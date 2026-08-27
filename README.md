@@ -40,6 +40,29 @@ bluclawd/
 `checkpoints`, `subagents`, `web`, `mcp`, `sandbox`, `background-bash`,
 `branding`, `diagnostics`, `diff`, `fleet`, `skills`, `help`, `commands`.
 
+## Updating from pi
+
+```bash
+bluclawd/scripts/sync-pi.sh            # fetch, merge, verify
+bluclawd/scripts/sync-pi.sh --check    # report what's incoming, merge nothing
+```
+
+The merge is the easy half — this branch owns no file pi owns, so a textual
+conflict is structurally impossible and the script asserts that invariant before
+touching anything.
+
+The half that can actually break is invisible to git. The layer imports **36
+symbols across 16 pi modules that pi does not export publicly** (config paths,
+the `theme` object, `execCommand`, `openBrowser`, `BUILTIN_SLASH_COMMANDS`, the
+keybindings table, …). An upstream rename there merges perfectly and fails
+afterwards, so the script runs typecheck, lint and an extension-load probe after
+the merge and refuses to call the sync good until they pass. Verified by
+renaming a pi export on purpose: both the typecheck and the probe caught it.
+
+Everything pi *does* export publicly comes through
+`@earendil-works/pi-coding-agent` — 113 symbols — precisely so upstream is free
+to rearrange its internals underneath.
+
 ## Running and checking it
 
 ```bash
