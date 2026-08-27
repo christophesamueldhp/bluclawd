@@ -6,12 +6,22 @@
  * `ExtensionAPI`, it does not ship on this branch — that is the trade this
  * branch exists to make.
  *
- * Registration order matters only where two extensions touch the same tool or
- * event; keep it explicit rather than alphabetical.
+ * Order matters only for permissions, which must see `tool_call` before anything
+ * that might answer it — keep it first.
  */
 import type { InlineExtension } from "../../packages/coding-agent/src/core/extensions/types.ts";
+import checkpoints from "./checkpoints/index.ts";
 import commands from "./commands/index.ts";
+import hooks from "./hooks/index.ts";
+import mcp from "./mcp/index.ts";
+import memory from "./memory/index.ts";
+import modelControls from "./model-controls/index.ts";
+import permissions from "./permissions/index.ts";
+import sandbox from "./sandbox/index.ts";
+import statusline from "./statusline/index.ts";
+import subagents from "./subagents/index.ts";
+import web from "./web/index.ts";
 
 export function bluclawdExtensions(): InlineExtension[] {
-	return [commands];
+	return [permissions, hooks, modelControls, statusline, memory, checkpoints, subagents, web, mcp, sandbox, commands];
 }
