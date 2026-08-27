@@ -25,6 +25,10 @@
 		"lineWidth": 120
 	},
 	"files": {
-		"includes": ["ext/**/*.ts", "scripts/**/*.ts"]
+		"includes": [
+			"ext/**/*.ts",
+			"daemon/**/*.ts",
+			"scripts/**/*.ts"
+		]
 	}
 }

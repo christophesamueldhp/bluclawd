@@ -16,6 +16,7 @@ import checkpoints from "./checkpoints/index.ts";
 import commands from "./commands/index.ts";
 import diagnostics from "./diagnostics/index.ts";
 import diff from "./diff/index.ts";
+import fleet from "./fleet/index.ts";
 import help from "./help/index.ts";
 import hooks from "./hooks/index.ts";
 import mcp from "./mcp/index.ts";
@@ -44,6 +45,7 @@ export function bluclawdExtensions(): InlineExtension[] {
 		branding,
 		diagnostics,
 		diff,
+		fleet,
 		skills,
 		help,
 		commands,

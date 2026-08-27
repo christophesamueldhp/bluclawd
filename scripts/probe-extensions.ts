@@ -6,13 +6,16 @@ const noop = () => {};
 const rec: Record<string, { commands: string[]; tools: string[]; shortcuts: number; events: string[] }> = {};
 
 for (const ext of bluclawdExtensions()) {
+	// InlineExtension is a union: a bare factory, or a named wrapper around one.
+	const name = typeof ext === "function" ? ext.name || "(anonymous)" : ext.name;
+	const factory = typeof ext === "function" ? ext : ext.factory;
 	const r = {
 		commands: [] as string[],
 		tools: [] as string[],
 		shortcuts: 0,
 		events: [] as string[],
 	};
-	rec[ext.name] = r;
+	rec[name] = r;
 	const pi: any = new Proxy(
 		{
 			registerCommand: (name: string) => r.commands.push(name),
@@ -33,9 +36,9 @@ for (const ext of bluclawdExtensions()) {
 		{ get: (t: any, p: string) => (p in t ? t[p] : noop) },
 	);
 	try {
-		ext.factory(pi);
+		factory(pi);
 	} catch (err) {
-		console.log(`  ${ext.name}: FACTORY THREW — ${err instanceof Error ? err.message : String(err)}`);
+		console.log(`  ${name}: FACTORY THREW — ${err instanceof Error ? err.message : String(err)}`);
 	}
 }
 

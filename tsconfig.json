@@ -1,6 +1,14 @@
 {
-	"//": "The root tsconfig's `include` covers packages/* only, and extending it there would edit a file pi owns — the one thing this branch does not do. So bluclawd typechecks itself: `npx tsgo -p bluclawd`. `src`, `docs` and `examples` are symlinks back into packages/coding-agent (see README) and are excluded so the program does not pull pi's whole source in twice under a second path.",
+	"//": "The root tsconfig's `include` covers packages/* only, and extending it there would edit a file pi owns \u2014 the one thing this branch does not do. So bluclawd typechecks itself: `npx tsgo -p bluclawd`. `src`, `docs` and `examples` are symlinks back into packages/coding-agent (see README) and are excluded so the program does not pull pi's whole source in twice under a second path.",
 	"extends": "../tsconfig.json",
-	"include": ["ext/**/*"],
-	"exclude": ["src", "docs", "examples"]
+	"include": [
+		"ext/**/*",
+		"daemon/**/*",
+		"scripts/**/*"
+	],
+	"exclude": [
+		"src",
+		"docs",
+		"examples"
+	]
 }
