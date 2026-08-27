@@ -15,6 +15,7 @@ import branding from "./branding/index.ts";
 import checkpoints from "./checkpoints/index.ts";
 import commands from "./commands/index.ts";
 import diagnostics from "./diagnostics/index.ts";
+import diff from "./diff/index.ts";
 import help from "./help/index.ts";
 import hooks from "./hooks/index.ts";
 import mcp from "./mcp/index.ts";
@@ -22,6 +23,7 @@ import memory from "./memory/index.ts";
 import modelControls from "./model-controls/index.ts";
 import permissions from "./permissions/index.ts";
 import sandbox from "./sandbox/index.ts";
+import skills from "./skills/index.ts";
 import statusline from "./statusline/index.ts";
 import subagents from "./subagents/index.ts";
 import web from "./web/index.ts";
@@ -41,6 +43,8 @@ export function bluclawdExtensions(): InlineExtension[] {
 		backgroundBash,
 		branding,
 		diagnostics,
+		diff,
+		skills,
 		help,
 		commands,
 	];
