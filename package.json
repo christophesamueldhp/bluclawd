@@ -1,0 +1,11 @@
+{
+  "name": "bluclawd",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "bluclawd — pi plus the bluclawd extension layer. Adds nothing to pi's own source.",
+  "piConfig": {
+    "name": "bluclawd",
+    "configDir": ".bluclawd"
+  }
+}
