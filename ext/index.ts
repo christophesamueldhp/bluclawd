@@ -10,8 +10,11 @@
  * that might answer it — keep it first.
  */
 import type { InlineExtension } from "../../packages/coding-agent/src/core/extensions/types.ts";
+import backgroundBash from "./background-bash/index.ts";
+import branding from "./branding/index.ts";
 import checkpoints from "./checkpoints/index.ts";
 import commands from "./commands/index.ts";
+import help from "./help/index.ts";
 import hooks from "./hooks/index.ts";
 import mcp from "./mcp/index.ts";
 import memory from "./memory/index.ts";
@@ -23,5 +26,20 @@ import subagents from "./subagents/index.ts";
 import web from "./web/index.ts";
 
 export function bluclawdExtensions(): InlineExtension[] {
-	return [permissions, hooks, modelControls, statusline, memory, checkpoints, subagents, web, mcp, sandbox, commands];
+	return [
+		permissions,
+		hooks,
+		modelControls,
+		statusline,
+		memory,
+		checkpoints,
+		subagents,
+		web,
+		mcp,
+		sandbox,
+		backgroundBash,
+		branding,
+		help,
+		commands,
+	];
 }

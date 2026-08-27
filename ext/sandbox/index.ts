@@ -16,6 +16,7 @@
  * lazily so disabled sessions pay no startup cost.
  */
 
+import { type Static, Type } from "typebox";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -27,10 +28,30 @@ import {
 	createBashTool,
 	createLocalBashOperations,
 } from "../../../packages/coding-agent/src/core/tools/bash.ts";
+import { backgroundBashJobs } from "../_shared/background-bash.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { resolveSandboxConfig, type SandboxConfig } from "./config.ts";
 import { buildSandboxFailureNote } from "./failure-note.ts";
 import { isSandboxActive, setSandboxActive } from "./state.ts";
+
+/**
+ * The two parameters bluclawd adds to pi's bash tool. Kept next to the
+ * registration that owns the tool name so the pair cannot drift apart.
+ */
+const BACKGROUND_BASH_PARAMS = Type.Object({
+	description: Type.Optional(
+		Type.String({
+			description:
+				"Short human-readable summary of what this command does (5-10 words), shown to the user in the UI.",
+		}),
+	),
+	run_in_background: Type.Optional(
+		Type.Boolean({
+			description:
+				"Run the command in the background and return immediately with a task id. Read its output later with bash_output; stop it with kill_bash.",
+		}),
+	),
+});
 
 type SandboxRuntime = typeof import("@anthropic-ai/sandbox-runtime");
 
@@ -75,10 +96,44 @@ export function factory(pi: ExtensionAPI): void {
 	// Override the built-in bash tool. When the sandbox is inactive this
 	// delegates to an unmodified bash tool with the same settings-derived
 	// options the session would have used.
+	//
+	// This one registration is also where `run_in_background` lives. The fork
+	// branch put that parameter in pi's own bash.ts, so the sandbox's
+	// createBashTool() call inherited it; here only one extension may own the
+	// tool name, so the two features share this registration rather than fight
+	// over it. Keep them together if either changes.
 	const plainBash = () => createBashTool(localCwd, { commandPrefix, shellPath });
+	const baseBash = createBashTool(localCwd);
 	pi.registerTool({
-		...createBashTool(localCwd),
+		...baseBash,
+		parameters: Type.Object({ ...baseBash.parameters.properties, ...BACKGROUND_BASH_PARAMS.properties }),
 		async execute(id, params, signal, onUpdate) {
+			const { description, run_in_background, ...rest } = params as Static<typeof BACKGROUND_BASH_PARAMS> &
+				Record<string, unknown>;
+
+			if (run_in_background) {
+				// The job's own lifetime owns the process: the tool call's signal is
+				// deliberately NOT attached, since backgrounding means outliving this
+				// call. Operations match the foreground path, so sandboxing applies.
+				const ops = isSandboxActive() ? sandboxedOperations() : createLocalBashOperations();
+				const job = backgroundBashJobs.start({
+					command: String(rest.command ?? ""),
+					cwd: localCwd,
+					timeout: typeof rest.timeout === "number" ? rest.timeout : undefined,
+					description,
+					exec: ops.exec,
+				});
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Started background task ${job.id}: ${rest.command}\nRead output with bash_output {"task_id":"${job.id}"}; stop it with kill_bash. /tasks lists all background tasks.`,
+						},
+					],
+					details: undefined,
+				};
+			}
+
 			const tool = isSandboxActive()
 				? createBashTool(localCwd, {
 						commandPrefix,
@@ -86,7 +141,7 @@ export function factory(pi: ExtensionAPI): void {
 						operations: sandboxedOperations(),
 					})
 				: plainBash();
-			return tool.execute(id, params, signal, onUpdate);
+			return tool.execute(id, rest as never, signal, onUpdate);
 		},
 	});
 
@@ -203,4 +258,5 @@ export function factory(pi: ExtensionAPI): void {
 }
 
 const sandboxExtension: InlineExtension = { name: "sandbox", factory };
+
 export default sandboxExtension;
