@@ -14,6 +14,7 @@ import backgroundBash from "./background-bash/index.ts";
 import branding from "./branding/index.ts";
 import checkpoints from "./checkpoints/index.ts";
 import commands from "./commands/index.ts";
+import diagnostics from "./diagnostics/index.ts";
 import help from "./help/index.ts";
 import hooks from "./hooks/index.ts";
 import mcp from "./mcp/index.ts";
@@ -39,6 +40,7 @@ export function bluclawdExtensions(): InlineExtension[] {
 		sandbox,
 		backgroundBash,
 		branding,
+		diagnostics,
 		help,
 		commands,
 	];
