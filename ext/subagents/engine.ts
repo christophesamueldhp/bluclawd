@@ -22,14 +22,16 @@
  */
 
 import type { Model } from "@earendil-works/pi-ai/compat";
-import { getAgentDir, getAuthPath, getModelsPath } from "../../../packages/coding-agent/src/config.ts";
-import type { AgentSessionEvent } from "../../../packages/coding-agent/src/core/agent-session.ts";
-import type { ExtensionContext } from "../../../packages/coding-agent/src/core/extensions/types.ts";
-import { ModelRuntime } from "../../../packages/coding-agent/src/core/model-runtime.ts";
-import { DefaultResourceLoader } from "../../../packages/coding-agent/src/core/resource-loader.ts";
+import type { AgentSessionEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	DefaultResourceLoader,
+	getAgentDir,
+	ModelRuntime,
+	SessionManager,
+	SettingsManager,
+} from "@earendil-works/pi-coding-agent";
+import { getAuthPath, getModelsPath } from "../../../packages/coding-agent/src/config.ts";
 import { createAgentSession } from "../../../packages/coding-agent/src/core/sdk.ts";
-import { SessionManager } from "../../../packages/coding-agent/src/core/session-manager.ts";
-import { SettingsManager } from "../../../packages/coding-agent/src/core/settings-manager.ts";
 import subagentPermissionGate from "../permissions/subagent-gate.ts";
 import type { AgentDef } from "./defs.ts";
 import { emptyUsage, type SingleResult } from "./render.ts";

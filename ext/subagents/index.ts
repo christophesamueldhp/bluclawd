@@ -14,15 +14,15 @@
 
 import { join } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { Type } from "typebox";
-import { CONFIG_DIR_NAME, getAgentDir } from "../../../packages/coding-agent/src/config.ts";
 import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ExtensionAPI,
 	ExtensionContext,
 	InlineExtension,
-} from "../../../packages/coding-agent/src/core/extensions/types.ts";
+} from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { type AgentDef, type AgentScope, bundledAgentsDir, discoverDefs, formatAgentList } from "./defs.ts";
 import { runSubagent } from "./engine.ts";
 import {

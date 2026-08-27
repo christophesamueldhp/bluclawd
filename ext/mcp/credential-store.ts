@@ -24,7 +24,7 @@
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { getAgentDir } from "../../../packages/coding-agent/src/config.ts";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export interface McpOAuthCredential {
 	serverUrl: string;

@@ -13,7 +13,7 @@
  * caller reads as "continue" — a broken hook must not take the session down.
  */
 import { spawn } from "node:child_process";
-import type { ExecOptions, ExecResult } from "../../../packages/coding-agent/src/core/exec.ts";
+import type { ExecOptions, ExecResult } from "@earendil-works/pi-coding-agent";
 
 /** pi's ExecOptions plus the two things a hook or statusline command needs. */
 export interface ExecWithIoOptions extends ExecOptions {

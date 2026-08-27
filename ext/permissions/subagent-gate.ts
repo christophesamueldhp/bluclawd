@@ -30,13 +30,8 @@
  * halves of the evaluator run here, not just the first.
  */
 
-import { CONFIG_DIR_NAME, getAgentDir } from "../../../packages/coding-agent/src/config.ts";
-import type {
-	ExtensionAPI,
-	InlineExtension,
-	ToolCallEventResult,
-} from "../../../packages/coding-agent/src/core/extensions/types.ts";
-import { SettingsManager } from "../../../packages/coding-agent/src/core/settings-manager.ts";
+import type { ExtensionAPI, InlineExtension, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import * as forkSettings from "../_shared/settings.ts";
 import { getActivePermissionMode } from "./active-mode.ts";
 import { type EvalConfig, evaluatePostHook, evaluatePreHook } from "./evaluate.ts";

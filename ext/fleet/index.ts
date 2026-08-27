@@ -26,13 +26,10 @@
 
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
+import type { ExtensionCommandContext, InlineExtension } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { APP_NAME, getAgentDir, VERSION } from "../../../packages/coding-agent/src/config.ts";
-import type {
-	ExtensionCommandContext,
-	InlineExtension,
-} from "../../../packages/coding-agent/src/core/extensions/types.ts";
-import { SessionManager } from "../../../packages/coding-agent/src/core/session-manager.ts";
+import { APP_NAME } from "../../../packages/coding-agent/src/config.ts";
 import { FleetView } from "./fleet-view.ts";
 import { OrchestratorClient } from "./orchestrator-client.ts";
 import { hideSession, loadHiddenSessions, toSavedSummaries } from "./saved-sessions.ts";

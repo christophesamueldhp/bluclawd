@@ -16,18 +16,14 @@
  * lazily so disabled sessions pay no startup cost.
  */
 
-import { type Static, Type } from "typebox";
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	InlineExtension,
-} from "../../../packages/coding-agent/src/core/extensions/types.ts";
-import { SettingsManager } from "../../../packages/coding-agent/src/core/settings-manager.ts";
+import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import {
 	type BashOperations,
 	createBashTool,
 	createLocalBashOperations,
-} from "../../../packages/coding-agent/src/core/tools/bash.ts";
+	SettingsManager,
+} from "@earendil-works/pi-coding-agent";
+import { type Static, Type } from "typebox";
 import { backgroundBashJobs } from "../_shared/background-bash.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { resolveSandboxConfig, type SandboxConfig } from "./config.ts";

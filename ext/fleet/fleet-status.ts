@@ -1,4 +1,4 @@
-import type { ThemeColor } from "../../../packages/coding-agent/src/modes/interactive/theme/theme.ts";
+import type { ThemeColor } from "@earendil-works/pi-coding-agent";
 
 export type AgentActivity = "idle" | "working" | "awaiting_input";
 export type InstanceStatus = "starting" | "online" | "stopping" | "stopped" | "error";

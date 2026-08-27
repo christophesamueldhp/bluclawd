@@ -55,7 +55,7 @@
  * buggy guard fails open rather than blocking forever.
  */
 
-import type { ExecResult } from "../../../packages/coding-agent/src/core/exec.ts";
+import type { ExecResult } from "@earendil-works/pi-coding-agent";
 
 /** Default per-hook timeout. A hook exceeding this is killed and fails open. */
 export const DEFAULT_HOOK_TIMEOUT_MS = 30_000;

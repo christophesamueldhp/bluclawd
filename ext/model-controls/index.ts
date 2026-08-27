@@ -16,12 +16,8 @@
  * coverage was lost in the move.
  */
 
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	InlineExtension,
-} from "../../../packages/coding-agent/src/core/extensions/types.ts";
-import { SettingsManager } from "../../../packages/coding-agent/src/core/settings-manager.ts";
+import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
+import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import * as forkSettings from "../_shared/settings.ts";
 
 const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;

@@ -77,14 +77,17 @@
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TextContent } from "@earendil-works/pi-ai";
-import { CONFIG_DIR_NAME, getAgentDir, getDebugLogPath } from "../../../packages/coding-agent/src/config.ts";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
 	InlineExtension,
 	InputEventResult,
-	SessionBeforeCompactResult,
 	ToolCallEventResult,
+} from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getDebugLogPath } from "../../../packages/coding-agent/src/config.ts";
+import type {
+	SessionBeforeCompactResult,
 	ToolResultEventResult,
 } from "../../../packages/coding-agent/src/core/extensions/types.ts";
 import { execWithIo } from "../_shared/exec.ts";

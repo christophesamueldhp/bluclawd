@@ -13,7 +13,7 @@
  */
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { InlineExtension } from "../../../packages/coding-agent/src/core/extensions/types.ts";
+import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 
 const skillsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "skills");
 

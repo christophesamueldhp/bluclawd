@@ -13,9 +13,11 @@
  * Output goes through `appendEntry` + `registerEntryRenderer`; see the commands
  * extension for why not `ctx.ui.notify`.
  */
+
+import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
-import { APP_NAME, getAgentDir } from "../../../packages/coding-agent/src/config.ts";
-import type { InlineExtension } from "../../../packages/coding-agent/src/core/extensions/types.ts";
+import { APP_NAME } from "../../../packages/coding-agent/src/config.ts";
 import { runDoctorChecks } from "../_shared/doctor.ts";
 
 const BAR_WIDTH = 20;

@@ -16,7 +16,7 @@
  * enforces deny (allow/ask have nothing to act on).
  */
 
-import type { ExtensionContext } from "../../../packages/coding-agent/src/core/extensions/types.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export interface HookPermissionDecision {
 	decision: "allow" | "deny" | "ask";

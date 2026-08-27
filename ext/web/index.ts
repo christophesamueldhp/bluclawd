@@ -12,14 +12,9 @@
  */
 
 import { completeSimple } from "@earendil-works/pi-ai/compat";
+import type { AgentToolResult, ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
+import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type {
-	AgentToolResult,
-	ExtensionAPI,
-	ExtensionContext,
-	InlineExtension,
-} from "../../../packages/coding-agent/src/core/extensions/types.ts";
-import { SettingsManager } from "../../../packages/coding-agent/src/core/settings-manager.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { type WebfetchResult, webFetch } from "./fetch.ts";
 import { defaultEnvFor, exaMcpSearch, type SearchProvider, type SearchResult, webSearch } from "./search.ts";

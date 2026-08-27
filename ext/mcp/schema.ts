@@ -19,8 +19,9 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs
 import { join } from "node:path";
 import type { TSchema } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
-import { CONFIG_DIR_NAME, getAgentDir, getDebugLogPath } from "../../../packages/coding-agent/src/config.ts";
-import type { ExtensionContext } from "../../../packages/coding-agent/src/core/extensions/types.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getDebugLogPath } from "../../../packages/coding-agent/src/config.ts";
 import { resolveConfigValue } from "../../../packages/coding-agent/src/core/resolve-config-value.ts";
 
 const MCP_FILE = "mcp.json";

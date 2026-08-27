@@ -8,6 +8,8 @@
  */
 
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import type { AgentToolResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_MAX_BYTES, formatSize, VERSION } from "@earendil-works/pi-coding-agent";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
@@ -16,10 +18,7 @@ import {
 	type StdioServerParameters,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { VERSION } from "../../../packages/coding-agent/src/config.ts";
-import type { AgentToolResult, ExtensionAPI } from "../../../packages/coding-agent/src/core/extensions/types.ts";
 import { resolveHeaders } from "../../../packages/coding-agent/src/core/resolve-config-value.ts";
-import { DEFAULT_MAX_BYTES, formatSize } from "../../../packages/coding-agent/src/core/tools/truncate.ts";
 import { mcpToolName, resolveServerEnv, type ServerConfig, toToolParameters } from "./schema.ts";
 
 export type { Client };

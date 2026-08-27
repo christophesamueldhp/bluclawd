@@ -5,6 +5,7 @@
  * identical wherever you see it.
  */
 
+import { keyText, renderDiff } from "@earendil-works/pi-coding-agent";
 import {
 	type Component,
 	type Focusable,
@@ -15,8 +16,6 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { renderDiff } from "../../../packages/coding-agent/src/modes/interactive/components/diff.ts";
-import { keyText } from "../../../packages/coding-agent/src/modes/interactive/components/keybinding-hints.ts";
 import { theme } from "../../../packages/coding-agent/src/modes/interactive/theme/theme.ts";
 import { fitsSideBySide, type SideBySideRow, toSideBySideRows } from "./diff-side-by-side.ts";
 import type { ParsedFileDiff } from "./git-diff.ts";

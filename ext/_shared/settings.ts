@@ -12,7 +12,7 @@
  * project is not trusted, so a reader here can never see an untrusted project's
  * values.
  */
-import type { SettingsManager } from "../../../packages/coding-agent/src/core/settings-manager.ts";
+import type { SettingsManager } from "@earendil-works/pi-coding-agent";
 
 /** Sandbox settings, passed through to @anthropic-ai/sandbox-runtime. */
 export interface SandboxSettings {

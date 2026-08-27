@@ -21,15 +21,14 @@
  * state lives in this closure.
  */
 
-import { Key } from "@earendil-works/pi-tui";
-import { CONFIG_DIR_NAME, getAgentDir } from "../../../packages/coding-agent/src/config.ts";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
 	InlineExtension,
 	ToolCallEventResult,
-} from "../../../packages/coding-agent/src/core/extensions/types.ts";
-import { SettingsManager } from "../../../packages/coding-agent/src/core/settings-manager.ts";
+} from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { Key } from "@earendil-works/pi-tui";
 import * as forkSettings from "../_shared/settings.ts";
 import { addGlobalRule, addProjectRule, removeGlobalRule, removeProjectRule } from "../_shared/settings-write.ts";
 import { decidePermissionViaHooks, notifyPermissionPrompt } from "../hooks/permissions-bridge.ts";

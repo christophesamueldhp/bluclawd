@@ -9,7 +9,7 @@
  * Order matters only for permissions, which must see `tool_call` before anything
  * that might answer it — keep it first.
  */
-import type { InlineExtension } from "../../packages/coding-agent/src/core/extensions/types.ts";
+import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import backgroundBash from "./background-bash/index.ts";
 import branding from "./branding/index.ts";
 import checkpoints from "./checkpoints/index.ts";

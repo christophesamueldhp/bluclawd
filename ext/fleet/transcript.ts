@@ -5,8 +5,9 @@
  * `⏺ name  subject` / `└ result` treatment so a background session reads like a real one.
  */
 
+import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Markdown, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { getMarkdownTheme, theme } from "../../../packages/coding-agent/src/modes/interactive/theme/theme.ts";
+import { theme } from "../../../packages/coding-agent/src/modes/interactive/theme/theme.ts";
 
 export interface WireMessage {
 	role: string;

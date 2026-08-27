@@ -6,7 +6,7 @@
  * --no-sandbox > --sandbox > settings.enabled > default off.
  */
 
-import { CONFIG_DIR_NAME } from "../../../packages/coding-agent/src/config.ts";
+import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import type { SandboxSettings } from "../_shared/settings.ts";
 
 export interface SandboxConfig extends SandboxSettings {

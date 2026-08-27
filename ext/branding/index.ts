@@ -16,10 +16,10 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { APP_NAME, VERSION } from "../../../packages/coding-agent/src/config.ts";
-import type { ExtensionContext, InlineExtension } from "../../../packages/coding-agent/src/core/extensions/types.ts";
-import { SettingsManager } from "../../../packages/coding-agent/src/core/settings-manager.ts";
+import { APP_NAME } from "../../../packages/coding-agent/src/config.ts";
 import { renderPixelArt } from "./pixel-art.ts";
 import { WelcomeBox, type WelcomeBoxInfo } from "./welcome-box.ts";
 

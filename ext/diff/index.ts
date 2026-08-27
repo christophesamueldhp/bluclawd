@@ -9,9 +9,10 @@
  * Runs git itself rather than going through a tool, so nothing enters the model's
  * context: `/diff` is for the human reading the screen.
  */
+
+import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { execCommand } from "../../../packages/coding-agent/src/core/exec.ts";
-import type { InlineExtension } from "../../../packages/coding-agent/src/core/extensions/types.ts";
 import { DiffView } from "./diff-view.ts";
 import { parseUnifiedDiff } from "./git-diff.ts";
 

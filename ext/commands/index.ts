@@ -17,8 +17,8 @@
  */
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
-import type { InlineExtension } from "../../../packages/coding-agent/src/core/extensions/types.ts";
 import { openBrowser } from "../../../packages/coding-agent/src/utils/open-browser.ts";
 
 /** bluclawd's own tracker — pi's `piConfig` does not cover this string. */

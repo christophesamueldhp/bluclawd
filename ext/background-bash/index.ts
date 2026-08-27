@@ -13,8 +13,9 @@
  * seconds are frozen at command time because the output is a moment, not a live
  * view.
  */
+
+import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
-import type { InlineExtension } from "../../../packages/coding-agent/src/core/extensions/types.ts";
 import {
 	backgroundBashJobs,
 	createBashOutputTool,

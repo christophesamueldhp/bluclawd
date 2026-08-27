@@ -46,13 +46,9 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
+import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	InlineExtension,
-} from "../../../packages/coding-agent/src/core/extensions/types.ts";
-import { SettingsManager } from "../../../packages/coding-agent/src/core/settings-manager.ts";
 import { stripAnsi } from "../../../packages/coding-agent/src/utils/ansi.ts";
 import { execWithIo } from "../_shared/exec.ts";
 import * as forkSettings from "../_shared/settings.ts";

@@ -18,8 +18,8 @@
  * registry — audit Tier B follow-up.
  */
 
+import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { ToolDefinition } from "../../../packages/coding-agent/src/core/extensions/types.ts";
 import { wrapToolDefinition } from "../../../packages/coding-agent/src/core/tools/tool-definition-wrapper.ts";
 
 /** Cap on buffered output per job; the oldest chunks are dropped past this. */

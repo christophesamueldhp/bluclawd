@@ -101,12 +101,7 @@ import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-	ExtensionAPI,
-	ExtensionContext,
-	InlineExtension,
-} from "../../../packages/coding-agent/src/core/extensions/types.ts";
-import type { SessionEntry } from "../../../packages/coding-agent/src/core/session-manager.ts";
+import type { ExtensionAPI, ExtensionContext, InlineExtension, SessionEntry } from "@earendil-works/pi-coding-agent";
 
 const CHECKPOINT_CUSTOM_TYPE = "checkpoint";
 const CHECKPOINT_REF_PREFIX = "refs/bluclawd/checkpoints/";

@@ -8,7 +8,8 @@
  * host, so it needs no SSRF guard.
  */
 
-import { APP_NAME, VERSION } from "../../../packages/coding-agent/src/config.ts";
+import { VERSION } from "@earendil-works/pi-coding-agent";
+import { APP_NAME } from "../../../packages/coding-agent/src/config.ts";
 
 export type SearchProvider = "exa" | "brave" | "tavily";
 

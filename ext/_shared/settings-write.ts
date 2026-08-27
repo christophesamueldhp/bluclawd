@@ -19,8 +19,8 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
-import { CONFIG_DIR_NAME, getAgentDir } from "../../../packages/coding-agent/src/config.ts";
 import type { PermissionSettings } from "./settings.ts";
 
 type RuleList = "allow" | "ask" | "deny";
