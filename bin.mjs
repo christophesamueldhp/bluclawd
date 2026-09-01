@@ -1,28 +1,17 @@
 #!/usr/bin/env node
 /**
- * bluclawd entry point.
+ * Run bluclawd without a separate `pi install` — for trying it out or for
+ * local development against a checkout of this repo. `pi install <path>`
+ * (this repo's real distribution path) doesn't use this file at all; it
+ * loads each `ext/<name>/index.ts` per `package.json`'s `pi.extensions`
+ * manifest.
  *
- * Everything bluclawd changes about pi happens here or in `ext/` — pi's own
- * source is untouched, so `git merge upstream/main` on this branch is a
- * fast-forward.
+ * Identity is plain pi — no rebrand, no PI_PACKAGE_DIR override — the point
+ * of this repo is to run as an add-on to a stock pi install, not a fork of
+ * it. `main(argv, { extensionFactories })` is pi's own documented embedder
+ * entry; `@earendil-works/pi-coding-agent` must be resolvable (installed
+ * globally or as a devDependency here) for this to import.
  *
- *  1. PI_PACKAGE_DIR points pi's config loader at this directory, so identity
- *     comes from our package.json's `piConfig` (name, config dir) rather than
- *     pi's. This is pi's documented override, not a patch.
- *  2. PI_SKIP_VERSION_CHECK stops pi phoning pi.dev for its own updates — the
- *     fork's debrand, expressed as an env var pi already honours instead of as
- *     a source edit that deletes upstream code.
- *  3. main(argv, { extensionFactories }) is pi's embedder entry; the bluclawd
- *     feature layer is passed in as ordinary inline extensions.
- */
-import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-
-const packageDir = dirname(fileURLToPath(import.meta.url));
-process.env.PI_PACKAGE_DIR = packageDir;
-process.env.PI_SKIP_VERSION_CHECK ??= "1";
-
-/**
  * Claude Code-compatible output flags.
  *
  * `--output-format` is a pure alias for pi's own `--mode`, so it is translated
@@ -76,7 +65,7 @@ function translateArgs(argv) {
 async function withDefaultTuiMode(argv) {
 	if (argv.includes("--tui-mode")) return argv;
 	try {
-		const { SettingsManager } = await import("../packages/coding-agent/src/index.ts");
+		const { SettingsManager } = await import("@earendil-works/pi-coding-agent");
 		const configured = SettingsManager.create(process.cwd()).getGlobalSettings().tuiMode;
 		if (configured) return argv;
 	} catch {
@@ -85,7 +74,7 @@ async function withDefaultTuiMode(argv) {
 	return [...argv, "--tui-mode", "fullscreen"];
 }
 
-const { main } = await import("../packages/coding-agent/src/index.ts");
+const { main } = await import("@earendil-works/pi-coding-agent");
 const { bluclawdExtensions } = await import("./ext/index.ts");
 
 const argv = await withDefaultTuiMode(translateArgs(process.argv.slice(2)));

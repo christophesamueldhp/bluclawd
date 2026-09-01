@@ -1,6 +1,6 @@
 {
 	"$schema": "https://biomejs.dev/schemas/2.3.5/schema.json",
-	"root": false,
+	"root": true,
 	"linter": {
 		"enabled": true,
 		"rules": {
@@ -25,11 +25,6 @@
 		"lineWidth": 120
 	},
 	"files": {
-		"includes": [
-			"ext/**/*.ts",
-			"daemon/**/*.ts",
-			"scripts/**/*.ts",
-			"test/**/*.ts"
-		]
+		"includes": ["ext/**/*.ts", "daemon/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"]
 	}
 }

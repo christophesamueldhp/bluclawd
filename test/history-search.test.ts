@@ -1,12 +1,24 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { setKeybindings, TuiMainScreen } from "@earendil-works/pi-tui";
+import type {
+	KeybindingsManager as CodingAgentKeybindingsManager,
+	ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+// `KeybindingsManager` is type-only in @earendil-works/pi-coding-agent's public
+// entry; pi-tui's own (the base class it extends) is a real export, and works
+// here because nothing this test exercises calls the three members
+// coding-agent's subclass adds (configPath, reload, getEffectiveConfig) — only
+// `.matches()`/`.getKeys()`, which the base class already implements. Built
+// with empty definitions: HistorySearchEditor's own Ctrl+R check is a direct
+// `matchesKey(data, "ctrl+r")`, not routed through this manager, so no
+// default binding table is needed for these tests to be meaningful.
+import { KeybindingsManager, setKeybindings, TuiMainScreen } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it } from "vitest";
-// `KeybindingsManager` is type-only in pi's public entry, so this reaches into the
-// internal module the same way the fork branch's own editor tests did.
-import { KeybindingsManager } from "../../packages/coding-agent/src/core/keybindings.ts";
-import { defaultEditorTheme } from "../../packages/tui/test/test-themes.ts";
-import { VirtualTerminal } from "../../packages/tui/test/virtual-terminal.ts";
 import { HistorySearchEditor } from "../ext/history-search/editor.ts";
+import { defaultEditorTheme } from "./fixtures/test-themes.ts";
+import { VirtualTerminal } from "./fixtures/virtual-terminal.ts";
+
+function makeKeybindings(): CodingAgentKeybindingsManager {
+	return new KeybindingsManager({}) as unknown as CodingAgentKeybindingsManager;
+}
 
 /** Records every `setWidget` call so tests can assert what the status line showed. */
 function makeCtxStub() {
@@ -24,7 +36,7 @@ function makeCtxStub() {
 
 function makeEditor(history: string[]) {
 	const { ctx, widgets } = makeCtxStub();
-	const keybindings = new KeybindingsManager();
+	const keybindings = makeKeybindings();
 	const editor = new HistorySearchEditor(
 		new TuiMainScreen(new VirtualTerminal()),
 		defaultEditorTheme,
@@ -37,7 +49,7 @@ function makeEditor(history: string[]) {
 
 describe("HistorySearchEditor", () => {
 	afterEach(() => {
-		setKeybindings(new KeybindingsManager());
+		setKeybindings(new KeybindingsManager({}));
 	});
 
 	it("does nothing to normal typing — falls through to the base editor", () => {
