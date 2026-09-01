@@ -196,4 +196,4 @@ export function factory(pi: ExtensionAPI): void {
 }
 
 const memoryExtension: InlineExtension = { name: "memory", factory };
-export default memoryExtension;
+export default memoryExtension.factory;

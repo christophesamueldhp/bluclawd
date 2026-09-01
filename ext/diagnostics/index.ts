@@ -137,4 +137,4 @@ const diagnostics: InlineExtension = {
 	},
 };
 
-export default diagnostics;
+export default diagnostics.factory;

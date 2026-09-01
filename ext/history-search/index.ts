@@ -32,4 +32,4 @@ const historySearch: InlineExtension = {
 	},
 };
 
-export default historySearch;
+export default historySearch.factory;

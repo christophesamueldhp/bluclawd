@@ -260,4 +260,4 @@ export function factory(pi: ExtensionAPI): void {
 }
 
 const webExtension: InlineExtension = { name: "web", factory };
-export default webExtension;
+export default webExtension.factory;

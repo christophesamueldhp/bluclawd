@@ -100,4 +100,4 @@ const diff: InlineExtension = {
 	},
 };
 
-export default diff;
+export default diff.factory;

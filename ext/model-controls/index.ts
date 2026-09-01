@@ -160,4 +160,4 @@ const modelControlsExtension: InlineExtension = {
 	name: "model-controls",
 	factory,
 };
-export default modelControlsExtension;
+export default modelControlsExtension.factory;

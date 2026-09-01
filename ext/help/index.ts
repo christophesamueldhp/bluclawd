@@ -125,4 +125,4 @@ const help: InlineExtension = {
 	},
 };
 
-export default help;
+export default help.factory;

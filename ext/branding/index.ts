@@ -129,4 +129,4 @@ const branding: InlineExtension = {
 	},
 };
 
-export default branding;
+export default branding.factory;

@@ -85,4 +85,4 @@ const commands: InlineExtension = {
 	},
 };
 
-export default commands;
+export default commands.factory;

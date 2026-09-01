@@ -88,4 +88,4 @@ const backgroundBash: InlineExtension = {
 	},
 };
 
-export default backgroundBash;
+export default backgroundBash.factory;

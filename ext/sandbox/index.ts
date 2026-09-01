@@ -255,4 +255,4 @@ export function factory(pi: ExtensionAPI): void {
 
 const sandboxExtension: InlineExtension = { name: "sandbox", factory };
 
-export default sandboxExtension;
+export default sandboxExtension.factory;

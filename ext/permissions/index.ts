@@ -622,4 +622,4 @@ export function factory(pi: ExtensionAPI): void {
 }
 
 const permissionsExtension: InlineExtension = { name: "permissions", factory };
-export default permissionsExtension;
+export default permissionsExtension.factory;

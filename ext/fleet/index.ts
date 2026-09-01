@@ -192,4 +192,4 @@ const fleet: InlineExtension = {
 	},
 };
 
-export default fleet;
+export default fleet.factory;

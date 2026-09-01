@@ -292,4 +292,4 @@ export function factory(pi: ExtensionAPI): void {
 }
 
 const statuslineExtension: InlineExtension = { name: "statusline", factory };
-export default statuslineExtension;
+export default statuslineExtension.factory;

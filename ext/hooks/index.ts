@@ -691,4 +691,4 @@ export function factory(pi: ExtensionAPI): void {
 }
 
 const hooksExtension: InlineExtension = { name: "hooks", factory };
-export default hooksExtension;
+export default hooksExtension.factory;

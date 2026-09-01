@@ -497,4 +497,4 @@ export function factory(pi: ExtensionAPI): void {
 }
 
 const subagentsExtension: InlineExtension = { name: "subagents", factory };
-export default subagentsExtension;
+export default subagentsExtension.factory;

@@ -535,4 +535,4 @@ export function factory(pi: ExtensionAPI): void {
 }
 
 const checkpointsExtension: InlineExtension = { name: "checkpoints", factory };
-export default checkpointsExtension;
+export default checkpointsExtension.factory;

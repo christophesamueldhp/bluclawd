@@ -24,4 +24,4 @@ const skills: InlineExtension = {
 	},
 };
 
-export default skills;
+export default skills.factory;

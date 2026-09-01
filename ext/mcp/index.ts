@@ -507,4 +507,4 @@ export function factory(pi: ExtensionAPI): void {
 }
 
 const mcpExtension: InlineExtension = { name: "mcp", factory };
-export default mcpExtension;
+export default mcpExtension.factory;
