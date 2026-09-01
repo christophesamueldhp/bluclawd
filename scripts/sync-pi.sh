@@ -82,6 +82,20 @@ probe="$(./node_modules/.bin/tsx bluclawd/scripts/probe-extensions.ts 2>&1)"
 echo "$probe" | grep -q "FACTORY THREW" && { echo "$probe" | grep "FACTORY THREW" | sed 's/^/    /'; fail "an extension factory threw"; }
 ok "$(echo "$probe" | tail -1)"
 
+bold "7. Tests"
+# Catches what 4-6 can't: behavior drift in a function whose signature didn't
+# change (the permissions characterization table), and pi internals renamed in
+# a way that still typechecks against a structurally-compatible replacement.
+test_log="$(mktemp)"
+if npx vitest run --config bluclawd/vitest.config.ts >"$test_log" 2>&1; then
+	ok "$(grep -E '^\s*(Test Files|Tests)\s' "$test_log" | tr '\n' ' ')"
+	rm -f "$test_log"
+else
+	tail -40 "$test_log" | sed 's/^/    /'
+	rm -f "$test_log"
+	fail "the layer's own tests failed against the new pi — see the output above"
+fi
+
 bold "Done"
 cat <<'NOTE'
   Static checks pass. They do NOT cover behaviour that only appears at runtime —
