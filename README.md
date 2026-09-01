@@ -35,16 +35,15 @@ dependency); it is not how `pi install` loads this package.
 package.json    the pi package manifest (pi.extensions, dependencies)
 bin.mjs         convenience entry point for local runs
 themes/         the bluclawd theme
-skills/         bundled skills (code-review, security-review, verify)
 daemon/         FleetView's session daemon
 ext/            the feature layer
   _shared/      settings readers/writers, process runner, vendored pi internals
-test/           65 tests, self-contained — no monorepo, no fixtures pi doesn't publish
+test/           self-contained — no monorepo, no fixtures pi doesn't publish
 ```
 
-19 extensions: `permissions`, `hooks`, `model-controls`, `statusline`, `memory`,
+18 extensions: `permissions`, `hooks`, `model-controls`, `statusline`, `memory`,
 `checkpoints`, `subagents`, `web`, `mcp`, `sandbox`, `background-bash`,
-`branding`, `diagnostics`, `diff`, `fleet`, `skills`, `help`, `commands`,
+`branding`, `diagnostics`, `diff`, `fleet`, `help`, `commands`,
 `history-search`.
 
 ## Updating

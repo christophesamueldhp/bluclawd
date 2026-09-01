@@ -23,7 +23,6 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	diagnostics: { commands: ["context", "doctor"], tools: [], shortcuts: 0, events: 0 },
 	diff: { commands: ["diff"], tools: [], shortcuts: 0, events: 0 },
 	fleet: { commands: ["fleet"], tools: [], shortcuts: 0, events: 2 },
-	skills: { commands: [], tools: [], shortcuts: 0, events: 1 },
 	help: { commands: ["help"], tools: [], shortcuts: 0, events: 0 },
 	commands: { commands: ["init", "bug"], tools: [], shortcuts: 0, events: 0 },
 	"history-search": { commands: [], tools: [], shortcuts: 0, events: 2 },
@@ -32,7 +31,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 describe("bluclawd extension registration", () => {
 	const rec = recordExtensions();
 
-	it("registers exactly the 19 expected extensions, no more, no fewer", () => {
+	it("registers exactly the 18 expected extensions, no more, no fewer", () => {
 		expect(Object.keys(rec).sort()).toEqual(Object.keys(EXPECTED).sort());
 	});
 

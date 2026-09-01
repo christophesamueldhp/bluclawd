@@ -32,7 +32,6 @@ import memory from "./memory/index.ts";
 import modelControls from "./model-controls/index.ts";
 import permissions from "./permissions/index.ts";
 import sandbox from "./sandbox/index.ts";
-import skills from "./skills/index.ts";
 import statusline from "./statusline/index.ts";
 import subagents from "./subagents/index.ts";
 import web from "./web/index.ts";
@@ -54,7 +53,6 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "diagnostics", factory: diagnostics },
 		{ name: "diff", factory: diff },
 		{ name: "fleet", factory: fleet },
-		{ name: "skills", factory: skills },
 		{ name: "help", factory: help },
 		{ name: "commands", factory: commands },
 		{ name: "history-search", factory: historySearch },
