@@ -5,15 +5,23 @@
  * branch, where pi's own `theme` singleton was importable directly).
  *
  * pi's own singleton (`modes/interactive/theme/theme.ts`) isn't part of the
- * public package export, so `branding`'s `session_start` handler calls
- * `setSharedTheme(ctx.ui.theme)` once per session to populate this — `theme`
- * below is a live ES module binding, so every importer sees the update.
+ * public package export, so `setSharedTheme(ctx.ui.theme)` populates this
+ * instead — but "this" is NOT one singleton shared by the whole layer.
+ * `package.json`'s `pi.extensions` lists each top-level file separately, and
+ * pi's loader (`loadExtensionModule`, `moduleCache: false`) gives each of
+ * those its OWN module graph. `_shared/theme.ts` is the same file on disk but
+ * a SEPARATE loaded instance per top-level extension — a value set from
+ * `branding`'s copy is invisible to `diff`'s or `fleet`'s. Confirmed live:
+ * `/diff` crashed with "theme accessed before session_start populated it"
+ * even though branding's welcome banner (which sets its own copy) had
+ * already rendered.
  *
- * Assumption worth verifying live: this assumes `ctx.ui.theme` is (or wraps)
- * pi's own reactive theme object, so a switch via `/settings` after session
- * start still shows up here without a second `setSharedTheme` call. If a
- * live theme switch doesn't propagate to fleet/diff views, that assumption
- * is what to revisit.
+ * So every top-level extension that transitively imports this file calls
+ * `setSharedTheme` itself: `branding` and `fleet` in their `session_start`
+ * handler, `diff` right before constructing `DiffView` (no `session_start`
+ * handler of its own, and setting it adjacent to the read means a mid-session
+ * `/settings` theme switch is picked up for free — worth doing in the other
+ * two as well if that turns out to matter for them).
  */
 import type { Theme } from "@earendil-works/pi-coding-agent";
 

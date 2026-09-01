@@ -13,6 +13,7 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { execWithIo } from "../_shared/exec.ts";
+import { setSharedTheme } from "../_shared/theme.ts";
 import { DiffView } from "./diff-view.ts";
 import { parseUnifiedDiff } from "./git-diff.ts";
 
@@ -85,6 +86,12 @@ const diff: InlineExtension = {
 					return;
 				}
 
+				// pi's package loader gives each top-level extension file its own module
+				// instance (loadExtensionModule's moduleCache: false), so branding's
+				// setSharedTheme call never reaches diff's separately-loaded copy of
+				// _shared/theme.ts — set it here, right before the component that reads
+				// it is built, which also means a mid-session theme switch is picked up.
+				setSharedTheme(ctx.ui.theme);
 				await ctx.ui.custom<void>(
 					(tui, _theme, _keybindings, done) =>
 						new DiffView({

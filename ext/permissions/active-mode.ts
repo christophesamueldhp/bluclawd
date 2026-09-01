@@ -12,16 +12,26 @@
  * everything unlisted?" — because delegation must not be a way around that
  * answer. `acceptEdits` is deliberately NOT inherited by children today; that
  * predates this module and changing it is its own decision.
+ *
+ * Backed by {@link sharedRef}, not a plain module-level `let`: `subagent-gate.ts`
+ * is loaded twice — once inside `permissions`'s own module graph, once inside
+ * `subagents`'s (via `engine.ts`'s import) — each a separate instance under pi's
+ * loader (`moduleCache: false`). A plain `let` would leave the subagents-side
+ * copy always reading the initial "default", never the mode `permissions/index.ts`
+ * actually sets — so a child under `dontAsk` would silently fall back to the
+ * permissive deny-only posture instead of the restrictive allow-list this module
+ * exists to enforce, reopening exactly the delegation hole described above.
  */
 
+import { sharedRef } from "../_shared/global-state.ts";
 import type { PermissionMode } from "./modes.ts";
 
-let activeMode: PermissionMode = "default";
+const ref = sharedRef<PermissionMode>("permissions.activeMode", "default");
 
 export function setActivePermissionMode(mode: PermissionMode): void {
-	activeMode = mode;
+	ref.set(mode);
 }
 
 export function getActivePermissionMode(): PermissionMode {
-	return activeMode;
+	return ref.get();
 }

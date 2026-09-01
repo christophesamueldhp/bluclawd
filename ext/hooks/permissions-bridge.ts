@@ -14,9 +14,20 @@
  * decidePermissionViaHooks returns undefined and permissions behaves as before;
  * with permissions disabled, the hooks extension's own tool_call pass still
  * enforces deny (allow/ask have nothing to act on).
+ *
+ * The decider/notifier pair is stored via {@link sharedRef}, not a plain
+ * module-level `let`: `hooks` and `permissions` are separate top-level
+ * extensions, each with its own module graph under pi's loader (`moduleCache:
+ * false`), so a plain `let` would leave permissions' copy of `decider` always
+ * undefined — `decidePermissionViaHooks` silently returning undefined on every
+ * call, as if no PreToolUse hook were ever configured. That fails toward more
+ * prompts when a hook wants to auto-allow, but toward FEWER when a hook wants
+ * to force "ask" on something permissions' own rules would otherwise
+ * auto-allow — a configured hook silently stops gating at all.
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { sharedRef } from "../_shared/global-state.ts";
 
 export interface HookPermissionDecision {
 	decision: "allow" | "deny" | "ask";
@@ -36,14 +47,15 @@ export type HookPermissionDecider = (
 
 export type HookPromptNotifier = (message: string, ctx: ExtensionContext) => void;
 
-let decider: HookPermissionDecider | undefined;
-let notifier: HookPromptNotifier | undefined;
+interface Bridge {
+	decider: HookPermissionDecider;
+	notifier: HookPromptNotifier;
+}
 
-export function setHookPermissionBridge(
-	bridge: { decider: HookPermissionDecider; notifier: HookPromptNotifier } | undefined,
-): void {
-	decider = bridge?.decider;
-	notifier = bridge?.notifier;
+const ref = sharedRef<Bridge | undefined>("hooks.permissionBridge", undefined);
+
+export function setHookPermissionBridge(bridge: Bridge | undefined): void {
+	ref.set(bridge);
 }
 
 /** Ask PreToolUse hooks to decide; undefined = no hooks configured / no decision. */
@@ -51,9 +63,10 @@ export async function decidePermissionViaHooks(
 	request: HookPermissionRequest,
 	ctx: ExtensionContext,
 ): Promise<HookPermissionDecision | undefined> {
-	if (!decider) return undefined;
+	const bridge = ref.get();
+	if (!bridge) return undefined;
 	try {
-		return await decider(request, ctx);
+		return await bridge.decider(request, ctx);
 	} catch {
 		return undefined; // a broken hook must never wedge the permission gate
 	}
@@ -62,7 +75,7 @@ export async function decidePermissionViaHooks(
 /** Tell Notification hooks a permission prompt is being shown. Never throws. */
 export function notifyPermissionPrompt(message: string, ctx: ExtensionContext): void {
 	try {
-		notifier?.(message, ctx);
+		ref.get()?.notifier(message, ctx);
 	} catch {
 		// Notification is best-effort
 	}

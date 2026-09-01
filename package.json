@@ -32,6 +32,7 @@
     "@anthropic-ai/sandbox-runtime": "0.0.26",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@silvia-odwyer/photon-node": "0.3.4",
+    "diff": "8.0.4",
     "proper-lockfile": "4.1.2",
     "undici": "8.9.0"
   },

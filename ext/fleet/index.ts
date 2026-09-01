@@ -29,6 +29,7 @@ import { tmpdir } from "node:os";
 import type { ExtensionCommandContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
+import { setSharedTheme } from "../_shared/theme.ts";
 import { FleetView } from "./fleet-view.ts";
 import { OrchestratorClient } from "./orchestrator-client.ts";
 import { hideSession, loadHiddenSessions, toSavedSummaries } from "./saved-sessions.ts";
@@ -105,6 +106,11 @@ const fleet: InlineExtension = {
 		};
 
 		pi.on("session_start", (_event, ctx) => {
+			// pi's package loader gives each top-level extension file its own module
+			// instance (loadExtensionModule's moduleCache: false), so branding's
+			// setSharedTheme call never reaches fleet's separately-loaded copy of
+			// _shared/theme.ts — every extension that needs it populates its own.
+			setSharedTheme(ctx.ui.theme);
 			if (!ctx.hasUI) return; // the roster is a TUI affordance
 			registration?.stop();
 			registration = new FleetSelfRegistration(new OrchestratorClient(), () =>
