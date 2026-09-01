@@ -62,7 +62,31 @@ function translateArgs(argv) {
 	return out;
 }
 
+/**
+ * Default `tuiMode` to "fullscreen" for a user who hasn't chosen either mode.
+ *
+ * `tuiMode` is read once at TUI construction, before any extension factory
+ * runs (`interactive-mode.ts`: `options.tuiMode ?? settingsManager.getTuiMode()`),
+ * so there is no `session_start` hook late enough to flip it — the CLI flag is
+ * the only lever a wrapper can reach. `--tui-mode` is documented as a
+ * per-run override, not a persisted write, so this never stomps a choice the
+ * user saved via `/settings`: we only inject the flag when neither the
+ * command line nor settings.json already names a mode.
+ */
+async function withDefaultTuiMode(argv) {
+	if (argv.includes("--tui-mode")) return argv;
+	try {
+		const { SettingsManager } = await import("../packages/coding-agent/src/index.ts");
+		const configured = SettingsManager.create(process.cwd()).getGlobalSettings().tuiMode;
+		if (configured) return argv;
+	} catch {
+		return argv; // settings unreadable: let pi resolve its own default
+	}
+	return [...argv, "--tui-mode", "fullscreen"];
+}
+
 const { main } = await import("../packages/coding-agent/src/index.ts");
 const { bluclawdExtensions } = await import("./ext/index.ts");
 
-await main(translateArgs(process.argv.slice(2)), { extensionFactories: bluclawdExtensions() });
+const argv = await withDefaultTuiMode(translateArgs(process.argv.slice(2)));
+await main(argv, { extensionFactories: bluclawdExtensions() });

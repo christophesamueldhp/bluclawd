@@ -18,6 +18,7 @@ import diagnostics from "./diagnostics/index.ts";
 import diff from "./diff/index.ts";
 import fleet from "./fleet/index.ts";
 import help from "./help/index.ts";
+import historySearch from "./history-search/index.ts";
 import hooks from "./hooks/index.ts";
 import mcp from "./mcp/index.ts";
 import memory from "./memory/index.ts";
@@ -49,5 +50,6 @@ export function bluclawdExtensions(): InlineExtension[] {
 		skills,
 		help,
 		commands,
+		historySearch,
 	];
 }
