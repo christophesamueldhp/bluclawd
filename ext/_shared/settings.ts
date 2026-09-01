@@ -2,9 +2,11 @@
  * Settings keys bluclawd adds on top of pi's, and the readers for them.
  *
  * pi's `Settings` interface does not know these keys and pi's `SettingsManager`
- * has no getters for them. Rather than edit either — the one thing this branch
- * does not do — the keys are declared here by TypeScript module augmentation and
- * read through pi's public `getGlobalSettings()` / `getProjectSettings()`.
+ * has no getters for them, and — unlike most of what this layer reaches for —
+ * `Settings` isn't part of pi's public package export at all, so it cannot even
+ * be augmented by name from outside pi's own source. Every reader here goes
+ * through an untyped `Record<string, unknown>` cast instead (`merged()` below)
+ * rather than assuming a shape pi's own types don't promise.
  *
  * The merge below reproduces pi's own precedence: project settings override
  * global ones, one level deep for objects. Trust is already handled upstream —
@@ -46,17 +48,6 @@ export interface WebsearchSettings {
 	provider?: "exa" | "brave" | "tavily";
 	apiKeyEnv?: string;
 	keyless?: boolean;
-}
-
-declare module "../../../packages/coding-agent/src/core/settings-manager.ts" {
-	interface Settings {
-		/** "provider/model-id" used by the /fast command; unset disables it. */
-		fastModel?: string;
-		statusline?: StatuslineSettings;
-		permissions?: PermissionSettings;
-		websearch?: WebsearchSettings;
-		sandbox?: SandboxSettings;
-	}
 }
 
 type Mergeable = Record<string, unknown>;
@@ -107,7 +98,9 @@ export function permissions(sm: SettingsManager): PermissionSettings | undefined
  * safety layer off wholesale by shipping `defaultMode: "bypass"`.
  */
 export function globalPermissionDefaultMode(sm: SettingsManager): string | undefined {
-	return sm.getGlobalSettings().permissions?.defaultMode;
+	const global = sm.getGlobalSettings() as unknown as Mergeable;
+	const value = (global.permissions as PermissionSettings | undefined)?.defaultMode;
+	return typeof value === "string" ? value : undefined;
 }
 
 export function websearch(sm: SettingsManager): WebsearchSettings | undefined {
