@@ -10,7 +10,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { theme } from "../../../packages/coding-agent/src/modes/interactive/theme/theme.ts";
+import { theme } from "../_shared/theme.ts";
 import { countStatuses, describeStatus, groupByCwd, relativeTime } from "./fleet-status.ts";
 import { NewSessionPanel } from "./new-session-panel.ts";
 import { currentDaemonBuildId, type InstanceSummary, type OrchestratorClient } from "./orchestrator-client.ts";

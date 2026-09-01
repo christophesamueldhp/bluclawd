@@ -7,7 +7,7 @@
 
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Markdown, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { theme } from "../../../packages/coding-agent/src/modes/interactive/theme/theme.ts";
+import { theme } from "../_shared/theme.ts";
 
 export interface WireMessage {
 	role: string;

@@ -24,14 +24,14 @@
 import type { Model } from "@earendil-works/pi-ai/compat";
 import type { AgentSessionEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	createAgentSession,
 	DefaultResourceLoader,
 	getAgentDir,
 	ModelRuntime,
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { getAuthPath, getModelsPath } from "../../../packages/coding-agent/src/config.ts";
-import { createAgentSession } from "../../../packages/coding-agent/src/core/sdk.ts";
+import { getAuthPath, getModelsPath } from "../_shared/paths.ts";
 import subagentPermissionGate from "../permissions/subagent-gate.ts";
 import type { AgentDef } from "./defs.ts";
 import { emptyUsage, type SingleResult } from "./render.ts";

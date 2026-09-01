@@ -18,7 +18,7 @@ import {
 	type StdioServerParameters,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { resolveHeaders } from "../../../packages/coding-agent/src/core/resolve-config-value.ts";
+import { resolveHeaders } from "../_shared/resolve-config-value.ts";
 import { mcpToolName, resolveServerEnv, type ServerConfig, toToolParameters } from "./schema.ts";
 
 export type { Client };

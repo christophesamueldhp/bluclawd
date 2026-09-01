@@ -29,7 +29,6 @@ import { tmpdir } from "node:os";
 import type { ExtensionCommandContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { APP_NAME } from "../../../packages/coding-agent/src/config.ts";
 import { FleetView } from "./fleet-view.ts";
 import { OrchestratorClient } from "./orchestrator-client.ts";
 import { hideSession, loadHiddenSessions, toSavedSummaries } from "./saved-sessions.ts";
@@ -128,7 +127,7 @@ const fleet: InlineExtension = {
 						const view = new FleetView({
 							ui: tui,
 							client: new OrchestratorClient(),
-							appName: APP_NAME,
+							appName: "pi",
 							version: VERSION,
 							model: model ? `${model.provider}/${model.id}` : undefined,
 							spawnModel: model ? { provider: model.provider, id: model.id } : undefined,

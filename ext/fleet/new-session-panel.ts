@@ -1,5 +1,5 @@
 import { getKeybindings, Input, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { theme } from "../../../packages/coding-agent/src/modes/interactive/theme/theme.ts";
+import { theme } from "../_shared/theme.ts";
 
 export interface NewSessionValues {
 	path: string;

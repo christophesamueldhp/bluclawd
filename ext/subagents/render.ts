@@ -12,7 +12,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
-import { keyDisplayText } from "../../../packages/coding-agent/src/modes/interactive/components/keybinding-hints.ts";
+import { keyDisplayText } from "../_shared/key-display-text.ts";
 import type { AgentScope } from "./defs.ts";
 
 export const MAX_PARALLEL_TASKS = 8;

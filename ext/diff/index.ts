@@ -12,7 +12,7 @@
 
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { execCommand } from "../../../packages/coding-agent/src/core/exec.ts";
+import { execWithIo } from "../_shared/exec.ts";
 import { DiffView } from "./diff-view.ts";
 import { parseUnifiedDiff } from "./git-diff.ts";
 
@@ -26,7 +26,8 @@ const diff: InlineExtension = {
 			description: "Review the working-tree diff",
 			handler: async (args, ctx) => {
 				const cwd = ctx.cwd;
-				const inRepo = await execCommand("git", ["rev-parse", "--is-inside-work-tree"], cwd, {
+				const inRepo = await execWithIo("git", ["rev-parse", "--is-inside-work-tree"], {
+					cwd,
 					timeout: IN_REPO_TIMEOUT_MS,
 				});
 				if (inRepo.code !== 0) {
@@ -36,7 +37,8 @@ const diff: InlineExtension = {
 
 				const ref = args.trim();
 				const diffArgs = ref ? ["diff", ref] : ["diff", "HEAD"];
-				const result = await execCommand("git", ["--no-optional-locks", ...diffArgs], cwd, {
+				const result = await execWithIo("git", ["--no-optional-locks", ...diffArgs], {
+					cwd,
 					timeout: DIFF_TIMEOUT_MS,
 				});
 				if (result.code !== 0) {
@@ -50,11 +52,10 @@ const diff: InlineExtension = {
 				const files = parseUnifiedDiff(result.stdout);
 				if (!ref) {
 					// `git diff HEAD` omits untracked files; list them so new work is visible.
-					const untracked = await execCommand(
+					const untracked = await execWithIo(
 						"git",
 						["--no-optional-locks", "ls-files", "--others", "--exclude-standard"],
-						cwd,
-						{ timeout: IN_REPO_TIMEOUT_MS },
+						{ cwd, timeout: IN_REPO_TIMEOUT_MS },
 					);
 					for (const path of untracked.stdout
 						.split("\n")
@@ -64,11 +65,10 @@ const diff: InlineExtension = {
 						// --no-index against /dev/null yields a normal unified diff of the whole
 						// file, so a new file shows its contents instead of an empty entry. It
 						// exits 1 when there are differences — the expected case here.
-						const added = await execCommand(
+						const added = await execWithIo(
 							"git",
 							["--no-optional-locks", "diff", "--no-index", "--", "/dev/null", path],
-							cwd,
-							{ timeout: DIFF_TIMEOUT_MS },
+							{ cwd, timeout: DIFF_TIMEOUT_MS },
 						);
 						const parsed = parseUnifiedDiff(added.stdout);
 						const entry = parsed.find((file) => file.path.endsWith(path)) ?? parsed[0];

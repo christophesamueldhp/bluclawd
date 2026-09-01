@@ -21,8 +21,8 @@ import type { TSchema } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { getDebugLogPath } from "../../../packages/coding-agent/src/config.ts";
-import { resolveConfigValue } from "../../../packages/coding-agent/src/core/resolve-config-value.ts";
+import { getDebugLogPath } from "../_shared/paths.ts";
+import { resolveConfigValue } from "../_shared/resolve-config-value.ts";
 
 const MCP_FILE = "mcp.json";
 

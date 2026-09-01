@@ -17,7 +17,6 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
-import { APP_NAME } from "../../../packages/coding-agent/src/config.ts";
 import { runDoctorChecks } from "../_shared/doctor.ts";
 
 const BAR_WIDTH = 20;
@@ -124,7 +123,7 @@ const diagnostics: InlineExtension = {
 		pi.registerCommand("doctor", {
 			description: "Diagnose common setup issues",
 			handler: async (_args, ctx) => {
-				const checks = await runDoctorChecks({ cwd: ctx.cwd, agentDir: getAgentDir(), appName: APP_NAME });
+				const checks = await runDoctorChecks({ cwd: ctx.cwd, agentDir: getAgentDir(), appName: "pi" });
 				pi.appendEntry<DoctorData>("bluclawd:doctor", {
 					checks: checks.map((check) => ({
 						name: check.name,

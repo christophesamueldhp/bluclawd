@@ -34,7 +34,7 @@ export type Rules = { allow?: string[]; ask?: string[]; deny?: string[] };
  */
 import { realpathSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
-import { resolveToCwd } from "../../../packages/coding-agent/src/core/tools/path-utils.ts";
+import { resolveToCwd } from "../_shared/path-resolve.ts";
 
 const VERB: Record<string, string> = {
 	bash: "Bash",

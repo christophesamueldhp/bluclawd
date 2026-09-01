@@ -26,10 +26,9 @@ import { lookup as dnsLookupAsync } from "node:dns/promises";
 import { isIP } from "node:net";
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import { Agent, fetch as undiciFetch } from "undici";
-import { APP_NAME } from "../../../packages/coding-agent/src/config.ts";
 import { htmlToMarkdown } from "./html-to-md.ts";
 
-const USER_AGENT = `${APP_NAME}/${VERSION}`;
+const USER_AGENT = `pi/${VERSION}`;
 const DEFAULT_MAX_BYTES = 2_000_000;
 // Hard ceiling regardless of a caller-supplied maxBytes: `webfetch` is
 // prompt-injectable, so a runaway request must not be able to buffer an

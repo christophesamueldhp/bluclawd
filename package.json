@@ -29,6 +29,9 @@
     "skills": ["./skills"],
     "themes": ["./themes"]
   },
+  "dependencies": {
+    "@silvia-odwyer/photon-node": "0.3.4"
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-agent-core": "*",

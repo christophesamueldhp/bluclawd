@@ -19,7 +19,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
-import { openBrowser } from "../../../packages/coding-agent/src/utils/open-browser.ts";
+import { openBrowser } from "../_shared/open-browser.ts";
 
 /** bluclawd's own tracker — pi's `piConfig` does not cover this string. */
 const BUG_REPORT_URL = "https://github.com/christophesamueldhp/bluclawd/issues";

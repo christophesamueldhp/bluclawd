@@ -1,5 +1,5 @@
 import { type Component, type Focusable, getKeybindings, Input, type TUI } from "@earendil-works/pi-tui";
-import { theme } from "../../../packages/coding-agent/src/modes/interactive/theme/theme.ts";
+import { theme } from "../_shared/theme.ts";
 import { StreamAttachment, type StreamMessage } from "./stream-attachment.ts";
 import { TranscriptModel, type WireMessage } from "./transcript.ts";
 

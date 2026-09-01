@@ -20,7 +20,7 @@
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { wrapToolDefinition } from "../../../packages/coding-agent/src/core/tools/tool-definition-wrapper.ts";
+import { wrapToolDefinition } from "./wrap-tool-definition.ts";
 
 /** Cap on buffered output per job; the oldest chunks are dropped past this. */
 const DEFAULT_MAX_BUFFER_BYTES = 2 * 1024 * 1024;

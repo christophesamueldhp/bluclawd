@@ -8,12 +8,12 @@
  * directories it visits so /doctor stays fast on huge repos.
  */
 
+import { spawnSync as spawnProcessSync } from "node:child_process";
 import { accessSync, constants, type Dirent, existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { KEYBINDINGS, migrateKeybindingsConfig } from "../../../packages/coding-agent/src/core/keybindings.ts";
-import { spawnProcessSync } from "../../../packages/coding-agent/src/utils/child-process.ts";
 import { toKeybindingsConfig } from "./keybindings-config.ts";
+import { KNOWN_KEYBINDING_ACTIONS, migrateKeybindingsConfig } from "./keybindings-known.ts";
 
 export interface DoctorCheck {
 	name: string;
@@ -353,7 +353,7 @@ export function checkMcpShape(config: Record<string, unknown>): string[] {
 export function checkKeybindingsShape(raw: Record<string, unknown>): string[] {
 	const problems: string[] = [];
 	const { config: migrated } = migrateKeybindingsConfig(raw);
-	const knownKeys = new Set(Object.keys(KEYBINDINGS));
+	const knownKeys = KNOWN_KEYBINDING_ACTIONS;
 	for (const key of Object.keys(migrated)) {
 		if (!knownKeys.has(key)) problems.push(`unknown keybinding action "${key}" (ignored by the loader)`);
 	}

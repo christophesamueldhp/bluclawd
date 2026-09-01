@@ -9,7 +9,6 @@
  */
 
 import { VERSION } from "@earendil-works/pi-coding-agent";
-import { APP_NAME } from "../../../packages/coding-agent/src/config.ts";
 
 export type SearchProvider = "exa" | "brave" | "tavily";
 
@@ -19,7 +18,7 @@ export interface SearchResult {
 	snippet: string;
 }
 
-const USER_AGENT = `${APP_NAME}/${VERSION}`;
+const USER_AGENT = `pi/${VERSION}`;
 const TIMEOUT_MS = 30_000;
 const NUM_RESULTS = 5;
 
@@ -232,7 +231,7 @@ export async function exaMcpSearch(
 		params: {
 			protocolVersion: MCP_PROTOCOL_VERSION,
 			capabilities: {},
-			clientInfo: { name: APP_NAME, version: VERSION },
+			clientInfo: { name: "pi", version: VERSION },
 		},
 	});
 	await rpc({ jsonrpc: "2.0", method: "notifications/initialized" });

@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
-import { APP_NAME } from "../../../packages/coding-agent/src/config.ts";
+import { setSharedTheme } from "../_shared/theme.ts";
 import { renderPixelArt } from "./pixel-art.ts";
 import { WelcomeBox, type WelcomeBoxInfo } from "./welcome-box.ts";
 
@@ -90,6 +90,11 @@ const branding: InlineExtension = {
 		pi.on("resources_discover", () => ({ themePaths: [join(here, "..", "..", "themes")] }));
 
 		pi.on("session_start", (_event, ctx) => {
+			// Populate the shared theme reference other components in this layer
+			// (fleet-view and friends) import instead of reaching into pi's own
+			// theme singleton, which isn't part of the public package export.
+			setSharedTheme(ctx.ui.theme);
+
 			// pi resolves the configured theme during startup, BEFORE extensions have
 			// contributed their theme paths — so a theme shipped here can never be the
 			// startup theme, and pi falls back to dark with a "Theme not found" notice.
@@ -106,10 +111,10 @@ const branding: InlineExtension = {
 					const rows: string[] = [];
 					if (mascotLines) rows.push(...mascotLines);
 					rows.push("");
-					rows.push(theme.bold(theme.fg("accent", `Welcome to ${APP_NAME}`)));
+					rows.push(theme.bold(theme.fg("accent", "Welcome to bluclawd")));
 					rows.push(theme.fg("dim", "/help for commands · @ for files · ! for bash"));
 					return {
-						title: `${APP_NAME} v${VERSION}`,
+						title: `bluclawd v${VERSION}`,
 						rows,
 						sidebar: [
 							{

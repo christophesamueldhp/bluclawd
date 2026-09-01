@@ -16,7 +16,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-import { theme } from "../../../packages/coding-agent/src/modes/interactive/theme/theme.ts";
+import { theme } from "../_shared/theme.ts";
 import { fitsSideBySide, type SideBySideRow, toSideBySideRows } from "./diff-side-by-side.ts";
 import type { ParsedFileDiff } from "./git-diff.ts";
 import { summarizeFileDiff } from "./git-diff.ts";

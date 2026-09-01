@@ -10,7 +10,7 @@
  * changes, the side-by-side view will look subtly different until this follows.
  */
 import * as Diff from "diff";
-import { theme } from "../../../packages/coding-agent/src/modes/interactive/theme/theme.ts";
+import { theme } from "../_shared/theme.ts";
 
 export function renderIntraLineDiff(
 	oldContent: string,

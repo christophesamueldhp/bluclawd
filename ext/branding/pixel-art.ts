@@ -1,4 +1,4 @@
-import { loadPhoton } from "../../../packages/coding-agent/src/utils/photon.ts";
+import { loadPhoton } from "../_shared/photon.ts";
 
 /** Alpha values below this are treated as fully transparent. */
 const ALPHA_THRESHOLD = 128;

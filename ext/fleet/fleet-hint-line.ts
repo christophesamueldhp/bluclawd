@@ -1,5 +1,5 @@
 import { type Component, truncateToWidth } from "@earendil-works/pi-tui";
-import { theme } from "../../../packages/coding-agent/src/modes/interactive/theme/theme.ts";
+import { theme } from "../_shared/theme.ts";
 
 /**
  * A single dim hint line shown just below the prompt input for the FleetView ←← gesture.

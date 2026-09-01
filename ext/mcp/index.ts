@@ -49,7 +49,7 @@
 
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
-import { openBrowser } from "../../../packages/coding-agent/src/utils/open-browser.ts";
+import { openBrowser } from "../_shared/open-browser.ts";
 import type { Client, RegisteredMcpTool } from "./client.ts";
 import { McpCredentialStore } from "./credential-store.ts";
 import { isAuthFailure, loadMcpConfig, type ServerConfig, setServerDisabled } from "./schema.ts";

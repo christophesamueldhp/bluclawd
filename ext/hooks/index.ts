@@ -85,12 +85,8 @@ import type {
 	ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { getDebugLogPath } from "../../../packages/coding-agent/src/config.ts";
-import type {
-	SessionBeforeCompactResult,
-	ToolResultEventResult,
-} from "../../../packages/coding-agent/src/core/extensions/types.ts";
 import { execWithIo } from "../_shared/exec.ts";
+import { getDebugLogPath } from "../_shared/paths.ts";
 import { setHookPermissionBridge } from "./permissions-bridge.ts";
 import { type HookExec, matches, runHook } from "./protocol.ts";
 
@@ -516,7 +512,7 @@ export function factory(pi: ExtensionAPI): void {
 		return undefined;
 	});
 
-	pi.on("tool_result", async (event, ctx): Promise<ToolResultEventResult | undefined> => {
+	pi.on("tool_result", async (event, ctx) => {
 		const data: HookData = {
 			toolName: event.toolName,
 			...toolFields(event.input),
@@ -628,7 +624,7 @@ export function factory(pi: ExtensionAPI): void {
 		});
 	});
 
-	pi.on("session_before_compact", async (_event, ctx): Promise<SessionBeforeCompactResult | undefined> => {
+	pi.on("session_before_compact", async (_event, ctx) => {
 		// Blockable (IMPROVEMENT-PLAN.md §3.2): Claude Code documents PreCompact as
 		// able to block, and unlike Stop/SubagentStop below, pi's own
 		// session_before_compact event already supports it via `{cancel: true}`

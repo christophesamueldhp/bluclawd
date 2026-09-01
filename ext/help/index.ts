@@ -17,8 +17,7 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
-import { APP_NAME } from "../../../packages/coding-agent/src/config.ts";
-import { BUILTIN_SLASH_COMMANDS } from "../../../packages/coding-agent/src/core/slash-commands.ts";
+import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { categorizeCommands } from "./categories.ts";
 
 interface HelpEntry {
@@ -115,7 +114,7 @@ const help: InlineExtension = {
 
 				pi.appendEntry<HelpData>("bluclawd:help", {
 					version: VERSION,
-					appName: APP_NAME,
+					appName: "pi",
 					commands,
 					templates: pick("prompt"),
 					skills: pick("skill"),
