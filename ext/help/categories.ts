@@ -57,15 +57,11 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 	copy: "Session",
 
 	// Code & review
-	diff: "Code & review",
-	init: "Code & review",
 	rewind: "Code & review",
 
 	// Model & output
 	model: "Model & output",
 	"scoped-models": "Model & output",
-	effort: "Model & output",
-	fast: "Model & output",
 	llama: "Model & output",
 
 	// Permissions & safety
@@ -77,7 +73,6 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 	// Extensions & integrations
 	mcp: "Extensions & integrations",
 	agents: "Extensions & integrations",
-	hooks: "Extensions & integrations",
 	memory: "Extensions & integrations",
 	statusline: "Extensions & integrations",
 	plugin: "Extensions & integrations",
@@ -89,11 +84,9 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 	usage: "Info & diagnostics",
 	context: "Info & diagnostics",
 	tasks: "Info & diagnostics",
-	doctor: "Info & diagnostics",
 	changelog: "Info & diagnostics",
 	keybindings: "Info & diagnostics",
 	help: "Info & diagnostics",
-	bug: "Info & diagnostics",
 
 	// App
 	config: "App",

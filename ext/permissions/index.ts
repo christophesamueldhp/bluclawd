@@ -31,10 +31,9 @@ import { CONFIG_DIR_NAME, getAgentDir, SettingsManager } from "@earendil-works/p
 import { Key } from "@earendil-works/pi-tui";
 import * as forkSettings from "../_shared/settings.ts";
 import { addGlobalRule, addProjectRule, removeGlobalRule, removeProjectRule } from "../_shared/settings-write.ts";
-import { decidePermissionViaHooks, notifyPermissionPrompt } from "../hooks/permissions-bridge.ts";
 import { isSandboxActive } from "../sandbox/state.ts";
 import { setActivePermissionMode } from "./active-mode.ts";
-import { type EvalConfig, evaluatePostHook, evaluatePreHook, type HookDecision } from "./evaluate.ts";
+import { type EvalConfig, evaluatePostHook, evaluatePreHook } from "./evaluate.ts";
 import { createModeStore, type ModeStore, PERMISSION_MODES, type PermissionMode } from "./modes.ts";
 import {
 	bashSegments,
@@ -299,7 +298,6 @@ export function factory(pi: ExtensionAPI): void {
 
 	/** Yes/No prompt. Any failure fails CLOSED — an unanswered prompt is a "No". */
 	async function confirm(label: string, ctx: ExtensionContext): Promise<boolean | "failed"> {
-		notifyPermissionPrompt(label, ctx);
 		try {
 			return (await ctx.ui.select(label, ["Yes", "No"])) === "Yes";
 		} catch {
@@ -317,7 +315,6 @@ export function factory(pi: ExtensionAPI): void {
 		exact: string | null,
 		ctx: ExtensionContext,
 	): Promise<"allow" | "deny" | "failed"> {
-		notifyPermissionPrompt(label, ctx);
 		let choice: string | undefined;
 		try {
 			const options = ["Yes", "No", "Always allow", ...(ctx.isProjectTrusted() ? ["Always allow (project)"] : [])];
@@ -335,7 +332,7 @@ export function factory(pi: ExtensionAPI): void {
 	/**
 	 * The gate. Decision logic lives in evaluate.ts as a pure function of the inputs
 	 * gathered here; this handler owns only the I/O a verdict calls for — prompting,
-	 * notifying hooks, persisting an "Always allow", and advancing the auto-mode counters.
+	 * persisting an "Always allow", and advancing the auto-mode counters.
 	 */
 	pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
 		liveCtx = ctx;
@@ -352,8 +349,7 @@ export function factory(pi: ExtensionAPI): void {
 			hasUI: ctx.hasUI,
 		};
 
-		// Gates 1-5: mode blocks, deny rules, protected paths. A hook may never override
-		// any of them, which is why they run before it.
+		// Gates 1-4: mode blocks, deny rules, protected paths.
 		const pre = evaluatePreHook(tool, input, cfg);
 		if (pre?.outcome === "allow") return;
 		if (pre?.outcome === "block") return { block: true, reason: pre.reason };
@@ -378,21 +374,9 @@ export function factory(pi: ExtensionAPI): void {
 			if (pre.gate === "write-protected-path") return;
 		}
 
-		// PreToolUse permissionDecision (CC parity, audit B.4). The hooks extension caches
-		// this run by toolCallId so the hook commands execute exactly once per call.
-		const hookDecision = await decidePermissionViaHooks({ toolCallId: event.toolCallId, toolName: tool, input }, ctx);
-		if (hookDecision?.decision === "deny") {
-			return {
-				block: true,
-				reason: hookDecision.reason ?? "Blocked by a PreToolUse hook (permissionDecision: deny).",
-			};
-		}
-		const hook: HookDecision =
-			hookDecision?.decision === "allow" ? "allow" : hookDecision?.decision === "ask" ? "ask" : undefined;
-
-		// Gates 6-9: the hook's verdict, auto mode's guardrail, the standing grants that
-		// clear an ask, and the prompt.
-		const post = evaluatePostHook(tool, input, cfg, hook);
+		// Gates 6-9: auto mode's guardrail, the standing grants that clear an ask, and the
+		// prompt.
+		const post = evaluatePostHook(tool, input, cfg);
 
 		// Auto mode owns counters, so its outcomes are handled before the generic ones.
 		if (post.gate === "auto-guardrail" || (cfg.mode === "auto" && post.outcome === "allow")) {
@@ -415,20 +399,6 @@ export function factory(pi: ExtensionAPI): void {
 
 		if (post.outcome === "allow") return;
 		if (post.outcome === "block") return { block: true, reason: post.reason };
-
-		// A hook allowed the call but the guardrail did not: a two-option confirmation,
-		// never an "Always allow" (that would persist a grant the guardrail refused).
-		if (post.gate === "hook-allow") {
-			notifyPermissionPrompt(`Guardrail — ${post.reason}`, ctx);
-			let hookChoice: string | undefined;
-			try {
-				hookChoice = await ctx.ui.select(`A hook allowed this, but ${post.reason}`, ["Yes", "No"]);
-			} catch {
-				return { block: true, reason: post.reason };
-			}
-			if (hookChoice === "Yes") return;
-			return { block: true, reason: post.reason };
-		}
 
 		const outcome = await askWithScope(post.reason, post.exact ?? null, ctx);
 		if (outcome === "failed") {

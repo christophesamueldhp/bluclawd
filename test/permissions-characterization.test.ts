@@ -17,9 +17,8 @@
  * `registration.test.ts` covers that the extension registers and wires events
  * at all; this covers what it decides once wired.
  *
- * Deliberately excluded, same as the original: PreToolUse hook interaction
- * (tested by calling with `hook: undefined` throughout) and the "Always allow"
- * settings writeback — both need I/O this table cannot hold still for.
+ * Deliberately excluded, same as the original: the "Always allow" settings
+ * writeback — it needs I/O this table cannot hold still for.
  */
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -104,7 +103,7 @@ describe("permissions decision characterization (pin current behaviour)", () => 
 								hasUI,
 							};
 							const pre = evaluatePreHook(tool, input, cfg);
-							const verdict = pre ?? evaluatePostHook(tool, input, cfg, undefined);
+							const verdict = pre ?? evaluatePostHook(tool, input, cfg);
 							const key = `sandbox=${sandboxActive} ui=${hasUI} rules=${rulesName} mode=${mode} case=${name}`;
 							lines.push(encode(key, cwd, agentDir, verdict));
 						}

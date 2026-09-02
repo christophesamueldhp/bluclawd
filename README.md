@@ -41,9 +41,9 @@ ext/            the feature layer
 test/           self-contained — no monorepo, no fixtures pi doesn't publish
 ```
 
-18 extensions: `permissions`, `hooks`, `model-controls`, `statusline`, `memory`,
+14 extensions: `permissions`, `statusline`, `memory`,
 `checkpoints`, `subagents`, `web`, `mcp`, `sandbox`, `background-bash`,
-`branding`, `diagnostics`, `diff`, `fleet`, `help`, `commands`,
+`branding`, `diagnostics`, `fleet`, `help`,
 `history-search`.
 
 ## Updating
@@ -59,7 +59,7 @@ handful of small pi functions/tables that pi does not export publicly
 (`stripAnsi`, `openBrowser`, path getters, the built-in slash-command list, the
 keybindings action-name table, a security-relevant path resolver, MCP
 auth-header resolution). Each is documented in its own file with what drifts
-if pi changes it — mostly cosmetic (a stale `/help`/`/doctor` line), one
+if pi changes it — mostly cosmetic (a stale `/help` line), one
 (`path-resolve.ts`) copied whole rather than trimmed because it backs
 permission rule matching. `npm run typecheck && npm test` after a pi version
 bump is what would actually catch a break.

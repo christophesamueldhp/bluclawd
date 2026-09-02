@@ -9,8 +9,6 @@ import { recordExtensions } from "../scripts/probe-extensions.ts";
  */
 const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts: number; events: number }> = {
 	permissions: { commands: ["mode", "permissions"], tools: [], shortcuts: 1, events: 3 },
-	hooks: { commands: ["hooks"], tools: [], shortcuts: 0, events: 8 },
-	"model-controls": { commands: ["effort", "fast"], tools: [], shortcuts: 0, events: 1 },
 	statusline: { commands: ["statusline"], tools: [], shortcuts: 0, events: 3 },
 	memory: { commands: ["memory"], tools: ["memory"], shortcuts: 0, events: 2 },
 	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 3 },
@@ -20,18 +18,16 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	sandbox: { commands: ["sandbox"], tools: ["bash"], shortcuts: 0, events: 3 },
 	"background-bash": { commands: ["tasks"], tools: ["bash_output", "kill_bash"], shortcuts: 0, events: 0 },
 	branding: { commands: [], tools: [], shortcuts: 0, events: 2 },
-	diagnostics: { commands: ["context", "doctor"], tools: [], shortcuts: 0, events: 0 },
-	diff: { commands: ["diff"], tools: [], shortcuts: 0, events: 0 },
+	diagnostics: { commands: ["context"], tools: [], shortcuts: 0, events: 0 },
 	fleet: { commands: ["fleet"], tools: [], shortcuts: 0, events: 2 },
 	help: { commands: ["help"], tools: [], shortcuts: 0, events: 0 },
-	commands: { commands: ["init", "bug"], tools: [], shortcuts: 0, events: 0 },
 	"history-search": { commands: [], tools: [], shortcuts: 0, events: 2 },
 };
 
 describe("bluclawd extension registration", () => {
 	const rec = recordExtensions();
 
-	it("registers exactly the 18 expected extensions, no more, no fewer", () => {
+	it("registers exactly the 14 expected extensions, no more, no fewer", () => {
 		expect(Object.keys(rec).sort()).toEqual(Object.keys(EXPECTED).sort());
 	});
 

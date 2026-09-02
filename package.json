@@ -7,8 +7,6 @@
   "pi": {
     "extensions": [
       "./ext/permissions/index.ts",
-      "./ext/hooks/index.ts",
-      "./ext/model-controls/index.ts",
       "./ext/statusline/index.ts",
       "./ext/memory/index.ts",
       "./ext/checkpoints/index.ts",
@@ -19,10 +17,8 @@
       "./ext/background-bash/index.ts",
       "./ext/branding/index.ts",
       "./ext/diagnostics/index.ts",
-      "./ext/diff/index.ts",
       "./ext/fleet/index.ts",
       "./ext/help/index.ts",
-      "./ext/commands/index.ts",
       "./ext/history-search/index.ts"
     ]
   },

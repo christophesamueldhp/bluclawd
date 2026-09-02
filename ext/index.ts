@@ -20,16 +20,12 @@ import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import backgroundBash from "./background-bash/index.ts";
 import branding from "./branding/index.ts";
 import checkpoints from "./checkpoints/index.ts";
-import commands from "./commands/index.ts";
 import diagnostics from "./diagnostics/index.ts";
-import diff from "./diff/index.ts";
 import fleet from "./fleet/index.ts";
 import help from "./help/index.ts";
 import historySearch from "./history-search/index.ts";
-import hooks from "./hooks/index.ts";
 import mcp from "./mcp/index.ts";
 import memory from "./memory/index.ts";
-import modelControls from "./model-controls/index.ts";
 import permissions from "./permissions/index.ts";
 import sandbox from "./sandbox/index.ts";
 import statusline from "./statusline/index.ts";
@@ -39,8 +35,6 @@ import web from "./web/index.ts";
 export function bluclawdExtensions(): InlineExtension[] {
 	return [
 		{ name: "permissions", factory: permissions },
-		{ name: "hooks", factory: hooks },
-		{ name: "model-controls", factory: modelControls },
 		{ name: "statusline", factory: statusline },
 		{ name: "memory", factory: memory },
 		{ name: "checkpoints", factory: checkpoints },
@@ -51,10 +45,8 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "background-bash", factory: backgroundBash },
 		{ name: "branding", factory: branding },
 		{ name: "diagnostics", factory: diagnostics },
-		{ name: "diff", factory: diff },
 		{ name: "fleet", factory: fleet },
 		{ name: "help", factory: help },
-		{ name: "commands", factory: commands },
 		{ name: "history-search", factory: historySearch },
 	];
 }

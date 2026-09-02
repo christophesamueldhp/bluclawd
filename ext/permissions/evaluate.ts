@@ -11,10 +11,9 @@
  * "why was this call allowed?" without re-reading the whole thing. Gate order is now a
  * readable sequence, and every verdict names the gate that produced it.
  *
- * The evaluation is split in two because a `PreToolUse` hook decides in the MIDDLE of the
- * order: after deny rules and protected paths (which a hook may never override), before the
- * ask/auto gates (which it may). `evaluatePreHook` runs the first half, `evaluatePostHook`
- * the second.
+ * The evaluation is split in two: `evaluatePreHook` runs the gates nothing may override
+ * (mode blocks, deny rules, protected paths), `evaluatePostHook` runs the rest (auto mode's
+ * guardrail, `dontAsk`'s refusal, standing grants, and the prompt).
  *
  * Purity note: `isProtectedPath`/`isReadProtectedPath` do touch the filesystem (realpath, to
  * catch symlinks into protected territory), and so does `decide()` for a deny/ask path
@@ -46,8 +45,6 @@ export type Gate =
 	| "deny-rule"
 	| "read-protected-path"
 	| "write-protected-path"
-	| "hook-deny"
-	| "hook-allow"
 	| "auto-guardrail"
 	| "manual-guardrail"
 	| "dont-ask-mode"
@@ -86,9 +83,6 @@ export interface EvalConfig {
 	sandboxActive: boolean;
 	hasUI: boolean;
 }
-
-/** A `PreToolUse` hook's verdict, as the hooks bridge reports it. */
-export type HookDecision = "allow" | "ask" | undefined;
 
 const READ_LIKE_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
@@ -168,14 +162,14 @@ function noPromptReason(cfg: EvalConfig): string | undefined {
 /**
  * Gates 1–4: mode-level blocks, deny rules, and protected paths.
  *
- * Returns `undefined` when nothing here decides and evaluation should continue through the
- * hook and then {@link evaluatePostHook}.
+ * Returns `undefined` when nothing here decides and evaluation should continue in
+ * {@link evaluatePostHook}.
  */
 export function evaluatePreHook(tool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict | undefined {
 	// 1. bypass → allow everything, rules are not consulted.
 	if (cfg.mode === "bypass") return ALLOW("bypass-mode");
 
-	// 2. deny rules. (ask/allow are resolved after the hook — see evaluatePostHook.)
+	// 2. deny rules. (ask/allow are resolved in evaluatePostHook.)
 	const { decision, denyAgent } = decideRules(tool, input, cfg.rules, cfg.cwd);
 	if (decision === "deny") {
 		const subj = tool === "task" && denyAgent !== undefined ? denyAgent : subject(tool, input);
@@ -216,10 +210,11 @@ export function evaluatePreHook(tool: string, input: Record<string, unknown>, cf
 		}
 	}
 
-	// 4. Protected paths, writes. bash counts: `echo {} > .bluclawd/hooks.json` installs a
-	//    shell-executing config file exactly as `write` does, so its redirect targets are
-	//    screened with the same predicate. Descriptor dups (`2>&1`) carry no path and are
-	//    skipped — blocking those would stop most test commands.
+	// 4. Protected paths, writes. bash counts: `echo {} > .bluclawd/mcp.json` installs a
+	//    shell-executing config file exactly as `write` does (mcp.json auth headers can run
+	//    shell commands via resolve-config-value.ts), so its redirect targets are screened
+	//    with the same predicate. Descriptor dups (`2>&1`) carry no path and are skipped —
+	//    blocking those would stop most test commands.
 	if (tool === "edit" || tool === "write" || tool === "bash") {
 		const candidates =
 			tool === "bash"
@@ -256,49 +251,21 @@ export function evaluatePreHook(tool: string, input: Record<string, unknown>, cf
 }
 
 /**
- * Gates 5–8: the hook's own verdict, auto mode's guardrail, `dontAsk`'s refusal, the standing
- * grants that clear an `ask`, and finally the prompt.
+ * Gates 6–8: auto mode's guardrail, `dontAsk`'s refusal, the standing grants that clear an
+ * `ask`, and finally the prompt.
  *
  * `autoBlocked` reports whether auto mode's guardrail refused, so the caller can advance its
  * counters; the caller decides whether that becomes a prompt (threshold reached) or a plain
  * block. This function reports `outcome: "block"` with `promptKind: "auto-pause"` to mean
  * "blocked, and eligible to become a pause-and-ask if your thresholds say so".
  */
-export function evaluatePostHook(
-	tool: string,
-	input: Record<string, unknown>,
-	cfg: EvalConfig,
-	hook: HookDecision,
-): Verdict {
-	// 5. A hook's "allow" clears the ask/auto gates — but NOT the guardrail. Settings'
-	//    broadest allow glob deliberately does not skip it either, and a convenience hook
-	//    must not silently become more powerful than that. (A hook "deny" was handled by
-	//    the caller before reaching here.)
-	if (hook === "allow") {
-		const verdict = autoGuard(tool, input, cfg.cwd);
-		if (verdict === "allow") return ALLOW("hook-allow");
-		if (noPromptReason(cfg)) {
-			return {
-				outcome: "block",
-				gate: "hook-allow",
-				reason: `Guardrail: ${verdict.reason}. A PreToolUse hook allowed it, but the guardrail did not.`,
-			};
-		}
-		return {
-			outcome: "prompt",
-			gate: "hook-allow",
-			promptKind: "ask",
-			reason: verdict.reason,
-		};
-	}
-	const hookForcesAsk = hook === "ask";
-
+export function evaluatePostHook(tool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict {
 	const { decision, askAgent } = decideRules(tool, input, cfg.rules, cfg.cwd);
 	const subj = tool === "task" ? (askAgent ?? "") : subject(tool, input);
 	const exact = exactRule(tool, subj);
 
 	// 6. auto mode: no prompts, but every non-trivial call is screened.
-	if (cfg.mode === "auto" && !hookForcesAsk) {
+	if (cfg.mode === "auto") {
 		if (hasExactAllow(cfg.rules, exact)) return ALLOW("exact-allow");
 		if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
 		if (READ_LIKE_TOOLS.has(tool)) return ALLOW("auto-guardrail");
@@ -325,7 +292,7 @@ export function evaluatePostHook(
 	//     An `ask` RULE is NOT handled here — it falls through to gate 7, whose prompt
 	//     `noPromptReason` turns into a block for the same reason. One prompt-to-block
 	//     conversion, applied at every prompt site.
-	if (cfg.mode === "dontAsk" && decision === null && !hookForcesAsk) {
+	if (cfg.mode === "dontAsk" && decision === null) {
 		if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
 		if (READ_LIKE_TOOLS.has(tool)) return ALLOW("dont-ask-mode");
 		if (tool === "bash" && isSafeCommand(subject("bash", input))) return ALLOW("readonly-bash");
@@ -346,53 +313,50 @@ export function evaluatePostHook(
 		};
 	}
 
-	// 7. Standing grants that clear an `ask`. A hook's "ask" outranks every one of them —
-	//    that is what it exists for.
-	if (decision === "ask" || hookForcesAsk) {
-		if (!hookForcesAsk) {
-			// An exact full-subject allow is what "Always allow" persists. Because
-			// precedence is deny > ask > allow, it would otherwise be shadowed forever by
-			// the very ask rule that triggered the prompt. A broad allow GLOB does not
-			// match this exact check, so it cannot quietly defeat an ask rule.
-			if (hasExactAllow(cfg.rules, exact)) return ALLOW("exact-allow");
-			// A compound command persists one exact rule PER SEGMENT (§2.4), so the
-			// single whole-line check above never matches one — without this, "Always
-			// allow" on a compound would re-prompt on every subsequent identical
-			// invocation, the exact training-to-approve-repeatedly failure this exists
-			// to prevent. Same "exact, not a broader glob" discipline as the check above.
-			if (tool === "bash" && hasExactAllowForEverySegment(cfg.rules, subj)) return ALLOW("exact-allow");
-			// --allowedTools is an explicit per-invocation grant, and glob-aware.
-			if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
-			// Read-only bash is auto-approved in every mode (Claude Code's built-in list).
-			if (tool === "bash" && isSafeCommand(subject("bash", input))) return ALLOW("readonly-bash");
-			// With the OS sandbox active, a bash command clears the ask gate only if it
-			// ALSO passes the guardrail: ordinary mutating commands run unprompted under
-			// the OS cap, while what the sandbox does not actually mitigate still prompts.
-			//
-			// Proof this premise holds AT EXECUTION TIME, not just at grant time
-			// (IMPROVEMENT-PLAN.md §2.7, investigated 2026-08-14 — no gap found):
-			// `cfg.sandboxActive` is `isSandboxActive()` read fresh in the same `tool_call`
-			// handler that is about to dispatch the tool (`permissions/index.ts:310`), with
-			// no `await` between that read and dispatch. The bash tool does not trust a
-			// value threaded through from here — it independently re-reads
-			// `isSandboxActive()` at execute() time (`sandbox/index.ts:73`) to choose
-			// sandboxed vs. plain operations, so a stale grant cannot silently execute
-			// unsandboxed. A per-command wrap failure (`SandboxManager.wrapWithSandbox`)
-			// is not caught and retried unsandboxed either — `sandbox/index.ts`'s `exec()`
-			// has no catch around it, so the failure propagates as a tool error instead of
-			// a silent unsandboxed run (covered by
-			// `core-ext-sandbox.test.ts`: "a post-init wrap failure errors out rather than
-			// silently running unsandboxed"). The only residual gap is the TOCTOU inherent
-			// to any live security toggle — the user typing `/sandbox off` in the exact
-			// microtask between this grant and the tool's execute() call — which requires
-			// deliberate concurrent user action and degrades at most one already-approved
-			// in-flight command; the model cannot trigger it. Subagent children never reach
-			// this branch: `subagent-gate.ts:88` hardcodes `sandboxActive: false` for them.
-			if (tool === "bash" && cfg.sandboxActive && autoGuard("bash", input, cfg.cwd) === "allow") {
-				return ALLOW("sandbox-pairing");
-			}
-			if (cfg.mode === "acceptEdits" && (tool === "edit" || tool === "write")) return ALLOW("accept-edits");
+	// 7. Standing grants that clear an `ask`.
+	if (decision === "ask") {
+		// An exact full-subject allow is what "Always allow" persists. Because
+		// precedence is deny > ask > allow, it would otherwise be shadowed forever by
+		// the very ask rule that triggered the prompt. A broad allow GLOB does not
+		// match this exact check, so it cannot quietly defeat an ask rule.
+		if (hasExactAllow(cfg.rules, exact)) return ALLOW("exact-allow");
+		// A compound command persists one exact rule PER SEGMENT (§2.4), so the
+		// single whole-line check above never matches one — without this, "Always
+		// allow" on a compound would re-prompt on every subsequent identical
+		// invocation, the exact training-to-approve-repeatedly failure this exists
+		// to prevent. Same "exact, not a broader glob" discipline as the check above.
+		if (tool === "bash" && hasExactAllowForEverySegment(cfg.rules, subj)) return ALLOW("exact-allow");
+		// --allowedTools is an explicit per-invocation grant, and glob-aware.
+		if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
+		// Read-only bash is auto-approved in every mode (Claude Code's built-in list).
+		if (tool === "bash" && isSafeCommand(subject("bash", input))) return ALLOW("readonly-bash");
+		// With the OS sandbox active, a bash command clears the ask gate only if it
+		// ALSO passes the guardrail: ordinary mutating commands run unprompted under
+		// the OS cap, while what the sandbox does not actually mitigate still prompts.
+		//
+		// Proof this premise holds AT EXECUTION TIME, not just at grant time
+		// (IMPROVEMENT-PLAN.md §2.7, investigated 2026-08-14 — no gap found):
+		// `cfg.sandboxActive` is `isSandboxActive()` read fresh in the same `tool_call`
+		// handler that is about to dispatch the tool (`permissions/index.ts:310`), with
+		// no `await` between that read and dispatch. The bash tool does not trust a
+		// value threaded through from here — it independently re-reads
+		// `isSandboxActive()` at execute() time (`sandbox/index.ts:73`) to choose
+		// sandboxed vs. plain operations, so a stale grant cannot silently execute
+		// unsandboxed. A per-command wrap failure (`SandboxManager.wrapWithSandbox`)
+		// is not caught and retried unsandboxed either — `sandbox/index.ts`'s `exec()`
+		// has no catch around it, so the failure propagates as a tool error instead of
+		// a silent unsandboxed run (covered by
+		// `core-ext-sandbox.test.ts`: "a post-init wrap failure errors out rather than
+		// silently running unsandboxed"). The only residual gap is the TOCTOU inherent
+		// to any live security toggle — the user typing `/sandbox off` in the exact
+		// microtask between this grant and the tool's execute() call — which requires
+		// deliberate concurrent user action and degrades at most one already-approved
+		// in-flight command; the model cannot trigger it. Subagent children never reach
+		// this branch: `subagent-gate.ts:88` hardcodes `sandboxActive: false` for them.
+		if (tool === "bash" && cfg.sandboxActive && autoGuard("bash", input, cfg.cwd) === "allow") {
+			return ALLOW("sandbox-pairing");
 		}
+		if (cfg.mode === "acceptEdits" && (tool === "edit" || tool === "write")) return ALLOW("accept-edits");
 
 		const noPrompt = noPromptReason(cfg);
 		if (noPrompt) {
@@ -414,10 +378,10 @@ export function evaluatePostHook(
 	// 8. An allow rule matched. An EXACT allow — the user spelled out this precise subject —
 	//    is never second-guessed: a user who writes `allow: Bash(rm -rf build)` means it. A
 	//    BROADER match (e.g. `allow: Bash(**)`) did not name this specific command, so it
-	//    goes through the same guardrail every other allow path does — gate 5's comment
-	//    above ("settings' broadest allow glob deliberately does not skip it") was FALSE for
-	//    this path until this fix; resolved per IMPROVEMENT-PLAN.md §2.1 (user decision,
-	//    2026-08-14: close the skip, not the comment). Only the command denylist is applied
+	//    goes through the same guardrail every other allow path does — "a broad allow glob
+	//    deliberately does not skip it" was FALSE for this path until this fix; resolved per
+	//    IMPROVEMENT-PLAN.md §2.1 (user decision, 2026-08-14: close the skip, not the
+	//    comment). Only the command denylist is applied
 	//    here, not autoGuard's containment half — same scope gate 9's tail below uses for
 	//    manual modes, and for the same reason (see gate 9's comment).
 	if (decision === "allow") {

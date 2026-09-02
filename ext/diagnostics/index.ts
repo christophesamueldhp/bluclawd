@@ -1,6 +1,6 @@
 /**
- * `/context` and `/doctor` — the two diagnostics that need nothing from pi
- * beyond its public extension context.
+ * `/context` — the one diagnostic that needs nothing from pi beyond its
+ * public extension context.
  *
  * `/status` and `/usage` are NOT here. `/status` on the fork branch was pi's own
  * session summary plus a model-and-behaviour block, and pi keeps that summary
@@ -15,9 +15,7 @@
  */
 
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
-import { runDoctorChecks } from "../_shared/doctor.ts";
 
 const BAR_WIDTH = 20;
 
@@ -27,10 +25,6 @@ interface ContextData {
 	tokens?: number | null;
 	percent?: number | null;
 	systemPromptChars?: number;
-}
-
-interface DoctorData {
-	checks: Array<{ name: string; status: string; detail: string }>;
 }
 
 function block(lines: string[]): Container {
@@ -99,37 +93,6 @@ const diagnostics: InlineExtension = {
 					tokens: usage?.tokens,
 					percent: usage?.percent,
 					systemPromptChars: ctx.getSystemPrompt().length,
-				});
-			},
-		});
-
-		pi.registerEntryRenderer<DoctorData>("bluclawd:doctor", (entry, _options, theme) => {
-			const checks = entry.data?.checks ?? [];
-			const lines: string[] = [theme.bold("Doctor")];
-			if (checks.length === 0) lines.push(theme.fg("dim", "No checks ran."));
-			for (const check of checks) {
-				const mark =
-					check.status === "ok"
-						? theme.fg("success", "✔")
-						: check.status === "warn"
-							? theme.fg("warning", "!")
-							: theme.fg("error", "✘");
-				lines.push(`  ${mark} ${check.name}`);
-				if (check.detail) lines.push(`      ${theme.fg("dim", check.detail)}`);
-			}
-			return block(lines);
-		});
-
-		pi.registerCommand("doctor", {
-			description: "Diagnose common setup issues",
-			handler: async (_args, ctx) => {
-				const checks = await runDoctorChecks({ cwd: ctx.cwd, agentDir: getAgentDir(), appName: "pi" });
-				pi.appendEntry<DoctorData>("bluclawd:doctor", {
-					checks: checks.map((check) => ({
-						name: check.name,
-						status: check.status,
-						detail: check.detail,
-					})),
 				});
 			},
 		});

@@ -105,7 +105,7 @@ export function factory(pi: ExtensionAPI): void {
 		//
 		// Running BOTH halves unconditionally is what surfaced that for free, and is what
 		// keeps this gate from drifting from the parent again the next time a gate is added.
-		const post = evaluatePostHook(event.toolName, input, cfg, undefined);
+		const post = evaluatePostHook(event.toolName, input, cfg);
 		if (post.outcome !== "allow") return { block: true, reason: post.reason };
 		return;
 	});
