@@ -19,7 +19,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
+import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { setSharedTheme } from "../_shared/theme.ts";
