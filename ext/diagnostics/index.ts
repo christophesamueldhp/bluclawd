@@ -1,21 +1,72 @@
 /**
- * `/context` — the one diagnostic that needs nothing from pi beyond its
- * public extension context.
+ * `/context` and `/status` — diagnostics built from the public extension
+ * context alone.
  *
- * `/status` and `/usage` are NOT here. `/status` on the fork branch was pi's own
- * session summary plus a model-and-behaviour block, and pi keeps that summary
- * private behind `/session`; reproducing it in fork code would be drift to
- * re-sync forever, and shipping only half of it under the same name would be
- * worse than not shipping it. Use `/session` for the session half and `/context`
- * for the window. `/usage` needs a provider-usage poller that only pays off with
- * live credentials — deferred rather than half-ported.
+ * `/status` is bluclawd's half of Claude Code's status screen: model, effort,
+ * auth, permission mode, sandbox, trust, session file. It deliberately does NOT
+ * reproduce pi's own session summary (entry counts, tree, cost history) — pi
+ * keeps that private behind `/session`, and re-implementing it here would be
+ * drift to re-sync forever — so the report ends by pointing at `/session`.
+ * Permission mode and sandbox state come from the other extensions' `sharedRef`
+ * stores, which are safe to read across the `pi.extensions` module-graph
+ * boundary (see `_shared/global-state.ts`).
  *
- * Output goes through `appendEntry` + `registerEntryRenderer`; see the commands
- * extension for why not `ctx.ui.notify`.
+ * `/usage` is NOT here: it lives in `statusline`, next to the plan-usage
+ * pollers it reports on.
+ *
+ * Output goes through `appendEntry` + `registerEntryRenderer` rather than
+ * `ctx.ui.notify` (which dims everything and does not persist in the session).
  */
 
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import { VERSION } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { getActivePermissionMode } from "../permissions/active-mode.ts";
+import { isSandboxActive } from "../sandbox/state.ts";
+
+/** Snapshot rendered by `/status`. Plain data so it survives in the session file. */
+export interface StatusData {
+	piVersion: string;
+	model?: string;
+	modelName?: string;
+	thinkingLevel?: string;
+	authSource?: string;
+	subscription: boolean;
+	permissionMode: string;
+	sandbox: boolean;
+	projectTrusted: boolean;
+	cwd: string;
+	sessionFile?: string;
+	sessionName?: string;
+	contextWindow?: number;
+}
+
+/** Exported pure for tests; `theme` is the only styling dependency. */
+export function formatStatus(
+	data: StatusData,
+	theme: { bold(s: string): string; fg(color: "dim", s: string): string },
+): string[] {
+	const dim = (s: string) => theme.fg("dim", s);
+	const lines: string[] = [theme.bold("Status")];
+	lines.push(`${dim("pi:")} v${data.piVersion} ${dim("· bluclawd package")}`);
+	lines.push("", theme.bold("Model"));
+	lines.push(`${dim("Model:")} ${data.model ?? "none selected"}${data.modelName ? dim(` (${data.modelName})`) : ""}`);
+	lines.push(`${dim("Effort:")} ${data.thinkingLevel ?? "off"} ${dim("(/thinking)")}`);
+	const auth = data.authSource ?? "not configured";
+	lines.push(`${dim("Auth:")} ${auth}${data.subscription ? dim(" · subscription") : ""}`);
+	if (data.contextWindow)
+		lines.push(`${dim("Context window:")} ${formatTokens(data.contextWindow)} ${dim("(/context)")}`);
+	lines.push("", theme.bold("Safety"));
+	lines.push(`${dim("Permission mode:")} ${data.permissionMode} ${dim("(/mode)")}`);
+	lines.push(`${dim("Sandbox:")} ${data.sandbox ? "on" : "off"} ${dim("(/sandbox)")}`);
+	lines.push(`${dim("Project trust:")} ${data.projectTrusted ? "trusted" : "not trusted"} ${dim("(/trust)")}`);
+	lines.push("", theme.bold("Session"));
+	lines.push(`${dim("Working directory:")} ${data.cwd}`);
+	if (data.sessionName) lines.push(`${dim("Name:")} ${data.sessionName}`);
+	lines.push(`${dim("File:")} ${data.sessionFile ?? "not saved (ephemeral)"}`);
+	lines.push(dim("Entry counts, tree, and history: /session"));
+	return lines;
+}
 
 const BAR_WIDTH = 20;
 
@@ -80,6 +131,47 @@ const diagnostics: InlineExtension = {
 				`${theme.fg("dim", "Free:")} ${formatTokens(Math.max(data.contextWindow - data.tokens, 0))} (${(100 - data.percent).toFixed(1)}%)`,
 			);
 			return block(lines);
+		});
+
+		pi.registerEntryRenderer<StatusData>("bluclawd:status", (entry, _options, theme) =>
+			block(entry.data ? formatStatus(entry.data, theme) : []),
+		);
+
+		pi.registerCommand("status", {
+			description: "Show model, auth, permission mode, sandbox, and session info",
+			handler: async (_args, ctx) => {
+				const model = ctx.model;
+				let authSource: string | undefined;
+				if (model) {
+					try {
+						const status = ctx.modelRegistry.getProviderAuthStatus(model.provider);
+						authSource = status.configured ? (status.label ?? status.source ?? "configured") : undefined;
+					} catch {
+						authSource = undefined;
+					}
+				}
+				let sessionFile: string | undefined;
+				try {
+					sessionFile = ctx.sessionManager.getSessionFile() ?? undefined;
+				} catch {
+					sessionFile = undefined;
+				}
+				pi.appendEntry<StatusData>("bluclawd:status", {
+					piVersion: VERSION,
+					model: model ? `${model.provider}/${model.id}` : undefined,
+					modelName: model?.name,
+					thinkingLevel: model?.reasoning ? ctx.thinkingLevel : undefined,
+					authSource,
+					subscription: model ? model.provider === "kimi-coding" || ctx.modelRegistry.isUsingOAuth(model) : false,
+					permissionMode: getActivePermissionMode(),
+					sandbox: isSandboxActive(),
+					projectTrusted: ctx.isProjectTrusted(),
+					cwd: ctx.cwd,
+					sessionFile,
+					sessionName: ctx.sessionManager.getSessionName(),
+					contextWindow: model?.contextWindow,
+				});
+			},
 		});
 
 		pi.registerCommand("context", {

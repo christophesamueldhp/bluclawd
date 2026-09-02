@@ -17,6 +17,11 @@
  *    published via ctx.ui.setStatus("statusline", text), which the footer above
  *    shows on its status line. When the setting is unset, nothing runs.
  *
+ * `/usage` and `/cost` (Claude Code's names) live here too rather than in
+ * `diagnostics`: they report the plan-usage windows the footer's pollers hold,
+ * and reading that state from another top-level extension would cross a
+ * `pi.extensions` module-graph boundary (see `_shared/global-state.ts`).
+ *
  * Payload delivery: the JSON payload is written to the command's STDIN (Claude
  * Code parity — real CC statusline scripts read stdin; review I5) AND exposed as
  * the BLUCLAWD_STATUSLINE_JSON env var (kept for scripts written against this
@@ -48,13 +53,18 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { readStoredCredential, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { Container, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { stripAnsi } from "../_shared/ansi.ts";
 import { execWithIo } from "../_shared/exec.ts";
 import * as forkSettings from "../_shared/settings.ts";
-import { CcStatuslineFooter, ContextTokenCount } from "./footer.ts";
+import { CcStatuslineFooter, ContextTokenCount, formatTokens, type SessionTotals, sumSessionUsage } from "./footer.ts";
 import { GitInfo } from "./git-info.ts";
-import { OpencodeGoUsageProvider, UsageDataProvider } from "./usage-providers.ts";
+import {
+	type OpencodeGoUsageData,
+	OpencodeGoUsageProvider,
+	UsageDataProvider,
+	type UsageWindowData,
+} from "./usage-providers.ts";
 
 /** Env var carrying the JSON payload to the external statusline command. */
 export const STATUSLINE_ENV_VAR = "BLUCLAWD_STATUSLINE_JSON";
@@ -171,6 +181,77 @@ function installFooter(ctx: ExtensionContext): void {
 
 	usage.start();
 	goUsage.start();
+}
+
+/** Snapshot rendered by `/usage`. Plain data so it survives in the session file. */
+export interface UsageReport {
+	model?: string;
+	subscription: boolean;
+	totals: SessionTotals;
+	claude: UsageWindowData | null;
+	go: OpencodeGoUsageData | null;
+}
+
+/**
+ * The `/usage` (and `/cost`) report: this session's spend and token totals,
+ * followed by whichever plan-usage windows the footer pollers have. Exported
+ * pure for tests; `theme` is the only styling dependency.
+ */
+export function formatUsageReport(
+	report: UsageReport,
+	theme: { bold(s: string): string; fg(color: "dim", s: string): string },
+): string[] {
+	const dim = (s: string) => theme.fg("dim", s);
+	const lines: string[] = [theme.bold("Session usage")];
+	const t = report.totals;
+	lines.push(`${dim("Model:")} ${report.model ?? "none selected"}`);
+	lines.push(
+		`${dim("Cost:")} $${t.cost.toFixed(4)}${report.subscription ? dim(" (subscription — not billed per token)") : ""}`,
+	);
+	lines.push(
+		`${dim("Tokens:")} ↑${formatTokens(t.input)} in · ↓${formatTokens(t.output)} out · cache read ${formatTokens(t.cacheRead)} · cache write ${formatTokens(t.cacheWrite)}`,
+	);
+	if (t.latestCacheHitRate !== undefined) {
+		lines.push(`${dim("Cache hit (last turn):")} ${t.latestCacheHitRate.toFixed(1)}%`);
+	}
+
+	const resetSuffix = (iso: string | undefined): string => {
+		if (!iso) return "";
+		const at = new Date(iso);
+		return Number.isNaN(at.getTime()) ? "" : dim(` (resets ${at.toLocaleString()})`);
+	};
+
+	const claude = report.claude;
+	if (claude && (claude.sessionUsage !== undefined || claude.weeklyUsage !== undefined)) {
+		lines.push("", theme.bold("Plan usage (Claude)"));
+		if (claude.sessionUsage !== undefined) {
+			lines.push(`${dim("Session (5h):")} ${claude.sessionUsage.toFixed(0)}%${resetSuffix(claude.sessionResetAt)}`);
+		}
+		if (claude.weeklyUsage !== undefined) {
+			lines.push(`${dim("Weekly:")} ${claude.weeklyUsage.toFixed(0)}%${resetSuffix(claude.weeklyResetAt)}`);
+		}
+	}
+
+	const go = report.go;
+	if (go && (go.rolling || go.weekly || go.monthly)) {
+		lines.push("", theme.bold("Plan usage (OpenCode Go)"));
+		for (const [label, window] of [
+			["Session (5h)", go.rolling],
+			["Weekly", go.weekly],
+			["Monthly", go.monthly],
+		] as const) {
+			if (window) lines.push(`${dim(`${label}:`)} ${window.usagePercent.toFixed(0)}%${resetSuffix(window.resetAt)}`);
+		}
+	}
+
+	if (!claude && !go) {
+		lines.push(
+			"",
+			dim("No plan usage available: Claude windows need an Anthropic OAuth login (/login);"),
+			dim("OpenCode Go windows need OPENCODE_GO_WORKSPACE_ID and OPENCODE_GO_AUTH_COOKIE."),
+		);
+	}
+	return lines;
 }
 
 /**
@@ -318,6 +399,32 @@ export function factory(pi: ExtensionAPI): void {
 		disposeFooterRuntime();
 	});
 	pi.on("turn_end", (_event, ctx) => fire(ctx));
+
+	pi.registerEntryRenderer<UsageReport>("bluclawd:usage", (entry, _options, theme) => {
+		const container = new Container();
+		container.addChild(new Spacer(1));
+		container.addChild(new Text(entry.data ? formatUsageReport(entry.data, theme).join("\n") : "", 1, 0));
+		return container;
+	});
+
+	const usageHandler = async (_args: string, ctx: ExtensionContext): Promise<void> => {
+		const model = ctx.model;
+		pi.appendEntry<UsageReport>("bluclawd:usage", {
+			model: model ? `${model.provider}/${model.id}` : undefined,
+			subscription: model ? model.provider === "kimi-coding" || ctx.modelRegistry.isUsingOAuth(model) : false,
+			totals: sumSessionUsage(ctx),
+			claude: footerRuntime?.usage.getUsageData() ?? null,
+			go: footerRuntime?.goUsage.getUsageData() ?? null,
+		});
+	};
+	pi.registerCommand("usage", {
+		description: "Show session cost, token totals, and plan usage",
+		handler: usageHandler,
+	});
+	pi.registerCommand("cost", {
+		description: "Show session cost and token totals (same as /usage)",
+		handler: usageHandler,
+	});
 
 	pi.registerCommand("statusline", {
 		description: "Show the external status line command and how it refreshes",

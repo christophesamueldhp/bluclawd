@@ -17,6 +17,7 @@
  * it — keep it first.
  */
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import aliases from "./aliases/index.ts";
 import backgroundBash from "./background-bash/index.ts";
 import branding from "./branding/index.ts";
 import checkpoints from "./checkpoints/index.ts";
@@ -46,5 +47,6 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "diagnostics", factory: diagnostics },
 		{ name: "fleet", factory: fleet },
 		{ name: "help", factory: help },
+		{ name: "aliases", factory: aliases },
 	];
 }

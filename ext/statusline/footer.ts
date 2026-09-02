@@ -135,7 +135,7 @@ function sanitizeStatusText(text: string): string {
 }
 
 /** Cumulative usage over the whole session, including pre-compaction entries. */
-type SessionTotals = {
+export type SessionTotals = {
 	input: number;
 	output: number;
 	cacheRead: number;
@@ -144,7 +144,7 @@ type SessionTotals = {
 	latestCacheHitRate: number | undefined;
 };
 
-function sumSessionUsage(ctx: ExtensionContext): SessionTotals {
+export function sumSessionUsage(ctx: ExtensionContext): SessionTotals {
 	const totals: SessionTotals = {
 		input: 0,
 		output: 0,
