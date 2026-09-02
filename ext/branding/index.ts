@@ -20,7 +20,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
-import { VERSION } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { setSharedTheme } from "../_shared/theme.ts";
 import { renderPixelArt } from "./pixel-art.ts";
@@ -55,6 +55,46 @@ async function preloadMascot(requestRender: () => void): Promise<void> {
 const branding: InlineExtension = {
 	name: "branding",
 	factory: (pi) => {
+		// Claude Code's /theme: pick from every theme pi knows (built-in, custom,
+		// package) and persist the choice, the same setting pi's own settings
+		// panel writes.
+		pi.registerCommand("theme", {
+			description: "Switch the theme (pick from a list, or /theme <name>)",
+			handler: async (args, ctx) => {
+				const names = ctx.ui
+					.getAllThemes()
+					.map((entry) => entry.name)
+					.sort();
+				let name = args.trim();
+				if (!name) {
+					if (!ctx.hasUI) {
+						ctx.ui.notify(`Usage: /theme <name>. Available: ${names.join(", ")}`, "info");
+						return;
+					}
+					name = (await ctx.ui.select("Theme", names)) ?? "";
+					if (!name) return;
+				}
+				if (!names.includes(name)) {
+					ctx.ui.notify(`Unknown theme "${name}". Available: ${names.join(", ")}`, "error");
+					return;
+				}
+				const result = ctx.ui.setTheme(name);
+				if (!result.success) {
+					ctx.ui.notify(`Failed to load theme "${name}": ${result.error ?? "unknown error"}`, "error");
+					return;
+				}
+				try {
+					const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
+					settings.setTheme(name);
+					await settings.flush();
+				} catch {
+					ctx.ui.notify(`Theme "${name}" applied for this session; could not save it to settings.`, "warning");
+					return;
+				}
+				ctx.ui.notify(`Theme set to "${name}".`, "info");
+			},
+		});
+
 		pi.on("session_start", (_event, ctx) => {
 			// Populate the shared theme reference other components in this layer
 			// (fleet-view and friends) import instead of reaching into pi's own

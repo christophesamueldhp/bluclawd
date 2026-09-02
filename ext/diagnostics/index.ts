@@ -19,7 +19,7 @@
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, serializeConversation, VERSION } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { getActivePermissionMode } from "../permissions/active-mode.ts";
@@ -88,6 +88,24 @@ const RECAP_SYSTEM_PROMPT = [
 
 interface RecapData {
 	text: string;
+	model?: string;
+	error?: string;
+}
+
+/**
+ * `/btw <question>` — Claude Code's side question: answered by the model with
+ * the conversation so far as context, but the exchange is shown as an entry
+ * and never becomes part of the conversation, so it costs no context.
+ */
+const BTW_SYSTEM_PROMPT = [
+	"The user is in the middle of a coding session with an AI assistant and has a side question.",
+	"Answer the question directly and concisely using the session transcript as context.",
+	"You have no tools; do not pretend to run anything. Do not continue the session's task.",
+].join("\n");
+
+interface BtwData {
+	question: string;
+	answer: string;
 	model?: string;
 	error?: string;
 }
@@ -205,52 +223,90 @@ const diagnostics: InlineExtension = {
 			return block([theme.bold(`Recap${data.model ? theme.fg("dim", ` · ${data.model}`) : ""}`), data.text]);
 		});
 
+		/** The session so far as plain text, tail-truncated to the recap budget. */
+		const transcriptOf = (ctx: ExtensionContext): string | undefined => {
+			const messages: AgentMessage[] = [];
+			for (const entry of ctx.sessionManager.getEntries()) {
+				if (entry.type === "message") messages.push(entry.message);
+			}
+			if (messages.length === 0) return undefined;
+			const transcript = serializeConversation(convertToLlm(messages));
+			return transcript.length > RECAP_MAX_CHARS
+				? `[earlier conversation omitted]\n${transcript.slice(-RECAP_MAX_CHARS)}`
+				: transcript;
+		};
+
+		/** One out-of-band model call; returns the text answer or throws. */
+		const askModel = async (ctx: ExtensionContext, systemPrompt: string, text: string): Promise<string> => {
+			const model = ctx.model;
+			if (!model) throw new Error("No model selected — pick one with /model first.");
+			const response = await ctx.modelRegistry.complete(model, {
+				systemPrompt,
+				messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }],
+			});
+			const answer = response.content
+				.filter((part): part is { type: "text"; text: string } => part.type === "text")
+				.map((part) => part.text)
+				.join("")
+				.trim();
+			if (!answer) throw new Error("The model returned no text.");
+			return answer;
+		};
+
+		const modelLabel = (ctx: ExtensionContext): string | undefined =>
+			ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+
 		pi.registerCommand("recap", {
 			description: "Summarise this session so far: goal, done, open, next",
 			handler: async (_args, ctx) => {
-				const model = ctx.model;
-				if (!model) {
-					ctx.ui.notify("No model selected — pick one with /model first.", "error");
-					return;
-				}
-				const messages: AgentMessage[] = [];
-				for (const entry of ctx.sessionManager.getEntries()) {
-					if (entry.type === "message") messages.push(entry.message);
-				}
-				if (messages.length === 0) {
+				const transcript = transcriptOf(ctx);
+				if (!transcript) {
 					ctx.ui.notify("Nothing to recap yet.", "info");
 					return;
 				}
-				let transcript = serializeConversation(convertToLlm(messages));
-				if (transcript.length > RECAP_MAX_CHARS) {
-					transcript = `[earlier conversation omitted]\n${transcript.slice(-RECAP_MAX_CHARS)}`;
-				}
 				ctx.ui.notify("Writing recap…", "info");
-				const label = `${model.provider}/${model.id}`;
 				try {
-					const response = await ctx.modelRegistry.complete(model, {
-						systemPrompt: RECAP_SYSTEM_PROMPT,
-						messages: [
-							{
-								role: "user",
-								content: [{ type: "text", text: `Summarise this session:\n\n${transcript}` }],
-								timestamp: Date.now(),
-							},
-						],
-					});
-					const text = response.content
-						.filter((part): part is { type: "text"; text: string } => part.type === "text")
-						.map((part) => part.text)
-						.join("")
-						.trim();
-					pi.appendEntry<RecapData>(
-						"bluclawd:recap",
-						text ? { text, model: label } : { text: "", error: "The model returned no text." },
-					);
+					const text = await askModel(ctx, RECAP_SYSTEM_PROMPT, `Summarise this session:\n\n${transcript}`);
+					pi.appendEntry<RecapData>("bluclawd:recap", { text, model: modelLabel(ctx) });
 				} catch (error) {
 					pi.appendEntry<RecapData>("bluclawd:recap", {
 						text: "",
 						error: `Recap failed: ${error instanceof Error ? error.message : String(error)}`,
+					});
+				}
+			},
+		});
+
+		pi.registerEntryRenderer<BtwData>("bluclawd:btw", (entry, _options, theme) => {
+			const data = entry.data;
+			if (!data) return block([]);
+			const head = theme.bold(`btw${data.model ? theme.fg("dim", ` · ${data.model}`) : ""}`);
+			if (data.error) return block([head, theme.fg("error", data.error)]);
+			return block([head, theme.fg("dim", `Q: ${data.question}`), "", data.answer]);
+		});
+
+		pi.registerCommand("btw", {
+			description: "Ask a side question with the session as context, without adding it to the conversation",
+			handler: async (args, ctx) => {
+				const question = args.trim();
+				if (!question) {
+					ctx.ui.notify("Usage: /btw <question>", "info");
+					return;
+				}
+				const transcript = transcriptOf(ctx) ?? "(the session has no messages yet)";
+				ctx.ui.notify("Asking…", "info");
+				try {
+					const answer = await askModel(
+						ctx,
+						BTW_SYSTEM_PROMPT,
+						`Session transcript:\n\n${transcript}\n\n---\nSide question: ${question}`,
+					);
+					pi.appendEntry<BtwData>("bluclawd:btw", { question, answer, model: modelLabel(ctx) });
+				} catch (error) {
+					pi.appendEntry<BtwData>("bluclawd:btw", {
+						question,
+						answer: "",
+						error: `Failed: ${error instanceof Error ? error.message : String(error)}`,
 					});
 				}
 			},

@@ -56,7 +56,9 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 	share: "Session",
 	copy: "Session",
 	recap: "Session",
+	btw: "Session",
 	cost: "Info & diagnostics",
+	theme: "App",
 
 	// Code & review
 	rewind: "Code & review",
