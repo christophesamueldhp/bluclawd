@@ -85,10 +85,10 @@ reading the API:
   `app.thinking.cycle`; pi refuses the registration and logs a conflict.
 - **An extension cannot add a theme colour.** The `acceptEdits` badge uses
   `success` rather than a dedicated token.
-- **An extension-contributed theme cannot be the startup theme.** pi resolves
-  the configured theme before extensions contribute their paths, so it falls
-  back to dark and prints "Theme not found" once; `branding` re-applies it
-  after discovery.
+- **A theme contributed through `resources_discover` cannot be the startup
+  theme.** pi resolves the configured theme before that hook runs, so it falls
+  back to dark and prints "Theme not found". The theme is declared in
+  `package.json`'s `pi.themes` instead, which pi registers before startup.
 - **`newSession()` takes neither a directory nor a model**, so FleetView's "New
   session" panel says which part of the choice it could not honour.
 

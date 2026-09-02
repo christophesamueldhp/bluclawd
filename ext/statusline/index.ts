@@ -1,21 +1,21 @@
 /**
- * Statusline core extension (Claude Code /statusline parity — PLAN.md F1.3)
+ * Statusline extension: the Claude Code status line, two ways.
  *
- * Scope note: PLAN.md's literal text ("default footer = model · branch · context% ·
- * cost via ctx.ui.setFooter") is superseded here by a verified fact: the built-in
- * FooterComponent (../../modes/interactive/components/footer.ts) already renders
- * model, git branch, context %, total cost, token stats, cache-hit rate, and
- * thinking level. Replacing it via ctx.ui.setFooter would be redundant and would
- * throw away that detail. So this extension does NOT touch the built-in footer.
+ * 1. The footer itself. `ctx.ui.setFooter` replaces pi's built-in footer with
+ *    `CcStatuslineFooter` (./footer.ts), a widget-for-widget replica of the
+ *    user's ccstatusline configuration — model, thinking effort, context slider,
+ *    git owner/branch/changes, cwd, plan-usage sliders, token stats — plus a
+ *    right-aligned context token counter above the prompt. Data pi's
+ *    `ReadonlyFooterDataProvider` does not carry (origin owner, change counts,
+ *    plan usage) comes from ./git-info.ts and ./usage-providers.ts. Everything
+ *    that used to land on the built-in footer via `ctx.ui.setStatus` (permission
+ *    mode, mcp, this extension's own external command) still shows: the custom
+ *    footer renders `footerData.getExtensionStatuses()` as its last line.
  *
- * Instead it implements Claude-Code-style *external* statusline commands: when
- * `settings.statusline.command` is set, the command is run and its stdout is added
- * as one more line via ctx.ui.setStatus("statusline", text) — setStatus ADDS a line
- * to the existing footer, it does not replace it (see ExtensionUIContext.setStatus
- * in core/extensions/types.ts and FooterComponent's extensionStatuses handling,
- * which joins all setStatus() texts onto their own line below the built-in stats).
- * When the setting is unset, this extension does nothing and the footer is
- * untouched.
+ * 2. Claude-Code-style *external* statusline commands: when
+ *    `settings.statusline.command` is set, the command is run and its stdout is
+ *    published via ctx.ui.setStatus("statusline", text), which the footer above
+ *    shows on its status line. When the setting is unset, nothing runs.
  *
  * Payload delivery: the JSON payload is written to the command's STDIN (Claude
  * Code parity — real CC statusline scripts read stdin; review I5) AND exposed as
@@ -47,11 +47,14 @@
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
-import { SettingsManager } from "@earendil-works/pi-coding-agent";
+import { readStoredCredential, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { stripAnsi } from "../_shared/ansi.ts";
 import { execWithIo } from "../_shared/exec.ts";
 import * as forkSettings from "../_shared/settings.ts";
+import { CcStatuslineFooter, ContextTokenCount } from "./footer.ts";
+import { GitInfo } from "./git-info.ts";
+import { OpencodeGoUsageProvider, UsageDataProvider } from "./usage-providers.ts";
 
 /** Env var carrying the JSON payload to the external statusline command. */
 export const STATUSLINE_ENV_VAR = "BLUCLAWD_STATUSLINE_JSON";
@@ -102,6 +105,72 @@ function stopIntervalTimer(): void {
 		clearInterval(intervalTimer);
 		intervalTimer = undefined;
 	}
+}
+
+/**
+ * The live data sources behind the custom footer. Module-scoped for the same
+ * reason as the timers above: session_start may fire more than once per
+ * process (double factory pass, /reload, session switch) and each start must
+ * replace — not stack — the pollers of the previous one.
+ */
+let footerRuntime: { git: GitInfo; usage: UsageDataProvider; goUsage: OpencodeGoUsageProvider } | undefined;
+
+/**
+ * Latest context seen by any handler. The footer reads model, thinking level,
+ * context usage, and session entries through it on every render; its getters
+ * are live, so one captured reference stays current for the whole session.
+ */
+let latestCtx: ExtensionContext | undefined;
+
+function disposeFooterRuntime(): void {
+	footerRuntime?.git.dispose();
+	footerRuntime?.usage.dispose();
+	footerRuntime?.goUsage.dispose();
+	footerRuntime = undefined;
+}
+
+/** Replace pi's footer with the ccstatusline replica and start its data pollers. */
+function installFooter(ctx: ExtensionContext): void {
+	disposeFooterRuntime();
+	const git = new GitInfo(ctx.cwd);
+	const usage = new UsageDataProvider(() => readStoredCredential("anthropic"));
+	const goUsage = new OpencodeGoUsageProvider();
+	footerRuntime = { git, usage, goUsage };
+
+	ctx.ui.setFooter((tui, theme, footerData) => {
+		const repaint = () => tui.requestRender();
+		const unsubscribe = [
+			git.onChange(repaint),
+			usage.onChange(repaint),
+			goUsage.onChange(repaint),
+			footerData.onBranchChange(repaint),
+		];
+		const footer = new CcStatuslineFooter(
+			{
+				ctx: () => latestCtx,
+				gitBranch: () => footerData.getGitBranch(),
+				gitOriginOwner: () => git.getOriginOwner(),
+				gitChanges: () => git.getChanges(),
+				usage: () => usage.getUsageData(),
+				goUsage: () => goUsage.getUsageData(),
+				extensionStatuses: () => footerData.getExtensionStatuses(),
+			},
+			theme,
+		);
+		return Object.assign(footer, {
+			dispose: () => {
+				for (const off of unsubscribe) off();
+			},
+		});
+	});
+	ctx.ui.setWidget(
+		"statusline-context-tokens",
+		(_tui, theme) => new ContextTokenCount(() => latestCtx?.getContextUsage()?.tokens, theme),
+		{ placement: "aboveEditor" },
+	);
+
+	usage.start();
+	goUsage.start();
 }
 
 /**
@@ -219,10 +288,12 @@ export function factory(pi: ExtensionAPI): void {
 	// in the agent loop). The inner .catch is redundant with refresh()'s own
 	// try/catch but guards against an unhandled rejection if that ever regresses.
 	const fire = (ctx: ExtensionContext) => {
+		latestCtx = ctx;
 		void refresh(ctx, execWithIo).catch(() => {});
 	};
 
 	pi.on("session_start", (_event, ctx) => {
+		if (ctx.hasUI && ctx.mode === "tui") installFooter(ctx);
 		fire(ctx);
 
 		// (Re)start the periodic refresh timer. Restarting on every session_start
@@ -242,7 +313,10 @@ export function factory(pi: ExtensionAPI): void {
 		// Never keep a headless process alive just to repaint a footer.
 		intervalTimer.unref?.();
 	});
-	pi.on("session_shutdown", () => stopIntervalTimer());
+	pi.on("session_shutdown", () => {
+		stopIntervalTimer();
+		disposeFooterRuntime();
+	});
 	pi.on("turn_end", (_event, ctx) => fire(ctx));
 
 	pi.registerCommand("statusline", {

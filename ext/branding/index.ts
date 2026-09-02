@@ -1,10 +1,13 @@
 /**
- * bluclawd's visual identity: the theme and the welcome banner.
+ * bluclawd's visual identity: the welcome banner.
  *
- * Two pi mechanisms carry it. `resources_discover` contributes this layer's
- * `themes/` directory to pi's theme search path, so `"theme": "bluclawd"` in
- * settings.json resolves without the theme file living inside pi. `setHeader`
- * replaces the startup banner with the two-pane box and the mascot.
+ * The theme itself is not registered here. `package.json`'s `pi.themes`
+ * manifest entry makes `themes/bluclawd.json` a package resource, which pi
+ * registers before it resolves the configured theme at startup — so
+ * `"theme": "bluclawd"` in settings.json is the startup theme with no fallback
+ * notice. (An extension's `resources_discover` hook runs too late for that:
+ * pi has already applied the startup theme and printed "Theme not found".)
+ * `setHeader` replaces the startup banner with the two-pane box and the mascot.
  *
  * The mascot is decoded asynchronously (photon) and the banner renders without
  * it until it is ready — a missing or undecodable PNG degrades to a text-only
@@ -17,7 +20,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
-import { SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
+import { VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { setSharedTheme } from "../_shared/theme.ts";
 import { renderPixelArt } from "./pixel-art.ts";
@@ -49,59 +52,14 @@ async function preloadMascot(requestRender: () => void): Promise<void> {
 	requestRender();
 }
 
-/** How many macrotask ticks to wait for extension theme discovery before giving up. */
-const THEME_APPLY_ATTEMPTS = 20;
-
-/**
- * Apply the configured theme once it is discoverable.
- *
- * A no-op when the user configured a theme pi already had (pi applied it at
- * startup) or one nobody provides. Cosmetic by nature: every failure is
- * swallowed rather than allowed to disturb session start.
- */
-function applyConfiguredTheme(ctx: ExtensionContext, attemptsLeft: number): void {
-	let configured: string | undefined;
-	try {
-		configured = SettingsManager.create(ctx.cwd, undefined, {
-			projectTrusted: ctx.isProjectTrusted(),
-		}).getThemeSetting();
-	} catch {
-		return;
-	}
-	if (!configured) return;
-
-	const attempt = (remaining: number): void => {
-		try {
-			if (ctx.ui.getAllThemes().some((entry) => entry.name === configured)) {
-				ctx.ui.setTheme(configured);
-				return;
-			}
-		} catch {
-			return;
-		}
-		if (remaining > 0) setTimeout(() => attempt(remaining - 1), 0).unref?.();
-	};
-	attempt(attemptsLeft);
-}
-
 const branding: InlineExtension = {
 	name: "branding",
 	factory: (pi) => {
-		pi.on("resources_discover", () => ({ themePaths: [join(here, "..", "..", "themes")] }));
-
 		pi.on("session_start", (_event, ctx) => {
 			// Populate the shared theme reference other components in this layer
 			// (fleet-view and friends) import instead of reaching into pi's own
 			// theme singleton, which isn't part of the public package export.
 			setSharedTheme(ctx.ui.theme);
-
-			// pi resolves the configured theme during startup, BEFORE extensions have
-			// contributed their theme paths — so a theme shipped here can never be the
-			// startup theme, and pi falls back to dark with a "Theme not found" notice.
-			// Re-apply once discovery has run. The ordering of session_start against
-			// resource discovery is not guaranteed, so this retries on the macrotask
-			// queue until the theme shows up, with a hard cap rather than a spin.
-			applyConfiguredTheme(ctx, THEME_APPLY_ATTEMPTS);
 
 			// The header factory hands us the TUI; that is the only handle an
 			// extension gets for repainting once the mascot finishes decoding.
