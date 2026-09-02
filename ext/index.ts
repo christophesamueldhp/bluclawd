@@ -23,7 +23,6 @@ import checkpoints from "./checkpoints/index.ts";
 import diagnostics from "./diagnostics/index.ts";
 import fleet from "./fleet/index.ts";
 import help from "./help/index.ts";
-import historySearch from "./history-search/index.ts";
 import mcp from "./mcp/index.ts";
 import memory from "./memory/index.ts";
 import permissions from "./permissions/index.ts";
@@ -47,6 +46,5 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "diagnostics", factory: diagnostics },
 		{ name: "fleet", factory: fleet },
 		{ name: "help", factory: help },
-		{ name: "history-search", factory: historySearch },
 	];
 }

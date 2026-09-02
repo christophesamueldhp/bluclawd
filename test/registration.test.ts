@@ -21,13 +21,12 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	diagnostics: { commands: ["context"], tools: [], shortcuts: 0, events: 0 },
 	fleet: { commands: ["fleet"], tools: [], shortcuts: 0, events: 2 },
 	help: { commands: ["help"], tools: [], shortcuts: 0, events: 0 },
-	"history-search": { commands: [], tools: [], shortcuts: 0, events: 2 },
 };
 
 describe("bluclawd extension registration", () => {
 	const rec = recordExtensions();
 
-	it("registers exactly the 14 expected extensions, no more, no fewer", () => {
+	it("registers exactly the 13 expected extensions, no more, no fewer", () => {
 		expect(Object.keys(rec).sort()).toEqual(Object.keys(EXPECTED).sort());
 	});
 

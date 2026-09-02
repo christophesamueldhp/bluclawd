@@ -18,8 +18,7 @@
       "./ext/branding/index.ts",
       "./ext/diagnostics/index.ts",
       "./ext/fleet/index.ts",
-      "./ext/help/index.ts",
-      "./ext/history-search/index.ts"
+      "./ext/help/index.ts"
     ]
   },
   "dependencies": {
