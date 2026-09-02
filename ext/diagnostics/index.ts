@@ -24,6 +24,7 @@ import { convertToLlm, serializeConversation, VERSION } from "@earendil-works/pi
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { getActivePermissionMode } from "../permissions/active-mode.ts";
 import { isSandboxActive } from "../sandbox/state.ts";
+import { isUsingSubscription } from "../statusline/footer.ts";
 
 /** Snapshot rendered by `/status`. Plain data so it survives in the session file. */
 export interface StatusData {
@@ -204,7 +205,7 @@ const diagnostics: InlineExtension = {
 					modelName: model?.name,
 					thinkingLevel: model?.reasoning ? ctx.thinkingLevel : undefined,
 					authSource,
-					subscription: model ? model.provider === "kimi-coding" || ctx.modelRegistry.isUsingOAuth(model) : false,
+					subscription: isUsingSubscription(ctx),
 					permissionMode: getActivePermissionMode(),
 					sandbox: isSandboxActive(),
 					projectTrusted: ctx.isProjectTrusted(),

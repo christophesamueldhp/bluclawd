@@ -57,7 +57,14 @@ import { Container, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui
 import { stripAnsi } from "../_shared/ansi.ts";
 import { execWithIo } from "../_shared/exec.ts";
 import * as forkSettings from "../_shared/settings.ts";
-import { CcStatuslineFooter, ContextTokenCount, formatTokens, type SessionTotals, sumSessionUsage } from "./footer.ts";
+import {
+	CcStatuslineFooter,
+	ContextTokenCount,
+	formatTokens,
+	isUsingSubscription,
+	type SessionTotals,
+	sumSessionUsage,
+} from "./footer.ts";
 import { GitInfo } from "./git-info.ts";
 import {
 	type OpencodeGoUsageData,
@@ -411,7 +418,7 @@ export function factory(pi: ExtensionAPI): void {
 		const model = ctx.model;
 		pi.appendEntry<UsageReport>("bluclawd:usage", {
 			model: model ? `${model.provider}/${model.id}` : undefined,
-			subscription: model ? model.provider === "kimi-coding" || ctx.modelRegistry.isUsingOAuth(model) : false,
+			subscription: isUsingSubscription(ctx),
 			totals: sumSessionUsage(ctx),
 			claude: footerRuntime?.usage.getUsageData() ?? null,
 			go: footerRuntime?.goUsage.getUsageData() ?? null,

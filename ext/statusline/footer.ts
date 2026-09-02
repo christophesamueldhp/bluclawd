@@ -144,6 +144,25 @@ export type SessionTotals = {
 	latestCacheHitRate: number | undefined;
 };
 
+/**
+ * Whether the active model is billed by subscription rather than per token —
+ * pi's own footer rule: OAuth to a provider whose OAuth flow is a subscription,
+ * plus Kimi Coding, which is subscription-backed despite API-key auth.
+ */
+export function isUsingSubscription(ctx: ExtensionContext): boolean {
+	const model = ctx.model;
+	if (!model) return false;
+	if (model.provider === "kimi-coding") return true;
+	try {
+		return (
+			ctx.modelRegistry.isUsingOAuth(model) &&
+			ctx.modelRegistry.getProvider(model.provider)?.auth?.oauth?.isSubscription === true
+		);
+	} catch {
+		return false;
+	}
+}
+
 export function sumSessionUsage(ctx: ExtensionContext): SessionTotals {
 	const totals: SessionTotals = {
 		input: 0,
@@ -329,11 +348,7 @@ export class CcStatuslineFooter implements Component {
 		const totals = sumSessionUsage(ctx);
 
 		const parts: string[] = [];
-		// Kimi Coding is subscription-backed despite using API-key authentication.
-		const model = ctx.model;
-		const usingSubscription = model
-			? model.provider === "kimi-coding" || ctx.modelRegistry.isUsingOAuth(model)
-			: false;
+		const usingSubscription = isUsingSubscription(ctx);
 		if (totals.cost || usingSubscription) {
 			parts.push(`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
 		}

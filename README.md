@@ -45,6 +45,29 @@ test/           self-contained — no monorepo, no fixtures pi doesn't publish
 `checkpoints`, `subagents`, `web`, `mcp`, `sandbox`, `background-bash`,
 `branding`, `diagnostics`, `fleet`, `help`, `aliases`, `plugin`.
 
+## What it adds
+
+Claude Code's names and behaviours, on top of pi's own commands:
+
+| Command | What it does |
+|---|---|
+| `/mode`, `/permissions` | permission modes (Alt+M cycles) and allow/ask/deny rules |
+| `/sandbox` | OS-level sandbox for bash (`@anthropic-ai/sandbox-runtime`) |
+| `/tasks` | background bash jobs (`run_in_background`, `bash_output`, `kill_bash`) |
+| `/agents` | subagents via the `task` tool |
+| `/mcp` | MCP servers from `mcp.json` |
+| `/memory`, `# note` | persistent memory, injected into the system prompt |
+| `/rewind` | file checkpoints per turn |
+| `/fleet` | live view of every running session |
+| `/status`, `/context`, `/usage`, `/cost` | model, auth, safety, session, context window, spend, plan usage |
+| `/recap`, `/btw <q>` | session summary / side question, neither added to the conversation |
+| `/plugin`, `/theme`, `/statusline` | packages, theme, external status line command |
+| `/clear`, `/exit`, `/rename` | pi's `/new`, `/quit`, `/name` under their Claude Code names |
+| `/help` | all of the above, grouped |
+
+The footer replicates a ccstatusline configuration (model, effort, context
+slider, git owner/branch/changes, plan-usage sliders, token stats).
+
 ## Updating
 
 ```bash
