@@ -41,9 +41,9 @@ ext/            the feature layer
 test/           self-contained — no monorepo, no fixtures pi doesn't publish
 ```
 
-14 extensions: `permissions`, `statusline`, `memory`,
+15 extensions: `permissions`, `statusline`, `memory`,
 `checkpoints`, `subagents`, `web`, `mcp`, `sandbox`, `background-bash`,
-`branding`, `diagnostics`, `fleet`, `help`, `aliases`.
+`branding`, `diagnostics`, `fleet`, `help`, `aliases`, `plugin`.
 
 ## Updating
 

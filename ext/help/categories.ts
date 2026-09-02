@@ -55,6 +55,8 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 	import: "Session",
 	share: "Session",
 	copy: "Session",
+	recap: "Session",
+	cost: "Info & diagnostics",
 
 	// Code & review
 	rewind: "Code & review",

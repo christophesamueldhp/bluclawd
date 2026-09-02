@@ -19,7 +19,8 @@
       "./ext/diagnostics/index.ts",
       "./ext/fleet/index.ts",
       "./ext/help/index.ts",
-      "./ext/aliases/index.ts"
+      "./ext/aliases/index.ts",
+      "./ext/plugin/index.ts"
     ],
     "themes": ["./themes"]
   },

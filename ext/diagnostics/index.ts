@@ -18,8 +18,9 @@
  * `ctx.ui.notify` (which dims everything and does not persist in the session).
  */
 
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
-import { VERSION } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, serializeConversation, VERSION } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { getActivePermissionMode } from "../permissions/active-mode.ts";
 import { isSandboxActive } from "../sandbox/state.ts";
@@ -66,6 +67,29 @@ export function formatStatus(
 	lines.push(`${dim("File:")} ${data.sessionFile ?? "not saved (ephemeral)"}`);
 	lines.push(dim("Entry counts, tree, and history: /session"));
 	return lines;
+}
+
+/**
+ * `/recap` — a short "where are we" summary of the current session, written
+ * by the active model and shown as a transcript entry (not sent to the model
+ * as conversation, so it costs one request and no context). Only the tail of
+ * the conversation that fits RECAP_MAX_CHARS is summarised.
+ */
+const RECAP_MAX_CHARS = 120_000;
+const RECAP_SYSTEM_PROMPT = [
+	"You summarise a coding session between a user and an AI assistant for the user who is returning to it.",
+	"Do NOT continue the conversation and do NOT answer questions in it. Output ONLY the summary, under 200 words, in this shape:",
+	"",
+	"**Goal:** what the user is trying to do",
+	"**Done:** what has been completed, as short bullets",
+	"**Open:** problems, questions, or decisions still unresolved",
+	"**Next:** the most likely next step",
+].join("\n");
+
+interface RecapData {
+	text: string;
+	model?: string;
+	error?: string;
 }
 
 const BAR_WIDTH = 20;
@@ -171,6 +195,64 @@ const diagnostics: InlineExtension = {
 					sessionName: ctx.sessionManager.getSessionName(),
 					contextWindow: model?.contextWindow,
 				});
+			},
+		});
+
+		pi.registerEntryRenderer<RecapData>("bluclawd:recap", (entry, _options, theme) => {
+			const data = entry.data;
+			if (!data) return block([]);
+			if (data.error) return block([theme.bold("Recap"), theme.fg("error", data.error)]);
+			return block([theme.bold(`Recap${data.model ? theme.fg("dim", ` · ${data.model}`) : ""}`), data.text]);
+		});
+
+		pi.registerCommand("recap", {
+			description: "Summarise this session so far: goal, done, open, next",
+			handler: async (_args, ctx) => {
+				const model = ctx.model;
+				if (!model) {
+					ctx.ui.notify("No model selected — pick one with /model first.", "error");
+					return;
+				}
+				const messages: AgentMessage[] = [];
+				for (const entry of ctx.sessionManager.getEntries()) {
+					if (entry.type === "message") messages.push(entry.message);
+				}
+				if (messages.length === 0) {
+					ctx.ui.notify("Nothing to recap yet.", "info");
+					return;
+				}
+				let transcript = serializeConversation(convertToLlm(messages));
+				if (transcript.length > RECAP_MAX_CHARS) {
+					transcript = `[earlier conversation omitted]\n${transcript.slice(-RECAP_MAX_CHARS)}`;
+				}
+				ctx.ui.notify("Writing recap…", "info");
+				const label = `${model.provider}/${model.id}`;
+				try {
+					const response = await ctx.modelRegistry.complete(model, {
+						systemPrompt: RECAP_SYSTEM_PROMPT,
+						messages: [
+							{
+								role: "user",
+								content: [{ type: "text", text: `Summarise this session:\n\n${transcript}` }],
+								timestamp: Date.now(),
+							},
+						],
+					});
+					const text = response.content
+						.filter((part): part is { type: "text"; text: string } => part.type === "text")
+						.map((part) => part.text)
+						.join("")
+						.trim();
+					pi.appendEntry<RecapData>(
+						"bluclawd:recap",
+						text ? { text, model: label } : { text: "", error: "The model returned no text." },
+					);
+				} catch (error) {
+					pi.appendEntry<RecapData>("bluclawd:recap", {
+						text: "",
+						error: `Recap failed: ${error instanceof Error ? error.message : String(error)}`,
+					});
+				}
 			},
 		});
 

@@ -27,6 +27,7 @@ import help from "./help/index.ts";
 import mcp from "./mcp/index.ts";
 import memory from "./memory/index.ts";
 import permissions from "./permissions/index.ts";
+import plugin from "./plugin/index.ts";
 import sandbox from "./sandbox/index.ts";
 import statusline from "./statusline/index.ts";
 import subagents from "./subagents/index.ts";
@@ -48,5 +49,6 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "fleet", factory: fleet },
 		{ name: "help", factory: help },
 		{ name: "aliases", factory: aliases },
+		{ name: "plugin", factory: plugin },
 	];
 }

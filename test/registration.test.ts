@@ -18,16 +18,17 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	sandbox: { commands: ["sandbox"], tools: ["bash"], shortcuts: 0, events: 3 },
 	"background-bash": { commands: ["tasks"], tools: ["bash_output", "kill_bash"], shortcuts: 0, events: 0 },
 	branding: { commands: [], tools: [], shortcuts: 0, events: 1 },
-	diagnostics: { commands: ["context", "status"], tools: [], shortcuts: 0, events: 0 },
+	diagnostics: { commands: ["context", "status", "recap"], tools: [], shortcuts: 0, events: 0 },
 	fleet: { commands: ["fleet"], tools: [], shortcuts: 0, events: 2 },
 	help: { commands: ["help"], tools: [], shortcuts: 0, events: 0 },
 	aliases: { commands: ["clear", "exit", "rename"], tools: [], shortcuts: 0, events: 0 },
+	plugin: { commands: ["plugin"], tools: [], shortcuts: 0, events: 0 },
 };
 
 describe("bluclawd extension registration", () => {
 	const rec = recordExtensions();
 
-	it("registers exactly the 14 expected extensions, no more, no fewer", () => {
+	it("registers exactly the 15 expected extensions, no more, no fewer", () => {
 		expect(Object.keys(rec).sort()).toEqual(Object.keys(EXPECTED).sort());
 	});
 
