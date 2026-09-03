@@ -58,7 +58,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `/mcp` | MCP servers from `mcp.json` |
 | `/memory`, `# note` | persistent memory, injected into the system prompt |
 | `/rewind` | file checkpoints per turn |
-| `/fleet` | live view of every running session |
+| `/fleet` | session roster in the shape of Claude Code's `/resume` picker: title + `time · branch · N messages · path`, type to search, ctrl+a current/all projects, enter opens, ctrl+t peeks, ctrl+n starts one |
 | `/status`, `/context`, `/usage`, `/cost` | model, auth, safety, session, context window, spend, plan usage |
 | `/recap`, `/btw <q>` | session summary / side question, neither added to the conversation |
 | `/plugin`, `/theme`, `/statusline` | packages, theme, external status line command |

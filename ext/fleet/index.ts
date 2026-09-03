@@ -30,6 +30,7 @@ import type { ExtensionCommandContext, InlineExtension } from "@earendil-works/p
 import { getAgentDir, SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { setSharedTheme } from "../_shared/theme.ts";
+import { AttachView } from "./attach-view.ts";
 import { FleetView } from "./fleet-view.ts";
 import { OrchestratorClient } from "./orchestrator-client.ts";
 import { hideSession, loadHiddenSessions, toSavedSummaries } from "./saved-sessions.ts";
@@ -124,75 +125,96 @@ const fleet: InlineExtension = {
 			registration = undefined;
 		});
 
+		/** Peek: a live, read-only view of a background session (Claude Code's "space preview"
+		 *  analogue). Opened AFTER the roster overlay has closed and followed by reopening it —
+		 *  one overlay at a time, never stacked. */
+		const openPeek = async (ctx: ExtensionCommandContext, instanceId: string, label: string): Promise<void> => {
+			await ctx.ui.custom<void>(
+				(tui, _theme, _keybindings, done) => {
+					const view = new AttachView({ ui: tui, instanceId, label, onClose: () => done(undefined) });
+					view.onShow();
+					return view as Component & { dispose?(): void };
+				},
+				{ overlay: true, overlayOptions: { width: "94%", maxHeight: "92%" } },
+			);
+			await openFleet(ctx);
+		};
+
+		const openFleet = async (ctx: ExtensionCommandContext): Promise<void> => {
+			const model = ctx.model;
+			await ctx.ui.custom<void>(
+				(tui, _theme, _keybindings, done) => {
+					const view = new FleetView({
+						ui: tui,
+						client: new OrchestratorClient(),
+						appName: "pi",
+						version: VERSION,
+						model: model ? `${model.provider}/${model.id}` : undefined,
+						spawnModel: model ? { provider: model.provider, id: model.id } : undefined,
+						cwd: ctx.cwd,
+						home: process.env.HOME ?? "",
+						mascotLines: null,
+						selfId: registration?.id,
+						onClose: () => done(undefined),
+						onJumpIn: (sessionFile) => {
+							done(undefined);
+							void (async () => {
+								// Capture BEFORE the switch: switchSession disposes this session.
+								const outgoing = captureOutgoing(ctx);
+								await ctx.switchSession(sessionFile);
+								// Re-register immediately so the just-opened session shows as
+								// "(this session)" at once rather than after the next heartbeat.
+								await registration?.refresh();
+								await handOff(outgoing);
+							})();
+						},
+						onCreateSession: (cwd, spawnModel, task) => {
+							done(undefined);
+							void (async () => {
+								const outgoing = captureOutgoing(ctx);
+								// pi's newSession() takes neither a working directory nor a model,
+								// so a chosen cwd/model cannot be honoured from an extension. Say
+								// so rather than open a session that quietly ignores the choice.
+								const ignored: string[] = [];
+								if (cwd && cwd !== ctx.cwd) ignored.push(`directory ${cwd}`);
+								const chosen = spawnModel ? `${spawnModel.provider}/${spawnModel.id}` : undefined;
+								const current = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+								if (chosen && chosen !== current) ignored.push(`model ${chosen}`);
+								if (ignored.length > 0) {
+									ctx.ui.notify(
+										`New session opened here instead — pi's newSession() cannot set a ${ignored.join(" or ")}.`,
+										"warning",
+									);
+								}
+								await ctx.newSession({
+									withSession: async (replaced) => {
+										if (task.trim()) replaced.sendUserMessage(task);
+									},
+								});
+								await registration?.refresh();
+								await handOff(outgoing);
+							})();
+						},
+						onAttach: (instanceId, label) => {
+							done(undefined);
+							void openPeek(ctx, instanceId, label);
+						},
+						loadSavedSessions,
+						loadHiddenSessions: () => loadHiddenSessions(getAgentDir()),
+						hideSession: (sessionFile) => hideSession(getAgentDir(), sessionFile),
+					});
+					// FleetView loads its roster on show, not on construct — without this
+					// the overlay opens empty and never polls.
+					void view.onShow();
+					return view as Component & { dispose?(): void };
+				},
+				{ overlay: true, overlayOptions: { width: "94%", maxHeight: "92%" } },
+			);
+		};
+
 		pi.registerCommand("fleet", {
 			description: "Manage every running and saved session",
-			handler: async (_args, ctx) => {
-				const model = ctx.model;
-				await ctx.ui.custom<void>(
-					(tui, _theme, _keybindings, done) => {
-						const view = new FleetView({
-							ui: tui,
-							client: new OrchestratorClient(),
-							appName: "pi",
-							version: VERSION,
-							model: model ? `${model.provider}/${model.id}` : undefined,
-							spawnModel: model ? { provider: model.provider, id: model.id } : undefined,
-							cwd: ctx.cwd,
-							home: process.env.HOME ?? "",
-							mascotLines: null,
-							selfId: registration?.id,
-							onClose: () => done(undefined),
-							onJumpIn: (sessionFile) => {
-								done(undefined);
-								void (async () => {
-									// Capture BEFORE the switch: switchSession disposes this session.
-									const outgoing = captureOutgoing(ctx);
-									await ctx.switchSession(sessionFile);
-									// Re-register immediately so the just-opened session shows as
-									// "(this session)" at once rather than after the next heartbeat.
-									await registration?.refresh();
-									await handOff(outgoing);
-								})();
-							},
-							onCreateSession: (cwd, spawnModel, task) => {
-								done(undefined);
-								void (async () => {
-									const outgoing = captureOutgoing(ctx);
-									// pi's newSession() takes neither a working directory nor a model,
-									// so a chosen cwd/model cannot be honoured from an extension. Say
-									// so rather than open a session that quietly ignores the choice.
-									const ignored: string[] = [];
-									if (cwd && cwd !== ctx.cwd) ignored.push(`directory ${cwd}`);
-									const chosen = spawnModel ? `${spawnModel.provider}/${spawnModel.id}` : undefined;
-									const current = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-									if (chosen && chosen !== current) ignored.push(`model ${chosen}`);
-									if (ignored.length > 0) {
-										ctx.ui.notify(
-											`New session opened here instead — pi's newSession() cannot set a ${ignored.join(" or ")}.`,
-											"warning",
-										);
-									}
-									await ctx.newSession({
-										withSession: async (replaced) => {
-											if (task.trim()) replaced.sendUserMessage(task);
-										},
-									});
-									await registration?.refresh();
-									await handOff(outgoing);
-								})();
-							},
-							loadSavedSessions,
-							loadHiddenSessions: () => loadHiddenSessions(getAgentDir()),
-							hideSession: (sessionFile) => hideSession(getAgentDir(), sessionFile),
-						});
-						// FleetView loads its roster on show, not on construct — without this
-						// the overlay opens empty and never polls.
-						void view.onShow();
-						return view as Component & { dispose?(): void };
-					},
-					{ overlay: true, overlayOptions: { width: "94%", maxHeight: "92%" } },
-				);
-			},
+			handler: async (_args, ctx) => openFleet(ctx),
 		});
 	},
 };

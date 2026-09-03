@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { type Dirent, readdirSync, statSync } from "node:fs";
+import { type Dirent, readdirSync, readFileSync, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -17,6 +17,8 @@ export interface InstanceSummary {
 	lastSeenAt?: string;
 	activity?: AgentActivity;
 	external?: boolean;
+	/** Known for on-disk sessions only (from pi's session index); live daemon rows omit it. */
+	messageCount?: number;
 }
 
 export interface RegisterInput {
@@ -67,8 +69,35 @@ export function orchestratorSocketPath(): string {
  * threw ERR_MODULE_NOT_FOUND into ensureDaemon's catch and silently disabled auto-start.
  */
 export function daemonCliPath(): string {
-	const indexJs = fileURLToPath(import.meta.resolve("@earendil-works/pi-server"));
-	return join(dirname(indexJs), "cli.js");
+	// This package ships its own daemon (daemon/cli.ts, run by node's native type stripping) —
+	// the monorepo's `@earendil-works/pi-server` package is not a dependency here, so resolving
+	// it threw and auto-start silently never happened.
+	return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "daemon", "cli.ts");
+}
+
+/**
+ * The package directory of the pi that is running this extension, found by walking up from
+ * the entry script (`.../pi-coding-agent/dist/bundle/cli.js` for a global install). Handed to
+ * the daemon as PI_PACKAGE_ROOT so daemon/pi-resolve-hook.mjs can resolve `@earendil-works/*`
+ * from there: pi aliases those imports for extensions, but the installed package has none of
+ * them in its own node_modules, and the daemon is a separate node process. Undefined when the
+ * entry script is not inside pi (e.g. bin.mjs in a dev checkout, which resolves them itself).
+ */
+export function piPackageRoot(entry: string | undefined = process.argv[1]): string | undefined {
+	if (!entry) return undefined;
+	let dir = dirname(entry);
+	for (let i = 0; i < 8; i++) {
+		try {
+			const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { name?: string };
+			if (pkg.name === "@earendil-works/pi-coding-agent") return dir;
+		} catch {
+			// no package.json here — keep walking
+		}
+		const parent = dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return undefined;
 }
 
 /**
@@ -103,9 +132,9 @@ export function newestMtimeMs(dir: string, depth = 0): number {
 }
 
 /**
- * The build identifier a FRESHLY spawned daemon would report right now, computed from the
- * currently-installed @earendil-works/pi-server package's dist/ — not from any running
- * daemon. Compared against a running daemon's own self-reported `buildId` (see
+ * The build identifier a FRESHLY spawned daemon would report right now, computed from this
+ * package's daemon/ directory (the same directory the daemon hashes for its own buildId) —
+ * not from any running daemon. Compared against a running daemon's own self-reported `buildId` (see
  * getDaemonInfo()) to detect "the daemon process predates the code that is on disk now",
  * the classic stale-dist failure a semver comparison alone would miss, since a local
  * rebuild during development does not bump package.json's version
@@ -246,11 +275,18 @@ export class OrchestratorClient {
 		return instance;
 	}
 
-	/** Best-effort: if the daemon is down, launch `server serve` detached (dev/monorepo only). */
+	/** Best-effort: if the daemon is down, launch `daemon/cli.ts serve` detached. */
 	async ensureDaemon(): Promise<boolean> {
 		if (await this.isRunning()) return true;
 		try {
-			spawn(process.execPath, [daemonCliPath(), "serve"], { detached: true, stdio: "ignore" }).unref();
+			const cli = daemonCliPath();
+			const hook = join(dirname(cli), "pi-resolve-hook.mjs");
+			const root = piPackageRoot();
+			spawn(process.execPath, ["--import", hook, cli, "serve"], {
+				detached: true,
+				stdio: "ignore",
+				env: root ? { ...process.env, PI_PACKAGE_ROOT: root } : process.env,
+			}).unref();
 		} catch {
 			return false;
 		}

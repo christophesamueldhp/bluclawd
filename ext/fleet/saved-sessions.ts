@@ -27,6 +27,7 @@ export function sessionInfoToSummary(info: SavedSessionInfo): InstanceSummary {
 		sessionFile: info.path,
 		createdAt: info.created.toISOString(),
 		lastSeenAt: info.modified.toISOString(),
+		messageCount: info.messageCount,
 	};
 }
 

@@ -11,7 +11,8 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { theme } from "../_shared/theme.ts";
-import { countStatuses, describeStatus, groupByCwd, relativeTime } from "./fleet-status.ts";
+import { BranchCache } from "./branch-cache.ts";
+import { countStatuses, describeStatus, matchesQuery, relativeTime, sortForRoster } from "./fleet-status.ts";
 import { NewSessionPanel } from "./new-session-panel.ts";
 import { currentDaemonBuildId, type InstanceSummary, type OrchestratorClient } from "./orchestrator-client.ts";
 
@@ -121,12 +122,24 @@ export class FleetView implements Component, Focusable {
 	 *  every action reads ordered[selectedIndex], which would otherwise silently point at a different
 	 *  session after a refresh. Re-anchored in recompute(). */
 	private selectedId: string | undefined;
+	/** True once ↑/↓ has been pressed; before that the highlight stays on the top row. */
+	private userMoved = false;
 	/** Set once close() runs, so an in-flight onShow() doesn't install a poll timer on a dead view.
 	 *  One-way by design and never reset — safe only because the host (`showFleetView()`) always
 	 *  constructs a fresh FleetView on each open rather than reusing a closed one. If that ever
 	 *  changes, a closed-then-reopened view would need `closed` reset in onShow(), or every guard
 	 *  above would permanently refuse to (re)install its poll timer (IMPROVEMENT-PLAN.md §5.2). */
 	private closed = false;
+	/** Type-to-search, as in Claude Code's /resume picker: filters title, path and branch. */
+	private readonly search = new Input();
+	/** Claude Code's /resume defaults to the current project; this defaults to ALL projects so the
+	 *  "N awaiting input" header never hides a running session. ctrl+a toggles, as there. */
+	private allProjects = true;
+	private readonly branches = new BranchCache(() => {
+		if (this.closed) return;
+		this.recompute(); // a query may match the branch that just landed
+		this.opts.ui.requestRender();
+	});
 	private readonly replyInput = new Input();
 	private readonly newSession = new NewSessionPanel();
 	private creating = false;
@@ -164,7 +177,8 @@ export class FleetView implements Component, Focusable {
 		if (this.closed) return;
 		this.daemonStatusNotice = "";
 		if (!ok) {
-			this.daemonStatusNotice = "daemon unavailable — run `server serve`";
+			this.daemonStatusNotice =
+				"daemon unavailable — couldn't start `node daemon/cli.ts serve` (see the package's daemon/)";
 		} else {
 			// Stale-daemon check (IMPROVEMENT-PLAN.md §4.5/§5.3): a daemon left running across a
 			// local rebuild shares no version bump with what's on disk now, so compare build
@@ -174,8 +188,8 @@ export class FleetView implements Component, Focusable {
 			if (this.closed) return;
 			if (info.running && info.buildId !== currentDaemonBuildId()) {
 				this.daemonStatusNotice = info.buildId
-					? "daemon is running an older build — restart it (kill the `server` process, then reopen)"
-					: "daemon predates version checks — restart it to enable them (kill the `server` process, then reopen)";
+					? "daemon is running an older build — restart it (kill the `daemon/cli.ts serve` process, then reopen)"
+					: "daemon predates version checks — restart it to enable them (kill the `daemon/cli.ts serve` process, then reopen)";
 			}
 		}
 		// Load the deleted/hidden set so previously deleted sessions stay gone across reopens.
@@ -274,16 +288,28 @@ export class FleetView implements Component, Focusable {
 		this.opts.onJumpIn(target.sessionFile, target.cwd);
 	}
 
+	private get query(): string {
+		return this.search.getValue();
+	}
+
 	private recompute(): void {
-		this.ordered = groupByCwd(this.instances).flatMap((group) => group.items);
+		const scoped = this.allProjects ? this.instances : this.instances.filter((i) => i.cwd === this.opts.cwd);
+		const query = this.query;
+		this.ordered = sortForRoster(
+			scoped.filter((i) => matchesQuery([i.label, i.sessionId, i.cwd, this.branches.get(i.cwd)], query)),
+		);
 		// Re-anchor selection to the SAME row by identity, so a poll that reorders/removes rows can't
 		// silently move the highlight onto a different session (enter/ctrl+t/ctrl+r/space would then
 		// act on the wrong one). Only fall back to the clamped index when the row is truly gone.
-		const anchored = this.selectedId ? this.ordered.findIndex((row) => row.id === this.selectedId) : -1;
+		// Until the user has moved, the highlight stays on the TOP row instead — live rows arrive
+		// a poll or two after the saved ones and sort above them, and an anchored highlight would
+		// otherwise open on whichever saved row happened to load first.
+		const anchored =
+			this.selectedId && this.userMoved ? this.ordered.findIndex((row) => row.id === this.selectedId) : -1;
 		if (anchored !== -1) {
 			this.selectedIndex = anchored;
-		} else if (this.selectedIndex >= this.ordered.length) {
-			this.selectedIndex = Math.max(0, this.ordered.length - 1);
+		} else if (!this.userMoved || this.selectedIndex >= this.ordered.length) {
+			this.selectedIndex = this.userMoved ? Math.max(0, this.ordered.length - 1) : 0;
 		}
 		this.selectedId = this.ordered[this.selectedIndex]?.id;
 	}
@@ -315,6 +341,7 @@ export class FleetView implements Component, Focusable {
 
 	private moveSelection(delta: number): void {
 		if (this.ordered.length === 0) return;
+		this.userMoved = true;
 		this.selectedIndex = Math.max(0, Math.min(this.ordered.length - 1, this.selectedIndex + delta));
 		this.selectedId = this.ordered[this.selectedIndex]?.id;
 	}
@@ -465,12 +492,15 @@ export class FleetView implements Component, Focusable {
 	private renderShortcuts(width: number): string[] {
 		const rows: Array<[string, string]> = [
 			["↑ / ↓", "select session"],
+			["type", "search — filters by title, path and branch"],
 			["enter", "open — full session view in this window (others keep running)"],
 			["ctrl+t", "peek — watch it work live, read-only (no takeover)"],
 			["ctrl+r", "resume — restart a Done session as a background child"],
+			["ctrl+n", "new session"],
+			["ctrl+a", "show all projects / only the current one"],
 			["space", "reply to the selected session"],
 			["ctrl+x ×2", "delete the selected session"],
-			["esc", "back / cancel"],
+			["esc", "clear search / close"],
 			["?", "toggle this help"],
 		];
 		const out = [theme.bold("Shortcuts"), ""];
@@ -562,9 +592,24 @@ export class FleetView implements Component, Focusable {
 		// ctrl+t peeks: watch the selected session work live (read-only), without taking the seat.
 		if (matchesKey(data, "ctrl+t")) {
 			const target = this.ordered[this.selectedIndex];
-			if (target && !target.external && target.status === "online" && this.opts.onAttach) {
+			if (!target || !this.opts.onAttach) return;
+			if (target.external) {
+				this.setNotice(
+					target.id === this.opts.selfId
+						? "you're in this session already"
+						: "that session is open in another window — nothing to peek at from here",
+				);
+			} else if (target.status !== "online") {
+				this.setNotice("peek needs a running session — ctrl+r resumes it first");
+			} else {
+				// The host closes this overlay and opens the peek view in its place (then reopens a
+				// FRESH roster on return) — same teardown as jumpInto()'s swap, or the poll leaks.
+				this.closed = true;
+				this.clearPolling();
 				this.opts.onAttach(target.id, target.label || target.sessionId || target.id);
+				return;
 			}
+			this.opts.ui.requestRender();
 			return;
 		}
 
@@ -575,15 +620,29 @@ export class FleetView implements Component, Focusable {
 			return;
 		}
 
-		// '?' opens the shortcuts overlay.
-		if (this.isQuestionMark(data)) {
+		// ctrl+n opens the new-session panel (typing no longer does: it searches, as in /resume).
+		if (matchesKey(data, "ctrl+n")) {
+			this.startCreating("");
+			return;
+		}
+
+		// ctrl+a toggles all projects / only the current one (Claude Code's /resume chord).
+		if (matchesKey(data, "ctrl+a")) {
+			this.allProjects = !this.allProjects;
+			this.recompute();
+			this.opts.ui.requestRender();
+			return;
+		}
+
+		// '?' opens the shortcuts overlay — unless a search is being typed, where it's just text.
+		if (this.isQuestionMark(data) && !this.query) {
 			this.showShortcuts = true;
 			this.opts.ui.requestRender();
 			return;
 		}
 
-		// space replies to the selected session.
-		if (matchesKey(data, "space")) {
+		// space replies to the selected session — unless a search is being typed, where it's text.
+		if (matchesKey(data, "space") && !this.query) {
 			const target = this.ordered[this.selectedIndex];
 			if (target) {
 				if (target.external) {
@@ -597,7 +656,14 @@ export class FleetView implements Component, Focusable {
 			return;
 		}
 
+		// esc clears an active search first; a second esc (or esc with no search) closes.
 		if (kb.matches(data, "tui.select.cancel")) {
+			if (this.query) {
+				this.search.setValue("");
+				this.recompute();
+				this.opts.ui.requestRender();
+				return;
+			}
 			this.close();
 			return;
 		}
@@ -623,10 +689,10 @@ export class FleetView implements Component, Focusable {
 			return;
 		}
 
-		// A printable character starts a new session, seeding the task field with it.
-		if (data.length === 1 && data >= " " && data !== "\x7f") {
-			this.startCreating(data);
-		}
+		// Everything else is search input (printable characters, backspace, cursor keys).
+		this.search.handleInput(data);
+		this.recompute();
+		this.opts.ui.requestRender();
 	}
 
 	invalidate(): void {}
@@ -665,12 +731,19 @@ export class FleetView implements Component, Focusable {
 				? `${this.opts.model} ${dot} ${shortenPath(this.opts.cwd, this.opts.home)}`
 				: shortenPath(this.opts.cwd, this.opts.home),
 		);
-		const countsLine = `${theme.fg("warning", `${counts.needsInput} awaiting input`)} ${dot} ${theme.fg("accent", `${counts.working} working`)} ${dot} ${theme.fg("success", `${counts.done} done`)}`;
+		const scope = this.allProjects ? "all projects" : "current project";
+		const shown =
+			this.ordered.length === this.instances.length
+				? ""
+				: ` ${dot} ${theme.fg("dim", `${this.ordered.length} of ${this.instances.length}`)}`;
+		const countsLine = `${theme.fg("warning", `${counts.needsInput} awaiting input`)} ${dot} ${theme.fg("accent", `${counts.working} working`)} ${dot} ${theme.fg("success", `${counts.done} done`)} ${dot} ${theme.fg("dim", scope)}${shown}`;
 		const textLines = [titleLine, subtitle, countsLine];
+		// A daemon that never came up (or is stale) is the more specific message — "lost connection"
+		// would only paraphrase it, and would mask the hint on how to fix it.
 		if (this.notice) textLines.push(theme.fg("warning", this.notice));
+		else if (this.daemonStatusNotice) textLines.push(theme.fg("warning", this.daemonStatusNotice));
 		else if (this.connectionLost)
 			textLines.push(theme.fg("warning", "lost connection to the daemon — showing the last known list"));
-		else if (this.daemonStatusNotice) textLines.push(theme.fg("warning", this.daemonStatusNotice));
 
 		const header: string[] = [];
 		for (let i = 0; i < Math.max(mascot.length, textLines.length); i++) {
@@ -680,41 +753,52 @@ export class FleetView implements Component, Focusable {
 			header.push(right ? truncateToWidth(`${left}${pad}  ${right}`, width) : left);
 		}
 		header.push("");
+		// Search line, as in /resume: the query with a cursor, or a placeholder.
+		if (!this.showShortcuts && !this.creating && !this.replyTarget) {
+			header.push(this.query ? this.search.render(width)[0] : theme.fg("dim", "  Type to search"));
+			header.push("");
+		}
 
-		// Body: sessions grouped by project, a blank line between groups.
+		// Body: two lines per session, Claude Code /resume style —
+		//   › title                                   Working
+		//       5m ago · main · 12 messages · ~/path
 		const body: string[] = [];
 		let selectedRow = 0;
 		if (this.showShortcuts) {
 			body.push(...this.renderShortcuts(width));
 		} else if (this.ordered.length === 0) {
-			body.push(truncateToWidth(theme.fg("dim", "  no running sessions — type to start one"), width));
+			const empty = this.query
+				? `  No sessions match "${this.query}".`
+				: this.allProjects
+					? "  No sessions found — ctrl+n starts one"
+					: "  No sessions in this project — ctrl+a shows all projects";
+			body.push(truncateToWidth(theme.fg("dim", empty), width));
 		} else {
-			let flatIndex = 0;
-			let firstGroup = true;
-			for (const group of groupByCwd(this.instances)) {
-				if (!firstGroup) body.push("");
-				firstGroup = false;
-				body.push(truncateToWidth(theme.fg("dim", shortenPath(group.cwd, this.opts.home)), width));
-				for (const inst of group.items) {
-					const isSelected = flatIndex === this.selectedIndex;
-					if (isSelected) selectedRow = body.length;
-					const status = describeStatus(inst);
-					const active =
-						inst.status === "online" && (inst.activity === "working" || inst.activity === "awaiting_input");
-					const marker = theme.fg(status.color, active ? "*" : "·");
-					const rawName = inst.label || inst.sessionId || inst.id;
-					const selfTag = inst.id === this.opts.selfId ? theme.fg("dim", " (this session)") : "";
-					const name = (isSelected ? theme.bold(rawName) : rawName) + selfTag;
-					const time = relativeTime(inst.lastSeenAt ?? inst.createdAt, nowMs);
-					const left = `${marker} ${name}`;
-					const right = `${theme.fg(status.color, status.label)}  ${theme.fg("dim", time)}`;
-					const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
-					let line = truncateToWidth(`${left}${" ".repeat(gap)}${right}`, width);
-					if (isSelected) line = theme.bg("selectedBg", line);
-					body.push(line);
-					flatIndex++;
-				}
-			}
+			this.ordered.forEach((inst, index) => {
+				const isSelected = index === this.selectedIndex;
+				if (isSelected) selectedRow = body.length;
+				const status = describeStatus(inst);
+				// Unnamed sessions show the first 8 characters of their id, as Claude Code does.
+				const rawName = (inst.label || (inst.sessionId || inst.id).slice(0, 8))
+					.replace(/[\x00-\x1f\x7f]/g, " ")
+					.trim();
+				const selfTag = inst.id === this.opts.selfId ? theme.fg("dim", " (this session)") : "";
+				const cursor = isSelected ? theme.fg("accent", "› ") : "  ";
+				const badge = theme.fg(status.color, status.label);
+				const nameBudget = Math.max(10, width - 2 - visibleWidth(selfTag) - visibleWidth(badge) - 2);
+				const name =
+					(isSelected
+						? theme.bold(truncateToWidth(rawName, nameBudget, "…"))
+						: truncateToWidth(rawName, nameBudget, "…")) + selfTag;
+				const left = `${cursor}${name}`;
+				const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(badge));
+				body.push(truncateToWidth(`${left}${" ".repeat(gap)}${badge}`, width));
+
+				const details = [relativeTime(inst.lastSeenAt ?? inst.createdAt, nowMs), this.branches.get(inst.cwd)];
+				if (inst.messageCount !== undefined) details.push(`${inst.messageCount} messages`);
+				if (this.allProjects) details.push(shortenPath(inst.cwd, this.opts.home));
+				body.push(truncateToWidth(theme.fg("dim", `    ${details.filter(Boolean).join(" · ")}`), width, "…"));
+			});
 		}
 
 		const footer: string[] = [];
@@ -726,10 +810,6 @@ export class FleetView implements Component, Focusable {
 				truncateToWidth(theme.fg("dim", `> reply to "${this.replyTarget.label || this.replyTarget.id}"`), width),
 			);
 			footer.push(this.replyInput.render(width)[0]);
-		} else {
-			footer.push(
-				truncateToWidth(theme.fg("dim", "> type to start a new session · enter opens the selected one"), width),
-			);
 		}
 		const pendingDelete =
 			this.confirmDeleteId !== null && this.ordered[this.selectedIndex]?.id === this.confirmDeleteId;
@@ -744,14 +824,14 @@ export class FleetView implements Component, Focusable {
 		} else if (this.showShortcuts) {
 			footer.push(truncateToWidth(theme.fg("dim", "? or esc to close"), width));
 		} else {
+			const scopeHint = this.allProjects ? "ctrl+a current project" : "ctrl+a all projects";
+			const escHint = this.query ? "esc clear" : "esc close";
 			footer.push(
 				truncateToWidth(
-					theme.fg(
-						"dim",
-						"↑↓ select · enter open · ctrl+t peek · space reply · ctrl+r resume · ctrl+x delete · ? help",
-					),
+					theme.fg("dim", "↑↓ select · enter open · ctrl+t peek · space reply · ctrl+r resume"),
 					width,
 				),
+				truncateToWidth(theme.fg("dim", `ctrl+n new · ${scopeHint} · ctrl+x delete · ${escHint} · ? help`), width),
 			);
 		}
 
