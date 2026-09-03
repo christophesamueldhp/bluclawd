@@ -1,3 +1,5 @@
+import { mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
@@ -82,6 +84,11 @@ describe("roster helpers", () => {
 		expect(piPackageRoot(join(piRoot, "dist", "bundle", "cli.js"))).toBe(piRoot);
 		expect(piPackageRoot(resolve("bin.mjs"))).toBeUndefined();
 		expect(piPackageRoot(undefined)).toBeUndefined();
+		expect(piPackageRoot("/nonexistent/pi")).toBeUndefined();
+		// argv[1] is the bin symlink as invoked, e.g. /opt/homebrew/bin/pi — must follow it.
+		const link = join(mkdtempSync(join(tmpdir(), "pi-bin-")), "pi");
+		symlinkSync(join(piRoot, "dist", "bundle", "cli.js"), link);
+		expect(piPackageRoot(link)).toBe(realpathSync(piRoot));
 	});
 
 	it("carries the message count from pi's session index into a saved row", () => {

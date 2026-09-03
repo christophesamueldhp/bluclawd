@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { type Dirent, readdirSync, readFileSync, statSync } from "node:fs";
+import { type Dirent, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -85,7 +85,13 @@ export function daemonCliPath(): string {
  */
 export function piPackageRoot(entry: string | undefined = process.argv[1]): string | undefined {
 	if (!entry) return undefined;
-	let dir = dirname(entry);
+	// argv[1] is the bin symlink as invoked (`/opt/homebrew/bin/pi`), not the script it points to.
+	let dir: string;
+	try {
+		dir = dirname(realpathSync(entry));
+	} catch {
+		return undefined;
+	}
 	for (let i = 0; i < 8; i++) {
 		try {
 			const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf8")) as { name?: string };
