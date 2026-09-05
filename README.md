@@ -60,7 +60,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `/rewind` | file checkpoints per turn; restores the files, the conversation, or both |
 | `/fleet` | session roster in the shape of Claude Code's `/resume` picker: title + `time · branch · N messages · path`, type to search, ctrl+a current/all projects, enter opens, ctrl+t peeks, ctrl+n starts one |
 | `/status`, `/context`, `/usage`, `/cost` | model, auth, safety, session, context window, spend, plan usage |
-| `/recap`, `/btw <q>` | session summary / side question, neither added to the conversation |
+| `/recap`, `/btw <q>` | session summary / side question, neither added to the conversation; `--save` on either keeps the result in project memory |
 | `/plugin`, `/theme`, `/statusline` | packages, theme, external status line command |
 | `/clear`, `/exit`, `/rename` | pi's `/new`, `/quit`, `/name` under their Claude Code names |
 | `/help` | all of the above, grouped |

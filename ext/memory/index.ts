@@ -96,6 +96,17 @@ function appendFact(fact: string, scope: MemoryScope, cwd: string): void {
 	appendFileSync(path, `${formatFact(fact)}\n`);
 }
 
+/**
+ * Append a note to this project's memory. Exported for the diagnostics extension's
+ * `/recap --save` and `/btw --save`, which have a summary worth keeping and no
+ * business re-deriving where memory lives. Pure file I/O, so crossing the
+ * `pi.extensions` module-graph boundary costs nothing — there is no shared state
+ * here for each extension's own module instance to disagree about.
+ */
+export function saveProjectNote(fact: string, cwd: string): void {
+	appendFact(fact, "project", cwd);
+}
+
 /** Replace a scope's body, keeping the header. Used by `/memory edit`. */
 function writeMemoryBody(scope: MemoryScope, cwd: string, body: string): void {
 	const path = memoryPath(scope, cwd);

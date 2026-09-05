@@ -22,6 +22,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { convertToLlm, serializeConversation, VERSION } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { saveProjectNote } from "../memory/index.ts";
 import { getActivePermissionMode } from "../permissions/active-mode.ts";
 import { isSandboxActive } from "../sandbox/state.ts";
 import { isUsingSubscription } from "../statusline/footer.ts";
@@ -257,9 +258,16 @@ const diagnostics: InlineExtension = {
 		const modelLabel = (ctx: ExtensionContext): string | undefined =>
 			ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 
+		/** Today's date in the user's own timezone, as YYYY-MM-DD. */
+		const localDate = (): string => {
+			const now = new Date();
+			return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+		};
+
 		pi.registerCommand("recap", {
-			description: "Summarise this session so far: goal, done, open, next",
-			handler: async (_args, ctx) => {
+			description: "Summarise this session so far: goal, done, open, next (--save keeps it in project memory)",
+			handler: async (args, ctx) => {
+				const save = args.trim() === "--save";
 				const transcript = transcriptOf(ctx);
 				if (!transcript) {
 					ctx.ui.notify("Nothing to recap yet.", "info");
@@ -269,6 +277,14 @@ const diagnostics: InlineExtension = {
 				try {
 					const text = await askModel(ctx, RECAP_SYSTEM_PROMPT, `Summarise this session:\n\n${transcript}`);
 					pi.appendEntry<RecapData>("bluclawd:recap", { text, model: modelLabel(ctx) });
+					// Saved only on request: a recap is usually a glance, and writing every
+					// one of them into memory would bury the notes worth keeping.
+					if (save) {
+						// Local date, not toISOString(): the note is read back months later, and a
+						// UTC date is off by one for anyone east of Greenwich after their evening.
+						saveProjectNote(`Recap ${localDate()}\n${text}`, ctx.cwd);
+						ctx.ui.notify("Recap saved to project memory (/memory).", "info");
+					}
 				} catch (error) {
 					pi.appendEntry<RecapData>("bluclawd:recap", {
 						text: "",
@@ -287,11 +303,13 @@ const diagnostics: InlineExtension = {
 		});
 
 		pi.registerCommand("btw", {
-			description: "Ask a side question with the session as context, without adding it to the conversation",
+			description: "Ask a side question with the session as context (--save keeps the answer in project memory)",
 			handler: async (args, ctx) => {
-				const question = args.trim();
+				const trimmed = args.trim();
+				const save = trimmed.startsWith("--save");
+				const question = (save ? trimmed.slice("--save".length) : trimmed).trim();
 				if (!question) {
-					ctx.ui.notify("Usage: /btw <question>", "info");
+					ctx.ui.notify("Usage: /btw [--save] <question>", "info");
 					return;
 				}
 				const transcript = transcriptOf(ctx) ?? "(the session has no messages yet)";
@@ -303,6 +321,10 @@ const diagnostics: InlineExtension = {
 						`Session transcript:\n\n${transcript}\n\n---\nSide question: ${question}`,
 					);
 					pi.appendEntry<BtwData>("bluclawd:btw", { question, answer, model: modelLabel(ctx) });
+					if (save) {
+						saveProjectNote(`${question}\n${answer}`, ctx.cwd);
+						ctx.ui.notify("Answer saved to project memory (/memory).", "info");
+					}
 				} catch (error) {
 					pi.appendEntry<BtwData>("bluclawd:btw", {
 						question,
