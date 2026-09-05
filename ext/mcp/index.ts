@@ -49,12 +49,25 @@
 
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { openBrowser } from "../_shared/open-browser.ts";
 import type { Client, RegisteredMcpTool } from "./client.ts";
 import { McpCredentialStore } from "./credential-store.ts";
 import { isAuthFailure, loadMcpConfig, type ServerConfig, setServerDisabled } from "./schema.ts";
 
 type ConnectionStatus = "connecting" | "connected" | "error" | "disabled";
+
+/** One `/mcp` row and the entry that holds them. Plain data — entries persist as
+ *  JSON, so status becomes colour at render time rather than in the string. */
+interface McpRow {
+	name: string;
+	kind: string;
+	status: ConnectionStatus;
+	state: string;
+}
+interface McpData {
+	rows: McpRow[];
+}
 
 interface Connection {
 	name: string;
@@ -335,6 +348,36 @@ export function factory(pi: ExtensionAPI): void {
 		await Promise.allSettled(clients.map((c) => c.close()));
 	});
 
+	pi.registerEntryRenderer<McpData>("bluclawd:mcp", (entry, _options, theme) => {
+		const rows = entry.data?.rows ?? [];
+		const lines: string[] = [theme.bold("MCP servers")];
+		const width = Math.max(0, ...rows.map((row) => row.name.length));
+		for (const row of rows) {
+			// Colour carries the status, so a broken server is visible without reading
+			// every line — the flat notify string could not do that.
+			const colour =
+				row.status === "connected"
+					? "success"
+					: row.status === "connecting"
+						? "warning"
+						: row.status === "disabled"
+							? "muted"
+							: "error";
+			lines.push(
+				`  ${theme.fg("accent", row.name.padEnd(width))}  ${theme.fg("dim", row.kind.padEnd(5))}  ${theme.fg(colour, row.state)}`,
+			);
+		}
+		if (rows.length === 0) lines.push(theme.fg("muted", "  none configured"));
+		lines.push("");
+		lines.push(
+			theme.fg("dim", "/mcp enable|disable <server> · /mcp login|logout <server> · /mcp reconnect [server]"),
+		);
+		const container = new Container();
+		container.addChild(new Spacer(1));
+		container.addChild(new Text(lines.join("\n"), 1, 0));
+		return container;
+	});
+
 	pi.registerCommand("mcp", {
 		description:
 			"List or manage MCP servers: /mcp [enable|disable <server> | login|logout <server> | reconnect [server]]",
@@ -486,22 +529,20 @@ export function factory(pi: ExtensionAPI): void {
 				);
 				return;
 			}
-			const lines = connections.map((c) => {
-				const kind = c.config.command ? "stdio" : c.config.url ? "http" : "?";
-				const deferred = c.config.deferTools ? ", deferred" : "";
-				const state =
+			const rows: McpRow[] = connections.map((c) => ({
+				name: c.name,
+				kind: c.config.command ? "stdio" : c.config.url ? "http" : "?",
+				status: c.status,
+				state:
 					c.status === "connected"
-						? `connected, ${c.toolCount} tool${c.toolCount === 1 ? "" : "s"}${deferred}`
+						? `connected, ${c.toolCount} tool${c.toolCount === 1 ? "" : "s"}${c.config.deferTools ? ", deferred" : ""}`
 						: c.status === "connecting"
 							? "connecting…"
 							: c.status === "disabled"
 								? "disabled"
-								: `error: ${c.error ?? "unknown"}`;
-				return `• ${c.name} (${kind}) — ${state}`;
-			});
-			lines.push("");
-			lines.push("Manage: /mcp enable|disable <server> · /mcp login|logout <server> · /mcp reconnect [server]");
-			ctx.ui.notify(`MCP servers:\n${lines.join("\n")}`, "info");
+								: `error: ${c.error ?? "unknown"}`,
+			}));
+			pi.appendEntry<McpData>("bluclawd:mcp", { rows });
 		},
 	});
 }

@@ -22,8 +22,24 @@ import type {
 	InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { type AgentDef, type AgentScope, bundledAgentsDir, discoverDefs, formatAgentList } from "./defs.ts";
+
+/** What `/agents` renders. Plain data: entries persist as JSON, so the theme is
+ *  applied at render time rather than baked into the strings. */
+interface AgentsData {
+	rows: AgentListRow[];
+	footer: string;
+}
+
+import {
+	type AgentDef,
+	type AgentListRow,
+	type AgentScope,
+	agentListRows,
+	bundledAgentsDir,
+	discoverDefs,
+} from "./defs.ts";
 import { runSubagent } from "./engine.ts";
 import {
 	capText,
@@ -471,6 +487,26 @@ export function factory(pi: ExtensionAPI): void {
 		renderCall,
 		renderResult,
 	});
+	pi.registerEntryRenderer<AgentsData>("bluclawd:agents", (entry, _options, theme) => {
+		const data = entry.data;
+		const container = new Container();
+		container.addChild(new Spacer(1));
+		if (!data) return container;
+		const lines: string[] = [theme.bold("Agents")];
+		const width = Math.max(0, ...data.rows.map((row) => row.name.length));
+		for (const row of data.rows) {
+			lines.push(
+				`  ${theme.fg("accent", row.name.padEnd(width))}  ${theme.fg("dim", row.origin.padEnd(7))}  ${row.description}`,
+			);
+			lines.push(`  ${" ".repeat(width)}  ${theme.fg("dim", row.notes)}`);
+		}
+		if (data.rows.length === 0) lines.push(theme.fg("muted", "  none found"));
+		lines.push("");
+		lines.push(theme.fg("dim", data.footer));
+		container.addChild(new Text(lines.join("\n"), 1, 0));
+		return container;
+	});
+
 	pi.registerCommand("agents", {
 		description: "List the subagents the task tool can delegate to",
 		handler: async (_args, ctx) => {
@@ -478,20 +514,16 @@ export function factory(pi: ExtensionAPI): void {
 			// agent descriptions should not be surfaced, the same rule /hooks uses.
 			const trusted = ctx.isProjectTrusted();
 			const { defs, projectAgentsDir } = discoverDefs(ctx.cwd, trusted ? "both" : "user");
-			const lines = formatAgentList(defs, bundledAgentsDir());
-			if (lines.length === 0) {
-				ctx.ui.notify(
-					`No agents found. Add markdown defs to <agentDir>/agents or ${CONFIG_DIR_NAME}/agents.`,
-					"info",
-				);
-				return;
-			}
-			const footer = !trusted
-				? `Project agents are not listed — this project is untrusted. The task tool still offers them behind a confirmation prompt, and blocks them outright when headless.`
-				: projectAgentsDir
-					? `Project agents from ${projectAgentsDir} need agentScope: "both" (or "project") on the task call.`
-					: `No ${CONFIG_DIR_NAME}/agents directory here; only user and bundled agents are available.`;
-			ctx.ui.notify(["Agents:", "", ...lines, "", footer].join("\n"), "info");
+			const rows = agentListRows(defs, bundledAgentsDir());
+			const footer =
+				rows.length === 0
+					? `No agents found. Add markdown defs to <agentDir>/agents or ${CONFIG_DIR_NAME}/agents.`
+					: !trusted
+						? "Project agents are not listed — this project is untrusted. The task tool still offers them behind a confirmation prompt, and blocks them outright when headless."
+						: projectAgentsDir
+							? `Project agents from ${projectAgentsDir} need agentScope: "both" (or "project") on the task call.`
+							: `No ${CONFIG_DIR_NAME}/agents directory here; only user and bundled agents are available.`;
+			pi.appendEntry<AgentsData>("bluclawd:agents", { rows, footer });
 		},
 	});
 }

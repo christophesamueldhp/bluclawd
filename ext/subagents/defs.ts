@@ -51,13 +51,24 @@ export function bundledAgentsDir(): string {
  * An agent with no `tools` frontmatter inherits every tool, which is worth
  * stating outright rather than leaving as a blank column.
  */
-export function formatAgentList(defs: AgentDef[], bundledDir: string): string[] {
-	const nameWidth = Math.max(0, ...defs.map((def) => def.name.length));
+/** One `/agents` row, as plain data — the renderer owns padding and colour. */
+export interface AgentListRow {
+	name: string;
+	origin: "project" | "bundled" | "user";
+	description: string;
+	notes: string;
+}
+
+export function agentListRows(defs: AgentDef[], bundledDir: string): AgentListRow[] {
 	return defs.map((def) => {
-		const origin = def.source === "project" ? "project" : def.filePath.startsWith(bundledDir) ? "bundled" : "user";
 		const notes = [def.tools?.length ? `tools: ${def.tools.join(", ")}` : "all tools"];
 		if (def.model) notes.push(`model: ${def.model}`);
-		return `${def.name.padEnd(nameWidth)}  ${origin.padEnd(7)}  ${def.description}  [${notes.join(" · ")}]`;
+		return {
+			name: def.name,
+			origin: def.source === "project" ? "project" : def.filePath.startsWith(bundledDir) ? "bundled" : "user",
+			description: def.description,
+			notes: notes.join(" · "),
+		};
 	});
 }
 

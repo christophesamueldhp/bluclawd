@@ -28,7 +28,7 @@ import type {
 	ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { Key } from "@earendil-works/pi-tui";
+import { Container, Key, Spacer, Text } from "@earendil-works/pi-tui";
 import * as forkSettings from "../_shared/settings.ts";
 import { addGlobalRule, addProjectRule, removeGlobalRule, removeProjectRule } from "../_shared/settings-write.ts";
 import { isSandboxActive } from "../sandbox/state.ts";
@@ -54,6 +54,13 @@ import {
 	type Rules,
 	stripWrappingQuotes,
 } from "./rules.ts";
+
+/** What `/permissions` renders: either the rule lists, or one `test` result. */
+interface PermissionsData {
+	mode: PermissionMode;
+	lists?: Array<{ list: "deny" | "ask" | "allow"; rules: string[] }>;
+	test?: string[];
+}
 
 /** Claude Code's `autoAccept` badge colour (2.1.259 dark): rgb(175,135,255). */
 const CC_AUTO_ACCEPT = "\x1b[38;2;175;135;255m";
@@ -546,6 +553,43 @@ export function factory(pi: ExtensionAPI): void {
 	): boolean {
 		return decide({ [kind]: [rule] }, tool, input, cwd) === kind;
 	}
+	pi.registerEntryRenderer<PermissionsData>("bluclawd:permissions", (entry, _options, theme) => {
+		const data = entry.data;
+		const container = new Container();
+		container.addChild(new Spacer(1));
+		if (!data) return container;
+		const lines: string[] = [`${theme.bold("Permissions")}  ${theme.fg("dim", `mode: ${data.mode}`)}`];
+		if (data.test) {
+			for (const line of data.test) lines.push(`  ${line}`);
+			lines.push("");
+			lines.push(
+				theme.fg(
+					"dim",
+					"This is the RULE decision only. The final outcome can still differ: protected paths, a PreToolUse hook, the sandbox pairing and auto mode's guardrail all apply on top.",
+				),
+			);
+		} else {
+			// deny/ask/allow keep their precedence order and take the colour that says
+			// which way each list pushes — the flat string could only indent them.
+			const colour = { deny: "error", ask: "warning", allow: "success" } as const;
+			for (const { list, rules } of data.lists ?? []) {
+				lines.push("");
+				lines.push(`${theme.fg(colour[list], list)} ${theme.fg("dim", `(${rules.length})`)}`);
+				for (const rule of rules) lines.push(`  ${rule}`);
+				if (rules.length === 0) lines.push(theme.fg("muted", "  none"));
+			}
+			lines.push("");
+			lines.push(
+				theme.fg(
+					"dim",
+					"/permissions test <Rule(spec)> · /permissions add <allow|ask|deny> <Rule(spec)> [--project] · /permissions remove <Rule(spec)>",
+				),
+			);
+		}
+		container.addChild(new Text(lines.join("\n"), 1, 0));
+		return container;
+	});
+
 	pi.registerCommand("permissions", {
 		description:
 			"View, test or edit permission rules: /permissions [test <Rule(spec)> | add <allow|ask|deny> <Rule(spec)> [--project] | remove <Rule(spec)>]",
@@ -558,17 +602,10 @@ export function factory(pi: ExtensionAPI): void {
 
 			if (!trimmed) {
 				const effective = forkSettings.permissions(sm) ?? {};
-				const lines: string[] = [`Permission mode: ${currentMode()}`];
-				for (const list of ["deny", "ask", "allow"] as const) {
-					const entries = effective[list] ?? [];
-					lines.push(`${list} (${entries.length}):`);
-					for (const rule of entries) lines.push(`  ${rule}`);
-				}
-				lines.push("");
-				lines.push(
-					"Test: /permissions test <Rule(spec)> · Edit: /permissions add <allow|ask|deny> <Rule(spec)> [--project] · /permissions remove <Rule(spec)>",
-				);
-				ctx.ui.notify(lines.join("\n"), "info");
+				pi.appendEntry<PermissionsData>("bluclawd:permissions", {
+					mode: currentMode(),
+					lists: (["deny", "ask", "allow"] as const).map((list) => ({ list, rules: effective[list] ?? [] })),
+				});
 				return;
 			}
 
@@ -610,11 +647,7 @@ export function factory(pi: ExtensionAPI): void {
 							: "No rule matches — the call runs (nothing is denied, nothing prompts).",
 					);
 				}
-				lines.push("");
-				lines.push(
-					"This is the RULE decision only. The final outcome can still differ: protected paths, a PreToolUse hook, the sandbox pairing and auto mode's guardrail all apply on top.",
-				);
-				ctx.ui.notify(lines.join("\n"), "info");
+				pi.appendEntry<PermissionsData>("bluclawd:permissions", { mode: currentMode(), test: lines });
 				return;
 			}
 
