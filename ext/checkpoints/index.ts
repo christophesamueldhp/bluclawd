@@ -2,8 +2,18 @@
  * Checkpoints core extension (Claude Code checkpoint/rewind parity — PLAN.md F1.6)
  *
  * Captures a restorable git snapshot of the working tree at the start of every
- * turn, so `/rewind` can time-travel the code back to an earlier point without
- * touching the conversation history. Donor `examples/extensions/git-checkpoint.ts`
+ * turn, so `/rewind` can time-travel the code back to an earlier point. The
+ * conversation is a separate axis: `/rewind` asks whether to restore the files,
+ * the conversation, or both, and rewinds the conversation with `ctx.navigateTree`
+ * to the user message that started the turn.
+ *
+ * `navigateTree`, NOT `ctx.fork`: fork is the obvious fit and it is what pi's own
+ * `/fork` uses, but calling it from this command handler terminates the session
+ * (exit code 1, no stderr) — reproduced with the file restore removed, so the fork
+ * alone is the trigger. navigateTree reaches the same point in the session tree,
+ * is equally non-destructive (the abandoned path stays in the file), and does not
+ * take the session down. Do not "simplify" this back to fork without re-testing
+ * that live. Donor `examples/extensions/git-checkpoint.ts`
  * contributes only the hook-point shape (turn_start capture, session_before_fork
  * offer) — its `git stash create` + in-memory Map are a toy and are not reused
  * here: stash create drops untracked files, and an in-memory Map doesn't survive
@@ -482,11 +492,45 @@ export function factory(pi: ExtensionAPI): void {
 			const target = checkpoints[labels.indexOf(choice)];
 			if (!target) return;
 
-			const confirmed = await ctx.ui.confirm(
-				"Rewind",
-				"This will overwrite your current uncommitted changes with the selected checkpoint. Continue?",
-			);
-			if (!confirmed) return;
+			// What to rewind. Claude Code asks the same three-way question, and the two
+			// halves are genuinely independent here: the git checkpoint restores files,
+			// while the conversation lives in pi's session tree and is rewound by forking
+			// at the user message that started the turn.
+			const canRewindTalk = Boolean(target.turnEntryId);
+			const SCOPES = [
+				{ label: "Files only — restore the working tree, keep the conversation", files: true, talk: false },
+				{ label: "Files and conversation — restore the tree and rewind the conversation", files: true, talk: true },
+				{
+					label: "Conversation only — rewind the conversation to that turn, leave files alone",
+					files: false,
+					talk: true,
+				},
+			].filter((scope) => !scope.talk || canRewindTalk);
+			let scopeChoice = SCOPES[0];
+			if (SCOPES.length > 1) {
+				const scopeLabels = SCOPES.map((scope) => scope.label);
+				const picked = await ctx.ui.select("Rewind what?", scopeLabels);
+				if (!picked) return;
+				scopeChoice = SCOPES[scopeLabels.indexOf(picked)];
+			}
+			if (!scopeChoice) return;
+
+			if (scopeChoice.files) {
+				const confirmed = await ctx.ui.confirm(
+					"Rewind",
+					"This will overwrite your current uncommitted changes with the selected checkpoint. Continue?",
+				);
+				if (!confirmed) return;
+			}
+
+			// Conversation only: nothing touches the working tree, so none of the
+			// safety-net machinery below applies. Navigating the tree is non-destructive —
+			// the abandoned path stays in the session file — so there is nothing to
+			// snapshot first.
+			if (!scopeChoice.files) {
+				await ctx.navigateTree(target.turnEntryId);
+				return;
+			}
 
 			// Safety net: checkpoint the current (about-to-be-overwritten) state first
 			// so the rewind itself can be undone with another /rewind. Deliberately
@@ -518,6 +562,10 @@ export function factory(pi: ExtensionAPI): void {
 			const restored = await restoreCheckpoint(ctx.cwd, pi.exec, target.sha);
 			if (restored) {
 				ctx.ui.notify("Working tree restored to checkpoint.", "info");
+				// Move the conversation LAST: it swaps what the session is pointing at, so
+				// anything after it would run against state that is being replaced — the
+				// same ordering FleetView's switchSession hand-off exists for.
+				if (scopeChoice.talk) await ctx.navigateTree(target.turnEntryId);
 			} else {
 				// read-tree can be interrupted mid-write (e.g. SIGTERM on RESTORE_TIMEOUT_MS),
 				// potentially leaving a partially-applied tree. Point the user at the
