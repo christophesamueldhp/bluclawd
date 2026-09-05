@@ -106,8 +106,9 @@ reading the API:
 - **An extension cannot rebind a pi keybinding.** Permission-mode cycling is
   **Alt+M**, not Claude Code's Shift+Tab, which pi binds to
   `app.thinking.cycle`; pi refuses the registration and logs a conflict.
-- **An extension cannot add a theme colour.** The `acceptEdits` badge uses
-  `success` rather than a dedicated token.
+- **An extension cannot add a theme colour.** pi's `ThemeColor` union is fixed,
+  so the `acceptEdits` badge paints Claude Code's `#af87ff` with a raw truecolor
+  escape and falls back to the `success` token on a 256-colour terminal.
 - **A theme contributed through `resources_discover` cannot be the startup
   theme.** pi resolves the configured theme before that hook runs, so it falls
   back to dark and prints "Theme not found". The theme is declared in

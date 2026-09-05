@@ -45,23 +45,40 @@ import {
 	stripWrappingQuotes,
 } from "./rules.ts";
 
+/** Claude Code's `autoAccept` badge colour (2.1.259 dark): rgb(175,135,255). */
+const CC_AUTO_ACCEPT = "\x1b[38;2;175;135;255m";
+
 /**
- * Footer chip for a mode. Labels/symbols/colors mirror Claude Code (2.1.207/2.1.220 dark):
- * manual=gray ⏸, accept edits=purple ⏵⏵, auto=amber ⏵⏵, bypass=red ⏵⏵,
- * don't ask=red ⏵⏵ (CC's own badge entry is `{indicator:"don't ask", symbol:"⏵⏵", color:"error"}`).
+ * Footer chip for a mode, in Claude Code's own badge colours (extracted from the
+ * 2.1.259 binary's dark theme): accept edits=#af87ff, auto=amber, bypass and
+ * don't ask=red, manual=gray.
+ *
+ * Two things this gets right that the previous version did not:
+ *
+ * - `acceptEdits` is PURPLE, not green. pi's theme has no token for it, so
+ *   `success` was the stand-in — and green is the one colour that reads as the
+ *   opposite of what the badge means. It is painted with a raw truecolor escape
+ *   instead, which the ccstatusline footer next to it already does for its own
+ *   widgets. A 256-colour terminal would not downconvert the escape, so that
+ *   case keeps the theme token.
+ * - `default` carries NO symbol. `⏸` is Claude Code's *plan mode* badge, and
+ *   plan mode is not part of this layer, so the symbol pointed at nothing.
  */
 function modeStatusText(ctx: ExtensionContext, mode: PermissionMode): string | undefined {
+	const theme = ctx.ui.theme;
 	switch (mode) {
 		case "default":
-			return ctx.ui.theme.fg("muted", "⏸ manual mode on");
+			return theme.fg("muted", "manual mode on");
 		case "acceptEdits":
-			return ctx.ui.theme.fg("success", "⏵⏵ accept edits on");
+			return theme.getColorMode() === "truecolor"
+				? `${CC_AUTO_ACCEPT}⏵⏵ accept edits on\x1b[0m`
+				: theme.fg("success", "⏵⏵ accept edits on");
 		case "auto":
-			return ctx.ui.theme.fg("warning", "⏵⏵ auto mode on");
+			return theme.fg("warning", "⏵⏵ auto mode on");
 		case "bypass":
-			return ctx.ui.theme.fg("error", "⏵⏵ bypass permissions on");
+			return theme.fg("error", "⏵⏵ bypass permissions on");
 		case "dontAsk":
-			return ctx.ui.theme.fg("error", "⏵⏵ don't ask on");
+			return theme.fg("error", "⏵⏵ don't ask on");
 		default:
 			return undefined;
 	}
