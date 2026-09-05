@@ -51,7 +51,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 
 | Command | What it does |
 |---|---|
-| `/mode`, `/permissions` | permission modes (Alt+M cycles) and allow/ask/deny rules |
+| `/mode`, `/permissions` | permission modes and allow/ask/deny rules. `/mode` picks from a list; Alt+M cycles `ask → edits → auto`. `always` and `never` must be named |
 | `/sandbox` | OS-level sandbox for bash (`@anthropic-ai/sandbox-runtime`) |
 | `/tasks` | background bash jobs (`run_in_background`, `bash_output`, `kill_bash`) |
 | `/agents` | subagents via the `task` tool |
@@ -115,6 +115,30 @@ reading the API:
   `package.json`'s `pi.themes` instead, which pi registers before startup.
 - **`newSession()` takes neither a directory nor a model**, so FleetView's "New
   session" panel says which part of the choice it could not honour.
+
+## Permission modes
+
+Named after pi's own `ask` / `always` / `never` trust vocabulary rather than
+Claude Code's, because they answer the same question about a tool call that
+`defaultProjectTrust` answers about a project:
+
+| Mode | What it does |
+|---|---|
+| `ask` | ask before anything that is not already allowed |
+| `edits` | approve file edits automatically, ask for the rest |
+| `auto` | never prompt, but screen every dangerous command |
+| `always` | approve everything, no guards at all |
+| `never` | refuse anything that would have prompted, instead of asking |
+
+Claude Code's names (`default`, `acceptEdits`, `bypass`, `dontAsk`) are still
+accepted anywhere a mode is named, so stored settings and scripts keep working.
+
+**Project trust pins the mode.** In a project pi has not been told to trust,
+every mode above `ask` is refused — from settings, CLI flags, `/mode` and
+Alt+M alike. pi already withholds an untrusted repository's settings,
+extensions and skills; a mode that auto-approves edits or skips prompts would
+hand back what that gate withholds. `/trust` is the way out, and the refusal
+message says so.
 
 Deliberately not ported: **PDF input** (would mean reimplementing four
 provider wire formats behind `before_provider_request` — a shared-type change

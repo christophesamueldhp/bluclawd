@@ -13,7 +13,7 @@
  *
  * The evaluation is split in two: `evaluatePreHook` runs the gates nothing may override
  * (mode blocks, deny rules, protected paths), `evaluatePostHook` runs the rest (auto mode's
- * guardrail, `dontAsk`'s refusal, standing grants, and the prompt).
+ * guardrail, `never`'s refusal, standing grants, and the prompt).
  *
  * Purity note: `isProtectedPath`/`isReadProtectedPath` do touch the filesystem (realpath, to
  * catch symlinks into protected territory), and so does `decide()` for a deny/ask path
@@ -41,7 +41,7 @@ import { isSafeCommand } from "./safe-command.ts";
 
 /** The gate that produced a verdict. Every verdict names exactly one. */
 export type Gate =
-	| "bypass-mode"
+	| "always-mode"
 	| "deny-rule"
 	| "read-protected-path"
 	| "write-protected-path"
@@ -148,13 +148,13 @@ const autoModeReason = (reason: string): string =>
  * or `undefined` when it can.
  *
  * Two independent reasons converge on the same outcome, so every prompt site asks this one
- * question. Headless cannot prompt: there is no UI. `dontAsk` refuses to by policy: Claude
- * Code's mode fallback answers "deny" in exactly the place `default` answers "ask"
- * (`if (mode === "dontAsk") return "deny"`, verified in the 2.1.220 binary), which makes the
+ * question. Headless cannot prompt: there is no UI. `never` refuses to by policy: Claude
+ * Code's mode fallback answers "deny" in exactly the place `ask` answers "ask"
+ * (`if (mode === "never") return "deny"`, verified in the 2.1.220 binary), which makes the
  * mode precisely "every would-be prompt is a refusal".
  */
 function noPromptReason(cfg: EvalConfig): string | undefined {
-	if (cfg.mode === "dontAsk") return "dontAsk mode never prompts";
+	if (cfg.mode === "never") return "never mode never prompts";
 	if (!cfg.hasUI) return "running headless (no interactive UI)";
 	return undefined;
 }
@@ -167,7 +167,7 @@ function noPromptReason(cfg: EvalConfig): string | undefined {
  */
 export function evaluatePreHook(tool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict | undefined {
 	// 1. bypass → allow everything, rules are not consulted.
-	if (cfg.mode === "bypass") return ALLOW("bypass-mode");
+	if (cfg.mode === "always") return ALLOW("always-mode");
 
 	// 2. deny rules. (ask/allow are resolved in evaluatePostHook.)
 	const { decision, denyAgent } = decideRules(tool, input, cfg.rules, cfg.cwd);
@@ -251,7 +251,7 @@ export function evaluatePreHook(tool: string, input: Record<string, unknown>, cf
 }
 
 /**
- * Gates 6–8: auto mode's guardrail, `dontAsk`'s refusal, the standing grants that clear an
+ * Gates 6–8: auto mode's guardrail, `never`'s refusal, the standing grants that clear an
  * `ask`, and finally the prompt.
  *
  * `autoBlocked` reports whether auto mode's guardrail refused, so the caller can advance its
@@ -280,19 +280,19 @@ export function evaluatePostHook(tool: string, input: Record<string, unknown>, c
 		};
 	}
 
-	// 6b. dontAsk: no prompt is available, so a call is either already permitted or blocked.
-	//     The grants below are gate 7's, minus `acceptEdits` (a different mode) — the question
+	// 6b. never: no prompt is available, so a call is either already permitted or blocked.
+	//     The grants below are gate 7's, minus `edits` (a different mode) — the question
 	//     "does anything already permit this?" is identical; only the fallback differs, and
 	//     here the fallback is a refusal.
 	//
 	//     Reads stay free. In Claude Code they resolve to "allow" before the mode fallback is
-	//     ever consulted, so `dontAsk` does not deny them there either; denying them would
+	//     ever consulted, so `never` does not deny them there either; denying them would
 	//     also leave the mode unable to so much as open a file.
 	//
 	//     An `ask` RULE is NOT handled here — it falls through to gate 7, whose prompt
 	//     `noPromptReason` turns into a block for the same reason. One prompt-to-block
 	//     conversion, applied at every prompt site.
-	if (cfg.mode === "dontAsk" && decision === null) {
+	if (cfg.mode === "never" && decision === null) {
 		if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
 		if (READ_LIKE_TOOLS.has(tool)) return ALLOW("dont-ask-mode");
 		if (tool === "bash" && isSafeCommand(subject("bash", input))) return ALLOW("readonly-bash");
@@ -304,12 +304,12 @@ export function evaluatePostHook(tool: string, input: Record<string, unknown>, c
 		// The rule that would permit this call, named so the block is actionable. `exact`
 		// above cannot be reused: for `task` it is keyed to the ASKING agent, and no rule
 		// matched here, so there is none. `exact` is likewise left unset on the verdict —
-		// a dontAsk block never reaches the "Always allow" path that reads it.
+		// a never-mode block never reaches the "Always allow" path that reads it.
 		const denied = exactRule(tool, tool === "task" ? (taskAgents(input)[0] ?? "") : subject(tool, input)) ?? tool;
 		return {
 			outcome: "block",
 			gate: "dont-ask-mode",
-			reason: `dontAsk mode: no allow rule covers ${denied}, and this mode never prompts. Blocked.`,
+			reason: `never mode: no allow rule covers ${denied}, and this mode never prompts. Blocked.`,
 		};
 	}
 
@@ -356,7 +356,7 @@ export function evaluatePostHook(tool: string, input: Record<string, unknown>, c
 		if (tool === "bash" && cfg.sandboxActive && autoGuard("bash", input, cfg.cwd) === "allow") {
 			return ALLOW("sandbox-pairing");
 		}
-		if (cfg.mode === "acceptEdits" && (tool === "edit" || tool === "write")) return ALLOW("accept-edits");
+		if (cfg.mode === "edits" && (tool === "edit" || tool === "write")) return ALLOW("accept-edits");
 
 		const noPrompt = noPromptReason(cfg);
 		if (noPrompt) {
@@ -406,7 +406,7 @@ export function evaluatePostHook(tool: string, input: Record<string, unknown>, c
 		};
 	}
 
-	// 9. No rule matched, so nothing has decided. `default` means "the rules decide" —
+	// 9. No rule matched, so nothing has decided. `ask` means "the rules decide" —
 	//    and a fresh install has no `permissions` key at all, so `rm -rf build` used to
 	//    run unprompted in the mode whose name promises the most caution, while `auto`
 	//    refused it. The mode that sounds more autonomous was the safer one
@@ -416,8 +416,8 @@ export function evaluatePostHook(tool: string, input: Record<string, unknown>, c
 	//    PROMPT rather than a block: these modes are manual, so the user decides — and
 	//    "Always allow" turns the answer into the rule that was missing.
 	//
-	//    Reached by `default` and `acceptEdits`, so a single Shift+Tab cannot disarm it.
-	//    `bypass` returned at gate 1, `auto` at 6 and `dontAsk` at 6b.
+	//    Reached by `ask` and `edits`, so a single Shift+Tab cannot disarm it.
+	//    `always` returned at gate 1, `auto` at 6 and `never` at 6b.
 	//
 	//    Only the COMMAND denylist, deliberately — not `autoGuard`'s containment half.
 	//    Screening writes and redirects for "inside the working directory" is part of auto

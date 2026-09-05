@@ -3,7 +3,7 @@
  *
  * Governs every `tool_call` against a `Verb(glob)` rule set (rules.ts) with a
  * deny > ask > allow precedence, layered under a session permission mode
- * (modes.ts): bypass / acceptEdits / default / auto / dontAsk.
+ * (modes.ts): always / edits / ask / auto / never.
  *
  * Registration order matters: this extension is registered FIRST in
  * coreExtensions() so it sees `tool_call` before any other extension.
@@ -34,7 +34,17 @@ import { addGlobalRule, addProjectRule, removeGlobalRule, removeProjectRule } fr
 import { isSandboxActive } from "../sandbox/state.ts";
 import { setActivePermissionMode } from "./active-mode.ts";
 import { type EvalConfig, evaluatePostHook, evaluatePreHook } from "./evaluate.ts";
-import { createModeStore, type ModeStore, PERMISSION_MODES, type PermissionMode } from "./modes.ts";
+import {
+	createModeStore,
+	isModeAllowedUntrusted,
+	MODE_DESCRIPTIONS,
+	type ModeStore,
+	nextInCycle,
+	PERMISSION_MODES,
+	type PermissionMode,
+	parseMode,
+	SAFEST_MODE,
+} from "./modes.ts";
 import {
 	bashSegments,
 	decide,
@@ -50,35 +60,35 @@ const CC_AUTO_ACCEPT = "\x1b[38;2;175;135;255m";
 
 /**
  * Footer chip for a mode, in Claude Code's own badge colours (extracted from the
- * 2.1.259 binary's dark theme): accept edits=#af87ff, auto=amber, bypass and
- * don't ask=red, manual=gray.
+ * 2.1.259 binary's dark theme): edits=#af87ff, auto=amber, always and never=red,
+ * ask=gray. The wording follows this layer's own mode names, not CC's labels.
  *
  * Two things this gets right that the previous version did not:
  *
- * - `acceptEdits` is PURPLE, not green. pi's theme has no token for it, so
+ * - `edits` (Claude Code's accept-edits) is PURPLE, not green. pi's theme has no token for it, so
  *   `success` was the stand-in — and green is the one colour that reads as the
  *   opposite of what the badge means. It is painted with a raw truecolor escape
  *   instead, which the ccstatusline footer next to it already does for its own
  *   widgets. A 256-colour terminal would not downconvert the escape, so that
  *   case keeps the theme token.
- * - `default` carries NO symbol. `⏸` is Claude Code's *plan mode* badge, and
+ * - `ask` carries NO symbol. `⏸` is Claude Code's *plan mode* badge, and
  *   plan mode is not part of this layer, so the symbol pointed at nothing.
  */
 function modeStatusText(ctx: ExtensionContext, mode: PermissionMode): string | undefined {
 	const theme = ctx.ui.theme;
 	switch (mode) {
-		case "default":
-			return theme.fg("muted", "manual mode on");
-		case "acceptEdits":
+		case "ask":
+			return theme.fg("muted", "ask mode on");
+		case "edits":
 			return theme.getColorMode() === "truecolor"
-				? `${CC_AUTO_ACCEPT}⏵⏵ accept edits on\x1b[0m`
-				: theme.fg("success", "⏵⏵ accept edits on");
+				? `${CC_AUTO_ACCEPT}⏵⏵ edits mode on\x1b[0m`
+				: theme.fg("success", "⏵⏵ edits mode on");
 		case "auto":
 			return theme.fg("warning", "⏵⏵ auto mode on");
-		case "bypass":
-			return theme.fg("error", "⏵⏵ bypass permissions on");
-		case "dontAsk":
-			return theme.fg("error", "⏵⏵ don't ask on");
+		case "always":
+			return theme.fg("error", "⏵⏵ always mode on");
+		case "never":
+			return theme.fg("error", "⏵⏵ never mode on");
 		default:
 			return undefined;
 	}
@@ -112,8 +122,8 @@ export function factory(pi: ExtensionAPI): void {
 	// flag's intent is an explicit per-invocation grant — honored in the ask and
 	// auto gates below (deny and protected paths still win).
 	let cliAllowRules: Rules = {};
-	// Mode store: created in session_start (fresh "default" state), disposed in
-	// session_shutdown. Undefined before the first session_start → treat as "default".
+	// Mode store: created in session_start (fresh "ask" state), disposed in
+	// session_shutdown. Undefined before the first session_start → treat as "ask".
 	let modeStore: ModeStore | undefined;
 	// Latest live context, captured in handlers so the event-driven footer refresh
 	// has a ctx. Optional-chained + try/guarded so a stale instance is a safe no-op.
@@ -126,7 +136,20 @@ export function factory(pi: ExtensionAPI): void {
 	let autoMaxConsecutive = 3;
 	let autoMaxTotal = 20;
 
-	const currentMode = (): PermissionMode => modeStore?.get() ?? "default";
+	const currentMode = (): PermissionMode => modeStore?.get() ?? "ask";
+
+	/**
+	 * Say why a mode was refused. Project trust is pi's own gate — it already withholds
+	 * this repository's settings, extensions and skills — so a mode that auto-approves
+	 * edits or skips prompts is exactly what it should also withhold. `/trust` is the
+	 * way out, so the message names it rather than leaving the refusal unexplained.
+	 */
+	function reportUntrustedRefusal(ctx: ExtensionContext, mode: PermissionMode): void {
+		ctx.ui.notify(
+			`This project is not trusted, so it stays in ${SAFEST_MODE} mode — ${mode} was refused. Run /trust to change that.`,
+			"warning",
+		);
+	}
 
 	/**
 	 * Every mode change, from any source. Publishes the mode for the subagent gate
@@ -160,14 +183,15 @@ export function factory(pi: ExtensionAPI): void {
 			return;
 		}
 		if (!configured) return;
-		if (!(PERMISSION_MODES as readonly string[]).includes(configured)) {
+		if (!parseMode(configured)) {
 			ctx.ui.notify(
 				`Invalid permissions.defaultMode "${configured}" in settings. Valid: ${PERMISSION_MODES.join(", ")}`,
 				"warning",
 			);
 			return;
 		}
-		modeStore?.set(configured as PermissionMode);
+		const parsed = parseMode(configured);
+		if (parsed && modeStore && !modeStore.set(parsed)) reportUntrustedRefusal(ctx, parsed);
 	}
 
 	function loadRules(ctx: ExtensionContext): Rules {
@@ -224,10 +248,13 @@ export function factory(pi: ExtensionAPI): void {
 		liveCtx = ctx;
 		// Dispose any prior store first so resume/new/fork re-runs stay idempotent.
 		modeStore?.dispose();
-		modeStore = createModeStore(onModeChanged);
+		// Trust is read through a live callback, not captured: pi resolves it during
+		// startup and `/trust` can grant it mid-session, so a snapshot would strand the
+		// session in the clamped mode for good.
+		modeStore = createModeStore(onModeChanged, () => ctx.isProjectTrusted());
 		// Starting mode from settings (Claude Code parity with permissions.defaultMode).
 		// GLOBAL settings only — a trusted project may contribute allow rules, but
-		// letting it name the mode would let any repo ship `defaultMode: "bypass"`
+		// letting it name the mode would let any repo ship `defaultMode: "always"`
 		// and switch the whole safety layer off. CLI flags below still override this.
 		applySettingsDefaultMode(ctx);
 		rules = loadRules(ctx);
@@ -257,12 +284,13 @@ export function factory(pi: ExtensionAPI): void {
 		const allowFlag = pi.getFlag("allowedTools");
 		cliAllowRules = typeof allowFlag === "string" && allowFlag ? { allow: parseToolRuleFlag(allowFlag) } : {};
 		// Initial mode from the CLI: --dangerously-skip-permissions (CC alias) wins
-		// over --permission-mode. Sets the *initial* mode only — Shift+Tab and /mode
+		// over --permission-mode. Sets the *initial* mode only — Alt+M and /mode
 		// still switch freely afterwards.
-		const modeFlag = pi.getFlag("dangerously-skip-permissions") === true ? "bypass" : pi.getFlag("permission-mode");
+		const modeFlag = pi.getFlag("dangerously-skip-permissions") === true ? "always" : pi.getFlag("permission-mode");
 		if (typeof modeFlag === "string" && modeFlag) {
-			if ((PERMISSION_MODES as readonly string[]).includes(modeFlag)) {
-				modeStore.set(modeFlag as PermissionMode);
+			const parsedFlag = parseMode(modeFlag);
+			if (parsedFlag) {
+				if (!modeStore.set(parsedFlag)) reportUntrustedRefusal(ctx, parsedFlag);
 			} else {
 				ctx.ui.notify(`Invalid --permission-mode "${modeFlag}". Valid: ${PERMISSION_MODES.join(", ")}`, "warning");
 			}
@@ -274,7 +302,7 @@ export function factory(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", async () => {
 		modeStore?.dispose();
 		modeStore = undefined;
-		setActivePermissionMode("default");
+		setActivePermissionMode("ask");
 	});
 
 	/** CC's documented cap: "Up to 5 rules may be saved for a single compound command." */
@@ -431,25 +459,64 @@ export function factory(pi: ExtensionAPI): void {
 	async function cycleAndReport(ctx: ExtensionContext): Promise<void> {
 		liveCtx = ctx;
 		if (!modeStore) return; // no store before session_start (shouldn't happen in practice)
+		const before = modeStore.get();
 		const next = modeStore.cycle();
 		refreshStatus();
+		// An untrusted project pins the mode, so the cycle is a no-op. Saying "Permission
+		// mode: ask" again would read as a stuck key rather than a refusal.
+		if (next === before && !ctx.isProjectTrusted()) {
+			// Name the mode the cycle AIMED at, not the one still in effect — "ask was
+			// refused" while sitting in ask reads as nonsense.
+			reportUntrustedRefusal(ctx, nextInCycle(before));
+			return;
+		}
 		ctx.ui.notify(`Permission mode: ${next}`, "info");
 	}
 
+	/** Apply a named mode, reporting either the change or why trust refused it. */
+	function applyNamedMode(ctx: ExtensionContext, mode: PermissionMode): void {
+		liveCtx = ctx;
+		if (!modeStore) return;
+		if (!modeStore.set(mode)) {
+			reportUntrustedRefusal(ctx, mode);
+			return;
+		}
+		refreshStatus();
+		ctx.ui.notify(`Permission mode: ${mode}`, "info");
+	}
+
 	pi.registerCommand("mode", {
-		description:
-			"Cycle permission mode (default → acceptEdits → auto); /mode bypass allows everything, /mode dontAsk denies whatever would have prompted",
+		description: `Choose a permission mode (${PERMISSION_MODES.join(" / ")}); Alt+M cycles the first three`,
 		handler: async (args, ctx) => {
-			const requested = args.trim() as PermissionMode;
-			if (requested && (PERMISSION_MODES as readonly string[]).includes(requested)) {
-				liveCtx = ctx;
-				if (!modeStore) return;
-				modeStore.set(requested);
-				refreshStatus();
-				ctx.ui.notify(`Permission mode: ${requested}`, "info");
+			const requested = args.trim();
+			if (requested) {
+				const mode = parseMode(requested);
+				if (!mode) {
+					ctx.ui.notify(`Unknown mode "${requested}". Valid: ${PERMISSION_MODES.join(", ")}`, "warning");
+					return;
+				}
+				applyNamedMode(ctx, mode);
 				return;
 			}
-			await cycleAndReport(ctx);
+			// A bare `/mode` opens a picker, the way pi's own `/model`, `/theme` and
+			// `/thinking` do — cycling blind through five modes (two of which are not even
+			// in the cycle) never showed what the other options were, or what they mean.
+			// Alt+M is still the fast path for the three-mode cycle.
+			if (!ctx.hasUI) {
+				await cycleAndReport(ctx);
+				return;
+			}
+			const trusted = ctx.isProjectTrusted();
+			const current = currentMode();
+			const labels = PERMISSION_MODES.map((mode) => {
+				const suffix =
+					mode === current ? "  (current)" : !trusted && !isModeAllowedUntrusted(mode) ? "  (needs /trust)" : "";
+				return `${mode} — ${MODE_DESCRIPTIONS[mode]}${suffix}`;
+			});
+			const choice = await ctx.ui.select("Permission mode", labels);
+			if (!choice) return;
+			const picked = PERMISSION_MODES[labels.indexOf(choice)];
+			if (picked) applyNamedMode(ctx, picked);
 		},
 	});
 
@@ -538,8 +605,8 @@ export function factory(pi: ExtensionAPI): void {
 				}
 				if (!decided) {
 					lines.push(
-						currentMode() === "dontAsk"
-							? "No rule matches — and dontAsk mode refuses whatever no rule allows, so the call is blocked."
+						currentMode() === "never"
+							? "No rule matches — and never mode refuses whatever no rule allows, so the call is blocked."
 							: "No rule matches — the call runs (nothing is denied, nothing prompts).",
 					);
 				}

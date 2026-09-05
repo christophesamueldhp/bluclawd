@@ -31,7 +31,7 @@ export interface SandboxSettings {
 
 export interface PermissionSettings {
 	/** Mode the session starts in. Read from GLOBAL settings only — a project must not name it. */
-	defaultMode?: "default" | "acceptEdits" | "auto" | "bypass" | "dontAsk";
+	defaultMode?: "ask" | "edits" | "auto" | "always" | "never" | "default" | "acceptEdits" | "bypass" | "dontAsk";
 	allow?: string[];
 	ask?: string[];
 	deny?: string[];
@@ -95,7 +95,7 @@ export function permissions(sm: SettingsManager): PermissionSettings | undefined
  *
  * Deliberately not merged with project settings: a trusted project may add allow
  * rules, but letting it name the session's mode would let a repo switch the
- * safety layer off wholesale by shipping `defaultMode: "bypass"`.
+ * safety layer off wholesale by shipping `defaultMode: "always"`.
  */
 export function globalPermissionDefaultMode(sm: SettingsManager): string | undefined {
 	const global = sm.getGlobalSettings() as unknown as Mergeable;

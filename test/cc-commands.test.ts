@@ -48,7 +48,7 @@ describe("/status report", () => {
 				thinkingLevel: "high",
 				authSource: "stored",
 				subscription: false,
-				permissionMode: "acceptEdits",
+				permissionMode: "edits",
 				sandbox: true,
 				projectTrusted: true,
 				cwd: "/x",
@@ -60,7 +60,7 @@ describe("/status report", () => {
 		);
 		expect(lines).toContain("Model: opencode-go/kimi-k2.6 (Kimi K2.6)");
 		expect(lines).toContain("Effort: high (/thinking)");
-		expect(lines).toContain("Permission mode: acceptEdits (/mode)");
+		expect(lines).toContain("Permission mode: edits (/mode)");
 		expect(lines).toContain("Sandbox: on (/sandbox)");
 		expect(lines).toContain("Name: wave");
 		expect(lines.at(-1)).toContain("/session");

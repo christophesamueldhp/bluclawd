@@ -40,7 +40,7 @@ const RULE_SETS: Record<string, Rules> = {
 	"allow-all-bash": { allow: ["Bash(**)"] },
 };
 
-const MODES: readonly PermissionMode[] = ["default", "acceptEdits", "auto", "bypass", "dontAsk"];
+const MODES: readonly PermissionMode[] = ["ask", "edits", "auto", "always", "never"];
 
 function toolCases(
 	cwd: string,

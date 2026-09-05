@@ -12,13 +12,13 @@
  * inherited ask would hard-block every governed tool and break subagents
  * entirely. deny is the safety-critical layer; allow/ask stay parent-side.
  *
- * `dontAsk` is the ONE mode that changes that, and it has to. The mode means "run
+ * `never` is the ONE mode that changes that, and it has to. The mode means "run
  * only what is listed", so leaving a child on the default posture would make an
  * `allow: Task(...)` grant a laundering route: the parent refuses an unlisted
- * write, the child performs it. Under `dontAsk` the child therefore inherits the
+ * write, the child performs it. Under `never` the child therefore inherits the
  * mode AND the whole rule set — ask rules included, since nothing prompts in that
  * mode anyway, so parent and child reach the same verdict. Its posture is exactly
- * the parent's. `acceptEdits` is still not inherited (pre-existing; see
+ * the parent's. `edits` is still not inherited (pre-existing; see
  * active-mode.ts).
  *
  * Enforcement runs through the SAME evaluator the parent uses (evaluate.ts), in
@@ -60,13 +60,13 @@ export function factory(pi: ExtensionAPI): void {
 	}
 
 	/**
-	 * Deny-only normally; the whole set under `dontAsk`, where the child must be able
+	 * Deny-only normally; the whole set under `never`, where the child must be able
 	 * to do what the parent explicitly allowed and must refuse what it did not. The
 	 * mode is read per call, not cached, so switching it mid-session takes effect.
 	 */
-	function rulesFor(ctx: { cwd: string; isProjectTrusted: () => boolean }, dontAsk: boolean): Rules {
+	function rulesFor(ctx: { cwd: string; isProjectTrusted: () => boolean }, neverMode: boolean): Rules {
 		const rules = loadRules(ctx);
-		return dontAsk ? rules : { deny: rules.deny ?? [] };
+		return neverMode ? rules : { deny: rules.deny ?? [] };
 	}
 
 	// A reload re-reads settings; drop the cache so the next call picks them up.
@@ -79,10 +79,10 @@ export function factory(pi: ExtensionAPI): void {
 		// because a child has nobody to ask. `task` is stripped from child tool sets, but
 		// the evaluator gates it anyway (defense in depth against a custom tool set
 		// reintroducing it).
-		const dontAsk = getActivePermissionMode() === "dontAsk";
+		const neverMode = getActivePermissionMode() === "never";
 		const cfg: EvalConfig = {
-			mode: dontAsk ? "dontAsk" : "default",
-			rules: rulesFor(ctx, dontAsk),
+			mode: neverMode ? "never" : "ask",
+			rules: rulesFor(ctx, neverMode),
 			cliAllowRules: {},
 			cwd: ctx.cwd,
 			agentDir: getAgentDir(),
@@ -97,7 +97,7 @@ export function factory(pi: ExtensionAPI): void {
 		// allow must never fall through to "permitted" in a gate whose job is to refuse.
 		if (pre) return pre.outcome === "allow" ? undefined : { block: true, reason: pre.reason };
 
-		// The second half. Under `dontAsk` it applies the whole inherited rule set; in every
+		// The second half. Under `never` it applies the whole inherited rule set; in every
 		// other mode it now contributes exactly one thing — the deterministic guardrail,
 		// whose refusal the parent turns into a prompt and a child, having nobody to ask,
 		// turns into a block. Without it `task` would launder every guardrail-refused
