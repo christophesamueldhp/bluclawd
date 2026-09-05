@@ -12,7 +12,8 @@
  * named `task` (the donor called it `subagent`).
  */
 
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import type {
 	AgentToolResult,
@@ -507,9 +508,69 @@ export function factory(pi: ExtensionAPI): void {
 		return container;
 	});
 
+	/** Where a user-scoped agent definition lives. Project defs are read-only here:
+	 *  writing one would be this layer editing a repository's own resources. */
+	const userAgentPath = (name: string): string => join(getAgentDir(), "agents", `${name}.md`);
+
+	/** A def's skeleton, so a new agent starts valid rather than empty. */
+	const AGENT_TEMPLATE = (name: string): string =>
+		`---\nname: ${name}\ndescription: One line the task tool reads to decide when to delegate here.\ntools: read,grep,find,ls\n---\nYou are …\n\n- What this agent does, and what it must not do.\n- What it returns.\n`;
+
+	/** Open a user agent def in the editor and write it back. Shared by new and edit. */
+	async function editAgent(ctx: ExtensionContext, name: string, prefill: string): Promise<void> {
+		const path = userAgentPath(name);
+		const edited = await ctx.ui.editor(`agent ${name} — ${path}`, prefill);
+		if (edited === undefined) return;
+		if (!edited.trim()) {
+			ctx.ui.notify("Left unchanged: an empty definition would not load.", "warning");
+			return;
+		}
+		try {
+			mkdirSync(dirname(path), { recursive: true });
+			writeFileSync(path, edited.endsWith("\n") ? edited : `${edited}\n`);
+		} catch (error) {
+			ctx.ui.notify(`Could not write ${path}: ${error instanceof Error ? error.message : String(error)}`, "error");
+			return;
+		}
+		// The task tool rediscovers defs per call, so the agent is usable at once.
+		ctx.ui.notify(`Saved ${path}`, "info");
+	}
+
 	pi.registerCommand("agents", {
-		description: "List the subagents the task tool can delegate to",
-		handler: async (_args, ctx) => {
+		description: "List, create or edit the subagents the task tool can delegate to (/agents [new|edit] <name>)",
+		handler: async (args, ctx) => {
+			const [sub = "", ...rest] = args.trim().split(/\s+/);
+
+			if (sub === "new" || sub === "edit") {
+				if (!ctx.hasUI) {
+					ctx.ui.notify(`/agents ${sub} requires interactive mode`, "error");
+					return;
+				}
+				const name = rest.join("-");
+				if (!name || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name)) {
+					ctx.ui.notify(`Usage: /agents ${sub} <name> (letters, digits, dashes)`, "warning");
+					return;
+				}
+				// Prefill from the existing user def when there is one; a bundled agent of
+				// the same name is used as a starting point, which is how you customise a
+				// shipped one without hunting for where it lives.
+				const userPath = userAgentPath(name);
+				const bundledPath = join(bundledAgentsDir(), `${name}.md`);
+				const source = existsSync(userPath) ? userPath : existsSync(bundledPath) ? bundledPath : undefined;
+				if (sub === "edit" && !source) {
+					ctx.ui.notify(`No agent named "${name}". /agents new ${name} creates one.`, "warning");
+					return;
+				}
+				const prefill = source ? readFileSync(source, "utf-8") : AGENT_TEMPLATE(name);
+				await editAgent(ctx, name, prefill);
+				return;
+			}
+
+			if (sub) {
+				ctx.ui.notify(`Unknown subcommand "${sub}". Usage: /agents [new|edit] <name>`, "warning");
+				return;
+			}
+
 			// Project defs are read only for a trusted project — an untrusted repo's
 			// agent descriptions should not be surfaced, the same rule /hooks uses.
 			const trusted = ctx.isProjectTrusted();

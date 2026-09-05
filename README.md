@@ -54,7 +54,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `/mode`, `/permissions` | permission modes and allow/ask/deny rules. `/mode` picks from a list; Alt+M cycles `ask → edits → auto`. `always` and `never` must be named |
 | `/sandbox` | OS-level sandbox for bash (`@anthropic-ai/sandbox-runtime`). `sandbox.strict` refuses to run bash at all when the sandbox was enabled but failed to start, instead of falling back to unsandboxed |
 | `/tasks` | background bash jobs (`run_in_background`, `bash_output`, `kill_bash`) |
-| `/agents` | subagents via the `task` tool |
+| `/agents` | subagents via the `task` tool; `/agents new\|edit <name>` writes user defs (editing a bundled one starts from its text) |
 | `/mcp` | MCP servers from `mcp.json` |
 | `/memory`, `# note` | persistent memory, injected into the system prompt. `/memory edit [scope]` and `/memory search <text>`; a bare `#` opens an editor for a multi-line note; `@name.md` lines pull in a sibling file |
 | `/rewind` | file checkpoints per turn; restores the files, the conversation, or both |
