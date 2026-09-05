@@ -12,8 +12,10 @@
  *
  * Failure posture: if enabled but initialization fails (missing bubblewrap,
  * unsupported platform, ...), bash falls back to UNSANDBOXED execution with a
- * loud status chip and an error notice. The runtime dependency is imported
- * lazily so disabled sessions pay no startup cost.
+ * loud status chip and an error notice — unless `sandbox.strict` is set, in
+ * which case bash refuses to run at all: the tool, background jobs and user `!`
+ * commands each check strictRefusalReason. The runtime
+ * dependency is imported lazily so disabled sessions pay no startup cost.
  */
 
 import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
@@ -26,7 +28,7 @@ import {
 import { type Static, Type } from "typebox";
 import { backgroundBashJobs } from "../_shared/background-bash.ts";
 import * as forkSettings from "../_shared/settings.ts";
-import { resolveSandboxConfig, type SandboxConfig } from "./config.ts";
+import { resolveSandboxConfig, type SandboxConfig, strictRefusalReason } from "./config.ts";
 import { buildSandboxFailureNote } from "./failure-note.ts";
 import { isSandboxActive, setSandboxActive } from "./state.ts";
 
@@ -107,6 +109,11 @@ export function factory(pi: ExtensionAPI): void {
 			const { description, run_in_background, ...rest } = params as Static<typeof BACKGROUND_BASH_PARAMS> &
 				Record<string, unknown>;
 
+			const refusal = strictRefusalReason(config, isSandboxActive(), lastError);
+			if (refusal) {
+				return { content: [{ type: "text", text: refusal }], isError: true, details: undefined };
+			}
+
 			if (run_in_background) {
 				// The job's own lifetime owns the process: the tool call's signal is
 				// deliberately NOT attached, since backgrounding means outliving this
@@ -142,6 +149,14 @@ export function factory(pi: ExtensionAPI): void {
 	});
 
 	pi.on("user_bash", () => {
+		// A user `!` command is the other way a shell runs, and it does NOT go through
+		// the bash tool's execute — so strict has to refuse here too, or `!` would be a
+		// hole straight around it. `user_bash` takes a full result replacement, which is
+		// how the refusal is delivered without running anything.
+		const refusal = strictRefusalReason(config, isSandboxActive(), lastError);
+		if (refusal) {
+			return { result: { output: refusal, exitCode: 1, cancelled: false, truncated: false } };
+		}
 		if (!isSandboxActive()) return;
 		return { operations: sandboxedOperations() };
 	});
@@ -175,7 +190,12 @@ export function factory(pi: ExtensionAPI): void {
 			setSandboxActive(false);
 			lastError = err instanceof Error ? err.message : String(err);
 			ctx.ui.setStatus("sandbox", ctx.ui.theme.fg("error", "🔓 sandbox FAILED"));
-			ctx.ui.notify(`Sandbox initialization failed — bash commands run UNSANDBOXED: ${lastError}`, "error");
+			ctx.ui.notify(
+				config.strict
+					? `Sandbox initialization failed — bash is BLOCKED while sandbox.strict is set: ${lastError}`
+					: `Sandbox initialization failed — bash commands run UNSANDBOXED: ${lastError}`,
+				"error",
+			);
 		}
 	}
 
@@ -235,6 +255,7 @@ export function factory(pi: ExtensionAPI): void {
 			}
 			const lines = [
 				`Sandbox: ${isSandboxActive() ? "active 🔒" : config.enabled ? "enabled but NOT active 🔓" : "disabled"}`,
+				`On failure: ${config.strict ? "REFUSE to run bash (sandbox.strict)" : "run unsandboxed"}`,
 				...(lastError ? [`Last error: ${lastError}`] : []),
 				"",
 				"Network:",

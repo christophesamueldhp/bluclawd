@@ -52,7 +52,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | Command | What it does |
 |---|---|
 | `/mode`, `/permissions` | permission modes and allow/ask/deny rules. `/mode` picks from a list; Alt+M cycles `ask → edits → auto`. `always` and `never` must be named |
-| `/sandbox` | OS-level sandbox for bash (`@anthropic-ai/sandbox-runtime`) |
+| `/sandbox` | OS-level sandbox for bash (`@anthropic-ai/sandbox-runtime`). `sandbox.strict` refuses to run bash at all when the sandbox was enabled but failed to start, instead of falling back to unsandboxed |
 | `/tasks` | background bash jobs (`run_in_background`, `bash_output`, `kill_bash`) |
 | `/agents` | subagents via the `task` tool |
 | `/mcp` | MCP servers from `mcp.json` |

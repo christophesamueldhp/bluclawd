@@ -11,11 +11,13 @@ import type { SandboxSettings } from "../_shared/settings.ts";
 
 export interface SandboxConfig extends SandboxSettings {
 	enabled: boolean;
+	strict: boolean;
 }
 
 /** Conservative defaults applied under user/project overrides (donor: examples/extensions/sandbox). */
 export const DEFAULT_SANDBOX_CONFIG: SandboxConfig = {
 	enabled: false,
+	strict: false,
 	network: {
 		allowedDomains: [
 			"npmjs.org",
@@ -73,6 +75,7 @@ export function resolveSandboxConfig(
 		...DEFAULT_SANDBOX_CONFIG,
 		...settings,
 		enabled: settings?.enabled ?? DEFAULT_SANDBOX_CONFIG.enabled,
+		strict: settings?.strict ?? DEFAULT_SANDBOX_CONFIG.strict,
 		network: { ...DEFAULT_SANDBOX_CONFIG.network, ...settings?.network },
 		filesystem: {
 			...DEFAULT_SANDBOX_CONFIG.filesystem,
@@ -89,4 +92,24 @@ export function resolveSandboxConfig(
 	if (flags.sandbox) config.enabled = true;
 	if (flags.noSandbox) config.enabled = false;
 	return config;
+}
+
+/**
+ * Why bash must refuse, or undefined when it may run.
+ *
+ * Under `sandbox.strict`, a sandbox that was asked for but did not start makes bash
+ * refuse rather than run unconfined. The default is still the unsandboxed fallback,
+ * because that is what a missing bubblewrap on a Linux box has always done and silently
+ * breaking those sessions would be worse than the risk. But "enabled" and "actually
+ * confining anything" are different states, and a status chip is the wrong place to
+ * learn which one you are in — someone who set `enabled: true` to contain a command has
+ * no reason to expect it to run anyway. `strict` makes the two states agree.
+ */
+export function strictRefusalReason(
+	config: Pick<SandboxConfig, "enabled" | "strict">,
+	active: boolean,
+	lastError?: string,
+): string | undefined {
+	if (!config.enabled || !config.strict || active) return undefined;
+	return `Refusing to run: sandbox.strict is set, the sandbox is enabled but not active${lastError ? ` (${lastError})` : ""}. Fix the sandbox, or clear sandbox.strict to allow unsandboxed execution.`;
 }

@@ -19,6 +19,9 @@ import type { SettingsManager } from "@earendil-works/pi-coding-agent";
 /** Sandbox settings, passed through to @anthropic-ai/sandbox-runtime. */
 export interface SandboxSettings {
 	enabled?: boolean; // default: false — sandboxing is opt-in
+	/** Refuse to run bash at all when the sandbox is enabled but failed to start.
+	 *  default: false — the historical behaviour is an unsandboxed fallback. */
+	strict?: boolean;
 	network?: { allowedDomains?: string[]; deniedDomains?: string[] };
 	filesystem?: {
 		denyRead?: string[];
