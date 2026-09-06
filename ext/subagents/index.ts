@@ -40,6 +40,7 @@ import {
 	agentListRows,
 	bundledAgentsDir,
 	discoverDefs,
+	parseDef,
 } from "./defs.ts";
 import { runSubagent } from "./engine.ts";
 import {
@@ -512,19 +513,48 @@ export function factory(pi: ExtensionAPI): void {
 	 *  writing one would be this layer editing a repository's own resources. */
 	const userAgentPath = (name: string): string => join(getAgentDir(), "agents", `${name}.md`);
 
+	/** A name that is both a valid agent identity and a safe file name. */
+	const AGENT_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
 	/** A def's skeleton, so a new agent starts valid rather than empty. */
 	const AGENT_TEMPLATE = (name: string): string =>
 		`---\nname: ${name}\ndescription: One line the task tool reads to decide when to delegate here.\ntools: read,grep,find,ls\n---\nYou are …\n\n- What this agent does, and what it must not do.\n- What it returns.\n`;
 
 	/** Open a user agent def in the editor and write it back. Shared by new and edit. */
 	async function editAgent(ctx: ExtensionContext, name: string, prefill: string): Promise<void> {
-		const path = userAgentPath(name);
-		const edited = await ctx.ui.editor(`agent ${name} — ${path}`, prefill);
+		const edited = await ctx.ui.editor(`agent ${name} — ${userAgentPath(name)}`, prefill);
 		if (edited === undefined) return;
 		if (!edited.trim()) {
 			ctx.ui.notify("Left unchanged: an empty definition would not load.", "warning");
 			return;
 		}
+
+		// The frontmatter name is the agent's identity, so it — not the command
+		// argument — decides the file name. Otherwise renaming in the editor left
+		// `foo.md` declaring `name: bar`, and a later `/agents new bar` put a second
+		// file behind the same name, with readdir order picking the winner.
+		const parsed = parseDef(edited);
+		const declared = "problem" in parsed ? name : parsed.name;
+		if (declared !== name) {
+			if (!AGENT_NAME.test(declared)) {
+				ctx.ui.notify(
+					`Left unchanged: name: "${declared}" is not a usable file name (letters, digits, dashes).`,
+					"warning",
+				);
+				return;
+			}
+			// Renaming onto an existing def would silently overwrite an agent the user
+			// never opened.
+			if (existsSync(userAgentPath(declared))) {
+				ctx.ui.notify(
+					`Left unchanged: "${declared}" already exists. /agents edit ${declared} changes it.`,
+					"warning",
+				);
+				return;
+			}
+		}
+
+		const path = userAgentPath(declared);
 		try {
 			mkdirSync(dirname(path), { recursive: true });
 			writeFileSync(path, edited.endsWith("\n") ? edited : `${edited}\n`);
@@ -532,8 +562,16 @@ export function factory(pi: ExtensionAPI): void {
 			ctx.ui.notify(`Could not write ${path}: ${error instanceof Error ? error.message : String(error)}`, "error");
 			return;
 		}
-		// The task tool rediscovers defs per call, so the agent is usable at once.
-		ctx.ui.notify(`Saved ${path}`, "info");
+		// The task tool rediscovers defs per call, so the agent is usable at once —
+		// unless discovery will skip it, which is worth saying rather than reporting a
+		// bare "Saved" for a definition that never appears.
+		if ("problem" in parsed) {
+			ctx.ui.notify(`Saved ${path}, but it will not load: ${parsed.problem}`, "warning");
+		} else if (declared !== name) {
+			ctx.ui.notify(`Saved ${path} — renamed from "${name}", whose definition is unchanged.`, "info");
+		} else {
+			ctx.ui.notify(`Saved ${path}`, "info");
+		}
 	}
 
 	pi.registerCommand("agents", {
@@ -547,7 +585,7 @@ export function factory(pi: ExtensionAPI): void {
 					return;
 				}
 				const name = rest.join("-");
-				if (!name || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name)) {
+				if (!name || !AGENT_NAME.test(name)) {
 					ctx.ui.notify(`Usage: /agents ${sub} <name> (letters, digits, dashes)`, "warning");
 					return;
 				}
@@ -557,9 +595,25 @@ export function factory(pi: ExtensionAPI): void {
 				const userPath = userAgentPath(name);
 				const bundledPath = join(bundledAgentsDir(), `${name}.md`);
 				const source = existsSync(userPath) ? userPath : existsSync(bundledPath) ? bundledPath : undefined;
-				if (sub === "edit" && !source) {
-					ctx.ui.notify(`No agent named "${name}". /agents new ${name} creates one.`, "warning");
-					return;
+				if (!source) {
+					// A name this layer cannot write may still be a real agent: project defs
+					// are read (for a trusted project — the same rule the listing below uses)
+					// but never written, so "no such agent" would be wrong, and creating a
+					// user def under that name would be shadowed by the project's own.
+					const projectDef = discoverDefs(ctx.cwd, ctx.isProjectTrusted() ? "both" : "user").defs.find(
+						(def) => def.name === name && def.source === "project",
+					);
+					if (projectDef) {
+						ctx.ui.notify(
+							`"${name}" is a project agent at ${projectDef.filePath}. /agents does not write repository files, and a user def of that name would be overridden here — edit that file directly.`,
+							"warning",
+						);
+						return;
+					}
+					if (sub === "edit") {
+						ctx.ui.notify(`No agent named "${name}". /agents new ${name} creates one.`, "warning");
+						return;
+					}
 				}
 				const prefill = source ? readFileSync(source, "utf-8") : AGENT_TEMPLATE(name);
 				await editAgent(ctx, name, prefill);
