@@ -113,7 +113,12 @@ describe("parseDef", () => {
 		expect(parseDef("---\ndescription: no name\n---\nbody\n")).toEqual({
 			problem: "the frontmatter declares no name:",
 		});
-		expect(parseDef("---\nname: x\n---\nbody\n")).toEqual({ problem: "the frontmatter declares no description:" });
+		// The name comes back with the problem: a save can then still file the def under
+		// the name its author gave it, rather than under whatever it was opened as.
+		expect(parseDef("---\nname: x\n---\nbody\n")).toEqual({
+			name: "x",
+			problem: "the frontmatter declares no description:",
+		});
 		expect(parseDef("---\nname: x\ndescription: '\n---\nbody\n")).toMatchObject({
 			problem: expect.stringContaining("not valid YAML"),
 		});

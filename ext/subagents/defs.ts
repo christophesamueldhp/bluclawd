@@ -97,7 +97,7 @@ export type ParsedDef = Omit<AgentDef, "source" | "filePath">;
  * someone who has just saved one — so both paths go through here and the rule
  * cannot drift: what this rejects is exactly what `/agents` will not list.
  */
-export function parseDef(content: string): ParsedDef | { problem: string } {
+export function parseDef(content: string): ParsedDef | { name?: string; problem: string } {
 	// yaml.parse throws on malformed frontmatter, and with the parse outside a
 	// guard one bad file took down the whole directory — every other agent
 	// vanished from /agents and from the task tool, behind an error naming no
@@ -119,7 +119,10 @@ export function parseDef(content: string): ParsedDef | { problem: string } {
 	const name = typeof frontmatter.name === "string" ? frontmatter.name.trim() : "";
 	const description = typeof frontmatter.description === "string" ? frontmatter.description : "";
 	if (!name) return { problem: "the frontmatter declares no name:" };
-	if (!description.trim()) return { problem: "the frontmatter declares no description:" };
+	// The name comes back even though the def will not load: it is still what the
+	// author called this agent, so a save can file it under that name rather than
+	// leaving the very desync between file and identity `name` exists to prevent.
+	if (!description.trim()) return { name, problem: "the frontmatter declares no description:" };
 
 	// Lowercase: canonical tool names are lowercase, but Claude Code defs (this
 	// fork's migration premise) capitalize them (`tools: Read, Grep, Bash`) —

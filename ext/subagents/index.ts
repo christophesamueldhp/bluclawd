@@ -516,6 +516,13 @@ export function factory(pi: ExtensionAPI): void {
 	/** A name that is both a valid agent identity and a safe file name. */
 	const AGENT_NAME = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
+	/** The project's own def of this name, when the project is trusted enough to read
+	 *  it — the same rule the listing uses. A user def it shadows is dead weight here. */
+	const projectDefFor = (ctx: ExtensionContext, name: string): AgentDef | undefined =>
+		discoverDefs(ctx.cwd, ctx.isProjectTrusted() ? "both" : "user").defs.find(
+			(def) => def.name === name && def.source === "project",
+		);
+
 	/** A def's skeleton, so a new agent starts valid rather than empty. */
 	const AGENT_TEMPLATE = (name: string): string =>
 		`---\nname: ${name}\ndescription: One line the task tool reads to decide when to delegate here.\ntools: read,grep,find,ls\n---\nYou are …\n\n- What this agent does, and what it must not do.\n- What it returns.\n`;
@@ -534,7 +541,9 @@ export function factory(pi: ExtensionAPI): void {
 		// `foo.md` declaring `name: bar`, and a later `/agents new bar` put a second
 		// file behind the same name, with readdir order picking the winner.
 		const parsed = parseDef(edited);
-		const declared = "problem" in parsed ? name : parsed.name;
+		// parseDef reports the name even for a def that will not load, so a rename that
+		// also broke the frontmatter still lands under the name the author gave it.
+		const declared = parsed.name ?? name;
 		if (declared !== name) {
 			if (!AGENT_NAME.test(declared)) {
 				ctx.ui.notify(
@@ -567,10 +576,17 @@ export function factory(pi: ExtensionAPI): void {
 		// bare "Saved" for a definition that never appears.
 		if ("problem" in parsed) {
 			ctx.ui.notify(`Saved ${path}, but it will not load: ${parsed.problem}`, "warning");
-		} else if (declared !== name) {
-			ctx.ui.notify(`Saved ${path} — renamed from "${name}", whose definition is unchanged.`, "info");
+			return;
+		}
+		// A def the project overrides is saved and correct, and still does nothing in
+		// this directory. Checked against the name that was SAVED, so a rename is
+		// reported against the name it actually landed under.
+		const shadow = projectDefFor(ctx, declared);
+		const note = shadow ? ` It does nothing here: the project's own ${shadow.filePath} overrides it.` : "";
+		if (declared !== name) {
+			ctx.ui.notify(`Saved ${path} — renamed from "${name}", whose definition is unchanged.${note}`, "info");
 		} else {
-			ctx.ui.notify(`Saved ${path}`, "info");
+			ctx.ui.notify(`Saved ${path}${note}`, "info");
 		}
 	}
 
@@ -597,12 +613,10 @@ export function factory(pi: ExtensionAPI): void {
 				const source = existsSync(userPath) ? userPath : existsSync(bundledPath) ? bundledPath : undefined;
 				if (!source) {
 					// A name this layer cannot write may still be a real agent: project defs
-					// are read (for a trusted project — the same rule the listing below uses)
-					// but never written, so "no such agent" would be wrong, and creating a
-					// user def under that name would be shadowed by the project's own.
-					const projectDef = discoverDefs(ctx.cwd, ctx.isProjectTrusted() ? "both" : "user").defs.find(
-						(def) => def.name === name && def.source === "project",
-					);
+					// are read but never written, so "no such agent" would be wrong, and a
+					// user def under that name would be shadowed by the project's own — with
+					// nothing to edit here, that leaves nothing worth writing either.
+					const projectDef = projectDefFor(ctx, name);
 					if (projectDef) {
 						ctx.ui.notify(
 							`"${name}" is a project agent at ${projectDef.filePath}. /agents does not write repository files, and a user def of that name would be overridden here — edit that file directly.`,
