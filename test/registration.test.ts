@@ -15,7 +15,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	subagents: { commands: ["agents"], tools: ["task"], shortcuts: 0, events: 0 },
 	web: { commands: [], tools: ["webfetch", "websearch"], shortcuts: 0, events: 0 },
 	mcp: { commands: ["mcp"], tools: [], shortcuts: 0, events: 2 },
-	sandbox: { commands: ["sandbox"], tools: ["bash"], shortcuts: 0, events: 3 },
+	sandbox: { commands: ["sandbox"], tools: ["bash", "monitor"], shortcuts: 0, events: 3 },
 	"background-bash": { commands: ["tasks"], tools: ["bash_output", "kill_bash"], shortcuts: 0, events: 0 },
 	branding: { commands: ["theme"], tools: [], shortcuts: 0, events: 1 },
 	diagnostics: { commands: ["context", "status", "recap"], tools: [], shortcuts: 0, events: 0 },

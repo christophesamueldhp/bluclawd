@@ -30,6 +30,7 @@ import { backgroundBashJobs } from "../_shared/background-bash.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { resolveSandboxConfig, type SandboxConfig, strictRefusalReason } from "./config.ts";
 import { buildSandboxFailureNote } from "./failure-note.ts";
+import { createMonitorTool } from "./monitor-tool.ts";
 import { isSandboxActive, setSandboxActive } from "./state.ts";
 
 /**
@@ -147,6 +148,17 @@ export function factory(pi: ExtensionAPI): void {
 			return tool.execute(id, rest as never, signal, onUpdate);
 		},
 	});
+
+	// The monitor is the fourth shell path (tool, background job, user `!`,
+	// monitor): same refusal, same operations, so the sandbox covers it too.
+	pi.registerTool(
+		createMonitorTool({
+			sendMessage: (message, options) => pi.sendMessage(message, options),
+			cwd: localCwd,
+			exec: () => (isSandboxActive() ? sandboxedOperations() : createLocalBashOperations()).exec,
+			refuse: () => strictRefusalReason(config, isSandboxActive(), lastError),
+		}),
+	);
 
 	pi.on("user_bash", () => {
 		// A user `!` command is the other way a shell runs, and it does NOT go through
