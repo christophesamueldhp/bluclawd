@@ -160,12 +160,29 @@ function noPromptReason(cfg: EvalConfig): string | undefined {
 }
 
 /**
+ * The tool name every gate below decides on.
+ *
+ * `monitor` is bash with a different delivery — same `command` field, same shell — but
+ * every rule verb, the guardrail and the protected-path screen key on the literal name
+ * "bash", so an un-normalised `monitor` walked past all of them: a `deny: Bash(**)` did
+ * not match it, `rm -rf` never reached the denylist, and a write to `.bluclawd/mcp.json`
+ * was not screened. Normalising here — the one point both the session's `tool_call`
+ * handler and the subagent gate go through — makes one name enough for every gate,
+ * instead of a per-gate list that the next shell-carrying tool would have to be added to.
+ */
+function governedTool(tool: string): string {
+	return tool === "monitor" ? "bash" : tool;
+}
+
+/**
  * Gates 1–4: mode-level blocks, deny rules, and protected paths.
  *
  * Returns `undefined` when nothing here decides and evaluation should continue in
  * {@link evaluatePostHook}.
  */
-export function evaluatePreHook(tool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict | undefined {
+export function evaluatePreHook(rawTool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict | undefined {
+	const tool = governedTool(rawTool);
+
 	// 1. bypass → allow everything, rules are not consulted.
 	if (cfg.mode === "always") return ALLOW("always-mode");
 
@@ -259,7 +276,8 @@ export function evaluatePreHook(tool: string, input: Record<string, unknown>, cf
  * block. This function reports `outcome: "block"` with `promptKind: "auto-pause"` to mean
  * "blocked, and eligible to become a pause-and-ask if your thresholds say so".
  */
-export function evaluatePostHook(tool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict {
+export function evaluatePostHook(rawTool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict {
+	const tool = governedTool(rawTool);
 	const { decision, askAgent } = decideRules(tool, input, cfg.rules, cfg.cwd);
 	const subj = tool === "task" ? (askAgent ?? "") : subject(tool, input);
 	const exact = exactRule(tool, subj);
