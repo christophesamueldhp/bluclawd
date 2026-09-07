@@ -5,6 +5,8 @@
  * extension.
  */
 
+import { type BackgroundJobInfo, describeJobStatus } from "./background-bash.ts";
+
 export interface Batch {
 	lines: string[];
 	/** Lines that did not fit under the caps; the registry still buffers them for bash_output. */
@@ -95,10 +97,8 @@ export class RateLimiter {
  * A single line past `maxBytes` on its own keeps the end of that line instead of going empty.
  */
 export function tailOutput(text: string, maxLines: number, maxBytes: number): string {
-	const lines = text
-		.replace(/\n+$/, "")
-		.split("\n")
-		.map((line) => line.replace(/\r$/, ""));
+	const lines = text.split("\n").map((line) => line.replace(/\r$/, ""));
+	while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
 	const kept: string[] = [];
 	let bytes = 0;
 	for (let i = lines.length - 1; i >= 0 && kept.length < maxLines; i--) {
@@ -111,4 +111,88 @@ export function tailOutput(text: string, maxLines: number, maxBytes: number): st
 		kept.push(lines[lines.length - 1].slice(-maxBytes));
 	}
 	return kept.join("\n");
+}
+
+export const MONITOR_MESSAGE_TYPE = "bluclawd:monitor";
+export const TASK_EXIT_MESSAGE_TYPE = "bluclawd:task-exit";
+
+export type EventStatus = "success" | "error" | "warning";
+
+export interface MonitorMessageDetails {
+	id: string;
+	description: string;
+	lines: string[];
+	more: number;
+	/** Present only on the terminal message. */
+	end?: string;
+	status?: EventStatus;
+}
+
+export interface TaskExitDetails {
+	id: string;
+	description: string;
+	command: string;
+	end: string;
+	tail: string;
+	status: EventStatus;
+}
+
+/** The shape pi.sendMessage takes, minus the fields it fills in. */
+export interface OutgoingMessage<T> {
+	customType: string;
+	content: string;
+	display: true;
+	details: T;
+}
+
+function label(job: BackgroundJobInfo): string {
+	return job.description?.trim() || job.command;
+}
+
+function endStatus(job: BackgroundJobInfo): EventStatus {
+	if (job.stopReason) return "warning";
+	if (job.killed) return "warning";
+	if (job.exit?.error || (job.exit?.code ?? 0) !== 0) return "error";
+	return "success";
+}
+
+function overflowNote(more: number): string[] {
+	return more > 0 ? [`…and ${more} more lines (read them with bash_output)`] : [];
+}
+
+export function monitorEventMessage(job: BackgroundJobInfo, batch: Batch): OutgoingMessage<MonitorMessageDetails> {
+	const description = label(job);
+	const content = [`[monitor ${job.id} · ${description}]`, ...batch.lines, ...overflowNote(batch.more)].join("\n");
+	return {
+		customType: MONITOR_MESSAGE_TYPE,
+		content,
+		display: true,
+		details: { id: job.id, description, lines: batch.lines, more: batch.more },
+	};
+}
+
+export function monitorEndMessage(job: BackgroundJobInfo, batch: Batch): OutgoingMessage<MonitorMessageDetails> {
+	const description = label(job);
+	const end = describeJobStatus(job);
+	const content = [`[monitor ${job.id} · ${description}]`, ...batch.lines, ...overflowNote(batch.more), end].join(
+		"\n",
+	);
+	return {
+		customType: MONITOR_MESSAGE_TYPE,
+		content,
+		display: true,
+		details: { id: job.id, description, lines: batch.lines, more: batch.more, end, status: endStatus(job) },
+	};
+}
+
+export function taskExitMessage(job: BackgroundJobInfo, tail: string): OutgoingMessage<TaskExitDetails> {
+	const description = label(job);
+	const end = describeJobStatus(job);
+	const head = `[task ${job.id} · ${description}] ${end} — ${job.command}`;
+	return {
+		customType: TASK_EXIT_MESSAGE_TYPE,
+		content: tail.length > 0 ? `${head}\n${tail}` : head,
+		display: true,
+		details: { id: job.id, description, command: job.command, end, tail, status: endStatus(job) },
+	};
 }

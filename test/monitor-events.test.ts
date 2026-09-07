@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { BackgroundJobInfo } from "../ext/_shared/background-bash.ts";
 import { splitLines } from "../ext/_shared/lines.ts";
-import { EventBatcher, RateLimiter, tailOutput } from "../ext/_shared/monitor-events.ts";
+import {
+	EventBatcher,
+	monitorEndMessage,
+	monitorEventMessage,
+	RateLimiter,
+	tailOutput,
+	taskExitMessage,
+} from "../ext/_shared/monitor-events.ts";
 
 describe("splitLines", () => {
 	it("returns whole lines and carries the partial tail", () => {
@@ -36,6 +44,12 @@ describe("EventBatcher", () => {
 		batcher.push(["b"]);
 		vi.advanceTimersByTime(100);
 		expect(flushed).toEqual([{ lines: ["a", "b"], more: 0 }]);
+		batcher.push(["c"]);
+		vi.advanceTimersByTime(200);
+		expect(flushed).toEqual([
+			{ lines: ["a", "b"], more: 0 },
+			{ lines: ["c"], more: 0 },
+		]);
 	});
 
 	it("caps a batch at maxLines and reports the remainder", () => {
@@ -112,10 +126,69 @@ describe("tailOutput", () => {
 	});
 
 	it("strips CRLF line endings", () => {
-		expect(tailOutput("a\r\n\r\n\r\n", 10, 100)).toBe("a\n\n");
+		expect(tailOutput("a\r\n\r\n\r\n", 10, 100)).toBe("a");
 	});
 
 	it("returns an empty string for no output", () => {
 		expect(tailOutput("", 20, 2048)).toBe("");
+	});
+});
+
+const monitorJob: BackgroundJobInfo = {
+	id: "bash_3",
+	command: "tail -f x.log",
+	description: "errors in deploy.log",
+	cwd: "/",
+	startedAt: 0,
+	killed: false,
+	kind: "monitor",
+	events: 0,
+};
+
+describe("message builders", () => {
+	it("monitorEventMessage is self-describing and lists the lines", () => {
+		const msg = monitorEventMessage(monitorJob, { lines: ["E1", "E2"], more: 0 });
+		expect(msg.customType).toBe("bluclawd:monitor");
+		expect(msg.content).toBe("[monitor bash_3 · errors in deploy.log]\nE1\nE2");
+		expect(msg.details).toEqual({ id: "bash_3", description: "errors in deploy.log", lines: ["E1", "E2"], more: 0 });
+	});
+
+	it("monitorEventMessage notes overflow", () => {
+		const msg = monitorEventMessage(monitorJob, { lines: ["E1"], more: 7 });
+		expect(msg.content).toContain("…and 7 more lines (read them with bash_output)");
+	});
+
+	it("monitorEndMessage carries leftover lines and the terminal status", () => {
+		const ended = { ...monitorJob, exit: { code: 0, at: 1 } };
+		const msg = monitorEndMessage(ended, { lines: ["last"], more: 0 });
+		expect(msg.content).toBe("[monitor bash_3 · errors in deploy.log]\nlast\nexited with code 0");
+		expect(msg.details).toMatchObject({ end: "exited with code 0", status: "success" });
+	});
+
+	it("monitorEndMessage colours a rate-limit stop as warning and an error as error", () => {
+		const stopped = { ...monitorJob, killed: true, stopReason: "too many events", exit: { code: null, at: 1 } };
+		expect(monitorEndMessage(stopped, { lines: [], more: 0 }).details).toMatchObject({ status: "warning" });
+		const failed = { ...monitorJob, exit: { code: 2, at: 1 } };
+		expect(monitorEndMessage(failed, { lines: [], more: 0 }).details).toMatchObject({ status: "error" });
+	});
+
+	it("taskExitMessage names the job, status, command and tail", () => {
+		const job: BackgroundJobInfo = {
+			...monitorJob,
+			id: "bash_2",
+			kind: "job",
+			description: "build",
+			command: "make",
+			exit: { code: 1, at: 1 },
+		};
+		const msg = taskExitMessage(job, "err: boom");
+		expect(msg.customType).toBe("bluclawd:task-exit");
+		expect(msg.content).toBe("[task bash_2 · build] exited with code 1 — make\nerr: boom");
+		expect(msg.details).toMatchObject({ status: "error" });
+	});
+
+	it("falls back to the command when there is no description", () => {
+		const job = { ...monitorJob, description: undefined };
+		expect(monitorEventMessage(job, { lines: ["x"], more: 0 }).content).toBe("[monitor bash_3 · tail -f x.log]\nx");
 	});
 });
