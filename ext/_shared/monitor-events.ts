@@ -1,8 +1,7 @@
 /**
  * The pure pieces of the monitor tool: lines into batches, batches into a
- * rate, and the tail of a job's output. Nothing here touches pi or a
- * process, so all of it is unit tested; the wiring will live in the sandbox
- * extension.
+ * rate, and the tail of a job's output. Nothing here spawns a process or
+ * talks to pi; the wiring lives in the sandbox extension.
  */
 
 import { type BackgroundJobInfo, describeJobStatus } from "./background-bash.ts";
@@ -150,7 +149,6 @@ function label(job: BackgroundJobInfo): string {
 }
 
 function endStatus(job: BackgroundJobInfo): EventStatus {
-	if (job.stopReason) return "warning";
 	if (job.killed) return "warning";
 	if (job.exit?.error || (job.exit?.code ?? 0) !== 0) return "error";
 	return "success";
@@ -188,7 +186,9 @@ export function monitorEndMessage(job: BackgroundJobInfo, batch: Batch): Outgoin
 export function taskExitMessage(job: BackgroundJobInfo, tail: string): OutgoingMessage<TaskExitDetails> {
 	const description = label(job);
 	const end = describeJobStatus(job);
-	const head = `[task ${job.id} · ${description}] ${end} — ${job.command}`;
+	// label() already falls back to the command, so name it again only when it is not the label.
+	const command = job.description?.trim() ? ` — ${job.command}` : "";
+	const head = `[task ${job.id} · ${description}] ${end}${command}`;
 	return {
 		customType: TASK_EXIT_MESSAGE_TYPE,
 		content: tail.length > 0 ? `${head}\n${tail}` : head,

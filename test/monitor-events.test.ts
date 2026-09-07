@@ -187,6 +187,11 @@ describe("message builders", () => {
 		expect(msg.details).toMatchObject({ status: "error" });
 	});
 
+	it("does not repeat the command in a task-exit head that has no description", () => {
+		const job = { ...monitorJob, id: "bash_2", command: "make", description: undefined, exit: { code: 1, at: 1 } };
+		expect(taskExitMessage(job, "").content).toBe("[task bash_2 · make] exited with code 1");
+	});
+
 	it("falls back to the command when there is no description", () => {
 		const job = { ...monitorJob, description: undefined };
 		expect(monitorEventMessage(job, { lines: ["x"], more: 0 }).content).toBe("[monitor bash_3 · tail -f x.log]\nx");

@@ -29,8 +29,28 @@ import { wrapToolDefinition } from "./wrap-tool-definition.ts";
 const DEFAULT_MAX_BUFFER_BYTES = 2 * 1024 * 1024;
 /** Finished jobs retained for later `bash_output` / `/tasks` inspection before the oldest are dropped. */
 const DEFAULT_MAX_FINISHED_JOBS = 50;
-/** A process writing only bare-`\r` progress rewrites never ends a line, so cap the carry and flush it. */
+/**
+ * A process writing only bare-`\r` progress rewrites never ends a line, so cap the carry and flush it.
+ * A genuine line longer than this is delivered as several lines.
+ */
 const MAX_CARRY_CHARS = 4096;
+
+/**
+ * A sink belongs to the caller, not to the registry: a throw from it must not
+ * corrupt job bookkeeping, or, from the synchronous onData path, take the
+ * process down. Swallowed silently: this is a TUI, console output would
+ * corrupt the render.
+ */
+function guardSink<A extends unknown[]>(fn: ((...args: A) => void) | undefined) {
+	return (
+		fn &&
+		((...args: A) => {
+			try {
+				fn(...args);
+			} catch {}
+		})
+	);
+}
 
 /** Exec function shape — matches BashOperations.exec (injected to avoid an import cycle with bash.ts). */
 export type BackgroundExec = (
@@ -55,7 +75,7 @@ export interface BackgroundJobInfo {
 	/** Set once the process has terminated (normally, by error, or by kill). */
 	exit?: { code: number | null; error?: string; at: number };
 	killed: boolean;
-	/** Why the registry itself killed the job (rate limit); absent for a caller's kill. */
+	/** Why the job was stopped programmatically (e.g. the monitor rate limit); absent for a caller's kill_bash. */
 	stopReason?: string;
 	kind: BackgroundJobKind;
 	/** Batches delivered to the model (monitors only; always 0 for plain jobs). */
@@ -65,7 +85,10 @@ export interface BackgroundJobInfo {
 export interface JobSinks {
 	/** Whole output lines, as they arrive; the trailing partial line is delivered before onExit. */
 	onLines?: (lines: string[], job: BackgroundJobInfo) => void;
-	/** Fires once, after `exit` is set. */
+	/**
+	 * Fires once, after `exit` is set. Read anything you need (peek) synchronously
+	 * inside the callback: eviction of finished jobs runs right after it returns.
+	 */
 	onExit?: (job: BackgroundJobInfo) => void;
 }
 
@@ -145,7 +168,7 @@ export class BackgroundJobRegistry {
 			droppedBytes: 0,
 			cursor: 0,
 			abort: new AbortController(),
-			sinks: { onLines: options.onLines, onExit: options.onExit },
+			sinks: { onLines: guardSink(options.onLines), onExit: guardSink(options.onExit) },
 			carry: "",
 			decoder: options.onLines ? new StringDecoder("utf-8") : undefined,
 		};
@@ -231,7 +254,7 @@ export class BackgroundJobRegistry {
 	/** Count a delivered batch (monitors). */
 	recordEvent(id: string): void {
 		const state = this.jobs.get(id);
-		if (state) state.events++;
+		if (state?.kind === "monitor") state.events++;
 	}
 
 	/** Kill a running job's whole process tree (via its abort signal). `reason` marks a registry-initiated stop. */
@@ -260,7 +283,7 @@ export class BackgroundJobRegistry {
 			const dropped = state.chunks.shift();
 			if (dropped) state.droppedBytes += dropped.length;
 		}
-		if (!state.sinks.onLines || !state.decoder) return;
+		if (!state.sinks.onLines) return;
 		const { lines, carry } = splitLines(state.carry, state.decoder.write(data));
 		state.carry = carry;
 		if (state.carry.length > MAX_CARRY_CHARS) {
@@ -285,6 +308,8 @@ export class BackgroundJobRegistry {
  */
 export const backgroundBashJobs = sharedRef("backgroundBashJobs", new BackgroundJobRegistry()).get();
 
+// Precedence ladder: a programmatic stop is more informative than a kill, which beats a timeout,
+// which beats a generic error.
 export function describeJobStatus(job: BackgroundJobInfo): string {
 	if (!job.exit) return "running";
 	if (job.stopReason) return `stopped: ${job.stopReason}`;

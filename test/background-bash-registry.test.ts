@@ -90,17 +90,41 @@ describe("registry sinks", () => {
 		});
 		await tick();
 		// One flush from the carry cap while running, one from the exit flush.
-		expect(seen.length).toBeGreaterThanOrEqual(2);
+		expect(seen.length).toBe(2);
 		expect(seen.flat().at(-1)).toBe("p 1000%");
 	});
 
-	it("defaults kind to job and counts events", () => {
+	it("defaults kind to job and counts events for monitors only", () => {
 		const registry = new BackgroundJobRegistry();
 		const job = registry.start({ command: "x", cwd: "/", exec: pendingExec().exec });
 		expect(job.kind).toBe("job");
 		expect(job.events).toBe(0);
 		registry.recordEvent(job.id);
-		expect(registry.get(job.id)?.events).toBe(1);
+		expect(registry.get(job.id)?.events).toBe(0);
+		const monitor = registry.start({ command: "y", cwd: "/", exec: pendingExec().exec, kind: "monitor" });
+		registry.recordEvent(monitor.id);
+		expect(registry.get(monitor.id)?.events).toBe(1);
+	});
+
+	it("survives a throwing sink without double-finishing the job", async () => {
+		const registry = new BackgroundJobRegistry();
+		let exits = 0;
+		const job = registry.start({
+			command: "x",
+			cwd: "/",
+			exec: streamingExec(["a\n"], 0),
+			onLines: () => {
+				throw new Error("onLines boom");
+			},
+			onExit: () => {
+				exits++;
+				if (exits === 1) throw new Error("onExit boom");
+			},
+		});
+		await tick();
+		expect(exits).toBe(1);
+		expect(registry.get(job.id)?.exit?.code).toBe(0);
+		expect(registry.get(job.id)?.exit?.error).toBeUndefined();
 	});
 
 	it("peek returns the buffered output without moving the read cursor", async () => {
