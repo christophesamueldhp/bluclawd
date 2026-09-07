@@ -1,12 +1,12 @@
 /**
  * Background bash jobs (Claude Code `run_in_background` parity — CC-PARITY-AUDIT B.1).
  *
- * The registry is a module-scoped, process-wide singleton: jobs belong to the
- * PROCESS, not to a session branch — resuming or forking a session must never
- * resurrect (or pretend to own) a dead child process, so no job state is ever
- * persisted to the session log. Each job owns its own AbortController; the tool
- * call's Esc/abort signal is deliberately NOT wired to it (backgrounding means
- * outliving the tool call).
+ * The registry is a process-wide singleton (shared across extension module
+ * graphs via sharedRef): jobs belong to the PROCESS, not to a session branch —
+ * resuming or forking a session must never resurrect (or pretend to own) a dead
+ * child process, so no job state is ever persisted to the session log. Each job
+ * owns its own AbortController; the tool call's Esc/abort signal is
+ * deliberately NOT wired to it (backgrounding means outliving the tool call).
  *
  * Output is buffered with a byte cap (oldest chunks dropped, noted to the
  * reader). `bash_output` reads are cursor-based and incremental: each call
@@ -18,15 +18,19 @@
  * registry — audit Tier B follow-up.
  */
 
+import { StringDecoder } from "node:string_decoder";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { sharedRef } from "./global-state.ts";
+import { splitLines } from "./lines.ts";
 import { wrapToolDefinition } from "./wrap-tool-definition.ts";
 
 /** Cap on buffered output per job; the oldest chunks are dropped past this. */
 const DEFAULT_MAX_BUFFER_BYTES = 2 * 1024 * 1024;
 /** Finished jobs retained for later `bash_output` / `/tasks` inspection before the oldest are dropped. */
 const DEFAULT_MAX_FINISHED_JOBS = 50;
+/** A process writing only bare-`\r` progress rewrites never ends a line, so cap the carry and flush it. */
+const MAX_CARRY_CHARS = 4096;
 
 /** Exec function shape — matches BashOperations.exec (injected to avoid an import cycle with bash.ts). */
 export type BackgroundExec = (
@@ -40,6 +44,8 @@ export type BackgroundExec = (
 	},
 ) => Promise<{ exitCode: number | null }>;
 
+export type BackgroundJobKind = "job" | "monitor";
+
 export interface BackgroundJobInfo {
 	id: string;
 	command: string;
@@ -49,6 +55,18 @@ export interface BackgroundJobInfo {
 	/** Set once the process has terminated (normally, by error, or by kill). */
 	exit?: { code: number | null; error?: string; at: number };
 	killed: boolean;
+	/** Why the registry itself killed the job (rate limit); absent for a caller's kill. */
+	stopReason?: string;
+	kind: BackgroundJobKind;
+	/** Batches delivered to the model (monitors only; always 0 for plain jobs). */
+	events: number;
+}
+
+export interface JobSinks {
+	/** Whole output lines, as they arrive; the trailing partial line is delivered before onExit. */
+	onLines?: (lines: string[], job: BackgroundJobInfo) => void;
+	/** Fires once, after `exit` is set. */
+	onExit?: (job: BackgroundJobInfo) => void;
 }
 
 interface JobState extends BackgroundJobInfo {
@@ -60,6 +78,11 @@ interface JobState extends BackgroundJobInfo {
 	/** Absolute stream offset of the next unread byte. */
 	cursor: number;
 	abort: AbortController;
+	sinks: JobSinks;
+	/** Partial last line not yet delivered to onLines. */
+	carry: string;
+	/** Holds a multibyte sequence split across chunks; only built when onLines is wired. */
+	decoder?: StringDecoder;
 }
 
 export interface BackgroundReadResult {
@@ -96,14 +119,17 @@ export class BackgroundJobRegistry {
 		}
 	}
 
-	start(options: {
-		command: string;
-		cwd: string;
-		exec: BackgroundExec;
-		description?: string;
-		timeout?: number;
-		env?: NodeJS.ProcessEnv;
-	}): BackgroundJobInfo {
+	start(
+		options: {
+			command: string;
+			cwd: string;
+			exec: BackgroundExec;
+			description?: string;
+			timeout?: number;
+			env?: NodeJS.ProcessEnv;
+			kind?: BackgroundJobKind;
+		} & JobSinks,
+	): BackgroundJobInfo {
 		const id = `bash_${this.nextId++}`;
 		const state: JobState = {
 			id,
@@ -112,14 +138,31 @@ export class BackgroundJobRegistry {
 			cwd: options.cwd,
 			startedAt: Date.now(),
 			killed: false,
+			kind: options.kind ?? "job",
+			events: 0,
 			chunks: [],
 			totalBytes: 0,
 			droppedBytes: 0,
 			cursor: 0,
 			abort: new AbortController(),
+			sinks: { onLines: options.onLines, onExit: options.onExit },
+			carry: "",
+			decoder: options.onLines ? new StringDecoder("utf-8") : undefined,
 		};
 		this.jobs.set(id, state);
 		this.evictFinished();
+
+		const finish = (exit: JobState["exit"]) => {
+			state.exit = exit;
+			if (state.decoder) state.carry += state.decoder.end();
+			if (state.carry.length > 0) {
+				const { lines } = splitLines(state.carry, "\n");
+				state.carry = "";
+				if (lines.length > 0) state.sinks.onLines?.(lines, this.info(state));
+			}
+			state.sinks.onExit?.(this.info(state));
+			this.evictFinished();
+		};
 
 		void options
 			.exec(options.command, options.cwd, {
@@ -128,19 +171,15 @@ export class BackgroundJobRegistry {
 				timeout: options.timeout,
 				env: options.env,
 			})
-			.then((result) => {
-				state.exit = { code: result.exitCode, at: Date.now() };
-				this.evictFinished();
-			})
+			.then((result) => finish({ code: result.exitCode, at: Date.now() }))
 			.catch((err: unknown) => {
 				const message = err instanceof Error ? err.message : String(err);
-				state.exit = {
+				finish({
 					code: null,
 					// An abort-kill is expected termination, not an error worth surfacing.
 					error: state.killed && message === "aborted" ? undefined : message,
 					at: Date.now(),
-				};
-				this.evictFinished();
+				});
 			});
 
 		return this.info(state);
@@ -182,12 +221,26 @@ export class BackgroundJobRegistry {
 		return { job: this.info(state), newOutput, droppedNote };
 	}
 
-	/** Kill a running job's whole process tree (via its abort signal). */
-	kill(id: string): BackgroundJobInfo | undefined {
+	/** The whole buffered output, without moving the read cursor. */
+	peek(id: string): string | undefined {
+		const state = this.jobs.get(id);
+		if (!state) return undefined;
+		return Buffer.concat(state.chunks).toString("utf-8");
+	}
+
+	/** Count a delivered batch (monitors). */
+	recordEvent(id: string): void {
+		const state = this.jobs.get(id);
+		if (state) state.events++;
+	}
+
+	/** Kill a running job's whole process tree (via its abort signal). `reason` marks a registry-initiated stop. */
+	kill(id: string, reason?: string): BackgroundJobInfo | undefined {
 		const state = this.jobs.get(id);
 		if (!state) return undefined;
 		if (!state.exit) {
 			state.killed = true;
+			state.stopReason = reason;
 			state.abort.abort();
 		}
 		return this.info(state);
@@ -207,11 +260,19 @@ export class BackgroundJobRegistry {
 			const dropped = state.chunks.shift();
 			if (dropped) state.droppedBytes += dropped.length;
 		}
+		if (!state.sinks.onLines || !state.decoder) return;
+		const { lines, carry } = splitLines(state.carry, state.decoder.write(data));
+		state.carry = carry;
+		if (state.carry.length > MAX_CARRY_CHARS) {
+			lines.push(...splitLines(state.carry, "\n").lines);
+			state.carry = "";
+		}
+		if (lines.length > 0) state.sinks.onLines(lines, this.info(state));
 	}
 
 	private info(state: JobState): BackgroundJobInfo {
-		const { id, command, description, cwd, startedAt, exit, killed } = state;
-		return { id, command, description, cwd, startedAt, exit, killed };
+		const { id, command, description, cwd, startedAt, exit, killed, stopReason, kind, events } = state;
+		return { id, command, description, cwd, startedAt, exit, killed, stopReason, kind, events };
 	}
 }
 
@@ -222,15 +283,15 @@ export class BackgroundJobRegistry {
  * top-level extension in its own module graph, so a plain module constant
  * would be two registries. `sharedRef` keeps it one (see global-state.ts).
  */
-export const backgroundBashJobs: BackgroundJobRegistry = sharedRef(
-	"backgroundBashJobs",
-	new BackgroundJobRegistry(),
-).get();
+export const backgroundBashJobs = sharedRef("backgroundBashJobs", new BackgroundJobRegistry()).get();
 
 export function describeJobStatus(job: BackgroundJobInfo): string {
 	if (!job.exit) return "running";
+	if (job.stopReason) return `stopped: ${job.stopReason}`;
 	if (job.killed) return "killed";
-	if (job.exit.error) return `failed (${job.exit.error})`;
+	const timeout = job.exit.error?.match(/^timeout:(\d+)/);
+	if (timeout) return `timed out after ${timeout[1]}s`;
+	if (job.exit.error) return `failed: ${job.exit.error}`;
 	return `exited with code ${job.exit.code}`;
 }
 
