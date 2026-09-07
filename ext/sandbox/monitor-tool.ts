@@ -124,7 +124,12 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 				kind: "monitor",
 				onLines: (lines) => batcher.push(lines),
 				onExit: (job) => {
-					deps.sendMessage(monitorEndMessage(job, batcher.take()), EVENT_DELIVERY);
+					const batch = batcher.take();
+					// A line that arrived just before exit rides along in the terminal message
+					// instead of a batch flush, but it is still an event: count it here so
+					// /tasks does not show 0 events for a monitor that delivered one.
+					if (batch.lines.length > 0) registry.recordEvent(job.id);
+					deps.sendMessage(monitorEndMessage(job, batch), EVENT_DELIVERY);
 				},
 			});
 

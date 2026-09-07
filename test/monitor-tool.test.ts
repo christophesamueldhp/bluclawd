@@ -80,10 +80,20 @@ describe("monitor tool", () => {
 			onData(Buffer.from("only\n"));
 			return { exitCode: 3 };
 		};
-		const { tool, sent } = harness(exec);
+		const { tool, sent, registry } = harness(exec);
 		await tool.execute("c1", { command: "x", description: "d", persistent: false }, undefined as any, undefined);
 		await vi.advanceTimersByTimeAsync(0);
 		expect(sent.map((s) => s.message.content)).toEqual(["[monitor bash_1 · d]\nonly\nexited with code 3"]);
+		// The leftover line rode along in the terminal message but is still an event: /tasks must count it.
+		expect(registry.get("bash_1")?.events).toBe(1);
+	});
+
+	it("keeps the event count at 0 when a monitor exits with no leftover lines", async () => {
+		const exec: BackgroundExec = async () => ({ exitCode: 0 });
+		const { tool, registry } = harness(exec);
+		await tool.execute("c1", { command: "x", description: "d", persistent: false }, undefined as any, undefined);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(registry.get("bash_1")?.events).toBe(0);
 	});
 
 	it("stops a monitor that exceeds the rate limit", async () => {
