@@ -1,8 +1,8 @@
 /**
  * The pure pieces of the monitor tool: lines into batches, batches into a
- * rate, and all of it into the messages the model sees. Nothing here touches
- * pi or a process, so all of it is unit tested; the wiring lives in
- * ext/sandbox/monitor-tool.ts.
+ * rate, and the tail of a job's output. Nothing here touches pi or a
+ * process, so all of it is unit tested; the wiring will live in the sandbox
+ * extension.
  */
 
 export interface Batch {
@@ -61,11 +61,18 @@ export class EventBatcher {
 			lines.push(line);
 			bytes += size;
 		}
+		if (lines.length === 0 && all.length > 0) {
+			lines.push(all[0].slice(0, this.maxBytes));
+		}
 		return { lines, more: all.length - lines.length };
 	}
 }
 
-/** Counts events in a rolling window; `record` returns true once the count exceeds `max`. */
+/**
+ * Counts events in a rolling window; `record` returns true once the count exceeds `max`.
+ * Call it once per emitted batch, not per line, so the retained stamps stay bounded by
+ * windowMs / batch delay.
+ */
 export class RateLimiter {
 	private stamps: number[] = [];
 	readonly max: number;
@@ -83,12 +90,15 @@ export class RateLimiter {
 	}
 }
 
-/** The last `maxLines` lines of `text`, trimmed further to fit `maxBytes` on a line boundary. */
+/**
+ * The last `maxLines` lines of `text`, trimmed further to fit `maxBytes` on a line boundary.
+ * A single line past `maxBytes` on its own keeps the end of that line instead of going empty.
+ */
 export function tailOutput(text: string, maxLines: number, maxBytes: number): string {
 	const lines = text
-		.replace(/\n$/, "")
+		.replace(/\n+$/, "")
 		.split("\n")
-		.filter((line) => line.length > 0);
+		.map((line) => line.replace(/\r$/, ""));
 	const kept: string[] = [];
 	let bytes = 0;
 	for (let i = lines.length - 1; i >= 0 && kept.length < maxLines; i--) {
@@ -96,6 +106,9 @@ export function tailOutput(text: string, maxLines: number, maxBytes: number): st
 		if (bytes + size > maxBytes) break;
 		kept.unshift(lines[i]);
 		bytes += size;
+	}
+	if (kept.length === 0 && lines.length > 0) {
+		kept.push(lines[lines.length - 1].slice(-maxBytes));
 	}
 	return kept.join("\n");
 }

@@ -18,6 +18,10 @@ describe("splitLines", () => {
 	it("drops empty lines", () => {
 		expect(splitLines("", "\n\na\n\n")).toEqual({ lines: ["a"], carry: "" });
 	});
+
+	it("keeps only the text after the last bare \\r in a completed line", () => {
+		expect(splitLines("", "p 1%\rp 2%\n")).toEqual({ lines: ["p 2%"], carry: "" });
+	});
 });
 
 describe("EventBatcher", () => {
@@ -50,6 +54,14 @@ describe("EventBatcher", () => {
 		expect(flushed).toEqual([{ lines: ["abc"], more: 2 }]);
 	});
 
+	it("keeps content when the first pending line alone exceeds maxBytes", () => {
+		const flushed: unknown[] = [];
+		const batcher = new EventBatcher({ delayMs: 200, maxBytes: 10, onFlush: (b) => flushed.push(b) });
+		batcher.push(["y".repeat(50), "short"]);
+		vi.advanceTimersByTime(200);
+		expect(flushed).toEqual([{ lines: ["yyyyyyyyyy"], more: 1 }]);
+	});
+
 	it("take() returns what is pending, cancels the timer, and does not call onFlush", () => {
 		const flushed: unknown[] = [];
 		const batcher = new EventBatcher({ delayMs: 200, onFlush: (b) => flushed.push(b) });
@@ -58,6 +70,9 @@ describe("EventBatcher", () => {
 		vi.advanceTimersByTime(500);
 		expect(flushed).toEqual([]);
 		expect(batcher.take()).toEqual({ lines: [], more: 0 });
+		batcher.push(["b"]);
+		vi.advanceTimersByTime(200);
+		expect(flushed).toEqual([{ lines: ["b"], more: 0 }]);
 	});
 });
 
@@ -86,6 +101,18 @@ describe("tailOutput", () => {
 
 	it("keeps the last maxBytes bytes on a line boundary", () => {
 		expect(tailOutput("aaaa\nbbbb\ncc", 10, 8)).toBe("bbbb\ncc");
+	});
+
+	it("keeps the end of a single line that alone exceeds maxBytes", () => {
+		expect(tailOutput("x".repeat(100), 10, 20)).toBe("x".repeat(20));
+	});
+
+	it("keeps interior blank lines", () => {
+		expect(tailOutput("FAIL\n\n  at foo\n", 10, 100)).toBe("FAIL\n\n  at foo");
+	});
+
+	it("strips CRLF line endings", () => {
+		expect(tailOutput("a\r\n\r\n\r\n", 10, 100)).toBe("a\n\n");
 	});
 
 	it("returns an empty string for no output", () => {
