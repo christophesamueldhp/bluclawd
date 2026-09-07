@@ -196,3 +196,8 @@ export function taskExitMessage(job: BackgroundJobInfo, tail: string): OutgoingM
 		details: { id: job.id, description, command: job.command, end, tail, status: endStatus(job) },
 	};
 }
+
+/** A job the model killed itself already got its answer from kill_bash; everything else is news. */
+export function shouldNotifyExit(job: BackgroundJobInfo): boolean {
+	return !(job.killed && !job.stopReason);
+}

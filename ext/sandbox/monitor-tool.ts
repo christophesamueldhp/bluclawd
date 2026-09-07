@@ -89,10 +89,9 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 			if (refusal) {
 				return { content: [{ type: "text", text: refusal }], isError: true, details: undefined };
 			}
-			const timeout =
-				(params.persistent ?? false)
-					? undefined
-					: Math.min(params.timeout ?? DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS);
+			const timeout = params.persistent
+				? undefined
+				: Math.min(params.timeout ?? DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS);
 
 			const limiter = new RateLimiter(rateLimit);
 			const batcher = new EventBatcher({
@@ -100,19 +99,17 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 				onFlush: (batch) => deliver(batch),
 			});
 			let current: BackgroundJobInfo | undefined;
-			/** Set when the rate limit stops the monitor: a child that ignores the signal
-			 *  keeps producing output, and `exit` alone would let it steer on until it died. */
-			let stopped = false;
 
 			const deliver = (batch: Batch) => {
-				if (stopped) return;
 				// current is set before the first flush: deliver only runs from the batch timer.
 				const job = registry.get(current!.id) ?? current!;
-				if (job.exit) return; // the exit path sends the terminal message with whatever is left
+				// exit: the exit path sends the terminal message with whatever is left.
+				// killed: a child that traps the signal keeps producing output, and the
+				// exit guard alone would let it steer on until it finally died.
+				if (job.exit || job.killed) return;
 				registry.recordEvent(job.id);
 				deps.sendMessage(monitorEventMessage(job, batch), EVENT_DELIVERY);
 				if (limiter.record(Date.now())) {
-					stopped = true;
 					registry.kill(
 						job.id,
 						`too many events (${rateLimit.max} in ${rateLimit.windowMs / 1000}s), restart with a tighter filter`,

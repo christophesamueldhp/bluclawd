@@ -27,10 +27,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { backgroundBashJobs } from "../_shared/background-bash.ts";
+import { shouldNotifyExit, tailOutput, taskExitMessage } from "../_shared/monitor-events.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { resolveSandboxConfig, type SandboxConfig, strictRefusalReason } from "./config.ts";
 import { buildSandboxFailureNote } from "./failure-note.ts";
-import { createMonitorTool } from "./monitor-tool.ts";
+import { createMonitorTool, EVENT_DELIVERY } from "./monitor-tool.ts";
 import { isSandboxActive, setSandboxActive } from "./state.ts";
 
 /**
@@ -47,7 +48,7 @@ const BACKGROUND_BASH_PARAMS = Type.Object({
 	run_in_background: Type.Optional(
 		Type.Boolean({
 			description:
-				"Run the command in the background and return immediately with a task id. Read its output later with bash_output; stop it with kill_bash.",
+				"Run the command in the background and return immediately with a task id. You are notified once when it exits (with its last lines of output); read more with bash_output; stop it with kill_bash.",
 		}),
 	),
 });
@@ -126,6 +127,13 @@ export function factory(pi: ExtensionAPI): void {
 					timeout: typeof rest.timeout === "number" ? rest.timeout : undefined,
 					description,
 					exec: ops.exec,
+					// One notification on exit, so `until ...; do sleep 1; done` in the
+					// background is the single-notification recipe, as in Claude Code.
+					onExit: (finished) => {
+						if (!shouldNotifyExit(finished)) return;
+						const tail = tailOutput(backgroundBashJobs.peek(finished.id) ?? "", 20, 2048);
+						pi.sendMessage(taskExitMessage(finished, tail), EVENT_DELIVERY);
+					},
 				});
 				return {
 					content: [

@@ -130,6 +130,22 @@ describe("monitor tool", () => {
 		expect(sent.length).toBe(afterKill);
 	});
 
+	it("delivers nothing more after kill_bash, even if the child ignores the signal", async () => {
+		let onDataRef!: (b: Buffer) => void;
+		const exec: BackgroundExec = (_c, _d, { onData }) =>
+			new Promise(() => {
+				onDataRef = onData;
+			});
+		const { tool, sent, registry } = harness(exec);
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
+		// No reason: this is the model's own kill_bash, not a registry-initiated stop.
+		registry.kill("bash_1");
+		const afterKill = sent.length;
+		onDataRef(Buffer.from("late\n"));
+		await vi.advanceTimersByTimeAsync(250);
+		expect(sent.length).toBe(afterKill);
+	});
+
 	it("passes the timeout through unless persistent, clamped to the maximum", async () => {
 		const seen: (number | undefined)[] = [];
 		const exec: BackgroundExec = (_c, _d, { timeout }) => {

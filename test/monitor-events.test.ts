@@ -6,6 +6,7 @@ import {
 	monitorEndMessage,
 	monitorEventMessage,
 	RateLimiter,
+	shouldNotifyExit,
 	tailOutput,
 	taskExitMessage,
 } from "../ext/_shared/monitor-events.ts";
@@ -195,5 +196,30 @@ describe("message builders", () => {
 	it("falls back to the command when there is no description", () => {
 		const job = { ...monitorJob, description: undefined };
 		expect(monitorEventMessage(job, { lines: ["x"], more: 0 }).content).toBe("[monitor bash_3 · tail -f x.log]\nx");
+	});
+});
+
+describe("shouldNotifyExit", () => {
+	const base: BackgroundJobInfo = {
+		id: "bash_1",
+		command: "x",
+		cwd: "/",
+		startedAt: 0,
+		killed: false,
+		kind: "job",
+		events: 0,
+	};
+	it("notifies a normal exit, a failure and a timeout", () => {
+		expect(shouldNotifyExit({ ...base, exit: { code: 0, at: 1 } })).toBe(true);
+		expect(shouldNotifyExit({ ...base, exit: { code: null, error: "spawn ENOENT", at: 1 } })).toBe(true);
+		expect(shouldNotifyExit({ ...base, exit: { code: null, error: "timeout:300", at: 1 } })).toBe(true);
+	});
+	it("stays quiet for a kill the model asked for", () => {
+		expect(shouldNotifyExit({ ...base, killed: true, exit: { code: null, at: 1 } })).toBe(false);
+	});
+	it("still notifies a registry-initiated stop", () => {
+		expect(
+			shouldNotifyExit({ ...base, killed: true, stopReason: "too many events", exit: { code: null, at: 1 } }),
+		).toBe(true);
 	});
 });
