@@ -20,6 +20,7 @@
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { sharedRef } from "./global-state.ts";
 import { wrapToolDefinition } from "./wrap-tool-definition.ts";
 
 /** Cap on buffered output per job; the oldest chunks are dropped past this. */
@@ -214,8 +215,17 @@ export class BackgroundJobRegistry {
 	}
 }
 
-/** The process-wide registry used by the bash tool, bash_output/kill_bash, and /tasks. */
-export const backgroundBashJobs = new BackgroundJobRegistry();
+/**
+ * The process-wide registry used by the bash tool, bash_output/kill_bash, and /tasks.
+ *
+ * `sandbox` starts jobs and `background-bash` reads them, and pi loads each
+ * top-level extension in its own module graph, so a plain module constant
+ * would be two registries. `sharedRef` keeps it one (see global-state.ts).
+ */
+export const backgroundBashJobs: BackgroundJobRegistry = sharedRef(
+	"backgroundBashJobs",
+	new BackgroundJobRegistry(),
+).get();
 
 export function describeJobStatus(job: BackgroundJobInfo): string {
 	if (!job.exit) return "running";
