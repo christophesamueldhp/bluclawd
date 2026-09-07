@@ -9,7 +9,7 @@ import { recordExtensions } from "../scripts/probe-extensions.ts";
  */
 const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts: number; events: number }> = {
 	permissions: { commands: ["mode", "permissions"], tools: [], shortcuts: 1, events: 3 },
-	statusline: { commands: ["statusline", "usage", "cost"], tools: [], shortcuts: 0, events: 3 },
+	statusline: { commands: ["statusline", "usage"], tools: [], shortcuts: 0, events: 3 },
 	memory: { commands: ["memory"], tools: ["memory"], shortcuts: 0, events: 2 },
 	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 3 },
 	subagents: { commands: ["agents"], tools: ["task"], shortcuts: 0, events: 0 },
@@ -18,10 +18,9 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	sandbox: { commands: ["sandbox"], tools: ["bash"], shortcuts: 0, events: 3 },
 	"background-bash": { commands: ["tasks"], tools: ["bash_output", "kill_bash"], shortcuts: 0, events: 0 },
 	branding: { commands: ["theme"], tools: [], shortcuts: 0, events: 1 },
-	diagnostics: { commands: ["context", "status", "recap", "btw"], tools: [], shortcuts: 0, events: 0 },
+	diagnostics: { commands: ["context", "status", "recap"], tools: [], shortcuts: 0, events: 0 },
 	fleet: { commands: ["fleet"], tools: [], shortcuts: 0, events: 2 },
 	help: { commands: ["help"], tools: [], shortcuts: 0, events: 0 },
-	aliases: { commands: ["clear", "exit", "rename"], tools: [], shortcuts: 0, events: 0 },
 	plugin: { commands: ["plugin"], tools: [], shortcuts: 0, events: 0 },
 };
 

@@ -94,24 +94,6 @@ interface RecapData {
 	error?: string;
 }
 
-/**
- * `/btw <question>` — Claude Code's side question: answered by the model with
- * the conversation so far as context, but the exchange is shown as an entry
- * and never becomes part of the conversation, so it costs no context.
- */
-const BTW_SYSTEM_PROMPT = [
-	"The user is in the middle of a coding session with an AI assistant and has a side question.",
-	"Answer the question directly and concisely using the session transcript as context.",
-	"You have no tools; do not pretend to run anything. Do not continue the session's task.",
-].join("\n");
-
-interface BtwData {
-	question: string;
-	answer: string;
-	model?: string;
-	error?: string;
-}
-
 const BAR_WIDTH = 20;
 
 interface ContextData {
@@ -289,47 +271,6 @@ const diagnostics: InlineExtension = {
 					pi.appendEntry<RecapData>("bluclawd:recap", {
 						text: "",
 						error: `Recap failed: ${error instanceof Error ? error.message : String(error)}`,
-					});
-				}
-			},
-		});
-
-		pi.registerEntryRenderer<BtwData>("bluclawd:btw", (entry, _options, theme) => {
-			const data = entry.data;
-			if (!data) return block([]);
-			const head = theme.bold(`btw${data.model ? theme.fg("dim", ` · ${data.model}`) : ""}`);
-			if (data.error) return block([head, theme.fg("error", data.error)]);
-			return block([head, theme.fg("dim", `Q: ${data.question}`), "", data.answer]);
-		});
-
-		pi.registerCommand("btw", {
-			description: "Ask a side question with the session as context (--save keeps the answer in project memory)",
-			handler: async (args, ctx) => {
-				const trimmed = args.trim();
-				const save = trimmed.startsWith("--save");
-				const question = (save ? trimmed.slice("--save".length) : trimmed).trim();
-				if (!question) {
-					ctx.ui.notify("Usage: /btw [--save] <question>", "info");
-					return;
-				}
-				const transcript = transcriptOf(ctx) ?? "(the session has no messages yet)";
-				ctx.ui.notify("Asking…", "info");
-				try {
-					const answer = await askModel(
-						ctx,
-						BTW_SYSTEM_PROMPT,
-						`Session transcript:\n\n${transcript}\n\n---\nSide question: ${question}`,
-					);
-					pi.appendEntry<BtwData>("bluclawd:btw", { question, answer, model: modelLabel(ctx) });
-					if (save) {
-						saveProjectNote(`${question}\n${answer}`, ctx.cwd);
-						ctx.ui.notify("Answer saved to project memory (/memory).", "info");
-					}
-				} catch (error) {
-					pi.appendEntry<BtwData>("bluclawd:btw", {
-						question,
-						answer: "",
-						error: `Failed: ${error instanceof Error ? error.message : String(error)}`,
 					});
 				}
 			},

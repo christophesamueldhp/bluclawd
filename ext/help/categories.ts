@@ -34,7 +34,6 @@ type CategoryTitle = (typeof CATEGORY_ORDER)[number];
  */
 const CATEGORY_OF: Record<string, CategoryTitle> = {
 	// Session
-	clear: "Session",
 	// pi's own command names. The fork branch renamed these to their Claude Code
 	// equivalents by editing pi's built-in table; this branch does not, so the
 	// names pi actually ships are the ones that need a category.
@@ -49,15 +48,12 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 	fork: "Session",
 	clone: "Session",
 	tree: "Session",
-	rename: "Session",
 	compact: "Session",
 	export: "Session",
 	import: "Session",
 	share: "Session",
 	copy: "Session",
 	recap: "Session",
-	btw: "Session",
-	cost: "Info & diagnostics",
 	theme: "App",
 
 	// Code & review
@@ -95,7 +91,6 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 	// App
 	config: "App",
 	reload: "App",
-	exit: "App",
 };
 
 /** The bucket for anything not in the table above. Rendered last. */

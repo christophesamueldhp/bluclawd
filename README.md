@@ -41,9 +41,9 @@ ext/            the feature layer
 test/           self-contained — no monorepo, no fixtures pi doesn't publish
 ```
 
-15 extensions: `permissions`, `statusline`, `memory`,
+14 extensions: `permissions`, `statusline`, `memory`,
 `checkpoints`, `subagents`, `web`, `mcp`, `sandbox`, `background-bash`,
-`branding`, `diagnostics`, `fleet`, `help`, `aliases`, `plugin`.
+`branding`, `diagnostics`, `fleet`, `help`, `plugin`.
 
 ## What it adds
 
@@ -59,10 +59,9 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `/memory`, `# note` | persistent memory, injected into the system prompt. `/memory edit [scope]` and `/memory search <text>`; a bare `#` opens an editor for a multi-line note; `@name.md` lines pull in a sibling file |
 | `/rewind` | file checkpoints per turn; restores the files, the conversation, or both |
 | `/fleet` | session roster in the shape of Claude Code's `/resume` picker: title + `time · branch · N messages · path`, type to search, ctrl+a current/all projects, enter opens, ctrl+t peeks, ctrl+n starts one |
-| `/status`, `/context`, `/usage`, `/cost` | model, auth, safety, session, context window, spend, plan usage |
-| `/recap`, `/btw <q>` | session summary / side question, neither added to the conversation; `--save` on either keeps the result in project memory |
+| `/status`, `/context`, `/usage` | model, auth, safety, session, context window, spend, plan usage |
+| `/recap` | session summary, not added to the conversation; `--save` keeps it in project memory |
 | `/plugin`, `/theme`, `/statusline` | packages, theme, external status line command |
-| `/clear`, `/exit`, `/rename` | pi's `/new`, `/quit`, `/name` under their Claude Code names |
 | `/help` | all of the above, grouped |
 
 The footer replicates a ccstatusline configuration (model, effort, context

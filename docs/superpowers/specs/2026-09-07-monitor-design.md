@@ -96,7 +96,7 @@ into one stream, so both become events. The tool description says to add
 - A job killed through `kill_bash` does NOT notify: the model asked for it and
   already got the tool result. Timeouts and spawn failures do notify.
 - `/tasks` shows a kind column (job / monitor) and, for monitors, the event
-  count.
+  count (batches sent, the same unit the rate limiter counts).
 
 ## 5. Verification
 

@@ -17,7 +17,7 @@
  *    published via ctx.ui.setStatus("statusline", text), which the footer above
  *    shows on its status line. When the setting is unset, nothing runs.
  *
- * `/usage` and `/cost` (Claude Code's names) live here too rather than in
+ * `/usage` (Claude Code's name) lives here too rather than in
  * `diagnostics`: they report the plan-usage windows the footer's pollers hold,
  * and reading that state from another top-level extension would cross a
  * `pi.extensions` module-graph boundary (see `_shared/global-state.ts`).
@@ -200,7 +200,7 @@ export interface UsageReport {
 }
 
 /**
- * The `/usage` (and `/cost`) report: this session's spend and token totals,
+ * The `/usage` report: this session's spend and token totals,
  * followed by whichever plan-usage windows the footer pollers have. Exported
  * pure for tests; `theme` is the only styling dependency.
  */
@@ -426,10 +426,6 @@ export function factory(pi: ExtensionAPI): void {
 	};
 	pi.registerCommand("usage", {
 		description: "Show session cost, token totals, and plan usage",
-		handler: usageHandler,
-	});
-	pi.registerCommand("cost", {
-		description: "Show session cost and token totals (same as /usage)",
 		handler: usageHandler,
 	});
 
