@@ -3,8 +3,9 @@
  * (`~/.config/ccstatusline/settings.json`, widget for widget):
  *
  *   line 1: model · thinking effort · context slider (bar only) — flex — origin owner · ⎇ branch · (+ins,-del) · cwd
- *   line 2: Claude usage — Session: slider % · reset timer | Weekly: slider % · reset date (Anthropic OAuth only)
- *   line 3: OpenCode Go usage — Session/Weekly/Monthly sliders + reset times (env credentials only)
+ *   line 2..n: one plan-usage line per source that has data (Claude subscription
+ *              via Anthropic OAuth, OpenCode Go via env credentials, ...) — sliders +
+ *              reset times, compacted before truncation when the terminal is narrow
  *   line 4: cost + token stats (omitted when empty)
  *   line 5: extension statuses (permission mode, mcp, the external statusline command, ...)
  *
@@ -18,8 +19,9 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { sharedRef } from "../_shared/global-state.ts";
 import type { GitChangeCounts } from "./git-info.ts";
-import type { OpencodeGoUsageData, OpencodeGoWindow, UsageError, UsageWindowData } from "./usage-providers.ts";
+import type { PlanUsage, UsageError } from "./usage-providers.ts";
 
 /** Everything the footer reads, behind functions so each render sees live values. */
 export interface FooterSources {
@@ -28,8 +30,8 @@ export interface FooterSources {
 	gitBranch(): string | null;
 	gitOriginOwner(): string | null;
 	gitChanges(): GitChangeCounts | null;
-	usage(): UsageWindowData | null;
-	goUsage(): OpencodeGoUsageData | null;
+	/** Every plan-usage source that currently has data, in display order. */
+	planUsage(): readonly PlanUsage[];
 	extensionStatuses(): ReadonlyMap<string, string>;
 }
 
@@ -135,6 +137,29 @@ function sanitizeStatusText(text: string): string {
 }
 
 /** Cumulative usage over the whole session, including pre-compaction entries. */
+/** One plan-usage widget pair, already painted: the labeled slider and its optional reset text. */
+export type UsageGroup = { usage: string; reset?: string };
+
+/**
+ * Fit plan-usage groups into `width` the way ccstatusline's compact mode does,
+ * dropping detail before cutting text: full line → without reset times → without
+ * trailing windows (never fewer than one) → truncated as a last resort. A line
+ * that fits is never touched.
+ */
+export function fitUsageGroups(groups: readonly UsageGroup[], width: number, separator: string): string {
+	const join = (items: readonly UsageGroup[], withReset: boolean) =>
+		items.map((g) => g.usage + (withReset ? (g.reset ?? "") : "")).join(separator);
+	const full = join(groups, true);
+	if (visibleWidth(full) <= width) return full;
+	let kept = groups;
+	let line = join(kept, false);
+	while (visibleWidth(line) > width && kept.length > 1) {
+		kept = kept.slice(0, -1);
+		line = join(kept, false);
+	}
+	return truncateToWidth(line, width, "...");
+}
+
 export type SessionTotals = {
 	input: number;
 	output: number;
@@ -144,15 +169,30 @@ export type SessionTotals = {
 	latestCacheHitRate: number | undefined;
 };
 
+/** Providers billed by subscription despite API-key auth, so pi's OAuth rule never sees them. */
+const BUILTIN_SUBSCRIPTION_PROVIDERS: readonly string[] = ["kimi-coding", "opencode-go"];
+
+/**
+ * `statusline.subscriptionProviders` from settings. A sharedRef, not a module
+ * `let`: `diagnostics` imports this file for `/status` inside its own module
+ * graph and would otherwise never see what `statusline` set.
+ */
+const configuredSubscriptionProviders = sharedRef<readonly string[]>("statusline.subscriptionProviders", []);
+
+export function setSubscriptionProviders(providers: readonly string[]): void {
+	configuredSubscriptionProviders.set([...providers]);
+}
+
 /**
  * Whether the active model is billed by subscription rather than per token —
- * pi's own footer rule: OAuth to a provider whose OAuth flow is a subscription,
- * plus Kimi Coding, which is subscription-backed despite API-key auth.
+ * pi's own footer rule (OAuth to a provider whose OAuth flow is a subscription)
+ * plus the built-in and configured subscription providers above.
  */
 export function isUsingSubscription(ctx: ExtensionContext): boolean {
 	const model = ctx.model;
 	if (!model) return false;
-	if (model.provider === "kimi-coding") return true;
+	if (BUILTIN_SUBSCRIPTION_PROVIDERS.includes(model.provider)) return true;
+	if (configuredSubscriptionProviders.get().includes(model.provider)) return true;
 	try {
 		return (
 			ctx.modelRegistry.isUsingOAuth(model) &&
@@ -256,90 +296,39 @@ export class CcStatuslineFooter implements Component {
 		return truncateToWidth(leftText + rightText, width, "...");
 	}
 
-	/** Line 2: Session slider + block reset timer | Weekly slider + weekly reset date. */
-	private renderUsageLine(width: number): string | null {
-		const data = this.sources.usage();
-		if (!data) return null;
-
+	/**
+	 * One plan-usage line: `Label: slider pct%  reset` per window, ` | ` between.
+	 * An errored source renders as `Source: [API Error]` so the failing poller is
+	 * named. Compacted by {@link fitUsageGroups} before anything is truncated.
+	 */
+	private renderPlanUsageLine(usage: PlanUsage, width: number): string | null {
+		if (usage.error) {
+			return truncateToWidth(
+				pad(paint("yellowBright", `${usage.source}: ${usageErrorMessage(usage.error)}`)),
+				width,
+				"...",
+			);
+		}
 		const now = Date.now();
-
-		// session-usage widget: brightYellow, labeled slider
-		let sessionUsage: string | null = null;
-		if (data.sessionUsage !== undefined) {
-			const percent = Math.max(0, Math.min(100, data.sessionUsage));
-			sessionUsage = `Session: ${makeSliderBar(percent)} ${percent.toFixed(1)}%`;
-		} else if (data.error) {
-			sessionUsage = usageErrorMessage(data.error);
-		}
-
-		// reset-timer widget: yellow, raw remaining time until the 5h block resets
-		let resetTimer: string | null = null;
-		if (!data.error) {
-			const resetAtMs = data.sessionResetAt ? Date.parse(data.sessionResetAt) : Number.NaN;
-			resetTimer = Number.isNaN(resetAtMs) ? "[Loading]" : formatUsageDuration(resetAtMs - now);
-		}
-
-		// weekly-usage widget: brightYellow, labeled slider
-		let weeklyUsage: string | null = null;
-		if (data.weeklyUsage !== undefined) {
-			const percent = Math.max(0, Math.min(100, data.weeklyUsage));
-			weeklyUsage = `Weekly: ${makeSliderBar(percent)} ${percent.toFixed(1)}%`;
-		}
-
-		// weekly-reset-timer widget: yellow, absolute compact local date
-		let weeklyReset: string | null = null;
-		if (!data.error) {
-			weeklyReset = formatResetAtCompactLocal(data.weeklyResetAt) ?? "[Loading]";
-		}
-
-		const leftGroup = [
-			sessionUsage && pad(paint("yellowBright", sessionUsage)),
-			resetTimer && pad(paint("yellow", resetTimer)),
-		]
-			.filter(Boolean)
-			.join("");
-		const rightGroup = [
-			weeklyUsage && pad(paint("yellowBright", weeklyUsage)),
-			weeklyReset && pad(paint("yellow", weeklyReset)),
-		]
-			.filter(Boolean)
-			.join("");
-
-		if (!leftGroup && !rightGroup) return null;
-		// separator widget: brightWhite " | ", only between two rendered groups
-		const line =
-			leftGroup && rightGroup ? leftGroup + paint("whiteBright", " | ") + rightGroup : leftGroup || rightGroup;
-		return truncateToWidth(line, width, "...");
-	}
-
-	/** Line 3: OpenCode Go plan usage — rolling 5h, weekly, and monthly windows. */
-	private renderGoUsageLine(width: number): string | null {
-		const data = this.sources.goUsage();
-		if (!data) return null;
-
-		if (data.error) {
-			return truncateToWidth(pad(paint("yellowBright", `Session: ${usageErrorMessage(data.error)}`)), width, "...");
-		}
-
-		const now = Date.now();
-		const windowGroup = (label: string, window: OpencodeGoWindow | undefined, absoluteReset: boolean) => {
-			if (!window) return null;
+		const groups: UsageGroup[] = usage.windows.map((window) => {
 			const percent = Math.max(0, Math.min(100, window.usagePercent));
-			const usage = pad(paint("yellowBright", `${label}: ${makeSliderBar(percent)} ${percent.toFixed(1)}%`));
-			const reset = absoluteReset
-				? formatResetAtCompactLocal(window.resetAt)
-				: formatUsageDuration(Date.parse(window.resetAt) - now);
-			return usage + (reset ? pad(paint("yellow", reset)) : "");
-		};
-
-		const groups = [
-			windowGroup("Session", data.rolling, false),
-			windowGroup("Weekly", data.weekly, true),
-			windowGroup("Monthly", data.monthly, true),
-		].filter((group): group is string => Boolean(group));
-
+			let reset: string | null = null;
+			if (window.resetAt) {
+				if (window.resetStyle === "countdown") {
+					const resetAtMs = Date.parse(window.resetAt);
+					reset = Number.isNaN(resetAtMs) ? null : formatUsageDuration(resetAtMs - now);
+				} else {
+					reset = formatResetAtCompactLocal(window.resetAt);
+				}
+			}
+			if (reset === null && usage.loading) reset = "[Loading]";
+			return {
+				usage: pad(paint("yellowBright", `${window.label}: ${makeSliderBar(percent)} ${percent.toFixed(1)}%`)),
+				reset: reset === null ? undefined : pad(paint("yellow", reset)),
+			};
+		});
 		if (groups.length === 0) return null;
-		return truncateToWidth(groups.join(paint("whiteBright", " | ")), width, "...");
+		return fitUsageGroups(groups, width, paint("whiteBright", " | "));
 	}
 
 	/** Line 4: cost and token stats, dim. Returns null when there is nothing to show. */
@@ -377,11 +366,10 @@ export class CcStatuslineFooter implements Component {
 
 		const lines = [this.renderInfoLine(width, ctx)];
 
-		const usageLine = this.renderUsageLine(width);
-		if (usageLine !== null) lines.push(usageLine);
-
-		const goUsageLine = this.renderGoUsageLine(width);
-		if (goUsageLine !== null) lines.push(goUsageLine);
+		for (const usage of this.sources.planUsage()) {
+			const line = this.renderPlanUsageLine(usage, width);
+			if (line !== null) lines.push(line);
+		}
 
 		let statsLine: string | null = null;
 		try {

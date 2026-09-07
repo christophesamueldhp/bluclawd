@@ -63,14 +63,16 @@ import {
 	formatTokens,
 	isUsingSubscription,
 	type SessionTotals,
+	setSubscriptionProviders,
 	sumSessionUsage,
 } from "./footer.ts";
 import { GitInfo } from "./git-info.ts";
 import {
-	type OpencodeGoUsageData,
+	claudePlanUsage,
 	OpencodeGoUsageProvider,
+	opencodeGoPlanUsage,
+	type PlanUsage,
 	UsageDataProvider,
-	type UsageWindowData,
 } from "./usage-providers.ts";
 
 /** Env var carrying the JSON payload to the external statusline command. */
@@ -121,7 +123,40 @@ function stopIntervalTimer(): void {
  * process (double factory pass, /reload, session switch) and each start must
  * replace — not stack — the pollers of the previous one.
  */
-let footerRuntime: { git: GitInfo; usage: UsageDataProvider; goUsage: OpencodeGoUsageProvider } | undefined;
+let footerRuntime: { git: GitInfo; sources: PlanUsageSource[] } | undefined;
+
+/**
+ * One plan-usage source: its poller, the adapter to the neutral shape, and the
+ * hint `/usage` prints while it has no data. Adding a provider means adding an
+ * entry here — the footer and `/usage` iterate the list and know nothing else.
+ */
+interface PlanUsageSource {
+	poller: { onChange(callback: () => void): () => void; start(): void; dispose(): void };
+	usage(): PlanUsage | null;
+	hint: string;
+}
+
+function createPlanUsageSources(): PlanUsageSource[] {
+	const claude = new UsageDataProvider(() => readStoredCredential("anthropic"));
+	const go = new OpencodeGoUsageProvider();
+	return [
+		{
+			poller: claude,
+			usage: () => claudePlanUsage(claude.getUsageData()),
+			hint: "Claude plan windows need an Anthropic OAuth login (/login).",
+		},
+		{
+			poller: go,
+			usage: () => opencodeGoPlanUsage(go.getUsageData()),
+			hint: "OpenCode Go windows need OPENCODE_GO_WORKSPACE_ID and OPENCODE_GO_AUTH_COOKIE.",
+		},
+	];
+}
+
+/** Sources with data, in display order. */
+function activePlanUsage(sources: readonly PlanUsageSource[]): PlanUsage[] {
+	return sources.map((source) => source.usage()).filter((usage): usage is PlanUsage => usage !== null);
+}
 
 /**
  * Latest context seen by any handler. The footer reads model, thinking level,
@@ -132,8 +167,7 @@ let latestCtx: ExtensionContext | undefined;
 
 function disposeFooterRuntime(): void {
 	footerRuntime?.git.dispose();
-	footerRuntime?.usage.dispose();
-	footerRuntime?.goUsage.dispose();
+	for (const source of footerRuntime?.sources ?? []) source.poller.dispose();
 	footerRuntime = undefined;
 }
 
@@ -141,16 +175,14 @@ function disposeFooterRuntime(): void {
 function installFooter(ctx: ExtensionContext): void {
 	disposeFooterRuntime();
 	const git = new GitInfo(ctx.cwd);
-	const usage = new UsageDataProvider(() => readStoredCredential("anthropic"));
-	const goUsage = new OpencodeGoUsageProvider();
-	footerRuntime = { git, usage, goUsage };
+	const sources = createPlanUsageSources();
+	footerRuntime = { git, sources };
 
 	ctx.ui.setFooter((tui, theme, footerData) => {
 		const repaint = () => tui.requestRender();
 		const unsubscribe = [
 			git.onChange(repaint),
-			usage.onChange(repaint),
-			goUsage.onChange(repaint),
+			...sources.map((source) => source.poller.onChange(repaint)),
 			footerData.onBranchChange(repaint),
 		];
 		const footer = new CcStatuslineFooter(
@@ -159,8 +191,7 @@ function installFooter(ctx: ExtensionContext): void {
 				gitBranch: () => footerData.getGitBranch(),
 				gitOriginOwner: () => git.getOriginOwner(),
 				gitChanges: () => git.getChanges(),
-				usage: () => usage.getUsageData(),
-				goUsage: () => goUsage.getUsageData(),
+				planUsage: () => activePlanUsage(sources),
 				extensionStatuses: () => footerData.getExtensionStatuses(),
 			},
 			theme,
@@ -177,8 +208,7 @@ function installFooter(ctx: ExtensionContext): void {
 		{ placement: "aboveEditor" },
 	);
 
-	usage.start();
-	goUsage.start();
+	for (const source of sources) source.poller.start();
 }
 
 /** Snapshot rendered by `/usage`. Plain data so it survives in the session file. */
@@ -186,8 +216,10 @@ export interface UsageReport {
 	model?: string;
 	subscription: boolean;
 	totals: SessionTotals;
-	claude: UsageWindowData | null;
-	go: OpencodeGoUsageData | null;
+	/** Optional: entries written before 2026-09-07 carry `claude`/`go` fields instead and must still render. */
+	plans?: PlanUsage[];
+	/** Hints for the sources that had no data, printed when nothing is available. */
+	unavailable?: string[];
 }
 
 /**
@@ -219,35 +251,19 @@ export function formatUsageReport(
 		return Number.isNaN(at.getTime()) ? "" : dim(` (resets ${at.toLocaleString()})`);
 	};
 
-	const claude = report.claude;
-	if (claude && (claude.sessionUsage !== undefined || claude.weeklyUsage !== undefined)) {
-		lines.push("", theme.bold("Plan usage (Claude)"));
-		if (claude.sessionUsage !== undefined) {
-			lines.push(`${dim("Session (5h):")} ${claude.sessionUsage.toFixed(0)}%${resetSuffix(claude.sessionResetAt)}`);
-		}
-		if (claude.weeklyUsage !== undefined) {
-			lines.push(`${dim("Weekly:")} ${claude.weeklyUsage.toFixed(0)}%${resetSuffix(claude.weeklyResetAt)}`);
+	const plans = report.plans ?? [];
+	for (const plan of plans) {
+		if (plan.windows.length === 0) continue;
+		lines.push("", theme.bold(`Plan usage (${plan.source})`));
+		for (const window of plan.windows) {
+			lines.push(`${dim(`${window.label}:`)} ${window.usagePercent.toFixed(0)}%${resetSuffix(window.resetAt)}`);
 		}
 	}
 
-	const go = report.go;
-	if (go && (go.rolling || go.weekly || go.monthly)) {
-		lines.push("", theme.bold("Plan usage (OpenCode Go)"));
-		for (const [label, window] of [
-			["Session (5h)", go.rolling],
-			["Weekly", go.weekly],
-			["Monthly", go.monthly],
-		] as const) {
-			if (window) lines.push(`${dim(`${label}:`)} ${window.usagePercent.toFixed(0)}%${resetSuffix(window.resetAt)}`);
-		}
-	}
-
-	if (!claude && !go) {
-		lines.push(
-			"",
-			dim("No plan usage available: Claude windows need an Anthropic OAuth login (/login);"),
-			dim("OpenCode Go windows need OPENCODE_GO_WORKSPACE_ID and OPENCODE_GO_AUTH_COOKIE."),
-		);
+	if (plans.length === 0) {
+		const provider = report.model?.split("/")[0];
+		lines.push("", dim(`No plan usage available${provider ? ` for ${provider}` : ""}.`));
+		for (const hint of report.unavailable ?? []) lines.push(dim(hint));
 	}
 	return lines;
 }
@@ -385,6 +401,7 @@ export function factory(pi: ExtensionAPI): void {
 				projectTrusted: ctx.isProjectTrusted(),
 			}),
 		);
+		setSubscriptionProviders(statusline?.subscriptionProviders ?? []);
 		const intervalMs = statusline?.intervalMs;
 		if (!statusline?.command?.trim() || typeof intervalMs !== "number" || !Number.isFinite(intervalMs)) return;
 		intervalTimer = setInterval(() => fire(ctx), Math.max(intervalMs, MIN_INTERVAL_MS));
@@ -410,8 +427,10 @@ export function factory(pi: ExtensionAPI): void {
 			model: model ? `${model.provider}/${model.id}` : undefined,
 			subscription: isUsingSubscription(ctx),
 			totals: sumSessionUsage(ctx),
-			claude: footerRuntime?.usage.getUsageData() ?? null,
-			go: footerRuntime?.goUsage.getUsageData() ?? null,
+			plans: activePlanUsage(footerRuntime?.sources ?? []),
+			unavailable: (footerRuntime?.sources ?? [])
+				.filter((source) => source.usage() === null)
+				.map((source) => source.hint),
 		});
 	};
 	pi.registerCommand("usage", {

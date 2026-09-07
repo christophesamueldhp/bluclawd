@@ -43,8 +43,11 @@ export interface PermissionSettings {
 }
 
 export interface StatuslineSettings {
-	command: string;
+	/** External command whose first stdout line joins the footer's status line. */
+	command?: string;
 	intervalMs?: number;
+	/** Extra provider ids billed by subscription (`(sub)` in the footer, `/usage`, `/status`); kimi-coding and opencode-go are built in. */
+	subscriptionProviders?: string[];
 }
 
 export interface WebsearchSettings {

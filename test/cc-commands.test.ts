@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { formatStatus } from "../ext/diagnostics/index.ts";
 import { formatPackageList } from "../ext/plugin/index.ts";
 import { formatUsageReport } from "../ext/statusline/index.ts";
+import { claudePlanUsage, opencodeGoPlanUsage } from "../ext/statusline/usage-providers.ts";
 
 const plain = { bold: (s: string) => s, fg: (_c: string, s: string) => s };
 
@@ -14,8 +15,13 @@ describe("/usage report", () => {
 				model: "opencode-go/kimi-k2.6",
 				subscription: true,
 				totals,
-				claude: { sessionUsage: 20, weeklyUsage: 55, sessionResetAt: undefined, weeklyResetAt: undefined },
-				go: { rolling: { usagePercent: 3, resetAt: "2026-09-03T00:00:00Z" } },
+				plans: [
+					claudePlanUsage({ sessionUsage: 20, weeklyUsage: 55 }) ?? { source: "", windows: [] },
+					opencodeGoPlanUsage({ rolling: { usagePercent: 3, resetAt: "2026-09-03T00:00:00Z" } }) ?? {
+						source: "",
+						windows: [],
+					},
+				],
 			},
 			plain,
 		);
@@ -26,15 +32,34 @@ describe("/usage report", () => {
 			"Tokens: ↑1.2k in · ↓340 out · cache read 5.0k · cache write 0",
 		);
 		expect(lines).toContain("Plan usage (Claude)");
-		expect(lines).toContain("Session (5h): 20%");
+		expect(lines).toContain("Session: 20%");
 		expect(lines).toContain("Plan usage (OpenCode Go)");
-		expect(lines.some((l) => l.startsWith("Session (5h): 3%"))).toBe(true);
+		expect(lines.some((l) => l.startsWith("Session: 3%"))).toBe(true);
 	});
 
-	it("explains how to get plan usage when neither source is configured", () => {
-		const lines = formatUsageReport({ subscription: false, totals, claude: null, go: null }, plain);
+	it("names the provider and prints each source's hint when no plan usage is available", () => {
+		const lines = formatUsageReport(
+			{
+				model: "openrouter/x",
+				subscription: false,
+				totals,
+				plans: [],
+				unavailable: [
+					"Claude plan windows need an Anthropic OAuth login (/login).",
+					"Go needs OPENCODE_GO_WORKSPACE_ID.",
+				],
+			},
+			plain,
+		);
+		expect(lines).toContain("No plan usage available for openrouter.");
 		expect(lines.some((l) => l.includes("/login"))).toBe(true);
 		expect(lines.some((l) => l.includes("OPENCODE_GO_WORKSPACE_ID"))).toBe(true);
+	});
+
+	it("still renders entries written before the plan list existed", () => {
+		const lines = formatUsageReport({ subscription: false, totals } as never, plain);
+		expect(lines[0]).toBe("Session usage");
+		expect(lines).toContain("No plan usage available.");
 	});
 });
 

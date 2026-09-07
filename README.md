@@ -65,7 +65,14 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `/help` | all of the above, grouped |
 
 The footer replicates a ccstatusline configuration (model, effort, context
-slider, git owner/branch/changes, plan-usage sliders, token stats).
+slider, git owner/branch/changes, plan-usage sliders, token stats). Plan usage
+is provider-neutral: one line per source that has data (Claude subscription via
+an Anthropic OAuth login, OpenCode Go via `OPENCODE_GO_WORKSPACE_ID` +
+`OPENCODE_GO_AUTH_COOKIE`), compacted before truncation on narrow terminals.
+The `(sub)` cost marker follows pi's OAuth-subscription rule plus
+`kimi-coding` and `opencode-go`; add other subscription-billed provider ids
+with `statusline.subscriptionProviders` in settings.json. `statusline.command`
+runs an external script whose first stdout line joins the status line.
 
 ## Updating
 

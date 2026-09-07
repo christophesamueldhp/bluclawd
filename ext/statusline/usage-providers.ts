@@ -318,3 +318,62 @@ export class OpencodeGoUsageProvider extends PollingProvider<OpencodeGoUsageData
 		}
 	}
 }
+
+/**
+ * Provider-neutral plan usage — the one shape the footer and `/usage` render.
+ * Each billing source (Claude subscription, OpenCode Go, ...) adapts its own API
+ * response into this, so the renderers never know which provider they show and
+ * adding a source is an adapter plus a poller, never a renderer change.
+ */
+export type PlanUsageWindow = {
+	label: string;
+	/** Utilization percent, 0-100. */
+	usagePercent: number;
+	/** ISO timestamp of the next reset, when the source reports one. */
+	resetAt?: string;
+	/** `countdown` renders the time remaining ("4hr 33m"); `absolute` renders the local date ("09-14 07:00"). */
+	resetStyle: "countdown" | "absolute";
+};
+
+export type PlanUsage = {
+	/** Source name ("Claude", "OpenCode Go"); also labels error lines so `[API Error]` says which poller failed. */
+	source: string;
+	windows: PlanUsageWindow[];
+	error?: UsageError;
+	/** Render "[Loading]" for a window whose reset time is not known yet, instead of nothing. */
+	loading?: boolean;
+};
+
+export function claudePlanUsage(data: UsageWindowData | null): PlanUsage | null {
+	if (!data) return null;
+	const windows: PlanUsageWindow[] = [];
+	if (data.sessionUsage !== undefined) {
+		windows.push({
+			label: "Session",
+			usagePercent: data.sessionUsage,
+			resetAt: data.sessionResetAt,
+			resetStyle: "countdown",
+		});
+	}
+	if (data.weeklyUsage !== undefined) {
+		windows.push({
+			label: "Weekly",
+			usagePercent: data.weeklyUsage,
+			resetAt: data.weeklyResetAt,
+			resetStyle: "absolute",
+		});
+	}
+	return { source: "Claude", windows, error: data.error, loading: true };
+}
+
+export function opencodeGoPlanUsage(data: OpencodeGoUsageData | null): PlanUsage | null {
+	if (!data) return null;
+	const windows: PlanUsageWindow[] = [];
+	const push = (label: string, window: OpencodeGoWindow | undefined, resetStyle: PlanUsageWindow["resetStyle"]) => {
+		if (window) windows.push({ label, usagePercent: window.usagePercent, resetAt: window.resetAt, resetStyle });
+	};
+	push("Session", data.rolling, "countdown");
+	push("Weekly", data.weekly, "absolute");
+	push("Monthly", data.monthly, "absolute");
+	return { source: "OpenCode Go", windows, error: data.error };
+}

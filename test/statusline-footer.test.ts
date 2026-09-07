@@ -2,12 +2,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	CcStatuslineFooter,
 	type FooterSources,
+	fitUsageGroups,
 	formatCwd,
 	formatUsageDuration,
+	isUsingSubscription,
 	makeSliderBar,
+	setSubscriptionProviders,
 } from "../ext/statusline/footer.ts";
 import { parseDiffShortStat, parseRemoteOwner } from "../ext/statusline/git-info.ts";
-import { parseOpencodeGoDashboard, UsageDataProvider } from "../ext/statusline/usage-providers.ts";
+import {
+	claudePlanUsage,
+	opencodeGoPlanUsage,
+	parseOpencodeGoDashboard,
+	UsageDataProvider,
+} from "../ext/statusline/usage-providers.ts";
 
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 
@@ -132,7 +140,7 @@ describe("CcStatuslineFooter", () => {
 		ctx: () =>
 			({
 				cwd: "/home/me/proj",
-				model: { name: "Kimi K2.6 (preview)", id: "kimi-k2.6", provider: "opencode-go", reasoning: true },
+				model: { name: "Kimi K2.6 (preview)", id: "kimi-k2.6", provider: "openrouter", reasoning: true },
 				thinkingLevel: "high",
 				getContextUsage: () => ({ percent: 50, tokens: 100_000 }),
 				sessionManager: { getEntries: () => [] },
@@ -141,8 +149,7 @@ describe("CcStatuslineFooter", () => {
 		gitBranch: () => "main",
 		gitOriginOwner: () => "owner",
 		gitChanges: () => ({ insertions: 4, deletions: 2 }),
-		usage: () => null,
-		goUsage: () => null,
+		planUsage: () => [],
 		extensionStatuses: () => new Map(),
 		...overrides,
 	});
@@ -161,7 +168,7 @@ describe("CcStatuslineFooter", () => {
 	it("shows the usage line only when a provider has data, and statuses last", () => {
 		const lines = new CcStatuslineFooter(
 			sources({
-				usage: () => ({ sessionUsage: 20, weeklyUsage: 60, sessionResetAt: undefined, weeklyResetAt: undefined }),
+				planUsage: () => [claudePlanUsage({ sessionUsage: 20, weeklyUsage: 60 }) ?? { source: "", windows: [] }],
 				extensionStatuses: () =>
 					new Map([
 						["b", "same"],
@@ -180,6 +187,60 @@ describe("CcStatuslineFooter", () => {
 		expect(lines[2]).toBe("same ⏸ manual");
 	});
 
+	it("names the source on an error line so the failing poller is identifiable", () => {
+		const lines = new CcStatuslineFooter(
+			sources({ planUsage: () => [{ source: "OpenCode Go", windows: [], error: "api-error" }] }),
+			fakeTheme,
+		)
+			.render(120)
+			.map(stripAnsi);
+		expect(lines[1]).toBe(" OpenCode Go: [API Error] ");
+	});
+
+	it("compacts a wide plan-usage line instead of truncating it", () => {
+		const go = opencodeGoPlanUsage({
+			rolling: { usagePercent: 0, resetAt: new Date(Date.now() + 4 * 3_600_000).toISOString() },
+			weekly: { usagePercent: 0, resetAt: "2026-09-14T00:00:00Z" },
+			monthly: { usagePercent: 0.1, resetAt: "2026-10-04T00:00:00Z" },
+		});
+		const render = (width: number) =>
+			stripAnsi(
+				new CcStatuslineFooter(sources({ planUsage: () => [go ?? { source: "", windows: [] }] }), fakeTheme).render(
+					width,
+				)[1],
+			);
+
+		const wide = render(120);
+		expect(wide).toContain("Monthly:");
+		expect(wide).toMatch(/\d\d-\d\d \d\d:\d\d/);
+
+		const medium = render(90);
+		expect(medium).toContain("Monthly:");
+		expect(medium).not.toMatch(/\d\d-\d\d \d\d:\d\d/);
+		expect(medium).not.toContain("...");
+
+		const narrow = render(60);
+		expect(narrow).toContain("Weekly:");
+		expect(narrow).not.toContain("Monthly:");
+		expect(narrow).not.toContain("...");
+	});
+
+	it("marks opencode-go as a subscription on the stats line", () => {
+		const lines = new CcStatuslineFooter(
+			sources({
+				ctx: () =>
+					({
+						...sources().ctx(),
+						model: { name: "Kimi K2.6", id: "kimi-k2.6", provider: "opencode-go" },
+					}) as never,
+			}),
+			fakeTheme,
+		)
+			.render(120)
+			.map(stripAnsi);
+		expect(lines[1]).toBe(" $0.000 (sub) ");
+	});
+
 	it("degrades to a bare footer when the context is gone", () => {
 		const lines = new CcStatuslineFooter(
 			sources({
@@ -190,5 +251,42 @@ describe("CcStatuslineFooter", () => {
 			fakeTheme,
 		).render(80);
 		expect(stripAnsi(lines[0])).toContain("no-model");
+	});
+});
+
+describe("fitUsageGroups", () => {
+	const groups = [
+		{ usage: "AAAAAAAAAA", reset: "rrrr" },
+		{ usage: "BBBBBBBBBB", reset: "rrrr" },
+		{ usage: "CCCCCCCCCC", reset: "rrrr" },
+	];
+
+	it("keeps a line that fits untouched", () => {
+		expect(fitUsageGroups(groups, 100, " | ")).toBe("AAAAAAAAAArrrr | BBBBBBBBBBrrrr | CCCCCCCCCCrrrr");
+	});
+
+	it("drops reset times first, then trailing windows, and truncates last", () => {
+		expect(fitUsageGroups(groups, 40, " | ")).toBe("AAAAAAAAAA | BBBBBBBBBB | CCCCCCCCCC");
+		expect(fitUsageGroups(groups, 30, " | ")).toBe("AAAAAAAAAA | BBBBBBBBBB");
+		expect(stripAnsi(fitUsageGroups(groups, 8, " | "))).toBe("AAAAA...");
+	});
+});
+
+describe("isUsingSubscription", () => {
+	const ctxFor = (provider: string) =>
+		({ model: { id: "m", provider }, modelRegistry: { isUsingOAuth: () => false } }) as never;
+
+	afterEach(() => setSubscriptionProviders([]));
+
+	it("treats the built-in subscription providers as such without OAuth", () => {
+		expect(isUsingSubscription(ctxFor("opencode-go"))).toBe(true);
+		expect(isUsingSubscription(ctxFor("kimi-coding"))).toBe(true);
+		expect(isUsingSubscription(ctxFor("openrouter"))).toBe(false);
+	});
+
+	it("honours statusline.subscriptionProviders from settings", () => {
+		setSubscriptionProviders(["acme"]);
+		expect(isUsingSubscription(ctxFor("acme"))).toBe(true);
+		expect(isUsingSubscription(ctxFor("openrouter"))).toBe(false);
 	});
 });
