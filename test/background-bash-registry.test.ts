@@ -135,6 +135,23 @@ describe("registry sinks", () => {
 		expect(registry.read(job.id)?.newOutput).toBe("one\ntwo\n");
 	});
 
+	it("peek inside onExit still sees the output at the retention cap", async () => {
+		const registry = new BackgroundJobRegistry({ maxFinishedJobs: 1 });
+		let tail: string | undefined;
+		registry.start({ command: "a", cwd: "/", exec: streamingExec(["one\n"], 0) });
+		await tick();
+		registry.start({
+			command: "b",
+			cwd: "/",
+			exec: streamingExec(["two\n"], 0),
+			onExit: (job) => {
+				tail = registry.peek(job.id);
+			},
+		});
+		await tick();
+		expect(tail).toBe("two\n");
+	});
+
 	it("kill with a reason records it and describeJobStatus reports it", async () => {
 		const registry = new BackgroundJobRegistry();
 		const { exec, finish } = pendingExec();

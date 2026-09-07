@@ -112,6 +112,9 @@ export function tailOutput(text: string, maxLines: number, maxBytes: number): st
 	return kept.join("\n");
 }
 
+/** How every event reaches the model: after the current turn's tool calls, or as a new turn when idle. */
+export const EVENT_DELIVERY = { deliverAs: "steer", triggerTurn: true } as const;
+
 export const MONITOR_MESSAGE_TYPE = "bluclawd:monitor";
 export const TASK_EXIT_MESSAGE_TYPE = "bluclawd:task-exit";
 
@@ -197,7 +200,11 @@ export function taskExitMessage(job: BackgroundJobInfo, tail: string): OutgoingM
 	};
 }
 
-/** A job the model killed itself already got its answer from kill_bash; everything else is news. */
+/**
+ * A job the model killed itself already got its answer from kill_bash; everything
+ * else is news. Monitors are the exception: monitor-tool's own onExit reports every
+ * end, kill included — a watch's end is its answer.
+ */
 export function shouldNotifyExit(job: BackgroundJobInfo): boolean {
 	return !(job.killed && !job.stopReason);
 }

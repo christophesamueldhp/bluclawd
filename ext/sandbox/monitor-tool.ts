@@ -15,6 +15,7 @@ import {
 } from "../_shared/background-bash.ts";
 import {
 	type Batch,
+	EVENT_DELIVERY,
 	EventBatcher,
 	monitorEndMessage,
 	monitorEventMessage,
@@ -26,9 +27,6 @@ const DEFAULT_TIMEOUT_SECONDS = 300;
 const MAX_TIMEOUT_SECONDS = 3600;
 const BATCH_WINDOW_MS = 200;
 const DEFAULT_RATE_LIMIT = { max: 20, windowMs: 60_000 };
-
-/** How every event reaches the model: after the current turn's tool calls, or as a new turn when idle. */
-export const EVENT_DELIVERY = { deliverAs: "steer", triggerTurn: true } as const;
 
 const monitorSchema = Type.Object({
 	command: Type.String({

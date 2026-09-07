@@ -27,11 +27,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { backgroundBashJobs } from "../_shared/background-bash.ts";
-import { shouldNotifyExit, tailOutput, taskExitMessage } from "../_shared/monitor-events.ts";
+import { EVENT_DELIVERY, shouldNotifyExit, tailOutput, taskExitMessage } from "../_shared/monitor-events.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { resolveSandboxConfig, type SandboxConfig, strictRefusalReason } from "./config.ts";
 import { buildSandboxFailureNote } from "./failure-note.ts";
-import { createMonitorTool, EVENT_DELIVERY } from "./monitor-tool.ts";
+import { createMonitorTool } from "./monitor-tool.ts";
 import { isSandboxActive, setSandboxActive } from "./state.ts";
 
 /**
@@ -52,6 +52,10 @@ const BACKGROUND_BASH_PARAMS = Type.Object({
 		}),
 	),
 });
+
+/** How much of a finished job's output rides along with its exit notification. */
+const EXIT_TAIL_LINES = 20;
+const EXIT_TAIL_BYTES = 2048;
 
 type SandboxRuntime = typeof import("@anthropic-ai/sandbox-runtime");
 
@@ -131,7 +135,7 @@ export function factory(pi: ExtensionAPI): void {
 					// background is the single-notification recipe, as in Claude Code.
 					onExit: (finished) => {
 						if (!shouldNotifyExit(finished)) return;
-						const tail = tailOutput(backgroundBashJobs.peek(finished.id) ?? "", 20, 2048);
+						const tail = tailOutput(backgroundBashJobs.peek(finished.id) ?? "", EXIT_TAIL_LINES, EXIT_TAIL_BYTES);
 						pi.sendMessage(taskExitMessage(finished, tail), EVENT_DELIVERY);
 					},
 				});

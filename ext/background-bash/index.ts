@@ -6,6 +6,10 @@
  * does, so the parameter is registered there against the same job registry in
  * `_shared/background-bash.ts`. Change one, look at the other.
  *
+ * The two message renderers here draw events whose senders also live in
+ * `ext/sandbox`: `monitor-tool.ts` and the `run_in_background` exit hook. Same
+ * coupling as the parameter above — change one, look at the other.
+ *
  * `/tasks` renders through `appendEntry` + `registerEntryRenderer` rather than
  * `ctx.ui.notify`, which would dim the whole block and flatten the heading and
  * per-job status colours. Entry data is a snapshot of plain values: entries are
@@ -16,6 +20,7 @@
 
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { stripAnsi } from "../_shared/ansi.ts";
 import {
 	backgroundBashJobs,
 	createBashOutputTool,
@@ -30,6 +35,13 @@ import {
 } from "../_shared/monitor-events.ts";
 
 const MAX_COMMAND_CHARS = 80;
+
+/**
+ * Child output reaches the frame verbatim, so escape sequences it wrote for its own
+ * terminal (colour, but also erase-line and cursor moves) would corrupt the render.
+ * Tabs and newlines are legitimate text and stay.
+ */
+const clean = (s: string) => stripAnsi(s).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
 
 interface TaskSnapshot {
 	id: string;
@@ -64,12 +76,13 @@ const backgroundBash: InlineExtension = {
 		// the outcome: an exit is the one thing a monitor must never be silent about.
 		pi.registerMessageRenderer<MonitorMessageDetails>(MONITOR_MESSAGE_TYPE, (message, { outputPad }, theme) => {
 			const d = message.details;
-			const lines: string[] = [
-				theme.fg("accent", `monitor ${d?.id ?? ""}`) + theme.fg("dim", ` · ${d?.description ?? ""}`),
-			];
-			for (const line of d?.lines ?? []) lines.push(line);
-			if (d && d.more > 0) lines.push(theme.fg("dim", `…and ${d.more} more lines (bash_output)`));
-			if (d?.end) lines.push(theme.fg(d.status ?? "dim", d.end));
+			// Without details there is nothing to lay out; returning undefined leaves
+			// pi to render the message's own content rather than an empty box.
+			if (!d) return undefined;
+			const lines: string[] = [theme.fg("accent", `monitor ${d.id}`) + theme.fg("dim", ` · ${d.description}`)];
+			for (const line of d.lines) lines.push(clean(line));
+			if (d.more > 0) lines.push(theme.fg("dim", `…and ${d.more} more lines (bash_output)`));
+			if (d.end) lines.push(theme.fg(d.status ?? "dim", d.end));
 			const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
 			box.addChild(new Text(lines.join("\n"), 0, 0));
 			return box;
@@ -77,13 +90,17 @@ const backgroundBash: InlineExtension = {
 
 		pi.registerMessageRenderer<TaskExitDetails>(TASK_EXIT_MESSAGE_TYPE, (message, { outputPad }, theme) => {
 			const d = message.details;
+			if (!d) return undefined;
+			// The description falls back to the command upstream, so name the command
+			// again only when it is not already the description.
+			const command = d.command === d.description ? "" : theme.fg("dim", ` — ${d.command}`);
 			const lines: string[] = [
-				theme.fg("accent", `task ${d?.id ?? ""}`) +
-					theme.fg("dim", ` · ${d?.description ?? ""} `) +
-					theme.fg(d?.status ?? "dim", d?.end ?? "") +
-					theme.fg("dim", ` — ${d?.command ?? ""}`),
+				theme.fg("accent", `task ${d.id}`) +
+					theme.fg("dim", ` · ${d.description} `) +
+					theme.fg(d.status, d.end) +
+					command,
 			];
-			if (d?.tail) lines.push(d.tail);
+			if (d.tail) lines.push(clean(d.tail));
 			const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
 			box.addChild(new Text(lines.join("\n"), 0, 0));
 			return box;
@@ -101,8 +118,9 @@ const backgroundBash: InlineExtension = {
 				);
 			} else {
 				for (const job of jobs) {
-					const kind = job.kind === "monitor" ? theme.fg("warning", "monitor") : theme.fg("dim", "job");
-					const events = job.kind === "monitor" ? theme.fg("dim", ` ${job.events} events`) : "";
+					const kind = job.kind === "monitor" ? theme.fg("muted", "monitor") : theme.fg("dim", "job");
+					const events =
+						job.kind === "monitor" ? theme.fg("dim", ` · ${job.events} event${job.events === 1 ? "" : "s"}`) : "";
 					lines.push(
 						`  ${theme.fg("accent", job.id)} ${kind} ${job.running ? theme.fg("success", job.status) : theme.fg("dim", job.status)} ${theme.fg("dim", `${job.seconds}s`)}${events} ${job.command}`,
 					);
