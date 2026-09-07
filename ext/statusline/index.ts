@@ -107,15 +107,6 @@ let isRefreshing = false;
  * second timer.
  */
 let intervalTimer: ReturnType<typeof setInterval> | undefined;
-/**
- * The interval the LIVE timer is running at, in ms — undefined when none runs.
- *
- * `/statusline` used to re-read settings from disk, but the timer is only built at
- * session_start, so editing intervalMs mid-session made the command report a
- * refresh rate that was not the one in effect — the exact misreporting the clamp
- * note beside it was written to prevent.
- */
-let activeIntervalMs: number | undefined;
 
 function stopIntervalTimer(): void {
 	if (intervalTimer !== undefined) {
@@ -396,8 +387,7 @@ export function factory(pi: ExtensionAPI): void {
 		);
 		const intervalMs = statusline?.intervalMs;
 		if (!statusline?.command?.trim() || typeof intervalMs !== "number" || !Number.isFinite(intervalMs)) return;
-		activeIntervalMs = Math.max(intervalMs, MIN_INTERVAL_MS);
-		intervalTimer = setInterval(() => fire(ctx), activeIntervalMs);
+		intervalTimer = setInterval(() => fire(ctx), Math.max(intervalMs, MIN_INTERVAL_MS));
 		// Never keep a headless process alive just to repaint a footer.
 		intervalTimer.unref?.();
 	});
@@ -427,51 +417,6 @@ export function factory(pi: ExtensionAPI): void {
 	pi.registerCommand("usage", {
 		description: "Show session cost, token totals, and plan usage",
 		handler: usageHandler,
-	});
-
-	pi.registerCommand("statusline", {
-		description: "Show the external status line command and how it refreshes",
-		handler: async (_args, ctx) => {
-			const statusline = forkSettings.statusline(
-				SettingsManager.create(ctx.cwd, undefined, {
-					projectTrusted: ctx.isProjectTrusted(),
-				}),
-			);
-			const command = statusline?.command?.trim();
-			if (!command) {
-				ctx.ui.notify(
-					[
-						"No status line command configured.",
-						"",
-						'Set statusline.command in settings.json, e.g. { "statusline": { "command": "npx -y ccstatusline@latest" } }.',
-						"It receives session JSON on stdin and its first line of stdout becomes the status line.",
-					].join("\n"),
-					"info",
-				);
-				return;
-			}
-			// Report the RUNNING timer, not the file: the two diverge whenever
-			// intervalMs is edited mid-session, and the running one is the answer to
-			// "how often does this refresh?".
-			const configured = statusline?.intervalMs;
-			const lines = [`Status line: ${command}`];
-			if (activeIntervalMs === undefined) {
-				lines.push("Refresh: after each turn only — set statusline.intervalMs for a periodic refresh");
-			} else {
-				lines.push(`Refresh: every ${activeIntervalMs}ms between turns (floor ${MIN_INTERVAL_MS}ms)`);
-			}
-			if (typeof configured === "number" && Number.isFinite(configured)) {
-				const wouldRunAt = Math.max(configured, MIN_INTERVAL_MS);
-				if (wouldRunAt !== activeIntervalMs) {
-					lines.push(`Settings now say ${configured}ms — /reload to apply it to this session.`);
-				} else if (configured !== activeIntervalMs) {
-					lines.push(`(configured ${configured}ms, clamped up to the ${MIN_INTERVAL_MS}ms floor)`);
-				}
-			} else if (activeIntervalMs !== undefined) {
-				lines.push("Settings no longer set intervalMs — /reload to stop the periodic refresh.");
-			}
-			ctx.ui.notify(lines.join("\n"), "info");
-		},
 	});
 }
 

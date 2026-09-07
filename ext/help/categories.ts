@@ -74,7 +74,6 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 	mcp: "Extensions & integrations",
 	agents: "Extensions & integrations",
 	memory: "Extensions & integrations",
-	statusline: "Extensions & integrations",
 	plugin: "Extensions & integrations",
 	login: "Extensions & integrations",
 	logout: "Extensions & integrations",

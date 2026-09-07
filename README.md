@@ -61,7 +61,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `/fleet` | session roster in the shape of Claude Code's `/resume` picker: title + `time · branch · N messages · path`, type to search, ctrl+a current/all projects, enter opens, ctrl+t peeks, ctrl+n starts one |
 | `/status`, `/context`, `/usage` | model, auth, safety, session, context window, spend, plan usage |
 | `/recap` | session summary, not added to the conversation; `--save` keeps it in project memory |
-| `/plugin`, `/theme`, `/statusline` | packages, theme, external status line command |
+| `/plugin`, `/theme` | packages, theme |
 | `/help` | all of the above, grouped |
 
 The footer replicates a ccstatusline configuration (model, effort, context
