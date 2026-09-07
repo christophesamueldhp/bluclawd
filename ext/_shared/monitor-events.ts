@@ -64,3 +64,38 @@ export class EventBatcher {
 		return { lines, more: all.length - lines.length };
 	}
 }
+
+/** Counts events in a rolling window; `record` returns true once the count exceeds `max`. */
+export class RateLimiter {
+	private stamps: number[] = [];
+	readonly max: number;
+	readonly windowMs: number;
+
+	constructor(options: { max: number; windowMs: number }) {
+		this.max = options.max;
+		this.windowMs = options.windowMs;
+	}
+
+	record(now: number): boolean {
+		this.stamps = this.stamps.filter((stamp) => now - stamp < this.windowMs);
+		this.stamps.push(now);
+		return this.stamps.length > this.max;
+	}
+}
+
+/** The last `maxLines` lines of `text`, trimmed further to fit `maxBytes` on a line boundary. */
+export function tailOutput(text: string, maxLines: number, maxBytes: number): string {
+	const lines = text
+		.replace(/\n$/, "")
+		.split("\n")
+		.filter((line) => line.length > 0);
+	const kept: string[] = [];
+	let bytes = 0;
+	for (let i = lines.length - 1; i >= 0 && kept.length < maxLines; i--) {
+		const size = Buffer.byteLength(lines[i], "utf-8") + 1;
+		if (bytes + size > maxBytes) break;
+		kept.unshift(lines[i]);
+		bytes += size;
+	}
+	return kept.join("\n");
+}
