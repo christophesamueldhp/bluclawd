@@ -155,7 +155,7 @@ export function factory(pi: ExtensionAPI): void {
 		createMonitorTool({
 			sendMessage: (message, options) => pi.sendMessage(message, options),
 			cwd: localCwd,
-			exec: () => (isSandboxActive() ? sandboxedOperations() : createLocalBashOperations()).exec,
+			exec: () => (isSandboxActive() ? sandboxedOperations() : createLocalBashOperations({ shellPath })).exec,
 			refuse: () => strictRefusalReason(config, isSandboxActive(), lastError),
 		}),
 	);

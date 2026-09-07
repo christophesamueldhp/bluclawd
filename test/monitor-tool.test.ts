@@ -1,3 +1,4 @@
+import { validateToolArguments } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type BackgroundExec, BackgroundJobRegistry } from "../ext/_shared/background-bash.ts";
 import { createMonitorTool } from "../ext/sandbox/monitor-tool.ts";
@@ -19,6 +20,19 @@ function harness(exec: BackgroundExec, refuse?: string) {
 describe("monitor tool", () => {
 	beforeEach(() => vi.useFakeTimers());
 	afterEach(() => vi.useRealTimers());
+
+	it("accepts a call that omits persistent", () => {
+		// pi validates but never applies schema defaults, so a required `persistent`
+		// would turn the documented default into a validation error.
+		const { tool } = harness(() => new Promise(() => {}));
+		const args = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "c1",
+			name: "monitor",
+			arguments: { command: "x", description: "d" },
+		});
+		expect(args).toMatchObject({ command: "x" });
+	});
 
 	it("refuses when the sandbox refusal applies", async () => {
 		const { tool, registry } = harness(async () => ({ exitCode: 0 }), "Refusing to run");
@@ -89,28 +103,59 @@ describe("monitor tool", () => {
 		expect(sent.at(-1)?.message.content).toContain(
 			"stopped: too many events (2 in 60s), restart with a tighter filter",
 		);
+		const afterExit = sent.length;
+		onDataRef(Buffer.from("late\n"));
+		await vi.advanceTimersByTimeAsync(250);
+		expect(sent.length).toBe(afterExit);
 	});
 
-	it("passes the timeout through unless persistent", () => {
+	it("delivers nothing more once killed, even if the child ignores the signal", async () => {
+		let onDataRef!: (b: Buffer) => void;
+		// A child that traps SIGTERM: the abort never ends it, so the job never exits and
+		// the exit guard alone would let it keep steering the model.
+		const exec: BackgroundExec = (_c, _d, { onData }) =>
+			new Promise(() => {
+				onDataRef = onData;
+			});
+		const { tool, sent, registry } = harness(exec);
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
+		for (let i = 0; i < 3; i++) {
+			onDataRef(Buffer.from(`${i}\n`));
+			await vi.advanceTimersByTimeAsync(250);
+		}
+		expect(registry.get("bash_1")?.killed).toBe(true);
+		const afterKill = sent.length;
+		onDataRef(Buffer.from("late\n"));
+		await vi.advanceTimersByTimeAsync(250);
+		expect(sent.length).toBe(afterKill);
+	});
+
+	it("passes the timeout through unless persistent, clamped to the maximum", async () => {
 		const seen: (number | undefined)[] = [];
 		const exec: BackgroundExec = (_c, _d, { timeout }) => {
 			seen.push(timeout);
 			return new Promise(() => {});
 		};
 		const { tool } = harness(exec);
-		void tool.execute("c1", { command: "x", description: "d", persistent: false }, undefined as any, undefined);
-		void tool.execute(
+		await tool.execute("c1", { command: "x", description: "d", persistent: false }, undefined as any, undefined);
+		await tool.execute(
 			"c2",
 			{ command: "x", description: "d", persistent: false, timeout: 60 },
 			undefined as any,
 			undefined,
 		);
-		void tool.execute(
+		await tool.execute(
 			"c3",
 			{ command: "x", description: "d", persistent: true, timeout: 60 },
 			undefined as any,
 			undefined,
 		);
-		expect(seen).toEqual([300, 60, undefined]);
+		await tool.execute(
+			"c4",
+			{ command: "x", description: "d", persistent: false, timeout: 7200 },
+			undefined as any,
+			undefined,
+		);
+		expect(seen).toEqual([300, 60, undefined, 3600]);
 	});
 });
