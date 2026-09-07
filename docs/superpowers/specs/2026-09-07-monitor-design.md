@@ -81,7 +81,7 @@ into one stream, so both become events. The tool description says to add
 - Content is self-describing because it lands out of band:
   `[monitor bash_3 · errors in deploy.log]` on the first line, then the lines.
 - A terminal event is always sent, whatever the cause:
-  `ended: exit code N`, `killed`, `timed out after Ns`, `failed: <error>`, or
+  `exited with code N`, `killed`, `timed out after Ns`, `failed: <error>`, or
   `stopped: too many events (N in 60s), restart with a tighter filter`.
   Silence never means "still running".
 - `pi.registerMessageRenderer("bluclawd:monitor")` in `background-bash`:
@@ -116,3 +116,13 @@ Live in tmux with a real model (the idle-wake path cannot be unit tested):
 
 Docs: README command/tool table, "What it adds", and the stdout+stderr
 divergence note.
+
+## Findings from implementation
+
+- The registry had to move onto `sharedRef` (bug confirmed live: `bash_output` saw an empty registry).
+- The permission layer keyed on the literal tool name "bash", so the evaluator now normalises `monitor` to `bash` at its entry.
+- pi applies no JSON-schema defaults, so `persistent` is optional.
+- Per-job `StringDecoder` and a 4096-char carry cap were needed for multibyte and bare-`\r` streams.
+- Sinks are guarded because a throw from `onLines` would have been an uncaughtException.
+- Events arriving during a permission prompt are queued as steer, and during a slash-command picker they start a turn behind the dialog without breaking it (both verified live).
+- A job killed with `kill_bash` does not notify but a killed monitor still reports its end.
