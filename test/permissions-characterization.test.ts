@@ -40,7 +40,7 @@ const RULE_SETS: Record<string, Rules> = {
 	"allow-all-bash": { allow: ["Bash(**)"] },
 };
 
-const MODES: readonly PermissionMode[] = ["ask", "edits", "auto", "always", "never"];
+const MODES: readonly PermissionMode[] = ["ask", "edits", "auto", "always"];
 
 function toolCases(
 	cwd: string,
@@ -127,7 +127,7 @@ describe("permissions decision characterization (pin current behaviour)", () => 
 	 */
 	it("decides a monitor call exactly as it decides the same bash call", () => {
 		const cases: Array<{ name: string; mode: PermissionMode; rules: Rules; input: Record<string, unknown> }> = [];
-		for (const mode of ["ask", "edits", "auto", "never"] as const) {
+		for (const mode of ["ask", "edits", "auto"] as const) {
 			cases.push({
 				name: `dangerous mode=${mode}`,
 				mode,

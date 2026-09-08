@@ -11,8 +11,8 @@ import {
 } from "../ext/permissions/modes.ts";
 
 describe("mode vocabulary", () => {
-	it("names modes after pi's own ask/always/never, plus the two scoped ones", () => {
-		expect(PERMISSION_MODES).toEqual(["ask", "edits", "auto", "always", "never"]);
+	it("names modes after pi's own ask/always, plus the two scoped ones", () => {
+		expect(PERMISSION_MODES).toEqual(["ask", "edits", "auto", "always"]);
 		expect(SAFEST_MODE).toBe("ask");
 	});
 
@@ -22,7 +22,7 @@ describe("mode vocabulary", () => {
 		expect(parseMode("default")).toBe("ask");
 		expect(parseMode("acceptEdits")).toBe("edits");
 		expect(parseMode("bypass")).toBe("always");
-		expect(parseMode("dontAsk")).toBe("never");
+		expect(parseMode("dontAsk")).toBeUndefined();
 	});
 
 	it("accepts the current names and surrounding whitespace, and rejects anything else", () => {
@@ -33,10 +33,9 @@ describe("mode vocabulary", () => {
 		expect(parseMode("ASK")).toBeUndefined();
 	});
 
-	it("keeps the two non-interactive modes off the keyboard cycle", () => {
+	it("keeps the non-interactive mode off the keyboard cycle", () => {
 		expect(MODE_CYCLE).toEqual(["ask", "edits", "auto"]);
 		expect(MODE_CYCLE).not.toContain("always");
-		expect(MODE_CYCLE).not.toContain("never");
 	});
 
 	it("describes every mode, for the /mode picker", () => {
@@ -55,7 +54,7 @@ describe("mode store", () => {
 
 	it("resumes the cycle at ask when the current mode is outside it", () => {
 		const store = createModeStore();
-		store.set("never");
+		store.set("always");
 		expect(store.cycle()).toBe("ask");
 	});
 
@@ -93,7 +92,7 @@ describe("project trust clamps the mode", () => {
 		expect(nextInCycle("ask")).toBe("edits");
 		expect(nextInCycle("edits")).toBe("auto");
 		expect(nextInCycle("auto")).toBe("ask");
-		expect(nextInCycle("never")).toBe("ask");
+		expect(nextInCycle("always")).toBe("ask");
 	});
 
 	it("never fires onChange for a refused transition", () => {

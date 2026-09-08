@@ -34,7 +34,7 @@ export interface SandboxSettings {
 
 export interface PermissionSettings {
 	/** Mode the session starts in. Read from GLOBAL settings only — a project must not name it. */
-	defaultMode?: "ask" | "edits" | "auto" | "always" | "never" | "default" | "acceptEdits" | "bypass" | "dontAsk";
+	defaultMode?: "ask" | "edits" | "auto" | "always" | "default" | "acceptEdits" | "bypass";
 	allow?: string[];
 	ask?: string[];
 	deny?: string[];

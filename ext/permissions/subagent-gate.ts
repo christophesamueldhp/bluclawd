@@ -10,16 +10,8 @@
  * parent) and enforces them plus the protected-paths guard. Ask rules are
  * deliberately NOT propagated: a child has no UI to answer a prompt, so an
  * inherited ask would hard-block every governed tool and break subagents
- * entirely. deny is the safety-critical layer; allow/ask stay parent-side.
- *
- * `never` is the ONE mode that changes that, and it has to. The mode means "run
- * only what is listed", so leaving a child on the default posture would make an
- * `allow: Task(...)` grant a laundering route: the parent refuses an unlisted
- * write, the child performs it. Under `never` the child therefore inherits the
- * mode AND the whole rule set — ask rules included, since nothing prompts in that
- * mode anyway, so parent and child reach the same verdict. Its posture is exactly
- * the parent's. `edits` is still not inherited (pre-existing; see
- * active-mode.ts).
+ * entirely. deny is the safety-critical layer; allow/ask stay parent-side. The
+ * parent's mode is not inherited either: a child is always evaluated as `ask`.
  *
  * Enforcement runs through the SAME evaluator the parent uses (evaluate.ts), in
  * headless mode. It used to hand-roll its own copy, which had drifted: the parent
@@ -33,7 +25,6 @@
 import type { ExtensionAPI, InlineExtension, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import * as forkSettings from "../_shared/settings.ts";
-import { getActivePermissionMode } from "./active-mode.ts";
 import { type EvalConfig, evaluatePostHook, evaluatePreHook } from "./evaluate.ts";
 import type { Rules } from "./rules.ts";
 
@@ -59,14 +50,9 @@ export function factory(pi: ExtensionAPI): void {
 		return allRules;
 	}
 
-	/**
-	 * Deny-only normally; the whole set under `never`, where the child must be able
-	 * to do what the parent explicitly allowed and must refuse what it did not. The
-	 * mode is read per call, not cached, so switching it mid-session takes effect.
-	 */
-	function rulesFor(ctx: { cwd: string; isProjectTrusted: () => boolean }, neverMode: boolean): Rules {
-		const rules = loadRules(ctx);
-		return neverMode ? rules : { deny: rules.deny ?? [] };
+	/** Deny rules only — see the header. */
+	function rulesFor(ctx: { cwd: string; isProjectTrusted: () => boolean }): Rules {
+		return { deny: loadRules(ctx).deny ?? [] };
 	}
 
 	// A reload re-reads settings; drop the cache so the next call picks them up.
@@ -79,10 +65,9 @@ export function factory(pi: ExtensionAPI): void {
 		// because a child has nobody to ask. `task` is stripped from child tool sets, but
 		// the evaluator gates it anyway (defense in depth against a custom tool set
 		// reintroducing it).
-		const neverMode = getActivePermissionMode() === "never";
 		const cfg: EvalConfig = {
-			mode: neverMode ? "never" : "ask",
-			rules: rulesFor(ctx, neverMode),
+			mode: "ask",
+			rules: rulesFor(ctx),
 			cliAllowRules: {},
 			cwd: ctx.cwd,
 			agentDir: getAgentDir(),
@@ -97,8 +82,7 @@ export function factory(pi: ExtensionAPI): void {
 		// allow must never fall through to "permitted" in a gate whose job is to refuse.
 		if (pre) return pre.outcome === "allow" ? undefined : { block: true, reason: pre.reason };
 
-		// The second half. Under `never` it applies the whole inherited rule set; in every
-		// other mode it now contributes exactly one thing — the deterministic guardrail,
+		// The second half contributes exactly one thing — the deterministic guardrail,
 		// whose refusal the parent turns into a prompt and a child, having nobody to ask,
 		// turns into a block. Without it `task` would launder every guardrail-refused
 		// command: the parent asks before `rm -rf`, the child just runs it.

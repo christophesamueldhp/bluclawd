@@ -94,8 +94,6 @@ function modeStatusText(ctx: ExtensionContext, mode: PermissionMode): string | u
 			return theme.fg("warning", "⏵⏵ auto mode on");
 		case "always":
 			return theme.fg("error", "⏵⏵ always mode on");
-		case "never":
-			return theme.fg("error", "⏵⏵ never mode on");
 		default:
 			return undefined;
 	}
@@ -641,11 +639,7 @@ export function factory(pi: ExtensionAPI): void {
 					decided = true;
 				}
 				if (!decided) {
-					lines.push(
-						currentMode() === "never"
-							? "No rule matches — and never mode refuses whatever no rule allows, so the call is blocked."
-							: "No rule matches — the call runs (nothing is denied, nothing prompts).",
-					);
+					lines.push("No rule matches — the call runs (nothing is denied, nothing prompts).");
 				}
 				pi.appendEntry<PermissionsData>("bluclawd:permissions", { mode: currentMode(), test: lines });
 				return;

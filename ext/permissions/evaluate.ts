@@ -13,7 +13,7 @@
  *
  * The evaluation is split in two: `evaluatePreHook` runs the gates nothing may override
  * (mode blocks, deny rules, protected paths), `evaluatePostHook` runs the rest (auto mode's
- * guardrail, `never`'s refusal, standing grants, and the prompt).
+ * guardrail, standing grants, and the prompt).
  *
  * Purity note: `isProtectedPath`/`isReadProtectedPath` do touch the filesystem (realpath, to
  * catch symlinks into protected territory), and so does `decide()` for a deny/ask path
@@ -47,7 +47,6 @@ export type Gate =
 	| "write-protected-path"
 	| "auto-guardrail"
 	| "manual-guardrail"
-	| "dont-ask-mode"
 	| "exact-allow"
 	| "cli-allow"
 	| "readonly-bash"
@@ -145,16 +144,9 @@ const autoModeReason = (reason: string): string =>
 
 /**
  * Why this configuration cannot prompt — as the clause that goes into the block reason —
- * or `undefined` when it can.
- *
- * Two independent reasons converge on the same outcome, so every prompt site asks this one
- * question. Headless cannot prompt: there is no UI. `never` refuses to by policy: Claude
- * Code's mode fallback answers "deny" in exactly the place `ask` answers "ask"
- * (`if (mode === "never") return "deny"`, verified in the 2.1.220 binary), which makes the
- * mode precisely "every would-be prompt is a refusal".
+ * or `undefined` when it can. Headless cannot prompt: there is no UI.
  */
 function noPromptReason(cfg: EvalConfig): string | undefined {
-	if (cfg.mode === "never") return "never mode never prompts";
 	if (!cfg.hasUI) return "running headless (no interactive UI)";
 	return undefined;
 }
@@ -268,8 +260,8 @@ export function evaluatePreHook(rawTool: string, input: Record<string, unknown>,
 }
 
 /**
- * Gates 6–8: auto mode's guardrail, `never`'s refusal, the standing grants that clear an
- * `ask`, and finally the prompt.
+ * Gates 6–8: auto mode's guardrail, the standing grants that clear an `ask`, and finally
+ * the prompt.
  *
  * `autoBlocked` reports whether auto mode's guardrail refused, so the caller can advance its
  * counters; the caller decides whether that becomes a prompt (threshold reached) or a plain
@@ -295,39 +287,6 @@ export function evaluatePostHook(rawTool: string, input: Record<string, unknown>
 			promptKind: "auto-pause",
 			reason: autoModeReason(verdict.reason),
 			exact,
-		};
-	}
-
-	// 6b. never: no prompt is available, so a call is either already permitted or blocked.
-	//     The grants below are gate 7's, minus `edits` (a different mode) — the question
-	//     "does anything already permit this?" is identical; only the fallback differs, and
-	//     here the fallback is a refusal.
-	//
-	//     Reads stay free. In Claude Code they resolve to "allow" before the mode fallback is
-	//     ever consulted, so `never` does not deny them there either; denying them would
-	//     also leave the mode unable to so much as open a file.
-	//
-	//     An `ask` RULE is NOT handled here — it falls through to gate 7, whose prompt
-	//     `noPromptReason` turns into a block for the same reason. One prompt-to-block
-	//     conversion, applied at every prompt site.
-	if (cfg.mode === "never" && decision === null) {
-		if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
-		if (READ_LIKE_TOOLS.has(tool)) return ALLOW("dont-ask-mode");
-		if (tool === "bash" && isSafeCommand(subject("bash", input))) return ALLOW("readonly-bash");
-		// Same grant, same execution-time premise as gate 7 below — see the proof
-		// comment there (IMPROVEMENT-PLAN.md §2.7).
-		if (tool === "bash" && cfg.sandboxActive && autoGuard("bash", input, cfg.cwd) === "allow") {
-			return ALLOW("sandbox-pairing");
-		}
-		// The rule that would permit this call, named so the block is actionable. `exact`
-		// above cannot be reused: for `task` it is keyed to the ASKING agent, and no rule
-		// matched here, so there is none. `exact` is likewise left unset on the verdict —
-		// a never-mode block never reaches the "Always allow" path that reads it.
-		const denied = exactRule(tool, tool === "task" ? (taskAgents(input)[0] ?? "") : subject(tool, input)) ?? tool;
-		return {
-			outcome: "block",
-			gate: "dont-ask-mode",
-			reason: `never mode: no allow rule covers ${denied}, and this mode never prompts. Blocked.`,
 		};
 	}
 
@@ -435,7 +394,7 @@ export function evaluatePostHook(rawTool: string, input: Record<string, unknown>
 	//    "Always allow" turns the answer into the rule that was missing.
 	//
 	//    Reached by `ask` and `edits`, so a single Shift+Tab cannot disarm it.
-	//    `always` returned at gate 1, `auto` at 6 and `never` at 6b.
+	//    `always` returned at gate 1 and `auto` at 6.
 	//
 	//    Only the COMMAND denylist, deliberately — not `autoGuard`'s containment half.
 	//    Screening writes and redirects for "inside the working directory" is part of auto

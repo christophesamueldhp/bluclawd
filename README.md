@@ -124,9 +124,9 @@ reading the API:
 
 ## Permission modes
 
-Named after pi's own `ask` / `always` / `never` trust vocabulary rather than
-Claude Code's, because they answer the same question about a tool call that
-`defaultProjectTrust` answers about a project:
+Named after pi's own `defaultProjectTrust` vocabulary (`ask` / `always`)
+rather than Claude Code's, because they answer the same question about a tool
+call that project trust answers about a project:
 
 | Mode | What it does |
 |---|---|
@@ -134,9 +134,8 @@ Claude Code's, because they answer the same question about a tool call that
 | `edits` | approve file edits automatically, ask for the rest |
 | `auto` | never prompt, but screen every dangerous command |
 | `always` | approve everything, no guards at all |
-| `never` | refuse anything that would have prompted, instead of asking |
 
-Claude Code's names (`default`, `acceptEdits`, `bypass`, `dontAsk`) are still
+Claude Code's names (`default`, `acceptEdits`, `bypass`) are still
 accepted anywhere a mode is named, so stored settings and scripts keep working.
 
 **Project trust pins the mode.** In a project pi has not been told to trust,
