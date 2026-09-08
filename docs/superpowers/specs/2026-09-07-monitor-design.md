@@ -126,3 +126,5 @@ divergence note.
 - Sinks are guarded because a throw from `onLines` would have been an uncaughtException.
 - Events arriving during a permission prompt are queued as steer, and during a slash-command picker they start a turn behind the dialog without breaking it (both verified live).
 - A job killed with `kill_bash` does not notify but a killed monitor still reports its end.
+- Monitors are process-wide (the registry is shared) while delivery is session-scoped: a monitor started before `/fork` or a session switch delivers its events into whatever session is current afterwards.
+- Because the verdict is normalised, a permission prompt for a monitor call reads "allow bash to …" and an "Always allow" rule is persisted as `Bash(<command>)`.
