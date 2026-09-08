@@ -170,8 +170,10 @@ export class BackgroundJobRegistry {
 			abort: new AbortController(),
 			sinks: { onLines: guardSink(options.onLines), onExit: guardSink(options.onExit) },
 			carry: "",
-			decoder: options.onLines ? new StringDecoder("utf-8") : undefined,
+			// Derived from the sink, not from options, so the two cannot drift apart.
+			decoder: undefined,
 		};
+		if (state.sinks.onLines) state.decoder = new StringDecoder("utf-8");
 		this.jobs.set(id, state);
 		this.evictFinished();
 

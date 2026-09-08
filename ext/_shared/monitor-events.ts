@@ -190,7 +190,7 @@ export function taskExitMessage(job: BackgroundJobInfo, tail: string): OutgoingM
 	const description = label(job);
 	const end = describeJobStatus(job);
 	// label() already falls back to the command, so name it again only when it is not the label.
-	const command = job.description?.trim() ? ` — ${job.command}` : "";
+	const command = description === job.command ? "" : ` — ${job.command}`;
 	const head = `[task ${job.id} · ${description}] ${end}${command}`;
 	return {
 		customType: TASK_EXIT_MESSAGE_TYPE,

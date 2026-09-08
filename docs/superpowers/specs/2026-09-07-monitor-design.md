@@ -66,7 +66,7 @@ Parameters:
 | `persistent`  | boolean | default false; ignores timeout, lives until `kill_bash`      |
 
 Tool result: `Started monitor bash_3 (description). Each output line arrives
-as an event; stop it with kill_bash. /tasks lists it.`
+as an event; read the full buffer with bash_output, stop it with kill_bash.`
 
 Deliberate divergence from Claude Code: pi's `exec` merges stdout and stderr
 into one stream, so both become events. The tool description says to add

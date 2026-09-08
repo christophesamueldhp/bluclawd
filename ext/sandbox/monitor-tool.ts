@@ -94,7 +94,13 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 			const limiter = new RateLimiter(rateLimit);
 			const batcher = new EventBatcher({
 				delayMs: BATCH_WINDOW_MS,
-				onFlush: (batch) => deliver(batch),
+				// Runs from a raw timer, outside the registry's guarded sinks: a throw here
+				// would be an uncaughtException, the same class the sink guard closes.
+				onFlush: (batch) => {
+					try {
+						deliver(batch);
+					} catch {}
+				},
 			});
 			let current: BackgroundJobInfo | undefined;
 
