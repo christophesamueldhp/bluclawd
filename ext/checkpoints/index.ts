@@ -55,11 +55,16 @@
  * ── Latency: fire-and-forget capture ──────────────────────────────────────────
  * `turn_start` handlers are awaited inline in the agent loop (confirmed for
  * turn_end by statusline — same mechanism applies to turn_start), so a capture
- * that blocks would add real per-turn latency. The handler therefore captures
- * `turnEntryId`/`subject` SYNCHRONOUSLY (from the branch as of turn_start — cheap,
- * in-memory) and then kicks off `captureCheckpoint()` detached (`void ... .then`),
- * appending the `checkpoint` entry only once the sha resolves. This keeps the
- * turn/subject association correct even though the entry lands asynchronously.
+ * that blocks would add real per-turn latency. The handler therefore kicks off
+ * `captureCheckpoint()` detached (`void ... .then`) and appends the `checkpoint`
+ * entry only once the sha resolves. `turnEntryId`/`subject` are resolved at
+ * THAT point, not at turn_start: pi's agent loop emits turn_start BEFORE the
+ * prompt's message_start/message_end, and the user message is persisted on
+ * message_end, so the branch as of turn_start still ends at the PREVIOUS
+ * prompt. Reading it there labelled every prompt's first checkpoint with the
+ * prompt before it ("(session start)" for the first) and gave the fork-point
+ * offer a turnEntryId that never matched the forked-at user message. The git
+ * calls always outlast that persistence, so the post-capture branch has it.
  * A module-scoped `isCapturing` guard (same idea as statusline's `isRefreshing`)
  * drops an overlapping turn_start capture while one is still in flight, bounding
  * concurrent git subprocesses to one; the next turn tries again. This guard does
@@ -505,10 +510,14 @@ let failedCaptureCount = 0;
 export function factory(pi: ExtensionAPI): void {
 	function checkpointCurrentTurn(ctx: ExtensionContext): void {
 		if (isCapturing) return; // an in-flight capture: the next turn_start will try again
-		const { turnEntryId, subject } = findTurnContext(ctx.sessionManager.getBranch());
 		isCapturing = true;
 		void captureCheckpoint(ctx.cwd, pi.exec)
 			.then(async (sha) => {
+				// Resolved AFTER the capture, not at turn_start: pi persists the prompt's
+				// user message on message_end, which the agent loop emits after
+				// turn_start, so the branch at turn_start still ends at the previous
+				// prompt. By the time the git calls have completed the message is in.
+				const { turnEntryId, subject } = findTurnContext(ctx.sessionManager.getBranch());
 				if (sha) {
 					pi.appendEntry(CHECKPOINT_CUSTOM_TYPE, { sha, turnEntryId, subject });
 					// Fire-and-forget, like capture itself — doesn't gate isCapturing below.

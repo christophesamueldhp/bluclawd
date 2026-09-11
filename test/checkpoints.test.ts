@@ -411,3 +411,28 @@ describe("session_before_fork", () => {
 		expect(appendedSubjects(entries)).not.toContain("(before fork)");
 	});
 });
+
+describe("turn_start capture", () => {
+	it("labels the checkpoint with the user message that is persisted AFTER turn_start fires", async () => {
+		// pi's agent loop emits turn_start before message_start/message_end for the
+		// prompt, so the branch has no user message for this turn yet when the
+		// handler runs; it appears while the capture's git calls are in flight.
+		const { dir, exec } = await makeRepo();
+		const entries: SessionEntry[] = [userEntry("u0", "previous prompt")];
+		const { handlers } = loadFactory(exec, entries);
+		const { ctx } = makeCtx(dir, entries);
+
+		const turn = handlers.get("turn_start")?.({ type: "turn_start", turnIndex: 0, timestamp: Date.now() }, ctx);
+		entries.push(userEntry("u1", "the prompt that started this turn"));
+		await turn;
+		const deadline = Date.now() + 5000;
+		while (listCheckpoints(entries).length === 0 && Date.now() < deadline) {
+			await new Promise((r) => setTimeout(r, 20));
+		}
+
+		const [checkpoint] = listCheckpoints(entries);
+		expect(checkpoint).toBeDefined();
+		expect(checkpoint?.turnEntryId).toBe("u1");
+		expect(checkpoint?.subject).toBe("the prompt that started this turn");
+	});
+});
