@@ -31,7 +31,7 @@ Conventions to follow (read them once before starting):
 - Create: `test/checkpoints.test.ts`
 - Modify: `ext/checkpoints/index.ts` (add `checkpointForTurn`)
 
-- [ ] **Step 1: Create the test file with the harness and the unit tests**
+- [x] **Step 1: Create the test file with the harness and the unit tests**
 
 ```ts
 import { execFile } from "node:child_process";
@@ -242,12 +242,12 @@ describe("checkpointForTurn", () => {
 });
 ```
 
-- [ ] **Step 2: Run it to verify it fails on the missing export**
+- [x] **Step 2: Run it to verify it fails on the missing export**
 
 Run: `npx vitest run test/checkpoints.test.ts`
 Expected: FAIL — `checkpointForTurn` is not exported (`SyntaxError: The requested module ... does not provide an export named 'checkpointForTurn'` or an "is not a function" TypeError).
 
-- [ ] **Step 3: Add `checkpointForTurn` to `ext/checkpoints/index.ts`**
+- [x] **Step 3: Add `checkpointForTurn` to `ext/checkpoints/index.ts`**
 
 Insert directly after the `listCheckpoints` function (after its closing `}` at the current line 189):
 
@@ -266,12 +266,12 @@ export function checkpointForTurn(entries: SessionEntry[], turnEntryId: string):
 }
 ```
 
-- [ ] **Step 4: Run the unit tests and verify they pass**
+- [x] **Step 4: Run the unit tests and verify they pass**
 
 Run: `npx vitest run test/checkpoints.test.ts`
 Expected: PASS, 3 tests (`listCheckpoints` 1, `checkpointForTurn` 2).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add test/checkpoints.test.ts ext/checkpoints/index.ts
@@ -287,7 +287,7 @@ These pass against the existing code; they lock in the header's claims before an
 **Files:**
 - Modify: `test/checkpoints.test.ts` (append)
 
-- [ ] **Step 1: Append the tests**
+- [x] **Step 1: Append the tests**
 
 ```ts
 // ── integration: exported git functions ──────────────────────────────────────
@@ -341,12 +341,12 @@ describe("pruneCheckpointRefs", () => {
 });
 ```
 
-- [ ] **Step 2: Run and verify they pass**
+- [x] **Step 2: Run and verify they pass**
 
 Run: `npx vitest run test/checkpoints.test.ts`
 Expected: PASS, 7 tests. If the "parent" assertion fails with `sha^` unknown, the repo has no commit — check `makeRepo` ran its commit step.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add test/checkpoints.test.ts
@@ -361,7 +361,7 @@ git commit -m "checkpoints: lock in non-intrusive capture and prune behaviour wi
 - Modify: `test/checkpoints.test.ts` (append)
 - Modify: `ext/checkpoints/index.ts` (`captureCheckpoint`, lines ~250–305)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 describe("restoreCheckpoint — tracked files that match .gitignore", () => {
@@ -383,12 +383,12 @@ describe("restoreCheckpoint — tracked files that match .gitignore", () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `npx vitest run test/checkpoints.test.ts -t "gitignore"`
 Expected: FAIL at the `ls-tree` assertion — `cfg.txt` is not in the checkpoint tree (and if you skip that line, `read("cfg.txt")` throws ENOENT: the restore deleted it).
 
-- [ ] **Step 3: Seed the temporary index from HEAD before staging**
+- [x] **Step 3: Seed the temporary index from HEAD before staging**
 
 In `captureCheckpoint`, replace the body of the `try` block up to and including the `commit` call's `parentArgs` with this (the `commit`/`updateRef` steps below it stay unchanged):
 
@@ -440,12 +440,12 @@ async function headSha(cwd: string, exec: ExtensionAPI["exec"]): Promise<string 
 }
 ```
 
-- [ ] **Step 4: Run the file and verify everything passes**
+- [x] **Step 4: Run the file and verify everything passes**
 
 Run: `npx vitest run test/checkpoints.test.ts`
 Expected: PASS, 8 tests — including the Task 2 non-intrusiveness test (the seeding step must not touch the real index either).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add test/checkpoints.test.ts ext/checkpoints/index.ts
@@ -460,7 +460,7 @@ git commit -m "checkpoints: seed the temp index from HEAD so tracked-but-ignored
 - Modify: `test/checkpoints.test.ts` (append)
 - Modify: `ext/checkpoints/index.ts` (`restoreCheckpoint`, lines ~313–319)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 describe("restoreCheckpoint — index state afterwards", () => {
@@ -491,12 +491,12 @@ describe("restoreCheckpoint — index state afterwards", () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify they fail**
+- [x] **Step 2: Run to verify they fail**
 
 Run: `npx vitest run test/checkpoints.test.ts -t "index state"`
 Expected: FAIL — status is `["A  new.txt", "M  a.txt", "?? later.txt"]` (staged), and the unborn case shows `["A  a.txt"]`.
 
-- [ ] **Step 3: Reset the index to HEAD after the tree restore**
+- [x] **Step 3: Reset the index to HEAD after the tree restore**
 
 Replace `restoreCheckpoint` with:
 
@@ -526,12 +526,12 @@ export async function restoreCheckpoint(cwd: string, exec: ExtensionAPI["exec"],
 }
 ```
 
-- [ ] **Step 4: Run the file and verify everything passes**
+- [x] **Step 4: Run the file and verify everything passes**
 
 Run: `npx vitest run test/checkpoints.test.ts`
 Expected: PASS, 10 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add test/checkpoints.test.ts ext/checkpoints/index.ts
@@ -546,7 +546,7 @@ git commit -m "checkpoints: reset the index to HEAD after a restore so nothing a
 - Modify: `test/checkpoints.test.ts` (append)
 - Modify: `ext/checkpoints/index.ts` (new export; `/rewind` handler lines ~518–581)
 
-- [ ] **Step 1: Write the handler tests**
+- [x] **Step 1: Write the handler tests**
 
 ```ts
 // ── integration: handlers through the factory ────────────────────────────────
@@ -599,12 +599,12 @@ describe("/rewind (files only)", () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify the current handler already satisfies them (baseline)**
+- [x] **Step 2: Run to verify the current handler already satisfies them (baseline)**
 
 Run: `npx vitest run test/checkpoints.test.ts -t "/rewind"`
 Expected: PASS, 2 tests — this proves the refactor in Step 3 is behaviour-preserving. If either fails here, stop and read the assertion: the harness, not the extension, is wrong.
 
-- [ ] **Step 3: Extract `restoreWithSafetyNet` and call it from `/rewind`**
+- [x] **Step 3: Extract `restoreWithSafetyNet` and call it from `/rewind`**
 
 Add this exported function directly above `/** Module-scoped overlap guard ... */` (the `let isCapturing = false;` line):
 
@@ -670,12 +670,12 @@ Then in the `/rewind` handler, replace everything from the comment `// Safety ne
 			if (restored && scopeChoice.talk) await ctx.navigateTree(target.turnEntryId);
 ```
 
-- [ ] **Step 4: Run the file and verify everything still passes**
+- [x] **Step 4: Run the file and verify everything still passes**
 
 Run: `npx vitest run test/checkpoints.test.ts`
 Expected: PASS, 12 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add test/checkpoints.test.ts ext/checkpoints/index.ts
@@ -690,7 +690,7 @@ git commit -m "checkpoints: extract restoreWithSafetyNet from /rewind, cover fil
 - Modify: `test/checkpoints.test.ts` (append)
 - Modify: `ext/checkpoints/index.ts` (`session_before_fork` handler, lines ~434–452)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```ts
 describe("session_before_fork", () => {
@@ -733,12 +733,12 @@ describe("session_before_fork", () => {
 });
 ```
 
-- [ ] **Step 2: Run to verify the first test fails**
+- [x] **Step 2: Run to verify the first test fails**
 
 Run: `npx vitest run test/checkpoints.test.ts -t "session_before_fork"`
 Expected: first test FAILS — `a.txt` is `mid-prompt` (newest checkpoint chosen) and no `(before fork)` entry exists. Second test passes.
 
-- [ ] **Step 3: Rewire the fork handler**
+- [x] **Step 3: Rewire the fork handler**
 
 Replace the whole `pi.on("session_before_fork", ...)` block with:
 
@@ -759,12 +759,12 @@ Replace the whole `pi.on("session_before_fork", ...)` block with:
 	});
 ```
 
-- [ ] **Step 4: Run the file and verify everything passes**
+- [x] **Step 4: Run the file and verify everything passes**
 
 Run: `npx vitest run test/checkpoints.test.ts`
 Expected: PASS, 14 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add test/checkpoints.test.ts ext/checkpoints/index.ts
@@ -778,7 +778,7 @@ git commit -m "checkpoints: fork-point offer restores the turn's first checkpoin
 **Files:**
 - Modify: `ext/checkpoints/index.ts` header comment (lines 1–108) and the follow-up note (lines 136–150)
 
-- [ ] **Step 1: Apply these text edits to the header**
+- [x] **Step 1: Apply these text edits to the header**
 
 1. In the capture step list, replace step 1:
 
@@ -837,12 +837,12 @@ git commit -m "checkpoints: fork-point offer restores the turn's first checkpoin
     *
    ```
 
-- [ ] **Step 2: Typecheck and lint**
+- [x] **Step 2: Typecheck and lint**
 
 Run: `npm run typecheck && npm run lint`
 Expected: both clean. If biome complains about line width in the header, wrap at the same column as neighbouring lines.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add ext/checkpoints/index.ts
@@ -855,12 +855,12 @@ git commit -m "checkpoints: header matches the seeded capture, index reset, and 
 
 **Files:** none new.
 
-- [ ] **Step 1: Full suite, typecheck, lint**
+- [x] **Step 1: Full suite, typecheck, lint**
 
 Run: `npm test && npm run typecheck && npm run lint`
 Expected: all green; `test/registration.test.ts` still reports `checkpoints: commands ["rewind"], events 3`.
 
-- [ ] **Step 2: Live verify in tmux (working-tree recipe, real HOME)**
+- [x] **Step 2: Live verify in tmux (working-tree recipe, real HOME)**
 
 In a scratch git repo with a tracked-then-ignored file and some ` M` / `??` entries:
 
@@ -879,9 +879,37 @@ git status --short; cat .env
 ```
 Expected: same shape as before (` M`, `??`, not `M ` / `A `), and `.env` still present with `secret=2`.
 
-- [ ] **Step 3: Record the observed output in the plan and mark the tasks done**
+- [x] **Step 3: Record the observed output in the plan and mark the tasks done**
 
 Paste the two `git status --short` outputs and the `cat .env` line under this step, then commit the plan with the boxes ticked:
+
+Observed 2026-09-11 (pi 0.85.1, `pi -ne -e ext/checkpoints/index.ts`, model gpt-5.6-luna, tmux):
+
+```
+# before the prompt                      # after the prompt: a.txt += z, .env = secret=3, extra.txt created
+ M .env                                   M .env
+ M a.txt                                  M a.txt
+?? new.txt                               ?? extra.txt
+                                         ?? new.txt
+# git ls-tree --name-only <checkpoint>: .env .gitignore a.txt new.txt   (.env present — fix 1)
+# /rewind → checkpoint → "Files only" → Yes → "Working tree restored to checkpoint."
+ M .env          cat .env → secret=2   (kept with checkpointed content — fix 1)
+ M a.txt         cat a.txt → x y       (unstaged, not "M " — fix 2)
+?? extra.txt                           (created after the checkpoint, survives — documented)
+?? new.txt                             (untracked, not "A " — fix 2)
+# refs/bluclawd/checkpoints/: 2 refs — the turn's capture plus the "(before rewind)" safety net
+```
+
+Full suite at the same time: `npm test` 36 files / 366 tests green, `npm run typecheck` clean, biome clean on the two touched files.
+
+**Defect 5, found by this live check (spec §Defects 5):** the picker label read
+`(session start)` and the session file showed `turnEntryId` = the entry *before*
+the user message. `turn_start` fires before pi persists the prompt (confirmed in
+`pi-agent-core` `agent-loop.js` for 0.84.4 and 0.85.1). Fixed by resolving the
+turn context after the capture; covered by the `turn_start capture` test, which
+pushes the user message while the capture is in flight. Re-verified live: the
+label is now the prompt text and the entry's `turnEntryId` is the user message
+id. `test/checkpoints.test.ts` ends at 15 tests.
 
 ```bash
 git add docs/superpowers/plans/2026-09-11-checkpoint-rewind-hardening.md

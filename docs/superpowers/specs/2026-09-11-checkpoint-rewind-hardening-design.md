@@ -31,6 +31,17 @@ and a review of the fork path found a fourth.
    about-to-be-overwritten tree first and refuses to proceed (fail-closed) if
    that capture fails. `session_before_fork` calls `restoreCheckpoint`
    directly after a yes/no prompt.
+5. **Checkpoints are attributed to the previous prompt** (found during the
+   live check of 1–4). pi's agent loop emits `turn_start` before the prompt's
+   `message_start`/`message_end`, and the user message is persisted on
+   `message_end`, so the branch read at `turn_start` still ends at the
+   previous prompt. Every prompt's first checkpoint carried the previous
+   prompt's text as its label ("(session start)" for the first) and a
+   `turnEntryId` that never equals the user message id pi passes to
+   `session_before_fork` — so the fork-point offer never fired. Present in
+   both pi 0.84.4 and 0.85.1. Fix: resolve `turnEntryId`/`subject` from the
+   branch after the capture's git calls complete (the message is persisted
+   long before those return), instead of synchronously at `turn_start`.
 
 ## Design
 
