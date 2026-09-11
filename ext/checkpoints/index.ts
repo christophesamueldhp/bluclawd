@@ -523,24 +523,19 @@ export function factory(pi: ExtensionAPI): void {
 		checkpointCurrentTurn(ctx);
 	});
 
-	// Donor behavior (git-checkpoint.ts): offer to restore the checkpoint at the
-	// fork point, kept simple (no auto-restore, always asks first).
+	// Offer to put the code back where it was when the forked-at prompt began.
+	// Always asks first, never auto-restores; shares /rewind's safety net.
 	pi.on("session_before_fork", async (event, ctx) => {
 		if (!ctx.hasUI) return;
-		const match = listCheckpoints(ctx.sessionManager.getBranch()).find((c) => c.turnEntryId === event.entryId);
+		const match = checkpointForTurn(ctx.sessionManager.getBranch(), event.entryId);
 		if (!match) return;
 
 		const choice = await ctx.ui.select(`Restore code to the checkpoint at this fork point? (${match.subject})`, [
-			"Yes, restore code to that checkpoint",
+			"Yes, restore code to that checkpoint (your current uncommitted changes are checkpointed first)",
 			"No, keep current code",
 		]);
-		if (choice?.startsWith("Yes")) {
-			const restored = await restoreCheckpoint(ctx.cwd, pi.exec, match.sha);
-			ctx.ui.notify(
-				restored ? "Code restored to checkpoint." : "Failed to restore checkpoint.",
-				restored ? "info" : "error",
-			);
-		}
+		if (!choice?.startsWith("Yes")) return;
+		await restoreWithSafetyNet(pi, ctx, match.sha, "(before fork)");
 	});
 
 	pi.registerCommand("rewind", {

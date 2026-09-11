@@ -356,3 +356,46 @@ describe("/rewind (files only)", () => {
 		expect(appendedSubjects(entries)).not.toContain("(before rewind)");
 	});
 });
+
+describe("session_before_fork", () => {
+	it("restores the OLDEST checkpoint of the forked turn and takes a safety net first", async () => {
+		const { dir, exec, write, read } = await makeRepo();
+		await write("a.txt", "before-prompt\n");
+		const older = await capture(dir, exec);
+		await write("a.txt", "mid-prompt\n");
+		const newer = await capture(dir, exec);
+		const entries = [
+			userEntry("u1", "long prompt"),
+			checkpointEntry(older, "u1", "long prompt"),
+			checkpointEntry(newer, "u1", "long prompt"),
+		];
+		await write("a.txt", "after-prompt\n");
+
+		const { handlers } = loadFactory(exec, entries);
+		const { ctx, notices } = makeCtx(dir, entries, { select: [0] }); // "Yes, restore ..."
+		await handlers
+			.get("session_before_fork")
+			?.({ type: "session_before_fork", entryId: "u1", position: "before" }, ctx);
+
+		expect(await read("a.txt")).toBe("before-prompt\n");
+		expect(appendedSubjects(entries)).toContain("(before fork)");
+		expect(notices.at(-1)?.message).toContain("restored");
+	});
+
+	it("does nothing when the user keeps the current code", async () => {
+		const { dir, exec, write, read } = await makeRepo();
+		await write("a.txt", "v1\n");
+		const sha = await capture(dir, exec);
+		const entries = [userEntry("u1", "p"), checkpointEntry(sha, "u1", "p")];
+		await write("a.txt", "v2\n");
+
+		const { handlers } = loadFactory(exec, entries);
+		const { ctx } = makeCtx(dir, entries, { select: [1] }); // "No, keep current code"
+		await handlers
+			.get("session_before_fork")
+			?.({ type: "session_before_fork", entryId: "u1", position: "before" }, ctx);
+
+		expect(await read("a.txt")).toBe("v2\n");
+		expect(appendedSubjects(entries)).not.toContain("(before fork)");
+	});
+});
