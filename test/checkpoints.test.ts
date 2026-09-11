@@ -211,3 +211,53 @@ describe("checkpointForTurn", () => {
 		expect(checkpointForTurn([userEntry("u1", "x")], "u1")).toBeUndefined();
 	});
 });
+
+// ── integration: exported git functions ──────────────────────────────────────
+
+describe("captureCheckpoint", () => {
+	it("returns undefined outside a git repository", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "bluclawd-cp-nogit-"));
+		cleanups.push(dir);
+		const exec = makeExec();
+		expect(await isGitRepo(dir, exec)).toBe(false);
+		expect(await captureCheckpoint(dir, exec)).toBeUndefined();
+	});
+
+	it("never changes git status or the real index, and leaves no temp index behind", async () => {
+		const { dir, exec, write, status } = await makeRepo();
+		await write("a.txt", "edited\n");
+		await write("new.txt", "new\n");
+		const statusBefore = await status();
+		const indexBefore = await readFile(join(dir, ".git", "index"));
+
+		await capture(dir, exec);
+
+		const indexAfter = await readFile(join(dir, ".git", "index"));
+		expect(indexAfter.equals(indexBefore)).toBe(true);
+		expect(await status()).toEqual(statusBefore);
+		expect(statusBefore).toEqual([" M a.txt", "?? new.txt"]);
+		const leftovers = (await readdir(tmpdir())).filter((f) => f.startsWith("bluclawd-checkpoint-"));
+		expect(leftovers).toEqual([]);
+	});
+
+	it("records the sha under refs/bluclawd/checkpoints/ with the commit as parent", async () => {
+		const { dir, exec, git } = await makeRepo();
+		const sha = await capture(dir, exec);
+		expect((await git("rev-parse", `refs/bluclawd/checkpoints/${sha}`)).trim()).toBe(sha);
+		expect((await git("rev-parse", `${sha}^`)).trim()).toBe((await git("rev-parse", "HEAD")).trim());
+	});
+});
+
+describe("pruneCheckpointRefs", () => {
+	it("deletes only the refs outside the keep set", async () => {
+		const { dir, exec, git, write } = await makeRepo();
+		const keep = await capture(dir, exec);
+		await write("a.txt", "second\n");
+		const drop = await capture(dir, exec);
+		expect(keep).not.toBe(drop);
+
+		expect(await pruneCheckpointRefs(dir, exec, new Set([keep]))).toBe(1);
+		const refs = (await git("for-each-ref", "--format=%(refname)", "refs/bluclawd/checkpoints/")).trim();
+		expect(refs).toBe(`refs/bluclawd/checkpoints/${keep}`);
+	});
+});
