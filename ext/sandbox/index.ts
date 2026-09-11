@@ -32,7 +32,7 @@ import * as forkSettings from "../_shared/settings.ts";
 import { resolveSandboxConfig, type SandboxConfig, strictRefusalReason } from "./config.ts";
 import { buildSandboxFailureNote } from "./failure-note.ts";
 import { createMonitorTool } from "./monitor-tool.ts";
-import { isSandboxActive, setSandboxActive } from "./state.ts";
+import { isSandboxActive, publishChildBash, setSandboxActive } from "./state.ts";
 
 /**
  * The two parameters bluclawd adds to pi's bash tool. Kept next to the
@@ -250,6 +250,14 @@ export function factory(pi: ExtensionAPI): void {
 		} else if (isSandboxActive()) {
 			await deactivate(ctx);
 		}
+		// Subagent children build their bash on these (child-bash.ts): the same
+		// sandbox, the same strict refusal, so delegation is not a way around either.
+		publishChildBash({
+			operations: () => (isSandboxActive() ? sandboxedOperations() : createLocalBashOperations({ shellPath })),
+			refusal: () => strictRefusalReason(config, isSandboxActive(), lastError),
+			shellPath,
+			commandPrefix,
+		});
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {

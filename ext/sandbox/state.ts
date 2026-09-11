@@ -11,6 +11,7 @@
  * permissions always read `false`, silently dropping the fewer-prompts pairing.
  */
 
+import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { sharedRef } from "../_shared/global-state.ts";
 
 const ref = sharedRef<boolean>("sandbox.active", false);
@@ -21,4 +22,30 @@ export function setSandboxActive(active: boolean): void {
 
 export function isSandboxActive(): boolean {
 	return ref.get();
+}
+
+/**
+ * What a subagent child needs to run bash the way the parent does. Children load
+ * no extensions (subagents/engine.ts, Trap 2), so the sandbox extension is not
+ * there to replace their bash tool; the parent publishes its operations here and
+ * `child-bash.ts` builds the child's tool on top of them. Operations, not a tool:
+ * a child has its own cwd (a worktree, say), and the tool is bound to one.
+ */
+export interface ChildBashProvider {
+	/** Sandboxed operations while the sandbox is active, plain ones otherwise. */
+	operations(): BashOperations;
+	/** The strict-mode refusal, when the sandbox was wanted but is not running. */
+	refusal(): string | undefined;
+	shellPath?: string;
+	commandPrefix?: string;
+}
+
+const provider = sharedRef<ChildBashProvider | undefined>("sandbox.childBash", undefined);
+
+export function publishChildBash(value: ChildBashProvider | undefined): void {
+	provider.set(value);
+}
+
+export function childBashProvider(): ChildBashProvider | undefined {
+	return provider.get();
 }

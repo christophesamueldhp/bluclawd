@@ -16,17 +16,45 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { type PermissionMode, parseMode } from "../permissions/modes.ts";
 
 export type AgentScope = "user" | "project" | "both";
+
+/** Where a def's persistent memory lives (Claude Code's `memory:` field). */
+export type AgentMemoryScope = "user" | "project" | "local";
+export type AgentEffort = "low" | "medium" | "high" | "xhigh" | "max";
+export type AgentColor = "red" | "blue" | "green" | "yellow" | "purple" | "orange" | "pink" | "cyan";
+
+const MEMORY_SCOPES: readonly AgentMemoryScope[] = ["user", "project", "local"];
+const EFFORTS: readonly AgentEffort[] = ["low", "medium", "high", "xhigh", "max"];
+const COLORS: readonly AgentColor[] = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"];
 
 export interface AgentDef {
 	name: string;
 	description: string;
 	tools?: string[];
+	/** Removed from the child's tool set, after `tools` is applied. */
+	disallowedTools?: string[];
 	model?: string;
+	/** Stop the child after this many assistant turns; its output is then partial. */
+	maxTurns?: number;
+	/** Skills whose full content is preloaded into the child's system prompt. */
+	skills?: string[];
+	/** The mode the child is evaluated under when the parent is in `ask`. */
+	permissionMode?: PermissionMode;
+	memory?: AgentMemoryScope;
+	/** Run detached by default, even when the call did not ask for it. */
+	background?: boolean;
+	isolation?: "worktree";
+	effort?: AgentEffort;
+	color?: AgentColor;
 	systemPrompt: string;
 	source: "user" | "project";
 	filePath: string;
+}
+
+function oneOf<T extends string>(raw: unknown, set: readonly T[]): T | undefined {
+	return typeof raw === "string" && (set as readonly string[]).includes(raw) ? (raw as T) : undefined;
 }
 
 export interface AgentDiscoveryResult {
@@ -131,14 +159,41 @@ export function parseDef(content: string): ParsedDef | { name?: string; problem:
 	// list syntax (`tools: [Read, Grep]`), which parses to an array — calling
 	// .split on that threw. Anything else yields no restriction rather than a crash.
 	const tools = normalizeTools(frontmatter.tools);
+	const disallowedTools = normalizeTools(frontmatter.disallowedTools);
+	// Skills are names, not tool names: same two spellings, but case is kept.
+	const skillsRaw = frontmatter.skills;
+	const skills = (typeof skillsRaw === "string" ? skillsRaw.split(",") : Array.isArray(skillsRaw) ? skillsRaw : [])
+		.filter((s): s is string => typeof s === "string")
+		.map((s) => s.trim())
+		.filter(Boolean);
+	const maxTurns = frontmatter.maxTurns;
+	// `plan` and the removed modes are not errors, just not this layer's: a def that
+	// names one is loaded and runs under the default, exactly as an undeclared one.
+	const permissionMode =
+		typeof frontmatter.permissionMode === "string" ? parseMode(frontmatter.permissionMode) : undefined;
 
-	return {
+	// Absent fields are absent, not present-as-undefined: a def is compared and
+	// serialised (the /agents list, tests), and `{ maxTurns: undefined }` is noise there.
+	return compact({
 		name,
 		description,
 		tools: tools && tools.length > 0 ? tools : undefined,
+		disallowedTools: disallowedTools && disallowedTools.length > 0 ? disallowedTools : undefined,
 		model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
+		maxTurns: typeof maxTurns === "number" && Number.isInteger(maxTurns) && maxTurns > 0 ? maxTurns : undefined,
+		skills: skills.length > 0 ? skills : undefined,
+		permissionMode,
+		memory: oneOf(frontmatter.memory, MEMORY_SCOPES),
+		background: frontmatter.background === true ? true : undefined,
+		isolation: frontmatter.isolation === "worktree" ? "worktree" : undefined,
+		effort: oneOf(frontmatter.effort, EFFORTS),
+		color: oneOf(frontmatter.color, COLORS),
 		systemPrompt: body,
-	};
+	});
+}
+
+function compact<T extends object>(value: T): T {
+	return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as T;
 }
 
 function loadDefsFromDir(dir: string, source: "user" | "project"): AgentDef[] {

@@ -244,7 +244,13 @@ export function isProtectedPath(rawPath: string, cwd: string, agentDir: string, 
 		const segments = candidate.split(sep);
 		if (
 			segments.some((segment, i) => {
-				if (eq(segment, configDirName)) return true;
+				// Two subtrees of the config dir hold a subagent's WORKING DATA rather
+				// than configuration — its worktree copy of the repository and its own
+				// memory file — and a child must be able to write both. Same shape as
+				// the `.claude/worktrees` carve-out below, and just as narrow: only the
+				// config-dir segment is exempted, so a worktree's own `.git` and its
+				// own config dir stay protected by the segments after it.
+				if (eq(segment, configDirName)) return !WORKING_DATA_DIRS.some((dir) => eq(segments[i + 1] ?? "", dir));
 				// `.claude/worktrees` holds working copies, not configuration — Claude
 				// Code carves it out, and gating it would prompt on ordinary edits.
 				// The carve-out applies ONLY to the `.claude` segment: a worktree still
@@ -265,11 +271,20 @@ export function isProtectedPath(rawPath: string, cwd: string, agentDir: string, 
 				? candidate.toLowerCase().startsWith(agentPrefix.toLowerCase())
 				: candidate.startsWith(agentPrefix)
 		) {
+			// The agent dir's own working-data subtree: user-scoped subagent memory.
+			// Nothing else under the agent dir is exempt — auth.json, settings, agents.
+			const rest = candidate.slice(agentPrefix.length).split(sep);
+			if (eq(rest[0] ?? "", AGENT_MEMORY_DIR)) continue;
 			return true;
 		}
 	}
 	return false;
 }
+
+/** Subagent memory directory name, under the config dir (project/local) or the agent dir (user). */
+export const AGENT_MEMORY_DIR = "agent-memory";
+/** Directories under the config dir that hold subagent working data, not configuration. */
+const WORKING_DATA_DIRS = ["worktrees", AGENT_MEMORY_DIR, `${AGENT_MEMORY_DIR}-local`];
 
 /**
  * Agent files whose CONTENTS are secrets or grant execution: server credentials

@@ -46,6 +46,12 @@ export interface SingleResult {
 	stopReason?: string;
 	errorMessage?: string;
 	step?: number;
+	/** The child session's id: what a later call resumes. */
+	agentId?: string;
+	/** Stopped at its turn cap; the output is what it had by then. */
+	partial?: boolean;
+	/** A worktree the child changed and so was kept, for the user to inspect or merge. */
+	worktree?: string;
 }
 
 export interface SubagentDetails {
@@ -61,6 +67,7 @@ export interface TaskCallArgs {
 	tasks?: Array<{ agent: string; task: string }>;
 	chain?: Array<{ agent: string; task: string }>;
 	agentScope?: AgentScope;
+	resume?: string;
 }
 
 export function emptyUsage(): UsageStats {
@@ -232,12 +239,14 @@ function getDisplayItems(messages: AgentMessage[]): DisplayItem[] {
 }
 
 export function renderCall(args: TaskCallArgs, theme: Theme, _context: unknown) {
-	const scope: AgentScope = args.agentScope ?? "user";
+	// The default scope is decided by project trust at run time (see index.ts), so
+	// an omitted scope is not a fact this renderer can state; only an explicit one is.
+	const scopeTag = args.agentScope ? theme.fg("muted", ` [${args.agentScope}]`) : "";
 	if (args.chain && args.chain.length > 0) {
 		let text =
 			theme.fg("toolTitle", theme.bold("task ")) +
 			theme.fg("accent", `chain (${args.chain.length} steps)`) +
-			theme.fg("muted", ` [${scope}]`);
+			scopeTag;
 		for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
 			const step = args.chain[i];
 			const cleanTask = step.task.replace(/\{previous\}/g, "").trim();
@@ -256,7 +265,7 @@ export function renderCall(args: TaskCallArgs, theme: Theme, _context: unknown) 
 		let text =
 			theme.fg("toolTitle", theme.bold("task ")) +
 			theme.fg("accent", `parallel (${args.tasks.length} tasks)`) +
-			theme.fg("muted", ` [${scope}]`);
+			scopeTag;
 		for (const t of args.tasks.slice(0, 3)) {
 			const preview = t.task.length > 40 ? `${t.task.slice(0, 40)}...` : t.task;
 			text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", ` ${preview}`)}`;
@@ -264,10 +273,9 @@ export function renderCall(args: TaskCallArgs, theme: Theme, _context: unknown) 
 		if (args.tasks.length > 3) text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
 		return new Text(text, 0, 0);
 	}
-	const agentName = args.agent || "...";
+	const agentName = args.agent || (args.resume ? `resume ${args.resume}` : "...");
 	const preview = args.task ? (args.task.length > 60 ? `${args.task.slice(0, 60)}...` : args.task) : "...";
-	let text =
-		theme.fg("toolTitle", theme.bold("task ")) + theme.fg("accent", agentName) + theme.fg("muted", ` [${scope}]`);
+	let text = theme.fg("toolTitle", theme.bold("task ")) + theme.fg("accent", agentName) + scopeTag;
 	text += `\n  ${theme.fg("dim", preview)}`;
 	return new Text(text, 0, 0);
 }
@@ -452,6 +460,10 @@ export function renderResult(
 			text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
 			if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 			else text += `\n${renderDisplayItems(displayItems, 5)}`;
+			// Per-step usage while the chain is still running: the only progress signal
+			// a child gives before its final text is its turn and token count.
+			const stepUsage = formatUsageStats(r.usage, r.model);
+			if (stepUsage) text += `\n${theme.fg("dim", stepUsage)}`;
 		}
 		const usageStr = formatUsageStats(aggregateUsage(details.results));
 		if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
@@ -530,6 +542,8 @@ export function renderResult(
 			if (displayItems.length === 0)
 				text += `\n${theme.fg("muted", r.status === "running" ? "(running...)" : "(no output)")}`;
 			else text += `\n${renderDisplayItems(displayItems, 5)}`;
+			const taskUsage = formatUsageStats(r.usage, r.model);
+			if (taskUsage) text += `\n${theme.fg("dim", taskUsage)}`;
 		}
 		if (!isRunning) {
 			const usageStr = formatUsageStats(aggregateUsage(details.results));

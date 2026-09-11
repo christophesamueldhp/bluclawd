@@ -54,6 +54,19 @@ export interface WebsearchSettings {
 	keyless?: boolean;
 }
 
+/** Limits and model aliases for the `task` tool's in-process subagents. */
+export interface SubagentSettings {
+	/** Most tasks one parallel or chain call may carry. default: 8 */
+	maxTasks?: number;
+	/** Most children running at once within one call. default: 4 */
+	maxConcurrent?: number;
+	/** Turn cap for every child that declares none. default: unlimited */
+	maxTurns?: number;
+	/** Short model names a def's `model:` may use, e.g. `{ "fast": "opencode-go/kimi-k2" }`.
+	 *  Provider-neutral on purpose: nothing here names a vendor unless the user does. */
+	models?: Record<string, string>;
+}
+
 type Mergeable = Record<string, unknown>;
 
 function isPlainObject(value: unknown): value is Mergeable {
@@ -110,4 +123,9 @@ export function globalPermissionDefaultMode(sm: SettingsManager): string | undef
 export function websearch(sm: SettingsManager): WebsearchSettings | undefined {
 	const value = merged(sm).websearch as WebsearchSettings | undefined;
 	return value ? { ...value } : undefined;
+}
+
+export function subagents(sm: SettingsManager): SubagentSettings | undefined {
+	const value = merged(sm).subagents as SubagentSettings | undefined;
+	return value ? structuredClone(value) : undefined;
 }

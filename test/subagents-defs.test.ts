@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { discoverDefs, parseDef } from "../ext/subagents/defs.ts";
 
 /** Names of the defs shipped in ext/subagents/agents. */
-const BUNDLED = ["code-reviewer", "explore", "planner"];
+const BUNDLED = ["code-reviewer", "explore", "general-purpose", "planner"];
 
 const def = (name: string, description = "does a thing") =>
 	`---\nname: ${name}\ndescription: ${description}\n---\nYou are ${name}.\n`;
@@ -136,5 +136,40 @@ describe("parseDef", () => {
 		expect(parseDef("---\nname: x\ndescription: d\ntools: [Read, Grep]\n---\n")).toMatchObject({
 			tools: ["read", "grep"],
 		});
+	});
+});
+
+describe("parseDef: Claude Code frontmatter fields", () => {
+	const withFm = (fm: string) => parseDef(`---\nname: x\ndescription: d\n${fm}\n---\nbody\n`);
+
+	it("reads disallowedTools in both spellings, lowercased", () => {
+		expect(withFm("disallowedTools: Write, Edit")).toMatchObject({ disallowedTools: ["write", "edit"] });
+		expect(withFm("disallowedTools: [Write]")).toMatchObject({ disallowedTools: ["write"] });
+	});
+
+	it("reads maxTurns only as a positive integer", () => {
+		expect(withFm("maxTurns: 5")).toMatchObject({ maxTurns: 5 });
+		expect(withFm("maxTurns: 0")).not.toHaveProperty("maxTurns");
+		expect(withFm("maxTurns: lots")).not.toHaveProperty("maxTurns");
+	});
+
+	it("reads skills as a list or a comma-separated string", () => {
+		expect(withFm("skills:\n  - api-conventions\n  - tdd")).toMatchObject({ skills: ["api-conventions", "tdd"] });
+		expect(withFm("skills: a, b")).toMatchObject({ skills: ["a", "b"] });
+	});
+
+	it("maps permissionMode through the same aliases /mode accepts, and drops unknown ones", () => {
+		expect(withFm("permissionMode: acceptEdits")).toMatchObject({ permissionMode: "edits" });
+		expect(withFm("permissionMode: default")).toMatchObject({ permissionMode: "ask" });
+		expect(withFm("permissionMode: auto")).toMatchObject({ permissionMode: "auto" });
+		expect(withFm("permissionMode: plan")).not.toHaveProperty("permissionMode");
+	});
+
+	it("reads memory scope, background, isolation, effort and color, rejecting values outside their sets", () => {
+		expect(withFm("memory: project\nbackground: true\nisolation: worktree\neffort: high\ncolor: cyan")).toMatchObject(
+			{ memory: "project", background: true, isolation: "worktree", effort: "high", color: "cyan" },
+		);
+		const bad = withFm("memory: shared\nbackground: yes\nisolation: docker\neffort: turbo\ncolor: mauve");
+		for (const key of ["memory", "background", "isolation", "effort", "color"]) expect(bad).not.toHaveProperty(key);
 	});
 });
