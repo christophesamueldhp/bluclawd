@@ -17,6 +17,7 @@ import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import * as forkSettings from "../_shared/settings.ts";
 import { type WebfetchResult, webFetch } from "./fetch.ts";
+import { renderWebfetchCall, renderWebfetchResult, renderWebsearchCall, renderWebsearchResult } from "./render.ts";
 import { defaultEnvFor, exaMcpSearch, type SearchProvider, type SearchResult, webSearch } from "./search.ts";
 
 interface WebfetchDetails {
@@ -182,6 +183,9 @@ export function factory(pi: ExtensionAPI): void {
 		promptSnippet:
 			"Use webfetch to retrieve the content of a public http(s) URL as text/Markdown; pass `prompt` to extract just what you need from large pages.",
 		parameters: WebfetchParams,
+		// A fetched page can run to megabytes; the TUI must not dump it uncollapsed.
+		renderCall: renderWebfetchCall,
+		renderResult: renderWebfetchResult,
 		async execute(
 			_toolCallId,
 			params,
@@ -227,6 +231,8 @@ export function factory(pi: ExtensionAPI): void {
 		promptSnippet:
 			"Use websearch to find current information on the web; account for the current date when judging whether a result is recent.",
 		parameters: WebsearchParams,
+		renderCall: renderWebsearchCall,
+		renderResult: renderWebsearchResult,
 		async execute(
 			_toolCallId,
 			params,
