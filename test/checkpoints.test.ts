@@ -27,13 +27,18 @@ const GIT_ENV = {
 };
 
 /** Same contract as pi's (unexported) execCommand: resolves {code, stdout, stderr, killed}, never rejects. */
-function makeExec(): Exec {
+function makeExec(extraEnv: Record<string, string> = {}): Exec {
 	return (command, args, options) =>
 		new Promise((resolve) => {
 			execFile(
 				command,
 				args,
-				{ cwd: options?.cwd, timeout: options?.timeout, env: GIT_ENV, maxBuffer: 64 * 1024 * 1024 },
+				{
+					cwd: options?.cwd,
+					timeout: options?.timeout,
+					env: { ...GIT_ENV, ...extraEnv },
+					maxBuffer: 64 * 1024 * 1024,
+				},
 				(error, stdout, stderr) => {
 					const err = error as (Error & { code?: unknown; killed?: boolean }) | null;
 					const code = err ? (typeof err.code === "number" ? err.code : 1) : 0;
@@ -83,11 +88,30 @@ async function makeRepo(opts: { commit?: boolean } = {}) {
 	return { dir, exec, git, write, read, status };
 }
 
+const SESSION = "session-a";
+
 /** Capture with the real function and assert it worked, so failures point at capture, not the test. */
 async function capture(dir: string, exec: Exec): Promise<string> {
-	const sha = await captureCheckpoint(dir, exec);
+	const sha = await captureCheckpoint(dir, exec, SESSION);
 	expect(sha).toMatch(/^[0-9a-f]{40}$/);
 	return sha as string;
+}
+
+/** A checkpoint-shaped commit of the current index, dated `daysAgo` days back, not yet under any ref. */
+async function commitAt(dir: string, daysAgo: number): Promise<string> {
+	const date = `${Math.floor(Date.now() / 1000) - daysAgo * 86400} +0000`;
+	const exec = makeExec({
+		GIT_AUTHOR_DATE: date,
+		GIT_COMMITTER_DATE: date,
+		GIT_AUTHOR_NAME: "x",
+		GIT_AUTHOR_EMAIL: "x@x",
+		GIT_COMMITTER_NAME: "x",
+		GIT_COMMITTER_EMAIL: "x@x",
+	});
+	const tree = (await exec("git", ["write-tree"], { cwd: dir })).stdout.trim();
+	const commit = await exec("git", ["commit-tree", tree, "-m", `fixture ${daysAgo}d`], { cwd: dir });
+	expect(commit.code).toBe(0);
+	return commit.stdout.trim();
 }
 
 let nextEntryId = 1;
@@ -154,7 +178,7 @@ function makeCtx(dir: string, entries: SessionEntry[], script: { select?: number
 			notify: (message: string, type?: string) => notices.push({ message, type }),
 			input: async () => undefined,
 		},
-		sessionManager: { getBranch: () => entries, getLeafEntry: () => entries.at(-1) },
+		sessionManager: { getBranch: () => entries, getLeafEntry: () => entries.at(-1), getSessionId: () => SESSION },
 		navigateTree: async (id: string) => {
 			navigated.push(id);
 			return { cancelled: false };
@@ -230,7 +254,7 @@ describe("captureCheckpoint", () => {
 		cleanups.push(dir);
 		const exec = makeExec();
 		expect(await isGitRepo(dir, exec)).toBe(false);
-		expect(await captureCheckpoint(dir, exec)).toBeUndefined();
+		expect(await captureCheckpoint(dir, exec, SESSION)).toBeUndefined();
 	});
 
 	it("never changes git status or the real index, and leaves no temp index behind", async () => {
@@ -250,25 +274,43 @@ describe("captureCheckpoint", () => {
 		expect(leftovers).toEqual([]);
 	});
 
-	it("records the sha under refs/bluclawd/checkpoints/ with the commit as parent", async () => {
+	it("records the sha under refs/bluclawd/checkpoints/<sessionId>/ with the commit as parent", async () => {
 		const { dir, exec, git } = await makeRepo();
 		const sha = await capture(dir, exec);
-		expect((await git("rev-parse", `refs/bluclawd/checkpoints/${sha}`)).trim()).toBe(sha);
+		expect((await git("rev-parse", `refs/bluclawd/checkpoints/${SESSION}/${sha}`)).trim()).toBe(sha);
 		expect((await git("rev-parse", `${sha}^`)).trim()).toBe((await git("rev-parse", "HEAD")).trim());
 	});
 });
 
 describe("pruneCheckpointRefs", () => {
-	it("deletes only the refs outside the keep set", async () => {
+	it("keeps own-branch refs, drops own and legacy strays, and drops foreign refs only past the TTL", async () => {
 		const { dir, exec, git, write } = await makeRepo();
 		const keep = await capture(dir, exec);
 		await write("a.txt", "second\n");
-		const drop = await capture(dir, exec);
-		expect(keep).not.toBe(drop);
+		const ownStray = await capture(dir, exec);
+		expect(keep).not.toBe(ownStray);
+		const legacy = await commitAt(dir, 0);
+		await git("update-ref", `refs/bluclawd/checkpoints/${legacy}`, legacy);
+		const foreignFresh = await commitAt(dir, 1);
+		await git("update-ref", `refs/bluclawd/checkpoints/session-b/${foreignFresh}`, foreignFresh);
+		const foreignOld = await commitAt(dir, 31);
+		await git("update-ref", `refs/bluclawd/checkpoints/session-b/${foreignOld}`, foreignOld);
 
-		expect(await pruneCheckpointRefs(dir, exec, new Set([keep]))).toBe(1);
-		const refs = (await git("for-each-ref", "--format=%(refname)", "refs/bluclawd/checkpoints/")).trim();
-		expect(refs).toBe(`refs/bluclawd/checkpoints/${keep}`);
+		expect(await pruneCheckpointRefs(dir, exec, SESSION, new Set([keep]))).toBe(3);
+		const refs = (await git("for-each-ref", "--format=%(refname)", "refs/bluclawd/checkpoints/"))
+			.trim()
+			.split("\n")
+			.sort();
+		expect(refs).toEqual(
+			[`refs/bluclawd/checkpoints/${SESSION}/${keep}`, `refs/bluclawd/checkpoints/session-b/${foreignFresh}`].sort(),
+		);
+	});
+
+	it("keeps a legacy flat ref that the current branch still references", async () => {
+		const { dir, git } = await makeRepo();
+		const legacy = await commitAt(dir, 0);
+		await git("update-ref", `refs/bluclawd/checkpoints/${legacy}`, legacy);
+		expect(await pruneCheckpointRefs(dir, makeExec(), SESSION, new Set([legacy]))).toBe(0);
 	});
 });
 

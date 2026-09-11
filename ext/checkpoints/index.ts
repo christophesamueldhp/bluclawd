@@ -268,8 +268,15 @@ function findTurnContext(branch: SessionEntry[]): {
 	return { turnEntryId: leaf?.id ?? "", subject: "(session start)" };
 }
 
-function refNameForSha(sha: string): string {
-	return `${CHECKPOINT_REF_PREFIX}${sha}`;
+/**
+ * Refs from OTHER sessions' namespaces are kept this long (by commit date)
+ * before the prune drops them — a session resumed later than this loses its
+ * file checkpoints, nothing else. Matches Claude Code's checkpoint retention.
+ */
+const FOREIGN_CHECKPOINT_TTL_DAYS = 30;
+
+function refNameForSha(sessionId: string, sha: string): string {
+	return `${CHECKPOINT_REF_PREFIX}${sessionId}/${sha}`;
 }
 
 export async function isGitRepo(cwd: string, exec: ExtensionAPI["exec"]): Promise<boolean> {
@@ -297,7 +304,11 @@ async function headSha(cwd: string, exec: ExtensionAPI["exec"]): Promise<string 
  * commit sha, or undefined on any failure or when `cwd` isn't a git repo — never
  * throws (silent no-op).
  */
-export async function captureCheckpoint(cwd: string, exec: ExtensionAPI["exec"]): Promise<string | undefined> {
+export async function captureCheckpoint(
+	cwd: string,
+	exec: ExtensionAPI["exec"],
+	sessionId: string,
+): Promise<string | undefined> {
 	if (!(await isGitRepo(cwd, exec))) return undefined;
 
 	const tmpIndex = join(tmpdir(), `bluclawd-checkpoint-${randomUUID()}.index`);
@@ -349,7 +360,7 @@ export async function captureCheckpoint(cwd: string, exec: ExtensionAPI["exec"])
 		const sha = commit?.stdout.trim();
 		if (!commit || commit.code !== 0 || !sha) return undefined;
 
-		const updateRef = await exec("git", ["update-ref", refNameForSha(sha), sha], {
+		const updateRef = await exec("git", ["update-ref", refNameForSha(sessionId, sha), sha], {
 			cwd,
 			timeout: GIT_TIMEOUT_MS,
 		}).catch(() => undefined);
@@ -388,29 +399,43 @@ export async function restoreCheckpoint(cwd: string, exec: ExtensionAPI["exec"],
 }
 
 /**
- * Delete every `refs/bluclawd/checkpoints/*` ref whose sha is not in `keepShas`.
+ * Sweep `refs/bluclawd/checkpoints/**` with three rules, so sessions sharing
+ * one `.git` (FleetView, subagent worktrees) never delete each other's live
+ * checkpoints:
+ *   - `<sessionId>/<sha>` (this session): delete unless the sha is in `keepShas`.
+ *   - `<sha>` directly under the prefix (legacy flat layout): same rule, so an
+ *     upgraded repo converges without a migration.
+ *   - `<otherSession>/<sha>`: delete only when the commit is older than
+ *     FOREIGN_CHECKPOINT_TTL_DAYS.
  * Returns the number of refs removed. Never throws.
  */
 export async function pruneCheckpointRefs(
 	cwd: string,
 	exec: ExtensionAPI["exec"],
+	sessionId: string,
 	keepShas: ReadonlySet<string>,
 ): Promise<number> {
-	const list = await exec("git", ["for-each-ref", "--format=%(refname)", CHECKPOINT_REF_PREFIX], {
-		cwd,
-		timeout: GIT_TIMEOUT_MS,
-	}).catch(() => undefined);
+	const list = await exec(
+		"git",
+		["for-each-ref", "--format=%(refname) %(committerdate:unix)", CHECKPOINT_REF_PREFIX],
+		{
+			cwd,
+			timeout: GIT_TIMEOUT_MS,
+		},
+	).catch(() => undefined);
 	if (!list || list.code !== 0) return 0;
 
-	const refs = list.stdout
-		.split("\n")
-		.map((line) => line.trim())
-		.filter(Boolean);
-
+	const cutoff = Math.floor(Date.now() / 1000) - FOREIGN_CHECKPOINT_TTL_DAYS * 86400;
 	let removed = 0;
-	for (const ref of refs) {
-		const sha = ref.slice(CHECKPOINT_REF_PREFIX.length);
-		if (keepShas.has(sha)) continue;
+	for (const line of list.stdout.split("\n")) {
+		const [ref, dateText] = line.trim().split(" ");
+		if (!ref) continue;
+		const rest = ref.slice(CHECKPOINT_REF_PREFIX.length);
+		const slash = rest.indexOf("/");
+		const owner = slash === -1 ? sessionId : rest.slice(0, slash);
+		const sha = slash === -1 ? rest : rest.slice(slash + 1);
+		const stale = owner === sessionId ? !keepShas.has(sha) : Number.parseInt(dateText ?? "", 10) < cutoff;
+		if (!stale) continue;
 		const del = await exec("git", ["update-ref", "-d", ref], {
 			cwd,
 			timeout: GIT_TIMEOUT_MS,
@@ -432,9 +457,14 @@ export async function pruneCheckpointRefs(
  * (one `for-each-ref`, zero deletes once nothing is stray or over the cap).
  * Never throws — `pruneCheckpointRefs` already swallows its own errors.
  */
-async function pruneOldCheckpointRefs(cwd: string, exec: ExtensionAPI["exec"], branch: SessionEntry[]): Promise<void> {
+async function pruneOldCheckpointRefs(
+	cwd: string,
+	exec: ExtensionAPI["exec"],
+	sessionId: string,
+	branch: SessionEntry[],
+): Promise<void> {
 	const shas = listCheckpoints(branch).map((c) => c.sha); // newest-first
-	await pruneCheckpointRefs(cwd, exec, new Set(shas.slice(0, MAX_CHECKPOINT_REFS)));
+	await pruneCheckpointRefs(cwd, exec, sessionId, new Set(shas.slice(0, MAX_CHECKPOINT_REFS)));
 }
 
 /**
@@ -451,7 +481,7 @@ export async function restoreWithSafetyNet(
 ): Promise<boolean> {
 	// Deliberately bypasses the isCapturing guard (see file header) — this is a
 	// foreground, user-awaited, one-off action.
-	const safetySha = await captureCheckpoint(ctx.cwd, pi.exec);
+	const safetySha = await captureCheckpoint(ctx.cwd, pi.exec, ctx.sessionManager.getSessionId());
 	if (safetySha) {
 		pi.appendEntry(CHECKPOINT_CUSTOM_TYPE, {
 			sha: safetySha,
@@ -514,7 +544,8 @@ export function factory(pi: ExtensionAPI): void {
 	function checkpointCurrentTurn(ctx: ExtensionContext): void {
 		if (isCapturing) return; // an in-flight capture: the next turn_start will try again
 		isCapturing = true;
-		void captureCheckpoint(ctx.cwd, pi.exec)
+		const sessionId = ctx.sessionManager.getSessionId();
+		void captureCheckpoint(ctx.cwd, pi.exec, sessionId)
 			.then(async (sha) => {
 				// Resolved AFTER the capture, not at turn_start: pi persists the prompt's
 				// user message on message_end, which the agent loop emits after
@@ -524,7 +555,7 @@ export function factory(pi: ExtensionAPI): void {
 				if (sha) {
 					pi.appendEntry(CHECKPOINT_CUSTOM_TYPE, { sha, turnEntryId, subject });
 					// Fire-and-forget, like capture itself — doesn't gate isCapturing below.
-					void pruneOldCheckpointRefs(ctx.cwd, pi.exec, ctx.sessionManager.getBranch());
+					void pruneOldCheckpointRefs(ctx.cwd, pi.exec, sessionId, ctx.sessionManager.getBranch());
 					return;
 				}
 				// Capture failed. Distinguish "not a git repo" (stable, expected, not
@@ -578,7 +609,7 @@ export function factory(pi: ExtensionAPI): void {
 			const trimmed = args.trim().toLowerCase();
 			if (trimmed === "--prune" || trimmed === "prune") {
 				const keepShas = new Set(listCheckpoints(ctx.sessionManager.getBranch()).map((c) => c.sha));
-				const removed = await pruneCheckpointRefs(ctx.cwd, pi.exec, keepShas);
+				const removed = await pruneCheckpointRefs(ctx.cwd, pi.exec, ctx.sessionManager.getSessionId(), keepShas);
 				ctx.ui.notify(`Pruned ${removed} old checkpoint ref${removed === 1 ? "" : "s"}.`, "info");
 				return;
 			}
