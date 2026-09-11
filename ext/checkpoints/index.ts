@@ -27,9 +27,14 @@
  * `ExecOptions` has no env passthrough and a `VAR=val cmd` shell prefix doesn't
  * expand across separate spawned processes anyway):
  *
- *   1. `env GIT_INDEX_FILE=<tmp> git add -A`   — stage the ENTIRE working tree
- *      (tracked + untracked, respecting .gitignore, matching `git stash`'s
- *      scope) into the fresh temp index. The real index is never opened.
+ *   1. `env GIT_INDEX_FILE=<tmp> git read-tree HEAD` (skipped on an unborn
+ *      HEAD) then `env GIT_INDEX_FILE=<tmp> git add -A` — seed the temp index
+ *      with HEAD's entries, then stage the ENTIRE working tree on top:
+ *      tracked files (modified, deleted, or matching .gitignore — the
+ *      committed-then-ignored `.env` pattern) plus untracked files, the same
+ *      scope as `git stash -u`. Without the seed, tracked-but-ignored files
+ *      are missing from the tree and a restore DELETES them. The real index
+ *      is never opened.
  *   2. `env GIT_INDEX_FILE=<tmp> git write-tree` — turn that temp index into a
  *      tree object.
  *   3. `git commit-tree <tree> [-p HEAD] -m ...` — wrap the tree in a commit
@@ -44,7 +49,7 @@
  * The temp index file itself lives under `os.tmpdir()` (never inside the repo)
  * and is removed in a `finally` block regardless of outcome. Every git exec
  * carries a hard `timeout` (GIT_TIMEOUT_MS) so a hung git can never hang the
- * agent loop. See `test/core-ext-checkpoints.test.ts` for the byte-identical
+ * agent loop. See `test/checkpoints.test.ts` for the byte-identical
  * before/after proof.
  *
  * ── Latency: fire-and-forget capture ──────────────────────────────────────────
@@ -67,8 +72,9 @@
  * `git read-tree --reset -u <sha>` resets the real index AND working tree to
  * match the checkpoint's tree in one step (the standard idiom underlying
  * `git reset --hard`) — this is the one operation in this file that is meant to
- * touch the user's working tree, and only ever runs from an explicit, confirmed
- * `/rewind` (or a fork-point restore the user opted into). It gets its own larger
+ * touch the user's working tree, and only ever runs through
+ * `restoreWithSafetyNet`, from an explicit, confirmed `/rewind` or a fork-point
+ * restore the user opted into — both take the safety net below. It gets its own larger
  * RESTORE_TIMEOUT_MS budget (not the cheap 5s metadata timeout), since a SIGTERM
  * mid-restore on a large repo can leave a partially-applied tree; that failure is
  * reported with a distinct message pointing at the safety-net sha for recovery.
@@ -81,16 +87,29 @@
  * the working tree untouched. This closes the data-loss hole where a failed
  * safety net would silently still overwrite the user's uncommitted work.
  *
- * Files present in the checkpoint tree that were previously untracked become
- * tracked/staged after a restore (tree objects don't record "trackedness") —
- * documented, not fixed, to keep this file within scope.
+ * After the tree restore, the index is reset to HEAD (`git reset -q`, or
+ * `read-tree --empty` on an unborn HEAD) so the result reads as ordinary
+ * uncommitted work: modified files unstaged, new files untracked. A checkpoint
+ * is a flattened tree — it does not record what was staged — so anything the
+ * user had staged is unstaged after a restore, the same loss as `git stash
+ * pop` without `--index`. Checkpoints captured before the HEAD-seeding change
+ * above still lack tracked-but-ignored files; restoring one of those still
+ * removes such files, and that cannot be repaired retroactively.
  *
- * The inverse also holds (2026-07-10 review I6): `read-tree --reset -u` only
- * touches paths that differ between the target tree and the current index, so a
- * file created AFTER the checkpoint (agent-written, never git-added) is in
- * neither and SURVIVES a `/rewind` or fork-restore. Removing such strays would
- * need an explicit untracked-diff + delete pass with its own safety questions
- * (it would erase files the USER dropped in too) — documented, not fixed.
+ * `read-tree --reset -u` only touches paths that differ between the target
+ * tree and the current index, so a file created AFTER the checkpoint
+ * (agent-written, never git-added) is in neither and SURVIVES a restore.
+ * Removing such strays would need an explicit untracked-diff + delete pass
+ * with its own safety questions (it would erase files the USER dropped in
+ * too) — documented, not fixed.
+ *
+ * The fork-point offer (`session_before_fork`) restores the OLDEST checkpoint
+ * of the forked-at turn (`checkpointForTurn`): a prompt runs several turns and
+ * each is captured, and replaying the prompt needs the tree from before its
+ * first turn. Its safety-net entry lands on the OUTGOING session's branch, so
+ * the forked session's first automatic prune drops that ref; the commit
+ * object stays restorable by sha until `git gc` (default two weeks). Known
+ * limitation, shared with every concurrent-session case (see pruning below).
  *
  * ── Persistence & pruning ────────────────────────────────────────────────────
  * Each checkpoint is `pi.appendEntry("checkpoint", { sha, turnEntryId, subject })`
@@ -456,7 +475,10 @@ export async function restoreWithSafetyNet(
 	const recovery = safetySha
 		? ` Your pre-rewind state is checkpointed at ${safetySha.slice(0, 7)} — run /rewind to return to it.`
 		: "";
-	ctx.ui.notify(`Failed to restore checkpoint; the working tree may be in a partially-applied state.${recovery}`, "error");
+	ctx.ui.notify(
+		`Failed to restore checkpoint; the working tree may be in a partially-applied state.${recovery}`,
+		"error",
+	);
 	return false;
 }
 

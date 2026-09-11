@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
@@ -71,11 +71,7 @@ async function makeRepo(opts: { commit?: boolean } = {}) {
 	};
 	const write = (name: string, content: string) => writeFile(join(dir, name), content);
 	const read = (name: string) => readFile(join(dir, name), "utf8");
-	const status = async () =>
-		(await git("status", "--porcelain"))
-			.split("\n")
-			.filter(Boolean)
-			.sort();
+	const status = async () => (await git("status", "--porcelain")).split("\n").filter(Boolean).sort();
 	await git("init", "-q");
 	await git("config", "user.email", "test@bluclawd.local");
 	await git("config", "user.name", "bluclawd test");
@@ -176,8 +172,22 @@ describe("listCheckpoints", () => {
 		const entries: SessionEntry[] = [
 			userEntry("u1", "first"),
 			checkpointEntry("a".repeat(40), "u1", "first", "c1"),
-			{ type: "custom", customType: "other", id: "x", parentId: null, timestamp: "t", data: { sha: "z" } } as SessionEntry,
-			{ type: "custom", customType: "checkpoint", id: "bad", parentId: null, timestamp: "t", data: {} } as SessionEntry,
+			{
+				type: "custom",
+				customType: "other",
+				id: "x",
+				parentId: null,
+				timestamp: "t",
+				data: { sha: "z" },
+			} as SessionEntry,
+			{
+				type: "custom",
+				customType: "checkpoint",
+				id: "bad",
+				parentId: null,
+				timestamp: "t",
+				data: {},
+			} as SessionEntry,
 			{
 				type: "custom",
 				customType: "checkpoint",
@@ -373,9 +383,10 @@ describe("session_before_fork", () => {
 
 		const { handlers } = loadFactory(exec, entries);
 		const { ctx, notices } = makeCtx(dir, entries, { select: [0] }); // "Yes, restore ..."
-		await handlers
-			.get("session_before_fork")
-			?.({ type: "session_before_fork", entryId: "u1", position: "before" }, ctx);
+		await handlers.get("session_before_fork")?.(
+			{ type: "session_before_fork", entryId: "u1", position: "before" },
+			ctx,
+		);
 
 		expect(await read("a.txt")).toBe("before-prompt\n");
 		expect(appendedSubjects(entries)).toContain("(before fork)");
@@ -391,9 +402,10 @@ describe("session_before_fork", () => {
 
 		const { handlers } = loadFactory(exec, entries);
 		const { ctx } = makeCtx(dir, entries, { select: [1] }); // "No, keep current code"
-		await handlers
-			.get("session_before_fork")
-			?.({ type: "session_before_fork", entryId: "u1", position: "before" }, ctx);
+		await handlers.get("session_before_fork")?.(
+			{ type: "session_before_fork", entryId: "u1", position: "before" },
+			ctx,
+		);
 
 		expect(await read("a.txt")).toBe("v2\n");
 		expect(appendedSubjects(entries)).not.toContain("(before fork)");
