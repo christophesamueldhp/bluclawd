@@ -253,6 +253,16 @@ export async function isGitRepo(cwd: string, exec: ExtensionAPI["exec"]): Promis
 	return result?.code === 0 && result.stdout.trim() === "true";
 }
 
+/** Current HEAD commit sha, or undefined on an unborn HEAD (fresh `git init`). */
+async function headSha(cwd: string, exec: ExtensionAPI["exec"]): Promise<string | undefined> {
+	const result = await exec("git", ["rev-parse", "--verify", "--quiet", "HEAD"], {
+		cwd,
+		timeout: GIT_TIMEOUT_MS,
+	}).catch(() => undefined);
+	const sha = result?.stdout.trim();
+	return result?.code === 0 && sha ? sha : undefined;
+}
+
 /**
  * Capture a restorable snapshot of the working tree (tracked + untracked files,
  * respecting .gitignore) as a git commit object, without touching the real index
@@ -265,6 +275,19 @@ export async function captureCheckpoint(cwd: string, exec: ExtensionAPI["exec"])
 
 	const tmpIndex = join(tmpdir(), `bluclawd-checkpoint-${randomUUID()}.index`);
 	try {
+		// Seed the temp index with HEAD's entries first, so `add -A` sees tracked
+		// files even when they match .gitignore (the committed-then-ignored
+		// pattern). An empty index would drop them from the tree and a later
+		// restore would delete them. Skipped on an unborn HEAD: nothing to seed.
+		const head = await headSha(cwd, exec);
+		if (head) {
+			const seed = await exec("env", [`GIT_INDEX_FILE=${tmpIndex}`, "git", "read-tree", head], {
+				cwd,
+				timeout: GIT_TIMEOUT_MS,
+			}).catch(() => undefined);
+			if (!seed || seed.code !== 0) return undefined;
+		}
+
 		const add = await exec("env", [`GIT_INDEX_FILE=${tmpIndex}`, "git", "add", "-A"], {
 			cwd,
 			timeout: GIT_TIMEOUT_MS,
@@ -278,11 +301,7 @@ export async function captureCheckpoint(cwd: string, exec: ExtensionAPI["exec"])
 		const tree = writeTree?.stdout.trim();
 		if (!writeTree || writeTree.code !== 0 || !tree) return undefined;
 
-		const headRef = await exec("git", ["rev-parse", "HEAD"], {
-			cwd,
-			timeout: GIT_TIMEOUT_MS,
-		}).catch(() => undefined);
-		const parentArgs = headRef?.code === 0 && headRef.stdout.trim() ? ["-p", headRef.stdout.trim()] : [];
+		const parentArgs = head ? ["-p", head] : [];
 
 		const commit = await exec(
 			"env",
@@ -318,17 +337,27 @@ export async function captureCheckpoint(cwd: string, exec: ExtensionAPI["exec"])
 }
 
 /**
- * Restore the working tree AND index to a previously captured checkpoint. This
- * is the one deliberately destructive operation in this file — only call it
- * from an explicit, user-confirmed action. Returns false (never throws) if the
- * sha can't be restored (e.g. not a git repo, unknown sha).
+ * Restore the working tree to a previously captured checkpoint. This is the
+ * one deliberately destructive operation in this file — only call it from an
+ * explicit, user-confirmed action. `read-tree --reset -u` rewrites the index
+ * and working tree together; the index is then reset to HEAD so the result
+ * reads as ordinary uncommitted work (modified files unstaged, new files
+ * untracked) instead of a fully staged tree. Returns false (never throws) if
+ * the sha can't be restored (e.g. not a git repo, unknown sha).
  */
 export async function restoreCheckpoint(cwd: string, exec: ExtensionAPI["exec"], sha: string): Promise<boolean> {
 	const result = await exec("git", ["read-tree", "--reset", "-u", sha], {
 		cwd,
 		timeout: RESTORE_TIMEOUT_MS,
 	}).catch(() => undefined);
-	return result?.code === 0;
+	if (result?.code !== 0) return false;
+
+	const head = await headSha(cwd, exec);
+	const unstage = await exec("git", head ? ["reset", "-q"] : ["read-tree", "--empty"], {
+		cwd,
+		timeout: GIT_TIMEOUT_MS,
+	}).catch(() => undefined);
+	return unstage?.code === 0;
 }
 
 /**

@@ -261,3 +261,49 @@ describe("pruneCheckpointRefs", () => {
 		expect(refs).toBe(`refs/bluclawd/checkpoints/${keep}`);
 	});
 });
+
+describe("restoreCheckpoint — tracked files that match .gitignore", () => {
+	it("captures their modifications and keeps them on restore", async () => {
+		const { dir, exec, git, write, read } = await makeRepo();
+		await write("cfg.txt", "committed\n");
+		await write(".gitignore", "cfg.txt\n");
+		await git("add", "-f", "cfg.txt", ".gitignore");
+		await git("commit", "-q", "-m", "track cfg then ignore it");
+		expect((await git("ls-files")).split("\n")).toContain("cfg.txt");
+		await write("cfg.txt", "checkpointed\n");
+
+		const sha = await capture(dir, exec);
+		expect((await git("ls-tree", "--name-only", sha)).split("\n")).toContain("cfg.txt");
+
+		await write("cfg.txt", "later\n");
+		expect(await restoreCheckpoint(dir, exec, sha)).toBe(true);
+		expect(await read("cfg.txt")).toBe("checkpointed\n");
+	});
+});
+
+describe("restoreCheckpoint — index state afterwards", () => {
+	it("leaves modified files unstaged and new files untracked; later files survive", async () => {
+		const { dir, exec, write, read, status } = await makeRepo();
+		await write("a.txt", "v1\n");
+		await write("new.txt", "new\n");
+		const sha = await capture(dir, exec);
+
+		await write("a.txt", "v2\n");
+		await write("later.txt", "later\n");
+		expect(await restoreCheckpoint(dir, exec, sha)).toBe(true);
+
+		expect(await read("a.txt")).toBe("v1\n");
+		expect(await read("later.txt")).toBe("later\n");
+		expect(await status()).toEqual([" M a.txt", "?? later.txt", "?? new.txt"]);
+	});
+
+	it("works on an unborn HEAD (fresh git init, no commits)", async () => {
+		const { dir, exec, write, read, status } = await makeRepo({ commit: false });
+		await write("a.txt", "first\n");
+		const sha = await capture(dir, exec);
+		await write("a.txt", "changed\n");
+		expect(await restoreCheckpoint(dir, exec, sha)).toBe(true);
+		expect(await read("a.txt")).toBe("first\n");
+		expect(await status()).toEqual(["?? a.txt"]);
+	});
+});
