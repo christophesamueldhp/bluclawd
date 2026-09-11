@@ -188,6 +188,19 @@ export function listCheckpoints(entries: SessionEntry[]): Checkpoint[] {
 	return checkpoints.reverse();
 }
 
+/**
+ * The checkpoint to restore when forking at the user message `turnEntryId`:
+ * the OLDEST capture of that turn. A prompt runs several turns, each captured
+ * with the same turnEntryId; the first capture is the tree before the prompt
+ * changed anything, which is what replaying the prompt from scratch needs.
+ */
+export function checkpointForTurn(entries: SessionEntry[], turnEntryId: string): Checkpoint | undefined {
+	if (!turnEntryId) return undefined;
+	return listCheckpoints(entries)
+		.reverse()
+		.find((c) => c.turnEntryId === turnEntryId);
+}
+
 /** Extract plain text from a user message's content (string or content-block array). */
 function extractUserText(content: unknown): string {
 	if (typeof content === "string") return content;
