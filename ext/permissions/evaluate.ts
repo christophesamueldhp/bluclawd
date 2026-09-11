@@ -4,7 +4,7 @@
  * This module answers "what should happen to this tool call, and which gate decided?"
  * without performing any I/O: no prompts, no settings reads, no hook execution. The
  * extension's `tool_call` handler supplies the inputs, performs whatever I/O a verdict
- * calls for, and owns the counters.
+ * calls for, and owns nothing else.
  *
  * WHY: the decision used to live inline in a ~330-line handler interleaved with prompting
  * and persistence, so nothing — not the user, not `/permissions`, not a test — could answer
@@ -12,8 +12,21 @@
  * readable sequence, and every verdict names the gate that produced it.
  *
  * The evaluation is split in two: `evaluatePreHook` runs the gates nothing may override
- * (mode blocks, deny rules, protected paths), `evaluatePostHook` runs the rest (auto mode's
- * guardrail, standing grants, and the prompt).
+ * (deny rules, protected paths), `evaluatePostHook` runs the rest (ask rules, allow
+ * rules, and what the mode does with a call no rule names).
+ *
+ * ── The three modes, as Claude Code defines them ─────────────────────────────
+ * Rules decide first in every mode: `deny` blocks, `ask` prompts, `allow` allows,
+ * with precedence deny > ask > allow. Reads and read-only bash never prompt. The mode
+ * only says what happens to a call NO rule names:
+ *
+ *   ask    every edit/write and every non-read-only command prompts
+ *   edits  edit/write run; everything else prompts
+ *   auto   everything runs
+ *
+ * `auto` is therefore the bypass mode with the rules still on: a rule set that says
+ * nothing makes it approve everything, and `deny: Bash(rm -rf **)` is how a user who
+ * wants a guard in auto mode gets one.
  *
  * Purity note: `isProtectedPath`/`isReadProtectedPath` do touch the filesystem (realpath, to
  * catch symlinks into protected territory), and so does `decide()` for a deny/ask path
@@ -24,7 +37,7 @@
  * so callers and tests stay in control.
  */
 
-import { autoGuard, bashWriteTargets, dangerousCommand } from "./auto-guard.ts";
+import { bashWriteTargets } from "./bash-targets.ts";
 import type { PermissionMode } from "./modes.ts";
 import {
 	bashSegments,
@@ -41,18 +54,17 @@ import { isSafeCommand } from "./safe-command.ts";
 
 /** The gate that produced a verdict. Every verdict names exactly one. */
 export type Gate =
-	| "always-mode"
 	| "deny-rule"
 	| "read-protected-path"
 	| "write-protected-path"
-	| "auto-guardrail"
-	| "manual-guardrail"
 	| "exact-allow"
 	| "cli-allow"
 	| "readonly-bash"
-	| "sandbox-pairing"
-	| "accept-edits"
+	| "allow-rule"
 	| "ask-rule"
+	| "read-like"
+	| "accept-edits"
+	| "auto-mode"
 	| "no-matching-rule";
 
 /** What the caller must do. `prompt` means "ask the user"; `kind` says which prompt. */
@@ -64,7 +76,7 @@ export interface Verdict {
 	/** Shown to the model on a block, or in the prompt on a prompt. Empty when allowing. */
 	reason: string;
 	/** Which prompt to show, when `outcome === "prompt"`. */
-	promptKind?: "protected-read" | "protected-write" | "ask" | "auto-pause";
+	promptKind?: "protected-read" | "protected-write" | "ask";
 	/** The exact `Verb(subject)` rule "Always allow" would persist, when applicable. */
 	exact?: string | null;
 	/** The path that tripped a protected-path gate, for the prompt text. */
@@ -79,7 +91,6 @@ export interface EvalConfig {
 	cwd: string;
 	agentDir: string;
 	configDirName: string;
-	sandboxActive: boolean;
 	hasUI: boolean;
 }
 
@@ -136,13 +147,6 @@ export function decideRules(
 const ALLOW = (gate: Gate): Verdict => ({ outcome: "allow", gate, reason: "" });
 
 /**
- * `autoGuard` returns a bare noun phrase; auto mode is the one caller that refuses
- * outright, so it is the one that says so and names the way out.
- */
-const autoModeReason = (reason: string): string =>
-	`auto mode blocked: ${reason}. Exit auto mode (Shift+Tab) to run it.`;
-
-/**
  * Why this configuration cannot prompt — as the clause that goes into the block reason —
  * or `undefined` when it can. Headless cannot prompt: there is no UI.
  */
@@ -151,23 +155,42 @@ function noPromptReason(cfg: EvalConfig): string | undefined {
 	return undefined;
 }
 
+/** The ask prompt, or the block it becomes when nothing can show a prompt. */
+function askOrBlock(gate: Gate, exact: string | null, cfg: EvalConfig): Verdict {
+	const noPrompt = noPromptReason(cfg);
+	if (noPrompt) {
+		return {
+			outcome: "block",
+			gate,
+			reason: `Permission approval required, but ${noPrompt}. Blocked by default.`,
+		};
+	}
+	return {
+		outcome: "prompt",
+		gate,
+		promptKind: "ask",
+		reason: `Permission required — ${exact}`,
+		exact,
+	};
+}
+
 /**
  * The tool name every gate below decides on.
  *
  * `monitor` is bash with a different delivery — same `command` field, same shell — but
- * every rule verb, the guardrail and the protected-path screen key on the literal name
- * "bash", so an un-normalised `monitor` walked past all of them: a `deny: Bash(**)` did
- * not match it, `rm -rf` never reached the denylist, and a write to `.bluclawd/mcp.json`
- * was not screened. Normalising here — the one point both the session's `tool_call`
- * handler and the subagent gate go through — makes one name enough for every gate,
- * instead of a per-gate list that the next shell-carrying tool would have to be added to.
+ * every rule verb and the protected-path screen key on the literal name "bash", so an
+ * un-normalised `monitor` walked past all of them: a `deny: Bash(**)` did not match it,
+ * and a write to `.bluclawd/mcp.json` was not screened. Normalising here — the one point
+ * both the session's `tool_call` handler and the subagent gate go through — makes one
+ * name enough for every gate, instead of a per-gate list that the next shell-carrying
+ * tool would have to be added to.
  */
 function governedTool(tool: string): string {
 	return tool === "monitor" ? "bash" : tool;
 }
 
 /**
- * Gates 1–4: mode-level blocks, deny rules, and protected paths.
+ * Gates 1–3: deny rules and protected paths. No mode can override these.
  *
  * Returns `undefined` when nothing here decides and evaluation should continue in
  * {@link evaluatePostHook}.
@@ -175,10 +198,7 @@ function governedTool(tool: string): string {
 export function evaluatePreHook(rawTool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict | undefined {
 	const tool = governedTool(rawTool);
 
-	// 1. bypass → allow everything, rules are not consulted.
-	if (cfg.mode === "always") return ALLOW("always-mode");
-
-	// 2. deny rules. (ask/allow are resolved in evaluatePostHook.)
+	// 1. deny rules. (ask/allow are resolved in evaluatePostHook.)
 	const { decision, denyAgent } = decideRules(tool, input, cfg.rules, cfg.cwd);
 	if (decision === "deny") {
 		const subj = tool === "task" && denyAgent !== undefined ? denyAgent : subject(tool, input);
@@ -189,7 +209,7 @@ export function evaluatePreHook(rawTool: string, input: Record<string, unknown>,
 		};
 	}
 
-	// 3. Protected paths, reads. Narrow by design: only files whose CONTENTS are
+	// 2. Protected paths, reads. Narrow by design: only files whose CONTENTS are
 	//    credentials or executable config. Gating every read under .git/.bluclawd would
 	//    prompt for HEAD and installed package sources, and a constantly-firing gate
 	//    trains people to approve blindly.
@@ -219,7 +239,7 @@ export function evaluatePreHook(rawTool: string, input: Record<string, unknown>,
 		}
 	}
 
-	// 4. Protected paths, writes. bash counts: `echo {} > .bluclawd/mcp.json` installs a
+	// 3. Protected paths, writes. bash counts: `echo {} > .bluclawd/mcp.json` installs a
 	//    shell-executing config file exactly as `write` does (mcp.json auth headers can run
 	//    shell commands via resolve-config-value.ts), so its redirect targets are screened
 	//    with the same predicate. Descriptor dups (`2>&1`) carry no path and are skipped —
@@ -260,37 +280,19 @@ export function evaluatePreHook(rawTool: string, input: Record<string, unknown>,
 }
 
 /**
- * Gates 6–8: auto mode's guardrail, the standing grants that clear an `ask`, and finally
- * the prompt.
- *
- * `autoBlocked` reports whether auto mode's guardrail refused, so the caller can advance its
- * counters; the caller decides whether that becomes a prompt (threshold reached) or a plain
- * block. This function reports `outcome: "block"` with `promptKind: "auto-pause"` to mean
- * "blocked, and eligible to become a pause-and-ask if your thresholds say so".
+ * Gates 4–6: ask rules, allow rules, and what the mode does with an unmatched call.
  */
 export function evaluatePostHook(rawTool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict {
 	const tool = governedTool(rawTool);
 	const { decision, askAgent } = decideRules(tool, input, cfg.rules, cfg.cwd);
-	const subj = tool === "task" ? (askAgent ?? "") : subject(tool, input);
+	// For `task` the subject is the agent the prompt is about: the one an ask rule named,
+	// or (no rule at all) the first target — `Task()` would label the prompt with nothing
+	// and persist an "Always allow" that matches nothing.
+	const subj = tool === "task" ? (askAgent ?? taskAgents(input)[0] ?? "") : subject(tool, input);
 	const exact = exactRule(tool, subj);
 
-	// 6. auto mode: no prompts, but every non-trivial call is screened.
-	if (cfg.mode === "auto") {
-		if (hasExactAllow(cfg.rules, exact)) return ALLOW("exact-allow");
-		if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
-		if (READ_LIKE_TOOLS.has(tool)) return ALLOW("auto-guardrail");
-		const verdict = autoGuard(tool, input, cfg.cwd);
-		if (verdict === "allow") return ALLOW("auto-guardrail");
-		return {
-			outcome: "block",
-			gate: "auto-guardrail",
-			promptKind: "auto-pause",
-			reason: autoModeReason(verdict.reason),
-			exact,
-		};
-	}
-
-	// 7. Standing grants that clear an `ask`.
+	// 4. An ask rule matched. It prompts in EVERY mode — auto included, exactly as Claude
+	//    Code's auto mode honours explicit ask rules — unless a standing grant clears it.
 	if (decision === "ask") {
 		// An exact full-subject allow is what "Always allow" persists. Because
 		// precedence is deny > ask > allow, it would otherwise be shadowed forever by
@@ -307,128 +309,20 @@ export function evaluatePostHook(rawTool: string, input: Record<string, unknown>
 		if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
 		// Read-only bash is auto-approved in every mode (Claude Code's built-in list).
 		if (tool === "bash" && isSafeCommand(subject("bash", input))) return ALLOW("readonly-bash");
-		// With the OS sandbox active, a bash command clears the ask gate only if it
-		// ALSO passes the guardrail: ordinary mutating commands run unprompted under
-		// the OS cap, while what the sandbox does not actually mitigate still prompts.
-		//
-		// Proof this premise holds AT EXECUTION TIME, not just at grant time
-		// (IMPROVEMENT-PLAN.md §2.7, investigated 2026-08-14 — no gap found):
-		// `cfg.sandboxActive` is `isSandboxActive()` read fresh in the same `tool_call`
-		// handler that is about to dispatch the tool (`permissions/index.ts:310`), with
-		// no `await` between that read and dispatch. The bash tool does not trust a
-		// value threaded through from here — it independently re-reads
-		// `isSandboxActive()` at execute() time (`sandbox/index.ts:73`) to choose
-		// sandboxed vs. plain operations, so a stale grant cannot silently execute
-		// unsandboxed. A per-command wrap failure (`SandboxManager.wrapWithSandbox`)
-		// is not caught and retried unsandboxed either — `sandbox/index.ts`'s `exec()`
-		// has no catch around it, so the failure propagates as a tool error instead of
-		// a silent unsandboxed run (covered by
-		// `core-ext-sandbox.test.ts`: "a post-init wrap failure errors out rather than
-		// silently running unsandboxed"). The only residual gap is the TOCTOU inherent
-		// to any live security toggle — the user typing `/sandbox off` in the exact
-		// microtask between this grant and the tool's execute() call — which requires
-		// deliberate concurrent user action and degrades at most one already-approved
-		// in-flight command; the model cannot trigger it. Subagent children never reach
-		// this branch: `subagent-gate.ts:88` hardcodes `sandboxActive: false` for them.
-		if (tool === "bash" && cfg.sandboxActive && autoGuard("bash", input, cfg.cwd) === "allow") {
-			return ALLOW("sandbox-pairing");
-		}
-		if (cfg.mode === "edits" && (tool === "edit" || tool === "write")) return ALLOW("accept-edits");
-
-		const noPrompt = noPromptReason(cfg);
-		if (noPrompt) {
-			return {
-				outcome: "block",
-				gate: "ask-rule",
-				reason: `Permission approval required, but ${noPrompt}. Blocked by default.`,
-			};
-		}
-		return {
-			outcome: "prompt",
-			gate: "ask-rule",
-			promptKind: "ask",
-			reason: `Permission required — ${exact}`,
-			exact,
-		};
+		return askOrBlock("ask-rule", exact, cfg);
 	}
 
-	// 8. An allow rule matched. An EXACT allow — the user spelled out this precise subject —
-	//    is never second-guessed: a user who writes `allow: Bash(rm -rf build)` means it. A
-	//    BROADER match (e.g. `allow: Bash(**)`) did not name this specific command, so it
-	//    goes through the same guardrail every other allow path does — "a broad allow glob
-	//    deliberately does not skip it" was FALSE for this path until this fix; resolved per
-	//    IMPROVEMENT-PLAN.md §2.1 (user decision, 2026-08-14: close the skip, not the
-	//    comment). Only the command denylist is applied
-	//    here, not autoGuard's containment half — same scope gate 9's tail below uses for
-	//    manual modes, and for the same reason (see gate 9's comment).
-	if (decision === "allow") {
-		if (hasExactAllow(cfg.rules, exact)) return ALLOW("exact-allow");
-		const guard = tool === "bash" ? dangerousCommand(String(input.command ?? "")) : "allow";
-		if (guard === "allow") return ALLOW("exact-allow");
+	// 5. An allow rule matched. The user wrote it; it is not second-guessed.
+	if (decision === "allow") return ALLOW("allow-rule");
 
-		const noPrompt = noPromptReason(cfg);
-		if (noPrompt) {
-			return {
-				outcome: "block",
-				gate: "manual-guardrail",
-				reason: `Guardrail: ${guard.reason}. Approval required, but ${noPrompt}. Blocked.`,
-			};
-		}
-		return {
-			outcome: "prompt",
-			gate: "manual-guardrail",
-			promptKind: "ask",
-			reason: `Guardrail — ${guard.reason}. Allow ${exact}?`,
-			exact,
-		};
-	}
-
-	// 9. No rule matched, so nothing has decided. `ask` means "the rules decide" —
-	//    and a fresh install has no `permissions` key at all, so `rm -rf build` used to
-	//    run unprompted in the mode whose name promises the most caution, while `auto`
-	//    refused it. The mode that sounds more autonomous was the safer one
-	//    (REVIEW-2026-07 §3.1b).
-	//
-	//    The same deterministic screen `auto` uses runs here, but its refusal becomes a
-	//    PROMPT rather than a block: these modes are manual, so the user decides — and
-	//    "Always allow" turns the answer into the rule that was missing.
-	//
-	//    Reached by `ask` and `edits`, so a single Shift+Tab cannot disarm it.
-	//    `always` returned at gate 1 and `auto` at 6.
-	//
-	//    Only the COMMAND denylist, deliberately — not `autoGuard`'s containment half.
-	//    Screening writes and redirects for "inside the working directory" is part of auto
-	//    mode's bargain (it never prompts, so it screens hard); importing it here would
-	//    make every `> /tmp/log.txt` and every write to an absolute path a prompt, and
-	//    since "Always allow" persists the literal path, each new file would ask again.
-	//    Protected paths — `.git`, `.bluclawd`, credentials — are already gated above, in
-	//    both directions, for edit/write AND bash redirect targets. Ordinary work stays
-	//    silent; a gate that fires constantly only teaches people to approve without
-	//    looking.
-	//
-	//    Read-only bash clears it, exactly as it clears the ask gate above — Claude Code
-	//    auto-approves that list in every mode. Without this, the denylist's word matching
-	//    turns `grep -r eval .` and `git log --grep=eval` into prompts, which is the
-	//    approve-without-looking training the gate is supposed to avoid. No new exposure:
-	//    `isSafeCommand` already stands as a grant at gate 7.
-	const command = String(input.command ?? "");
-	if (tool === "bash" && isSafeCommand(command)) return ALLOW("readonly-bash");
-	const guard = tool === "bash" ? dangerousCommand(command) : "allow";
-	if (guard === "allow") return ALLOW("no-matching-rule");
-
-	const noPrompt = noPromptReason(cfg);
-	if (noPrompt) {
-		return {
-			outcome: "block",
-			gate: "manual-guardrail",
-			reason: `Guardrail: ${guard.reason}. Approval required, but ${noPrompt}. Blocked.`,
-		};
-	}
-	return {
-		outcome: "prompt",
-		gate: "manual-guardrail",
-		promptKind: "ask",
-		reason: `Guardrail — ${guard.reason}. Allow ${exact}?`,
-		exact,
-	};
+	// 6. No rule matched, so the mode decides. Reads never prompt in any mode; neither
+	//    does read-only bash (Claude Code auto-approves that list everywhere) — without
+	//    this, `ask` would prompt for `git status`, which is the approve-without-looking
+	//    training the gate must avoid.
+	if (READ_LIKE_TOOLS.has(tool)) return ALLOW("read-like");
+	if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
+	if (tool === "bash" && isSafeCommand(String(input.command ?? ""))) return ALLOW("readonly-bash");
+	if (cfg.mode === "auto") return ALLOW("auto-mode");
+	if (cfg.mode === "edits" && (tool === "edit" || tool === "write")) return ALLOW("accept-edits");
+	return askOrBlock("no-matching-rule", exact, cfg);
 }

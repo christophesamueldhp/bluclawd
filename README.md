@@ -52,7 +52,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 
 | Command | What it does |
 |---|---|
-| `/mode`, `/permissions` | permission modes and allow/ask/deny rules. `/mode` picks from a list; Alt+M cycles `ask → edits → auto`. `always` must be named |
+| `/mode`, `/permissions` | permission modes and allow/ask/deny rules. `/mode` picks from a list; Alt+M cycles `ask → edits → auto` |
 | `/sandbox` | OS-level sandbox for bash (`@anthropic-ai/sandbox-runtime`). `sandbox.strict` refuses to run bash at all when the sandbox was enabled but failed to start, instead of falling back to unsandboxed |
 | `/tasks` | background bash jobs (`run_in_background`, `bash_output`, `kill_bash`) and monitors. A job notifies the model once when it exits; the `monitor` tool turns each output line of a long-running command into an event that wakes the model (Claude Code's `Monitor`, minus the WebSocket source; stdout and stderr are both events because pi's shell backend merges them) |
 | `/agents` | subagents via the `task` tool; `/agents new\|edit <name>` writes user defs (editing a bundled one starts from its text) |
@@ -70,9 +70,11 @@ slider, git owner/branch/changes, plan-usage sliders, token stats). Plan usage
 is provider-neutral: one line per source that has data (Claude subscription via
 an Anthropic OAuth login, OpenCode Go via `OPENCODE_GO_WORKSPACE_ID` +
 `OPENCODE_GO_AUTH_COOKIE`), compacted before truncation on narrow terminals.
-The `(sub)` cost marker follows pi's OAuth-subscription rule plus
-`kimi-coding` and `opencode-go`; add other subscription-billed provider ids
-with `statusline.subscriptionProviders` in settings.json. `statusline.command`
+The cost figure always names its billing: `(subscription)` when the amount is
+what the tokens would have cost at API rates, `(per token)` when it is what the
+session actually costs. The subscription side follows pi's OAuth-subscription
+rule plus `kimi-coding` and `opencode-go`; add other subscription-billed
+provider ids with `statusline.subscriptionProviders` in settings.json. `statusline.command`
 runs an external script whose first stdout line joins the status line.
 
 ## Updating
@@ -124,19 +126,23 @@ reading the API:
 
 ## Permission modes
 
-Named after pi's own `defaultProjectTrust` vocabulary (`ask` / `always`)
-rather than Claude Code's, because they answer the same question about a tool
-call that project trust answers about a project:
+Claude Code's three modes. Rules decide first in every one of them: `deny`
+blocks, `ask` prompts, `allow` allows, with precedence deny > ask > allow.
+Reads and read-only bash never prompt. The mode only says what happens to a
+call no rule names:
 
-| Mode | What it does |
+| Mode | A call no rule names |
 |---|---|
-| `ask` | ask before anything that is not already allowed |
-| `edits` | approve file edits automatically, ask for the rest |
-| `auto` | never prompt, but screen every dangerous command |
-| `always` | approve everything, no guards at all |
+| `ask` | every edit/write and every non-read-only command prompts |
+| `edits` | edit/write run; everything else prompts |
+| `auto` | everything runs |
 
-Claude Code's names (`default`, `acceptEdits`, `bypass`) are still
-accepted anywhere a mode is named, so stored settings and scripts keep working.
+`auto` is the bypass mode with the rules still on: an empty rule set makes it
+approve everything, and `deny: ["Bash(rm -rf **)"]` is how you put a guard
+back. Claude Code's names (`default`, `acceptEdits`, `bypass`) and the older
+`always` are still accepted anywhere a mode is named — the bypass spellings
+resolve to `auto` — so stored settings and scripts keep working. Subagent
+children are evaluated as `auto` with the parent's deny rules only.
 
 **Project trust pins the mode.** In a project pi has not been told to trust,
 every mode above `ask` is refused — from settings, CLI flags, `/mode` and

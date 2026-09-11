@@ -11,7 +11,9 @@
  * deliberately NOT propagated: a child has no UI to answer a prompt, so an
  * inherited ask would hard-block every governed tool and break subagents
  * entirely. deny is the safety-critical layer; allow/ask stay parent-side. The
- * parent's mode is not inherited either: a child is always evaluated as `ask`.
+ * parent's mode is not inherited either: a child is always evaluated as `auto`,
+ * the one mode under which a call no rule names can run without a prompt —
+ * a child has nobody to answer one.
  *
  * Enforcement runs through the SAME evaluator the parent uses (evaluate.ts), in
  * headless mode. It used to hand-roll its own copy, which had drifted: the parent
@@ -66,13 +68,12 @@ export function factory(pi: ExtensionAPI): void {
 		// the evaluator gates it anyway (defense in depth against a custom tool set
 		// reintroducing it).
 		const cfg: EvalConfig = {
-			mode: "ask",
+			mode: "auto",
 			rules: rulesFor(ctx),
 			cliAllowRules: {},
 			cwd: ctx.cwd,
 			agentDir: getAgentDir(),
 			configDirName: CONFIG_DIR_NAME,
-			sandboxActive: false,
 			hasUI: false,
 		};
 
@@ -82,13 +83,9 @@ export function factory(pi: ExtensionAPI): void {
 		// allow must never fall through to "permitted" in a gate whose job is to refuse.
 		if (pre) return pre.outcome === "allow" ? undefined : { block: true, reason: pre.reason };
 
-		// The second half contributes exactly one thing — the deterministic guardrail,
-		// whose refusal the parent turns into a prompt and a child, having nobody to ask,
-		// turns into a block. Without it `task` would launder every guardrail-refused
-		// command: the parent asks before `rm -rf`, the child just runs it.
-		//
-		// Running BOTH halves unconditionally is what surfaced that for free, and is what
-		// keeps this gate from drifting from the parent again the next time a gate is added.
+		// Both halves run unconditionally, so the next gate added to the evaluator applies
+		// here too instead of leaving this copy to drift from the parent again. With deny
+		// rules only and auto mode, the second half allows everything today.
 		const post = evaluatePostHook(event.toolName, input, cfg);
 		if (post.outcome !== "allow") return { block: true, reason: post.reason };
 		return;

@@ -40,7 +40,7 @@ const RULE_SETS: Record<string, Rules> = {
 	"allow-all-bash": { allow: ["Bash(**)"] },
 };
 
-const MODES: readonly PermissionMode[] = ["ask", "edits", "auto", "always"];
+const MODES: readonly PermissionMode[] = ["ask", "edits", "auto"];
 
 function toolCases(
 	cwd: string,
@@ -87,26 +87,23 @@ describe("permissions decision characterization (pin current behaviour)", () => 
 	it("matches the recorded decision table", () => {
 		const lines: string[] = [];
 
-		for (const sandboxActive of [false, true]) {
-			for (const hasUI of [true, false]) {
-				for (const [rulesName, rules] of Object.entries(RULE_SETS)) {
-					for (const mode of MODES) {
-						for (const { name, tool, input } of toolCases(cwd, agentDir)) {
-							const cfg = {
-								mode,
-								rules,
-								cliAllowRules: {},
-								cwd,
-								agentDir,
-								configDirName: ".bluclawd",
-								sandboxActive,
-								hasUI,
-							};
-							const pre = evaluatePreHook(tool, input, cfg);
-							const verdict = pre ?? evaluatePostHook(tool, input, cfg);
-							const key = `sandbox=${sandboxActive} ui=${hasUI} rules=${rulesName} mode=${mode} case=${name}`;
-							lines.push(encode(key, cwd, agentDir, verdict));
-						}
+		for (const hasUI of [true, false]) {
+			for (const [rulesName, rules] of Object.entries(RULE_SETS)) {
+				for (const mode of MODES) {
+					for (const { name, tool, input } of toolCases(cwd, agentDir)) {
+						const cfg = {
+							mode,
+							rules,
+							cliAllowRules: {},
+							cwd,
+							agentDir,
+							configDirName: ".bluclawd",
+							hasUI,
+						};
+						const pre = evaluatePreHook(tool, input, cfg);
+						const verdict = pre ?? evaluatePostHook(tool, input, cfg);
+						const key = `ui=${hasUI} rules=${rulesName} mode=${mode} case=${name}`;
+						lines.push(encode(key, cwd, agentDir, verdict));
 					}
 				}
 			}
@@ -158,7 +155,6 @@ describe("permissions decision characterization (pin current behaviour)", () => 
 				cwd,
 				agentDir,
 				configDirName: ".bluclawd",
-				sandboxActive: false,
 				hasUI: true,
 			};
 			const verdictFor = (tool: string) => evaluatePreHook(tool, input, cfg) ?? evaluatePostHook(tool, input, cfg);
@@ -167,5 +163,37 @@ describe("permissions decision characterization (pin current behaviour)", () => 
 		}
 
 		expect(asMonitor).toEqual(asBash);
+	});
+});
+
+/**
+ * The subagent gate's posture (subagent-gate.ts): `auto`, the parent's deny rules only,
+ * no UI. Under the strict `ask` a child would have been blocked on every unmatched edit
+ * and every non-read-only command — there is nobody to answer a prompt — which is why
+ * children are evaluated as `auto`. Deny stays the safety-critical layer.
+ */
+describe("subagent gate posture: auto + deny rules only, headless", () => {
+	const cfg = (cwd: string, agentDir: string) => ({
+		mode: "auto" as const,
+		rules: { deny: ["Bash(rm **)"] },
+		cliAllowRules: {},
+		cwd,
+		agentDir,
+		configDirName: ".bluclawd",
+		hasUI: false,
+	});
+	const verdictFor = (tool: string, input: Record<string, unknown>, cwd: string, agentDir: string) =>
+		evaluatePreHook(tool, input, cfg(cwd, agentDir)) ?? evaluatePostHook(tool, input, cfg(cwd, agentDir));
+
+	it("blocks what the parent denies", () => {
+		const v = verdictFor("bash", { command: "rm x" }, "/p", "/a");
+		expect(v.outcome).toBe("block");
+		expect(v.gate).toBe("deny-rule");
+	});
+
+	it("runs unmatched work without a prompt it could never answer", () => {
+		expect(verdictFor("bash", { command: "npm test" }, "/p", "/a").outcome).toBe("allow");
+		expect(verdictFor("edit", { path: "/p/src/x.ts" }, "/p", "/a").outcome).toBe("allow");
+		expect(verdictFor("mcp__srv__do", {}, "/p", "/a").outcome).toBe("allow");
 	});
 });

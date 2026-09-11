@@ -3,7 +3,7 @@
  *
  * Governs every `tool_call` against a `Verb(glob)` rule set (rules.ts) with a
  * deny > ask > allow precedence, layered under a session permission mode
- * (modes.ts): always / edits / ask / auto / never.
+ * (modes.ts): ask / edits / auto.
  *
  * Registration order matters: this extension is registered FIRST in
  * coreExtensions() so it sees `tool_call` before any other extension.
@@ -31,7 +31,6 @@ import { CONFIG_DIR_NAME, getAgentDir, SettingsManager } from "@earendil-works/p
 import { Container, Key, Spacer, Text } from "@earendil-works/pi-tui";
 import * as forkSettings from "../_shared/settings.ts";
 import { addGlobalRule, addProjectRule, removeGlobalRule, removeProjectRule } from "../_shared/settings-write.ts";
-import { isSandboxActive } from "../sandbox/state.ts";
 import { setActivePermissionMode } from "./active-mode.ts";
 import { type EvalConfig, evaluatePostHook, evaluatePreHook } from "./evaluate.ts";
 import {
@@ -67,8 +66,7 @@ const CC_AUTO_ACCEPT = "\x1b[38;2;175;135;255m";
 
 /**
  * Footer chip for a mode, in Claude Code's own badge colours (extracted from the
- * 2.1.259 binary's dark theme): edits=#af87ff, auto=amber, always and never=red,
- * ask=gray. The wording follows this layer's own mode names, not CC's labels.
+ * 2.1.259 binary's dark theme): edits=#af87ff, auto=amber, ask=gray. The wording follows this layer's own mode names, not CC's labels.
  *
  * Two things this gets right that the previous version did not:
  *
@@ -78,22 +76,20 @@ const CC_AUTO_ACCEPT = "\x1b[38;2;175;135;255m";
  *   instead, which the ccstatusline footer next to it already does for its own
  *   widgets. A 256-colour terminal would not downconvert the escape, so that
  *   case keeps the theme token.
- * - `ask` carries NO symbol. `⏸` is Claude Code's *plan mode* badge, and
- *   plan mode is not part of this layer, so the symbol pointed at nothing.
+ * - `ask` carries `⏸`: it is the manual mode, and `⏸` is the badge the manual
+ *   (non-auto-accept) modes share.
  */
 function modeStatusText(ctx: ExtensionContext, mode: PermissionMode): string | undefined {
 	const theme = ctx.ui.theme;
 	switch (mode) {
 		case "ask":
-			return theme.fg("muted", "ask mode on");
+			return theme.fg("muted", "⏸ ask mode on");
 		case "edits":
 			return theme.getColorMode() === "truecolor"
 				? `${CC_AUTO_ACCEPT}⏵⏵ edits mode on\x1b[0m`
 				: theme.fg("success", "⏵⏵ edits mode on");
 		case "auto":
 			return theme.fg("warning", "⏵⏵ auto mode on");
-		case "always":
-			return theme.fg("error", "⏵⏵ always mode on");
 		default:
 			return undefined;
 	}
@@ -106,7 +102,7 @@ export function factory(pi: ExtensionAPI): void {
 		type: "string",
 	});
 	pi.registerFlag("dangerously-skip-permissions", {
-		description: "Start sessions in bypass mode (alias for --permission-mode bypass)",
+		description: "Start sessions in auto mode (alias for --permission-mode auto)",
 		type: "boolean",
 		default: false,
 	});
@@ -133,13 +129,6 @@ export function factory(pi: ExtensionAPI): void {
 	// Latest live context, captured in handlers so the event-driven footer refresh
 	// has a ctx. Optional-chained + try/guarded so a stale instance is a safe no-op.
 	let liveCtx: ExtensionContext | undefined;
-
-	// Auto-mode fallback state (reset on session_start). Mirrors CC: any allowed action
-	// resets `consecutive`; `total` persists for the session. Thresholds are configurable.
-	let consecutiveBlocks = 0;
-	let totalBlocks = 0;
-	let autoMaxConsecutive = 3;
-	let autoMaxTotal = 20;
 
 	const currentMode = (): PermissionMode => modeStore?.get() ?? "ask";
 
@@ -232,23 +221,6 @@ export function factory(pi: ExtensionAPI): void {
 		return out;
 	}
 
-	/** Load auto-mode fallback thresholds from settings (defaults 3 / 20; positive ints only). */
-	function loadAutoModeConfig(ctx: ExtensionContext): void {
-		let cfg: { maxConsecutiveBlocks?: number; maxTotalBlocks?: number } | undefined;
-		try {
-			const sm = SettingsManager.create(ctx.cwd, undefined, {
-				projectTrusted: ctx.isProjectTrusted(),
-			});
-			cfg = forkSettings.permissions(sm)?.autoMode;
-		} catch {
-			cfg = undefined;
-		}
-		const posInt = (v: unknown, fallback: number): number =>
-			typeof v === "number" && Number.isInteger(v) && v >= 1 ? v : fallback;
-		autoMaxConsecutive = posInt(cfg?.maxConsecutiveBlocks, 3);
-		autoMaxTotal = posInt(cfg?.maxTotalBlocks, 20);
-	}
-
 	pi.on("session_start", async (_event, ctx) => {
 		liveCtx = ctx;
 		// Dispose any prior store first so resume/new/fork re-runs stay idempotent.
@@ -259,13 +231,10 @@ export function factory(pi: ExtensionAPI): void {
 		modeStore = createModeStore(onModeChanged, () => ctx.isProjectTrusted());
 		// Starting mode from settings (Claude Code parity with permissions.defaultMode).
 		// GLOBAL settings only — a trusted project may contribute allow rules, but
-		// letting it name the mode would let any repo ship `defaultMode: "always"`
+		// letting it name the mode would let any repo ship `defaultMode: "auto"`
 		// and switch the whole safety layer off. CLI flags below still override this.
 		applySettingsDefaultMode(ctx);
 		rules = loadRules(ctx);
-		loadAutoModeConfig(ctx);
-		consecutiveBlocks = 0;
-		totalBlocks = 0;
 		// PI_PERMISSION_MODE=ask (set by the FleetView orchestrator for spawned background
 		// sessions) makes the agent ask before every governed tool, so it surfaces a blocking
 		// prompt an attach viewer can answer. Rules-based so it never touches the mode union.
@@ -277,7 +246,7 @@ export function factory(pi: ExtensionAPI): void {
 			rules = { ...rules, ask: [...(rules.ask ?? []), ...askAll] };
 		}
 		// CC headless interop (audit B.6): --disallowedTools merges into the deny
-		// list (deny > ask > allow, so it wins everywhere except bypass mode);
+		// list (deny > ask > allow, so it wins in every mode);
 		// --allowedTools populates the separate cliAllowRules grant set.
 		const denyFlag = pi.getFlag("disallowedTools");
 		if (typeof denyFlag === "string" && denyFlag) {
@@ -291,7 +260,7 @@ export function factory(pi: ExtensionAPI): void {
 		// Initial mode from the CLI: --dangerously-skip-permissions (CC alias) wins
 		// over --permission-mode. Sets the *initial* mode only — Alt+M and /mode
 		// still switch freely afterwards.
-		const modeFlag = pi.getFlag("dangerously-skip-permissions") === true ? "always" : pi.getFlag("permission-mode");
+		const modeFlag = pi.getFlag("dangerously-skip-permissions") === true ? "auto" : pi.getFlag("permission-mode");
 		if (typeof modeFlag === "string" && modeFlag) {
 			const parsedFlag = parseMode(modeFlag);
 			if (parsedFlag) {
@@ -382,7 +351,7 @@ export function factory(pi: ExtensionAPI): void {
 	/**
 	 * The gate. Decision logic lives in evaluate.ts as a pure function of the inputs
 	 * gathered here; this handler owns only the I/O a verdict calls for — prompting,
-	 * persisting an "Always allow", and advancing the auto-mode counters.
+	 * persisting an "Always allow".
 	 */
 	pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
 		liveCtx = ctx;
@@ -395,11 +364,10 @@ export function factory(pi: ExtensionAPI): void {
 			cwd: ctx.cwd,
 			agentDir: getAgentDir(),
 			configDirName: CONFIG_DIR_NAME,
-			sandboxActive: isSandboxActive(),
 			hasUI: ctx.hasUI,
 		};
 
-		// Gates 1-4: mode blocks, deny rules, protected paths.
+		// Gates 1-3: deny rules, protected paths.
 		const pre = evaluatePreHook(tool, input, cfg);
 		if (pre?.outcome === "allow") return;
 		if (pre?.outcome === "block") return { block: true, reason: pre.reason };
@@ -424,29 +392,8 @@ export function factory(pi: ExtensionAPI): void {
 			if (pre.gate === "write-protected-path") return;
 		}
 
-		// Gates 6-9: auto mode's guardrail, the standing grants that clear an ask, and the
-		// prompt.
+		// Gates 4-6: ask rules, allow rules, and what the mode does with the rest.
 		const post = evaluatePostHook(tool, input, cfg);
-
-		// Auto mode owns counters, so its outcomes are handled before the generic ones.
-		if (post.gate === "auto-guardrail" || (cfg.mode === "auto" && post.outcome === "allow")) {
-			if (post.outcome === "allow") {
-				// NOTE: an exact "Always allow" grant deliberately does NOT reset the
-				// consecutive counter — preserved from the pre-refactor implementation.
-				if (post.gate !== "exact-allow") consecutiveBlocks = 0;
-				return;
-			}
-			consecutiveBlocks += 1;
-			totalBlocks += 1;
-			const shouldPrompt = consecutiveBlocks >= autoMaxConsecutive || totalBlocks >= autoMaxTotal;
-			if (!shouldPrompt || !ctx.hasUI) return { block: true, reason: post.reason };
-			// Threshold hit: pause auto mode and ask, so the user can approve and resume.
-			const outcome = await askWithScope(`Auto mode paused — ${post.reason}`, post.exact ?? null, ctx);
-			if (outcome === "failed" || outcome === "deny") return { block: true, reason: post.reason };
-			consecutiveBlocks = 0;
-			return;
-		}
-
 		if (post.outcome === "allow") return;
 		if (post.outcome === "block") return { block: true, reason: post.reason };
 
@@ -491,7 +438,7 @@ export function factory(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("mode", {
-		description: `Choose a permission mode (${PERMISSION_MODES.join(" / ")}); Alt+M cycles the first three`,
+		description: `Choose a permission mode (); Alt+M cycles them`,
 		handler: async (args, ctx) => {
 			const requested = args.trim();
 			if (requested) {
@@ -504,9 +451,8 @@ export function factory(pi: ExtensionAPI): void {
 				return;
 			}
 			// A bare `/mode` opens a picker, the way pi's own `/model`, `/theme` and
-			// `/thinking` do — cycling blind through five modes (two of which are not even
-			// in the cycle) never showed what the other options were, or what they mean.
-			// Alt+M is still the fast path for the three-mode cycle.
+			// `/thinking` do — cycling blind never showed what the other options were, or
+			// what they mean. Alt+M is still the fast path.
 			if (!ctx.hasUI) {
 				await cycleAndReport(ctx);
 				return;

@@ -5,41 +5,28 @@
  * trust imposes on it (see {@link createModeStore}).
  *
  * ── Vocabulary ────────────────────────────────────────────────────────────────
- * The names are pi's, not Claude Code's. pi has no permission modes of its own,
- * but it does have a vocabulary for the same question — "may this go ahead?" —
- * in `defaultProjectTrust`: `ask` / `always` / `never`. Two of the four modes
- * are exactly that question applied to tool calls instead of project resources,
- * so they take those names; `edits` and `auto` name the scope they narrow to.
+ * Three modes, Claude Code's own set (its `default`, `acceptEdits` and `auto`),
+ * under this layer's names. `ask` borrows the word from pi's `defaultProjectTrust`
+ * vocabulary; `edits` and `auto` name what they stop asking about.
  *
- * The Claude Code names this layer shipped with (`default`, `acceptEdits`,
- * `bypass`) are still accepted everywhere a mode can be named — see
+ * `auto` IS the bypass mode: it approves everything the rules do not veto. There
+ * is no separate "no guards at all" mode any more — a rule set that says nothing
+ * makes `auto` behave exactly like one. The names that used to reach it
+ * (`always`, `bypass`, `--dangerously-skip-permissions`) resolve to `auto` — see
  * {@link parseMode} — so a stored `permissions.defaultMode`, a script passing
  * `--permission-mode acceptEdits`, or muscle memory at the `/mode` prompt all
  * keep working.
  */
 
-export type PermissionMode = "ask" | "edits" | "auto" | "always";
+export type PermissionMode = "ask" | "edits" | "auto";
 
 /**
  * Every valid mode name — the vocabulary accepted by `--permission-mode`,
  * `permissions.defaultMode` and `/mode <name>`.
- *
- * Deliberately WIDER than MODE_CYCLE: `always` is nameable but not reachable by
- * keyboard. Do not collapse the two back into one list — that is what put
- * bypass four Shift+Tab presses from `default`.
  */
-export const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "edits", "auto", "always"];
+export const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "edits", "auto"];
 
-/**
- * Cycle order for Alt+M and a bare `/mode`, in increasing autonomy.
- *
- * `always` is deliberately NOT here (Claude Code parity — its own remote-session
- * allowlist is likewise `acceptEdits|plan|default|auto`, excluding bypass). It
- * disables every guard, so landing on it by accident must be impossible. It must be
- * named: `/mode always`, `--permission-mode always`, `--dangerously-skip-permissions`,
- * or `permissions.defaultMode`. Cycling FROM it still works: it is not in the list,
- * so `indexOf` returns -1 and the cycle resumes at `ask`.
- */
+/** Cycle order for Alt+M and a bare `/mode`, in increasing autonomy. */
 export const MODE_CYCLE: readonly PermissionMode[] = ["ask", "edits", "auto"];
 
 /** The mode every session starts in, and the only one an untrusted project may use. */
@@ -47,17 +34,17 @@ export const SAFEST_MODE: PermissionMode = "ask";
 
 /** One line per mode, for `/mode`'s selector and its command description. */
 export const MODE_DESCRIPTIONS: Record<PermissionMode, string> = {
-	ask: "ask before anything that is not already allowed",
+	ask: "ask before every edit and every non-read-only command the rules do not allow",
 	edits: "approve file edits automatically, ask for the rest",
-	auto: "never prompt, but screen every dangerous command",
-	always: "approve everything, no guards at all",
+	auto: "never prompt: only deny and ask rules can stop a call",
 };
 
-/** The names this layer used before it adopted pi's vocabulary. */
+/** Names this layer accepted before, mapped onto the mode that now does the job. */
 const LEGACY_MODE_NAMES: Readonly<Record<string, PermissionMode>> = {
 	default: "ask",
 	acceptEdits: "edits",
-	bypass: "always",
+	always: "auto",
+	bypass: "auto",
 };
 
 /**

@@ -11,17 +11,19 @@ import {
 } from "../ext/permissions/modes.ts";
 
 describe("mode vocabulary", () => {
-	it("names modes after pi's own ask/always, plus the two scoped ones", () => {
-		expect(PERMISSION_MODES).toEqual(["ask", "edits", "auto", "always"]);
+	it("is Claude Code's three-mode set under this layer's names", () => {
+		expect(PERMISSION_MODES).toEqual(["ask", "edits", "auto"]);
 		expect(SAFEST_MODE).toBe("ask");
 	});
 
-	it("still accepts the Claude Code names this layer shipped with", () => {
+	it("still accepts the names this layer shipped with, bypass included", () => {
 		// A stored permissions.defaultMode, a script passing --permission-mode, and
-		// muscle memory at the /mode prompt all go through parseMode.
+		// muscle memory at the /mode prompt all go through parseMode. The old bypass
+		// spellings land on auto, which is the bypass mode now.
 		expect(parseMode("default")).toBe("ask");
 		expect(parseMode("acceptEdits")).toBe("edits");
-		expect(parseMode("bypass")).toBe("always");
+		expect(parseMode("bypass")).toBe("auto");
+		expect(parseMode("always")).toBe("auto");
 		expect(parseMode("dontAsk")).toBeUndefined();
 	});
 
@@ -33,9 +35,8 @@ describe("mode vocabulary", () => {
 		expect(parseMode("ASK")).toBeUndefined();
 	});
 
-	it("keeps the non-interactive mode off the keyboard cycle", () => {
-		expect(MODE_CYCLE).toEqual(["ask", "edits", "auto"]);
-		expect(MODE_CYCLE).not.toContain("always");
+	it("cycles every mode from the keyboard", () => {
+		expect(MODE_CYCLE).toEqual(PERMISSION_MODES);
 	});
 
 	it("describes every mode, for the /mode picker", () => {
@@ -49,12 +50,6 @@ describe("mode store", () => {
 		expect(store.get()).toBe("ask");
 		expect(store.cycle()).toBe("edits");
 		expect(store.cycle()).toBe("auto");
-		expect(store.cycle()).toBe("ask");
-	});
-
-	it("resumes the cycle at ask when the current mode is outside it", () => {
-		const store = createModeStore();
-		store.set("always");
 		expect(store.cycle()).toBe("ask");
 	});
 
@@ -92,7 +87,6 @@ describe("project trust clamps the mode", () => {
 		expect(nextInCycle("ask")).toBe("edits");
 		expect(nextInCycle("edits")).toBe("auto");
 		expect(nextInCycle("auto")).toBe("ask");
-		expect(nextInCycle("always")).toBe("ask");
 	});
 
 	it("never fires onChange for a refused transition", () => {
@@ -101,7 +95,7 @@ describe("project trust clamps the mode", () => {
 			(mode) => seen.push(mode),
 			() => false,
 		);
-		store.set("always");
+		store.set("auto");
 		store.cycle();
 		expect(seen).toEqual([]);
 	});

@@ -34,19 +34,17 @@ export interface SandboxSettings {
 
 export interface PermissionSettings {
 	/** Mode the session starts in. Read from GLOBAL settings only — a project must not name it. */
-	defaultMode?: "ask" | "edits" | "auto" | "always" | "default" | "acceptEdits" | "bypass";
+	defaultMode?: "ask" | "edits" | "auto" | "default" | "acceptEdits" | "always" | "bypass";
 	allow?: string[];
 	ask?: string[];
 	deny?: string[];
-	/** auto mode reverts to prompting after N blocks */
-	autoMode?: { maxConsecutiveBlocks?: number; maxTotalBlocks?: number };
 }
 
 export interface StatuslineSettings {
 	/** External command whose first stdout line joins the footer's status line. */
 	command?: string;
 	intervalMs?: number;
-	/** Extra provider ids billed by subscription (`(sub)` in the footer, `/usage`, `/status`); kimi-coding and opencode-go are built in. */
+	/** Extra provider ids billed by subscription (`(subscription)` in the footer, `/usage`, `/status`); kimi-coding and opencode-go are built in. */
 	subscriptionProviders?: string[];
 }
 
@@ -101,7 +99,7 @@ export function permissions(sm: SettingsManager): PermissionSettings | undefined
  *
  * Deliberately not merged with project settings: a trusted project may add allow
  * rules, but letting it name the session's mode would let a repo switch the
- * safety layer off wholesale by shipping `defaultMode: "always"`.
+ * safety layer off wholesale by shipping `defaultMode: "auto"`.
  */
 export function globalPermissionDefaultMode(sm: SettingsManager): string | undefined {
 	const global = sm.getGlobalSettings() as unknown as Mergeable;
