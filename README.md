@@ -38,6 +38,7 @@ themes/         the bluclawd theme
 daemon/         FleetView's session daemon
 ext/            the feature layer
   _shared/      settings readers/writers, process runner, vendored pi internals
+scripts/        probe-extensions.ts — headless report of what each extension registers
 test/           self-contained — no monorepo, no fixtures pi doesn't publish
 ```
 
@@ -51,7 +52,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 
 | Command | What it does |
 |---|---|
-| `/mode`, `/permissions` | permission modes and allow/ask/deny rules. `/mode` picks from a list; Alt+M cycles `ask → edits → auto`. `always` and `never` must be named |
+| `/mode`, `/permissions` | permission modes and allow/ask/deny rules. `/mode` picks from a list; Alt+M cycles `ask → edits → auto`. `always` must be named |
 | `/sandbox` | OS-level sandbox for bash (`@anthropic-ai/sandbox-runtime`). `sandbox.strict` refuses to run bash at all when the sandbox was enabled but failed to start, instead of falling back to unsandboxed |
 | `/tasks` | background bash jobs (`run_in_background`, `bash_output`, `kill_bash`) and monitors. A job notifies the model once when it exits; the `monitor` tool turns each output line of a long-running command into an event that wakes the model (Claude Code's `Monitor`, minus the WebSocket source; stdout and stderr are both events because pi's shell backend merges them) |
 | `/agents` | subagents via the `task` tool; `/agents new\|edit <name>` writes user defs (editing a bundled one starts from its text) |
@@ -84,9 +85,8 @@ npm test      # confirm nothing broke against the new pi
 There is no upstream merge here — this repo owns no pi source to merge into.
 The dependency this actually has on pi's internals: `ext/_shared/` vendors a
 handful of small pi functions/tables that pi does not export publicly
-(`stripAnsi`, `openBrowser`, path getters, the built-in slash-command list, the
-keybindings action-name table, a security-relevant path resolver, MCP
-auth-header resolution). Each is documented in its own file with what drifts
+(`stripAnsi`, `openBrowser`, path getters, the built-in slash-command list, a
+security-relevant path resolver, MCP auth-header resolution). Each is documented in its own file with what drifts
 if pi changes it — mostly cosmetic (a stale `/help` line), one
 (`path-resolve.ts`) copied whole rather than trimmed because it backs
 permission rule matching. `npm run typecheck && npm test` after a pi version

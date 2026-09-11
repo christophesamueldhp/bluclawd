@@ -4,7 +4,7 @@
  * Distinct from InstanceStatus (process lifecycle). Activity describes what the agent
  * inside a live instance is doing right now, derived from its event stream and blocking
  * UI requests. This is a pure module — no process/socket/coding-agent runtime deps — so it
- * is fully unit-testable. See docs/superpowers/specs/2026-07-12-fleetview-phase0-design.md §4.2.
+ * is fully unit-testable.
  */
 
 export type AgentActivity = "idle" | "working" | "awaiting_input";
