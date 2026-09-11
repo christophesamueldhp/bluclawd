@@ -410,6 +410,56 @@ async function pruneOldCheckpointRefs(cwd: string, exec: ExtensionAPI["exec"], b
 	await pruneCheckpointRefs(cwd, exec, new Set(shas.slice(0, MAX_CHECKPOINT_REFS)));
 }
 
+/**
+ * The whole destructive sequence, shared by `/rewind` and the fork-point
+ * offer: safety-net capture → fail-closed confirmation if that capture failed
+ * → restore → report. Returns true only when the tree was restored. The
+ * caller has already asked the user whether to overwrite their changes.
+ */
+export async function restoreWithSafetyNet(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	targetSha: string,
+	safetySubject: string,
+): Promise<boolean> {
+	// Deliberately bypasses the isCapturing guard (see file header) — this is a
+	// foreground, user-awaited, one-off action.
+	const safetySha = await captureCheckpoint(ctx.cwd, pi.exec);
+	if (safetySha) {
+		pi.appendEntry(CHECKPOINT_CUSTOM_TYPE, {
+			sha: safetySha,
+			turnEntryId: ctx.sessionManager.getLeafEntry()?.id ?? "",
+			subject: safetySubject,
+		});
+	} else {
+		// Fail-closed. Restoring now would overwrite the user's current
+		// uncommitted work with NO way to recover it — exactly the data loss the
+		// safety net exists to prevent. Do NOT restore unless the user opts in.
+		const proceed = await ctx.ui.confirm(
+			"Safety checkpoint failed",
+			"Could not snapshot your current changes before rewinding. If you restore now, your current uncommitted changes will be UNRECOVERABLE. Restore anyway, without a safety checkpoint?",
+		);
+		if (!proceed) {
+			ctx.ui.notify("Rewind aborted: safety checkpoint failed, current changes left untouched.", "error");
+			return false;
+		}
+	}
+
+	const restored = await restoreCheckpoint(ctx.cwd, pi.exec, targetSha);
+	if (restored) {
+		ctx.ui.notify("Working tree restored to checkpoint.", "info");
+		return true;
+	}
+	// read-tree can be interrupted mid-write (e.g. SIGTERM on RESTORE_TIMEOUT_MS),
+	// potentially leaving a partially-applied tree. Point the user at the
+	// safety-net sha (when one was taken) so they can get back to where they were.
+	const recovery = safetySha
+		? ` Your pre-rewind state is checkpointed at ${safetySha.slice(0, 7)} — run /rewind to return to it.`
+		: "";
+	ctx.ui.notify(`Failed to restore checkpoint; the working tree may be in a partially-applied state.${recovery}`, "error");
+	return false;
+}
+
 /** Module-scoped overlap guard for the turn_start background capture (see file header). */
 let isCapturing = false;
 
@@ -574,52 +624,11 @@ export function factory(pi: ExtensionAPI): void {
 				return;
 			}
 
-			// Safety net: checkpoint the current (about-to-be-overwritten) state first
-			// so the rewind itself can be undone with another /rewind. Deliberately
-			// bypasses the isCapturing guard (see file header) — this is a foreground,
-			// user-awaited, one-off action.
-			const safetySha = await captureCheckpoint(ctx.cwd, pi.exec);
-			if (safetySha) {
-				pi.appendEntry(CHECKPOINT_CUSTOM_TYPE, {
-					sha: safetySha,
-					turnEntryId: ctx.sessionManager.getLeafEntry()?.id ?? "",
-					subject: "(before rewind)",
-				});
-			} else {
-				// Fail-closed. The safety-net capture failed (e.g. timeout on a very
-				// large tree, or a transient git error), so restoring now would
-				// overwrite the user's current uncommitted work with NO way to recover
-				// it — exactly the data loss the safety net exists to prevent. Do NOT
-				// restore unless the user explicitly opts into that unsafe path.
-				const proceed = await ctx.ui.confirm(
-					"Safety checkpoint failed",
-					"Could not snapshot your current changes before rewinding. If you restore now, your current uncommitted changes will be UNRECOVERABLE. Restore anyway, without a safety checkpoint?",
-				);
-				if (!proceed) {
-					ctx.ui.notify("Rewind aborted: safety checkpoint failed, current changes left untouched.", "error");
-					return;
-				}
-			}
-
-			const restored = await restoreCheckpoint(ctx.cwd, pi.exec, target.sha);
-			if (restored) {
-				ctx.ui.notify("Working tree restored to checkpoint.", "info");
-				// Move the conversation LAST: it swaps what the session is pointing at, so
-				// anything after it would run against state that is being replaced — the
-				// same ordering FleetView's switchSession hand-off exists for.
-				if (scopeChoice.talk) await ctx.navigateTree(target.turnEntryId);
-			} else {
-				// read-tree can be interrupted mid-write (e.g. SIGTERM on RESTORE_TIMEOUT_MS),
-				// potentially leaving a partially-applied tree. Point the user at the
-				// safety-net sha (when one was taken) so they can get back to where they were.
-				const recovery = safetySha
-					? ` Your pre-rewind state is checkpointed at ${safetySha.slice(0, 7)} — run /rewind to return to it.`
-					: "";
-				ctx.ui.notify(
-					`Failed to restore checkpoint; the working tree may be in a partially-applied state.${recovery}`,
-					"error",
-				);
-			}
+			const restored = await restoreWithSafetyNet(pi, ctx, target.sha, "(before rewind)");
+			// Move the conversation LAST: it swaps what the session is pointing at, so
+			// anything after it would run against state that is being replaced — the
+			// same ordering FleetView's switchSession hand-off exists for.
+			if (restored && scopeChoice.talk) await ctx.navigateTree(target.turnEntryId);
 		},
 	});
 }

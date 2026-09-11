@@ -307,3 +307,52 @@ describe("restoreCheckpoint — index state afterwards", () => {
 		expect(await status()).toEqual(["?? a.txt"]);
 	});
 });
+
+// ── integration: handlers through the factory ────────────────────────────────
+
+describe("/rewind (files only)", () => {
+	it("checkpoints the current tree as a safety net, then restores the chosen one", async () => {
+		const { dir, exec, write, read } = await makeRepo();
+		await write("a.txt", "v1\n");
+		const sha = await capture(dir, exec);
+		const entries = [userEntry("u1", "make v1"), checkpointEntry(sha, "u1", "make v1")];
+		await write("a.txt", "v2\n");
+
+		const { commands } = loadFactory(exec, entries);
+		// select 0 = the only checkpoint, select 0 = "Files only", confirm = overwrite
+		const { ctx, notices, navigated } = makeCtx(dir, entries, { select: [0, 0], confirm: [true] });
+		await commands.get("rewind")?.("", ctx);
+
+		expect(await read("a.txt")).toBe("v1\n");
+		expect(appendedSubjects(entries)).toContain("(before rewind)");
+		expect(notices.at(-1)?.message).toContain("restored");
+		expect(navigated).toEqual([]);
+
+		// The safety net itself restores v2.
+		const safety = listCheckpoints(entries).find((c) => c.subject === "(before rewind)");
+		expect(await restoreCheckpoint(dir, exec, safety?.sha ?? "")).toBe(true);
+		expect(await read("a.txt")).toBe("v2\n");
+	});
+
+	it("is fail-closed: a failed safety capture aborts unless the user opts into the unsafe path", async () => {
+		const { dir, exec, write, read } = await makeRepo();
+		await write("a.txt", "v1\n");
+		const sha = await capture(dir, exec);
+		const entries = [userEntry("u1", "make v1"), checkpointEntry(sha, "u1", "make v1")];
+		await write("a.txt", "v2\n");
+
+		const { commands } = loadFactory(failOnce(exec, "write-tree"), entries);
+		const declined = makeCtx(dir, entries, { select: [0, 0], confirm: [true, false] });
+		await commands.get("rewind")?.("", declined.ctx);
+		expect(await read("a.txt")).toBe("v2\n");
+		expect(declined.notices.at(-1)).toMatchObject({ type: "error" });
+		expect(declined.notices.at(-1)?.message).toContain("aborted");
+		expect(appendedSubjects(entries)).not.toContain("(before rewind)");
+
+		const { commands: again } = loadFactory(failOnce(exec, "write-tree"), entries);
+		const accepted = makeCtx(dir, entries, { select: [0, 0], confirm: [true, true] });
+		await again.get("rewind")?.("", accepted.ctx);
+		expect(await read("a.txt")).toBe("v1\n");
+		expect(appendedSubjects(entries)).not.toContain("(before rewind)");
+	});
+});
