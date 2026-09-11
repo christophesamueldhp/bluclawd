@@ -161,7 +161,7 @@ describe("CcStatuslineFooter", () => {
 		expect(plain.length).toBe(100);
 		expect(plain.startsWith(" Kimi K2.6  high  ▓▓▓▓▓░░░░░ ")).toBe(true);
 		expect(plain.endsWith(" owner  ⎇ main  (+4,-2)  ~/proj ")).toBe(true);
-		expect(rest).toEqual([]);
+		expect(rest.map(stripAnsi)).toEqual([" $0.000 (per token) "]);
 		vi.unstubAllEnvs();
 	});
 
@@ -180,11 +180,12 @@ describe("CcStatuslineFooter", () => {
 		)
 			.render(120)
 			.map(stripAnsi);
-		expect(lines).toHaveLength(3);
+		expect(lines).toHaveLength(4);
 		expect(lines[1]).toContain("Session: ▓▓░░░░░░░░ 20.0%");
 		expect(lines[1]).toContain(" | ");
 		expect(lines[1]).toContain("Weekly: ▓▓▓▓▓▓░░░░ 60.0%");
-		expect(lines[2]).toBe("same ⏸ manual");
+		expect(lines[2]).toBe(" $0.000 (per token) ");
+		expect(lines[3]).toBe("same ⏸ manual");
 	});
 
 	it("names the source on an error line so the failing poller is identifiable", () => {
@@ -214,14 +215,19 @@ describe("CcStatuslineFooter", () => {
 		expect(wide).toContain("Monthly:");
 		expect(wide).toMatch(/\d\d-\d\d \d\d:\d\d/);
 
+		// Three windows plus their reset times need 118 columns, so the trailing
+		// window goes and the times stay — the Session + Weekly pair ccstatusline shows.
 		const medium = render(90);
-		expect(medium).toContain("Monthly:");
-		expect(medium).not.toMatch(/\d\d-\d\d \d\d:\d\d/);
+		expect(medium).toContain("Weekly:");
+		expect(medium).not.toContain("Monthly:");
+		expect(medium).toMatch(/\d\d-\d\d \d\d:\d\d/);
 		expect(medium).not.toContain("...");
 
+		// Narrower still: the session window alone, with its countdown.
 		const narrow = render(60);
-		expect(narrow).toContain("Weekly:");
-		expect(narrow).not.toContain("Monthly:");
+		expect(narrow).toContain("Session:");
+		expect(narrow).not.toContain("Weekly:");
+		expect(narrow).toMatch(/\dhr/);
 		expect(narrow).not.toContain("...");
 	});
 
@@ -238,7 +244,22 @@ describe("CcStatuslineFooter", () => {
 		)
 			.render(120)
 			.map(stripAnsi);
-		expect(lines[1]).toBe(" $0.000 (sub) ");
+		expect(lines[1]).toBe(" $0.000 (subscription) ");
+	});
+
+	it("names per-token billing on the stats line when the provider is not a subscription", () => {
+		const lines = new CcStatuslineFooter(sources(), fakeTheme).render(120).map(stripAnsi);
+		expect(lines[1]).toBe(" $0.000 (per token) ");
+	});
+
+	it("leaves the cost figure unlabeled when there is no model to bill", () => {
+		const lines = new CcStatuslineFooter(
+			sources({ ctx: () => ({ ...sources().ctx(), model: undefined }) as never }),
+			fakeTheme,
+		)
+			.render(120)
+			.map(stripAnsi);
+		expect(lines).toHaveLength(1);
 	});
 
 	it("degrades to a bare footer when the context is gone", () => {
@@ -265,10 +286,29 @@ describe("fitUsageGroups", () => {
 		expect(fitUsageGroups(groups, 100, " | ")).toBe("AAAAAAAAAArrrr | BBBBBBBBBBrrrr | CCCCCCCCCCrrrr");
 	});
 
-	it("drops reset times first, then trailing windows, and truncates last", () => {
-		expect(fitUsageGroups(groups, 40, " | ")).toBe("AAAAAAAAAA | BBBBBBBBBB | CCCCCCCCCC");
-		expect(fitUsageGroups(groups, 30, " | ")).toBe("AAAAAAAAAA | BBBBBBBBBB");
+	it("drops trailing windows before reset times, and truncates last", () => {
+		expect(fitUsageGroups(groups, 40, " | ")).toBe("AAAAAAAAAArrrr | BBBBBBBBBBrrrr");
+		expect(fitUsageGroups(groups, 30, " | ")).toBe("AAAAAAAAAArrrr");
 		expect(stripAnsi(fitUsageGroups(groups, 8, " | "))).toBe("AAAAA...");
+	});
+
+	it("drops windows only, for a source that reports no reset times", () => {
+		const withoutResets = groups.map(({ usage }) => ({ usage }));
+		expect(fitUsageGroups(withoutResets, 30, " | ")).toBe("AAAAAAAAAA | BBBBBBBBBB");
+	});
+
+	it("keeps the reset times of a real usage line on an 85-column terminal", () => {
+		// Real OpenCode Go widths: 26/25/26 columns of slider plus 9/13/13 of reset
+		// text, 118 in full — more than the terminal has, so Monthly goes and the
+		// reset times stay (which is the ccstatusline line this replicates anyway).
+		const real = [
+			{ usage: " Session: ░░░░░░░░░░ 0.0% ", reset: " 4hr 33m " },
+			{ usage: " Weekly: ░░░░░░░░░░ 0.1% ", reset: " 09-14 07:00 " },
+			{ usage: " Monthly: ░░░░░░░░░░ 0.1% ", reset: " 10-01 07:00 " },
+		];
+		expect(fitUsageGroups(real, 85, " | ")).toBe(
+			" Session: ░░░░░░░░░░ 0.0%  4hr 33m  |  Weekly: ░░░░░░░░░░ 0.1%  09-14 07:00 ",
+		);
 	});
 });
 

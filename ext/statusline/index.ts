@@ -235,9 +235,11 @@ export function formatUsageReport(
 	const lines: string[] = [theme.bold("Session usage")];
 	const t = report.totals;
 	lines.push(`${dim("Model:")} ${report.model ?? "none selected"}`);
-	lines.push(
-		`${dim("Cost:")} $${t.cost.toFixed(4)}${report.subscription ? dim(" (subscription — not billed per token)") : ""}`,
-	);
+	// Same rule as the footer's cost figure: the amount always says how it is
+	// billed, since a subscription total is a notional API-rate equivalent and a
+	// per-token one is real spend. No model, no billing to name.
+	const billing = report.model ? dim(report.subscription ? " (subscription)" : " (per token)") : "";
+	lines.push(`${dim("Cost:")} $${t.cost.toFixed(4)}${billing}`);
 	lines.push(
 		`${dim("Tokens:")} ↑${formatTokens(t.input)} in · ↓${formatTokens(t.output)} out · cache read ${formatTokens(t.cacheRead)} · cache write ${formatTokens(t.cacheWrite)}`,
 	);

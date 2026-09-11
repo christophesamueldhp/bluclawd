@@ -26,8 +26,7 @@ describe("/usage report", () => {
 			plain,
 		);
 		expect(lines[0]).toBe("Session usage");
-		expect(lines.find((l) => l.startsWith("Cost:"))).toContain("$0.0123");
-		expect(lines.find((l) => l.startsWith("Cost:"))).toContain("subscription");
+		expect(lines.find((l) => l.startsWith("Cost:"))).toBe("Cost: $0.0123 (subscription)");
 		expect(lines.find((l) => l.startsWith("Tokens:"))).toBe(
 			"Tokens: ↑1.2k in · ↓340 out · cache read 5.0k · cache write 0",
 		);
@@ -51,6 +50,7 @@ describe("/usage report", () => {
 			},
 			plain,
 		);
+		expect(lines.find((l) => l.startsWith("Cost:"))).toContain("(per token)");
 		expect(lines).toContain("No plan usage available for openrouter.");
 		expect(lines.some((l) => l.includes("/login"))).toBe(true);
 		expect(lines.some((l) => l.includes("OPENCODE_GO_WORKSPACE_ID"))).toBe(true);
@@ -59,6 +59,7 @@ describe("/usage report", () => {
 	it("still renders entries written before the plan list existed", () => {
 		const lines = formatUsageReport({ subscription: false, totals } as never, plain);
 		expect(lines[0]).toBe("Session usage");
+		expect(lines.find((l) => l.startsWith("Cost:"))).toBe("Cost: $0.0123");
 		expect(lines).toContain("No plan usage available.");
 	});
 });
@@ -85,6 +86,7 @@ describe("/status report", () => {
 		);
 		expect(lines).toContain("Model: opencode-go/kimi-k2.6 (Kimi K2.6)");
 		expect(lines).toContain("Effort: high (/thinking)");
+		expect(lines).toContain("Auth: stored · per token");
 		expect(lines).toContain("Permission mode: edits (/mode)");
 		expect(lines).toContain("Sandbox: on (/sandbox)");
 		expect(lines).toContain("Name: wave");

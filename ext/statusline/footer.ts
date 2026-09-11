@@ -141,23 +141,26 @@ function sanitizeStatusText(text: string): string {
 export type UsageGroup = { usage: string; reset?: string };
 
 /**
- * Fit plan-usage groups into `width` the way ccstatusline's compact mode does,
- * dropping detail before cutting text: full line → without reset times → without
- * trailing windows (never fewer than one) → truncated as a last resort. A line
- * that fits is never touched.
+ * Fit plan-usage groups into `width`, dropping detail before cutting text: full
+ * line → fewer trailing windows, reset times kept → all windows without reset
+ * times → fewer trailing windows without them → truncated as a last resort. A
+ * line that fits is never touched.
+ *
+ * Detail goes before breadth because "when does it reset" is what the line is
+ * for: at the ~85 columns a typical terminal has, keeping the reset times costs
+ * the trailing window and leaves exactly the Session + Weekly pair ccstatusline
+ * shows. The dropped window is still in `/usage`.
  */
 export function fitUsageGroups(groups: readonly UsageGroup[], width: number, separator: string): string {
 	const join = (items: readonly UsageGroup[], withReset: boolean) =>
 		items.map((g) => g.usage + (withReset ? (g.reset ?? "") : "")).join(separator);
-	const full = join(groups, true);
-	if (visibleWidth(full) <= width) return full;
-	let kept = groups;
-	let line = join(kept, false);
-	while (visibleWidth(line) > width && kept.length > 1) {
-		kept = kept.slice(0, -1);
-		line = join(kept, false);
+	for (const withReset of [true, false]) {
+		for (let kept = groups.length; kept > 0; kept--) {
+			const line = join(groups.slice(0, kept), withReset);
+			if (visibleWidth(line) <= width) return line;
+		}
 	}
-	return truncateToWidth(line, width, "...");
+	return truncateToWidth(join(groups.slice(0, 1), false), width, "...");
 }
 
 export type SessionTotals = {
@@ -337,9 +340,14 @@ export class CcStatuslineFooter implements Component {
 		const totals = sumSessionUsage(ctx);
 
 		const parts: string[] = [];
-		const usingSubscription = isUsingSubscription(ctx);
-		if (totals.cost || usingSubscription) {
-			parts.push(`$${totals.cost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
+		// The marker is the dollar figure's unit, so it is always named: under a
+		// subscription the amount is what the tokens would have cost at API rates,
+		// otherwise it is what the session actually costs. With no model there is no
+		// billing to name, so the bare figure shows only once something was spent.
+		if (ctx.model) {
+			parts.push(`$${totals.cost.toFixed(3)} (${isUsingSubscription(ctx) ? "subscription" : "per token"})`);
+		} else if (totals.cost) {
+			parts.push(`$${totals.cost.toFixed(3)}`);
 		}
 		if (totals.input) parts.push(`↑${formatTokens(totals.input)}`);
 		if (totals.output) parts.push(`↓${formatTokens(totals.output)}`);

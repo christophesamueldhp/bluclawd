@@ -56,7 +56,9 @@ export function formatStatus(
 	lines.push(`${dim("Model:")} ${data.model ?? "none selected"}${data.modelName ? dim(` (${data.modelName})`) : ""}`);
 	lines.push(`${dim("Effort:")} ${data.thinkingLevel ?? "off"} ${dim("(/thinking)")}`);
 	const auth = data.authSource ?? "not configured";
-	lines.push(`${dim("Auth:")} ${auth}${data.subscription ? dim(" · subscription") : ""}`);
+	// Billing is always named when there is a model to bill, as on the footer.
+	const billing = data.model ? dim(data.subscription ? " · subscription" : " · per token") : "";
+	lines.push(`${dim("Auth:")} ${auth}${billing}`);
 	if (data.contextWindow)
 		lines.push(`${dim("Context window:")} ${formatTokens(data.contextWindow)} ${dim("(/context)")}`);
 	lines.push("", theme.bold("Safety"));
