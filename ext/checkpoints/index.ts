@@ -467,22 +467,65 @@ async function pruneOldCheckpointRefs(
 	await pruneCheckpointRefs(cwd, exec, sessionId, new Set(shas.slice(0, MAX_CHECKPOINT_REFS)));
 }
 
+/** Lines of `git diff --stat` shown in the restore confirmation before it is clipped. */
+const PREVIEW_MAX_LINES = 20;
+
+/**
+ * `git diff --stat` from one checkpoint commit to another — what restoring
+ * `toSha` changes relative to the tree captured as `fromSha`. Undefined on any
+ * git error; the empty string when the trees are identical.
+ */
+async function diffStat(
+	cwd: string,
+	exec: ExtensionAPI["exec"],
+	fromSha: string,
+	toSha: string,
+): Promise<string | undefined> {
+	const result = await exec("git", ["diff", "--stat", "--stat-width=80", fromSha, toSha], {
+		cwd,
+		timeout: GIT_TIMEOUT_MS,
+	}).catch(() => undefined);
+	return result?.code === 0 ? result.stdout : undefined;
+}
+
+function clipLines(text: string, max: number): string {
+	const lines = text.trimEnd().split("\n");
+	if (lines.length <= max) return lines.join("\n");
+	return `${lines.slice(0, max).join("\n")}\n… and ${lines.length - max} more`;
+}
+
 /**
  * The whole destructive sequence, shared by `/rewind` and the fork-point
- * offer: safety-net capture → fail-closed confirmation if that capture failed
- * → restore → report. Returns true only when the tree was restored. The
- * caller has already asked the user whether to overwrite their changes.
+ * offer: safety-net capture → ONE confirmation that previews what the restore
+ * changes (or the fail-closed prompt if the safety capture failed) → append
+ * the safety-net entry → restore → report. Returns true only when the tree was
+ * restored. `intro` is the question the confirmation opens with.
  */
 export async function restoreWithSafetyNet(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	targetSha: string,
 	safetySubject: string,
+	intro: string,
 ): Promise<boolean> {
 	// Deliberately bypasses the isCapturing guard (see file header) — this is a
-	// foreground, user-awaited, one-off action.
+	// foreground, user-awaited, one-off action. The captured tree doubles as the
+	// preview base: `git diff <sha>` against the working tree would skip
+	// untracked files, and this tree has them.
 	const safetySha = await captureCheckpoint(ctx.cwd, pi.exec, ctx.sessionManager.getSessionId());
 	if (safetySha) {
+		const stat = await diffStat(ctx.cwd, pi.exec, safetySha, targetSha);
+		if (stat !== undefined && stat.trim() === "") {
+			ctx.ui.notify("Working tree already matches this checkpoint.", "info");
+			return false;
+		}
+		const preview = stat === undefined ? "(preview unavailable)" : clipLines(stat, PREVIEW_MAX_LINES);
+		const proceed = await ctx.ui.confirm(
+			"Rewind",
+			`${intro}\n\n${preview}\n\nYour current changes are checkpointed first, so this can be undone with /rewind. Continue?`,
+		);
+		// Declined: no entry is appended; the safety-net ref is swept by the next prune.
+		if (!proceed) return false;
 		pi.appendEntry(CHECKPOINT_CUSTOM_TYPE, {
 			sha: safetySha,
 			turnEntryId: ctx.sessionManager.getLeafEntry()?.id ?? "",
@@ -494,7 +537,7 @@ export async function restoreWithSafetyNet(
 		// safety net exists to prevent. Do NOT restore unless the user opts in.
 		const proceed = await ctx.ui.confirm(
 			"Safety checkpoint failed",
-			"Could not snapshot your current changes before rewinding. If you restore now, your current uncommitted changes will be UNRECOVERABLE. Restore anyway, without a safety checkpoint?",
+			`${intro}\n\nCould not snapshot your current changes before rewinding (no preview either). If you restore now, your current uncommitted changes will be UNRECOVERABLE. Restore anyway, without a safety checkpoint?`,
 		);
 		if (!proceed) {
 			ctx.ui.notify("Rewind aborted: safety checkpoint failed, current changes left untouched.", "error");
@@ -589,18 +632,19 @@ export function factory(pi: ExtensionAPI): void {
 	});
 
 	// Offer to put the code back where it was when the forked-at prompt began.
-	// Always asks first, never auto-restores; shares /rewind's safety net.
+	// Always asks first (the one confirmation with the preview lives in
+	// restoreWithSafetyNet), never auto-restores.
 	pi.on("session_before_fork", async (event, ctx) => {
 		if (!ctx.hasUI) return;
 		const match = checkpointForTurn(ctx.sessionManager.getBranch(), event.entryId);
 		if (!match) return;
-
-		const choice = await ctx.ui.select(`Restore code to the checkpoint at this fork point? (${match.subject})`, [
-			"Yes, restore code to that checkpoint (your current uncommitted changes are checkpointed first)",
-			"No, keep current code",
-		]);
-		if (!choice?.startsWith("Yes")) return;
-		await restoreWithSafetyNet(pi, ctx, match.sha, "(before fork)");
+		await restoreWithSafetyNet(
+			pi,
+			ctx,
+			match.sha,
+			"(before fork)",
+			`Restore code to the checkpoint at this fork point? (${match.subject})`,
+		);
 	});
 
 	pi.registerCommand("rewind", {
@@ -667,14 +711,6 @@ export function factory(pi: ExtensionAPI): void {
 			}
 			if (!scopeChoice) return;
 
-			if (scopeChoice.files) {
-				const confirmed = await ctx.ui.confirm(
-					"Rewind",
-					"This will overwrite your current uncommitted changes with the selected checkpoint. Continue?",
-				);
-				if (!confirmed) return;
-			}
-
 			// Conversation only: nothing touches the working tree, so none of the
 			// safety-net machinery below applies. Navigating the tree is non-destructive —
 			// the abandoned path stays in the session file — so there is nothing to
@@ -684,7 +720,13 @@ export function factory(pi: ExtensionAPI): void {
 				return;
 			}
 
-			const restored = await restoreWithSafetyNet(pi, ctx, target.sha, "(before rewind)");
+			const restored = await restoreWithSafetyNet(
+				pi,
+				ctx,
+				target.sha,
+				"(before rewind)",
+				`Restore the working tree to the checkpoint "${target.subject}"?`,
+			);
 			// Move the conversation LAST: it swaps what the session is pointing at, so
 			// anything after it would run against state that is being replaced — the
 			// same ordering FleetView's switchSession hand-off exists for.

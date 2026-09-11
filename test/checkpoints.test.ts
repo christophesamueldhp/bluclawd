@@ -166,6 +166,7 @@ function makeCtx(dir: string, entries: SessionEntry[], script: { select?: number
 	const confirms = [...(script.confirm ?? [])];
 	const notices: Array<{ message: string; type?: string }> = [];
 	const navigated: string[] = [];
+	const confirmMessages: string[] = [];
 	const ctx = {
 		cwd: dir,
 		hasUI: true,
@@ -174,7 +175,10 @@ function makeCtx(dir: string, entries: SessionEntry[], script: { select?: number
 				const i = selects.shift();
 				return i === undefined ? undefined : options[i];
 			},
-			confirm: async () => confirms.shift() ?? false,
+			confirm: async (_title: string, message: string) => {
+				confirmMessages.push(message);
+				return confirms.shift() ?? false;
+			},
 			notify: (message: string, type?: string) => notices.push({ message, type }),
 			input: async () => undefined,
 		},
@@ -184,7 +188,7 @@ function makeCtx(dir: string, entries: SessionEntry[], script: { select?: number
 			return { cancelled: false };
 		},
 	} as unknown as ExtensionContext;
-	return { ctx, notices, navigated };
+	return { ctx, notices, navigated, confirmMessages };
 }
 
 const appendedSubjects = (entries: SessionEntry[]) => listCheckpoints(entries).map((c) => c.subject);
@@ -371,10 +375,12 @@ describe("/rewind (files only)", () => {
 		await write("a.txt", "v2\n");
 
 		const { commands } = loadFactory(exec, entries);
-		// select 0 = the only checkpoint, select 0 = "Files only", confirm = overwrite
-		const { ctx, notices, navigated } = makeCtx(dir, entries, { select: [0, 0], confirm: [true] });
+		// select 0 = the only checkpoint, select 0 = "Files only", one confirm with the preview
+		const { ctx, notices, navigated, confirmMessages } = makeCtx(dir, entries, { select: [0, 0], confirm: [true] });
 		await commands.get("rewind")?.("", ctx);
 
+		expect(confirmMessages).toHaveLength(1);
+		expect(confirmMessages[0]).toContain("a.txt");
 		expect(await read("a.txt")).toBe("v1\n");
 		expect(appendedSubjects(entries)).toContain("(before rewind)");
 		expect(notices.at(-1)?.message).toContain("restored");
@@ -386,6 +392,37 @@ describe("/rewind (files only)", () => {
 		expect(await read("a.txt")).toBe("v2\n");
 	});
 
+	it("declining the preview leaves the tree alone and appends no entry", async () => {
+		const { dir, exec, write, read } = await makeRepo();
+		await write("a.txt", "v1\n");
+		const sha = await capture(dir, exec);
+		const entries = [userEntry("u1", "make v1"), checkpointEntry(sha, "u1", "make v1")];
+		await write("a.txt", "v2\n");
+
+		const { commands } = loadFactory(exec, entries);
+		const { ctx, notices } = makeCtx(dir, entries, { select: [0, 0], confirm: [false] });
+		await commands.get("rewind")?.("", ctx);
+
+		expect(await read("a.txt")).toBe("v2\n");
+		expect(appendedSubjects(entries)).not.toContain("(before rewind)");
+		expect(notices.some((n) => n.message.includes("restored"))).toBe(false);
+	});
+
+	it("short-circuits when the working tree already matches the checkpoint", async () => {
+		const { dir, exec, write } = await makeRepo();
+		await write("a.txt", "v1\n");
+		const sha = await capture(dir, exec);
+		const entries = [userEntry("u1", "make v1"), checkpointEntry(sha, "u1", "make v1")];
+
+		const { commands } = loadFactory(exec, entries);
+		const { ctx, notices, confirmMessages } = makeCtx(dir, entries, { select: [0, 0], confirm: [true] });
+		await commands.get("rewind")?.("", ctx);
+
+		expect(confirmMessages).toEqual([]);
+		expect(notices.at(-1)?.message).toContain("already matches");
+		expect(appendedSubjects(entries)).not.toContain("(before rewind)");
+	});
+
 	it("is fail-closed: a failed safety capture aborts unless the user opts into the unsafe path", async () => {
 		const { dir, exec, write, read } = await makeRepo();
 		await write("a.txt", "v1\n");
@@ -394,15 +431,16 @@ describe("/rewind (files only)", () => {
 		await write("a.txt", "v2\n");
 
 		const { commands } = loadFactory(failOnce(exec, "write-tree"), entries);
-		const declined = makeCtx(dir, entries, { select: [0, 0], confirm: [true, false] });
+		const declined = makeCtx(dir, entries, { select: [0, 0], confirm: [false] });
 		await commands.get("rewind")?.("", declined.ctx);
+		expect(declined.confirmMessages[0]).toContain("UNRECOVERABLE");
 		expect(await read("a.txt")).toBe("v2\n");
 		expect(declined.notices.at(-1)).toMatchObject({ type: "error" });
 		expect(declined.notices.at(-1)?.message).toContain("aborted");
 		expect(appendedSubjects(entries)).not.toContain("(before rewind)");
 
 		const { commands: again } = loadFactory(failOnce(exec, "write-tree"), entries);
-		const accepted = makeCtx(dir, entries, { select: [0, 0], confirm: [true, true] });
+		const accepted = makeCtx(dir, entries, { select: [0, 0], confirm: [true] });
 		await again.get("rewind")?.("", accepted.ctx);
 		expect(await read("a.txt")).toBe("v1\n");
 		expect(appendedSubjects(entries)).not.toContain("(before rewind)");
@@ -424,12 +462,15 @@ describe("session_before_fork", () => {
 		await write("a.txt", "after-prompt\n");
 
 		const { handlers } = loadFactory(exec, entries);
-		const { ctx, notices } = makeCtx(dir, entries, { select: [0] }); // "Yes, restore ..."
+		const { ctx, notices, confirmMessages } = makeCtx(dir, entries, { confirm: [true] });
 		await handlers.get("session_before_fork")?.(
 			{ type: "session_before_fork", entryId: "u1", position: "before" },
 			ctx,
 		);
 
+		expect(confirmMessages).toHaveLength(1);
+		expect(confirmMessages[0]).toContain("fork point");
+		expect(confirmMessages[0]).toContain("a.txt");
 		expect(await read("a.txt")).toBe("before-prompt\n");
 		expect(appendedSubjects(entries)).toContain("(before fork)");
 		expect(notices.at(-1)?.message).toContain("restored");
@@ -443,7 +484,7 @@ describe("session_before_fork", () => {
 		await write("a.txt", "v2\n");
 
 		const { handlers } = loadFactory(exec, entries);
-		const { ctx } = makeCtx(dir, entries, { select: [1] }); // "No, keep current code"
+		const { ctx } = makeCtx(dir, entries, { confirm: [false] });
 		await handlers.get("session_before_fork")?.(
 			{ type: "session_before_fork", entryId: "u1", position: "before" },
 			ctx,
