@@ -28,6 +28,8 @@ interface WebfetchDetails {
 	cached?: boolean;
 	/** True when the returned text is a model analysis (prompt param), not the raw page. */
 	analyzed?: boolean;
+	/** Set when the URL redirected to another host; the text is a notice, not page content. */
+	redirectedTo?: string;
 }
 
 const WebfetchParams = Type.Object({
@@ -115,7 +117,23 @@ async function analyzeFetchedPage(
 
 const WebsearchParams = Type.Object({
 	query: Type.String({ description: "The search query." }),
+	allowed_domains: Type.Optional(
+		Type.Array(Type.String(), { description: "Only include results from these domains (subdomains included)." }),
+	),
+	blocked_domains: Type.Optional(
+		Type.Array(Type.String(), { description: "Never include results from these domains (subdomains included)." }),
+	),
 });
+
+/** Claude Code's rule: the two filters are exclusive. Returns the error text, or undefined when fine. */
+export function domainFilterError(params: {
+	allowed_domains?: string[];
+	blocked_domains?: string[];
+}): string | undefined {
+	return params.allowed_domains?.length && params.blocked_domains?.length
+		? "Error: Cannot specify both allowed_domains and blocked_domains in the same request"
+		: undefined;
+}
 
 /** Most results rendered into context, however many the provider returned. */
 const MAX_RENDERED_RESULTS = 10;
@@ -134,7 +152,12 @@ const MAX_RENDERED_RESULTS = 10;
 export function renderResults(query: string, results: SearchResult[]): string {
 	if (results.length === 0) return `No results for "${query}".`;
 	const shown = results.slice(0, MAX_RENDERED_RESULTS);
-	const body = shown.map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}\n   ${r.snippet}`).join("\n\n");
+	const body = shown
+		.map((r, i) => {
+			const head = `${i + 1}. ${r.title}${r.published ? ` (${r.published})` : ""}\n   ${r.url}`;
+			return r.snippet ? `${head}\n   ${r.snippet}` : head;
+		})
+		.join("\n\n");
 	const omitted = results.length - shown.length;
 	const note = omitted > 0 ? `\n\n(${omitted} further result${omitted === 1 ? "" : "s"} omitted.)` : "";
 	return [
@@ -144,6 +167,9 @@ export function renderResults(query: string, results: SearchResult[]): string {
 		"",
 		body + note,
 		"</untrusted-search-results>",
+		"",
+		// Ours, not the results': it sits outside the untrusted block on purpose.
+		"Cite the sources you use from these results as markdown links in your reply.",
 	].join("\n");
 }
 
@@ -152,7 +178,7 @@ export function factory(pi: ExtensionAPI): void {
 		name: "webfetch",
 		label: "WebFetch",
 		description:
-			"Fetch an http(s) URL and return its content as Markdown (for HTML) or text. Pass `prompt` to have the page analyzed and get just the answer. Successful fetches are cached for 15 minutes. Blocks non-http(s) schemes and private/loopback addresses, including via redirects.",
+			"Fetch an http(s) URL and return its content as Markdown (for HTML) or text. Pass `prompt` to have the page analyzed and get just the answer. Successful fetches are cached for 15 minutes. Blocks non-http(s) schemes and private/loopback addresses, including via redirects. A redirect to a different host is reported instead of followed; call again with the new URL if it is plainly where the page lives.",
 		promptSnippet:
 			"Use webfetch to retrieve the content of a public http(s) URL as text/Markdown; pass `prompt` to extract just what you need from large pages.",
 		parameters: WebfetchParams,
@@ -176,8 +202,10 @@ export function factory(pi: ExtensionAPI): void {
 				truncated: result.truncated,
 				cached: result.cached ?? false,
 				analyzed: false,
+				...(result.redirectedTo ? { redirectedTo: result.redirectedTo } : {}),
 			};
-			if (params.prompt) {
+			// A redirect notice is not page content: hand it back as-is, never analyzed.
+			if (params.prompt && !result.redirectedTo) {
 				const analysis = await analyzeFetchedPage(ctx, result, params.prompt, signal);
 				if (analysis !== undefined) {
 					return {
@@ -195,8 +223,9 @@ export function factory(pi: ExtensionAPI): void {
 		name: "websearch",
 		label: "WebSearch",
 		description:
-			"Search the web and return a list of {title, url, snippet} results. Works with no configuration; set an API key (exa, brave, or tavily) to use your own provider account.",
-		promptSnippet: "Use websearch to find current information on the web.",
+			"Search the web and return a list of {title, url, snippet, published?} results. Use allowed_domains or blocked_domains (not both) to narrow by site. Works with no configuration; set an API key (exa, brave, or tavily) to use your own provider account.",
+		promptSnippet:
+			"Use websearch to find current information on the web; account for the current date when judging whether a result is recent.",
 		parameters: WebsearchParams,
 		async execute(
 			_toolCallId,
@@ -205,6 +234,9 @@ export function factory(pi: ExtensionAPI): void {
 			_onUpdate,
 			ctx: ExtensionContext,
 		): Promise<AgentToolResult<SearchResult[]>> {
+			const filterError = domainFilterError(params);
+			if (filterError) return { content: [{ type: "text", text: filterError }], details: [] };
+			const filter = { allowedDomains: params.allowed_domains, blockedDomains: params.blocked_domains };
 			// Trust-aware read: project settings (which could override provider/apiKeyEnv)
 			// are honoured ONLY when the project is trusted. This prevents an untrusted
 			// repo from pointing apiKeyEnv at an unrelated secret to exfiltrate it.
@@ -239,7 +271,7 @@ export function factory(pi: ExtensionAPI): void {
 				// timeout the keyed providers get. The old `?? new AbortController().signal`
 				// substituted a signal that is never aborted, so a stalled endpoint hung
 				// the turn with no bound at all.
-				const keylessResults = await exaMcpSearch(params.query, fetch, signal);
+				const keylessResults = await exaMcpSearch(params.query, fetch, signal, filter);
 				return {
 					content: [{ type: "text", text: renderResults(params.query, keylessResults) }],
 					details: keylessResults,
@@ -250,6 +282,7 @@ export function factory(pi: ExtensionAPI): void {
 				provider,
 				apiKey,
 				signal,
+				...filter,
 			});
 			return {
 				content: [{ type: "text", text: renderResults(params.query, results) }],

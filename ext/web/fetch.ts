@@ -8,17 +8,20 @@
  * private IP. Two layers enforce this:
  *   1. `assertAllowedUrl` — a fast, pure, DNS-free reject of bad schemes,
  *      localhost, and literal private-IP hosts.
- *   2. A runtime-dependent DNS guard on the original request AND every redirect
- *      hop:
- *      - Node: a per-request undici dispatcher whose `connect.lookup` validates
- *        the CONNECTED IP (TOCTOU-safe — undici connects to exactly the address
- *        the lookup returned, and re-runs it per hop).
- *      - Bun: the native fetch IGNORES undici's `dispatcher`, so redirects are
- *        followed manually (`fetchGuardedRedirects`) with `assertAllowedUrl` +
- *        an all-addresses DNS validation per hop. Residual TOCTOU: Bun
- *        re-resolves internally, so a DNS answer could change between the check
- *        and the connect — far narrower than no guard, but weaker than Node's
- *        connect-layer path.
+ *   2. A DNS guard on the original request AND every redirect hop. Redirects are
+ *      always followed manually (`fetchGuardedRedirects`) with `assertAllowedUrl`
+ *      + an all-addresses DNS validation per hop, and a hop to a DIFFERENT host
+ *      is reported back to the model rather than followed (Claude Code parity):
+ *      a `WebFetch(domain:…)` rule approved one host, and a 302 must not be able
+ *      to turn that into a fetch of any other.
+ *      - Node additionally routes every hop through a per-request undici
+ *        dispatcher whose `connect.lookup` validates the CONNECTED IP
+ *        (TOCTOU-safe — undici connects to exactly the address the lookup
+ *        returned).
+ *      - Bun's native fetch IGNORES undici's `dispatcher`, so it has only the
+ *        per-hop DNS check. Residual TOCTOU: Bun re-resolves internally, so a
+ *        DNS answer could change between the check and the connect — far
+ *        narrower than no guard, but weaker than Node's connect-layer path.
  */
 
 import { lookup as dnsLookup } from "node:dns";
@@ -29,6 +32,10 @@ import { Agent, fetch as undiciFetch } from "undici";
 import { htmlToMarkdown } from "./html-to-md.ts";
 
 const USER_AGENT = `pi/${VERSION}`;
+// Prefer prose the converter handles well; text/markdown is what a growing number
+// of docs hosts serve to agents that ask for it, sparing the HTML round-trip.
+const ACCEPT =
+	"text/html, application/xhtml+xml, text/markdown;q=0.9, text/plain;q=0.8, application/json;q=0.7, */*;q=0.5";
 const DEFAULT_MAX_BYTES = 2_000_000;
 // Hard ceiling regardless of a caller-supplied maxBytes: `webfetch` is
 // prompt-injectable, so a runaway request must not be able to buffer an
@@ -44,6 +51,8 @@ export interface WebfetchResult {
 	text: string;
 	/** True when served from the in-memory 15-minute cache. */
 	cached?: boolean;
+	/** Set when the URL redirected to another host: `text` is a notice, nothing was fetched from it. */
+	redirectedTo?: string;
 }
 
 // ── 15-minute result cache (CC parity, audit B.9) ───────────────────────────
@@ -272,11 +281,11 @@ function makeSafeAgent(): Agent {
 }
 
 /** Bun's native fetch ignores undici's `dispatcher`, so the connect-layer guard
- * never runs there — those requests must go through `fetchGuardedRedirects`. */
+ * never runs there — only the per-hop DNS check in `fetchGuardedRedirects` does. */
 const IS_BUN = typeof process.versions.bun === "string";
 
-/** Max manual redirect hops on the Bun path (undici's own default is 20; tighter
- * is safer for a prompt-injectable tool). */
+/** Max redirect hops (undici's own default is 20; tighter is safer for a
+ * prompt-injectable tool). */
 const MAX_REDIRECTS = 5;
 
 /**
@@ -295,11 +304,25 @@ async function assertPublicDns(hostname: string): Promise<void> {
 	}
 }
 
+/** Thrown by `fetchGuardedRedirects` when a hop leaves the original host. */
+export class CrossHostRedirect extends Error {
+	from: string;
+	status: number;
+	to: string;
+	constructor(from: string, status: number, to: string) {
+		super(`webfetch: ${from} redirects (${status}) to another host: ${to}`);
+		this.from = from;
+		this.status = status;
+		this.to = to;
+	}
+}
+
 /**
- * Bun-path replacement for the dispatcher guard: fetch with redirect:"manual"
- * and follow up to MAX_REDIRECTS hops, running `assertAllowedUrl` (scheme /
- * localhost / literal-IP) plus an all-addresses DNS validation on EVERY hop.
- * Exported for tests (fetchImpl/resolveHost injectable).
+ * Fetch with redirect:"manual" and follow up to MAX_REDIRECTS hops, running
+ * `assertAllowedUrl` (scheme / localhost / literal-IP) plus an all-addresses DNS
+ * validation on EVERY hop. Same-host hops (a path move, an http→https upgrade)
+ * are followed; a hop to another host throws `CrossHostRedirect` so the caller
+ * can report it instead. Exported for tests (fetchImpl/resolveHost injectable).
  */
 export async function fetchGuardedRedirects(
 	url: URL,
@@ -314,7 +337,9 @@ export async function fetchGuardedRedirects(
 		const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
 		if (location === null) return res;
 		await res.body?.cancel().catch(() => {});
-		current = assertAllowedUrl(new URL(location, current).href);
+		const next = assertAllowedUrl(new URL(location, current).href);
+		if (next.hostname !== current.hostname) throw new CrossHostRedirect(current.href, res.status, next.href);
+		current = next;
 	}
 	throw new Error(`webfetch: too many redirects for ${url.href}`);
 }
@@ -330,6 +355,33 @@ function classifyContentType(contentType: string): "html" | "text" | "binary" {
 	if (type === "application/xml" || type.endsWith("+xml")) return "text";
 	if (type === "application/javascript" || type === "application/ecmascript") return "text";
 	return "binary";
+}
+
+/** `charset=` from a content-type header or a <meta> tag's content attribute. */
+function charsetParam(value: string): string | undefined {
+	return /charset\s*=\s*["']?([\w.:-]+)/i.exec(value)?.[1];
+}
+
+/**
+ * Decode a body with the charset the response declares — the content-type
+ * header first, then a `<meta charset>` / `<meta http-equiv>` in the first
+ * 2KB — falling back to utf-8 for none or an unknown label. Exported for tests.
+ */
+export function decodeBody(bytes: Uint8Array, contentType: string): string {
+	let label = charsetParam(contentType);
+	if (!label) {
+		// Sniff as latin1: every byte maps to one char, so the ASCII markup is intact.
+		const head = new TextDecoder("latin1").decode(bytes.subarray(0, 2048));
+		label = /<meta\b[^>]*\bcharset\s*=\s*["']?([\w.:-]+)/i.exec(head)?.[1];
+	}
+	if (label) {
+		try {
+			return new TextDecoder(label, { fatal: false }).decode(bytes);
+		} catch {
+			// Unknown or unsupported label: fall through to utf-8.
+		}
+	}
+	return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 }
 
 /** Read the response body, stopping once `cap` bytes are collected. */
@@ -389,13 +441,18 @@ function unwrapFetchError(err: unknown): Error {
  * Fetch `urlStr` and return it as text/Markdown. Throws on any failure (bad
  * scheme, private IP, network error, non-2xx) — never returns an error as success.
  *
- * `fetchImpl` is injectable for tests. The default is runtime-dependent:
+ * A redirect to another host is not followed: the result carries `redirectedTo`
+ * and a notice as `text`, and is not cached, so the model can decide whether
+ * to fetch the new location.
+ *
+ * `fetchImpl` / `resolveHost` are injectable for tests. The default fetch is
+ * runtime-dependent:
  *   - Node: the pinned undici package's own fetch — it must share an instance
  *     with `makeSafeAgent`'s Agent, because Node's BUILT-IN fetch given a
  *     foreign-instance dispatcher silently skips response decompression
  *     (content-encoding gets stripped while the body stays compressed).
- *   - Bun: the native fetch (no dispatcher support; `fetchGuardedRedirects`
- *     provides the guard instead).
+ *   - Bun: the native fetch (no dispatcher support; the per-hop DNS check in
+ *     `fetchGuardedRedirects` is the only guard).
  */
 export async function webFetch(
 	urlStr: string,
@@ -403,6 +460,7 @@ export async function webFetch(
 		maxBytes?: number;
 		signal?: AbortSignal;
 		fetchImpl?: typeof fetch;
+		resolveHost?: (hostname: string) => Promise<void>;
 	} = {},
 ): Promise<WebfetchResult> {
 	const url = assertAllowedUrl(urlStr);
@@ -416,19 +474,30 @@ export async function webFetch(
 	const agent = IS_BUN ? undefined : makeSafeAgent();
 	try {
 		const baseInit: RequestInit = {
-			headers: { "User-Agent": USER_AGENT },
+			headers: { "User-Agent": USER_AGENT, Accept: ACCEPT },
 			signal,
+			...(agent ? ({ dispatcher: agent } as unknown as RequestInit) : {}),
 		};
 		let res: Response;
 		try {
-			res = agent
-				? await fetchImpl(url, {
-						...baseInit,
-						dispatcher: agent,
-						redirect: "follow",
-					} as unknown as RequestInit)
-				: await fetchGuardedRedirects(url, baseInit, fetchImpl);
+			res = await fetchGuardedRedirects(url, baseInit, fetchImpl, opts.resolveHost);
 		} catch (err) {
+			if (err instanceof CrossHostRedirect) {
+				return {
+					url: url.href,
+					contentType: "",
+					bytes: 0,
+					truncated: false,
+					redirectedTo: err.to,
+					text: [
+						"REDIRECT DETECTED: the URL redirects to another host, which was not fetched.",
+						`Original URL: ${err.from}`,
+						`Status: ${err.status}`,
+						`Redirects to: ${err.to}`,
+						"The target was supplied by the fetched server. If it is plainly where the requested page now lives, fetch it with a new webfetch call; otherwise report the redirect.",
+					].join("\n"),
+				};
+			}
 			throw unwrapFetchError(err);
 		}
 		if (!res.ok) {
@@ -450,7 +519,7 @@ export async function webFetch(
 			};
 		}
 		const { bytes, truncated } = await readCappedBody(res, cap);
-		const decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+		const decoded = decodeBody(bytes, contentType);
 		let text = kind === "html" ? htmlToMarkdown(decoded) : decoded;
 		if (truncated) text += `\n\n[webfetch: output truncated at ${cap} bytes]`;
 		const result: WebfetchResult = {

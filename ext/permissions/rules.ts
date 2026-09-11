@@ -126,7 +126,13 @@ export function parseRuleSpec(spec: string): { tool: string; input: Record<strin
 	const tool = Object.keys(VERB).find((t) => VERB[t].toLowerCase() === verb);
 	if (!tool) return undefined;
 	if (tool === "bash") return { tool, input: { command: subj } };
-	if (tool === "webfetch") return { tool, input: { url: subj } };
+	if (tool === "webfetch") {
+		// `WebFetch(domain:example.com)` (Claude Code's spelling) names a host, not a
+		// url; hand back a url on that host so the spec is validated by the same
+		// matcher that will later govern live calls.
+		const domain = domainSpec(subj);
+		return { tool, input: { url: domain !== undefined ? `https://${domain}/` : subj } };
+	}
 	if (tool === "websearch") return { tool, input: { query: subj } };
 	return { tool, input: { path: subj } };
 }
@@ -164,7 +170,31 @@ export function subject(tool: string, input: Record<string, unknown>): string {
  */
 export function exactRule(tool: string, subj: string): string | null {
 	const verb = verbFor(tool);
-	return verb ? `${verb}(${subj})` : null;
+	if (!verb) return null;
+	// "Always allow" on a fetch persists the HOST, not the full url (Claude Code
+	// parity): a rule pinned to `https://docs.x.com/page?v=3` would never fire again.
+	if (tool === "webfetch") {
+		const host = urlHost(subj);
+		if (host !== undefined) return `${verb}(domain:${host})`;
+	}
+	return `${verb}(${subj})`;
+}
+
+/** The `<domain>` of a `domain:<domain>` rule subject, or undefined for a url-shaped one. */
+function domainSpec(ruleSubject: string): string | undefined {
+	const m = /^domain:\s*(.+)$/i.exec(ruleSubject.trim());
+	return m ? m[1].trim().toLowerCase() : undefined;
+}
+
+/** Lowercase hostname of a url (IPv6 brackets stripped), or undefined when it does not parse. */
+function urlHost(url: string): string | undefined {
+	try {
+		const host = new URL(url).hostname.toLowerCase();
+		if (!host) return undefined;
+		return host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+	} catch {
+		return undefined;
+	}
 }
 
 /**
@@ -490,6 +520,15 @@ export function decide(rules: Rules, tool: string, input: Record<string, unknown
 			// casing (RULE_SHAPE is [A-Za-z]+), so `bash(**)` would otherwise be
 			// stored, listed, and silently never enforced.
 			if (m === null || m[1].toLowerCase() !== verb.toLowerCase()) return false;
+			// A `domain:` fetch rule is matched against the url's HOST alone, so it
+			// covers every path and port there — the only shape worth persisting.
+			if (verb === "WebFetch") {
+				const domain = domainSpec(m[2]);
+				if (domain !== undefined) {
+					const host = urlHost(subj);
+					return host !== undefined && globToRegExp(domain).test(host);
+				}
+			}
 			// Bash subjects are command strings, not paths.
 			const pattern = globToRegExp(m[2], !isBash);
 			if (pattern.test(subj)) {
