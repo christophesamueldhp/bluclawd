@@ -63,8 +63,11 @@
  * message_end, so the branch as of turn_start still ends at the PREVIOUS
  * prompt. Reading it there labelled every prompt's first checkpoint with the
  * prompt before it ("(session start)" for the first) and gave the fork-point
- * offer a turnEntryId that never matched the forked-at user message. The git
- * calls always outlast that persistence, so the post-capture branch has it.
+ * offer a turnEntryId that never matched the forked-at user message. That
+ * persistence is synchronous continuation work in the agent loop while the
+ * capture needs several child-process round trips, so in practice the
+ * post-capture branch always has it (a slow message_start handler in another
+ * extension is the only way to narrow that gap).
  * A module-scoped `isCapturing` guard (same idea as statusline's `isRefreshing`)
  * drops an overlapping turn_start capture while one is still in flight, bounding
  * concurrent git subprocesses to one; the next turn tries again. This guard does
