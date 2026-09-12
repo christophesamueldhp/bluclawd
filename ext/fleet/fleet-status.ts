@@ -70,8 +70,10 @@ export function relativeTime(iso: string | undefined, nowMs: number): string {
 export function sortForRoster<
 	T extends { status: InstanceStatus; activity?: AgentActivity; lastSeenAt?: string; createdAt?: string },
 >(instances: T[]): T[] {
+	// Live but not yet/no longer online (starting, stopping) ranks with idle, so every live row
+	// sits above every saved one — the roster's Running / Saved split relies on that boundary.
 	const rank = (i: T): number => {
-		if (i.status !== "online") return 3;
+		if (!isLive(i)) return 3;
 		if (i.activity === "awaiting_input") return 0;
 		if (i.activity === "working") return 1;
 		return 2;

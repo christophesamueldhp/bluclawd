@@ -149,6 +149,15 @@ describe("FleetView roster (Claude Code /resume style)", () => {
 		expect(lines.findIndex((l) => l.includes("deploy"))).toBeGreaterThan(running);
 		expect(lines.findIndex((l) => l.includes("deploy"))).toBeLessThan(saved);
 		expect(lines.findIndex((l) => l.includes("fix theme"))).toBeGreaterThan(saved);
+		// A row that is starting (ctrl+r just resumed it) is live: it sorts and sits under Running.
+		view.setInstancesForTest([
+			...rows,
+			{ id: "live:boot", status: "starting", cwd: HERE, label: "booting", lastSeenAt: ago(0) },
+		]);
+		const withStarting = text();
+		const bootRow = withStarting.findIndex((l) => l.includes("booting"));
+		expect(withStarting.findIndex((l) => l.trim() === "Running · 3")).toBeLessThan(bootRow);
+		expect(bootRow).toBeLessThan(withStarting.findIndex((l) => l.trim() === "Saved · 2"));
 		// A group with nothing in it gets no header.
 		view.setInstancesForTest(rows.filter((r) => r.status === "stopped"));
 		expect(text().some((l) => l.trim().startsWith("Running"))).toBe(false);
