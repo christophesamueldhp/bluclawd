@@ -413,7 +413,9 @@ export async function restoreCheckpoint(cwd: string, exec: ExtensionAPI["exec"],
  *   - `<sha>` directly under the prefix (legacy flat layout): same rule, so an
  *     upgraded repo converges without a migration.
  *   - `<otherSession>/<sha>`: delete only when the commit is older than
- *     FOREIGN_CHECKPOINT_TTL_DAYS.
+ *     FOREIGN_CHECKPOINT_TTL_DAYS. A ref with no committer date (not a
+ *     commit) parses to NaN, fails the comparison, and is KEPT — the safe
+ *     direction. Session ids are UUIDs, so the first `/` splits owner and sha.
  * Returns the number of refs removed. Never throws.
  */
 export async function pruneCheckpointRefs(
