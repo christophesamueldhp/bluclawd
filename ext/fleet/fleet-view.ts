@@ -101,6 +101,18 @@ export interface FleetViewOptions {
 	/** "Delete" a session from FleetView — hides it from the list; the .jsonl stays on disk. */
 	hideSession?: (sessionFile: string) => void;
 	onAttach?: (instanceId: string, label: string) => void;
+	/** Last-activity time for a live row that reports none (daemon children, self-registered
+	 *  windows): the session file's modified time, so the details line reads "5m ago" like a
+	 *  saved row's. Defaults to fs.stat; injectable for tests. */
+	fileModifiedAt?: (sessionFile: string) => string | undefined;
+}
+
+function statModifiedAt(path: string): string | undefined {
+	try {
+		return statSync(path).mtime.toISOString();
+	} catch {
+		return undefined;
+	}
 }
 
 /** Minimum time an action-result `notice` stays on screen before it can self-clear
@@ -292,6 +304,14 @@ export class FleetView implements Component, Focusable {
 		return this.search.getValue();
 	}
 
+	/** Fill in a missing last-activity time from the session file (see `fileModifiedAt`). */
+	private withActivityTime(instances: InstanceSummary[]): InstanceSummary[] {
+		const modifiedAt = this.opts.fileModifiedAt ?? statModifiedAt;
+		return instances.map((inst) =>
+			inst.lastSeenAt || !inst.sessionFile ? inst : { ...inst, lastSeenAt: modifiedAt(inst.sessionFile) },
+		);
+	}
+
 	private recompute(): void {
 		const scoped = this.allProjects ? this.instances : this.instances.filter((i) => i.cwd === this.opts.cwd);
 		const query = this.query;
@@ -322,7 +342,10 @@ export class FleetView implements Component, Focusable {
 			// a saved row when the same file is already live. Then drop any "deleted" (hidden)
 			// session — applied to the WHOLE list so a hidden one can't sneak back in via a daemon
 			// row (a stored stopped/Done row, or a re-backgrounded child).
-			const merged = dedupeBySessionFile([...(await this.opts.client.list()), ...this.savedSessions]);
+			const merged = dedupeBySessionFile([
+				...this.withActivityTime(await this.opts.client.list()),
+				...this.savedSessions,
+			]);
 			this.instances = merged.filter((i) => !(i.sessionFile && this.hidden.has(i.sessionFile)));
 			// `notice` is intentionally NOT cleared here — it self-expires on its own dwell timer
 			// (setNotice()/IMPROVEMENT-PLAN.md §5.1g) so a fast successful poll can't wipe an error
@@ -699,7 +722,7 @@ export class FleetView implements Component, Focusable {
 
 	/** Test seam: inject a known instance list without hitting the socket. */
 	setInstancesForTest(instances: InstanceSummary[]): void {
-		this.instances = dedupeBySessionFile(instances);
+		this.instances = dedupeBySessionFile(this.withActivityTime(instances));
 		this.recompute();
 	}
 

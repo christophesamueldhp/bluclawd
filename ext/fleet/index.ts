@@ -34,7 +34,7 @@ import { AttachView } from "./attach-view.ts";
 import { FleetView } from "./fleet-view.ts";
 import { OrchestratorClient } from "./orchestrator-client.ts";
 import { hideSession, loadHiddenSessions, toSavedSummaries } from "./saved-sessions.ts";
-import { FleetSelfRegistration, type SelfSessionInfo } from "./self-registration.ts";
+import { deriveLabel, FleetSelfRegistration, ForegroundActivity, type SelfSessionInfo } from "./self-registration.ts";
 
 /** What the daemon needs to keep the outgoing session running in the background. */
 interface BackgroundableSession {
@@ -72,12 +72,15 @@ const fleet: InlineExtension = {
 	name: "fleet",
 	factory: (pi) => {
 		let registration: FleetSelfRegistration | undefined;
+		// What this window is doing, as every other FleetView sees it. Without this feed the
+		// self-registered row (and every other open window) reads "Idle" forever.
+		let activity = new ForegroundActivity();
 
 		const selfInfo = (ctx: ExtensionCommandContext): SelfSessionInfo => ({
 			cwd: ctx.sessionManager.getCwd(),
 			sessionId: ctx.sessionManager.getSessionId(),
 			sessionFile: ctx.sessionManager.getSessionFile(),
-			label: ctx.sessionManager.getSessionName(),
+			label: deriveLabel(ctx.sessionManager.getSessionName(), ctx.sessionManager.getEntries()),
 		});
 
 		/**
@@ -114,11 +117,21 @@ const fleet: InlineExtension = {
 			setSharedTheme(ctx.ui.theme);
 			if (!ctx.hasUI) return; // the roster is a TUI affordance
 			registration?.stop();
+			activity = new ForegroundActivity();
 			registration = new FleetSelfRegistration(new OrchestratorClient(), () =>
 				selfInfo(ctx as ExtensionCommandContext),
 			);
 			registration.start();
 		});
+
+		const track = (event: { type: string; kind?: string }): void => {
+			registration?.setActivity(activity.apply(event));
+		};
+		pi.on("agent_start", track);
+		pi.on("turn_start", track);
+		pi.on("agent_settled", track);
+		pi.on("ui_prompt_start", track);
+		pi.on("ui_prompt_end", track);
 
 		pi.on("session_shutdown", () => {
 			registration?.stop();

@@ -247,3 +247,34 @@ describe("FleetView roster (Claude Code /resume style)", () => {
 		expect(view.selectedIdForTest()).toBe("live:work");
 	});
 });
+
+describe("live rows without a timestamp", () => {
+	it("take the session file's modified time, so a live row reads '5m ago' like a saved one", () => {
+		const ui = { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI;
+		const view = new FleetView({
+			ui,
+			client: {} as OrchestratorClient,
+			appName: "pi",
+			cwd: HERE,
+			home: HOME,
+			mascotLines: null,
+			onClose: () => {},
+			onJumpIn: () => {},
+			fileModifiedAt: (path) => (path === "/s/live.jsonl" ? ago(5) : undefined),
+		});
+		view.setInstancesForTest([
+			{
+				id: "live:1",
+				status: "online",
+				activity: "working",
+				cwd: HERE,
+				label: "live",
+				sessionFile: "/s/live.jsonl",
+			},
+			{ id: "live:2", status: "online", activity: "idle", cwd: HERE, label: "nofile" },
+		]);
+		const text = view.render(80).map(stripAnsi).join("\n");
+		expect(text).toContain("5m ago");
+		expect(text).not.toContain("NaN");
+	});
+});
