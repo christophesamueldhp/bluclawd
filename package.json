@@ -24,7 +24,7 @@
     "themes": ["./themes"]
   },
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "0.0.26",
+    "@anthropic-ai/sandbox-runtime": "0.0.76",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@silvia-odwyer/photon-node": "0.3.4",
     "diff": "8.0.4",

@@ -6,35 +6,42 @@
  * --no-sandbox > --sandbox > settings.enabled > default off.
  */
 
-import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
+import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { SandboxSettings } from "../_shared/settings.ts";
+import { decide } from "../permissions/rules.ts";
 
 export interface SandboxConfig extends SandboxSettings {
 	enabled: boolean;
-	strict: boolean;
+	failIfUnavailable: boolean;
+	excludedCommands: string[];
+	allowUnsandboxedCommands: boolean;
+	autoAllowBashIfSandboxed: boolean;
+	network: SandboxRuntimeConfig["network"];
+	filesystem: SandboxRuntimeConfig["filesystem"];
 }
 
-/** Conservative defaults applied under user/project overrides (donor: examples/extensions/sandbox). */
+/**
+ * Claude Code's defaults. No domain is pre-allowed: the first connection to a
+ * host prompts (see the ask callback in index.ts), which is how Claude Code
+ * behaves too. The write/read lists are the fork's long-standing conservative
+ * set plus the agent's own credentials.
+ */
 export const DEFAULT_SANDBOX_CONFIG: SandboxConfig = {
 	enabled: false,
-	strict: false,
+	failIfUnavailable: false,
+	excludedCommands: [],
+	allowUnsandboxedCommands: true,
+	autoAllowBashIfSandboxed: true,
 	network: {
-		allowedDomains: [
-			"npmjs.org",
-			"*.npmjs.org",
-			"registry.npmjs.org",
-			"registry.yarnpkg.com",
-			"pypi.org",
-			"*.pypi.org",
-			"github.com",
-			"*.github.com",
-			"api.github.com",
-			"raw.githubusercontent.com",
-		],
+		allowedDomains: [],
 		deniedDomains: [],
 	},
 	filesystem: {
-		denyRead: ["~/.ssh", "~/.aws", "~/.gnupg"],
+		// The agent's own provider credentials. The permission layer gates the
+		// read tool on this file, but a bash `cat` is only stopped here.
+		denyRead: ["~/.ssh", "~/.aws", "~/.gnupg", join(getAgentDir(), "auth.json")],
 		allowWrite: [".", "/tmp"],
 		denyWrite: [
 			".env",
@@ -56,7 +63,7 @@ export const DEFAULT_SANDBOX_CONFIG: SandboxConfig = {
 };
 
 /** Union preserving order, first occurrence wins. */
-function mergeDeny(defaults: string[] | undefined, overrides: string[] | undefined): string[] {
+function union(defaults: string[] | undefined, overrides: string[] | undefined): string[] {
 	return [...new Set([...(defaults ?? []), ...(overrides ?? [])])];
 }
 
@@ -71,45 +78,81 @@ export function resolveSandboxConfig(
 	settings: SandboxSettings | undefined,
 	flags: SandboxFlagOverrides = {},
 ): SandboxConfig {
+	const d = DEFAULT_SANDBOX_CONFIG;
 	const config: SandboxConfig = {
-		...DEFAULT_SANDBOX_CONFIG,
+		...d,
 		...settings,
-		enabled: settings?.enabled ?? DEFAULT_SANDBOX_CONFIG.enabled,
-		strict: settings?.strict ?? DEFAULT_SANDBOX_CONFIG.strict,
-		network: { ...DEFAULT_SANDBOX_CONFIG.network, ...settings?.network },
+		enabled: settings?.enabled ?? d.enabled,
+		failIfUnavailable: settings?.failIfUnavailable ?? settings?.strict ?? d.failIfUnavailable,
+		excludedCommands: union(d.excludedCommands, settings?.excludedCommands),
+		allowUnsandboxedCommands: settings?.allowUnsandboxedCommands ?? d.allowUnsandboxedCommands,
+		autoAllowBashIfSandboxed: settings?.autoAllowBashIfSandboxed ?? d.autoAllowBashIfSandboxed,
+		network: {
+			...d.network,
+			...settings?.network,
+			allowedDomains: union(d.network.allowedDomains, settings?.network?.allowedDomains),
+			deniedDomains: union(d.network.deniedDomains, settings?.network?.deniedDomains),
+		},
+		// Lists ADD to the built-ins, as Claude Code merges them across scopes. Plain
+		// spread meant that naming a single pattern of your own silently dropped every
+		// default protection — including the agent-config and git-hooks entries above,
+		// which exist precisely to be hard to lose.
 		filesystem: {
-			...DEFAULT_SANDBOX_CONFIG.filesystem,
+			...d.filesystem,
 			...settings?.filesystem,
-			// Deny lists ADD to the built-ins. Plain spread meant that naming a
-			// single pattern of your own silently dropped every default protection
-			// — including the agent-config and git-hooks entries above, which exist
-			// precisely to be hard to lose. allowWrite stays a plain override: it is
-			// a grant, and the user owns their workspace layout.
-			denyWrite: mergeDeny(DEFAULT_SANDBOX_CONFIG.filesystem?.denyWrite, settings?.filesystem?.denyWrite),
-			denyRead: mergeDeny(DEFAULT_SANDBOX_CONFIG.filesystem?.denyRead, settings?.filesystem?.denyRead),
+			denyWrite: union(d.filesystem.denyWrite, settings?.filesystem?.denyWrite),
+			denyRead: union(d.filesystem.denyRead, settings?.filesystem?.denyRead),
+			allowWrite: union(d.filesystem.allowWrite, settings?.filesystem?.allowWrite),
 		},
 	};
+	delete config.strict;
 	if (flags.sandbox) config.enabled = true;
 	if (flags.noSandbox) config.enabled = false;
 	return config;
 }
 
+/** The part of the config the runtime takes; bluclawd's own keys stay behind. */
+export function runtimeConfig(config: SandboxConfig): SandboxRuntimeConfig {
+	const {
+		enabled: _enabled,
+		failIfUnavailable: _fail,
+		strict: _strict,
+		excludedCommands: _excluded,
+		allowUnsandboxedCommands: _unsandboxed,
+		autoAllowBashIfSandboxed: _auto,
+		...runtime
+	} = config;
+	return runtime;
+}
+
+/**
+ * Does `excludedCommands` take this command out of the sandbox? Each entry is the
+ * content of a `Bash(...)` rule, and a match on ANY part of a compound command
+ * excludes the whole command (Claude Code's rule) — exactly a deny rule's reach,
+ * so the deny matcher is the matcher.
+ */
+export function isExcludedCommand(command: string, excludedCommands: string[]): boolean {
+	if (excludedCommands.length === 0) return false;
+	return decide({ deny: excludedCommands.map((p) => `Bash(${p})`) }, "bash", { command }) === "deny";
+}
+
 /**
  * Why bash must refuse, or undefined when it may run.
  *
- * Under `sandbox.strict`, a sandbox that was asked for but did not start makes bash
- * refuse rather than run unconfined. The default is still the unsandboxed fallback,
- * because that is what a missing bubblewrap on a Linux box has always done and silently
- * breaking those sessions would be worse than the risk. But "enabled" and "actually
- * confining anything" are different states, and a status chip is the wrong place to
- * learn which one you are in — someone who set `enabled: true` to contain a command has
- * no reason to expect it to run anyway. `strict` makes the two states agree.
+ * Under `sandbox.failIfUnavailable`, a sandbox that was asked for but did not start
+ * makes bash refuse rather than run unconfined. The default is still the unsandboxed
+ * fallback, because that is what a missing bubblewrap on a Linux box has always done
+ * and silently breaking those sessions would be worse than the risk. But "enabled" and
+ * "actually confining anything" are different states, and a status chip is the wrong
+ * place to learn which one you are in — someone who set `enabled: true` to contain a
+ * command has no reason to expect it to run anyway. `failIfUnavailable` makes the two
+ * states agree.
  */
 export function strictRefusalReason(
-	config: Pick<SandboxConfig, "enabled" | "strict">,
+	config: Pick<SandboxConfig, "enabled" | "failIfUnavailable">,
 	active: boolean,
 	lastError?: string,
 ): string | undefined {
-	if (!config.enabled || !config.strict || active) return undefined;
-	return `Refusing to run: sandbox.strict is set, the sandbox is enabled but not active${lastError ? ` (${lastError})` : ""}. Fix the sandbox, or clear sandbox.strict to allow unsandboxed execution.`;
+	if (!config.enabled || !config.failIfUnavailable || active) return undefined;
+	return `Refusing to run: sandbox.failIfUnavailable is set, the sandbox is enabled but not active${lastError ? ` (${lastError})` : ""}. Fix the sandbox, or clear sandbox.failIfUnavailable to allow unsandboxed execution.`;
 }

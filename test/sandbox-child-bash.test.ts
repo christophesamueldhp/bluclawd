@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { childBashExtension } from "../ext/sandbox/child-bash.ts";
+import { createChildBashExtension } from "../ext/sandbox/child-bash.ts";
 import { publishChildBash } from "../ext/sandbox/state.ts";
 
 function load() {
 	const tools: any[] = [];
-	const factory = typeof childBashExtension === "function" ? childBashExtension : childBashExtension.factory;
+	const ext = createChildBashExtension(process.cwd());
+	const factory = typeof ext === "function" ? ext : ext.factory;
 	factory({ registerTool: (t: any) => tools.push(t) } as any);
 	return tools;
 }

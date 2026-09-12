@@ -59,8 +59,8 @@ type MonitorParams = { command: string; description: string; timeout?: number; p
 export interface MonitorToolDeps {
 	sendMessage: (message: OutgoingMessage<unknown>, options: typeof EVENT_DELIVERY) => void;
 	cwd: string;
-	/** Resolved per call so the sandbox state at call time decides the operations. */
-	exec: () => BackgroundExec;
+	/** Resolved per call so the sandbox state (and the command) at call time decides the operations. */
+	exec: (command: string) => BackgroundExec;
 	/** A reason to refuse (sandbox.strict), or undefined to proceed. */
 	refuse: () => string | undefined;
 	registry?: BackgroundJobRegistry;
@@ -124,7 +124,7 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 			current = registry.start({
 				command: params.command,
 				cwd: deps.cwd,
-				exec: deps.exec(),
+				exec: deps.exec(params.command),
 				description: params.description,
 				timeout,
 				kind: "monitor",

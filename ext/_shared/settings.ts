@@ -14,22 +14,30 @@
  * project is not trusted, so a reader here can never see an untrusted project's
  * values.
  */
+import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { SettingsManager } from "@earendil-works/pi-coding-agent";
 
-/** Sandbox settings, passed through to @anthropic-ai/sandbox-runtime. */
-export interface SandboxSettings {
+/**
+ * Sandbox settings: Claude Code's `sandbox` keys. Everything the runtime
+ * understands passes straight through (typed against its own config so a
+ * renamed key is a compile error here, and an unknown one an init failure
+ * there); the keys below are the ones Claude Code adds on top.
+ */
+export interface SandboxSettings extends Partial<Omit<SandboxRuntimeConfig, "network" | "filesystem">> {
 	enabled?: boolean; // default: false — sandboxing is opt-in
 	/** Refuse to run bash at all when the sandbox is enabled but failed to start.
 	 *  default: false — the historical behaviour is an unsandboxed fallback. */
+	failIfUnavailable?: boolean;
+	/** Former name of failIfUnavailable; still honoured. */
 	strict?: boolean;
-	network?: { allowedDomains?: string[]; deniedDomains?: string[] };
-	filesystem?: {
-		denyRead?: string[];
-		allowWrite?: string[];
-		denyWrite?: string[];
-	};
-	ignoreViolations?: Record<string, string[]>;
-	enableWeakerNestedSandbox?: boolean;
+	/** `Bash(...)` rule patterns (`docker *`) that always run outside the sandbox. */
+	excludedCommands?: string[];
+	/** Honour the bash tool's `dangerouslyDisableSandbox` retry. default: true */
+	allowUnsandboxedCommands?: boolean;
+	/** Run sandboxed commands without a permission prompt. default: true */
+	autoAllowBashIfSandboxed?: boolean;
+	network?: Partial<SandboxRuntimeConfig["network"]>;
+	filesystem?: Partial<SandboxRuntimeConfig["filesystem"]>;
 }
 
 export interface PermissionSettings {
@@ -98,8 +106,44 @@ export function statusline(sm: SettingsManager): StatuslineSettings | undefined 
 }
 
 export function sandbox(sm: SettingsManager): SandboxSettings | undefined {
-	const value = merged(sm).sandbox as SandboxSettings | undefined;
-	return value ? structuredClone(value) : undefined;
+	const global = (sm.getGlobalSettings() as unknown as Mergeable).sandbox as SandboxSettings | undefined;
+	const project = (sm.getProjectSettings() as unknown as Mergeable).sandbox as SandboxSettings | undefined;
+	return mergeSandboxSettings(global, project);
+}
+
+/**
+ * Claude Code's scope merge for `sandbox`: arrays combine across scopes rather
+ * than one replacing the other, objects merge at any depth, scalars take the
+ * project's value. `allowAppleEvents` is the one key a project may not set —
+ * it removes code-execution isolation, so only the user's own settings count.
+ */
+export function mergeSandboxSettings(
+	global: SandboxSettings | undefined,
+	project: SandboxSettings | undefined,
+): SandboxSettings | undefined {
+	if (!global && !project) return undefined;
+	const out = deepMerge(
+		structuredClone(global ?? {}) as Mergeable,
+		structuredClone(project ?? {}) as Mergeable,
+	) as SandboxSettings;
+	if (project && "allowAppleEvents" in project) {
+		if (global?.allowAppleEvents === undefined) delete out.allowAppleEvents;
+		else out.allowAppleEvents = global.allowAppleEvents;
+	}
+	return out;
+}
+
+function deepMerge(base: Mergeable, overrides: Mergeable): Mergeable {
+	const out: Mergeable = { ...base };
+	for (const key of Object.keys(overrides)) {
+		const override = overrides[key];
+		if (override === undefined) continue;
+		const existing = out[key];
+		if (Array.isArray(existing) && Array.isArray(override)) out[key] = [...new Set([...existing, ...override])];
+		else if (isPlainObject(existing) && isPlainObject(override)) out[key] = deepMerge(existing, override);
+		else out[key] = override;
+	}
+	return out;
 }
 
 export function permissions(sm: SettingsManager): PermissionSettings | undefined {

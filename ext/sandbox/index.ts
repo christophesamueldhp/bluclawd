@@ -10,14 +10,22 @@
  * shell backend — foreground, background (run_in_background), and user `!`
  * commands all flow through the same operations seam, so all are sandboxed.
  *
+ * Claude Code's escape hatches, both settings-driven: `excludedCommands` (rule
+ * patterns that always run outside) and the bash tool's
+ * `dangerouslyDisableSandbox` retry (honoured unless
+ * `allowUnsandboxedCommands: false`; the permission layer decides whether the
+ * user is asked). Network: no host is pre-allowed — the first connection to a
+ * host asks the user, and a yes holds for the session.
+ *
  * Failure posture: if enabled but initialization fails (missing bubblewrap,
  * unsupported platform, ...), bash falls back to UNSANDBOXED execution with a
- * loud status chip and an error notice — unless `sandbox.strict` is set, in
- * which case bash refuses to run at all: the tool, background jobs and user `!`
- * commands each check strictRefusalReason. The runtime
- * dependency is imported lazily so disabled sessions pay no startup cost.
+ * loud status chip and an error notice — unless `sandbox.failIfUnavailable` is
+ * set, in which case bash refuses to run at all: the tool, background jobs and
+ * user `!` commands each check strictRefusalReason. The runtime dependency is
+ * imported lazily so disabled sessions pay no startup cost.
  */
 
+import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import {
 	type BashOperations,
@@ -29,16 +37,27 @@ import { type Static, Type } from "typebox";
 import { backgroundBashJobs } from "../_shared/background-bash.ts";
 import { EVENT_DELIVERY, shouldNotifyExit, tailOutput, taskExitMessage } from "../_shared/monitor-events.ts";
 import * as forkSettings from "../_shared/settings.ts";
-import { resolveSandboxConfig, type SandboxConfig, strictRefusalReason } from "./config.ts";
-import { buildSandboxFailureNote } from "./failure-note.ts";
+import {
+	isExcludedCommand,
+	resolveSandboxConfig,
+	runtimeConfig,
+	type SandboxConfig,
+	strictRefusalReason,
+} from "./config.ts";
+import {
+	buildSandboxFailureNote,
+	formatSandboxViolations,
+	looksLikeSandboxDenial,
+	relevantViolations,
+} from "./failure-note.ts";
 import { createMonitorTool } from "./monitor-tool.ts";
-import { isSandboxActive, publishChildBash, setSandboxActive } from "./state.ts";
+import { isSandboxActive, publishChildBash, publishSandboxPosture, setSandboxActive } from "./state.ts";
 
 /**
- * The two parameters bluclawd adds to pi's bash tool. Kept next to the
- * registration that owns the tool name so the pair cannot drift apart.
+ * The parameters bluclawd adds to pi's bash tool. Kept next to the
+ * registration that owns the tool name so the set cannot drift apart.
  */
-const BACKGROUND_BASH_PARAMS = Type.Object({
+const BASH_EXTRA_PARAMS = Type.Object({
 	description: Type.Optional(
 		Type.String({
 			description:
@@ -51,11 +70,23 @@ const BACKGROUND_BASH_PARAMS = Type.Object({
 				"Run the command in the background and return immediately with a task id. You are notified once when it exits (with its last lines of output); read more with bash_output; stop it with kill_bash.",
 		}),
 	),
+	dangerouslyDisableSandbox: Type.Optional(
+		Type.Boolean({
+			description:
+				"Set to true to retry a command OUTSIDE the OS sandbox after a sandboxed run failed with <sandbox_violations>. The user is asked first. Never use it pre-emptively.",
+		}),
+	),
 });
 
 /** How much of a finished job's output rides along with its exit notification. */
 const EXIT_TAIL_LINES = 20;
 const EXIT_TAIL_BYTES = 2048;
+
+/** How much of a command's output is kept to look for a denial message. */
+const DENIAL_SCAN_BYTES = 4096;
+/** How long a failed command waits for the violation monitor to catch up. */
+const VIOLATION_WAIT_MS = 400;
+const VIOLATION_POLL_MS = 50;
 
 type SandboxRuntime = typeof import("@anthropic-ai/sandbox-runtime");
 
@@ -76,25 +107,102 @@ export function factory(pi: ExtensionAPI): void {
 	let lastError: string | undefined;
 	let shellPath: string | undefined;
 	let commandPrefix: string | undefined;
+	// The ask callback is bound once at initialize; the context it prompts through
+	// is whichever session is live now.
+	let liveCtx: ExtensionContext | undefined;
+	// Hosts the user allowed this session (`host:port`), and prompts in flight so
+	// N parallel connections to one host raise one dialog, not N.
+	const sessionAllowedHosts = new Set<string>();
+	const pendingHostPrompts = new Map<string, Promise<boolean>>();
+
+	async function askHost(host: string, port: number): Promise<boolean> {
+		const key = `${host}:${port}`;
+		if (sessionAllowedHosts.has(key)) return true;
+		const pending = pendingHostPrompts.get(key);
+		if (pending) return pending;
+		const ctx = liveCtx;
+		if (!ctx?.hasUI) return false;
+		const prompt = ctx.ui
+			.confirm(
+				"Sandbox: allow network access?",
+				`A sandboxed command wants to connect to ${key}.\nAllow it for this session? The command is waiting on your answer and may time out.\nPre-allow hosts with sandbox.network.allowedDomains in settings.json.`,
+			)
+			.then((yes) => {
+				if (yes) sessionAllowedHosts.add(key);
+				return yes;
+			})
+			.catch(() => false)
+			.finally(() => pendingHostPrompts.delete(key));
+		pendingHostPrompts.set(key, prompt);
+		return prompt;
+	}
+
+	/**
+	 * The denial lines recorded for a command. The macOS log stream delivers with
+	 * a little latency (the first command after start can miss it entirely), so a
+	 * failed command waits briefly for its lines; a successful one never pays this.
+	 */
+	async function violationLines(commandId: string): Promise<string[]> {
+		const store = runtime?.SandboxManager.getSandboxViolationStore();
+		if (!store) return [];
+		for (let waited = 0; ; waited += VIOLATION_POLL_MS) {
+			const lines = store.getViolationsForCommand(commandId).map((v) => v.line);
+			if (relevantViolations(lines).length > 0 || waited >= VIOLATION_WAIT_MS) return lines;
+			await new Promise((resolve) => setTimeout(resolve, VIOLATION_POLL_MS));
+		}
+	}
 
 	function sandboxedOperations(): BashOperations {
 		const local = createLocalBashOperations({ shellPath });
 		return {
 			exec: async (command, cwd, options) => {
 				if (!runtime) throw new Error("Sandbox runtime not initialized");
-				const wrapped = await runtime.SandboxManager.wrapWithSandbox(command);
-				const result = await local.exec(wrapped, cwd, options);
-				// A failed command may well have been denied by the sandbox; say so,
-				// with the limits in force, so the model can adapt instead of retrying
-				// the same thing (see failure-note.ts for why the OS violation feed
-				// is not used).
-				if (result.exitCode !== 0) {
+				// Violations are attributed by this id (the runtime keys on the first 100
+				// chars of the command otherwise, so reruns would inherit old events).
+				const commandId = randomUUID();
+				const wrapped = await runtime.SandboxManager.wrapWithSandbox(command, undefined, undefined, undefined, {
+					commandId,
+					commandText: command,
+				});
+				let tail = "";
+				const result = await local.exec(wrapped, cwd, {
+					...options,
+					onData: (data) => {
+						tail = (tail + data.toString()).slice(-DENIAL_SCAN_BYTES);
+						options.onData(data);
+					},
+				});
+				if (result.exitCode === 0) return result;
+				// Name what the sandbox denied, as Claude Code does, so the model can
+				// adapt (or ask to retry unsandboxed) instead of retrying the same thing.
+				// The signature scan is the fallback for a denial the monitor missed.
+				const violations = relevantViolations(await violationLines(commandId));
+				if (violations.length > 0) {
+					options.onData(Buffer.from(formatSandboxViolations(violations)));
+				}
+				if (violations.length > 0 || looksLikeSandboxDenial(tail)) {
 					const note = buildSandboxFailureNote(config);
 					if (note) options.onData(Buffer.from(note));
 				}
 				return result;
 			},
 		};
+	}
+
+	const plainOperations = () => createLocalBashOperations({ shellPath });
+
+	/**
+	 * The operations a command runs through: the sandbox when it is active and
+	 * nothing takes the command out of it — an `excludedCommands` match, or the
+	 * model's `dangerouslyDisableSandbox` retry while `allowUnsandboxedCommands`
+	 * permits it. The permission layer has already decided whether the user was
+	 * asked about the retry.
+	 */
+	function operationsFor(command: string, disableSandbox = false): BashOperations {
+		if (!isSandboxActive()) return plainOperations();
+		if (isExcludedCommand(command, config.excludedCommands)) return plainOperations();
+		if (disableSandbox && config.allowUnsandboxedCommands) return plainOperations();
+		return sandboxedOperations();
 	}
 
 	// Override the built-in bash tool. When the sandbox is inactive this
@@ -106,27 +214,30 @@ export function factory(pi: ExtensionAPI): void {
 	// createBashTool() call inherited it; here only one extension may own the
 	// tool name, so the two features share this registration rather than fight
 	// over it. Keep them together if either changes.
-	const plainBash = () => createBashTool(localCwd, { commandPrefix, shellPath });
 	const baseBash = createBashTool(localCwd);
 	pi.registerTool({
 		...baseBash,
-		parameters: Type.Object({ ...baseBash.parameters.properties, ...BACKGROUND_BASH_PARAMS.properties }),
+		parameters: Type.Object({ ...baseBash.parameters.properties, ...BASH_EXTRA_PARAMS.properties }),
 		async execute(id, params, signal, onUpdate) {
-			const { description, run_in_background, ...rest } = params as Static<typeof BACKGROUND_BASH_PARAMS> &
+			const { description, run_in_background, dangerouslyDisableSandbox, ...rest } = params as Static<
+				typeof BASH_EXTRA_PARAMS
+			> &
 				Record<string, unknown>;
+			const command = String(rest.command ?? "");
 
 			const refusal = strictRefusalReason(config, isSandboxActive(), lastError);
 			if (refusal) {
 				return { content: [{ type: "text", text: refusal }], isError: true, details: undefined };
 			}
 
+			const ops = operationsFor(command, dangerouslyDisableSandbox === true);
+
 			if (run_in_background) {
 				// The job's own lifetime owns the process: the tool call's signal is
 				// deliberately NOT attached, since backgrounding means outliving this
 				// call. Operations match the foreground path, so sandboxing applies.
-				const ops = isSandboxActive() ? sandboxedOperations() : createLocalBashOperations();
 				const job = backgroundBashJobs.start({
-					command: String(rest.command ?? ""),
+					command,
 					cwd: localCwd,
 					timeout: typeof rest.timeout === "number" ? rest.timeout : undefined,
 					description,
@@ -143,20 +254,14 @@ export function factory(pi: ExtensionAPI): void {
 					content: [
 						{
 							type: "text",
-							text: `Started background task ${job.id}: ${rest.command}\nRead output with bash_output {"task_id":"${job.id}"}; stop it with kill_bash. /tasks lists all background tasks.`,
+							text: `Started background task ${job.id}: ${command}\nRead output with bash_output {"task_id":"${job.id}"}; stop it with kill_bash. /tasks lists all background tasks.`,
 						},
 					],
 					details: undefined,
 				};
 			}
 
-			const tool = isSandboxActive()
-				? createBashTool(localCwd, {
-						commandPrefix,
-						shellPath,
-						operations: sandboxedOperations(),
-					})
-				: plainBash();
+			const tool = createBashTool(localCwd, { commandPrefix, shellPath, operations: ops });
 			return tool.execute(id, rest as never, signal, onUpdate);
 		},
 	});
@@ -167,12 +272,12 @@ export function factory(pi: ExtensionAPI): void {
 		createMonitorTool({
 			sendMessage: (message, options) => pi.sendMessage(message, options),
 			cwd: localCwd,
-			exec: () => (isSandboxActive() ? sandboxedOperations() : createLocalBashOperations({ shellPath })).exec,
+			exec: (command) => operationsFor(command).exec,
 			refuse: () => strictRefusalReason(config, isSandboxActive(), lastError),
 		}),
 	);
 
-	pi.on("user_bash", () => {
+	pi.on("user_bash", (event) => {
 		// A user `!` command is the other way a shell runs, and it does NOT go through
 		// the bash tool's execute — so strict has to refuse here too, or `!` would be a
 		// hole straight around it. `user_bash` takes a full result replacement, which is
@@ -182,8 +287,17 @@ export function factory(pi: ExtensionAPI): void {
 			return { result: { output: refusal, exitCode: 1, cancelled: false, truncated: false } };
 		}
 		if (!isSandboxActive()) return;
-		return { operations: sandboxedOperations() };
+		return { operations: operationsFor(event.command) };
 	});
+
+	function publishPosture(): void {
+		publishSandboxPosture({
+			active: isSandboxActive(),
+			autoAllowBashIfSandboxed: config.autoAllowBashIfSandboxed,
+			allowUnsandboxedCommands: config.allowUnsandboxedCommands,
+			isExcluded: (command) => isExcludedCommand(command, config.excludedCommands),
+		});
+	}
 
 	async function activate(ctx: ExtensionContext): Promise<void> {
 		if (process.platform !== "darwin" && process.platform !== "linux") {
@@ -194,19 +308,9 @@ export function factory(pi: ExtensionAPI): void {
 		}
 		try {
 			runtime ??= await import("@anthropic-ai/sandbox-runtime");
-			await runtime.SandboxManager.initialize({
-				network: {
-					allowedDomains: config.network?.allowedDomains ?? [],
-					deniedDomains: config.network?.deniedDomains ?? [],
-				},
-				filesystem: {
-					denyRead: config.filesystem?.denyRead ?? [],
-					allowWrite: config.filesystem?.allowWrite ?? [],
-					denyWrite: config.filesystem?.denyWrite ?? [],
-				},
-				ignoreViolations: config.ignoreViolations,
-				enableWeakerNestedSandbox: config.enableWeakerNestedSandbox,
-			});
+			// The log monitor is what attributes file denials to commands (network
+			// denials come from the proxy regardless).
+			await runtime.SandboxManager.initialize(runtimeConfig(config), ({ host, port }) => askHost(host, port), true);
 			setSandboxActive(true);
 			lastError = undefined;
 			ctx.ui.setStatus("sandbox", ctx.ui.theme.fg("accent", "🔒 sandbox"));
@@ -215,12 +319,13 @@ export function factory(pi: ExtensionAPI): void {
 			lastError = err instanceof Error ? err.message : String(err);
 			ctx.ui.setStatus("sandbox", ctx.ui.theme.fg("error", "🔓 sandbox FAILED"));
 			ctx.ui.notify(
-				config.strict
-					? `Sandbox initialization failed — bash is BLOCKED while sandbox.strict is set: ${lastError}`
+				config.failIfUnavailable
+					? `Sandbox initialization failed — bash is BLOCKED while sandbox.failIfUnavailable is set: ${lastError}`
 					: `Sandbox initialization failed — bash commands run UNSANDBOXED: ${lastError}`,
 				"error",
 			);
 		}
+		publishPosture();
 	}
 
 	async function deactivate(ctx: ExtensionContext): Promise<void> {
@@ -233,9 +338,11 @@ export function factory(pi: ExtensionAPI): void {
 		}
 		setSandboxActive(false);
 		ctx.ui.setStatus("sandbox", undefined);
+		publishPosture();
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
+		liveCtx = ctx;
 		const sm = SettingsManager.create(ctx.cwd, undefined, {
 			projectTrusted: ctx.isProjectTrusted(),
 		});
@@ -250,10 +357,11 @@ export function factory(pi: ExtensionAPI): void {
 		} else if (isSandboxActive()) {
 			await deactivate(ctx);
 		}
+		publishPosture();
 		// Subagent children build their bash on these (child-bash.ts): the same
 		// sandbox, the same strict refusal, so delegation is not a way around either.
 		publishChildBash({
-			operations: () => (isSandboxActive() ? sandboxedOperations() : createLocalBashOperations({ shellPath })),
+			operations: operationsFor,
 			refusal: () => strictRefusalReason(config, isSandboxActive(), lastError),
 			shellPath,
 			commandPrefix,
@@ -270,7 +378,9 @@ export function factory(pi: ExtensionAPI): void {
 			const arg = (args ?? "").trim();
 			if (arg === "on") {
 				config.enabled = true;
-				await activate(ctx);
+				// SandboxManager.initialize is not idempotent (on Linux it starts a
+				// second network bridge without stopping the first).
+				if (!isSandboxActive()) await activate(ctx);
 				if (isSandboxActive()) {
 					ctx.ui.notify(
 						"Sandbox enabled for this session. Persist with sandbox.enabled in settings.json.",
@@ -285,19 +395,26 @@ export function factory(pi: ExtensionAPI): void {
 				ctx.ui.notify("Sandbox disabled for this session. Persist with sandbox.enabled in settings.json.", "info");
 				return;
 			}
+			const list = (values: string[] | undefined) => values?.join(", ") || "(none)";
 			const lines = [
 				`Sandbox: ${isSandboxActive() ? "active 🔒" : config.enabled ? "enabled but NOT active 🔓" : "disabled"}`,
-				`On failure: ${config.strict ? "REFUSE to run bash (sandbox.strict)" : "run unsandboxed"}`,
+				`On failure: ${config.failIfUnavailable ? "REFUSE to run bash (sandbox.failIfUnavailable)" : "run unsandboxed"}`,
 				...(lastError ? [`Last error: ${lastError}`] : []),
 				"",
+				`Mode: ${config.autoAllowBashIfSandboxed ? "auto-allow (sandboxed commands run without a prompt)" : "regular permissions (sandboxed commands still prompt)"}`,
+				`Unsandboxed retry (dangerouslyDisableSandbox): ${config.allowUnsandboxedCommands ? "allowed, goes through the permission flow" : "ignored — strict sandbox mode"}`,
+				`Excluded commands (always unsandboxed): ${list(config.excludedCommands)}`,
+				"",
 				"Network:",
-				`  Allowed: ${config.network?.allowedDomains?.join(", ") || "(none)"}`,
-				`  Denied: ${config.network?.deniedDomains?.join(", ") || "(none)"}`,
+				`  Pre-allowed: ${list(config.network.allowedDomains)}`,
+				`  Allowed this session: ${list([...sessionAllowedHosts])}`,
+				`  Denied: ${list(config.network.deniedDomains)}`,
+				`  Unlisted hosts: ${config.network.strictAllowlist ? "denied (strictAllowlist)" : "ask the user; denied when no one can answer"}`,
 				"",
 				"Filesystem:",
-				`  Deny read: ${config.filesystem?.denyRead?.join(", ") || "(none)"}`,
-				`  Allow write: ${config.filesystem?.allowWrite?.join(", ") || "(none)"}`,
-				`  Deny write: ${config.filesystem?.denyWrite?.join(", ") || "(none)"}`,
+				`  Deny read: ${list(config.filesystem.denyRead)}`,
+				`  Allow write: ${list(config.filesystem.allowWrite)}`,
+				`  Deny write: ${list(config.filesystem.denyWrite)}`,
 				"",
 				"Toggle with /sandbox on|off; configure via the sandbox section in settings.json.",
 			];

@@ -31,6 +31,7 @@ import { CONFIG_DIR_NAME, getAgentDir, SettingsManager } from "@earendil-works/p
 import { Container, Key, Spacer, Text } from "@earendil-works/pi-tui";
 import * as forkSettings from "../_shared/settings.ts";
 import { addGlobalRule, addProjectRule, removeGlobalRule, removeProjectRule } from "../_shared/settings-write.ts";
+import { sandboxPosture } from "../sandbox/state.ts";
 import { setActivePermissionMode } from "./active-mode.ts";
 import { type EvalConfig, evaluatePostHook, evaluatePreHook } from "./evaluate.ts";
 import {
@@ -365,6 +366,7 @@ export function factory(pi: ExtensionAPI): void {
 			agentDir: getAgentDir(),
 			configDirName: CONFIG_DIR_NAME,
 			hasUI: ctx.hasUI,
+			sandbox: sandboxPosture(),
 		};
 
 		// Gates 1-3: deny rules, protected paths.

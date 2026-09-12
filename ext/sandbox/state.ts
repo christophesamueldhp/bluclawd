@@ -32,8 +32,8 @@ export function isSandboxActive(): boolean {
  * a child has its own cwd (a worktree, say), and the tool is bound to one.
  */
 export interface ChildBashProvider {
-	/** Sandboxed operations while the sandbox is active, plain ones otherwise. */
-	operations(): BashOperations;
+	/** The operations this command runs through: the sandbox unless something takes it out. */
+	operations(command: string, disableSandbox?: boolean): BashOperations;
 	/** The strict-mode refusal, when the sandbox was wanted but is not running. */
 	refusal(): string | undefined;
 	shellPath?: string;
@@ -48,4 +48,26 @@ export function publishChildBash(value: ChildBashProvider | undefined): void {
 
 export function childBashProvider(): ChildBashProvider | undefined {
 	return provider.get();
+}
+
+/**
+ * What the permission layer needs to know about the sandbox: whether a bash
+ * command will actually run inside it (auto-allow applies), and whether the
+ * model's unsandboxed retry is honoured (so the user is asked about it).
+ */
+export interface SandboxPosture {
+	active: boolean;
+	autoAllowBashIfSandboxed: boolean;
+	allowUnsandboxedCommands: boolean;
+	isExcluded(command: string): boolean;
+}
+
+const posture = sharedRef<SandboxPosture | undefined>("sandbox.posture", undefined);
+
+export function publishSandboxPosture(value: SandboxPosture | undefined): void {
+	posture.set(value);
+}
+
+export function sandboxPosture(): SandboxPosture | undefined {
+	return posture.get();
 }

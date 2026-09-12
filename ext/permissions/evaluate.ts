@@ -37,6 +37,7 @@
  * so callers and tests stay in control.
  */
 
+import type { SandboxPosture } from "../sandbox/state.ts";
 import { bashWriteTargets } from "./bash-targets.ts";
 import type { PermissionMode } from "./modes.ts";
 import {
@@ -65,6 +66,7 @@ export type Gate =
 	| "read-like"
 	| "accept-edits"
 	| "auto-mode"
+	| "sandboxed"
 	| "no-matching-rule";
 
 /** What the caller must do. `prompt` means "ask the user"; `kind` says which prompt. */
@@ -92,9 +94,57 @@ export interface EvalConfig {
 	agentDir: string;
 	configDirName: string;
 	hasUI: boolean;
+	/** The OS sandbox's stance, when the sandbox extension is loaded. */
+	sandbox?: SandboxPosture;
 }
 
 const READ_LIKE_TOOLS = new Set(["read", "grep", "find", "ls"]);
+
+/**
+ * Will this bash command actually run inside the OS sandbox? Not when the sandbox is
+ * off, when `excludedCommands` takes the command out, or when the model's
+ * `dangerouslyDisableSandbox` retry is honoured. When that retry is NOT honoured
+ * (`allowUnsandboxedCommands: false`) the parameter is ignored and the command still
+ * runs sandboxed, exactly as Claude Code's strict sandbox mode does.
+ */
+function sandboxedRun(tool: string, input: Record<string, unknown>, cfg: EvalConfig): boolean {
+	const sb = cfg.sandbox;
+	if (!sb?.active || tool !== "bash") return false;
+	if (sb.isExcluded(String(input.command ?? ""))) return false;
+	return !unsandboxedRetry(tool, input, cfg);
+}
+
+/** The model asked to leave the sandbox, and the settings let it. */
+function unsandboxedRetry(tool: string, input: Record<string, unknown>, cfg: EvalConfig): boolean {
+	return (
+		tool === "bash" &&
+		input.dangerouslyDisableSandbox === true &&
+		cfg.sandbox?.active === true &&
+		cfg.sandbox.allowUnsandboxedCommands
+	);
+}
+
+/**
+ * Claude Code's ask rule for the unsandboxed retry, `Bash(dangerouslyDisableSandbox:true)`,
+ * matched literally: bluclawd's rules do not match on input parameters, and this is the
+ * one such rule the sandbox docs tell users to write.
+ */
+const RETRY_ASK_RULE = /^bash\(dangerouslyDisableSandbox:true\)$/i;
+
+function asksAboutEveryRetry(rules: Rules): boolean {
+	return (rules.ask ?? []).some((r) => RETRY_ASK_RULE.test(r));
+}
+
+/**
+ * A bare `Bash` / `Bash(*)` / `Bash(**)` ask rule is skipped for a command that runs
+ * sandboxed (Claude Code's auto-allow mode); content-scoped ones like `Bash(git push *)`
+ * still prompt. Dropping the bare forms and re-deciding tells the two apart.
+ */
+const BARE_BASH_RULE = /^bash(?:\((?:\*|\*\*)?\))?$/i;
+
+function withoutBareBashAsk(rules: Rules): Rules {
+	return { ...rules, ask: (rules.ask ?? []).filter((r) => !BARE_BASH_RULE.test(r)) };
+}
 
 /** Does an exact full-subject allow rule stand for this call? */
 function hasExactAllow(rules: Rules, exact: string | null): boolean {
@@ -156,7 +206,7 @@ function noPromptReason(cfg: EvalConfig): string | undefined {
 }
 
 /** The ask prompt, or the block it becomes when nothing can show a prompt. */
-function askOrBlock(gate: Gate, exact: string | null, cfg: EvalConfig): Verdict {
+function askOrBlock(gate: Gate, exact: string | null, cfg: EvalConfig, label?: string): Verdict {
 	const noPrompt = noPromptReason(cfg);
 	if (noPrompt) {
 		return {
@@ -169,7 +219,7 @@ function askOrBlock(gate: Gate, exact: string | null, cfg: EvalConfig): Verdict 
 		outcome: "prompt",
 		gate,
 		promptKind: "ask",
-		reason: `Permission required — ${exact}`,
+		reason: `Permission required — ${label ? `${label}: ` : ""}${exact}`,
 		exact,
 	};
 }
@@ -284,7 +334,19 @@ export function evaluatePreHook(rawTool: string, input: Record<string, unknown>,
  */
 export function evaluatePostHook(rawTool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict {
 	const tool = governedTool(rawTool);
-	const { decision, askAgent } = decideRules(tool, input, cfg.rules, cfg.cwd);
+	// Claude Code's sandbox auto-allow: a command that will run inside the OS sandbox is
+	// approved without a prompt, in every mode. Deny rules (gate 1) and content-scoped ask
+	// rules still apply; only the bare `Bash` ask rule is skipped for such a command.
+	const autoAllowed = sandboxedRun(tool, input, cfg) && cfg.sandbox?.autoAllowBashIfSandboxed === true;
+	const retry = unsandboxedRetry(tool, input, cfg);
+	// The prompt names an unsandboxed retry as such, as Claude Code's does.
+	const label = retry ? "Bash command (unsandboxed)" : undefined;
+	const { decision, askAgent } = decideRules(
+		tool,
+		input,
+		autoAllowed ? withoutBareBashAsk(cfg.rules) : cfg.rules,
+		cfg.cwd,
+	);
 	// For `task` the subject is the agent the prompt is about: the one an ask rule named,
 	// or (no rule at all) the first target — `Task()` would label the prompt with nothing
 	// and persist an "Always allow" that matches nothing.
@@ -308,12 +370,18 @@ export function evaluatePostHook(rawTool: string, input: Record<string, unknown>
 		// --allowedTools is an explicit per-invocation grant, and glob-aware.
 		if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
 		// Read-only bash is auto-approved in every mode (Claude Code's built-in list).
-		if (tool === "bash" && isSafeCommand(subject("bash", input))) return ALLOW("readonly-bash");
-		return askOrBlock("ask-rule", exact, cfg);
+		if (tool === "bash" && !retry && isSafeCommand(subject("bash", input))) return ALLOW("readonly-bash");
+		return askOrBlock("ask-rule", exact, cfg, label);
 	}
 
 	// 5. An allow rule matched. The user wrote it; it is not second-guessed.
 	if (decision === "allow") return ALLOW("allow-rule");
+
+	// 5b. Sandboxed, and the sandbox is trusted to contain it (autoAllowBashIfSandboxed).
+	if (autoAllowed) return ALLOW("sandboxed");
+
+	// 5c. An unsandboxed retry the user asked to hear about every time — even in auto.
+	if (retry && asksAboutEveryRetry(cfg.rules)) return askOrBlock("ask-rule", exact, cfg, label);
 
 	// 6. No rule matched, so the mode decides. Reads never prompt in any mode; neither
 	//    does read-only bash (Claude Code auto-approves that list everywhere) — without
@@ -321,8 +389,12 @@ export function evaluatePostHook(rawTool: string, input: Record<string, unknown>
 	//    training the gate must avoid.
 	if (READ_LIKE_TOOLS.has(tool)) return ALLOW("read-like");
 	if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
-	if (tool === "bash" && isSafeCommand(String(input.command ?? ""))) return ALLOW("readonly-bash");
+	// An unsandboxed retry is never "read-only": `head ~/.ssh/id_rsa` is on the safe list,
+	// and the sandbox was the layer that stopped it — leaving the sandbox is exactly what
+	// the user must be asked about. Found live: the retry of a denied credential read ran
+	// unprompted and printed the file.
+	if (tool === "bash" && !retry && isSafeCommand(String(input.command ?? ""))) return ALLOW("readonly-bash");
 	if (cfg.mode === "auto") return ALLOW("auto-mode");
 	if (cfg.mode === "edits" && (tool === "edit" || tool === "write")) return ALLOW("accept-edits");
-	return askOrBlock("no-matching-rule", exact, cfg);
+	return askOrBlock("no-matching-rule", exact, cfg, label);
 }

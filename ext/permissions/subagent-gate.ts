@@ -33,9 +33,16 @@
 import type { ExtensionAPI, InlineExtension, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { CONFIG_DIR_NAME, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import * as forkSettings from "../_shared/settings.ts";
+import { sandboxPosture } from "../sandbox/state.ts";
 import { type EvalConfig, evaluatePostHook, evaluatePreHook, type Verdict } from "./evaluate.ts";
 import type { PermissionMode } from "./modes.ts";
 import type { Rules } from "./rules.ts";
+
+/** The parent's sandbox stance with the unsandboxed retry switched off. */
+function childSandboxPosture(): EvalConfig["sandbox"] {
+	const posture = sandboxPosture();
+	return posture ? { ...posture, allowUnsandboxedCommands: false } : undefined;
+}
 
 export interface GatePromptRequest {
 	title: string;
@@ -121,6 +128,10 @@ export function createSubagentGate(options: SubagentGateOptions = {}): InlineExt
 				agentDir: getAgentDir(),
 				configDirName: CONFIG_DIR_NAME,
 				hasUI: Boolean(prompt),
+				// A child cannot leave the sandbox: its bash offers no
+				// `dangerouslyDisableSandbox` (child-bash.ts), and the evaluator is told
+				// the same so a smuggled parameter changes nothing here either.
+				sandbox: childSandboxPosture(),
 			};
 
 			const input = event.input as Record<string, unknown>;
