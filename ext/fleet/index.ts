@@ -33,6 +33,7 @@ import { setSharedTheme } from "../_shared/theme.ts";
 import { AttachView } from "./attach-view.ts";
 import { FleetView } from "./fleet-view.ts";
 import { OrchestratorClient } from "./orchestrator-client.ts";
+import { loadGrouping, saveGrouping } from "./prefs.ts";
 import { hideSession, loadHiddenSessions, toSavedSummaries } from "./saved-sessions.ts";
 import { deriveLabel, FleetSelfRegistration, ForegroundActivity, type SelfSessionInfo } from "./self-registration.ts";
 
@@ -219,6 +220,8 @@ const fleet: InlineExtension = {
 						loadSavedSessions,
 						loadHiddenSessions: () => loadHiddenSessions(getAgentDir()),
 						hideSession: (sessionFile) => hideSession(getAgentDir(), sessionFile),
+						loadGrouping: () => loadGrouping(getAgentDir()),
+						saveGrouping: (grouping) => saveGrouping(getAgentDir(), grouping),
 					});
 					// FleetView loads its roster on show, not on construct — without this
 					// the overlay opens empty and never polls.

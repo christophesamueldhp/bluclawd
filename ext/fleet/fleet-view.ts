@@ -15,6 +15,7 @@ import { BranchCache } from "./branch-cache.ts";
 import { countStatuses, describeStatus, isLive, matchesQuery, relativeTime, sortForRoster } from "./fleet-status.ts";
 import { NewSessionPanel } from "./new-session-panel.ts";
 import { currentDaemonBuildId, type InstanceSummary, type OrchestratorClient } from "./orchestrator-client.ts";
+import type { Grouping } from "./prefs.ts";
 
 function shortenPath(path: string, home: string): string {
 	return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;
@@ -105,6 +106,21 @@ export interface FleetViewOptions {
 	 *  windows): the session file's modified time, so the details line reads "5m ago" like a
 	 *  saved row's. Defaults to fs.stat; injectable for tests. */
 	fileModifiedAt?: (sessionFile: string) => string | undefined;
+	/** The remembered grouping (ctrl+g); absent → by path. */
+	loadGrouping?: () => Grouping | undefined;
+	saveGrouping?: (grouping: Grouping) => void;
+}
+
+/** Stable regroup of an already-sorted list by cwd: groups appear in the order of their first
+ *  (= most urgent) row, rows inside a group keep their order. */
+function groupByPath<T extends { cwd: string }>(sorted: T[]): T[] {
+	const groups = new Map<string, T[]>();
+	for (const row of sorted) {
+		const group = groups.get(row.cwd);
+		if (group) group.push(row);
+		else groups.set(row.cwd, [row]);
+	}
+	return [...groups.values()].flat();
 }
 
 function statModifiedAt(path: string): string | undefined {
@@ -147,6 +163,8 @@ export class FleetView implements Component, Focusable {
 	/** Claude Code's /resume defaults to the current project; this defaults to ALL projects so the
 	 *  "N awaiting input" header never hides a running session. ctrl+a toggles, as there. */
 	private allProjects = true;
+	/** ctrl+g: group rows by project path (default) or by Running / Saved. */
+	private grouping: Grouping;
 	private readonly branches = new BranchCache(() => {
 		if (this.closed) return;
 		this.recompute(); // a query may match the branch that just landed
@@ -179,6 +197,7 @@ export class FleetView implements Component, Focusable {
 
 	constructor(opts: FleetViewOptions) {
 		this.opts = opts;
+		this.grouping = opts.loadGrouping?.() ?? "path";
 	}
 
 	async onShow(): Promise<void> {
@@ -319,9 +338,11 @@ export class FleetView implements Component, Focusable {
 	private recompute(): void {
 		const scoped = this.allProjects ? this.instances : this.instances.filter((i) => i.cwd === this.opts.cwd);
 		const query = this.query;
-		this.ordered = sortForRoster(
+		const sorted = sortForRoster(
 			scoped.filter((i) => matchesQuery([i.label, i.sessionId, i.cwd, this.branches.get(i.cwd)], query)),
 		);
+		// `ordered` is the DISPLAY order — ↑/↓ and every action index into it.
+		this.ordered = this.grouping === "path" ? groupByPath(sorted) : sorted;
 		// Re-anchor selection to the SAME row by identity, so a poll that reorders/removes rows can't
 		// silently move the highlight onto a different session (enter/ctrl+t/ctrl+r/space would then
 		// act on the wrong one). Only fall back to the clamped index when the row is truly gone.
@@ -525,6 +546,7 @@ export class FleetView implements Component, Focusable {
 			["ctrl+r", "resume — restart a Done session as a background child"],
 			["ctrl+n", "new session"],
 			["ctrl+a", "show all projects / only the current one"],
+			["ctrl+g", "group by project path / by running-saved"],
 			["space", "reply to the selected session"],
 			["ctrl+x ×2", "delete the selected session"],
 			["esc", "clear search / close"],
@@ -656,6 +678,15 @@ export class FleetView implements Component, Focusable {
 		// ctrl+a toggles all projects / only the current one (Claude Code's /resume chord).
 		if (matchesKey(data, "ctrl+a")) {
 			this.allProjects = !this.allProjects;
+			this.recompute();
+			this.opts.ui.requestRender();
+			return;
+		}
+
+		// ctrl+g toggles the grouping and remembers it.
+		if (matchesKey(data, "ctrl+g")) {
+			this.grouping = this.grouping === "path" ? "status" : "path";
+			this.opts.saveGrouping?.(this.grouping);
 			this.recompute();
 			this.opts.ui.requestRender();
 			return;
@@ -801,15 +832,25 @@ export class FleetView implements Component, Focusable {
 					: "  No sessions in this project — ctrl+a shows all projects";
 			body.push(truncateToWidth(theme.fg("dim", empty), width));
 		} else {
-			// Section headers: live rows sort first (sortForRoster), so the split is one boundary.
-			const liveCount = this.ordered.filter(isLive).length;
 			const sectionHeader = (title: string, count: number): string =>
 				truncateToWidth(`  ${theme.fg("muted", title)} ${theme.fg("dim", `· ${count}`)}`, width);
+			// By status: live rows sort first (sortForRoster), so the split is one boundary.
+			// By path: `ordered` is regrouped by cwd, so a header goes wherever the cwd changes.
+			const liveCount = this.ordered.filter(isLive).length;
+			const byPath = this.grouping === "path";
 			this.ordered.forEach((inst, index) => {
-				if (index === 0 && liveCount > 0) body.push(sectionHeader("Running", liveCount));
-				if (index === liveCount && liveCount < this.ordered.length) {
-					if (index > 0) body.push("");
-					body.push(sectionHeader("Saved", this.ordered.length - liveCount));
+				if (byPath) {
+					if (index === 0 || this.ordered[index - 1].cwd !== inst.cwd) {
+						if (index > 0) body.push("");
+						const size = this.ordered.filter((row) => row.cwd === inst.cwd).length;
+						body.push(sectionHeader(shortenPath(inst.cwd, this.opts.home), size));
+					}
+				} else {
+					if (index === 0 && liveCount > 0) body.push(sectionHeader("Running", liveCount));
+					if (index === liveCount && liveCount < this.ordered.length) {
+						if (index > 0) body.push("");
+						body.push(sectionHeader("Saved", this.ordered.length - liveCount));
+					}
 				}
 				const isSelected = index === this.selectedIndex;
 				if (isSelected) selectedRow = body.length;
@@ -832,7 +873,8 @@ export class FleetView implements Component, Focusable {
 
 				const details = [relativeTime(inst.lastSeenAt ?? inst.createdAt, nowMs), this.branches.get(inst.cwd)];
 				if (inst.messageCount !== undefined) details.push(`${inst.messageCount} messages`);
-				if (this.allProjects) details.push(shortenPath(inst.cwd, this.opts.home));
+				// The path is the group header when grouping by path, and the scope when narrowed.
+				if (this.allProjects && !byPath) details.push(shortenPath(inst.cwd, this.opts.home));
 				body.push(truncateToWidth(theme.fg("dim", `    ${details.filter(Boolean).join(" · ")}`), width, "…"));
 			});
 		}
@@ -861,13 +903,17 @@ export class FleetView implements Component, Focusable {
 			footer.push(truncateToWidth(theme.fg("dim", "? or esc to close"), width));
 		} else {
 			const scopeHint = this.allProjects ? "ctrl+a current project" : "ctrl+a all projects";
+			const groupHint = this.grouping === "path" ? "ctrl+g by status" : "ctrl+g by path";
 			const escHint = this.query ? "esc clear" : "esc close";
 			footer.push(
 				truncateToWidth(
-					theme.fg("dim", "↑↓ select · enter open · ctrl+t peek · space reply · ctrl+r resume"),
+					theme.fg("dim", "↑↓ select · enter open · ctrl+t peek · space reply · ctrl+r resume · ctrl+n new"),
 					width,
 				),
-				truncateToWidth(theme.fg("dim", `ctrl+n new · ${scopeHint} · ctrl+x delete · ${escHint} · ? help`), width),
+				truncateToWidth(
+					theme.fg("dim", `${scopeHint} · ${groupHint} · ctrl+x delete · ${escHint} · ? help`),
+					width,
+				),
 			);
 		}
 

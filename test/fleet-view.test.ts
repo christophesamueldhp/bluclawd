@@ -133,14 +133,59 @@ describe("FleetView roster (Claude Code /resume style)", () => {
 		const lines = text();
 		const title = lines.find((l) => l.includes("deploy"));
 		expect(title).toMatch(/^› deploy\s+◐ Needs input$/);
-		expect(lines[lines.indexOf(title as string) + 1]).toBe("    5m ago · ~/proj/here");
+		expect(lines[lines.indexOf(title as string) + 1]).toBe("    5m ago");
 		const saved = lines.find((l) => l.includes("fix theme"));
 		expect(saved).toMatch(/^ {2}fix theme\s+✓ Done$/);
-		expect(lines[lines.indexOf(saved as string) + 1]).toBe("    30m ago · 21 messages · ~/proj/here");
+		expect(lines[lines.indexOf(saved as string) + 1]).toBe("    30m ago · 21 messages");
+	});
+
+	it("groups by path by default: each project once, the project with the most urgent row first", () => {
+		const { view, text } = makeView();
+		const lines = text();
+		const here = lines.findIndex((l) => l.trim() === "~/proj/here · 3");
+		const there = lines.findIndex((l) => l.trim() === "~/proj/there · 1");
+		expect(here).toBeGreaterThan(-1);
+		expect(there).toBeGreaterThan(here); // "deploy" (needs input) lives in ~/proj/here
+		expect(lines.findIndex((l) => l.includes("deploy"))).toBeGreaterThan(here);
+		expect(lines.findIndex((l) => l.includes("fix theme"))).toBeLessThan(there);
+		expect(lines.findIndex((l) => l.includes("port footer"))).toBeGreaterThan(there);
+		// ↑/↓ walk the rows in the order they are drawn, not the status-sorted order.
+		expect(view.orderedIdsForTest()).toEqual(["live:ask", "saved:new", "saved:old", "live:work"]);
+		view.handleInput("\x1b[B"); // down
+		expect(view.selectedIdForTest()).toBe("saved:new");
+		expect(lines.some((l) => l.includes("ctrl+g by status"))).toBe(true);
+	});
+
+	it("ctrl+g switches to Running / Saved sections and remembers the choice", () => {
+		const saved: string[] = [];
+		const ui = { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI;
+		const view = new FleetView({
+			ui,
+			client: {} as OrchestratorClient,
+			appName: "pi",
+			cwd: HERE,
+			home: HOME,
+			mascotLines: null,
+			onClose: () => {},
+			onJumpIn: () => {},
+			loadGrouping: () => "status",
+			saveGrouping: (g) => {
+				saved.push(g);
+			},
+		});
+		view.setInstancesForTest(rows);
+		const text = () => view.render(80).map(stripAnsi);
+		expect(text().some((l) => l.trim() === "Running · 2")).toBe(true); // loaded preference
+		view.handleInput("\x07"); // ctrl+g
+		expect(saved).toEqual(["path"]);
+		expect(text().some((l) => l.trim() === "~/proj/here · 3")).toBe(true);
+		view.handleInput("\x07");
+		expect(saved).toEqual(["path", "status"]);
 	});
 
 	it("groups live rows under 'Running' and the rest under 'Saved', in that order", () => {
 		const { view, text } = makeView();
+		view.handleInput("\x07"); // ctrl+g: by status
 		const lines = text();
 		const running = lines.findIndex((l) => l.trim() === "Running · 2");
 		const saved = lines.findIndex((l) => l.trim() === "Saved · 2");
@@ -265,7 +310,7 @@ describe("FleetView roster (Claude Code /resume style)", () => {
 
 	it("keeps the selection anchored to the same session across a refresh that reorders", () => {
 		const { view } = makeView();
-		view.handleInput("\x1b[B"); // down → live:work
+		for (let i = 0; i < 3; i++) view.handleInput("\x1b[B"); // down ×3 → live:work (last, by path)
 		expect(view.selectedIdForTest()).toBe("live:work");
 		view.setInstancesForTest([...rows].reverse());
 		expect(view.selectedIdForTest()).toBe("live:work");
