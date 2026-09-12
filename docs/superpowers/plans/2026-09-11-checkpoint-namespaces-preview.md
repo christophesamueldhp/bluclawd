@@ -18,7 +18,7 @@ Spec: `docs/superpowers/specs/2026-09-11-checkpoint-namespaces-preview-design.md
 - Modify: `ext/checkpoints/index.ts` — `refNameForSha`, `captureCheckpoint` (new `sessionId` argument), `pruneCheckpointRefs` (new signature), `pruneOldCheckpointRefs`, `/rewind --prune`, callers.
 - Modify: `test/checkpoints.test.ts` — `capture()` helper passes a session id; `makeCtx` stub gains `getSessionId`; new namespace/prune tests.
 
-- [ ] **Step 1: Write the failing tests** (replace the existing `pruneCheckpointRefs` describe; add the ref-path assertion to the "records the sha" test)
+- [x] **Step 1: Write the failing tests** (replace the existing `pruneCheckpointRefs` describe; add the ref-path assertion to the "records the sha" test)
 
 ```ts
 const SESSION = "session-a";
@@ -42,9 +42,9 @@ describe("pruneCheckpointRefs", () => {
 
 The committer date needs an env override; extend `makeExec` to accept extra env (`makeExec(extraEnv?)`) and build a second exec for the old-commit fixture with `GIT_COMMITTER_DATE`.
 
-- [ ] **Step 2: Run, expect failures** (`capture` passes an extra arg → ref path assertion fails; prune signature).
+- [x] **Step 2: Run, expect failures** (`capture` passes an extra arg → ref path assertion fails; prune signature).
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```ts
 const FOREIGN_CHECKPOINT_TTL_DAYS = 30;
@@ -59,7 +59,7 @@ export async function pruneCheckpointRefs(cwd, exec, sessionId, keepShas): Promi
 
 `pruneOldCheckpointRefs(cwd, exec, sessionId, branch)`; `checkpointCurrentTurn` and `restoreWithSafetyNet` pass `ctx.sessionManager.getSessionId()`; `/rewind --prune` too.
 
-- [ ] **Step 4: Run the file; all green. Commit** `checkpoints: per-session ref namespaces; prune only what the session owns`
+- [x] **Step 4: Run the file; all green. Commit** `checkpoints: per-session ref namespaces; prune only what the session owns`
 
 ---
 
@@ -69,7 +69,7 @@ export async function pruneCheckpointRefs(cwd, exec, sessionId, keepShas): Promi
 - Modify: `ext/checkpoints/index.ts` — `restoreWithSafetyNet(pi, ctx, targetSha, safetySubject, intro)`, `/rewind` handler (drop its confirm), fork handler (drop its select).
 - Modify: `test/checkpoints.test.ts` — adjust scripts; add preview tests.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```ts
 // /rewind files-only: select [0, 0], confirm [true]; additionally:
@@ -81,9 +81,9 @@ expect(confirmMessages[0]).toContain("a.txt");
 // fork: no select; confirm [true] / [false]; confirm message contains "fork point" and "a.txt"
 ```
 
-- [ ] **Step 2: Run, expect failures.**
+- [x] **Step 2: Run, expect failures.**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```ts
 const PREVIEW_MAX_LINES = 20;
@@ -106,12 +106,39 @@ export async function restoreWithSafetyNet(pi, ctx, targetSha, safetySubject, in
 
 `/rewind`: remove the `if (scopeChoice.files) confirm(...)` block; call `restoreWithSafetyNet(pi, ctx, target.sha, "(before rewind)", "Restore the working tree to this checkpoint?")`. Fork: remove the select; call with intro `Restore code to the checkpoint at this fork point? (${match.subject})`.
 
-- [ ] **Step 4: Run the file; green. Biome. Commit** `checkpoints: preview the diff in one confirmation before any restore`
+- [x] **Step 4: Run the file; green. Biome. Commit** `checkpoints: preview the diff in one confirmation before any restore`
 
 ---
 
 ### Task 3: Header, live check, docs
 
-- [ ] Header: ref layout (`<sessionId>/<sha>`), the three prune rules, the preview; drop the sentence that says the fork safety-net ref gets swept.
-- [ ] Live in tmux: `/rewind` shows the stat in the confirm; `for-each-ref` shows the session path; second `/rewind` to an identical tree says "already matches".
-- [ ] Commit; record observed output below.
+- [x] Header: ref layout (`<sessionId>/<sha>`), the three prune rules, the preview; drop the sentence that says the fork safety-net ref gets swept.
+- [x] Live in tmux: `/rewind` shows the stat in the confirm; `for-each-ref` shows the session path; second `/rewind` to an identical tree says "already matches".
+- [x] Commit; record observed output below.
+
+Observed 2026-09-12 (pi 0.85.1, `pi -ne -e ext/checkpoints/index.ts`, gpt-5.6-luna, tmux):
+
+```
+# refs after the prompt's capture
+refs/bluclawd/checkpoints/01a09167-ca4e-74c8-865a-b8bf1c6c3092/0050653…
+# mutate: a.txt += q, .env = secret=9, preview.txt created; /rewind → checkpoint → Files only
+ Rewind
+ Restore the working tree to the checkpoint "Reply with the single word ok and nothing else."?
+  .env        | 2 +-
+  a.txt       | 1 -
+  preview.txt | 1 -
+  3 files changed, 1 insertion(+), 3 deletions(-)
+ Your current changes are checkpointed first, so this can be undone with /rewind. Continue?
+ → Yes
+# after Yes: "Working tree restored to checkpoint."
+ M .env    (secret=2)      M a.txt     ?? extra.txt  ?? new.txt  ?? preview.txt
+# refs: two, both under the session namespace (capture + "(before rewind)")
+# second /rewind to the same checkpoint while preview.txt still existed → confirm shown (tree differs: correct)
+# after removing the post-checkpoint files, /rewind → Files only:
+ Working tree already matches this checkpoint.
+```
+
+`test/checkpoints.test.ts` ends at 18 tests; full suite 41 files / 437 tests green.
+Deviation from the Task 1 sketch: the fixture helper became `commitAt(dir, daysAgo)`
+using `makeExec(extraEnv)` with `GIT_COMMITTER_DATE`, and the prune test also covers
+a legacy flat ref that the branch still references (kept).
