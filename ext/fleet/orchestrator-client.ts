@@ -36,7 +36,8 @@ type Request =
 	| { type: "stop"; instanceId: string }
 	| { type: "rpc"; instanceId: string; command: unknown }
 	| { type: "register"; instance: RegisterInput }
-	| { type: "unregister"; instanceId: string };
+	| { type: "unregister"; instanceId: string }
+	| { type: "shutdown" };
 
 interface AnyResponse {
 	type: string;
@@ -279,6 +280,40 @@ export class OrchestratorClient {
 			}).catch(() => undefined);
 		}
 		return instance;
+	}
+
+	/**
+	 * Ask the daemon to exit and wait until it is actually gone. `ok: false` carries the daemon's
+	 * reason (it still owns running sessions; or it predates the verb and answered "unknown").
+	 */
+	async shutdownDaemon(): Promise<{ ok: boolean; reason?: string }> {
+		try {
+			const res = await this.request({ type: "shutdown" }, 3000);
+			// A daemon from before this verb answers an unknown request with no `type` at all —
+			// waiting for it to exit would only time out.
+			if (res.type !== "shutdown_result") {
+				return {
+					ok: false,
+					reason:
+						"this daemon predates the shutdown request — kill the `daemon/cli.ts serve` process once, then reopen",
+				};
+			}
+		} catch (error) {
+			return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+		}
+		for (let i = 0; i < 25; i++) {
+			if (!(await this.isRunning())) return { ok: true };
+			await new Promise((resolve) => setTimeout(resolve, 200));
+		}
+		return { ok: false, reason: "the old daemon did not exit" };
+	}
+
+	/** Replace a running (stale) daemon with a fresh one from the code on disk. */
+	async restartDaemon(): Promise<{ restarted: boolean; reason?: string }> {
+		const down = await this.shutdownDaemon();
+		if (!down.ok) return { restarted: false, reason: down.reason };
+		if (await this.ensureDaemon()) return { restarted: true };
+		return { restarted: false, reason: "the new daemon did not start" };
 	}
 
 	/** Best-effort: if the daemon is down, launch `daemon/cli.ts serve` detached. */

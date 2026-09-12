@@ -4,26 +4,33 @@ export type AgentActivity = "idle" | "working" | "awaiting_input";
 export type InstanceStatus = "starting" | "online" | "stopping" | "stopped" | "error";
 
 export interface StatusDisplay {
+	/** One-cell marker in front of the label — the same set the peek view uses (● working, ○ idle). */
+	glyph: string;
 	label: string;
 	color: ThemeColor;
 }
 
 export function describeStatus(inst: { status: InstanceStatus; activity?: AgentActivity }): StatusDisplay {
 	if (inst.status === "online") {
-		if (inst.activity === "working") return { label: "Working", color: "accent" };
-		if (inst.activity === "awaiting_input") return { label: "Needs input", color: "warning" };
-		return { label: "Idle", color: "muted" };
+		if (inst.activity === "working") return { glyph: "●", label: "Working", color: "accent" };
+		if (inst.activity === "awaiting_input") return { glyph: "◐", label: "Needs input", color: "warning" };
+		return { glyph: "○", label: "Idle", color: "muted" };
 	}
 	switch (inst.status) {
 		case "stopped":
-			return { label: "Done", color: "success" };
+			return { glyph: "✓", label: "Done", color: "success" };
 		case "error":
-			return { label: "Error", color: "error" };
+			return { glyph: "✗", label: "Error", color: "error" };
 		case "starting":
-			return { label: "Starting", color: "dim" };
+			return { glyph: "◌", label: "Starting", color: "dim" };
 		case "stopping":
-			return { label: "Stopping", color: "dim" };
+			return { glyph: "◌", label: "Stopping", color: "dim" };
 	}
+}
+
+/** Roster section: a live row (the daemon or another window has a process for it) or a saved one. */
+export function isLive(inst: { status: InstanceStatus }): boolean {
+	return inst.status === "online" || inst.status === "starting" || inst.status === "stopping";
 }
 
 export interface FleetCounts {

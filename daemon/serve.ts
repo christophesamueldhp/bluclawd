@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { getSocketPath } from "./config.ts";
-import { handleIpcRequest, openRpcStream } from "./handler.ts";
+import { handleIpcRequest, openRpcStream, setShutdownHook } from "./handler.ts";
 import { startIpcServer } from "./ipc/server.ts";
 import { getRadiusServerBaseUrl, isRadiusEnabled, radiusPresence } from "./radius.ts";
 import { supervisor } from "./supervisor.ts";
@@ -58,6 +58,9 @@ export async function serve(): Promise<void> {
 		process.exit(exitCode);
 	};
 
+	setShutdownHook(() => {
+		void shutdown(0);
+	});
 	process.on("SIGINT", () => {
 		void shutdown(0);
 	});

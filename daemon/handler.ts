@@ -19,6 +19,8 @@ import type {
 	RpcStreamRequest,
 	ServerRequest,
 	ServerResponse,
+	ShutdownRequest,
+	ShutdownResponse,
 	SpawnRequest,
 	SpawnResponse,
 	StatusRequest,
@@ -45,6 +47,20 @@ function toInstanceSummary(instance: InstanceRecord, activity?: AgentActivity, e
 	};
 }
 
+/** Installed by serve.ts: the process's own graceful shutdown. Unset outside `serve` (tests). */
+let shutdownHook: (() => void) | undefined;
+
+export function setShutdownHook(hook: (() => void) | undefined): void {
+	shutdownHook = hook;
+}
+
+/** Why a shutdown is refused, or undefined when it is safe: the daemon's exit takes every
+ *  spawned child with it, so it only goes when it owns nothing that is running. */
+export function shutdownRefusal(liveCount: number): string | undefined {
+	if (liveCount === 0) return undefined;
+	return `${liveCount} running session${liveCount === 1 ? "" : "s"}`;
+}
+
 function unknownInstanceError(instanceId: string): ErrorResponse {
 	return {
 		type: "error",
@@ -62,6 +78,7 @@ export async function handleIpcRequest(request: RpcRequest): Promise<RpcBridgeRe
 export async function handleIpcRequest(request: RpcStreamRequest): Promise<RpcReadyResponse | ErrorResponse>;
 export async function handleIpcRequest(request: RegisterRequest): Promise<RegisterResponse | ErrorResponse>;
 export async function handleIpcRequest(request: UnregisterRequest): Promise<UnregisterResponse | ErrorResponse>;
+export async function handleIpcRequest(request: ShutdownRequest): Promise<ShutdownResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse> {
 	switch (request.type) {
@@ -164,6 +181,16 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 		case "unregister": {
 			supervisor.unregisterExternal(request.instanceId);
 			return { type: "unregister_result", ok: true };
+		}
+
+		case "shutdown": {
+			const refusal = shutdownRefusal(supervisor.listLiveInstances().length);
+			if (refusal) return { type: "error", ok: false, error: refusal };
+			if (!shutdownHook) return { type: "error", ok: false, error: "shutdown is not available in this process" };
+			// Deferred so the reply is written before the socket server closes.
+			const hook = shutdownHook;
+			setTimeout(hook, 100);
+			return { type: "shutdown_result", ok: true };
 		}
 	}
 }

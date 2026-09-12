@@ -52,6 +52,10 @@ interface BackgroundableSession {
  * are dropped: hundreds of old test and runtime sessions under /var/folders
  * would otherwise flood the list, and none of them can be meaningfully resumed.
  */
+/** The roster and the peek view cover the whole terminal: at anything less, the welcome banner
+ *  behind them shows through the margins and reads as a broken frame. */
+const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
+
 const TMP_ROOTS = [tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"];
 const MAX_SAVED_ROWS = 40;
 
@@ -148,7 +152,7 @@ const fleet: InlineExtension = {
 					view.onShow();
 					return view as Component & { dispose?(): void };
 				},
-				{ overlay: true, overlayOptions: { width: "94%", maxHeight: "92%" } },
+				{ overlay: true, overlayOptions: FULL_SCREEN },
 			);
 			await openFleet(ctx);
 		};
@@ -160,7 +164,7 @@ const fleet: InlineExtension = {
 					const view = new FleetView({
 						ui: tui,
 						client: new OrchestratorClient(),
-						appName: "pi",
+						appName: "bluclawd",
 						version: VERSION,
 						model: model ? `${model.provider}/${model.id}` : undefined,
 						spawnModel: model ? { provider: model.provider, id: model.id } : undefined,
@@ -221,7 +225,7 @@ const fleet: InlineExtension = {
 					void view.onShow();
 					return view as Component & { dispose?(): void };
 				},
-				{ overlay: true, overlayOptions: { width: "94%", maxHeight: "92%" } },
+				{ overlay: true, overlayOptions: FULL_SCREEN },
 			);
 		};
 

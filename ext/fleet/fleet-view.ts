@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { theme } from "../_shared/theme.ts";
 import { BranchCache } from "./branch-cache.ts";
-import { countStatuses, describeStatus, matchesQuery, relativeTime, sortForRoster } from "./fleet-status.ts";
+import { countStatuses, describeStatus, isLive, matchesQuery, relativeTime, sortForRoster } from "./fleet-status.ts";
 import { NewSessionPanel } from "./new-session-panel.ts";
 import { currentDaemonBuildId, type InstanceSummary, type OrchestratorClient } from "./orchestrator-client.ts";
 
@@ -199,9 +199,13 @@ export class FleetView implements Component, Focusable {
 			const info = await this.opts.client.getDaemonInfo();
 			if (this.closed) return;
 			if (info.running && info.buildId !== currentDaemonBuildId()) {
-				this.daemonStatusNotice = info.buildId
-					? "daemon is running an older build — restart it (kill the `daemon/cli.ts serve` process, then reopen)"
-					: "daemon predates version checks — restart it to enable them (kill the `daemon/cli.ts serve` process, then reopen)";
+				// Restart it ourselves: the daemon refuses while it owns running sessions (its exit
+				// would take them down), in which case the reason is shown instead.
+				const result = await this.opts.client.restartDaemon();
+				if (this.closed) return;
+				this.daemonStatusNotice = result.restarted
+					? "daemon restarted to the current build"
+					: `daemon is running an older build — not restarted: ${result.reason ?? "unknown reason"}`;
 			}
 		}
 		// Load the deleted/hidden set so previously deleted sessions stay gone across reopens.
@@ -797,7 +801,16 @@ export class FleetView implements Component, Focusable {
 					: "  No sessions in this project — ctrl+a shows all projects";
 			body.push(truncateToWidth(theme.fg("dim", empty), width));
 		} else {
+			// Section headers: live rows sort first (sortForRoster), so the split is one boundary.
+			const liveCount = this.ordered.filter(isLive).length;
+			const sectionHeader = (title: string, count: number): string =>
+				truncateToWidth(`  ${theme.fg("muted", title)} ${theme.fg("dim", `· ${count}`)}`, width);
 			this.ordered.forEach((inst, index) => {
+				if (index === 0 && liveCount > 0) body.push(sectionHeader("Running", liveCount));
+				if (index === liveCount && liveCount < this.ordered.length) {
+					if (index > 0) body.push("");
+					body.push(sectionHeader("Saved", this.ordered.length - liveCount));
+				}
 				const isSelected = index === this.selectedIndex;
 				if (isSelected) selectedRow = body.length;
 				const status = describeStatus(inst);
@@ -807,7 +820,7 @@ export class FleetView implements Component, Focusable {
 					.trim();
 				const selfTag = inst.id === this.opts.selfId ? theme.fg("dim", " (this session)") : "";
 				const cursor = isSelected ? theme.fg("accent", "› ") : "  ";
-				const badge = theme.fg(status.color, status.label);
+				const badge = theme.fg(status.color, `${status.glyph} ${status.label}`);
 				const nameBudget = Math.max(10, width - 2 - visibleWidth(selfTag) - visibleWidth(badge) - 2);
 				const name =
 					(isSelected

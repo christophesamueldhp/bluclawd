@@ -61,6 +61,12 @@ export interface UnregisterRequest {
 	instanceId: string;
 }
 
+/** Ask the daemon to exit so a client can start a fresh one (a stale build). Refused while it
+ *  still owns running sessions — those would be killed with it. */
+export interface ShutdownRequest {
+	type: "shutdown";
+}
+
 export interface RequestMap {
 	spawn: SpawnRequest;
 	list: ListRequest;
@@ -70,6 +76,7 @@ export interface RequestMap {
 	rpc_stream: RpcStreamRequest;
 	register: RegisterRequest;
 	unregister: UnregisterRequest;
+	shutdown: ShutdownRequest;
 }
 
 export type ServerRequest = RequestMap[keyof RequestMap];
@@ -141,6 +148,10 @@ export interface UnregisterResponse extends ResponseBase {
 	type: "unregister_result";
 }
 
+export interface ShutdownResponse extends ResponseBase {
+	type: "shutdown_result";
+}
+
 export interface ErrorResponse extends ResponseBase {
 	type: "error";
 	ok: false;
@@ -156,6 +167,7 @@ export interface ResponseMap {
 	rpc_stream: RpcReadyResponse;
 	register: RegisterResponse;
 	unregister: UnregisterResponse;
+	shutdown: ShutdownResponse;
 }
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;

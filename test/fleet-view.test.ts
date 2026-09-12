@@ -132,11 +132,26 @@ describe("FleetView roster (Claude Code /resume style)", () => {
 		const { text } = makeView();
 		const lines = text();
 		const title = lines.find((l) => l.includes("deploy"));
-		expect(title).toMatch(/^› deploy\s+Needs input$/);
+		expect(title).toMatch(/^› deploy\s+◐ Needs input$/);
 		expect(lines[lines.indexOf(title as string) + 1]).toBe("    5m ago · ~/proj/here");
 		const saved = lines.find((l) => l.includes("fix theme"));
-		expect(saved).toMatch(/^ {2}fix theme\s+Done$/);
+		expect(saved).toMatch(/^ {2}fix theme\s+✓ Done$/);
 		expect(lines[lines.indexOf(saved as string) + 1]).toBe("    30m ago · 21 messages · ~/proj/here");
+	});
+
+	it("groups live rows under 'Running' and the rest under 'Saved', in that order", () => {
+		const { view, text } = makeView();
+		const lines = text();
+		const running = lines.findIndex((l) => l.trim() === "Running · 2");
+		const saved = lines.findIndex((l) => l.trim() === "Saved · 2");
+		expect(running).toBeGreaterThan(-1);
+		expect(saved).toBeGreaterThan(running);
+		expect(lines.findIndex((l) => l.includes("deploy"))).toBeGreaterThan(running);
+		expect(lines.findIndex((l) => l.includes("deploy"))).toBeLessThan(saved);
+		expect(lines.findIndex((l) => l.includes("fix theme"))).toBeGreaterThan(saved);
+		// A group with nothing in it gets no header.
+		view.setInstancesForTest(rows.filter((r) => r.status === "stopped"));
+		expect(text().some((l) => l.trim().startsWith("Running"))).toBe(false);
 	});
 
 	it("shows the search placeholder and the all-projects scope by default", () => {
@@ -198,7 +213,7 @@ describe("FleetView roster (Claude Code /resume style)", () => {
 		view.setInstancesForTest([
 			{ id: "ext:1", status: "online", activity: "idle", cwd: HERE, sessionId: "01a067e4-c59a-71c7" },
 		]);
-		expect(text()).toContain("› 01a067e4                                                                  Idle");
+		expect(text()).toContain("› 01a067e4                                                                ○ Idle");
 	});
 
 	it("stays on the top row until the user moves, even when live rows arrive above saved ones", () => {
@@ -276,5 +291,51 @@ describe("live rows without a timestamp", () => {
 		const text = view.render(80).map(stripAnsi).join("\n");
 		expect(text).toContain("5m ago");
 		expect(text).not.toContain("NaN");
+	});
+});
+
+describe("stale daemon on open", () => {
+	function openWith(client: Partial<OrchestratorClient>) {
+		const ui = { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI;
+		const view = new FleetView({
+			ui,
+			client: client as OrchestratorClient,
+			appName: "pi",
+			cwd: HERE,
+			home: HOME,
+			mascotLines: null,
+			onClose: () => {},
+			onJumpIn: () => {},
+		});
+		return { view, text: () => view.render(80).map(stripAnsi).join("\n") };
+	}
+
+	it("restarts an older-build daemon by itself and says so", async () => {
+		let restarts = 0;
+		const { view, text } = openWith({
+			ensureDaemon: async () => true,
+			getDaemonInfo: async () => ({ running: true, buildId: "old" }),
+			restartDaemon: async () => {
+				restarts++;
+				return { restarted: true };
+			},
+			list: async () => [],
+		});
+		await view.onShow();
+		view.handleInput("\x1b"); // close: stops the poll
+		expect(restarts).toBe(1);
+		expect(text()).toContain("daemon restarted to the current build");
+	});
+
+	it("leaves a busy daemon alone and passes on its reason", async () => {
+		const { view, text } = openWith({
+			ensureDaemon: async () => true,
+			getDaemonInfo: async () => ({ running: true, buildId: "old" }),
+			restartDaemon: async () => ({ restarted: false, reason: "2 running sessions" }),
+			list: async () => [],
+		});
+		await view.onShow();
+		view.handleInput("\x1b");
+		expect(text()).toContain("daemon is running an older build — not restarted: 2 running sessions");
 	});
 });
