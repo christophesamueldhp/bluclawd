@@ -59,6 +59,11 @@ function pad(text: string): string {
 /** Width of ccstatusline slider bars (context bar and usage sliders). */
 const SLIDER_WIDTH = 10;
 
+/** Fixed lead-in order for the extension-statuses line: permission mode reads
+ * before the mcp server/tool count, matching Claude Code. Keys not listed here
+ * fall back to alphabetical order after these. */
+const STATUS_KEY_ORDER: readonly string[] = ["mode", "mcp"];
+
 /** Render a ccstatusline-style slider bar: `▓` filled, `░` empty. */
 export function makeSliderBar(percent: number, width: number = SLIDER_WIDTH): string {
 	const clamped = Math.max(0, Math.min(100, percent));
@@ -387,13 +392,18 @@ export class CcStatuslineFooter implements Component {
 		}
 		if (statsLine !== null) lines.push(statsLine);
 
-		// Extension statuses on one line, sorted by key. Identical texts collapse
-		// to one chip: loosely-coupled extensions may echo the same state under
+		// Extension statuses on one line: "mode" before "mcp" (Claude Code's own
+		// order), everything else alphabetical by key. Identical texts collapse to
+		// one chip: loosely-coupled extensions may echo the same state under
 		// different keys, which would otherwise render twice.
 		const statuses = this.sources.extensionStatuses();
 		if (statuses.size > 0) {
+			const rank = (key: string) => {
+				const index = STATUS_KEY_ORDER.indexOf(key);
+				return index === -1 ? STATUS_KEY_ORDER.length : index;
+			};
 			const sorted = Array.from(statuses.entries())
-				.sort(([a], [b]) => a.localeCompare(b))
+				.sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b))
 				.map(([, text]) => sanitizeStatusText(text));
 			lines.push(truncateToWidth([...new Set(sorted)].join(" "), width, this.theme.fg("dim", "...")));
 		}
