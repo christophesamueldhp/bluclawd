@@ -18,11 +18,9 @@
  * `ctx.ui.notify` (which dims everything and does not persist in the session).
  */
 
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
-import { convertToLlm, serializeConversation, VERSION } from "@earendil-works/pi-coding-agent";
+import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import { VERSION } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
-import { saveProjectNote } from "../memory/index.ts";
 import { getActivePermissionMode } from "../permissions/active-mode.ts";
 import { isSandboxActive } from "../sandbox/state.ts";
 import { isUsingSubscription } from "../statusline/footer.ts";
@@ -71,29 +69,6 @@ export function formatStatus(
 	lines.push(`${dim("File:")} ${data.sessionFile ?? "not saved (ephemeral)"}`);
 	lines.push(dim("Entry counts, tree, and history: /session"));
 	return lines;
-}
-
-/**
- * `/recap` — a short "where are we" summary of the current session, written
- * by the active model and shown as a transcript entry (not sent to the model
- * as conversation, so it costs one request and no context). Only the tail of
- * the conversation that fits RECAP_MAX_CHARS is summarised.
- */
-const RECAP_MAX_CHARS = 120_000;
-const RECAP_SYSTEM_PROMPT = [
-	"You summarise a coding session between a user and an AI assistant for the user who is returning to it.",
-	"Do NOT continue the conversation and do NOT answer questions in it. Output ONLY the summary, under 200 words, in this shape:",
-	"",
-	"**Goal:** what the user is trying to do",
-	"**Done:** what has been completed, as short bullets",
-	"**Open:** problems, questions, or decisions still unresolved",
-	"**Next:** the most likely next step",
-].join("\n");
-
-interface RecapData {
-	text: string;
-	model?: string;
-	error?: string;
 }
 
 const BAR_WIDTH = 20;
@@ -199,82 +174,6 @@ const diagnostics: InlineExtension = {
 					sessionName: ctx.sessionManager.getSessionName(),
 					contextWindow: model?.contextWindow,
 				});
-			},
-		});
-
-		pi.registerEntryRenderer<RecapData>("bluclawd:recap", (entry, _options, theme) => {
-			const data = entry.data;
-			if (!data) return block([]);
-			if (data.error) return block([theme.bold("Recap"), theme.fg("error", data.error)]);
-			return block([theme.bold(`Recap${data.model ? theme.fg("dim", ` · ${data.model}`) : ""}`), data.text]);
-		});
-
-		/** The session so far as plain text, tail-truncated to the recap budget. */
-		const transcriptOf = (ctx: ExtensionContext): string | undefined => {
-			const messages: AgentMessage[] = [];
-			for (const entry of ctx.sessionManager.getEntries()) {
-				if (entry.type === "message") messages.push(entry.message);
-			}
-			if (messages.length === 0) return undefined;
-			const transcript = serializeConversation(convertToLlm(messages));
-			return transcript.length > RECAP_MAX_CHARS
-				? `[earlier conversation omitted]\n${transcript.slice(-RECAP_MAX_CHARS)}`
-				: transcript;
-		};
-
-		/** One out-of-band model call; returns the text answer or throws. */
-		const askModel = async (ctx: ExtensionContext, systemPrompt: string, text: string): Promise<string> => {
-			const model = ctx.model;
-			if (!model) throw new Error("No model selected — pick one with /model first.");
-			const response = await ctx.modelRegistry.complete(model, {
-				systemPrompt,
-				messages: [{ role: "user", content: [{ type: "text", text }], timestamp: Date.now() }],
-			});
-			const answer = response.content
-				.filter((part): part is { type: "text"; text: string } => part.type === "text")
-				.map((part) => part.text)
-				.join("")
-				.trim();
-			if (!answer) throw new Error("The model returned no text.");
-			return answer;
-		};
-
-		const modelLabel = (ctx: ExtensionContext): string | undefined =>
-			ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-
-		/** Today's date in the user's own timezone, as YYYY-MM-DD. */
-		const localDate = (): string => {
-			const now = new Date();
-			return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-		};
-
-		pi.registerCommand("recap", {
-			description: "Summarise this session so far: goal, done, open, next (--save keeps it in project memory)",
-			handler: async (args, ctx) => {
-				const save = args.trim() === "--save";
-				const transcript = transcriptOf(ctx);
-				if (!transcript) {
-					ctx.ui.notify("Nothing to recap yet.", "info");
-					return;
-				}
-				ctx.ui.notify("Writing recap…", "info");
-				try {
-					const text = await askModel(ctx, RECAP_SYSTEM_PROMPT, `Summarise this session:\n\n${transcript}`);
-					pi.appendEntry<RecapData>("bluclawd:recap", { text, model: modelLabel(ctx) });
-					// Saved only on request: a recap is usually a glance, and writing every
-					// one of them into memory would bury the notes worth keeping.
-					if (save) {
-						// Local date, not toISOString(): the note is read back months later, and a
-						// UTC date is off by one for anyone east of Greenwich after their evening.
-						saveProjectNote(`Recap ${localDate()}\n${text}`, ctx.cwd);
-						ctx.ui.notify("Recap saved to project memory (/memory).", "info");
-					}
-				} catch (error) {
-					pi.appendEntry<RecapData>("bluclawd:recap", {
-						text: "",
-						error: `Recap failed: ${error instanceof Error ? error.message : String(error)}`,
-					});
-				}
 			},
 		});
 
