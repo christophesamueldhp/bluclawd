@@ -2,10 +2,21 @@
  * MCP bridge core extension (Model Context Protocol) — PLAN.md F4.1 + audit B.5.
  *
  * Bridges MCP servers declared in `mcp.json` into bluclawd by registering each
- * server's tools as `mcp__<server>__<tool>`. Config is loaded from
- * `<agentDir>/mcp.json` (global, always) and `<cwd>/.bluclawd/mcp.json` (project,
- * ONLY when the project is trusted), in Claude Code's `{ "mcpServers": { … } }`
- * shape.
+ * server's tools as `mcp__<server>__<tool>`. Config is Claude Code's
+ * `{ "mcpServers": { … } }` shape, read from three files, later winning:
+ * `<agentDir>/mcp.json` (global, always), then — ONLY when the project is trusted
+ * — `<cwd>/.mcp.json` (the shared file repos commit) and
+ * `<cwd>/<CONFIG_DIR_NAME>/mcp.json` (this agent's project override).
+ *
+ * APPROVAL GATE: a server from either PROJECT file does not connect until the user
+ * runs `/mcp approve <server>`; until then it sits at `needs-approval` and nothing
+ * is spawned. This is the only control that reaches a project-declared server: a
+ * `Mcp(server:tool)` deny rule gates a tool CALL, but a stdio server is spawned at
+ * session_start, so by the time a rule could apply its process is already running —
+ * and `defaultProjectTrust: "always"` means cloning a repo can be enough to reach
+ * that point. Approvals record a config FINGERPRINT and live in the GLOBAL settings
+ * file, so the repo being gated can neither approve itself nor edit its command
+ * afterwards without re-gating. `mcp.enableAllProjectMcpServers: true` opts out.
  *
  * STARTUP COST (Trap): the `@modelcontextprotocol/sdk` transitive tree is heavy,
  * so this file never statically imports client.ts or the SDK. Config parsing lives
@@ -21,9 +32,10 @@
  * registered by then. The per-server handshake timeout in client.ts bounds the
  * wait.
  *
- * MANAGEMENT (audit B.5): `/mcp` lists servers; `/mcp enable|disable <server>`
- * toggles a server live AND persists `disabled` into the defining mcp.json;
- * `/mcp reconnect [server]` closes and re-drives connections.
+ * MANAGEMENT (audit B.5): `/mcp` lists servers; `/mcp approve <server>` clears the
+ * gate above and connects; `/mcp enable|disable <server>` toggles a server live AND
+ * persists `disabled` into the defining mcp.json; `/mcp reconnect [server]` closes
+ * and re-drives connections.
  *
  * OAUTH (audit B.5): `/mcp login <server>` runs the browser flow (see oauth.ts)
  * and `/mcp logout <server>` forgets the credential. Login is ONLY ever explicit:
@@ -48,14 +60,31 @@
  */
 
 import { Type } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
+import {
+	CONFIG_DIR_NAME,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type InlineExtension,
+} from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { openBrowser } from "../_shared/open-browser.ts";
+import { approveProjectServer } from "../_shared/settings-write.ts";
 import type { Client, RegisteredMcpTool } from "./client.ts";
 import { McpCredentialStore } from "./credential-store.ts";
-import { isAuthFailure, loadMcpConfig, type ServerConfig, setServerDisabled } from "./schema.ts";
+import {
+	approvalsForProject,
+	enableAllProjectServers,
+	isAuthFailure,
+	loadMcpConfig,
+	needsApproval,
+	partitionByApproval,
+	type ServerConfig,
+	serverFingerprint,
+	setServerDisabled,
+	transportKind,
+} from "./schema.ts";
 
-type ConnectionStatus = "connecting" | "connected" | "error" | "disabled";
+type ConnectionStatus = "connecting" | "connected" | "error" | "disabled" | "needs-approval";
 
 /** One `/mcp` row and the entry that holds them. Plain data — entries persist as
  *  JSON, so status becomes colour at render time rather than in the string. */
@@ -86,6 +115,23 @@ function errMsg(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
+/** How a connection turned out, for the notify after a connect attempt. Taking the
+ *  Connection rather than its status keeps it readable after an `await` that
+ *  mutated it — narrowing at the call site would otherwise fix the status to
+ *  whatever it was set to before the connect. */
+function connectionSummary(c: Connection): string {
+	return c.status === "connected" ? `connected, ${c.toolCount} tools` : (c.error ?? c.status);
+}
+
+/** transportKind for display: a misconfigured entry yields "" rather than throwing. */
+function safeTransportKind(name: string, config: ServerConfig): string {
+	try {
+		return transportKind(name, config);
+	} catch {
+		return "";
+	}
+}
+
 export function factory(pi: ExtensionAPI): void {
 	// Session-scoped state, rebuilt on every session_start. `epoch` guards against
 	// in-flight connects resolving after a shutdown/reload (see file header).
@@ -97,13 +143,17 @@ export function factory(pi: ExtensionAPI): void {
 
 	function updateStatus(ctx: ExtensionContext): void {
 		const disabled = connections.filter((c) => c.status === "disabled").length;
-		const total = connections.length - disabled;
+		const pending = connections.filter((c) => c.status === "needs-approval").length;
+		const total = connections.length - disabled - pending;
 		const connected = connections.filter((c) => c.status === "connected").length;
 		const tools = connections.reduce((n, c) => n + c.toolCount, 0);
 		const failed = connections.filter((c) => c.status === "error").length;
 		let text = `mcp: ${connected}/${total} servers, ${tools} tools`;
 		if (failed > 0) text += `, ${failed} failed`;
 		if (disabled > 0) text += `, ${disabled} disabled`;
+		// Surfaced in the footer, not just the panel: an unapproved server is doing
+		// nothing, and the reason needs to be visible without opening /mcp.
+		if (pending > 0) text += `, ${pending} needs approval`;
 		ctx.ui.setStatus("mcp", text);
 	}
 
@@ -229,7 +279,25 @@ export function factory(pi: ExtensionAPI): void {
 		if (myEpoch === epoch) updateStatus(ctx);
 	}
 
-	async function connectTargets(ctx: ExtensionContext, myEpoch: number, targets: Connection[]): Promise<void> {
+	async function connectTargets(ctx: ExtensionContext, myEpoch: number, requested: Connection[]): Promise<void> {
+		// The approval gate lives HERE, not at the call sites: every path that opens a
+		// transport funnels through this function, and three of them (/mcp reconnect,
+		// /mcp enable after a disable, /mcp login) would otherwise spawn a
+		// project-declared server the user never approved. Re-read rather than cached
+		// so an approval made this session takes effect immediately.
+		const { allowed: targets, gated } = partitionByApproval(
+			requested,
+			approvalsForProject(ctx.cwd),
+			enableAllProjectServers(),
+		);
+		for (const conn of gated) {
+			conn.status = "needs-approval";
+			conn.error = undefined;
+			ctx.ui.notify(`MCP: "${conn.name}" needs approval first — run /mcp approve ${conn.name}.`, "warning");
+		}
+		if (gated.length > 0) updateStatus(ctx);
+		if (targets.length === 0) return;
+
 		let mod: typeof import("./client.ts");
 		try {
 			mod = await import("./client.ts");
@@ -292,7 +360,7 @@ export function factory(pi: ExtensionAPI): void {
 		await connectTargets(
 			ctx,
 			myEpoch,
-			connections.filter((c) => c.status !== "disabled"),
+			connections.filter((c) => c.status !== "disabled" && c.status !== "needs-approval"),
 		);
 	}
 
@@ -315,10 +383,17 @@ export function factory(pi: ExtensionAPI): void {
 		deferredTools.clear();
 		const servers = loadMcpConfig(ctx);
 		const names = Object.keys(servers);
+		// Read once per session: both come from the global settings file.
+		const approvals = approvalsForProject(ctx.cwd);
+		const approveAll = enableAllProjectServers();
 		connections = names.map((name) => ({
 			name,
 			config: servers[name],
-			status: servers[name].disabled ? "disabled" : "connecting",
+			status: servers[name].disabled
+				? "disabled"
+				: needsApproval(name, servers[name], approvals, approveAll)
+					? "needs-approval"
+					: "connecting",
 			toolCount: 0,
 			tools: [],
 		}));
@@ -327,7 +402,18 @@ export function factory(pi: ExtensionAPI): void {
 			return;
 		}
 		updateStatus(ctx);
-		if (connections.every((c) => c.status === "disabled")) return;
+		const pending = connections.filter((c) => c.status === "needs-approval");
+		if (pending.length > 0) {
+			// Say it once, at startup: an unapproved server is silent otherwise, and
+			// a user who does not know it is there cannot approve it.
+			ctx.ui.notify(
+				`MCP: ${pending.length} project server${pending.length === 1 ? "" : "s"} awaiting approval (${pending
+					.map((c) => c.name)
+					.join(", ")}). Review with /mcp, then /mcp approve <server>.`,
+				"warning",
+			);
+		}
+		if (connections.every((c) => c.status === "disabled" || c.status === "needs-approval")) return;
 		if (ctx.hasUI) {
 			// Fire-and-forget: don't block interactive launch on server connections.
 			void connectAll(ctx, myEpoch).catch(() => {});
@@ -358,7 +444,7 @@ export function factory(pi: ExtensionAPI): void {
 			const colour =
 				row.status === "connected"
 					? "success"
-					: row.status === "connecting"
+					: row.status === "connecting" || row.status === "needs-approval"
 						? "warning"
 						: row.status === "disabled"
 							? "muted"
@@ -370,7 +456,10 @@ export function factory(pi: ExtensionAPI): void {
 		if (rows.length === 0) lines.push(theme.fg("muted", "  none configured"));
 		lines.push("");
 		lines.push(
-			theme.fg("dim", "/mcp enable|disable <server> · /mcp login|logout <server> · /mcp reconnect [server]"),
+			theme.fg(
+				"dim",
+				"/mcp approve <server> · /mcp enable|disable <server> · /mcp login|logout <server> · /mcp reconnect [server]",
+			),
 		);
 		const container = new Container();
 		container.addChild(new Spacer(1));
@@ -380,7 +469,7 @@ export function factory(pi: ExtensionAPI): void {
 
 	pi.registerCommand("mcp", {
 		description:
-			"List or manage MCP servers: /mcp [enable|disable <server> | login|logout <server> | reconnect [server]]",
+			"List or manage MCP servers: /mcp [approve <server> | enable|disable <server> | login|logout <server> | reconnect [server]]",
 		handler: async (args, ctx) => {
 			const parts = args.trim().split(/\s+/).filter(Boolean);
 			const sub = parts[0];
@@ -411,6 +500,19 @@ export function factory(pi: ExtensionAPI): void {
 
 				if (!conn.config.url) {
 					ctx.ui.notify(`MCP: "${name}" is a stdio server; OAuth applies to url servers only.`, "warning");
+					return;
+				}
+
+				// Gate the LOGIN too, not just the connect that follows it. The flow opens a
+				// browser at an authorization endpoint discovered from the server's own url —
+				// a url an unapproved repo chose. Letting that run and only refusing the
+				// connect afterwards would still have pointed the user at a page the repo
+				// picked, and leaked a discovery request to it.
+				if (needsApproval(name, conn.config, approvalsForProject(ctx.cwd), enableAllProjectServers())) {
+					ctx.ui.notify(
+						`MCP: "${name}" is not approved for this project yet — run /mcp approve ${name} before signing in.`,
+						"warning",
+					);
 					return;
 				}
 
@@ -457,6 +559,37 @@ export function factory(pi: ExtensionAPI): void {
 				return;
 			}
 
+			if (sub === "approve") {
+				const name = parts[1];
+				if (!name) {
+					ctx.ui.notify("Usage: /mcp approve <server>", "warning");
+					return;
+				}
+				const conn = connections.find((c) => c.name === name);
+				if (!conn) {
+					ctx.ui.notify(`MCP: no server named "${name}".`, "warning");
+					return;
+				}
+				if (conn.config.source !== "project") {
+					ctx.ui.notify(`MCP: "${name}" comes from your own global config; it needs no approval.`, "info");
+					return;
+				}
+				const written = await approveProjectServer(ctx.cwd, name, serverFingerprint(conn.config));
+				if (!written) {
+					ctx.ui.notify(`MCP: could not record the approval for "${name}".`, "error");
+					return;
+				}
+				if (conn.status !== "needs-approval") {
+					ctx.ui.notify(`MCP server "${name}" approved for this project.`, "info");
+					return;
+				}
+				conn.status = "connecting";
+				updateStatus(ctx);
+				await connectTargets(ctx, epoch, [conn]);
+				ctx.ui.notify(`MCP server "${name}" approved for this project — ${connectionSummary(conn)}.`, "info");
+				return;
+			}
+
 			if (sub === "enable" || sub === "disable") {
 				const name = parts[1];
 				if (!name) {
@@ -492,7 +625,12 @@ export function factory(pi: ExtensionAPI): void {
 
 			if (sub === "reconnect") {
 				const name = parts[1];
-				const targets = connections.filter((c) => (name ? c.name === name : c.status !== "disabled"));
+				// A bare /mcp reconnect means "re-drive what is running", so it skips both
+				// parked states; naming a server explicitly still reaches it, and the gate
+				// in connectTargets is what refuses an unapproved one.
+				const targets = connections.filter((c) =>
+					name ? c.name === name : c.status !== "disabled" && c.status !== "needs-approval",
+				);
 				if (targets.length === 0) {
 					ctx.ui.notify(name ? `MCP: no server named "${name}".` : "MCP: no servers to reconnect.", "warning");
 					return;
@@ -504,19 +642,14 @@ export function factory(pi: ExtensionAPI): void {
 				}
 				updateStatus(ctx);
 				await connectTargets(ctx, epoch, targets);
-				const summary = targets
-					.map(
-						(c) =>
-							`${c.name}: ${c.status === "connected" ? `connected, ${c.toolCount} tools` : (c.error ?? c.status)}`,
-					)
-					.join(" · ");
+				const summary = targets.map((c) => `${c.name}: ${connectionSummary(c)}`).join(" · ");
 				ctx.ui.notify(`MCP reconnect — ${summary}`, "info");
 				return;
 			}
 
 			if (parts.length > 0) {
 				ctx.ui.notify(
-					"Usage: /mcp [enable|disable <server> | login|logout <server> | reconnect [server]]",
+					"Usage: /mcp [approve <server> | enable|disable <server> | login|logout <server> | reconnect [server]]",
 					"warning",
 				);
 				return;
@@ -524,14 +657,16 @@ export function factory(pi: ExtensionAPI): void {
 
 			if (connections.length === 0) {
 				ctx.ui.notify(
-					"No MCP servers configured. Add an mcp.json (global agent dir or project .bluclawd/).",
+					`No MCP servers configured. Add an mcp.json (global agent dir or project ${CONFIG_DIR_NAME}/).`,
 					"info",
 				);
 				return;
 			}
 			const rows: McpRow[] = connections.map((c) => ({
 				name: c.name,
-				kind: c.config.command ? "stdio" : c.config.url ? "http" : "?",
+				// A misconfigured entry has no transport to name; it reports the reason
+				// in its error row instead, so the kind column just stays blank.
+				kind: safeTransportKind(c.name, c.config),
 				status: c.status,
 				state:
 					c.status === "connected"
@@ -540,7 +675,9 @@ export function factory(pi: ExtensionAPI): void {
 							? "connecting…"
 							: c.status === "disabled"
 								? "disabled"
-								: `error: ${c.error ?? "unknown"}`,
+								: c.status === "needs-approval"
+									? `needs approval — /mcp approve ${c.name}`
+									: `error: ${c.error ?? "unknown"}`,
 			}));
 			pi.appendEntry<McpData>("bluclawd:mcp", { rows });
 		},

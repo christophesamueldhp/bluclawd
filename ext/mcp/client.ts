@@ -12,6 +12,7 @@ import type { AgentToolResult, ExtensionAPI } from "@earendil-works/pi-coding-ag
 import { DEFAULT_MAX_BYTES, formatSize, VERSION } from "@earendil-works/pi-coding-agent";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import {
 	getDefaultEnvironment,
 	StdioClientTransport,
@@ -19,7 +20,7 @@ import {
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { resolveHeaders } from "../_shared/resolve-config-value.ts";
-import { mcpToolName, resolveServerEnv, type ServerConfig, toToolParameters } from "./schema.ts";
+import { mcpToolName, resolveServerEnv, type ServerConfig, toToolParameters, transportKind } from "./schema.ts";
 
 export type { Client };
 
@@ -62,25 +63,21 @@ export function stdioTransportOptions(config: ServerConfig): StdioServerParamete
 }
 
 /**
- * Build and connect a transport for one server. `command` selects stdio, `url`
- * selects HTTP; having neither or both is a misconfiguration and throws (the
- * caller surfaces it as a notify + error status). Returns the connected Client.
+ * Build and connect a transport for one server. {@link transportKind} picks it and
+ * rejects a misconfiguration by throwing (the caller surfaces that as a notify +
+ * error status). Returns the connected Client.
  */
 export async function connectServer(
 	name: string,
 	config: ServerConfig,
 	opts?: { connectTimeoutMs?: number; authProvider?: OAuthClientProvider },
 ): Promise<Client> {
-	const hasCommand = typeof config.command === "string" && config.command.length > 0;
-	const hasUrl = typeof config.url === "string" && config.url.length > 0;
-	if (hasCommand === hasUrl) {
-		throw new Error(`server "${name}" must set exactly one of "command" (stdio) or "url" (http)`);
-	}
+	const kind = transportKind(name, config);
 
 	const client = new Client({ name: "bluclawd", version: VERSION }, { capabilities: {} });
 
-	let transport: StdioClientTransport | StreamableHTTPClientTransport;
-	if (hasCommand) {
+	let transport: StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport;
+	if (kind === "stdio") {
 		transport = new StdioClientTransport(stdioTransportOptions(config));
 	} else {
 		// resolveHeaders falls back to process.env internally (same as resolveServerEnv),
@@ -89,10 +86,20 @@ export async function connectServer(
 		// `/mcp login` (see oauth.ts authProviderFor). With it the SDK attaches the
 		// bearer token and refreshes on 401; without it a 401 simply fails the
 		// connect, which is what keeps login an explicit, user-initiated act.
-		transport = new StreamableHTTPClientTransport(new URL(config.url as string), {
+		//
+		// Both HTTP transports take the same two options. The SSE transport's
+		// `requestInit` doc comment says "recurring POST requests", but its
+		// _commonHeaders() is also what builds the headers for the initial event
+		// stream (sdk 1.29.0 client/sse.js), so configured headers and a refreshed
+		// OAuth token both reach the GET — `headers` and /mcp login work for an SSE
+		// server exactly as they do for a streamable-http one.
+		const options = {
 			requestInit: { headers: resolveHeaders(config.headers) },
 			authProvider: opts?.authProvider,
-		});
+		};
+		const url = new URL(config.url as string);
+		transport =
+			kind === "sse" ? new SSEClientTransport(url, options) : new StreamableHTTPClientTransport(url, options);
 	}
 
 	const timeoutMs = opts?.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;

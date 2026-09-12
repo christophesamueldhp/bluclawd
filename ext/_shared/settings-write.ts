@@ -1,5 +1,6 @@
 /**
- * Persisting bluclawd's permission rules to settings.json.
+ * Persisting bluclawd's own settings keys (permission rules, MCP server
+ * approvals) to settings.json.
  *
  * pi's `SettingsManager` has a typed setter per key and keeps its write path
  * private, so there is no public way to persist a key pi does not know about.
@@ -7,8 +8,10 @@
  * read-modify-write of the same JSON files pi reads.
  *
  * Two properties make that safe enough to be the same risk the fork already
- * carried: the writers touch **only** the `permissions` key, merging into
- * whatever else is on disk at the time; and they take pi's own advisory lock
+ * carried: each writer touches **only** the one top-level key it owns
+ * (`permissions` for the rule writers, `mcp` for the MCP approval record),
+ * merging into whatever else is on disk at the time; and they take pi's own
+ * advisory lock
  * (`proper-lockfile` on the settings file) so a concurrent writer serialises
  * rather than interleaves. The fork's version wrote through a second
  * `SettingsManager` instance, which had the same last-writer-wins exposure.
@@ -47,11 +50,8 @@ function readObject(path: string): Record<string, unknown> {
 	}
 }
 
-/** Locked read-modify-write of one settings file, touching only `permissions`. */
-async function updatePermissions(
-	path: string,
-	update: (permissions: PermissionSettings) => PermissionSettings | undefined,
-): Promise<boolean> {
+/** Locked read-modify-write of one settings file, touching only `key`. */
+async function updateKey<T>(path: string, key: string, update: (current: T) => T | undefined): Promise<boolean> {
 	mkdirSync(dirname(path), { recursive: true });
 	if (!existsSync(path)) writeFileSync(path, "{}\n", "utf-8");
 
@@ -67,10 +67,10 @@ async function updatePermissions(
 
 	try {
 		const settings = readObject(path);
-		const current = (settings.permissions ?? {}) as PermissionSettings;
+		const current = (settings[key] ?? {}) as T;
 		const next = update(structuredClone(current));
 		if (next === undefined) return false;
-		settings.permissions = next;
+		settings[key] = next;
 		writeFileSync(path, `${JSON.stringify(settings, null, "\t")}\n`, "utf-8");
 		return true;
 	} finally {
@@ -98,19 +98,41 @@ function withoutRule(permissions: PermissionSettings, rule: string): PermissionS
 }
 
 export async function addGlobalRule(list: RuleList, rule: string): Promise<void> {
-	await updatePermissions(globalSettingsPath(), (permissions) => withRule(permissions, list, rule));
+	await updateKey<PermissionSettings>(globalSettingsPath(), "permissions", (p) => withRule(p, list, rule));
 }
 
 export async function addProjectRule(cwd: string, list: RuleList, rule: string, trusted: boolean): Promise<void> {
 	if (!trusted) throw new Error("Refusing to write project permission rules: project is not trusted");
-	await updatePermissions(projectSettingsPath(cwd), (permissions) => withRule(permissions, list, rule));
+	await updateKey<PermissionSettings>(projectSettingsPath(cwd), "permissions", (p) => withRule(p, list, rule));
 }
 
 export async function removeGlobalRule(rule: string): Promise<boolean> {
-	return updatePermissions(globalSettingsPath(), (permissions) => withoutRule(permissions, rule));
+	return updateKey<PermissionSettings>(globalSettingsPath(), "permissions", (p) => withoutRule(p, rule));
 }
 
 export async function removeProjectRule(cwd: string, rule: string, trusted: boolean): Promise<boolean> {
 	if (!trusted) return false;
-	return updatePermissions(projectSettingsPath(cwd), (permissions) => withoutRule(permissions, rule));
+	return updateKey<PermissionSettings>(projectSettingsPath(cwd), "permissions", (p) => withoutRule(p, rule));
+}
+
+/** The `mcp` settings key this layer owns. Only the approval record lives here. */
+interface McpSettings {
+	approvedProjectServers?: Record<string, Record<string, string>>;
+	enableAllProjectMcpServers?: boolean;
+}
+
+/**
+ * Record the user's approval of one project-declared MCP server.
+ *
+ * Always written to the GLOBAL settings file, never the project's: the repo whose
+ * server is being approved must not be able to supply its own approval. Keyed by
+ * absolute project path, then server name, storing the config fingerprint so a
+ * later edit to that entry re-gates it.
+ */
+export async function approveProjectServer(cwd: string, name: string, fingerprint: string): Promise<boolean> {
+	return updateKey<McpSettings>(globalSettingsPath(), "mcp", (mcp) => {
+		const byProject = { ...(mcp.approvedProjectServers ?? {}) };
+		byProject[cwd] = { ...(byProject[cwd] ?? {}), [name]: fingerprint };
+		return { ...mcp, approvedProjectServers: byProject };
+	});
 }

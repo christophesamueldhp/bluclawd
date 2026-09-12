@@ -13,8 +13,13 @@
  *       "playwright": { "command": "npx", "args": ["-y", "@playwright/mcp@latest"] },
  *       "remote": { "url": "https://example.com/mcp", "headers": { "Authorization": "Bearer $TOK" } }
  *   } }
+ *
+ * Besides parsing, this module owns the two decisions that must be testable without
+ * a transport: which transport an entry selects ({@link transportKind}) and whether
+ * a project-declared server may connect at all ({@link needsApproval}).
  */
 
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { TSchema } from "@earendil-works/pi-ai";
@@ -25,6 +30,14 @@ import { getDebugLogPath } from "../_shared/paths.ts";
 import { resolveConfigValue } from "../_shared/resolve-config-value.ts";
 
 const MCP_FILE = "mcp.json";
+/** Claude Code's shared, commit-to-the-repo config at the project root. */
+const SHARED_MCP_FILE = ".mcp.json";
+
+/** Transports a server entry can select. See {@link transportKind}. */
+export type TransportKind = "stdio" | "http" | "sse";
+
+/** Which file an entry came from. Decides whether the approval gate applies. */
+export type ServerSource = "global" | "project";
 
 /** A single MCP server entry. `command` ⇒ stdio transport; `url` ⇒ HTTP transport. */
 export interface ServerConfig {
@@ -33,6 +46,13 @@ export interface ServerConfig {
 	env?: Record<string, string>;
 	url?: string;
 	headers?: Record<string, string>;
+	/** Explicit transport, as Claude Code writes it. Absent ⇒ inferred from the
+	 *  fields; required to reach the legacy SSE transport, which is never guessed. */
+	type?: TransportKind;
+	/** Which file this came from. Stamped by {@link loadMcpConfig} and NEVER read
+	 *  out of the file itself — a repo that could declare itself `global` would
+	 *  walk straight past {@link needsApproval}. */
+	source?: ServerSource;
 	/** Configured but not connected; toggled by `/mcp enable|disable` (audit B.5). */
 	disabled?: boolean;
 	/** Register this server's tools deferred: schemas stay out of the model's
@@ -89,6 +109,17 @@ function debugLog(message: string): void {
 	}
 }
 
+/** Read + JSON-parse a file expected to hold an object. Anything else ⇒ {}. */
+function readJsonObject(path: string): Record<string, unknown> {
+	if (!existsSync(path)) return {};
+	try {
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
+		return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+	} catch {
+		return {};
+	}
+}
+
 /** Keep only string-valued entries of an object. */
 function stringRecord(value: object): Record<string, string> {
 	const out: Record<string, string> = {};
@@ -122,11 +153,138 @@ export function parseMcpConfig(raw: unknown): Record<string, ServerConfig> {
 		if (v.env && typeof v.env === "object") config.env = stringRecord(v.env as object);
 		if (typeof v.url === "string") config.url = v.url;
 		if (v.headers && typeof v.headers === "object") config.headers = stringRecord(v.headers as object);
+		// Kept verbatim (not validated here) so an unknown transport surfaces as a
+		// per-server notify at connect time rather than being silently inferred away.
+		if (typeof v.type === "string") config.type = v.type as TransportKind;
 		if (typeof v.disabled === "boolean") config.disabled = v.disabled;
 		if (typeof v.deferTools === "boolean") config.deferTools = v.deferTools;
 		out[name] = config;
 	}
 	return out;
+}
+
+/**
+ * Pick the transport for a server entry, validating the config as it goes.
+ *
+ * `type` is Claude Code's field and wins when present; without it the transport is
+ * inferred, exactly as before, from whichever of `command`/`url` is set. SSE is
+ * reachable ONLY through an explicit `type: "sse"`: an SSE endpoint is just a URL,
+ * so guessing would mean attempting both transports and paying the handshake
+ * timeout twice on every genuinely misconfigured server, while hiding the mistake.
+ *
+ * Throws on a misconfiguration (unknown type, a type missing its required field,
+ * neither or both of command/url) — the caller turns that into a per-server notify.
+ */
+export function transportKind(name: string, config: ServerConfig): TransportKind {
+	const hasCommand = typeof config.command === "string" && config.command.length > 0;
+	const hasUrl = typeof config.url === "string" && config.url.length > 0;
+
+	if (config.type !== undefined) {
+		if (config.type === "stdio") {
+			if (!hasCommand) throw new Error(`server "${name}" has type "stdio" but no "command"`);
+			return "stdio";
+		}
+		if (config.type === "http" || config.type === "sse") {
+			if (!hasUrl) throw new Error(`server "${name}" has type "${config.type}" but no "url"`);
+			return config.type;
+		}
+		throw new Error(`server "${name}" has unknown transport type "${config.type}" (expected stdio, http or sse)`);
+	}
+
+	if (hasCommand === hasUrl) {
+		throw new Error(`server "${name}" must set exactly one of "command" (stdio) or "url" (http)`);
+	}
+	return hasCommand ? "stdio" : "http";
+}
+
+/** Recursively sort object keys so JSON.stringify is order-independent. Arrays keep
+ *  their order — `args` is positional, so reordering it changes what runs. */
+function canonical(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(canonical);
+	if (value && typeof value === "object") {
+		const out: Record<string, unknown> = {};
+		for (const key of Object.keys(value as object).sort()) {
+			out[key] = canonical((value as Record<string, unknown>)[key]);
+		}
+		return out;
+	}
+	return value;
+}
+
+/**
+ * Fingerprint of everything about a server that decides WHAT RUNS and WHERE
+ * CREDENTIALS GO: the command line, its environment, the endpoint, the headers,
+ * and the transport.
+ *
+ * `disabled`, `deferTools` and `source` are deliberately excluded — they change
+ * how bluclawd presents a server, never what it executes, so toggling them must
+ * not invalidate an approval the user already gave.
+ *
+ * Fields are fingerprinted as a canonicalised object rather than a joined string
+ * so that text cannot migrate between neighbouring fields without changing the
+ * digest (`command: "ab"` and `command: "a", args: ["b"]` differ).
+ */
+export function serverFingerprint(config: ServerConfig): string {
+	const surface = {
+		command: config.command,
+		args: config.args,
+		env: config.env,
+		url: config.url,
+		headers: config.headers,
+		type: config.type,
+	};
+	return createHash("sha256")
+		.update(JSON.stringify(canonical(surface)))
+		.digest("hex");
+}
+
+/** Approved server fingerprints for one project, keyed by server name. */
+export type ProjectApprovals = Record<string, string>;
+
+/**
+ * Must this server be approved by the user before bluclawd connects it?
+ *
+ * Only project-sourced servers are gated. This is the one control that reaches
+ * them: a `Mcp(server:tool)` deny rule gates a tool CALL, but a stdio server is
+ * spawned at session_start, so by the time any rule could apply the process is
+ * already running. Project trust does not cover it either — `defaultProjectTrust`
+ * can be `always`, in which case cloning a repo would be enough to run its
+ * command.
+ *
+ * The approval records a fingerprint, not just a name, so editing an approved
+ * entry's command re-gates it instead of inheriting the old consent.
+ */
+export function needsApproval(
+	name: string,
+	config: ServerConfig,
+	approvals: ProjectApprovals,
+	enableAllProjectServers: boolean,
+): boolean {
+	if (config.source !== "project") return false;
+	if (enableAllProjectServers) return false;
+	return approvals[name] !== serverFingerprint(config);
+}
+
+/**
+ * Split servers about to be connected into those allowed through and those the
+ * approval gate holds back.
+ *
+ * Applied at the single point where a transport is opened rather than at
+ * session_start, because session_start is not the only way in: `/mcp reconnect`,
+ * `/mcp enable` after a disable, and `/mcp login` all re-drive a connection, and
+ * each one would otherwise start a server the user never approved.
+ */
+export function partitionByApproval<T extends { name: string; config: ServerConfig }>(
+	targets: T[],
+	approvals: ProjectApprovals,
+	enableAllProjectServers: boolean,
+): { allowed: T[]; gated: T[] } {
+	const allowed: T[] = [];
+	const gated: T[] = [];
+	for (const target of targets) {
+		(needsApproval(target.name, target.config, approvals, enableAllProjectServers) ? gated : allowed).push(target);
+	}
+	return { allowed, gated };
 }
 
 /** Read + JSON-parse an mcp.json file into a server map. Missing/unreadable/malformed ⇒ {}. */
@@ -150,13 +308,49 @@ function parseMcpFile(path: string): Record<string, ServerConfig> {
 
 /**
  * Load the effective server map: the global `<agentDir>/mcp.json` always, plus the
- * project `<cwd>/.bluclawd/mcp.json` ONLY when the project is trusted. On a name
- * collision the project entry wins.
+ * project `<cwd>/<CONFIG_DIR_NAME>/mcp.json` ONLY when the project is trusted. On a
+ * name collision the project entry wins.
  */
 export function loadMcpConfig(ctx: ExtensionContext): Record<string, ServerConfig> {
-	const global = parseMcpFile(join(getAgentDir(), MCP_FILE));
-	const project = ctx.isProjectTrusted() ? parseMcpFile(join(ctx.cwd, CONFIG_DIR_NAME, MCP_FILE)) : {};
-	return { ...global, ...project };
+	const stamp = (servers: Record<string, ServerConfig>, source: ServerSource): Record<string, ServerConfig> => {
+		for (const config of Object.values(servers)) config.source = source;
+		return servers;
+	};
+
+	const global = stamp(parseMcpFile(join(getAgentDir(), MCP_FILE)), "global");
+	if (!ctx.isProjectTrusted()) return global;
+	// `.mcp.json` is the shared, committed convention; `<configDir>/mcp.json` is
+	// this agent's own override and wins over it. Both are project-sourced, so
+	// both go through the approval gate.
+	const shared = stamp(parseMcpFile(join(ctx.cwd, SHARED_MCP_FILE)), "project");
+	const project = stamp(parseMcpFile(join(ctx.cwd, CONFIG_DIR_NAME, MCP_FILE)), "project");
+	return { ...global, ...shared, ...project };
+}
+
+/**
+ * Server approvals recorded for `cwd`, read from the GLOBAL settings file.
+ *
+ * Global on purpose: a project-scoped record would let the repo being gated write
+ * its own approval. Anything unreadable or misshapen yields no approvals — this
+ * must fail closed, since the failure mode of the alternative is running a
+ * stranger's command.
+ */
+export function approvalsForProject(cwd: string): ProjectApprovals {
+	const settings = readJsonObject(join(getAgentDir(), "settings.json"));
+	const mcp = settings.mcp;
+	if (!mcp || typeof mcp !== "object") return {};
+	const byProject = (mcp as Record<string, unknown>).approvedProjectServers;
+	if (!byProject || typeof byProject !== "object") return {};
+	const entry = (byProject as Record<string, unknown>)[cwd];
+	if (!entry || typeof entry !== "object") return {};
+	return stringRecord(entry as object);
+}
+
+/** Has the user opted out of the project-server gate entirely? Global settings only. */
+export function enableAllProjectServers(): boolean {
+	const mcp = readJsonObject(join(getAgentDir(), "settings.json")).mcp;
+	if (!mcp || typeof mcp !== "object") return false;
+	return (mcp as Record<string, unknown>).enableAllProjectMcpServers === true;
 }
 
 /**
@@ -172,8 +366,10 @@ export function setServerDisabled(
 	name: string,
 	disabled: boolean,
 ): { file: string } | { error: string } {
+	// Same precedence as loadMcpConfig, so the file edited is the one that actually
+	// defines the server the user is looking at.
 	const candidates = [
-		...(ctx.isProjectTrusted() ? [join(ctx.cwd, CONFIG_DIR_NAME, MCP_FILE)] : []),
+		...(ctx.isProjectTrusted() ? [join(ctx.cwd, CONFIG_DIR_NAME, MCP_FILE), join(ctx.cwd, SHARED_MCP_FILE)] : []),
 		join(getAgentDir(), MCP_FILE),
 	];
 	for (const file of candidates) {

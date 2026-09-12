@@ -214,6 +214,17 @@ function urlHost(url: string): string | undefined {
  * name a custom linker or runner, `.config/git/config` can repoint
  * `core.hooksPath`, and `.yarn/releases` holds the yarn binary itself.
  */
+/**
+ * Agent-config files identified by NAME alone, wherever they sit.
+ *
+ * `.mcp.json` lives at the PROJECT ROOT, not inside a config directory, so no
+ * segment rule reaches it — yet it names a `command` the MCP bridge spawns at
+ * session_start. That spawn happens before any `Mcp(server:tool)` rule could
+ * apply (rules gate tool calls, not the server process), which makes writing the
+ * file the only place a gate can sit.
+ */
+const PROTECTED_FILENAMES = [".mcp.json"];
+
 const PROTECTED_SEGMENTS = [
 	".git",
 	".claude",
@@ -295,6 +306,7 @@ export function isProtectedPath(rawPath: string, cwd: string, agentDir: string, 
 		) {
 			return true;
 		}
+		if (PROTECTED_FILENAMES.some((name) => eq(name, basename(candidate)))) return true;
 		if (eq(candidate, agentAbs)) return true;
 		if (
 			caseInsensitive
@@ -336,6 +348,9 @@ export function isReadProtectedPath(rawPath: string, cwd: string, agentDir: stri
 	// Match the filename the same way the filesystem does. On darwin/win32 `Auth.json`
 	// opens auth.json, so a case-sensitive compare here read credentials unprompted
 	// while the directory comparisons below were already case-insensitive.
+	// Protected by name wherever it sits — `.mcp.json` holds server headers, which
+	// routinely carry a literal bearer token.
+	if (PROTECTED_FILENAMES.some((name) => eq(name, basename(abs)))) return true;
 	if (!READ_PROTECTED_FILES.some((name) => eq(name, basename(abs)))) return false;
 	const parent = dirname(abs);
 	const agentAbs = resolveToCwd(agentDir, cwd);
