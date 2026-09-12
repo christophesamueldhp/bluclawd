@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	createModeStore,
+	DEFAULT_MODE,
 	isModeAllowedUntrusted,
 	MODE_CYCLE,
 	MODE_DESCRIPTIONS,
@@ -14,6 +15,13 @@ describe("mode vocabulary", () => {
 	it("is Claude Code's three-mode set under this layer's names", () => {
 		expect(PERMISSION_MODES).toEqual(["ask", "edits", "auto"]);
 		expect(SAFEST_MODE).toBe("ask");
+	});
+
+	it("starts trusted sessions in auto, distinct from the untrusted floor", () => {
+		// A parity sweep that "fixes" the product default back to ask must fail here,
+		// not rediscover the divergence live.
+		expect(DEFAULT_MODE).toBe("auto");
+		expect(DEFAULT_MODE).not.toBe(SAFEST_MODE);
 	});
 
 	it("still accepts the names this layer shipped with, bypass included", () => {

@@ -36,6 +36,7 @@ import { setActivePermissionMode } from "./active-mode.ts";
 import { type EvalConfig, evaluatePostHook, evaluatePreHook } from "./evaluate.ts";
 import {
 	createModeStore,
+	DEFAULT_MODE,
 	isModeAllowedUntrusted,
 	MODE_DESCRIPTIONS,
 	type ModeStore,
@@ -167,6 +168,12 @@ export function factory(pi: ExtensionAPI): void {
 	}
 
 	function applySettingsDefaultMode(ctx: ExtensionContext): void {
+		// Product default: a trusted session starts in DEFAULT_MODE unless settings say
+		// otherwise. An untrusted project just stays clamped at SAFEST_MODE (the store's
+		// own construction-time value) — that's the ordinary clamp, not a refused
+		// request, so it does not warn.
+		modeStore?.set(DEFAULT_MODE);
+
 		let configured: string | undefined;
 		try {
 			configured = forkSettings.globalPermissionDefaultMode(
@@ -230,7 +237,7 @@ export function factory(pi: ExtensionAPI): void {
 		// startup and `/trust` can grant it mid-session, so a snapshot would strand the
 		// session in the clamped mode for good.
 		modeStore = createModeStore(onModeChanged, () => ctx.isProjectTrusted());
-		// Starting mode from settings (Claude Code parity with permissions.defaultMode).
+		// Starting mode: DEFAULT_MODE unless permissions.defaultMode overrides it.
 		// GLOBAL settings only — a trusted project may contribute allow rules, but
 		// letting it name the mode would let any repo ship `defaultMode: "auto"`
 		// and switch the whole safety layer off. CLI flags below still override this.

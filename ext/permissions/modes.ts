@@ -29,8 +29,14 @@ export const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "edits", "aut
 /** Cycle order for Alt+M and a bare `/mode`, in increasing autonomy. */
 export const MODE_CYCLE: readonly PermissionMode[] = ["ask", "edits", "auto"];
 
-/** The mode every session starts in, and the only one an untrusted project may use. */
+/** The only mode an untrusted project may use, and what an untrusted or freshly
+ *  constructed store falls back to. Kept separate from {@link DEFAULT_MODE} so
+ *  raising the product default can never loosen this floor. */
 export const SAFEST_MODE: PermissionMode = "ask";
+
+/** The mode a trusted session starts in absent an explicit `permissions.defaultMode`
+ *  or `--permission-mode`/`--dangerously-skip-permissions` flag. */
+export const DEFAULT_MODE: PermissionMode = "auto";
 
 /** One line per mode, for `/mode`'s selector and its command description. */
 export const MODE_DESCRIPTIONS: Record<PermissionMode, string> = {

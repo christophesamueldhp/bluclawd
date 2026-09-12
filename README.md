@@ -144,6 +144,9 @@ back. Claude Code's names (`default`, `acceptEdits`, `bypass`) and the older
 resolve to `auto` — so stored settings and scripts keep working. Subagent
 children are evaluated as `auto` with the parent's deny rules only.
 
+A trusted session starts in `auto`; set `permissions.defaultMode` in global
+settings to start in `ask` or `edits` instead.
+
 **Project trust pins the mode.** In a project pi has not been told to trust,
 every mode above `ask` is refused — from settings, CLI flags, `/mode` and
 Alt+M alike. pi already withholds an untrusted repository's settings,
