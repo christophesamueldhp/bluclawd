@@ -40,8 +40,9 @@
  *   3. `git commit-tree <tree> [-p HEAD] -m ...` — wrap the tree in a commit
  *      object (no index involved at all). Author/committer are fixed synthetic
  *      values so this never depends on the user's `git config`.
- *   4. `git update-ref refs/bluclawd/checkpoints/<sha> <sha>` — keep the commit
- *      reachable from GC. `refs/bluclawd/...` (rather than `git tag`) is
+ *   4. `git update-ref refs/bluclawd/checkpoints/<sessionId>/<sha> <sha>` — keep
+ *      the commit reachable from GC, under this session's own namespace (see
+ *      pruning below). `refs/bluclawd/...` (rather than `git tag`) is
  *      invisible to `git tag`/`git branch` and the user's normal workflow;
  *      `git log --all` will still enumerate it, same tradeoff as e.g. GitHub's
  *      `refs/pull/*` convention.
@@ -114,24 +115,33 @@
  * The fork-point offer (`session_before_fork`) restores the OLDEST checkpoint
  * of the forked-at turn (`checkpointForTurn`): a prompt runs several turns and
  * each is captured, and replaying the prompt needs the tree from before its
- * first turn. Its safety-net entry lands on the OUTGOING session's branch, so
- * the forked session's first automatic prune drops that ref; the commit
- * object stays restorable by sha until `git gc` (default two weeks). Known
- * limitation, shared with every concurrent-session case (see pruning below).
+ * first turn. Its safety-net entry lands on the OUTGOING session's branch and
+ * its ref under that session's namespace, where the forked session's prune
+ * leaves it alone (see pruning below).
+ *
+ * Both `/rewind` and the fork offer ask exactly ONE question, inside
+ * `restoreWithSafetyNet`: the safety-net tree it has just captured is diffed
+ * against the target (`git diff --stat`, clipped to PREVIEW_MAX_LINES) so the
+ * confirmation shows what the restore changes. Identical trees short-circuit
+ * with a notice; declining appends no entry (the stray safety-net ref is
+ * swept by the next prune).
  *
  * ── Persistence & pruning ────────────────────────────────────────────────────
  * Each checkpoint is `pi.appendEntry("checkpoint", { sha, turnEntryId, subject })`
  * — a flat, alias-free object (no nested/mutable state to clone). `listCheckpoints`
  * is a pure function over session entries (root->leaf order in, newest-first out)
- * so it's unit-testable without git. `/rewind --prune` (or `prune`) deletes every
- * `refs/bluclawd/checkpoints/*` ref whose sha isn't referenced by a checkpoint
- * entry on the CURRENT branch — i.e. checkpoints from other/old sessions get
- * swept, avoiding unbounded ref accumulation. `pruneOldCheckpointRefs()` now
- * runs that same sweep automatically after every capture (not just on request),
- * and additionally caps the current branch itself to the newest
- * `MAX_CHECKPOINT_REFS` refs, so growth stays bounded across both long-lived
- * repos (many old sessions) and long-lived sessions (many turns) without the
- * user ever needing `/rewind --prune` — see the note below.
+ * so it's unit-testable without git. Refs live under
+ * `refs/bluclawd/checkpoints/<sessionId>/<sha>` so that sessions sharing one
+ * `.git` (FleetView sessions in the same repo, subagents in worktrees) do not
+ * sweep each other. `pruneCheckpointRefs` — run automatically after every
+ * capture and by `/rewind --prune` — applies three rules: this session's refs
+ * are kept only while their sha is among the newest `MAX_CHECKPOINT_REFS`
+ * checkpoint entries on the CURRENT branch; legacy flat refs
+ * (`refs/bluclawd/checkpoints/<sha>`, from before the namespaces) follow the
+ * same rule so an upgraded repo converges without a migration; other sessions'
+ * refs are dropped only once their commit is older than
+ * FOREIGN_CHECKPOINT_TTL_DAYS. Growth stays bounded across long-lived repos
+ * and long-lived sessions without the user ever needing `/rewind --prune`.
  */
 
 import { randomUUID } from "node:crypto";
@@ -167,14 +177,11 @@ export const MAX_CHECKPOINT_REFS = 50;
 //   platform stance, and §3's "PowerShell" row gives the specific reason: "skip
 //   until Windows is a target (checkpoints are POSIX-only anyway)". No
 //   cross-platform shim is planned.
-// - Unbounded ref growth: CLOSED. `checkpointCurrentTurn()` now calls
-//   `pruneOldCheckpointRefs()` unconditionally after every successful capture:
-//   below MAX_CHECKPOINT_REFS this is exactly the manual `/rewind --prune`
-//   sweep (stray refs from OTHER/old sessions removed), just run every turn
-//   instead of on request; above it, it also caps the current branch's own refs
-//   to the newest MAX_CHECKPOINT_REFS. Fire-and-forget, same as capture itself
-//   (doesn't gate `isCapturing`). Manual `/rewind --prune` is unchanged and
-//   still available for on-demand use.
+// - Unbounded ref growth: CLOSED. `checkpointCurrentTurn()` calls
+//   `pruneOldCheckpointRefs()` unconditionally after every successful capture
+//   (the three-rule sweep in the header, capped at MAX_CHECKPOINT_REFS for this
+//   session). Fire-and-forget, same as capture itself (doesn't gate
+//   `isCapturing`). Manual `/rewind --prune` runs the identical sweep on demand.
 
 /** Data persisted per checkpoint via `pi.appendEntry("checkpoint", ...)`. */
 export interface CheckpointData {
