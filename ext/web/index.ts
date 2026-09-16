@@ -20,7 +20,8 @@ import * as forkSettings from "../_shared/settings.ts";
 import { webfetchConfig } from "./config.ts";
 import { type WebfetchResult, webFetch } from "./fetch.ts";
 import { renderWebfetchCall, renderWebfetchResult, renderWebsearchCall, renderWebsearchResult } from "./render.ts";
-import { defaultEnvFor, exaMcpSearch, type SearchProvider, type SearchResult, webSearch } from "./search.ts";
+import { type RouterSettings, routedSearch } from "./router.ts";
+import type { SearchResult } from "./search.ts";
 import { findLines, getContent, listContent, putContent, sliceLines } from "./store.ts";
 
 interface WebfetchDetails {
@@ -341,7 +342,7 @@ export function factory(pi: ExtensionAPI): void {
 		name: "websearch",
 		label: "WebSearch",
 		description:
-			"Search the web and return a list of {title, url, snippet, published?} results. Use allowed_domains or blocked_domains (not both) to narrow by site. Works with no configuration; set an API key (exa, brave, or tavily) to use your own provider account.",
+			"Search the web and return a list of {title, url, snippet, published?} results. Use allowed_domains or blocked_domains (not both) to narrow by site. Works with no configuration; with API keys it uses exa, brave, tavily, jina, perplexity, kagi, serper, a SearXNG instance or DuckDuckGo, falling back along settings.websearch.routing.",
 		promptSnippet:
 			"Use websearch to find current information on the web; account for the current date when judging whether a result is recent.",
 		parameters: WebsearchParams,
@@ -365,49 +366,19 @@ export function factory(pi: ExtensionAPI): void {
 					projectTrusted: ctx.isProjectTrusted(),
 				}),
 			);
-			const provider: SearchProvider = ws?.provider ?? "exa";
-			const envVar = ws?.apiKeyEnv ?? defaultEnvFor(provider);
-			const apiKey = process.env[envVar];
-			if (!apiKey) {
-				// Zero-config websearch (audit C.2): Exa's hosted MCP endpoint answers
-				// without credentials, so the tool works on a fresh install instead of
-				// dead-ending on "go get an API key". It is a fallback, never a
-				// preference — a configured key always wins above.
-				//
-				// Queries reach a third party unauthenticated on this path, so it is
-				// switchable off, and turning it off restores the configure message.
-				if (ws?.keyless === false) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Web search needs an API key. Set the ${envVar} environment variable, or configure settings.websearch (provider is "${provider}").`,
-							},
-						],
-						details: [],
-					};
-				}
-				// Pass the caller's signal straight through: exaMcpSearch adds the same
-				// timeout the keyed providers get. The old `?? new AbortController().signal`
-				// substituted a signal that is never aborted, so a stalled endpoint hung
-				// the turn with no bound at all.
-				const keylessResults = await exaMcpSearch(params.query, fetch, signal, filter, params.recency);
-				return {
-					content: [{ type: "text", text: searchOutput(params.query, keylessResults) }],
-					details: keylessResults,
-				};
-			}
-			const results = await webSearch({
+			const routed = await routedSearch({
 				query: params.query,
-				provider,
-				apiKey,
-				signal,
+				filter,
 				recency: params.recency,
-				...filter,
+				signal,
+				settings: ws as RouterSettings | undefined,
 			});
+			if (routed.unconfigured) return { content: [{ type: "text", text: routed.unconfigured }], details: [] };
+			const fellBack = routed.skipped.length > 0 && ((ws as RouterSettings | undefined)?.routing?.length ?? 0) > 1;
+			const via = fellBack ? `\n[websearch: answered by ${routed.provider}; ${routed.skipped.join("; ")}]` : "";
 			return {
-				content: [{ type: "text", text: searchOutput(params.query, results) }],
-				details: results,
+				content: [{ type: "text", text: searchOutput(params.query, routed.results) + via }],
+				details: routed.results,
 			};
 		},
 	});
