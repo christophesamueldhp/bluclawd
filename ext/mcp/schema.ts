@@ -324,7 +324,33 @@ export function loadMcpConfig(ctx: ExtensionContext): Record<string, ServerConfi
 	// both go through the approval gate.
 	const shared = stamp(parseMcpFile(join(ctx.cwd, SHARED_MCP_FILE)), "project");
 	const project = stamp(parseMcpFile(join(ctx.cwd, CONFIG_DIR_NAME, MCP_FILE)), "project");
-	return { ...global, ...shared, ...project };
+	const merged = { ...global, ...shared, ...project };
+	for (const [name, disabled] of Object.entries(projectServerOverrides(ctx.cwd))) {
+		if (merged[name]?.source === "project") merged[name].disabled = disabled;
+	}
+	return merged;
+}
+
+/**
+ * `/mcp enable|disable` choices for this project's servers, from the GLOBAL
+ * settings (`mcp.disabledProjectServers[<cwd>][<name>] = boolean`).
+ *
+ * Kept out of the project files on purpose: `.mcp.json` is committed and shared,
+ * so one person turning a server off must not rewrite the team's file (Claude Code
+ * likewise keeps this in the user's own state, never in `.mcp.json`).
+ */
+export function projectServerOverrides(cwd: string): Record<string, boolean> {
+	const mcp = readJsonObject(join(getAgentDir(), "settings.json")).mcp;
+	if (!mcp || typeof mcp !== "object") return {};
+	const byProject = (mcp as Record<string, unknown>).disabledProjectServers;
+	if (!byProject || typeof byProject !== "object") return {};
+	const entry = (byProject as Record<string, unknown>)[cwd];
+	if (!entry || typeof entry !== "object") return {};
+	const out: Record<string, boolean> = {};
+	for (const [name, value] of Object.entries(entry)) {
+		if (typeof value === "boolean") out[name] = value;
+	}
+	return out;
 }
 
 /**
@@ -354,46 +380,33 @@ export function enableAllProjectServers(): boolean {
 }
 
 /**
- * Persist a server's `disabled` flag into the mcp.json file that defines it
- * (audit B.5, `/mcp enable|disable`). The project file wins when it defines the
- * server (mirroring loadMcpConfig's precedence) and is only considered when the
- * project is trusted. Raw JSON is minimally edited: only the server object's
- * `disabled` key changes (removed entirely when enabling). Returns the file
- * written, or an error string.
+ * Persist a GLOBAL server's `disabled` flag into the user's own `<agentDir>/mcp.json`
+ * (audit B.5, `/mcp enable|disable`). Project servers never come here — their
+ * choice is recorded by approveProjectServer's sibling in settings-write.ts, see
+ * {@link projectServerOverrides}. Only the server object's `disabled` key changes
+ * (removed entirely when enabling). Returns the file written, or an error string.
  */
-export function setServerDisabled(
-	ctx: ExtensionContext,
-	name: string,
-	disabled: boolean,
-): { file: string } | { error: string } {
-	// Same precedence as loadMcpConfig, so the file edited is the one that actually
-	// defines the server the user is looking at.
-	const candidates = [
-		...(ctx.isProjectTrusted() ? [join(ctx.cwd, CONFIG_DIR_NAME, MCP_FILE), join(ctx.cwd, SHARED_MCP_FILE)] : []),
-		join(getAgentDir(), MCP_FILE),
-	];
-	for (const file of candidates) {
-		if (!existsSync(file)) continue;
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(readFileSync(file, "utf-8"));
-		} catch {
-			continue; // malformed file cannot define the server
-		}
-		const servers = (parsed as Record<string, unknown> | null)?.mcpServers;
-		if (!servers || typeof servers !== "object") continue;
-		const entry = (servers as Record<string, unknown>)[name];
-		if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
-		if (disabled) (entry as Record<string, unknown>).disabled = true;
-		else delete (entry as Record<string, unknown>).disabled;
-		try {
-			writeFileSync(file, `${JSON.stringify(parsed, null, "\t")}\n`);
-		} catch (err) {
-			return { error: `could not write ${file}: ${String(err)}` };
-		}
-		return { file };
+export function setServerDisabled(name: string, disabled: boolean): { file: string } | { error: string } {
+	const file = join(getAgentDir(), MCP_FILE);
+	const notFound = { error: `server "${name}" not found in ${file}` };
+	if (!existsSync(file)) return notFound;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(readFileSync(file, "utf-8"));
+	} catch {
+		return notFound; // a malformed file cannot define the server
 	}
-	return { error: `server "${name}" not found in any mcp.json` };
+	const servers = (parsed as Record<string, unknown> | null)?.mcpServers;
+	const entry = servers && typeof servers === "object" ? (servers as Record<string, unknown>)[name] : undefined;
+	if (!entry || typeof entry !== "object" || Array.isArray(entry)) return notFound;
+	if (disabled) (entry as Record<string, unknown>).disabled = true;
+	else delete (entry as Record<string, unknown>).disabled;
+	try {
+		writeFileSync(file, `${JSON.stringify(parsed, null, "\t")}\n`);
+	} catch (err) {
+		return { error: `could not write ${file}: ${String(err)}` };
+	}
+	return { file };
 }
 
 /**
@@ -423,4 +436,74 @@ export function isAuthFailure(message: string): boolean {
 	const text = message.toLowerCase();
 	if (text.includes("403") || text.includes("forbidden")) return false;
 	return text.includes("401") || text.includes("unauthorized") || text.includes("invalid_token");
+}
+
+/** Per-server cap on injected instructions, so one verbose server cannot crowd the prompt. */
+const MAX_INSTRUCTIONS_CHARS = 2048;
+
+/**
+ * The system-prompt section carrying connected servers' `instructions` (from the MCP
+ * initialize result), shaped like Claude Code's "MCP Server Instructions" section.
+ * Undefined when no server supplied any.
+ */
+export function formatServerInstructions(servers: { name: string; instructions?: string }[]): string | undefined {
+	const sections: string[] = [];
+	for (const { name, instructions } of servers) {
+		const text = instructions?.trim();
+		if (!text) continue;
+		const capped =
+			text.length > MAX_INSTRUCTIONS_CHARS ? `${text.slice(0, MAX_INSTRUCTIONS_CHARS)}\n[truncated]` : text;
+		sections.push(`## ${name}\n${capped}`);
+	}
+	if (sections.length === 0) return undefined;
+	return `# MCP Server Instructions\n\nThe following MCP servers have provided instructions for how to use their tools and resources:\n\n${sections.join("\n\n")}`;
+}
+
+/** One declared argument of an MCP prompt. */
+export interface PromptArgument {
+	name: string;
+	description?: string;
+	required?: boolean;
+}
+
+/**
+ * Map `/mcp__server__prompt` arguments onto the prompt's declared arguments.
+ * Positional and whitespace-separated, as Claude Code does it; words beyond the last
+ * declared argument join that argument instead of being silently dropped.
+ */
+export function parsePromptArgs(
+	raw: string,
+	defs: PromptArgument[] | undefined,
+): { args: Record<string, string> } | { error: string } {
+	const words = raw.trim().split(/\s+/).filter(Boolean);
+	const args: Record<string, string> = {};
+	const list = defs ?? [];
+	list.forEach((def, i) => {
+		const value = i === list.length - 1 ? words.slice(i).join(" ") : words[i];
+		if (value) args[def.name] = value;
+	});
+	const missing = list.find((def) => def.required && !(def.name in args));
+	return missing ? { error: `missing required argument: ${missing.name}` } : { args };
+}
+
+/**
+ * Flatten a prompts/get result into one user message. A single user message stays
+ * verbatim; a multi-message prompt keeps `[role]` markers so its turns stay legible.
+ * Embedded text resources are inlined; anything else becomes a compact placeholder.
+ */
+export function promptMessagesToText(messages: { role: string; content: unknown }[]): string {
+	const parts = messages.map((message) => {
+		const c = (message.content ?? {}) as Record<string, unknown>;
+		const resource = c.resource as Record<string, unknown> | undefined;
+		let text: string;
+		if (c.type === "text" && typeof c.text === "string") text = c.text;
+		else if (c.type === "resource" && typeof resource?.text === "string") text = resource.text;
+		else {
+			const mime = typeof c.mimeType === "string" ? ` (${c.mimeType})` : "";
+			text = `[mcp: omitted ${typeof c.type === "string" ? c.type : "unknown"} content${mime}]`;
+		}
+		return { role: message.role, text };
+	});
+	if (parts.length === 1 && parts[0].role === "user") return parts[0].text;
+	return parts.map((p) => `[${p.role}]\n${p.text}`).join("\n\n");
 }

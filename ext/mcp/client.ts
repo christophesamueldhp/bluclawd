@@ -7,6 +7,9 @@
  * startup path and the browser bundle. All pure/config logic lives in schema.ts.
  */
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import type { AgentToolResult, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_MAX_BYTES, formatSize, VERSION } from "@earendil-works/pi-coding-agent";
@@ -20,7 +23,14 @@ import {
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { resolveHeaders } from "../_shared/resolve-config-value.ts";
-import { mcpToolName, resolveServerEnv, type ServerConfig, toToolParameters, transportKind } from "./schema.ts";
+import {
+	mcpToolName,
+	type PromptArgument,
+	resolveServerEnv,
+	type ServerConfig,
+	toToolParameters,
+	transportKind,
+} from "./schema.ts";
 
 export type { Client };
 
@@ -70,11 +80,29 @@ export function stdioTransportOptions(config: ServerConfig): StdioServerParamete
 export async function connectServer(
 	name: string,
 	config: ServerConfig,
-	opts?: { connectTimeoutMs?: number; authProvider?: OAuthClientProvider },
+	opts?: {
+		connectTimeoutMs?: number;
+		authProvider?: OAuthClientProvider;
+		/** Called when the server announces its tool or prompt list changed. The SDK
+		 *  only subscribes when the server advertises `listChanged`. */
+		onListChanged?: (list: "tools" | "prompts") => void;
+	},
 ): Promise<Client> {
 	const kind = transportKind(name, config);
 
-	const client = new Client({ name: "bluclawd", version: VERSION }, { capabilities: {} });
+	const onListChanged = opts?.onListChanged;
+	const client = new Client(
+		{ name: "bluclawd", version: VERSION },
+		{
+			capabilities: {},
+			// autoRefresh off: the caller re-lists through registerServerTools, which is
+			// what re-registers the tools; a second listTools here would be wasted.
+			listChanged: onListChanged && {
+				tools: { autoRefresh: false, onChanged: () => onListChanged("tools") },
+				prompts: { autoRefresh: false, onChanged: () => onListChanged("prompts") },
+			},
+		},
+	);
 
 	let transport: StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport;
 	if (kind === "stdio") {
@@ -159,11 +187,17 @@ function mapContent(rawContent: unknown): (TextContent | ImageContent)[] {
 
 /**
  * Enforce the size caps on a mapped content array (2026-07-10 review Minor): text
- * blocks share one MAX_TEXT_CHARS budget (excess is cut and marked, like the
- * built-in tools' truncation), and any single image block over MAX_IMAGE_CHARS of
- * base64 becomes a compact placeholder instead of an OOM-sized payload.
+ * blocks share one MAX_TEXT_CHARS budget, and any single image block over
+ * MAX_IMAGE_CHARS of base64 becomes a compact placeholder instead of an OOM-sized
+ * payload. Text past the budget is not lost: the full text is saved to a private
+ * temp file and the note names it, so the model can page through it with read/grep
+ * (Claude Code does the same for an oversized MCP result).
  */
-function capContent(content: (TextContent | ImageContent)[]): (TextContent | ImageContent)[] {
+export function capContent(
+	content: (TextContent | ImageContent)[],
+	server: string,
+	tool: string,
+): (TextContent | ImageContent)[] {
 	const out: (TextContent | ImageContent)[] = [];
 	let remaining = MAX_TEXT_CHARS;
 	let truncated = false;
@@ -191,15 +225,32 @@ function capContent(content: (TextContent | ImageContent)[]): (TextContent | Ima
 		}
 	}
 	if (truncated) {
+		const saved = saveFullText(joinText(content), server, tool);
 		out.push({
 			type: "text",
-			text: `[mcp: text result truncated at ${formatSize(MAX_TEXT_CHARS)}]`,
+			text: saved
+				? `[mcp: text result truncated at ${formatSize(MAX_TEXT_CHARS)}; full output saved to ${saved} ]`
+				: `[mcp: text result truncated at ${formatSize(MAX_TEXT_CHARS)}]`,
 		});
 	}
 	return out;
 }
 
-/** Join the text blocks of a content array (for building a thrown error message). */
+/** Write an oversized result to a 0600 file in a 0700 temp dir. Undefined if that fails. */
+function saveFullText(text: string, server: string, tool: string): string | undefined {
+	try {
+		const dir = join(tmpdir(), "bluclawd-mcp-output");
+		mkdirSync(dir, { recursive: true, mode: 0o700 });
+		const safe = `${server}-${tool}`.replace(/[^\w.-]/g, "_");
+		const file = join(dir, `${safe}-${Date.now()}-${process.pid}.txt`);
+		writeFileSync(file, text, { mode: 0o600 });
+		return file;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Join the text blocks of a content array (thrown error messages, saved full output). */
 function joinText(content: (TextContent | ImageContent)[]): string {
 	return content
 		.filter((c): c is TextContent => c.type === "text")
@@ -251,7 +302,7 @@ export async function registerServerTools(
 				);
 				// Cap BEFORE the isError branch so a runaway error text can't flood the
 				// thrown message either.
-				const content = capContent(mapContent(result.content));
+				const content = capContent(mapContent(result.content), serverName, bareName);
 				if (result.isError === true) {
 					// Framework contract (AgentToolResult.execute): throw on failure instead of
 					// encoding the error in content, so the loop/telemetry/hooks record a failure.
@@ -266,4 +317,30 @@ export async function registerServerTools(
 		});
 	}
 	return registered;
+}
+
+/** An MCP prompt as offered to the user: `/mcp__<server>__<name>`. */
+export interface McpPrompt {
+	name: string;
+	description?: string;
+	arguments?: PromptArgument[];
+}
+
+/** List a server's prompts. Empty without asking when it lacks the prompts capability. */
+export async function listServerPrompts(client: Client): Promise<McpPrompt[]> {
+	if (!client.getServerCapabilities()?.prompts) return [];
+	const { prompts } = await client.listPrompts();
+	return prompts.map((p) => ({
+		name: p.name,
+		...(p.description ? { description: p.description } : {}),
+		...(p.arguments?.length
+			? {
+					arguments: p.arguments.map((a) => ({
+						name: a.name,
+						...(a.description ? { description: a.description } : {}),
+						...(a.required ? { required: true } : {}),
+					})),
+				}
+			: {}),
+	}));
 }

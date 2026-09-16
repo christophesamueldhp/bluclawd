@@ -34,8 +34,14 @@
  *
  * MANAGEMENT (audit B.5): `/mcp` lists servers; `/mcp approve <server>` clears the
  * gate above and connects; `/mcp enable|disable <server>` toggles a server live AND
- * persists `disabled` into the defining mcp.json; `/mcp reconnect [server]` closes
- * and re-drives connections.
+ * persists it — a global server's `disabled` in `<agentDir>/mcp.json`, a project
+ * server's in the global settings (never the committed `.mcp.json`);
+ * `/mcp reconnect [server]` closes and re-drives connections.
+ *
+ * CLAUDE CODE PARITY: a server's initialize `instructions` are appended to the system
+ * prompt; its prompts become `/mcp__<server>__<prompt>` commands; `list_changed`
+ * notifications re-list tools/prompts live; a transport that closes on its own flips
+ * the server to `error` instead of leaving dead tools active.
  *
  * OAUTH (audit B.5): `/mcp login <server>` runs the browser flow (see oauth.ts)
  * and `/mcp logout <server>` forgets the credential. Login is ONLY ever explicit:
@@ -68,16 +74,20 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { openBrowser } from "../_shared/open-browser.ts";
-import { approveProjectServer } from "../_shared/settings-write.ts";
-import type { Client, RegisteredMcpTool } from "./client.ts";
+import { approveProjectServer, setProjectServerDisabled } from "../_shared/settings-write.ts";
+import type { Client, McpPrompt, RegisteredMcpTool } from "./client.ts";
 import { McpCredentialStore } from "./credential-store.ts";
 import {
 	approvalsForProject,
 	enableAllProjectServers,
+	formatServerInstructions,
 	isAuthFailure,
 	loadMcpConfig,
+	mcpToolName,
 	needsApproval,
+	parsePromptArgs,
 	partitionByApproval,
+	promptMessagesToText,
 	type ServerConfig,
 	serverFingerprint,
 	setServerDisabled,
@@ -104,9 +114,20 @@ interface Connection {
 	status: ConnectionStatus;
 	toolCount: number;
 	tools: RegisteredMcpTool[];
+	/** Offered as `/mcp__<server>__<prompt>` commands while connected. */
+	prompts: McpPrompt[];
+	/** The server's initialize-result `instructions`, injected into the system prompt. */
+	instructions?: string;
 	error?: string;
 	client?: Client;
 }
+
+type ClientModule = typeof import("./client.ts");
+type ConnectFn = (
+	name: string,
+	config: ServerConfig,
+	onListChanged: (list: "tools" | "prompts") => void,
+) => Promise<Client>;
 
 /** Most matches mcp_find_tools will activate in one call (context guard). */
 const FIND_TOOLS_MAX_MATCHES = 10;
@@ -140,6 +161,11 @@ export function factory(pi: ExtensionAPI): void {
 	// Deferred (registered-but-inactive) MCP tools by namespaced name (audit B.5).
 	const deferredTools = new Map<string, RegisteredMcpTool>();
 	let findToolsRegistered = false;
+	// Loaded on first connect; list_changed refreshes reuse it.
+	let clientModule: ClientModule | undefined;
+	// Commands cannot be unregistered, so a name is registered once per factory and its
+	// handler looks the prompt up live — a disconnected server's prompt just says so.
+	const promptCommands = new Set<string>();
 
 	function updateStatus(ctx: ExtensionContext): void {
 		const disabled = connections.filter((c) => c.status === "disabled").length;
@@ -232,23 +258,128 @@ export function factory(pi: ExtensionAPI): void {
 		ensureFindToolsRegistered();
 	}
 
+	/** Make freshly registered tools usable: deferred behind mcp_find_tools, or active. */
+	function exposeTools(conn: Connection, registered: RegisteredMcpTool[]): void {
+		if (registered.length === 0) return;
+		if (conn.config.deferTools) {
+			deferServerTools(registered);
+			return;
+		}
+		// Re-registration of a known name does not auto-activate (the registry only
+		// auto-activates NEW names), so an enable/reconnect after a disable would leave
+		// the tools invisible — activate explicitly.
+		const active = new Set(pi.getActiveTools());
+		const missing = registered.map((t) => t.name).filter((n) => !active.has(n));
+		if (missing.length > 0) pi.setActiveTools([...active, ...missing]);
+	}
+
+	function registerPromptCommands(conn: Connection): void {
+		const server = conn.name;
+		for (const prompt of conn.prompts) {
+			const command = mcpToolName(server, prompt.name);
+			// A name with whitespace could never be typed as one slash command.
+			if (/\s/.test(prompt.name) || promptCommands.has(command)) continue;
+			promptCommands.add(command);
+			const promptName = prompt.name;
+			pi.registerCommand(command, {
+				description: `${prompt.description ?? `Prompt "${promptName}"`} (MCP: ${server})`,
+				handler: async (args, ctx) => {
+					const live = connections.find((c) => c.name === server && c.status === "connected");
+					const current = live?.prompts.find((p) => p.name === promptName);
+					if (!live?.client || !current) {
+						ctx.ui.notify(
+							`MCP: prompt "${promptName}" is not available — "${server}" is not connected.`,
+							"warning",
+						);
+						return;
+					}
+					const parsed = parsePromptArgs(args, current.arguments);
+					if ("error" in parsed) {
+						const usage = (current.arguments ?? []).map((a) => (a.required ? `<${a.name}>` : `[${a.name}]`));
+						ctx.ui.notify(`MCP: ${parsed.error}. Usage: /${command} ${usage.join(" ")}`, "warning");
+						return;
+					}
+					let text: string;
+					try {
+						const result = await live.client.getPrompt({ name: promptName, arguments: parsed.args });
+						text = promptMessagesToText(result.messages);
+					} catch (err) {
+						ctx.ui.notify(`MCP: prompt "${promptName}" from "${server}" failed: ${errMsg(err)}`, "error");
+						return;
+					}
+					if (!text.trim()) {
+						ctx.ui.notify(`MCP: prompt "${promptName}" from "${server}" returned nothing.`, "warning");
+						return;
+					}
+					pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+				},
+			});
+		}
+	}
+
+	/** Re-read a server's tools or prompts after it announced a list change. */
+	async function refreshServerList(
+		conn: Connection,
+		ctx: ExtensionContext,
+		myEpoch: number,
+		list: "tools" | "prompts",
+	): Promise<void> {
+		const client = conn.client;
+		const mod = clientModule;
+		if (!client || !mod || conn.status !== "connected") return;
+		const stale = () => myEpoch !== epoch || conn.client !== client;
+		try {
+			if (list === "prompts") {
+				const prompts = await mod.listServerPrompts(client);
+				if (stale()) return;
+				conn.prompts = prompts;
+				registerPromptCommands(conn);
+				return;
+			}
+			const before = new Set(conn.tools.map((t) => t.name));
+			const registered = await mod.registerServerTools(pi, conn.name, client);
+			if (stale()) return;
+			const now = new Set(registered.map((t) => t.name));
+			// pi has no unregisterTool: a removed tool is deactivated and un-indexed.
+			const removed = new Set([...before].filter((n) => !now.has(n)));
+			if (removed.size > 0) {
+				pi.setActiveTools(pi.getActiveTools().filter((n) => !removed.has(n)));
+				for (const name of removed) deferredTools.delete(name);
+			}
+			// Only NEW tools: one the model already activated via mcp_find_tools stays active.
+			exposeTools(
+				conn,
+				registered.filter((t) => !before.has(t.name)),
+			);
+			conn.tools = registered;
+			conn.toolCount = registered.length;
+			updateStatus(ctx);
+		} catch (err) {
+			if (!stale()) ctx.ui.notify(`MCP: could not refresh ${list} for "${conn.name}": ${errMsg(err)}`, "warning");
+		}
+	}
+
 	async function connectOne(
 		conn: Connection,
 		ctx: ExtensionContext,
 		myEpoch: number,
-		connectServer: (name: string, config: ServerConfig) => Promise<Client>,
-		registerServerTools: (pi: ExtensionAPI, name: string, client: Client) => Promise<RegisteredMcpTool[]>,
+		connectServer: ConnectFn,
+		mod: ClientModule,
 		hadCredential = false,
 	): Promise<void> {
 		try {
-			const client = await connectServer(conn.name, conn.config);
+			const client = await connectServer(conn.name, conn.config, (list) => {
+				void refreshServerList(conn, ctx, myEpoch, list);
+			});
 			if (myEpoch !== epoch) {
 				// Session ended/reloaded while connecting — don't register; close to avoid a leak.
 				await client.close().catch(() => {});
 				return;
 			}
 			conn.client = client;
-			const registered = await registerServerTools(pi, conn.name, client);
+			const registered = await mod.registerServerTools(pi, conn.name, client);
+			// Prompts are an extra: a server that fails to list them still serves its tools.
+			const prompts = await mod.listServerPrompts(client).catch(() => []);
 			if (myEpoch !== epoch) {
 				await client.close().catch(() => {});
 				return;
@@ -256,16 +387,21 @@ export function factory(pi: ExtensionAPI): void {
 			conn.status = "connected";
 			conn.tools = registered;
 			conn.toolCount = registered.length;
-			if (conn.config.deferTools && registered.length > 0) {
-				deferServerTools(registered);
-			} else if (registered.length > 0) {
-				// Re-registration of a known name does not auto-activate (the registry
-				// only auto-activates NEW names), so an enable/reconnect after a
-				// disable would leave the tools invisible — activate explicitly.
-				const active = new Set(pi.getActiveTools());
-				const missing = registered.map((t) => t.name).filter((n) => !active.has(n));
-				if (missing.length > 0) pi.setActiveTools([...active, ...missing]);
-			}
+			conn.prompts = prompts;
+			conn.instructions = client.getInstructions();
+			exposeTools(conn, registered);
+			registerPromptCommands(conn);
+			// A server that exits or drops its socket later must not keep reading as
+			// "connected" with tools that can only fail. Intentional closes clear
+			// conn.client first (teardownConnection) or bump the epoch, so they skip this.
+			client.onclose = () => {
+				if (myEpoch !== epoch || conn.client !== client) return;
+				void teardownConnection(conn);
+				conn.status = "error";
+				conn.error = "connection closed";
+				ctx.ui.notify(`MCP server "${conn.name}" disconnected — run /mcp reconnect ${conn.name}.`, "warning");
+				updateStatus(ctx);
+			};
 		} catch (err) {
 			if (myEpoch !== epoch) return;
 			conn.status = "error";
@@ -298,9 +434,10 @@ export function factory(pi: ExtensionAPI): void {
 		if (gated.length > 0) updateStatus(ctx);
 		if (targets.length === 0) return;
 
-		let mod: typeof import("./client.ts");
+		let mod: ClientModule;
 		try {
 			mod = await import("./client.ts");
+			clientModule = mod;
 		} catch (err) {
 			if (myEpoch !== epoch) return;
 			for (const c of targets) {
@@ -312,7 +449,7 @@ export function factory(pi: ExtensionAPI): void {
 			return;
 		}
 		if (myEpoch !== epoch) return;
-		const { connectServer, registerServerTools } = mod;
+		const { connectServer } = mod;
 
 		// Attach stored OAuth credentials, if any. authProviderFor yields a provider
 		// only when this exact server URL has already been through `/mcp login`, so an
@@ -344,15 +481,11 @@ export function factory(pi: ExtensionAPI): void {
 		}
 		if (myEpoch !== epoch) return;
 
-		const connectWithAuth = (name: string, config: ServerConfig) => {
-			const authProvider = providers.get(name);
-			return authProvider ? connectServer(name, config, { authProvider }) : connectServer(name, config);
-		};
+		const connectWithAuth: ConnectFn = (name, config, onListChanged) =>
+			connectServer(name, config, { authProvider: providers.get(name), onListChanged });
 
 		await Promise.allSettled(
-			targets.map((conn) =>
-				connectOne(conn, ctx, myEpoch, connectWithAuth, registerServerTools, providers.has(conn.name)),
-			),
+			targets.map((conn) => connectOne(conn, ctx, myEpoch, connectWithAuth, mod, providers.has(conn.name))),
 		);
 	}
 
@@ -375,6 +508,8 @@ export function factory(pi: ExtensionAPI): void {
 		}
 		conn.tools = [];
 		conn.toolCount = 0;
+		conn.prompts = [];
+		conn.instructions = undefined;
 		if (client) await client.close().catch(() => {});
 	}
 
@@ -396,6 +531,7 @@ export function factory(pi: ExtensionAPI): void {
 					: "connecting",
 			toolCount: 0,
 			tools: [],
+			prompts: [],
 		}));
 		if (names.length === 0) {
 			ctx.ui.setStatus("mcp", undefined);
@@ -432,6 +568,12 @@ export function factory(pi: ExtensionAPI): void {
 		const clients = connections.map((c) => c.client).filter((c): c is Client => !!c);
 		connections = [];
 		await Promise.allSettled(clients.map((c) => c.close()));
+	});
+
+	pi.on("before_agent_start", async (event) => {
+		const section = formatServerInstructions(connections.filter((c) => c.status === "connected"));
+		if (!section) return;
+		return { systemPrompt: `${event.systemPrompt}\n\n${section}` };
 	});
 
 	pi.registerEntryRenderer<McpData>("bluclawd:mcp", (entry, _options, theme) => {
@@ -597,12 +739,24 @@ export function factory(pi: ExtensionAPI): void {
 					return;
 				}
 				const disabled = sub === "disable";
-				const result = setServerDisabled(ctx, name, disabled);
-				if ("error" in result) {
-					ctx.ui.notify(`MCP: ${result.error}`, "error");
-					return;
-				}
 				const conn = connections.find((c) => c.name === name);
+				// A project server's choice goes to the user's global settings, never into
+				// the committed .mcp.json it came from (see projectServerOverrides).
+				let where: string;
+				if (conn?.config.source === "project") {
+					if (!(await setProjectServerDisabled(ctx.cwd, name, disabled))) {
+						ctx.ui.notify(`MCP: could not record that "${name}" is ${sub}d.`, "error");
+						return;
+					}
+					where = "your settings for this project";
+				} else {
+					const result = setServerDisabled(name, disabled);
+					if ("error" in result) {
+						ctx.ui.notify(`MCP: ${result.error}`, "error");
+						return;
+					}
+					where = result.file;
+				}
 				if (conn) {
 					conn.config.disabled = disabled;
 					if (disabled) {
@@ -616,10 +770,7 @@ export function factory(pi: ExtensionAPI): void {
 					}
 					updateStatus(ctx);
 				}
-				ctx.ui.notify(
-					`MCP server "${name}" ${disabled ? "disabled" : "enabled"} (persisted to ${result.file}).`,
-					"info",
-				);
+				ctx.ui.notify(`MCP server "${name}" ${disabled ? "disabled" : "enabled"} (persisted to ${where}).`, "info");
 				return;
 			}
 
@@ -670,7 +821,7 @@ export function factory(pi: ExtensionAPI): void {
 				status: c.status,
 				state:
 					c.status === "connected"
-						? `connected, ${c.toolCount} tool${c.toolCount === 1 ? "" : "s"}${c.config.deferTools ? ", deferred" : ""}`
+						? `connected, ${c.toolCount} tool${c.toolCount === 1 ? "" : "s"}${c.config.deferTools ? ", deferred" : ""}${c.prompts.length > 0 ? `, ${c.prompts.length} prompt${c.prompts.length === 1 ? "" : "s"}` : ""}`
 						: c.status === "connecting"
 							? "connecting…"
 							: c.status === "disabled"

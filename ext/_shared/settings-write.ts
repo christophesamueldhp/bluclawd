@@ -115,9 +115,10 @@ export async function removeProjectRule(cwd: string, rule: string, trusted: bool
 	return updateKey<PermissionSettings>(projectSettingsPath(cwd), "permissions", (p) => withoutRule(p, rule));
 }
 
-/** The `mcp` settings key this layer owns. Only the approval record lives here. */
+/** The `mcp` settings key this layer owns: the approval record and per-project enable/disable choices. */
 interface McpSettings {
 	approvedProjectServers?: Record<string, Record<string, string>>;
+	disabledProjectServers?: Record<string, Record<string, boolean>>;
 	enableAllProjectMcpServers?: boolean;
 }
 
@@ -134,5 +135,17 @@ export async function approveProjectServer(cwd: string, name: string, fingerprin
 		const byProject = { ...(mcp.approvedProjectServers ?? {}) };
 		byProject[cwd] = { ...(byProject[cwd] ?? {}), [name]: fingerprint };
 		return { ...mcp, approvedProjectServers: byProject };
+	});
+}
+
+/**
+ * Record `/mcp enable|disable` for one project-declared server in the GLOBAL
+ * settings, so the committed `.mcp.json` the server came from is never rewritten.
+ */
+export async function setProjectServerDisabled(cwd: string, name: string, disabled: boolean): Promise<boolean> {
+	return updateKey<McpSettings>(globalSettingsPath(), "mcp", (mcp) => {
+		const byProject = { ...(mcp.disabledProjectServers ?? {}) };
+		byProject[cwd] = { ...(byProject[cwd] ?? {}), [name]: disabled };
+		return { ...mcp, disabledProjectServers: byProject };
 	});
 }
