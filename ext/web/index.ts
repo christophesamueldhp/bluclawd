@@ -17,6 +17,7 @@ import type { AgentToolResult, ExtensionAPI, ExtensionContext, InlineExtension }
 import { resizeImage, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import * as forkSettings from "../_shared/settings.ts";
+import { webfetchConfig } from "./config.ts";
 import { type WebfetchResult, webFetch } from "./fetch.ts";
 import { renderWebfetchCall, renderWebfetchResult, renderWebsearchCall, renderWebsearchResult } from "./render.ts";
 import { defaultEnvFor, exaMcpSearch, type SearchProvider, type SearchResult, webSearch } from "./search.ts";
@@ -47,6 +48,12 @@ const WebfetchParams = Type.Object({
 	maxBytes: Type.Optional(
 		Type.Number({
 			description: "Maximum bytes to read from the response body (default 2MB, hard cap 8MB).",
+		}),
+	),
+	format: Type.Optional(
+		Type.Union([Type.Literal("markdown"), Type.Literal("raw")], {
+			description:
+				"`markdown` (default): the page's main content as Markdown. `raw`: the response body as served, e.g. to read HTML markup or JSON-LD.",
 		}),
 	),
 });
@@ -259,9 +266,22 @@ export function factory(pi: ExtensionAPI): void {
 		): Promise<AgentToolResult<WebfetchDetails>> {
 			// webFetch throws on any failure (bad scheme, private IP, non-2xx, network);
 			// the agent loop surfaces the thrown error per the tool-error contract.
+			const config = webfetchConfig(
+				SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() }),
+			);
+			let host = "";
+			try {
+				host = new URL(params.url).hostname;
+			} catch {
+				// webFetch reports the invalid URL.
+			}
 			const result = await webFetch(params.url, {
 				maxBytes: params.maxBytes,
 				signal,
+				format: params.format,
+				timeoutMs: config.timeoutMs,
+				allowRanges: config.allowRanges,
+				headers: config.headersFor(host),
 			});
 			const details: WebfetchDetails = {
 				url: result.url,

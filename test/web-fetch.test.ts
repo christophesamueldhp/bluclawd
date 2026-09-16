@@ -2,6 +2,7 @@ import { readFileSync, rmSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	assertAllowedUrl,
+	blockedExcept,
 	clearWebfetchCache,
 	decodeBody,
 	fetchGuardedRedirects,
@@ -308,5 +309,55 @@ describe("tool output", () => {
 		const content = await webfetchContent(imageResult, { input: ["text"] });
 		expect(content.every((c) => c.type === "text")).toBe(true);
 		expect(JSON.stringify(content)).toMatch(/does not support images/);
+	});
+});
+
+describe("fetch options from settings", () => {
+	it("allowRanges exempts a configured range from the private-address block, and nothing else", () => {
+		const blocked = blockedExcept(["198.18.0.0/15", "fd00:abcd::/32"]);
+		expect(blocked("198.19.1.2")).toBe(false);
+		expect(blocked("::ffff:198.18.0.9")).toBe(false);
+		expect(blocked("fd00:abcd::1")).toBe(false);
+		expect(blocked("10.0.0.1")).toBe(true);
+		expect(blocked("fd00:abce::1")).toBe(true);
+		expect(blocked("169.254.169.254")).toBe(true);
+		expect(() => assertAllowedUrl("http://198.18.0.5/", blocked)).not.toThrow();
+		expect(() => assertAllowedUrl("http://198.18.0.5/")).toThrow(/private address/);
+		expect(() => blockedExcept(["not-a-cidr"])).toThrow(/invalid CIDR/);
+	});
+
+	it("raw format returns the body unconverted", async () => {
+		const fetchImpl = (async () => response("<p>hi <b>there</b></p>")) as typeof fetch;
+		const result = await webFetch("https://example.com/raw", { fetchImpl, resolveHost: noDns, format: "raw" });
+		expect(result.text).toBe("<p>hi <b>there</b></p>");
+		const converted = await webFetch("https://example.com/raw", { fetchImpl, resolveHost: noDns });
+		expect(converted.text).toBe("hi **there**");
+	});
+
+	it("sends configured headers and never caches what they fetched", async () => {
+		const seen: Array<string | undefined> = [];
+		const fetchImpl = (async (_input: URL | RequestInfo, init?: RequestInit) => {
+			seen.push((init?.headers as Record<string, string>).Cookie);
+			return response("private page", { headers: { "content-type": "text/plain" } });
+		}) as typeof fetch;
+		const opts = { fetchImpl, resolveHost: noDns, headers: { Cookie: "session=abc" } };
+		await webFetch("https://example.com/me", opts);
+		const again = await webFetch("https://example.com/me", opts);
+		expect(seen).toEqual(["session=abc", "session=abc"]);
+		expect(again.cached).toBeFalsy();
+		await webFetch("https://example.com/me", { fetchImpl, resolveHost: noDns });
+		expect(seen[2]).toBeUndefined();
+	});
+
+	it("honours a custom timeout", async () => {
+		const fetchImpl = ((_input: URL | RequestInfo, init?: RequestInit) =>
+			new Promise((_resolve, reject) => {
+				init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+			})) as typeof fetch;
+		const started = Date.now();
+		await expect(
+			webFetch("https://example.com/slow", { fetchImpl, resolveHost: noDns, timeoutMs: 50 }),
+		).rejects.toThrow();
+		expect(Date.now() - started).toBeLessThan(2000);
 	});
 });

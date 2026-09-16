@@ -25,7 +25,7 @@ export type Recency = "day" | "week" | "month" | "year";
 
 const RECENCY_DAYS: Record<Recency, number> = { day: 1, week: 7, month: 31, year: 365 };
 
-function recencyStart(recency: Recency): Date {
+export function recencyStart(recency: Recency): Date {
 	return new Date(Date.now() - RECENCY_DAYS[recency] * 24 * 60 * 60 * 1000);
 }
 
@@ -45,13 +45,13 @@ export interface DomainFilter {
 	blockedDomains?: string[];
 }
 
-const USER_AGENT = `pi/${VERSION}`;
+export const USER_AGENT = `pi/${VERSION}`;
 const TIMEOUT_MS = 30_000;
-const NUM_RESULTS = 5;
+export const NUM_RESULTS = 5;
 /** Asked for when the filtering happens on our side, so a few survive it. */
-const NUM_RESULTS_FILTERED = 20;
+export const NUM_RESULTS_FILTERED = 20;
 
-function hasFilter(filter: DomainFilter | undefined): boolean {
+export function hasFilter(filter: DomainFilter | undefined): boolean {
 	return Boolean(filter?.allowedDomains?.length || filter?.blockedDomains?.length);
 }
 
@@ -64,7 +64,7 @@ function normalizeDomain(spec: string): string {
 }
 
 /** Domains as native provider filters expect them: bare, lowercase hosts. */
-function nativeDomains(specs: string[]): string[] {
+export function nativeDomains(specs: string[]): string[] {
 	return specs.map(normalizeDomain).filter(Boolean);
 }
 
@@ -104,13 +104,13 @@ function isoDate(value: unknown): string | undefined {
 	return Number.isNaN(t) ? undefined : new Date(t).toISOString().slice(0, 10);
 }
 
-function withDate(result: SearchResult, raw: unknown): SearchResult {
+export function withDate(result: SearchResult, raw: unknown): SearchResult {
 	const published = isoDate(raw);
 	return published ? { ...result, published } : result;
 }
 
 /** An error for a non-2xx provider reply, naming the key variable on 401/403. */
-function providerError(provider: string, res: Response, envVar?: string): Error {
+export function providerError(provider: string, res: Response, envVar?: string): Error {
 	const status = `${res.status} ${res.statusText}`.trim();
 	const hint = envVar && (res.status === 401 || res.status === 403) ? ` (check ${envVar})` : "";
 	return new Error(`websearch: ${provider} returned ${status}${hint}`);
@@ -135,12 +135,12 @@ export function defaultEnvFor(provider: SearchProvider): string {
 	}
 }
 
-function timeoutSignal(signal: AbortSignal | undefined): AbortSignal {
+export function timeoutSignal(signal: AbortSignal | undefined): AbortSignal {
 	const timeout = AbortSignal.timeout(TIMEOUT_MS);
 	return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }
 
-function str(value: unknown): string {
+export function str(value: unknown): string {
 	return typeof value === "string" ? value : "";
 }
 

@@ -245,11 +245,63 @@ export function isPrivateIp(ip: string): boolean {
 	return false;
 }
 
+/** Decides whether an address must not be reached. */
+export type BlockedIp = (ip: string) => boolean;
+
+function cidrMatcher(cidr: string): (ip: string) => boolean {
+	const [base, bitsText, extra] = cidr.trim().split("/");
+	const bits = Number(bitsText);
+	const family = isIP(base ?? "");
+	const maxBits = family === 4 ? 32 : 128;
+	if (extra !== undefined || !family || !/^\d+$/.test(bitsText ?? "") || bits > maxBits) {
+		throw new Error(`webfetch: invalid CIDR in allowRanges: ${cidr}`);
+	}
+	if (family === 4) {
+		return (ip) => {
+			const n = ipv4ToInt(ip);
+			return n !== null && inCidr4(n, base, bits);
+		};
+	}
+	const baseGroups = expandIpv6(base) as string[];
+	return (ip) => {
+		const groups = expandIpv6(ip);
+		if (!groups) return false;
+		for (let bit = 0; bit < bits; bit++) {
+			const g = Math.floor(bit / 16);
+			const mask = 0x8000 >> (bit % 16);
+			if ((Number.parseInt(groups[g], 16) & mask) !== (Number.parseInt(baseGroups[g], 16) & mask)) return false;
+		}
+		return true;
+	};
+}
+
+/**
+ * The private-address block with the user's `allowRanges` carved out, for
+ * proxies that hand out fake IPs (e.g. 198.18.0.0/15). An IPv4-mapped IPv6
+ * address is matched as the IPv4 it carries. Throws on a malformed range.
+ */
+export function blockedExcept(allowRanges: string[]): BlockedIp {
+	const matchers = allowRanges.map(cidrMatcher);
+	return (ip) => {
+		if (!isPrivateIp(ip)) return false;
+		const clean = ip.split("%")[0];
+		const groups = isIP(clean) === 6 ? expandIpv6(clean) : null;
+		const mapped =
+			groups?.slice(0, 5).every((g) => g === "0000") && groups[5] === "ffff"
+				? [groups[6], groups[7]]
+						.map((g) => Number.parseInt(g, 16))
+						.flatMap((n) => [(n >> 8) & 0xff, n & 0xff])
+						.join(".")
+				: undefined;
+		return !matchers.some((match) => match(clean) || (mapped !== undefined && match(mapped)));
+	};
+}
+
 /**
  * Parse `urlStr` and reject it up front for an unsupported scheme, localhost, or
  * a literal private-IP host. Pure (no DNS). Returns the parsed URL when allowed.
  */
-export function assertAllowedUrl(urlStr: string): URL {
+export function assertAllowedUrl(urlStr: string, isBlocked: BlockedIp = isPrivateIp): URL {
 	let url: URL;
 	try {
 		url = new URL(urlStr);
@@ -265,7 +317,7 @@ export function assertAllowedUrl(urlStr: string): URL {
 	}
 	// WHATWG URL keeps IPv6 hosts in brackets ([::1]); strip them for isIP.
 	const bare = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
-	if (isIP(bare) && isPrivateIp(bare)) {
+	if (isIP(bare) && isBlocked(bare)) {
 		throw new Error(`webfetch: refusing to fetch private address ${bare}`);
 	}
 	return url;
@@ -289,14 +341,17 @@ type LookupCallback = (
  * rejects if any is private, and answers in the shape the caller asked for.
  * Exported for tests (the live undici wiring needs real DNS + network).
  */
-export function makeValidatingLookup(lookupImpl: DnsLookupAll = dnsLookup as unknown as DnsLookupAll) {
+export function makeValidatingLookup(
+	lookupImpl: DnsLookupAll = dnsLookup as unknown as DnsLookupAll,
+	isBlocked: BlockedIp = isPrivateIp,
+) {
 	return (hostname: string, options: { all?: boolean } & Record<string, unknown>, cb: LookupCallback): void => {
 		lookupImpl(hostname, { ...options, all: true }, (err, addresses) => {
 			if (err) return cb(err, "", 0);
 			const list = Array.isArray(addresses) ? addresses : [{ address: String(addresses), family: 4 }];
 			if (list.length === 0) return cb(new Error(`no addresses for ${hostname}`), "", 0);
 			for (const a of list) {
-				if (isPrivateIp(a.address)) {
+				if (isBlocked(a.address)) {
 					return cb(new Error(`blocked private address ${a.address} for ${hostname}`), "", 0);
 				}
 			}
@@ -314,10 +369,10 @@ export function makeValidatingLookup(lookupImpl: DnsLookupAll = dnsLookup as unk
  * resolves to a private IP. Runs on the original request and on every redirect
  * hop, so a public URL redirecting to 169.254.169.254 is blocked at connect time.
  */
-function makeSafeAgent(): Agent {
+function makeSafeAgent(isBlocked: BlockedIp): Agent {
 	return new Agent({
 		connect: {
-			lookup: makeValidatingLookup() as never,
+			lookup: makeValidatingLookup(undefined, isBlocked) as never,
 		},
 	});
 }
@@ -334,13 +389,13 @@ const MAX_REDIRECTS = 5;
  * Resolve `hostname` and throw if ANY of its addresses is private. Literal IPs
  * pass through (already vetted by `assertAllowedUrl`).
  */
-async function assertPublicDns(hostname: string): Promise<void> {
+async function assertPublicDns(hostname: string, isBlocked: BlockedIp = isPrivateIp): Promise<void> {
 	const bare = hostname.startsWith("[") && hostname.endsWith("]") ? hostname.slice(1, -1) : hostname;
 	if (isIP(bare)) return;
 	const addresses = await dnsLookupAsync(bare, { all: true, verbatim: true });
 	if (addresses.length === 0) throw new Error(`webfetch: no addresses for ${hostname}`);
 	for (const a of addresses) {
-		if (isPrivateIp(a.address)) {
+		if (isBlocked(a.address)) {
 			throw new Error(`webfetch: blocked private address ${a.address} for ${hostname}`);
 		}
 	}
@@ -371,6 +426,7 @@ export async function fetchGuardedRedirects(
 	init: RequestInit,
 	fetchImpl: typeof fetch,
 	resolveHost: (hostname: string) => Promise<void> = assertPublicDns,
+	isBlocked: BlockedIp = isPrivateIp,
 ): Promise<Response> {
 	let current = url;
 	for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
@@ -379,7 +435,7 @@ export async function fetchGuardedRedirects(
 		const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
 		if (location === null) return res;
 		await res.body?.cancel().catch(() => {});
-		const next = assertAllowedUrl(new URL(location, current).href);
+		const next = assertAllowedUrl(new URL(location, current).href, isBlocked);
 		if (next.hostname !== current.hostname) throw new CrossHostRedirect(current.href, res.status, next.href);
 		current = next;
 	}
@@ -511,26 +567,42 @@ export async function webFetch(
 		signal?: AbortSignal;
 		fetchImpl?: typeof fetch;
 		resolveHost?: (hostname: string) => Promise<void>;
+		/** `raw` skips HTML conversion and main-content extraction. */
+		format?: "markdown" | "raw";
+		timeoutMs?: number;
+		/** Private ranges the user allows (settings `webfetch.allowRanges`). */
+		allowRanges?: string[];
+		/** Extra request headers for this host (settings `webfetch.hosts`); such fetches are never cached. */
+		headers?: Record<string, string>;
 	} = {},
 ): Promise<WebfetchResult> {
-	const url = assertAllowedUrl(urlStr);
+	const isBlocked = opts.allowRanges?.length ? blockedExcept(opts.allowRanges) : isPrivateIp;
+	const url = assertAllowedUrl(urlStr, isBlocked);
 	const cap = Math.min(Math.max(1, Math.floor(opts.maxBytes ?? DEFAULT_MAX_BYTES)), MAX_ALLOWED_BYTES);
-	const cacheKey = `${cap}|${url.href}`;
-	const hit = cacheGet(cacheKey);
+	const raw = opts.format === "raw";
+	// A page fetched with the user's credentials is theirs alone: keep it out of the shared cache.
+	const cacheable = !opts.headers || Object.keys(opts.headers).length === 0;
+	const cacheKey = `${cap}|${raw ? "raw" : "md"}|${url.href}`;
+	const hit = cacheable ? cacheGet(cacheKey) : undefined;
 	if (hit) return hit;
-	const timeout = AbortSignal.timeout(TIMEOUT_MS);
+	const timeout = AbortSignal.timeout(opts.timeoutMs ?? TIMEOUT_MS);
 	const signal = opts.signal ? AbortSignal.any([opts.signal, timeout]) : timeout;
 	const fetchImpl = opts.fetchImpl ?? (IS_BUN ? fetch : (undiciFetch as unknown as typeof fetch));
-	const agent = IS_BUN ? undefined : makeSafeAgent();
+	const agent = IS_BUN ? undefined : makeSafeAgent(isBlocked);
+	const resolveHost = opts.resolveHost ?? ((hostname: string) => assertPublicDns(hostname, isBlocked));
+	const store = (result: WebfetchResult): WebfetchResult => {
+		if (cacheable) cacheSet(cacheKey, result);
+		return result;
+	};
 	try {
 		const baseInit: RequestInit = {
-			headers: { "User-Agent": USER_AGENT, Accept: ACCEPT },
+			headers: { "User-Agent": USER_AGENT, Accept: ACCEPT, ...opts.headers },
 			signal,
 			...(agent ? ({ dispatcher: agent } as unknown as RequestInit) : {}),
 		};
 		let res: Response;
 		try {
-			res = await fetchGuardedRedirects(url, baseInit, fetchImpl, opts.resolveHost);
+			res = await fetchGuardedRedirects(url, baseInit, fetchImpl, resolveHost, isBlocked);
 		} catch (err) {
 			if (err instanceof CrossHostRedirect) {
 				return {
@@ -591,13 +663,11 @@ export async function webFetch(
 					`webfetch: could not read the PDF at ${url.href}: ${err instanceof Error ? err.message : err}`,
 				);
 			}
-			const result: WebfetchResult = { ...base, ...inlineOrSpill(pdfText) };
-			cacheSet(cacheKey, result);
-			return result;
+			return store({ ...base, ...inlineOrSpill(pdfText) });
 		}
 		const { bytes, truncated } = await readCappedBody(res, cap);
 		const decoded = decodeBody(bytes, contentType);
-		let text = kind === "html" ? await readableMarkdown(decoded) : decoded;
+		let text = kind === "html" && !raw ? await readableMarkdown(decoded) : decoded;
 		if (truncated) text += `\n\n[webfetch: output truncated at ${cap} bytes]`;
 		const result: WebfetchResult = {
 			url: url.href,
@@ -606,8 +676,7 @@ export async function webFetch(
 			truncated,
 			...inlineOrSpill(text),
 		};
-		cacheSet(cacheKey, result);
-		return result;
+		return store(result);
 	} finally {
 		await agent?.destroy().catch(() => {});
 	}
