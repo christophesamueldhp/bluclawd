@@ -31,6 +31,7 @@ import sandbox from "./sandbox/index.ts";
 import shell from "./shell/index.ts";
 import statusline from "./statusline/index.ts";
 import subagents from "./subagents/index.ts";
+import vibes from "./vibes/index.ts";
 import web from "./web/index.ts";
 
 export function bluclawdExtensions(): InlineExtension[] {
@@ -50,5 +51,6 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "help", factory: help },
 		{ name: "plugin", factory: plugin },
 		{ name: "shell", factory: shell },
+		{ name: "vibes", factory: vibes },
 	];
 }

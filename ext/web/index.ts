@@ -16,6 +16,7 @@ import { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { AgentToolResult, ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { resizeImage, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { sessionHeaders } from "../_shared/session-headers.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { searchQueries } from "../permissions/rules.ts";
 import { registerWebCommand } from "./browser.ts";
@@ -89,21 +90,6 @@ async function analyzeFetchedPage(
 		signal,
 		2048,
 	);
-}
-
-/**
- * The per-session headers pi's own agent loop adds for OpenCode (provider-attribution.ts,
- * not exported): OpenCode Go refuses a request without `x-opencode-session`.
- */
-function sessionHeaders(model: { provider: string; baseUrl: string }, sessionId: string): Record<string, string> {
-	let host = "";
-	try {
-		host = new URL(model.baseUrl).hostname;
-	} catch {
-		// No usable base URL: decide by provider name alone.
-	}
-	const opencode = model.provider === "opencode" || model.provider === "opencode-go" || host === "opencode.ai";
-	return opencode && sessionId ? { "x-opencode-session": sessionId, "x-opencode-client": "pi" } : {};
 }
 
 /**

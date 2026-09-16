@@ -58,6 +58,16 @@ export interface StatuslineSettings {
 	currency?: string;
 }
 
+/** Themed working messages (`/vibe`). */
+export interface VibesSettings {
+	/** Theme of the working messages, e.g. "star trek"; unset means off. */
+	theme?: string;
+	/** "generate" asks a model per prompt; "file" cycles pre-generated vibes. default: generate */
+	mode?: "generate" | "file";
+	/** `provider/model-id` for generating vibes. default: the session's model */
+	model?: string;
+}
+
 export interface WebsearchSettings {
 	provider?: "exa" | "brave" | "tavily";
 	apiKeyEnv?: string;
@@ -105,6 +115,12 @@ export function fastModel(sm: SettingsManager): string | undefined {
 export function statusline(sm: SettingsManager): StatuslineSettings | undefined {
 	const value = merged(sm).statusline as StatuslineSettings | undefined;
 	return value ? { ...value } : undefined;
+}
+
+/** User settings only: `/vibe` writes there, and a repo should not pick the model its vibes call. */
+export function vibes(sm: SettingsManager): VibesSettings {
+	const value = (sm.getGlobalSettings() as unknown as Mergeable).vibes as VibesSettings | undefined;
+	return value ? { ...value } : {};
 }
 
 export function sandbox(sm: SettingsManager): SandboxSettings | undefined {
