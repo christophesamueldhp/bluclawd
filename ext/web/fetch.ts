@@ -41,6 +41,7 @@ import { Agent, fetch as undiciFetch } from "undici";
 import { fetchGithub, type GithubRunner, parseGithubUrl } from "./github.ts";
 import { pdfToText } from "./pdf.ts";
 import { readableMarkdown } from "./readable.ts";
+import { fetchYoutube, parseYoutubeId } from "./youtube.ts";
 
 const USER_AGENT = `pi/${VERSION}`;
 // Prefer prose the converter handles well; text/markdown is what a growing number
@@ -577,6 +578,8 @@ export async function webFetch(
 		headers?: Record<string, string>;
 		/** Read github.com repos, files, issues and PRs through gh/git instead of their HTML. Off unless given. */
 		github?: { allowClone: boolean; run?: GithubRunner };
+		/** Read a YouTube video as its details and caption transcript. Off unless given. */
+		youtube?: { fetchImpl?: typeof fetch };
 	} = {},
 ): Promise<WebfetchResult> {
 	const isBlocked = opts.allowRanges?.length ? blockedExcept(opts.allowRanges) : isPrivateIp;
@@ -612,6 +615,20 @@ export async function webFetch(
 			});
 		}
 		// gh/git unavailable or the API refused: read the page like any other.
+	}
+	const videoId = opts.youtube && !raw ? parseYoutubeId(url) : undefined;
+	if (videoId) {
+		const video = await fetchYoutube(videoId, { fetchImpl: opts.youtube?.fetchImpl, signal });
+		if (video) {
+			return store({
+				url: url.href,
+				contentType: "text/markdown",
+				bytes: Buffer.byteLength(video),
+				truncated: false,
+				...inlineOrSpill(video),
+			});
+		}
+		// YouTube did not answer the player API: fall back to the watch page.
 	}
 	try {
 		const baseInit: RequestInit = {
