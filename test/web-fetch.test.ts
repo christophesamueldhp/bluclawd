@@ -361,3 +361,35 @@ describe("fetch options from settings", () => {
 		expect(Date.now() - started).toBeLessThan(2000);
 	});
 });
+
+describe("github", () => {
+	it("reads a github.com URL through gh when enabled, and the page otherwise", async () => {
+		const calls: string[][] = [];
+		const run = async (cmd: "gh" | "git", args: string[]) => {
+			calls.push([cmd, ...args]);
+			return {
+				code: 0,
+				stdout: JSON.stringify({
+					type: "file",
+					content: Buffer.from("print('hi')\n").toString("base64"),
+					size: 12,
+					encoding: "base64",
+				}),
+				stderr: "",
+			};
+		};
+		let pageFetches = 0;
+		const fetchImpl = (async () => {
+			pageFetches++;
+			return response("<p>github html</p>");
+		}) as typeof fetch;
+		const url = "https://github.com/o/r/blob/main/src/a.py";
+		const viaGh = await webFetch(url, { fetchImpl, resolveHost: noDns, github: { allowClone: false, run } });
+		expect(viaGh.text).toContain("print('hi')");
+		expect(pageFetches).toBe(0);
+		expect(calls[0][0]).toBe("gh");
+		clearWebfetchCache();
+		const plain = await webFetch(url, { fetchImpl, resolveHost: noDns });
+		expect(plain.text).toContain("github html");
+	});
+});

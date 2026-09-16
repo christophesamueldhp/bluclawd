@@ -294,9 +294,8 @@ export function factory(pi: ExtensionAPI): void {
 		): Promise<AgentToolResult<WebfetchDetails>> {
 			// webFetch throws on any failure (bad scheme, private IP, non-2xx, network);
 			// the agent loop surfaces the thrown error per the tool-error contract.
-			const config = webfetchConfig(
-				SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() }),
-			);
+			const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
+			const config = webfetchConfig(settings);
 			let host = "";
 			try {
 				host = new URL(params.url).hostname;
@@ -310,6 +309,8 @@ export function factory(pi: ExtensionAPI): void {
 				timeoutMs: config.timeoutMs,
 				allowRanges: config.allowRanges,
 				headers: config.headersFor(host),
+				// A clone runs git outside the bash sandbox; with the sandbox on, read through the API only.
+				github: { allowClone: forkSettings.sandbox(settings)?.enabled !== true },
 			});
 			const details: WebfetchDetails = {
 				url: result.url,

@@ -38,6 +38,7 @@ import {
 	VERSION,
 } from "@earendil-works/pi-coding-agent";
 import { Agent, fetch as undiciFetch } from "undici";
+import { fetchGithub, type GithubRunner, parseGithubUrl } from "./github.ts";
 import { pdfToText } from "./pdf.ts";
 import { readableMarkdown } from "./readable.ts";
 
@@ -574,6 +575,8 @@ export async function webFetch(
 		allowRanges?: string[];
 		/** Extra request headers for this host (settings `webfetch.hosts`); such fetches are never cached. */
 		headers?: Record<string, string>;
+		/** Read github.com repos, files, issues and PRs through gh/git instead of their HTML. Off unless given. */
+		github?: { allowClone: boolean; run?: GithubRunner };
 	} = {},
 ): Promise<WebfetchResult> {
 	const isBlocked = opts.allowRanges?.length ? blockedExcept(opts.allowRanges) : isPrivateIp;
@@ -594,6 +597,22 @@ export async function webFetch(
 		if (cacheable) cacheSet(cacheKey, result);
 		return result;
 	};
+	const githubTarget = opts.github && !raw ? parseGithubUrl(url) : undefined;
+	if (githubTarget && opts.github) {
+		const gh = await fetchGithub(githubTarget, { signal, allowClone: opts.github.allowClone, run: opts.github.run });
+		if (gh) {
+			const inline = inlineOrSpill(gh.text);
+			return store({
+				url: url.href,
+				contentType: "text/markdown",
+				bytes: Buffer.byteLength(gh.text),
+				truncated: false,
+				...inline,
+				note: [gh.note, inline.note].filter(Boolean).join("\n") || undefined,
+			});
+		}
+		// gh/git unavailable or the API refused: read the page like any other.
+	}
 	try {
 		const baseInit: RequestInit = {
 			headers: { "User-Agent": USER_AGENT, Accept: ACCEPT, ...opts.headers },
