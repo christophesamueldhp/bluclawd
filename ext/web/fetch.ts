@@ -24,10 +24,19 @@
  *        narrower than no guard, but weaker than Node's connect-layer path.
  */
 
+import { randomBytes } from "node:crypto";
 import { lookup as dnsLookup } from "node:dns";
 import { lookup as dnsLookupAsync } from "node:dns/promises";
+import { writeFileSync } from "node:fs";
 import { isIP } from "node:net";
-import { VERSION } from "@earendil-works/pi-coding-agent";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	formatSize,
+	DEFAULT_MAX_BYTES as INLINE_MAX_BYTES,
+	truncateHead,
+	VERSION,
+} from "@earendil-works/pi-coding-agent";
 import { Agent, fetch as undiciFetch } from "undici";
 import { htmlToMarkdown } from "./html-to-md.ts";
 
@@ -53,6 +62,32 @@ export interface WebfetchResult {
 	cached?: boolean;
 	/** Set when the URL redirected to another host: `text` is a notice, nothing was fetched from it. */
 	redirectedTo?: string;
+	/** Set when the page was too long to inline: `text` is its head, this file holds all of it. */
+	fullTextPath?: string;
+}
+
+/**
+ * Hold a page to the limit pi's own read and bash tools keep (2000 lines / 50KB):
+ * anything longer is written to a temp file and only its head is returned, with
+ * a footer pointing `read` at the rest. The network cap (`maxBytes`) is a
+ * separate, much larger bound on what is downloaded.
+ */
+function inlineOrSpill(text: string): { text: string; fullTextPath?: string } {
+	const head = truncateHead(text);
+	if (!head.truncated) return { text };
+	const fullTextPath = join(tmpdir(), `bluclawd-webfetch-${randomBytes(8).toString("hex")}.md`);
+	writeFileSync(fullTextPath, text, { mode: 0o600 });
+	const size = formatSize(head.totalBytes);
+	if (head.firstLineExceedsLimit) {
+		return {
+			text: `${Buffer.from(text).subarray(0, INLINE_MAX_BYTES).toString()}\n\n[webfetch: page is one ${size} line; showing its start. Full content: ${fullTextPath} — search it with grep.]`,
+			fullTextPath,
+		};
+	}
+	return {
+		text: `${head.content}\n\n[webfetch: showing lines 1-${head.outputLines} of ${head.totalLines} (${size} total). Full content: ${fullTextPath} — use read with offset=${head.outputLines + 1} to continue.]`,
+		fullTextPath,
+	};
 }
 
 // ── 15-minute result cache (CC parity, audit B.9) ───────────────────────────
@@ -527,7 +562,7 @@ export async function webFetch(
 			contentType,
 			bytes: bytes.length,
 			truncated,
-			text,
+			...inlineOrSpill(text),
 		};
 		cacheSet(cacheKey, result);
 		return result;

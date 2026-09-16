@@ -20,6 +20,25 @@ export interface SearchResult {
 	published?: string;
 }
 
+/** How far back results may be published. */
+export type Recency = "day" | "week" | "month" | "year";
+
+const RECENCY_DAYS: Record<Recency, number> = { day: 1, week: 7, month: 31, year: 365 };
+
+function recencyStart(recency: Recency): Date {
+	return new Date(Date.now() - RECENCY_DAYS[recency] * 24 * 60 * 60 * 1000);
+}
+
+/**
+ * Drop results published before the window. Undated results stay: the keyless
+ * endpoint only sometimes reports a date, and "unknown" is not "old".
+ */
+function filterByRecency(results: SearchResult[], recency: Recency | undefined): SearchResult[] {
+	if (!recency) return results;
+	const start = recencyStart(recency).toISOString().slice(0, 10);
+	return results.filter((r) => !r.published || r.published >= start);
+}
+
 /** Host allow/block lists (Claude Code's `allowed_domains` / `blocked_domains`). */
 export interface DomainFilter {
 	allowedDomains?: string[];
@@ -42,6 +61,11 @@ function normalizeDomain(spec: string): string {
 	const m = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/.exec(d);
 	if (m) d = m[1];
 	return d.replace(/^\*\./, "").replace(/^\./, "").replace(/\/.*$/, "");
+}
+
+/** Domains as native provider filters expect them: bare, lowercase hosts. */
+function nativeDomains(specs: string[]): string[] {
+	return specs.map(normalizeDomain).filter(Boolean);
 }
 
 function hostMatches(host: string, domain: string): boolean {
@@ -126,6 +150,7 @@ async function exaSearch(
 	fetchImpl: typeof fetch,
 	signal: AbortSignal,
 	filter: DomainFilter,
+	recency: Recency | undefined,
 ): Promise<SearchResult[]> {
 	const res = await fetchImpl("https://api.exa.ai/search", {
 		method: "POST",
@@ -137,8 +162,9 @@ async function exaSearch(
 		body: JSON.stringify({
 			query,
 			numResults: NUM_RESULTS,
-			...(filter.allowedDomains?.length ? { includeDomains: filter.allowedDomains } : {}),
-			...(filter.blockedDomains?.length ? { excludeDomains: filter.blockedDomains } : {}),
+			...(filter.allowedDomains?.length ? { includeDomains: nativeDomains(filter.allowedDomains) } : {}),
+			...(filter.blockedDomains?.length ? { excludeDomains: nativeDomains(filter.blockedDomains) } : {}),
+			...(recency ? { startPublishedDate: recencyStart(recency).toISOString() } : {}),
 		}),
 		signal,
 	});
@@ -164,10 +190,17 @@ async function braveSearch(
 	fetchImpl: typeof fetch,
 	signal: AbortSignal,
 	filter: DomainFilter,
+	recency: Recency | undefined,
 ): Promise<SearchResult[]> {
-	// Brave has no domain parameters: over-request and let the caller post-filter.
+	// Brave has no domain parameters: narrow the query with site: operators, and
+	// still over-request so the caller's post-filter has results to keep.
 	const count = hasFilter(filter) ? NUM_RESULTS_FILTERED : NUM_RESULTS;
-	const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(query)}&count=${count}`;
+	const allowed = nativeDomains(filter.allowedDomains ?? []);
+	const blocked = nativeDomains(filter.blockedDomains ?? []);
+	let q = query;
+	if (allowed.length) q += ` (${allowed.map((d) => `site:${d}`).join(" OR ")})`;
+	for (const d of blocked) q += ` -site:${d}`;
+	const url = `https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(q)}&count=${count}${recency ? `&freshness=p${recency[0]}` : ""}`;
 	const res = await fetchImpl(url, {
 		headers: {
 			Accept: "application/json",
@@ -198,6 +231,7 @@ async function tavilySearch(
 	fetchImpl: typeof fetch,
 	signal: AbortSignal,
 	filter: DomainFilter,
+	recency: Recency | undefined,
 ): Promise<SearchResult[]> {
 	const res = await fetchImpl("https://api.tavily.com/search", {
 		method: "POST",
@@ -206,8 +240,9 @@ async function tavilySearch(
 			api_key: apiKey,
 			query,
 			max_results: NUM_RESULTS,
-			...(filter.allowedDomains?.length ? { include_domains: filter.allowedDomains } : {}),
-			...(filter.blockedDomains?.length ? { exclude_domains: filter.blockedDomains } : {}),
+			...(filter.allowedDomains?.length ? { include_domains: nativeDomains(filter.allowedDomains) } : {}),
+			...(filter.blockedDomains?.length ? { exclude_domains: nativeDomains(filter.blockedDomains) } : {}),
+			...(recency ? { time_range: recency } : {}),
 		}),
 		signal,
 	});
@@ -275,7 +310,9 @@ export function parseExaMcpResults(text: string): SearchResult[] {
 		const url = /^URL:[ \t]*(.*)$/m.exec(block)?.[1].trim() ?? "";
 		const highlights = block.split(/^Highlights:[ \t]*$/m)[1]?.trim() ?? "";
 		if (!title && !url) continue;
-		results.push({ title: title || url, url, snippet: highlights });
+		results.push(
+			withDate({ title: title || url, url, snippet: highlights }, /^Published:[ \t]*(.*)$/m.exec(block)?.[1]),
+		);
 	}
 	// Degrade to "here is what we got" rather than a silent "no results" — but
 	// bounded: this is an entire third-party response body headed for the context.
@@ -300,16 +337,114 @@ export function resetExaMcpSession(): void {
 	exaMcpSession = undefined;
 }
 
-/** Search via Exa's hosted MCP endpoint. Sends no credentials — there are none. */
+/** A keyless reply error; a 429 means the shared anonymous quota ran out, which a key fixes. */
+function exaMcpError(res: Response): Error {
+	if (res.status !== 429) return providerError("exa mcp", res);
+	return new Error(`websearch: exa mcp returned 429 (keyless search is rate-limited; set EXA_API_KEY)`);
+}
+
+function mcpText(envelope: RpcEnvelope | undefined): string {
+	if (envelope?.error) throw new Error(`websearch: exa mcp error: ${envelope.error.message ?? "unknown"}`);
+	return (envelope?.result?.content ?? [])
+		.filter((part) => part.type === "text")
+		.map((part) => part.text ?? "")
+		.join("\n");
+}
+
+/**
+ * Search via Exa's hosted MCP endpoint. Sends no credentials — there are none.
+ *
+ * With a domain filter or recency it first asks the endpoint's advanced tool,
+ * which filters natively and dates every result; if that fails it falls back to
+ * the basic tool and filters here. The post-filters run on both paths.
+ */
 export async function exaMcpSearch(
 	query: string,
 	fetchImpl: typeof fetch,
 	signal?: AbortSignal,
 	filter: DomainFilter = {},
+	recency?: Recency,
 ): Promise<SearchResult[]> {
 	// Same bound the keyed providers get. This path used to run with whatever the
 	// caller passed — including a signal that never aborts.
 	const effectiveSignal = timeoutSignal(signal);
+	let results: SearchResult[] | undefined;
+	if (hasFilter(filter) || recency) {
+		try {
+			results = await exaMcpAdvancedSearch(query, fetchImpl, effectiveSignal, filter, recency);
+		} catch (err) {
+			if (effectiveSignal.aborted) throw err;
+		}
+	}
+	results ??= await exaMcpBasicSearch(query, fetchImpl, effectiveSignal, filter, recency);
+	return filterByRecency(
+		filterByDomain(results, { allowed: filter.allowedDomains, blocked: filter.blockedDomains }),
+		recency,
+	);
+}
+
+/**
+ * The advanced tool is not in the endpoint's default tool set: `?tools=` enables
+ * it. It answers without a session, so this is one stateless call, and it
+ * replies with Exa's search JSON rather than text blocks.
+ */
+async function exaMcpAdvancedSearch(
+	query: string,
+	fetchImpl: typeof fetch,
+	signal: AbortSignal,
+	filter: DomainFilter,
+	recency: Recency | undefined,
+): Promise<SearchResult[]> {
+	const res = await fetchImpl(`${EXA_MCP_URL}?tools=web_search_advanced_exa`, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			Accept: "application/json, text/event-stream",
+			"User-Agent": USER_AGENT,
+		},
+		body: JSON.stringify({
+			jsonrpc: "2.0",
+			id: 1,
+			method: "tools/call",
+			params: {
+				name: "web_search_advanced_exa",
+				arguments: {
+					query,
+					type: "auto",
+					numResults: NUM_RESULTS,
+					...(filter.allowedDomains?.length ? { includeDomains: nativeDomains(filter.allowedDomains) } : {}),
+					...(filter.blockedDomains?.length ? { excludeDomains: nativeDomains(filter.blockedDomains) } : {}),
+					...(recency ? { startPublishedDate: recencyStart(recency).toISOString() } : {}),
+					enableHighlights: true,
+					textMaxCharacters: 1000,
+				},
+			},
+		}),
+		signal,
+		redirect: "manual",
+	});
+	if (!res.ok) throw exaMcpError(res);
+	const data = JSON.parse(mcpText(decodeRpc(await res.text()))) as { results?: Array<Record<string, unknown>> };
+	if (!Array.isArray(data.results)) throw new Error("websearch: exa mcp advanced search returned no results list");
+	return data.results.map((r) =>
+		withDate(
+			{
+				title: str(r.title) || str(r.url),
+				url: str(r.url),
+				snippet: Array.isArray(r.highlights) ? r.highlights.map(str).join("\n") : str(r.text),
+			},
+			r.publishedDate,
+		),
+	);
+}
+
+async function exaMcpBasicSearch(
+	query: string,
+	fetchImpl: typeof fetch,
+	effectiveSignal: AbortSignal,
+	filter: DomainFilter,
+	recency: Recency | undefined,
+): Promise<SearchResult[]> {
 	const rpc = async (body: Record<string, unknown>): Promise<Response> => {
 		const res = await fetchImpl(EXA_MCP_URL, {
 			method: "POST",
@@ -339,7 +474,7 @@ export async function exaMcpSearch(
 				clientInfo: { name: "pi", version: VERSION },
 			},
 		});
-		if (!init.ok) throw providerError("exa mcp", init);
+		if (!init.ok) throw exaMcpError(init);
 		await init.body?.cancel().catch(() => {});
 		const ack = await rpc({ jsonrpc: "2.0", method: "notifications/initialized" });
 		await ack.body?.cancel().catch(() => {});
@@ -351,8 +486,13 @@ export async function exaMcpSearch(
 			method: "tools/call",
 			params: {
 				name: "web_search_exa",
-				// No domain parameter on this endpoint: over-request and post-filter.
-				arguments: { query, numResults: hasFilter(filter) ? NUM_RESULTS_FILTERED : NUM_RESULTS },
+				// No domain or date parameter on this endpoint: over-request and post-filter.
+				// `objective` is required by its schema; the recency wish rides along in it.
+				arguments: {
+					query,
+					numResults: hasFilter(filter) || recency ? NUM_RESULTS_FILTERED : NUM_RESULTS,
+					objective: recency ? `${query} (prefer pages published in the past ${recency})` : query,
+				},
 			},
 		});
 
@@ -366,15 +506,8 @@ export async function exaMcpSearch(
 		await handshake();
 		res = await search();
 	}
-	if (!res.ok) throw providerError("exa mcp", res);
-
-	const envelope = decodeRpc(await res.text());
-	if (envelope?.error) throw new Error(`websearch: exa mcp error: ${envelope.error.message ?? "unknown"}`);
-	const text = (envelope?.result?.content ?? [])
-		.filter((part) => part.type === "text")
-		.map((part) => part.text ?? "")
-		.join("\n");
-	return filterByDomain(parseExaMcpResults(text), { allowed: filter.allowedDomains, blocked: filter.blockedDomains });
+	if (!res.ok) throw exaMcpError(res);
+	return parseExaMcpResults(mcpText(decodeRpc(await res.text())));
 }
 
 /**
@@ -388,6 +521,7 @@ export async function webSearch(
 		apiKey: string;
 		signal?: AbortSignal;
 		fetchImpl?: typeof fetch;
+		recency?: Recency;
 	} & DomainFilter,
 ): Promise<SearchResult[]> {
 	const fetchImpl = opts.fetchImpl ?? fetch;
@@ -396,13 +530,13 @@ export async function webSearch(
 	let results: SearchResult[];
 	switch (opts.provider) {
 		case "brave":
-			results = await braveSearch(opts.query, opts.apiKey, fetchImpl, signal, filter);
+			results = await braveSearch(opts.query, opts.apiKey, fetchImpl, signal, filter, opts.recency);
 			break;
 		case "tavily":
-			results = await tavilySearch(opts.query, opts.apiKey, fetchImpl, signal, filter);
+			results = await tavilySearch(opts.query, opts.apiKey, fetchImpl, signal, filter, opts.recency);
 			break;
 		default:
-			results = await exaSearch(opts.query, opts.apiKey, fetchImpl, signal, filter);
+			results = await exaSearch(opts.query, opts.apiKey, fetchImpl, signal, filter, opts.recency);
 	}
 	// Applied after the native filter too: cheap, and it holds even if a provider is lax.
 	return filterByDomain(results, { allowed: filter.allowedDomains, blocked: filter.blockedDomains });

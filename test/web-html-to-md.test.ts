@@ -43,4 +43,17 @@ describe("htmlToMarkdown", () => {
 		);
 		expect(md).toBe("body\n\n---\n\nmore");
 	});
+	it("keeps a link's label but drops javascript: and data: targets", () => {
+		const md = htmlToMarkdown(
+			`<p><a href="javascript:alert(1)">run</a> <a href="DATA:text/html;base64,PHNjcmlwdD4=">blob</a> <a href="https://ok.example/">ok</a></p>`,
+		);
+		expect(md).toBe("run blob [ok](https://ok.example/)");
+	});
+
+	it("uses <title> as the heading when the page has no <h1>", () => {
+		expect(htmlToMarkdown("<html><head><title>Docs &amp; API</title></head><body><p>x</p></body></html>")).toBe(
+			"# Docs & API\n\nx",
+		);
+		expect(htmlToMarkdown("<head><title>T</title></head><h1>Main</h1>")).toBe("# Main");
+	});
 });

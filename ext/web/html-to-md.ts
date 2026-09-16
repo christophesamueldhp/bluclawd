@@ -68,6 +68,10 @@ export function htmlToMarkdown(html: string): string {
 	try {
 		let s = html;
 
+		// 0. A page with no <h1> still has a name: keep its <title>, which step 1 discards with <head>.
+		const title = /<title\b[^>]*>([\s\S]*?)<\/title>/i.exec(s)?.[1];
+		const heading = title && !/<h1\b/i.test(s) ? decodeEntities(collapseInline(title)) : "";
+
 		// 1. Drop comments and elements whose content is not prose.
 		s = s.replace(/<!--[\s\S]*?-->/g, "");
 		s = s.replace(/<(script|style|head|nav|noscript|template|svg|footer|aside|iframe)\b[^>]*>[\s\S]*?<\/\1>/gi, "");
@@ -91,7 +95,9 @@ export function htmlToMarkdown(html: string): string {
 		s = s.replace(
 			/<a\b[^>]*\bhref\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a>/gi,
 			(_m, _raw, dq: string, sq: string, uq: string, text: string) => {
-				const href = (dq ?? sq ?? uq ?? "").trim();
+				let href = (dq ?? sq ?? uq ?? "").trim();
+				// A script or inline-payload target is nothing the model can visit; keep the label only.
+				if (/^\s*(javascript|data|vbscript):/i.test(href)) href = "";
 				const label = collapseInline(text) || href;
 				return href ? `[${label}](${href})` : label;
 			},
@@ -169,7 +175,7 @@ export function htmlToMarkdown(html: string): string {
 
 		// 10. Restore protected code blocks (after tidying, so their internals are untouched).
 		s = s.replace(new RegExp(`${NUL}(\\d+)${NUL}`, "g"), (_m, i: string) => stash[Number(i)] ?? "");
-		return s.trim();
+		return heading ? `# ${heading}\n\n${s.trim()}`.trim() : s.trim();
 	} catch {
 		// Defensive: the converter must never throw. Fall back to tag-stripped text.
 		try {

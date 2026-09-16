@@ -22,6 +22,7 @@ interface WebfetchDetails {
 	cached?: boolean;
 	analyzed?: boolean;
 	redirectedTo?: string;
+	fullTextPath?: string;
 }
 
 const expandHint = (theme: Theme): string => theme.fg("muted", ` (${keyDisplayText("app.tools.expand")} to expand)`);
@@ -59,7 +60,9 @@ export function renderWebfetchResult(
 	}
 	if (expanded) return new Text(theme.fg("toolOutput", text), 0, 0);
 
-	const flags = [details.cached && "cached", details.truncated && "truncated"].filter(Boolean).join(", ");
+	const flags = [details.cached && "cached", details.truncated && "truncated", details.fullTextPath && "saved to file"]
+		.filter(Boolean)
+		.join(", ");
 	const summary = `${theme.fg("success", "✓")} ${theme.fg("toolTitle", details.url)} ${theme.fg(
 		"muted",
 		`${details.contentType || "text"} · ${formatBytes(details.bytes)}${flags ? ` · ${flags}` : ""}`,

@@ -1,3 +1,4 @@
+import { readFileSync, rmSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	assertAllowedUrl,
@@ -153,6 +154,52 @@ describe("caching and limits", () => {
 		const second = await webFetch("https://example.com/", { fetchImpl, resolveHost: noDns, maxBytes: 4 });
 		expect(second.cached).toBe(true);
 		expect(calls).toBe(1);
+	});
+
+	it("keeps a long page out of context: first 2000 lines inline, the rest saved to a file", async () => {
+		const page = Array.from({ length: 3000 }, (_, i) => `line ${i + 1}`).join("\n");
+		let calls = 0;
+		const fetchImpl = (async () => {
+			calls++;
+			return response(page, { headers: { "content-type": "text/plain" } });
+		}) as typeof fetch;
+		const result = await webFetch("https://example.com/long", { fetchImpl, resolveHost: noDns });
+		expect(result.fullTextPath).toBeDefined();
+		const path = result.fullTextPath as string;
+		try {
+			expect(result.text).toContain("line 2000");
+			expect(result.text).not.toContain("line 2001");
+			expect(result.text).toContain(`Full content: ${path}`);
+			expect(result.text).toContain("offset=2001");
+			expect(readFileSync(path, "utf8")).toBe(page);
+			const again = await webFetch("https://example.com/long", { fetchImpl, resolveHost: noDns });
+			expect(again.cached).toBe(true);
+			expect(again.fullTextPath).toBe(path);
+			expect(calls).toBe(1);
+		} finally {
+			rmSync(path, { force: true });
+		}
+	});
+
+	it("saves a page whose single line is over the byte limit and inlines only a slice of it", async () => {
+		const page = "x".repeat(200_000);
+		const fetchImpl = (async () => response(page, { headers: { "content-type": "text/plain" } })) as typeof fetch;
+		const result = await webFetch("https://example.com/min.js", { fetchImpl, resolveHost: noDns });
+		const path = result.fullTextPath as string;
+		try {
+			expect(readFileSync(path, "utf8")).toBe(page);
+			expect(result.text.length).toBeLessThan(60_000);
+			expect(result.text).toContain(`Full content: ${path}`);
+		} finally {
+			rmSync(path, { force: true });
+		}
+	});
+
+	it("leaves a short page inline with no file", async () => {
+		const fetchImpl = (async () => response("short", { headers: { "content-type": "text/plain" } })) as typeof fetch;
+		const result = await webFetch("https://example.com/s", { fetchImpl, resolveHost: noDns });
+		expect(result.text).toBe("short");
+		expect(result.fullTextPath).toBeUndefined();
 	});
 
 	it("reports binary content instead of dumping it", async () => {
