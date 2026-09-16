@@ -19,12 +19,19 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { InlineExtension } from "@earendil-works/pi-coding-agent";
-import { SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
+import {
+	getAgentDir,
+	loadProjectContextFiles,
+	SessionManager,
+	SettingsManager,
+	VERSION,
+} from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { setSharedTheme } from "../_shared/theme.ts";
 import { renderPixelArt } from "./pixel-art.ts";
 import { WelcomeBox, type WelcomeBoxInfo } from "./welcome-box.ts";
+import { type WelcomeInfo, welcomeSections } from "./welcome-info.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -95,6 +102,55 @@ const branding: InlineExtension = {
 			},
 		});
 
+		/** Filled in asynchronously after startup; the banner renders without it first. */
+		let recentSessions: WelcomeInfo["recentSessions"] = [];
+
+		/** What the banner's sidebar shows, read live so a model switch shows on the next render. */
+		function welcomeInfo(
+			ctx: ExtensionContext,
+			contextFiles: number,
+			recent: WelcomeInfo["recentSessions"],
+		): WelcomeInfo {
+			let systemPromptTokens: number | undefined;
+			try {
+				systemPromptTokens = Math.ceil(ctx.getSystemPrompt().length / 4) || undefined;
+			} catch {
+				// A retired context (session switch) throws; the size just goes blank.
+			}
+			const commands = pi.getCommands();
+			return {
+				model: ctx.model ? { name: ctx.model.name ?? ctx.model.id, provider: ctx.model.provider } : undefined,
+				loaded: {
+					contextFiles,
+					skills: commands.filter((command) => command.source === "skill").length,
+					tools: pi.getAllTools().length,
+					promptTemplates: commands.filter((command) => command.source === "prompt").length,
+				},
+				systemPromptTokens,
+				recentSessions: recent,
+				tips: [
+					"Ask a question to start — it reads and edits files itself.",
+					"/mode switches how much it asks before acting.",
+					"# saves a note to memory; /memory shows what is saved.",
+				],
+			};
+		}
+
+		/** The three newest other sessions started in this directory. */
+		async function loadRecentSessions(ctx: ExtensionContext): Promise<WelcomeInfo["recentSessions"]> {
+			try {
+				const current = ctx.sessionManager.getSessionFile();
+				const sessions = await SessionManager.list(ctx.cwd, ctx.sessionManager.getSessionDir());
+				return sessions
+					.filter((session) => session.path !== current && session.messageCount > 0)
+					.sort((a, b) => b.modified.getTime() - a.modified.getTime())
+					.slice(0, 3)
+					.map((session) => ({ title: session.name ?? session.firstMessage, modified: session.modified }));
+			} catch {
+				return [];
+			}
+		}
+
 		pi.on("session_start", (_event, ctx) => {
 			// Populate the shared theme reference other components in this layer
 			// (fleet-view and friends) import instead of reaching into pi's own
@@ -105,6 +161,18 @@ const branding: InlineExtension = {
 			// extension gets for repainting once the mascot finishes decoding.
 			ctx.ui.setHeader((tui, theme) => {
 				void preloadMascot(() => tui.requestRender());
+				void loadRecentSessions(ctx).then((sessions) => {
+					recentSessions = sessions;
+					tui.requestRender();
+				});
+				// The same discovery pi ran for this session's AGENTS.md / CLAUDE.md files;
+				// extensions get no read access to the loaded list at startup.
+				let contextFiles = 0;
+				try {
+					contextFiles = loadProjectContextFiles({ cwd: ctx.cwd, agentDir: getAgentDir() }).length;
+				} catch {
+					// Unreadable files: the count is left out.
+				}
 				const info = (): WelcomeBoxInfo => {
 					const rows: string[] = [];
 					if (mascotLines) rows.push(...mascotLines);
@@ -114,16 +182,7 @@ const branding: InlineExtension = {
 					return {
 						title: `bluclawd v${VERSION}`,
 						rows,
-						sidebar: [
-							{
-								heading: "Tips for getting started",
-								lines: [
-									theme.fg("dim", "Ask a question to start — it reads and edits files itself."),
-									theme.fg("dim", "/mode switches how much it asks before acting."),
-									theme.fg("dim", "# saves a note to memory; /memory shows what is saved."),
-								],
-							},
-						],
+						sidebar: welcomeSections(welcomeInfo(ctx, contextFiles, recentSessions), theme, Date.now()),
 					};
 				};
 				return new WelcomeBox(info) as Component & { dispose?(): void };
