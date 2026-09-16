@@ -137,10 +137,14 @@ describe("MCP server round trip (in-memory)", () => {
 		server.registerTool("one", { description: "first" }, async () => ({ content: [] }));
 		const client = await connect(server);
 		const registered: string[] = [];
+		const timeouts = { total: 10_000, idle: 10_000 };
 		const pi = { registerTool: (t: { name: string }) => registered.push(t.name) } as unknown as ExtensionAPI;
-		expect((await registerServerTools(pi, "s", client)).map((t) => t.name)).toEqual(["mcp__s__one"]);
+		expect((await registerServerTools(pi, "s", client, timeouts)).map((t) => t.name)).toEqual(["mcp__s__one"]);
 		server.registerTool("two", { description: "second" }, async () => ({ content: [] }));
-		expect((await registerServerTools(pi, "s", client)).map((t) => t.name)).toEqual(["mcp__s__one", "mcp__s__two"]);
+		expect((await registerServerTools(pi, "s", client, timeouts)).map((t) => t.name)).toEqual([
+			"mcp__s__one",
+			"mcp__s__two",
+		]);
 		await client.close();
 	});
 });

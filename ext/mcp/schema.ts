@@ -58,6 +58,8 @@ export interface ServerConfig {
 	/** Register this server's tools deferred: schemas stay out of the model's
 	 *  context until activated via the mcp_find_tools search tool (audit B.5). */
 	deferTools?: boolean;
+	/** Per-call wall-clock limit in ms (Claude Code's field); see {@link toolCallTimeouts}. */
+	timeout?: number;
 }
 
 /**
@@ -158,6 +160,7 @@ export function parseMcpConfig(raw: unknown): Record<string, ServerConfig> {
 		if (typeof v.type === "string") config.type = v.type as TransportKind;
 		if (typeof v.disabled === "boolean") config.disabled = v.disabled;
 		if (typeof v.deferTools === "boolean") config.deferTools = v.deferTools;
+		if (typeof v.timeout === "number" && Number.isFinite(v.timeout)) config.timeout = v.timeout;
 		out[name] = config;
 	}
 	return out;
@@ -216,7 +219,7 @@ function canonical(value: unknown): unknown {
  * CREDENTIALS GO: the command line, its environment, the endpoint, the headers,
  * and the transport.
  *
- * `disabled`, `deferTools` and `source` are deliberately excluded — they change
+ * `disabled`, `deferTools`, `timeout` and `source` are deliberately excluded — they change
  * how bluclawd presents a server, never what it executes, so toggling them must
  * not invalidate an approval the user already gave.
  *
@@ -506,4 +509,180 @@ export function promptMessagesToText(messages: { role: string; content: unknown 
 	});
 	if (parts.length === 1 && parts[0].role === "user") return parts[0].text;
 	return parts.map((p) => `[${p.role}]\n${p.text}`).join("\n\n");
+}
+
+type Env = Record<string, string | undefined>;
+
+/** Claude Code's default wall clock for one tool call: 1e8 ms, about 28 hours — in effect
+ *  "no limit"; the idle window below is what catches a hung server. */
+const DEFAULT_TOOL_TIMEOUT_MS = 100_000_000;
+/** setTimeout's ceiling (a larger delay fires immediately). */
+const MAX_TIMER_MS = 2_147_483_647;
+const DEFAULT_IDLE_STDIO_MS = 1_800_000;
+const DEFAULT_IDLE_REMOTE_MS = 300_000;
+const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+
+function envMs(env: Env, name: string): number | undefined {
+	const raw = env[name];
+	if (raw === undefined || raw.trim() === "") return undefined;
+	const n = Number(raw);
+	return Number.isFinite(n) ? n : undefined;
+}
+
+/**
+ * Timeouts for one tool call, as Claude Code computes them (2.1.273):
+ * - `total` — wall clock: per-server `timeout` (≥1000ms) ?? `MCP_TOOL_TIMEOUT` ?? ~28h,
+ *   clamped to [1000ms, setTimeout's max]. Progress does not extend it.
+ * - `idle` — abort when the server sends no response and no progress for this long:
+ *   `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` ?? 30 min (stdio) / 5 min (remote). 0 turns it
+ *   off; otherwise never below the per-server `timeout` and never above `total`.
+ */
+export function toolCallTimeouts(config: ServerConfig, env: Env = process.env): { total: number; idle: number } {
+	const perServer = config.timeout !== undefined && config.timeout >= 1000 ? config.timeout : undefined;
+	const total = Math.min(
+		Math.max(perServer ?? envMs(env, "MCP_TOOL_TIMEOUT") ?? DEFAULT_TOOL_TIMEOUT_MS, 1000),
+		MAX_TIMER_MS,
+	);
+	const remote = typeof config.url === "string" && config.url.length > 0;
+	const idleSetting =
+		envMs(env, "CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT") ?? (remote ? DEFAULT_IDLE_REMOTE_MS : DEFAULT_IDLE_STDIO_MS);
+	const idle = idleSetting <= 0 ? 0 : Math.min(Math.max(idleSetting, perServer ?? 0, 1000), total);
+	return { total, idle };
+}
+
+/** The MCP handshake limit: `MCP_TIMEOUT` (Claude Code's name), 30s by default. */
+export function connectTimeoutMs(env: Env = process.env): number {
+	const ms = envMs(env, "MCP_TIMEOUT");
+	return ms !== undefined && ms > 0 ? ms : DEFAULT_CONNECT_TIMEOUT_MS;
+}
+
+/**
+ * Claude Code's `${VAR}` / `${VAR:-default}` expansion. An unset variable with no
+ * default stays as literal `${VAR}` text and is reported, as Claude Code does.
+ *
+ * Only the braced form: pi's bare `$VAR` and `!command` values in `env`/`headers` are
+ * left for {@link resolveServerEnv}/resolveHeaders, which run after this. The two do
+ * not collide — that resolver treats `${VAR:-x}` (not a valid name) as literal text.
+ */
+export function expandEnv(text: string, env: Env = process.env): { text: string; missing: string[] } {
+	const missing: string[] = [];
+	const out = text.replace(
+		/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g,
+		(match, name: string, fallback?: string) => {
+			const value = env[name];
+			// `:-` is the shell's: an empty value takes the default too.
+			if (value !== undefined && (value !== "" || fallback === undefined)) return value;
+			if (fallback !== undefined) return fallback;
+			missing.push(name);
+			return match;
+		},
+	);
+	return { text: out, missing };
+}
+
+/**
+ * Expand `${VAR}` in every field Claude Code expands — command, args, env, url, headers
+ * — returning a copy. Runs at connect time, never at load: the approval fingerprint
+ * must cover the file's text, not whatever the environment held that day.
+ */
+export function expandServerConfig(
+	config: ServerConfig,
+	env: Env = process.env,
+): { config: ServerConfig; missing: string[] } {
+	const missing = new Set<string>();
+	const one = (value: string): string => {
+		const r = expandEnv(value, env);
+		for (const name of r.missing) missing.add(name);
+		return r.text;
+	};
+	const record = (rec: Record<string, string>) => Object.fromEntries(Object.entries(rec).map(([k, v]) => [k, one(v)]));
+	const out: ServerConfig = { ...config };
+	if (config.command !== undefined) out.command = one(config.command);
+	if (config.args) out.args = config.args.map(one);
+	if (config.env) out.env = record(config.env);
+	if (config.url !== undefined) out.url = one(config.url);
+	if (config.headers) out.headers = record(config.headers);
+	return { config: out, missing: [...missing] };
+}
+
+/**
+ * The agent's own credentials: model-provider keys and cloud/registry secrets. Claude
+ * Code reads its equivalents as empty in a remote server's `url` and `headers`; this is
+ * that list made provider-neutral (the providers pi talks to, not only Anthropic). A
+ * server's OWN key (NOTION_API_KEY, GITHUB_TOKEN…) is deliberately absent — sending it
+ * in a header is the point of headers. Secret VALUES only, never paths or URLs
+ * (HTTP_PROXY, GOOGLE_APPLICATION_CREDENTIALS): matching by value, a proxy at
+ * 127.0.0.1:8080 would refuse a local MCP server on the same port.
+ */
+const AGENT_CREDENTIAL_ENV = [
+	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_AUTH_TOKEN",
+	"ANTHROPIC_OAUTH_TOKEN",
+	"CLAUDE_CODE_OAUTH_TOKEN",
+	"OPENAI_API_KEY",
+	"AZURE_OPENAI_API_KEY",
+	"GEMINI_API_KEY",
+	"GOOGLE_CLOUD_API_KEY",
+	"DEEPSEEK_API_KEY",
+	"GROQ_API_KEY",
+	"CEREBRAS_API_KEY",
+	"XAI_API_KEY",
+	"OPENROUTER_API_KEY",
+	"AI_GATEWAY_API_KEY",
+	"ZAI_API_KEY",
+	"MISTRAL_API_KEY",
+	"MINIMAX_API_KEY",
+	"MOONSHOT_API_KEY",
+	"KIMI_API_KEY",
+	"FIREWORKS_API_KEY",
+	"TOGETHER_API_KEY",
+	"OPENCODE_API_KEY",
+	"NVIDIA_API_KEY",
+	"COPILOT_GITHUB_TOKEN",
+	"CLOUDFLARE_API_KEY",
+	"AWS_BEARER_TOKEN_BEDROCK",
+	"AWS_SECRET_ACCESS_KEY",
+	"AWS_SESSION_TOKEN",
+	"AZURE_CLIENT_SECRET",
+	"NPM_TOKEN",
+];
+
+/** Shorter values match too much unrelated text to mean anything. */
+const MIN_CREDENTIAL_CHARS = 8;
+
+/**
+ * Which agent credential, if any, has its VALUE inside a resolved remote url or header.
+ *
+ * Checked on the value after every expansion path (`${VAR}`, pi's bare `$VAR`, and
+ * `!command`), so no syntax can route a model key to a server a repo chose. Where
+ * Claude Code blanks the variable, bluclawd refuses the connect instead — a silently
+ * emptied url or header only surfaces later as a baffling server error.
+ */
+export function leakedCredential(value: string, env: Env = process.env): string | undefined {
+	return AGENT_CREDENTIAL_ENV.find((name) => {
+		const secret = env[name];
+		return secret !== undefined && secret.length >= MIN_CREDENTIAL_CHARS && value.includes(secret);
+	});
+}
+
+/**
+ * `@server:uri` resource mentions, Claude Code's syntax, for the given server names only
+ * — restricting to real servers is what keeps `@someone:thing` in prose from matching.
+ * The `@` must start a word (not an email), and trailing sentence punctuation is not
+ * part of the uri. Deduplicated, in order of first appearance.
+ */
+export function findResourceMentions(text: string, servers: string[]): { server: string; uri: string }[] {
+	const known = new Set(servers);
+	const seen = new Set<string>();
+	const out: { server: string; uri: string }[] = [];
+	for (const m of text.matchAll(/(^|\s)@([A-Za-z0-9_.-]+?):(\S+)/g)) {
+		const server = m[2];
+		const uri = m[3].replace(/[.,;:!?)\]}'"]+$/, "");
+		if (!known.has(server) || !uri) continue;
+		const key = `${server}\n${uri}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push({ server, uri });
+	}
+	return out;
 }

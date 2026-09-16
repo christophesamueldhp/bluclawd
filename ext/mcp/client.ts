@@ -22,8 +22,11 @@ import {
 	type StdioServerParameters,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import { resolveHeaders } from "../_shared/resolve-config-value.ts";
 import {
+	connectTimeoutMs,
+	leakedCredential,
 	mcpToolName,
 	type PromptArgument,
 	resolveServerEnv,
@@ -33,10 +36,6 @@ import {
 } from "./schema.ts";
 
 export type { Client };
-
-/** Ceiling for the MCP handshake — a server that never speaks MCP (hung binary,
- * wrong command) must not leak its child/socket until shutdown. */
-const CONNECT_TIMEOUT_MS = 30_000;
 
 /** Total text budget per tool result — the shared built-in tool-output budget.
  * A misbehaving server must not flood the context window. */
@@ -121,8 +120,20 @@ export async function connectServer(
 		// stream (sdk 1.29.0 client/sse.js), so configured headers and a refreshed
 		// OAuth token both reach the GET — `headers` and /mcp login work for an SSE
 		// server exactly as they do for a streamable-http one.
+		const headers = resolveHeaders(config.headers);
+		// No expansion path may carry the agent's own model/cloud key to a server
+		// (see leakedCredential). Checked on resolved values, before any request.
+		const leakedIn = [
+			["url", config.url as string],
+			...Object.entries(headers ?? {}).map(([k, v]) => [`header "${k}"`, v]),
+		].find(([, value]) => leakedCredential(value) !== undefined);
+		if (leakedIn) {
+			throw new Error(
+				`server "${name}": refusing to connect — its ${leakedIn[0]} contains the value of ${leakedCredential(leakedIn[1])}`,
+			);
+		}
 		const options = {
-			requestInit: { headers: resolveHeaders(config.headers) },
+			requestInit: { headers },
 			authProvider: opts?.authProvider,
 		};
 		const url = new URL(config.url as string);
@@ -130,7 +141,9 @@ export async function connectServer(
 			kind === "sse" ? new SSEClientTransport(url, options) : new StreamableHTTPClientTransport(url, options);
 	}
 
-	const timeoutMs = opts?.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
+	// A server that never speaks MCP (hung binary, wrong command) must not leak its
+	// child/socket until shutdown.
+	const timeoutMs = opts?.connectTimeoutMs ?? connectTimeoutMs();
 	let timer: NodeJS.Timeout | undefined;
 	const timeout = new Promise<never>((_, reject) => {
 		timer = setTimeout(
@@ -259,6 +272,22 @@ function joinText(content: (TextContent | ImageContent)[]): string {
 		.trim();
 }
 
+/** A readable error for the SDK's RequestTimeout, undefined for anything else. */
+function timeoutError(
+	err: unknown,
+	server: string,
+	tool: string,
+	timeouts: { total: number; idle: number },
+): Error | undefined {
+	if (!(err instanceof McpError) || err.code !== ErrorCode.RequestTimeout) return undefined;
+	// The SDK (1.29.0 shared/protocol.js) tells the two apart only by message text.
+	const hitTotal = err.message.includes("Maximum total timeout") || timeouts.idle <= 0;
+	const why = hitTotal
+		? `exceeded its ${timeouts.total}ms limit (per-server "timeout" or MCP_TOOL_TIMEOUT)`
+		: `sent no response or progress for ${timeouts.idle}ms (CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT)`;
+	return new Error(`MCP tool "${tool}" on server "${server}" ${why}.`);
+}
+
 /** Name + description of one registered MCP tool (for /mcp and tool deferral). */
 export interface RegisteredMcpTool {
 	name: string;
@@ -276,6 +305,7 @@ export async function registerServerTools(
 	pi: ExtensionAPI,
 	serverName: string,
 	client: Client,
+	timeouts: { total: number; idle: number },
 ): Promise<RegisteredMcpTool[]> {
 	const { tools } = await client.listTools();
 	const registered: RegisteredMcpTool[] = [];
@@ -291,15 +321,29 @@ export async function registerServerTools(
 			description: tool.description ?? `MCP tool "${bareName}" from server "${serverName}".`,
 			parameters: toToolParameters(tool.inputSchema),
 			async execute(_toolCallId, params, signal): Promise<AgentToolResult<McpToolDetails>> {
-				// Forward the abort signal so Esc cancels an in-flight MCP call.
-				const result = await client.callTool(
-					{
-						name: bareName,
-						arguments: (params ?? {}) as Record<string, unknown>,
-					},
-					undefined,
-					{ signal },
-				);
+				// Forward the abort signal so Esc cancels an in-flight MCP call. The SDK's
+				// per-request timer is the IDLE window: reset by each progress notification,
+				// capped by the wall clock. `onprogress` must be set — it is what makes the
+				// SDK send a progressToken, and without one no server reports progress.
+				let result: Awaited<ReturnType<Client["callTool"]>>;
+				try {
+					result = await client.callTool(
+						{
+							name: bareName,
+							arguments: (params ?? {}) as Record<string, unknown>,
+						},
+						undefined,
+						{
+							signal,
+							timeout: timeouts.idle > 0 ? timeouts.idle : timeouts.total,
+							resetTimeoutOnProgress: timeouts.idle > 0,
+							maxTotalTimeout: timeouts.total,
+							onprogress: () => {},
+						},
+					);
+				} catch (err) {
+					throw timeoutError(err, serverName, bareName, timeouts) ?? err;
+				}
 				// Cap BEFORE the isError branch so a runaway error text can't flood the
 				// thrown message either.
 				const content = capContent(mapContent(result.content), serverName, bareName);
@@ -343,4 +387,58 @@ export async function listServerPrompts(client: Client): Promise<McpPrompt[]> {
 				}
 			: {}),
 	}));
+}
+
+/** One MCP resource as listed to the model. */
+export interface McpResource {
+	uri: string;
+	name: string;
+	title?: string;
+	description?: string;
+	mimeType?: string;
+}
+
+/** Stop paging a runaway resource list here. */
+const MAX_LISTED_RESOURCES = 1000;
+
+/** List a server's resources (all pages, capped). Empty without asking when it lacks the capability. */
+export async function listServerResources(client: Client): Promise<McpResource[]> {
+	if (!client.getServerCapabilities()?.resources) return [];
+	const out: McpResource[] = [];
+	let cursor: string | undefined;
+	do {
+		const page = await client.listResources(cursor ? { cursor } : undefined);
+		for (const r of page.resources) {
+			out.push({
+				uri: r.uri,
+				name: r.name,
+				...(r.title ? { title: r.title } : {}),
+				...(r.description ? { description: r.description } : {}),
+				...(r.mimeType ? { mimeType: r.mimeType } : {}),
+			});
+		}
+		cursor = page.nextCursor;
+	} while (cursor && out.length < MAX_LISTED_RESOURCES);
+	return out.slice(0, MAX_LISTED_RESOURCES);
+}
+
+/**
+ * Read one resource into pi content: text stays text, an image blob becomes an image
+ * block, and other binary content a compact placeholder (never a base64 dump). The
+ * same size caps as a tool result apply, including the full-text spill file.
+ */
+export async function readServerResource(
+	client: Client,
+	server: string,
+	uri: string,
+): Promise<(TextContent | ImageContent)[]> {
+	const { contents } = await client.readResource({ uri });
+	const blocks = contents.map((c) => {
+		if ("text" in c && typeof c.text === "string") return { type: "text", text: c.text };
+		if ("blob" in c && typeof c.blob === "string" && c.mimeType?.startsWith("image/")) {
+			return { type: "image", data: c.blob, mimeType: c.mimeType };
+		}
+		return { type: "text", text: `[mcp: omitted binary resource ${c.uri}${c.mimeType ? ` (${c.mimeType})` : ""}]` };
+	});
+	return capContent(mapContent(blocks), server, "resource");
 }
