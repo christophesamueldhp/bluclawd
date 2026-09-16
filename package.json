@@ -26,10 +26,13 @@
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "0.0.76",
     "@modelcontextprotocol/sdk": "1.29.0",
+    "@mozilla/readability": "0.6.0",
     "@silvia-odwyer/photon-node": "0.3.4",
     "diff": "8.0.4",
+    "linkedom": "0.18.13",
     "proper-lockfile": "4.1.2",
-    "undici": "8.9.0"
+    "undici": "8.9.0",
+    "unpdf": "1.8.1"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

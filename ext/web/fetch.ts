@@ -38,7 +38,8 @@ import {
 	VERSION,
 } from "@earendil-works/pi-coding-agent";
 import { Agent, fetch as undiciFetch } from "undici";
-import { htmlToMarkdown } from "./html-to-md.ts";
+import { pdfToText } from "./pdf.ts";
+import { readableMarkdown } from "./readable.ts";
 
 const USER_AGENT = `pi/${VERSION}`;
 // Prefer prose the converter handles well; text/markdown is what a growing number
@@ -64,6 +65,10 @@ export interface WebfetchResult {
 	redirectedTo?: string;
 	/** Set when the page was too long to inline: `text` is its head, this file holds all of it. */
 	fullTextPath?: string;
+	/** Our own pointer to `fullTextPath`, kept apart from `text` so the page cannot forge one. */
+	note?: string;
+	/** An image response, for the tool to attach; `text` is empty. Never cached. */
+	image?: { bytes: Uint8Array; mimeType: string };
 }
 
 /**
@@ -72,7 +77,7 @@ export interface WebfetchResult {
  * a footer pointing `read` at the rest. The network cap (`maxBytes`) is a
  * separate, much larger bound on what is downloaded.
  */
-function inlineOrSpill(text: string): { text: string; fullTextPath?: string } {
+function inlineOrSpill(text: string): { text: string; fullTextPath?: string; note?: string } {
 	const head = truncateHead(text);
 	if (!head.truncated) return { text };
 	const fullTextPath = join(tmpdir(), `bluclawd-webfetch-${randomBytes(8).toString("hex")}.md`);
@@ -80,13 +85,15 @@ function inlineOrSpill(text: string): { text: string; fullTextPath?: string } {
 	const size = formatSize(head.totalBytes);
 	if (head.firstLineExceedsLimit) {
 		return {
-			text: `${Buffer.from(text).subarray(0, INLINE_MAX_BYTES).toString()}\n\n[webfetch: page is one ${size} line; showing its start. Full content: ${fullTextPath} — search it with grep.]`,
+			text: Buffer.from(text).subarray(0, INLINE_MAX_BYTES).toString(),
 			fullTextPath,
+			note: `[webfetch: page is one ${size} line; showing its start. Full content: ${fullTextPath} — search it with grep.]`,
 		};
 	}
 	return {
-		text: `${head.content}\n\n[webfetch: showing lines 1-${head.outputLines} of ${head.totalLines} (${size} total). Full content: ${fullTextPath} — use read with offset=${head.outputLines + 1} to continue.]`,
+		text: head.content,
 		fullTextPath,
+		note: `[webfetch: showing lines 1-${head.outputLines} of ${head.totalLines} (${size} total). Full content: ${fullTextPath} — use read with offset=${head.outputLines + 1} to continue.]`,
 	};
 }
 
@@ -381,9 +388,17 @@ export async function fetchGuardedRedirects(
 
 // ── content handling ────────────────────────────────────────────────────────
 
-function classifyContentType(contentType: string): "html" | "text" | "binary" {
+/** Image types a model can take as an attachment. */
+const IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+function classifyContentType(contentType: string, url: URL): "html" | "text" | "pdf" | "image" | "binary" {
 	const type = contentType.split(";")[0].trim().toLowerCase();
 	if (type === "text/html" || type === "application/xhtml+xml") return "html";
+	if (type === "application/pdf") return "pdf";
+	// Plenty of hosts serve PDFs as a generic download.
+	if ((type === "application/octet-stream" || type === "binary/octet-stream") && /\.pdf$/i.test(url.pathname))
+		return "pdf";
+	if (IMAGE_TYPES.has(type)) return "image";
 	if (type === "") return "text"; // missing content-type: assume text (best-effort)
 	if (type.startsWith("text/")) return "text";
 	if (type === "application/json" || type.endsWith("+json")) return "text";
@@ -540,7 +555,7 @@ export async function webFetch(
 			throw new Error(`webfetch: ${status} for ${url.href}`);
 		}
 		const contentType = res.headers.get("content-type") ?? "";
-		const kind = classifyContentType(contentType);
+		const kind = classifyContentType(contentType, url);
 		if (kind === "binary") {
 			// Don't dump binary; report a short note. Drain the body so the socket frees.
 			const size = Number(res.headers.get("content-length") ?? 0);
@@ -553,9 +568,36 @@ export async function webFetch(
 				text: `[webfetch: non-text content ${contentType || "unknown"}${size ? `, ${size} bytes` : ""}]`,
 			};
 		}
+		if (kind === "pdf" || kind === "image") {
+			// A document or image cut short cannot be decoded, and both run large: read
+			// up to the hard ceiling unless the caller chose a cap.
+			const binaryCap = opts.maxBytes === undefined ? MAX_ALLOWED_BYTES : cap;
+			const { bytes, truncated } = await readCappedBody(res, binaryCap);
+			const base = { url: url.href, contentType, bytes: bytes.length, truncated: false };
+			if (truncated) {
+				const what = kind === "pdf" ? "PDF" : "image";
+				return {
+					...base,
+					text: `[webfetch: ${what} is larger than ${binaryCap} bytes; pass a larger maxBytes (up to ${MAX_ALLOWED_BYTES}) to read it]`,
+				};
+			}
+			if (kind === "image")
+				return { ...base, text: "", image: { bytes, mimeType: contentType.split(";")[0].trim() } };
+			let pdfText: string;
+			try {
+				pdfText = await pdfToText(bytes);
+			} catch (err) {
+				throw new Error(
+					`webfetch: could not read the PDF at ${url.href}: ${err instanceof Error ? err.message : err}`,
+				);
+			}
+			const result: WebfetchResult = { ...base, ...inlineOrSpill(pdfText) };
+			cacheSet(cacheKey, result);
+			return result;
+		}
 		const { bytes, truncated } = await readCappedBody(res, cap);
 		const decoded = decodeBody(bytes, contentType);
-		let text = kind === "html" ? htmlToMarkdown(decoded) : decoded;
+		let text = kind === "html" ? await readableMarkdown(decoded) : decoded;
 		if (truncated) text += `\n\n[webfetch: output truncated at ${cap} bytes]`;
 		const result: WebfetchResult = {
 			url: url.href,

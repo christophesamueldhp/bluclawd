@@ -56,4 +56,14 @@ describe("htmlToMarkdown", () => {
 		);
 		expect(htmlToMarkdown("<head><title>T</title></head><h1>Main</h1>")).toBe("# Main");
 	});
+	it("removes a nested chrome element whole, not just up to its first inner close tag", () => {
+		expect(htmlToMarkdown("<aside>a<aside>b</aside>c</aside><p>keep</p>")).toBe("keep");
+	});
+	it("does not leak attribute text when a quoted attribute value contains >", () => {
+		expect(
+			htmlToMarkdown(
+				`<p><span data-mw='{"wt":"a > b"}' title="x>y">text</span> <a href="/q?a>b" data-j='{"k":">"}'>go</a></p>`,
+			),
+		).toBe("text [go](/q?a>b)");
+	});
 });

@@ -74,7 +74,22 @@ export function htmlToMarkdown(html: string): string {
 
 		// 1. Drop comments and elements whose content is not prose.
 		s = s.replace(/<!--[\s\S]*?-->/g, "");
-		s = s.replace(/<(script|style|head|nav|noscript|template|svg|footer|aside|iframe)\b[^>]*>[\s\S]*?<\/\1>/gi, "");
+		// Every tag pattern below reads a tag as `<name ...>` up to the first `>`, which
+		// a quoted attribute value may contain (Wikipedia's JSON data-mw does). Escape
+		// angle brackets inside quoted values first; step 9 decodes them back.
+		s = s.replace(/<[a-zA-Z][^\s/>]*(?:[^>"']|"[^"]*"|'[^']*')*>/g, (tag) =>
+			tag.replace(/"[^"]*"|'[^']*'/g, (value) => value.replace(/</g, "&lt;").replace(/>/g, "&gt;")),
+		);
+		// script/style end at their first close tag (HTML parses their content as raw
+		// text); the others can nest, so remove innermost-first until nothing changes —
+		// a non-greedy match would stop at an inner close tag and leak the outer tail.
+		s = s.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, "");
+		const chrome = /<(head|nav|noscript|template|svg|footer|aside|iframe)\b[^>]*>(?:(?!<\1\b)[\s\S])*?<\/\1>/gi;
+		for (let pass = 0; pass < 32; pass++) {
+			const next = s.replace(chrome, "");
+			if (next === s) break;
+			s = next;
+		}
 
 		// 2. Protect code blocks: convert them now and stash the result behind a
 		//    sentinel placeholder so the later inline/block rules leave them alone.
