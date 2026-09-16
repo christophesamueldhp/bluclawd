@@ -28,6 +28,7 @@ import memory from "./memory/index.ts";
 import permissions from "./permissions/index.ts";
 import plugin from "./plugin/index.ts";
 import sandbox from "./sandbox/index.ts";
+import shell from "./shell/index.ts";
 import statusline from "./statusline/index.ts";
 import subagents from "./subagents/index.ts";
 import web from "./web/index.ts";
@@ -48,5 +49,6 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "fleet", factory: fleet },
 		{ name: "help", factory: help },
 		{ name: "plugin", factory: plugin },
+		{ name: "shell", factory: shell },
 	];
 }

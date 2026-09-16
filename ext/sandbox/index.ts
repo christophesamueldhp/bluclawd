@@ -7,8 +7,10 @@
  * when trusted) or --sandbox; --no-sandbox wins over both. Replaces the
  * built-in bash tool with a variant whose operations wrap each command via
  * SandboxManager.wrapWithSandbox before delegating to pi's standard local
- * shell backend — foreground, background (run_in_background), and user `!`
+ * shell backend — foreground, background (run_in_background), and monitor
  * commands all flow through the same operations seam, so all are sandboxed.
+ * Commands the user types (`!` and bash mode) run outside the sandbox, as in
+ * Claude Code: the sandbox confines what the model runs, not the user.
  *
  * Claude Code's escape hatches, both settings-driven: `excludedCommands` (rule
  * patterns that always run outside) and the bash tool's
@@ -20,8 +22,8 @@
  * Failure posture: if enabled but initialization fails (missing bubblewrap,
  * unsupported platform, ...), bash falls back to UNSANDBOXED execution with a
  * loud status chip and an error notice — unless `sandbox.failIfUnavailable` is
- * set, in which case bash refuses to run at all: the tool, background jobs and
- * user `!` commands each check strictRefusalReason. The runtime dependency is
+ * set, in which case the model's bash refuses to run at all: the tool,
+ * background jobs and the monitor each check strictRefusalReason. The runtime dependency is
  * imported lazily so disabled sessions pay no startup cost.
  */
 
@@ -266,7 +268,7 @@ export function factory(pi: ExtensionAPI): void {
 		},
 	});
 
-	// The monitor is the fourth shell path (tool, background job, user `!`,
+	// The monitor is the third shell path the model drives (tool, background job,
 	// monitor): same refusal, same operations, so the sandbox covers it too.
 	pi.registerTool(
 		createMonitorTool({
@@ -276,19 +278,6 @@ export function factory(pi: ExtensionAPI): void {
 			refuse: () => strictRefusalReason(config, isSandboxActive(), lastError),
 		}),
 	);
-
-	pi.on("user_bash", (event) => {
-		// A user `!` command is the other way a shell runs, and it does NOT go through
-		// the bash tool's execute — so strict has to refuse here too, or `!` would be a
-		// hole straight around it. `user_bash` takes a full result replacement, which is
-		// how the refusal is delivered without running anything.
-		const refusal = strictRefusalReason(config, isSandboxActive(), lastError);
-		if (refusal) {
-			return { result: { output: refusal, exitCode: 1, cancelled: false, truncated: false } };
-		}
-		if (!isSandboxActive()) return;
-		return { operations: operationsFor(event.command) };
-	});
 
 	function publishPosture(): void {
 		publishSandboxPosture({

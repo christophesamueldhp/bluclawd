@@ -54,11 +54,17 @@ import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
-import { getAgentDir, readStoredCredential, SettingsManager } from "@earendil-works/pi-coding-agent";
+import {
+	createLocalBashOperations,
+	getAgentDir,
+	readStoredCredential,
+	SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { stripAnsi } from "../_shared/ansi.ts";
 import { execWithIo } from "../_shared/exec.ts";
 import * as forkSettings from "../_shared/settings.ts";
+import { notifyingWhenSettled, onWorkingTreeChanged } from "../_shared/working-tree.ts";
 import { COST_CURRENCIES, type CostCurrency, CurrencyRates, formatCost, normalizeCurrency } from "./currency.ts";
 import {
 	CcStatuslineFooter,
@@ -183,6 +189,9 @@ const currencyRates = new CurrencyRates({
 });
 let costCurrency: CostCurrency = "USD";
 
+/** The `shellPath` setting, for the user `!` commands this extension runs (see the user_bash handler). */
+let userShellPath: string | undefined;
+
 function disposeFooterRuntime(): void {
 	footerRuntime?.git.dispose();
 	for (const source of footerRuntime?.sources ?? []) source.poller.dispose();
@@ -204,6 +213,10 @@ function installFooter(ctx: ExtensionContext): void {
 			footerData.onBranchChange(repaint),
 			currencyRates.onChange(repaint),
 		];
+		onWorkingTreeChanged(() => {
+			git.invalidateChanges();
+			repaint();
+		});
 		const footer = new CcStatuslineFooter(
 			{
 				ctx: () => latestCtx,
@@ -220,6 +233,7 @@ function installFooter(ctx: ExtensionContext): void {
 		return Object.assign(footer, {
 			dispose: () => {
 				for (const off of unsubscribe) off();
+				onWorkingTreeChanged(undefined);
 			},
 		});
 	});
@@ -424,11 +438,11 @@ export function factory(pi: ExtensionAPI): void {
 		// /reload pick up statusline setting changes. Trust-aware settings read,
 		// same as refresh().
 		stopIntervalTimer();
-		const statusline = forkSettings.statusline(
-			SettingsManager.create(ctx.cwd, undefined, {
-				projectTrusted: ctx.isProjectTrusted(),
-			}),
-		);
+		const settingsManager = SettingsManager.create(ctx.cwd, undefined, {
+			projectTrusted: ctx.isProjectTrusted(),
+		});
+		const statusline = forkSettings.statusline(settingsManager);
+		userShellPath = settingsManager.getShellPath();
 		setSubscriptionProviders(statusline?.subscriptionProviders ?? []);
 		const currency = statusline?.currency === undefined ? "USD" : normalizeCurrency(statusline.currency);
 		if (!currency) {
@@ -454,6 +468,12 @@ export function factory(pi: ExtensionAPI): void {
 	pi.on("tool_result", (event) => {
 		if (!READ_ONLY_TOOLS.has(event.toolName)) footerRuntime?.git.invalidateChanges();
 	});
+	// A user `!` command runs where pi would run it anyway (same local backend, the
+	// configured shell); owning its operations is only how the footer learns it
+	// finished — `user_bash` itself fires before the command starts.
+	pi.on("user_bash", () => ({
+		operations: notifyingWhenSettled(createLocalBashOperations({ shellPath: userShellPath })),
+	}));
 	pi.on("message_update", (event) => {
 		streamingUsage = streamingContextUsage(event.message) ?? streamingUsage;
 	});

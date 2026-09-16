@@ -9,19 +9,20 @@ import { recordExtensions } from "../scripts/probe-extensions.ts";
  */
 const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts: number; events: number }> = {
 	permissions: { commands: ["mode", "permissions"], tools: [], shortcuts: 1, events: 3 },
-	statusline: { commands: ["usage"], tools: [], shortcuts: 0, events: 6 },
+	statusline: { commands: ["usage"], tools: [], shortcuts: 0, events: 7 },
 	memory: { commands: ["memory"], tools: ["memory"], shortcuts: 0, events: 2 },
 	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 3 },
 	subagents: { commands: ["agents"], tools: ["task"], shortcuts: 0, events: 2 },
 	web: { commands: ["web"], tools: ["get_search_content", "source_check", "webfetch", "websearch"], shortcuts: 0, events: 0 },
 	mcp: { commands: ["mcp"], tools: [], shortcuts: 0, events: 4 },
-	sandbox: { commands: ["sandbox"], tools: ["bash", "monitor"], shortcuts: 0, events: 3 },
+	sandbox: { commands: ["sandbox"], tools: ["bash", "monitor"], shortcuts: 0, events: 2 },
 	"background-bash": { commands: ["tasks"], tools: ["bash_output", "kill_bash"], shortcuts: 0, events: 0 },
 	branding: { commands: ["theme"], tools: [], shortcuts: 0, events: 1 },
 	diagnostics: { commands: ["context", "status"], tools: [], shortcuts: 0, events: 0 },
 	fleet: { commands: ["fleet"], tools: [], shortcuts: 0, events: 7 },
 	help: { commands: ["help"], tools: [], shortcuts: 0, events: 0 },
 	plugin: { commands: ["plugin"], tools: [], shortcuts: 0, events: 0 },
+	shell: { commands: ["bash-mode"], tools: [], shortcuts: 1, events: 2 },
 };
 
 describe("bluclawd extension registration", () => {
