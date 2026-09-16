@@ -284,7 +284,10 @@ describe("tool surface", () => {
 			string,
 			{ execute: (...args: unknown[]) => Promise<{ content: Array<{ text: string }> }> }
 		>();
-		const pi = { registerTool: (def: { name: string; execute: unknown }) => tools.set(def.name, def as never) };
+		const pi = {
+			registerTool: (def: { name: string; execute: unknown }) => tools.set(def.name, def as never),
+			registerCommand: () => {},
+		};
 		factory(pi as never);
 		return tools;
 	}
