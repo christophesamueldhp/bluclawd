@@ -17,7 +17,10 @@
  */
 
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Usage } from "@earendil-works/pi-ai";
 import {
+	calculateContextTokens,
 	type ExtensionContext,
 	estimateTokens,
 	sessionEntryToContextMessages,
@@ -25,6 +28,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { sharedRef } from "../_shared/global-state.ts";
+import { type CostCurrency, formatCost } from "./currency.ts";
 import type { GitChangeCounts } from "./git-info.ts";
 import type { PlanUsage, UsageError } from "./usage-providers.ts";
 
@@ -38,6 +42,10 @@ export interface FooterSources {
 	/** Every plan-usage source that currently has data, in display order. */
 	planUsage(): readonly PlanUsage[];
 	extensionStatuses(): ReadonlyMap<string, string>;
+	/** Usage of the assistant reply currently streaming, if it reports any. */
+	streamingUsage(): Usage | undefined;
+	/** Currency for the cost figure and its USD rate (null until known). */
+	currency(): { code: CostCurrency; rate: number | null };
 }
 
 /** ccstatusline colors: bright 16-color ANSI SGR codes with `globalBold`. */
@@ -50,6 +58,7 @@ const SGR = {
 	blackBright: 90,
 	yellowBright: 93,
 	yellow: 33,
+	redBright: 91,
 } as const;
 
 function paint(color: keyof typeof SGR, text: string): string {
@@ -74,6 +83,13 @@ export function makeSliderBar(percent: number, width: number = SLIDER_WIDTH): st
 	const clamped = Math.max(0, Math.min(100, percent));
 	const filled = Math.round((clamped / 100) * width);
 	return "▓".repeat(filled) + "░".repeat(width - filled);
+}
+
+/** Context slider color: yellow once compaction is worth planning for, red once it is close. */
+export function contextSliderColor(percent: number): "whiteBright" | "yellowBright" | "redBright" {
+	if (percent > 90) return "redBright";
+	if (percent > 70) return "yellowBright";
+	return "whiteBright";
 }
 
 /** Format a duration like ccstatusline's usage reset timers: `2hr 30m` / `1d 3hr` / `45m`. */
@@ -179,16 +195,33 @@ export type DisplayContextUsage = { tokens: number; percent: number; approximate
 let contextEstimate: { key: string; usage: DisplayContextUsage } | undefined;
 
 /**
+ * The usage an in-flight assistant message reports, when it can stand in for
+ * pi's figure: pi counts a reply only once it has finished, so while one streams
+ * its own usage is the newer number. Errored and aborted replies, and providers
+ * that report nothing until the end, leave pi's figure in charge.
+ */
+export function streamingContextUsage(message: AgentMessage): Usage | undefined {
+	if (message.role !== "assistant") return undefined;
+	if (message.stopReason === "error" || message.stopReason === "aborted") return undefined;
+	return calculateContextTokens(message.usage) > 0 ? message.usage : undefined;
+}
+
+/**
  * Context usage for the slider and the token counter. After a compaction pi
  * reports the count as unknown until the next response, which used to blank
  * both widgets right when the user wants to see how much the compaction freed.
  * Instead, estimate the compacted context — system prompt plus the messages
  * still in context, at pi's own chars/4 rate — and mark it approximate. Cached
  * per session leaf because walking the context on every render is not free.
+ * A reply that is still streaming outranks both (see streamingContextUsage).
  */
-export function resolveContextUsage(ctx: ExtensionContext): DisplayContextUsage | undefined {
+export function resolveContextUsage(ctx: ExtensionContext, streaming?: Usage): DisplayContextUsage | undefined {
 	const usage = ctx.getContextUsage();
 	if (!usage) return undefined;
+	if (streaming) {
+		const tokens = calculateContextTokens(streaming);
+		return { tokens, percent: (tokens / usage.contextWindow) * 100, approximate: false };
+	}
 	if (usage.tokens !== null && usage.percent !== null) {
 		return { tokens: usage.tokens, percent: usage.percent, approximate: false };
 	}
@@ -306,10 +339,10 @@ export class CcStatuslineFooter implements Component {
 		if (model?.reasoning) {
 			left.push(pad(paint("magentaBright", ctx?.thinkingLevel || "off")));
 		}
-		// context-bar widget: brightWhite, "slider-only" display (bare bar, no percent)
-		const contextUsage = ctx && resolveContextUsage(ctx);
+		// context-bar widget: brightWhite (yellow past 70%, red past 90%), "slider-only" display (bare bar, no percent)
+		const contextUsage = ctx && resolveContextUsage(ctx, this.sources.streamingUsage());
 		if (contextUsage) {
-			left.push(pad(paint("whiteBright", makeSliderBar(contextUsage.percent))));
+			left.push(pad(paint(contextSliderColor(contextUsage.percent), makeSliderBar(contextUsage.percent))));
 		}
 
 		const right: string[] = [];
@@ -383,10 +416,12 @@ export class CcStatuslineFooter implements Component {
 		// subscription the amount is what the tokens would have cost at API rates,
 		// otherwise it is what the session actually costs. With no model there is no
 		// billing to name, so the bare figure shows only once something was spent.
+		const { code, rate } = this.sources.currency();
+		const cost = formatCost(totals.cost, code, rate);
 		if (ctx.model) {
-			parts.push(`$${totals.cost.toFixed(3)} (${isUsingSubscription(ctx) ? "subscription" : "per token"})`);
+			parts.push(`${cost} (${isUsingSubscription(ctx) ? "subscription" : "per token"})`);
 		} else if (totals.cost) {
-			parts.push(`$${totals.cost.toFixed(3)}`);
+			parts.push(cost);
 		}
 		if (totals.input) parts.push(`↑${formatTokens(totals.input)}`);
 		if (totals.output) parts.push(`↓${formatTokens(totals.output)}`);

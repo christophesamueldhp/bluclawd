@@ -50,13 +50,16 @@
  * guard, so a slow command coalesces instead of stacking.
  */
 
+import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
-import { readStoredCredential, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, readStoredCredential, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { stripAnsi } from "../_shared/ansi.ts";
 import { execWithIo } from "../_shared/exec.ts";
 import * as forkSettings from "../_shared/settings.ts";
+import { COST_CURRENCIES, type CostCurrency, CurrencyRates, formatCost, normalizeCurrency } from "./currency.ts";
 import {
 	CcStatuslineFooter,
 	ContextTokenCount,
@@ -65,6 +68,7 @@ import {
 	resolveContextUsage,
 	type SessionTotals,
 	setSubscriptionProviders,
+	streamingContextUsage,
 	sumSessionUsage,
 } from "./footer.ts";
 import { GitInfo } from "./git-info.ts";
@@ -169,6 +173,16 @@ function activePlanUsage(sources: readonly PlanUsageSource[]): PlanUsage[] {
  */
 let latestCtx: ExtensionContext | undefined;
 
+/** Usage of the reply streaming right now; cleared when it ends (see streamingContextUsage). */
+let streamingUsage: Usage | undefined;
+
+/** Daily USD rates for the cost figure; one table per process, shared by every session. */
+const currencyRates = new CurrencyRates({
+	cachePath: join(getAgentDir(), "bluclawd", "currency-rates.json"),
+	fetch: (input, init) => fetch(input, init),
+});
+let costCurrency: CostCurrency = "USD";
+
 function disposeFooterRuntime(): void {
 	footerRuntime?.git.dispose();
 	for (const source of footerRuntime?.sources ?? []) source.poller.dispose();
@@ -188,6 +202,7 @@ function installFooter(ctx: ExtensionContext): void {
 			git.onChange(repaint),
 			...sources.map((source) => source.poller.onChange(repaint)),
 			footerData.onBranchChange(repaint),
+			currencyRates.onChange(repaint),
 		];
 		const footer = new CcStatuslineFooter(
 			{
@@ -197,6 +212,8 @@ function installFooter(ctx: ExtensionContext): void {
 				gitChanges: () => git.getChanges(),
 				planUsage: () => activePlanUsage(sources),
 				extensionStatuses: () => footerData.getExtensionStatuses(),
+				streamingUsage: () => streamingUsage,
+				currency: () => ({ code: costCurrency, rate: currencyRates.rate(costCurrency) }),
 			},
 			theme,
 		);
@@ -208,7 +225,7 @@ function installFooter(ctx: ExtensionContext): void {
 	});
 	ctx.ui.setWidget(
 		"statusline-context-tokens",
-		(_tui, theme) => new ContextTokenCount(() => latestCtx && resolveContextUsage(latestCtx), theme),
+		(_tui, theme) => new ContextTokenCount(() => latestCtx && resolveContextUsage(latestCtx, streamingUsage), theme),
 		{ placement: "aboveEditor" },
 	);
 
@@ -224,6 +241,8 @@ export interface UsageReport {
 	plans?: PlanUsage[];
 	/** Hints for the sources that had no data, printed when nothing is available. */
 	unavailable?: string[];
+	/** Absent on entries written before currencies existed: they render in USD. */
+	currency?: { code: CostCurrency; rate: number | null };
 }
 
 /**
@@ -243,7 +262,9 @@ export function formatUsageReport(
 	// billed, since a subscription total is a notional API-rate equivalent and a
 	// per-token one is real spend. No model, no billing to name.
 	const billing = report.model ? dim(report.subscription ? " (subscription)" : " (per token)") : "";
-	lines.push(`${dim("Cost:")} $${t.cost.toFixed(4)}${billing}`);
+	lines.push(
+		`${dim("Cost:")} ${formatCost(t.cost, report.currency?.code ?? "USD", report.currency?.rate ?? 1, 4)}${billing}`,
+	);
 	lines.push(
 		`${dim("Tokens:")} ↑${formatTokens(t.input)} in · ↓${formatTokens(t.output)} out · cache read ${formatTokens(t.cacheRead)} · cache write ${formatTokens(t.cacheWrite)}`,
 	);
@@ -394,6 +415,7 @@ export function factory(pi: ExtensionAPI): void {
 	};
 
 	pi.on("session_start", (_event, ctx) => {
+		streamingUsage = undefined;
 		if (ctx.hasUI && ctx.mode === "tui") installFooter(ctx);
 		fire(ctx);
 
@@ -408,6 +430,14 @@ export function factory(pi: ExtensionAPI): void {
 			}),
 		);
 		setSubscriptionProviders(statusline?.subscriptionProviders ?? []);
+		const currency = statusline?.currency === undefined ? "USD" : normalizeCurrency(statusline.currency);
+		if (!currency) {
+			ctx.ui.notify(
+				`statusline.currency "${statusline?.currency}" is not supported, showing USD. Supported: ${COST_CURRENCIES.join(", ")}.`,
+				"warning",
+			);
+		}
+		costCurrency = currency ?? "USD";
 		const intervalMs = statusline?.intervalMs;
 		if (!statusline?.command?.trim() || typeof intervalMs !== "number" || !Number.isFinite(intervalMs)) return;
 		intervalTimer = setInterval(() => fire(ctx), Math.max(intervalMs, MIN_INTERVAL_MS));
@@ -423,6 +453,12 @@ export function factory(pi: ExtensionAPI): void {
 	// render that shows the tool result then re-reads the change counts.
 	pi.on("tool_result", (event) => {
 		if (!READ_ONLY_TOOLS.has(event.toolName)) footerRuntime?.git.invalidateChanges();
+	});
+	pi.on("message_update", (event) => {
+		streamingUsage = streamingContextUsage(event.message) ?? streamingUsage;
+	});
+	pi.on("message_end", () => {
+		streamingUsage = undefined;
 	});
 
 	pi.registerEntryRenderer<UsageReport>("bluclawd:usage", (entry, _options, theme) => {
@@ -442,6 +478,7 @@ export function factory(pi: ExtensionAPI): void {
 			unavailable: (footerRuntime?.sources ?? [])
 				.filter((source) => source.usage() === null)
 				.map((source) => source.hint),
+			currency: { code: costCurrency, rate: currencyRates.rate(costCurrency) },
 		});
 	};
 	pi.registerCommand("usage", {

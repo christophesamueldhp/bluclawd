@@ -14,6 +14,7 @@ import {
 	makeSliderBar,
 	resolveContextUsage,
 	setSubscriptionProviders,
+	streamingContextUsage,
 } from "../ext/statusline/footer.ts";
 import { GitInfo, parseDiffShortStat, parseRemoteOwner } from "../ext/statusline/git-info.ts";
 import {
@@ -157,6 +158,8 @@ describe("CcStatuslineFooter", () => {
 		gitChanges: () => ({ insertions: 4, deletions: 2 }),
 		planUsage: () => [],
 		extensionStatuses: () => new Map(),
+		streamingUsage: () => undefined,
+		currency: () => ({ code: "USD", rate: 1 }),
 		...overrides,
 	});
 
@@ -169,6 +172,31 @@ describe("CcStatuslineFooter", () => {
 		expect(plain.endsWith(" owner  ⎇ main  (+4,-2)  ~/proj ")).toBe(true);
 		expect(rest.map(stripAnsi)).toEqual([" $0.000 (per token) "]);
 		vi.unstubAllEnvs();
+	});
+
+	it("colors the context slider yellow past 70% and red past 90%", () => {
+		const line1 = (percent: number) =>
+			new CcStatuslineFooter(
+				sources({
+					ctx: () =>
+						({
+							...sources().ctx(),
+							getContextUsage: () => ({ percent, tokens: percent * 10, contextWindow: 1000 }),
+						}) as never,
+				}),
+				fakeTheme,
+			).render(100)[0];
+		expect(line1(70)).toContain("\x1b[1;97m▓▓▓▓▓▓▓░░░");
+		expect(line1(71)).toContain("\x1b[1;93m▓▓▓▓▓▓▓░░░");
+		expect(line1(90)).toContain("\x1b[1;93m▓▓▓▓▓▓▓▓▓░");
+		expect(line1(91)).toContain("\x1b[1;91m▓▓▓▓▓▓▓▓▓░");
+	});
+
+	it("shows the cost in the configured currency with the billing label", () => {
+		const lines = new CcStatuslineFooter(sources({ currency: () => ({ code: "IDR", rate: 17000 }) }), fakeTheme)
+			.render(100)
+			.map(stripAnsi);
+		expect(lines[1]).toBe(" Rp0 (per token) ");
 	});
 
 	it("shows the usage line only when a provider has data, and statuses last", () => {
@@ -281,7 +309,7 @@ describe("CcStatuslineFooter", () => {
 	});
 });
 
-describe("context usage after compaction", () => {
+describe("context usage", () => {
 	const fakeTheme = { fg: (_c: string, s: string) => s } as unknown as ConstructorParameters<
 		typeof ContextTokenCount
 	>[1];
@@ -298,6 +326,30 @@ describe("context usage after compaction", () => {
 			getLeafId: () => leafId,
 			buildContextEntries: vi.fn(() => entries),
 		},
+	});
+
+	const usage = (tokens: number) => ({
+		input: tokens,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: tokens,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	});
+
+	it("prefers a streaming reply's usage over pi's finished-message figure", () => {
+		const ctx = { getContextUsage: () => ({ tokens: 500, contextWindow: 1000, percent: 50 }) } as never;
+		expect(resolveContextUsage(ctx, usage(650) as never)).toEqual({ tokens: 650, percent: 65, approximate: false });
+	});
+
+	it("takes usage only from a live assistant message that reports some", () => {
+		const assistant = (over: object) =>
+			({ role: "assistant", stopReason: "stop", usage: usage(10), ...over }) as never;
+		expect(streamingContextUsage(assistant({}))).toEqual(usage(10));
+		expect(streamingContextUsage(assistant({ stopReason: "aborted" }))).toBeUndefined();
+		expect(streamingContextUsage(assistant({ stopReason: "error" }))).toBeUndefined();
+		expect(streamingContextUsage(assistant({ usage: usage(0) }))).toBeUndefined();
+		expect(streamingContextUsage({ role: "user", content: [], timestamp: 0 } as never)).toBeUndefined();
 	});
 
 	it("passes pi's own figure through untouched when it is known", () => {
@@ -337,6 +389,8 @@ describe("context usage after compaction", () => {
 				gitChanges: () => null,
 				planUsage: () => [],
 				extensionStatuses: () => new Map(),
+				streamingUsage: () => undefined,
+				currency: () => ({ code: "USD", rate: 1 }),
 			},
 			fakeTheme,
 		);

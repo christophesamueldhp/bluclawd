@@ -9,7 +9,7 @@ import { recordExtensions } from "../scripts/probe-extensions.ts";
  */
 const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts: number; events: number }> = {
 	permissions: { commands: ["mode", "permissions"], tools: [], shortcuts: 1, events: 3 },
-	statusline: { commands: ["usage"], tools: [], shortcuts: 0, events: 4 },
+	statusline: { commands: ["usage"], tools: [], shortcuts: 0, events: 6 },
 	memory: { commands: ["memory"], tools: ["memory"], shortcuts: 0, events: 2 },
 	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 3 },
 	subagents: { commands: ["agents"], tools: ["task"], shortcuts: 0, events: 2 },

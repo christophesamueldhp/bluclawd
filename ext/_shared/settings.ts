@@ -54,6 +54,8 @@ export interface StatuslineSettings {
 	intervalMs?: number;
 	/** Extra provider ids billed by subscription (`(subscription)` in the footer, `/usage`, `/status`); kimi-coding and opencode-go are built in. */
 	subscriptionProviders?: string[];
+	/** Currency of the cost figure in the footer and `/usage`, converted from USD at a daily rate. default: USD */
+	currency?: string;
 }
 
 export interface WebsearchSettings {
