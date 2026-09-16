@@ -151,6 +151,12 @@ const REGEX_META = new Set([".", "+", "^", "$", "{", "}", "(", ")", "|", "[", "]
  * cwd; `decide()` substitutes the cwd instead (see CWD_DEFAULTING_VERBS) so that
  * omitting the argument no longer escapes a path rule.
  */
+/** Every query a websearch call runs: `query` and each of a batch's `queries`. */
+export function searchQueries(input: Record<string, unknown>): string[] {
+	const batch = Array.isArray(input.queries) ? input.queries.filter((q): q is string => typeof q === "string") : [];
+	return typeof input.query === "string" && input.query !== "" ? [input.query, ...batch] : batch;
+}
+
 export function subject(tool: string, input: Record<string, unknown>): string {
 	if (tool === "task") {
 		// Single-mode target; multi-agent calls are decided per agent via
@@ -161,6 +167,7 @@ export function subject(tool: string, input: Record<string, unknown>): string {
 		const m = /^mcp__(.+?)__(.+)$/.exec(tool);
 		return m ? `${m[1]}:${m[2]}` : "";
 	}
+	if (tool === "websearch") return searchQueries(input)[0] ?? "";
 	return tool === "bash" ? String(input.command ?? "") : String(input.path ?? input.url ?? input.query ?? "");
 }
 

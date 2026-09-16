@@ -17,6 +17,7 @@ import type { AgentToolResult, ExtensionAPI, ExtensionContext, InlineExtension }
 import { resizeImage, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import * as forkSettings from "../_shared/settings.ts";
+import { searchQueries } from "../permissions/rules.ts";
 import { registerWebCommand } from "./browser.ts";
 import { webfetchConfig } from "./config.ts";
 import { type WebfetchResult, webFetch } from "./fetch.ts";
@@ -159,8 +160,16 @@ const SourceCheckParams = Type.Object({
 	),
 });
 
+const MAX_BATCH_QUERIES = 10;
+const BATCH_CONCURRENCY = 3;
+
 const WebsearchParams = Type.Object({
-	query: Type.String({ description: "The search query." }),
+	query: Type.Optional(Type.String({ description: "The search query." })),
+	queries: Type.Optional(
+		Type.Array(Type.String(), {
+			description: `Several searches in one call (up to ${MAX_BATCH_QUERIES}, run 3 at a time), e.g. different angles on one question. Each gets its own results section.`,
+		}),
+	),
 	allowed_domains: Type.Optional(
 		Type.Array(Type.String(), { description: "Only include results from these domains (subdomains included)." }),
 	),
@@ -399,20 +408,61 @@ export function factory(pi: ExtensionAPI): void {
 					projectTrusted: ctx.isProjectTrusted(),
 				}),
 			);
-			const routed = await routedSearch({
-				query: params.query,
-				filter,
-				recency: params.recency,
-				signal,
-				settings: ws as RouterSettings | undefined,
-			});
-			if (routed.unconfigured) return { content: [{ type: "text", text: routed.unconfigured }], details: [] };
-			const fellBack = routed.skipped.length > 0 && ((ws as RouterSettings | undefined)?.routing?.length ?? 0) > 1;
-			const via = fellBack ? `\n[websearch: answered by ${routed.provider}; ${routed.skipped.join("; ")}]` : "";
-			return {
-				content: [{ type: "text", text: searchOutput(params.query, routed.results) + via }],
-				details: routed.results,
+			const queries = [...new Set(searchQueries(params))];
+			if (queries.length === 0)
+				return { content: [{ type: "text", text: "Error: give query or queries" }], details: [] };
+			if (queries.length > MAX_BATCH_QUERIES) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Error: at most ${MAX_BATCH_QUERIES} queries per call (got ${queries.length})`,
+						},
+					],
+					details: [],
+				};
+			}
+			const routing = (ws as RouterSettings | undefined)?.routing?.length ?? 0;
+			const runOne = async (query: string): Promise<{ text: string; results: SearchResult[] }> => {
+				const routed = await routedSearch({
+					query,
+					filter,
+					recency: params.recency,
+					signal,
+					settings: ws as RouterSettings | undefined,
+				});
+				if (routed.unconfigured) return { text: routed.unconfigured, results: [] };
+				const via =
+					routed.skipped.length > 0 && routing > 1
+						? `\n[websearch: answered by ${routed.provider}; ${routed.skipped.join("; ")}]`
+						: "";
+				return { text: searchOutput(query, routed.results) + via, results: routed.results };
 			};
+			if (queries.length === 1) {
+				const one = await runOne(queries[0]);
+				return { content: [{ type: "text", text: one.text }], details: one.results };
+			}
+			// One failing query must not sink the batch: it gets its error in its own section.
+			const sections: string[] = new Array(queries.length);
+			const details: SearchResult[] = [];
+			let next = 0;
+			const worker = async () => {
+				while (next < queries.length) {
+					const index = next++;
+					const query = queries[index];
+					try {
+						const one = await runOne(query);
+						sections[index] = `## Query: "${query}"\n\n${one.text}`;
+						details.push(...one.results);
+					} catch (err) {
+						if (signal?.aborted) throw err;
+						sections[index] =
+							`## Query: "${query}"\n\nSearch failed: ${err instanceof Error ? err.message : String(err)}`;
+					}
+				}
+			};
+			await Promise.all(Array.from({ length: Math.min(BATCH_CONCURRENCY, queries.length) }, worker));
+			return { content: [{ type: "text", text: sections.join("\n\n") }], details };
 		},
 	});
 

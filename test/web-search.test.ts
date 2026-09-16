@@ -339,6 +339,32 @@ describe("tool surface", () => {
 		vi.unstubAllEnvs();
 	});
 
+	it("runs a batch of queries as sections, and one failing query does not sink the rest", async () => {
+		const tools = captureTools();
+		const { fetchImpl } = jsonFetch((call) =>
+			sentBody(call).query === "broken"
+				? new Response("down", { status: 500, statusText: "Server Error" })
+				: { results: [{ title: `T ${String(sentBody(call).query)}`, url: "https://t/", text: "s" }] },
+		);
+		vi.stubGlobal("fetch", fetchImpl);
+		vi.stubEnv("EXA_API_KEY", "k");
+		const ctx = { cwd: process.cwd(), isProjectTrusted: () => false };
+		const out = await tools
+			.get("websearch")!
+			.execute("id", { query: "alpha", queries: ["broken", "beta", "alpha"] }, undefined, undefined, ctx);
+		const text = out.content[0].text;
+		expect(text.indexOf('## Query: "alpha"')).toBeLessThan(text.indexOf('## Query: "broken"'));
+		expect(text).toContain("T alpha");
+		expect(text).toContain("T beta");
+		expect(text).toMatch(/## Query: "broken"\n\nSearch failed: .*500/);
+		expect(text.match(/## Query:/g)?.length).toBe(3);
+		const tooMany = await tools
+			.get("websearch")!
+			.execute("id", { queries: Array.from({ length: 11 }, (_, i) => `q${i}`) }, undefined, undefined, ctx);
+		expect(tooMany.content[0].text).toMatch(/at most 10 queries/);
+		vi.unstubAllEnvs();
+	});
+
 	it("keeps third-party text from escaping the untrusted block", () => {
 		const text = renderResults('x" onload="<y>', [
 			{

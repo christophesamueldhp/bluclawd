@@ -48,6 +48,7 @@ import {
 	isProtectedPath,
 	isReadProtectedPath,
 	type Rules,
+	searchQueries,
 	subject,
 	taskAgents,
 } from "./rules.ts";
@@ -170,6 +171,8 @@ function hasExactAllowForEverySegment(rules: Rules, command: string): boolean {
  * `task` is decided PER TARGET AGENT across single/parallel/chain: a deny on ANY target
  * blocks the whole call, and the first asking agent becomes the prompt's subject —
  * otherwise wrapping an agent in parallel mode would walk past its `Task(...)` rule.
+ * A `websearch` batch is decided PER QUERY the same way, so `queries` cannot carry a
+ * query past a `WebSearch(...)` rule; `denyAgent`/`askAgent` then name the query.
  */
 export function decideRules(
 	tool: string,
@@ -177,16 +180,18 @@ export function decideRules(
 	rules: Rules,
 	cwd: string,
 ): { decision: Decision | null; denyAgent?: string; askAgent?: string } {
-	if (tool !== "task") return { decision: decide(rules, tool, input, cwd) };
+	const batch = tool === "websearch" && Array.isArray(input.queries);
+	if (tool !== "task" && !batch) return { decision: decide(rules, tool, input, cwd) };
 
 	let decision: Decision | null = null;
 	let askAgent: string | undefined;
-	for (const agent of taskAgents(input)) {
-		const d = decide(rules, "task", { agent }, cwd);
-		if (d === "deny") return { decision: "deny", denyAgent: agent };
+	const targets = batch ? searchQueries(input) : taskAgents(input);
+	for (const target of targets) {
+		const d = decide(rules, tool, batch ? { query: target } : { agent: target }, cwd);
+		if (d === "deny") return { decision: "deny", denyAgent: target };
 		if (d === "ask" && decision !== "ask") {
 			decision = "ask";
-			askAgent = agent;
+			askAgent = target;
 		} else if (d === "allow" && decision === null) {
 			decision = "allow";
 		}
@@ -251,7 +256,8 @@ export function evaluatePreHook(rawTool: string, input: Record<string, unknown>,
 	// 1. deny rules. (ask/allow are resolved in evaluatePostHook.)
 	const { decision, denyAgent } = decideRules(tool, input, cfg.rules, cfg.cwd);
 	if (decision === "deny") {
-		const subj = tool === "task" && denyAgent !== undefined ? denyAgent : subject(tool, input);
+		const subj =
+			(tool === "task" || tool === "websearch") && denyAgent !== undefined ? denyAgent : subject(tool, input);
 		return {
 			outcome: "block",
 			gate: "deny-rule",
@@ -350,7 +356,12 @@ export function evaluatePostHook(rawTool: string, input: Record<string, unknown>
 	// For `task` the subject is the agent the prompt is about: the one an ask rule named,
 	// or (no rule at all) the first target — `Task()` would label the prompt with nothing
 	// and persist an "Always allow" that matches nothing.
-	const subj = tool === "task" ? (askAgent ?? taskAgents(input)[0] ?? "") : subject(tool, input);
+	const subj =
+		tool === "task"
+			? (askAgent ?? taskAgents(input)[0] ?? "")
+			: tool === "websearch" && askAgent !== undefined
+				? askAgent
+				: subject(tool, input);
 	const exact = exactRule(tool, subj);
 
 	// 4. An ask rule matched. It prompts in EVERY mode — auto included, exactly as Claude

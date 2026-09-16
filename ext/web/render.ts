@@ -71,12 +71,10 @@ export function renderWebfetchResult(
 }
 
 /** Collapsed: `websearch "<query>"`. */
-export function renderWebsearchCall(args: { query?: string }, theme: Theme): Text {
-	return new Text(
-		`${theme.fg("toolTitle", theme.bold("websearch"))} ${theme.fg("muted", `"${args.query ?? ""}"`)}`,
-		0,
-		0,
-	);
+export function renderWebsearchCall(args: { query?: string; queries?: string[] }, theme: Theme): Text {
+	const all = [args.query, ...(args.queries ?? [])].filter((q): q is string => Boolean(q));
+	const shown = all.length > 1 ? `${all.length} queries: ${all.map((q) => `"${q}"`).join(", ")}` : `"${all[0] ?? ""}"`;
+	return new Text(`${theme.fg("toolTitle", theme.bold("websearch"))} ${theme.fg("muted", shown)}`, 0, 0);
 }
 
 /** The human-facing list, without the untrusted-block wrapper or the citation reminder meant for the model. */
