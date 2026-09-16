@@ -21,6 +21,7 @@ import { webfetchConfig } from "./config.ts";
 import { type WebfetchResult, webFetch } from "./fetch.ts";
 import { renderWebfetchCall, renderWebfetchResult, renderWebsearchCall, renderWebsearchResult } from "./render.ts";
 import { defaultEnvFor, exaMcpSearch, type SearchProvider, type SearchResult, webSearch } from "./search.ts";
+import { findLines, getContent, listContent, putContent, sliceLines } from "./store.ts";
 
 interface WebfetchDetails {
 	url: string;
@@ -182,6 +183,7 @@ type WebfetchContent = Array<{ type: "text"; text: string } | { type: "image"; d
 export async function webfetchContent(
 	result: WebfetchResult,
 	model: { input: readonly string[] } | undefined,
+	id?: string,
 ): Promise<WebfetchContent> {
 	if (result.redirectedTo) return [{ type: "text", text: result.text }];
 	if (result.image) {
@@ -203,8 +205,33 @@ export async function webfetchContent(
 		closeTagSafe(result.text, "untrusted-web-content"),
 		"</untrusted-web-content>",
 	].join("\n");
-	return [{ type: "text", text: result.note ? `${block}\n\n${result.note}` : block }];
+	const notes = [result.note, id && `[webfetch: stored as ${id}; get_search_content pages through or searches it]`];
+	const tail = notes.filter(Boolean).join("\n");
+	return [{ type: "text", text: tail ? `${block}\n\n${tail}` : block }];
 }
+
+/** The whole text of a fetch, including what did not fit inline. */
+async function fullText(result: WebfetchResult): Promise<string> {
+	return result.fullTextPath ? await readFile(result.fullTextPath, "utf8").catch(() => result.text) : result.text;
+}
+
+/** Search results into the store, with their id outside the untrusted block. */
+function searchOutput(query: string, results: SearchResult[]): string {
+	const rendered = renderResults(query, results);
+	if (results.length === 0) return rendered;
+	return `${rendered}\n[websearch: stored as ${putContent("search", query, rendered)}]`;
+}
+
+const GetContentParams = Type.Object({
+	id: Type.String({ description: "A content id from webfetch or websearch output (e.g. f3, s2)." }),
+	find: Type.Optional(
+		Type.Array(Type.String(), {
+			description: "Return only lines containing any of these strings (case-insensitive), with 2 lines of context.",
+		}),
+	),
+	offset: Type.Optional(Type.Number({ description: "First line to return, 1-based (default 1)." })),
+	limit: Type.Optional(Type.Number({ description: "Lines to return (default 200)." })),
+});
 
 /**
  * Render search results as explicitly-untrusted content.
@@ -293,18 +320,20 @@ export function factory(pi: ExtensionAPI): void {
 				...(result.redirectedTo ? { redirectedTo: result.redirectedTo } : {}),
 				...(result.fullTextPath ? { fullTextPath: result.fullTextPath } : {}),
 			};
+			const id =
+				result.redirectedTo || result.image ? undefined : putContent("fetch", result.url, await fullText(result));
 			// A redirect notice is not page content, and an image has no text: neither is analyzed.
 			if (params.prompt && !result.redirectedTo && !result.image) {
 				const analysis = await analyzeFetchedPage(ctx, result, params.prompt, signal);
 				if (analysis !== undefined) {
 					return {
-						content: [{ type: "text", text: analysis }],
+						content: [{ type: "text", text: `${analysis}\n\n[webfetch: page stored as ${id}]` }],
 						details: { ...details, analyzed: true },
 					};
 				}
 				// No model/auth or the analysis failed — fall back to the raw content.
 			}
-			return { content: await webfetchContent(result, ctx.model), details };
+			return { content: await webfetchContent(result, ctx.model, id), details };
 		},
 	});
 
@@ -364,7 +393,7 @@ export function factory(pi: ExtensionAPI): void {
 				// the turn with no bound at all.
 				const keylessResults = await exaMcpSearch(params.query, fetch, signal, filter, params.recency);
 				return {
-					content: [{ type: "text", text: renderResults(params.query, keylessResults) }],
+					content: [{ type: "text", text: searchOutput(params.query, keylessResults) }],
 					details: keylessResults,
 				};
 			}
@@ -377,9 +406,43 @@ export function factory(pi: ExtensionAPI): void {
 				...filter,
 			});
 			return {
-				content: [{ type: "text", text: renderResults(params.query, results) }],
+				content: [{ type: "text", text: searchOutput(params.query, results) }],
 				details: results,
 			};
+		},
+	});
+
+	pi.registerTool<typeof GetContentParams, { id: string; found: boolean }>({
+		name: "get_search_content",
+		label: "GetSearchContent",
+		description:
+			"Read more of a page or search result stored earlier this session by webfetch or websearch, by its id: a line range (offset/limit) or just the lines containing given text (find). No network access.",
+		promptSnippet:
+			"Use get_search_content with an id from webfetch/websearch output to page through or search content you already fetched instead of fetching it again.",
+		parameters: GetContentParams,
+		async execute(_toolCallId, params): Promise<AgentToolResult<{ id: string; found: boolean }>> {
+			const entry = getContent(params.id);
+			if (!entry) {
+				const ids = listContent()
+					.slice(0, 20)
+					.map((e) => `${e.id} ${e.source}`)
+					.join("\n");
+				return {
+					content: [
+						{ type: "text", text: `No stored content with id ${params.id}.${ids ? ` Stored:\n${ids}` : ""}` },
+					],
+					details: { id: params.id, found: false },
+				};
+			}
+			const body = params.find?.length
+				? findLines(entry.text, params.find)
+				: sliceLines(entry.text, params.offset, params.limit);
+			const block = [
+				`<untrusted-web-content url="${escapeAttr(entry.source)}" id="${entry.id}">`,
+				closeTagSafe(body, "untrusted-web-content"),
+				"</untrusted-web-content>",
+			].join("\n");
+			return { content: [{ type: "text", text: block }], details: { id: entry.id, found: true } };
 		},
 	});
 }

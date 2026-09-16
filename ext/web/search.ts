@@ -100,8 +100,17 @@ export function filterByDomain(
 /** YYYY-MM-DD from whatever date string a provider sends, or undefined. */
 function isoDate(value: unknown): string | undefined {
 	if (typeof value !== "string" || !value) return undefined;
+	const dateOnly = /^(\d{4}-\d{2}-\d{2})$/.exec(value.trim());
+	if (dateOnly) return dateOnly[1];
 	const t = Date.parse(value);
-	return Number.isNaN(t) ? undefined : new Date(t).toISOString().slice(0, 10);
+	if (Number.isNaN(t)) return undefined;
+	const d = new Date(t);
+	// With no zone ("Sep 2, 2026", "2026-09-02T10:00") Date.parse reads local time, and
+	// the UTC day can be the day before: take the local calendar day it named instead.
+	if (!/(z|[+-]\d\d:?\d\d)$/i.test(value.trim())) {
+		return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+	}
+	return d.toISOString().slice(0, 10);
 }
 
 export function withDate(result: SearchResult, raw: unknown): SearchResult {

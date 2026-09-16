@@ -8,6 +8,7 @@ import {
 	type SearchResult,
 	webSearch,
 } from "../ext/web/search.ts";
+import { clearContent } from "../ext/web/store.ts";
 
 type Call = { url: string; init: RequestInit };
 
@@ -298,6 +299,41 @@ describe("tool surface", () => {
 		expect(text).toContain("2. U\n   https://u/");
 		expect(text.indexOf("</untrusted-search-results>")).toBeLessThan(text.indexOf("Cite"));
 		expect(text).toMatch(/Cite .*markdown links/);
+	});
+
+	it("reads a date without a time zone as that calendar day", async () => {
+		const { fetchImpl } = jsonFetch(() => ({
+			web: {
+				results: [
+					{ title: "a", url: "https://a/", description: "", page_age: "Sep 2, 2026" },
+					{ title: "b", url: "https://b/", description: "", page_age: "2026-09-02T23:30:00-05:00" },
+				],
+			},
+		}));
+		const out = await webSearch({ query: "q", provider: "brave", apiKey: "k", fetchImpl });
+		expect(out.map((r) => r.published)).toEqual(["2026-09-02", "2026-09-03"]);
+	});
+
+	it("stores results and gives the model their id, and get_search_content reads them back", async () => {
+		clearContent();
+		const tools = captureTools();
+		const { fetchImpl } = jsonFetch(() => ({
+			results: [{ title: "T", url: "https://t/", text: "line one\nprice $5" }],
+		}));
+		vi.stubGlobal("fetch", fetchImpl);
+		vi.stubEnv("EXA_API_KEY", "k");
+		const ctx = { cwd: process.cwd(), isProjectTrusted: () => false };
+		const out = await tools.get("websearch")!.execute("id", { query: "q" }, undefined, undefined, ctx);
+		const id = /stored as (s\d+)/.exec(out.content[0].text)?.[1];
+		expect(id).toBeDefined();
+		const found = await tools
+			.get("get_search_content")!
+			.execute("id", { id, find: ["PRICE"] }, undefined, undefined, ctx);
+		expect(found.content[0].text).toContain("price $5");
+		expect(found.content[0].text).toContain("<untrusted-web-content");
+		const missing = await tools.get("get_search_content")!.execute("id", { id: "f999" }, undefined, undefined, ctx);
+		expect(missing.content[0].text).toMatch(/No stored content with id f999/);
+		vi.unstubAllEnvs();
 	});
 
 	it("keeps third-party text from escaping the untrusted block", () => {
