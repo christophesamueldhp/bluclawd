@@ -57,7 +57,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `/tasks` | background bash jobs (`run_in_background`, `bash_output`, `kill_bash`) and monitors. A job notifies the model once when it exits; the `monitor` tool turns each output line of a long-running command into an event that wakes the model (Claude Code's `Monitor`, minus the WebSocket source; stdout and stderr are both events because pi's shell backend merges them) |
 | `/agents` | subagents via the `task` tool (single, parallel, chain; `run_in_background`, `resume`, `worktree: true`). The roster is in the system prompt, so the model delegates unprompted. Defs are Claude Code's markdown: `tools`, `disallowedTools`, `model` (`inherit`, `provider/id`, or a `subagents.models` alias), `permissionMode`, `maxTurns`, `skills`, `memory`, `background`, `isolation`, `effort`, `color`. Children get the parent's deny rules and protected paths, its sandbox, and — when it has a UI — its permission prompts, named per subagent. `/agents new\|edit\|delete <name>` manage user defs (editing a bundled one starts from its text); bundled: `explore`, `planner`, `code-reviewer`, `general-purpose` |
 | `/mcp` | MCP servers from `mcp.json` / `.mcp.json`; project servers need `/mcp approve` (enable/disable of a project server is kept in your settings, never written into `.mcp.json`). Server instructions go into the system prompt, server prompts run as `/mcp__<server>__<prompt> args…`, `list_changed` refreshes tools live, and a result over 50KB is cut with the full text saved to a temp file. Resources: `mcp_list_resources` / `mcp_read_resource`, and `@server:uri` in a prompt attaches one. Claude Code's timeouts (per-server `timeout`, `MCP_TOOL_TIMEOUT` ≈28h default, idle `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` 30 min stdio / 5 min remote, `MCP_TIMEOUT` connect) and `${VAR}` / `${VAR:-default}` in `command`, `args`, `env`, `url`, `headers`; a remote server whose url or header would carry a model/cloud credential is refused |
-| `webfetch`, `websearch` | Claude Code's `WebFetch`/`WebSearch`. Fetch returns the page's main content as Markdown (Readability, tables and code kept), the text of a PDF, or an image for models that read images; page text is marked untrusted; it decodes the page's charset, caches 15 minutes, blocks private addresses, and reports a redirect to another host instead of following it. A page over 2000 lines / 50KB comes back as its start plus a temp file holding the whole page. Search works with no key (Exa's hosted endpoint), or with `EXA_API_KEY`/`BRAVE_API_KEY`/`TAVILY_API_KEY` (`settings.websearch.provider`); `allowed_domains`/`blocked_domains` narrow by site, `recency` (`day`/`week`/`month`/`year`) by publish date. Rules: `WebFetch(domain:example.com)` (what "Always allow" persists), `WebSearch(<query glob>)` |
+| `webfetch`, `websearch` | Claude Code's `WebFetch`/`WebSearch`, extended; see [Web](#web). Rules: `WebFetch(domain:example.com)` (what "Always allow" persists), `WebSearch(<query glob>)`, checked per query in a batch |
 | `/memory`, `# note` | persistent memory, injected into the system prompt. `/memory edit [scope]` and `/memory search <text>`; a bare `#` opens an editor for a multi-line note; `@name.md` lines pull in a sibling file |
 | `/rewind` | file checkpoints per turn; restores the files, the conversation, or both |
 | `/fleet` | session roster in the shape of Claude Code's `/resume` picker: title + `time · branch · N messages · path`, grouped by project path (ctrl+g: by Running / Saved instead, remembered) with status glyphs, type to search, ctrl+a current/all projects, enter opens, ctrl+t peeks, ctrl+n starts one; restarts a stale daemon by itself when it owns no running session |
@@ -76,6 +76,58 @@ session actually costs. The subscription side follows pi's OAuth-subscription
 rule plus `kimi-coding` and `opencode-go`; add other subscription-billed
 provider ids with `statusline.subscriptionProviders` in settings.json. `statusline.command`
 runs an external script whose first stdout line joins the status line.
+
+## Web
+
+**webfetch** returns a page's main content as Markdown (Readability; the whole page
+when extraction keeps too little), a PDF's text, or an image for models that read
+images. Page text is marked untrusted. It blocks private addresses (checked at
+connect time) and reports a redirect to another host instead of following it.
+Special URLs:
+- **github.com**: through your `gh`/`git` — a repository is shallow-cloned under
+  the temp dir (tree + README, then read/grep the clone; not while the bash sandbox
+  is on), a `/blob/` file comes from the API, issues and PRs as ordered Markdown.
+- **YouTube**: title, channel, description and the caption transcript with
+  timestamps. No video model involved; YouTube sometimes withholds captions from
+  anonymous clients, and the output says so.
+- **Next.js pages** that render client-side are read from their flight payload.
+
+Pages over 2000 lines / 50KB return their start plus a temp file with all of it.
+Every page and search result is kept for the session under an id (`f1`, `s2`):
+`get_search_content` pages through or searches it, `source_check` judges claims
+against it (supported / contradicted / unclear / missing-evidence, with a quote
+verified to be in the source), and `/web` browses it. `format: "raw"` skips
+conversion.
+
+**websearch** works with no key (Exa's hosted endpoint) and takes
+`allowed_domains`/`blocked_domains`, `recency` (`day`…`year`) and `queries` (up
+to 10 searches in one call). Providers: `exa`, `brave`, `tavily`, `jina`,
+`perplexity`, `kagi`, `serper` (keys from `EXA_API_KEY`, `BRAVE_API_KEY`, …),
+`searxng` (`websearch.searxngUrl`), `duckduckgo` (keyless). Settings:
+
+```json
+"websearch": {
+  "routing": ["brave", "searxng", "exa"],
+  "fallbackOn": ["transient", "quota", "network"],
+  "apiKeyEnvs": { "serper": "MY_SERPER_KEY" },
+  "searxngUrl": "https://searx.example.org",
+  "keyless": true
+},
+"webfetch": {
+  "timeoutSeconds": 60,
+  "allowRanges": ["198.18.0.0/15"],
+  "hosts": { "intranet.example.com": { "headersEnv": { "Cookie": "INTRANET_COOKIE" } } },
+  "fallbacks": { "remote": true }
+}
+```
+
+`routing` is tried in order: a provider without its key is skipped, and a failure
+of a kind in `fallbackOn` moves on. `allowRanges`, `hosts` and `fallbacks` are
+read from your user settings only, never a project's: they open private
+addresses, attach your secrets, or send URLs to a third party. `hosts` headers are
+sent to that exact host only and those pages are never cached. With
+`fallbacks.remote`, a page that is blocked (403/429/503) or needs JavaScript is
+read by Firecrawl (`FIRECRAWL_API_KEY`) or Jina Reader, and the output says so.
 
 ## Updating
 
