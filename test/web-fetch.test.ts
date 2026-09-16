@@ -393,3 +393,61 @@ describe("github", () => {
 		expect(plain.text).toContain("github html");
 	});
 });
+
+describe("pages that need more than a plain fetch", () => {
+	const shell = `<html><body><div id="root"></div>${"<script src=/a.js></script>".repeat(5)}</body></html>`;
+
+	it("reads a thin Next.js page from its flight payload", async () => {
+		const para = "Server components stream their tree to the client as flight rows. ".repeat(6);
+		const row = `0:["$","article",null,{"children":[["$","h1",null,{"children":"Flight"}],["$","p",null,{"children":"${para}"}]]}]\n`;
+		const html = `<html><body><div id="__next"></div><script>self.__next_f.push([1,${JSON.stringify(row)}])</script></body></html>`;
+		const fetchImpl = (async () => response(html)) as typeof fetch;
+		const result = await webFetch("https://next.example/docs", { fetchImpl, resolveHost: noDns });
+		expect(result.text).toContain("Server components stream");
+	});
+
+	it("says a thin script-heavy page probably needs JavaScript, and asks a hosted reader only when allowed", async () => {
+		const seen: string[] = [];
+		const fetchImpl = (async (input: URL | RequestInfo) => {
+			const u = String(input);
+			seen.push(u);
+			if (u.startsWith("https://r.jina.ai/")) return new Response("# Rendered\n\nfull text");
+			return response(shell);
+		}) as typeof fetch;
+		const local = await webFetch("https://spa.example/", { fetchImpl, resolveHost: noDns });
+		expect(local.note).toMatch(/probably renders with JavaScript/);
+		expect(seen).toEqual(["https://spa.example/"]);
+		clearWebfetchCache();
+		const remote = await webFetch("https://spa.example/", {
+			fetchImpl,
+			resolveHost: noDns,
+			remoteFallback: { fetchImpl, env: {} },
+		});
+		expect(remote.text).toContain("full text");
+		expect(remote.note).toMatch(/read by jina, a hosted reader/);
+		expect(seen[2]).toBe("https://r.jina.ai/https://spa.example/");
+	});
+
+	it("tries a hosted reader for a blocked page, but never for one fetched with the user's headers", async () => {
+		const seen: string[] = [];
+		const fetchImpl = (async (input: URL | RequestInfo) => {
+			const u = String(input);
+			seen.push(u);
+			if (u.startsWith("https://api.firecrawl.dev/"))
+				return new Response(JSON.stringify({ data: { markdown: "from firecrawl" } }));
+			return response("blocked", { status: 403 });
+		}) as typeof fetch;
+		const remote = { fetchImpl, env: { FIRECRAWL_API_KEY: "k" } };
+		const read = await webFetch("https://walled.example/", { fetchImpl, resolveHost: noDns, remoteFallback: remote });
+		expect(read.text).toBe("from firecrawl");
+		await expect(
+			webFetch("https://walled.example/", {
+				fetchImpl,
+				resolveHost: noDns,
+				remoteFallback: remote,
+				headers: { Cookie: "s" },
+			}),
+		).rejects.toThrow(/403/);
+		expect(seen.filter((u) => u.includes("firecrawl")).length).toBe(1);
+	});
+});

@@ -41,6 +41,8 @@ import { Agent, fetch as undiciFetch } from "undici";
 import { fetchGithub, type GithubRunner, parseGithubUrl } from "./github.ts";
 import { pdfToText } from "./pdf.ts";
 import { readableMarkdown } from "./readable.ts";
+import { remoteRead } from "./remote.ts";
+import { extractRscMarkdown } from "./rsc.ts";
 import { fetchYoutube, parseYoutubeId } from "./youtube.ts";
 
 const USER_AGENT = `pi/${VERSION}`;
@@ -54,6 +56,8 @@ const DEFAULT_MAX_BYTES = 2_000_000;
 // arbitrarily large body into the parent context.
 const MAX_ALLOWED_BYTES = 8_000_000;
 const TIMEOUT_MS = 30_000;
+/** Below this much text, an HTML page probably needed JavaScript (pi-web-access's floor). */
+const THIN_PAGE_CHARS = 500;
 
 export interface WebfetchResult {
 	url: string;
@@ -580,6 +584,8 @@ export async function webFetch(
 		github?: { allowClone: boolean; run?: GithubRunner };
 		/** Read a YouTube video as its details and caption transcript. Off unless given. */
 		youtube?: { fetchImpl?: typeof fetch };
+		/** Ask a hosted reader for a page this fetch could not read (settings `webfetch.fallbacks.remote`). */
+		remoteFallback?: { fetchImpl?: typeof fetch; env?: NodeJS.ProcessEnv };
 	} = {},
 ): Promise<WebfetchResult> {
 	const isBlocked = opts.allowRanges?.length ? blockedExcept(opts.allowRanges) : isPrivateIp;
@@ -658,7 +664,28 @@ export async function webFetch(
 			}
 			throw unwrapFetchError(err);
 		}
+		// A private page (fetched with the user's headers) never goes to a third party.
+		const remote = cacheable && !raw ? opts.remoteFallback : undefined;
+		const readRemotely = async (why: string): Promise<WebfetchResult | undefined> => {
+			if (!remote) return undefined;
+			const read = await remoteRead(url.href, { fetchImpl: remote.fetchImpl, env: remote.env, signal: opts.signal });
+			if (!read) return undefined;
+			const inline = inlineOrSpill(read.text);
+			const served = `[webfetch: ${why}; this text was read by ${read.provider}, a hosted reader, not fetched directly]`;
+			return store({
+				url: url.href,
+				contentType: "text/markdown",
+				bytes: Buffer.byteLength(read.text),
+				truncated: false,
+				...inline,
+				note: [served, inline.note].filter(Boolean).join("\n"),
+			});
+		};
 		if (!res.ok) {
+			if (res.status === 403 || res.status === 429 || res.status === 503) {
+				const viaRemote = await readRemotely(`the site answered ${res.status}`);
+				if (viaRemote) return viaRemote;
+			}
 			const status = res.statusText ? `${res.status} ${res.statusText}` : `${res.status}`;
 			throw new Error(`webfetch: ${status} for ${url.href}`);
 		}
@@ -704,6 +731,19 @@ export async function webFetch(
 		const { bytes, truncated } = await readCappedBody(res, cap);
 		const decoded = decodeBody(bytes, contentType);
 		let text = kind === "html" && !raw ? await readableMarkdown(decoded) : decoded;
+		let thinNote: string | undefined;
+		if (kind === "html" && !raw && text.length < THIN_PAGE_CHARS) {
+			// Little text but a Next.js flight payload: the content is in the payload.
+			const rsc = decoded.includes("self.__next_f.push") ? extractRscMarkdown(decoded) : undefined;
+			if (rsc && rsc.length > text.length) {
+				text = rsc;
+			} else if ((decoded.match(/<script\b/gi)?.length ?? 0) > 3) {
+				const viaRemote = await readRemotely("the page had little text without JavaScript");
+				if (viaRemote) return viaRemote;
+				thinNote =
+					"[webfetch: the page returned little text and many scripts; it probably renders with JavaScript]";
+			}
+		}
 		if (truncated) text += `\n\n[webfetch: output truncated at ${cap} bytes]`;
 		const result: WebfetchResult = {
 			url: url.href,
@@ -712,6 +752,7 @@ export async function webFetch(
 			truncated,
 			...inlineOrSpill(text),
 		};
+		if (thinNote) result.note = [thinNote, result.note].filter(Boolean).join("\n");
 		return store(result);
 	} finally {
 		await agent?.destroy().catch(() => {});

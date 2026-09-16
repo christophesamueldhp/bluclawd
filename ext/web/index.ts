@@ -312,6 +312,7 @@ export function factory(pi: ExtensionAPI): void {
 				// A clone runs git outside the bash sandbox; with the sandbox on, read through the API only.
 				github: { allowClone: forkSettings.sandbox(settings)?.enabled !== true },
 				youtube: {},
+				remoteFallback: config.remoteFallbacks ? {} : undefined,
 			});
 			const details: WebfetchDetails = {
 				url: result.url,
