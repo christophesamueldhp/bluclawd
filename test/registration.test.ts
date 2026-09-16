@@ -12,12 +12,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	statusline: { commands: ["usage"], tools: [], shortcuts: 0, events: 4 },
 	memory: { commands: ["memory"], tools: ["memory"], shortcuts: 0, events: 2 },
 	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 3 },
-	subagents: {
-		commands: ["agents"],
-		tools: ["task", "task_output", "task_stop", "task_message", "manage_agents"],
-		shortcuts: 0,
-		events: 2,
-	},
+	subagents: { commands: ["agents"], tools: ["task"], shortcuts: 0, events: 2 },
 	web: { commands: [], tools: ["webfetch", "websearch"], shortcuts: 0, events: 0 },
 	mcp: { commands: ["mcp"], tools: [], shortcuts: 0, events: 4 },
 	sandbox: { commands: ["sandbox"], tools: ["bash", "monitor"], shortcuts: 0, events: 3 },
