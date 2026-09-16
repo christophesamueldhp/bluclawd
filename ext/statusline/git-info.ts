@@ -71,6 +71,8 @@ export class GitInfo {
 	private cachedChanges: GitChangeCounts | null = null;
 	private changesFetchedAt = 0;
 	private changesRefreshInFlight = false;
+	/** Bumped by invalidation so a refresh that started before it cannot publish. */
+	private changesGeneration = 0;
 	private disposed = false;
 
 	constructor(cwd: string) {
@@ -119,6 +121,18 @@ export class GitInfo {
 	}
 
 	/**
+	 * Drop the change counts' TTL after something may have touched the working
+	 * tree (an agent edit, a bash command), so the next render re-reads it
+	 * instead of showing the pre-edit counts for up to five seconds. The old
+	 * counts keep showing until the fresh ones land.
+	 */
+	invalidateChanges(): void {
+		this.changesGeneration++;
+		this.changesFetchedAt = 0;
+		this.changesRefreshInFlight = false;
+	}
+
+	/**
 	 * Staged + unstaged insertion/deletion counts, null while unresolved or
 	 * outside a repo. Cached with a short TTL; a stale read kicks an async
 	 * refresh that notifies on change.
@@ -127,10 +141,12 @@ export class GitInfo {
 		if (!this.changesRefreshInFlight && Date.now() - this.changesFetchedAt > CHANGES_TTL_MS) {
 			this.changesRefreshInFlight = true;
 			const cwd = this.cwd;
+			const generation = this.changesGeneration;
 			void Promise.all([
 				runGitCapture(cwd, ["diff", "--shortstat"]),
 				runGitCapture(cwd, ["diff", "--cached", "--shortstat"]),
 			]).then(([unstaged, staged]) => {
+				if (generation !== this.changesGeneration) return;
 				this.changesRefreshInFlight = false;
 				if (this.disposed || this.cwd !== cwd) return;
 				this.changesFetchedAt = Date.now();

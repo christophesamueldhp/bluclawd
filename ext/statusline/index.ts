@@ -62,6 +62,7 @@ import {
 	ContextTokenCount,
 	formatTokens,
 	isUsingSubscription,
+	resolveContextUsage,
 	type SessionTotals,
 	setSubscriptionProviders,
 	sumSessionUsage,
@@ -86,6 +87,9 @@ const MAX_STATUS_CHARS = 200;
 /** Timeout for the main statusline command. Detached, so it no longer blocks the
  * agent loop; 5s is a generous ceiling before we give up and clear. */
 const COMMAND_TIMEOUT_MS = 5000;
+
+/** Pi's built-in tools that never write, so their results skip the git re-read. */
+const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls"]);
 
 /** Timeout for the git-branch sub-exec so a hung git can't stall the refresh. */
 const GIT_TIMEOUT_MS = 2000;
@@ -204,7 +208,7 @@ function installFooter(ctx: ExtensionContext): void {
 	});
 	ctx.ui.setWidget(
 		"statusline-context-tokens",
-		(_tui, theme) => new ContextTokenCount(() => latestCtx?.getContextUsage()?.tokens, theme),
+		(_tui, theme) => new ContextTokenCount(() => latestCtx && resolveContextUsage(latestCtx), theme),
 		{ placement: "aboveEditor" },
 	);
 
@@ -415,6 +419,11 @@ export function factory(pi: ExtensionAPI): void {
 		disposeFooterRuntime();
 	});
 	pi.on("turn_end", (_event, ctx) => fire(ctx));
+	// Any tool that is not a pure read may have changed the working tree; the
+	// render that shows the tool result then re-reads the change counts.
+	pi.on("tool_result", (event) => {
+		if (!READ_ONLY_TOOLS.has(event.toolName)) footerRuntime?.git.invalidateChanges();
+	});
 
 	pi.registerEntryRenderer<UsageReport>("bluclawd:usage", (entry, _options, theme) => {
 		const container = new Container();

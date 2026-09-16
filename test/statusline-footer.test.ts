@@ -1,15 +1,21 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	CcStatuslineFooter,
+	ContextTokenCount,
 	type FooterSources,
 	fitUsageGroups,
 	formatCwd,
 	formatUsageDuration,
 	isUsingSubscription,
 	makeSliderBar,
+	resolveContextUsage,
 	setSubscriptionProviders,
 } from "../ext/statusline/footer.ts";
-import { parseDiffShortStat, parseRemoteOwner } from "../ext/statusline/git-info.ts";
+import { GitInfo, parseDiffShortStat, parseRemoteOwner } from "../ext/statusline/git-info.ts";
 import {
 	claudePlanUsage,
 	opencodeGoPlanUsage,
@@ -272,6 +278,116 @@ describe("CcStatuslineFooter", () => {
 			fakeTheme,
 		).render(80);
 		expect(stripAnsi(lines[0])).toContain("no-model");
+	});
+});
+
+describe("context usage after compaction", () => {
+	const fakeTheme = { fg: (_c: string, s: string) => s } as unknown as ConstructorParameters<
+		typeof ContextTokenCount
+	>[1];
+	const userEntry = (id: string, text: string) => ({
+		type: "message",
+		id,
+		message: { role: "user", content: [{ type: "text", text }], timestamp: 0 },
+	});
+	const compactedCtx = (leafId: string, entries: unknown[]) => ({
+		getContextUsage: () => ({ tokens: null, contextWindow: 1000, percent: null }),
+		getSystemPrompt: () => "s".repeat(400),
+		sessionManager: {
+			getSessionId: () => "session",
+			getLeafId: () => leafId,
+			buildContextEntries: vi.fn(() => entries),
+		},
+	});
+
+	it("passes pi's own figure through untouched when it is known", () => {
+		const ctx = { getContextUsage: () => ({ tokens: 500, contextWindow: 1000, percent: 50 }) } as never;
+		expect(resolveContextUsage(ctx)).toEqual({ tokens: 500, percent: 50, approximate: false });
+	});
+
+	it("estimates the compacted context instead of reporting nothing, once per leaf", () => {
+		const ctx = compactedCtx("leaf-1", [userEntry("a", "u".repeat(400))]);
+		const usage = resolveContextUsage(ctx as never);
+		// 400-char system prompt + 400-char message at pi's chars/4 estimate
+		expect(usage).toEqual({ tokens: 200, percent: 20, approximate: true });
+		resolveContextUsage(ctx as never);
+		expect(ctx.sessionManager.buildContextEntries).toHaveBeenCalledTimes(1);
+	});
+
+	it("marks an estimate with ~ in the token counter and keeps the slider", () => {
+		expect(
+			new ContextTokenCount(() => ({ tokens: 12_000, percent: 6, approximate: true }), fakeTheme).render(40)[0],
+		).toMatch(/ ~12k tokens$/);
+		expect(
+			new ContextTokenCount(() => ({ tokens: 12_000, percent: 6, approximate: false }), fakeTheme).render(40)[0],
+		).toMatch(/ 12k tokens$/);
+		const ctx = compactedCtx("leaf-2", [userEntry("b", "u".repeat(3600))]);
+		const footer = new CcStatuslineFooter(
+			{
+				ctx: () =>
+					({
+						...ctx,
+						cwd: "/x",
+						model: { name: "M", id: "m", provider: "p" },
+						sessionManager: { ...ctx.sessionManager, getEntries: () => [] },
+						modelRegistry: { isUsingOAuth: () => false },
+					}) as never,
+				gitBranch: () => null,
+				gitOriginOwner: () => null,
+				gitChanges: () => null,
+				planUsage: () => [],
+				extensionStatuses: () => new Map(),
+			},
+			fakeTheme,
+		);
+		expect(stripAnsi(footer.render(80)[0])).toContain(makeSliderBar(100));
+	});
+});
+
+describe("GitInfo change counts", () => {
+	let repo: string;
+	beforeEach(() => {
+		repo = mkdtempSync(join(tmpdir(), "statusline-git-"));
+		execFileSync("git", ["init", "-q"], { cwd: repo });
+		writeFileSync(join(repo, "f.txt"), "one\n");
+		execFileSync("git", ["add", "."], { cwd: repo });
+		execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "init"], { cwd: repo });
+	});
+	afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+	const counts = async (git: GitInfo) => {
+		const changed = new Promise<void>((r) => {
+			const off = git.onChange(() => {
+				off();
+				r();
+			});
+		});
+		git.getChanges();
+		await changed;
+		return git.getChanges();
+	};
+
+	it("re-reads the working tree after invalidation instead of serving the TTL cache", async () => {
+		const git = new GitInfo(repo);
+		writeFileSync(join(repo, "f.txt"), "one\ntwo\n");
+		expect(await counts(git)).toEqual({ insertions: 1, deletions: 0 });
+
+		writeFileSync(join(repo, "f.txt"), "one\ntwo\nthree\n");
+		git.invalidateChanges();
+		expect(await counts(git)).toEqual({ insertions: 2, deletions: 0 });
+		git.dispose();
+	});
+
+	it("does not let a refresh started before invalidation publish or block the next one", async () => {
+		const git = new GitInfo(repo);
+		writeFileSync(join(repo, "f.txt"), "one\ntwo\n");
+		git.getChanges(); // in flight, may read either tree
+		writeFileSync(join(repo, "f.txt"), "one\ntwo\nthree\nfour\n");
+		git.invalidateChanges();
+		expect(await counts(git)).toEqual({ insertions: 3, deletions: 0 });
+		await new Promise((r) => setTimeout(r, 300));
+		expect(git.getChanges()).toEqual({ insertions: 3, deletions: 0 });
+		git.dispose();
 	});
 });
 

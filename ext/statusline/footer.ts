@@ -17,7 +17,12 @@
  */
 
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import {
+	type ExtensionContext,
+	estimateTokens,
+	sessionEntryToContextMessages,
+	type Theme,
+} from "@earendil-works/pi-coding-agent";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { sharedRef } from "../_shared/global-state.ts";
 import type { GitChangeCounts } from "./git-info.ts";
@@ -168,6 +173,36 @@ export function fitUsageGroups(groups: readonly UsageGroup[], width: number, sep
 	return truncateToWidth(join(groups.slice(0, 1), false), width, "...");
 }
 
+/** Context usage as the slider and token counter show it. */
+export type DisplayContextUsage = { tokens: number; percent: number; approximate: boolean };
+
+let contextEstimate: { key: string; usage: DisplayContextUsage } | undefined;
+
+/**
+ * Context usage for the slider and the token counter. After a compaction pi
+ * reports the count as unknown until the next response, which used to blank
+ * both widgets right when the user wants to see how much the compaction freed.
+ * Instead, estimate the compacted context — system prompt plus the messages
+ * still in context, at pi's own chars/4 rate — and mark it approximate. Cached
+ * per session leaf because walking the context on every render is not free.
+ */
+export function resolveContextUsage(ctx: ExtensionContext): DisplayContextUsage | undefined {
+	const usage = ctx.getContextUsage();
+	if (!usage) return undefined;
+	if (usage.tokens !== null && usage.percent !== null) {
+		return { tokens: usage.tokens, percent: usage.percent, approximate: false };
+	}
+	const key = `${ctx.sessionManager.getSessionId()}:${ctx.sessionManager.getLeafId()}:${usage.contextWindow}`;
+	if (contextEstimate?.key !== key) {
+		let tokens = Math.ceil(ctx.getSystemPrompt().length / 4);
+		for (const entry of ctx.sessionManager.buildContextEntries()) {
+			for (const message of sessionEntryToContextMessages(entry)) tokens += estimateTokens(message);
+		}
+		contextEstimate = { key, usage: { tokens, percent: (tokens / usage.contextWindow) * 100, approximate: true } };
+	}
+	return contextEstimate.usage;
+}
+
 export type SessionTotals = {
 	input: number;
 	output: number;
@@ -272,10 +307,9 @@ export class CcStatuslineFooter implements Component {
 			left.push(pad(paint("magentaBright", ctx?.thinkingLevel || "off")));
 		}
 		// context-bar widget: brightWhite, "slider-only" display (bare bar, no percent)
-		// (hidden while usage is unknown, e.g. right after compaction)
-		const contextPercent = ctx?.getContextUsage()?.percent;
-		if (contextPercent !== null && contextPercent !== undefined) {
-			left.push(pad(paint("whiteBright", makeSliderBar(contextPercent))));
+		const contextUsage = ctx && resolveContextUsage(ctx);
+		if (contextUsage) {
+			left.push(pad(paint("whiteBright", makeSliderBar(contextUsage.percent))));
 		}
 
 		const right: string[] = [];
@@ -414,31 +448,32 @@ export class CcStatuslineFooter implements Component {
 
 /**
  * One-line context token counter rendered directly above the prompt input,
- * right-aligned and dim. Shows nothing while the count is unknown (no model,
- * or right after compaction before the next response reports usage).
+ * right-aligned and dim, `~`-prefixed when the count is an estimate. Shows
+ * nothing while there is no count at all (no model).
  */
 export class ContextTokenCount implements Component {
-	private readonly getTokens: () => number | null | undefined;
+	private readonly getUsage: () => DisplayContextUsage | undefined;
 	private readonly theme: Theme;
 
-	constructor(getTokens: () => number | null | undefined, theme: Theme) {
-		this.getTokens = getTokens;
+	constructor(getUsage: () => DisplayContextUsage | undefined, theme: Theme) {
+		this.getUsage = getUsage;
 		this.theme = theme;
 	}
 
 	invalidate(): void {}
 
 	render(width: number): string[] {
-		let tokens: number | null | undefined;
+		let usage: DisplayContextUsage | undefined;
 		try {
-			tokens = this.getTokens();
+			usage = this.getUsage();
 		} catch {
-			tokens = undefined;
+			usage = undefined;
 		}
-		if (tokens === null || tokens === undefined) return [];
+		if (!usage) return [];
+		const label = `${usage.approximate ? "~" : ""}${formatTokens(usage.tokens)} tokens`;
 		// -1 reserves the same right margin the padding below leaves, so a terminal
 		// too narrow for the full string clips instead of wrapping.
-		const text = this.theme.fg("dim", truncateToWidth(`${formatTokens(tokens)} tokens`, Math.max(0, width - 1)));
+		const text = this.theme.fg("dim", truncateToWidth(label, Math.max(0, width - 1)));
 		return [" ".repeat(Math.max(0, width - visibleWidth(text) - 1)) + text];
 	}
 }
