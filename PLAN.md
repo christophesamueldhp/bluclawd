@@ -12,17 +12,19 @@
 - No powerline presets/layout, no dependency on pi-powerline-footer; port what is needed.
 - `!` and bash mode follow Claude Code: they run OUTSIDE the sandbox even when it is on (CC docs: "commands you type in shell mode run outside the sandbox even when you've enabled sandboxing"). Model-run commands stay sandboxed.
 - Bash mode is a persistent shell (cd/export/alias survive). Ghost-text completions are out of scope.
-- Queue: hold input during compaction, `/compact <text>`, `/queue` list/send/retry/clear. Cross-project aliases/targets are out of scope.
+- Queue: hold input during compaction, `/compact <text>`, `/queue` list/send/retry/clear. Cross-project aliases/targets are out of scope. (Later skipped — see Tier 4.)
 - Vibes: off by default, session model by default (provider-neutral rule), `/vibe model` override, file mode.
 - Welcome: powerline's content goes into the existing mascot banner's sidebar; no separate overlay.
 - Currency: powerline's list plus IDR. Labels `(subscription)` / `(per token)` stay.
 - Already shipped (f5641b8): git counts refresh after tool calls; `~N tokens` estimate after compaction.
 
-**Working-tree hygiene:** other sessions keep uncommitted work in this tree (`ext/_shared/settings.ts`, `ext/subagents`, `ext/mcp`, `ext/web`, `test/registration.test.ts`). Stage only this plan's hunks. For a file with foreign hunks, build the staged blob from `git show HEAD:<file>` plus this plan's change and stage it with `git hash-object -w` + `git update-index --cacheinfo`. Never `git stash` the shared tree. Ask the user before every commit.
+**Working-tree hygiene:** other sessions keep uncommitted work in this tree (`ext/_shared/settings.ts`, `ext/subagents`, `ext/mcp`, `ext/web`, `test/registration.test.ts`). Stage only this plan's hunks. For a file with foreign hunks, build the staged blob from `git show HEAD:<file>` plus this plan's change and stage it with `git hash-object -w` + `git update-index --cacheinfo`. Never `git stash` the shared tree. Commits: the user authorized committing each tier once its tests and live verification pass; pushes still need asking.
 
 ---
 
 ## Tier 1 — Statusline: context colors, live streaming context, cost currency
+
+**Done: 0b53ac3.**
 
 ### Task 1.1: Context slider turns yellow past 70% and red past 90%
 
@@ -30,7 +32,7 @@
 - Modify: `ext/statusline/footer.ts` (SGR table, `renderInfoLine`)
 - Test: `test/statusline-footer.test.ts` (`describe("CcStatuslineFooter")`)
 
-- [ ] **Step 1: Write the failing test** — inside `describe("CcStatuslineFooter", ...)`, after the line-1 test:
+- [x] **Step 1: Write the failing test** — inside `describe("CcStatuslineFooter", ...)`, after the line-1 test:
 
 ```ts
 	it("colors the context slider yellow past 70% and red past 90%", () => {
@@ -52,9 +54,9 @@
 	});
 ```
 
-- [ ] **Step 2: Run it** — `npx vitest run test/statusline-footer.test.ts -t "colors the context slider"` → FAIL (71 renders `97`).
+- [x] **Step 2: Run it** — `npx vitest run test/statusline-footer.test.ts -t "colors the context slider"` → FAIL (71 renders `97`).
 
-- [ ] **Step 3: Implement** — in `footer.ts` add `redBright: 91,` to `SGR`, add below `makeSliderBar`:
+- [x] **Step 3: Implement** — in `footer.ts` add `redBright: 91,` to `SGR`, add below `makeSliderBar`:
 
 ```ts
 /** Context slider color: yellow once compaction is worth planning for, red once it is close. */
@@ -67,7 +69,7 @@ export function contextSliderColor(percent: number): "whiteBright" | "yellowBrig
 
 and in `renderInfoLine` replace `paint("whiteBright", makeSliderBar(contextUsage.percent))` with `paint(contextSliderColor(contextUsage.percent), makeSliderBar(contextUsage.percent))`; update the widget comment to `brightWhite, yellow past 70%, red past 90%`.
 
-- [ ] **Step 4: Run** — same command → PASS; then `npx vitest run test/statusline-footer.test.ts` → all pass.
+- [x] **Step 4: Run** — same command → PASS; then `npx vitest run test/statusline-footer.test.ts` → all pass.
 
 ### Task 1.2: Slider and counter follow a streaming reply
 
@@ -78,7 +80,7 @@ pi's `getContextUsage()` estimates over `agent.state.messages`, which only recei
 - Modify: `ext/statusline/index.ts` (`message_update` / `message_end` handlers, sources, token widget)
 - Test: `test/statusline-footer.test.ts`, `test/registration.test.ts` (statusline events 4 → 6)
 
-- [ ] **Step 1: Write the failing tests** — in `describe("context usage after compaction")` (rename it to `describe("context usage")`), add:
+- [x] **Step 1: Write the failing tests** — in `describe("context usage after compaction")` (rename it to `describe("context usage")`), add:
 
 ```ts
 	const usage = (tokens: number) => ({
@@ -107,9 +109,9 @@ pi's `getContextUsage()` estimates over `agent.state.messages`, which only recei
 
 Add `streamingContextUsage` to the `footer.ts` import. In `test/registration.test.ts` change only the statusline line to `events: 6`.
 
-- [ ] **Step 2: Run** — `npx vitest run test/statusline-footer.test.ts test/registration.test.ts` → FAIL (`streamingContextUsage` not exported; events 4 ≠ 6).
+- [x] **Step 2: Run** — `npx vitest run test/statusline-footer.test.ts test/registration.test.ts` → FAIL (`streamingContextUsage` not exported; events 4 ≠ 6).
 
-- [ ] **Step 3: Implement footer.ts**
+- [x] **Step 3: Implement footer.ts**
 
 Imports: add `calculateContextTokens` to the pi-coding-agent import, and
 
@@ -145,7 +147,7 @@ Change the signature to `resolveContextUsage(ctx: ExtensionContext, streaming?: 
 
 `FooterSources`: add `/** Usage of the assistant reply currently streaming, if it reports any. */ streamingUsage(): Usage | undefined;` and in `renderInfoLine` call `resolveContextUsage(ctx, this.sources.streamingUsage())`. Add `streamingUsage: () => undefined,` to the test `sources()` helper and to the literal sources in the compaction slider test.
 
-- [ ] **Step 4: Implement index.ts**
+- [x] **Step 4: Implement index.ts**
 
 Next to `latestCtx`:
 
@@ -167,7 +169,7 @@ let streamingUsage: Usage | undefined;
 
 and at the top of the `session_start` handler `streamingUsage = undefined;`.
 
-- [ ] **Step 5: Run** — `npx vitest run test/statusline-footer.test.ts test/registration.test.ts` → all pass (registration may still show the other session's subagents mismatch; only the statusline row matters).
+- [x] **Step 5: Run** — `npx vitest run test/statusline-footer.test.ts test/registration.test.ts` → all pass (registration may still show the other session's subagents mismatch; only the statusline row matters).
 
 ### Task 1.3: Cost figure in a configurable currency
 
@@ -178,7 +180,7 @@ and at the top of the `session_start` handler `streamingUsage = undefined;`.
 - Modify: `ext/statusline/index.ts` (rates instance, setting, repaint, `/usage` report)
 - Test: `test/statusline-currency.test.ts` (new), `test/statusline-footer.test.ts`
 
-- [ ] **Step 1: Write the failing tests** — `test/statusline-currency.test.ts`:
+- [x] **Step 1: Write the failing tests** — `test/statusline-currency.test.ts`:
 
 ```ts
 import { mkdtempSync, rmSync } from "node:fs";
@@ -273,9 +275,9 @@ And in `test/statusline-footer.test.ts` `describe("CcStatuslineFooter")`: add `c
 	});
 ```
 
-- [ ] **Step 2: Run** — `npx vitest run test/statusline-currency.test.ts test/statusline-footer.test.ts` → FAIL (module missing).
+- [x] **Step 2: Run** — `npx vitest run test/statusline-currency.test.ts test/statusline-footer.test.ts` → FAIL (module missing).
 
-- [ ] **Step 3: Implement `ext/statusline/currency.ts`**
+- [x] **Step 3: Implement `ext/statusline/currency.ts`**
 
 ```ts
 /**
@@ -420,7 +422,7 @@ export class CurrencyRates {
 
 Note: in the "refetches a day-old table" test the second `rate()` after a failure is inside `RETRY_AFTER_MS`, so `fetchSpy` stays at 2 calls — that is the back-off assertion.
 
-- [ ] **Step 4: Wire the footer** — `footer.ts`: import `{ type CostCurrency, formatCost } from "./currency.ts"`; `FooterSources` gains `/** Currency for the cost figure and its USD rate (null until known). */ currency(): { code: CostCurrency; rate: number | null };`. In `renderStatsLine` replace the two cost pushes with:
+- [x] **Step 4: Wire the footer** — `footer.ts`: import `{ type CostCurrency, formatCost } from "./currency.ts"`; `FooterSources` gains `/** Currency for the cost figure and its USD rate (null until known). */ currency(): { code: CostCurrency; rate: number | null };`. In `renderStatsLine` replace the two cost pushes with:
 
 ```ts
 		const { code, rate } = this.sources.currency();
@@ -434,7 +436,7 @@ Note: in the "refetches a day-old table" test the second `rate()` after a failur
 
 (keep the existing comment above it).
 
-- [ ] **Step 5: Wire settings and index.ts** — `ext/_shared/settings.ts` `StatuslineSettings`:
+- [x] **Step 5: Wire settings and index.ts** — `ext/_shared/settings.ts` `StatuslineSettings`:
 
 ```ts
 	/** Currency of the cost figure in the footer and `/usage`, converted from USD at a daily rate. default: USD */
@@ -467,17 +469,19 @@ let costCurrency: CostCurrency = "USD";
 
 `UsageReport` gains `/** Absent on entries written before currencies existed: they render in USD. */ currency?: { code: CostCurrency; rate: number | null };`; `usageHandler` adds `currency: { code: costCurrency, rate: currencyRates.rate(costCurrency) },`; `formatUsageReport` cost line becomes ``lines.push(`${dim("Cost:")} ${formatCost(t.cost, report.currency?.code ?? "USD", report.currency?.rate ?? 1, 4)}${billing}`);``.
 
-- [ ] **Step 6: Run** — `npx vitest run test/statusline-currency.test.ts test/statusline-footer.test.ts test/registration.test.ts` → pass; `npx biome check ext/statusline test/statusline-currency.test.ts test/statusline-footer.test.ts` → clean; `npx tsc --noEmit 2>&1 | grep -v "mcp\|subagents"` → no statusline errors.
+- [x] **Step 6: Run** — `npx vitest run test/statusline-currency.test.ts test/statusline-footer.test.ts test/registration.test.ts` → pass; `npx biome check ext/statusline test/statusline-currency.test.ts test/statusline-footer.test.ts` → clean; `npx tsc --noEmit 2>&1 | grep -v "mcp\|subagents"` → no statusline errors.
 
 ### Task 1.4: Live verify Tier 1 and commit
 
-- [ ] **Step 1: tmux** — scratch git repo under `$CLAUDE_JOB_DIR/tmp/live`; `pi -ne -e <repo>/ext/statusline/index.ts --session-dir <tmp>/sessions` in a 110×35 tmux session. Put `{"statusline":{"currency":"IDR"}}` in the scratch repo's `.pi/settings.json` and trust the project when asked (if it does not apply untrusted, set it in a throwaway `PI_CODING_AGENT_DIR` copy instead — never edit the user's global settings). Check: stats line shows `Rp… (subscription|per token)`; a long read-heavy prompt moves the slider while `Working` is shown; `/usage` shows `Cost: Rp…`. Colors: confirm the SGR code of the slider via `tmux capture-pane -e -p`.
-- [ ] **Step 2: Full checks** — `npm test` (report the other sessions' failures separately), `npx biome check .`, `npx tsc --noEmit`.
-- [ ] **Step 3: Commit (ask first)** — stage `ext/statusline/{footer,index,currency}.ts`, `test/statusline-{footer,currency}.test.ts`, and the plan hunks of `ext/_shared/settings.ts` / `test/registration.test.ts` per the hygiene note. Message: `statusline: context colors, live streaming context, cost in a configurable currency`.
+- [x] **Step 1: tmux** — scratch git repo under `$CLAUDE_JOB_DIR/tmp/live`; `pi -ne -e <repo>/ext/statusline/index.ts --session-dir <tmp>/sessions` in a 110×35 tmux session. Put `{"statusline":{"currency":"IDR"}}` in the scratch repo's `.pi/settings.json` and trust the project when asked (if it does not apply untrusted, set it in a throwaway `PI_CODING_AGENT_DIR` copy instead — never edit the user's global settings). Check: stats line shows `Rp… (subscription|per token)`; a long read-heavy prompt moves the slider while `Working` is shown; `/usage` shows `Cost: Rp…`. Colors: confirm the SGR code of the slider via `tmux capture-pane -e -p`.
+- [x] **Step 2: Full checks** — `npm test` (report the other sessions' failures separately), `npx biome check .`, `npx tsc --noEmit`.
+- [x] **Step 3: Commit (ask first)** — stage `ext/statusline/{footer,index,currency}.ts`, `test/statusline-{footer,currency}.test.ts`, and the plan hunks of `ext/_shared/settings.ts` / `test/registration.test.ts` per the hygiene note. Message: `statusline: context colors, live streaming context, cost in a configurable currency`.
 
 ---
 
 ## Tier 2 — `!` outside the sandbox, `!` git refresh, bash mode (`ext/shell`)
+
+**Done: 12589f8.** Found while verifying: Ctrl+C killed the whole shell (powerline has the same bug) — fixed with an INT trap in the init script; sentinels are matched mid-line so `printf foo` cannot hang a command. Bash-mode output stays out of the conversation (powerline behaviour).
 
 Detailed steps are written when this tier starts, against the code as it is then.
 
@@ -487,21 +491,31 @@ Detailed steps are written when this tier starts, against the code as it is then
 
 ## Tier 3 — Stash (`ext/shell`)
 
+**Done: dc692d3.** `/stash` is the history picker (powerline used ctrl+alt+h). Found while verifying: `setEditorText` does not repaint, so an inserted stash was invisible until the next key.
+
 - `alt+s` in the shared editor: stash non-empty text and clear; on an empty editor restore; with an active stash and new text, update the stash. `stash` status on the footer status line. History persisted at `getAgentDir()/bluclawd/stash-history.json`, session-local active stash. Port of powerline's stash logic from `index.ts`. Tests: the three transitions + persistence. Live tmux verify.
 
 ## Tier 4 — Queue (`ext/queue`)
+
+**Skipped by user decision (2026-09-17).** The pi version bluclawd runs on already holds prompts typed during compaction and sends them when it finishes (`queueCompactionMessage` / `flushCompactionQueue`), restoring them on failure — the core of powerline's queue, which predates that. The remaining extras (`/compact <text>` re-purposing, file-backed `/queue`) were not worth the code.
 
 - During compaction (`session_before_compact` → `session_compact` / `session_compact_failed`), prompts typed are held (`input` handler returns handled) and delivered after a successful compaction via `pi.sendUserMessage`; on failure they stay queued with a notice. `/compact <text>` = compact then send `<text>` (checked at detailing time whether an extension may take the built-in name; if not, `/compact-then`). `/queue` picker + `send [id]`, `retry [id]`, `clear <id|all>`. Store: `getAgentDir()/bluclawd/queue.jsonl`, atomic writes with `proper-lockfile` (already a dependency). Interaction with `ext/memory` and `ext/mcp` `input` handlers tested (handler order). Tests: hold/deliver/fail paths, store round-trip and locking. Live tmux verify with a manual `/compact`.
 
 ## Tier 5 — Vibes (`ext/vibes`)
 
+**Done: 886a4f6.** Found while verifying: OpenCode Go rejects requests without `x-opencode-session` (the helper moved from `ext/web` to `_shared/session-headers.ts`), and a reasoning model spent a 40-token budget thinking — generation uses 1024 tokens and a 10 s timeout.
+
 - Port `working-vibes.ts`: `/vibe <theme>`, `/vibe off`, `/vibe` (show), `/vibe model [provider/id[:thinking]]`, `/vibe mode generate|file`, `/vibe generate <theme> <n>`. Default model = the session's current model (never a hard-coded vendor); `vibes.model` setting overrides. Uses `ctx.ui.setWorkingMessage`; 3s timeout, 30s refresh, fallback `Working`. Files at `getAgentDir()/bluclawd/vibes/<theme>.txt`. Settings under `vibes.*` in `StatuslineSettings`' sibling interface. Tests: response cleanup/length cap, model resolution fallback, file-mode seeded shuffle. Live tmux verify with opencode-go.
 
 ## Tier 6 — Welcome content in the mascot banner (`ext/branding`)
 
+**Done: 986e4bf.** Counts come from `loadProjectContextFiles` and `pi.getCommands()` / `getAllTools()`; `getSystemPromptOptions` exists only on command contexts. There is no extension count API, so tools are shown instead.
+
 - Sidebar sections: **Model** (name · provider), **Loaded** (AGENTS.md/CLAUDE.md context files, extensions, skills, prompt templates — from what pi exposes to extensions), **System prompt** (`~N tokens`, chars/4), **Recent sessions** (3 newest for this cwd with relative time), **Tips** (existing three). Sections that have no data are omitted; narrow terminals already drop the sidebar. Tests: `welcome-box` rendering with the new sections, recent-session formatting. Live tmux verify at 110 and 70 columns.
 
 ## Tier 7 — Docs, memory, final checks
+
+**Done** in the commit that carries this line.
 
 - README: commands table (`/bash-mode`, `/queue`, `/vibe`, `/compact <text>`), shortcuts (`ctrl+shift+b`, `alt+s`), settings (`statusline.currency`, `vibes.*`), sandbox `!` note, MIT attribution for pi-powerline-footer.
 - Memory: footer note, sandbox parity note, new notes for shell/queue/vibes traps found during live verify.

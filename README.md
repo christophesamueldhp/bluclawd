@@ -42,9 +42,9 @@ scripts/        probe-extensions.ts — headless report of what each extension r
 test/           self-contained — no monorepo, no fixtures pi doesn't publish
 ```
 
-14 extensions: `permissions`, `statusline`, `memory`,
+16 extensions: `permissions`, `statusline`, `memory`,
 `checkpoints`, `subagents`, `web`, `mcp`, `sandbox`, `background-bash`,
-`branding`, `diagnostics`, `fleet`, `help`, `plugin`.
+`branding`, `diagnostics`, `fleet`, `help`, `plugin`, `shell`, `vibes`.
 
 ## What it adds
 
@@ -53,20 +53,24 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | Command | What it does |
 |---|---|
 | `/mode`, `/permissions` | permission modes and allow/ask/deny rules. `/mode` picks from a list; Alt+M cycles `ask → edits → auto` |
-| `/sandbox` | OS-level sandbox for bash (`@anthropic-ai/sandbox-runtime`), configured with Claude Code's `sandbox` keys. No host is pre-allowed: the first connection to a host asks you (a yes holds for the session; `network.allowedDomains` pre-allows). Sandboxed commands run without a permission prompt (`autoAllowBashIfSandboxed`, default true; deny rules and content-scoped ask rules still apply). A denied command's result names the path or host in `<sandbox_violations>`; the model may retry with `dangerouslyDisableSandbox`, which goes through the normal permission flow labelled "(unsandboxed)" — `allowUnsandboxedCommands: false` ignores that parameter. `excludedCommands` (`Bash(...)` patterns, e.g. `docker *`) always run outside. `failIfUnavailable` (formerly `strict`) refuses to run bash at all when the sandbox was enabled but failed to start. Everything else (`filesystem.allowRead`, `network.allowLocalBinding`, `credentials`, ...) passes straight through to the runtime; `allowAppleEvents` is honoured from user settings only |
+| `/sandbox` | OS-level sandbox for bash (`@anthropic-ai/sandbox-runtime`), configured with Claude Code's `sandbox` keys. No host is pre-allowed: the first connection to a host asks you (a yes holds for the session; `network.allowedDomains` pre-allows). Sandboxed commands run without a permission prompt (`autoAllowBashIfSandboxed`, default true; deny rules and content-scoped ask rules still apply). A denied command's result names the path or host in `<sandbox_violations>`; the model may retry with `dangerouslyDisableSandbox`, which goes through the normal permission flow labelled "(unsandboxed)" — `allowUnsandboxedCommands: false` ignores that parameter. `excludedCommands` (`Bash(...)` patterns, e.g. `docker *`) always run outside. `failIfUnavailable` (formerly `strict`) refuses to run bash at all when the sandbox was enabled but failed to start. Commands you type yourself (`!` and bash mode) run outside the sandbox, as in Claude Code. Everything else (`filesystem.allowRead`, `network.allowLocalBinding`, `credentials`, ...) passes straight through to the runtime; `allowAppleEvents` is honoured from user settings only |
 | `/tasks` | background bash jobs (`run_in_background`, `bash_output`, `kill_bash`) and monitors. A job notifies the model once when it exits; the `monitor` tool turns each output line of a long-running command into an event that wakes the model (Claude Code's `Monitor`, minus the WebSocket source; stdout and stderr are both events because pi's shell backend merges them) |
 | `/agents` | subagents via the `task` tool (single, parallel, chain; `run_in_background`, `resume`, `worktree: true`). The roster is in the system prompt, so the model delegates unprompted. Defs are Claude Code's markdown: `tools`, `disallowedTools`, `model` (`inherit`, `provider/id`, or a `subagents.models` alias), `permissionMode`, `maxTurns`, `skills`, `memory`, `background`, `isolation`, `effort`, `color`. Children get the parent's deny rules and protected paths, its sandbox, and — when it has a UI — its permission prompts, named per subagent. `/agents new\|edit\|delete <name>` manage user defs (editing a bundled one starts from its text); bundled: `explore`, `planner`, `code-reviewer`, `general-purpose` |
 | `/mcp` | MCP servers from `mcp.json` / `.mcp.json`; project servers need `/mcp approve` (enable/disable of a project server is kept in your settings, never written into `.mcp.json`). Server instructions go into the system prompt, server prompts run as `/mcp__<server>__<prompt> args…`, `list_changed` refreshes tools live, and a result over 50KB is cut with the full text saved to a temp file. Resources: `mcp_list_resources` / `mcp_read_resource`, and `@server:uri` in a prompt attaches one. Claude Code's timeouts (per-server `timeout`, `MCP_TOOL_TIMEOUT` ≈28h default, idle `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` 30 min stdio / 5 min remote, `MCP_TIMEOUT` connect) and `${VAR}` / `${VAR:-default}` in `command`, `args`, `env`, `url`, `headers`; a remote server whose url or header would carry a model/cloud credential is refused |
 | `webfetch`, `websearch` | Claude Code's `WebFetch`/`WebSearch`, extended; see [Web](#web). Rules: `WebFetch(domain:example.com)` (what "Always allow" persists), `WebSearch(<query glob>)`, checked per query in a batch |
 | `/memory`, `# note` | persistent memory, injected into the system prompt. `/memory edit [scope]` and `/memory search <text>`; a bare `#` opens an editor for a multi-line note; `@name.md` lines pull in a sibling file |
 | `/rewind` | file checkpoints per turn; restores the files, the conversation, or both |
+| `/bash-mode`, `/stash` | bash mode (Ctrl+Shift+B or `/bash-mode`): the prompt drives a persistent shell, so `cd`, `export` and functions carry between commands; output shows below the editor instead of in the conversation, Escape leaves, Ctrl+C interrupts, Up/Down walk its commands. Alt+S stashes the prompt you are writing and brings it back into an empty editor; `/stash` inserts an older one |
+| `/vibe` | themed working messages: `/vibe star trek` turns "Working..." into short in-theme lines. Off by default; uses the session's model (`/vibe model <provider/id>` picks another), or `/vibe generate <theme> [count]` + `/vibe mode file` for no calls at all |
 | `/fleet` | session roster in the shape of Claude Code's `/resume` picker: title + `time · branch · N messages · path`, grouped by project path (ctrl+g: by Running / Saved instead, remembered) with status glyphs, type to search, ctrl+a current/all projects, enter opens, ctrl+t peeks, ctrl+n starts one; restarts a stale daemon by itself when it owns no running session |
 | `/status`, `/context`, `/usage` | model, auth, safety, session, context window, spend, plan usage |
 | `/plugin`, `/theme` | packages, theme |
 | `/help` | all of the above, grouped |
 
 The footer replicates a ccstatusline configuration (model, effort, context
-slider, git owner/branch/changes, plan-usage sliders, token stats). Plan usage
+slider, git owner/branch/changes, plan-usage sliders, token stats). The context slider turns yellow past 70% and red past 90%, follows a reply while it streams, and
+shows an estimate (the counter reads `~N tokens`) right after a compaction. The git change
+counts refresh as soon as a tool, a `!` command or a bash-mode command finishes. Plan usage
 is provider-neutral: one line per source that has data (Claude subscription via
 an Anthropic OAuth login, OpenCode Go via `OPENCODE_GO_WORKSPACE_ID` +
 `OPENCODE_GO_AUTH_COOKIE`), compacted before truncation on narrow terminals.
@@ -74,8 +78,14 @@ The cost figure always names its billing: `(subscription)` when the amount is
 what the tokens would have cost at API rates, `(per token)` when it is what the
 session actually costs. The subscription side follows pi's OAuth-subscription
 rule plus `kimi-coding` and `opencode-go`; add other subscription-billed
-provider ids with `statusline.subscriptionProviders` in settings.json. `statusline.command`
+provider ids with `statusline.subscriptionProviders` in settings.json. `statusline.currency`
+(`IDR`, `EUR`, `JPY`, ...) shows the cost figure in another currency, converted from USD at a
+daily rate. `statusline.command`
 runs an external script whose first stdout line joins the status line.
+
+Bash mode, the stash, vibes, the footer's currency and context-color behaviour and the welcome
+banner's sidebar are adapted from [pi-powerline-footer](https://github.com/nicobailon/pi-powerline-footer)
+(MIT, Nico Bailon).
 
 ## Web
 
