@@ -36,9 +36,9 @@ describe("buildSandboxFailureNote", () => {
 	});
 
 	it("lists writes and network by name but denyRead only by count", () => {
-		const note = buildSandboxFailureNote(resolveSandboxConfig(undefined));
+		const note = buildSandboxFailureNote(resolveSandboxConfig({ filesystem: { denyRead: ["~/.ssh", "~/.aws"] } }));
 		expect(note).toContain("<sandbox_note>");
-		expect(note).toContain("writes allowed: ., /tmp");
+		expect(note).toContain("writes allowed: ., and $TMPDIR for temporary files");
 		expect(note).toMatch(/reads denied: \d+ paths/);
 		expect(note).not.toContain("~/.ssh");
 	});

@@ -1,19 +1,15 @@
-import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SANDBOX_CONFIG, resolveSandboxConfig, strictRefusalReason } from "../ext/sandbox/config.ts";
 
 describe("default denyRead", () => {
-	const authPath = join(getAgentDir(), "auth.json");
-
-	it("covers the agent's own credential file", () => {
-		expect(resolveSandboxConfig(undefined).filesystem.denyRead).toContain(authPath);
+	it("blocks nothing, as in Claude Code: secrets are the permission layer's call", () => {
+		expect(resolveSandboxConfig(undefined).filesystem.denyRead).toEqual([]);
 	});
 
-	it("keeps it when the user adds their own denyRead entries", () => {
-		const denyRead = resolveSandboxConfig({ filesystem: { denyRead: ["~/secrets"] } }).filesystem.denyRead;
-		expect(denyRead).toContain(authPath);
-		expect(denyRead).toContain("~/secrets");
+	it("takes the user's own entries", () => {
+		expect(resolveSandboxConfig({ filesystem: { denyRead: ["~/secrets"] } }).filesystem.denyRead).toEqual([
+			"~/secrets",
+		]);
 	});
 });
 

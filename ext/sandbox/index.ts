@@ -17,34 +17,43 @@
  * `dangerouslyDisableSandbox` retry (honoured unless
  * `allowUnsandboxedCommands: false`; the permission layer decides whether the
  * user is asked). Network: no host is pre-allowed — the first connection to a
- * host asks the user, and a yes holds for the session.
+ * host asks the user; a yes holds for the session, "don't ask again" saves a
+ * `WebFetch(domain:...)` rule.
  *
  * Failure posture: if enabled but initialization fails (missing bubblewrap,
  * unsupported platform, ...), bash falls back to UNSANDBOXED execution with a
  * loud status chip and an error notice — unless `sandbox.failIfUnavailable` is
- * set, in which case the model's bash refuses to run at all: the tool,
- * background jobs and the monitor each check strictRefusalReason. The runtime dependency is
- * imported lazily so disabled sessions pay no startup cost.
+ * set, in which case bluclawd exits at startup, and should the sandbox fail
+ * later (`/sandbox on`) the model's bash refuses to run: the tool, background
+ * jobs and the monitor each check strictRefusalReason. The runtime dependency
+ * is imported lazily so disabled sessions pay no startup cost.
  */
 
+import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import {
 	type BashOperations,
+	CONFIG_DIR_NAME,
 	createBashTool,
 	createLocalBashOperations,
+	getAgentDir,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import { backgroundBashJobs } from "../_shared/background-bash.ts";
 import { EVENT_DELIVERY, shouldNotifyExit, tailOutput, taskExitMessage } from "../_shared/monitor-events.ts";
 import * as forkSettings from "../_shared/settings.ts";
+import { addProjectRule, setProjectSandboxKeys } from "../_shared/settings-write.ts";
 import {
 	isExcludedCommand,
 	resolveSandboxConfig,
 	runtimeConfig,
 	type SandboxConfig,
 	strictRefusalReason,
+	withSessionChoices,
 } from "./config.ts";
 import {
 	buildSandboxFailureNote,
@@ -89,8 +98,30 @@ const DENIAL_SCAN_BYTES = 4096;
 /** How long a failed command waits for the violation monitor to catch up. */
 const VIOLATION_WAIT_MS = 400;
 const VIOLATION_POLL_MS = 50;
+/** Where the runtime allows sandboxed temp writes by default. */
+const SESSION_TMP_ROOT = "/tmp/claude";
 
 type SandboxRuntime = typeof import("@anthropic-ai/sandbox-runtime");
+
+/**
+ * The repository's shared `.git` when `cwd` is a linked worktree (its git dir and
+ * common dir differ), else undefined. Commits there write to the common dir.
+ */
+function linkedWorktreeCommonDir(cwd: string): string | undefined {
+	try {
+		const [gitDir, commonDir] = execFileSync("git", ["rev-parse", "--git-dir", "--git-common-dir"], {
+			cwd,
+			encoding: "utf-8",
+			stdio: ["ignore", "pipe", "ignore"],
+		})
+			.trim()
+			.split("\n")
+			.map((dir) => resolve(cwd, dir));
+		return commonDir && gitDir !== commonDir ? commonDir : undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 export function factory(pi: ExtensionAPI): void {
 	pi.registerFlag("sandbox", {
@@ -109,6 +140,7 @@ export function factory(pi: ExtensionAPI): void {
 	let lastError: string | undefined;
 	let shellPath: string | undefined;
 	let commandPrefix: string | undefined;
+	let sessionTmp: string | undefined;
 	// The ask callback is bound once at initialize; the context it prompts through
 	// is whichever session is live now.
 	let liveCtx: ExtensionContext | undefined;
@@ -117,6 +149,12 @@ export function factory(pi: ExtensionAPI): void {
 	const sessionAllowedHosts = new Set<string>();
 	const pendingHostPrompts = new Map<string, Promise<boolean>>();
 
+	/**
+	 * Claude Code's network prompt. "Yes" holds for the session; "don't ask again"
+	 * saves a `WebFetch(domain:...)` allow rule, which pre-allows the host for the
+	 * sandbox (and for webfetch) from then on. That row is offered only in a trusted
+	 * project, the one place a rule can be saved.
+	 */
 	async function askHost(host: string, port: number): Promise<boolean> {
 		const key = `${host}:${port}`;
 		if (sessionAllowedHosts.has(key)) return true;
@@ -124,19 +162,66 @@ export function factory(pi: ExtensionAPI): void {
 		if (pending) return pending;
 		const ctx = liveCtx;
 		if (!ctx?.hasUI) return false;
+		// IPv6 literals are bracketed in domain lists and rules.
+		const domain = host.includes(":") ? `[${host}]` : host;
+		const persist = ctx.isProjectTrusted() ? `Yes, and don't ask again for ${domain}` : undefined;
 		const prompt = ctx.ui
-			.confirm(
-				"Sandbox: allow network access?",
-				`A sandboxed command wants to connect to ${key}.\nAllow it for this session? The command is waiting on your answer and may time out.\nPre-allow hosts with sandbox.network.allowedDomains in settings.json.`,
-			)
-			.then((yes) => {
-				if (yes) sessionAllowedHosts.add(key);
-				return yes;
+			.select(`Network request outside of sandbox\n\nHost: ${key}\n\nDo you want to allow this connection?`, [
+				"Yes",
+				...(persist ? [persist] : []),
+				"No",
+			])
+			.then(async (choice) => {
+				if (choice !== "Yes" && choice !== persist) return false;
+				sessionAllowedHosts.add(key);
+				if (choice === persist) {
+					config.network.allowedDomains = [...new Set([...config.network.allowedDomains, domain])];
+					runtime?.SandboxManager.updateConfig(runtimeConfig(config));
+					await addProjectRule(ctx.cwd, "allow", `WebFetch(domain:${domain})`, true);
+				}
+				return true;
 			})
 			.catch(() => false)
 			.finally(() => pendingHostPrompts.delete(key));
 		pendingHostPrompts.set(key, prompt);
 		return prompt;
+	}
+
+	/** The config for this session's settings and permission rules, as they are on disk now. */
+	function loadConfig(ctx: ExtensionContext): SandboxConfig {
+		const sm = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
+		shellPath = sm.getShellPath();
+		commandPrefix = sm.getShellCommandPrefix();
+		return resolveSandboxConfig(
+			forkSettings.sandbox(sm, { project: ctx.cwd, agent: getAgentDir() }),
+			{ sandbox: pi.getFlag("sandbox") === true, noSandbox: pi.getFlag("no-sandbox") === true },
+			{
+				cwd: ctx.cwd,
+				agentDir: getAgentDir(),
+				rules: forkSettings.permissions(sm) ?? {},
+				gitCommonDir: linkedWorktreeCommonDir(ctx.cwd),
+			},
+		);
+	}
+
+	/**
+	 * Settings edits reach the running session, as in Claude Code: before each
+	 * sandboxed command the config is re-read, and the runtime updated when the part
+	 * it enforces changed; what the session decided is kept (withSessionChoices).
+	 */
+	function syncConfig(): void {
+		const ctx = liveCtx;
+		if (!ctx || !runtime) return;
+		let next: SandboxConfig;
+		try {
+			next = loadConfig(ctx);
+		} catch {
+			return; // A settings file mid-write keeps the config in force.
+		}
+		const before = JSON.stringify(runtimeConfig(config));
+		config = withSessionChoices(next, config);
+		if (JSON.stringify(runtimeConfig(config)) !== before) runtime.SandboxManager.updateConfig(runtimeConfig(config));
+		publishPosture();
 	}
 
 	/**
@@ -159,6 +244,7 @@ export function factory(pi: ExtensionAPI): void {
 		return {
 			exec: async (command, cwd, options) => {
 				if (!runtime) throw new Error("Sandbox runtime not initialized");
+				syncConfig();
 				// Violations are attributed by this id (the runtime keys on the first 100
 				// chars of the command otherwise, so reruns would inherit old events).
 				const commandId = randomUUID();
@@ -297,6 +383,14 @@ export function factory(pi: ExtensionAPI): void {
 		}
 		try {
 			runtime ??= await import("@anthropic-ai/sandbox-runtime");
+			// Claude Code's session temp dir. The runtime points sandboxed commands'
+			// $TMPDIR at CLAUDE_CODE_TMPDIR (else /tmp/claude) and lets them write under
+			// /tmp/claude, but creates neither, so every temp write failed.
+			if (!process.env.CLAUDE_CODE_TMPDIR) {
+				mkdirSync(SESSION_TMP_ROOT, { recursive: true });
+				sessionTmp = mkdtempSync(join(SESSION_TMP_ROOT, "pi-"));
+				process.env.CLAUDE_CODE_TMPDIR = sessionTmp;
+			}
 			// The log monitor is what attributes file denials to commands (network
 			// denials come from the proxy regardless).
 			await runtime.SandboxManager.initialize(runtimeConfig(config), ({ host, port }) => askHost(host, port), true);
@@ -325,6 +419,11 @@ export function factory(pi: ExtensionAPI): void {
 				// Ignore cleanup errors
 			}
 		}
+		if (sessionTmp) {
+			rmSync(sessionTmp, { recursive: true, force: true });
+			if (process.env.CLAUDE_CODE_TMPDIR === sessionTmp) delete process.env.CLAUDE_CODE_TMPDIR;
+			sessionTmp = undefined;
+		}
 		setSandboxActive(false);
 		ctx.ui.setStatus("sandbox", undefined);
 		publishPosture();
@@ -332,17 +431,23 @@ export function factory(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		liveCtx = ctx;
-		const sm = SettingsManager.create(ctx.cwd, undefined, {
-			projectTrusted: ctx.isProjectTrusted(),
-		});
-		shellPath = sm.getShellPath();
-		commandPrefix = sm.getShellCommandPrefix();
-		config = resolveSandboxConfig(forkSettings.sandbox(sm), {
-			sandbox: pi.getFlag("sandbox") === true,
-			noSandbox: pi.getFlag("no-sandbox") === true,
-		});
+		config = loadConfig(ctx);
 		if (config.enabled) {
 			await activate(ctx);
+			// Claude Code refuses to start when a required sandbox cannot. The refusal in
+			// the bash tool stays as the backstop for a session that keeps running.
+			if (!isSandboxActive() && config.failIfUnavailable) {
+				console.error(`bluclawd: sandbox.failIfUnavailable is set and the sandbox could not start: ${lastError}`);
+				// Headless, a graceful shutdown still lets the pending prompt run first;
+				// with a UI it is what restores the terminal.
+				if (!ctx.hasUI) process.exit(1);
+				// pi exits 0 after a shutdown; the exit code must still report the failure.
+				process.once("exit", () => {
+					process.exitCode = 1;
+				});
+				ctx.shutdown();
+				return;
+			}
 		} else if (isSandboxActive()) {
 			await deactivate(ctx);
 		}
@@ -361,53 +466,45 @@ export function factory(pi: ExtensionAPI): void {
 		await deactivate(ctx);
 	});
 
+	async function setEnabled(ctx: ExtensionContext, on: boolean): Promise<void> {
+		config.enabled = on;
+		// SandboxManager.initialize is not idempotent (on Linux it starts a second
+		// network bridge without stopping the first).
+		if (on && !isSandboxActive()) await activate(ctx);
+		if (!on) await deactivate(ctx);
+	}
+
+	/**
+	 * The sandbox is a switch: on, the model's shell commands run confined (and
+	 * without a prompt); off, they run as usual. The choice is saved per project,
+	 * never in an untrusted one. The finer settings keys still apply when written.
+	 */
 	pi.registerCommand("sandbox", {
-		description: "Show or toggle bash sandboxing (/sandbox [on|off])",
+		description: "Turn the bash sandbox on or off (/sandbox [on|off])",
 		handler: async (args, ctx) => {
-			const arg = (args ?? "").trim();
-			if (arg === "on") {
-				config.enabled = true;
-				// SandboxManager.initialize is not idempotent (on Linux it starts a
-				// second network bridge without stopping the first).
-				if (!isSandboxActive()) await activate(ctx);
-				if (isSandboxActive()) {
-					ctx.ui.notify(
-						"Sandbox enabled for this session. Persist with sandbox.enabled in settings.json.",
-						"info",
-					);
-				}
+			let arg = (args ?? "").trim().toLowerCase();
+			if (!arg) {
+				const choice = await ctx.ui.select(`Sandbox (currently ${isSandboxActive() ? "on" : "off"})`, [
+					"On",
+					"Off",
+				]);
+				if (!choice) return;
+				arg = choice.toLowerCase();
+			}
+			if (arg !== "on" && arg !== "off") {
+				ctx.ui.notify("Usage: /sandbox [on|off]", "warning");
 				return;
 			}
-			if (arg === "off") {
-				await deactivate(ctx);
-				config.enabled = false;
-				ctx.ui.notify("Sandbox disabled for this session. Persist with sandbox.enabled in settings.json.", "info");
-				return;
+			const on = arg === "on";
+			await setEnabled(ctx, on);
+			// A sandbox that failed to start has already said why.
+			if (on && !isSandboxActive()) return;
+			let where = "for this session only (the project is not trusted, so nothing was saved)";
+			if (ctx.isProjectTrusted()) {
+				await setProjectSandboxKeys(ctx.cwd, { enabled: on }, true);
+				where = `and saved to ${CONFIG_DIR_NAME}/settings.json`;
 			}
-			const list = (values: string[] | undefined) => values?.join(", ") || "(none)";
-			const lines = [
-				`Sandbox: ${isSandboxActive() ? "active 🔒" : config.enabled ? "enabled but NOT active 🔓" : "disabled"}`,
-				`On failure: ${config.failIfUnavailable ? "REFUSE to run bash (sandbox.failIfUnavailable)" : "run unsandboxed"}`,
-				...(lastError ? [`Last error: ${lastError}`] : []),
-				"",
-				`Mode: ${config.autoAllowBashIfSandboxed ? "auto-allow (sandboxed commands run without a prompt)" : "regular permissions (sandboxed commands still prompt)"}`,
-				`Unsandboxed retry (dangerouslyDisableSandbox): ${config.allowUnsandboxedCommands ? "allowed, goes through the permission flow" : "ignored — strict sandbox mode"}`,
-				`Excluded commands (always unsandboxed): ${list(config.excludedCommands)}`,
-				"",
-				"Network:",
-				`  Pre-allowed: ${list(config.network.allowedDomains)}`,
-				`  Allowed this session: ${list([...sessionAllowedHosts])}`,
-				`  Denied: ${list(config.network.deniedDomains)}`,
-				`  Unlisted hosts: ${config.network.strictAllowlist ? "denied (strictAllowlist)" : "ask the user; denied when no one can answer"}`,
-				"",
-				"Filesystem:",
-				`  Deny read: ${list(config.filesystem.denyRead)}`,
-				`  Allow write: ${list(config.filesystem.allowWrite)}`,
-				`  Deny write: ${list(config.filesystem.denyWrite)}`,
-				"",
-				"Toggle with /sandbox on|off; configure via the sandbox section in settings.json.",
-			];
-			ctx.ui.notify(lines.join("\n"), "info");
+			ctx.ui.notify(`Sandbox ${on ? "on 🔒" : "off"} ${where}.`, "info");
 		},
 	});
 }

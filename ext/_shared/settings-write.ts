@@ -24,6 +24,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
+import { sharedRef } from "./global-state.ts";
 import type { PermissionSettings } from "./settings.ts";
 
 type RuleList = "allow" | "ask" | "deny";
@@ -97,22 +98,64 @@ function withoutRule(permissions: PermissionSettings, rule: string): PermissionS
 	return removed ? next : undefined;
 }
 
+/**
+ * Told whenever a permission rule is saved or removed, so the permission layer can
+ * reload its in-memory rules when another extension wrote one (the sandbox's "don't
+ * ask again" for a host). A sharedRef: each extension loads this module on its own.
+ */
+const rulesChanged = sharedRef<(() => void) | undefined>("permissions.rulesChanged", undefined);
+
+export function onRulesChanged(listener: (() => void) | undefined): void {
+	rulesChanged.set(listener);
+}
+
+function notifyRulesChanged(): void {
+	rulesChanged.get()?.();
+}
+
 export async function addGlobalRule(list: RuleList, rule: string): Promise<void> {
 	await updateKey<PermissionSettings>(globalSettingsPath(), "permissions", (p) => withRule(p, list, rule));
+	notifyRulesChanged();
 }
 
 export async function addProjectRule(cwd: string, list: RuleList, rule: string, trusted: boolean): Promise<void> {
 	if (!trusted) throw new Error("Refusing to write project permission rules: project is not trusted");
 	await updateKey<PermissionSettings>(projectSettingsPath(cwd), "permissions", (p) => withRule(p, list, rule));
+	notifyRulesChanged();
 }
 
 export async function removeGlobalRule(rule: string): Promise<boolean> {
-	return updateKey<PermissionSettings>(globalSettingsPath(), "permissions", (p) => withoutRule(p, rule));
+	const removed = await updateKey<PermissionSettings>(globalSettingsPath(), "permissions", (p) =>
+		withoutRule(p, rule),
+	);
+	if (removed) notifyRulesChanged();
+	return removed;
 }
 
 export async function removeProjectRule(cwd: string, rule: string, trusted: boolean): Promise<boolean> {
 	if (!trusted) return false;
-	return updateKey<PermissionSettings>(projectSettingsPath(cwd), "permissions", (p) => withoutRule(p, rule));
+	const removed = await updateKey<PermissionSettings>(projectSettingsPath(cwd), "permissions", (p) =>
+		withoutRule(p, rule),
+	);
+	if (removed) notifyRulesChanged();
+	return removed;
+}
+
+/**
+ * Save the `/sandbox` on/off choice (`sandbox.enabled`) to the project's settings,
+ * as Claude Code saves it to the project's local settings. Every other `sandbox`
+ * key on disk is kept.
+ */
+export async function setProjectSandboxKeys(
+	cwd: string,
+	patch: Record<string, boolean>,
+	trusted: boolean,
+): Promise<boolean> {
+	if (!trusted) throw new Error("Refusing to write project sandbox settings: project is not trusted");
+	return updateKey<Record<string, unknown>>(projectSettingsPath(cwd), "sandbox", (sandbox) => ({
+		...sandbox,
+		...patch,
+	}));
 }
 
 /** The `mcp` settings key this layer owns: the approval record and per-project enable/disable choices. */

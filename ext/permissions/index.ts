@@ -30,7 +30,13 @@ import type {
 import { CONFIG_DIR_NAME, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Container, Key, Spacer, Text } from "@earendil-works/pi-tui";
 import * as forkSettings from "../_shared/settings.ts";
-import { addGlobalRule, addProjectRule, removeGlobalRule, removeProjectRule } from "../_shared/settings-write.ts";
+import {
+	addGlobalRule,
+	addProjectRule,
+	onRulesChanged,
+	removeGlobalRule,
+	removeProjectRule,
+} from "../_shared/settings-write.ts";
 import { sandboxPosture } from "../sandbox/state.ts";
 import { setActivePermissionMode } from "./active-mode.ts";
 import { type EvalConfig, evaluatePostHook, evaluatePreHook, type Gate } from "./evaluate.ts";
@@ -186,6 +192,8 @@ export function factory(pi: ExtensionAPI): void {
 			deny: [...(base.deny ?? []), ...(sessionRules.deny ?? [])],
 		};
 	}
+	// A rule saved elsewhere (the sandbox's "don't ask again" for a host) applies at once.
+	onRulesChanged(() => liveCtx && reloadRules(liveCtx));
 	// Mode store: created in session_start (fresh "ask" state), disposed in
 	// session_shutdown. Undefined before the first session_start → treat as "ask".
 	let modeStore: ModeStore | undefined;

@@ -6,16 +6,10 @@
  * retries the same thing. This appends a short, DETERMINISTIC note derived
  * from the active configuration.
  *
- * Why not report the actual OS denial? sandbox-runtime can stream macOS
- * sandbox violations (`initialize(..., enableLogMonitor=true)`), but measured
- * against the real runtime that path does not deliver: the `log stream`
- * subprocess needs seconds to attach (so the first commands report nothing),
- * attribution depends on the violation line and its `CMD64_` marker landing in
- * the same stdout chunk, Linux/bubblewrap has no feeder at all, and on macOS
- * the denial that actually failed the command (file-write) did not surface —
- * only unrelated noise like `deny(1) sysctl-read kern.iossupportversion` did.
- * Injecting that into the transcript would mislead the model on every failure,
- * so this note states what is known for certain instead of guessing.
+ * The OS denials themselves, when the runtime attributes them to the command,
+ * are reported separately as `<sandbox_violations>` (index.ts); this note is the
+ * fallback that still holds when they are missing (a denial can go unrecorded,
+ * or arrive too late to attribute).
  */
 
 import type { SandboxConfig } from "./config.ts";
@@ -86,7 +80,7 @@ export function buildSandboxFailureNote(config: SandboxConfig): string | undefin
 		"",
 		"<sandbox_note>",
 		"This command ran inside the OS sandbox, which may have denied it.",
-		`  writes allowed: ${summarize(allowWrite)}`,
+		`  writes allowed: ${summarize(allowWrite)}, and $TMPDIR for temporary files`,
 		`  writes denied: ${summarize(denyWrite)}`,
 		`  reads denied: ${countOnly(denyRead)}`,
 		`  network pre-allowed: ${summarize(allowedDomains)} (other hosts ask the user first, or are denied when nobody can answer)`,

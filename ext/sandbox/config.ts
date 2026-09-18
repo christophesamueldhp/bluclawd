@@ -6,11 +6,12 @@
  * --no-sandbox > --sandbox > settings.enabled > default off.
  */
 
-import { join } from "node:path";
+import { existsSync, statSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { SandboxSettings } from "../_shared/settings.ts";
-import { decide } from "../permissions/rules.ts";
+import { decide, type Rules, stripWrappingQuotes } from "../permissions/rules.ts";
 
 export interface SandboxConfig extends SandboxSettings {
 	enabled: boolean;
@@ -24,9 +25,10 @@ export interface SandboxConfig extends SandboxSettings {
 
 /**
  * Claude Code's defaults. No domain is pre-allowed: the first connection to a
- * host prompts (see the ask callback in index.ts), which is how Claude Code
- * behaves too. The write/read lists are the fork's long-standing conservative
- * set plus the agent's own credentials.
+ * host prompts (see the ask callback in index.ts). Writes: the working directory,
+ * plus the session temp dir (index.ts). Reads: everything; like Claude Code, no
+ * credential is blocked by default — which files are secret is the permission
+ * layer's call, and `denyRead` / `credentials` are there to add OS-level blocks.
  */
 export const DEFAULT_SANDBOX_CONFIG: SandboxConfig = {
 	enabled: false,
@@ -39,28 +41,129 @@ export const DEFAULT_SANDBOX_CONFIG: SandboxConfig = {
 		deniedDomains: [],
 	},
 	filesystem: {
-		// The agent's own provider credentials. The permission layer gates the
-		// read tool on this file, but a bash `cat` is only stopped here.
-		denyRead: ["~/.ssh", "~/.aws", "~/.gnupg", join(getAgentDir(), "auth.json")],
-		allowWrite: [".", "/tmp"],
-		denyWrite: [
-			".env",
-			".env.*",
-			"*.pem",
-			"*.key",
-			// The agent's own configuration: hooks.json and mcp.json here run shell
-			// commands and spawn servers, so a bash write into this dir is a way to
-			// grant yourself execution. allowWrite lists "." and the dir lives under
-			// it, so without this the sandbox permits it.
-			`**/${CONFIG_DIR_NAME}/**`,
-			// Git hooks execute on commit. The REST of .git is deliberately writable:
-			// git writes objects, refs, the index and logs constantly, and denying
-			// that would break every commit the agent makes. Git only populates
-			// hooks/ at init and clone.
-			"**/.git/hooks/**",
-		],
+		denyRead: [],
+		allowWrite: ["."],
+		denyWrite: [],
 	},
 };
+
+/**
+ * What the agent loads configuration and code from inside a config dir: settings,
+ * hooks and MCP servers run commands, and the resource dirs hold extensions,
+ * skills, agents and prompts it executes or obeys. A sandboxed command that could
+ * write these could grant itself permissions. Everything else in the dir, such as
+ * `worktrees/` where subagents work, stays writable, as `.claude/worktrees` does
+ * in Claude Code.
+ */
+const CONFIG_DIR_ENTRIES = [
+	"settings.json",
+	"mcp.json",
+	"hooks.json",
+	"SYSTEM.md",
+	"APPEND_SYSTEM.md",
+	"extensions",
+	"skills",
+	"prompts",
+	"themes",
+	"agents",
+	"commands",
+	"hooks",
+	"workflows",
+	"npm",
+	"git",
+];
+
+export interface SandboxContext {
+	cwd: string;
+	agentDir: string;
+	/** The session's permission rules, which Claude Code folds into the sandbox lists. */
+	rules?: Rules;
+	/** The repository's shared `.git` when `cwd` is a linked worktree. */
+	gitCommonDir?: string;
+}
+
+/**
+ * Writes the sandbox denies inside its writable directories, whatever the settings
+ * say (Claude Code's protected paths; no allowWrite entry lifts them). Each entry is
+ * given both as a glob, which macOS applies at any depth, and as a concrete path,
+ * because the Linux runtime skips glob write entries altogether. The runtime adds
+ * its own set on top: shell startup files, `.gitconfig`, `.mcp.json`, `.vscode`,
+ * `.idea`, and `.git/hooks` and `.git/config`.
+ */
+export function protectedWritePaths(context: SandboxContext): string[] {
+	const { cwd, agentDir } = context;
+	const paths = CONFIG_DIR_ENTRIES.flatMap((entry) => [
+		`**/${CONFIG_DIR_NAME}/${entry}`,
+		join(cwd, CONFIG_DIR_NAME, entry),
+	]);
+	paths.push(agentDir);
+	// Files that would turn the working directory into a bare git repository, whose
+	// config (core.fsmonitor, hooks) git would then run for anyone working here.
+	paths.push(join(cwd, "HEAD"), join(cwd, "objects"), join(cwd, "refs"));
+	if (!isDirectory(join(cwd, "config"))) paths.push(join(cwd, "config"));
+	if (existsSync(join(cwd, "HEAD"))) paths.push(join(cwd, "hooks"));
+	if (context.gitCommonDir) {
+		paths.push(join(context.gitCommonDir, "hooks"), join(context.gitCommonDir, "config"));
+	}
+	return paths;
+}
+
+function isDirectory(path: string): boolean {
+	try {
+		return statSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+/** A rule path in the sandbox's spelling: permission rules resolve relative paths against the working directory. */
+function rulePath(path: string, cwd: string): string {
+	return isAbsolute(path) || path.startsWith("~") ? path : join(cwd, path);
+}
+
+/**
+ * Wildcards the sandbox honours in a `WebFetch(domain:...)` rule: a leading `*.` and a
+ * bare `*`. Any other wildcard still matches fetches but means nothing to the proxy.
+ */
+function sandboxDomain(domain: string): string | undefined {
+	if (domain === "*") return domain;
+	const rest = domain.startsWith("*.") ? domain.slice(2) : domain;
+	return rest.includes("*") ? undefined : domain;
+}
+
+/**
+ * The paths and domains Claude Code adds from permission rules: `Edit` allow and deny
+ * rules to the write lists, `Read` deny rules to `denyRead`, `WebFetch(domain:...)`
+ * allow and deny rules to the domain lists. bluclawd's `Write` verb counts as `Edit`.
+ * A rule with no argument names no path and adds nothing.
+ */
+export function sandboxListsFromRules(rules: Rules, cwd: string) {
+	const lists = {
+		allowWrite: [] as string[],
+		denyWrite: [] as string[],
+		denyRead: [] as string[],
+		allowedDomains: [] as string[],
+		deniedDomains: [] as string[],
+	};
+	for (const kind of ["allow", "deny"] as const) {
+		for (const rule of rules[kind] ?? []) {
+			const m = /^(\w+)\((.+)\)$/.exec(rule.trim());
+			if (!m) continue;
+			const verb = m[1].toLowerCase();
+			const arg = stripWrappingQuotes(m[2].trim());
+			if (verb === "webfetch") {
+				const domain = /^domain:\s*(.+)$/i.exec(arg)?.[1];
+				const host = domain && sandboxDomain(domain.trim());
+				if (host) (kind === "allow" ? lists.allowedDomains : lists.deniedDomains).push(host);
+			} else if (verb === "edit" || verb === "write") {
+				(kind === "allow" ? lists.allowWrite : lists.denyWrite).push(rulePath(arg, cwd));
+			} else if (verb === "read" && kind === "deny") {
+				lists.denyRead.push(rulePath(arg, cwd));
+			}
+		}
+	}
+	return lists;
+}
 
 /** Union preserving order, first occurrence wins. */
 function union(defaults: string[] | undefined, overrides: string[] | undefined): string[] {
@@ -77,8 +180,10 @@ export interface SandboxFlagOverrides {
 export function resolveSandboxConfig(
 	settings: SandboxSettings | undefined,
 	flags: SandboxFlagOverrides = {},
+	context: SandboxContext = { cwd: process.cwd(), agentDir: getAgentDir() },
 ): SandboxConfig {
 	const d = DEFAULT_SANDBOX_CONFIG;
+	const fromRules = sandboxListsFromRules(context.rules ?? {}, context.cwd);
 	const config: SandboxConfig = {
 		...d,
 		...settings,
@@ -90,8 +195,14 @@ export function resolveSandboxConfig(
 		network: {
 			...d.network,
 			...settings?.network,
-			allowedDomains: union(d.network.allowedDomains, settings?.network?.allowedDomains),
-			deniedDomains: union(d.network.deniedDomains, settings?.network?.deniedDomains),
+			allowedDomains: union(
+				union(d.network.allowedDomains, settings?.network?.allowedDomains),
+				fromRules.allowedDomains,
+			),
+			deniedDomains: union(
+				union(d.network.deniedDomains, settings?.network?.deniedDomains),
+				fromRules.deniedDomains,
+			),
 		},
 		// Lists ADD to the built-ins, as Claude Code merges them across scopes. Plain
 		// spread meant that naming a single pattern of your own silently dropped every
@@ -100,15 +211,41 @@ export function resolveSandboxConfig(
 		filesystem: {
 			...d.filesystem,
 			...settings?.filesystem,
-			denyWrite: union(d.filesystem.denyWrite, settings?.filesystem?.denyWrite),
-			denyRead: union(d.filesystem.denyRead, settings?.filesystem?.denyRead),
-			allowWrite: union(d.filesystem.allowWrite, settings?.filesystem?.allowWrite),
+			denyWrite: union(union(d.filesystem.denyWrite, settings?.filesystem?.denyWrite), [
+				...fromRules.denyWrite,
+				...protectedWritePaths(context),
+			]),
+			denyRead: union(union(d.filesystem.denyRead, settings?.filesystem?.denyRead), fromRules.denyRead),
+			allowWrite: union(
+				union(d.filesystem.allowWrite, settings?.filesystem?.allowWrite),
+				// A linked worktree's commits land in the repository's shared .git.
+				[...fromRules.allowWrite, ...(context.gitCommonDir ? [context.gitCommonDir] : [])],
+			),
 		},
 	};
 	delete config.strict;
 	if (flags.sandbox) config.enabled = true;
 	if (flags.noSandbox) config.enabled = false;
 	return config;
+}
+
+/**
+ * A config re-read from disk mid-session, with what the session decided kept: whether
+ * the sandbox is on, the /sandbox panel's mode and override (which an untrusted project
+ * holds for the session only), and hosts allowed so far. Claude Code applies settings
+ * edits to the lists, not to these.
+ */
+export function withSessionChoices(next: SandboxConfig, current: SandboxConfig): SandboxConfig {
+	return {
+		...next,
+		enabled: current.enabled,
+		autoAllowBashIfSandboxed: current.autoAllowBashIfSandboxed,
+		allowUnsandboxedCommands: current.allowUnsandboxedCommands,
+		network: {
+			...next.network,
+			allowedDomains: [...new Set([...next.network.allowedDomains, ...current.network.allowedDomains])],
+		},
+	};
 }
 
 /** The part of the config the runtime takes; bluclawd's own keys stay behind. */

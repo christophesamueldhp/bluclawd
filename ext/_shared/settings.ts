@@ -14,6 +14,7 @@
  * project is not trusted, so a reader here can never see an untrusted project's
  * values.
  */
+import { join } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { SettingsManager } from "@earendil-works/pi-coding-agent";
 
@@ -123,32 +124,90 @@ export function statusline(sm: SettingsManager): StatuslineSettings | undefined 
 	return value ? { ...value } : undefined;
 }
 
-export function sandbox(sm: SettingsManager): SandboxSettings | undefined {
+/**
+ * The merged `sandbox` settings. Relative filesystem paths resolve per scope, as
+ * in Claude Code: against the project root in project settings, against the
+ * agent dir (Claude Code's `~/.claude`) in user settings. Without `dirs` they are
+ * left as written, for readers that only want a flag.
+ */
+export function sandbox(sm: SettingsManager, dirs?: { project: string; agent: string }): SandboxSettings | undefined {
 	const global = (sm.getGlobalSettings() as unknown as Mergeable).sandbox as SandboxSettings | undefined;
 	const project = (sm.getProjectSettings() as unknown as Mergeable).sandbox as SandboxSettings | undefined;
-	return mergeSandboxSettings(global, project);
+	return mergeSandboxSettings(
+		global && dirs ? resolveSandboxPaths(global, dirs.agent) : global,
+		project && dirs ? resolveSandboxPaths(project, dirs.project) : project,
+	);
+}
+
+/**
+ * Claude Code's sandbox path prefixes: `/` and `//` are absolute, `~` is home,
+ * anything else (`./out`, `out`, `**\/.env`) is relative to `base`.
+ */
+export function resolveSandboxPath(path: string, base: string): string {
+	if (path.startsWith("//")) return path.slice(1);
+	if (path.startsWith("/") || path.startsWith("~")) return path;
+	return join(base, path);
+}
+
+export function resolveSandboxPaths(settings: SandboxSettings, base: string): SandboxSettings {
+	const out = structuredClone(settings);
+	const fs = out.filesystem;
+	if (fs) {
+		for (const key of ["allowWrite", "denyWrite", "denyRead", "allowRead"] as const) {
+			const list = fs[key];
+			if (Array.isArray(list)) fs[key] = list.map((p) => resolveSandboxPath(p, base));
+		}
+	}
+	for (const file of out.credentials?.files ?? []) {
+		if (typeof file.path === "string") file.path = resolveSandboxPath(file.path, base);
+	}
+	return out;
+}
+
+/**
+ * Keys Claude Code honours from user (or managed) settings only: each widens what a
+ * sandboxed command can do (run apps, write anywhere, send a real credential somewhere,
+ * swap the sandbox binary), so a checked-out repository must not be able to set it.
+ */
+function withoutUserOnlyKeys(project: SandboxSettings): SandboxSettings {
+	const out = structuredClone(project);
+	delete out.allowAppleEvents;
+	delete out.ripgrep;
+	// Binaries the runtime spawns: a repository must not name its own.
+	delete out.bwrapPath;
+	delete out.socatPath;
+	if (out.filesystem) delete out.filesystem.disabled;
+	if (out.network) {
+		delete out.network.strictAllowlist;
+		delete out.network.tlsTerminate;
+	}
+	const creds = out.credentials;
+	if (creds) {
+		delete creds.allowPlaintextInject;
+		delete creds.awsPairs;
+		delete creds.sigv4;
+		// A `deny` entry only narrows access, so any scope may add one; a `mask` entry
+		// authorizes the proxy to send the real value out.
+		if (creds.files) creds.files = creds.files.filter((entry) => entry.mode !== "mask");
+		if (creds.envVars) creds.envVars = creds.envVars.filter((entry) => entry.mode !== "mask");
+	}
+	return out;
 }
 
 /**
  * Claude Code's scope merge for `sandbox`: arrays combine across scopes rather
  * than one replacing the other, objects merge at any depth, scalars take the
- * project's value. `allowAppleEvents` is the one key a project may not set —
- * it removes code-execution isolation, so only the user's own settings count.
+ * project's value — except the user-only keys above, which a project cannot set.
  */
 export function mergeSandboxSettings(
 	global: SandboxSettings | undefined,
 	project: SandboxSettings | undefined,
 ): SandboxSettings | undefined {
 	if (!global && !project) return undefined;
-	const out = deepMerge(
+	return deepMerge(
 		structuredClone(global ?? {}) as Mergeable,
-		structuredClone(project ?? {}) as Mergeable,
+		(project ? withoutUserOnlyKeys(project) : {}) as Mergeable,
 	) as SandboxSettings;
-	if (project && "allowAppleEvents" in project) {
-		if (global?.allowAppleEvents === undefined) delete out.allowAppleEvents;
-		else out.allowAppleEvents = global.allowAppleEvents;
-	}
-	return out;
 }
 
 function deepMerge(base: Mergeable, overrides: Mergeable): Mergeable {
