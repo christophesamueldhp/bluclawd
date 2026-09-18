@@ -26,6 +26,32 @@ describe("subagent rendering", () => {
 		expect(out.render(120).join("\n")).toMatch(/3 turns ↑1\.2k ↓300/);
 	});
 
+	it("marks a child stopped at a cap as partial, naming the cap, in every mode", () => {
+		const capped: SingleResult = { ...running("tiny", 2), status: "ok", partial: true, stopReason: "max-tokens" };
+		const render = (mode: string, expanded: boolean) =>
+			(
+				renderResult(
+					{
+						content: [{ type: "text", text: "" }],
+						details: { mode, agentScope: "user", projectAgentsDir: null, results: [{ ...capped, step: 1 }] },
+					} as never,
+					{ expanded },
+					theme,
+					undefined,
+				) as { render(w: number): string[] }
+			)
+				.render(120)
+				.join("\n");
+		for (const mode of ["single", "chain", "parallel"])
+			for (const expanded of [false, true]) {
+				const out = render(mode, expanded);
+				expect(out, `${mode} expanded=${expanded}`).toContain("◐");
+				expect(out, `${mode} expanded=${expanded}`).not.toMatch(/✓ tiny|tiny ✓/);
+			}
+		expect(render("single", false)).toContain("[max-tokens]");
+		expect(render("single", true)).toContain("[max-tokens]");
+	});
+
 	const call = (args: object) =>
 		(renderCall(args as never, theme, undefined) as { render(w: number): string[] }).render(120).join("\n");
 

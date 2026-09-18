@@ -202,6 +202,20 @@ export function isFailedResult(result: SingleResult): boolean {
 	return result.status === "failed" || result.stopReason === "error" || result.stopReason === "aborted";
 }
 
+/** ✗ failed, ◐ stopped at a cap (its output is partial), ✓ done. */
+function resultIcon(r: SingleResult, theme: Theme): string {
+	if (r.status === "running") return theme.fg("warning", "⏳");
+	if (isFailedResult(r)) return theme.fg("error", "✗");
+	return r.partial ? theme.fg("warning", "◐") : theme.fg("success", "✓");
+}
+
+/** The stop reason beside a failed or capped child's name. */
+function stopTag(r: SingleResult, theme: Theme): string {
+	if (!r.stopReason) return "";
+	if (isFailedResult(r)) return ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+	return r.partial ? ` ${theme.fg("warning", `[${r.stopReason}]`)}` : "";
+}
+
 export function getResultOutput(result: SingleResult): string {
 	if (isFailedResult(result)) {
 		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
@@ -318,14 +332,14 @@ export function renderResult(
 	if (details.mode === "single" && details.results.length === 1) {
 		const r = details.results[0];
 		const isError = isFailedResult(r);
-		const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+		const icon = resultIcon(r, theme);
 		const displayItems = getDisplayItems(r.messages);
 		const finalOutput = getFinalOutput(r.messages);
 
 		if (expanded) {
 			const container = new Container();
 			let header = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
-			if (isError && r.stopReason) header += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+			header += stopTag(r, theme);
 			container.addChild(new Text(header, 0, 0));
 			if (isError && r.errorMessage)
 				container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
@@ -361,7 +375,7 @@ export function renderResult(
 		}
 
 		let text = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
-		if (isError && r.stopReason) text += ` ${theme.fg("error", `[${r.stopReason}]`)}`;
+		text += stopTag(r, theme);
 		if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
 		else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
 		else {
@@ -409,12 +423,7 @@ export function renderResult(
 			);
 
 			for (const r of details.results) {
-				const rIcon =
-					r.status === "running"
-						? theme.fg("warning", "⏳")
-						: r.status === "ok"
-							? theme.fg("success", "✓")
-							: theme.fg("error", "✗");
+				const rIcon = resultIcon(r, theme);
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
 
@@ -455,12 +464,7 @@ export function renderResult(
 
 		let text = `${icon} ${theme.fg("toolTitle", theme.bold("chain "))}${theme.fg("accent", `${successCount}/${details.results.length} done`)}`;
 		for (const r of details.results) {
-			const rIcon =
-				r.status === "running"
-					? theme.fg("warning", "⏳")
-					: r.status === "ok"
-						? theme.fg("success", "✓")
-						: theme.fg("error", "✗");
+			const rIcon = resultIcon(r, theme);
 			const displayItems = getDisplayItems(r.messages);
 			text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
 			if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
@@ -497,7 +501,7 @@ export function renderResult(
 			);
 
 			for (const r of details.results) {
-				const rIcon = isFailedResult(r) ? theme.fg("error", "✗") : theme.fg("success", "✓");
+				const rIcon = resultIcon(r, theme);
 				const displayItems = getDisplayItems(r.messages);
 				const finalOutput = getFinalOutput(r.messages);
 
@@ -536,12 +540,7 @@ export function renderResult(
 
 		let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
 		for (const r of details.results) {
-			const rIcon =
-				r.status === "running"
-					? theme.fg("warning", "⏳")
-					: isFailedResult(r)
-						? theme.fg("error", "✗")
-						: theme.fg("success", "✓");
+			const rIcon = resultIcon(r, theme);
 			const displayItems = getDisplayItems(r.messages);
 			text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`;
 			if (displayItems.length === 0)
