@@ -186,12 +186,17 @@ describe("agent memory", () => {
 	});
 });
 
-/** A scripted child session: N assistant turns per prompt, abortable, all calls recorded. */
+/**
+ * A scripted child session: N assistant turns per prompt, abortable, all calls recorded.
+ * Like pi, it notifies listeners of message_end before the stats count that message.
+ */
 function fakeSession(turns: number) {
 	const messages: any[] = [];
 	const listeners: Array<(e: any) => void> = [];
 	const calls: string[] = [];
 	let aborted = false;
+	let ending: any;
+	const counted = () => messages.filter((m) => m !== ending);
 	const session = {
 		state: { messages },
 		sessionId: "child-1",
@@ -208,23 +213,33 @@ function fakeSession(turns: number) {
 			calls.push("dispose");
 		},
 		getSessionStats() {
+			const assistant = counted().filter((m) => m.role === "assistant");
 			return {
-				tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+				tokens: {
+					input: 10 + assistant.reduce((sum, m) => sum + (m.usage?.input ?? 0), 0),
+					output: 5,
+					cacheRead: 0,
+					cacheWrite: 0,
+				},
 				cost: 0.01,
-				assistantMessages: messages.filter((m) => m.role === "assistant").length,
+				assistantMessages: assistant.length,
 			};
 		},
 		async prompt(text: string) {
 			calls.push(`prompt:${text}`);
 			messages.push({ role: "user", content: [{ type: "text", text }], timestamp: Date.now() });
 			for (let i = 0; i < turns && !aborted; i++) {
-				messages.push({
+				const message = {
 					role: "assistant",
 					content: [{ type: "text", text: `turn ${i + 1}` }],
 					stopReason: "end",
+					usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0 },
 					timestamp: Date.now(),
-				});
-				for (const l of listeners) l({ type: "message_end" });
+				};
+				messages.push(message);
+				ending = message;
+				for (const l of listeners) l({ type: "message_end", message });
+				ending = undefined;
 			}
 		},
 	};
@@ -639,22 +654,10 @@ describe("timeouts, steering hooks and forked context", () => {
 	});
 
 	it("stops a child at maxTokens, counted from this run only", async () => {
+		// 100 tokens a turn (fakeSession); a resumed child's earlier turns do not count.
 		const fake = fakeSession(5);
 		const s = fake.session as any;
-		let used = 1000;
-		s.getSessionStats = () => ({
-			tokens: { input: used, output: 0, cacheRead: 0, cacheWrite: 0 },
-			cost: 0,
-			assistantMessages: s.state.messages.filter((m: any) => m.role === "assistant").length,
-		});
-		const prompt = s.prompt.bind(s);
-		const subscribe = s.subscribe.bind(s);
-		s.subscribe = (l: any) =>
-			subscribe((e: any) => {
-				used += 100;
-				l(e);
-			});
-		s.prompt = prompt;
+		s.state.messages.push({ role: "assistant", content: [], usage: { input: 1000 }, timestamp: 1 });
 		const result = await runSubagent({
 			def: def({ maxTokens: 250 }),
 			task: "t",

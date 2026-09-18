@@ -891,8 +891,14 @@ async function runChild(
 		if (event.type === "tool_execution_start") toolTimer?.start(event.toolCallId, event.toolName);
 		if (event.type === "tool_execution_end") toolTimer?.end(event.toolCallId);
 		if (event.type !== "message_end") return;
-		if (turnCap && turnsSoFar() >= turnCap) stopAt("max-turns");
-		if (tokenCap && tokensSoFar() >= tokenCap) stopAt("max-tokens");
+		// pi tells subscribers before it persists the message, so the session stats
+		// do not count this one yet: without it, each cap ran one turn over.
+		const ended = event.message.role === "assistant" ? event.message : undefined;
+		const endedTokens = ended
+			? ended.usage.input + ended.usage.output + ended.usage.cacheRead + ended.usage.cacheWrite
+			: 0;
+		if (turnCap && turnsSoFar() + (ended ? 1 : 0) >= turnCap) stopAt("max-turns");
+		if (tokenCap && tokensSoFar() + endedTokens >= tokenCap) stopAt("max-tokens");
 		if (onUpdate) onUpdate(snapshot());
 	});
 
