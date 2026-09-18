@@ -58,7 +58,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `/agents` | subagents via the `task` tool — single, parallel, chain, saved workflows, nesting, forked context, background runs with `task_output`/`task_message`/`task_stop`/`task_wait`, schedules, acceptance gates, tool/token budgets, questions to you mid-run, external CLI runners. `/agents new\|edit\|delete <name>` manage user defs (the model can too, with `manage_agents`); `/agents show <id>` shows a child's transcript, `/agents stop <sa-N>` stops a background run. See [Subagents](#subagents) |
 | `/review-loop` | review/fix loop: parallel `code-reviewer` rounds, fixes by a `worker`, until clean or 3 rounds |
 | `/mcp` | MCP servers from `mcp.json` / `.mcp.json`; project servers need `/mcp approve` (enable/disable of a project server is kept in your settings, never written into `.mcp.json`). Server instructions go into the system prompt, server prompts run as `/mcp__<server>__<prompt> args…`, `list_changed` refreshes tools live, and a result over 50KB is cut with the full text saved to a temp file. Resources: `mcp_list_resources` / `mcp_read_resource`, and `@server:uri` in a prompt attaches one; both prompt commands and `@server:` resources autocomplete in the editor (Tab after `@server:` lists them). A server can ask you for input (form elicitation) or ask your current model for a completion (sampling, confirmed per request, any provider). To confirm before chosen tools run, use an ask rule such as `Mcp(github:delete_*)`. Claude Code's timeouts (per-server `timeout`, `MCP_TOOL_TIMEOUT` ≈28h default, idle `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` 30 min stdio / 5 min remote, `MCP_TIMEOUT` connect) and `${VAR}` / `${VAR:-default}` in `command`, `args`, `env`, `url`, `headers`; a remote server whose url or header would carry a model/cloud credential is refused |
-| `webfetch`, `websearch` | Claude Code's `WebFetch`/`WebSearch`, extended; see [Web](#web). Rules: `WebFetch(domain:example.com)` (what "Always allow" persists), `WebSearch(<query glob>)`, checked per query in a batch |
+| `webfetch`, `websearch` | Claude Code's `WebFetch`/`WebSearch`, extended; see [Web](#web). Rules: `WebFetch(domain:example.com)` (what "don't ask again" persists), `WebSearch(<query glob>)`, checked per query in a batch |
 | `/memory`, `# note` | persistent memory, injected into the system prompt. `/memory edit [scope]` and `/memory search <text>`; a bare `#` opens an editor for a multi-line note; `@name.md` lines pull in a sibling file |
 | `/rewind` | file checkpoints per turn; restores the files, the conversation, or both |
 | `/bash-mode`, `/stash` | bash mode (Ctrl+Shift+B or `/bash-mode`): the prompt drives a persistent shell, so `cd`, `export` and functions carry between commands; output shows below the editor instead of in the conversation, Escape leaves, Ctrl+C interrupts, Up/Down walk its commands. Alt+S stashes the prompt you are writing and brings it back into an empty editor; `/stash` inserts an older one |
@@ -300,6 +300,19 @@ its def declares (`ask` if none). With a UI its prompts reach you; headless it
 gets the parent's deny rules only, and whatever would prompt is blocked. `task_output`, `task_message`, `task_stop`, `task_wait`
 and `task_schedule list|cancel` never prompt — they only touch this session's own
 runs — and `manage_agents` asks for every write itself, in every mode.
+
+A prompt has Claude Code's rows: **Yes**, a row for "from now on", and **No**. A
+digit picks a row, Esc is No, and Tab on No types a note the model receives. Where
+pi cannot draw that dialog (RPC mode, FleetView's background sessions) the same rows
+come as a plain list, with **No, and tell the model what to do differently** as its
+own row.
+The middle row depends on the call: a command offers `Yes, and don't ask again for
+npm test commands in <project>`, saved as `Bash(npm test:*)` — the prefix alone or
+with arguments, never `npm testx` — in the project's settings (one rule per command
+of a compound line; interpreters, wrappers and `$(…)` get the exact command
+instead); an edit no rule names offers `Yes, and switch to edits mode for this
+session`; a credential read is allowed for the session; a protected write gets
+no middle row. In an untrusted project "don't ask again" lasts the session.
 
 A trusted session starts in `auto`; set `permissions.defaultMode` in global
 settings to start in `ask` or `edits` instead.

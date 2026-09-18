@@ -8,11 +8,11 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type EvalConfig, evaluatePostHook, evaluatePreHook } from "../ext/permissions/evaluate.ts";
 import permissions from "../ext/permissions/index.ts";
-import { decide, exactRule, parseRuleSpec } from "../ext/permissions/rules.ts";
+import { commandPrefix, decide, exactRule, parseRuleSpec, standingRules } from "../ext/permissions/rules.ts";
 
 const agentDir = "/home/u/.pi/agent";
 const cwd = "/proj";
@@ -138,6 +138,61 @@ describe("A4: allow globs do not clear command substitution", () => {
 
 	it("does not weaken deny", () => {
 		expect(decide({ deny: ["Bash(git *)"] }, "bash", { command: "git $(x)" }, cwd)).toBe("deny");
+	});
+});
+
+describe("prefix rules (`Bash(npm test:*)`)", () => {
+	const allow = (command: string) => decide({ allow: ["Bash(npm test:*)"] }, "bash", { command }, cwd);
+
+	it("match the prefix alone or with arguments, not a longer word", () => {
+		expect(allow("npm test")).toBe("allow");
+		expect(allow("npm test -- --watch")).toBe("allow");
+		expect(allow("npm testx")).toBeNull();
+		expect(allow("npm tes")).toBeNull();
+	});
+
+	it("do not allow command substitution or another command in the line", () => {
+		expect(allow("npm test $(rm -rf ~)")).toBeNull();
+		expect(allow("npm test `rm -rf ~`")).toBeNull();
+		expect(allow("npm test && rm -rf /")).toBeNull();
+		expect(allow("npm test; rm -rf /")).toBeNull();
+	});
+
+	it("work for deny too", () => {
+		expect(decide({ deny: ["Bash(rm:*)"] }, "bash", { command: "rm -rf x" }, cwd)).toBe("deny");
+		expect(decide({ deny: ["Bash(rm:*)"] }, "bash", { command: "env A=1 rm x" }, cwd)).toBe("deny");
+	});
+});
+
+describe("what don't ask again grants", () => {
+	it("offers a command's prefix, with the subcommand where the tool has one", () => {
+		expect(commandPrefix("npm test -- --watch")).toBe("npm test");
+		expect(commandPrefix("npm run build --prod")).toBe("npm run build");
+		expect(commandPrefix("git push origin main")).toBe("git push");
+		expect(commandPrefix("ls -la")).toBe("ls");
+	});
+
+	it("offers no prefix for interpreters, wrappers or substitution", () => {
+		for (const command of [
+			"python x.py",
+			"bash -c 'rm x'",
+			"sudo rm x",
+			"env A=1 rm x",
+			"./run.sh",
+			"git $(x)",
+			"git --no-pager log",
+			"git -C /x status",
+			"npm --prefix x run evil",
+		]) {
+			expect(commandPrefix(command)).toBeUndefined();
+		}
+	});
+
+	it("grants one rule per segment, the exact command where no prefix is safe", () => {
+		expect(standingRules("bash", "npm test && python x.py")).toEqual(["Bash(npm test:*)", "Bash(python x.py)"]);
+		expect(standingRules("bash", "ls *.ts")).toEqual(["Bash(ls:*)"]);
+		expect(standingRules("webfetch", "https://docs.rs/x?y=1")).toEqual(["WebFetch(domain:docs.rs)"]);
+		expect(standingRules("some_tool", "x")).toEqual([]);
 	});
 });
 
@@ -269,24 +324,15 @@ describe("A5: /permissions add keeps the session's flag-derived rules", () => {
 		await commands.permissions('remove "Bash(nothing)"', ctx);
 		expect((await handlers.tool_call(call, ctx))?.block).toBe(true);
 	});
-	it("offers Always allow on a protected read, and does not ask again once chosen", async () => {
+	it("offers a protected read for the session, and does not ask again once chosen", async () => {
 		const { handlers, ctx } = load({});
-		const seen: string[][] = [];
-		const ui = {
-			...ctx.ui,
-			theme: { ...ctx.ui.theme, getColorMode: () => "256" },
-			select: async (_label: string, options: string[]) => {
-				seen.push(options);
-				return "Always allow";
-			},
-		};
-		const live = { ...ctx, hasUI: true, ui };
+		const { live, seen } = interactive(ctx, [/^Yes, allow reading \.mcp\.json during this session$/]);
 		await handlers.session_start({}, live);
 		const call = { toolName: "bash", input: { command: "git diff .mcp.json" } };
 		expect(await handlers.tool_call(call, live)).toBeUndefined();
-		expect(seen[0]).toContain("Always allow");
 		expect(await handlers.tool_call(call, live)).toBeUndefined();
 		expect(seen).toHaveLength(1);
+		expect(projectAllow()).toEqual([]);
 	});
 
 	it("/permissions test says the mode decides when no rule matches", async () => {
@@ -317,40 +363,167 @@ describe("A5: /permissions add keeps the session's flag-derived rules", () => {
 	});
 
 	/** An interactive ctx whose prompts answer from `answers`, in order. */
-	function interactive(ctx: any, answers: string[], typed?: string) {
+	/** Answers the prompts in order: a label, or a pattern for the row to pick. */
+	function interactive(ctx: any, answers: Array<string | RegExp>, typed?: string, trusted = true) {
 		const seen: Array<{ label: string; options: string[] }> = [];
 		const ui = {
 			...ctx.ui,
 			theme: { ...ctx.ui.theme, getColorMode: () => "256" },
 			select: async (label: string, options: string[]) => {
 				seen.push({ label, options });
-				return answers.shift();
+				const answer = answers.shift();
+				return typeof answer === "string" ? answer : options.find((option) => answer?.test(option));
 			},
 			input: async () => typed,
 		};
-		return { live: { ...ctx, hasUI: true, ui }, seen };
+		return { live: { ...ctx, hasUI: true, isProjectTrusted: () => trusted, ui }, seen };
 	}
 	const globalAllow = () =>
 		JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8")).permissions.allow ?? [];
+	const projectAllow = (): string[] => {
+		try {
+			return JSON.parse(readFileSync(join(dir, CONFIG_DIR_NAME, "settings.json"), "utf8")).permissions.allow ?? [];
+		} catch {
+			return [];
+		}
+	};
+	const DONT_ASK = /^Yes, and don't ask again for /;
 
-	it("C2: Yes, for this session stops the prompts without writing settings", async () => {
+	it("asks as Claude Code does: Yes, don't ask again for the prefix in this project, No", async () => {
 		const { handlers, ctx } = load({ "permission-mode": "ask" });
-		const { live, seen } = interactive(ctx, ["Yes, for this session"]);
+		const { live, seen } = interactive(ctx, ["No"]);
+		await handlers.session_start({}, live);
+		await handlers.tool_call({ toolName: "bash", input: { command: "npm init -y" } }, live);
+		expect(seen[0].label).toBe("Bash command\n\n  npm init -y\n\nDo you want to proceed?");
+		expect(seen[0].options).toEqual([
+			"Yes",
+			`Yes, and don't ask again for npm init commands in ${dir}`,
+			"No",
+			"No, and tell the model what to do differently",
+		]);
+	});
+
+	/** A terminal UI: the dialog is drawn, and `keys` are typed into it. */
+	function terminal(ctx: any, keys: string[]) {
+		const drawn: string[][] = [];
+		const ui = {
+			...ctx.ui,
+			theme: { ...ctx.ui.theme, getColorMode: () => "256" },
+			custom: (factory: any) =>
+				new Promise((resolve) => {
+					const view = factory({ requestRender: () => {} }, plain, {}, resolve);
+					drawn.push(view.render(120));
+					for (const key of keys) view.handleInput(key);
+				}),
+			select: async () => {
+				throw new Error("a terminal draws the dialog, not the list");
+			},
+		};
+		return { live: { ...ctx, hasUI: true, ui }, drawn };
+	}
+
+	it("a terminal gets Claude Code's dialog: a digit picks a row", async () => {
+		const { handlers, ctx } = load({ "permission-mode": "ask" });
+		const { live, drawn } = terminal(ctx, ["2"]);
+		await handlers.session_start({}, live);
+		expect(await handlers.tool_call({ toolName: "bash", input: { command: "npm init -y" } }, live)).toBeUndefined();
+		expect(drawn[0]).toContain("   3. No");
+		expect(projectAllow()).toEqual(["Bash(npm init:*)"]);
+	});
+
+	it("a note typed on No reaches the model", async () => {
+		const { handlers, ctx } = load({ "permission-mode": "ask" });
+		const { live } = terminal(ctx, ["\x1b[B", "\x1b[B", "\t", ..."use pnpm", "\r"]);
+		await handlers.session_start({}, live);
+		const result = await handlers.tool_call({ toolName: "bash", input: { command: "npm init -y" } }, live);
+		expect(result?.block).toBe(true);
+		expect(result?.reason).toContain("The user says: use pnpm");
+	});
+
+	it("falls back to the plain list where the dialog cannot be drawn (RPC)", async () => {
+		const { handlers, ctx } = load({ "permission-mode": "ask" });
+		const { live, seen } = interactive(ctx, ["Yes"]);
+		const rpc = { ...live, ui: { ...live.ui, custom: async () => undefined } };
+		await handlers.session_start({}, rpc);
+		expect(await handlers.tool_call({ toolName: "bash", input: { command: "npm init -y" } }, rpc)).toBeUndefined();
+		expect(seen).toHaveLength(1);
+	});
+
+	it("don't ask again persists the prefix to the project and covers its arguments", async () => {
+		const { handlers, ctx } = load({ "permission-mode": "ask" });
+		const { live, seen } = interactive(ctx, [DONT_ASK, "No"]);
+		await handlers.session_start({}, live);
+		expect(await handlers.tool_call({ toolName: "bash", input: { command: "npm init -y" } }, live)).toBeUndefined();
+		expect(projectAllow()).toEqual(["Bash(npm init:*)"]);
+		expect(globalAllow()).toEqual([]);
+		expect(await handlers.tool_call({ toolName: "bash", input: { command: "npm init" } }, live)).toBeUndefined();
+		expect(
+			await handlers.tool_call({ toolName: "bash", input: { command: "npm init --scope x" } }, live),
+		).toBeUndefined();
+		expect(seen).toHaveLength(1);
+		// Another word is another command.
+		expect((await handlers.tool_call({ toolName: "bash", input: { command: "npm initialize" } }, live))?.block).toBe(
+			true,
+		);
+	});
+
+	it("don't ask again clears the ask rule that asked", async () => {
+		writeFileSync(
+			join(getAgentDir(), "settings.json"),
+			JSON.stringify({ permissions: { ask: ["Bash(git push *)"] } }),
+		);
+		const { handlers, ctx } = load({});
+		const { live, seen } = interactive(ctx, [DONT_ASK]);
+		await handlers.session_start({}, live);
+		expect(
+			await handlers.tool_call({ toolName: "bash", input: { command: "git push origin a" } }, live),
+		).toBeUndefined();
+		expect(
+			await handlers.tool_call({ toolName: "bash", input: { command: "git push origin b" } }, live),
+		).toBeUndefined();
+		expect(seen).toHaveLength(1);
+	});
+
+	it("an edit no rule names offers edits mode instead of a rule", async () => {
+		const { handlers, ctx } = load({ "permission-mode": "ask" });
+		const { live, seen } = interactive(ctx, [/switch to edits mode/]);
+		await handlers.session_start({}, live);
+		expect(await handlers.tool_call({ toolName: "edit", input: { path: "a.ts" } }, live)).toBeUndefined();
+		expect(seen[0].label).toBe("Edit file\n\n  a.ts\n\nDo you want to proceed?");
+		expect(seen[0].options[1]).toBe("Yes, and switch to edits mode for this session (alt+m)");
+		expect(await handlers.tool_call({ toolName: "write", input: { path: "b.ts" } }, live)).toBeUndefined();
+		expect(seen).toHaveLength(1);
+		expect(projectAllow()).toEqual([]);
+	});
+
+	it("a protected write offers no standing grant", async () => {
+		const { handlers, ctx } = load({});
+		const { live, seen } = interactive(ctx, ["No"]);
+		await handlers.session_start({}, live);
+		await handlers.tool_call({ toolName: "write", input: { path: ".mcp.json" } }, live);
+		expect(seen[0].options).toEqual(["Yes", "No", "No, and tell the model what to do differently"]);
+	});
+
+	it("an untrusted project keeps don't ask again to the session", async () => {
+		const { handlers, ctx } = load({ "permission-mode": "ask" });
+		const { live, seen } = interactive(ctx, [DONT_ASK], undefined, false);
 		await handlers.session_start({}, live);
 		const call = { toolName: "bash", input: { command: "npm test" } };
 		expect(await handlers.tool_call(call, live)).toBeUndefined();
+		expect(seen[0].options[1]).toBe("Yes, and don't ask again for npm test commands during this session");
 		expect(await handlers.tool_call(call, live)).toBeUndefined();
 		expect(seen).toHaveLength(1);
+		expect(projectAllow()).toEqual([]);
 		expect(globalAllow()).toEqual([]);
 		// A new session starts without the grant.
 		await handlers.session_start({}, live);
-		const again = interactive(ctx, ["No"]);
+		const again = interactive(ctx, ["No"], undefined, false);
 		expect((await handlers.tool_call(call, again.live))?.block).toBe(true);
 	});
 
 	it("C2: a session grant survives /permissions add", async () => {
 		const { handlers, commands, ctx } = load({ "permission-mode": "ask" });
-		const { live, seen } = interactive(ctx, ["Yes, for this session"]);
+		const { live, seen } = interactive(ctx, [DONT_ASK], undefined, false);
 		await handlers.session_start({}, live);
 		const call = { toolName: "bash", input: { command: "npm test" } };
 		await handlers.tool_call(call, live);
@@ -359,9 +532,9 @@ describe("A5: /permissions add keeps the session's flag-derived rules", () => {
 		expect(seen).toHaveLength(1);
 	});
 
-	it("C4: No, and tell the model why passes the reason on", async () => {
+	it("C4: No, and tell the model what to do differently passes the note on", async () => {
 		const { handlers, ctx } = load({ "permission-mode": "ask" });
-		const { live } = interactive(ctx, ["No, and tell the model why"], "use pnpm instead");
+		const { live } = interactive(ctx, ["No, and tell the model what to do differently"], "use pnpm instead");
 		await handlers.session_start({}, live);
 		const result = await handlers.tool_call({ toolName: "bash", input: { command: "npm test" } }, live);
 		expect(result?.block).toBe(true);
@@ -408,17 +581,17 @@ describe("A5: /permissions add keeps the session's flag-derived rules", () => {
 
 	it("C2: /permissions remove revokes a session grant", async () => {
 		const { handlers, commands, ctx } = load({ "permission-mode": "ask" });
-		const { live } = interactive(ctx, ["Yes, for this session", "No"]);
+		const { live } = interactive(ctx, [DONT_ASK, "No"], undefined, false);
 		await handlers.session_start({}, live);
 		const call = { toolName: "bash", input: { command: "npm test" } };
 		await handlers.tool_call(call, live);
-		await commands.permissions('remove "Bash(npm test)"', live);
+		await commands.permissions('remove "Bash(npm test:*)"', live);
 		expect((await handlers.tool_call(call, live))?.block).toBe(true);
 	});
 
-	it("C9: Always allow on a long compound does not ask again", async () => {
+	it("C9: don't ask again on a long compound does not ask again", async () => {
 		const { handlers, ctx } = load({ "permission-mode": "ask" });
-		const { live, seen } = interactive(ctx, ["Always allow"]);
+		const { live, seen } = interactive(ctx, [DONT_ASK]);
 		await handlers.session_start({}, live);
 		const command = "npm run a && npm run b && npm run c && npm run d && npm run e && npm run f";
 		const call = { toolName: "bash", input: { command } };

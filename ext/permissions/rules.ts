@@ -183,12 +183,12 @@ export function subject(tool: string, input: Record<string, unknown>): string {
 
 /**
  * Build the exact-match allow rule string for a tool call subject, e.g.
- * `Bash(npm install)`. Returns null for ungoverned tools. Used by "Always allow".
+ * `Bash(npm install)`. Returns null for ungoverned tools. Used by "don't ask again".
  */
 export function exactRule(tool: string, subj: string): string | null {
 	const verb = verbFor(tool);
 	if (!verb) return null;
-	// "Always allow" on a fetch persists the HOST, not the full url (Claude Code
+	// "don't ask again" on a fetch persists the HOST, not the full url (Claude Code
 	// parity): a rule pinned to `https://docs.x.com/page?v=3` would never fire again.
 	if (tool === "webfetch") {
 		const host = urlHost(subj);
@@ -197,9 +197,116 @@ export function exactRule(tool: string, subj: string): string | null {
 	return `${verb}(${escapeGlob(subj)})`;
 }
 
+/** CC's documented cap: "Up to 5 rules may be saved for a single compound command." */
+export const MAX_COMPOUND_ALLOW_RULES = 5;
+
+/** Tools whose second word names what runs: `git push`, not `git`. */
+const SUBCOMMAND_TOOLS = new Set([
+	"git",
+	"npm",
+	"pnpm",
+	"yarn",
+	"bun",
+	"npx",
+	"bunx",
+	"uv",
+	"uvx",
+	"pip",
+	"pip3",
+	"cargo",
+	"go",
+	"docker",
+	"kubectl",
+	"gh",
+	"brew",
+	"make",
+	"just",
+	"deno",
+	"dotnet",
+	"mvn",
+	"gradle",
+	"terraform",
+]);
+
+/**
+ * Commands that run whatever their arguments say — a shell, an interpreter, a wrapper.
+ * A prefix rule for one would grant arbitrary code, so they only ever get an exact rule.
+ */
+const NO_PREFIX = new Set([
+	"sh",
+	"bash",
+	"zsh",
+	"fish",
+	"dash",
+	"ksh",
+	"python",
+	"python3",
+	"node",
+	"ruby",
+	"perl",
+	"php",
+	"env",
+	"sudo",
+	"su",
+	"doas",
+	"xargs",
+	"eval",
+	"exec",
+	"nohup",
+	"watch",
+	"time",
+	"timeout",
+	"nice",
+	"command",
+	"builtin",
+	"source",
+	".",
+	"ssh",
+	"osascript",
+]);
+
+/**
+ * The command prefix "don't ask again" offers for one bash segment — `npm test` for
+ * `npm test -- --watch`, `npm run build` for `npm run build --prod`, `ls` for `ls -la` —
+ * or undefined when only the exact command is safe to grant. A simple word-based
+ * heuristic, not Claude Code's own (which is not public).
+ */
+export function commandPrefix(segment: string): string | undefined {
+	// A prefix rule never allows a substitution (see `allowsSubstitution`), so offering
+	// one would ask again next time.
+	if (COMMAND_SUBSTITUTION.test(segment)) return undefined;
+	const words = segment.trim().split(/\s+/);
+	const [head, second, third] = words;
+	if (!head || !/^[\w.+-]+$/.test(head) || NO_PREFIX.has(head)) return undefined;
+	const word = (w: string | undefined): w is string => w !== undefined && /^[a-z][\w:.-]*$/i.test(w);
+	if (!SUBCOMMAND_TOOLS.has(head)) return head;
+	// `git --no-pager log` would widen to all of git: only the exact command is safe.
+	if (!word(second)) return undefined;
+	return second === "run" && word(third) ? `${head} run ${third}` : `${head} ${second}`;
+}
+
+/**
+ * The allow rules "Yes, and don't ask again" persists for a call: a `Bash(<prefix>:*)`
+ * per segment of a bash command (up to {@link MAX_COMPOUND_ALLOW_RULES}; past that, the
+ * exact line), the host for a fetch, the exact subject for everything else. Empty for a
+ * tool no rule verb governs.
+ */
+export function standingRules(tool: string, subj: string): string[] {
+	const exact = exactRule(tool, subj);
+	if (exact === null) return [];
+	if (tool !== "bash") return [exact];
+	const segments = bashSegments(subj);
+	if (segments.length > MAX_COMPOUND_ALLOW_RULES) return [exact];
+	const rules = segments.map((segment) => {
+		const prefix = commandPrefix(segment);
+		return prefix ? `Bash(${prefix}:*)` : `Bash(${escapeGlob(segment)})`;
+	});
+	return [...new Set(rules)];
+}
+
 /**
  * `\*` is a literal `*` in a rule. An exact rule escapes every `*` of its subject: an
- * "Always allow" on `ls *.ts` otherwise persisted a live glob that also granted
+ * "don't ask again" on `ls *.ts` otherwise persisted a live glob that also granted
  * `ls $(rm -rf ~).ts`.
  */
 function escapeGlob(subj: string): string {
@@ -472,6 +579,15 @@ function homeExpand(s: string): string {
  * string is not a path, and `deny: Bash(rm *)` must match `rm -rf /tmp/x`.
  */
 function globToRegExp(pat: string, pathLike = true): RegExp {
+	// Claude Code's prefix form, bash only: `npm test:*` is `npm test` alone or followed
+	// by arguments — not `npm testx`, which a plain `npm test*` would also grant.
+	if (!pathLike && pat.endsWith(":*")) {
+		return new RegExp(`^${globBody(pat.slice(0, -2), pathLike)}(?:\\s[\\s\\S]*)?$`);
+	}
+	return new RegExp(`^${globBody(pat, pathLike)}$`);
+}
+
+function globBody(pat: string, pathLike: boolean): string {
 	const expanded = homeExpand(pat);
 	let body = "";
 	for (let i = 0; i < expanded.length; i++) {
@@ -494,7 +610,7 @@ function globToRegExp(pat: string, pathLike = true): RegExp {
 			body += c;
 		}
 	}
-	return new RegExp(`^${body}$`);
+	return body;
 }
 
 /**
@@ -590,7 +706,7 @@ export function bashRuleSubjects(command: string, depth = 0): string[] {
 /**
  * `$(…)`, backticks and `<(…)` run arbitrary code before the command a glob names, so
  * `Bash(git *)` must not grant `git $(rm -rf ~)`. Only a rule with no wildcard — the
- * exact one "Always allow" persists — can allow such a command.
+ * exact one "don't ask again" persists — can allow such a command.
  */
 function allowsSubstitution(ruleSubject: string, command: string): boolean {
 	return literalSubject(ruleSubject) === command;
@@ -674,7 +790,7 @@ export function decide(rules: Rules, tool: string, input: Record<string, unknown
 		}
 	};
 	// A compound bash command's segments may each be covered by a DIFFERENT allow rule
-	// (IMPROVEMENT-PLAN.md §2.4: "Always allow" on `git status && npm test` persists one
+	// (IMPROVEMENT-PLAN.md §2.4: "don't ask again" on `git status && npm test` persists one
 	// rule per segment, CC-style). No single rule needs to span the whole line — every
 	// segment just needs SOME allow rule to cover it. Deny/ask are unaffected: a single
 	// rule already covers those (with the widening `matches()` already does), and "any one
@@ -685,7 +801,7 @@ export function decide(rules: Rules, tool: string, input: Record<string, unknown
 		}
 		const allowRules = rules.allow ?? [];
 		// An exact rule for the whole line is the user's answer to exactly this command:
-		// "Always allow" persists one past the per-segment cap.
+		// "don't ask again" persists one past the per-segment cap.
 		const wholeLineAllowed = allowRules.some((r) => {
 			const m = /^(\w+)\((.*)\)$/.exec(r);
 			return m !== null && m[1].toLowerCase() === verb.toLowerCase() && literalSubject(m[2]) === subj;

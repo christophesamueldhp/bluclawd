@@ -10,10 +10,11 @@
  *
  * Trap 3 (security): project settings are read TRUST-AWARE — an untrusted repo's
  * `.bluclawd/settings.json` must not be able to inject allow rules that defeat the
- * safety layer. Global writeback ("Always allow") targets global settings only.
+ * safety layer. "Don't ask again" writes the project's settings only when it is
+ * trusted; otherwise the grant lasts the session.
  *
  * Performance: rules are loaded once per session_start into a closure variable —
- * the awaited `tool_call` path does no blocking I/O. "Always allow" updates the
+ * the awaited `tool_call` path does no blocking I/O. "Don't ask again" updates the
  * in-closure rules immediately (so it takes effect at once) in addition to the
  * async disk writeback.
  *
@@ -21,6 +22,7 @@
  * state lives in this closure.
  */
 
+import { homedir } from "node:os";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -39,7 +41,7 @@ import {
 } from "../_shared/settings-write.ts";
 import { sandboxPosture } from "../sandbox/state.ts";
 import { setActivePermissionMode } from "./active-mode.ts";
-import { type EvalConfig, evaluatePostHook, evaluatePreHook, type Gate } from "./evaluate.ts";
+import { type EvalConfig, evaluatePostHook, evaluatePreHook, type Gate, type Verdict } from "./evaluate.ts";
 import {
 	createModeStore,
 	DEFAULT_MODE,
@@ -52,13 +54,14 @@ import {
 	parseMode,
 	SAFEST_MODE,
 } from "./modes.ts";
+import { type ProceedAnswer, ProceedPrompt } from "./prompt-view.ts";
 import {
-	bashSegments,
 	decide,
-	exactRule,
+	displayRule,
 	governedVerbs,
 	parseRuleSpec,
 	type Rules,
+	standingRules,
 	stripWrappingQuotes,
 	subject,
 } from "./rules.ts";
@@ -167,7 +170,7 @@ export function factory(pi: ExtensionAPI): void {
 	});
 
 	// Rule set for the current session, loaded on session_start (trust-aware) and
-	// updated in place by "Always allow". Empty until the first session_start.
+	// updated in place by "don't ask again". Empty until the first session_start.
 	let rules: Rules = {};
 	// --allowedTools grants, kept SEPARATE from `rules`: the engine's ask > allow
 	// precedence would let any settings ask rule shadow a merged allow glob, but the
@@ -177,7 +180,7 @@ export function factory(pi: ExtensionAPI): void {
 	// What the session layers over settings — the FleetView ask-all posture and
 	// --disallowedTools. Kept apart so every reload of settings re-applies it:
 	// `/permissions add` used to reload settings alone and silently drop both.
-	// Its allow list holds the "Yes, for this session" grants.
+	// Its allow list holds the grants that last only this session.
 	let sessionRules: Rules = {};
 	// The latest gated calls, newest last, for `/permissions why`.
 	let decisions: DecisionRecord[] = [];
@@ -352,87 +355,132 @@ export function factory(pi: ExtensionAPI): void {
 		setActivePermissionMode("ask");
 	});
 
-	/** CC's documented cap: "Up to 5 rules may be saved for a single compound command." */
-	const MAX_COMPOUND_ALLOW_RULES = 5;
+	/** The reject-with-a-note row of the plain-list fallback; the terminal dialog types the note on `No`. */
+	const NO_WITH_NOTE = "No, and tell the model what to do differently";
 
-	/**
-	 * Persist an "Always allow" choice: update the in-closure cache so it takes effect
-	 * at once, then write it back (global by default, project on request) and flush, so
-	 * the throwaway SettingsManager's queued write lands before it is discarded.
-	 *
-	 * A compound bash command (`git status && npm test`) persists one rule PER SEGMENT
-	 * (capped at `MAX_COMPOUND_ALLOW_RULES`, matching CC) rather than one rule for the
-	 * whole line — `decide()`'s union-allow semantics for multi-segment bash (§2.4) then
-	 * clear both the identical compound again AND any of its segments run alone, instead
-	 * of only the exact compound string verbatim. A single command or a non-bash verb is
-	 * unaffected: `bashSegments` returns one segment, so `toPersist` is just `[exact]`.
-	 */
-	/**
-	 * The rules that grant `exact`: one per segment for a compound, or the whole line
-	 * once the compound is past the cap, where per-segment rules would miss some.
-	 */
-	function grantRules(exact: string): string[] {
-		const parsed = parseRuleSpec(exact);
-		const segments = parsed?.tool === "bash" ? bashSegments(String(parsed.input.command ?? "")) : undefined;
-		if (!segments || segments.length < 2 || segments.length > MAX_COMPOUND_ALLOW_RULES) return [exact];
-		return [...new Set(segments.map((segment) => exactRule("bash", segment)).filter((r) => r !== null))];
+	/** What the middle row of a prompt grants when picked. */
+	interface Standing {
+		label: string;
+		/** Allow rules to add. */
+		rules?: string[];
+		/** Keep the rules in memory for this session instead of the project's settings. */
+		sessionOnly?: boolean;
+		/** Switch the session to this mode instead of adding rules. */
+		mode?: PermissionMode;
 	}
 
-	async function persistAlwaysAllow(exact: string, toProject: boolean, ctx: ExtensionContext): Promise<void> {
-		const toPersist = grantRules(exact);
-
-		rules = {
-			...rules,
-			allow: [...new Set([...(rules.allow ?? []), ...toPersist])],
-		};
-		for (const rule of toPersist) {
-			if (toProject) await addProjectRule(ctx.cwd, "allow", rule, ctx.isProjectTrusted());
-			else await addGlobalRule("allow", rule);
+	/**
+	 * Claude Code's middle row: what "yes" can also mean from now on. A command offers
+	 * its prefix for this project (`Bash(npm test:*)` in the project's settings; an
+	 * untrusted project's settings are never read, so there it lasts the session). An
+	 * edit no rule names offers edits mode. A credential read lasts the session. A
+	 * protected write offers nothing: it is approved one call at a time.
+	 */
+	function standingOption(tool: string, verdict: Verdict, ctx: ExtensionContext): Standing | undefined {
+		if (verdict.gate === "write-protected-path" || !verdict.exact) return undefined;
+		if (verdict.gate === "read-protected-path") {
+			return {
+				label: `Yes, allow reading ${verdict.protectedPath} during this session`,
+				rules: [verdict.exact],
+				sessionOnly: true,
+			};
 		}
+		const trusted = ctx.isProjectTrusted();
+		if (verdict.gate === "no-matching-rule" && (tool === "edit" || tool === "write")) {
+			return trusted
+				? { label: "Yes, and switch to edits mode for this session (alt+m)", mode: "edits" }
+				: undefined;
+		}
+		const spec = parseRuleSpec(verdict.exact);
+		const granted = spec ? standingRules(spec.tool, subject(spec.tool, spec.input)) : [];
+		if (granted.length === 0) return undefined;
+		const where = trusted ? `in ${ctx.cwd.replace(homedir(), "~")}` : "during this session";
+		const what =
+			spec?.tool === "bash"
+				? `${granted.map((rule) => displayRule(rule).slice("Bash(".length, -1).replace(/:\*$/, "")).join(" and ")} commands`
+				: granted.map(displayRule).join(" and ");
+		return { label: `Yes, and don't ask again for ${what} ${where}`, rules: granted, sessionOnly: !trusted };
 	}
 
-	/** Yes/No prompt. Any failure fails CLOSED — an unanswered prompt is a "No". */
-	async function confirm(label: string, ctx: ExtensionContext): Promise<boolean | "failed"> {
-		try {
-			return (await ctx.ui.select(label, ["Yes", "No"])) === "Yes";
-		} catch {
-			return "failed";
+	/** Apply a picked middle row: rules take effect at once, and persist unless session-only. */
+	async function grant(standing: Standing, ctx: ExtensionContext): Promise<void> {
+		if (standing.mode) {
+			modeStore?.set(standing.mode);
+			return;
 		}
+		const add = standing.rules ?? [];
+		rules = { ...rules, allow: [...new Set([...(rules.allow ?? []), ...add])] };
+		if (standing.sessionOnly) {
+			sessionRules.allow = [...new Set([...(sessionRules.allow ?? []), ...add])];
+			return;
+		}
+		for (const rule of add) await addProjectRule(ctx.cwd, "allow", rule, ctx.isProjectTrusted());
+	}
+
+	/** The prompt's title, laid out as Claude Code's: what runs, then the question. */
+	function promptTitle(tool: string, input: Record<string, unknown>, verdict: Verdict): string {
+		const heading =
+			verdict.gate === "read-protected-path" || verdict.gate === "write-protected-path"
+				? verdict.reason
+				: tool === "bash"
+					? `Bash command${verdict.reason.includes("(unsandboxed)") ? " (unsandboxed)" : ""}\n\n${indent(String(input.command ?? ""))}`
+					: tool === "edit" || tool === "write"
+						? `${tool === "edit" ? "Edit" : "Write"} file\n\n${indent(String(input.path ?? ""))}`
+						: verdict.reason.replace(/^Permission required — /, "");
+		return `${heading}\n\nDo you want to proceed?`;
+	}
+
+	function indent(text: string): string {
+		return text
+			.split("\n")
+			.map((line) => `  ${line}`)
+			.join("\n");
 	}
 
 	/**
-	 * The full permission prompt: Yes / Yes, for this session / No / No, and tell the
-	 * model why / Always allow / Always allow (project). The project option persists into
-	 * `.bluclawd/settings.json` and is offered only when the project is trusted (untrusted
-	 * project rules are never read anyway). A session grant lives in memory only.
+	 * The permission prompt, Claude Code's rows: Yes / what "yes" can also mean from now
+	 * on / No, with a note to the model typed on `No`. Any failure fails CLOSED — an
+	 * unanswered prompt is a "No".
 	 */
-	async function askWithScope(
-		label: string,
-		exact: string | null,
+	async function askProceed(
+		title: string,
+		standing: Standing | undefined,
 		ctx: ExtensionContext,
 	): Promise<{ outcome: "allow" | "deny" | "failed"; answer?: string; note?: string }> {
 		let choice: string | undefined;
 		try {
-			// No rule names this call (a tool outside the rule verbs), so there is nothing to grant.
-			const session = exact ? ["Yes, for this session"] : [];
-			const always = exact ? ["Always allow", ...(ctx.isProjectTrusted() ? ["Always allow (project)"] : [])] : [];
-			const options = ["Yes", ...session, "No", "No, and tell the model why", ...always];
-			choice = await ctx.ui.select(label, options);
-			if (choice === "No, and tell the model why") {
-				const note = (await ctx.ui.input("Tell the model why, or what to do instead"))?.trim();
-				return { outcome: "deny", answer: choice, note: note || undefined };
+			const rows = ["Yes", ...(standing ? [standing.label] : [])];
+			// Claude Code's own dialog where a terminal can draw it; `undefined` means this
+			// UI cannot (pi's RPC mode, FleetView's background sessions), so fall back to a
+			// plain list there rather than deny unseen.
+			const drawn = await ctx.ui.custom?.<ProceedAnswer | undefined>((tui, theme, _keybindings, done) => {
+				const view = new ProceedPrompt(title, rows, theme, done);
+				return {
+					render: (width: number) => view.render(width),
+					invalidate: () => view.invalidate(),
+					handleInput: (data: string) => {
+						view.handleInput(data);
+						tui.requestRender();
+					},
+				};
+			});
+			if (drawn?.kind === "no")
+				return { outcome: "deny", answer: drawn.note ? NO_WITH_NOTE : "No", note: drawn.note };
+			if (drawn) {
+				choice = rows[drawn.index];
+			} else {
+				choice = await ctx.ui.select(title, [...rows, "No", NO_WITH_NOTE]);
+				if (choice === NO_WITH_NOTE) {
+					const note = (await ctx.ui.input("Tell the model what to do differently"))?.trim();
+					return { outcome: "deny", answer: choice, note: note || undefined };
+				}
+			}
+			if (standing && choice === standing.label) {
+				await grant(standing, ctx);
+				return { outcome: "allow", answer: choice };
 			}
 		} catch {
 			return { outcome: "failed" };
-		}
-		if (choice === "Always allow" || choice === "Always allow (project)") {
-			if (exact) await persistAlwaysAllow(exact, choice === "Always allow (project)", ctx);
-			return { outcome: "allow", answer: choice };
-		}
-		if (choice === "Yes, for this session" && exact) {
-			sessionRules.allow = [...new Set([...(sessionRules.allow ?? []), ...grantRules(exact)])];
-			rules = { ...rules, allow: [...new Set([...(rules.allow ?? []), ...grantRules(exact)])] };
-			return { outcome: "allow", answer: choice };
 		}
 		return { outcome: choice === "Yes" ? "allow" : "deny", answer: choice ?? "No" };
 	}
@@ -445,7 +493,7 @@ export function factory(pi: ExtensionAPI): void {
 	/**
 	 * The gate. Decision logic lives in evaluate.ts as a pure function of the inputs
 	 * gathered here; this handler owns only the I/O a verdict calls for — prompting,
-	 * persisting an "Always allow".
+	 * persisting a "don't ask again".
 	 */
 	pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
 		liveCtx = ctx;
@@ -482,17 +530,10 @@ export function factory(pi: ExtensionAPI): void {
 		if (pre?.outcome === "block") return { result: { block: true, reason: pre.reason }, gate: pre.gate };
 		let preAnswer: string | undefined;
 		if (pre?.outcome === "prompt") {
-			// A protected READ may be allowed for good: the exact rule clears this gate next
-			// time, and the bash screen matches words, so a repeat (`git diff .mcp.json`)
+			// A protected READ may be allowed for the session: the exact rule clears this gate
+			// next time, and the bash screen matches words, so a repeat (`git diff .mcp.json`)
 			// would otherwise ask every time. Protected WRITES stay one approval at a time.
-			const asked =
-				pre.gate === "read-protected-path"
-					? await askWithScope(pre.reason, pre.exact ?? null, ctx)
-					: await confirm(pre.reason, ctx).then((r) => ({
-							outcome: r === "failed" ? ("failed" as const) : r ? ("allow" as const) : ("deny" as const),
-							answer: r === true ? "Yes" : "No",
-							note: undefined,
-						}));
+			const asked = await askProceed(promptTitle(tool, input, pre), standingOption(tool, pre, ctx), ctx);
 			if (asked.outcome === "failed") return { result: failed, gate: pre.gate };
 			if (asked.outcome === "deny") {
 				const what = pre.gate === "read-protected-path" ? "Read of" : "Write to";
@@ -514,7 +555,7 @@ export function factory(pi: ExtensionAPI): void {
 		if (post.outcome === "allow") return { result: undefined, gate: post.gate, answer: preAnswer };
 		if (post.outcome === "block") return { result: { block: true, reason: post.reason }, gate: post.gate };
 
-		const asked = await askWithScope(post.reason, post.exact ?? null, ctx);
+		const asked = await askProceed(promptTitle(tool, input, post), standingOption(tool, post, ctx), ctx);
 		if (asked.outcome === "failed") return { result: failed, gate: post.gate };
 		if (asked.outcome === "deny") {
 			return { result: denied("Permission denied by user.", asked.note), gate: post.gate, answer: asked.answer };
@@ -596,7 +637,7 @@ export function factory(pi: ExtensionAPI): void {
 
 	/**
 	 * One rule list with where each rule was set. Settings files first, then what this
-	 * session layers on top — flags, the FleetView posture, "Yes, for this session" —
+	 * session layers on top — flags, the FleetView posture, session-only grants —
 	 * which no settings file shows.
 	 */
 	function sourcedRules(sm: SettingsManager, list: "deny" | "ask" | "allow"): SourcedRule[] {
@@ -788,7 +829,7 @@ export function factory(pi: ExtensionAPI): void {
 				}
 				const removedGlobal = await removeGlobalRule(rule);
 				const removedProject = await removeProjectRule(ctx.cwd, rule, ctx.isProjectTrusted());
-				// A "Yes, for this session" grant is revoked the same way.
+				// A session-only grant is revoked the same way.
 				const removedSession = sessionRules.allow?.includes(rule) ?? false;
 				if (removedSession) sessionRules.allow = sessionRules.allow?.filter((r) => r !== rule);
 				reloadRules(ctx);

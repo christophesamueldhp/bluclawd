@@ -52,6 +52,7 @@ import {
 	type Rules,
 	searchQueries,
 	searchReachesProtectedFiles,
+	standingRules,
 	subject,
 	taskAgents,
 } from "./rules.ts";
@@ -83,7 +84,7 @@ export interface Verdict {
 	reason: string;
 	/** Which prompt to show, when `outcome === "prompt"`. */
 	promptKind?: "protected-read" | "protected-write" | "ask";
-	/** The exact `Verb(subject)` rule "Always allow" would persist, when applicable. */
+	/** The exact `Verb(subject)` rule "don't ask again" would persist, when applicable. */
 	exact?: string | null;
 	/** The path that tripped a protected-path gate, for the prompt text. */
 	protectedPath?: string;
@@ -183,6 +184,11 @@ function withoutBareBashAsk(rules: Rules): Rules {
 /** Does an exact full-subject allow rule stand for this call? */
 function hasExactAllow(rules: Rules, exact: string | null): boolean {
 	return exact !== null && (rules.allow ?? []).includes(exact);
+}
+
+/** Is every one of `granted` an allow rule already? False for an empty list. */
+function hasEveryAllow(rules: Rules, granted: string[]): boolean {
+	return granted.length > 0 && granted.every((rule) => (rules.allow ?? []).includes(rule));
 }
 
 /**
@@ -424,7 +430,7 @@ export function evaluatePostHook(rawTool: string, input: Record<string, unknown>
 	);
 	// For `task` the subject is the agent the prompt is about: the one an ask rule named,
 	// or (no rule at all) the first target — `Task()` would label the prompt with nothing
-	// and persist an "Always allow" that matches nothing.
+	// and persist a "don't ask again" that matches nothing.
 	const subj =
 		tool === "task"
 			? (askAgent ?? taskAgents(input)[0] ?? "")
@@ -436,7 +442,7 @@ export function evaluatePostHook(rawTool: string, input: Record<string, unknown>
 	// 4. An ask rule matched. It prompts in EVERY mode — auto included, exactly as Claude
 	//    Code's auto mode honours explicit ask rules — unless a standing grant clears it.
 	if (decision === "ask") {
-		// An exact full-subject allow is what "Always allow" persists. Because
+		// An exact full-subject allow is what "don't ask again" persists where no prefix is safe. Because
 		// precedence is deny > ask > allow, it would otherwise be shadowed forever by
 		// the very ask rule that triggered the prompt. A broad allow GLOB does not
 		// match this exact check, so it cannot quietly defeat an ask rule.
@@ -447,6 +453,10 @@ export function evaluatePostHook(rawTool: string, input: Record<string, unknown>
 		// invocation, the exact training-to-approve-repeatedly failure this exists
 		// to prevent. Same "exact, not a broader glob" discipline as the check above.
 		if (tool === "bash" && hasExactAllowForEverySegment(cfg.rules, subj)) return ALLOW("exact-allow");
+		// "Yes, and don't ask again" persists a PREFIX rule (`Bash(git push:*)`), which the
+		// exact checks above cannot see. The very rules that answer would persist count as
+		// the user's standing answer — only those, so a broad `Bash(**)` still cannot.
+		if (hasEveryAllow(cfg.rules, standingRules(tool, subj))) return ALLOW("exact-allow");
 		// --allowedTools is an explicit per-invocation grant, and glob-aware.
 		if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
 		// Read-only bash is auto-approved in every mode (Claude Code's built-in list).
