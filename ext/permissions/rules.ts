@@ -24,6 +24,9 @@
 export type Decision = "allow" | "ask" | "deny";
 export type Rules = { allow?: string[]; ask?: string[]; deny?: string[] };
 
+import { realpathSync } from "node:fs";
+import { basename, dirname, join, sep } from "node:path";
+import { resolveToCwd } from "../_shared/path-resolve.ts";
 /**
  * Lowercase tool name → capitalized rule verb. Since audit B.5, MCP tools and
  * `task` are ALSO governed via the dynamic `verbFor()` mapping below:
@@ -32,9 +35,7 @@ export type Rules = { allow?: string[]; ask?: string[]; deny?: string[] };
  * `deny: Bash(**)` is no longer circumventable by delegating to an agent def
  * that grants bash.
  */
-import { realpathSync } from "node:fs";
-import { basename, dirname, join, sep } from "node:path";
-import { resolveToCwd } from "../_shared/path-resolve.ts";
+import { resolveTaskTargets } from "../_shared/subagent-targets.ts";
 
 const VERB: Record<string, string> = {
 	bash: "Bash",
@@ -79,15 +80,23 @@ export function governedVerbs(): string[] {
  */
 export function taskAgents(input: Record<string, unknown>): string[] {
 	const names: string[] = [];
-	if (typeof input.agent === "string" && input.agent) names.push(input.agent);
+	// A resume runs the resumed child's own def: the `agent` sent beside it is not what runs.
+	const resuming = typeof input.resume === "string" && input.resume !== "";
+	if (!resuming && typeof input.agent === "string" && input.agent) names.push(input.agent);
 	for (const key of ["tasks", "chain"] as const) {
 		const list = input[key];
 		if (!Array.isArray(list)) continue;
 		for (const entry of list) {
-			const agent = (entry as Record<string, unknown> | null)?.agent;
-			if (typeof agent === "string" && agent) names.push(agent);
+			const record = entry as Record<string, unknown> | null;
+			// A chain step may be a parallel group of {agent, task}.
+			const group = Array.isArray(record?.parallel) ? (record.parallel as unknown[]) : [record];
+			for (const item of group) {
+				const agent = (item as Record<string, unknown> | null)?.agent;
+				if (typeof agent === "string" && agent) names.push(agent);
+			}
 		}
 	}
+	names.push(...resolveTaskTargets(input));
 	return [...new Set(names)];
 }
 

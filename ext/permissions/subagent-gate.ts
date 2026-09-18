@@ -9,10 +9,11 @@
  * Two postures, chosen by whether the parent can be asked:
  *
  *   - No prompt bridge (headless parent, or the default export): only the
- *     parent's deny rules and the protected-path screen apply, and the child is
- *     evaluated as `auto`. Ask rules are deliberately NOT loaded: a child has no
- *     UI of its own, so an inherited ask would hard-block every governed tool
- *     and break subagents entirely. deny is the safety-critical layer.
+ *     parent's deny rules and the protected-path screen apply, under the mode the
+ *     engine resolved (`auto` for the default export). Ask rules are deliberately
+ *     NOT loaded: a child has no UI of its own, so an inherited ask would
+ *     hard-block every governed tool. Under `ask` — a headless parent in `ask` —
+ *     whatever the mode would prompt for is blocked, as it is for that parent.
  *
  *   - With a prompt bridge (the engine supplies one when the parent has a UI):
  *     the parent's FULL rule set applies, the child runs under the mode the
@@ -34,7 +35,7 @@ import type { ExtensionAPI, InlineExtension, ToolCallEventResult } from "@earend
 import { CONFIG_DIR_NAME, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import * as forkSettings from "../_shared/settings.ts";
 import { sandboxPosture } from "../sandbox/state.ts";
-import { type EvalConfig, evaluatePostHook, evaluatePreHook, type Verdict } from "./evaluate.ts";
+import { type EvalConfig, evaluatePostHook, evaluatePreHook } from "./evaluate.ts";
 import type { PermissionMode } from "./modes.ts";
 import type { Rules } from "./rules.ts";
 
@@ -47,6 +48,8 @@ function childSandboxPosture(): EvalConfig["sandbox"] {
 export interface GatePromptRequest {
 	title: string;
 	message: string;
+	/** The child's abort signal: a stopped child's question is withdrawn, not left open. */
+	signal?: AbortSignal;
 }
 
 /** Puts one permission question to the user in the parent's UI. */
@@ -69,6 +72,62 @@ export interface SubagentGateOptions {
 	rulesCwd?: string;
 }
 
+/** The parent's permission rules as they apply at `cwd` for a project of this trust. */
+export function loadParentRules(cwd: string, trusted: boolean): Rules {
+	try {
+		return forkSettings.permissions(SettingsManager.create(cwd, undefined, { projectTrusted: trusted })) ?? {};
+	} catch {
+		return {};
+	}
+}
+
+export interface SubagentCheck {
+	mode: PermissionMode;
+	/** Full rules when the user can be asked; the gate passes deny rules only otherwise. */
+	rules: Rules;
+	/** Protected paths resolve against this: the child's own cwd. */
+	cwd: string;
+	prompt?: GatePrompt;
+	/** Who is asking, for the prompt title. */
+	asker: string;
+	signal?: AbortSignal;
+}
+
+/**
+ * One tool call judged as the parent would judge it, prompting through the bridge
+ * when the verdict is a prompt. Returns the block reason, or undefined when it may
+ * run. Shared by the child gate and the commands the subagent layer runs itself
+ * (acceptance gates, external runners), so neither can drift from the evaluator.
+ */
+export async function checkAsParent(
+	toolName: string,
+	input: Record<string, unknown>,
+	check: SubagentCheck,
+): Promise<string | undefined> {
+	const cfg: EvalConfig = {
+		mode: check.mode,
+		rules: check.rules,
+		cliAllowRules: {},
+		cwd: check.cwd,
+		agentDir: getAgentDir(),
+		configDirName: CONFIG_DIR_NAME,
+		hasUI: Boolean(check.prompt),
+		// A child cannot leave the sandbox: its bash offers no
+		// `dangerouslyDisableSandbox` (child-bash.ts), and the evaluator is told
+		// the same so a smuggled parameter changes nothing here either.
+		sandbox: childSandboxPosture(),
+	};
+	// Running BOTH halves unconditionally is what keeps this gate from drifting
+	// from the parent the next time a gate is added there.
+	const verdict = evaluatePreHook(toolName, input, cfg) ?? evaluatePostHook(toolName, input, cfg);
+	if (verdict.outcome === "allow") return undefined;
+	if (verdict.outcome === "prompt" && check.prompt) {
+		const ok = await check.prompt({ title: check.asker, message: verdict.reason, signal: check.signal });
+		return ok ? undefined : `Permission declined by the user — ${verdict.reason}`;
+	}
+	return verdict.reason;
+}
+
 export function createSubagentGate(options: SubagentGateOptions = {}): InlineExtension {
 	const mode = options.mode ?? "auto";
 	const agent = options.agent ?? "subagent";
@@ -83,23 +142,10 @@ export function createSubagentGate(options: SubagentGateOptions = {}): InlineExt
 		// circumventable by delegation, which is the exact hole it exists to close.
 		let allRules: Rules | undefined;
 
-		function loadRules(ctx: { cwd: string; isProjectTrusted: () => boolean }): Rules {
-			if (allRules) return allRules;
-			try {
-				const sm = SettingsManager.create(rulesCwd ?? ctx.cwd, undefined, {
-					projectTrusted: ctx.isProjectTrusted(),
-				});
-				allRules = forkSettings.permissions(sm) ?? {};
-			} catch {
-				allRules = {};
-			}
-			return allRules;
-		}
-
 		/** Full rules when the user can be asked; deny only otherwise — see the header. */
 		function rulesFor(ctx: { cwd: string; isProjectTrusted: () => boolean }): Rules {
-			const rules = loadRules(ctx);
-			return prompt ? rules : { deny: rules.deny ?? [] };
+			allRules ??= loadParentRules(rulesCwd ?? ctx.cwd, ctx.isProjectTrusted());
+			return prompt ? allRules : { deny: allRules.deny ?? [] };
 		}
 
 		// A reload re-reads settings; drop the cache so the next call picks them up.
@@ -107,39 +153,17 @@ export function createSubagentGate(options: SubagentGateOptions = {}): InlineExt
 			allRules = undefined;
 		});
 
-		/** A verdict that is not an explicit allow never falls through to "permitted". */
-		async function decide(verdict: Verdict): Promise<ToolCallEventResult | undefined> {
-			if (verdict.outcome === "allow") return undefined;
-			if (verdict.outcome === "prompt" && prompt) {
-				const ok = await prompt({ title: `Subagent "${agent}" needs permission`, message: verdict.reason });
-				return ok ? undefined : { block: true, reason: `Permission declined by the user — ${verdict.reason}` };
-			}
-			return { block: true, reason: verdict.reason };
-		}
-
 		pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
-			// `task` is stripped from child tool sets, but the evaluator gates it anyway
-			// (defense in depth against a custom tool set reintroducing it).
-			const cfg: EvalConfig = {
+			// `task` is judged too: a nested child's delegations meet the parent's Task rules.
+			const reason = await checkAsParent(event.toolName, event.input as Record<string, unknown>, {
 				mode,
 				rules: rulesFor(ctx),
-				cliAllowRules: {},
 				cwd: ctx.cwd,
-				agentDir: getAgentDir(),
-				configDirName: CONFIG_DIR_NAME,
-				hasUI: Boolean(prompt),
-				// A child cannot leave the sandbox: its bash offers no
-				// `dangerouslyDisableSandbox` (child-bash.ts), and the evaluator is told
-				// the same so a smuggled parameter changes nothing here either.
-				sandbox: childSandboxPosture(),
-			};
-
-			const input = event.input as Record<string, unknown>;
-			const pre = evaluatePreHook(event.toolName, input, cfg);
-			if (pre) return decide(pre);
-			// Running BOTH halves unconditionally is what keeps this gate from drifting
-			// from the parent the next time a gate is added there.
-			return decide(evaluatePostHook(event.toolName, input, cfg));
+				prompt,
+				asker: `Subagent "${agent}" needs permission`,
+				signal: ctx.signal,
+			});
+			return reason === undefined ? undefined : { block: true, reason };
 		});
 	}
 

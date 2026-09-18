@@ -102,6 +102,16 @@ export interface EvalConfig {
 const READ_LIKE_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
 /**
+ * Tools the mode does not prompt for, though they are not reads: the three only
+ * inspect, steer or stop this session's own background subagents (a steered child's
+ * own tool calls still pass its gate), and `manage_agents` asks the user itself
+ * before every write, in every mode — a mode prompt on top would ask twice; and
+ * `contact_supervisor` is itself a question to the user.
+ * Deny rules still apply to them.
+ */
+const SELF_GATED_TOOLS = new Set(["task_output", "task_stop", "task_message", "manage_agents", "contact_supervisor"]);
+
+/**
  * Will this bash command actually run inside the OS sandbox? Not when the sandbox is
  * off, when `excludedCommands` takes the command out, or when the model's
  * `dangerouslyDisableSandbox` retry is honoured. When that retry is NOT honoured
@@ -240,8 +250,12 @@ function askOrBlock(gate: Gate, exact: string | null, cfg: EvalConfig, label?: s
  * name enough for every gate, instead of a per-gate list that the next shell-carrying
  * tool would have to be added to.
  */
-function governedTool(tool: string): string {
-	return tool === "monitor" ? "bash" : tool;
+function governedTool(tool: string, input: Record<string, unknown>): string {
+	if (tool === "monitor") return "bash";
+	// Creating a schedule is judged as the task it will start, while the user is here to
+	// answer; listing and cancelling touch only this session's own schedules.
+	if (tool === "task_schedule") return input.action === "create" ? "task" : "task_output";
+	return tool;
 }
 
 /**
@@ -251,7 +265,7 @@ function governedTool(tool: string): string {
  * {@link evaluatePostHook}.
  */
 export function evaluatePreHook(rawTool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict | undefined {
-	const tool = governedTool(rawTool);
+	const tool = governedTool(rawTool, input);
 
 	// 1. deny rules. (ask/allow are resolved in evaluatePostHook.)
 	const { decision, denyAgent } = decideRules(tool, input, cfg.rules, cfg.cwd);
@@ -339,7 +353,7 @@ export function evaluatePreHook(rawTool: string, input: Record<string, unknown>,
  * Gates 4–6: ask rules, allow rules, and what the mode does with an unmatched call.
  */
 export function evaluatePostHook(rawTool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict {
-	const tool = governedTool(rawTool);
+	const tool = governedTool(rawTool, input);
 	// Claude Code's sandbox auto-allow: a command that will run inside the OS sandbox is
 	// approved without a prompt, in every mode. Deny rules (gate 1) and content-scoped ask
 	// rules still apply; only the bare `Bash` ask rule is skipped for such a command.
@@ -398,7 +412,7 @@ export function evaluatePostHook(rawTool: string, input: Record<string, unknown>
 	//    does read-only bash (Claude Code auto-approves that list everywhere) — without
 	//    this, `ask` would prompt for `git status`, which is the approve-without-looking
 	//    training the gate must avoid.
-	if (READ_LIKE_TOOLS.has(tool)) return ALLOW("read-like");
+	if (READ_LIKE_TOOLS.has(tool) || SELF_GATED_TOOLS.has(tool)) return ALLOW("read-like");
 	if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
 	// An unsandboxed retry is never "read-only": `head ~/.ssh/id_rsa` is on the safe list,
 	// and the sandbox was the layer that stopped it — leaving the sandbox is exactly what
