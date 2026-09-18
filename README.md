@@ -55,7 +55,8 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `/mode`, `/permissions` | permission modes and allow/ask/deny rules. `/mode` picks from a list; Alt+M cycles `ask → edits → auto` |
 | `/sandbox` | OS-level sandbox for bash (`@anthropic-ai/sandbox-runtime`), configured with Claude Code's `sandbox` keys. No host is pre-allowed: the first connection to a host asks you (a yes holds for the session; `network.allowedDomains` pre-allows). Sandboxed commands run without a permission prompt (`autoAllowBashIfSandboxed`, default true; deny rules and content-scoped ask rules still apply). A denied command's result names the path or host in `<sandbox_violations>`; the model may retry with `dangerouslyDisableSandbox`, which goes through the normal permission flow labelled "(unsandboxed)" — `allowUnsandboxedCommands: false` ignores that parameter. `excludedCommands` (`Bash(...)` patterns, e.g. `docker *`) always run outside. `failIfUnavailable` (formerly `strict`) refuses to run bash at all when the sandbox was enabled but failed to start. Commands you type yourself (`!` and bash mode) run outside the sandbox, as in Claude Code. Everything else (`filesystem.allowRead`, `network.allowLocalBinding`, `credentials`, ...) passes straight through to the runtime; `allowAppleEvents` is honoured from user settings only |
 | `/tasks` | background bash jobs (`run_in_background`, `bash_output`, `kill_bash`) and monitors. A job notifies the model once when it exits; the `monitor` tool turns each output line of a long-running command into an event that wakes the model (Claude Code's `Monitor`, minus the WebSocket source; stdout and stderr are both events because pi's shell backend merges them) |
-| `/agents` | subagents via the `task` tool (single, parallel, chain; `run_in_background`, `resume`, `worktree: true`). The roster is in the system prompt, so the model delegates unprompted. Defs are Claude Code's markdown: `tools`, `disallowedTools`, `model` (`inherit`, `provider/id`, or a `subagents.models` alias), `permissionMode`, `maxTurns`, `skills`, `memory`, `background`, `isolation`, `effort`, `color`. Children get the parent's deny rules and protected paths, its sandbox, and — when it has a UI — its permission prompts, named per subagent. `/agents new\|edit\|delete <name>` manage user defs (editing a bundled one starts from its text); bundled: `explore`, `planner`, `code-reviewer`, `general-purpose` |
+| `/agents` | subagents via the `task` tool — single, parallel, chain, saved workflows, nesting, forked context, background runs with `task_output`/`task_message`/`task_stop`, schedules, acceptance gates, tool/token budgets, questions to you mid-run, external CLI runners. `/agents new\|edit\|delete <name>` manage user defs (the model can too, with `manage_agents`); `/agents show <id>` shows a child's transcript, `/agents stop <sa-N>` stops a background run. See [Subagents](#subagents) |
+| `/review-loop` | review/fix loop: parallel `code-reviewer` rounds, fixes by a `worker`, until clean or 3 rounds |
 | `/mcp` | MCP servers from `mcp.json` / `.mcp.json`; project servers need `/mcp approve` (enable/disable of a project server is kept in your settings, never written into `.mcp.json`). Server instructions go into the system prompt, server prompts run as `/mcp__<server>__<prompt> args…`, `list_changed` refreshes tools live, and a result over 50KB is cut with the full text saved to a temp file. Resources: `mcp_list_resources` / `mcp_read_resource`, and `@server:uri` in a prompt attaches one; both prompt commands and `@server:` resources autocomplete in the editor (Tab after `@server:` lists them). A server can ask you for input (form elicitation) or ask your current model for a completion (sampling, confirmed per request, any provider). To confirm before chosen tools run, use an ask rule such as `Mcp(github:delete_*)`. Claude Code's timeouts (per-server `timeout`, `MCP_TOOL_TIMEOUT` ≈28h default, idle `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` 30 min stdio / 5 min remote, `MCP_TIMEOUT` connect) and `${VAR}` / `${VAR:-default}` in `command`, `args`, `env`, `url`, `headers`; a remote server whose url or header would carry a model/cloud credential is refused |
 | `webfetch`, `websearch` | Claude Code's `WebFetch`/`WebSearch`, extended; see [Web](#web). Rules: `WebFetch(domain:example.com)` (what "Always allow" persists), `WebSearch(<query glob>)`, checked per query in a batch |
 | `/memory`, `# note` | persistent memory, injected into the system prompt. `/memory edit [scope]` and `/memory search <text>`; a bare `#` opens an editor for a multi-line note; `@name.md` lines pull in a sibling file |
@@ -88,6 +89,89 @@ While the agent works, "Working..." becomes one of Claude Code's 187 spinner ver
 Bash mode, the stash, the footer's currency and context-color behaviour and the welcome
 banner's sidebar are adapted from [pi-powerline-footer](https://github.com/nicobailon/pi-powerline-footer)
 (MIT, Nico Bailon).
+
+## Subagents
+
+The `task` tool delegates to agents defined in markdown (Claude Code's format),
+found bundled < `~/.pi/agent/agents` < `.pi/agents` in a trusted project. The
+roster, saved workflows and this project's recent missions are in the system
+prompt, so the model delegates unprompted. An untrusted project's agents and
+workflows are not offered at all; trust the project to use them.
+
+**Calling it.** `{agent, task}`; `tasks[]` in parallel; `chain[]` in sequence,
+where `{previous}` is the prior step's output and a step may be `{parallel: [...]}`
+(its outputs reach the next step together); `{workflow, input}` for a saved
+workflow. Options: `run_in_background`, `resume: "<agent id>"`, `worktree: true`,
+`fork: true` (the child starts from a copy of this conversation — compacted first
+when it is over `subagents.forkCompactAbove` tokens), `gate: "npm test"` (must
+pass after the child; a failure is sent back to it `subagents.gateRetries`
+times, then the task fails), `mission: "<label>"` (groups runs so a later session
+can find and resume them).
+
+**Background runs.** `task_output <sa-N>` shows progress, `task_message` steers a
+running child without restarting it, `task_stop` stops it and returns what it had
+(it can be resumed). For you: `/agents show <sa-N or agent id>` prints a child's
+transcript (its text, tool calls and results), `/agents stop <sa-N>` stops a run
+and tells the model you did. `task_schedule` starts a task or workflow later (`in: "10m"`)
+or repeatedly (`every: "1h"`); schedules end with the session.
+
+**Questions mid-run.** With a UI, children have `contact_supervisor`: a child that
+reaches a decision nobody made asks it, the question appears in your session
+(queued with permission prompts), and your answer goes back to the child. Esc lets
+it decide on its own and say what it assumed. The parent's model cannot answer —
+it is waiting on the `task` call — so you are the supervisor. Headless, the tool
+is absent.
+
+**Limits.** Per def or for every child via `subagents.*` settings: `maxTurns`,
+`timeoutMs` (the whole run), `toolTimeoutMs` (one tool call; time a permission
+prompt waits on you does not count), `maxTokens` (input + output + cache), and
+`toolBudget: {soft, hard, block}` — at `soft` calls the child is told to wrap up,
+past `hard` the `block` tools are refused (default: `read`, `grep`, `find`, `ls`,
+so an edit is never cut off halfway; `"*"` blocks everything). A child stopped by
+a limit returns what it had, marked partial and naming the limit. A cost cap is
+left out on purpose: subscription providers report no cost, so it would never fire.
+
+**Nesting.** Children get their own `task` tool down to `subagents.maxDepth`
+(default 2: main → child → grandchild; 1 turns nesting off), with at most
+`subagents.maxSpawns` children per top-level call (default 32). Nested children
+run in the foreground, share the root's permission prompts and transcript
+directory, and have no control tools.
+
+**Definitions.** Frontmatter: `name`, `description`, `tools`, `disallowedTools`,
+`model` (`inherit`, `provider/id`, or a `subagents.models` alias),
+`permissionMode`, `maxTurns`, `timeoutMs`, `toolTimeoutMs`, `maxTokens`,
+`toolBudget`, `skills`, `memory`, `background`, `fork: true` (start from this
+conversation unless it is not saved; pi-subagents' `defaultContext: fork` also
+works), `isolation: worktree`, `effort`, `color`, `gate`, and `runner` — `runner:
+{command: claude, args: [-p]}` runs that CLI instead of a pi child, with the
+prompt on stdin and its stdout as the result (no tools, fork, resume or
+steering). Bundled: `explore`, `planner`, `code-reviewer`, `general-purpose`,
+`oracle` (a read-only second opinion from a copy of this conversation: what was
+decided, where the plan drifts) and `worker` (implements an agreed plan from a copy
+of this conversation, asks instead of deciding).
+`/agents new|edit|delete <name>` edits user defs; `manage_agents` lets the model
+list, read, create, update and delete them — every write asks you first, in every
+mode, and a def may not declare a `permissionMode` above the session's.
+
+**Workflows.** Markdown files with `name`, `description` and a `chain` in
+frontmatter (`{input}` is the call's input), found bundled < `~/.pi/agent/workflows`
+< `.pi/workflows` in a trusted project. Bundled: `parallel-review`,
+`scout-and-plan`, `implement-and-review`. They are declarative on purpose: a
+workflow *script* would need a JS sandbox, and node's `vm` is not a security
+boundary — a script escaping it would bypass every permission rule.
+`/review-loop [target]` covers the loop a chain cannot express: reviewers in
+parallel, the parent merges and triages (P0/P1/P2), a `worker` fixes what is worth
+fixing, repeat until clean or 3 rounds. `oracle`, `worker` and `/review-loop` are
+adapted from [pi-subagents](https://github.com/nicobailon/pi-subagents) (MIT, Nico Bailon).
+
+**Safety.** Children run under the parent's rules, protected paths and sandbox;
+when the parent has a UI their permission prompts appear there, named per
+subagent. Gate commands and external runners are judged as bash by the parent's
+rules and mode and run in the sandbox. A resume is judged by the agent the
+resumed child actually runs. Child output that imitates the harness (tags,
+`Human:` lines, bluclawd's own `[agent id: …]` notes) is escaped before the
+parent sees it. Finished children are recorded in `~/.pi/agent/subagents/runs.jsonl`,
+which is also how a child is resumed from another session.
 
 ## Web
 
@@ -205,8 +289,12 @@ call no rule names:
 approve everything, and `deny: ["Bash(rm -rf **)"]` is how you put a guard
 back. Claude Code's names (`default`, `acceptEdits`, `bypass`) and the older
 `always` are still accepted anywhere a mode is named — the bypass spellings
-resolve to `auto` — so stored settings and scripts keep working. Subagent
-children are evaluated as `auto` with the parent's deny rules only.
+resolve to `auto` — so stored settings and scripts keep working. A subagent
+child keeps a parent's `edits` or `auto` mode; under `ask` it runs in the mode
+its def declares (`ask` if none). With a UI its prompts reach you; headless it
+gets the parent's deny rules only, and whatever would prompt is blocked. `task_output`, `task_message`, `task_stop`
+and `task_schedule list|cancel` never prompt — they only touch this session's own
+runs — and `manage_agents` asks for every write itself, in every mode.
 
 A trusted session starts in `auto`; set `permissions.defaultMode` in global
 settings to start in `ask` or `edits` instead.
