@@ -36,6 +36,7 @@ import { resolveToCwd } from "../_shared/path-resolve.ts";
  * that grants bash.
  */
 import { resolveTaskTargets } from "../_shared/subagent-targets.ts";
+import { COMMAND_SUBSTITUTION } from "./safe-command.ts";
 
 const VERB: Record<string, string> = {
 	bash: "Bash",
@@ -124,7 +125,7 @@ export function parseRuleSpec(spec: string): { tool: string; input: Record<strin
 	const m = /^(\w+)\((.*)\)$/.exec(stripWrappingQuotes(spec));
 	if (!m) return undefined;
 	const verb = m[1].toLowerCase();
-	const subj = m[2];
+	const subj = unescapeGlob(m[2]);
 
 	if (verb === "task") return { tool: "task", input: { agent: subj } };
 	if (verb === "mcp") {
@@ -193,7 +194,30 @@ export function exactRule(tool: string, subj: string): string | null {
 		const host = urlHost(subj);
 		if (host !== undefined) return `${verb}(domain:${host})`;
 	}
-	return `${verb}(${subj})`;
+	return `${verb}(${escapeGlob(subj)})`;
+}
+
+/**
+ * `\*` is a literal `*` in a rule. An exact rule escapes every `*` of its subject: an
+ * "Always allow" on `ls *.ts` otherwise persisted a live glob that also granted
+ * `ls $(rm -rf ~).ts`.
+ */
+function escapeGlob(subj: string): string {
+	return subj.replace(/\*/g, "\\*");
+}
+
+/** A rule as a person reads it: the `\*` an exact rule stores is a plain `*`. */
+export function displayRule(rule: string): string {
+	return unescapeGlob(rule);
+}
+
+function unescapeGlob(subj: string): string {
+	return subj.replace(/\\\*/g, "*");
+}
+
+/** A rule subject with no live wildcard, as the literal string it matches; undefined otherwise. */
+function literalSubject(pattern: string): string | undefined {
+	return /(?:^|[^\\])\*/.test(pattern) ? undefined : homeExpand(unescapeGlob(pattern));
 }
 
 /** The `<domain>` of a `domain:<domain>` rule subject, or undefined for a url-shaped one. */
@@ -373,6 +397,56 @@ export function isReadProtectedPath(rawPath: string, cwd: string, agentDir: stri
 	return eq(parent, agentAbs) || eq(basename(parent), configDirName);
 }
 
+/**
+ * {@link isReadProtectedPath} for a shell word whose basename may be a wildcard:
+ * `~/.pi/agent/*.json` expands to auth.json before the command ever sees it.
+ */
+export function isReadProtectedPattern(word: string, cwd: string, agentDir: string, configDirName: string): boolean {
+	if (isReadProtectedPath(word, cwd, agentDir, configDirName)) return true;
+	const name = basename(word);
+	if (!/[*?[]/.test(name)) return false;
+	// `[…]` stays a character class; over-matching here only prompts more.
+	const glob = name
+		.replace(/[.+^${}()|\\]/g, "\\$&")
+		.replace(/\*/g, ".*")
+		.replace(/\?/g, ".");
+	let re: RegExp;
+	try {
+		re = new RegExp(`^${glob}$`, "i");
+	} catch {
+		return false; // an unbalanced `[` is no glob the shell would expand either
+	}
+	return [...PROTECTED_FILENAMES, ...READ_PROTECTED_FILES].some(
+		(file) => re.test(file) && isReadProtectedPath(join(dirname(word), file), cwd, agentDir, configDirName),
+	);
+}
+
+/**
+ * Does a recursive search rooted at `rawPath` reach credential-bearing config? pi's
+ * grep runs with `--hidden`, so searching the agent dir, a config dir, or any ancestor
+ * of the agent dir (`~`, `/`) reads auth.json and mcp.json. A subagent's working data
+ * under the config dir (a worktree, agent memory) is not config and is exempt.
+ */
+export function searchReachesProtectedFiles(
+	rawPath: string,
+	cwd: string,
+	agentDir: string,
+	configDirName: string,
+): boolean {
+	const abs = resolveToCwd(rawPath, cwd);
+	const caseInsensitive = process.platform === "darwin" || process.platform === "win32";
+	const norm = (s: string): string => (caseInsensitive ? s.toLowerCase() : s);
+	const agentAbs = norm(resolveToCwd(agentDir, cwd));
+	const a = norm(abs);
+	const withSep = (s: string): string => (s.endsWith(sep) ? s : s + sep);
+	if (a === agentAbs || a.startsWith(withSep(agentAbs)) || agentAbs.startsWith(withSep(a))) return true;
+	const segments = a.split(sep);
+	return segments.some(
+		(segment, i) =>
+			segment === norm(configDirName) && !WORKING_DATA_DIRS.some((dir) => norm(dir) === (segments[i + 1] ?? "")),
+	);
+}
+
 /** Rule verbs whose subject is a filesystem path (so it can also be resolved). */
 const PATH_VERBS = new Set(["Read", "Write", "Edit", "Grep", "Find", "Ls"]);
 
@@ -402,7 +476,10 @@ function globToRegExp(pat: string, pathLike = true): RegExp {
 	let body = "";
 	for (let i = 0; i < expanded.length; i++) {
 		const c = expanded[i];
-		if (c === "*") {
+		if (c === "\\" && expanded[i + 1] === "*") {
+			body += "\\*";
+			i++;
+		} else if (c === "*") {
 			if (expanded[i + 1] === "*") {
 				// ** crosses / AND newlines: `.` never matches \n (no dotAll), so `.*`
 				// let any multiline command escape `**` deny rules (2026-07-10 review I1).
@@ -510,6 +587,15 @@ export function bashRuleSubjects(command: string, depth = 0): string[] {
 	return [...candidates].filter(Boolean);
 }
 
+/**
+ * `$(…)`, backticks and `<(…)` run arbitrary code before the command a glob names, so
+ * `Bash(git *)` must not grant `git $(rm -rf ~)`. Only a rule with no wildcard — the
+ * exact one "Always allow" persists — can allow such a command.
+ */
+function allowsSubstitution(ruleSubject: string, command: string): boolean {
+	return literalSubject(ruleSubject) === command;
+}
+
 export function decide(rules: Rules, tool: string, input: Record<string, unknown>, cwd?: string): Decision | null {
 	const verb = verbFor(tool);
 	if (!verb) return null; // unknown/extension tools: not governed
@@ -560,6 +646,7 @@ export function decide(rules: Rules, tool: string, input: Record<string, unknown
 					return host !== undefined && globToRegExp(domain).test(host);
 				}
 			}
+			if (kind === "allow" && isBash && COMMAND_SUBSTITUTION.test(subj)) return allowsSubstitution(m[2], subj);
 			// Bash subjects are command strings, not paths.
 			const pattern = globToRegExp(m[2], !isBash);
 			if (pattern.test(subj)) {
@@ -597,11 +684,19 @@ export function decide(rules: Rules, tool: string, input: Record<string, unknown
 			if ((rules[kind] ?? []).some((r) => matches(r, kind === "deny", kind))) return kind;
 		}
 		const allowRules = rules.allow ?? [];
+		// An exact rule for the whole line is the user's answer to exactly this command:
+		// "Always allow" persists one past the per-segment cap.
+		const wholeLineAllowed = allowRules.some((r) => {
+			const m = /^(\w+)\((.*)\)$/.exec(r);
+			return m !== null && m[1].toLowerCase() === verb.toLowerCase() && literalSubject(m[2]) === subj;
+		});
+		if (wholeLineAllowed) return "allow";
 		const segmentAllowed = (segment: string): boolean =>
 			allowRules.some((r) => {
 				try {
 					const m = /^(\w+)\((.*)\)$/.exec(r);
 					if (m === null || m[1].toLowerCase() !== verb.toLowerCase()) return false;
+					if (COMMAND_SUBSTITUTION.test(segment)) return allowsSubstitution(m[2], segment);
 					return globToRegExp(m[2], false).test(segment);
 				} catch {
 					return false; // a broken allow rule is ignored, same fail-open-for-allow as matches()

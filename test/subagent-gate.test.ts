@@ -96,6 +96,14 @@ describe("subagent permission gate", () => {
 			expect(auto.prompts).toHaveLength(0);
 		});
 
+		it("still judges the rest of a command after an approved protected read, as the parent does", async () => {
+			const { gate, prompts } = bridged(true);
+			// Approving the credential read must not also clear the ask rule the same line trips.
+			expect(await gate(bash("cat .mcp.json && git push origin main"), ctx())).toBeUndefined();
+			expect(prompts).toHaveLength(2);
+			expect(prompts[1]?.message).toContain("git push");
+		});
+
 		it("asks before a protected-path write instead of refusing outright", async () => {
 			const { gate, prompts } = bridged(true);
 			const write = { toolName: "write", input: { path: join(cwd, ".git", "hooks", "pre-commit"), content: "x" } };

@@ -33,7 +33,7 @@ import * as forkSettings from "../_shared/settings.ts";
 import { addGlobalRule, addProjectRule, removeGlobalRule, removeProjectRule } from "../_shared/settings-write.ts";
 import { sandboxPosture } from "../sandbox/state.ts";
 import { setActivePermissionMode } from "./active-mode.ts";
-import { type EvalConfig, evaluatePostHook, evaluatePreHook } from "./evaluate.ts";
+import { type EvalConfig, evaluatePostHook, evaluatePreHook, type Gate } from "./evaluate.ts";
 import {
 	createModeStore,
 	DEFAULT_MODE,
@@ -54,14 +54,57 @@ import {
 	parseRuleSpec,
 	type Rules,
 	stripWrappingQuotes,
+	subject,
 } from "./rules.ts";
 
-/** What `/permissions` renders: either the rule lists, or one `test` result. */
+/** One rule and where it was set. */
+interface SourcedRule {
+	rule: string;
+	source: string;
+}
+
+/** One gated call, as `/permissions why` shows it. */
+interface DecisionRecord {
+	tool: string;
+	subject: string;
+	gate: Gate;
+	allowed: boolean;
+	/** The user's answer, when the call prompted. */
+	answer?: string;
+}
+
+/** What `/permissions` renders: the rule lists, one `test` result, or the decision log. */
 interface PermissionsData {
 	mode: PermissionMode;
-	lists?: Array<{ list: "deny" | "ask" | "allow"; rules: string[] }>;
+	lists?: Array<{ list: "deny" | "ask" | "allow"; rules: Array<string | SourcedRule> }>;
 	test?: string[];
+	log?: DecisionRecord[];
 }
+
+/** Why a gate lets a call through or stops it, in the words `/permissions why` uses. */
+const GATE_TEXT: Record<Gate, string> = {
+	"deny-rule": "a deny rule",
+	"read-protected-path": "protected path (credentials)",
+	"write-protected-path": "protected path (config)",
+	"exact-allow": "an exact allow rule",
+	"cli-allow": "--allowedTools",
+	"readonly-bash": "read-only command",
+	"allow-rule": "an allow rule",
+	"ask-rule": "an ask rule",
+	"read-like": "reads never prompt",
+	"accept-edits": "edits mode",
+	"auto-mode": "auto mode",
+	sandboxed: "runs in the sandbox",
+	"no-matching-rule": "no rule matched, so the mode asked",
+};
+
+/** A rule some gate reads: a governed verb and a non-empty subject. */
+function isRule(spec: string): boolean {
+	return /\(.+\)$/.test(spec) && parseRuleSpec(spec) !== undefined;
+}
+
+/** How many recent decisions `/permissions why` keeps. */
+const DECISION_LOG_SIZE = 20;
 
 /** Claude Code's `autoAccept` badge colour (2.1.259 dark): rgb(175,135,255). */
 const CC_AUTO_ACCEPT = "\x1b[38;2;175;135;255m";
@@ -125,6 +168,24 @@ export function factory(pi: ExtensionAPI): void {
 	// flag's intent is an explicit per-invocation grant — honored in the ask and
 	// auto gates below (deny and protected paths still win).
 	let cliAllowRules: Rules = {};
+	// What the session layers over settings — the FleetView ask-all posture and
+	// --disallowedTools. Kept apart so every reload of settings re-applies it:
+	// `/permissions add` used to reload settings alone and silently drop both.
+	// Its allow list holds the "Yes, for this session" grants.
+	let sessionRules: Rules = {};
+	// The latest gated calls, newest last, for `/permissions why`.
+	let decisions: DecisionRecord[] = [];
+
+	/** Settings rules with the session's own layered on top. */
+	function reloadRules(ctx: ExtensionContext): void {
+		const base = loadRules(ctx);
+		rules = {
+			...base,
+			allow: [...(base.allow ?? []), ...(sessionRules.allow ?? [])],
+			ask: [...(base.ask ?? []), ...(sessionRules.ask ?? [])],
+			deny: [...(base.deny ?? []), ...(sessionRules.deny ?? [])],
+		};
+	}
 	// Mode store: created in session_start (fresh "ask" state), disposed in
 	// session_shutdown. Undefined before the first session_start → treat as "ask".
 	let modeStore: ModeStore | undefined;
@@ -219,7 +280,7 @@ export function factory(pi: ExtensionAPI): void {
 			.split(",")
 			.map((s) => s.trim())
 			.filter((s) => s.length > 0)) {
-			if (RULE_SHAPE.test(entry)) {
+			if (isRule(entry)) {
 				out.push(entry);
 				continue;
 			}
@@ -242,7 +303,8 @@ export function factory(pi: ExtensionAPI): void {
 		// letting it name the mode would let any repo ship `defaultMode: "auto"`
 		// and switch the whole safety layer off. CLI flags below still override this.
 		applySettingsDefaultMode(ctx);
-		rules = loadRules(ctx);
+		sessionRules = {};
+		decisions = [];
 		// PI_PERMISSION_MODE=ask (set by the FleetView orchestrator for spawned background
 		// sessions) makes the agent ask before every governed tool, so it surfaces a blocking
 		// prompt an attach viewer can answer. Rules-based so it never touches the mode union.
@@ -250,19 +312,14 @@ export function factory(pi: ExtensionAPI): void {
 		// hand-kept list would silently miss any verb added to governance later. Since audit
 		// B.5 this includes Mcp and Task, so MCP tools and subagent delegation prompt too.
 		if (process.env.PI_PERMISSION_MODE === "ask") {
-			const askAll = governedVerbs().map((verb) => `${verb}(**)`);
-			rules = { ...rules, ask: [...(rules.ask ?? []), ...askAll] };
+			sessionRules.ask = governedVerbs().map((verb) => `${verb}(**)`);
 		}
 		// CC headless interop (audit B.6): --disallowedTools merges into the deny
 		// list (deny > ask > allow, so it wins in every mode);
 		// --allowedTools populates the separate cliAllowRules grant set.
 		const denyFlag = pi.getFlag("disallowedTools");
-		if (typeof denyFlag === "string" && denyFlag) {
-			rules = {
-				...rules,
-				deny: [...(rules.deny ?? []), ...parseToolRuleFlag(denyFlag)],
-			};
-		}
+		if (typeof denyFlag === "string" && denyFlag) sessionRules.deny = parseToolRuleFlag(denyFlag);
+		reloadRules(ctx);
 		const allowFlag = pi.getFlag("allowedTools");
 		cliAllowRules = typeof allowFlag === "string" && allowFlag ? { allow: parseToolRuleFlag(allowFlag) } : {};
 		// Initial mode from the CLI: --dangerously-skip-permissions (CC alias) wins
@@ -302,16 +359,19 @@ export function factory(pi: ExtensionAPI): void {
 	 * of only the exact compound string verbatim. A single command or a non-bash verb is
 	 * unaffected: `bashSegments` returns one segment, so `toPersist` is just `[exact]`.
 	 */
-	async function persistAlwaysAllow(exact: string, toProject: boolean, ctx: ExtensionContext): Promise<void> {
+	/**
+	 * The rules that grant `exact`: one per segment for a compound, or the whole line
+	 * once the compound is past the cap, where per-segment rules would miss some.
+	 */
+	function grantRules(exact: string): string[] {
 		const parsed = parseRuleSpec(exact);
 		const segments = parsed?.tool === "bash" ? bashSegments(String(parsed.input.command ?? "")) : undefined;
-		const toPersist =
-			segments && segments.length > 1
-				? [...new Set(segments.map((segment) => exactRule("bash", segment)).filter((r) => r !== null))].slice(
-						0,
-						MAX_COMPOUND_ALLOW_RULES,
-					)
-				: [exact];
+		if (!segments || segments.length < 2 || segments.length > MAX_COMPOUND_ALLOW_RULES) return [exact];
+		return [...new Set(segments.map((segment) => exactRule("bash", segment)).filter((r) => r !== null))];
+	}
+
+	async function persistAlwaysAllow(exact: string, toProject: boolean, ctx: ExtensionContext): Promise<void> {
+		const toPersist = grantRules(exact);
 
 		rules = {
 			...rules,
@@ -333,27 +393,45 @@ export function factory(pi: ExtensionAPI): void {
 	}
 
 	/**
-	 * The full permission prompt: Yes / No / Always allow / Always allow (project).
-	 * The project option persists into `.bluclawd/settings.json` and is offered only when
-	 * the project is trusted (untrusted project rules are never read anyway).
+	 * The full permission prompt: Yes / Yes, for this session / No / No, and tell the
+	 * model why / Always allow / Always allow (project). The project option persists into
+	 * `.bluclawd/settings.json` and is offered only when the project is trusted (untrusted
+	 * project rules are never read anyway). A session grant lives in memory only.
 	 */
 	async function askWithScope(
 		label: string,
 		exact: string | null,
 		ctx: ExtensionContext,
-	): Promise<"allow" | "deny" | "failed"> {
+	): Promise<{ outcome: "allow" | "deny" | "failed"; answer?: string; note?: string }> {
 		let choice: string | undefined;
 		try {
-			const options = ["Yes", "No", "Always allow", ...(ctx.isProjectTrusted() ? ["Always allow (project)"] : [])];
+			// No rule names this call (a tool outside the rule verbs), so there is nothing to grant.
+			const session = exact ? ["Yes, for this session"] : [];
+			const always = exact ? ["Always allow", ...(ctx.isProjectTrusted() ? ["Always allow (project)"] : [])] : [];
+			const options = ["Yes", ...session, "No", "No, and tell the model why", ...always];
 			choice = await ctx.ui.select(label, options);
+			if (choice === "No, and tell the model why") {
+				const note = (await ctx.ui.input("Tell the model why, or what to do instead"))?.trim();
+				return { outcome: "deny", answer: choice, note: note || undefined };
+			}
 		} catch {
-			return "failed";
+			return { outcome: "failed" };
 		}
 		if (choice === "Always allow" || choice === "Always allow (project)") {
 			if (exact) await persistAlwaysAllow(exact, choice === "Always allow (project)", ctx);
-			return "allow";
+			return { outcome: "allow", answer: choice };
 		}
-		return choice === "Yes" ? "allow" : "deny";
+		if (choice === "Yes, for this session" && exact) {
+			sessionRules.allow = [...new Set([...(sessionRules.allow ?? []), ...grantRules(exact)])];
+			rules = { ...rules, allow: [...new Set([...(rules.allow ?? []), ...grantRules(exact)])] };
+			return { outcome: "allow", answer: choice };
+		}
+		return { outcome: choice === "Yes" ? "allow" : "deny", answer: choice ?? "No" };
+	}
+
+	/** A denial's reason, carrying what the user told the model, if anything. */
+	function denied(reason: string, note?: string): ToolCallEventResult {
+		return { block: true, reason: note ? `${reason} The user says: ${note}` : reason };
 	}
 
 	/**
@@ -365,6 +443,19 @@ export function factory(pi: ExtensionAPI): void {
 		liveCtx = ctx;
 		const tool = event.toolName;
 		const input = event.input as Record<string, unknown>;
+		const { result, gate, answer } = await judge(tool, input, ctx);
+		decisions = [...decisions, { tool, subject: subject(tool, input), gate, allowed: !result?.block, answer }].slice(
+			-DECISION_LOG_SIZE,
+		);
+		return result;
+	});
+
+	/** The verdict for one call, with the gate that decided it and the user's answer if asked. */
+	async function judge(
+		tool: string,
+		input: Record<string, unknown>,
+		ctx: ExtensionContext,
+	): Promise<{ result: ToolCallEventResult | undefined; gate: Gate; answer?: string }> {
 		const cfg: EvalConfig = {
 			mode: currentMode(),
 			rules,
@@ -376,46 +467,52 @@ export function factory(pi: ExtensionAPI): void {
 			sandbox: sandboxPosture(),
 		};
 
+		const failed = { block: true, reason: "Permission prompt failed or was interrupted. Blocked by default." };
+
 		// Gates 1-3: deny rules, protected paths.
 		const pre = evaluatePreHook(tool, input, cfg);
-		if (pre?.outcome === "allow") return;
-		if (pre?.outcome === "block") return { block: true, reason: pre.reason };
+		if (pre?.outcome === "block") return { result: { block: true, reason: pre.reason }, gate: pre.gate };
+		let preAnswer: string | undefined;
 		if (pre?.outcome === "prompt") {
-			const approved = await confirm(pre.reason, ctx);
-			if (approved === "failed") {
-				return {
-					block: true,
-					reason: "Permission prompt failed or was interrupted. Blocked by default.",
-				};
-			}
-			if (!approved) {
+			// A protected READ may be allowed for good: the exact rule clears this gate next
+			// time, and the bash screen matches words, so a repeat (`git diff .mcp.json`)
+			// would otherwise ask every time. Protected WRITES stay one approval at a time.
+			const asked =
+				pre.gate === "read-protected-path"
+					? await askWithScope(pre.reason, pre.exact ?? null, ctx)
+					: await confirm(pre.reason, ctx).then((r) => ({
+							outcome: r === "failed" ? ("failed" as const) : r ? ("allow" as const) : ("deny" as const),
+							answer: r === true ? "Yes" : "No",
+							note: undefined,
+						}));
+			if (asked.outcome === "failed") return { result: failed, gate: pre.gate };
+			if (asked.outcome === "deny") {
 				const what = pre.gate === "read-protected-path" ? "Read of" : "Write to";
 				return {
-					block: true,
-					reason: `${what} protected path denied: ${pre.protectedPath}`,
+					result: denied(`${what} protected path denied: ${pre.protectedPath}.`, asked.note),
+					gate: pre.gate,
+					answer: asked.answer,
 				};
 			}
 			// An approved WRITE to a protected path is granted once and we are done. An
 			// approved READ falls through: the read gate is narrow (credentials only) and
 			// the call still has to satisfy the ordinary ask/auto gates below.
-			if (pre.gate === "write-protected-path") return;
+			if (pre.gate === "write-protected-path") return { result: undefined, gate: pre.gate, answer: asked.answer };
+			preAnswer = asked.answer;
 		}
 
 		// Gates 4-6: ask rules, allow rules, and what the mode does with the rest.
 		const post = evaluatePostHook(tool, input, cfg);
-		if (post.outcome === "allow") return;
-		if (post.outcome === "block") return { block: true, reason: post.reason };
+		if (post.outcome === "allow") return { result: undefined, gate: post.gate, answer: preAnswer };
+		if (post.outcome === "block") return { result: { block: true, reason: post.reason }, gate: post.gate };
 
-		const outcome = await askWithScope(post.reason, post.exact ?? null, ctx);
-		if (outcome === "failed") {
-			return {
-				block: true,
-				reason: "Permission prompt failed or was interrupted. Blocked by default.",
-			};
+		const asked = await askWithScope(post.reason, post.exact ?? null, ctx);
+		if (asked.outcome === "failed") return { result: failed, gate: post.gate };
+		if (asked.outcome === "deny") {
+			return { result: denied("Permission denied by user.", asked.note), gate: post.gate, answer: asked.answer };
 		}
-		if (outcome === "deny") return { block: true, reason: "Permission denied by user." };
-		return;
-	});
+		return { result: undefined, gate: post.gate, answer: asked.answer };
+	}
 
 	async function cycleAndReport(ctx: ExtensionContext): Promise<void> {
 		liveCtx = ctx;
@@ -447,7 +544,7 @@ export function factory(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("mode", {
-		description: `Choose a permission mode (); Alt+M cycles them`,
+		description: `Choose a permission mode (${PERMISSION_MODES.join(" / ")}); Alt+M cycles them`,
 		handler: async (args, ctx) => {
 			const requested = args.trim();
 			if (requested) {
@@ -489,9 +586,30 @@ export function factory(pi: ExtensionAPI): void {
 		handler: async (ctx) => cycleAndReport(ctx),
 	});
 
-	// /permissions — view or edit rules (CC parity, audit B.3). Rule syntax is
-	// validated shallowly (Verb(spec)); the glob semantics live in rules.ts.
-	const RULE_SHAPE = /^[A-Za-z]+\(.+\)$/;
+	/**
+	 * One rule list with where each rule was set. Settings files first, then what this
+	 * session layers on top — flags, the FleetView posture, "Yes, for this session" —
+	 * which no settings file shows.
+	 */
+	function sourcedRules(sm: SettingsManager, list: "deny" | "ask" | "allow"): SourcedRule[] {
+		const listOf = (settings: unknown): string[] => (settings as { permissions?: Rules }).permissions?.[list] ?? [];
+		const sessionSource = {
+			deny: "--disallowedTools",
+			ask: "PI_PERMISSION_MODE=ask",
+			allow: "this session",
+		}[list];
+		const out: SourcedRule[] = [];
+		const add = (rule: string, source: string): void => {
+			const seen = out.find((entry) => entry.rule === rule);
+			if (seen) seen.source += `, ${source}`;
+			else out.push({ rule, source });
+		};
+		for (const rule of listOf(sm.getGlobalSettings())) add(rule, "global");
+		for (const rule of listOf(sm.getProjectSettings())) add(rule, "project");
+		for (const rule of sessionRules[list] ?? []) add(rule, sessionSource);
+		if (list === "allow") for (const rule of cliAllowRules.allow ?? []) add(rule, "--allowedTools");
+		return out;
+	}
 
 	/**
 	 * Does ONE rule match this call, as its list kind? Runs the real engine on a
@@ -512,13 +630,22 @@ export function factory(pi: ExtensionAPI): void {
 		container.addChild(new Spacer(1));
 		if (!data) return container;
 		const lines: string[] = [`${theme.bold("Permissions")}  ${theme.fg("dim", `mode: ${data.mode}`)}`];
-		if (data.test) {
+		if (data.log) {
+			lines.push("");
+			if (data.log.length === 0) lines.push(theme.fg("muted", "  No tool calls yet this session."));
+			for (const d of data.log) {
+				const mark = d.allowed ? theme.fg("success", "✓") : theme.fg("error", "✗");
+				const what = d.subject ? `${d.tool}  ${d.subject.split("\n")[0].slice(0, 80)}` : d.tool;
+				const answer = d.answer ? `, you answered "${d.answer}"` : "";
+				lines.push(`  ${mark} ${what}  ${theme.fg("dim", `— ${GATE_TEXT[d.gate]}${answer}`)}`);
+			}
+		} else if (data.test) {
 			for (const line of data.test) lines.push(`  ${line}`);
 			lines.push("");
 			lines.push(
 				theme.fg(
 					"dim",
-					"This is the RULE decision only. The final outcome can still differ: protected paths, a PreToolUse hook, the sandbox pairing and auto mode's guardrail all apply on top.",
+					"This is the RULE decision only. The final outcome can still differ: protected paths, the read-only allowlist, the sandbox pairing and the mode all apply on top.",
 				),
 			);
 		} else {
@@ -528,14 +655,18 @@ export function factory(pi: ExtensionAPI): void {
 			for (const { list, rules } of data.lists ?? []) {
 				lines.push("");
 				lines.push(`${theme.fg(colour[list], list)} ${theme.fg("dim", `(${rules.length})`)}`);
-				for (const rule of rules) lines.push(`  ${rule}`);
+				for (const entry of rules) {
+					lines.push(
+						typeof entry === "string" ? `  ${entry}` : `  ${entry.rule}  ${theme.fg("dim", `(${entry.source})`)}`,
+					);
+				}
 				if (rules.length === 0) lines.push(theme.fg("muted", "  none"));
 			}
 			lines.push("");
 			lines.push(
 				theme.fg(
 					"dim",
-					"/permissions test <Rule(spec)> · /permissions add <allow|ask|deny> <Rule(spec)> [--project] · /permissions remove <Rule(spec)>",
+					"/permissions why · /permissions test <Rule(spec)> · /permissions add <allow|ask|deny> <Rule(spec)> [--project] · /permissions remove <Rule(spec)>",
 				),
 			);
 		}
@@ -545,7 +676,7 @@ export function factory(pi: ExtensionAPI): void {
 
 	pi.registerCommand("permissions", {
 		description:
-			"View, test or edit permission rules: /permissions [test <Rule(spec)> | add <allow|ask|deny> <Rule(spec)> [--project] | remove <Rule(spec)>]",
+			"View, test or edit permission rules, or see why recent calls ran: /permissions [why | test <Rule(spec)> | add <allow|ask|deny> <Rule(spec)> [--project] | remove <Rule(spec)>]",
 		handler: async (args, ctx) => {
 			liveCtx = ctx;
 			const trimmed = args.trim();
@@ -554,11 +685,15 @@ export function factory(pi: ExtensionAPI): void {
 			});
 
 			if (!trimmed) {
-				const effective = forkSettings.permissions(sm) ?? {};
 				pi.appendEntry<PermissionsData>("bluclawd:permissions", {
 					mode: currentMode(),
-					lists: (["deny", "ask", "allow"] as const).map((list) => ({ list, rules: effective[list] ?? [] })),
+					lists: (["deny", "ask", "allow"] as const).map((list) => ({ list, rules: sourcedRules(sm, list) })),
 				});
+				return;
+			}
+
+			if (trimmed === "why") {
+				pi.appendEntry<PermissionsData>("bluclawd:permissions", { mode: currentMode(), log: decisions });
 				return;
 			}
 
@@ -568,8 +703,8 @@ export function factory(pi: ExtensionAPI): void {
 			// /permissions test <Verb(subject)> — which rules match this call, and what the
 			// rule engine decides. Deliberately narrow: it reports the RULE decision and the
 			// matching rules, NOT a prediction of the final outcome. The full outcome also
-			// depends on the mode, protected paths, a PreToolUse hook, the sandbox, the auto
-			// counters and the real filesystem — a confident "allow" here that turned into a
+			// depends on the mode, protected paths, the read-only allowlist, the sandbox and
+			// the real filesystem — a confident "allow" here that turned into a
 			// prompt in the real call would be worse than no feature at all.
 			if (verb === "test") {
 				const spec = parts.slice(1).join(" ");
@@ -594,7 +729,12 @@ export function factory(pi: ExtensionAPI): void {
 					decided = true;
 				}
 				if (!decided) {
-					lines.push("No rule matches — the call runs (nothing is denied, nothing prompts).");
+					const byMode = {
+						auto: "runs it",
+						edits: "runs reads and file edits, and prompts for the rest",
+						ask: "runs read-only calls, and prompts for the rest",
+					};
+					lines.push(`No rule matches — mode ${currentMode()} decides: it ${byMode[currentMode()]}.`);
 				}
 				pi.appendEntry<PermissionsData>("bluclawd:permissions", { mode: currentMode(), test: lines });
 				return;
@@ -605,9 +745,10 @@ export function factory(pi: ExtensionAPI): void {
 				const rest = parts.slice(2);
 				const toProject = rest.includes("--project");
 				const rule = stripWrappingQuotes(rest.filter((token) => token !== "--project").join(" "));
-				if (!["allow", "ask", "deny"].includes(list) || !RULE_SHAPE.test(rule)) {
+				if (!["allow", "ask", "deny"].includes(list) || !isRule(rule)) {
+					// A rule no gate reads would sit in settings looking like protection.
 					ctx.ui.notify(
-						'Usage: /permissions add <allow|ask|deny> <Rule(spec)> [--project] — e.g. add deny "Bash(curl **)"',
+						`Usage: /permissions add <allow|ask|deny> <Rule(spec)> [--project] — e.g. add deny "Bash(curl **)"\nGoverned verbs: ${governedVerbs().join(", ")} (Mcp takes server:tool)`,
 						"warning",
 					);
 					return;
@@ -621,7 +762,7 @@ export function factory(pi: ExtensionAPI): void {
 				}
 				if (toProject) await addProjectRule(ctx.cwd, list, rule, ctx.isProjectTrusted());
 				else await addGlobalRule(list, rule);
-				rules = loadRules(ctx); // effective immediately
+				reloadRules(ctx); // effective immediately
 				ctx.ui.notify(`Added ${list} rule (${toProject ? "project" : "global"}): ${rule}`, "info");
 				return;
 			}
@@ -639,18 +780,22 @@ export function factory(pi: ExtensionAPI): void {
 				}
 				const removedGlobal = await removeGlobalRule(rule);
 				const removedProject = await removeProjectRule(ctx.cwd, rule, ctx.isProjectTrusted());
-				rules = loadRules(ctx);
+				// A "Yes, for this session" grant is revoked the same way.
+				const removedSession = sessionRules.allow?.includes(rule) ?? false;
+				if (removedSession) sessionRules.allow = sessionRules.allow?.filter((r) => r !== rule);
+				reloadRules(ctx);
+				const where = [removedGlobal && "global", removedProject && "project", removedSession && "this session"]
+					.filter(Boolean)
+					.join(", ");
 				ctx.ui.notify(
-					removedGlobal || removedProject
-						? `Removed rule${removedGlobal ? " (global)" : ""}${removedProject ? " (project)" : ""}: ${rule}`
-						: `Rule not found: ${rule}`,
-					removedGlobal || removedProject ? "info" : "warning",
+					where ? `Removed rule (${where}): ${rule}` : `Rule not found: ${rule}`,
+					where ? "info" : "warning",
 				);
 				return;
 			}
 
 			ctx.ui.notify(
-				"Usage: /permissions [add <allow|ask|deny> <Rule(spec)> [--project] | remove <Rule(spec)>]",
+				"Usage: /permissions [why | test <Rule(spec)> | add <allow|ask|deny> <Rule(spec)> [--project] | remove <Rule(spec)>]",
 				"warning",
 			);
 		},

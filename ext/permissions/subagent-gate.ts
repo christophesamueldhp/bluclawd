@@ -119,7 +119,15 @@ export async function checkAsParent(
 	};
 	// Running BOTH halves unconditionally is what keeps this gate from drifting
 	// from the parent the next time a gate is added there.
-	const verdict = evaluatePreHook(toolName, input, cfg) ?? evaluatePostHook(toolName, input, cfg);
+	let verdict = evaluatePreHook(toolName, input, cfg);
+	// An approved protected READ falls through to the remaining gates, as in the parent:
+	// approving `cat .mcp.json` must not also approve the rest of the line.
+	if (verdict?.outcome === "prompt" && verdict.gate === "read-protected-path" && check.prompt) {
+		const ok = await check.prompt({ title: check.asker, message: verdict.reason, signal: check.signal });
+		if (!ok) return `Permission declined by the user — ${verdict.reason}`;
+		verdict = undefined;
+	}
+	verdict ??= evaluatePostHook(toolName, input, cfg);
 	if (verdict.outcome === "allow") return undefined;
 	if (verdict.outcome === "prompt" && check.prompt) {
 		const ok = await check.prompt({ title: check.asker, message: verdict.reason, signal: check.signal });

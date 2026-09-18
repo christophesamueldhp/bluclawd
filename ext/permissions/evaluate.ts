@@ -38,17 +38,20 @@
  */
 
 import type { SandboxPosture } from "../sandbox/state.ts";
-import { bashWriteTargets } from "./bash-targets.ts";
+import { bashPathArgs, bashWriteTargets } from "./bash-targets.ts";
 import type { PermissionMode } from "./modes.ts";
 import {
 	bashSegments,
 	type Decision,
 	decide,
+	displayRule,
 	exactRule,
 	isProtectedPath,
 	isReadProtectedPath,
+	isReadProtectedPattern,
 	type Rules,
 	searchQueries,
+	searchReachesProtectedFiles,
 	subject,
 	taskAgents,
 } from "./rules.ts";
@@ -102,9 +105,18 @@ export interface EvalConfig {
 const READ_LIKE_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
 /**
- * Tools the mode does not prompt for, though they are not reads: the three only
- * inspect, steer or stop this session's own background subagents (a steered child's
- * own tool calls still pass its gate), and `manage_agents` asks the user itself
+ * Tools that only read what this session already holds, so the mode does not prompt
+ * for them: content webfetch/websearch stored (no network), the deferred MCP tool index
+ * (each tool it activates is still judged when called), and the names of every MCP
+ * server's resources (a listing for ONE server is judged as that server's tool).
+ */
+const LOCAL_READ_TOOLS = new Set(["get_search_content", "source_check", "mcp_find_tools", "mcp_list_resources"]);
+
+/**
+ * Tools the mode does not prompt for, though they are not reads: the task control
+ * tools only inspect, steer or stop this session's own background subagents (a steered
+ * child's own tool calls still pass its gate), `bash_output`/`kill_bash` do the same
+ * for its own background shells, and `manage_agents` asks the user itself
  * before every write, in every mode — a mode prompt on top would ask twice; and
  * `contact_supervisor` is itself a question to the user; `structured_output` only hands
  * a child's result back to its parent.
@@ -118,6 +130,8 @@ const SELF_GATED_TOOLS = new Set([
 	"manage_agents",
 	"contact_supervisor",
 	"structured_output",
+	"bash_output",
+	"kill_bash",
 ]);
 
 /**
@@ -230,7 +244,7 @@ function noPromptReason(cfg: EvalConfig): string | undefined {
 }
 
 /** The ask prompt, or the block it becomes when nothing can show a prompt. */
-function askOrBlock(gate: Gate, exact: string | null, cfg: EvalConfig, label?: string): Verdict {
+function askOrBlock(gate: Gate, exact: string | null, cfg: EvalConfig, tool: string, label?: string): Verdict {
 	const noPrompt = noPromptReason(cfg);
 	if (noPrompt) {
 		return {
@@ -243,7 +257,8 @@ function askOrBlock(gate: Gate, exact: string | null, cfg: EvalConfig, label?: s
 		outcome: "prompt",
 		gate,
 		promptKind: "ask",
-		reason: `Permission required — ${label ? `${label}: ` : ""}${exact}`,
+		// A tool no rule verb names has no rule to show (and none to persist): name the tool.
+		reason: `Permission required — ${label ? `${label}: ` : ""}${exact ? displayRule(exact) : tool}`,
 		exact,
 	};
 }
@@ -264,7 +279,31 @@ function governedTool(tool: string, input: Record<string, unknown>): string {
 	// Creating a schedule is judged as the task it will start, while the user is here to
 	// answer; listing and cancelling touch only this session's own schedules.
 	if (tool === "task_schedule") return input.action === "create" ? "task" : "task_output";
+	// MCP resources are judged as their server's tools, so `deny: Mcp(github:*)` covers
+	// reading github's resources too.
+	if (tool === "mcp_read_resource" || tool === "mcp_list_resources") {
+		const server = typeof input.server === "string" ? input.server : "";
+		if (server) return `mcp__${server}__${tool.slice("mcp_".length)}`;
+	}
 	return tool;
+}
+
+/** The credential-bearing path this call reads, if any — see gate 3. */
+function protectedReadTarget(tool: string, input: Record<string, unknown>, cfg: EvalConfig): string | undefined {
+	const { cwd, agentDir, configDirName } = cfg;
+	if (tool === "bash") {
+		return bashPathArgs(String(input.command ?? "")).find((word) =>
+			isReadProtectedPattern(word, cwd, agentDir, configDirName),
+		);
+	}
+	if (!READ_LIKE_TOOLS.has(tool)) return undefined;
+	const rawPath = typeof input.path === "string" ? input.path : "";
+	if (rawPath && isReadProtectedPath(rawPath, cwd, agentDir, configDirName)) return rawPath;
+	// find and ls list names, not contents; only grep reads what is under its root.
+	if (tool === "grep" && searchReachesProtectedFiles(rawPath || cwd, cwd, agentDir, configDirName)) {
+		return rawPath || cwd;
+	}
+	return undefined;
 }
 
 /**
@@ -284,41 +323,14 @@ export function evaluatePreHook(rawTool: string, input: Record<string, unknown>,
 		return {
 			outcome: "block",
 			gate: "deny-rule",
-			reason: `Blocked by permission rule (deny): ${exactRule(tool, subj)}`,
+			reason: `Blocked by permission rule (deny): ${displayRule(exactRule(tool, subj) ?? tool)}`,
 		};
 	}
 
-	// 2. Protected paths, reads. Narrow by design: only files whose CONTENTS are
-	//    credentials or executable config. Gating every read under .git/.bluclawd would
-	//    prompt for HEAD and installed package sources, and a constantly-firing gate
-	//    trains people to approve blindly.
-	if (READ_LIKE_TOOLS.has(tool)) {
-		const rawPath = typeof input.path === "string" ? input.path : "";
-		if (rawPath && isReadProtectedPath(rawPath, cfg.cwd, cfg.agentDir, cfg.configDirName)) {
-			const exact = exactRule(tool, subject(tool, input));
-			if (!hasExactAllow(cfg.rules, exact)) {
-				const noPrompt = noPromptReason(cfg);
-				if (noPrompt) {
-					return {
-						outcome: "block",
-						gate: "read-protected-path",
-						reason: `Protected path: ${rawPath} holds agent credentials. Approval required, but ${noPrompt}. Blocked.`,
-						protectedPath: rawPath,
-					};
-				}
-				return {
-					outcome: "prompt",
-					gate: "read-protected-path",
-					promptKind: "protected-read",
-					reason: `Protected path — allow ${tool} of ${rawPath}?`,
-					protectedPath: rawPath,
-					exact,
-				};
-			}
-		}
-	}
-
-	// 3. Protected paths, writes. bash counts: `echo {} > .bluclawd/mcp.json` installs a
+	// 2. Protected paths, writes. Checked before reads: an approved protected READ falls
+	//    through to the later gates, and a bash command that also writes protected
+	//    territory must not ride along on that approval.
+	//    bash counts: `echo {} > .bluclawd/mcp.json` installs a
 	//    shell-executing config file exactly as `write` does (mcp.json auth headers can run
 	//    shell commands via resolve-config-value.ts), so its redirect targets are screened
 	//    with the same predicate. Descriptor dups (`2>&1`) carry no path and are skipped —
@@ -352,6 +364,40 @@ export function evaluatePreHook(rawTool: string, input: Record<string, unknown>,
 					exact,
 				};
 			}
+		}
+	}
+
+	// 3. Protected paths, reads. Narrow by design: only files whose CONTENTS are
+	//    credentials or executable config. Gating every read under .git/.bluclawd would
+	//    prompt for HEAD and installed package sources, and a constantly-firing gate
+	//    trains people to approve blindly. bash counts, as it does for writes:
+	//    `cat auth.json` reads exactly what `read` does. So does a grep whose search
+	//    root reaches those files (pi's grep searches hidden files).
+	const readTarget = protectedReadTarget(tool, input, cfg);
+	if (readTarget !== undefined) {
+		const exact = exactRule(tool, subject(tool, input));
+		if (!hasExactAllow(cfg.rules, exact)) {
+			const noPrompt = noPromptReason(cfg);
+			if (noPrompt) {
+				return {
+					outcome: "block",
+					gate: "read-protected-path",
+					reason: `Protected path: ${readTarget} holds agent credentials. Approval required, but ${noPrompt}. Blocked.`,
+					protectedPath: readTarget,
+				};
+			}
+			return {
+				outcome: "prompt",
+				gate: "read-protected-path",
+				promptKind: "protected-read",
+				// bash names the whole command: approving it approves all of it.
+				reason:
+					tool === "bash"
+						? `Protected path — bash command names ${readTarget}: ${String(input.command ?? "")}`
+						: `Protected path — allow ${tool} of ${readTarget}?`,
+				protectedPath: readTarget,
+				exact,
+			};
 		}
 	}
 
@@ -405,7 +451,7 @@ export function evaluatePostHook(rawTool: string, input: Record<string, unknown>
 		if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
 		// Read-only bash is auto-approved in every mode (Claude Code's built-in list).
 		if (tool === "bash" && !retry && isSafeCommand(subject("bash", input))) return ALLOW("readonly-bash");
-		return askOrBlock("ask-rule", exact, cfg, label);
+		return askOrBlock("ask-rule", exact, cfg, tool, label);
 	}
 
 	// 5. An allow rule matched. The user wrote it; it is not second-guessed.
@@ -415,13 +461,13 @@ export function evaluatePostHook(rawTool: string, input: Record<string, unknown>
 	if (autoAllowed) return ALLOW("sandboxed");
 
 	// 5c. An unsandboxed retry the user asked to hear about every time — even in auto.
-	if (retry && asksAboutEveryRetry(cfg.rules)) return askOrBlock("ask-rule", exact, cfg, label);
+	if (retry && asksAboutEveryRetry(cfg.rules)) return askOrBlock("ask-rule", exact, cfg, tool, label);
 
 	// 6. No rule matched, so the mode decides. Reads never prompt in any mode; neither
 	//    does read-only bash (Claude Code auto-approves that list everywhere) — without
 	//    this, `ask` would prompt for `git status`, which is the approve-without-looking
 	//    training the gate must avoid.
-	if (READ_LIKE_TOOLS.has(tool) || SELF_GATED_TOOLS.has(tool)) return ALLOW("read-like");
+	if (READ_LIKE_TOOLS.has(tool) || LOCAL_READ_TOOLS.has(tool) || SELF_GATED_TOOLS.has(tool)) return ALLOW("read-like");
 	if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
 	// An unsandboxed retry is never "read-only": `head ~/.ssh/id_rsa` is on the safe list,
 	// and the sandbox was the layer that stopped it — leaving the sandbox is exactly what
@@ -430,5 +476,5 @@ export function evaluatePostHook(rawTool: string, input: Record<string, unknown>
 	if (tool === "bash" && !retry && isSafeCommand(String(input.command ?? ""))) return ALLOW("readonly-bash");
 	if (cfg.mode === "auto") return ALLOW("auto-mode");
 	if (cfg.mode === "edits" && (tool === "edit" || tool === "write")) return ALLOW("accept-edits");
-	return askOrBlock("no-matching-rule", exact, cfg, label);
+	return askOrBlock("no-matching-rule", exact, cfg, tool, label);
 }
