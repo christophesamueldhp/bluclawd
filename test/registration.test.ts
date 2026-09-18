@@ -23,7 +23,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	help: { commands: ["help"], tools: [], shortcuts: 0, events: 0 },
 	plugin: { commands: ["plugin"], tools: [], shortcuts: 0, events: 0 },
 	shell: { commands: ["bash-mode", "stash"], tools: [], shortcuts: 2, events: 2 },
-	vibes: { commands: ["vibe"], tools: [], shortcuts: 0, events: 4 },
+	vibes: { commands: [], tools: [], shortcuts: 0, events: 2 },
 };
 
 describe("bluclawd extension registration", () => {

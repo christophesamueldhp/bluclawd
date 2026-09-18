@@ -56,7 +56,6 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 	"bash-mode": "Session",
 	stash: "Session",
 	theme: "App",
-	vibe: "App",
 
 	// Code & review
 	rewind: "Code & review",

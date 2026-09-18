@@ -24,7 +24,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
-import type { PermissionSettings, VibesSettings } from "./settings.ts";
+import type { PermissionSettings } from "./settings.ts";
 
 type RuleList = "allow" | "ask" | "deny";
 
@@ -148,9 +148,4 @@ export async function setProjectServerDisabled(cwd: string, name: string, disabl
 		byProject[cwd] = { ...(byProject[cwd] ?? {}), [name]: disabled };
 		return { ...mcp, disabledProjectServers: byProject };
 	});
-}
-
-/** `/vibe` settings, in the user's global settings; `undefined` values are removed. */
-export async function updateGlobalVibes(changes: Partial<VibesSettings>): Promise<boolean> {
-	return updateKey<VibesSettings>(globalSettingsPath(), "vibes", (vibes) => ({ ...vibes, ...changes }));
 }

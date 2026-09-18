@@ -61,7 +61,6 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `/memory`, `# note` | persistent memory, injected into the system prompt. `/memory edit [scope]` and `/memory search <text>`; a bare `#` opens an editor for a multi-line note; `@name.md` lines pull in a sibling file |
 | `/rewind` | file checkpoints per turn; restores the files, the conversation, or both |
 | `/bash-mode`, `/stash` | bash mode (Ctrl+Shift+B or `/bash-mode`): the prompt drives a persistent shell, so `cd`, `export` and functions carry between commands; output shows below the editor instead of in the conversation, Escape leaves, Ctrl+C interrupts, Up/Down walk its commands. Alt+S stashes the prompt you are writing and brings it back into an empty editor; `/stash` inserts an older one |
-| `/vibe` | themed working messages: `/vibe star trek` turns "Working..." into short in-theme lines. Off by default; uses the session's model (`/vibe model <provider/id>` picks another), or `/vibe generate <theme> [count]` + `/vibe mode file` for no calls at all |
 | `/fleet` | session roster in the shape of Claude Code's `/resume` picker: title + `time · branch · N messages · path`, grouped by project path (ctrl+g: by Running / Saved instead, remembered) with status glyphs, type to search, ctrl+a current/all projects, enter opens, ctrl+t peeks, ctrl+n starts one; restarts a stale daemon by itself when it owns no running session |
 | `/status`, `/context`, `/usage` | model, auth, safety, session, context window, spend, plan usage |
 | `/plugin`, `/theme` | packages, theme |
@@ -83,7 +82,10 @@ provider ids with `statusline.subscriptionProviders` in settings.json. `statusli
 daily rate. `statusline.command`
 runs an external script whose first stdout line joins the status line.
 
-Bash mode, the stash, vibes, the footer's currency and context-color behaviour and the welcome
+While the agent works, "Working..." becomes one of Claude Code's 187 spinner verbs
+("Pondering...", "Clauding..."), a new one each turn, none repeated until all have shown.
+
+Bash mode, the stash, the footer's currency and context-color behaviour and the welcome
 banner's sidebar are adapted from [pi-powerline-footer](https://github.com/nicobailon/pi-powerline-footer)
 (MIT, Nico Bailon).
 

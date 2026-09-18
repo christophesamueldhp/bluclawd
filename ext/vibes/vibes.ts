@@ -1,83 +1,197 @@
 /**
- * The pure parts of working vibes: prompts, response cleanup, and the seeded
- * no-repeat order file mode walks.
- *
- * Adapted from pi-powerline-footer's working vibes (MIT, Nico Bailon).
+ * Claude Code's spinner verbs (2.1.276, 187 words), shown one per agent turn
+ * in place of "Working...".
  */
 
-export function buildVibePrompt(theme: string, task: string, recent: readonly string[]): string {
-	return [
-		`Generate a 2-4 word "${theme}" themed loading message ending in "...".`,
-		"",
-		// The start of a request carries most of its meaning; the rest only costs tokens.
-		`Task: ${task.slice(0, 100)}`,
-		"",
-		"Be creative and unexpected. Avoid obvious or clichéd phrases for this theme.",
-		"The message should hint at the task using theme vocabulary.",
-		recent.length > 0 ? `Don't use: ${recent.join(", ")}` : "",
-		"Output only the message, nothing else.",
-	]
-		.filter((line, index, lines) => line !== "" || lines[index - 1] !== "")
-		.join("\n");
-}
-
-export function buildBatchPrompt(theme: string, count: number): string {
-	return [
-		`Generate ${count} unique 2-4 word loading messages for a "${theme}" theme.`,
-		'Each message should end with "..."',
-		"Be creative, varied, and thematic. No duplicates.",
-		"Output one message per line, nothing else. No numbering, no bullets.",
-	].join("\n");
-}
-
-export const VIBE_SYSTEM_PROMPT = "You generate short themed loading messages and reply with the requested text only.";
-
-function withEllipsis(text: string): string {
-	return text.endsWith("...") ? text : `${text.replace(/\.+$/, "")}...`;
-}
-
-/** One model reply → one working message: first line, unquoted, `...`-terminated, at most `maxLength`. */
-export function cleanVibe(reply: string, fallback: string, maxLength: number): string {
-	let vibe = withEllipsis((reply.trim().split("\n")[0] ?? "").trim().replace(/^["']|["']$/g, ""));
-	if (vibe.length > maxLength) vibe = `${vibe.slice(0, maxLength - 3)}...`;
-	return vibe === "..." ? `${fallback}...` : vibe;
-}
-
-/** A batch reply → the vibes it contains, numbering/bullets/quotes removed. */
-export function parseVibeBatch(reply: string): string[] {
-	return reply
-		.split("\n")
-		.map((line) =>
-			line
-				.trim()
-				.replace(/^["'\d.\-)\s]+/, "")
-				.replace(/["']$/, "")
-				.trim(),
-		)
-		.filter((line) => line.length > 0)
-		.map(withEllipsis)
-		.filter((vibe) => vibe !== "...");
-}
-
-/** `/vibe generate <theme words> [count]`: a trailing number is the count (1-500, default 100). */
-export function parseGenerateArgs(args: readonly string[]): { theme: string; count: number } | undefined {
-	if (args.length === 0) return undefined;
-	const last = args[args.length - 1] ?? "";
-	const hasCount = args.length > 1 && /^\d+$/.test(last);
-	const theme = (hasCount ? args.slice(0, -1) : args).join(" ");
-	const count = hasCount ? Math.min(Math.max(Number.parseInt(last, 10), 1), 500) : 100;
-	return { theme, count };
-}
-
-export function vibeFileSlug(theme: string): string {
-	const slug = theme
-		.trim()
-		.toLowerCase()
-		.replace(/[^a-z0-9_-]+/g, "-")
-		.replace(/-+/g, "-")
-		.replace(/^[-_]+|[-_]+$/g, "");
-	return slug || "theme";
-}
+export const SPINNER_VERBS: readonly string[] = [
+	"Accomplishing",
+	"Actioning",
+	"Actualizing",
+	"Architecting",
+	"Baking",
+	"Beaming",
+	"Beboppin'",
+	"Befuddling",
+	"Billowing",
+	"Blanching",
+	"Bloviating",
+	"Boogieing",
+	"Boondoggling",
+	"Booping",
+	"Bootstrapping",
+	"Brewing",
+	"Bunning",
+	"Burrowing",
+	"Calculating",
+	"Canoodling",
+	"Caramelizing",
+	"Cascading",
+	"Catapulting",
+	"Cerebrating",
+	"Channeling",
+	"Choreographing",
+	"Churning",
+	"Clauding",
+	"Coalescing",
+	"Cogitating",
+	"Combobulating",
+	"Composing",
+	"Computing",
+	"Concocting",
+	"Considering",
+	"Contemplating",
+	"Cooking",
+	"Crafting",
+	"Creating",
+	"Crunching",
+	"Crystallizing",
+	"Cultivating",
+	"Deciphering",
+	"Deliberating",
+	"Determining",
+	"Dilly-dallying",
+	"Discombobulating",
+	"Doing",
+	"Doodling",
+	"Drizzling",
+	"Ebbing",
+	"Effecting",
+	"Elucidating",
+	"Embellishing",
+	"Enchanting",
+	"Envisioning",
+	"Fermenting",
+	"Fiddle-faddling",
+	"Finagling",
+	"Flambéing",
+	"Flibbertigibbeting",
+	"Flowing",
+	"Flummoxing",
+	"Fluttering",
+	"Forging",
+	"Forming",
+	"Frolicking",
+	"Frosting",
+	"Gallivanting",
+	"Galloping",
+	"Garnishing",
+	"Generating",
+	"Gesticulating",
+	"Germinating",
+	"Gitifying",
+	"Grooving",
+	"Gusting",
+	"Harmonizing",
+	"Hashing",
+	"Hatching",
+	"Herding",
+	"Honking",
+	"Hullaballooing",
+	"Hyperspacing",
+	"Ideating",
+	"Imagining",
+	"Improvising",
+	"Incubating",
+	"Inferring",
+	"Infusing",
+	"Ionizing",
+	"Jitterbugging",
+	"Julienning",
+	"Kerfuffling",
+	"Kneading",
+	"Leavening",
+	"Levitating",
+	"Lollygagging",
+	"Manifesting",
+	"Marinating",
+	"Meandering",
+	"Metamorphosing",
+	"Misting",
+	"Moonwalking",
+	"Moseying",
+	"Mulling",
+	"Mustering",
+	"Musing",
+	"Nebulizing",
+	"Nesting",
+	"Newspapering",
+	"Noodling",
+	"Nucleating",
+	"Orbiting",
+	"Orchestrating",
+	"Osmosing",
+	"Perambulating",
+	"Percolating",
+	"Perusing",
+	"Philosophizing",
+	"Photosynthesizing",
+	"Pollinating",
+	"Pondering",
+	"Pontificating",
+	"Pouncing",
+	"Precipitating",
+	"Prestidigitating",
+	"Processing",
+	"Proofing",
+	"Propagating",
+	"Puttering",
+	"Puzzling",
+	"Quantumizing",
+	"Razzle-dazzling",
+	"Razzmatazzing",
+	"Recombobulating",
+	"Reticulating",
+	"Roosting",
+	"Ruminating",
+	"Sautéing",
+	"Scampering",
+	"Schlepping",
+	"Scurrying",
+	"Seasoning",
+	"Shenaniganing",
+	"Shimmying",
+	"Simmering",
+	"Skedaddling",
+	"Sketching",
+	"Slithering",
+	"Smooshing",
+	"Sock-hopping",
+	"Spelunking",
+	"Spinning",
+	"Sprouting",
+	"Stewing",
+	"Sublimating",
+	"Swirling",
+	"Swooping",
+	"Symbioting",
+	"Synthesizing",
+	"Tempering",
+	"Thinking",
+	"Thundering",
+	"Tinkering",
+	"Tomfoolering",
+	"Topsy-turvying",
+	"Transfiguring",
+	"Transmogrifying",
+	"Transmuting",
+	"Twisting",
+	"Undulating",
+	"Unfurling",
+	"Unraveling",
+	"Vibing",
+	"Waddling",
+	"Wandering",
+	"Warping",
+	"Whatchamacalliting",
+	"Whirlpooling",
+	"Whirring",
+	"Whisking",
+	"Wibbling",
+	"Working",
+	"Wrangling",
+	"Zesting",
+	"Zigzagging",
+];
 
 /** Mulberry32: small, fast, deterministic. */
 function mulberry32(seed: number): () => number {
