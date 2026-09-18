@@ -16,6 +16,7 @@
 
 import type { ExtensionAPI, InlineExtension, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import type { GatePrompt } from "../permissions/subagent-gate.ts";
+import { STRUCTURED_OUTPUT_TOOL } from "./structured-output.ts";
 
 export interface ToolBudget {
 	soft?: number;
@@ -25,8 +26,11 @@ export interface ToolBudget {
 
 export const DEFAULT_BUDGET_BLOCK = ["read", "grep", "find", "ls"];
 
-/** Tools that wait on a person or on other children by design: never counted or timed. */
-export const UNLIMITED_TOOLS = new Set(["contact_supervisor", "task"]);
+/**
+ * Tools that wait on a person or on other children by design, and the call that ends
+ * a structured child's run: never counted or timed.
+ */
+export const UNLIMITED_TOOLS = new Set(["contact_supervisor", "task", STRUCTURED_OUTPUT_TOOL]);
 
 const positiveInt = (v: unknown): number | undefined =>
 	typeof v === "number" && Number.isInteger(v) && v > 0 ? v : undefined;

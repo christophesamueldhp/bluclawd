@@ -105,8 +105,12 @@ workflow. Options: `run_in_background`, `resume: "<agent id>"`, `worktree: true`
 `fork: true` (the child starts from a copy of this conversation — compacted first
 when it is over `subagents.forkCompactAbove` tokens), `gate: "npm test"` (must
 pass after the child; a failure is sent back to it `subagents.gateRetries`
-times, then the task fails), `mission: "<label>"` (groups runs so a later session
-can find and resume them).
+times, then the task fails), `outputSchema: {…}` (a JSON Schema: the child must
+finish by calling `structured_output` with a matching value, which becomes its
+output — the parent's result and the next chain step's `{previous}` are that JSON;
+a child that ends in prose is reminded once — a turn `maxTurns` counts — then fails; no `$ref`), `mission: "<label>"` (groups runs so a later session can find and
+resume them). `gate` and `outputSchema` also go on each `tasks[]` item, chain
+step and workflow step.
 
 **Background runs.** `task_output <sa-N>` shows progress, `task_message` steers a
 running child without restarting it, `task_stop` stops it and returns what it had
@@ -143,10 +147,10 @@ directory, and have no control tools.
 `permissionMode`, `maxTurns`, `timeoutMs`, `toolTimeoutMs`, `maxTokens`,
 `toolBudget`, `skills`, `memory`, `background`, `fork: true` (start from this
 conversation unless it is not saved; pi-subagents' `defaultContext: fork` also
-works), `isolation: worktree`, `effort`, `color`, `gate`, and `runner` — `runner:
+works), `isolation: worktree`, `effort`, `color`, `gate`, `outputSchema`, and `runner` — `runner:
 {command: claude, args: [-p]}` runs that CLI instead of a pi child, with the
-prompt on stdin and its stdout as the result (no tools, fork, resume or
-steering). Bundled: `explore`, `planner`, `code-reviewer`, `general-purpose`,
+prompt on stdin and its stdout as the result (no tools, fork, resume,
+steering or structured output). Bundled: `explore`, `planner`, `code-reviewer`, `general-purpose`,
 `oracle` (a read-only second opinion from a copy of this conversation: what was
 decided, where the plan drifts) and `worker` (implements an agreed plan from a copy
 of this conversation, asks instead of deciding).

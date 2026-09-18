@@ -549,6 +549,27 @@ describe("task tool", () => {
 			expect(h.log.map((o) => o.gate)).toEqual(["npm test", undefined, "make a", undefined, undefined, "make b"]);
 		});
 
+		it("passes a call's outputSchema, or each item's own, to the engine; an empty one is none", async () => {
+			const h = harness();
+			const run = (params: object) => h.tool.execute("1", params, undefined, undefined, ctxFor(cwd));
+			const schema = { type: "object", properties: { ok: { type: "boolean" } } };
+			await run({ agent: "explore", task: "t", outputSchema: schema });
+			await run({ agent: "explore", task: "t", outputSchema: {} });
+			await run({
+				tasks: [
+					{ agent: "explore", task: "a", outputSchema: schema },
+					{ agent: "explore", task: "b" },
+				],
+			});
+			await run({
+				chain: [
+					{ agent: "explore", task: "a" },
+					{ agent: "explore", task: "b", outputSchema: schema },
+				],
+			});
+			expect(h.log.map((o) => o.outputSchema)).toEqual([schema, undefined, schema, undefined, undefined, schema]);
+		});
+
 		it("says in the result whether the gate passed", async () => {
 			const h = harness(async (opts) => ({
 				agent: opts.def.name,

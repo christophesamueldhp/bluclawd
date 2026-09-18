@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { type PermissionMode, parseMode } from "../permissions/modes.ts";
 import { parseToolBudget, type ToolBudget } from "./limits.ts";
+import { type OutputSchema, parseOutputSchema } from "./structured-output.ts";
 
 export type AgentScope = "user" | "project" | "both";
 
@@ -55,6 +56,8 @@ export interface AgentDef {
 	toolBudget?: ToolBudget;
 	/** A command that must succeed after the child finishes (an acceptance gate). */
 	gate?: string;
+	/** The child must finish by handing back JSON matching this schema. */
+	outputSchema?: OutputSchema;
 	/** Run this command instead of a pi child. */
 	runner?: AgentRunner;
 	/** Skills whose full content is preloaded into the child's system prompt. */
@@ -208,6 +211,7 @@ export function parseDef(content: string): ParsedDef | { name?: string; problem:
 		maxTokens: positive(frontmatter.maxTokens),
 		toolBudget: parseToolBudget(frontmatter.toolBudget),
 		gate: typeof frontmatter.gate === "string" && frontmatter.gate.trim() ? frontmatter.gate.trim() : undefined,
+		outputSchema: parseOutputSchema(frontmatter.outputSchema),
 		runner: parseRunner(frontmatter.runner),
 		skills: skills.length > 0 ? skills : undefined,
 		permissionMode,

@@ -18,11 +18,13 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
+import { type OutputSchema, parseOutputSchema } from "./structured-output.ts";
 
 export interface StepTask {
 	agent: string;
 	task: string;
 	gate?: string;
+	outputSchema?: OutputSchema;
 }
 
 /** One chain step: a single agent, or a parallel group. */
@@ -30,6 +32,7 @@ export interface ChainStep {
 	agent?: string;
 	task?: string;
 	gate?: string;
+	outputSchema?: OutputSchema;
 	parallel?: StepTask[];
 }
 
@@ -48,20 +51,23 @@ export function bundledWorkflowsDir(): string {
 /** The tasks a step runs: its parallel group when it has a non-empty one, else itself. */
 export function stepTasks(step: ChainStep): StepTask[] {
 	if (step.parallel && step.parallel.length > 0) return step.parallel;
-	return [{ agent: step.agent ?? "", task: step.task ?? "", gate: step.gate }];
+	return [{ agent: step.agent ?? "", task: step.task ?? "", gate: step.gate, outputSchema: step.outputSchema }];
 }
 
 const isTask = (v: unknown): v is StepTask =>
 	!!v &&
 	typeof (v as StepTask).agent === "string" &&
 	typeof (v as StepTask).task === "string" &&
-	((v as StepTask).gate === undefined || typeof (v as StepTask).gate === "string");
+	((v as StepTask).gate === undefined || typeof (v as StepTask).gate === "string") &&
+	((v as StepTask).outputSchema === undefined || parseOutputSchema((v as StepTask).outputSchema) !== undefined);
 
 function parseStep(raw: unknown): ChainStep | undefined {
 	if (!raw || typeof raw !== "object") return undefined;
 	const { parallel } = raw as { parallel?: unknown };
 	if (Array.isArray(parallel)) return parallel.length > 0 && parallel.every(isTask) ? { parallel } : undefined;
-	return isTask(raw) ? { agent: raw.agent, task: raw.task, gate: raw.gate } : undefined;
+	return isTask(raw)
+		? { agent: raw.agent, task: raw.task, gate: raw.gate, outputSchema: raw.outputSchema }
+		: undefined;
 }
 
 /** A workflow file's parts, or why it will not load. */

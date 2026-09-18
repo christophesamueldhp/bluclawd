@@ -68,6 +68,15 @@ import { type RunHostCommand, runHostCommand } from "./host-command.ts";
 import { countingPrompt, createToolBudgetExtension, createToolTimer, parseToolBudget } from "./limits.ts";
 import { appendRecord, findRecord } from "./records.ts";
 import { emptyUsage, type SingleResult } from "./render.ts";
+import {
+	createStructuredOutputExtension,
+	type OutputSchema,
+	outputSchemaProblem,
+	STRUCTURED_OUTPUT_INSTRUCTIONS,
+	STRUCTURED_OUTPUT_REMINDER,
+	STRUCTURED_OUTPUT_TOOL,
+	structuredOutputOf,
+} from "./structured-output.ts";
 import { createSupervisorExtension, type SupervisorAsk } from "./supervisor.ts";
 
 /**
@@ -103,9 +112,14 @@ export const TASK_TOOL_NAME = "task";
 export function childToolLists(
 	def: AgentDef,
 	allowTask = false,
+	structuredOutput = false,
 ): { tools: string[] | undefined; excludeTools: string[] } {
-	if (allowTask) return { tools: def.tools, excludeTools: def.disallowedTools ?? [] };
-	const tools = def.tools?.filter((t) => t !== TASK_TOOL_NAME);
+	// An allowlist filters extension tools too: without this, a def that lists its
+	// tools could never hand back the output its schema asks for.
+	const withOutput = (tools: string[] | undefined) =>
+		structuredOutput && tools && !tools.includes(STRUCTURED_OUTPUT_TOOL) ? [...tools, STRUCTURED_OUTPUT_TOOL] : tools;
+	if (allowTask) return { tools: withOutput(def.tools), excludeTools: def.disallowedTools ?? [] };
+	const tools = withOutput(def.tools?.filter((t) => t !== TASK_TOOL_NAME));
 	const excludeTools = [TASK_TOOL_NAME, ...(def.disallowedTools ?? []).filter((t) => t !== TASK_TOOL_NAME)];
 	return { tools, excludeTools };
 }
@@ -230,6 +244,8 @@ export interface ChildLoaderExtras {
 	nested?: InlineExtension;
 	/** Who answers the child's `contact_supervisor`; without one the tool is absent. */
 	ask?: SupervisorAsk;
+	/** The JSON the child must finish by handing back through `structured_output`. */
+	outputSchema?: OutputSchema;
 }
 
 type LoaderOptions = ConstructorParameters<typeof DefaultResourceLoader>[0];
@@ -269,6 +285,7 @@ export function childLoaderOptions(
 	if (def.memory && (def.memory === "user" || trusted))
 		appendSystemPrompt.push(agentMemorySection(def.memory, def.name, ctx.cwd));
 	if (def.skills?.length) appendSystemPrompt.push(...preloadedSkillSections(def.skills, ctx.cwd, trusted));
+	if (extras.outputSchema) appendSystemPrompt.push(STRUCTURED_OUTPUT_INSTRUCTIONS);
 
 	const extensionFactories = [
 		createSubagentGate({ mode: extras.mode, agent: def.name, prompt: extras.prompt, rulesCwd: ctx.cwd }),
@@ -279,6 +296,7 @@ export function childLoaderOptions(
 	if (extras.forkedAt !== undefined) extensionFactories.push(createForkContextExtension(extras.forkedAt));
 	if (extras.nested) extensionFactories.push(extras.nested);
 	if (extras.ask) extensionFactories.push(createSupervisorExtension(def.name, extras.ask));
+	if (extras.outputSchema) extensionFactories.push(createStructuredOutputExtension(extras.outputSchema));
 
 	return {
 		cwd,
@@ -499,6 +517,8 @@ export interface RunSubagentOptions {
 	mission?: string;
 	/** A command that must succeed once the child is done; default: the def's `gate`. */
 	gate?: string;
+	/** JSON the child must finish by handing back; default: the def's `outputSchema`. */
+	outputSchema?: OutputSchema;
 	/** Runs gate commands; injectable for tests. */
 	runCommand?: RunHostCommand;
 	/** A child allowed to spawn its own: its depth and the subagents extension that gives it `task`. */
@@ -584,6 +604,14 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<SingleResul
 	if (def.runner && (opts.fork || opts.resume)) {
 		return failed(base(), "error", `"${def.name}" runs an external command: it cannot be forked or resumed.`);
 	}
+	const outputSchema = opts.outputSchema ?? def.outputSchema;
+	if (outputSchema) {
+		if (def.runner) {
+			return failed(base(), "error", `"${def.name}" runs an external command: it cannot return structured output.`);
+		}
+		const problem = outputSchemaProblem(outputSchema);
+		if (problem) return failed(base(), "error", problem);
+	}
 
 	if (opts.fork && !opts.resume) {
 		// Opened with the CHILD's session dir, so the branch is written there — not into
@@ -635,6 +663,7 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<SingleResul
 					def,
 					cwd,
 					forkedAt,
+					outputSchema,
 					sessionManager: sessionManager ?? SessionManager.create(cwd, opts.sessionDir ?? childSessionDir(ctx)),
 				},
 				base(),
@@ -644,7 +673,7 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<SingleResul
 
 	const gate = opts.gate || def.gate;
 	if (gate && result.status === "ok" && !result.partial) {
-		result = await applyGate(gate, result, { ...opts, def, cwd, forkedAt });
+		result = await applyGate(gate, result, { ...opts, def, cwd, forkedAt, outputSchema });
 	}
 
 	if (worktree) {
@@ -777,6 +806,7 @@ async function runChild(
 			forkedAt: opts.forkedAt,
 			nested: opts.nested?.extension,
 			ask: opts.ask ?? uiSupervisor(ctx),
+			outputSchema: opts.outputSchema,
 		});
 		const childLoader = new DefaultResourceLoader(loaderOptions);
 		await childLoader.reload();
@@ -794,7 +824,7 @@ async function runChild(
 		const resolvedModel = resolveModel(def, ctx, settings?.models ?? {});
 		base.model = resolvedModel ? `${resolvedModel.provider}/${resolvedModel.id}` : undefined;
 
-		const { tools, excludeTools } = childToolLists(def, Boolean(opts.nested));
+		const { tools, excludeTools } = childToolLists(def, Boolean(opts.nested), Boolean(opts.outputSchema));
 		({ session } = await (opts.createSession ?? defaultCreateSession)({
 			cwd,
 			model: resolvedModel,
@@ -926,6 +956,12 @@ async function runChild(
 		// and would otherwise be lost — the child would run its entire task (Trap 3).
 		if (signal?.aborted) return failed(base, "aborted", "Subagent was aborted before starting.");
 		await session.prompt(opts.fork && !opts.resume ? forkedTaskPrompt(task) : `Task: ${task}`);
+		// A child that ended in prose instead of its structured output gets one reminder.
+		const owesOutput = () => Boolean(opts.outputSchema) && structuredOutputOf(snapshot().messages) === undefined;
+		if (owesOutput() && !capHit && !timedOut && !signal?.aborted) {
+			if (lastAssistant(session.state.messages)?.stopReason !== "error")
+				await session.prompt(STRUCTURED_OUTPUT_REMINDER);
+		}
 		const final = snapshot();
 		const last = lastAssistant(session.state.messages);
 		if (signal?.aborted) {
@@ -940,6 +976,10 @@ async function runChild(
 			final.status = "failed";
 			final.stopReason = "error";
 			final.errorMessage = last.errorMessage ?? "Subagent ended with an error.";
+		} else if (owesOutput()) {
+			final.status = "failed";
+			final.stopReason = "no-structured-output";
+			final.errorMessage = `The child finished without calling ${STRUCTURED_OUTPUT_TOOL}, which its output schema requires.`;
 		} else {
 			final.status = "ok";
 			final.stopReason = last?.stopReason;

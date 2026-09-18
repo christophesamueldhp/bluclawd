@@ -106,7 +106,8 @@ const READ_LIKE_TOOLS = new Set(["read", "grep", "find", "ls"]);
  * inspect, steer or stop this session's own background subagents (a steered child's
  * own tool calls still pass its gate), and `manage_agents` asks the user itself
  * before every write, in every mode — a mode prompt on top would ask twice; and
- * `contact_supervisor` is itself a question to the user.
+ * `contact_supervisor` is itself a question to the user; `structured_output` only hands
+ * a child's result back to its parent.
  * Deny rules still apply to them.
  */
 const SELF_GATED_TOOLS = new Set([
@@ -116,6 +117,7 @@ const SELF_GATED_TOOLS = new Set([
 	"task_wait",
 	"manage_agents",
 	"contact_supervisor",
+	"structured_output",
 ]);
 
 /**

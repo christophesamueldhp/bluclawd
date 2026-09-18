@@ -14,6 +14,7 @@ import { getMarkdownTheme, type Theme, type ThemeColor } from "@earendil-works/p
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { keyDisplayText } from "../_shared/key-display-text.ts";
 import type { AgentScope } from "./defs.ts";
+import { structuredOutputOf } from "./structured-output.ts";
 
 export const MAX_PARALLEL_TASKS = 8;
 export const MAX_CONCURRENCY = 4;
@@ -187,6 +188,8 @@ function formatToolCall(
 }
 
 export function getFinalOutput(messages: AgentMessage[]): string {
+	const structured = structuredOutputOf(messages);
+	if (structured !== undefined) return structured;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (msg.role === "assistant") {

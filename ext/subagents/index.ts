@@ -33,6 +33,7 @@ import { createManageAgentsTool } from "./manage.ts";
 import { scanOutput } from "./output-scan.ts";
 import { missionsSection } from "./records.ts";
 import { createScheduleTool } from "./schedule.ts";
+import { parseOutputSchema } from "./structured-output.ts";
 import type { SupervisorAsk } from "./supervisor.ts";
 import { discoverWorkflows, expandWorkflow, stepTasks, type Workflow } from "./workflows.ts";
 
@@ -151,7 +152,17 @@ async function runOne(
 	ctx: ExtensionContext,
 	extra: Pick<
 		RunSubagentOptions,
-		"resume" | "isolation" | "fork" | "onSession" | "nested" | "prompt" | "ask" | "sessionDir" | "gate" | "mission"
+		| "resume"
+		| "isolation"
+		| "fork"
+		| "onSession"
+		| "nested"
+		| "prompt"
+		| "ask"
+		| "sessionDir"
+		| "gate"
+		| "outputSchema"
+		| "mission"
 	> & {
 		budget: SpawnBudget;
 		/** The call asked every child to fork; otherwise only defs declaring `fork: true` do. */
@@ -277,10 +288,19 @@ const GateParam = Type.Optional(
 	}),
 );
 
+const OutputSchemaParam = Type.Optional(
+	Type.Unsafe<Record<string, unknown>>({
+		type: "object",
+		description:
+			"A JSON Schema the child's result must match: it then hands back that JSON instead of prose. Leave out for a prose report.",
+	}),
+);
+
 const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
 	gate: GateParam,
+	outputSchema: OutputSchemaParam,
 });
 
 const ChainItem = Type.Object({
@@ -291,6 +311,7 @@ const ChainItem = Type.Object({
 		}),
 	),
 	gate: GateParam,
+	outputSchema: OutputSchemaParam,
 	parallel: Type.Optional(
 		Type.Array(TaskItem, {
 			description:
@@ -307,6 +328,7 @@ const TaskParams = Type.Object({
 	),
 	task: Type.Optional(Type.String({ description: "Task to delegate (for single mode)" })),
 	gate: GateParam,
+	outputSchema: OutputSchemaParam,
 	tasks: Type.Optional(
 		Type.Array(TaskItem, {
 			description: "Array of {agent, task} for parallel execution",
@@ -794,7 +816,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 						i + 1,
 						signal,
 						ctx,
-						{ ...extra, gate: item.gate || undefined },
+						{ ...extra, gate: item.gate || undefined, outputSchema: parseOutputSchema(item.outputSchema) },
 						onUpdate
 							? (snap) => {
 									live[index] = snap;
@@ -890,7 +912,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 						undefined,
 						signal,
 						ctx,
-						{ ...extra, gate: t.gate || undefined },
+						{ ...extra, gate: t.gate || undefined, outputSchema: parseOutputSchema(t.outputSchema) },
 						(snap) => {
 							allResults[index] = snap;
 							emitParallelUpdate();
@@ -947,7 +969,12 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 				undefined,
 				signal,
 				ctx,
-				{ ...extra, resume: params.resume, gate: params.gate || undefined },
+				{
+					...extra,
+					resume: params.resume,
+					gate: params.gate || undefined,
+					outputSchema: parseOutputSchema(params.outputSchema),
+				},
 				onUpdate
 					? (snap) =>
 							onUpdate({
