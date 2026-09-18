@@ -22,8 +22,15 @@ import {
 	type StdioServerParameters,
 } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import {
+	CreateMessageRequestSchema,
+	ElicitRequestSchema,
+	ErrorCode,
+	McpError,
+} from "@modelcontextprotocol/sdk/types.js";
 import { resolveHeaders } from "../_shared/resolve-config-value.ts";
+import type { ElicitAnswer, ElicitParams } from "./elicit.ts";
+import type { SamplingParams, SamplingReply } from "./sampling.ts";
 import {
 	connectTimeoutMs,
 	leakedCredential,
@@ -71,6 +78,42 @@ export function stdioTransportOptions(config: ServerConfig): StdioServerParamete
 	};
 }
 
+export interface ClientHandlers {
+	/** Called when the server announces its tool, prompt or resource list changed. The
+	 *  SDK only subscribes when the server advertises `listChanged`. */
+	onListChanged?: (list: "tools" | "prompts" | "resources") => void;
+	/** Answers the server's elicitation (form input) requests; the capability is
+	 *  only advertised when this is supplied. */
+	onElicit?: (params: ElicitParams) => Promise<ElicitAnswer>;
+	/** Answers the server's sampling requests; advertised only when supplied. */
+	onSample?: (params: SamplingParams) => Promise<SamplingReply>;
+}
+
+/** An unconnected Client carrying the capabilities and handlers for `handlers`. */
+export function createClient(handlers: ClientHandlers = {}): Client {
+	const { onListChanged, onElicit, onSample } = handlers;
+	const client = new Client(
+		{ name: "bluclawd", version: VERSION },
+		{
+			capabilities: {
+				...(onElicit && { elicitation: { form: {} } }),
+				...(onSample && { sampling: {} }),
+			},
+			// autoRefresh off: the caller re-lists through registerServerTools, which is
+			// what re-registers the tools; a second listTools here would be wasted.
+			listChanged: onListChanged && {
+				tools: { autoRefresh: false, onChanged: () => onListChanged("tools") },
+				prompts: { autoRefresh: false, onChanged: () => onListChanged("prompts") },
+				resources: { autoRefresh: false, onChanged: () => onListChanged("resources") },
+			},
+		},
+	);
+	if (onElicit) client.setRequestHandler(ElicitRequestSchema, (request) => onElicit(request.params as ElicitParams));
+	if (onSample)
+		client.setRequestHandler(CreateMessageRequestSchema, (request) => onSample(request.params as SamplingParams));
+	return client;
+}
+
 /**
  * Build and connect a transport for one server. {@link transportKind} picks it and
  * rejects a misconfiguration by throwing (the caller surfaces that as a notify +
@@ -79,29 +122,13 @@ export function stdioTransportOptions(config: ServerConfig): StdioServerParamete
 export async function connectServer(
 	name: string,
 	config: ServerConfig,
-	opts?: {
+	opts?: ClientHandlers & {
 		connectTimeoutMs?: number;
 		authProvider?: OAuthClientProvider;
-		/** Called when the server announces its tool or prompt list changed. The SDK
-		 *  only subscribes when the server advertises `listChanged`. */
-		onListChanged?: (list: "tools" | "prompts") => void;
 	},
 ): Promise<Client> {
 	const kind = transportKind(name, config);
-
-	const onListChanged = opts?.onListChanged;
-	const client = new Client(
-		{ name: "bluclawd", version: VERSION },
-		{
-			capabilities: {},
-			// autoRefresh off: the caller re-lists through registerServerTools, which is
-			// what re-registers the tools; a second listTools here would be wasted.
-			listChanged: onListChanged && {
-				tools: { autoRefresh: false, onChanged: () => onListChanged("tools") },
-				prompts: { autoRefresh: false, onChanged: () => onListChanged("prompts") },
-			},
-		},
-	);
+	const client = createClient(opts);
 
 	let transport: StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport;
 	if (kind === "stdio") {

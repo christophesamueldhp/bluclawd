@@ -45,6 +45,9 @@
  * `mcp_list_resources`/`mcp_read_resource` and attached by `@server:uri` in a prompt;
  * tool calls use Claude Code's wall-clock + idle timeouts (schema.ts toolCallTimeouts);
  * `${VAR}`/`${VAR:-default}` expand at connect time (expandServerConfig).
+ * Prompt commands and `@server:uri` complete in the editor (autocomplete.ts); a
+ * server may elicit form input (elicit.ts) or, with per-request consent, sample the
+ * session's model (sampling.ts) — both only when there is a UI to ask on.
  *
  * OAUTH (audit B.5): `/mcp login <server>` runs the browser flow (see oauth.ts)
  * and `/mcp logout <server>` forgets the credential. Login is ONLY ever explicit:
@@ -78,8 +81,11 @@ import {
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { openBrowser } from "../_shared/open-browser.ts";
 import { approveProjectServer, setProjectServerDisabled } from "../_shared/settings-write.ts";
-import type { Client, McpPrompt, RegisteredMcpTool } from "./client.ts";
+import { mcpAutocomplete } from "./autocomplete.ts";
+import type { Client, McpPrompt, McpResource, RegisteredMcpTool } from "./client.ts";
 import { McpCredentialStore } from "./credential-store.ts";
+import { answerElicitation, type ElicitParams } from "./elicit.ts";
+import { answerSampling, type SamplingParams } from "./sampling.ts";
 import {
 	approvalsForProject,
 	enableAllProjectServers,
@@ -127,12 +133,20 @@ interface Connection {
 	instructions?: string;
 	/** The server advertises the resources capability. */
 	hasResources: boolean;
+	/** Resource list for `@server:` completion, fetched on first use and dropped on a list change. */
+	resourceCache?: Promise<McpResource[]>;
 	error?: string;
 	client?: Client;
 }
 
 type ClientModule = typeof import("./client.ts");
-type ConnectFn = (name: string, onListChanged: (list: "tools" | "prompts") => void) => Promise<Client>;
+type ListKind = "tools" | "prompts" | "resources";
+interface ServerHandlers {
+	onListChanged: (list: ListKind) => void;
+	onElicit?: (params: ElicitParams) => ReturnType<typeof answerElicitation>;
+	onSample?: (params: SamplingParams) => ReturnType<typeof answerSampling>;
+}
+type ConnectFn = (name: string, handlers: ServerHandlers) => Promise<Client>;
 
 /** Most matches mcp_find_tools will activate in one call (context guard). */
 const FIND_TOOLS_MAX_MATCHES = 10;
@@ -172,6 +186,7 @@ export function factory(pi: ExtensionAPI): void {
 	// Commands cannot be unregistered, so a name is registered once per factory and its
 	// handler looks the prompt up live — a disconnected server's prompt just says so.
 	const promptCommands = new Set<string>();
+	let autocompleteAdded = false;
 
 	function updateStatus(ctx: ExtensionContext): void {
 		const disabled = connections.filter((c) => c.status === "disabled").length;
@@ -391,12 +406,16 @@ export function factory(pi: ExtensionAPI): void {
 		conn: Connection,
 		ctx: ExtensionContext,
 		myEpoch: number,
-		list: "tools" | "prompts",
+		list: ListKind,
 	): Promise<void> {
 		const client = conn.client;
 		const mod = clientModule;
 		if (!client || !mod || conn.status !== "connected") return;
 		const stale = () => myEpoch !== epoch || conn.client !== client;
+		if (list === "resources") {
+			conn.resourceCache = undefined;
+			return;
+		}
 		try {
 			if (list === "prompts") {
 				const prompts = await mod.listServerPrompts(client);
@@ -437,8 +456,13 @@ export function factory(pi: ExtensionAPI): void {
 		hadCredential = false,
 	): Promise<void> {
 		try {
-			const client = await connectServer(conn.name, (list) => {
-				void refreshServerList(conn, ctx, myEpoch, list);
+			// Both ask the user, so a session without a UI does not offer them.
+			const client = await connectServer(conn.name, {
+				onListChanged: (list) => void refreshServerList(conn, ctx, myEpoch, list),
+				...(ctx.hasUI && {
+					onElicit: (params) => answerElicitation(conn.name, params, ctx.ui),
+					onSample: (params) => answerSampling(ctx, conn.name, params),
+				}),
 			});
 			if (myEpoch !== epoch) {
 				// Session ended/reloaded while connecting — don't register; close to avoid a leak.
@@ -570,8 +594,8 @@ export function factory(pi: ExtensionAPI): void {
 		}
 		if (myEpoch !== epoch) return;
 
-		const connectWithAuth: ConnectFn = (name, onListChanged) =>
-			connectServer(name, resolved.get(name) as ServerConfig, { authProvider: providers.get(name), onListChanged });
+		const connectWithAuth: ConnectFn = (name, handlers) =>
+			connectServer(name, resolved.get(name) as ServerConfig, { authProvider: providers.get(name), ...handlers });
 
 		await Promise.allSettled(
 			targets.map((conn) => connectOne(conn, ctx, myEpoch, connectWithAuth, mod, providers.has(conn.name))),
@@ -600,11 +624,47 @@ export function factory(pi: ExtensionAPI): void {
 		conn.prompts = [];
 		conn.instructions = undefined;
 		conn.hasResources = false;
+		conn.resourceCache = undefined;
 		if (client) await client.close().catch(() => {});
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
 		const myEpoch = ++epoch;
+		if (ctx.hasUI && !autocompleteAdded) {
+			autocompleteAdded = true;
+			const live = () => connections.filter((c) => c.status === "connected" && c.client);
+			ctx.ui.addAutocompleteProvider((current) =>
+				mcpAutocomplete(current, {
+					promptCommands: () =>
+						live().flatMap((c) =>
+							c.prompts
+								.map((p) => {
+									const usage = (p.arguments ?? []).map((a) => (a.required ? `<${a.name}>` : `[${a.name}]`));
+									const about = `${p.description ?? `Prompt "${p.name}"`} (MCP: ${c.name})`;
+									return {
+										name: mcpToolName(c.name, p.name),
+										description: usage.length > 0 ? `${usage.join(" ")} — ${about}` : about,
+									};
+								})
+								.filter((p) => promptCommands.has(p.name)),
+						),
+					resourceServers: () =>
+						live()
+							.filter((c) => c.hasResources)
+							.map((c) => c.name),
+					resources: (server) => {
+						const conn = live().find((c) => c.name === server);
+						const mod = clientModule;
+						if (!conn?.client || !mod) return Promise.resolve([]);
+						conn.resourceCache ??= mod.listServerResources(conn.client).catch(() => {
+							conn.resourceCache = undefined;
+							return [];
+						});
+						return conn.resourceCache;
+					},
+				}),
+			);
+		}
 		deferredTools.clear();
 		const servers = loadMcpConfig(ctx);
 		const names = Object.keys(servers);
