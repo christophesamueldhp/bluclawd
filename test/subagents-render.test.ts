@@ -26,6 +26,29 @@ describe("subagent rendering", () => {
 		expect(out.render(120).join("\n")).toMatch(/3 turns ↑1\.2k ↓300/);
 	});
 
+	const call = (args: object) =>
+		(renderCall(args as never, theme, undefined) as { render(w: number): string[] }).render(120).join("\n");
+
+	it("names a workflow call by its workflow and input", () => {
+		expect(call({ workflow: "pair", input: "zeta", agent: "", chain: [] })).toMatch(/task workflow pair[\s\S]*zeta/);
+	});
+
+	it("draws a chain step that is a parallel group", () => {
+		const out = call({
+			chain: [
+				{
+					parallel: [
+						{ agent: "a", task: "x" },
+						{ agent: "b", task: "y" },
+					],
+				},
+				{ agent: "c", task: "{previous}" },
+			],
+		});
+		expect(out).toMatch(/1\. a \+ b/);
+		expect(out).toMatch(/2\. c/);
+	});
+
 	it("omits the scope tag when the call left agentScope to the default", () => {
 		const out = renderCall({ agent: "explore", task: "look" }, theme, undefined) as { render(w: number): string[] };
 		expect(out.render(120).join("\n")).not.toContain("[user]");

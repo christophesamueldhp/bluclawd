@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { discoverDefs, parseDef } from "../ext/subagents/defs.ts";
 
 /** Names of the defs shipped in ext/subagents/agents. */
-const BUNDLED = ["code-reviewer", "explore", "general-purpose", "planner"];
+const BUNDLED = ["code-reviewer", "explore", "general-purpose", "oracle", "planner", "worker"];
 
 const def = (name: string, description = "does a thing") =>
 	`---\nname: ${name}\ndescription: ${description}\n---\nYou are ${name}.\n`;
@@ -147,6 +147,39 @@ describe("parseDef: Claude Code frontmatter fields", () => {
 		expect(withFm("disallowedTools: [Write]")).toMatchObject({ disallowedTools: ["write"] });
 	});
 
+	it("reads runner as a command with string arguments, in pi-subagents' shape too", () => {
+		expect(withFm("runner:\n  command: claude\n  args: [-p]")).toMatchObject({
+			runner: { command: "claude", args: ["-p"] },
+		});
+		expect(withFm("runner:\n  type: external-cli\n  command: codex")).toMatchObject({
+			runner: { command: "codex", args: [] },
+		});
+		expect(withFm("runner:\n  args: [-p]")).not.toHaveProperty("runner");
+	});
+
+	it("reads gate as a non-empty command", () => {
+		expect(withFm("gate: npm test")).toMatchObject({ gate: "npm test" });
+		expect(withFm('gate: ""')).not.toHaveProperty("gate");
+	});
+
+	it("reads timeoutMs only as a positive integer", () => {
+		expect(withFm("timeoutMs: 60000")).toMatchObject({ timeoutMs: 60000 });
+		expect(withFm("timeoutMs: -1")).not.toHaveProperty("timeoutMs");
+		expect(withFm("timeoutMs: soon")).not.toHaveProperty("timeoutMs");
+	});
+
+	it("reads toolTimeoutMs, maxTokens and a toolBudget object", () => {
+		expect(withFm("toolTimeoutMs: 30000\nmaxTokens: 200000")).toMatchObject({
+			toolTimeoutMs: 30000,
+			maxTokens: 200000,
+		});
+		expect(withFm("toolBudget:\n  soft: 20\n  hard: 30")).toMatchObject({
+			toolBudget: { soft: 20, hard: 30, block: ["read", "grep", "find", "ls"] },
+		});
+		expect(withFm("toolBudget: 30")).not.toHaveProperty("toolBudget");
+		expect(withFm("maxTokens: lots")).not.toHaveProperty("maxTokens");
+	});
+
 	it("reads maxTurns only as a positive integer", () => {
 		expect(withFm("maxTurns: 5")).toMatchObject({ maxTurns: 5 });
 		expect(withFm("maxTurns: 0")).not.toHaveProperty("maxTurns");
@@ -171,5 +204,12 @@ describe("parseDef: Claude Code frontmatter fields", () => {
 		);
 		const bad = withFm("memory: shared\nbackground: yes\nisolation: docker\neffort: turbo\ncolor: mauve");
 		for (const key of ["memory", "background", "isolation", "effort", "color"]) expect(bad).not.toHaveProperty(key);
+	});
+
+	it("reads fork: true, and pi-subagents' defaultContext: fork, as starting from the parent's conversation", () => {
+		expect(withFm("fork: true")).toMatchObject({ fork: true });
+		expect(withFm("defaultContext: fork")).toMatchObject({ fork: true });
+		expect(withFm("fork: yes")).not.toHaveProperty("fork");
+		expect(withFm("defaultContext: fresh")).not.toHaveProperty("fork");
 	});
 });

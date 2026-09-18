@@ -52,6 +52,8 @@ export interface SingleResult {
 	partial?: boolean;
 	/** A worktree the child changed and so was kept, for the user to inspect or merge. */
 	worktree?: string;
+	/** The acceptance gate that ran after the child, and how it ended. */
+	gate?: { command: string; passed: boolean; attempts: number };
 }
 
 export interface SubagentDetails {
@@ -65,9 +67,10 @@ export interface TaskCallArgs {
 	agent?: string;
 	task?: string;
 	tasks?: Array<{ agent: string; task: string }>;
-	chain?: Array<{ agent: string; task: string }>;
-	agentScope?: AgentScope;
+	chain?: Array<{ agent?: string; task?: string; parallel?: Array<{ agent: string; task: string }> }>;
 	resume?: string;
+	workflow?: string;
+	input?: string;
 }
 
 export function emptyUsage(): UsageStats {
@@ -239,23 +242,27 @@ function getDisplayItems(messages: AgentMessage[]): DisplayItem[] {
 }
 
 export function renderCall(args: TaskCallArgs, theme: Theme, _context: unknown) {
-	// The default scope is decided by project trust at run time (see index.ts), so
-	// an omitted scope is not a fact this renderer can state; only an explicit one is.
-	const scopeTag = args.agentScope ? theme.fg("muted", ` [${args.agentScope}]`) : "";
+	if (args.workflow) {
+		const input = args.input ?? "";
+		const preview = input.length > 60 ? `${input.slice(0, 60)}...` : input;
+		return new Text(
+			`${theme.fg("toolTitle", theme.bold("task "))}${theme.fg("accent", `workflow ${args.workflow}`)}\n  ${theme.fg("dim", preview)}`,
+			0,
+			0,
+		);
+	}
 	if (args.chain && args.chain.length > 0) {
-		let text =
-			theme.fg("toolTitle", theme.bold("task ")) +
-			theme.fg("accent", `chain (${args.chain.length} steps)`) +
-			scopeTag;
+		let text = theme.fg("toolTitle", theme.bold("task ")) + theme.fg("accent", `chain (${args.chain.length} steps)`);
 		for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
 			const step = args.chain[i];
-			const cleanTask = step.task.replace(/\{previous\}/g, "").trim();
+			const group = step.parallel?.length ? step.parallel : [{ agent: step.agent ?? "", task: step.task ?? "" }];
+			const cleanTask = group.length > 1 ? "" : group[0].task.replace(/\{previous\}/g, "").trim();
 			const preview = cleanTask.length > 40 ? `${cleanTask.slice(0, 40)}...` : cleanTask;
 			text +=
 				"\n  " +
 				theme.fg("muted", `${i + 1}.`) +
 				" " +
-				theme.fg("accent", step.agent) +
+				theme.fg("accent", group.map((t) => t.agent).join(" + ")) +
 				theme.fg("dim", ` ${preview}`);
 		}
 		if (args.chain.length > 3) text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
@@ -263,9 +270,7 @@ export function renderCall(args: TaskCallArgs, theme: Theme, _context: unknown) 
 	}
 	if (args.tasks && args.tasks.length > 0) {
 		let text =
-			theme.fg("toolTitle", theme.bold("task ")) +
-			theme.fg("accent", `parallel (${args.tasks.length} tasks)`) +
-			scopeTag;
+			theme.fg("toolTitle", theme.bold("task ")) + theme.fg("accent", `parallel (${args.tasks.length} tasks)`);
 		for (const t of args.tasks.slice(0, 3)) {
 			const preview = t.task.length > 40 ? `${t.task.slice(0, 40)}...` : t.task;
 			text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", ` ${preview}`)}`;
@@ -275,7 +280,7 @@ export function renderCall(args: TaskCallArgs, theme: Theme, _context: unknown) 
 	}
 	const agentName = args.agent || (args.resume ? `resume ${args.resume}` : "...");
 	const preview = args.task ? (args.task.length > 60 ? `${args.task.slice(0, 60)}...` : args.task) : "...";
-	let text = theme.fg("toolTitle", theme.bold("task ")) + theme.fg("accent", agentName) + scopeTag;
+	let text = theme.fg("toolTitle", theme.bold("task ")) + theme.fg("accent", agentName);
 	text += `\n  ${theme.fg("dim", preview)}`;
 	return new Text(text, 0, 0);
 }
@@ -397,7 +402,7 @@ export function renderResult(
 			const container = new Container();
 			container.addChild(
 				new Text(
-					`${icon} ${theme.fg("toolTitle", theme.bold("chain "))}${theme.fg("accent", `${successCount}/${details.results.length} steps`)}`,
+					`${icon} ${theme.fg("toolTitle", theme.bold("chain "))}${theme.fg("accent", `${successCount}/${details.results.length} done`)}`,
 					0,
 					0,
 				),
@@ -448,7 +453,7 @@ export function renderResult(
 			return container;
 		}
 
-		let text = `${icon} ${theme.fg("toolTitle", theme.bold("chain "))}${theme.fg("accent", `${successCount}/${details.results.length} steps`)}`;
+		let text = `${icon} ${theme.fg("toolTitle", theme.bold("chain "))}${theme.fg("accent", `${successCount}/${details.results.length} done`)}`;
 		for (const r of details.results) {
 			const rIcon =
 				r.status === "running"

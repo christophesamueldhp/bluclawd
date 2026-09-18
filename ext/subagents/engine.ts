@@ -6,8 +6,9 @@
  * subprocess-spawn `runSingleAgent`.
  *
  * Isolation & safety:
- *   - Trap 1 (recursion): `task` is excluded from every child's tool set, so a
- *     child can never spawn further subagents.
+ *   - Trap 1 (recursion): `task` is excluded from a child's tool set unless the
+ *     caller hands it a nested subagents extension — which index.ts does only
+ *     below `subagents.maxDepth`, and within the call tree's spawn budget.
  *   - Trap 2 (minimality/leaks): the child gets a bare `DefaultResourceLoader`
  *     with no discovered extensions, skills, prompts or themes, and a separate
  *     Agent + in-memory SessionManager, so it cannot mutate the parent. What it
@@ -39,11 +40,13 @@ import type {
 	AgentSessionEvent,
 	CreateAgentSessionOptions,
 	ExtensionContext,
+	InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import {
 	CONFIG_DIR_NAME,
 	createAgentSession,
 	DefaultResourceLoader,
+	estimateTokens,
 	getAgentDir,
 	loadSkills,
 	ModelRuntime,
@@ -58,8 +61,14 @@ import type { PermissionMode } from "../permissions/modes.ts";
 import { AGENT_MEMORY_DIR } from "../permissions/rules.ts";
 import { createSubagentGate, type GatePrompt } from "../permissions/subagent-gate.ts";
 import { createChildBashExtension } from "../sandbox/child-bash.ts";
-import { type AgentDef, type AgentEffort, type AgentMemoryScope, bundledAgentsDir } from "./defs.ts";
+import { type AgentDef, type AgentEffort, type AgentMemoryScope, bundledAgentsDir, discoverDefs } from "./defs.ts";
+import { runExternal } from "./external.ts";
+import { createForkContextExtension, type ForkSource, forkedTaskPrompt } from "./fork.ts";
+import { type RunHostCommand, runHostCommand } from "./host-command.ts";
+import { countingPrompt, createToolBudgetExtension, createToolTimer, parseToolBudget } from "./limits.ts";
+import { appendRecord, findRecord } from "./records.ts";
 import { emptyUsage, type SingleResult } from "./render.ts";
+import { createSupervisorExtension, type SupervisorAsk } from "./supervisor.ts";
 
 /**
  * The ModelRuntime every subagent child is built with.
@@ -86,11 +95,16 @@ function sharedModelRuntime(): Promise<ModelRuntime> {
 export const TASK_TOOL_NAME = "task";
 
 /**
- * The child's tool allowlist and denylist. `task` is both stripped from the
- * allowlist and always excluded, so a def cannot reintroduce it either way;
- * `disallowedTools` joins the exclusions, applied after `tools` as in Claude Code.
+ * The child's tool allowlist and denylist. A child that may not nest has `task`
+ * both stripped from the allowlist and excluded, so a def cannot reintroduce it
+ * either way; one that may nest keeps it unless its own `tools`/`disallowedTools`
+ * leave it out. `disallowedTools` is applied after `tools`, as in Claude Code.
  */
-export function childToolLists(def: AgentDef): { tools: string[] | undefined; excludeTools: string[] } {
+export function childToolLists(
+	def: AgentDef,
+	allowTask = false,
+): { tools: string[] | undefined; excludeTools: string[] } {
+	if (allowTask) return { tools: def.tools, excludeTools: def.disallowedTools ?? [] };
 	const tools = def.tools?.filter((t) => t !== TASK_TOOL_NAME);
 	const excludeTools = [TASK_TOOL_NAME, ...(def.disallowedTools ?? []).filter((t) => t !== TASK_TOOL_NAME)];
 	return { tools, excludeTools };
@@ -128,12 +142,12 @@ export function effortToThinkingLevel(effort: AgentEffort | undefined): CreateAg
 /**
  * The mode a child is evaluated under. A permissive parent mode carries into the
  * child unchanged (Claude Code: the main conversation's mode overrides the def's);
- * a parent in `ask` lets the def declare its own, and an undeclared def runs as
- * `auto` — the posture children have always had here, deny rules still applying.
+ * a parent in `ask` lets the def declare its own, and an undeclared def stays in
+ * `ask` — delegating must not be a way out of the prompts the parent is under.
  */
 export function resolveChildMode(parent: PermissionMode, declared: PermissionMode | undefined): PermissionMode {
 	if (parent !== "ask") return parent;
-	return declared ?? "auto";
+	return declared ?? "ask";
 }
 
 /** Where a def's persistent memory file lives, per scope (Claude Code's `memory:`). */
@@ -210,6 +224,12 @@ export interface ChildLoaderExtras {
 	cwd?: string;
 	/** Where the bundled seeds live; exposed for tests. */
 	bundledDir?: string;
+	/** Set for a child that inherits the parent's conversation: when it was forked. */
+	forkedAt?: number;
+	/** The child's own subagents extension, for a child allowed to nest. */
+	nested?: InlineExtension;
+	/** Who answers the child's `contact_supervisor`; without one the tool is absent. */
+	ask?: SupervisorAsk;
 }
 
 type LoaderOptions = ConstructorParameters<typeof DefaultResourceLoader>[0];
@@ -250,15 +270,22 @@ export function childLoaderOptions(
 		appendSystemPrompt.push(agentMemorySection(def.memory, def.name, ctx.cwd));
 	if (def.skills?.length) appendSystemPrompt.push(...preloadedSkillSections(def.skills, ctx.cwd, trusted));
 
+	const extensionFactories = [
+		createSubagentGate({ mode: extras.mode, agent: def.name, prompt: extras.prompt, rulesCwd: ctx.cwd }),
+		createChildBashExtension(cwd),
+	];
+	const budget = def.toolBudget ?? parseToolBudget(forkSettings.subagents(settingsManager)?.toolBudget);
+	if (budget) extensionFactories.push(createToolBudgetExtension(budget));
+	if (extras.forkedAt !== undefined) extensionFactories.push(createForkContextExtension(extras.forkedAt));
+	if (extras.nested) extensionFactories.push(extras.nested);
+	if (extras.ask) extensionFactories.push(createSupervisorExtension(def.name, extras.ask));
+
 	return {
 		cwd,
 		agentDir: getAgentDir(),
 		settingsManager,
 		appendSystemPrompt,
-		extensionFactories: [
-			createSubagentGate({ mode: extras.mode, agent: def.name, prompt: extras.prompt, rulesCwd: ctx.cwd }),
-			createChildBashExtension(cwd),
-		],
+		extensionFactories,
 		// Trap 2: keep the child minimal — no inherited extensions/resources.
 		noExtensions: true,
 		noSkills: true,
@@ -274,13 +301,36 @@ export function childLoaderOptions(
  * switches the gate to its block-instead-of-prompt posture.
  */
 let promptQueue: Promise<unknown> = Promise.resolve();
+function queueDialog<T>(show: () => Promise<T>): Promise<T> {
+	const next = promptQueue.then(show);
+	promptQueue = next.catch(() => undefined);
+	return next;
+}
+
 export function uiPromptBridge(ctx: Pick<ExtensionContext, "hasUI" | "ui">): GatePrompt | undefined {
 	if (!ctx.hasUI) return undefined;
-	return (request) => {
-		const next = promptQueue.then(() => ctx.ui.confirm(request.title, request.message));
-		promptQueue = next.catch(() => undefined);
-		return next;
-	};
+	// Queued behind other children's questions: by its turn, this child may be stopped.
+	return (request) =>
+		queueDialog(async () =>
+			request.signal?.aborted
+				? false
+				: ctx.ui.confirm(request.title, request.message, request.signal ? { signal: request.signal } : undefined),
+		);
+}
+
+/** The root session's UI as the children's supervisor, in the same queue as permission prompts. */
+export function uiSupervisor(ctx: Pick<ExtensionContext, "hasUI" | "ui">): SupervisorAsk | undefined {
+	if (!ctx.hasUI) return undefined;
+	return (request) =>
+		queueDialog(async () =>
+			request.signal?.aborted
+				? undefined
+				: ctx.ui.input(
+						`Subagent "${request.agent}" asks: ${request.question}`,
+						"Your answer (Esc: let it decide)",
+						request.signal ? { signal: request.signal } : undefined,
+					),
+		);
 }
 
 interface AssistantLike {
@@ -295,6 +345,11 @@ function lastAssistant(messages: readonly { role: string }[]): AssistantLike | u
 	}
 	return undefined;
 }
+
+/** Inherited-context size above which a forked child compacts before its task. */
+const DEFAULT_FORK_COMPACT_ABOVE = 60_000;
+const FORK_COMPACT_INSTRUCTIONS =
+	"This conversation is being handed to a subagent that will do one delegated task. Keep the decisions, constraints, requirements, file paths and open questions it needs; drop exploration that led nowhere.";
 
 export type CreateSession = (options: CreateAgentSessionOptions) => Promise<{ session: AgentSession }>;
 
@@ -316,6 +371,8 @@ interface ResumableChild {
 	def: AgentDef;
 	sessionFile: string;
 	cwd: string;
+	/** A forked child's inherited history is filtered on resume too. */
+	forkedAt?: number;
 }
 
 /**
@@ -324,6 +381,43 @@ interface ResumableChild {
  * resume it"); the transcript files themselves persist regardless.
  */
 const resumable = new Map<string, ResumableChild>();
+/** Resumes in flight: two at once would append to one transcript as two branches. */
+const resuming = new Set<string>();
+
+/** The def name a resumable child runs, for permission subjects. */
+export function resumableAgentName(id: string): string | undefined {
+	return resumable.get(id)?.def.name ?? findRecord(id)?.agent;
+}
+
+/** Where a finished child's transcript is, from this process's registry or the durable records. */
+export function childTranscript(id: string): { file: string; agent: string; forkedAt?: number } | undefined {
+	const live = resumable.get(id);
+	if (live) return { file: live.sessionFile, agent: live.def.name, forkedAt: live.forkedAt };
+	const record = findRecord(id);
+	return record ? { file: record.sessionFile, agent: record.agent, forkedAt: record.forkedAt } : undefined;
+}
+
+export function forgetResumableForTests(): void {
+	resumable.clear();
+}
+
+/**
+ * A child another process ran, from its durable record. Its def is looked up by
+ * name as it is NOW, under this session's trust: an untrusted project's def is not
+ * reached this way, as it would not be by name.
+ */
+function resumableFromRecord(
+	id: string,
+	ctx: Pick<ExtensionContext, "cwd" | "isProjectTrusted">,
+): ResumableChild | undefined {
+	const record = findRecord(id);
+	if (!record) return undefined;
+	const def = discoverDefs(ctx.cwd, ctx.isProjectTrusted() ? "both" : "user").defs.find(
+		(d) => d.name === record.agent,
+	);
+	if (!def) return undefined;
+	return { def, sessionFile: record.sessionFile, cwd: record.cwd, forkedAt: record.forkedAt };
+}
 
 /** Stands in for `def` on a resume call; the engine swaps in the child's own def. */
 export const RESUME_PLACEHOLDER: AgentDef = {
@@ -399,6 +493,25 @@ export interface RunSubagentOptions {
 	resume?: string;
 	/** Run the child in its own detached git worktree. */
 	isolation?: "worktree";
+	/** Start the child from the parent's conversation instead of an empty one. Ignored on resume. */
+	fork?: ForkSource;
+	/** A label grouping runs toward one goal, kept in the durable run records. */
+	mission?: string;
+	/** A command that must succeed once the child is done; default: the def's `gate`. */
+	gate?: string;
+	/** Runs gate commands; injectable for tests. */
+	runCommand?: RunHostCommand;
+	/** A child allowed to spawn its own: its depth and the subagents extension that gives it `task`. */
+	nested?: { depth: number; extension: InlineExtension };
+	/** Where permission questions go; default: the parent's UI. A nested child passes the root's. */
+	prompt?: GatePrompt;
+	/** Who answers contact_supervisor; default: the parent's UI. A nested child passes the root's. */
+	ask?: SupervisorAsk;
+	/** Where the child's transcript goes; default: keyed by the parent session. Nested children share the root's. */
+	sessionDir?: string;
+	/** Called with the child's session once it exists, e.g. to steer it while it runs;
+	 *  what it returns is called when the child is done. */
+	onSession?: (session: AgentSession) => (() => void) | undefined;
 	/** Session construction; injectable so the engine is testable without a model. */
 	createSession?: CreateSession;
 }
@@ -420,6 +533,7 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<SingleResul
 	let def = opts.def;
 	let cwd = opts.cwd ?? ctx.cwd;
 	let sessionManager: SessionManager | undefined;
+	let forkedAt: number | undefined;
 
 	const base = (): SingleResult => ({
 		agent: def.name,
@@ -437,7 +551,7 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<SingleResul
 	if (signal?.aborted) return failed(base(), "aborted", "Subagent was aborted before starting.");
 
 	if (opts.resume) {
-		const entry = resumable.get(opts.resume);
+		const entry = resumable.get(opts.resume) ?? resumableFromRecord(opts.resume, ctx);
 		if (!entry) {
 			return failed(
 				base(),
@@ -445,12 +559,45 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<SingleResul
 				`No subagent with id "${opts.resume}" to resume. Only children this session ran, and did not run in a worktree, can be resumed.`,
 			);
 		}
+		if (resuming.has(opts.resume)) {
+			return failed(
+				base(),
+				"error",
+				`Subagent "${opts.resume}" is already running a resume; wait for it to finish.`,
+			);
+		}
 		def = entry.def;
 		cwd = entry.cwd;
+		forkedAt = entry.forkedAt;
+		// SessionManager.open on a missing file quietly starts an empty session: the child
+		// would carry on with no context under a new id.
+		if (!existsSync(entry.sessionFile)) {
+			return failed(base(), "error", `Cannot resume "${opts.resume}": its transcript ${entry.sessionFile} is gone.`);
+		}
 		try {
-			sessionManager = SessionManager.open(entry.sessionFile, childSessionDir(ctx), cwd);
+			sessionManager = SessionManager.open(entry.sessionFile, opts.sessionDir ?? childSessionDir(ctx), cwd);
 		} catch (err) {
 			return failed(base(), "error", `Could not reopen subagent "${opts.resume}": ${String(err)}`);
+		}
+	}
+
+	if (def.runner && (opts.fork || opts.resume)) {
+		return failed(base(), "error", `"${def.name}" runs an external command: it cannot be forked or resumed.`);
+	}
+
+	if (opts.fork && !opts.resume) {
+		// Opened with the CHILD's session dir, so the branch is written there — not into
+		// the parent's session dir, where /fleet and the resume picker would list it.
+		try {
+			sessionManager = SessionManager.open(opts.fork.sessionFile, opts.sessionDir ?? childSessionDir(ctx), cwd);
+			sessionManager.createBranchedSession(opts.fork.leafId);
+			forkedAt = opts.fork.forkedAt;
+		} catch (err) {
+			return failed(
+				base(),
+				"error",
+				`Could not fork the parent conversation: ${err instanceof Error ? err.message : String(err)}`,
+			);
 		}
 	}
 
@@ -468,10 +615,37 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<SingleResul
 		}
 	}
 
-	const result = await runChild(
-		{ ...opts, def, cwd, sessionManager: sessionManager ?? SessionManager.create(cwd, childSessionDir(ctx)) },
-		base(),
-	);
+	if (opts.resume) resuming.add(opts.resume);
+	let result: SingleResult & { sessionFile?: string } = def.runner
+		? await runExternal(base(), {
+				runner: def.runner,
+				systemPrompt: def.systemPrompt,
+				task,
+				ctx,
+				cwd,
+				agent: def.name,
+				prompt: opts.prompt ?? uiPromptBridge(ctx),
+				signal,
+				timeoutMs: def.timeoutMs,
+				runCommand: opts.runCommand,
+			})
+		: await runChild(
+				{
+					...opts,
+					def,
+					cwd,
+					forkedAt,
+					sessionManager: sessionManager ?? SessionManager.create(cwd, opts.sessionDir ?? childSessionDir(ctx)),
+				},
+				base(),
+			).finally(() => {
+				if (opts.resume) resuming.delete(opts.resume);
+			});
+
+	const gate = opts.gate || def.gate;
+	if (gate && result.status === "ok" && !result.partial) {
+		result = await applyGate(gate, result, { ...opts, def, cwd, forkedAt });
+	}
 
 	if (worktree) {
 		// Resume and worktrees do not compose: a clean worktree is gone by now, and a
@@ -479,14 +653,106 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<SingleResul
 		result.agentId = undefined;
 		result.worktree = await finishWorktree(worktree);
 	} else if (result.agentId && result.sessionFile) {
-		resumable.set(result.agentId, { def, sessionFile: result.sessionFile, cwd });
+		resumable.set(result.agentId, { def, sessionFile: result.sessionFile, cwd, forkedAt });
+		appendRecord({
+			agentId: result.agentId,
+			agent: def.name,
+			sessionFile: result.sessionFile,
+			cwd,
+			task,
+			status: result.status,
+			stopReason: result.stopReason,
+			mission: opts.mission,
+			forkedAt,
+			endedAt: Date.now(),
+		});
 	}
 	return result;
 }
 
+/** Most of a failed gate's output the child and the parent are shown. */
+const GATE_OUTPUT_CHARS = 4000;
+
+/**
+ * Run the acceptance gate after a successful child. A failure is handed back to the
+ * child (its own transcript, reopened) up to `subagents.gateRetries` times; a gate
+ * still failing — or blocked by the permission rules — fails the child.
+ */
+async function applyGate(
+	command: string,
+	first: SingleResult & { sessionFile?: string },
+	opts: RunSubagentOptions & { cwd: string; forkedAt?: number },
+): Promise<SingleResult & { sessionFile?: string }> {
+	const { ctx, def, cwd, signal } = opts;
+	let retries = 1;
+	try {
+		const settings = forkSettings.subagents(
+			SettingsManager.create(ctx.cwd, getAgentDir(), { projectTrusted: ctx.isProjectTrusted() }),
+		);
+		if (typeof settings?.gateRetries === "number" && settings.gateRetries >= 0) retries = settings.gateRetries;
+	} catch {
+		// The default stands.
+	}
+	const run = opts.runCommand ?? runHostCommand;
+	let result = first;
+	for (let attempts = 1; ; attempts++) {
+		const check = await run(command, {
+			ctx,
+			cwd,
+			asker: `Acceptance check for subagent "${def.name}" needs permission`,
+			prompt: opts.prompt ?? uiPromptBridge(ctx),
+			signal,
+		});
+		if (check.outcome === "passed") return { ...result, gate: { command, passed: true, attempts } };
+		const output = check.output.slice(-GATE_OUTPUT_CHARS);
+		if (check.outcome === "blocked" || attempts > retries || !result.sessionFile || signal?.aborted) {
+			return {
+				...result,
+				status: "failed",
+				stopReason: "gate",
+				errorMessage: `Acceptance check \`${command}\` ${check.outcome === "blocked" ? "was blocked" : "failed"}:\n${output}`,
+				gate: { command, passed: false, attempts },
+			};
+		}
+		const previous = result;
+		const next = await runChild(
+			{
+				...opts,
+				fork: undefined,
+				resume: previous.agentId ?? "gate",
+				task: `The acceptance check \`${command}\` failed after your work:\n\n${output}\n\nFix the cause, then report again.`,
+				sessionManager: SessionManager.open(
+					previous.sessionFile as string,
+					opts.sessionDir ?? childSessionDir(ctx),
+					cwd,
+				),
+			},
+			{ ...previous, status: "running", messages: [], stopReason: undefined, errorMessage: undefined },
+		);
+		result = {
+			...next,
+			messages: [...previous.messages, ...next.messages],
+			usage: sumUsage(previous.usage, next.usage),
+		};
+		if (result.status !== "ok" || result.partial) return { ...result, gate: { command, passed: false, attempts } };
+	}
+}
+
+function sumUsage(a: SingleResult["usage"], b: SingleResult["usage"]): SingleResult["usage"] {
+	return {
+		input: a.input + b.input,
+		output: a.output + b.output,
+		cacheRead: a.cacheRead + b.cacheRead,
+		cacheWrite: a.cacheWrite + b.cacheWrite,
+		cost: a.cost + b.cost,
+		contextTokens: b.contextTokens,
+		turns: a.turns + b.turns,
+	};
+}
+
 /** The one run, against a prepared def, cwd and session manager. */
 async function runChild(
-	opts: RunSubagentOptions & { cwd: string; sessionManager: SessionManager },
+	opts: RunSubagentOptions & { cwd: string; sessionManager: SessionManager; forkedAt?: number },
 	base: SingleResult & { sessionFile?: string },
 ): Promise<SingleResult & { sessionFile?: string }> {
 	const { def, task, ctx, signal, onUpdate, cwd } = opts;
@@ -496,14 +762,31 @@ async function runChild(
 	// contract — chain/single callers don't catch (2026-07-10 review).
 	let session: AgentSession;
 	let turnCap: number | undefined;
+	let timeoutMs: number | undefined;
+	let toolTimeoutMs: number | undefined;
+	let tokenCap: number | undefined;
+	let compactAbove = DEFAULT_FORK_COMPACT_ABOVE;
+	// Questions this child has in front of the user right now: the tool timer waits on them.
+	const openQuestions = { count: 0 };
 	try {
 		const mode = resolveChildMode(getActivePermissionMode(), def.permissionMode);
-		const loaderOptions = childLoaderOptions(ctx, def, { mode, prompt: uiPromptBridge(ctx), cwd });
+		const loaderOptions = childLoaderOptions(ctx, def, {
+			mode,
+			prompt: countingPrompt(opts.prompt ?? uiPromptBridge(ctx), openQuestions),
+			cwd,
+			forkedAt: opts.forkedAt,
+			nested: opts.nested?.extension,
+			ask: opts.ask ?? uiSupervisor(ctx),
+		});
 		const childLoader = new DefaultResourceLoader(loaderOptions);
 		await childLoader.reload();
 
 		const settings = forkSettings.subagents(loaderOptions.settingsManager);
 		turnCap = def.maxTurns ?? settings?.maxTurns;
+		timeoutMs = def.timeoutMs ?? settings?.timeoutMs;
+		toolTimeoutMs = def.toolTimeoutMs ?? settings?.toolTimeoutMs;
+		tokenCap = def.maxTokens ?? settings?.maxTokens;
+		compactAbove = settings?.forkCompactAbove ?? compactAbove;
 
 		// Resolve once and report THIS model, not the raw def.model: on a
 		// malformed/unknown def.model, resolution silently inherits the parent
@@ -511,7 +794,7 @@ async function runChild(
 		const resolvedModel = resolveModel(def, ctx, settings?.models ?? {});
 		base.model = resolvedModel ? `${resolvedModel.provider}/${resolvedModel.id}` : undefined;
 
-		const { tools, excludeTools } = childToolLists(def);
+		const { tools, excludeTools } = childToolLists(def, Boolean(opts.nested));
 		({ session } = await (opts.createSession ?? defaultCreateSession)({
 			cwd,
 			model: resolvedModel,
@@ -525,24 +808,49 @@ async function runChild(
 	} catch (err) {
 		return failed(base, "error", err instanceof Error ? err.message : String(err));
 	}
+	// Pruned fork: an inherited conversation above the threshold is compacted first,
+	// by pi's own compaction on the child's model — every parallel fork would otherwise
+	// pay for the whole parent conversation on every turn. A failed compaction leaves it
+	// whole rather than failing the child.
+	if (opts.forkedAt !== undefined && !opts.resume && !signal?.aborted) {
+		const inherited = session.state.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+		if (inherited > compactAbove) {
+			try {
+				await session.compact(FORK_COMPACT_INSTRUCTIONS);
+			} catch {
+				// Proceed with the full history.
+			}
+		}
+	}
+
 	// Through the session manager first: it is the stable API, and the getters on
 	// AgentSession have moved between pi releases.
 	base.agentId = session.sessionManager?.getSessionId?.() ?? session.sessionId;
 
+	// What the session already holds — a fork's inherited conversation, a resumed
+	// child's earlier run — is not this run's: turns, usage and messages count from here,
+	// or a fork of a long conversation would hit maxTurns before its first turn.
+	// By timestamp, not index: compaction replaces the message list mid-run, and an
+	// index taken now would then point past its end.
+	const runStartedAt = Date.now();
+	const start = session.getSessionStats();
+	const turnsSoFar = () => session.getSessionStats().assistantMessages - start.assistantMessages;
+
 	const snapshot = (): SingleResult & { sessionFile?: string } => {
 		const stats = session.getSessionStats();
-		const last = lastAssistant(session.state.messages);
+		const messages = session.state.messages.filter((m) => (m.timestamp ?? 0) >= runStartedAt);
+		const last = lastAssistant(messages);
 		return {
 			...base,
-			messages: [...session.state.messages],
+			messages,
 			usage: {
-				input: stats.tokens.input,
-				output: stats.tokens.output,
-				cacheRead: stats.tokens.cacheRead,
-				cacheWrite: stats.tokens.cacheWrite,
-				cost: stats.cost,
+				input: stats.tokens.input - start.tokens.input,
+				output: stats.tokens.output - start.tokens.output,
+				cacheRead: stats.tokens.cacheRead - start.tokens.cacheRead,
+				cacheWrite: stats.tokens.cacheWrite - start.tokens.cacheWrite,
+				cost: stats.cost - start.cost,
 				contextTokens: 0,
-				turns: stats.assistantMessages,
+				turns: turnsSoFar(),
 			},
 			model: base.model ?? last?.model,
 			// Read HERE, not at creation: pi 0.85 assigns a session its id on first
@@ -553,15 +861,38 @@ async function runChild(
 		};
 	};
 
-	// maxTurns: the cap is checked as each assistant message lands, and the child
-	// is aborted at it. Its output is then partial, and the result says so.
-	let turnCapHit = false;
+	// Every cap aborts the child the same way; its output is then partial, and the
+	// result says which cap stopped it.
+	let capHit: "max-turns" | "max-tokens" | "tool-timeout" | undefined;
+	const stopAt = (cap: NonNullable<typeof capHit>): void => {
+		if (capHit) return;
+		capHit = cap;
+		void session.abort();
+	};
+	const tokensSoFar = (): number => {
+		const now = session.getSessionStats().tokens;
+		return (
+			now.input +
+			now.output +
+			now.cacheRead +
+			now.cacheWrite -
+			(start.tokens.input + start.tokens.output + start.tokens.cacheRead + start.tokens.cacheWrite)
+		);
+	};
+	const toolTimer =
+		toolTimeoutMs && toolTimeoutMs > 0
+			? createToolTimer({
+					ms: toolTimeoutMs,
+					paused: () => openQuestions.count > 0,
+					onTimeout: () => stopAt("tool-timeout"),
+				})
+			: undefined;
 	const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
+		if (event.type === "tool_execution_start") toolTimer?.start(event.toolCallId, event.toolName);
+		if (event.type === "tool_execution_end") toolTimer?.end(event.toolCallId);
 		if (event.type !== "message_end") return;
-		if (turnCap && !turnCapHit && session.getSessionStats().assistantMessages >= turnCap) {
-			turnCapHit = true;
-			void session.abort();
-		}
+		if (turnCap && turnsSoFar() >= turnCap) stopAt("max-turns");
+		if (tokenCap && tokensSoFar() >= tokenCap) stopAt("max-tokens");
 		if (onUpdate) onUpdate(snapshot());
 	});
 
@@ -572,22 +903,32 @@ async function runChild(
 		void session.abort();
 	};
 	if (signal) signal.addEventListener("abort", onAbort, { once: true });
+	// Same shape as maxTurns: abort at the deadline, report what exists as partial.
+	let timedOut = false;
+	const timer =
+		timeoutMs && timeoutMs > 0
+			? setTimeout(() => {
+					timedOut = true;
+					void session.abort();
+				}, timeoutMs)
+			: undefined;
+	const releaseSession = opts.onSession?.(session);
 
 	try {
 		// Re-check after attaching the listener: an abort fired during the loader
 		// reload / session creation awaits above landed BEFORE the listener existed
 		// and would otherwise be lost — the child would run its entire task (Trap 3).
 		if (signal?.aborted) return failed(base, "aborted", "Subagent was aborted before starting.");
-		await session.prompt(`Task: ${task}`);
+		await session.prompt(opts.fork && !opts.resume ? forkedTaskPrompt(task) : `Task: ${task}`);
 		const final = snapshot();
 		const last = lastAssistant(session.state.messages);
 		if (signal?.aborted) {
 			final.status = "failed";
 			final.stopReason = "aborted";
 			final.errorMessage = final.errorMessage ?? "Subagent was aborted.";
-		} else if (turnCapHit) {
+		} else if (capHit || timedOut) {
 			final.status = "ok";
-			final.stopReason = "max-turns";
+			final.stopReason = timedOut ? "timeout" : capHit;
 			final.partial = true;
 		} else if (last?.stopReason === "error") {
 			final.status = "failed";
@@ -605,6 +946,9 @@ async function runChild(
 		final.errorMessage = err instanceof Error ? err.message : String(err);
 		return final;
 	} finally {
+		clearTimeout(timer);
+		toolTimer?.clear();
+		releaseSession?.();
 		if (signal) signal.removeEventListener("abort", onAbort);
 		unsubscribe();
 		session.dispose();

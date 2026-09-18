@@ -17,6 +17,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 import { type PermissionMode, parseMode } from "../permissions/modes.ts";
+import { parseToolBudget, type ToolBudget } from "./limits.ts";
 
 export type AgentScope = "user" | "project" | "both";
 
@@ -29,6 +30,12 @@ const MEMORY_SCOPES: readonly AgentMemoryScope[] = ["user", "project", "local"];
 const EFFORTS: readonly AgentEffort[] = ["low", "medium", "high", "xhigh", "max"];
 const COLORS: readonly AgentColor[] = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"];
 
+/** A command run in place of a pi child: stdin gets the prompt, stdout is the result. */
+export interface AgentRunner {
+	command: string;
+	args: string[];
+}
+
 export interface AgentDef {
 	name: string;
 	description: string;
@@ -38,6 +45,18 @@ export interface AgentDef {
 	model?: string;
 	/** Stop the child after this many assistant turns; its output is then partial. */
 	maxTurns?: number;
+	/** Stop the child after this long; its output is then partial. */
+	timeoutMs?: number;
+	/** Stop the child when one tool call runs longer than this; its output is then partial. */
+	toolTimeoutMs?: number;
+	/** Stop the child after this many tokens (input + output + cache); its output is then partial. */
+	maxTokens?: number;
+	/** A nudge at `soft` tool calls; past `hard`, the `block` tools are refused. */
+	toolBudget?: ToolBudget;
+	/** A command that must succeed after the child finishes (an acceptance gate). */
+	gate?: string;
+	/** Run this command instead of a pi child. */
+	runner?: AgentRunner;
 	/** Skills whose full content is preloaded into the child's system prompt. */
 	skills?: string[];
 	/** The mode the child is evaluated under when the parent is in `ask`. */
@@ -45,6 +64,8 @@ export interface AgentDef {
 	memory?: AgentMemoryScope;
 	/** Run detached by default, even when the call did not ask for it. */
 	background?: boolean;
+	/** Start from a copy of the parent's conversation by default (pi-subagents' `defaultContext: fork`). */
+	fork?: boolean;
 	isolation?: "worktree";
 	effort?: AgentEffort;
 	color?: AgentColor;
@@ -166,7 +187,8 @@ export function parseDef(content: string): ParsedDef | { name?: string; problem:
 		.filter((s): s is string => typeof s === "string")
 		.map((s) => s.trim())
 		.filter(Boolean);
-	const maxTurns = frontmatter.maxTurns;
+	const positive = (v: unknown): number | undefined =>
+		typeof v === "number" && Number.isInteger(v) && v > 0 ? v : undefined;
 	// `plan` and the removed modes are not errors, just not this layer's: a def that
 	// names one is loaded and runs under the default, exactly as an undeclared one.
 	const permissionMode =
@@ -180,16 +202,32 @@ export function parseDef(content: string): ParsedDef | { name?: string; problem:
 		tools: tools && tools.length > 0 ? tools : undefined,
 		disallowedTools: disallowedTools && disallowedTools.length > 0 ? disallowedTools : undefined,
 		model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
-		maxTurns: typeof maxTurns === "number" && Number.isInteger(maxTurns) && maxTurns > 0 ? maxTurns : undefined,
+		maxTurns: positive(frontmatter.maxTurns),
+		timeoutMs: positive(frontmatter.timeoutMs),
+		toolTimeoutMs: positive(frontmatter.toolTimeoutMs),
+		maxTokens: positive(frontmatter.maxTokens),
+		toolBudget: parseToolBudget(frontmatter.toolBudget),
+		gate: typeof frontmatter.gate === "string" && frontmatter.gate.trim() ? frontmatter.gate.trim() : undefined,
+		runner: parseRunner(frontmatter.runner),
 		skills: skills.length > 0 ? skills : undefined,
 		permissionMode,
 		memory: oneOf(frontmatter.memory, MEMORY_SCOPES),
 		background: frontmatter.background === true ? true : undefined,
+		fork: frontmatter.fork === true || frontmatter.defaultContext === "fork" ? true : undefined,
 		isolation: frontmatter.isolation === "worktree" ? "worktree" : undefined,
 		effort: oneOf(frontmatter.effort, EFFORTS),
 		color: oneOf(frontmatter.color, COLORS),
 		systemPrompt: body,
 	});
+}
+
+/** `runner: {command, args}`; pi-subagents' `type: external-cli` and `promptDelivery: stdin` are accepted and implied. */
+function parseRunner(raw: unknown): AgentRunner | undefined {
+	if (!raw || typeof raw !== "object") return undefined;
+	const { command, args } = raw as { command?: unknown; args?: unknown };
+	if (typeof command !== "string" || !command.trim()) return undefined;
+	const list = Array.isArray(args) ? args.filter((a): a is string => typeof a === "string") : [];
+	return { command: command.trim(), args: list };
 }
 
 function compact<T extends object>(value: T): T {

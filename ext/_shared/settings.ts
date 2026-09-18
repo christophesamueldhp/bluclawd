@@ -72,6 +72,22 @@ export interface SubagentSettings {
 	maxConcurrent?: number;
 	/** Turn cap for every child that declares none. default: unlimited */
 	maxTurns?: number;
+	/** Run-time cap in milliseconds for every child that declares none. default: unlimited */
+	timeoutMs?: number;
+	/** One tool call running longer than this (ms) stops the child. default: unlimited */
+	toolTimeoutMs?: number;
+	/** Tokens (input + output + cache reads and writes) a child may use in one run. default: unlimited */
+	maxTokens?: number;
+	/** `{soft, hard, block}` tool-call budget for every child that declares none. default: none */
+	toolBudget?: { soft?: number; hard: number; block?: string[] | "*" };
+	/** How deep children may nest: 1 = children cannot delegate, 2 = they can, once. default: 2 */
+	maxDepth?: number;
+	/** Children one top-level task call may start in total, nested and resumed ones included. default: 32 */
+	maxSpawns?: number;
+	/** A forked child whose inherited conversation is above this many tokens compacts it first. default: 60000 */
+	forkCompactAbove?: number;
+	/** Times a child whose acceptance gate failed is sent back to fix it. default: 1 */
+	gateRetries?: number;
 	/** Short model names a def's `model:` may use, e.g. `{ "fast": "opencode-go/kimi-k2" }`.
 	 *  Provider-neutral on purpose: nothing here names a vendor unless the user does. */
 	models?: Record<string, string>;
