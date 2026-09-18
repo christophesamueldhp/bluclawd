@@ -14,7 +14,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 3 },
 	subagents: {
 		commands: ["agents", "review-loop"],
-		tools: ["task", "task_output", "task_stop", "task_message", "manage_agents", "task_schedule"],
+		tools: ["task", "task_output", "task_stop", "task_message", "task_wait", "manage_agents", "task_schedule"],
 		shortcuts: 0,
 		events: 2,
 	},

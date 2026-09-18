@@ -461,6 +461,8 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 		stopped: boolean;
 		/** Set by `/agents stop`: the completion message says the user stopped it. */
 		stoppedByUser?: boolean;
+		/** task_wait calls waiting on it: a result they receive needs no completion message. */
+		waiters: number;
 		done: Promise<AgentToolResult<SubagentDetails>>;
 	}
 	const backgroundRuns = new Map<string, BackgroundRun>();
@@ -527,7 +529,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
 			"The available agents are listed in the system prompt (<available_agents>).",
 			`Agents come from the bundled set, ${join(getAgentDir(), "agents")}, and ${CONFIG_DIR_NAME}/agents in a trusted project.`,
-			"run_in_background returns at once and delivers the result later (task_output, task_message and task_stop check on, steer and stop it); resume continues an earlier child by its agent id; worktree: true gives each child its own git worktree; fork: true starts children from this conversation.",
+			"run_in_background returns at once and delivers the result later (task_output, task_message and task_stop check on, steer and stop it; task_wait waits for it); resume continues an earlier child by its agent id; worktree: true gives each child its own git worktree; fork: true starts children from this conversation.",
 		].join(" "),
 		promptSnippet:
 			"Use the task tool to delegate self-contained work to specialized subagents (modes: single, parallel, chain) — each runs in-process with its own isolated context",
@@ -721,6 +723,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 				sessions,
 				latest: [],
 				stopped: false,
+				waiters: 0,
 			} as Omit<BackgroundRun, "done"> as BackgroundRun;
 			// Assigned after the entry exists: the run's first progress can land synchronously.
 			entry.done = executeTask(
@@ -745,7 +748,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 				.then((result) => {
 					const child = result.details?.results?.[0]?.agentId;
 					if (child) backgroundChildIds.set(id, child);
-					if (shuttingDown || entry.stopped) return;
+					if (shuttingDown || entry.stopped || entry.waiters > 0) return;
 					return pi.sendMessage(
 						subagentExitMessage(id, agent, firstTask, result, entry.stoppedByUser),
 						EVENT_DELIVERY,
@@ -1027,6 +1030,10 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 			};
 		};
 
+		/** How long task_wait waits by default, and at most. */
+		const DEFAULT_WAIT_SECONDS = 300;
+		const MAX_WAIT_SECONDS = 1800;
+
 		/** Most lines of a running child's latest output task_output shows. */
 		const PROGRESS_TAIL_LINES = 40;
 
@@ -1074,6 +1081,76 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 					content: [{ type: "text", text: [`Stopped ${run.id} (${run.agent}).`, ...sections].join("\n\n") }],
 					details: undefined,
 				};
+			},
+		});
+
+		pi.registerTool({
+			name: "task_wait",
+			label: "Task Wait",
+			description:
+				"Wait for background subagents to finish and get their results here instead of as messages later. Use it when nothing else can be done until they finish; otherwise carry on and let the results arrive.",
+			parameters: Type.Object({
+				ids: Type.Optional(
+					Type.Array(Type.String(), {
+						description: "sa-N ids to wait for; empty or omitted waits for all running",
+					}),
+				),
+				timeout_seconds: Type.Optional(
+					Type.Number({
+						description: `Stop waiting after this long (default ${DEFAULT_WAIT_SECONDS}, max ${MAX_WAIT_SECONDS}); runs still going then report as messages when they finish`,
+					}),
+				),
+			}),
+			execute: async (_toolCallId, params, signal) => {
+				const wanted = params.ids?.filter((id) => id.trim()) ?? [];
+				const unknown = wanted.filter((id) => !backgroundRuns.has(id));
+				const runs = (wanted.length > 0 ? wanted : Array.from(backgroundRuns.keys()))
+					.map((id) => backgroundRuns.get(id))
+					.filter((r): r is BackgroundRun => r !== undefined);
+				const notes = unknown.map(
+					(id) => `No running background subagent "${id}"; a finished run delivered its result as a message.`,
+				);
+				if (runs.length === 0) {
+					return {
+						content: [{ type: "text", text: [...notes, "No background subagents running."].join("\n") }],
+						details: undefined,
+					};
+				}
+				// A model fills an optional number with 0: anything not positive is the default.
+				const seconds =
+					params.timeout_seconds && params.timeout_seconds > 0
+						? Math.min(params.timeout_seconds, MAX_WAIT_SECONDS)
+						: DEFAULT_WAIT_SECONDS;
+				for (const r of runs) r.waiters++;
+				let timer: ReturnType<typeof setTimeout> | undefined;
+				let onAbort: (() => void) | undefined;
+				const settled = new Map<string, AgentToolResult<SubagentDetails>>();
+				try {
+					await Promise.race([
+						Promise.all(runs.map((r) => r.done.then((result) => void settled.set(r.id, result)))),
+						new Promise<void>((resolve) => {
+							timer = setTimeout(resolve, seconds * 1000);
+						}),
+						new Promise<void>((resolve) => {
+							onAbort = resolve;
+							if (signal?.aborted) resolve();
+							else signal?.addEventListener("abort", onAbort, { once: true });
+						}),
+					]);
+				} finally {
+					clearTimeout(timer);
+					if (onAbort) signal?.removeEventListener("abort", onAbort);
+					for (const r of runs) r.waiters--;
+				}
+				const sections = runs.map((r) => {
+					const result = settled.get(r.id);
+					if (!result) {
+						const age = Math.round((Date.now() - r.startedAt) / 1000);
+						return `[subagent ${r.id} · ${r.agent} still running · ${age}s]\nIts result will arrive as a message when it finishes.`;
+					}
+					return subagentExitMessage(r.id, r.agent, r.task, result, r.stoppedByUser).content;
+				});
+				return { content: [{ type: "text", text: [...notes, ...sections].join("\n\n") }], details: undefined };
 			},
 		});
 

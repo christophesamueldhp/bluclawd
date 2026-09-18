@@ -109,7 +109,14 @@ const READ_LIKE_TOOLS = new Set(["read", "grep", "find", "ls"]);
  * `contact_supervisor` is itself a question to the user.
  * Deny rules still apply to them.
  */
-const SELF_GATED_TOOLS = new Set(["task_output", "task_stop", "task_message", "manage_agents", "contact_supervisor"]);
+const SELF_GATED_TOOLS = new Set([
+	"task_output",
+	"task_stop",
+	"task_message",
+	"task_wait",
+	"manage_agents",
+	"contact_supervisor",
+]);
 
 /**
  * Will this bash command actually run inside the OS sandbox? Not when the sandbox is

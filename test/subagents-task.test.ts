@@ -739,6 +739,81 @@ describe("task tool", () => {
 			expect(text(await call(h, "task_output", { id }))).toMatch(/no running background subagent/i);
 		});
 
+		/** Background children that each finish when the test says so. */
+		function finishable() {
+			const finish: Record<string, (text: string) => void> = {};
+			const h = harness(
+				(opts) =>
+					new Promise<SingleResult>((resolve) => {
+						finish[opts.task] = (out) =>
+							resolve({
+								agent: opts.def.name,
+								agentSource: "user",
+								task: opts.task,
+								status: "ok",
+								messages: [{ role: "assistant", content: [{ type: "text", text: out }] } as never],
+								stderr: "",
+								usage: emptyUsage(),
+							});
+					}),
+			);
+			const launch = async (task: string) =>
+				text(
+					await h.tool.execute(
+						"1",
+						{ agent: "explore", task, run_in_background: true },
+						undefined,
+						undefined,
+						ctxFor(cwd),
+					),
+				).match(/sa-\d+/)?.[0] as string;
+			return { h, finish, launch };
+		}
+
+		it("task_wait returns every run's result once all finish, instead of completion messages", async () => {
+			const { h, finish, launch } = finishable();
+			const a = await launch("one");
+			const b = await launch("two");
+			// A model's default-filled [] and 0 mean all runs and the default wait.
+			const waiting = call(h, "task_wait", { ids: [], timeout_seconds: 0 });
+			await tick();
+			finish.one("first result");
+			await tick();
+			finish.two("second result");
+			const out = text(await waiting);
+			expect(out).toContain(`[subagent ${a} · explore finished]`);
+			expect(out).toContain("first result");
+			expect(out).toContain(`[subagent ${b} · explore finished]`);
+			expect(out).toContain("second result");
+			await tick();
+			expect(h.sent).toHaveLength(0);
+		});
+
+		it("task_wait gives up at its timeout, and the run still reports as a message when it finishes", async () => {
+			const { h, finish, launch } = finishable();
+			const id = await launch("slow");
+			vi.useFakeTimers();
+			try {
+				const waiting = call(h, "task_wait", { ids: [id], timeout_seconds: 5 });
+				await vi.advanceTimersByTimeAsync(5000);
+				expect(text(await waiting)).toMatch(new RegExp(`${id} · explore still running`));
+			} finally {
+				vi.useRealTimers();
+			}
+			finish.slow("late result");
+			await tick();
+			await tick();
+			expect(h.sent).toHaveLength(1);
+			expect(h.sent[0].message.content).toContain("late result");
+		});
+
+		it("task_wait says so when there is nothing to wait for", async () => {
+			const { h } = finishable();
+			const out = text(await call(h, "task_wait", { ids: ["sa-7"] }));
+			expect(out).toMatch(/no running background subagent "sa-7"/i);
+			expect(out).toMatch(/no background subagents running/i);
+		});
+
 		it("answers an unknown id with what is running", async () => {
 			const { h } = controllable();
 			for (const [name, params] of [

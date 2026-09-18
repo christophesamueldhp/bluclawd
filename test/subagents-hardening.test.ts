@@ -54,7 +54,7 @@ describe("task_schedule", () => {
 });
 
 describe("background-run control tools", () => {
-	it.each(["task_output", "task_stop", "task_message", "manage_agents"])(
+	it.each(["task_output", "task_stop", "task_message", "task_wait", "manage_agents"])(
 		"%s gets no mode prompt: it only touches this session's runs or asks for itself",
 		(tool) => {
 			expect(verdict(tool, { id: "sa-1" }, cfg({ mode: "ask" })).outcome).toBe("allow");
