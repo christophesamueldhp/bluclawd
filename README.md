@@ -35,7 +35,7 @@ dependency); it is not how `pi install` loads this package.
 package.json    the pi package manifest (pi.extensions, dependencies)
 bin.mjs         convenience entry point for local runs
 themes/         the bluclawd theme
-daemon/         FleetView's session daemon
+daemon/         agent view's background-session daemon
 ext/            the feature layer
   _shared/      settings readers/writers, process runner, vendored pi internals
 scripts/        probe-extensions.ts — headless report of what each extension registers
@@ -44,7 +44,7 @@ test/           self-contained — no monorepo, no fixtures pi doesn't publish
 
 16 extensions: `permissions`, `statusline`, `memory`,
 `checkpoints`, `subagents`, `web`, `mcp`, `sandbox`, `background-bash`,
-`branding`, `diagnostics`, `fleet`, `help`, `plugin`, `shell`, `vibes`.
+`branding`, `diagnostics`, `agent-view`, `help`, `plugin`, `shell`, `vibes`.
 
 ## What it adds
 
@@ -62,7 +62,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `/memory`, `# note` | persistent memory, injected into the system prompt. `/memory edit [scope]` and `/memory search <text>`; a bare `#` opens an editor for a multi-line note; `@name.md` lines pull in a sibling file |
 | `/rewind` | file checkpoints per turn; restores the files, the conversation, or both |
 | `/bash-mode`, `/stash` | bash mode (Ctrl+Shift+B or `/bash-mode`): the prompt drives a persistent shell, so `cd`, `export` and functions carry between commands; output shows below the editor instead of in the conversation, Escape leaves, Ctrl+C interrupts, Up/Down walk its commands. Alt+S stashes the prompt you are writing and brings it back into an empty editor; `/stash` inserts an older one |
-| `/fleet` | session roster in the shape of Claude Code's `/resume` picker: title + `time · branch · N messages · path`, grouped by project path (ctrl+g: by Running / Saved instead, remembered) with status glyphs, type to search, ctrl+a current/all projects, enter opens, ctrl+t peeks, ctrl+n starts one; restarts a stale daemon by itself when it owns no running session |
+| `←` twice on an empty prompt | agent view, as Claude Code's `claude agents`: background sessions in Needs input / Working / Completed bands (ctrl+s: by directory, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing, age. Type a task + enter to start a background session (ctrl+enter: start it here), shift+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, space peeks and replies (1-9 answers a pending question), enter/→ opens a session in this window (this one keeps running in the background), alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes, ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` filters, `/resume` brings a past session back, `/model` sets the model for new ones. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press |
 | `/status`, `/context`, `/usage` | model, auth, safety, session, context window, spend, plan usage |
 | `/plugin`, `/theme` | packages, theme |
 | `/help` | all of the above, grouped |
@@ -274,8 +274,17 @@ reading the API:
   theme.** pi resolves the configured theme before that hook runs, so it falls
   back to dark and prints "Theme not found". The theme is declared in
   `package.json`'s `pi.themes` instead, which pi registers before startup.
-- **`newSession()` takes neither a directory nor a model**, so FleetView's "New
-  session" panel says which part of the choice it could not honour.
+- **`newSession()` takes no model**, so agent view's ctrl+enter (start a task in this
+  window) says so when `/model` chose a different one.
+- **Agent view differs from Claude Code's in a few places.** Row text comes from each
+  session's own output — background sessions are asked to end a turn with a `result:` /
+  `needs input:` / `failed:` line — not from a Haiku-class summary, so it works with any
+  provider. There are no pull-request badges (no Ready for review band), no `!` shell-job
+  rows, no `@repo` / `@agent` mentions, and no worktree isolation for background
+  sessions. Opening a session here stops its background process first (pi holds one
+  session per window), so a turn in progress is cut off rather than carried over. `←`
+  always takes two presses (Claude Code opens on one when the prompt was already
+  empty), and `tab` does not browse subagents.
 
 ## Permission modes
 
@@ -303,7 +312,7 @@ runs — and `manage_agents` asks for every write itself, in every mode.
 
 A prompt has Claude Code's rows: **Yes**, a row for "from now on", and **No**. A
 digit picks a row, Esc is No, and Tab on No types a note the model receives. Where
-pi cannot draw that dialog (RPC mode, FleetView's background sessions) the same rows
+pi cannot draw that dialog (RPC mode, agent view's background sessions) the same rows
 come as a plain list, with **No, and tell the model what to do differently** as its
 own row.
 The middle row depends on the call: a command offers `Yes, and don't ask again for

@@ -17,11 +17,11 @@
  * it — keep it first.
  */
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import agentView from "./agent-view/index.ts";
 import backgroundBash from "./background-bash/index.ts";
 import branding from "./branding/index.ts";
 import checkpoints from "./checkpoints/index.ts";
 import diagnostics from "./diagnostics/index.ts";
-import fleet from "./fleet/index.ts";
 import help from "./help/index.ts";
 import mcp from "./mcp/index.ts";
 import memory from "./memory/index.ts";
@@ -47,7 +47,7 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "background-bash", factory: backgroundBash },
 		{ name: "branding", factory: branding },
 		{ name: "diagnostics", factory: diagnostics },
-		{ name: "fleet", factory: fleet },
+		{ name: "agent-view", factory: agentView },
 		{ name: "help", factory: help },
 		{ name: "plugin", factory: plugin },
 		{ name: "shell", factory: shell },

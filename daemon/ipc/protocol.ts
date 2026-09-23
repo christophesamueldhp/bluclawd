@@ -6,6 +6,7 @@ import type {
 	RpcResponse,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentActivity } from "../activity.ts";
+import type { SessionNeeds } from "../session-state.ts";
 import type { InstanceStatus } from "../types.ts";
 
 export interface SpawnRequest {
@@ -67,6 +68,33 @@ export interface ShutdownRequest {
 	type: "shutdown";
 }
 
+/** Remove a row (stopping it first). The session file stays on disk. */
+export interface DeleteRequest {
+	type: "delete";
+	instanceId: string;
+}
+
+export interface RenameRequest {
+	type: "rename";
+	instanceId: string;
+	name: string;
+}
+
+/** Agent-view-only fields: pin and manual order. */
+export interface MetaRequest {
+	type: "meta";
+	instanceId: string;
+	pinned?: boolean;
+	sortOrder?: number;
+}
+
+/** Answer the blocking prompt a session is waiting on, without attaching. */
+export interface AnswerRequest {
+	type: "answer";
+	instanceId: string;
+	response: RpcExtensionUIResponse;
+}
+
 export interface RequestMap {
 	spawn: SpawnRequest;
 	list: ListRequest;
@@ -77,6 +105,10 @@ export interface RequestMap {
 	register: RegisterRequest;
 	unregister: UnregisterRequest;
 	shutdown: ShutdownRequest;
+	delete: DeleteRequest;
+	rename: RenameRequest;
+	meta: MetaRequest;
+	answer: AnswerRequest;
 }
 
 export type ServerRequest = RequestMap[keyof RequestMap];
@@ -92,6 +124,17 @@ export interface InstanceSummary {
 	activity?: AgentActivity;
 	/** True for a self-registered foreground session (not a daemon-spawned child). */
 	external?: boolean;
+	createdAt?: string;
+	lastSeenAt?: string;
+	detail?: string;
+	outcome?: "done" | "failed" | "stopped";
+	question?: string;
+	turns?: number;
+	finishedAt?: string;
+	pinned?: boolean;
+	sortOrder?: number;
+	/** The blocking prompt a live session is waiting on. */
+	needs?: SessionNeeds;
 }
 
 export interface ResponseBase {
@@ -152,6 +195,12 @@ export interface ShutdownResponse extends ResponseBase {
 	type: "shutdown_result";
 }
 
+/** Reply to delete / rename / meta / answer. */
+export interface AckResponse extends ResponseBase {
+	type: "ack";
+	instance?: InstanceSummary;
+}
+
 export interface ErrorResponse extends ResponseBase {
 	type: "error";
 	ok: false;
@@ -168,6 +217,10 @@ export interface ResponseMap {
 	register: RegisterResponse;
 	unregister: UnregisterResponse;
 	shutdown: ShutdownResponse;
+	delete: AckResponse;
+	rename: AckResponse;
+	meta: AckResponse;
+	answer: AckResponse;
 }
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;

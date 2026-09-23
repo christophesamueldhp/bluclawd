@@ -7,12 +7,17 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { AgentActivity } from "./activity.ts";
 import type {
+	AckResponse,
+	AnswerRequest,
+	DeleteRequest,
 	ErrorResponse,
 	InstanceSummary,
 	ListRequest,
 	ListResponse,
+	MetaRequest,
 	RegisterRequest,
 	RegisterResponse,
+	RenameRequest,
 	RpcBridgeResponse,
 	RpcReadyResponse,
 	RpcRequest,
@@ -35,6 +40,16 @@ import type { InstanceRecord } from "./types.ts";
 
 function toInstanceSummary(instance: InstanceRecord, activity?: AgentActivity, external?: boolean): InstanceSummary {
 	return {
+		createdAt: instance.createdAt,
+		lastSeenAt: instance.lastSeenAt,
+		detail: instance.detail,
+		outcome: instance.outcome,
+		question: instance.question,
+		turns: instance.turns,
+		finishedAt: instance.finishedAt,
+		pinned: instance.pinned,
+		sortOrder: instance.sortOrder,
+		needs: external ? undefined : supervisor.getPendingNeeds(instance.id),
 		id: instance.id,
 		status: instance.status,
 		cwd: instance.cwd,
@@ -79,6 +94,9 @@ export async function handleIpcRequest(request: RpcStreamRequest): Promise<RpcRe
 export async function handleIpcRequest(request: RegisterRequest): Promise<RegisterResponse | ErrorResponse>;
 export async function handleIpcRequest(request: UnregisterRequest): Promise<UnregisterResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ShutdownRequest): Promise<ShutdownResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	request: DeleteRequest | RenameRequest | MetaRequest | AnswerRequest,
+): Promise<AckResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse> {
 	switch (request.type) {
@@ -181,6 +199,34 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 		case "unregister": {
 			supervisor.unregisterExternal(request.instanceId);
 			return { type: "unregister_result", ok: true };
+		}
+
+		case "delete": {
+			const deleted = await supervisor.deleteInstance(request.instanceId);
+			return deleted ? { type: "ack", ok: true } : unknownInstanceError(request.instanceId);
+		}
+
+		case "rename": {
+			const instance = await supervisor.renameInstance(request.instanceId, request.name);
+			return instance
+				? { type: "ack", ok: true, instance: toInstanceSummary(instance) }
+				: unknownInstanceError(request.instanceId);
+		}
+
+		case "meta": {
+			const instance = supervisor.setInstanceMeta(request.instanceId, {
+				pinned: request.pinned,
+				sortOrder: request.sortOrder,
+			});
+			return instance
+				? { type: "ack", ok: true, instance: toInstanceSummary(instance) }
+				: unknownInstanceError(request.instanceId);
+		}
+
+		case "answer": {
+			return supervisor.answer(request.instanceId, request.response)
+				? { type: "ack", ok: true }
+				: { type: "error", ok: false, error: "that question was already answered" };
 		}
 
 		case "shutdown": {

@@ -56,6 +56,9 @@ const help: InlineExtension = {
 				`  ${theme.fg("accent", "# <note>")}  ${theme.fg("dim", "save a quick note to persistent memory")}`,
 			);
 			lines.push(
+				`  ${theme.fg("accent", "← ←")}       ${theme.fg("dim", "agent view: background sessions (on an empty prompt)")}`,
+			);
+			lines.push(
 				`  ${theme.fg("accent", "Alt+M")}     ${theme.fg("dim", "cycle permission modes — /hotkeys lists every shortcut")}`,
 			);
 
@@ -104,6 +107,7 @@ const help: InlineExtension = {
 				}));
 				for (const command of registered) {
 					if (command.source !== "extension" || builtinNames.has(command.name)) continue;
+					if (command.name === "agent-view") continue; // ext/agent-view: opened with ←←, not typed
 					commands.push({ name: command.name, description: command.description ?? "" });
 				}
 

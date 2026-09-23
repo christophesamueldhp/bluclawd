@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { handleIpcRequest, setShutdownHook, shutdownRefusal } from "../daemon/handler.ts";
-import { OrchestratorClient } from "../ext/fleet/orchestrator-client.ts";
+import { OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
 
 describe("daemon `shutdown` request", () => {
 	afterEach(() => setShutdownHook(undefined));

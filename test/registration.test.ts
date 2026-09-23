@@ -24,7 +24,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	"background-bash": { commands: ["tasks"], tools: ["bash_output", "kill_bash"], shortcuts: 0, events: 0 },
 	branding: { commands: ["theme"], tools: [], shortcuts: 0, events: 1 },
 	diagnostics: { commands: ["context", "status"], tools: [], shortcuts: 0, events: 0 },
-	fleet: { commands: ["fleet"], tools: [], shortcuts: 0, events: 7 },
+	"agent-view": { commands: ["agent-view"], tools: [], shortcuts: 0, events: 7 },
 	help: { commands: ["help"], tools: [], shortcuts: 0, events: 0 },
 	plugin: { commands: ["plugin"], tools: [], shortcuts: 0, events: 0 },
 	shell: { commands: ["bash-mode", "stash"], tools: [], shortcuts: 2, events: 2 },

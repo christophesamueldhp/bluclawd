@@ -4,7 +4,9 @@ import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentActivity, InstanceStatus } from "./fleet-status.ts";
+
+export type AgentActivity = "idle" | "working" | "awaiting_input";
+export type InstanceStatus = "starting" | "online" | "stopping" | "stopped" | "error";
 
 export interface InstanceSummary {
 	id: string;
@@ -17,8 +19,26 @@ export interface InstanceSummary {
 	lastSeenAt?: string;
 	activity?: AgentActivity;
 	external?: boolean;
-	/** Known for on-disk sessions only (from pi's session index); live daemon rows omit it. */
-	messageCount?: number;
+	detail?: string;
+	outcome?: "done" | "failed" | "stopped";
+	/** A `needs input:` line the session ended its last turn with. */
+	question?: string;
+	turns?: number;
+	finishedAt?: string;
+	pinned?: boolean;
+	sortOrder?: number;
+	/** The blocking prompt a live session is waiting on. */
+	needs?: PendingNeeds;
+}
+
+/** Mirror of daemon/session-state.ts SessionNeeds. */
+export interface PendingNeeds {
+	requestId: string;
+	method: "select" | "confirm" | "input" | "editor";
+	title: string;
+	message?: string;
+	options?: string[];
+	since?: string;
 }
 
 export interface RegisterInput {
@@ -37,7 +57,11 @@ type Request =
 	| { type: "rpc"; instanceId: string; command: unknown }
 	| { type: "register"; instance: RegisterInput }
 	| { type: "unregister"; instanceId: string }
-	| { type: "shutdown" };
+	| { type: "shutdown" }
+	| { type: "delete"; instanceId: string }
+	| { type: "rename"; instanceId: string; name: string }
+	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
+	| { type: "answer"; instanceId: string; response: Record<string, unknown> };
 
 interface AnyResponse {
 	type: string;
@@ -54,7 +78,7 @@ interface AnyResponse {
  *
  * Upstream v0.82.0 renamed the daemon package orchestrator → server, and with it the
  * env var, the directory and the socket filename. This mirror has to move in lockstep
- * or FleetView silently fails to find a running daemon.
+ * or agent view silently fails to find a running daemon.
  */
 export function orchestratorSocketPath(): string {
 	const envDir = process.env.PI_SERVER_DIR;
@@ -231,12 +255,35 @@ export class OrchestratorClient {
 	}
 
 	async stop(instanceId: string): Promise<void> {
-		await this.request({ type: "stop", instanceId });
+		await this.request({ type: "stop", instanceId }, 10_000);
 	}
 
-	/** Send a follow-up message to a running session (reply without jumping into it). */
-	async reply(instanceId: string, message: string): Promise<void> {
-		await this.request({ type: "rpc", instanceId, command: { type: "follow_up", message } });
+	/** Send a message to a running session without attaching: a new prompt when it is idle, a
+	 *  follow-up queued behind the current run when it is working. */
+	async reply(instanceId: string, message: string, working: boolean): Promise<void> {
+		const command = working ? { type: "follow_up", message } : { type: "prompt", message };
+		await this.request({ type: "rpc", instanceId, command });
+	}
+
+	async delete(instanceId: string): Promise<void> {
+		await this.request({ type: "delete", instanceId }, 10_000);
+	}
+
+	async rename(instanceId: string, name: string): Promise<void> {
+		await this.request({ type: "rename", instanceId, name });
+	}
+
+	async setMeta(instanceId: string, meta: { pinned?: boolean; sortOrder?: number }): Promise<void> {
+		await this.request({ type: "meta", instanceId, ...meta });
+	}
+
+	/** Answer a pending prompt: `{ value }`, `{ confirmed }` or `{ cancelled: true }`. */
+	async answer(instanceId: string, requestId: string, answer: Record<string, unknown>): Promise<void> {
+		await this.request({
+			type: "answer",
+			instanceId,
+			response: { type: "extension_ui_response", id: requestId, ...answer },
+		});
 	}
 
 	/** Register/heartbeat this foreground session as an external instance. */

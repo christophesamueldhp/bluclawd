@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AgentActivity } from "./fleet-status.ts";
-import type { OrchestratorClient, RegisterInput } from "./orchestrator-client.ts";
+import type { AgentActivity, OrchestratorClient, RegisterInput } from "./orchestrator-client.ts";
 
 export interface SelfSessionInfo {
 	cwd: string;
@@ -45,7 +44,7 @@ export function deriveLabel(name: string | undefined, entries: EntryLike[]): str
 }
 
 /** Blocking prompt kinds, as the daemon's activity reducer sees them: a `custom` overlay
- *  (FleetView itself, /diff, …) is a view, not a question waiting on the user. */
+ *  (agent view itself, /diff, …) is a view, not a question waiting on the user. */
 const BLOCKING_PROMPT_KINDS: ReadonlySet<string> = new Set(["select", "confirm", "input", "editor"]);
 
 /**
@@ -84,7 +83,7 @@ export class ForegroundActivity {
  * 3000ms, not 5000ms. The daemon reaps an external registration after 15s
  * (`EXTERNAL_TTL_MS`, packages/server/src/supervisor.ts) — at the old 5000ms interval, exactly
  * 3 consecutive missed heartbeats (each a `register()` call that times out at 1000ms under
- * load) landed precisely ON that boundary with zero margin: a poll from ANY other FleetView
+ * load) landed precisely ON that boundary with zero margin: a poll from ANY other agent view
  * arriving microseconds later would reap the row (IMPROVEMENT-PLAN.md §5.2). At 3000ms, 4
  * consecutive misses (12s) are still safely inside the TTL — reaping now needs a 5th
  * consecutive failure, and the boundary no longer sits on an exact multiple of the interval.
@@ -95,10 +94,10 @@ const HEARTBEAT_MS = 3000;
 
 /**
  * Registers the foreground interactive session with the orchestrator daemon as an
- * external instance and heartbeats it, so it appears in every FleetView. Best-effort:
+ * external instance and heartbeats it, so it appears in every agent view. Best-effort:
  * if the daemon is down a heartbeat silently no-ops and re-registers once one exists.
  */
-export class FleetSelfRegistration {
+export class SelfRegistration {
 	readonly id = randomUUID();
 	private readonly client: OrchestratorClient;
 	private readonly getInfo: () => SelfSessionInfo;

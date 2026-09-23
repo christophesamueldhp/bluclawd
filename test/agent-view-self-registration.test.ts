@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { OrchestratorClient, RegisterInput } from "../ext/fleet/orchestrator-client.ts";
-import { deriveLabel, FleetSelfRegistration, ForegroundActivity } from "../ext/fleet/self-registration.ts";
+import type { OrchestratorClient, RegisterInput } from "../ext/agent-view/orchestrator-client.ts";
+import { deriveLabel, ForegroundActivity, SelfRegistration } from "../ext/agent-view/self-registration.ts";
 
 describe("ForegroundActivity (what the roster shows for THIS window)", () => {
 	it("starts idle, works during an agent run, and settles back to idle", () => {
@@ -24,7 +24,7 @@ describe("ForegroundActivity (what the roster shows for THIS window)", () => {
 		expect(fg.apply({ type: "ui_prompt_end", kind: "select" })).toBe("idle");
 	});
 
-	it("a 'custom' overlay (FleetView itself, /diff, …) is not a question for the user", () => {
+	it("a 'custom' overlay (agent view itself, /diff, …) is not a question for the user", () => {
 		const fg = new ForegroundActivity();
 		fg.apply({ type: "agent_start" });
 		expect(fg.apply({ type: "ui_prompt_start", kind: "custom" })).toBe("working");
@@ -64,7 +64,7 @@ describe("deriveLabel (roster title for the foreground session)", () => {
 	});
 });
 
-describe("FleetSelfRegistration heartbeats", () => {
+describe("SelfRegistration heartbeats", () => {
 	function fakeClient() {
 		const calls: RegisterInput[] = [];
 		const client = {
@@ -78,7 +78,7 @@ describe("FleetSelfRegistration heartbeats", () => {
 
 	it("re-registers immediately with the new activity when it changes", async () => {
 		const { client, calls } = fakeClient();
-		const reg = new FleetSelfRegistration(client, () => ({ cwd: "/p", label: "deploy" }));
+		const reg = new SelfRegistration(client, () => ({ cwd: "/p", label: "deploy" }));
 		reg.setActivity("working");
 		await new Promise((r) => setTimeout(r, 0));
 		expect(calls.at(-1)?.activity).toBe("working");

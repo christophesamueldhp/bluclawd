@@ -16,6 +16,13 @@ import {
 } from "./activity.ts";
 import { radiusPresence } from "./radius.ts";
 import { createRpcProcessInstance, type RpcProcessInstance } from "./rpc-process.ts";
+import {
+	needsFromRequest,
+	readSessionTail,
+	SENTINEL_INSTRUCTIONS,
+	type SessionNeeds,
+	SessionStateTracker,
+} from "./session-state.ts";
 import { getInstance, loadInstances, removeInstance, saveInstances, upsertInstance } from "./storage.ts";
 import type { InstanceRecord, InstanceStatus } from "./types.ts";
 
@@ -30,7 +37,9 @@ interface LiveInstance {
 	resources: LiveInstanceResources;
 	subscribers: Set<AgentSessionEventListener>;
 	activityState: ActivityState;
+	tracker: SessionStateTracker;
 	pendingUiRequest?: RpcExtensionUIRequest;
+	pendingSince?: string;
 	onUiRequest?: (request: RpcExtensionUIRequest) => void;
 	unsubscribeEvents?: () => void;
 	unsubscribeExit?: () => void;
@@ -123,6 +132,9 @@ export class ServerSupervisor {
 		live.resources.rpcProcess = rpcProcess;
 		live.unsubscribeEvents = rpcProcess.onEvent((event) => {
 			live.activityState = reduceActivity(live.activityState, { kind: "agent_event", type: event.type });
+			live.tracker.apply(event as Parameters<SessionStateTracker["apply"]>[0]);
+			// Persisted at run boundaries only: every streamed delta would rewrite instances.json.
+			if (event.type === "agent_start" || event.type === "agent_settled") this.persistTracker(live);
 			// The agent resumed/settled, so any prompt it was blocked on has been resolved (a blocked
 			// agent emits neither). Clear it so it isn't replayed to a late-attaching viewer.
 			if (live.pendingUiRequest && (event.type === "agent_settled" || event.type === "turn_start")) {
@@ -134,7 +146,7 @@ export class ServerSupervisor {
 				try {
 					subscriber(event);
 				} catch (error) {
-					console.error(`FleetView subscriber threw on ${event.type}: ${String(error)}`);
+					console.error(`Agent view subscriber threw on ${event.type}: ${String(error)}`);
 				}
 			}
 		});
@@ -149,11 +161,12 @@ export class ServerSupervisor {
 					id: request.id,
 				});
 				live.pendingUiRequest = request;
+				live.pendingSince = new Date().toISOString();
 			}
 			try {
 				live.onUiRequest?.(request);
 			} catch (error) {
-				console.error(`FleetView ui-request handler threw: ${String(error)}`);
+				console.error(`Agent view ui-request handler threw: ${String(error)}`);
 			}
 		});
 	}
@@ -165,7 +178,14 @@ export class ServerSupervisor {
 		if (live.record.status === "stopping" || live.record.status === "stopped") {
 			return;
 		}
-		this.setStatus(live, "error");
+		// The row stays (agent view lists it as Failed until deleted); its .jsonl resumes it.
+		live.record = {
+			...live.record,
+			status: "stopped",
+			outcome: "failed",
+			detail: live.tracker.detail ?? "the session process exited unexpectedly",
+		};
+		this.setStatus(live, "stopped");
 		this.clearBindings(live);
 		live.resources.rpcProcess = undefined;
 		if (live.resources.radiusPiId) {
@@ -177,10 +197,17 @@ export class ServerSupervisor {
 			}
 		}
 		this.liveInstances.delete(live.record.id);
-		// Don't leave an unstoppable "error" ghost in instances.json: it's no longer in
-		// liveInstances (so stopInstance can't remove it) and would accumulate forever. The
-		// session's .jsonl survives on disk, so it still appears in the resumable saved list.
-		removeInstance(live.record.id);
+	}
+
+	private persistTracker(live: LiveInstance): void {
+		const { tracker } = live;
+		this.updateRecord(live, {
+			detail: tracker.detail,
+			outcome: tracker.outcome,
+			question: tracker.needsText,
+			turns: tracker.turns,
+			finishedAt: tracker.finishedAt,
+		});
 	}
 
 	private getRpcProcess(live: LiveInstance): RpcProcessInstance | undefined {
@@ -327,11 +354,18 @@ export class ServerSupervisor {
 
 	async recoverAfterRestart(): Promise<void> {
 		const recoveredAt = new Date().toISOString();
-		const instances = loadInstances().map((instance) => ({
-			...instance,
-			status: instance.status === "online" || instance.status === "starting" ? "stopped" : instance.status,
-			lastSeenAt: recoveredAt,
-		}));
+		const instances = loadInstances().map((instance) => {
+			if (instance.status !== "online" && instance.status !== "starting" && instance.status !== "stopping") {
+				return instance;
+			}
+			// It ended while the daemon was down: keep its row, resumable from its .jsonl.
+			return {
+				...instance,
+				status: "stopped" as const,
+				outcome: instance.outcome ?? "stopped",
+				lastSeenAt: recoveredAt,
+			};
+		});
 		for (const instance of instances) {
 			await radiusPresence.disconnectPi(instance);
 		}
@@ -340,6 +374,13 @@ export class ServerSupervisor {
 
 	listInstances(): InstanceRecord[] {
 		return loadInstances().map(cloneInstance);
+	}
+
+	/** The blocking question a live session is waiting on, as the peek panel renders it. */
+	getPendingNeeds(instanceId: string): SessionNeeds | undefined {
+		const live = this.liveInstances.get(instanceId);
+		const needs = live?.pendingUiRequest ? needsFromRequest(live.pendingUiRequest) : undefined;
+		return needs ? { ...needs, since: live?.pendingSince } : undefined;
 	}
 
 	getInstance(instanceId: string): InstanceRecord | undefined {
@@ -351,6 +392,12 @@ export class ServerSupervisor {
 		return stored ? cloneInstance(stored) : undefined;
 	}
 
+	/**
+	 * Start a background session. Given the `.jsonl` of a row the daemon already knows, the SAME
+	 * row comes back to life (id, name, pin, age) instead of a twin appearing; given one a live
+	 * child already writes to, that child is returned — two writers on one session file would
+	 * corrupt it.
+	 */
 	async spawnInstance(options: {
 		cwd: string;
 		label?: string;
@@ -358,32 +405,53 @@ export class ServerSupervisor {
 		provider?: string;
 		model?: string;
 	}): Promise<InstanceRecord> {
+		if (options.sessionFile) {
+			for (const live of this.liveInstances.values()) {
+				if (live.record.sessionFile === options.sessionFile) return cloneInstance(live.record);
+			}
+		}
 		const now = new Date().toISOString();
+		const previous = options.sessionFile
+			? loadInstances().find((instance) => instance.sessionFile === options.sessionFile)
+			: undefined;
+		// A session with history but no row yet: pick up where its transcript left off.
+		const tail = !previous && options.sessionFile ? readSessionTail(options.sessionFile) : undefined;
 		const live: LiveInstance = {
 			record: {
-				id: randomUUID(),
+				...previous,
+				id: previous?.id ?? randomUUID(),
 				status: "starting",
-				cwd: options.cwd,
-				createdAt: now,
+				cwd: previous?.cwd ?? options.cwd,
+				createdAt: previous?.createdAt ?? now,
 				lastSeenAt: now,
-				label: options.label,
+				label: previous?.label ?? options.label,
+				detail: previous?.detail ?? tail?.detail,
+				outcome: previous ? undefined : tail?.outcome,
+				question: previous ? undefined : tail?.question,
+				turns: previous?.turns ?? tail?.turns,
 			},
 			resources: {},
 			subscribers: new Set(),
 			activityState: INITIAL_ACTIVITY,
+			tracker: new SessionStateTracker({
+				detail: previous?.detail ?? tail?.detail,
+				outcome: previous ? undefined : tail?.outcome,
+				turns: previous?.turns ?? tail?.turns,
+			}),
 		};
 		this.liveInstances.set(live.record.id, live);
 		upsertInstance(live.record);
 
 		try {
 			// Spawned background sessions ask before running tools, so they can surface a
-			// blocking prompt (FleetView "Needs input") that a live-attach viewer answers.
+			// blocking prompt (agent view "Needs input") that the peek panel answers.
 			const rpcProcess = createRpcProcessInstance({
-				cwd: options.cwd,
+				cwd: live.record.cwd,
 				env: { ...process.env, PI_PERMISSION_MODE: "ask" },
 				sessionFile: options.sessionFile,
 				provider: options.provider,
 				model: options.model,
+				appendSystemPrompt: SENTINEL_INSTRUCTIONS,
 			});
 			this.bindRpcProcess(live, rpcProcess);
 			await this.syncInstanceRecord(live);
@@ -396,25 +464,77 @@ export class ServerSupervisor {
 		}
 	}
 
+	/** Stop the process; the row stays (Stopped, or Done/Failed if the run had already ended). */
 	async stopInstance(instanceId: string): Promise<InstanceRecord | undefined> {
 		const live = this.liveInstances.get(instanceId);
 		if (!live) {
-			return undefined;
+			return this.getInstance(instanceId);
 		}
 
 		this.setStatus(live, "stopping");
 		try {
 			await this.cleanupAcquiredResources(live);
 		} finally {
+			const working = live.activityState.activity !== "idle";
 			live.record = {
 				...live.record,
 				status: "stopped",
+				outcome: working ? "stopped" : (live.tracker.outcome ?? "stopped"),
 				lastSeenAt: new Date().toISOString(),
 			};
 			this.liveInstances.delete(instanceId);
-			removeInstance(instanceId);
+			upsertInstance(live.record);
 		}
 		return cloneInstance(live.record);
+	}
+
+	/** Remove the row. The session's .jsonl stays on disk, resumable with /resume. */
+	async deleteInstance(instanceId: string): Promise<boolean> {
+		const known = this.getInstance(instanceId);
+		if (!known) return false;
+		await this.stopInstance(instanceId);
+		removeInstance(instanceId);
+		return true;
+	}
+
+	async renameInstance(instanceId: string, name: string): Promise<InstanceRecord | undefined> {
+		const live = this.liveInstances.get(instanceId);
+		if (live) {
+			this.updateRecord(live, { label: name });
+			await live.resources.rpcProcess?.send({ type: "set_session_name", name }).catch(() => undefined);
+			return cloneInstance(live.record);
+		}
+		return this.updateStored(instanceId, { label: name });
+	}
+
+	/** Agent-view-only fields: pin and manual order. */
+	setInstanceMeta(instanceId: string, meta: { pinned?: boolean; sortOrder?: number }): InstanceRecord | undefined {
+		const live = this.liveInstances.get(instanceId);
+		if (live) {
+			live.record = { ...live.record, ...meta };
+			upsertInstance(live.record);
+			return cloneInstance(live.record);
+		}
+		return this.updateStored(instanceId, meta);
+	}
+
+	private updateStored(instanceId: string, updates: Partial<InstanceRecord>): InstanceRecord | undefined {
+		const stored = getInstance(instanceId);
+		if (!stored) return undefined;
+		const next = { ...stored, ...updates };
+		upsertInstance(next);
+		return next;
+	}
+
+	/** Answer the blocking prompt a session is waiting on, without attaching to it. */
+	answer(instanceId: string, response: RpcExtensionUIResponse): boolean {
+		const live = this.liveInstances.get(instanceId);
+		const rpcProcess = live ? this.getRpcProcess(live) : undefined;
+		if (!live || !rpcProcess || live.pendingUiRequest?.id !== response.id) return false;
+		live.activityState = reduceActivity(live.activityState, { kind: "ui_response", id: response.id });
+		live.pendingUiRequest = undefined;
+		rpcProcess.handleUiResponse(response);
+		return true;
 	}
 
 	async handleRpc(instanceId: string, command: RpcCommand): Promise<RpcResponse | undefined> {

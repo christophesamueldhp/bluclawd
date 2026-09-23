@@ -1,5 +1,5 @@
 /**
- * Records the FleetView daemon stores and exchanges.
+ * Records the agent view daemon stores and exchanges.
  *
  * These lived in pi's `packages/server/src/types.ts` on the fork branch, added
  * there because the daemon modules did. They are self-contained — nothing here
@@ -30,4 +30,13 @@ export interface InstanceRecord {
 	sessionId?: string;
 	sessionFile?: string;
 	radiusPiId?: string;
+	/** Agent-view row state (daemon/session-state.ts), persisted so a row survives a restart. */
+	detail?: string;
+	outcome?: "done" | "failed" | "stopped";
+	/** A `needs input:` line the session ended its last turn with. */
+	question?: string;
+	turns?: number;
+	finishedAt?: string;
+	pinned?: boolean;
+	sortOrder?: number;
 }

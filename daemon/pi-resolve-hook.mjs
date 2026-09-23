@@ -1,5 +1,5 @@
 /**
- * `--import`ed into the daemon process by FleetView's auto-start.
+ * `--import`ed into the daemon process by agent view's auto-start.
  *
  * pi loads this package's extensions through jiti and aliases every
  * `@earendil-works/*` import to its own bundled copies, so the installed package

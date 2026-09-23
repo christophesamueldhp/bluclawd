@@ -1,5 +1,5 @@
 /**
- * The FleetView daemon's public surface.
+ * The agent view daemon's public surface.
  *
  * On the fork branch these modules lived inside pi's `packages/server` and were
  * re-exported from its index. They are bluclawd's own code, so here they live in

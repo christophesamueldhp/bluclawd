@@ -376,7 +376,7 @@ const defaultCreateSession: CreateSession = async (options) =>
 
 /**
  * Where children's transcripts go: under the agent dir, keyed by the parent
- * session — outside pi's own session dir, so `/fleet` and the resume picker do
+ * session — outside pi's own session dir, so `/agent-view` and the resume picker do
  * not list them, and surviving the call so a child can be resumed and its
  * transcript read later.
  */
@@ -615,7 +615,7 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<SingleResul
 
 	if (opts.fork && !opts.resume) {
 		// Opened with the CHILD's session dir, so the branch is written there — not into
-		// the parent's session dir, where /fleet and the resume picker would list it.
+		// the parent's session dir, where /agent-view and the resume picker would list it.
 		try {
 			sessionManager = SessionManager.open(opts.fork.sessionFile, opts.sessionDir ?? childSessionDir(ctx), cwd);
 			sessionManager.createBranchedSession(opts.fork.leafId);
