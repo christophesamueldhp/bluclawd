@@ -197,10 +197,33 @@ describe("what don't ask again grants", () => {
 });
 
 describe("A6: tools no rule verb names", () => {
-	it("runs background-bash control tools without a prompt, like the task control tools", () => {
-		for (const tool of ["bash_output", "kill_bash"]) {
-			expect(verdict(tool, { id: "bash_1" }, cfg({ mode: "ask" })).outcome).toBe("allow");
+	it("runs the task control tools on a background shell without a prompt", () => {
+		for (const tool of ["task_output", "task_stop"]) {
+			expect(verdict(tool, { task_id: "bash_1" }, cfg({ mode: "ask" })).outcome).toBe("allow");
 		}
+	});
+
+	it("judges a WebSocket monitor as a fetch of its URL", () => {
+		const ws = { ws: { url: "wss://evil.example/stream" }, description: "d" };
+		const rules = { deny: ["WebFetch(domain:evil.example)"] };
+		expect(verdict("monitor", ws, cfg({ rules })).outcome).toBe("block");
+		expect(verdict("monitor", ws, cfg({ mode: "ask" })).outcome).toBe("prompt");
+		expect(
+			verdict("monitor", ws, cfg({ rules: { allow: ["WebFetch(domain:evil.example)"] }, mode: "ask" })).outcome,
+		).toBe("allow");
+		// A strict-schema model fills ws with an empty url beside a command: that is a
+		// command monitor, and bash rules must still catch it.
+		expect(
+			verdict(
+				"monitor",
+				{ command: "ls", ws: { url: "", protocols: [] }, description: "d" },
+				cfg({ rules: { deny: ["Bash(ls)"] } }),
+			).outcome,
+		).toBe("block");
+		// A command monitor is still bash.
+		expect(
+			verdict("monitor", { command: "ls", description: "d" }, cfg({ rules: { deny: ["Bash(ls)"] } })).outcome,
+		).toBe("block");
 	});
 
 	it("treats local reads of stored web content as reads", () => {

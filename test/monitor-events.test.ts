@@ -3,12 +3,17 @@ import type { BackgroundJobInfo } from "../ext/_shared/background-bash.ts";
 import { splitLines } from "../ext/_shared/lines.ts";
 import {
 	EventBatcher,
+	eventText,
+	formatDuration,
 	monitorEndMessage,
+	monitorEndSummary,
 	monitorEventMessage,
-	RateLimiter,
 	shouldNotifyExit,
+	TokenBucket,
 	tailOutput,
 	taskExitMessage,
+	taskExitSummary,
+	taskStallMessage,
 } from "../ext/_shared/monitor-events.ts";
 
 describe("splitLines", () => {
@@ -91,21 +96,19 @@ describe("EventBatcher", () => {
 	});
 });
 
-describe("RateLimiter", () => {
-	it("trips on the event past the limit within the window", () => {
-		const limiter = new RateLimiter({ max: 3, windowMs: 1000 });
-		expect(limiter.record(0)).toBe(false);
-		expect(limiter.record(100)).toBe(false);
-		expect(limiter.record(200)).toBe(false);
-		expect(limiter.record(300)).toBe(true);
+describe("TokenBucket", () => {
+	it("lets a burst of `capacity` through, then one per refill interval", () => {
+		const bucket = new TokenBucket({ capacity: 3, refillMs: 1000 });
+		expect([0, 0, 0, 0].map((t) => bucket.take(t))).toEqual([true, true, true, false]);
+		expect(bucket.take(500)).toBe(false);
+		expect(bucket.take(1000)).toBe(true);
+		expect(bucket.take(1000)).toBe(false);
 	});
 
-	it("forgets events that left the window", () => {
-		const limiter = new RateLimiter({ max: 3, windowMs: 1000 });
-		limiter.record(0);
-		limiter.record(100);
-		limiter.record(200);
-		expect(limiter.record(1150)).toBe(false);
+	it("never refills past its capacity", () => {
+		const bucket = new TokenBucket({ capacity: 2, refillMs: 10 });
+		bucket.take(0);
+		expect([10_000, 10_000, 10_000].map((t) => bucket.take(t))).toEqual([true, true, false]);
 	});
 });
 
@@ -136,7 +139,7 @@ describe("tailOutput", () => {
 });
 
 const monitorJob: BackgroundJobInfo = {
-	id: "bash_3",
+	id: "b0000003x",
 	command: "tail -f x.log",
 	description: "errors in deploy.log",
 	cwd: "/",
@@ -144,58 +147,132 @@ const monitorJob: BackgroundJobInfo = {
 	killed: false,
 	kind: "monitor",
 	events: 0,
+	outputFile: "/tmp/claude/t/b0000003x.output",
 };
 
 describe("message builders", () => {
-	it("monitorEventMessage is self-describing and lists the lines", () => {
-		const msg = monitorEventMessage(monitorJob, { lines: ["E1", "E2"], more: 0 });
+	it("monitorEventMessage is Claude Code's task-notification with the event", () => {
+		const msg = monitorEventMessage(monitorJob, ["E1", "E2"]);
 		expect(msg.customType).toBe("bluclawd:monitor");
-		expect(msg.content).toBe("[monitor bash_3 · errors in deploy.log]\nE1\nE2");
-		expect(msg.details).toEqual({ id: "bash_3", description: "errors in deploy.log", lines: ["E1", "E2"], more: 0 });
+		expect(msg.content).toBe(
+			[
+				"<task-notification>",
+				"<task-id>b0000003x</task-id>",
+				'<summary>Monitor event: "errors in deploy.log"</summary>',
+				"<event>E1",
+				"E2</event>",
+				"</task-notification>",
+			].join("\n"),
+		);
+		expect(msg.details).toEqual({ id: "b0000003x", description: "errors in deploy.log", lines: ["E1", "E2"] });
 	});
 
-	it("monitorEventMessage notes overflow", () => {
-		const msg = monitorEventMessage(monitorJob, { lines: ["E1"], more: 7 });
-		expect(msg.content).toContain("…and 7 more lines (read them with bash_output)");
+	it("caps a line at 500 characters and an event at 3000", () => {
+		const long = eventText(["x".repeat(600)]);
+		expect(long).toBe(`${"x".repeat(500)}...(truncated)`);
+		const many = eventText(Array.from({ length: 20 }, () => "y".repeat(400)));
+		expect(many.length).toBe(3000 + "...(truncated)".length);
 	});
 
-	it("monitorEndMessage carries leftover lines and the terminal status", () => {
-		const ended = { ...monitorJob, exit: { code: 0, at: 1 } };
-		const msg = monitorEndMessage(ended, { lines: ["last"], more: 0 });
-		expect(msg.content).toBe("[monitor bash_3 · errors in deploy.log]\nlast\nexited with code 0");
-		expect(msg.details).toMatchObject({ end: "exited with code 0", status: "success" });
+	it("monitorEndMessage says how the stream ended, with leftover lines as its event", () => {
+		const ended = { ...monitorJob, events: 2, exit: { code: 0, at: 1 } };
+		const msg = monitorEndMessage(ended, ["last"]);
+		expect(msg.content).toContain("<status>completed</status>");
+		expect(msg.content).toContain("<output-file>/tmp/claude/t/b0000003x.output</output-file>");
+		expect(msg.content).toContain(
+			'<summary>Monitor "errors in deploy.log" stream ended</summary>\n<event>last</event>\n</task-notification>',
+		);
+		expect(msg.details).toMatchObject({ end: 'Monitor "errors in deploy.log" stream ended', status: "success" });
 	});
 
-	it("monitorEndMessage colours a rate-limit stop as warning and an error as error", () => {
-		const stopped = { ...monitorJob, killed: true, stopReason: "too many events", exit: { code: null, at: 1 } };
-		expect(monitorEndMessage(stopped, { lines: [], more: 0 }).details).toMatchObject({ status: "warning" });
-		const failed = { ...monitorJob, exit: { code: 2, at: 1 } };
-		expect(monitorEndMessage(failed, { lines: [], more: 0 }).details).toMatchObject({ status: "error" });
+	it("names a silent end, a failed script and a stop", () => {
+		expect(monitorEndSummary({ ...monitorJob, exit: { code: 0, at: 1 } })).toBe(
+			'Monitor "errors in deploy.log" ended without producing output (exit 0)',
+		);
+		expect(monitorEndSummary({ ...monitorJob, events: 1, exit: { code: 2, at: 1 } })).toBe(
+			'Monitor "errors in deploy.log" script failed (exit 2)',
+		);
+		expect(monitorEndSummary({ ...monitorJob, killed: true, exit: { code: null, at: 1 } })).toBe(
+			'Monitor "errors in deploy.log" stopped',
+		);
 	});
 
-	it("taskExitMessage names the job, status, command and tail", () => {
+	it("sends a registry stop's notice as the event", () => {
+		const stopped = {
+			...monitorJob,
+			killed: true,
+			stopReason: "[Monitor stopped — too much output]",
+			exit: { code: null, at: 1 },
+		};
+		const msg = monitorEndMessage(stopped, []);
+		expect(msg.content).toContain("<status>killed</status>");
+		expect(msg.content).toContain("<event>[Monitor stopped — too much output]</event>");
+	});
+
+	it("taskExitMessage is Claude Code's notification for a finished command", () => {
 		const job: BackgroundJobInfo = {
 			...monitorJob,
-			id: "bash_2",
+			id: "b0000002x",
 			kind: "job",
 			description: "build",
 			command: "make",
 			exit: { code: 1, at: 1 },
 		};
-		const msg = taskExitMessage(job, "err: boom");
+		const msg = taskExitMessage(job, "toolu_1");
 		expect(msg.customType).toBe("bluclawd:task-exit");
-		expect(msg.content).toBe("[task bash_2 · build] exited with code 1 — make\nerr: boom");
+		expect(msg.content).toBe(
+			[
+				"<task-notification>",
+				"<task-id>b0000002x</task-id>",
+				"<tool-use-id>toolu_1</tool-use-id>",
+				"<output-file>/tmp/claude/t/b0000003x.output</output-file>",
+				"<status>failed</status>",
+				'<summary>Background command "build" failed with exit code 1</summary>',
+				"</task-notification>",
+			].join("\n"),
+		);
 		expect(msg.details).toMatchObject({ status: "error" });
 	});
 
-	it("does not repeat the command in a task-exit head that has no description", () => {
-		const job = { ...monitorJob, id: "bash_2", command: "make", description: undefined, exit: { code: 1, at: 1 } };
-		expect(taskExitMessage(job, "").content).toBe("[task bash_2 · make] exited with code 1");
+	it("names completion, a stop, and a stop the user made (without the file)", () => {
+		const job: BackgroundJobInfo = { ...monitorJob, kind: "job", description: undefined, command: "make" };
+		expect(taskExitSummary({ ...job, exit: { code: 0, at: 1 } })).toBe(
+			'Background command "make" completed (exit code 0)',
+		);
+		expect(taskExitSummary({ ...job, killed: true, exit: { code: null, at: 1 } })).toBe(
+			'Background command "make" was stopped',
+		);
+		const byUser = taskExitMessage({ ...job, killed: true, stoppedByUser: true, exit: { code: null, at: 1 } });
+		expect(byUser.content).toContain('<summary>Task "make" was stopped by the user</summary>');
+		expect(byUser.content).toContain("<status>killed</status>");
+		expect(byUser.content).not.toContain("<output-file>");
 	});
 
-	it("falls back to the command when there is no description", () => {
-		const job = { ...monitorJob, description: undefined };
-		expect(monitorEventMessage(job, { lines: ["x"], more: 0 }).content).toBe("[monitor bash_3 · tail -f x.log]\nx");
+	it("taskStallMessage is Claude Code's notice with the tail after the envelope and no status", () => {
+		const job: BackgroundJobInfo = { ...monitorJob, kind: "job", description: "npm init", command: "npm init" };
+		const msg = taskStallMessage(job, "name: (x)\nIs this OK? (yes/no) ", "toolu_2");
+		expect(msg.content).toBe(
+			[
+				"<task-notification>",
+				"<task-id>b0000003x</task-id>",
+				"<tool-use-id>toolu_2</tool-use-id>",
+				"<output-file>/tmp/claude/t/b0000003x.output</output-file>",
+				'<summary>Background command "npm init" appears to be waiting for interactive input</summary>',
+				"</task-notification>",
+				"Last output:",
+				"name: (x)",
+				"Is this OK? (yes/no)",
+				"",
+				"The command is likely blocked on an interactive prompt. Stop this task and re-run with piped input (e.g., `echo y | command`) or a non-interactive flag if one exists.",
+			].join("\n"),
+		);
+		expect(msg.details).toMatchObject({ status: "warning" });
+	});
+
+	it("formats durations as the expiry notice names them", () => {
+		expect(formatDuration(300_000)).toBe("5m");
+		expect(formatDuration(90_000)).toBe("1m 30s");
+		expect(formatDuration(5_000)).toBe("5s");
 	});
 });
 
@@ -214,8 +291,13 @@ describe("shouldNotifyExit", () => {
 		expect(shouldNotifyExit({ ...base, exit: { code: null, error: "spawn ENOENT", at: 1 } })).toBe(true);
 		expect(shouldNotifyExit({ ...base, exit: { code: null, error: "timeout:300", at: 1 } })).toBe(true);
 	});
-	it("stays quiet for a kill the model asked for", () => {
+	it("stays quiet for a kill the model asked for, and for an exit task_output was waiting on", () => {
 		expect(shouldNotifyExit({ ...base, killed: true, exit: { code: null, at: 1 } })).toBe(false);
+		expect(shouldNotifyExit({ ...base, awaited: true, exit: { code: 0, at: 1 } })).toBe(false);
+	});
+
+	it("notifies a stop the user made from /tasks", () => {
+		expect(shouldNotifyExit({ ...base, killed: true, stoppedByUser: true, exit: { code: null, at: 1 } })).toBe(true);
 	});
 	it("still notifies a registry-initiated stop", () => {
 		expect(

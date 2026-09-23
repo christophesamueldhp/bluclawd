@@ -326,7 +326,7 @@ describe("task tool", () => {
 				undefined,
 				ctxFor(cwd),
 			);
-			expect(text(r)).toMatch(/^Started background subagent sa-\d+ \(explore\)/);
+			expect(text(r)).toMatch(/^Started background subagent a[0-9a-f]{16} \(explore\)/);
 			await tick();
 			expect(h.sent).toHaveLength(1);
 			const { message, options } = h.sent[0];
@@ -396,6 +396,35 @@ describe("task tool", () => {
 			expect(seen?.signal?.aborted).toBe(true);
 			expect(h.sent).toHaveLength(0);
 			release?.();
+		});
+
+		it("waits on shutdown for aborted runs to finish, so their worktrees are cleaned up", async () => {
+			let finished = false;
+			const h = harness(async (opts) => {
+				await new Promise<void>((resolve) => opts.signal?.addEventListener("abort", () => resolve()));
+				// The engine's worktree removal, after the abort.
+				await new Promise((r) => setTimeout(r, 20));
+				finished = true;
+				return {
+					agent: opts.def.name,
+					agentSource: "user",
+					task: opts.task,
+					status: "failed",
+					messages: [],
+					stderr: "",
+					usage: emptyUsage(),
+					stopReason: "aborted",
+				};
+			});
+			await h.tool.execute(
+				"1",
+				{ agent: "explore", task: "t", run_in_background: true },
+				undefined,
+				undefined,
+				ctxFor(cwd),
+			);
+			await h.handlers.session_shutdown({}, ctxFor(cwd));
+			expect(finished).toBe(true);
 		});
 	});
 
@@ -664,12 +693,12 @@ describe("task tool", () => {
 			expect(h.log[0]?.nested).toBeUndefined();
 		});
 
-		it("a child's task tool spawns no deeper than the cap, stays foreground, and has no control tools", async () => {
+		it("a child's task tool spawns no deeper than the cap, stays foreground, and keeps only the shell-capable control tools", async () => {
 			settings({ maxDepth: 2 });
 			const prompt = async () => true;
 			const budget = { remaining: 10 };
 			const h = harness(undefined, { depth: 1, prompt, sessionDir: "/root-dir", budget });
-			expect(Object.keys(h.tools)).toEqual(["task"]);
+			expect(Object.keys(h.tools)).toEqual(["task", "task_output", "task_stop"]);
 			const r = await run(h, { agent: "explore", task: "t", run_in_background: true });
 			expect(text(r)).toBe("echo: t");
 			expect(h.log[0]?.nested).toBeUndefined();
@@ -726,38 +755,39 @@ describe("task tool", () => {
 		it("task_output reports a running child's progress and latest output", async () => {
 			const { h } = controllable();
 			const r = await start(h);
-			const id = text(r).match(/sa-\d+/)?.[0];
+			const id = text(r).match(/a[0-9a-f]{16}/)?.[0];
 			await tick();
-			const out = text(await call(h, "task_output", { id }));
+			const out = text(await call(h, "task_output", { task_id: id, block: false }));
+			expect(out).toMatch(/<retrieval_status>not_ready<\/retrieval_status>/);
 			expect(out).toMatch(/running/);
 			expect(out).toContain("working on it");
 			expect(out).toMatch(/2 turns/);
-			await call(h, "task_stop", { id });
+			await call(h, "task_stop", { task_id: id });
 		});
 
 		it("task_message steers the running child", async () => {
 			const { h, steered } = controllable();
-			const id = text(await start(h)).match(/sa-\d+/)?.[0];
+			const id = text(await start(h)).match(/a[0-9a-f]{16}/)?.[0];
 			await tick();
 			const r = await call(h, "task_message", { id, message: "focus on tests" });
 			expect(text(r)).toMatch(/delivered/i);
 			expect(steered).toHaveLength(1);
 			expect(steered[0]).toContain("focus on tests");
 			expect(steered[0]).toMatch(/parent agent/);
-			await call(h, "task_stop", { id });
+			await call(h, "task_stop", { task_id: id });
 		});
 
 		it("task_stop aborts the child, returns its partial output and id, and sends no completion message", async () => {
 			const { h } = controllable();
-			const id = text(await start(h)).match(/sa-\d+/)?.[0];
+			const id = text(await start(h)).match(/a[0-9a-f]{16}/)?.[0];
 			await tick();
-			const r = await call(h, "task_stop", { id });
+			const r = await call(h, "task_stop", { task_id: id });
 			expect(text(r)).toMatch(new RegExp(`Stopped ${id}`));
 			expect(text(r)).toContain("working on it");
 			expect(text(r)).toMatch(/agent id: child-42/);
 			await tick();
 			expect(h.sent).toHaveLength(0);
-			expect(text(await call(h, "task_output", { id }))).toMatch(/no running background subagent/i);
+			await expect(call(h, "task_output", { task_id: id })).rejects.toThrow(`No task found with ID: ${id}`);
 		});
 
 		/** Background children that each finish when the test says so. */
@@ -787,7 +817,7 @@ describe("task tool", () => {
 						undefined,
 						ctxFor(cwd),
 					),
-				).match(/sa-\d+/)?.[0] as string;
+				).match(/a[0-9a-f]{16}/)?.[0] as string;
 			return { h, finish, launch };
 		}
 
@@ -828,6 +858,36 @@ describe("task tool", () => {
 			expect(h.sent[0].message.content).toContain("late result");
 		});
 
+		it("task_output blocks until the run finishes and takes its result instead of a completion message", async () => {
+			const { h, finish, launch } = finishable();
+			const id = await launch("one");
+			const waiting = call(h, "task_output", { task_id: id });
+			await tick();
+			finish.one("the result");
+			const out = text(await waiting);
+			expect(out).toContain(`[subagent ${id} · explore finished]`);
+			expect(out).toContain("the result");
+			await tick();
+			expect(h.sent).toHaveLength(0);
+		});
+
+		it("task_output gives up at its timeout with the run still going", async () => {
+			const { h, finish, launch } = finishable();
+			const id = await launch("slow");
+			vi.useFakeTimers();
+			try {
+				const waiting = call(h, "task_output", { task_id: id, timeout: 1000 });
+				await vi.advanceTimersByTimeAsync(1000);
+				expect(text(await waiting)).toMatch(/<retrieval_status>timeout<\/retrieval_status>/);
+			} finally {
+				vi.useRealTimers();
+			}
+			finish.slow("late");
+			await tick();
+			await tick();
+			expect(h.sent).toHaveLength(1);
+		});
+
 		it("task_wait says so when there is nothing to wait for", async () => {
 			const { h } = finishable();
 			const out = text(await call(h, "task_wait", { ids: ["sa-7"] }));
@@ -838,12 +898,16 @@ describe("task tool", () => {
 		it("answers an unknown id with what is running", async () => {
 			const { h } = controllable();
 			for (const [name, params] of [
-				["task_output", { id: "sa-99" }],
-				["task_stop", { id: "sa-99" }],
-				["task_message", { id: "sa-99", message: "x" }],
+				["task_output", { task_id: "sa-99" }],
+				["task_stop", { task_id: "sa-99" }],
+				["task_output", { task_id: "b12345678" }],
+				["task_stop", { task_id: "b12345678" }],
 			] as const) {
-				expect(text(await call(h, name, params))).toMatch(/no running background subagent "sa-99"/i);
+				await expect(call(h, name, params)).rejects.toThrow(`No task found with ID: ${params.task_id}`);
 			}
+			expect(text(await call(h, "task_message", { id: "sa-99", message: "x" }))).toMatch(
+				/no running background subagent "sa-99"/i,
+			);
 		});
 	});
 
@@ -868,6 +932,57 @@ describe("task tool", () => {
 			expect(h.entries.at(-1)).toEqual({
 				sections: [{ title: "explore · kid-9", lines: [{ kind: "assistant", text: "found it" }] }],
 			});
+		});
+
+		it("shows every child of a finished parallel run by its run id", async () => {
+			for (const kid of ["kid-a", "kid-b"]) {
+				const file = join(cwd, `${kid}.jsonl`);
+				writeFileSync(
+					file,
+					`${JSON.stringify({ type: "message", timestamp: new Date().toISOString(), message: { role: "assistant", content: [{ type: "text", text: kid }] } })}\n`,
+				);
+				appendRecord({
+					agentId: kid,
+					agent: "explore",
+					sessionFile: file,
+					cwd,
+					task: "t",
+					status: "ok",
+					endedAt: 1,
+				});
+			}
+			const ids = ["kid-a", "kid-b"];
+			const h = harness(async (opts) => ({
+				agent: opts.def.name,
+				agentSource: opts.def.source,
+				task: opts.task,
+				status: "ok",
+				messages: [],
+				stderr: "",
+				usage: emptyUsage(),
+				stopReason: "end",
+				agentId: ids.shift(),
+			}));
+			const started = await h.tool.execute(
+				"1",
+				{
+					tasks: [
+						{ agent: "explore", task: "a" },
+						{ agent: "explore", task: "b" },
+					],
+					run_in_background: true,
+				},
+				undefined,
+				undefined,
+				ctxFor(cwd),
+			);
+			const id = /subagent (a[0-9a-f]{16})/.exec(text(started))?.[1];
+			await new Promise((r) => setTimeout(r, 0));
+			await h.commands.agents(`show ${id}`, ctxFor(cwd));
+			expect((h.entries.at(-1) as any).sections.map((s: any) => s.title)).toEqual([
+				"explore · kid-a",
+				"explore · kid-b",
+			]);
 		});
 
 		it("says so for an unknown id, and stop needs a running run", async () => {
@@ -900,11 +1015,18 @@ describe("task tool", () => {
 				};
 			});
 			const ctx = { ...ctxFor(cwd), ui: { notify: () => {} } };
-			await h.tool.execute("1", { agent: "explore", task: "t", run_in_background: true }, undefined, undefined, ctx);
-			await h.commands.agents("stop sa-1", ctx);
+			const started = await h.tool.execute(
+				"1",
+				{ agent: "explore", task: "t", run_in_background: true },
+				undefined,
+				undefined,
+				ctx,
+			);
+			const id = /subagent (a[0-9a-f]{16})/.exec(text(started))?.[1];
+			await h.commands.agents(`stop ${id}`, ctx);
 			await vi.waitFor(() => expect(h.sent).toHaveLength(1));
 			expect(h.sent[0].message.details.status).toBe("error");
-			expect(h.sent[0].message.content).toMatch(/^\[subagent sa-1 · explore stopped by the user\]/);
+			expect(h.sent[0].message.content).toContain(`[subagent ${id} · explore stopped by the user]`);
 			release();
 		});
 	});
@@ -1058,7 +1180,7 @@ describe("task tool", () => {
 	});
 
 	describe("resume by background id", () => {
-		it("accepts the sa-N id of a finished background run as an alias for its child's agent id", async () => {
+		it("accepts the run id of a finished background run as an alias for its child's agent id", async () => {
 			const seen: RunSubagentOptions[] = [];
 			const h = harness(async (opts) => {
 				seen.push(opts);
@@ -1081,10 +1203,47 @@ describe("task tool", () => {
 				undefined,
 				ctxFor(cwd),
 			);
-			const id = /subagent (sa-\d+)/.exec(text(started))?.[1];
+			const id = /subagent (a[0-9a-f]{16})/.exec(text(started))?.[1];
 			await new Promise((r) => setTimeout(r, 0));
 			await h.tool.execute("2", { resume: id, task: "more" }, undefined, undefined, ctxFor(cwd));
 			expect(seen[1]?.resume).toBe("child-42");
+		});
+
+		it("refuses the run id of a run with several children, naming each child's agent id", async () => {
+			const seen: RunSubagentOptions[] = [];
+			let n = 0;
+			const h = harness(async (opts) => {
+				seen.push(opts);
+				return {
+					agent: opts.def.name,
+					agentSource: opts.def.source,
+					task: opts.task,
+					status: "ok",
+					messages: [{ role: "assistant", content: [{ type: "text", text: "done" }] } as never],
+					stderr: "",
+					usage: emptyUsage(),
+					stopReason: "end",
+					agentId: `child-${++n}`,
+				};
+			});
+			const started = await h.tool.execute(
+				"1",
+				{
+					tasks: [
+						{ agent: "explore", task: "a" },
+						{ agent: "explore", task: "b" },
+					],
+					run_in_background: true,
+				},
+				undefined,
+				undefined,
+				ctxFor(cwd),
+			);
+			const id = /subagent (a[0-9a-f]{16})/.exec(text(started))?.[1];
+			await new Promise((r) => setTimeout(r, 0));
+			const r = await h.tool.execute("2", { resume: id, task: "more" }, undefined, undefined, ctxFor(cwd));
+			expect(text(r)).toMatch(/ran 2 subagents.*child-1.*child-2/s);
+			expect(seen).toHaveLength(2);
 		});
 	});
 
@@ -1111,7 +1270,7 @@ describe("task tool", () => {
 				undefined,
 				ctxFor(cwd),
 			);
-			expect(text(r)).toMatch(/^Started background subagent sa-\d+ \(resume child-3\)/);
+			expect(text(r)).toMatch(/^Started background subagent child-3 \(resume child-3\)/);
 		});
 	});
 });

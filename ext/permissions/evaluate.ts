@@ -37,6 +37,7 @@
  * so callers and tests stay in control.
  */
 
+import { monitorSource } from "../_shared/monitor-source.ts";
 import type { SandboxPosture } from "../sandbox/state.ts";
 import { bashPathArgs, bashWriteTargets } from "./bash-targets.ts";
 import type { PermissionMode } from "./modes.ts";
@@ -115,9 +116,8 @@ const LOCAL_READ_TOOLS = new Set(["get_search_content", "source_check", "mcp_fin
 
 /**
  * Tools the mode does not prompt for, though they are not reads: the task control
- * tools only inspect, steer or stop this session's own background subagents (a steered
- * child's own tool calls still pass its gate), `bash_output`/`kill_bash` do the same
- * for its own background shells, and `manage_agents` asks the user itself
+ * tools only inspect, steer or stop this session's own background subagents and shells
+ * (a steered child's own tool calls still pass its gate), and `manage_agents` asks the user itself
  * before every write, in every mode — a mode prompt on top would ask twice; and
  * `contact_supervisor` is itself a question to the user; `structured_output` only hands
  * a child's result back to its parent.
@@ -131,8 +131,6 @@ const SELF_GATED_TOOLS = new Set([
 	"manage_agents",
 	"contact_supervisor",
 	"structured_output",
-	"bash_output",
-	"kill_bash",
 ]);
 
 /**
@@ -281,7 +279,9 @@ function askOrBlock(gate: Gate, exact: string | null, cfg: EvalConfig, tool: str
  * tool would have to be added to.
  */
 function governedTool(tool: string, input: Record<string, unknown>): string {
-	if (tool === "monitor") return "bash";
+	// A WebSocket monitor opens from this process, outside the OS sandbox: it is judged
+	// as a fetch of its URL, so WebFetch(domain:…) rules and the fetch prompt cover it.
+	if (tool === "monitor") return monitorSource(input).kind === "ws" ? "webfetch" : "bash";
 	// Creating a schedule is judged as the task it will start, while the user is here to
 	// answer; listing and cancelling touch only this session's own schedules.
 	if (tool === "task_schedule") return input.action === "create" ? "task" : "task_output";
@@ -292,6 +292,12 @@ function governedTool(tool: string, input: Record<string, unknown>): string {
 		if (server) return `mcp__${server}__${tool.slice("mcp_".length)}`;
 	}
 	return tool;
+}
+
+/** The input every gate below reads: a WebSocket monitor's is the fetch it amounts to. */
+function governedInput(tool: string, input: Record<string, unknown>): Record<string, unknown> {
+	const source = tool === "monitor" ? monitorSource(input) : undefined;
+	return source?.kind === "ws" ? { url: source.url } : input;
 }
 
 /** The credential-bearing path this call reads, if any — see gate 3. */
@@ -318,8 +324,13 @@ function protectedReadTarget(tool: string, input: Record<string, unknown>, cfg: 
  * Returns `undefined` when nothing here decides and evaluation should continue in
  * {@link evaluatePostHook}.
  */
-export function evaluatePreHook(rawTool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict | undefined {
-	const tool = governedTool(rawTool, input);
+export function evaluatePreHook(
+	rawTool: string,
+	rawInput: Record<string, unknown>,
+	cfg: EvalConfig,
+): Verdict | undefined {
+	const tool = governedTool(rawTool, rawInput);
+	const input = governedInput(rawTool, rawInput);
 
 	// 1. deny rules. (ask/allow are resolved in evaluatePostHook.)
 	const { decision, denyAgent } = decideRules(tool, input, cfg.rules, cfg.cwd);
@@ -413,8 +424,9 @@ export function evaluatePreHook(rawTool: string, input: Record<string, unknown>,
 /**
  * Gates 4–6: ask rules, allow rules, and what the mode does with an unmatched call.
  */
-export function evaluatePostHook(rawTool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict {
-	const tool = governedTool(rawTool, input);
+export function evaluatePostHook(rawTool: string, rawInput: Record<string, unknown>, cfg: EvalConfig): Verdict {
+	const tool = governedTool(rawTool, rawInput);
+	const input = governedInput(rawTool, rawInput);
 	// Claude Code's sandbox auto-allow: a command that will run inside the OS sandbox is
 	// approved without a prompt, in every mode. Deny rules (gate 1) and content-scoped ask
 	// rules still apply; only the bare `Bash` ask rule is skipped for such a command.

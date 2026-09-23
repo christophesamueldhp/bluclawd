@@ -54,13 +54,16 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import type { LendableMcpServer } from "../_shared/mcp-lending.ts";
 import { getAuthPath, getModelsPath } from "../_shared/paths.ts";
 import * as forkSettings from "../_shared/settings.ts";
+import { formatServerInstructions } from "../mcp/schema.ts";
 import { getActivePermissionMode } from "../permissions/active-mode.ts";
 import type { PermissionMode } from "../permissions/modes.ts";
 import { AGENT_MEMORY_DIR } from "../permissions/rules.ts";
 import { createSubagentGate, type GatePrompt } from "../permissions/subagent-gate.ts";
 import { createChildBashExtension } from "../sandbox/child-bash.ts";
+import { borrowMcpServers, createChildMcpExtension } from "./child-mcp.ts";
 import { type AgentDef, type AgentEffort, type AgentMemoryScope, bundledAgentsDir, discoverDefs } from "./defs.ts";
 import { runExternal } from "./external.ts";
 import { createForkContextExtension, type ForkSource, forkedTaskPrompt } from "./fork.ts";
@@ -113,11 +116,13 @@ export function childToolLists(
 	def: AgentDef,
 	allowTask = false,
 	structuredOutput = false,
+	mcpTools: readonly string[] = [],
 ): { tools: string[] | undefined; excludeTools: string[] } {
 	// An allowlist filters extension tools too: without this, a def that lists its
-	// tools could never hand back the output its schema asks for.
-	const withOutput = (tools: string[] | undefined) =>
-		structuredOutput && tools && !tools.includes(STRUCTURED_OUTPUT_TOOL) ? [...tools, STRUCTURED_OUTPUT_TOOL] : tools;
+	// tools could never hand back the output its schema asks for, nor use the MCP
+	// servers it names.
+	const added = [...(structuredOutput ? [STRUCTURED_OUTPUT_TOOL] : []), ...mcpTools];
+	const withOutput = (tools: string[] | undefined) => tools && [...tools, ...added.filter((t) => !tools.includes(t))];
 	if (allowTask) return { tools: withOutput(def.tools), excludeTools: def.disallowedTools ?? [] };
 	const tools = withOutput(def.tools?.filter((t) => t !== TASK_TOOL_NAME));
 	const excludeTools = [TASK_TOOL_NAME, ...(def.disallowedTools ?? []).filter((t) => t !== TASK_TOOL_NAME)];
@@ -246,6 +251,8 @@ export interface ChildLoaderExtras {
 	ask?: SupervisorAsk;
 	/** The JSON the child must finish by handing back through `structured_output`. */
 	outputSchema?: OutputSchema;
+	/** The parent's MCP servers the child borrows. */
+	mcp?: readonly LendableMcpServer[];
 }
 
 type LoaderOptions = ConstructorParameters<typeof DefaultResourceLoader>[0];
@@ -286,6 +293,8 @@ export function childLoaderOptions(
 		appendSystemPrompt.push(agentMemorySection(def.memory, def.name, ctx.cwd));
 	if (def.skills?.length) appendSystemPrompt.push(...preloadedSkillSections(def.skills, ctx.cwd, trusted));
 	if (extras.outputSchema) appendSystemPrompt.push(STRUCTURED_OUTPUT_INSTRUCTIONS);
+	const mcpInstructions = extras.mcp && formatServerInstructions([...extras.mcp]);
+	if (mcpInstructions) appendSystemPrompt.push(mcpInstructions);
 
 	const extensionFactories = [
 		createSubagentGate({ mode: extras.mode, agent: def.name, prompt: extras.prompt, rulesCwd: ctx.cwd }),
@@ -297,6 +306,7 @@ export function childLoaderOptions(
 	if (extras.nested) extensionFactories.push(extras.nested);
 	if (extras.ask) extensionFactories.push(createSupervisorExtension(def.name, extras.ask));
 	if (extras.outputSchema) extensionFactories.push(createStructuredOutputExtension(extras.outputSchema));
+	if (extras.mcp?.length) extensionFactories.push(createChildMcpExtension(extras.mcp));
 
 	return {
 		cwd,
@@ -452,6 +462,8 @@ const git = async (cwd: string, ...args: string[]): Promise<string> =>
 interface Worktree {
 	top: string;
 	path: string;
+	/** The commit it was checked out at. */
+	base: string;
 }
 
 /**
@@ -465,7 +477,8 @@ async function createWorktree(cwd: string, name: string): Promise<Worktree> {
 	const id = `${name}-${Date.now().toString(36)}${randomBytes(2).toString("hex")}`;
 	const path = join(top, CONFIG_DIR_NAME, "worktrees", id);
 	mkdirSync(dirname(path), { recursive: true });
-	await git(top, "worktree", "add", "--detach", path, "HEAD");
+	const base = (await git(top, "rev-parse", "HEAD")).trim();
+	await git(top, "worktree", "add", "--detach", path, base);
 	try {
 		const common = resolve(top, (await git(top, "rev-parse", "--git-common-dir")).trim());
 		const excludeFile = join(common, "info", "exclude");
@@ -478,13 +491,15 @@ async function createWorktree(cwd: string, name: string): Promise<Worktree> {
 	} catch {
 		// The exclude is a courtesy; the worktree works without it.
 	}
-	return { top, path };
+	return { top, path, base };
 }
 
-/** Remove a worktree the child left clean; keep (and return) one it changed. */
+/** Remove a worktree the child left clean; keep (and return) one it changed or committed in. */
 async function finishWorktree(worktree: Worktree): Promise<string | undefined> {
 	try {
 		if ((await git(worktree.path, "status", "--porcelain")).trim()) return worktree.path;
+		// A commit leaves the status clean; removing the worktree would orphan it.
+		if ((await git(worktree.path, "rev-parse", "HEAD")).trim() !== worktree.base) return worktree.path;
 		await git(worktree.top, "worktree", "remove", "--force", worktree.path);
 		// Seen live: `remove` unregistered the worktree and emptied it but left the
 		// directory skeleton and prunable metadata behind. Finish the job.
@@ -509,6 +524,8 @@ export interface RunSubagentOptions {
 	cwd?: string;
 	/** Continue the child with this id instead of starting one; `def` is then ignored. */
 	resume?: string;
+	/** The id a new child is known by; default a fresh one (see newAgentId). */
+	agentId?: string;
 	/** Run the child in its own detached git worktree. */
 	isolation?: "worktree";
 	/** Start the child from the parent's conversation instead of an empty one. Ignored on resume. */
@@ -534,6 +551,11 @@ export interface RunSubagentOptions {
 	onSession?: (session: AgentSession) => (() => void) | undefined;
 	/** Session construction; injectable so the engine is testable without a model. */
 	createSession?: CreateSession;
+}
+
+/** Claude Code's agent id: `a` and 16 hex characters. It is also a background run's task id. */
+export function newAgentId(): string {
+	return `a${randomBytes(8).toString("hex")}`;
 }
 
 const failed = (base: SingleResult, stopReason: string, errorMessage: string): SingleResult => ({
@@ -612,6 +634,15 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<SingleResul
 		const problem = outputSchemaProblem(outputSchema);
 		if (problem) return failed(base(), "error", problem);
 	}
+	let mcp: readonly LendableMcpServer[] | undefined;
+	if (def.mcpServers) {
+		if (def.runner) {
+			return failed(base(), "error", `"${def.name}" runs an external command: it cannot use MCP servers.`);
+		}
+		const borrowed = borrowMcpServers(def.mcpServers);
+		if ("problem" in borrowed) return failed(base(), "error", borrowed.problem);
+		mcp = borrowed.servers;
+	}
 
 	if (opts.fork && !opts.resume) {
 		// Opened with the CHILD's session dir, so the branch is written there — not into
@@ -664,6 +695,7 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<SingleResul
 					cwd,
 					forkedAt,
 					outputSchema,
+					mcp,
 					sessionManager: sessionManager ?? SessionManager.create(cwd, opts.sessionDir ?? childSessionDir(ctx)),
 				},
 				base(),
@@ -673,7 +705,7 @@ export async function runSubagent(opts: RunSubagentOptions): Promise<SingleResul
 
 	const gate = opts.gate || def.gate;
 	if (gate && result.status === "ok" && !result.partial) {
-		result = await applyGate(gate, result, { ...opts, def, cwd, forkedAt, outputSchema });
+		result = await applyGate(gate, result, { ...opts, def, cwd, forkedAt, outputSchema, mcp });
 	}
 
 	if (worktree) {
@@ -710,7 +742,7 @@ const GATE_OUTPUT_CHARS = 4000;
 async function applyGate(
 	command: string,
 	first: SingleResult & { sessionFile?: string },
-	opts: RunSubagentOptions & { cwd: string; forkedAt?: number },
+	opts: RunSubagentOptions & { cwd: string; forkedAt?: number; mcp?: readonly LendableMcpServer[] },
 ): Promise<SingleResult & { sessionFile?: string }> {
 	const { ctx, def, cwd, signal } = opts;
 	let retries = 1;
@@ -781,7 +813,12 @@ function sumUsage(a: SingleResult["usage"], b: SingleResult["usage"]): SingleRes
 
 /** The one run, against a prepared def, cwd and session manager. */
 async function runChild(
-	opts: RunSubagentOptions & { cwd: string; sessionManager: SessionManager; forkedAt?: number },
+	opts: RunSubagentOptions & {
+		cwd: string;
+		sessionManager: SessionManager;
+		forkedAt?: number;
+		mcp?: readonly LendableMcpServer[];
+	},
 	base: SingleResult & { sessionFile?: string },
 ): Promise<SingleResult & { sessionFile?: string }> {
 	const { def, task, ctx, signal, onUpdate, cwd } = opts;
@@ -807,6 +844,7 @@ async function runChild(
 			nested: opts.nested?.extension,
 			ask: opts.ask ?? uiSupervisor(ctx),
 			outputSchema: opts.outputSchema,
+			mcp: opts.mcp,
 		});
 		const childLoader = new DefaultResourceLoader(loaderOptions);
 		await childLoader.reload();
@@ -824,7 +862,12 @@ async function runChild(
 		const resolvedModel = resolveModel(def, ctx, settings?.models ?? {});
 		base.model = resolvedModel ? `${resolvedModel.provider}/${resolvedModel.id}` : undefined;
 
-		const { tools, excludeTools } = childToolLists(def, Boolean(opts.nested), Boolean(opts.outputSchema));
+		const { tools, excludeTools } = childToolLists(
+			def,
+			Boolean(opts.nested),
+			Boolean(opts.outputSchema),
+			opts.mcp?.flatMap((server) => server.toolNames),
+		);
 		({ session } = await (opts.createSession ?? defaultCreateSession)({
 			cwd,
 			model: resolvedModel,
@@ -853,9 +896,8 @@ async function runChild(
 		}
 	}
 
-	// Through the session manager first: it is the stable API, and the getters on
-	// AgentSession have moved between pi releases.
-	base.agentId = session.sessionManager?.getSessionId?.() ?? session.sessionId;
+	// A resumed child keeps its id; the records map an id to its transcript file.
+	base.agentId = opts.resume ?? opts.agentId ?? newAgentId();
 
 	// What the session already holds — a fork's inherited conversation, a resumed
 	// child's earlier run — is not this run's: turns, usage and messages count from here,
@@ -883,10 +925,7 @@ async function runChild(
 				turns: turnsSoFar(),
 			},
 			model: base.model ?? last?.model,
-			// Read HERE, not at creation: pi 0.85 assigns a session its id on first
-			// persist, so right after createAgentSession there is none yet — which
-			// is why the live result carried a sessionFile but no agentId.
-			agentId: session.sessionManager?.getSessionId?.() ?? session.sessionId ?? base.agentId,
+			agentId: base.agentId,
 			sessionFile: session.sessionManager?.getSessionFile?.() ?? session.sessionFile,
 		};
 	};

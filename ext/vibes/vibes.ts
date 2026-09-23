@@ -1,5 +1,5 @@
 /**
- * Claude Code's spinner verbs (2.1.276, 187 words), shown one per agent turn
+ * Claude Code's spinner verbs (2.1.276, 186 words (exclude "Clauding")), shown one per agent turn
  * in place of "Working...".
  */
 
@@ -31,7 +31,6 @@ export const SPINNER_VERBS: readonly string[] = [
 	"Channeling",
 	"Choreographing",
 	"Churning",
-	"Clauding",
 	"Coalescing",
 	"Cogitating",
 	"Combobulating",

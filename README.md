@@ -54,8 +54,8 @@ Claude Code's names and behaviours, on top of pi's own commands:
 |---|---|
 | `/mode`, `/permissions` | permission modes and allow/ask/deny rules. `/mode` picks from a list; Alt+M cycles `ask → edits → auto` |
 | `/sandbox` | OS-level sandbox for bash (`@anthropic-ai/sandbox-runtime`), configured with Claude Code's `sandbox` keys. `/sandbox` is a switch — on or off (`/sandbox on|off`, or pick from the menu) — saved to the project's `.pi/settings.json` (session-only in an untrusted project); on, the model's shell commands run confined and without a permission prompt, which is what makes it the safety net for agentic work. The finer keys below still apply when written in settings.json. Writes: the working directory and a per-session `$TMPDIR`; a linked worktree also gets the repository's shared `.git` (not its hooks or config). Protected inside those, whatever `allowWrite` says: the agent's config (`.pi/settings.json`, `mcp.json`, `hooks.json`, `extensions/`, `skills/`, `agents/`, ... — but not `.pi/worktrees/`, where subagents work), the agent dir, bare-repository files (`HEAD`, `objects`, `refs`, `config`), plus the runtime's own list (shell rc files, `.gitconfig`, `.mcp.json`, `.git/hooks`, `.git/config`, ...). Network: no host is pre-allowed; the first connection to a host asks — "Yes" holds for the session, "Yes, and don't ask again" saves a `WebFetch(domain:…)` allow rule. Permission rules feed the sandbox as in Claude Code: `Edit`/`Write` allow and deny → write lists, `Read` deny → `denyRead`, `WebFetch(domain:…)` → domain lists. Relative paths resolve against the project root in project settings and against the agent dir in user settings. Sandboxed commands run without a permission prompt (`autoAllowBashIfSandboxed`, default true; deny rules and content-scoped ask rules still apply). A denied command's result names the path or host in `<sandbox_violations>`; the model may retry with `dangerouslyDisableSandbox`, which goes through the normal permission flow labelled "(unsandboxed)" — `allowUnsandboxedCommands: false` ignores that parameter. `excludedCommands` (`Bash(...)` patterns, e.g. `docker *`) always run outside. `failIfUnavailable` (formerly `strict`) makes bluclawd exit with an error at startup when the sandbox was enabled but cannot start. Settings edits apply to the running session. Commands you type yourself (`!` and bash mode) run outside the sandbox, as in Claude Code. User settings only (ignored in a project, as in Claude Code): `allowAppleEvents`, `filesystem.disabled`, `network.strictAllowlist`, `network.tlsTerminate`, `ripgrep`, and credential `mask` entries, `allowPlaintextInject`, `awsPairs`, `sigv4`. Everything else (`credentials`, `filesystem.allowRead`, `network.allowLocalBinding`, `ignoreViolations`, ...) passes straight through to the runtime. Like Claude Code, no credential is blocked by default: a `Read(...)` deny rule (e.g. `Read(~/.ssh/**)`) blocks it for the read tool and, through the sandbox, for every bash subprocess too. Not available: per-command allowed domains in auto mode (needs Claude Code's classifier) |
-| `/tasks` | background bash jobs (`run_in_background`, `bash_output`, `kill_bash`) and monitors. A job notifies the model once when it exits; the `monitor` tool turns each output line of a long-running command into an event that wakes the model (Claude Code's `Monitor`, minus the WebSocket source; stdout and stderr are both events because pi's shell backend merges them) |
-| `/agents` | subagents via the `task` tool — single, parallel, chain, saved workflows, nesting, forked context, background runs with `task_output`/`task_message`/`task_stop`/`task_wait`, schedules, acceptance gates, tool/token budgets, questions to you mid-run, external CLI runners. `/agents new\|edit\|delete <name>` manage user defs (the model can too, with `manage_agents`); `/agents show <id>` shows a child's transcript, `/agents stop <sa-N>` stops a background run. See [Subagents](#subagents) |
+| `/tasks` | background tasks dialog (alias `/bashes`): shells (`run_in_background`, Ctrl+B on the model's running bash, or a foreground command past its `timeout`), monitors and background subagents; Enter shows a task's output tail, `x` stops it. The footer pill counts what is running; ↓ from an empty prompt selects it and Enter opens the dialog. A shell writes its whole output to a file named in its start result and exit notification; `task_output` returns new output or waits for the exit (`block`), `task_stop` stops it. A job notifies the model once when it exits, and once more if it goes quiet for 45s on what reads as an interactive prompt (`(y/n)`, `Press Enter`, …); the `monitor` tool turns each stdout line of a long-running command, or each frame of a WebSocket (`ws`), into an event that wakes the model (Claude Code's `Monitor`; stderr goes to the output file) |
+| `/agents` | subagents via the `task` tool — single, parallel, chain, saved workflows, nesting, forked context, background runs with `task_output`/`task_message`/`task_stop`/`task_wait`, schedules, acceptance gates, tool/token budgets, questions to you mid-run, external CLI runners. `/agents new\|edit\|delete <name>` manage user defs (the model can too, with `manage_agents`); `/agents show <id>` shows a child's transcript, `/agents stop <id>` stops a background run. See [Subagents](#subagents) |
 | `/review-loop` | review/fix loop: parallel `code-reviewer` rounds, fixes by a `worker`, until clean or 3 rounds |
 | `/mcp` | MCP servers from `mcp.json` / `.mcp.json`; project servers need `/mcp approve` (enable/disable of a project server is kept in your settings, never written into `.mcp.json`). Server instructions go into the system prompt, server prompts run as `/mcp__<server>__<prompt> args…`, `list_changed` refreshes tools live, and a result over 50KB is cut with the full text saved to a temp file. Resources: `mcp_list_resources` / `mcp_read_resource`, and `@server:uri` in a prompt attaches one; both prompt commands and `@server:` resources autocomplete in the editor (Tab after `@server:` lists them). A server can ask you for input (form elicitation) or ask your current model for a completion (sampling, confirmed per request, any provider). To confirm before chosen tools run, use an ask rule such as `Mcp(github:delete_*)`. Claude Code's timeouts (per-server `timeout`, `MCP_TOOL_TIMEOUT` ≈28h default, idle `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` 30 min stdio / 5 min remote, `MCP_TIMEOUT` connect) and `${VAR}` / `${VAR:-default}` in `command`, `args`, `env`, `url`, `headers`; a remote server whose url or header would carry a model/cloud credential is refused |
 | `webfetch`, `websearch` | Claude Code's `WebFetch`/`WebSearch`, extended; see [Web](#web). Rules: `WebFetch(domain:example.com)` (what "don't ask again" persists), `WebSearch(<query glob>)`, checked per query in a batch |
@@ -112,12 +112,14 @@ a child that ends in prose is reminded once — a turn `maxTurns` counts — the
 resume them). `gate` and `outputSchema` also go on each `tasks[]` item, chain
 step and workflow step.
 
-**Background runs.** `task_output <sa-N>` shows progress, `task_message` steers a
+**Background runs.** Ids are Claude Code's, `a` and 16 hex characters; a run with one child is known by that child's agent id. `task_output <id>` waits for the result (up to its
+`timeout`; `block: false` shows progress instead), `task_message` steers a
 running child without restarting it, `task_stop` stops it and returns what it had
 (it can be resumed), and `task_wait` blocks until the given runs (or all) finish and
-returns their results in place of the completion messages. For you: `/agents show <sa-N or agent id>` prints a child's
-transcript (its text, tool calls and results), `/agents stop <sa-N>` stops a run
-and tells the model you did. `task_schedule` starts a task or workflow later (`in: "10m"`)
+returns their results in place of the completion messages. For you: `/agents show <id>` prints a child's
+transcript (its text, tool calls and results; every child of a parallel run),
+`/agents stop <id>` stops a run and tells the model you did. `resume: "<id>"`
+works for a run with one child; a parallel run's children are resumed by agent id. `task_schedule` starts a task or workflow later (`in: "10m"`)
 or repeatedly (`every: "1h"`); schedules end with the session.
 
 **Questions mid-run.** With a UI, children have `contact_supervisor`: a child that
@@ -147,10 +149,16 @@ directory, and have no control tools.
 `permissionMode`, `maxTurns`, `timeoutMs`, `toolTimeoutMs`, `maxTokens`,
 `toolBudget`, `skills`, `memory`, `background`, `fork: true` (start from this
 conversation unless it is not saved; pi-subagents' `defaultContext: fork` also
-works), `isolation: worktree`, `effort`, `color`, `gate`, `outputSchema`, and `runner` — `runner:
+works), `isolation: worktree` (removed afterwards unless the child changed or
+committed something; quitting waits up to 10s for aborted runs to clean theirs up),
+`effort`, `color`, `gate`, `outputSchema`, `mcpServers: [github, docs]` (the child
+gets those servers' tools and instructions, borrowing this session's connections —
+only connected servers, so a project server still needs `/mcp approve`; names only,
+no inline server configs; a `deferTools` server's tools are all active in the
+child), and `runner` — `runner:
 {command: claude, args: [-p]}` runs that CLI instead of a pi child, with the
 prompt on stdin and its stdout as the result (no tools, fork, resume,
-steering or structured output). Bundled: `explore`, `planner`, `code-reviewer`, `general-purpose`,
+steering, structured output or MCP). Bundled: `explore`, `planner`, `code-reviewer`, `general-purpose`,
 `oracle` (a read-only second opinion from a copy of this conversation: what was
 decided, where the plan drifts) and `worker` (implements an agreed plan from a copy
 of this conversation, asks instead of deciding).
@@ -308,7 +316,7 @@ child keeps a parent's `edits` or `auto` mode; under `ask` it runs in the mode
 its def declares (`ask` if none). With a UI its prompts reach you; headless it
 gets the parent's deny rules only, and whatever would prompt is blocked. `task_output`, `task_message`, `task_stop`, `task_wait`
 and `task_schedule list|cancel` never prompt — they only touch this session's own
-runs — and `manage_agents` asks for every write itself, in every mode.
+runs and shells — and `manage_agents` asks for every write itself, in every mode.
 
 A prompt has Claude Code's rows: **Yes**, a row for "from now on", and **No**. A
 digit picks a row, Esc is No, and Tab on No types a note the model receives. Where

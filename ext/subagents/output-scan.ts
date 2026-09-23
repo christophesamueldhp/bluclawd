@@ -24,7 +24,7 @@ const HARNESS_TAGS = [
 const TAG_LINE = new RegExp(`^\\s*</?(${HARNESS_TAGS.join("|")})\\b`, "i");
 const ROLE_LINE = /^\s*(Human|Assistant|System):/;
 /** The lines the parent is told to trust: annotations, completion headers, section heads. */
-const NOTE_LINE = /^\s*(\[(?:agent id|partial|worktree kept at|harness|subagent sa-\d+|gate)\b|### \[)/i;
+const NOTE_LINE = /^\s*(\[(?:agent id|partial|worktree kept at|harness|subagent [\w-]+|gate)\b|### \[)/i;
 /** Invisible characters that would otherwise hide a line's start from the patterns. */
 const INVISIBLE = /[\u200B-\u200D\u2060\uFEFF]/g;
 

@@ -43,8 +43,9 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
-import { backgroundBashJobs } from "../_shared/background-bash.ts";
-import { EVENT_DELIVERY, shouldNotifyExit, tailOutput, taskExitMessage } from "../_shared/monitor-events.ts";
+import { type BackgroundJobInfo, backgroundBashJobs } from "../_shared/background-bash.ts";
+import { detachableExec, ShellDetachedError } from "../_shared/foreground-shells.ts";
+import { EVENT_DELIVERY, shouldNotifyExit, taskExitMessage, taskStallMessage } from "../_shared/monitor-events.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { addProjectRule, setProjectSandboxKeys } from "../_shared/settings-write.ts";
 import {
@@ -78,7 +79,7 @@ const BASH_EXTRA_PARAMS = Type.Object({
 	run_in_background: Type.Optional(
 		Type.Boolean({
 			description:
-				"Run the command in the background and return immediately with a task id. You are notified once when it exits (with its last lines of output); read more with bash_output; stop it with kill_bash.",
+				"Run the command in the background and return immediately with a task id and the file its output is written to. You are notified once when it exits; read the output file with the read tool, or check with task_output; stop it with task_stop.",
 		}),
 	),
 	dangerouslyDisableSandbox: Type.Optional(
@@ -89,10 +90,6 @@ const BASH_EXTRA_PARAMS = Type.Object({
 	),
 });
 
-/** How much of a finished job's output rides along with its exit notification. */
-const EXIT_TAIL_LINES = 20;
-const EXIT_TAIL_BYTES = 2048;
-
 /** How much of a command's output is kept to look for a denial message. */
 const DENIAL_SCAN_BYTES = 4096;
 /** How long a failed command waits for the violation monitor to catch up. */
@@ -102,6 +99,20 @@ const VIOLATION_POLL_MS = 50;
 const SESSION_TMP_ROOT = "/tmp/claude";
 
 type SandboxRuntime = typeof import("@anthropic-ai/sandbox-runtime");
+
+/**
+ * What the model reads when a command goes to the background, in Claude Code's words:
+ * at the start, by Ctrl+B (`moved: "user"`), or at its timeout (`moved: seconds`).
+ */
+function backgroundStartText(job: BackgroundJobInfo, moved?: "user" | number): string {
+	const file = job.outputFile ? ` Output is being written to: ${job.outputFile}.` : "";
+	const follow = ` You will be notified when it completes. To check interim output, use read on that file path.`;
+	if (moved === "user") return `Command was manually backgrounded by user with ID: ${job.id}.${file}`;
+	if (typeof moved === "number") {
+		return `Command did not complete within its ${moved}s timeout and was moved to the background (ID: ${job.id}).${file}${follow}`;
+	}
+	return `Command running in background with ID: ${job.id}.${file}${follow}`;
+}
 
 /**
  * The repository's shared `.git` when `cwd` is a linked worktree (its git dir and
@@ -306,7 +317,7 @@ export function factory(pi: ExtensionAPI): void {
 	pi.registerTool({
 		...baseBash,
 		parameters: Type.Object({ ...baseBash.parameters.properties, ...BASH_EXTRA_PARAMS.properties }),
-		async execute(id, params, signal, onUpdate) {
+		async execute(id, params, signal, onUpdate, ctx) {
 			const { description, run_in_background, dangerouslyDisableSandbox, ...rest } = params as Static<
 				typeof BASH_EXTRA_PARAMS
 			> &
@@ -320,6 +331,16 @@ export function factory(pi: ExtensionAPI): void {
 
 			const ops = operationsFor(command, dangerouslyDisableSandbox === true);
 
+			const owner = ctx?.sessionManager?.getSessionId();
+			// One notification on exit, so `until ...; do sleep 1; done` in the
+			// background is the single-notification recipe, as in Claude Code.
+			const notifyExit = (finished: BackgroundJobInfo) => {
+				if (!shouldNotifyExit(finished)) return;
+				pi.sendMessage(taskExitMessage(finished, id), EVENT_DELIVERY);
+			};
+			const notifyStall = (job: BackgroundJobInfo, tail: string) =>
+				pi.sendMessage(taskStallMessage(job, tail, id), EVENT_DELIVERY);
+
 			if (run_in_background) {
 				// The job's own lifetime owns the process: the tool call's signal is
 				// deliberately NOT attached, since backgrounding means outliving this
@@ -329,28 +350,26 @@ export function factory(pi: ExtensionAPI): void {
 					cwd: localCwd,
 					timeout: typeof rest.timeout === "number" ? rest.timeout : undefined,
 					description,
+					owner,
 					exec: ops.exec,
-					// One notification on exit, so `until ...; do sleep 1; done` in the
-					// background is the single-notification recipe, as in Claude Code.
-					onExit: (finished) => {
-						if (!shouldNotifyExit(finished)) return;
-						const tail = tailOutput(backgroundBashJobs.peek(finished.id) ?? "", EXIT_TAIL_LINES, EXIT_TAIL_BYTES);
-						pi.sendMessage(taskExitMessage(finished, tail), EVENT_DELIVERY);
-					},
+					onExit: notifyExit,
+					onStall: notifyStall,
 				});
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Started background task ${job.id}: ${command}\nRead output with bash_output {"task_id":"${job.id}"}; stop it with kill_bash. /tasks lists all background tasks.`,
-						},
-					],
-					details: undefined,
-				};
+				return { content: [{ type: "text", text: backgroundStartText(job) }], details: undefined };
 			}
 
-			const tool = createBashTool(localCwd, { commandPrefix, shellPath, operations: ops });
-			return tool.execute(id, rest as never, signal, onUpdate);
+			// Ctrl+B can move this call to the background mid-flight (background-bash owns the key).
+			const detachable = detachableExec(ops.exec, { description, owner, onExit: notifyExit, onStall: notifyStall });
+			const tool = createBashTool(localCwd, { commandPrefix, shellPath, operations: { exec: detachable } });
+			try {
+				return await tool.execute(id, rest as never, signal, onUpdate);
+			} catch (err) {
+				if (err instanceof ShellDetachedError) {
+					const text = backgroundStartText(err.job, err.timeout ?? "user");
+					return { content: [{ type: "text", text }], details: undefined };
+				}
+				throw err;
+			}
 		},
 	});
 

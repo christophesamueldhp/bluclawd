@@ -8,7 +8,7 @@ import { type BackgroundJobInfo, describeJobStatus } from "./background-bash.ts"
 
 export interface Batch {
 	lines: string[];
-	/** Lines that did not fit under the caps; the registry still buffers them for bash_output. */
+	/** Lines that did not fit under the caps; the output file still has them. */
 	more: number;
 }
 
@@ -70,24 +70,29 @@ export class EventBatcher {
 }
 
 /**
- * Counts events in a rolling window; `record` returns true once the count exceeds `max`.
- * Call it once per emitted batch, not per line, so the retained stamps stay bounded by
- * windowMs / batch delay.
+ * Claude Code's monitor rate limit: a bucket of `capacity` events refilled one per
+ * `refillMs`. `take` spends one and says whether the event may go out.
  */
-export class RateLimiter {
-	private stamps: number[] = [];
-	readonly max: number;
-	readonly windowMs: number;
+export class TokenBucket {
+	readonly capacity: number;
+	readonly refillMs: number;
+	private tokens: number;
+	private last: number | undefined;
 
-	constructor(options: { max: number; windowMs: number }) {
-		this.max = options.max;
-		this.windowMs = options.windowMs;
+	constructor(options: { capacity: number; refillMs: number }) {
+		this.capacity = options.capacity;
+		this.refillMs = options.refillMs;
+		this.tokens = options.capacity;
 	}
 
-	record(now: number): boolean {
-		this.stamps = this.stamps.filter((stamp) => now - stamp < this.windowMs);
-		this.stamps.push(now);
-		return this.stamps.length > this.max;
+	take(now: number): boolean {
+		if (this.last !== undefined) {
+			this.tokens = Math.min(this.capacity, this.tokens + (now - this.last) / this.refillMs);
+		}
+		this.last = now;
+		if (this.tokens < 1) return false;
+		this.tokens -= 1;
+		return true;
 	}
 }
 
@@ -123,8 +128,8 @@ export type EventStatus = "success" | "error" | "warning";
 export interface MonitorMessageDetails {
 	id: string;
 	description: string;
+	/** Event text, one entry per line; empty on an end notice with nothing left over. */
 	lines: string[];
-	more: number;
 	/** Present only on the terminal message. */
 	end?: string;
 	status?: EventStatus;
@@ -134,8 +139,9 @@ export interface TaskExitDetails {
 	id: string;
 	description: string;
 	command: string;
+	/** The notification's summary line. */
 	end: string;
-	tail: string;
+	outputFile?: string;
 	status: EventStatus;
 }
 
@@ -157,54 +163,171 @@ function endStatus(job: BackgroundJobInfo): EventStatus {
 	return "success";
 }
 
-function overflowNote(more: number): string[] {
-	return more > 0 ? [`…and ${more} more lines (read them with bash_output)`] : [];
+/** Claude Code's `<task-notification>`: each tag only when it has a value. */
+export function taskNotification(fields: {
+	taskId: string;
+	toolUseId?: string;
+	outputFile?: string;
+	status?: string;
+	summary: string;
+	body?: string;
+	/** Text after the closing tag. */
+	trailing?: string;
+}): string {
+	const tag = (name: string, value: string | undefined) => (value ? [`<${name}>${value}</${name}>`] : []);
+	const head = [
+		"<task-notification>",
+		...tag("task-id", fields.taskId),
+		...tag("tool-use-id", fields.toolUseId),
+		...tag("output-file", fields.outputFile),
+		...tag("status", fields.status),
+		...tag("summary", fields.summary),
+	].join("\n");
+	// The body follows the tags, as in Claude Code; `trailing` follows the envelope.
+	return `${head}${fields.body ?? ""}\n</task-notification>${fields.trailing ?? ""}`;
 }
 
-export function monitorEventMessage(job: BackgroundJobInfo, batch: Batch): OutgoingMessage<MonitorMessageDetails> {
+/** Monitor event caps, Claude Code's: per line and per event. */
+const MAX_EVENT_LINE_CHARS = 500;
+const MAX_EVENT_CHARS = 3000;
+const TRUNCATED = "...(truncated)";
+
+/** An event's text under Claude Code's caps. */
+export function eventText(lines: string[]): string {
+	const text = lines
+		.map((line) => (line.length > MAX_EVENT_LINE_CHARS ? `${line.slice(0, MAX_EVENT_LINE_CHARS)}${TRUNCATED}` : line))
+		.join("\n");
+	return text.length > MAX_EVENT_CHARS ? `${text.slice(0, MAX_EVENT_CHARS)}${TRUNCATED}` : text;
+}
+
+/** 300000 → "5m", 90000 → "1m 30s", as the expiry notice names the timeout. */
+export function formatDuration(ms: number): string {
+	const total = Math.max(0, Math.round(ms / 1000));
+	const h = Math.floor(total / 3600);
+	const m = Math.floor((total % 3600) / 60);
+	const s = total % 60;
+	return [h ? `${h}h` : "", m ? `${m}m` : "", s || total === 0 ? `${s}s` : ""].filter(Boolean).join(" ");
+}
+
+/** One monitor event: `lines` as the event, or a notice line of the monitor's own. */
+export function monitorEventMessage(job: BackgroundJobInfo, lines: string[]): OutgoingMessage<MonitorMessageDetails> {
 	const description = label(job);
-	const content = [`[monitor ${job.id} · ${description}]`, ...batch.lines, ...overflowNote(batch.more)].join("\n");
+	const text = eventText(lines);
 	return {
 		customType: MONITOR_MESSAGE_TYPE,
-		content,
+		content: taskNotification({
+			taskId: job.id,
+			summary: `Monitor event: "${description}"`,
+			body: `\n<event>${text}</event>`,
+		}),
 		display: true,
-		details: { id: job.id, description, lines: batch.lines, more: batch.more },
-	};
-}
-
-export function monitorEndMessage(job: BackgroundJobInfo, batch: Batch): OutgoingMessage<MonitorMessageDetails> {
-	const description = label(job);
-	const end = describeJobStatus(job);
-	const content = [`[monitor ${job.id} · ${description}]`, ...batch.lines, ...overflowNote(batch.more), end].join(
-		"\n",
-	);
-	return {
-		customType: MONITOR_MESSAGE_TYPE,
-		content,
-		display: true,
-		details: { id: job.id, description, lines: batch.lines, more: batch.more, end, status: endStatus(job) },
-	};
-}
-
-export function taskExitMessage(job: BackgroundJobInfo, tail: string): OutgoingMessage<TaskExitDetails> {
-	const description = label(job);
-	const end = describeJobStatus(job);
-	// label() already falls back to the command, so name it again only when it is not the label.
-	const command = description === job.command ? "" : ` — ${job.command}`;
-	const head = `[task ${job.id} · ${description}] ${end}${command}`;
-	return {
-		customType: TASK_EXIT_MESSAGE_TYPE,
-		content: tail.length > 0 ? `${head}\n${tail}` : head,
-		display: true,
-		details: { id: job.id, description, command: job.command, end, tail, status: endStatus(job) },
+		details: { id: job.id, description, lines: text.split("\n") },
 	};
 }
 
 /**
- * A job the model killed itself already got its answer from kill_bash; everything
- * else is news. Monitors are the exception: monitor-tool's own onExit reports every
- * end, kill included — a watch's end is its answer.
+ * How a monitor's end reads. `expiry` is the notice sent instead when the timeout
+ * killed it; a stop the registry made (the rate limit) carries its own notice.
+ */
+export function monitorEndSummary(job: BackgroundJobInfo): string {
+	const d = label(job);
+	if (job.killed) return `Monitor "${d}" stopped`;
+	const code = job.exit?.code ?? null;
+	if (job.exit?.error || (code !== null && code !== 0)) return `Monitor "${d}" script failed (exit ${code})`;
+	return job.events > 0
+		? `Monitor "${d}" stream ended`
+		: `Monitor "${d}" ended without producing output (exit ${code})`;
+}
+
+/** The terminal notification, with any lines that arrived too late for their own event. */
+export function monitorEndMessage(job: BackgroundJobInfo, leftover: string[]): OutgoingMessage<MonitorMessageDetails> {
+	const description = label(job);
+	const end = job.stopReason ?? monitorEndSummary(job);
+	const text = leftover.length > 0 ? eventText(leftover) : "";
+	return {
+		customType: MONITOR_MESSAGE_TYPE,
+		content: taskNotification({
+			taskId: job.id,
+			outputFile: job.outputFile,
+			status: job.killed ? "killed" : endStatus(job) === "error" ? "failed" : "completed",
+			summary: job.stopReason ? `Monitor event: "${description}"` : end,
+			body: job.stopReason ? `\n<event>${end}</event>` : text ? `\n<event>${text}</event>` : undefined,
+		}),
+		display: true,
+		details: { id: job.id, description, lines: text ? text.split("\n") : [], end, status: endStatus(job) },
+	};
+}
+
+/** The summary of a finished background command, in Claude Code's words. */
+export function taskExitSummary(job: BackgroundJobInfo): string {
+	const d = label(job);
+	if (job.stoppedByUser) return `Task "${d}" was stopped by the user`;
+	if (job.killed) return `Background command "${d}" was stopped`;
+	const code = job.exit?.code;
+	if (job.exit?.error && code === null) return `Background command "${d}" ${describeJobStatus(job)}`;
+	return code === 0
+		? `Background command "${d}" completed (exit code 0)`
+		: `Background command "${d}" failed with exit code ${code}`;
+}
+
+export function taskExitMessage(job: BackgroundJobInfo, toolUseId?: string): OutgoingMessage<TaskExitDetails> {
+	const end = taskExitSummary(job);
+	const status = job.killed ? "killed" : endStatus(job) === "error" ? "failed" : "completed";
+	return {
+		customType: TASK_EXIT_MESSAGE_TYPE,
+		content: taskNotification({
+			taskId: job.id,
+			toolUseId,
+			// A stop the user made is the whole news; Claude Code names no file then.
+			outputFile: job.stoppedByUser ? undefined : job.outputFile,
+			status,
+			summary: end,
+		}),
+		display: true,
+		details: {
+			id: job.id,
+			description: label(job),
+			command: job.command,
+			end,
+			outputFile: job.outputFile,
+			status: endStatus(job),
+		},
+	};
+}
+
+/** Claude Code's notice for a background shell that looks blocked on a prompt; the task keeps running. */
+export function taskStallMessage(
+	job: BackgroundJobInfo,
+	tail: string,
+	toolUseId?: string,
+): OutgoingMessage<TaskExitDetails> {
+	const end = `Background command "${label(job)}" appears to be waiting for interactive input`;
+	return {
+		customType: TASK_EXIT_MESSAGE_TYPE,
+		content: taskNotification({
+			taskId: job.id,
+			toolUseId,
+			outputFile: job.outputFile,
+			summary: end,
+			trailing: `\nLast output:\n${tail.trimEnd()}\n\nThe command is likely blocked on an interactive prompt. Stop this task and re-run with piped input (e.g., \`echo y | command\`) or a non-interactive flag if one exists.`,
+		}),
+		display: true,
+		details: {
+			id: job.id,
+			description: label(job),
+			command: job.command,
+			end,
+			outputFile: job.outputFile,
+			status: "warning",
+		},
+	};
+}
+
+/**
+ * A job the model stopped itself already got its answer from task_stop, and one a
+ * blocking task_output was waiting on got it there; everything else is news.
  */
 export function shouldNotifyExit(job: BackgroundJobInfo): boolean {
-	return !(job.killed && !job.stopReason);
+	if (job.awaited) return false;
+	return !(job.killed && !job.stopReason && !job.stoppedByUser);
 }

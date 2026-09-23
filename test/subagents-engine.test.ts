@@ -287,7 +287,7 @@ describe("runSubagent", () => {
 		});
 		expect(result.status).toBe("ok");
 		expect(result.usage.turns).toBe(2);
-		expect(result.agentId).toBe("child-1");
+		expect(result.agentId).toMatch(/^a[0-9a-f]{16}$/);
 		expect(fake.calls).toEqual(["prompt:Task: look around", "dispose"]);
 		expect(received.tools).toEqual(["read"]);
 		expect(received.excludeTools).toEqual(["task", "write"]);
@@ -414,7 +414,7 @@ describe("persistence, resume and worktrees", () => {
 		const fake = fakeSession(1);
 		fake.session.sessionId = first.getSessionId();
 		(fake.session as any).sessionFile = file;
-		await runSubagent({
+		const { agentId } = await runSubagent({
 			def: def({ name: "keeper", tools: ["read"] }),
 			task: "t",
 			ctx: ctx(),
@@ -426,13 +426,14 @@ describe("persistence, resume and worktrees", () => {
 			def: def({ name: "wrong-def" }),
 			task: "more",
 			ctx: ctx(),
-			resume: first.getSessionId(),
+			resume: agentId,
 			createSession: async (o) => {
 				received = o;
 				return { session: fakeSession(1).session as any };
 			},
 		});
 		expect(result.status).toBe("ok");
+		expect(result.agentId).toBe(agentId);
 		expect(result.agent).toBe("keeper");
 		expect(received.tools).toEqual(["read"]);
 		expect(received.sessionManager.getSessionFile()).toBe(file);
@@ -471,6 +472,24 @@ describe("persistence, resume and worktrees", () => {
 				ctx: ctx(),
 				createSession: async (o) => {
 					writeFileSync(join(o.cwd as string, "new.txt"), "x");
+					return { session: fakeSession(1).session as any };
+				},
+			});
+			expect(result.worktree).toBeDefined();
+			expect(existsSync(join(result.worktree as string, "new.txt"))).toBe(true);
+		});
+
+		it("keeps a worktree the child committed in, though its status is clean", async () => {
+			const result = await runSubagent({
+				def: def({ isolation: "worktree" }),
+				task: "t",
+				ctx: ctx(),
+				createSession: async (o) => {
+					const wt = (...args: string[]) =>
+						execFileSync("git", ["-C", o.cwd as string, ...args], { stdio: "pipe" });
+					writeFileSync(join(o.cwd as string, "new.txt"), "x");
+					wt("add", "new.txt");
+					wt("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "work");
 					return { session: fakeSession(1).session as any };
 				},
 			});
@@ -532,28 +551,24 @@ describe("worktree children keep the parent's settings and trust", () => {
 		expect(ok.join("\n")).toContain("planted");
 	});
 
-	it("takes the child's id from its session manager after the run — pi 0.85 assigns it on first persist", async () => {
-		const fake = fakeSession(1);
-		const s = fake.session as any;
-		delete s.sessionId;
-		delete s.sessionFile;
-		// pi 0.85 assigns the id on first persist, i.e. only once the prompt has run.
-		s.sessionManager = {
-			getSessionId: () => (s.state.messages.length > 0 ? "via-manager" : undefined),
-			getSessionFile: () => "/tmp/via-manager.jsonl",
-		};
-		const result = await runSubagent({
-			def: def(),
-			task: "t",
-			ctx: {
-				cwd,
-				isProjectTrusted: () => true,
-				model: model("p", "m"),
-				modelRegistry: registry(model("p", "m")),
-			} as any,
-			createSession: async () => ({ session: s }),
-		});
-		expect(result.agentId).toBe("via-manager");
+	it("gives a new child Claude Code's agent id, or the one it was handed", async () => {
+		const run = (agentId?: string) =>
+			runSubagent({
+				def: def(),
+				task: "t",
+				agentId,
+				ctx: {
+					cwd,
+					isProjectTrusted: () => true,
+					model: model("p", "m"),
+					modelRegistry: registry(model("p", "m")),
+				} as any,
+				createSession: async () => ({ session: fakeSession(1).session as any }),
+			});
+		const [a, b] = [await run(), await run()];
+		expect(a.agentId).toMatch(/^a[0-9a-f]{16}$/);
+		expect(a.agentId).not.toBe(b.agentId);
+		expect((await run("a0123456789abcdef")).agentId).toBe("a0123456789abcdef");
 	});
 });
 
@@ -885,13 +900,13 @@ describe("run lifecycle hardening", () => {
 		const fake = fakeSession(1);
 		fake.session.sessionId = first.getSessionId();
 		(fake.session as any).sessionFile = first.getSessionFile();
-		await runSubagent({
+		const { agentId } = await runSubagent({
 			def: def(),
 			task: "t",
 			ctx: ctx(),
 			createSession: async () => ({ session: fake.session as any }),
 		});
-		return first.getSessionId();
+		return agentId as string;
 	}
 
 	it("keeps the child's output when compaction replaces its message list mid-run", async () => {
@@ -1241,14 +1256,14 @@ describe("durable run records", () => {
 		const fake = fakeSession(1);
 		fake.session.sessionId = first.getSessionId();
 		(fake.session as any).sessionFile = first.getSessionFile();
-		await runSubagent({
+		const { agentId } = await runSubagent({
 			def: def({ name: "explore" }),
 			task: "look",
 			ctx: ctx(),
 			mission: "login",
 			createSession: async () => ({ session: fake.session as any }),
 		});
-		expect(findRecord(first.getSessionId())).toMatchObject({ agent: "explore", mission: "login", cwd, status: "ok" });
+		expect(findRecord(agentId as string)).toMatchObject({ agent: "explore", mission: "login", cwd, status: "ok" });
 		expect(missionsSection(cwd).join("\n")).toMatch(/- login: 1 run; latest explore ok, agent id /);
 
 		forgetResumableForTests();
@@ -1257,7 +1272,7 @@ describe("durable run records", () => {
 			def: def(),
 			task: "more",
 			ctx: ctx(),
-			resume: first.getSessionId(),
+			resume: agentId,
 			createSession: async (o) => {
 				received = o;
 				return { session: fakeSession(1).session as any };
@@ -1266,7 +1281,7 @@ describe("durable run records", () => {
 		expect(resumed.status).toBe("ok");
 		expect(resumed.agent).toBe("explore");
 		expect(received.sessionManager.getSessionFile()).toBe(first.getSessionFile());
-		expect(resumableAgentName(first.getSessionId())).toBe("explore");
+		expect(resumableAgentName(agentId as string)).toBe("explore");
 	});
 });
 

@@ -5,7 +5,7 @@ import {
 	TASK_EXIT_MESSAGE_TYPE,
 	type TaskExitDetails,
 } from "../ext/_shared/monitor-events.ts";
-import backgroundBash from "../ext/background-bash/index.ts";
+import backgroundBash, { tasksPillLabel } from "../ext/background-bash/index.ts";
 
 type Renderer = (message: any, options: any, theme: any) => { render(width: number): string[] } | undefined;
 
@@ -17,7 +17,7 @@ const options = { outputPad: 0, expanded: false } as any;
 function renderers(): Record<string, Renderer> {
 	const registered: Record<string, Renderer> = {};
 	const pi = {
-		registerTool: () => {},
+		on: () => {},
 		registerEntryRenderer: () => {},
 		registerCommand: () => {},
 		registerMessageRenderer: (type: string, renderer: Renderer) => {
@@ -39,25 +39,24 @@ function render(type: string, details: unknown): string | undefined {
 }
 
 const exitDetails: TaskExitDetails = {
-	id: "bash_2",
+	id: "b00000002",
 	description: "make",
 	command: "make",
-	end: "exited with code 1",
-	tail: "boom",
+	end: 'Background command "make" failed with exit code 1',
+	outputFile: "/tmp/claude/x/b00000002.output",
 	status: "error",
 };
 
 describe("task-exit renderer", () => {
-	it("names the command once when it is also the description", () => {
+	it("shows the summary and the output file, naming the command once", () => {
 		const out = render(TASK_EXIT_MESSAGE_TYPE, exitDetails) ?? "";
-		expect(out).toContain("task bash_2 · make exited with code 1");
-		expect(out).not.toContain("make exited with code 1 — make");
-		expect(out).toContain("boom");
+		expect(out).toContain('task b00000002 Background command "make" failed with exit code 1');
+		expect(out).not.toContain("— make");
+		expect(out).toContain("/tmp/claude/x/b00000002.output");
 	});
 
-	it("names the command once beside a description of its own", () => {
+	it("names the command beside a description of its own", () => {
 		const out = render(TASK_EXIT_MESSAGE_TYPE, { ...exitDetails, description: "build" }) ?? "";
-		expect(out).toContain("task bash_2 · build exited with code 1 — make");
 		expect(out.split("— make").length - 1).toBe(1);
 	});
 
@@ -65,31 +64,29 @@ describe("task-exit renderer", () => {
 		expect(render(TASK_EXIT_MESSAGE_TYPE, undefined)).toBeUndefined();
 	});
 
-	it("strips escape sequences out of the child's output", () => {
-		const tail = "\u001b[31mERROR\u001b[0m: boom\u001b[2K";
-		const out = render(TASK_EXIT_MESSAGE_TYPE, { ...exitDetails, tail }) ?? "";
-		expect(out).toContain("ERROR: boom");
-		expect(out).not.toContain("\u001b");
+	it("strips escape sequences out of the command", () => {
+		const out =
+			render(TASK_EXIT_MESSAGE_TYPE, { ...exitDetails, description: "d", command: "\u001b[31mmake\u001b[0m" }) ?? "";
+		expect(out).toContain("— make");
+		expect(out).not.toContain("\u001b[31m");
 	});
 });
 
 describe("monitor renderer", () => {
 	const monitorDetails: MonitorMessageDetails = {
-		id: "bash_3",
+		id: "b00000003",
 		description: "errors in deploy.log",
 		lines: ["l1", "l2"],
-		more: 3,
-		end: "exited with code 0",
+		end: 'Monitor "errors in deploy.log" stream ended',
 		status: "success",
 	};
 
-	it("renders the header, every event line, the overflow note and the end", () => {
+	it("renders the header, every event line and the end", () => {
 		const out = render(MONITOR_MESSAGE_TYPE, monitorDetails) ?? "";
-		expect(out).toContain("monitor bash_3 · errors in deploy.log");
+		expect(out).toContain("monitor b00000003 · errors in deploy.log");
 		expect(out).toContain("l1");
 		expect(out).toContain("l2");
-		expect(out).toContain("3 more lines");
-		expect(out).toContain("exited with code 0");
+		expect(out).toContain("stream ended");
 	});
 
 	it("falls back to pi's own rendering when the message carries no details", () => {
@@ -101,5 +98,29 @@ describe("monitor renderer", () => {
 		const out = render(MONITOR_MESSAGE_TYPE, { ...monitorDetails, lines }) ?? "";
 		expect(out).toContain("ERROR: boom");
 		expect(out).not.toContain("\u001b");
+	});
+});
+
+describe("footer pill label", () => {
+	const row = (id: string, kind: "shell" | "monitor" | "agent", state: "running" | "completed" = "running") =>
+		({ id, kind, label: "x", state, startedAt: 0 }) as const;
+
+	it.each([
+		[[row("b00000001", "shell")], "1 shell"],
+		[[row("b00000001", "shell"), row("b00000002", "shell")], "2 shells"],
+		[[row("b00000001", "shell"), row("b00000002", "monitor")], "1 shell, 1 monitor"],
+		[[row("b00000001", "monitor"), row("b00000002", "monitor")], "2 monitors"],
+		[[row("s00000001", "monitor")], "1 monitor"],
+		[[row("sa-1", "agent")], "1 local agent"],
+		[[row("sa-1", "agent"), row("sa-2", "agent")], "2 local agents"],
+		[[row("sa-1", "agent"), row("b00000001", "shell")], "2 background tasks"],
+		[[row("s00000001", "monitor"), row("b00000001", "monitor")], "2 background tasks"],
+	])("labels %j as %s", (rows, label) => {
+		expect(tasksPillLabel([...rows])).toBe(label);
+	});
+
+	it("counts only what is running, and shows nothing when nothing is", () => {
+		expect(tasksPillLabel([row("b00000001", "shell", "completed")])).toBeUndefined();
+		expect(tasksPillLabel([row("b00000001", "shell"), row("b00000002", "shell", "completed")])).toBe("1 shell");
 	});
 });

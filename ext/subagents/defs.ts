@@ -62,6 +62,8 @@ export interface AgentDef {
 	runner?: AgentRunner;
 	/** Skills whose full content is preloaded into the child's system prompt. */
 	skills?: string[];
+	/** The parent's MCP servers, by name, whose tools the child gets. */
+	mcpServers?: string[];
 	/** The mode the child is evaluated under when the parent is in `ask`. */
 	permissionMode?: PermissionMode;
 	memory?: AgentMemoryScope;
@@ -190,6 +192,12 @@ export function parseDef(content: string): ParsedDef | { name?: string; problem:
 		.filter((s): s is string => typeof s === "string")
 		.map((s) => s.trim())
 		.filter(Boolean);
+	// Names only: an inline config would start a process no `/mcp approve` covers.
+	const mcpRaw = frontmatter.mcpServers;
+	const mcpList = typeof mcpRaw === "string" ? mcpRaw.split(",") : Array.isArray(mcpRaw) ? mcpRaw : [];
+	if (mcpList.some((s) => typeof s !== "string"))
+		return { name, problem: "mcpServers lists server names only; declare a server in mcp.json and name it here" };
+	const mcpServers = (mcpList as string[]).map((s) => s.trim()).filter(Boolean);
 	const positive = (v: unknown): number | undefined =>
 		typeof v === "number" && Number.isInteger(v) && v > 0 ? v : undefined;
 	// `plan` and the removed modes are not errors, just not this layer's: a def that
@@ -214,6 +222,7 @@ export function parseDef(content: string): ParsedDef | { name?: string; problem:
 		outputSchema: parseOutputSchema(frontmatter.outputSchema),
 		runner: parseRunner(frontmatter.runner),
 		skills: skills.length > 0 ? skills : undefined,
+		mcpServers: mcpServers.length > 0 ? mcpServers : undefined,
 		permissionMode,
 		memory: oneOf(frontmatter.memory, MEMORY_SCOPES),
 		background: frontmatter.background === true ? true : undefined,

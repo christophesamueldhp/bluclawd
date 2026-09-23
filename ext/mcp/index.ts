@@ -79,6 +79,7 @@ import {
 	type InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { publishMcpServers } from "../_shared/mcp-lending.ts";
 import { openBrowser } from "../_shared/open-browser.ts";
 import { approveProjectServer, setProjectServerDisabled } from "../_shared/settings-write.ts";
 import { mcpAutocomplete } from "./autocomplete.ts";
@@ -630,6 +631,29 @@ export function factory(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		const myEpoch = ++epoch;
+		// Subagents borrow these connections (see _shared/mcp-lending.ts); the view is
+		// live, so it follows connects, reconnects and this session's shutdown.
+		const liveClient = (name: string) => connections.find((c) => c.name === name && c.status === "connected")?.client;
+		publishMcpServers(() =>
+			connections.map((conn) => ({
+				name: conn.name,
+				status: conn.status,
+				...(conn.error ? { error: conn.error } : {}),
+				toolNames: conn.tools.map((t) => t.name),
+				...(conn.instructions ? { instructions: conn.instructions } : {}),
+				lend: (target) => {
+					const mod = clientModule;
+					if (!mod || conn.status !== "connected") return;
+					mod.registerListedTools(
+						target,
+						conn.name,
+						() => liveClient(conn.name),
+						conn.tools.map((t) => t.listed),
+						toolCallTimeouts(conn.config),
+					);
+				},
+			})),
+		);
 		if (ctx.hasUI && !autocompleteAdded) {
 			autocompleteAdded = true;
 			const live = () => connections.filter((c) => c.status === "connected" && c.client);

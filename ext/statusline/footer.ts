@@ -74,9 +74,9 @@ function pad(text: string): string {
 const SLIDER_WIDTH = 10;
 
 /** Fixed lead-in order for the extension-statuses line: permission mode reads
- * before the mcp server/tool count, matching Claude Code. Keys not listed here
+ * before the background task count and the mcp server/tool count, matching Claude Code. Keys not listed here
  * fall back to alphabetical order after these. */
-const STATUS_KEY_ORDER: readonly string[] = ["mode", "mcp"];
+const STATUS_KEY_ORDER: readonly string[] = ["mode", "tasks", "mcp"];
 
 /** Render a ccstatusline-style slider bar: `▓` filled, `░` empty. */
 export function makeSliderBar(percent: number, width: number = SLIDER_WIDTH): string {

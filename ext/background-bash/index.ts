@@ -1,38 +1,39 @@
 /**
- * Background shell jobs: the `bash_output` / `kill_bash` tools and `/tasks`.
+ * Background tasks, the user's side: `/tasks`, the footer's task count, Ctrl+B
+ * to move a running foreground bash into the background, and the renderers for
+ * job events.
  *
- * The `run_in_background` parameter that STARTS a job does not live here — only
- * one extension may own the `bash` tool name, and the sandbox extension already
- * does, so the parameter is registered there against the same job registry in
- * `_shared/background-bash.ts`. Change one, look at the other.
+ * Nothing here starts a job or answers the model: `run_in_background` and the
+ * monitor live on the sandbox extension (the one owner of the `bash` name), and
+ * `task_output` / `task_stop` on the subagents extension, which owns those names;
+ * the shell half of both sits in `_shared/background-bash.ts`. Change one, look
+ * at the others.
  *
  * The two message renderers here draw events whose senders also live in
  * `ext/sandbox`: `monitor-tool.ts` and the `run_in_background` exit hook. Same
  * coupling as the parameter above — change one, look at the other.
  *
- * `/tasks` renders through `appendEntry` + `registerEntryRenderer` rather than
- * `ctx.ui.notify`, which would dim the whole block and flatten the heading and
+ * Interactive `/tasks` is a dialog; without a UI it renders through
+ * `appendEntry` + `registerEntryRenderer` rather than `ctx.ui.notify`, which would dim the whole block and flatten the heading and
  * per-job status colours. Entry data is a snapshot of plain values: entries are
  * persisted JSON, so the theme is applied at render time, and the elapsed
  * seconds are frozen at command time because the output is a moment, not a live
  * view.
  */
 
-import type { InlineExtension } from "@earendil-works/pi-coding-agent";
-import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
+import type { ExtensionCommandContext, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
+import { Box, type Component, Container, matchesKey, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import { subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { stripAnsi } from "../_shared/ansi.ts";
-import {
-	backgroundBashJobs,
-	createBashOutputTool,
-	createKillBashTool,
-	describeJobStatus,
-} from "../_shared/background-bash.ts";
+import { backgroundBashJobs, describeJobStatus } from "../_shared/background-bash.ts";
+import { detachAll, runningForegroundShells, subscribeForegroundShells } from "../_shared/foreground-shells.ts";
 import {
 	MONITOR_MESSAGE_TYPE,
 	type MonitorMessageDetails,
 	TASK_EXIT_MESSAGE_TYPE,
 	type TaskExitDetails,
 } from "../_shared/monitor-events.ts";
+import { type TaskRow, TasksDialog, taskRows } from "./tasks-dialog.ts";
 
 const MAX_COMMAND_CHARS = 80;
 
@@ -65,11 +66,169 @@ function block(lines: string[]): Container {
 	return container;
 }
 
+/** Claude Code's `background` colour (dark theme), the footer pill's. */
+const PILL = (text: string) => `\x1b[38;2;0;204;204m${text}\x1b[39m`;
+const INVERSE = (text: string) => `\x1b[7m${text}\x1b[27m`;
+/** Claude Code shows the Ctrl+B hint once a foreground command has run this long. */
+const BACKGROUND_HINT_MS = 2000;
+
+const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : `${n} ${many}`);
+
+/**
+ * The footer pill's label, Claude Code's: named by type when every running task
+ * shares one (shells and monitors are both shell tasks), else a plain count.
+ */
+export function tasksPillLabel(rows: TaskRow[]): string | undefined {
+	const running = rows.filter((r) => r.state === "running");
+	if (running.length === 0) return undefined;
+	const type = (r: TaskRow) => (r.kind === "agent" ? "agent" : r.id.startsWith("s") ? "ws" : "shell");
+	const types = new Set(running.map(type));
+	if (types.size > 1) return count(running.length, "background task", "background tasks");
+	if (types.has("agent")) return count(running.length, "local agent", "local agents");
+	if (types.has("ws")) return count(running.length, "monitor", "monitors");
+	const shells = running.filter((r) => r.kind === "shell").length;
+	const monitors = running.length - shells;
+	return [shells ? count(shells, "shell", "shells") : "", monitors ? count(monitors, "monitor", "monitors") : ""]
+		.filter(Boolean)
+		.join(", ");
+}
+
+/** The Ctrl+B hint; under tmux Ctrl+B is the prefix, so it takes two presses. */
+export function backgroundHint(): string {
+	const key = process.env.TMUX ? "ctrl+b ctrl+b (twice)" : "ctrl+b";
+	return `(${key} to run in background)`;
+}
+
+/** Only the prompt editor has getText among the components that take focus. */
+const isEditor = (component: unknown) => typeof (component as { getText?: unknown } | null)?.getText === "function";
+
 const backgroundBash: InlineExtension = {
 	name: "background-bash",
 	factory: (pi) => {
-		pi.registerTool(createBashOutputTool());
-		pi.registerTool(createKillBashTool());
+		let ctx: ExtensionContext | undefined;
+		let tui: TUI | undefined;
+		let pillSelected = false;
+		let hintTimer: ReturnType<typeof setTimeout> | undefined;
+		const cleanups: (() => void)[] = [];
+
+		const owner = () => ctx?.sessionManager?.getSessionId();
+
+		/** The footer pill: its label, then what ↓ (or Enter, once selected) does. */
+		const refresh = () => {
+			if (!ctx?.hasUI) return;
+			const label = tasksPillLabel(taskRows(owner()));
+			if (!label) pillSelected = false;
+			const hint = pillSelected ? "(enter to view tasks)" : "(↓ to manage)";
+			const pill = pillSelected ? INVERSE(PILL(label ?? "")) : PILL(label ?? "");
+			ctx.ui.setStatus("tasks", label ? `${pill} ${ctx.ui.theme.fg("dim", hint)}` : undefined);
+			tui?.requestRender();
+		};
+
+		/** The Ctrl+B hint appears 2s into a foreground command, so it needs a render then. */
+		const onForegroundChange = () => {
+			clearTimeout(hintTimer);
+			const shells = runningForegroundShells();
+			if (shells.length > 0) {
+				const due = Math.min(...shells.map((s) => s.startedAt)) + BACKGROUND_HINT_MS - Date.now();
+				hintTimer = setTimeout(() => tui?.requestRender(), Math.max(0, due));
+			}
+			tui?.requestRender();
+		};
+
+		const openDialog = async (ui: ExtensionContext["ui"], sessionOwner: string | undefined) => {
+			await ui.custom<void>((dialogTui, theme, _keybindings, done) => {
+				const dialog = new TasksDialog(
+					theme,
+					sessionOwner,
+					() => done(undefined),
+					() => dialogTui.requestRender(),
+				);
+				// Runtimes and output tails move on their own.
+				const timer = setInterval(() => dialogTui.requestRender(), 1000);
+				const offJobs = backgroundBashJobs.subscribe(() => dialogTui.requestRender());
+				return Object.assign(dialog as Component, {
+					dispose: () => {
+						clearInterval(timer);
+						offJobs();
+					},
+				});
+			});
+		};
+
+		const deselect = () => {
+			if (!pillSelected) return;
+			pillSelected = false;
+			refresh();
+		};
+
+		pi.on("session_start", (_event, startCtx) => {
+			ctx = startCtx;
+			pillSelected = false;
+			for (const off of cleanups.splice(0)) off();
+			cleanups.push(
+				backgroundBashJobs.subscribe(refresh),
+				subscribeAgentTasks(refresh),
+				subscribeForegroundShells(onForegroundChange),
+			);
+			if (startCtx.hasUI) {
+				const ui = startCtx.ui;
+				// Always mounted: it renders nothing until a foreground command has run 2s.
+				ui.setWidget("background-bash:hint", (widgetTui, theme) => {
+					tui = widgetTui;
+					return {
+						render: () => {
+							const shells = runningForegroundShells();
+							if (!shells.some((s) => Date.now() - s.startedAt >= BACKGROUND_HINT_MS)) return [];
+							return [`     ${theme.fg("dim", backgroundHint())}`];
+						},
+						invalidate: () => {},
+					};
+				});
+				cleanups.push(
+					ui.onTerminalInput((data) => {
+						// Ctrl+B is the editor's cursor-left, so the key is taken only while a
+						// foreground bash is running and would otherwise do nothing useful.
+						if (matchesKey(data, "ctrl+b") && detachAll() > 0) return { consume: true };
+						// ↓ from an empty prompt selects the pill, Enter opens it (Claude Code).
+						// Nothing is taken while a dialog or overlay has the keyboard.
+						// getFocusedComponent is on pi-tui's TUI class, not its TUI interface.
+						const focused = (tui as { getFocusedComponent?: () => unknown } | undefined)?.getFocusedComponent?.();
+						if (!tui || tui.hasOverlay() || !isEditor(focused)) {
+							deselect();
+							return undefined;
+						}
+						if (pillSelected) {
+							if (matchesKey(data, "enter")) {
+								deselect();
+								void openDialog(ui, owner());
+								return { consume: true };
+							}
+							if (matchesKey(data, "escape") || matchesKey(data, "up")) {
+								deselect();
+								return { consume: true };
+							}
+							if (matchesKey(data, "down")) return { consume: true };
+							deselect();
+							return undefined;
+						}
+						if (matchesKey(data, "down") && ui.getEditorText() === "" && tasksPillLabel(taskRows(owner()))) {
+							pillSelected = true;
+							refresh();
+							return { consume: true };
+						}
+						return undefined;
+					}),
+				);
+			}
+			refresh();
+		});
+
+		pi.on("session_shutdown", () => {
+			for (const off of cleanups.splice(0)) off();
+			clearTimeout(hintTimer);
+			ctx = undefined;
+			tui = undefined;
+		});
 
 		// Events land out of band, so each carries its own header. The header is
 		// accent, event lines are plain, and the terminal line takes the colour of
@@ -81,7 +240,6 @@ const backgroundBash: InlineExtension = {
 			if (!d) return undefined;
 			const lines: string[] = [theme.fg("accent", `monitor ${d.id}`) + theme.fg("dim", ` · ${d.description}`)];
 			for (const line of d.lines) lines.push(clean(line));
-			if (d.more > 0) lines.push(theme.fg("dim", `…and ${d.more} more lines (bash_output)`));
 			if (d.end) lines.push(theme.fg(d.status ?? "dim", d.end));
 			const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
 			box.addChild(new Text(lines.join("\n"), 0, 0));
@@ -91,16 +249,11 @@ const backgroundBash: InlineExtension = {
 		pi.registerMessageRenderer<TaskExitDetails>(TASK_EXIT_MESSAGE_TYPE, (message, { outputPad }, theme) => {
 			const d = message.details;
 			if (!d) return undefined;
-			// The description falls back to the command upstream, so name the command
-			// again only when it is not already the description.
-			const command = d.command === d.description ? "" : theme.fg("dim", ` — ${d.command}`);
-			const lines: string[] = [
-				theme.fg("accent", `task ${d.id}`) +
-					theme.fg("dim", ` · ${d.description} `) +
-					theme.fg(d.status, d.end) +
-					command,
-			];
-			if (d.tail) lines.push(clean(d.tail));
+			// The summary names the description, so the command is named again only when
+			// it is not the description.
+			const command = d.command === d.description ? "" : theme.fg("dim", ` — ${clean(d.command)}`);
+			const lines: string[] = [theme.fg("accent", `task ${d.id} `) + theme.fg(d.status, clean(d.end)) + command];
+			if (d.outputFile) lines.push(theme.fg("dim", d.outputFile));
 			const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
 			box.addChild(new Text(lines.join("\n"), 0, 0));
 			return box;
@@ -129,32 +282,41 @@ const backgroundBash: InlineExtension = {
 				lines.push(
 					theme.fg(
 						"dim",
-						"Read output: bash_output · stop: kill_bash (ask the model, or use ! with ps). monitor starts a watch.",
+						"Read output: task_output or the output file · stop: task_stop. monitor starts a watch.",
 					),
 				);
 			}
 			return block(lines);
 		});
 
-		pi.registerCommand("tasks", {
-			description: "List background bash tasks",
-			handler: async () => {
-				const now = Date.now();
-				const jobs: TaskSnapshot[] = backgroundBashJobs.list().map((job) => ({
-					id: job.id,
-					kind: job.kind,
-					command:
-						job.command.length > MAX_COMMAND_CHARS
-							? `${job.command.slice(0, MAX_COMMAND_CHARS - 3)}...`
-							: job.command,
-					status: describeJobStatus(job),
-					seconds: Math.max(0, Math.round(((job.exit?.at ?? now) - job.startedAt) / 1000)),
-					running: !job.exit,
-					events: job.events,
-				}));
-				pi.appendEntry<TasksData>("bluclawd:tasks", { jobs });
-			},
-		});
+		// Claude Code's /tasks (formerly /bashes).
+		for (const name of ["tasks", "bashes"]) {
+			pi.registerCommand(name, {
+				description: name === "tasks" ? "View and manage everything running in the background" : "Alias for /tasks",
+				handler: (_args, commandCtx) => showTasks(commandCtx),
+			});
+		}
+
+		async function showTasks(commandCtx: ExtensionCommandContext): Promise<void> {
+			if (commandCtx.hasUI) {
+				await openDialog(commandCtx.ui, commandCtx.sessionManager.getSessionId());
+				return;
+			}
+			const now = Date.now();
+			const jobs: TaskSnapshot[] = backgroundBashJobs.list(commandCtx.sessionManager.getSessionId()).map((job) => ({
+				id: job.id,
+				kind: job.kind,
+				command:
+					job.command.length > MAX_COMMAND_CHARS
+						? `${job.command.slice(0, MAX_COMMAND_CHARS - 3)}...`
+						: job.command,
+				status: describeJobStatus(job),
+				seconds: Math.max(0, Math.round(((job.exit?.at ?? now) - job.startedAt) / 1000)),
+				running: !job.exit,
+				events: job.events,
+			}));
+			pi.appendEntry<TasksData>("bluclawd:tasks", { jobs });
+		}
 	},
 };
 

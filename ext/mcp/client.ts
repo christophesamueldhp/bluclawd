@@ -315,10 +315,14 @@ function timeoutError(
 	return new Error(`MCP tool "${tool}" on server "${server}" ${why}.`);
 }
 
+type ListedTool = Awaited<ReturnType<Client["listTools"]>>["tools"][number];
+
 /** Name + description of one registered MCP tool (for /mcp and tool deferral). */
 export interface RegisteredMcpTool {
 	name: string;
 	description: string;
+	/** As the server listed it: what registering the tool again (on a subagent) needs. */
+	listed: ListedTool;
 }
 
 /**
@@ -329,18 +333,34 @@ export interface RegisteredMcpTool {
  * exercises with a fake in-memory server.
  */
 export async function registerServerTools(
-	pi: ExtensionAPI,
+	pi: Pick<ExtensionAPI, "registerTool">,
 	serverName: string,
 	client: Client,
 	timeouts: { total: number; idle: number },
 ): Promise<RegisteredMcpTool[]> {
 	const { tools } = await client.listTools();
+	return registerListedTools(pi, serverName, () => client, tools, timeouts);
+}
+
+/**
+ * Register already-listed tools, calling through whatever client `getClient`
+ * returns at call time: a subagent borrowing the parent's server then follows a
+ * reconnect instead of holding a closed client.
+ */
+export function registerListedTools(
+	pi: Pick<ExtensionAPI, "registerTool">,
+	serverName: string,
+	getClient: () => Client | undefined,
+	tools: readonly ListedTool[],
+	timeouts: { total: number; idle: number },
+): RegisteredMcpTool[] {
 	const registered: RegisteredMcpTool[] = [];
 	for (const tool of tools) {
 		const bareName = tool.name;
 		registered.push({
 			name: mcpToolName(serverName, bareName),
 			description: tool.description ?? `MCP tool "${bareName}" from server "${serverName}".`,
+			listed: tool,
 		});
 		pi.registerTool({
 			name: mcpToolName(serverName, bareName),
@@ -352,6 +372,8 @@ export async function registerServerTools(
 				// per-request timer is the IDLE window: reset by each progress notification,
 				// capped by the wall clock. `onprogress` must be set — it is what makes the
 				// SDK send a progressToken, and without one no server reports progress.
+				const client = getClient();
+				if (!client) throw new Error(`MCP server "${serverName}" is not connected.`);
 				let result: Awaited<ReturnType<Client["callTool"]>>;
 				try {
 					result = await client.callTool(

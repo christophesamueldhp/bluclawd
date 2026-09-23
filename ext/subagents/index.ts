@@ -26,6 +26,8 @@ import type {
 import { CONFIG_DIR_NAME, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
+import { agentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
+import { isShellTaskId, noTaskError, shellTaskOutput, shellTaskStop } from "../_shared/background-bash.ts";
 import { EVENT_DELIVERY } from "../_shared/monitor-events.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { readTranscript, type TranscriptLine, transcriptLines } from "./inspect.ts";
@@ -64,6 +66,7 @@ import {
 import {
 	childSessionDir,
 	childTranscript,
+	newAgentId,
 	RESUME_PLACEHOLDER,
 	type RunSubagentOptions,
 	resumableAgentName,
@@ -153,6 +156,7 @@ async function runOne(
 	extra: Pick<
 		RunSubagentOptions,
 		| "resume"
+		| "agentId"
 		| "isolation"
 		| "fork"
 		| "onSession"
@@ -222,6 +226,8 @@ function annotate(result: SingleResult): string {
 const ROSTER_DESCRIPTION_CHARS = 400;
 /** Lines of a background child's output shown in its completion box. */
 const EXIT_PREVIEW_LINES = 20;
+/** How long quitting waits for aborted background runs to clean up after themselves. */
+const SHUTDOWN_WAIT_MS = 10_000;
 
 /**
  * The agent roster the model sees in its system prompt. Without it the model
@@ -488,14 +494,39 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 		done: Promise<AgentToolResult<SubagentDetails>>;
 	}
 	const backgroundRuns = new Map<string, BackgroundRun>();
-	// The `sa-N` id a background run was started under, mapped to the child it ran:
-	// the model sees the run id first and reaches for it, so `resume` accepts either.
-	const backgroundChildIds = new Map<string, string>();
-	let backgroundCounter = 0;
+	// /tasks and the footer list these runs; only the main session has any.
+	const releaseAgentTasks =
+		depth > 0
+			? () => {}
+			: publishAgentTasks({
+					list: () =>
+						Array.from(backgroundRuns.values(), ({ id, agent, task, startedAt }) => ({
+							id,
+							agent,
+							task,
+							startedAt,
+						})),
+					stop: (id) => {
+						const run = backgroundRuns.get(id);
+						if (!run) return false;
+						// As /agents stop: the model still gets the completion message.
+						run.stoppedByUser = true;
+						run.controller.abort();
+						return true;
+					},
+				});
+	// The id a background run was started under, mapped to the children it ran. A
+	// single child already carries the run's id; `resume` also accepts a run id
+	// when the run had one child. A parallel run's children are resumed by agent id.
+	const backgroundChildIds = new Map<string, { agent: string; agentId: string }[]>();
+	const soleChild = (id: string) => {
+		const children = backgroundChildIds.get(id);
+		return children?.length === 1 ? children[0].agentId : undefined;
+	};
 	let shuttingDown = false;
 
 	// Permission subjects for calls whose input does not name what runs: a resume
-	// (by agent id or by its sa-N run id) runs the resumed child's own def.
+	// (by agent id or by its background run id) runs the resumed child's own def.
 	// Published by the main session's instance only: a nested child's instance never
 	// sees session_shutdown to release it, and resolves nothing the root does not.
 	const releaseTargets =
@@ -503,7 +534,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 			? () => {}
 			: publishTaskTargets((input) => {
 					const id = typeof input.resume === "string" ? input.resume : "";
-					const name = id ? resumableAgentName(backgroundChildIds.get(id) ?? id) : undefined;
+					const name = id ? resumableAgentName(soleChild(id) ?? id) : undefined;
 					const workflow =
 						typeof input.workflow === "string" && input.workflow && lastCtx
 							? findWorkflow(lastCtx, input.workflow)
@@ -525,7 +556,21 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 		shuttingDown = true;
 		schedules.clear();
 		releaseTargets();
-		for (const run of backgroundRuns.values()) run.controller.abort();
+		releaseAgentTasks();
+		const runs = [...backgroundRuns.values()];
+		for (const run of runs) run.controller.abort();
+		// An aborted run still removes its clean worktree on the way out; the process
+		// must not exit before it has. Bounded, so a stuck child cannot hold up quitting.
+		if (runs.length > 0) {
+			let timer: NodeJS.Timeout | undefined;
+			await Promise.race([
+				Promise.allSettled(runs.map((run) => run.done)),
+				new Promise((resolve) => {
+					timer = setTimeout(resolve, SHUTDOWN_WAIT_MS);
+				}),
+			]);
+			clearTimeout(timer);
+		}
 	});
 
 	pi.registerMessageRenderer<SubagentExitDetails>(SUBAGENT_EXIT_MESSAGE_TYPE, (message, { outputPad }, theme) => {
@@ -551,7 +596,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
 			"The available agents are listed in the system prompt (<available_agents>).",
 			`Agents come from the bundled set, ${join(getAgentDir(), "agents")}, and ${CONFIG_DIR_NAME}/agents in a trusted project.`,
-			"run_in_background returns at once and delivers the result later (task_output, task_message and task_stop check on, steer and stop it; task_wait waits for it); resume continues an earlier child by its agent id; worktree: true gives each child its own git worktree; fork: true starts children from this conversation.",
+			"run_in_background returns at once and delivers the result later (task_output waits for it, or with block: false checks on it; task_message steers it; task_stop stops it; task_wait waits for several); resume continues an earlier child by its agent id; worktree: true gives each child its own git worktree; fork: true starts children from this conversation.",
 		].join(" "),
 		promptSnippet:
 			"Use the task tool to delegate self-contained work to specialized subagents (modes: single, parallel, chain) — each runs in-process with its own isolated context",
@@ -569,7 +614,13 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 		ctx: ExtensionContext,
 		// The detached re-entry of a background run: never detach again, whatever the
 		// def says (a def's `background: true` would otherwise recurse forever).
-		inner?: { fork?: ForkSource; onSession: NonNullable<RunSubagentOptions["onSession"]>; budget: SpawnBudget },
+		inner?: {
+			fork?: ForkSource;
+			onSession: NonNullable<RunSubagentOptions["onSession"]>;
+			budget: SpawnBudget;
+			/** The run's task id, which a single new child takes as its agent id (Claude Code). */
+			agentId?: string;
+		},
 	): Promise<AgentToolResult<SubagentDetails>> {
 		// A saved workflow is a chain: expanded here, before anything reads the modes.
 		if (params.workflow) {
@@ -596,10 +647,21 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 				resume: undefined,
 			};
 		}
-		// A background run's `sa-N` id stands for the child it ran.
-		if (params.resume && backgroundChildIds.has(params.resume)) {
-			params = { ...params, resume: backgroundChildIds.get(params.resume) };
+		// A background run's id stands for the child it ran.
+		const children = params.resume ? backgroundChildIds.get(params.resume) : undefined;
+		if (children && children.length > 1) {
+			const list = children.map((c) => `${c.agentId} (${c.agent})`).join(", ");
+			return {
+				content: [
+					{
+						type: "text",
+						text: `${params.resume} ran ${children.length} subagents; resume one by its agent id: ${list}.`,
+					},
+				],
+				details: { mode: "single", agentScope: "user", projectAgentsDir: null, results: [] },
+			};
 		}
+		if (children?.length === 1) params = { ...params, resume: children[0].agentId };
 		// Default scope follows project trust, as the /agents listing does: a trusted
 		// project's own agents are simply available (Claude Code's project > user),
 		// an untrusted one's need to be asked for by name AND pass the gate below.
@@ -732,7 +794,11 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 			(params.run_in_background === true ||
 				(hasSingle && !params.resume && defs.find((d) => d.name === params.agent)?.background === true));
 		if (background) {
-			const id = `sa-${++backgroundCounter}`;
+			// Claude Code's task id is the agent's id: a single child is known by the run's
+			// id, a resumed one keeps its own; a parallel or chain run gets one of its own.
+			const resumed = typeof params.resume === "string" && params.resume ? params.resume : undefined;
+			const id = resumed ? (soleChild(resumed) ?? resumed) : newAgentId();
+			if (backgroundRuns.has(id)) throw new Error(`Subagent ${id} is still running; wait for it or stop it first.`);
 			const { agent, task: firstTask } = describeCall(params);
 			const controller = new AbortController();
 			const sessions = new Set<AgentSession>();
@@ -759,6 +825,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 				{
 					fork,
 					budget,
+					agentId: hasSingle && !resumed ? id : undefined,
 					onSession: (session) => {
 						sessions.add(session);
 						return () => sessions.delete(session);
@@ -766,10 +833,13 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 				},
 			);
 			backgroundRuns.set(id, entry);
+			agentTasksChanged();
 			void entry.done
 				.then((result) => {
-					const child = result.details?.results?.[0]?.agentId;
-					if (child) backgroundChildIds.set(id, child);
+					const children = (result.details?.results ?? []).flatMap((r) =>
+						r.agentId ? [{ agent: r.agent, agentId: r.agentId }] : [],
+					);
+					if (children.length > 0) backgroundChildIds.set(id, children);
 					if (shuttingDown || entry.stopped || entry.waiters > 0) return;
 					return pi.sendMessage(
 						subagentExitMessage(id, agent, firstTask, result, entry.stoppedByUser),
@@ -777,7 +847,10 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 					);
 				})
 				.catch(() => undefined)
-				.finally(() => backgroundRuns.delete(id));
+				.finally(() => {
+					backgroundRuns.delete(id);
+					agentTasksChanged();
+				});
 			const preview = firstTask.length > 80 ? `${firstTask.slice(0, 80)}…` : firstTask;
 			return {
 				content: [
@@ -972,6 +1045,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 				{
 					...extra,
 					resume: params.resume,
+					agentId: inner?.agentId,
 					gate: params.gate || undefined,
 					outputSchema: parseOutputSchema(params.outputSchema),
 				},
@@ -1023,7 +1097,10 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 	}
 
 	// ── Controlling background runs (Claude Code's TaskOutput / TaskStop / SendMessage) ──
-	// A nested child has no background runs to control.
+	// task_output and task_stop answer for background shells too, which a nested child
+	// can start, so they exist at every depth; the rest only has background runs to act on
+	// in the main session.
+	registerTaskTools();
 	if (depth === 0) {
 		registerControlTools();
 		pi.registerTool(createManageAgentsTool());
@@ -1038,8 +1115,127 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 		});
 	}
 
+	/** How long task_output blocks by default, and at most (Claude Code's TaskOutput). */
+	const DEFAULT_OUTPUT_WAIT_MS = 30_000;
+	const MAX_OUTPUT_WAIT_MS = 600_000;
+	/** Most lines of a running child's latest output task_output shows. */
+	const PROGRESS_TAIL_LINES = 40;
+
+	function registerTaskTools(): void {
+		const TaskId = Type.String({
+			description:
+				"The task id: a shell or monitor id (e.g. b1a2b3c4d) or a background subagent's id (e.g. a1b2c3d4e5f6a7b8c)",
+		});
+		pi.registerTool({
+			name: "task_output",
+			label: "Task Output",
+			description: [
+				"Retrieves output from a running or completed background task (background shell, monitor or background subagent).",
+				"block: true (the default) waits for the task to finish, up to timeout ms (default 30000, max 600000); block: false checks the current status without waiting.",
+				"Prefer the read tool on a shell's output file (its path is in the start result and the completion notification); a completion notification also arrives on its own.",
+			].join(" "),
+			parameters: Type.Object({
+				task_id: TaskId,
+				block: Type.Optional(Type.Boolean({ description: "Whether to wait for completion (default true)" })),
+				timeout: Type.Optional(Type.Number({ description: "Max wait time in ms (default 30000, max 600000)" })),
+			}),
+			execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
+				const id = params.task_id.trim();
+				const block = params.block !== false;
+				// A model fills an optional number with 0: anything not positive is the default.
+				const timeoutMs =
+					params.timeout && params.timeout > 0
+						? Math.min(params.timeout, MAX_OUTPUT_WAIT_MS)
+						: DEFAULT_OUTPUT_WAIT_MS;
+				if (isShellTaskId(id)) {
+					const owner = ctx?.sessionManager?.getSessionId();
+					const text = await shellTaskOutput(id, owner, { block, timeoutMs, signal });
+					return { content: [{ type: "text", text }], details: undefined };
+				}
+				const run = backgroundRuns.get(id);
+				if (!run) throw noTaskError(id);
+				if (block) {
+					// A waiter takes the result here, so the run sends no completion message.
+					run.waiters++;
+					let timer: ReturnType<typeof setTimeout> | undefined;
+					let onAbort: (() => void) | undefined;
+					let result: AgentToolResult<SubagentDetails> | undefined;
+					try {
+						await Promise.race([
+							run.done.then((r) => {
+								result = r;
+							}),
+							new Promise<void>((resolve) => {
+								timer = setTimeout(resolve, timeoutMs);
+							}),
+							new Promise<void>((resolve) => {
+								onAbort = resolve;
+								if (signal?.aborted) resolve();
+								else signal?.addEventListener("abort", onAbort, { once: true });
+							}),
+						]);
+					} finally {
+						clearTimeout(timer);
+						if (onAbort) signal?.removeEventListener("abort", onAbort);
+						run.waiters--;
+					}
+					if (result) {
+						const text = subagentExitMessage(run.id, run.agent, run.task, result, run.stoppedByUser).content;
+						return { content: [{ type: "text", text }], details: undefined };
+					}
+				}
+				const seconds = Math.round((Date.now() - run.startedAt) / 1000);
+				const lines = [
+					`<retrieval_status>${block ? "timeout" : "not_ready"}</retrieval_status>`,
+					`<task_id>${run.id}</task_id>`,
+					"<task_type>local_agent</task_type>",
+					"<status>running</status>",
+					`${run.id} (${run.agent}) running · ${seconds}s`,
+				];
+				for (const child of run.latest) {
+					const output = getFinalOutput(child.messages).split("\n").slice(-PROGRESS_TAIL_LINES).join("\n");
+					lines.push(
+						"",
+						`### [${child.agent}] ${child.status} · ${child.usage.turns} turns`,
+						forParent(output) || "(no output yet)",
+					);
+				}
+				if (run.latest.length === 0) lines.push("(no output yet)");
+				return { content: [{ type: "text", text: lines.join("\n") }], details: undefined };
+			},
+		});
+
+		pi.registerTool({
+			name: "task_stop",
+			label: "Task Stop",
+			description:
+				"Stops a running background task by its ID: a background shell or monitor (its whole process tree), or a background subagent (returns what it had produced; a stopped child can be continued later with task's resume).",
+			parameters: Type.Object({ task_id: TaskId }),
+			execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
+				const id = params.task_id.trim();
+				if (isShellTaskId(id)) {
+					const text = shellTaskStop(id, ctx?.sessionManager?.getSessionId());
+					return { content: [{ type: "text", text }], details: undefined };
+				}
+				const run = backgroundRuns.get(id);
+				if (!run) throw noTaskError(id);
+				run.stopped = true;
+				run.controller.abort();
+				const result = await run.done;
+				const sections = (result.details?.results ?? []).map(
+					(child) =>
+						`### [${child.agent}]\n${forParent(getFinalOutput(child.messages)) || "(no output yet)"}${annotate(child)}`,
+				);
+				return {
+					content: [{ type: "text", text: [`Stopped ${run.id} (${run.agent}).`, ...sections].join("\n\n") }],
+					details: undefined,
+				};
+			},
+		});
+	}
+
 	function registerControlTools(): void {
-		const RunId = Type.String({ description: "The sa-N id a background task call returned" });
+		const RunId = Type.String({ description: "The id a background task call returned" });
 
 		/** The run, or the model-facing answer for an id with nothing running behind it. */
 		const findRun = (id: string): BackgroundRun | AgentToolResult<undefined> => {
@@ -1061,56 +1257,6 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 		const DEFAULT_WAIT_SECONDS = 300;
 		const MAX_WAIT_SECONDS = 1800;
 
-		/** Most lines of a running child's latest output task_output shows. */
-		const PROGRESS_TAIL_LINES = 40;
-
-		pi.registerTool({
-			name: "task_output",
-			label: "Task Output",
-			description:
-				"Check on a background subagent without waiting for it: status, turns so far and the tail of each child's latest output.",
-			parameters: Type.Object({ id: RunId }),
-			execute: async (_toolCallId, params) => {
-				const run = findRun(params.id);
-				if (!("controller" in run)) return run;
-				const seconds = Math.round((Date.now() - run.startedAt) / 1000);
-				const lines = [`${run.id} (${run.agent}) running · ${seconds}s`];
-				for (const child of run.latest) {
-					const output = getFinalOutput(child.messages).split("\n").slice(-PROGRESS_TAIL_LINES).join("\n");
-					lines.push(
-						"",
-						`### [${child.agent}] ${child.status} · ${child.usage.turns} turns`,
-						forParent(output) || "(no output yet)",
-					);
-				}
-				if (run.latest.length === 0) lines.push("(no output yet)");
-				return { content: [{ type: "text", text: lines.join("\n") }], details: undefined };
-			},
-		});
-
-		pi.registerTool({
-			name: "task_stop",
-			label: "Task Stop",
-			description:
-				"Stop a background subagent. Returns what it had produced; a stopped child can be continued later with task's resume.",
-			parameters: Type.Object({ id: RunId }),
-			execute: async (_toolCallId, params) => {
-				const run = findRun(params.id);
-				if (!("controller" in run)) return run;
-				run.stopped = true;
-				run.controller.abort();
-				const result = await run.done;
-				const sections = (result.details?.results ?? []).map(
-					(child) =>
-						`### [${child.agent}]\n${forParent(getFinalOutput(child.messages)) || "(no output yet)"}${annotate(child)}`,
-				);
-				return {
-					content: [{ type: "text", text: [`Stopped ${run.id} (${run.agent}).`, ...sections].join("\n\n") }],
-					details: undefined,
-				};
-			},
-		});
-
 		pi.registerTool({
 			name: "task_wait",
 			label: "Task Wait",
@@ -1119,7 +1265,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 			parameters: Type.Object({
 				ids: Type.Optional(
 					Type.Array(Type.String(), {
-						description: "sa-N ids to wait for; empty or omitted waits for all running",
+						description: "Background subagent ids to wait for; empty or omitted waits for all running",
 					}),
 				),
 				timeout_seconds: Type.Optional(
@@ -1250,7 +1396,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 		return container;
 	});
 
-	/** The transcript sections for an sa-N run or an agent id; a string says why there are none. */
+	/** The transcript sections for a background run id or an agent id; a string says why there are none. */
 	function transcriptFor(id: string): TranscriptData | string {
 		const running = backgroundRuns.get(id);
 		if (running) {
@@ -1263,21 +1409,21 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 					: [{ title: `${id} · ${running.agent} · starting`, lines: [] }],
 			};
 		}
-		const childId = backgroundChildIds.get(id) ?? id;
-		const source = childTranscript(childId);
-		if (!source) return `No subagent "${id}". Use an sa-N id or the agent id a result reported.`;
-		try {
-			return {
-				sections: [
-					{
-						title: `${source.agent} · ${childId}`,
-						lines: transcriptLines(readTranscript(source.file, source.forkedAt)),
-					},
-				],
-			};
-		} catch (error) {
-			return `Cannot read ${source.file}: ${error instanceof Error ? error.message : String(error)}`;
+		const childIds = backgroundChildIds.get(id)?.map((c) => c.agentId) ?? [id];
+		const sections: TranscriptData["sections"] = [];
+		for (const childId of childIds) {
+			const source = childTranscript(childId);
+			if (!source) return `No subagent "${id}". Use a background run id or the agent id a result reported.`;
+			try {
+				sections.push({
+					title: `${source.agent} · ${childId}`,
+					lines: transcriptLines(readTranscript(source.file, source.forkedAt)),
+				});
+			} catch (error) {
+				return `Cannot read ${source.file}: ${error instanceof Error ? error.message : String(error)}`;
+			}
 		}
+		return { sections };
 	}
 
 	pi.registerEntryRenderer<AgentsData>("bluclawd:agents", (entry, _options, theme) => {
@@ -1399,7 +1545,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 			if (sub === "show" || sub === "stop") {
 				const id = rest.join(" ").trim();
 				if (!id) {
-					ctx.ui.notify(`Usage: /agents ${sub} <${sub === "stop" ? "sa-N" : "sa-N or agent id"}>`, "warning");
+					ctx.ui.notify(`Usage: /agents ${sub} <${sub === "stop" ? "id" : "id or agent id"}>`, "warning");
 					return;
 				}
 				if (sub === "stop") {
