@@ -229,7 +229,7 @@ columns >= 70`, in `row gap 2, marginBottom 1` next to 3 text lines. It is never
 
 - Mascot footprint: 11×4 octants (or 22×8 half-blocks), not 9×3. The exact proportions of
   `mascot.svg` require it.
-- Crouch drops by one pixel instead of clipping the feet, so the legs keep their length.
+- ~~Crouch drops by one pixel instead of clipping the feet.~~ Reversed 2026-09-25 at the user's request ("as close to Claude Code as possible"): the crouch drops one octant row and the feet leave the box, as in Claude Code. Look moves the eyes a full eye width and arms-up raises the arms 3 rows, Claude Code's moves scaled to the 20×15 grid. Claude Code's eyes also rise 1 px when looking; that would need 3 colors in one octant cell, so it is left out.
 - No click trigger: pi-tui has no mouse events for components.
 - No screen-reader hide: pi exposes no screen-reader signal.
 - No update-summary line under the header ("Updated to latest…"), no announcement slot, no

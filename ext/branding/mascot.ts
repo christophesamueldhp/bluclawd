@@ -6,7 +6,10 @@
  * luminance mask) that is pixel art on a 20×15 grid of 100 px blocks.
  * `SOURCE` below is that grid, and a test checks it against the SVG. Every pose
  * only moves parts of the grid — eyes, arms, the whole sprite — and never
- * resizes one, so the proportions of the SVG hold in every frame.
+ * resizes one, so the proportions of the SVG hold in every frame. Each move is
+ * Claude Code's Clawd move scaled to this grid: its 1-px eye shifts by its own
+ * width, its arm rises a quarter of the body's height, and its crouch drops the
+ * sprite one row so the feet leave the clipped box.
  *
  * Terminal cells are ~2.3× taller than wide, so one grid pixel drawn as half a
  * cell reads ~14% too tall. Columns 2 and 17 are drawn twice to widen it back:
@@ -45,6 +48,10 @@ export const EYE_COLOR = "#1e1e1e";
 export type Pose = "default" | "look-left" | "look-right" | "arms-up";
 
 const EYE_ROWS = [4, 5];
+/** A full eye width, as Claude Code's look moves its 1-px eye by one pixel. */
+const LOOK_SHIFT = 2;
+/** A quarter of the body's 12 rows, as Claude Code raises its arm 1 of its 4 body pixels. */
+const ARM_RAISE = 3;
 const EYE_COLUMNS = [5, 6, 13, 14];
 const ARM_COLUMNS = [0, 1, 18, 19];
 const ARM_ROWS = [6, 7, 8];
@@ -53,13 +60,13 @@ const ARM_ROWS = [6, 7, 8];
 export function poseGrid(pose: Pose): string[] {
 	const grid = SOURCE.map((row) => row.split("") as Pixel[]);
 	if (pose === "look-left" || pose === "look-right") {
-		const shift = pose === "look-left" ? -1 : 1;
+		const shift = pose === "look-left" ? -LOOK_SHIFT : LOOK_SHIFT;
 		for (const y of EYE_ROWS) for (const x of EYE_COLUMNS) grid[y]![x] = "#";
 		for (const y of EYE_ROWS) for (const x of EYE_COLUMNS) grid[y]![x + shift] = "o";
 	} else if (pose === "arms-up") {
 		for (const x of ARM_COLUMNS) {
 			for (const y of ARM_ROWS) grid[y]![x] = ".";
-			for (const y of ARM_ROWS) grid[y - 1]![x] = "#";
+			for (const y of ARM_ROWS) grid[y - ARM_RAISE]![x] = "#";
 		}
 	}
 	return grid.map((row) => row.join(""));
@@ -76,15 +83,15 @@ function widen(grid: string[]): string[] {
 	);
 }
 
-/** Widened grid width, and the canvas height: 15 rows plus a spare row the crouch drops into. */
+/** Widened grid width, and the canvas height: 15 rows plus a pad row that fills out the last octant line. */
 const WIDTH = SOURCE[0]!.length + DOUBLED_COLUMNS.length;
 const HEIGHT = 16;
 
 /**
- * One animation frame, Claude Code's shape (m1353): `offset` is the crouch — the
- * sprite drops one pixel into the spare row instead of clipping its feet, so
- * the legs keep their length — `x` slides the sprite in Claude Code's units
- * (its Clawd is 9 cells wide), and `poof` is the landing dust.
+ * One animation frame, Claude Code's shape (m1353): `offset` is the crouch in
+ * rows — the sprite drops and its feet leave the clipped box — `x` slides the
+ * sprite in Claude Code's units (its Clawd is 9 cells wide), and `poof` is the
+ * landing dust.
  */
 export interface MascotFrame {
 	pose: Pose;
@@ -94,6 +101,9 @@ export interface MascotFrame {
 }
 
 export const REST: MascotFrame = { pose: "default", offset: 0 };
+
+/** One crouch row: an octant line, which is a third of the art as Claude Code's row is of its Clawd. */
+const CROUCH_PIXELS = 4;
 
 /** Claude Code's frame length. */
 export const FRAME_MS = 60;
@@ -233,7 +243,7 @@ export function frameCanvas(frame: MascotFrame, glyphs: Glyphs): Pixel[][] {
 	for (const [y, row] of sprite.entries()) {
 		for (const [x, pixel] of [...row].entries()) {
 			const cx = x + dx;
-			const cy = y + frame.offset;
+			const cy = y + frame.offset * CROUCH_PIXELS;
 			if (cx >= 0 && cx < WIDTH && cy < HEIGHT) canvas[cy]![cx] = pixel as Pixel;
 		}
 	}
@@ -283,12 +293,12 @@ export function renderMascot(frame: MascotFrame, glyphs: Glyphs, dim: (text: str
 		lines.push(line);
 	}
 	if (frame.poof && frame.offset > 0) {
-		// Claude Code centers the dust on the feet row, between the legs.
-		const width = mascotWidth(glyphs);
-		const center = Math.floor((width - 1) / 2);
+		// Claude Code puffs the dust at both edges of the bottom row, over the crouched arms.
 		const last = lines.length - 1;
 		const cells = splitCells(lines[last]!);
-		cells[center] = dim(frame.poof === "dot" ? "·" : "~");
+		const dust = dim(frame.poof === "dot" ? "·" : "~");
+		cells[0] = dust;
+		cells[cells.length - 1] = dust;
 		lines[last] = cells.join("");
 	}
 	return lines;

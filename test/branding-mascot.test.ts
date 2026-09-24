@@ -136,10 +136,10 @@ describe("poses", () => {
 
 	it("moves only what the pose names", () => {
 		expect(poseGrid("default")).toEqual(SOURCE);
-		expect(poseGrid("look-left")[4]).toBe("..##oo######oo####..");
-		expect(poseGrid("look-right")[4]).toBe("..####oo######oo##..");
+		expect(poseGrid("look-left")[4]).toBe("..#oo######oo#####..");
+		expect(poseGrid("look-right")[4]).toBe("..#####oo######oo#..");
 		const up = poseGrid("arms-up");
-		expect(up.map((row) => row[0])).toEqual([...".....###......."]);
+		expect(up.map((row) => row[0])).toEqual([..."...###........."]);
 		expect(up.slice(9)).toEqual(SOURCE.slice(9));
 	});
 });
@@ -216,10 +216,15 @@ describe("renderMascot", () => {
 		expect(new Set(Array.from({ length: 256 }, (_, mask) => glyphFor("octant", mask))).size).toBe(256);
 	});
 
-	it("puts the landing dust between the legs", () => {
+	it("crouches a row, feet out of the box, with dust at both edges like Claude Code", () => {
 		const [dot] = SEQUENCES.jump;
 		expect(dot?.poof).toBe("dot");
-		expect(renderMascot(dot!, "octant", (t) => `<${t}>`).at(-1)).toContain("<·>");
+		const lines = renderMascot(dot!, "octant", (t) => `<${t}>`);
+		expect(lines[0]!.trim()).toBe("");
+		expect(lines.at(-1)).toMatch(/^<·>.*<·>$/u);
+		expect(frameCanvas(dot!, "octant").flat().join("").replace(/\./g, "").length).toBeLessThan(
+			frameCanvas(REST, "octant").flat().join("").replace(/\./g, "").length,
+		);
 	});
 });
 
