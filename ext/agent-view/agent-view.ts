@@ -27,6 +27,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { theme } from "../_shared/theme.ts";
+import { mascotGlyphs, REST, renderMascot } from "../branding/mascot.ts";
 import { currentDaemonBuildId, type InstanceSummary, type OrchestratorClient } from "./orchestrator-client.ts";
 import {
 	type AgentRow,
@@ -167,9 +168,8 @@ const ICON_COLOR: Record<RowState, Color> = {
 /** The state word in the directory view; Claude Code leaves "Working" in the plain text color. */
 const WORD_COLOR: Record<RowState, Color> = { ...ICON_COLOR, working: "text" };
 
-/** The bluclawd mascot (ext/branding/mascot.png) in quarter blocks, at the size of Claude Code's Clawd. */
-const MASCOT_COLOR = "#00c0e8";
-const MASCOT = ["  ▄▄██▄▄  ", "▄█▙▟██▙▟█▄", " ▜▛█▀▀█▜▛ "];
+/** Claude Code shows its Clawd beside the header only this wide (m0727). */
+const MASCOT_MIN_COLUMNS = 70;
 
 /** SGR faint, as Claude Code draws its rules and the peek box. */
 function faint(text: string): string {
@@ -395,7 +395,7 @@ export class AgentView implements Component, Focusable {
 	}
 
 	private bodyBudget(): number {
-		return Math.max(6, this.opts.ui.terminal.rows - this.headerLines().length - 5);
+		return Math.max(6, this.opts.ui.terminal.rows - this.headerLines(this.opts.ui.terminal.columns).length - 5);
 	}
 
 	private syncSpinner(): void {
@@ -1067,7 +1067,7 @@ export class AgentView implements Component, Focusable {
 
 	// ---- render --------------------------------------------------------------------------
 
-	private headerLines(): string[] {
+	private headerLines(width: number): string[] {
 		const dot = cc.fg("muted", " · ");
 		const counts = countRows(this.rows);
 		const summary = cc.fg(
@@ -1086,7 +1086,10 @@ export class AgentView implements Component, Focusable {
 		const cwd =
 			target === this.opts.cwd ? cc.fg("muted", this.shorten(target)) : cc.fg("accent", this.shorten(target));
 		const where = model ? `${cc.fg("muted", model)}${dot}${cwd}` : cwd;
-		return [title, where, summary].map((text, i) => `${sgr(38, MASCOT_COLOR)}${MASCOT[i]}\x1b[39m  ${text}`);
+		const text = [title, where, summary];
+		if (width < MASCOT_MIN_COLUMNS) return text;
+		// The same static mascot as the welcome header; Claude Code's agent view never animates it.
+		return renderMascot(REST, mascotGlyphs()).map((art, i) => `${art}  ${text[i] ?? ""}`);
 	}
 
 	private statusLine(): string | undefined {
@@ -1339,7 +1342,7 @@ export class AgentView implements Component, Focusable {
 
 	render(width: number): string[] {
 		const rows = this.opts.ui.terminal.rows;
-		const header = [...this.headerLines()];
+		const header = [...this.headerLines(width)];
 		const status = this.statusLine();
 		if (status) header.push(truncateToWidth(status, width));
 		header.push("");

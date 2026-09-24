@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteProvider, TUI } from "@earendil-works/pi-tui";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView } from "../ext/agent-view/agent-view.ts";
 import { withoutAgentViewCommand } from "../ext/agent-view/index.ts";
@@ -132,6 +132,7 @@ function makeView(opts: { self?: InstanceSummary; rows?: number } = {}) {
 }
 
 beforeAll(() => setSharedTheme(plainTheme));
+afterEach(() => vi.unstubAllEnvs());
 
 describe("rows", () => {
 	it("maps daemon state onto Claude Code's six states", () => {
@@ -433,8 +434,17 @@ describe("withoutAgentViewCommand", () => {
 
 describe("AgentView look", () => {
 	it("draws the mascot beside the header and the ? grid under the composer, list still visible", () => {
+		vi.stubEnv("TERM_PROGRAM", "ghostty");
+		vi.stubEnv("TERM", "xterm-ghostty");
 		const { view, text } = makeView();
-		expect(text()[0]).toMatch(/^ {2}▄▄██▄▄ {4}bluclawd/);
+		expect(text().slice(0, 4)).toEqual([
+			expect.stringMatching(/^ {2}▗▄▟█▙▄▖ {4}bluclawd v1\.0\.0$/),
+			expect.stringMatching(/^▄██▀███▀██▄ {2}\S/),
+			expect.stringMatching(/^🮂█████████🮂 {2}\d+ awaiting input/u),
+			expect.stringMatching(/^ {2}🮅.{5}🮅 +$/u),
+		]);
+		// Claude Code drops the mascot below 70 columns.
+		expect(stripAnsi(view.render(60)[0]!)).toMatch(/^bluclawd v1\.0\.0/);
 		view.handleInput("?");
 		const shown = text().join("\n");
 		expect(shown).toContain("power-up design");

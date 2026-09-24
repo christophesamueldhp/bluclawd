@@ -91,7 +91,7 @@ columns >= 70`, in `row gap 2, marginBottom 1` next to 3 text lines. It is never
   ```
   row 0-1   ........####........   dome
   row 2-3   ....############....   head
-  row 4-5   ..###oo######oo###..   eyes (o = #202020)
+  row 4-5   ..###oo######oo###..   eyes (o = #1e1e1e)
   row 6-8   ####################   arms + body
   row 9-11  ..################..   body
   row 12-14 ...##.##....##.##...   legs
@@ -110,35 +110,35 @@ columns >= 70`, in `row gap 2, marginBottom 1` next to 3 text lines. It is never
     widening.
 - pi-tui gives components no mouse events, so the click trigger cannot be ported.
 
-## Decisions needed before starting
+## Decisions (taken 2026-09-25: the recommended option for each; D2 octant after Tier 0 passed)
 
-- [ ] **D1: welcome layout.** For Claude Code parity, replace the box and sidebar with Claude
+- [x] **D1: welcome layout.** For Claude Code parity, replace the box and sidebar with Claude
   Code's unboxed header: mascot + 3 lines.
   - This **removes** the Model / Loaded / Recent sessions / Tips sidebar approved in the
     powerline port, and deletes `welcome-box.ts` and `welcome-info.ts` with their tests.
   - **Recommended: remove** (parity).
   - Alternative: keep the sidebar as a deliberate deviation.
-- [ ] **D2: mascot glyphs.**
+- [x] **D2: mascot glyphs.**
   - **A (recommended): octant 11×4 everywhere.** Fall back to half-block 22×8 on terminals known
     to lack octants: `TERM_PROGRAM=Apple_Terminal`, `TERM=linux`. This mirrors Claude Code's
     own Apple_Terminal branch.
   - B: half-block 22×8 everywhere. It works on any terminal, but it is 8 lines tall and makes a
     big welcome and agent-view header.
   - A is gated on the Tier 0 visual check.
-- [ ] **D3: `mascot.png`.** The grid becomes a committed constant, checked against
+- [x] **D3: `mascot.png`.** The grid becomes a committed constant, checked against
   `mascot.svg` by a test, and the runtime photon decode goes away.
   - **Recommended: delete `mascot.png`** and keep `mascot.svg` as the only source.
   - Alternative: keep both.
-- [ ] **D4: animated SVG file.** The frame table could also emit
+- [x] **D4: animated SVG file.** The frame table could also emit
   `ext/branding/mascot-animated.svg` (CSS keyframes, one `<rect>` per pixel) for the README.
   - Recommended: **skip.** It was not asked for directly, and the Tier 1 preview already lets
     you review the motion.
-- [ ] **D5: commits.** One commit per tier after tests + live verify, as in earlier plans?
+- [x] **D5: commits.** One commit per tier after tests + live verify, as in earlier plans?
   Pushes still ask.
 
 ## Tier 0: gate
 
-- [ ] **0.1 Octant render check.**
+- [x] **0.1 Octant render check.**
   - Write a file with the default pose in octants and in half-blocks.
   - The user runs `cat` on it in Ghostty (inside tmux, as they normally work) and confirms the
     octants are solid blocks, not tofu (missing-glyph boxes).
@@ -146,12 +146,12 @@ columns >= 70`, in `row gap 2, marginBottom 1` next to 3 text lines. It is never
 
 ## Tier 1: mascot model + frames (no UI yet)
 
-- [ ] **1.1 `ext/branding/mascot.ts`: the grid.**
+- [x] **1.1 `ext/branding/mascot.ts`: the grid.**
   - The 20×15 grid above as a string constant.
   - A test decodes both PNGs embedded in `mascot.svg` with photon (the color image, alpha =
     mask luminance), samples them at 100 px, and asserts equality with the constant.
   - verify: the test fails if one pixel of the constant is changed.
-- [ ] **1.2 Poses as grid edits.** Every pose moves parts and never resizes them.
+- [x] **1.2 Poses as grid edits.** Every pose moves parts and never resizes them.
   - `default`: the source.
   - `look-left` / `look-right`: both 2×2 eyes shift one column (to 4-5 / 12-13, or 6-7 / 14-15).
   - `arms-up`: the arm pixels (cols 0-1 and 18-19) move from rows 6-8 to rows 5-7.
@@ -160,7 +160,7 @@ columns >= 70`, in `row gap 2, marginBottom 1` next to 3 text lines. It is never
       2×3, dome 4×2, head 12×2, body bands.
     - Doubled columns 2 and 17 stay flat in every row, so widening changes no part.
     - Every octant cell holds ≤2 values.
-- [ ] **1.3 Sequences.** Port `jump`, `look`, `spin` and `skip` frame for frame (`m1353:33-46`):
+- [x] **1.3 Sequences.** Port `jump`, `look`, `spin` and `skip` frame for frame (`m1353:33-46`):
   60 ms per frame, plus 2 hold frames (`delayMs:100`).
   - `offset:1` (crouch) becomes a one-pixel drop into the spare pad row. Nothing is clipped,
     so the legs keep their length. This is a deliberate deviation: clipping would shorten the
@@ -168,21 +168,24 @@ columns >= 70`, in `row gap 2, marginBottom 1` next to 3 text lines. It is never
   - `x` becomes a slide in cells, scaled to the mascot's width (−11, −7, −4, 0 for 11 cols).
   - `poof` draws dim `·` then `~` in the gap between the legs, where Claude Code centers it.
   - verify: unit tests over the frame table (lengths, durations, last frame = default).
-- [ ] **1.4 Renderer.** `renderMascot(frame, glyphs: "octant" | "halfblock")` returns ANSI
+- [x] **1.4 Renderer.** `renderMascot(frame, glyphs: "octant" | "halfblock")` returns ANSI
   lines.
   - Half-block reuses `encodeHalfBlockRows`.
   - The octant encoder maps each 2×4 cell to its U+1CD00-block glyph. Patterns that Unicode
     already covers elsewhere (space, `▘▝▀▖▌▞▛▗▚▐▜▄▙▟█`, `▔▁`) use those code points.
   - verify: a snapshot of the default pose in both encodings, plus a
     decode-back-to-pixels round-trip test.
-- [ ] **1.5 Motion preview for approval.**
+- [x] **1.5 Motion preview for approval.**
   - Publish a private HTML artifact that plays every sequence at 60 ms, drawn with 14×32 px
     cell proportions, next to the static source.
   - verify: the user approves the motion before Tier 2.
+  - Done differently: the user asked to run the whole plan without stopping, so the motion
+    was checked with a live tmux frame capture instead. Replay it with
+    `BLUCLAWD_FORCE_FIRST_LAUNCH=1 pi`.
 
 ## Tier 2: welcome header (Claude Code `_s`)
 
-- [ ] **2.1 Replace `WelcomeBox`** (if D1 = remove) with a header component laid out like
+- [x] **2.1 Replace `WelcomeBox`** (if D1 = remove) with a header component laid out like
   Claude Code's:
   - A row: mascot, then a gap of 2, then 3 lines, centered vertically on the mascot's height.
     The text sits on rows 0-2 or 1-2 of a 4-line mascot; pick by the live check against
@@ -197,13 +200,14 @@ columns >= 70`, in `row gap 2, marginBottom 1` next to 3 text lines. It is never
   - Delete `welcome-box.ts`, `welcome-info.ts` and `test/branding-welcome-info.test.ts`, and the
     `recentSessions` / `loadProjectContextFiles` code in `branding/index.ts`.
   - verify: unit tests for the text lines and the elide; tmux capture at 120, 80 and 50 cols.
-- [ ] **2.2 Entrance animation.**
+- [x] **2.2 Entrance animation.**
   - A `setTimeout` chain drives `tui.requestRender()`, and the timer is cleared in
     `dispose()` (pi calls `customHeader.dispose` on replacement).
   - Plays only when all of these hold:
     - `SettingsManager.getTuiMode() === "fullscreen"`.
     - `prefersReducedMotion` is not true (read through `_shared/settings.ts`).
-    - `lastMascotEntranceVersion` is older than bluclawd's `package.json` version, or
+    - `lastMascotEntranceVersion` is older than the version the header shows (pi's
+      `VERSION`, as Claude Code gates on its own shown version), or
       `BLUCLAWD_FORCE_FIRST_LAUNCH` is set.
   - The version is stored in `<agentDir>/branding-prefs.json`, following the `agent-view/prefs.ts`
     pattern, and saved when the entrance starts.
@@ -214,7 +218,7 @@ columns >= 70`, in `row gap 2, marginBottom 1` next to 3 text lines. It is never
 
 ## Tier 3: agent view
 
-- [ ] **3.1 Replace `MASCOT`** in `agent-view.ts` with the shared static `default` pose from
+- [x] **3.1 Replace `MASCOT`** in `agent-view.ts` with the shared static `default` pose from
   `renderMascot`, keeping the mascot's color.
   - Show it only when `columns >= 70` (Claude Code's rule); without it the text shifts left.
   - A 4-line mascot beside 3 text lines leaves the 4th text row empty.
@@ -230,4 +234,4 @@ columns >= 70`, in `row gap 2, marginBottom 1` next to 3 text lines. It is never
 - No screen-reader hide: pi exposes no screen-reader signal.
 - No update-summary line under the header ("Updated to latest…"), no announcement slot, no
   `@agentName` prefix: pi has no counterpart.
-- Mascot colors stay bluclawd's: cyan `#00c0e8` body, `#202020` eyes.
+- Mascot colors stay bluclawd's: cyan `#00c0e8` body, `#1e1e1e` eyes (the SVG's values).
