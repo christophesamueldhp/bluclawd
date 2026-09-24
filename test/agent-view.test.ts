@@ -25,6 +25,8 @@ const plainTheme = {
 	fg: (_c: string, s: string) => s,
 	bg: (_c: string, s: string) => s,
 	bold: (s: string) => s,
+	getBgAnsi: () => "",
+	getColorMode: () => "truecolor",
 } as unknown as Theme;
 
 const NOW = Date.now();
@@ -426,5 +428,19 @@ describe("withoutAgentViewCommand", () => {
 		} as unknown as AutocompleteProvider;
 		const got = await withoutAgentViewCommand(base).getSuggestions(["/a"], 0, 2, { force: false } as never);
 		expect(got?.items.map((i) => i.value)).toEqual(["agents"]);
+	});
+});
+
+describe("AgentView look", () => {
+	it("draws the mascot beside the header and the ? grid under the composer, list still visible", () => {
+		const { view, text } = makeView();
+		expect(text()[0]).toMatch(/^ {2}▄▄██▄▄ {4}bluclawd/);
+		view.handleInput("?");
+		const shown = text().join("\n");
+		expect(shown).toContain("power-up design");
+		expect(shown).toMatch(/shift\+↑↓ to\s/);
+		expect(text().at(-1)).not.toContain("? for shortcuts");
+		view.handleInput("?");
+		expect(text().at(-1)).toContain("? for shortcuts");
 	});
 });

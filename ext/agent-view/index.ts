@@ -319,6 +319,7 @@ const agentView: InlineExtension = {
 							appName: "bluclawd",
 							version: VERSION,
 							model: model ? { provider: model.provider, id: model.id } : undefined,
+							modelName: model?.name,
 							cwd: ctx.cwd,
 							home: process.env.HOME ?? "",
 							self: () => selfRow(ctx),

@@ -57,6 +57,8 @@ export interface AgentViewOptions {
 	version?: string;
 	/** The model new sessions start with (the foreground's); `/model` overrides it for this view. */
 	model?: { provider: string; id: string };
+	/** The model's display name for the header, as Claude Code shows it. */
+	modelName?: string;
 	cwd: string;
 	home: string;
 	/** This window's own session as a row, rebuilt on every refresh (its activity is live). */
@@ -90,19 +92,98 @@ const SPINNER = [...FRAMES, ...[...FRAMES].reverse()];
 const ARM_MS = 2000;
 const NOTICE_MS = 3000;
 
-const ICON_COLOR: Record<RowState, Parameters<typeof theme.fg>[0]> = {
-	working: "accent",
+type Color = Parameters<typeof theme.fg>[0];
+
+/**
+ * Claude Code's dark palette, so agent view reads the same whatever dark theme pi uses:
+ * secondary text is its inactive gray, the focused row its message background. A light
+ * theme keeps its own colors, which are chosen for a light terminal.
+ */
+const CC_DARK: Partial<Record<Color | "userMessageBg", string>> = {
+	text: "#ffffff",
+	muted: "#999999",
+	success: "#4eba65",
+	warning: "#ffc107",
+	error: "#ff6b80",
+	accent: "#00c0e8",
+	userMessageBg: "#373737",
+};
+
+const lightThemes = new WeakMap<object, boolean>();
+
+/** Whether the theme's message background is light, read from the escape it emits. */
+function isLightTheme(): boolean {
+	let light = lightThemes.get(theme);
+	if (light === undefined) {
+		const ansi = theme.getBgAnsi("userMessageBg");
+		const rgb = /48;2;(\d+);(\d+);(\d+)/.exec(ansi);
+		const n = /48;5;(\d+)/.exec(ansi);
+		const [r, g, b] = rgb ? rgb.slice(1).map(Number) : n ? xterm256(Number(n[1])) : [0, 0, 0];
+		light = 0.299 * r + 0.587 * g + 0.114 * b > 128;
+		lightThemes.set(theme, light);
+	}
+	return light;
+}
+
+function xterm256(n: number): [number, number, number] {
+	if (n >= 232) {
+		const v = 8 + (n - 232) * 10;
+		return [v, v, v];
+	}
+	if (n < 16) return n === 7 || n === 15 ? [255, 255, 255] : [0, 0, 0];
+	const i = n - 16;
+	const level = (x: number) => (x === 0 ? 0 : 55 + x * 40);
+	return [level(Math.floor(i / 36)), level(Math.floor(i / 6) % 6), level(i % 6)];
+}
+
+function sgr(layer: 38 | 48, hex: string): string {
+	const [r, g, b] = [1, 3, 5].map((i) => Number.parseInt(hex.slice(i, i + 2), 16));
+	if (theme.getColorMode() === "truecolor") return `\x1b[${layer};2;${r};${g};${b}m`;
+	const cube = (x: number) => (x < 48 ? 0 : x < 115 ? 1 : Math.floor((x - 35) / 40));
+	return `\x1b[${layer};5;${16 + 36 * cube(r) + 6 * cube(g) + cube(b)}m`;
+}
+
+const cc = {
+	fg(color: Color, text: string): string {
+		const hex = isLightTheme() ? undefined : CC_DARK[color];
+		return hex ? `${sgr(38, hex)}${text}\x1b[39m` : theme.fg(color, text);
+	},
+	bg(color: "userMessageBg", text: string): string {
+		const hex = isLightTheme() ? undefined : CC_DARK[color];
+		return hex ? `${sgr(48, hex)}${text}\x1b[49m` : theme.bg(color, text);
+	},
+};
+
+/** Claude Code's colors: secondary text is its inactive gray (`muted`), rules and boxes are faint. */
+const ICON_COLOR: Record<RowState, Color> = {
+	working: "muted",
 	needs: "warning",
-	idle: "dim",
+	idle: "muted",
 	done: "success",
 	failed: "error",
 	stopped: "muted",
 };
 
-/** An Input line with Claude Code's `❯` prompt and a dim placeholder when empty. */
+/** The state word in the directory view; Claude Code leaves "Working" in the plain text color. */
+const WORD_COLOR: Record<RowState, Color> = { ...ICON_COLOR, working: "text" };
+
+/** The bluclawd mascot (ext/branding/mascot.png) in quarter blocks, at the size of Claude Code's Clawd. */
+const MASCOT_COLOR = "#00c0e8";
+const MASCOT = ["  ▄▄██▄▄  ", "▄█▙▟██▙▟█▄", " ▜▛█▀▀█▜▛ "];
+
+/** SGR faint, as Claude Code draws its rules and the peek box. */
+function faint(text: string): string {
+	return `\x1b[2m${text}\x1b[22m`;
+}
+
+/** An Input line with Claude Code's `❯` prompt; empty, the cursor sits on the placeholder's first letter. */
 function promptLine(input: Input, width: number, placeholder: string): string {
 	if (!input.getValue()) {
-		return truncateToWidth(`❯ \x1b[7m \x1b[27m${theme.fg("dim", placeholder)}`, width);
+		const [first = " ", ...rest] = [...placeholder];
+		return truncateToWidth(
+			`${cc.fg("muted", "❯")} \x1b[7m${cc.fg("muted", first)}\x1b[27m${cc.fg("muted", rest.join(""))}`,
+			width,
+		);
 	}
 	const line = input.render(width)[0] ?? "";
 	return line.startsWith("> ") ? `❯ ${line.slice(2)}` : line;
@@ -730,11 +811,11 @@ export class AgentView implements Component, Focusable {
 
 	handleInput(data: string): void {
 		if (this.mode === "help") {
+			this.mode = "list";
 			if (this.isEsc(data) || matchesKey(data, "?") || matchesKey(data, "shift+?")) {
-				this.mode = "list";
 				this.render_();
+				return;
 			}
-			return;
 		}
 		if (this.mode === "resume") {
 			this.handleResumeInput(data);
@@ -987,64 +1068,70 @@ export class AgentView implements Component, Focusable {
 	// ---- render --------------------------------------------------------------------------
 
 	private headerLines(): string[] {
-		const dot = theme.fg("dim", " · ");
+		const dot = cc.fg("muted", " · ");
 		const counts = countRows(this.rows);
-		const summary = theme.fg(
-			"dim",
+		const summary = cc.fg(
+			"muted",
 			`${counts.needs} awaiting input · ${counts.working} working · ${counts.completed} completed`,
 		);
 		if (this.opts.ui.terminal.rows < 20) return [summary];
-		const title = `${theme.bold(this.opts.appName)}${this.opts.version ? ` ${theme.fg("dim", `v${this.opts.version}`)}` : ""}`;
-		const model = this.dispatchModel ? `${this.dispatchModel.provider}/${this.dispatchModel.id}` : "";
+		const title = `${theme.bold(this.opts.appName)}${this.opts.version ? ` ${cc.fg("muted", `v${this.opts.version}`)}` : ""}`;
+		const model =
+			this.dispatchModel === this.opts.model && this.opts.modelName
+				? this.opts.modelName
+				: this.dispatchModel
+					? `${this.dispatchModel.provider}/${this.dispatchModel.id}`
+					: "";
 		const target = this.dispatchCwd();
 		const cwd =
-			target === this.opts.cwd ? theme.fg("dim", this.shorten(target)) : theme.fg("accent", this.shorten(target));
-		const where = model ? `${theme.fg("dim", model)}${dot}${cwd}` : cwd;
-		return [title, where, summary];
+			target === this.opts.cwd ? cc.fg("muted", this.shorten(target)) : cc.fg("accent", this.shorten(target));
+		const where = model ? `${cc.fg("muted", model)}${dot}${cwd}` : cwd;
+		return [title, where, summary].map((text, i) => `${sgr(38, MASCOT_COLOR)}${MASCOT[i]}\x1b[39m  ${text}`);
 	}
 
 	private statusLine(): string | undefined {
-		if (this.notice) return theme.fg(this.notice.color, this.notice.text);
-		if (this.daemonNotice) return theme.fg("warning", this.daemonNotice);
+		if (this.notice) return cc.fg(this.notice.color, this.notice.text);
+		if (this.daemonNotice) return cc.fg("warning", this.daemonNotice);
 		if (this.connectionLost)
-			return theme.fg("warning", "lost connection to the background service — showing the last known list");
+			return cc.fg("warning", "lost connection to the background service — showing the last known list");
 		return undefined;
 	}
 
 	private icon(row: AgentRow): string {
 		const glyph = !row.alive ? "∙" : row.state === "working" ? SPINNER[this.frame] : "✻";
-		return theme.fg(ICON_COLOR[row.state], glyph);
+		return cc.fg(ICON_COLOR[row.state], glyph);
 	}
 
 	private rowDetail(row: AgentRow): string {
-		if (this.opening === row.id) return theme.fg("dim", "opening… · esc to cancel");
+		if (this.opening === row.id) return cc.fg("muted", "opening… · esc to cancel");
 		if (this.armed?.key === row.id) {
 			return row.state === "stopped" || !row.alive
-				? theme.fg("error", row.state === "stopped" ? "stopped · ctrl+x again to delete" : "ctrl+x again to delete")
-				: theme.fg("error", "ctrl+x again to delete");
+				? cc.fg("error", row.state === "stopped" ? "stopped · ctrl+x again to delete" : "ctrl+x again to delete")
+				: cc.fg("error", "ctrl+x again to delete");
 		}
-		const detail = sanitize(row.detail);
+		const detail = cc.fg("muted", sanitize(row.detail));
 		if (this.viewMode === "directory") {
-			return `${theme.fg(ICON_COLOR[row.state], STATE_WORDS[row.state])}${theme.fg("dim", " · ")}${detail}`;
+			return `${cc.fg(WORD_COLOR[row.state], STATE_WORDS[row.state])}${cc.fg("muted", " · ")}${detail}`;
 		}
-		return row.state === "idle" || row.state === "stopped" ? theme.fg("dim", detail) : detail;
+		return detail;
 	}
 
 	private renderRow(row: AgentRow, width: number, labelWidth: number, ageWidth: number, focused: boolean): string {
 		const pad = width >= 120 ? " " : "";
 		const nowMs = Date.now();
 		const name = truncateToWidth(sanitize(row.label), labelWidth, "…");
-		const label = row.self ? theme.bold(name) : focused ? name : row.alive ? name : theme.fg("muted", name);
+		// The row you came from keeps a bold, undimmed name; the others are gray until focused.
+		const label = row.self ? theme.bold(name) : focused ? cc.fg("text", name) : cc.fg("muted", name);
 		const age = rowAge(row, nowMs).padStart(ageWidth);
 		const fixed = visibleWidth(pad) + 2 + labelWidth + 2 + 2 + ageWidth;
 		const detailWidth = Math.max(0, width - fixed);
 		const detail = truncateToWidth(this.rowDetail(row), detailWidth, "…");
 		const line =
 			`${pad}${this.icon(row)} ${label}${" ".repeat(Math.max(0, labelWidth - visibleWidth(name)))}  ` +
-			`${detail}${" ".repeat(Math.max(0, detailWidth - visibleWidth(detail)))}  ${theme.fg("dim", age)}`;
+			`${detail}${" ".repeat(Math.max(0, detailWidth - visibleWidth(detail)))}  ${cc.fg("muted", age)}`;
 		const fitted = truncateToWidth(line, width);
 		if (!focused) return fitted;
-		return theme.bg("userMessageBg", `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`);
+		return cc.bg("userMessageBg", `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`);
 	}
 
 	private renderBody(width: number): { lines: string[]; focusLine: number } {
@@ -1059,20 +1146,20 @@ export class AgentView implements Component, Focusable {
 		const onlySelf = this.rows.length === 1 && this.rows[0].self;
 		if (this.rows.length === 0 && !stateFilter(this.composerText())) {
 			lines.push(
-				theme.fg("text", "Nothing running in the background."),
-				theme.fg(
-					"dim",
+				cc.fg("text", "Nothing running in the background."),
+				cc.fg(
+					"muted",
 					"Hand off a task and it keeps working while you do something else — even if you close this terminal.",
 				),
-				theme.fg("dim", "Start one by describing a task below, or bring a past session back with /resume."),
+				cc.fg("muted", "Start one by describing a task below, or bring a past session back with /resume."),
 			);
 			return { lines: lines.flatMap((l) => wrapTextWithAnsi(l, width)), focusLine };
 		}
 		if (onlySelf) {
 			lines.push(
 				...wrapTextWithAnsi(
-					theme.fg(
-						"dim",
+					cc.fg(
+						"muted",
 						"A different way to work: hand off a bigger task than you would chat through, and it is organized in the sections below so you know when it needs you.",
 					),
 					width,
@@ -1081,7 +1168,7 @@ export class AgentView implements Component, Focusable {
 			);
 		}
 		if (this.rows.length === 0) {
-			lines.push(theme.fg("dim", "no sessions match"));
+			lines.push(cc.fg("muted", "no sessions match"));
 			return { lines, focusLine };
 		}
 		const helper: Record<string, string> = {
@@ -1098,16 +1185,21 @@ export class AgentView implements Component, Focusable {
 				first = false;
 				if (focused) focusLine = lines.length;
 				const collapsed = this.collapsed.has(item.band.key);
-				const title = focused ? theme.bold(item.band.title) : theme.fg("dim", item.band.title);
-				const count = collapsed ? theme.fg("dim", ` ${item.band.rows.length}`) : "";
-				const armed = this.armed?.key === item.key ? theme.fg("error", "  ctrl+x again to delete all") : "";
+				const gray = cc.fg("muted", item.band.title);
+				const title = focused
+					? theme.bold(item.band.title)
+					: this.viewMode === "directory"
+						? theme.bold(gray)
+						: gray;
+				const count = collapsed ? cc.fg("muted", ` ${item.band.rows.length}`) : "";
+				const armed = this.armed?.key === item.key ? cc.fg("error", "  ctrl+x again to delete all") : "";
 				lines.push(truncateToWidth(`${title}${count}${armed}`, width));
 				if (!collapsed && item.band.rows.length === 0 && onlySelf && helper[item.band.key]) {
-					lines.push(truncateToWidth(theme.fg("dim", `  ${helper[item.band.key]}`), width));
+					lines.push(truncateToWidth(cc.fg("muted", `  ${helper[item.band.key]}`), width));
 				}
 			} else if (item.kind === "more") {
 				const text = `  … ${item.hidden} more`;
-				lines.push(focused ? theme.bg("userMessageBg", text.padEnd(width)) : theme.fg("dim", text));
+				lines.push(focused ? cc.bg("userMessageBg", text.padEnd(width)) : cc.fg("muted", text));
 			} else {
 				lines.push(this.renderRow(item.row, width, labelWidth, ageWidth, focused));
 			}
@@ -1121,42 +1213,40 @@ export class AgentView implements Component, Focusable {
 		const needs = row.needs;
 		if (needs) {
 			body.push(...wrapTextWithAnsi(theme.bold(sanitize(needs.title)), inner));
-			if (needs.message) body.push(...wrapTextWithAnsi(sanitize(needs.message), inner));
+			if (needs.message) body.push(...wrapTextWithAnsi(cc.fg("muted", sanitize(needs.message)), inner));
 			const options =
 				needs.method === "select" ? (needs.options ?? []) : needs.method === "confirm" ? ["Yes", "No"] : [];
 			options.slice(0, 9).forEach((option, i) => {
-				body.push(truncateToWidth(`${theme.fg("dim", `${i + 1}.`)} ${sanitize(option)}`, inner));
+				body.push(truncateToWidth(`${cc.fg("muted", `${i + 1}.`)} ${sanitize(option)}`, inner));
 			});
-			if (options.length > 9) body.push(theme.fg("dim", `+${options.length - 9} more · enter to open`));
+			if (options.length > 9) body.push(cc.fg("muted", `+${options.length - 9} more · enter to open`));
 		} else {
-			const text = row.state === "needs" && row.question ? theme.bold(sanitize(row.question)) : sanitize(row.detail);
-			body.push(...wrapTextWithAnsi(text || theme.fg("dim", "(no output yet)"), inner).slice(0, 8));
+			const text =
+				row.state === "needs" && row.question
+					? theme.bold(sanitize(row.question))
+					: cc.fg("muted", sanitize(row.detail) || "(no output yet)");
+			body.push(...wrapTextWithAnsi(text, inner).slice(0, 8));
 		}
-		body.push(theme.fg("dim", this.shorten(row.cwd)));
 		const since = needs?.since ?? (row.state === "needs" ? row.finishedAt : undefined);
-		if (since)
-			body.push(theme.fg("warning", `waiting ${compactAge(Date.now() - (Date.parse(since) || Date.now()))}`));
+		if (since) body.push(cc.fg("warning", `waiting ${compactAge(Date.now() - (Date.parse(since) || Date.now()))}`));
 		body.push("");
 		const options = needs?.method === "select" ? (needs.options?.length ?? 0) : needs?.method === "confirm" ? 2 : 0;
 		body.push(
 			promptLine(this.reply, inner, options > 0 ? `press 1-${Math.min(options, 9)} or type your answer` : "reply"),
 		);
-		const border = (l: string, r: string) => theme.fg("dim", `${l}${"─".repeat(Math.max(0, width - 2))}${r}`);
+		const border = (l: string, r: string) => faint(`${l}${"─".repeat(Math.max(0, width - 2))}${r}`);
 		const boxed = [border("╭", "╮")];
 		for (const line of body) {
 			const fitted = truncateToWidth(line, inner);
-			boxed.push(
-				`${theme.fg("dim", "│")} ${fitted}${" ".repeat(Math.max(0, inner - visibleWidth(fitted)))} ${theme.fg("dim", "│")}`,
-			);
+			boxed.push(`${faint("│")} ${fitted}${" ".repeat(Math.max(0, inner - visibleWidth(fitted)))} ${faint("│")}`);
 		}
 		boxed.push(border("╰", "╯"));
 		const empty = !this.reply.getValue();
-		const action = empty ? (row.self ? "return" : row.alive ? "open" : "resume") : "send";
+		const action = empty ? (row.self ? "return" : "open") : "send";
 		boxed.push(
 			this.hints(width, [
 				["enter", action],
 				empty ? ["space", "close"] : ["esc", "close"],
-				["↑↓", "peek at others"],
 				["ctrl+x", this.armed?.key === row.id ? "confirm" : "delete"],
 			]),
 		);
@@ -1165,50 +1255,48 @@ export class AgentView implements Component, Focusable {
 
 	private renderResume(width: number): string[] {
 		const out = [theme.bold("Resume a past session"), ""];
-		if (this.pastLoading) out.push(theme.fg("dim", "looking for past sessions…"));
-		else if (this.past.length === 0) out.push(theme.fg("dim", "No past sessions to resume"));
+		if (this.pastLoading) out.push(cc.fg("muted", "looking for past sessions…"));
+		else if (this.past.length === 0) out.push(cc.fg("muted", "No past sessions to resume"));
 		const nowMs = Date.now();
 		const start = Math.max(0, Math.min(this.pastIndex - 5, this.past.length - 12));
 		this.past.slice(start, start + 12).forEach((past, i) => {
 			const focused = start + i === this.pastIndex;
 			const age = compactAge(nowMs - (Date.parse(past.modifiedAt) || nowMs));
 			const text = truncateToWidth(`  ${sanitize(past.label)}`, Math.max(10, width - age.length - 2), "…");
-			const line = `${text}${" ".repeat(Math.max(1, width - visibleWidth(text) - age.length))}${theme.fg("dim", age)}`;
-			out.push(focused ? theme.bg("userMessageBg", line) : line);
+			const line = `${text}${" ".repeat(Math.max(1, width - visibleWidth(text) - age.length))}${cc.fg("muted", age)}`;
+			out.push(focused ? cc.bg("userMessageBg", line) : line);
 		});
-		out.push("", theme.fg("dim", "↑/↓ to navigate · enter to resume as a background session · esc to close"));
+		out.push("", cc.fg("muted", "↑/↓ to navigate · enter to resume as a background session · esc to close"));
 		return out;
 	}
 
+	/** `?`: Claude Code's shortcut grid, under the composer in place of the hint line. */
 	private renderHelp(width: number): string[] {
-		const items: Array<[string, string]> = [
-			["enter", "open"],
-			["space", "peek and reply"],
-			["ctrl+enter", "start and open"],
-			["→", "open"],
-			["alt+1-9", "open 1-9 in this directory"],
-			["shift+enter", "newline"],
-			["ctrl+g", "edit prompt in $EDITOR"],
-			["shift+↑↓", "reorder"],
-			["ctrl+r", "rename"],
-			["ctrl+t", "pin to top"],
-			["ctrl+s", "switch views"],
-			["ctrl+x", "stop · twice to delete"],
-			["s:<state>", "filter"],
-			["/resume", "bring a past session back"],
-			["/model", "set the model for new sessions"],
-			["esc", "go back"],
-			["ctrl+c ×2", "quit"],
-			["?", "close"],
+		const items = [
+			"shift+↑↓ to reorder",
+			"ctrl+s to switch views",
+			"ctrl+enter to start and open",
+			"ctrl+t to pin to top",
+			"ctrl+x to delete",
+			"? to close",
+			"ctrl+r to rename",
+			"ctrl+j for newline",
+			"ctrl+g for $EDITOR",
+			"alt+1-9 to open",
+			"s:<state> to filter",
+			"esc to quit",
 		];
-		const column = Math.max(24, Math.floor(width / 2));
-		const out = [theme.bold("Shortcuts"), ""];
-		for (let i = 0; i < items.length; i += 2) {
-			const cell = ([key, action]: [string, string]) =>
-				`${theme.fg("accent", key)} ${theme.fg("dim", `to ${action}`)}`;
-			const left = cell(items[i]);
-			const right = items[i + 1] ? cell(items[i + 1]) : "";
-			out.push(truncateToWidth(`${left}${" ".repeat(Math.max(2, column - visibleWidth(left)))}${right}`, width));
+		const usable = Math.max(20, width - 2);
+		const columns = Math.max(1, Math.min(6, Math.floor(usable / 18)));
+		const cell = Math.floor(usable / columns);
+		const out: string[] = [];
+		for (let i = 0; i < items.length; i += columns) {
+			const cells = items.slice(i, i + columns).map((item) => wrapTextWithAnsi(item, cell - 3));
+			const height = Math.max(...cells.map((c) => c.length));
+			for (let line = 0; line < height; line++) {
+				const text = cells.map((c) => (c[line] ?? "").padEnd(cell)).join("");
+				out.push(truncateToWidth(`  ${cc.fg("muted", text.trimEnd())}`, width));
+			}
 		}
 		return out;
 	}
@@ -1216,11 +1304,11 @@ export class AgentView implements Component, Focusable {
 	private hints(width: number, items: Array<[string, string] | undefined>): string {
 		const parts = items.filter((i): i is [string, string] => !!i).map(([key, action]) => `${key} to ${action}`);
 		let line = parts.join(" · ");
-		while (parts.length > 1 && visibleWidth(line) > width) {
+		while (parts.length > 1 && visibleWidth(line) > width - 2) {
 			parts.splice(parts.length - 2, 1);
 			line = parts.join(" · ");
 		}
-		return truncateToWidth(theme.fg("dim", line), width);
+		return truncateToWidth(`  ${cc.fg("muted", line)}`, width);
 	}
 
 	private listFooter(width: number): string {
@@ -1230,21 +1318,17 @@ export class AgentView implements Component, Focusable {
 			if (stateFilter(text)) return this.hints(width, [["esc", "clear"]]);
 			return this.hints(width, [
 				["enter", text.startsWith("/") ? "run" : "create"],
-				text.startsWith("/") ? undefined : ["ctrl+enter", "start and open"],
 				["esc", "clear"],
 			]);
 		}
 		let enter: [string, string] | undefined;
 		if (item?.kind === "header") enter = ["enter", this.collapsed.has(item.band.key) ? "expand" : "collapse"];
 		else if (item?.kind === "more") enter = ["enter", "show all"];
-		else if (item?.kind === "row") enter = ["enter", item.row.self ? "return" : item.row.alive ? "open" : "resume"];
+		else if (item?.kind === "row") enter = ["enter", item.row.self ? "return" : "open"];
 		const x: [string, string] | undefined =
 			!item || width < 80 || item.kind === "more" || (item?.kind === "row" && item.row.self)
 				? undefined
-				: [
-						"ctrl+x",
-						item?.kind === "header" ? "delete all" : item?.kind === "row" && item.row.alive ? "stop" : "delete",
-					];
+				: ["ctrl+x", item?.kind === "header" ? "delete all" : "delete"];
 		return this.hints(width, [
 			enter,
 			width >= 55 && item?.kind === "row" ? ["space", "reply"] : undefined,
@@ -1260,13 +1344,13 @@ export class AgentView implements Component, Focusable {
 		if (status) header.push(truncateToWidth(status, width));
 		header.push("");
 
+		const rule = faint("─".repeat(width));
 		let footer: string[];
 		if (this.mode === "peek" && this.selectedRow) footer = this.renderPeek(this.selectedRow, width);
 		else if (this.mode === "rename") {
-			const rule = theme.fg("dim", "─".repeat(width));
 			footer = [
 				rule,
-				`${theme.fg("dim", "rename ")}${promptLine(this.renameInput, width - 7, "")}`,
+				`${cc.fg("muted", "rename ")}${promptLine(this.renameInput, width - 7, "")}`,
 				rule,
 				this.hints(width, [
 					["enter", "save"],
@@ -1274,20 +1358,24 @@ export class AgentView implements Component, Focusable {
 				]),
 			];
 		} else {
-			const rule = theme.fg("dim", "─".repeat(width));
 			const above = this.composerLines
 				.slice(-5)
 				.map((line, i, shown) =>
 					truncateToWidth(`${i === 0 && shown.length === this.composerLines.length ? "❯" : " "} ${line}`, width),
 				);
 			const current = promptLine(this.composer, width, above.length ? "" : "describe a task for a new session");
-			footer = [rule, ...above, above.length ? current.replace(/^❯/, " ") : current, rule, this.listFooter(width)];
+			footer = [
+				rule,
+				...above,
+				above.length ? current.replace(/^❯/, " ") : current,
+				rule,
+				...(this.mode === "help" ? this.renderHelp(width) : [this.listFooter(width)]),
+			];
 		}
 
 		let body: string[];
 		let focusLine = 0;
-		if (this.mode === "help") body = this.renderHelp(width);
-		else if (this.mode === "resume") body = this.renderResume(width);
+		if (this.mode === "resume") body = this.renderResume(width);
 		else ({ lines: body, focusLine } = this.renderBody(width));
 
 		const budget = Math.max(1, rows - header.length - footer.length);
