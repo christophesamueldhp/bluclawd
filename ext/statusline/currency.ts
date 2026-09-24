@@ -80,17 +80,11 @@ export class CurrencyRates {
 	private diskRead = false;
 	private retryAt = 0;
 	private pending: Promise<void> | undefined;
-	private readonly listeners = new Set<() => void>();
 
 	constructor(options: { cachePath: string; fetch: typeof fetch; now?: () => number }) {
 		this.cachePath = options.cachePath;
 		this.fetchImpl = options.fetch;
 		this.now = options.now ?? Date.now;
-	}
-
-	onChange(listener: () => void): () => void {
-		this.listeners.add(listener);
-		return () => this.listeners.delete(listener);
 	}
 
 	/** USD → `currency`, null until a table is known. A missing or day-old table refreshes in the background. */
@@ -115,7 +109,7 @@ export class CurrencyRates {
 		if (!this.diskRead) {
 			this.diskRead = true;
 			const fromDisk = await readCache(this.cachePath);
-			if (fromDisk) this.publish(fromDisk);
+			if (fromDisk) this.cached = fromDisk;
 			if (fromDisk && this.now() - fromDisk.timestamp < RATE_TTL_MS) return;
 		}
 		try {
@@ -123,7 +117,7 @@ export class CurrencyRates {
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
 			const body = (await response.json()) as { usd?: unknown };
 			const fresh = { timestamp: this.now(), rates: parseRates(body.usd) };
-			this.publish(fresh);
+			this.cached = fresh;
 			await mkdir(dirname(this.cachePath), { recursive: true });
 			await writeFile(this.cachePath, JSON.stringify(fresh));
 		} catch {
@@ -131,10 +125,5 @@ export class CurrencyRates {
 			// showing stays, and the next attempt waits instead of firing every render.
 			this.retryAt = this.now() + RETRY_AFTER_MS;
 		}
-	}
-
-	private publish(rates: CachedRates): void {
-		this.cached = rates;
-		for (const listener of this.listeners) listener();
 	}
 }

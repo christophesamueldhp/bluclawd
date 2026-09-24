@@ -81,9 +81,11 @@ import {
 	getFinalOutput,
 	getResultOutput,
 	isFailedResult,
+	type LiveChild,
 	MAX_CONCURRENCY,
 	MAX_PARALLEL_TASKS,
 	renderCall,
+	renderLiveRows,
 	renderResult,
 	type SingleResult,
 	type SubagentDetails,
@@ -456,8 +458,56 @@ export interface SubagentsDeps {
 }
 
 export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
-	const run = deps.run ?? runSubagent;
 	const depth = deps.depth ?? 0;
+
+	// Every child this session runs, foreground or background, listed under the
+	// permission mode while it runs. Only the main session has a footer to show them.
+	const live = new Set<LiveChild>();
+	let footerCtx: ExtensionContext | undefined;
+	let liveTimer: NodeJS.Timeout | undefined;
+	const paintLive = () => {
+		try {
+			footerCtx?.ui.setStatus("subagents", renderLiveRows([...live], Date.now(), footerCtx.ui.theme));
+		} catch {
+			// A context replaced by /new or /resume; the next session_start hands over a fresh one.
+		}
+		if (live.size === 0) {
+			clearInterval(liveTimer);
+			liveTimer = undefined;
+		} else if (!liveTimer) {
+			// Elapsed times tick between the child's own updates.
+			liveTimer = setInterval(paintLive, 1000);
+			liveTimer.unref?.();
+		}
+	};
+	const baseRun = deps.run ?? runSubagent;
+	const run: typeof baseRun =
+		depth > 0
+			? baseRun
+			: async (options) => {
+					const child: LiveChild = {
+						agent: options.resume ? (resumableAgentName(options.resume) ?? "resume") : options.def.name,
+						startedAt: Date.now(),
+					};
+					live.add(child);
+					paintLive();
+					try {
+						return await baseRun({
+							...options,
+							onUpdate: (snap) => {
+								child.snap = snap;
+								paintLive();
+								options.onUpdate?.(snap);
+							},
+						});
+					} finally {
+						live.delete(child);
+						paintLive();
+					}
+				};
+	pi.on("session_start", (_event, ctx) => {
+		footerCtx = depth === 0 && ctx.hasUI && ctx.mode === "tui" ? ctx : undefined;
+	});
 
 	// Project defs join the roster only for a trusted project — the same rule the
 	// `/agents` listing applies, and the same reason: an untrusted repo's agent
@@ -554,6 +604,9 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 		// The parent is going away: nobody is left to receive a result, so the
 		// children are aborted rather than left running to completion in the dark.
 		shuttingDown = true;
+		clearInterval(liveTimer);
+		liveTimer = undefined;
+		footerCtx = undefined;
 		schedules.clear();
 		releaseTargets();
 		releaseAgentTasks();

@@ -77,14 +77,14 @@ const count = (n: number, one: string, many: string) => (n === 1 ? `1 ${one}` : 
 /**
  * The footer pill's label, Claude Code's: named by type when every running task
  * shares one (shells and monitors are both shell tasks), else a plain count.
+ * Subagents are left out: the subagents extension lists them under the mode line.
  */
 export function tasksPillLabel(rows: TaskRow[]): string | undefined {
-	const running = rows.filter((r) => r.state === "running");
+	const running = rows.filter((r) => r.state === "running" && r.kind !== "agent");
 	if (running.length === 0) return undefined;
-	const type = (r: TaskRow) => (r.kind === "agent" ? "agent" : r.id.startsWith("s") ? "ws" : "shell");
+	const type = (r: TaskRow) => (r.id.startsWith("s") ? "ws" : "shell");
 	const types = new Set(running.map(type));
 	if (types.size > 1) return count(running.length, "background task", "background tasks");
-	if (types.has("agent")) return count(running.length, "local agent", "local agents");
 	if (types.has("ws")) return count(running.length, "monitor", "monitors");
 	const shells = running.filter((r) => r.kind === "shell").length;
 	const monitors = running.length - shells;

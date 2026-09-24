@@ -11,7 +11,7 @@ import { homedir } from "node:os";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, Markdown, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { keyDisplayText } from "../_shared/key-display-text.ts";
 import type { AgentScope } from "./defs.ts";
 import { structuredOutputOf } from "./structured-output.ts";
@@ -562,4 +562,52 @@ export function renderResult(
 
 	const text = result.content[0];
 	return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+}
+
+/** A subagent running right now, as the footer lists it. */
+export interface LiveChild {
+	agent: string;
+	startedAt: number;
+	/** The child's latest progress; absent until its first message ends. */
+	snap?: SingleResult;
+}
+
+/** Footer rows shown before the rest collapse into `+N more`. */
+export const LIVE_ROWS_SHOWN = 3;
+/** Room for a row's activity, so its elapsed time and tool count stay on screen. */
+const ACTIVITY_WIDTH = 60;
+
+function formatElapsed(ms: number): string {
+	const s = Math.max(0, Math.floor(ms / 1000));
+	return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+/**
+ * The footer block under the permission mode: one row per running subagent with
+ * what it is doing now. Always ends in a line break, which is what marks a status
+ * as a block of its own rather than a chip on the mode row.
+ */
+export function renderLiveRows(children: readonly LiveChild[], now: number, theme: Theme): string | undefined {
+	if (children.length === 0) return undefined;
+	const shown = children.slice(0, LIVE_ROWS_SHOWN);
+	const nameWidth = Math.max(...shown.map((c) => (c.snap?.agent ?? c.agent).length));
+	const rows = shown.map((child) => {
+		const items = getDisplayItems(child.snap?.messages ?? []);
+		const last = items[items.length - 1];
+		const activity = truncateToWidth(
+			!last
+				? theme.fg("dim", "Starting…")
+				: last.type === "toolCall"
+					? formatToolCall(last.name, last.args, theme.fg.bind(theme))
+					: theme.fg("dim", last.text.trim().split("\n")[0] ?? ""),
+			ACTIVITY_WIDTH,
+		);
+		const tools = items.filter((i) => i.type === "toolCall").length;
+		const stats = `${formatElapsed(now - child.startedAt)} · ${tools} tool${tools === 1 ? "" : "s"}`;
+		const name = (child.snap?.agent ?? child.agent).padEnd(nameWidth);
+		return `  ${theme.fg("dim", "⎿")} ${theme.fg("accent", name)}  ${activity}${theme.fg("dim", ` · ${stats}`)}`;
+	});
+	if (children.length > shown.length)
+		rows.push(theme.fg("dim", `    +${children.length - shown.length} more (/agents)`));
+	return `${rows.join("\n")}\n`;
 }

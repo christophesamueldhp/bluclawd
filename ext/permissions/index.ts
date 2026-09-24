@@ -127,13 +127,18 @@ const CC_AUTO_ACCEPT = "\x1b[38;2;175;135;255m";
  * - `edits` (Claude Code's accept-edits) is PURPLE, not green. pi's theme has no token for it, so
  *   `success` was the stand-in — and green is the one colour that reads as the
  *   opposite of what the badge means. It is painted with a raw truecolor escape
- *   instead, which the ccstatusline footer next to it already does for its own
- *   widgets. A 256-colour terminal would not downconvert the escape, so that
+ *   instead. A 256-colour terminal would not downconvert the escape, so that
  *   case keeps the theme token.
  * - `ask` carries `⏸`: it is the manual mode, and `⏸` is the badge the manual
  *   (non-auto-accept) modes share.
  */
-function modeStatusText(ctx: ExtensionContext, mode: PermissionMode): string | undefined {
+export function modeStatusText(ctx: ExtensionContext, mode: PermissionMode): string | undefined {
+	const badge = modeBadge(ctx, mode);
+	// Claude Code names its cycle key after the badge; ours is Alt+M (see the shortcut below).
+	return badge && `${badge} ${ctx.ui.theme.fg("dim", "(alt+m to cycle)")}`;
+}
+
+function modeBadge(ctx: ExtensionContext, mode: PermissionMode): string | undefined {
 	const theme = ctx.ui.theme;
 	switch (mode) {
 		case "ask":

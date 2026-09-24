@@ -50,12 +50,9 @@ export interface PermissionSettings {
 }
 
 export interface StatuslineSettings {
-	/** External command whose first stdout line joins the footer's status line. */
-	command?: string;
-	intervalMs?: number;
-	/** Extra provider ids billed by subscription (`(subscription)` in the footer, `/usage`, `/status`); kimi-coding and opencode-go are built in. */
+	/** Extra provider ids billed by subscription (`(subscription)` in `/usage` and `/status`); kimi-coding and opencode-go are built in. */
 	subscriptionProviders?: string[];
-	/** Currency of the cost figure in the footer and `/usage`, converted from USD at a daily rate. default: USD */
+	/** Currency of the cost figure in `/usage`, converted from USD at a daily rate. default: USD */
 	currency?: string;
 }
 

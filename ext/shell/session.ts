@@ -43,7 +43,7 @@ export interface ShellSessionOptions {
 	/** Any visible state changed (output, running, cwd). */
 	onChange: () => void;
 	/** A command finished, with its exit status. */
-	onCommandFinished: (exitCode: number) => void;
+	onCommandFinished?: (exitCode: number) => void;
 }
 
 function quote(value: string): string {
@@ -247,7 +247,7 @@ export class ShellSession {
 		this.state.lastExitCode = exitCode;
 		if (id) this.options.transcript.finish(id, exitCode);
 		this.currentId = undefined;
-		this.options.onCommandFinished(exitCode);
+		this.options.onCommandFinished?.(exitCode);
 		this.options.onChange();
 	}
 

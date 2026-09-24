@@ -67,13 +67,4 @@ describe("CurrencyRates", () => {
 		await rates.settled();
 		expect(fetchSpy).toHaveBeenCalledTimes(2);
 	});
-
-	it("notifies listeners when a table arrives", async () => {
-		const rates = new CurrencyRates({ cachePath: join(dir, "rates.json"), fetch: vi.fn(ok(1)) as never });
-		const listener = vi.fn();
-		rates.onChange(listener);
-		rates.rate("IDR");
-		await rates.settled();
-		expect(listener).toHaveBeenCalledTimes(1);
-	});
 });

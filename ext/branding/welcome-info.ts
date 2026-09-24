@@ -7,7 +7,7 @@
  * Content adapted from pi-powerline-footer's welcome overlay (MIT, Nico Bailon);
  * the counts come from what pi itself loaded, not from scanning directories.
  */
-import { formatTokens } from "../statusline/footer.ts";
+import { formatTokens } from "../_shared/session-usage.ts";
 import type { WelcomeSidebarSection } from "./welcome-box.ts";
 
 export interface WelcomeInfo {

@@ -111,9 +111,7 @@ describe("footer pill label", () => {
 		[[row("b00000001", "shell"), row("b00000002", "monitor")], "1 shell, 1 monitor"],
 		[[row("b00000001", "monitor"), row("b00000002", "monitor")], "2 monitors"],
 		[[row("s00000001", "monitor")], "1 monitor"],
-		[[row("sa-1", "agent")], "1 local agent"],
-		[[row("sa-1", "agent"), row("sa-2", "agent")], "2 local agents"],
-		[[row("sa-1", "agent"), row("b00000001", "shell")], "2 background tasks"],
+		[[row("sa-1", "agent"), row("b00000001", "shell")], "1 shell"],
 		[[row("s00000001", "monitor"), row("b00000001", "monitor")], "2 background tasks"],
 	])("labels %j as %s", (rows, label) => {
 		expect(tasksPillLabel([...rows])).toBe(label);
@@ -122,5 +120,6 @@ describe("footer pill label", () => {
 	it("counts only what is running, and shows nothing when nothing is", () => {
 		expect(tasksPillLabel([row("b00000001", "shell", "completed")])).toBeUndefined();
 		expect(tasksPillLabel([row("b00000001", "shell"), row("b00000002", "shell", "completed")])).toBe("1 shell");
+		expect(tasksPillLabel([row("sa-1", "agent"), row("sa-2", "agent")])).toBeUndefined();
 	});
 });

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { formatStatus } from "../ext/diagnostics/index.ts";
 import { formatPackageList } from "../ext/plugin/index.ts";
 import { formatUsageReport } from "../ext/statusline/index.ts";
-import { claudePlanUsage, opencodeGoPlanUsage } from "../ext/statusline/usage-providers.ts";
+import { claudePlanUsage } from "../ext/statusline/usage-providers.ts";
 
 const plain = { bold: (s: string) => s, fg: (_c: string, s: string) => s };
 
@@ -17,9 +17,10 @@ describe("/usage report", () => {
 				totals,
 				plans: [
 					claudePlanUsage({ sessionUsage: 20, weeklyUsage: 55 }) ?? { source: "", windows: [] },
-					opencodeGoPlanUsage({ rolling: { usagePercent: 3, resetAt: "2026-09-03T00:00:00Z" } }) ?? {
-						source: "",
-						windows: [],
+					// Entries saved before 2026-09-24 also carry other sources.
+					{
+						source: "OpenCode Go",
+						windows: [{ label: "Session", usagePercent: 3, resetAt: "2026-09-03T00:00:00Z" }],
 					},
 				],
 			},
@@ -45,7 +46,7 @@ describe("/usage report", () => {
 				plans: [],
 				unavailable: [
 					"Claude plan windows need an Anthropic OAuth login (/login).",
-					"Go needs OPENCODE_GO_WORKSPACE_ID.",
+					"Another source needs a login.",
 				],
 			},
 			plain,
@@ -53,7 +54,7 @@ describe("/usage report", () => {
 		expect(lines.find((l) => l.startsWith("Cost:"))).toContain("(per token)");
 		expect(lines).toContain("No plan usage available for openrouter.");
 		expect(lines.some((l) => l.includes("/login"))).toBe(true);
-		expect(lines.some((l) => l.includes("OPENCODE_GO_WORKSPACE_ID"))).toBe(true);
+		expect(lines).toContain("Another source needs a login.");
 	});
 
 	it("still renders entries written before the plan list existed", () => {

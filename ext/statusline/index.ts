@@ -1,250 +1,36 @@
 /**
- * Statusline extension: the Claude Code status line, two ways.
- *
- * 1. The footer itself. `ctx.ui.setFooter` replaces pi's built-in footer with
- *    `CcStatuslineFooter` (./footer.ts), a widget-for-widget replica of the
- *    user's ccstatusline configuration — model, thinking effort, context slider,
- *    git owner/branch/changes, cwd, plan-usage sliders, token stats — plus a
- *    right-aligned context token counter above the prompt. Data pi's
- *    `ReadonlyFooterDataProvider` does not carry (origin owner, change counts,
- *    plan usage) comes from ./git-info.ts and ./usage-providers.ts. Everything
- *    that used to land on the built-in footer via `ctx.ui.setStatus` (permission
- *    mode, mcp, this extension's own external command) still shows: the custom
- *    footer renders `footerData.getExtensionStatuses()` as its last line.
- *
- * 2. Claude-Code-style *external* statusline commands: when
- *    `settings.statusline.command` is set, the command is run and its stdout is
- *    published via ctx.ui.setStatus("statusline", text), which the footer above
- *    shows on its status line. When the setting is unset, nothing runs.
- *
- * `/usage` (Claude Code's name) lives here too rather than in
- * `diagnostics`: they report the plan-usage windows the footer's pollers hold,
- * and reading that state from another top-level extension would cross a
- * `pi.extensions` module-graph boundary (see `_shared/global-state.ts`).
- *
- * Payload delivery: the JSON payload is written to the command's STDIN (Claude
- * Code parity — real CC statusline scripts read stdin; review I5) AND exposed as
- * the BLUCLAWD_STATUSLINE_JSON env var (kept for scripts written against this
- * extension's original env-var-only delivery). Both go through exec's per-child
- * `stdin`/`env` options, so nothing mutates process.env (which would race across
- * concurrent refreshes).
- *
- * Non-blocking: `turn_end` fires INLINE in the agent loop (pi-agent-core awaits
- * emit() before the next round-trip, and turn_end fires on every tool-calling
- * round-trip, not once per user message). So refresh() must NOT be awaited by the
- * handlers, or a slow statusline.command would add up to its 5s timeout of latency
- * to every round-trip. The handlers fire it detached (void refresh().catch(...));
- * the status line updating a beat late is fine, blocking the agent is not. The
- * git-branch sub-exec also carries its own short timeout so it can't hang unbounded.
- * A module-scoped isRefreshing guard drops any refresh that starts while another is
- * still in flight (the next turn_end refreshes anyway) — this both prevents
- * out-of-order status updates from overlapping detached runs and bounds concurrent
- * child processes to one.
- *
- * intervalMs (settings.statusline.intervalMs): when set alongside command, a
- * periodic refresh timer runs between turns (clamped to MIN_INTERVAL_MS). The
- * timer is (re)started on session_start — which also makes /reload pick up
- * setting changes — and cleared on session_shutdown. Module-scoped handle so the
- * factory's double trust-resolving pass never leaks a second timer; unref'd so
- * it can never keep a headless process alive. Ticks reuse refresh()'s in-flight
- * guard, so a slow command coalesces instead of stacking.
+ * Statusline extension: `/usage` (Claude Code's name), the session's spend,
+ * token totals and Claude plan windows. The footer itself is pistatusline's
+ * (ccstatusline as a pi package); this extension only reads the settings that
+ * `/usage` and `/status` share — `statusline.subscriptionProviders` and
+ * `statusline.currency`.
  */
 
 import { join } from "node:path";
-import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, readStoredCredential, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import {
-	createLocalBashOperations,
-	getAgentDir,
-	readStoredCredential,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
-import { stripAnsi } from "../_shared/ansi.ts";
-import { execWithIo } from "../_shared/exec.ts";
-import * as forkSettings from "../_shared/settings.ts";
-import { notifyingWhenSettled, onWorkingTreeChanged } from "../_shared/working-tree.ts";
-import { COST_CURRENCIES, type CostCurrency, CurrencyRates, formatCost, normalizeCurrency } from "./currency.ts";
-import {
-	CcStatuslineFooter,
-	ContextTokenCount,
 	formatTokens,
 	isUsingSubscription,
-	resolveContextUsage,
 	type SessionTotals,
 	setSubscriptionProviders,
-	streamingContextUsage,
 	sumSessionUsage,
-} from "./footer.ts";
-import { GitInfo } from "./git-info.ts";
-import {
-	claudePlanUsage,
-	OpencodeGoUsageProvider,
-	opencodeGoPlanUsage,
-	type PlanUsage,
-	UsageDataProvider,
-} from "./usage-providers.ts";
+} from "../_shared/session-usage.ts";
+import * as forkSettings from "../_shared/settings.ts";
+import { COST_CURRENCIES, type CostCurrency, CurrencyRates, formatCost, normalizeCurrency } from "./currency.ts";
+import { claudePlanUsage, fetchClaudeUsage, type PlanUsage } from "./usage-providers.ts";
 
-/** Env var carrying the JSON payload to the external statusline command. */
-export const STATUSLINE_ENV_VAR = "BLUCLAWD_STATUSLINE_JSON";
-
-/** Cap on the rendered status text, independent of terminal width (the footer
- * truncates to terminal width separately at render time; this just bounds how
- * much a runaway command's stdout can inflate in-memory status state). */
-const MAX_STATUS_CHARS = 200;
-
-/** Timeout for the main statusline command. Detached, so it no longer blocks the
- * agent loop; 5s is a generous ceiling before we give up and clear. */
-const COMMAND_TIMEOUT_MS = 5000;
-
-/** Pi's built-in tools that never write, so their results skip the git re-read. */
-const READ_ONLY_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls"]);
-
-/** Timeout for the git-branch sub-exec so a hung git can't stall the refresh. */
-const GIT_TIMEOUT_MS = 2000;
-
-/** Floor for statusline.intervalMs — smaller configured values clamp up to this
- * so a typo (e.g. `5`) can't spawn a shell command hundreds of times a second. */
-export const MIN_INTERVAL_MS = 250;
-
-/**
- * Module-scoped in-flight guard. Module scope (not factory closure) is deliberate:
- * the factory may run twice per trust-resolving load, and a shared guard drops
- * overlapping refreshes across both handler registrations. Reset in refresh()'s
- * finally block.
- */
-let isRefreshing = false;
-
-/**
- * Module-scoped periodic-refresh timer. Module scope for the same reason as
- * isRefreshing: the factory may run twice per trust-resolving load, and both
- * passes' session_start handlers restart the same slot instead of leaking a
- * second timer.
- */
-let intervalTimer: ReturnType<typeof setInterval> | undefined;
-
-function stopIntervalTimer(): void {
-	if (intervalTimer !== undefined) {
-		clearInterval(intervalTimer);
-		intervalTimer = undefined;
-	}
-}
-
-/**
- * The live data sources behind the custom footer. Module-scoped for the same
- * reason as the timers above: session_start may fire more than once per
- * process (double factory pass, /reload, session switch) and each start must
- * replace — not stack — the pollers of the previous one.
- */
-let footerRuntime: { git: GitInfo; sources: PlanUsageSource[] } | undefined;
-
-/**
- * One plan-usage source: its poller, the adapter to the neutral shape, and the
- * hint `/usage` prints while it has no data. Adding a provider means adding an
- * entry here — the footer and `/usage` iterate the list and know nothing else.
- */
-interface PlanUsageSource {
-	poller: { onChange(callback: () => void): () => void; start(): void; dispose(): void };
-	usage(): PlanUsage | null;
-	hint: string;
-}
-
-function createPlanUsageSources(): PlanUsageSource[] {
-	const claude = new UsageDataProvider(() => readStoredCredential("anthropic"));
-	const go = new OpencodeGoUsageProvider();
-	return [
-		{
-			poller: claude,
-			usage: () => claudePlanUsage(claude.getUsageData()),
-			hint: "Claude plan windows need an Anthropic OAuth login (/login).",
-		},
-		{
-			poller: go,
-			usage: () => opencodeGoPlanUsage(go.getUsageData()),
-			hint: "OpenCode Go windows need OPENCODE_GO_WORKSPACE_ID and OPENCODE_GO_AUTH_COOKIE.",
-		},
-	];
-}
-
-/** Sources with data, in display order. */
-function activePlanUsage(sources: readonly PlanUsageSource[]): PlanUsage[] {
-	return sources.map((source) => source.usage()).filter((usage): usage is PlanUsage => usage !== null);
-}
-
-/**
- * Latest context seen by any handler. The footer reads model, thinking level,
- * context usage, and session entries through it on every render; its getters
- * are live, so one captured reference stays current for the whole session.
- */
-let latestCtx: ExtensionContext | undefined;
-
-/** Usage of the reply streaming right now; cleared when it ends (see streamingContextUsage). */
-let streamingUsage: Usage | undefined;
+/** Printed when there is no Claude plan to report. */
+const CLAUDE_HINT = "Claude plan windows need an Anthropic OAuth login (/login).";
 
 /** Daily USD rates for the cost figure; one table per process, shared by every session. */
 const currencyRates = new CurrencyRates({
 	cachePath: join(getAgentDir(), "bluclawd", "currency-rates.json"),
-	fetch: (input, init) => fetch(input, init),
+	// Bounded: `/usage` waits for this table.
+	fetch: (input, init) => fetch(input, { ...init, signal: AbortSignal.timeout(5000) }),
 });
 let costCurrency: CostCurrency = "USD";
-
-/** The `shellPath` setting, for the user `!` commands this extension runs (see the user_bash handler). */
-let userShellPath: string | undefined;
-
-function disposeFooterRuntime(): void {
-	footerRuntime?.git.dispose();
-	for (const source of footerRuntime?.sources ?? []) source.poller.dispose();
-	footerRuntime = undefined;
-}
-
-/** Replace pi's footer with the ccstatusline replica and start its data pollers. */
-function installFooter(ctx: ExtensionContext): void {
-	disposeFooterRuntime();
-	const git = new GitInfo(ctx.cwd);
-	const sources = createPlanUsageSources();
-	footerRuntime = { git, sources };
-
-	ctx.ui.setFooter((tui, theme, footerData) => {
-		const repaint = () => tui.requestRender();
-		const unsubscribe = [
-			git.onChange(repaint),
-			...sources.map((source) => source.poller.onChange(repaint)),
-			footerData.onBranchChange(repaint),
-			currencyRates.onChange(repaint),
-		];
-		onWorkingTreeChanged(() => {
-			git.invalidateChanges();
-			repaint();
-		});
-		const footer = new CcStatuslineFooter(
-			{
-				ctx: () => latestCtx,
-				gitBranch: () => footerData.getGitBranch(),
-				gitOriginOwner: () => git.getOriginOwner(),
-				gitChanges: () => git.getChanges(),
-				planUsage: () => activePlanUsage(sources),
-				extensionStatuses: () => footerData.getExtensionStatuses(),
-				streamingUsage: () => streamingUsage,
-				currency: () => ({ code: costCurrency, rate: currencyRates.rate(costCurrency) }),
-			},
-			theme,
-		);
-		return Object.assign(footer, {
-			dispose: () => {
-				for (const off of unsubscribe) off();
-				onWorkingTreeChanged(undefined);
-			},
-		});
-	});
-	ctx.ui.setWidget(
-		"statusline-context-tokens",
-		(_tui, theme) => new ContextTokenCount(() => latestCtx && resolveContextUsage(latestCtx, streamingUsage), theme),
-		{ placement: "aboveEditor" },
-	);
-
-	for (const source of sources) source.poller.start();
-}
 
 /** Snapshot rendered by `/usage`. Plain data so it survives in the session file. */
 export interface UsageReport {
@@ -260,9 +46,9 @@ export interface UsageReport {
 }
 
 /**
- * The `/usage` report: this session's spend and token totals,
- * followed by whichever plan-usage windows the footer pollers have. Exported
- * pure for tests; `theme` is the only styling dependency.
+ * The `/usage` report: this session's spend and token totals, followed by
+ * whichever plan-usage windows are available. Exported pure for tests; `theme`
+ * is the only styling dependency.
  */
 export function formatUsageReport(
 	report: UsageReport,
@@ -272,9 +58,9 @@ export function formatUsageReport(
 	const lines: string[] = [theme.bold("Session usage")];
 	const t = report.totals;
 	lines.push(`${dim("Model:")} ${report.model ?? "none selected"}`);
-	// Same rule as the footer's cost figure: the amount always says how it is
-	// billed, since a subscription total is a notional API-rate equivalent and a
-	// per-token one is real spend. No model, no billing to name.
+	// The amount always says how it is billed, since a subscription total is a
+	// notional API-rate equivalent and a per-token one is real spend. No model, no
+	// billing to name.
 	const billing = report.model ? dim(report.subscription ? " (subscription)" : " (per token)") : "";
 	lines.push(
 		`${dim("Cost:")} ${formatCost(t.cost, report.currency?.code ?? "USD", report.currency?.rate ?? 1, 4)}${billing}`,
@@ -309,140 +95,13 @@ export function formatUsageReport(
 	return lines;
 }
 
-/**
- * Sanitize a command's stdout line for safe single-line TUI rendering. The output
- * is trusted config (statusline.command) but can still emit ANSI/OSC escapes,
- * cursor moves, or stray control bytes that would corrupt the terminal. Strip ANSI
- * escape sequences via the shared stripAnsi util, then remove any remaining C0
- * control chars and DEL (the footer's own sanitizer only handles \r\n\t, not these).
- */
-function sanitizeStatusOutput(text: string): string {
-	return stripAnsi(text).replace(/[\x00-\x1f\x7f]/g, "");
-}
-
-export interface StatuslinePayload {
-	model: string;
-	branch: string | null;
-	cwd: string;
-	contextPct: number | null;
-	costUsd: number;
-}
-
-/**
- * Pure helper: total cost in USD summed over assistant messages' usage.cost.total.
- * Modeled on FooterComponent.render's cost accumulation (footer.ts ~L91-100), but
- * exported as a plain function over an array so it's unit-testable without a live
- * session. contextPct is deliberately NOT computed here: it requires the model's
- * live contextWindow (ctx.getContextUsage()), which isn't derivable from messages
- * alone — the handler below fetches it separately, keeping this function pure.
- */
-export function computeFooterStats(messages: AgentMessage[]): {
-	costUsd: number;
-} {
-	let costUsd = 0;
-	for (const message of messages) {
-		if (message.role === "assistant") {
-			costUsd += message.usage.cost.total;
-		}
-	}
-	return { costUsd };
-}
-
-/**
- * Run the statusline command and push its output to the footer. Detached from the
- * agent loop (see file header): never awaited by the handlers, never throws, and
- * drops itself if another refresh is already in flight.
- */
-async function refresh(ctx: ExtensionContext, exec: typeof execWithIo): Promise<void> {
-	// statusline.command is arbitrary shell: project-scope settings apply ONLY when
-	// the user trusted the project (an untrusted repo's .bluclawd/settings.json
-	// must never execute — mirrors web/index.ts's trust-aware settings read).
-	const command = forkSettings
-		.statusline(
-			SettingsManager.create(ctx.cwd, undefined, {
-				projectTrusted: ctx.isProjectTrusted(),
-			}),
-		)
-		?.command?.trim();
-	if (!command) return; // unset: leave the built-in footer untouched
-	if (isRefreshing) return; // overlap guard: the next turn_end will refresh anyway
-	isRefreshing = true;
-
-	try {
-		const messages: AgentMessage[] = [];
-		for (const entry of ctx.sessionManager.getEntries()) {
-			if (entry.type === "message") messages.push(entry.message);
-		}
-		const { costUsd } = computeFooterStats(messages);
-
-		const branchResult = await exec("git", ["branch", "--show-current"], {
-			cwd: ctx.cwd,
-			timeout: GIT_TIMEOUT_MS,
-		}).catch(() => undefined);
-		const branchOut = branchResult?.code === 0 ? branchResult.stdout.trim() : "";
-		const branch = branchOut.length > 0 ? branchOut : null;
-
-		const payload: StatuslinePayload = {
-			model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unknown",
-			branch,
-			cwd: ctx.cwd,
-			contextPct: ctx.getContextUsage()?.percent ?? null,
-			costUsd,
-		};
-
-		const payloadJson = JSON.stringify(payload);
-		const result = await exec("bash", ["-c", command], {
-			cwd: ctx.cwd,
-			timeout: COMMAND_TIMEOUT_MS,
-			stdin: payloadJson,
-			env: { [STATUSLINE_ENV_VAR]: payloadJson },
-		});
-
-		if (result.killed || result.code !== 0) {
-			ctx.ui.setStatus("statusline", undefined);
-			return;
-		}
-
-		const firstLine = sanitizeStatusOutput(result.stdout.split("\n")[0] ?? "").trim();
-		ctx.ui.setStatus("statusline", firstLine ? truncateToWidth(firstLine, MAX_STATUS_CHARS) : undefined);
-	} catch {
-		// Never throw out of a detached refresh. Clear rather than show stale data.
-		ctx.ui.setStatus("statusline", undefined);
-	} finally {
-		isRefreshing = false;
-	}
-}
-
-/**
- * Extension factory. Idempotent at registration time: the body below only calls
- * on() (no exec/timer work), so it is safe to run twice per load (bootstrap +
- * final trust-resolving pass). All command execution is deferred to event handlers,
- * and fired detached so it never blocks the agent loop.
- */
 export function factory(pi: ExtensionAPI): void {
-	// Fire-and-forget: do NOT await refresh() (see file header — turn_end is inline
-	// in the agent loop). The inner .catch is redundant with refresh()'s own
-	// try/catch but guards against an unhandled rejection if that ever regresses.
-	const fire = (ctx: ExtensionContext) => {
-		latestCtx = ctx;
-		void refresh(ctx, execWithIo).catch(() => {});
-	};
-
 	pi.on("session_start", (_event, ctx) => {
-		streamingUsage = undefined;
-		if (ctx.hasUI && ctx.mode === "tui") installFooter(ctx);
-		fire(ctx);
-
-		// (Re)start the periodic refresh timer. Restarting on every session_start
-		// keeps exactly one timer alive across the factory's double pass and lets
-		// /reload pick up statusline setting changes. Trust-aware settings read,
-		// same as refresh().
-		stopIntervalTimer();
+		// Trust-aware: an untrusted project's settings do not apply.
 		const settingsManager = SettingsManager.create(ctx.cwd, undefined, {
 			projectTrusted: ctx.isProjectTrusted(),
 		});
 		const statusline = forkSettings.statusline(settingsManager);
-		userShellPath = settingsManager.getShellPath();
 		setSubscriptionProviders(statusline?.subscriptionProviders ?? []);
 		const currency = statusline?.currency === undefined ? "USD" : normalizeCurrency(statusline.currency);
 		if (!currency) {
@@ -452,33 +111,6 @@ export function factory(pi: ExtensionAPI): void {
 			);
 		}
 		costCurrency = currency ?? "USD";
-		const intervalMs = statusline?.intervalMs;
-		if (!statusline?.command?.trim() || typeof intervalMs !== "number" || !Number.isFinite(intervalMs)) return;
-		intervalTimer = setInterval(() => fire(ctx), Math.max(intervalMs, MIN_INTERVAL_MS));
-		// Never keep a headless process alive just to repaint a footer.
-		intervalTimer.unref?.();
-	});
-	pi.on("session_shutdown", () => {
-		stopIntervalTimer();
-		disposeFooterRuntime();
-	});
-	pi.on("turn_end", (_event, ctx) => fire(ctx));
-	// Any tool that is not a pure read may have changed the working tree; the
-	// render that shows the tool result then re-reads the change counts.
-	pi.on("tool_result", (event) => {
-		if (!READ_ONLY_TOOLS.has(event.toolName)) footerRuntime?.git.invalidateChanges();
-	});
-	// A user `!` command runs where pi would run it anyway (same local backend, the
-	// configured shell); owning its operations is only how the footer learns it
-	// finished — `user_bash` itself fires before the command starts.
-	pi.on("user_bash", () => ({
-		operations: notifyingWhenSettled(createLocalBashOperations({ shellPath: userShellPath })),
-	}));
-	pi.on("message_update", (event) => {
-		streamingUsage = streamingContextUsage(event.message) ?? streamingUsage;
-	});
-	pi.on("message_end", () => {
-		streamingUsage = undefined;
 	});
 
 	pi.registerEntryRenderer<UsageReport>("bluclawd:usage", (entry, _options, theme) => {
@@ -490,14 +122,16 @@ export function factory(pi: ExtensionAPI): void {
 
 	const usageHandler = async (_args: string, ctx: ExtensionContext): Promise<void> => {
 		const model = ctx.model;
+		const claude = claudePlanUsage(await fetchClaudeUsage(() => readStoredCredential("anthropic")));
+		// The first call starts loading the rate table; without one the amount prints in USD.
+		currencyRates.rate(costCurrency);
+		await currencyRates.settled();
 		pi.appendEntry<UsageReport>("bluclawd:usage", {
 			model: model ? `${model.provider}/${model.id}` : undefined,
 			subscription: isUsingSubscription(ctx),
 			totals: sumSessionUsage(ctx),
-			plans: activePlanUsage(footerRuntime?.sources ?? []),
-			unavailable: (footerRuntime?.sources ?? [])
-				.filter((source) => source.usage() === null)
-				.map((source) => source.hint),
+			plans: claude ? [claude] : [],
+			unavailable: claude ? [] : [CLAUDE_HINT],
 			currency: { code: costCurrency, rate: currencyRates.rate(costCurrency) },
 		});
 	};

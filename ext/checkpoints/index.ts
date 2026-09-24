@@ -22,8 +22,8 @@
  * ── Non-intrusiveness (the crux of this feature) ──────────────────────────────
  * A checkpoint capture must NEVER change what `git status`/`git diff` report, and
  * must never touch the real `.git/index` or working tree. Capture therefore uses
- * a SEPARATE TEMPORARY INDEX FILE (the `GIT_INDEX_FILE` env var, set the same way
- * statusline sets `BLUCLAWD_STATUSLINE_JSON` — via `env VAR=... git ...`, since
+ * a SEPARATE TEMPORARY INDEX FILE (the `GIT_INDEX_FILE` env var, set via
+ * `env VAR=... git ...`, since
  * `ExecOptions` has no env passthrough and a `VAR=val cmd` shell prefix doesn't
  * expand across separate spawned processes anyway):
  *

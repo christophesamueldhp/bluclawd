@@ -21,9 +21,9 @@
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { VERSION } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { isUsingSubscription } from "../_shared/session-usage.ts";
 import { getActivePermissionMode } from "../permissions/active-mode.ts";
 import { isSandboxActive } from "../sandbox/state.ts";
-import { isUsingSubscription } from "../statusline/footer.ts";
 
 /** Snapshot rendered by `/status`. Plain data so it survives in the session file. */
 export interface StatusData {

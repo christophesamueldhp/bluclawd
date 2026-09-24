@@ -5,8 +5,7 @@
  * and a long-lived shell (./session.ts), so `cd`, `export` and functions carry
  * from one command to the next. Output goes to a transcript widget below the
  * editor, NOT into the conversation: bash mode is the user's own terminal, while
- * `!` remains the way to show the model a command's output. A finished command
- * signals a possible working-tree change so the footer's git counts refresh.
+ * `!` remains the way to show the model a command's output.
  *
  * Like `!`, bash mode runs outside the sandbox (Claude Code parity).
  *
@@ -19,7 +18,6 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, InlineExtension, Theme } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Key, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
-import { workingTreeChanged } from "../_shared/working-tree.ts";
 import { ShellEditor } from "./editor.ts";
 import { ShellSession } from "./session.ts";
 import { StashHistory, stashAction } from "./stash.ts";
@@ -89,7 +87,6 @@ export function factory(pi: ExtensionAPI): void {
 					if (latestCtx) publishStatus(latestCtx);
 					repaint();
 				},
-				onCommandFinished: () => workingTreeChanged(),
 			});
 		}
 		return session;
