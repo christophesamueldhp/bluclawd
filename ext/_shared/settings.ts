@@ -109,6 +109,11 @@ export function fastModel(sm: SettingsManager): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
+/** Claude Code's `prefersReducedMotion` ("Reduce motion"): no mascot animation. */
+export function prefersReducedMotion(sm: SettingsManager): boolean {
+	return merged(sm).prefersReducedMotion === true;
+}
+
 /**
  * The merged `sandbox` settings. Relative filesystem paths resolve per scope, as
  * in Claude Code: against the project root in project settings, against the

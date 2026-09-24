@@ -1,16 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { formatTokens, isUsingSubscription } from "../ext/_shared/session-usage.ts";
+import { isUsingSubscription } from "../ext/_shared/session-usage.ts";
 import { STATUS_KEYS } from "../ext/_shared/status-keys.ts";
-
-describe("formatTokens", () => {
-	it("uses pi's own footer thresholds", () => {
-		expect(formatTokens(999)).toBe("999");
-		expect(formatTokens(1200)).toBe("1.2k");
-		expect(formatTokens(80_000)).toBe("80k");
-		expect(formatTokens(1_000_000)).toBe("1.0M");
-		expect(formatTokens(12_000_000)).toBe("12M");
-	});
-});
 
 describe("isUsingSubscription", () => {
 	const ctxFor = (provider: string) =>

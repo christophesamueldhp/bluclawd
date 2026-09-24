@@ -14,7 +14,7 @@ pi                                                                 # run it
 ```
 
 Identity is plain pi — `~/.pi/agent`, the `pi` binary. The name "bluclawd"
-shows up in the welcome banner and nowhere else; there is no rebrand.
+shows up in the welcome header and nowhere else; there is no rebrand.
 
 ## How it works
 
@@ -77,8 +77,12 @@ the same items under its lines, with each subagent on a row of its own.
 While the agent works, "Working..." becomes one of Claude Code's 187 spinner verbs
 ("Pondering...", "Clauding..."), a new one each turn, none repeated until all have shown.
 
-Bash mode, the stash and the welcome
-banner's sidebar are adapted from [pi-powerline-footer](https://github.com/nicobailon/pi-powerline-footer)
+The welcome header is Claude Code's: the mascot beside name, model and cwd. In the
+fullscreen renderer the mascot plays one of Claude Code's entrance animations once per
+version; `"prefersReducedMotion": true` in settings turns it off, and
+`BLUCLAWD_FORCE_FIRST_LAUNCH=1` plays it again.
+
+Bash mode and the stash are adapted from [pi-powerline-footer](https://github.com/nicobailon/pi-powerline-footer)
 (MIT, Nico Bailon).
 
 ## Subagents

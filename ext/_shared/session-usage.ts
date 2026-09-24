@@ -1,18 +1,8 @@
 /**
- * Token counts and billing, for the welcome banner (branding) and `/status`
- * (diagnostics), which load in separate module graphs.
+ * Billing, for `/status` (diagnostics).
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-
-/** Format token counts for compact display (same thresholds as pi's own footer). */
-export function formatTokens(count: number): string {
-	if (count < 1000) return count.toString();
-	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-	if (count < 1000000) return `${Math.round(count / 1000)}k`;
-	if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
-	return `${Math.round(count / 1000000)}M`;
-}
 
 /** Providers billed by subscription despite API-key auth, so pi's OAuth rule never sees them. */
 const BUILTIN_SUBSCRIPTION_PROVIDERS: readonly string[] = ["kimi-coding", "opencode-go"];
