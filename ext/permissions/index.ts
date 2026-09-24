@@ -116,12 +116,14 @@ function isRule(spec: string): boolean {
 /** How many recent decisions `/permissions why` keeps. */
 const DECISION_LOG_SIZE = 20;
 
-/** Claude Code's `autoAccept` badge colour (2.1.259 dark): rgb(175,135,255). */
+/** Claude Code's `autoAccept` badge colour (2.1.282 dark): rgb(175,135,255). */
 const CC_AUTO_ACCEPT = "\x1b[38;2;175;135;255m";
+/** Claude Code's `warning` colour, which its auto-mode badge uses (2.1.282 dark): rgb(255,193,7). */
+const CC_WARNING = "\x1b[38;2;255;193;7m";
 
 /**
  * Footer chip for a mode, in Claude Code's own badge colours (extracted from the
- * 2.1.259 binary's dark theme): edits=#af87ff, auto=amber, ask=gray. The wording follows this layer's own mode names, not CC's labels.
+ * 2.1.282 binary's dark theme): edits=#af87ff, auto=#ffc107 amber, ask=gray. The wording follows this layer's own mode names, not CC's labels.
  *
  * Two things this gets right that the previous version did not:
  *
@@ -129,7 +131,8 @@ const CC_AUTO_ACCEPT = "\x1b[38;2;175;135;255m";
  *   `success` was the stand-in — and green is the one colour that reads as the
  *   opposite of what the badge means. It is painted with a raw truecolor escape
  *   instead. A 256-colour terminal would not downconvert the escape, so that
- *   case keeps the theme token.
+ *   case keeps the theme token. `auto` is painted the same way: pi's `warning`
+ *   is a different yellow in every theme but bluclawd's.
  * - `ask` carries `⏸`: it is the manual mode, and `⏸` is the badge the manual
  *   (non-auto-accept) modes share.
  */
@@ -141,15 +144,15 @@ export function modeStatusText(ctx: ExtensionContext, mode: PermissionMode): str
 
 function modeBadge(ctx: ExtensionContext, mode: PermissionMode): string | undefined {
 	const theme = ctx.ui.theme;
+	const paint = (sgr: string, fallback: "success" | "warning", text: string) =>
+		theme.getColorMode() === "truecolor" ? `${sgr}${text}\x1b[39m` : theme.fg(fallback, text);
 	switch (mode) {
 		case "ask":
 			return theme.fg("muted", "⏸ ask mode on");
 		case "edits":
-			return theme.getColorMode() === "truecolor"
-				? `${CC_AUTO_ACCEPT}⏵⏵ edits mode on\x1b[0m`
-				: theme.fg("success", "⏵⏵ edits mode on");
+			return paint(CC_AUTO_ACCEPT, "success", "⏵⏵ edits mode on");
 		case "auto":
-			return theme.fg("warning", "⏵⏵ auto mode on");
+			return paint(CC_WARNING, "warning", "⏵⏵ auto mode on");
 		default:
 			return undefined;
 	}
