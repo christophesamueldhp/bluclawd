@@ -42,7 +42,7 @@ scripts/        probe-extensions.ts — headless report of what each extension r
 test/           self-contained — no monorepo, no fixtures pi doesn't publish
 ```
 
-16 extensions: `permissions`, `statusline`, `memory`,
+15 extensions: `permissions`, `memory`,
 `checkpoints`, `subagents`, `web`, `mcp`, `sandbox`, `background-bash`,
 `branding`, `diagnostics`, `agent-view`, `help`, `plugin`, `shell`, `vibes`.
 
@@ -63,28 +63,21 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `/rewind` | file checkpoints per turn; restores the files, the conversation, or both |
 | `/bash-mode`, `/stash` | bash mode (Ctrl+Shift+B or `/bash-mode`): the prompt drives a persistent shell, so `cd`, `export` and functions carry between commands; output shows below the editor instead of in the conversation, Escape leaves, Ctrl+C interrupts, Up/Down walk its commands. Alt+S stashes the prompt you are writing and brings it back into an empty editor; `/stash` inserts an older one |
 | `←` twice on an empty prompt | agent view, as Claude Code's `claude agents`: background sessions in Needs input / Working / Completed bands (ctrl+s: by directory, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing, age. Type a task + enter to start a background session (ctrl+enter: start it here), shift+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, space peeks and replies (1-9 answers a pending question), enter/→ opens a session in this window (this one keeps running in the background), alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes, ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` filters, `/resume` brings a past session back, `/model` sets the model for new ones. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press |
-| `/status`, `/context`, `/usage` | model, auth, safety, session, context window, spend, plan usage |
+| `/status`, `/context` | model, auth, safety, session, context window |
 | `/plugin`, `/theme` | packages, theme |
 | `/help` | all of the above, grouped |
 
-The status line itself comes from [pistatusline](https://github.com/christophesamueldhp/pistatusline)
-(ccstatusline as a pi package); install it next to bluclawd. Under it, bluclawd shows Claude Code's
-mode row — `⏵⏵ auto mode on (alt+m to cycle)`, then the background-task pill, then `← for agents` —
-and one row per running subagent (agent, what it is doing, elapsed time, tool count; three at most,
-then `+N more`). Without pistatusline, pi's own footer shows the same items on one line.
-
-`/usage` names how the cost is billed: `(subscription)` when the amount is
-what the tokens would have cost at API rates, `(per token)` when it is what the
-session actually costs. The subscription side follows pi's OAuth-subscription
-rule plus `kimi-coding` and `opencode-go`; add other subscription-billed
-provider ids with `statusline.subscriptionProviders` in settings.json. `statusline.currency`
-(`IDR`, `EUR`, `JPY`, ...) shows the cost in another currency, converted from USD at a
-daily rate.
+bluclawd draws no footer of its own. Its footer items go through pi's `setStatus`, keyed so they
+sort into Claude Code's order: `⏵⏵ auto mode on (alt+m to cycle)`, then the background-task pill,
+then `← for agents`, plus one row per running subagent (agent, what it is doing, elapsed time, tool
+count; three at most, then `+N more`). pi's own footer shows them on one line. For the ccstatusline
+status line, install [pistatusline](https://github.com/christophesamueldhp/pistatusline): it draws
+the same items under its lines, with each subagent on a row of its own.
 
 While the agent works, "Working..." becomes one of Claude Code's 187 spinner verbs
 ("Pondering...", "Clauding..."), a new one each turn, none repeated until all have shown.
 
-Bash mode, the stash, the currency conversion and the welcome
+Bash mode, the stash and the welcome
 banner's sidebar are adapted from [pi-powerline-footer](https://github.com/nicobailon/pi-powerline-footer)
 (MIT, Nico Bailon).
 

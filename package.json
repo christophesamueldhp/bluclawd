@@ -7,7 +7,6 @@
   "pi": {
     "extensions": [
       "./ext/permissions/index.ts",
-      "./ext/statusline/index.ts",
       "./ext/memory/index.ts",
       "./ext/checkpoints/index.ts",
       "./ext/subagents/index.ts",

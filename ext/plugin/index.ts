@@ -16,6 +16,7 @@
  */
 import type { ExtensionCommandContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { DefaultPackageManager, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { STATUS_KEYS } from "../_shared/status-keys.ts";
 
 function packageManagerFor(ctx: ExtensionCommandContext): DefaultPackageManager {
 	return new DefaultPackageManager({
@@ -68,10 +69,10 @@ const plugin: InlineExtension = {
 					return;
 				}
 				pm.setProgressCallback((event) => {
-					ctx.ui.setStatus("plugin", event.message ?? `${event.action} ${event.source}…`);
+					ctx.ui.setStatus(STATUS_KEYS.plugin, event.message ?? `${event.action} ${event.source}…`);
 				});
 				const done = (message: string, level: "info" | "error" = "info") => {
-					ctx.ui.setStatus("plugin", undefined);
+					ctx.ui.setStatus(STATUS_KEYS.plugin, undefined);
 					ctx.ui.notify(message, level);
 				};
 

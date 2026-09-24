@@ -48,6 +48,7 @@ import { detachableExec, ShellDetachedError } from "../_shared/foreground-shells
 import { EVENT_DELIVERY, shouldNotifyExit, taskExitMessage, taskStallMessage } from "../_shared/monitor-events.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { addProjectRule, setProjectSandboxKeys } from "../_shared/settings-write.ts";
+import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import {
 	isExcludedCommand,
 	resolveSandboxConfig,
@@ -415,11 +416,11 @@ export function factory(pi: ExtensionAPI): void {
 			await runtime.SandboxManager.initialize(runtimeConfig(config), ({ host, port }) => askHost(host, port), true);
 			setSandboxActive(true);
 			lastError = undefined;
-			ctx.ui.setStatus("sandbox", ctx.ui.theme.fg("accent", "🔒 sandbox"));
+			ctx.ui.setStatus(STATUS_KEYS.sandbox, ctx.ui.theme.fg("accent", "🔒 sandbox"));
 		} catch (err) {
 			setSandboxActive(false);
 			lastError = err instanceof Error ? err.message : String(err);
-			ctx.ui.setStatus("sandbox", ctx.ui.theme.fg("error", "🔓 sandbox FAILED"));
+			ctx.ui.setStatus(STATUS_KEYS.sandbox, ctx.ui.theme.fg("error", "🔓 sandbox FAILED"));
 			ctx.ui.notify(
 				config.failIfUnavailable
 					? `Sandbox initialization failed — bash is BLOCKED while sandbox.failIfUnavailable is set: ${lastError}`
@@ -444,7 +445,7 @@ export function factory(pi: ExtensionAPI): void {
 			sessionTmp = undefined;
 		}
 		setSandboxActive(false);
-		ctx.ui.setStatus("sandbox", undefined);
+		ctx.ui.setStatus(STATUS_KEYS.sandbox, undefined);
 		publishPosture();
 	}
 

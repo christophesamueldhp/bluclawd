@@ -39,6 +39,7 @@ import {
 	removeGlobalRule,
 	removeProjectRule,
 } from "../_shared/settings-write.ts";
+import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { sandboxPosture } from "../sandbox/state.ts";
 import { setActivePermissionMode } from "./active-mode.ts";
 import { type EvalConfig, evaluatePostHook, evaluatePreHook, type Gate, type Verdict } from "./evaluate.ts";
@@ -238,7 +239,7 @@ export function factory(pi: ExtensionAPI): void {
 		const ctx = liveCtx;
 		if (!ctx) return;
 		try {
-			ctx.ui.setStatus("mode", modeStatusText(ctx, currentMode()));
+			ctx.ui.setStatus(STATUS_KEYS.mode, modeStatusText(ctx, currentMode()));
 		} catch {
 			// Stale extension instance after reload/replacement — ignore.
 		}

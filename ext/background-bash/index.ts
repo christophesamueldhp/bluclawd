@@ -33,6 +33,7 @@ import {
 	TASK_EXIT_MESSAGE_TYPE,
 	type TaskExitDetails,
 } from "../_shared/monitor-events.ts";
+import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { type TaskRow, TasksDialog, taskRows } from "./tasks-dialog.ts";
 
 const MAX_COMMAND_CHARS = 80;
@@ -120,7 +121,7 @@ const backgroundBash: InlineExtension = {
 			if (!label) pillSelected = false;
 			const hint = pillSelected ? "(enter to view tasks)" : "(↓ to manage)";
 			const pill = pillSelected ? INVERSE(PILL(label ?? "")) : PILL(label ?? "");
-			ctx.ui.setStatus("tasks", label ? `${pill} ${ctx.ui.theme.fg("dim", hint)}` : undefined);
+			ctx.ui.setStatus(STATUS_KEYS.tasks, label ? `${pill} ${ctx.ui.theme.fg("dim", hint)}` : undefined);
 			tui?.requestRender();
 		};
 

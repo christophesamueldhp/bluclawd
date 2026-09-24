@@ -82,6 +82,7 @@ import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { publishMcpServers } from "../_shared/mcp-lending.ts";
 import { openBrowser } from "../_shared/open-browser.ts";
 import { approveProjectServer, setProjectServerDisabled } from "../_shared/settings-write.ts";
+import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { mcpAutocomplete } from "./autocomplete.ts";
 import type { Client, McpPrompt, McpResource, RegisteredMcpTool } from "./client.ts";
 import { McpCredentialStore } from "./credential-store.ts";
@@ -202,7 +203,7 @@ export function factory(pi: ExtensionAPI): void {
 		// Surfaced in the footer, not just the panel: an unapproved server is doing
 		// nothing, and the reason needs to be visible without opening /mcp.
 		if (pending > 0) text += `, ${pending} needs approval`;
-		ctx.ui.setStatus("mcp", text);
+		ctx.ui.setStatus(STATUS_KEYS.mcp, text);
 	}
 
 	/** Register the deferred-tool search tool once per factory instance. */
@@ -709,7 +710,7 @@ export function factory(pi: ExtensionAPI): void {
 			hasResources: false,
 		}));
 		if (names.length === 0) {
-			ctx.ui.setStatus("mcp", undefined);
+			ctx.ui.setStatus(STATUS_KEYS.mcp, undefined);
 			return;
 		}
 		updateStatus(ctx);

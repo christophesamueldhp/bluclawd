@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { STATUS_KEYS } from "../ext/_shared/status-keys.ts";
 import type { RunSubagentOptions } from "../ext/subagents/engine.ts";
 import { factory } from "../ext/subagents/index.ts";
 import { emptyUsage, type LiveChild, renderLiveRows, type SingleResult } from "../ext/subagents/render.ts";
@@ -100,7 +101,7 @@ describe("subagents footer status", () => {
 			model: undefined,
 			ui: {
 				theme,
-				setStatus: (key: string, text: string | undefined) => key === "subagents" && statuses.push(text),
+				setStatus: (key: string, text: string | undefined) => key === STATUS_KEYS.subagents && statuses.push(text),
 			},
 		};
 		handlers.session_start?.({}, ctx);

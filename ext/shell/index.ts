@@ -18,6 +18,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, InlineExtension, Theme } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Key, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { ShellEditor } from "./editor.ts";
 import { ShellSession } from "./session.ts";
 import { StashHistory, stashAction } from "./stash.ts";
@@ -69,11 +70,14 @@ export function factory(pi: ExtensionAPI): void {
 
 	function publishStatus(ctx: ExtensionContext): void {
 		if (!active || !session) {
-			ctx.ui.setStatus("shell", undefined);
+			ctx.ui.setStatus(STATUS_KEYS.shell, undefined);
 			return;
 		}
 		const state = session.state.running ? "running" : "idle";
-		ctx.ui.setStatus("shell", ctx.ui.theme.fg("accent", `bash mode · ${session.state.shellName} · ${state}`));
+		ctx.ui.setStatus(
+			STATUS_KEYS.shell,
+			ctx.ui.theme.fg("accent", `bash mode · ${session.state.shellName} · ${state}`),
+		);
 	}
 
 	function ensureSession(ctx: ExtensionContext): ShellSession {
@@ -144,7 +148,7 @@ export function factory(pi: ExtensionAPI): void {
 			case "restore":
 				ctx.ui.setEditorText(stashed ?? "");
 				stashed = undefined;
-				ctx.ui.setStatus("stash", undefined);
+				ctx.ui.setStatus(STATUS_KEYS.stash, undefined);
 				ctx.ui.notify("Stash restored.", "info");
 				return;
 			case "stash":
@@ -153,7 +157,7 @@ export function factory(pi: ExtensionAPI): void {
 				stashed = text;
 				history().add(text);
 				ctx.ui.setEditorText("");
-				ctx.ui.setStatus("stash", ctx.ui.theme.fg("accent", "stash"));
+				ctx.ui.setStatus(STATUS_KEYS.stash, ctx.ui.theme.fg("accent", "stash"));
 				ctx.ui.notify(
 					updated
 						? "Stash updated — Alt+S on an empty editor brings it back."
@@ -167,8 +171,8 @@ export function factory(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
 		latestCtx = ctx;
 		reset();
-		ctx.ui.setStatus("shell", undefined);
-		ctx.ui.setStatus("stash", undefined);
+		ctx.ui.setStatus(STATUS_KEYS.shell, undefined);
+		ctx.ui.setStatus(STATUS_KEYS.stash, undefined);
 		if (!ctx.hasUI || ctx.mode !== "tui") return;
 		ctx.ui.setEditorComponent((editorTui, theme, keybindings) => {
 			tui = editorTui;

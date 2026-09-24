@@ -54,8 +54,7 @@
  * before/after proof.
  *
  * ── Latency: fire-and-forget capture ──────────────────────────────────────────
- * `turn_start` handlers are awaited inline in the agent loop (confirmed for
- * turn_end by statusline — same mechanism applies to turn_start), so a capture
+ * `turn_start` handlers are awaited inline in the agent loop, so a capture
  * that blocks would add real per-turn latency. The handler therefore kicks off
  * `captureCheckpoint()` detached (`void ... .then`) and appends the `checkpoint`
  * entry only once the sha resolves. `turnEntryId`/`subject` are resolved at
@@ -69,8 +68,7 @@
  * capture needs several child-process round trips, so in practice the
  * post-capture branch always has it (a slow message_start handler in another
  * extension is the only way to narrow that gap).
- * A module-scoped `isCapturing` guard (same idea as statusline's `isRefreshing`)
- * drops an overlapping turn_start capture while one is still in flight, bounding
+ * A module-scoped `isCapturing` guard drops an overlapping turn_start capture while one is still in flight, bounding
  * concurrent git subprocesses to one; the next turn tries again. This guard does
  * NOT gate the `/rewind` command's own (foreground, user-awaited) safety-net
  * capture — that one is a one-off, sequential action the user explicitly
@@ -171,8 +169,7 @@ const SUBJECT_MAX_CHARS = 100;
 export const MAX_CHECKPOINT_REFS = 50;
 
 // Follow-ups from the F1.6 review — both CLOSED:
-// - Windows `env`-portability: WON'T DO. The `env VAR=... git ...` idiom (also
-//   used by statusline) is POSIX-only, but Windows is an explicit non-goal for
+// - Windows `env`-portability: WON'T DO. The `env VAR=... git ...` idiom is POSIX-only, but Windows is an explicit non-goal for
 //   this fork — CC-PARITY-AUDIT.md §4.10 ("Non-goals ... do NOT fix") locks the
 //   platform stance, and §3's "PowerShell" row gives the specific reason: "skip
 //   until Windows is a target (checkpoints are POSIX-only anyway)". No

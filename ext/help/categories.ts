@@ -82,7 +82,6 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 
 	// Info & diagnostics
 	status: "Info & diagnostics",
-	usage: "Info & diagnostics",
 	context: "Info & diagnostics",
 	tasks: "Info & diagnostics",
 	changelog: "Info & diagnostics",

@@ -35,6 +35,7 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import { lastLine, textOf } from "../../daemon/session-state.ts";
+import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
 import { AgentView, type PastSession } from "./agent-view.ts";
 import { type InstanceSummary, OrchestratorClient } from "./orchestrator-client.ts";
@@ -58,7 +59,7 @@ const PILL_POLL_MS = 10_000;
 const DONE_FLASH_MS = 2500;
 /** How long the first ← waits for the second. */
 const LEFT_ARM_MS = 2000;
-const STATUS_KEY = "agents";
+const STATUS_KEY = STATUS_KEYS.agents;
 /** The command ←← dispatches; not meant to be typed. */
 export const AGENT_VIEW_COMMAND = "agent-view";
 

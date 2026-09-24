@@ -52,6 +52,7 @@ interface AgentsData {
 	footer: string;
 }
 
+import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { publishTaskTargets } from "../_shared/subagent-targets.ts";
 import type { GatePrompt } from "../permissions/subagent-gate.ts";
 import {
@@ -467,7 +468,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 	let liveTimer: NodeJS.Timeout | undefined;
 	const paintLive = () => {
 		try {
-			footerCtx?.ui.setStatus("subagents", renderLiveRows([...live], Date.now(), footerCtx.ui.theme));
+			footerCtx?.ui.setStatus(STATUS_KEYS.subagents, renderLiveRows([...live], Date.now(), footerCtx.ui.theme));
 		} catch {
 			// A context replaced by /new or /resume; the next session_start hands over a fresh one.
 		}

@@ -11,9 +11,6 @@
  * stores, which are safe to read across the `pi.extensions` module-graph
  * boundary (see `_shared/global-state.ts`).
  *
- * `/usage` is NOT here: it lives in `statusline`, next to the plan-usage
- * pollers it reports on.
- *
  * Output goes through `appendEntry` + `registerEntryRenderer` rather than
  * `ctx.ui.notify` (which dims everything and does not persist in the session).
  */

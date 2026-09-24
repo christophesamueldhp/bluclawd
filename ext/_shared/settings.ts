@@ -49,13 +49,6 @@ export interface PermissionSettings {
 	deny?: string[];
 }
 
-export interface StatuslineSettings {
-	/** Extra provider ids billed by subscription (`(subscription)` in `/usage` and `/status`); kimi-coding and opencode-go are built in. */
-	subscriptionProviders?: string[];
-	/** Currency of the cost figure in `/usage`, converted from USD at a daily rate. default: USD */
-	currency?: string;
-}
-
 export interface WebsearchSettings {
 	provider?: "exa" | "brave" | "tavily";
 	apiKeyEnv?: string;
@@ -114,11 +107,6 @@ function merged(sm: SettingsManager): Mergeable {
 export function fastModel(sm: SettingsManager): string | undefined {
 	const value = merged(sm).fastModel;
 	return typeof value === "string" ? value : undefined;
-}
-
-export function statusline(sm: SettingsManager): StatuslineSettings | undefined {
-	const value = merged(sm).statusline as StatuslineSettings | undefined;
-	return value ? { ...value } : undefined;
 }
 
 /**
