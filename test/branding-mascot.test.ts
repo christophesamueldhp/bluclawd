@@ -193,9 +193,17 @@ describe("sequences", () => {
 			).toEqual(["2×2", "2×2"]);
 		}
 		expect(SEQUENCES.wave.some((f) => f.look === "right")).toBe(true);
-		// The arm leans side to side: its top moves 4 pixels between leaning in and leaning out.
-		const tops = SEQUENCES.wave.flatMap((f) => (f.arm ?? []).filter(([, y]) => y === 2).map(([x]) => x));
-		expect(Math.max(...tops) - Math.min(...tops)).toBe(5); // the top row spans columns 18–23: leaning 2 in, upright, leaning 2 out
+		// The raised arm is always the arm's own solid block, 2×3 or turned 3×2, never thinner.
+		for (const frame of SEQUENCES.wave.filter((f) => f.arm)) {
+			const xs = frame.arm!.map(([x]) => x);
+			const ys = frame.arm!.map(([, y]) => y);
+			const w = Math.max(...xs) - Math.min(...xs) + 1;
+			const h = Math.max(...ys) - Math.min(...ys) + 1;
+			expect([`${w}×${h}`, new Set(frame.arm!.map(String)).size]).toEqual([w === 2 ? "2×3" : "3×2", 6]);
+		}
+		// It swings side to side: from column 18 (in, beside the head) out to column 22.
+		const reach = SEQUENCES.wave.flatMap((f) => (f.arm ?? []).map(([x]) => x));
+		expect([Math.min(...reach), Math.max(...reach)]).toEqual([18, 22]);
 	});
 
 	it("port Claude Code's frame counts and end at rest", () => {

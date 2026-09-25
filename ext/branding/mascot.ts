@@ -151,21 +151,23 @@ const jump = [
 
 type ArmPixels = readonly (readonly [number, number])[];
 
-/** A 2-wide arm, one row per `[left column, row]` step, on the widened canvas. */
-function armRows(...rows: (readonly [number, number])[]): ArmPixels {
-	return rows.flatMap(([x, y]) => [[x, y] as const, [x + 1, y] as const]);
+/** A solid `w`×`h` block with its top-left pixel at `[x, y]` on the widened canvas. */
+function block(x: number, y: number, w: number, h: number): ArmPixels {
+	return Array.from({ length: w * h }, (_, i) => [x + (i % w), y + Math.floor(i / w)] as const);
 }
 
 /**
- * The raised right arm, always the arm's own 6 pixels and always joined to the
- * body at the shoulder (column 19 is the body's edge from row 4 down). It
- * swings by leaning: a staircase out to the right or in toward the head.
+ * The raised right arm: always the arm's own solid 2×3 block (or the same
+ * block turned on its side), so it stays as thick as the arm in mascot.svg, and
+ * always joined to the body — column 19 is the body's edge from row 4 down.
  */
 const ARM = {
-	shoulder: armRows([20, 4], [20, 5], [20, 6]),
-	up: armRows([20, 2], [20, 3], [20, 4]),
-	out: armRows([22, 2], [21, 3], [20, 4]),
-	in: armRows([18, 2], [19, 3], [20, 4]),
+	shoulder: block(20, 4, 2, 3),
+	up: block(20, 2, 2, 3),
+	// Standing on the shoulder, beside the head.
+	in: block(18, 1, 2, 3),
+	// Turned on its side, pointing out.
+	out: block(20, 3, 3, 2),
 } as const;
 
 function armFrames(count: number, arm: keyof typeof ARM, look?: "right"): MascotFrame[] {
@@ -177,7 +179,7 @@ function armFrames(count: number, arm: keyof typeof ARM, look?: "right"): Mascot
 	}));
 }
 
-/** One swing: upright, leaning out, upright, leaning in toward the head. */
+/** One swing: upright, out to the side, upright, in toward the head. */
 const swing = [...armFrames(1, "up"), ...armFrames(2, "out"), ...armFrames(1, "up"), ...armFrames(2, "in")];
 
 /**
