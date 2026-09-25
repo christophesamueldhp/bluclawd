@@ -1,17 +1,11 @@
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { FRAME_MS, SEQUENCES } from "../ext/branding/mascot.ts";
 import {
 	type Clock,
 	elidePath,
-	loadEntranceVersion,
 	MascotPlayer,
-	olderVersion,
 	pickEntrance,
-	saveEntranceVersion,
 	WelcomeHeader,
 	type WelcomeHeaderInfo,
 	welcomeLines,
@@ -75,35 +69,18 @@ describe("elidePath", () => {
 });
 
 describe("entrance", () => {
-	const base = { fullscreen: true, reducedMotion: false, force: false, version: "0.84.3", random: () => 0 };
+	const base = { fullscreen: true, reducedMotion: false, startup: true, random: () => 0 };
 
-	it("plays once per version, in the fullscreen renderer, without reduced motion", () => {
-		expect(pickEntrance({ ...base, lastVersion: undefined })).toBe("skip");
-		expect(pickEntrance({ ...base, lastVersion: "0.84.2" })).toBe("skip");
-		expect(pickEntrance({ ...base, lastVersion: "0.84.3" })).toBeUndefined();
-		expect(pickEntrance({ ...base, lastVersion: "0.84.3", force: true })).toBe("skip");
-		expect(pickEntrance({ ...base, lastVersion: undefined, fullscreen: false })).toBeUndefined();
-		expect(pickEntrance({ ...base, lastVersion: undefined, reducedMotion: true, force: true })).toBeUndefined();
+	it("plays on every launch from the terminal, in the fullscreen renderer, without reduced motion", () => {
+		expect(pickEntrance(base)).toBe("skip");
+		expect(pickEntrance({ ...base, startup: false })).toBeUndefined();
+		expect(pickEntrance({ ...base, fullscreen: false })).toBeUndefined();
+		expect(pickEntrance({ ...base, reducedMotion: true })).toBeUndefined();
 	});
 
 	it("picks among skip, jump, look, spin and wave", () => {
-		const picks = [0, 0.2, 0.4, 0.6, 0.8].map((r) =>
-			pickEntrance({ ...base, lastVersion: undefined, random: () => r }),
-		);
+		const picks = [0, 0.2, 0.4, 0.6, 0.8].map((r) => pickEntrance({ ...base, random: () => r }));
 		expect(picks).toEqual(["skip", "jump", "look", "spin", "wave"]);
-	});
-
-	it("compares versions numerically", () => {
-		expect(olderVersion("0.9.0", "0.10.0")).toBe(true);
-		expect(olderVersion("1.0.0", "0.10.0")).toBe(false);
-		expect(olderVersion("0.84.3", "0.84.3")).toBe(false);
-	});
-
-	it("remembers the version it played for", () => {
-		const dir = mkdtempSync(join(tmpdir(), "branding-"));
-		expect(loadEntranceVersion(dir)).toBeUndefined();
-		saveEntranceVersion(dir, "0.84.3");
-		expect(loadEntranceVersion(dir)).toBe("0.84.3");
 	});
 });
 

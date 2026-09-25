@@ -2,13 +2,11 @@
  * The startup header, Claude Code 2.1.282's `_s` (m1356): no box, just the
  * mascot beside three lines — bold name and dim version, dim model · billing,
  * dim cwd — centered on each other. In the fullscreen renderer the mascot plays
- * one of Claude Code's entrance sequences once per version.
+ * one of Claude Code's entrance sequences each time pi is launched.
  *
  * Claude Code's billing field (plan or provider) is the provider's display name
  * here, which reads the same for every provider.
  */
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	ENTRANCES,
@@ -93,56 +91,18 @@ export function welcomeLines(info: WelcomeHeaderInfo, columns: number, mascotCel
 	return lines;
 }
 
-const PREFS_FILE = "branding-prefs.json";
-
-export function loadEntranceVersion(agentDir: string): string | undefined {
-	try {
-		const parsed = JSON.parse(readFileSync(join(agentDir, PREFS_FILE), "utf8")) as {
-			lastMascotEntranceVersion?: unknown;
-		};
-		return typeof parsed.lastMascotEntranceVersion === "string" ? parsed.lastMascotEntranceVersion : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-export function saveEntranceVersion(agentDir: string, version: string): void {
-	try {
-		writeFileSync(join(agentDir, PREFS_FILE), JSON.stringify({ lastMascotEntranceVersion: version }), "utf8");
-	} catch {
-		// best-effort: the entrance just plays again next launch
-	}
-}
-
-/** `a < b` for dotted numeric versions; a pre-release tail is ignored. */
-export function olderVersion(a: string, b: string): boolean {
-	const parse = (v: string) =>
-		v
-			.split("-")[0]!
-			.split(".")
-			.map((n) => Number.parseInt(n, 10) || 0);
-	const [x, y] = [parse(a), parse(b)];
-	for (let i = 0; i < Math.max(x.length, y.length); i++) {
-		if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) < (y[i] ?? 0);
-	}
-	return false;
-}
-
 /**
- * Claude Code's entrance rule (`fe`, m1353): only in the fullscreen renderer,
- * not with reduced motion, and once per version unless forced — then a random
- * pick of skip, jump, look or spin.
+ * Claude Code's entrance rule (`fe`, m1353), minus its once-per-version limit:
+ * only in the fullscreen renderer, not with reduced motion, and only for a launch
+ * (not /new, /resume, /fork or /reload) — then a random pick of the entrances.
  */
 export function pickEntrance(opts: {
 	fullscreen: boolean;
 	reducedMotion: boolean;
-	force: boolean;
-	lastVersion: string | undefined;
-	version: string;
+	startup: boolean;
 	random?: () => number;
 }): SequenceName | undefined {
-	if (!opts.fullscreen || opts.reducedMotion) return undefined;
-	if (!opts.force && opts.lastVersion !== undefined && !olderVersion(opts.lastVersion, opts.version)) return undefined;
+	if (!opts.fullscreen || opts.reducedMotion || !opts.startup) return undefined;
 	return ENTRANCES[Math.floor((opts.random ?? Math.random)() * ENTRANCES.length)];
 }
 

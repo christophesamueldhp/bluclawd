@@ -15,19 +15,12 @@
  */
 import { homedir } from "node:os";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
-import { getAgentDir, SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { prefersReducedMotion } from "../_shared/settings.ts";
 import { setSharedTheme } from "../_shared/theme.ts";
 import { mascotGlyphs } from "./mascot.ts";
-import {
-	loadEntranceVersion,
-	MascotPlayer,
-	pickEntrance,
-	saveEntranceVersion,
-	WelcomeHeader,
-	type WelcomeHeaderInfo,
-} from "./welcome-header.ts";
+import { MascotPlayer, pickEntrance, WelcomeHeader, type WelcomeHeaderInfo } from "./welcome-header.ts";
 
 function tildePath(path: string): string {
 	const home = homedir();
@@ -77,7 +70,7 @@ const branding: InlineExtension = {
 			},
 		});
 
-		pi.on("session_start", (_event, ctx) => {
+		pi.on("session_start", (event, ctx) => {
 			// Populate the shared theme reference other components in this layer
 			// (fleet-view and friends) import instead of reaching into pi's own
 			// theme singleton, which isn't part of the public package export.
@@ -85,7 +78,6 @@ const branding: InlineExtension = {
 
 			ctx.ui.setHeader((tui, theme) => {
 				const glyphs = mascotGlyphs();
-				const agentDir = getAgentDir();
 				let reducedMotion = false;
 				try {
 					const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
@@ -96,11 +88,8 @@ const branding: InlineExtension = {
 				const entrance = pickEntrance({
 					fullscreen: tui.mode === "fullscreen",
 					reducedMotion,
-					force: Boolean(process.env.BLUCLAWD_FORCE_FIRST_LAUNCH),
-					lastVersion: loadEntranceVersion(agentDir),
-					version: VERSION,
+					startup: event.reason === "startup",
 				});
-				if (entrance) saveEntranceVersion(agentDir, VERSION);
 				const player = new MascotPlayer(entrance, () => tui.requestRender());
 				const info = (): WelcomeHeaderInfo => {
 					const model = ctx.model;

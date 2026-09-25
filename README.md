@@ -78,10 +78,9 @@ While the agent works, "Working..." becomes one of Claude Code's 187 spinner ver
 ("Pondering...", "Clauding..."), a new one each turn, none repeated until all have shown.
 
 The welcome header is Claude Code's: the mascot beside name, model and cwd. In the
-fullscreen renderer the mascot plays an entrance animation once per version, picked at
-random from Claude Code's four (skip, jump, look, spin) and bluclawd's own hand wave;
-`"prefersReducedMotion": true` in settings turns it off, and
-`BLUCLAWD_FORCE_FIRST_LAUNCH=1` plays it again.
+fullscreen renderer the mascot plays an entrance animation each time pi is launched,
+picked at random from Claude Code's four (skip, jump, look, spin) and bluclawd's own
+hand wave; `"prefersReducedMotion": true` in settings turns it off.
 
 Bash mode and the stash are adapted from [pi-powerline-footer](https://github.com/nicobailon/pi-powerline-footer)
 (MIT, Nico Bailon).
