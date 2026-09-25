@@ -157,7 +157,7 @@ const realClock: Clock = {
 
 /** Steps through a sequence once at Claude Code's frame rate, then rests on its last frame. */
 export class MascotPlayer {
-	private frames: MascotFrame[] = [];
+	private readonly frames: MascotFrame[];
 	private readonly onFrame: () => void;
 	private readonly clock: Clock;
 	private index = 0;
@@ -167,7 +167,8 @@ export class MascotPlayer {
 		this.onFrame = onFrame;
 		this.clock = clock;
 		// Claude Code's welcome passes delayMs: 100.
-		if (sequence) this.play(withHold(SEQUENCES[sequence], 100));
+		this.frames = sequence ? withHold(SEQUENCES[sequence], 100) : [];
+		if (this.frames.length > 0) this.schedule();
 	}
 
 	get frame(): MascotFrame {
@@ -176,16 +177,6 @@ export class MascotPlayer {
 
 	get playing(): boolean {
 		return this.timer !== undefined;
-	}
-
-	/** Start `frames` from the first one; false while another sequence is still playing. */
-	play(frames: MascotFrame[]): boolean {
-		if (this.playing || frames.length === 0) return false;
-		this.frames = frames;
-		this.index = 0;
-		if (frames.length > 1) this.schedule();
-		this.onFrame();
-		return true;
 	}
 
 	private schedule(): void {
@@ -203,50 +194,12 @@ export class MascotPlayer {
 	}
 }
 
-/** What a click on Claude Code's welcome Clawd picks from (`P`, m1353), played without the entrance hold. */
-export const CLICK_SEQUENCES: SequenceName[] = ["jump", "look"];
-
-/** A left-button press in SGR mouse encoding, as 0-based cell coordinates. */
-export function parseLeftPress(data: string): { x: number; y: number } | undefined {
-	const match = /^\x1b\[<(\d+);(\d+);(\d+)M$/.exec(data);
-	if (!match || Number(match[1]) !== 0) return undefined;
-	return { x: Number(match[2]) - 1, y: Number(match[3]) - 1 };
-}
-
-type InputListener = (data: string) => { consume?: boolean; data?: string } | undefined;
-
-/**
- * Keep `listener` ahead of every other TUI input listener. pi offers no mouse
- * events to extensions, and the fullscreen renderer's own listener — registered
- * first — consumes every mouse sequence for scrolling and selection, so an
- * extension listener added the public way never sees a click. This reorders
- * pi-tui's private `inputListeners` set; if pi-tui changes that field, it
- * returns false and clicks simply do nothing.
- */
-export function keepInputListenerFirst(tui: object, listener: InputListener): boolean {
-	const listeners = (tui as { inputListeners?: unknown }).inputListeners;
-	if (!(listeners instanceof Set)) return false;
-	if (listeners.values().next().value === listener) return true;
-	const rest = [...listeners].filter((entry) => entry !== listener);
-	listeners.clear();
-	listeners.add(listener);
-	for (const entry of rest) listeners.add(entry);
-	return true;
-}
-
-export function removeInputListener(tui: object, listener: InputListener): void {
-	const listeners = (tui as { inputListeners?: unknown }).inputListeners;
-	if (listeners instanceof Set) listeners.delete(listener);
-}
-
 /** The header component: mascot and text, each centered on the taller of the two (Yoga rounds half up). */
 export class WelcomeHeader implements Component {
 	private readonly glyphs: Glyphs;
 	private readonly player: MascotPlayer;
 	private readonly getInfo: () => WelcomeHeaderInfo;
 	private readonly dim: (text: string) => string;
-	/** Where the last render drew the mascot, in the header's own rows and columns. */
-	private mascotBox = { top: 0, left: 1, width: 0, height: 0 };
 
 	constructor(glyphs: Glyphs, player: MascotPlayer, getInfo: () => WelcomeHeaderInfo, dim: (text: string) => string) {
 		this.glyphs = glyphs;
@@ -264,25 +217,12 @@ export class WelcomeHeader implements Component {
 		const rows = Math.max(mascot.length, text.length);
 		const mascotTop = Math.round((rows - mascot.length) / 2);
 		const textTop = Math.round((rows - text.length) / 2);
-		this.mascotBox = { top: mascotTop, left: 1, width: cells, height: mascot.length };
 		const lines: string[] = [];
 		for (let i = 0; i < rows; i++) {
 			const art = mascot[i - mascotTop] ?? " ".repeat(cells);
 			lines.push(truncateToWidth(` ${art}  ${text[i - textTop] ?? ""}`, width));
 		}
 		return lines;
-	}
-
-	/** Whether a cell of the header (0-based row and column) is on the mascot. */
-	hitsMascot(row: number, col: number): boolean {
-		const box = this.mascotBox;
-		return row >= box.top && row < box.top + box.height && col >= box.left && col < box.left + box.width;
-	}
-
-	/** Claude Code's click: jump or look at random, only when nothing is playing. */
-	click(random: () => number = Math.random): boolean {
-		const sequence = CLICK_SEQUENCES[Math.floor(random() * CLICK_SEQUENCES.length)]!;
-		return this.player.play(SEQUENCES[sequence]);
 	}
 
 	dispose(): void {

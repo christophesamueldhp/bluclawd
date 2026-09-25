@@ -1,21 +1,16 @@
-import { mkdtempSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { FRAME_MS, SEQUENCES } from "../ext/branding/mascot.ts";
 import {
-	CLICK_SEQUENCES,
 	type Clock,
 	elidePath,
-	keepInputListenerFirst,
 	loadEntranceVersion,
 	MascotPlayer,
 	olderVersion,
-	parseLeftPress,
 	pickEntrance,
-	removeInputListener,
 	saveEntranceVersion,
 	WelcomeHeader,
 	type WelcomeHeaderInfo,
@@ -139,7 +134,7 @@ describe("MascotPlayer", () => {
 		const seen = [player.frame];
 		while (tick()) seen.push(player.frame);
 		expect(seen).toEqual([{ pose: "default", offset: 0 }, { pose: "default", offset: 0 }, ...SEQUENCES.jump]);
-		expect(renders).toBe(seen.length); // one repaint per frame, the first included
+		expect(renders).toBe(seen.length - 1);
 		expect(player.playing).toBe(false);
 	});
 
@@ -180,72 +175,5 @@ describe("WelcomeHeader", () => {
 		for (const width of [30, 20, 12]) {
 			for (const line of header("octant").render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 		}
-	});
-});
-
-describe("clicking the mascot", () => {
-	it("plays jump or look at once, without the entrance hold, and not while something is playing", () => {
-		const { clock, tick } = fakeClock();
-		const header = new WelcomeHeader(
-			"octant",
-			new MascotPlayer(undefined, () => {}, clock),
-			() => info,
-			(t) => t,
-		);
-		expect(CLICK_SEQUENCES).toEqual(["jump", "look"]);
-		expect(header.click(() => 0)).toBe(true);
-		const player = (header as unknown as { player: MascotPlayer }).player;
-		expect(player.frame).toEqual(SEQUENCES.jump[0]);
-		expect(header.click(() => 0.9)).toBe(false);
-		while (tick());
-		expect(header.click(() => 0.9)).toBe(true);
-		expect(player.frame).toEqual(SEQUENCES.look[0]);
-	});
-
-	it("hits only the cells the mascot was drawn in", () => {
-		const header = new WelcomeHeader(
-			"octant",
-			new MascotPlayer(undefined, () => {}),
-			() => info,
-			(t) => t,
-		);
-		header.render(120);
-		expect(header.hitsMascot(0, 1)).toBe(true);
-		expect(header.hitsMascot(3, 11)).toBe(true);
-		expect(header.hitsMascot(0, 0)).toBe(false);
-		expect(header.hitsMascot(1, 14)).toBe(false);
-		expect(header.hitsMascot(4, 5)).toBe(false);
-		expect(header.hitsMascot(-1, 5)).toBe(false);
-	});
-
-	it("reads SGR left presses only", () => {
-		expect(parseLeftPress("\x1b[<0;6;3M")).toEqual({ x: 5, y: 2 });
-		expect(parseLeftPress("\x1b[<0;6;3m")).toBeUndefined();
-		expect(parseLeftPress("\x1b[<2;6;3M")).toBeUndefined();
-		expect(parseLeftPress("\x1b[<32;6;3M")).toBeUndefined();
-		expect(parseLeftPress("a")).toBeUndefined();
-	});
-
-	it("puts its listener ahead of the renderer's, and takes it out again", () => {
-		const viewport = () => ({ consume: true });
-		const ours = () => undefined;
-		const tui = { inputListeners: new Set([viewport]) };
-		expect(keepInputListenerFirst(tui, ours)).toBe(true);
-		expect([...tui.inputListeners]).toEqual([ours, viewport]);
-		expect(keepInputListenerFirst(tui, ours)).toBe(true);
-		expect([...tui.inputListeners]).toEqual([ours, viewport]);
-		removeInputListener(tui, ours);
-		expect([...tui.inputListeners]).toEqual([viewport]);
-		expect(keepInputListenerFirst({}, ours)).toBe(false);
-	});
-
-	it("still matches pi-tui: a private listener set the fullscreen renderer registers into first", () => {
-		// If this fails after a pi update, keepInputListenerFirst no longer reaches clicks.
-		const require = createRequire(import.meta.url);
-		const dist = require.resolve("@earendil-works/pi-tui").replace(/index\.js$/, "");
-		expect(readFileSync(`${dist}tui.js`, "utf8")).toContain("inputListeners = new Set()");
-		expect(readFileSync(`${dist}tui-alt-screen.js`, "utf8")).toContain(
-			"this.addInputListener((data) => this.handleViewportInput(data))",
-		);
 	});
 });

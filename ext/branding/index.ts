@@ -21,19 +21,13 @@ import { prefersReducedMotion } from "../_shared/settings.ts";
 import { setSharedTheme } from "../_shared/theme.ts";
 import { mascotGlyphs } from "./mascot.ts";
 import {
-	keepInputListenerFirst,
 	loadEntranceVersion,
 	MascotPlayer,
-	parseLeftPress,
 	pickEntrance,
-	removeInputListener,
 	saveEntranceVersion,
 	WelcomeHeader,
 	type WelcomeHeaderInfo,
 } from "./welcome-header.ts";
-
-/** The header's first document row: pi puts a one-line spacer above it, at the top of the transcript. */
-const HEADER_DOCUMENT_ROW = 1;
 
 function tildePath(path: string): string {
 	const home = homedir();
@@ -119,29 +113,8 @@ const branding: InlineExtension = {
 						cwd: tildePath(ctx.cwd),
 					};
 				};
-				const header = new WelcomeHeader(glyphs, player, info, (text) => theme.fg("muted", text));
-				// Claude Code's welcome Clawd plays on click, in the fullscreen renderer only.
-				if (tui.mode !== "fullscreen" || reducedMotion) return header as Component & { dispose?(): void };
-				const onInput = (data: string) => {
-					const press = parseLeftPress(data);
-					if (!press) return undefined;
-					const viewportTop = (tui as { viewportTop?: number }).viewportTop ?? 0;
-					if (!header.hitsMascot(press.y + viewportTop - HEADER_DOCUMENT_ROW, press.x)) return undefined;
-					header.click();
-					return { consume: true };
-				};
-				keepInputListenerFirst(tui, onInput);
-				return {
-					render: (width: number) => {
-						// A renderer switch rebuilds the listener set; get back in front of it.
-						keepInputListenerFirst(tui, onInput);
-						return header.render(width);
-					},
-					invalidate: () => header.invalidate(),
-					dispose: () => {
-						removeInputListener(tui, onInput);
-						header.dispose();
-					},
+				return new WelcomeHeader(glyphs, player, info, (text) => theme.fg("muted", text)) as Component & {
+					dispose?(): void;
 				};
 			});
 		});
