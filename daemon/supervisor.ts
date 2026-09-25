@@ -404,6 +404,7 @@ export class ServerSupervisor {
 		sessionFile?: string;
 		provider?: string;
 		model?: string;
+		permissionMode?: string;
 	}): Promise<InstanceRecord> {
 		if (options.sessionFile) {
 			for (const live of this.liveInstances.values()) {
@@ -443,15 +444,17 @@ export class ServerSupervisor {
 		upsertInstance(live.record);
 
 		try {
-			// Spawned background sessions ask before running tools, so they can surface a
-			// blocking prompt (agent view "Needs input") that the peek panel answers.
+			// A child runs in the mode the agent view inherited, as Claude Code's dispatched sessions
+			// do. Given none, it asks before running any tool, so it surfaces a blocking prompt
+			// (agent view "Needs input") that the peek panel answers.
 			const rpcProcess = createRpcProcessInstance({
 				cwd: live.record.cwd,
-				env: { ...process.env, PI_PERMISSION_MODE: "ask" },
+				env: options.permissionMode ? process.env : { ...process.env, PI_PERMISSION_MODE: "ask" },
 				sessionFile: options.sessionFile,
 				provider: options.provider,
 				model: options.model,
 				appendSystemPrompt: SENTINEL_INSTRUCTIONS,
+				permissionMode: options.permissionMode,
 			});
 			this.bindRpcProcess(live, rpcProcess);
 			await this.syncInstanceRecord(live);

@@ -29,4 +29,8 @@ describe("buildRpcTailArgs", () => {
 			"claude-opus-4-8",
 		]);
 	});
+
+	it("starts the child in the permission mode it inherits", () => {
+		expect(buildRpcTailArgs({ permissionMode: "auto" })).toEqual(["--permission-mode", "auto"]);
+	});
 });

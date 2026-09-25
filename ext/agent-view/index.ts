@@ -37,6 +37,7 @@ import {
 import { lastLine, textOf } from "../../daemon/session-state.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
+import { getActivePermissionMode } from "../permissions/active-mode.ts";
 import { AgentView, type PastSession } from "./agent-view.ts";
 import { type InstanceSummary, OrchestratorClient } from "./orchestrator-client.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
@@ -49,6 +50,8 @@ interface BackgroundableSession {
 	label?: string;
 	sessionFile: string;
 	model?: { provider: string; id: string };
+	/** It keeps running in the mode it had here. */
+	permissionMode?: string;
 }
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
@@ -156,6 +159,7 @@ const agentView: InlineExtension = {
 				label: ctx.sessionManager.getSessionName() ?? selfRow(ctx).label,
 				sessionFile,
 				model: model ? { provider: model.provider, id: model.id } : undefined,
+				permissionMode: getActivePermissionMode(),
 			};
 		};
 
@@ -321,6 +325,7 @@ const agentView: InlineExtension = {
 							version: VERSION,
 							model: model ? { provider: model.provider, id: model.id } : undefined,
 							modelName: model?.name,
+							permissionMode: getActivePermissionMode,
 							cwd: ctx.cwd,
 							home: process.env.HOME ?? "",
 							self: () => selfRow(ctx),

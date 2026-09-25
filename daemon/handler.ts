@@ -107,6 +107,7 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				sessionFile: request.sessionFile,
 				provider: request.provider,
 				model: request.model,
+				permissionMode: request.permissionMode,
 			});
 			return {
 				type: "spawn_result",

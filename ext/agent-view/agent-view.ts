@@ -28,6 +28,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { theme } from "../_shared/theme.ts";
 import { mascotGlyphs, REST, renderMascot } from "../branding/mascot.ts";
+import type { PermissionMode } from "../permissions/modes.ts";
 import { currentDaemonBuildId, type InstanceSummary, type OrchestratorClient } from "./orchestrator-client.ts";
 import {
 	type AgentRow,
@@ -79,6 +80,8 @@ export interface AgentViewOptions {
 	setTitle?: (title: string | undefined) => void;
 	/** Test seam for the "wait for the session file" step of opening a starting session. */
 	fileExists?: (path: string) => boolean;
+	/** The mode of the session the view was opened from, which new sessions inherit. */
+	permissionMode?: () => PermissionMode | undefined;
 }
 
 type Item =
@@ -187,6 +190,13 @@ function promptLine(input: Input, width: number, placeholder: string): string {
 	}
 	const line = input.render(width)[0] ?? "";
 	return line.startsWith("> ") ? `❯ ${line.slice(2)}` : line;
+}
+
+/** Claude Code's badge for the mode new sessions inherit; its default mode (our `ask`) has none. */
+function modeChip(mode: PermissionMode | undefined): string | undefined {
+	if (mode === "auto") return cc.fg("warning", "⏵⏵ auto mode");
+	if (mode === "edits") return `${sgr(38, isLightTheme() ? "#8700ff" : "#af87ff")}⏵⏵ edits mode\x1b[39m`;
+	return undefined;
 }
 
 function sanitize(text: string): string {
@@ -488,7 +498,13 @@ export class AgentView implements Component, Focusable {
 		this.recompute();
 		this.render_();
 		try {
-			const instance = await this.opts.client.spawn({ cwd, label: placeholder.label, prompt: task, model });
+			const instance = await this.opts.client.spawn({
+				cwd,
+				label: placeholder.label,
+				prompt: task,
+				model,
+				permissionMode: this.opts.permissionMode?.(),
+			});
 			if (instance && this.selectedKey === placeholder.id) this.selectedKey = instance.id;
 			if (open && instance) {
 				this.pending = this.pending.filter((p) => p !== placeholder);
@@ -690,6 +706,7 @@ export class AgentView implements Component, Focusable {
 				label: past.label,
 				sessionFile: past.sessionFile,
 				model: this.dispatchModel,
+				permissionMode: this.opts.permissionMode?.(),
 			});
 			if (instance) this.selectedKey = instance.id;
 		} catch (error) {
@@ -773,6 +790,7 @@ export class AgentView implements Component, Focusable {
 					sessionFile: row.sessionFile,
 					prompt: text,
 					model: this.dispatchModel,
+					permissionMode: this.opts.permissionMode?.(),
 				});
 			}
 			this.reply.setValue("");
@@ -1080,7 +1098,7 @@ export class AgentView implements Component, Focusable {
 			this.dispatchModel === this.opts.model && this.opts.modelName
 				? this.opts.modelName
 				: this.dispatchModel
-					? `${this.dispatchModel.provider}/${this.dispatchModel.id}`
+					? `${this.dispatchModel.provider}/${this.dispatchModel.id}${this.dispatchModel === this.opts.model ? "" : " (session)"}`
 					: "";
 		const target = this.dispatchCwd();
 		const cwd =
@@ -1158,18 +1176,6 @@ export class AgentView implements Component, Focusable {
 				cc.fg("muted", "Start one by describing a task below, or bring a past session back with /resume."),
 			);
 			return { lines: lines.flatMap((l) => wrapTextWithAnsi(l, width)), focusLine };
-		}
-		if (onlySelf) {
-			lines.push(
-				...wrapTextWithAnsi(
-					cc.fg(
-						"muted",
-						"A different way to work: hand off a bigger task than you would chat through, and it is organized in the sections below so you know when it needs you.",
-					),
-					width,
-				),
-				"",
-			);
 		}
 		if (this.rows.length === 0) {
 			lines.push(cc.fg("muted", "no sessions match"));
@@ -1276,54 +1282,74 @@ export class AgentView implements Component, Focusable {
 
 	/** `?`: Claude Code's shortcut grid, under the composer in place of the hint line. */
 	private renderHelp(width: number): string[] {
+		const item = this.selected;
+		const cwd = item?.kind === "row" ? item.row.cwd : this.opts.cwd;
+		const alt = Math.min(
+			9,
+			this.items.filter((i) => i.kind === "row" && i.row.cwd === cwd && !i.row.id.startsWith("pending:")).length,
+		);
+		// Claude Code's order; ctrl+g and s: are this view's own.
 		const items = [
 			"shift+↑↓ to reorder",
-			"ctrl+s to switch views",
-			"ctrl+enter to start and open",
-			"ctrl+t to pin to top",
-			"ctrl+x to delete",
-			"? to close",
 			"ctrl+r to rename",
+			"ctrl+s to switch views",
 			"ctrl+j for newline",
+			"ctrl+enter to start and open",
 			"ctrl+g for $EDITOR",
-			"alt+1-9 to open",
+			`ctrl+t to ${item?.kind === "row" && item.row.pinned ? "unpin" : "pin to top"}`,
+			...(alt > 0 ? [`alt+1${alt > 1 ? `-${alt}` : ""} to open`] : []),
+			"ctrl+x to delete",
 			"s:<state> to filter",
 			"esc to quit",
+			"? to close",
 		];
-		const usable = Math.max(20, width - 2);
-		const columns = Math.max(1, Math.min(6, Math.floor(usable / 18)));
-		const cell = Math.floor(usable / columns);
-		const out: string[] = [];
-		for (let i = 0; i < items.length; i += columns) {
-			const cells = items.slice(i, i + columns).map((item) => wrapTextWithAnsi(item, cell - 3));
-			const height = Math.max(...cells.map((c) => c.length));
-			for (let line = 0; line < height; line++) {
-				const text = cells.map((c) => (c[line] ?? "").padEnd(cell)).join("");
-				out.push(truncateToWidth(`  ${cc.fg("muted", text.trimEnd())}`, width));
-			}
+		// Claude Code stacks the items two to a column, each column as wide as its longest item and
+		// 4 apart. Where that does not fit, the columns grow taller instead of wrapping an item.
+		for (let height = 2; ; height++) {
+			const columns: string[][] = [];
+			for (let i = 0; i < items.length; i += height) columns.push(items.slice(i, i + height));
+			const widths = columns.map((c) => Math.max(...c.map((s) => visibleWidth(s))));
+			const total = 4 + widths.reduce((a, b) => a + b, 0) + 4 * (columns.length - 1);
+			if (total > width && columns.length > 1) continue;
+			return Array.from({ length: height }, (_, row) => {
+				const text = columns
+					.map((c, i) => {
+						const cell = c[row] ?? "";
+						return i === columns.length - 1 ? cell : cell + " ".repeat(widths[i] + 4 - visibleWidth(cell));
+					})
+					.join("")
+					.trimEnd();
+				return truncateToWidth(`  ${cc.fg("muted", text)}`, width);
+			});
 		}
-		return out;
 	}
 
-	private hints(width: number, items: Array<[string, string] | undefined>): string {
+	private hints(width: number, items: Array<[string, string] | undefined>, chip?: string): string {
 		const parts = items.filter((i): i is [string, string] => !!i).map(([key, action]) => `${key} to ${action}`);
+		const lead = chip ? `${chip}${cc.fg("muted", " · ")}` : "";
 		let line = parts.join(" · ");
-		while (parts.length > 1 && visibleWidth(line) > width - 2) {
+		while (parts.length > 1 && visibleWidth(lead) + visibleWidth(line) > width - 2) {
 			parts.splice(parts.length - 2, 1);
 			line = parts.join(" · ");
 		}
-		return truncateToWidth(`  ${cc.fg("muted", line)}`, width);
+		return truncateToWidth(`  ${lead}${cc.fg("muted", line)}`, width);
 	}
 
 	private listFooter(width: number): string {
 		const text = this.composerText();
 		const item = this.selected;
+		// Claude Code leads its list hints with the mode new sessions will run in.
+		const chip = modeChip(this.opts.permissionMode?.());
 		if (text) {
-			if (stateFilter(text)) return this.hints(width, [["esc", "clear"]]);
-			return this.hints(width, [
-				["enter", text.startsWith("/") ? "run" : "create"],
-				["esc", "clear"],
-			]);
+			if (stateFilter(text)) return this.hints(width, [["esc", "clear"]], chip);
+			return this.hints(
+				width,
+				[
+					["enter", text.startsWith("/") ? "run" : "create"],
+					["esc", "clear"],
+				],
+				chip,
+			);
 		}
 		let enter: [string, string] | undefined;
 		if (item?.kind === "header") enter = ["enter", this.collapsed.has(item.band.key) ? "expand" : "collapse"];
@@ -1333,12 +1359,11 @@ export class AgentView implements Component, Focusable {
 			!item || width < 80 || item.kind === "more" || (item?.kind === "row" && item.row.self)
 				? undefined
 				: ["ctrl+x", item?.kind === "header" ? "delete all" : "delete"];
-		return this.hints(width, [
-			enter,
-			width >= 55 && item?.kind === "row" ? ["space", "reply"] : undefined,
-			x,
-			["?", "for shortcuts"],
-		]).replace("? to for shortcuts", "? for shortcuts");
+		return this.hints(
+			width,
+			[enter, width >= 55 && item?.kind === "row" ? ["space", "reply"] : undefined, x, ["?", "for shortcuts"]],
+			chip,
+		).replace("? to for shortcuts", "? for shortcuts");
 	}
 
 	render(width: number): string[] {
@@ -1368,7 +1393,22 @@ export class AgentView implements Component, Focusable {
 					truncateToWidth(`${i === 0 && shown.length === this.composerLines.length ? "❯" : " "} ${line}`, width),
 				);
 			const current = promptLine(this.composer, width, above.length ? "" : "describe a task for a new session");
+			// Claude Code explains the view right above its composer while only your own session is listed.
+			const onlySelf = this.rows.length === 1 && this.rows[0].self && !this.composerText();
+			const intro = onlySelf
+				? [
+						...wrapTextWithAnsi(
+							cc.fg(
+								"muted",
+								"A different way to work: hand off a bigger task than you would chat through, and it is organized in the sections above so you know when it needs you.",
+							),
+							width - 1,
+						).map((line) => ` ${line}`),
+						"",
+					]
+				: [];
 			footer = [
+				...intro,
 				rule,
 				...above,
 				above.length ? current.replace(/^❯/, " ") : current,

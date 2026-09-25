@@ -17,6 +17,8 @@ export interface SpawnRequest {
 	model?: string;
 	/** Resume an existing session `.jsonl` instead of starting fresh (child gets `--session`). */
 	sessionFile?: string;
+	/** The permission mode the child starts in (`--permission-mode`), inherited from the agent view. */
+	permissionMode?: string;
 }
 
 export interface ListRequest {
