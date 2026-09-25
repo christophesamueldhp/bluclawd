@@ -16,6 +16,8 @@ import {
 import {
 	EVENT_DELIVERY,
 	EventBatcher,
+	type EventDelivery,
+	exitDelivery,
 	formatDuration,
 	monitorEndMessage,
 	monitorEventMessage,
@@ -143,7 +145,7 @@ export function websocketExec(url: string, protocols?: string[]): BackgroundExec
 }
 
 export interface MonitorToolDeps {
-	sendMessage: (message: OutgoingMessage<unknown>, options: typeof EVENT_DELIVERY) => void;
+	sendMessage: (message: OutgoingMessage<unknown>, options: EventDelivery) => void;
 	cwd: string;
 	/** Resolved per call so the sandbox state (and the command) at call time decides the operations. */
 	exec: (command: string) => BackgroundExec;
@@ -168,7 +170,7 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 		].join("\n"),
 		promptSnippet: "Watch a long-running command or a WebSocket and get each output line or frame as an event",
 		parameters: monitorSchema,
-		async execute(_toolCallId, params: MonitorParams, _signal, _onUpdate, ctx) {
+		async execute(toolCallId, params: MonitorParams, _signal, _onUpdate, ctx) {
 			const source = monitorSource(params);
 			if (source.kind === "invalid") {
 				return { content: [{ type: "text", text: source.reason }], isError: true, details: undefined };
@@ -214,10 +216,9 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 					suppressed++;
 					suppressedSince ??= now;
 					if (now - suppressedSince > rateLimit.maxSuppressMs) {
-						registry.kill(
-							job.id,
-							`[Monitor stopped — too much output (${suppressed} events suppressed over ${Math.round((now - suppressedSince) / 1000)}s). Restart with a more selective source.]`,
-						);
+						registry.kill(job.id, {
+							reason: `[Monitor stopped — too much output (${suppressed} events suppressed over ${Math.round((now - suppressedSince) / 1000)}s). Restart with a more selective source.]`,
+						});
 					}
 					return;
 				}
@@ -255,7 +256,7 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 					// The model's own task_stop is its answer already.
 					if (job.killed && !job.stopReason && !job.stoppedByUser) return;
 					if (job.stoppedByUser) {
-						deps.sendMessage(taskExitMessage(job), EVENT_DELIVERY);
+						deps.sendMessage(taskExitMessage(job, toolCallId), exitDelivery(job));
 						return;
 					}
 					if (job.exit?.error?.startsWith("timeout:") && timeout !== undefined) {

@@ -44,30 +44,52 @@ const exitDetails: TaskExitDetails = {
 	command: "make",
 	end: 'Background command "make" failed with exit code 1',
 	outputFile: "/tmp/claude/x/b00000002.output",
-	status: "error",
+	state: "failed",
 };
 
-describe("task-exit renderer", () => {
-	it("shows the summary and the output file, naming the command once", () => {
+const DOT = process.platform === "darwin" ? "⏺" : "●";
+
+describe("task-exit renderer (Claude Code's one line)", () => {
+	it("draws a dot and the summary, nothing else", () => {
 		const out = render(TASK_EXIT_MESSAGE_TYPE, exitDetails) ?? "";
-		expect(out).toContain('task b00000002 Background command "make" failed with exit code 1');
-		expect(out).not.toContain("— make");
-		expect(out).toContain("/tmp/claude/x/b00000002.output");
+		expect(out.trim()).toBe(`${DOT} Background command "make" failed with exit code 1`);
+		expect(out).not.toContain("b00000002.output");
 	});
 
-	it("names the command beside a description of its own", () => {
-		const out = render(TASK_EXIT_MESSAGE_TYPE, { ...exitDetails, description: "build" }) ?? "";
-		expect(out.split("— make").length - 1).toBe(1);
+	it("colours the dot by the notification's status", () => {
+		const seen: string[] = [];
+		const colouring = {
+			...theme,
+			fg: (c: string, t: string) => {
+				seen.push(c);
+				return t;
+			},
+		};
+		const draw = (state?: string) =>
+			renderers()
+				[TASK_EXIT_MESSAGE_TYPE](
+					{
+						role: "custom",
+						customType: TASK_EXIT_MESSAGE_TYPE,
+						content: "",
+						display: true,
+						details: { ...exitDetails, state },
+					},
+					options,
+					colouring,
+				)
+				?.render(120);
+		for (const state of ["completed", "failed", "killed", "stopped", undefined]) draw(state);
+		expect(seen).toEqual(["success", "error", "warning"]);
 	});
 
 	it("falls back to pi's own rendering when the message carries no details", () => {
 		expect(render(TASK_EXIT_MESSAGE_TYPE, undefined)).toBeUndefined();
 	});
 
-	it("strips escape sequences out of the command", () => {
-		const out =
-			render(TASK_EXIT_MESSAGE_TYPE, { ...exitDetails, description: "d", command: "\u001b[31mmake\u001b[0m" }) ?? "";
-		expect(out).toContain("— make");
+	it("strips escape sequences out of the summary", () => {
+		const out = render(TASK_EXIT_MESSAGE_TYPE, { ...exitDetails, end: "\u001b[31mdone\u001b[0m" }) ?? "";
+		expect(out).toContain(`${DOT} done`);
 		expect(out).not.toContain("\u001b[31m");
 	});
 });

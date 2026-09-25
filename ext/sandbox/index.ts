@@ -37,18 +37,19 @@ import type { ExtensionAPI, ExtensionContext, InlineExtension } from "@earendil-
 import {
 	type BashOperations,
 	CONFIG_DIR_NAME,
-	createBashTool,
 	createLocalBashOperations,
 	getAgentDir,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { type Static, Type } from "typebox";
-import { type BackgroundJobInfo, backgroundBashJobs } from "../_shared/background-bash.ts";
-import { detachableExec, ShellDetachedError } from "../_shared/foreground-shells.ts";
-import { EVENT_DELIVERY, shouldNotifyExit, taskExitMessage, taskStallMessage } from "../_shared/monitor-events.ts";
+import { backgroundBashJobs } from "../_shared/background-bash.ts";
+import { sharedRef } from "../_shared/global-state.ts";
+import { clearMainSession, mainSession, setMainSession } from "../_shared/main-session.ts";
+import { deliverOrHold } from "../_shared/notification-hold.ts";
+import { SHELL_END_ENTRY, SHELL_START_ENTRY } from "../_shared/orphan-shells.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { addProjectRule, setProjectSandboxKeys } from "../_shared/settings-write.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
+import { createClaudeBashTool } from "./bash-tool.ts";
 import {
 	isExcludedCommand,
 	resolveSandboxConfig,
@@ -66,31 +67,6 @@ import {
 import { createMonitorTool } from "./monitor-tool.ts";
 import { isSandboxActive, publishChildBash, publishSandboxPosture, setSandboxActive } from "./state.ts";
 
-/**
- * The parameters bluclawd adds to pi's bash tool. Kept next to the
- * registration that owns the tool name so the set cannot drift apart.
- */
-const BASH_EXTRA_PARAMS = Type.Object({
-	description: Type.Optional(
-		Type.String({
-			description:
-				"Short human-readable summary of what this command does (5-10 words), shown to the user in the UI.",
-		}),
-	),
-	run_in_background: Type.Optional(
-		Type.Boolean({
-			description:
-				"Run the command in the background and return immediately with a task id and the file its output is written to. You are notified once when it exits; read the output file with the read tool, or check with task_output; stop it with task_stop.",
-		}),
-	),
-	dangerouslyDisableSandbox: Type.Optional(
-		Type.Boolean({
-			description:
-				"Set to true to retry a command OUTSIDE the OS sandbox after a sandboxed run failed with <sandbox_violations>. The user is asked first. Never use it pre-emptively.",
-		}),
-	),
-});
-
 /** How much of a command's output is kept to look for a denial message. */
 const DENIAL_SCAN_BYTES = 4096;
 /** How long a failed command waits for the violation monitor to catch up. */
@@ -102,18 +78,16 @@ const SESSION_TMP_ROOT = "/tmp/claude";
 type SandboxRuntime = typeof import("@anthropic-ai/sandbox-runtime");
 
 /**
- * What the model reads when a command goes to the background, in Claude Code's words:
- * at the start, by Ctrl+B (`moved: "user"`), or at its timeout (`moved: seconds`).
+ * The sandbox runtime left running across a session switch for background shells,
+ * and the temp dir that goes with it. pi builds a new instance of this extension
+ * per session, so this cannot live in the instance.
  */
-function backgroundStartText(job: BackgroundJobInfo, moved?: "user" | number): string {
-	const file = job.outputFile ? ` Output is being written to: ${job.outputFile}.` : "";
-	const follow = ` You will be notified when it completes. To check interim output, use read on that file path.`;
-	if (moved === "user") return `Command was manually backgrounded by user with ID: ${job.id}.${file}`;
-	if (typeof moved === "number") {
-		return `Command did not complete within its ${moved}s timeout and was moved to the background (ID: ${job.id}).${file}${follow}`;
-	}
-	return `Command running in background with ID: ${job.id}.${file}${follow}`;
-}
+const keptSandbox = sharedRef<{ kept: boolean; sessionTmp?: string }>("sandbox.kept", { kept: false });
+/** The current session's network prompt: the runtime binds one callback, for good, at initialize. */
+const hostAsker = sharedRef<((host: string, port: number) => Promise<boolean>) | undefined>(
+	"sandbox.hostAsker",
+	undefined,
+);
 
 /**
  * The repository's shared `.git` when `cwd` is a linked worktree (its git dir and
@@ -305,80 +279,31 @@ export function factory(pi: ExtensionAPI): void {
 		return sandboxedOperations();
 	}
 
-	// Override the built-in bash tool. When the sandbox is inactive this
-	// delegates to an unmodified bash tool with the same settings-derived
-	// options the session would have used.
-	//
-	// This one registration is also where `run_in_background` lives. The fork
-	// branch put that parameter in pi's own bash.ts, so the sandbox's
-	// createBashTool() call inherited it; here only one extension may own the
-	// tool name, so the two features share this registration rather than fight
-	// over it. Keep them together if either changes.
-	const baseBash = createBashTool(localCwd);
-	pi.registerTool({
-		...baseBash,
-		parameters: Type.Object({ ...baseBash.parameters.properties, ...BASH_EXTRA_PARAMS.properties }),
-		async execute(id, params, signal, onUpdate, ctx) {
-			const { description, run_in_background, dangerouslyDisableSandbox, ...rest } = params as Static<
-				typeof BASH_EXTRA_PARAMS
-			> &
-				Record<string, unknown>;
-			const command = String(rest.command ?? "");
-
-			const refusal = strictRefusalReason(config, isSandboxActive(), lastError);
-			if (refusal) {
-				return { content: [{ type: "text", text: refusal }], isError: true, details: undefined };
-			}
-
-			const ops = operationsFor(command, dangerouslyDisableSandbox === true);
-
-			const owner = ctx?.sessionManager?.getSessionId();
-			// One notification on exit, so `until ...; do sleep 1; done` in the
-			// background is the single-notification recipe, as in Claude Code.
-			const notifyExit = (finished: BackgroundJobInfo) => {
-				if (!shouldNotifyExit(finished)) return;
-				pi.sendMessage(taskExitMessage(finished, id), EVENT_DELIVERY);
-			};
-			const notifyStall = (job: BackgroundJobInfo, tail: string) =>
-				pi.sendMessage(taskStallMessage(job, tail, id), EVENT_DELIVERY);
-
-			if (run_in_background) {
-				// The job's own lifetime owns the process: the tool call's signal is
-				// deliberately NOT attached, since backgrounding means outliving this
-				// call. Operations match the foreground path, so sandboxing applies.
-				const job = backgroundBashJobs.start({
-					command,
-					cwd: localCwd,
-					timeout: typeof rest.timeout === "number" ? rest.timeout : undefined,
-					description,
-					owner,
-					exec: ops.exec,
-					onExit: notifyExit,
-					onStall: notifyStall,
-				});
-				return { content: [{ type: "text", text: backgroundStartText(job) }], details: undefined };
-			}
-
-			// Ctrl+B can move this call to the background mid-flight (background-bash owns the key).
-			const detachable = detachableExec(ops.exec, { description, owner, onExit: notifyExit, onStall: notifyStall });
-			const tool = createBashTool(localCwd, { commandPrefix, shellPath, operations: { exec: detachable } });
-			try {
-				return await tool.execute(id, rest as never, signal, onUpdate);
-			} catch (err) {
-				if (err instanceof ShellDetachedError) {
-					const text = backgroundStartText(err.job, err.timeout ?? "user");
-					return { content: [{ type: "text", text }], details: undefined };
-				}
-				throw err;
-			}
-		},
-	});
+	// Override the built-in bash tool. When the sandbox is inactive this runs the
+	// same Claude Code bash through unsandboxed operations. Subagent children build
+	// theirs from the same factory (bash-tool.ts), so the two cannot drift apart.
+	pi.registerTool(
+		createClaudeBashTool({
+			cwd: localCwd,
+			shellPath,
+			commandPrefix,
+			operations: operationsFor,
+			refusal: () => strictRefusalReason(config, isSandboxActive(), lastError),
+			sendMessage: (message, delivery) => deliverOrHold(() => mainSession.sendMessage(message, delivery)),
+			isMain: true,
+			sandboxEscape: true,
+			record: {
+				start: (record) => mainSession.appendEntry(SHELL_START_ENTRY, record),
+				end: (taskId) => mainSession.appendEntry(SHELL_END_ENTRY, { taskId }),
+			},
+		}),
+	);
 
 	// The monitor is the third shell path the model drives (tool, background job,
 	// monitor): same refusal, same operations, so the sandbox covers it too.
 	pi.registerTool(
 		createMonitorTool({
-			sendMessage: (message, options) => pi.sendMessage(message, options),
+			sendMessage: (message, options) => deliverOrHold(() => mainSession.sendMessage(message, options)),
 			cwd: localCwd,
 			exec: (command) => operationsFor(command).exec,
 			refuse: () => strictRefusalReason(config, isSandboxActive(), lastError),
@@ -413,7 +338,13 @@ export function factory(pi: ExtensionAPI): void {
 			}
 			// The log monitor is what attributes file denials to commands (network
 			// denials come from the proxy regardless).
-			await runtime.SandboxManager.initialize(runtimeConfig(config), ({ host, port }) => askHost(host, port), true);
+			// Through the process-wide asker: a runtime kept across a session switch must
+			// prompt through the session that is current, not the one that initialized it.
+			await runtime.SandboxManager.initialize(
+				runtimeConfig(config),
+				({ host, port }) => hostAsker.get()?.(host, port) ?? Promise.resolve(false),
+				true,
+			);
 			setSandboxActive(true);
 			lastError = undefined;
 			ctx.ui.setStatus(STATUS_KEYS.sandbox, ctx.ui.theme.fg("accent", "🔒 sandbox"));
@@ -451,8 +382,26 @@ export function factory(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		liveCtx = ctx;
+		hostAsker.set(askHost);
+		setMainSession({
+			sendMessage: (message, delivery) => pi.sendMessage(message, delivery),
+			appendEntry: (customType, data) => pi.appendEntry(customType, data),
+		});
 		config = loadConfig(ctx);
-		if (config.enabled) {
+		// pi builds a fresh instance of this extension for every session; the last one may
+		// have left the runtime running for background shells.
+		const carried = keptSandbox.get();
+		if (carried.kept) {
+			keptSandbox.set({ kept: false });
+			runtime ??= await import("@anthropic-ai/sandbox-runtime");
+			sessionTmp = carried.sessionTmp;
+		}
+		if (config.enabled && carried.kept && isSandboxActive()) {
+			// Still running for the background shells the last session left (initialize is
+			// not idempotent): this session's settings and chip are all it needs.
+			runtime?.SandboxManager.updateConfig(runtimeConfig(config));
+			ctx.ui.setStatus(STATUS_KEYS.sandbox, ctx.ui.theme.fg("accent", "🔒 sandbox"));
+		} else if (config.enabled) {
 			await activate(ctx);
 			// Claude Code refuses to start when a required sandbox cannot. The refusal in
 			// the bash tool stays as the backstop for a session that keeps running.
@@ -482,7 +431,16 @@ export function factory(pi: ExtensionAPI): void {
 		});
 	});
 
-	pi.on("session_shutdown", async (_event, ctx) => {
+	pi.on("session_shutdown", async (event, ctx) => {
+		// Background shells outlive a /clear or a session switch (Claude Code): tearing the
+		// sandbox down would pull its network proxy and $TMPDIR out from under them. The
+		// next session_start finds it still running and keeps it.
+		const switching = event.reason === "new" || event.reason === "resume" || event.reason === "fork";
+		clearMainSession();
+		if (switching && isSandboxActive() && backgroundBashJobs.list().some((job) => !job.exit)) {
+			keptSandbox.set({ kept: true, sessionTmp });
+			return;
+		}
 		await deactivate(ctx);
 	});
 

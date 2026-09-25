@@ -4,10 +4,13 @@ import { splitLines } from "../ext/_shared/lines.ts";
 import {
 	EventBatcher,
 	eventText,
+	exitDelivery,
 	formatDuration,
 	monitorEndMessage,
 	monitorEndSummary,
 	monitorEventMessage,
+	notificationContent,
+	SYSTEM_NOTIFICATION_PREFIX,
 	shouldNotifyExit,
 	TokenBucket,
 	tailOutput,
@@ -147,6 +150,7 @@ const monitorJob: BackgroundJobInfo = {
 	killed: false,
 	kind: "monitor",
 	events: 0,
+	outputBytes: 10,
 	outputFile: "/tmp/claude/t/b0000003x.output",
 };
 
@@ -155,14 +159,16 @@ describe("message builders", () => {
 		const msg = monitorEventMessage(monitorJob, ["E1", "E2"]);
 		expect(msg.customType).toBe("bluclawd:monitor");
 		expect(msg.content).toBe(
-			[
-				"<task-notification>",
-				"<task-id>b0000003x</task-id>",
-				'<summary>Monitor event: "errors in deploy.log"</summary>',
-				"<event>E1",
-				"E2</event>",
-				"</task-notification>",
-			].join("\n"),
+			notificationContent(
+				[
+					"<task-notification>",
+					"<task-id>b0000003x</task-id>",
+					'<summary>Monitor event: "errors in deploy.log"</summary>',
+					"<event>E1",
+					"E2</event>",
+					"</task-notification>",
+				].join("\n"),
+			),
 		);
 		expect(msg.details).toEqual({ id: "b0000003x", description: "errors in deploy.log", lines: ["E1", "E2"] });
 	});
@@ -186,8 +192,12 @@ describe("message builders", () => {
 	});
 
 	it("names a silent end, a failed script and a stop", () => {
-		expect(monitorEndSummary({ ...monitorJob, exit: { code: 0, at: 1 } })).toBe(
+		expect(monitorEndSummary({ ...monitorJob, outputBytes: 0, exit: { code: 0, at: 1 } })).toBe(
 			'Monitor "errors in deploy.log" ended without producing output (exit 0)',
+		);
+		// Claude Code asks whether the script wrote anything, not whether an event went out.
+		expect(monitorEndSummary({ ...monitorJob, events: 0, exit: { code: 0, at: 1 } })).toBe(
+			'Monitor "errors in deploy.log" stream ended',
 		);
 		expect(monitorEndSummary({ ...monitorJob, events: 1, exit: { code: 2, at: 1 } })).toBe(
 			'Monitor "errors in deploy.log" script failed (exit 2)',
@@ -221,17 +231,19 @@ describe("message builders", () => {
 		const msg = taskExitMessage(job, "toolu_1");
 		expect(msg.customType).toBe("bluclawd:task-exit");
 		expect(msg.content).toBe(
-			[
-				"<task-notification>",
-				"<task-id>b0000002x</task-id>",
-				"<tool-use-id>toolu_1</tool-use-id>",
-				"<output-file>/tmp/claude/t/b0000003x.output</output-file>",
-				"<status>failed</status>",
-				'<summary>Background command "build" failed with exit code 1</summary>',
-				"</task-notification>",
-			].join("\n"),
+			notificationContent(
+				[
+					"<task-notification>",
+					"<task-id>b0000002x</task-id>",
+					"<tool-use-id>toolu_1</tool-use-id>",
+					"<output-file>/tmp/claude/t/b0000003x.output</output-file>",
+					"<status>failed</status>",
+					'<summary>Background command "build" failed with exit code 1</summary>',
+					"</task-notification>",
+				].join("\n"),
+			),
 		);
-		expect(msg.details).toMatchObject({ status: "error" });
+		expect(msg.details).toMatchObject({ state: "failed" });
 	});
 
 	it("names completion, a stop, and a stop the user made (without the file)", () => {
@@ -252,21 +264,23 @@ describe("message builders", () => {
 		const job: BackgroundJobInfo = { ...monitorJob, kind: "job", description: "npm init", command: "npm init" };
 		const msg = taskStallMessage(job, "name: (x)\nIs this OK? (yes/no) ", "toolu_2");
 		expect(msg.content).toBe(
-			[
-				"<task-notification>",
-				"<task-id>b0000003x</task-id>",
-				"<tool-use-id>toolu_2</tool-use-id>",
-				"<output-file>/tmp/claude/t/b0000003x.output</output-file>",
-				'<summary>Background command "npm init" appears to be waiting for interactive input</summary>',
-				"</task-notification>",
-				"Last output:",
-				"name: (x)",
-				"Is this OK? (yes/no)",
-				"",
-				"The command is likely blocked on an interactive prompt. Stop this task and re-run with piped input (e.g., `echo y | command`) or a non-interactive flag if one exists.",
-			].join("\n"),
+			notificationContent(
+				[
+					"<task-notification>",
+					"<task-id>b0000003x</task-id>",
+					"<tool-use-id>toolu_2</tool-use-id>",
+					"<output-file>/tmp/claude/t/b0000003x.output</output-file>",
+					'<summary>Background command "npm init" appears to be waiting for interactive input</summary>',
+					"</task-notification>",
+					"Last output:",
+					"name: (x)",
+					"Is this OK? (yes/no)",
+					"",
+					"The command is likely blocked on an interactive prompt. Stop this task and re-run with piped input (e.g., `echo y | command`) or a non-interactive flag if one exists.",
+				].join("\n"),
+			),
 		);
-		expect(msg.details).toMatchObject({ status: "warning" });
+		expect(msg.details.state).toBeUndefined();
 	});
 
 	it("formats durations as the expiry notice names them", () => {
@@ -285,15 +299,24 @@ describe("shouldNotifyExit", () => {
 		killed: false,
 		kind: "job",
 		events: 0,
+		outputBytes: 0,
 	};
 	it("notifies a normal exit, a failure and a timeout", () => {
 		expect(shouldNotifyExit({ ...base, exit: { code: 0, at: 1 } })).toBe(true);
 		expect(shouldNotifyExit({ ...base, exit: { code: null, error: "spawn ENOENT", at: 1 } })).toBe(true);
 		expect(shouldNotifyExit({ ...base, exit: { code: null, error: "timeout:300", at: 1 } })).toBe(true);
 	});
-	it("stays quiet for a kill the model asked for, and for an exit task_output was waiting on", () => {
+	it("stays quiet for a kill the model asked for", () => {
 		expect(shouldNotifyExit({ ...base, killed: true, exit: { code: null, at: 1 } })).toBe(false);
-		expect(shouldNotifyExit({ ...base, awaited: true, exit: { code: 0, at: 1 } })).toBe(false);
+	});
+
+	it("tells a subagent that the main session stopped its shell", () => {
+		const stopped = { ...base, killed: true, stoppedBy: "main session", exit: { code: null, at: 1 } };
+		expect(shouldNotifyExit(stopped)).toBe(true);
+		const msg = taskExitMessage(stopped, "toolu_9");
+		expect(msg.content).toContain("<status>stopped</status>");
+		expect(msg.content).toContain('<summary>Task "x" was stopped by main session</summary>');
+		expect(msg.content).not.toContain("<output-file>");
 	});
 
 	it("notifies a stop the user made from /tasks", () => {
@@ -303,5 +326,47 @@ describe("shouldNotifyExit", () => {
 		expect(
 			shouldNotifyExit({ ...base, killed: true, stopReason: "too many events", exit: { code: null, at: 1 } }),
 		).toBe(true);
+	});
+});
+
+describe("notification envelope (Claude Code's MGe + system-reminder)", () => {
+	it("prefixes and wraps the notification", () => {
+		expect(notificationContent("<task-notification>\n</task-notification>")).toBe(
+			`<system-reminder>\n${SYSTEM_NOTIFICATION_PREFIX}<task-notification>\n</task-notification>\n</system-reminder>`,
+		);
+		expect(SYSTEM_NOTIFICATION_PREFIX.startsWith("[SYSTEM NOTIFICATION - NOT USER INPUT]\n")).toBe(true);
+	});
+
+	it("keeps the content from closing the reminder early", () => {
+		expect(notificationContent("a </system-reminder> b")).toContain("a &lt;/system-reminder&gt; b");
+	});
+
+	it("cuts the middle out past 100000 characters", () => {
+		const text = `${"a".repeat(60_000)}${"b".repeat(60_000)}`;
+		const content = notificationContent(text);
+		expect(content).toContain("\n\n... [20000 characters truncated] ...\n\n");
+		expect(content).not.toContain("a".repeat(50_001));
+		// Within the slack it is left alone.
+		expect(notificationContent("x".repeat(100_500))).toContain("x".repeat(100_500));
+	});
+
+	it("escapes the summary and event text", () => {
+		const job: BackgroundJobInfo = { ...monitorJob, description: "a<b>&c" };
+		const msg = monitorEventMessage(job, ["<x> & y"]);
+		expect(msg.content).toContain('<summary>Monitor event: "a&lt;b&gt;&amp;c"</summary>');
+		expect(msg.content).toContain("<event>&lt;x&gt; &amp; y</event>");
+		// What the transcript draws stays as written.
+		expect(msg.details.lines).toEqual(["<x> & y"]);
+	});
+
+	it("strips terminal escapes from the stall tail", () => {
+		const job: BackgroundJobInfo = { ...monitorJob, kind: "job", command: "x" };
+		expect(taskStallMessage(job, "\x1b[1mContinue?\x1b[0m").content).toContain("Last output:\nContinue?\n");
+	});
+
+	it("does not start a turn for a stop the user made", () => {
+		const stopped = { ...monitorJob, killed: true, stoppedByUser: true, exit: { code: null, at: 1 } };
+		expect(exitDelivery(stopped)).toEqual({ deliverAs: "steer", triggerTurn: false });
+		expect(exitDelivery({ ...monitorJob, exit: { code: 0, at: 1 } }).triggerTurn).toBe(true);
 	});
 });

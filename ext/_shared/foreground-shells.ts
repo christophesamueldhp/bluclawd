@@ -14,11 +14,22 @@
 import { type BackgroundExec, type BackgroundJobInfo, backgroundBashJobs } from "./background-bash.ts";
 import { sharedRef } from "./global-state.ts";
 
+/** Why a foreground command moved to the background: Ctrl+B, its timeout, or a message the user sent. */
+export type DetachReason = "user" | "timeout" | "message";
+
+/**
+ * Claude Code registers a foreground command as a task only once it has run this
+ * long; before that, neither Ctrl+B nor a message moves it.
+ */
+export const FOREGROUND_TASK_AFTER_MS = 2000;
+
 export interface ForegroundShell {
 	command: string;
 	startedAt: number;
+	/** Session id of the session running it. */
+	owner?: string;
 	/** Moves it to the background; `timeout` (seconds) when its timeout did it. */
-	detach(timeout?: number): void;
+	detach(reason: DetachReason, timeout?: number): void;
 }
 
 const state = sharedRef("foregroundShells", {
@@ -44,20 +55,31 @@ export function subscribeForegroundShells(listener: () => void): () => void {
 	return () => state.listeners.delete(listener);
 }
 
-/** Moves every running foreground shell to the background; returns how many moved. */
-export function detachAll(): number {
-	const shells = runningForegroundShells();
-	for (const shell of shells) shell.detach();
+/**
+ * Moves the running foreground shells that have been running long enough to count
+ * as tasks (and, given an `owner`, only that session's) to the background; returns
+ * how many moved.
+ */
+export function detachAll(reason: DetachReason, options: { owner?: string; now?: number } = {}): number {
+	const now = options.now ?? Date.now();
+	const shells = runningForegroundShells().filter(
+		(shell) =>
+			now - shell.startedAt >= FOREGROUND_TASK_AFTER_MS &&
+			(options.owner === undefined || shell.owner === options.owner),
+	);
+	for (const shell of shells) shell.detach(reason);
 	return shells.length;
 }
 
 export class ShellDetachedError extends Error {
 	readonly job: BackgroundJobInfo;
-	/** Set when the foreground timeout moved it, in seconds; absent for Ctrl+B. */
+	readonly reason: DetachReason;
+	/** Set when the foreground timeout moved it, in seconds. */
 	readonly timeout?: number;
-	constructor(job: BackgroundJobInfo, timeout?: number) {
+	constructor(job: BackgroundJobInfo, reason: DetachReason, timeout?: number) {
 		super(`moved to background as ${job.id}`);
 		this.job = job;
+		this.reason = reason;
 		this.timeout = timeout;
 	}
 }
@@ -65,16 +87,24 @@ export class ShellDetachedError extends Error {
 export interface DetachOptions {
 	description?: string;
 	owner?: string;
+	/** The subagent child running it; absent for the main session. */
+	agentId?: string;
 	/** Runs once the job ends, as run_in_background's exit notification does. */
 	onExit?: (job: BackgroundJobInfo) => void;
 	/** The stall watchdog's notice, which Claude Code also runs on a shell moved to the background. */
 	onStall?: (job: BackgroundJobInfo, tail: string) => void;
+	/**
+	 * Whether reaching the timeout moves the command to the background (the default) or
+	 * ends it as timed out, as Claude Code ends a leading `sleep`.
+	 */
+	autoBackground?: boolean;
 }
 
 /**
  * `inner` wrapped so the call can be detached mid-flight. The timeout is enforced
  * here rather than handed to `inner`: as in Claude Code, a command still running at
- * its timeout is moved to the background, not killed.
+ * its timeout is moved to the background, not killed, unless `autoBackground` is
+ * off; and moving it to the background any other way cancels the timeout.
  */
 export function detachableExec(inner: BackgroundExec, options: DetachOptions = {}): BackgroundExec {
 	return (command, cwd, { onData, signal, timeout, env }) => {
@@ -84,6 +114,7 @@ export function detachableExec(inner: BackgroundExec, options: DetachOptions = {
 		let sink: ((data: Buffer) => void) | undefined;
 		let attached = true;
 		let timer: ReturnType<typeof setTimeout> | undefined;
+		let timedOut = false;
 
 		const onAbort = () => abort.abort();
 		signal?.addEventListener("abort", onAbort, { once: true });
@@ -103,7 +134,8 @@ export function detachableExec(inner: BackgroundExec, options: DetachOptions = {
 			const shell: ForegroundShell = {
 				command,
 				startedAt: Date.now(),
-				detach: (movedAt?: number) => {
+				owner: options.owner,
+				detach: (reason, movedAt) => {
 					if (!attached) return;
 					attached = false;
 					release();
@@ -112,6 +144,7 @@ export function detachableExec(inner: BackgroundExec, options: DetachOptions = {
 						cwd,
 						description: options.description,
 						owner: options.owner,
+						agentId: options.agentId,
 						onExit: options.onExit,
 						onStall: options.onStall,
 						exec: (_command, _cwd, job) => {
@@ -123,10 +156,18 @@ export function detachableExec(inner: BackgroundExec, options: DetachOptions = {
 							return run;
 						},
 					});
-					reject(new ShellDetachedError(job, movedAt));
+					reject(new ShellDetachedError(job, reason, movedAt));
 				},
 			};
-			if (timeout !== undefined && timeout > 0) timer = setTimeout(() => shell.detach(timeout), timeout * 1000);
+			if (timeout !== undefined && timeout > 0) {
+				timer = setTimeout(() => {
+					if (options.autoBackground !== false) shell.detach("timeout", timeout);
+					else {
+						timedOut = true;
+						abort.abort();
+					}
+				}, timeout * 1000);
+			}
 			const release = () => {
 				clearTimeout(timer);
 				signal?.removeEventListener("abort", onAbort);
@@ -143,7 +184,8 @@ export function detachableExec(inner: BackgroundExec, options: DetachOptions = {
 				(err: unknown) => {
 					if (!attached) return;
 					release();
-					reject(err);
+					// pi's own spelling of a timeout, which its bash tool turns into the result.
+					reject(timedOut ? new Error(`timeout:${timeout}`) : err);
 				},
 			);
 		});

@@ -698,7 +698,7 @@ describe("task tool", () => {
 			const prompt = async () => true;
 			const budget = { remaining: 10 };
 			const h = harness(undefined, { depth: 1, prompt, sessionDir: "/root-dir", budget });
-			expect(Object.keys(h.tools)).toEqual(["task", "task_output", "task_stop"]);
+			expect(Object.keys(h.tools)).toEqual(["task", "task_stop"]);
 			const r = await run(h, { agent: "explore", task: "t", run_in_background: true });
 			expect(text(r)).toBe("echo: t");
 			expect(h.log[0]?.nested).toBeUndefined();
@@ -752,19 +752,6 @@ describe("task tool", () => {
 		const call = (h: Harness, name: string, params: unknown) =>
 			h.tools[name].execute("2", params, undefined, undefined, ctxFor(cwd));
 
-		it("task_output reports a running child's progress and latest output", async () => {
-			const { h } = controllable();
-			const r = await start(h);
-			const id = text(r).match(/a[0-9a-f]{16}/)?.[0];
-			await tick();
-			const out = text(await call(h, "task_output", { task_id: id, block: false }));
-			expect(out).toMatch(/<retrieval_status>not_ready<\/retrieval_status>/);
-			expect(out).toMatch(/running/);
-			expect(out).toContain("working on it");
-			expect(out).toMatch(/2 turns/);
-			await call(h, "task_stop", { task_id: id });
-		});
-
 		it("task_message steers the running child", async () => {
 			const { h, steered } = controllable();
 			const id = text(await start(h)).match(/a[0-9a-f]{16}/)?.[0];
@@ -787,7 +774,7 @@ describe("task tool", () => {
 			expect(text(r)).toMatch(/agent id: child-42/);
 			await tick();
 			expect(h.sent).toHaveLength(0);
-			await expect(call(h, "task_output", { task_id: id })).rejects.toThrow(`No task found with ID: ${id}`);
+			await expect(call(h, "task_stop", { task_id: id })).rejects.toThrow(`No task found with ID: ${id}`);
 		});
 
 		/** Background children that each finish when the test says so. */
@@ -858,36 +845,6 @@ describe("task tool", () => {
 			expect(h.sent[0].message.content).toContain("late result");
 		});
 
-		it("task_output blocks until the run finishes and takes its result instead of a completion message", async () => {
-			const { h, finish, launch } = finishable();
-			const id = await launch("one");
-			const waiting = call(h, "task_output", { task_id: id });
-			await tick();
-			finish.one("the result");
-			const out = text(await waiting);
-			expect(out).toContain(`[subagent ${id} · explore finished]`);
-			expect(out).toContain("the result");
-			await tick();
-			expect(h.sent).toHaveLength(0);
-		});
-
-		it("task_output gives up at its timeout with the run still going", async () => {
-			const { h, finish, launch } = finishable();
-			const id = await launch("slow");
-			vi.useFakeTimers();
-			try {
-				const waiting = call(h, "task_output", { task_id: id, timeout: 1000 });
-				await vi.advanceTimersByTimeAsync(1000);
-				expect(text(await waiting)).toMatch(/<retrieval_status>timeout<\/retrieval_status>/);
-			} finally {
-				vi.useRealTimers();
-			}
-			finish.slow("late");
-			await tick();
-			await tick();
-			expect(h.sent).toHaveLength(1);
-		});
-
 		it("task_wait says so when there is nothing to wait for", async () => {
 			const { h } = finishable();
 			const out = text(await call(h, "task_wait", { ids: ["sa-7"] }));
@@ -898,9 +855,7 @@ describe("task tool", () => {
 		it("answers an unknown id with what is running", async () => {
 			const { h } = controllable();
 			for (const [name, params] of [
-				["task_output", { task_id: "sa-99" }],
 				["task_stop", { task_id: "sa-99" }],
-				["task_output", { task_id: "b12345678" }],
 				["task_stop", { task_id: "b12345678" }],
 			] as const) {
 				await expect(call(h, name, params)).rejects.toThrow(`No task found with ID: ${params.task_id}`);
@@ -908,6 +863,19 @@ describe("task tool", () => {
 			expect(text(await call(h, "task_message", { id: "sa-99", message: "x" }))).toMatch(
 				/no running background subagent "sa-99"/i,
 			);
+		});
+
+		it("names the background subagents still running, and wants an id", async () => {
+			const { h } = controllable();
+			const id = text(await start(h)).match(/a[0-9a-f]{16}/)?.[0];
+			await tick();
+			await expect(call(h, "task_stop", { task_id: "b12345678" })).rejects.toThrow(
+				new RegExp(`^No task found with ID: b12345678\\. Running background agents: ${id} \\(`),
+			);
+			await expect(call(h, "task_stop", {})).rejects.toThrow("Missing required parameter: task_id");
+			await expect(call(h, "task_stop", { task_id: "" })).rejects.toThrow("Missing required parameter: task_id");
+			// The deprecated shell_id still names a task.
+			expect(text(await call(h, "task_stop", { shell_id: id }))).toMatch(new RegExp(`Stopped ${id}`));
 		});
 	});
 

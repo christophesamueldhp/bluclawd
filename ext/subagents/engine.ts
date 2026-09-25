@@ -54,6 +54,7 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { backgroundBashJobs } from "../_shared/background-bash.ts";
 import type { LendableMcpServer } from "../_shared/mcp-lending.ts";
 import { getAuthPath, getModelsPath } from "../_shared/paths.ts";
 import * as forkSettings from "../_shared/settings.ts";
@@ -253,6 +254,8 @@ export interface ChildLoaderExtras {
 	outputSchema?: OutputSchema;
 	/** The parent's MCP servers the child borrows. */
 	mcp?: readonly LendableMcpServer[];
+	/** A background run, whose child's background shells outlive its final response. */
+	background?: boolean;
 }
 
 type LoaderOptions = ConstructorParameters<typeof DefaultResourceLoader>[0];
@@ -298,7 +301,7 @@ export function childLoaderOptions(
 
 	const extensionFactories = [
 		createSubagentGate({ mode: extras.mode, agent: def.name, prompt: extras.prompt, rulesCwd: ctx.cwd }),
-		createChildBashExtension(cwd),
+		createChildBashExtension(cwd, { endsWithFinalResponse: !extras.background }),
 	];
 	const budget = def.toolBudget ?? parseToolBudget(forkSettings.subagents(settingsManager)?.toolBudget);
 	if (budget) extensionFactories.push(createToolBudgetExtension(budget));
@@ -549,6 +552,11 @@ export interface RunSubagentOptions {
 	/** Called with the child's session once it exists, e.g. to steer it while it runs;
 	 *  what it returns is called when the child is done. */
 	onSession?: (session: AgentSession) => (() => void) | undefined;
+	/**
+	 * A background run: the child's background shells outlive its final response.
+	 * A synchronous child's are ended with it, as Claude Code ends them.
+	 */
+	background?: boolean;
 	/** Session construction; injectable so the engine is testable without a model. */
 	createSession?: CreateSession;
 }
@@ -845,6 +853,7 @@ async function runChild(
 			ask: opts.ask ?? uiSupervisor(ctx),
 			outputSchema: opts.outputSchema,
 			mcp: opts.mcp,
+			background: opts.background,
 		});
 		const childLoader = new DefaultResourceLoader(loaderOptions);
 		await childLoader.reload();
@@ -1036,6 +1045,13 @@ async function runChild(
 		releaseSession?.();
 		if (signal) signal.removeEventListener("abort", onAbort);
 		unsubscribe();
+		// A synchronous child's background shells end with its final response (Claude Code):
+		// nobody would be left to be told about them.
+		if (!opts.background) {
+			for (const job of backgroundBashJobs.list(opts.sessionManager.getSessionId())) {
+				if (!job.exit) backgroundBashJobs.kill(job.id);
+			}
+		}
 		session.dispose();
 	}
 }

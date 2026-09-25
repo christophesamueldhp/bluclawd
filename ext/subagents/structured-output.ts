@@ -8,7 +8,7 @@
  * failed, and the child can correct it. An accepted call ends the child's run.
  *
  * What the child handed back lives in its transcript, as that call's result: the
- * output the parent, the next chain step and a later `task_output` all read.
+ * output the parent, the next chain step and a later `task_wait` all read.
  */
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";

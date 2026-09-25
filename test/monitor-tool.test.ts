@@ -183,7 +183,7 @@ describe("monitor tool", () => {
 			});
 		const { tool, sent, registry, id } = harness(exec);
 		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
-		registry.kill(id(), "a registry stop");
+		registry.kill(id(), { reason: "a registry stop" });
 		const afterKill = sent.length;
 		onDataRef(Buffer.from("late\n"));
 		await vi.advanceTimersByTimeAsync(250);
@@ -198,7 +198,7 @@ describe("monitor tool", () => {
 		await tool.execute("c2", { command: "y", description: "e" }, undefined as any, undefined);
 		const [first, second] = registry.list();
 		registry.kill(first.id);
-		registry.kill(second.id, undefined, true);
+		registry.kill(second.id, { byUser: true });
 		await vi.advanceTimersByTimeAsync(0);
 		expect(sent).toHaveLength(1);
 		expect(sent[0].message.content).toContain('<summary>Task "e" was stopped by the user</summary>');

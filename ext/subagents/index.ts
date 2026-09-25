@@ -27,8 +27,9 @@ import { CONFIG_DIR_NAME, getAgentDir, SettingsManager } from "@earendil-works/p
 import { Box, Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
 import { agentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
-import { isShellTaskId, noTaskError, shellTaskOutput, shellTaskStop } from "../_shared/background-bash.ts";
+import { isShellTaskId, noTaskError, shellTaskStop } from "../_shared/background-bash.ts";
 import { EVENT_DELIVERY } from "../_shared/monitor-events.ts";
+import { deliverOrHold } from "../_shared/notification-hold.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { readTranscript, type TranscriptLine, transcriptLines } from "./inspect.ts";
 import { createManageAgentsTool } from "./manage.ts";
@@ -650,7 +651,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
 			"The available agents are listed in the system prompt (<available_agents>).",
 			`Agents come from the bundled set, ${join(getAgentDir(), "agents")}, and ${CONFIG_DIR_NAME}/agents in a trusted project.`,
-			"run_in_background returns at once and delivers the result later (task_output waits for it, or with block: false checks on it; task_message steers it; task_stop stops it; task_wait waits for several); resume continues an earlier child by its agent id; worktree: true gives each child its own git worktree; fork: true starts children from this conversation.",
+			"run_in_background returns at once and delivers the result later (task_wait waits for it or several; task_message steers it; task_stop stops it); resume continues an earlier child by its agent id; worktree: true gives each child its own git worktree; fork: true starts children from this conversation.",
 		].join(" "),
 		promptSnippet:
 			"Use the task tool to delegate self-contained work to specialized subagents (modes: single, parallel, chain) — each runs in-process with its own isolated context",
@@ -829,6 +830,7 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 			prompt: deps.prompt,
 			ask: deps.ask,
 			sessionDir: deps.sessionDir,
+			background: inner !== undefined,
 		};
 
 		// ── Background ────────────────────────────────────────────────────
@@ -895,9 +897,11 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 					);
 					if (children.length > 0) backgroundChildIds.set(id, children);
 					if (shuttingDown || entry.stopped || entry.waiters > 0) return;
-					return pi.sendMessage(
-						subagentExitMessage(id, agent, firstTask, result, entry.stoppedByUser),
-						EVENT_DELIVERY,
+					deliverOrHold(() =>
+						pi.sendMessage(
+							subagentExitMessage(id, agent, firstTask, result, entry.stoppedByUser),
+							EVENT_DELIVERY,
+						),
 					);
 				})
 				.catch(() => undefined)
@@ -1150,10 +1154,11 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 		};
 	}
 
-	// ── Controlling background runs (Claude Code's TaskOutput / TaskStop / SendMessage) ──
-	// task_output and task_stop answer for background shells too, which a nested child
-	// can start, so they exist at every depth; the rest only has background runs to act on
-	// in the main session.
+	// ── Controlling background runs (Claude Code's TaskStop / SendMessage) ──
+	// task_stop answers for background shells too, which a nested child can start, so
+	// it exists at every depth; the rest only has background runs to act on in the main
+	// session. Output is read from a task's output file (Claude Code 2.1.280 retired
+	// TaskOutput), and a background subagent's result arrives as a message.
 	registerTaskTools();
 	if (depth === 0) {
 		registerControlTools();
@@ -1169,11 +1174,12 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 		});
 	}
 
-	/** How long task_output blocks by default, and at most (Claude Code's TaskOutput). */
-	const DEFAULT_OUTPUT_WAIT_MS = 30_000;
-	const MAX_OUTPUT_WAIT_MS = 600_000;
-	/** Most lines of a running child's latest output task_output shows. */
-	const PROGRESS_TAIL_LINES = 40;
+	/** Claude Code's answer for an unknown id, naming the background subagents still running. */
+	function unknownTaskError(id: string): Error {
+		const running = [...backgroundRuns.values()].map((run) => `${run.id} (${run.task.replace(/\s+/g, " ").trim()})`);
+		const suffix = running.length > 0 ? `. Running background agents: ${running.join(", ")}` : "";
+		return new Error(`${noTaskError(id).message}${suffix}`);
+	}
 
 	function registerTaskTools(): void {
 		const TaskId = Type.String({
@@ -1181,98 +1187,38 @@ export function factory(pi: ExtensionAPI, deps: SubagentsDeps = {}): void {
 				"The task id: a shell or monitor id (e.g. b1a2b3c4d) or a background subagent's id (e.g. a1b2c3d4e5f6a7b8c)",
 		});
 		pi.registerTool({
-			name: "task_output",
-			label: "Task Output",
-			description: [
-				"Retrieves output from a running or completed background task (background shell, monitor or background subagent).",
-				"block: true (the default) waits for the task to finish, up to timeout ms (default 30000, max 600000); block: false checks the current status without waiting.",
-				"Prefer the read tool on a shell's output file (its path is in the start result and the completion notification); a completion notification also arrives on its own.",
-			].join(" "),
-			parameters: Type.Object({
-				task_id: TaskId,
-				block: Type.Optional(Type.Boolean({ description: "Whether to wait for completion (default true)" })),
-				timeout: Type.Optional(Type.Number({ description: "Max wait time in ms (default 30000, max 600000)" })),
-			}),
-			execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
-				const id = params.task_id.trim();
-				const block = params.block !== false;
-				// A model fills an optional number with 0: anything not positive is the default.
-				const timeoutMs =
-					params.timeout && params.timeout > 0
-						? Math.min(params.timeout, MAX_OUTPUT_WAIT_MS)
-						: DEFAULT_OUTPUT_WAIT_MS;
-				if (isShellTaskId(id)) {
-					const owner = ctx?.sessionManager?.getSessionId();
-					const text = await shellTaskOutput(id, owner, { block, timeoutMs, signal });
-					return { content: [{ type: "text", text }], details: undefined };
-				}
-				const run = backgroundRuns.get(id);
-				if (!run) throw noTaskError(id);
-				if (block) {
-					// A waiter takes the result here, so the run sends no completion message.
-					run.waiters++;
-					let timer: ReturnType<typeof setTimeout> | undefined;
-					let onAbort: (() => void) | undefined;
-					let result: AgentToolResult<SubagentDetails> | undefined;
-					try {
-						await Promise.race([
-							run.done.then((r) => {
-								result = r;
-							}),
-							new Promise<void>((resolve) => {
-								timer = setTimeout(resolve, timeoutMs);
-							}),
-							new Promise<void>((resolve) => {
-								onAbort = resolve;
-								if (signal?.aborted) resolve();
-								else signal?.addEventListener("abort", onAbort, { once: true });
-							}),
-						]);
-					} finally {
-						clearTimeout(timer);
-						if (onAbort) signal?.removeEventListener("abort", onAbort);
-						run.waiters--;
-					}
-					if (result) {
-						const text = subagentExitMessage(run.id, run.agent, run.task, result, run.stoppedByUser).content;
-						return { content: [{ type: "text", text }], details: undefined };
-					}
-				}
-				const seconds = Math.round((Date.now() - run.startedAt) / 1000);
-				const lines = [
-					`<retrieval_status>${block ? "timeout" : "not_ready"}</retrieval_status>`,
-					`<task_id>${run.id}</task_id>`,
-					"<task_type>local_agent</task_type>",
-					"<status>running</status>",
-					`${run.id} (${run.agent}) running · ${seconds}s`,
-				];
-				for (const child of run.latest) {
-					const output = getFinalOutput(child.messages).split("\n").slice(-PROGRESS_TAIL_LINES).join("\n");
-					lines.push(
-						"",
-						`### [${child.agent}] ${child.status} · ${child.usage.turns} turns`,
-						forParent(output) || "(no output yet)",
-					);
-				}
-				if (run.latest.length === 0) lines.push("(no output yet)");
-				return { content: [{ type: "text", text: lines.join("\n") }], details: undefined };
-			},
-		});
-
-		pi.registerTool({
 			name: "task_stop",
 			label: "Task Stop",
-			description:
-				"Stops a running background task by its ID: a background shell or monitor (its whole process tree), or a background subagent (returns what it had produced; a stopped child can be continued later with task's resume).",
-			parameters: Type.Object({ task_id: TaskId }),
+			description: [
+				"Stop a running background task by ID.",
+				"- Stops a running background task by its ID",
+				"- Takes a task_id parameter identifying the task to stop",
+				"- A background shell or monitor is stopped with its whole process tree; a background subagent returns what it had produced, and can be continued later with task's resume",
+				"- Returns a success or failure status",
+				"- Use this tool when you need to terminate a long-running task",
+			].join("\n"),
+			parameters: Type.Object({
+				task_id: Type.Optional(TaskId),
+				shell_id: Type.Optional(Type.String({ description: "Deprecated: use task_id instead" })),
+			}),
 			execute: async (_toolCallId, params, _signal, _onUpdate, ctx) => {
-				const id = params.task_id.trim();
+				// A model fills an optional string with "": empty is absent.
+				const id = (params.task_id?.trim() || params.shell_id?.trim()) ?? "";
+				if (!id) throw new Error("Missing required parameter: task_id");
 				if (isShellTaskId(id)) {
-					const text = shellTaskStop(id, ctx?.sessionManager?.getSessionId());
+					const owner = ctx?.sessionManager?.getSessionId();
+					// A child's shells carry its session id as their agent id (bash-tool.ts).
+					let text: string;
+					try {
+						text = shellTaskStop(id, { owner, agentId: depth === 0 ? undefined : owner });
+					} catch (err) {
+						if (err instanceof Error && err.message === noTaskError(id).message) throw unknownTaskError(id);
+						throw err;
+					}
 					return { content: [{ type: "text", text }], details: undefined };
 				}
 				const run = backgroundRuns.get(id);
-				if (!run) throw noTaskError(id);
+				if (!run) throw unknownTaskError(id);
 				run.stopped = true;
 				run.controller.abort();
 				const result = await run.done;

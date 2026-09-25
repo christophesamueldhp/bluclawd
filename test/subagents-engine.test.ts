@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { backgroundBashJobs } from "../ext/_shared/background-bash.ts";
 import * as forkSettings from "../ext/_shared/settings.ts";
 import { setActivePermissionMode } from "../ext/permissions/active-mode.ts";
 import type { AgentDef } from "../ext/subagents/defs.ts";
@@ -293,6 +294,39 @@ describe("runSubagent", () => {
 		expect(received.excludeTools).toEqual(["task", "write"]);
 		expect(received.thinkingLevel).toBe("high");
 		expect(received.cwd).toBe(cwd);
+	});
+
+	it.each([
+		[false, true],
+		[true, false],
+	])("background: %s — ends the child's running shells with its final response: %s", async (background, reaped) => {
+		const fake = fakeSession(1);
+		let jobId = "";
+		const result = await runSubagent({
+			def: def({}),
+			task: "start a server",
+			ctx: ctx(),
+			background,
+			createSession: async (o: any) => {
+				const owner = o.sessionManager.getSessionId();
+				const prompt = fake.session.prompt;
+				fake.session.prompt = async (text: string) => {
+					jobId = backgroundBashJobs.start({
+						command: "server",
+						cwd,
+						owner,
+						agentId: owner,
+						exec: (_c, _w, { signal }) =>
+							new Promise((_r, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted")))),
+					}).id;
+					await prompt(text);
+				};
+				return { session: fake.session as any };
+			},
+		});
+		expect(result.status).toBe("ok");
+		expect(backgroundBashJobs.get(jobId)?.killed).toBe(reaped);
+		backgroundBashJobs.kill(jobId);
 	});
 
 	it("stops a child at maxTurns and marks the result partial", async () => {

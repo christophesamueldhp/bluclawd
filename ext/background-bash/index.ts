@@ -5,7 +5,7 @@
  *
  * Nothing here starts a job or answers the model: `run_in_background` and the
  * monitor live on the sandbox extension (the one owner of the `bash` name), and
- * `task_output` / `task_stop` on the subagents extension, which owns those names;
+ * `task_stop` on the subagents extension, which owns that name;
  * the shell half of both sits in `_shared/background-bash.ts`. Change one, look
  * at the others.
  *
@@ -26,13 +26,22 @@ import { Box, type Component, Container, matchesKey, Spacer, Text, type TUI } fr
 import { subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { stripAnsi } from "../_shared/ansi.ts";
 import { backgroundBashJobs, describeJobStatus } from "../_shared/background-bash.ts";
+import { backgroundTasksDisabled } from "../_shared/bash-limits.ts";
 import { detachAll, runningForegroundShells, subscribeForegroundShells } from "../_shared/foreground-shells.ts";
+import { sharedRef } from "../_shared/global-state.ts";
 import {
 	MONITOR_MESSAGE_TYPE,
 	type MonitorMessageDetails,
 	TASK_EXIT_MESSAGE_TYPE,
 	type TaskExitDetails,
 } from "../_shared/monitor-events.ts";
+import {
+	heldNotifications,
+	heldNotificationsLine,
+	holdNotifications,
+	subscribeNotificationHold,
+} from "../_shared/notification-hold.ts";
+import { findOrphanShells, orphanShellMessage, SHELL_END_ENTRY } from "../_shared/orphan-shells.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { type TaskRow, TasksDialog, taskRows } from "./tasks-dialog.ts";
 
@@ -66,6 +75,14 @@ function block(lines: string[]): Container {
 	container.addChild(new Text(lines.join("\n"), 1, 0));
 	return container;
 }
+
+/** Claude Code's dot for a message line (`⏺` on macOS, `●` elsewhere). */
+const NOTIFICATION_DOT = process.platform === "darwin" ? "⏺" : "●";
+const NOTIFICATION_DOT_COLOR: Record<string, "success" | "error" | "warning" | undefined> = {
+	completed: "success",
+	failed: "error",
+	killed: "warning",
+};
 
 /** Claude Code's `background` colour (dark theme), the footer pill's. */
 const PILL = (text: string) => `\x1b[38;2;0;204;204m${text}\x1b[39m`;
@@ -103,6 +120,12 @@ export function backgroundHint(): string {
 /** Only the prompt editor has getText among the components that take focus. */
 const isEditor = (component: unknown) => typeof (component as { getText?: unknown } | null)?.getText === "function";
 
+/**
+ * The main session's id, for handing its jobs to the next one on /clear. pi builds a
+ * new instance of this extension per session, so it cannot live in the instance.
+ */
+const lastMainSession = sharedRef<string | undefined>("backgroundBash.lastMainSession", undefined);
+
 const backgroundBash: InlineExtension = {
 	name: "background-bash",
 	factory: (pi) => {
@@ -114,14 +137,30 @@ const backgroundBash: InlineExtension = {
 
 		const owner = () => ctx?.sessionManager?.getSessionId();
 
+		/**
+		 * Shells the resumed conversation started but never heard the end of: the model is
+		 * told once, without a turn being started for it, and the report is recorded as
+		 * their end so the next resume does not repeat it.
+		 */
+		const reportOrphanShells = (startCtx: ExtensionContext) => {
+			const { orphans, live } = findOrphanShells(startCtx.sessionManager.getBranch(), (id) =>
+				Boolean(backgroundBashJobs.get(id)),
+			);
+			const message = orphanShellMessage(orphans, live);
+			if (!message) return;
+			pi.sendMessage(message, { deliverAs: "steer", triggerTurn: false });
+			for (const orphan of orphans) pi.appendEntry(SHELL_END_ENTRY, { taskId: orphan.taskId });
+		};
+
 		/** The footer pill: its label, then what ↓ (or Enter, once selected) does. */
 		const refresh = () => {
 			if (!ctx?.hasUI) return;
 			const label = tasksPillLabel(taskRows(owner()));
 			if (!label) pillSelected = false;
-			const hint = pillSelected ? "(enter to view tasks)" : "(↓ to manage)";
+			// Claude Code's default footer: the hint is an item of its own, after a dim dot.
+			const hint = pillSelected ? "Enter to view tasks" : "↓ to manage";
 			const pill = pillSelected ? INVERSE(PILL(label ?? "")) : PILL(label ?? "");
-			ctx.ui.setStatus(STATUS_KEYS.tasks, label ? `${pill} ${ctx.ui.theme.fg("dim", hint)}` : undefined);
+			ctx.ui.setStatus(STATUS_KEYS.tasks, label ? `${pill}${ctx.ui.theme.fg("dim", ` · ${hint}`)}` : undefined);
 			tui?.requestRender();
 		};
 
@@ -137,20 +176,36 @@ const backgroundBash: InlineExtension = {
 		};
 
 		const openDialog = async (ui: ExtensionContext["ui"], sessionOwner: string | undefined) => {
+			// Updates wait while the panel is open (Claude Code), and go out when it closes.
+			const release = holdNotifications();
+			try {
+				await showDialog(ui, sessionOwner);
+			} finally {
+				release();
+			}
+		};
+
+		const showDialog = async (ui: ExtensionContext["ui"], sessionOwner: string | undefined) => {
 			await ui.custom<void>((dialogTui, theme, _keybindings, done) => {
 				const dialog = new TasksDialog(
 					theme,
 					sessionOwner,
 					() => done(undefined),
 					() => dialogTui.requestRender(),
+					{
+						notify: (message) => ui.notify(message, "info"),
+						held: () => heldNotificationsLine(heldNotifications()),
+					},
 				);
 				// Runtimes and output tails move on their own.
 				const timer = setInterval(() => dialogTui.requestRender(), 1000);
 				const offJobs = backgroundBashJobs.subscribe(() => dialogTui.requestRender());
+				const offHeld = subscribeNotificationHold(() => dialogTui.requestRender());
 				return Object.assign(dialog as Component, {
 					dispose: () => {
 						clearInterval(timer);
 						offJobs();
+						offHeld();
 					},
 				});
 			});
@@ -162,8 +217,14 @@ const backgroundBash: InlineExtension = {
 			refresh();
 		};
 
-		pi.on("session_start", (_event, startCtx) => {
+		pi.on("session_start", (event, startCtx) => {
 			ctx = startCtx;
+			const session = startCtx.sessionManager.getSessionId();
+			// Claude Code keeps background shells across /clear: the new session owns them.
+			const previous = lastMainSession.get();
+			if (event.reason === "new" && previous && previous !== session) backgroundBashJobs.reown(previous, session);
+			lastMainSession.set(session);
+			if (event.reason === "startup" || event.reason === "resume") reportOrphanShells(startCtx);
 			pillSelected = false;
 			for (const off of cleanups.splice(0)) off();
 			cleanups.push(
@@ -189,7 +250,7 @@ const backgroundBash: InlineExtension = {
 					ui.onTerminalInput((data) => {
 						// Ctrl+B is the editor's cursor-left, so the key is taken only while a
 						// foreground bash is running and would otherwise do nothing useful.
-						if (matchesKey(data, "ctrl+b") && detachAll() > 0) return { consume: true };
+						if (matchesKey(data, "ctrl+b") && detachAll("user") > 0) return { consume: true };
 						// ↓ from an empty prompt selects the pill, Enter opens it (Claude Code).
 						// Nothing is taken while a dialog or overlay has the keyboard.
 						// getFocusedComponent is on pi-tui's TUI class, not its TUI interface.
@@ -224,6 +285,17 @@ const backgroundBash: InlineExtension = {
 			refresh();
 		});
 
+		// A message the user sends while the model's bash is running would otherwise wait for
+		// the command to end; Claude Code moves the command to the background instead, so
+		// the message reaches the model now and the command keeps running. Only the main
+		// session's commands, and only ones old enough to be tasks.
+		pi.on("input", (event, inputCtx) => {
+			if (event.streamingBehavior && event.source !== "extension" && !backgroundTasksDisabled()) {
+				detachAll("message", { owner: inputCtx.sessionManager.getSessionId() });
+			}
+			return { action: "continue" };
+		});
+
 		pi.on("session_shutdown", () => {
 			for (const off of cleanups.splice(0)) off();
 			clearTimeout(hintTimer);
@@ -247,17 +319,13 @@ const backgroundBash: InlineExtension = {
 			return box;
 		});
 
-		pi.registerMessageRenderer<TaskExitDetails>(TASK_EXIT_MESSAGE_TYPE, (message, { outputPad }, theme) => {
+		// Claude Code draws a task notification as one line: a dot in the colour of its
+		// status, then the summary.
+		pi.registerMessageRenderer<TaskExitDetails>(TASK_EXIT_MESSAGE_TYPE, (message, _options, theme) => {
 			const d = message.details;
 			if (!d) return undefined;
-			// The summary names the description, so the command is named again only when
-			// it is not the description.
-			const command = d.command === d.description ? "" : theme.fg("dim", ` — ${clean(d.command)}`);
-			const lines: string[] = [theme.fg("accent", `task ${d.id} `) + theme.fg(d.status, clean(d.end)) + command];
-			if (d.outputFile) lines.push(theme.fg("dim", d.outputFile));
-			const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
-			box.addChild(new Text(lines.join("\n"), 0, 0));
-			return box;
+			const color = NOTIFICATION_DOT_COLOR[d.state ?? ""];
+			return block([`${color ? theme.fg(color, NOTIFICATION_DOT) : NOTIFICATION_DOT} ${clean(d.end)}`]);
 		});
 
 		pi.registerEntryRenderer<TasksData>("bluclawd:tasks", (entry, _options, theme) => {
@@ -280,12 +348,7 @@ const backgroundBash: InlineExtension = {
 					);
 				}
 				lines.push("");
-				lines.push(
-					theme.fg(
-						"dim",
-						"Read output: task_output or the output file · stop: task_stop. monitor starts a watch.",
-					),
-				);
+				lines.push(theme.fg("dim", "Read output: the output file · stop: task_stop. monitor starts a watch."));
 			}
 			return block(lines);
 		});

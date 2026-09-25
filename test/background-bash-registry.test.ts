@@ -163,7 +163,7 @@ describe("registry sinks", () => {
 		const registry = new BackgroundJobRegistry({ outputRoot: null });
 		const { exec, finish } = pendingExec();
 		const job = registry.start({ command: "x", cwd: "/", exec });
-		registry.kill(job.id, "too many events");
+		registry.kill(job.id, { reason: "too many events" });
 		finish(null);
 		await tick();
 		expect(describeJobStatus(registry.get(job.id)!)).toBe("stopped: too many events");
@@ -179,6 +179,7 @@ describe("describeJobStatus", () => {
 		killed: false,
 		kind: "job" as const,
 		events: 0,
+		outputBytes: 0,
 	};
 	it("names a timeout in seconds", () => {
 		expect(describeJobStatus({ ...base, exit: { code: null, error: "timeout:300", at: 1 } })).toBe(
@@ -210,8 +211,7 @@ describe("output file", () => {
 		});
 		expect(job.id).toMatch(/^b[0-9a-z]{8}$/);
 		expect(job.outputFile).toBe(join(root, "-work-dir", "sess-1", "tasks", `${job.id}.output`));
-		await registry.waitFor(job.id, 1000);
-		// The stream flushes after the job ends.
+		// The job ends, then the stream flushes.
 		await new Promise((r) => setTimeout(r, 20));
 		expect(readFileSync(job.outputFile!, "utf-8")).toBe("abcdef\n\n[exited with code 0]\n");
 		expect(registry.peek(job.id)).toBe("def\n");
@@ -226,27 +226,7 @@ describe("output file", () => {
 	});
 });
 
-describe("waitFor, owners and listeners", () => {
-	it("resolves on exit, or as the job stands when the timeout passes first", async () => {
-		const registry = new BackgroundJobRegistry({ outputRoot: null });
-		const { exec, finish } = pendingExec();
-		const job = registry.start({ command: "x", cwd: "/", exec });
-		expect((await registry.waitFor(job.id, 10))?.exit).toBeUndefined();
-		const waiting = registry.waitFor(job.id, 10_000);
-		finish(3);
-		expect((await waiting)?.exit?.code).toBe(3);
-		expect(await registry.waitFor("b99999999", 10)).toBeUndefined();
-	});
-
-	it("stops waiting when the signal aborts", async () => {
-		const registry = new BackgroundJobRegistry({ outputRoot: null });
-		const job = registry.start({ command: "x", cwd: "/", exec: pendingExec().exec });
-		const controller = new AbortController();
-		const waiting = registry.waitFor(job.id, 60_000, controller.signal);
-		controller.abort();
-		expect((await waiting)?.exit).toBeUndefined();
-	});
-
+describe("owners and listeners", () => {
 	it("lists only the owner's jobs when asked", () => {
 		const registry = new BackgroundJobRegistry({ outputRoot: null });
 		registry.start({ command: "a", cwd: "/", owner: "p", exec: pendingExec().exec });
@@ -346,5 +326,26 @@ describe("stall watchdog", () => {
 		await vi.advanceTimersByTimeAsync(STALL_MS * 2);
 		expect(stalls).toEqual([]);
 		monitor.finish();
+	});
+});
+
+describe("output file location (Claude Code's project dir spelling)", () => {
+	it("spells every non-alphanumeric of the cwd as -, dots included, and hashes a long one", async () => {
+		const { mkdtempSync, rmSync } = await import("node:fs");
+		const { tmpdir } = await import("node:os");
+		const { join } = await import("node:path");
+		const root = mkdtempSync(join(tmpdir(), "bb-dir-"));
+		try {
+			const registry = new BackgroundJobRegistry({ outputRoot: root });
+			const exec: BackgroundExec = async () => ({ exitCode: 0 });
+			const job = registry.start({ command: "x", cwd: "/work/my.app", owner: "s1", exec });
+			expect(job.outputFile).toBe(join(root, "-work-my-app", "s1", "tasks", `${job.id}.output`));
+			const long = `/${"d".repeat(250)}`;
+			const deep = registry.start({ command: "x", cwd: long, owner: "s1", exec });
+			const dir = deep.outputFile!.slice(root.length + 1).split("/")[0];
+			expect(dir).toMatch(new RegExp(`^-${"d".repeat(199)}-[0-9a-z]+$`));
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
