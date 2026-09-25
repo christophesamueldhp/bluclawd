@@ -86,9 +86,11 @@ describe("entrance", () => {
 		expect(pickEntrance({ ...base, lastVersion: undefined, reducedMotion: true, force: true })).toBeUndefined();
 	});
 
-	it("picks among skip, jump, look and spin", () => {
-		const picks = [0, 0.3, 0.6, 0.9].map((r) => pickEntrance({ ...base, lastVersion: undefined, random: () => r }));
-		expect(picks).toEqual(["skip", "jump", "look", "spin"]);
+	it("picks among skip, jump, look, spin and wave", () => {
+		const picks = [0, 0.2, 0.4, 0.6, 0.8].map((r) =>
+			pickEntrance({ ...base, lastVersion: undefined, random: () => r }),
+		);
+		expect(picks).toEqual(["skip", "jump", "look", "spin", "wave"]);
 	});
 
 	it("compares versions numerically", () => {

@@ -21,7 +21,7 @@ import {
 	withHold,
 } from "../ext/branding/mascot.ts";
 
-const POSES: Pose[] = ["default", "look-left", "look-right", "arms-up"];
+const POSES: Pose[] = ["default", "look-left", "look-right", "arms-up", "wave-up", "wave-down"];
 const GLYPHS: Glyphs[] = ["octant", "halfblock"];
 const ALL_FRAMES: MascotFrame[] = [REST, ...Object.values(SEQUENCES).flat()];
 
@@ -141,6 +141,10 @@ describe("poses", () => {
 		const up = poseGrid("arms-up");
 		expect(up.map((row) => row[0])).toEqual([..."...###........."]);
 		expect(up.slice(9)).toEqual(SOURCE.slice(9));
+		// The wave moves only the right hand: beside the head, then at the arms-up height.
+		expect(poseGrid("wave-up").map((row) => row[19])).toEqual([...".###..........."]);
+		expect(poseGrid("wave-down").map((row) => row[19])).toEqual([..."...###........."]);
+		expect(poseGrid("wave-up").map((row) => row[0])).toEqual(SOURCE.map((row) => row[0]));
 	});
 });
 
@@ -151,6 +155,7 @@ describe("sequences", () => {
 			look: 11,
 			spin: 10,
 			skip: 14,
+			wave: 19,
 		});
 		for (const frames of Object.values(SEQUENCES)) {
 			const last = frames.at(-1)!;

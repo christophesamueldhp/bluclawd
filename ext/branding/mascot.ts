@@ -45,7 +45,7 @@ export const SOURCE: readonly string[] = [
 export const BODY_COLOR = "#00c0e8";
 export const EYE_COLOR = "#1e1e1e";
 
-export type Pose = "default" | "look-left" | "look-right" | "arms-up";
+export type Pose = "default" | "look-left" | "look-right" | "arms-up" | "wave-up" | "wave-down";
 
 const EYE_ROWS = [4, 5];
 /** A full eye width, as Claude Code's look moves its 1-px eye by one pixel. */
@@ -54,7 +54,18 @@ const LOOK_SHIFT = 2;
 const ARM_RAISE = 3;
 const EYE_COLUMNS = [5, 6, 13, 14];
 const ARM_COLUMNS = [0, 1, 18, 19];
+const RIGHT_ARM_COLUMNS = [18, 19];
 const ARM_ROWS = [6, 7, 8];
+/** The waving hand's two heights: beside the head, and the arms-up height. */
+const WAVE_RAISE = { "wave-up": 5, "wave-down": ARM_RAISE };
+
+/** Move an arm's 2×3 block up by `rows`, unchanged in size. */
+function raiseArm(grid: Pixel[][], columns: number[], rows: number): void {
+	for (const x of columns) {
+		for (const y of ARM_ROWS) grid[y]![x] = ".";
+		for (const y of ARM_ROWS) grid[y - rows]![x] = "#";
+	}
+}
 
 /** The 20×15 grid for a pose. */
 export function poseGrid(pose: Pose): string[] {
@@ -64,10 +75,9 @@ export function poseGrid(pose: Pose): string[] {
 		for (const y of EYE_ROWS) for (const x of EYE_COLUMNS) grid[y]![x] = "#";
 		for (const y of EYE_ROWS) for (const x of EYE_COLUMNS) grid[y]![x + shift] = "o";
 	} else if (pose === "arms-up") {
-		for (const x of ARM_COLUMNS) {
-			for (const y of ARM_ROWS) grid[y]![x] = ".";
-			for (const y of ARM_ROWS) grid[y - ARM_RAISE]![x] = "#";
-		}
+		raiseArm(grid, ARM_COLUMNS, ARM_RAISE);
+	} else if (pose === "wave-up" || pose === "wave-down") {
+		raiseArm(grid, RIGHT_ARM_COLUMNS, WAVE_RAISE[pose]);
 	}
 	return grid.map((row) => row.join(""));
 }
@@ -129,7 +139,9 @@ const jump = [
 	...repeat("default", 0, 1),
 ];
 
-/** Claude Code's entrance sequences, frame for frame. */
+const waveOnce = [...repeat("wave-up", 0, 3), ...repeat("wave-down", 0, 3)];
+
+/** Claude Code's entrance sequences, frame for frame, plus bluclawd's own wave. */
 export const SEQUENCES = {
 	jump,
 	look: [...repeat("look-right", 0, 5), ...repeat("look-left", 0, 5), ...repeat("default", 0, 1)],
@@ -152,12 +164,14 @@ export const SEQUENCES = {
 		...poof(0),
 		...repeat("default", 0, 1, 0),
 	],
+	/** Not Claude Code's: the right hand rises beside the head and waves three times. */
+	wave: [...waveOnce, ...waveOnce, ...waveOnce, ...repeat("default", 0, 1)],
 } satisfies Record<string, MascotFrame[]>;
 
 export type SequenceName = keyof typeof SEQUENCES;
 
-/** What Claude Code picks from at random for the startup entrance. */
-export const ENTRANCES: SequenceName[] = ["skip", "jump", "look", "spin"];
+/** What the startup entrance picks from at random: Claude Code's four, plus the wave. */
+export const ENTRANCES: SequenceName[] = ["skip", "jump", "look", "spin", "wave"];
 
 /** Claude Code's `delayMs` hold, in rest frames, ahead of a sequence. */
 export function withHold(frames: MascotFrame[], delayMs: number): MascotFrame[] {
