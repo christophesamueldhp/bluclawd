@@ -21,7 +21,7 @@ import {
 	withHold,
 } from "../ext/branding/mascot.ts";
 
-const POSES: Pose[] = ["default", "look-left", "look-right", "arms-up", "wave-up", "wave-down"];
+const POSES: Pose[] = ["default", "look-left", "look-right", "arms-up"];
 const GLYPHS: Glyphs[] = ["octant", "halfblock"];
 const ALL_FRAMES: MascotFrame[] = [REST, ...Object.values(SEQUENCES).flat()];
 
@@ -126,7 +126,7 @@ describe("poses", () => {
 		expect(opaque(grid)).toBe(opaque(SOURCE));
 		for (const g of [
 			grid as readonly string[],
-			frameCanvas({ pose, offset: 0 }, "octant").map((row) => row.join("")),
+			frameCanvas({ pose, offset: 0 }, "octant").map((row) => row.join("").slice(0, 22)),
 		]) {
 			expect(components(g, "o")).toEqual(source.eyes);
 			expect(legs(g.slice(0, 15))).toEqual(source.legs);
@@ -141,10 +141,9 @@ describe("poses", () => {
 		const up = poseGrid("arms-up");
 		expect(up.map((row) => row[0])).toEqual([..."...###........."]);
 		expect(up.slice(9)).toEqual(SOURCE.slice(9));
-		// The wave moves only the right hand: beside the head, then at the arms-up height.
-		expect(poseGrid("wave-up").map((row) => row[19])).toEqual([...".###..........."]);
-		expect(poseGrid("wave-down").map((row) => row[19])).toEqual([..."...###........."]);
-		expect(poseGrid("wave-up").map((row) => row[0])).toEqual(SOURCE.map((row) => row[0]));
+		// The wave lifts only the right arm off the grid; the frame draws it as the hand.
+		expect(poseGrid("wave").map((row) => row[19])).toEqual([..."..............."]);
+		expect(poseGrid("wave").map((row) => row[0])).toEqual(SOURCE.map((row) => row[0]));
 	});
 });
 
@@ -164,7 +163,9 @@ describe("sequences", () => {
 			).toEqual(["2×2", "2×2"]);
 		}
 		expect(SEQUENCES.wave.some((f) => f.look === "right")).toBe(true);
-		expect(SEQUENCES.wave.some((f) => f.offset > 0)).toBe(true);
+		// The hand swings side to side: 4 pixels between its inner and outer positions.
+		const xs = SEQUENCES.wave.flatMap((f) => (f.hand ? [f.hand[0]] : []));
+		expect(Math.max(...xs) - Math.min(...xs)).toBe(4);
 	});
 
 	it("port Claude Code's frame counts and end at rest", () => {
@@ -173,7 +174,7 @@ describe("sequences", () => {
 			look: 11,
 			spin: 10,
 			skip: 14,
-			wave: 25,
+			wave: 27,
 		});
 		for (const frames of Object.values(SEQUENCES)) {
 			const last = frames.at(-1)!;
@@ -193,8 +194,8 @@ describe("renderMascot", () => {
 	});
 
 	it("draws 11×4 octants or 22×8 half blocks", () => {
-		expect(mascotWidth("octant")).toBe(11);
-		expect(mascotWidth("halfblock")).toBe(22);
+		expect(mascotWidth("octant")).toBe(12);
+		expect(mascotWidth("halfblock")).toBe(24);
 		for (const glyphs of GLYPHS) {
 			for (const frame of ALL_FRAMES) {
 				const lines = renderMascot(frame, glyphs);
@@ -214,7 +215,7 @@ describe("renderMascot", () => {
 					? "o"
 					: "#";
 		for (const frame of ALL_FRAMES.filter((f) => !f.poof)) {
-			const decoded = Array.from({ length: 16 }, () => Array<string>(22).fill("."));
+			const decoded = Array.from({ length: 16 }, () => Array<string>(24).fill("."));
 			for (const [cy, line] of renderMascot(frame, glyphs).entries()) {
 				const cells = line.match(/\x1b\[38;2;([\d;]+?);(?:48;2;([\d;]+)|49)m(.)\x1b\[0m|(.)/gu)!;
 				for (const [cx, cell] of cells.entries()) {
@@ -244,7 +245,7 @@ describe("renderMascot", () => {
 		expect(dot?.poof).toBe("dot");
 		const lines = renderMascot(dot!, "octant", (t) => `<${t}>`);
 		expect(lines[0]!.trim()).toBe("");
-		expect(lines.at(-1)).toMatch(/^<·>.*<·>$/u);
+		expect(lines.at(-1)).toMatch(/^<·>.*<·> $/u);
 		expect(frameCanvas(dot!, "octant").flat().join("").replace(/\./g, "").length).toBeLessThan(
 			frameCanvas(REST, "octant").flat().join("").replace(/\./g, "").length,
 		);

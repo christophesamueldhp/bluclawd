@@ -45,7 +45,7 @@ export const SOURCE: readonly string[] = [
 export const BODY_COLOR = "#00c0e8";
 export const EYE_COLOR = "#1e1e1e";
 
-export type Pose = "default" | "look-left" | "look-right" | "arms-up" | "wave-up" | "wave-down";
+export type Pose = "default" | "look-left" | "look-right" | "arms-up" | "wave";
 
 const EYE_ROWS = [4, 5];
 /** A full eye width, as Claude Code's look moves its 1-px eye by one pixel. */
@@ -56,8 +56,6 @@ const EYE_COLUMNS = [5, 6, 13, 14];
 const ARM_COLUMNS = [0, 1, 18, 19];
 const RIGHT_ARM_COLUMNS = [18, 19];
 const ARM_ROWS = [6, 7, 8];
-/** The waving hand's two heights: beside the head, and the arms-up height. */
-const WAVE_RAISE = { "wave-up": 5, "wave-down": ARM_RAISE };
 
 /** Move an arm's 2×3 block up by `rows`, unchanged in size. */
 function raiseArm(grid: Pixel[][], columns: number[], rows: number): void {
@@ -78,8 +76,9 @@ export function poseGrid(pose: Pose, look?: "left" | "right"): string[] {
 	}
 	if (pose === "arms-up") {
 		raiseArm(grid, ARM_COLUMNS, ARM_RAISE);
-	} else if (pose === "wave-up" || pose === "wave-down") {
-		raiseArm(grid, RIGHT_ARM_COLUMNS, WAVE_RAISE[pose]);
+	} else if (pose === "wave") {
+		// The right arm leaves the grid; the frame's `hand` draws it wherever the wave has it.
+		for (const x of RIGHT_ARM_COLUMNS) for (const y of ARM_ROWS) grid[y]![x] = ".";
 	}
 	return grid.map((row) => row.join(""));
 }
@@ -95,8 +94,13 @@ function widen(grid: string[]): string[] {
 	);
 }
 
-/** Widened grid width, and the canvas height: 15 rows plus a pad row that fills out the last octant line. */
-const WIDTH = SOURCE[0]!.length + DOUBLED_COLUMNS.length;
+/**
+ * The widened art's width; the canvas adds one octant cell on the right for the
+ * waving hand to swing into (the header's gap shrinks by one to match). Its
+ * height is 15 rows plus a pad row that fills out the last octant line.
+ */
+const ART_WIDTH = SOURCE[0]!.length + DOUBLED_COLUMNS.length;
+const WIDTH = ART_WIDTH + 2;
 const HEIGHT = 16;
 
 /**
@@ -112,6 +116,8 @@ export interface MascotFrame {
 	x?: number;
 	poof?: "dot" | "wave";
 	look?: "left" | "right";
+	/** The waving hand's top-left pixel on the widened canvas (pose `wave` only). */
+	hand?: readonly [number, number];
 }
 
 export const REST: MascotFrame = { pose: "default", offset: 0 };
@@ -143,23 +149,45 @@ const jump = [
 	...repeat("default", 0, 1),
 ];
 
-/** One wave stroke pair: the hand down at shoulder height with the body bobbing a pixel, then up beside the head. */
-const waveStroke: MascotFrame[] = [...repeat("wave-down", 0.25, 2), ...repeat("wave-up", 0, 2)];
+/** The 2×3 hand's size, the right arm's own. */
+const HAND = { w: 2, h: 3 };
+
+/** Where the hand goes, top-left on the widened canvas; the arm rests at column 20, rows 6–8. */
+const HAND_AT = {
+	shoulder: [20, 3],
+	raised: [20, 1],
+	// A pendulum swung from the elbow: highest in the middle, a row lower at either end.
+	top: [20, 0],
+	out: [22, 1],
+	in: [18, 1],
+} as const;
+
+function handFrames(count: number, hand: keyof typeof HAND_AT, look?: "right"): MascotFrame[] {
+	return Array.from({ length: count }, () => ({
+		pose: "wave" as const,
+		offset: 0,
+		hand: HAND_AT[hand],
+		...(look && { look }),
+	}));
+}
+
+/** One swing: through the top, out to the right, back through the top, in toward the head. */
+const swing = [...handFrames(1, "top"), ...handFrames(2, "out"), ...handFrames(1, "top"), ...handFrames(2, "in")];
 
 /**
  * bluclawd's own wave: the hand comes up in two steps while the eyes glance at
- * it, the eyes turn back to you for four quick strokes with a bob on each
- * downstroke, the hand holds up, then comes down in two steps.
+ * it, then the eyes turn back to you and the hand swings side to side three
+ * times like a waving hand, and comes back down.
  */
 const wave: MascotFrame[] = [
-	...Array.from({ length: 2 }, (): MascotFrame => ({ pose: "wave-down", offset: 0, look: "right" })),
-	...Array.from({ length: 2 }, (): MascotFrame => ({ pose: "wave-up", offset: 0, look: "right" })),
-	...waveStroke,
-	...waveStroke,
-	...waveStroke,
-	...waveStroke,
-	...repeat("wave-up", 0, 2),
-	...repeat("wave-down", 0, 2),
+	...handFrames(2, "shoulder", "right"),
+	...handFrames(2, "raised", "right"),
+	...swing,
+	...swing,
+	...swing,
+	...handFrames(1, "top"),
+	...handFrames(1, "raised"),
+	...handFrames(2, "shoulder"),
 	...repeat("default", 0, 1),
 ];
 
@@ -209,7 +237,7 @@ export function mascotGlyphs(env: NodeJS.ProcessEnv = process.env): Glyphs {
 
 const CELL = { octant: { w: 2, h: 4 }, halfblock: { w: 1, h: 2 } } as const;
 
-/** Cell width of a rendered frame. */
+/** Cell width of a rendered frame, the hand's swing room included. */
 export function mascotWidth(glyphs: Glyphs): number {
 	return WIDTH / CELL[glyphs].w;
 }
@@ -274,14 +302,18 @@ const COLOR: Record<Exclude<Pixel, ".">, string> = { "#": rgb(BODY_COLOR), o: rg
 export function frameCanvas(frame: MascotFrame, glyphs: Glyphs): Pixel[][] {
 	const sprite = widen(poseGrid(frame.pose, frame.look));
 	const cellWidth = CELL[glyphs].w;
-	const dx = Math.round(((frame.x ?? 0) / CLAWD_WIDTH) * mascotWidth(glyphs)) * cellWidth;
+	const dx = Math.round(((frame.x ?? 0) / CLAWD_WIDTH) * (ART_WIDTH / cellWidth)) * cellWidth;
+	const dy = Math.round(frame.offset * CROUCH_PIXELS);
 	const canvas: Pixel[][] = Array.from({ length: HEIGHT }, () => Array<Pixel>(WIDTH).fill("."));
+	const put = (x: number, y: number, pixel: Pixel) => {
+		if (x >= 0 && x < WIDTH && y >= 0 && y < HEIGHT && pixel !== ".") canvas[y]![x] = pixel;
+	};
 	for (const [y, row] of sprite.entries()) {
-		for (const [x, pixel] of [...row].entries()) {
-			const cx = x + dx;
-			const cy = y + Math.round(frame.offset * CROUCH_PIXELS);
-			if (cx >= 0 && cx < WIDTH && cy < HEIGHT) canvas[cy]![cx] = pixel as Pixel;
-		}
+		for (const [x, pixel] of [...row].entries()) put(x + dx, y + dy, pixel as Pixel);
+	}
+	if (frame.hand) {
+		const [hx, hy] = frame.hand;
+		for (let y = 0; y < HAND.h; y++) for (let x = 0; x < HAND.w; x++) put(hx + x + dx, hy + y + dy, "#");
 	}
 	return canvas;
 }
@@ -334,7 +366,7 @@ export function renderMascot(frame: MascotFrame, glyphs: Glyphs, dim: (text: str
 		const cells = splitCells(lines[last]!);
 		const dust = dim(frame.poof === "dot" ? "·" : "~");
 		cells[0] = dust;
-		cells[cells.length - 1] = dust;
+		cells[ART_WIDTH / CELL[glyphs].w - 1] = dust;
 		lines[last] = cells.join("");
 	}
 	return lines;

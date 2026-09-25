@@ -1089,7 +1089,8 @@ export class AgentView implements Component, Focusable {
 		const text = [title, where, summary];
 		if (width < MASCOT_MIN_COLUMNS) return text;
 		// The same static mascot as the welcome header; Claude Code's agent view never animates it.
-		return renderMascot(REST, mascotGlyphs()).map((art, i) => `${art}  ${text[i] ?? ""}`);
+		// The mascot's box ends in a blank cell (the wave's swing room), so one more space makes Claude Code's gap of 2.
+		return renderMascot(REST, mascotGlyphs()).map((art, i) => `${art} ${text[i] ?? ""}`);
 	}
 
 	private statusLine(): string | undefined {

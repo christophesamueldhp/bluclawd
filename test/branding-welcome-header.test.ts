@@ -29,7 +29,7 @@ const info: WelcomeHeaderInfo = {
 
 describe("welcomeLines", () => {
 	it("draws Claude Code's three lines: bold name + faint version, model · billing, cwd", () => {
-		const lines = welcomeLines(info, 120, 11);
+		const lines = welcomeLines(info, 120, 12);
 		expect(lines.map(plain)).toEqual([
 			"bluclawd v0.84.3",
 			"Kimi K2.6 with high effort · OpenCode Go",
@@ -40,8 +40,8 @@ describe("welcomeLines", () => {
 	});
 
 	it("splits model and billing when they do not fit on one line, then elides the cwd", () => {
-		// width = max(50 - 17, 20) = 33 < 26 + 3 + 11
-		const lines = welcomeLines(info, 50, 11).map(plain);
+		// width = max(50 - 17, 20) = 33 < 26 + 3 + 11 (a 12-cell mascot box, then a 1-cell gap)
+		const lines = welcomeLines(info, 50, 12).map(plain);
 		expect(lines).toEqual([
 			"bluclawd v0.84.3",
 			"Kimi K2.6 with high effort",
@@ -49,15 +49,15 @@ describe("welcomeLines", () => {
 			"~/Desktop/Project/bluclawd",
 		]);
 		expect(
-			welcomeLines({ ...info, cwd: "~/a/very/long/path/to/some/deep/project" }, 30, 11)
+			welcomeLines({ ...info, cwd: "~/a/very/long/path/to/some/deep/project" }, 30, 12)
 				.map(plain)
 				.at(-1),
 		).toBe("~/…/deep/project");
 	});
 
 	it("leaves out the effort without a thinking level and the model line without a model", () => {
-		expect(welcomeLines({ ...info, effort: undefined }, 120, 11).map(plain)[1]).toBe("Kimi K2.6 · OpenCode Go");
-		expect(welcomeLines({ ...info, model: undefined }, 120, 11).map(plain)).toEqual([
+		expect(welcomeLines({ ...info, effort: undefined }, 120, 12).map(plain)[1]).toBe("Kimi K2.6 · OpenCode Go");
+		expect(welcomeLines({ ...info, model: undefined }, 120, 12).map(plain)).toEqual([
 			"bluclawd v0.84.3",
 			"~/Desktop/Project/bluclawd",
 		]);

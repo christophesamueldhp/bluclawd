@@ -75,8 +75,9 @@ export function elidePath(path: string, width: number): string {
 
 /** The text column for a terminal `columns` wide, Claude Code's widths shifted by the mascot's extra cells. */
 export function welcomeLines(info: WelcomeHeaderInfo, columns: number, mascotCells: number): string[] {
-	// Claude Code: max(columns - 15, 20) for its 9-cell Clawd.
-	const width = Math.max(columns - (mascotCells + 6), 20);
+	// Claude Code: max(columns - 15, 20) for its 9-cell Clawd and 2-cell gap; the mascot's box
+	// carries one blank cell of swing room, and the gap after it is one cell.
+	const width = Math.max(columns - (mascotCells + 5), 20);
 	const lines = [`${bold("bluclawd")} ${faint(`v${ellipsis(info.version, Math.max(width - 13, 6))}`)}`];
 	if (info.model) {
 		const model = info.effort ? `${info.model} with ${info.effort} effort` : info.model;
@@ -220,7 +221,7 @@ export class WelcomeHeader implements Component {
 		const lines: string[] = [];
 		for (let i = 0; i < rows; i++) {
 			const art = mascot[i - mascotTop] ?? " ".repeat(cells);
-			lines.push(truncateToWidth(` ${art}  ${text[i - textTop] ?? ""}`, width));
+			lines.push(truncateToWidth(` ${art} ${text[i - textTop] ?? ""}`, width));
 		}
 		return lines;
 	}
