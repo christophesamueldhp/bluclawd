@@ -234,5 +234,5 @@ columns >= 70`, in `row gap 2, marginBottom 1` next to 3 text lines. It is never
 - No screen-reader hide: pi exposes no screen-reader signal.
 - No update-summary line under the header ("Updated to latest…"), no announcement slot, no
   `@agentName` prefix: pi has no counterpart.
-- An extra entrance, `wave` (added 2026-09-25 at the user's request): the right hand rises beside the head and waves three times. Claude Code has no such sequence; it joins the random pool.
+- An extra entrance, `wave` (added 2026-09-25 at the user's request, made more expressive the same day): the hand rises in two steps while the eyes glance at it, the eyes turn back for four quick strokes with a one-pixel bob on each downstroke, the hand holds, then lowers in two steps (25 frames, 1.5 s). Claude Code has no such sequence; it joins the random pool.
 - Mascot colors stay bluclawd's: cyan `#00c0e8` body, `#1e1e1e` eyes (the SVG's values).

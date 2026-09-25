@@ -68,13 +68,15 @@ function raiseArm(grid: Pixel[][], columns: number[], rows: number): void {
 }
 
 /** The 20×15 grid for a pose. */
-export function poseGrid(pose: Pose): string[] {
+export function poseGrid(pose: Pose, look?: "left" | "right"): string[] {
 	const grid = SOURCE.map((row) => row.split("") as Pixel[]);
-	if (pose === "look-left" || pose === "look-right") {
-		const shift = pose === "look-left" ? -LOOK_SHIFT : LOOK_SHIFT;
+	const eyes = pose === "look-left" ? "left" : pose === "look-right" ? "right" : look;
+	if (eyes) {
+		const shift = eyes === "left" ? -LOOK_SHIFT : LOOK_SHIFT;
 		for (const y of EYE_ROWS) for (const x of EYE_COLUMNS) grid[y]![x] = "#";
 		for (const y of EYE_ROWS) for (const x of EYE_COLUMNS) grid[y]![x + shift] = "o";
-	} else if (pose === "arms-up") {
+	}
+	if (pose === "arms-up") {
 		raiseArm(grid, ARM_COLUMNS, ARM_RAISE);
 	} else if (pose === "wave-up" || pose === "wave-down") {
 		raiseArm(grid, RIGHT_ARM_COLUMNS, WAVE_RAISE[pose]);
@@ -99,15 +101,17 @@ const HEIGHT = 16;
 
 /**
  * One animation frame, Claude Code's shape (m1353): `offset` is the crouch in
- * rows — the sprite drops and its feet leave the clipped box — `x` slides the
- * sprite in Claude Code's units (its Clawd is 9 cells wide), and `poof` is the
- * landing dust.
+ * rows — the sprite drops and its feet leave the clipped box; a quarter row is
+ * a one-pixel bob — `x` slides the sprite in Claude Code's units (its Clawd is
+ * 9 cells wide), and `poof` is the landing dust. `look` turns the eyes on top
+ * of any pose (bluclawd's wave only).
  */
 export interface MascotFrame {
 	pose: Pose;
 	offset: number;
 	x?: number;
 	poof?: "dot" | "wave";
+	look?: "left" | "right";
 }
 
 export const REST: MascotFrame = { pose: "default", offset: 0 };
@@ -139,7 +143,25 @@ const jump = [
 	...repeat("default", 0, 1),
 ];
 
-const waveOnce = [...repeat("wave-up", 0, 3), ...repeat("wave-down", 0, 3)];
+/** One wave stroke pair: the hand down at shoulder height with the body bobbing a pixel, then up beside the head. */
+const waveStroke: MascotFrame[] = [...repeat("wave-down", 0.25, 2), ...repeat("wave-up", 0, 2)];
+
+/**
+ * bluclawd's own wave: the hand comes up in two steps while the eyes glance at
+ * it, the eyes turn back to you for four quick strokes with a bob on each
+ * downstroke, the hand holds up, then comes down in two steps.
+ */
+const wave: MascotFrame[] = [
+	...Array.from({ length: 2 }, (): MascotFrame => ({ pose: "wave-down", offset: 0, look: "right" })),
+	...Array.from({ length: 2 }, (): MascotFrame => ({ pose: "wave-up", offset: 0, look: "right" })),
+	...waveStroke,
+	...waveStroke,
+	...waveStroke,
+	...waveStroke,
+	...repeat("wave-up", 0, 2),
+	...repeat("wave-down", 0, 2),
+	...repeat("default", 0, 1),
+];
 
 /** Claude Code's entrance sequences, frame for frame, plus bluclawd's own wave. */
 export const SEQUENCES = {
@@ -164,8 +186,8 @@ export const SEQUENCES = {
 		...poof(0),
 		...repeat("default", 0, 1, 0),
 	],
-	/** Not Claude Code's: the right hand rises beside the head and waves three times. */
-	wave: [...waveOnce, ...waveOnce, ...waveOnce, ...repeat("default", 0, 1)],
+	/** Not Claude Code's; see `wave` above. */
+	wave,
 } satisfies Record<string, MascotFrame[]>;
 
 export type SequenceName = keyof typeof SEQUENCES;
@@ -250,14 +272,14 @@ const COLOR: Record<Exclude<Pixel, ".">, string> = { "#": rgb(BODY_COLOR), o: rg
 
 /** The frame as a canvas of pixels, sprite placed by its crouch and slide. */
 export function frameCanvas(frame: MascotFrame, glyphs: Glyphs): Pixel[][] {
-	const sprite = widen(poseGrid(frame.pose));
+	const sprite = widen(poseGrid(frame.pose, frame.look));
 	const cellWidth = CELL[glyphs].w;
 	const dx = Math.round(((frame.x ?? 0) / CLAWD_WIDTH) * mascotWidth(glyphs)) * cellWidth;
 	const canvas: Pixel[][] = Array.from({ length: HEIGHT }, () => Array<Pixel>(WIDTH).fill("."));
 	for (const [y, row] of sprite.entries()) {
 		for (const [x, pixel] of [...row].entries()) {
 			const cx = x + dx;
-			const cy = y + frame.offset * CROUCH_PIXELS;
+			const cy = y + Math.round(frame.offset * CROUCH_PIXELS);
 			if (cx >= 0 && cx < WIDTH && cy < HEIGHT) canvas[cy]![cx] = pixel as Pixel;
 		}
 	}

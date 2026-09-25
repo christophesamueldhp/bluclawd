@@ -149,13 +149,31 @@ describe("poses", () => {
 });
 
 describe("sequences", () => {
+	it("wave moves parts without resizing them: every frame keeps all pixels and 2×2 eyes", () => {
+		const opaque = (frame: MascotFrame) =>
+			frameCanvas(frame, "octant")
+				.flat()
+				.filter((p) => p !== ".").length;
+		for (const frame of SEQUENCES.wave) {
+			expect(opaque(frame)).toBe(opaque(REST));
+			expect(
+				components(
+					frameCanvas(frame, "octant").map((row) => row.join("")),
+					"o",
+				),
+			).toEqual(["2×2", "2×2"]);
+		}
+		expect(SEQUENCES.wave.some((f) => f.look === "right")).toBe(true);
+		expect(SEQUENCES.wave.some((f) => f.offset > 0)).toBe(true);
+	});
+
 	it("port Claude Code's frame counts and end at rest", () => {
 		expect(Object.fromEntries(Object.entries(SEQUENCES).map(([name, frames]) => [name, frames.length]))).toEqual({
 			jump: 12,
 			look: 11,
 			spin: 10,
 			skip: 14,
-			wave: 19,
+			wave: 25,
 		});
 		for (const frames of Object.values(SEQUENCES)) {
 			const last = frames.at(-1)!;
