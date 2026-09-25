@@ -60,6 +60,27 @@ function components(grid: readonly string[], value: string): string[] {
 	return sizes;
 }
 
+/** How many 4-connected shapes the opaque pixels (body and eyes) form. */
+function shapes(canvas: string[][]): number {
+	const seen = new Set<string>();
+	let count = 0;
+	for (let y = 0; y < canvas.length; y++) {
+		for (let x = 0; x < canvas[y]!.length; x++) {
+			if (canvas[y]![x] === "." || seen.has(`${x},${y}`)) continue;
+			count++;
+			const stack = [[x, y]];
+			while (stack.length > 0) {
+				const [cx, cy] = stack.pop()!;
+				const pixel = canvas[cy!]?.[cx!];
+				if (pixel === undefined || pixel === "." || seen.has(`${cx},${cy}`)) continue;
+				seen.add(`${cx},${cy}`);
+				stack.push([cx! + 1, cy!], [cx! - 1, cy!], [cx!, cy! + 1], [cx!, cy! - 1]);
+			}
+		}
+	}
+	return count;
+}
+
 /** Leg runs: opaque runs in the last three rows. */
 function legs(grid: readonly string[]): number[][] {
 	return grid.slice(-3).map((row) => (row.match(/#+/g) ?? []).map((run: string) => run.length));
@@ -148,6 +169,15 @@ describe("poses", () => {
 });
 
 describe("sequences", () => {
+	it("never splits the mascot: every frame of every sequence is one connected shape", () => {
+		for (const [name, frames] of Object.entries(SEQUENCES)) {
+			for (const [i, frame] of frames.entries()) {
+				if (frame.x === -9) continue; // fully off-screen at the start of skip
+				expect(shapes(frameCanvas(frame, "octant")), `${name}[${i}]`).toBe(1);
+			}
+		}
+	});
+
 	it("wave moves parts without resizing them: every frame keeps all pixels and 2×2 eyes", () => {
 		const opaque = (frame: MascotFrame) =>
 			frameCanvas(frame, "octant")
@@ -163,9 +193,9 @@ describe("sequences", () => {
 			).toEqual(["2×2", "2×2"]);
 		}
 		expect(SEQUENCES.wave.some((f) => f.look === "right")).toBe(true);
-		// The hand swings side to side: 4 pixels between its inner and outer positions.
-		const xs = SEQUENCES.wave.flatMap((f) => (f.hand ? [f.hand[0]] : []));
-		expect(Math.max(...xs) - Math.min(...xs)).toBe(4);
+		// The arm leans side to side: its top moves 4 pixels between leaning in and leaning out.
+		const tops = SEQUENCES.wave.flatMap((f) => (f.arm ?? []).filter(([, y]) => y === 2).map(([x]) => x));
+		expect(Math.max(...tops) - Math.min(...tops)).toBe(5); // the top row spans columns 18–23: leaning 2 in, upright, leaning 2 out
 	});
 
 	it("port Claude Code's frame counts and end at rest", () => {
@@ -174,7 +204,7 @@ describe("sequences", () => {
 			look: 11,
 			spin: 10,
 			skip: 14,
-			wave: 27,
+			wave: 26,
 		});
 		for (const frames of Object.values(SEQUENCES)) {
 			const last = frames.at(-1)!;

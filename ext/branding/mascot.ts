@@ -77,7 +77,7 @@ export function poseGrid(pose: Pose, look?: "left" | "right"): string[] {
 	if (pose === "arms-up") {
 		raiseArm(grid, ARM_COLUMNS, ARM_RAISE);
 	} else if (pose === "wave") {
-		// The right arm leaves the grid; the frame's `hand` draws it wherever the wave has it.
+		// The right arm leaves the grid; the frame's `arm` draws it wherever the wave has it.
 		for (const x of RIGHT_ARM_COLUMNS) for (const y of ARM_ROWS) grid[y]![x] = ".";
 	}
 	return grid.map((row) => row.join(""));
@@ -116,8 +116,8 @@ export interface MascotFrame {
 	x?: number;
 	poof?: "dot" | "wave";
 	look?: "left" | "right";
-	/** The waving hand's top-left pixel on the widened canvas (pose `wave` only). */
-	hand?: readonly [number, number];
+	/** The raised right arm's pixels on the widened canvas (pose `wave` only). */
+	arm?: readonly (readonly [number, number])[];
 }
 
 export const REST: MascotFrame = { pose: "default", offset: 0 };
@@ -149,45 +149,50 @@ const jump = [
 	...repeat("default", 0, 1),
 ];
 
-/** The 2×3 hand's size, the right arm's own. */
-const HAND = { w: 2, h: 3 };
+type ArmPixels = readonly (readonly [number, number])[];
 
-/** Where the hand goes, top-left on the widened canvas; the arm rests at column 20, rows 6–8. */
-const HAND_AT = {
-	shoulder: [20, 3],
-	raised: [20, 1],
-	// A pendulum swung from the elbow: highest in the middle, a row lower at either end.
-	top: [20, 0],
-	out: [22, 1],
-	in: [18, 1],
+/** A 2-wide arm, one row per `[left column, row]` step, on the widened canvas. */
+function armRows(...rows: (readonly [number, number])[]): ArmPixels {
+	return rows.flatMap(([x, y]) => [[x, y] as const, [x + 1, y] as const]);
+}
+
+/**
+ * The raised right arm, always the arm's own 6 pixels and always joined to the
+ * body at the shoulder (column 19 is the body's edge from row 4 down). It
+ * swings by leaning: a staircase out to the right or in toward the head.
+ */
+const ARM = {
+	shoulder: armRows([20, 4], [20, 5], [20, 6]),
+	up: armRows([20, 2], [20, 3], [20, 4]),
+	out: armRows([22, 2], [21, 3], [20, 4]),
+	in: armRows([18, 2], [19, 3], [20, 4]),
 } as const;
 
-function handFrames(count: number, hand: keyof typeof HAND_AT, look?: "right"): MascotFrame[] {
+function armFrames(count: number, arm: keyof typeof ARM, look?: "right"): MascotFrame[] {
 	return Array.from({ length: count }, () => ({
 		pose: "wave" as const,
 		offset: 0,
-		hand: HAND_AT[hand],
+		arm: ARM[arm],
 		...(look && { look }),
 	}));
 }
 
-/** One swing: through the top, out to the right, back through the top, in toward the head. */
-const swing = [...handFrames(1, "top"), ...handFrames(2, "out"), ...handFrames(1, "top"), ...handFrames(2, "in")];
+/** One swing: upright, leaning out, upright, leaning in toward the head. */
+const swing = [...armFrames(1, "up"), ...armFrames(2, "out"), ...armFrames(1, "up"), ...armFrames(2, "in")];
 
 /**
- * bluclawd's own wave: the hand comes up in two steps while the eyes glance at
- * it, then the eyes turn back to you and the hand swings side to side three
+ * bluclawd's own wave: the arm comes up in two steps while the eyes glance at
+ * it, then the eyes turn back to you and the arm swings side to side three
  * times like a waving hand, and comes back down.
  */
 const wave: MascotFrame[] = [
-	...handFrames(2, "shoulder", "right"),
-	...handFrames(2, "raised", "right"),
+	...armFrames(2, "shoulder", "right"),
+	...armFrames(2, "up", "right"),
 	...swing,
 	...swing,
 	...swing,
-	...handFrames(1, "top"),
-	...handFrames(1, "raised"),
-	...handFrames(2, "shoulder"),
+	...armFrames(1, "up"),
+	...armFrames(2, "shoulder"),
 	...repeat("default", 0, 1),
 ];
 
@@ -311,10 +316,7 @@ export function frameCanvas(frame: MascotFrame, glyphs: Glyphs): Pixel[][] {
 	for (const [y, row] of sprite.entries()) {
 		for (const [x, pixel] of [...row].entries()) put(x + dx, y + dy, pixel as Pixel);
 	}
-	if (frame.hand) {
-		const [hx, hy] = frame.hand;
-		for (let y = 0; y < HAND.h; y++) for (let x = 0; x < HAND.w; x++) put(hx + x + dx, hy + y + dy, "#");
-	}
+	for (const [x, y] of frame.arm ?? []) put(x + dx, y + dy, "#");
 	return canvas;
 }
 
