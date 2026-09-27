@@ -55,7 +55,6 @@ import {
 	searchReachesProtectedFiles,
 	standingRules,
 	subject,
-	taskAgents,
 } from "./rules.ts";
 import { isSafeCommand } from "./safe-command.ts";
 
@@ -115,23 +114,13 @@ const READ_LIKE_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const LOCAL_READ_TOOLS = new Set(["get_search_content", "source_check", "mcp_find_tools", "mcp_list_resources"]);
 
 /**
- * Tools the mode does not prompt for, though they are not reads: the task control
- * tools only inspect, steer or stop this session's own background subagents and shells
- * (a steered child's own tool calls still pass its gate), and `manage_agents` asks the user itself
- * before every write, in every mode — a mode prompt on top would ask twice; and
- * `contact_supervisor` is itself a question to the user; `structured_output` only hands
- * a child's result back to its parent.
- * Deny rules still apply to them.
+ * Tools the mode does not prompt for, though they are not reads. `agent` is Claude Code's:
+ * its own permission check allows a spawn outright outside auto mode — `Agent(...)` rules
+ * still apply — and every tool call the child then makes passes the child's own gate
+ * under the parent's mode. `send_message` and `task_stop` only steer, resume or stop this
+ * session's own background work. Deny rules still apply to all of them.
  */
-const SELF_GATED_TOOLS = new Set([
-	"task_output",
-	"task_stop",
-	"task_message",
-	"task_wait",
-	"manage_agents",
-	"contact_supervisor",
-	"structured_output",
-]);
+const SELF_GATED_TOOLS = new Set(["agent", "task_stop", "send_message"]);
 
 /**
  * Will this bash command actually run inside the OS sandbox? Not when the sandbox is
@@ -203,13 +192,10 @@ function hasExactAllowForEverySegment(rules: Rules, command: string): boolean {
 }
 
 /**
- * The rule decision, plus (for `task`) which target agent is asking.
- *
- * `task` is decided PER TARGET AGENT across single/parallel/chain: a deny on ANY target
- * blocks the whole call, and the first asking agent becomes the prompt's subject —
- * otherwise wrapping an agent in parallel mode would walk past its `Task(...)` rule.
- * A `websearch` batch is decided PER QUERY the same way, so `queries` cannot carry a
- * query past a `WebSearch(...)` rule; `denyAgent`/`askAgent` then name the query.
+ * The rule decision. A `websearch` batch is decided PER QUERY: a deny on ANY query
+ * blocks the whole call and the first asking query becomes the prompt's subject, so
+ * `queries` cannot carry a query past a `WebSearch(...)` rule; `denyAgent`/`askAgent`
+ * then name that query.
  */
 export function decideRules(
 	tool: string,
@@ -218,13 +204,13 @@ export function decideRules(
 	cwd: string,
 ): { decision: Decision | null; denyAgent?: string; askAgent?: string } {
 	const batch = tool === "websearch" && Array.isArray(input.queries);
-	if (tool !== "task" && !batch) return { decision: decide(rules, tool, input, cwd) };
+	if (!batch) return { decision: decide(rules, tool, input, cwd) };
 
 	let decision: Decision | null = null;
 	let askAgent: string | undefined;
-	const targets = batch ? searchQueries(input) : taskAgents(input);
+	const targets = searchQueries(input);
 	for (const target of targets) {
-		const d = decide(rules, tool, batch ? { query: target } : { agent: target }, cwd);
+		const d = decide(rules, tool, { query: target }, cwd);
 		if (d === "deny") return { decision: "deny", denyAgent: target };
 		if (d === "ask" && decision !== "ask") {
 			decision = "ask";
@@ -282,9 +268,6 @@ function governedTool(tool: string, input: Record<string, unknown>): string {
 	// A WebSocket monitor opens from this process, outside the OS sandbox: it is judged
 	// as a fetch of its URL, so WebFetch(domain:…) rules and the fetch prompt cover it.
 	if (tool === "monitor") return monitorSource(input).kind === "ws" ? "webfetch" : "bash";
-	// Creating a schedule is judged as the task it will start, while the user is here to
-	// answer; listing and cancelling touch only this session's own schedules.
-	if (tool === "task_schedule") return input.action === "create" ? "task" : "task_output";
 	// MCP resources are judged as their server's tools, so `deny: Mcp(github:*)` covers
 	// reading github's resources too.
 	if (tool === "mcp_read_resource" || tool === "mcp_list_resources") {
@@ -335,8 +318,7 @@ export function evaluatePreHook(
 	// 1. deny rules. (ask/allow are resolved in evaluatePostHook.)
 	const { decision, denyAgent } = decideRules(tool, input, cfg.rules, cfg.cwd);
 	if (decision === "deny") {
-		const subj =
-			(tool === "task" || tool === "websearch") && denyAgent !== undefined ? denyAgent : subject(tool, input);
+		const subj = tool === "websearch" && denyAgent !== undefined ? denyAgent : subject(tool, input);
 		return {
 			outcome: "block",
 			gate: "deny-rule",
@@ -440,15 +422,8 @@ export function evaluatePostHook(rawTool: string, rawInput: Record<string, unkno
 		autoAllowed ? withoutBareBashAsk(cfg.rules) : cfg.rules,
 		cfg.cwd,
 	);
-	// For `task` the subject is the agent the prompt is about: the one an ask rule named,
-	// or (no rule at all) the first target — `Task()` would label the prompt with nothing
-	// and persist a "don't ask again" that matches nothing.
-	const subj =
-		tool === "task"
-			? (askAgent ?? taskAgents(input)[0] ?? "")
-			: tool === "websearch" && askAgent !== undefined
-				? askAgent
-				: subject(tool, input);
+	// A websearch batch's prompt is about the query an ask rule named.
+	const subj = tool === "websearch" && askAgent !== undefined ? askAgent : subject(tool, input);
 	const exact = exactRule(tool, subj);
 
 	// 4. An ask rule matched. It prompts in EVERY mode — auto included, exactly as Claude

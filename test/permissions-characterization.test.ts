@@ -31,7 +31,7 @@ import type { Rules } from "../ext/permissions/rules.ts";
 const RULE_SETS: Record<string, Rules> = {
 	none: {},
 	"deny-bash": { deny: ["Bash(**)"] },
-	"ask-all": { ask: ["Bash(**)", "Read(**)", "Write(**)", "Edit(**)", "Task(**)", "Mcp(**)"] },
+	"ask-all": { ask: ["Bash(**)", "Read(**)", "Write(**)", "Edit(**)", "Agent(**)", "Mcp(**)"] },
 	"allow-glob": { ask: ["Bash(**)"], allow: ["Bash(npm *)"] },
 	"allow-exact": { ask: ["Bash(**)"], allow: ["Bash(npm install)"] },
 	// A broad, un-narrowed allow glob reaching a dangerous command with no `ask` rule to
@@ -56,7 +56,7 @@ function toolCases(
 		{ name: "write-git-hook", tool: "write", input: { path: join(cwd, ".git", "hooks", "pre-commit") } },
 		{ name: "edit-normal", tool: "edit", input: { path: join(cwd, "src", "x.ts") } },
 		{ name: "write-outside-cwd", tool: "write", input: { path: "/etc/hosts" } },
-		{ name: "task-explore", tool: "task", input: { agent: "explore" } },
+		{ name: "agent-explore", tool: "agent", input: { subagent_type: "Explore" } },
 		{ name: "mcp-tool", tool: "mcp__srv__do", input: {} },
 	];
 }

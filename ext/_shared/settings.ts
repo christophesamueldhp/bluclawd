@@ -55,31 +55,19 @@ export interface WebsearchSettings {
 	keyless?: boolean;
 }
 
-/** Limits and model aliases for the `task` tool's in-process subagents. */
+/**
+ * Limits and models for the `agent` tool's in-process subagents — Claude Code's
+ * CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH and
+ * CLAUDE_CODE_SUBAGENT_MODEL, which override these when set.
+ */
 export interface SubagentSettings {
-	/** Most tasks one parallel or chain call may carry. default: 8 */
-	maxTasks?: number;
-	/** Most children running at once within one call. default: 4 */
+	/** Subagents running at once, across the session. default: 20 */
 	maxConcurrent?: number;
-	/** Turn cap for every child that declares none. default: unlimited */
-	maxTurns?: number;
-	/** Run-time cap in milliseconds for every child that declares none. default: unlimited */
-	timeoutMs?: number;
-	/** One tool call running longer than this (ms) stops the child. default: unlimited */
-	toolTimeoutMs?: number;
-	/** Tokens (input + output + cache reads and writes) a child may use in one run. default: unlimited */
-	maxTokens?: number;
-	/** `{soft, hard, block}` tool-call budget for every child that declares none. default: none */
-	toolBudget?: { soft?: number; hard: number; block?: string[] | "*" };
-	/** How deep children may nest: 1 = children cannot delegate, 2 = they can, once. default: 2 */
+	/** Layers below the main session that may still spawn: 1 = children cannot delegate. default: 3 */
 	maxDepth?: number;
-	/** Children one top-level task call may start in total, nested and resumed ones included. default: 32 */
-	maxSpawns?: number;
-	/** A forked child whose inherited conversation is above this many tokens compacts it first. default: 60000 */
-	forkCompactAbove?: number;
-	/** Times a child whose acceptance gate failed is sent back to fix it. default: 1 */
-	gateRetries?: number;
-	/** Short model names a def's `model:` may use, e.g. `{ "fast": "opencode-go/kimi-k2" }`.
+	/** The model when neither the call nor the definition names one. default: the parent's */
+	model?: string;
+	/** Short model names `model` may use, e.g. `{ "sonnet": "opencode-go/kimi-k2" }`.
 	 *  Provider-neutral on purpose: nothing here names a vendor unless the user does. */
 	models?: Record<string, string>;
 }

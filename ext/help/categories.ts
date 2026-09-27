@@ -59,7 +59,6 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 
 	// Code & review
 	rewind: "Code & review",
-	"review-loop": "Code & review",
 
 	// Model & output
 	model: "Model & output",

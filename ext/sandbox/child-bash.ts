@@ -17,6 +17,7 @@
 
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { createClaudeBashTool } from "./bash-tool.ts";
+import { createMonitorTool } from "./monitor-tool.ts";
 import { childBashProvider } from "./state.ts";
 
 export function createChildBashExtension(
@@ -41,6 +42,15 @@ export function createChildBashExtension(
 					isMain: false,
 					sandboxEscape: false,
 					endsWithFinalResponse: options.endsWithFinalResponse,
+				}),
+			);
+			// Claude Code gives subagents Monitor too; the same sandbox covers it.
+			pi.registerTool(
+				createMonitorTool({
+					sendMessage: (message, delivery) => pi.sendMessage(message, delivery),
+					cwd,
+					exec: (command) => provider.operations(command).exec,
+					refuse: () => provider.refusal(),
 				}),
 			);
 		},

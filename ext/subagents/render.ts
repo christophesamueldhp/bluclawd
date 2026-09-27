@@ -1,10 +1,7 @@
 /**
- * Result model + TUI rendering for the `task` subagent tool (PLAN.md F3.1).
- *
- * Lifted ~verbatim from the donor `examples/extensions/subagent/index.ts`
- * (renderCall / renderResult + the format/display helpers), adapted for the
- * in-process engine: messages are the child session's `AgentMessage[]`, and the
- * tool is titled "task" (not the donor's "subagent").
+ * Result model + TUI rendering for the `agent` tool, in Claude Code's shape: the call
+ * reads `Type(description)` coloured by the agent's `color`, a running child shows its
+ * last few tool calls, and a finished one `Done (N tool uses · X tokens · Ys)`.
  */
 
 import { homedir } from "node:os";
@@ -13,13 +10,7 @@ import type { AgentToolResult } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme, type Theme, type ThemeColor } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { keyDisplayText } from "../_shared/key-display-text.ts";
-import type { AgentScope } from "./defs.ts";
-import { structuredOutputOf } from "./structured-output.ts";
-
-export const MAX_PARALLEL_TASKS = 8;
-export const MAX_CONCURRENCY = 4;
-const COLLAPSED_ITEM_COUNT = 10;
-export const PER_TASK_OUTPUT_CAP = 50 * 1024;
+import type { AgentColor, AgentSource } from "./defs.ts";
 
 export interface UsageStats {
 	input: number;
@@ -31,12 +22,11 @@ export interface UsageStats {
 	turns: number;
 }
 
-/** In-process run status, replacing the donor's subprocess exitCode encoding. */
 export type SubagentStatus = "running" | "ok" | "failed";
 
 export interface SingleResult {
 	agent: string;
-	agentSource: "user" | "project" | "unknown";
+	agentSource: AgentSource | "unknown";
 	task: string;
 	/** "running" until the child completes, then "ok" or "failed". */
 	status: SubagentStatus;
@@ -46,77 +36,93 @@ export interface SingleResult {
 	model?: string;
 	stopReason?: string;
 	errorMessage?: string;
-	step?: number;
-	/** The child session's id: what a later call resumes. */
+	/** What `send_message` continues it by. */
 	agentId?: string;
+	startedAt?: number;
+	durationMs?: number;
+	toolUses?: number;
 	/** Stopped at its turn cap; the output is what it had by then. */
 	partial?: boolean;
-	/** A worktree the child changed and so was kept, for the user to inspect or merge. */
-	worktree?: string;
-	/** The acceptance gate that ran after the child, and how it ended. */
-	gate?: { command: string; passed: boolean; attempts: number };
+	turnCap?: number;
+	/** A worktree the child changed, kept for the user to inspect or merge. */
+	worktreePath?: string;
+	worktreeBranch?: string;
 }
 
-export interface SubagentDetails {
-	mode: "single" | "parallel" | "chain";
-	agentScope: AgentScope;
-	projectAgentsDir: string | null;
-	results: SingleResult[];
+export interface AgentDetails {
+	/** The agent type shown in the header. */
+	agentType: string;
+	description: string;
+	/** A background launch: the result arrives later as a notification. */
+	launched?: boolean;
+	result?: SingleResult;
 }
 
-export interface TaskCallArgs {
-	agent?: string;
-	task?: string;
-	tasks?: Array<{ agent: string; task: string }>;
-	chain?: Array<{ agent?: string; task?: string; parallel?: Array<{ agent: string; task: string }> }>;
-	resume?: string;
-	workflow?: string;
-	input?: string;
+export interface AgentCallArgs {
+	description?: string;
+	prompt?: string;
+	subagent_type?: string;
 }
 
 export function emptyUsage(): UsageStats {
-	return {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		cost: 0,
-		contextTokens: 0,
-		turns: 0,
-	};
+	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
 }
 
-function formatTokens(count: number): string {
+/** Claude Code's token count: `950`, `12.3k`, `1.2M`. */
+export function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
-	if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
-	if (count < 1000000) return `${Math.round(count / 1000)}k`;
-	return `${(count / 1000000).toFixed(1)}M`;
+	if (count < 1_000_000) return `${(count / 1000).toFixed(1).replace(/\.0$/, "")}k`;
+	return `${(count / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
 }
 
-export function formatUsageStats(
-	usage: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		cost: number;
-		contextTokens?: number;
-		turns?: number;
-	},
-	model?: string,
-): string {
-	const parts: string[] = [];
-	if (usage.turns) parts.push(`${usage.turns} turn${usage.turns > 1 ? "s" : ""}`);
-	if (usage.input) parts.push(`↑${formatTokens(usage.input)}`);
-	if (usage.output) parts.push(`↓${formatTokens(usage.output)}`);
-	if (usage.cacheRead) parts.push(`R${formatTokens(usage.cacheRead)}`);
-	if (usage.cacheWrite) parts.push(`W${formatTokens(usage.cacheWrite)}`);
-	if (usage.cost) parts.push(`$${usage.cost.toFixed(4)}`);
-	if (usage.contextTokens && usage.contextTokens > 0) {
-		parts.push(`ctx:${formatTokens(usage.contextTokens)}`);
+/** `8s`, `1m 5s`. */
+export function formatDuration(ms: number): string {
+	const s = Math.max(0, Math.round(ms / 1000));
+	return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+/** Tokens a child used: Claude Code counts the last request's input, output and cache. */
+export function totalTokens(result: SingleResult): number {
+	for (let i = result.messages.length - 1; i >= 0; i--) {
+		const m = result.messages[i];
+		if (m.role === "assistant" && m.usage)
+			return m.usage.input + m.usage.output + m.usage.cacheRead + m.usage.cacheWrite;
 	}
-	if (model) parts.push(model);
-	return parts.join(" ");
+	return result.usage.input + result.usage.output + result.usage.cacheRead + result.usage.cacheWrite;
+}
+
+/** `Done (3 tool uses · 12.3k tokens · 8s)`. */
+export function doneLine(result: SingleResult): string {
+	const uses = result.toolUses ?? 0;
+	return `Done (${uses} tool ${uses === 1 ? "use" : "uses"} · ${formatTokens(totalTokens(result))} tokens · ${formatDuration(result.durationMs ?? 0)})`;
+}
+
+/** Agent colours, registered as definitions are listed (Claude Code's `qqe`). */
+const agentColors = new Map<string, AgentColor>();
+export function registerAgentColor(type: string, color: AgentColor | undefined): void {
+	if (color) agentColors.set(type, color);
+	else agentColors.delete(type);
+}
+
+const ANSI: Record<AgentColor, string> = {
+	red: "31",
+	green: "32",
+	yellow: "33",
+	blue: "34",
+	purple: "35",
+	cyan: "36",
+	orange: "38;5;208",
+	pink: "38;5;205",
+};
+
+function colored(type: string, text: string): string | undefined {
+	const color = agentColors.get(type);
+	return color ? `\x1b[${ANSI[color]}m${text}\x1b[39m` : undefined;
+}
+
+/** Claude Code's header name: `Agent` for the default general-purpose agent, else the type. */
+export function headerName(type: string | undefined): string {
+	return !type || type === "general-purpose" ? "Agent" : type;
 }
 
 function formatToolCall(
@@ -128,75 +134,46 @@ function formatToolCall(
 		const home = homedir();
 		return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
 	};
-
+	const path = String(args.file_path || args.path || ".");
 	switch (toolName) {
 		case "bash": {
-			const command = (args.command as string) || "...";
-			const preview = command.length > 60 ? `${command.slice(0, 60)}...` : command;
-			return themeFg("muted", "$ ") + themeFg("toolOutput", preview);
-		}
-		case "read": {
-			const rawPath = (args.file_path || args.path || "...") as string;
-			const filePath = shortenPath(rawPath);
-			const offset = args.offset as number | undefined;
-			const limit = args.limit as number | undefined;
-			let text = themeFg("accent", filePath);
-			if (offset !== undefined || limit !== undefined) {
-				const startLine = offset ?? 1;
-				const endLine = limit !== undefined ? startLine + limit - 1 : "";
-				text += themeFg("warning", `:${startLine}${endLine ? `-${endLine}` : ""}`);
-			}
-			return themeFg("muted", "read ") + text;
-		}
-		case "write": {
-			const rawPath = (args.file_path || args.path || "...") as string;
-			const filePath = shortenPath(rawPath);
-			const content = (args.content || "") as string;
-			const lines = content.split("\n").length;
-			let text = themeFg("muted", "write ") + themeFg("accent", filePath);
-			if (lines > 1) text += themeFg("dim", ` (${lines} lines)`);
-			return text;
-		}
-		case "edit": {
-			const rawPath = (args.file_path || args.path || "...") as string;
-			return themeFg("muted", "edit ") + themeFg("accent", shortenPath(rawPath));
-		}
-		case "ls": {
-			const rawPath = (args.path || ".") as string;
-			return themeFg("muted", "ls ") + themeFg("accent", shortenPath(rawPath));
-		}
-		case "find": {
-			const pattern = (args.pattern || "*") as string;
-			const rawPath = (args.path || ".") as string;
-			return themeFg("muted", "find ") + themeFg("accent", pattern) + themeFg("dim", ` in ${shortenPath(rawPath)}`);
-		}
-		case "grep": {
-			const pattern = (args.pattern || "") as string;
-			const rawPath = (args.path || ".") as string;
+			const command = String(args.command || "...");
 			return (
-				themeFg("muted", "grep ") +
-				themeFg("accent", `/${pattern}/`) +
-				themeFg("dim", ` in ${shortenPath(rawPath)}`)
+				themeFg("muted", "$ ") + themeFg("toolOutput", command.length > 60 ? `${command.slice(0, 60)}...` : command)
 			);
 		}
+		case "read":
+		case "write":
+		case "edit":
+		case "ls":
+			return themeFg("muted", `${toolName} `) + themeFg("accent", shortenPath(path));
+		case "find":
+		case "grep":
+			return (
+				themeFg("muted", `${toolName} `) +
+				themeFg("accent", String(args.pattern || "")) +
+				themeFg("dim", ` in ${shortenPath(path)}`)
+			);
 		default: {
 			const argsStr = JSON.stringify(args);
-			const preview = argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr;
-			return themeFg("accent", toolName) + themeFg("dim", ` ${preview}`);
+			return (
+				themeFg("accent", toolName) +
+				themeFg("dim", ` ${argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr}`)
+			);
 		}
 	}
 }
 
 export function getFinalOutput(messages: AgentMessage[]): string {
-	const structured = structuredOutputOf(messages);
-	if (structured !== undefined) return structured;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
-		if (msg.role === "assistant") {
-			for (const part of msg.content) {
-				if (part.type === "text") return part.text;
-			}
-		}
+		if (msg.role !== "assistant") continue;
+		const text = msg.content
+			.filter((part) => part.type === "text")
+			.map((part) => (part as { text: string }).text)
+			.join("\n")
+			.trim();
+		if (text) return text;
 	}
 	return "";
 }
@@ -205,363 +182,82 @@ export function isFailedResult(result: SingleResult): boolean {
 	return result.status === "failed" || result.stopReason === "error" || result.stopReason === "aborted";
 }
 
-/** ✗ failed, ◐ stopped at a cap (its output is partial), ✓ done. */
-function resultIcon(r: SingleResult, theme: Theme): string {
-	if (r.status === "running") return theme.fg("warning", "⏳");
-	if (isFailedResult(r)) return theme.fg("error", "✗");
-	return r.partial ? theme.fg("warning", "◐") : theme.fg("success", "✓");
-}
+type ToolCallItem = { name: string; args: Record<string, unknown> };
 
-/** The stop reason beside a failed or capped child's name. */
-function stopTag(r: SingleResult, theme: Theme): string {
-	if (!r.stopReason) return "";
-	if (isFailedResult(r)) return ` ${theme.fg("error", `[${r.stopReason}]`)}`;
-	return r.partial ? ` ${theme.fg("warning", `[${r.stopReason}]`)}` : "";
-}
-
-export function getResultOutput(result: SingleResult): string {
-	if (isFailedResult(result)) {
-		return result.errorMessage || result.stderr || getFinalOutput(result.messages) || "(no output)";
-	}
-	return getFinalOutput(result.messages) || "(no output)";
-}
-
-/** Cap `output` at PER_TASK_OUTPUT_CAP bytes (full text stays in details.results). */
-export function capText(output: string): string {
-	const byteLength = Buffer.byteLength(output, "utf8");
-	if (byteLength <= PER_TASK_OUTPUT_CAP) return output;
-
-	let truncated = output.slice(0, PER_TASK_OUTPUT_CAP);
-	while (Buffer.byteLength(truncated, "utf8") > PER_TASK_OUTPUT_CAP) {
-		truncated = truncated.slice(0, -1);
-	}
-	return `${truncated}\n\n[Output truncated: ${byteLength - Buffer.byteLength(truncated, "utf8")} bytes omitted. Full output preserved in tool details.]`;
-}
-
-type DisplayItem = { type: "text"; text: string } | { type: "toolCall"; name: string; args: Record<string, unknown> };
-
-function getDisplayItems(messages: AgentMessage[]): DisplayItem[] {
-	const items: DisplayItem[] = [];
+function toolCalls(messages: AgentMessage[]): ToolCallItem[] {
+	const items: ToolCallItem[] = [];
 	for (const msg of messages) {
-		if (msg.role === "assistant") {
-			for (const part of msg.content) {
-				if (part.type === "text") items.push({ type: "text", text: part.text });
-				else if (part.type === "toolCall")
-					items.push({
-						type: "toolCall",
-						name: part.name,
-						args: part.arguments as Record<string, unknown>,
-					});
-			}
-		}
+		if (msg.role !== "assistant") continue;
+		for (const part of msg.content)
+			if (part.type === "toolCall") items.push({ name: part.name, args: part.arguments as Record<string, unknown> });
 	}
 	return items;
 }
 
-export function renderCall(args: TaskCallArgs, theme: Theme, _context: unknown) {
-	if (args.workflow) {
-		const input = args.input ?? "";
-		const preview = input.length > 60 ? `${input.slice(0, 60)}...` : input;
-		return new Text(
-			`${theme.fg("toolTitle", theme.bold("task "))}${theme.fg("accent", `workflow ${args.workflow}`)}\n  ${theme.fg("dim", preview)}`,
-			0,
-			0,
-		);
-	}
-	if (args.chain && args.chain.length > 0) {
-		let text = theme.fg("toolTitle", theme.bold("task ")) + theme.fg("accent", `chain (${args.chain.length} steps)`);
-		for (let i = 0; i < Math.min(args.chain.length, 3); i++) {
-			const step = args.chain[i];
-			const group = step.parallel?.length ? step.parallel : [{ agent: step.agent ?? "", task: step.task ?? "" }];
-			const cleanTask = group.length > 1 ? "" : group[0].task.replace(/\{previous\}/g, "").trim();
-			const preview = cleanTask.length > 40 ? `${cleanTask.slice(0, 40)}...` : cleanTask;
-			text +=
-				"\n  " +
-				theme.fg("muted", `${i + 1}.`) +
-				" " +
-				theme.fg("accent", group.map((t) => t.agent).join(" + ")) +
-				theme.fg("dim", ` ${preview}`);
-		}
-		if (args.chain.length > 3) text += `\n  ${theme.fg("muted", `... +${args.chain.length - 3} more`)}`;
-		return new Text(text, 0, 0);
-	}
-	if (args.tasks && args.tasks.length > 0) {
-		let text =
-			theme.fg("toolTitle", theme.bold("task ")) + theme.fg("accent", `parallel (${args.tasks.length} tasks)`);
-		for (const t of args.tasks.slice(0, 3)) {
-			const preview = t.task.length > 40 ? `${t.task.slice(0, 40)}...` : t.task;
-			text += `\n  ${theme.fg("accent", t.agent)}${theme.fg("dim", ` ${preview}`)}`;
-		}
-		if (args.tasks.length > 3) text += `\n  ${theme.fg("muted", `... +${args.tasks.length - 3} more`)}`;
-		return new Text(text, 0, 0);
-	}
-	const agentName = args.agent || (args.resume ? `resume ${args.resume}` : "...");
-	const preview = args.task ? (args.task.length > 60 ? `${args.task.slice(0, 60)}...` : args.task) : "...";
-	let text = theme.fg("toolTitle", theme.bold("task ")) + theme.fg("accent", agentName);
-	text += `\n  ${theme.fg("dim", preview)}`;
-	return new Text(text, 0, 0);
+/** Tool calls a running child shows before the rest collapse into `+N more tool uses`. */
+const RUNNING_CALLS_SHOWN = 3;
+
+export function renderCall(args: AgentCallArgs, theme: Theme, _context: unknown) {
+	const type = headerName(args.subagent_type);
+	const name = colored(args.subagent_type ?? "", theme.bold(type)) ?? theme.fg("toolTitle", theme.bold(type));
+	const description = (args.description ?? "").replace(/\s+/g, " ").trim();
+	return new Text(`${name}${description ? theme.fg("muted", `(${description})`) : ""}`, 0, 0);
 }
 
 export function renderResult(
-	result: AgentToolResult<SubagentDetails>,
-	{ expanded }: { expanded: boolean },
+	result: AgentToolResult<AgentDetails>,
+	{ expanded, isPartial }: { expanded: boolean; isPartial?: boolean },
 	theme: Theme,
 	_context: unknown,
 ) {
-	const details = result.details as SubagentDetails | undefined;
-	if (!details || details.results.length === 0) {
+	const details = result.details;
+	const expandHint = keyDisplayText("app.tools.expand");
+	if (details?.launched) {
+		return new Text(theme.fg("dim", `  ⎿  Backgrounded agent (/tasks to manage · ${expandHint} to expand)`), 0, 0);
+	}
+	const r = details?.result;
+	if (!r) {
 		const text = result.content[0];
-		return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+		return new Text(text?.type === "text" ? text.text : "", 0, 0);
+	}
+	const calls = toolCalls(r.messages);
+	const prefix = theme.fg("dim", "  ⎿  ");
+
+	if (isPartial || r.status === "running") {
+		if (calls.length === 0) return new Text(`${prefix}${theme.fg("dim", "Initializing…")}`, 0, 0);
+		const shown = expanded ? calls : calls.slice(-RUNNING_CALLS_SHOWN);
+		const lines = shown.map((c) => `${prefix}${formatToolCall(c.name, c.args, theme.fg.bind(theme))}`);
+		if (!expanded && calls.length > shown.length)
+			lines.push(theme.fg("dim", `     +${calls.length - shown.length} more tool uses (${expandHint} to expand)`));
+		return new Text(lines.join("\n"), 0, 0);
 	}
 
-	const mdTheme = getMarkdownTheme();
-
-	const renderDisplayItems = (items: DisplayItem[], limit?: number) => {
-		const toShow = limit ? items.slice(-limit) : items;
-		const skipped = limit && items.length > limit ? items.length - limit : 0;
-		let text = "";
-		if (skipped > 0) text += theme.fg("muted", `... ${skipped} earlier items\n`);
-		for (const item of toShow) {
-			if (item.type === "text") {
-				const preview = expanded ? item.text : item.text.split("\n").slice(0, 3).join("\n");
-				text += `${theme.fg("toolOutput", preview)}\n`;
-			} else {
-				text += `${theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme))}\n`;
-			}
-		}
-		return text.trimEnd();
-	};
-
-	if (details.mode === "single" && details.results.length === 1) {
-		const r = details.results[0];
-		const isError = isFailedResult(r);
-		const icon = resultIcon(r, theme);
-		const displayItems = getDisplayItems(r.messages);
-		const finalOutput = getFinalOutput(r.messages);
-
-		if (expanded) {
-			const container = new Container();
-			let header = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
-			header += stopTag(r, theme);
-			container.addChild(new Text(header, 0, 0));
-			if (isError && r.errorMessage)
-				container.addChild(new Text(theme.fg("error", `Error: ${r.errorMessage}`), 0, 0));
-			container.addChild(new Spacer(1));
-			container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
-			container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
-			container.addChild(new Spacer(1));
-			container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
-			if (displayItems.length === 0 && !finalOutput) {
-				container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
-			} else {
-				for (const item of displayItems) {
-					if (item.type === "toolCall")
-						container.addChild(
-							new Text(
-								theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
-								0,
-								0,
-							),
-						);
-				}
-				if (finalOutput) {
-					container.addChild(new Spacer(1));
-					container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
-				}
-			}
-			const usageStr = formatUsageStats(r.usage, r.model);
-			if (usageStr) {
-				container.addChild(new Spacer(1));
-				container.addChild(new Text(theme.fg("dim", usageStr), 0, 0));
-			}
-			return container;
-		}
-
-		let text = `${icon} ${theme.fg("toolTitle", theme.bold(r.agent))}${theme.fg("muted", ` (${r.agentSource})`)}`;
-		text += stopTag(r, theme);
-		if (isError && r.errorMessage) text += `\n${theme.fg("error", `Error: ${r.errorMessage}`)}`;
-		else if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
-		else {
-			text += `\n${renderDisplayItems(displayItems, COLLAPSED_ITEM_COUNT)}`;
-			if (displayItems.length > COLLAPSED_ITEM_COUNT)
-				text += `\n${theme.fg("muted", `(${keyDisplayText("app.tools.expand")} to expand)`)}`;
-		}
-		const usageStr = formatUsageStats(r.usage, r.model);
-		if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
-		return new Text(text, 0, 0);
+	if (isFailedResult(r)) {
+		return new Text(`${prefix}${theme.fg("error", r.errorMessage || r.stderr || "Agent failed")}`, 0, 0);
 	}
 
-	const aggregateUsage = (results: SingleResult[]) => {
-		const total = {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			cost: 0,
-			turns: 0,
-		};
-		for (const r of results) {
-			total.input += r.usage.input;
-			total.output += r.usage.output;
-			total.cacheRead += r.usage.cacheRead;
-			total.cacheWrite += r.usage.cacheWrite;
-			total.cost += r.usage.cost;
-			total.turns += r.usage.turns;
-		}
-		return total;
-	};
+	const footer: string[] = [];
+	if (r.partial) footer.push(theme.fg("warning", `Stopped at its ${r.turnCap ?? "turn"}-turn limit (partial result)`));
+	if (r.worktreePath) footer.push(theme.fg("dim", `Kept worktree ${r.worktreePath}`));
+	footer.push(theme.fg("dim", doneLine(r)));
 
-	if (details.mode === "chain") {
-		const successCount = details.results.filter((r) => r.status === "ok").length;
-		const icon = successCount === details.results.length ? theme.fg("success", "✓") : theme.fg("error", "✗");
-
-		if (expanded) {
-			const container = new Container();
-			container.addChild(
-				new Text(
-					`${icon} ${theme.fg("toolTitle", theme.bold("chain "))}${theme.fg("accent", `${successCount}/${details.results.length} done`)}`,
-					0,
-					0,
-				),
-			);
-
-			for (const r of details.results) {
-				const rIcon = resultIcon(r, theme);
-				const displayItems = getDisplayItems(r.messages);
-				const finalOutput = getFinalOutput(r.messages);
-
-				container.addChild(new Spacer(1));
-				container.addChild(
-					new Text(`${theme.fg("muted", `─── Step ${r.step}: `) + theme.fg("accent", r.agent)} ${rIcon}`, 0, 0),
-				);
-				container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
-
-				for (const item of displayItems) {
-					if (item.type === "toolCall") {
-						container.addChild(
-							new Text(
-								theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
-								0,
-								0,
-							),
-						);
-					}
-				}
-
-				if (finalOutput) {
-					container.addChild(new Spacer(1));
-					container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
-				}
-
-				const stepUsage = formatUsageStats(r.usage, r.model);
-				if (stepUsage) container.addChild(new Text(theme.fg("dim", stepUsage), 0, 0));
-			}
-
-			const usageStr = formatUsageStats(aggregateUsage(details.results));
-			if (usageStr) {
-				container.addChild(new Spacer(1));
-				container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}`), 0, 0));
-			}
-			return container;
-		}
-
-		let text = `${icon} ${theme.fg("toolTitle", theme.bold("chain "))}${theme.fg("accent", `${successCount}/${details.results.length} done`)}`;
-		for (const r of details.results) {
-			const rIcon = resultIcon(r, theme);
-			const displayItems = getDisplayItems(r.messages);
-			text += `\n\n${theme.fg("muted", `─── Step ${r.step}: `)}${theme.fg("accent", r.agent)} ${rIcon}`;
-			if (displayItems.length === 0) text += `\n${theme.fg("muted", "(no output)")}`;
-			else text += `\n${renderDisplayItems(displayItems, 5)}`;
-			// Per-step usage while the chain is still running: the only progress signal
-			// a child gives before its final text is its turn and token count.
-			const stepUsage = formatUsageStats(r.usage, r.model);
-			if (stepUsage) text += `\n${theme.fg("dim", stepUsage)}`;
-		}
-		const usageStr = formatUsageStats(aggregateUsage(details.results));
-		if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
-		text += `\n${theme.fg("muted", `(${keyDisplayText("app.tools.expand")} to expand)`)}`;
-		return new Text(text, 0, 0);
+	if (!expanded) {
+		return new Text(footer.map((line) => `${prefix}${line}`).join("\n"), 0, 0);
 	}
-
-	if (details.mode === "parallel") {
-		const running = details.results.filter((r) => r.status === "running").length;
-		const successCount = details.results.filter((r) => r.status !== "running" && !isFailedResult(r)).length;
-		const failCount = details.results.filter((r) => r.status !== "running" && isFailedResult(r)).length;
-		const isRunning = running > 0;
-		const icon = isRunning
-			? theme.fg("warning", "⏳")
-			: failCount > 0
-				? theme.fg("warning", "◐")
-				: theme.fg("success", "✓");
-		const status = isRunning
-			? `${successCount + failCount}/${details.results.length} done, ${running} running`
-			: `${successCount}/${details.results.length} tasks`;
-
-		if (expanded && !isRunning) {
-			const container = new Container();
-			container.addChild(
-				new Text(`${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`, 0, 0),
-			);
-
-			for (const r of details.results) {
-				const rIcon = resultIcon(r, theme);
-				const displayItems = getDisplayItems(r.messages);
-				const finalOutput = getFinalOutput(r.messages);
-
-				container.addChild(new Spacer(1));
-				container.addChild(new Text(`${theme.fg("muted", "─── ") + theme.fg("accent", r.agent)} ${rIcon}`, 0, 0));
-				container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
-
-				for (const item of displayItems) {
-					if (item.type === "toolCall") {
-						container.addChild(
-							new Text(
-								theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme)),
-								0,
-								0,
-							),
-						);
-					}
-				}
-
-				if (finalOutput) {
-					container.addChild(new Spacer(1));
-					container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
-				}
-
-				const taskUsage = formatUsageStats(r.usage, r.model);
-				if (taskUsage) container.addChild(new Text(theme.fg("dim", taskUsage), 0, 0));
-			}
-
-			const usageStr = formatUsageStats(aggregateUsage(details.results));
-			if (usageStr) {
-				container.addChild(new Spacer(1));
-				container.addChild(new Text(theme.fg("dim", `Total: ${usageStr}`), 0, 0));
-			}
-			return container;
-		}
-
-		let text = `${icon} ${theme.fg("toolTitle", theme.bold("parallel "))}${theme.fg("accent", status)}`;
-		for (const r of details.results) {
-			const rIcon = resultIcon(r, theme);
-			const displayItems = getDisplayItems(r.messages);
-			text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", r.agent)} ${rIcon}`;
-			if (displayItems.length === 0)
-				text += `\n${theme.fg("muted", r.status === "running" ? "(running...)" : "(no output)")}`;
-			else text += `\n${renderDisplayItems(displayItems, 5)}`;
-			const taskUsage = formatUsageStats(r.usage, r.model);
-			if (taskUsage) text += `\n${theme.fg("dim", taskUsage)}`;
-		}
-		if (!isRunning) {
-			const usageStr = formatUsageStats(aggregateUsage(details.results));
-			if (usageStr) text += `\n\n${theme.fg("dim", `Total: ${usageStr}`)}`;
-		}
-		if (!expanded) text += `\n${theme.fg("muted", `(${keyDisplayText("app.tools.expand")} to expand)`)}`;
-		return new Text(text, 0, 0);
+	const container = new Container();
+	container.addChild(new Text(theme.fg("muted", "Prompt:"), 0, 0));
+	container.addChild(new Text(theme.fg("dim", r.task), 0, 0));
+	container.addChild(new Spacer(1));
+	for (const c of calls)
+		container.addChild(new Text(`${prefix}${formatToolCall(c.name, c.args, theme.fg.bind(theme))}`, 0, 0));
+	const output = getFinalOutput(r.messages);
+	if (output) {
+		container.addChild(new Spacer(1));
+		container.addChild(new Markdown(output, 0, 0, getMarkdownTheme()));
 	}
-
-	const text = result.content[0];
-	return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
+	container.addChild(new Spacer(1));
+	for (const line of footer) container.addChild(new Text(line, 0, 0));
+	return container;
 }
 
 /** A subagent running right now, as the footer lists it. */
@@ -577,37 +273,27 @@ export const LIVE_ROWS_SHOWN = 3;
 /** Room for a row's activity, so its elapsed time and tool count stay on screen. */
 const ACTIVITY_WIDTH = 60;
 
-function formatElapsed(ms: number): string {
-	const s = Math.max(0, Math.floor(ms / 1000));
-	return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
-}
-
 /**
- * The footer block under the permission mode: one row per running subagent with
- * what it is doing now. Always ends in a line break, which is what marks a status
- * as a block of its own rather than a chip on the mode row.
+ * The footer block under the permission mode: one row per running subagent with what it
+ * is doing now (Claude Code's subagent panel). Always ends in a line break, which marks a
+ * status as a block of its own rather than a chip on the mode row.
  */
 export function renderLiveRows(children: readonly LiveChild[], now: number, theme: Theme): string | undefined {
 	if (children.length === 0) return undefined;
 	const shown = children.slice(0, LIVE_ROWS_SHOWN);
 	const nameWidth = Math.max(...shown.map((c) => (c.snap?.agent ?? c.agent).length));
 	const rows = shown.map((child) => {
-		const items = getDisplayItems(child.snap?.messages ?? []);
-		const last = items[items.length - 1];
+		const calls = toolCalls(child.snap?.messages ?? []);
+		const last = calls[calls.length - 1];
 		const activity = truncateToWidth(
-			!last
-				? theme.fg("dim", "Starting…")
-				: last.type === "toolCall"
-					? formatToolCall(last.name, last.args, theme.fg.bind(theme))
-					: theme.fg("dim", last.text.trim().split("\n")[0] ?? ""),
+			last ? formatToolCall(last.name, last.args, theme.fg.bind(theme)) : theme.fg("dim", "Initializing…"),
 			ACTIVITY_WIDTH,
 		);
-		const tools = items.filter((i) => i.type === "toolCall").length;
-		const stats = `${formatElapsed(now - child.startedAt)} · ${tools} tool${tools === 1 ? "" : "s"}`;
+		const stats = `${formatDuration(now - child.startedAt)} · ${calls.length} tool ${calls.length === 1 ? "use" : "uses"}`;
 		const name = (child.snap?.agent ?? child.agent).padEnd(nameWidth);
 		return `  ${theme.fg("dim", "⎿")} ${theme.fg("accent", name)}  ${activity}${theme.fg("dim", ` · ${stats}`)}`;
 	});
 	if (children.length > shown.length)
-		rows.push(theme.fg("dim", `    +${children.length - shown.length} more (/agents)`));
+		rows.push(theme.fg("dim", `    +${children.length - shown.length} more (/tasks)`));
 	return `${rows.join("\n")}\n`;
 }

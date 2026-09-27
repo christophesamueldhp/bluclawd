@@ -28,14 +28,12 @@ import { realpathSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
 /**
- * Lowercase tool name → capitalized rule verb. Since audit B.5, MCP tools and
- * `task` are ALSO governed via the dynamic `verbFor()` mapping below:
- * `mcp__server__tool` → `Mcp(server:tool)` and `task` → `Task(agentname)`.
- * Subagent children additionally run a deny-only gate (subagent-gate.ts), so a
- * `deny: Bash(**)` is no longer circumventable by delegating to an agent def
- * that grants bash.
+ * Lowercase tool name → capitalized rule verb. MCP tools are ALSO governed via the
+ * dynamic `verbFor()` mapping below: `mcp__server__tool` → `Mcp(server:tool)`.
+ * `agent` is `Agent(<subagent_type>)`, with Claude Code's legacy `Task(...)` as an
+ * alias. Subagent children additionally run a gate (subagent-gate.ts), so a
+ * `deny: Bash(**)` is not circumventable by delegating to an agent def that grants bash.
  */
-import { resolveTaskTargets } from "../_shared/subagent-targets.ts";
 import { COMMAND_SUBSTITUTION } from "./safe-command.ts";
 
 const VERB: Record<string, string> = {
@@ -48,7 +46,25 @@ const VERB: Record<string, string> = {
 	ls: "Ls",
 	webfetch: "WebFetch", // Tier 4 tools opt in here
 	websearch: "WebSearch",
+	agent: "Agent",
 };
+
+/** Claude Code's legacy spellings of a rule verb, still accepted in rules. */
+const VERB_ALIASES: Record<string, string> = { task: "agent" };
+
+/** An agent type as lookup compares it: case- and separator-insensitive (defs.ts `findDef`). */
+function agentKey(name: string): string {
+	return name
+		.trim()
+		.toLowerCase()
+		.replace(/[\s_]+/g, "-");
+}
+
+/** The agent type a subagent call runs; omitted means general-purpose, as in Claude Code. */
+export function agentType(input: Record<string, unknown>): string {
+	const type = typeof input.subagent_type === "string" ? input.subagent_type.trim() : "";
+	return type || "general-purpose";
+}
 
 /** True for namespaced MCP tool names of the form `mcp__server__tool`. */
 export function isMcpToolName(tool: string): boolean {
@@ -57,10 +73,9 @@ export function isMcpToolName(tool: string): boolean {
 
 /**
  * The governed rule verb for a tool name, or undefined when ungoverned.
- * MCP tools (audit B.5) map to `Mcp`, the task tool to `Task`.
+ * MCP tools (audit B.5) map to `Mcp`.
  */
 function verbFor(tool: string): string | undefined {
-	if (tool === "task") return "Task";
 	if (isMcpToolName(tool)) return "Mcp";
 	return VERB[tool];
 }
@@ -69,36 +84,18 @@ function verbFor(tool: string): string | undefined {
  *  set, so callers that want to gate "every governable tool" (e.g. the FleetView ask-all posture)
  *  should build their rules from THIS list rather than a hand-kept copy that can drift out of sync. */
 export function governedVerbs(): string[] {
-	return [...Object.values(VERB), "Mcp", "Task"];
+	return [...Object.values(VERB), "Mcp"];
 }
 
 /**
- * Every agent name a `task` call targets, across all three invocation modes
- * (single `agent`, parallel `tasks[].agent`, chain `chain[].agent`). Used by
- * the permission gate to decide a task call PER TARGET AGENT: `Task(agent)`
- * rules would otherwise be bypassable by wrapping the agent in parallel/chain
- * mode. Unknown shapes yield [] (the call stays decidable as "no rule").
+ * A rule string's verb and subject. A bare verb (`Agent`, `Bash`) covers every subject,
+ * as in Claude Code; a legacy alias (`Task`) is read as the verb it stands for.
  */
-export function taskAgents(input: Record<string, unknown>): string[] {
-	const names: string[] = [];
-	// A resume runs the resumed child's own def: the `agent` sent beside it is not what runs.
-	const resuming = typeof input.resume === "string" && input.resume !== "";
-	if (!resuming && typeof input.agent === "string" && input.agent) names.push(input.agent);
-	for (const key of ["tasks", "chain"] as const) {
-		const list = input[key];
-		if (!Array.isArray(list)) continue;
-		for (const entry of list) {
-			const record = entry as Record<string, unknown> | null;
-			// A chain step may be a parallel group of {agent, task}.
-			const group = Array.isArray(record?.parallel) ? (record.parallel as unknown[]) : [record];
-			for (const item of group) {
-				const agent = (item as Record<string, unknown> | null)?.agent;
-				if (typeof agent === "string" && agent) names.push(agent);
-			}
-		}
-	}
-	names.push(...resolveTaskTargets(input));
-	return [...new Set(names)];
+function ruleParts(rule: string): { verb: string; subject: string } | undefined {
+	const m = /^(\w+)(?:\((.*)\))?$/.exec(rule);
+	if (!m) return undefined;
+	const verb = m[1].toLowerCase();
+	return { verb: VERB_ALIASES[verb] ?? verb, subject: m[2] ?? "**" };
 }
 
 /**
@@ -122,12 +119,12 @@ export function stripWrappingQuotes(raw: string): string {
  * Returns undefined for a malformed spec or an ungoverned verb.
  */
 export function parseRuleSpec(spec: string): { tool: string; input: Record<string, unknown> } | undefined {
-	const m = /^(\w+)\((.*)\)$/.exec(stripWrappingQuotes(spec));
-	if (!m) return undefined;
-	const verb = m[1].toLowerCase();
-	const subj = unescapeGlob(m[2]);
+	const parts = ruleParts(stripWrappingQuotes(spec));
+	if (!parts) return undefined;
+	const { verb } = parts;
+	const subj = unescapeGlob(parts.subject);
 
-	if (verb === "task") return { tool: "task", input: { agent: subj } };
+	if (verb === "agent") return { tool: "agent", input: { subagent_type: subj } };
 	if (verb === "mcp") {
 		const [server, ...rest] = subj.split(":");
 		if (!server || rest.length === 0) return undefined;
@@ -168,11 +165,7 @@ export function searchQueries(input: Record<string, unknown>): string[] {
 }
 
 export function subject(tool: string, input: Record<string, unknown>): string {
-	if (tool === "task") {
-		// Single-mode target; multi-agent calls are decided per agent via
-		// taskAgents() in the gate — this covers the common single case.
-		return String(input.agent ?? "");
-	}
+	if (tool === "agent") return agentType(input);
 	if (isMcpToolName(tool)) {
 		const m = /^mcp__(.+?)__(.+)$/.exec(tool);
 		return m ? `${m[1]}:${m[2]}` : "";
@@ -748,23 +741,36 @@ export function decide(rules: Rules, tool: string, input: Record<string, unknown
 	};
 	const matches = (r: string, failClosed: boolean, kind: Decision): boolean => {
 		try {
-			const m = /^(\w+)\((.*)\)$/.exec(r);
+			const parts = ruleParts(r);
 			// Verb comparison is case-insensitive: `/permissions add` accepts any
 			// casing (RULE_SHAPE is [A-Za-z]+), so `bash(**)` would otherwise be
 			// stored, listed, and silently never enforced.
-			if (m === null || m[1].toLowerCase() !== verb.toLowerCase()) return false;
+			if (parts === undefined || parts.verb !== verb.toLowerCase()) return false;
+			const ruleSubject = parts.subject;
+			// `Agent(model:opus)`, `Agent(isolation:*)`: a parameter rule, deny/ask only, matched
+			// against the literal input — an omitted parameter never matches (Claude Code).
+			const param = verb === "Agent" ? /^(\w+):(.*)$/.exec(ruleSubject) : null;
+			if (param) {
+				const value = input[param[1]];
+				if (kind === "allow" || value === undefined || value === "") return false;
+				return globToRegExp(param[2], false).test(String(value));
+			}
 			// A `domain:` fetch rule is matched against the url's HOST alone, so it
 			// covers every path and port there — the only shape worth persisting.
 			if (verb === "WebFetch") {
-				const domain = domainSpec(m[2]);
+				const domain = domainSpec(ruleSubject);
 				if (domain !== undefined) {
 					const host = urlHost(subj);
 					return host !== undefined && globToRegExp(domain).test(host);
 				}
 			}
-			if (kind === "allow" && isBash && COMMAND_SUBSTITUTION.test(subj)) return allowsSubstitution(m[2], subj);
+			// Agent types resolve case- and separator-insensitively (`explore` runs Explore), so
+			// their rules match the same way: `Agent(explore)` must not let `Explore` through.
+			if (verb === "Agent") return globToRegExp(agentKey(ruleSubject), false).test(agentKey(subj));
+			if (kind === "allow" && isBash && COMMAND_SUBSTITUTION.test(subj))
+				return allowsSubstitution(ruleSubject, subj);
 			// Bash subjects are command strings, not paths.
-			const pattern = globToRegExp(m[2], !isBash);
+			const pattern = globToRegExp(ruleSubject, !isBash);
 			if (pattern.test(subj)) {
 				// A whole-line match is enough for deny/ask. For allow it is not: the
 				// bash glob does not stop at `/`, so `Bash(ls *)` spans the entire line
@@ -810,10 +816,10 @@ export function decide(rules: Rules, tool: string, input: Record<string, unknown
 		const segmentAllowed = (segment: string): boolean =>
 			allowRules.some((r) => {
 				try {
-					const m = /^(\w+)\((.*)\)$/.exec(r);
-					if (m === null || m[1].toLowerCase() !== verb.toLowerCase()) return false;
-					if (COMMAND_SUBSTITUTION.test(segment)) return allowsSubstitution(m[2], segment);
-					return globToRegExp(m[2], false).test(segment);
+					const parts = ruleParts(r);
+					if (parts === undefined || parts.verb !== verb.toLowerCase()) return false;
+					if (COMMAND_SUBSTITUTION.test(segment)) return allowsSubstitution(parts.subject, segment);
+					return globToRegExp(parts.subject, false).test(segment);
 				} catch {
 					return false; // a broken allow rule is ignored, same fail-open-for-allow as matches()
 				}

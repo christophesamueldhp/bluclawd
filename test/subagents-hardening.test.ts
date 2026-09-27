@@ -1,7 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { publishTaskTargets } from "../ext/_shared/subagent-targets.ts";
 import { type EvalConfig, evaluatePostHook, evaluatePreHook } from "../ext/permissions/evaluate.ts";
-import { taskAgents } from "../ext/permissions/rules.ts";
 import { uiPromptBridge } from "../ext/subagents/engine.ts";
 import { scanOutput } from "../ext/subagents/output-scan.ts";
 
@@ -18,46 +16,30 @@ const cfg = (over: Partial<EvalConfig> = {}): EvalConfig => ({
 const verdict = (tool: string, input: Record<string, unknown>, c: EvalConfig) =>
 	evaluatePreHook(tool, input, c) ?? evaluatePostHook(tool, input, c);
 
-describe("task permission subjects follow what actually runs", () => {
-	it("judges a resume by the agent the resumed child runs, not the agent param sent beside it", () => {
-		const release = publishTaskTargets((input) => (input.resume === "child-1" ? ["foo"] : []));
-		try {
-			expect(taskAgents({ resume: "child-1", agent: "explore", task: "t" })).toEqual(["foo"]);
-			const v = verdict(
-				"task",
-				{ resume: "child-1", task: "t" },
-				cfg({ mode: "auto", rules: { deny: ["Task(foo)"] } }),
-			);
-			expect(v.outcome).toBe("block");
-		} finally {
-			release();
+describe("agent permission subjects", () => {
+	it("blocks a spawn an Agent(type) deny rule names, in every mode", () => {
+		for (const mode of ["ask", "edits", "auto"] as const) {
+			const c = cfg({ mode, rules: { deny: ["Agent(Explore)"] } });
+			expect(verdict("agent", { subagent_type: "Explore", prompt: "p" }, c).outcome, mode).toBe("block");
+			expect(verdict("agent", { subagent_type: "Plan", prompt: "p" }, c).outcome, mode).toBe("allow");
 		}
-		expect(taskAgents({ resume: "child-1", task: "t" })).toEqual([]);
-	});
-});
-
-describe("task_schedule", () => {
-	it("is judged as the task it will run when it creates a schedule", () => {
-		const rules = { deny: ["Task(explore)"] };
-		expect(
-			verdict("task_schedule", { action: "create", agent: "explore", task: "t" }, cfg({ mode: "auto", rules }))
-				.outcome,
-		).toBe("block");
-		expect(
-			verdict("task_schedule", { action: "create", agent: "planner", task: "t" }, cfg({ mode: "ask" })).outcome,
-		).toBe("prompt");
 	});
 
-	it("lists and cancels without a prompt", () => {
-		expect(verdict("task_schedule", { action: "list" }, cfg({ mode: "ask" })).outcome).toBe("allow");
+	it("judges a call that omits subagent_type as general-purpose", () => {
+		const c = cfg({ mode: "auto", rules: { deny: ["Agent(general-purpose)"] } });
+		expect(verdict("agent", { prompt: "p" }, c).outcome).toBe("block");
+		expect(verdict("agent", { subagent_type: "  ", prompt: "p" }, c).outcome).toBe("block");
 	});
-});
 
-describe("background-run control tools", () => {
-	it.each(["task_output", "task_stop", "task_message", "task_wait", "manage_agents"])(
-		"%s gets no mode prompt: it only touches this session's runs or asks for itself",
+	it("still honours Claude Code's legacy Task(...) spelling", () => {
+		const c = cfg({ mode: "auto", rules: { deny: ["Task(Explore)"] } });
+		expect(verdict("agent", { subagent_type: "Explore", prompt: "p" }, c).outcome).toBe("block");
+	});
+
+	it.each(["agent", "send_message", "task_stop"])(
+		"%s gets no mode prompt: the child's own gate judges what it then does",
 		(tool) => {
-			expect(verdict(tool, { id: "sa-1" }, cfg({ mode: "ask" })).outcome).toBe("allow");
+			expect(verdict(tool, { to: "a1", task_id: "a1", prompt: "p" }, cfg({ mode: "ask" })).outcome).toBe("allow");
 		},
 	);
 });
@@ -82,6 +64,10 @@ describe("scanOutput covers the lines the parent trusts", () => {
 });
 
 describe("uiPromptBridge", () => {
+	it("is absent without a UI, so a headless child's gate blocks instead of prompting", () => {
+		expect(uiPromptBridge({ hasUI: false } as never)).toBeUndefined();
+	});
+
 	it("hands the child's abort signal to the dialog and skips a prompt whose child is already gone", async () => {
 		const seen: unknown[] = [];
 		const bridge = uiPromptBridge({
@@ -100,5 +86,24 @@ describe("uiPromptBridge", () => {
 		gone.abort();
 		expect(await bridge?.({ title: "t", message: "m", signal: gone.signal })).toBe(false);
 		expect(seen).toHaveLength(1);
+	});
+
+	it("puts parallel children's questions to the user one at a time", async () => {
+		let open = 0;
+		let most = 0;
+		const bridge = uiPromptBridge({
+			hasUI: true,
+			ui: {
+				confirm: async () => {
+					open++;
+					most = Math.max(most, open);
+					await new Promise((r) => setTimeout(r, 5));
+					open--;
+					return true;
+				},
+			},
+		} as never);
+		await Promise.all([1, 2, 3].map(() => bridge?.({ title: "t", message: "m" })));
+		expect(most).toBe(1);
 	});
 });

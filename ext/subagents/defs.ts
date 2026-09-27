@@ -1,161 +1,133 @@
 /**
- * Agent-definition discovery for in-process subagents (PLAN.md F3.1).
+ * Agent definitions, as Claude Code reads them.
  *
- * Definitions are markdown files with `name` / `description` / optional
- * `tools` (comma-separated) / optional `model` frontmatter; the body is the
- * child's system prompt. Sources, and who wins a name collision:
- *   - bundled: `agents/*.md` shipped next to this module (lowest)
- *   - user:    `<agentDir>/agents/*.md`
- *   - project: nearest ancestor `<cwd>/<CONFIG_DIR_NAME>/agents/*.md` (highest)
+ * Markdown files with YAML frontmatter; the body is the child's system prompt.
+ * Sources, and who wins a name collision (Claude Code's built-in < user < project):
+ *   - built-in: `agents/*.md` shipped next to this module (general-purpose, Explore, Plan)
+ *   - user:     `<agentDir>/agents/*.md`
+ *   - project:  nearest ancestor `<cwd>/<CONFIG_DIR_NAME>/agents/*.md`, trusted projects only
  *
- * Adapted from the donor `examples/extensions/subagent/agents.ts`, plus the
- * bundled seeds (the donor had none).
+ * Frontmatter is Claude Code's: tool names are Claude Code's (`Read, Grep, Glob, WebFetch`,
+ * `mcp__server`, `Agent(...)`) and are mapped onto this layer's tools when a child is
+ * built (see {@link resolveChildTools}). An invalid field is dropped and the agent still
+ * loads; a missing name or description, or a name Claude Code rejects, skips the file.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONFIG_DIR_NAME, getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
-import { type PermissionMode, parseMode } from "../permissions/modes.ts";
-import { parseToolBudget, type ToolBudget } from "./limits.ts";
-import { type OutputSchema, parseOutputSchema } from "./structured-output.ts";
 
-export type AgentScope = "user" | "project" | "both";
-
-/** Where a def's persistent memory lives (Claude Code's `memory:` field). */
 export type AgentMemoryScope = "user" | "project" | "local";
 export type AgentEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export type AgentColor = "red" | "blue" | "green" | "yellow" | "purple" | "orange" | "pink" | "cyan";
+/** Claude Code's `permissionMode` values, as written in a definition. */
+export type AgentPermissionMode = "default" | "acceptEdits" | "auto" | "dontAsk" | "bypassPermissions" | "plan";
 
 const MEMORY_SCOPES: readonly AgentMemoryScope[] = ["user", "project", "local"];
 const EFFORTS: readonly AgentEffort[] = ["low", "medium", "high", "xhigh", "max"];
 const COLORS: readonly AgentColor[] = ["red", "blue", "green", "yellow", "purple", "orange", "pink", "cyan"];
+/** This layer's own mode names are accepted beside Claude Code's. */
+const PERMISSION_MODES: Record<string, AgentPermissionMode> = {
+	default: "default",
+	manual: "default",
+	ask: "default",
+	acceptEdits: "acceptEdits",
+	edits: "acceptEdits",
+	auto: "auto",
+	dontAsk: "dontAsk",
+	bypassPermissions: "bypassPermissions",
+	plan: "plan",
+};
 
-/** A command run in place of a pi child: stdin gets the prompt, stdout is the result. */
-export interface AgentRunner {
-	command: string;
-	args: string[];
-}
+export type AgentSource = "built-in" | "user" | "project";
 
 export interface AgentDef {
 	name: string;
 	description: string;
+	/** As written: Claude Code tool names. Absent or `*` = every tool a subagent may have. */
 	tools?: string[];
-	/** Removed from the child's tool set, after `tools` is applied. */
+	/** As written; applied before `tools`, as in Claude Code. */
 	disallowedTools?: string[];
 	model?: string;
 	/** Stop the child after this many assistant turns; its output is then partial. */
 	maxTurns?: number;
-	/** Stop the child after this long; its output is then partial. */
-	timeoutMs?: number;
-	/** Stop the child when one tool call runs longer than this; its output is then partial. */
-	toolTimeoutMs?: number;
-	/** Stop the child after this many tokens (input + output + cache); its output is then partial. */
-	maxTokens?: number;
-	/** A nudge at `soft` tool calls; past `hard`, the `block` tools are refused. */
-	toolBudget?: ToolBudget;
-	/** A command that must succeed after the child finishes (an acceptance gate). */
-	gate?: string;
-	/** The child must finish by handing back JSON matching this schema. */
-	outputSchema?: OutputSchema;
-	/** Run this command instead of a pi child. */
-	runner?: AgentRunner;
-	/** Skills whose full content is preloaded into the child's system prompt. */
+	/** Skills whose full content is preloaded into the child's context. */
 	skills?: string[];
-	/** The parent's MCP servers, by name, whose tools the child gets. */
+	/** The parent's MCP servers, by name, the child must have. */
 	mcpServers?: string[];
-	/** The mode the child is evaluated under when the parent is in `ask`. */
-	permissionMode?: PermissionMode;
+	permissionMode?: AgentPermissionMode;
 	memory?: AgentMemoryScope;
-	/** Run detached by default, even when the call did not ask for it. */
+	/** Always run in the background. */
 	background?: boolean;
-	/** Start from a copy of the parent's conversation by default (pi-subagents' `defaultContext: fork`). */
-	fork?: boolean;
 	isolation?: "worktree";
 	effort?: AgentEffort;
 	color?: AgentColor;
+	/** Skip the project's context files (CLAUDE.md, AGENTS.md) and the git status. */
+	omitClaudeMd?: boolean;
 	systemPrompt: string;
-	source: "user" | "project";
+	source: AgentSource;
 	filePath: string;
+}
+
+/** Claude Code's one-shot built-ins: no agent id comes back, so they cannot be continued. */
+const ONE_SHOT = new Set(["Explore", "Plan"]);
+
+export function isOneShot(def: Pick<AgentDef, "name">): boolean {
+	return ONE_SHOT.has(def.name);
 }
 
 function oneOf<T extends string>(raw: unknown, set: readonly T[]): T | undefined {
 	return typeof raw === "string" && (set as readonly string[]).includes(raw) ? (raw as T) : undefined;
 }
 
-export interface AgentDiscoveryResult {
-	defs: AgentDef[];
-	projectAgentsDir: string | null;
-}
-
-/** Bundled seed defs, shipped next to this module (agents/*.md). */
+/** Built-in defs, shipped next to this module (agents/*.md). */
 export function bundledAgentsDir(): string {
 	return join(dirname(fileURLToPath(import.meta.url)), "agents");
 }
 
 /**
- * Render discovered agents for `/agents`, one per line.
- *
- * Origin is derived from the FILE PATH, not from `source`: bundledDefs() tags
- * the shipped seeds as `source: "user"`, so that field cannot tell "ships with
- * bluclawd" from "you wrote this" — and that is the distinction someone reading
- * this list actually wants.
- *
- * An agent with no `tools` frontmatter inherits every tool, which is worth
- * stating outright rather than leaving as a blank column.
+ * A tools list in either spelling Claude Code writes — `Read, Grep` or `[Read, Grep]` —
+ * split on commas that are not inside a specifier's parentheses (`Agent(a, b)`).
  */
-/** One `/agents` row, as plain data — the renderer owns padding and colour. */
-export interface AgentListRow {
-	name: string;
-	origin: "project" | "bundled" | "user";
-	description: string;
-	notes: string;
-}
-
-export function agentListRows(defs: AgentDef[], bundledDir: string): AgentListRow[] {
-	return defs.map((def) => {
-		const notes = [def.tools?.length ? `tools: ${def.tools.join(", ")}` : "all tools"];
-		if (def.model) notes.push(`model: ${def.model}`);
-		return {
-			name: def.name,
-			origin: def.source === "project" ? "project" : def.filePath.startsWith(bundledDir) ? "bundled" : "user",
-			description: def.description,
-			notes: notes.join(" · "),
-		};
-	});
-}
-
-/**
- * Frontmatter `tools` in either spelling Claude Code writes, lowercased.
- *
- * A comma-separated string (`tools: Read, Grep`) and YAML list syntax
- * (`tools: [Read, Grep]`) are both standard; the latter parses to an array.
- * Any other shape returns undefined — "no restriction" — rather than throwing.
- */
-function normalizeTools(raw: unknown): string[] | undefined {
-	const parts = typeof raw === "string" ? raw.split(",") : Array.isArray(raw) ? raw : undefined;
-	if (!parts) return undefined;
-	return parts
+function toolList(raw: unknown): string[] | undefined {
+	let parts: unknown[];
+	if (Array.isArray(raw)) parts = raw;
+	else if (typeof raw === "string") {
+		parts = [];
+		let depth = 0;
+		let current = "";
+		for (const ch of raw) {
+			if (ch === "(") depth++;
+			if (ch === ")") depth = Math.max(0, depth - 1);
+			if (ch === "," && depth === 0) {
+				parts.push(current);
+				current = "";
+			} else current += ch;
+		}
+		parts.push(current);
+	} else return undefined;
+	const list = parts
 		.filter((t): t is string => typeof t === "string")
-		.map((t) => t.trim().toLowerCase())
+		.map((t) => t.trim())
 		.filter(Boolean);
+	return list.length > 0 ? list : undefined;
+}
+
+function nameList(raw: unknown): string[] | undefined {
+	const parts = typeof raw === "string" ? raw.split(",") : Array.isArray(raw) ? raw : [];
+	const list = parts
+		.filter((s): s is string => typeof s === "string")
+		.map((s) => s.trim())
+		.filter(Boolean);
+	return list.length > 0 ? list : undefined;
 }
 
 /** A def file's loaded parts, before discovery attaches where it came from. */
 export type ParsedDef = Omit<AgentDef, "source" | "filePath">;
 
-/**
- * Parse one def file: its parts, or the reason it would not load.
- *
- * Discovery skips a bad file silently, which is right there and useless to
- * someone who has just saved one — so both paths go through here and the rule
- * cannot drift: what this rejects is exactly what `/agents` will not list.
- */
+/** Parse one def file: its parts, or the reason it would not load. */
 export function parseDef(content: string): ParsedDef | { name?: string; problem: string } {
-	// yaml.parse throws on malformed frontmatter, and with the parse outside a
-	// guard one bad file took down the whole directory — every other agent
-	// vanished from /agents and from the task tool, behind an error naming no
-	// filename.
 	let frontmatter: Record<string, unknown>;
 	let body: string;
 	try {
@@ -168,100 +140,66 @@ export function parseDef(content: string): ParsedDef | { name?: string; problem:
 		};
 	}
 
-	// A def MUST declare both name and description. The name is trimmed because it
-	// is an identity — a map key, a task-tool argument, and the file it is saved as.
-	const name = typeof frontmatter.name === "string" ? frontmatter.name.trim() : "";
-	const description = typeof frontmatter.description === "string" ? frontmatter.description : "";
+	const name = typeof frontmatter.name === "string" ? frontmatter.name.trim().normalize("NFKC") : "";
 	if (!name) return { problem: "the frontmatter declares no name:" };
-	// The name comes back even though the def will not load: it is still what the
-	// author called this agent, so a save can file it under that name rather than
-	// leaving the very desync between file and identity `name` exists to prevent.
-	if (!description.trim()) return { name, problem: "the frontmatter declares no description:" };
+	if (name.startsWith("-")) return { name, problem: "names must not start with '-'" };
+	if (name.includes(":")) return { name, problem: "names must not contain ':' (reserved for plugin namespacing)" };
+	const description = typeof frontmatter.description === "string" ? frontmatter.description : "";
+	if (!description.trim()) return { name, problem: "missing required 'description' in frontmatter" };
 
-	// Lowercase: canonical tool names are lowercase, but Claude Code defs (this
-	// fork's migration premise) capitalize them (`tools: Read, Grep, Bash`) —
-	// without normalization such a def silently activates ZERO tools (review I3).
-	// Accept BOTH spellings Claude Code uses: a comma-separated string and YAML
-	// list syntax (`tools: [Read, Grep]`), which parses to an array — calling
-	// .split on that threw. Anything else yields no restriction rather than a crash.
-	const tools = normalizeTools(frontmatter.tools);
-	const disallowedTools = normalizeTools(frontmatter.disallowedTools);
-	// Skills are names, not tool names: same two spellings, but case is kept.
-	const skillsRaw = frontmatter.skills;
-	const skills = (typeof skillsRaw === "string" ? skillsRaw.split(",") : Array.isArray(skillsRaw) ? skillsRaw : [])
-		.filter((s): s is string => typeof s === "string")
-		.map((s) => s.trim())
-		.filter(Boolean);
-	// Names only: an inline config would start a process no `/mcp approve` covers.
-	const mcpRaw = frontmatter.mcpServers;
-	const mcpList = typeof mcpRaw === "string" ? mcpRaw.split(",") : Array.isArray(mcpRaw) ? mcpRaw : [];
-	if (mcpList.some((s) => typeof s !== "string"))
-		return { name, problem: "mcpServers lists server names only; declare a server in mcp.json and name it here" };
-	const mcpServers = (mcpList as string[]).map((s) => s.trim()).filter(Boolean);
-	const positive = (v: unknown): number | undefined =>
-		typeof v === "number" && Number.isInteger(v) && v > 0 ? v : undefined;
-	// `plan` and the removed modes are not errors, just not this layer's: a def that
-	// names one is loaded and runs under the default, exactly as an undeclared one.
+	const maxTurns =
+		typeof frontmatter.maxTurns === "number" && Number.isInteger(frontmatter.maxTurns) && frontmatter.maxTurns > 0
+			? frontmatter.maxTurns
+			: undefined;
+	const model =
+		typeof frontmatter.model === "string" && frontmatter.model.trim() ? frontmatter.model.trim() : undefined;
+	const background = frontmatter.background === true || frontmatter.background === "true" ? true : undefined;
+	const omitClaudeMd = frontmatter.omitClaudeMd === true || frontmatter.omitClaudeMd === "true" ? true : undefined;
 	const permissionMode =
-		typeof frontmatter.permissionMode === "string" ? parseMode(frontmatter.permissionMode) : undefined;
+		typeof frontmatter.permissionMode === "string" ? PERMISSION_MODES[frontmatter.permissionMode.trim()] : undefined;
 
-	// Absent fields are absent, not present-as-undefined: a def is compared and
-	// serialised (the /agents list, tests), and `{ maxTurns: undefined }` is noise there.
 	return compact({
 		name,
-		description,
-		tools: tools && tools.length > 0 ? tools : undefined,
-		disallowedTools: disallowedTools && disallowedTools.length > 0 ? disallowedTools : undefined,
-		model: typeof frontmatter.model === "string" ? frontmatter.model : undefined,
-		maxTurns: positive(frontmatter.maxTurns),
-		timeoutMs: positive(frontmatter.timeoutMs),
-		toolTimeoutMs: positive(frontmatter.toolTimeoutMs),
-		maxTokens: positive(frontmatter.maxTokens),
-		toolBudget: parseToolBudget(frontmatter.toolBudget),
-		gate: typeof frontmatter.gate === "string" && frontmatter.gate.trim() ? frontmatter.gate.trim() : undefined,
-		outputSchema: parseOutputSchema(frontmatter.outputSchema),
-		runner: parseRunner(frontmatter.runner),
-		skills: skills.length > 0 ? skills : undefined,
-		mcpServers: mcpServers.length > 0 ? mcpServers : undefined,
+		description: description.replace(/\\n/g, "\n"),
+		tools: toolList(frontmatter.tools),
+		disallowedTools: toolList(frontmatter.disallowedTools),
+		model: model && model.toLowerCase() === "inherit" ? "inherit" : model,
+		maxTurns,
+		skills: nameList(frontmatter.skills),
+		// Names of servers the parent has; an inline config would start a process no
+		// `/mcp approve` covers, so object entries are dropped (Claude Code drops bad items).
+		mcpServers: nameList(
+			Array.isArray(frontmatter.mcpServers)
+				? frontmatter.mcpServers.filter((s) => typeof s === "string")
+				: frontmatter.mcpServers,
+		),
 		permissionMode,
 		memory: oneOf(frontmatter.memory, MEMORY_SCOPES),
-		background: frontmatter.background === true ? true : undefined,
-		fork: frontmatter.fork === true || frontmatter.defaultContext === "fork" ? true : undefined,
+		background,
 		isolation: frontmatter.isolation === "worktree" ? "worktree" : undefined,
 		effort: oneOf(frontmatter.effort, EFFORTS),
 		color: oneOf(frontmatter.color, COLORS),
-		systemPrompt: body,
+		omitClaudeMd,
+		systemPrompt: body.trim(),
 	});
-}
-
-/** `runner: {command, args}`; pi-subagents' `type: external-cli` and `promptDelivery: stdin` are accepted and implied. */
-function parseRunner(raw: unknown): AgentRunner | undefined {
-	if (!raw || typeof raw !== "object") return undefined;
-	const { command, args } = raw as { command?: unknown; args?: unknown };
-	if (typeof command !== "string" || !command.trim()) return undefined;
-	const list = Array.isArray(args) ? args.filter((a): a is string => typeof a === "string") : [];
-	return { command: command.trim(), args: list };
 }
 
 function compact<T extends object>(value: T): T {
 	return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== undefined)) as T;
 }
 
-function loadDefsFromDir(dir: string, source: "user" | "project"): AgentDef[] {
+function loadDefsFromDir(dir: string, source: AgentSource): AgentDef[] {
 	const defs: AgentDef[] = [];
 	if (!existsSync(dir)) return defs;
-
 	let entries: import("node:fs").Dirent[];
 	try {
 		entries = readdirSync(dir, { withFileTypes: true });
 	} catch {
 		return defs;
 	}
-
 	for (const entry of entries) {
 		if (!entry.name.endsWith(".md")) continue;
 		if (!entry.isFile() && !entry.isSymbolicLink()) continue;
-
 		const filePath = join(dir, entry.name);
 		let content: string;
 		try {
@@ -269,12 +207,10 @@ function loadDefsFromDir(dir: string, source: "user" | "project"): AgentDef[] {
 		} catch {
 			continue;
 		}
-
 		const parsed = parseDef(content);
 		if ("problem" in parsed) continue;
 		defs.push({ ...parsed, source, filePath });
 	}
-
 	return defs;
 }
 
@@ -286,12 +222,11 @@ function isDirectory(p: string): boolean {
 	}
 }
 
-function findNearestProjectAgentsDir(cwd: string): string | null {
+export function findNearestProjectAgentsDir(cwd: string): string | null {
 	let currentDir = cwd;
 	while (true) {
 		const candidate = join(currentDir, CONFIG_DIR_NAME, "agents");
 		if (isDirectory(candidate)) return candidate;
-
 		const parentDir = dirname(currentDir);
 		if (parentDir === currentDir) return null;
 		currentDir = parentDir;
@@ -299,27 +234,152 @@ function findNearestProjectAgentsDir(cwd: string): string | null {
 }
 
 /**
- * Discover agent defs for the given scope, merged by name: bundled < user <
- * project, each source overriding the one before it.
- *
- * The bundled seeds used to be an all-or-nothing FALLBACK, loaded only while the
- * user had no defs of their own — so writing a single agent (or customising one
- * shipped agent, which `/agents edit` saves to the user directory) silently
- * dropped every other bundled agent from `/agents` and from the task tool.
- * Overriding a shipped agent by name is the point; deleting its siblings was not.
+ * Every def this session can delegate to, merged by name: built-in < user < project.
+ * Project defs only for a trusted project — an untrusted repo's agents never reach the model.
  */
-export function discoverDefs(cwd: string, scope: AgentScope): AgentDiscoveryResult {
-	const userDir = join(getAgentDir(), "agents");
-	const projectAgentsDir = findNearestProjectAgentsDir(cwd);
-
-	const projectDefs = scope === "user" || !projectAgentsDir ? [] : loadDefsFromDir(projectAgentsDir, "project");
-
+export function discoverDefs(cwd: string, trusted: boolean): AgentDef[] {
 	const byName = new Map<string, AgentDef>();
-	if (scope !== "project") {
-		for (const def of loadDefsFromDir(bundledAgentsDir(), "user")) byName.set(def.name, def);
-		for (const def of loadDefsFromDir(userDir, "user")) byName.set(def.name, def);
-	}
-	for (const def of projectDefs) byName.set(def.name, def);
+	for (const def of loadDefsFromDir(bundledAgentsDir(), "built-in")) byName.set(def.name, def);
+	for (const def of loadDefsFromDir(join(getAgentDir(), "agents"), "user")) byName.set(def.name, def);
+	const projectDir = trusted ? findNearestProjectAgentsDir(cwd) : null;
+	if (projectDir) for (const def of loadDefsFromDir(projectDir, "project")) byName.set(def.name, def);
+	return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
 
-	return { defs: Array.from(byName.values()), projectAgentsDir };
+/** Claude Code's `uie`: case- and separator-insensitive, so `Code Reviewer` is `code-reviewer`. */
+function normalizeType(name: string): string {
+	return name
+		.trim()
+		.toLowerCase()
+		.replace(/[\s_]+/g, "-");
+}
+
+/** The def a `subagent_type` names: exact first, then normalised; an ambiguous name is an error. */
+export function findDef(defs: AgentDef[], type: string): AgentDef | { error: string } {
+	const exact = defs.find((d) => d.name === type);
+	if (exact) return exact;
+	const wanted = normalizeType(type);
+	const matches = defs.filter((d) => normalizeType(d.name) === wanted);
+	if (matches.length === 1) return matches[0];
+	const available = defs.map((d) => d.name).join(", ") || "none";
+	if (matches.length > 1) {
+		return {
+			error: `Agent type '${type}' is ambiguous — matches ${matches.map((d) => d.name).join(", ")}. Use the exact name: ${matches[0].name}`,
+		};
+	}
+	return { error: `Agent type '${type}' not found. Available agents: ${available}` };
+}
+
+/** Claude Code's `(Tools: …)` label for the agent listing. */
+export function toolsLabel(def: Pick<AgentDef, "tools" | "disallowedTools">): string {
+	const tools = def.tools;
+	const denied = def.disallowedTools;
+	if (tools && !tools.includes("*")) {
+		const remaining = denied ? tools.filter((t) => !denied.includes(t)) : tools;
+		return remaining.length > 0 ? remaining.join(", ") : "None";
+	}
+	if (denied) return `All tools except ${denied.join(", ")}`;
+	return tools ? tools.join(", ") : "All tools";
+}
+
+// ── Tool names ────────────────────────────────────────────────────────────────
+
+/** Claude Code tool names → this layer's. An empty list: recognised, but no such tool here. */
+const CC_TOOLS: Record<string, string[]> = {
+	read: ["read"],
+	write: ["write"],
+	edit: ["edit"],
+	multiedit: ["edit"],
+	bash: ["bash"],
+	grep: ["grep"],
+	glob: ["find"],
+	find: ["find"],
+	ls: ["ls"],
+	webfetch: ["webfetch"],
+	websearch: ["websearch", "get_search_content", "source_check"],
+	agent: ["agent", "send_message"],
+	task: ["agent", "send_message"],
+	sendmessage: ["send_message"],
+	send_message: ["send_message"],
+	monitor: ["monitor"],
+	taskstop: ["task_stop"],
+	task_stop: ["task_stop"],
+	get_search_content: ["get_search_content"],
+	source_check: ["source_check"],
+	notebookedit: [],
+	notebookread: [],
+	todowrite: [],
+	toolsearch: [],
+	skill: [],
+	lsp: [],
+	powershell: [],
+	enterworktree: [],
+	exitworktree: [],
+	artifact: [],
+	exitplanmode: [],
+	enterplanmode: [],
+	askuserquestion: [],
+};
+
+export interface ChildTools {
+	tools: string[];
+	/** Entries that name no tool at all. */
+	invalid: string[];
+	/** Entries that name a tool, just not one this child can have. */
+	unavailable: string[];
+}
+
+/** `Bash(git push *)` → `Bash`: a specifier still names the whole tool (Claude Code). */
+function toolName(entry: string): string {
+	const paren = entry.indexOf("(");
+	return (paren > 0 ? entry.slice(0, paren) : entry).trim();
+}
+
+/** The tools one entry stands for, out of `pool`; undefined when it names nothing known. */
+function expand(entry: string, pool: readonly string[]): string[] | undefined {
+	const name = toolName(entry);
+	if (name === "*") return [...pool];
+	if (name === "mcp__*") return pool.filter((t) => t.startsWith("mcp__"));
+	if (name.startsWith("mcp__")) {
+		const server = /^mcp__(.+?)(?:__\*)?$/.exec(name)?.[1];
+		if (pool.includes(name)) return [name];
+		if (server && !server.includes("__")) return pool.filter((t) => t.startsWith(`mcp__${server}__`));
+		return [];
+	}
+	const mapped = CC_TOOLS[name.toLowerCase()];
+	if (mapped) return mapped.filter((t) => pool.includes(t));
+	return pool.includes(name) ? [name] : undefined;
+}
+
+/**
+ * The child's tools, Claude Code's way: `disallowedTools` first, then `tools` as an
+ * allowlist over what is left (absent or `*`: everything left). `pool` is every tool a
+ * subagent may have in this session.
+ */
+export function resolveChildTools(
+	def: Pick<AgentDef, "tools" | "disallowedTools">,
+	pool: readonly string[],
+): ChildTools {
+	const invalid: string[] = [];
+	const unavailable: string[] = [];
+	const denied = new Set((def.disallowedTools ?? []).flatMap((entry) => expand(entry, pool) ?? []));
+	const remaining = pool.filter((t) => !denied.has(t));
+	if (!def.tools || def.tools.some((t) => toolName(t) === "*")) return { tools: remaining, invalid, unavailable };
+	const tools = new Set<string>();
+	for (const entry of def.tools) {
+		const found = expand(entry, pool);
+		if (found === undefined) invalid.push(entry);
+		else if (found.length === 0) unavailable.push(entry);
+		for (const tool of found ?? []) if (!denied.has(tool)) tools.add(tool);
+	}
+	return { tools: [...tools], invalid, unavailable };
+}
+
+/** Claude Code's refusal for a def whose tools resolve to nothing. */
+export function zeroToolsError(name: string, resolved: ChildTools): string {
+	const parts: string[] = [];
+	if (resolved.invalid.length > 0) parts.push(`unrecognized [${resolved.invalid.join(", ")}]`);
+	if (resolved.unavailable.length > 0) parts.push(`not available to subagents [${resolved.unavailable.join(", ")}]`);
+	const why = parts.length > 0 ? parts.join("; ") : "recognized but matched no tools in this session";
+	return `Agent '${name}' would be spawned with zero tools — refusing. Its tools list resolved to nothing: ${why}. Fix the agent's tools frontmatter or pass a different subagent_type.`;
 }
