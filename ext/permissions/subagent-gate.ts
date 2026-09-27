@@ -38,6 +38,7 @@ import { sandboxPosture } from "../sandbox/state.ts";
 import { type EvalConfig, evaluatePostHook, evaluatePreHook } from "./evaluate.ts";
 import type { PermissionMode } from "./modes.ts";
 import type { Rules } from "./rules.ts";
+import { getSessionRuleLayer, withSessionRules } from "./session-rules.ts";
 
 /** The parent's sandbox stance with the unsandboxed retry switched off. */
 function childSandboxPosture(): EvalConfig["sandbox"] {
@@ -107,7 +108,7 @@ export async function checkAsParent(
 	const cfg: EvalConfig = {
 		mode: check.mode,
 		rules: check.rules,
-		cliAllowRules: {},
+		cliAllowRules: getSessionRuleLayer().cliAllow ?? {},
 		cwd: check.cwd,
 		agentDir: getAgentDir(),
 		configDirName: CONFIG_DIR_NAME,
@@ -153,7 +154,9 @@ export function createSubagentGate(options: SubagentGateOptions = {}): InlineExt
 		/** Full rules when the user can be asked; deny only otherwise — see the header. */
 		function rulesFor(ctx: { cwd: string; isProjectTrusted: () => boolean }): Rules {
 			allRules ??= loadParentRules(rulesCwd ?? ctx.cwd, ctx.isProjectTrusted());
-			return prompt ? allRules : { deny: allRules.deny ?? [] };
+			// The session layer is read per call: a grant or revocation applies at once.
+			const live = withSessionRules(allRules);
+			return prompt ? live : { deny: live.deny ?? [] };
 		}
 
 		// A reload re-reads settings; drop the cache so the next call picks them up.

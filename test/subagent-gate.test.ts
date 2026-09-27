@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir, type InlineExtension } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { setSessionRuleLayer } from "../ext/permissions/session-rules.ts";
 import subagentPermissionGate, { createSubagentGate, type GatePrompt } from "../ext/permissions/subagent-gate.ts";
 
 type Handler = (event: any, ctx: any) => Promise<any>;
@@ -109,6 +110,35 @@ describe("subagent permission gate", () => {
 			const write = { toolName: "write", input: { path: join(cwd, ".git", "hooks", "pre-commit"), content: "x" } };
 			expect(await gate(write, ctx())).toBeUndefined();
 			expect(prompts).toHaveLength(1);
+		});
+	});
+
+	describe("the parent's session-only rules", () => {
+		afterEach(() => setSessionRuleLayer({}));
+
+		it("blocks a --disallowedTools rule in a child, which settings files never hold", async () => {
+			setSessionRuleLayer({ rules: { deny: ["Bash(touch *)"] } });
+			const gate = load(subagentPermissionGate);
+			expect((await gate(bash("touch x"), ctx()))?.block).toBe(true);
+		});
+
+		it("honours a grant made for this session instead of prompting again", async () => {
+			setSessionRuleLayer({ rules: { allow: ["Bash(npm test)"] } });
+			const prompts: unknown[] = [];
+			const prompt: GatePrompt = async (request) => {
+				prompts.push(request);
+				return false;
+			};
+			const gate = load(createSubagentGate({ mode: "ask", prompt }));
+			expect(await gate(bash("npm test"), ctx())).toBeUndefined();
+			expect(prompts).toEqual([]);
+		});
+
+		it("honours --allowedTools in a headless ask-mode child", async () => {
+			const gate = load(createSubagentGate({ mode: "ask" }));
+			expect((await gate(bash("make build"), ctx()))?.block).toBe(true);
+			setSessionRuleLayer({ cliAllow: { allow: ["Bash(make *)"] } });
+			expect(await gate(bash("make build"), ctx())).toBeUndefined();
 		});
 	});
 

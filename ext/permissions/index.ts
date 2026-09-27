@@ -66,6 +66,7 @@ import {
 	stripWrappingQuotes,
 	subject,
 } from "./rules.ts";
+import { setSessionRuleLayer } from "./session-rules.ts";
 
 /** One rule and where it was set. */
 interface SourcedRule {
@@ -194,9 +195,15 @@ export function factory(pi: ExtensionAPI): void {
 	// The latest gated calls, newest last, for `/permissions why`.
 	let decisions: DecisionRecord[] = [];
 
+	/** Hands the session layer to subagent children, which cannot see it otherwise. */
+	function publishSessionLayer(): void {
+		setSessionRuleLayer({ rules: sessionRules, cliAllow: cliAllowRules });
+	}
+
 	/** Settings rules with the session's own layered on top. */
 	function reloadRules(ctx: ExtensionContext): void {
 		const base = loadRules(ctx);
+		publishSessionLayer();
 		rules = {
 			...base,
 			allow: [...(base.allow ?? []), ...(sessionRules.allow ?? [])],
@@ -342,6 +349,7 @@ export function factory(pi: ExtensionAPI): void {
 		reloadRules(ctx);
 		const allowFlag = pi.getFlag("allowedTools");
 		cliAllowRules = typeof allowFlag === "string" && allowFlag ? { allow: parseToolRuleFlag(allowFlag) } : {};
+		publishSessionLayer();
 		// Initial mode from the CLI: --dangerously-skip-permissions (CC alias) wins
 		// over --permission-mode. Sets the *initial* mode only — Alt+M and /mode
 		// still switch freely afterwards.
@@ -421,6 +429,7 @@ export function factory(pi: ExtensionAPI): void {
 		rules = { ...rules, allow: [...new Set([...(rules.allow ?? []), ...add])] };
 		if (standing.sessionOnly) {
 			sessionRules.allow = [...new Set([...(sessionRules.allow ?? []), ...add])];
+			publishSessionLayer();
 			return;
 		}
 		for (const rule of add) await addProjectRule(ctx.cwd, "allow", rule, ctx.isProjectTrusted());
