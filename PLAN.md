@@ -118,5 +118,6 @@ verify with a default-filler model (opencode-go) where the model-facing shape ch
   keeps its worktree + branch and the footer carries `worktreePath:` / `worktreeBranch:`.
 - Not a gap: a bare `Read`/`Edit` deny adds nothing to the sandbox lists (`sandboxListsFromRules`
   says so on purpose: no path, and deny-write-everywhere would break every bash call).
-- Flaky, unrelated: `test/exit-status.test.ts` "grep exit 1" failed once in 3 full-suite runs
-  under load, 6/6 alone.
+- Flaky tests fixed: `exit-status` waited a fixed 20ms for the output trailer (now waits for it);
+  `/tasks` rows started in the same millisecond listed oldest first (stable sort; now reversed first).
+- Notification `<result>` escaping matches 2.1.283: its `Gt()` escapes `& < >` only, as `escapeXml` does.

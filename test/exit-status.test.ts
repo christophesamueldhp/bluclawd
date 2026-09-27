@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type BackgroundExec, BackgroundJobRegistry, jobOutcome } from "../ext/_shared/background-bash.ts";
 import { classifyExit } from "../ext/_shared/exit-status.ts";
 import { taskExitSummary } from "../ext/_shared/monitor-events.ts";
@@ -61,11 +61,16 @@ describe("background job outcome and summary", () => {
 		});
 		const started = registry.start({ command, description, cwd: "/", exec, onExit: () => done() });
 		await exited;
-		// The trailer is written by the stream's end, after onExit.
-		await new Promise((r) => setTimeout(r, 20));
 		const job = registry.get(started.id);
 		if (!job?.outputFile) throw new Error("no job");
-		return { job, file: readFileSync(job.outputFile, "utf-8") };
+		const outputFile = job.outputFile;
+		// The trailer is written by the stream's end, after onExit; a fixed delay lost that race under load.
+		const file = await vi.waitFor(() => {
+			const text = readFileSync(outputFile, "utf-8");
+			if (!text.endsWith("]\n")) throw new Error("trailer not written yet");
+			return text;
+		});
+		return { job, file };
 	}
 
 	it("reports grep's exit 1 as completed with a note", async () => {

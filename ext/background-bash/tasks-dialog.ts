@@ -56,7 +56,8 @@ export function taskRows(owner: string | undefined): TaskRow[] {
 		state: "running",
 		startedAt: run.startedAt,
 	}));
-	return [...shells, ...agents].sort((a, b) => b.startedAt - a.startedAt);
+	// Reversed first: the sort is stable, so tasks started in the same millisecond stay newest first.
+	return [...shells, ...agents].reverse().sort((a, b) => b.startedAt - a.startedAt);
 }
 
 function formatSize(bytes: number): string {
