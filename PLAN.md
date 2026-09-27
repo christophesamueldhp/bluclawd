@@ -106,9 +106,17 @@ verify with a default-filler model (opencode-go) where the model-facing shape ch
 - Fixed after the test rewrite: Explore/Plan were registered for `send_message` continuation
   (now never; verified live — refused); at the depth cap a child's tool pool still named
   `agent`/`send_message` (now `canSpawn` reaches the engine; a `tools: [Agent]` def is refused).
-- Checks: `npx vitest run` 81 files / 1166 tests green, `tsc` clean, biome clean (1 pre-existing
+- Checks: `npx vitest run` 81 files / 1167 tests green, `tsc` clean, biome clean (1 pre-existing
   warning in ext/web/render.ts).
 - Housekeeping: 56 untracked iCloud conflict copies (`* 2.ts`/`* 2.md`, created 2026-09-26 23:29–
   01:22, each byte-identical to HEAD or the current file) broke `tsc`; moved to
   `~/.Trash/bluclawd-icloud-dupes-2026-09-27`. A broken ref `refs/heads/main 2` (+ `origin/main 2`)
-  is still there — same iCloud cause, left for the user.
+  is still there — same iCloud cause, left for the user. **Update:** the user OK'd removal; it, `.git/index 2|3|4`
+  and `general-purpose 3.md` (identical to HEAD) went to the same Trash folder; `git fsck` clean.
+- Live-verified after commit: an ask-mode child's write prompts in the parent UI ("Subagent
+  "general-purpose" needs permission"), Yes lets it write; a worktree agent that leaves changes
+  keeps its worktree + branch and the footer carries `worktreePath:` / `worktreeBranch:`.
+- Not a gap: a bare `Read`/`Edit` deny adds nothing to the sandbox lists (`sandboxListsFromRules`
+  says so on purpose: no path, and deny-write-everywhere would break every bash call).
+- Flaky, unrelated: `test/exit-status.test.ts` "grep exit 1" failed once in 3 full-suite runs
+  under load, 6/6 alone.
