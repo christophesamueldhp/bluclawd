@@ -192,19 +192,21 @@ reading the API:
 
 ## Permission modes
 
-Claude Code's three modes. Rules decide first in every one of them: `deny`
-blocks, `ask` prompts, `allow` allows, with precedence deny > ask > allow.
-Reads and read-only bash never prompt. The mode only says what happens to a
-call no rule names:
+Rules decide first, in every mode: `deny` blocks, `ask` prompts, `allow` runs,
+with precedence deny > ask > allow. An `ask` rule always asks — no allow rule,
+flag or sandbox clears it. The mode only says what happens to a call no rule
+names:
 
 | Mode | A call no rule names |
 |---|---|
-| `ask` | every edit/write and every non-read-only command prompts |
-| `edits` | edit/write run; everything else prompts |
+| `ask` | reads and read-only bash run; everything else prompts |
+| `edits` | reads, read-only bash and edit/write run; everything else prompts |
 | `auto` | everything runs |
 
-`auto` is the bypass mode with the rules still on: an empty rule set makes it
-approve everything, and `deny: ["Bash(rm -rf **)"]` is how you put a guard
+In `ask` and `edits`, a write to protected config (`.git`, `.pi`, `.vscode`,
+`.mcp.json`, the agent dir, …) and a read of agent credentials also prompt; an
+allow rule or `auto` runs them. `auto` never prompts on its own: an empty rule
+set approves everything, and `deny: ["Bash(rm -rf **)"]` is how you put a guard
 back. Claude Code's names (`default`, `acceptEdits`, `bypass`) and the older
 `always` are still accepted anywhere a mode is named — the bypass spellings
 resolve to `auto` — so stored settings and scripts keep working.
@@ -227,8 +229,8 @@ npm test commands in <project>`, saved as `Bash(npm test:*)` — the prefix alon
 with arguments, never `npm testx` — in the project's settings (one rule per command
 of a compound line; interpreters, wrappers and `$(…)` get the exact command
 instead); an edit no rule names offers `Yes, and switch to edits mode for this
-session`; a credential read is allowed for the session; a protected write gets
-no middle row. In an untrusted project "don't ask again" lasts the session.
+session`; a credential read is allowed for the session; a protected write and an
+`ask` rule's prompt get no middle row. In an untrusted project "don't ask again" lasts the session.
 
 A trusted session starts in `auto`; set `permissions.defaultMode` in global
 settings to start in `ask` or `edits` instead.

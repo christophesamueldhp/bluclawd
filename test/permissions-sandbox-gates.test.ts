@@ -35,9 +35,13 @@ const verdict = (tool: string, input: Record<string, unknown>, c: EvalConfig) =>
 const MUTATING = { command: "npm install" };
 
 describe("auto-allow: a sandboxed command runs without a prompt", () => {
-	it.each<PermissionMode>(["ask", "edits", "auto"])("in %s mode", (mode) => {
+	it.each<PermissionMode>(["ask", "edits"])("in %s mode", (mode) => {
 		const v = verdict("bash", MUTATING, cfg({ mode, sandbox: active() }));
 		expect(v).toMatchObject({ outcome: "allow", gate: "sandboxed" });
+	});
+
+	it("auto mode runs it anyway", () => {
+		expect(verdict("bash", MUTATING, cfg({ mode: "auto", sandbox: active() })).gate).toBe("auto-mode");
 	});
 
 	it("covers the monitor tool too — same shell, same sandbox", () => {
@@ -68,9 +72,9 @@ describe("auto-allow: a sandboxed command runs without a prompt", () => {
 		expect(verdict("bash", MUTATING, cfg({ rules, sandbox: active() })).outcome).toBe("block");
 	});
 
-	it("skips a bare Bash ask rule but honours a content-scoped one", () => {
-		expect(verdict("bash", MUTATING, cfg({ rules: { ask: ["Bash(*)"] }, sandbox: active() })).gate).toBe("sandboxed");
-		expect(verdict("bash", MUTATING, cfg({ rules: { ask: ["Bash"] }, sandbox: active() })).gate).toBe("sandboxed");
+	it("never overrides an ask rule, bare or content-scoped", () => {
+		expect(verdict("bash", MUTATING, cfg({ rules: { ask: ["Bash(*)"] }, sandbox: active() })).gate).toBe("ask-rule");
+		expect(verdict("bash", MUTATING, cfg({ rules: { ask: ["Bash"] }, sandbox: active() })).gate).toBe("ask-rule");
 		const scoped = verdict(
 			"bash",
 			{ command: "git push origin main" },

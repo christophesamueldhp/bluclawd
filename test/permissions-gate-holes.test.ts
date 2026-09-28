@@ -43,8 +43,8 @@ describe("A1: bash reads of credential files meet the protected-read gate", () =
 		"python3 dump.py < .bluclawd/settings.json",
 		"grep -r token /home/u/.pi/agent/*.json",
 		"base64 --input=/home/u/.pi/agent/auth.json",
-	])("%s prompts in auto mode", (command) => {
-		const v = verdict("bash", { command });
+	])("%s prompts in ask mode", (command) => {
+		const v = verdict("bash", { command }, cfg({ mode: "ask" }));
 		expect(v.outcome).toBe("prompt");
 		expect(v.gate).toBe("read-protected-path");
 		// The prompt names the whole command: approving it approves all of it.
@@ -54,7 +54,12 @@ describe("A1: bash reads of credential files meet the protected-read gate", () =
 	});
 
 	it("blocks headless", () => {
-		expect(verdict("bash", { command: "cat .mcp.json" }, cfg({ hasUI: false })).outcome).toBe("block");
+		expect(verdict("bash", { command: "cat .mcp.json" }, cfg({ mode: "ask", hasUI: false })).outcome).toBe("block");
+	});
+
+	it("runs in auto mode: there only rules stop a call", () => {
+		expect(verdict("bash", { command: "cat .mcp.json" }).gate).toBe("auto-mode");
+		expect(verdict("bash", { command: "cat .mcp.json > .bluclawd/hooks.json" }).gate).toBe("auto-mode");
 	});
 
 	it("leaves ordinary reads alone", () => {
@@ -64,9 +69,8 @@ describe("A1: bash reads of credential files meet the protected-read gate", () =
 	});
 
 	it("puts a command that both reads and writes protected files through the write prompt", () => {
-		// An approved protected READ falls through to the later gates; a protected write
-		// must not ride along on it.
-		expect(verdict("bash", { command: "cat .mcp.json > .bluclawd/hooks.json" }).gate).toBe("write-protected-path");
+		const command = "cat .mcp.json > .bluclawd/hooks.json";
+		expect(verdict("bash", { command }, cfg({ mode: "ask" })).gate).toBe("write-protected-path");
 	});
 
 	it("is cleared by the exact rule 'Always allow' persists", () => {
@@ -83,7 +87,7 @@ describe("A2: grep over a tree that holds credentials", () => {
 		["an ancestor of the agent dir", "~"],
 		["the project config dir", ".bluclawd"],
 	])("prompts for %s", (_label, path) => {
-		const v = verdict("grep", { pattern: "key", path }, cfg({ agentDir: "~/.pi/agent" }));
+		const v = verdict("grep", { pattern: "key", path }, cfg({ mode: "ask", agentDir: "~/.pi/agent" }));
 		expect(v.outcome).toBe("prompt");
 		expect(v.gate).toBe("read-protected-path");
 	});
@@ -346,7 +350,7 @@ describe("A5: /permissions add keeps the session's flag-derived rules", () => {
 		expect((await handlers.tool_call(call, ctx))?.block).toBe(true);
 	});
 	it("offers a protected read for the session, and does not ask again once chosen", async () => {
-		const { handlers, ctx } = load({});
+		const { handlers, ctx } = load({ "permission-mode": "ask" });
 		const { live, seen } = interactive(ctx, [/^Yes, allow reading \.mcp\.json during this session$/]);
 		await handlers.session_start({}, live);
 		const call = { toolName: "bash", input: { command: "git diff .mcp.json" } };
@@ -488,21 +492,20 @@ describe("A5: /permissions add keeps the session's flag-derived rules", () => {
 		);
 	});
 
-	it("don't ask again clears the ask rule that asked", async () => {
+	it("an ask rule always asks, so its prompt offers no don't ask again", async () => {
 		writeFileSync(
 			join(getAgentDir(), "settings.json"),
-			JSON.stringify({ permissions: { ask: ["Bash(git push *)"] } }),
+			JSON.stringify({ permissions: { ask: ["Bash(git push *)"], allow: ["Bash(git push:*)"] } }),
 		);
 		const { handlers, ctx } = load({});
-		const { live, seen } = interactive(ctx, [DONT_ASK]);
+		const { live, seen } = interactive(ctx, ["Yes", "Yes"]);
 		await handlers.session_start({}, live);
-		expect(
-			await handlers.tool_call({ toolName: "bash", input: { command: "git push origin a" } }, live),
-		).toBeUndefined();
-		expect(
-			await handlers.tool_call({ toolName: "bash", input: { command: "git push origin b" } }, live),
-		).toBeUndefined();
-		expect(seen).toHaveLength(1);
+		const push = (branch: string) =>
+			handlers.tool_call({ toolName: "bash", input: { command: `git push origin ${branch}` } }, live);
+		expect(await push("a")).toBeUndefined();
+		expect(await push("b")).toBeUndefined();
+		expect(seen).toHaveLength(2);
+		expect(seen[0].options).toEqual(["Yes", "No", "No, and tell the model what to do differently"]);
 	});
 
 	it("an edit no rule names offers edits mode instead of a rule", async () => {
@@ -518,7 +521,7 @@ describe("A5: /permissions add keeps the session's flag-derived rules", () => {
 	});
 
 	it("a protected write offers no standing grant", async () => {
-		const { handlers, ctx } = load({});
+		const { handlers, ctx } = load({ "permission-mode": "ask" });
 		const { live, seen } = interactive(ctx, ["No"]);
 		await handlers.session_start({}, live);
 		await handlers.tool_call({ toolName: "write", input: { path: ".mcp.json" } }, live);
@@ -563,7 +566,10 @@ describe("A5: /permissions add keeps the session's flag-derived rules", () => {
 	});
 
 	it("C6: /permissions why explains recent decisions", async () => {
-		const { handlers, commands, ctx, entries, render } = load({ disallowedTools: "Bash(curl **)" });
+		const { handlers, commands, ctx, entries, render } = load({
+			disallowedTools: "Bash(curl **)",
+			"permission-mode": "ask",
+		});
 		await handlers.session_start({}, ctx);
 		await handlers.tool_call({ toolName: "bash", input: { command: "git status" } }, ctx);
 		await handlers.tool_call({ toolName: "bash", input: { command: "curl https://x" } }, ctx);
@@ -643,14 +649,14 @@ describe("E2: cp, mv, ln and install into protected paths", () => {
 		"npm test && /bin/cp evil .git/config",
 		"cp evil.json /home/u/.pi/agent/auth.json",
 	])("%s asks as a protected write", (command) => {
-		const v = verdict("bash", { command });
+		const v = verdict("bash", { command }, cfg({ mode: "ask" }));
 		expect(v.outcome).toBe("prompt");
 		expect(v.gate).toBe("write-protected-path");
 	});
 
 	it("leaves ordinary copies alone", () => {
 		for (const command of ["cp a.txt b.txt", "mv src/a.ts src/b.ts", "ln -s ../x y", "cp .git/HEAD /tmp/head"]) {
-			expect(verdict("bash", { command }).gate).not.toBe("write-protected-path");
+			expect(verdict("bash", { command }, cfg({ mode: "ask" })).gate).not.toBe("write-protected-path");
 		}
 	});
 });

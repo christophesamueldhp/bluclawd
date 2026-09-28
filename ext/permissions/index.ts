@@ -96,7 +96,6 @@ const GATE_TEXT: Record<Gate, string> = {
 	"deny-rule": "a deny rule",
 	"read-protected-path": "protected path (credentials)",
 	"write-protected-path": "protected path (config)",
-	"exact-allow": "an exact allow rule",
 	"cli-allow": "--allowedTools",
 	"readonly-bash": "read-only command",
 	"allow-rule": "an allow rule",
@@ -378,14 +377,14 @@ export function factory(pi: ExtensionAPI): void {
 	}
 
 	/**
-	 * Claude Code's middle row: what "yes" can also mean from now on. A command offers
-	 * its prefix for this project (`Bash(npm test:*)` in the project's settings; an
-	 * untrusted project's settings are never read, so there it lasts the session). An
-	 * edit no rule names offers edits mode. A credential read lasts the session. A
-	 * protected write offers nothing: it is approved one call at a time.
+	 * The middle row: what "yes" can also mean from now on. A command offers its prefix
+	 * for this project (`Bash(npm test:*)` in the project's settings; session-only in an
+	 * untrusted project). An edit offers edits mode. A credential read lasts the session.
+	 * An ask rule always asks and a protected write is approved one call at a time, so
+	 * neither offers anything.
 	 */
 	function standingOption(tool: string, verdict: Verdict, ctx: ExtensionContext): Standing | undefined {
-		if (verdict.gate === "write-protected-path" || !verdict.exact) return undefined;
+		if (verdict.gate === "ask-rule" || verdict.gate === "write-protected-path" || !verdict.exact) return undefined;
 		if (verdict.gate === "read-protected-path") {
 			return {
 				label: `Yes, allow reading ${verdict.protectedPath} during this session`,
@@ -533,42 +532,22 @@ export function factory(pi: ExtensionAPI): void {
 
 		const failed = { block: true, reason: "Permission prompt failed or was interrupted. Blocked by default." };
 
-		// Gates 1-3: deny rules, protected paths.
-		const pre = evaluatePreHook(tool, input, cfg);
-		if (pre?.outcome === "block") return { result: { block: true, reason: pre.reason }, gate: pre.gate };
-		let preAnswer: string | undefined;
-		if (pre?.outcome === "prompt") {
-			// A protected READ may be allowed for the session: the exact rule clears this gate
-			// next time, and the bash screen matches words, so a repeat (`git diff .mcp.json`)
-			// would otherwise ask every time. Protected WRITES stay one approval at a time.
-			const asked = await askProceed(promptTitle(tool, input, pre), standingOption(tool, pre, ctx), ctx);
-			if (asked.outcome === "failed") return { result: failed, gate: pre.gate };
-			if (asked.outcome === "deny") {
-				const what = pre.gate === "read-protected-path" ? "Read of" : "Write to";
-				return {
-					result: denied(`${what} protected path denied: ${pre.protectedPath}.`, asked.note),
-					gate: pre.gate,
-					answer: asked.answer,
-				};
-			}
-			// An approved WRITE to a protected path is granted once and we are done. An
-			// approved READ falls through: the read gate is narrow (credentials only) and
-			// the call still has to satisfy the ordinary ask/auto gates below.
-			if (pre.gate === "write-protected-path") return { result: undefined, gate: pre.gate, answer: asked.answer };
-			preAnswer = asked.answer;
-		}
+		const verdict = evaluatePreHook(tool, input, cfg) ?? evaluatePostHook(tool, input, cfg);
+		if (verdict.outcome === "allow") return { result: undefined, gate: verdict.gate };
+		if (verdict.outcome === "block") return { result: { block: true, reason: verdict.reason }, gate: verdict.gate };
 
-		// Gates 4-6: ask rules, allow rules, and what the mode does with the rest.
-		const post = evaluatePostHook(tool, input, cfg);
-		if (post.outcome === "allow") return { result: undefined, gate: post.gate, answer: preAnswer };
-		if (post.outcome === "block") return { result: { block: true, reason: post.reason }, gate: post.gate };
-
-		const asked = await askProceed(promptTitle(tool, input, post), standingOption(tool, post, ctx), ctx);
-		if (asked.outcome === "failed") return { result: failed, gate: post.gate };
+		const asked = await askProceed(promptTitle(tool, input, verdict), standingOption(tool, verdict, ctx), ctx);
+		if (asked.outcome === "failed") return { result: failed, gate: verdict.gate };
 		if (asked.outcome === "deny") {
-			return { result: denied("Permission denied by user.", asked.note), gate: post.gate, answer: asked.answer };
+			const reason =
+				verdict.gate === "read-protected-path"
+					? `Read of protected path denied: ${verdict.protectedPath}.`
+					: verdict.gate === "write-protected-path"
+						? `Write to protected path denied: ${verdict.protectedPath}.`
+						: "Permission denied by user.";
+			return { result: denied(reason, asked.note), gate: verdict.gate, answer: asked.answer };
 		}
-		return { result: undefined, gate: post.gate, answer: asked.answer };
+		return { result: undefined, gate: verdict.gate, answer: asked.answer };
 	}
 
 	async function cycleAndReport(ctx: ExtensionContext): Promise<void> {

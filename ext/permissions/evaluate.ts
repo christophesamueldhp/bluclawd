@@ -1,40 +1,24 @@
 /**
- * The permission decision, as data.
+ * The permission decision, as data: no prompts, no settings reads. The `tool_call`
+ * handler supplies the inputs and performs whatever I/O a verdict calls for.
  *
- * This module answers "what should happen to this tool call, and which gate decided?"
- * without performing any I/O: no prompts, no settings reads, no hook execution. The
- * extension's `tool_call` handler supplies the inputs, performs whatever I/O a verdict
- * calls for, and owns nothing else.
+ * Rules decide first, in every mode, with precedence deny > ask > allow:
  *
- * WHY: the decision used to live inline in a ~330-line handler interleaved with prompting
- * and persistence, so nothing — not the user, not `/permissions`, not a test — could answer
- * "why was this call allowed?" without re-reading the whole thing. Gate order is now a
- * readable sequence, and every verdict names the gate that produced it.
+ *   deny   blocks
+ *   ask    prompts
+ *   allow  runs
  *
- * The evaluation is split in two: `evaluatePreHook` runs the gates nothing may override
- * (deny rules, protected paths), `evaluatePostHook` runs the rest (ask rules, allow
- * rules, and what the mode does with a call no rule names).
+ * Only a call no rule names reaches the mode:
  *
- * ── The three modes, as Claude Code defines them ─────────────────────────────
- * Rules decide first in every mode: `deny` blocks, `ask` prompts, `allow` allows,
- * with precedence deny > ask > allow. Reads and read-only bash never prompt. The mode
- * only says what happens to a call NO rule names:
- *
- *   ask    every edit/write and every non-read-only command prompts
- *   edits  edit/write run; everything else prompts
+ *   ask    reads and read-only bash run; everything else prompts
+ *   edits  as ask, but edit/write run
  *   auto   everything runs
  *
- * `auto` is therefore the bypass mode with the rules still on: a rule set that says
- * nothing makes it approve everything, and `deny: Bash(rm -rf **)` is how a user who
- * wants a guard in auto mode gets one.
+ * In ask and edits, a write to protected config and a read of credentials also prompt.
  *
- * Purity note: `isProtectedPath`/`isReadProtectedPath` do touch the filesystem (realpath, to
- * catch symlinks into protected territory), and so does `decide()` for a deny/ask path
- * rule — the same realpath widening, but for user-written rules rather than the hardcoded
- * protected set (IMPROVEMENT-PLAN.md §2.3), lazily so an allow-only rule set never pays for
- * it. That is inherent to the check, not incidental state — everything else here is a pure
- * function of its arguments. `agentDir` is INJECTED rather than read from the environment
- * so callers and tests stay in control.
+ * `isProtectedPath`/`isReadProtectedPath` and deny/ask path rules resolve symlinks, so
+ * this module touches the filesystem there; everything else is a pure function of its
+ * arguments.
  */
 
 import { monitorSource } from "../_shared/monitor-source.ts";
@@ -42,7 +26,6 @@ import type { SandboxPosture } from "../sandbox/state.ts";
 import { bashPathArgs, bashWriteTargets } from "./bash-targets.ts";
 import type { PermissionMode } from "./modes.ts";
 import {
-	bashSegments,
 	type Decision,
 	decide,
 	displayRule,
@@ -53,7 +36,6 @@ import {
 	type Rules,
 	searchQueries,
 	searchReachesProtectedFiles,
-	standingRules,
 	subject,
 } from "./rules.ts";
 import { isSafeCommand } from "./safe-command.ts";
@@ -61,20 +43,19 @@ import { isSafeCommand } from "./safe-command.ts";
 /** The gate that produced a verdict. Every verdict names exactly one. */
 export type Gate =
 	| "deny-rule"
-	| "read-protected-path"
-	| "write-protected-path"
-	| "exact-allow"
-	| "cli-allow"
-	| "readonly-bash"
-	| "allow-rule"
 	| "ask-rule"
-	| "read-like"
-	| "accept-edits"
+	| "allow-rule"
+	| "cli-allow"
 	| "auto-mode"
+	| "write-protected-path"
+	| "read-protected-path"
 	| "sandboxed"
+	| "read-like"
+	| "readonly-bash"
+	| "accept-edits"
 	| "no-matching-rule";
 
-/** What the caller must do. `prompt` means "ask the user"; `kind` says which prompt. */
+/** What the caller must do. `prompt` means "ask the user". */
 export type Outcome = "allow" | "block" | "prompt";
 
 export interface Verdict {
@@ -84,7 +65,7 @@ export interface Verdict {
 	reason: string;
 	/** Which prompt to show, when `outcome === "prompt"`. */
 	promptKind?: "protected-read" | "protected-write" | "ask";
-	/** The exact `Verb(subject)` rule "don't ask again" would persist, when applicable. */
+	/** The exact `Verb(subject)` rule for this call, when its tool is governed. */
 	exact?: string | null;
 	/** The path that tripped a protected-path gate, for the prompt text. */
 	protectedPath?: string;
@@ -93,7 +74,7 @@ export interface Verdict {
 export interface EvalConfig {
 	mode: PermissionMode;
 	rules: Rules;
-	/** `--allowedTools` grants, kept apart from `rules` (see the extension's comment). */
+	/** `--allowedTools` grants. */
 	cliAllowRules: Rules;
 	cwd: string;
 	agentDir: string;
@@ -106,25 +87,17 @@ export interface EvalConfig {
 const READ_LIKE_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
 /**
- * Tools that only read what this session already holds, so the mode does not prompt
- * for them: content webfetch/websearch stored (no network), the deferred MCP tool index
- * (each tool it activates is still judged when called), and the names of every MCP
- * server's resources (a listing for ONE server is judged as that server's tool).
+ * Tools that only read what this session already holds: stored fetch results, the
+ * deferred MCP tool index, and MCP resource names.
  */
 const LOCAL_READ_TOOLS = new Set(["get_search_content", "source_check", "mcp_find_tools", "mcp_list_resources"]);
 
-/**
- * Tools the mode does not prompt for, though they are not reads: `task_stop` only stops
- * this session's own background work. Deny rules still apply.
- */
+/** Tools that only stop this session's own background work. */
 const SELF_GATED_TOOLS = new Set(["task_stop"]);
 
 /**
- * Will this bash command actually run inside the OS sandbox? Not when the sandbox is
- * off, when `excludedCommands` takes the command out, or when the model's
- * `dangerouslyDisableSandbox` retry is honoured. When that retry is NOT honoured
- * (`allowUnsandboxedCommands: false`) the parameter is ignored and the command still
- * runs sandboxed, exactly as Claude Code's strict sandbox mode does.
+ * Will this bash command run inside the OS sandbox? Not when the sandbox is off, when
+ * `excludedCommands` takes it out, or when a `dangerouslyDisableSandbox` retry is honoured.
  */
 function sandboxedRun(tool: string, input: Record<string, unknown>, cfg: EvalConfig): boolean {
 	const sb = cfg.sandbox;
@@ -143,11 +116,7 @@ function unsandboxedRetry(tool: string, input: Record<string, unknown>, cfg: Eva
 	);
 }
 
-/**
- * Claude Code's ask rule for the unsandboxed retry, `Bash(dangerouslyDisableSandbox:true)`,
- * matched literally: bluclawd's rules do not match on input parameters, and this is the
- * one such rule the sandbox docs tell users to write.
- */
+/** The one parameter rule: ask before every unsandboxed retry. Rules do not otherwise match parameters. */
 const RETRY_ASK_RULE = /^bash\(dangerouslyDisableSandbox:true\)$/i;
 
 function asksAboutEveryRetry(rules: Rules): boolean {
@@ -155,44 +124,8 @@ function asksAboutEveryRetry(rules: Rules): boolean {
 }
 
 /**
- * A bare `Bash` / `Bash(*)` / `Bash(**)` ask rule is skipped for a command that runs
- * sandboxed (Claude Code's auto-allow mode); content-scoped ones like `Bash(git push *)`
- * still prompt. Dropping the bare forms and re-deciding tells the two apart.
- */
-const BARE_BASH_RULE = /^bash(?:\((?:\*|\*\*)?\))?$/i;
-
-function withoutBareBashAsk(rules: Rules): Rules {
-	return { ...rules, ask: (rules.ask ?? []).filter((r) => !BARE_BASH_RULE.test(r)) };
-}
-
-/** Does an exact full-subject allow rule stand for this call? */
-function hasExactAllow(rules: Rules, exact: string | null): boolean {
-	return exact !== null && (rules.allow ?? []).includes(exact);
-}
-
-/** Is every one of `granted` an allow rule already? False for an empty list. */
-function hasEveryAllow(rules: Rules, granted: string[]): boolean {
-	return granted.length > 0 && granted.every((rule) => (rules.allow ?? []).includes(rule));
-}
-
-/**
- * The compound-command analogue of {@link hasExactAllow}: EVERY segment of a compound
- * bash command has its OWN exact allow rule (exactly what `persistAlwaysAllow`'s
- * per-segment writeback creates, IMPROVEMENT-PLAN.md §2.4) — not merely covered by some
- * broader glob, which would let an unrelated `Bash(**)` silently defeat an ask rule the
- * same way a bare glob already cannot for the single-command case above. Single-segment
- * commands are handled by `hasExactAllow` already; this only applies past 1 segment.
- */
-function hasExactAllowForEverySegment(rules: Rules, command: string): boolean {
-	const segments = bashSegments(command);
-	return segments.length > 1 && segments.every((segment) => hasExactAllow(rules, exactRule("bash", segment)));
-}
-
-/**
- * The rule decision. A `websearch` batch is decided PER QUERY: a deny on ANY query
- * blocks the whole call and the first asking query becomes the prompt's subject, so
- * `queries` cannot carry a query past a `WebSearch(...)` rule; `denyAgent`/`askAgent`
- * then name that query.
+ * The rule decision. A `websearch` batch is decided per query: a deny on any query
+ * blocks the whole call, and the first asking query becomes the prompt's subject.
  */
 export function decideRules(
 	tool: string,
@@ -205,8 +138,7 @@ export function decideRules(
 
 	let decision: Decision | null = null;
 	let askAgent: string | undefined;
-	const targets = searchQueries(input);
-	for (const target of targets) {
+	for (const target of searchQueries(input)) {
 		const d = decide(rules, tool, { query: target }, cwd);
 		if (d === "deny") return { decision: "deny", denyAgent: target };
 		if (d === "ask" && decision !== "ask") {
@@ -221,51 +153,28 @@ export function decideRules(
 
 const ALLOW = (gate: Gate): Verdict => ({ outcome: "allow", gate, reason: "" });
 
-/**
- * Why this configuration cannot prompt — as the clause that goes into the block reason —
- * or `undefined` when it can. Headless cannot prompt: there is no UI.
- */
-function noPromptReason(cfg: EvalConfig): string | undefined {
-	if (!cfg.hasUI) return "running headless (no interactive UI)";
-	return undefined;
-}
+const HEADLESS = "running headless (no interactive UI)";
 
-/** The ask prompt, or the block it becomes when nothing can show a prompt. */
+/** The ask prompt, or a block when there is no UI to show it. */
 function askOrBlock(gate: Gate, exact: string | null, cfg: EvalConfig, tool: string, label?: string): Verdict {
-	const noPrompt = noPromptReason(cfg);
-	if (noPrompt) {
-		return {
-			outcome: "block",
-			gate,
-			reason: `Permission approval required, but ${noPrompt}. Blocked by default.`,
-		};
+	if (!cfg.hasUI) {
+		return { outcome: "block", gate, reason: `Permission approval required, but ${HEADLESS}. Blocked by default.` };
 	}
 	return {
 		outcome: "prompt",
 		gate,
 		promptKind: "ask",
-		// A tool no rule verb names has no rule to show (and none to persist): name the tool.
 		reason: `Permission required — ${label ? `${label}: ` : ""}${exact ? displayRule(exact) : tool}`,
 		exact,
 	};
 }
 
 /**
- * The tool name every gate below decides on.
- *
- * `monitor` is bash with a different delivery — same `command` field, same shell — but
- * every rule verb and the protected-path screen key on the literal name "bash", so an
- * un-normalised `monitor` walked past all of them: a `deny: Bash(**)` did not match it,
- * and a write to `.bluclawd/mcp.json` was not screened. Normalising here — the one point
- * every gate goes through — makes one name enough for every gate, instead of a per-gate list that the next shell-carrying
- * tool would have to be added to.
+ * The tool name every gate decides on. `monitor` runs a shell like bash, or opens a
+ * WebSocket judged as a fetch; MCP resources are judged as their server's tools.
  */
 function governedTool(tool: string, input: Record<string, unknown>): string {
-	// A WebSocket monitor opens from this process, outside the OS sandbox: it is judged
-	// as a fetch of its URL, so WebFetch(domain:…) rules and the fetch prompt cover it.
 	if (tool === "monitor") return monitorSource(input).kind === "ws" ? "webfetch" : "bash";
-	// MCP resources are judged as their server's tools, so `deny: Mcp(github:*)` covers
-	// reading github's resources too.
 	if (tool === "mcp_read_resource" || tool === "mcp_list_resources") {
 		const server = typeof input.server === "string" ? input.server : "";
 		if (server) return `mcp__${server}__${tool.slice("mcp_".length)}`;
@@ -273,13 +182,28 @@ function governedTool(tool: string, input: Record<string, unknown>): string {
 	return tool;
 }
 
-/** The input every gate below reads: a WebSocket monitor's is the fetch it amounts to. */
+/** The input every gate reads: a WebSocket monitor's is the fetch it amounts to. */
 function governedInput(tool: string, input: Record<string, unknown>): Record<string, unknown> {
 	const source = tool === "monitor" ? monitorSource(input) : undefined;
 	return source?.kind === "ws" ? { url: source.url } : input;
 }
 
-/** The credential-bearing path this call reads, if any — see gate 3. */
+/** The protected config path this call writes, if any. bash counts through its redirects and write commands. */
+function protectedWriteTarget(tool: string, input: Record<string, unknown>, cfg: EvalConfig): string | undefined {
+	if (tool !== "edit" && tool !== "write" && tool !== "bash") return undefined;
+	const candidates =
+		tool === "bash"
+			? bashWriteTargets(String(input.command ?? ""))
+			: [typeof input.path === "string" ? input.path : ""];
+	return candidates.find(
+		(candidate) => candidate && isProtectedPath(candidate, cfg.cwd, cfg.agentDir, cfg.configDirName),
+	);
+}
+
+/**
+ * The credential file this call reads, if any. Only files whose contents are secrets or
+ * executable config: gating every read under `.git` would prompt constantly.
+ */
 function protectedReadTarget(tool: string, input: Record<string, unknown>, cfg: EvalConfig): string | undefined {
 	const { cwd, agentDir, configDirName } = cfg;
 	if (tool === "bash") {
@@ -290,19 +214,61 @@ function protectedReadTarget(tool: string, input: Record<string, unknown>, cfg: 
 	if (!READ_LIKE_TOOLS.has(tool)) return undefined;
 	const rawPath = typeof input.path === "string" ? input.path : "";
 	if (rawPath && isReadProtectedPath(rawPath, cwd, agentDir, configDirName)) return rawPath;
-	// find and ls list names, not contents; only grep reads what is under its root.
+	// find and ls list names; only grep reads what is under its root.
 	if (tool === "grep" && searchReachesProtectedFiles(rawPath || cwd, cwd, agentDir, configDirName)) {
 		return rawPath || cwd;
 	}
 	return undefined;
 }
 
-/**
- * Gates 1–3: deny rules and protected paths. No mode can override these.
- *
- * Returns `undefined` when nothing here decides and evaluation should continue in
- * {@link evaluatePostHook}.
- */
+/** The protected-path prompt for a call no rule names, in ask or edits mode. */
+function protectedPathVerdict(tool: string, input: Record<string, unknown>, cfg: EvalConfig): Verdict | undefined {
+	const exact = exactRule(tool, subject(tool, input));
+	const writeTarget = protectedWriteTarget(tool, input, cfg);
+	if (writeTarget) {
+		if (!cfg.hasUI) {
+			return {
+				outcome: "block",
+				gate: "write-protected-path",
+				reason: `Protected path: ${writeTarget}. Approval required, but ${HEADLESS}. Blocked.`,
+				protectedPath: writeTarget,
+			};
+		}
+		return {
+			outcome: "prompt",
+			gate: "write-protected-path",
+			promptKind: "protected-write",
+			reason: `Protected path — allow ${tool} to ${writeTarget}?`,
+			protectedPath: writeTarget,
+			exact,
+		};
+	}
+	const readTarget = protectedReadTarget(tool, input, cfg);
+	if (readTarget) {
+		if (!cfg.hasUI) {
+			return {
+				outcome: "block",
+				gate: "read-protected-path",
+				reason: `Protected path: ${readTarget} holds agent credentials. Approval required, but ${HEADLESS}. Blocked.`,
+				protectedPath: readTarget,
+			};
+		}
+		return {
+			outcome: "prompt",
+			gate: "read-protected-path",
+			promptKind: "protected-read",
+			reason:
+				tool === "bash"
+					? `Protected path — bash command names ${readTarget}: ${String(input.command ?? "")}`
+					: `Protected path — allow ${tool} of ${readTarget}?`,
+			protectedPath: readTarget,
+			exact,
+		};
+	}
+	return undefined;
+}
+
+/** Deny rules. `undefined` when none matches and evaluation continues in {@link evaluatePostHook}. */
 export function evaluatePreHook(
 	rawTool: string,
 	rawInput: Record<string, unknown>,
@@ -310,164 +276,41 @@ export function evaluatePreHook(
 ): Verdict | undefined {
 	const tool = governedTool(rawTool, rawInput);
 	const input = governedInput(rawTool, rawInput);
-
-	// 1. deny rules. (ask/allow are resolved in evaluatePostHook.)
 	const { decision, denyAgent } = decideRules(tool, input, cfg.rules, cfg.cwd);
-	if (decision === "deny") {
-		const subj = tool === "websearch" && denyAgent !== undefined ? denyAgent : subject(tool, input);
-		return {
-			outcome: "block",
-			gate: "deny-rule",
-			reason: `Blocked by permission rule (deny): ${displayRule(exactRule(tool, subj) ?? tool)}`,
-		};
-	}
-
-	// 2. Protected paths, writes. Checked before reads: an approved protected READ falls
-	//    through to the later gates, and a bash command that also writes protected
-	//    territory must not ride along on that approval.
-	//    bash counts: `echo {} > .bluclawd/mcp.json` installs a
-	//    shell-executing config file exactly as `write` does (mcp.json auth headers can run
-	//    shell commands via resolve-config-value.ts), so its redirect targets are screened
-	//    with the same predicate. Descriptor dups (`2>&1`) carry no path and are skipped —
-	//    blocking those would stop most test commands.
-	if (tool === "edit" || tool === "write" || tool === "bash") {
-		const candidates =
-			tool === "bash"
-				? bashWriteTargets(String(input.command ?? ""))
-				: [typeof input.path === "string" ? input.path : ""];
-		const rawPath = candidates.find(
-			(candidate) => candidate && isProtectedPath(candidate, cfg.cwd, cfg.agentDir, cfg.configDirName),
-		);
-		if (rawPath) {
-			const exact = exactRule(tool, subject(tool, input));
-			if (!hasExactAllow(cfg.rules, exact)) {
-				const noPrompt = noPromptReason(cfg);
-				if (noPrompt) {
-					return {
-						outcome: "block",
-						gate: "write-protected-path",
-						reason: `Protected path: ${rawPath}. Approval required, but ${noPrompt}. Blocked.`,
-						protectedPath: rawPath,
-					};
-				}
-				return {
-					outcome: "prompt",
-					gate: "write-protected-path",
-					promptKind: "protected-write",
-					reason: `Protected path — allow ${tool} to ${rawPath}?`,
-					protectedPath: rawPath,
-					exact,
-				};
-			}
-		}
-	}
-
-	// 3. Protected paths, reads. Narrow by design: only files whose CONTENTS are
-	//    credentials or executable config. Gating every read under .git/.bluclawd would
-	//    prompt for HEAD and installed package sources, and a constantly-firing gate
-	//    trains people to approve blindly. bash counts, as it does for writes:
-	//    `cat auth.json` reads exactly what `read` does. So does a grep whose search
-	//    root reaches those files (pi's grep searches hidden files).
-	const readTarget = protectedReadTarget(tool, input, cfg);
-	if (readTarget !== undefined) {
-		const exact = exactRule(tool, subject(tool, input));
-		if (!hasExactAllow(cfg.rules, exact)) {
-			const noPrompt = noPromptReason(cfg);
-			if (noPrompt) {
-				return {
-					outcome: "block",
-					gate: "read-protected-path",
-					reason: `Protected path: ${readTarget} holds agent credentials. Approval required, but ${noPrompt}. Blocked.`,
-					protectedPath: readTarget,
-				};
-			}
-			return {
-				outcome: "prompt",
-				gate: "read-protected-path",
-				promptKind: "protected-read",
-				// bash names the whole command: approving it approves all of it.
-				reason:
-					tool === "bash"
-						? `Protected path — bash command names ${readTarget}: ${String(input.command ?? "")}`
-						: `Protected path — allow ${tool} of ${readTarget}?`,
-				protectedPath: readTarget,
-				exact,
-			};
-		}
-	}
-
-	return undefined;
+	if (decision !== "deny") return undefined;
+	const subj = tool === "websearch" && denyAgent !== undefined ? denyAgent : subject(tool, input);
+	return {
+		outcome: "block",
+		gate: "deny-rule",
+		reason: `Blocked by permission rule (deny): ${displayRule(exactRule(tool, subj) ?? tool)}`,
+	};
 }
 
-/**
- * Gates 4–6: ask rules, allow rules, and what the mode does with an unmatched call.
- */
+/** Ask and allow rules, then the mode for a call no rule names. */
 export function evaluatePostHook(rawTool: string, rawInput: Record<string, unknown>, cfg: EvalConfig): Verdict {
 	const tool = governedTool(rawTool, rawInput);
 	const input = governedInput(rawTool, rawInput);
-	// Claude Code's sandbox auto-allow: a command that will run inside the OS sandbox is
-	// approved without a prompt, in every mode. Deny rules (gate 1) and content-scoped ask
-	// rules still apply; only the bare `Bash` ask rule is skipped for such a command.
-	const autoAllowed = sandboxedRun(tool, input, cfg) && cfg.sandbox?.autoAllowBashIfSandboxed === true;
 	const retry = unsandboxedRetry(tool, input, cfg);
-	// The prompt names an unsandboxed retry as such, as Claude Code's does.
 	const label = retry ? "Bash command (unsandboxed)" : undefined;
-	const { decision, askAgent } = decideRules(
-		tool,
-		input,
-		autoAllowed ? withoutBareBashAsk(cfg.rules) : cfg.rules,
-		cfg.cwd,
-	);
-	// A websearch batch's prompt is about the query an ask rule named.
+	const { decision, askAgent } = decideRules(tool, input, cfg.rules, cfg.cwd);
 	const subj = tool === "websearch" && askAgent !== undefined ? askAgent : subject(tool, input);
 	const exact = exactRule(tool, subj);
 
-	// 4. An ask rule matched. It prompts in EVERY mode — auto included, exactly as Claude
-	//    Code's auto mode honours explicit ask rules — unless a standing grant clears it.
-	if (decision === "ask") {
-		// An exact full-subject allow is what "don't ask again" persists where no prefix is safe. Because
-		// precedence is deny > ask > allow, it would otherwise be shadowed forever by
-		// the very ask rule that triggered the prompt. A broad allow GLOB does not
-		// match this exact check, so it cannot quietly defeat an ask rule.
-		if (hasExactAllow(cfg.rules, exact)) return ALLOW("exact-allow");
-		// A compound command persists one exact rule PER SEGMENT (§2.4), so the
-		// single whole-line check above never matches one — without this, "Always
-		// allow" on a compound would re-prompt on every subsequent identical
-		// invocation, the exact training-to-approve-repeatedly failure this exists
-		// to prevent. Same "exact, not a broader glob" discipline as the check above.
-		if (tool === "bash" && hasExactAllowForEverySegment(cfg.rules, subj)) return ALLOW("exact-allow");
-		// "Yes, and don't ask again" persists a PREFIX rule (`Bash(git push:*)`), which the
-		// exact checks above cannot see. The very rules that answer would persist count as
-		// the user's standing answer — only those, so a broad `Bash(**)` still cannot.
-		if (hasEveryAllow(cfg.rules, standingRules(tool, subj))) return ALLOW("exact-allow");
-		// --allowedTools is an explicit per-invocation grant, and glob-aware.
-		if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
-		// Read-only bash is auto-approved in every mode (Claude Code's built-in list).
-		if (tool === "bash" && !retry && isSafeCommand(subject("bash", input))) return ALLOW("readonly-bash");
+	// Rules.
+	if (decision === "ask" || (retry && asksAboutEveryRetry(cfg.rules))) {
 		return askOrBlock("ask-rule", exact, cfg, tool, label);
 	}
-
-	// 5. An allow rule matched. The user wrote it; it is not second-guessed.
 	if (decision === "allow") return ALLOW("allow-rule");
-
-	// 5b. Sandboxed, and the sandbox is trusted to contain it (autoAllowBashIfSandboxed).
-	if (autoAllowed) return ALLOW("sandboxed");
-
-	// 5c. An unsandboxed retry the user asked to hear about every time — even in auto.
-	if (retry && asksAboutEveryRetry(cfg.rules)) return askOrBlock("ask-rule", exact, cfg, tool, label);
-
-	// 6. No rule matched, so the mode decides. Reads never prompt in any mode; neither
-	//    does read-only bash (Claude Code auto-approves that list everywhere) — without
-	//    this, `ask` would prompt for `git status`, which is the approve-without-looking
-	//    training the gate must avoid.
-	if (READ_LIKE_TOOLS.has(tool) || LOCAL_READ_TOOLS.has(tool) || SELF_GATED_TOOLS.has(tool)) return ALLOW("read-like");
 	if (decide(cfg.cliAllowRules, tool, input, cfg.cwd) === "allow") return ALLOW("cli-allow");
-	// An unsandboxed retry is never "read-only": `head ~/.ssh/id_rsa` is on the safe list,
-	// and the sandbox was the layer that stopped it — leaving the sandbox is exactly what
-	// the user must be asked about. Found live: the retry of a denied credential read ran
-	// unprompted and printed the file.
-	if (tool === "bash" && !retry && isSafeCommand(String(input.command ?? ""))) return ALLOW("readonly-bash");
+
+	// The mode.
 	if (cfg.mode === "auto") return ALLOW("auto-mode");
+	const protectedPath = protectedPathVerdict(tool, input, cfg);
+	if (protectedPath) return protectedPath;
+	if (sandboxedRun(tool, input, cfg) && cfg.sandbox?.autoAllowBashIfSandboxed === true) return ALLOW("sandboxed");
+	if (READ_LIKE_TOOLS.has(tool) || LOCAL_READ_TOOLS.has(tool) || SELF_GATED_TOOLS.has(tool)) return ALLOW("read-like");
+	// Leaving the sandbox is never read-only: the sandbox is what stopped the first attempt.
+	if (tool === "bash" && !retry && isSafeCommand(String(input.command ?? ""))) return ALLOW("readonly-bash");
 	if (cfg.mode === "edits" && (tool === "edit" || tool === "write")) return ALLOW("accept-edits");
 	return askOrBlock("no-matching-rule", exact, cfg, tool, label);
 }

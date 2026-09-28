@@ -1,13 +1,13 @@
 /**
- * Write primitives that take their target as an argument, not a redirect. The
- * protected-path gate is mode-independent, so each must prompt even in auto mode.
+ * Write primitives that take their target as an argument, not a redirect. In ask and
+ * edits mode a write to protected config prompts; auto and allow rules run it.
  */
 import { describe, expect, it } from "vitest";
 import { bashWriteTargets } from "../ext/permissions/bash-targets.ts";
 import { type EvalConfig, evaluatePostHook, evaluatePreHook } from "../ext/permissions/evaluate.ts";
 
 const c: EvalConfig = {
-	mode: "auto",
+	mode: "ask",
 	rules: {},
 	cliAllowRules: {},
 	cwd: "/proj",
@@ -16,8 +16,13 @@ const c: EvalConfig = {
 	hasUI: true,
 };
 
+function verdict(tool: string, input: Record<string, unknown>, over: Partial<EvalConfig> = {}) {
+	const cfg = { ...c, ...over };
+	return evaluatePreHook(tool, input, cfg) ?? evaluatePostHook(tool, input, cfg);
+}
+
 function gate(command: string) {
-	return (evaluatePreHook("bash", { command }, c) ?? evaluatePostHook("bash", { command }, c)).gate;
+	return verdict("bash", { command }).gate;
 }
 
 describe("protected writes through argument-taking primitives", () => {
@@ -39,7 +44,7 @@ describe("protected writes through argument-taking primitives", () => {
 		"env X=1 rm -rf .git",
 		"sh -c 'rm -rf .git'",
 		"npm test && rm -rf .git",
-	])("%s prompts in auto mode", (command) => {
+	])("%s prompts in ask mode", (command) => {
 		expect(gate(command)).toBe("write-protected-path");
 	});
 
@@ -49,6 +54,19 @@ describe("protected writes through argument-taking primitives", () => {
 			expect(gate(command)).not.toBe("write-protected-path");
 		},
 	);
+
+	it("prompts in edits mode too, and blocks headless", () => {
+		const hook = { path: ".git/hooks/pre-commit" };
+		expect(verdict("write", hook, { mode: "edits" }).gate).toBe("write-protected-path");
+		expect(verdict("write", hook, { hasUI: false }).outcome).toBe("block");
+	});
+
+	it("runs in auto mode, and under an allow rule in any mode", () => {
+		const hook = { path: ".git/hooks/pre-commit" };
+		expect(verdict("write", hook, { mode: "auto" }).gate).toBe("auto-mode");
+		expect(verdict("write", hook, { rules: { allow: ["Edit(.git/**)"] } }).gate).toBe("allow-rule");
+		expect(verdict("bash", { command: "rm -rf .git" }, { mode: "auto" }).gate).toBe("auto-mode");
+	});
 
 	it("names the targets, not the flags or the sed script's own words", () => {
 		expect(bashWriteTargets("rm -rf a b")).toEqual(["a", "b"]);
