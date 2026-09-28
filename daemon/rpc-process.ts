@@ -36,14 +36,12 @@ export function buildRpcTailArgs(opts: {
 	provider?: string;
 	model?: string;
 	appendSystemPrompt?: string;
-	permissionMode?: string;
 }): string[] {
 	const args: string[] = [];
 	if (opts.sessionFile) args.push("--session", opts.sessionFile);
 	if (opts.provider) args.push("--provider", opts.provider);
 	if (opts.model) args.push("--model", opts.model);
 	if (opts.appendSystemPrompt) args.push("--append-system-prompt", opts.appendSystemPrompt);
-	if (opts.permissionMode) args.push("--permission-mode", opts.permissionMode);
 	return args;
 }
 
@@ -66,7 +64,6 @@ export class RpcProcessInstance {
 		provider?: string;
 		model?: string;
 		appendSystemPrompt?: string;
-		permissionMode?: string;
 	}) {
 		const rpcCommand = this.getSpawnCommand(options);
 		this.process = spawn(rpcCommand.command, rpcCommand.args, {
@@ -85,7 +82,6 @@ export class RpcProcessInstance {
 		provider?: string;
 		model?: string;
 		appendSystemPrompt?: string;
-		permissionMode?: string;
 	}): {
 		command: string;
 		args: string[];
@@ -277,7 +273,6 @@ export function createRpcProcessInstance(options: {
 	provider?: string;
 	model?: string;
 	appendSystemPrompt?: string;
-	permissionMode?: string;
 }): RpcProcessInstance {
 	return new RpcProcessInstance(options);
 }

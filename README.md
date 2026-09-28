@@ -42,9 +42,8 @@ scripts/        probe-extensions.ts — headless report of what each extension r
 test/           self-contained — no monorepo, no fixtures pi doesn't publish
 ```
 
-14 extensions: `permissions`, `memory`,
-`checkpoints`, `web`, `mcp`, `sandbox`, `background-bash`,
-`branding`, `diagnostics`, `agent-view`, `help`, `plugin`, `shell`, `vibes`.
+11 extensions: `permissions`, `checkpoints`, `web`, `mcp`, `background-bash`,
+`branding`, `diagnostics`, `agent-view`, `help`, `shell`, `vibes`.
 
 ## What it adds
 
@@ -52,21 +51,19 @@ Claude Code's names and behaviours, on top of pi's own commands:
 
 | Command | What it does |
 |---|---|
-| `/mode`, `/permissions` | permission modes and allow/ask/deny rules. `/mode` picks from a list; Alt+M cycles `ask → edits → auto` |
-| `/sandbox` | OS-level sandbox for bash (`@anthropic-ai/sandbox-runtime`), configured with Claude Code's `sandbox` keys. `/sandbox` is a switch — on or off (`/sandbox on|off`, or pick from the menu) — saved to the project's `.pi/settings.json` (session-only in an untrusted project); on, the model's shell commands run confined and without a permission prompt, which is what makes it the safety net for agentic work. The finer keys below still apply when written in settings.json. Writes: the working directory and a per-session `$TMPDIR`; a linked worktree also gets the repository's shared `.git` (not its hooks or config). Protected inside those, whatever `allowWrite` says: the agent's config (`.pi/settings.json`, `mcp.json`, `hooks.json`, `extensions/`, `skills/`, `agents/`, ... — but not `.pi/worktrees/`, where subagents work), the agent dir, bare-repository files (`HEAD`, `objects`, `refs`, `config`), plus the runtime's own list (shell rc files, `.gitconfig`, `.mcp.json`, `.git/hooks`, `.git/config`, ...). Network: no host is pre-allowed; the first connection to a host asks — "Yes" holds for the session, "Yes, and don't ask again" saves a `WebFetch(domain:…)` allow rule. Permission rules feed the sandbox as in Claude Code: `Edit`/`Write` allow and deny → write lists, `Read` deny → `denyRead`, `WebFetch(domain:…)` → domain lists. Relative paths resolve against the project root in project settings and against the agent dir in user settings. Sandboxed commands run without a permission prompt (`autoAllowBashIfSandboxed`, default true; deny rules and content-scoped ask rules still apply). A denied command's result names the path or host in `<sandbox_violations>`; the model may retry with `dangerouslyDisableSandbox`, which goes through the normal permission flow labelled "(unsandboxed)" — `allowUnsandboxedCommands: false` ignores that parameter. `excludedCommands` (`Bash(...)` patterns, e.g. `docker *`) always run outside. `failIfUnavailable` (formerly `strict`) makes bluclawd exit with an error at startup when the sandbox was enabled but cannot start. Settings edits apply to the running session. Commands you type yourself (`!` and bash mode) run outside the sandbox, as in Claude Code. User settings only (ignored in a project, as in Claude Code): `allowAppleEvents`, `filesystem.disabled`, `network.strictAllowlist`, `network.tlsTerminate`, `ripgrep`, and credential `mask` entries, `allowPlaintextInject`, `awsPairs`, `sigv4`. Everything else (`credentials`, `filesystem.allowRead`, `network.allowLocalBinding`, `ignoreViolations`, ...) passes straight through to the runtime. Like Claude Code, no credential is blocked by default: a `Read(...)` deny rule (e.g. `Read(~/.ssh/**)`) blocks it for the read tool and, through the sandbox, for every bash subprocess too. Not available: per-command allowed domains in auto mode (needs Claude Code's classifier) |
+| `permissions.deny`, Alt+M | deny rules block matching tool calls; the footer shows pi's `defaultProjectTrust` (`⏵⏵ always` / `⏸ ask` / `✕ never`) and Alt+M cycles it — see [Permissions](#permissions) |
 | `/tasks` | background tasks dialog (alias `/bashes`): shells (`run_in_background`, Ctrl+B on the model's running bash, or a foreground command past its `timeout`), monitors; running tasks only; Enter shows a task's output tail, `x` stops it (the model is told without a turn starting), and updates wait while the dialog is open. The model's bash is Claude Code's: `timeout` in milliseconds (2 minutes by default), a command still running then - or on Ctrl+B after 2s, or when you send a message - moves to the background instead of being killed, and the model reads a task's output file with `read`. The footer pill counts the running shells and monitors; ↓ from an empty prompt selects it and Enter opens the dialog. A shell writes its whole output to a file named in its start result and exit notification; `task_stop` stops it. A job notifies the model once when it exits, and once more if it goes quiet for 45s on what reads as an interactive prompt (`(y/n)`, `Press Enter`, …); the `monitor` tool turns each stdout line of a long-running command, or each frame of a WebSocket (`ws`), into an event that wakes the model (Claude Code's `Monitor`; stderr goes to the output file) |
 | `/mcp` | MCP servers from `mcp.json` / `.mcp.json`; project servers need `/mcp approve` (enable/disable of a project server is kept in your settings, never written into `.mcp.json`). Server instructions go into the system prompt, server prompts run as `/mcp__<server>__<prompt> args…`, `list_changed` refreshes tools live, and a result over 50KB is cut with the full text saved to a temp file. Resources: `mcp_list_resources` / `mcp_read_resource`, and `@server:uri` in a prompt attaches one; both prompt commands and `@server:` resources autocomplete in the editor (Tab after `@server:` lists them). A server can ask you for input (form elicitation) or ask your current model for a completion (sampling, confirmed per request, any provider). To confirm before chosen tools run, use an ask rule such as `Mcp(github:delete_*)`. Claude Code's timeouts (per-server `timeout`, `MCP_TOOL_TIMEOUT` ≈28h default, idle `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` 30 min stdio / 5 min remote, `MCP_TIMEOUT` connect) and `${VAR}` / `${VAR:-default}` in `command`, `args`, `env`, `url`, `headers`; a remote server whose url or header would carry a model/cloud credential is refused |
 | `webfetch`, `websearch` | Claude Code's `WebFetch`/`WebSearch`, extended; see [Web](#web). Rules: `WebFetch(domain:example.com)` (what "don't ask again" persists), `WebSearch(<query glob>)`, checked per query in a batch |
-| `/memory`, `# note` | persistent memory, injected into the system prompt. `/memory edit [scope]` and `/memory search <text>`; a bare `#` opens an editor for a multi-line note; `@name.md` lines pull in a sibling file |
 | `/rewind` | file checkpoints per turn; restores the files, the conversation, or both |
 | `/bash-mode`, `/stash` | bash mode (Ctrl+Shift+B or `/bash-mode`): the prompt drives a persistent shell, so `cd`, `export` and functions carry between commands; output shows below the editor instead of in the conversation, Escape leaves, Ctrl+C interrupts, Up/Down walk its commands. Alt+S stashes the prompt you are writing and brings it back into an empty editor; `/stash` inserts an older one |
 | `←` twice on an empty prompt | agent view, as Claude Code's `claude agents`: background sessions in Needs input / Working / Completed bands (ctrl+s: by directory, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing, age. Type a task + enter to start a background session (ctrl+enter: start it here), shift+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, space peeks and replies (1-9 answers a pending question), enter/→ opens a session in this window (this one keeps running in the background), alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes, ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` filters, `/resume` brings a past session back, `/model` sets the model for new ones. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press |
 | `/status`, `/context` | model, auth, safety, session, context window |
-| `/plugin`, `/theme` | packages, theme |
+| `/theme` | theme |
 | `/help` | all of the above, grouped |
 
 bluclawd draws no footer of its own. Its footer items go through pi's `setStatus`, keyed so they
-sort into Claude Code's order: `⏵⏵ auto mode on (alt+m to cycle)`, then the background-task pill,
+sort in this order: `⏵⏵ always (alt+m to cycle)`, then the background-task pill,
 then `← for agents`. pi's own footer shows them on one line. For the ccstatusline
 status line, install [pistatusline](https://github.com/christophesamueldhp/pistatusline): it draws
 the same items under its lines.
@@ -90,8 +87,7 @@ images. Page text is marked untrusted. It blocks private addresses (checked at
 connect time) and reports a redirect to another host instead of following it.
 Special URLs:
 - **github.com**: through your `gh`/`git` — a repository is shallow-cloned under
-  the temp dir (tree + README, then read/grep the clone; not while the bash sandbox
-  is on), a `/blob/` file comes from the API, issues and PRs as ordered Markdown.
+  the temp dir (tree + README, then read/grep the clone), a `/blob/` file comes from the API, issues and PRs as ordered Markdown.
 - **YouTube**: title, channel, description and the caption transcript with
   timestamps. No video model involved; YouTube sometimes withholds captions from
   anonymous clients, and the output says so.
@@ -168,7 +164,7 @@ reading the API:
 - **Hidden command aliases are impossible.** `registerCommand` has no alias
   field, and pi's `input` event fires only after the interactive command chain.
   Commands here have their canonical name only.
-- **An extension cannot rebind a pi keybinding.** Permission-mode cycling is
+- **An extension cannot rebind a pi keybinding.** Trust cycling is
   **Alt+M**, not Claude Code's Shift+Tab, which pi binds to
   `app.thinking.cycle`; pi refuses the registration and logs a conflict.
 - **An extension cannot add a theme colour.** pi's `ThemeColor` union is fixed,
@@ -190,57 +186,36 @@ reading the API:
   always takes two presses (Claude Code opens on one when the prompt was already
   empty), and `tab` does not browse subagents.
 
-## Permission modes
+## Permissions
 
-Rules decide first, in every mode: `deny` blocks, `ask` prompts, `allow` runs,
-with precedence deny > ask > allow. An `ask` rule always asks — no allow rule,
-flag or sandbox clears it. The mode only says what happens to a call no rule
-names:
+pi asks nothing before a tool runs, and bluclawd keeps it that way: there are no
+permission modes and no prompts. It adds one thing — **deny rules**. A tool call
+that matches a `permissions.deny` rule is blocked, and the model is told which rule
+blocked it:
 
-| Mode | A call no rule names |
-|---|---|
-| `ask` | reads and read-only bash run; everything else prompts |
-| `edits` | reads, read-only bash and edit/write run; everything else prompts |
-| `auto` | everything runs |
+```json
+{
+  "permissions": {
+    "deny": ["Bash(rm -rf *)", "Bash(git push --force *)", "Read(~/.ssh/**)", "mcp__github__delete_*"]
+  }
+}
+```
 
-In `ask` and `edits`, a write to protected config (`.git`, `.pi`, `.vscode`,
-`.mcp.json`, the agent dir, …) and a read of agent credentials also prompt; an
-allow rule or `auto` runs them. `auto` never prompts on its own: an empty rule
-set approves everything, and `deny: ["Bash(rm -rf **)"]` is how you put a guard
-back. Claude Code's names (`default`, `acceptEdits`, `bypass`) and the older
-`always` are still accepted anywhere a mode is named — the bypass spellings
-resolve to `auto` — so stored settings and scripts keep working.
-`task_stop` never prompts from the mode: it only touches this session's own shells.
+Rules come from `~/.pi/agent/settings.json` and the project's `.pi/settings.json`
+(read only when the project is trusted); the two lists add up, so a project cannot
+drop your global rules. Syntax: `Bash(npm test *)` is `npm test` alone or with
+arguments; `*` stays within a path segment and `**` crosses them; `Edit(...)`
+also covers write and `Read(...)` also covers grep, find and ls; `//path` is
+absolute, `~/path` is home, anything else is relative to the working directory;
+`WebFetch(domain:x.com)`, `WebSearch(...)`, and MCP tools as `mcp__server`,
+`mcp__server__*`, `mcp__server__tool` or `Mcp(server:tool)`. A bash rule also
+matches the command behind `env`, `nohup`, `xargs`, `watch`, `sh -c '…'`,
+`/bin/…` and `\cmd`, and in any part of a `&&`/`;`/`|` chain.
 
-Rules take Claude Code's spellings: an `Edit(...)` rule also covers the write tool,
-a `Read(...)` rule also covers grep, find and ls, `Bash(npm test *)` equals
-`Bash(npm test:*)`, `//path` is an absolute path, and MCP tools can be named
-`mcp__server`, `mcp__server__*` or `mcp__server__tool` as well as `Mcp(server:tool)`.
-Global and project `allow`/`ask`/`deny` lists add up; a project cannot replace
-yours.
-
-A prompt has Claude Code's rows: **Yes**, a row for "from now on", and **No**. A
-digit picks a row, Esc is No, and Tab on No types a note the model receives. Where
-pi cannot draw that dialog (RPC mode, agent view's background sessions) the same rows
-come as a plain list, with **No, and tell the model what to do differently** as its
-own row.
-The middle row depends on the call: a command offers `Yes, and don't ask again for
-npm test commands in <project>`, saved as `Bash(npm test:*)` — the prefix alone or
-with arguments, never `npm testx` — in the project's settings (one rule per command
-of a compound line; interpreters, wrappers and `$(…)` get the exact command
-instead); an edit no rule names offers `Yes, and switch to edits mode for this
-session`; a credential read is allowed for the session; a protected write and an
-`ask` rule's prompt get no middle row. In an untrusted project "don't ask again" lasts the session.
-
-A trusted session starts in `auto`; set `permissions.defaultMode` in global
-settings to start in `ask` or `edits` instead.
-
-**Project trust pins the mode.** In a project pi has not been told to trust,
-every mode above `ask` is refused — from settings, CLI flags, `/mode` and
-Alt+M alike. pi already withholds an untrusted repository's settings,
-extensions and skills; a mode that auto-approves edits or skips prompts would
-hand back what that gate withholds. `/trust` is the way out, and the refusal
-message says so.
+The footer shows pi's own `defaultProjectTrust` — `⏵⏵ always`, `⏸ ask` or
+`✕ never` — and Alt+M cycles it, saving to global settings. It decides whether a
+project's `.pi` settings and extensions load when no `/trust` decision was saved;
+like `/settings`, the change applies to projects opened from then on.
 
 Deliberately not ported: **PDF input** (would mean reimplementing four
 provider wire formats behind `before_provider_request` — a shared-type change

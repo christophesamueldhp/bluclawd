@@ -108,7 +108,7 @@ function fakeClient(calls: Calls, list: () => InstanceSummary[] = () => sessions
 	} as unknown as OrchestratorClient;
 }
 
-function makeView(opts: { self?: InstanceSummary; rows?: number; mode?: "ask" | "edits" | "auto" } = {}) {
+function makeView(opts: { self?: InstanceSummary; rows?: number } = {}) {
 	const calls: Calls = [];
 	const opened: string[] = [];
 	let closed = 0;
@@ -125,7 +125,6 @@ function makeView(opts: { self?: InstanceSummary; rows?: number; mode?: "ask" | 
 		onClose: () => closed++,
 		onOpen: (file) => opened.push(file),
 		fileExists: () => true,
-		permissionMode: opts.mode ? () => opts.mode : undefined,
 	});
 	view.setInstancesForTest(sessions);
 	const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -264,14 +263,6 @@ describe("AgentView keys", () => {
 				model: { provider: "opencode-go", id: "kimi" },
 			},
 		]);
-	});
-
-	it("new sessions run in the mode of the session the view was opened from", async () => {
-		const { view, calls, flush } = makeView({ mode: "auto" });
-		for (const ch of "fix it") view.handleInput(ch);
-		view.handleInput(ENTER);
-		await flush();
-		expect(calls[0]?.[1]).toMatchObject({ permissionMode: "auto" });
 	});
 
 	it("ctrl+j and shift+enter add lines to the task; backspace on an empty line joins them back", async () => {
@@ -463,24 +454,6 @@ describe("AgentView look", () => {
 		expect(text().at(-1)).toContain("? for shortcuts");
 	});
 
-	it("leads the hints with the mode new sessions inherit, in Claude Code's badge colors", () => {
-		const auto = makeView({ mode: "auto" });
-		const raw = auto.view.render(100).at(-1)!;
-		expect(stripAnsi(raw)).toBe(
-			"  ⏵⏵ auto mode · enter to open · space to reply · ctrl+x to delete · ? for shortcuts",
-		);
-		expect(raw).toContain("\x1b[38;2;255;193;7m⏵⏵ auto mode");
-		for (const ch of "fix it") auto.view.handleInput(ch);
-		expect(auto.text().at(-1)).toBe("  ⏵⏵ auto mode · enter to create · esc to clear");
-
-		const edits = makeView({ mode: "edits" }).view.render(100).at(-1)!;
-		expect(edits).toContain("\x1b[38;2;175;135;255m⏵⏵ edits mode");
-		// ask is Claude Code's default, which it leaves unlabeled.
-		expect(makeView({ mode: "ask" }).text().at(-1)).toBe(
-			"  enter to open · space to reply · ctrl+x to delete · ? for shortcuts",
-		);
-	});
-
 	it("lays the ? grid out like Claude Code: two to a column, whole phrases, alt count from the focused directory", () => {
 		const { view } = makeView();
 		view.handleInput("?");
@@ -505,18 +478,6 @@ describe("AgentView look", () => {
 			expect.stringMatching(/^ {2}shift\+↑↓ to reorder {4}ctrl\+s to switch views {4}/),
 			expect.stringMatching(/^ {2}ctrl\+r to rename {7}ctrl\+j for newline {8}/),
 		]);
-	});
-
-	it("keeps the mode off the shortcut grid, the peek box and rename", () => {
-		const { view, text } = makeView({ mode: "auto" });
-		view.handleInput("?");
-		expect(text().join("\n")).not.toContain("auto mode");
-		view.handleInput("?");
-		view.handleInput(" ");
-		expect(text().join("\n")).not.toContain("auto mode");
-		view.handleInput(ESC);
-		view.handleInput("\x12"); // ctrl+r
-		expect(text().join("\n")).not.toContain("auto mode");
 	});
 
 	it("with only this session listed, explains the view just above the composer", () => {

@@ -1,29 +1,19 @@
 /**
- * Persisting bluclawd's own settings keys (permission rules, MCP server
- * approvals) to settings.json. pi's `SettingsManager` has no public way to
- * persist a key it does not know, so these writers do their own
- * read-modify-write of the same files pi reads.
+ * Persisting bluclawd's own settings key `mcp` (MCP server approvals) to
+ * settings.json. pi's `SettingsManager` has no public way to persist a key it does
+ * not know, so these writers do their own read-modify-write of the file pi reads.
  *
  * Each writer touches **only** the one top-level key it owns, merging into
  * whatever else is on disk, and takes pi's `proper-lockfile` lock on the file
- * so a concurrent writer serialises rather than interleaves. Project writes
- * refuse an untrusted project.
+ * so a concurrent writer serialises rather than interleaves.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import lockfile from "proper-lockfile";
-import { sharedRef } from "./global-state.ts";
-import type { PermissionSettings } from "./settings.ts";
-
-type RuleList = "allow" | "ask" | "deny";
 
 function globalSettingsPath(): string {
 	return join(getAgentDir(), "settings.json");
-}
-
-function projectSettingsPath(cwd: string): string {
-	return join(cwd, CONFIG_DIR_NAME, "settings.json");
 }
 
 function readObject(path: string): Record<string, unknown> {
@@ -65,84 +55,6 @@ async function updateKey<T>(path: string, key: string, update: (current: T) => T
 	} finally {
 		await release?.().catch(() => {});
 	}
-}
-
-function withRule(permissions: PermissionSettings, list: RuleList, rule: string): PermissionSettings | undefined {
-	const rules = permissions[list] ?? [];
-	if (rules.includes(rule)) return undefined; // idempotent: nothing to write
-	return { ...permissions, [list]: [...rules, rule] };
-}
-
-function withoutRule(permissions: PermissionSettings, rule: string): PermissionSettings | undefined {
-	let removed = false;
-	const next: PermissionSettings = { ...permissions };
-	for (const list of ["allow", "ask", "deny"] as const) {
-		const rules = next[list];
-		if (rules?.includes(rule)) {
-			next[list] = rules.filter((entry) => entry !== rule);
-			removed = true;
-		}
-	}
-	return removed ? next : undefined;
-}
-
-/**
- * Told whenever a permission rule is saved or removed, so the permission layer can
- * reload its in-memory rules when another extension wrote one (the sandbox's "don't
- * ask again" for a host). A sharedRef: each extension loads this module on its own.
- */
-const rulesChanged = sharedRef<(() => void) | undefined>("permissions.rulesChanged", undefined);
-
-export function onRulesChanged(listener: (() => void) | undefined): void {
-	rulesChanged.set(listener);
-}
-
-function notifyRulesChanged(): void {
-	rulesChanged.get()?.();
-}
-
-export async function addGlobalRule(list: RuleList, rule: string): Promise<void> {
-	await updateKey<PermissionSettings>(globalSettingsPath(), "permissions", (p) => withRule(p, list, rule));
-	notifyRulesChanged();
-}
-
-export async function addProjectRule(cwd: string, list: RuleList, rule: string, trusted: boolean): Promise<void> {
-	if (!trusted) throw new Error("Refusing to write project permission rules: project is not trusted");
-	await updateKey<PermissionSettings>(projectSettingsPath(cwd), "permissions", (p) => withRule(p, list, rule));
-	notifyRulesChanged();
-}
-
-export async function removeGlobalRule(rule: string): Promise<boolean> {
-	const removed = await updateKey<PermissionSettings>(globalSettingsPath(), "permissions", (p) =>
-		withoutRule(p, rule),
-	);
-	if (removed) notifyRulesChanged();
-	return removed;
-}
-
-export async function removeProjectRule(cwd: string, rule: string, trusted: boolean): Promise<boolean> {
-	if (!trusted) return false;
-	const removed = await updateKey<PermissionSettings>(projectSettingsPath(cwd), "permissions", (p) =>
-		withoutRule(p, rule),
-	);
-	if (removed) notifyRulesChanged();
-	return removed;
-}
-
-/**
- * Save the `/sandbox` on/off choice (`sandbox.enabled`) to the project's settings.
- * Every other `sandbox` key on disk is kept.
- */
-export async function setProjectSandboxKeys(
-	cwd: string,
-	patch: Record<string, boolean>,
-	trusted: boolean,
-): Promise<boolean> {
-	if (!trusted) throw new Error("Refusing to write project sandbox settings: project is not trusted");
-	return updateKey<Record<string, unknown>>(projectSettingsPath(cwd), "sandbox", (sandbox) => ({
-		...sandbox,
-		...patch,
-	}));
 }
 
 /** The `mcp` settings key this layer owns: the approval record and per-project enable/disable choices. */

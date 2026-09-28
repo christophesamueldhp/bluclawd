@@ -46,13 +46,10 @@ const help: InlineExtension = {
 				`  ${theme.fg("accent", "@ <path>")}  ${theme.fg("dim", "mention a file (Tab autocompletes paths)")}`,
 			);
 			lines.push(
-				`  ${theme.fg("accent", "# <note>")}  ${theme.fg("dim", "save a quick note to persistent memory")}`,
-			);
-			lines.push(
 				`  ${theme.fg("accent", "← ←")}       ${theme.fg("dim", "agent view: background sessions (on an empty prompt)")}`,
 			);
 			lines.push(
-				`  ${theme.fg("accent", "Alt+M")}     ${theme.fg("dim", "cycle permission modes — /hotkeys lists every shortcut")}`,
+				`  ${theme.fg("accent", "Alt+M")}     ${theme.fg("dim", "cycle defaultProjectTrust — /hotkeys lists every shortcut")}`,
 			);
 
 			const width =

@@ -2,7 +2,7 @@ import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { backgroundBashJobs } from "../ext/_shared/background-bash.ts";
 import { formatClaudeDuration } from "../ext/_shared/bash-limits.ts";
-import { backgroundStartText, createClaudeBashTool } from "../ext/sandbox/bash-tool.ts";
+import { backgroundStartText, createClaudeBashTool } from "../ext/background-bash/bash-tool.ts";
 
 /** Operations whose runs the test ends; each call is recorded with its timeout. */
 function fakeOps() {
@@ -26,11 +26,9 @@ function makeTool(ops: BashOperations, extra: Partial<Parameters<typeof createCl
 	const sent: unknown[] = [];
 	const tool = createClaudeBashTool({
 		cwd: "/work",
-		operations: () => ops,
-		refusal: () => undefined,
+		operations: ops,
 		sendMessage: (message) => sent.push(message),
 		isMain: true,
-		sandboxEscape: true,
 		...extra,
 	});
 	return { tool, sent };
@@ -48,18 +46,9 @@ describe("schema and prompt (Claude Code 2.1.281)", () => {
 	it("takes timeout in milliseconds and CC's parameter texts", () => {
 		const { tool } = makeTool(fakeOps().ops);
 		const props = (tool.parameters as { properties: Record<string, { description?: string }> }).properties;
-		expect(Object.keys(props)).toEqual([
-			"command",
-			"timeout",
-			"description",
-			"run_in_background",
-			"dangerouslyDisableSandbox",
-		]);
+		expect(Object.keys(props)).toEqual(["command", "timeout", "description", "run_in_background"]);
 		expect(props.timeout.description).toBe("Optional timeout in milliseconds (max 600000)");
 		expect(props.run_in_background.description).toBe("Set to true to run this command in the background.");
-		expect(props.dangerouslyDisableSandbox.description).toBe(
-			"Set this to true to dangerously override sandbox mode and run commands without sandboxing.",
-		);
 		expect(props.description.description).toMatch(/^Clear, concise description of what this command does/);
 		expect(tool.promptGuidelines).toContain("`timeout` is in milliseconds: default 120000, max 600000.");
 		expect(tool.promptGuidelines).toContain(
@@ -80,13 +69,6 @@ describe("schema and prompt (Claude Code 2.1.281)", () => {
 		vi.stubEnv("BASH_DEFAULT_TIMEOUT_MS", "900000");
 		const { tool } = makeTool(fakeOps().ops);
 		expect(tool.promptGuidelines).toContain("`timeout` is in milliseconds: default 900000, max 900000.");
-	});
-
-	it("leaves dangerouslyDisableSandbox out for a session with nobody to ask", () => {
-		const { tool } = makeTool(fakeOps().ops, { sandboxEscape: false });
-		expect((tool.parameters as { properties: Record<string, unknown> }).properties.dangerouslyDisableSandbox).toBe(
-			undefined,
-		);
 	});
 });
 

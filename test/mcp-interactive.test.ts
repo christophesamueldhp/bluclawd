@@ -7,7 +7,6 @@ import { type McpCompletionSource, mcpAutocomplete } from "../ext/mcp/autocomple
 import { type ClientHandlers, createClient } from "../ext/mcp/client.ts";
 import { answerElicitation, type ElicitUI } from "../ext/mcp/elicit.ts";
 import { answerSampling, samplingPrompt } from "../ext/mcp/sampling.ts";
-import { decide } from "../ext/permissions/rules.ts";
 
 /** A dialog UI that replays scripted answers in order and records every title. */
 function scriptedUI(answers: (string | boolean | undefined)[]): ElicitUI & { titles: string[] } {
@@ -252,13 +251,5 @@ describe("mcpAutocomplete", () => {
 
 	it("leaves @unknown:… to the file completer", async () => {
 		expect(await suggest("@nope:x")).toBeNull();
-	});
-});
-
-describe("confirming chosen MCP tools", () => {
-	it("is an ask rule with a glob, so no separate approveTools setting is needed", () => {
-		const rules = { allow: [], ask: ["Mcp(github:delete_*)"], deny: [] } as unknown as Parameters<typeof decide>[0];
-		expect(decide(rules, "mcp__github__delete_repo", {})).toBe("ask");
-		expect(decide(rules, "mcp__github__get_me", {})).toBeNull();
 	});
 });

@@ -25,7 +25,6 @@ import {
 } from "@earendil-works/pi-tui";
 import { theme } from "../_shared/theme.ts";
 import { mascotGlyphs, REST, renderMascot } from "../branding/mascot.ts";
-import type { PermissionMode } from "../permissions/modes.ts";
 import { currentDaemonBuildId, type InstanceSummary, type OrchestratorClient } from "./orchestrator-client.ts";
 import {
 	type AgentRow,
@@ -77,8 +76,6 @@ export interface AgentViewOptions {
 	setTitle?: (title: string | undefined) => void;
 	/** Test seam for the "wait for the session file" step of opening a starting session. */
 	fileExists?: (path: string) => boolean;
-	/** The mode of the session the view was opened from, which new sessions inherit. */
-	permissionMode?: () => PermissionMode | undefined;
 }
 
 type Item =
@@ -185,13 +182,6 @@ function promptLine(input: Input, width: number, placeholder: string): string {
 	}
 	const line = input.render(width)[0] ?? "";
 	return line.startsWith("> ") ? `❯ ${line.slice(2)}` : line;
-}
-
-/** Badge for the mode new sessions inherit; `ask` has none. */
-function modeChip(mode: PermissionMode | undefined): string | undefined {
-	if (mode === "auto") return cc.fg("warning", "⏵⏵ auto mode");
-	if (mode === "edits") return `${sgr(38, isLightTheme() ? "#8700ff" : "#af87ff")}⏵⏵ edits mode\x1b[39m`;
-	return undefined;
 }
 
 function sanitize(text: string): string {
@@ -498,7 +488,6 @@ export class AgentView implements Component, Focusable {
 				label: placeholder.label,
 				prompt: task,
 				model,
-				permissionMode: this.opts.permissionMode?.(),
 			});
 			if (instance && this.selectedKey === placeholder.id) this.selectedKey = instance.id;
 			if (open && instance) {
@@ -701,7 +690,6 @@ export class AgentView implements Component, Focusable {
 				label: past.label,
 				sessionFile: past.sessionFile,
 				model: this.dispatchModel,
-				permissionMode: this.opts.permissionMode?.(),
 			});
 			if (instance) this.selectedKey = instance.id;
 		} catch (error) {
@@ -785,7 +773,6 @@ export class AgentView implements Component, Focusable {
 					sessionFile: row.sessionFile,
 					prompt: text,
 					model: this.dispatchModel,
-					permissionMode: this.opts.permissionMode?.(),
 				});
 			}
 			this.reply.setValue("");
@@ -1318,32 +1305,25 @@ export class AgentView implements Component, Focusable {
 		}
 	}
 
-	private hints(width: number, items: Array<[string, string] | undefined>, chip?: string): string {
+	private hints(width: number, items: Array<[string, string] | undefined>): string {
 		const parts = items.filter((i): i is [string, string] => !!i).map(([key, action]) => `${key} to ${action}`);
-		const lead = chip ? `${chip}${cc.fg("muted", " · ")}` : "";
 		let line = parts.join(" · ");
-		while (parts.length > 1 && visibleWidth(lead) + visibleWidth(line) > width - 2) {
+		while (parts.length > 1 && visibleWidth(line) > width - 2) {
 			parts.splice(parts.length - 2, 1);
 			line = parts.join(" · ");
 		}
-		return truncateToWidth(`  ${lead}${cc.fg("muted", line)}`, width);
+		return truncateToWidth(`  ${cc.fg("muted", line)}`, width);
 	}
 
 	private listFooter(width: number): string {
 		const text = this.composerText();
 		const item = this.selected;
-		// The hints lead with the mode new sessions will run in.
-		const chip = modeChip(this.opts.permissionMode?.());
 		if (text) {
-			if (stateFilter(text)) return this.hints(width, [["esc", "clear"]], chip);
-			return this.hints(
-				width,
-				[
-					["enter", text.startsWith("/") ? "run" : "create"],
-					["esc", "clear"],
-				],
-				chip,
-			);
+			if (stateFilter(text)) return this.hints(width, [["esc", "clear"]]);
+			return this.hints(width, [
+				["enter", text.startsWith("/") ? "run" : "create"],
+				["esc", "clear"],
+			]);
 		}
 		let enter: [string, string] | undefined;
 		if (item?.kind === "header") enter = ["enter", this.collapsed.has(item.band.key) ? "expand" : "collapse"];
@@ -1353,11 +1333,12 @@ export class AgentView implements Component, Focusable {
 			!item || width < 80 || item.kind === "more" || (item?.kind === "row" && item.row.self)
 				? undefined
 				: ["ctrl+x", item?.kind === "header" ? "delete all" : "delete"];
-		return this.hints(
-			width,
-			[enter, width >= 55 && item?.kind === "row" ? ["space", "reply"] : undefined, x, ["?", "for shortcuts"]],
-			chip,
-		).replace("? to for shortcuts", "? for shortcuts");
+		return this.hints(width, [
+			enter,
+			width >= 55 && item?.kind === "row" ? ["space", "reply"] : undefined,
+			x,
+			["?", "for shortcuts"],
+		]).replace("? to for shortcuts", "? for shortcuts");
 	}
 
 	render(width: number): string[] {

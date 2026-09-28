@@ -24,10 +24,7 @@ import checkpoints from "./checkpoints/index.ts";
 import diagnostics from "./diagnostics/index.ts";
 import help from "./help/index.ts";
 import mcp from "./mcp/index.ts";
-import memory from "./memory/index.ts";
 import permissions from "./permissions/index.ts";
-import plugin from "./plugin/index.ts";
-import sandbox from "./sandbox/index.ts";
 import shell from "./shell/index.ts";
 import vibes from "./vibes/index.ts";
 import web from "./web/index.ts";
@@ -35,17 +32,14 @@ import web from "./web/index.ts";
 export function bluclawdExtensions(): InlineExtension[] {
 	return [
 		{ name: "permissions", factory: permissions },
-		{ name: "memory", factory: memory },
 		{ name: "checkpoints", factory: checkpoints },
 		{ name: "web", factory: web },
 		{ name: "mcp", factory: mcp },
-		{ name: "sandbox", factory: sandbox },
 		{ name: "background-bash", factory: backgroundBash },
 		{ name: "branding", factory: branding },
 		{ name: "diagnostics", factory: diagnostics },
 		{ name: "agent-view", factory: agentView },
 		{ name: "help", factory: help },
-		{ name: "plugin", factory: plugin },
 		{ name: "shell", factory: shell },
 		{ name: "vibes", factory: vibes },
 	];

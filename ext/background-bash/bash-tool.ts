@@ -55,16 +55,12 @@ export interface ClaudeBashOptions {
 	cwd: string;
 	shellPath?: string;
 	commandPrefix?: string;
-	/** What this command runs through: the sandbox unless something takes it out. */
-	operations(command: string, disableSandbox: boolean): BashOperations;
-	/** The strict-mode refusal, when the sandbox was wanted but is not running. */
-	refusal(): string | undefined;
+	/** What every command runs through. */
+	operations: BashOperations;
 	/** Where a job's notifications go: the session that started it. */
 	sendMessage(message: OutgoingMessage<unknown>, delivery: EventDelivery): void;
 	/** The main agent, which alone honours CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS. */
 	isMain: boolean;
-	/** Offer `dangerouslyDisableSandbox`: only a session with somebody to ask. */
-	sandboxEscape: boolean;
 	/** Background jobs end with this session's final response: the start text says so. */
 	endsWithFinalResponse?: boolean;
 	/**
@@ -134,18 +130,8 @@ export function createClaudeBashTool(options: ClaudeBashOptions): ToolDefinition
 						Type.Boolean({ description: "Set to true to run this command in the background." }),
 					),
 				}),
-		...(options.sandboxEscape
-			? {
-					dangerouslyDisableSandbox: Type.Optional(
-						Type.Boolean({
-							description:
-								"Set this to true to dangerously override sandbox mode and run commands without sandboxing.",
-						}),
-					),
-				}
-			: {}),
 	});
-	type Params = Static<typeof parameters> & { run_in_background?: boolean; dangerouslyDisableSandbox?: boolean };
+	type Params = Static<typeof parameters> & { run_in_background?: boolean };
 
 	return {
 		...base,
@@ -174,13 +160,9 @@ export function createClaudeBashTool(options: ClaudeBashOptions): ToolDefinition
 			return base.renderResult?.(result as never, renderOptions, theme, context as never) as never;
 		},
 		async execute(id, rawParams, signal, onUpdate, ctx) {
-			const { description, run_in_background, dangerouslyDisableSandbox, timeout, ...rest } = rawParams as Params;
+			const { description, run_in_background, timeout, ...rest } = rawParams as Params;
 			const command = String(rest.command ?? "");
-
-			const refusal = options.refusal();
-			if (refusal) return { content: [{ type: "text", text: refusal }], isError: true, details: undefined };
-
-			const ops = options.operations(command, options.sandboxEscape && dangerouslyDisableSandbox === true);
+			const ops = options.operations;
 			const owner = ctx?.sessionManager?.getSessionId();
 			// A child session's jobs carry its session id as their agent id: the main
 			// session sees and may stop them, another child may not.
@@ -213,7 +195,6 @@ export function createClaudeBashTool(options: ClaudeBashOptions): ToolDefinition
 			if (run_in_background && !disabled) {
 				// The job owns the process from here: neither the call's signal nor a
 				// timeout reaches it, since backgrounding means outliving this call.
-				// Operations match the foreground path, so sandboxing applies.
 				const job = backgroundBashJobs.start({
 					command,
 					cwd,

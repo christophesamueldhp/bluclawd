@@ -10,11 +10,9 @@
  */
 
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
-import { VERSION } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { isUsingSubscription } from "../_shared/session-usage.ts";
-import { getActivePermissionMode } from "../permissions/active-mode.ts";
-import { isSandboxActive } from "../sandbox/state.ts";
 
 /** Snapshot rendered by `/status`. Plain data so it survives in the session file. */
 export interface StatusData {
@@ -24,8 +22,7 @@ export interface StatusData {
 	thinkingLevel?: string;
 	authSource?: string;
 	subscription: boolean;
-	permissionMode: string;
-	sandbox: boolean;
+	defaultProjectTrust: string;
 	projectTrusted: boolean;
 	cwd: string;
 	sessionFile?: string;
@@ -51,9 +48,8 @@ export function formatStatus(
 	if (data.contextWindow)
 		lines.push(`${dim("Context window:")} ${formatTokens(data.contextWindow)} ${dim("(/context)")}`);
 	lines.push("", theme.bold("Safety"));
-	lines.push(`${dim("Permission mode:")} ${data.permissionMode} ${dim("(/mode)")}`);
-	lines.push(`${dim("Sandbox:")} ${data.sandbox ? "on" : "off"} ${dim("(/sandbox)")}`);
 	lines.push(`${dim("Project trust:")} ${data.projectTrusted ? "trusted" : "not trusted"} ${dim("(/trust)")}`);
+	lines.push(`${dim("Trust default:")} ${data.defaultProjectTrust} ${dim("(alt+m)")}`);
 	lines.push("", theme.bold("Session"));
 	lines.push(`${dim("Working directory:")} ${data.cwd}`);
 	if (data.sessionName) lines.push(`${dim("Name:")} ${data.sessionName}`);
@@ -131,7 +127,7 @@ const diagnostics: InlineExtension = {
 		);
 
 		pi.registerCommand("status", {
-			description: "Show model, auth, permission mode, sandbox, and session info",
+			description: "Show model, auth, project trust, and session info",
 			handler: async (_args, ctx) => {
 				const model = ctx.model;
 				let authSource: string | undefined;
@@ -156,8 +152,9 @@ const diagnostics: InlineExtension = {
 					thinkingLevel: model?.reasoning ? ctx.thinkingLevel : undefined,
 					authSource,
 					subscription: isUsingSubscription(ctx),
-					permissionMode: getActivePermissionMode(),
-					sandbox: isSandboxActive(),
+					defaultProjectTrust: SettingsManager.create(ctx.cwd, undefined, {
+						projectTrusted: ctx.isProjectTrusted(),
+					}).getDefaultProjectTrust(),
 					projectTrusted: ctx.isProjectTrusted(),
 					cwd: ctx.cwd,
 					sessionFile,

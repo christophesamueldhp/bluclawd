@@ -8,8 +8,7 @@ import { recordExtensions } from "../scripts/probe-extensions.ts";
  * changed may still structurally match) and only throws here.
  */
 const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts: number; events: number }> = {
-	permissions: { commands: ["mode", "permissions"], tools: [], shortcuts: 1, events: 3 },
-	memory: { commands: ["memory"], tools: ["memory"], shortcuts: 0, events: 2 },
+	permissions: { commands: [], tools: [], shortcuts: 1, events: 2 },
 	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 3 },
 	web: {
 		commands: ["web"],
@@ -18,13 +17,16 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 		events: 0,
 	},
 	mcp: { commands: ["mcp"], tools: [], shortcuts: 0, events: 4 },
-	sandbox: { commands: ["sandbox"], tools: ["bash", "monitor"], shortcuts: 0, events: 2 },
-	"background-bash": { commands: ["tasks", "bashes"], tools: ["task_stop"], shortcuts: 0, events: 3 },
+	"background-bash": {
+		commands: ["tasks", "bashes"],
+		tools: ["bash", "monitor", "task_stop"],
+		shortcuts: 0,
+		events: 3,
+	},
 	branding: { commands: ["theme"], tools: [], shortcuts: 0, events: 1 },
 	diagnostics: { commands: ["context", "status"], tools: [], shortcuts: 0, events: 0 },
 	"agent-view": { commands: ["agent-view"], tools: [], shortcuts: 0, events: 7 },
 	help: { commands: ["help"], tools: [], shortcuts: 0, events: 0 },
-	plugin: { commands: ["plugin"], tools: [], shortcuts: 0, events: 0 },
 	shell: { commands: ["bash-mode", "stash"], tools: [], shortcuts: 2, events: 2 },
 	vibes: { commands: [], tools: [], shortcuts: 0, events: 2 },
 };
@@ -32,7 +34,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 describe("bluclawd extension registration", () => {
 	const rec = recordExtensions();
 
-	it("registers exactly the 14 expected extensions, no more, no fewer", () => {
+	it("registers exactly the 11 expected extensions, no more, no fewer", () => {
 		expect(Object.keys(rec).sort()).toEqual(Object.keys(EXPECTED).sort());
 	});
 

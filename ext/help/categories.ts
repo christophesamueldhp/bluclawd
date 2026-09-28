@@ -50,16 +50,11 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 	llama: "Model & output",
 
 	// Permissions & safety
-	mode: "Permissions & safety",
-	permissions: "Permissions & safety",
-	sandbox: "Permissions & safety",
 	trust: "Permissions & safety",
 
 	// Extensions & integrations
 	mcp: "Extensions & integrations",
 	agents: "Extensions & integrations",
-	memory: "Extensions & integrations",
-	plugin: "Extensions & integrations",
 	login: "Extensions & integrations",
 	logout: "Extensions & integrations",
 

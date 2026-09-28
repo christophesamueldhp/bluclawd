@@ -80,18 +80,10 @@ describe("agent-view session lifecycle", () => {
 		else process.env.PI_SERVER_DIR = prevEnv;
 	});
 
-	it("children get the sentinel instructions and ask-mode permissions", async () => {
+	it("children get the sentinel instructions", async () => {
 		await new ServerSupervisor().spawnInstance({ cwd: "/p" });
 		const options = FakeChild.spawnOptions[0];
 		expect(options.appendSystemPrompt).toBe(SENTINEL_INSTRUCTIONS);
-		expect((options.env as Record<string, string>).PI_PERMISSION_MODE).toBe("ask");
-	});
-
-	it("a child given a mode runs in it, without the ask-everything posture", async () => {
-		await new ServerSupervisor().spawnInstance({ cwd: "/p", permissionMode: "auto" });
-		const options = FakeChild.spawnOptions[0];
-		expect(options.permissionMode).toBe("auto");
-		expect((options.env as Record<string, string>).PI_PERMISSION_MODE).toBeUndefined();
 	});
 
 	it("stop keeps the row; delete removes it", async () => {

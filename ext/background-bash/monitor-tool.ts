@@ -1,8 +1,6 @@
 /**
  * The `monitor` tool: a background job whose output lines are delivered to
- * the model as events. Registered by the
- * sandbox extension because the command must pass the same refusal and run
- * through the same operations as every other shell path.
+ * the model as events.
  */
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -147,10 +145,7 @@ export function websocketExec(url: string, protocols?: string[]): BackgroundExec
 export interface MonitorToolDeps {
 	sendMessage: (message: OutgoingMessage<unknown>, options: EventDelivery) => void;
 	cwd: string;
-	/** Resolved per call so the sandbox state (and the command) at call time decides the operations. */
-	exec: (command: string) => BackgroundExec;
-	/** A reason to refuse (sandbox.failIfUnavailable), or undefined to proceed. */
-	refuse: () => string | undefined;
+	exec: BackgroundExec;
 	registry?: BackgroundJobRegistry;
 	rateLimit?: { capacity: number; refillMs: number; maxSuppressMs: number };
 }
@@ -176,12 +171,6 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 				return { content: [{ type: "text", text: source.reason }], isError: true, details: undefined };
 			}
 			const command = source.kind === "command" ? source.command : undefined;
-			// The sandbox refusal is about shells; a socket opens in this process and is
-			// judged by the permission layer as a fetch of its host.
-			const refusal = command === undefined ? undefined : deps.refuse();
-			if (refusal) {
-				return { content: [{ type: "text", text: refusal }], isError: true, details: undefined };
-			}
 			const timeout = params.persistent
 				? undefined
 				: Math.min(params.timeout ?? DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS);
@@ -237,10 +226,7 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 			current = registry.start({
 				command: source.kind === "ws" ? source.url : source.command,
 				cwd: deps.cwd,
-				exec:
-					source.kind === "ws"
-						? websocketExec(source.url, source.protocols)
-						: stdoutOnly(deps.exec(source.command)),
+				exec: source.kind === "ws" ? websocketExec(source.url, source.protocols) : stdoutOnly(deps.exec),
 				owner: ctx?.sessionManager?.getSessionId(),
 				idPrefix: command === undefined ? "s" : "b",
 				description: params.description,

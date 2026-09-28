@@ -14,7 +14,13 @@
  * so they hold plain values and the theme is applied at render time.
  */
 
-import type { ExtensionCommandContext, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
+import type {
+	BashOperations,
+	ExtensionCommandContext,
+	ExtensionContext,
+	InlineExtension,
+} from "@earendil-works/pi-coding-agent";
+import { createLocalBashOperations, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Box, type Component, Container, matchesKey, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { subscribeAgentTasks } from "../_shared/agent-tasks.ts";
@@ -29,6 +35,7 @@ import {
 import { backgroundTasksDisabled } from "../_shared/bash-limits.ts";
 import { detachAll, runningForegroundShells, subscribeForegroundShells } from "../_shared/foreground-shells.ts";
 import { sharedRef } from "../_shared/global-state.ts";
+import { clearMainSession, mainSession, setMainSession } from "../_shared/main-session.ts";
 import {
 	MONITOR_MESSAGE_TYPE,
 	type MonitorMessageDetails,
@@ -36,13 +43,16 @@ import {
 	type TaskExitDetails,
 } from "../_shared/monitor-events.ts";
 import {
+	deliverOrHold,
 	heldNotifications,
 	heldNotificationsLine,
 	holdNotifications,
 	subscribeNotificationHold,
 } from "../_shared/notification-hold.ts";
-import { findOrphanShells, orphanShellMessage, SHELL_END_ENTRY } from "../_shared/orphan-shells.ts";
+import { findOrphanShells, orphanShellMessage, SHELL_END_ENTRY, SHELL_START_ENTRY } from "../_shared/orphan-shells.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
+import { createClaudeBashTool } from "./bash-tool.ts";
+import { createMonitorTool } from "./monitor-tool.ts";
 import { type TaskRow, TasksDialog, taskRows } from "./tasks-dialog.ts";
 
 const MAX_COMMAND_CHARS = 80;
@@ -134,6 +144,35 @@ const backgroundBash: InlineExtension = {
 		const cleanups: (() => void)[] = [];
 
 		const owner = () => ctx?.sessionManager?.getSessionId();
+
+		// The user's configured shell, read per session.
+		let shellPath: string | undefined;
+		const operations: BashOperations = {
+			exec: (command, cwd, options) => createLocalBashOperations({ shellPath }).exec(command, cwd, options),
+		};
+		const localCwd = process.cwd();
+
+		// Overrides the built-in bash tool with timeouts in ms and run_in_background.
+		pi.registerTool(
+			createClaudeBashTool({
+				cwd: localCwd,
+				operations,
+				sendMessage: (message, delivery) => deliverOrHold(() => mainSession.sendMessage(message, delivery)),
+				isMain: true,
+				record: {
+					start: (record) => mainSession.appendEntry(SHELL_START_ENTRY, record),
+					end: (taskId) => mainSession.appendEntry(SHELL_END_ENTRY, { taskId }),
+				},
+			}),
+		);
+
+		pi.registerTool(
+			createMonitorTool({
+				sendMessage: (message, options) => deliverOrHold(() => mainSession.sendMessage(message, options)),
+				cwd: localCwd,
+				exec: operations.exec,
+			}),
+		);
 
 		pi.registerTool({
 			name: "task_stop",
@@ -239,6 +278,17 @@ const backgroundBash: InlineExtension = {
 
 		pi.on("session_start", (event, startCtx) => {
 			ctx = startCtx;
+			setMainSession({
+				sendMessage: (message, delivery) => pi.sendMessage(message, delivery),
+				appendEntry: (customType, data) => pi.appendEntry(customType, data),
+			});
+			try {
+				shellPath = SettingsManager.create(startCtx.cwd, undefined, {
+					projectTrusted: startCtx.isProjectTrusted(),
+				}).getShellPath();
+			} catch {
+				shellPath = undefined;
+			}
 			const session = startCtx.sessionManager.getSessionId();
 			// Background shells survive /clear: the new session owns them.
 			const previous = lastMainSession.get();
@@ -315,6 +365,7 @@ const backgroundBash: InlineExtension = {
 		});
 
 		pi.on("session_shutdown", () => {
+			clearMainSession();
 			for (const off of cleanups.splice(0)) off();
 			clearTimeout(hintTimer);
 			ctx = undefined;

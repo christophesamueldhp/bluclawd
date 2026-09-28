@@ -334,8 +334,7 @@ export function factory(pi: ExtensionAPI): void {
 				timeoutMs: config.timeoutMs,
 				allowRanges: config.allowRanges,
 				headers: config.headersFor(host),
-				// A clone runs git outside the bash sandbox; with the sandbox on, read through the API only.
-				github: { allowClone: forkSettings.sandbox(settings)?.enabled !== true },
+				github: { allowClone: true },
 				youtube: {},
 				remoteFallback: config.remoteFallbacks ? {} : undefined,
 			});

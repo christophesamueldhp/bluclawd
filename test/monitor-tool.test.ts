@@ -1,16 +1,15 @@
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type BackgroundExec, BackgroundJobRegistry } from "../ext/_shared/background-bash.ts";
-import { createMonitorTool, stdoutOnly, websocketExec } from "../ext/sandbox/monitor-tool.ts";
+import { createMonitorTool, stdoutOnly, websocketExec } from "../ext/background-bash/monitor-tool.ts";
 
-function harness(exec: BackgroundExec, refuse?: string) {
+function harness(exec: BackgroundExec) {
 	const sent: { message: any; options: any }[] = [];
 	const registry = new BackgroundJobRegistry();
 	const tool = createMonitorTool({
 		sendMessage: (message, options) => sent.push({ message, options }),
 		cwd: "/",
-		exec: () => exec,
-		refuse: () => refuse,
+		exec,
 		registry,
 		rateLimit: { capacity: 2, refillMs: 60_000, maxSuppressMs: 500 },
 	}) as any;
@@ -33,18 +32,6 @@ describe("monitor tool", () => {
 			arguments: { command: "x", description: "d" },
 		});
 		expect(args).toMatchObject({ command: "x" });
-	});
-
-	it("refuses when the sandbox refusal applies", async () => {
-		const { tool, registry } = harness(async () => ({ exitCode: 0 }), "Refusing to run");
-		const result = await tool.execute(
-			"c1",
-			{ command: "x", description: "d", persistent: false },
-			undefined as any,
-			undefined,
-		);
-		expect(result.isError).toBe(true);
-		expect(registry.list()).toEqual([]);
 	});
 
 	it("starts a monitor job and reports its id in Claude Code's words", async () => {
@@ -141,8 +128,7 @@ describe("monitor tool", () => {
 		const tool = createMonitorTool({
 			sendMessage: (message) => sent.push({ message }),
 			cwd: "/",
-			exec: () => exec,
-			refuse: () => undefined,
+			exec,
 			registry,
 			rateLimit: { capacity: 1, refillMs: 1000, maxSuppressMs: 60_000 },
 		}) as any;

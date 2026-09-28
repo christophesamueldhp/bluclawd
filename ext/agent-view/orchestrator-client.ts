@@ -59,7 +59,6 @@ type Request =
 			sessionFile?: string;
 			provider?: string;
 			model?: string;
-			permissionMode?: string;
 	  }
 	| { type: "stop"; instanceId: string }
 	| { type: "rpc"; instanceId: string; command: unknown }
@@ -292,8 +291,6 @@ export class OrchestratorClient {
 		prompt?: string;
 		model?: { provider: string; id: string };
 		sessionFile?: string;
-		/** The permission mode the child starts in. */
-		permissionMode?: string;
 	}): Promise<InstanceSummary | undefined> {
 		// Pin the model at child startup (daemon-side --provider/--model) instead of a post-spawn
 		// set_model RPC — set_model silently no-ops when the model isn't yet in the child's registry,
@@ -305,7 +302,6 @@ export class OrchestratorClient {
 			sessionFile: opts.sessionFile,
 			provider: opts.model?.provider,
 			model: opts.model?.id,
-			permissionMode: opts.permissionMode,
 		});
 		const instance = res.instance;
 		if (!instance) return instance;
