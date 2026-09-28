@@ -210,6 +210,13 @@ back. Claude Code's names (`default`, `acceptEdits`, `bypass`) and the older
 resolve to `auto` — so stored settings and scripts keep working.
 `task_stop` never prompts from the mode: it only touches this session's own shells.
 
+Rules take Claude Code's spellings: an `Edit(...)` rule also covers the write tool,
+a `Read(...)` rule also covers grep, find and ls, `Bash(npm test *)` equals
+`Bash(npm test:*)`, `//path` is an absolute path, and MCP tools can be named
+`mcp__server`, `mcp__server__*` or `mcp__server__tool` as well as `Mcp(server:tool)`.
+Global and project `allow`/`ask`/`deny` lists add up; a project cannot replace
+yours.
+
 A prompt has Claude Code's rows: **Yes**, a row for "from now on", and **No**. A
 digit picks a row, Esc is No, and Tab on No types a note the model receives. Where
 pi cannot draw that dialog (RPC mode, agent view's background sessions) the same rows

@@ -201,9 +201,22 @@ function deepMerge(base: Mergeable, overrides: Mergeable): Mergeable {
 	return out;
 }
 
+/**
+ * Rule lists are the union of both scopes, as Claude Code merges them. The
+ * one-level merge above would let a project's `deny: []` replace the user's
+ * global deny list.
+ */
 export function permissions(sm: SettingsManager): PermissionSettings | undefined {
 	const value = merged(sm).permissions as PermissionSettings | undefined;
-	return value ? structuredClone(value) : undefined;
+	if (!value) return undefined;
+	const global = (sm.getGlobalSettings() as unknown as Mergeable).permissions as PermissionSettings | undefined;
+	const project = (sm.getProjectSettings() as unknown as Mergeable).permissions as PermissionSettings | undefined;
+	const out = structuredClone(value);
+	for (const list of ["allow", "ask", "deny"] as const) {
+		const rules = [...new Set([...(global?.[list] ?? []), ...(project?.[list] ?? [])])];
+		if (rules.length > 0) out[list] = rules;
+	}
+	return out;
 }
 
 /**

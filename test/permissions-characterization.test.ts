@@ -31,7 +31,7 @@ import type { Rules } from "../ext/permissions/rules.ts";
 const RULE_SETS: Record<string, Rules> = {
 	none: {},
 	"deny-bash": { deny: ["Bash(**)"] },
-	"ask-all": { ask: ["Bash(**)", "Read(**)", "Write(**)", "Edit(**)", "Agent(**)", "Mcp(**)"] },
+	"ask-all": { ask: ["Bash(**)", "Read(**)", "Write(**)", "Edit(**)", "Mcp(**)"] },
 	"allow-glob": { ask: ["Bash(**)"], allow: ["Bash(npm *)"] },
 	"allow-exact": { ask: ["Bash(**)"], allow: ["Bash(npm install)"] },
 	// A broad, un-narrowed allow glob reaching a dangerous command with no `ask` rule to
@@ -56,7 +56,6 @@ function toolCases(
 		{ name: "write-git-hook", tool: "write", input: { path: join(cwd, ".git", "hooks", "pre-commit") } },
 		{ name: "edit-normal", tool: "edit", input: { path: join(cwd, "src", "x.ts") } },
 		{ name: "write-outside-cwd", tool: "write", input: { path: "/etc/hosts" } },
-		{ name: "agent-explore", tool: "agent", input: { subagent_type: "Explore" } },
 		{ name: "mcp-tool", tool: "mcp__srv__do", input: {} },
 	];
 }
@@ -119,8 +118,7 @@ describe("permissions decision characterization (pin current behaviour)", () => 
 	/**
 	 * `monitor` carries a `command` and runs a shell exactly as `bash` does, so every gate
 	 * keyed on the literal tool name — rules, the guardrail, protected paths — must see it
-	 * as bash. Anything less makes the tool a way around all of them, in the parent session
-	 * and in subagents (the subagent gate calls these same two functions).
+	 * as bash. Anything less makes the tool a way around all of them.
 	 */
 	it("decides a monitor call exactly as it decides the same bash call", () => {
 		const cases: Array<{ name: string; mode: PermissionMode; rules: Rules; input: Record<string, unknown> }> = [];
@@ -167,12 +165,10 @@ describe("permissions decision characterization (pin current behaviour)", () => 
 });
 
 /**
- * The subagent gate's posture (subagent-gate.ts): `auto`, the parent's deny rules only,
- * no UI. Under the strict `ask` a child would have been blocked on every unmatched edit
- * and every non-read-only command — there is nobody to answer a prompt — which is why
- * children are evaluated as `auto`. Deny stays the safety-critical layer.
+ * Headless `auto` with deny rules only (`pi -p --permission-mode auto`): nobody can answer
+ * a prompt, so unmatched work runs and deny stays the safety-critical layer.
  */
-describe("subagent gate posture: auto + deny rules only, headless", () => {
+describe("headless auto posture: deny rules only", () => {
 	const cfg = (cwd: string, agentDir: string) => ({
 		mode: "auto" as const,
 		rules: { deny: ["Bash(rm **)"] },
@@ -185,7 +181,7 @@ describe("subagent gate posture: auto + deny rules only, headless", () => {
 	const verdictFor = (tool: string, input: Record<string, unknown>, cwd: string, agentDir: string) =>
 		evaluatePreHook(tool, input, cfg(cwd, agentDir)) ?? evaluatePostHook(tool, input, cfg(cwd, agentDir));
 
-	it("blocks what the parent denies", () => {
+	it("blocks what a deny rule names", () => {
 		const v = verdictFor("bash", { command: "rm x" }, "/p", "/a");
 		expect(v.outcome).toBe("block");
 		expect(v.gate).toBe("deny-rule");

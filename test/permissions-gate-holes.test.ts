@@ -197,10 +197,8 @@ describe("what don't ask again grants", () => {
 });
 
 describe("A6: tools no rule verb names", () => {
-	it("runs the task control tools without a prompt", () => {
-		for (const tool of ["task_stop", "send_message"]) {
-			expect(verdict(tool, { task_id: "bash_1" }, cfg({ mode: "ask" })).outcome).toBe("allow");
-		}
+	it("runs the task control tool without a prompt", () => {
+		expect(verdict("task_stop", { task_id: "bash_1" }, cfg({ mode: "ask" })).outcome).toBe("allow");
 	});
 
 	it("judges a WebSocket monitor as a fetch of its URL", () => {

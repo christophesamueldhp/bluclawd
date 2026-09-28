@@ -66,7 +66,6 @@ import {
 	stripWrappingQuotes,
 	subject,
 } from "./rules.ts";
-import { setSessionRuleLayer } from "./session-rules.ts";
 
 /** One rule and where it was set. */
 interface SourcedRule {
@@ -109,9 +108,9 @@ const GATE_TEXT: Record<Gate, string> = {
 	"no-matching-rule": "no rule matched, so the mode asked",
 };
 
-/** A rule some gate reads: a governed verb and a non-empty subject. */
+/** A rule some gate reads: a governed verb and a non-empty subject, or Claude Code's `mcp__server[__tool]`. */
 function isRule(spec: string): boolean {
-	return /\(.+\)$/.test(spec) && parseRuleSpec(spec) !== undefined;
+	return (/\(.+\)$/.test(spec) || spec.startsWith("mcp__")) && parseRuleSpec(spec) !== undefined;
 }
 
 /** How many recent decisions `/permissions why` keeps. */
@@ -195,15 +194,9 @@ export function factory(pi: ExtensionAPI): void {
 	// The latest gated calls, newest last, for `/permissions why`.
 	let decisions: DecisionRecord[] = [];
 
-	/** Hands the session layer to subagent children, which cannot see it otherwise. */
-	function publishSessionLayer(): void {
-		setSessionRuleLayer({ rules: sessionRules, cliAllow: cliAllowRules });
-	}
-
 	/** Settings rules with the session's own layered on top. */
 	function reloadRules(ctx: ExtensionContext): void {
 		const base = loadRules(ctx);
-		publishSessionLayer();
 		rules = {
 			...base,
 			allow: [...(base.allow ?? []), ...(sessionRules.allow ?? [])],
@@ -236,9 +229,8 @@ export function factory(pi: ExtensionAPI): void {
 	}
 
 	/**
-	 * Every mode change, from any source. Publishes the mode for the subagent gate
-	 * (which has no other way to see it) before touching the UI, so a child spawned
-	 * during the same turn cannot observe a stale mode.
+	 * Every mode change, from any source. Publishes the mode for agent-view and
+	 * `/status`, which have no other way to see it, then refreshes the footer.
 	 */
 	function onModeChanged(): void {
 		setActivePermissionMode(currentMode());
@@ -337,7 +329,7 @@ export function factory(pi: ExtensionAPI): void {
 		// prompt an attach viewer can answer. Rules-based so it never touches the mode union.
 		// Derived from governedVerbs() so it always covers exactly what decide() can gate — a
 		// hand-kept list would silently miss any verb added to governance later. Since audit
-		// B.5 this includes Mcp and Task, so MCP tools and subagent delegation prompt too.
+		// B.5 this includes Mcp, so MCP tools prompt too.
 		if (process.env.PI_PERMISSION_MODE === "ask") {
 			sessionRules.ask = governedVerbs().map((verb) => `${verb}(**)`);
 		}
@@ -349,7 +341,6 @@ export function factory(pi: ExtensionAPI): void {
 		reloadRules(ctx);
 		const allowFlag = pi.getFlag("allowedTools");
 		cliAllowRules = typeof allowFlag === "string" && allowFlag ? { allow: parseToolRuleFlag(allowFlag) } : {};
-		publishSessionLayer();
 		// Initial mode from the CLI: --dangerously-skip-permissions (CC alias) wins
 		// over --permission-mode. Sets the *initial* mode only — Alt+M and /mode
 		// still switch freely afterwards.
@@ -429,7 +420,6 @@ export function factory(pi: ExtensionAPI): void {
 		rules = { ...rules, allow: [...new Set([...(rules.allow ?? []), ...add])] };
 		if (standing.sessionOnly) {
 			sessionRules.allow = [...new Set([...(sessionRules.allow ?? []), ...add])];
-			publishSessionLayer();
 			return;
 		}
 		for (const rule of add) await addProjectRule(ctx.cwd, "allow", rule, ctx.isProjectTrusted());

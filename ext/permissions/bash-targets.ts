@@ -6,6 +6,8 @@
  * and `tee` targets are screened with the same predicate `write` is.
  */
 
+import { bashRuleSubjects, bashSegments } from "./rules.ts";
+
 /**
  * Redirect target: `>`, `>>` or `>|` followed by a path (quoted or bare).
  *
@@ -85,17 +87,52 @@ function copyTargets(command: string): string[] {
 	return targets;
 }
 
+/** Commands whose every non-flag argument is a path they create, change or remove. */
+const PATH_WRITER = /^\\?(?:\S*\/)?(rm|rmdir|unlink|touch|mkdir|truncate|chmod|chown|chgrp)\s+([\s\S]*)$/;
+/** `sed` and `perl`, which edit their file arguments in place under `-i`. */
+const IN_PLACE_EDITOR = /^\\?(?:\S*\/)?(sed|perl)\s+([\s\S]*)$/;
+const IN_PLACE_FLAG = /^(-[a-zA-Z]*i|--in-place)/;
+
+/**
+ * What the argument-taking write primitives write: the paths of {@link PATH_WRITER},
+ * the files of an in-place `sed`/`perl`, `dd`'s `of=`, and `rsync`'s destination. Read
+ * from every respelling of each segment (see `bashRuleSubjects`), so `env`, `nohup` and
+ * `sh -c '…'` do not hide them. A flag's value or a sed script can land in the list too;
+ * that only screens a word that is not a protected path.
+ */
+function argumentTargets(command: string): string[] {
+	const targets = new Set<string>();
+	for (const candidate of bashRuleSubjects(command)) {
+		if (bashSegments(candidate).length !== 1) continue;
+		const words = (rest: string) => rest.split(/\s+/).map((w) => w.replace(/^["']|["']$/g, ""));
+		const paths = (rest: string) => words(rest).filter((w) => w && !w.startsWith("-"));
+		const writer = PATH_WRITER.exec(candidate);
+		if (writer) for (const p of paths(writer[2])) targets.add(p);
+		const editor = IN_PLACE_EDITOR.exec(candidate);
+		if (editor && words(editor[2]).some((w) => IN_PLACE_FLAG.test(w))) {
+			for (const p of paths(editor[2])) targets.add(p);
+		}
+		if (/^(?:\S*\/)?dd\s/.test(candidate)) {
+			for (const w of words(candidate)) if (w.startsWith("of=")) targets.add(w.slice(3));
+		}
+		const rsync = /^(?:\S*\/)?rsync\s+([\s\S]*)$/.exec(candidate);
+		const destination = rsync && paths(rsync[1]).at(-1);
+		if (destination) targets.add(destination);
+	}
+	return [...targets];
+}
+
 /**
  * Paths a bash command writes, as far as a command string can be read: redirect
- * targets, `tee` arguments, and the paths `cp`, `mv`, `ln` and `install` write.
+ * targets, `tee` arguments, the paths `cp`, `mv`, `ln` and `install` write, and those
+ * of the argument-taking primitives in {@link argumentTargets}.
  *
- * NOT a completeness claim, and callers must not treat it as one. `sed -i`, `dd`,
- * `rsync`, an editor, or any interpreter given a script all write paths this never
- * sees. It raises the cost of the vectors a model reaches for first;
- * the OS sandbox is the boundary that actually holds.
+ * NOT a completeness claim, and callers must not treat it as one. An editor, or any
+ * interpreter given a script, writes paths this never sees. It raises the cost of the
+ * vectors a model reaches for first; the OS sandbox is the boundary that actually holds.
  */
 export function bashWriteTargets(command: string): string[] {
-	const targets = [...bashRedirectTargets(command), ...copyTargets(command)];
+	const targets = [...bashRedirectTargets(command), ...copyTargets(command), ...argumentTargets(command)];
 	TEE.lastIndex = 0;
 	for (const m of command.matchAll(TEE)) {
 		for (const arg of m[2].trim().split(/\s+/)) {

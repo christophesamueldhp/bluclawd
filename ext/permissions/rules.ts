@@ -27,15 +27,12 @@ export type Rules = { allow?: string[]; ask?: string[]; deny?: string[] };
 import { realpathSync } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
+import { COMMAND_SUBSTITUTION } from "./safe-command.ts";
+
 /**
  * Lowercase tool name → capitalized rule verb. MCP tools are ALSO governed via the
  * dynamic `verbFor()` mapping below: `mcp__server__tool` → `Mcp(server:tool)`.
- * `agent` is `Agent(<subagent_type>)`, with Claude Code's legacy `Task(...)` as an
- * alias. Subagent children additionally run a gate (subagent-gate.ts), so a
- * `deny: Bash(**)` is not circumventable by delegating to an agent def that grants bash.
  */
-import { COMMAND_SUBSTITUTION } from "./safe-command.ts";
-
 const VERB: Record<string, string> = {
 	bash: "Bash",
 	read: "Read",
@@ -46,25 +43,7 @@ const VERB: Record<string, string> = {
 	ls: "Ls",
 	webfetch: "WebFetch", // Tier 4 tools opt in here
 	websearch: "WebSearch",
-	agent: "Agent",
 };
-
-/** Claude Code's legacy spellings of a rule verb, still accepted in rules. */
-const VERB_ALIASES: Record<string, string> = { task: "agent" };
-
-/** An agent type as lookup compares it: case- and separator-insensitive (defs.ts `findDef`). */
-function agentKey(name: string): string {
-	return name
-		.trim()
-		.toLowerCase()
-		.replace(/[\s_]+/g, "-");
-}
-
-/** The agent type a subagent call runs; omitted means general-purpose, as in Claude Code. */
-export function agentType(input: Record<string, unknown>): string {
-	const type = typeof input.subagent_type === "string" ? input.subagent_type.trim() : "";
-	return type || "general-purpose";
-}
 
 /** True for namespaced MCP tool names of the form `mcp__server__tool`. */
 export function isMcpToolName(tool: string): boolean {
@@ -88,14 +67,32 @@ export function governedVerbs(): string[] {
 }
 
 /**
- * A rule string's verb and subject. A bare verb (`Agent`, `Bash`) covers every subject,
- * as in Claude Code; a legacy alias (`Task`) is read as the verb it stands for.
+ * Claude Code's rule verbs that reach more tools than their own: an `Edit` rule covers
+ * every file-editing tool, a `Read` rule every file-reading one. Keyed by the tool's verb.
+ */
+const COVERING_VERBS: Record<string, string[]> = {
+	Write: ["edit"],
+	Grep: ["read"],
+	Find: ["read"],
+	Ls: ["read"],
+};
+
+/** Does a rule written with `ruleVerb` govern a tool whose own verb is `verb`? */
+function ruleVerbCovers(ruleVerb: string, verb: string): boolean {
+	return ruleVerb === verb.toLowerCase() || (COVERING_VERBS[verb] ?? []).includes(ruleVerb);
+}
+
+/**
+ * A rule string's verb and subject. A bare verb (`Bash`) covers every subject, as in
+ * Claude Code. Claude Code's MCP spellings — `mcp__server`, `mcp__server__*`,
+ * `mcp__server__tool` — read as `Mcp(server:*)` / `Mcp(server:tool)`.
  */
 function ruleParts(rule: string): { verb: string; subject: string } | undefined {
+	const mcp = /^mcp__(.+?)(?:__(.+))?$/.exec(rule);
+	if (mcp) return { verb: "mcp", subject: `${mcp[1]}:${mcp[2] ?? "*"}` };
 	const m = /^(\w+)(?:\((.*)\))?$/.exec(rule);
 	if (!m) return undefined;
-	const verb = m[1].toLowerCase();
-	return { verb: VERB_ALIASES[verb] ?? verb, subject: m[2] ?? "**" };
+	return { verb: m[1].toLowerCase(), subject: m[2] ?? "**" };
 }
 
 /**
@@ -124,7 +121,6 @@ export function parseRuleSpec(spec: string): { tool: string; input: Record<strin
 	const { verb } = parts;
 	const subj = unescapeGlob(parts.subject);
 
-	if (verb === "agent") return { tool: "agent", input: { subagent_type: subj } };
 	if (verb === "mcp") {
 		const [server, ...rest] = subj.split(":");
 		if (!server || rest.length === 0) return undefined;
@@ -141,7 +137,7 @@ export function parseRuleSpec(spec: string): { tool: string; input: Record<strin
 		return { tool, input: { url: domain !== undefined ? `https://${domain}/` : subj } };
 	}
 	if (tool === "websearch") return { tool, input: { query: subj } };
-	return { tool, input: { path: subj } };
+	return { tool, input: { path: subj.replace(/^\/\//, "/") } };
 }
 
 /** Characters that are regex metacharacters and must be escaped to match literally. */
@@ -165,7 +161,6 @@ export function searchQueries(input: Record<string, unknown>): string[] {
 }
 
 export function subject(tool: string, input: Record<string, unknown>): string {
-	if (tool === "agent") return agentType(input);
 	if (isMcpToolName(tool)) {
 		const m = /^mcp__(.+?)__(.+)$/.exec(tool);
 		return m ? `${m[1]}:${m[2]}` : "";
@@ -425,13 +420,7 @@ export function isProtectedPath(rawPath: string, cwd: string, agentDir: string, 
 		const segments = candidate.split(sep);
 		if (
 			segments.some((segment, i) => {
-				// Two subtrees of the config dir hold a subagent's WORKING DATA rather
-				// than configuration — its worktree copy of the repository and its own
-				// memory file — and a child must be able to write both. Same shape as
-				// the `.claude/worktrees` carve-out below, and just as narrow: only the
-				// config-dir segment is exempted, so a worktree's own `.git` and its
-				// own config dir stay protected by the segments after it.
-				if (eq(segment, configDirName)) return !WORKING_DATA_DIRS.some((dir) => eq(segments[i + 1] ?? "", dir));
+				if (eq(segment, configDirName)) return true;
 				// `.claude/worktrees` holds working copies, not configuration — Claude
 				// Code carves it out, and gating it would prompt on ordinary edits.
 				// The carve-out applies ONLY to the `.claude` segment: a worktree still
@@ -453,20 +442,11 @@ export function isProtectedPath(rawPath: string, cwd: string, agentDir: string, 
 				? candidate.toLowerCase().startsWith(agentPrefix.toLowerCase())
 				: candidate.startsWith(agentPrefix)
 		) {
-			// The agent dir's own working-data subtree: user-scoped subagent memory.
-			// Nothing else under the agent dir is exempt — auth.json, settings, agents.
-			const rest = candidate.slice(agentPrefix.length).split(sep);
-			if (eq(rest[0] ?? "", AGENT_MEMORY_DIR)) continue;
 			return true;
 		}
 	}
 	return false;
 }
-
-/** Subagent memory directory name, under the config dir (project/local) or the agent dir (user). */
-export const AGENT_MEMORY_DIR = "agent-memory";
-/** Directories under the config dir that hold subagent working data, not configuration. */
-const WORKING_DATA_DIRS = ["worktrees", AGENT_MEMORY_DIR, `${AGENT_MEMORY_DIR}-local`];
 
 /**
  * Agent files whose CONTENTS are secrets or grant execution: server credentials
@@ -524,8 +504,7 @@ export function isReadProtectedPattern(word: string, cwd: string, agentDir: stri
 /**
  * Does a recursive search rooted at `rawPath` reach credential-bearing config? pi's
  * grep runs with `--hidden`, so searching the agent dir, a config dir, or any ancestor
- * of the agent dir (`~`, `/`) reads auth.json and mcp.json. A subagent's working data
- * under the config dir (a worktree, agent memory) is not config and is exempt.
+ * of the agent dir (`~`, `/`) reads auth.json and mcp.json.
  */
 export function searchReachesProtectedFiles(
 	rawPath: string,
@@ -540,11 +519,7 @@ export function searchReachesProtectedFiles(
 	const a = norm(abs);
 	const withSep = (s: string): string => (s.endsWith(sep) ? s : s + sep);
 	if (a === agentAbs || a.startsWith(withSep(agentAbs)) || agentAbs.startsWith(withSep(a))) return true;
-	const segments = a.split(sep);
-	return segments.some(
-		(segment, i) =>
-			segment === norm(configDirName) && !WORKING_DATA_DIRS.some((dir) => norm(dir) === (segments[i + 1] ?? "")),
-	);
+	return a.split(sep).some((segment) => segment === norm(configDirName));
 }
 
 /** Rule verbs whose subject is a filesystem path (so it can also be resolved). */
@@ -572,16 +547,17 @@ function homeExpand(s: string): string {
  * string is not a path, and `deny: Bash(rm *)` must match `rm -rf /tmp/x`.
  */
 function globToRegExp(pat: string, pathLike = true): RegExp {
-	// Claude Code's prefix form, bash only: `npm test:*` is `npm test` alone or followed
-	// by arguments — not `npm testx`, which a plain `npm test*` would also grant.
-	if (!pathLike && pat.endsWith(":*")) {
+	// Claude Code's prefix forms, bash only: `npm test:*` and `npm test *` are `npm test`
+	// alone or followed by arguments — not `npm testx`, which `npm test*` would also grant.
+	if (!pathLike && (pat.endsWith(":*") || pat.endsWith(" *"))) {
 		return new RegExp(`^${globBody(pat.slice(0, -2), pathLike)}(?:\\s[\\s\\S]*)?$`);
 	}
 	return new RegExp(`^${globBody(pat, pathLike)}$`);
 }
 
 function globBody(pat: string, pathLike: boolean): string {
-	const expanded = homeExpand(pat);
+	// Claude Code spells an absolute path rule `//abs`; a single `/` is absolute here too.
+	const expanded = homeExpand(pathLike ? pat.replace(/^\/\//, "/") : pat);
 	let body = "";
 	for (let i = 0; i < expanded.length; i++) {
 		const c = expanded[i];
@@ -745,16 +721,8 @@ export function decide(rules: Rules, tool: string, input: Record<string, unknown
 			// Verb comparison is case-insensitive: `/permissions add` accepts any
 			// casing (RULE_SHAPE is [A-Za-z]+), so `bash(**)` would otherwise be
 			// stored, listed, and silently never enforced.
-			if (parts === undefined || parts.verb !== verb.toLowerCase()) return false;
+			if (parts === undefined || !ruleVerbCovers(parts.verb, verb)) return false;
 			const ruleSubject = parts.subject;
-			// `Agent(model:opus)`, `Agent(isolation:*)`: a parameter rule, deny/ask only, matched
-			// against the literal input — an omitted parameter never matches (Claude Code).
-			const param = verb === "Agent" ? /^(\w+):(.*)$/.exec(ruleSubject) : null;
-			if (param) {
-				const value = input[param[1]];
-				if (kind === "allow" || value === undefined || value === "") return false;
-				return globToRegExp(param[2], false).test(String(value));
-			}
 			// A `domain:` fetch rule is matched against the url's HOST alone, so it
 			// covers every path and port there — the only shape worth persisting.
 			if (verb === "WebFetch") {
@@ -764,9 +732,6 @@ export function decide(rules: Rules, tool: string, input: Record<string, unknown
 					return host !== undefined && globToRegExp(domain).test(host);
 				}
 			}
-			// Agent types resolve case- and separator-insensitively (`explore` runs Explore), so
-			// their rules match the same way: `Agent(explore)` must not let `Explore` through.
-			if (verb === "Agent") return globToRegExp(agentKey(ruleSubject), false).test(agentKey(subj));
 			if (kind === "allow" && isBash && COMMAND_SUBSTITUTION.test(subj))
 				return allowsSubstitution(ruleSubject, subj);
 			// Bash subjects are command strings, not paths.

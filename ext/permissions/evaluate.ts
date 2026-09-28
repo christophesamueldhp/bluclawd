@@ -114,13 +114,10 @@ const READ_LIKE_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const LOCAL_READ_TOOLS = new Set(["get_search_content", "source_check", "mcp_find_tools", "mcp_list_resources"]);
 
 /**
- * Tools the mode does not prompt for, though they are not reads. `agent` is Claude Code's:
- * its own permission check allows a spawn outright outside auto mode — `Agent(...)` rules
- * still apply — and every tool call the child then makes passes the child's own gate
- * under the parent's mode. `send_message` and `task_stop` only steer, resume or stop this
- * session's own background work. Deny rules still apply to all of them.
+ * Tools the mode does not prompt for, though they are not reads: `task_stop` only stops
+ * this session's own background work. Deny rules still apply.
  */
-const SELF_GATED_TOOLS = new Set(["agent", "task_stop", "send_message"]);
+const SELF_GATED_TOOLS = new Set(["task_stop"]);
 
 /**
  * Will this bash command actually run inside the OS sandbox? Not when the sandbox is
@@ -260,8 +257,7 @@ function askOrBlock(gate: Gate, exact: string | null, cfg: EvalConfig, tool: str
  * every rule verb and the protected-path screen key on the literal name "bash", so an
  * un-normalised `monitor` walked past all of them: a `deny: Bash(**)` did not match it,
  * and a write to `.bluclawd/mcp.json` was not screened. Normalising here — the one point
- * both the session's `tool_call` handler and the subagent gate go through — makes one
- * name enough for every gate, instead of a per-gate list that the next shell-carrying
+ * every gate goes through — makes one name enough for every gate, instead of a per-gate list that the next shell-carrying
  * tool would have to be added to.
  */
 function governedTool(tool: string, input: Record<string, unknown>): string {

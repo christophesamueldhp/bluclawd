@@ -118,6 +118,8 @@ function isDirectory(path: string): boolean {
 
 /** A rule path in the sandbox's spelling: permission rules resolve relative paths against the working directory. */
 function rulePath(path: string, cwd: string): string {
+	// Claude Code's `//abs` spelling, as the permission engine reads it.
+	if (path.startsWith("//")) return path.slice(1);
 	return isAbsolute(path) || path.startsWith("~") ? path : join(cwd, path);
 }
 
