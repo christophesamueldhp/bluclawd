@@ -580,8 +580,8 @@ export function describeJobStatus(job: BackgroundJobInfo): string {
 }
 
 // ============================================================================
-// The shell half of task_stop (the tool lives in ext/subagents, which owns the
-// name; this answers for shell and monitor ids)
+// The shell half of task_stop (the tool lives in ext/background-bash; this
+// answers for shell and monitor ids)
 // ============================================================================
 
 export function isShellTaskId(id: string): boolean {

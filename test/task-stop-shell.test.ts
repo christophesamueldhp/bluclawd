@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { type BackgroundExec, backgroundBashJobs, shellTaskStop } from "../ext/_shared/background-bash.ts";
+import backgroundBash from "../ext/background-bash/index.ts";
 
 /** An exec that runs until it is aborted. */
 const forever: BackgroundExec = (_c, _w, { signal }) =>
@@ -64,5 +65,39 @@ describe("task_stop for shells (Claude Code's TaskStop ownership)", () => {
 		expect(() => shellTaskStop(done.id, { owner: "main" })).toThrow(
 			`Task ${done.id} is not running (status: completed)`,
 		);
+	});
+});
+
+describe("the task_stop tool (registered by background-bash)", () => {
+	function taskStop() {
+		let tool: any;
+		const noop = () => {};
+		backgroundBash({
+			on: noop,
+			registerEntryRenderer: noop,
+			registerCommand: noop,
+			registerMessageRenderer: noop,
+			registerTool: (t: unknown) => {
+				tool = t;
+			},
+		} as any);
+		const ctx = { sessionManager: { getSessionId: () => "main" } };
+		return (params: Record<string, string>) => tool.execute("call", params, undefined, undefined, ctx);
+	}
+
+	it("stops a shell by task_id, or by the deprecated shell_id", async () => {
+		const stop = taskStop();
+		const a = backgroundBashJobs.start({ command: "a", cwd: "/", owner: "main", exec: forever });
+		const b = backgroundBashJobs.start({ command: "b", cwd: "/", owner: "main", exec: forever });
+		await stop({ task_id: a.id });
+		await stop({ task_id: "", shell_id: b.id });
+		expect(backgroundBashJobs.get(a.id)?.killed).toBe(true);
+		expect(backgroundBashJobs.get(b.id)?.killed).toBe(true);
+	});
+
+	it("rejects a missing id and one that names no shell", async () => {
+		const stop = taskStop();
+		await expect(stop({})).rejects.toThrow("Missing required parameter: task_id");
+		await expect(stop({ task_id: "a0123456789abcdef" })).rejects.toThrow("No task found with ID: a0123456789abcdef");
 	});
 });

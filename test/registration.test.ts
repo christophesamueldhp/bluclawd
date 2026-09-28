@@ -11,12 +11,6 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	permissions: { commands: ["mode", "permissions"], tools: [], shortcuts: 1, events: 3 },
 	memory: { commands: ["memory"], tools: ["memory"], shortcuts: 0, events: 2 },
 	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 3 },
-	subagents: {
-		commands: ["agents"],
-		tools: ["agent", "send_message", "task_stop"],
-		shortcuts: 0,
-		events: 3,
-	},
 	web: {
 		commands: ["web"],
 		tools: ["get_search_content", "source_check", "webfetch", "websearch"],
@@ -25,7 +19,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	},
 	mcp: { commands: ["mcp"], tools: [], shortcuts: 0, events: 4 },
 	sandbox: { commands: ["sandbox"], tools: ["bash", "monitor"], shortcuts: 0, events: 2 },
-	"background-bash": { commands: ["tasks", "bashes"], tools: [], shortcuts: 0, events: 3 },
+	"background-bash": { commands: ["tasks", "bashes"], tools: ["task_stop"], shortcuts: 0, events: 3 },
 	branding: { commands: ["theme"], tools: [], shortcuts: 0, events: 1 },
 	diagnostics: { commands: ["context", "status"], tools: [], shortcuts: 0, events: 0 },
 	"agent-view": { commands: ["agent-view"], tools: [], shortcuts: 0, events: 7 },
@@ -38,7 +32,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 describe("bluclawd extension registration", () => {
 	const rec = recordExtensions();
 
-	it("registers exactly the 15 expected extensions, no more, no fewer", () => {
+	it("registers exactly the 14 expected extensions, no more, no fewer", () => {
 		expect(Object.keys(rec).sort()).toEqual(Object.keys(EXPECTED).sort());
 	});
 

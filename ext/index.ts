@@ -29,7 +29,6 @@ import permissions from "./permissions/index.ts";
 import plugin from "./plugin/index.ts";
 import sandbox from "./sandbox/index.ts";
 import shell from "./shell/index.ts";
-import subagents from "./subagents/index.ts";
 import vibes from "./vibes/index.ts";
 import web from "./web/index.ts";
 
@@ -38,7 +37,6 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "permissions", factory: permissions },
 		{ name: "memory", factory: memory },
 		{ name: "checkpoints", factory: checkpoints },
-		{ name: "subagents", factory: subagents },
 		{ name: "web", factory: web },
 		{ name: "mcp", factory: mcp },
 		{ name: "sandbox", factory: sandbox },

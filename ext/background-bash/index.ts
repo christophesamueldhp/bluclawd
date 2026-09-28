@@ -1,13 +1,12 @@
 /**
  * Background tasks, the user's side: `/tasks`, the footer's task count, Ctrl+B
- * to move a running foreground bash into the background, and the renderers for
- * job events.
+ * to move a running foreground bash into the background, the renderers for
+ * job events, and `task_stop`.
  *
- * Nothing here starts a job or answers the model: `run_in_background` and the
- * monitor live on the sandbox extension (the one owner of the `bash` name), and
- * `task_stop` on the subagents extension, which owns that name;
- * the shell half of both sits in `_shared/background-bash.ts`. Change one, look
- * at the others.
+ * Nothing here starts a job: `run_in_background` and the monitor live on the
+ * sandbox extension (the one owner of the `bash` name); the shell half of both
+ * and of `task_stop` sits in `_shared/background-bash.ts`. Change one, look at
+ * the others.
  *
  * The two message renderers here draw events whose senders also live in
  * `ext/sandbox`: `monitor-tool.ts` and the `run_in_background` exit hook. Same
@@ -23,9 +22,16 @@
 
 import type { ExtensionCommandContext, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { Box, type Component, Container, matchesKey, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 import { subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { stripAnsi } from "../_shared/ansi.ts";
-import { backgroundBashJobs, describeJobStatus } from "../_shared/background-bash.ts";
+import {
+	backgroundBashJobs,
+	describeJobStatus,
+	isShellTaskId,
+	noTaskError,
+	shellTaskStop,
+} from "../_shared/background-bash.ts";
 import { backgroundTasksDisabled } from "../_shared/bash-limits.ts";
 import { detachAll, runningForegroundShells, subscribeForegroundShells } from "../_shared/foreground-shells.ts";
 import { sharedRef } from "../_shared/global-state.ts";
@@ -136,6 +142,29 @@ const backgroundBash: InlineExtension = {
 		const cleanups: (() => void)[] = [];
 
 		const owner = () => ctx?.sessionManager?.getSessionId();
+
+		pi.registerTool({
+			name: "task_stop",
+			label: "TaskStop",
+			description: [
+				"- Stops a running background task by its ID",
+				"- Takes a task_id parameter identifying the task to stop",
+				"- Returns a success or failure status",
+				"- Use this tool when you need to terminate a long-running task",
+			].join("\n"),
+			parameters: Type.Object({
+				task_id: Type.Optional(Type.String({ description: "The ID of the background task to stop" })),
+				shell_id: Type.Optional(Type.String({ description: "Deprecated: use task_id instead" })),
+			}),
+			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
+				// A model fills an optional string with "": empty is absent.
+				const id = (params.task_id?.trim() || params.shell_id?.trim()) ?? "";
+				if (!id) throw new Error("Missing required parameter: task_id");
+				if (!isShellTaskId(id)) throw noTaskError(id);
+				const text = shellTaskStop(id, { owner: toolCtx?.sessionManager?.getSessionId() });
+				return { content: [{ type: "text", text }], details: undefined };
+			},
+		});
 
 		/**
 		 * Shells the resumed conversation started but never heard the end of: the model is

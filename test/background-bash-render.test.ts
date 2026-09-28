@@ -20,6 +20,7 @@ function renderers(): Record<string, Renderer> {
 		on: () => {},
 		registerEntryRenderer: () => {},
 		registerCommand: () => {},
+		registerTool: () => {},
 		registerMessageRenderer: (type: string, renderer: Renderer) => {
 			registered[type] = renderer;
 		},

@@ -9,7 +9,6 @@
       "./ext/permissions/index.ts",
       "./ext/memory/index.ts",
       "./ext/checkpoints/index.ts",
-      "./ext/subagents/index.ts",
       "./ext/web/index.ts",
       "./ext/mcp/index.ts",
       "./ext/sandbox/index.ts",
