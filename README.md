@@ -208,9 +208,14 @@ arguments; `*` stays within a path segment and `**` crosses them; `Edit(...)`
 also covers write and `Read(...)` also covers grep, find and ls; `//path` is
 absolute, `~/path` is home, anything else is relative to the working directory;
 `WebFetch(domain:x.com)`, `WebSearch(...)`, and MCP tools as `mcp__server`,
-`mcp__server__*`, `mcp__server__tool` or `Mcp(server:tool)`. A bash rule also
-matches the command behind `env`, `nohup`, `xargs`, `watch`, `sh -c '…'`,
-`/bin/…` and `\cmd`, and in any part of a `&&`/`;`/`|` chain.
+`mcp__server__*`, `mcp__server__tool` or `Mcp(server:tool)`; `dir/**` covers
+`dir` itself too. A bash rule also matches the command behind wrappers (`sudo`,
+`timeout`, `nice`, `env`, `xargs`, `sh -c '…'`, `eval`, …), shell keywords,
+quoting (`'rm'`, `\rm`), `/bin/…`, `$(…)`, and any part of a `&&`/`;`/`|` chain.
+A `Read`/`Edit` rule also blocks a bash command that names a matching path —
+`cat ~/.ssh/id_rsa`, `echo x > .git/config`, `cd secret && cat key`. Deny rules
+match text, not behavior: a command that builds the path or name at run time
+(`$(printf rm)`, a variable set earlier, a glob like `~/.ss*`) is not caught.
 
 The footer shows pi's own `defaultProjectTrust` — `⏵⏵ always`, `⏸ ask` or
 `✕ never` — and Alt+M cycles it, saving to global settings. It decides whether a

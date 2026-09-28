@@ -72,6 +72,91 @@ describe("deniedBy", () => {
 		expect(denied(["Bash(ls *)"], "bash", { command: "lsof" })).toBe(false);
 		expect(denied(["Bash(**)"], "task_stop", {})).toBe(false);
 	});
+
+	it("sees through exec wrappers and shell keywords, flag values included", () => {
+		const rules = ["Bash(rm *)"];
+		for (const command of [
+			"timeout 5 rm x",
+			"timeout -s KILL 5 rm x",
+			"sudo -u root rm x",
+			"doas rm x",
+			"nice -n 10 rm x",
+			"time rm x",
+			"command rm x",
+			"builtin exec rm x",
+			"stdbuf -oL rm x",
+			"strace -f -o out rm x",
+			"watch -n 5 rm x",
+			"env -u HOME rm x",
+			"eval 'rm x'",
+			"sudo timeout 5 nice rm x",
+			"if rm x; then echo; fi",
+			"for f in a; do rm $f; done",
+			"! rm x",
+		]) {
+			expect(denied(rules, "bash", { command }), command).toBe(true);
+		}
+	});
+
+	it("sees through quoting and command substitution", () => {
+		const rules = ["Bash(rm *)"];
+		for (const command of [
+			"'rm' x",
+			'"rm" x',
+			'r""m x',
+			"$'rm' x",
+			"r\\m x",
+			"echo $(rm x)",
+			"echo `rm x`",
+			"(rm x)",
+		]) {
+			expect(denied(rules, "bash", { command }), command).toBe(true);
+		}
+		expect(denied(["Bash(rm -rf *)"], "bash", { command: "rm '-rf' x" })).toBe(true);
+		expect(denied(rules, "bash", { command: "echo 'rmdir'" })).toBe(false);
+	});
+
+	it("a Read or Edit rule guards the paths a bash command names", () => {
+		const home = process.env.HOME ?? "";
+		const ssh = ["Read(~/.ssh/**)"];
+		for (const command of [
+			"cat ~/.ssh/id_rsa",
+			'cat "$HOME/.ssh/id_rsa"',
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: a shell variable, not a template
+			"cat ${HOME}/.ssh/id_rsa",
+			`base64 < ${home}/.ssh/id_rsa`,
+			"ls ~/.ssh",
+			"cp ~/.ssh/id_rsa /tmp/k",
+			"tar czf out.tgz ~/.ssh",
+		]) {
+			expect(denied(ssh, "bash", { command }), command).toBe(true);
+		}
+		expect(denied(["Edit(/proj/.git/**)"], "bash", { command: "echo x > .git/config" })).toBe(true);
+		expect(denied(["Edit(//etc/**)"], "bash", { command: "dd if=x of=/etc/hosts" })).toBe(true);
+		expect(denied(ssh, "bash", { command: "cat ~/.sshx/key" })).toBe(false);
+		// A plain word that is not a path on disk is not a path.
+		expect(denied(["Read(/proj/**)"], "bash", { command: "npm test" })).toBe(false);
+	});
+
+	it("follows cd, and a bare file name that exists", () => {
+		const dir = mkdtempSync(join(tmpdir(), "deny-cd-"));
+		try {
+			mkdirSync(join(dir, "secret"));
+			writeFileSync(join(dir, "secret", "key"), "");
+			const rules = [`Read(${join(dir, "secret")}/**)`];
+			expect(deniedBy(rules, "bash", { command: "cd secret && cat key" }, dir)).toBeDefined();
+			expect(deniedBy(rules, "bash", { command: "cat secret" }, dir)).toBeDefined();
+			expect(deniedBy(rules, "bash", { command: "cat other" }, dir)).toBeUndefined();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("a dir/** rule covers the directory itself, not a sibling prefix", () => {
+		expect(denied(["Read(~/.ssh/**)"], "ls", { path: "~/.ssh" })).toBe(true);
+		expect(denied(["Read(//**)"], "read", { path: "/etc/hosts" })).toBe(true);
+		expect(denied(["Read(/proj/sec/**)"], "read", { path: "secrets" })).toBe(false);
+	});
 });
 
 describe("the extension", () => {

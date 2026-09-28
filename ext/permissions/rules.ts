@@ -13,7 +13,7 @@
  *   `Bash(npm *)` does not match `npmx`.
  */
 
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
 
@@ -131,6 +131,10 @@ const PATH_VERBS = new Set(["Read", "Write", "Edit", "Grep", "Find", "Ls"]);
 /** Verbs whose tool falls back to the working directory when `path` is omitted. */
 const CWD_DEFAULTING_VERBS = new Set(["Grep", "Find", "Ls"]);
 
+function capitalize(s: string): string {
+	return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
 function homeExpand(s: string): string {
 	return s.replace(/^~/, process.env.HOME ?? "~");
 }
@@ -140,6 +144,11 @@ function homeExpand(s: string): string {
  * a command string is not a path, and `Bash(rm *)` must match `rm -rf /tmp/x`.
  */
 function globToRegExp(pat: string, pathLike = true): RegExp {
+	// `dir/**` also covers `dir` itself, so listing the directory is denied with its contents.
+	const dirPrefix = pat.slice(0, -3);
+	if (pathLike && pat.endsWith("/**") && !/^\/*$/.test(dirPrefix)) {
+		return new RegExp(`^${globBody(dirPrefix, pathLike)}(?:/[\\s\\S]*)?$`);
+	}
 	// Prefix forms, bash only: `npm test:*` and `npm test *` are `npm test` alone or
 	// followed by arguments — not `npm testx`.
 	if (!pathLike && (pat.endsWith(":*") || pat.endsWith(" *"))) {
@@ -176,23 +185,58 @@ function globBody(pat: string, pathLike: boolean): string {
 
 /** Leading `VAR=value` assignments: `RM=1 rm x`. */
 const ENV_ASSIGNMENTS = /^(?:[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/;
-/** An `env` wrapper with its own flags/assignments: `env -i FOO=bar rm x`. */
-const ENV_WRAPPER = /^env\s+(?:-\S+\s+|[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|\S*)\s+)*/;
 /** A shell asked to run an inline command: `sh -c '…'`, `/bin/bash -lc "…"`. */
 const SHELL_INLINE = /^(?:\S*\/)?(?:ba|z|k|da|a)?sh\s+(?:-\S+\s+)*-\S*c\s+(?:"([^"]*)"|'([^']*)'|(\S+))/;
 /**
- * Exec wrappers that take a full command as trailing arguments: `watch rm -rf x`,
- * `nohup rm -rf x`, `echo x | xargs rm -rf`. A flag whose value is a separate token
- * (`watch -n 5 …`) is not fully stripped, which only leaves noise in the candidate.
+ * Words that run the command after them: exec wrappers (`sudo -u root rm x`,
+ * `timeout -s KILL 5 rm x`) and shell keywords (`if rm x`, `! rm x`). Their flags may
+ * take a separate value, so every suffix after one is a candidate.
  */
-const EXEC_WRAPPER = /^(?:watch|setsid|ionice|nohup|xargs)\s+(?:-\S+\s+)*/;
+const COMMAND_PREFIXES = new Set([
+	"sudo",
+	"doas",
+	"timeout",
+	"nice",
+	"ionice",
+	"time",
+	"command",
+	"builtin",
+	"exec",
+	"eval",
+	"stdbuf",
+	"strace",
+	"ltrace",
+	"nohup",
+	"setsid",
+	"watch",
+	"xargs",
+	"env",
+	"chrt",
+	"taskset",
+	"caffeinate",
+	"unbuffer",
+	"if",
+	"then",
+	"else",
+	"elif",
+	"do",
+	"while",
+	"until",
+	"!",
+	"{",
+]);
+/** How many tokens after a prefix word a command may start. */
+const PREFIX_ARG_LIMIT = 8;
 /** `flock` takes a lockfile/fd (and optional `-c`) before the command it wraps; `-w`/`-E` take a value. */
 const FLOCK_WRAPPER = /^flock\s+(?:-[wE]\s+\S+\s+|-\S+\s+)*\S+\s+(?:-c\s+)?/;
 
-/** Split a bash command on `;`, `&`, `|` and newlines. Naive about quotes, which only blocks more. */
+/**
+ * Split a bash command on `;`, `&`, `|`, newlines, subshell parens and backticks, so
+ * `$(rm x)` is a segment too. Naive about quotes, which only blocks more.
+ */
 function bashSegments(command: string): string[] {
 	return command
-		.split(/[;\n]+|(?<!>)[&|]+/)
+		.split(/[;\n()`]+|(?<!>)[&|]+/)
 		.map((segment) => segment.trim())
 		.filter(Boolean);
 }
@@ -215,12 +259,7 @@ function bashRuleSubjects(command: string, depth = 0): string[] {
 		let previous = "";
 		while (previous !== segment) {
 			previous = segment;
-			segment = segment
-				.replace(ENV_ASSIGNMENTS, "")
-				.replace(ENV_WRAPPER, "")
-				.replace(EXEC_WRAPPER, "")
-				.replace(FLOCK_WRAPPER, "")
-				.trim();
+			segment = segment.replace(ENV_ASSIGNMENTS, "").replace(FLOCK_WRAPPER, "").trim();
 		}
 		candidates.add(segment);
 
@@ -228,9 +267,19 @@ function bashRuleSubjects(command: string, depth = 0): string[] {
 		const unescaped = segment.replace(/^\\/, "");
 		candidates.add(unescaped);
 
-		// `/bin/rm x` is the same program as `rm x`.
-		const [, binary, rest] = /^(\S+)([\s\S]*)$/.exec(unescaped) ?? [];
-		if (binary?.includes("/")) candidates.add(`${binary.slice(binary.lastIndexOf("/") + 1)}${rest ?? ""}`);
+		for (const form of new Set([unescaped, dequote(unescaped)])) {
+			candidates.add(form);
+			// `/bin/rm x` is the same program as `rm x`.
+			const [, binary, rest] = /^(\S+)([\s\S]*)$/.exec(form) ?? [];
+			if (binary?.includes("/")) candidates.add(`${binary.slice(binary.lastIndexOf("/") + 1)}${rest ?? ""}`);
+
+			const tokens = form.split(/\s+/);
+			if (COMMAND_PREFIXES.has(basename(tokens[0] ?? ""))) {
+				for (let i = 1; i < Math.min(tokens.length, PREFIX_ARG_LIMIT + 2); i++) {
+					for (const nested of bashRuleSubjects(tokens.slice(i).join(" "), depth + 1)) candidates.add(nested);
+				}
+			}
+		}
 
 		const inline = SHELL_INLINE.exec(unescaped);
 		if (inline) {
@@ -240,6 +289,60 @@ function bashRuleSubjects(command: string, depth = 0): string[] {
 		}
 	}
 	return [...candidates].filter(Boolean);
+}
+
+/** The word the shell would see: quotes and backslashes removed (`'rm'`, `r""m`, `$'rm'`, `\rm`). */
+function dequote(s: string): string {
+	return s
+		.replace(/\$(?=['"])/g, "")
+		.replace(/\\(.)/g, "$1")
+		.replace(/['"]/g, "");
+}
+
+/** `$VAR` and `${VAR}` from this process's environment; unknown ones stay as written. */
+function expandVars(s: string): string {
+	return s.replace(/\$\{(\w+)\}|\$(\w+)/g, (m, braced, bare) => process.env[braced ?? bare] ?? m);
+}
+
+/**
+ * Every path a bash command names, resolved like a tool path, so a Read/Edit rule
+ * reaches `cat ~/.ssh/id_rsa`. Redirect targets always count; another word counts when
+ * it looks like a path (`/`, `~`, `.`) or exists, relative to the cwd or any `cd`
+ * target. Which words the command really opens is unknown; testing them all only blocks more.
+ */
+function bashPathCandidates(subjects: string[], cwd: string): string[] {
+	const words = new Set<string>();
+	const redirects = new Set<string>();
+	const bases = new Set([cwd]);
+	for (const s of subjects) {
+		const plain = expandVars(dequote(s));
+		for (const m of plain.matchAll(/[<>]+&?\s*([^\s<>&|;]+)/g)) redirects.add(m[1]);
+		const cd = /^cd\s+(\S+)/.exec(plain);
+		if (cd) bases.add(resolveToCwd(homeExpand(cd[1]), cwd));
+		for (const token of plain.replace(/\d*[<>]+&?/g, " ").split(/\s+/)) {
+			// `--file=x`, `if=/dev/sda`: the value is the path.
+			const value = token.includes("=") ? token.slice(token.indexOf("=") + 1) : "";
+			if (value) words.add(value);
+			if (token && !token.startsWith("-")) words.add(token);
+		}
+	}
+	const out = new Set<string>();
+	const addResolved = (word: string, base: string) => {
+		const resolved = resolveToCwd(homeExpand(word), base);
+		out.add(resolved);
+		const real = realpathIfSymlink(resolved);
+		if (real !== undefined) out.add(real);
+	};
+	for (const word of words) {
+		const pathLike = /^[~./]/.test(word) || word.includes("/") || redirects.has(word);
+		for (const base of bases) {
+			if (pathLike || existsSync(resolveToCwd(word, base))) {
+				out.add(homeExpand(word));
+				addResolved(word, base);
+			}
+		}
+	}
+	return [...out];
 }
 
 /**
@@ -266,10 +369,19 @@ export function deniedBy(
 		if (real !== undefined) pathCandidates.push(real);
 	}
 
+	let bashPaths: string[] | undefined;
+
 	const matches = (rule: string): boolean => {
 		try {
 			const parts = ruleParts(rule);
-			if (parts === undefined || !ruleVerbCovers(parts.verb, verb)) return false;
+			if (parts === undefined) return false;
+			// A file rule also guards the paths a bash command names.
+			if (isBash && cwd && PATH_VERBS.has(capitalize(parts.verb))) {
+				bashPaths ??= bashPathCandidates(bashSubjects, cwd);
+				const pattern = globToRegExp(parts.subject);
+				return bashPaths.some((candidate) => pattern.test(candidate));
+			}
+			if (!ruleVerbCovers(parts.verb, verb)) return false;
 			if (verb === "WebFetch") {
 				const domain = domainSpec(parts.subject);
 				if (domain !== undefined) {
