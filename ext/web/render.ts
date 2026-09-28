@@ -1,11 +1,9 @@
 /**
  * TUI rendering for `webfetch` / `websearch` (Ctrl+O collapse/expand).
  *
- * Neither tool defined `renderCall`/`renderResult`, so pi fell back to dumping
- * the raw `content` text for every call — a fetched page can be up to 8MB and
- * a search reply can carry ten full snippets, both far past what a collapsed
- * row should show. Same shape as `ext/subagents/render.ts`: a one-line
- * collapsed summary with a "(ctrl+o to expand)" hint, full content on expand.
+ * A fetched page can be up to 8MB and a search reply can carry ten full
+ * snippets, so collapsed rows show a one-line summary with an expand hint and
+ * the full content only on expand.
  */
 
 import type { AgentToolResult, Theme } from "@earendil-works/pi-coding-agent";

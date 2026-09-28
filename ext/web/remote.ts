@@ -6,7 +6,7 @@
  * approval did not cover.
  *
  * Firecrawl when FIRECRAWL_API_KEY is set, then Jina Reader (keyless, or
- * JINA_API_KEY for its higher limits). Request shapes follow pi-web-access (MIT).
+ * JINA_API_KEY for its higher limits).
  */
 
 import { USER_AGENT } from "./search.ts";

@@ -1,8 +1,8 @@
 /**
- * Claude Code's bash timeouts and its background-task switch (2.1.281): the model
- * gives `timeout` in milliseconds, a command still running when it passes moves to
- * the background instead of being killed, and `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`
- * turns every background path off.
+ * Bash timeouts and the background-task switch: the model gives `timeout` in
+ * milliseconds, a command still running when it passes moves to the background
+ * instead of being killed, and `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` turns every
+ * background path off.
  */
 
 /** `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` defaults. */
@@ -10,7 +10,7 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
 /** The lowest `CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS` takes effect at. */
 const MIN_AUTO_BACKGROUND_MS = 2000;
-/** Commands that time out as asked rather than move to the background (`v4o`). */
+/** Commands that time out as asked rather than move to the background. */
 const NEVER_AUTO_BACKGROUND = ["sleep"];
 
 type Env = NodeJS.ProcessEnv;
@@ -49,7 +49,7 @@ function firstWord(command: string): string | undefined {
 	return command.trim().split(/[\s;&|]+/)[0] || undefined;
 }
 
-/** Whether a command still running at its timeout moves to the background (`x4o`). */
+/** Whether a command still running at its timeout moves to the background. */
 export function canAutoBackground(command: string, env: Env = process.env): boolean {
 	if (backgroundTasksDisabled(env)) return false;
 	const word = firstWord(command);
@@ -57,7 +57,7 @@ export function canAutoBackground(command: string, env: Env = process.env): bool
 }
 
 /**
- * `CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS` (`YJt`): the main agent only, and only a
+ * `CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS`: the main agent only, and only a
  * command that can move to the background, moves there sooner.
  */
 export function autoBackgroundTimeoutMs(
@@ -70,7 +70,7 @@ export function autoBackgroundTimeoutMs(
 	return early === undefined ? timeoutMs : Math.min(timeoutMs, Math.max(early, MIN_AUTO_BACKGROUND_MS));
 }
 
-/** Claude Code's duration (`Qt`): `45s`, `2m 0s`, `1h 5m 0s`, `2d 3h 0m`. */
+/** `45s`, `2m 0s`, `1h 5m 0s`, `2d 3h 0m`. */
 export function formatClaudeDuration(ms: number): string {
 	if (ms < 60_000) {
 		if (ms === 0) return "0s";

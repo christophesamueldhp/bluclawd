@@ -1,9 +1,9 @@
 /**
- * Claude Code's resume scan for background shells (2.1.281, `qr`): a shell the
- * conversation started but never heard the end of did not finish before the
- * previous session ended, and the model is told so without a turn being started
- * for it. The session log is where the start and the end are recorded: job state
- * itself is never persisted (a dead process must not be resurrected).
+ * The resume scan for background shells: a shell the conversation started but
+ * never heard the end of did not finish before the previous session ended, and
+ * the model is told so without a turn being started for it. Only the start and
+ * end are recorded in the session log; job state itself is never persisted (a
+ * dead process must not be resurrected).
  */
 
 import {
@@ -30,9 +30,9 @@ export interface ShellEndRecord {
 	taskId: string;
 }
 
-/** The aggregate notice names at most this many ids (`Le`). */
+/** The aggregate notice names at most this many ids. */
 const MAX_LISTED = 20;
-/** Prefix of the aggregate's marker ids, which are not tasks (`Ne`). */
+/** Prefix of the aggregate's marker ids, which are not tasks. */
 const MARKER = "__orphan_summary";
 
 type Entry = { type: string; customType?: string; data?: unknown };

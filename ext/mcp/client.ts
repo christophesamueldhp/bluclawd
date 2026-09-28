@@ -1,5 +1,5 @@
 /**
- * MCP transport + tool-registration layer — PLAN.md F4.1.
+ * MCP transport + tool-registration layer.
  *
  * This module statically imports `@modelcontextprotocol/sdk`, whose transitive
  * tree is heavy, so it is ONLY reached via a dynamic `import("./client.ts")` from
@@ -134,19 +134,14 @@ export async function connectServer(
 	if (kind === "stdio") {
 		transport = new StdioClientTransport(stdioTransportOptions(config));
 	} else {
-		// resolveHeaders falls back to process.env internally (same as resolveServerEnv),
-		// so it needs no explicit env argument.
 		// authProvider is supplied only for a server that has already been through
 		// `/mcp login` (see oauth.ts authProviderFor). With it the SDK attaches the
 		// bearer token and refreshes on 401; without it a 401 simply fails the
 		// connect, which is what keeps login an explicit, user-initiated act.
 		//
-		// Both HTTP transports take the same two options. The SSE transport's
-		// `requestInit` doc comment says "recurring POST requests", but its
-		// _commonHeaders() is also what builds the headers for the initial event
-		// stream (sdk 1.29.0 client/sse.js), so configured headers and a refreshed
-		// OAuth token both reach the GET — `headers` and /mcp login work for an SSE
-		// server exactly as they do for a streamable-http one.
+		// Both HTTP transports take the same two options: the SSE transport also builds
+		// its initial event-stream GET from `requestInit`, so configured headers and a
+		// refreshed OAuth token reach it too.
 		const headers = resolveHeaders(config.headers);
 		// No expansion path may carry the agent's own model/cloud key to a server
 		// (see leakedCredential). Checked on resolved values, before any request.
@@ -181,8 +176,6 @@ export async function connectServer(
 	try {
 		await Promise.race([client.connect(transport), timeout]);
 	} catch (err) {
-		// Kill the spawned stdio child / close the socket so a never-handshaking
-		// server can't leak until shutdown.
 		await transport.close().catch(() => {});
 		throw err;
 	} finally {
@@ -226,12 +219,11 @@ function mapContent(rawContent: unknown): (TextContent | ImageContent)[] {
 }
 
 /**
- * Enforce the size caps on a mapped content array (2026-07-10 review Minor): text
+ * Enforce the size caps on a mapped content array: text
  * blocks share one MAX_TEXT_CHARS budget, and any single image block over
  * MAX_IMAGE_CHARS of base64 becomes a compact placeholder instead of an OOM-sized
  * payload. Text past the budget is not lost: the full text is saved to a private
- * temp file and the note names it, so the model can page through it with read/grep
- * (Claude Code does the same for an oversized MCP result).
+ * temp file and the note names it, so the model can page through it with read/grep.
  */
 export function capContent(
 	content: (TextContent | ImageContent)[],
@@ -307,7 +299,7 @@ function timeoutError(
 	timeouts: { total: number; idle: number },
 ): Error | undefined {
 	if (!(err instanceof McpError) || err.code !== ErrorCode.RequestTimeout) return undefined;
-	// The SDK (1.29.0 shared/protocol.js) tells the two apart only by message text.
+	// The SDK tells the two apart only by message text.
 	const hitTotal = err.message.includes("Maximum total timeout") || timeouts.idle <= 0;
 	const why = hitTotal
 		? `exceeded its ${timeouts.total}ms limit (per-server "timeout" or MCP_TOOL_TIMEOUT)`
@@ -329,8 +321,7 @@ export interface RegisteredMcpTool {
  * List a connected server's tools and register each on `pi`, namespaced as
  * `mcp__<server>__<tool>`, with `execute` proxying to `client.callTool`. Returns
  * the registered tools (namespaced name + description) so the caller can defer
- * or deactivate them. This is the seam the in-process round-trip test
- * exercises with a fake in-memory server.
+ * or deactivate them.
  */
 export async function registerServerTools(
 	pi: Pick<ExtensionAPI, "registerTool">,
@@ -397,8 +388,7 @@ export function registerListedTools(
 				// thrown message either.
 				const content = capContent(mapContent(result.content), serverName, bareName);
 				if (result.isError === true) {
-					// Framework contract (AgentToolResult.execute): throw on failure instead of
-					// encoding the error in content, so the loop/telemetry/hooks record a failure.
+					// Throw instead of encoding the error in content, so the loop and hooks record a failure.
 					throw new Error(joinText(content) || `MCP tool "${bareName}" on server "${serverName}" failed.`);
 				}
 				if (content.length === 0) content.push({ type: "text", text: "" });

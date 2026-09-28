@@ -1,6 +1,6 @@
 /**
  * The `monitor` tool: a background job whose output lines are delivered to
- * the model as events (Claude Code `Monitor` parity). Registered by the
+ * the model as events. Registered by the
  * sandbox extension because the command must pass the same refusal and run
  * through the same operations as every other shell path.
  */
@@ -30,7 +30,7 @@ import { monitorSource } from "../_shared/monitor-source.ts";
 const DEFAULT_TIMEOUT_SECONDS = 300;
 const MAX_TIMEOUT_SECONDS = 3600;
 const BATCH_WINDOW_MS = 200;
-/** Claude Code's: a bucket of 10 events, one back every 2s, and a stop after 30s of suppression. */
+/** A bucket of 10 events, one back every 2s, and a stop after 30s of suppression. */
 const DEFAULT_RATE_LIMIT = { capacity: 10, refillMs: 2000, maxSuppressMs: 30_000 };
 
 const monitorSchema = Type.Object({
@@ -85,9 +85,9 @@ type MonitorParams = {
 const shellQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 
 /**
- * Stdout alone is the event stream (Claude Code's Monitor): the command's stderr is
- * appended to the job's output file by the shell itself, so it never reaches the
- * line sink. Without an output file both streams stay events, as before.
+ * Stdout alone is the event stream: the command's stderr is appended to the job's
+ * output file by the shell itself, so it never reaches the line sink. Without an
+ * output file both streams stay events.
  */
 export function stdoutOnly(exec: BackgroundExec): BackgroundExec {
 	return (command, cwd, options) =>
@@ -149,7 +149,7 @@ export interface MonitorToolDeps {
 	cwd: string;
 	/** Resolved per call so the sandbox state (and the command) at call time decides the operations. */
 	exec: (command: string) => BackgroundExec;
-	/** A reason to refuse (sandbox.strict), or undefined to proceed. */
+	/** A reason to refuse (sandbox.failIfUnavailable), or undefined to proceed. */
 	refuse: () => string | undefined;
 	registry?: BackgroundJobRegistry;
 	rateLimit?: { capacity: number; refillMs: number; maxSuppressMs: number };
@@ -191,7 +191,7 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 			let suppressedSince: number | undefined;
 			const batcher = new EventBatcher({
 				delayMs: BATCH_WINDOW_MS,
-				// Every line of a batch is one event; eventText applies Claude Code's caps.
+				// Every line of a batch is one event; eventText applies the caps.
 				maxLines: Number.POSITIVE_INFINITY,
 				maxBytes: Number.POSITIVE_INFINITY,
 				// Runs from a raw timer, outside the registry's guarded sinks: a throw here
@@ -260,7 +260,7 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 						return;
 					}
 					if (job.exit?.error?.startsWith("timeout:") && timeout !== undefined) {
-						// Expiry is one notice, and the kill after it is silent (Claude Code).
+						// Expiry is one notice, and the kill after it is silent.
 						const events = registry.get(job.id)?.events ?? job.events;
 						const expired =
 							events === 0

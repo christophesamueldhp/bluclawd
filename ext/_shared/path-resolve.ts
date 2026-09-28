@@ -1,12 +1,10 @@
 /**
- * `resolveToCwd` and its dependencies (`normalizePath`, `resolvePath`),
- * vendored from pi's `utils/paths.ts` / `core/tools/path-utils.ts`.
+ * `resolveToCwd` and its dependencies, vendored from pi's `utils/paths.ts` /
+ * `core/tools/path-utils.ts`.
  *
- * Security-relevant: `permissions/rules.ts` uses this to normalize a path
- * before matching it against allow/ask/deny rules, so this copy must resolve
- * a path identically to pi's own tool layer — trimmed down to exactly the two
- * functions that path needs, not reimplemented, to avoid a normalization gap
- * a rule could slip through.
+ * Security-relevant: permission rules match paths normalized here, so this copy
+ * must resolve a path identically to pi's tool layer. Do not reimplement it; a
+ * normalization gap is a hole a rule could slip through.
  */
 
 import { homedir } from "node:os";

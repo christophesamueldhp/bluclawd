@@ -1,145 +1,50 @@
 /**
- * Checkpoints core extension (Claude Code checkpoint/rewind parity — PLAN.md F1.6)
+ * Checkpoints: a restorable git snapshot of the working tree at the start of
+ * every turn, so `/rewind` can restore the files, the conversation, or both.
+ * The conversation is rewound with `ctx.navigateTree` to the user message that
+ * started the turn.
  *
- * Captures a restorable git snapshot of the working tree at the start of every
- * turn, so `/rewind` can time-travel the code back to an earlier point. The
- * conversation is a separate axis: `/rewind` asks whether to restore the files,
- * the conversation, or both, and rewinds the conversation with `ctx.navigateTree`
- * to the user message that started the turn.
+ * `navigateTree`, NOT `ctx.fork`: calling fork from this command handler
+ * terminates the session (exit code 1, no stderr). navigateTree reaches the same
+ * point, keeps the abandoned path in the file, and does not take the session
+ * down. Do not switch to fork without re-testing that live. `git stash create`
+ * is not used because it drops untracked files.
  *
- * `navigateTree`, NOT `ctx.fork`: fork is the obvious fit and it is what pi's own
- * `/fork` uses, but calling it from this command handler terminates the session
- * (exit code 1, no stderr) — reproduced with the file restore removed, so the fork
- * alone is the trigger. navigateTree reaches the same point in the session tree,
- * is equally non-destructive (the abandoned path stays in the file), and does not
- * take the session down. Do not "simplify" this back to fork without re-testing
- * that live. Donor `examples/extensions/git-checkpoint.ts`
- * contributes only the hook-point shape (turn_start capture, session_before_fork
- * offer) — its `git stash create` + in-memory Map are a toy and are not reused
- * here: stash create drops untracked files, and an in-memory Map doesn't survive
- * process restart (`/resume`).
+ * ── Capture never touches the real index or working tree ─────────────────────
+ * It works in a separate temporary index via `env GIT_INDEX_FILE=<tmp> git ...`
+ * (POSIX-only; `ExecOptions` has no env passthrough):
+ *   1. `read-tree HEAD` (skipped on an unborn HEAD), then `add -A`. Without the
+ *      HEAD seed, tracked files matching .gitignore (the committed-then-ignored
+ *      `.env` pattern) are missing from the tree and a restore DELETES them.
+ *   2. `write-tree`, then `commit-tree [-p HEAD]` with fixed synthetic
+ *      author/committer, so it never depends on the user's `git config`.
+ *   3. `update-ref refs/bluclawd/checkpoints/<sessionId>/<sha>` keeps the commit
+ *      safe from GC and out of `git tag`/`git branch` (`git log --all` still
+ *      lists it).
+ * The temp index lives under `os.tmpdir()` and is removed in a `finally`.
  *
- * ── Non-intrusiveness (the crux of this feature) ──────────────────────────────
- * A checkpoint capture must NEVER change what `git status`/`git diff` report, and
- * must never touch the real `.git/index` or working tree. Capture therefore uses
- * a SEPARATE TEMPORARY INDEX FILE (the `GIT_INDEX_FILE` env var, set via
- * `env VAR=... git ...`, since
- * `ExecOptions` has no env passthrough and a `VAR=val cmd` shell prefix doesn't
- * expand across separate spawned processes anyway):
+ * ── Capture is fire-and-forget ───────────────────────────────────────────────
+ * `turn_start` handlers are awaited inline, so the capture runs detached and its
+ * entry is appended once the sha resolves. `turnEntryId`/`subject` are read at
+ * THAT point, not at turn_start: turn_start fires before the prompt's user
+ * message is persisted (on message_end), so the branch at turn_start still ends
+ * at the PREVIOUS prompt. `isCapturing` drops an overlapping background capture;
+ * the safety-net capture before a restore bypasses it.
  *
- *   1. `env GIT_INDEX_FILE=<tmp> git read-tree HEAD` (skipped on an unborn
- *      HEAD) then `env GIT_INDEX_FILE=<tmp> git add -A` — seed the temp index
- *      with HEAD's entries, then stage the ENTIRE working tree on top:
- *      tracked files (modified, deleted, or matching .gitignore — the
- *      committed-then-ignored `.env` pattern) plus untracked files, the same
- *      scope as `git stash -u`. Without the seed, tracked-but-ignored files
- *      are missing from the tree and a restore DELETES them. The real index
- *      is never opened.
- *   2. `env GIT_INDEX_FILE=<tmp> git write-tree` — turn that temp index into a
- *      tree object.
- *   3. `git commit-tree <tree> [-p HEAD] -m ...` — wrap the tree in a commit
- *      object (no index involved at all). Author/committer are fixed synthetic
- *      values so this never depends on the user's `git config`.
- *   4. `git update-ref refs/bluclawd/checkpoints/<sessionId>/<sha> <sha>` — keep
- *      the commit reachable from GC, under this session's own namespace (see
- *      pruning below). `refs/bluclawd/...` (rather than `git tag`) is
- *      invisible to `git tag`/`git branch` and the user's normal workflow;
- *      `git log --all` will still enumerate it, same tradeoff as e.g. GitHub's
- *      `refs/pull/*` convention.
+ * ── Restore is destructive and fail-closed ───────────────────────────────────
+ * `git read-tree --reset -u <sha>` resets the index and working tree in one
+ * step, and only runs through `restoreWithSafetyNet` after a confirmation. That
+ * captures the current state first so the restore is undoable; if the capture
+ * fails, restoring needs a separate "unrecoverable" confirmation. The index is
+ * then reset to HEAD so the result reads as ordinary uncommitted work (what was
+ * staged is not recorded, as with `git stash pop` without `--index`). Files
+ * created after the checkpoint and never added survive a restore: `read-tree`
+ * only touches paths that differ from the index.
  *
- * The temp index file itself lives under `os.tmpdir()` (never inside the repo)
- * and is removed in a `finally` block regardless of outcome. Every git exec
- * carries a hard `timeout` (GIT_TIMEOUT_MS) so a hung git can never hang the
- * agent loop. See `test/checkpoints.test.ts` for the byte-identical
- * before/after proof.
- *
- * ── Latency: fire-and-forget capture ──────────────────────────────────────────
- * `turn_start` handlers are awaited inline in the agent loop, so a capture
- * that blocks would add real per-turn latency. The handler therefore kicks off
- * `captureCheckpoint()` detached (`void ... .then`) and appends the `checkpoint`
- * entry only once the sha resolves. `turnEntryId`/`subject` are resolved at
- * THAT point, not at turn_start: pi's agent loop emits turn_start BEFORE the
- * prompt's message_start/message_end, and the user message is persisted on
- * message_end, so the branch as of turn_start still ends at the PREVIOUS
- * prompt. Reading it there labelled every prompt's first checkpoint with the
- * prompt before it ("(session start)" for the first) and gave the fork-point
- * offer a turnEntryId that never matched the forked-at user message. That
- * persistence is synchronous continuation work in the agent loop while the
- * capture needs several child-process round trips, so in practice the
- * post-capture branch always has it (a slow message_start handler in another
- * extension is the only way to narrow that gap).
- * A module-scoped `isCapturing` guard drops an overlapping turn_start capture while one is still in flight, bounding
- * concurrent git subprocesses to one; the next turn tries again. This guard does
- * NOT gate the `/rewind` command's own (foreground, user-awaited) safety-net
- * capture — that one is a one-off, sequential action the user explicitly
- * triggered, and unconditionally running it is more useful than occasionally
- * skipping the undo-safety-net over unlucky timing with a background capture.
- *
- * ── Restore (destructive, fail-closed) ──────────────────────────────────────
- * `git read-tree --reset -u <sha>` resets the real index AND working tree to
- * match the checkpoint's tree in one step (the standard idiom underlying
- * `git reset --hard`) — this is the one operation in this file that is meant to
- * touch the user's working tree, and only ever runs through
- * `restoreWithSafetyNet`, from an explicit, confirmed `/rewind` or a fork-point
- * restore the user opted into — both take the safety net below. It gets its own larger
- * RESTORE_TIMEOUT_MS budget (not the cheap 5s metadata timeout), since a SIGTERM
- * mid-restore on a large repo can leave a partially-applied tree; that failure is
- * reported with a distinct message pointing at the safety-net sha for recovery.
- *
- * `/rewind` is FAIL-CLOSED on its safety net: before restoring it captures the
- * current (about-to-be-overwritten) state so the rewind is undoable. If that
- * safety capture FAILS (timeout/transient git error), the destructive restore
- * does NOT proceed automatically — the user must explicitly re-confirm an
- * "unrecoverable, no safety checkpoint" prompt, otherwise the rewind aborts with
- * the working tree untouched. This closes the data-loss hole where a failed
- * safety net would silently still overwrite the user's uncommitted work.
- *
- * After the tree restore, the index is reset to HEAD (`git reset -q`, or
- * `read-tree --empty` on an unborn HEAD) so the result reads as ordinary
- * uncommitted work: modified files unstaged, new files untracked. A checkpoint
- * is a flattened tree — it does not record what was staged — so anything the
- * user had staged is unstaged after a restore, the same loss as `git stash
- * pop` without `--index`. Checkpoints captured before the HEAD-seeding change
- * above still lack tracked-but-ignored files; restoring one of those still
- * removes such files, and that cannot be repaired retroactively.
- *
- * `read-tree --reset -u` only touches paths that differ between the target
- * tree and the current index, so a file created AFTER the checkpoint
- * (agent-written, never git-added) is in neither and SURVIVES a restore.
- * Removing such strays would need an explicit untracked-diff + delete pass
- * with its own safety questions (it would erase files the USER dropped in
- * too) — documented, not fixed.
- *
- * The fork-point offer (`session_before_fork`) restores the OLDEST checkpoint
- * of the forked-at turn (`checkpointForTurn`): a prompt runs several turns and
- * each is captured, and replaying the prompt needs the tree from before its
- * first turn. Its safety-net entry lands on the OUTGOING session's branch and
- * its ref under that session's namespace, where the forked session's prune
- * leaves it alone (see pruning below).
- *
- * Both `/rewind` and the fork offer ask exactly ONE question, inside
- * `restoreWithSafetyNet`: the safety-net tree it has just captured is diffed
- * against the target (`git diff --stat`, clipped to PREVIEW_MAX_LINES) so the
- * confirmation shows what the restore changes. Identical trees short-circuit
- * with a notice; declining appends no entry (the stray safety-net ref is
- * swept by the next prune).
- *
- * ── Persistence & pruning ────────────────────────────────────────────────────
- * Each checkpoint is `pi.appendEntry("checkpoint", { sha, turnEntryId, subject })`
- * — a flat, alias-free object (no nested/mutable state to clone). `listCheckpoints`
- * is a pure function over session entries (root->leaf order in, newest-first out)
- * so it's unit-testable without git. Refs live under
- * `refs/bluclawd/checkpoints/<sessionId>/<sha>` so that sessions sharing one
- * `.git` (FleetView sessions in the same repo, subagents in worktrees) do not
- * sweep each other. `pruneCheckpointRefs` — run automatically after every
- * capture and by `/rewind --prune` — applies three rules: this session's refs
- * are kept only while their sha is among the newest `MAX_CHECKPOINT_REFS`
- * checkpoint entries on the CURRENT branch; legacy flat refs
- * (`refs/bluclawd/checkpoints/<sha>`, from before the namespaces) follow the
- * same rule so an upgraded repo converges without a migration; other sessions'
- * refs are dropped only once their commit is older than
- * FOREIGN_CHECKPOINT_TTL_DAYS. Growth stays bounded across long-lived repos
- * and long-lived sessions without the user ever needing `/rewind --prune`.
+ * ── Refs are namespaced per session ──────────────────────────────────────────
+ * Sessions sharing one `.git` must not sweep each other's refs; see
+ * `pruneCheckpointRefs`. Pruning runs after every capture, so ref growth stays
+ * bounded without `/rewind --prune`.
  */
 
 import { randomUUID } from "node:crypto";
@@ -153,36 +58,20 @@ const CHECKPOINT_REF_PREFIX = "refs/bluclawd/checkpoints/";
 /** Timeout for cheap git metadata/capture calls (rev-parse, add, write-tree, commit-tree, update-ref). */
 const GIT_TIMEOUT_MS = 5000;
 /**
- * Larger, dedicated budget for the ONE destructive call (`git read-tree --reset -u`).
- * A SIGTERM mid-restore on a large repo can leave a partially-applied tree (neither
- * old nor new state), so restore must not share the cheap 5s metadata budget.
+ * The one destructive call (`git read-tree --reset -u`) gets its own budget: a
+ * SIGTERM mid-restore on a large repo can leave a partially-applied tree.
  */
 const RESTORE_TIMEOUT_MS = 30000;
 const SUBJECT_MAX_CHARS = 100;
 /**
- * Cap on checkpoint refs kept on the current branch by the automatic pruning
- * below (`pruneOldCheckpointRefs`). Keeps the newest N captures restorable;
- * older refs are dropped and their commits become normal git-GC candidates.
- * Matches the "recent bounded window" size used elsewhere in this codebase
- * (e.g. `CACHE_MAX_ENTRIES`/`DEFAULT_MAX_FINISHED_JOBS` = 50).
+ * Checkpoint refs kept for this session (the newest on the current branch);
+ * older commits become normal git-GC candidates.
  */
 export const MAX_CHECKPOINT_REFS = 50;
 
-// Follow-ups from the F1.6 review — both CLOSED:
-// - Windows `env`-portability: WON'T DO. The `env VAR=... git ...` idiom is POSIX-only, but Windows is an explicit non-goal for
-//   this fork — CC-PARITY-AUDIT.md §4.10 ("Non-goals ... do NOT fix") locks the
-//   platform stance, and §3's "PowerShell" row gives the specific reason: "skip
-//   until Windows is a target (checkpoints are POSIX-only anyway)". No
-//   cross-platform shim is planned.
-// - Unbounded ref growth: CLOSED. `checkpointCurrentTurn()` calls
-//   `pruneOldCheckpointRefs()` unconditionally after every successful capture
-//   (the three-rule sweep in the header, capped at MAX_CHECKPOINT_REFS for this
-//   session). Fire-and-forget, same as capture itself (doesn't gate
-//   `isCapturing`). Manual `/rewind --prune` runs the identical sweep on demand.
-
 /** Data persisted per checkpoint via `pi.appendEntry("checkpoint", ...)`. */
 export interface CheckpointData {
-	/** Commit sha of the snapshot (see file header for how it's built). */
+	/** Commit sha of the snapshot. */
 	sha: string;
 	/** Id of the session entry (the user message) that started the turn this checkpoint belongs to. */
 	turnEntryId: string;
@@ -198,10 +87,7 @@ export interface Checkpoint extends CheckpointData {
 	timestamp: string;
 }
 
-/**
- * Pure helper: given session entries (e.g. `ctx.sessionManager.getBranch()`),
- * return the checkpoints on that branch, newest first. Unit-testable without git.
- */
+/** The checkpoints on a branch (e.g. `ctx.sessionManager.getBranch()`), newest first. */
 export function listCheckpoints(entries: SessionEntry[]): Checkpoint[] {
 	const checkpoints: Checkpoint[] = [];
 	for (const entry of entries) {
@@ -274,8 +160,7 @@ function findTurnContext(branch: SessionEntry[]): {
 
 /**
  * Refs from OTHER sessions' namespaces are kept this long (by commit date)
- * before the prune drops them — a session resumed later than this loses its
- * file checkpoints, nothing else. Matches Claude Code's checkpoint retention.
+ * before the prune drops them.
  */
 const FOREIGN_CHECKPOINT_TTL_DAYS = 30;
 
@@ -302,11 +187,9 @@ async function headSha(cwd: string, exec: ExtensionAPI["exec"]): Promise<string 
 }
 
 /**
- * Capture a restorable snapshot of the working tree (tracked + untracked files,
- * respecting .gitignore) as a git commit object, without touching the real index
- * or working tree (see file header for the temp-index mechanism). Returns the
- * commit sha, or undefined on any failure or when `cwd` isn't a git repo — never
- * throws (silent no-op).
+ * Capture a snapshot of the working tree (tracked + untracked, respecting
+ * .gitignore) as a commit, without touching the real index or working tree.
+ * Returns the sha, or undefined on any failure or outside a git repo; never throws.
  */
 export async function captureCheckpoint(
 	cwd: string,
@@ -317,10 +200,8 @@ export async function captureCheckpoint(
 
 	const tmpIndex = join(tmpdir(), `bluclawd-checkpoint-${randomUUID()}.index`);
 	try {
-		// Seed the temp index with HEAD's entries first, so `add -A` sees tracked
-		// files even when they match .gitignore (the committed-then-ignored
-		// pattern). An empty index would drop them from the tree and a later
-		// restore would delete them. Skipped on an unborn HEAD: nothing to seed.
+		// Seed with HEAD so `add -A` keeps tracked files that match .gitignore;
+		// without them a restore would delete those files.
 		const head = await headSha(cwd, exec);
 		if (head) {
 			const seed = await exec("env", [`GIT_INDEX_FILE=${tmpIndex}`, "git", "read-tree", head], {
@@ -379,13 +260,10 @@ export async function captureCheckpoint(
 }
 
 /**
- * Restore the working tree to a previously captured checkpoint. This is the
- * one deliberately destructive operation in this file — only call it from an
- * explicit, user-confirmed action. `read-tree --reset -u` rewrites the index
- * and working tree together; the index is then reset to HEAD so the result
- * reads as ordinary uncommitted work (modified files unstaged, new files
- * untracked) instead of a fully staged tree. Returns false (never throws) if
- * the sha can't be restored (e.g. not a git repo, unknown sha).
+ * Restore the working tree to a checkpoint; only call it from an explicit,
+ * user-confirmed action. The index is then reset to HEAD so the result reads as
+ * ordinary uncommitted work instead of a fully staged tree. Returns false (never
+ * throws) if the sha can't be restored.
  */
 export async function restoreCheckpoint(cwd: string, exec: ExtensionAPI["exec"], sha: string): Promise<boolean> {
 	const result = await exec("git", ["read-tree", "--reset", "-u", sha], {
@@ -404,15 +282,13 @@ export async function restoreCheckpoint(cwd: string, exec: ExtensionAPI["exec"],
 
 /**
  * Sweep `refs/bluclawd/checkpoints/**` with three rules, so sessions sharing
- * one `.git` (FleetView, subagent worktrees) never delete each other's live
- * checkpoints:
+ * one `.git` never delete each other's live checkpoints:
  *   - `<sessionId>/<sha>` (this session): delete unless the sha is in `keepShas`.
- *   - `<sha>` directly under the prefix (legacy flat layout): same rule, so an
- *     upgraded repo converges without a migration.
+ *   - `<sha>` directly under the prefix (older flat layout): the same rule.
  *   - `<otherSession>/<sha>`: delete only when the commit is older than
- *     FOREIGN_CHECKPOINT_TTL_DAYS. A ref with no committer date (not a
- *     commit) parses to NaN, fails the comparison, and is KEPT — the safe
- *     direction. Session ids are UUIDs, so the first `/` splits owner and sha.
+ *     FOREIGN_CHECKPOINT_TTL_DAYS. A ref with no committer date parses to NaN,
+ *     fails the comparison, and is KEPT — the safe direction. Session ids are
+ *     UUIDs, so the first `/` splits owner and sha.
  * Returns the number of refs removed. Never throws.
  */
 export async function pruneCheckpointRefs(
@@ -452,16 +328,9 @@ export async function pruneCheckpointRefs(
 }
 
 /**
- * Automatic counterpart to the manual `/rewind --prune`: runs after every
- * successful capture (unconditionally, not just once some threshold is
- * crossed), so a repo doesn't depend on the user remembering to prune. Deletes
- * every checkpoint ref that isn't among the newest `MAX_CHECKPOINT_REFS` shas on
- * the CURRENT branch — below that count this is exactly manual `/rewind
- * --prune`'s "sweep every stray ref from OTHER/old sessions" behavior, just run
- * every turn instead of on request; above it, it also caps the current branch's
- * own refs (see the "Unbounded ref growth" note above). Cheap in steady state
- * (one `for-each-ref`, zero deletes once nothing is stray or over the cap).
- * Never throws — `pruneCheckpointRefs` already swallows its own errors.
+ * Runs after every successful capture: keeps only the newest
+ * `MAX_CHECKPOINT_REFS` shas on the current branch and sweeps stray refs, as
+ * `/rewind --prune` does on request. Never throws.
  */
 async function pruneOldCheckpointRefs(
 	cwd: string,
@@ -514,10 +383,9 @@ export async function restoreWithSafetyNet(
 	safetySubject: string,
 	intro: string,
 ): Promise<boolean> {
-	// Deliberately bypasses the isCapturing guard (see file header) — this is a
-	// foreground, user-awaited, one-off action. The captured tree doubles as the
-	// preview base: `git diff <sha>` against the working tree would skip
-	// untracked files, and this tree has them.
+	// Bypasses the isCapturing guard: this is a foreground, user-awaited action.
+	// The captured tree doubles as the preview base, since `git diff <sha>`
+	// against the working tree would skip untracked files.
 	const safetySha = await captureCheckpoint(ctx.cwd, pi.exec, ctx.sessionManager.getSessionId());
 	if (safetySha) {
 		const stat = await diffStat(ctx.cwd, pi.exec, safetySha, targetSha);
@@ -538,9 +406,8 @@ export async function restoreWithSafetyNet(
 			subject: safetySubject,
 		});
 	} else {
-		// Fail-closed. Restoring now would overwrite the user's current
-		// uncommitted work with NO way to recover it — exactly the data loss the
-		// safety net exists to prevent. Do NOT restore unless the user opts in.
+		// Fail-closed: restoring now would overwrite uncommitted work with no
+		// way to recover it, so only restore if the user opts in.
 		const proceed = await ctx.ui.confirm(
 			"Safety checkpoint failed",
 			`${intro}\n\nCould not snapshot your current changes before rewinding (no preview either). If you restore now, your current uncommitted changes will be UNRECOVERABLE. Restore anyway, without a safety checkpoint?`,
@@ -556,9 +423,8 @@ export async function restoreWithSafetyNet(
 		ctx.ui.notify("Working tree restored to checkpoint.", "info");
 		return true;
 	}
-	// read-tree can be interrupted mid-write (e.g. SIGTERM on RESTORE_TIMEOUT_MS),
-	// potentially leaving a partially-applied tree. Point the user at the
-	// safety-net sha (when one was taken) so they can get back to where they were.
+	// read-tree can be interrupted mid-write (e.g. SIGTERM on RESTORE_TIMEOUT_MS);
+	// point the user at the safety-net sha so they can get back.
 	const recovery = safetySha
 		? ` Your pre-rewind state is checkpointed at ${safetySha.slice(0, 7)} — run /rewind to return to it.`
 		: "";
@@ -569,25 +435,19 @@ export async function restoreWithSafetyNet(
 	return false;
 }
 
-/** Module-scoped overlap guard for the turn_start background capture (see file header). */
+/** Overlap guard for the turn_start background capture. */
 let isCapturing = false;
 
 /**
- * Session-scoped count of turn_start captures that failed while `cwd` WAS a
- * git repo (index.lock, GIT_TIMEOUT_MS, or any other git error — see
- * `captureCheckpoint`'s individual `.catch(() => undefined)` sites). Reset on
- * `session_start` (covers resume). Deliberately does NOT count the "not a git
- * repo" no-op — that is a stable, already-surfaced-by-design condition (see
- * the dedicated test for it), not the surprise this counter exists for: a
- * turn silently missing its safety net while checkpoints are otherwise
- * working (IMPROVEMENT-PLAN.md §4.3).
+ * Background captures this session that failed while `cwd` WAS a git repo;
+ * reset on `session_start`. "Not a git repo" is expected and not counted —
+ * these are turns silently left without a safety net.
  */
 let failedCaptureCount = 0;
 
 /**
- * Extension factory. Idempotent at registration time: the body below only calls
- * on()/registerCommand() (no git/exec work), so it is safe to run twice per load
- * (bootstrap + final trust-resolving pass). All git work happens in handlers.
+ * Registration does no git work, so it is safe to run twice per load
+ * (bootstrap + trust-resolving pass).
  */
 export function factory(pi: ExtensionAPI): void {
 	function checkpointCurrentTurn(ctx: ExtensionContext): void {
@@ -596,10 +456,8 @@ export function factory(pi: ExtensionAPI): void {
 		const sessionId = ctx.sessionManager.getSessionId();
 		void captureCheckpoint(ctx.cwd, pi.exec, sessionId)
 			.then(async (sha) => {
-				// Resolved AFTER the capture, not at turn_start: pi persists the prompt's
-				// user message on message_end, which the agent loop emits after
-				// turn_start, so the branch at turn_start still ends at the previous
-				// prompt. By the time the git calls have completed the message is in.
+				// Read AFTER the capture, not at turn_start: the prompt's user message
+				// is persisted on message_end, which comes after turn_start.
 				const { turnEntryId, subject } = findTurnContext(ctx.sessionManager.getBranch());
 				if (sha) {
 					pi.appendEntry(CHECKPOINT_CUSTOM_TYPE, { sha, turnEntryId, subject });
@@ -607,12 +465,8 @@ export function factory(pi: ExtensionAPI): void {
 					void pruneOldCheckpointRefs(ctx.cwd, pi.exec, sessionId, ctx.sessionManager.getBranch());
 					return;
 				}
-				// Capture failed. Distinguish "not a git repo" (stable, expected, not
-				// this turn's fault — no counter, no notice) from a genuine git-op
-				// failure (index.lock, GIT_TIMEOUT_MS, ...) that silently left this
-				// turn with no safety net (IMPROVEMENT-PLAN.md §4.3). The extra check
-				// only runs on the already-slow failure path, so the happy path pays
-				// nothing for it.
+				// "Not a git repo" is expected and gets no notice; any other failure
+				// (index.lock, timeout, ...) left this turn without a safety net.
 				if (!(await isGitRepo(ctx.cwd, pi.exec))) return;
 				failedCaptureCount++;
 				if (failedCaptureCount === 1 && ctx.hasUI) {
@@ -670,10 +524,8 @@ export function factory(pi: ExtensionAPI): void {
 			}
 
 			const checkpoints = listCheckpoints(ctx.sessionManager.getBranch());
-			// Surface capture failures here too, not just the one-time notice on the
-			// turn they happened (IMPROVEMENT-PLAN.md §4.3) — this is where a user
-			// actually checks "what can I rewind to", so a gap between turn count and
-			// checkpoint count belongs in the same view as the list itself.
+			// Surface capture failures here too: this is where users check what they
+			// can rewind to.
 			const failureNote =
 				failedCaptureCount > 0
 					? ` (${failedCaptureCount} checkpoint${failedCaptureCount === 1 ? "" : "s"} failed to capture this session — those turns have no safety net)`
@@ -694,10 +546,8 @@ export function factory(pi: ExtensionAPI): void {
 			const target = checkpoints[labels.indexOf(choice)];
 			if (!target) return;
 
-			// What to rewind. Claude Code asks the same three-way question, and the two
-			// halves are genuinely independent here: the git checkpoint restores files,
-			// while the conversation lives in pi's session tree and is rewound by forking
-			// at the user message that started the turn.
+			// The git checkpoint restores files; the conversation lives in pi's
+			// session tree and is rewound to the user message that started the turn.
 			const canRewindTalk = Boolean(target.turnEntryId);
 			const SCOPES = [
 				{ label: "Files only — restore the working tree, keep the conversation", files: true, talk: false },
@@ -717,10 +567,8 @@ export function factory(pi: ExtensionAPI): void {
 			}
 			if (!scopeChoice) return;
 
-			// Conversation only: nothing touches the working tree, so none of the
-			// safety-net machinery below applies. Navigating the tree is non-destructive —
-			// the abandoned path stays in the session file — so there is nothing to
-			// snapshot first.
+			// Conversation only: the working tree is untouched and navigating is
+			// non-destructive, so there is nothing to snapshot first.
 			if (!scopeChoice.files) {
 				await ctx.navigateTree(target.turnEntryId);
 				return;
@@ -733,9 +581,8 @@ export function factory(pi: ExtensionAPI): void {
 				"(before rewind)",
 				`Restore the working tree to the checkpoint "${target.subject}"?`,
 			);
-			// Move the conversation LAST: it swaps what the session is pointing at, so
-			// anything after it would run against state that is being replaced — the
-			// same ordering FleetView's switchSession hand-off exists for.
+			// Move the conversation LAST: it swaps what the session points at, so
+			// anything after it would run against state being replaced.
 			if (restored && scopeChoice.talk) await ctx.navigateTree(target.turnEntryId);
 		},
 	});

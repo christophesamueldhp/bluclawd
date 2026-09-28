@@ -1,17 +1,13 @@
 /**
  * bluclawd's visual identity: the welcome header.
  *
- * The theme itself is not registered here. `package.json`'s `pi.themes`
- * manifest entry makes `themes/bluclawd.json` a package resource, which pi
- * registers before it resolves the configured theme at startup — so
- * `"theme": "bluclawd"` in settings.json is the startup theme with no fallback
- * notice. (An extension's `resources_discover` hook runs too late for that:
- * pi has already applied the startup theme and printed "Theme not found".)
- * `setHeader` replaces the startup banner with Claude Code's header: the
- * mascot beside name, model and cwd (welcome-header.ts).
+ * The theme is not registered here: the `pi.themes` manifest entry in
+ * `package.json` registers `themes/bluclawd.json` before pi resolves the
+ * startup theme. An extension's `resources_discover` hook runs too late for
+ * that (pi would already have printed "Theme not found").
  *
- * `quietStartup` is pi's own setting and pi honours it before a header factory
- * is consulted, so there is nothing to check here.
+ * pi honours `quietStartup` before a header factory is consulted, so there is
+ * nothing to check here.
  */
 import { homedir } from "node:os";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
@@ -30,9 +26,7 @@ function tildePath(path: string): string {
 const branding: InlineExtension = {
 	name: "branding",
 	factory: (pi) => {
-		// Claude Code's /theme: pick from every theme pi knows (built-in, custom,
-		// package) and persist the choice, the same setting pi's own settings
-		// panel writes.
+		// Persists to the same setting pi's own settings panel writes.
 		pi.registerCommand("theme", {
 			description: "Switch the theme (pick from a list, or /theme <name>)",
 			handler: async (args, ctx) => {
@@ -71,9 +65,8 @@ const branding: InlineExtension = {
 		});
 
 		pi.on("session_start", (event, ctx) => {
-			// Populate the shared theme reference other components in this layer
-			// (fleet-view and friends) import instead of reaching into pi's own
-			// theme singleton, which isn't part of the public package export.
+			// Other components read this shared reference because pi's theme
+			// singleton isn't part of the public package export.
 			setSharedTheme(ctx.ui.theme);
 
 			ctx.ui.setHeader((tui, theme) => {

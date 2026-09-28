@@ -1,33 +1,24 @@
 /**
  * Settings keys bluclawd adds on top of pi's, and the readers for them.
  *
- * pi's `Settings` interface does not know these keys and pi's `SettingsManager`
- * has no getters for them, and — unlike most of what this layer reaches for —
- * `Settings` isn't part of pi's public package export at all, so it cannot even
- * be augmented by name from outside pi's own source. Every reader here goes
- * through an untyped `Record<string, unknown>` cast instead (`merged()` below)
- * rather than assuming a shape pi's own types don't promise.
- *
- * The merge below reproduces pi's own precedence: project settings override
- * global ones, one level deep for objects. Trust is already handled upstream —
- * `SettingsManager.loadFromStorage` returns empty project settings when the
- * project is not trusted, so a reader here can never see an untrusted project's
- * values.
+ * pi's `Settings` type is not exported and has no getters for these keys, so
+ * every reader goes through an untyped `Record<string, unknown>` cast.
+ * `SettingsManager` already returns empty project settings for an untrusted
+ * project, so a reader here never sees an untrusted project's values.
  */
 import { join } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { SettingsManager } from "@earendil-works/pi-coding-agent";
 
 /**
- * Sandbox settings: Claude Code's `sandbox` keys. Everything the runtime
- * understands passes straight through (typed against its own config so a
- * renamed key is a compile error here, and an unknown one an init failure
- * there); the keys below are the ones Claude Code adds on top.
+ * Sandbox settings. Everything the runtime understands passes straight through
+ * (typed against its own config so a renamed key is a compile error here); the
+ * keys below are added on top.
  */
 export interface SandboxSettings extends Partial<Omit<SandboxRuntimeConfig, "network" | "filesystem">> {
 	enabled?: boolean; // default: false — sandboxing is opt-in
 	/** Refuse to run bash at all when the sandbox is enabled but failed to start.
-	 *  default: false — the historical behaviour is an unsandboxed fallback. */
+	 *  default: false — falls back to running unsandboxed. */
 	failIfUnavailable?: boolean;
 	/** Former name of failIfUnavailable; still honoured. */
 	strict?: boolean;
@@ -56,9 +47,9 @@ export interface WebsearchSettings {
 }
 
 /**
- * Limits and models for the `agent` tool's in-process subagents — Claude Code's
+ * Limits and models for the `agent` tool's in-process subagents.
  * CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH and
- * CLAUDE_CODE_SUBAGENT_MODEL, which override these when set.
+ * CLAUDE_CODE_SUBAGENT_MODEL override these when set.
  */
 export interface SubagentSettings {
 	/** Subagents running at once, across the session. default: 20 */
@@ -97,16 +88,15 @@ export function fastModel(sm: SettingsManager): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
-/** Claude Code's `prefersReducedMotion` ("Reduce motion"): no mascot animation. */
+/** "Reduce motion": no mascot animation. */
 export function prefersReducedMotion(sm: SettingsManager): boolean {
 	return merged(sm).prefersReducedMotion === true;
 }
 
 /**
- * The merged `sandbox` settings. Relative filesystem paths resolve per scope, as
- * in Claude Code: against the project root in project settings, against the
- * agent dir (Claude Code's `~/.claude`) in user settings. Without `dirs` they are
- * left as written, for readers that only want a flag.
+ * The merged `sandbox` settings. Relative filesystem paths resolve per scope:
+ * against the project root in project settings, against the agent dir in user
+ * settings. Without `dirs` they are left as written, for readers that only want a flag.
  */
 export function sandbox(sm: SettingsManager, dirs?: { project: string; agent: string }): SandboxSettings | undefined {
 	const global = (sm.getGlobalSettings() as unknown as Mergeable).sandbox as SandboxSettings | undefined;
@@ -118,7 +108,7 @@ export function sandbox(sm: SettingsManager, dirs?: { project: string; agent: st
 }
 
 /**
- * Claude Code's sandbox path prefixes: `/` and `//` are absolute, `~` is home,
+ * Sandbox path prefixes: `/` and `//` are absolute, `~` is home,
  * anything else (`./out`, `out`, `**\/.env`) is relative to `base`.
  */
 export function resolveSandboxPath(path: string, base: string): string {
@@ -143,7 +133,7 @@ export function resolveSandboxPaths(settings: SandboxSettings, base: string): Sa
 }
 
 /**
- * Keys Claude Code honours from user (or managed) settings only: each widens what a
+ * Keys honoured from user settings only: each widens what a
  * sandboxed command can do (run apps, write anywhere, send a real credential somewhere,
  * swap the sandbox binary), so a checked-out repository must not be able to set it.
  */
@@ -173,7 +163,7 @@ function withoutUserOnlyKeys(project: SandboxSettings): SandboxSettings {
 }
 
 /**
- * Claude Code's scope merge for `sandbox`: arrays combine across scopes rather
+ * Scope merge for `sandbox`: arrays combine across scopes rather
  * than one replacing the other, objects merge at any depth, scalars take the
  * project's value — except the user-only keys above, which a project cannot set.
  */
@@ -202,9 +192,8 @@ function deepMerge(base: Mergeable, overrides: Mergeable): Mergeable {
 }
 
 /**
- * Rule lists are the union of both scopes, as Claude Code merges them. The
- * one-level merge above would let a project's `deny: []` replace the user's
- * global deny list.
+ * Rule lists are the union of both scopes: the one-level merge above would let
+ * a project's `deny: []` replace the user's global deny list.
  */
 export function permissions(sm: SettingsManager): PermissionSettings | undefined {
 	const value = merged(sm).permissions as PermissionSettings | undefined;

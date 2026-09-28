@@ -1,13 +1,9 @@
 /**
- * The parent session's MCP servers, as the subagents layer may lend them to a child.
- *
- * A child is built with no extensions, so it has no MCP bridge of its own; and
- * spawning each server again per child would repeat the approval gate, OAuth and
- * startup cost the parent already paid. Instead the MCP extension publishes its
- * connections here and a child borrows them: its tools call through the parent's
+ * The parent session's MCP servers, lent to subagent children. A child has no
+ * extensions of its own, and respawning each server per child would repeat the
+ * approval gate, OAuth and startup, so a child's tools call through the parent's
  * live client. MCP and subagents are separate `pi.extensions` entries, hence
- * `sharedRef` (see global-state.ts). Kept free of the SDK, which the subagents
- * layer must not load.
+ * `sharedRef`. Kept free of the MCP SDK, which the subagents layer must not load.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";

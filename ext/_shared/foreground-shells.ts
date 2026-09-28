@@ -1,6 +1,6 @@
 /**
- * Ctrl+B: moving the model's running foreground bash into the background
- * (Claude Code parity). The sandbox extension wraps the foreground exec with
+ * Ctrl+B: moving the model's running foreground bash into the background.
+ * The sandbox extension wraps the foreground exec with
  * `detachableExec`; background-bash owns the key and calls `detachAll`. The two
  * load in separate module graphs, so the set of running foreground shells is a
  * sharedRef.
@@ -17,10 +17,7 @@ import { sharedRef } from "./global-state.ts";
 /** Why a foreground command moved to the background: Ctrl+B, its timeout, or a message the user sent. */
 export type DetachReason = "user" | "timeout" | "message";
 
-/**
- * Claude Code registers a foreground command as a task only once it has run this
- * long; before that, neither Ctrl+B nor a message moves it.
- */
+/** A foreground command counts as a task only after this long; before that, neither Ctrl+B nor a message moves it. */
 export const FOREGROUND_TASK_AFTER_MS = 2000;
 
 export interface ForegroundShell {
@@ -91,20 +88,20 @@ export interface DetachOptions {
 	agentId?: string;
 	/** Runs once the job ends, as run_in_background's exit notification does. */
 	onExit?: (job: BackgroundJobInfo) => void;
-	/** The stall watchdog's notice, which Claude Code also runs on a shell moved to the background. */
+	/** The stall watchdog's notice, which also runs on a shell moved to the background. */
 	onStall?: (job: BackgroundJobInfo, tail: string) => void;
 	/**
 	 * Whether reaching the timeout moves the command to the background (the default) or
-	 * ends it as timed out, as Claude Code ends a leading `sleep`.
+	 * ends it as timed out, as for a leading `sleep`.
 	 */
 	autoBackground?: boolean;
 }
 
 /**
  * `inner` wrapped so the call can be detached mid-flight. The timeout is enforced
- * here rather than handed to `inner`: as in Claude Code, a command still running at
- * its timeout is moved to the background, not killed, unless `autoBackground` is
- * off; and moving it to the background any other way cancels the timeout.
+ * here rather than handed to `inner`: a command still running at its timeout is
+ * moved to the background, not killed, unless `autoBackground` is off; and moving
+ * it to the background any other way cancels the timeout.
  */
 export function detachableExec(inner: BackgroundExec, options: DetachOptions = {}): BackgroundExec {
 	return (command, cwd, { onData, signal, timeout, env }) => {

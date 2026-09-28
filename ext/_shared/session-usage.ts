@@ -1,7 +1,3 @@
-/**
- * Billing, for `/status` (diagnostics).
- */
-
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Providers billed by subscription despite API-key auth, so pi's OAuth rule never sees them. */

@@ -1,6 +1,6 @@
 /**
  * Keys for `ctx.ui.setStatus`. pi's footer, and pistatusline under its status line,
- * order the statuses by key, so these keys spell Claude Code's order: the permission
+ * order the statuses by key, so these keys spell the display order: the permission
  * mode first, background tasks beside it, the agent view hint last. Subagent rows sort
  * just before that hint, which is where pi's one-line footer puts them.
  */

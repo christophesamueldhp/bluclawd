@@ -1,5 +1,5 @@
 /**
- * Pure, SDK-free helpers for the MCP bridge — PLAN.md F4.1.
+ * Pure, SDK-free helpers for the MCP bridge.
  *
  * This module holds everything that does NOT touch the `@modelcontextprotocol/sdk`
  * so it can be imported at startup (by index.ts) and unit-tested without any
@@ -7,7 +7,7 @@
  * only ever dynamically imported when there is at least one configured server (its
  * heavy transitive tree must stay out of the startup path and the browser bundle).
  *
- * Config shape follows Claude Code's `mcp.json`:
+ * Config shape (`mcp.json`):
  *
  *   { "mcpServers": {
  *       "playwright": { "command": "npx", "args": ["-y", "@playwright/mcp@latest"] },
@@ -30,7 +30,7 @@ import { getDebugLogPath } from "../_shared/paths.ts";
 import { resolveConfigValue } from "../_shared/resolve-config-value.ts";
 
 const MCP_FILE = "mcp.json";
-/** Claude Code's shared, commit-to-the-repo config at the project root. */
+/** Shared, committed config at the project root. */
 const SHARED_MCP_FILE = ".mcp.json";
 
 /** Transports a server entry can select. See {@link transportKind}. */
@@ -46,19 +46,19 @@ export interface ServerConfig {
 	env?: Record<string, string>;
 	url?: string;
 	headers?: Record<string, string>;
-	/** Explicit transport, as Claude Code writes it. Absent ⇒ inferred from the
+	/** Explicit transport. Absent ⇒ inferred from the
 	 *  fields; required to reach the legacy SSE transport, which is never guessed. */
 	type?: TransportKind;
 	/** Which file this came from. Stamped by {@link loadMcpConfig} and NEVER read
 	 *  out of the file itself — a repo that could declare itself `global` would
 	 *  walk straight past {@link needsApproval}. */
 	source?: ServerSource;
-	/** Configured but not connected; toggled by `/mcp enable|disable` (audit B.5). */
+	/** Configured but not connected; toggled by `/mcp enable|disable`. */
 	disabled?: boolean;
 	/** Register this server's tools deferred: schemas stay out of the model's
-	 *  context until activated via the mcp_find_tools search tool (audit B.5). */
+	 *  context until activated via the mcp_find_tools search tool. */
 	deferTools?: boolean;
-	/** Per-call wall-clock limit in ms (Claude Code's field); see {@link toolCallTimeouts}. */
+	/** Per-call wall-clock limit in ms; see {@link toolCallTimeouts}. */
 	timeout?: number;
 }
 
@@ -169,8 +169,8 @@ export function parseMcpConfig(raw: unknown): Record<string, ServerConfig> {
 /**
  * Pick the transport for a server entry, validating the config as it goes.
  *
- * `type` is Claude Code's field and wins when present; without it the transport is
- * inferred, exactly as before, from whichever of `command`/`url` is set. SSE is
+ * `type` wins when present; without it the transport is inferred from whichever
+ * of `command`/`url` is set. SSE is
  * reachable ONLY through an explicit `type: "sse"`: an SSE endpoint is just a URL,
  * so guessing would mean attempting both transports and paying the handshake
  * timeout twice on every genuinely misconfigured server, while hiding the mistake.
@@ -339,8 +339,7 @@ export function loadMcpConfig(ctx: ExtensionContext): Record<string, ServerConfi
  * settings (`mcp.disabledProjectServers[<cwd>][<name>] = boolean`).
  *
  * Kept out of the project files on purpose: `.mcp.json` is committed and shared,
- * so one person turning a server off must not rewrite the team's file (Claude Code
- * likewise keeps this in the user's own state, never in `.mcp.json`).
+ * so one person turning a server off must not rewrite the team's file.
  */
 export function projectServerOverrides(cwd: string): Record<string, boolean> {
 	const mcp = readJsonObject(join(getAgentDir(), "settings.json")).mcp;
@@ -384,7 +383,7 @@ export function enableAllProjectServers(): boolean {
 
 /**
  * Persist a GLOBAL server's `disabled` flag into the user's own `<agentDir>/mcp.json`
- * (audit B.5, `/mcp enable|disable`). Project servers never come here — their
+ * (`/mcp enable|disable`). Project servers never come here — their
  * choice is recorded by approveProjectServer's sibling in settings-write.ts, see
  * {@link projectServerOverrides}. Only the server object's `disabled` key changes
  * (removed entirely when enabling). Returns the file written, or an error string.
@@ -446,8 +445,7 @@ const MAX_INSTRUCTIONS_CHARS = 2048;
 
 /**
  * The system-prompt section carrying connected servers' `instructions` (from the MCP
- * initialize result), shaped like Claude Code's "MCP Server Instructions" section.
- * Undefined when no server supplied any.
+ * initialize result). Undefined when no server supplied any.
  */
 export function formatServerInstructions(servers: { name: string; instructions?: string }[]): string | undefined {
 	const sections: string[] = [];
@@ -471,7 +469,7 @@ export interface PromptArgument {
 
 /**
  * Map `/mcp__server__prompt` arguments onto the prompt's declared arguments.
- * Positional and whitespace-separated, as Claude Code does it; words beyond the last
+ * Positional and whitespace-separated; words beyond the last
  * declared argument join that argument instead of being silently dropped.
  */
 export function parsePromptArgs(
@@ -513,7 +511,7 @@ export function promptMessagesToText(messages: { role: string; content: unknown 
 
 type Env = Record<string, string | undefined>;
 
-/** Claude Code's default wall clock for one tool call: 1e8 ms, about 28 hours — in effect
+/** Default wall clock for one tool call: 1e8 ms, about 28 hours — in effect
  *  "no limit"; the idle window below is what catches a hung server. */
 const DEFAULT_TOOL_TIMEOUT_MS = 100_000_000;
 /** setTimeout's ceiling (a larger delay fires immediately). */
@@ -530,7 +528,7 @@ function envMs(env: Env, name: string): number | undefined {
 }
 
 /**
- * Timeouts for one tool call, as Claude Code computes them (2.1.273):
+ * Timeouts for one tool call:
  * - `total` — wall clock: per-server `timeout` (≥1000ms) ?? `MCP_TOOL_TIMEOUT` ?? ~28h,
  *   clamped to [1000ms, setTimeout's max]. Progress does not extend it.
  * - `idle` — abort when the server sends no response and no progress for this long:
@@ -550,15 +548,15 @@ export function toolCallTimeouts(config: ServerConfig, env: Env = process.env): 
 	return { total, idle };
 }
 
-/** The MCP handshake limit: `MCP_TIMEOUT` (Claude Code's name), 30s by default. */
+/** The MCP handshake limit: `MCP_TIMEOUT`, 30s by default. */
 export function connectTimeoutMs(env: Env = process.env): number {
 	const ms = envMs(env, "MCP_TIMEOUT");
 	return ms !== undefined && ms > 0 ? ms : DEFAULT_CONNECT_TIMEOUT_MS;
 }
 
 /**
- * Claude Code's `${VAR}` / `${VAR:-default}` expansion. An unset variable with no
- * default stays as literal `${VAR}` text and is reported, as Claude Code does.
+ * `${VAR}` / `${VAR:-default}` expansion. An unset variable with no default stays
+ * as literal `${VAR}` text and is reported.
  *
  * Only the braced form: pi's bare `$VAR` and `!command` values in `env`/`headers` are
  * left for {@link resolveServerEnv}/resolveHeaders, which run after this. The two do
@@ -581,8 +579,7 @@ export function expandEnv(text: string, env: Env = process.env): { text: string;
 }
 
 /**
- * Expand `${VAR}` in every field Claude Code expands — command, args, env, url, headers
- * — returning a copy. Runs at connect time, never at load: the approval fingerprint
+ * Expand `${VAR}` in command, args, env, url and headers, returning a copy. Runs at connect time, never at load: the approval fingerprint
  * must cover the file's text, not whatever the environment held that day.
  */
 export function expandServerConfig(
@@ -606,10 +603,8 @@ export function expandServerConfig(
 }
 
 /**
- * The agent's own credentials: model-provider keys and cloud/registry secrets. Claude
- * Code reads its equivalents as empty in a remote server's `url` and `headers`; this is
- * that list made provider-neutral (the providers pi talks to, not only Anthropic). A
- * server's OWN key (NOTION_API_KEY, GITHUB_TOKEN…) is deliberately absent — sending it
+ * The agent's own credentials: model-provider keys and cloud/registry secrets, which
+ * must never reach a remote server's `url` or `headers`. A server's OWN key (NOTION_API_KEY, GITHUB_TOKEN…) is deliberately absent — sending it
  * in a header is the point of headers. Secret VALUES only, never paths or URLs
  * (HTTP_PROXY, GOOGLE_APPLICATION_CREDENTIALS): matching by value, a proxy at
  * 127.0.0.1:8080 would refuse a local MCP server on the same port.
@@ -654,9 +649,9 @@ const MIN_CREDENTIAL_CHARS = 8;
  * Which agent credential, if any, has its VALUE inside a resolved remote url or header.
  *
  * Checked on the value after every expansion path (`${VAR}`, pi's bare `$VAR`, and
- * `!command`), so no syntax can route a model key to a server a repo chose. Where
- * Claude Code blanks the variable, bluclawd refuses the connect instead — a silently
- * emptied url or header only surfaces later as a baffling server error.
+ * `!command`), so no syntax can route a model key to a server a repo chose. Refuses
+ * rather than blanking the value: a silently emptied url or header only surfaces
+ * later as a baffling server error.
  */
 export function leakedCredential(value: string, env: Env = process.env): string | undefined {
 	return AGENT_CREDENTIAL_ENV.find((name) => {
@@ -666,7 +661,7 @@ export function leakedCredential(value: string, env: Env = process.env): string 
 }
 
 /**
- * `@server:uri` resource mentions, Claude Code's syntax, for the given server names only
+ * `@server:uri` resource mentions for the given server names only
  * — restricting to real servers is what keeps `@someone:thing` in prose from matching.
  * The `@` must start a word (not an email), and trailing sentence punctuation is not
  * part of the uri. Deduplicated, in order of first appearance.

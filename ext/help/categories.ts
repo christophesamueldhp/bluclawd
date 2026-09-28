@@ -1,15 +1,6 @@
 /**
- * Grouping for `/help` (REVIEW-2026-07 §4.4).
- *
- * ~47 commands in one flat list is a wall, not a surface you can discover
- * anything from. This groups them by what you are trying to DO, not by where
- * they are implemented — a user looking for `/rewind` does not know or care
- * that it comes from an extension while `/fork` is a built-in, so the two
- * appear side by side under Session.
- *
- * Kept as a pure function over names so it can be unit-tested without a TUI,
- * and kept in its own fork-owned file so `slash-commands.ts` needs no category
- * field (it is an upstream file; adding one would be a modifying hunk there).
+ * Grouping for `/help`, by what you are trying to DO rather than where a
+ * command is implemented: built-ins and extension commands share one namespace.
  *
  * Unknown names are NOT dropped — they fall into "Other", so a command added
  * later still shows up in `/help` before anyone remembers to categorise it.
@@ -28,15 +19,8 @@ const CATEGORY_ORDER = [
 
 type CategoryTitle = (typeof CATEGORY_ORDER)[number];
 
-/**
- * name → category. Built-ins and extension commands share one namespace here
- * on purpose; see the file header.
- */
 const CATEGORY_OF: Record<string, CategoryTitle> = {
 	// Session
-	// pi's own command names. The fork branch renamed these to their Claude Code
-	// equivalents by editing pi's built-in table; this branch does not, so the
-	// names pi actually ships are the ones that need a category.
 	new: "Session",
 	session: "Info & diagnostics",
 	name: "Session",

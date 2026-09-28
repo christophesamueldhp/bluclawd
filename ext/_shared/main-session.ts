@@ -2,10 +2,9 @@
  * Where the main session's background jobs report to. pi rebuilds the session
  * runtime, extension instances included, on /clear (`/new`), /resume and fork,
  * and an instance's `pi` goes stale with the session it was made for. A job
- * outlives that switch (Claude Code keeps background shells across /clear), so
- * its notifications and session-log records go to whichever main session is
- * current, never to the `pi` that started it. Between the old session's end and
- * the new one's start they wait here.
+ * outlives that switch, so its notifications and session-log records go to
+ * whichever main session is current, never to the `pi` that started it. Between
+ * the old session's end and the new one's start they wait here.
  */
 
 import { sharedRef } from "./global-state.ts";

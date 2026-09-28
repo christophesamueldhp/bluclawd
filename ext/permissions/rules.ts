@@ -1,24 +1,17 @@
 /**
- * Pure permission-rule engine (PLAN.md F2.1).
+ * Permission-rule engine.
  *
  * Rules use a `Verb(glob)` syntax, e.g. `Bash(npm *)`, `Read(~/.ssh/**)`.
  * `decide()` resolves a tool call against a rule set with fixed
  * deny > ask > allow precedence and returns the winning kind, or `null` when
- * no rule governs the call. This module is fully unit-tested and safe to call
- * inline in the hot `tool_call` path. One deliberate, narrow exception to
- * "no I/O": a deny/ask path rule also widens to the subject's realpath (a
- * symlink resolved), so a rule can catch what it points at, not just its
- * literal spelling — see `getRealpathSubject` in `decide()`, and
- * `evaluate.ts`'s purity note for why this is scoped to deny/ask only.
+ * no rule governs the call. The one I/O exception: a deny/ask path rule also
+ * matches the subject's realpath, so a symlink cannot dodge it.
  *
- * Glob semantics (see the tests for the exact assertions):
+ * Glob semantics:
  * - `*`  matches any run of characters EXCEPT `/`  → `[^/]*`
  * - `**` matches any characters INCLUDING `/` and newlines → `[\s\S]*`
- * - every other character — including literal spaces — is matched literally.
- *
- * NB (Trap 1): the plan's reference impl converted every literal space to `.*`
- * via a space sentinel, which made `Bash(npm *)` match `npmx`. This char-by-char
- * scan has no sentinel, so spaces stay literal.
+ * - every other character — including spaces — is matched literally, so
+ *   `Bash(npm *)` does not match `npmx`.
  */
 
 export type Decision = "allow" | "ask" | "deny";
@@ -30,8 +23,8 @@ import { resolveToCwd } from "../_shared/path-resolve.ts";
 import { COMMAND_SUBSTITUTION } from "./safe-command.ts";
 
 /**
- * Lowercase tool name → capitalized rule verb. MCP tools are ALSO governed via the
- * dynamic `verbFor()` mapping below: `mcp__server__tool` → `Mcp(server:tool)`.
+ * Lowercase tool name → capitalized rule verb. MCP tools are governed via
+ * `verbFor()`: `mcp__server__tool` → `Mcp(server:tool)`.
  */
 const VERB: Record<string, string> = {
 	bash: "Bash",
@@ -41,34 +34,28 @@ const VERB: Record<string, string> = {
 	grep: "Grep",
 	find: "Find",
 	ls: "Ls",
-	webfetch: "WebFetch", // Tier 4 tools opt in here
+	webfetch: "WebFetch",
 	websearch: "WebSearch",
 };
 
-/** True for namespaced MCP tool names of the form `mcp__server__tool`. */
 export function isMcpToolName(tool: string): boolean {
 	return /^mcp__.+__.+$/.test(tool);
 }
 
-/**
- * The governed rule verb for a tool name, or undefined when ungoverned.
- * MCP tools (audit B.5) map to `Mcp`.
- */
+/** The governed rule verb for a tool name, or undefined when ungoverned. */
 function verbFor(tool: string): string | undefined {
 	if (isMcpToolName(tool)) return "Mcp";
 	return VERB[tool];
 }
 
-/** The rule verbs this engine actually governs. `decide()` returns null for anything outside this
- *  set, so callers that want to gate "every governable tool" (e.g. the FleetView ask-all posture)
- *  should build their rules from THIS list rather than a hand-kept copy that can drift out of sync. */
+/** The rule verbs this engine governs. Build "every governable tool" rules from this, not a copy. */
 export function governedVerbs(): string[] {
 	return [...Object.values(VERB), "Mcp"];
 }
 
 /**
- * Claude Code's rule verbs that reach more tools than their own: an `Edit` rule covers
- * every file-editing tool, a `Read` rule every file-reading one. Keyed by the tool's verb.
+ * Rule verbs that reach more tools than their own: an `Edit` rule covers every
+ * file-editing tool, a `Read` rule every file-reading one. Keyed by the tool's verb.
  */
 const COVERING_VERBS: Record<string, string[]> = {
 	Write: ["edit"],
@@ -83,9 +70,9 @@ function ruleVerbCovers(ruleVerb: string, verb: string): boolean {
 }
 
 /**
- * A rule string's verb and subject. A bare verb (`Bash`) covers every subject, as in
- * Claude Code. Claude Code's MCP spellings — `mcp__server`, `mcp__server__*`,
- * `mcp__server__tool` — read as `Mcp(server:*)` / `Mcp(server:tool)`.
+ * A rule string's verb and subject. A bare verb (`Bash`) covers every subject. The MCP
+ * spellings `mcp__server`, `mcp__server__*` and `mcp__server__tool` read as
+ * `Mcp(server:*)` / `Mcp(server:tool)`.
  */
 function ruleParts(rule: string): { verb: string; subject: string } | undefined {
 	const mcp = /^mcp__(.+?)(?:__(.+))?$/.exec(rule);
@@ -109,11 +96,8 @@ export function stripWrappingQuotes(raw: string): string {
 
 /**
  * Invert a `Verb(subject)` string back into the `{tool, input}` a tool call would carry,
- * so a rule spec can be run through the very same engine that governs live calls.
- *
- * Derived from the VERB table above rather than a hand-kept second mapping — a third
- * spelling of "which field is this verb's subject" is exactly how these drift.
- * Returns undefined for a malformed spec or an ungoverned verb.
+ * so a rule spec can be run through the same engine that governs live calls. Returns
+ * undefined for a malformed spec or an ungoverned verb.
  */
 export function parseRuleSpec(spec: string): { tool: string; input: Record<string, unknown> } | undefined {
 	const parts = ruleParts(stripWrappingQuotes(spec));
@@ -130,9 +114,8 @@ export function parseRuleSpec(spec: string): { tool: string; input: Record<strin
 	if (!tool) return undefined;
 	if (tool === "bash") return { tool, input: { command: subj } };
 	if (tool === "webfetch") {
-		// `WebFetch(domain:example.com)` (Claude Code's spelling) names a host, not a
-		// url; hand back a url on that host so the spec is validated by the same
-		// matcher that will later govern live calls.
+		// `WebFetch(domain:example.com)` names a host, not a url; hand back a url on
+		// that host so the spec goes through the same matcher as live calls.
 		const domain = domainSpec(subj);
 		return { tool, input: { url: domain !== undefined ? `https://${domain}/` : subj } };
 	}
@@ -140,26 +123,19 @@ export function parseRuleSpec(spec: string): { tool: string; input: Record<strin
 	return { tool, input: { path: subj.replace(/^\/\//, "/") } };
 }
 
-/** Characters that are regex metacharacters and must be escaped to match literally. */
 const REGEX_META = new Set([".", "+", "^", "$", "{", "}", "(", ")", "|", "[", "]", "\\", "?"]);
 
-/**
- * The governed subject for a tool call: the command for bash, otherwise the
- * path/url/query. `query` is read so `websearch {query}` calls are governable by
- * `WebSearch(<query>)` rules; existing tools have no `query` field, so this is
- * backward-compatible.
- *
- * For grep/find/ls the `path` field is OPTIONAL and the tool falls back to the
- * working directory. This function still returns "" for those, because it has no
- * cwd; `decide()` substitutes the cwd instead (see CWD_DEFAULTING_VERBS) so that
- * omitting the argument no longer escapes a path rule.
- */
 /** Every query a websearch call runs: `query` and each of a batch's `queries`. */
 export function searchQueries(input: Record<string, unknown>): string[] {
 	const batch = Array.isArray(input.queries) ? input.queries.filter((q): q is string => typeof q === "string") : [];
 	return typeof input.query === "string" && input.query !== "" ? [input.query, ...batch] : batch;
 }
 
+/**
+ * The governed subject for a tool call: the command for bash, otherwise the
+ * path/url/query. For grep/find/ls with no `path` this returns ""; `decide()`
+ * substitutes the cwd (see CWD_DEFAULTING_VERBS) so omitting it cannot escape a rule.
+ */
 export function subject(tool: string, input: Record<string, unknown>): string {
 	if (isMcpToolName(tool)) {
 		const m = /^mcp__(.+?)__(.+)$/.exec(tool);
@@ -176,8 +152,8 @@ export function subject(tool: string, input: Record<string, unknown>): string {
 export function exactRule(tool: string, subj: string): string | null {
 	const verb = verbFor(tool);
 	if (!verb) return null;
-	// "don't ask again" on a fetch persists the HOST, not the full url (Claude Code
-	// parity): a rule pinned to `https://docs.x.com/page?v=3` would never fire again.
+	// "don't ask again" on a fetch persists the HOST: a rule pinned to a full url
+	// would never fire again.
 	if (tool === "webfetch") {
 		const host = urlHost(subj);
 		if (host !== undefined) return `${verb}(domain:${host})`;
@@ -185,7 +161,7 @@ export function exactRule(tool: string, subj: string): string | null {
 	return `${verb}(${escapeGlob(subj)})`;
 }
 
-/** CC's documented cap: "Up to 5 rules may be saved for a single compound command." */
+/** Most rules saved for a single compound command. */
 export const MAX_COMPOUND_ALLOW_RULES = 5;
 
 /** Tools whose second word names what runs: `git push`, not `git`. */
@@ -256,8 +232,7 @@ const NO_PREFIX = new Set([
 /**
  * The command prefix "don't ask again" offers for one bash segment — `npm test` for
  * `npm test -- --watch`, `npm run build` for `npm run build --prod`, `ls` for `ls -la` —
- * or undefined when only the exact command is safe to grant. A simple word-based
- * heuristic, not Claude Code's own (which is not public).
+ * or undefined when only the exact command is safe to grant.
  */
 export function commandPrefix(segment: string): string | undefined {
 	// A prefix rule never allows a substitution (see `allowsSubstitution`), so offering
@@ -293,8 +268,8 @@ export function standingRules(tool: string, subj: string): string[] {
 }
 
 /**
- * `\*` is a literal `*` in a rule. An exact rule escapes every `*` of its subject: an
- * "don't ask again" on `ls *.ts` otherwise persisted a live glob that also granted
+ * `\*` is a literal `*` in a rule. An exact rule escapes every `*` of its subject, or
+ * "don't ask again" on `ls *.ts` would persist a live glob that also grants
  * `ls $(rm -rf ~).ts`.
  */
 function escapeGlob(subj: string): string {
@@ -333,33 +308,18 @@ function urlHost(url: string): string | undefined {
 }
 
 /**
- * Is `rawPath` inside territory that configures the agent itself? Claude Code
- * parity ("protected paths"): such paths are never auto-approved. Covers any
- * `.git` or `<configDirName>` (e.g. `.bluclawd`) path segment, plus the whole
- * global agent dir (settings.json, hooks.json, mcp.json, keybindings.json, …).
- * Pure — agentDir/configDirName are injected; path resolution mirrors the edit
- * and write tools (resolveToCwd handles ~ and absolute paths identically).
- */
-/**
- * Directory names that configure the agent, the repo, or the toolchain — Claude
- * Code's protected set, adopted wholesale.
- *
- * Every entry can lead to code execution: husky hooks run on commit, VS Code
- * tasks and devcontainer lifecycle commands run shell, `.cargo/config.toml` can
- * name a custom linker or runner, `.config/git/config` can repoint
- * `core.hooksPath`, and `.yarn/releases` holds the yarn binary itself.
- */
-/**
- * Agent-config files identified by NAME alone, wherever they sit.
- *
- * `.mcp.json` lives at the PROJECT ROOT, not inside a config directory, so no
- * segment rule reaches it — yet it names a `command` the MCP bridge spawns at
- * session_start. That spawn happens before any `Mcp(server:tool)` rule could
- * apply (rules gate tool calls, not the server process), which makes writing the
- * file the only place a gate can sit.
+ * Agent-config files identified by name alone. `.mcp.json` sits at the project root and
+ * names a `command` spawned at session start, before any `Mcp()` rule applies, so
+ * gating its writes is the only place a gate can sit.
  */
 const PROTECTED_FILENAMES = [".mcp.json"];
 
+/**
+ * Directory names that configure the agent, the repo, or the toolchain. Every entry
+ * can lead to code execution: husky hooks run on commit, VS Code tasks and devcontainer
+ * lifecycle commands run shell, `.cargo/config.toml` can name a custom linker, and
+ * `.yarn/releases` holds the yarn binary itself.
+ */
 const PROTECTED_SEGMENTS = [
 	".git",
 	".claude",
@@ -375,8 +335,7 @@ const PROTECTED_SEGMENTS = [
 /**
  * Resolve symlinks in an absolute path, falling back to the parent directory's realpath
  * + basename when the leaf doesn't exist yet (a write creating it through a symlinked
- * directory) — same fallback `isProtectedPath` above uses. Returns `undefined` when even
- * the parent can't be resolved.
+ * directory). Returns `undefined` when even the parent can't be resolved.
  */
 function realpathIfSymlink(absPath: string): string | undefined {
 	try {
@@ -390,6 +349,10 @@ function realpathIfSymlink(absPath: string): string | undefined {
 	}
 }
 
+/**
+ * Is `rawPath` inside territory that configures the agent, the repo or the toolchain?
+ * Such paths are never auto-approved.
+ */
 export function isProtectedPath(rawPath: string, cwd: string, agentDir: string, configDirName: string): boolean {
 	const abs = resolveToCwd(rawPath, cwd);
 	// Compare BOTH the literal path and its realpath: a repo-supplied symlink
@@ -421,12 +384,9 @@ export function isProtectedPath(rawPath: string, cwd: string, agentDir: string, 
 		if (
 			segments.some((segment, i) => {
 				if (eq(segment, configDirName)) return true;
-				// `.claude/worktrees` holds working copies, not configuration — Claude
-				// Code carves it out, and gating it would prompt on ordinary edits.
-				// The carve-out applies ONLY to the `.claude` segment: a worktree still
-				// contains a real `.git` and a real project config dir, and this
-				// project's own EnterWorktree puts whole sessions under that path, so
-				// exempting the entire predicate disarmed protection for the session.
+				// `.claude/worktrees` holds working copies, not configuration. The
+				// carve-out applies ONLY to the `.claude` segment: a worktree still
+				// contains a real `.git` and project config dir that stay protected.
 				if (eq(segment, ".claude")) return !eq(segments[i + 1] ?? "", "worktrees");
 				if (PROTECTED_SEGMENTS.some((protectedSeg) => eq(segment, protectedSeg))) return true;
 				// `.config/git` is the only two-segment entry in the set.
@@ -449,14 +409,9 @@ export function isProtectedPath(rawPath: string, cwd: string, agentDir: string, 
 }
 
 /**
- * Agent files whose CONTENTS are secrets or grant execution: server credentials
- * in mcp.json, provider tokens in auth.json, the apiKeyEnv indirection in
- * settings.json, shell commands in hooks.json.
- *
- * isProtectedPath governs writes to the whole agent-config tree. Reads need a
- * far narrower rule: gating every read under `.git` or `.bluclawd` would prompt
- * for HEAD, refs, and installed package sources, none of which hold secrets, and
- * a gate that fires constantly trains people to approve without reading it.
+ * Agent files whose CONTENTS are secrets or grant execution. Reads get this narrower
+ * set than writes: gating every read under `.git` would prompt constantly and train
+ * people to approve without reading.
  */
 const READ_PROTECTED_FILES = ["auth.json", "mcp.json", "settings.json", "hooks.json", "trust.json"];
 
@@ -465,11 +420,9 @@ export function isReadProtectedPath(rawPath: string, cwd: string, agentDir: stri
 	const abs = resolveToCwd(rawPath, cwd);
 	const caseInsensitive = process.platform === "darwin" || process.platform === "win32";
 	const eq = (a: string, b: string): boolean => (caseInsensitive ? a.toLowerCase() === b.toLowerCase() : a === b);
-	// Match the filename the same way the filesystem does. On darwin/win32 `Auth.json`
-	// opens auth.json, so a case-sensitive compare here read credentials unprompted
-	// while the directory comparisons below were already case-insensitive.
-	// Protected by name wherever it sits — `.mcp.json` holds server headers, which
-	// routinely carry a literal bearer token.
+	// Match the filename the way the filesystem does: on darwin/win32 `Auth.json`
+	// opens auth.json. `.mcp.json` is protected wherever it sits — its server
+	// headers routinely carry a bearer token.
 	if (PROTECTED_FILENAMES.some((name) => eq(name, basename(abs)))) return true;
 	if (!READ_PROTECTED_FILES.some((name) => eq(name, basename(abs)))) return false;
 	const parent = dirname(abs);
@@ -526,14 +479,9 @@ export function searchReachesProtectedFiles(
 const PATH_VERBS = new Set(["Read", "Write", "Edit", "Grep", "Find", "Ls"]);
 
 /**
- * Verbs whose tool takes an OPTIONAL path and falls back to the working
- * directory (grep.ts:178, ls.ts:124 both resolve `path || "."`).
- *
- * Their subject came out empty when the argument was omitted, and no glob
- * matches an empty string — so `deny: Grep(**​/secrets/**)` was defeated by
- * leaving the path off and letting the tool default to cwd. read/write/edit are
- * NOT here: their path is required, so an empty subject is a malformed call and
- * substituting cwd would invent a target the call never named.
+ * Verbs whose tool takes an OPTIONAL path and falls back to the working directory.
+ * An omitted path would give an empty subject that no deny glob matches, so the cwd
+ * is substituted. read/write/edit are NOT here: their path is required.
  */
 const CWD_DEFAULTING_VERBS = new Set(["Grep", "Find", "Ls"]);
 
@@ -547,8 +495,8 @@ function homeExpand(s: string): string {
  * string is not a path, and `deny: Bash(rm *)` must match `rm -rf /tmp/x`.
  */
 function globToRegExp(pat: string, pathLike = true): RegExp {
-	// Claude Code's prefix forms, bash only: `npm test:*` and `npm test *` are `npm test`
-	// alone or followed by arguments — not `npm testx`, which `npm test*` would also grant.
+	// Prefix forms, bash only: `npm test:*` and `npm test *` are `npm test` alone or
+	// followed by arguments — not `npm testx`, which `npm test*` would also grant.
 	if (!pathLike && (pat.endsWith(":*") || pat.endsWith(" *"))) {
 		return new RegExp(`^${globBody(pat.slice(0, -2), pathLike)}(?:\\s[\\s\\S]*)?$`);
 	}
@@ -556,7 +504,7 @@ function globToRegExp(pat: string, pathLike = true): RegExp {
 }
 
 function globBody(pat: string, pathLike: boolean): string {
-	// Claude Code spells an absolute path rule `//abs`; a single `/` is absolute here too.
+	// An absolute path rule may be spelled `//abs`; a single `/` is absolute too.
 	const expanded = homeExpand(pathLike ? pat.replace(/^\/\//, "/") : pat);
 	let body = "";
 	for (let i = 0; i < expanded.length; i++) {
@@ -566,8 +514,8 @@ function globBody(pat: string, pathLike: boolean): string {
 			i++;
 		} else if (c === "*") {
 			if (expanded[i + 1] === "*") {
-				// ** crosses / AND newlines: `.` never matches \n (no dotAll), so `.*`
-				// let any multiline command escape `**` deny rules (2026-07-10 review I1).
+				// ** crosses / AND newlines: `.*` would let a multiline command escape
+				// a `**` deny rule.
 				body += "[\\s\\S]*";
 				i++;
 			} else {
@@ -582,10 +530,6 @@ function globBody(pat: string, pathLike: boolean): string {
 	return body;
 }
 
-/**
- * Resolve a tool call against the rule set. Returns the winning decision kind, or
- * null when no rule matches (or the tool is ungoverned). Precedence: deny > ask > allow.
- */
 /** Leading `VAR=value` assignments: `RM=1 rm x`. */
 const ENV_ASSIGNMENTS = /^(?:[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/;
 /** An `env` wrapper with its own flags/assignments: `env -i FOO=bar rm x`. */
@@ -594,34 +538,20 @@ const ENV_WRAPPER = /^env\s+(?:-\S+\s+|[A-Za-z_]\w*=(?:"[^"]*"|'[^']*'|\S*)\s+)*
 const SHELL_INLINE = /^(?:\S*\/)?(?:ba|z|k|da|a)?sh\s+(?:-\S+\s+)*-\S*c\s+(?:"([^"]*)"|'([^']*)'|(\S+))/;
 /**
  * Exec wrappers that take a full command as trailing arguments: `watch rm -rf x`,
- * `nohup rm -rf x`, `echo x | xargs rm -rf`. Claude Code documents these as "always
- * prompt, can't be auto-approved by a prefix rule" on the allow side; bluclawd's gap
- * is symmetric on the deny side — `deny: Bash(rm *)` must see through them too.
- * Same conservative single-token-flag peel as ENV_WRAPPER above: a flag whose value
- * is a separate token (`watch -n 5 …`) is not fully stripped, which leaves noise in
- * the candidate rather than mis-identifying the wrapped command — the tradeoff
- * already accepted there.
+ * `nohup rm -rf x`, `echo x | xargs rm -rf`. `deny: Bash(rm *)` must see through them.
+ * A flag whose value is a separate token (`watch -n 5 …`) is not fully stripped, which
+ * leaves noise in the candidate rather than mis-identifying the wrapped command.
  */
 const EXEC_WRAPPER = /^(?:watch|setsid|ionice|nohup|xargs)\s+(?:-\S+\s+)*/;
-/** `flock` additionally takes a lockfile/fd positional (and optional `-c`) before the
- *  command it wraps: `flock file.lock rm -rf x`, `flock file.lock -c "rm -rf x"`. `-w`
- *  (wait timeout) and `-E` (exit code) are common enough two-token flags to special-case —
- *  without it, the lockfile positional this peel exists to skip past is misidentified as
- *  the flag's value instead. */
+/** `flock` also takes a lockfile/fd positional (and optional `-c`) before the command it
+ *  wraps. `-w` and `-E` take a value, so they are special-cased or the value would be
+ *  mistaken for the lockfile. */
 const FLOCK_WRAPPER = /^flock\s+(?:-[wE]\s+\S+\s+|-\S+\s+)*\S+\s+(?:-c\s+)?/;
 
 /**
- * Every spelling of a bash command a deny rule should be tested against.
- *
- * `deny: Bash(rm *)` used to match the raw command string and nothing else, so
- * a leading space, an `env` prefix, `\rm`, `/bin/rm`, `sh -c '…'`, or anything
- * after `&&`/`;`/`|` walked straight past it. Each segment is therefore also
- * offered in normalized form, with the original spelling always kept so a rule
- * naming a full path still matches.
- *
- * Splitting is naive about quotes, which over-splits `echo "a; rm b"` into a
- * candidate that a deny rule may match. That direction is deliberate: for deny
- * and ask, an extra candidate can only ever block or prompt more.
+ * Split a bash command on `;`, `&`, `|` and newlines. Naive about quotes, which
+ * over-splits `echo "a; rm b"`; for deny and ask an extra candidate can only block or
+ * prompt more.
  */
 export function bashSegments(command: string): string[] {
 	return command
@@ -630,6 +560,11 @@ export function bashSegments(command: string): string[] {
 		.filter(Boolean);
 }
 
+/**
+ * Every spelling of a bash command a deny rule should be tested against: each segment,
+ * also with env prefixes, wrappers, `\`, the binary's directory and `sh -c` peeled off.
+ * The original spelling is always kept so a rule naming a full path still matches.
+ */
 export function bashRuleSubjects(command: string, depth = 0): string[] {
 	const candidates = new Set<string>([command.trim()]);
 	// A wrapper can nest; stop well before any input could make this expensive.
@@ -681,31 +616,23 @@ function allowsSubstitution(ruleSubject: string, command: string): boolean {
 	return literalSubject(ruleSubject) === command;
 }
 
+/**
+ * Resolve a tool call against the rule set. Returns the winning decision kind, or
+ * null when no rule matches (or the tool is ungoverned). Precedence: deny > ask > allow.
+ */
 export function decide(rules: Rules, tool: string, input: Record<string, unknown>, cwd?: string): Decision | null {
 	const verb = verbFor(tool);
 	if (!verb) return null; // unknown/extension tools: not governed
 	const rawSubject = subject(tool, input);
 	const subj = homeExpand(rawSubject === "" && cwd && CWD_DEFAULTING_VERBS.has(verb) ? cwd : rawSubject);
-	// A rule that fails to compile/test must never crash the awaited tool_call gate.
-	// Fail closed: a broken `deny` counts as a match (block); a broken `allow`/`ask` is
-	// ignored, so a malformed permissive rule can't silently grant access. (Currently
-	// unreachable — REGEX_META is exhaustive — but cheap insurance for future glob syntax.)
-	// Respellings of a bash command (see bashRuleSubjects). Computed once, and only
-	// for the rule kinds that may safely widen — see `expand` below.
 	const isBash = verb === "Bash";
 	const bashSubjects = isBash ? bashRuleSubjects(subj) : undefined;
 	const segments = isBash ? bashSegments(subj) : undefined;
-	// Path subjects arrive as the tool was called — `.env`, `./x`, `../../y` — so a
-	// rule written against a resolved shape (`**/.env`, an absolute prefix) missed
-	// them. Offer the resolved path as an extra candidate, alongside the original
-	// so rules written against the literal spelling keep matching.
+	// Path subjects arrive as the tool was called (`./x`, `../y`); the resolved path is an
+	// extra candidate so rules written against a resolved shape still match.
 	const resolvedSubject = cwd && PATH_VERBS.has(verb) && subj ? homeExpand(resolveToCwd(subj, cwd)) : undefined;
-	// A rule the user wrote against `deny: Read(/home/me/secrets/**)` should also catch a
-	// repo-local symlink pointing there (`./s -> /home/me/secrets`) — isProtectedPath already
-	// resolves symlinks for its own hardcoded set; user-written rules did not. This is real
-	// filesystem I/O, unlike `resolvedSubject` above, so it stays lazy (computed only if a
-	// deny/ask rule actually needs it, never for allow — same asymmetry as bashSubjects and
-	// resolvedSubject) and memoized (computed at most once per `decide()` call).
+	// A deny/ask path rule also catches a symlink pointing into its territory. This is
+	// filesystem I/O, so it is lazy (deny/ask only, never allow) and memoized.
 	let realpathSubjectComputed = false;
 	let realpathSubject: string | undefined;
 	const getRealpathSubject = (): string | undefined => {
@@ -715,12 +642,12 @@ export function decide(rules: Rules, tool: string, input: Record<string, unknown
 		}
 		return realpathSubject;
 	};
+	// A rule that fails to compile/test must never crash the tool_call gate. Fail closed:
+	// a broken `deny` counts as a match; a broken `allow`/`ask` is ignored.
 	const matches = (r: string, failClosed: boolean, kind: Decision): boolean => {
 		try {
 			const parts = ruleParts(r);
-			// Verb comparison is case-insensitive: `/permissions add` accepts any
-			// casing (RULE_SHAPE is [A-Za-z]+), so `bash(**)` would otherwise be
-			// stored, listed, and silently never enforced.
+			// Case-insensitive: `bash(**)` would otherwise be stored and never enforced.
 			if (parts === undefined || !ruleVerbCovers(parts.verb, verb)) return false;
 			const ruleSubject = parts.subject;
 			// A `domain:` fetch rule is matched against the url's HOST alone, so it
@@ -760,12 +687,8 @@ export function decide(rules: Rules, tool: string, input: Record<string, unknown
 			return failClosed;
 		}
 	};
-	// A compound bash command's segments may each be covered by a DIFFERENT allow rule
-	// (IMPROVEMENT-PLAN.md §2.4: "don't ask again" on `git status && npm test` persists one
-	// rule per segment, CC-style). No single rule needs to span the whole line — every
-	// segment just needs SOME allow rule to cover it. Deny/ask are unaffected: a single
-	// rule already covers those (with the widening `matches()` already does), and "any one
-	// dangerous segment blocks/prompts" is the correct, unchanged behavior for both.
+	// Each segment of a compound bash command may be allowed by a DIFFERENT rule ("don't
+	// ask again" persists one per segment). Deny/ask still match on any one segment.
 	if (isBash && segments && segments.length > 1) {
 		for (const kind of ["deny", "ask"] as const) {
 			if ((rules[kind] ?? []).some((r) => matches(r, kind === "deny", kind))) return kind;
@@ -786,7 +709,7 @@ export function decide(rules: Rules, tool: string, input: Record<string, unknown
 					if (COMMAND_SUBSTITUTION.test(segment)) return allowsSubstitution(parts.subject, segment);
 					return globToRegExp(parts.subject, false).test(segment);
 				} catch {
-					return false; // a broken allow rule is ignored, same fail-open-for-allow as matches()
+					return false; // a broken allow rule is ignored, as in matches()
 				}
 			});
 		return segments.every(segmentAllowed) ? "allow" : null;

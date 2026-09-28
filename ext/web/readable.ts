@@ -11,7 +11,7 @@
 
 import { htmlToMarkdown } from "./html-to-md.ts";
 
-/** Below this, extraction probably missed the content (pi-web-access uses the same floor). */
+/** Below this, extraction probably missed the content. */
 const MIN_CHARS = 500;
 /** Below this share of the whole-page text, extraction probably gutted a non-article page. */
 const MIN_SHARE = 0.25;

@@ -1,13 +1,8 @@
 /**
- * Read-only bash allowlist, used by `evaluate.ts` to auto-approve safe commands
- * across every permission mode (not just as a gate, but as the standing grant
- * that clears an `ask` and the fallback at "no matching rule").
- *
- * Originally ported verbatim from a donor plan-mode extension's utils.ts (PLAN.md F1.5),
- * then relocated here when plan mode was removed — this predicate outlived that feature.
+ * Read-only bash allowlist, used by `evaluate.ts` to auto-approve safe commands in
+ * every permission mode.
  */
 
-// Destructive commands blocked from auto-approval.
 const DESTRUCTIVE_PATTERNS = [
 	/\brm\b/i,
 	/\brmdir\b/i,
@@ -47,14 +42,10 @@ const DESTRUCTIVE_PATTERNS = [
 	/\|\s*(bash|sh|zsh)\b/i,
 	// `find` that deletes or runs commands: `-delete`, `-exec`, `-execdir`, `-ok`, `-okdir`.
 	/\bfind\b.*\s-(delete|execdir|exec|okdir|ok)\b/i,
-	// NOTE (F1.5): this allow/deny regex is a coarse first line only. It still lets
-	// subtler read-only violations through (e.g. `curl -o file` writing to disk,
-	// arbitrary tool flags). Full command-safety analysis + sandboxing is deferred
-	// to F2.1 (permissions); do not grow this into a parser here — add only
-	// unambiguous categories.
+	// A coarse first line only: do not grow this into a parser, add only unambiguous
+	// categories.
 ];
 
-// Safe read-only commands allowed to auto-approve.
 const SAFE_PATTERNS = [
 	/^\s*cat\b/,
 	/^\s*head\b/,
@@ -108,9 +99,7 @@ const SAFE_PATTERNS = [
 	/^\s*wget\s+-O\s*-/i,
 	/^\s*jq\b/,
 	/^\s*sed\s+-n/i,
-	// `awk` (arbitrary code via system()) and `env` (launcher for any binary,
-	// e.g. `env python -c …`) were removed from this list — review I7. Use
-	// `printenv` to read the environment.
+	// No `awk` (arbitrary code via system()) or `env` (launches any binary).
 	/^\s*rg\b/,
 	/^\s*fd\b/,
 	/^\s*bat\b/,
@@ -148,8 +137,6 @@ const UNSAFE_ARGS: RegExp[] = [
 	/\btree\b[^\n]*\s-o\b/,
 	// git's diff options write the patch to a file.
 	/\bgit\b[^\n]*\s--output(=|\s)/,
-	// grep -f/--file reads a pattern file, but --include with -r into a writer
-	// is not the risk; tee is.
 	/\btee\b/i,
 ];
 
@@ -205,15 +192,12 @@ function shellSegments(command: string): string[] | undefined {
 export function isSafeCommand(rawCommand: string): boolean {
 	const command = rawCommand.replace(HARMLESS_REDIRECTS, " ");
 	if (DESTRUCTIVE_PATTERNS.some((p) => p.test(command))) return false;
-	// Command substitution executes BEFORE the allowlisted binary sees its
-	// arguments, so `echo $(node -e "…")` is arbitrary execution wearing an
-	// `echo` prefix. The allowlist cannot reason about it — refuse instead.
+	// Command substitution runs before the allowlisted binary sees its arguments, so
+	// `echo $(node -e "…")` is arbitrary execution wearing an `echo` prefix.
 	if (COMMAND_SUBSTITUTION.test(command)) return false;
 	if (UNSAFE_ARGS.some((p) => p.test(command))) return false;
-	// Review I7: the safe-list is anchored (`^…`), so checking only the whole
-	// string let a safe prefix smuggle arbitrary follow-on commands past the gate
-	// (`ls && python -c "…rmtree…"`). Split on chain/pipe separators and require
-	// EVERY segment to independently match the safe list.
+	// The safe-list is anchored, so a safe prefix could smuggle a follow-on command
+	// (`ls && python -c …`): EVERY segment must match on its own.
 	const segments = (shellSegments(command) ?? command.split(/[;&|\n]+/))
 		.map((s) => s.trim())
 		.filter((s) => s.length > 0);

@@ -1,10 +1,9 @@
 /**
- * The model's bash tool, as Claude Code's Bash (2.1.281): `timeout` in
- * milliseconds with a 2-minute default, `run_in_background`, and a command still
- * running at its timeout (or on Ctrl+B, or when the user sends a message) moved to
- * the background rather than killed. The main session and subagent children
- * build theirs here, so the two cannot drift apart; what differs is the
- * operations each runs through and who is told when a job ends.
+ * The model's bash tool: `timeout` in milliseconds with a 2-minute default,
+ * `run_in_background`, and a command still running at its timeout (or on Ctrl+B,
+ * or when the user sends a message) moved to the background rather than killed.
+ * Every session builds its bash here so they cannot drift apart; what differs is
+ * the operations each runs through and who is told when a job ends.
  */
 
 import type { BashOperations, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -33,7 +32,6 @@ import {
 } from "../_shared/monitor-events.ts";
 import type { ShellStartRecord } from "../_shared/orphan-shells.ts";
 
-/** Claude Code's `description` parameter text. */
 const DESCRIPTION_TEXT = `Clear, concise description of what this command does in active voice. Never use words like "complex" or "risk" in the description - just describe what it does.
 
 Say what the command does in plain words: do not echo the command's text, its flags, or file paths - the user reads this description, often without seeing the command.
@@ -67,10 +65,7 @@ export interface ClaudeBashOptions {
 	isMain: boolean;
 	/** Offer `dangerouslyDisableSandbox`: only a session with somebody to ask. */
 	sandboxEscape: boolean;
-	/**
-	 * Background jobs end with this session's final response (a synchronous subagent,
-	 * whose engine reaps them): the start text says so.
-	 */
+	/** Background jobs end with this session's final response: the start text says so. */
 	endsWithFinalResponse?: boolean;
 	/**
 	 * Records a background shell's start and end in the session log, so a resumed
@@ -79,14 +74,14 @@ export interface ClaudeBashOptions {
 	record?: { start(record: ShellStartRecord): void; end(taskId: string): void };
 }
 
-/** Whether a command changes directory in any of its parts (`sIe`). */
+/** Whether a command changes directory in any of its parts. */
 function changesDirectory(command: string): boolean {
 	return command.split(/&&|\|\||[;|&\n]/).some((part) => /^(?:cd|pushd|popd|chdir)(?:\s|$)/.test(part.trim()));
 }
 
 /**
- * What the model reads when a command goes to the background, in Claude Code's words
- * (`xxn`): at the start, by Ctrl+B, at its timeout, or for a message the user sent.
+ * What the model reads when a command goes to the background: at the start, by
+ * Ctrl+B, at its timeout, or for a message the user sent.
  */
 export function backgroundStartText(
 	job: BackgroundJobInfo,
@@ -113,7 +108,7 @@ export function backgroundStartText(
 		: text;
 }
 
-/** pi's timeout line, respelled as Claude Code spells a duration. */
+/** pi's timeout line, with the duration respelled from the milliseconds given. */
 function claudeTimeoutError(err: unknown, timeoutMs: number): unknown {
 	if (!(err instanceof Error)) return err;
 	const respelled = err.message.replace(
@@ -187,11 +182,11 @@ export function createClaudeBashTool(options: ClaudeBashOptions): ToolDefinition
 
 			const ops = options.operations(command, options.sandboxEscape && dangerouslyDisableSandbox === true);
 			const owner = ctx?.sessionManager?.getSessionId();
-			// A subagent's jobs carry its session id as their agent id: the main session
-			// sees and may stop them, another subagent may not.
+			// A child session's jobs carry its session id as their agent id: the main
+			// session sees and may stop them, another child may not.
 			const agentId = options.isMain ? undefined : owner;
 			// One notification on exit, so `until ...; do sleep 1; done` in the
-			// background is the single-notification recipe, as in Claude Code.
+			// background is the single-notification recipe.
 			const onExit = (finished: BackgroundJobInfo) => {
 				options.record?.end(finished.id);
 				if (shouldNotifyExit(finished)) options.sendMessage(taskExitMessage(finished, id), exitDelivery(finished));

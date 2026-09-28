@@ -4,8 +4,7 @@
  * `source_check` checks claims against it, and `/web` browses it.
  *
  * In memory only: an entry is the model's working material for this session,
- * not a cache worth its own file permissions and eviction on disk. Bounded like
- * pi-web-access's store (1 hour, 128 entries, 128MB of text).
+ * not a cache worth its own file permissions and eviction on disk.
  */
 
 export interface StoredContent {

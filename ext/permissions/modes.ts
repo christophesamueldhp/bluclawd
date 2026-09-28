@@ -1,29 +1,14 @@
 /**
- * Permission mode store (PLAN.md F2.1).
+ * Permission mode store: holds the session-scoped permission mode and enforces the
+ * one rule project trust imposes on it (see {@link createModeStore}).
  *
- * Holds the session-scoped permission mode, and enforces the one rule project
- * trust imposes on it (see {@link createModeStore}).
- *
- * ── Vocabulary ────────────────────────────────────────────────────────────────
- * Three modes, Claude Code's own set (its `default`, `acceptEdits` and `auto`),
- * under this layer's names. `ask` borrows the word from pi's `defaultProjectTrust`
- * vocabulary; `edits` and `auto` name what they stop asking about.
- *
- * `auto` IS the bypass mode: it approves everything the rules do not veto. There
- * is no separate "no guards at all" mode any more — a rule set that says nothing
- * makes `auto` behave exactly like one. The names that used to reach it
- * (`always`, `bypass`, `--dangerously-skip-permissions`) resolve to `auto` — see
- * {@link parseMode} — so a stored `permissions.defaultMode`, a script passing
- * `--permission-mode acceptEdits`, or muscle memory at the `/mode` prompt all
- * keep working.
+ * `auto` is the bypass mode: it approves everything the rules do not veto. Legacy
+ * names (`default`, `acceptEdits`, `always`, `bypass`) still resolve via
+ * {@link parseMode}, so stored settings and scripts keep working.
  */
 
 export type PermissionMode = "ask" | "edits" | "auto";
 
-/**
- * Every valid mode name — the vocabulary accepted by `--permission-mode`,
- * `permissions.defaultMode` and `/mode <name>`.
- */
 export const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "edits", "auto"];
 
 /** Cycle order for Alt+M and a bare `/mode`, in increasing autonomy. */
@@ -45,7 +30,6 @@ export const MODE_DESCRIPTIONS: Record<PermissionMode, string> = {
 	auto: "never prompt: only deny and ask rules can stop a call",
 };
 
-/** Names this layer accepted before, mapped onto the mode that now does the job. */
 const LEGACY_MODE_NAMES: Readonly<Record<string, PermissionMode>> = {
 	default: "ask",
 	acceptEdits: "edits",
@@ -55,8 +39,8 @@ const LEGACY_MODE_NAMES: Readonly<Record<string, PermissionMode>> = {
 
 /**
  * Resolve a user-supplied mode name — current or legacy — or undefined when it names
- * no mode. Every entry point that accepts a mode name goes through this, so the legacy
- * spellings cannot work in one place and fail in another.
+ * no mode. Every entry point goes through this so legacy spellings behave the same
+ * everywhere.
  */
 export function parseMode(name: string): PermissionMode | undefined {
 	const trimmed = name.trim();
@@ -65,29 +49,22 @@ export function parseMode(name: string): PermissionMode | undefined {
 }
 
 /**
- * Is this mode allowed in a project the user has not trusted?
- *
- * Only the safest one is. An untrusted project is by definition one the user has not
- * vouched for, and pi already refuses to load its settings, extensions and skills for
- * that reason; letting the same repository run under a mode that auto-approves edits
- * or skips prompts entirely would hand back everything that gate withholds. `/trust`
- * is the way out, which is what the refusal message points at.
+ * Only the safest mode is allowed in an untrusted project: pi already withholds its
+ * settings, extensions and skills, and an auto-approving mode would hand that back.
  */
 export function isModeAllowedUntrusted(mode: PermissionMode): boolean {
 	return mode === SAFEST_MODE;
 }
 
 /**
- * The mode a cycle from `mode` aims at. Exported so a caller that has to explain a
- * REFUSED cycle can name the mode that was actually attempted — the store reports the
- * mode still in effect, which for a refusal is the one the user already had.
+ * The mode a cycle from `mode` aims at. Exported so a refused cycle can name the
+ * attempted mode; the store only reports the mode still in effect.
  */
 export function nextInCycle(mode: PermissionMode): PermissionMode {
 	return MODE_CYCLE[(MODE_CYCLE.indexOf(mode) + 1) % MODE_CYCLE.length];
 }
 
 export interface ModeStore {
-	/** Current mode. */
 	get(): PermissionMode;
 	/** User-initiated cycle to the next mode. Returns the mode now in effect — unchanged
 	 *  when project trust refused the raise. */
@@ -99,12 +76,9 @@ export interface ModeStore {
 }
 
 /**
- * `onChange` fires on every mode change with the new mode — use it to refresh UI.
- *
- * `isTrusted` is consulted on every transition rather than once at construction: pi
- * resolves project trust during startup and a user can grant it mid-session with
- * `/trust`, so a snapshot taken when this store is built would strand the session in
- * the clamped mode for the rest of its life.
+ * `isTrusted` is consulted on every transition, not once at construction: trust can
+ * be granted mid-session with `/trust`, and a snapshot would strand the session in
+ * the clamped mode.
  */
 export function createModeStore(
 	onChange?: (mode: PermissionMode) => void,

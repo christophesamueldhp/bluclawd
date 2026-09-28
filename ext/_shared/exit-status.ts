@@ -1,10 +1,9 @@
 /**
- * How a finished background command is classified, as Claude Code 2.1.281 does it
- * (`xle`/`a6t`/`$2o`): a few commands exit 1 for an answer rather than a failure
- * (grep with no match, diff with a difference), so their exit 1 is `completed` with
- * a note, and only 2 and above fail. The command judged is the last one of a
- * compound command, unless it only runs after `&&`: then an earlier command may be
- * what failed, and the plain rule applies.
+ * How a finished background command is classified: a few commands exit 1 for an
+ * answer rather than a failure (grep with no match, diff with a difference), so
+ * their exit 1 is `completed` with a note, and only 2 and above fail. The command
+ * judged is the last one of a compound command, unless it only runs after `&&`:
+ * then an earlier command may be what failed, and the plain rule applies.
  */
 
 export type ExitStatus = "completed" | "failed";
@@ -15,7 +14,7 @@ export interface ExitClass {
 	note?: string;
 }
 
-/** Claude Code gives up on commands past this length (`aD`) and applies the plain rule. */
+/** Commands past this length get the plain rule. */
 const MAX_COMMAND_CHARS = 10_000;
 
 const EXIT_ONE_NOTES = new Map([
@@ -106,7 +105,7 @@ function exitOneNote(command: string): string | undefined {
 
 /**
  * The status of a command that exited on its own (not killed by us). A null code
- * (the shell itself died of a signal) is a failure, as Claude Code's `noExitStatus`.
+ * (the shell itself died of a signal) is a failure.
  */
 export function classifyExit(command: string, code: number | null): ExitClass {
 	if (code === null) return { status: "failed" };
@@ -118,8 +117,5 @@ export function classifyExit(command: string, code: number | null): ExitClass {
 	return { status: "failed" };
 }
 
-/**
- * The exit code Claude Code reports for a shell that died of a signal: 144 for
- * SIGTERM, 1 for any other. pi resolves no signal name, so every such exit is 1.
- */
+/** Exit code reported for a shell that died of a signal; pi resolves no signal name, so it is always 1. */
 export const SIGNAL_EXIT_CODE = 1;

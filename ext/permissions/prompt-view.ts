@@ -1,10 +1,10 @@
 /**
- * The permission prompt as Claude Code draws it: numbered rows (a digit picks one),
- * one `No` row, and Tab on `No` to type what the model should do instead.
+ * The permission prompt: numbered rows (a digit picks one), one `No` row, and Tab on
+ * `No` to type what the model should do instead.
  *
- * Only the interactive TUI can show it. pi's RPC mode (FleetView's background
- * sessions) answers `ui.custom` with `undefined`, so the caller falls back to
- * `ui.select` there — the same rows, with the note as a row of its own.
+ * Only the interactive TUI can show it. pi's RPC mode answers `ui.custom` with
+ * `undefined`, so the caller falls back to `ui.select` there — the same rows, with
+ * the note as a row of its own.
  */
 
 import { getKeybindings, Input, matchesKey, truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";

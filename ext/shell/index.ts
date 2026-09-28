@@ -7,7 +7,8 @@
  * editor, NOT into the conversation: bash mode is the user's own terminal, while
  * `!` remains the way to show the model a command's output.
  *
- * Like `!`, bash mode runs outside the sandbox (Claude Code parity).
+ * Like `!`, bash mode runs outside the sandbox, which confines only what the
+ * model runs.
  *
  * The editor stash lives here too (`alt+s`, `/stash`; ./stash.ts): it acts on
  * the same editor and has no other owner.

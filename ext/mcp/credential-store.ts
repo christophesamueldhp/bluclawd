@@ -1,19 +1,9 @@
 /**
  * Credential store for remote MCP servers — `<agentDir>/mcp-auth.json`.
  *
- * MCP OAuth credentials used to live in `auth.json` under an `mcp:<server>` key,
- * sharing the provider credential file. Upstream v0.81.0 moved provider
- * credentials behind an async `CredentialStore` in `packages/ai/src/auth/`, whose
- * `Credential` union is `api_key | oauth` — there is no place in it for an MCP
- * server token, and widening that union would mean carrying a fork delta in a
- * package the fork otherwise never touches, which is the merge cost the whole
- * soft-fork strategy exists to avoid.
- *
- * So MCP credentials get their own file. Beyond keeping upstream's types intact,
- * the separation removes a real defect class: while the two shared `auth.json`,
- * every consumer that listed "providers" had to remember to filter `mcp:` keys
- * out, and `/logout` had already shipped MCP servers into its picker as
- * unlabelled providers once.
+ * Kept apart from the provider credential file (`auth.json`), whose credential
+ * types have no place for an MCP server token and whose consumers list every
+ * entry as a provider.
  *
  * `client` and `tokens` are held as `unknown` on purpose: this file is
  * user-editable and the MCP SDK must not be imported on the startup path, so the

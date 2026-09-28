@@ -1,12 +1,7 @@
 /**
- * Vendored verbatim from pi's core/resolve-config-value.ts — not part of
- * pi's public package export. Resolves $(shell command)/env-var/literal
- * config values (MCP server auth headers, etc.); shell execution makes this
- * security-relevant, so copied whole rather than trimmed.
- */
-/**
- * Resolve configuration values that may be shell commands, environment variables, or literals.
- * Used by auth-storage.ts and model-registry.ts.
+ * Resolve configuration values that may be shell commands, environment variables,
+ * or literals. Vendored whole from pi's core/resolve-config-value.ts, which pi
+ * does not export; shell execution makes it security-relevant, so it is not trimmed.
  */
 
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
@@ -221,9 +216,6 @@ function executeCommand(commandConfig: string): string | undefined {
 	return result;
 }
 
-/**
- * Resolve all header values using the same resolution logic as API keys.
- */
 export function resolveConfigValueUncached(config: string, env?: Record<string, string>): string | undefined {
 	const reference = parseConfigValueReference(config);
 	if (reference.type === "command") {

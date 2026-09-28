@@ -2,8 +2,7 @@
  * Additional `websearch` provider adapters: SearXNG, DuckDuckGo, Jina, Perplexity,
  * Kagi and Serper.
  *
- * Request and response shapes follow pi-web-access (MIT). Like search.ts, every
- * adapter talks to one fixed host (or the user's configured SearXNG instance)
+ * Like search.ts, every adapter talks to one fixed host (or the user's configured SearXNG instance)
  * with an injected fetch and never follows redirects. Each one ends with the
  * client-side domain filter, so a provider that ignores a native filter cannot
  * leak an excluded host.

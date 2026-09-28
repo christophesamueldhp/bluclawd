@@ -1,5 +1,5 @@
 /**
- * Tiny, dependency-free HTML -> Markdown converter for `webfetch` (PLAN.md F4.2).
+ * Tiny, dependency-free HTML -> Markdown converter for `webfetch`.
  *
  * This is a pragmatic regex/string scan, NOT a spec-compliant parser. It exists
  * only to turn a fetched web page into readable Markdown for the model, so it

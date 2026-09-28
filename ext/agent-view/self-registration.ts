@@ -80,15 +80,10 @@ export class ForegroundActivity {
 }
 
 /**
- * 3000ms, not 5000ms. The daemon reaps an external registration after 15s
- * (`EXTERNAL_TTL_MS`, packages/server/src/supervisor.ts) — at the old 5000ms interval, exactly
- * 3 consecutive missed heartbeats (each a `register()` call that times out at 1000ms under
- * load) landed precisely ON that boundary with zero margin: a poll from ANY other agent view
- * arriving microseconds later would reap the row (IMPROVEMENT-PLAN.md §5.2). At 3000ms, 4
- * consecutive misses (12s) are still safely inside the TTL — reaping now needs a 5th
- * consecutive failure, and the boundary no longer sits on an exact multiple of the interval.
- * Chosen over widening the daemon's own TTL because a TTL change only takes effect after every
- * running daemon restarts; this is client-side and applies to the very next heartbeat.
+ * The daemon reaps an external registration after 15s (`EXTERNAL_TTL_MS`); at 3s, four missed
+ * heartbeats (each a `register()` that can time out at 1s under load) still land inside the TTL.
+ * Tuned here rather than in the daemon, where a TTL change only applies once every running daemon
+ * restarts.
  */
 const HEARTBEAT_MS = 3000;
 

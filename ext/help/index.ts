@@ -1,17 +1,10 @@
 /**
- * `/help` — a categorised command surface.
+ * `/help` — pi's built-ins, extension commands, prompt templates and skills,
+ * grouped by what you are trying to do.
  *
- * pi has no `/help`; its command list lives only in the autocomplete popup,
- * which is fine for finding a command you can already name and useless for
- * discovering one you cannot. This groups everything by what you are trying to
- * DO, merging pi's built-ins with extension commands, prompt templates and
- * skills into one list — someone looking for `/rewind` does not know or care
- * that it comes from an extension while `/fork` is built in.
- *
- * `pi.getCommands()` deliberately does NOT include built-ins (see
- * `agent-session.ts`), so the built-in table is imported from pi directly and
- * merged here. Extension commands that shadow a built-in name are collapsed,
- * keeping the built-in's description.
+ * `pi.getCommands()` does NOT include built-ins, so the vendored built-in table
+ * is merged in here. Extension commands that shadow a built-in name are
+ * collapsed, keeping the built-in's description.
  */
 
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";

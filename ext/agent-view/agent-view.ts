@@ -1,14 +1,11 @@
 /**
- * Agent view — Claude Code 2.1.280's `claude agents` screen, rebuilt on pi's TUI.
+ * Agent view, built on pi's TUI.
  *
  * Header, then the bands (Needs input / Working / Completed, or one band per directory), one
  * line per session: icon + name │ what it is doing │ age. The composer at the bottom starts a
  * new background session from whatever is typed; space opens the peek panel to read the
  * question or result and reply without leaving the list; enter opens the session in this
  * window (the one here goes to the background daemon).
- *
- * Layout, glyphs, keys and wording follow Claude Code's own; the known differences are listed
- * in the README (no model-written summaries, no pull-request badges, no `!` shell rows).
  */
 
 import { spawn } from "node:child_process";
@@ -59,7 +56,7 @@ export interface AgentViewOptions {
 	version?: string;
 	/** The model new sessions start with (the foreground's); `/model` overrides it for this view. */
 	model?: { provider: string; id: string };
-	/** The model's display name for the header, as Claude Code shows it. */
+	/** The model's display name for the header. */
 	modelName?: string;
 	cwd: string;
 	home: string;
@@ -99,9 +96,8 @@ const NOTICE_MS = 3000;
 type Color = Parameters<typeof theme.fg>[0];
 
 /**
- * Claude Code's dark palette, so agent view reads the same whatever dark theme pi uses:
- * secondary text is its inactive gray, the focused row its message background. A light
- * theme keeps its own colors, which are chosen for a light terminal.
+ * A fixed dark palette, so agent view reads the same whatever dark theme pi uses. A light theme
+ * keeps its own colors, which are chosen for a light terminal.
  */
 const CC_DARK: Partial<Record<Color | "userMessageBg", string>> = {
 	text: "#ffffff",
@@ -158,7 +154,6 @@ const cc = {
 	},
 };
 
-/** Claude Code's colors: secondary text is its inactive gray (`muted`), rules and boxes are faint. */
 const ICON_COLOR: Record<RowState, Color> = {
 	working: "muted",
 	needs: "warning",
@@ -168,18 +163,18 @@ const ICON_COLOR: Record<RowState, Color> = {
 	stopped: "muted",
 };
 
-/** The state word in the directory view; Claude Code leaves "Working" in the plain text color. */
+/** The state word in the directory view; "Working" stays in the plain text color. */
 const WORD_COLOR: Record<RowState, Color> = { ...ICON_COLOR, working: "text" };
 
-/** Claude Code shows its Clawd beside the header only this wide (m0727). */
+/** The header shows the mascot only this wide. */
 const MASCOT_MIN_COLUMNS = 70;
 
-/** SGR faint, as Claude Code draws its rules and the peek box. */
+/** SGR faint, for rules and the peek box. */
 function faint(text: string): string {
 	return `\x1b[2m${text}\x1b[22m`;
 }
 
-/** An Input line with Claude Code's `❯` prompt; empty, the cursor sits on the placeholder's first letter. */
+/** An Input line with a `❯` prompt; empty, the cursor sits on the placeholder's first letter. */
 function promptLine(input: Input, width: number, placeholder: string): string {
 	if (!input.getValue()) {
 		const [first = " ", ...rest] = [...placeholder];
@@ -192,7 +187,7 @@ function promptLine(input: Input, width: number, placeholder: string): string {
 	return line.startsWith("> ") ? `❯ ${line.slice(2)}` : line;
 }
 
-/** Claude Code's badge for the mode new sessions inherit; its default mode (our `ask`) has none. */
+/** Badge for the mode new sessions inherit; `ask` has none. */
 function modeChip(mode: PermissionMode | undefined): string | undefined {
 	if (mode === "auto") return cc.fg("warning", "⏵⏵ auto mode");
 	if (mode === "edits") return `${sgr(38, isLightTheme() ? "#8700ff" : "#af87ff")}⏵⏵ edits mode\x1b[39m`;
@@ -368,7 +363,7 @@ export class AgentView implements Component, Focusable {
 		const bands = buildBands(this.rows, this.viewMode, (p) => this.shorten(p));
 		this.items = this.layoutItems(bands);
 		// Until the user moves, the highlight follows rows as they arrive: this window's own
-		// first (as when Claude Code opens with the session you came from selected), else the top.
+		// first, else the top.
 		const current = this.items.find((item) => item.key === this.selectedKey);
 		if (!current || (!this.userMoved && current.kind !== "row")) {
 			const rows = this.items.filter((item) => item.kind === "row");
@@ -1106,8 +1101,8 @@ export class AgentView implements Component, Focusable {
 		const where = model ? `${cc.fg("muted", model)}${dot}${cwd}` : cwd;
 		const text = [title, where, summary];
 		if (width < MASCOT_MIN_COLUMNS) return text;
-		// The same static mascot as the welcome header; Claude Code's agent view never animates it.
-		// The mascot's box ends in a blank cell (the wave's swing room), so one more space makes Claude Code's gap of 2.
+		// The same static mascot as the welcome header. Its box ends in a blank cell (the wave's
+		// swing room), so one more space makes a 2-cell gap.
 		return renderMascot(REST, mascotGlyphs()).map((art, i) => `${art} ${text[i] ?? ""}`);
 	}
 
@@ -1280,7 +1275,7 @@ export class AgentView implements Component, Focusable {
 		return out;
 	}
 
-	/** `?`: Claude Code's shortcut grid, under the composer in place of the hint line. */
+	/** `?`: the shortcut grid, under the composer in place of the hint line. */
 	private renderHelp(width: number): string[] {
 		const item = this.selected;
 		const cwd = item?.kind === "row" ? item.row.cwd : this.opts.cwd;
@@ -1288,7 +1283,6 @@ export class AgentView implements Component, Focusable {
 			9,
 			this.items.filter((i) => i.kind === "row" && i.row.cwd === cwd && !i.row.id.startsWith("pending:")).length,
 		);
-		// Claude Code's order; ctrl+g and s: are this view's own.
 		const items = [
 			"shift+↑↓ to reorder",
 			"ctrl+r to rename",
@@ -1303,8 +1297,8 @@ export class AgentView implements Component, Focusable {
 			"esc to quit",
 			"? to close",
 		];
-		// Claude Code stacks the items two to a column, each column as wide as its longest item and
-		// 4 apart. Where that does not fit, the columns grow taller instead of wrapping an item.
+		// Items stack two to a column, each column as wide as its longest item and 4 apart.
+		// Where that does not fit, the columns grow taller instead of wrapping an item.
 		for (let height = 2; ; height++) {
 			const columns: string[][] = [];
 			for (let i = 0; i < items.length; i += height) columns.push(items.slice(i, i + height));
@@ -1338,7 +1332,7 @@ export class AgentView implements Component, Focusable {
 	private listFooter(width: number): string {
 		const text = this.composerText();
 		const item = this.selected;
-		// Claude Code leads its list hints with the mode new sessions will run in.
+		// The hints lead with the mode new sessions will run in.
 		const chip = modeChip(this.opts.permissionMode?.());
 		if (text) {
 			if (stateFilter(text)) return this.hints(width, [["esc", "clear"]], chip);
@@ -1393,7 +1387,7 @@ export class AgentView implements Component, Focusable {
 					truncateToWidth(`${i === 0 && shown.length === this.composerLines.length ? "❯" : " "} ${line}`, width),
 				);
 			const current = promptLine(this.composer, width, above.length ? "" : "describe a task for a new session");
-			// Claude Code explains the view right above its composer while only your own session is listed.
+			// Explains the view above the composer while only your own session is listed.
 			const onlySelf = this.rows.length === 1 && this.rows[0].self && !this.composerText();
 			const intro = onlySelf
 				? [

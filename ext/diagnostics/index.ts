@@ -2,14 +2,8 @@
  * `/context` and `/status` — diagnostics built from the public extension
  * context alone.
  *
- * `/status` is bluclawd's half of Claude Code's status screen: model, effort,
- * auth, permission mode, sandbox, trust, session file. It deliberately does NOT
- * reproduce pi's own session summary (entry counts, tree, cost history) — pi
- * keeps that private behind `/session`, and re-implementing it here would be
- * drift to re-sync forever — so the report ends by pointing at `/session`.
- * Permission mode and sandbox state come from the other extensions' `sharedRef`
- * stores, which are safe to read across the `pi.extensions` module-graph
- * boundary (see `_shared/global-state.ts`).
+ * `/status` deliberately does NOT reproduce pi's own session summary, which pi
+ * keeps private behind `/session`; the report points there instead.
  *
  * Output goes through `appendEntry` + `registerEntryRenderer` rather than
  * `ctx.ui.notify` (which dims everything and does not persist in the session).
@@ -118,8 +112,7 @@ const diagnostics: InlineExtension = {
 				`${theme.fg("dim", "In context:")} ${formatTokens(data.tokens)} (${data.percent.toFixed(1)}%) ${bar}`,
 			);
 
-			// Four characters per token is the same rough estimate pi uses for its own
-			// pre-response display; it is a breakdown hint, not an accounting figure.
+			// Four characters per token, pi's own rough estimate: a hint, not an accounting figure.
 			const systemPromptEstimate = Math.round((data.systemPromptChars ?? 0) / 4);
 			lines.push(
 				`  ${theme.fg("dim", "System prompt incl. project context & skills (est.):")} ~${formatTokens(systemPromptEstimate)}`,

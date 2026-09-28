@@ -1,5 +1,5 @@
 /**
- * `websearch` provider adapters (PLAN.md F4.2).
+ * `websearch` provider adapters.
  *
  * Each provider maps its response to a uniform `{ title, url, snippet }[]`. The
  * API key is read by the caller (index.ts) from the trust-aware settings; this
@@ -39,7 +39,7 @@ function filterByRecency(results: SearchResult[], recency: Recency | undefined):
 	return results.filter((r) => !r.published || r.published >= start);
 }
 
-/** Host allow/block lists (Claude Code's `allowed_domains` / `blocked_domains`). */
+/** Host allow/block lists (the tool's `allowed_domains` / `blocked_domains`). */
 export interface DomainFilter {
 	allowedDomains?: string[];
 	blockedDomains?: string[];
@@ -267,14 +267,13 @@ async function tavilySearch(
 }
 
 /**
- * Exa's hosted MCP endpoint, which answers `web_search_exa` with NO credentials.
- * This is what makes websearch work out of the box (audit C.2).
+ * Exa's hosted MCP endpoint, which answers `web_search_exa` with NO credentials,
+ * so websearch works out of the box.
  *
- * Spoken over plain fetch rather than the MCP SDK: this is one fixed endpoint and
- * two calls, and keeping it here preserves the module's injectable-fetch shape (so
- * it is testable) and keeps the SDK's heavy tree off this path. The trade-off is
- * that we track the wire format ourselves — hence decodeRpc tolerating both SSE
- * and plain JSON, and parseExaMcpResults falling back rather than throwing.
+ * Spoken over plain fetch rather than the MCP SDK: one fixed endpoint, two calls,
+ * injectable fetch for tests, and no heavy SDK tree. The trade-off is tracking the
+ * wire format ourselves — hence decodeRpc tolerating both SSE and plain JSON, and
+ * parseExaMcpResults falling back rather than throwing.
  */
 const EXA_MCP_URL = "https://mcp.exa.ai/mcp";
 const MCP_PROTOCOL_VERSION = "2025-03-26";
@@ -374,8 +373,7 @@ export async function exaMcpSearch(
 	filter: DomainFilter = {},
 	recency?: Recency,
 ): Promise<SearchResult[]> {
-	// Same bound the keyed providers get. This path used to run with whatever the
-	// caller passed — including a signal that never aborts.
+	// Same bound the keyed providers get, even when the caller's signal never aborts.
 	const effectiveSignal = timeoutSignal(signal);
 	let results: SearchResult[] | undefined;
 	if (hasFilter(filter) || recency) {

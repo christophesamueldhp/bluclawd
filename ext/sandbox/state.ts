@@ -1,14 +1,11 @@
 /**
- * Process-wide sandbox activation state, shared with the permissions core
- * extension (auto-mode/ask pairing: sandboxed bash needs fewer prompts because
- * the OS caps the blast radius). Kept in a tiny module so permissions never
- * imports the sandbox runtime.
+ * Process-wide sandbox activation state, shared with the permissions extension
+ * (sandboxed bash needs fewer prompts because the OS caps the blast radius).
+ * Kept in a tiny module so permissions never imports the sandbox runtime.
  *
- * Backed by {@link sharedRef} rather than a plain module-level `let`: `sandbox`
- * and `permissions` are separate top-level extensions, each loaded with its own
- * module graph, so a plain `let` here would give permissions its own copy that
- * never saw what sandbox's copy set — confirmed live, `isSandboxActive()` from
- * permissions always read `false`, silently dropping the fewer-prompts pairing.
+ * Backed by {@link sharedRef} rather than a module-level `let`: `sandbox` and
+ * `permissions` are separate extensions, each loaded with its own module graph,
+ * so a plain `let` would give permissions a copy that never sees what sandbox set.
  */
 
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
@@ -25,11 +22,10 @@ export function isSandboxActive(): boolean {
 }
 
 /**
- * What a subagent child needs to run bash the way the parent does. Children load
- * no extensions (subagents/engine.ts, Trap 2), so the sandbox extension is not
- * there to replace their bash tool; the parent publishes its operations here and
- * `child-bash.ts` builds the child's tool on top of them. Operations, not a tool:
- * a child has its own cwd (a worktree, say), and the tool is bound to one.
+ * What a child session needs to run bash the way the parent does. Children load
+ * no extensions, so the parent publishes its operations here for the child's tool
+ * to build on. Operations, not a tool: a child has its own cwd, and a tool is
+ * bound to one.
  */
 export interface ChildBashProvider {
 	/** The operations this command runs through: the sandbox unless something takes it out. */

@@ -1,6 +1,4 @@
 /**
- * Sandbox failure note (audit C.1 follow-up).
- *
  * When a sandboxed command fails, the model needs to know the sandbox was in
  * play — otherwise it reads "Operation not permitted" as a broken script and
  * retries the same thing. This appends a short, DETERMINISTIC note derived
@@ -42,7 +40,7 @@ export function relevantViolations(lines: string[]): string[] {
 	return [...new Set(lines.filter((line) => RELEVANT_VIOLATION.test(line)))];
 }
 
-/** Claude Code's shape: the denials, verbatim, in a `<sandbox_violations>` block. */
+/** The denials, verbatim, in a `<sandbox_violations>` block. */
 export function formatSandboxViolations(lines: string[]): string {
 	return ["", "<sandbox_violations>", ...lines, "</sandbox_violations>"].join("\n");
 }

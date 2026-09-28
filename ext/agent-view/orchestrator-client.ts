@@ -82,11 +82,8 @@ interface AnyResponse {
 }
 
 /**
- * Mirror of packages/server/src/config.ts getSocketPath() so the client and daemon agree.
- *
- * Upstream v0.82.0 renamed the daemon package orchestrator → server, and with it the
- * env var, the directory and the socket filename. This mirror has to move in lockstep
- * or agent view silently fails to find a running daemon.
+ * Mirror of packages/server/src/config.ts getSocketPath(); it must stay in lockstep or agent view
+ * silently fails to find a running daemon.
  */
 export function orchestratorSocketPath(): string {
 	const envDir = process.env.PI_SERVER_DIR;
@@ -94,17 +91,10 @@ export function orchestratorSocketPath(): string {
 	return join(dir, "server.sock");
 }
 
-/**
- * Path to the daemon's CLI entry, for the ensureDaemon() auto-start.
- *
- * Exported (and asserted in tests) for the same reason as orchestratorSocketPath: the
- * v0.82.0 orchestrator → server rename left this resolving the old package name, which
- * threw ERR_MODULE_NOT_FOUND into ensureDaemon's catch and silently disabled auto-start.
- */
+/** Path to the daemon's CLI entry, for the ensureDaemon() auto-start. */
 export function daemonCliPath(): string {
-	// This package ships its own daemon (daemon/cli.ts, run by node's native type stripping) —
-	// the monorepo's `@earendil-works/pi-server` package is not a dependency here, so resolving
-	// it threw and auto-start silently never happened.
+	// This package ships its own daemon (daemon/cli.ts, run by node's native type stripping);
+	// `@earendil-works/pi-server` is not a dependency here.
 	return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "daemon", "cli.ts");
 }
 
@@ -140,11 +130,9 @@ export function piPackageRoot(entry: string | undefined = process.argv[1]): stri
 }
 
 /**
- * Newest mtime (ms) of any file under `dir`, recursive. Mirrors
- * packages/server/src/config.ts's own `newestMtimeMs` — duplicated for the same reason
- * orchestratorSocketPath() mirrors getSocketPath() above: different npm packages, no
- * shared module to import from. Exported so scripts/check-mirror-drift.mjs can invoke
- * it directly rather than compare it by AST, the same way it treats orchestratorSocketPath.
+ * Newest mtime (ms) of any file under `dir`, recursive. Mirrors packages/server/src/config.ts's
+ * `newestMtimeMs` (a different npm package, no shared module); exported so
+ * scripts/check-mirror-drift.mjs can invoke it directly.
  */
 export function newestMtimeMs(dir: string, depth = 0): number {
 	if (depth > 4) return 0;
@@ -171,13 +159,9 @@ export function newestMtimeMs(dir: string, depth = 0): number {
 }
 
 /**
- * The build identifier a FRESHLY spawned daemon would report right now, computed from this
- * package's daemon/ directory (the same directory the daemon hashes for its own buildId) —
- * not from any running daemon. Compared against a running daemon's own self-reported `buildId` (see
- * getDaemonInfo()) to detect "the daemon process predates the code that is on disk now",
- * the classic stale-dist failure a semver comparison alone would miss, since a local
- * rebuild during development does not bump package.json's version
- * (IMPROVEMENT-PLAN.md §4.5/§5.3).
+ * The build id a freshly spawned daemon would report now, from this package's daemon/ directory.
+ * Compared with a running daemon's self-reported `buildId` to catch a daemon older than the code
+ * on disk — a local rebuild does not bump the version, so semver alone would miss it.
  */
 export function currentDaemonBuildId(): string {
 	let cliPath: string;
@@ -220,12 +204,8 @@ export class OrchestratorClient {
 				if (!line) return;
 				try {
 					const parsed = JSON.parse(line) as AnyResponse;
-					// The protocol populates ok/error on every response (ipc/protocol.ts's
-					// ResponseBase), but every call site used to await this promise and use the
-					// payload without ever looking at `ok` — so a daemon-side rejection (e.g. an
-					// unknown instance id) resolved exactly like success (IMPROVEMENT-PLAN.md
-					// §5.1d). Reject centrally, once, instead of repeating the check in every
-					// method below.
+					// Every response carries ok/error; reject here so a daemon-side rejection
+					// (e.g. an unknown instance id) does not resolve like success.
 					if (parsed.ok === false) {
 						done(() => reject(new Error(parsed.error ?? `orchestrator request failed: ${req.type}`)));
 						return;
@@ -244,10 +224,9 @@ export class OrchestratorClient {
 		return (await this.getDaemonInfo()).running;
 	}
 
-	/** Probe the daemon and, if reachable, read back its self-reported version/buildId
-	 *  (IMPROVEMENT-PLAN.md §4.5/§5.3). `buildId` is undefined for a daemon that predates
-	 *  the version-echo handshake — a distinct case from "not running" for a caller that
-	 *  wants to warn about a stale daemon rather than treat it as absent. */
+	/** Probe the daemon and, if reachable, read back its self-reported version/buildId.
+	 *  `buildId` is undefined for a daemon that predates the version-echo handshake — a distinct
+	 *  case from "not running" for a caller that wants to warn about a stale daemon. */
 	async getDaemonInfo(): Promise<{ running: boolean; version?: string; buildId?: string }> {
 		try {
 			const res = await this.request({ type: "list" }, 500);

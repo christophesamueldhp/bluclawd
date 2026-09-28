@@ -1,18 +1,16 @@
 /**
- * `/plugin` — Claude Code's name for managing installed packages, over pi's
- * own package manager (`DefaultPackageManager`, the same code behind
- * `pi install` / `pi remove` / `pi update`).
+ * `/plugin` — managing installed packages through pi's own package manager
+ * (the same code behind `pi install` / `pi remove` / `pi update`).
  *
  *   /plugin                      list configured packages and where they are installed
  *   /plugin install <source> [-l] add and install (npm name, git URL, or local path); -l = project scope
  *   /plugin remove <source> [-l]  uninstall and drop from settings
  *   /plugin update [source]       update one package, or every git/npm package
  *
- * Manage-only on purpose — there is no browse/marketplace surface. A package
- * executes arbitrary code at load time with no signing or consent step, so
- * naming a source here is the same explicit act as typing `pi install`; a
- * catalogue you can click through would widen trust without adding any
- * safeguard. Changes take effect after `/reload`.
+ * Manage-only on purpose, with no browse/marketplace surface: a package runs
+ * arbitrary code at load time with no signing or consent step, so a clickable
+ * catalogue would widen trust without adding any safeguard. Changes take effect
+ * after `/reload`.
  */
 import type { ExtensionCommandContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { DefaultPackageManager, getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";

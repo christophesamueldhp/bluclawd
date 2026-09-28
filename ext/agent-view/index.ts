@@ -1,24 +1,12 @@
 /**
- * Agent view (← twice on an empty prompt) — Claude Code's `claude agents` for pi.
+ * Agent view (← twice on an empty prompt).
  *
- * Everything it needs is on pi's public extension surface:
+ * Session switching lives on `ExtensionCommandContext`, not the plain context, so ← dispatches
+ * the hidden `/agent-view` command rather than opening the view itself.
  *
- * | needs | pi gives |
- * |---|---|
- * | a full-screen UI with the keyboard | `ctx.ui.custom({ overlay: true })` |
- * | opening another session in this window | `ctx.switchSession(path)` |
- * | starting a fresh one in this window | `ctx.newSession()` |
- * | ←← on an empty prompt | `ui.onTerminalInput` + `sendUserMessage("/agent-view", { expandPromptTemplates })` |
- * | the `← for agents` hint | `ctx.ui.setStatus` |
- *
- * The session-switching powers live on `ExtensionCommandContext`, not the plain context, which
- * is why ← dispatches the `/agent-view` command rather than opening the view itself. The command
- * is only that plumbing: ←← is the way in, so autocomplete and /help leave it out.
- *
- * The outgoing session keeps running because this hands it to the daemon after the switch —
- * pi's `switchSession` disposes the current session, so the handle has to be captured BEFORE
- * the call and spawned AFTER it, once the outgoing `.jsonl` has been flushed on dispose. Two
- * writers on one session file is the failure this ordering exists to prevent.
+ * pi's `switchSession` disposes the current session, so the outgoing handle is captured BEFORE
+ * the call and handed to the daemon AFTER it, once its `.jsonl` has been flushed on dispose —
+ * otherwise two writers share one session file.
  */
 
 import { existsSync } from "node:fs";
@@ -245,9 +233,9 @@ const agentView: InlineExtension = {
 				tui = widgetTui;
 				return { render: () => [], invalidate: () => {} };
 			});
-			// ← twice on an empty prompt opens agent view: the first press shows Claude Code's
-			// "Press ← again" hint, the second switches. Nothing is taken while an overlay or
-			// dialog has the keyboard, or while the prompt holds text.
+			// ← twice on an empty prompt opens agent view: the first press shows a "Press ← again"
+			// hint, the second switches. Nothing is taken while an overlay or dialog has the
+			// keyboard, or while the prompt holds text.
 			let armedAt = 0;
 			const disarm = (): void => {
 				if (!armedAt) return;

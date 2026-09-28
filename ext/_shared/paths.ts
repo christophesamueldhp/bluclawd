@@ -1,10 +1,4 @@
-/**
- * pi's own auth/models/debug-log path getters aren't part of its public
- * package export, but each is a one-line join onto `getAgentDir()` (which
- * is public) against a filename pi has never changed. Vendored here instead
- * of reached into via a relative import so the layer has no import that
- * depends on `packages/coding-agent/src` existing on disk.
- */
+/** pi's auth/models/debug-log path getters, which pi does not export. */
 
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";

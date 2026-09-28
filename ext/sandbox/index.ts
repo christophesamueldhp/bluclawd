@@ -1,32 +1,23 @@
 /**
- * Sandbox core extension (audit C.1, CC parity §4.2): OS-level sandboxing for
- * bash commands via @anthropic-ai/sandbox-runtime (Seatbelt/sandbox-exec on
- * macOS, bubblewrap on Linux).
+ * Sandbox core extension: OS-level sandboxing for bash commands via
+ * @anthropic-ai/sandbox-runtime (Seatbelt on macOS, bubblewrap on Linux).
  *
- * Opt-in: settings.json `sandbox.enabled` (global+project merge, project only
- * when trusted) or --sandbox; --no-sandbox wins over both. Replaces the
- * built-in bash tool with a variant whose operations wrap each command via
- * SandboxManager.wrapWithSandbox before delegating to pi's standard local
- * shell backend — foreground, background (run_in_background), and monitor
- * commands all flow through the same operations seam, so all are sandboxed.
- * Commands the user types (`!` and bash mode) run outside the sandbox, as in
- * Claude Code: the sandbox confines what the model runs, not the user.
+ * Opt-in: settings.json `sandbox.enabled` (project only when trusted) or
+ * --sandbox; --no-sandbox wins over both. Foreground, background and monitor
+ * commands all run through the same operations seam, so all are sandboxed.
+ * Commands the user types (`!` and bash mode) run outside: the sandbox confines
+ * what the model runs, not the user.
  *
- * Claude Code's escape hatches, both settings-driven: `excludedCommands` (rule
- * patterns that always run outside) and the bash tool's
+ * Escape hatches: `excludedCommands` and the bash tool's
  * `dangerouslyDisableSandbox` retry (honoured unless
  * `allowUnsandboxedCommands: false`; the permission layer decides whether the
- * user is asked). Network: no host is pre-allowed — the first connection to a
- * host asks the user; a yes holds for the session, "don't ask again" saves a
- * `WebFetch(domain:...)` rule.
+ * user is asked). No host is pre-allowed: the first connection to a host asks.
  *
- * Failure posture: if enabled but initialization fails (missing bubblewrap,
- * unsupported platform, ...), bash falls back to UNSANDBOXED execution with a
- * loud status chip and an error notice — unless `sandbox.failIfUnavailable` is
- * set, in which case bluclawd exits at startup, and should the sandbox fail
- * later (`/sandbox on`) the model's bash refuses to run: the tool, background
- * jobs and the monitor each check strictRefusalReason. The runtime dependency
- * is imported lazily so disabled sessions pay no startup cost.
+ * If enabled but initialization fails, bash falls back to UNSANDBOXED execution
+ * with a loud status chip — unless `sandbox.failIfUnavailable` is set, in which
+ * case bluclawd exits at startup, and a later failure (`/sandbox on`) makes the
+ * tool, background jobs and the monitor refuse via strictRefusalReason. The
+ * runtime is imported lazily so disabled sessions pay no startup cost.
  */
 
 import { execFileSync } from "node:child_process";
@@ -136,10 +127,10 @@ export function factory(pi: ExtensionAPI): void {
 	const pendingHostPrompts = new Map<string, Promise<boolean>>();
 
 	/**
-	 * Claude Code's network prompt. "Yes" holds for the session; "don't ask again"
-	 * saves a `WebFetch(domain:...)` allow rule, which pre-allows the host for the
-	 * sandbox (and for webfetch) from then on. That row is offered only in a trusted
-	 * project, the one place a rule can be saved.
+	 * The network prompt. "Yes" holds for the session; "don't ask again" saves a
+	 * `WebFetch(domain:...)` allow rule, which pre-allows the host for the sandbox
+	 * and for webfetch. That row is offered only in a trusted project, the one
+	 * place a rule can be saved.
 	 */
 	async function askHost(host: string, port: number): Promise<boolean> {
 		const key = `${host}:${port}`;
@@ -191,9 +182,9 @@ export function factory(pi: ExtensionAPI): void {
 	}
 
 	/**
-	 * Settings edits reach the running session, as in Claude Code: before each
-	 * sandboxed command the config is re-read, and the runtime updated when the part
-	 * it enforces changed; what the session decided is kept (withSessionChoices).
+	 * Settings edits reach the running session: before each sandboxed command the
+	 * config is re-read, and the runtime updated when the part it enforces changed;
+	 * what the session decided is kept (withSessionChoices).
 	 */
 	function syncConfig(): void {
 		const ctx = liveCtx;
@@ -247,9 +238,9 @@ export function factory(pi: ExtensionAPI): void {
 					},
 				});
 				if (result.exitCode === 0) return result;
-				// Name what the sandbox denied, as Claude Code does, so the model can
-				// adapt (or ask to retry unsandboxed) instead of retrying the same thing.
-				// The signature scan is the fallback for a denial the monitor missed.
+				// Name what the sandbox denied so the model can adapt (or ask to retry
+				// unsandboxed) instead of retrying the same thing. The signature scan is
+				// the fallback for a denial the monitor missed.
 				const violations = relevantViolations(await violationLines(commandId));
 				if (violations.length > 0) {
 					options.onData(Buffer.from(formatSandboxViolations(violations)));
@@ -279,9 +270,8 @@ export function factory(pi: ExtensionAPI): void {
 		return sandboxedOperations();
 	}
 
-	// Override the built-in bash tool. When the sandbox is inactive this runs the
-	// same Claude Code bash through unsandboxed operations. Subagent children build
-	// theirs from the same factory (bash-tool.ts), so the two cannot drift apart.
+	// Overrides the built-in bash tool; with the sandbox inactive it runs through
+	// unsandboxed operations.
 	pi.registerTool(
 		createClaudeBashTool({
 			cwd: localCwd,
@@ -328,9 +318,8 @@ export function factory(pi: ExtensionAPI): void {
 		}
 		try {
 			runtime ??= await import("@anthropic-ai/sandbox-runtime");
-			// Claude Code's session temp dir. The runtime points sandboxed commands'
-			// $TMPDIR at CLAUDE_CODE_TMPDIR (else /tmp/claude) and lets them write under
-			// /tmp/claude, but creates neither, so every temp write failed.
+			// The runtime points sandboxed commands' $TMPDIR at CLAUDE_CODE_TMPDIR (else
+			// /tmp/claude) and lets them write under /tmp/claude, but creates neither.
 			if (!process.env.CLAUDE_CODE_TMPDIR) {
 				mkdirSync(SESSION_TMP_ROOT, { recursive: true });
 				sessionTmp = mkdtempSync(join(SESSION_TMP_ROOT, "pi-"));
@@ -403,8 +392,8 @@ export function factory(pi: ExtensionAPI): void {
 			ctx.ui.setStatus(STATUS_KEYS.sandbox, ctx.ui.theme.fg("accent", "🔒 sandbox"));
 		} else if (config.enabled) {
 			await activate(ctx);
-			// Claude Code refuses to start when a required sandbox cannot. The refusal in
-			// the bash tool stays as the backstop for a session that keeps running.
+			// Refuse to start when a required sandbox cannot. The refusal in the bash
+			// tool stays as the backstop for a session that keeps running.
 			if (!isSandboxActive() && config.failIfUnavailable) {
 				console.error(`bluclawd: sandbox.failIfUnavailable is set and the sandbox could not start: ${lastError}`);
 				// Headless, a graceful shutdown still lets the pending prompt run first;
@@ -421,8 +410,8 @@ export function factory(pi: ExtensionAPI): void {
 			await deactivate(ctx);
 		}
 		publishPosture();
-		// Subagent children build their bash on these (child-bash.ts): the same
-		// sandbox, the same strict refusal, so delegation is not a way around either.
+		// Child sessions build their bash on these: the same sandbox and strict
+		// refusal, so delegation is not a way around either.
 		publishChildBash({
 			operations: operationsFor,
 			refusal: () => strictRefusalReason(config, isSandboxActive(), lastError),
@@ -432,9 +421,9 @@ export function factory(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async (event, ctx) => {
-		// Background shells outlive a /clear or a session switch (Claude Code): tearing the
-		// sandbox down would pull its network proxy and $TMPDIR out from under them. The
-		// next session_start finds it still running and keeps it.
+		// Background shells outlive a /clear or a session switch: tearing the sandbox
+		// down would pull its network proxy and $TMPDIR out from under them. The next
+		// session_start finds it still running and keeps it.
 		const switching = event.reason === "new" || event.reason === "resume" || event.reason === "fork";
 		clearMainSession();
 		if (switching && isSandboxActive() && backgroundBashJobs.list().some((job) => !job.exit)) {

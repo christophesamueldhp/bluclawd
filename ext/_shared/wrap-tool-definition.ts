@@ -1,7 +1,6 @@
 /**
  * Wrap a ToolDefinition into an AgentTool for the core runtime. Vendored from
- * pi's core/tools/tool-definition-wrapper.ts — not part of the public
- * package export, but a small pure adapter over two public types.
+ * pi's core/tools/tool-definition-wrapper.ts, which pi does not export.
  */
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";

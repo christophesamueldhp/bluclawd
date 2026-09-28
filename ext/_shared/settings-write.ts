@@ -1,24 +1,13 @@
 /**
  * Persisting bluclawd's own settings keys (permission rules, MCP server
- * approvals) to settings.json.
+ * approvals) to settings.json. pi's `SettingsManager` has no public way to
+ * persist a key it does not know, so these writers do their own
+ * read-modify-write of the same files pi reads.
  *
- * pi's `SettingsManager` has a typed setter per key and keeps its write path
- * private, so there is no public way to persist a key pi does not know about.
- * Rather than edit that file, these writers do their own locked
- * read-modify-write of the same JSON files pi reads.
- *
- * Two properties make that safe enough to be the same risk the fork already
- * carried: each writer touches **only** the one top-level key it owns
- * (`permissions` for the rule writers, `mcp` for the MCP approval record),
- * merging into whatever else is on disk at the time; and they take pi's own
- * advisory lock
- * (`proper-lockfile` on the settings file) so a concurrent writer serialises
- * rather than interleaves. The fork's version wrote through a second
- * `SettingsManager` instance, which had the same last-writer-wins exposure.
- *
- * Trust is the caller's job — `addProjectRule` throws rather than silently
- * writing into an untrusted project, mirroring pi's own
- * `assertProjectTrustedForWrite`.
+ * Each writer touches **only** the one top-level key it owns, merging into
+ * whatever else is on disk, and takes pi's `proper-lockfile` lock on the file
+ * so a concurrent writer serialises rather than interleaves. Project writes
+ * refuse an untrusted project.
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -40,9 +29,8 @@ function projectSettingsPath(cwd: string): string {
 function readObject(path: string): Record<string, unknown> {
 	try {
 		const parsed: unknown = JSON.parse(readFileSync(path, "utf-8"));
-		// A malformed or non-object settings file is left alone by returning {};
-		// the caller's write then re-creates a well-formed one rather than
-		// throwing in the middle of a permission prompt.
+		// A malformed file reads as {} so the write re-creates a well-formed one
+		// rather than throwing in the middle of a permission prompt.
 		return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
 			? (parsed as Record<string, unknown>)
 			: {};
@@ -142,9 +130,8 @@ export async function removeProjectRule(cwd: string, rule: string, trusted: bool
 }
 
 /**
- * Save the `/sandbox` on/off choice (`sandbox.enabled`) to the project's settings,
- * as Claude Code saves it to the project's local settings. Every other `sandbox`
- * key on disk is kept.
+ * Save the `/sandbox` on/off choice (`sandbox.enabled`) to the project's settings.
+ * Every other `sandbox` key on disk is kept.
  */
 export async function setProjectSandboxKeys(
 	cwd: string,

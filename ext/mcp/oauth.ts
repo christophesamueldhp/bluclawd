@@ -1,5 +1,5 @@
 /**
- * OAuth for remote MCP servers — audit item B.5.
+ * OAuth for remote MCP servers.
  *
  * The SDK ships the whole OAuth2 client (discovery, dynamic client registration,
  * PKCE, exchange, refresh, 401-retry). This module supplies only the two things it
@@ -15,8 +15,7 @@
  *      (authProviderFor), and
  *   2. redirectToAuthorization() and saveClientInformation() refuse outright unless
  *      a flow is in progress.
- * Guard 2 exists because guard 1 alone once rested on redirectUrl being "" — which
- * silently disabled token refresh as well. Do not reintroduce that coupling.
+ * Do not replace guard 2 with an empty redirectUrl: that also disables token refresh.
  *
  * The authorization URL itself is remote-controlled, so it is scheme-checked before
  * ever reaching the OS opener — see assertOpenableAuthorizationUrl.
@@ -197,9 +196,7 @@ export class McpOAuthProvider {
 	}
 
 	async redirectToAuthorization(url: URL): Promise<void> {
-		// Explicit, not incidental: only a running /mcp login may open a browser.
-		// This previously held only because redirectUrl was "" — which also disabled
-		// token refresh — so the invariant now stands on its own.
+		// Only a running /mcp login may open a browser.
 		if (!this.flow) {
 			throw new Error("no OAuth flow in progress — run /mcp login to authenticate");
 		}
@@ -210,8 +207,8 @@ export class McpOAuthProvider {
 			);
 		}
 		assertOpenableAuthorizationUrl(url, this.opts.server);
-		// Start the human's clock HERE, not when the listener was created: discovery
-		// and dynamic client registration happen first and were eating the budget.
+		// Start the human's clock here, not when the listener was created: discovery
+		// and dynamic client registration come first and must not eat the budget.
 		this.flow.startTimeout?.();
 		await this.opts.openBrowser(url.toString());
 	}
@@ -352,7 +349,6 @@ export function authProviderFor(opts: {
 
 /** Forget a server's stored credential. Absent credentials are not an error. */
 export function logoutServer(opts: { storage: McpCredentialStore; server: string }): void {
-	// remove() is already a no-op for an absent server, so no guard is needed.
 	opts.storage.remove(opts.server);
 }
 

@@ -1,14 +1,11 @@
-// Vendored verbatim from pi's utils/open-browser.ts — not part of pi's public
-// package export, and small/stable enough to copy rather than reach into
-// packages/coding-agent/src for.
+// Vendored from pi's utils/open-browser.ts, which pi does not export.
 import { spawn } from "node:child_process";
 
 /**
- * Open a URL or file in the platform browser/default handler.
+ * Open a URL or file in the platform's default handler.
  *
- * This intentionally never invokes a shell. On Windows, do not use
- * `cmd /c start`: cmd.exe re-parses metacharacters (&, |, ^, ...) before
- * `start` runs, which would make attacker-controlled URLs injectable.
+ * Never invokes a shell: on Windows `cmd /c start` re-parses metacharacters
+ * (&, |, ^, ...), which would make attacker-controlled URLs injectable.
  */
 export function openBrowser(target: string): void {
 	const [cmd, args]: [string, string[]] =
@@ -18,9 +15,7 @@ export function openBrowser(target: string): void {
 				? ["rundll32", ["url.dll,FileProtocolHandler", target]]
 				: ["xdg-open", [target]];
 
-	// spawn reports launcher failures (for example, missing xdg-open) via an
-	// error event. Browser launch is best-effort: callers still present the target
-	// to the user, so keep the launcher failure from becoming a process crash.
+	// A missing launcher surfaces as an error event; best-effort, so it must not crash the process.
 	spawn(cmd, args, { stdio: "ignore", detached: true })
 		.on("error", () => {})
 		.unref();

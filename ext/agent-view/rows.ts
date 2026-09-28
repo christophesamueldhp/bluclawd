@@ -1,7 +1,6 @@
 /**
- * Agent view's data model, as Claude Code 2.1.280 defines it: a session has one of six states,
- * the state decides its band, and the band order puts what needs you on top. Pure — the view
- * renders what these functions return.
+ * Agent view's data model: a session has one of six states, the state decides its band, and the
+ * band order puts what needs you on top. Pure — the view renders what these functions return.
  */
 
 import type { InstanceSummary, PendingNeeds } from "./orchestrator-client.ts";
@@ -33,7 +32,7 @@ export interface AgentRow {
 	updatedAt?: string;
 }
 
-/** Claude Code's untitled-row fallback: the first three words of the task. */
+/** Untitled-row fallback: the first three words of the task. */
 export function labelFromTask(task: string): string {
 	const words = task.trim().split(/\s+/).filter(Boolean);
 	if (words.length === 0) return "untitled session";
@@ -87,9 +86,9 @@ export function needsText(needs: PendingNeeds): string {
 
 /**
  * The rows agent view lists: the daemon's sessions plus this window's own (`self`, built by the
- * caller). Other windows' foreground sessions are not listed — Claude Code keeps those behind a
- * flag, off by default — but a stored row they hold open is marked `elsewhere`. One row per
- * session file; this window's own and then a live one win over a stored twin.
+ * caller). Other windows' foreground sessions are not listed, but a stored row they hold open is
+ * marked `elsewhere`. One row per session file; this window's own and then a live one win over a
+ * stored twin.
  */
 export function collectRows(instances: InstanceSummary[], self: InstanceSummary | undefined): AgentRow[] {
 	const heldElsewhere = new Set(

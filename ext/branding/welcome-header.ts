@@ -1,11 +1,7 @@
 /**
- * The startup header, Claude Code 2.1.282's `_s` (m1356): no box, just the
- * mascot beside three lines — bold name and dim version, dim model · billing,
- * dim cwd — centered on each other. In the fullscreen renderer the mascot plays
- * one of Claude Code's entrance sequences each time pi is launched.
- *
- * Claude Code's billing field (plan or provider) is the provider's display name
- * here, which reads the same for every provider.
+ * The startup header: no box, just the mascot beside three lines — bold name
+ * and dim version, dim model · provider, dim cwd — centered on each other. In
+ * the fullscreen renderer the mascot plays an entrance sequence on each launch.
  */
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
@@ -21,7 +17,6 @@ import {
 	withHold,
 } from "./mascot.ts";
 
-/** Ink's `bold` and `dimColor`, which Claude Code draws the header with. */
 const bold = (text: string) => `\x1b[1m${text}\x1b[22m`;
 const faint = (text: string) => `\x1b[2m${text}\x1b[22m`;
 
@@ -31,7 +26,7 @@ export interface WelcomeHeaderInfo {
 	model?: string;
 	/** Thinking level, when the model reasons and it is not off. */
 	effort?: string;
-	/** Provider display name, in Claude Code's billing slot. */
+	/** Provider display name. */
 	provider?: string;
 	/** `~`-abbreviated working directory. */
 	cwd: string;
@@ -48,7 +43,7 @@ function ellipsis(text: string, width: number): string {
 	return width > 0 ? `${out}…` : "";
 }
 
-/** Claude Code's path elider (`e_e`): keeps the first and last segments, then as many middle ones as fit. */
+/** Keeps the first and last segments, then as many middle ones as fit. */
 export function elidePath(path: string, width: number): string {
 	if (visibleWidth(path) <= width) return path;
 	const parts = path.split("/");
@@ -71,10 +66,9 @@ export function elidePath(path: string, width: number): string {
 	return middle.length === 0 ? `${first}/…/${last}` : `${first}/…/${middle.join("/")}/${last}`;
 }
 
-/** The text column for a terminal `columns` wide, Claude Code's widths shifted by the mascot's extra cells. */
+/** The text column for a terminal `columns` wide. */
 export function welcomeLines(info: WelcomeHeaderInfo, columns: number, mascotCells: number): string[] {
-	// Claude Code: max(columns - 15, 20) for its 9-cell Clawd and 2-cell gap; the mascot's box
-	// carries one blank cell of swing room, and the gap after it is one cell.
+	// The mascot's canvas carries one blank cell of swing room, so the gap after it is one cell.
 	const width = Math.max(columns - (mascotCells + 5), 20);
 	const lines = [`${bold("bluclawd")} ${faint(`v${ellipsis(info.version, Math.max(width - 13, 6))}`)}`];
 	if (info.model) {
@@ -92,8 +86,7 @@ export function welcomeLines(info: WelcomeHeaderInfo, columns: number, mascotCel
 }
 
 /**
- * Claude Code's entrance rule (`fe`, m1353), minus its once-per-version limit:
- * only in the fullscreen renderer, not with reduced motion, and only for a launch
+ * Only in the fullscreen renderer, not with reduced motion, and only for a launch
  * (not /new, /resume, /fork or /reload) — then a random pick of the entrances.
  */
 export function pickEntrance(opts: {
@@ -116,7 +109,7 @@ const realClock: Clock = {
 	clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
 };
 
-/** Steps through a sequence once at Claude Code's frame rate, then rests on its last frame. */
+/** Steps through a sequence once, then rests on its last frame. */
 export class MascotPlayer {
 	private readonly frames: MascotFrame[];
 	private readonly onFrame: () => void;
@@ -127,7 +120,7 @@ export class MascotPlayer {
 	constructor(sequence: SequenceName | undefined, onFrame: () => void, clock: Clock = realClock) {
 		this.onFrame = onFrame;
 		this.clock = clock;
-		// Claude Code's welcome passes delayMs: 100.
+		// 100 ms of rest before the entrance starts.
 		this.frames = sequence ? withHold(SEQUENCES[sequence], 100) : [];
 		if (this.frames.length > 0) this.schedule();
 	}

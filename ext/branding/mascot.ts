@@ -1,15 +1,12 @@
 /**
- * The bluclawd mascot as a pixel grid, its poses, Claude Code's Clawd animation
- * sequences, and a renderer to terminal block glyphs.
+ * The bluclawd mascot as a pixel grid, its poses, its animation sequences, and a
+ * renderer to terminal block glyphs.
  *
  * `mascot.svg` is the source: it embeds a 2000×1500 raster (a color image and a
  * luminance mask) that is pixel art on a 20×15 grid of 100 px blocks.
  * `SOURCE` below is that grid, and a test checks it against the SVG. Every pose
  * only moves parts of the grid — eyes, arms, the whole sprite — and never
- * resizes one, so the proportions of the SVG hold in every frame. Each move is
- * Claude Code's Clawd move scaled to this grid: its 1-px eye shifts by its own
- * width, its arm rises a quarter of the body's height, and its crouch drops the
- * sprite one row so the feet leave the clipped box.
+ * resizes one, so the proportions of the SVG hold in every frame.
  *
  * Terminal cells are ~2.3× taller than wide, so one grid pixel drawn as half a
  * cell reads ~14% too tall. Columns 2 and 17 are drawn twice to widen it back:
@@ -17,8 +14,8 @@
  * size (22×15, 1.28:1 against the source's 1.33:1).
  *
  * Two encodings with the same pixel aspect: octants (2×4 pixels per cell,
- * Unicode 16) give 11×4 cells, close to Claude Code's 9×3 Clawd; half blocks
- * (1×2 per cell) give 22×8 for terminals that lack octant glyphs.
+ * Unicode 16) give 11×4 cells; half blocks (1×2 per cell) give 22×8 for
+ * terminals that lack octant glyphs.
  */
 
 /** `.` transparent, `#` body, `o` eye. */
@@ -48,9 +45,9 @@ export const EYE_COLOR = "#1e1e1e";
 export type Pose = "default" | "look-left" | "look-right" | "arms-up" | "wave";
 
 const EYE_ROWS = [4, 5];
-/** A full eye width, as Claude Code's look moves its 1-px eye by one pixel. */
+/** A look moves the eyes by their full width. */
 const LOOK_SHIFT = 2;
-/** A quarter of the body's 12 rows, as Claude Code raises its arm 1 of its 4 body pixels. */
+/** A quarter of the body's 12 rows. */
 const ARM_RAISE = 3;
 const EYE_COLUMNS = [5, 6, 13, 14];
 const ARM_COLUMNS = [0, 1, 18, 19];
@@ -104,11 +101,10 @@ const WIDTH = ART_WIDTH + 2;
 const HEIGHT = 16;
 
 /**
- * One animation frame, Claude Code's shape (m1353): `offset` is the crouch in
- * rows — the sprite drops and its feet leave the clipped box; a quarter row is
- * a one-pixel bob — `x` slides the sprite in Claude Code's units (its Clawd is
- * 9 cells wide), and `poof` is the landing dust. `look` turns the eyes on top
- * of any pose (bluclawd's wave only).
+ * One animation frame: `offset` is the crouch in rows — the sprite drops and
+ * its feet leave the clipped box; a quarter row is a one-pixel bob — `x` slides
+ * the sprite in 1/`CLAWD_WIDTH` steps of its own width, and `poof` is the
+ * landing dust. `look` turns the eyes on top of any pose (the wave only).
  */
 export interface MascotFrame {
 	pose: Pose;
@@ -122,10 +118,9 @@ export interface MascotFrame {
 
 export const REST: MascotFrame = { pose: "default", offset: 0 };
 
-/** One crouch row: an octant line, which is a third of the art as Claude Code's row is of its Clawd. */
+/** One crouch row: an octant line. */
 const CROUCH_PIXELS = 4;
 
-/** Claude Code's frame length. */
 export const FRAME_MS = 60;
 
 const CLAWD_WIDTH = 9;
@@ -198,7 +193,6 @@ const wave: MascotFrame[] = [
 	...repeat("default", 0, 1),
 ];
 
-/** Claude Code's entrance sequences, frame for frame, plus bluclawd's own wave. */
 export const SEQUENCES = {
 	jump,
 	look: [...repeat("look-right", 0, 5), ...repeat("look-left", 0, 5), ...repeat("default", 0, 1)],
@@ -221,23 +215,22 @@ export const SEQUENCES = {
 		...poof(0),
 		...repeat("default", 0, 1, 0),
 	],
-	/** Not Claude Code's; see `wave` above. */
 	wave,
 } satisfies Record<string, MascotFrame[]>;
 
 export type SequenceName = keyof typeof SEQUENCES;
 
-/** What the startup entrance picks from at random: Claude Code's four, plus the wave. */
+/** What the startup entrance picks from at random. */
 export const ENTRANCES: SequenceName[] = ["skip", "jump", "look", "spin", "wave"];
 
-/** Claude Code's `delayMs` hold, in rest frames, ahead of a sequence. */
+/** `delayMs` worth of rest frames ahead of a sequence. */
 export function withHold(frames: MascotFrame[], delayMs: number): MascotFrame[] {
 	return [...repeat("default", 0, Math.round(delayMs / FRAME_MS)), ...frames];
 }
 
 export type Glyphs = "octant" | "halfblock";
 
-/** Octants everywhere except terminals known to lack them (Claude Code branches on Apple Terminal too). */
+/** Octants everywhere except terminals known to lack them. */
 export function mascotGlyphs(env: NodeJS.ProcessEnv = process.env): Glyphs {
 	return env.TERM_PROGRAM === "Apple_Terminal" || env.TERM === "linux" ? "halfblock" : "octant";
 }
@@ -365,7 +358,7 @@ export function renderMascot(frame: MascotFrame, glyphs: Glyphs, dim: (text: str
 		lines.push(line);
 	}
 	if (frame.poof && frame.offset > 0) {
-		// Claude Code puffs the dust at both edges of the bottom row, over the crouched arms.
+		// Dust at both edges of the bottom row, over the crouched arms.
 		const last = lines.length - 1;
 		const cells = splitCells(lines[last]!);
 		const dust = dim(frame.poof === "dot" ? "·" : "~");

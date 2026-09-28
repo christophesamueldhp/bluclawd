@@ -1,13 +1,9 @@
 /**
- * Memory core extension (Claude Code cross-session memory parity — PLAN.md F1.4,
- * per-project auto-memory added per CC-PARITY-AUDIT B.2).
- *
- * Two scopes, mirroring Claude Code:
+ * Memory core extension: cross-session memory in two scopes.
  * - GLOBAL:  `<agentDir>/memory/MEMORY.md` — facts that apply everywhere.
  * - PROJECT: `<agentDir>/projects/<slug>/memory/MEMORY.md` — per-repository
  *   auto-memory (slug derived from the session cwd). This is the DEFAULT scope
- *   for both the `memory` tool and the `# <text>` shorthand, matching CC's
- *   project-scoped auto memory.
+ *   for both the `memory` tool and the `# <text>` shorthand.
  *
  * - `memory` tool: `{fact, scope?}` appends `- <fact>` as a new line (scope
  *   defaults to "project"). The tool description instructs the model to convert
@@ -16,7 +12,7 @@
  *   message swallowed (not sent to the LLM). A bare `"#"` opens the editor for a
  *   multi-line note.
  * - `before_agent_start`: injects global then project memory into the system
- *   prompt, each capped at 200 lines / 25KB (CC's injection budget) with a
+ *   prompt, each capped at 200 lines / 25KB with a
  *   truncation note pointing at /memory.
  * - `/memory` command: shows both files with their paths, `/memory edit [scope]`
  *   opens one in the editor (this is also how a line gets deleted), and
@@ -45,13 +41,13 @@ interface MemoryData {
 
 const HEADER = "# Memory\n";
 
-/** Injection budget per scope (Claude Code parity: first 200 lines / 25KB). */
+/** Injection budget per scope. */
 const INJECT_MAX_LINES = 200;
 const INJECT_MAX_BYTES = 25 * 1024;
 
 export type MemoryScope = "global" | "project";
 
-/** Filesystem-safe slug for a project cwd (CC-style path flattening). */
+/** Filesystem-safe slug for a project cwd. */
 export function projectSlug(cwd: string): string {
 	return cwd.replace(/[^A-Za-z0-9_-]/g, "-");
 }
@@ -67,10 +63,8 @@ function memoryPath(scope: MemoryScope, cwd: string): string {
 function ensureMemoryFile(path: string): void {
 	if (existsSync(path)) return;
 	mkdirSync(dirname(path), { recursive: true });
-	// Exclusive create ("wx") so two concurrent processes racing the first-ever
-	// write can't truncate each other's content — a plain "w" would truncate.
-	// Established idiom (see session-manager.ts). Subsequent appendFileSync
-	// O_APPEND writes are already atomic, so only the header-create needs this.
+	// Exclusive create ("wx") so two processes racing the first-ever write can't
+	// truncate each other's content; later O_APPEND writes are already atomic.
 	try {
 		writeFileSync(path, HEADER, { flag: "wx" });
 	} catch (err) {
@@ -235,17 +229,13 @@ export function factory(pi: ExtensionAPI): void {
 		},
 	});
 
-	// "# <text>" shorthand: capture a single-line quick note into PROJECT memory
-	// and swallow it (don't send to the LLM). Guarded to single-line only: a
-	// multi-line paste (e.g. a markdown doc that happens to start with "# ")
-	// passes through untouched, so it reaches the LLM instead of being silently
-	// eaten as one malformed bullet. A bare "# " with no fact is also a
-	// passthrough (no empty bullet).
+	// "# <text>" saves a single-line note to project memory without sending it to
+	// the model. Single-line only: a multi-line paste starting with "# " (e.g. a
+	// markdown doc) must reach the model, not be eaten as one malformed bullet.
 	pi.on("input", async (event, ctx) => {
-		// A bare "#" opens the editor instead, which is how a multi-line note gets in:
-		// the single-line guard below cannot be relaxed, because the `input` event
-		// cannot tell a typed newline from a pasted document, and a paste starting
-		// with "# " would then be eaten as a note instead of reaching the model.
+		// A bare "#" opens the editor for a multi-line note. The single-line guard
+		// below can't be relaxed instead: the `input` event cannot tell a typed
+		// newline from a pasted document.
 		if (event.text.trim() === "#" && ctx.hasUI) {
 			const note = await ctx.ui.editor("New memory note (project)");
 			if (note?.trim()) {
@@ -264,8 +254,6 @@ export function factory(pi: ExtensionAPI): void {
 		return { action: "handled" };
 	});
 
-	// Inject persisted memory into the system prompt: global first (broadest),
-	// then this project's auto-memory. Each capped at the CC injection budget.
 	pi.on("before_agent_start", async (event, ctx) => {
 		// Expand `@name.md` pointers before capping, so the budget is measured against
 		// what the model will actually see rather than the one-line pointer.

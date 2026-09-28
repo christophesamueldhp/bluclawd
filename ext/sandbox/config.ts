@@ -24,9 +24,8 @@ export interface SandboxConfig extends SandboxSettings {
 }
 
 /**
- * Claude Code's defaults. No domain is pre-allowed: the first connection to a
- * host prompts (see the ask callback in index.ts). Writes: the working directory,
- * plus the session temp dir (index.ts). Reads: everything; like Claude Code, no
+ * No domain is pre-allowed: the first connection to a host prompts (index.ts).
+ * Writes: the working directory plus the session temp dir. Reads: everything; no
  * credential is blocked by default — which files are secret is the permission
  * layer's call, and `denyRead` / `credentials` are there to add OS-level blocks.
  */
@@ -52,8 +51,7 @@ export const DEFAULT_SANDBOX_CONFIG: SandboxConfig = {
  * hooks and MCP servers run commands, and the resource dirs hold extensions,
  * skills, agents and prompts it executes or obeys. A sandboxed command that could
  * write these could grant itself permissions. Everything else in the dir, such as
- * `worktrees/` where subagents work, stays writable, as `.claude/worktrees` does
- * in Claude Code.
+ * `worktrees/`, stays writable.
  */
 const CONFIG_DIR_ENTRIES = [
 	"settings.json",
@@ -76,7 +74,7 @@ const CONFIG_DIR_ENTRIES = [
 export interface SandboxContext {
 	cwd: string;
 	agentDir: string;
-	/** The session's permission rules, which Claude Code folds into the sandbox lists. */
+	/** The session's permission rules, folded into the sandbox lists. */
 	rules?: Rules;
 	/** The repository's shared `.git` when `cwd` is a linked worktree. */
 	gitCommonDir?: string;
@@ -84,7 +82,7 @@ export interface SandboxContext {
 
 /**
  * Writes the sandbox denies inside its writable directories, whatever the settings
- * say (Claude Code's protected paths; no allowWrite entry lifts them). Each entry is
+ * say (no allowWrite entry lifts them). Each entry is
  * given both as a glob, which macOS applies at any depth, and as a concrete path,
  * because the Linux runtime skips glob write entries altogether. The runtime adds
  * its own set on top: shell startup files, `.gitconfig`, `.mcp.json`, `.vscode`,
@@ -118,7 +116,7 @@ function isDirectory(path: string): boolean {
 
 /** A rule path in the sandbox's spelling: permission rules resolve relative paths against the working directory. */
 function rulePath(path: string, cwd: string): string {
-	// Claude Code's `//abs` spelling, as the permission engine reads it.
+	// `//abs` is an absolute path, as the permission engine reads it.
 	if (path.startsWith("//")) return path.slice(1);
 	return isAbsolute(path) || path.startsWith("~") ? path : join(cwd, path);
 }
@@ -134,7 +132,7 @@ function sandboxDomain(domain: string): string | undefined {
 }
 
 /**
- * The paths and domains Claude Code adds from permission rules: `Edit` allow and deny
+ * The paths and domains added from permission rules: `Edit` allow and deny
  * rules to the write lists, `Read` deny rules to `denyRead`, `WebFetch(domain:...)`
  * allow and deny rules to the domain lists. bluclawd's `Write` verb counts as `Edit`.
  * A rule with no argument names no path and adds nothing.
@@ -206,10 +204,8 @@ export function resolveSandboxConfig(
 				fromRules.deniedDomains,
 			),
 		},
-		// Lists ADD to the built-ins, as Claude Code merges them across scopes. Plain
-		// spread meant that naming a single pattern of your own silently dropped every
-		// default protection — including the agent-config and git-hooks entries above,
-		// which exist precisely to be hard to lose.
+		// Lists ADD to the built-ins: a plain spread would let one pattern of your own
+		// silently drop every default protection, including the protected write paths.
 		filesystem: {
 			...d.filesystem,
 			...settings?.filesystem,
@@ -234,8 +230,8 @@ export function resolveSandboxConfig(
 /**
  * A config re-read from disk mid-session, with what the session decided kept: whether
  * the sandbox is on, the /sandbox panel's mode and override (which an untrusted project
- * holds for the session only), and hosts allowed so far. Claude Code applies settings
- * edits to the lists, not to these.
+ * holds for the session only), and hosts allowed so far. Settings edits apply to the
+ * lists, not to these.
  */
 export function withSessionChoices(next: SandboxConfig, current: SandboxConfig): SandboxConfig {
 	return {
@@ -267,7 +263,7 @@ export function runtimeConfig(config: SandboxConfig): SandboxRuntimeConfig {
 /**
  * Does `excludedCommands` take this command out of the sandbox? Each entry is the
  * content of a `Bash(...)` rule, and a match on ANY part of a compound command
- * excludes the whole command (Claude Code's rule) — exactly a deny rule's reach,
+ * excludes the whole command — exactly a deny rule's reach,
  * so the deny matcher is the matcher.
  */
 export function isExcludedCommand(command: string, excludedCommands: string[]): boolean {
@@ -279,13 +275,9 @@ export function isExcludedCommand(command: string, excludedCommands: string[]): 
  * Why bash must refuse, or undefined when it may run.
  *
  * Under `sandbox.failIfUnavailable`, a sandbox that was asked for but did not start
- * makes bash refuse rather than run unconfined. The default is still the unsandboxed
- * fallback, because that is what a missing bubblewrap on a Linux box has always done
- * and silently breaking those sessions would be worse than the risk. But "enabled" and
- * "actually confining anything" are different states, and a status chip is the wrong
- * place to learn which one you are in — someone who set `enabled: true` to contain a
- * command has no reason to expect it to run anyway. `failIfUnavailable` makes the two
- * states agree.
+ * makes bash refuse rather than run unconfined. The default stays the unsandboxed
+ * fallback so a missing bubblewrap does not break sessions; `failIfUnavailable` makes
+ * "enabled" and "actually confining" agree.
  */
 export function strictRefusalReason(
 	config: Pick<SandboxConfig, "enabled" | "failIfUnavailable">,

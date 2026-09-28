@@ -1,8 +1,7 @@
 /**
- * The interactive `/tasks` dialog, laid out as Claude Code's "Background" dialog:
- * shells, monitors and subagent runs of this session in sections, a detail view
- * with the tail of the output file, and stop. Rows are re-read on every render,
- * so the dialog stays live while it is open.
+ * The interactive `/tasks` dialog: shells, monitors and subagent runs of this
+ * session in sections, a detail view with the tail of the output file, and stop.
+ * Rows are re-read on every render, so the dialog stays live while it is open.
  */
 
 import { closeSync, openSync, readSync, statSync } from "node:fs";
@@ -13,11 +12,11 @@ import { stripAnsi } from "../_shared/ansi.ts";
 import { type BackgroundJobInfo, backgroundBashJobs, jobOutcome } from "../_shared/background-bash.ts";
 import { formatClaudeDuration } from "../_shared/bash-limits.ts";
 
-/** Claude Code's detail view: the last 10 lines of the file's last 8 KiB. */
+/** The detail view shows the last 10 lines of the file's last 8 KiB. */
 const DETAIL_TAIL_BYTES = 8192;
 const DETAIL_TAIL_LINES = 10;
 const MAX_COMMAND_CHARS = 280;
-/** Claude Code's suggestion colour, for the selected row. */
+/** The selected row's colour. */
 const SUGGESTION = (text: string) => `\x1b[38;2;177;185;249m${text}\x1b[39m`;
 
 export type TaskKind = "shell" | "monitor" | "agent";
@@ -35,14 +34,14 @@ export interface TaskRow {
 
 /** Every task of the session `owner`, newest first. */
 export function taskRows(owner: string | undefined): TaskRow[] {
-	// A subagent's shells are listed too, as Claude Code lists them.
+	// A subagent's shells are listed too.
 	const jobs = backgroundBashJobs
 		.list()
 		.filter((job) => owner === undefined || job.owner === owner || job.agentId !== undefined);
 	const shells: TaskRow[] = jobs.map((job) => ({
 		id: job.id,
 		kind: job.kind === "monitor" ? "monitor" : "shell",
-		// A shell shows its command, a monitor its description (Claude Code).
+		// A shell shows its command, a monitor its description.
 		label: job.kind === "monitor" ? job.description?.trim() || job.command : job.command,
 		state: jobOutcome(job).state,
 		startedAt: job.startedAt,
@@ -102,17 +101,17 @@ export function outputTail(job: BackgroundJobInfo): { lines: string[]; size: num
 	return { lines: lines.slice(-DETAIL_TAIL_LINES), size, read };
 }
 
-/** Stops a task as the user: the model is told, as Claude Code tells it. */
+/** Stops a task as the user; the model is told. */
 export function stopTask(row: TaskRow): void {
 	if (row.kind === "agent") agentTasks()?.stop(row.id);
 	else backgroundBashJobs.kill(row.id, { byUser: true });
 }
 
-/** Claude Code's `background` colour (dark theme): the dialog's title and a running status. */
+/** The dialog's title and a running status. */
 const BACKGROUND = (text: string) => `\x1b[38;2;0;204;204m${text}\x1b[39m`;
 const ITALIC = (text: string) => `\x1b[3m${text}\x1b[23m`;
 
-/** A row's status, dim and coloured by outcome (`fc`); only running tasks are listed. */
+/** A row's status, dim and coloured by outcome; only running tasks are listed. */
 const STATUS_COLOR: Record<TaskState, "success" | "error" | "warning" | undefined> = {
 	running: undefined,
 	completed: "success",
@@ -126,7 +125,7 @@ const STATUS_LABEL: Record<TaskState, string> = {
 	killed: "stopped",
 };
 
-/** Claude Code's sections, in its order: a shell's section holds its command monitors too. */
+/** Sections, in display order: a shell's section holds its command monitors too. */
 type Section = "shells" | "monitors" | "agents";
 const SECTIONS: [Section, string][] = [
 	["shells", "Shells"],
@@ -139,10 +138,10 @@ function sectionOf(row: TaskRow): Section {
 	return row.id.startsWith("s") ? "monitors" : "shells";
 }
 
-/** A WebSocket monitor has no detail view in Claude Code (`OA`). */
+/** A WebSocket monitor has no detail view. */
 const hasDetail = (row: TaskRow) => sectionOf(row) !== "monitors";
 
-/** The tasks the dialog lists: running ones only (Claude Code's `rm`), running first then newest. */
+/** The tasks the dialog lists: running ones only, running first then newest. */
 function visibleRows(owner: string | undefined): TaskRow[] {
 	const rows = taskRows(owner).filter((row) => row.state === "running");
 	return SECTIONS.flatMap(([section]) => rows.filter((row) => sectionOf(row) === section));
@@ -173,7 +172,7 @@ export class TasksDialog implements Component {
 		this.requestRender = requestRender;
 		this.notify = options.notify ?? (() => {});
 		this.held = options.held ?? (() => undefined);
-		// With one task to show, Claude Code opens straight to it.
+		// With one task to show, open straight to it.
 		const rows = visibleRows(owner);
 		if (rows.length === 1 && hasDetail(rows[0])) {
 			this.detail = rows[0].id;
@@ -229,8 +228,8 @@ export class TasksDialog implements Component {
 		if (this.detail !== undefined) {
 			const row = rows.find((r) => r.id === this.detail);
 			if (row) return [border, ...this.renderDetail(row, width), ...this.heldLine(), border];
-			// The task ended while it was on screen: Claude Code goes back to the list, or
-			// closes a dialog that was opened straight to it.
+			// The task ended while on screen: back to the list, or close a dialog that was
+			// opened straight to it.
 			const direct = this.direct;
 			this.leaveDetail(rows);
 			if (direct && rows.length <= 1) return [];
@@ -256,7 +255,7 @@ export class TasksDialog implements Component {
 			for (const [section, title] of SECTIONS) {
 				const items = rows.filter((r) => sectionOf(r) === section);
 				if (items.length === 0) continue;
-				// The Shells header only when the list holds agents too (Claude Code).
+				// The Shells header only when the list holds agents too.
 				if (section !== "shells" || agents > 0) out.push(t.fg("dim", `  ${t.bold(title)} (${items.length})`));
 				for (const row of items) {
 					const selected = index++ === this.selected;
@@ -283,7 +282,7 @@ export class TasksDialog implements Component {
 		return out;
 	}
 
-	/** Claude Code's line for notifications held while the panel is open. */
+	/** The line for notifications held while the panel is open. */
 	private heldLine(): string[] {
 		const line = this.held();
 		return line ? [this.theme.fg("dim", ` ${line}`)] : [];
@@ -311,7 +310,7 @@ export class TasksDialog implements Component {
 			const { lines, size, read } = outputTail(row.job);
 			const inner = Math.max(10, width - 4);
 			out.push(t.fg("borderMuted", ` ╭${"─".repeat(inner)}╮`));
-			// A fixed 12 rows, borders included, as Claude Code's box.
+			// A fixed 12 rows, borders included.
 			const body = lines.length > 0 ? lines : [t.fg("dim", "No output available")];
 			for (let i = 0; i < DETAIL_TAIL_LINES; i++) {
 				const text = truncateToWidth(body[i] ?? "", inner - 2, "…");

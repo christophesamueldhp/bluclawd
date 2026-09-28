@@ -1,8 +1,7 @@
 /**
- * Claude Code holds background-task updates while its tasks panel is open and
- * delivers them when it closes (2.1.278), so a notification cannot start a turn
- * under the user's hands. The panel lives in background-bash and the senders in
- * sandbox and subagents, separate module graphs, so the hold is a sharedRef.
+ * Background-task updates are held while the tasks panel is open and delivered
+ * when it closes, so a notification cannot start a turn under the user's hands.
+ * The panel and the senders live in separate module graphs, so the hold is a sharedRef.
  */
 
 import { sharedRef } from "./global-state.ts";
@@ -59,7 +58,6 @@ export function subscribeNotificationHold(listener: () => void): () => void {
 	return () => state.listeners.delete(listener);
 }
 
-/** Claude Code's line for updates waiting behind the panel. */
 export function heldNotificationsLine(count: number): string | undefined {
 	if (count === 0) return undefined;
 	return count === 1

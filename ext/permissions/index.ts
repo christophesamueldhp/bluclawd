@@ -1,25 +1,16 @@
 /**
- * Permissions core extension (PLAN.md F2.1).
+ * Permissions extension: governs every `tool_call` against a `Verb(glob)` rule set
+ * (rules.ts) with deny > ask > allow precedence, layered under a session permission
+ * mode (modes.ts).
  *
- * Governs every `tool_call` against a `Verb(glob)` rule set (rules.ts) with a
- * deny > ask > allow precedence, layered under a session permission mode
- * (modes.ts): ask / edits / auto.
+ * Registered FIRST so it sees `tool_call` before any other extension.
  *
- * Registration order matters: this extension is registered FIRST in
- * coreExtensions() so it sees `tool_call` before any other extension.
+ * Project settings are read trust-aware: an untrusted repo's settings must not inject
+ * allow rules. "Don't ask again" writes project settings only when trusted; otherwise
+ * the grant lasts the session.
  *
- * Trap 3 (security): project settings are read TRUST-AWARE — an untrusted repo's
- * `.bluclawd/settings.json` must not be able to inject allow rules that defeat the
- * safety layer. "Don't ask again" writes the project's settings only when it is
- * trusted; otherwise the grant lasts the session.
- *
- * Performance: rules are loaded once per session_start into a closure variable —
- * the awaited `tool_call` path does no blocking I/O. "Don't ask again" updates the
- * in-closure rules immediately (so it takes effect at once) in addition to the
- * async disk writeback.
- *
- * Idempotent factory: the body only registers handlers/commands/shortcuts. All
- * state lives in this closure.
+ * Rules are loaded once per session_start so the awaited `tool_call` path does no
+ * blocking I/O.
  */
 
 import { homedir } from "node:os";
@@ -107,7 +98,7 @@ const GATE_TEXT: Record<Gate, string> = {
 	"no-matching-rule": "no rule matched, so the mode asked",
 };
 
-/** A rule some gate reads: a governed verb and a non-empty subject, or Claude Code's `mcp__server[__tool]`. */
+/** A rule some gate reads: a governed verb and a non-empty subject, or `mcp__server[__tool]`. */
 function isRule(spec: string): boolean {
 	return (/\(.+\)$/.test(spec) || spec.startsWith("mcp__")) && parseRuleSpec(spec) !== undefined;
 }
@@ -115,29 +106,16 @@ function isRule(spec: string): boolean {
 /** How many recent decisions `/permissions why` keeps. */
 const DECISION_LOG_SIZE = 20;
 
-/** Claude Code's `autoAccept` badge colour (2.1.282 dark): rgb(175,135,255). */
 const CC_AUTO_ACCEPT = "\x1b[38;2;175;135;255m";
-/** Claude Code's `warning` colour, which its auto-mode badge uses (2.1.282 dark): rgb(255,193,7). */
 const CC_WARNING = "\x1b[38;2;255;193;7m";
 
 /**
- * Footer chip for a mode, in Claude Code's own badge colours (extracted from the
- * 2.1.282 binary's dark theme): edits=#af87ff, auto=#ffc107 amber, ask=gray. The wording follows this layer's own mode names, not CC's labels.
- *
- * Two things this gets right that the previous version did not:
- *
- * - `edits` (Claude Code's accept-edits) is PURPLE, not green. pi's theme has no token for it, so
- *   `success` was the stand-in — and green is the one colour that reads as the
- *   opposite of what the badge means. It is painted with a raw truecolor escape
- *   instead. A 256-colour terminal would not downconvert the escape, so that
- *   case keeps the theme token. `auto` is painted the same way: pi's `warning`
- *   is a different yellow in every theme but bluclawd's.
- * - `ask` carries `⏸`: it is the manual mode, and `⏸` is the badge the manual
- *   (non-auto-accept) modes share.
+ * Footer chip for a mode: edits purple, auto amber, ask gray. pi's theme has no token
+ * for the first two, so they are raw truecolor escapes; other colour modes fall back to
+ * theme tokens, since the escape would not be downconverted.
  */
 export function modeStatusText(ctx: ExtensionContext, mode: PermissionMode): string | undefined {
 	const badge = modeBadge(ctx, mode);
-	// Claude Code names its cycle key after the badge; ours is Alt+M (see the shortcut below).
 	return badge && `${badge} ${ctx.ui.theme.fg("dim", "(alt+m to cycle)")}`;
 }
 
@@ -158,7 +136,7 @@ function modeBadge(ctx: ExtensionContext, mode: PermissionMode): string | undefi
 }
 
 export function factory(pi: ExtensionAPI): void {
-	// CC headless-interop flags (audit B.6). Values are read in session_start.
+	// Values are read in session_start.
 	pi.registerFlag("permission-mode", {
 		description: `Start sessions in a permission mode: ${PERMISSION_MODES.join("|")}`,
 		type: "string",
@@ -180,15 +158,11 @@ export function factory(pi: ExtensionAPI): void {
 	// Rule set for the current session, loaded on session_start (trust-aware) and
 	// updated in place by "don't ask again". Empty until the first session_start.
 	let rules: Rules = {};
-	// --allowedTools grants, kept SEPARATE from `rules`: the engine's ask > allow
-	// precedence would let any settings ask rule shadow a merged allow glob, but the
-	// flag's intent is an explicit per-invocation grant — honored in the ask and
-	// auto gates below (deny and protected paths still win).
+	// --allowedTools grants, kept SEPARATE from `rules`: merged in, any settings ask
+	// rule would shadow them by precedence. Deny rules and protected paths still win.
 	let cliAllowRules: Rules = {};
-	// What the session layers over settings — the FleetView ask-all posture and
-	// --disallowedTools. Kept apart so every reload of settings re-applies it:
-	// `/permissions add` used to reload settings alone and silently drop both.
-	// Its allow list holds the grants that last only this session.
+	// What the session layers over settings (PI_PERMISSION_MODE=ask, --disallowedTools,
+	// session-only grants). Kept apart so every settings reload re-applies it.
 	let sessionRules: Rules = {};
 	// The latest gated calls, newest last, for `/permissions why`.
 	let decisions: DecisionRecord[] = [];
@@ -214,12 +188,7 @@ export function factory(pi: ExtensionAPI): void {
 
 	const currentMode = (): PermissionMode => modeStore?.get() ?? "ask";
 
-	/**
-	 * Say why a mode was refused. Project trust is pi's own gate — it already withholds
-	 * this repository's settings, extensions and skills — so a mode that auto-approves
-	 * edits or skips prompts is exactly what it should also withhold. `/trust` is the
-	 * way out, so the message names it rather than leaving the refusal unexplained.
-	 */
+	/** Say why a mode was refused, naming `/trust` as the way out. */
 	function reportUntrustedRefusal(ctx: ExtensionContext, mode: PermissionMode): void {
 		ctx.ui.notify(
 			`This project is not trusted, so it stays in ${SAFEST_MODE} mode — ${mode} was refused. Run /trust to change that.`,
@@ -247,10 +216,8 @@ export function factory(pi: ExtensionAPI): void {
 	}
 
 	function applySettingsDefaultMode(ctx: ExtensionContext): void {
-		// Product default: a trusted session starts in DEFAULT_MODE unless settings say
-		// otherwise. An untrusted project just stays clamped at SAFEST_MODE (the store's
-		// own construction-time value) — that's the ordinary clamp, not a refused
-		// request, so it does not warn.
+		// An untrusted project silently stays at SAFEST_MODE: the ordinary clamp, not a
+		// refused request, so no warning.
 		modeStore?.set(DEFAULT_MODE);
 
 		let configured: string | undefined;
@@ -312,37 +279,23 @@ export function factory(pi: ExtensionAPI): void {
 		liveCtx = ctx;
 		// Dispose any prior store first so resume/new/fork re-runs stay idempotent.
 		modeStore?.dispose();
-		// Trust is read through a live callback, not captured: pi resolves it during
-		// startup and `/trust` can grant it mid-session, so a snapshot would strand the
-		// session in the clamped mode for good.
 		modeStore = createModeStore(onModeChanged, () => ctx.isProjectTrusted());
-		// Starting mode: DEFAULT_MODE unless permissions.defaultMode overrides it.
-		// GLOBAL settings only — a trusted project may contribute allow rules, but
-		// letting it name the mode would let any repo ship `defaultMode: "auto"`
-		// and switch the whole safety layer off. CLI flags below still override this.
+		// permissions.defaultMode is read from GLOBAL settings only: a repo that could name
+		// the mode could ship `defaultMode: "auto"` and switch the safety layer off.
 		applySettingsDefaultMode(ctx);
 		sessionRules = {};
 		decisions = [];
-		// PI_PERMISSION_MODE=ask (set by the FleetView orchestrator for spawned background
-		// sessions) makes the agent ask before every governed tool, so it surfaces a blocking
-		// prompt an attach viewer can answer. Rules-based so it never touches the mode union.
-		// Derived from governedVerbs() so it always covers exactly what decide() can gate — a
-		// hand-kept list would silently miss any verb added to governance later. Since audit
-		// B.5 this includes Mcp, so MCP tools prompt too.
+		// PI_PERMISSION_MODE=ask makes the agent ask before every governed tool, so a
+		// spawned background session surfaces a prompt a viewer can answer.
 		if (process.env.PI_PERMISSION_MODE === "ask") {
 			sessionRules.ask = governedVerbs().map((verb) => `${verb}(**)`);
 		}
-		// CC headless interop (audit B.6): --disallowedTools merges into the deny
-		// list (deny > ask > allow, so it wins in every mode);
-		// --allowedTools populates the separate cliAllowRules grant set.
 		const denyFlag = pi.getFlag("disallowedTools");
 		if (typeof denyFlag === "string" && denyFlag) sessionRules.deny = parseToolRuleFlag(denyFlag);
 		reloadRules(ctx);
 		const allowFlag = pi.getFlag("allowedTools");
 		cliAllowRules = typeof allowFlag === "string" && allowFlag ? { allow: parseToolRuleFlag(allowFlag) } : {};
-		// Initial mode from the CLI: --dangerously-skip-permissions (CC alias) wins
-		// over --permission-mode. Sets the *initial* mode only — Alt+M and /mode
-		// still switch freely afterwards.
+		// --dangerously-skip-permissions wins over --permission-mode.
 		const modeFlag = pi.getFlag("dangerously-skip-permissions") === true ? "auto" : pi.getFlag("permission-mode");
 		if (typeof modeFlag === "string" && modeFlag) {
 			const parsedFlag = parseMode(modeFlag);
@@ -424,7 +377,7 @@ export function factory(pi: ExtensionAPI): void {
 		for (const rule of add) await addProjectRule(ctx.cwd, "allow", rule, ctx.isProjectTrusted());
 	}
 
-	/** The prompt's title, laid out as Claude Code's: what runs, then the question. */
+	/** The prompt's title: what runs, then the question. */
 	function promptTitle(tool: string, input: Record<string, unknown>, verdict: Verdict): string {
 		const heading =
 			verdict.gate === "read-protected-path" || verdict.gate === "write-protected-path"
@@ -445,9 +398,8 @@ export function factory(pi: ExtensionAPI): void {
 	}
 
 	/**
-	 * The permission prompt, Claude Code's rows: Yes / what "yes" can also mean from now
-	 * on / No, with a note to the model typed on `No`. Any failure fails CLOSED — an
-	 * unanswered prompt is a "No".
+	 * The permission prompt: Yes / what "yes" can also mean from now on / No, with a note
+	 * to the model typed on `No`. Any failure fails CLOSED.
 	 */
 	async function askProceed(
 		title: string,
@@ -457,9 +409,8 @@ export function factory(pi: ExtensionAPI): void {
 		let choice: string | undefined;
 		try {
 			const rows = ["Yes", ...(standing ? [standing.label] : [])];
-			// Claude Code's own dialog where a terminal can draw it; `undefined` means this
-			// UI cannot (pi's RPC mode, FleetView's background sessions), so fall back to a
-			// plain list there rather than deny unseen.
+			// `undefined` means this UI cannot draw the dialog (pi's RPC mode), so fall
+			// back to a plain list rather than deny unseen.
 			const drawn = await ctx.ui.custom?.<ProceedAnswer | undefined>((tui, theme, _keybindings, done) => {
 				const view = new ProceedPrompt(title, rows, theme, done);
 				return {
@@ -497,11 +448,7 @@ export function factory(pi: ExtensionAPI): void {
 		return { block: true, reason: note ? `${reason} The user says: ${note}` : reason };
 	}
 
-	/**
-	 * The gate. Decision logic lives in evaluate.ts as a pure function of the inputs
-	 * gathered here; this handler owns only the I/O a verdict calls for — prompting,
-	 * persisting a "don't ask again".
-	 */
+	/** The gate. Decisions live in evaluate.ts; this handler owns only the prompting and persisting. */
 	pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
 		liveCtx = ctx;
 		const tool = event.toolName;
@@ -556,11 +503,9 @@ export function factory(pi: ExtensionAPI): void {
 		const before = modeStore.get();
 		const next = modeStore.cycle();
 		refreshStatus();
-		// An untrusted project pins the mode, so the cycle is a no-op. Saying "Permission
-		// mode: ask" again would read as a stuck key rather than a refusal.
+		// An untrusted project pins the mode; report the refusal, naming the mode the
+		// cycle aimed at rather than the one still in effect.
 		if (next === before && !ctx.isProjectTrusted()) {
-			// Name the mode the cycle AIMED at, not the one still in effect — "ask was
-			// refused" while sitting in ask reads as nonsense.
 			reportUntrustedRefusal(ctx, nextInCycle(before));
 			return;
 		}
@@ -592,9 +537,6 @@ export function factory(pi: ExtensionAPI): void {
 				applyNamedMode(ctx, mode);
 				return;
 			}
-			// A bare `/mode` opens a picker, the way pi's own `/model`, `/theme` and
-			// `/thinking` do — cycling blind never showed what the other options were, or
-			// what they mean. Alt+M is still the fast path.
 			if (!ctx.hasUI) {
 				await cycleAndReport(ctx);
 				return;
@@ -613,19 +555,15 @@ export function factory(pi: ExtensionAPI): void {
 		},
 	});
 
-	// Claude Code cycles permission modes on Shift+Tab, and the fork branch got that
-	// by rebinding pi's own `app.thinking.cycle` default away from it. An extension
-	// cannot rebind a built-in — pi refuses the registration and logs a conflict — so
-	// this layer takes Alt+M instead and leaves Shift+Tab to pi. `/mode` is unaffected.
+	// Not Shift+Tab: that is pi's built-in thinking cycle, which an extension cannot rebind.
 	pi.registerShortcut(Key.alt("m"), {
 		description: "Cycle permission mode",
 		handler: async (ctx) => cycleAndReport(ctx),
 	});
 
 	/**
-	 * One rule list with where each rule was set. Settings files first, then what this
-	 * session layers on top — flags, the FleetView posture, session-only grants —
-	 * which no settings file shows.
+	 * One rule list with where each rule was set: settings files first, then what this
+	 * session layers on top, which no settings file shows.
 	 */
 	function sourcedRules(sm: SettingsManager, list: "deny" | "ask" | "allow"): SourcedRule[] {
 		const listOf = (settings: unknown): string[] => (settings as { permissions?: Rules }).permissions?.[list] ?? [];
@@ -685,8 +623,6 @@ export function factory(pi: ExtensionAPI): void {
 				),
 			);
 		} else {
-			// deny/ask/allow keep their precedence order and take the colour that says
-			// which way each list pushes — the flat string could only indent them.
 			const colour = { deny: "error", ask: "warning", allow: "success" } as const;
 			for (const { list, rules } of data.lists ?? []) {
 				lines.push("");
@@ -736,12 +672,8 @@ export function factory(pi: ExtensionAPI): void {
 			const parts = trimmed.split(/\s+/);
 			const verb = parts[0];
 
-			// /permissions test <Verb(subject)> — which rules match this call, and what the
-			// rule engine decides. Deliberately narrow: it reports the RULE decision and the
-			// matching rules, NOT a prediction of the final outcome. The full outcome also
-			// depends on the mode, protected paths, the read-only allowlist, the sandbox and
-			// the real filesystem — a confident "allow" here that turned into a
-			// prompt in the real call would be worse than no feature at all.
+			// /permissions test reports the RULE decision only, not a prediction of the final
+			// outcome: a confident "allow" that turns into a prompt would mislead.
 			if (verb === "test") {
 				const spec = parts.slice(1).join(" ");
 				const parsed = parseRuleSpec(spec);

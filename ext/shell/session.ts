@@ -10,9 +10,9 @@
  * found anywhere in a line, because a command whose output lacks a trailing
  * newline (`printf foo`) puts it mid-line.
  *
- * Like `!`, this runs outside the sandbox (Claude Code parity: the sandbox
- * confines what the model runs, not what the user types). The shell reads no rc
- * file, so aliases come from what the user defines in the session.
+ * Like `!`, this runs outside the sandbox: the sandbox confines what the model
+ * runs, not what the user types. The shell reads no rc file, so aliases come
+ * from what the user defines in the session.
  *
  * Adapted from pi-powerline-footer's bash-mode shell session (MIT, Nico Bailon).
  */

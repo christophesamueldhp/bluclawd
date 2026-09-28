@@ -1,5 +1,5 @@
 /**
- * `webfetch` implementation (PLAN.md F4.2): fetch a URL and return it as text /
+ * `webfetch` implementation: fetch a URL and return it as text /
  * Markdown for the model, with an SSRF guard.
  *
  * A coding agent follows model instructions, so `webfetch` is prompt-injectable:
@@ -11,7 +11,7 @@
  *   2. A DNS guard on the original request AND every redirect hop. Redirects are
  *      always followed manually (`fetchGuardedRedirects`) with `assertAllowedUrl`
  *      + an all-addresses DNS validation per hop, and a hop to a DIFFERENT host
- *      is reported back to the model rather than followed (Claude Code parity):
+ *      is reported back to the model rather than followed:
  *      a `WebFetch(domain:…)` rule approved one host, and a 302 must not be able
  *      to turn that into a fetch of any other.
  *      - Node additionally routes every hop through a per-request undici
@@ -56,7 +56,7 @@ const DEFAULT_MAX_BYTES = 2_000_000;
 // arbitrarily large body into the parent context.
 const MAX_ALLOWED_BYTES = 8_000_000;
 const TIMEOUT_MS = 30_000;
-/** Below this much text, an HTML page probably needed JavaScript (pi-web-access's floor). */
+/** Below this much text, an HTML page probably needed JavaScript. */
 const THIN_PAGE_CHARS = 500;
 
 export interface WebfetchResult {
@@ -103,7 +103,7 @@ function inlineOrSpill(text: string): { text: string; fullTextPath?: string; not
 	};
 }
 
-// ── 15-minute result cache (CC parity, audit B.9) ───────────────────────────
+// ── 15-minute result cache ──────────────────────────────────────────────────
 // Process-local and keyed by URL+byte cap; only successful text results are
 // cached (binary notes and errors are not). Bounded so a long session cannot
 // accumulate page bodies without limit.

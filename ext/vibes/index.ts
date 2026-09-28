@@ -1,7 +1,6 @@
 /**
- * Vibes extension: each agent turn shows one of Claude Code's spinner verbs
- * ("Pondering...", "Clauding...") in place of "Working...". Always on, nothing
- * to configure, no model calls.
+ * Vibes extension: each agent turn shows a spinner verb ("Pondering...") in
+ * place of "Working...". Always on, nothing to configure, no model calls.
  */
 import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { pickVibe, SPINNER_VERBS } from "./vibes.ts";

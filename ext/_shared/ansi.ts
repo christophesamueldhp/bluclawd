@@ -1,7 +1,5 @@
 /*
- * Vendored verbatim from pi's utils/ansi.ts — not part of pi's public package
- * export, and small/stable enough to copy rather than reach into
- * packages/coding-agent/src for.
+ * Vendored from pi's utils/ansi.ts, which pi does not export.
  *
  * Portions of this file are derived from:
  * - ansi-regex (https://github.com/chalk/ansi-regex)

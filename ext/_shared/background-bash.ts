@@ -1,5 +1,5 @@
 /**
- * Background bash jobs (Claude Code `run_in_background` parity — CC-PARITY-AUDIT B.1).
+ * Background bash jobs (`run_in_background`).
  *
  * The registry is a process-wide singleton (shared across extension module
  * graphs via sharedRef): jobs belong to the PROCESS, not to a session branch —
@@ -8,11 +8,10 @@
  * owns its own AbortController; the tool call's Esc/abort signal is
  * deliberately NOT wired to it (backgrounding means outliving the tool call).
  *
- * Every byte a job produces goes to its output file (Claude Code keeps task
- * output in a file the model reads with its read tool); a byte-capped copy stays
- * in memory for exit tails and /tasks. Jobs carry the session id that
- * started them, so a subagent child running in this process cannot see or stop
- * its parent's shells.
+ * Every byte a job produces goes to its output file, which the model reads with
+ * its read tool; a byte-capped copy stays in memory for exit tails and /tasks.
+ * Jobs carry the session id that started them, so a subagent child running in
+ * this process cannot see or stop its parent's shells.
  */
 
 import { randomBytes } from "node:crypto";
@@ -26,7 +25,6 @@ import { splitLines } from "./lines.ts";
 
 /** Cap on buffered output per job; the oldest chunks are dropped past this. */
 const DEFAULT_MAX_BUFFER_BYTES = 2 * 1024 * 1024;
-/** Claude Code's cap on a task's output file (5 GB). */
 const MAX_FILE_BYTES = 5 * 1024 * 1024 * 1024;
 /** Finished jobs retained for later `/tasks` inspection before the oldest are dropped. */
 const DEFAULT_MAX_FINISHED_JOBS = 50;
@@ -37,7 +35,7 @@ const DEFAULT_MAX_FINISHED_JOBS = 50;
 const MAX_CARRY_CHARS = 4096;
 
 /**
- * Claude Code's stall watchdog: every 5s it checks whether a background shell's
+ * Stall watchdog: every 5s it checks whether a background shell's
  * output grew; after 45s without growth, a last line that reads as a prompt
  * means the command is waiting for input nobody will type.
  */
@@ -76,14 +74,13 @@ function defaultOutputRoot(): string {
 /** A path segment from a session id: anything a path could trip on becomes `-`. */
 const segment = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, "-") || "-";
 
-/** Claude Code's string hash (`NY`), for a project dir cut short. */
 function stringHash(s: string): number {
 	let h = 0;
 	for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
 	return h;
 }
 
-/** The cwd as Claude Code spells its project dirs (`gT`): every non-alphanumeric a `-`, long ones cut and hashed. */
+/** The cwd as a directory name: every non-alphanumeric a `-`, long ones cut and hashed. */
 function projectSegment(cwd: string): string {
 	const spelled = cwd.replace(/[^a-zA-Z0-9]/g, "-");
 	return spelled.length <= 200 ? spelled : `${spelled.slice(0, 200)}-${Math.abs(stringHash(cwd)).toString(36)}`;
@@ -91,7 +88,7 @@ function projectSegment(cwd: string): string {
 
 const TASK_ID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
 
-/** Claude Code's task id (`MS`): a type letter and 8 random base36 characters (`b` shell, `s` WebSocket). */
+/** A type letter and 8 random base36 characters (`b` shell, `s` WebSocket). */
 function randomTaskId(prefix: string): string {
 	const bytes = randomBytes(8);
 	let id = prefix;
@@ -143,13 +140,13 @@ export interface BackgroundJobInfo {
 		code: number | null;
 		error?: string;
 		at: number;
-		/** The shell died of a signal; `code` is the one Claude Code reports for that. */
+		/** The shell died of a signal; `code` is a stand-in. */
 		noExitStatus?: boolean;
 	};
 	killed: boolean;
 	/** Why the job was stopped programmatically (e.g. the monitor rate limit); absent for a caller's task_stop. */
 	stopReason?: string;
-	/** Stopped by the user from /tasks: the model is told, as Claude Code tells it. */
+	/** Stopped by the user from /tasks: the model is told. */
 	stoppedByUser?: boolean;
 	/** Who stopped it for its owner: "main session" when the main session stopped a subagent's shell. */
 	stoppedBy?: string;
@@ -193,7 +190,7 @@ interface JobState extends Omit<BackgroundJobInfo, "outputBytes"> {
 	/** Holds a multibyte sequence split across chunks; only built when onLines is wired. */
 	decoder?: StringDecoder;
 	file?: WriteStream;
-	/** The output file passed Claude Code's disk cap: nothing more is written, and the job is ended. */
+	/** The output file passed the disk cap: nothing more is written, and the job is ended. */
 	oversize?: boolean;
 	stallTimer?: ReturnType<typeof setInterval>;
 }
@@ -261,12 +258,8 @@ export class BackgroundJobRegistry {
 	}
 
 	/**
-	 * Drop the oldest finished jobs past the retention cap.
-	 *
-	 * remove() existed but nothing ever called it, so every finished job — command,
-	 * cwd, and up to maxBufferBytes of output — was retained for the life of the
-	 * process. Running jobs are never evicted; Map preserves insertion order, so
-	 * iteration is already oldest-first.
+	 * Drop the oldest finished jobs past the retention cap. Running jobs are never
+	 * evicted; Map preserves insertion order, so iteration is already oldest-first.
 	 */
 	private evictFinished(): void {
 		const finished = [...this.jobs.values()].filter((state) => state.exit);
@@ -336,7 +329,7 @@ export class BackgroundJobRegistry {
 				if (lines.length > 0) state.sinks.onLines?.(lines, this.info(state));
 			}
 			state.sinks.onExit?.(this.info(state));
-			// The end is marked in the file, as Claude Code marks it; the memory copy stays the output alone.
+			// The end is marked in the file only; the memory copy stays the output alone.
 			state.file?.end(state.killed ? "\n[killed]\n" : `\n[exited with code ${exit?.code ?? "unknown"}]\n`);
 			this.evictFinished();
 			this.changed();
@@ -351,8 +344,8 @@ export class BackgroundJobRegistry {
 				outputFile: state.outputFile,
 			})
 			.then((result) =>
-				// A null code means the shell itself died of a signal: Claude Code reports that as
-				// a failure with a code of its own, not as an exit without a status.
+				// A null code means the shell itself died of a signal: a failure with a code
+				// of its own, not an exit without a status.
 				finish(
 					result.exitCode === null
 						? { code: SIGNAL_EXIT_CODE, noExitStatus: true, at: Date.now() }
@@ -361,7 +354,7 @@ export class BackgroundJobRegistry {
 			)
 			.catch((err: unknown) => {
 				const message = err instanceof Error ? err.message : String(err);
-				// Claude Code ends such a command with 137, a failure rather than a stop.
+				// Past the disk cap: 137, a failure rather than a stop.
 				if (state.oversize) return finish({ code: 137, at: Date.now() });
 				finish({
 					code: null,
@@ -397,9 +390,8 @@ export class BackgroundJobRegistry {
 			droppedNote = `[${state.droppedBytes - start} bytes of earlier output were dropped by the buffer cap]`;
 			start = state.droppedBytes;
 		}
-		// Collect only the chunks at or after the cursor. Concatenating the whole
-		// buffer and slicing made each poll cost the length of the entire stream, so
-		// repeatedly polling a chatty job was quadratic in its output.
+		// Only the chunks at or after the cursor: concatenating the whole buffer
+		// would make repeated polling quadratic in the output.
 		const skip = start - state.droppedBytes;
 		const unread: Buffer[] = [];
 		let offset = 0;
@@ -449,9 +441,9 @@ export class BackgroundJobRegistry {
 	}
 
 	/**
-	 * Hands the running jobs `from` started to `to`: Claude Code keeps background shells
-	 * across /clear, so the new session owns what the old one left running. A
-	 * subagent's jobs stay its own.
+	 * Hands the running jobs `from` started to `to`: background shells survive
+	 * /clear, so the new session owns what the old one left running. A subagent's
+	 * jobs stay its own.
 	 */
 	reown(from: string, to: string): number {
 		let moved = 0;
@@ -555,7 +547,7 @@ export const backgroundBashJobs = sharedRef("backgroundBashJobs", new Background
 export type JobOutcomeState = "running" | "completed" | "failed" | "killed";
 
 /**
- * Where a job stands, in Claude Code's four task statuses. A job killed by us is
+ * Where a job stands, in four task statuses. A job killed by us is
  * `killed`; one that could not run or died of a signal has failed; otherwise its
  * exit code is judged by the command that produced it (grep's exit 1 is an answer).
  */
@@ -592,7 +584,6 @@ function taskType(job: BackgroundJobInfo): string {
 	return job.id.startsWith("s") ? "monitor_ws" : "local_bash";
 }
 
-/** Claude Code's answer for an id that names no task of this session. */
 export function noTaskError(id: string): Error {
 	return new Error(`No task found with ID: ${id}`);
 }
@@ -606,8 +597,8 @@ export interface TaskCaller {
 
 /**
  * The job, if the caller may name it. The main session reaches its own jobs and
- * its subagents'; a child finds any job, so that one it does not own gets
- * Claude Code's ownership error rather than a claim that it does not exist.
+ * its subagents'; a child finds any job, so that one it does not own gets an
+ * ownership error rather than a claim that it does not exist.
  */
 function findJob(id: string, caller: TaskCaller): BackgroundJobInfo | undefined {
 	const job = backgroundBashJobs.get(id);
@@ -617,7 +608,7 @@ function findJob(id: string, caller: TaskCaller): BackgroundJobInfo | undefined 
 }
 
 /**
- * task_stop for a shell (Claude Code's TaskStop). The main session may stop a
+ * task_stop for a shell. The main session may stop a
  * subagent's shell, whose owner is then told; a subagent stops only its own.
  */
 export function shellTaskStop(id: string, caller: TaskCaller): string {

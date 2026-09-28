@@ -71,7 +71,7 @@ export class EventBatcher {
 }
 
 /**
- * Claude Code's monitor rate limit: a bucket of `capacity` events refilled one per
+ * Monitor rate limit: a bucket of `capacity` events refilled one per
  * `refillMs`. `take` spends one and says whether the event may go out.
  */
 export class TokenBucket {
@@ -128,7 +128,7 @@ export interface EventDelivery {
 
 /**
  * A stop the user made from /tasks is news, but not a reason to start a turn:
- * Claude Code queues it as `passive`, for the model to read next time it runs.
+ * the model reads it next time it runs.
  */
 export function exitDelivery(job: BackgroundJobInfo): EventDelivery {
 	return job.stoppedByUser ? { deliverAs: "steer", triggerTurn: false } : EVENT_DELIVERY;
@@ -178,15 +178,12 @@ function endStatus(job: BackgroundJobInfo): EventStatus {
 	return OUTCOME_COLOR[jobOutcome(job).state];
 }
 
-/** Claude Code's escape for text placed inside a notification's tags (`Bt`). */
+/** Escape for text placed inside a notification's tags. */
 export function escapeXml(text: string): string {
 	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/**
- * Claude Code's prefix on every background-task notification (`MGe`): the model
- * reads it as a user message, so it is told plainly that nobody typed it.
- */
+/** The model reads a notification as a user message, so it is told plainly that nobody typed it. */
 export const SYSTEM_NOTIFICATION_PREFIX = `[SYSTEM NOTIFICATION - NOT USER INPUT]
 This is an automated background-task event, NOT a message from the user.
 Do NOT interpret this as user acknowledgement, confirmation, or response to any pending question.
@@ -194,12 +191,11 @@ No human input has been received since the last genuine user message in this con
 
 `;
 
-/** Claude Code caps a notification at this many characters (`Mat`), cutting the middle out. */
+/** A notification is capped at this many characters, cutting the middle out. */
 const MAX_NOTIFICATION_CHARS = 100_000;
-/** How far past the cap a notification may run before it is cut (`HM`). */
+/** How far past the cap a notification may run before it is cut. */
 const CAP_SLACK_CHARS = 1024;
 
-/** `text` with its middle cut out past the cap, as Claude Code's `kc` does it. */
 export function capNotification(text: string): string {
 	if (text.length <= MAX_NOTIFICATION_CHARS + CAP_SLACK_CHARS) return text;
 	const head = Math.floor(MAX_NOTIFICATION_CHARS / 2);
@@ -217,7 +213,7 @@ export function notificationContent(notification: string): string {
 	return `<system-reminder>\n${SYSTEM_NOTIFICATION_PREFIX}${body}\n</system-reminder>`;
 }
 
-/** Claude Code's `<task-notification>`: each tag only when it has a value. */
+/** `<task-notification>`: each tag only when it has a value. */
 export function taskNotification(fields: {
 	taskId: string;
 	toolUseId?: string;
@@ -237,16 +233,14 @@ export function taskNotification(fields: {
 		...tag("status", fields.status),
 		...tag("summary", escapeXml(fields.summary)),
 	].join("\n");
-	// The body follows the tags, as in Claude Code; `trailing` follows the envelope.
 	return `${head}${fields.body ?? ""}\n</task-notification>${fields.trailing ?? ""}`;
 }
 
-/** Monitor event caps, Claude Code's: per line and per event. */
+/** Monitor event caps: per line and per event. */
 const MAX_EVENT_LINE_CHARS = 500;
 const MAX_EVENT_CHARS = 3000;
 const TRUNCATED = "...(truncated)";
 
-/** An event's text under Claude Code's caps. */
 export function eventText(lines: string[]): string {
 	const text = lines
 		.map((line) => (line.length > MAX_EVENT_LINE_CHARS ? `${line.slice(0, MAX_EVENT_LINE_CHARS)}${TRUNCATED}` : line))
@@ -292,7 +286,7 @@ export function monitorEndSummary(job: BackgroundJobInfo): string {
 	const code = job.exit?.code;
 	const exit = code !== null && code !== undefined ? ` (exit ${code})` : "";
 	if (state === "failed") return `Monitor "${d}" script failed${exit}`;
-	// Claude Code asks whether the script wrote anything, not whether an event went out.
+	// Whether the script wrote anything, not whether an event went out.
 	return job.outputBytes === 0
 		? `Monitor "${d}" ended without producing output${exit}`
 		: `Monitor "${d}" stream ended`;
@@ -323,7 +317,6 @@ export function monitorEndMessage(job: BackgroundJobInfo, leftover: string[]): O
 	};
 }
 
-/** The summary of a finished background command, in Claude Code's words. */
 export function taskExitSummary(job: BackgroundJobInfo): string {
 	const d = label(job);
 	if (job.stoppedByUser) return `Task "${d}" was stopped by the user`;
@@ -338,7 +331,6 @@ export function taskExitSummary(job: BackgroundJobInfo): string {
 
 export function taskExitMessage(job: BackgroundJobInfo, toolUseId?: string): OutgoingMessage<TaskExitDetails> {
 	const end = taskExitSummary(job);
-	// A stop made for the job's owner by another session is Claude Code's `stopped`.
 	const status = job.stoppedBy ? "stopped" : jobOutcome(job).state;
 	return {
 		customType: TASK_EXIT_MESSAGE_TYPE,
@@ -346,7 +338,7 @@ export function taskExitMessage(job: BackgroundJobInfo, toolUseId?: string): Out
 			taskNotification({
 				taskId: job.id,
 				toolUseId,
-				// A stop the user or another session made is the whole news; Claude Code names no file then.
+				// A stop the user or another session made is the whole news; no file is named then.
 				outputFile: job.stoppedByUser || job.stoppedBy ? undefined : job.outputFile,
 				status,
 				summary: end,
@@ -364,7 +356,7 @@ export function taskExitMessage(job: BackgroundJobInfo, toolUseId?: string): Out
 	};
 }
 
-/** Claude Code's notice for a background shell that looks blocked on a prompt; the task keeps running. */
+/** Notice for a background shell that looks blocked on a prompt; the task keeps running. */
 export function taskStallMessage(
 	job: BackgroundJobInfo,
 	tail: string,

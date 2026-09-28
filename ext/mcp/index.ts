@@ -1,9 +1,8 @@
 /**
- * MCP bridge core extension (Model Context Protocol) — PLAN.md F4.1 + audit B.5.
+ * MCP bridge core extension (Model Context Protocol).
  *
- * Bridges MCP servers declared in `mcp.json` into bluclawd by registering each
- * server's tools as `mcp__<server>__<tool>`. Config is Claude Code's
- * `{ "mcpServers": { … } }` shape, read from three files, later winning:
+ * Registers each configured server's tools as `mcp__<server>__<tool>`. Config is
+ * `{ "mcpServers": { … } }`, read from three files, later winning:
  * `<agentDir>/mcp.json` (global, always), then — ONLY when the project is trusted
  * — `<cwd>/.mcp.json` (the shared file repos commit) and
  * `<cwd>/<CONFIG_DIR_NAME>/mcp.json` (this agent's project override).
@@ -18,48 +17,31 @@
  * file, so the repo being gated can neither approve itself nor edit its command
  * afterwards without re-gating. `mcp.enableAllProjectMcpServers: true` opts out.
  *
- * STARTUP COST (Trap): the `@modelcontextprotocol/sdk` transitive tree is heavy,
- * so this file never statically imports client.ts or the SDK. Config parsing lives
- * in schema.ts (SDK-free). Only when there is ≥1 configured server does
- * session_start dynamically `import("./client.ts")` and connect.
+ * STARTUP COST: the `@modelcontextprotocol/sdk` transitive tree is heavy, so this
+ * file never statically imports client.ts or the SDK; session_start imports it only
+ * when at least one server is configured.
  *
- * NON-BLOCKING (interactive): connecting is fire-and-forget — session_start
- * returns immediately so a slow/hung remote server can't stall launch. Each
- * server connects independently under its own try/catch; failures surface as a
- * footer status + notify, never a crash. Live tool registration after startup
- * is supported. HEADLESS (-p/RPC, `!ctx.hasUI`): session_start awaits the
- * connections instead — the only turn starts right after it, so tools must be
- * registered by then. The per-server handshake timeout in client.ts bounds the
- * wait.
+ * NON-BLOCKING: an interactive session connects fire-and-forget so a hung server
+ * can't stall launch; failures surface as status + notify, never a crash. HEADLESS
+ * (`!ctx.hasUI`) awaits the connections instead, because the only turn starts right
+ * after session_start; the per-server handshake timeout bounds the wait.
  *
- * MANAGEMENT (audit B.5): `/mcp` lists servers; `/mcp approve <server>` clears the
- * gate above and connects; `/mcp enable|disable <server>` toggles a server live AND
- * persists it — a global server's `disabled` in `<agentDir>/mcp.json`, a project
- * server's in the global settings (never the committed `.mcp.json`);
- * `/mcp reconnect [server]` closes and re-drives connections.
+ * MANAGEMENT: `/mcp` lists servers; `/mcp approve <server>` clears the gate above
+ * and connects; `/mcp enable|disable <server>` toggles a server live AND persists it
+ * — a global server's `disabled` in `<agentDir>/mcp.json`, a project server's in the
+ * global settings (never the committed `.mcp.json`); `/mcp reconnect [server]`
+ * closes and re-drives connections.
  *
- * CLAUDE CODE PARITY: a server's initialize `instructions` are appended to the system
- * prompt; its prompts become `/mcp__<server>__<prompt>` commands; `list_changed`
- * notifications re-list tools/prompts live; a transport that closes on its own flips
- * the server to `error` instead of leaving dead tools active. Resources are served by
- * `mcp_list_resources`/`mcp_read_resource` and attached by `@server:uri` in a prompt;
- * tool calls use Claude Code's wall-clock + idle timeouts (schema.ts toolCallTimeouts);
- * `${VAR}`/`${VAR:-default}` expand at connect time (expandServerConfig).
- * Prompt commands and `@server:uri` complete in the editor (autocomplete.ts); a
- * server may elicit form input (elicit.ts) or, with per-request consent, sample the
- * session's model (sampling.ts) — both only when there is a UI to ask on.
- *
- * OAUTH (audit B.5): `/mcp login <server>` runs the browser flow (see oauth.ts)
- * and `/mcp logout <server>` forgets the credential. Login is ONLY ever explicit:
+ * OAUTH: `/mcp login <server>` runs the browser flow (see oauth.ts) and
+ * `/mcp logout <server>` forgets the credential. Login is ONLY ever explicit:
  * connectTargets attaches an authProvider just for servers that already hold a
  * credential, so a 401 fails the connect rather than opening a browser chosen by
  * whatever URL happened to be in mcp.json.
  *
- * DEFERRED TOOLS (audit B.5): a server with `deferTools: true` gets its tools
- * registered but immediately DEACTIVATED, so their schemas stay out of the
- * model's context. A single `mcp_find_tools` search tool (registered only when
- * something is deferred) lets the model find and activate them on demand —
- * this is the context-saver for 60-tool servers like github.
+ * DEFERRED TOOLS: a server with `deferTools: true` gets its tools registered but
+ * immediately DEACTIVATED, so their schemas stay out of the model's context. A
+ * single `mcp_find_tools` search tool (registered only when something is deferred)
+ * lets the model find and activate them on demand.
  *
  * LIFECYCLE: session_start re-fires on resume and /reload (reload also fires
  * session_shutdown first, which closes clients). An `epoch` counter, bumped on
@@ -67,8 +49,8 @@
  * connect that resolves after the session ended neither registers tools nor leaks
  * an open client.
  *
- * Idempotent factory (Trap): the body only registers managed pi.on(...) handlers
- * and the /mcp command — no file I/O and no connecting at load time.
+ * The factory only registers handlers and the /mcp command — no file I/O and no
+ * connecting at load time.
  */
 
 import { Type } from "@earendil-works/pi-ai";
@@ -179,7 +161,7 @@ export function factory(pi: ExtensionAPI): void {
 	// in-flight connects resolving after a shutdown/reload (see file header).
 	let connections: Connection[] = [];
 	let epoch = 0;
-	// Deferred (registered-but-inactive) MCP tools by namespaced name (audit B.5).
+	// Deferred (registered-but-inactive) MCP tools by namespaced name.
 	const deferredTools = new Map<string, RegisteredMcpTool>();
 	let findToolsRegistered = false;
 	let resourceToolsRegistered = false;
@@ -282,7 +264,7 @@ export function factory(pi: ExtensionAPI): void {
 		return match;
 	}
 
-	/** Claude Code's ListMcpResourcesTool / ReadMcpResourceTool, registered once a server offers resources. */
+	/** The resource list/read tools, registered once a server offers resources. */
 	function ensureResourceToolsRegistered(): void {
 		if (resourceToolsRegistered) return;
 		resourceToolsRegistered = true;
@@ -549,8 +531,8 @@ export function factory(pi: ExtensionAPI): void {
 		const { connectServer } = mod;
 
 		// `${VAR}` expansion happens here, per connect, never at load (see
-		// expandServerConfig). An unset variable stays literal, as in Claude Code — say
-		// so, or a stdio server just fails with a baffling ENOENT or bad argument.
+		// expandServerConfig). An unset variable stays literal — say so, or a stdio
+		// server just fails with a baffling ENOENT or bad argument.
 		const resolved = new Map<string, ServerConfig>();
 		for (const target of targets) {
 			const { config, missing } = expandServerConfig(target.config);
@@ -746,7 +728,7 @@ export function factory(pi: ExtensionAPI): void {
 		await Promise.allSettled(clients.map((c) => c.close()));
 	});
 
-	// `@server:uri` in a prompt attaches that resource, as in Claude Code. The fetched
+	// `@server:uri` in a prompt attaches that resource. The fetched
 	// text is fenced and labelled as data: it is server content arriving in the user's
 	// turn, and must not read as the user's own instructions.
 	pi.on("input", async (event, ctx) => {
@@ -793,7 +775,7 @@ export function factory(pi: ExtensionAPI): void {
 		const width = Math.max(0, ...rows.map((row) => row.name.length));
 		for (const row of rows) {
 			// Colour carries the status, so a broken server is visible without reading
-			// every line — the flat notify string could not do that.
+			// every line.
 			const colour =
 				row.status === "connected"
 					? "success"

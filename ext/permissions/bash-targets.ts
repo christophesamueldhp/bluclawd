@@ -19,11 +19,8 @@ const REDIRECT = /(?:^|[^>])>>?\|?\s*(&?)("[^"]+"|'[^']+'|[^\s;&|<>]*)/g;
 function segments(command: string): string[] {
 	return (
 		command
-			// `|` and `&` directly after `>` belong to the redirect — `>|` is the
-			// clobber override and `>&` a descriptor dup. Splitting there tore the
-			// operator in half: the `>|` target never reached the redirect scan, and
-			// `2>&1` decayed into an empty target that read as an unparseable
-			// redirect.
+			// `|` and `&` directly after `>` belong to the redirect (`>|` clobber
+			// override, `>&` descriptor dup), so they must not split the segment.
 			.split(/[;\n]+|(?<!>)[&|]+/)
 			.map((s) => s.trim())
 			.filter((s) => s.length > 0)
@@ -46,9 +43,8 @@ export function bashRedirectTargets(command: string): string[] {
 	for (const seg of segments(command)) {
 		REDIRECT.lastIndex = 0;
 		for (const m of seg.matchAll(REDIRECT)) {
-			// `&` only means "no path" when what follows is a descriptor (`2>&1`,
-			// `>&2`) or a close (`>&-`). `>&FILE` is redirect-BOTH-streams-to-a-file
-			// and writes it — verified in bash, zsh and sh — so it must be screened.
+			// `&` only means "no path" before a descriptor (`2>&1`) or a close (`>&-`);
+			// `>&FILE` writes both streams to FILE, so it must be screened.
 			if (m[1] === "&" && /^\d+$|^-$/.test(m[2])) continue;
 			targets.push(m[2].replace(/^["']|["']$/g, ""));
 		}

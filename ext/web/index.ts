@@ -1,5 +1,5 @@
 /**
- * Web tools core extension (PLAN.md F4.2): `webfetch` and `websearch`.
+ * Web tools core extension: `webfetch` and `websearch`.
  *
  * Both tools are auto-governed by the permissions core extension purely by their
  * lowercase names (`webfetch` -> WebFetch, `websearch` -> WebSearch in rules.ts's
@@ -70,7 +70,7 @@ const ANALYZE_MAX_CHARS = 120_000;
 
 /**
  * Run the fetched page through the session model with the caller's instruction
- * (CC's WebFetch `prompt` param, audit B.9). Returns undefined when analysis is
+ * (the `prompt` param). Returns undefined when analysis is
  * impossible (no model, no auth, error/abort) so the caller can fall back to
  * returning the raw page content.
  */
@@ -169,7 +169,7 @@ const WebsearchParams = Type.Object({
 	),
 });
 
-/** Claude Code's rule: the two filters are exclusive. Returns the error text, or undefined when fine. */
+/** The two filters are exclusive. Returns the error text, or undefined when fine. */
 export function domainFilterError(params: {
 	allowed_domains?: string[];
 	blocked_domains?: string[];

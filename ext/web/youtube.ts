@@ -1,8 +1,7 @@
 /**
  * YouTube videos for `webfetch`: title, channel, length, description and the
  * caption transcript with timestamps, as text any model can read. No video
- * model is involved (pi-web-access sends videos to Gemini; that would tie the
- * feature to one provider).
+ * model is involved, which would tie the feature to one provider.
  *
  * The watch page's caption URLs now come back empty without a proof-of-origin
  * token, so this asks YouTube's player API as its mobile apps do, whose caption

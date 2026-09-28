@@ -1,15 +1,8 @@
 /**
- * pi's own built-in slash commands, for `/help`'s listing.
- *
- * Vendored from `core/slash-commands.ts`'s `BUILTIN_SLASH_COMMANDS`, which
- * isn't part of pi's public package export and has no substitute: `pi.getCommands()`
- * only returns extension/prompt/skill-sourced commands (`SlashCommandSource =
- * "extension" | "prompt" | "skill"`), never pi's own built-ins.
- *
- * Drift risk is low and purely cosmetic: if pi adds a built-in command
- * upstream, `/help` just won't list it here until this copy is refreshed —
- * nothing breaks. Re-sync against `packages/coding-agent/src/core/slash-commands.ts`
- * if `/help`'s output looks incomplete after an upstream update.
+ * pi's built-in slash commands, for `/help`'s listing. Copied from pi's
+ * `core/slash-commands.ts`, which pi does not export; `pi.getCommands()` never
+ * returns built-ins. A command pi adds later is simply missing from `/help`
+ * until this list is refreshed.
  */
 export interface BuiltinSlashCommand {
 	name: string;

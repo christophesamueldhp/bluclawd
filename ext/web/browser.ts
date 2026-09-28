@@ -1,10 +1,6 @@
 /**
- * `/web`: browse what webfetch and websearch stored this session, in the TUI.
- *
- * This is bluclawd's take on pi-web-access's curator. That one is a browser page
- * served from a local HTTP server, and its own author made it default-off; here
- * the same review happens in pi's own selector: pick an entry, read it, or hand
- * it to the next prompt.
+ * `/web`: browse what webfetch and websearch stored this session, in the TUI:
+ * pick an entry, read it, or hand it to the next prompt.
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";

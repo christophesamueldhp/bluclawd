@@ -122,7 +122,7 @@ export async function routedSearch(opts: {
 						...opts.filter,
 					});
 			} else if (name === "exa" && ws.keyless !== false) {
-				// Zero-config search (audit C.2): Exa's hosted MCP endpoint needs no key. It
+				// Zero-config search: Exa's hosted MCP endpoint needs no key. It
 				// sends queries to a third party unauthenticated, so `keyless: false` turns it off.
 				run = () => exaMcpSearch(opts.query, fetchImpl, signal, opts.filter, opts.recency);
 			}

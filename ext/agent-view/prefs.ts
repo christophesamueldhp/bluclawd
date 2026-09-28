@@ -4,7 +4,7 @@ import type { ViewMode } from "./rows.ts";
 
 const PREFS_FILE = "agent-view-prefs.json";
 
-/** The saved ctrl+s view (Claude Code's `fleetViewGroupMode`), or undefined when none is saved. */
+/** The saved ctrl+s view, or undefined when none is saved. */
 export function loadViewMode(agentDir: string): ViewMode | undefined {
 	try {
 		const parsed = JSON.parse(readFileSync(join(agentDir, PREFS_FILE), "utf8")) as { view?: unknown };
