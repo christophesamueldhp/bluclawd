@@ -32,18 +32,28 @@ dependency); it is not how `pi install` loads this package.
 ## What ships
 
 ```
-package.json    the pi package manifest (pi.extensions, dependencies)
+package.json    the pi package manifest (pi.extensions, pi.themes, peer dependencies)
 bin.mjs         convenience entry point for local runs
 themes/         the bluclawd theme
-daemon/         agent view's background-session daemon
-ext/            the feature layer
-  _shared/      shared state, settings readers, vendored pi internals
+daemon/         agent view's background-session daemon (state in ~/.pi/server, or $PI_SERVER_DIR)
+ext/            the feature layer, one directory per extension
+  _shared/      cross-extension state (via globalThis), settings readers, vendored pi internals
 scripts/        probe-extensions.ts — headless report of what each extension registers
-test/           self-contained — no monorepo, no fixtures
+test/           vitest suites, self-contained — no monorepo, no fixture files
 ```
 
-8 extensions: `permissions`, `checkpoints`, `background-bash`,
-`branding`, `diagnostics`, `agent-view`, `help`, `vibes`.
+8 extensions, no runtime dependencies (pi's own packages are peers):
+
+| Extension | Registers |
+|---|---|
+| `permissions` | deny-rule gate on every tool call; Alt+M |
+| `checkpoints` | `/rewind` |
+| `background-bash` | `/tasks`, `/bashes`; the `bash`, `monitor` and `task_stop` tools |
+| `branding` | `/theme`; welcome header and mascot |
+| `diagnostics` | `/status`, `/context` |
+| `agent-view` | `/agent-view` (what `←` twice dispatches) |
+| `help` | `/help` |
+| `vibes` | spinner verbs |
 
 ## What it adds
 
@@ -53,8 +63,8 @@ Claude Code's names and behaviours, on top of pi's own commands:
 |---|---|
 | `permissions.deny`, Alt+M | deny rules block matching tool calls; the footer shows pi's `defaultProjectTrust` (`⏵⏵ always` / `⏸ ask` / `✕ never`) and Alt+M cycles it — see [Permissions](#permissions) |
 | `/tasks` | background tasks dialog (alias `/bashes`): shells (`run_in_background`, Ctrl+B on the model's running bash, or a foreground command past its `timeout`), monitors; running tasks only; Enter shows a task's output tail, `x` stops it (the model is told without a turn starting), and updates wait while the dialog is open. The model's bash is Claude Code's: `timeout` in milliseconds (2 minutes by default), a command still running then - or on Ctrl+B after 2s, or when you send a message - moves to the background instead of being killed, and the model reads a task's output file with `read`. The footer pill counts the running shells and monitors; ↓ from an empty prompt selects it and Enter opens the dialog. A shell writes its whole output to a file named in its start result and exit notification; `task_stop` stops it. A job notifies the model once when it exits, and once more if it goes quiet for 45s on what reads as an interactive prompt (`(y/n)`, `Press Enter`, …); the `monitor` tool turns each stdout line of a long-running command, or each frame of a WebSocket (`ws`), into an event that wakes the model (Claude Code's `Monitor`; stderr goes to the output file; every monitor expires after `timeout_ms`, 5 minutes by default and at most 30, with one notice so the model can re-arm it) |
-| `/rewind` | file checkpoints per turn; restores the files, the conversation, or both |
-| `←` twice on an empty prompt | agent view, as Claude Code's `claude agents`: background sessions in Needs input / Working / Completed bands (ctrl+s: by directory, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing, age. Type a task + enter to start a background session (ctrl+enter: start it here), shift+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, space peeks and replies (1-9 answers a pending question), enter/→ opens a session in this window (this one keeps running in the background), alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes, ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` filters, `/resume` brings a past session back, `/model` sets the model for new ones. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press |
+| `/rewind` | file checkpoints per turn; restores the files, the conversation, or both. Checkpoints are git commits kept under `refs/bluclawd/checkpoints/<session>/`: the newest 50 per session, and another session's refs are pruned after 30 days |
+| `←` twice on an empty prompt (or `/agent-view`) | agent view, as Claude Code's `claude agents`: background sessions in Needs input / Working / Completed bands (ctrl+s: by directory, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing, age. Type a task + enter to start a background session (ctrl+enter: start it here), shift+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, space peeks and replies (1-9 answers a pending question), enter/→ opens a session in this window (this one keeps running in the background), alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes, ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` filters, `/resume` brings a past session back, `/model` sets the model for new ones. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press. Background sessions run under a local daemon (`daemon/`, a Unix socket in `~/.pi/server`); it reports presence to radius.pi.dev only when a radius credential or `RADIUS_API_KEY` is configured |
 | `/status`, `/context` | model, auth, safety, session, context window |
 | `/theme` | theme |
 | `/help` | all of the above, grouped |
@@ -65,7 +75,7 @@ then `← for agents`. pi's own footer shows them on one line. For the ccstatusl
 status line, install [pistatusline](https://github.com/christophesamueldhp/pistatusline): it draws
 the same items under its lines.
 
-While the agent works, "Working..." becomes one of Claude Code's 187 spinner verbs
+While the agent works, "Working..." becomes one of Claude Code's 186 spinner verbs
 ("Pondering...", "Clauding..."), a new one each turn, none repeated until all have shown.
 
 The welcome header is Claude Code's: the mascot beside name, model and cwd. In the
@@ -107,7 +117,7 @@ reading the API:
 
 - **Hidden command aliases are impossible.** `registerCommand` has no alias
   field, and pi's `input` event fires only after the interactive command chain.
-  Commands here have their canonical name only.
+  An alias is a second, visible command (`/bashes` for `/tasks`).
 - **An extension cannot rebind a pi keybinding.** Trust cycling is
   **Alt+M**, not Claude Code's Shift+Tab, which pi binds to
   `app.thinking.cycle`; pi refuses the registration and logs a conflict.
@@ -152,7 +162,9 @@ arguments; `*` stays within a path segment and `**` crosses them; `Edit(...)`
 also covers write and `Read(...)` also covers grep, find and ls; `//path` is
 absolute, `~/path` is home, anything else is relative to the working directory;
 `WebFetch(domain:x.com)`, `WebSearch(...)`, and MCP tools as `mcp__server`,
-`mcp__server__*`, `mcp__server__tool` or `Mcp(server:tool)`; `dir/**` covers
+`mcp__server__*`, `mcp__server__tool` or `Mcp(server:tool)` — bluclawd ships no
+web or MCP tools, so these apply to the `webfetch`/`websearch`/MCP tools another
+pi package registers; `dir/**` covers
 `dir` itself too. A bash rule also matches the command behind wrappers (`sudo`,
 `timeout`, `nice`, `env`, `xargs`, `sh -c '…'`, `eval`, …), shell keywords,
 quoting (`'rm'`, `\rm`), `/bin/…`, `$(…)`, and any part of a `&&`/`;`/`|` chain.
@@ -166,6 +178,10 @@ The footer shows pi's own `defaultProjectTrust` — `⏵⏵ always`, `⏸ ask` o
 project's `.pi` settings and extensions load when no `/trust` decision was saved;
 like `/settings`, the change applies to projects opened from then on.
 
-Deliberately not ported: **PDF input** (would mean reimplementing four
+Deliberately not ported, because pi already has them: **bash mode** (pi's `!cmd`
+runs a command and sends its output to the model, `!!cmd` runs it without
+sending), **prompt stash** (↑/↓ on the prompt browse earlier prompts, as in
+Claude Code), **web search/fetch and MCP** (install a pi package for those; deny
+rules still cover them). Also not ported: **PDF input** (would mean reimplementing four
 provider wire formats behind `before_provider_request` — a shared-type change
 in pi's own `packages/ai`, not reachable through the extension API at all).
