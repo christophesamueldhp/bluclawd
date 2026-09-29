@@ -118,6 +118,11 @@ export function outputTail(job: BackgroundJobInfo): { lines: string[]; size: num
 				closeSync(fd);
 			}
 			text = buffer.toString("utf-8");
+			// The write stream flushes asynchronously: output that has not reached the file yet is still in memory.
+			if (size === 0) {
+				text = backgroundBashJobs.peek(job.id) ?? "";
+				size = Buffer.byteLength(text);
+			}
 		} catch {
 			text = backgroundBashJobs.peek(job.id) ?? "";
 			size = Buffer.byteLength(text);
