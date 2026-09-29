@@ -1,28 +1,9 @@
-/**
- * Shell extension: bash mode — a persistent shell driven from the prompt editor.
- *
- * `ctrl+shift+b` or `/bash-mode [on|off]` switches the editor between the model
- * and a long-lived shell (./session.ts), so `cd`, `export` and functions carry
- * from one command to the next. Output goes to a transcript widget below the
- * editor, NOT into the conversation: bash mode is the user's own terminal, while
- * `!` remains the way to show the model a command's output.
- *
- * Like `!`, bash mode runs outside the sandbox, which confines only what the
- * model runs.
- *
- * The editor stash lives here too (`alt+s`, `/stash`; ./stash.ts): it acts on
- * the same editor and has no other owner.
- *
- * Bash mode and the stash were adapted from pi-powerline-footer (MIT, Nico Bailon).
- */
-import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, InlineExtension, Theme } from "@earendil-works/pi-coding-agent";
-import { getAgentDir, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Key, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { ShellEditor } from "./editor.ts";
 import { ShellSession } from "./session.ts";
-import { StashHistory, stashAction } from "./stash.ts";
 import { ShellTranscript } from "./transcript.ts";
 
 /** Commands and output lines per command the widget shows; the rest stays in the transcript. */
@@ -129,51 +110,12 @@ function factory(pi: ExtensionAPI): void {
 		session = undefined;
 		transcript = new ShellTranscript();
 		active = false;
-		stashed = undefined;
-	}
-
-	/** The active stash of this session; the history outlives it. */
-	let stashed: string | undefined;
-	let stashHistory: StashHistory | undefined;
-	const history = () => {
-		stashHistory ??= new StashHistory(join(getAgentDir(), "bluclawd", "stash-history.json"));
-		return stashHistory;
-	};
-
-	function toggleStash(ctx: ExtensionContext): void {
-		const text = ctx.ui.getEditorText();
-		switch (stashAction(text, stashed)) {
-			case "nothing":
-				ctx.ui.notify("Nothing to stash — the editor is empty.", "info");
-				return;
-			case "restore":
-				ctx.ui.setEditorText(stashed ?? "");
-				stashed = undefined;
-				ctx.ui.setStatus(STATUS_KEYS.stash, undefined);
-				ctx.ui.notify("Stash restored.", "info");
-				return;
-			case "stash":
-			case "update": {
-				const updated = stashed !== undefined;
-				stashed = text;
-				history().add(text);
-				ctx.ui.setEditorText("");
-				ctx.ui.setStatus(STATUS_KEYS.stash, ctx.ui.theme.fg("accent", "stash"));
-				ctx.ui.notify(
-					updated
-						? "Stash updated — Alt+S on an empty editor brings it back."
-						: "Stashed — Alt+S on an empty editor brings it back.",
-					"info",
-				);
-			}
-		}
 	}
 
 	pi.on("session_start", (_event, ctx) => {
 		latestCtx = ctx;
 		reset();
 		ctx.ui.setStatus(STATUS_KEYS.shell, undefined);
-		ctx.ui.setStatus(STATUS_KEYS.stash, undefined);
 		if (!ctx.hasUI || ctx.mode !== "tui") return;
 		ctx.ui.setEditorComponent((editorTui, theme, keybindings) => {
 			tui = editorTui;
@@ -213,34 +155,6 @@ function factory(pi: ExtensionAPI): void {
 	pi.registerShortcut(Key.ctrlShift("b"), {
 		description: "Toggle bash mode (a persistent shell in the prompt)",
 		handler: async (ctx) => setActive(!active, ctx),
-	});
-
-	pi.registerShortcut(Key.alt("s"), {
-		description: "Stash the prompt, or bring the stash back into an empty editor",
-		handler: (ctx) => toggleStash(ctx),
-	});
-
-	pi.registerCommand("stash", {
-		description: "Insert a previously stashed prompt into the editor",
-		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify("The stash needs the interactive terminal.", "warning");
-				return;
-			}
-			const entries = history().entries;
-			if (entries.length === 0) {
-				ctx.ui.notify("Nothing stashed yet — Alt+S stashes the prompt you are writing.", "info");
-				return;
-			}
-			const labels = entries.map((entry, index) => `${index + 1}. ${entry.replace(/\s+/g, " ").trim()}`);
-			const choice = await ctx.ui.select("Stashed prompts", labels);
-			if (choice === undefined) return;
-			const picked = entries[labels.indexOf(choice)];
-			if (picked === undefined) return;
-			ctx.ui.setEditorText(picked);
-			// setEditorText does not repaint; without this the text is there but invisible until the next keypress.
-			repaint();
-		},
 	});
 
 	pi.registerCommand("bash-mode", {

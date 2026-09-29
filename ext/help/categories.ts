@@ -38,7 +38,6 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 	share: "Session",
 	copy: "Session",
 	"bash-mode": "Session",
-	stash: "Session",
 	theme: "App",
 
 	// Code & review
