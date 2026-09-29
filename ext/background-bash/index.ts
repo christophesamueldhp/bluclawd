@@ -1,13 +1,11 @@
 /**
- * Background tasks, the user's side: `/tasks`, the footer's task count, Ctrl+B
- * to move a running foreground bash into the background, the renderers for
- * job events, and `task_stop`.
+ * Background tasks: the model's `bash` (with `run_in_background`), `monitor` and
+ * `task_stop`, and the user's side of them: `/tasks`, the footer's task count,
+ * Ctrl+B to move a running foreground bash into the background, and the
+ * renderers for job events.
  *
- * Nothing here starts a job: `run_in_background` and the monitor live on the
- * sandbox extension (the one owner of the `bash` name), and the shell half of
- * both and of `task_stop` sits in `_shared/background-bash.ts`. The message
- * renderers here draw events sent from `ext/sandbox`. Change one, look at the
- * others.
+ * The job registry, and the shell half of all three tools, sits in
+ * `_shared/background-bash.ts`. Change one, look at the others.
  *
  * Without a UI, `/tasks` renders through `appendEntry` rather than
  * `ctx.ui.notify`, which would flatten its colours. Entries are persisted JSON,
@@ -254,6 +252,7 @@ const backgroundBash: InlineExtension = {
 					{
 						notify: (message) => ui.notify(message, "info"),
 						held: () => heldNotificationsLine(heldNotifications()),
+						rows: () => dialogTui.terminal.rows,
 					},
 				);
 				// Runtimes and output tails move on their own.

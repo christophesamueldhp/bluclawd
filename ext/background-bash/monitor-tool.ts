@@ -25,48 +25,120 @@ import {
 } from "../_shared/monitor-events.ts";
 import { monitorSource } from "../_shared/monitor-source.ts";
 
-const DEFAULT_TIMEOUT_SECONDS = 300;
-const MAX_TIMEOUT_SECONDS = 3600;
+/**
+ * Claude Code's bounded monitor: every watch expires. `timeout_ms` defaults to 5
+ * minutes, is refused past an hour, and is capped at 30 minutes.
+ */
+const DEFAULT_TIMEOUT_MS = 300_000;
+const MAX_TIMEOUT_MS = 3_600_000;
+const CAP_TIMEOUT_MS = 1_800_000;
 const BATCH_WINDOW_MS = 200;
 /** A bucket of 10 events, one back every 2s, and a stop after 30s of suppression. */
 const DEFAULT_RATE_LIMIT = { capacity: 10, refillMs: 2000, maxSuppressMs: 30_000 };
 
+const minutes = (ms: number) => `${Math.round(ms / 60_000)} minutes`;
+
+/** Claude Code's Monitor prompt, with its tool names spelled as pi's (`bash`, `read`, `task_stop`). */
+export const MONITOR_DESCRIPTION = `Start a background monitor that streams events from a long-running script. Each stdout line is an event — you keep working and notifications arrive in the chat. Events arrive on their own schedule and are not replies from the user, even if one lands while you're waiting for the user to answer a question.
+
+Pick by how many notifications you need:
+- **One** ("tell me when the server is ready / the build finishes") → use **bash with \`run_in_background\`** and a command that exits when the condition is true, e.g. \`until grep -q "Ready in" dev.log; do sleep 0.5; done\`. You get a single completion notification when it exits.
+- **One per occurrence, until the monitor expires (re-arm to continue)** ("tell me every time an ERROR line appears") → monitor with an unbounded command (\`tail -f\`, \`inotifywait -m\`, \`while true\`).
+- **One per occurrence, until a known end** ("emit each CI step result, stop when the run completes") → monitor with a command that emits lines and then exits.
+
+Your script's stdout is the event stream. Each line becomes a notification. Exit ends the watch.
+
+  # Each matching log line is an event
+  tail -f /var/log/app.log | grep --line-buffered "ERROR"
+
+  # Each file change is an event
+  inotifywait -m --format '%e %f' /watched/dir
+
+  # Poll GitHub for new PR comments and emit one line per new comment
+  last=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  while true; do
+    now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    gh api "repos/owner/repo/issues/123/comments?since=$last" --jq '.[] | "\\(.user.login): \\(.body)"'
+    last=$now; sleep 30
+  done
+
+  # Node script that emits events as they arrive (e.g. WebSocket listener)
+  node watch-for-events.js
+
+  # Per-occurrence with a natural end: emit each CI check as it lands, exit when the run completes
+  prev=""
+  while true; do
+    s=$(gh pr checks 123 --json name,bucket)
+    cur=$(jq -r '.[] | select(.bucket!="pending") | "\\(.name): \\(.bucket)"' <<<"$s" | sort)
+    comm -13 <(echo "$prev") <(echo "$cur")
+    prev=$cur
+    jq -e 'all(.bucket!="pending")' <<<"$s" >/dev/null && break
+    sleep 30
+  done
+
+**Don't use an unbounded command for a single notification.** \`tail -f\`, \`inotifywait -m\`, and \`while true\` never exit on their own, so the monitor stays armed until timeout even after the event has fired. For "tell me when X is ready," use bash \`run_in_background\` with an \`until\` loop instead (one notification, ends in seconds). Note that \`tail -f log | grep -m 1 ...\` does *not* fix this: if the log goes quiet after the match, \`tail\` never receives SIGPIPE and the pipeline hangs anyway.
+
+**Script quality:**
+- Every pipe stage must flush per line or matches sit in its buffer unseen: \`grep\` needs \`--line-buffered\`, \`awk\` needs \`fflush()\`. \`head\` cannot flush at all — \`| head -N\` delivers nothing until N matches accumulate, then ends the stream.
+- In poll loops, handle transient failures (\`curl ... || true\`) — one failed request shouldn't kill the monitor.
+- Poll intervals: 30s+ for remote APIs (rate limits), 0.5-1s for local checks.
+- Write a specific \`description\` — it appears in every notification ("errors in deploy.log" not "watching logs").
+- Only stdout is the event stream. Stderr goes to the output file (readable via read) but does not trigger notifications — for a command you run directly (e.g. \`python train.py 2>&1 | grep --line-buffered ...\`), merge stderr with \`2>&1\` so its failures reach your filter. (No effect on \`tail -f\` of an existing log — that file only contains what its writer redirected.)
+
+**Coverage — silence is not success.** When watching a job or process for an outcome, your filter must match every terminal state, not just the happy path. A monitor that greps only for the success marker stays silent through a crashloop, a hung process, or an unexpected exit — and silence looks identical to "still running." Before arming, ask: *if this process crashed right now, would my filter emit anything?* If not, widen it.
+
+  # Wrong — silent on crash, hang, or any non-success exit
+  tail -f run.log | grep --line-buffered "elapsed_steps="
+
+  # Right — one alternation covering progress + the failure signatures you'd act on
+  tail -f run.log | grep -E --line-buffered "elapsed_steps=|Traceback|Error|FAILED|assert|Killed|OOM"
+
+For poll loops checking job state, emit on every terminal status (\`succeeded|failed|cancelled|timeout\`), not just success. If you cannot confidently enumerate the failure signatures, broaden the grep alternation rather than narrow it — some extra noise is better than missing a crashloop.
+
+**Output volume**: Every stdout line is a conversation message, so the filter should be selective — but selective means "the lines you'd act on," not "only good news." Never pipe raw logs; filter to exactly the success and failure signals you care about. Monitors that produce too many events are automatically stopped; restart with a tighter filter if this happens.
+
+Stdout lines within 200ms are batched into a single notification, so multiline output from a single event groups naturally.
+
+The script runs in the same shell environment as bash. Exit ends the watch (exit code is reported). Every monitor expires after \`timeout_ms\` (default ${minutes(DEFAULT_TIMEOUT_MS)}, at most ${minutes(CAP_TIMEOUT_MS)}): it is killed and you get one notice with the event count. Re-arm it if you still need the watch; for a long watch (PR monitoring, log tails) set \`timeout_ms\` to the maximum and re-arm on each expiry, and widen the filter if an expiry with no events was unexpected. Use task_stop to cancel early.
+**ws source** — open a WebSocket and stream each incoming text frame as an event. No shell, no polling: the server pushes, you get notified.
+
+  monitor({
+    ws: {url: 'wss://events.example.com/stream', protocols: ['v1']},
+    description: 'deploy events',
+  })
+
+Each text frame becomes one notification (multiline frames stay as one event). Binary frames are reported as \`[binary frame, N bytes]\` rather than passed through. Socket close ends the watch with the close code surfaced; errors are surfaced before close. Same rate limiting as bash — a firehose will be suppressed and eventually stopped, so subscribe to a filtered feed where one exists.
+
+Prefer this over \`command: 'websocat wss://…'\` — it avoids the extra process and line-buffering pitfalls. Use bash when you need to transform or filter frames with shell tools before they become events.`;
+
 const monitorSchema = Type.Object({
 	command: Type.Optional(
-		Type.String({
-			description:
-				"Shell command or script. Each stdout line is an event; exit ends the watch. Stderr goes to the output file but does not trigger events: merge it with 2>&1 when its failures should reach your filter.",
-		}),
+		Type.String({ description: "Shell command or script. Each stdout line is an event; exit ends the watch." }),
 	),
 	ws: Type.Optional(
 		Type.Object(
 			{
-				url: Type.String({ description: "ws:// or wss:// URL" }),
-				protocols: Type.Optional(Type.Array(Type.String())),
+				url: Type.String(),
+				protocols: Type.Optional(Type.Array(Type.String({ pattern: "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$" }))),
 			},
 			{
 				description:
-					"WebSocket to open instead of a command. Each text frame is an event; binary frames are reported as a placeholder line. Socket close ends the watch. Cannot be combined with command.",
+					"WebSocket to open. Each text frame is an event; binary frames are reported as a placeholder line. Socket close ends the watch. Cannot be combined with command.",
 			},
 		),
 	),
 	description: Type.String({
-		description: "Short description of what is being watched, shown in every event (e.g. 'errors in deploy.log').",
+		description: "Short human-readable description of what you are monitoring (shown in notifications).",
 	}),
-	timeout: Type.Optional(
-		Type.Number({
-			minimum: 1,
-			description: `Kill the monitor after this many seconds. Default ${DEFAULT_TIMEOUT_SECONDS}, max ${MAX_TIMEOUT_SECONDS}. Ignored when persistent is true.`,
-		}),
-	),
 	// Optional, not required-with-a-default: pi validates arguments but never applies
 	// schema defaults, so a required field would make omitting it an error rather than
-	// the false this documents.
-	persistent: Type.Optional(
-		Type.Boolean({
-			description:
-				"Run for the lifetime of the session (no timeout). Use for session-length watches. Stop with task_stop.",
-			default: false,
+	// the default this documents.
+	timeout_ms: Type.Optional(
+		Type.Number({
+			minimum: 1000,
+			maximum: MAX_TIMEOUT_MS,
+			default: DEFAULT_TIMEOUT_MS,
+			description: `Kill the monitor after this deadline. Default ${DEFAULT_TIMEOUT_MS}ms. Deadlines above ${CAP_TIMEOUT_MS}ms are capped to ${CAP_TIMEOUT_MS}ms. You are notified at expiry and can re-arm.`,
 		}),
 	),
 });
@@ -75,8 +147,7 @@ type MonitorParams = {
 	command?: string;
 	ws?: { url: string; protocols?: string[] };
 	description: string;
-	timeout?: number;
-	persistent?: boolean;
+	timeout_ms?: number;
 };
 
 /** Single-quoted for sh: the output file path goes into the command line. */
@@ -157,12 +228,7 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 	return {
 		name: "monitor",
 		label: "monitor",
-		description: [
-			"Start a background monitor that streams events from a long-running command or a WebSocket. Each stdout line (or text frame) becomes a message in the conversation, delivered while you keep working or waking you when idle. Exit ends the watch and is always reported.",
-			"Use it for one notification per occurrence (tail -f | grep --line-buffered ERROR; a poll loop that prints one line per change). For a single 'tell me when done' notification use bash with run_in_background instead: it notifies once on exit.",
-			"Filter to the lines you would act on, covering failure signatures as well as success: a monitor that only greps the happy path stays silent through a crash. Every pipe stage must flush per line (grep --line-buffered, awk fflush()). Monitors that produce too many events are stopped automatically.",
-			"The whole output, stderr included, is in the output file named when the monitor starts (read it with the read tool); stop it with task_stop.",
-		].join("\n"),
+		description: MONITOR_DESCRIPTION,
 		promptSnippet: "Watch a long-running command or a WebSocket and get each output line or frame as an event",
 		parameters: monitorSchema,
 		async execute(toolCallId, params: MonitorParams, _signal, _onUpdate, ctx) {
@@ -171,9 +237,8 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 				return { content: [{ type: "text", text: source.reason }], isError: true, details: undefined };
 			}
 			const command = source.kind === "command" ? source.command : undefined;
-			const timeout = params.persistent
-				? undefined
-				: Math.min(params.timeout ?? DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS);
+			// In seconds, as the registry takes it.
+			const timeout = Math.min(params.timeout_ms ?? DEFAULT_TIMEOUT_MS, CAP_TIMEOUT_MS) / 1000;
 
 			const bucket = new TokenBucket(rateLimit);
 			let suppressed = 0;
@@ -245,13 +310,13 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 						deps.sendMessage(taskExitMessage(job, toolCallId), exitDelivery(job));
 						return;
 					}
-					if (job.exit?.error?.startsWith("timeout:") && timeout !== undefined) {
+					if (job.exit?.error?.startsWith("timeout:")) {
 						// Expiry is one notice, and the kill after it is silent.
 						const events = registry.get(job.id)?.events ?? job.events;
 						const expired =
 							events === 0
 								? `[Monitor expired after ${formatDuration(timeout * 1000)} with no events delivered. Re-arm it if you still need the watch — and widen the filter if silence was unexpected.]`
-								: `[Monitor expired after ${formatDuration(timeout * 1000)} with ${events} event(s) delivered. Re-arm it if you still need the watch.]`;
+								: `[Monitor expired after ${formatDuration(timeout * 1000)} with ${events} ${events === 1 ? "event" : "events"} delivered. Re-arm it if you still need the watch.]`;
 						deps.sendMessage(monitorEventMessage(job, [...lines, expired]), EVENT_DELIVERY);
 						return;
 					}
@@ -259,10 +324,7 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 				},
 			});
 
-			const lifetime =
-				timeout === undefined
-					? "persistent — runs until TaskStop or session end"
-					: `expires in ${formatDuration(timeout * 1000)} unless the source ends first; you get one notice at expiry — re-arm if you still need the watch`;
+			const lifetime = `expires in ${formatDuration(timeout * 1000)} unless the source ends first; you get one notice at expiry — re-arm if you still need the watch`;
 			return {
 				content: [
 					{
