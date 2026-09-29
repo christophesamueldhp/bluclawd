@@ -10,13 +10,6 @@ import { recordExtensions } from "../scripts/probe-extensions.ts";
 const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts: number; events: number }> = {
 	permissions: { commands: [], tools: [], shortcuts: 1, events: 2 },
 	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 3 },
-	web: {
-		commands: ["web"],
-		tools: ["get_search_content", "source_check", "webfetch", "websearch"],
-		shortcuts: 0,
-		events: 0,
-	},
-	mcp: { commands: ["mcp"], tools: [], shortcuts: 0, events: 4 },
 	"background-bash": {
 		commands: ["tasks", "bashes"],
 		tools: ["bash", "monitor", "task_stop"],
@@ -34,7 +27,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 describe("bluclawd extension registration", () => {
 	const rec = recordExtensions();
 
-	it("registers exactly the 11 expected extensions, no more, no fewer", () => {
+	it("registers exactly the 9 expected extensions, no more, no fewer", () => {
 		expect(Object.keys(rec).sort()).toEqual(Object.keys(EXPECTED).sort());
 	});
 

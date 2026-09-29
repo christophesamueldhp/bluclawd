@@ -12,12 +12,6 @@ export interface PermissionSettings {
 	deny?: string[];
 }
 
-export interface WebsearchSettings {
-	provider?: "exa" | "brave" | "tavily";
-	apiKeyEnv?: string;
-	keyless?: boolean;
-}
-
 /**
  * Limits and models for the `agent` tool's in-process subagents.
  * CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH and
@@ -73,11 +67,6 @@ export function denyRules(sm: SettingsManager): string[] {
 	const of = (settings: unknown) =>
 		((settings as Mergeable).permissions as PermissionSettings | undefined)?.deny ?? [];
 	return [...new Set([...of(sm.getGlobalSettings()), ...of(sm.getProjectSettings())])];
-}
-
-export function websearch(sm: SettingsManager): WebsearchSettings | undefined {
-	const value = merged(sm).websearch as WebsearchSettings | undefined;
-	return value ? { ...value } : undefined;
 }
 
 export function subagents(sm: SettingsManager): SubagentSettings | undefined {

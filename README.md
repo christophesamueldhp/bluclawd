@@ -42,7 +42,7 @@ scripts/        probe-extensions.ts — headless report of what each extension r
 test/           self-contained — no monorepo, no fixtures pi doesn't publish
 ```
 
-11 extensions: `permissions`, `checkpoints`, `web`, `mcp`, `background-bash`,
+9 extensions: `permissions`, `checkpoints`, `background-bash`,
 `branding`, `diagnostics`, `agent-view`, `help`, `shell`, `vibes`.
 
 ## What it adds
@@ -53,8 +53,6 @@ Claude Code's names and behaviours, on top of pi's own commands:
 |---|---|
 | `permissions.deny`, Alt+M | deny rules block matching tool calls; the footer shows pi's `defaultProjectTrust` (`⏵⏵ always` / `⏸ ask` / `✕ never`) and Alt+M cycles it — see [Permissions](#permissions) |
 | `/tasks` | background tasks dialog (alias `/bashes`): shells (`run_in_background`, Ctrl+B on the model's running bash, or a foreground command past its `timeout`), monitors; running tasks only; Enter shows a task's output tail, `x` stops it (the model is told without a turn starting), and updates wait while the dialog is open. The model's bash is Claude Code's: `timeout` in milliseconds (2 minutes by default), a command still running then - or on Ctrl+B after 2s, or when you send a message - moves to the background instead of being killed, and the model reads a task's output file with `read`. The footer pill counts the running shells and monitors; ↓ from an empty prompt selects it and Enter opens the dialog. A shell writes its whole output to a file named in its start result and exit notification; `task_stop` stops it. A job notifies the model once when it exits, and once more if it goes quiet for 45s on what reads as an interactive prompt (`(y/n)`, `Press Enter`, …); the `monitor` tool turns each stdout line of a long-running command, or each frame of a WebSocket (`ws`), into an event that wakes the model (Claude Code's `Monitor`; stderr goes to the output file) |
-| `/mcp` | MCP servers from `mcp.json` / `.mcp.json`; project servers need `/mcp approve` (enable/disable of a project server is kept in your settings, never written into `.mcp.json`). Server instructions go into the system prompt, server prompts run as `/mcp__<server>__<prompt> args…`, `list_changed` refreshes tools live, and a result over 50KB is cut with the full text saved to a temp file. Resources: `mcp_list_resources` / `mcp_read_resource`, and `@server:uri` in a prompt attaches one; both prompt commands and `@server:` resources autocomplete in the editor (Tab after `@server:` lists them). A server can ask you for input (form elicitation) or ask your current model for a completion (sampling, confirmed per request, any provider). To confirm before chosen tools run, use an ask rule such as `Mcp(github:delete_*)`. Claude Code's timeouts (per-server `timeout`, `MCP_TOOL_TIMEOUT` ≈28h default, idle `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT` 30 min stdio / 5 min remote, `MCP_TIMEOUT` connect) and `${VAR}` / `${VAR:-default}` in `command`, `args`, `env`, `url`, `headers`; a remote server whose url or header would carry a model/cloud credential is refused |
-| `webfetch`, `websearch` | Claude Code's `WebFetch`/`WebSearch`, extended; see [Web](#web). Rules: `WebFetch(domain:example.com)` (what "don't ask again" persists), `WebSearch(<query glob>)`, checked per query in a batch |
 | `/rewind` | file checkpoints per turn; restores the files, the conversation, or both |
 | `/bash-mode`, `/stash` | bash mode (Ctrl+Shift+B or `/bash-mode`): the prompt drives a persistent shell, so `cd`, `export` and functions carry between commands; output shows below the editor instead of in the conversation, Escape leaves, Ctrl+C interrupts, Up/Down walk its commands. Alt+S stashes the prompt you are writing and brings it back into an empty editor; `/stash` inserts an older one |
 | `←` twice on an empty prompt | agent view, as Claude Code's `claude agents`: background sessions in Needs input / Working / Completed bands (ctrl+s: by directory, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing, age. Type a task + enter to start a background session (ctrl+enter: start it here), shift+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, space peeks and replies (1-9 answers a pending question), enter/→ opens a session in this window (this one keeps running in the background), alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes, ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` filters, `/resume` brings a past session back, `/model` sets the model for new ones. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press |
@@ -79,57 +77,6 @@ hand wave; `"prefersReducedMotion": true` in settings turns it off.
 Bash mode and the stash are adapted from [pi-powerline-footer](https://github.com/nicobailon/pi-powerline-footer)
 (MIT, Nico Bailon).
 
-## Web
-
-**webfetch** returns a page's main content as Markdown (Readability; the whole page
-when extraction keeps too little), a PDF's text, or an image for models that read
-images. Page text is marked untrusted. It blocks private addresses (checked at
-connect time) and reports a redirect to another host instead of following it.
-Special URLs:
-- **github.com**: through your `gh`/`git` — a repository is shallow-cloned under
-  the temp dir (tree + README, then read/grep the clone), a `/blob/` file comes from the API, issues and PRs as ordered Markdown.
-- **YouTube**: title, channel, description and the caption transcript with
-  timestamps. No video model involved; YouTube sometimes withholds captions from
-  anonymous clients, and the output says so.
-- **Next.js pages** that render client-side are read from their flight payload.
-
-Pages over 2000 lines / 50KB return their start plus a temp file with all of it.
-Every page and search result is kept for the session under an id (`f1`, `s2`):
-`get_search_content` pages through or searches it, `source_check` judges claims
-against it (supported / contradicted / unclear / missing-evidence, with a quote
-verified to be in the source), and `/web` browses it. `format: "raw"` skips
-conversion.
-
-**websearch** works with no key (Exa's hosted endpoint) and takes
-`allowed_domains`/`blocked_domains`, `recency` (`day`…`year`) and `queries` (up
-to 10 searches in one call). Providers: `exa`, `brave`, `tavily`, `jina`,
-`perplexity`, `kagi`, `serper` (keys from `EXA_API_KEY`, `BRAVE_API_KEY`, …),
-`searxng` (`websearch.searxngUrl`), `duckduckgo` (keyless). Settings:
-
-```json
-"websearch": {
-  "routing": ["brave", "searxng", "exa"],
-  "fallbackOn": ["transient", "quota", "network"],
-  "apiKeyEnvs": { "serper": "MY_SERPER_KEY" },
-  "searxngUrl": "https://searx.example.org",
-  "keyless": true
-},
-"webfetch": {
-  "timeoutSeconds": 60,
-  "allowRanges": ["198.18.0.0/15"],
-  "hosts": { "intranet.example.com": { "headersEnv": { "Cookie": "INTRANET_COOKIE" } } },
-  "fallbacks": { "remote": true }
-}
-```
-
-`routing` is tried in order: a provider without its key is skipped, and a failure
-of a kind in `fallbackOn` moves on. `allowRanges`, `hosts` and `fallbacks` are
-read from your user settings only, never a project's: they open private
-addresses, attach your secrets, or send URLs to a third party. `hosts` headers are
-sent to that exact host only and those pages are never cached. With
-`fallbacks.remote`, a page that is blocked (403/429/503) or needs JavaScript is
-read by Firecrawl (`FIRECRAWL_API_KEY`) or Jina Reader, and the output says so.
-
 ## Updating
 
 ```bash
@@ -140,8 +87,8 @@ npm test      # confirm nothing broke against the new pi
 There is no upstream merge here — this repo owns no pi source to merge into.
 The dependency this actually has on pi's internals: `ext/_shared/` vendors a
 handful of small pi functions/tables that pi does not export publicly
-(`stripAnsi`, `openBrowser`, path getters, the built-in slash-command list, a
-security-relevant path resolver, MCP auth-header resolution). Each is documented in its own file with what drifts
+(`stripAnsi`, path getters, the built-in slash-command list, a
+security-relevant path resolver). Each is documented in its own file with what drifts
 if pi changes it — mostly cosmetic (a stale `/help` line), one
 (`path-resolve.ts`) copied whole rather than trimmed because it backs
 permission rule matching. `npm run typecheck && npm test` after a pi version

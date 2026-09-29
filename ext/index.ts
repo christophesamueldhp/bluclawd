@@ -23,18 +23,14 @@ import branding from "./branding/index.ts";
 import checkpoints from "./checkpoints/index.ts";
 import diagnostics from "./diagnostics/index.ts";
 import help from "./help/index.ts";
-import mcp from "./mcp/index.ts";
 import permissions from "./permissions/index.ts";
 import shell from "./shell/index.ts";
 import vibes from "./vibes/index.ts";
-import web from "./web/index.ts";
 
 export function bluclawdExtensions(): InlineExtension[] {
 	return [
 		{ name: "permissions", factory: permissions },
 		{ name: "checkpoints", factory: checkpoints },
-		{ name: "web", factory: web },
-		{ name: "mcp", factory: mcp },
 		{ name: "background-bash", factory: backgroundBash },
 		{ name: "branding", factory: branding },
 		{ name: "diagnostics", factory: diagnostics },

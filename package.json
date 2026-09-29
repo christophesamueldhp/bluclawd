@@ -8,8 +8,6 @@
     "extensions": [
       "./ext/permissions/index.ts",
       "./ext/checkpoints/index.ts",
-      "./ext/web/index.ts",
-      "./ext/mcp/index.ts",
       "./ext/background-bash/index.ts",
       "./ext/branding/index.ts",
       "./ext/diagnostics/index.ts",
@@ -21,14 +19,8 @@
     "themes": ["./themes"]
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
-    "@mozilla/readability": "0.6.0",
     "@silvia-odwyer/photon-node": "0.3.4",
-    "diff": "8.0.4",
-    "linkedom": "0.18.13",
-    "proper-lockfile": "4.1.2",
-    "undici": "8.9.0",
-    "unpdf": "1.8.1"
+    "diff": "8.0.4"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
