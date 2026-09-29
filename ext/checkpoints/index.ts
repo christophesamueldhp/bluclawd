@@ -67,10 +67,10 @@ const SUBJECT_MAX_CHARS = 100;
  * Checkpoint refs kept for this session (the newest on the current branch);
  * older commits become normal git-GC candidates.
  */
-export const MAX_CHECKPOINT_REFS = 50;
+const MAX_CHECKPOINT_REFS = 50;
 
 /** Data persisted per checkpoint via `pi.appendEntry("checkpoint", ...)`. */
-export interface CheckpointData {
+interface CheckpointData {
 	/** Commit sha of the snapshot. */
 	sha: string;
 	/** Id of the session entry (the user message) that started the turn this checkpoint belongs to. */
@@ -376,7 +376,7 @@ function clipLines(text: string, max: number): string {
  * the safety-net entry → restore → report. Returns true only when the tree was
  * restored. `intro` is the question the confirmation opens with.
  */
-export async function restoreWithSafetyNet(
+async function restoreWithSafetyNet(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
 	targetSha: string,

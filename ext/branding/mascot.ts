@@ -80,7 +80,7 @@ export function poseGrid(pose: Pose, look?: "left" | "right"): string[] {
 	return grid.map((row) => row.join(""));
 }
 
-export const DOUBLED_COLUMNS = [2, 17];
+const DOUBLED_COLUMNS = [2, 17];
 
 function widen(grid: string[]): string[] {
 	return grid.map((row) =>

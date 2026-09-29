@@ -46,7 +46,7 @@ For commands that are harder to parse at a glance (piped commands, obscure flags
 - git reset --hard origin/main → "Discard all local changes and match remote main"
 - curl -s url | jq '.data[]' → "Fetch JSON from URL and extract data array elements"`;
 
-export interface BashDetails {
+interface BashDetails {
 	/** Set when the command went to (or started in) the background. */
 	backgroundTaskId?: string;
 }

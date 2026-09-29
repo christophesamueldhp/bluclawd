@@ -37,9 +37,9 @@ bin.mjs         convenience entry point for local runs
 themes/         the bluclawd theme
 daemon/         agent view's background-session daemon
 ext/            the feature layer
-  _shared/      settings readers/writers, process runner, vendored pi internals
+  _shared/      shared state, settings readers, vendored pi internals
 scripts/        probe-extensions.ts — headless report of what each extension registers
-test/           self-contained — no monorepo, no fixtures pi doesn't publish
+test/           self-contained — no monorepo, no fixtures
 ```
 
 9 extensions: `permissions`, `checkpoints`, `background-bash`,
@@ -87,8 +87,8 @@ npm test      # confirm nothing broke against the new pi
 There is no upstream merge here — this repo owns no pi source to merge into.
 The dependency this actually has on pi's internals: `ext/_shared/` vendors a
 handful of small pi functions/tables that pi does not export publicly
-(`stripAnsi`, path getters, the built-in slash-command list, a
-security-relevant path resolver). Each is documented in its own file with what drifts
+(`stripAnsi`, the built-in slash-command list, a security-relevant path
+resolver). Each is documented in its own file with what drifts
 if pi changes it — mostly cosmetic (a stale `/help` line), one
 (`path-resolve.ts`) copied whole rather than trimmed because it backs
 permission rule matching. `npm run typecheck && npm test` after a pi version

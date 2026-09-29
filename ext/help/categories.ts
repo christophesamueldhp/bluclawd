@@ -71,7 +71,7 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 };
 
 /** The bucket for anything not in the table above. Rendered last. */
-export const OTHER_CATEGORY = "Other";
+const OTHER_CATEGORY = "Other";
 
 export interface HelpGroup {
 	title: string;

@@ -23,7 +23,7 @@ import { deniedBy, displayRule, searchQueries } from "./rules.ts";
 
 export type ProjectTrust = "always" | "ask" | "never";
 
-export const TRUST_CYCLE: readonly ProjectTrust[] = ["always", "ask", "never"];
+const TRUST_CYCLE: readonly ProjectTrust[] = ["always", "ask", "never"];
 
 const AMBER = "\x1b[38;2;255;193;7m";
 
@@ -57,7 +57,7 @@ function governed(tool: string, input: Record<string, unknown>): { tool: string;
 	return { tool, input };
 }
 
-export function factory(pi: ExtensionAPI): void {
+function factory(pi: ExtensionAPI): void {
 	let deny: string[] = [];
 
 	function settings(ctx: ExtensionContext): SettingsManager {

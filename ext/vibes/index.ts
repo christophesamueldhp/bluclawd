@@ -5,7 +5,7 @@
 import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { pickVibe, SPINNER_VERBS } from "./vibes.ts";
 
-export function factory(pi: ExtensionAPI): void {
+function factory(pi: ExtensionAPI): void {
 	const seed = Date.now();
 	let index = 0;
 

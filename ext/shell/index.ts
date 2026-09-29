@@ -32,7 +32,7 @@ const WIDGET_OUTPUT_LINES = 6;
 type ThemeLike = Pick<Theme, "fg">;
 
 /** The widget below the editor while bash mode is on. */
-export function renderTranscriptLines(
+function renderTranscriptLines(
 	transcript: ShellTranscript,
 	width: number,
 	theme: ThemeLike,
@@ -60,7 +60,7 @@ export function renderTranscriptLines(
 	return lines.map((line) => truncateToWidth(line, Math.max(1, width), "…"));
 }
 
-export function factory(pi: ExtensionAPI): void {
+function factory(pi: ExtensionAPI): void {
 	let active = false;
 	let session: ShellSession | undefined;
 	let transcript = new ShellTranscript();

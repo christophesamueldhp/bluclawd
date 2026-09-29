@@ -104,7 +104,7 @@ function logRadiusRetry(scope: string, action: string, delayMs: number, failureC
 	);
 }
 
-export function getRadiusUrl(): string {
+function getRadiusUrl(): string {
 	return process.env.PI_RADIUS_URL || DEFAULT_RADIUS_URL;
 }
 
@@ -122,7 +122,7 @@ function getStoredRadiusCredential(): OAuthCredential | undefined {
 	return credential?.type === "oauth" ? credential : undefined;
 }
 
-export function getRadiusAccessToken(): string {
+function getRadiusAccessToken(): string {
 	const storedCredential = getStoredRadiusCredential();
 	if (typeof storedCredential?.access === "string" && storedCredential.access) {
 		return storedCredential.access;
@@ -140,7 +140,7 @@ export function isRadiusEnabled(): boolean {
 	return !!getStoredRadiusCredential()?.access || !!process.env.RADIUS_API_KEY;
 }
 
-export class RadiusPresence {
+class RadiusPresence {
 	private machineHeartbeatTimer?: NodeJS.Timeout;
 	private machineHeartbeatIntervalMs = 0;
 	private machineConsecutiveNotFoundCount = 0;

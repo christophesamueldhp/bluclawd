@@ -3,7 +3,7 @@ import { recordExtensions } from "../scripts/probe-extensions.ts";
 
 /**
  * Turns `probe-extensions.ts`'s printed table into an assertion. This is the
- * check sync-pi.sh exists to run on every upstream merge: an upstream rename
+ * check to run after every pi version bump: an upstream rename
  * that breaks a factory at registration time typechecks fine (the type it
  * changed may still structurally match) and only throws here.
  */

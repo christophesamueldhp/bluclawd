@@ -19,3 +19,12 @@ export function sharedRef<T>(key: string, initial: T): { get(): T; set(value: T)
 		},
 	};
 }
+
+/** Calls every listener; one that throws does not stop the rest. */
+export function notifyListeners(listeners: Iterable<() => void>): void {
+	for (const listener of listeners) {
+		try {
+			listener();
+		} catch {}
+	}
+}

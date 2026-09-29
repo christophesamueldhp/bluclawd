@@ -8,25 +8,8 @@
  */
 import type { SettingsManager } from "@earendil-works/pi-coding-agent";
 
-export interface PermissionSettings {
+interface PermissionSettings {
 	deny?: string[];
-}
-
-/**
- * Limits and models for the `agent` tool's in-process subagents.
- * CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS, CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH and
- * CLAUDE_CODE_SUBAGENT_MODEL override these when set.
- */
-export interface SubagentSettings {
-	/** Subagents running at once, across the session. default: 20 */
-	maxConcurrent?: number;
-	/** Layers below the main session that may still spawn: 1 = children cannot delegate. default: 3 */
-	maxDepth?: number;
-	/** The model when neither the call nor the definition names one. default: the parent's */
-	model?: string;
-	/** Short model names `model` may use, e.g. `{ "sonnet": "opencode-go/kimi-k2" }`.
-	 *  Provider-neutral on purpose: nothing here names a vendor unless the user does. */
-	models?: Record<string, string>;
 }
 
 type Mergeable = Record<string, unknown>;
@@ -49,11 +32,6 @@ function merged(sm: SettingsManager): Mergeable {
 	return out;
 }
 
-export function fastModel(sm: SettingsManager): string | undefined {
-	const value = merged(sm).fastModel;
-	return typeof value === "string" ? value : undefined;
-}
-
 /** "Reduce motion": no mascot animation. */
 export function prefersReducedMotion(sm: SettingsManager): boolean {
 	return merged(sm).prefersReducedMotion === true;
@@ -67,9 +45,4 @@ export function denyRules(sm: SettingsManager): string[] {
 	const of = (settings: unknown) =>
 		((settings as Mergeable).permissions as PermissionSettings | undefined)?.deny ?? [];
 	return [...new Set([...of(sm.getGlobalSettings()), ...of(sm.getProjectSettings())])];
-}
-
-export function subagents(sm: SettingsManager): SubagentSettings | undefined {
-	const value = merged(sm).subagents as SubagentSettings | undefined;
-	return value ? structuredClone(value) : undefined;
 }

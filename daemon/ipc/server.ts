@@ -44,7 +44,7 @@ export interface IpcRequestHandler {
 }
 
 /** Stamp the daemon's version/buildId onto a reply to the initial request/response
- *  handshake (IMPROVEMENT-PLAN.md §4.5/§5.3) — not the mid-stream RPC bridge messages,
+ *  handshake — not the mid-stream RPC bridge messages,
  *  which aren't part of that handshake. */
 function withDaemonMeta<T extends ServerResponse>(response: T): T {
 	return { ...response, version: VERSION, buildId: BUILD_ID };

@@ -1,12 +1,12 @@
 import { spawn } from "node:child_process";
-import { type Dirent, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getSocketPath, newestMtimeMs } from "../../daemon/paths.ts";
 
 export type AgentActivity = "idle" | "working" | "awaiting_input";
-export type InstanceStatus = "starting" | "online" | "stopping" | "stopped" | "error";
+type InstanceStatus = "starting" | "online" | "stopping" | "stopped" | "error";
 
 export interface InstanceSummary {
 	id: string;
@@ -80,18 +80,8 @@ interface AnyResponse {
 	buildId?: string;
 }
 
-/**
- * Mirror of packages/server/src/config.ts getSocketPath(); it must stay in lockstep or agent view
- * silently fails to find a running daemon.
- */
-export function orchestratorSocketPath(): string {
-	const envDir = process.env.PI_SERVER_DIR;
-	const dir = envDir ?? join(process.env.PI_CONFIG_DIR ?? join(homedir(), ".pi"), "server");
-	return join(dir, "server.sock");
-}
-
 /** Path to the daemon's CLI entry, for the ensureDaemon() auto-start. */
-export function daemonCliPath(): string {
+function daemonCliPath(): string {
 	// This package ships its own daemon (daemon/cli.ts, run by node's native type stripping);
 	// `@earendil-works/pi-server` is not a dependency here.
 	return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "daemon", "cli.ts");
@@ -129,35 +119,6 @@ export function piPackageRoot(entry: string | undefined = process.argv[1]): stri
 }
 
 /**
- * Newest mtime (ms) of any file under `dir`, recursive. Mirrors packages/server/src/config.ts's
- * `newestMtimeMs` (a different npm package, no shared module); exported so
- * scripts/check-mirror-drift.mjs can invoke it directly.
- */
-export function newestMtimeMs(dir: string, depth = 0): number {
-	if (depth > 4) return 0;
-	let entries: Dirent[];
-	try {
-		entries = readdirSync(dir, { withFileTypes: true });
-	} catch {
-		return 0;
-	}
-	let newest = 0;
-	for (const entry of entries) {
-		const full = join(dir, entry.name);
-		if (entry.isDirectory()) {
-			newest = Math.max(newest, newestMtimeMs(full, depth + 1));
-		} else if (entry.isFile()) {
-			try {
-				newest = Math.max(newest, statSync(full).mtimeMs);
-			} catch {
-				// racing delete — skip
-			}
-		}
-	}
-	return newest;
-}
-
-/**
  * The build id a freshly spawned daemon would report now, from this package's daemon/ directory.
  * Compared with a running daemon's self-reported `buildId` to catch a daemon older than the code
  * on disk — a local rebuild does not bump the version, so semver alone would miss it.
@@ -176,7 +137,7 @@ export function currentDaemonBuildId(): string {
 export class OrchestratorClient {
 	private readonly socketPath: string;
 
-	constructor(socketPath: string = orchestratorSocketPath()) {
+	constructor(socketPath: string = getSocketPath()) {
 		this.socketPath = socketPath;
 	}
 

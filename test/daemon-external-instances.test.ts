@@ -49,8 +49,7 @@ describe("external (self-registered) instances", () => {
 /**
  * The client's own heartbeat cadence (`HEARTBEAT_MS`, `ext/agent-view/self-registration.ts` —
  * a different file, no shared module to import from) times out against THIS
- * module's TTL. Mirrored here as a literal, matching the fork branch's existing
- * precedent for documented cross-module duplication rather than a real import.
+ * module's TTL. Mirrored here as a literal rather than a real import.
  */
 describe("external instance TTL vs the client's heartbeat cadence", () => {
 	const OLD_HEARTBEAT_MS = 5000; // the pre-fix interval, kept here only to prove the old bug
