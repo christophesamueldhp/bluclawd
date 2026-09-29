@@ -21,8 +21,8 @@ describe("monitor tool", () => {
 	beforeEach(() => vi.useFakeTimers());
 	afterEach(() => vi.useRealTimers());
 
-	it("accepts a call that omits persistent", () => {
-		// pi validates but never applies schema defaults, so a required `persistent`
+	it("accepts a call that omits timeout_ms", () => {
+		// pi validates but never applies schema defaults, so a required `timeout_ms`
 		// would turn the documented default into a validation error.
 		const { tool } = harness(() => new Promise(() => {}));
 		const args = validateToolArguments(tool, {
@@ -38,7 +38,7 @@ describe("monitor tool", () => {
 		const { tool, registry, id } = harness(() => new Promise(() => {}));
 		const result = await tool.execute(
 			"c1",
-			{ command: "tail -f x", description: "x errors", persistent: false },
+			{ command: "tail -f x", description: "x errors" },
 			undefined as any,
 			undefined,
 		);
@@ -57,7 +57,7 @@ describe("monitor tool", () => {
 			return { exitCode: 0 };
 		};
 		const { tool, sent } = harness(exec);
-		await tool.execute("c1", { command: "x", description: "d", persistent: false }, undefined as any, undefined);
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
 		await vi.advanceTimersByTimeAsync(600);
 		expect(sent).toHaveLength(2);
 		expect(sent[0].message.content).toContain('<summary>Monitor event: "d"</summary>\n<event>a\nb</event>');
@@ -71,7 +71,7 @@ describe("monitor tool", () => {
 			return { exitCode: 3 };
 		};
 		const { tool, sent, registry, id } = harness(exec);
-		await tool.execute("c1", { command: "x", description: "d", persistent: false }, undefined as any, undefined);
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
 		await vi.advanceTimersByTimeAsync(0);
 		expect(sent).toHaveLength(1);
 		expect(sent[0].message.content).toContain(
@@ -84,7 +84,7 @@ describe("monitor tool", () => {
 	it("keeps the event count at 0 when a monitor exits with no leftover lines", async () => {
 		const exec: BackgroundExec = async () => ({ exitCode: 0 });
 		const { tool, registry, id, sent } = harness(exec);
-		await tool.execute("c1", { command: "x", description: "d", persistent: false }, undefined as any, undefined);
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
 		await vi.advanceTimersByTimeAsync(0);
 		expect(registry.get(id())?.events).toBe(0);
 		expect(sent[0].message.content).toContain('Monitor "d" ended without producing output (exit 0)');
@@ -98,7 +98,7 @@ describe("monitor tool", () => {
 				signal?.addEventListener("abort", () => reject(new Error("aborted")));
 			});
 		const { tool, sent, registry, id } = harness(exec);
-		await tool.execute("c1", { command: "x", description: "d", persistent: false }, undefined as any, undefined);
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
 		for (let i = 0; i < 7; i++) {
 			onDataRef(Buffer.from(`${i}\n`));
 			await vi.advanceTimersByTimeAsync(250);
@@ -190,33 +190,39 @@ describe("monitor tool", () => {
 		expect(sent[0].message.content).toContain('<summary>Task "e" was stopped by the user</summary>');
 	});
 
-	it("passes the timeout through unless persistent, clamped to the maximum", async () => {
+	it("passes timeout_ms through in seconds, capped at 30 minutes", async () => {
 		const seen: (number | undefined)[] = [];
 		const exec: BackgroundExec = (_c, _d, { timeout }) => {
 			seen.push(timeout);
 			return new Promise(() => {});
 		};
 		const { tool } = harness(exec);
-		await tool.execute("c1", { command: "x", description: "d", persistent: false }, undefined as any, undefined);
-		await tool.execute(
-			"c2",
-			{ command: "x", description: "d", persistent: false, timeout: 60 },
-			undefined as any,
-			undefined,
+		await tool.execute("c1", { command: "x", description: "d" }, undefined as any, undefined);
+		await tool.execute("c2", { command: "x", description: "d", timeout_ms: 60_000 }, undefined as any, undefined);
+		await tool.execute("c3", { command: "x", description: "d", timeout_ms: 3_600_000 }, undefined as any, undefined);
+		expect(seen).toEqual([300, 60, 1800]);
+	});
+
+	it("refuses a timeout_ms past an hour or under a second, as Claude Code's schema does", () => {
+		const { tool } = harness(() => new Promise(() => {}));
+		const call = (timeout_ms: number) => () =>
+			validateToolArguments(tool, {
+				type: "toolCall",
+				id: "c1",
+				name: "monitor",
+				arguments: { command: "x", description: "d", timeout_ms },
+			});
+		expect(call(3_600_001)).toThrow();
+		expect(call(999)).toThrow();
+		expect(call(1000)).not.toThrow();
+	});
+
+	it("carries no persistent parameter: every monitor expires", () => {
+		const { tool } = harness(() => new Promise(() => {}));
+		expect(Object.keys(tool.parameters.properties)).toEqual(["command", "ws", "description", "timeout_ms"]);
+		expect(tool.description).toContain(
+			"Every monitor expires after `timeout_ms` (default 5 minutes, at most 30 minutes)",
 		);
-		await tool.execute(
-			"c3",
-			{ command: "x", description: "d", persistent: true, timeout: 60 },
-			undefined as any,
-			undefined,
-		);
-		await tool.execute(
-			"c4",
-			{ command: "x", description: "d", persistent: false, timeout: 7200 },
-			undefined as any,
-			undefined,
-		);
-		expect(seen).toEqual([300, 60, undefined, 3600]);
 	});
 });
 
