@@ -53,7 +53,6 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 	trust: "Permissions & safety",
 
 	// Extensions & integrations
-	mcp: "Extensions & integrations",
 	agents: "Extensions & integrations",
 	login: "Extensions & integrations",
 	logout: "Extensions & integrations",

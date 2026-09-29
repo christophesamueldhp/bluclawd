@@ -7,7 +7,6 @@
 export const STATUS_KEYS = {
 	mode: "1-mode",
 	tasks: "2-tasks",
-	mcp: "3-mcp",
 	shell: "3-shell",
 	stash: "3-stash",
 	subagents: "8-subagents",
