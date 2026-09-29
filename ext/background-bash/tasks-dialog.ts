@@ -45,8 +45,8 @@ const POINTER = "❯";
 /** A running task's icon (`⏺` on macOS, `●` elsewhere). */
 const RUNNING_ICON = process.platform === "darwin" ? "⏺" : "●";
 
-export type TaskKind = "shell" | "monitor" | "agent";
-export type TaskState = "running" | "completed" | "failed" | "killed";
+type TaskKind = "shell" | "monitor" | "agent";
+type TaskState = "running" | "completed" | "failed" | "killed";
 
 export interface TaskRow {
 	id: string;
@@ -86,7 +86,7 @@ export function taskRows(owner: string | undefined): TaskRow[] {
 }
 
 /** `512 bytes`, `8.2KB`, `3MB`: a trailing `.0` is dropped. */
-export function formatSize(bytes: number): string {
+function formatSize(bytes: number): string {
 	const kb = bytes / 1024;
 	if (kb < 1) return `${bytes} bytes`;
 	if (kb < 1024) return `${kb.toFixed(1).replace(/\.0$/, "")}KB`;
@@ -103,7 +103,7 @@ const clean = (s: string) => stripAnsi(s).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "
  * last ten newline-separated pieces, empty ones dropped, so output that ends in a
  * newline shows nine.
  */
-export function outputTail(job: BackgroundJobInfo): { lines: string[]; size: number; read: number } {
+function outputTail(job: BackgroundJobInfo): { lines: string[]; size: number; read: number } {
 	let text = "";
 	let size = 0;
 	if (job.outputFile) {
@@ -137,7 +137,7 @@ export function outputTail(job: BackgroundJobInfo): { lines: string[]; size: num
 }
 
 /** Stops a task as the user; the model is told. */
-export function stopTask(row: TaskRow): void {
+function stopTask(row: TaskRow): void {
 	if (row.kind === "agent") agentTasks()?.stop(row.id);
 	else backgroundBashJobs.kill(row.id, { byUser: true });
 }

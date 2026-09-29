@@ -49,7 +49,7 @@ const DONE_FLASH_MS = 2500;
 const LEFT_ARM_MS = 2000;
 const STATUS_KEY = STATUS_KEYS.agents;
 /** The command ←← dispatches; not meant to be typed. */
-export const AGENT_VIEW_COMMAND = "agent-view";
+const AGENT_VIEW_COMMAND = "agent-view";
 
 /** Autocomplete without the agent view command. */
 export function withoutAgentViewCommand(current: AutocompleteProvider): AutocompleteProvider {

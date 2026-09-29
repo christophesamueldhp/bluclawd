@@ -6,7 +6,7 @@
  * then an earlier command may be what failed, and the plain rule applies.
  */
 
-export type ExitStatus = "completed" | "failed";
+type ExitStatus = "completed" | "failed";
 
 export interface ExitClass {
 	status: ExitStatus;

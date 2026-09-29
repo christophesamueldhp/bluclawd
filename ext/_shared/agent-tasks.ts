@@ -5,7 +5,7 @@
  * instance publishes one (a nested child has no background runs).
  */
 
-import { sharedRef } from "./global-state.ts";
+import { notifyListeners, sharedRef } from "./global-state.ts";
 
 export interface AgentTaskInfo {
 	id: string;
@@ -38,12 +38,8 @@ export function agentTasks(): AgentTaskSource | undefined {
 	return state.source;
 }
 
-export function agentTasksChanged(): void {
-	for (const listener of state.listeners) {
-		try {
-			listener();
-		} catch {}
-	}
+function agentTasksChanged(): void {
+	notifyListeners(state.listeners);
 }
 
 export function subscribeAgentTasks(listener: () => void): () => void {

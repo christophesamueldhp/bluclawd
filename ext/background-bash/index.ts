@@ -19,7 +19,7 @@ import type {
 	InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { createLocalBashOperations, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { Box, type Component, Container, matchesKey, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import { Box, type Component, matchesKey, Text, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { stripAnsi } from "../_shared/ansi.ts";
@@ -31,6 +31,7 @@ import {
 	shellTaskStop,
 } from "../_shared/background-bash.ts";
 import { backgroundTasksDisabled } from "../_shared/bash-limits.ts";
+import { commandBlock } from "../_shared/command-block.ts";
 import { detachAll, runningForegroundShells, subscribeForegroundShells } from "../_shared/foreground-shells.ts";
 import { sharedRef } from "../_shared/global-state.ts";
 import { clearMainSession, mainSession, setMainSession } from "../_shared/main-session.ts";
@@ -76,14 +77,6 @@ interface TasksData {
 	jobs: TaskSnapshot[];
 }
 
-/** A blank line, then the block indented by one column — pi's own command-output shape. */
-function block(lines: string[]): Container {
-	const container = new Container();
-	container.addChild(new Spacer(1));
-	container.addChild(new Text(lines.join("\n"), 1, 0));
-	return container;
-}
-
 /** The dot for a message line (`⏺` on macOS, `●` elsewhere). */
 const NOTIFICATION_DOT = process.platform === "darwin" ? "⏺" : "●";
 const NOTIFICATION_DOT_COLOR: Record<string, "success" | "error" | "warning" | undefined> = {
@@ -118,7 +111,7 @@ export function tasksPillLabel(rows: TaskRow[]): string | undefined {
 }
 
 /** The Ctrl+B hint; under tmux Ctrl+B is the prefix, so it takes two presses. */
-export function backgroundHint(): string {
+function backgroundHint(): string {
 	const key = process.env.TMUX ? "ctrl+b ctrl+b (twice)" : "ctrl+b";
 	return `(${key} to run in background)`;
 }
@@ -389,7 +382,7 @@ const backgroundBash: InlineExtension = {
 			const d = message.details;
 			if (!d) return undefined;
 			const color = NOTIFICATION_DOT_COLOR[d.state ?? ""];
-			return block([`${color ? theme.fg(color, NOTIFICATION_DOT) : NOTIFICATION_DOT} ${clean(d.end)}`]);
+			return commandBlock([`${color ? theme.fg(color, NOTIFICATION_DOT) : NOTIFICATION_DOT} ${clean(d.end)}`]);
 		});
 
 		pi.registerEntryRenderer<TasksData>("bluclawd:tasks", (entry, _options, theme) => {
@@ -414,7 +407,7 @@ const backgroundBash: InlineExtension = {
 				lines.push("");
 				lines.push(theme.fg("dim", "Read output: the output file · stop: task_stop. monitor starts a watch."));
 			}
-			return block(lines);
+			return commandBlock(lines);
 		});
 
 		for (const name of ["tasks", "bashes"]) {

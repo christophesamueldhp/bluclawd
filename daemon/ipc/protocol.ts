@@ -95,7 +95,7 @@ export interface AnswerRequest {
 	response: RpcExtensionUIResponse;
 }
 
-export interface RequestMap {
+interface RequestMap {
 	spawn: SpawnRequest;
 	list: ListRequest;
 	stop: StopRequest;
@@ -137,13 +137,13 @@ export interface InstanceSummary {
 	needs?: SessionNeeds;
 }
 
-export interface ResponseBase {
+interface ResponseBase {
 	ok: boolean;
 	error?: string;
 	/**
-	 * Echoed on every response (IMPROVEMENT-PLAN.md §4.5/§5.3) so a client can detect it is
-	 * talking to a stale — already-running, since-rebuilt — daemon. `version` is the daemon's
-	 * package.json semver; `buildId` is the newest mtime across its own installed dist/ tree,
+	 * Echoed on every response so a client can detect it is talking to a stale —
+	 * already-running, since-changed — daemon. `version` is the daemon's package.json
+	 * semver; `buildId` is the newest mtime across its own daemon/ tree,
 	 * because a local rebuild during development does not bump `version` but does change what
 	 * code is on disk. A client compares `buildId` against what a FRESH spawn would report
 	 * right now, not against its own version, since the two processes are different npm
@@ -207,7 +207,7 @@ export interface ErrorResponse extends ResponseBase {
 	error: string;
 }
 
-export interface ResponseMap {
+interface ResponseMap {
 	spawn: SpawnResponse;
 	list: ListResponse;
 	stop: StopResponse;
@@ -224,20 +224,9 @@ export interface ResponseMap {
 }
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;
-export type RpcClientMessage = RpcCommand | RpcExtensionUIResponse;
-export type RpcServerMessage =
-	| RpcReadyResponse
-	| RpcResponse
-	| AgentSessionEvent
-	| RpcExtensionUIRequest
-	| ErrorResponse;
+type RpcClientMessage = RpcCommand | RpcExtensionUIResponse;
+type RpcServerMessage = RpcReadyResponse | RpcResponse | AgentSessionEvent | RpcExtensionUIRequest | ErrorResponse;
 export type ProtocolMessage = ServerRequest | ServerResponse | RpcClientMessage | RpcServerMessage;
-
-export type ResponseFor<T extends ServerRequest> = T extends { type: infer K }
-	? K extends keyof ResponseMap
-		? ResponseMap[K] | ErrorResponse
-		: ErrorResponse
-	: ErrorResponse;
 
 export function encodeMessage(message: ProtocolMessage): string {
 	return `${JSON.stringify(message)}\n`;

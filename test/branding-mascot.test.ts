@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import photon from "@silvia-odwyer/photon-node";
 import { describe, expect, it } from "vitest";
-import { loadPhoton } from "../ext/_shared/photon.ts";
 import {
 	BODY_COLOR,
 	cellValues,
@@ -96,8 +96,6 @@ describe("mascot source", () => {
 	it("is the grid mascot.svg draws, pixel for pixel", async () => {
 		const svg = readFileSync(new URL("../ext/branding/mascot.svg", import.meta.url), "utf8");
 		const [mask, color] = [...svg.matchAll(/base64,([A-Za-z0-9+/=]+)/g)].map((m) => Buffer.from(m[1]!, "base64"));
-		const photon = await loadPhoton();
-		if (!photon) throw new Error("photon unavailable");
 		const decode = (bytes: Buffer) => {
 			const image = photon.PhotonImage.new_from_byteslice(bytes);
 			try {

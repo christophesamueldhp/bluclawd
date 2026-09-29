@@ -12,13 +12,13 @@
  */
 
 import { type BackgroundExec, type BackgroundJobInfo, backgroundBashJobs } from "./background-bash.ts";
-import { sharedRef } from "./global-state.ts";
+import { notifyListeners, sharedRef } from "./global-state.ts";
 
 /** Why a foreground command moved to the background: Ctrl+B, its timeout, or a message the user sent. */
 export type DetachReason = "user" | "timeout" | "message";
 
 /** A foreground command counts as a task only after this long; before that, neither Ctrl+B nor a message moves it. */
-export const FOREGROUND_TASK_AFTER_MS = 2000;
+const FOREGROUND_TASK_AFTER_MS = 2000;
 
 export interface ForegroundShell {
 	command: string;
@@ -35,11 +35,7 @@ const state = sharedRef("foregroundShells", {
 }).get();
 
 function changed(): void {
-	for (const listener of state.listeners) {
-		try {
-			listener();
-		} catch {}
-	}
+	notifyListeners(state.listeners);
 }
 
 export function runningForegroundShells(): ForegroundShell[] {

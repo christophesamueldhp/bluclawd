@@ -80,7 +80,7 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 	};
 }
 
-export function needsText(needs: PendingNeeds): string {
+function needsText(needs: PendingNeeds): string {
 	return needs.message ? `${needs.title} — ${needs.message}` : needs.title;
 }
 
@@ -140,13 +140,13 @@ export interface Band {
 	fixed: boolean;
 }
 
-export const STATE_BANDS = [
+const STATE_BANDS = [
 	{ key: "needs", title: "Needs input" },
 	{ key: "working", title: "Working" },
 	{ key: "completed", title: "Completed" },
 ] as const;
 
-export function stateBandOf(row: AgentRow): "needs" | "working" | "completed" {
+function stateBandOf(row: AgentRow): "needs" | "working" | "completed" {
 	if (row.state === "needs" || row.state === "idle") return "needs";
 	if (row.state === "working") return "working";
 	return "completed";
@@ -157,7 +157,7 @@ function stamp(iso: string | undefined): number {
 }
 
 /** Manual order first (shift+↑/↓), then the most recently active. */
-export function sortRows(rows: AgentRow[]): AgentRow[] {
+function sortRows(rows: AgentRow[]): AgentRow[] {
 	return [...rows].sort((a, b) => {
 		if (a.sortOrder !== undefined || b.sortOrder !== undefined) {
 			return (a.sortOrder ?? Number.MAX_SAFE_INTEGER) - (b.sortOrder ?? Number.MAX_SAFE_INTEGER);

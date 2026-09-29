@@ -30,7 +30,7 @@ const VERB: Record<string, string> = {
 	websearch: "WebSearch",
 };
 
-export function isMcpToolName(tool: string): boolean {
+function isMcpToolName(tool: string): boolean {
 	return /^mcp__.+__.+$/.test(tool);
 }
 
@@ -78,7 +78,7 @@ export function searchQueries(input: Record<string, unknown>): string[] {
  * grep/find/ls with no `path` this is ""; `deniedBy()` substitutes the cwd so omitting
  * the path cannot escape a rule.
  */
-export function subject(tool: string, input: Record<string, unknown>): string {
+function subject(tool: string, input: Record<string, unknown>): string {
 	if (isMcpToolName(tool)) {
 		const m = /^mcp__(.+?)__(.+)$/.exec(tool);
 		return m ? `${m[1]}:${m[2]}` : "";

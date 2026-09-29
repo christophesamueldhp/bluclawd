@@ -137,7 +137,7 @@ export function exitDelivery(job: BackgroundJobInfo): EventDelivery {
 export const MONITOR_MESSAGE_TYPE = "bluclawd:monitor";
 export const TASK_EXIT_MESSAGE_TYPE = "bluclawd:task-exit";
 
-export type EventStatus = "success" | "error" | "warning";
+type EventStatus = "success" | "error" | "warning";
 
 export interface MonitorMessageDetails {
 	id: string;
@@ -196,7 +196,7 @@ const MAX_NOTIFICATION_CHARS = 100_000;
 /** How far past the cap a notification may run before it is cut. */
 const CAP_SLACK_CHARS = 1024;
 
-export function capNotification(text: string): string {
+function capNotification(text: string): string {
 	if (text.length <= MAX_NOTIFICATION_CHARS + CAP_SLACK_CHARS) return text;
 	const head = Math.floor(MAX_NOTIFICATION_CHARS / 2);
 	const tail = MAX_NOTIFICATION_CHARS - head;

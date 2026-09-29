@@ -11,7 +11,7 @@
 
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, Text } from "@earendil-works/pi-tui";
+import { commandBlock } from "../_shared/command-block.ts";
 import { isUsingSubscription } from "../_shared/session-usage.ts";
 
 /** Snapshot rendered by `/status`. Plain data so it survives in the session file. */
@@ -68,13 +68,6 @@ interface ContextData {
 	systemPromptChars?: number;
 }
 
-function block(lines: string[]): Container {
-	const container = new Container();
-	container.addChild(new Spacer(1));
-	container.addChild(new Text(lines.join("\n"), 1, 0));
-	return container;
-}
-
 function formatTokens(value: number): string {
 	if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
 	if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
@@ -90,7 +83,7 @@ const diagnostics: InlineExtension = {
 
 			if (!data?.model || data.contextWindow === undefined) {
 				lines.push("Context usage is unknown (no model selected or the model has no context window).");
-				return block(lines);
+				return commandBlock(lines);
 			}
 
 			lines.push(
@@ -99,7 +92,7 @@ const diagnostics: InlineExtension = {
 
 			if (data.tokens === null || data.tokens === undefined || data.percent === null || data.percent === undefined) {
 				lines.push(`${theme.fg("dim", "In context:")} unknown until the next assistant response`);
-				return block(lines);
+				return commandBlock(lines);
 			}
 
 			const filled = Math.min(BAR_WIDTH, Math.max(0, Math.round((data.percent / 100) * BAR_WIDTH)));
@@ -119,11 +112,11 @@ const diagnostics: InlineExtension = {
 			lines.push(
 				`${theme.fg("dim", "Free:")} ${formatTokens(Math.max(data.contextWindow - data.tokens, 0))} (${(100 - data.percent).toFixed(1)}%)`,
 			);
-			return block(lines);
+			return commandBlock(lines);
 		});
 
 		pi.registerEntryRenderer<StatusData>("bluclawd:status", (entry, _options, theme) =>
-			block(entry.data ? formatStatus(entry.data, theme) : []),
+			commandBlock(entry.data ? formatStatus(entry.data, theme) : []),
 		);
 
 		pi.registerCommand("status", {

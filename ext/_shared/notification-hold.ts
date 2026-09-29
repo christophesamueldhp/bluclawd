@@ -4,7 +4,7 @@
  * The panel and the senders live in separate module graphs, so the hold is a sharedRef.
  */
 
-import { sharedRef } from "./global-state.ts";
+import { notifyListeners, sharedRef } from "./global-state.ts";
 
 const state = sharedRef("notificationHold", {
 	holds: 0,
@@ -13,11 +13,7 @@ const state = sharedRef("notificationHold", {
 }).get();
 
 function changed(): void {
-	for (const listener of state.listeners) {
-		try {
-			listener();
-		} catch {}
-	}
+	notifyListeners(state.listeners);
 }
 
 /** Holds updates until the returned release is called (once per hold). */

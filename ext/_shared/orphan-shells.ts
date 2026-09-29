@@ -26,7 +26,7 @@ export interface ShellStartRecord {
 	outputFile?: string;
 }
 
-export interface ShellEndRecord {
+interface ShellEndRecord {
 	taskId: string;
 }
 

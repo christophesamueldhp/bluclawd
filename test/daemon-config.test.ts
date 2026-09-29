@@ -2,13 +2,12 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { newestMtimeMs } from "../daemon/config.ts";
+import { newestMtimeMs } from "../daemon/paths.ts";
 
 /**
  * The build identifier must reflect a rebuild that only touches a NESTED file
- * (e.g. handler.ts, not the entry cli.ts) — dist/ is tsgo output, one .js per
- * source file, not a bundle, so stat'ing only the entry file would miss the
- * common case of editing anything else and rebuilding.
+ * (e.g. handler.ts, not the entry cli.ts): the daemon runs from its source
+ * files, so stat'ing only the entry file would miss editing anything else.
  */
 describe("newestMtimeMs", () => {
 	let tempDir: string;

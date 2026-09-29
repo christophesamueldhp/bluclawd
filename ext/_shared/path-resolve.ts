@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
 
-export interface PathInputOptions {
+interface PathInputOptions {
 	/** Trim leading/trailing whitespace before normalization. */
 	trim?: boolean;
 	/** Expand leading `~` to a home directory. Defaults to true. */
@@ -35,7 +35,7 @@ function normalizeWindowsShellPath(filePath: string): string {
 	return `${match[1].toUpperCase()}:\\${suffix ?? ""}`;
 }
 
-export function normalizePath(input: string, options: PathInputOptions = {}): string {
+function normalizePath(input: string, options: PathInputOptions = {}): string {
 	let normalized = options.trim ? input.trim() : input;
 	if (options.normalizeUnicodeSpaces) {
 		normalized = normalized.replace(UNICODE_SPACES, " ");
@@ -62,7 +62,7 @@ export function normalizePath(input: string, options: PathInputOptions = {}): st
 	return normalized;
 }
 
-export function resolvePath(input: string, baseDir: string = process.cwd(), options: PathInputOptions = {}): string {
+function resolvePath(input: string, baseDir: string = process.cwd(), options: PathInputOptions = {}): string {
 	const normalized = normalizePath(input, options);
 	const normalizedBaseDir = normalizePath(baseDir);
 	return isAbsolute(normalized) ? nodeResolvePath(normalized) : nodeResolvePath(normalizedBaseDir, normalized);
