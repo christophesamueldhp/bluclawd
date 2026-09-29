@@ -7,7 +7,6 @@
 export const STATUS_KEYS = {
 	mode: "1-mode",
 	tasks: "2-tasks",
-	shell: "3-shell",
 	subagents: "8-subagents",
 	agents: "9-agents",
 } as const;

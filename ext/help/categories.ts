@@ -37,7 +37,6 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 	import: "Session",
 	share: "Session",
 	copy: "Session",
-	"bash-mode": "Session",
 	theme: "App",
 
 	// Code & review

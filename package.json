@@ -13,7 +13,6 @@
       "./ext/diagnostics/index.ts",
       "./ext/agent-view/index.ts",
       "./ext/help/index.ts",
-      "./ext/shell/index.ts",
       "./ext/vibes/index.ts"
     ],
     "themes": ["./themes"]
