@@ -461,6 +461,37 @@ export class ServerSupervisor {
 		}
 	}
 
+	/**
+	 * Keep a session that left its window (pi exited while it was idle) as a stopped row, with no
+	 * process: it resumes from its `.jsonl` when opened or replied to. A row the daemon already has
+	 * for that file is reused, so the session keeps its id, name and pin.
+	 */
+	saveInstance(options: { cwd: string; label?: string; sessionFile: string }): InstanceRecord {
+		for (const live of this.liveInstances.values()) {
+			if (live.record.sessionFile === options.sessionFile) return cloneInstance(live.record);
+		}
+		const now = new Date().toISOString();
+		const previous = loadInstances().find((instance) => instance.sessionFile === options.sessionFile);
+		const tail = readSessionTail(options.sessionFile);
+		const record: InstanceRecord = {
+			...previous,
+			id: previous?.id ?? randomUUID(),
+			status: "stopped",
+			cwd: previous?.cwd ?? options.cwd,
+			createdAt: previous?.createdAt ?? now,
+			lastSeenAt: now,
+			label: previous?.label ?? options.label,
+			sessionFile: options.sessionFile,
+			detail: tail?.detail ?? previous?.detail,
+			outcome: tail?.outcome ?? "stopped",
+			question: tail?.question,
+			turns: previous?.turns ?? tail?.turns,
+			finishedAt: now,
+		};
+		upsertInstance(record);
+		return cloneInstance(record);
+	}
+
 	/** Stop the process; the row stays (Stopped, or Done/Failed if the run had already ended). */
 	async stopInstance(instanceId: string): Promise<InstanceRecord | undefined> {
 		const live = this.liveInstances.get(instanceId);

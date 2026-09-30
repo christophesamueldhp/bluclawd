@@ -68,7 +68,8 @@ type Request =
 	| { type: "delete"; instanceId: string }
 	| { type: "rename"; instanceId: string; name: string }
 	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
-	| { type: "answer"; instanceId: string; response: Record<string, unknown> };
+	| { type: "answer"; instanceId: string; response: Record<string, unknown> }
+	| { type: "save"; cwd: string; label?: string; sessionFile: string };
 
 interface AnyResponse {
 	type: string;
@@ -210,6 +211,11 @@ export class OrchestratorClient {
 	async reply(instanceId: string, message: string, working: boolean): Promise<void> {
 		const command = working ? { type: "follow_up", message } : { type: "prompt", message };
 		await this.request({ type: "rpc", instanceId, command });
+	}
+
+	/** List a session as a stopped row without starting it; it resumes when opened. */
+	async save(session: { cwd: string; label?: string; sessionFile: string }): Promise<void> {
+		await this.request({ type: "save", cwd: session.cwd, label: session.label, sessionFile: session.sessionFile });
 	}
 
 	async delete(instanceId: string): Promise<void> {

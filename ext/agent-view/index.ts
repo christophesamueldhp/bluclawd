@@ -272,12 +272,13 @@ const agentView: InlineExtension = {
 			registration = undefined;
 			stopPill?.();
 			stopPill = undefined;
-			// Exiting pi kills a turn in progress; the daemon carries it on once this process is gone
-			// (it must be the only writer of the .jsonl). A switch ("new"/"resume") is handed off by
-			// agent view itself, and a reload is not leaving.
+			// Exiting pi keeps the session in agent view until ctrl+x deletes it; a turn in progress
+			// carries on in the daemon once this process is gone (it must be the only writer of the
+			// .jsonl). A switch ("new"/"resume") is handed off by agent view itself, and a reload is
+			// not leaving.
 			if (event.reason !== "quit" || ctx.mode !== "tui") return;
 			const outgoing = captureOutgoing(ctx);
-			if (outgoing?.working) handOffAfterExit(outgoing);
+			if (outgoing) handOffAfterExit(outgoing);
 		});
 
 		const openAgentView = async (ctx: ExtensionCommandContext): Promise<void> => {
