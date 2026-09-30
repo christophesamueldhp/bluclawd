@@ -6,6 +6,7 @@ import type { AutocompleteProvider, TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView } from "../ext/agent-view/agent-view.ts";
+import { CONTINUE_PROMPT, handOff } from "../ext/agent-view/hand-off.ts";
 import { withoutAgentViewCommand } from "../ext/agent-view/index.ts";
 import { type InstanceSummary, type OrchestratorClient, piPackageRoot } from "../ext/agent-view/orchestrator-client.ts";
 import {
@@ -111,6 +112,7 @@ function fakeClient(calls: Calls, list: () => InstanceSummary[] = () => sessions
 function makeView(opts: { self?: InstanceSummary; rows?: number } = {}) {
 	const calls: Calls = [];
 	const opened: string[] = [];
+	const resumed: boolean[] = [];
 	let closed = 0;
 	const ui = { terminal: { rows: opts.rows ?? 40 }, requestRender: () => {} } as unknown as TUI;
 	const view = new AgentView({
@@ -123,12 +125,15 @@ function makeView(opts: { self?: InstanceSummary; rows?: number } = {}) {
 		home: HOME,
 		self: opts.self ? () => opts.self : undefined,
 		onClose: () => closed++,
-		onOpen: (file) => opened.push(file),
+		onOpen: (file, _cwd, resume) => {
+			opened.push(file);
+			resumed.push(resume);
+		},
 		fileExists: () => true,
 	});
 	view.setInstancesForTest(sessions);
 	const flush = () => new Promise((r) => setTimeout(r, 0));
-	return { view, calls, opened, closed: () => closed, text: () => view.render(100).map(stripAnsi), flush };
+	return { view, calls, opened, resumed, closed: () => closed, text: () => view.render(100).map(stripAnsi), flush };
 }
 
 beforeAll(() => setSharedTheme(plainTheme));
@@ -297,6 +302,29 @@ describe("AgentView keys", () => {
 		expect(opened).toEqual(["/c.jsonl"]);
 	});
 
+	it("opening a working session stops it and carries its turn on here", async () => {
+		const { view, calls, opened, resumed, flush } = makeView();
+		view.setInstancesForTest([
+			{ id: "w", status: "online", activity: "working", cwd: HERE, sessionFile: "/w.jsonl", createdAt: ago(1) },
+		]);
+		view.handleInput(ENTER);
+		for (let i = 0; i < 5; i++) await flush();
+		expect(calls).toEqual([["stop", "w"]]);
+		expect(opened).toEqual(["/w.jsonl"]);
+		expect(resumed).toEqual([true]);
+	});
+
+	it("opening a finished live session only stops it", async () => {
+		const { view, calls, resumed, flush } = makeView();
+		view.setInstancesForTest([
+			{ id: "d", status: "online", activity: "idle", cwd: HERE, sessionFile: "/d.jsonl", outcome: "done", turns: 1 },
+		]);
+		view.handleInput(ENTER);
+		for (let i = 0; i < 5; i++) await flush();
+		expect(calls).toEqual([["stop", "d"]]);
+		expect(resumed).toEqual([false]);
+	});
+
 	it("refuses a too-short task", () => {
 		const { view, calls, text } = makeView();
 		for (const ch of "hi") view.handleInput(ch);
@@ -412,6 +440,32 @@ describe("piPackageRoot", () => {
 		const link = join(mkdtempSync(join(tmpdir(), "pi-bin-")), "pi");
 		symlinkSync(join(piRoot, "dist", "bundle", "cli.js"), link);
 		expect(piPackageRoot(link)).toBe(realpathSync(piRoot));
+	});
+});
+
+describe("handOff", () => {
+	const outgoing = { cwd: HERE, sessionFile: "/s.jsonl", model: { provider: "p", id: "m" } };
+	const spy = () => {
+		const spawned: unknown[] = [];
+		const client = { spawn: async (opts: unknown) => void spawned.push(opts) } as Pick<OrchestratorClient, "spawn">;
+		return { spawned, client };
+	};
+
+	it("resumes a session that was working with the continue prompt", async () => {
+		const { spawned, client } = spy();
+		await handOff({ ...outgoing, working: true }, client);
+		expect(spawned).toEqual([expect.objectContaining({ sessionFile: "/s.jsonl", prompt: CONTINUE_PROMPT })]);
+	});
+
+	it("resumes an idle session without a prompt", async () => {
+		const { spawned, client } = spy();
+		await handOff({ ...outgoing, working: false }, client);
+		expect(spawned).toEqual([expect.objectContaining({ sessionFile: "/s.jsonl", prompt: undefined })]);
+	});
+
+	it("swallows a daemon failure", async () => {
+		const client = { spawn: async () => Promise.reject(new Error("no daemon")) } as Pick<OrchestratorClient, "spawn">;
+		await expect(handOff({ ...outgoing, working: true }, client)).resolves.toBeUndefined();
 	});
 });
 
