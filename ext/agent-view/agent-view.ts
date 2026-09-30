@@ -62,8 +62,9 @@ export interface AgentViewOptions {
 	/** This window's own session as a row, rebuilt on every refresh (its activity is live). */
 	self?: () => InstanceSummary | undefined;
 	onClose: () => void;
-	/** Open a session in this window; the one here goes to the background. */
-	onOpen: (sessionFile: string, cwd: string) => void;
+	/** Open a session in this window; the one here goes to the background. `resume`: its turn was
+	 *  cut off by the move, so it should carry on here. */
+	onOpen: (sessionFile: string, cwd: string, resume: boolean) => void;
 	/** A peek reply to this window's own session: sent as its next prompt once the view closes. */
 	onSelfReply?: (text: string) => void;
 	/** ctrl+enter: start a session in this window with `task` as its first prompt. */
@@ -532,6 +533,8 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		this.teardown();
+		// A turn in progress is cut off by the stop; this window carries it on.
+		const resume = row.alive && (row.state === "working" || row.needs !== undefined);
 		if (row.alive) {
 			try {
 				await this.opts.client.stop(row.id);
@@ -539,7 +542,7 @@ export class AgentView implements Component, Focusable {
 				// The file is append-only; opening it is safe either way.
 			}
 		}
-		this.opts.onOpen(row.sessionFile, row.cwd);
+		this.opts.onOpen(row.sessionFile, row.cwd, resume);
 	}
 
 	private disarm(): void {

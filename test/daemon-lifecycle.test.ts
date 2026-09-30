@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -159,6 +159,34 @@ describe("agent-view session lifecycle", () => {
 		expect(child?.answered).toHaveLength(1);
 		expect(supervisor.getPendingNeeds(spawned.id)).toBeUndefined();
 		expect(supervisor.getActivity(spawned.id)).toBe("working");
+	});
+
+	it("save lists a session as a row without starting it, reusing a row it already has", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "bluclawd-save-"));
+		const file = join(dir, "s.jsonl");
+		const reply = { role: "assistant", content: [{ type: "text", text: "result: tests pass" }], stopReason: "stop" };
+		writeFileSync(file, `${JSON.stringify({ type: "message", message: reply })}\n`);
+		const supervisor = new ServerSupervisor();
+
+		const saved = supervisor.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file });
+		expect(FakeChild.spawnOptions).toHaveLength(0);
+		expect(loadInstances()).toEqual([
+			expect.objectContaining({ id: saved.id, status: "stopped", outcome: "done", detail: "result: tests pass" }),
+		]);
+
+		supervisor.setInstanceMeta(saved.id, { pinned: true });
+		const again = supervisor.saveInstance({ cwd: "/p", label: "other", sessionFile: file });
+		expect(again).toMatchObject({ id: saved.id, label: "fix tests", pinned: true });
+		expect(loadInstances()).toHaveLength(1);
+	});
+
+	it("save leaves a session the daemon is running alone", async () => {
+		const supervisor = new ServerSupervisor();
+		const live = await supervisor.spawnInstance({ cwd: "/p", sessionFile: "/tmp/live.jsonl" });
+		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: "/tmp/live.jsonl" })).toMatchObject({
+			id: live.id,
+			status: "online",
+		});
 	});
 
 	it("recovery after a daemon restart keeps rows as stopped", async () => {

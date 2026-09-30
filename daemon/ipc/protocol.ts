@@ -88,6 +88,14 @@ export interface MetaRequest {
 	sortOrder?: number;
 }
 
+/** Keep a session that left its window as a row, with no process: resumable from its .jsonl. */
+export interface SaveRequest {
+	type: "save";
+	cwd: string;
+	label?: string;
+	sessionFile: string;
+}
+
 /** Answer the blocking prompt a session is waiting on, without attaching. */
 export interface AnswerRequest {
 	type: "answer";
@@ -109,6 +117,7 @@ interface RequestMap {
 	rename: RenameRequest;
 	meta: MetaRequest;
 	answer: AnswerRequest;
+	save: SaveRequest;
 }
 
 export type ServerRequest = RequestMap[keyof RequestMap];
@@ -195,7 +204,7 @@ export interface ShutdownResponse extends ResponseBase {
 	type: "shutdown_result";
 }
 
-/** Reply to delete / rename / meta / answer. */
+/** Reply to delete / rename / meta / answer / save. */
 export interface AckResponse extends ResponseBase {
 	type: "ack";
 	instance?: InstanceSummary;
@@ -221,6 +230,7 @@ interface ResponseMap {
 	rename: AckResponse;
 	meta: AckResponse;
 	answer: AckResponse;
+	save: AckResponse;
 }
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;

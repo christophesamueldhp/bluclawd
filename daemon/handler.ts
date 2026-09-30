@@ -22,6 +22,7 @@ import type {
 	RpcReadyResponse,
 	RpcRequest,
 	RpcStreamRequest,
+	SaveRequest,
 	ServerRequest,
 	ServerResponse,
 	ShutdownRequest,
@@ -95,7 +96,7 @@ export async function handleIpcRequest(request: RegisterRequest): Promise<Regist
 export async function handleIpcRequest(request: UnregisterRequest): Promise<UnregisterResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ShutdownRequest): Promise<ShutdownResponse | ErrorResponse>;
 export async function handleIpcRequest(
-	request: DeleteRequest | RenameRequest | MetaRequest | AnswerRequest,
+	request: DeleteRequest | RenameRequest | MetaRequest | AnswerRequest | SaveRequest,
 ): Promise<AckResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse> {
@@ -221,6 +222,15 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 			return instance
 				? { type: "ack", ok: true, instance: toInstanceSummary(instance) }
 				: unknownInstanceError(request.instanceId);
+		}
+
+		case "save": {
+			const instance = supervisor.saveInstance({
+				cwd: request.cwd,
+				label: request.label,
+				sessionFile: request.sessionFile,
+			});
+			return { type: "ack", ok: true, instance: toInstanceSummary(instance) };
 		}
 
 		case "answer": {

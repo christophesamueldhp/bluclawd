@@ -26,18 +26,11 @@ import { lastLine, textOf } from "../../daemon/session-state.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
 import { AgentView, type PastSession } from "./agent-view.ts";
+import { type BackgroundableSession, CONTINUE_PROMPT, handOff, handOffAfterExit } from "./hand-off.ts";
 import { type InstanceSummary, OrchestratorClient } from "./orchestrator-client.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
 import { collectRows, labelFromTask } from "./rows.ts";
 import { deriveLabel, ForegroundActivity, SelfRegistration, type SelfSessionInfo } from "./self-registration.ts";
-
-/** What the daemon needs to keep the outgoing session running in the background. */
-interface BackgroundableSession {
-	cwd: string;
-	label?: string;
-	sessionFile: string;
-	model?: { provider: string; id: string };
-}
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
@@ -135,7 +128,7 @@ const agentView: InlineExtension = {
 		 * A handle on the current session, or undefined when there is nothing worth
 		 * backgrounding: an unsaved session has no file for the daemon to resume.
 		 */
-		const captureOutgoing = (ctx: ExtensionCommandContext): BackgroundableSession | undefined => {
+		const captureOutgoing = (ctx: ExtensionContext): BackgroundableSession | undefined => {
 			const sessionFile = ctx.sessionManager.getSessionFile();
 			if (!sessionFile || !existsSync(sessionFile)) return undefined;
 			const model = ctx.model;
@@ -144,17 +137,8 @@ const agentView: InlineExtension = {
 				label: ctx.sessionManager.getSessionName() ?? selfRow(ctx).label,
 				sessionFile,
 				model: model ? { provider: model.provider, id: model.id } : undefined,
+				working: !ctx.isIdle(),
 			};
-		};
-
-		const handOff = async (outgoing: BackgroundableSession | undefined): Promise<void> => {
-			if (!outgoing) return;
-			try {
-				await new OrchestratorClient().spawn(outgoing);
-			} catch {
-				// Best-effort: with no daemon the outgoing session is still on disk and
-				// resumable with /resume; it just is not running in parallel.
-			}
 		};
 
 		/** The `← for agents` footer hint: `← N agents` while sessions wait on you, `← N done`
@@ -283,11 +267,18 @@ const agentView: InlineExtension = {
 		pi.on("ui_prompt_start", track);
 		pi.on("ui_prompt_end", track);
 
-		pi.on("session_shutdown", () => {
+		pi.on("session_shutdown", (event, ctx) => {
 			registration?.stop();
 			registration = undefined;
 			stopPill?.();
 			stopPill = undefined;
+			// Exiting pi keeps the session in agent view until ctrl+x deletes it; a turn in progress
+			// carries on in the daemon once this process is gone (it must be the only writer of the
+			// .jsonl). A switch ("new"/"resume") is handed off by agent view itself, and a reload is
+			// not leaving.
+			if (event.reason !== "quit" || ctx.mode !== "tui") return;
+			const outgoing = captureOutgoing(ctx);
+			if (outgoing) handOffAfterExit(outgoing);
 		});
 
 		const openAgentView = async (ctx: ExtensionCommandContext): Promise<void> => {
@@ -315,13 +306,18 @@ const agentView: InlineExtension = {
 							onClose: () => done(undefined),
 							onSelfReply: (text) =>
 								pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "followUp" }),
-							onOpen: (sessionFile) => {
+							onOpen: (sessionFile, _cwd, resume) => {
 								done(undefined);
 								openedFromView = true;
 								void (async () => {
 									// Capture BEFORE the switch: switchSession disposes this session.
 									const outgoing = captureOutgoing(ctx);
-									await ctx.switchSession(sessionFile);
+									await ctx.switchSession(
+										sessionFile,
+										resume
+											? { withSession: async (replaced) => replaced.sendUserMessage(CONTINUE_PROMPT) }
+											: undefined,
+									);
 									await registration?.refresh();
 									await handOff(outgoing);
 								})();
