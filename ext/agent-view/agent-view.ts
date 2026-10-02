@@ -90,6 +90,9 @@ const FRAMES = ["·", "✢", "✳", "✶", "✻", "✽"];
 const SPINNER = [...FRAMES, ...[...FRAMES].reverse()];
 const ARM_MS = 2000;
 const NOTICE_MS = 3000;
+/** How long a takeover waits for the other terminal: its next heartbeat (3s), then abort and switch. */
+const RELEASE_WAIT_MS = 15_000;
+const RELEASE_POLL_MS = 300;
 
 type Color = Parameters<typeof theme.fg>[0];
 
@@ -257,7 +260,8 @@ export class AgentView implements Component, Focusable {
 		this.pollTimer = setInterval(() => void this.refresh(), 1000);
 	}
 
-	private close(): void {
+	/** Leave the view (also used when another terminal takes this session over). */
+	close(): void {
 		this.teardown();
 		this.opts.onClose();
 	}
@@ -511,13 +515,17 @@ export class AgentView implements Component, Focusable {
 			this.close();
 			return;
 		}
-		if (row.elsewhere) {
-			this.say("Can't attach — this session is running in another terminal");
-			return;
-		}
 		if (row.id.startsWith("pending:") || !row.sessionFile) {
 			this.say("Still starting — try again in a moment");
 			return;
+		}
+		// Open in another terminal: that one lets it go (and moves to a new session), then it opens here.
+		let heldTurn = false;
+		if (row.elsewhere) {
+			const file = row.sessionFile;
+			const holder = this.instances.find((i) => i.external && i.sessionFile === file);
+			heldTurn = holder?.activity === "working" || holder?.activity === "awaiting_input";
+			if (!(await this.takeOver(row.id, file))) return;
 		}
 		const exists = this.opts.fileExists ?? existsSync;
 		this.opening = row.id;
@@ -534,7 +542,7 @@ export class AgentView implements Component, Focusable {
 		}
 		this.teardown();
 		// A turn in progress is cut off by the stop; this window carries it on.
-		const resume = row.alive && (row.state === "working" || row.needs !== undefined);
+		const resume = heldTurn || (row.alive && (row.state === "working" || row.needs !== undefined));
 		if (row.alive) {
 			try {
 				await this.opts.client.stop(row.id);
@@ -543,6 +551,36 @@ export class AgentView implements Component, Focusable {
 			}
 		}
 		this.opts.onOpen(row.sessionFile, row.cwd, resume);
+	}
+
+	/** Ask the terminal holding `sessionFile` to let it go, and wait until it has. */
+	private async takeOver(rowId: string, sessionFile: string): Promise<boolean> {
+		let asked = false;
+		try {
+			asked = await this.opts.client.release(sessionFile);
+		} catch {
+			// no daemon: nothing to pass the request on
+		}
+		if (!asked) {
+			this.say("Can't take over — the agent daemon is out of date · close pi there to open it here", "error");
+			return false;
+		}
+		this.opening = rowId;
+		this.render_();
+		const deadline = Date.now() + RELEASE_WAIT_MS;
+		while (this.opening === rowId && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, RELEASE_POLL_MS));
+			try {
+				const instances = await this.opts.client.list();
+				if (!instances.some((i) => i.external && i.sessionFile === sessionFile)) return this.opening === rowId;
+			} catch {
+				// keep waiting
+			}
+		}
+		if (this.opening !== rowId) return false; // esc cancelled
+		this.opening = undefined;
+		this.say("The other terminal didn't let go — close pi there to open it here", "error");
+		return false;
 	}
 
 	private disarm(): void {

@@ -96,6 +96,12 @@ export interface SaveRequest {
 	sessionFile: string;
 }
 
+/** Ask the window holding a session to let it go, so another window can open it. */
+export interface ReleaseRequest {
+	type: "release";
+	sessionFile: string;
+}
+
 /** Answer the blocking prompt a session is waiting on, without attaching. */
 export interface AnswerRequest {
 	type: "answer";
@@ -118,6 +124,7 @@ interface RequestMap {
 	meta: MetaRequest;
 	answer: AnswerRequest;
 	save: SaveRequest;
+	release: ReleaseRequest;
 }
 
 export type ServerRequest = RequestMap[keyof RequestMap];
@@ -194,6 +201,8 @@ export interface RpcReadyResponse extends ResponseBase {
 
 export interface RegisterResponse extends ResponseBase {
 	type: "register_result";
+	/** Another window wants this session: let it go. */
+	release?: boolean;
 }
 
 export interface UnregisterResponse extends ResponseBase {
@@ -204,7 +213,7 @@ export interface ShutdownResponse extends ResponseBase {
 	type: "shutdown_result";
 }
 
-/** Reply to delete / rename / meta / answer / save. */
+/** Reply to delete / rename / meta / answer / save / release. */
 export interface AckResponse extends ResponseBase {
 	type: "ack";
 	instance?: InstanceSummary;
@@ -231,6 +240,7 @@ interface ResponseMap {
 	meta: AckResponse;
 	answer: AckResponse;
 	save: AckResponse;
+	release: AckResponse;
 }
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;

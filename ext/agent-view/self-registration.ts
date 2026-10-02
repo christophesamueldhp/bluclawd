@@ -96,12 +96,15 @@ export class SelfRegistration {
 	readonly id = randomUUID();
 	private readonly client: OrchestratorClient;
 	private readonly getInfo: () => SelfSessionInfo;
+	private readonly onRelease: () => void;
 	private activity: AgentActivity = "idle";
 	private timer: ReturnType<typeof setInterval> | undefined;
 
-	constructor(client: OrchestratorClient, getInfo: () => SelfSessionInfo) {
+	/** `onRelease`: another window wants this session — switch this one away from it. */
+	constructor(client: OrchestratorClient, getInfo: () => SelfSessionInfo, onRelease: () => void = () => {}) {
 		this.client = client;
 		this.getInfo = getInfo;
+		this.onRelease = onRelease;
 	}
 
 	start(): void {
@@ -133,7 +136,8 @@ export class SelfRegistration {
 			activity: this.activity,
 		};
 		try {
-			await this.client.register(instance);
+			const res = await this.client.register(instance);
+			if (res?.release) this.onRelease();
 		} catch {
 			// daemon may be down; the next tick retries (register is an upsert).
 		}

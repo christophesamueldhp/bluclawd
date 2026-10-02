@@ -97,7 +97,8 @@ const help: InlineExtension = {
 				}));
 				for (const command of registered) {
 					if (command.source !== "extension" || builtinNames.has(command.name)) continue;
-					if (command.name === "agent-view") continue; // ext/agent-view: opened with ←←, not typed
+					// ext/agent-view plumbing: dispatched by ←← and by a takeover, not typed
+					if (command.name === "agent-view" || command.name === "agent-view-release") continue;
 					commands.push({ name: command.name, description: command.description ?? "" });
 				}
 

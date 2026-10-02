@@ -99,7 +99,7 @@ export function collectRows(instances: InstanceSummary[], self: InstanceSummary 
 		const row = rowFromSummary(i, self?.id);
 		if (!row.self && row.sessionFile && heldElsewhere.has(row.sessionFile)) {
 			row.elsewhere = true;
-			row.detail = "open in another terminal · continue it there";
+			row.detail = "open in another terminal · enter moves it here";
 		}
 		return row;
 	});

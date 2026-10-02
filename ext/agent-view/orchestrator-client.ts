@@ -69,7 +69,8 @@ type Request =
 	| { type: "rename"; instanceId: string; name: string }
 	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
 	| { type: "answer"; instanceId: string; response: Record<string, unknown> }
-	| { type: "save"; cwd: string; label?: string; sessionFile: string };
+	| { type: "save"; cwd: string; label?: string; sessionFile: string }
+	| { type: "release"; sessionFile: string };
 
 interface AnyResponse {
 	type: string;
@@ -79,6 +80,7 @@ interface AnyResponse {
 	instance?: InstanceSummary;
 	version?: string;
 	buildId?: string;
+	release?: boolean;
 }
 
 /** Path to the daemon's CLI entry, for the ensureDaemon() auto-start. */
@@ -240,8 +242,16 @@ export class OrchestratorClient {
 	}
 
 	/** Register/heartbeat this foreground session as an external instance. */
-	async register(instance: RegisterInput): Promise<void> {
-		await this.request({ type: "register", instance }, 1000);
+	async register(instance: RegisterInput): Promise<{ release: boolean }> {
+		const res = await this.request({ type: "register", instance }, 1000);
+		return { release: res.release === true };
+	}
+
+	/** Ask the window holding `sessionFile` to let it go. False when this daemon predates the request. */
+	async release(sessionFile: string): Promise<boolean> {
+		// An older daemon answers an unknown request with no `type`.
+		const res = await this.request({ type: "release", sessionFile });
+		return res.type === "ack";
 	}
 
 	async unregister(instanceId: string): Promise<void> {

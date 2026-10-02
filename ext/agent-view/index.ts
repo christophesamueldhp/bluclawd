@@ -43,8 +43,11 @@ const LEFT_ARM_MS = 2000;
 const STATUS_KEY = STATUS_KEYS.agents;
 /** The command ←← dispatches; not meant to be typed. */
 const AGENT_VIEW_COMMAND = "agent-view";
+/** The command a takeover from another terminal dispatches; not meant to be typed. */
+const RELEASE_COMMAND = "agent-view-release";
+const HIDDEN_COMMANDS: ReadonlySet<string> = new Set([AGENT_VIEW_COMMAND, RELEASE_COMMAND]);
 
-/** Autocomplete without the agent view command. */
+/** Autocomplete without the agent view commands. */
 export function withoutAgentViewCommand(current: AutocompleteProvider): AutocompleteProvider {
 	return {
 		...current,
@@ -53,7 +56,7 @@ export function withoutAgentViewCommand(current: AutocompleteProvider): Autocomp
 		async getSuggestions(lines, cursorLine, cursorCol, options) {
 			const base = await current.getSuggestions(lines, cursorLine, cursorCol, options);
 			if (!base) return base;
-			const items = base.items.filter((item) => item.value !== AGENT_VIEW_COMMAND);
+			const items = base.items.filter((item) => !HIDDEN_COMMANDS.has(item.value));
 			return items.length > 0 ? { ...base, items } : null;
 		},
 	};
@@ -86,6 +89,8 @@ const agentView: InlineExtension = {
 		let activity = new ForegroundActivity();
 		let stopPill: (() => void) | undefined;
 		let viewOpen = false;
+		let closeView: (() => void) | undefined;
+		let releasing = false;
 		// The first ← swaps the footer pill for this hint; the second opens agent view.
 		let leftHint: string | undefined;
 		let paintPill: (() => void) | undefined;
@@ -198,7 +203,12 @@ const agentView: InlineExtension = {
 			if (ctx.mode !== "tui") return;
 			registration?.stop();
 			activity = new ForegroundActivity();
-			registration = new SelfRegistration(new OrchestratorClient(), () => selfInfo(ctx));
+			registration = new SelfRegistration(
+				new OrchestratorClient(),
+				() => selfInfo(ctx),
+				// Session switching needs a command context, as ←← does.
+				() => pi.sendUserMessage(`/${RELEASE_COMMAND}`, { expandPromptTemplates: true }),
+			);
 			registration.start();
 			stopPill?.();
 			const offPill = startPill(ctx);
@@ -350,6 +360,7 @@ const agentView: InlineExtension = {
 							saveViewMode: (mode) => saveViewMode(getAgentDir(), mode),
 							setTitle: (title) => ctx.ui.setTitle(title ?? sessionTitle()),
 						});
+						closeView = () => view.close();
 						// The roster loads on show, not on construct — without this it opens empty.
 						void view.onShow();
 						return view as Component & { dispose?(): void };
@@ -358,12 +369,40 @@ const agentView: InlineExtension = {
 				);
 			} finally {
 				viewOpen = false;
+				closeView = undefined;
+			}
+		};
+
+		/**
+		 * Another terminal is taking this session over: stop any turn (that terminal carries it on)
+		 * and move to a new session. Not handed to the daemon — the other terminal is its writer now.
+		 */
+		const releaseSession = async (ctx: ExtensionCommandContext): Promise<void> => {
+			if (releasing) return;
+			releasing = true;
+			try {
+				closeView?.();
+				if (!ctx.isIdle()) {
+					ctx.abort();
+					await ctx.waitForIdle();
+				}
+				await ctx.newSession({
+					withSession: async (replaced) => {
+						replaced.ui.notify("Session moved to another terminal — this is a new one", "info");
+					},
+				});
+			} finally {
+				releasing = false;
 			}
 		};
 
 		pi.registerCommand(AGENT_VIEW_COMMAND, {
 			description: "Agent view (press ← twice on an empty prompt)",
 			handler: async (_args, ctx) => openAgentView(ctx),
+		});
+		pi.registerCommand(RELEASE_COMMAND, {
+			description: "Let another terminal take this session over",
+			handler: async (_args, ctx) => releaseSession(ctx),
 		});
 	},
 };

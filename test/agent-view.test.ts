@@ -88,7 +88,7 @@ const sessions: InstanceSummary[] = [
 
 type Calls = Array<[string, ...unknown[]]>;
 
-function fakeClient(calls: Calls, list: () => InstanceSummary[] = () => sessions): OrchestratorClient {
+function fakeClient(calls: Calls, list: () => InstanceSummary[] = () => sessions, releases = true): OrchestratorClient {
 	const record =
 		(name: string) =>
 		async (...args: unknown[]) => {
@@ -106,10 +106,16 @@ function fakeClient(calls: Calls, list: () => InstanceSummary[] = () => sessions
 		answer: record("answer"),
 		reply: record("reply"),
 		spawn: record("spawn"),
+		release: async (sessionFile: string) => {
+			calls.push(["release", sessionFile]);
+			return releases;
+		},
 	} as unknown as OrchestratorClient;
 }
 
-function makeView(opts: { self?: InstanceSummary; rows?: number } = {}) {
+function makeView(
+	opts: { self?: InstanceSummary; rows?: number; list?: () => InstanceSummary[]; releases?: boolean } = {},
+) {
 	const calls: Calls = [];
 	const opened: string[] = [];
 	const resumed: boolean[] = [];
@@ -117,7 +123,7 @@ function makeView(opts: { self?: InstanceSummary; rows?: number } = {}) {
 	const ui = { terminal: { rows: opts.rows ?? 40 }, requestRender: () => {} } as unknown as TUI;
 	const view = new AgentView({
 		ui,
-		client: fakeClient(calls),
+		client: fakeClient(calls, opts.list, opts.releases),
 		appName: "bluclawd",
 		version: "1.0.0",
 		model: { provider: "opencode-go", id: "kimi" },
@@ -325,6 +331,70 @@ describe("AgentView keys", () => {
 		expect(resumed).toEqual([false]);
 	});
 
+	describe("a session open in another terminal", () => {
+		const stored: InstanceSummary = {
+			id: "s",
+			status: "stopped",
+			cwd: HERE,
+			sessionFile: "/x.jsonl",
+			outcome: "done",
+		};
+		const holder = (activity: InstanceSummary["activity"]): InstanceSummary => ({
+			id: "other-window",
+			status: "online",
+			activity,
+			cwd: HERE,
+			sessionFile: "/x.jsonl",
+			external: true,
+		});
+
+		it("enter asks that terminal to let go, then opens it here", async () => {
+			let held = true;
+			const { view, calls, opened, resumed, flush } = makeView({
+				list: () => (held ? [stored, holder("idle")] : [stored]),
+			});
+			view.setInstancesForTest([stored, holder("idle")]);
+			view.handleInput(ENTER);
+			await flush();
+			expect(calls).toEqual([["release", "/x.jsonl"]]);
+			expect(opened).toEqual([]);
+			held = false;
+			await vi.waitFor(() => expect(opened).toEqual(["/x.jsonl"]));
+			expect(resumed).toEqual([false]);
+		});
+
+		it("carries on a turn the other terminal was in the middle of", async () => {
+			const { view, opened, resumed } = makeView({ list: () => [stored] });
+			view.setInstancesForTest([stored, holder("working")]);
+			view.handleInput(ENTER);
+			await vi.waitFor(() => expect(opened).toEqual(["/x.jsonl"]));
+			expect(resumed).toEqual([true]);
+		});
+
+		it("says so when the daemon cannot pass the request on", async () => {
+			const { view, opened, text, flush } = makeView({ releases: false });
+			view.setInstancesForTest([stored, holder("idle")]);
+			view.handleInput(ENTER);
+			for (let i = 0; i < 5; i++) await flush();
+			expect(opened).toEqual([]);
+			expect(text().join("\n")).toContain("close pi there");
+		});
+
+		it("gives up when the other terminal never lets go", async () => {
+			vi.useFakeTimers();
+			try {
+				const { view, opened, text } = makeView({ list: () => [stored, holder("idle")] });
+				view.setInstancesForTest([stored, holder("idle")]);
+				view.handleInput(ENTER);
+				await vi.advanceTimersByTimeAsync(15_500);
+				expect(opened).toEqual([]);
+				expect(text().join("\n")).toContain("didn't let go");
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+	});
+
 	it("refuses a too-short task", () => {
 		const { view, calls, text } = makeView();
 		for (const ch of "hi") view.handleInput(ch);
@@ -470,12 +540,13 @@ describe("handOff", () => {
 });
 
 describe("withoutAgentViewCommand", () => {
-	it("keeps the ←← plumbing command out of slash autocomplete", async () => {
+	it("keeps the plumbing commands out of slash autocomplete", async () => {
 		const base = {
 			getSuggestions: async () => ({
 				prefix: "/a",
 				items: [
 					{ value: "agent-view", label: "agent-view" },
+					{ value: "agent-view-release", label: "agent-view-release" },
 					{ value: "agents", label: "agents" },
 				],
 			}),

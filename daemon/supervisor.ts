@@ -82,6 +82,8 @@ interface ExternalInstance {
 	record: InstanceRecord;
 	activity: AgentActivity;
 	lastSeenAt: number;
+	/** Another window wants this session: told to the holder on its next heartbeat. */
+	release?: boolean;
 }
 
 /** External (self-registered) instances expire this long after their last heartbeat. */
@@ -326,9 +328,26 @@ export class ServerSupervisor {
 		);
 	}
 
-	/** Register/heartbeat an external (self-registered) instance the daemon does not own a process for. */
-	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = Date.now()): void {
+	/**
+	 * Register/heartbeat an external (self-registered) instance the daemon does not own a process for.
+	 * True once when another window has asked it to let its session go.
+	 */
+	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = Date.now()): boolean {
+		const previous = this.externalInstances.get(record.id);
+		const release = previous?.release === true && previous.record.sessionFile === record.sessionFile;
 		this.externalInstances.set(record.id, { record: cloneInstance(record), activity, lastSeenAt: now });
+		return release;
+	}
+
+	/** Ask every window holding `sessionFile` to let it go; returns how many hold it. */
+	requestRelease(sessionFile: string): number {
+		let holders = 0;
+		for (const entry of this.externalInstances.values()) {
+			if (entry.record.sessionFile !== sessionFile) continue;
+			entry.release = true;
+			holders++;
+		}
+		return holders;
 	}
 
 	unregisterExternal(id: string): void {

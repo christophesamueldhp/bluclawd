@@ -17,6 +17,7 @@ import type {
 	MetaRequest,
 	RegisterRequest,
 	RegisterResponse,
+	ReleaseRequest,
 	RenameRequest,
 	RpcBridgeResponse,
 	RpcReadyResponse,
@@ -96,7 +97,7 @@ export async function handleIpcRequest(request: RegisterRequest): Promise<Regist
 export async function handleIpcRequest(request: UnregisterRequest): Promise<UnregisterResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ShutdownRequest): Promise<ShutdownResponse | ErrorResponse>;
 export async function handleIpcRequest(
-	request: DeleteRequest | RenameRequest | MetaRequest | AnswerRequest | SaveRequest,
+	request: DeleteRequest | RenameRequest | MetaRequest | AnswerRequest | SaveRequest | ReleaseRequest,
 ): Promise<AckResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse> {
@@ -193,8 +194,8 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				sessionId: request.instance.sessionId,
 				sessionFile: request.instance.sessionFile,
 			};
-			supervisor.registerExternal(record, request.instance.activity ?? "idle");
-			return { type: "register_result", ok: true };
+			const release = supervisor.registerExternal(record, request.instance.activity ?? "idle");
+			return { type: "register_result", ok: true, release };
 		}
 
 		case "unregister": {
@@ -231,6 +232,11 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				sessionFile: request.sessionFile,
 			});
 			return { type: "ack", ok: true, instance: toInstanceSummary(instance) };
+		}
+
+		case "release": {
+			supervisor.requestRelease(request.sessionFile);
+			return { type: "ack", ok: true };
 		}
 
 		case "answer": {
