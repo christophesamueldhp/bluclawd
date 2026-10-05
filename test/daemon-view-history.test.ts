@@ -12,7 +12,7 @@ afterEach(() => {
 function file(entries: unknown[]) {
 	dir = mkdtempSync(join(tmpdir(), "view-history-"));
 	const path = join(dir, "session.jsonl");
-	writeFileSync(path, entries.map((e) => JSON.stringify(e)).join("\n") + "\n");
+	writeFileSync(path, `${entries.map((e) => JSON.stringify(e)).join("\n")}\n`);
 	return path;
 }
 function message(id: string, parentId: string | null, text: string) {
@@ -45,7 +45,7 @@ describe("read-only display history", () => {
 	});
 	it("ignores only unfinished trailing records", () => {
 		const p = file([message("a", null, "saved")]);
-		writeFileSync(p, readFileSync(p, "utf8") + '{"type":');
+		writeFileSync(p, `${readFileSync(p, "utf8")}{"type":`);
 		expect(readViewHistory(p).messages).toHaveLength(1);
 	});
 	it("pages at most 200 entries with a stable cursor", () => {

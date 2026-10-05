@@ -24,7 +24,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type { SessionTarget } from "../../daemon/view-types.ts";
+import { type SessionTarget, VIEW_PROTOCOL_VERSION } from "../../daemon/view-types.ts";
 import { theme } from "../_shared/theme.ts";
 import { mascotGlyphs, REST, renderMascot } from "../branding/mascot.ts";
 import { type AgentClipboard, readAgentClipboard } from "./clipboard.ts";
@@ -78,7 +78,7 @@ export interface AgentViewOptions {
 		model: { provider: string; id: string } | undefined,
 		task: string,
 		images: ImageContent[],
-	) => void | Promise<boolean>;
+	) => Promise<boolean>;
 	/** Clipboard IO is separate from the view so asynchronous paste never blocks rendering. */
 	readClipboard?: () => Promise<AgentClipboard>;
 	/** `/resume`: this repository's past sessions, newest first. */
@@ -261,7 +261,7 @@ export class AgentView implements Component, Focusable {
 		} else {
 			const info = await this.opts.client.getDaemonInfo();
 			if (this.closed) return;
-			if (info.running && info.buildId !== currentDaemonBuildId()) {
+			if (info.running && info.viewProtocol !== VIEW_PROTOCOL_VERSION && info.buildId !== currentDaemonBuildId()) {
 				const result = await this.opts.client.restartDaemon();
 				if (this.closed) return;
 				this.daemonNotice = result.restarted

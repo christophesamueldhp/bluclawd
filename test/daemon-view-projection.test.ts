@@ -110,7 +110,7 @@ describe("persistent view projection", () => {
 					isError: false,
 				},
 				"e",
-			).tools["call"],
+			).tools.call,
 		).toBeDefined();
 	});
 	it("agent_end does not settle retries", () => {

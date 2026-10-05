@@ -58,7 +58,7 @@ vi.mock("../ext/agent-view/view-client.ts", () => ({
 				ok: true,
 				viewProtocol: 1,
 				instance: mock.rows.find((row) => row.id === id)! as never,
-				generation: "g-" + id,
+				generation: `g-${id}`,
 				sequence: 0,
 				projection: createViewProjection(),
 				state: {
@@ -150,6 +150,23 @@ function fixture(state: ManagedUiState = { phase: "managed", drafts: {}, pending
 	return { runtime, state, ctx, notify, sendUserMessage };
 }
 describe("managed UI runtime lifecycle", () => {
+	it("startup slash commands disclose unavailable screens instead of becoming prompts", async () => {
+		const f = fixture({ phase: "managed", drafts: {}, pendingInput: [{ text: "/tasks", images: [] }] });
+		await f.runtime.bootstrap(f.ctx);
+		expect(mock.sent.some((command) => command.type === "prompt")).toBe(false);
+		expect(mock.spawns).toHaveLength(0);
+	});
+	it("bootstrap dispatch enables extension-command handling, never a model prompt", async () => {
+		vi.useFakeTimers();
+		try {
+			const f = fixture({ phase: "native", drafts: {}, pendingInput: [] });
+			f.runtime.sessionStart(f.ctx);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(f.sendUserMessage).toHaveBeenCalledWith("/agent-view-bootstrap", { expandPromptTemplates: true });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 	it("input after an initially empty startup queue is delivered once", async () => {
 		const f = fixture();
 		await f.runtime.bootstrap(f.ctx);

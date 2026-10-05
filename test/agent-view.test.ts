@@ -147,14 +147,15 @@ function makeView(
 		currentId: () => opts.currentId,
 		onDeleted: opts.onDeleted,
 		onOpen: async (target) => {
-			opened.push("sessionFile" in target ? target.sessionFile : "/" + target.instanceId + ".jsonl");
+			opened.push("sessionFile" in target ? target.sessionFile : `/${target.instanceId}.jsonl`);
 			resumed.push(false);
 			return true;
 		},
 		fileExists: () => true,
 		readClipboard: opts.readClipboard,
-		onCreateAndOpen: (...args) => {
+		onCreateAndOpen: async (...args) => {
 			calls.push(["createAndOpen", ...args]);
+			return true;
 		},
 	});
 	view.setInstancesForTest(sessions);
@@ -163,6 +164,25 @@ function makeView(
 }
 
 beforeAll(() => setSharedTheme(plainTheme));
+it("compatible daemon metadata does not restart the roster service", async () => {
+	const calls: Calls = [];
+	const client = fakeClient(calls, () => []);
+	client.getDaemonInfo = async () => ({ running: true, viewProtocol: 1, buildId: "different-compatible-build" });
+	const restart = vi.fn(async () => ({ restarted: true }));
+	client.restartDaemon = restart;
+	const view = new AgentView({
+		ui: { terminal: { rows: 40 }, requestRender: () => {} } as TUI,
+		client,
+		appName: "test",
+		cwd: HERE,
+		home: HOME,
+		onClose: () => {},
+		onOpen: async () => true,
+	});
+	await view.onShow();
+	expect(restart).not.toHaveBeenCalled();
+	view.dispose();
+});
 afterEach(() => vi.unstubAllEnvs());
 
 describe("rows", () => {

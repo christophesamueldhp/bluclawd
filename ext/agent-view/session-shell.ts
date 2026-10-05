@@ -1,5 +1,6 @@
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
+import type { ManagedDraft } from "../../daemon/view-types.ts";
 import { setSharedTheme } from "../_shared/theme.ts";
 import { AgentView, type PastSession } from "./agent-view.ts";
 import type { AgentClipboard } from "./clipboard.ts";
@@ -48,6 +49,11 @@ export class SessionShell implements Component, Focusable {
 		if (this.localDialog) this.localDialog.focused = value;
 		this.conversation.focused = value && this.mode === "conversation";
 		if (this.roster) this.roster.focused = value && this.mode === "agents";
+	}
+	async submit(draft: ManagedDraft): Promise<void> {
+		if (this.disposed) return;
+		this.options.controller.setDraft(draft);
+		await this.conversation.submit(draft.text);
 	}
 	showAgents(): void {
 		if (this.disposed) return;

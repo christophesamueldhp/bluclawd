@@ -15,14 +15,7 @@ import { basename } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ExtensionCommandContext, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
-import {
-	type AutocompleteProvider,
-	type Component,
-	isKeyRelease,
-	isKeyRepeat,
-	matchesKey,
-	type TUI,
-} from "@earendil-works/pi-tui";
+import type { AutocompleteProvider, Component } from "@earendil-works/pi-tui";
 import { lastLine, textOf } from "../../daemon/session-state.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
@@ -46,7 +39,7 @@ const TMP_ROOTS = [tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/v
 const PILL_POLL_MS = 10_000;
 const DONE_FLASH_MS = 2500;
 /** How long the first ← waits for the second. */
-const LEFT_ARM_MS = 2000;
+const _LEFT_ARM_MS = 2000;
 const STATUS_KEY = STATUS_KEYS.agents;
 /** The command ←← dispatches; not meant to be typed. */
 const AGENT_VIEW_COMMAND = "agent-view";
@@ -107,12 +100,12 @@ const agentView: InlineExtension = {
 		let releasing = false;
 		// The first ← swaps the footer pill for this hint; the second opens agent view.
 		let leftHint: string | undefined;
-		let paintPill: (() => void) | undefined;
+		let _paintPill: (() => void) | undefined;
 		// Set when agent view opened this session, so the hint reads "go back".
-		let openedFromView = false;
+		let _openedFromView = false;
 		let autocompleteAdded = false;
 
-		const selfInfo = (ctx: ExtensionContext): SelfSessionInfo => ({
+		const _selfInfo = (ctx: ExtensionContext): SelfSessionInfo => ({
 			cwd: ctx.sessionManager.getCwd(),
 			sessionId: ctx.sessionManager.getSessionId(),
 			sessionFile: ctx.sessionManager.getSessionFile(),
@@ -162,7 +155,7 @@ const agentView: InlineExtension = {
 
 		/** The `← for agents` footer hint: `← N agents` while sessions wait on you, `← N done`
 		 *  briefly when some finish. Only reads — it never starts the daemon. */
-		const startPill = (ctx: ExtensionContext): (() => void) => {
+		const _startPill = (ctx: ExtensionContext): (() => void) => {
 			const client = new OrchestratorClient();
 			let finished: Set<string> | undefined;
 			let flashUntil = 0;
@@ -172,7 +165,7 @@ const agentView: InlineExtension = {
 			const paint = (): void => {
 				if (!stopped) ctx.ui.setStatus(STATUS_KEY, leftHint ?? last);
 			};
-			paintPill = paint;
+			_paintPill = paint;
 			const tick = async (): Promise<void> => {
 				let text = theme.fg("dim", "← for agents");
 				try {
@@ -203,7 +196,7 @@ const agentView: InlineExtension = {
 			return () => {
 				stopped = true;
 				clearInterval(timer);
-				paintPill = undefined;
+				_paintPill = undefined;
 				ctx.ui.setStatus(STATUS_KEY, undefined);
 			};
 		};
@@ -281,8 +274,10 @@ const agentView: InlineExtension = {
 								done({ type: "open", sessionFile, resume: false });
 								return true;
 							},
-							onCreateAndOpen: (_cwd, spawnModel, task, images) =>
-								done({ type: "create", model: spawnModel, task, images }),
+							onCreateAndOpen: async (_cwd, spawnModel, task, images) => {
+								done({ type: "create", model: spawnModel, task, images });
+								return true;
+							},
 							loadPastSessions,
 							loadViewMode: () => loadViewMode(getAgentDir()),
 							saveViewMode: (mode) => saveViewMode(getAgentDir(), mode),
@@ -299,7 +294,7 @@ const agentView: InlineExtension = {
 				// Only plain data survives replacement. The command awaits the whole transition;
 				// hand-off runs only in the fresh context, after dispose and never on cancellation.
 				const outgoing = captureOutgoing(ctx);
-				openedFromView = true;
+				_openedFromView = true;
 				if (action.type === "open") {
 					await ctx.switchSession(action.sessionFile, {
 						withSession: async (replaced) => {

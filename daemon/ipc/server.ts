@@ -104,8 +104,9 @@ export async function startIpcServer(handler: IpcRequestHandler): Promise<Server
 		};
 		const pump = () => {
 			try {
-				let nl: number;
-				while (mode !== "pending" && mode !== "done" && (nl = buffer.indexOf("\n")) !== -1) {
+				while (mode !== "pending" && mode !== "done") {
+					const nl = buffer.indexOf("\n");
+					if (nl === -1) break;
 					const line = buffer.slice(0, nl);
 					buffer = buffer.slice(nl + 1);
 					if (Buffer.byteLength(line) > MAX_FRAME_BYTES) throw new Error("Session viewer frame exceeds 16 MiB");
@@ -145,7 +146,7 @@ export async function startIpcServer(handler: IpcRequestHandler): Promise<Server
 						queued.push(message);
 					};
 					const handle = handler.openViewStream?.(request.instanceId, receive);
-					if (!handle) throw new Error("Instance is unavailable for attachment: " + request.instanceId);
+					if (!handle) throw new Error(`Instance is unavailable for attachment: ${request.instanceId}`);
 					if (socket.destroyed) {
 						handle.close();
 						return;
@@ -206,7 +207,7 @@ export async function startIpcServer(handler: IpcRequestHandler): Promise<Server
 					queued.push(message);
 				};
 				const handle = handler.openRpcStream(request.instanceId, receive, receive, receive);
-				if (!handle) throw new Error("Unknown instance: " + request.instanceId);
+				if (!handle) throw new Error(`Unknown instance: ${request.instanceId}`);
 				if (socket.destroyed) {
 					handle.close();
 					return;
@@ -217,15 +218,13 @@ export async function startIpcServer(handler: IpcRequestHandler): Promise<Server
 				for (const record of queued) if (!safeWrite(record)) return;
 				dispatch = (message) => {
 					if (message.type === "view_answer") throw new Error("view_answer requires view_stream");
-					void handle
-						.handleRequest(message)
-						.catch((error) =>
-							safeWrite({
-								type: "error",
-								ok: false,
-								error: error instanceof Error ? error.message : String(error),
-							}),
-						);
+					void handle.handleRequest(message).catch((error) =>
+						safeWrite({
+							type: "error",
+							ok: false,
+							error: error instanceof Error ? error.message : String(error),
+						}),
+					);
 				};
 				mode = "stream";
 				pump();
@@ -258,7 +257,7 @@ export async function startIpcServer(handler: IpcRequestHandler): Promise<Server
 }
 async function removeStaleSocketIfNeeded(socketPath: string): Promise<void> {
 	if (!existsSync(socketPath)) return;
-	if (await isSocketLive(socketPath)) throw new Error("server is already running: " + socketPath);
+	if (await isSocketLive(socketPath)) throw new Error(`server is already running: ${socketPath}`);
 	unlinkSync(socketPath);
 }
 async function isSocketLive(socketPath: string): Promise<boolean> {

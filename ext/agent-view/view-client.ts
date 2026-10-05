@@ -71,7 +71,7 @@ export class SessionViewClient {
 				payload: Record<string, unknown>,
 			): Promise<T> {
 				if (closed) return Promise.reject(new Error("Session view closed"));
-				const id = prefix + ":" + ++counter;
+				const id = `${prefix}:${++counter}`;
 				return new Promise<T>((resolveRequest, rejectRequest) => {
 					const timer = setTimeout(
 						() =>
@@ -88,7 +88,7 @@ export class SessionViewClient {
 						timer,
 					});
 					try {
-						const bytes = JSON.stringify({ ...payload, id }) + "\n";
+						const bytes = `${JSON.stringify({ ...payload, id })}\n`;
 						if (Buffer.byteLength(bytes) > MAX_FRAME_BYTES) throw new Error("Session view frame exceeds 16 MiB");
 						if (socket.writableLength + Buffer.byteLength(bytes) > MAX_FRAME_BYTES)
 							throw new Error("Session view outgoing queue exceeds 16 MiB");
@@ -101,14 +101,15 @@ export class SessionViewClient {
 			options.signal?.addEventListener("abort", abort, { once: true });
 			socket.once("connect", () =>
 				socket.write(
-					JSON.stringify({ type: "view_stream", instanceId, viewProtocol: VIEW_PROTOCOL_VERSION }) + "\n",
+					`${JSON.stringify({ type: "view_stream", instanceId, viewProtocol: VIEW_PROTOCOL_VERSION })}\n`,
 				),
 			);
 			socket.on("data", (chunk) => {
 				buffer += decoder.write(chunk);
 				try {
-					let newline: number;
-					while (!closed && (newline = buffer.indexOf("\n")) !== -1) {
+					while (!closed) {
+						const newline = buffer.indexOf("\n");
+						if (newline === -1) break;
 						const line = buffer.slice(0, newline);
 						buffer = buffer.slice(newline + 1);
 						if (Buffer.byteLength(line) > MAX_FRAME_BYTES) throw new Error("Session view frame exceeds 16 MiB");

@@ -2,9 +2,8 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { Server } from "node:net";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
 import type { InstanceSummary, ServerRequest, ServerResponse } from "../daemon/ipc/protocol.ts";
 import { type IpcRequestHandler, startIpcServer } from "../daemon/ipc/server.ts";
 import { RpcProcessInstance } from "../daemon/rpc-process.ts";
@@ -102,7 +101,7 @@ export async function withPersistentViewHarness<T>(run: (harness: PersistentView
 							page: supervisor.getViewHistory(request.instanceId, request.before, request.limit)!,
 						};
 					default:
-						return { type: "error", ok: false, error: "Probe request unsupported: " + request.type };
+						return { type: "error", ok: false, error: `Probe request unsupported: ${request.type}` };
 				}
 			}) as IpcRequestHandler,
 			{ openViewStream: supervisor.openViewStream.bind(supervisor), openRpcStream: () => undefined },
@@ -212,9 +211,7 @@ async function loadedResources(packageRoot?: string): Promise<boolean> {
 		rmSync(dir, { recursive: true, force: true });
 	}
 }
-export async function probePersistentSessionViews(
-	options: { piPackageRoot?: string } = {},
-): Promise<{
+export async function probePersistentSessionViews(options: { piPackageRoot?: string } = {}): Promise<{
 	pidStable: boolean;
 	toolExecutions: number;
 	deletedRowAbsent: boolean;

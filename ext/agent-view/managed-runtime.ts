@@ -67,12 +67,12 @@ export function createManagedRuntime(
 	}
 	function flush(): Promise<void> {
 		if (flushWork) return flushWork;
-		if (!controller) return Promise.resolve();
+		if (!controller || !shell) return Promise.resolve();
 		flushWork = Promise.resolve()
 			.then(async () => {
-				while (state.pendingInput.length && controller) {
+				while (state.pendingInput.length && controller && shell) {
 					const draft = state.pendingInput.shift()!;
-					await controller.submit(draft);
+					await shell.submit(draft);
 				}
 			})
 			.finally(() => {
@@ -140,7 +140,7 @@ export function createManagedRuntime(
 						throw new Error("Model catalog unavailable");
 					models = result.data.models;
 				}
-				const names = models.map((model) => model.provider + "/" + model.id);
+				const names = models.map((model) => `${model.provider}/${model.id}`);
 				const selected = await view.choose("Execution owner model", names);
 				const model = models[names.indexOf(selected ?? "")];
 				if (model) {
@@ -284,7 +284,7 @@ export function createManagedRuntime(
 			});
 			clearTimeout(timer);
 			timer = setTimeout(
-				() => pi.sendUserMessage("/" + MANAGED_BOOTSTRAP_COMMAND, { expandPromptTemplates: false }),
+				() => pi.sendUserMessage(`/${MANAGED_BOOTSTRAP_COMMAND}`, { expandPromptTemplates: true }),
 				0,
 			);
 		},
@@ -304,7 +304,7 @@ export function createManagedRuntime(
 		},
 		input(event: InputEvent, ctx: ExtensionContext): InputEventResult | undefined {
 			if (ctx.mode !== "tui") return;
-			if (event.text.trim() === "/" + MANAGED_BOOTSTRAP_COMMAND) return;
+			if (event.text.trim() === `/${MANAGED_BOOTSTRAP_COMMAND}`) return;
 			if (controller && state.phase === "managed") {
 				state.pendingInput.push({ text: event.text, images: event.images ?? [] });
 				void flush();

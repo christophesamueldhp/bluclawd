@@ -28,7 +28,7 @@ export function readViewHistory(sessionFile: string, before?: string, limit = VI
 	const messages = selected.flatMap((e) =>
 		sessionEntryToContextMessages(e)
 			.filter((m) => String(m.role) !== "system")
-			.map((message, i) => ({ key: i ? e.id + ":" + i : e.id, entryId: e.id, message })),
+			.map((message, i) => ({ key: i ? `${e.id}:${i}` : e.id, entryId: e.id, message })),
 	);
 	return { messages, before: start ? selected[0]?.id : undefined };
 }

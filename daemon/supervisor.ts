@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type {
-	AgentSessionEvent,
 	JsonAgentSessionEvent,
 	RpcCommand,
 	RpcExtensionUIRequest,
@@ -57,6 +56,7 @@ interface LiveInstance {
 	activityState: ActivityState;
 	tracker: SessionStateTracker;
 	pendingUiRequest?: RpcExtensionUIRequest;
+	pendingUiRequests?: Map<string, RpcExtensionUIRequest>;
 	pendingSince?: string;
 	onUiRequest?: (request: RpcExtensionUIRequest) => void;
 	unsubscribeEvents?: () => void;
@@ -213,6 +213,7 @@ export class ServerSupervisor {
 		// The child that owned any outstanding prompt is gone/being rebound — drop it so a viewer
 		// attaching later isn't replayed a dead prompt (openRpcStream replays pendingUiRequest).
 		live.pendingUiRequest = undefined;
+		live.pendingUiRequests?.clear();
 		live.resources.rpcProcess?.setUiRequestHandler(undefined);
 	}
 
@@ -230,6 +231,7 @@ export class ServerSupervisor {
 			// agent emits neither). Clear it so it isn't replayed to a late-attaching viewer.
 			if (live.pendingUiRequest && (event.type === "agent_settled" || event.type === "turn_start")) {
 				live.pendingUiRequest = undefined;
+				live.pendingUiRequests?.clear();
 			}
 			// A throwing subscriber (e.g. socket.write to a just-closed viewer) runs on the child's
 			// stdout stack — an unguarded throw here would crash the whole daemon. Isolate each one.
@@ -245,14 +247,19 @@ export class ServerSupervisor {
 			void this.handleUnexpectedRpcExit(live, error);
 		});
 		rpcProcess.setUiRequestHandler((request) => {
-			this.publishView(live, request);
+			if (!isBlockingUiMethod(request.method)) this.publishView(live, request);
 			if (isBlockingUiMethod(request.method)) {
+				live.pendingUiRequests ??= new Map();
+				live.pendingUiRequests.set(request.id, request);
+				if (!live.pendingUiRequest) {
+					live.pendingUiRequest = request;
+					this.publishView(live, request);
+				}
 				live.activityState = reduceActivity(live.activityState, {
 					kind: "ui_request",
 					method: request.method,
 					id: request.id,
 				});
-				live.pendingUiRequest = request;
 				live.pendingSince = new Date().toISOString();
 			}
 			try {
@@ -784,10 +791,12 @@ export class ServerSupervisor {
 	answer(instanceId: string, response: RpcExtensionUIResponse): boolean {
 		const live = this.liveInstances.get(instanceId);
 		const rpcProcess = live ? this.getRpcProcess(live) : undefined;
-		if (!live || !rpcProcess || live.pendingUiRequest?.id !== response.id) return false;
+		if (!live || !rpcProcess || !live.pendingUiRequests?.has(response.id)) return false;
 		live.activityState = reduceActivity(live.activityState, { kind: "ui_response", id: response.id });
-		live.pendingUiRequest = undefined;
+		live.pendingUiRequests.delete(response.id);
+		live.pendingUiRequest = live.pendingUiRequests.values().next().value;
 		this.publishView(live, { type: "view_ui_resolved", requestId: response.id });
+		if (live.pendingUiRequest) this.publishView(live, live.pendingUiRequest);
 		rpcProcess.handleUiResponse(response);
 		return true;
 	}

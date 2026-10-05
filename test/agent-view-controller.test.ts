@@ -18,7 +18,7 @@ function deferred<T>() {
 }
 function fixture() {
 	const rows = new Map<string, InstanceSummary>(
-		["a", "b"].map((id) => [id, { id, status: "online", cwd: "/unit", sessionFile: "/" + id + ".jsonl" }]),
+		["a", "b"].map((id) => [id, { id, status: "online", cwd: "/unit", sessionFile: `/${id}.jsonl` }]),
 	);
 	const generations = new Map<string, string>();
 	const overrides = new Map<string, Partial<ViewReady>>();
@@ -34,8 +34,8 @@ function fixture() {
 			log.push("spawn");
 			let row = [...rows.values()].find((r) => opts.sessionFile && r.sessionFile === opts.sessionFile);
 			if (!row) {
-				const id = "new-" + rows.size;
-				row = { id, status: "online", cwd: opts.cwd, sessionFile: opts.sessionFile ?? "/" + id + ".jsonl" };
+				const id = `new-${rows.size}`;
+				row = { id, status: "online", cwd: opts.cwd, sessionFile: opts.sessionFile ?? `/${id}.jsonl` };
 				rows.set(id, row);
 			}
 			if (row.status !== "online") {
@@ -76,7 +76,7 @@ function fixture() {
 			ok: true,
 			viewProtocol: 1,
 			instance: { ...row },
-			generation: generations.get(id) ?? "g-" + id,
+			generation: generations.get(id) ?? `g-${id}`,
 			sequence: 0,
 			projection,
 			state,

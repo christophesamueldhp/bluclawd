@@ -69,7 +69,7 @@ async function fixture() {
 				ok: true,
 				viewProtocol: 1,
 				instance: rows.find((row) => row.id === id)!,
-				generation: "g-" + id,
+				generation: `g-${id}`,
 				sequence: 0,
 				projection: createViewProjection(),
 				state: {

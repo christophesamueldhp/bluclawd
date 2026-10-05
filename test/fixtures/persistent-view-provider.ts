@@ -65,6 +65,7 @@ export default function persistentViewProvider(pi: ExtensionAPI) {
 				if (Date.now() > deadline) throw new Error("Fixture gate deadline exceeded");
 				await delay(20, undefined, { signal });
 			}
+			if (process.env.VIEW_EDITOR === "1") await ctx.ui.editor("PTY pending editor", "Earlier editor draft");
 			return { content: [{ type: "text", text: "gate complete" }], details: { pid: process.pid, count } };
 		},
 	});

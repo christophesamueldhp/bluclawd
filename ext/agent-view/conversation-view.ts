@@ -144,7 +144,7 @@ export class ConversationView implements Component, Focusable {
 	}
 	private currentScope() {
 		const ready = this.options.controller.selected();
-		return ready ? ready.instance.id + ":" + ready.generation : "$blank";
+		return ready ? `${ready.instance.id}:${ready.generation}` : "$blank";
 	}
 	private synchronize(): void {
 		if (this.disposed) return;
@@ -174,7 +174,7 @@ export class ConversationView implements Component, Focusable {
 			this.syncing = false;
 		}
 		const request = controller.projection()?.pendingDialog;
-		const dialogKey = request ? scope + ":" + request.id : undefined;
+		const dialogKey = request ? `${scope}:${request.id}` : undefined;
 		if (dialogKey !== this.dialogKey) {
 			this.dialog?.dispose();
 			this.dialog = undefined;
@@ -235,7 +235,7 @@ export class ConversationView implements Component, Focusable {
 			/* Disconnected/archived views remain readable. */
 		}
 	}
-	private async submit(text: string) {
+	async submit(text: string) {
 		if (this.disposed) return;
 		const controller = this.options.controller;
 		const draft = { ...controller.draft(), text };
@@ -461,7 +461,7 @@ export class ConversationView implements Component, Focusable {
 						.join("\n") +
 					"\n" +
 					text;
-			if (message.errorMessage) text += "\n" + message.errorMessage;
+			if (message.errorMessage) text += `\n${message.errorMessage}`;
 		}
 		if (!text && typeof m.summary === "string") text = m.summary;
 		if (!text && typeof m.output === "string") text = m.output;
@@ -504,9 +504,9 @@ export class ConversationView implements Component, Focusable {
 			const title = `${tool.parentToolCallId ? "↳ " : ""}${tool.toolName} · running`;
 			lines.push(this.options.theme.fg("toolTitle", title));
 			const content = this.expandedTools
-				? JSON.stringify(tool.args, null, 2) + "\n" + output
+				? `${JSON.stringify(tool.args, null, 2)}\n${output}`
 				: (output.trim().split("\n").at(-1) ?? "");
-			lines.push(...this.md("tool:" + tool.toolCallId, content, width), "");
+			lines.push(...this.md(`tool:${tool.toolCallId}`, content, width), "");
 		}
 		if (this.inspection) lines.push(...this.md("inspection", this.inspection, width));
 		for (const key of this.markdown.keys()) if (!this.renderedKeys.has(key)) this.markdown.delete(key);
@@ -526,7 +526,7 @@ export class ConversationView implements Component, Focusable {
 			theme.fg("accent", stripTerminalSequences(title).replace(/[\r\n]+/g, " ")),
 			theme.fg(
 				"dim",
-				`${controller.connectionState()} · ${p?.activity ?? "idle"}${ready?.state.model ? " · " + ready.state.model.id : ""}`,
+				`${controller.connectionState()} · ${p?.activity ?? "idle"}${ready?.state.model ? ` · ${ready.state.model.id}` : ""}`,
 			),
 		];
 		if (rows < 10) header.splice(1);

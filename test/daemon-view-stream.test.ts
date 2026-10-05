@@ -27,6 +27,18 @@ afterEach(async () => {
 	rmSync(dir, { recursive: true, force: true });
 });
 describe("daemon persistent view streams", () => {
+	it("parallel questions retain the first dialog and expose the next after one answer", async () => {
+		const row = await supervisor.spawnInstance({ cwd: dir });
+		const child = FakeViewChild.children[0];
+		child.ui({ type: "extension_ui_request", method: "input", id: "first", title: "first" });
+		child.ui({ type: "extension_ui_request", method: "input", id: "second", title: "second" });
+		const view = supervisor.openViewStream(row.id, () => {})!;
+		expect(view.ready.projection.pendingDialog?.id).toBe("first");
+		expect(view.handleUiResponse({ type: "extension_ui_response", id: "first", value: "answer" })).toBe(true);
+		expect(view.handleUiResponse({ type: "extension_ui_response", id: "first", value: "again" })).toBe(false);
+		expect(supervisor.openViewStream(row.id, () => {})!.ready.projection.pendingDialog?.id).toBe("second");
+		view.close();
+	});
 	it("refreshes confirmed state without awaiting RPC during attach", async () => {
 		const row = await supervisor.spawnInstance({ cwd: dir });
 		const child = FakeViewChild.children[0];

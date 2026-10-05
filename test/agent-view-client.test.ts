@@ -72,8 +72,9 @@ async function wire(first: unknown[]) {
 	let buffer = "";
 	socket.on("data", (chunk) => {
 		buffer += decoder.write(chunk);
-		let nl: number;
-		while ((nl = buffer.indexOf("\n")) >= 0) {
+		while (true) {
+			const nl = buffer.indexOf("\n");
+			if (nl < 0) break;
 			frames.push(JSON.parse(buffer.slice(0, nl)));
 			buffer = buffer.slice(nl + 1);
 		}
@@ -81,7 +82,7 @@ async function wire(first: unknown[]) {
 	socket.on("error", () => {});
 	await new Promise<void>((r) =>
 		socket.once("connect", () => {
-			socket.write(first.map((x) => JSON.stringify(x) + "\n").join(""));
+			socket.write(first.map((x) => `${JSON.stringify(x)}\n`).join(""));
 			r();
 		}),
 	);
@@ -197,7 +198,7 @@ describe("persistent view JSONL transport", () => {
 					sequence: 1,
 					event: textDelta("👋\u2028done"),
 				};
-				const bytes = Buffer.from(JSON.stringify(source) + "\n" + JSON.stringify(event) + "\n");
+				const bytes = Buffer.from(`${JSON.stringify(source)}\n${JSON.stringify(event)}\n`);
 				const emoji = bytes.indexOf(Buffer.from("👋"));
 				socket.write(bytes.subarray(0, emoji + 1));
 				setImmediate(() => socket.write(bytes.subarray(emoji + 1)));
@@ -330,7 +331,7 @@ describe("persistent view JSONL transport", () => {
 				message: { role: "user", content: [{ type: "text", text: String(i) }], timestamp: i },
 			})),
 		];
-		writeFileSync(file, entries.map((x) => JSON.stringify(x)).join("\n") + "\n");
+		writeFileSync(file, `${entries.map((x) => JSON.stringify(x)).join("\n")}\n`);
 		const row = supervisor.saveInstance({ cwd: dir, sessionFile: file });
 		const page = await client.history(row.id);
 		expect(page.messages).toHaveLength(200);

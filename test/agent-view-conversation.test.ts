@@ -27,7 +27,7 @@ afterEach(() => {
 function fixture(readClipboard?: () => Promise<AgentClipboard>) {
 	let color = "\x1b[31m";
 	const theme = {
-		fg: (_color: string, text: string) => color + text + "\x1b[0m",
+		fg: (_color: string, text: string) => `${color + text}\x1b[0m`,
 		bold: (text: string) => text,
 	} as Theme;
 	const tui = { terminal: { rows: 30, columns: 80, setTitle: vi.fn() }, requestRender: vi.fn() } as unknown as TUI;
@@ -113,7 +113,7 @@ function fixture(readClipboard?: () => Promise<AgentClipboard>) {
 		tui,
 		ready: () => ready,
 		choose: (id: string, projection = createViewProjection()) => {
-			ready = { ...ready, instance: { ...ready.instance, id }, generation: "g-" + id, projection };
+			ready = { ...ready, instance: { ...ready.instance, id }, generation: `g-${id}`, projection };
 			view!.refresh();
 		},
 		changeTheme: () => {
@@ -155,7 +155,7 @@ describe("daemon-owned conversation screen", () => {
 		f.view.render(70);
 		f.view.handleInput?.("\x1b[5~");
 		const before = f.text();
-		f.ready().projection.partial = assistant(text + "\n\nnew paragraph");
+		f.ready().projection.partial = assistant(`${text}\n\nnew paragraph`);
 		f.view.refresh();
 		expect(f.text()).toBe(before);
 	});
