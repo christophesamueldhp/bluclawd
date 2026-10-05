@@ -74,9 +74,9 @@ export function routeSessionCommand(text: string, context: SessionCommandContext
 		}
 		case "thinking": {
 			if (!args) return { type: "rpc", command: { type: "cycle_thinking_level" } };
-			const level = args as "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-			if (!["off", "minimal", "low", "medium", "high", "xhigh"].includes(level))
-				return unavailable("Thinking level must be off, minimal, low, medium, high, or xhigh");
+			const level = args as Extract<RpcCommand, { type: "set_thinking_level" }>["level"];
+			if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(level))
+				return unavailable("Thinking level must be off, minimal, low, medium, high, xhigh, or max");
 			return { type: "rpc", command: { type: "set_thinking_level", level } };
 		}
 		case "compact":

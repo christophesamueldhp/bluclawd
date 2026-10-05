@@ -6,6 +6,9 @@ import type { SessionController } from "../ext/agent-view/session-controller.ts"
 const context = { busy: false, commands: [] };
 const route = (text: string, busy = false) => routeSessionCommand(text, { ...context, busy });
 describe("managed session command destinations", () => {
+	it("routes the installed maximum thinking level", () => {
+		expect(route("/thinking max")).toEqual({ type: "rpc", command: { type: "set_thinking_level", level: "max" } });
+	});
 	it.each(["hello", "", "@ README.md explain"])("ordinary/image-only input is a prompt: %s", (text) =>
 		expect(route(text)).toEqual({ type: "prompt", message: text }),
 	);

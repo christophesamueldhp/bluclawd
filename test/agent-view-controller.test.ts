@@ -119,6 +119,18 @@ function fixture() {
 	return { client, views, controller, rows, transports, log, send, make, overrides, generations, onChange };
 }
 describe("managed session selection", () => {
+	it("malformed incoming snapshot cannot replace the old selection", async () => {
+		const f = fixture();
+		await f.controller.select({ instanceId: "a" });
+		const old = f.transports[0];
+		const projection = createViewProjection();
+		projection.queues = undefined as never;
+		f.overrides.set("b", { projection });
+		expect(await f.controller.select({ instanceId: "b" })).toBe(false);
+		expect(f.controller.selected()?.instance.id).toBe("a");
+		expect(old.close).not.toHaveBeenCalled();
+		f.controller.dispose();
+	});
 	it("buffers events arriving immediately after ready", async () => {
 		const f = fixture();
 		const projection = createViewProjection();

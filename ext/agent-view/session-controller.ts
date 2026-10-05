@@ -163,9 +163,9 @@ export class SessionController {
 			}
 			const old = this.current;
 			candidate.committed = true;
+			const snapshot = this.normalizeState(structuredClone(candidate.handle.ready));
 			this.current = candidate;
-			this.ready = structuredClone(candidate.handle.ready);
-			this.normalizeState();
+			this.ready = snapshot;
 			this.historyLoaded = false;
 			this.historyCursor = undefined;
 			this.selectionNotice = undefined;
@@ -203,13 +203,13 @@ export class SessionController {
 			}
 		}
 	}
-	private normalizeState(): void {
-		if (!this.ready) return;
-		const p = this.ready.projection;
-		this.ready = {
-			...this.ready,
+	private normalizeState(ready = this.ready): ViewReady | undefined {
+		if (!ready) return;
+		const p = ready.projection;
+		return {
+			...ready,
 			state: {
-				...this.ready.state,
+				...ready.state,
 				isStreaming: p.running,
 				isCompacting: p.compacting,
 				pendingMessageCount: p.queues.steering.length + p.queues.followUp.length,
@@ -270,7 +270,7 @@ export class SessionController {
 				this.revisions.set(key, (this.revisions.get(key) ?? 0) + 1);
 			}
 		}
-		this.normalizeState();
+		this.ready = this.normalizeState();
 		this.notify();
 	}
 	async submit(draft: ManagedDraft): Promise<SubmissionResult> {

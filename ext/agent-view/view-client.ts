@@ -8,6 +8,8 @@ import { VIEW_PROTOCOL_VERSION, type ViewEvent, type ViewReady, type ViewTermina
 const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 interface Pending {
 	kind: "rpc" | "answer";
+	command?: unknown;
+	awaitingCompletion?: boolean;
 	resolve: (record: RpcResponse | boolean) => void;
 	reject: (error: Error) => void;
 	timer: ReturnType<typeof setTimeout>;
@@ -78,7 +80,13 @@ export class SessionViewClient {
 							),
 						30_000,
 					);
-					pending.set(id, { kind, resolve: (value) => resolveRequest(value as T), reject: rejectRequest, timer });
+					pending.set(id, {
+						kind,
+						command: payload.type,
+						resolve: (value) => resolveRequest(value as T),
+						reject: rejectRequest,
+						timer,
+					});
 					try {
 						const bytes = JSON.stringify({ ...payload, id }) + "\n";
 						if (Buffer.byteLength(bytes) > MAX_FRAME_BYTES) throw new Error("Session view frame exceeds 16 MiB");
@@ -156,6 +164,31 @@ export class SessionViewClient {
 							(!["stopped", "deleted", "failed"].includes(record.reason) || record.instanceId !== instanceId)
 						)
 							throw new Error("Malformed session view terminal state");
+						// A compact response is a completed operation, not an immediate submission acknowledgement.
+						if (
+							record.type === "view_event" &&
+							record.event.type === "compaction_start" &&
+							record.event.reason === "manual"
+						) {
+							for (const item of pending.values())
+								if (item.command === "compact") {
+									clearTimeout(item.timer);
+									item.awaitingCompletion = true;
+								}
+						}
+						if (record.type === "view_event" && record.event.type === "compaction_end") {
+							for (const item of pending.values())
+								if (item.awaitingCompletion) {
+									item.awaitingCompletion = false;
+									item.timer = setTimeout(
+										() =>
+											finish(
+												new Error("Compaction result acknowledgement timed out; inspect the saved session"),
+											),
+										30_000,
+									);
+								}
+						}
 						options.onRecord(record);
 					}
 					if (!closed && Buffer.byteLength(buffer) > MAX_FRAME_BYTES)

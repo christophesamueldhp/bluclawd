@@ -88,6 +88,43 @@ async function wire(first: unknown[]) {
 	return { socket, frames };
 }
 describe("persistent view JSONL transport", () => {
+	it("accepted manual compaction is not timed out while model work continues", async () => {
+		const id = await daemon();
+		let started = false;
+		const h = await view(id, (record) => {
+			if (record.type === "view_event" && record.event.type === "compaction_start") started = true;
+		});
+		const child = FakeViewChild.children[0];
+		let release!: (response: RpcResponse) => void;
+		const send = child.send.bind(child);
+		child.send = (command) => {
+			if (command.type === "compact") {
+				child.sent.push(command);
+				child.emit({ type: "compaction_start", reason: "manual" });
+				return new Promise((resolve) => {
+					release = resolve;
+				});
+			}
+			return send(command);
+		};
+		vi.useFakeTimers();
+		const pending = h.send({ type: "compact" });
+		let error: unknown;
+		void pending.catch((reason) => {
+			error = reason;
+		});
+		await vi.waitFor(() => expect(started).toBe(true));
+		await vi.advanceTimersByTimeAsync(31_000);
+		expect(error).toBeUndefined();
+		release({
+			type: "response",
+			id: child.sent.find((command) => command.type === "compact")!.id,
+			command: "compact",
+			success: true,
+			data: { summary: "done", firstKeptEntryId: "entry", tokensBefore: 1 },
+		});
+		expect((await pending).success).toBe(true);
+	});
 	it("handshake deadline closes a silent socket", async () => {
 		await daemon();
 		server!.close();
