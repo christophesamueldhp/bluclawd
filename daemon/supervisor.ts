@@ -17,7 +17,7 @@ import {
 	reduceActivity,
 } from "./activity.ts";
 import { radiusPresence } from "./radius.ts";
-import { createRpcProcessInstance, type RpcProcessInstance } from "./rpc-process.ts";
+import { createRpcProcessInstance, type RpcLaunch, type RpcProcessInstance } from "./rpc-process.ts";
 import { canonicalSessionKey, SessionOperations } from "./session-operations.ts";
 import {
 	needsFromRequest,
@@ -116,6 +116,10 @@ interface ExternalInstance {
 const EXTERNAL_TTL_MS = 15_000;
 
 export class ServerSupervisor {
+	private readonly launch?: RpcLaunch;
+	constructor(launch?: RpcLaunch) {
+		this.launch = launch;
+	}
 	private readonly liveInstances = new Map<string, LiveInstance>();
 	private readonly externalInstances = new Map<string, ExternalInstance>();
 	private readonly operations = new SessionOperations();
@@ -640,13 +644,16 @@ export class ServerSupervisor {
 
 		try {
 			if (options.sessionFile) live.projection = createViewProjection(readViewHistory(options.sessionFile));
-			const rpcProcess = createRpcProcessInstance({
-				cwd: live.record.cwd,
-				sessionFile: options.sessionFile,
-				provider: options.provider,
-				model: options.model,
-				appendSystemPrompt: SENTINEL_INSTRUCTIONS,
-			});
+			const rpcProcess = createRpcProcessInstance(
+				{
+					cwd: live.record.cwd,
+					sessionFile: options.sessionFile,
+					provider: options.provider,
+					model: options.model,
+					appendSystemPrompt: SENTINEL_INSTRUCTIONS,
+				},
+				this.launch,
+			);
 			this.bindRpcProcess(live, rpcProcess);
 			await this.syncInstanceRecord(live);
 			const registeredRecord = await radiusPresence.registerPi(live.record);
