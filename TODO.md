@@ -13,6 +13,6 @@ Intent: switching away and back must not abort ongoing work; Agent View must all
 - [x] Obtain user review of the written specification.
 - [x] Write and self-review `docs/superpowers/plans/2026-10-05-persistent-session-views.md` (11 sequential tasks; interfaces, regression cases, and verification commands).
 - [x] Establish existing baseline: 38 test files / 397 tests pass; `npm run typecheck` exits 0. No product code changed.
-- [ ] Obtain user review of the implementation plan and execution-method selection (native recommended; no subagent tool available).
-- [ ] Implement regression tests and fixes.
-- [ ] Verify switching, cancellation, single-writer safety, active-session deletion, and existing tests.
+- [x] Obtain user review of the implementation plan and execution-method selection (native recommended; no subagent tool available).
+- [x] Implement regression tests and fixes.
+- [x] Verify switching, cancellation, single-writer safety, active-session deletion, and existing tests.
