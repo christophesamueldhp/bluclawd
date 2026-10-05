@@ -27,6 +27,8 @@ export interface AgentRow {
 	sortOrder?: number;
 	/** The foreground session this view was opened from — returned to, never stopped. */
 	self: boolean;
+	/** Daemon-owned conversation currently displayed in this terminal. */
+	current: boolean;
 	/** Open in another window's foreground — attaching here would make a second writer. */
 	elsewhere: boolean;
 	updatedAt?: string;
@@ -75,6 +77,7 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 		pinned: inst.pinned === true,
 		sortOrder: inst.sortOrder,
 		self,
+		current: false,
 		elsewhere: false,
 		updatedAt: inst.lastSeenAt,
 	};
@@ -90,16 +93,21 @@ function needsText(needs: PendingNeeds): string {
  * marked `elsewhere`. One row per session file; this window's own and then a live one win over a
  * stored twin.
  */
-export function collectRows(instances: InstanceSummary[], self: InstanceSummary | undefined): AgentRow[] {
+export function collectRows(
+	instances: InstanceSummary[],
+	self: InstanceSummary | undefined,
+	currentId?: string,
+): AgentRow[] {
 	const heldElsewhere = new Set(
 		instances.filter((i) => i.external && i.id !== self?.id && i.sessionFile).map((i) => i.sessionFile),
 	);
 	const listed = instances.filter((i) => !i.external);
 	const rows = (self ? [self, ...listed] : listed).map((i) => {
 		const row = rowFromSummary(i, self?.id);
+		row.current = i.id === currentId;
 		if (!row.self && row.sessionFile && heldElsewhere.has(row.sessionFile)) {
 			row.elsewhere = true;
-			row.detail = "open in another terminal · enter moves it here";
+			row.detail = "open in another terminal · wait for its writer to finish";
 		}
 		return row;
 	});

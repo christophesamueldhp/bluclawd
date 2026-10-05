@@ -321,7 +321,16 @@ const agentView: InlineExtension = {
 							onClose: () => done(undefined),
 							onSelfReply: (text) =>
 								pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "followUp" }),
-							onOpen: (sessionFile, _cwd, resume) => done({ type: "open", sessionFile, resume }),
+							onOpen: async (target) => {
+								const sessionFile =
+									"sessionFile" in target
+										? target.sessionFile
+										: (await new OrchestratorClient().list()).find((row) => row.id === target.instanceId)
+												?.sessionFile;
+								if (!sessionFile) return false;
+								done({ type: "open", sessionFile, resume: false });
+								return true;
+							},
 							onCreateAndOpen: (_cwd, spawnModel, task, images) =>
 								done({ type: "create", model: spawnModel, task, images }),
 							loadPastSessions,

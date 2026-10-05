@@ -11,6 +11,7 @@ import agentView from "../ext/agent-view/index.ts";
 
 const state = vi.hoisted(() => ({
 	spawned: [] as unknown[],
+	incoming: undefined as { id: string; status: "stopped"; cwd: string; sessionFile: string } | undefined,
 	image: { type: "image" as const, mimeType: "image/png", data: "AQID" },
 }));
 vi.mock("../ext/agent-view/clipboard.ts", () => ({ readAgentClipboard: async () => ({ image: state.image }) }));
@@ -24,7 +25,7 @@ vi.mock("../ext/agent-view/orchestrator-client.ts", async (original) => ({
 			return { running: false };
 		}
 		async list() {
-			return [];
+			return state.incoming ? [state.incoming] : [];
 		}
 		async stop() {}
 		async spawn(options: unknown) {
@@ -54,6 +55,7 @@ function setup(create: boolean, cancelled = false) {
 	const incoming = join(dir, "incoming.jsonl");
 	writeFileSync(outgoing, "");
 	writeFileSync(incoming, "");
+	state.incoming = { id: "incoming", status: "stopped", cwd: dir, sessionFile: incoming };
 	let handler!: (_args: string, ctx: ExtensionCommandContext) => Promise<void>;
 	agentView({
 		on: () => {},
