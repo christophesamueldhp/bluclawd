@@ -3,6 +3,7 @@ import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
 import { setSharedTheme } from "../_shared/theme.ts";
 import { AgentView, type PastSession } from "./agent-view.ts";
 import type { AgentClipboard } from "./clipboard.ts";
+import { createConversationDialog } from "./conversation-dialog.ts";
 import { ConversationView } from "./conversation-view.ts";
 import type { OrchestratorClient } from "./orchestrator-client.ts";
 import { labelFromTask, type ViewMode } from "./rows.ts";
@@ -31,6 +32,8 @@ export class SessionShell implements Component, Focusable {
 	private focus = false;
 	private disposed = false;
 	private lastSelected?: string;
+	private localDialog?: ReturnType<typeof createConversationDialog>;
+	private finishLocal?: (value?: string) => void;
 	constructor(options: SessionShellOptions) {
 		this.options = options;
 		setSharedTheme(options.theme);
@@ -42,6 +45,7 @@ export class SessionShell implements Component, Focusable {
 	}
 	set focused(value: boolean) {
 		this.focus = value;
+		if (this.localDialog) this.localDialog.focused = value;
 		this.conversation.focused = value && this.mode === "conversation";
 		if (this.roster) this.roster.focused = value && this.mode === "agents";
 	}
@@ -108,12 +112,41 @@ export class SessionShell implements Component, Focusable {
 		if (this.roster) void this.roster.refresh();
 		this.options.tui.requestRender();
 	}
+	choose(title: string, choices: string[]): Promise<string | undefined> {
+		this.finishLocal?.();
+		return new Promise((resolve) => {
+			this.finishLocal = (value) => {
+				this.localDialog?.dispose();
+				this.localDialog = undefined;
+				this.finishLocal = undefined;
+				this.focused = this.focus;
+				this.options.tui.requestRender();
+				resolve(value);
+			};
+			this.localDialog = createConversationDialog(
+				{ type: "extension_ui_request", method: "select", id: "local", title, options: choices },
+				{
+					theme: this.options.theme,
+					tui: this.options.tui,
+					onAnswer: (answer) => this.finishLocal?.("value" in answer ? answer.value : undefined),
+				},
+			);
+			this.localDialog.focused = this.focus;
+			this.options.tui.requestRender();
+		});
+	}
 	handleInput(data: string): void {
 		if (this.disposed) return;
+		if (this.localDialog) {
+			this.localDialog.handleInput?.(data);
+			this.options.tui.requestRender();
+			return;
+		}
 		if (this.mode === "agents") this.roster?.handleInput(data);
 		else this.conversation.handleInput(data);
 	}
 	render(width: number): string[] {
+		if (this.localDialog) return this.localDialog.render(width);
 		return this.mode === "agents" && this.roster ? this.roster.render(width) : this.conversation.render(width);
 	}
 	invalidate(): void {
@@ -123,6 +156,7 @@ export class SessionShell implements Component, Focusable {
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
+		this.finishLocal?.();
 		this.roster?.dispose();
 		this.roster = undefined;
 		this.conversation.dispose();

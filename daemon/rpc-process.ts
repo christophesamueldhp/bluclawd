@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,7 +9,9 @@ import type {
 	RpcExtensionUIResponse,
 	RpcResponse,
 } from "@earendil-works/pi-coding-agent";
+import { bundledChildExtensionArgs } from "./child-resources.ts";
 import { isBunBinary } from "./config.ts";
+export type RpcLaunch = (command: string, args: string[], options: SpawnOptions) => ChildProcess;
 
 interface PendingRequest {
 	resolve(response: RpcResponse): void;
@@ -57,16 +59,19 @@ export class RpcProcessInstance {
 	private readonly exitListeners = new Set<(error?: Error) => void>();
 	private uiRequestHandler: ((request: RpcExtensionUIRequest) => void) | undefined;
 
-	constructor(options: {
-		cwd: string;
-		env?: NodeJS.ProcessEnv;
-		sessionFile?: string;
-		provider?: string;
-		model?: string;
-		appendSystemPrompt?: string;
-	}) {
+	constructor(
+		options: {
+			cwd: string;
+			env?: NodeJS.ProcessEnv;
+			sessionFile?: string;
+			provider?: string;
+			model?: string;
+			appendSystemPrompt?: string;
+		},
+		launch: RpcLaunch = spawn,
+	) {
 		const rpcCommand = this.getSpawnCommand(options);
-		this.process = spawn(rpcCommand.command, rpcCommand.args, {
+		this.process = launch(rpcCommand.command, rpcCommand.args, {
 			cwd: options.cwd,
 			env: options.env ?? process.env,
 			stdio: ["pipe", "pipe", "pipe"],
@@ -88,7 +93,7 @@ export class RpcProcessInstance {
 	} {
 		// Resume an existing session and/or pin the model; `main()` parses these before the mode
 		// branch, and the node rpc-entry forwards process.argv through to main().
-		const tail = buildRpcTailArgs(opts);
+		const tail = [...buildRpcTailArgs(opts), ...bundledChildExtensionArgs()];
 		if (isBunBinary) {
 			return {
 				command: join(dirname(process.execPath), process.platform === "win32" ? "pi.exe" : "pi"),
@@ -266,13 +271,16 @@ export class RpcProcessInstance {
 	}
 }
 
-export function createRpcProcessInstance(options: {
-	cwd: string;
-	env?: NodeJS.ProcessEnv;
-	sessionFile?: string;
-	provider?: string;
-	model?: string;
-	appendSystemPrompt?: string;
-}): RpcProcessInstance {
-	return new RpcProcessInstance(options);
+export function createRpcProcessInstance(
+	options: {
+		cwd: string;
+		env?: NodeJS.ProcessEnv;
+		sessionFile?: string;
+		provider?: string;
+		model?: string;
+		appendSystemPrompt?: string;
+	},
+	launch?: RpcLaunch,
+): RpcProcessInstance {
+	return new RpcProcessInstance(options, launch);
 }
