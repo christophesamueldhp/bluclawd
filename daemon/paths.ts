@@ -3,9 +3,23 @@
  * Side-effect free, so the agent-view extension imports it directly instead of
  * keeping its own copy in step with the daemon's.
  */
-import { type Dirent, readdirSync, statSync } from "node:fs";
+import { type Dirent, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+/** Include the Pi installation: an unchanged daemon cannot launch children after Pi moves. */
+export function daemonBuildId(dir: string, piRoot?: string): string {
+	const newest = newestMtimeMs(dir);
+	const source = newest > 0 ? new Date(newest).toISOString() : "unknown";
+	if (!piRoot) return source;
+	let root = piRoot;
+	try {
+		root = realpathSync(piRoot);
+	} catch {
+		/* A removed installation must still differ. */
+	}
+	return `${source}|${root}`;
+}
 
 export function getServerDir(): string {
 	const envDir = process.env.PI_SERVER_DIR;

@@ -159,7 +159,7 @@ interface ResponseBase {
 	/**
 	 * Echoed on every response so a client can detect it is talking to a stale —
 	 * already-running, since-changed — daemon. `version` is the daemon's package.json
-	 * semver; `buildId` is the newest mtime across its own daemon/ tree,
+	 * semver; `buildId` combines the newest mtime across its own daemon/ tree and the Pi installation path,
 	 * because a local rebuild during development does not bump `version` but does change what
 	 * code is on disk. A client compares `buildId` against what a FRESH spawn would report
 	 * right now, not against its own version, since the two processes are different npm

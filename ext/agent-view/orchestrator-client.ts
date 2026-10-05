@@ -3,7 +3,8 @@ import { readFileSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getSocketPath, newestMtimeMs } from "../../daemon/paths.ts";
+import type { ImageContent } from "@earendil-works/pi-ai";
+import { daemonBuildId, getSocketPath } from "../../daemon/paths.ts";
 
 export type AgentActivity = "idle" | "working" | "awaiting_input";
 type InstanceStatus = "starting" | "online" | "stopping" | "stopped" | "error";
@@ -81,6 +82,7 @@ interface AnyResponse {
 	version?: string;
 	buildId?: string;
 	release?: boolean;
+	response?: { success: boolean; error?: string };
 }
 
 /** Path to the daemon's CLI entry, for the ensureDaemon() auto-start. */
@@ -133,8 +135,7 @@ export function currentDaemonBuildId(): string {
 	} catch {
 		return "unknown"; // package not resolvable — same "can't tell" outcome as a stat failure
 	}
-	const newest = newestMtimeMs(dirname(cliPath));
-	return newest > 0 ? new Date(newest).toISOString() : "unknown";
+	return daemonBuildId(dirname(cliPath), piPackageRoot() ?? process.env.PI_PACKAGE_ROOT);
 }
 
 export class OrchestratorClient {
@@ -266,6 +267,7 @@ export class OrchestratorClient {
 		cwd: string;
 		label?: string;
 		prompt?: string;
+		images?: ImageContent[];
 		model?: { provider: string; id: string };
 		sessionFile?: string;
 	}): Promise<InstanceSummary | undefined> {
@@ -282,12 +284,18 @@ export class OrchestratorClient {
 		});
 		const instance = res.instance;
 		if (!instance) return instance;
-		if (opts.prompt) {
-			await this.request({
+		if (opts.prompt || opts.images?.length) {
+			const prompted = await this.request({
 				type: "rpc",
 				instanceId: instance.id,
-				command: { type: "prompt", message: opts.prompt },
-			}).catch(() => undefined);
+				command: {
+					type: "prompt",
+					message: opts.prompt ?? "",
+					...(opts.images?.length ? { images: opts.images } : {}),
+				},
+			});
+			if (prompted.response?.success === false)
+				throw new Error(prompted.response.error ?? "The first prompt was rejected");
 		}
 		return instance;
 	}

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getServerDir, newestMtimeMs } from "./paths.ts";
+import { daemonBuildId, getServerDir } from "./paths.ts";
 
 export { getServerDir, getSocketPath } from "./paths.ts";
 
@@ -47,10 +47,7 @@ export const VERSION: string = pkg.version || "0.0.0";
  * can tell a still-running daemon apart from what's on disk right now, which a semver
  * comparison alone would miss after a version-less local rebuild.
  */
-export const BUILD_ID: string = (() => {
-	const newest = newestMtimeMs(__dirname);
-	return newest > 0 ? new Date(newest).toISOString() : "unknown";
-})();
+export const BUILD_ID: string = daemonBuildId(__dirname, process.env.PI_PACKAGE_ROOT);
 
 export function getMachinePath(): string {
 	return join(getServerDir(), "machine.json");

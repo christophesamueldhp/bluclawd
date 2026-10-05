@@ -173,7 +173,7 @@ export class ServerSupervisor {
 		});
 	}
 
-	private async handleUnexpectedRpcExit(live: LiveInstance, _error?: Error): Promise<void> {
+	private async handleUnexpectedRpcExit(live: LiveInstance, error?: Error): Promise<void> {
 		if (this.liveInstances.get(live.record.id) !== live) {
 			return;
 		}
@@ -185,7 +185,7 @@ export class ServerSupervisor {
 			...live.record,
 			status: "stopped",
 			outcome: "failed",
-			detail: live.tracker.detail ?? "the session process exited unexpectedly",
+			detail: error?.message ?? live.tracker.detail ?? "the session process exited unexpectedly",
 		};
 		this.setStatus(live, "stopped");
 		this.clearBindings(live);
@@ -253,6 +253,11 @@ export class ServerSupervisor {
 	}
 
 	private async failSpawn(live: LiveInstance, error: unknown): Promise<never> {
+		this.updateRecord(live, {
+			outcome: "failed",
+			detail: error instanceof Error ? error.message : String(error),
+			finishedAt: new Date().toISOString(),
+		});
 		this.setStatus(live, "error");
 		try {
 			await this.cleanupAcquiredResources(live);
@@ -444,6 +449,7 @@ export class ServerSupervisor {
 				createdAt: previous?.createdAt ?? now,
 				lastSeenAt: now,
 				label: previous?.label ?? options.label,
+				sessionFile: options.sessionFile,
 				detail: previous?.detail ?? tail?.detail,
 				outcome: previous ? undefined : tail?.outcome,
 				question: previous ? undefined : tail?.question,

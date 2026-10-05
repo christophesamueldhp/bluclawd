@@ -8,7 +8,12 @@ import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView } from "../ext/agent-view/agent-view.ts";
 import { CONTINUE_PROMPT, handOff } from "../ext/agent-view/hand-off.ts";
 import { withoutAgentViewCommand } from "../ext/agent-view/index.ts";
-import { type InstanceSummary, type OrchestratorClient, piPackageRoot } from "../ext/agent-view/orchestrator-client.ts";
+import {
+	currentDaemonBuildId,
+	type InstanceSummary,
+	type OrchestratorClient,
+	piPackageRoot,
+} from "../ext/agent-view/orchestrator-client.ts";
 import {
 	buildBands,
 	collectRows,
@@ -114,7 +119,13 @@ function fakeClient(calls: Calls, list: () => InstanceSummary[] = () => sessions
 }
 
 function makeView(
-	opts: { self?: InstanceSummary; rows?: number; list?: () => InstanceSummary[]; releases?: boolean } = {},
+	opts: {
+		self?: InstanceSummary;
+		rows?: number;
+		list?: () => InstanceSummary[];
+		releases?: boolean;
+		readClipboard?: () => Promise<{ image?: { type: "image"; data: string; mimeType: string }; text?: string }>;
+	} = {},
 ) {
 	const calls: Calls = [];
 	const opened: string[] = [];
@@ -136,6 +147,10 @@ function makeView(
 			resumed.push(resume);
 		},
 		fileExists: () => true,
+		readClipboard: opts.readClipboard,
+		onCreateAndOpen: (...args) => {
+			calls.push(["createAndOpen", ...args]);
+		},
 	});
 	view.setInstancesForTest(sessions);
 	const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -320,6 +335,106 @@ describe("AgentView keys", () => {
 		expect(resumed).toEqual([true]);
 	});
 
+	it("does not open a live session if stopping its writer fails, and keeps the view usable", async () => {
+		const calls: Calls = [];
+		const client = fakeClient(calls);
+		client.stop = async () => {
+			throw new Error("stop timed out");
+		};
+		let opened = false;
+		let closed = false;
+		const view = new AgentView({
+			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+			client,
+			appName: "bluclawd",
+			cwd: HERE,
+			home: HOME,
+			onClose: () => {
+				closed = true;
+			},
+			onOpen: () => {
+				opened = true;
+			},
+			fileExists: () => true,
+		});
+		view.setInstancesForTest([
+			{ id: "w", status: "online", activity: "working", cwd: HERE, sessionFile: "/w.jsonl" },
+		]);
+		view.handleInput(ENTER);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(opened).toBe(false);
+		expect(view.render(100).map(stripAnsi).join("\n")).toContain("stop timed out");
+		view.handleInput(ESC);
+		expect(closed).toBe(true);
+	});
+
+	it("ignores a late roster response after closing rather than reading the replaced session context", async () => {
+		let invalidated = false;
+		let answer!: (rows: InstanceSummary[]) => void;
+		const client = fakeClient([]);
+		client.list = () =>
+			new Promise((resolve) => {
+				answer = resolve;
+			});
+		const view = new AgentView({
+			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+			client,
+			appName: "bluclawd",
+			cwd: HERE,
+			home: HOME,
+			onClose: () => {},
+			onOpen: () => {},
+			self: () => {
+				if (invalidated) throw new Error("stale session context");
+				return undefined;
+			},
+		});
+		const showing = view.onShow();
+		await vi.waitFor(() => expect(answer).toBeDefined());
+		view.close();
+		invalidated = true;
+		answer([]);
+		await expect(showing).resolves.toBeUndefined();
+	});
+
+	it("Esc cancels an in-flight open while the background writer is stopping", async () => {
+		let finish!: () => void;
+		const client = fakeClient([]);
+		client.stop = () =>
+			new Promise<void>((resolve) => {
+				finish = resolve;
+			});
+		let opened = false;
+		const view = new AgentView({
+			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+			client,
+			appName: "bluclawd",
+			cwd: HERE,
+			home: HOME,
+			onClose: () => {},
+			onOpen: () => {
+				opened = true;
+			},
+			fileExists: () => true,
+		});
+		view.setInstancesForTest([
+			{ id: "w", status: "online", activity: "working", cwd: HERE, sessionFile: "/w.jsonl" },
+		]);
+		view.handleInput(ENTER);
+		view.handleInput(ESC);
+		finish();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(opened).toBe(false);
+	});
+
+	it("explains how to recover a legacy Failed row that never recorded its file", () => {
+		const { view, text, opened } = makeView();
+		view.setInstancesForTest([{ id: "legacy", status: "stopped", outcome: "failed", cwd: HERE }]);
+		view.handleInput(ENTER);
+		expect(opened).toEqual([]);
+		expect(text().join("\n")).toContain("/resume");
+	});
+
 	it("opening a finished live session only stops it", async () => {
 		const { view, calls, resumed, flush } = makeView();
 		view.setInstancesForTest([
@@ -393,6 +508,101 @@ describe("AgentView keys", () => {
 				vi.useRealTimers();
 			}
 		});
+	});
+
+	it("Ctrl+V attaches an image to a new background session, including an image-only prompt", async () => {
+		const image = { type: "image" as const, mimeType: "image/png", data: "aW1hZ2U=" };
+		const { view, calls, text, flush } = makeView({ readClipboard: async () => ({ image }) });
+		view.handleInput("\x16");
+		await flush();
+		expect(text().join("\n")).toContain("1 image attached");
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]).toEqual(["spawn", expect.objectContaining({ prompt: "", images: [image] })]);
+		expect(text().join("\n")).not.toContain("image attached");
+	});
+
+	it("Ctrl+Enter carries pasted images into the new foreground session", async () => {
+		const image = { type: "image" as const, mimeType: "image/png", data: "aW1hZ2U=" };
+		const { view, calls, flush } = makeView({ readClipboard: async () => ({ image }) });
+		for (const ch of "describe this") view.handleInput(ch);
+		view.handleInput("\x16");
+		await flush();
+		view.handleInput("\x1b[13;5u");
+		expect(calls).toEqual([
+			["createAndOpen", HERE, { provider: "opencode-go", id: "kimi" }, "describe this", [image]],
+		]);
+	});
+
+	it("Ctrl+V falls back to clipboard text without stripping existing composer text", async () => {
+		const { view, calls, flush } = makeView({ readClipboard: async () => ({ text: " image" }) });
+		for (const ch of "describe") view.handleInput(ch);
+		view.handleInput("\x16");
+		await flush();
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]).toEqual(["spawn", expect.objectContaining({ prompt: "describe image" })]);
+	});
+
+	it("Esc clears pasted images rather than unexpectedly opening the selected session", async () => {
+		const image = { type: "image" as const, mimeType: "image/png", data: "aW1hZ2U=" };
+		const { view, closed, text, flush } = makeView({ readClipboard: async () => ({ image }) });
+		view.handleInput("\x16");
+		await flush();
+		view.handleInput(ESC);
+		expect(closed()).toBe(0);
+		expect(text().join("\n")).not.toContain("image attached");
+		view.handleInput(ESC);
+		expect(closed()).toBe(1);
+	});
+
+	it("does not submit while clipboard image data is still loading", async () => {
+		let finish!: (value: { image: { type: "image"; mimeType: string; data: string } }) => void;
+		const { view, calls, flush } = makeView({
+			readClipboard: () =>
+				new Promise((resolve) => {
+					finish = resolve;
+				}),
+		});
+		for (const ch of "describe image") view.handleInput(ch);
+		view.handleInput("\x16");
+		view.handleInput(ENTER);
+		expect(calls).toEqual([]);
+		finish({ image: { type: "image", mimeType: "image/png", data: "aW1hZ2U=" } });
+		await flush();
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]).toEqual([
+			"spawn",
+			expect.objectContaining({ images: [expect.objectContaining({ type: "image" })] }),
+		]);
+	});
+
+	it("retains the task and images if starting a new session fails", async () => {
+		const image = { type: "image" as const, mimeType: "image/png", data: "AQID" };
+		const client = fakeClient([]);
+		client.spawn = async () => {
+			throw new Error("startup unavailable");
+		};
+		const view = new AgentView({
+			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+			client,
+			appName: "bluclawd",
+			cwd: HERE,
+			home: HOME,
+			onClose: () => {},
+			onOpen: () => {},
+			readClipboard: async () => ({ image }),
+		});
+		for (const ch of "describe image") view.handleInput(ch);
+		view.handleInput("\x16");
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		view.handleInput(ENTER);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		const shown = view.render(100).map(stripAnsi).join("\n");
+		expect(shown).toContain("describe image");
+		expect(shown).toContain("1 image attached");
+		expect(shown).toContain("startup unavailable");
 	});
 
 	it("refuses a too-short task", () => {
@@ -554,6 +764,15 @@ describe("withoutAgentViewCommand", () => {
 		} as unknown as AutocompleteProvider;
 		const got = await withoutAgentViewCommand(base).getSuggestions(["/a"], 0, 2, { force: false } as never);
 		expect(got?.items.map((i) => i.value)).toEqual(["agents"]);
+	});
+});
+
+describe("daemon runtime identity", () => {
+	it("detects a different Pi installation even when bluclawd source is unchanged", () => {
+		vi.stubEnv("PI_PACKAGE_ROOT", "/old/pi");
+		const old = currentDaemonBuildId();
+		vi.stubEnv("PI_PACKAGE_ROOT", "/new/pi");
+		expect(currentDaemonBuildId()).not.toBe(old);
 	});
 });
 

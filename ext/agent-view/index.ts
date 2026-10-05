@@ -12,6 +12,7 @@
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename } from "node:path";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ExtensionCommandContext, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
 import {
@@ -34,6 +35,10 @@ import { deriveLabel, ForegroundActivity, SelfRegistration, type SelfSessionInfo
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
+
+type ViewAction =
+	| { type: "open"; sessionFile: string; resume: boolean }
+	| { type: "create"; model?: { provider: string; id: string }; task: string; images: ImageContent[] };
 
 const TMP_ROOTS = [tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"];
 const PILL_POLL_MS = 10_000;
@@ -301,7 +306,7 @@ const agentView: InlineExtension = {
 				return name ? `π - ${name} - ${dir}` : `π - ${dir}`;
 			};
 			try {
-				await ctx.ui.custom<void>(
+				const action = await ctx.ui.custom<ViewAction | undefined>(
 					(tui, _theme, _keybindings, done) => {
 						const view = new AgentView({
 							ui: tui,
@@ -316,45 +321,9 @@ const agentView: InlineExtension = {
 							onClose: () => done(undefined),
 							onSelfReply: (text) =>
 								pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "followUp" }),
-							onOpen: (sessionFile, _cwd, resume) => {
-								done(undefined);
-								openedFromView = true;
-								void (async () => {
-									// Capture BEFORE the switch: switchSession disposes this session.
-									const outgoing = captureOutgoing(ctx);
-									await ctx.switchSession(
-										sessionFile,
-										resume
-											? { withSession: async (replaced) => replaced.sendUserMessage(CONTINUE_PROMPT) }
-											: undefined,
-									);
-									await registration?.refresh();
-									await handOff(outgoing);
-								})();
-							},
-							onCreateAndOpen: (_cwd, spawnModel, task) => {
-								done(undefined);
-								openedFromView = true;
-								void (async () => {
-									const outgoing = captureOutgoing(ctx);
-									const chosen = spawnModel ? `${spawnModel.provider}/${spawnModel.id}` : undefined;
-									const current = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-									if (chosen && chosen !== current) {
-										// pi's newSession() takes no model; say so instead of quietly ignoring it.
-										ctx.ui.notify(
-											`New session opened with ${current ?? "the default model"} — newSession() cannot set ${chosen}.`,
-											"warning",
-										);
-									}
-									await ctx.newSession({
-										withSession: async (replaced) => {
-											replaced.sendUserMessage(task);
-										},
-									});
-									await registration?.refresh();
-									await handOff(outgoing);
-								})();
-							},
+							onOpen: (sessionFile, _cwd, resume) => done({ type: "open", sessionFile, resume }),
+							onCreateAndOpen: (_cwd, spawnModel, task, images) =>
+								done({ type: "create", model: spawnModel, task, images }),
 							loadPastSessions,
 							loadViewMode: () => loadViewMode(getAgentDir()),
 							saveViewMode: (mode) => saveViewMode(getAgentDir(), mode),
@@ -367,6 +336,38 @@ const agentView: InlineExtension = {
 					},
 					{ overlay: true, overlayOptions: FULL_SCREEN },
 				);
+				if (!action) return;
+				// Only plain data survives replacement. The command awaits the whole transition;
+				// hand-off runs only in the fresh context, after dispose and never on cancellation.
+				const outgoing = captureOutgoing(ctx);
+				openedFromView = true;
+				if (action.type === "open") {
+					await ctx.switchSession(action.sessionFile, {
+						withSession: async (replaced) => {
+							await handOff(outgoing);
+							if (action.resume) await replaced.sendUserMessage(CONTINUE_PROMPT);
+						},
+					});
+				} else {
+					const chosen = action.model ? `${action.model.provider}/${action.model.id}` : undefined;
+					const current = model ? `${model.provider}/${model.id}` : undefined;
+					if (chosen && chosen !== current) {
+						ctx.ui.notify(
+							`New session will use ${current ?? "the default model"} — newSession() cannot set ${chosen}.`,
+							"warning",
+						);
+					}
+					await ctx.newSession({
+						withSession: async (replaced) => {
+							await handOff(outgoing);
+							await replaced.sendUserMessage(
+								action.images.length
+									? [...(action.task ? [{ type: "text" as const, text: action.task }] : []), ...action.images]
+									: action.task,
+							);
+						},
+					});
+				}
 			} finally {
 				viewOpen = false;
 				closeView = undefined;

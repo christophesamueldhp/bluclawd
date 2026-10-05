@@ -9,6 +9,7 @@ type Listener = (event: { type: string; [key: string]: unknown }) => void;
 class FakeChild {
 	static last: FakeChild | undefined;
 	static spawnOptions: Array<Record<string, unknown>> = [];
+	static startupError: Error | undefined;
 	listeners = new Set<Listener>();
 	exitListeners = new Set<(error?: Error) => void>();
 	uiHandler: ((request: unknown) => void) | undefined;
@@ -38,6 +39,7 @@ class FakeChild {
 	async send(command: { type: string }) {
 		this.sent.push(command);
 		if (command.type === "get_state") {
+			if (FakeChild.startupError) throw FakeChild.startupError;
 			return {
 				type: "response",
 				success: true,
@@ -73,6 +75,7 @@ describe("agent-view session lifecycle", () => {
 		prevEnv = process.env.PI_SERVER_DIR;
 		process.env.PI_SERVER_DIR = mkdtempSync(join(tmpdir(), "bluclawd-lifecycle-"));
 		FakeChild.spawnOptions = [];
+		FakeChild.startupError = undefined;
 	});
 
 	afterEach(() => {
@@ -108,6 +111,21 @@ describe("agent-view session lifecycle", () => {
 		expect(loadInstances()[0]).toMatchObject({ outcome: "done", detail: "result: shipped it", turns: 1 });
 		await supervisor.stopInstance(spawned.id);
 		expect(loadInstances()[0].outcome).toBe("done");
+	});
+
+	it("a failed hand-off keeps the session file so its Failed row can be opened and revived", async () => {
+		const supervisor = new ServerSupervisor();
+		FakeChild.startupError = new Error("Cannot find package: old Pi installation removed");
+		await expect(supervisor.spawnInstance({ cwd: "/p", sessionFile: "/p/outgoing.jsonl" })).rejects.toThrow(
+			"Cannot find package",
+		);
+		const [failed] = loadInstances();
+		expect(failed).toMatchObject({ status: "stopped", outcome: "failed", sessionFile: "/p/outgoing.jsonl" });
+		expect(failed.detail).toContain("old Pi installation removed");
+		FakeChild.startupError = undefined;
+		const revived = await supervisor.spawnInstance({ cwd: "/p", sessionFile: "/p/outgoing.jsonl" });
+		expect(revived.id).toBe(failed.id);
+		expect(loadInstances()).toHaveLength(1);
 	});
 
 	it("a crashed child is kept as Failed instead of vanishing", async () => {

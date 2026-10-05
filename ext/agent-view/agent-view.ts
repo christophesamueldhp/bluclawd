@@ -12,6 +12,7 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import {
 	type Component,
 	type Focusable,
@@ -25,6 +26,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { theme } from "../_shared/theme.ts";
 import { mascotGlyphs, REST, renderMascot } from "../branding/mascot.ts";
+import { type AgentClipboard, readAgentClipboard } from "./clipboard.ts";
 import { currentDaemonBuildId, type InstanceSummary, type OrchestratorClient } from "./orchestrator-client.ts";
 import {
 	type AgentRow,
@@ -68,7 +70,14 @@ export interface AgentViewOptions {
 	/** A peek reply to this window's own session: sent as its next prompt once the view closes. */
 	onSelfReply?: (text: string) => void;
 	/** ctrl+enter: start a session in this window with `task` as its first prompt. */
-	onCreateAndOpen?: (cwd: string, model: { provider: string; id: string } | undefined, task: string) => void;
+	onCreateAndOpen?: (
+		cwd: string,
+		model: { provider: string; id: string } | undefined,
+		task: string,
+		images: ImageContent[],
+	) => void;
+	/** Clipboard IO is separate from the view so asynchronous paste never blocks rendering. */
+	readClipboard?: () => Promise<AgentClipboard>;
 	/** `/resume`: this repository's past sessions, newest first. */
 	loadPastSessions?: (cwd: string) => Promise<PastSession[]>;
 	loadViewMode?: () => ViewMode | undefined;
@@ -199,6 +208,10 @@ export class AgentView implements Component, Focusable {
 	private readonly composer = new Input();
 	/** Lines above the composer's current one (ctrl+j / shift+enter); Input itself is single-line. */
 	private composerLines: string[] = [];
+	private composerImages: ImageContent[] = [];
+	private pasting = false;
+	private dispatching = false;
+	private draftVersion = 0;
 	/** True while ctrl+g's editor owns the terminal. */
 	private editing = false;
 	private readonly reply = new Input();
@@ -269,6 +282,7 @@ export class AgentView implements Component, Focusable {
 	/** Every path that abandons the view: close, open, create-and-open. */
 	private teardown(): void {
 		this.closed = true;
+		this.opening = undefined;
 		if (this.pollTimer) clearInterval(this.pollTimer);
 		if (this.spinTimer) clearInterval(this.spinTimer);
 		if (this.noticeTimer) clearTimeout(this.noticeTimer);
@@ -286,6 +300,35 @@ export class AgentView implements Component, Focusable {
 		this.composer.setValue(lines.pop() ?? "");
 		this.composerLines = lines;
 		this.composer.handleInput("\x05"); // ctrl+e: cursor to the end
+	}
+
+	private clearDraft(): void {
+		this.setComposer("");
+		this.composerImages = [];
+		this.draftVersion++;
+	}
+
+	private async pasteClipboard(): Promise<void> {
+		if (this.pasting || this.dispatching) return;
+		this.pasting = true;
+		this.render_();
+		const version = this.draftVersion;
+		try {
+			const clipboard = await (this.opts.readClipboard ?? readAgentClipboard)();
+			if (this.closed || version !== this.draftVersion) return;
+			if (clipboard.image) this.composerImages.push(clipboard.image);
+			else if (clipboard.text) this.composer.handleInput(`\x1b[200~${clipboard.text}\x1b[201~`);
+			else this.say("Clipboard has no image or text");
+		} catch (error) {
+			if (!this.closed)
+				this.say(`Couldn't paste — ${error instanceof Error ? error.message : String(error)}`, "error");
+		} finally {
+			this.pasting = false;
+			if (!this.closed) {
+				this.recompute();
+				this.render_();
+			}
+		}
 	}
 
 	/** ctrl+g: edit the dispatch prompt in $VISUAL / $EDITOR, as pi's own editor does. */
@@ -347,6 +390,7 @@ export class AgentView implements Component, Focusable {
 		} finally {
 			this.refreshing = false;
 		}
+		if (this.closed) return; // Its self callback may already belong to a disposed session.
 		this.recompute();
 		this.render_();
 	}
@@ -458,22 +502,25 @@ export class AgentView implements Component, Focusable {
 	}
 
 	private async dispatch(open: boolean): Promise<void> {
+		if (this.pasting || this.dispatching) return;
 		const task = this.composerText().trim();
-		if (task.length < 4) {
+		const images = [...this.composerImages];
+		if (task.length < 4 && images.length === 0) {
 			this.say("Too short — describe the task");
 			return;
 		}
 		const cwd = this.dispatchCwd();
 		const model = this.dispatchModel;
-		this.setComposer("");
 		if (open && this.opts.onCreateAndOpen && cwd === this.opts.cwd) {
+			this.clearDraft();
 			this.teardown();
-			this.opts.onCreateAndOpen(cwd, model, task);
+			this.opts.onCreateAndOpen(cwd, model, task, images);
 			return;
 		}
+		this.dispatching = true;
 		const placeholder: AgentRow = {
 			id: `pending:${Date.now()}`,
-			label: labelFromTask(task),
+			label: labelFromTask(task || "Image task"),
 			cwd,
 			state: "working",
 			alive: true,
@@ -492,8 +539,10 @@ export class AgentView implements Component, Focusable {
 				cwd,
 				label: placeholder.label,
 				prompt: task,
+				images: images.length ? images : undefined,
 				model,
 			});
+			this.clearDraft();
 			if (instance && this.selectedKey === placeholder.id) this.selectedKey = instance.id;
 			if (open && instance) {
 				this.pending = this.pending.filter((p) => p !== placeholder);
@@ -504,6 +553,7 @@ export class AgentView implements Component, Focusable {
 		} catch (error) {
 			this.say(`Couldn't start a new session — ${error instanceof Error ? error.message : String(error)}`, "error");
 		} finally {
+			this.dispatching = false;
 			this.pending = this.pending.filter((p) => p !== placeholder);
 			await this.refresh();
 		}
@@ -511,12 +561,17 @@ export class AgentView implements Component, Focusable {
 
 	/** Enter / →: this window switches to the session; the one here keeps running in the background. */
 	private async open(row: AgentRow): Promise<void> {
+		if (this.closed || this.opening) return;
 		if (row.self) {
 			this.close();
 			return;
 		}
 		if (row.id.startsWith("pending:") || !row.sessionFile) {
-			this.say("Still starting — try again in a moment");
+			this.say(
+				!row.alive && !row.sessionFile
+					? "No session file recorded — use /resume to reopen its saved conversation"
+					: "Still starting — try again in a moment",
+			);
 			return;
 		}
 		// Open in another terminal: that one lets it go (and moves to a new session), then it opens here.
@@ -535,21 +590,26 @@ export class AgentView implements Component, Focusable {
 			await new Promise((resolve) => setTimeout(resolve, 150));
 		}
 		if (this.opening !== row.id) return; // esc cancelled
-		this.opening = undefined;
 		if (!exists(row.sessionFile)) {
+			this.opening = undefined;
 			this.say("Still starting — try again in a moment");
 			return;
 		}
-		this.teardown();
 		// A turn in progress is cut off by the stop; this window carries it on.
 		const resume = heldTurn || (row.alive && (row.state === "working" || row.needs !== undefined));
 		if (row.alive) {
 			try {
 				await this.opts.client.stop(row.id);
-			} catch {
-				// The file is append-only; opening it is safe either way.
+			} catch (error) {
+				if (this.closed || this.opening !== row.id) return;
+				this.opening = undefined;
+				this.say(`Couldn't open — ${error instanceof Error ? error.message : String(error)}`, "error");
+				return; // The old writer may still be running; do not create a second one.
 			}
 		}
+		if (this.closed || this.opening !== row.id) return;
+		this.opening = undefined;
+		this.teardown();
 		this.opts.onOpen(row.sessionFile, row.cwd, resume);
 	}
 
@@ -932,9 +992,16 @@ export class AgentView implements Component, Focusable {
 		const text = this.composerText();
 		const item = this.selected;
 
+		if (matchesKey(data, "ctrl+v")) {
+			void this.pasteClipboard();
+			return;
+		}
+		if (this.dispatching) return;
+		if (this.pasting && (this.isEnter(data) || matchesKey(data, "ctrl+enter") || matchesKey(data, "alt+enter")))
+			return;
 		if (matchesKey(data, "ctrl+c")) {
-			if (text) {
-				this.setComposer("");
+			if (text || this.composerImages.length || this.pasting) {
+				this.clearDraft();
 				this.recompute();
 			} else if (Date.now() - this.ctrlCArmedAt < ARM_MS) {
 				this.close();
@@ -953,8 +1020,8 @@ export class AgentView implements Component, Focusable {
 		if (this.isEsc(data)) {
 			if (this.opening) this.opening = undefined;
 			else if (this.armed) this.disarm();
-			else if (text) {
-				this.setComposer("");
+			else if (text || this.composerImages.length || this.pasting) {
+				this.clearDraft();
 				this.recompute();
 			} else {
 				this.close();
@@ -981,15 +1048,15 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		if (matchesKey(data, "ctrl+enter") || matchesKey(data, "alt+enter")) {
-			if (text) void this.dispatch(true);
+			if (text || this.composerImages.length) void this.dispatch(true);
 			return;
 		}
 		if (this.isEnter(data)) {
-			if (text.startsWith("/")) {
+			if (text.startsWith("/") && this.composerImages.length === 0) {
 				this.runViewCommand(text.trim());
 				return;
 			}
-			if (text && !stateFilter(text)) {
+			if (this.composerImages.length || (text && !stateFilter(text))) {
 				void this.dispatch(false);
 				return;
 			}
@@ -1427,6 +1494,18 @@ export class AgentView implements Component, Focusable {
 				...intro,
 				rule,
 				...above,
+				...(this.composerImages.length
+					? [
+							truncateToWidth(
+								cc.fg(
+									"muted",
+									` ${this.composerImages.length} image${this.composerImages.length === 1 ? "" : "s"} attached · esc to clear`,
+								),
+								width,
+							),
+						]
+					: []),
+				...(this.pasting ? [truncateToWidth(cc.fg("muted", " Reading clipboard…"), width)] : []),
 				above.length ? current.replace(/^❯/, " ") : current,
 				rule,
 				...(this.mode === "help" ? this.renderHelp(width) : [this.listFooter(width)]),
