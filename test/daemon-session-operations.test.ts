@@ -19,6 +19,8 @@ beforeEach(() => {
 	file = join(dir, "saved.jsonl");
 	writeFileSync(file, '{"type":"session","id":"saved","version":3,"cwd":"/p","timestamp":"2026-10-05T00:00:00Z"}\n');
 	vi.stubEnv("PI_SERVER_DIR", dir);
+	vi.stubEnv("PI_CODING_AGENT_DIR", join(dir, "agent"));
+	vi.stubEnv("RADIUS_API_KEY", "");
 	FakeViewChild.children = [];
 	supervisor = new ServerSupervisor();
 });

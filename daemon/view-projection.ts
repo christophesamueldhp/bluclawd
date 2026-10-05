@@ -117,6 +117,14 @@ export function reduceViewProjection(state: ViewProjection, event: ViewInput, ke
 					},
 				].slice(-VIEW_MESSAGE_LIMIT);
 			break;
+		case "view_history_synced": {
+			const entries = new Map(event.entries.map((entry) => [entry.key, entry.entryId]));
+			s.messages = s.messages.map((message) =>
+				entries.has(message.key) ? { ...message, entryId: entries.get(message.key) } : message,
+			);
+			s.historyBefore = event.before;
+			break;
+		}
 		case "view_error":
 			s.errors = [...s.errors, event.message].slice(-10);
 			break;

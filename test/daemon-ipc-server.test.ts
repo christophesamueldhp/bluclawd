@@ -59,6 +59,7 @@ describe("startIpcServer — version echo", () => {
 		const response = await sendRaw(join(tempDir, "server.sock"), JSON.stringify({ type: "list" }));
 
 		expect(response.type).toBe("list_result");
+		expect(response.viewProtocol).toBe(1);
 		expect(response.version).toBe(VERSION);
 		expect(response.buildId).toBe(BUILD_ID);
 		expect(typeof response.buildId).toBe("string");

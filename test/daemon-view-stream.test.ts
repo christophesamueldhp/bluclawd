@@ -1,8 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ViewEvent, ViewTerminal } from "../daemon/view-types.ts";
+import { reduceViewProjection } from "../daemon/view-projection.ts";
+import type { ViewEvent, ViewProjection, ViewTerminal } from "../daemon/view-types.ts";
 import { FakeViewChild } from "./support/fake-view-child.ts";
 import { assistant, textDelta } from "./support/view-fixtures.ts";
 
@@ -15,6 +16,8 @@ let supervisor: InstanceType<typeof ServerSupervisor>;
 beforeEach(() => {
 	dir = mkdtempSync(join(tmpdir(), "view-stream-"));
 	vi.stubEnv("PI_SERVER_DIR", dir);
+	vi.stubEnv("PI_CODING_AGENT_DIR", join(dir, "agent"));
+	vi.stubEnv("RADIUS_API_KEY", "");
 	FakeViewChild.children = [];
 	supervisor = new ServerSupervisor();
 });
@@ -24,6 +27,53 @@ afterEach(async () => {
 	rmSync(dir, { recursive: true, force: true });
 });
 describe("daemon persistent view streams", () => {
+	it("refreshes confirmed state without awaiting RPC during attach", async () => {
+		const row = await supervisor.spawnInstance({ cwd: dir });
+		const child = FakeViewChild.children[0];
+		const send = child.send.bind(child);
+		child.send = async (command) => {
+			const response = await send(command);
+			if (response.command === "get_state" && response.success) response.data.thinkingLevel = "high";
+			return response;
+		};
+		await supervisor.handleRpc(row.id, { type: "get_state" });
+		const attach = supervisor.openViewStream(row.id, () => {})!;
+		expect(attach.ready.state.thinkingLevel).toBe("high");
+		attach.close();
+	});
+	it("reconciles persisted entry ids for already attached viewers", async () => {
+		const file = join(dir, "history.jsonl");
+		const header =
+			JSON.stringify({ type: "session", id: "saved", version: 3, cwd: dir, timestamp: "2026-10-05T00:00:00Z" }) +
+			"\n";
+		writeFileSync(file, header);
+		const row = await supervisor.spawnInstance({ cwd: dir, sessionFile: file });
+		let projection!: ViewProjection;
+		const a = supervisor.openViewStream(row.id, (record) => {
+			if (record.type === "view_event")
+				projection = reduceViewProjection(projection, record.event, `${record.generation}:${record.sequence}`);
+		})!;
+		projection = a.ready.projection;
+		const message = assistant("persisted", 5);
+		writeFileSync(
+			file,
+			header +
+				JSON.stringify({
+					type: "message",
+					id: "entry",
+					parentId: null,
+					timestamp: "2026-10-05T00:00:00Z",
+					message,
+				}) +
+				"\n",
+		);
+		FakeViewChild.children[0].emit({ type: "message_end", message });
+		const b = supervisor.openViewStream(row.id, () => {})!;
+		expect(projection.messages[0].entryId).toBe("entry");
+		expect(projection.messages).toEqual(b.ready.projection.messages);
+		a.close();
+		b.close();
+	});
 	it("repeated close cannot detach a newer viewer", async () => {
 		const row = await supervisor.spawnInstance({ cwd: dir });
 		const old = supervisor.openViewStream(row.id, () => {})!;

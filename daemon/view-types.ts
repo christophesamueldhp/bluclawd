@@ -44,7 +44,9 @@ export type ViewInput =
 	| JsonAgentSessionEvent
 	| RpcExtensionUIRequest
 	| { type: "view_ui_resolved"; requestId: string }
-	| { type: "view_error"; message: string };
+	| { type: "view_error"; message: string }
+	| { type: "view_history_synced"; entries: Array<{ key: string; entryId: string }>; before?: string }
+	| { type: "view_state"; state: RpcSessionState };
 export interface ViewReady {
 	type: "view_ready";
 	ok: true;

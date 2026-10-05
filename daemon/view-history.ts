@@ -49,7 +49,7 @@ export function reconcileEntryIds(messages: ViewMessage[], persisted: ViewMessag
 				continue;
 			cursor = i + 1;
 			if (p.entryId) used.add(p.entryId);
-			return { ...m, key: p.key, entryId: p.entryId };
+			return { ...m, entryId: p.entryId };
 		}
 		return m;
 	});

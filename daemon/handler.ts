@@ -36,9 +36,13 @@ import type {
 	StopResponse,
 	UnregisterRequest,
 	UnregisterResponse,
+	ViewHistoryRequest,
+	ViewHistoryResponse,
+	ViewStreamRequest,
 } from "./ipc/protocol.ts";
 import { supervisor } from "./supervisor.ts";
 import type { InstanceRecord } from "./types.ts";
+import { VIEW_PROTOCOL_VERSION, type ViewEvent, type ViewReady, type ViewTerminal } from "./view-types.ts";
 
 function toInstanceSummary(instance: InstanceRecord, activity?: AgentActivity, external?: boolean): InstanceSummary {
 	return {
@@ -93,6 +97,8 @@ export async function handleIpcRequest(request: StopRequest): Promise<StopRespon
 export async function handleIpcRequest(request: StatusRequest): Promise<StatusResponse | ErrorResponse>;
 export async function handleIpcRequest(request: RpcRequest): Promise<RpcBridgeResponse | ErrorResponse>;
 export async function handleIpcRequest(request: RpcStreamRequest): Promise<RpcReadyResponse | ErrorResponse>;
+export async function handleIpcRequest(request: ViewStreamRequest): Promise<ViewReady | ErrorResponse>;
+export async function handleIpcRequest(request: ViewHistoryRequest): Promise<ViewHistoryResponse | ErrorResponse>;
 export async function handleIpcRequest(request: RegisterRequest): Promise<RegisterResponse | ErrorResponse>;
 export async function handleIpcRequest(request: UnregisterRequest): Promise<UnregisterResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ShutdownRequest): Promise<ShutdownResponse | ErrorResponse>;
@@ -182,6 +188,18 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 			};
 		}
 
+		case "view_stream": {
+			if (request.viewProtocol !== VIEW_PROTOCOL_VERSION)
+				return { type: "error", ok: false, error: "Unsupported session view protocol" };
+			const handle = supervisor.openViewStream(request.instanceId, () => {});
+			if (!handle) return unknownInstanceError(request.instanceId);
+			handle.close();
+			return handle.ready;
+		}
+		case "view_history": {
+			const page = supervisor.getViewHistory(request.instanceId, request.before, request.limit);
+			return page ? { type: "view_history_result", ok: true, page } : unknownInstanceError(request.instanceId);
+		}
 		case "register": {
 			const now = new Date().toISOString();
 			const record: InstanceRecord = {
@@ -255,6 +273,10 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 			return { type: "shutdown_result", ok: true };
 		}
 	}
+}
+
+export function openViewStream(instanceId: string, onRecord: (record: ViewEvent | ViewTerminal) => void) {
+	return supervisor.openViewStream(instanceId, onRecord);
 }
 
 export function openRpcStream(

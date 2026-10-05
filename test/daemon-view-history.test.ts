@@ -72,5 +72,6 @@ describe("read-only display history", () => {
 			persisted,
 		);
 		expect(r.map((m) => m.entryId)).toEqual(["first", "second"]);
+		expect(r.map((m) => m.key)).toEqual(["live:1", "live:2"]);
 	});
 });

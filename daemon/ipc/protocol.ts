@@ -8,6 +8,7 @@ import type {
 import type { AgentActivity } from "../activity.ts";
 import type { SessionNeeds } from "../session-state.ts";
 import type { InstanceStatus } from "../types.ts";
+import type { HistoryPage, ViewEvent, ViewReady, ViewTerminal } from "../view-types.ts";
 
 export interface SpawnRequest {
 	type: "spawn";
@@ -42,6 +43,32 @@ export interface RpcRequest {
 export interface RpcStreamRequest {
 	type: "rpc_stream";
 	instanceId: string;
+}
+export interface ViewStreamRequest {
+	type: "view_stream";
+	instanceId: string;
+	viewProtocol: 1;
+}
+export interface ViewHistoryRequest {
+	type: "view_history";
+	instanceId: string;
+	before?: string;
+	limit?: number;
+}
+export interface ViewAnswerRequest {
+	type: "view_answer";
+	id: string;
+	response: RpcExtensionUIResponse;
+}
+export interface ViewAnswerResult {
+	type: "view_answer_result";
+	id: string;
+	ok: boolean;
+}
+export interface ViewHistoryResponse extends ResponseBase {
+	type: "view_history_result";
+	ok: true;
+	page: HistoryPage;
 }
 
 /** Register/heartbeat an external (self-registered) session — one the daemon did not spawn. */
@@ -116,6 +143,8 @@ interface RequestMap {
 	status: StatusRequest;
 	rpc: RpcRequest;
 	rpc_stream: RpcStreamRequest;
+	view_stream: ViewStreamRequest;
+	view_history: ViewHistoryRequest;
 	register: RegisterRequest;
 	unregister: UnregisterRequest;
 	shutdown: ShutdownRequest;
@@ -167,6 +196,7 @@ interface ResponseBase {
 	 */
 	version?: string;
 	buildId?: string;
+	viewProtocol?: number;
 }
 
 export interface SpawnResponse extends ResponseBase {
@@ -232,6 +262,8 @@ interface ResponseMap {
 	status: StatusResponse;
 	rpc: RpcBridgeResponse;
 	rpc_stream: RpcReadyResponse;
+	view_stream: ViewReady;
+	view_history: ViewHistoryResponse;
 	register: RegisterResponse;
 	unregister: UnregisterResponse;
 	shutdown: ShutdownResponse;
@@ -246,7 +278,15 @@ interface ResponseMap {
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;
 type RpcClientMessage = RpcCommand | RpcExtensionUIResponse;
 type RpcServerMessage = RpcReadyResponse | RpcResponse | JsonAgentSessionEvent | RpcExtensionUIRequest | ErrorResponse;
-export type ProtocolMessage = ServerRequest | ServerResponse | RpcClientMessage | RpcServerMessage;
+export type ProtocolMessage =
+	| ServerRequest
+	| ServerResponse
+	| RpcClientMessage
+	| RpcServerMessage
+	| ViewEvent
+	| ViewTerminal
+	| ViewAnswerRequest
+	| ViewAnswerResult;
 
 export function encodeMessage(message: ProtocolMessage): string {
 	return `${JSON.stringify(message)}\n`;

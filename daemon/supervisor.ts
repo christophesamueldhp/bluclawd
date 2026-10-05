@@ -81,6 +81,14 @@ const SESSION_METADATA_COMMANDS: ReadonlySet<RpcCommand["type"]> = new Set([
 	"clone",
 	"set_session_name",
 	"prompt",
+	"set_model",
+	"cycle_model",
+	"set_thinking_level",
+	"cycle_thinking_level",
+	"set_steering_mode",
+	"set_follow_up_mode",
+	"set_auto_compaction",
+	"set_auto_retry",
 ]);
 
 function shouldRefreshSessionMetadata(command: RpcCommand): boolean {
@@ -148,11 +156,19 @@ export class ServerSupervisor {
 		try {
 			const history = readViewHistory(file);
 			const messages = reconcileEntryIds(live.projection.messages, history.messages);
-			live.projection = {
-				...live.projection,
-				messages,
-				historyBefore: history.before ? (messages[0]?.entryId ?? history.before) : undefined,
-			};
+			const before = history.before ? (messages[0]?.entryId ?? history.before) : undefined;
+			if (
+				before !== live.projection.historyBefore ||
+				messages.some((message, i) => message.entryId !== live.projection.messages[i]?.entryId)
+			) {
+				this.publishView(live, {
+					type: "view_history_synced",
+					before,
+					entries: messages.flatMap((message) =>
+						message.entryId ? [{ key: message.key, entryId: message.entryId }] : [],
+					),
+				});
+			}
 		} catch (error) {
 			this.publishView(live, { type: "view_error", message: `Cannot read saved history: ${String(error)}` });
 		}
@@ -283,6 +299,13 @@ export class ServerSupervisor {
 		});
 	}
 
+	private confirmViewState(live: LiveInstance, state: RpcSessionState): void {
+		if (this.liveInstances.get(live.record.id) !== live) return;
+		const previous = live.viewState;
+		live.viewState = state;
+		if (previous && JSON.stringify(previous) !== JSON.stringify(state))
+			this.publishView(live, { type: "view_state", state });
+	}
 	private getRpcProcess(live: LiveInstance): RpcProcessInstance | undefined {
 		return live.resources.rpcProcess;
 	}
@@ -299,7 +322,7 @@ export class ServerSupervisor {
 			this.updateRecord(live, {});
 			return;
 		}
-		live.viewState = response.data;
+		this.confirmViewState(live, response.data);
 		this.updateRecord(live, {
 			sessionId: response.data.sessionId,
 			sessionFile: response.data.sessionFile,
@@ -773,7 +796,8 @@ export class ServerSupervisor {
 		}
 
 		const response = await rpcProcess.send(command);
-		if (shouldRefreshSessionMetadata(command)) {
+		if (isGetStateSuccess(response)) this.confirmViewState(live, response.data);
+		if (response.success && shouldRefreshSessionMetadata(command)) {
 			await this.syncInstanceRecord(live);
 		}
 		return response;
