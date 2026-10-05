@@ -24,6 +24,17 @@ afterEach(async () => {
 	rmSync(dir, { recursive: true, force: true });
 });
 describe("daemon persistent view streams", () => {
+	it("repeated close cannot detach a newer viewer", async () => {
+		const row = await supervisor.spawnInstance({ cwd: dir });
+		const old = supervisor.openViewStream(row.id, () => {})!;
+		old.close();
+		const events: Array<ViewEvent | ViewTerminal> = [];
+		const current = supervisor.openViewStream(row.id, (event) => events.push(event))!;
+		old.close();
+		FakeViewChild.children[0].emit({ type: "agent_start" });
+		expect(events).toHaveLength(1);
+		current.close();
+	});
 	it("attach returns existing partial and active tools", async () => {
 		const row = await supervisor.spawnInstance({ cwd: dir });
 		const child = FakeViewChild.children[0];

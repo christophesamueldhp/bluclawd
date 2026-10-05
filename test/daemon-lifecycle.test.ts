@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -126,7 +126,7 @@ describe("agent-view session lifecycle", () => {
 			"Cannot find package",
 		);
 		const [failed] = loadInstances();
-		expect(failed).toMatchObject({ status: "stopped", outcome: "failed", sessionFile: savedFile });
+		expect(failed).toMatchObject({ status: "stopped", outcome: "failed", sessionFile: realpathSync(savedFile) });
 		expect(failed.detail).toContain("old Pi installation removed");
 		FakeChild.startupError = undefined;
 		const revived = await supervisor.spawnInstance({ cwd: "/p", sessionFile: savedFile });
