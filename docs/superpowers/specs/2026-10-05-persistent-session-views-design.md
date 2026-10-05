@@ -1,6 +1,6 @@
 # Persistent session views and active-session deletion
 
-Status: draft for user review. The user selected approach 1 (keep execution alive; switch only the view). This document specifies that approach; implementation has not started.
+Status: approved by the user's “gas” after review of this specification and its compatibility limits. The user selected approach 1 (keep execution alive; switch only the view). Implementation has not started; the implementation plan is awaiting review and execution-method selection.
 
 ## Intent and success criteria
 
