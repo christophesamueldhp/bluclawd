@@ -70,10 +70,16 @@ const { SENTINEL_INSTRUCTIONS } = await import("../daemon/session-state.ts");
 
 describe("agent-view session lifecycle", () => {
 	let prevEnv: string | undefined;
+	let savedFile: string;
 
 	beforeEach(() => {
 		prevEnv = process.env.PI_SERVER_DIR;
 		process.env.PI_SERVER_DIR = mkdtempSync(join(tmpdir(), "bluclawd-lifecycle-"));
+		savedFile = join(process.env.PI_SERVER_DIR, "saved.jsonl");
+		writeFileSync(
+			savedFile,
+			'{"type":"session","version":3,"id":"saved","cwd":"/p","timestamp":"2026-10-05T00:00:00Z"}\n',
+		);
 		FakeChild.spawnOptions = [];
 		FakeChild.startupError = undefined;
 	});
@@ -116,14 +122,14 @@ describe("agent-view session lifecycle", () => {
 	it("a failed hand-off keeps the session file so its Failed row can be opened and revived", async () => {
 		const supervisor = new ServerSupervisor();
 		FakeChild.startupError = new Error("Cannot find package: old Pi installation removed");
-		await expect(supervisor.spawnInstance({ cwd: "/p", sessionFile: "/p/outgoing.jsonl" })).rejects.toThrow(
+		await expect(supervisor.spawnInstance({ cwd: "/p", sessionFile: savedFile })).rejects.toThrow(
 			"Cannot find package",
 		);
 		const [failed] = loadInstances();
-		expect(failed).toMatchObject({ status: "stopped", outcome: "failed", sessionFile: "/p/outgoing.jsonl" });
+		expect(failed).toMatchObject({ status: "stopped", outcome: "failed", sessionFile: savedFile });
 		expect(failed.detail).toContain("old Pi installation removed");
 		FakeChild.startupError = undefined;
-		const revived = await supervisor.spawnInstance({ cwd: "/p", sessionFile: "/p/outgoing.jsonl" });
+		const revived = await supervisor.spawnInstance({ cwd: "/p", sessionFile: savedFile });
 		expect(revived.id).toBe(failed.id);
 		expect(loadInstances()).toHaveLength(1);
 	});
@@ -138,14 +144,14 @@ describe("agent-view session lifecycle", () => {
 
 	it("resuming a known session file revives the same row, and never spawns a second writer", async () => {
 		const supervisor = new ServerSupervisor();
-		const first = await supervisor.spawnInstance({ cwd: "/p", sessionFile: "/tmp/a.jsonl", label: "walk cycle" });
-		const again = await supervisor.spawnInstance({ cwd: "/p", sessionFile: "/tmp/a.jsonl" });
+		const first = await supervisor.spawnInstance({ cwd: "/p", sessionFile: savedFile, label: "walk cycle" });
+		const again = await supervisor.spawnInstance({ cwd: "/p", sessionFile: savedFile });
 		expect(again.id).toBe(first.id);
 		expect(FakeChild.spawnOptions).toHaveLength(1);
 
 		supervisor.setInstanceMeta(first.id, { pinned: true });
 		await supervisor.stopInstance(first.id);
-		const revived = await supervisor.spawnInstance({ cwd: "/elsewhere", sessionFile: "/tmp/a.jsonl" });
+		const revived = await supervisor.spawnInstance({ cwd: "/elsewhere", sessionFile: savedFile });
 		expect(revived).toMatchObject({ id: first.id, label: "walk cycle", pinned: true, createdAt: first.createdAt });
 		expect(loadInstances()).toHaveLength(1);
 	});
@@ -200,8 +206,8 @@ describe("agent-view session lifecycle", () => {
 
 	it("save leaves a session the daemon is running alone", async () => {
 		const supervisor = new ServerSupervisor();
-		const live = await supervisor.spawnInstance({ cwd: "/p", sessionFile: "/tmp/live.jsonl" });
-		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: "/tmp/live.jsonl" })).toMatchObject({
+		const live = await supervisor.spawnInstance({ cwd: "/p", sessionFile: savedFile });
+		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: savedFile })).toMatchObject({
 			id: live.id,
 			status: "online",
 		});

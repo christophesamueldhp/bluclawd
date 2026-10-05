@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
-	AgentSessionEvent,
+	JsonAgentSessionEvent,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -53,7 +53,7 @@ export class RpcProcessInstance {
 	private stdoutBuffer = "";
 	private stderrBuffer = "";
 	private readonly pendingRequests = new Map<string, PendingRequest>();
-	private readonly eventListeners = new Set<(event: AgentSessionEvent) => void>();
+	private readonly eventListeners = new Set<(event: JsonAgentSessionEvent) => void>();
 	private readonly exitListeners = new Set<(error?: Error) => void>();
 	private uiRequestHandler: ((request: RpcExtensionUIRequest) => void) | undefined;
 
@@ -176,7 +176,7 @@ export class RpcProcessInstance {
 
 			default: {
 				for (const listener of this.eventListeners) {
-					listener(parsed as AgentSessionEvent);
+					listener(parsed as JsonAgentSessionEvent);
 				}
 			}
 		}
@@ -226,7 +226,7 @@ export class RpcProcessInstance {
 		this.uiRequestHandler = handler;
 	}
 
-	onEvent(listener: (event: AgentSessionEvent) => void): () => void {
+	onEvent(listener: (event: JsonAgentSessionEvent) => void): () => void {
 		this.eventListeners.add(listener);
 		return () => {
 			this.eventListeners.delete(listener);

@@ -1,5 +1,5 @@
 import type {
-	AgentSessionEvent,
+	JsonAgentSessionEvent,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -260,7 +260,7 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 export function openRpcStream(
 	instanceId: string,
 	onResponse: (response: RpcResponse) => void,
-	onSessionEvent: (event: AgentSessionEvent) => void,
+	onSessionEvent: (event: JsonAgentSessionEvent) => void,
 	onUiRequest: (request: RpcExtensionUIRequest) => void,
 ):
 	| {
