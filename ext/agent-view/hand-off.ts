@@ -1,8 +1,8 @@
 /**
- * Keeping a session in agent view after its pi quits (`/quit`, an exit word).
+ * Keeping a session in agent view after its pi quits (`/quit`, an exit word), as a stopped row.
  *
- * A script: pi's exit runs this file detached (`handOffAfterExit`), and once that pi process
- * is gone it keeps the session in agent view — running on in a new pane if it was working, else as a stopped row. It runs outside pi because pi killed by SIGHUP (terminal
+ * A script: pi's exit runs this file detached (`handOffAfterExit`), and once that pi process is
+ * gone it saves the row — the .jsonl must have its final writes first. It runs outside pi because pi killed by SIGHUP (terminal
  * closed) dies as soon as anything repaints, so it cannot wait on the daemon itself. Imports only
  * node builtins and plain modules, so node runs it without pi's package resolution.
  */
@@ -10,25 +10,13 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { currentDaemonBuildId, OrchestratorClient, piPackageRoot } from "./orchestrator-client.ts";
-import { CONTINUE_ENV, Tmux } from "./tmux.ts";
 
 /** What it takes to keep a session in agent view once its pi has quit. */
 export interface BackgroundableSession {
 	cwd: string;
 	label?: string;
 	sessionFile: string;
-	/** A turn was in progress: leaving cuts it off, so wherever it goes next carries on. */
-	working: boolean;
-	/** The pi a new pane runs ({@link piCommand}): this helper's own argv is not pi's. */
-	command: string[];
 }
-
-/** The custom type of the hidden message that carries on a turn cut off by pi quitting. */
-export const CONTINUE_COMMAND = "agent-view-continue";
-
-/** What the model is told, as that hidden message. */
-export const CONTINUE_TEXT =
-	"This session moved to the background while your turn was in progress. Continue where you left off; do not repeat work that is already done.";
 
 /** How long the helper waits for pi to exit; past this it gives up rather than add a second writer. */
 const EXIT_WAIT_MS = 60_000;
@@ -58,15 +46,6 @@ async function main(pid: number, outgoing: BackgroundableSession): Promise<void>
 	while (isAlive(pid)) {
 		if (Date.now() > deadline) return;
 		await new Promise((resolve) => setTimeout(resolve, 100));
-	}
-	if (outgoing.working) {
-		new Tmux().newSession({
-			cwd: outgoing.cwd,
-			args: ["--session", outgoing.sessionFile],
-			env: { [CONTINUE_ENV]: "1" },
-			command: outgoing.command,
-		});
-		return;
 	}
 	const client = new OrchestratorClient();
 	if (!(await client.ensureDaemon())) return;

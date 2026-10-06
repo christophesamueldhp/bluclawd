@@ -8,7 +8,7 @@ import { paneArgs } from "../ext/agent-view/index.ts";
 import type { InstanceSummary, OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
 import { collectRows } from "../ext/agent-view/rows.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
-import { CONTINUE_ENV, OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../ext/agent-view/tmux.ts";
+import { OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../ext/agent-view/tmux.ts";
 
 const plainTheme = {
 	fg: (_c: string, s: string) => s,
@@ -233,12 +233,12 @@ describe("tmux", () => {
 			runs.push(args);
 			return "";
 		});
-		const name = tmux.newSession({ cwd: HERE, args: ["--session", "/f"], env: { [CONTINUE_ENV]: "1" } });
+		const name = tmux.newSession({ cwd: HERE, args: ["--session", "/f"], env: { [OPEN_VIEW_ENV]: "1" } });
 		const args = runs[0];
 		expect(args.slice(0, 6)).toEqual(["new-session", "-d", "-s", name, "-c", HERE]);
 		expect(args).toContain("PI_SERVER_DIR=/srv");
 		expect(args).toContain(`${PANE_ENV}=${name}`);
-		expect(args).toContain(`${CONTINUE_ENV}=1`);
+		expect(args).toContain(`${OPEN_VIEW_ENV}=1`);
 		expect(args.join(" ")).not.toContain("secret");
 		expect(args.slice(-2)).toEqual(["--session", "/f"]);
 		vi.unstubAllEnvs();

@@ -22,7 +22,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 		commands: ["agent-view"],
 		tools: [],
 		shortcuts: 0,
-		events: 9,
+		events: 8,
 	},
 	help: { commands: ["help"], tools: [], shortcuts: 0, events: 0 },
 	vibes: { commands: [], tools: [], shortcuts: 0, events: 2 },

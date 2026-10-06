@@ -127,8 +127,8 @@ own session it moves the terminal to agent view with no session of its own, as C
 once the session you came from is deleted: the list can be empty, and esc quits from there. A
 session nothing has been asked in yet ends when you quit at its prompt. A peek reply is the
 session's next prompt.
-`/quit` inside a session ends it, but a turn in progress carries on in a new pane once its running
-tool finishes. tmux runs with no prefix key and no status line, passing keys through as CSI u.
+`/quit` (or `exit`, `/exit`) inside a session ends it, as in Claude Code: a turn in progress dies with
+its pi, and the session stays listed as a stopped row. tmux runs with no prefix key and no status line, passing keys through as CSI u.
 
 Without tmux, agent view is off: pi says so once at startup (and again on ←), and the rest of
 bluclawd works as usual.

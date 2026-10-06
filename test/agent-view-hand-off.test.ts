@@ -33,13 +33,14 @@ describe("hand-off.ts run as the exit helper", () => {
 	});
 
 	/** Run the helper for a pi process that has already exited; the fake daemon's requests. */
-	async function runHelper(): Promise<Array<Record<string, unknown>>> {
+	async function runHelper(working: boolean): Promise<Array<Record<string, unknown>>> {
 		dir = await mkdtemp(join(tmpdir(), "handoff-"));
 		const daemon = await fakeDaemon(dir);
 		server = daemon.server;
 		const gone = spawn(process.execPath, ["-e", ""]);
 		await new Promise((resolve) => gone.once("exit", resolve));
-		const outgoing = { cwd: "/p", sessionFile: "/p/s.jsonl", working: false, command: ["pi"] };
+		// `working` is what an older pi still sends; quitting mid-turn ends the turn, as in Claude Code.
+		const outgoing = { cwd: "/p", sessionFile: "/p/s.jsonl", working };
 		const helper = spawn(process.execPath, [HELPER, String(gone.pid), JSON.stringify(outgoing)], {
 			env: { ...process.env, PI_SERVER_DIR: dir },
 			stdio: "ignore",
@@ -48,8 +49,11 @@ describe("hand-off.ts run as the exit helper", () => {
 		return daemon.requests;
 	}
 
-	it("saves an idle session as a row without starting it", async () => {
-		const requests = await runHelper();
-		expect(requests).toContainEqual({ type: "save", cwd: "/p", sessionFile: "/p/s.jsonl" });
+	it("saves the session as a row without starting it, whether or not a turn was running", async () => {
+		for (const working of [false, true]) {
+			const requests = await runHelper(working);
+			expect(requests).toContainEqual({ type: "save", cwd: "/p", sessionFile: "/p/s.jsonl" });
+			server?.close();
+		}
 	});
 });

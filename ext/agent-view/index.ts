@@ -5,7 +5,7 @@
  * in a terminal starts its session there and attaches. Without tmux, agent view stays off.
  */
 
-import { existsSync, writeSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename } from "node:path";
 import type { ExtensionCommandContext, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
@@ -24,12 +24,12 @@ import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
 import { trustBadge } from "../permissions/index.ts";
 import { AgentView, EXIT_WORDS, type PastSession } from "./agent-view.ts";
-import { type BackgroundableSession, CONTINUE_COMMAND, CONTINUE_TEXT, handOffAfterExit } from "./hand-off.ts";
+import { type BackgroundableSession, handOffAfterExit } from "./hand-off.ts";
 import { type InstanceSummary, OrchestratorClient, type PaneMessage } from "./orchestrator-client.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
 import { collectRows, labelFromTask } from "./rows.ts";
 import { deriveLabel, ForegroundActivity, SelfRegistration, type SelfSessionInfo } from "./self-registration.ts";
-import { CONTINUE_ENV, OPEN_VIEW_ENV, piCommand, Tmux } from "./tmux.ts";
+import { OPEN_VIEW_ENV, Tmux } from "./tmux.ts";
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
@@ -126,8 +126,6 @@ const agentView: InlineExtension = {
 		let leftHint: string | undefined;
 		let paintPill: (() => void) | undefined;
 		let autocompleteAdded = false;
-		// Set while quitting waits for the turn's tools to finish.
-		let onToolsSettled: (() => void) | undefined;
 		// Pane mode: this pi runs in a tmux session of agent view's own (tmux.ts).
 		const pane = Tmux.currentPane();
 		const panes = new Tmux();
@@ -197,10 +195,7 @@ const agentView: InlineExtension = {
 			};
 		};
 
-		/**
-		 * A handle on the current session, or undefined when there is nothing worth
-		 * backgrounding: an unsaved session has no file for the daemon to resume.
-		 */
+		/** The current session as a stored row, or undefined while it has no file to resume from. */
 		const captureOutgoing = (ctx: ExtensionContext): BackgroundableSession | undefined => {
 			const sessionFile = ctx.sessionManager.getSessionFile();
 			if (!sessionFile || !existsSync(sessionFile)) return undefined;
@@ -208,8 +203,6 @@ const agentView: InlineExtension = {
 				cwd: ctx.sessionManager.getCwd(),
 				label: ctx.sessionManager.getSessionName() ?? selfRow(ctx).label,
 				sessionFile,
-				working: !ctx.isIdle(),
-				command: piCommand(),
 			};
 		};
 
@@ -340,14 +333,7 @@ const agentView: InlineExtension = {
 					// it ends on quitting all the same
 				}
 			}
-			// A pane started to carry on a turn, or to show agent view, does so once.
-			if (process.env[CONTINUE_ENV]) {
-				delete process.env[CONTINUE_ENV];
-				pi.sendMessage(
-					{ customType: CONTINUE_COMMAND, content: CONTINUE_TEXT, display: false },
-					{ triggerTurn: true },
-				);
-			}
+			// A pane started to show agent view does so once.
 			if (openView) {
 				pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
 			}
@@ -460,58 +446,21 @@ const agentView: InlineExtension = {
 		pi.on("agent_settled", (event) => {
 			liveDetail = undefined;
 			track(event);
-			onToolsSettled?.();
 		});
 		pi.on("tool_execution_start", (event) => {
 			liveDetail = toolActivity(event.toolName, event.args);
 		});
 		pi.on("ui_prompt_start", track);
 		pi.on("ui_prompt_end", track);
-		pi.on("turn_end", (event) => {
-			if (event.toolResults.length > 0) onToolsSettled?.();
-		});
-
-		/**
-		 * Quitting mid-turn waits, as Claude Code does, until the running tools finish, so their
-		 * results reach the transcript instead of being cut off and run again in the background.
-		 * The turn's next model request is then aborted with the session. Ctrl+C stops waiting.
-		 */
-		const settleTools = async (): Promise<void> => {
-			// A closed terminal (SIGHUP) cannot wait: pi exits on the next write that fails, before
-			// the hand-off. The synchronous write is the probe; then the turn is cut off as before.
-			try {
-				writeSync(
-					1,
-					`${theme.fg("dim", "Backgrounding after the current tool finishes… (ctrl+c to stop it now)")}\n`,
-				);
-			} catch {
-				return;
-			}
-			await toolsSettled();
-		};
-
-		const toolsSettled = (): Promise<void> =>
-			new Promise<void>((resolve) => {
-				const done = (): void => {
-					onToolsSettled = undefined;
-					process.off("SIGINT", done);
-					resolve();
-				};
-				onToolsSettled = done;
-				process.once("SIGINT", done);
-			});
-
 		pi.on("session_shutdown", async (event, ctx) => {
 			registration?.stop();
 			registration = undefined;
 			stopPill?.();
 			stopPill = undefined;
-			// Exiting pi keeps the session in agent view until ctrl+x deletes it; a turn in progress
-			// carries on in a new pane once this process is gone (it must be the only writer of the
-			// .jsonl). A reload is not leaving.
+			// Quitting ends the session as it ends a Claude Code session: a turn in progress dies with
+			// the process. The session stays in agent view as a stopped row until ctrl+x deletes it.
+			// A reload is not leaving.
 			if (event.reason !== "quit" || ctx.mode !== "tui" || !pane) return;
-			// A tool blocked on a dialog cannot finish once the TUI is gone.
-			if (!ctx.isIdle() && activity.current === "working") await settleTools();
 			const outgoing = captureOutgoing(ctx);
 			if (outgoing) handOffAfterExit(outgoing);
 		});

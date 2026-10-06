@@ -15,8 +15,6 @@ import { getServerDir } from "../../daemon/paths.ts";
 
 /** Set in a pane's environment: the tmux session its pi runs in. */
 export const PANE_ENV = "BLUCLAWD_PANE";
-/** Set on a pane started to carry on a turn that was in progress. */
-export const CONTINUE_ENV = "BLUCLAWD_CONTINUE";
 /** Set on a pane that should open agent view once it starts. */
 export const OPEN_VIEW_ENV = "BLUCLAWD_OPEN_VIEW";
 
