@@ -65,6 +65,8 @@ export interface AgentViewOptions {
 	model?: { provider: string; id: string };
 	/** The model's display name for the header. */
 	modelName?: string;
+	/** The mode new sessions start in, as a colored badge; it leads the hint line. */
+	mode?: string;
 	cwd: string;
 	home: string;
 	/** This window's own session as a row, rebuilt on every refresh (its activity is live). */
@@ -2109,9 +2111,11 @@ export class AgentView implements Component, Focusable {
 	}
 
 	/** One dim hint line; too narrow, it is cut with an ellipsis rather than dropping items. */
-	private hints(width: number, items: Array<string | undefined>): string {
+	private hints(width: number, items: Array<string | undefined>, lead?: string): string {
 		const line = items.filter((i): i is string => !!i).join(" · ");
-		return truncateToWidth(`  ${cc.fg("muted", line)}`, width, "…");
+		// The lead keeps its own color; the items after it stay muted.
+		const text = lead ? `${lead}${line ? cc.fg("muted", ` · ${line}`) : ""}` : cc.fg("muted", line);
+		return truncateToWidth(`  ${text}`, width, "…");
 	}
 
 	/** The line under the composer: whatever is most pressing, else what the keys do here. */
@@ -2154,17 +2158,21 @@ export class AgentView implements Component, Focusable {
 			else if (item?.kind === "header" && this.navigated && headerRows.length > 0) x = "ctrl+x to delete all";
 		}
 		const find = composing && !text.trim().startsWith("/") && width >= 49 ? "ctrl+f to find" : undefined;
-		return this.hints(width, [
-			enter,
-			item?.kind === "header" && !text && !this.onboarding
-				? `enter to ${this.collapsed.has(item.band.key) ? "expand" : "collapse"}`
-				: undefined,
-			item?.kind === "more" && !text ? "enter to show all" : undefined,
-			item?.kind === "row" && !text && width >= 55 ? "space to reply" : undefined,
-			x,
-			text ? "esc to clear" : "? for shortcuts",
-			find,
-		]);
+		return this.hints(
+			width,
+			[
+				enter,
+				item?.kind === "header" && !text && !this.onboarding
+					? `enter to ${this.collapsed.has(item.band.key) ? "expand" : "collapse"}`
+					: undefined,
+				item?.kind === "more" && !text ? "enter to show all" : undefined,
+				item?.kind === "row" && !text && width >= 55 ? "space to reply" : undefined,
+				x,
+				text ? "esc to clear" : "? for shortcuts",
+				find,
+			],
+			this.opts.mode,
+		);
 	}
 
 	/** The composer: every line, the first after `❯`, the rest from the left edge. */

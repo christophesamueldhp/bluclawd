@@ -130,6 +130,7 @@ function makeView(
 		list?: () => InstanceSummary[];
 		releases?: boolean;
 		readClipboard?: () => Promise<{ image?: { type: "image"; data: string; mimeType: string }; text?: string }>;
+		mode?: string;
 	} = {},
 ) {
 	const calls: Calls = [];
@@ -158,6 +159,7 @@ function makeView(
 			calls.push(["createAndOpen", ...args]);
 		},
 		isKnownCommand: (name) => name === "compact",
+		mode: opts.mode,
 	});
 	const setInstances = view.setInstancesForTest.bind(view);
 	view.setInstancesForTest = (rows) => {
@@ -330,6 +332,13 @@ describe("AgentView keys", () => {
 		view.handleInput(ENTER);
 		await flush();
 		expect(calls[0]?.[1]).toMatchObject({ prompt: "write the menu\nthen the credits" });
+	});
+
+	it("the hint line leads with the mode new sessions start in, as Claude Code's", () => {
+		const { view, text } = makeView({ mode: "⏵⏵ always" });
+		for (const ch of "fix it") view.handleInput(ch);
+		expect(text().at(-1)).toMatch(/^ {2}⏵⏵ always · enter to create · esc to clear/);
+		expect(makeView().text().at(-1)).not.toContain("⏵⏵");
 	});
 
 	it("an s: filter's footer offers esc", () => {

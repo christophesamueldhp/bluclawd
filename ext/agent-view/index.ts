@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { basename } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ExtensionCommandContext, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
-import { getAgentDir, SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, SessionManager, SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import {
 	type AutocompleteProvider,
 	type Component,
@@ -27,6 +27,7 @@ import { lastLine, textOf, toolActivity } from "../../daemon/session-state.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
+import { trustBadge } from "../permissions/index.ts";
 import { AgentView, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, CONTINUE_COMMAND, CONTINUE_TEXT, handOff, handOffAfterExit } from "./hand-off.ts";
 import { type InstanceSummary, OrchestratorClient, type PaneMessage } from "./orchestrator-client.ts";
@@ -501,6 +502,9 @@ const agentView: InlineExtension = {
 			if (viewOpen) return;
 			viewOpen = true;
 			const model = ctx.model;
+			// A global setting, so the project's settings are not read. As Claude Code, the mode
+			// shows only when it is not the default (pi's is "ask").
+			const trust = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: false }).getDefaultProjectTrust();
 			const sessionTitle = (): string => {
 				const name = ctx.sessionManager.getSessionName();
 				const dir = basename(ctx.sessionManager.getCwd());
@@ -517,6 +521,7 @@ const agentView: InlineExtension = {
 							version: VERSION,
 							model: model ? { provider: model.provider, id: model.id } : undefined,
 							modelName: model?.name,
+							mode: trust === "ask" ? undefined : trustBadge(theme, trust),
 							cwd: ctx.cwd,
 							home: process.env.HOME ?? "",
 							self: () => (hosting(ctx) ? undefined : selfRow(ctx)),

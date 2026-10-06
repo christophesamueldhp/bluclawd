@@ -12,6 +12,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	InlineExtension,
+	Theme,
 	ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
@@ -27,18 +28,20 @@ const TRUST_CYCLE: readonly ProjectTrust[] = ["always", "ask", "never"];
 
 const AMBER = "\x1b[38;2;255;193;7m";
 
+/** The colored badge for a `defaultProjectTrust` value. */
+export function trustBadge(theme: Theme, trust: ProjectTrust): string {
+	return trust === "always"
+		? theme.getColorMode() === "truecolor"
+			? `${AMBER}⏵⏵ always\x1b[39m`
+			: theme.fg("warning", "⏵⏵ always")
+		: trust === "ask"
+			? theme.fg("muted", "⏸ ask")
+			: theme.fg("error", "✕ never");
+}
+
 /** The footer badge for a `defaultProjectTrust` value. */
 export function trustStatusText(ctx: ExtensionContext, trust: ProjectTrust): string {
-	const theme = ctx.ui.theme;
-	const badge =
-		trust === "always"
-			? theme.getColorMode() === "truecolor"
-				? `${AMBER}⏵⏵ always\x1b[39m`
-				: theme.fg("warning", "⏵⏵ always")
-			: trust === "ask"
-				? theme.fg("muted", "⏸ ask")
-				: theme.fg("error", "✕ never");
-	return `${badge} ${theme.fg("dim", "(alt+m to cycle)")}`;
+	return `${trustBadge(ctx.ui.theme, trust)} ${ctx.ui.theme.fg("dim", "(alt+m to cycle)")}`;
 }
 
 /**
