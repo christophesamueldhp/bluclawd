@@ -195,13 +195,14 @@ describe("rows", () => {
 		expect(labelFromTask("   ")).toBe("untitled session");
 	});
 
-	it("bands put what needs you first; idle sessions wait with the blocked ones", () => {
-		const rows = collectRows(sessions, undefined);
+	it("bands: a blocking prompt, a turn running, or nothing running — an unprompted session is Idle", () => {
+		const fresh: InstanceSummary = { id: "fresh", status: "online", activity: "idle", cwd: HERE, turns: 0 };
+		const rows = collectRows([...sessions, fresh], undefined);
 		const bands = buildBands(rows, "state", (p) => p);
-		expect(bands.map((b) => [b.title, b.rows.map((r) => r.id)])).toEqual([
+		expect(bands.map((b) => [b.title, b.rows.map((r) => r.id).sort()])).toEqual([
 			["Needs input", ["ask"]],
 			["Working", ["work"]],
-			["Completed", ["done", "gone"]],
+			["Idle", ["done", "fresh", "gone"]],
 		]);
 	});
 
@@ -239,7 +240,7 @@ describe("rows", () => {
 	it("s:<state> filters; plain text is a task, not a filter", () => {
 		const rows = collectRows(sessions, undefined);
 		expect(rows.filter(queryFilter("s:blocked") ?? (() => false)).map((r) => r.id)).toEqual(["ask"]);
-		expect(rows.filter(queryFilter("s:completed") ?? (() => false)).map((r) => r.id)).toEqual(["done", "gone"]);
+		expect(rows.filter(queryFilter("s:idle") ?? (() => false)).map((r) => r.id)).toEqual(["done", "gone"]);
 		expect(queryFilter("fix the tests")).toBeUndefined();
 	});
 });
@@ -250,11 +251,11 @@ describe("AgentView render", () => {
 		expect(text[0]).toBe(""); // Claude Code pads the top of the list
 		expect(text[1]).toContain("bluclawd");
 		expect(text[2]).toContain("opencode-go/kimi · ~/proj/here");
-		expect(text[3]).toContain("1 awaiting input · 1 working · 2 completed");
+		expect(text[3]).toContain("1 awaiting input · 1 working · 2 idle");
 		const body = text.join("\n");
 		expect(body).toMatch(/Needs input\n.*power-up design\s+Allow bash: npm test\?\s+1m/);
 		expect(body).toMatch(/Working\n.*collision detection\s+Adding swept-AABB checks/);
-		expect(body).toMatch(/Completed\n.*title screen\s+menu done\s+6m/);
+		expect(body).toMatch(/Idle\n.*title screen\s+menu done\s+6m/);
 		expect(body).toContain("∙ sound effects");
 		expect(body).toContain("describe a task for a new session");
 	});
@@ -265,7 +266,7 @@ describe("AgentView render", () => {
 		const shown = text().join("\n");
 		// The launcher's directory first, its sessions oldest first.
 		expect(shown).toMatch(
-			/~\/proj\/here\n.*sound effects\s+Failed · build broke[\s\S]*power-up design\s+Needs input · Allow bash[\s\S]*~\/proj\/there/,
+			/~\/proj\/here\n.*sound effects\s+Idle · build broke[\s\S]*power-up design\s+Needs input · Allow bash[\s\S]*~\/proj\/there/,
 		);
 	});
 
@@ -275,7 +276,7 @@ describe("AgentView render", () => {
 		const shown = text().join("\n");
 		expect(shown).toMatch(/Needs input\n Sessions that have a question/);
 		expect(shown).toMatch(/Working\n Sessions actively working/);
-		expect(shown).toMatch(/Completed\n Finished sessions wait here/);
+		expect(shown).toMatch(/Idle\n Sessions with nothing running wait here/);
 		expect(shown).toContain("A different way to work");
 	});
 
@@ -750,7 +751,7 @@ describe("AgentView keys", () => {
 
 	it("a peek reply goes to a running session as a prompt when idle", async () => {
 		const { view, calls, flush } = makeView();
-		// Band headers are focusable too: ask → Working → work → Completed → title screen.
+		// Band headers are focusable too: ask → Working → work → Idle → title screen.
 		for (let i = 0; i < 4; i++) view.handleInput(DOWN);
 		expect(view.selectedKeyForTest()).toBe("done");
 		view.handleInput(" ");

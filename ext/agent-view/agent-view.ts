@@ -1,7 +1,7 @@
 /**
  * Agent view, built on pi's TUI.
  *
- * Header, then the bands (Needs input / Working / Completed, or one band per directory), one
+ * Header, then the bands (Needs input / Working / Idle, or one band per directory), one
  * line per session: icon + name │ what it is doing │ age. The composer at the bottom starts a
  * new background session from whatever is typed; space opens the peek panel to read the
  * question or result and reply without leaving the list; enter opens the session in this
@@ -205,12 +205,13 @@ const cc = {
 	},
 };
 
+/** Only a blocking prompt has a color: the rest say just whether a turn is running. */
 const ICON_COLOR: Record<RowState, Color> = {
 	working: "muted",
 	needs: "warning",
 	idle: "muted",
-	done: "success",
-	failed: "error",
+	done: "muted",
+	failed: "muted",
 	stopped: "muted",
 };
 
@@ -502,9 +503,9 @@ export class AgentView implements Component, Focusable {
 	}
 
 	/** Claude Code's header budget: `used` lines go to live rows and band headers; when the full
-	 *  header leaves fewer than 3 for Completed, it shrinks to the counts line. */
+	 *  header leaves fewer than 3 for Idle, it shrinks to the counts line. */
 	private layoutBudget(): { compact: boolean; doneCap: number } {
-		const live = this.rows.filter((r) => stateBandOf(r) !== "completed" || r.pinned);
+		const live = this.rows.filter((r) => stateBandOf(r) !== "idle" || r.pinned);
 		const used =
 			live.filter((r) => !this.collapsed.has(r.pinned ? "pinned" : stateBandOf(r))).length +
 			Math.max(0, new Set(live.map((r) => (r.pinned ? "pinned" : stateBandOf(r)))).size * 2 - 1);
@@ -512,7 +513,7 @@ export class AgentView implements Component, Focusable {
 		return free(4) >= 3 ? { compact: false, doneCap: free(4) } : { compact: true, doneCap: Math.max(0, free(2)) };
 	}
 
-	/** Bands → selectable items. A long Completed band folds into `… N more`, as Claude Code's does:
+	/** Bands → selectable items. A long Idle band folds into `… N more`, as Claude Code's does:
 	 *  only when at least 3 would hide, keeping runs that finished together and the session you
 	 *  came from. */
 	private layoutItems(bands: Band[], filtering: boolean): Item[] {
@@ -522,7 +523,7 @@ export class AgentView implements Component, Focusable {
 			items.push({ kind: "header", key: `band:${band.key}`, band });
 			if (!filtering && this.collapsed.has(band.key)) continue;
 			const rows = band.rows;
-			if (band.key === "completed" && !this.expanded.has(band.key)) {
+			if (band.key === "idle" && !this.expanded.has(band.key)) {
 				const shown = this.foldAt(rows, doneCap);
 				if (shown < rows.length) {
 					for (const row of rows.slice(0, shown)) items.push({ kind: "row", key: row.id, band, row });
@@ -535,7 +536,7 @@ export class AgentView implements Component, Focusable {
 		return items;
 	}
 
-	/** How many Completed rows show before the fold; all of them when it would not fold. */
+	/** How many Idle rows show before the fold; all of them when it would not fold. */
 	private foldAt(rows: AgentRow[], cap: number): number {
 		if (rows.length < cap + 3) return rows.length;
 		let shown = Math.min(cap, rows.length);
@@ -1773,7 +1774,7 @@ export class AgentView implements Component, Focusable {
 		const counts = countRows(this.allRows);
 		const summary = cc.fg(
 			"muted",
-			`${counts.needs} awaiting input · ${counts.working} working · ${counts.completed} completed`,
+			`${counts.needs} awaiting input · ${counts.working} working · ${counts.idle} idle`,
 		);
 		if (this.layoutBudget().compact) return [summary];
 		const title = `${theme.bold(this.opts.appName)}${this.opts.version ? ` ${cc.fg("muted", `v${this.opts.version}`)}` : ""}`;
@@ -1899,7 +1900,7 @@ export class AgentView implements Component, Focusable {
 		const helper: Record<string, string> = {
 			needs: "Sessions that have a question or need your decision land here",
 			working: "Sessions actively working — they keep running even if you close the terminal",
-			completed: "Finished sessions wait here for you to review",
+			idle: "Sessions with nothing running wait here",
 		};
 		const bandCount = this.items.filter((i) => i.kind === "header").length;
 		let first = true;

@@ -1,6 +1,6 @@
 /**
- * Agent view's data model: a session has one of six states, the state decides its band, and the
- * band order puts what needs you on top. Pure — the view renders what these functions return.
+ * Agent view's data model: a session has one of six states, and its band says only whether it
+ * is blocked on a prompt, running a turn, or idle; the band order puts what needs you on top. Pure — the view renders what these functions return.
  */
 
 import type { InstanceSummary, PendingNeeds } from "./orchestrator-client.ts";
@@ -155,13 +155,13 @@ export interface BandOptions {
 const STATE_BANDS = [
 	{ key: "needs", title: "Needs input" },
 	{ key: "working", title: "Working" },
-	{ key: "completed", title: "Completed" },
+	{ key: "idle", title: "Idle" },
 ] as const;
 
-export function stateBandOf(row: AgentRow): "needs" | "working" | "completed" {
-	if (row.state === "needs" || row.state === "idle") return "needs";
+export function stateBandOf(row: AgentRow): "needs" | "working" | "idle" {
+	if (row.state === "needs") return "needs";
 	if (row.state === "working") return "working";
-	return "completed";
+	return "idle";
 }
 
 function stamp(iso: string | undefined): number {
@@ -171,7 +171,7 @@ function stamp(iso: string | undefined): number {
 /** The state view: manual order (shift+↑/↓) first, then the most recently active. A finished
  *  run counts from when it finished, anything else from its last activity. */
 function byRecency(rows: AgentRow[]): AgentRow[] {
-	const at = (r: AgentRow) => stamp(stateBandOf(r) === "completed" ? (r.finishedAt ?? r.updatedAt) : r.updatedAt);
+	const at = (r: AgentRow) => stamp(stateBandOf(r) === "idle" ? (r.finishedAt ?? r.updatedAt) : r.updatedAt);
 	return [...rows].sort((a, b) => {
 		if (a.sortOrder !== undefined || b.sortOrder !== undefined) {
 			return (a.sortOrder ?? Number.MAX_SAFE_INTEGER) - (b.sortOrder ?? Number.MAX_SAFE_INTEGER);
@@ -225,12 +225,11 @@ export function buildBands(
 export interface AgentCounts {
 	needs: number;
 	working: number;
-	completed: number;
+	idle: number;
 }
 
 export function countRows(rows: AgentRow[]): AgentCounts {
-	const counts = { needs: 0, working: 0, completed: 0 };
-	// A session idling before its first prompt is waiting on you too: for its first prompt.
+	const counts = { needs: 0, working: 0, idle: 0 };
 	for (const row of rows) if (!row.id.startsWith("pending:")) counts[stateBandOf(row)]++;
 	return counts;
 }
@@ -238,7 +237,7 @@ export function countRows(rows: AgentRow[]): AgentCounts {
 const BAND_ALIASES: Record<ReturnType<typeof stateBandOf>, string[]> = {
 	needs: ["blocked", "needs input", "input"],
 	working: ["active", "working"],
-	completed: ["completed"],
+	idle: ["idle", "completed", "done", "failed", "stopped"],
 };
 
 function stateMatches(row: AgentRow, want: string): boolean {
@@ -307,9 +306,8 @@ export function rowAge(row: AgentRow, nowMs: number): string {
 export const STATE_WORDS: Record<RowState, string> = {
 	working: "Working",
 	needs: "Needs input",
-	// Not prompted yet: waiting on you for its first prompt.
-	idle: "Needs input",
-	done: "Done",
-	failed: "Failed",
-	stopped: "Stopped",
+	idle: "Idle",
+	done: "Idle",
+	failed: "Idle",
+	stopped: "Idle",
 };
