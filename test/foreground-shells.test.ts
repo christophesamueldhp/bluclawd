@@ -67,6 +67,19 @@ describe("detachableExec", () => {
 		expect(c.wasAborted()).toBe(false);
 	});
 
+	it("keeps only the newest output for the replay, like a job's buffer", async () => {
+		const c = controlled();
+		const run = detachableExec(c.exec)("yes", "/", { onData: () => {} });
+		const mb = 1024 * 1024;
+		for (const ch of "abc") c.emit(ch.repeat(mb));
+		detachAll("user", { now: Date.now() + 2000 });
+		const id = ((await run.catch((e) => e)) as ShellDetachedError).job.id;
+		await tick();
+		expect(backgroundBashJobs.get(id)?.outputBytes).toBe(2 * mb);
+		expect(backgroundBashJobs.peek(id)?.startsWith("b")).toBe(true);
+		c.finish(0);
+	});
+
 	it("no longer dies with the tool call's signal once detached, but does with task_stop", async () => {
 		const c = controlled();
 		const controller = new AbortController();

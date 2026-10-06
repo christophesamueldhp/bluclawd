@@ -11,7 +11,12 @@
  * tool turns into its "moved to background" result.
  */
 
-import { type BackgroundExec, type BackgroundJobInfo, backgroundBashJobs } from "./background-bash.ts";
+import {
+	type BackgroundExec,
+	type BackgroundJobInfo,
+	backgroundBashJobs,
+	DEFAULT_MAX_BUFFER_BYTES,
+} from "./background-bash.ts";
 import { notifyListeners, sharedRef } from "./global-state.ts";
 
 /** Why a foreground command moved to the background: Ctrl+B, its timeout, or a message the user sent. */
@@ -104,6 +109,7 @@ export function detachableExec(inner: BackgroundExec, options: DetachOptions = {
 		if (signal?.aborted) return Promise.reject(new Error("aborted"));
 		const abort = new AbortController();
 		const replay: Buffer[] = [];
+		let replayBytes = 0;
 		let sink: ((data: Buffer) => void) | undefined;
 		let attached = true;
 		let timer: ReturnType<typeof setTimeout> | undefined;
@@ -118,6 +124,11 @@ export function detachableExec(inner: BackgroundExec, options: DetachOptions = {
 			onData: (data) => {
 				if (attached) {
 					replay.push(data);
+					replayBytes += data.length;
+					// Capped like a job's buffer, so a chatty command cannot grow memory until it ends.
+					while (replayBytes > DEFAULT_MAX_BUFFER_BYTES && replay.length > 1) {
+						replayBytes -= replay.shift()?.length ?? 0;
+					}
 					onData(data);
 				} else sink?.(data);
 			},

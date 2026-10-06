@@ -24,7 +24,7 @@ import { sharedRef } from "./global-state.ts";
 import { splitLines } from "./lines.ts";
 
 /** Cap on buffered output per job; the oldest chunks are dropped past this. */
-const DEFAULT_MAX_BUFFER_BYTES = 2 * 1024 * 1024;
+export const DEFAULT_MAX_BUFFER_BYTES = 2 * 1024 * 1024;
 const MAX_FILE_BYTES = 5 * 1024 * 1024 * 1024;
 /** Finished jobs retained for later `/tasks` inspection before the oldest are dropped. */
 const DEFAULT_MAX_FINISHED_JOBS = 50;
