@@ -447,6 +447,37 @@ describe("/rewind (files only)", () => {
 	});
 });
 
+describe("/rewind (files and conversation)", () => {
+	it("keeps the safety net on the branch the conversation lands on, so /rewind can undo it", async () => {
+		const { dir, exec, write, read } = await makeRepo();
+		await write("a.txt", "v1\n");
+		const sha = await capture(dir, exec);
+		const entries = [userEntry("u1", "make v1"), checkpointEntry(sha, "u1", "make v1"), userEntry("u2", "make v2")];
+		await write("a.txt", "v2\n");
+
+		const { commands } = loadFactory(exec, entries);
+		// select 0 = the only checkpoint, select 1 = "Files and conversation"
+		const { ctx, navigated } = makeCtx(dir, entries, { select: [0, 1], confirm: [true] });
+		const oldLeaf = "u2";
+		// pi moves the leaf to the parent of the user message, leaving the later entries off-branch.
+		(ctx as unknown as { navigateTree: (id: string) => Promise<{ cancelled: boolean }> }).navigateTree = async (
+			id: string,
+		) => {
+			navigated.push(id);
+			entries.splice(entries.findIndex((e) => e.id === id));
+			return { cancelled: false };
+		};
+		await commands.get("rewind")?.("", ctx);
+
+		expect(navigated).toEqual(["u1"]);
+		expect(await read("a.txt")).toBe("v1\n");
+		const safety = listCheckpoints(entries).find((c) => c.subject === "(before rewind)");
+		expect(safety?.turnEntryId).toBe(oldLeaf);
+		expect(await restoreCheckpoint(dir, exec, safety?.sha ?? "")).toBe(true);
+		expect(await read("a.txt")).toBe("v2\n");
+	});
+});
+
 describe("session_before_fork", () => {
 	it("restores the OLDEST checkpoint of the forked turn and takes a safety net first", async () => {
 		const { dir, exec, write, read } = await makeRepo();

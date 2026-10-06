@@ -374,8 +374,9 @@ function clipLines(text: string, max: number): string {
  * The whole destructive sequence, shared by `/rewind` and the fork-point
  * offer: safety-net capture → ONE confirmation that previews what the restore
  * changes (or the fail-closed prompt if the safety capture failed) → append
- * the safety-net entry → restore → report. Returns true only when the tree was
- * restored. `intro` is the question the confirmation opens with.
+ * the safety-net entry → restore → report. `restored` is true only when the tree
+ * was restored; `safety` is the safety-net entry's data, when one was appended.
+ * `intro` is the question the confirmation opens with.
  */
 async function restoreWithSafetyNet(
 	pi: ExtensionAPI,
@@ -383,16 +384,17 @@ async function restoreWithSafetyNet(
 	targetSha: string,
 	safetySubject: string,
 	intro: string,
-): Promise<boolean> {
+): Promise<{ restored: boolean; safety?: CheckpointData }> {
 	// Bypasses the isCapturing guard: this is a foreground, user-awaited action.
 	// The captured tree doubles as the preview base, since `git diff <sha>`
 	// against the working tree would skip untracked files.
 	const safetySha = await captureCheckpoint(ctx.cwd, pi.exec, ctx.sessionManager.getSessionId());
+	let safety: CheckpointData | undefined;
 	if (safetySha) {
 		const stat = await diffStat(ctx.cwd, pi.exec, safetySha, targetSha);
 		if (stat !== undefined && stat.trim() === "") {
 			ctx.ui.notify("Working tree already matches this checkpoint.", "info");
-			return false;
+			return { restored: false };
 		}
 		const preview = stat === undefined ? "(preview unavailable)" : clipLines(stat, PREVIEW_MAX_LINES);
 		const proceed = await ctx.ui.confirm(
@@ -400,12 +402,9 @@ async function restoreWithSafetyNet(
 			`${intro}\n\n${preview}\n\nYour current changes are checkpointed first, so this can be undone with /rewind. Continue?`,
 		);
 		// Declined: no entry is appended; the safety-net ref is swept by the next prune.
-		if (!proceed) return false;
-		pi.appendEntry(CHECKPOINT_CUSTOM_TYPE, {
-			sha: safetySha,
-			turnEntryId: ctx.sessionManager.getLeafEntry()?.id ?? "",
-			subject: safetySubject,
-		});
+		if (!proceed) return { restored: false };
+		safety = { sha: safetySha, turnEntryId: ctx.sessionManager.getLeafEntry()?.id ?? "", subject: safetySubject };
+		pi.appendEntry(CHECKPOINT_CUSTOM_TYPE, safety);
 	} else {
 		// Fail-closed: restoring now would overwrite uncommitted work with no
 		// way to recover it, so only restore if the user opts in.
@@ -415,14 +414,14 @@ async function restoreWithSafetyNet(
 		);
 		if (!proceed) {
 			ctx.ui.notify("Rewind aborted: safety checkpoint failed, current changes left untouched.", "error");
-			return false;
+			return { restored: false };
 		}
 	}
 
 	const restored = await restoreCheckpoint(ctx.cwd, pi.exec, targetSha);
 	if (restored) {
 		ctx.ui.notify("Working tree restored to checkpoint.", "info");
-		return true;
+		return { restored: true, safety };
 	}
 	// read-tree can be interrupted mid-write (e.g. SIGTERM on RESTORE_TIMEOUT_MS);
 	// point the user at the safety-net sha so they can get back.
@@ -433,7 +432,7 @@ async function restoreWithSafetyNet(
 		`Failed to restore checkpoint; the working tree may be in a partially-applied state.${recovery}`,
 		"error",
 	);
-	return false;
+	return { restored: false };
 }
 
 /** Overlap guard for the turn_start background capture. */
@@ -611,16 +610,19 @@ export function factory(pi: ExtensionAPI): void {
 				return;
 			}
 
-			const restored = await restoreWithSafetyNet(
+			const { restored, safety } = await restoreWithSafetyNet(
 				pi,
 				ctx,
 				target.sha,
 				"(before rewind)",
 				`Restore the working tree to the checkpoint "${target.subject}"?`,
 			);
-			// Move the conversation LAST: it swaps what the session points at, so
-			// anything after it would run against state being replaced.
-			if (restored && scopeChoice.talk) await ctx.navigateTree(target.turnEntryId);
+			// Move the conversation after the restore: it swaps what the session points at.
+			if (!restored || !scopeChoice.talk) return;
+			const { cancelled } = await ctx.navigateTree(target.turnEntryId);
+			// The safety net was appended on the branch just left, where /rewind no longer
+			// lists it and pruning drops its ref; repeat it on the branch we landed on.
+			if (!cancelled && safety) pi.appendEntry(CHECKPOINT_CUSTOM_TYPE, safety);
 		},
 	});
 }
