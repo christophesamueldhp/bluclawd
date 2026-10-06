@@ -61,6 +61,15 @@ describe("deniedBy", () => {
 		expect(denied(["Read(//etc/**)"], "read", { path: "/etc/hosts" })).toBe(true);
 	});
 
+	it("a relative path rule matches every spelling of the path it names", () => {
+		for (const path of [".env", "./.env", "/proj/.env", "sub/../.env"]) {
+			expect(denied(["Read(.env)"], "read", { path }), path).toBe(true);
+		}
+		expect(denied(["Read(.env)"], "bash", { command: "cat ./.env" })).toBe(true);
+		expect(denied(["Edit(src/**)"], "write", { path: "/proj/src/a.ts" })).toBe(true);
+		expect(denied(["Read(.env)"], "read", { path: "/proj/sub/.env" })).toBe(false);
+	});
+
 	it("names MCP tools either way, and fetches by domain", () => {
 		expect(denied(["mcp__github__*"], "mcp__github__get_me", {})).toBe(true);
 		expect(denied(["Mcp(github:get_me)"], "mcp__github__get_me", {})).toBe(true);

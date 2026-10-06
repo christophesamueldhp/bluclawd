@@ -157,6 +157,13 @@ function globToRegExp(pat: string, pathLike = true): RegExp {
 	return new RegExp(`^${globBody(pat, pathLike)}$`);
 }
 
+/** A path rule's patterns: a relative one (`.env`, `src/**`) also names its path under the cwd. */
+function pathRulePatterns(ruleSubject: string, cwd: string): RegExp[] {
+	const patterns = [globToRegExp(ruleSubject)];
+	if (!/^[/~*]/.test(ruleSubject)) patterns.push(globToRegExp(resolveToCwd(ruleSubject, cwd)));
+	return patterns;
+}
+
 function globBody(pat: string, pathLike: boolean): string {
 	// An absolute path rule may be spelled `//abs`; a single `/` is absolute too.
 	const expanded = homeExpand(pathLike ? pat.replace(/^\/\//, "/") : pat);
@@ -378,8 +385,8 @@ export function deniedBy(
 			// A file rule also guards the paths a bash command names.
 			if (isBash && cwd && PATH_VERBS.has(capitalize(parts.verb))) {
 				bashPaths ??= bashPathCandidates(bashSubjects, cwd);
-				const pattern = globToRegExp(parts.subject);
-				return bashPaths.some((candidate) => pattern.test(candidate));
+				const patterns = pathRulePatterns(parts.subject, cwd);
+				return bashPaths.some((candidate) => patterns.some((pattern) => pattern.test(candidate)));
 			}
 			if (!ruleVerbCovers(parts.verb, verb)) return false;
 			if (verb === "WebFetch") {
@@ -389,8 +396,11 @@ export function deniedBy(
 					return host !== undefined && globToRegExp(domain).test(host);
 				}
 			}
-			const pattern = globToRegExp(parts.subject, !isBash);
-			return [subj, ...bashSubjects, ...pathCandidates].some((candidate) => pattern.test(candidate));
+			const patterns =
+				cwd && PATH_VERBS.has(verb) ? pathRulePatterns(parts.subject, cwd) : [globToRegExp(parts.subject, !isBash)];
+			return [subj, ...bashSubjects, ...pathCandidates].some((candidate) =>
+				patterns.some((pattern) => pattern.test(candidate)),
+			);
 		} catch {
 			return true;
 		}
