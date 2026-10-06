@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -70,16 +70,10 @@ const { SENTINEL_INSTRUCTIONS } = await import("../daemon/session-state.ts");
 
 describe("agent-view session lifecycle", () => {
 	let prevEnv: string | undefined;
-	let savedFile: string;
 
 	beforeEach(() => {
 		prevEnv = process.env.PI_SERVER_DIR;
 		process.env.PI_SERVER_DIR = mkdtempSync(join(tmpdir(), "bluclawd-lifecycle-"));
-		savedFile = join(process.env.PI_SERVER_DIR, "saved.jsonl");
-		writeFileSync(
-			savedFile,
-			'{"type":"session","version":3,"id":"saved","cwd":"/p","timestamp":"2026-10-05T00:00:00Z"}\n',
-		);
 		FakeChild.spawnOptions = [];
 		FakeChild.startupError = undefined;
 	});
@@ -119,17 +113,69 @@ describe("agent-view session lifecycle", () => {
 		expect(loadInstances()[0].outcome).toBe("done");
 	});
 
+	it("native transfer refuses a writer that became busy after the roster was drawn", async () => {
+		const supervisor = new ServerSupervisor();
+		const row = await supervisor.spawnInstance({ cwd: "/p" });
+		const child = FakeChild.last!;
+		child.emit({ type: "agent_start" });
+		await expect(supervisor.stopInstance(row.id, true)).rejects.toThrow("still working");
+		expect(child.disposed).toBe(false);
+		expect(supervisor.getInstance(row.id)?.status).toBe("online");
+		expect(supervisor.getActivity(row.id)).toBe("working");
+		child.emit({ type: "message_end", message: { role: "assistant", content: "result: completed" } });
+		child.emit({ type: "agent_settled" });
+		await supervisor.stopInstance(row.id, true);
+		expect(child.disposed).toBe(true);
+		expect(loadInstances()[0]).toMatchObject({ status: "stopped", outcome: "done" });
+	});
+
+	it("native transfer preserves an unanswered dialog", async () => {
+		const supervisor = new ServerSupervisor();
+		const row = await supervisor.spawnInstance({ cwd: "/p" });
+		const child = FakeChild.last!;
+		child.uiHandler?.({ type: "extension_ui_request", method: "input", id: "q", title: "Your choice?" });
+		await expect(supervisor.stopInstance(row.id, true)).rejects.toThrow("waiting for input");
+		expect(child.disposed).toBe(false);
+		expect(supervisor.getPendingNeeds(row.id)?.requestId).toBe("q");
+		expect(child.answered).toEqual([]);
+	});
+
+	it("native transfer blocks new prompts while releasing the idle writer", async () => {
+		const supervisor = new ServerSupervisor();
+		const row = await supervisor.spawnInstance({ cwd: "/p" });
+		const child = FakeChild.last!;
+		const stream = supervisor.openRpcStream(
+			row.id,
+			() => {},
+			() => {},
+		)!;
+		let finish!: () => void;
+		child.dispose = () =>
+			new Promise<void>((resolve) => {
+				finish = resolve;
+			});
+		const release = supervisor.stopInstance(row.id, true);
+		expect(supervisor.getInstance(row.id)?.status).toBe("stopping");
+		const prompt = { type: "prompt" as const, message: "must not run" };
+		expect(await supervisor.handleRpc(row.id, prompt)).toBeUndefined();
+		await expect(stream.handleRpc(prompt)).rejects.toThrow("being stopped");
+		expect(child.sent).not.toContainEqual(prompt);
+		finish();
+		await release;
+		stream.close();
+	});
+
 	it("a failed hand-off keeps the session file so its Failed row can be opened and revived", async () => {
 		const supervisor = new ServerSupervisor();
 		FakeChild.startupError = new Error("Cannot find package: old Pi installation removed");
-		await expect(supervisor.spawnInstance({ cwd: "/p", sessionFile: savedFile })).rejects.toThrow(
+		await expect(supervisor.spawnInstance({ cwd: "/p", sessionFile: "/p/outgoing.jsonl" })).rejects.toThrow(
 			"Cannot find package",
 		);
 		const [failed] = loadInstances();
-		expect(failed).toMatchObject({ status: "stopped", outcome: "failed", sessionFile: realpathSync(savedFile) });
+		expect(failed).toMatchObject({ status: "stopped", outcome: "failed", sessionFile: "/p/outgoing.jsonl" });
 		expect(failed.detail).toContain("old Pi installation removed");
 		FakeChild.startupError = undefined;
-		const revived = await supervisor.spawnInstance({ cwd: "/p", sessionFile: savedFile });
+		const revived = await supervisor.spawnInstance({ cwd: "/p", sessionFile: "/p/outgoing.jsonl" });
 		expect(revived.id).toBe(failed.id);
 		expect(loadInstances()).toHaveLength(1);
 	});
@@ -144,14 +190,14 @@ describe("agent-view session lifecycle", () => {
 
 	it("resuming a known session file revives the same row, and never spawns a second writer", async () => {
 		const supervisor = new ServerSupervisor();
-		const first = await supervisor.spawnInstance({ cwd: "/p", sessionFile: savedFile, label: "walk cycle" });
-		const again = await supervisor.spawnInstance({ cwd: "/p", sessionFile: savedFile });
+		const first = await supervisor.spawnInstance({ cwd: "/p", sessionFile: "/tmp/a.jsonl", label: "walk cycle" });
+		const again = await supervisor.spawnInstance({ cwd: "/p", sessionFile: "/tmp/a.jsonl" });
 		expect(again.id).toBe(first.id);
 		expect(FakeChild.spawnOptions).toHaveLength(1);
 
 		supervisor.setInstanceMeta(first.id, { pinned: true });
 		await supervisor.stopInstance(first.id);
-		const revived = await supervisor.spawnInstance({ cwd: "/elsewhere", sessionFile: savedFile });
+		const revived = await supervisor.spawnInstance({ cwd: "/elsewhere", sessionFile: "/tmp/a.jsonl" });
 		expect(revived).toMatchObject({ id: first.id, label: "walk cycle", pinned: true, createdAt: first.createdAt });
 		expect(loadInstances()).toHaveLength(1);
 	});
@@ -206,8 +252,8 @@ describe("agent-view session lifecycle", () => {
 
 	it("save leaves a session the daemon is running alone", async () => {
 		const supervisor = new ServerSupervisor();
-		const live = await supervisor.spawnInstance({ cwd: "/p", sessionFile: savedFile });
-		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: savedFile })).toMatchObject({
+		const live = await supervisor.spawnInstance({ cwd: "/p", sessionFile: "/tmp/live.jsonl" });
+		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: "/tmp/live.jsonl" })).toMatchObject({
 			id: live.id,
 			status: "online",
 		});

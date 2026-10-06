@@ -1,17 +1,15 @@
-import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
-	JsonAgentSessionEvent,
+	AgentSessionEvent,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcResponse,
 } from "@earendil-works/pi-coding-agent";
-import { bundledChildExtensionArgs } from "./child-resources.ts";
 import { isBunBinary } from "./config.ts";
-export type RpcLaunch = (command: string, args: string[], options: SpawnOptions) => ChildProcess;
 
 interface PendingRequest {
 	resolve(response: RpcResponse): void;
@@ -55,23 +53,20 @@ export class RpcProcessInstance {
 	private stdoutBuffer = "";
 	private stderrBuffer = "";
 	private readonly pendingRequests = new Map<string, PendingRequest>();
-	private readonly eventListeners = new Set<(event: JsonAgentSessionEvent) => void>();
+	private readonly eventListeners = new Set<(event: AgentSessionEvent) => void>();
 	private readonly exitListeners = new Set<(error?: Error) => void>();
 	private uiRequestHandler: ((request: RpcExtensionUIRequest) => void) | undefined;
 
-	constructor(
-		options: {
-			cwd: string;
-			env?: NodeJS.ProcessEnv;
-			sessionFile?: string;
-			provider?: string;
-			model?: string;
-			appendSystemPrompt?: string;
-		},
-		launch: RpcLaunch = spawn,
-	) {
+	constructor(options: {
+		cwd: string;
+		env?: NodeJS.ProcessEnv;
+		sessionFile?: string;
+		provider?: string;
+		model?: string;
+		appendSystemPrompt?: string;
+	}) {
 		const rpcCommand = this.getSpawnCommand(options);
-		this.process = launch(rpcCommand.command, rpcCommand.args, {
+		this.process = spawn(rpcCommand.command, rpcCommand.args, {
 			cwd: options.cwd,
 			env: options.env ?? process.env,
 			stdio: ["pipe", "pipe", "pipe"],
@@ -93,7 +88,7 @@ export class RpcProcessInstance {
 	} {
 		// Resume an existing session and/or pin the model; `main()` parses these before the mode
 		// branch, and the node rpc-entry forwards process.argv through to main().
-		const tail = [...buildRpcTailArgs(opts), ...bundledChildExtensionArgs()];
+		const tail = buildRpcTailArgs(opts);
 		if (isBunBinary) {
 			return {
 				command: join(dirname(process.execPath), process.platform === "win32" ? "pi.exe" : "pi"),
@@ -181,7 +176,7 @@ export class RpcProcessInstance {
 
 			default: {
 				for (const listener of this.eventListeners) {
-					listener(parsed as JsonAgentSessionEvent);
+					listener(parsed as AgentSessionEvent);
 				}
 			}
 		}
@@ -231,7 +226,7 @@ export class RpcProcessInstance {
 		this.uiRequestHandler = handler;
 	}
 
-	onEvent(listener: (event: JsonAgentSessionEvent) => void): () => void {
+	onEvent(listener: (event: AgentSessionEvent) => void): () => void {
 		this.eventListeners.add(listener);
 		return () => {
 			this.eventListeners.delete(listener);
@@ -271,16 +266,13 @@ export class RpcProcessInstance {
 	}
 }
 
-export function createRpcProcessInstance(
-	options: {
-		cwd: string;
-		env?: NodeJS.ProcessEnv;
-		sessionFile?: string;
-		provider?: string;
-		model?: string;
-		appendSystemPrompt?: string;
-	},
-	launch?: RpcLaunch,
-): RpcProcessInstance {
-	return new RpcProcessInstance(options, launch);
+export function createRpcProcessInstance(options: {
+	cwd: string;
+	env?: NodeJS.ProcessEnv;
+	sessionFile?: string;
+	provider?: string;
+	model?: string;
+	appendSystemPrompt?: string;
+}): RpcProcessInstance {
+	return new RpcProcessInstance(options);
 }

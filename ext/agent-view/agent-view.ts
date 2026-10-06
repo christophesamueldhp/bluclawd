@@ -9,7 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
@@ -24,7 +24,6 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { type SessionTarget, VIEW_PROTOCOL_VERSION } from "../../daemon/view-types.ts";
 import { theme } from "../_shared/theme.ts";
 import { mascotGlyphs, REST, renderMascot } from "../branding/mascot.ts";
 import { type AgentClipboard, readAgentClipboard } from "./clipboard.ts";
@@ -67,9 +66,7 @@ export interface AgentViewOptions {
 	onClose: () => void;
 	/** Open a session in this window; the one here goes to the background. `resume`: its turn was
 	 *  cut off by the move, so it should carry on here. */
-	onOpen: (target: SessionTarget, signal?: AbortSignal) => Promise<boolean>;
-	currentId?: () => string | undefined;
-	onDeleted?: (instanceId: string) => void;
+	onOpen: (sessionFile: string, cwd: string, resume: boolean) => void;
 	/** A peek reply to this window's own session: sent as its next prompt once the view closes. */
 	onSelfReply?: (text: string) => void;
 	/** ctrl+enter: start a session in this window with `task` as its first prompt. */
@@ -78,7 +75,7 @@ export interface AgentViewOptions {
 		model: { provider: string; id: string } | undefined,
 		task: string,
 		images: ImageContent[],
-	) => Promise<boolean>;
+	) => void;
 	/** Clipboard IO is separate from the view so asynchronous paste never blocks rendering. */
 	readClipboard?: () => Promise<AgentClipboard>;
 	/** `/resume`: this repository's past sessions, newest first. */
@@ -102,6 +99,9 @@ const FRAMES = ["·", "✢", "✳", "✶", "✻", "✽"];
 const SPINNER = [...FRAMES, ...[...FRAMES].reverse()];
 const ARM_MS = 2000;
 const NOTICE_MS = 3000;
+/** How long a takeover waits for the other terminal: its next heartbeat (3s), then abort and switch. */
+const RELEASE_WAIT_MS = 15_000;
+const RELEASE_POLL_MS = 300;
 
 type Color = Parameters<typeof theme.fg>[0];
 
@@ -232,7 +232,6 @@ export class AgentView implements Component, Focusable {
 	private daemonNotice = "";
 	private connectionLost = false;
 	private opening: string | undefined;
-	private openingAbort?: AbortController;
 	private dispatchModel: { provider: string; id: string } | undefined;
 	private past: PastSession[] = [];
 	private pastIndex = 0;
@@ -261,7 +260,7 @@ export class AgentView implements Component, Focusable {
 		} else {
 			const info = await this.opts.client.getDaemonInfo();
 			if (this.closed) return;
-			if (info.running && info.viewProtocol !== VIEW_PROTOCOL_VERSION && info.buildId !== currentDaemonBuildId()) {
+			if (info.running && info.buildId !== currentDaemonBuildId()) {
 				const result = await this.opts.client.restartDaemon();
 				if (this.closed) return;
 				this.daemonNotice = result.restarted
@@ -280,15 +279,9 @@ export class AgentView implements Component, Focusable {
 		this.opts.onClose();
 	}
 
-	dispose(): void {
-		this.teardown();
-	}
-
 	/** Every path that abandons the view: close, open, create-and-open. */
 	private teardown(): void {
 		this.closed = true;
-		this.openingAbort?.abort();
-		this.openingAbort = undefined;
 		this.opening = undefined;
 		if (this.pollTimer) clearInterval(this.pollTimer);
 		if (this.spinTimer) clearInterval(this.spinTimer);
@@ -386,7 +379,7 @@ export class AgentView implements Component, Focusable {
 
 	// ---- data ----------------------------------------------------------------------------
 
-	async refresh(): Promise<void> {
+	private async refresh(): Promise<void> {
 		if (this.refreshing || this.closed) return;
 		this.refreshing = true;
 		try {
@@ -403,7 +396,7 @@ export class AgentView implements Component, Focusable {
 	}
 
 	private recompute(): void {
-		const all = [...collectRows(this.instances, this.opts.self?.(), this.opts.currentId?.()), ...this.pending];
+		const all = [...collectRows(this.instances, this.opts.self?.()), ...this.pending];
 		const filter = stateFilter(this.composerText());
 		this.rows = filter ? all.filter(filter) : all;
 		const bands = buildBands(this.rows, this.viewMode, (p) => this.shorten(p));
@@ -413,7 +406,7 @@ export class AgentView implements Component, Focusable {
 		const current = this.items.find((item) => item.key === this.selectedKey);
 		if (!current || (!this.userMoved && current.kind !== "row")) {
 			const rows = this.items.filter((item) => item.kind === "row");
-			this.selectedKey = (rows.find((item) => item.row.self || item.row.current) ?? rows[0] ?? this.items[0])?.key;
+			this.selectedKey = (rows.find((item) => item.row.self) ?? rows[0] ?? this.items[0])?.key;
 		}
 		this.syncSpinner();
 		this.syncTitle();
@@ -435,7 +428,7 @@ export class AgentView implements Component, Focusable {
 			let hidden = 0;
 			if (band.key === "completed" && !this.expanded.has(band.key) && rows.length > room) {
 				const keep = new Set(rows.slice(0, room - 1).map((r) => r.id));
-				for (const row of rows) if (row.state === "failed" || row.self || row.current) keep.add(row.id);
+				for (const row of rows) if (row.state === "failed" || row.self) keep.add(row.id);
 				hidden = rows.length - keep.size;
 				rows = rows.filter((r) => keep.has(r.id));
 			}
@@ -518,20 +511,10 @@ export class AgentView implements Component, Focusable {
 		}
 		const cwd = this.dispatchCwd();
 		const model = this.dispatchModel;
-		if (open && this.opts.onCreateAndOpen) {
-			this.dispatching = true;
-			try {
-				const accepted = await this.opts.onCreateAndOpen(cwd, model, task, images);
-				if (accepted !== false) {
-					this.clearDraft();
-					this.teardown();
-				} else this.say("Could not attach the new session; draft retained", "error");
-			} catch (error) {
-				this.say(`Could not start — ${error instanceof Error ? error.message : String(error)}`, "error");
-			} finally {
-				this.dispatching = false;
-				if (!this.closed) this.render_();
-			}
+		if (open && this.opts.onCreateAndOpen && cwd === this.opts.cwd) {
+			this.clearDraft();
+			this.teardown();
+			this.opts.onCreateAndOpen(cwd, model, task, images);
 			return;
 		}
 		this.dispatching = true;
@@ -544,7 +527,6 @@ export class AgentView implements Component, Focusable {
 			detail: "starting…",
 			pinned: false,
 			self: false,
-			current: false,
 			elsewhere: false,
 			createdAt: new Date().toISOString(),
 		};
@@ -577,43 +559,93 @@ export class AgentView implements Component, Focusable {
 		}
 	}
 
-	/** Attach first; navigation never controls an execution writer. */
+	/** Enter / →: open an idle session with Pi's native UI, after releasing its previous writer. */
 	private async open(row: AgentRow): Promise<void> {
 		if (this.closed || this.opening) return;
 		if (row.self) {
 			this.close();
 			return;
 		}
-		if (row.elsewhere) {
-			this.say("Cannot attach — session is owned by another terminal", "error");
-			return;
-		}
-		if (row.id.startsWith("pending:") || (!row.alive && !row.sessionFile)) {
+		if (row.id.startsWith("pending:") || !row.sessionFile) {
 			this.say(
-				!row.sessionFile && !row.alive
+				!row.alive && !row.sessionFile
 					? "No session file recorded — use /resume to reopen its saved conversation"
 					: "Still starting — try again in a moment",
 			);
 			return;
 		}
-		const abort = new AbortController();
-		this.openingAbort = abort;
+		const exists = this.opts.fileExists ?? existsSync;
 		this.opening = row.id;
 		this.render_();
-		try {
-			const accepted = await this.opts.onOpen({ instanceId: row.id }, abort.signal);
-			if (this.closed || this.openingAbort !== abort || abort.signal.aborted) return;
-			this.opening = undefined;
-			this.openingAbort = undefined;
-			if (accepted) this.teardown();
-			else this.say("Could not attach — previous conversation retained", "error");
-		} catch (error) {
-			if (this.closed || this.openingAbort !== abort || abort.signal.aborted) return;
-			this.opening = undefined;
-			this.openingAbort = undefined;
-			this.say(`Could not attach — ${error instanceof Error ? error.message : String(error)}`, "error");
+		// A fresh child reports its session file before the first turn has written it.
+		for (let i = 0; i < 40 && !exists(row.sessionFile) && this.opening === row.id; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 150));
 		}
+		if (this.opening !== row.id) return; // esc cancelled
+		if (!exists(row.sessionFile)) {
+			this.opening = undefined;
+			this.say("Still starting — try again in a moment");
+			return;
+		}
+		try {
+			// Roster activity may have changed since the row was drawn. Never take a
+			// working writer away just to display its transcript in the native UI.
+			const owners = (await this.opts.client.list()).filter(
+				(instance) =>
+					instance.sessionFile === row.sessionFile &&
+					(instance.status === "online" || instance.status === "starting" || instance.status === "stopping"),
+			);
+			if (this.closed || this.opening !== row.id) return;
+			if (owners.some((owner) => owner.status !== "online" || owner.activity !== "idle" || owner.needs)) {
+				this.opening = undefined;
+				this.say("Session is still working or waiting for input — use Space to inspect/reply, then open when idle");
+				return;
+			}
+			if (owners.some((owner) => owner.external) && !(await this.takeOver(row.id, row.sessionFile))) return;
+			for (const owner of owners.filter((owner) => !owner.external)) {
+				await this.opts.client.releaseIdle(owner.id);
+				if (this.closed || this.opening !== row.id) return;
+			}
+		} catch (error) {
+			if (this.closed || this.opening !== row.id) return;
+			this.opening = undefined;
+			this.say(`Couldn't open — ${error instanceof Error ? error.message : String(error)}`, "error");
+			return; // The old writer may still be running; do not create a second one.
+		}
+		if (this.closed || this.opening !== row.id) return;
+		this.opening = undefined;
+		this.teardown();
+		this.opts.onOpen(row.sessionFile, row.cwd, false);
+	}
+
+	/** Ask the terminal holding `sessionFile` to let it go, and wait until it has. */
+	private async takeOver(rowId: string, sessionFile: string): Promise<boolean> {
+		let asked = false;
+		try {
+			asked = await this.opts.client.release(sessionFile);
+		} catch {
+			// no daemon: nothing to pass the request on
+		}
+		if (!asked) {
+			this.say("Can't take over — the agent daemon is out of date · close pi there to open it here", "error");
+			return false;
+		}
+		this.opening = rowId;
 		this.render_();
+		const deadline = Date.now() + RELEASE_WAIT_MS;
+		while (this.opening === rowId && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, RELEASE_POLL_MS));
+			try {
+				const instances = await this.opts.client.list();
+				if (!instances.some((i) => i.external && i.sessionFile === sessionFile)) return this.opening === rowId;
+			} catch {
+				// keep waiting
+			}
+		}
+		if (this.opening !== rowId) return false; // esc cancelled
+		this.opening = undefined;
+		this.say("The other terminal didn't let go — close pi there to open it here", "error");
+		return false;
 	}
 
 	private disarm(): void {
@@ -642,25 +674,12 @@ export class AgentView implements Component, Focusable {
 			if (targets.length === 0) return;
 			if (this.armed?.key === item.key) {
 				this.disarm();
-				const results = await Promise.allSettled(
-					targets.map(async (r) => {
-						await this.opts.client.delete(r.id);
-						this.opts.onDeleted?.(r.id);
-					}),
-				);
-				const failed = results.filter((result) => result.status === "rejected");
-				if (failed.length)
-					this.say(
-						`Not deleted: ${failed.length}/${targets.length} sessions · ${failed.map((result) => (result.status === "rejected" ? String(result.reason) : "")).join("; ")}`,
-						"error",
-					);
+				await Promise.all(targets.map((r) => this.opts.client.delete(r.id).catch(() => undefined)));
 				await this.refresh();
 				return;
 			}
 			this.arm(item.key);
 			this.say(`ctrl+x again to delete all ${targets.length} in ${item.band.title}`, "error");
-			await Promise.allSettled(targets.filter((row) => row.alive).map((row) => this.opts.client.stop(row.id)));
-			await this.refresh();
 			return;
 		}
 		const row = item.row;
@@ -677,7 +696,6 @@ export class AgentView implements Component, Focusable {
 			this.disarm();
 			try {
 				await this.opts.client.delete(row.id);
-				this.opts.onDeleted?.(row.id);
 				if (this.mode === "peek") this.mode = "list";
 			} catch (error) {
 				this.say(`not deleted · ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -1005,11 +1023,8 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		if (this.isEsc(data)) {
-			if (this.opening) {
-				this.openingAbort?.abort();
-				this.openingAbort = undefined;
-				this.opening = undefined;
-			} else if (this.armed) this.disarm();
+			if (this.opening) this.opening = undefined;
+			else if (this.armed) this.disarm();
 			else if (text || this.composerImages.length || this.pasting) {
 				this.clearDraft();
 				this.recompute();
@@ -1223,7 +1238,7 @@ export class AgentView implements Component, Focusable {
 		const nowMs = Date.now();
 		const name = truncateToWidth(sanitize(row.label), labelWidth, "…");
 		// The row you came from keeps a bold, undimmed name; the others are gray until focused.
-		const label = row.self || row.current ? theme.bold(name) : focused ? cc.fg("text", name) : cc.fg("muted", name);
+		const label = row.self ? theme.bold(name) : focused ? cc.fg("text", name) : cc.fg("muted", name);
 		const age = rowAge(row, nowMs).padStart(ageWidth);
 		const fixed = visibleWidth(pad) + 2 + labelWidth + 2 + 2 + ageWidth;
 		const detailWidth = Math.max(0, width - fixed);

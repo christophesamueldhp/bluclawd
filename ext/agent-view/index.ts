@@ -15,18 +15,23 @@ import { basename } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ExtensionCommandContext, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
-import type { AutocompleteProvider, Component } from "@earendil-works/pi-tui";
+import {
+	type AutocompleteProvider,
+	type Component,
+	isKeyRelease,
+	isKeyRepeat,
+	matchesKey,
+	type TUI,
+} from "@earendil-works/pi-tui";
 import { lastLine, textOf } from "../../daemon/session-state.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
 import { AgentView, type PastSession } from "./agent-view.ts";
-import { type BackgroundableSession, CONTINUE_PROMPT, handOff, handOffAfterExit } from "./hand-off.ts";
-import { createManagedRuntime, MANAGED_BOOTSTRAP_COMMAND } from "./managed-runtime.ts";
-import { managedUiRef } from "./managed-state.ts";
+import { type BackgroundableSession, handOff, handOffAfterExit } from "./hand-off.ts";
 import { type InstanceSummary, OrchestratorClient } from "./orchestrator-client.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
 import { collectRows, labelFromTask } from "./rows.ts";
-import { deriveLabel, ForegroundActivity, type SelfRegistration, type SelfSessionInfo } from "./self-registration.ts";
+import { deriveLabel, ForegroundActivity, SelfRegistration, type SelfSessionInfo } from "./self-registration.ts";
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
@@ -39,13 +44,13 @@ const TMP_ROOTS = [tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/v
 const PILL_POLL_MS = 10_000;
 const DONE_FLASH_MS = 2500;
 /** How long the first ← waits for the second. */
-const _LEFT_ARM_MS = 2000;
+const LEFT_ARM_MS = 2000;
 const STATUS_KEY = STATUS_KEYS.agents;
 /** The command ←← dispatches; not meant to be typed. */
 const AGENT_VIEW_COMMAND = "agent-view";
 /** The command a takeover from another terminal dispatches; not meant to be typed. */
 const RELEASE_COMMAND = "agent-view-release";
-const HIDDEN_COMMANDS: ReadonlySet<string> = new Set([AGENT_VIEW_COMMAND, RELEASE_COMMAND, MANAGED_BOOTSTRAP_COMMAND]);
+const HIDDEN_COMMANDS: ReadonlySet<string> = new Set([AGENT_VIEW_COMMAND, RELEASE_COMMAND]);
 
 /** Autocomplete without the agent view commands. */
 export function withoutAgentViewCommand(current: AutocompleteProvider): AutocompleteProvider {
@@ -84,28 +89,21 @@ async function loadPastSessions(cwd: string): Promise<PastSession[]> {
 const agentView: InlineExtension = {
 	name: "agent-view",
 	factory: (pi) => {
-		const managedState = managedUiRef.get();
-		const managed = createManagedRuntime(pi, managedState, loadPastSessions);
-		pi.on("input", (event, ctx) => managed.input(event, ctx));
-		pi.registerCommand(MANAGED_BOOTSTRAP_COMMAND, {
-			description: "Initialize persistent session views",
-			handler: async (_args, ctx) => managed.bootstrap(ctx),
-		});
 		let registration: SelfRegistration | undefined;
 		// What this window is doing: its own agent-view row, and what other windows see.
-		const activity = new ForegroundActivity();
+		let activity = new ForegroundActivity();
 		let stopPill: (() => void) | undefined;
 		let viewOpen = false;
 		let closeView: (() => void) | undefined;
 		let releasing = false;
 		// The first ← swaps the footer pill for this hint; the second opens agent view.
 		let leftHint: string | undefined;
-		let _paintPill: (() => void) | undefined;
+		let paintPill: (() => void) | undefined;
 		// Set when agent view opened this session, so the hint reads "go back".
-		let _openedFromView = false;
+		let openedFromView = false;
 		let autocompleteAdded = false;
 
-		const _selfInfo = (ctx: ExtensionContext): SelfSessionInfo => ({
+		const selfInfo = (ctx: ExtensionContext): SelfSessionInfo => ({
 			cwd: ctx.sessionManager.getCwd(),
 			sessionId: ctx.sessionManager.getSessionId(),
 			sessionFile: ctx.sessionManager.getSessionFile(),
@@ -155,7 +153,7 @@ const agentView: InlineExtension = {
 
 		/** The `← for agents` footer hint: `← N agents` while sessions wait on you, `← N done`
 		 *  briefly when some finish. Only reads — it never starts the daemon. */
-		const _startPill = (ctx: ExtensionContext): (() => void) => {
+		const startPill = (ctx: ExtensionContext): (() => void) => {
 			const client = new OrchestratorClient();
 			let finished: Set<string> | undefined;
 			let flashUntil = 0;
@@ -165,7 +163,7 @@ const agentView: InlineExtension = {
 			const paint = (): void => {
 				if (!stopped) ctx.ui.setStatus(STATUS_KEY, leftHint ?? last);
 			};
-			_paintPill = paint;
+			paintPill = paint;
 			const tick = async (): Promise<void> => {
 				let text = theme.fg("dim", "← for agents");
 				try {
@@ -196,7 +194,7 @@ const agentView: InlineExtension = {
 			return () => {
 				stopped = true;
 				clearInterval(timer);
-				_paintPill = undefined;
+				paintPill = undefined;
 				ctx.ui.setStatus(STATUS_KEY, undefined);
 			};
 		};
@@ -208,11 +206,71 @@ const agentView: InlineExtension = {
 			// Agent view is a terminal affordance. RPC children (the daemon's own sessions) have a
 			// UI too, but registering one as a window would mark its own row "open elsewhere".
 			if (ctx.mode !== "tui") return;
+			registration?.stop();
+			activity = new ForegroundActivity();
+			registration = new SelfRegistration(
+				new OrchestratorClient(),
+				() => selfInfo(ctx),
+				// Session switching needs a command context, as ←← does.
+				() => pi.sendUserMessage(`/${RELEASE_COMMAND}`, { expandPromptTemplates: true }),
+			);
+			registration.start();
+			stopPill?.();
+			const offPill = startPill(ctx);
 			if (!autocompleteAdded) {
 				autocompleteAdded = true;
 				ctx.ui.addAutocompleteProvider(withoutAgentViewCommand);
 			}
-			managed.sessionStart(ctx);
+			// A zero-line widget, only to get hold of the TUI: onTerminalInput sees keys before any
+			// dialog does, so ← must check that the main editor really has the keyboard.
+			let tui: TUI | undefined;
+			ctx.ui.setWidget("agent-view:tui", (widgetTui) => {
+				tui = widgetTui;
+				return { render: () => [], invalidate: () => {} };
+			});
+			// ← twice on an empty prompt opens agent view: the first press shows a "Press ← again"
+			// hint, the second switches. Nothing is taken while an overlay or dialog has the
+			// keyboard, or while the prompt holds text.
+			let armedAt = 0;
+			const disarm = (): void => {
+				if (!armedAt) return;
+				armedAt = 0;
+				leftHint = undefined;
+				paintPill?.();
+			};
+			const offKey = ctx.ui.onTerminalInput((data) => {
+				// Kitty reports a release (and a held key) as separate events; only presses count.
+				if (isKeyRelease(data) || isKeyRepeat(data)) return undefined;
+				if (viewOpen || !matchesKey(data, "left") || ctx.ui.getEditorText() !== "") {
+					disarm();
+					return undefined;
+				}
+				// getFocusedComponent is on pi-tui's TUI class, not its TUI interface.
+				const focused = (tui as { getFocusedComponent?: () => unknown } | undefined)?.getFocusedComponent?.();
+				const editorFocused = typeof (focused as { getText?: unknown } | null)?.getText === "function";
+				if (!tui || tui.hasOverlay() || !editorFocused) {
+					disarm();
+					return undefined;
+				}
+				if (Date.now() - armedAt < LEFT_ARM_MS) {
+					disarm();
+					pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
+					return { consume: true };
+				}
+				const at = Date.now();
+				armedAt = at;
+				leftHint = theme.fg("dim", `Press ← again to ${openedFromView ? "go back to" : "open"} agents`);
+				paintPill?.();
+				setTimeout(() => {
+					if (armedAt === at) disarm();
+				}, LEFT_ARM_MS);
+				return { consume: true };
+			});
+			stopPill = () => {
+				offPill();
+				offKey();
+				ctx.ui.setWidget("agent-view:tui", undefined);
+			};
 		});
 
 		const track = (event: { type: string; kind?: string }): void => {
@@ -225,7 +283,6 @@ const agentView: InlineExtension = {
 		pi.on("ui_prompt_end", track);
 
 		pi.on("session_shutdown", (event, ctx) => {
-			if (ctx.mode === "tui" && managed.shutdown()) return;
 			registration?.stop();
 			registration = undefined;
 			stopPill?.();
@@ -264,20 +321,9 @@ const agentView: InlineExtension = {
 							onClose: () => done(undefined),
 							onSelfReply: (text) =>
 								pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "followUp" }),
-							onOpen: async (target) => {
-								const sessionFile =
-									"sessionFile" in target
-										? target.sessionFile
-										: (await new OrchestratorClient().list()).find((row) => row.id === target.instanceId)
-												?.sessionFile;
-								if (!sessionFile) return false;
-								done({ type: "open", sessionFile, resume: false });
-								return true;
-							},
-							onCreateAndOpen: async (_cwd, spawnModel, task, images) => {
-								done({ type: "create", model: spawnModel, task, images });
-								return true;
-							},
+							onOpen: (sessionFile, _cwd, resume) => done({ type: "open", sessionFile, resume }),
+							onCreateAndOpen: (_cwd, spawnModel, task, images) =>
+								done({ type: "create", model: spawnModel, task, images }),
 							loadPastSessions,
 							loadViewMode: () => loadViewMode(getAgentDir()),
 							saveViewMode: (mode) => saveViewMode(getAgentDir(), mode),
@@ -291,15 +337,20 @@ const agentView: InlineExtension = {
 					{ overlay: true, overlayOptions: FULL_SCREEN },
 				);
 				if (!action) return;
+				// Native Pi replaces the runtime on a switch. Let its turn settle first
+				// so disposal cannot abort a tool or persist an interrupted assistant message.
+				if (!ctx.isIdle()) {
+					ctx.ui.notify("Waiting for this session to finish before switching", "info");
+					await ctx.waitForIdle();
+				}
 				// Only plain data survives replacement. The command awaits the whole transition;
 				// hand-off runs only in the fresh context, after dispose and never on cancellation.
 				const outgoing = captureOutgoing(ctx);
-				_openedFromView = true;
+				openedFromView = true;
 				if (action.type === "open") {
 					await ctx.switchSession(action.sessionFile, {
-						withSession: async (replaced) => {
+						withSession: async () => {
 							await handOff(outgoing);
-							if (action.resume) await replaced.sendUserMessage(CONTINUE_PROMPT);
 						},
 					});
 				} else {
@@ -329,7 +380,7 @@ const agentView: InlineExtension = {
 		};
 
 		/**
-		 * Another terminal is taking this session over: stop any turn (that terminal carries it on)
+		 * Another terminal is taking this session over: let any turn finish
 		 * and move to a new session. Not handed to the daemon — the other terminal is its writer now.
 		 */
 		const releaseSession = async (ctx: ExtensionCommandContext): Promise<void> => {
@@ -337,7 +388,10 @@ const agentView: InlineExtension = {
 			releasing = true;
 			try {
 				closeView?.();
-				if (!ctx.isIdle()) await ctx.waitForIdle();
+				if (!ctx.isIdle()) {
+					ctx.ui.notify("Waiting for this session to finish before moving to another terminal", "info");
+					await ctx.waitForIdle();
+				}
 				await ctx.newSession({
 					withSession: async (replaced) => {
 						replaced.ui.notify("Session moved to another terminal — this is a new one", "info");
@@ -350,7 +404,7 @@ const agentView: InlineExtension = {
 
 		pi.registerCommand(AGENT_VIEW_COMMAND, {
 			description: "Agent view (press ← twice on an empty prompt)",
-			handler: async (_args, ctx) => (ctx.mode === "tui" ? managed.agents(ctx) : openAgentView(ctx)),
+			handler: async (_args, ctx) => openAgentView(ctx),
 		});
 		pi.registerCommand(RELEASE_COMMAND, {
 			description: "Let another terminal take this session over",

@@ -2,11 +2,9 @@ import { spawn } from "node:child_process";
 import { readFileSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
-import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { daemonBuildId, getSocketPath } from "../../daemon/paths.ts";
-import type { HistoryPage } from "../../daemon/view-types.ts";
 
 export type AgentActivity = "idle" | "working" | "awaiting_input";
 type InstanceStatus = "starting" | "online" | "stopping" | "stopped" | "error";
@@ -64,6 +62,7 @@ type Request =
 			model?: string;
 	  }
 	| { type: "stop"; instanceId: string }
+	| { type: "release_idle"; instanceId: string }
 	| { type: "rpc"; instanceId: string; command: unknown }
 	| { type: "register"; instance: RegisterInput }
 	| { type: "unregister"; instanceId: string }
@@ -73,8 +72,7 @@ type Request =
 	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
 	| { type: "answer"; instanceId: string; response: Record<string, unknown> }
 	| { type: "save"; cwd: string; label?: string; sessionFile: string }
-	| { type: "release"; sessionFile: string }
-	| { type: "view_history"; instanceId: string; before?: string };
+	| { type: "release"; sessionFile: string };
 
 interface AnyResponse {
 	type: string;
@@ -84,8 +82,6 @@ interface AnyResponse {
 	instance?: InstanceSummary;
 	version?: string;
 	buildId?: string;
-	viewProtocol?: number;
-	page?: HistoryPage;
 	release?: boolean;
 	response?: { success: boolean; error?: string };
 }
@@ -154,22 +150,19 @@ export class OrchestratorClient {
 		return new Promise<AnyResponse>((resolve, reject) => {
 			const socket = createConnection(this.socketPath);
 			let buffer = "";
-			const decoder = new StringDecoder("utf8");
 			let settled = false;
 			const done = (fn: () => void): void => {
 				if (settled) return;
 				settled = true;
 				clearTimeout(timer);
-				socket.removeAllListeners("data");
-				socket.removeAllListeners("connect");
-				socket.removeAllListeners("end");
-				socket.destroy();
+				socket.removeAllListeners();
+				socket.end();
 				fn();
 			};
 			const timer = setTimeout(() => done(() => reject(new Error("orchestrator request timed out"))), timeoutMs);
 			socket.on("connect", () => socket.write(`${JSON.stringify(req)}\n`));
 			socket.on("data", (chunk: Buffer) => {
-				buffer += decoder.write(chunk);
+				buffer += chunk.toString();
 				const nl = buffer.indexOf("\n");
 				if (nl === -1) return;
 				const line = buffer.slice(0, nl).trim();
@@ -189,10 +182,6 @@ export class OrchestratorClient {
 			});
 			socket.on("error", (error) => done(() => reject(error)));
 			socket.on("end", () => done(() => reject(new Error("orchestrator socket closed before a response"))));
-			socket.once("close", () => {
-				done(() => reject(new Error("orchestrator socket closed before a response")));
-				socket.removeAllListeners();
-			});
 		});
 	}
 
@@ -203,20 +192,15 @@ export class OrchestratorClient {
 	/** Probe the daemon and, if reachable, read back its self-reported version/buildId.
 	 *  `buildId` is undefined for a daemon that predates the version-echo handshake — a distinct
 	 *  case from "not running" for a caller that wants to warn about a stale daemon. */
-	async getDaemonInfo(): Promise<{ running: boolean; version?: string; buildId?: string; viewProtocol?: number }> {
+	async getDaemonInfo(): Promise<{ running: boolean; version?: string; buildId?: string }> {
 		try {
 			const res = await this.request({ type: "list" }, 500);
-			return { running: true, version: res.version, buildId: res.buildId, viewProtocol: res.viewProtocol };
+			return { running: true, version: res.version, buildId: res.buildId };
 		} catch {
 			return { running: false };
 		}
 	}
 
-	async history(instanceId: string, before?: string): Promise<HistoryPage> {
-		const res = await this.request({ type: "view_history", instanceId, before });
-		if (!res.page) throw new Error("Daemon does not support saved view history");
-		return res.page;
-	}
 	async list(): Promise<InstanceSummary[]> {
 		const res = await this.request({ type: "list" });
 		return res.instances ?? [];
@@ -224,6 +208,15 @@ export class OrchestratorClient {
 
 	async stop(instanceId: string): Promise<void> {
 		await this.request({ type: "stop", instanceId }, 10_000);
+	}
+
+	/** Old daemons cannot silently interpret this request as an unconditional stop. */
+	async releaseIdle(instanceId: string): Promise<void> {
+		const response = await this.request({ type: "release_idle", instanceId }, 10_000);
+		if (response.type !== "stop_result")
+			throw new Error(
+				"Daemon cannot transfer sessions safely; update it or stop the idle session with Ctrl+X first",
+			);
 	}
 
 	/** Send a message to a running session without attaching: a new prompt when it is idle, a

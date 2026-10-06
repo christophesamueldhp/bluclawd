@@ -46,19 +46,10 @@ const help: InlineExtension = {
 				`  ${theme.fg("accent", "@ <path>")}  ${theme.fg("dim", "mention a file (Tab autocompletes paths)")}`,
 			);
 			lines.push(
-				`  ${theme.fg("accent", "← ←")}       ${theme.fg("dim", "agent views: switching preserves running work (empty prompt)")}`,
+				`  ${theme.fg("accent", "← ←")}       ${theme.fg("dim", "agent view: background sessions (on an empty prompt)")}`,
 			);
 			lines.push(
 				`  ${theme.fg("accent", "Alt+M")}     ${theme.fg("dim", "cycle defaultProjectTrust — /hotkeys lists every shortcut")}`,
-			);
-
-			lines.push(
-				"",
-				theme.bold("Managed session views"),
-				"  Navigation, reload and exit detach; they never stop or replay work.",
-				"  Ctrl+X twice deletes even the displayed row; saved .jsonl remains.",
-				"  /tasks /bashes /rewind screens unavailable; underlying tools remain loaded.",
-				"  Ctrl+Enter starts the child with the chosen model and images.",
 			);
 
 			const width =
@@ -107,12 +98,7 @@ const help: InlineExtension = {
 				for (const command of registered) {
 					if (command.source !== "extension" || builtinNames.has(command.name)) continue;
 					// ext/agent-view plumbing: dispatched by ←← and by a takeover, not typed
-					if (
-						command.name === "agent-view" ||
-						command.name === "agent-view-release" ||
-						command.name === "agent-view-bootstrap"
-					)
-						continue;
+					if (command.name === "agent-view" || command.name === "agent-view-release") continue;
 					commands.push({ name: command.name, description: command.description ?? "" });
 				}
 

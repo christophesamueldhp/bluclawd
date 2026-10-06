@@ -56,3 +56,25 @@ describe("Agent View new-session RPC", () => {
 		await expect(client.spawn({ cwd: "/p", prompt: "describe image" })).rejects.toThrow("image rejected");
 	});
 });
+
+describe("safe transfer to native Pi", () => {
+	it.each([
+		{ type: "stop_result", ok: true, instanceId: "a" },
+		{ version: "old", buildId: "legacy" },
+	])("uses a distinct request and checks the daemon's acknowledgement: %j", async (response) => {
+		dir = await mkdtemp(join(tmpdir(), "bluclawd-native-transfer-"));
+		const requests: unknown[] = [];
+		server = createServer((socket) =>
+			socket.on("data", (chunk) => {
+				requests.push(JSON.parse(chunk.toString()));
+				socket.end(`${JSON.stringify(response)}\n`);
+			}),
+		);
+		const socket = join(dir, "server.sock");
+		await new Promise<void>((resolve) => server?.listen(socket, resolve));
+		const transfer = new OrchestratorClient(socket).releaseIdle("a");
+		if ("type" in response) await expect(transfer).resolves.toBeUndefined();
+		else await expect(transfer).rejects.toThrow("cannot transfer sessions safely");
+		expect(requests).toEqual([{ type: "release_idle", instanceId: "a" }]);
+	});
+});

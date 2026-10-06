@@ -6,12 +6,10 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import type { AgentView } from "../ext/agent-view/agent-view.ts";
-import { CONTINUE_PROMPT } from "../ext/agent-view/hand-off.ts";
 import agentView from "../ext/agent-view/index.ts";
 
 const state = vi.hoisted(() => ({
 	spawned: [] as unknown[],
-	incoming: undefined as { id: string; status: "stopped"; cwd: string; sessionFile: string } | undefined,
 	image: { type: "image" as const, mimeType: "image/png", data: "AQID" },
 }));
 vi.mock("../ext/agent-view/clipboard.ts", () => ({ readAgentClipboard: async () => ({ image: state.image }) }));
@@ -25,7 +23,7 @@ vi.mock("../ext/agent-view/orchestrator-client.ts", async (original) => ({
 			return { running: false };
 		}
 		async list() {
-			return state.incoming ? [state.incoming] : [];
+			return [];
 		}
 		async stop() {}
 		async spawn(options: unknown) {
@@ -55,12 +53,13 @@ function setup(create: boolean, cancelled = false) {
 	const incoming = join(dir, "incoming.jsonl");
 	writeFileSync(outgoing, "");
 	writeFileSync(incoming, "");
-	state.incoming = { id: "incoming", status: "stopped", cwd: dir, sessionFile: incoming };
 	let handler!: (_args: string, ctx: ExtensionCommandContext) => Promise<void>;
+	let releaseHandler!: typeof handler;
 	agentView({
 		on: () => {},
 		registerCommand: (name, command) => {
 			if (name === "agent-view") handler = command.handler as typeof handler;
+			if (name === "agent-view-release") releaseHandler = command.handler as typeof handler;
 		},
 	} as unknown as ExtensionAPI);
 	let release!: () => void;
@@ -68,12 +67,23 @@ function setup(create: boolean, cancelled = false) {
 		release = resolve;
 	});
 	let replacing = false;
+	let working = true;
+	let finishTurn!: () => void;
+	const turn = new Promise<void>((resolve) => {
+		finishTurn = () => {
+			working = false;
+			resolve();
+		};
+	});
+	const waitForIdle = vi.fn(() => turn);
+	const abort = vi.fn();
 	const messages: unknown[] = [];
 	const replace = async (_pathOrOptions: unknown, options?: { withSession?: (fresh: unknown) => Promise<void> }) => {
 		replacing = true;
 		await gate;
 		if (!cancelled) {
-			const callback = create ? (_pathOrOptions as typeof options)?.withSession : options?.withSession;
+			const callback =
+				typeof _pathOrOptions === "string" ? options?.withSession : (_pathOrOptions as typeof options)?.withSession;
 			await callback?.({
 				sendUserMessage: async (message: unknown) => {
 					messages.push(message);
@@ -86,7 +96,9 @@ function setup(create: boolean, cancelled = false) {
 	const ctx = {
 		cwd: dir,
 		model: { provider: "test", id: "model" },
-		isIdle: () => false,
+		isIdle: () => !working,
+		waitForIdle,
+		abort,
 		sessionManager: {
 			getSessionFile: () => outgoing,
 			getCwd: () => dir,
@@ -121,25 +133,41 @@ function setup(create: boolean, cancelled = false) {
 				}),
 		},
 	} as unknown as ExtensionCommandContext;
-	return { run: () => handler("", ctx), release, replacing: () => replacing, messages, outgoing };
+	return {
+		run: () => handler("", ctx),
+		runRelease: () => releaseHandler("", ctx),
+		release,
+		finishTurn,
+		waitForIdle,
+		abort,
+		replacing: () => replacing,
+		messages,
+		outgoing,
+	};
 }
 
 describe("Agent View session replacement", () => {
-	it("awaits the switch before completing its command and resumes the outgoing working session", async () => {
+	it("lets the native turn finish before switching without abort or a continuation prompt", async () => {
 		const flow = setup(false);
 		let finished = false;
 		const running = flow.run().then(() => {
 			finished = true;
 		});
-		await vi.waitFor(() => expect(flow.replacing()).toBe(true));
+		await vi.waitFor(() => expect(flow.waitForIdle).toHaveBeenCalledOnce());
+		expect(flow.replacing()).toBe(false);
+		expect(flow.abort).not.toHaveBeenCalled();
 		expect(finished).toBe(false);
 		expect(state.spawned).toEqual([]);
+		flow.finishTurn();
+		await vi.waitFor(() => expect(flow.replacing()).toBe(true));
 		flow.release();
 		await running;
-		expect(state.spawned).toEqual([expect.objectContaining({ sessionFile: flow.outgoing, prompt: CONTINUE_PROMPT })]);
+		expect(state.spawned).toEqual([expect.objectContaining({ sessionFile: flow.outgoing, prompt: undefined })]);
+		expect(flow.messages).toEqual([]);
 	});
 	it("does not hand off the session if replacement is cancelled", async () => {
 		const flow = setup(false, true);
+		flow.finishTurn();
 		const running = flow.run();
 		await vi.waitFor(() => expect(flow.replacing()).toBe(true));
 		flow.release();
@@ -149,11 +177,25 @@ describe("Agent View session replacement", () => {
 	});
 	it("delivers Ctrl+V images to the fresh foreground context", async () => {
 		const flow = setup(true);
+		flow.finishTurn();
 		const running = flow.run();
 		await vi.waitFor(() => expect(flow.replacing()).toBe(true));
 		flow.release();
 		await running;
 		expect(flow.messages).toEqual([[{ type: "image", mimeType: "image/png", data: "AQID" }]]);
-		expect(state.spawned).toEqual([expect.objectContaining({ sessionFile: flow.outgoing, prompt: CONTINUE_PROMPT })]);
+		expect(state.spawned).toEqual([expect.objectContaining({ sessionFile: flow.outgoing, prompt: undefined })]);
+	});
+	it("another terminal's release waits for the native turn instead of aborting it", async () => {
+		const flow = setup(false);
+		const running = flow.runRelease();
+		await vi.waitFor(() => expect(flow.waitForIdle).toHaveBeenCalledOnce());
+		expect(flow.abort).not.toHaveBeenCalled();
+		expect(flow.replacing()).toBe(false);
+		flow.finishTurn();
+		await vi.waitFor(() => expect(flow.replacing()).toBe(true));
+		flow.release();
+		await running;
+		expect(state.spawned).toEqual([]);
+		expect(flow.messages).toEqual([]);
 	});
 });

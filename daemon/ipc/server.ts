@@ -1,22 +1,12 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
-import { StringDecoder } from "node:string_decoder";
-import type {
-	JsonAgentSessionEvent,
-	RpcCommand,
-	RpcExtensionUIRequest,
-	RpcExtensionUIResponse,
-	RpcResponse,
-} from "@earendil-works/pi-coding-agent";
+import type { AgentSessionEvent, RpcExtensionUIRequest, RpcResponse } from "@earendil-works/pi-coding-agent";
 import { BUILD_ID, getSocketPath, VERSION } from "../config.ts";
-import type { ServerSupervisor } from "../supervisor.ts";
-import { VIEW_PROTOCOL_VERSION } from "../view-types.ts";
 import {
 	type ErrorResponse,
 	encodeMessage,
 	type ListRequest,
 	type ListResponse,
-	type ProtocolMessage,
 	parseRequestLine,
 	type RpcBridgeResponse,
 	type RpcReadyResponse,
@@ -30,8 +20,8 @@ import {
 	type StatusResponse,
 	type StopRequest,
 	type StopResponse,
-	type ViewAnswerRequest,
 } from "./protocol.ts";
+
 export interface IpcRequestHandler {
 	(request: SpawnRequest): Promise<SpawnResponse | ErrorResponse> | SpawnResponse | ErrorResponse;
 	(request: ListRequest): Promise<ListResponse | ErrorResponse> | ListResponse | ErrorResponse;
@@ -40,212 +30,135 @@ export interface IpcRequestHandler {
 	(request: RpcRequest): Promise<RpcBridgeResponse | ErrorResponse> | RpcBridgeResponse | ErrorResponse;
 	(request: RpcStreamRequest): Promise<RpcReadyResponse | ErrorResponse> | RpcReadyResponse | ErrorResponse;
 	(request: ServerRequest): Promise<ServerResponse> | ServerResponse;
-	openViewStream?: ServerSupervisor["openViewStream"];
 	openRpcStream(
 		instanceId: string,
 		onResponse: (response: RpcResponse) => void,
-		onSessionEvent: (event: JsonAgentSessionEvent) => void,
+		onSessionEvent: (event: AgentSessionEvent) => void,
 		onUiRequest: (request: RpcExtensionUIRequest) => void,
-	): { handleRequest(request: RpcCommand | RpcExtensionUIResponse): Promise<void>; close(): void } | undefined;
+	):
+		| {
+				handleRequest(request: RpcRequest["command"] | { type: "extension_ui_response" }): Promise<void>;
+				close(): void;
+		  }
+		| undefined;
 }
+
+/** Stamp the daemon's version/buildId onto a reply to the initial request/response
+ *  handshake — not the mid-stream RPC bridge messages,
+ *  which aren't part of that handshake. */
 function withDaemonMeta<T extends ServerResponse>(response: T): T {
-	return { ...response, version: VERSION, buildId: BUILD_ID, viewProtocol: VIEW_PROTOCOL_VERSION };
+	return { ...response, version: VERSION, buildId: BUILD_ID };
 }
-const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+
 export async function startIpcServer(handler: IpcRequestHandler): Promise<Server> {
 	const socketPath = getSocketPath();
 	await removeStaleSocketIfNeeded(socketPath);
+
 	const server = createServer((socket) => {
-		const decoder = new StringDecoder("utf8");
 		let buffer = "";
-		let mode: "initial" | "pending" | "stream" | "done" = "initial";
-		let detach: (() => void) | undefined;
-		let dispatch: (message: RpcCommand | RpcExtensionUIResponse | ViewAnswerRequest) => void = () => {};
-		const closeStream = () => {
-			const close = detach;
-			detach = undefined;
-			close?.();
-		};
-		const abort = (error: Error) => {
-			mode = "done";
-			buffer = "";
-			closeStream();
-			socket.destroy(error);
-		};
-		const safeWrite = (message: ProtocolMessage): boolean => {
-			if (socket.destroyed) return false;
-			try {
-				const bytes = encodeMessage(message);
-				if (
-					Buffer.byteLength(bytes) > MAX_FRAME_BYTES ||
-					socket.writableLength + Buffer.byteLength(bytes) > MAX_FRAME_BYTES
-				) {
-					abort(new Error("Session viewer exceeds 16 MiB buffer limit"));
-					return false;
-				}
-				socket.write(bytes);
-				return true;
-			} catch (error) {
-				abort(error instanceof Error ? error : new Error(String(error)));
-				return false;
+
+		socket.on("data", async (chunk: Buffer | string) => {
+			buffer += chunk.toString();
+			const newlineIndex = buffer.indexOf("\n");
+			if (newlineIndex === -1) {
+				return;
 			}
-		};
-		const fail = (error: unknown) => {
-			if (mode === "done") return;
-			const response: ErrorResponse = {
-				type: "error",
-				ok: false,
-				error: error instanceof Error ? error.message : String(error),
-			};
-			safeWrite(withDaemonMeta(response));
-			mode = "done";
-			closeStream();
-			socket.end();
-		};
-		const pump = () => {
-			try {
-				while (mode !== "pending" && mode !== "done") {
-					const nl = buffer.indexOf("\n");
-					if (nl === -1) break;
-					const line = buffer.slice(0, nl);
-					buffer = buffer.slice(nl + 1);
-					if (Buffer.byteLength(line) > MAX_FRAME_BYTES) throw new Error("Session viewer frame exceeds 16 MiB");
-					if (!line.trim()) continue;
-					if (mode === "initial") {
-						mode = "pending";
-						void initialize(parseRequestLine(line));
-					} else {
-						const message = JSON.parse(line);
-						if (!message || typeof message.type !== "string") throw new Error("Malformed stream command");
-						dispatch(message);
-					}
-				}
-				if (mode !== "done" && Buffer.byteLength(buffer) > MAX_FRAME_BYTES)
-					throw new Error("Session viewer frame exceeds 16 MiB");
-			} catch (error) {
-				fail(error);
+
+			const line = buffer.slice(0, newlineIndex).trim();
+			buffer = buffer.slice(newlineIndex + 1);
+			if (!line) {
+				return;
 			}
-		};
-		async function initialize(request: ServerRequest) {
+
 			try {
-				if (request.type === "view_stream") {
-					if (request.viewProtocol !== VIEW_PROTOCOL_VERSION) throw new Error("Unsupported session view protocol");
-					let opened = false;
-					let queuedBytes = 0;
-					const queued: ProtocolMessage[] = [];
-					const receive = (message: ProtocolMessage) => {
-						if (opened) {
-							safeWrite(message);
-							return;
+				const request = parseRequestLine(line);
+				if (request.type === "rpc_stream") {
+					const response = await handler(request);
+					if (!response.ok || response.type !== "rpc_ready" || !response.instance) {
+						socket.end(encodeMessage(withDaemonMeta(response)));
+						return;
+					}
+
+					socket.removeAllListeners("data");
+					// Writing to a viewer socket that has just closed can throw synchronously; these
+					// callbacks fire on the child's stdout stack, so a throw would propagate to
+					// uncaughtException and crash the whole daemon. Swallow write-after-close here.
+					const safeWrite = (message: Parameters<typeof encodeMessage>[0]): void => {
+						try {
+							socket.write(encodeMessage(message));
+						} catch {
+							// viewer socket is gone; the child keeps running for other subscribers
 						}
-						queuedBytes += Buffer.byteLength(encodeMessage(message));
-						if (queuedBytes > MAX_FRAME_BYTES) {
-							abort(new Error("Session view attach buffer exceeds 16 MiB"));
-							return;
-						}
-						queued.push(message);
 					};
-					const handle = handler.openViewStream?.(request.instanceId, receive);
-					if (!handle) throw new Error(`Instance is unavailable for attachment: ${request.instanceId}`);
-					if (socket.destroyed) {
-						handle.close();
-						return;
-					}
-					detach = () => handle.close();
-					if (!safeWrite(withDaemonMeta(handle.ready))) return;
-					opened = true;
-					for (const record of queued) if (!safeWrite(record)) return;
-					dispatch = (message) => {
-						if (message.type === "view_answer") {
-							if (typeof message.id !== "string" || message.response?.type !== "extension_ui_response")
-								throw new Error("Malformed dialog answer");
-							const ok = handle.handleUiResponse(message.response);
-							safeWrite({ type: "view_answer_result", id: message.id, ok });
-							return;
-						}
-						if (message.type === "extension_ui_response") {
-							handle.handleUiResponse(message);
-							return;
-						}
-						void handle.handleRpc(message).then(
-							(response) => safeWrite(response),
-							(error) =>
-								safeWrite({
-									type: "response",
-									id: message.id,
-									command: message.type,
-									success: false,
-									error: error instanceof Error ? error.message : String(error),
-								} as RpcResponse),
-						);
-					};
-					mode = "stream";
-					pump();
-					return;
-				}
-				const response = await handler(request);
-				if (socket.destroyed) return;
-				if (request.type !== "rpc_stream" || !response.ok || response.type !== "rpc_ready" || !response.instance) {
-					safeWrite(withDaemonMeta(response));
-					mode = "done";
-					socket.end();
-					return;
-				}
-				let opened = false;
-				let queuedBytes = 0;
-				const queued: ProtocolMessage[] = [];
-				const receive = (message: ProtocolMessage) => {
-					if (opened) {
-						safeWrite(message);
-						return;
-					}
-					queuedBytes += Buffer.byteLength(encodeMessage(message));
-					if (queuedBytes > MAX_FRAME_BYTES) {
-						abort(new Error("RPC attach buffer exceeds 16 MiB"));
-						return;
-					}
-					queued.push(message);
-				};
-				const handle = handler.openRpcStream(request.instanceId, receive, receive, receive);
-				if (!handle) throw new Error(`Unknown instance: ${request.instanceId}`);
-				if (socket.destroyed) {
-					handle.close();
-					return;
-				}
-				detach = () => handle.close();
-				if (!safeWrite(withDaemonMeta(response))) return;
-				opened = true;
-				for (const record of queued) if (!safeWrite(record)) return;
-				dispatch = (message) => {
-					if (message.type === "view_answer") throw new Error("view_answer requires view_stream");
-					void handle.handleRequest(message).catch((error) =>
-						safeWrite({
-							type: "error",
-							ok: false,
-							error: error instanceof Error ? error.message : String(error),
-						}),
+					const rpcStream = handler.openRpcStream(
+						request.instanceId,
+						(response) => safeWrite(response),
+						(event) => safeWrite(event),
+						(request) => safeWrite(request),
 					);
+					if (!rpcStream) {
+						socket.end(
+							encodeMessage({ type: "error", ok: false, error: `Unknown instance: ${request.instanceId}` }),
+						);
+						return;
+					}
+
+					socket.write(encodeMessage(withDaemonMeta(response)));
+					let rpcRequestQueue = Promise.resolve();
+					socket.on("data", (rpcChunk: Buffer | string) => {
+						buffer += rpcChunk.toString();
+						for (;;) {
+							const rpcNewlineIndex = buffer.indexOf("\n");
+							if (rpcNewlineIndex === -1) {
+								break;
+							}
+							const rpcLine = buffer.slice(0, rpcNewlineIndex).trim();
+							buffer = buffer.slice(rpcNewlineIndex + 1);
+							if (!rpcLine) {
+								continue;
+							}
+							rpcRequestQueue = rpcRequestQueue
+								.then(async () => {
+									try {
+										await rpcStream.handleRequest(JSON.parse(rpcLine));
+									} catch (rpcError: unknown) {
+										socket.write(
+											encodeMessage({
+												type: "error",
+												ok: false,
+												error: rpcError instanceof Error ? rpcError.message : String(rpcError),
+											}),
+										);
+									}
+								})
+								.catch((rpcError: Error) => {
+									socket.write(
+										encodeMessage({
+											type: "error",
+											ok: false,
+											error: rpcError.message,
+										}),
+									);
+								});
+						}
+					});
+					socket.once("close", () => rpcStream.close());
+					return;
+				}
+
+				const response = await handler(request);
+				socket.end(encodeMessage(withDaemonMeta(response)));
+			} catch (error: unknown) {
+				const response: ErrorResponse = {
+					type: "error",
+					ok: false,
+					error: error instanceof Error ? error.message : String(error),
 				};
-				mode = "stream";
-				pump();
-			} catch (error) {
-				fail(error);
+				socket.end(encodeMessage(withDaemonMeta(response)));
 			}
-		}
-		socket.on("data", (chunk) => {
-			if (mode === "done") return;
-			buffer += decoder.write(chunk);
-			pump();
-		});
-		socket.once("error", () => {
-			mode = "done";
-			closeStream();
-		});
-		socket.once("close", () => {
-			mode = "done";
-			closeStream();
 		});
 	});
+
 	await new Promise<void>((resolve, reject) => {
 		server.once("error", reject);
 		server.listen(socketPath, () => {
@@ -253,31 +166,51 @@ export async function startIpcServer(handler: IpcRequestHandler): Promise<Server
 			resolve();
 		});
 	});
+
 	return server;
 }
+
 async function removeStaleSocketIfNeeded(socketPath: string): Promise<void> {
-	if (!existsSync(socketPath)) return;
-	if (await isSocketLive(socketPath)) throw new Error(`server is already running: ${socketPath}`);
+	if (!existsSync(socketPath)) {
+		return;
+	}
+
+	const isLive = await isSocketLive(socketPath);
+	if (isLive) {
+		throw new Error(`server is already running: ${socketPath}`);
+	}
+
 	unlinkSync(socketPath);
 }
+
 async function isSocketLive(socketPath: string): Promise<boolean> {
-	return new Promise((resolve, reject) => {
+	return new Promise<boolean>((resolve, reject) => {
 		const socket = createConnection(socketPath);
 		let settled = false;
+
 		const finish = (result: boolean) => {
-			if (settled) return;
+			if (settled) {
+				return;
+			}
 			settled = true;
 			socket.removeAllListeners();
 			socket.destroy();
 			resolve(result);
 		};
+
 		socket.on("connect", () => finish(true));
 		socket.on("error", (error: NodeJS.ErrnoException) => {
-			if (["ECONNREFUSED", "ENOENT", "EPIPE", "ECONNRESET"].includes(error.code ?? "")) {
+			if (error.code === "ECONNREFUSED" || error.code === "ENOENT") {
 				finish(false);
 				return;
 			}
-			if (settled) return;
+			if (error.code === "EPIPE" || error.code === "ECONNRESET") {
+				finish(false);
+				return;
+			}
+			if (settled) {
+				return;
+			}
 			settled = true;
 			socket.removeAllListeners();
 			socket.destroy();

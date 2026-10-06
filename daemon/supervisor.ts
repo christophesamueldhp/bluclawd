@@ -1,12 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import type {
-	JsonAgentSessionEvent,
+	AgentSessionEvent,
+	AgentSessionEventListener,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcResponse,
-	RpcSessionState,
 } from "@earendil-works/pi-coding-agent";
 import {
 	type ActivityState,
@@ -16,8 +15,7 @@ import {
 	reduceActivity,
 } from "./activity.ts";
 import { radiusPresence } from "./radius.ts";
-import { createRpcProcessInstance, type RpcLaunch, type RpcProcessInstance } from "./rpc-process.ts";
-import { canonicalSessionKey, SessionOperations } from "./session-operations.ts";
+import { createRpcProcessInstance, type RpcProcessInstance } from "./rpc-process.ts";
 import {
 	needsFromRequest,
 	readSessionTail,
@@ -27,17 +25,6 @@ import {
 } from "./session-state.ts";
 import { getInstance, loadInstances, removeInstance, saveInstances, upsertInstance } from "./storage.ts";
 import type { InstanceRecord, InstanceStatus } from "./types.ts";
-import { readViewHistory, reconcileEntryIds } from "./view-history.ts";
-import { createViewProjection, reduceViewProjection } from "./view-projection.ts";
-import {
-	type HistoryPage,
-	VIEW_PROTOCOL_VERSION,
-	type ViewEvent,
-	type ViewInput,
-	type ViewProjection,
-	type ViewReady,
-	type ViewTerminal,
-} from "./view-types.ts";
 
 interface LiveInstanceResources {
 	rpcProcess?: RpcProcessInstance;
@@ -48,15 +35,10 @@ interface LiveInstanceResources {
 interface LiveInstance {
 	record: InstanceRecord;
 	resources: LiveInstanceResources;
-	subscribers: Set<(event: JsonAgentSessionEvent) => void>;
-	generation: string;
-	sequence: number;
-	projection: ViewProjection;
-	viewState?: RpcSessionState;
+	subscribers: Set<AgentSessionEventListener>;
 	activityState: ActivityState;
 	tracker: SessionStateTracker;
 	pendingUiRequest?: RpcExtensionUIRequest;
-	pendingUiRequests?: Map<string, RpcExtensionUIRequest>;
 	pendingSince?: string;
 	onUiRequest?: (request: RpcExtensionUIRequest) => void;
 	unsubscribeEvents?: () => void;
@@ -81,14 +63,6 @@ const SESSION_METADATA_COMMANDS: ReadonlySet<RpcCommand["type"]> = new Set([
 	"clone",
 	"set_session_name",
 	"prompt",
-	"set_model",
-	"cycle_model",
-	"set_thinking_level",
-	"cycle_thinking_level",
-	"set_steering_mode",
-	"set_follow_up_mode",
-	"set_auto_compaction",
-	"set_auto_retry",
 ]);
 
 function shouldRefreshSessionMetadata(command: RpcCommand): boolean {
@@ -116,70 +90,10 @@ interface ExternalInstance {
 const EXTERNAL_TTL_MS = 15_000;
 
 export class ServerSupervisor {
-	private readonly launch?: RpcLaunch;
-	constructor(launch?: RpcLaunch) {
-		this.launch = launch;
-	}
 	private readonly liveInstances = new Map<string, LiveInstance>();
 	private readonly externalInstances = new Map<string, ExternalInstance>();
-	private readonly operations = new SessionOperations();
-	private readonly retainedViews = new Map<string, LiveInstance>();
-	private operationKey(record: { id: string; sessionFile?: string }): string {
-		return record.sessionFile ? canonicalSessionKey(record.sessionFile) : record.id;
-	}
-	private readonly viewSubscribers = new Map<string, Set<(record: ViewEvent | ViewTerminal) => void>>();
-
-	private fanOutView(live: LiveInstance, record: ViewEvent | ViewTerminal): void {
-		for (const subscriber of this.viewSubscribers.get(live.record.id) ?? []) {
-			try {
-				subscriber(record);
-			} catch (error) {
-				console.error(`Session viewer failed: ${String(error)}`);
-			}
-		}
-	}
-	private publishView(live: LiveInstance, event: ViewInput): void {
-		if (this.liveInstances.get(live.record.id) !== live) return;
-		const sequence = ++live.sequence;
-		live.projection = reduceViewProjection(live.projection, event, `${live.generation}:${sequence}`);
-		this.fanOutView(live, { type: "view_event", generation: live.generation, sequence, event });
-	}
-	private terminateView(live: LiveInstance, reason: ViewTerminal["reason"], error?: string): void {
-		this.fanOutView(live, {
-			type: "view_terminal",
-			instanceId: live.record.id,
-			generation: live.generation,
-			sequence: ++live.sequence,
-			reason,
-			error,
-		});
-	}
-	private refreshViewHistory(live: LiveInstance): void {
-		const file = live.record.sessionFile;
-		if (!file || !existsSync(file)) return;
-		try {
-			const history = readViewHistory(file);
-			const messages = reconcileEntryIds(live.projection.messages, history.messages);
-			const before = history.before ? (messages[0]?.entryId ?? history.before) : undefined;
-			if (
-				before !== live.projection.historyBefore ||
-				messages.some((message, i) => message.entryId !== live.projection.messages[i]?.entryId)
-			) {
-				this.publishView(live, {
-					type: "view_history_synced",
-					before,
-					entries: messages.flatMap((message) =>
-						message.entryId ? [{ key: message.key, entryId: message.entryId }] : [],
-					),
-				});
-			}
-		} catch (error) {
-			this.publishView(live, { type: "view_error", message: `Cannot read saved history: ${String(error)}` });
-		}
-	}
 
 	private setStatus(live: LiveInstance, status: InstanceStatus): void {
-		if (this.liveInstances.get(live.record.id) !== live) return;
 		live.record = {
 			...live.record,
 			status,
@@ -189,7 +103,6 @@ export class ServerSupervisor {
 	}
 
 	private updateRecord(live: LiveInstance, updates: Partial<InstanceRecord>): void {
-		if (this.liveInstances.get(live.record.id) !== live) return;
 		live.record = {
 			...live.record,
 			...updates,
@@ -213,7 +126,6 @@ export class ServerSupervisor {
 		// The child that owned any outstanding prompt is gone/being rebound — drop it so a viewer
 		// attaching later isn't replayed a dead prompt (openRpcStream replays pendingUiRequest).
 		live.pendingUiRequest = undefined;
-		live.pendingUiRequests?.clear();
 		live.resources.rpcProcess?.setUiRequestHandler(undefined);
 	}
 
@@ -221,8 +133,6 @@ export class ServerSupervisor {
 		this.clearBindings(live);
 		live.resources.rpcProcess = rpcProcess;
 		live.unsubscribeEvents = rpcProcess.onEvent((event) => {
-			this.publishView(live, event);
-			if (event.type === "message_end" || event.type === "agent_settled") this.refreshViewHistory(live);
 			live.activityState = reduceActivity(live.activityState, { kind: "agent_event", type: event.type });
 			live.tracker.apply(event as Parameters<SessionStateTracker["apply"]>[0]);
 			// Persisted at run boundaries only: every streamed delta would rewrite instances.json.
@@ -231,7 +141,6 @@ export class ServerSupervisor {
 			// agent emits neither). Clear it so it isn't replayed to a late-attaching viewer.
 			if (live.pendingUiRequest && (event.type === "agent_settled" || event.type === "turn_start")) {
 				live.pendingUiRequest = undefined;
-				live.pendingUiRequests?.clear();
 			}
 			// A throwing subscriber (e.g. socket.write to a just-closed viewer) runs on the child's
 			// stdout stack — an unguarded throw here would crash the whole daemon. Isolate each one.
@@ -247,19 +156,13 @@ export class ServerSupervisor {
 			void this.handleUnexpectedRpcExit(live, error);
 		});
 		rpcProcess.setUiRequestHandler((request) => {
-			if (!isBlockingUiMethod(request.method)) this.publishView(live, request);
 			if (isBlockingUiMethod(request.method)) {
-				live.pendingUiRequests ??= new Map();
-				live.pendingUiRequests.set(request.id, request);
-				if (!live.pendingUiRequest) {
-					live.pendingUiRequest = request;
-					this.publishView(live, request);
-				}
 				live.activityState = reduceActivity(live.activityState, {
 					kind: "ui_request",
 					method: request.method,
 					id: request.id,
 				});
+				live.pendingUiRequest = request;
 				live.pendingSince = new Date().toISOString();
 			}
 			try {
@@ -277,7 +180,6 @@ export class ServerSupervisor {
 		if (live.record.status === "stopping" || live.record.status === "stopped") {
 			return;
 		}
-		this.terminateView(live, "failed", error?.message);
 		// The row stays (agent view lists it as Failed until deleted); its .jsonl resumes it.
 		live.record = {
 			...live.record,
@@ -296,7 +198,7 @@ export class ServerSupervisor {
 				console.error(`Failed to disconnect Radius Pi ${live.record.id}: ${String(error)}`);
 			}
 		}
-		if (this.liveInstances.get(live.record.id) === live) this.liveInstances.delete(live.record.id);
+		this.liveInstances.delete(live.record.id);
 	}
 
 	private persistTracker(live: LiveInstance): void {
@@ -310,13 +212,6 @@ export class ServerSupervisor {
 		});
 	}
 
-	private confirmViewState(live: LiveInstance, state: RpcSessionState): void {
-		if (this.liveInstances.get(live.record.id) !== live) return;
-		const previous = live.viewState;
-		live.viewState = state;
-		if (previous && JSON.stringify(previous) !== JSON.stringify(state))
-			this.publishView(live, { type: "view_state", state });
-	}
 	private getRpcProcess(live: LiveInstance): RpcProcessInstance | undefined {
 		return live.resources.rpcProcess;
 	}
@@ -328,12 +223,10 @@ export class ServerSupervisor {
 			return;
 		}
 		const response = await rpcProcess.send({ type: "get_state" });
-		if (this.liveInstances.get(live.record.id) !== live) return;
 		if (!isGetStateSuccess(response)) {
 			this.updateRecord(live, {});
 			return;
 		}
-		this.confirmViewState(live, response.data);
 		this.updateRecord(live, {
 			sessionId: response.data.sessionId,
 			sessionFile: response.data.sessionFile,
@@ -344,11 +237,7 @@ export class ServerSupervisor {
 		const rpcProcess = live.resources.rpcProcess;
 		this.clearBindings(live);
 		if (live.resources.radiusPiId) {
-			try {
-				await radiusPresence.disconnectPi(live.record);
-			} catch (error) {
-				console.error(`Presence cleanup failed: ${String(error)}`);
-			}
+			await radiusPresence.disconnectPi(live.record);
 			live.resources.radiusPiId = undefined;
 			live.record = {
 				...live.record,
@@ -358,8 +247,8 @@ export class ServerSupervisor {
 		}
 		live.resources.sessionId = undefined;
 		if (rpcProcess) {
-			await rpcProcess.dispose();
 			live.resources.rpcProcess = undefined;
+			await rpcProcess.dispose();
 		}
 	}
 
@@ -381,7 +270,6 @@ export class ServerSupervisor {
 
 	updateInstance(instance: InstanceRecord): void {
 		const live = this.liveInstances.get(instance.id);
-		if (!live && !getInstance(instance.id)) return;
 		if (live) {
 			live.record = instance;
 			live.resources.radiusPiId = instance.radiusPiId;
@@ -390,61 +278,9 @@ export class ServerSupervisor {
 		upsertInstance(instance);
 	}
 
-	openViewStream(instanceId: string, onRecord: (record: ViewEvent | ViewTerminal) => void) {
-		const live = this.liveInstances.get(instanceId);
-		if (
-			!live?.viewState ||
-			live.record.status !== "online" ||
-			this.operations.isBlocked(this.operationKey(live.record))
-		)
-			return undefined;
-		this.retainedViews.set(instanceId, live);
-		this.refreshViewHistory(live);
-		const subscribers = this.viewSubscribers.get(instanceId) ?? new Set<(record: ViewEvent | ViewTerminal) => void>();
-		this.viewSubscribers.set(instanceId, subscribers);
-		subscribers.add(onRecord);
-		const ready: ViewReady = {
-			type: "view_ready",
-			ok: true,
-			viewProtocol: VIEW_PROTOCOL_VERSION,
-			instance: { ...live.record, activity: live.projection.activity, needs: this.getPendingNeeds(instanceId) },
-			generation: live.generation,
-			sequence: live.sequence,
-			projection: structuredClone(live.projection),
-			state: {
-				...live.viewState,
-				isStreaming: live.projection.running,
-				isCompacting: live.projection.compacting,
-				pendingMessageCount: live.projection.queues.steering.length + live.projection.queues.followUp.length,
-			},
-		};
-		return {
-			ready,
-			close: () => {
-				subscribers.delete(onRecord);
-				if (!subscribers.size && this.viewSubscribers.get(instanceId) === subscribers) {
-					this.viewSubscribers.delete(instanceId);
-					this.retainedViews.delete(instanceId);
-				}
-			},
-			handleRpc: async (command: RpcCommand): Promise<RpcResponse> => {
-				if (["new_session", "switch_session", "fork", "clone"].includes(command.type))
-					throw new Error("Use session-view navigation instead of replacing a live conversation");
-				const response = await this.handleRpc(instanceId, command);
-				if (!response) throw new Error("Session process is not running");
-				return response;
-			},
-			handleUiResponse: (response: RpcExtensionUIResponse) => this.answer(instanceId, response),
-		};
-	}
-	getViewHistory(instanceId: string, before?: string, limit?: number): HistoryPage | undefined {
-		const file = this.getInstance(instanceId)?.sessionFile;
-		return file ? readViewHistory(file, before, limit) : undefined;
-	}
-
 	openRpcStream(
 		instanceId: string,
-		onEvent: (event: JsonAgentSessionEvent) => void,
+		onEvent: (event: AgentSessionEvent) => void,
 		onUiRequest: (request: RpcExtensionUIRequest) => void,
 	):
 		| {
@@ -464,12 +300,19 @@ export class ServerSupervisor {
 		if (live.pendingUiRequest) onUiRequest(live.pendingUiRequest);
 		return {
 			handleRpc: async (command) => {
-				const response = await this.handleRpc(instanceId, command);
-				if (!response) throw new Error("Session process is not running");
+				if (live.record.status !== "online") throw new Error("Session is being stopped");
+				const response = await rpcProcess.send(command);
+				if (shouldRefreshSessionMetadata(command)) {
+					await this.syncInstanceRecord(live);
+				}
 				return response;
 			},
 			handleUiResponse: (response) => {
-				this.answer(instanceId, response);
+				live.activityState = reduceActivity(live.activityState, { kind: "ui_response", id: response.id });
+				if (live.pendingUiRequest?.id === response.id) {
+					live.pendingUiRequest = undefined;
+				}
+				rpcProcess.handleUiResponse(response);
 			},
 			close: () => {
 				if (live.onUiRequest === onUiRequest) {
@@ -587,35 +430,14 @@ export class ServerSupervisor {
 		provider?: string;
 		model?: string;
 	}): Promise<InstanceRecord> {
-		const file = options.sessionFile ? canonicalSessionKey(options.sessionFile) : undefined;
-		return this.operations.run(file ?? randomUUID(), "start", () =>
-			this.startInstance({ ...options, sessionFile: file }),
-		);
-	}
-	private async startInstance(options: {
-		cwd: string;
-		label?: string;
-		sessionFile?: string;
-		provider?: string;
-		model?: string;
-	}): Promise<InstanceRecord> {
 		if (options.sessionFile) {
-			if (
-				this.listExternalInstances().some(
-					({ record }) => record.sessionFile && canonicalSessionKey(record.sessionFile) === options.sessionFile,
-				)
-			)
-				throw new Error("Session is still owned by another terminal");
 			for (const live of this.liveInstances.values()) {
-				if (live.record.sessionFile && canonicalSessionKey(live.record.sessionFile) === options.sessionFile)
-					return cloneInstance(live.record);
+				if (live.record.sessionFile === options.sessionFile) return cloneInstance(live.record);
 			}
 		}
 		const now = new Date().toISOString();
 		const previous = options.sessionFile
-			? loadInstances().find(
-					(instance) => instance.sessionFile && canonicalSessionKey(instance.sessionFile) === options.sessionFile,
-				)
+			? loadInstances().find((instance) => instance.sessionFile === options.sessionFile)
 			: undefined;
 		// A session with history but no row yet: pick up where its transcript left off.
 		const tail = !previous && options.sessionFile ? readSessionTail(options.sessionFile) : undefined;
@@ -636,9 +458,6 @@ export class ServerSupervisor {
 			},
 			resources: {},
 			subscribers: new Set(),
-			generation: randomUUID(),
-			sequence: 0,
-			projection: createViewProjection(),
 			activityState: INITIAL_ACTIVITY,
 			tracker: new SessionStateTracker({
 				detail: previous?.detail ?? tail?.detail,
@@ -650,17 +469,13 @@ export class ServerSupervisor {
 		upsertInstance(live.record);
 
 		try {
-			if (options.sessionFile) live.projection = createViewProjection(readViewHistory(options.sessionFile));
-			const rpcProcess = createRpcProcessInstance(
-				{
-					cwd: live.record.cwd,
-					sessionFile: options.sessionFile,
-					provider: options.provider,
-					model: options.model,
-					appendSystemPrompt: SENTINEL_INSTRUCTIONS,
-				},
-				this.launch,
-			);
+			const rpcProcess = createRpcProcessInstance({
+				cwd: live.record.cwd,
+				sessionFile: options.sessionFile,
+				provider: options.provider,
+				model: options.model,
+				appendSystemPrompt: SENTINEL_INSTRUCTIONS,
+			});
 			this.bindRpcProcess(live, rpcProcess);
 			await this.syncInstanceRecord(live);
 			const registeredRecord = await radiusPresence.registerPi(live.record);
@@ -678,16 +493,11 @@ export class ServerSupervisor {
 	 * for that file is reused, so the session keeps its id, name and pin.
 	 */
 	saveInstance(options: { cwd: string; label?: string; sessionFile: string }): InstanceRecord {
-		options = { ...options, sessionFile: canonicalSessionKey(options.sessionFile) };
-		if (this.operations.isBlocked(options.sessionFile)) throw new Error("Session is being deleted or stopped");
 		for (const live of this.liveInstances.values()) {
-			if (live.record.sessionFile && canonicalSessionKey(live.record.sessionFile) === options.sessionFile)
-				return cloneInstance(live.record);
+			if (live.record.sessionFile === options.sessionFile) return cloneInstance(live.record);
 		}
 		const now = new Date().toISOString();
-		const previous = loadInstances().find(
-			(instance) => instance.sessionFile && canonicalSessionKey(instance.sessionFile) === options.sessionFile,
-		);
+		const previous = loadInstances().find((instance) => instance.sessionFile === options.sessionFile);
 		const tail = readSessionTail(options.sessionFile);
 		const record: InstanceRecord = {
 			...previous,
@@ -709,26 +519,22 @@ export class ServerSupervisor {
 	}
 
 	/** Stop the process; the row stays (Stopped, or Done/Failed if the run had already ended). */
-	async stopInstance(instanceId: string): Promise<InstanceRecord | undefined> {
-		const known = this.getInstance(instanceId);
-		if (!known) return undefined;
-		return this.operations.run(this.operationKey(known), "stop", () => this.stopOwnedInstance(instanceId));
-	}
-	private async stopOwnedInstance(instanceId: string): Promise<InstanceRecord | undefined> {
+	async stopInstance(instanceId: string, onlyIfIdle = false): Promise<InstanceRecord | undefined> {
 		const live = this.liveInstances.get(instanceId);
 		if (!live) {
 			return this.getInstance(instanceId);
+		}
+		if (
+			onlyIfIdle &&
+			(live.record.status !== "online" || live.activityState.activity !== "idle" || live.pendingUiRequest)
+		) {
+			throw new Error("Session is still working or waiting for input; open it when idle");
 		}
 
 		this.setStatus(live, "stopping");
 		try {
 			await this.cleanupAcquiredResources(live);
-		} catch (error) {
-			this.setStatus(live, "error");
-			throw error;
-		}
-		this.terminateView(live, "stopped");
-		{
+		} finally {
 			const working = live.activityState.activity !== "idle";
 			live.record = {
 				...live.record,
@@ -736,10 +542,8 @@ export class ServerSupervisor {
 				outcome: working ? "stopped" : (live.tracker.outcome ?? "stopped"),
 				lastSeenAt: new Date().toISOString(),
 			};
-			if (this.liveInstances.get(instanceId) === live) {
-				upsertInstance(live.record);
-				this.liveInstances.delete(instanceId);
-			}
+			this.liveInstances.delete(instanceId);
+			upsertInstance(live.record);
 		}
 		return cloneInstance(live.record);
 	}
@@ -748,14 +552,9 @@ export class ServerSupervisor {
 	async deleteInstance(instanceId: string): Promise<boolean> {
 		const known = this.getInstance(instanceId);
 		if (!known) return false;
-		return this.operations.run(this.operationKey(known), "delete", async () => {
-			const view = this.liveInstances.get(instanceId) ?? this.retainedViews.get(instanceId);
-			await this.stopOwnedInstance(instanceId);
-			removeInstance(instanceId);
-			if (view) this.terminateView(view, "deleted");
-			this.retainedViews.delete(instanceId);
-			return true;
-		});
+		await this.stopInstance(instanceId);
+		removeInstance(instanceId);
+		return true;
 	}
 
 	async renameInstance(instanceId: string, name: string): Promise<InstanceRecord | undefined> {
@@ -791,29 +590,22 @@ export class ServerSupervisor {
 	answer(instanceId: string, response: RpcExtensionUIResponse): boolean {
 		const live = this.liveInstances.get(instanceId);
 		const rpcProcess = live ? this.getRpcProcess(live) : undefined;
-		if (!live || !rpcProcess || !live.pendingUiRequests?.has(response.id)) return false;
+		if (!live || !rpcProcess || live.pendingUiRequest?.id !== response.id) return false;
 		live.activityState = reduceActivity(live.activityState, { kind: "ui_response", id: response.id });
-		live.pendingUiRequests.delete(response.id);
-		live.pendingUiRequest = live.pendingUiRequests.values().next().value;
-		this.publishView(live, { type: "view_ui_resolved", requestId: response.id });
-		if (live.pendingUiRequest) this.publishView(live, live.pendingUiRequest);
+		live.pendingUiRequest = undefined;
 		rpcProcess.handleUiResponse(response);
 		return true;
 	}
 
 	async handleRpc(instanceId: string, command: RpcCommand): Promise<RpcResponse | undefined> {
-		const known = this.getInstance(instanceId);
-		if (known && this.operations.isBlocked(this.operationKey(known)))
-			throw new Error("Session is being deleted or stopped");
 		const live = this.liveInstances.get(instanceId);
 		const rpcProcess = live ? this.getRpcProcess(live) : undefined;
-		if (!live || !rpcProcess) {
+		if (!live || !rpcProcess || live.record.status !== "online") {
 			return undefined;
 		}
 
 		const response = await rpcProcess.send(command);
-		if (isGetStateSuccess(response)) this.confirmViewState(live, response.data);
-		if (response.success && shouldRefreshSessionMetadata(command)) {
+		if (shouldRefreshSessionMetadata(command)) {
 			await this.syncInstanceRecord(live);
 		}
 		return response;

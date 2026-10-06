@@ -105,6 +105,7 @@ function fakeClient(calls: Calls, list: () => InstanceSummary[] = () => sessions
 		ensureDaemon: async () => true,
 		getDaemonInfo: async () => ({ running: false }),
 		stop: record("stop"),
+		releaseIdle: record("releaseIdle"),
 		delete: record("delete"),
 		rename: record("rename"),
 		setMeta: record("setMeta"),
@@ -124,19 +125,18 @@ function makeView(
 		rows?: number;
 		list?: () => InstanceSummary[];
 		releases?: boolean;
-		currentId?: string;
-		onDeleted?: (id: string) => void;
 		readClipboard?: () => Promise<{ image?: { type: "image"; data: string; mimeType: string }; text?: string }>;
 	} = {},
 ) {
 	const calls: Calls = [];
+	let instances = sessions;
 	const opened: string[] = [];
 	const resumed: boolean[] = [];
 	let closed = 0;
 	const ui = { terminal: { rows: opts.rows ?? 40 }, requestRender: () => {} } as unknown as TUI;
 	const view = new AgentView({
 		ui,
-		client: fakeClient(calls, opts.list, opts.releases),
+		client: fakeClient(calls, opts.list ?? (() => instances), opts.releases),
 		appName: "bluclawd",
 		version: "1.0.0",
 		model: { provider: "opencode-go", id: "kimi" },
@@ -144,45 +144,27 @@ function makeView(
 		home: HOME,
 		self: opts.self ? () => opts.self : undefined,
 		onClose: () => closed++,
-		currentId: () => opts.currentId,
-		onDeleted: opts.onDeleted,
-		onOpen: async (target) => {
-			opened.push("sessionFile" in target ? target.sessionFile : `/${target.instanceId}.jsonl`);
-			resumed.push(false);
-			return true;
+		onOpen: (file, _cwd, resume) => {
+			opened.push(file);
+			resumed.push(resume);
 		},
 		fileExists: () => true,
 		readClipboard: opts.readClipboard,
-		onCreateAndOpen: async (...args) => {
+		onCreateAndOpen: (...args) => {
 			calls.push(["createAndOpen", ...args]);
-			return true;
 		},
 	});
+	const setInstances = view.setInstancesForTest.bind(view);
+	view.setInstancesForTest = (rows) => {
+		instances = rows;
+		setInstances(rows);
+	};
 	view.setInstancesForTest(sessions);
 	const flush = () => new Promise((r) => setTimeout(r, 0));
 	return { view, calls, opened, resumed, closed: () => closed, text: () => view.render(100).map(stripAnsi), flush };
 }
 
 beforeAll(() => setSharedTheme(plainTheme));
-it("compatible daemon metadata does not restart the roster service", async () => {
-	const calls: Calls = [];
-	const client = fakeClient(calls, () => []);
-	client.getDaemonInfo = async () => ({ running: true, viewProtocol: 1, buildId: "different-compatible-build" });
-	const restart = vi.fn(async () => ({ restarted: true }));
-	client.restartDaemon = restart;
-	const view = new AgentView({
-		ui: { terminal: { rows: 40 }, requestRender: () => {} } as TUI,
-		client,
-		appName: "test",
-		cwd: HERE,
-		home: HOME,
-		onClose: () => {},
-		onOpen: async () => true,
-	});
-	await view.onShow();
-	expect(restart).not.toHaveBeenCalled();
-	view.dispose();
-});
 afterEach(() => vi.unstubAllEnvs());
 
 describe("rows", () => {
@@ -348,25 +330,44 @@ describe("AgentView keys", () => {
 		expect(opened).toEqual(["/c.jsonl"]);
 	});
 
-	it("live open selects without stop", async () => {
-		const { view, calls, opened, resumed, flush } = makeView();
+	it("opening a working session leaves its turn running and the roster usable", async () => {
+		const { view, calls, opened, resumed, text, flush } = makeView();
 		view.setInstancesForTest([
 			{ id: "w", status: "online", activity: "working", cwd: HERE, sessionFile: "/w.jsonl", createdAt: ago(1) },
 		]);
 		view.handleInput(ENTER);
 		for (let i = 0; i < 5; i++) await flush();
 		expect(calls).toEqual([]);
-		expect(opened).toEqual(["/w.jsonl"]);
-		expect(resumed).toEqual([false]);
+		expect(opened).toEqual([]);
+		expect(resumed).toEqual([]);
+		expect(text().join("\n")).toContain("still working");
+		view.handleInput(ESC);
+	});
+	it("a newly busy writer cannot be stopped from an outdated idle row", async () => {
+		const writer: InstanceSummary = {
+			id: "w",
+			status: "online",
+			activity: "working",
+			cwd: HERE,
+			sessionFile: "/w.jsonl",
+		};
+		const { view, calls, opened, flush } = makeView({ list: () => [writer] });
+		view.setInstancesForTest([{ ...writer, activity: "idle" }]);
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls).toEqual([]);
+		expect(opened).toEqual([]);
+		view.handleInput(ESC);
 	});
 
-	it("failed open retains usable roster", async () => {
+	it("does not open a live session if stopping its writer fails, and keeps the view usable", async () => {
 		const calls: Calls = [];
-		const client = fakeClient(calls);
-		client.stop = async () => {
+		const row: InstanceSummary = { id: "w", status: "online", activity: "idle", cwd: HERE, sessionFile: "/w.jsonl" };
+		const client = fakeClient(calls, () => [row]);
+		client.releaseIdle = async () => {
 			throw new Error("stop timed out");
 		};
-		const opened = false;
+		let opened = false;
 		let closed = false;
 		const view = new AgentView({
 			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
@@ -377,18 +378,16 @@ describe("AgentView keys", () => {
 			onClose: () => {
 				closed = true;
 			},
-			onOpen: async () => {
-				throw new Error("attach timed out");
+			onOpen: () => {
+				opened = true;
 			},
 			fileExists: () => true,
 		});
-		view.setInstancesForTest([
-			{ id: "w", status: "online", activity: "working", cwd: HERE, sessionFile: "/w.jsonl" },
-		]);
+		view.setInstancesForTest([row]);
 		view.handleInput(ENTER);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(opened).toBe(false);
-		expect(view.render(100).map(stripAnsi).join("\n")).toContain("attach timed out");
+		expect(view.render(100).map(stripAnsi).join("\n")).toContain("stop timed out");
 		view.handleInput(ESC);
 		expect(closed).toBe(true);
 	});
@@ -408,7 +407,7 @@ describe("AgentView keys", () => {
 			cwd: HERE,
 			home: HOME,
 			onClose: () => {},
-			onOpen: async () => true,
+			onOpen: () => {},
 			self: () => {
 				if (invalidated) throw new Error("stale session context");
 				return undefined;
@@ -422,10 +421,11 @@ describe("AgentView keys", () => {
 		await expect(showing).resolves.toBeUndefined();
 	});
 
-	it("cancel pending selection", async () => {
+	it("Esc cancels an in-flight open while the background writer is stopping", async () => {
 		let finish!: () => void;
-		const client = fakeClient([]);
-		client.stop = () =>
+		const row: InstanceSummary = { id: "w", status: "online", activity: "idle", cwd: HERE, sessionFile: "/w.jsonl" };
+		const client = fakeClient([], () => [row]);
+		client.releaseIdle = () =>
 			new Promise<void>((resolve) => {
 				finish = resolve;
 			});
@@ -437,19 +437,14 @@ describe("AgentView keys", () => {
 			cwd: HERE,
 			home: HOME,
 			onClose: () => {},
-			onOpen: (_target, signal) =>
-				new Promise((resolve) => {
-					finish = () => {
-						if (!signal?.aborted) opened = true;
-						resolve(!signal?.aborted);
-					};
-				}),
+			onOpen: () => {
+				opened = true;
+			},
 			fileExists: () => true,
 		});
-		view.setInstancesForTest([
-			{ id: "w", status: "online", activity: "working", cwd: HERE, sessionFile: "/w.jsonl" },
-		]);
+		view.setInstancesForTest([row]);
 		view.handleInput(ENTER);
+		await vi.waitFor(() => expect(finish).toBeDefined());
 		view.handleInput(ESC);
 		finish();
 		await new Promise((resolve) => setTimeout(resolve, 0));
@@ -464,14 +459,14 @@ describe("AgentView keys", () => {
 		expect(text().join("\n")).toContain("/resume");
 	});
 
-	it("opening a finished live session preserves its process", async () => {
+	it("opening a finished live session releases its idle writer without a prompt", async () => {
 		const { view, calls, resumed, flush } = makeView();
 		view.setInstancesForTest([
 			{ id: "d", status: "online", activity: "idle", cwd: HERE, sessionFile: "/d.jsonl", outcome: "done", turns: 1 },
 		]);
 		view.handleInput(ENTER);
 		for (let i = 0; i < 5; i++) await flush();
-		expect(calls).toEqual([]);
+		expect(calls).toEqual([["releaseIdle", "d"]]);
 		expect(resumed).toEqual([false]);
 	});
 
@@ -492,35 +487,39 @@ describe("AgentView keys", () => {
 			external: true,
 		});
 
-		it("unmanaged elsewhere remains protected", async () => {
-			const held = true;
+		it("enter asks that terminal to let go, then opens it here", async () => {
+			let held = true;
 			const { view, calls, opened, resumed, flush } = makeView({
 				list: () => (held ? [stored, holder("idle")] : [stored]),
 			});
 			view.setInstancesForTest([stored, holder("idle")]);
 			view.handleInput(ENTER);
 			await flush();
+			expect(calls).toEqual([["release", "/x.jsonl"]]);
+			expect(opened).toEqual([]);
+			held = false;
+			await vi.waitFor(() => expect(opened).toEqual(["/x.jsonl"]));
+			expect(resumed).toEqual([false]);
+		});
+
+		it("does not request release while the other terminal is still working", async () => {
+			const { view, calls, opened, resumed, flush } = makeView({ list: () => [stored, holder("working")] });
+			view.setInstancesForTest([stored, holder("working")]);
+			view.handleInput(ENTER);
+			await flush();
 			expect(calls).toEqual([]);
 			expect(opened).toEqual([]);
 			expect(resumed).toEqual([]);
-		});
-
-		it("does not take over a working native writer", async () => {
-			const { view, opened, resumed } = makeView({ list: () => [stored] });
-			view.setInstancesForTest([stored, holder("working")]);
-			view.handleInput(ENTER);
-			await new Promise((resolve) => setTimeout(resolve, 0));
-			expect(opened).toEqual([]);
-			expect(resumed).toEqual([]);
+			view.handleInput(ESC);
 		});
 
 		it("says so when the daemon cannot pass the request on", async () => {
-			const { view, opened, text, flush } = makeView({ releases: false });
+			const { view, opened, text, flush } = makeView({ releases: false, list: () => [stored, holder("idle")] });
 			view.setInstancesForTest([stored, holder("idle")]);
 			view.handleInput(ENTER);
 			for (let i = 0; i < 5; i++) await flush();
 			expect(opened).toEqual([]);
-			expect(text().join("\n")).toContain("another terminal");
+			expect(text().join("\n")).toContain("close pi there");
 		});
 
 		it("gives up when the other terminal never lets go", async () => {
@@ -531,7 +530,7 @@ describe("AgentView keys", () => {
 				view.handleInput(ENTER);
 				await vi.advanceTimersByTimeAsync(15_500);
 				expect(opened).toEqual([]);
-				expect(text().join("\n")).toContain("another terminal");
+				expect(text().join("\n")).toContain("didn't let go");
 			} finally {
 				vi.useRealTimers();
 			}
@@ -619,7 +618,7 @@ describe("AgentView keys", () => {
 			cwd: HERE,
 			home: HOME,
 			onClose: () => {},
-			onOpen: async () => true,
+			onOpen: () => {},
 			readClipboard: async () => ({ image }),
 		});
 		for (const ch of "describe image") view.handleInput(ch);
@@ -666,75 +665,6 @@ describe("AgentView keys", () => {
 		expect(calls[0]).toEqual(["reply", "done", "now add sound", false]);
 	});
 
-	it("current managed row can be deleted", async () => {
-		const onDeleted = vi.fn();
-		let listed: InstanceSummary[] = [
-			{ id: "selected", status: "online", activity: "working", cwd: HERE, sessionFile: "/selected.jsonl" },
-		];
-		const f = makeView({
-			currentId: "selected",
-			list: () => listed,
-			onDeleted: (id) => {
-				onDeleted(id);
-				listed = [];
-			},
-		});
-		f.view.setInstancesForTest(listed);
-		expect(collectRows(listed, undefined, "selected")[0]).toMatchObject({ current: true, self: false });
-		f.view.handleInput(CTRL_X);
-		await f.flush();
-		f.view.handleInput(CTRL_X);
-		await f.flush();
-		expect(onDeleted).toHaveBeenCalledWith("selected");
-		expect(f.calls).toEqual([
-			["stop", "selected"],
-			["delete", "selected"],
-		]);
-	});
-	it("bulk delete includes current", async () => {
-		const onDeleted = vi.fn();
-		const listed: InstanceSummary[] = [
-			{ id: "selected", status: "online", activity: "working", cwd: HERE, sessionFile: "/selected.jsonl" },
-		];
-		const f = makeView({ currentId: "selected", list: () => listed, onDeleted });
-		f.view.setInstancesForTest(listed);
-		f.view.handleInput("\x1b[A");
-		f.view.handleInput(CTRL_X);
-		await f.flush();
-		f.view.handleInput(CTRL_X);
-		await f.flush();
-		expect(onDeleted).toHaveBeenCalledWith("selected");
-		expect(f.calls).toContainEqual(["delete", "selected"]);
-	});
-	it("delete error retains selection", async () => {
-		const onDeleted = vi.fn();
-		const listed: InstanceSummary[] = [
-			{ id: "selected", status: "stopped", cwd: HERE, sessionFile: "/selected.jsonl" },
-		];
-		const client = fakeClient([], () => listed);
-		client.delete = async () => {
-			throw new Error("delete refused");
-		};
-		const view = new AgentView({
-			ui: { terminal: { rows: 40 }, requestRender: () => {} } as TUI,
-			client,
-			appName: "bluclawd",
-			cwd: HERE,
-			home: HOME,
-			currentId: () => "selected",
-			onDeleted,
-			onClose: () => {},
-			onOpen: async () => true,
-		});
-		view.setInstancesForTest(listed);
-		view.handleInput(CTRL_X);
-		view.handleInput(CTRL_X);
-		await new Promise((r) => setTimeout(r, 0));
-		expect(onDeleted).not.toHaveBeenCalled();
-		expect(view.selectedKeyForTest()).toBe("selected");
-		expect(view.render(100).map(stripAnsi).join("\n")).toContain("delete refused");
-		view.close();
-	});
 	it("ctrl+x stops a running session, a second press deletes it", async () => {
 		const { view, calls, text, flush } = makeView();
 		view.handleInput(DOWN);
@@ -758,7 +688,7 @@ describe("AgentView keys", () => {
 		expect(closed()).toBe(1);
 	});
 
-	it("legacy self remains protected from stopping and pinning", async () => {
+	it("ctrl+t pins; your own session cannot be stopped or pinned", async () => {
 		const self: InstanceSummary = {
 			id: "me",
 			status: "online",
