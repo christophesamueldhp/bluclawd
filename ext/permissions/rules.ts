@@ -274,7 +274,9 @@ function bashRuleSubjects(command: string, depth = 0): string[] {
 		const unescaped = segment.replace(/^\\/, "");
 		candidates.add(unescaped);
 
-		for (const form of new Set([unescaped, dequote(unescaped)])) {
+		// `{rm,-rf,x}` runs as `rm -rf x`.
+		const braced = dequote(unescaped).split(/\s+/).flatMap(expandBraces).join(" ");
+		for (const form of new Set([unescaped, dequote(unescaped), braced])) {
 			candidates.add(form);
 			// `/bin/rm x` is the same program as `rm x`.
 			const [, binary, rest] = /^(\S+)([\s\S]*)$/.exec(form) ?? [];
@@ -304,6 +306,69 @@ function dequote(s: string): string {
 		.replace(/\$(?=['"])/g, "")
 		.replace(/\\(.)/g, "$1")
 		.replace(/['"]/g, "");
+}
+
+/** Words one brace expansion may produce; past this it is denied rather than half-checked. */
+const MAX_BRACE_WORDS = 10_000;
+
+function tooManyBraceWords(word: string): Error {
+	return new Error(`brace expansion too large to check: ${word}`);
+}
+
+/** The words of a `{x..y[..step]}` sequence (numbers, zero-padded as written, or letters); undefined when it is not one. */
+function braceSequence(inner: string): string[] | undefined {
+	const m = /^(-?\d+|[a-zA-Z])\.\.(-?\d+|[a-zA-Z])(?:\.\.(-?\d+))?$/.exec(inner);
+	if (!m) return undefined;
+	const [, from, to, by] = m;
+	const numeric = /\d/.test(from);
+	if (numeric !== /\d/.test(to)) return undefined;
+	const start = numeric ? Number(from) : from.charCodeAt(0);
+	const end = numeric ? Number(to) : to.charCodeAt(0);
+	const step = Math.abs(Number(by ?? 1)) || 1;
+	if (Math.abs(end - start) / step + 1 > MAX_BRACE_WORDS) throw tooManyBraceWords(inner);
+	const zeroPadded = /^-?0\d/.test(from) || /^-?0\d/.test(to);
+	const padded = numeric && zeroPadded ? Math.max(from.length, to.length) : 0;
+	const words: string[] = [];
+	for (let n = start; start <= end ? n <= end : n >= end; n += start <= end ? step : -step) {
+		if (!numeric) words.push(String.fromCharCode(n));
+		else words.push(n < 0 ? `-${String(-n).padStart(padded - 1, "0")}` : String(n).padStart(padded, "0"));
+	}
+	return words;
+}
+
+/**
+ * A word's brace expansion, as the shell does it before running the command:
+ * `a{b,c}d`, nested groups, and `{1..5}` / `{a..e}` / `{01..10..2}`. `{x}`, `{}`, an
+ * unclosed brace and `${VAR}` stay as written. Throws past `MAX_BRACE_WORDS`, which
+ * `deniedBy` counts as a match.
+ */
+function expandBraces(word: string): string[] {
+	for (let open = word.indexOf("{"); open !== -1; open = word.indexOf("{", open + 1)) {
+		if (word[open - 1] === "$") continue;
+		let depth = 0;
+		let close = -1;
+		const commas: number[] = [];
+		for (let i = open; i < word.length && close === -1; i++) {
+			if (word[i] === "{") depth++;
+			else if (word[i] === "}" && --depth === 0) close = i;
+			else if (word[i] === "," && depth === 1) commas.push(i);
+		}
+		if (close === -1) continue;
+		const bounds = [open, ...commas, close];
+		const parts = commas.length
+			? bounds.slice(1).map((end, i) => word.slice(bounds[i] + 1, end))
+			: braceSequence(word.slice(open + 1, close));
+		if (!parts) continue;
+		const words: string[] = [];
+		for (const part of parts) {
+			for (const expanded of expandBraces(word.slice(0, open) + part + word.slice(close + 1))) {
+				words.push(expanded);
+				if (words.length > MAX_BRACE_WORDS) throw tooManyBraceWords(word);
+			}
+		}
+		return words;
+	}
+	return [word];
 }
 
 /** `$VAR` and `${VAR}` from this process's environment; unknown ones stay as written. */
@@ -430,7 +495,12 @@ export function deniedBy(
 	const rawSubject = subject(tool, input);
 	const subj = homeExpand(rawSubject === "" && cwd && CWD_DEFAULTING_VERBS.has(verb) ? cwd : rawSubject);
 	const isBash = verb === "Bash";
-	const bashSubjects = isBash ? bashRuleSubjects(subj) : [];
+	// Computed inside `matches`, so a command too large to check is caught there and denied.
+	let bashSubjects: string[] | undefined;
+	const respellings = (): string[] => {
+		bashSubjects ??= isBash ? bashRuleSubjects(subj) : [];
+		return bashSubjects;
+	};
 	const pathCandidates: string[] = [];
 	if (cwd && PATH_VERBS.has(verb) && subj) {
 		const resolved = resolveToCwd(subj, cwd);
@@ -447,7 +517,7 @@ export function deniedBy(
 			if (parts === undefined) return false;
 			// A file rule also guards the paths a bash command names.
 			if (isBash && cwd && PATH_VERBS.has(capitalize(parts.verb))) {
-				bashPaths ??= bashPathCandidates(bashSubjects, cwd);
+				bashPaths ??= bashPathCandidates(respellings(), cwd);
 				const patterns = pathRulePatterns(parts.subject, cwd);
 				return bashPaths.some((candidate) => patterns.some((pattern) => pattern.test(candidate)));
 			}
@@ -461,7 +531,7 @@ export function deniedBy(
 			}
 			const patterns =
 				cwd && PATH_VERBS.has(verb) ? pathRulePatterns(parts.subject, cwd) : [globToRegExp(parts.subject, !isBash)];
-			return [subj, ...bashSubjects, ...pathCandidates].some((candidate) =>
+			return [subj, ...respellings(), ...pathCandidates].some((candidate) =>
 				patterns.some((pattern) => pattern.test(candidate)),
 			);
 		} catch {

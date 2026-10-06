@@ -166,6 +166,36 @@ describe("deniedBy", () => {
 		}
 	});
 
+	it("expands braces the way the shell will", () => {
+		const ssh = ["Read(~/.ssh/**)"];
+		for (const command of [
+			"cat ~/.{ssh,x}/id_rsa",
+			"cat ~/.{s,t}sh/id_rsa",
+			"cat ~/.{x,{y,ssh}}/id_rsa",
+			"cat ~/.ssh/id_rsa{,.pub}",
+		]) {
+			expect(denied(ssh, "bash", { command }), command).toBe(true);
+		}
+		for (const command of ["{rm,-rf,x}", "r{m,} x", "sudo {rm,x}"]) {
+			expect(denied(["Bash(rm *)"], "bash", { command }), command).toBe(true);
+		}
+		// Not brace groups: `${VAR}`, `{}`, a lone word, an unclosed brace.
+		// biome-ignore lint/suspicious/noTemplateCurlyInString: a shell variable, not a template
+		for (const command of ["echo ${HOME}", "find . -exec cat {} ;", "echo {rm}", "echo {rm,x"]) {
+			expect(denied(["Bash(rm *)"], "bash", { command }), command).toBe(false);
+		}
+		expect(denied(["Bash(rm *)"], "bash", { command: "for i in {1..100}; do echo $i; done" })).toBe(false);
+	});
+
+	it("expands brace sequences, and denies one too long to check", () => {
+		const rules = ["Bash(rm *f05*)"];
+		expect(denied(rules, "bash", { command: "rm f{01..10}" })).toBe(true);
+		expect(denied(rules, "bash", { command: "rm f{01..10..2}" })).toBe(true);
+		expect(denied(rules, "bash", { command: "rm f{02..10..2}" })).toBe(false);
+		expect(denied(["Bash(rm *c*)"], "bash", { command: "rm {a..e}" })).toBe(true);
+		expect(denied(["Bash(rm *)"], "bash", { command: "echo {1..20000}" })).toBe(true);
+	});
+
 	it("denies a glob too broad to check rather than half-checking it", () => {
 		const dir = mkdtempSync(join(tmpdir(), "deny-glob-wide-"));
 		try {
