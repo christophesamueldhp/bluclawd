@@ -144,12 +144,16 @@ const agentView: InlineExtension = {
 		// What the turn in progress is doing, for this session's row in other windows.
 		let liveDetail: string | undefined;
 
-		// Set on a pane started only to show agent view, after this terminal's session was deleted.
-		let viewHost = false;
+		// A pane nothing has been asked in yet is not a session, as a Claude Code session isn't one
+		// until it runs: no other window lists it, and it ends when the terminal leaves it.
 		const blank = (ctx: ExtensionContext): boolean =>
 			!!pane && !ctx.sessionManager.getEntries().some((e) => e.type === "message");
-		// Such a pane is not a session, as Claude Code's agent view has none once its origin is
-		// deleted: it isn't listed, esc quits, and it ends when the terminal leaves it.
+		// Set while tmux ends this blank pane when its terminal detaches or closes.
+		let endsOnDetach = false;
+		// Set on a pane started only to show agent view, after this terminal's session was deleted.
+		let viewHost = false;
+		// Agent view there has no session of this terminal's, as Claude Code's once its origin is
+		// deleted: no own row, and esc quits.
 		const hosting = (ctx: ExtensionContext): boolean => viewHost && blank(ctx);
 		/** Leave this pane: tmux keeps a session running; one with nothing in it ends. */
 		const leavePane = (ending: boolean): void => {
@@ -158,7 +162,7 @@ const agentView: InlineExtension = {
 		};
 
 		const selfInfo = (ctx: ExtensionContext): SelfSessionInfo | undefined => {
-			if (hosting(ctx)) return undefined;
+			if (blank(ctx)) return undefined;
 			const row = selfRow(ctx);
 			return {
 				cwd: ctx.sessionManager.getCwd(),
@@ -338,6 +342,14 @@ const agentView: InlineExtension = {
 				pane,
 			);
 			registration.start();
+			if (pane && blank(ctx) && !endsOnDetach) {
+				try {
+					panes.endOnDetach(pane, true);
+					endsOnDetach = true;
+				} catch {
+					// it ends on quitting all the same
+				}
+			}
 			// A pane started to carry on a turn, or to show agent view, does so once.
 			if (process.env[CONTINUE_ENV]) {
 				delete process.env[CONTINUE_ENV];
@@ -436,7 +448,18 @@ const agentView: InlineExtension = {
 			const current = activity.apply(event);
 			registration?.setActivity(current);
 		};
-		pi.on("agent_start", track);
+		pi.on("agent_start", (event) => {
+			// Asked something: a session now, which runs on after its terminal leaves.
+			if (endsOnDetach && pane) {
+				endsOnDetach = false;
+				try {
+					panes.endOnDetach(pane, false);
+				} catch {
+					// tmux is gone with it
+				}
+			}
+			track(event);
+		});
 		pi.on("turn_start", track);
 		pi.on("agent_settled", (event) => {
 			liveDetail = undefined;
@@ -535,7 +558,7 @@ const agentView: InlineExtension = {
 								? {
 										current: pane,
 										switchTo: (name) => {
-											const ending = hosting(ctx);
+											const ending = blank(ctx);
 											panes.switchTo(name);
 											if (ending) panes.kill(pane);
 										},
@@ -545,7 +568,7 @@ const agentView: InlineExtension = {
 											await registration?.stop();
 											registration = undefined;
 										},
-										detach: () => leavePane(hosting(ctx)),
+										detach: () => leavePane(blank(ctx)),
 									}
 								: undefined,
 							listModels: () =>

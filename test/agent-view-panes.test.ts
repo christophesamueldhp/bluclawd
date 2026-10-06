@@ -273,6 +273,20 @@ describe("tmux", () => {
 		]);
 	});
 
+	it("has tmux end a blank pane when its terminal detaches, until it's asked something", () => {
+		const runs: string[][] = [];
+		const tmux = new Tmux("/srv", (args) => {
+			runs.push(args);
+			return "";
+		});
+		tmux.endOnDetach("pi-a", true);
+		tmux.endOnDetach("pi-a", false);
+		expect(runs).toEqual([
+			["set-hook", "-t", "=pi-a:", "client-detached", "kill-session -t =pi-a"],
+			["set-hook", "-u", "-t", "=pi-a:", "client-detached"],
+		]);
+	});
+
 	it("never ends a session it cannot SIGKILL the pi of: a hung-up pi would carry it on", () => {
 		const runs: string[][] = [];
 		const tmux = new Tmux("/srv", (args) => {

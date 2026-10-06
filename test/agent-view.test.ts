@@ -956,7 +956,7 @@ describe("AgentView look", () => {
 				"ctrl+r to rename",
 				"ctrl+f to find",
 				"ctrl+j for newline",
-				"ctrl+x to delete",
+				"ctrl+x to stop", // the focused row is in Needs input, which Claude Code stops first
 				"? to close",
 			]) {
 				expect(text).toContain(item);

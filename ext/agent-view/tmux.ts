@@ -129,6 +129,15 @@ export class Tmux {
 		this.run(["detach-client"]);
 	}
 
+	/** While `on`, `name` ends when the terminal showing it detaches or closes. */
+	endOnDetach(name: string, on: boolean): void {
+		this.run(
+			on
+				? ["set-hook", "-t", `=${name}:`, "client-detached", `kill-session -t =${name}`]
+				: ["set-hook", "-u", "-t", `=${name}:`, "client-detached"],
+		);
+	}
+
 	/**
 	 * End a pane's pi at once. SIGKILL, not tmux's SIGHUP: a hung-up pi treats it as quitting
 	 * and would carry the session on in a new pane.

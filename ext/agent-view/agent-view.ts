@@ -981,7 +981,7 @@ export class AgentView implements Component, Focusable {
 				return;
 			}
 			this.arm(row.id);
-			if (row.state === "working") {
+			if (stoppable(row)) {
 				this.justKilled = row.id;
 				this.opts.onStopSelf?.();
 				await this.refresh();
@@ -1008,7 +1008,7 @@ export class AgentView implements Component, Focusable {
 		this.arm(row.id);
 		if (row.pane) {
 			// A pane's pi keeps running until deleted; the first press stops its turn.
-			if (row.state === "working" || row.state === "needs") {
+			if (stoppable(row)) {
 				this.justKilled = row.id;
 				await this.opts.client.send(row.id, { type: "abort" }).catch(() => undefined);
 				await this.refresh();
@@ -2085,7 +2085,7 @@ export class AgentView implements Component, Focusable {
 			"ctrl+j for newline",
 			...(row ? [`ctrl+t to ${row.pinned ? "unpin" : "pin to top"}`] : []),
 			...(alt > 0 ? [`alt+1${alt > 1 ? `-${alt}` : ""} to open`] : []),
-			...(row ? [`ctrl+x to ${row.alive && row.state === "working" ? "stop" : "delete"}`] : []),
+			...(row ? [`ctrl+x to ${stoppable(row) ? "stop" : "delete"}`] : []),
 			"esc to quit",
 			"? to close",
 		];
@@ -2232,6 +2232,11 @@ export class AgentView implements Component, Focusable {
 			.map((line) => truncateToWidth(line, width));
 		return [...windowed, ...Array(Math.max(0, budget - windowed.length)).fill(""), ...footer];
 	}
+}
+
+/** Claude Code's ctrl+x stops a session in Working or Needs input first, and deletes the rest. */
+function stoppable(row: AgentRow): boolean {
+	return row.alive && (row.state === "working" || row.state === "needs" || row.state === "idle");
 }
 
 /** Claude Code's whitespace cleanup for a row's text: tags dropped, every run of space one space. */

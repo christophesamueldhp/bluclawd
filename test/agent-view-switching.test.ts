@@ -184,7 +184,8 @@ describe("Agent View native foreground and live background", () => {
 		flow.view().handleInput("\x18");
 		flow.finishTurn();
 		await running;
-		expect(flow.abort).toHaveBeenCalledOnce();
+		// The first press stops it, as Claude Code's does; the delete stops it again, harmlessly.
+		expect(flow.abort).toHaveBeenCalled();
 		expect(flow.replace).toHaveBeenCalledWith(undefined, expect.anything());
 		expect(state.deleted).toEqual(["twin"]);
 		expect(state.spawned).toEqual([]);
