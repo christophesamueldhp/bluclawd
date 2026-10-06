@@ -88,23 +88,3 @@ describe("SelfRegistration heartbeats", () => {
 		expect(calls.length).toBe(1);
 	});
 });
-
-describe("SelfRegistration release", () => {
-	it("calls onRelease when the daemon asks this window to let its session go", async () => {
-		let answer = true;
-		const client = {
-			register: async () => ({ release: answer }),
-			unregister: async () => {},
-		} as unknown as OrchestratorClient;
-		let released = 0;
-		const reg = new SelfRegistration(
-			client,
-			() => ({ cwd: "/p", sessionFile: "/x.jsonl" }),
-			() => released++,
-		);
-		await reg.refresh();
-		answer = false;
-		await reg.refresh();
-		expect(released).toBe(1);
-	});
-});

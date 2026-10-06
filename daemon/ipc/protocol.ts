@@ -1,38 +1,8 @@
-import type {
-	AgentSessionEvent,
-	JsonAgentSessionEvent,
-	RpcCommand,
-	RpcExtensionUIRequest,
-	RpcExtensionUIResponse,
-	RpcResponse,
-} from "@earendil-works/pi-coding-agent";
 import type { AgentActivity } from "../activity.ts";
-import type { SessionNeeds } from "../session-state.ts";
 import type { InstanceStatus } from "../types.ts";
-
-export interface SpawnRequest {
-	type: "spawn";
-	cwd: string;
-	label?: string;
-	provider?: string;
-	model?: string;
-	/** Resume an existing session `.jsonl` instead of starting fresh (child gets `--session`). */
-	sessionFile?: string;
-}
 
 export interface ListRequest {
 	type: "list";
-}
-
-export interface StopRequest {
-	type: "stop";
-	instanceId: string;
-}
-
-/** Stop a background session so a window can open it; a turn in progress first finishes its tools. */
-export interface HandOverRequest {
-	type: "hand_over";
-	instanceId: string;
 }
 
 export interface StatusRequest {
@@ -40,18 +10,7 @@ export interface StatusRequest {
 	instanceId: string;
 }
 
-export interface RpcRequest {
-	type: "rpc";
-	instanceId: string;
-	command: RpcCommand;
-}
-
-export interface RpcStreamRequest {
-	type: "rpc_stream";
-	instanceId: string;
-}
-
-/** Register/heartbeat an external (self-registered) session — one the daemon did not spawn. */
+/** Register/heartbeat a pane's pi. */
 export interface RegisterRequest {
 	type: "register";
 	instance: {
@@ -83,13 +42,12 @@ export interface UnregisterRequest {
 	instanceId: string;
 }
 
-/** Ask the daemon to exit so a client can start a fresh one (a stale build). Refused while it
- *  still owns running sessions — those would be killed with it. */
+/** Ask the daemon to exit so a client can start a fresh one (a stale build). */
 export interface ShutdownRequest {
 	type: "shutdown";
 }
 
-/** Remove a row (stopping it first). The session file stays on disk. */
+/** Remove a row. The session file stays on disk. */
 export interface DeleteRequest {
 	type: "delete";
 	instanceId: string;
@@ -117,27 +75,9 @@ export interface SaveRequest {
 	sessionFile: string;
 }
 
-/** Ask the window holding a session to let it go, so another window can open it. */
-export interface ReleaseRequest {
-	type: "release";
-	sessionFile: string;
-}
-
-/** Answer the blocking prompt a session is waiting on, without attaching. */
-export interface AnswerRequest {
-	type: "answer";
-	instanceId: string;
-	response: RpcExtensionUIResponse;
-}
-
 interface RequestMap {
-	spawn: SpawnRequest;
 	list: ListRequest;
-	stop: StopRequest;
-	hand_over: HandOverRequest;
 	status: StatusRequest;
-	rpc: RpcRequest;
-	rpc_stream: RpcStreamRequest;
 	register: RegisterRequest;
 	unregister: UnregisterRequest;
 	send: SendRequest;
@@ -145,9 +85,7 @@ interface RequestMap {
 	delete: DeleteRequest;
 	rename: RenameRequest;
 	meta: MetaRequest;
-	answer: AnswerRequest;
 	save: SaveRequest;
-	release: ReleaseRequest;
 }
 
 export type ServerRequest = RequestMap[keyof RequestMap];
@@ -159,9 +97,8 @@ export interface InstanceSummary {
 	label?: string;
 	sessionId?: string;
 	sessionFile?: string;
-	radiusPiId?: string;
 	activity?: AgentActivity;
-	/** True for a self-registered foreground session (not a daemon-spawned child). */
+	/** True for a pane's pi; a stored row has no process. */
 	external?: boolean;
 	createdAt?: string;
 	lastSeenAt?: string;
@@ -171,8 +108,6 @@ export interface InstanceSummary {
 	finishedAt?: string;
 	pinned?: boolean;
 	sortOrder?: number;
-	/** The blocking prompt a live session is waiting on. */
-	needs?: SessionNeeds;
 	pane?: string;
 }
 
@@ -192,21 +127,9 @@ interface ResponseBase {
 	buildId?: string;
 }
 
-export interface SpawnResponse extends ResponseBase {
-	type: "spawn_result";
-	instance?: InstanceSummary;
-}
-
 export interface ListResponse extends ResponseBase {
 	type: "list_result";
 	instances?: InstanceSummary[];
-}
-
-export interface StopResponse extends ResponseBase {
-	type: "stop_result";
-	instanceId?: string;
-	/** hand_over: the turn was still in progress, so whoever opens the session carries it on. */
-	working?: boolean;
 }
 
 export interface StatusResponse extends ResponseBase {
@@ -214,20 +137,8 @@ export interface StatusResponse extends ResponseBase {
 	instance?: InstanceSummary;
 }
 
-export interface RpcBridgeResponse extends ResponseBase {
-	type: "rpc_result";
-	response: RpcResponse;
-}
-
-export interface RpcReadyResponse extends ResponseBase {
-	type: "rpc_ready";
-	instance?: InstanceSummary;
-}
-
 export interface RegisterResponse extends ResponseBase {
 	type: "register_result";
-	/** Another window wants this session: let it go. */
-	release?: boolean;
 	/** Messages queued for it with `send`. */
 	messages?: PaneMessage[];
 }
@@ -240,7 +151,7 @@ export interface ShutdownResponse extends ResponseBase {
 	type: "shutdown_result";
 }
 
-/** Reply to delete / rename / meta / answer / save / release. */
+/** Reply to send / delete / rename / meta / save. */
 export interface AckResponse extends ResponseBase {
 	type: "ack";
 	instance?: InstanceSummary;
@@ -253,13 +164,8 @@ export interface ErrorResponse extends ResponseBase {
 }
 
 interface ResponseMap {
-	spawn: SpawnResponse;
 	list: ListResponse;
-	stop: StopResponse;
-	hand_over: StopResponse;
 	status: StatusResponse;
-	rpc: RpcBridgeResponse;
-	rpc_stream: RpcReadyResponse;
 	register: RegisterResponse;
 	send: AckResponse;
 	unregister: UnregisterResponse;
@@ -267,21 +173,11 @@ interface ResponseMap {
 	delete: AckResponse;
 	rename: AckResponse;
 	meta: AckResponse;
-	answer: AckResponse;
 	save: AckResponse;
-	release: AckResponse;
 }
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;
-type RpcClientMessage = RpcCommand | RpcExtensionUIResponse;
-type RpcServerMessage =
-	| RpcReadyResponse
-	| RpcResponse
-	| AgentSessionEvent
-	| JsonAgentSessionEvent
-	| RpcExtensionUIRequest
-	| ErrorResponse;
-export type ProtocolMessage = ServerRequest | ServerResponse | RpcClientMessage | RpcServerMessage;
+export type ProtocolMessage = ServerRequest | ServerResponse;
 
 export function encodeMessage(message: ProtocolMessage): string {
 	return `${JSON.stringify(message)}\n`;

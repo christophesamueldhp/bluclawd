@@ -2,12 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { lastLine, needsFromRequest, readSessionTail, SessionStateTracker } from "../daemon/session-state.ts";
-
-const assistant = (text: string, extra: Record<string, unknown> = {}) => ({
-	type: "message_end",
-	message: { role: "assistant", content: [{ type: "text", text }], ...extra },
-});
+import { lastLine, readSessionTail, toolActivity } from "../daemon/session-state.ts";
 
 describe("lastLine", () => {
 	it("strips list markers and skips blanks", () => {
@@ -16,93 +11,11 @@ describe("lastLine", () => {
 	});
 });
 
-describe("SessionStateTracker", () => {
-	it("a running tool is the detail: its description, else its command or path", () => {
-		const t = new SessionStateTracker();
-		t.apply({
-			type: "tool_execution_start",
-			toolName: "bash",
-			args: { command: "sleep 40", description: "Wait, then print" },
-		});
-		expect(t.detail).toBe("Wait, then print");
-		t.apply({ type: "tool_execution_start", toolName: "read", args: { path: "src/a.ts" } });
-		expect(t.detail).toBe("src/a.ts");
-		t.apply({ type: "tool_execution_start", toolName: "todo", args: {} });
-		expect(t.detail).toBe("todo");
-	});
-
-	it("a settled turn is Done, its last line of assistant text the detail", () => {
-		const t = new SessionStateTracker();
-		t.apply({ type: "agent_start" });
-		t.apply(assistant("Working on it.\nresult: menu, options, and credits done", { stopReason: "stop" }));
-		t.apply({ type: "agent_settled" }, new Date("2026-09-23T10:00:00Z"));
-		expect(t.outcome).toBe("done");
-		expect(t.detail).toBe("result: menu, options, and credits done");
-		expect(t.turns).toBe(1);
-		expect(t.finishedAt).toBe("2026-09-23T10:00:00.000Z");
-	});
-
-	it("a question in the reply text is not a needs-input state: only a blocking prompt is", () => {
-		const t = new SessionStateTracker();
-		t.apply({ type: "agent_start" });
-		t.apply(assistant("needs input: double jump or wall climb?"));
-		t.apply({ type: "agent_settled" });
-		expect(t.outcome).toBe("done");
-	});
-
-	it("a model error is Failed; an interrupted turn is Stopped", () => {
-		const a = new SessionStateTracker();
-		a.apply(assistant("failed: could not reach the database"));
-		a.apply({ type: "agent_settled" });
-		expect(a.outcome).toBe("done");
-
-		const b = new SessionStateTracker();
-		b.apply(assistant("", { stopReason: "error", errorMessage: "429 rate limited" }));
-		b.apply({ type: "agent_settled" });
-		expect(b.outcome).toBe("failed");
-		expect(b.detail).toBe("429 rate limited");
-
-		const c = new SessionStateTracker();
-		c.apply(assistant("Halfway there", { stopReason: "aborted" }));
-		c.apply({ type: "agent_settled" });
-		expect(c.outcome).toBe("stopped");
-		expect(c.detail).toBe("Halfway there");
-	});
-
-	it("the detail follows the run: prompt, reply, failed tool of assistant text is the detail", () => {
-		const t = new SessionStateTracker();
-		t.apply({ type: "message_start", message: { role: "user", content: "fix the flaky test" } });
-		expect(t.detail).toBe("> fix the flaky test");
-		t.apply(assistant("Adding swept-AABB checks to CollisionSystem"));
-		expect(t.detail).toBe("Adding swept-AABB checks to CollisionSystem");
-		t.apply({ type: "tool_execution_end", isError: true, result: { content: [{ type: "text", text: "ENOENT" }] } });
-		expect(t.detail).toBe("✗ ENOENT");
-		t.apply({ type: "agent_settled" });
-		expect(t.outcome).toBe("done");
-	});
-
-	it("a new run clears the previous outcome", () => {
-		const t = new SessionStateTracker({ outcome: "done", turns: 2 });
-		t.apply({ type: "agent_start" });
-		expect(t.outcome).toBeUndefined();
-		expect(t.turns).toBe(2);
-	});
-});
-
-describe("needsFromRequest", () => {
-	it("keeps the options of a select and drops fire-and-forget methods", () => {
-		expect(
-			needsFromRequest({
-				type: "extension_ui_request",
-				id: "r1",
-				method: "select",
-				title: "Run npm test?",
-				options: ["Yes", "No"],
-			}),
-		).toEqual({ requestId: "r1", method: "select", title: "Run npm test?", options: ["Yes", "No"] });
-		expect(
-			needsFromRequest({ type: "extension_ui_request", id: "r2", method: "notify", message: "hi" }),
-		).toBeUndefined();
+describe("toolActivity", () => {
+	it("a running tool as one line: its description, else its command or path, else its name", () => {
+		expect(toolActivity("bash", { command: "sleep 40", description: "Wait, then print" })).toBe("Wait, then print");
+		expect(toolActivity("read", { path: "src/a.ts" })).toBe("src/a.ts");
+		expect(toolActivity("todo", {})).toBe("todo");
 	});
 });
 
@@ -112,18 +25,32 @@ describe("readSessionTail", () => {
 		writeFileSync(file, `${"x".repeat(20_000)}\n${lines.map((l) => JSON.stringify(l)).join("\n")}\n`);
 		return file;
 	};
+	const reply = (text: string, extra: Record<string, unknown> = {}) => ({
+		type: "message",
+		message: { role: "assistant", content: [{ type: "text", text }], ...extra },
+	});
 
-	it("picks up where a transcript left off, past a cut first line", () => {
+	it("picks up where a transcript left off, past a cut first line: Done, its last line the detail", () => {
 		const file = write([
 			{ type: "message", message: { role: "user", content: "write a haiku" } },
-			{
-				type: "message",
-				message: { role: "assistant", content: [{ type: "text", text: "Done.\nresult: wrote haiku.txt" }] },
-			},
+			reply("Done.\nwrote haiku.txt"),
 		]);
-		expect(readSessionTail(file)).toEqual({
-			detail: "result: wrote haiku.txt",
-			outcome: "done",
+		expect(readSessionTail(file)).toEqual({ detail: "wrote haiku.txt", outcome: "done", turns: 1 });
+	});
+
+	it("a question in the reply text is still Done: only pi's own signals set the outcome", () => {
+		expect(readSessionTail(write([reply("needs input: double jump or wall climb?")]))?.outcome).toBe("done");
+	});
+
+	it("a model error is Failed with its message; an interrupted turn is Stopped", () => {
+		expect(readSessionTail(write([reply("", { stopReason: "error", errorMessage: "429 rate limited" })]))).toEqual({
+			detail: "429 rate limited",
+			outcome: "failed",
+			turns: 1,
+		});
+		expect(readSessionTail(write([reply("Halfway there", { stopReason: "aborted" })]))).toEqual({
+			detail: "Halfway there",
+			outcome: "stopped",
 			turns: 1,
 		});
 	});

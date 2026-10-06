@@ -101,27 +101,23 @@ export class SelfRegistration {
 	readonly id: string;
 	private readonly client: OrchestratorClient;
 	private readonly getInfo: () => SelfSessionInfo | undefined;
-	private readonly onRelease: () => void;
 	private readonly onMessage: (message: PaneMessage) => void;
 	private activity: AgentActivity = "idle";
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private inflight: Promise<void> | undefined;
 	private stopped = false;
 
-	/** `onRelease`: another window wants this session — switch this one away from it.
-	 *  `onMessage`: another window's agent view asks this session something (pane mode).
+	/** `onMessage`: another window's agent view asks this session something.
 	 *  `id`: a pane registers under its tmux session's name, so its row outlives a session switch.
 	 *  `getInfo` returns undefined while there is no session to list yet. */
 	constructor(
 		client: OrchestratorClient,
 		getInfo: () => SelfSessionInfo | undefined,
-		onRelease: () => void = () => {},
 		onMessage: (message: PaneMessage) => void = () => {},
 		id: string = randomUUID(),
 	) {
 		this.client = client;
 		this.getInfo = getInfo;
-		this.onRelease = onRelease;
 		this.onMessage = onMessage;
 		this.id = id;
 	}
@@ -168,7 +164,6 @@ export class SelfRegistration {
 		};
 		try {
 			const res = await this.client.register(instance);
-			if (res?.release) this.onRelease();
 			for (const message of res?.messages ?? []) this.onMessage(message);
 		} catch {
 			// daemon may be down; the next tick retries (register is an upsert).

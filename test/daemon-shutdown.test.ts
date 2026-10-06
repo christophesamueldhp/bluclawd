@@ -3,17 +3,11 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { handleIpcRequest, setShutdownHook, shutdownRefusal } from "../daemon/handler.ts";
+import { handleIpcRequest, setShutdownHook } from "../daemon/handler.ts";
 import { OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
 
 describe("daemon `shutdown` request", () => {
 	afterEach(() => setShutdownHook(undefined));
-
-	it("refuses while spawned sessions are still running, and says how many", () => {
-		expect(shutdownRefusal(0)).toBeUndefined();
-		expect(shutdownRefusal(1)).toBe("1 running session");
-		expect(shutdownRefusal(3)).toBe("3 running sessions");
-	});
 
 	it("answers ok and then hands off to the process's shutdown hook", async () => {
 		let called = 0;

@@ -2,8 +2,6 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { createConnection, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BUILD_ID, VERSION } from "../daemon/config.ts";
 import { type IpcRequestHandler, startIpcServer } from "../daemon/ipc/server.ts";
@@ -36,7 +34,6 @@ describe("startIpcServer — version echo", () => {
 			if (request.type === "list") return { type: "list_result", ok: true, instances: [] };
 			return { type: "error", ok: false, error: "unsupported in this test" };
 		}) as IpcRequestHandler;
-		handler.openRpcStream = () => undefined;
 		return handler;
 	}
 
@@ -73,52 +70,5 @@ describe("startIpcServer — version echo", () => {
 		expect(response.ok).toBe(false);
 		expect(response.version).toBe(VERSION);
 		expect(response.buildId).toBe(BUILD_ID);
-	});
-
-	it("sends a replay snapshot once and keeps subsequent assistant updates as compact wire deltas", async () => {
-		const handler = (async () => ({
-			type: "rpc_ready",
-			ok: true,
-			instance: { id: "worker" },
-		})) as unknown as IpcRequestHandler;
-		const message = fauxAssistantMessage("Earlier");
-		let emit!: (event: AgentSessionEvent) => void;
-		handler.openRpcStream = (_id, _response, onEvent) => {
-			emit = onEvent;
-			onEvent({ type: "message_start", message });
-			return { handleRequest: async () => {}, close: () => {} };
-		};
-		server = await startIpcServer(handler);
-		const socket = createConnection(join(tempDir, "server.sock"));
-		const frames: Array<Record<string, unknown>> = [];
-		let buffer = "";
-		socket.setEncoding("utf8");
-		socket.on("data", (chunk) => {
-			buffer += chunk;
-			while (buffer.includes("\n")) {
-				const index = buffer.indexOf("\n");
-				frames.push(JSON.parse(buffer.slice(0, index)));
-				buffer = buffer.slice(index + 1);
-			}
-		});
-		try {
-			await new Promise<void>((resolve) => socket.on("connect", resolve));
-			socket.write(`${JSON.stringify({ type: "rpc_stream", instanceId: "worker" })}\n`);
-			await vi.waitFor(() => expect(frames.some((frame) => frame.type === "rpc_ready")).toBe(true));
-			emit({
-				type: "message_update",
-				message,
-				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: " more" },
-			} as AgentSessionEvent);
-			await vi.waitFor(() => expect(frames.some((frame) => frame.type === "message_update")).toBe(true));
-			expect(frames.find((frame) => frame.type === "message_start")).toMatchObject({
-				message: { content: [{ text: "Earlier" }] },
-			});
-			const delta = frames.find((frame) => frame.type === "message_update");
-			expect(delta).not.toHaveProperty("message");
-			expect(delta).toMatchObject({ assistantMessageEvent: { type: "text_delta", delta: " more" } });
-		} finally {
-			socket.destroy();
-		}
 	});
 });

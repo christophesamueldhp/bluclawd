@@ -1,41 +1,23 @@
-import type {
-	AgentSessionEvent,
-	RpcCommand,
-	RpcExtensionUIRequest,
-	RpcExtensionUIResponse,
-	RpcResponse,
-} from "@earendil-works/pi-coding-agent";
 import type { AgentActivity } from "./activity.ts";
 import type {
 	AckResponse,
-	AnswerRequest,
 	DeleteRequest,
 	ErrorResponse,
-	HandOverRequest,
 	InstanceSummary,
 	ListRequest,
 	ListResponse,
 	MetaRequest,
 	RegisterRequest,
 	RegisterResponse,
-	ReleaseRequest,
 	RenameRequest,
-	RpcBridgeResponse,
-	RpcReadyResponse,
-	RpcRequest,
-	RpcStreamRequest,
 	SaveRequest,
 	SendRequest,
 	ServerRequest,
 	ServerResponse,
 	ShutdownRequest,
 	ShutdownResponse,
-	SpawnRequest,
-	SpawnResponse,
 	StatusRequest,
 	StatusResponse,
-	StopRequest,
-	StopResponse,
 	UnregisterRequest,
 	UnregisterResponse,
 } from "./ipc/protocol.ts";
@@ -46,20 +28,18 @@ function toInstanceSummary(instance: InstanceRecord, activity?: AgentActivity, e
 	return {
 		createdAt: instance.createdAt,
 		lastSeenAt: instance.lastSeenAt,
-		detail: (external ? undefined : supervisor.getLiveDetail(instance.id)) ?? instance.detail,
+		detail: instance.detail,
 		outcome: instance.outcome,
 		turns: instance.turns,
 		finishedAt: instance.finishedAt,
 		pinned: instance.pinned,
 		sortOrder: instance.sortOrder,
-		needs: external ? undefined : supervisor.getPendingNeeds(instance.id),
 		id: instance.id,
 		status: instance.status,
 		cwd: instance.cwd,
 		label: instance.label,
 		sessionId: instance.sessionId,
 		sessionFile: instance.sessionFile,
-		radiusPiId: instance.radiusPiId,
 		activity,
 		external,
 		pane: instance.pane,
@@ -73,13 +53,6 @@ export function setShutdownHook(hook: (() => void) | undefined): void {
 	shutdownHook = hook;
 }
 
-/** Why a shutdown is refused, or undefined when it is safe: the daemon's exit takes every
- *  spawned child with it, so it only goes when it owns nothing that is running. */
-export function shutdownRefusal(liveCount: number): string | undefined {
-	if (liveCount === 0) return undefined;
-	return `${liveCount} running session${liveCount === 1 ? "" : "s"}`;
-}
-
 function unknownInstanceError(instanceId: string): ErrorResponse {
 	return {
 		type: "error",
@@ -89,48 +62,26 @@ function unknownInstanceError(instanceId: string): ErrorResponse {
 }
 
 // Overhead types
-export async function handleIpcRequest(request: SpawnRequest): Promise<SpawnResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ListRequest): Promise<ListResponse | ErrorResponse>;
-export async function handleIpcRequest(request: StopRequest): Promise<StopResponse | ErrorResponse>;
-export async function handleIpcRequest(request: HandOverRequest): Promise<StopResponse | ErrorResponse>;
 export async function handleIpcRequest(request: StatusRequest): Promise<StatusResponse | ErrorResponse>;
-export async function handleIpcRequest(request: RpcRequest): Promise<RpcBridgeResponse | ErrorResponse>;
-export async function handleIpcRequest(request: RpcStreamRequest): Promise<RpcReadyResponse | ErrorResponse>;
 export async function handleIpcRequest(request: RegisterRequest): Promise<RegisterResponse | ErrorResponse>;
 export async function handleIpcRequest(request: UnregisterRequest): Promise<UnregisterResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ShutdownRequest): Promise<ShutdownResponse | ErrorResponse>;
 export async function handleIpcRequest(
-	request: DeleteRequest | RenameRequest | MetaRequest | AnswerRequest | SaveRequest | ReleaseRequest | SendRequest,
+	request: DeleteRequest | RenameRequest | MetaRequest | SaveRequest | SendRequest,
 ): Promise<AckResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse> {
 	switch (request.type) {
-		case "spawn": {
-			const instance = await supervisor.spawnInstance({
-				cwd: request.cwd,
-				label: request.label,
-				sessionFile: request.sessionFile,
-				provider: request.provider,
-				model: request.model,
-			});
-			return {
-				type: "spawn_result",
-				ok: true,
-				instance: toInstanceSummary(instance),
-			};
-		}
-
 		case "list": {
-			const spawned = supervisor
-				.listInstances()
-				.map((instance) => toInstanceSummary(instance, supervisor.getActivity(instance.id)));
+			const stored = supervisor.listInstances().map((instance) => toInstanceSummary(instance));
 			const external = supervisor
 				.listExternalInstances()
 				.map(({ record, activity }) => toInstanceSummary(record, activity, true));
 			return {
 				type: "list_result",
 				ok: true,
-				instances: [...spawned, ...external],
+				instances: [...stored, ...external],
 			};
 		}
 
@@ -139,61 +90,8 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 			if (!instance) {
 				return unknownInstanceError(request.instanceId);
 			}
-
 			return {
 				type: "status_result",
-				ok: true,
-				instance: toInstanceSummary(instance, supervisor.getActivity(instance.id)),
-			};
-		}
-
-		case "stop": {
-			const instance = await supervisor.stopInstance(request.instanceId);
-			if (!instance) {
-				return unknownInstanceError(request.instanceId);
-			}
-
-			return {
-				type: "stop_result",
-				ok: true,
-				instanceId: request.instanceId,
-			};
-		}
-
-		case "hand_over": {
-			const { record, working } = await supervisor.handOver(request.instanceId);
-			if (!record) {
-				return unknownInstanceError(request.instanceId);
-			}
-
-			return {
-				type: "stop_result",
-				ok: true,
-				instanceId: request.instanceId,
-				working,
-			};
-		}
-
-		case "rpc": {
-			const response = await supervisor.handleRpc(request.instanceId, request.command);
-			if (!response) {
-				return unknownInstanceError(request.instanceId);
-			}
-
-			return {
-				type: "rpc_result",
-				ok: true,
-				response,
-			};
-		}
-
-		case "rpc_stream": {
-			const instance = supervisor.getInstance(request.instanceId);
-			if (!instance) {
-				return unknownInstanceError(request.instanceId);
-			}
-			return {
-				type: "rpc_ready",
 				ok: true,
 				instance: toInstanceSummary(instance),
 			};
@@ -214,9 +112,9 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				detail: request.instance.detail,
 				turns: request.instance.turns,
 			};
-			const release = supervisor.registerExternal(record, request.instance.activity ?? "idle");
+			supervisor.registerExternal(record, request.instance.activity ?? "idle");
 			const messages = supervisor.drainExternal(record.id);
-			return { type: "register_result", ok: true, release, ...(messages.length ? { messages } : {}) };
+			return { type: "register_result", ok: true, ...(messages.length ? { messages } : {}) };
 		}
 
 		case "send": {
@@ -231,12 +129,13 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 		}
 
 		case "delete": {
-			const deleted = await supervisor.deleteInstance(request.instanceId);
-			return deleted ? { type: "ack", ok: true } : unknownInstanceError(request.instanceId);
+			return supervisor.deleteInstance(request.instanceId)
+				? { type: "ack", ok: true }
+				: unknownInstanceError(request.instanceId);
 		}
 
 		case "rename": {
-			const instance = await supervisor.renameInstance(request.instanceId, request.name);
+			const instance = supervisor.renameInstance(request.instanceId, request.name);
 			return instance
 				? { type: "ack", ok: true, instance: toInstanceSummary(instance) }
 				: unknownInstanceError(request.instanceId);
@@ -261,20 +160,7 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 			return { type: "ack", ok: true, instance: toInstanceSummary(instance) };
 		}
 
-		case "release": {
-			supervisor.requestRelease(request.sessionFile);
-			return { type: "ack", ok: true };
-		}
-
-		case "answer": {
-			return supervisor.answer(request.instanceId, request.response)
-				? { type: "ack", ok: true }
-				: { type: "error", ok: false, error: "that question was already answered" };
-		}
-
 		case "shutdown": {
-			const refusal = shutdownRefusal(supervisor.listLiveInstances().length);
-			if (refusal) return { type: "error", ok: false, error: refusal };
 			if (!shutdownHook) return { type: "error", ok: false, error: "shutdown is not available in this process" };
 			// Deferred so the reply is written before the socket server closes.
 			const hook = shutdownHook;
@@ -282,35 +168,4 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 			return { type: "shutdown_result", ok: true };
 		}
 	}
-}
-
-export function openRpcStream(
-	instanceId: string,
-	onResponse: (response: RpcResponse) => void,
-	onSessionEvent: (event: AgentSessionEvent) => void,
-	onUiRequest: (request: RpcExtensionUIRequest) => void,
-):
-	| {
-			handleRequest(request: RpcCommand | RpcExtensionUIResponse): Promise<void>;
-			close(): void;
-	  }
-	| undefined {
-	const handle = supervisor.openRpcStream(instanceId, onSessionEvent, onUiRequest);
-	if (!handle) {
-		return undefined;
-	}
-
-	return {
-		async handleRequest(request): Promise<void> {
-			if (request.type === "extension_ui_response") {
-				handle.handleUiResponse(request);
-				return;
-			}
-			const response = await handle.handleRpc(request);
-			onResponse(response);
-		},
-		close(): void {
-			handle.close();
-		},
-	};
 }

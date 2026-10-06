@@ -9,7 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
@@ -29,7 +29,6 @@ import { stripAnsi } from "../_shared/ansi.ts";
 import { theme } from "../_shared/theme.ts";
 import { mascotGlyphs, REST, renderMascot } from "../branding/mascot.ts";
 import { type AgentClipboard, readAgentClipboard } from "./clipboard.ts";
-import { handOff } from "./hand-off.ts";
 import { currentDaemonBuildId, type InstanceSummary, type OrchestratorClient } from "./orchestrator-client.ts";
 import {
 	type AgentRow,
@@ -47,7 +46,7 @@ import {
 	stateBandOf,
 	type ViewMode,
 } from "./rows.ts";
-import { CONTINUE_ENV, OPEN_VIEW_ENV } from "./tmux.ts";
+import { OPEN_VIEW_ENV } from "./tmux.ts";
 
 export interface PastSession {
 	sessionFile: string;
@@ -72,32 +71,18 @@ export interface AgentViewOptions {
 	/** This window's own session as a row, rebuilt on every refresh (its activity is live). */
 	self?: () => InstanceSummary | undefined;
 	onClose: () => void;
-	/** Quit pi (ctrl+c twice, `exit`, /exit): the sessions keep running. Without it, quitting closes the view. */
-	onQuit?: () => void;
 	/** The models `/model` accepts for new sessions. */
 	listModels?: () => Array<{ provider: string; id: string }>;
 	/** A slash command that exists but needs a session (`/compact`); any other `/text` is a task. */
 	isKnownCommand?: (name: string) => boolean;
-	/** Open a session in this window; the one here goes to the background. `resume`: its turn was
-	 *  cut off by the move, so it should carry on here. */
-	onOpen: (sessionFile: string, cwd: string, resume: boolean) => void;
 	/** ctrl+x on this window's own session: stop its turn. */
 	onStopSelf?: () => void;
-	/** ctrl+x twice on this window's own session: delete it; the window moves to a new one. */
-	onDeleteSelf?: () => void;
 	/** ctrl+r on this window's own session. */
 	onRenameSelf?: (name: string) => void;
-	/** Pane mode: every session is a pi in its own tmux session (see tmux.ts). */
-	panes?: PaneOps;
+	/** Every session is a pi in its own tmux session (see tmux.ts). */
+	panes: PaneOps;
 	/** A peek reply to this window's own session: sent as its next prompt once the view closes. */
 	onSelfReply?: (text: string) => void;
-	/** ctrl+enter: start a session in this window with `task` as its first prompt. */
-	onCreateAndOpen?: (
-		cwd: string,
-		model: { provider: string; id: string } | undefined,
-		task: string,
-		images: ImageContent[],
-	) => void;
 	/** Clipboard IO is separate from the view so asynchronous paste never blocks rendering. */
 	readClipboard?: () => Promise<AgentClipboard>;
 	/** `/resume`: this repository's past sessions, newest first. */
@@ -106,8 +91,6 @@ export interface AgentViewOptions {
 	saveViewMode?: (mode: ViewMode) => void;
 	/** The terminal tab title while the view is open; undefined restores the session's own. */
 	setTitle?: (title: string | undefined) => void;
-	/** Test seam for the "wait for the session file" step of opening a starting session. */
-	fileExists?: (path: string) => boolean;
 }
 
 /** What agent view needs from tmux in pane mode. */
@@ -138,11 +121,8 @@ const ARM_MS = 2000;
 const CTRL_C_MS = 800;
 /** Bare words that quit, as in Claude Code. */
 export const EXIT_WORDS = new Set(["exit", "quit", ":q", ":q!", ":wq", ":wq!"]);
-/** How long a takeover waits for the other terminal: its next heartbeat (3s), then abort and switch. */
-const RELEASE_WAIT_MS = 15_000;
 /** How long a new pane's row shows as starting before it should have registered. */
 const PANE_START_MS = 15_000;
-const RELEASE_POLL_MS = 300;
 
 type Color = Parameters<typeof theme.fg>[0];
 
@@ -660,59 +640,7 @@ export class AgentView implements Component, Focusable {
 		}
 		const cwd = this.dispatchCwd();
 		const model = this.dispatchModel;
-		if (this.opts.panes) {
-			this.startPane(open, draft, task, images, cwd, model);
-			return;
-		}
-		if (open && this.opts.onCreateAndOpen && cwd === this.opts.cwd) {
-			this.clearDraft();
-			this.teardown();
-			this.opts.onCreateAndOpen(cwd, model, task, images);
-			return;
-		}
-		const placeholder: AgentRow = {
-			id: `pending:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`,
-			label: labelFromTask(task || "Image task"),
-			cwd,
-			state: "working",
-			alive: true,
-			detail: "starting…",
-			pinned: false,
-			self: false,
-			elsewhere: false,
-			createdAt: new Date().toISOString(),
-		};
-		this.pending.push(placeholder);
-		this.clearDraft();
-		this.selectedKey = placeholder.id;
-		this.userMoved = true;
-		this.recompute();
-		this.render_();
-		try {
-			const instance = await this.opts.client.spawn({
-				cwd,
-				label: placeholder.label,
-				prompt: task,
-				images: images.length ? images : undefined,
-				model,
-			});
-			if (instance && this.selectedKey === placeholder.id) this.selectedKey = instance.id;
-			if (open && instance) {
-				this.pending = this.pending.filter((p) => p !== placeholder);
-				await this.refresh();
-				const row = this.rows.find((r) => r.id === instance.id);
-				if (row) void this.open(row);
-			}
-		} catch (error) {
-			if (!this.composerText() && this.composerImages.length === 0) {
-				this.setComposer(draft);
-				this.composerImages = images;
-			}
-			this.say(error instanceof Error ? error.message : String(error), "error");
-		} finally {
-			this.pending = this.pending.filter((p) => p !== placeholder);
-			await this.refresh();
-		}
+		this.startPane(open, draft, task, images, cwd, model);
 	}
 
 	/** Pane mode: a new session is a pi of its own, started with the task as its first prompt.
@@ -726,7 +654,6 @@ export class AgentView implements Component, Focusable {
 		model: { provider: string; id: string } | undefined,
 	): void {
 		const panes = this.opts.panes;
-		if (!panes) return;
 		this.clearDraft();
 		let pane: string;
 		try {
@@ -755,7 +682,6 @@ export class AgentView implements Component, Focusable {
 			detail: "starting…",
 			pinned: false,
 			self: false,
-			elsewhere: false,
 			pane,
 			createdAt: new Date().toISOString(),
 		};
@@ -774,7 +700,7 @@ export class AgentView implements Component, Focusable {
 	/** Pane mode: show `pane` in this terminal; this view closes so its session shows on return. */
 	private leaveFor(pane: string): void {
 		try {
-			this.opts.panes?.switchTo(pane);
+			this.opts.panes.switchTo(pane);
 		} catch (error) {
 			this.say(`Couldn't open — ${error instanceof Error ? error.message : String(error)}`, "error");
 			return;
@@ -788,25 +714,11 @@ export class AgentView implements Component, Focusable {
 			this.leaveFor(row.pane);
 			return;
 		}
-		if (row.elsewhere) {
-			this.say("This session is open in a terminal outside agent view — close pi there to open it here", "error");
-			return;
-		}
 		this.opening = row.id;
 		this.render_();
-		let resume = false;
-		try {
-			// A background process from before pane mode lets its running tool finish first.
-			if (row.alive) resume = await this.opts.client.handOver(row.id);
-		} catch (error) {
-			if (this.opening !== row.id) return;
-			this.opening = undefined;
-			this.say(`Couldn't open — ${error instanceof Error ? error.message : String(error)}`, "error");
-			return;
-		}
 		let pane: string;
 		try {
-			pane = panes.start(row.cwd, ["--session", sessionFile], resume ? { [CONTINUE_ENV]: "1" } : undefined);
+			pane = panes.start(row.cwd, ["--session", sessionFile]);
 		} catch (error) {
 			this.opening = undefined;
 			this.say(`Couldn't open — ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -822,11 +734,7 @@ export class AgentView implements Component, Focusable {
 		this.leaveFor(pane);
 	}
 
-	/**
-	 * Enter / →: make the session this window's own, as a full pi session; the one here moves to the
-	 * background. A background process lets its running tools finish and hands the session over;
-	 * a turn still in progress then carries on here.
-	 */
+	/** Enter / →: show the session in this terminal; the one here keeps running in its own pane. */
 	private async open(row: AgentRow): Promise<void> {
 		if (this.closed || this.opening) return;
 		if (row.self) {
@@ -841,91 +749,7 @@ export class AgentView implements Component, Focusable {
 			);
 			return;
 		}
-		if (this.opts.panes) {
-			await this.openPane(row, this.opts.panes, row.sessionFile);
-			return;
-		}
-		const exists = this.opts.fileExists ?? existsSync;
-		this.opening = row.id;
-		this.render_();
-		// A fresh child reports its session file before the first turn has written it.
-		for (let i = 0; i < 40 && !exists(row.sessionFile) && this.opening === row.id; i++) {
-			await new Promise((resolve) => setTimeout(resolve, 150));
-		}
-		if (this.opening !== row.id) return; // esc cancelled
-		if (!exists(row.sessionFile)) {
-			this.opening = undefined;
-			this.say("Still starting — try again in a moment");
-			return;
-		}
-		let resume = false;
-		try {
-			const owners = (await this.opts.client.list()).filter(
-				(instance) =>
-					instance.sessionFile === row.sessionFile &&
-					(instance.status === "online" || instance.status === "starting" || instance.status === "stopping"),
-			);
-			if (this.closed || this.opening !== row.id) return;
-			// Another window gives a session up only once idle: its turn cannot move between windows.
-			if (owners.some((owner) => owner.external && owner.activity !== "idle")) {
-				this.opening = undefined;
-				this.say("This session is working in another terminal — open it once it's idle", "error");
-				return;
-			}
-			if (owners.some((owner) => owner.external) && !(await this.takeOver(row.id, row.sessionFile))) return;
-			for (const owner of owners.filter((owner) => !owner.external)) {
-				if (await this.opts.client.handOver(owner.id)) resume = true;
-			}
-		} catch (error) {
-			if (this.closed || this.opening !== row.id) return;
-			this.opening = undefined;
-			this.say(`Couldn't open — ${error instanceof Error ? error.message : String(error)}`, "error");
-			return; // The old writer may still be running; do not create a second one.
-		}
-		if (this.closed || this.opening !== row.id) {
-			// Cancelled while the turn was being handed over: it goes on in the background.
-			if (resume) {
-				await handOff(
-					{ cwd: row.cwd, label: row.label, sessionFile: row.sessionFile, working: true },
-					this.opts.client,
-				);
-				if (!this.closed) await this.refresh();
-			}
-			return;
-		}
-		this.opening = undefined;
-		this.teardown();
-		this.opts.onOpen(row.sessionFile, row.cwd, resume);
-	}
-
-	/** Ask the terminal holding `sessionFile` to let it go, and wait until it has. */
-	private async takeOver(rowId: string, sessionFile: string): Promise<boolean> {
-		let asked = false;
-		try {
-			asked = await this.opts.client.release(sessionFile);
-		} catch {
-			// no daemon: nothing to pass the request on
-		}
-		if (!asked) {
-			this.say("Can't take over — the agent daemon is out of date · close pi there to open it here", "error");
-			return false;
-		}
-		this.opening = rowId;
-		this.render_();
-		const deadline = Date.now() + RELEASE_WAIT_MS;
-		while (this.opening === rowId && Date.now() < deadline) {
-			await new Promise((resolve) => setTimeout(resolve, RELEASE_POLL_MS));
-			try {
-				const instances = await this.opts.client.list();
-				if (!instances.some((i) => i.external && i.sessionFile === sessionFile)) return this.opening === rowId;
-			} catch {
-				// keep waiting
-			}
-		}
-		if (this.opening !== rowId) return false; // esc cancelled
-		this.opening = undefined;
-		this.say("The other terminal didn't let go — close pi there to open it here", "error");
-		return false;
+		await this.openPane(row, this.opts.panes, row.sessionFile);
 	}
 
 	private disarm(): void {
@@ -951,14 +775,14 @@ export class AgentView implements Component, Focusable {
 		const item = this.selected;
 		if (!item || item.kind === "more") return;
 		if (item.kind === "header") {
-			const targets = item.band.rows.filter((r) => !r.self && !r.elsewhere && !r.id.startsWith("pending:"));
+			const targets = item.band.rows.filter((r) => !r.self && !r.id.startsWith("pending:"));
 			if (targets.length === 0 || this.composing()) return;
 			if (this.armed?.key === item.key) {
 				this.disarm();
 				await Promise.all(
 					targets
 						.map(async (r) => {
-							if (r.pane) this.opts.panes?.kill(r.pane);
+							if (r.pane) this.opts.panes.kill(r.pane);
 							await this.opts.client.delete(r.id);
 						})
 						.map((p) => p.catch(() => undefined)),
@@ -973,12 +797,7 @@ export class AgentView implements Component, Focusable {
 		if (row.self) {
 			if (this.armed?.key === row.id) {
 				this.disarm();
-				if (this.opts.panes) {
-					await this.deleteOwnPane(row, this.opts.panes);
-					return;
-				}
-				this.teardown();
-				this.opts.onDeleteSelf?.();
+				await this.deleteOwnPane(row, this.opts.panes);
 				return;
 			}
 			this.arm(row.id);
@@ -989,15 +808,11 @@ export class AgentView implements Component, Focusable {
 			}
 			return;
 		}
-		if (row.elsewhere) {
-			this.say("Can't stop or delete — this session is running in another terminal", "error");
-			return;
-		}
 		if (row.id.startsWith("pending:")) return;
 		if (this.armed?.key === row.id) {
 			this.disarm();
 			try {
-				if (row.pane) this.opts.panes?.kill(row.pane);
+				if (row.pane) this.opts.panes.kill(row.pane);
 				await this.opts.client.delete(row.id);
 				if (this.mode === "peek") this.mode = "list";
 			} catch (error) {
@@ -1007,22 +822,10 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		this.arm(row.id);
-		if (row.pane) {
-			// A pane's pi keeps running until deleted; the first press stops its turn.
-			if (stoppable(row)) {
-				this.justKilled = row.id;
-				await this.opts.client.send(row.id, { type: "abort" }).catch(() => undefined);
-				await this.refresh();
-			}
-			return;
-		}
-		if (row.alive) {
+		// A pane's pi keeps running until deleted; the first press stops its turn.
+		if (row.pane && stoppable(row)) {
 			this.justKilled = row.id;
-			try {
-				await this.opts.client.stop(row.id);
-			} catch {
-				// The second press deletes regardless; the daemon stops it then.
-			}
+			await this.opts.client.send(row.id, { type: "abort" }).catch(() => undefined);
 			await this.refresh();
 		}
 	}
@@ -1050,14 +853,6 @@ export class AgentView implements Component, Focusable {
 	private async togglePin(): Promise<void> {
 		const row = this.selectedRow;
 		if (!row || row.id.startsWith("pending:")) return;
-		if (row.self && !this.opts.panes) {
-			this.say("Only background sessions can be pinned", "error");
-			return;
-		}
-		if (row.elsewhere) {
-			this.say("Can't pin a session that's running in another terminal", "error");
-			return;
-		}
 		const verb = row.pinned ? "unpin" : "pin";
 		try {
 			await this.opts.client.setMeta(row.id, { pinned: !row.pinned });
@@ -1148,46 +943,17 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		this.mode = "list";
-		if (this.opts.panes) {
-			try {
-				this.leaveFor(this.opts.panes.start(past.cwd, ["--session", past.sessionFile]));
-			} catch (error) {
-				this.say(`Couldn't resume — ${error instanceof Error ? error.message : String(error)}`, "error");
-			}
-			return;
-		}
 		try {
-			const instance = await this.opts.client.spawn({
-				cwd: past.cwd,
-				label: past.label,
-				sessionFile: past.sessionFile,
-				model: this.dispatchModel,
-			});
-			if (instance) this.selectedKey = instance.id;
-			await this.refresh();
-			const row = instance && this.rows.find((r) => r.id === instance.id);
-			if (row) void this.open(row);
-			return;
+			this.leaveFor(this.opts.panes.start(past.cwd, ["--session", past.sessionFile]));
 		} catch (error) {
 			this.say(`Couldn't resume — ${error instanceof Error ? error.message : String(error)}`, "error");
 		}
-		await this.refresh();
 	}
 
 	/** Leave pi itself (ctrl+c twice, exit words, /exit): background sessions keep running. */
 	private quit(): void {
-		if (this.opts.panes) {
-			const panes = this.opts.panes;
-			this.close();
-			panes.detach();
-			return;
-		}
-		if (!this.opts.onQuit) {
-			this.close();
-			return;
-		}
-		this.teardown();
-		this.opts.onQuit();
+		this.close();
+		this.opts.panes.detach();
 	}
 
 	/** `/model <name>`: an exact `provider/id` or id, else the only one it starts. */
@@ -1266,8 +1032,7 @@ export class AgentView implements Component, Focusable {
 				await this.refresh();
 				return;
 			}
-			const stop = row.pane ? this.opts.client.send(row.id, { type: "abort" }) : this.opts.client.stop(row.id);
-			await stop.catch((error) => {
+			await this.opts.client.send(row.id, { type: "abort" }).catch((error) => {
 				this.replyError = `Couldn't stop — ${error instanceof Error ? error.message : String(error)}`;
 			});
 			await this.refresh();
@@ -1279,53 +1044,7 @@ export class AgentView implements Component, Focusable {
 			this.opts.onClose();
 			return;
 		}
-		if (this.opts.panes) {
-			await this.replyToPane(row, text, this.opts.panes);
-			return;
-		}
-		const needs = row.needs;
-		try {
-			if (needs?.method === "select") {
-				const options = needs.options ?? [];
-				const n = Number.parseInt(text, 10);
-				const choice =
-					n >= 1 && n <= options.length
-						? options[n - 1]
-						: options.find((o) => o.toLowerCase() === text.toLowerCase());
-				if (!choice) {
-					this.replyError = `press 1-${options.length} to choose, or enter with an empty reply to open it`;
-					this.render_();
-					return;
-				}
-				await this.opts.client.answer(row.id, needs.requestId, { value: choice });
-			} else if (needs?.method === "confirm") {
-				const yes = /^(y|yes|1)$/i.test(text);
-				const no = /^(n|no|2)$/i.test(text);
-				if (!yes && !no) {
-					this.replyError = "answer y or n";
-					this.render_();
-					return;
-				}
-				await this.opts.client.answer(row.id, needs.requestId, { confirmed: yes });
-			} else if (needs) {
-				await this.opts.client.answer(row.id, needs.requestId, { value: text });
-			} else if (row.alive) {
-				await this.opts.client.reply(row.id, text, row.state === "working");
-			} else {
-				// Not running: restart it from its conversation with the reply as the next prompt.
-				await this.opts.client.spawn({
-					cwd: row.cwd,
-					sessionFile: row.sessionFile,
-					prompt: text,
-					model: this.dispatchModel,
-				});
-			}
-			this.reply.setValue("");
-			this.replyDrafts.delete(row.id);
-		} catch (error) {
-			this.replyError = `Couldn't send — ${error instanceof Error ? error.message : String(error)}`;
-		}
-		await this.refresh();
+		await this.replyToPane(row, text, this.opts.panes);
 	}
 
 	/** Pane mode: a reply is the session's next prompt (queued behind a turn in progress). A
@@ -1353,22 +1072,6 @@ export class AgentView implements Component, Focusable {
 			this.replyError = `Couldn't send — ${error instanceof Error ? error.message : String(error)}`;
 		}
 		await this.refresh();
-	}
-
-	/** A number key in an empty reply fills in that option; enter sends it. */
-	private fillOption(row: AgentRow, n: number): boolean {
-		const options =
-			row.needs?.method === "select"
-				? row.needs.options
-				: row.needs?.method === "confirm"
-					? ["Yes", "No"]
-					: undefined;
-		const choice = options?.[n - 1];
-		if (!choice) return false;
-		this.reply.setValue(choice);
-		this.reply.handleInput("\x05");
-		this.render_();
-		return true;
 	}
 
 	// ---- input ---------------------------------------------------------------------------
@@ -1468,7 +1171,7 @@ export class AgentView implements Component, Focusable {
 			this.restoreFocusAfterFilter();
 			this.recompute();
 		} else if (this.armed) this.disarm();
-		else if (this.opts.panes && !this.opts.self?.()) {
+		else if (!this.opts.self?.()) {
 			// No session of this terminal's to return to: as in Claude Code, esc quits.
 			this.quit();
 			return;
@@ -1619,7 +1322,6 @@ export class AgentView implements Component, Focusable {
 			void this.sendReply(row);
 			return;
 		}
-		if (empty && /^[1-9]$/.test(data) && this.fillOption(row, Number(data))) return;
 		if (matchesKey(data, "ctrl+v") || matchesKey(data, "tab")) return;
 		this.reply.handleInput(data);
 		this.replyError = undefined;
@@ -1964,36 +1666,18 @@ export class AgentView implements Component, Focusable {
 	private renderPeek(row: AgentRow, width: number): string[] {
 		const inner = Math.max(10, width - 4);
 		const body: string[] = [];
-		const needs = row.needs;
-		const options =
-			needs?.method === "select" ? (needs.options ?? []) : needs?.method === "confirm" ? ["Yes", "No"] : [];
-		if (needs && options.length) {
-			body.push(
-				truncateToWidth(
-					theme.bold(clean(needs.message ? `${needs.title} — ${needs.message}` : needs.title)),
-					inner,
-					"…",
-				),
-			);
-			options.forEach((option, i) => {
-				body.push(truncateToWidth(`  ${cc.fg("muted", `${i + 1}.`.padEnd(3))}${clean(option)}`, inner, "…"));
-			});
-		} else {
-			const text = needs ? (needs.message ? `${needs.title} — ${needs.message}` : needs.title) : row.detail;
-			const shown = row.state === "working" && !needs ? clean(text) : this.dimMarkdown(text);
-			const cap = Math.max(5, this.opts.ui.terminal.rows - 8 - 6);
-			if (text) body.push(...wrapTextWithAnsi(shown, inner).slice(0, cap));
-		}
-		const since = needs?.since ?? (row.state === "needs" ? row.finishedAt : undefined);
+		const text = row.detail;
+		const shown = row.state === "working" ? clean(text) : this.dimMarkdown(text);
+		const cap = Math.max(5, this.opts.ui.terminal.rows - 8 - 6);
+		if (text) body.push(...wrapTextWithAnsi(shown, inner).slice(0, cap));
+		const since = row.state === "needs" ? row.finishedAt : undefined;
 		if (since) {
 			body.push(
 				cc.fg(ICON_COLOR[row.state], `  waiting ${compactAge(Date.now() - (Date.parse(since) || Date.now()))}`),
 			);
 		}
 		body.push("");
-		body.push(
-			promptLine(this.reply, inner, options.length > 0 ? `press 1-${options.length} or type your answer` : "reply"),
-		);
+		body.push(promptLine(this.reply, inner, "reply"));
 		if (this.replyError) body.push(truncateToWidth(`\x1b[2m${cc.fg("error", this.replyError)}\x1b[22m`, inner, "…"));
 		const border = (l: string, r: string) => faint(`${l}${"─".repeat(Math.max(0, width - 2))}${r}`);
 		const boxed = [border("╭", "╮")];
@@ -2144,9 +1828,7 @@ export class AgentView implements Component, Focusable {
 		if (composing) enter = "enter to create";
 		else if (row) enter = `enter to ${row.self ? "return" : this.resumable(row) ? "resume" : "open"}`;
 		const headerRows =
-			item?.kind === "header"
-				? item.band.rows.filter((r) => !r.self && !r.elsewhere && !r.id.startsWith("pending:"))
-				: [];
+			item?.kind === "header" ? item.band.rows.filter((r) => !r.self && !r.id.startsWith("pending:")) : [];
 		let x: string | undefined;
 		if (width >= 80 && !text) {
 			if (row) x = "ctrl+x to delete";

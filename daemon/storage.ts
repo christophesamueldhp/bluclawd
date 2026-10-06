@@ -1,29 +1,14 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { getInstancesPath, getMachinePath, getServerDir } from "./config.ts";
-import type { InstanceRecord, MachineRecord } from "./types.ts";
+import { getInstancesPath, getServerDir } from "./config.ts";
+import type { InstanceRecord } from "./types.ts";
 
 function ensureServerDir(): void {
 	const serverDir = getServerDir();
 	if (!existsSync(serverDir)) {
-		// 0700: the socket here is an unauthenticated control channel that can spawn agents and
-		// drive tool-running RPCs — keep it owner-only. (Local-trust model; see the socket server.)
+		// 0700: the socket here is an unauthenticated control channel that queues prompts for
+		// running sessions — keep it owner-only. (Local-trust model; see the socket server.)
 		mkdirSync(serverDir, { recursive: true, mode: 0o700 });
 	}
-}
-
-export function loadMachine(): MachineRecord | undefined {
-	const machinePath = getMachinePath();
-	if (!existsSync(machinePath)) {
-		return undefined;
-	}
-
-	const data = readFileSync(machinePath, "utf-8");
-	return JSON.parse(data) as MachineRecord;
-}
-
-export function saveMachine(machine: MachineRecord): void {
-	ensureServerDir();
-	writeFileSync(getMachinePath(), JSON.stringify(machine, null, 2));
 }
 
 export function loadInstances(): InstanceRecord[] {
@@ -37,8 +22,8 @@ export function loadInstances(): InstanceRecord[] {
 		const parsed = JSON.parse(data) as InstanceRecord[];
 		return Array.isArray(parsed) ? parsed : [];
 	} catch {
-		// A corrupt/half-written instances.json must not throw out of every daemon op (list/spawn/
-		// stop) or brick recoverAfterRestart at startup. Treat it as empty and let it be rewritten.
+		// A corrupt/half-written instances.json must not throw out of every daemon op (list/save/
+		// delete) or brick recoverAfterRestart at startup. Treat it as empty and let it be rewritten.
 		return [];
 	}
 }

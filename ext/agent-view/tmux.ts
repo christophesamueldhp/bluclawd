@@ -19,8 +19,6 @@ export const PANE_ENV = "BLUCLAWD_PANE";
 export const CONTINUE_ENV = "BLUCLAWD_CONTINUE";
 /** Set on a pane that should open agent view once it starts. */
 export const OPEN_VIEW_ENV = "BLUCLAWD_OPEN_VIEW";
-/** `0` keeps `pi` in the terminal it was started in, with sessions swapped into it instead. */
-export const TMUX_OPT_OUT_ENV = "BLUCLAWD_TMUX";
 
 const CONFIG = `set -g prefix None
 set -g prefix2 None
@@ -83,9 +81,8 @@ export class Tmux {
 		return join(this.dir, "tmux.sock");
 	}
 
-	/** Whether pane mode is on: tmux is installed and not opted out of. */
+	/** Whether tmux is installed: agent view needs it. */
 	static available(): boolean {
-		if (process.env[TMUX_OPT_OUT_ENV] === "0") return false;
 		return spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
 	}
 

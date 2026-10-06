@@ -1,18 +1,13 @@
 /**
  * Agent view (← on an empty prompt).
  *
- * Session switching lives on `ExtensionCommandContext`, not the plain context, so ← dispatches
- * the hidden `/agent-view` command rather than opening the view itself.
- *
- * pi's `switchSession` disposes the current session, so the outgoing handle is captured BEFORE
- * the call and handed to the daemon AFTER it, once its `.jsonl` has been flushed on dispose —
- * otherwise two writers share one session file.
+ * It needs tmux: every session is a pi of its own in a private tmux server (tmux.ts), and `pi` run
+ * in a terminal starts its session there and attaches. Without tmux, agent view stays off.
  */
 
 import { existsSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename } from "node:path";
-import type { ImageContent } from "@earendil-works/pi-ai";
 import type { ExtensionCommandContext, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SessionManager, SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import {
@@ -29,7 +24,7 @@ import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
 import { trustBadge } from "../permissions/index.ts";
 import { AgentView, EXIT_WORDS, type PastSession } from "./agent-view.ts";
-import { type BackgroundableSession, CONTINUE_COMMAND, CONTINUE_TEXT, handOff, handOffAfterExit } from "./hand-off.ts";
+import { type BackgroundableSession, CONTINUE_COMMAND, CONTINUE_TEXT, handOffAfterExit } from "./hand-off.ts";
 import { type InstanceSummary, OrchestratorClient, type PaneMessage } from "./orchestrator-client.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
 import { collectRows, labelFromTask } from "./rows.ts";
@@ -38,11 +33,6 @@ import { CONTINUE_ENV, OPEN_VIEW_ENV, piCommand, Tmux } from "./tmux.ts";
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
-
-type ViewAction =
-	| { type: "open"; sessionFile: string; resume: boolean }
-	| { type: "delete" }
-	| { type: "create"; model?: { provider: string; id: string }; task: string; images: ImageContent[] };
 
 const TMP_ROOTS = [tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"];
 const PILL_POLL_MS = 10_000;
@@ -54,11 +44,10 @@ const LEFT_EDIT_MS = 2000;
 /** pi exits on a second ctrl+c this soon after the first; a pane detaches instead. */
 const CTRL_C_MS = 500;
 const STATUS_KEY = STATUS_KEYS.agents;
+const NEEDS_TMUX = "Agent view needs tmux — install it (brew install tmux) and start pi again";
 /** The command ←← dispatches; not meant to be typed. */
 const AGENT_VIEW_COMMAND = "agent-view";
-/** The command a takeover from another terminal dispatches; not meant to be typed. */
-const RELEASE_COMMAND = "agent-view-release";
-const HIDDEN_COMMANDS: ReadonlySet<string> = new Set([AGENT_VIEW_COMMAND, RELEASE_COMMAND, CONTINUE_COMMAND]);
+const HIDDEN_COMMANDS: ReadonlySet<string> = new Set([AGENT_VIEW_COMMAND]);
 
 /** Autocomplete without the agent view commands. */
 export function withoutAgentViewCommand(current: AutocompleteProvider): AutocompleteProvider {
@@ -133,13 +122,9 @@ const agentView: InlineExtension = {
 		let activity = new ForegroundActivity();
 		let stopPill: (() => void) | undefined;
 		let viewOpen = false;
-		let closeView: (() => void) | undefined;
-		let releasing = false;
 		// The first ← swaps the footer pill for this hint; the second opens agent view.
 		let leftHint: string | undefined;
 		let paintPill: (() => void) | undefined;
-		// Set when agent view opened this session, so the hint reads "go back".
-		let openedFromView = false;
 		let autocompleteAdded = false;
 		// Set while quitting waits for the turn's tools to finish.
 		let onToolsSettled: (() => void) | undefined;
@@ -174,8 +159,7 @@ const agentView: InlineExtension = {
 				cwd: ctx.sessionManager.getCwd(),
 				sessionId: ctx.sessionManager.getSessionId(),
 				sessionFile: ctx.sessionManager.getSessionFile(),
-				// A pane is listed like any row; a plain window only marks rows "open elsewhere".
-				label: pane ? row.label : deriveLabel(ctx.sessionManager.getSessionName(), ctx.sessionManager.getEntries()),
+				label: row.label,
 				pane,
 				detail: row.detail,
 				turns: row.turns,
@@ -220,15 +204,12 @@ const agentView: InlineExtension = {
 		const captureOutgoing = (ctx: ExtensionContext): BackgroundableSession | undefined => {
 			const sessionFile = ctx.sessionManager.getSessionFile();
 			if (!sessionFile || !existsSync(sessionFile)) return undefined;
-			const model = ctx.model;
 			return {
 				cwd: ctx.sessionManager.getCwd(),
 				label: ctx.sessionManager.getSessionName() ?? selfRow(ctx).label,
 				sessionFile,
-				model: model ? { provider: model.provider, id: model.id } : undefined,
 				working: !ctx.isIdle(),
-				pane: !!pane,
-				command: pane ? piCommand() : undefined,
+				command: piCommand(),
 			};
 		};
 
@@ -246,7 +227,7 @@ const agentView: InlineExtension = {
 				});
 			} catch (error) {
 				ctx.ui.notify(
-					`Agent view sessions swap into this window — tmux couldn't start: ${error instanceof Error ? error.message : String(error)}`,
+					`Agent view is off — tmux couldn't start: ${error instanceof Error ? error.message : String(error)}`,
 					"warning",
 				);
 				return false;
@@ -326,12 +307,17 @@ const agentView: InlineExtension = {
 			// pi's package loader gives each top-level extension file its own module
 			// instance, so agent view populates its own copy of the shared theme.
 			setSharedTheme(ctx.ui.theme);
-			// Agent view is a terminal affordance. RPC children (the daemon's own sessions) have a
-			// UI too, but registering one as a window would mark its own row "open elsewhere".
+			// Agent view is a terminal affordance: print, json and rpc modes have none.
 			if (ctx.mode !== "tui") return;
-			if (!pane && !launched && Tmux.available()) {
+			if (!pane) {
+				if (launched) return;
 				launched = true;
-				if (launchInTmux(ctx)) return;
+				if (!Tmux.available()) {
+					ctx.ui.notify(NEEDS_TMUX, "warning");
+					return;
+				}
+				launchInTmux(ctx);
+				return;
 			}
 			registration?.stop();
 			// Before the first heartbeat, which must not list a pane that only hosts agent view.
@@ -342,13 +328,11 @@ const agentView: InlineExtension = {
 			registration = new SelfRegistration(
 				new OrchestratorClient(),
 				() => selfInfo(ctx),
-				// Session switching needs a command context, as ←← does.
-				() => pi.sendUserMessage(`/${RELEASE_COMMAND}`, { expandPromptTemplates: true }),
 				(message) => onPaneMessage(ctx, message),
 				pane,
 			);
 			registration.start();
-			if (pane && blank(ctx) && !endsOnDetach) {
+			if (blank(ctx) && !endsOnDetach) {
 				try {
 					panes.endOnDetach(pane, true);
 					endsOnDetach = true;
@@ -398,9 +382,9 @@ const agentView: InlineExtension = {
 			const offKey = ctx.ui.onTerminalInput((data) => {
 				// Kitty reports a release (and a held key) as separate events; only presses count.
 				if (isKeyRelease(data) || isKeyRepeat(data)) return undefined;
-				// Pane mode: pi's own exit keys (ctrl+c twice, ctrl+d on an empty prompt) leave tmux
-				// instead, as quitting Claude Code leaves its sessions running.
-				if (pane && !viewOpen && !tui?.hasOverlay()) {
+				// pi's own exit keys (ctrl+c twice, ctrl+d on an empty prompt) leave tmux instead, as
+				// quitting Claude Code leaves its sessions running.
+				if (!viewOpen && !tui?.hasOverlay()) {
 					const empty = ctx.ui.getEditorText() === "";
 					if (matchesKey(data, "ctrl+d") && empty) {
 						leavePane(blank(ctx));
@@ -442,7 +426,7 @@ const agentView: InlineExtension = {
 				}
 				const at = Date.now();
 				armedAt = at;
-				leftHint = theme.fg("dim", `Press ← again to ${openedFromView ? "go back to" : "open"} agents`);
+				leftHint = theme.fg("dim", "Press ← again to open agents");
 				paintPill?.();
 				setTimeout(() => {
 					if (armedAt === at) disarm();
@@ -523,10 +507,9 @@ const agentView: InlineExtension = {
 			stopPill?.();
 			stopPill = undefined;
 			// Exiting pi keeps the session in agent view until ctrl+x deletes it; a turn in progress
-			// carries on in the daemon once this process is gone (it must be the only writer of the
-			// .jsonl). A switch ("new"/"resume") is handed off by agent view itself, and a reload is
-			// not leaving.
-			if (event.reason !== "quit" || ctx.mode !== "tui") return;
+			// carries on in a new pane once this process is gone (it must be the only writer of the
+			// .jsonl). A reload is not leaving.
+			if (event.reason !== "quit" || ctx.mode !== "tui" || !pane) return;
 			// A tool blocked on a dialog cannot finish once the TUI is gone.
 			if (!ctx.isIdle() && activity.current === "working") await settleTools();
 			const outgoing = captureOutgoing(ctx);
@@ -534,6 +517,10 @@ const agentView: InlineExtension = {
 		});
 
 		const openAgentView = async (ctx: ExtensionCommandContext): Promise<void> => {
+			if (!pane) {
+				ctx.ui.notify(NEEDS_TMUX, "warning");
+				return;
+			}
 			if (viewOpen) return;
 			viewOpen = true;
 			const model = ctx.model;
@@ -546,7 +533,7 @@ const agentView: InlineExtension = {
 				return name ? `π - ${name} - ${dir}` : `π - ${dir}`;
 			};
 			try {
-				const action = await ctx.ui.custom<ViewAction | undefined>(
+				await ctx.ui.custom<void>(
 					(tui, _theme, _keybindings, done) => {
 						const client = new OrchestratorClient();
 						const view = new AgentView({
@@ -561,28 +548,21 @@ const agentView: InlineExtension = {
 							home: process.env.HOME ?? "",
 							self: () => (hosting(ctx) ? undefined : selfRow(ctx)),
 							onClose: () => done(undefined),
-							// Quitting leaves through pi's own shutdown, which hands this session to the daemon.
-							onQuit: () => {
-								done(undefined);
-								ctx.shutdown();
+							panes: {
+								current: pane,
+								switchTo: (name) => {
+									const ending = blank(ctx);
+									panes.switchTo(name);
+									if (ending) panes.kill(pane);
+								},
+								start: (cwd, args, env) => panes.newSession({ cwd, args, env }),
+								kill: (name) => panes.kill(name),
+								unlist: async () => {
+									await registration?.stop();
+									registration = undefined;
+								},
+								detach: () => leavePane(blank(ctx)),
 							},
-							panes: pane
-								? {
-										current: pane,
-										switchTo: (name) => {
-											const ending = blank(ctx);
-											panes.switchTo(name);
-											if (ending) panes.kill(pane);
-										},
-										start: (cwd, args, env) => panes.newSession({ cwd, args, env }),
-										kill: (name) => panes.kill(name),
-										unlist: async () => {
-											await registration?.stop();
-											registration = undefined;
-										},
-										detach: () => leavePane(blank(ctx)),
-									}
-								: undefined,
 							listModels: () =>
 								ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id })),
 							isKnownCommand: (name) =>
@@ -590,140 +570,27 @@ const agentView: InlineExtension = {
 								pi.getCommands().some((c) => c.name === name && c.source === "extension"),
 							onSelfReply: (text) =>
 								pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "followUp" }),
-							onOpen: (sessionFile, _cwd, resume) => done({ type: "open", sessionFile, resume }),
 							onStopSelf: () => ctx.abort(),
-							onDeleteSelf: () => done({ type: "delete" }),
 							onRenameSelf: (name) => pi.setSessionName(name),
-							onCreateAndOpen: (_cwd, spawnModel, task, images) =>
-								done({ type: "create", model: spawnModel, task, images }),
 							loadPastSessions,
 							loadViewMode: () => loadViewMode(getAgentDir()),
 							saveViewMode: (mode) => saveViewMode(getAgentDir(), mode),
 							setTitle: (title) => ctx.ui.setTitle(title ?? sessionTitle()),
 						});
-						closeView = () => view.close();
 						// The roster loads on show, not on construct — without this it opens empty.
 						void view.onShow();
 						return view as Component & { dispose?(): void };
 					},
 					{ overlay: true, overlayOptions: FULL_SCREEN },
 				);
-				if (!action) return;
-				if (action.type === "delete") {
-					await deleteSession(ctx);
-					return;
-				}
-				// The switch disposes this session. As on quit, a turn in progress first lets its
-				// running tools finish; the daemon then carries the turn on in the background.
-				if (!ctx.isIdle() && activity.current === "working") {
-					ctx.ui.notify("Switching after the current tool finishes…", "info");
-					await toolsSettled();
-				}
-				// Only plain data survives replacement. The command awaits the whole transition;
-				// hand-off runs only in the fresh context, after dispose and never on cancellation.
-				const outgoing = captureOutgoing(ctx);
-				openedFromView = true;
-				if (action.type === "open") {
-					await ctx.switchSession(action.sessionFile, {
-						withSession: async (replaced) => {
-							await handOff(outgoing);
-							// Its turn was cut off by the move: it carries on here, with no visible prompt.
-							if (action.resume) {
-								await replaced.sendMessage(
-									{ customType: CONTINUE_COMMAND, content: CONTINUE_TEXT, display: false },
-									{ triggerTurn: true },
-								);
-							}
-						},
-					});
-				} else {
-					const chosen = action.model ? `${action.model.provider}/${action.model.id}` : undefined;
-					const current = model ? `${model.provider}/${model.id}` : undefined;
-					if (chosen && chosen !== current) {
-						ctx.ui.notify(
-							`New session will use ${current ?? "the default model"} — newSession() cannot set ${chosen}.`,
-							"warning",
-						);
-					}
-					await ctx.newSession({
-						withSession: async (replaced) => {
-							await handOff(outgoing);
-							await replaced.sendUserMessage(
-								action.images.length
-									? [...(action.task ? [{ type: "text" as const, text: action.task }] : []), ...action.images]
-									: action.task,
-							);
-						},
-					});
-				}
 			} finally {
 				viewOpen = false;
-				closeView = undefined;
-			}
-		};
-
-		/**
-		 * ctrl+x twice on this window's own row: the session leaves agent view like any other, and
-		 * this window moves to a new one, still in agent view. The .jsonl stays, resumable with /resume.
-		 */
-		const deleteSession = async (ctx: ExtensionCommandContext): Promise<void> => {
-			const sessionFile = ctx.sessionManager.getSessionFile();
-			if (!ctx.isIdle()) {
-				ctx.abort();
-				await ctx.waitForIdle();
-			}
-			await ctx.newSession({
-				withSession: async (replaced) => {
-					// Rows this session left behind earlier (a stored twin) go with it.
-					const client = new OrchestratorClient();
-					const twins = sessionFile
-						? (await client.list().catch(() => [])).filter((i) => !i.external && i.sessionFile === sessionFile)
-						: [];
-					await Promise.all(twins.map((i) => client.delete(i.id).catch(() => undefined)));
-					void replaced.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
-				},
-			});
-		};
-
-		/**
-		 * Another terminal is taking this session over: let any turn finish
-		 * and move to a new session. Not handed to the daemon — the other terminal is its writer now.
-		 */
-		const releaseSession = async (ctx: ExtensionCommandContext): Promise<void> => {
-			if (releasing) return;
-			releasing = true;
-			try {
-				closeView?.();
-				if (!ctx.isIdle()) {
-					ctx.ui.notify("Waiting for this session to finish before moving to another terminal", "info");
-					await ctx.waitForIdle();
-				}
-				await ctx.newSession({
-					withSession: async (replaced) => {
-						replaced.ui.notify("Session moved to another terminal — this is a new one", "info");
-					},
-				});
-			} finally {
-				releasing = false;
 			}
 		};
 
 		pi.registerCommand(AGENT_VIEW_COMMAND, {
 			description: "Agent view (press ← on an empty prompt)",
 			handler: async (_args, ctx) => openAgentView(ctx),
-		});
-		// Run by a worker the daemon resumed mid-turn: the model carries on without a visible prompt.
-		pi.registerCommand(CONTINUE_COMMAND, {
-			description: "Continue a turn that moved to the background",
-			handler: async () =>
-				pi.sendMessage(
-					{ customType: CONTINUE_COMMAND, content: CONTINUE_TEXT, display: false },
-					{ triggerTurn: true },
-				),
-		});
-		pi.registerCommand(RELEASE_COMMAND, {
-			description: "Let another terminal take this session over",
-			handler: async (_args, ctx) => releaseSession(ctx),
 		});
 	},
 };

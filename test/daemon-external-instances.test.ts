@@ -14,14 +14,13 @@ describe("external (self-registered) instances", () => {
 		expect(list.length).toBe(1);
 		expect(list[0].record.id).toBe("ext-1");
 		expect(list[0].activity).toBe("working");
-		expect(supervisor.getActivity("ext-1")).toBe("working");
 	});
 
 	it("heartbeat (re-register) updates activity and keeps it alive", () => {
 		const supervisor = new ServerSupervisor();
 		supervisor.registerExternal(rec("ext-1"), "working", 1000);
 		supervisor.registerExternal(rec("ext-1"), "idle", 10_000);
-		expect(supervisor.getActivity("ext-1")).toBe("idle");
+		expect(supervisor.listExternalInstances(10_000)[0].activity).toBe("idle");
 		expect(supervisor.listExternalInstances(10_000).length).toBe(1);
 	});
 
@@ -29,7 +28,6 @@ describe("external (self-registered) instances", () => {
 		const supervisor = new ServerSupervisor();
 		supervisor.registerExternal(rec("ext-1"), "working", 1000);
 		expect(supervisor.listExternalInstances(1000 + 20_000)).toEqual([]);
-		expect(supervisor.getActivity("ext-1")).toBeUndefined();
 	});
 
 	it("keeps an external instance just within the TTL", () => {
@@ -75,32 +73,5 @@ describe("external instance TTL vs the client's heartbeat cadence", () => {
 		const supervisor = new ServerSupervisor();
 		supervisor.registerExternal(rec("ext-1"), "working", 0);
 		expect(supervisor.listExternalInstances(5 * HEARTBEAT_MS + 1)).toEqual([]); // past the 15000ms boundary
-	});
-});
-
-describe("releasing a session another window holds", () => {
-	const holding = (id: string, sessionFile: string): InstanceRecord => ({ ...rec(id), sessionFile });
-
-	it("tells the holder on its next heartbeat, once", () => {
-		const supervisor = new ServerSupervisor();
-		supervisor.registerExternal(holding("a", "/x.jsonl"), "idle", 1000);
-		supervisor.registerExternal(holding("b", "/y.jsonl"), "idle", 1000);
-		expect(supervisor.requestRelease("/x.jsonl")).toBe(1);
-		expect(supervisor.registerExternal(holding("b", "/y.jsonl"), "idle", 2000)).toBe(false);
-		expect(supervisor.registerExternal(holding("a", "/x.jsonl"), "idle", 2000)).toBe(true);
-		expect(supervisor.registerExternal(holding("a", "/x.jsonl"), "idle", 3000)).toBe(false);
-	});
-
-	it("drops the request once the holder has moved to another session", () => {
-		const supervisor = new ServerSupervisor();
-		supervisor.registerExternal(holding("a", "/x.jsonl"), "idle", 1000);
-		supervisor.requestRelease("/x.jsonl");
-		expect(supervisor.registerExternal(holding("a", "/new.jsonl"), "idle", 2000)).toBe(false);
-		expect(supervisor.registerExternal(holding("a", "/x.jsonl"), "idle", 3000)).toBe(false);
-	});
-
-	it("reports no holder for a file nobody has open", () => {
-		const supervisor = new ServerSupervisor();
-		expect(supervisor.requestRelease("/x.jsonl")).toBe(0);
 	});
 });

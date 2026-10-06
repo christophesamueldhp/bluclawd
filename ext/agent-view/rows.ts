@@ -3,7 +3,7 @@
  * is blocked on a prompt, running a turn, or idle; the band order puts what needs you on top. Pure — the view renders what these functions return.
  */
 
-import type { InstanceSummary, PendingNeeds } from "./orchestrator-client.ts";
+import type { InstanceSummary } from "./orchestrator-client.ts";
 
 export type RowState = "working" | "needs" | "idle" | "done" | "failed" | "stopped";
 
@@ -17,16 +17,12 @@ export interface AgentRow {
 	/** Whether a process is running it (✻ / spinner) or not (∙). */
 	alive: boolean;
 	detail: string;
-	/** The blocking prompt it is waiting on (answerable from the peek panel). */
-	needs?: PendingNeeds;
 	createdAt?: string;
 	finishedAt?: string;
 	pinned: boolean;
 	sortOrder?: number;
 	/** The foreground session this view was opened from — returned to, never stopped. */
 	self: boolean;
-	/** Open in another window's foreground — attaching here would make a second writer. */
-	elsewhere: boolean;
 	/** Pane mode: the tmux session its pi runs in. */
 	pane?: string;
 	updatedAt?: string;
@@ -48,7 +44,7 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 	if (inst.status === "starting") state = "working";
 	else if (alive) {
 		if (inst.activity === "working") state = "working";
-		else if (inst.activity === "awaiting_input" || inst.needs) state = "needs";
+		else if (inst.activity === "awaiting_input") state = "needs";
 		else if (inst.outcome === "failed") state = "failed";
 		else if (inst.outcome === "stopped") state = "stopped";
 		else if (inst.outcome === "done" || (inst.turns ?? 0) > 0) state = "done";
@@ -56,8 +52,7 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 	} else state = inst.outcome === "failed" ? "failed" : inst.outcome === "done" ? "done" : "stopped";
 
 	let detail = inst.detail ?? "";
-	if (inst.needs) detail = needsText(inst.needs);
-	else if (inst.status === "starting") detail = "starting…";
+	if (inst.status === "starting") detail = "starting…";
 	// An idle session's line depends on focus, so the view writes it.
 	else if (state === "idle") detail = "";
 
@@ -70,44 +65,27 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 		state,
 		alive,
 		detail,
-		needs: inst.needs,
 		createdAt: inst.createdAt,
 		finishedAt: inst.finishedAt,
 		pinned: inst.pinned === true,
 		sortOrder: inst.sortOrder,
 		self,
-		elsewhere: false,
 		pane: inst.pane,
 		updatedAt: inst.lastSeenAt,
 	};
 }
 
-function needsText(needs: PendingNeeds): string {
-	return needs.message ? `${needs.title} — ${needs.message}` : needs.title;
-}
-
 /**
- * The rows agent view lists: the daemon's sessions, every pane's pi, and this window's own
- * (`self`, built by the caller). Other plain windows' sessions are not listed, but a stored row
- * they hold open is marked `elsewhere`. One row per session file; this window's own and then a
- * live one win over a stored twin.
+ * The rows agent view lists: the daemon's stored rows, every pane's pi, and this window's own
+ * (`self`, built by the caller). One row per session file; this window's own and then a live one
+ * win over a stored twin.
  */
 export function collectRows(instances: InstanceSummary[], self: InstanceSummary | undefined): AgentRow[] {
-	const heldElsewhere = new Set(
-		instances.filter((i) => i.external && i.id !== self?.id && i.sessionFile).map((i) => i.sessionFile),
-	);
-	const listed = instances.filter((i) => (!i.external || i.pane) && i.id !== self?.id);
+	const listed = instances.filter((i) => i.id !== self?.id);
 	// A pane's own pin and order are kept by the daemon, on its registration.
 	const registered = self && instances.find((i) => i.id === self.id);
 	const own = self && registered ? { ...self, pinned: registered.pinned, sortOrder: registered.sortOrder } : self;
-	const rows = (own ? [own, ...listed] : listed).map((i) => {
-		const row = rowFromSummary(i, self?.id);
-		if (!row.self && !row.pane && row.sessionFile && heldElsewhere.has(row.sessionFile)) {
-			row.elsewhere = true;
-			row.detail = "open in another terminal · enter moves it here";
-		}
-		return row;
-	});
+	const rows = (own ? [own, ...listed] : listed).map((i) => rowFromSummary(i, self?.id));
 	const rank = (row: AgentRow): number => (row.self ? 0 : row.alive ? 1 : 2);
 	const byFile = new Map<string, AgentRow>();
 	const out: AgentRow[] = [];

@@ -3,7 +3,6 @@ import { readFileSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ImageContent } from "@earendil-works/pi-ai";
 import { daemonBuildId, getSocketPath } from "../../daemon/paths.ts";
 
 export type AgentActivity = "idle" | "working" | "awaiting_input";
@@ -26,20 +25,8 @@ export interface InstanceSummary {
 	finishedAt?: string;
 	pinned?: boolean;
 	sortOrder?: number;
-	/** The blocking prompt a live session is waiting on. */
-	needs?: PendingNeeds;
 	/** The tmux session its interactive pi runs in. */
 	pane?: string;
-}
-
-/** Mirror of daemon/session-state.ts SessionNeeds. */
-export interface PendingNeeds {
-	requestId: string;
-	method: "select" | "confirm" | "input" | "editor";
-	title: string;
-	message?: string;
-	options?: string[];
-	since?: string;
 }
 
 export interface RegisterInput {
@@ -60,17 +47,6 @@ export type PaneMessage = { type: "prompt"; text: string } | { type: "abort" } |
 
 type Request =
 	| { type: "list" }
-	| {
-			type: "spawn";
-			cwd: string;
-			label?: string;
-			sessionFile?: string;
-			provider?: string;
-			model?: string;
-	  }
-	| { type: "stop"; instanceId: string }
-	| { type: "hand_over"; instanceId: string }
-	| { type: "rpc"; instanceId: string; command: unknown }
 	| { type: "register"; instance: RegisterInput }
 	| { type: "unregister"; instanceId: string }
 	| { type: "send"; instanceId: string; message: PaneMessage }
@@ -78,9 +54,7 @@ type Request =
 	| { type: "delete"; instanceId: string }
 	| { type: "rename"; instanceId: string; name: string }
 	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
-	| { type: "answer"; instanceId: string; response: Record<string, unknown> }
-	| { type: "save"; cwd: string; label?: string; sessionFile: string }
-	| { type: "release"; sessionFile: string };
+	| { type: "save"; cwd: string; label?: string; sessionFile: string };
 
 interface AnyResponse {
 	type: string;
@@ -90,10 +64,7 @@ interface AnyResponse {
 	instance?: InstanceSummary;
 	version?: string;
 	buildId?: string;
-	release?: boolean;
 	messages?: PaneMessage[];
-	working?: boolean;
-	response?: { success: boolean; error?: string };
 }
 
 /** Path to the daemon's CLI entry, for the ensureDaemon() auto-start. */
@@ -216,25 +187,6 @@ export class OrchestratorClient {
 		return res.instances ?? [];
 	}
 
-	async stop(instanceId: string): Promise<void> {
-		await this.request({ type: "stop", instanceId }, 10_000);
-	}
-
-	/** Stop a session so this window can open it, once its running tools finish. Returns whether its
-	 *  turn was still in progress. Unbounded: a tool may run for minutes. */
-	async handOver(instanceId: string): Promise<boolean> {
-		const response = await this.request({ type: "hand_over", instanceId }, 2 ** 31 - 1);
-		if (response.type !== "stop_result") throw new Error("The agent daemon is out of date — restart pi to update it");
-		return response.working === true;
-	}
-
-	/** Send a message to a running session without attaching: a new prompt when it is idle, a
-	 *  follow-up queued behind the current run when it is working. */
-	async reply(instanceId: string, message: string, working: boolean): Promise<void> {
-		const command = working ? { type: "follow_up", message } : { type: "prompt", message };
-		await this.request({ type: "rpc", instanceId, command });
-	}
-
 	/** List a session as a stopped row without starting it; it resumes when opened. */
 	async save(session: { cwd: string; label?: string; sessionFile: string }): Promise<void> {
 		await this.request({ type: "save", cwd: session.cwd, label: session.label, sessionFile: session.sessionFile });
@@ -252,19 +204,10 @@ export class OrchestratorClient {
 		await this.request({ type: "meta", instanceId, ...meta });
 	}
 
-	/** Answer a pending prompt: `{ value }`, `{ confirmed }` or `{ cancelled: true }`. */
-	async answer(instanceId: string, requestId: string, answer: Record<string, unknown>): Promise<void> {
-		await this.request({
-			type: "answer",
-			instanceId,
-			response: { type: "extension_ui_response", id: requestId, ...answer },
-		});
-	}
-
-	/** Register/heartbeat this foreground session as an external instance. */
-	async register(instance: RegisterInput): Promise<{ release: boolean; messages: PaneMessage[] }> {
+	/** Register/heartbeat a pane's pi. */
+	async register(instance: RegisterInput): Promise<{ messages: PaneMessage[] }> {
 		const res = await this.request({ type: "register", instance }, 1000);
-		return { release: res.release === true, messages: res.messages ?? [] };
+		return { messages: res.messages ?? [] };
 	}
 
 	/** Queue a message for a pane's pi; it acts on it within a heartbeat. */
@@ -273,61 +216,13 @@ export class OrchestratorClient {
 		if (res.type !== "ack") throw new Error(res.error ?? "The agent daemon is out of date — restart pi to update it");
 	}
 
-	/** Ask the window holding `sessionFile` to let it go. False when this daemon predates the request. */
-	async release(sessionFile: string): Promise<boolean> {
-		// An older daemon answers an unknown request with no `type`.
-		const res = await this.request({ type: "release", sessionFile });
-		return res.type === "ack";
-	}
-
 	async unregister(instanceId: string): Promise<void> {
 		await this.request({ type: "unregister", instanceId }, 1000);
 	}
 
 	/**
-	 * Spawn a background session and (optionally) match a model + seed an initial prompt.
-	 * Pass `sessionFile` to RESUME an existing session (continue its history) instead of a fresh one.
-	 */
-	async spawn(opts: {
-		cwd: string;
-		label?: string;
-		prompt?: string;
-		images?: ImageContent[];
-		model?: { provider: string; id: string };
-		sessionFile?: string;
-	}): Promise<InstanceSummary | undefined> {
-		// Pin the model at child startup (daemon-side --provider/--model) instead of a post-spawn
-		// set_model RPC — set_model silently no-ops when the model isn't yet in the child's registry,
-		// which is exactly when a fresh child would otherwise stay on the weak settings default.
-		const res = await this.request({
-			type: "spawn",
-			cwd: opts.cwd,
-			label: opts.label,
-			sessionFile: opts.sessionFile,
-			provider: opts.model?.provider,
-			model: opts.model?.id,
-		});
-		const instance = res.instance;
-		if (!instance) return instance;
-		if (opts.prompt || opts.images?.length) {
-			const prompted = await this.request({
-				type: "rpc",
-				instanceId: instance.id,
-				command: {
-					type: "prompt",
-					message: opts.prompt ?? "",
-					...(opts.images?.length ? { images: opts.images } : {}),
-				},
-			});
-			if (prompted.response?.success === false)
-				throw new Error(prompted.response.error ?? "The first prompt was rejected");
-		}
-		return instance;
-	}
-
-	/**
 	 * Ask the daemon to exit and wait until it is actually gone. `ok: false` carries the daemon's
-	 * reason (it still owns running sessions; or it predates the verb and answered "unknown").
+	 * reason (an older daemon still running sessions of its own; or one that predates the verb).
 	 */
 	async shutdownDaemon(): Promise<{ ok: boolean; reason?: string }> {
 		try {

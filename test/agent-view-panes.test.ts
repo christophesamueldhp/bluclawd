@@ -39,10 +39,6 @@ function setup(instances: InstanceSummary[], self?: InstanceSummary) {
 		send: record("send"),
 		delete: record("delete"),
 		setMeta: record("setMeta"),
-		handOver: async (id: string) => {
-			calls.push(["handOver", id]);
-			return true;
-		},
 	} as unknown as OrchestratorClient;
 	let started = 0;
 	const panes: PaneOps = {
@@ -67,7 +63,6 @@ function setup(instances: InstanceSummary[], self?: InstanceSummary) {
 		home: "/home/me",
 		self: () => self,
 		onClose: () => closed++,
-		onOpen: () => calls.push(["onOpen"]),
 		panes,
 	});
 	view.setInstancesForTest(instances);
@@ -114,15 +109,6 @@ describe("agent view in pane mode", () => {
 			["delete", "s"],
 			["switchTo", "pi-new1"],
 		]);
-	});
-
-	it("a background process from before pane mode hands its turn to a new pane", async () => {
-		const worker: InstanceSummary = { id: "w", status: "online", activity: "working", cwd: HERE, sessionFile: "/w" };
-		const { view, calls, flush } = setup([worker]);
-		view.handleInput(ENTER);
-		await flush();
-		expect(calls[0]).toEqual(["handOver", "w"]);
-		expect(calls[1]).toEqual(["start", HERE, ["--session", "/w"], { [CONTINUE_ENV]: "1" }]);
 	});
 
 	it("a task starts a new pane with it as the first prompt; its row replaces the placeholder", async () => {
@@ -229,10 +215,10 @@ describe("agent view in pane mode", () => {
 	it("lists every pane as an ordinary row, this terminal's own once", () => {
 		const self = paneRow("pi-self");
 		const rows = collectRows([paneRow("pi-a"), { ...self, pinned: true }, paneRow("pi-b")], self);
-		expect(rows.map((r) => [r.id, r.self, r.elsewhere])).toEqual([
-			["pi-self", true, false],
-			["pi-a", false, false],
-			["pi-b", false, false],
+		expect(rows.map((r) => [r.id, r.self])).toEqual([
+			["pi-self", true],
+			["pi-a", false],
+			["pi-b", false],
 		]);
 		expect(rows[0].pinned).toBe(true);
 	});

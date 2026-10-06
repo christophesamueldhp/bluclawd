@@ -8,13 +8,6 @@ export { getServerDir, getSocketPath } from "./paths.ts";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-/**
- * Detect if we're running as a Bun compiled binary.
- * Bun binaries have import.meta.url containing "$bunfs", "~BUN", or "%7EBUN" (Bun's virtual filesystem path)
- */
-export const isBunBinary =
-	import.meta.url.includes("$bunfs") || import.meta.url.includes("~BUN") || import.meta.url.includes("%7EBUN");
-
 interface PackageJson {
 	version?: string;
 }
@@ -48,10 +41,6 @@ export const VERSION: string = pkg.version || "0.0.0";
  * comparison alone would miss after a version-less local rebuild.
  */
 export const BUILD_ID: string = daemonBuildId(__dirname, process.env.PI_PACKAGE_ROOT);
-
-export function getMachinePath(): string {
-	return join(getServerDir(), "machine.json");
-}
 
 export function getInstancesPath(): string {
 	return join(getServerDir(), "instances.json");

@@ -1,56 +1,17 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
-import type {
-	AgentSessionEvent,
-	JsonAgentSessionEvent,
-	RpcExtensionUIRequest,
-	RpcResponse,
-} from "@earendil-works/pi-coding-agent";
 import { BUILD_ID, getSocketPath, VERSION } from "../config.ts";
 import {
 	type ErrorResponse,
 	encodeMessage,
-	type ListRequest,
-	type ListResponse,
 	parseRequestLine,
-	type RpcBridgeResponse,
-	type RpcReadyResponse,
-	type RpcRequest,
-	type RpcStreamRequest,
 	type ServerRequest,
 	type ServerResponse,
-	type SpawnRequest,
-	type SpawnResponse,
-	type StatusRequest,
-	type StatusResponse,
-	type StopRequest,
-	type StopResponse,
 } from "./protocol.ts";
 
-export interface IpcRequestHandler {
-	(request: SpawnRequest): Promise<SpawnResponse | ErrorResponse> | SpawnResponse | ErrorResponse;
-	(request: ListRequest): Promise<ListResponse | ErrorResponse> | ListResponse | ErrorResponse;
-	(request: StopRequest): Promise<StopResponse | ErrorResponse> | StopResponse | ErrorResponse;
-	(request: StatusRequest): Promise<StatusResponse | ErrorResponse> | StatusResponse | ErrorResponse;
-	(request: RpcRequest): Promise<RpcBridgeResponse | ErrorResponse> | RpcBridgeResponse | ErrorResponse;
-	(request: RpcStreamRequest): Promise<RpcReadyResponse | ErrorResponse> | RpcReadyResponse | ErrorResponse;
-	(request: ServerRequest): Promise<ServerResponse> | ServerResponse;
-	openRpcStream(
-		instanceId: string,
-		onResponse: (response: RpcResponse) => void,
-		onSessionEvent: (event: AgentSessionEvent) => void,
-		onUiRequest: (request: RpcExtensionUIRequest) => void,
-	):
-		| {
-				handleRequest(request: RpcRequest["command"] | { type: "extension_ui_response" }): Promise<void>;
-				close(): void;
-		  }
-		| undefined;
-}
+export type IpcRequestHandler = (request: ServerRequest) => Promise<ServerResponse> | ServerResponse;
 
-/** Stamp the daemon's version/buildId onto a reply to the initial request/response
- *  handshake — not the mid-stream RPC bridge messages,
- *  which aren't part of that handshake. */
+/** Stamp the daemon's version/buildId onto every reply. */
 function withDaemonMeta<T extends ServerResponse>(response: T): T {
 	return { ...response, version: VERSION, buildId: BUILD_ID };
 }
@@ -77,86 +38,6 @@ export async function startIpcServer(handler: IpcRequestHandler): Promise<Server
 
 			try {
 				const request = parseRequestLine(line);
-				if (request.type === "rpc_stream") {
-					const response = await handler(request);
-					if (!response.ok || response.type !== "rpc_ready" || !response.instance) {
-						socket.end(encodeMessage(withDaemonMeta(response)));
-						return;
-					}
-
-					socket.removeAllListeners("data");
-					// Writing to a viewer socket that has just closed can throw synchronously; these
-					// callbacks fire on the child's stdout stack, so a throw would propagate to
-					// uncaughtException and crash the whole daemon. Swallow write-after-close here.
-					const safeWrite = (message: Parameters<typeof encodeMessage>[0]): void => {
-						try {
-							socket.write(encodeMessage(message));
-						} catch {
-							// viewer socket is gone; the child keeps running for other subscribers
-						}
-					};
-					const rpcStream = handler.openRpcStream(
-						request.instanceId,
-						(response) => safeWrite(response),
-						(event) => {
-							if (event.type === "message_update" && event.message.role === "assistant") {
-								const { message, ...delta } = event;
-								// RpcProcess preserves the original JSON delta fields while adding its local snapshot.
-								safeWrite({ ...delta, usage: message.usage } as JsonAgentSessionEvent);
-							} else safeWrite(event);
-						},
-						(request) => safeWrite(request),
-					);
-					if (!rpcStream) {
-						socket.end(
-							encodeMessage({ type: "error", ok: false, error: `Unknown instance: ${request.instanceId}` }),
-						);
-						return;
-					}
-
-					socket.write(encodeMessage(withDaemonMeta(response)));
-					let rpcRequestQueue = Promise.resolve();
-					socket.on("data", (rpcChunk: Buffer | string) => {
-						buffer += rpcChunk.toString();
-						for (;;) {
-							const rpcNewlineIndex = buffer.indexOf("\n");
-							if (rpcNewlineIndex === -1) {
-								break;
-							}
-							const rpcLine = buffer.slice(0, rpcNewlineIndex).trim();
-							buffer = buffer.slice(rpcNewlineIndex + 1);
-							if (!rpcLine) {
-								continue;
-							}
-							rpcRequestQueue = rpcRequestQueue
-								.then(async () => {
-									try {
-										await rpcStream.handleRequest(JSON.parse(rpcLine));
-									} catch (rpcError: unknown) {
-										socket.write(
-											encodeMessage({
-												type: "error",
-												ok: false,
-												error: rpcError instanceof Error ? rpcError.message : String(rpcError),
-											}),
-										);
-									}
-								})
-								.catch((rpcError: Error) => {
-									socket.write(
-										encodeMessage({
-											type: "error",
-											ok: false,
-											error: rpcError.message,
-										}),
-									);
-								});
-						}
-					});
-					socket.once("close", () => rpcStream.close());
-					return;
-				}
-
 				const response = await handler(request);
 				socket.end(encodeMessage(withDaemonMeta(response)));
 			} catch (error: unknown) {

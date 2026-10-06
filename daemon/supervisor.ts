@@ -1,86 +1,18 @@
 import { randomUUID } from "node:crypto";
-import type {
-	AgentSessionEvent,
-	AgentSessionEventListener,
-	RpcCommand,
-	RpcExtensionUIRequest,
-	RpcExtensionUIResponse,
-	RpcResponse,
-} from "@earendil-works/pi-coding-agent";
-import {
-	type ActivityState,
-	type AgentActivity,
-	INITIAL_ACTIVITY,
-	isBlockingUiMethod,
-	reduceActivity,
-} from "./activity.ts";
+import type { AgentActivity } from "./activity.ts";
 import type { PaneMessage } from "./ipc/protocol.ts";
-import { radiusPresence } from "./radius.ts";
-import { createRpcProcessInstance, type RpcProcessInstance } from "./rpc-process.ts";
-import { needsFromRequest, readSessionTail, type SessionNeeds, SessionStateTracker } from "./session-state.ts";
+import { readSessionTail } from "./session-state.ts";
 import { getInstance, loadInstances, removeInstance, saveInstances, upsertInstance } from "./storage.ts";
-import type { InstanceRecord, InstanceStatus } from "./types.ts";
-
-interface LiveInstanceResources {
-	rpcProcess?: RpcProcessInstance;
-	radiusPiId?: string;
-	sessionId?: string;
-}
-
-interface LiveInstance {
-	record: InstanceRecord;
-	resources: LiveInstanceResources;
-	subscribers: Set<AgentSessionEventListener>;
-	activityState: ActivityState;
-	tracker: SessionStateTracker;
-	pendingUiRequest?: RpcExtensionUIRequest;
-	pendingSince?: string;
-	onUiRequest?: (request: RpcExtensionUIRequest) => void;
-	unsubscribeEvents?: () => void;
-	unsubscribeExit?: () => void;
-	/** Only in-flight output, so an attaching viewer sees progress emitted before it connected. */
-	replay?: Map<string, AgentSessionEvent>;
-}
+import type { InstanceRecord } from "./types.ts";
 
 function cloneInstance(record: InstanceRecord): InstanceRecord {
 	return { ...record };
-}
-
-// Only refresh persisted session metadata after commands that can plausibly change
-// the instance identity/details we store in instances.json. Most RPCs mutate transient
-// runtime state only, so forcing a follow-up get_state after every command is wasted IO.
-//
-// - new_session / switch_session / fork / clone can change sessionId/sessionFile
-// - set_session_name changes a persisted session detail we may want reflected externally
-// - prompt can materialize or advance persisted session state after the child processes it
-const SESSION_METADATA_COMMANDS: ReadonlySet<RpcCommand["type"]> = new Set([
-	"new_session",
-	"switch_session",
-	"fork",
-	"clone",
-	"set_session_name",
-	"prompt",
-]);
-
-function shouldRefreshSessionMetadata(command: RpcCommand): boolean {
-	return SESSION_METADATA_COMMANDS.has(command.type);
-}
-
-function isGetStateSuccess(
-	response: RpcResponse,
-): response is Extract<
-	RpcResponse,
-	{ success: true; command: "get_state"; data: { sessionId: string; sessionFile?: string } }
-> {
-	return response.success === true && response.command === "get_state" && "data" in response;
 }
 
 interface ExternalInstance {
 	record: InstanceRecord;
 	activity: AgentActivity;
 	lastSeenAt: number;
-	/** Another window wants this session: told to the holder on its next heartbeat. */
-	release?: boolean;
 	/** Messages for a pane's pi, drained by its next heartbeat. */
 	inbox: PaneMessage[];
 }
@@ -88,269 +20,17 @@ interface ExternalInstance {
 /** External (self-registered) instances expire this long after their last heartbeat. */
 const EXTERNAL_TTL_MS = 15_000;
 
+/**
+ * Agent view's registry. Every running session is a pane's pi that registers itself with a
+ * heartbeat; the daemon runs no sessions. A session whose pi quit while idle stays as a stored
+ * row (instances.json), resumable from its .jsonl.
+ */
 export class ServerSupervisor {
-	private readonly liveInstances = new Map<string, LiveInstance>();
 	private readonly externalInstances = new Map<string, ExternalInstance>();
 
-	private setStatus(live: LiveInstance, status: InstanceStatus): void {
-		live.record = {
-			...live.record,
-			status,
-			lastSeenAt: new Date().toISOString(),
-		};
-		upsertInstance(live.record);
-	}
-
-	private updateRecord(live: LiveInstance, updates: Partial<InstanceRecord>): void {
-		live.record = {
-			...live.record,
-			...updates,
-			lastSeenAt: new Date().toISOString(),
-		};
-		if (updates.radiusPiId !== undefined) {
-			live.resources.radiusPiId = updates.radiusPiId;
-		}
-		if (updates.sessionId !== undefined) {
-			live.resources.sessionId = updates.sessionId;
-		}
-		upsertInstance(live.record);
-	}
-
-	private clearBindings(live: LiveInstance): void {
-		live.replay?.clear();
-		live.unsubscribeEvents?.();
-		live.unsubscribeExit?.();
-		live.unsubscribeEvents = undefined;
-		live.unsubscribeExit = undefined;
-		live.onUiRequest = undefined;
-		// The child that owned any outstanding prompt is gone/being rebound — drop it so a viewer
-		// attaching later isn't replayed a dead prompt (openRpcStream replays pendingUiRequest).
-		live.pendingUiRequest = undefined;
-		live.resources.rpcProcess?.setUiRequestHandler(undefined);
-	}
-
-	private bindRpcProcess(live: LiveInstance, rpcProcess: RpcProcessInstance): void {
-		this.clearBindings(live);
-		live.resources.rpcProcess = rpcProcess;
-		live.replay = new Map();
-		live.unsubscribeEvents = rpcProcess.onEvent((event) => {
-			if (event.type === "message_start" || event.type === "message_update") live.replay.set("message", event);
-			else if (event.type === "message_end") live.replay.delete("message");
-			else if (event.type === "tool_execution_start" || event.type === "tool_execution_update")
-				live.replay.set(`tool:${event.toolCallId}`, event);
-			else if (event.type === "tool_execution_end") live.replay.delete(`tool:${event.toolCallId}`);
-			else if (event.type === "agent_settled") live.replay.clear();
-			live.activityState = reduceActivity(live.activityState, { kind: "agent_event", type: event.type });
-			live.tracker.apply(event as Parameters<SessionStateTracker["apply"]>[0]);
-			// Persisted at run boundaries only: every streamed delta would rewrite instances.json.
-			if (event.type === "agent_start" || event.type === "agent_settled") this.persistTracker(live);
-			// The agent resumed/settled, so any prompt it was blocked on has been resolved (a blocked
-			// agent emits neither). Clear it so it isn't replayed to a late-attaching viewer.
-			if (live.pendingUiRequest && (event.type === "agent_settled" || event.type === "turn_start")) {
-				live.pendingUiRequest = undefined;
-			}
-			// A throwing subscriber (e.g. socket.write to a just-closed viewer) runs on the child's
-			// stdout stack — an unguarded throw here would crash the whole daemon. Isolate each one.
-			for (const subscriber of live.subscribers) {
-				try {
-					subscriber(event);
-				} catch (error) {
-					console.error(`Agent view subscriber threw on ${event.type}: ${String(error)}`);
-				}
-			}
-		});
-		live.unsubscribeExit = rpcProcess.onExit((error) => {
-			void this.handleUnexpectedRpcExit(live, error);
-		});
-		rpcProcess.setUiRequestHandler((request) => {
-			if (isBlockingUiMethod(request.method)) {
-				live.activityState = reduceActivity(live.activityState, {
-					kind: "ui_request",
-					method: request.method,
-					id: request.id,
-				});
-				live.pendingUiRequest = request;
-				live.pendingSince = new Date().toISOString();
-			}
-			try {
-				live.onUiRequest?.(request);
-			} catch (error) {
-				console.error(`Agent view ui-request handler threw: ${String(error)}`);
-			}
-		});
-	}
-
-	private async handleUnexpectedRpcExit(live: LiveInstance, error?: Error): Promise<void> {
-		if (this.liveInstances.get(live.record.id) !== live) {
-			return;
-		}
-		if (live.record.status === "stopping" || live.record.status === "stopped") {
-			return;
-		}
-		// The row stays (agent view lists it as Failed until deleted); its .jsonl resumes it.
-		live.record = {
-			...live.record,
-			status: "stopped",
-			outcome: "failed",
-			detail: error?.message ?? live.tracker.detail ?? "the session process exited unexpectedly",
-		};
-		this.setStatus(live, "stopped");
-		this.clearBindings(live);
-		live.resources.rpcProcess = undefined;
-		if (live.resources.radiusPiId) {
-			try {
-				await radiusPresence.disconnectPi(live.record);
-				this.updateRecord(live, { radiusPiId: undefined });
-			} catch (error) {
-				console.error(`Failed to disconnect Radius Pi ${live.record.id}: ${String(error)}`);
-			}
-		}
-		this.liveInstances.delete(live.record.id);
-	}
-
-	private persistTracker(live: LiveInstance): void {
-		const { tracker } = live;
-		this.updateRecord(live, {
-			detail: tracker.detail,
-			outcome: tracker.outcome,
-			turns: tracker.turns,
-			finishedAt: tracker.finishedAt,
-		});
-	}
-
-	private getRpcProcess(live: LiveInstance): RpcProcessInstance | undefined {
-		return live.resources.rpcProcess;
-	}
-
-	private async syncInstanceRecord(live: LiveInstance): Promise<void> {
-		const rpcProcess = this.getRpcProcess(live);
-		if (!rpcProcess) {
-			this.updateRecord(live, {});
-			return;
-		}
-		const response = await rpcProcess.send({ type: "get_state" });
-		if (!isGetStateSuccess(response)) {
-			this.updateRecord(live, {});
-			return;
-		}
-		this.updateRecord(live, {
-			sessionId: response.data.sessionId,
-			sessionFile: response.data.sessionFile,
-		});
-	}
-
-	private async cleanupAcquiredResources(live: LiveInstance): Promise<void> {
-		const rpcProcess = live.resources.rpcProcess;
-		this.clearBindings(live);
-		if (live.resources.radiusPiId) {
-			await radiusPresence.disconnectPi(live.record);
-			live.resources.radiusPiId = undefined;
-			live.record = {
-				...live.record,
-				radiusPiId: undefined,
-				lastSeenAt: new Date().toISOString(),
-			};
-		}
-		live.resources.sessionId = undefined;
-		if (rpcProcess) {
-			live.resources.rpcProcess = undefined;
-			await rpcProcess.dispose();
-		}
-	}
-
-	private async failSpawn(live: LiveInstance, error: unknown): Promise<never> {
-		this.updateRecord(live, {
-			outcome: "failed",
-			detail: error instanceof Error ? error.message : String(error),
-			finishedAt: new Date().toISOString(),
-		});
-		this.setStatus(live, "error");
-		try {
-			await this.cleanupAcquiredResources(live);
-		} finally {
-			this.setStatus(live, "stopped");
-			this.liveInstances.delete(live.record.id);
-		}
-		throw error;
-	}
-
-	updateInstance(instance: InstanceRecord): void {
-		const live = this.liveInstances.get(instance.id);
-		if (live) {
-			live.record = instance;
-			live.resources.radiusPiId = instance.radiusPiId;
-			live.resources.sessionId = instance.sessionId;
-		}
-		upsertInstance(instance);
-	}
-
-	openRpcStream(
-		instanceId: string,
-		onEvent: (event: AgentSessionEvent) => void,
-		onUiRequest: (request: RpcExtensionUIRequest) => void,
-	):
-		| {
-				handleRpc(command: RpcCommand): Promise<RpcResponse>;
-				handleUiResponse(response: RpcExtensionUIResponse): void;
-				close(): void;
-		  }
-		| undefined {
-		const live = this.liveInstances.get(instanceId);
-		const rpcProcess = live ? this.getRpcProcess(live) : undefined;
-		if (!live || !rpcProcess) {
-			return undefined;
-		}
-		live.subscribers.add(onEvent);
-		for (const event of live.replay?.values() ?? []) {
-			// Seed a late viewer once; subsequent wire updates remain compact deltas.
-			onEvent(event.type === "message_update" ? { type: "message_start", message: event.message } : event);
-		}
-		live.onUiRequest = onUiRequest;
-		// Replay an already-outstanding prompt so a viewer attaching mid-block still sees it.
-		if (live.pendingUiRequest) onUiRequest(live.pendingUiRequest);
-		return {
-			handleRpc: async (command) => {
-				if (live.record.status !== "online") throw new Error("Session is being stopped");
-				const response = await rpcProcess.send(command);
-				if (shouldRefreshSessionMetadata(command)) {
-					await this.syncInstanceRecord(live);
-				}
-				return response;
-			},
-			handleUiResponse: (response) => {
-				live.activityState = reduceActivity(live.activityState, { kind: "ui_response", id: response.id });
-				if (live.pendingUiRequest?.id === response.id) {
-					live.pendingUiRequest = undefined;
-				}
-				rpcProcess.handleUiResponse(response);
-			},
-			close: () => {
-				if (live.onUiRequest === onUiRequest) {
-					live.onUiRequest = undefined;
-				}
-				live.subscribers.delete(onEvent);
-			},
-		};
-	}
-
-	getLiveInstance(instanceId: string): InstanceRecord | undefined {
-		const live = this.liveInstances.get(instanceId);
-		return live ? cloneInstance(live.record) : undefined;
-	}
-
-	getActivity(instanceId: string): AgentActivity | undefined {
-		return (
-			this.liveInstances.get(instanceId)?.activityState.activity ?? this.externalInstances.get(instanceId)?.activity
-		);
-	}
-
-	/**
-	 * Register/heartbeat an external (self-registered) instance the daemon does not own a process for.
-	 * True once when another window has asked it to let its session go.
-	 */
-	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = Date.now()): boolean {
+	/** Register/heartbeat a pane's pi. */
+	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = Date.now()): void {
 		const previous = this.externalInstances.get(record.id);
-		const release = previous?.release === true && previous.record.sessionFile === record.sessionFile;
 		// A heartbeat restates what the session knows; its age and agent-view meta are kept here.
 		const kept = previous
 			? {
@@ -365,18 +45,6 @@ export class ServerSupervisor {
 			lastSeenAt: now,
 			inbox: previous?.inbox ?? [],
 		});
-		return release;
-	}
-
-	/** Ask every window holding `sessionFile` to let it go; returns how many hold it. */
-	requestRelease(sessionFile: string): number {
-		let holders = 0;
-		for (const entry of this.externalInstances.values()) {
-			if (entry.record.sessionFile !== sessionFile) continue;
-			entry.release = true;
-			holders++;
-		}
-		return holders;
 	}
 
 	unregisterExternal(id: string): void {
@@ -413,17 +81,13 @@ export class ServerSupervisor {
 		return out;
 	}
 
-	listLiveInstances(): InstanceRecord[] {
-		return [...this.liveInstances.values()].map((live) => cloneInstance(live.record));
-	}
-
-	async recoverAfterRestart(): Promise<void> {
+	/** Rows an older daemon left running: they ended with it, and stay resumable from their .jsonl. */
+	recoverAfterRestart(): void {
 		const recoveredAt = new Date().toISOString();
 		const instances = loadInstances().map((instance) => {
 			if (instance.status !== "online" && instance.status !== "starting" && instance.status !== "stopping") {
 				return instance;
 			}
-			// It ended while the daemon was down: keep its row, resumable from its .jsonl.
 			return {
 				...instance,
 				status: "stopped" as const,
@@ -431,9 +95,6 @@ export class ServerSupervisor {
 				lastSeenAt: recoveredAt,
 			};
 		});
-		for (const instance of instances) {
-			await radiusPresence.disconnectPi(instance);
-		}
 		saveInstances(instances);
 	}
 
@@ -441,93 +102,9 @@ export class ServerSupervisor {
 		return loadInstances().map(cloneInstance);
 	}
 
-	/** The blocking question a live session is waiting on, as the peek panel renders it. */
-	/** What a running session is doing now; the stored record only changes at run boundaries. */
-	getLiveDetail(instanceId: string): string | undefined {
-		return this.liveInstances.get(instanceId)?.tracker.detail;
-	}
-
-	getPendingNeeds(instanceId: string): SessionNeeds | undefined {
-		const live = this.liveInstances.get(instanceId);
-		const needs = live?.pendingUiRequest ? needsFromRequest(live.pendingUiRequest) : undefined;
-		return needs ? { ...needs, since: live?.pendingSince } : undefined;
-	}
-
 	getInstance(instanceId: string): InstanceRecord | undefined {
-		const live = this.liveInstances.get(instanceId);
-		if (live) {
-			return cloneInstance(live.record);
-		}
 		const stored = getInstance(instanceId);
 		return stored ? cloneInstance(stored) : undefined;
-	}
-
-	/**
-	 * Start a background session. Given the `.jsonl` of a row the daemon already knows, the SAME
-	 * row comes back to life (id, name, pin, age) instead of a twin appearing; given one a live
-	 * child already writes to, that child is returned — two writers on one session file would
-	 * corrupt it.
-	 */
-	async spawnInstance(options: {
-		cwd: string;
-		label?: string;
-		sessionFile?: string;
-		provider?: string;
-		model?: string;
-	}): Promise<InstanceRecord> {
-		if (options.sessionFile) {
-			for (const live of this.liveInstances.values()) {
-				if (live.record.sessionFile === options.sessionFile) return cloneInstance(live.record);
-			}
-		}
-		const now = new Date().toISOString();
-		const previous = options.sessionFile
-			? loadInstances().find((instance) => instance.sessionFile === options.sessionFile)
-			: undefined;
-		// A session with history but no row yet: pick up where its transcript left off.
-		const tail = !previous && options.sessionFile ? readSessionTail(options.sessionFile) : undefined;
-		const live: LiveInstance = {
-			record: {
-				...previous,
-				id: previous?.id ?? randomUUID(),
-				status: "starting",
-				cwd: previous?.cwd ?? options.cwd,
-				createdAt: previous?.createdAt ?? now,
-				lastSeenAt: now,
-				label: previous?.label ?? options.label,
-				sessionFile: options.sessionFile,
-				detail: previous?.detail ?? tail?.detail,
-				outcome: previous ? undefined : tail?.outcome,
-				turns: previous?.turns ?? tail?.turns,
-			},
-			resources: {},
-			subscribers: new Set(),
-			activityState: INITIAL_ACTIVITY,
-			tracker: new SessionStateTracker({
-				detail: previous?.detail ?? tail?.detail,
-				outcome: previous ? undefined : tail?.outcome,
-				turns: previous?.turns ?? tail?.turns,
-			}),
-		};
-		this.liveInstances.set(live.record.id, live);
-		upsertInstance(live.record);
-
-		try {
-			const rpcProcess = createRpcProcessInstance({
-				cwd: live.record.cwd,
-				sessionFile: options.sessionFile,
-				provider: options.provider,
-				model: options.model,
-			});
-			this.bindRpcProcess(live, rpcProcess);
-			await this.syncInstanceRecord(live);
-			const registeredRecord = await radiusPresence.registerPi(live.record);
-			this.updateRecord(live, { radiusPiId: registeredRecord.radiusPiId });
-			this.setStatus(live, "online");
-			return cloneInstance(live.record);
-		} catch (error) {
-			return await this.failSpawn(live, error);
-		}
 	}
 
 	/**
@@ -536,9 +113,6 @@ export class ServerSupervisor {
 	 * for that file is reused, so the session keeps its id, name and pin.
 	 */
 	saveInstance(options: { cwd: string; label?: string; sessionFile: string }): InstanceRecord {
-		for (const live of this.liveInstances.values()) {
-			if (live.record.sessionFile === options.sessionFile) return cloneInstance(live.record);
-		}
 		const now = new Date().toISOString();
 		const previous = loadInstances().find((instance) => instance.sessionFile === options.sessionFile);
 		const tail = readSessionTail(options.sessionFile);
@@ -560,82 +134,16 @@ export class ServerSupervisor {
 		return cloneInstance(record);
 	}
 
-	/** Stop the process; the row stays (Stopped, or Done/Failed if the run had already ended). */
-	async stopInstance(instanceId: string): Promise<InstanceRecord | undefined> {
-		const live = this.liveInstances.get(instanceId);
-		if (!live) {
-			return this.getInstance(instanceId);
-		}
-
-		this.setStatus(live, "stopping");
-		try {
-			await this.cleanupAcquiredResources(live);
-		} finally {
-			const working = live.activityState.activity !== "idle";
-			live.record = {
-				...live.record,
-				status: "stopped",
-				outcome: working ? "stopped" : (live.tracker.outcome ?? "stopped"),
-				lastSeenAt: new Date().toISOString(),
-			};
-			this.liveInstances.delete(instanceId);
-			upsertInstance(live.record);
-		}
-		return cloneInstance(live.record);
-	}
-
-	/**
-	 * Stop a session so a window can open its file. A turn in progress first lets its running tools
-	 * finish, as quitting pi does, unless it is blocked on a prompt only a window can answer.
-	 * `working`: the turn was still in progress, so the window carries it on.
-	 */
-	async handOver(instanceId: string): Promise<{ record: InstanceRecord | undefined; working: boolean }> {
-		const live = this.liveInstances.get(instanceId);
-		if (live?.record.status === "starting") throw new Error("Still starting — try again in a moment");
-		const busy = (): boolean =>
-			this.liveInstances.get(instanceId) === live &&
-			live?.activityState.activity === "working" &&
-			!live.pendingUiRequest;
-		if (live && busy()) {
-			await new Promise<void>((resolve) => {
-				const done = (): void => {
-					clearInterval(poll);
-					live.subscribers.delete(onEvent);
-					resolve();
-				};
-				const onEvent: AgentSessionEventListener = (event) => {
-					if (event.type === "agent_settled" || (event.type === "turn_end" && event.toolResults.length > 0))
-						done();
-				};
-				// A prompt or an exit ends the wait too; neither arrives as a session event.
-				const poll = setInterval(() => {
-					if (!busy()) done();
-				}, 250);
-				live.subscribers.add(onEvent);
-			});
-		}
-		const working = !!live && this.liveInstances.get(instanceId) === live && live.activityState.activity !== "idle";
-		return { record: await this.stopInstance(instanceId), working };
-	}
-
 	/** Remove the row. The session's .jsonl stays on disk, resumable with /resume. */
-	async deleteInstance(instanceId: string): Promise<boolean> {
-		// A self-registered session's process is its window's; its row goes until it registers again.
+	deleteInstance(instanceId: string): boolean {
+		// A self-registered session's process is its pane's; its row goes until it registers again.
 		if (this.externalInstances.delete(instanceId)) return true;
-		const known = this.getInstance(instanceId);
-		if (!known) return false;
-		await this.stopInstance(instanceId);
+		if (!getInstance(instanceId)) return false;
 		removeInstance(instanceId);
 		return true;
 	}
 
-	async renameInstance(instanceId: string, name: string): Promise<InstanceRecord | undefined> {
-		const live = this.liveInstances.get(instanceId);
-		if (live) {
-			this.updateRecord(live, { label: name });
-			await live.resources.rpcProcess?.send({ type: "set_session_name", name }).catch(() => undefined);
-			return cloneInstance(live.record);
-		}
+	renameInstance(instanceId: string, name: string): InstanceRecord | undefined {
 		return this.updateStored(instanceId, { label: name });
 	}
 
@@ -645,12 +153,6 @@ export class ServerSupervisor {
 		if (external) {
 			external.record = { ...external.record, ...meta };
 			return cloneInstance(external.record);
-		}
-		const live = this.liveInstances.get(instanceId);
-		if (live) {
-			live.record = { ...live.record, ...meta };
-			upsertInstance(live.record);
-			return cloneInstance(live.record);
 		}
 		return this.updateStored(instanceId, meta);
 	}
@@ -662,49 +164,6 @@ export class ServerSupervisor {
 		upsertInstance(next);
 		return next;
 	}
-
-	/** Answer the blocking prompt a session is waiting on, without attaching to it. */
-	answer(instanceId: string, response: RpcExtensionUIResponse): boolean {
-		const live = this.liveInstances.get(instanceId);
-		const rpcProcess = live ? this.getRpcProcess(live) : undefined;
-		if (!live || !rpcProcess || live.pendingUiRequest?.id !== response.id) return false;
-		live.activityState = reduceActivity(live.activityState, { kind: "ui_response", id: response.id });
-		live.pendingUiRequest = undefined;
-		rpcProcess.handleUiResponse(response);
-		return true;
-	}
-
-	async handleRpc(instanceId: string, command: RpcCommand): Promise<RpcResponse | undefined> {
-		const live = this.liveInstances.get(instanceId);
-		const rpcProcess = live ? this.getRpcProcess(live) : undefined;
-		if (!live || !rpcProcess || live.record.status !== "online") {
-			return undefined;
-		}
-
-		const response = await rpcProcess.send(command);
-		if (shouldRefreshSessionMetadata(command)) {
-			await this.syncInstanceRecord(live);
-		}
-		return response;
-	}
-
-	async shutdown(): Promise<void> {
-		for (const instanceId of [...this.liveInstances.keys()]) {
-			await this.stopInstance(instanceId);
-		}
-	}
 }
 
 export const supervisor = new ServerSupervisor();
-
-radiusPresence.setCoordinator({
-	getLiveInstance(instanceId) {
-		return supervisor.getLiveInstance(instanceId);
-	},
-	listLiveInstances() {
-		return supervisor.listLiveInstances();
-	},
-	updateInstance(instance) {
-		supervisor.updateInstance(instance);
-	},
-});

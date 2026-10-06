@@ -5,8 +5,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteProvider, TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
-import { AgentView } from "../ext/agent-view/agent-view.ts";
-import { CONTINUE_PROMPT, handOff } from "../ext/agent-view/hand-off.ts";
+import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
 import { withoutAgentViewCommand } from "../ext/agent-view/index.ts";
 import {
 	currentDaemonBuildId,
@@ -52,15 +51,19 @@ const sessions: InstanceSummary[] = [
 	{
 		id: "ask",
 		status: "online",
+		external: true,
+		pane: "p-ask",
 		activity: "awaiting_input",
 		cwd: HERE,
 		label: "power-up design",
 		createdAt: ago(1),
-		needs: { requestId: "q1", method: "select", title: "Allow bash: npm test?", options: ["Yes", "No"] },
+		detail: "Allow bash: npm test?",
 	},
 	{
 		id: "work",
 		status: "online",
+		external: true,
+		pane: "p-work",
 		activity: "working",
 		cwd: THERE,
 		label: "collision detection",
@@ -70,6 +73,8 @@ const sessions: InstanceSummary[] = [
 	{
 		id: "done",
 		status: "online",
+		external: true,
+		pane: "p-done",
 		activity: "idle",
 		cwd: HERE,
 		label: "title screen",
@@ -93,34 +98,39 @@ const sessions: InstanceSummary[] = [
 
 type Calls = Array<[string, ...unknown[]]>;
 
-function fakeClient(calls: Calls, list: () => InstanceSummary[] = () => sessions, releases = true): OrchestratorClient {
+function fakeClient(calls: Calls, list: () => InstanceSummary[] = () => sessions): OrchestratorClient {
 	const record =
 		(name: string) =>
 		async (...args: unknown[]) => {
 			calls.push([name, ...args]);
-			return name === "spawn" ? { id: "new", status: "online", cwd: HERE } : undefined;
 		};
 	return {
 		list: async () => list(),
 		ensureDaemon: async () => true,
 		getDaemonInfo: async () => ({ running: false }),
-		stop: record("stop"),
-		// A working session's turn is still in progress once its tools finish.
-		handOver: async (id: string) => {
-			calls.push(["handOver", id]);
-			return list().find((i) => i.id === id)?.activity === "working";
-		},
 		delete: record("delete"),
 		rename: record("rename"),
 		setMeta: record("setMeta"),
-		answer: record("answer"),
-		reply: record("reply"),
-		spawn: record("spawn"),
-		release: async (sessionFile: string) => {
-			calls.push(["release", sessionFile]);
-			return releases;
-		},
+		send: record("send"),
 	} as unknown as OrchestratorClient;
+}
+
+/** tmux stand-in: every call is recorded; `start` names panes pane-1, pane-2, … */
+function fakePanes(calls: Calls): PaneOps {
+	let n = 0;
+	return {
+		current: "pane-self",
+		switchTo: (pane) => calls.push(["switchTo", pane]),
+		start: (cwd, args, env) => {
+			calls.push(["start", cwd, args, ...(env ? [env] : [])]);
+			return `pane-${++n}`;
+		},
+		kill: (pane) => calls.push(["kill", pane]),
+		unlist: async () => {
+			calls.push(["unlist"]);
+		},
+		detach: () => calls.push(["detach"]),
+	};
 }
 
 function makeView(
@@ -128,7 +138,6 @@ function makeView(
 		self?: InstanceSummary;
 		rows?: number;
 		list?: () => InstanceSummary[];
-		releases?: boolean;
 		readClipboard?: () => Promise<{ image?: { type: "image"; data: string; mimeType: string }; text?: string }>;
 		mode?: string;
 	} = {},
@@ -141,7 +150,8 @@ function makeView(
 	const ui = { terminal: { rows: opts.rows ?? 40 }, requestRender: () => {} } as unknown as TUI;
 	const view = new AgentView({
 		ui,
-		client: fakeClient(calls, opts.list ?? (() => instances), opts.releases),
+		client: fakeClient(calls, opts.list ?? (() => instances)),
+		panes: fakePanes(calls),
 		appName: "bluclawd",
 		version: "1.0.0",
 		model: { provider: "opencode-go", id: "kimi" },
@@ -149,15 +159,7 @@ function makeView(
 		home: HOME,
 		self: opts.self ? () => opts.self : undefined,
 		onClose: () => closed++,
-		onOpen: (file, _cwd, resume) => {
-			opened.push(file);
-			resumed.push(resume);
-		},
-		fileExists: () => true,
 		readClipboard: opts.readClipboard,
-		onCreateAndOpen: (...args) => {
-			calls.push(["createAndOpen", ...args]);
-		},
 		isKnownCommand: (name) => name === "compact",
 		mode: opts.mode,
 	});
@@ -217,14 +219,13 @@ describe("rows", () => {
 		const rows = collectRows(
 			[
 				{ id: "stored", status: "stopped", cwd: HERE, sessionFile: "/a.jsonl", pinned: true },
-				{ id: "other-window", status: "online", cwd: HERE, sessionFile: "/b.jsonl", external: true },
 				{ id: "b-row", status: "stopped", cwd: HERE, sessionFile: "/b.jsonl" },
+				{ id: "b-pane", status: "online", cwd: HERE, sessionFile: "/b.jsonl", external: true, pane: "p-b" },
 			],
 			self,
 		);
-		expect(rows.map((r) => r.id)).toEqual(["me", "b-row"]);
+		expect(rows.map((r) => r.id)).toEqual(["me", "b-pane"]);
 		expect(rows[0].pinned).toBe(true);
-		expect(rows[1].elsewhere).toBe(true);
 	});
 
 	it("ages count from creation and freeze when a run finishes", () => {
@@ -306,20 +307,13 @@ describe("AgentView render", () => {
 });
 
 describe("AgentView keys", () => {
-	it("typing then enter dispatches a background session named from the task", async () => {
-		const { view, calls, flush } = makeView();
+	it("typing then enter starts a session in a pane of its own, the task its first prompt", async () => {
+		const { view, calls, text, flush } = makeView();
 		for (const ch of "fix the flaky test") view.handleInput(ch);
 		view.handleInput(ENTER);
 		await flush();
-		expect(calls[0]).toEqual([
-			"spawn",
-			{
-				cwd: HERE,
-				label: "fix the flaky…",
-				prompt: "fix the flaky test",
-				model: { provider: "opencode-go", id: "kimi" },
-			},
-		]);
+		expect(calls[0]).toEqual(["start", HERE, ["--model", "opencode-go/kimi", "--", "fix the flaky test"]]);
+		expect(text().join("\n")).toContain("fix the flaky…");
 	});
 
 	it("ctrl+j and shift+enter add lines to the task; backspace on an empty line joins them back", async () => {
@@ -332,7 +326,7 @@ describe("AgentView keys", () => {
 		view.handleInput("\x7f"); // backspace on the empty third line
 		view.handleInput(ENTER);
 		await flush();
-		expect(calls[0]?.[1]).toMatchObject({ prompt: "write the menu\nthen the credits" });
+		expect((calls[0]?.[2] as string[]).at(-1)).toBe("write the menu\nthen the credits");
 	});
 
 	it("the hint line leads with the mode new sessions start in, as Claude Code's", () => {
@@ -349,7 +343,7 @@ describe("AgentView keys", () => {
 	});
 
 	it("alt+N opens the Nth session in the focused session's directory", async () => {
-		const { view, opened, flush } = makeView();
+		const { view, calls, flush } = makeView();
 		view.setInstancesForTest([
 			{ id: "a", status: "stopped", cwd: HERE, sessionFile: "/a.jsonl", outcome: "done", finishedAt: ago(1) },
 			{ id: "b", status: "stopped", cwd: THERE, sessionFile: "/b.jsonl", outcome: "done", finishedAt: ago(2) },
@@ -358,67 +352,8 @@ describe("AgentView keys", () => {
 		expect(view.selectedKeyForTest()).toBe("a");
 		view.handleInput("\x1b2"); // alt+2
 		for (let i = 0; i < 5; i++) await flush();
-		expect(opened).toEqual(["/c.jsonl"]);
-	});
-
-	it("opening a working session moves it into this window, where its turn carries on", async () => {
-		const { view, calls, opened, resumed, flush } = makeView();
-		view.setInstancesForTest([
-			{ id: "w", status: "online", activity: "working", cwd: HERE, sessionFile: "/w.jsonl", createdAt: ago(1) },
-		]);
-		view.handleInput(ENTER);
-		for (let i = 0; i < 5; i++) await flush();
-		expect(calls).toEqual([["handOver", "w"]]);
-		expect(opened).toEqual(["/w.jsonl"]);
-		expect(resumed).toEqual([true]);
-	});
-
-	it("a row drawn idle whose session has since started working still carries the turn over", async () => {
-		const writer: InstanceSummary = {
-			id: "w",
-			status: "online",
-			activity: "working",
-			cwd: HERE,
-			sessionFile: "/w.jsonl",
-		};
-		const { view, calls, resumed, flush } = makeView({ list: () => [writer] });
-		view.setInstancesForTest([{ ...writer, activity: "idle" }]);
-		view.handleInput(ENTER);
-		for (let i = 0; i < 5; i++) await flush();
-		expect(calls).toEqual([["handOver", "w"]]);
-		expect(resumed).toEqual([true]);
-	});
-
-	it("does not open a live session if stopping its writer fails, and keeps the view usable", async () => {
-		const calls: Calls = [];
-		const row: InstanceSummary = { id: "w", status: "online", activity: "idle", cwd: HERE, sessionFile: "/w.jsonl" };
-		const client = fakeClient(calls, () => [row]);
-		client.handOver = async () => {
-			throw new Error("stop timed out");
-		};
-		let opened = false;
-		let closed = false;
-		const view = new AgentView({
-			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
-			client,
-			appName: "bluclawd",
-			cwd: HERE,
-			home: HOME,
-			onClose: () => {
-				closed = true;
-			},
-			onOpen: () => {
-				opened = true;
-			},
-			fileExists: () => true,
-		});
-		view.setInstancesForTest([row]);
-		view.handleInput(ENTER);
-		await new Promise((resolve) => setTimeout(resolve, 0));
-		expect(opened).toBe(false);
-		expect(view.render(100).map(stripAnsi).join("\n")).toContain("stop timed out");
-		view.handleInput(ESC);
-		expect(closed).toBe(true);
+		expect(calls).toContainEqual(["start", HERE, ["--session", "/c.jsonl"]]);
+		expect(calls).toContainEqual(["switchTo", "pane-1"]);
 	});
 
 	it("ignores a late roster response after closing rather than reading the replaced session context", async () => {
@@ -436,7 +371,7 @@ describe("AgentView keys", () => {
 			cwd: HERE,
 			home: HOME,
 			onClose: () => {},
-			onOpen: () => {},
+			panes: fakePanes([]),
 			self: () => {
 				if (invalidated) throw new Error("stale session context");
 				return undefined;
@@ -450,131 +385,12 @@ describe("AgentView keys", () => {
 		await expect(showing).resolves.toBeUndefined();
 	});
 
-	it("Esc during a hand-over leaves a turn in progress running in the background", async () => {
-		let finish!: (working: boolean) => void;
-		const calls: Calls = [];
-		const row: InstanceSummary = {
-			id: "w",
-			status: "online",
-			activity: "working",
-			cwd: HERE,
-			sessionFile: "/w.jsonl",
-		};
-		const client = fakeClient(calls, () => [row]);
-		client.handOver = () =>
-			new Promise<boolean>((resolve) => {
-				finish = resolve;
-			});
-		let opened = false;
-		const view = new AgentView({
-			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
-			client,
-			appName: "bluclawd",
-			cwd: HERE,
-			home: HOME,
-			onClose: () => {},
-			onOpen: () => {
-				opened = true;
-			},
-			fileExists: () => true,
-		});
-		view.setInstancesForTest([row]);
-		view.handleInput(ENTER);
-		await vi.waitFor(() => expect(finish).toBeDefined());
-		view.handleInput(ESC);
-		finish(true);
-		await vi.waitFor(() => expect(calls.length).toBeGreaterThan(0));
-		expect(opened).toBe(false);
-		expect(calls[0]).toEqual([
-			"spawn",
-			expect.objectContaining({ sessionFile: "/w.jsonl", prompt: CONTINUE_PROMPT }),
-		]);
-	});
-
 	it("explains how to recover a legacy Failed row that never recorded its file", () => {
 		const { view, text, opened } = makeView();
 		view.setInstancesForTest([{ id: "legacy", status: "stopped", outcome: "failed", cwd: HERE }]);
 		view.handleInput(ENTER);
 		expect(opened).toEqual([]);
 		expect(text().join("\n")).toContain("/resume");
-	});
-
-	it("opening a finished live session releases its idle writer without a prompt", async () => {
-		const { view, calls, resumed, flush } = makeView();
-		view.setInstancesForTest([
-			{ id: "d", status: "online", activity: "idle", cwd: HERE, sessionFile: "/d.jsonl", outcome: "done", turns: 1 },
-		]);
-		view.handleInput(ENTER);
-		for (let i = 0; i < 5; i++) await flush();
-		expect(calls).toEqual([["handOver", "d"]]);
-		expect(resumed).toEqual([false]);
-	});
-
-	describe("a session open in another terminal", () => {
-		const stored: InstanceSummary = {
-			id: "s",
-			status: "stopped",
-			cwd: HERE,
-			sessionFile: "/x.jsonl",
-			outcome: "done",
-		};
-		const holder = (activity: InstanceSummary["activity"]): InstanceSummary => ({
-			id: "other-window",
-			status: "online",
-			activity,
-			cwd: HERE,
-			sessionFile: "/x.jsonl",
-			external: true,
-		});
-
-		it("enter asks that terminal to let go, then opens it here", async () => {
-			let held = true;
-			const { view, calls, opened, resumed, flush } = makeView({
-				list: () => (held ? [stored, holder("idle")] : [stored]),
-			});
-			view.setInstancesForTest([stored, holder("idle")]);
-			view.handleInput(ENTER);
-			await flush();
-			expect(calls).toEqual([["release", "/x.jsonl"]]);
-			expect(opened).toEqual([]);
-			held = false;
-			await vi.waitFor(() => expect(opened).toEqual(["/x.jsonl"]));
-			expect(resumed).toEqual([false]);
-		});
-
-		it("does not request release while the other terminal is still working", async () => {
-			const { view, calls, opened, resumed, flush } = makeView({ list: () => [stored, holder("working")] });
-			view.setInstancesForTest([stored, holder("working")]);
-			view.handleInput(ENTER);
-			await flush();
-			expect(calls).toEqual([]);
-			expect(opened).toEqual([]);
-			expect(resumed).toEqual([]);
-			view.handleInput(ESC);
-		});
-
-		it("says so when the daemon cannot pass the request on", async () => {
-			const { view, opened, text, flush } = makeView({ releases: false, list: () => [stored, holder("idle")] });
-			view.setInstancesForTest([stored, holder("idle")]);
-			view.handleInput(ENTER);
-			for (let i = 0; i < 5; i++) await flush();
-			expect(opened).toEqual([]);
-			expect(text().join("\n")).toContain("close pi there");
-		});
-
-		it("gives up when the other terminal never lets go", async () => {
-			vi.useFakeTimers();
-			try {
-				const { view, opened, text } = makeView({ list: () => [stored, holder("idle")] });
-				view.setInstancesForTest([stored, holder("idle")]);
-				view.handleInput(ENTER);
-				await vi.advanceTimersByTimeAsync(15_500);
-				expect(opened).toEqual([]);
-				expect(text().join("\n")).toContain("didn't let go");
-			} finally {
-				vi.useRealTimers();
-			}
-		});
 	});
 
 	it("Ctrl+V attaches an image to a new background session, including an image-only prompt", async () => {
@@ -585,20 +401,9 @@ describe("AgentView keys", () => {
 		expect(text().join("\n")).toContain("1 image attached");
 		view.handleInput(ENTER);
 		await flush();
-		expect(calls[0]).toEqual(["spawn", expect.objectContaining({ prompt: "", images: [image] })]);
+		expect(calls[0]?.[0]).toBe("start");
+		expect((calls[0]?.[2] as string[]).at(-1)).toMatch(/^@.*\.png$/);
 		expect(text().join("\n")).not.toContain("image attached");
-	});
-
-	it("Ctrl+Enter carries pasted images into the new foreground session", async () => {
-		const image = { type: "image" as const, mimeType: "image/png", data: "aW1hZ2U=" };
-		const { view, calls, flush } = makeView({ readClipboard: async () => ({ image }) });
-		for (const ch of "describe this") view.handleInput(ch);
-		view.handleInput("\x16");
-		await flush();
-		view.handleInput("\x1b[13;5u");
-		expect(calls).toEqual([
-			["createAndOpen", HERE, { provider: "opencode-go", id: "kimi" }, "describe this", [image]],
-		]);
 	});
 
 	it("Ctrl+V only attaches images, as in Claude Code, and keeps the composer text", async () => {
@@ -639,59 +444,19 @@ describe("AgentView keys", () => {
 		await flush();
 		view.handleInput(ENTER);
 		await flush();
-		expect(calls[0]).toEqual([
-			"spawn",
-			expect.objectContaining({ images: [expect.objectContaining({ type: "image" })] }),
-		]);
+		expect(calls[0]?.[0]).toBe("start");
+		expect(calls[0]?.[2]).toEqual(expect.arrayContaining(["describe image", expect.stringMatching(/^@.*\.png$/)]));
 	});
 
-	it("retains the task and images if starting a new session fails", async () => {
-		const image = { type: "image" as const, mimeType: "image/png", data: "AQID" };
-		const client = fakeClient([]);
-		client.spawn = async () => {
-			throw new Error("startup unavailable");
-		};
-		const view = new AgentView({
-			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
-			client,
-			appName: "bluclawd",
-			cwd: HERE,
-			home: HOME,
-			onClose: () => {},
-			onOpen: () => {},
-			readClipboard: async () => ({ image }),
-		});
-		for (const ch of "describe image") view.handleInput(ch);
-		view.handleInput("\x16");
-		await new Promise((resolve) => setTimeout(resolve, 0));
-		view.handleInput(ENTER);
-		await new Promise((resolve) => setTimeout(resolve, 0));
-		const shown = view.render(100).map(stripAnsi).join("\n");
-		expect(shown).toContain("describe image");
-		expect(shown).toContain("1 image attached");
-		expect(shown).toContain("startup unavailable");
-	});
-
-	it("ctrl+c clears the draft and arms the exit at once; a second press quits pi", () => {
-		let quit = 0;
-		const view = new AgentView({
-			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
-			client: fakeClient([]),
-			appName: "bluclawd",
-			cwd: HERE,
-			home: HOME,
-			onClose: () => {},
-			onOpen: () => {},
-			onQuit: () => quit++,
-		});
-		view.setInstancesForTest(sessions);
+	it("ctrl+c clears the draft and arms the exit at once; a second press leaves tmux", () => {
+		const { view, calls } = makeView();
 		for (const ch of "draft") view.handleInput(ch);
 		view.handleInput("\x03");
 		const shown = view.render(100).map(stripAnsi).join("\n");
 		expect(shown).not.toContain("❯ draft");
 		expect(shown).toContain("Press Ctrl-C again to exit · 2 agents will keep running");
 		view.handleInput("\x03");
-		expect(quit).toBe(1);
+		expect(calls).toEqual([["detach"]]);
 	});
 
 	it("exit words quit; an unknown /command is a task, not an error", async () => {
@@ -699,10 +464,11 @@ describe("AgentView keys", () => {
 		for (const ch of "/brainstorm a menu") view.handleInput(ch);
 		view.handleInput(ENTER);
 		await flush();
-		expect(calls[0]).toEqual(["spawn", expect.objectContaining({ prompt: "/brainstorm a menu" })]);
+		expect(calls[0]).toEqual(["start", HERE, ["--model", "opencode-go/kimi", "--", "/brainstorm a menu"]]);
 		for (const ch of "exit") view.handleInput(ch);
 		view.handleInput(ENTER);
 		expect(closed()).toBe(1);
+		expect(calls.at(-1)).toEqual(["detach"]);
 	});
 
 	it("↑ wraps from the top to the bottom", () => {
@@ -721,7 +487,7 @@ describe("AgentView keys", () => {
 		expect(shown.at(-1)).toContain("enter to save · esc to cancel");
 		view.handleInput(ENTER);
 		await flush();
-		expect(calls[0]).toEqual(["rename", "ask", "power-up design v2"]);
+		expect(calls[0]).toEqual(["send", "ask", { type: "rename", name: "power-up design v2" }]);
 	});
 
 	it("refuses a too-short task", () => {
@@ -730,23 +496,6 @@ describe("AgentView keys", () => {
 		view.handleInput(ENTER);
 		expect(calls).toEqual([]);
 		expect(text().join("\n")).toContain("Too short — describe the task");
-	});
-
-	it("space peeks; a number answers the pending question without attaching", async () => {
-		const { view, calls, text, flush } = makeView();
-		expect(view.selectedKeyForTest()).toBe("ask");
-		view.handleInput(" ");
-		const peek = text().join("\n");
-		expect(peek).toContain("Allow bash: npm test?");
-		expect(peek).toContain("│   1. Yes");
-		expect(peek).toContain("│   2. No");
-		// A number fills in that option; enter sends it.
-		view.handleInput("1");
-		expect(text().join("\n")).toContain("❯ Yes");
-		expect(calls).toEqual([]);
-		view.handleInput(ENTER);
-		await flush();
-		expect(calls[0]).toEqual(["answer", "ask", "q1", { value: "Yes" }]);
 	});
 
 	it("a peek reply goes to a running session as a prompt when idle", async () => {
@@ -758,20 +507,23 @@ describe("AgentView keys", () => {
 		for (const ch of "now add sound") view.handleInput(ch);
 		view.handleInput(ENTER);
 		await flush();
-		expect(calls[0]).toEqual(["reply", "done", "now add sound", false]);
+		expect(calls[0]).toEqual(["send", "done", { type: "prompt", text: "now add sound" }]);
 	});
 
-	it("ctrl+x stops a running session, a second press deletes it", async () => {
+	it("ctrl+x stops a running session's turn, a second press ends its pi and deletes the row", async () => {
 		const { view, calls, text, flush } = makeView();
 		view.handleInput(DOWN);
 		view.handleInput(DOWN); // Working header → collision detection
 		view.handleInput(CTRL_X);
 		await flush();
-		expect(calls).toEqual([["stop", "work"]]);
+		expect(calls).toEqual([["send", "work", { type: "abort" }]]);
 		expect(text().join("\n")).toContain("ctrl+x again to delete");
 		view.handleInput(CTRL_X);
 		await flush();
-		expect(calls[1]).toEqual(["delete", "work"]);
+		expect(calls.slice(1)).toEqual([
+			["kill", "p-work"],
+			["delete", "work"],
+		]);
 	});
 
 	it("esc dismisses an armed delete instead of closing", () => {
@@ -784,7 +536,7 @@ describe("AgentView keys", () => {
 		expect(closed()).toBe(1);
 	});
 
-	it("ctrl+t cannot pin your own session", async () => {
+	it("ctrl+t pins your own session like any other: it is a pane too", async () => {
 		const self: InstanceSummary = {
 			id: "me",
 			status: "online",
@@ -793,39 +545,51 @@ describe("AgentView keys", () => {
 			label: "current",
 			turns: 1,
 			external: true,
+			pane: "pane-self",
 		};
-		const { view, calls, text, flush } = makeView({ self });
+		const { view, calls, flush } = makeView({ self });
 		expect(view.selectedKeyForTest()).toBe("me");
 		view.handleInput(CTRL_T);
-		expect(text().join("\n")).toContain("Only background sessions can be pinned");
 		await flush();
-		expect(calls).toEqual([]);
-		view.handleInput(ENTER);
-		expect(calls).toEqual([]);
+		expect(calls).toEqual([["setMeta", "me", { pinned: true }]]);
 	});
 
 	it("ctrl+x stops your own session's turn, a second press deletes it", async () => {
-		const self: InstanceSummary = { id: "me", status: "online", activity: "working", cwd: HERE, external: true };
+		const self: InstanceSummary = {
+			id: "me",
+			status: "online",
+			activity: "working",
+			cwd: HERE,
+			external: true,
+			pane: "pane-self",
+		};
+		const calls: Calls = [];
 		let stopped = 0;
-		let deleted = 0;
 		const view = new AgentView({
 			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
-			client: fakeClient([], () => []),
+			client: fakeClient(calls, () => []),
 			appName: "bluclawd",
 			cwd: HERE,
 			home: HOME,
 			self: () => self,
 			onClose: () => {},
-			onOpen: () => {},
+			panes: fakePanes(calls),
 			onStopSelf: () => stopped++,
-			onDeleteSelf: () => deleted++,
 		});
 		view.setInstancesForTest([]);
 		view.handleInput(CTRL_X);
 		expect(stopped).toBe(1);
 		expect(view.render(100).map(stripAnsi).join("\n")).toContain("ctrl+x again to delete");
 		view.handleInput(CTRL_X);
-		await vi.waitFor(() => expect(deleted).toBe(1));
+		// This terminal moves to a new pane showing agent view; this one ends.
+		await vi.waitFor(() => expect(calls.at(-1)).toEqual(["kill", "pane-self"]));
+		expect(calls).toEqual([
+			["start", HERE, [], { BLUCLAWD_OPEN_VIEW: "1" }],
+			["switchTo", "pane-1"],
+			["unlist"],
+			["delete", "me"],
+			["kill", "pane-self"],
+		]);
 	});
 
 	it("enter on your own session returns to it; on another it opens there", async () => {
@@ -834,14 +598,18 @@ describe("AgentView keys", () => {
 		withSelf.view.handleInput(ENTER);
 		expect(withSelf.closed()).toBe(1);
 
-		const { view, opened, calls, flush } = makeView();
+		const { view, calls, flush } = makeView();
 		view.setInstancesForTest(sessions.map((s) => (s.id === "gone" ? { ...s, sessionFile: "/gone.jsonl" } : s)));
 		for (let i = 0; i < 5; i++) view.handleInput(DOWN);
 		expect(view.selectedKeyForTest()).toBe("gone");
 		view.handleInput(ENTER);
 		await flush();
-		expect(opened).toEqual(["/gone.jsonl"]);
-		expect(calls).toEqual([]); // not running: nothing to stop
+		// Not running: it starts in a pane of its own, which replaces the stored row.
+		expect(calls).toEqual([
+			["start", HERE, ["--session", "/gone.jsonl"]],
+			["delete", "gone"],
+			["switchTo", "pane-1"],
+		]);
 	});
 
 	it("/model sets the dispatch model for this view only; other slash commands point to attaching", () => {
@@ -869,40 +637,13 @@ describe("piPackageRoot", () => {
 	});
 });
 
-describe("handOff", () => {
-	const outgoing = { cwd: HERE, sessionFile: "/s.jsonl", model: { provider: "p", id: "m" } };
-	const spy = () => {
-		const spawned: unknown[] = [];
-		const client = { spawn: async (opts: unknown) => void spawned.push(opts) } as Pick<OrchestratorClient, "spawn">;
-		return { spawned, client };
-	};
-
-	it("resumes a session that was working with the continue prompt", async () => {
-		const { spawned, client } = spy();
-		await handOff({ ...outgoing, working: true }, client);
-		expect(spawned).toEqual([expect.objectContaining({ sessionFile: "/s.jsonl", prompt: CONTINUE_PROMPT })]);
-	});
-
-	it("resumes an idle session without a prompt", async () => {
-		const { spawned, client } = spy();
-		await handOff({ ...outgoing, working: false }, client);
-		expect(spawned).toEqual([expect.objectContaining({ sessionFile: "/s.jsonl", prompt: undefined })]);
-	});
-
-	it("swallows a daemon failure", async () => {
-		const client = { spawn: async () => Promise.reject(new Error("no daemon")) } as Pick<OrchestratorClient, "spawn">;
-		await expect(handOff({ ...outgoing, working: true }, client)).resolves.toBeUndefined();
-	});
-});
-
 describe("withoutAgentViewCommand", () => {
-	it("keeps the plumbing commands out of slash autocomplete", async () => {
+	it("keeps the plumbing command out of slash autocomplete", async () => {
 		const base = {
 			getSuggestions: async () => ({
 				prefix: "/a",
 				items: [
 					{ value: "agent-view", label: "agent-view" },
-					{ value: "agent-view-release", label: "agent-view-release" },
 					{ value: "agents", label: "agents" },
 				],
 			}),
