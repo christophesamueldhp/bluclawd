@@ -232,8 +232,12 @@ const agentView: InlineExtension = {
 				return { render: () => [], invalidate: () => {} };
 			});
 			ctx.ui.setWidget("agent-view:launch", undefined);
-			tui?.stop();
+			// Fullscreen pi copies its last frame to the terminal's own screen on stop; this one is
+			// not the session's, so it would stay behind once tmux leaves.
+			(tui as { stop(options?: { preserveScreen?: boolean }): void } | undefined)?.stop({ preserveScreen: true });
 			panes.attach(name);
+			// tmux's own "[detached (from session …)]" / "[exited]" line.
+			process.stdout.write("\x1b[1A\r\x1b[2K");
 			process.exit(0);
 		};
 
