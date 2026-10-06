@@ -1,5 +1,5 @@
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
-import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
+import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "@earendil-works/pi-tui";
 import type { ManagedDraft } from "../../daemon/view-types.ts";
 import { setSharedTheme } from "../_shared/theme.ts";
 import { AgentView, type PastSession } from "./agent-view.ts";
@@ -152,8 +152,17 @@ export class SessionShell implements Component, Focusable {
 		else this.conversation.handleInput(data);
 	}
 	render(width: number): string[] {
-		if (this.localDialog) return this.localDialog.render(width);
-		return this.mode === "agents" && this.roster ? this.roster.render(width) : this.conversation.render(width);
+		const rows = Math.max(1, this.options.tui.terminal.rows || 24);
+		const lines = this.localDialog
+			? this.localDialog.render(width)
+			: this.mode === "agents" && this.roster
+				? this.roster.render(width)
+				: this.conversation.render(width);
+		// Every screen owns the full viewport, including short local dialogs.
+		const cursor = lines.findIndex((line) => line.includes(CURSOR_MARKER));
+		const start = Math.max(0, Math.min(lines.length - rows, cursor < 0 ? 0 : cursor - rows + 1));
+		const visible = lines.slice(start, start + rows);
+		return [...visible, ...Array(rows - visible.length).fill("")];
 	}
 	invalidate(): void {
 		this.conversation.invalidate();

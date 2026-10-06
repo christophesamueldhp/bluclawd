@@ -576,7 +576,10 @@ export class ConversationView implements Component, Focusable {
 		const body = this.scroll.render(w);
 		const height = Math.max(1, rows - header.length - footer.length);
 		this.scroll.updateLayout(body.length, height, () => this.options.tui.requestRender());
-		return [...header, ...body.slice(this.scroll.scrollTop, this.scroll.scrollTop + height), ...footer].map((line) =>
+		const visible = body.slice(this.scroll.scrollTop, this.scroll.scrollTop + height);
+		// Reserve the entire body viewport even before the first message arrives.
+		// Otherwise Pi centers this short overlay and exposes the idle host's editor.
+		return [...header, ...visible, ...Array(Math.max(0, height - visible.length)).fill(""), ...footer].map((line) =>
 			truncateToWidth(line, w, ""),
 		);
 	}

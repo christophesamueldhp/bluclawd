@@ -8,7 +8,14 @@ import {
 	type RpcResponse,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
+import {
+	CURSOR_MARKER,
+	stripTerminalSequences,
+	type Terminal,
+	type TUI,
+	TuiAltScreen,
+	TuiMainScreen,
+} from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createViewProjection } from "../daemon/view-projection.ts";
 import type { ViewReady } from "../daemon/view-types.ts";
@@ -29,7 +36,7 @@ afterEach(() => {
 	vi.unstubAllEnvs();
 	rmSync(dir, { recursive: true, force: true });
 });
-async function fixture() {
+async function fixture(mode: "fullscreen" | "inline" = "fullscreen") {
 	const theme = {
 		fg: (_c: string, s: string) => s,
 		bg: (_c: string, s: string) => s,
@@ -104,8 +111,12 @@ async function fixture() {
 		onChange: () => shell?.refresh(),
 	});
 	await controller.select({ instanceId: "a" });
+	const terminal = { rows: 30, columns: 100, setTitle: () => {}, hideCursor: () => {} };
+	const Renderer = mode === "fullscreen" ? TuiAltScreen : TuiMainScreen;
+	const tui = new Renderer(terminal as unknown as Terminal);
+	vi.spyOn(tui, "requestRender").mockImplementation(() => {});
 	shell = new SessionShell({
-		tui: { terminal: { rows: 30, columns: 100, setTitle: () => {} }, requestRender: () => {} } as unknown as TUI,
+		tui,
 		theme,
 		keybindings: { matches: () => false } as unknown as KeybindingsManager,
 		controller,
@@ -121,9 +132,55 @@ async function fixture() {
 		shell?.dispose();
 		controller.dispose();
 	});
-	return { shell, controller, client, views, prompts, closes };
+	return { shell, controller, client, views, prompts, closes, tui, terminal };
+}
+/** Exercise Pi's actual overlay composition, including the idle host's focused editor. */
+function visibleScreen(tui: TUI, rows: number, width: number): string[] {
+	const host = Array.from({ length: rows + 10 }, () => "native host content");
+	host[host.length - 2] = `native editor${CURSOR_MARKER}`;
+	host[host.length - 1] = "native host status";
+	return (
+		tui as unknown as {
+			compositeOverlays(lines: string[], width: number, height: number): string[];
+		}
+	)
+		.compositeOverlays(host, width, rows)
+		.slice(-rows);
 }
 describe("managed session shell", () => {
+	it.each(["fullscreen", "inline"] as const)(
+		"%s blank conversation covers the host screen with one bottom editor",
+		async (mode) => {
+			const f = await fixture(mode);
+			f.controller.blank();
+			f.tui.showOverlay(f.shell, { width: "100%", maxHeight: "100%" });
+			const screen = visibleScreen(f.tui, f.terminal.rows, f.terminal.columns);
+			expect(stripTerminalSequences(screen.join("\n"))).not.toContain("native");
+			expect(stripTerminalSequences(screen[0])).toContain("Blank composer");
+			expect(screen.filter((line) => line.includes(CURSOR_MARKER))).toHaveLength(1);
+			expect(screen.findIndex((line) => line.includes(CURSOR_MARKER))).toBeGreaterThanOrEqual(f.terminal.rows - 5);
+			expect(stripTerminalSequences(screen.at(-1)!)).toContain("agents");
+		},
+	);
+	it("short conversation and local dialogs keep covering the host after terminal resize", async () => {
+		const f = await fixture();
+		f.controller.setDraft({ text: "line one\nline two", images: [] });
+		f.tui.showOverlay(f.shell, { width: "100%", maxHeight: "100%" });
+		for (const rows of [50, 12, 30]) {
+			f.terminal.rows = rows;
+			f.terminal.columns = 40;
+			const screen = visibleScreen(f.tui, rows, 40);
+			expect(stripTerminalSequences(screen.join("\n"))).not.toContain("native");
+			expect(screen.filter((line) => line.includes(CURSOR_MARKER))).toHaveLength(1);
+			expect(screen.findIndex((line) => line.includes(CURSOR_MARKER))).toBeGreaterThanOrEqual(rows - 6);
+		}
+		const choice = f.shell.choose("Choose a theme", ["dark", "light"]);
+		expect(stripTerminalSequences(visibleScreen(f.tui, 30, 40).join("\n"))).not.toContain("native");
+		f.shell.handleInput("\x1b");
+		await choice;
+		expect(f.controller.draft().text).toBe("line one\nline two");
+		expect(stripTerminalSequences(visibleScreen(f.tui, 30, 40).join("\n"))).not.toContain("native");
+	});
 	it("selected deletion shows a blank composer and only detaches", async () => {
 		const f = await fixture();
 		f.controller.setDraft({ text: "old", images: [] });

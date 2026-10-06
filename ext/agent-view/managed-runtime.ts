@@ -271,7 +271,7 @@ export function createManagedRuntime(
 				void flush();
 				return shell;
 			},
-			{ overlay: true, overlayOptions: { width: "100%", maxHeight: "100%" } },
+			{ overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", anchor: "top-left" } },
 		);
 		void lifetime.then(
 			() => {
