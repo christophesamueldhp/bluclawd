@@ -28,7 +28,7 @@ import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
 import { trustBadge } from "../permissions/index.ts";
-import { AgentView, type PastSession } from "./agent-view.ts";
+import { AgentView, EXIT_WORDS, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, CONTINUE_COMMAND, CONTINUE_TEXT, handOff, handOffAfterExit } from "./hand-off.ts";
 import { type InstanceSummary, OrchestratorClient, type PaneMessage } from "./orchestrator-client.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
@@ -73,6 +73,12 @@ export function withoutAgentViewCommand(current: AutocompleteProvider): Autocomp
 			return items.length > 0 ? { ...base, items } : null;
 		},
 	};
+}
+
+/** An exit word or /exit alone at the prompt: Claude Code runs /exit for it, which is pi's /quit. */
+export function isQuitAlias(text: string): boolean {
+	const trimmed = text.trim();
+	return trimmed === "/exit" || EXIT_WORDS.has(trimmed);
 }
 
 /** pi's ways to pick a session; a pane is given the one its launcher already picked. */
@@ -384,6 +390,11 @@ const agentView: InlineExtension = {
 				leftHint = undefined;
 				paintPill?.();
 			};
+			const editorFocused = (): boolean => {
+				// getFocusedComponent is on pi-tui's TUI class, not its TUI interface.
+				const focused = (tui as { getFocusedComponent?: () => unknown } | undefined)?.getFocusedComponent?.();
+				return typeof (focused as { getText?: unknown } | null)?.getText === "function";
+			};
 			const offKey = ctx.ui.onTerminalInput((data) => {
 				// Kitty reports a release (and a held key) as separate events; only presses count.
 				if (isKeyRelease(data) || isKeyRepeat(data)) return undefined;
@@ -405,6 +416,10 @@ const agentView: InlineExtension = {
 						ctrlCAt = now;
 					}
 				}
+				// Claude Code runs /exit for these; submitting them as /quit runs pi's own quit.
+				if (!viewOpen && matchesKey(data, "enter") && isQuitAlias(ctx.ui.getEditorText()) && editorFocused()) {
+					ctx.ui.setEditorText("/quit");
+				}
 				if (
 					ctx.ui.getEditorText() !== "" ||
 					matchesKey(data, "backspace") ||
@@ -416,10 +431,7 @@ const agentView: InlineExtension = {
 					disarm();
 					return undefined;
 				}
-				// getFocusedComponent is on pi-tui's TUI class, not its TUI interface.
-				const focused = (tui as { getFocusedComponent?: () => unknown } | undefined)?.getFocusedComponent?.();
-				const editorFocused = typeof (focused as { getText?: unknown } | null)?.getText === "function";
-				if (!tui || tui.hasOverlay() || !editorFocused) {
+				if (!tui || tui.hasOverlay() || !editorFocused()) {
 					disarm();
 					return undefined;
 				}

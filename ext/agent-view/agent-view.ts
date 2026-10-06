@@ -137,7 +137,7 @@ const ARM_MS = 2000;
 /** Claude Code's double ctrl+c window. */
 const CTRL_C_MS = 800;
 /** Bare words that quit, as in Claude Code. */
-const EXIT_WORDS = new Set(["exit", "quit", ":q", ":q!", ":wq", ":wq!"]);
+export const EXIT_WORDS = new Set(["exit", "quit", ":q", ":q!", ":wq", ":wq!"]);
 /** How long a takeover waits for the other terminal: its next heartbeat (3s), then abort and switch. */
 const RELEASE_WAIT_MS = 15_000;
 /** How long a new pane's row shows as starting before it should have registered. */
