@@ -72,6 +72,14 @@ export function textOf(content: unknown): string {
 		.join("");
 }
 
+/** A running tool as one line: its own description when it has one, as Claude Code's row shows. */
+export function toolActivity(toolName: string | undefined, args: unknown): string | undefined {
+	const a = (args ?? {}) as Record<string, unknown>;
+	const text = [a.description, a.command, a.path, a.pattern, a.url].find((v) => typeof v === "string" && v.trim());
+	if (typeof text === "string") return lastLine(text);
+	return toolName;
+}
+
 interface MessageLike {
 	role?: string;
 	content?: unknown;
@@ -113,7 +121,17 @@ export class SessionStateTracker {
 		this.finishedAt = seed?.finishedAt;
 	}
 
-	apply(event: { type: string; message?: MessageLike; isError?: boolean; result?: unknown }, now = new Date()): void {
+	apply(
+		event: {
+			type: string;
+			message?: MessageLike;
+			isError?: boolean;
+			result?: unknown;
+			toolName?: string;
+			args?: unknown;
+		},
+		now = new Date(),
+	): void {
 		switch (event.type) {
 			case "agent_start":
 				this.outcome = undefined;
@@ -134,6 +152,11 @@ export class SessionStateTracker {
 					if (text) this.detail = text;
 				}
 				break;
+			case "tool_execution_start": {
+				const text = toolActivity(event.toolName, event.args);
+				if (text) this.detail = text;
+				break;
+			}
 			case "tool_execution_end":
 				if (event.isError) {
 					const text = lastLine(textOf((event.result as { content?: unknown } | undefined)?.content));

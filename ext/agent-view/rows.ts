@@ -54,15 +54,18 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 		else state = "idle";
 	} else state = inst.outcome === "failed" ? "failed" : inst.outcome === "done" ? "done" : "stopped";
 
-	let detail = inst.detail ?? "";
+	// The daemon keeps the `result:` sentinel's word; the row shows only what it says.
+	let detail = (inst.detail ?? "").replace(/^result:\s*/i, "");
 	if (inst.needs) detail = needsText(inst.needs);
 	else if (state === "needs" && inst.question) detail = inst.question;
 	else if (inst.status === "starting") detail = "starting…";
-	else if (state === "idle") detail = "space to send it a prompt";
+	// An idle session's line depends on focus, so the view writes it.
+	else if (state === "idle") detail = "";
 
 	return {
 		id: inst.id,
-		label: inst.label?.trim() || (self ? "current session" : "untitled session"),
+		label:
+			inst.label?.trim() || (self ? "current session" : state === "working" ? "new session" : "untitled session"),
 		cwd: inst.cwd,
 		sessionFile: inst.sessionFile,
 		state,
@@ -136,8 +139,15 @@ export interface Band {
 	key: string;
 	title: string;
 	rows: AgentRow[];
-	/** Shown even when empty (the state view's three fixed bands). */
+	/** Shown even when empty: onboarding's three state bands, the launcher's directory. */
 	fixed: boolean;
+}
+
+export interface BandOptions {
+	/** The directory agent view was opened in: its band comes first, and shows even when empty. */
+	launcherCwd?: string;
+	/** Nothing but this window's own session is listed: every state band shows, with a hint. */
+	onboarding?: boolean;
 }
 
 const STATE_BANDS = [
@@ -146,7 +156,7 @@ const STATE_BANDS = [
 	{ key: "completed", title: "Completed" },
 ] as const;
 
-function stateBandOf(row: AgentRow): "needs" | "working" | "completed" {
+export function stateBandOf(row: AgentRow): "needs" | "working" | "completed" {
 	if (row.state === "needs" || row.state === "idle") return "needs";
 	if (row.state === "working") return "working";
 	return "completed";
@@ -156,40 +166,57 @@ function stamp(iso: string | undefined): number {
 	return iso ? Date.parse(iso) || 0 : 0;
 }
 
-/** Manual order first (shift+↑/↓), then the most recently active. */
-function sortRows(rows: AgentRow[]): AgentRow[] {
+/** The state view: manual order (shift+↑/↓) first, then the most recently active. A finished
+ *  run counts from when it finished, anything else from its last activity. */
+function byRecency(rows: AgentRow[]): AgentRow[] {
+	const at = (r: AgentRow) => stamp(stateBandOf(r) === "completed" ? (r.finishedAt ?? r.updatedAt) : r.updatedAt);
 	return [...rows].sort((a, b) => {
 		if (a.sortOrder !== undefined || b.sortOrder !== undefined) {
 			return (a.sortOrder ?? Number.MAX_SAFE_INTEGER) - (b.sortOrder ?? Number.MAX_SAFE_INTEGER);
 		}
-		return stamp(b.finishedAt ?? b.updatedAt ?? b.createdAt) - stamp(a.finishedAt ?? a.updatedAt ?? a.createdAt);
+		return at(b) - at(a) || stamp(b.createdAt) - stamp(a.createdAt);
 	});
 }
 
-export function buildBands(rows: AgentRow[], mode: ViewMode, shortenPath: (p: string) => string): Band[] {
+/** The directory view and the Pinned band: manual order, else oldest first. */
+function byCreation(rows: AgentRow[]): AgentRow[] {
+	const key = (r: AgentRow) => r.sortOrder ?? stamp(r.createdAt);
+	return [...rows].sort((a, b) => key(a) - key(b));
+}
+
+export function buildBands(
+	rows: AgentRow[],
+	mode: ViewMode,
+	shortenPath: (p: string) => string,
+	options: BandOptions = {},
+): Band[] {
 	const bands: Band[] = [];
 	const pinned = rows.filter((r) => r.pinned);
-	if (pinned.length) bands.push({ key: "pinned", title: "Pinned", rows: sortRows(pinned), fixed: false });
+	if (pinned.length) bands.push({ key: "pinned", title: "Pinned", rows: byCreation(pinned), fixed: false });
 	const rest = rows.filter((r) => !r.pinned);
 	if (mode === "state") {
 		for (const band of STATE_BANDS) {
-			bands.push({
-				key: band.key,
-				title: band.title,
-				rows: sortRows(rest.filter((r) => stateBandOf(r) === band.key)),
-				fixed: true,
-			});
+			const list = byRecency(rest.filter((r) => stateBandOf(r) === band.key));
+			if (list.length || options.onboarding) {
+				bands.push({ key: band.key, title: band.title, rows: list, fixed: !!options.onboarding });
+			}
 		}
 		return bands;
 	}
 	const byDir = new Map<string, AgentRow[]>();
-	for (const row of sortRows(rest)) {
+	const launcher = options.launcherCwd;
+	// The launcher's directory is where a new session starts, so it is listed even with no rows.
+	if (launcher && rows.length > 0) byDir.set(launcher, []);
+	for (const row of byCreation(rest)) {
 		const list = byDir.get(row.cwd);
 		if (list) list.push(row);
 		else byDir.set(row.cwd, [row]);
 	}
-	for (const [cwd, list] of byDir)
-		bands.push({ key: `dir:${cwd}`, title: shortenPath(cwd), rows: list, fixed: false });
+	const dirs = [...byDir.keys()].sort((a, b) => (a === launcher ? -1 : b === launcher ? 1 : a.localeCompare(b)));
+	for (const cwd of dirs) {
+		const list = byDir.get(cwd) ?? [];
+		bands.push({ key: `dir:${cwd}`, title: shortenPath(cwd), rows: list, fixed: cwd === launcher });
+	}
 	return bands;
 }
 
@@ -201,28 +228,65 @@ export interface AgentCounts {
 
 export function countRows(rows: AgentRow[]): AgentCounts {
 	const counts = { needs: 0, working: 0, completed: 0 };
-	// A session idling before its first prompt sits in the Needs input band but is not waiting on you.
-	for (const row of rows) if (row.state !== "idle") counts[stateBandOf(row)]++;
+	// A session idling before its first prompt is waiting on you too: for its first prompt.
+	for (const row of rows) if (!row.id.startsWith("pending:")) counts[stateBandOf(row)]++;
 	return counts;
 }
 
-/** The composer's `s:<state>` filter; undefined when the text is not a filter. */
-export function stateFilter(text: string): ((row: AgentRow) => boolean) | undefined {
-	const match = /^s:(\S*)$/i.exec(text.trim());
-	if (!match) return undefined;
-	const want = match[1].toLowerCase();
-	if (!want) return () => true;
+const BAND_ALIASES: Record<ReturnType<typeof stateBandOf>, string[]> = {
+	needs: ["blocked", "needs input", "input"],
+	working: ["active", "working"],
+	completed: ["completed"],
+};
+
+function stateMatches(row: AgentRow, want: string): boolean {
+	return (
+		row.state.startsWith(want) ||
+		STATE_WORDS[row.state].toLowerCase().startsWith(want) ||
+		BAND_ALIASES[stateBandOf(row)].some((alias) => alias.startsWith(want))
+	);
+}
+
+/**
+ * The composer as a filter: text that starts with `s:<state>` or `n:<name>`. Further words
+ * narrow it — `s:` tokens by state, the rest by name (after `n:`) or name and detail.
+ * Undefined when the text is a task instead.
+ */
+export function queryFilter(text: string): ((row: AgentRow) => boolean) | undefined {
+	const trimmed = text.trim();
+	if (!/^[sn]:/i.test(trimmed)) return undefined;
+	const states: string[] = [];
+	const words: string[] = [];
+	let byName = false;
+	for (const token of trimmed.toLowerCase().split(/\s+/)) {
+		if (token.startsWith("s:")) states.push(token.slice(2));
+		else if (token.startsWith("n:")) {
+			byName = true;
+			if (token.length > 2) words.push(token.slice(2));
+		} else words.push(token);
+	}
 	return (row) => {
-		if (want === "blocked" || want === "needs" || want === "input") return row.state === "needs";
-		if (want === "completed") return stateBandOf(row) === "completed";
-		return row.state.startsWith(want);
+		if (!states.every((want) => !want || stateMatches(row, want))) return false;
+		const haystack = (byName ? row.label : `${row.label} ${row.detail}`).toLowerCase();
+		return words.every((word) => haystack.includes(word));
 	};
 }
 
-/** Largest unit only, as agent view prints ages: `42s`, `4m`, `3h`, `2d`. */
+/** How well a row's name matches an `n:` query, as Claude Code ranks them: exact, then contains. */
+export function nameScore(row: AgentRow, text: string): number {
+	const match = /^n:(.*)$/i.exec(text.trim());
+	const want = match?.[1].trim().toLowerCase();
+	if (!want) return 0;
+	const name = row.label.toLowerCase();
+	return name === want ? 2 : name.includes(want) ? 1 : 0;
+}
+
+/** Largest unit only, as agent view prints ages: `42s`, `4m`, `3h`, `2d`. From a minute up the
+ *  seconds round, carrying into the larger units (1m59.6s is `2m`). */
 export function compactAge(ms: number): string {
-	const seconds = Math.max(0, Math.floor(ms / 1000));
-	if (seconds < 60) return `${seconds}s`;
+	const exact = Math.max(0, ms / 1000);
+	if (exact < 60) return `${Math.floor(exact)}s`;
+	const seconds = Math.round(exact);
 	const minutes = Math.floor(seconds / 60);
 	if (minutes < 60) return `${minutes}m`;
 	const hours = Math.floor(minutes / 60);
@@ -241,7 +305,8 @@ export function rowAge(row: AgentRow, nowMs: number): string {
 export const STATE_WORDS: Record<RowState, string> = {
 	working: "Working",
 	needs: "Needs input",
-	idle: "Idle",
+	// Not prompted yet: waiting on you for its first prompt.
+	idle: "Needs input",
 	done: "Done",
 	failed: "Failed",
 	stopped: "Stopped",

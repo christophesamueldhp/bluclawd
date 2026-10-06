@@ -21,9 +21,15 @@ export interface BackgroundableSession {
 	working: boolean;
 }
 
-/** What a session whose turn was cut off by a move (window switch, pi exit) resumes with. */
-export const CONTINUE_PROMPT =
-	"Your previous turn was interrupted when this session was moved or its window closed. Continue where you left off.";
+/** The worker command that carries on a turn cut off by a move (window switch, pi exit). */
+export const CONTINUE_COMMAND = "agent-view-continue";
+
+/** What a session whose turn was cut off resumes with: the command, so no prompt shows. */
+export const CONTINUE_PROMPT = `/${CONTINUE_COMMAND}`;
+
+/** What the model is told, as a hidden message, when the command runs. */
+export const CONTINUE_TEXT =
+	"This session moved to the background while your turn was in progress. Continue where you left off; do not repeat work that is already done.";
 
 /** How long the helper waits for pi to exit; past this it gives up rather than add a second writer. */
 const EXIT_WAIT_MS = 60_000;

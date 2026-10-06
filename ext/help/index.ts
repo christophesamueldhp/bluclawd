@@ -98,7 +98,7 @@ const help: InlineExtension = {
 				for (const command of registered) {
 					if (command.source !== "extension" || builtinNames.has(command.name)) continue;
 					// ext/agent-view plumbing: dispatched by ←← and by a takeover, not typed
-					if (command.name === "agent-view" || command.name === "agent-view-release") continue;
+					if (command.name.startsWith("agent-view")) continue;
 					commands.push({ name: command.name, description: command.description ?? "" });
 				}
 

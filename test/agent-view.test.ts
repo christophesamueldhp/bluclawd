@@ -19,9 +19,9 @@ import {
 	collectRows,
 	compactAge,
 	labelFromTask,
+	queryFilter,
 	rowAge,
 	rowFromSummary,
-	stateFilter,
 } from "../ext/agent-view/rows.ts";
 
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -153,6 +153,7 @@ function makeView(
 		onCreateAndOpen: (...args) => {
 			calls.push(["createAndOpen", ...args]);
 		},
+		isKnownCommand: (name) => name === "compact",
 	});
 	const setInstances = view.setInstancesForTest.bind(view);
 	view.setInstancesForTest = (rows) => {
@@ -231,22 +232,23 @@ describe("rows", () => {
 
 	it("s:<state> filters; plain text is a task, not a filter", () => {
 		const rows = collectRows(sessions, undefined);
-		expect(rows.filter(stateFilter("s:blocked") ?? (() => false)).map((r) => r.id)).toEqual(["ask"]);
-		expect(rows.filter(stateFilter("s:completed") ?? (() => false)).map((r) => r.id)).toEqual(["done", "gone"]);
-		expect(stateFilter("fix the tests")).toBeUndefined();
+		expect(rows.filter(queryFilter("s:blocked") ?? (() => false)).map((r) => r.id)).toEqual(["ask"]);
+		expect(rows.filter(queryFilter("s:completed") ?? (() => false)).map((r) => r.id)).toEqual(["done", "gone"]);
+		expect(queryFilter("fix the tests")).toBeUndefined();
 	});
 });
 
 describe("AgentView render", () => {
 	it("shows the header, the three bands and one line per session", () => {
 		const text = makeView().text();
-		expect(text[0]).toContain("bluclawd");
-		expect(text[1]).toContain("opencode-go/kimi · ~/proj/here");
-		expect(text[2]).toContain("1 awaiting input · 1 working · 2 completed");
+		expect(text[0]).toBe(""); // Claude Code pads the top of the list
+		expect(text[1]).toContain("bluclawd");
+		expect(text[2]).toContain("opencode-go/kimi · ~/proj/here");
+		expect(text[3]).toContain("1 awaiting input · 1 working · 2 completed");
 		const body = text.join("\n");
 		expect(body).toMatch(/Needs input\n.*power-up design\s+Allow bash: npm test\?\s+1m/);
 		expect(body).toMatch(/Working\n.*collision detection\s+Adding swept-AABB checks/);
-		expect(body).toMatch(/Completed\n.*title screen\s+result: menu done\s+6m/);
+		expect(body).toMatch(/Completed\n.*title screen\s+menu done\s+6m/);
 		expect(body).toContain("∙ sound effects");
 		expect(body).toContain("describe a task for a new session");
 	});
@@ -254,30 +256,45 @@ describe("AgentView render", () => {
 	it("prefixes the state word in the directory view", () => {
 		const { view, text } = makeView();
 		view.handleInput(CTRL_S);
-		expect(text().join("\n")).toMatch(/~\/proj\/here\n.*power-up design\s+Needs input · Allow bash/);
+		const shown = text().join("\n");
+		// The launcher's directory first, its sessions oldest first.
+		expect(shown).toMatch(
+			/~\/proj\/here\n.*sound effects\s+Failed · build broke[\s\S]*power-up design\s+Needs input · Allow bash[\s\S]*~\/proj\/there/,
+		);
 	});
 
-	it("says so when nothing runs yet", () => {
+	it("with nothing running, shows every band with what lands there, and the intro", () => {
 		const { view, text } = makeView();
 		view.setInstancesForTest([]);
-		expect(text().join("\n")).toContain("Nothing running in the background.");
+		const shown = text().join("\n");
+		expect(shown).toMatch(/Needs input\n Sessions that have a question/);
+		expect(shown).toMatch(/Working\n Sessions actively working/);
+		expect(shown).toMatch(/Completed\n Finished sessions wait here/);
+		expect(shown).toContain("A different way to work");
 	});
 
-	it("folds completed sessions that don't fit, but keeps failures visible", () => {
+	it("hides an empty band once anything is listed", () => {
+		const { view, text } = makeView();
+		view.setInstancesForTest(sessions.filter((s) => s.id !== "ask"));
+		expect(text().join("\n")).not.toContain("Needs input");
+	});
+
+	it("folds completed sessions that don't fit, keeping runs that finished together", () => {
 		const many: InstanceSummary[] = Array.from({ length: 30 }, (_, i) => ({
 			id: `d${i}`,
 			status: "stopped" as const,
 			cwd: HERE,
 			label: `task ${i}`,
 			outcome: "done" as const,
-			finishedAt: ago(i + 1),
+			finishedAt: ago(i * 2 + 1),
 		}));
-		many.push({ id: "bad", status: "stopped", cwd: HERE, label: "broken", outcome: "failed", finishedAt: ago(100) });
 		const { view, text } = makeView({ rows: 24 });
 		view.setInstancesForTest(many);
-		const body = text().join("\n");
-		expect(body).toMatch(/… \d+ more/);
-		expect(body).toContain("broken");
+		// 24 rows leave 12 for Completed (24 - 8 - 4).
+		expect(text().join("\n")).toContain("… 18 more");
+		// Finished within a minute of each other, the whole run stays together.
+		view.setInstancesForTest(many.map((s, i) => ({ ...s, finishedAt: new Date(NOW - i * 30_000).toISOString() })));
+		expect(text().join("\n")).not.toContain("more");
 	});
 });
 
@@ -303,7 +320,7 @@ describe("AgentView keys", () => {
 		for (const ch of "write the menu") view.handleInput(ch);
 		view.handleInput("\n"); // ctrl+j
 		for (const ch of "then the credits") view.handleInput(ch);
-		expect(text().join("\n")).toMatch(/❯ write the menu\n\s+then the credits/);
+		expect(text().join("\n")).toMatch(/❯ write the menu\nthen the credits/);
 		view.handleInput("\x1b[13;2u"); // shift+enter (kitty)
 		view.handleInput("\x7f"); // backspace on the empty third line
 		view.handleInput(ENTER);
@@ -561,14 +578,14 @@ describe("AgentView keys", () => {
 		]);
 	});
 
-	it("Ctrl+V falls back to clipboard text without stripping existing composer text", async () => {
-		const { view, calls, flush } = makeView({ readClipboard: async () => ({ text: " image" }) });
+	it("Ctrl+V only attaches images, as in Claude Code, and keeps the composer text", async () => {
+		const { view, text, flush } = makeView({ readClipboard: async () => ({ text: " image" }) });
 		for (const ch of "describe") view.handleInput(ch);
 		view.handleInput("\x16");
 		await flush();
-		view.handleInput(ENTER);
-		await flush();
-		expect(calls[0]).toEqual(["spawn", expect.objectContaining({ prompt: "describe image" })]);
+		const shown = text().join("\n");
+		expect(shown).toContain("No image found in clipboard");
+		expect(shown).toContain("❯ describe");
 	});
 
 	it("Esc clears pasted images rather than unexpectedly opening the selected session", async () => {
@@ -632,6 +649,58 @@ describe("AgentView keys", () => {
 		expect(shown).toContain("startup unavailable");
 	});
 
+	it("ctrl+c clears the draft and arms the exit at once; a second press quits pi", () => {
+		let quit = 0;
+		const view = new AgentView({
+			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+			client: fakeClient([]),
+			appName: "bluclawd",
+			cwd: HERE,
+			home: HOME,
+			onClose: () => {},
+			onOpen: () => {},
+			onQuit: () => quit++,
+		});
+		view.setInstancesForTest(sessions);
+		for (const ch of "draft") view.handleInput(ch);
+		view.handleInput("\x03");
+		const shown = view.render(100).map(stripAnsi).join("\n");
+		expect(shown).not.toContain("❯ draft");
+		expect(shown).toContain("Press Ctrl-C again to exit · 2 agents will keep running");
+		view.handleInput("\x03");
+		expect(quit).toBe(1);
+	});
+
+	it("exit words quit; an unknown /command is a task, not an error", async () => {
+		const { view, calls, closed, flush } = makeView();
+		for (const ch of "/brainstorm a menu") view.handleInput(ch);
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]).toEqual(["spawn", expect.objectContaining({ prompt: "/brainstorm a menu" })]);
+		for (const ch of "exit") view.handleInput(ch);
+		view.handleInput(ENTER);
+		expect(closed()).toBe(1);
+	});
+
+	it("↑ wraps from the top to the bottom", () => {
+		const { view } = makeView();
+		view.handleInput("\x1b[H"); // home: the first band header
+		view.handleInput("\x1b[A");
+		expect(view.selectedKeyForTest()).toBe("gone");
+	});
+
+	it("ctrl+r renames inline in the row, with the footer saying how to finish", async () => {
+		const { view, calls, text, flush } = makeView();
+		view.handleInput("\x12"); // ctrl+r on "power-up design"
+		for (const ch of " v2") view.handleInput(ch);
+		const shown = text();
+		expect(shown.join("\n")).toMatch(/✻ power-up design v2/);
+		expect(shown.at(-1)).toContain("enter to save · esc to cancel");
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]).toEqual(["rename", "ask", "power-up design v2"]);
+	});
+
 	it("refuses a too-short task", () => {
 		const { view, calls, text } = makeView();
 		for (const ch of "hi") view.handleInput(ch);
@@ -646,9 +715,13 @@ describe("AgentView keys", () => {
 		view.handleInput(" ");
 		const peek = text().join("\n");
 		expect(peek).toContain("Allow bash: npm test?");
-		expect(peek).toContain("│ 1. Yes");
-		expect(peek).toContain("│ 2. No");
+		expect(peek).toContain("│   1. Yes");
+		expect(peek).toContain("│   2. No");
+		// A number fills in that option; enter sends it.
 		view.handleInput("1");
+		expect(text().join("\n")).toContain("❯ Yes");
+		expect(calls).toEqual([]);
+		view.handleInput(ENTER);
 		await flush();
 		expect(calls[0]).toEqual(["answer", "ask", "q1", { value: "Yes" }]);
 	});
@@ -729,7 +802,7 @@ describe("AgentView keys", () => {
 		const { view, text } = makeView();
 		for (const ch of "/model openai/gpt-5") view.handleInput(ch);
 		view.handleInput(ENTER);
-		expect(text()[1]).toContain("openai/gpt-5 (session)");
+		expect(text()[2]).toContain("openai/gpt-5 (session)");
 		for (const ch of "/compact") view.handleInput(ch);
 		view.handleInput(ENTER);
 		expect(text().join("\n")).toContain("/compact isn't available in agent view — attach to a session to run it");
@@ -808,24 +881,24 @@ describe("AgentView look", () => {
 		vi.stubEnv("TERM_PROGRAM", "ghostty");
 		vi.stubEnv("TERM", "xterm-ghostty");
 		const { view, text } = makeView();
-		expect(text().slice(0, 4)).toEqual([
+		expect(text().slice(1, 5)).toEqual([
 			expect.stringMatching(/^ {2}▗▄▟█▙▄▖ {4}bluclawd v1\.0\.0$/),
 			expect.stringMatching(/^▄██▀███▀██▄ {2}\S/),
 			expect.stringMatching(/^🮂█████████🮂 {2}\d+ awaiting input/u),
 			expect.stringMatching(/^ {2}🮅.{5}🮅 +$/u),
 		]);
 		// Claude Code drops the mascot below 70 columns.
-		expect(stripAnsi(view.render(60)[0]!)).toMatch(/^bluclawd v1\.0\.0/);
+		expect(stripAnsi(view.render(60)[1]!)).toMatch(/^bluclawd v1\.0\.0/);
 		view.handleInput("?");
 		const shown = text().join("\n");
 		expect(shown).toContain("power-up design");
-		expect(shown).toMatch(/shift\+↑↓ to\s/);
+		expect(shown).toMatch(/ctrl\+r to rename\s/);
 		expect(text().at(-1)).not.toContain("? for shortcuts");
 		view.handleInput("?");
 		expect(text().at(-1)).toContain("? for shortcuts");
 	});
 
-	it("lays the ? grid out like Claude Code: two to a column, whole phrases, alt count from the focused directory", () => {
+	it("lays the ? grid out like Claude Code: three to a column, whole phrases, alt count from the focused directory", () => {
 		const { view } = makeView();
 		view.handleInput("?");
 		const grid = (width: number) => {
@@ -835,20 +908,21 @@ describe("AgentView look", () => {
 		for (const width of [100, 120, 160]) {
 			const text = grid(width).join("\n");
 			for (const item of [
-				"shift+↑↓ to reorder",
+				"ctrl+r to rename",
+				"ctrl+f to find",
 				"ctrl+j for newline",
-				"ctrl+enter to start and open",
+				"ctrl+x to delete",
 				"? to close",
 			]) {
 				expect(text).toContain(item);
 			}
 			expect(text).toContain("alt+1-3 to open"); // the focused row's directory holds three sessions
 		}
-		// Wide enough for Claude Code's two rows: its first column is reorder over rename, 4 apart.
-		expect(grid(160)).toEqual([
-			expect.stringMatching(/^ {2}shift\+↑↓ to reorder {4}ctrl\+s to switch views {4}/),
-			expect.stringMatching(/^ {2}ctrl\+r to rename {7}ctrl\+j for newline {8}/),
-		]);
+		// Wide enough for Claude Code's three rows, filled down each column, 4 apart.
+		const rows = grid(160);
+		expect(rows).toHaveLength(3);
+		expect(rows[0]).toMatch(/^ {2}ctrl\+r to rename {6,}ctrl\+s to switch views {4}/);
+		expect(rows[1]).toMatch(/^ {2}ctrl\+f to find {8,}ctrl\+j for newline {8}/);
 	});
 
 	it("with only this session listed, explains the view just above the composer", () => {

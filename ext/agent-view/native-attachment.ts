@@ -6,6 +6,13 @@ import {
 	BranchSummaryMessageComponent,
 	CompactionSummaryMessageComponent,
 	CustomMessageComponent,
+	createEditToolDefinition,
+	createFindToolDefinition,
+	createGrepToolDefinition,
+	createLocalBashOperations,
+	createLsToolDefinition,
+	createReadToolDefinition,
+	createWriteToolDefinition,
 	ExtensionEditorComponent,
 	ExtensionInputComponent,
 	ExtensionSelectorComponent,
@@ -17,17 +24,40 @@ import {
 	type RpcExtensionUIResponse,
 	type RpcSessionState,
 	type SessionEntry,
+	type ToolDefinition,
 	ToolExecutionComponent,
 	UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Editor, type Focusable, matchesKey, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
 import { textOf } from "../../daemon/session-state.ts";
 import { theme } from "../_shared/theme.ts";
+import { createClaudeBashTool } from "../background-bash/bash-tool.ts";
 import { readAgentClipboard } from "./clipboard.ts";
 import type { InstanceSummary, OrchestratorClient } from "./orchestrator-client.ts";
 import type { Attachment } from "./rpc-attachment.ts";
 
 type Message = Extract<SessionEntry, { type: "message" }>["message"];
+
+/**
+ * The renderers this window would draw the worker's tools with: pi draws a tool it has no
+ * definition for as raw JSON. Only rendering is used; nothing here executes.
+ */
+function toolRenderers(cwd: string): Record<string, ToolDefinition> {
+	return {
+		bash: createClaudeBashTool({
+			cwd,
+			operations: createLocalBashOperations(),
+			sendMessage: () => {},
+			isMain: false,
+		}),
+		read: createReadToolDefinition(cwd) as unknown as ToolDefinition,
+		edit: createEditToolDefinition(cwd) as unknown as ToolDefinition,
+		write: createWriteToolDefinition(cwd) as unknown as ToolDefinition,
+		grep: createGrepToolDefinition(cwd) as unknown as ToolDefinition,
+		find: createFindToolDefinition(cwd) as unknown as ToolDefinition,
+		ls: createLsToolDefinition(cwd) as unknown as ToolDefinition,
+	};
+}
 type Dialog = Component & { handleInput(data: string): void; dispose?(): void; focused?: boolean };
 
 export class NativeAttachment implements Component, Focusable {
@@ -46,6 +76,7 @@ export class NativeAttachment implements Component, Focusable {
 	private components: Component[] = [];
 	private readonly messages = new Map<string, Component>();
 	private readonly tools = new Map<string, ToolExecutionComponent>();
+	private renderers: Record<string, ToolDefinition> | undefined;
 	private dialog?: Dialog;
 	private dialogId?: string;
 	private scroll = 0;
@@ -204,7 +235,8 @@ export class NativeAttachment implements Component, Focusable {
 	private tool(id: string, name: string, args: unknown): ToolExecutionComponent {
 		let tool = this.tools.get(id);
 		if (!tool) {
-			tool = new ToolExecutionComponent(name, id, args, undefined, undefined, this.ui, this.instance.cwd);
+			this.renderers ??= toolRenderers(this.instance.cwd);
+			tool = new ToolExecutionComponent(name, id, args, undefined, this.renderers[name], this.ui, this.instance.cwd);
 			tool.setExpanded(this.expanded);
 			this.tools.set(id, tool);
 			this.components.push(tool);

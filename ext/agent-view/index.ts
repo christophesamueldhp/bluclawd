@@ -9,7 +9,7 @@
  * otherwise two writers share one session file.
  */
 
-import { existsSync } from "node:fs";
+import { existsSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
@@ -24,10 +24,11 @@ import {
 	type TUI,
 } from "@earendil-works/pi-tui";
 import { lastLine, textOf } from "../../daemon/session-state.ts";
+import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
 import { AgentView, type PastSession } from "./agent-view.ts";
-import { type BackgroundableSession, handOff, handOffAfterExit } from "./hand-off.ts";
+import { type BackgroundableSession, CONTINUE_COMMAND, CONTINUE_TEXT, handOff, handOffAfterExit } from "./hand-off.ts";
 import { NativeAttachment } from "./native-attachment.ts";
 import { type InstanceSummary, OrchestratorClient } from "./orchestrator-client.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
@@ -44,14 +45,16 @@ type ViewAction =
 const TMP_ROOTS = [tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"];
 const PILL_POLL_MS = 10_000;
 const DONE_FLASH_MS = 2500;
-/** How long the first ← waits for the second. */
-const LEFT_ARM_MS = 2000;
+/** How long the first ← waits for the second, as in Claude Code. */
+const LEFT_ARM_MS = 3000;
+/** An edit this recent makes the first ← arm instead of opening. */
+const LEFT_EDIT_MS = 2000;
 const STATUS_KEY = STATUS_KEYS.agents;
 /** The command ←← dispatches; not meant to be typed. */
 const AGENT_VIEW_COMMAND = "agent-view";
 /** The command a takeover from another terminal dispatches; not meant to be typed. */
 const RELEASE_COMMAND = "agent-view-release";
-const HIDDEN_COMMANDS: ReadonlySet<string> = new Set([AGENT_VIEW_COMMAND, RELEASE_COMMAND]);
+const HIDDEN_COMMANDS: ReadonlySet<string> = new Set([AGENT_VIEW_COMMAND, RELEASE_COMMAND, CONTINUE_COMMAND]);
 
 /** Autocomplete without the agent view commands. */
 export function withoutAgentViewCommand(current: AutocompleteProvider): AutocompleteProvider {
@@ -103,6 +106,8 @@ const agentView: InlineExtension = {
 		// Set when agent view opened this session, so the hint reads "go back".
 		let openedFromView = false;
 		let autocompleteAdded = false;
+		// Set while quitting waits for the turn's tools to finish.
+		let onToolsSettled: (() => void) | undefined;
 
 		const selfInfo = (ctx: ExtensionContext): SelfSessionInfo => ({
 			cwd: ctx.sessionManager.getCwd(),
@@ -259,7 +264,7 @@ const agentView: InlineExtension = {
 					disarm();
 					return undefined;
 				}
-				if (Date.now() - editedAt >= LEFT_ARM_MS || (armedAt && Date.now() - armedAt < LEFT_ARM_MS)) {
+				if (Date.now() - editedAt >= LEFT_EDIT_MS || (armedAt && Date.now() - armedAt < LEFT_ARM_MS)) {
 					disarm();
 					pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
 					return { consume: true };
@@ -285,11 +290,41 @@ const agentView: InlineExtension = {
 		};
 		pi.on("agent_start", track);
 		pi.on("turn_start", track);
-		pi.on("agent_settled", track);
+		pi.on("agent_settled", (event) => {
+			track(event);
+			onToolsSettled?.();
+		});
 		pi.on("ui_prompt_start", track);
 		pi.on("ui_prompt_end", track);
+		pi.on("turn_end", (event) => {
+			if (event.toolResults.length > 0) onToolsSettled?.();
+		});
 
-		pi.on("session_shutdown", (event, ctx) => {
+		/**
+		 * Quitting mid-turn waits, as Claude Code does, until the running tools finish, so their
+		 * results reach the transcript instead of being cut off and run again in the background.
+		 * The turn's next model request is then aborted with the session. Ctrl+C stops waiting.
+		 */
+		const settleTools = async (): Promise<void> => {
+			// A closed terminal (SIGHUP) cannot wait: pi exits on the next write that fails, before
+			// the hand-off. The synchronous write is the probe; then the turn is cut off as before.
+			try {
+				writeSync(1, `${theme.fg("dim", "Backgrounding after the current tool finishes… (ctrl+c to stop it now)")}\n`);
+			} catch {
+				return;
+			}
+			await new Promise<void>((resolve) => {
+				const done = (): void => {
+					onToolsSettled = undefined;
+					process.off("SIGINT", done);
+					resolve();
+				};
+				onToolsSettled = done;
+				process.once("SIGINT", done);
+			});
+		};
+
+		pi.on("session_shutdown", async (event, ctx) => {
 			registration?.stop();
 			registration = undefined;
 			stopPill?.();
@@ -299,6 +334,8 @@ const agentView: InlineExtension = {
 			// .jsonl). A switch ("new"/"resume") is handed off by agent view itself, and a reload is
 			// not leaving.
 			if (event.reason !== "quit" || ctx.mode !== "tui") return;
+			// A tool blocked on a dialog cannot finish once the TUI is gone.
+			if (!ctx.isIdle() && activity.current === "working") await settleTools();
 			const outgoing = captureOutgoing(ctx);
 			if (outgoing) handOffAfterExit(outgoing);
 		});
@@ -329,6 +366,16 @@ const agentView: InlineExtension = {
 							home: process.env.HOME ?? "",
 							self: () => selfRow(ctx),
 							onClose: () => done(undefined),
+							// Quitting leaves through pi's own shutdown, which hands this session to the daemon.
+							onQuit: () => {
+								done(undefined);
+								ctx.shutdown();
+							},
+							listModels: () =>
+								ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id })),
+							isKnownCommand: (name) =>
+								BUILTIN_SLASH_COMMANDS.some((c) => c.name === name) ||
+								pi.getCommands().some((c) => c.name === name && c.source === "extension"),
 							onSelfReply: (text) =>
 								pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "followUp" }),
 							onOpen: (sessionFile, _cwd, resume) => done({ type: "open", sessionFile, resume }),
@@ -415,6 +462,15 @@ const agentView: InlineExtension = {
 		pi.registerCommand(AGENT_VIEW_COMMAND, {
 			description: "Agent view (press ← on an empty prompt)",
 			handler: async (_args, ctx) => openAgentView(ctx),
+		});
+		// Run by a worker the daemon resumed mid-turn: the model carries on without a visible prompt.
+		pi.registerCommand(CONTINUE_COMMAND, {
+			description: "Continue a turn that moved to the background",
+			handler: async () =>
+				pi.sendMessage(
+					{ customType: CONTINUE_COMMAND, content: CONTINUE_TEXT, display: false },
+					{ triggerTurn: true },
+				),
 		});
 		pi.registerCommand(RELEASE_COMMAND, {
 			description: "Let another terminal take this session over",

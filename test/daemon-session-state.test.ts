@@ -39,6 +39,20 @@ describe("lastLine", () => {
 });
 
 describe("SessionStateTracker", () => {
+	it("a running tool is the detail: its description, else its command or path", () => {
+		const t = new SessionStateTracker();
+		t.apply({
+			type: "tool_execution_start",
+			toolName: "bash",
+			args: { command: "sleep 40", description: "Wait, then print" },
+		});
+		expect(t.detail).toBe("Wait, then print");
+		t.apply({ type: "tool_execution_start", toolName: "read", args: { path: "src/a.ts" } });
+		expect(t.detail).toBe("src/a.ts");
+		t.apply({ type: "tool_execution_start", toolName: "todo", args: {} });
+		expect(t.detail).toBe("todo");
+	});
+
 	it("a settled turn with a result line is Done with that result as detail", () => {
 		const t = new SessionStateTracker();
 		t.apply({ type: "agent_start" });

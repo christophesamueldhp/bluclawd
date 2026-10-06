@@ -416,6 +416,11 @@ export class ServerSupervisor {
 	}
 
 	/** The blocking question a live session is waiting on, as the peek panel renders it. */
+	/** What a running session is doing now; the stored record only changes at run boundaries. */
+	getLiveDetail(instanceId: string): string | undefined {
+		return this.liveInstances.get(instanceId)?.tracker.detail;
+	}
+
 	getPendingNeeds(instanceId: string): SessionNeeds | undefined {
 		const live = this.liveInstances.get(instanceId);
 		const needs = live?.pendingUiRequest ? needsFromRequest(live.pendingUiRequest) : undefined;

@@ -11,19 +11,21 @@
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import {
 	type Component,
 	type Focusable,
 	getKeybindings,
 	Input,
+	type KeyId,
 	matchesKey,
 	type TUI,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { stripAnsi } from "../_shared/ansi.ts";
 import { theme } from "../_shared/theme.ts";
 import { mascotGlyphs, REST, renderMascot } from "../branding/mascot.ts";
 import { type AgentClipboard, readAgentClipboard } from "./clipboard.ts";
@@ -36,10 +38,12 @@ import {
 	compactAge,
 	countRows,
 	labelFromTask,
+	nameScore,
+	queryFilter,
 	type RowState,
 	rowAge,
 	STATE_WORDS,
-	stateFilter,
+	stateBandOf,
 	type ViewMode,
 } from "./rows.ts";
 
@@ -64,6 +68,12 @@ export interface AgentViewOptions {
 	/** This window's own session as a row, rebuilt on every refresh (its activity is live). */
 	self?: () => InstanceSummary | undefined;
 	onClose: () => void;
+	/** Quit pi (ctrl+c twice, `exit`, /exit): the sessions keep running. Without it, quitting closes the view. */
+	onQuit?: () => void;
+	/** The models `/model` accepts for new sessions. */
+	listModels?: () => Array<{ provider: string; id: string }>;
+	/** A slash command that exists but needs a session (`/compact`); any other `/text` is a task. */
+	isKnownCommand?: (name: string) => boolean;
 	/** Open a session in this window; the one here goes to the background. `resume`: its turn was
 	 *  cut off by the move, so it should carry on here. */
 	onOpen: (sessionFile: string, cwd: string, resume: boolean) => void;
@@ -109,7 +119,10 @@ type Mode = "list" | "peek" | "rename" | "resume" | "help";
 const FRAMES = ["·", "✢", "✳", "✶", "✻", "✽"];
 const SPINNER = [...FRAMES, ...[...FRAMES].reverse()];
 const ARM_MS = 2000;
-const NOTICE_MS = 3000;
+/** Claude Code's double ctrl+c window. */
+const CTRL_C_MS = 800;
+/** Bare words that quit, as in Claude Code. */
+const EXIT_WORDS = new Set(["exit", "quit", ":q", ":q!", ":wq", ":wq!"]);
 /** How long a takeover waits for the other terminal: its next heartbeat (3s), then abort and switch. */
 const RELEASE_WAIT_MS = 15_000;
 const RELEASE_POLL_MS = 300;
@@ -208,10 +221,6 @@ function promptLine(input: Input, width: number, placeholder: string): string {
 	return line.startsWith("> ") ? `❯ ${line.slice(2)}` : line;
 }
 
-function sanitize(text: string): string {
-	return text.replace(/[\x00-\x1f\x7f]/g, " ");
-}
-
 export class AgentView implements Component, Focusable {
 	focused = false;
 
@@ -221,7 +230,6 @@ export class AgentView implements Component, Focusable {
 	private composerLines: string[] = [];
 	private composerImages: ImageContent[] = [];
 	private pasting = false;
-	private dispatching = false;
 	private draftVersion = 0;
 	/** True while ctrl+g's editor owns the terminal. */
 	private editing = false;
@@ -229,17 +237,35 @@ export class AgentView implements Component, Focusable {
 	private readonly renameInput = new Input();
 	private instances: InstanceSummary[] = [];
 	private rows: AgentRow[] = [];
+	/** Every listed session, before the composer's filter: what the counts and title report. */
+	private allRows: AgentRow[] = [];
+	private onboarding = false;
 	private pending: AgentRow[] = [];
 	private items: Item[] = [];
 	private selectedKey: string | undefined;
 	private mode: Mode = "list";
+	private renameFrom: "list" | "peek" = "list";
 	private viewMode: ViewMode;
 	private readonly collapsed = new Set<string>();
 	private readonly expanded = new Set<string>();
 	private armed: { key: string; timer: ReturnType<typeof setTimeout> } | undefined;
 	private ctrlCArmedAt = 0;
-	private notice: { text: string; color: "warning" | "error" | "dim" } | undefined;
-	private noticeTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Shown in the footer's hint slot until the composer changes or the focus moves, as Claude Code's are. */
+	private notice: { text: string; kind: "hint" | "error" } | undefined;
+	/** The row a ctrl+x stopped on its first press: it reads "stopped · ctrl+x again to delete". */
+	private justKilled: string | undefined;
+	/** Peek reply drafts by row, kept across navigation. */
+	private readonly replyDrafts = new Map<string, string>();
+	/** The peek's own send/answer error, shown inside the box. */
+	private replyError: string | undefined;
+	/** The first visible body line; moved only as far as keeps the focus on screen. */
+	private scrollStart = 0;
+	/** The focused item's index, for when that item disappears. */
+	private lastIndex = 0;
+	/** The focus before a filter was typed, restored when it is cleared. */
+	private beforeFilter: string | undefined;
+	/** A header reached with the arrows offers "ctrl+x to delete all"; one focused on open does not. */
+	private navigated = false;
 	private daemonNotice = "";
 	private connectionLost = false;
 	private opening: string | undefined;
@@ -247,6 +273,7 @@ export class AgentView implements Component, Focusable {
 	private past: PastSession[] = [];
 	private pastIndex = 0;
 	private pastLoading = false;
+	private pastError = false;
 	private frame = 0;
 	private spinTimer: ReturnType<typeof setInterval> | undefined;
 	private pollTimer: ReturnType<typeof setInterval> | undefined;
@@ -299,14 +326,19 @@ export class AgentView implements Component, Focusable {
 		this.opening = undefined;
 		if (this.pollTimer) clearInterval(this.pollTimer);
 		if (this.spinTimer) clearInterval(this.spinTimer);
-		if (this.noticeTimer) clearTimeout(this.noticeTimer);
 		if (this.armed) clearTimeout(this.armed.timer);
-		this.pollTimer = this.spinTimer = this.noticeTimer = undefined;
+		this.pollTimer = this.spinTimer = undefined;
 		this.opts.setTitle?.(undefined);
 	}
 
 	private composerText(): string {
 		return [...this.composerLines, this.composer.getValue()].join("\n");
+	}
+
+	/** A task (or slash command) is typed, as opposed to nothing or a filter. */
+	private composing(): boolean {
+		const text = this.composerText();
+		return (!!text.trim() || this.composerImages.length > 0) && !queryFilter(text);
 	}
 
 	private setComposer(text: string): void {
@@ -323,19 +355,18 @@ export class AgentView implements Component, Focusable {
 	}
 
 	private async pasteClipboard(): Promise<void> {
-		if (this.pasting || this.dispatching) return;
+		if (this.pasting) return;
 		this.pasting = true;
 		this.render_();
 		const version = this.draftVersion;
 		try {
 			const clipboard = await (this.opts.readClipboard ?? readAgentClipboard)();
 			if (this.closed || version !== this.draftVersion) return;
+			// ctrl+v attaches an image, as in Claude Code; text arrives by the terminal's own paste.
 			if (clipboard.image) this.composerImages.push(clipboard.image);
-			else if (clipboard.text) this.composer.handleInput(`\x1b[200~${clipboard.text}\x1b[201~`);
-			else this.say("Clipboard has no image or text");
-		} catch (error) {
-			if (!this.closed)
-				this.say(`Couldn't paste — ${error instanceof Error ? error.message : String(error)}`, "error");
+			else this.say("No image found in clipboard", "error");
+		} catch {
+			if (!this.closed) this.say("Couldn't read an image from the clipboard", "error");
 		} finally {
 			this.pasting = false;
 			if (!this.closed) {
@@ -381,13 +412,8 @@ export class AgentView implements Component, Focusable {
 		if (!this.closed && !this.editing) this.opts.ui.requestRender();
 	}
 
-	private say(text: string, color: "warning" | "error" | "dim" = "warning"): void {
-		if (this.noticeTimer) clearTimeout(this.noticeTimer);
-		this.notice = { text, color };
-		this.noticeTimer = setTimeout(() => {
-			this.notice = undefined;
-			this.render_();
-		}, NOTICE_MS);
+	private say(text: string, kind: "hint" | "error" = "hint"): void {
+		this.notice = { text, kind };
 		this.render_();
 	}
 
@@ -411,54 +437,99 @@ export class AgentView implements Component, Focusable {
 	}
 
 	private recompute(): void {
-		const all = [...collectRows(this.instances, this.opts.self?.()), ...this.pending];
-		const filter = stateFilter(this.composerText());
+		this.allRows = collectRows(this.instances, this.opts.self?.());
+		const all = [...this.allRows, ...this.pending];
+		const text = this.composerText();
+		const filter = queryFilter(text);
 		this.rows = filter ? all.filter(filter) : all;
-		const bands = buildBands(this.rows, this.viewMode, (p) => this.shorten(p));
-		this.items = this.layoutItems(bands);
-		// Until the user moves, the highlight follows rows as they arrive: this window's own
-		// first, else the top.
-		const current = this.items.find((item) => item.key === this.selectedKey);
-		if (!current || (!this.userMoved && current.kind !== "row")) {
-			const rows = this.items.filter((item) => item.kind === "row");
-			this.selectedKey = (rows.find((item) => item.row.self) ?? rows[0] ?? this.items[0])?.key;
+		this.onboarding =
+			this.viewMode === "state" && !text && this.allRows.every((r) => r.self) && !this.allRows[0]?.pinned;
+		const bands = buildBands(this.rows, this.viewMode, (p) => this.shorten(p), {
+			launcherCwd: this.opts.cwd,
+			onboarding: this.onboarding,
+		});
+		this.items = this.layoutItems(bands, !!filter);
+		const at = this.items.findIndex((item) => item.key === this.selectedKey);
+		if (filter && /^n:\S/i.test(text.trim())) {
+			// A name search focuses its best match.
+			const best = this.items
+				.filter((i): i is Extract<Item, { kind: "row" }> => i.kind === "row")
+				.reduce<Extract<Item, { kind: "row" }> | undefined>(
+					(top, i) => (!top || nameScore(i.row, text) > nameScore(top.row, text) ? i : top),
+					undefined,
+				);
+			if (best) this.selectedKey = best.key;
+		} else if (!this.userMoved && this.items[at]?.kind !== "row") {
+			// Until the user moves, the focus follows rows as they arrive.
+			this.selectedKey = this.homeKey();
+		} else if (at !== -1) this.lastIndex = at;
+		else {
+			// The focused row went away (deleted, filtered out, folded): its neighbour takes over.
+			this.selectedKey = this.items[Math.min(this.lastIndex, this.items.length - 1)]?.key;
 		}
 		this.syncSpinner();
 		this.syncTitle();
 	}
 
-	/** Bands → selectable items. The Completed band folds into `… N more` when it would push the
-	 *  live bands off screen; failures always stay visible. */
-	private layoutItems(bands: Band[]): Item[] {
+	/** Where the focus starts: the session this view was opened from, else the first row when it
+	 *  is in this directory, else the first header. */
+	private homeKey(): string | undefined {
+		const rows = this.items.filter((item) => item.kind === "row");
+		const self = rows.find((item) => item.row.self);
+		if (self) return self.key;
+		const first = rows[0];
+		return (first && first.row.cwd === this.opts.cwd ? first : this.items[0])?.key;
+	}
+
+	/** Claude Code's header budget: `used` lines go to live rows and band headers; when the full
+	 *  header leaves fewer than 3 for Completed, it shrinks to the counts line. */
+	private layoutBudget(): { compact: boolean; doneCap: number } {
+		const live = this.rows.filter((r) => stateBandOf(r) !== "completed" || r.pinned);
+		const used =
+			live.filter((r) => !this.collapsed.has(r.pinned ? "pinned" : stateBandOf(r))).length +
+			Math.max(0, new Set(live.map((r) => (r.pinned ? "pinned" : stateBandOf(r)))).size * 2 - 1);
+		const free = (header: number) => this.opts.ui.terminal.rows - 8 - header - used;
+		return free(4) >= 3 ? { compact: false, doneCap: free(4) } : { compact: true, doneCap: Math.max(0, free(2)) };
+	}
+
+	/** Bands → selectable items. A long Completed band folds into `… N more`, as Claude Code's does:
+	 *  only when at least 3 would hide, keeping runs that finished together and the session you
+	 *  came from. */
+	private layoutItems(bands: Band[], filtering: boolean): Item[] {
 		const items: Item[] = [];
-		const visible = bands.filter((band) => band.fixed || band.rows.length > 0);
-		const liveLines = visible
-			.filter((band) => band.key !== "completed")
-			.reduce((sum, band) => sum + 2 + (this.collapsed.has(band.key) ? 0 : band.rows.length), 0);
-		const room = Math.max(3, this.bodyBudget() - liveLines - 2);
-		for (const band of visible) {
+		const { doneCap } = this.layoutBudget();
+		for (const band of bands) {
 			items.push({ kind: "header", key: `band:${band.key}`, band });
-			if (this.collapsed.has(band.key)) continue;
-			let rows = band.rows;
-			let hidden = 0;
-			if (band.key === "completed" && !this.expanded.has(band.key) && rows.length > room) {
-				const keep = new Set(rows.slice(0, room - 1).map((r) => r.id));
-				for (const row of rows) if (row.state === "failed" || row.self) keep.add(row.id);
-				hidden = rows.length - keep.size;
-				rows = rows.filter((r) => keep.has(r.id));
+			if (!filtering && this.collapsed.has(band.key)) continue;
+			const rows = band.rows;
+			if (band.key === "completed" && !this.expanded.has(band.key)) {
+				const shown = this.foldAt(rows, doneCap);
+				if (shown < rows.length) {
+					for (const row of rows.slice(0, shown)) items.push({ kind: "row", key: row.id, band, row });
+					items.push({ kind: "more", key: `more:${band.key}`, band, hidden: rows.length - shown });
+					continue;
+				}
 			}
 			for (const row of rows) items.push({ kind: "row", key: row.id, band, row });
-			if (hidden > 0) items.push({ kind: "more", key: `more:${band.key}`, band, hidden });
 		}
 		return items;
 	}
 
-	private bodyBudget(): number {
-		return Math.max(6, this.opts.ui.terminal.rows - this.headerLines(this.opts.ui.terminal.columns).length - 5);
+	/** How many Completed rows show before the fold; all of them when it would not fold. */
+	private foldAt(rows: AgentRow[], cap: number): number {
+		if (rows.length < cap + 3) return rows.length;
+		let shown = Math.min(cap, rows.length);
+		const ended = (r: AgentRow | undefined) => Date.parse(r?.finishedAt ?? r?.updatedAt ?? "") || 0;
+		while (shown > 0 && shown < rows.length && Math.abs(ended(rows[shown - 1]) - ended(rows[shown])) <= 60_000)
+			shown++;
+		shown = Math.max(shown, cap);
+		if (rows.length - shown < 3) return rows.length;
+		if (rows.findIndex((r) => r.self) >= shown) return rows.length;
+		return shown;
 	}
 
 	private syncSpinner(): void {
-		const spinning = this.rows.some((row) => row.state === "working" && row.alive);
+		const spinning = !!this.opening || this.rows.some((row) => row.state === "working" && row.alive);
 		if (spinning && !this.spinTimer && !this.closed) {
 			this.spinTimer = setInterval(() => {
 				this.frame = (this.frame + 1) % SPINNER.length;
@@ -471,7 +542,7 @@ export class AgentView implements Component, Focusable {
 	}
 
 	private syncTitle(): void {
-		const needs = countRows(this.rows).needs;
+		const needs = countRows(this.allRows).needs;
 		const title = needs > 0 ? `${needs} awaiting input · pi agents` : "pi agents";
 		if (title !== this.lastTitle && !this.closed) {
 			this.lastTitle = title;
@@ -504,21 +575,63 @@ export class AgentView implements Component, Focusable {
 
 	// ---- actions -------------------------------------------------------------------------
 
-	private move(delta: number, rowsOnly = false): void {
+	/** ↑/↓ wrap around, as Claude Code's do; paging and home/end stop at the ends. The peek moves
+	 *  over sessions only, and so does onboarding, whose headers are labels. */
+	private move(delta: number, opts: { rowsOnly?: boolean; wrap?: boolean } = {}): void {
+		const rowsOnly = opts.rowsOnly || this.onboarding;
 		const candidates = rowsOnly ? this.items.filter((i) => i.kind === "row") : this.items;
 		if (candidates.length === 0) return;
 		const at = candidates.findIndex((i) => i.key === this.selectedKey);
-		const next = Math.max(0, Math.min(candidates.length - 1, (at === -1 ? 0 : at) + delta));
-		this.selectedKey = candidates[next].key;
+		const from = at === -1 ? 0 : at;
+		const next = opts.wrap
+			? (from + delta + candidates.length) % candidates.length
+			: Math.max(0, Math.min(candidates.length - 1, from + delta));
+		this.focus(candidates[next].key);
+	}
+
+	private focus(key: string): void {
+		if (key !== this.selectedKey) this.disarm();
+		this.saveReplyDraft();
+		this.selectedKey = key;
+		this.lastIndex = Math.max(
+			0,
+			this.items.findIndex((i) => i.key === key),
+		);
 		this.userMoved = true;
-		this.disarm();
-		this.reply.setValue("");
+		this.navigated = true;
+		this.notice = undefined;
+		this.reply.setValue(this.replyDrafts.get(key) ?? "");
+		this.reply.handleInput("\x05");
+		this.replyError = undefined;
 		this.render_();
 	}
 
+	/** ctrl/alt+↑↓: to the previous or next band header, not wrapping. */
+	private jumpGroup(delta: number): void {
+		const headers = this.items.filter((i) => i.kind === "header");
+		if (headers.length === 0) return;
+		const at = this.items.findIndex((i) => i.key === this.selectedKey);
+		const target =
+			delta < 0
+				? [...headers].reverse().find((h) => this.items.indexOf(h) < at)
+				: headers.find((h) => this.items.indexOf(h) > at);
+		if (target) this.focus(target.key);
+	}
+
+	private saveReplyDraft(): void {
+		const key = this.selectedKey;
+		if (!key) return;
+		const draft = this.reply.getValue();
+		if (draft) this.replyDrafts.set(key, draft);
+		else this.replyDrafts.delete(key);
+	}
+
+	/** Starts a session from the composer. The draft clears at once, and comes back if the start
+	 *  fails while the composer is still empty; several starts can be in flight. */
 	private async dispatch(open: boolean): Promise<void> {
-		if (this.pasting || this.dispatching) return;
-		const task = this.composerText().trim();
+		if (this.pasting) return;
+		const draft = this.composerText();
+		const task = draft.trim();
 		const images = [...this.composerImages];
 		if (task.length < 4 && images.length === 0) {
 			this.say("Too short — describe the task");
@@ -532,9 +645,8 @@ export class AgentView implements Component, Focusable {
 			this.opts.onCreateAndOpen(cwd, model, task, images);
 			return;
 		}
-		this.dispatching = true;
 		const placeholder: AgentRow = {
-			id: `pending:${Date.now()}`,
+			id: `pending:${Date.now()}:${Math.random().toString(36).slice(2, 6)}`,
 			label: labelFromTask(task || "Image task"),
 			cwd,
 			state: "working",
@@ -546,7 +658,9 @@ export class AgentView implements Component, Focusable {
 			createdAt: new Date().toISOString(),
 		};
 		this.pending.push(placeholder);
+		this.clearDraft();
 		this.selectedKey = placeholder.id;
+		this.userMoved = true;
 		this.recompute();
 		this.render_();
 		try {
@@ -557,7 +671,6 @@ export class AgentView implements Component, Focusable {
 				images: images.length ? images : undefined,
 				model,
 			});
-			this.clearDraft();
 			if (instance && this.selectedKey === placeholder.id) this.selectedKey = instance.id;
 			if (open && instance) {
 				this.pending = this.pending.filter((p) => p !== placeholder);
@@ -566,9 +679,12 @@ export class AgentView implements Component, Focusable {
 				if (row) void this.open(row);
 			}
 		} catch (error) {
-			this.say(`Couldn't start a new session — ${error instanceof Error ? error.message : String(error)}`, "error");
+			if (!this.composerText() && this.composerImages.length === 0) {
+				this.setComposer(draft);
+				this.composerImages = images;
+			}
+			this.say(error instanceof Error ? error.message : String(error), "error");
 		} finally {
-			this.dispatching = false;
 			this.pending = this.pending.filter((p) => p !== placeholder);
 			await this.refresh();
 		}
@@ -713,6 +829,7 @@ export class AgentView implements Component, Focusable {
 	private disarm(): void {
 		if (this.armed) clearTimeout(this.armed.timer);
 		this.armed = undefined;
+		this.justKilled = undefined;
 	}
 
 	private arm(key: string): void {
@@ -733,7 +850,7 @@ export class AgentView implements Component, Focusable {
 		if (!item || item.kind === "more") return;
 		if (item.kind === "header") {
 			const targets = item.band.rows.filter((r) => !r.self && !r.elsewhere && !r.id.startsWith("pending:"));
-			if (targets.length === 0) return;
+			if (targets.length === 0 || this.composing()) return;
 			if (this.armed?.key === item.key) {
 				this.disarm();
 				await Promise.all(targets.map((r) => this.opts.client.delete(r.id).catch(() => undefined)));
@@ -741,16 +858,15 @@ export class AgentView implements Component, Focusable {
 				return;
 			}
 			this.arm(item.key);
-			this.say(`ctrl+x again to delete all ${targets.length} in ${item.band.title}`, "error");
 			return;
 		}
 		const row = item.row;
 		if (row.self) {
-			this.say("Can't stop or delete — this is the session you're in (esc returns to it)");
+			this.say("Can't stop or delete — this is the session you're in (esc returns to it)", "error");
 			return;
 		}
 		if (row.elsewhere) {
-			this.say("Can't stop or delete — this session is running in another terminal");
+			this.say("Can't stop or delete — this session is running in another terminal", "error");
 			return;
 		}
 		if (row.id.startsWith("pending:")) return;
@@ -760,13 +876,14 @@ export class AgentView implements Component, Focusable {
 				await this.opts.client.delete(row.id);
 				if (this.mode === "peek") this.mode = "list";
 			} catch (error) {
-				this.say(`not deleted · ${error instanceof Error ? error.message : String(error)}`, "error");
+				this.say(`Couldn't delete — ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 			await this.refresh();
 			return;
 		}
 		this.arm(row.id);
 		if (row.alive) {
+			this.justKilled = row.id;
 			try {
 				await this.opts.client.stop(row.id);
 			} catch {
@@ -778,12 +895,22 @@ export class AgentView implements Component, Focusable {
 
 	private async togglePin(): Promise<void> {
 		const row = this.selectedRow;
-		if (!row) return;
-		if (row.self || row.id.startsWith("pending:")) {
-			this.say("Only background sessions can be pinned");
+		if (!row || row.id.startsWith("pending:")) return;
+		if (row.self) {
+			this.say("Only background sessions can be pinned", "error");
 			return;
 		}
-		await this.opts.client.setMeta(row.id, { pinned: !row.pinned }).catch(() => this.say("Couldn't pin"));
+		if (row.elsewhere) {
+			this.say("Can't pin a session that's running in another terminal", "error");
+			return;
+		}
+		const verb = row.pinned ? "unpin" : "pin";
+		try {
+			await this.opts.client.setMeta(row.id, { pinned: !row.pinned });
+			this.collapsed.delete("pinned");
+		} catch (error) {
+			this.say(`Couldn't ${verb} — ${error instanceof Error ? error.message : String(error)}`, "error");
+		}
 		await this.refresh();
 	}
 
@@ -806,12 +933,14 @@ export class AgentView implements Component, Focusable {
 
 	private startRename(): void {
 		const row = this.selectedRow;
-		if (!row || row.self || row.id.startsWith("pending:")) {
-			this.say(row?.self ? "Rename this session with /name" : "Select a session to rename");
+		if (!row || row.id.startsWith("pending:")) return;
+		if (row.self) {
+			this.say("Rename this session with /name");
 			return;
 		}
 		this.renameInput.setValue(row.label);
 		this.renameInput.handleInput("\x05"); // ctrl+e: cursor to the end, after the current name
+		this.renameFrom = this.mode === "peek" ? "peek" : "list";
 		this.mode = "rename";
 		this.render_();
 	}
@@ -819,22 +948,22 @@ export class AgentView implements Component, Focusable {
 	private async commitRename(): Promise<void> {
 		const row = this.selectedRow;
 		const name = this.renameInput.getValue().trim();
+		this.mode = this.renameFrom;
 		if (!row || !name) {
-			this.mode = "list";
 			this.render_();
 			return;
 		}
-		if (this.rows.some((r) => r.id !== row.id && r.label === name)) {
-			this.say(`Another session is already named "${name}"`);
-			return;
-		}
-		this.mode = "list";
-		await this.opts.client.rename(row.id, name).catch(() => this.say("Couldn't rename"));
+		await this.opts.client
+			.rename(row.id, name)
+			.catch(() =>
+				this.say("Couldn't rename — the job may have been removed or its state file is unwritable.", "error"),
+			);
 		await this.refresh();
 	}
 
 	private async openResumePicker(): Promise<void> {
 		this.mode = "resume";
+		this.pastError = false;
 		this.pastLoading = true;
 		this.pastIndex = 0;
 		this.render_();
@@ -844,13 +973,18 @@ export class AgentView implements Component, Focusable {
 			this.past = past.filter((p) => !listed.has(p.sessionFile));
 		} catch {
 			this.past = [];
-			this.say("Couldn't load past sessions — press esc, then try /resume again", "error");
+			this.pastError = true;
 		}
 		this.pastLoading = false;
 		this.render_();
 	}
 
+	/** Brings a past session back into the list and opens it, as Claude Code's picker does. */
 	private async resumePast(past: PastSession): Promise<void> {
+		if (this.rows.some((r) => r.sessionFile === past.sessionFile)) {
+			this.say("This session is already in the list — press enter on its row", "error");
+			return;
+		}
 		this.mode = "list";
 		try {
 			const instance = await this.opts.client.spawn({
@@ -860,46 +994,101 @@ export class AgentView implements Component, Focusable {
 				model: this.dispatchModel,
 			});
 			if (instance) this.selectedKey = instance.id;
+			await this.refresh();
+			const row = instance && this.rows.find((r) => r.id === instance.id);
+			if (row) void this.open(row);
+			return;
 		} catch (error) {
 			this.say(`Couldn't resume — ${error instanceof Error ? error.message : String(error)}`, "error");
 		}
 		await this.refresh();
 	}
 
-	/** Slash commands that run in agent view itself; anything else needs a real session. */
-	private runViewCommand(text: string): void {
+	/** Leave pi itself (ctrl+c twice, exit words, /exit): background sessions keep running. */
+	private quit(): void {
+		if (!this.opts.onQuit) {
+			this.close();
+			return;
+		}
+		this.teardown();
+		this.opts.onQuit();
+	}
+
+	/** `/model <name>`: an exact `provider/id` or id, else the only one it starts. */
+	private setModel(arg: string): void {
+		if (!arg) {
+			this.say("Usage: /model <name> — session-scoped, not persisted");
+			return;
+		}
+		if (arg === "default") {
+			this.dispatchModel = this.opts.model;
+			this.say("Model reset to default for this session");
+			return;
+		}
+		const models = this.opts.listModels?.() ?? [];
+		const name = (m: { provider: string; id: string }) => `${m.provider}/${m.id}`;
+		const want = arg.toLowerCase();
+		let model = models.find((m) => name(m).toLowerCase() === want || m.id.toLowerCase() === want);
+		if (!model) {
+			const prefixed = models.filter(
+				(m) => name(m).toLowerCase().startsWith(want) || m.id.toLowerCase().startsWith(want),
+			);
+			if (prefixed.length === 1) model = prefixed[0];
+		}
+		if (!model && models.length === 0 && arg.includes("/")) {
+			const slash = arg.indexOf("/");
+			model = { provider: arg.slice(0, slash), id: arg.slice(slash + 1) };
+		}
+		if (!model) {
+			this.say(`Unknown model '${arg}' — type /model  to see options`);
+			return;
+		}
+		this.dispatchModel = model;
+		this.say(`Model set to ${name(model)} (session-scoped, not persisted)`);
+	}
+
+	/** Slash commands agent view runs itself. A known command that needs a session says so; any
+	 *  other `/text` (a skill, a prompt template) is a task. Returns whether it was handled. */
+	private runViewCommand(text: string): boolean {
 		const [command, ...rest] = text.slice(1).split(/\s+/);
 		const arg = rest.join(" ").trim();
-		this.setComposer("");
 		switch (command) {
 			case "exit":
 			case "quit":
-				this.close();
-				return;
+				this.clearDraft();
+				this.quit();
+				return true;
 			case "resume":
 			case "continue":
+				if (arg) break;
+				this.clearDraft();
 				void this.openResumePicker();
-				return;
-			case "model": {
-				const slash = arg.indexOf("/");
-				if (slash <= 0 || slash === arg.length - 1) {
-					this.say("Usage: /model <provider>/<model>");
-					return;
-				}
-				this.dispatchModel = { provider: arg.slice(0, slash), id: arg.slice(slash + 1) };
-				this.say(`Model set to ${arg} (session-scoped, not persisted)`, "dim");
-				return;
-			}
+				return true;
+			case "model":
+				this.clearDraft();
+				this.setModel(arg);
+				return true;
 			default:
-				this.setComposer(text);
-				this.say(`/${command} isn't available in agent view — attach to a session to run it`);
+				if (!this.opts.isKnownCommand?.(command)) return false;
 		}
+		this.say(`/${command} isn't available in agent view — attach to a session to run it`);
+		return true;
 	}
 
 	private async sendReply(row: AgentRow): Promise<void> {
 		const text = this.reply.getValue().trim();
 		if (!text) {
 			void this.open(row);
+			return;
+		}
+		this.replyError = undefined;
+		if (text === "/stop" && row.alive && row.state === "working" && !row.self) {
+			this.reply.setValue("");
+			this.replyDrafts.delete(row.id);
+			await this.opts.client.stop(row.id).catch((error) => {
+				this.replyError = `Couldn't stop — ${error instanceof Error ? error.message : String(error)}`;
+			});
+			await this.refresh();
 			return;
 		}
 		if (row.self) {
@@ -918,7 +1107,8 @@ export class AgentView implements Component, Focusable {
 						? options[n - 1]
 						: options.find((o) => o.toLowerCase() === text.toLowerCase());
 				if (!choice) {
-					this.say(`press 1-${options.length} to choose, or enter with an empty reply to open it`);
+					this.replyError = `press 1-${options.length} to choose, or enter with an empty reply to open it`;
+					this.render_();
 					return;
 				}
 				await this.opts.client.answer(row.id, needs.requestId, { value: choice });
@@ -926,7 +1116,8 @@ export class AgentView implements Component, Focusable {
 				const yes = /^(y|yes|1)$/i.test(text);
 				const no = /^(n|no|2)$/i.test(text);
 				if (!yes && !no) {
-					this.say("answer y or n");
+					this.replyError = "answer y or n";
+					this.render_();
 					return;
 				}
 				await this.opts.client.answer(row.id, needs.requestId, { confirmed: yes });
@@ -944,27 +1135,27 @@ export class AgentView implements Component, Focusable {
 				});
 			}
 			this.reply.setValue("");
+			this.replyDrafts.delete(row.id);
 		} catch (error) {
-			this.say(`Couldn't send — ${error instanceof Error ? error.message : String(error)}`, "error");
+			this.replyError = `Couldn't send — ${error instanceof Error ? error.message : String(error)}`;
 		}
 		await this.refresh();
 	}
 
-	private async answerOption(row: AgentRow, n: number): Promise<void> {
-		const needs = row.needs;
-		if (!needs) return;
-		try {
-			if (needs.method === "select") {
-				const choice = needs.options?.[n - 1];
-				if (!choice) return;
-				await this.opts.client.answer(row.id, needs.requestId, { value: choice });
-			} else if (needs.method === "confirm" && (n === 1 || n === 2)) {
-				await this.opts.client.answer(row.id, needs.requestId, { confirmed: n === 1 });
-			} else return;
-		} catch (error) {
-			this.say(`Couldn't answer — ${error instanceof Error ? error.message : String(error)}`, "error");
-		}
-		await this.refresh();
+	/** A number key in an empty reply fills in that option; enter sends it. */
+	private fillOption(row: AgentRow, n: number): boolean {
+		const options =
+			row.needs?.method === "select"
+				? row.needs.options
+				: row.needs?.method === "confirm"
+					? ["Yes", "No"]
+					: undefined;
+		const choice = options?.[n - 1];
+		if (!choice) return false;
+		this.reply.setValue(choice);
+		this.reply.handleInput("\x05");
+		this.render_();
+		return true;
 	}
 
 	// ---- input ---------------------------------------------------------------------------
@@ -977,17 +1168,27 @@ export class AgentView implements Component, Focusable {
 		return getKeybindings().matches(data, "tui.select.cancel");
 	}
 
+	private isUp(data: string): boolean {
+		return getKeybindings().matches(data, "tui.select.up") || matchesKey(data, "ctrl+p");
+	}
+
+	private isDown(data: string): boolean {
+		return getKeybindings().matches(data, "tui.select.down") || matchesKey(data, "ctrl+n");
+	}
+
+	private isNewline(data: string): boolean {
+		return (
+			getKeybindings().matches(data, "tui.input.newLine") ||
+			matchesKey(data, "ctrl+j") ||
+			matchesKey(data, "shift+enter") ||
+			matchesKey(data, "alt+enter")
+		);
+	}
+
 	handleInput(data: string): void {
 		if (this.attachment) {
 			this.attachment.handleInput(data);
 			return;
-		}
-		if (this.mode === "help") {
-			this.mode = "list";
-			if (this.isEsc(data) || matchesKey(data, "?") || matchesKey(data, "shift+?")) {
-				this.render_();
-				return;
-			}
 		}
 		if (this.mode === "resume") {
 			this.handleResumeInput(data);
@@ -997,69 +1198,222 @@ export class AgentView implements Component, Focusable {
 			this.handleRenameInput(data);
 			return;
 		}
-		if (this.mode === "peek") {
-			this.handlePeekInput(data);
+		// While a session opens only cancelling (esc, ctrl+c, ↑/↓) is listened to.
+		if (this.opening) {
+			if (!this.isEsc(data) && !matchesKey(data, "ctrl+c") && !this.isUp(data) && !this.isDown(data)) return;
+			this.opening = undefined;
+			if (this.isEsc(data) || matchesKey(data, "ctrl+c")) {
+				this.render_();
+				return;
+			}
+		}
+		if (matchesKey(data, "ctrl+c")) {
+			this.handleCtrlC();
 			return;
 		}
-		this.handleListInput(data);
+		if (this.isEsc(data)) {
+			this.handleEsc();
+			return;
+		}
+		if (this.mode === "help") {
+			if (matchesKey(data, "?") || matchesKey(data, "shift+?")) {
+				this.mode = "list";
+				this.render_();
+				return;
+			}
+			// Help stays open while moving; any other key closes it and then does its own thing.
+			if (!this.isUp(data) && !this.isDown(data)) this.mode = "list";
+		}
+		if (this.handleCommonKey(data)) return;
+		if (this.mode === "peek") this.handlePeekInput(data);
+		else this.handleListInput(data);
+	}
+
+	/** ctrl+c clears the draft and arms the exit in one press; a second within 800ms quits. */
+	private handleCtrlC(): void {
+		if (this.mode === "help") {
+			this.mode = "list";
+			this.render_();
+			return;
+		}
+		if (this.mode === "peek") this.closePeek();
+		if (this.composerText() || this.composerImages.length) {
+			this.clearDraft();
+			this.recompute();
+		}
+		if (Date.now() - this.ctrlCArmedAt < CTRL_C_MS) {
+			this.quit();
+			return;
+		}
+		this.ctrlCArmedAt = Date.now();
+		setTimeout(() => this.render_(), CTRL_C_MS);
+		this.render_();
+	}
+
+	/** esc: close the peek, then help, then clear the draft, then disarm, then go back. */
+	private handleEsc(): void {
+		if (this.mode === "peek") this.closePeek();
+		else if (this.mode === "help") this.mode = "list";
+		else if (this.composerText() || this.composerImages.length || this.pasting) {
+			this.clearDraft();
+			this.restoreFocusAfterFilter();
+			this.recompute();
+		} else if (this.armed) this.disarm();
+		else {
+			this.close();
+			return;
+		}
+		this.render_();
+	}
+
+	private closePeek(): void {
+		this.saveReplyDraft();
+		this.replyError = undefined;
+		this.mode = "list";
+	}
+
+	private restoreFocusAfterFilter(): void {
+		if (this.beforeFilter) this.selectedKey = this.beforeFilter;
+		this.beforeFilter = undefined;
+	}
+
+	/** Keys that act the same in the list and the peek. */
+	private handleCommonKey(data: string): boolean {
+		const peek = this.mode === "peek";
+		const composing = this.composing();
+		if (matchesKey(data, "ctrl+s")) {
+			this.disarm();
+			this.viewMode = this.viewMode === "state" ? "directory" : "state";
+			this.opts.saveViewMode?.(this.viewMode);
+			this.recompute();
+			this.render_();
+			return true;
+		}
+		if (matchesKey(data, "ctrl+t")) {
+			void this.togglePin();
+			return true;
+		}
+		if (matchesKey(data, "ctrl+r")) {
+			this.startRename();
+			return true;
+		}
+		if (matchesKey(data, "ctrl+g")) {
+			if (peek) this.closePeek();
+			else void this.editExternally();
+			this.render_();
+			return true;
+		}
+		if (!peek && (matchesKey(data, "shift+up") || matchesKey(data, "shift+down"))) {
+			void this.reorder(matchesKey(data, "shift+up") ? -1 : 1);
+			return true;
+		}
+		if (
+			matchesKey(data, "ctrl+up") ||
+			matchesKey(data, "alt+up") ||
+			matchesKey(data, "ctrl+down") ||
+			matchesKey(data, "alt+down")
+		) {
+			if (!peek && !composing) {
+				this.notice = undefined;
+				this.jumpGroup(matchesKey(data, "ctrl+up") || matchesKey(data, "alt+up") ? -1 : 1);
+			}
+			return true;
+		}
+		if (!peek && matchesKey(data, "ctrl+f")) {
+			this.toggleFind();
+			return true;
+		}
+		if (this.isUp(data) || this.isDown(data)) {
+			const delta = this.isUp(data) ? -1 : 1;
+			if (peek) this.move(delta, { rowsOnly: true, wrap: true });
+			else if (composing) this.moveTarget(delta);
+			else this.move(delta, { wrap: true });
+			return true;
+		}
+		if (!composing) {
+			const page = Math.max(1, this.opts.ui.terminal.rows - 6);
+			if (matchesKey(data, "pageUp") || matchesKey(data, "pageDown")) {
+				this.move(matchesKey(data, "pageUp") ? -page : page);
+				return true;
+			}
+			if (!peek && (matchesKey(data, "home") || matchesKey(data, "end"))) {
+				this.move(matchesKey(data, "home") ? -this.items.length : this.items.length);
+				return true;
+			}
+		}
+		if (matchesKey(data, "ctrl+x")) {
+			void this.stopOrDelete();
+			return true;
+		}
+		return false;
+	}
+
+	/** ↑/↓ while a task is typed pick where it runs: a directory in the directory view. */
+	private moveTarget(delta: number): void {
+		if (this.viewMode !== "directory") return;
+		const headers = this.items.filter((i) => i.kind === "header" && i.band.key.startsWith("dir:"));
+		if (headers.length === 0) return;
+		const cwd = this.dispatchCwd();
+		const at = headers.findIndex((h) => h.band.key === `dir:${cwd}`);
+		const next = headers[(Math.max(0, at) + delta + headers.length) % headers.length];
+		this.selectedKey = next.key;
+		this.render_();
+	}
+
+	/** ctrl+f: turn the typed text into a name search, or back. A state filter stays as it is. */
+	private toggleFind(): void {
+		const text = this.composerText();
+		if (/^s:/i.test(text.trim())) return;
+		this.setComposer(/^n:/i.test(text) ? text.slice(2) : `n:${text}`);
+		this.afterComposerEdit(text);
 	}
 
 	private handleResumeInput(data: string): void {
-		const kb = getKeybindings();
-		if (this.isEsc(data)) this.mode = "list";
-		else if (kb.matches(data, "tui.select.up")) this.pastIndex = Math.max(0, this.pastIndex - 1);
-		else if (kb.matches(data, "tui.select.down")) this.pastIndex = Math.min(this.past.length - 1, this.pastIndex + 1);
+		if (this.isEsc(data) || matchesKey(data, "ctrl+c") || (data.startsWith("\x1b") && data.length === 2)) {
+			this.mode = "list";
+		} else if (this.isUp(data)) this.pastIndex = Math.max(0, this.pastIndex - 1);
+		else if (this.isDown(data)) this.pastIndex = Math.min(this.past.length - 1, this.pastIndex + 1);
 		else if (this.isEnter(data) && this.past[this.pastIndex]) void this.resumePast(this.past[this.pastIndex]);
 		this.render_();
 	}
 
 	private handleRenameInput(data: string): void {
-		if (this.isEsc(data)) this.mode = "list";
+		if (this.isEsc(data) || matchesKey(data, "ctrl+c")) this.mode = this.renameFrom;
 		else if (this.isEnter(data)) void this.commitRename();
-		else this.renameInput.handleInput(data);
+		else if (!this.isUp(data) && !this.isDown(data)) this.renameInput.handleInput(data);
 		this.render_();
 	}
 
 	private handlePeekInput(data: string): void {
-		const kb = getKeybindings();
 		const row = this.selectedRow;
 		const empty = this.reply.getValue() === "";
-		if (!row || this.isEsc(data) || (empty && matchesKey(data, "space"))) {
-			this.mode = "list";
-			this.reply.setValue("");
+		if (!row || (empty && matchesKey(data, "space"))) {
+			this.closePeek();
 			this.render_();
-			return;
-		}
-		if (kb.matches(data, "tui.select.up")) {
-			this.move(-1, true);
-			return;
-		}
-		if (kb.matches(data, "tui.select.down")) {
-			this.move(1, true);
-			return;
-		}
-		if (matchesKey(data, "ctrl+x")) {
-			void this.stopOrDelete();
 			return;
 		}
 		if (empty && matchesKey(data, "right")) {
 			void this.open(row);
 			return;
 		}
+		if (this.isNewline(data)) {
+			this.reply.handleInput("\n");
+			this.render_();
+			return;
+		}
 		if (this.isEnter(data)) {
+			this.saveReplyDraft();
 			void this.sendReply(row);
 			return;
 		}
-		if (empty && row.needs && /^[1-9]$/.test(data)) {
-			void this.answerOption(row, Number(data));
-			return;
-		}
+		if (empty && /^[1-9]$/.test(data) && this.fillOption(row, Number(data))) return;
+		if (matchesKey(data, "ctrl+v") || matchesKey(data, "tab")) return;
 		this.reply.handleInput(data);
+		this.replyError = undefined;
 		this.render_();
 	}
 
 	private handleListInput(data: string): void {
-		const kb = getKeybindings();
 		const text = this.composerText();
 		const item = this.selected;
 
@@ -1067,128 +1421,37 @@ export class AgentView implements Component, Focusable {
 			void this.pasteClipboard();
 			return;
 		}
-		if (this.dispatching) return;
-		if (this.pasting && (this.isEnter(data) || matchesKey(data, "ctrl+enter") || matchesKey(data, "alt+enter")))
-			return;
-		if (matchesKey(data, "ctrl+c")) {
-			if (text || this.composerImages.length || this.pasting) {
-				this.clearDraft();
-				this.recompute();
-			} else if (Date.now() - this.ctrlCArmedAt < ARM_MS) {
-				this.close();
-				return;
-			} else {
-				this.ctrlCArmedAt = Date.now();
-				const running = this.rows.filter((r) => r.alive && !r.self).length;
-				this.say(
-					`Press Ctrl-C again to exit · ${running} agent${running === 1 ? "" : "s"} will keep running`,
-					"dim",
-				);
-			}
-			this.render_();
-			return;
-		}
-		if (this.isEsc(data)) {
-			if (this.opening) this.opening = undefined;
-			else if (this.armed) this.disarm();
-			else if (text || this.composerImages.length || this.pasting) {
-				this.clearDraft();
-				this.recompute();
-			} else {
-				this.close();
-				return;
-			}
-			this.render_();
-			return;
-		}
-		if (kb.matches(data, "tui.input.newLine") || matchesKey(data, "ctrl+j") || matchesKey(data, "shift+enter")) {
+		if (this.pasting && (this.isEnter(data) || matchesKey(data, "ctrl+enter"))) return;
+		if (this.isNewline(data) || (this.isEnter(data) && this.composer.getValue().endsWith("\\"))) {
+			if (!this.isNewline(data)) this.composer.handleInput("\x7f"); // a trailing \ asks for a newline
 			this.composerLines.push(this.composer.getValue());
 			this.composer.setValue("");
-			this.recompute();
-			this.render_();
+			this.afterComposerEdit(text);
 			return;
 		}
 		if (matchesKey(data, "backspace") && this.composer.getValue() === "" && this.composerLines.length > 0) {
 			this.setComposer(this.composerLines.join("\n"));
-			this.recompute();
-			this.render_();
+			this.afterComposerEdit(text);
 			return;
 		}
-		if (matchesKey(data, "ctrl+g")) {
-			void this.editExternally();
+		const ctrlEnter = matchesKey(data, "ctrl+enter");
+		if (ctrlEnter || this.isEnter(data)) {
+			this.handleEnter(ctrlEnter);
 			return;
 		}
-		if (matchesKey(data, "ctrl+enter") || matchesKey(data, "alt+enter")) {
-			if (text || this.composerImages.length) void this.dispatch(true);
-			return;
-		}
-		if (this.isEnter(data)) {
-			if (text.startsWith("/") && this.composerImages.length === 0) {
-				this.runViewCommand(text.trim());
-				return;
-			}
-			if (this.composerImages.length || (text && !stateFilter(text))) {
-				void this.dispatch(false);
-				return;
-			}
-			if (!item) return;
-			if (item.kind === "header") {
-				if (this.collapsed.has(item.band.key)) this.collapsed.delete(item.band.key);
-				else this.collapsed.add(item.band.key);
-				this.recompute();
-			} else if (item.kind === "more") {
-				this.expanded.add(item.band.key);
-				this.recompute();
-			} else void this.open(item.row);
-			this.render_();
-			return;
-		}
-		if (matchesKey(data, "shift+up")) {
-			void this.reorder(-1);
-			return;
-		}
-		if (matchesKey(data, "shift+down")) {
-			void this.reorder(1);
-			return;
-		}
-		if (kb.matches(data, "tui.select.up") || matchesKey(data, "ctrl+p")) {
-			this.move(-1);
-			return;
-		}
-		if (kb.matches(data, "tui.select.down") || matchesKey(data, "ctrl+n")) {
-			this.move(1);
-			return;
-		}
-		if (matchesKey(data, "pageUp")) {
-			this.move(-10);
-			return;
-		}
-		if (matchesKey(data, "pageDown")) {
-			this.move(10);
-			return;
-		}
-		if (matchesKey(data, "ctrl+x")) {
-			void this.stopOrDelete();
-			return;
-		}
-		if (matchesKey(data, "ctrl+t")) {
-			void this.togglePin();
-			return;
-		}
-		if (matchesKey(data, "ctrl+r")) {
-			this.startRename();
-			return;
-		}
-		if (matchesKey(data, "ctrl+s")) {
-			this.viewMode = this.viewMode === "state" ? "directory" : "state";
-			this.opts.saveViewMode?.(this.viewMode);
-			this.recompute();
-			this.render_();
+		if (matchesKey(data, "tab")) return;
+		if (!text && matchesKey(data, "right") && item?.kind === "row") {
+			void this.open(item.row);
 			return;
 		}
 		for (let n = 1; n <= 9; n++) {
-			if (matchesKey(data, `alt+${n}` as Parameters<typeof matchesKey>[1])) {
-				const cwd = item?.kind === "row" ? item.row.cwd : this.opts.cwd;
+			if (matchesKey(data, `alt+${n}` as KeyId) || matchesKey(data, `super+${n}` as KeyId)) {
+				const cwd =
+					item?.kind === "row"
+						? item.row.cwd
+						: item?.band.key.startsWith("dir:")
+							? item.band.key.slice(4)
+							: this.opts.cwd;
 				const row = this.items.flatMap((i) =>
 					i.kind === "row" && i.row.cwd === cwd && !i.row.id.startsWith("pending:") ? [i.row] : [],
 				)[n - 1];
@@ -1196,36 +1459,76 @@ export class AgentView implements Component, Focusable {
 				return;
 			}
 		}
-		if (!text) {
-			if (matchesKey(data, "home")) {
-				this.move(-this.items.length);
-				return;
-			}
-			if (matchesKey(data, "end")) {
-				this.move(this.items.length);
-				return;
-			}
-			if (matchesKey(data, "right") && item?.kind === "row") {
-				void this.open(item.row);
-				return;
-			}
-			if (matchesKey(data, "space") && item?.kind === "row") {
-				this.mode = "peek";
-				this.reply.setValue("");
-				this.render_();
-				return;
-			}
+		if (!text && !this.composerImages.length) {
 			if (matchesKey(data, "?") || matchesKey(data, "shift+?")) {
 				this.mode = "help";
 				this.render_();
 				return;
 			}
+			// Space never types into an empty composer: on a session it opens the peek.
+			if (matchesKey(data, "space")) {
+				if (item?.kind === "row") {
+					this.mode = "peek";
+					this.reply.setValue(this.replyDrafts.get(item.key) ?? "");
+					this.reply.handleInput("\x05");
+					this.render_();
+				}
+				return;
+			}
 		}
-		this.disarm();
 		this.composer.handleInput(data);
+		this.afterComposerEdit(text);
+	}
+
+	/** What enter does: quit on an exit word, run a view command, start a task, or act on the focus. */
+	private handleEnter(ctrlEnter: boolean): void {
+		const text = this.composerText();
+		const trimmed = text.trim();
+		if (EXIT_WORDS.has(trimmed.toLowerCase()) && this.composerImages.length === 0) {
+			this.clearDraft();
+			this.quit();
+			return;
+		}
+		if (trimmed.startsWith("/") && this.composerImages.length === 0 && this.runViewCommand(trimmed)) {
+			this.recompute();
+			this.render_();
+			return;
+		}
+		if (this.composing()) {
+			void this.dispatch(ctrlEnter);
+			return;
+		}
+		const item = this.selected;
+		if (!item) return;
+		if (item.kind === "more") {
+			this.expanded.add(item.band.key);
+			this.recompute();
+		} else if (item.kind === "header") {
+			if (this.onboarding || queryFilter(text)) return;
+			if (this.collapsed.has(item.band.key)) this.collapsed.delete(item.band.key);
+			else {
+				this.collapsed.add(item.band.key);
+				this.expanded.delete(item.band.key);
+			}
+			this.recompute();
+		} else void this.open(item.row);
+		this.render_();
+	}
+
+	/** After the composer changed: notices clear, and a filter keeps the focus it had before it. */
+	private afterComposerEdit(before: string): void {
+		const after = this.composerText();
+		if (after !== before) this.notice = undefined;
+		const wasFilter = !!queryFilter(before);
+		const isFilter = !!queryFilter(after);
+		if (isFilter && !wasFilter) this.beforeFilter = this.selectedKey;
 		this.recompute();
-		// A filter being typed selects its first match, not whatever header survived it.
-		if (stateFilter(this.composerText())) {
+		if (!isFilter && wasFilter) {
+			this.restoreFocusAfterFilter();
+			this.recompute();
+		}
+		// A filter being typed focuses its first match, not whatever header survived it.
+		if (isFilter && !/^n:\S/i.test(after.trim())) {
 			this.selectedKey = this.items.find((i) => i.kind === "row")?.key ?? this.selectedKey;
 		}
 		this.render_();
@@ -1248,25 +1551,28 @@ export class AgentView implements Component, Focusable {
 
 	// ---- render --------------------------------------------------------------------------
 
+	private modelLabel(): string {
+		if (this.dispatchModel === this.opts.model && this.opts.modelName) return this.opts.modelName;
+		if (!this.dispatchModel) return "";
+		const name = `${this.dispatchModel.provider}/${this.dispatchModel.id}`;
+		return this.dispatchModel === this.opts.model ? name : `${name} (session)`;
+	}
+
+	/** Mascot beside name, model · cwd and the counts; only the counts when the list needs the room. */
 	private headerLines(width: number): string[] {
-		const dot = cc.fg("muted", " · ");
-		const counts = countRows(this.rows);
+		const counts = countRows(this.allRows);
 		const summary = cc.fg(
 			"muted",
 			`${counts.needs} awaiting input · ${counts.working} working · ${counts.completed} completed`,
 		);
-		if (this.opts.ui.terminal.rows < 20) return [summary];
+		if (this.layoutBudget().compact) return [summary];
 		const title = `${theme.bold(this.opts.appName)}${this.opts.version ? ` ${cc.fg("muted", `v${this.opts.version}`)}` : ""}`;
-		const model =
-			this.dispatchModel === this.opts.model && this.opts.modelName
-				? this.opts.modelName
-				: this.dispatchModel
-					? `${this.dispatchModel.provider}/${this.dispatchModel.id}${this.dispatchModel === this.opts.model ? "" : " (session)"}`
-					: "";
-		const target = this.dispatchCwd();
-		const cwd =
-			target === this.opts.cwd ? cc.fg("muted", this.shorten(target)) : cc.fg("accent", this.shorten(target));
-		const where = model ? `${cc.fg("muted", model)}${dot}${cwd}` : cwd;
+		const model = this.modelLabel();
+		const cwd = middleEllipsis(
+			this.shorten(this.dispatchCwd()),
+			Math.max(width - 11 - (model ? visibleWidth(model) + 3 : 0), 10),
+		);
+		const where = cc.fg("muted", [model, cwd].filter(Boolean).join(" · "));
 		const text = [title, where, summary];
 		if (width < MASCOT_MIN_COLUMNS) return text;
 		// The same static mascot as the welcome header. Its box ends in a blank cell (the wave's
@@ -1274,74 +1580,104 @@ export class AgentView implements Component, Focusable {
 		return renderMascot(REST, mascotGlyphs()).map((art, i) => `${art} ${text[i] ?? ""}`);
 	}
 
-	private statusLine(): string | undefined {
-		if (this.notice) return cc.fg(this.notice.color, this.notice.text);
-		if (this.daemonNotice) return cc.fg("warning", this.daemonNotice);
-		if (this.connectionLost)
-			return cc.fg("warning", "lost connection to the background service — showing the last known list");
-		return undefined;
-	}
-
-	private icon(row: AgentRow): string {
-		const glyph = !row.alive ? "∙" : row.state === "working" ? SPINNER[this.frame] : "✻";
+	private icon(row: AgentRow, focused: boolean): string {
+		if (this.opening === row.id) return SPINNER[this.frame];
+		const glyph =
+			this.justKilled === row.id || !row.alive ? "∙" : row.state === "working" ? SPINNER[this.frame] : "✻";
+		// Working has no color of its own: gray, or the text color when focused.
+		if (row.state === "working") return cc.fg(focused ? "text" : "muted", glyph);
 		return cc.fg(ICON_COLOR[row.state], glyph);
 	}
 
-	private rowDetail(row: AgentRow): string {
+	private armedFor(row: AgentRow): boolean {
+		const key = this.armed?.key;
+		return (
+			!!key &&
+			(key === row.id || this.items.some((i) => i.kind === "header" && i.key === key && i.band.rows.includes(row)))
+		);
+	}
+
+	private rowDetail(row: AgentRow, focused: boolean): string {
 		if (this.opening === row.id) return cc.fg("muted", "opening… · esc to cancel");
-		if (this.armed?.key === row.id) {
-			return row.state === "stopped" || !row.alive
-				? cc.fg("error", row.state === "stopped" ? "stopped · ctrl+x again to delete" : "ctrl+x again to delete")
-				: cc.fg("error", "ctrl+x again to delete");
+		if (this.armedFor(row)) {
+			return cc.fg(
+				"error",
+				this.justKilled === row.id ? "stopped · ctrl+x again to delete" : "ctrl+x again to delete",
+			);
 		}
-		const detail = cc.fg("muted", sanitize(row.detail));
-		if (this.viewMode === "directory") {
-			return `${cc.fg(WORD_COLOR[row.state], STATE_WORDS[row.state])}${cc.fg("muted", " · ")}${detail}`;
+		let text = clean(row.detail);
+		// Not prompted yet: what to do about it, which depends on where the focus is.
+		if (row.state === "idle") {
+			text = !focused ? "send a prompt to start" : row.self ? basename(row.cwd) : "space to send it a prompt";
 		}
-		return detail;
+		if (this.viewMode !== "directory") return cc.fg("muted", text);
+		const word = STATE_WORDS[row.state];
+		const shown = row.state === "working" ? word : cc.fg(WORD_COLOR[row.state], word);
+		return text ? `${shown}${cc.fg("muted", ` · ${text}`)}` : shown;
 	}
 
 	private renderRow(row: AgentRow, width: number, labelWidth: number, ageWidth: number, focused: boolean): string {
 		const pad = width >= 120 ? " " : "";
-		const nowMs = Date.now();
-		const name = truncateToWidth(sanitize(row.label), labelWidth, "…");
-		// The row you came from keeps a bold, undimmed name; the others are gray until focused.
-		const label = row.self ? theme.bold(name) : focused ? cc.fg("text", name) : cc.fg("muted", name);
-		const age = rowAge(row, nowMs).padStart(ageWidth);
+		let name = truncateToWidth(clean(row.label), labelWidth, "…");
+		if (this.mode === "rename" && focused) {
+			const line = (this.renameInput.render(labelWidth + 2)[0] ?? "").replace(/^> /, "");
+			name = truncateToWidth(line, labelWidth);
+		} else if (row.self) name = theme.bold(focused ? cc.fg("text", name) : name);
+		else name = focused ? cc.fg("text", name) : cc.fg("muted", name);
+		const age = rowAge(row, Date.now()).padStart(ageWidth);
 		const fixed = visibleWidth(pad) + 2 + labelWidth + 2 + 2 + ageWidth;
 		const detailWidth = Math.max(0, width - fixed);
-		const detail = truncateToWidth(this.rowDetail(row), detailWidth, "…");
+		const detail = truncateToWidth(this.rowDetail(row, focused), detailWidth, "…");
 		const line =
-			`${pad}${this.icon(row)} ${label}${" ".repeat(Math.max(0, labelWidth - visibleWidth(name)))}  ` +
+			`${pad}${this.icon(row, focused)} ${name}${" ".repeat(Math.max(0, labelWidth - visibleWidth(name)))}  ` +
 			`${detail}${" ".repeat(Math.max(0, detailWidth - visibleWidth(detail)))}  ${cc.fg("muted", age)}`;
 		const fitted = truncateToWidth(line, width);
-		if (!focused) return fitted;
+		if (!focused || this.composing()) return fitted;
 		return cc.bg("userMessageBg", `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`);
 	}
 
-	private renderBody(width: number): { lines: string[]; focusLine: number } {
+	/** The band a typed task would start in: Working, or the focused directory. */
+	private targetBandKey(): string {
+		return this.viewMode === "directory" ? `dir:${this.dispatchCwd()}` : "working";
+	}
+
+	private renderBand(
+		item: Extract<Item, { kind: "header" }>,
+		width: number,
+		focused: boolean,
+		bandCount: number,
+	): string {
+		const band = item.band;
+		const collapsed = this.collapsed.has(band.key) && !queryFilter(this.composerText());
+		const title =
+			this.viewMode === "directory" && band.key.startsWith("dir:")
+				? middleEllipsis(band.title, Math.max(width - 10, 10))
+				: band.title;
+		const count = collapsed ? cc.fg("muted", ` ${band.rows.length}`) : "";
+		if (this.composing()) {
+			const target = band.key === this.targetBandKey();
+			return truncateToWidth(`${target ? theme.bold(cc.fg("text", title)) : cc.fg("muted", title)}${count}`, width);
+		}
+		if (focused && !this.onboarding) {
+			const text = truncateToWidth(`${theme.bold(cc.fg("text", title))}${count}`, width);
+			return cc.bg("userMessageBg", `${text}${" ".repeat(Math.max(0, width - visibleWidth(text)))}`);
+		}
+		// With more than one band, the focused row's band stands out a little.
+		const own = this.selected?.kind === "row" && this.selected.band.key === band.key;
+		const gray = cc.fg("muted", title);
+		return truncateToWidth(`${bandCount > 1 && own ? theme.bold(gray) : gray}${count}`, width);
+	}
+
+	private renderList(width: number): { lines: string[]; focusLine: number } {
 		const lines: string[] = [];
 		let focusLine = 0;
-		const rows = this.items.filter((i): i is Extract<Item, { kind: "row" }> => i.kind === "row").map((i) => i.row);
 		const labelWidth = Math.min(
-			Math.max(12, ...rows.map((r) => Math.min(visibleWidth(sanitize(r.label)), 40))),
 			Math.max(40, Math.floor(width / 3)),
+			Math.max(12, ...this.rows.map((r) => visibleWidth(clean(r.label)))),
 		);
-		const ageWidth = Math.max(2, ...rows.map((r) => rowAge(r, Date.now()).length));
-		const onlySelf = this.rows.length === 1 && this.rows[0].self;
-		if (this.rows.length === 0 && !stateFilter(this.composerText())) {
-			lines.push(
-				cc.fg("text", "Nothing running in the background."),
-				cc.fg(
-					"muted",
-					"Hand off a task and it keeps working while you do something else — even if you close this terminal.",
-				),
-				cc.fg("muted", "Start one by describing a task below, or bring a past session back with /resume."),
-			);
-			return { lines: lines.flatMap((l) => wrapTextWithAnsi(l, width)), focusLine };
-		}
-		if (this.rows.length === 0) {
-			lines.push(cc.fg("muted", "no sessions match"));
+		const ageWidth = Math.max(3, ...this.rows.map((r) => rowAge(r, Date.now()).length));
+		if (this.rows.length === 0 && queryFilter(this.composerText())) {
+			lines.push(cc.fg("muted", "  no sessions match"));
 			return { lines, focusLine };
 		}
 		const helper: Record<string, string> = {
@@ -1349,64 +1685,105 @@ export class AgentView implements Component, Focusable {
 			working: "Sessions actively working — they keep running even if you close the terminal",
 			completed: "Finished sessions wait here for you to review",
 		};
+		const bandCount = this.items.filter((i) => i.kind === "header").length;
 		let first = true;
 		for (const item of this.items) {
 			const focused = item.key === this.selectedKey;
-			if (focused) focusLine = lines.length;
 			if (item.kind === "header") {
 				if (!first) lines.push("");
 				first = false;
 				if (focused) focusLine = lines.length;
-				const collapsed = this.collapsed.has(item.band.key);
-				const gray = cc.fg("muted", item.band.title);
-				const title = focused
-					? theme.bold(item.band.title)
-					: this.viewMode === "directory"
-						? theme.bold(gray)
-						: gray;
-				const count = collapsed ? cc.fg("muted", ` ${item.band.rows.length}`) : "";
-				const armed = this.armed?.key === item.key ? cc.fg("error", "  ctrl+x again to delete all") : "";
-				lines.push(truncateToWidth(`${title}${count}${armed}`, width));
-				if (!collapsed && item.band.rows.length === 0 && onlySelf && helper[item.band.key]) {
-					lines.push(truncateToWidth(cc.fg("muted", `  ${helper[item.band.key]}`), width));
+				lines.push(this.renderBand(item, width, focused, bandCount));
+				if (this.onboarding && helper[item.band.key]) {
+					lines.push(...wrapTextWithAnsi(cc.fg("muted", helper[item.band.key]), width - 1).map((l) => ` ${l}`));
 				}
-			} else if (item.kind === "more") {
-				const text = `  … ${item.hidden} more`;
-				lines.push(focused ? cc.bg("userMessageBg", text.padEnd(width)) : cc.fg("muted", text));
-			} else {
-				lines.push(this.renderRow(item.row, width, labelWidth, ageWidth, focused));
+				continue;
 			}
+			first = false;
+			if (focused) focusLine = lines.length;
+			if (item.kind === "more") {
+				const text = `${width >= 120 ? " " : ""}… ${item.hidden} more`;
+				lines.push(
+					focused && !this.composing()
+						? cc.bg("userMessageBg", cc.fg("text", text.padEnd(width)))
+						: cc.fg("muted", text),
+				);
+			} else lines.push(this.renderRow(item.row, width, labelWidth, ageWidth, focused));
 		}
 		return { lines, focusLine };
+	}
+
+	/** Everything above the composer, scrolled as one: Claude Code's header scrolls with its list. */
+	private renderBody(width: number): { lines: string[]; focusLine: number } {
+		const lines = ["", ...this.headerLines(width), ""];
+		if (this.opts.self) {
+			lines.push(
+				...wrapTextWithAnsi(
+					cc.fg(
+						"muted",
+						"Your conversation moved to the background — enter opens it · esc returns to it · ctrl+c twice quits",
+					),
+					width,
+				),
+				"",
+			);
+		}
+		const list = this.renderList(width);
+		return { lines: [...lines, ...list.lines], focusLine: lines.length + list.focusLine };
+	}
+
+	/** Inline markdown as Claude Code's peek shows a result: dim, with `code`, **bold** and ++x++ bold. */
+	private dimMarkdown(text: string): string {
+		return clean(text)
+			.split(/(\*\*[^*]+\*\*|\+\+[^+]+\+\+|`[^`]+`)/)
+			.map((part, i) =>
+				i % 2 === 1
+					? theme.bold(cc.fg("muted", part.replace(/^(\*\*|\+\+|`)|(\*\*|\+\+|`)$/g, "")))
+					: cc.fg("muted", part),
+			)
+			.join("");
 	}
 
 	private renderPeek(row: AgentRow, width: number): string[] {
 		const inner = Math.max(10, width - 4);
 		const body: string[] = [];
 		const needs = row.needs;
-		if (needs) {
-			body.push(...wrapTextWithAnsi(theme.bold(sanitize(needs.title)), inner));
-			if (needs.message) body.push(...wrapTextWithAnsi(cc.fg("muted", sanitize(needs.message)), inner));
-			const options =
-				needs.method === "select" ? (needs.options ?? []) : needs.method === "confirm" ? ["Yes", "No"] : [];
-			options.slice(0, 9).forEach((option, i) => {
-				body.push(truncateToWidth(`${cc.fg("muted", `${i + 1}.`)} ${sanitize(option)}`, inner));
+		const options =
+			needs?.method === "select" ? (needs.options ?? []) : needs?.method === "confirm" ? ["Yes", "No"] : [];
+		if (needs && options.length) {
+			body.push(
+				truncateToWidth(
+					theme.bold(clean(needs.message ? `${needs.title} — ${needs.message}` : needs.title)),
+					inner,
+					"…",
+				),
+			);
+			options.forEach((option, i) => {
+				body.push(truncateToWidth(`  ${cc.fg("muted", `${i + 1}.`.padEnd(3))}${clean(option)}`, inner, "…"));
 			});
-			if (options.length > 9) body.push(cc.fg("muted", `+${options.length - 9} more · enter to open`));
 		} else {
-			const text =
-				row.state === "needs" && row.question
-					? theme.bold(sanitize(row.question))
-					: cc.fg("muted", sanitize(row.detail) || "(no output yet)");
-			body.push(...wrapTextWithAnsi(text, inner).slice(0, 8));
+			const text = needs
+				? needs.message
+					? `${needs.title} — ${needs.message}`
+					: needs.title
+				: row.state === "needs" && row.question
+					? row.question
+					: row.detail;
+			const shown = row.state === "working" && !needs ? clean(text) : this.dimMarkdown(text);
+			const cap = Math.max(5, this.opts.ui.terminal.rows - 8 - 6);
+			if (text) body.push(...wrapTextWithAnsi(shown, inner).slice(0, cap));
 		}
 		const since = needs?.since ?? (row.state === "needs" ? row.finishedAt : undefined);
-		if (since) body.push(cc.fg("warning", `waiting ${compactAge(Date.now() - (Date.parse(since) || Date.now()))}`));
+		if (since) {
+			body.push(
+				cc.fg(ICON_COLOR[row.state], `  waiting ${compactAge(Date.now() - (Date.parse(since) || Date.now()))}`),
+			);
+		}
 		body.push("");
-		const options = needs?.method === "select" ? (needs.options?.length ?? 0) : needs?.method === "confirm" ? 2 : 0;
 		body.push(
-			promptLine(this.reply, inner, options > 0 ? `press 1-${Math.min(options, 9)} or type your answer` : "reply"),
+			promptLine(this.reply, inner, options.length > 0 ? `press 1-${options.length} or type your answer` : "reply"),
 		);
+		if (this.replyError) body.push(truncateToWidth(`\x1b[2m${cc.fg("error", this.replyError)}\x1b[22m`, inner, "…"));
 		const border = (l: string, r: string) => faint(`${l}${"─".repeat(Math.max(0, width - 2))}${r}`);
 		const boxed = [border("╭", "╮")];
 		for (const line of body) {
@@ -1414,69 +1791,100 @@ export class AgentView implements Component, Focusable {
 			boxed.push(`${faint("│")} ${fitted}${" ".repeat(Math.max(0, inner - visibleWidth(fitted)))} ${faint("│")}`);
 		}
 		boxed.push(border("╰", "╯"));
-		const empty = !this.reply.getValue();
-		const action = empty ? (row.self ? "return" : "open") : "send";
+		const typed = !!this.reply.getValue();
+		const pending = row.id.startsWith("pending:");
+		const enter = typed ? "send" : this.resumable(row) ? "resume" : "open";
 		boxed.push(
 			this.hints(width, [
-				["enter", action],
-				empty ? ["space", "close"] : ["esc", "close"],
-				["ctrl+x", this.armed?.key === row.id ? "confirm" : "delete"],
+				typed || !pending ? `enter to ${enter}` : undefined,
+				typed ? "esc to close" : "space to close",
+				`ctrl+x to ${this.armedFor(row) ? "confirm" : "delete"}`,
 			]),
 		);
 		return boxed;
 	}
 
+	/** A finished or stopped run with no process: enter starts it again. */
+	private resumable(row: AgentRow): boolean {
+		return !row.alive && (row.state === "failed" || row.state === "stopped");
+	}
+
+	/** `/resume`: a bordered box over the composer, as Claude Code's picker. */
 	private renderResume(width: number): string[] {
-		const out = [theme.bold("Resume a past session"), ""];
-		if (this.pastLoading) out.push(cc.fg("muted", "looking for past sessions…"));
-		else if (this.past.length === 0) out.push(cc.fg("muted", "No past sessions to resume"));
-		const nowMs = Date.now();
-		const start = Math.max(0, Math.min(this.pastIndex - 5, this.past.length - 12));
-		this.past.slice(start, start + 12).forEach((past, i) => {
-			const focused = start + i === this.pastIndex;
-			const age = compactAge(nowMs - (Date.parse(past.modifiedAt) || nowMs));
-			const text = truncateToWidth(`  ${sanitize(past.label)}`, Math.max(10, width - age.length - 2), "…");
-			const line = `${text}${" ".repeat(Math.max(1, width - visibleWidth(text) - age.length))}${cc.fg("muted", age)}`;
-			out.push(focused ? cc.bg("userMessageBg", line) : line);
-		});
-		out.push("", cc.fg("muted", "↑/↓ to navigate · enter to resume as a background session · esc to close"));
-		return out;
+		const inner = Math.max(10, width - 4);
+		const content: string[] = [theme.bold("Resume a past session")];
+		if (this.pastLoading) content.push(cc.fg("muted", "Looking for past sessions…"));
+		else if (this.pastError)
+			content.push(cc.fg("muted", "Couldn't load past sessions — press esc, then try /resume again"));
+		else if (this.past.length === 0) content.push(cc.fg("muted", "No past sessions to resume"));
+		else {
+			const start = Math.max(0, Math.min(this.pastIndex - 3, this.past.length - 8));
+			const shown = this.past.slice(start, start + 8);
+			if (start > 0) content.push(cc.fg("muted", `  … ${start} above`));
+			const nowMs = Date.now();
+			shown.forEach((past, i) => {
+				const focused = start + i === this.pastIndex;
+				const age = compactAge(nowMs - (Date.parse(past.modifiedAt) || nowMs));
+				const title = truncateToWidth(
+					`${focused ? "❯" : " "} ${clean(past.label)}`,
+					Math.max(4, inner - age.length - 1),
+					"…",
+				);
+				const colored = focused ? cc.fg("accent", title) : cc.fg("muted", title);
+				content.push(
+					`${colored}${" ".repeat(Math.max(1, inner - visibleWidth(title) - age.length))}${cc.fg("muted", age)}`,
+				);
+			});
+			const below = this.past.length - start - shown.length;
+			if (below > 0) content.push(cc.fg("muted", `  … ${below} more`));
+		}
+		content.push(cc.fg("muted", "↑/↓ to navigate · enter to resume as a background session · esc to close"));
+		const border = (l: string, r: string) => `${l}${"─".repeat(Math.max(0, width - 2))}${r}`;
+		return [
+			border("╭", "╮"),
+			...content.map((line) => {
+				const fitted = truncateToWidth(line, inner);
+				return `│ ${fitted}${" ".repeat(Math.max(0, inner - visibleWidth(fitted)))} │`;
+			}),
+			border("╰", "╯"),
+		];
 	}
 
 	/** `?`: the shortcut grid, under the composer in place of the hint line. */
 	private renderHelp(width: number): string[] {
 		const item = this.selected;
+		const row = item?.kind === "row" && !item.row.id.startsWith("pending:") ? item.row : undefined;
 		const cwd = item?.kind === "row" ? item.row.cwd : this.opts.cwd;
 		const alt = Math.min(
 			9,
 			this.items.filter((i) => i.kind === "row" && i.row.cwd === cwd && !i.row.id.startsWith("pending:")).length,
 		);
+		const opt = process.platform === "darwin" ? "opt" : "alt";
 		const items = [
-			"shift+↑↓ to reorder",
-			"ctrl+r to rename",
+			...(row && (this.viewMode === "directory" || row.pinned) ? ["shift+↑↓ to reorder"] : []),
+			...(row ? ["ctrl+r to rename"] : []),
+			"ctrl+f to find",
+			`${opt}+↑/↓ to jump groups`,
 			"ctrl+s to switch views",
 			"ctrl+j for newline",
-			"ctrl+enter to start and open",
-			"ctrl+g for $EDITOR",
-			`ctrl+t to ${item?.kind === "row" && item.row.pinned ? "unpin" : "pin to top"}`,
+			...(row ? [`ctrl+t to ${row.pinned ? "unpin" : "pin to top"}`] : []),
 			...(alt > 0 ? [`alt+1${alt > 1 ? `-${alt}` : ""} to open`] : []),
-			"ctrl+x to delete",
-			"s:<state> to filter",
+			...(row ? [`ctrl+x to ${row.alive && row.state === "working" ? "stop" : "delete"}`] : []),
 			"esc to quit",
 			"? to close",
 		];
-		// Items stack two to a column, each column as wide as its longest item and 4 apart.
+		// Items stack three to a column, each column as wide as its longest item and 4 apart.
 		// Where that does not fit, the columns grow taller instead of wrapping an item.
-		for (let height = 2; ; height++) {
+		for (let height = 3; ; height++) {
 			const columns: string[][] = [];
 			for (let i = 0; i < items.length; i += height) columns.push(items.slice(i, i + height));
 			const widths = columns.map((c) => Math.max(...c.map((s) => visibleWidth(s))));
 			const total = 4 + widths.reduce((a, b) => a + b, 0) + 4 * (columns.length - 1);
 			if (total > width && columns.length > 1) continue;
-			return Array.from({ length: height }, (_, row) => {
+			return Array.from({ length: Math.min(height, items.length) }, (_, r) => {
 				const text = columns
 					.map((c, i) => {
-						const cell = c[row] ?? "";
+						const cell = c[r] ?? "";
 						return i === columns.length - 1 ? cell : cell + " ".repeat(widths[i] + 4 - visibleWidth(cell));
 					})
 					.join("")
@@ -1486,40 +1894,76 @@ export class AgentView implements Component, Focusable {
 		}
 	}
 
-	private hints(width: number, items: Array<[string, string] | undefined>): string {
-		const parts = items.filter((i): i is [string, string] => !!i).map(([key, action]) => `${key} to ${action}`);
-		let line = parts.join(" · ");
-		while (parts.length > 1 && visibleWidth(line) > width - 2) {
-			parts.splice(parts.length - 2, 1);
-			line = parts.join(" · ");
-		}
-		return truncateToWidth(`  ${cc.fg("muted", line)}`, width);
+	/** One dim hint line; too narrow, it is cut with an ellipsis rather than dropping items. */
+	private hints(width: number, items: Array<string | undefined>): string {
+		const line = items.filter((i): i is string => !!i).join(" · ");
+		return truncateToWidth(`  ${cc.fg("muted", line)}`, width, "…");
 	}
 
-	private listFooter(width: number): string {
+	/** The line under the composer: whatever is most pressing, else what the keys do here. */
+	private footerSlot(width: number): string {
+		if (Date.now() - this.ctrlCArmedAt < CTRL_C_MS) {
+			const counts = countRows(this.allRows);
+			const running = counts.working + counts.needs;
+			const suffix = running > 0 ? ` · ${running} agent${running === 1 ? "" : "s"} will keep running` : "";
+			return this.hints(width, [`Press Ctrl-C again to exit${suffix}`]);
+		}
+		if (this.mode === "rename") return this.hints(width, ["enter to save · esc to cancel"]);
+		if (this.armed) return this.hints(width, ["ctrl+x to confirm"]);
+		if (this.notice) {
+			const text =
+				this.notice.kind === "error" ? cc.fg("error", this.notice.text) : cc.fg("muted", this.notice.text);
+			return truncateToWidth(`  ${text}`, width, "…");
+		}
+		const service =
+			this.daemonNotice ||
+			(this.connectionLost ? "lost connection to the background service — showing the last known list" : "");
+		if (service) return truncateToWidth(`  ${cc.fg("warning", service)}`, width, "…");
+		return this.listHints(width);
+	}
+
+	private listHints(width: number): string {
 		const text = this.composerText();
 		const item = this.selected;
-		if (text) {
-			if (stateFilter(text)) return this.hints(width, [["esc", "clear"]]);
-			return this.hints(width, [
-				["enter", text.startsWith("/") ? "run" : "create"],
-				["esc", "clear"],
-			]);
+		const composing = this.composing();
+		const row = item?.kind === "row" && !item.row.id.startsWith("pending:") ? item.row : undefined;
+		let enter: string | undefined;
+		if (composing) enter = "enter to create";
+		else if (row) enter = `enter to ${row.self ? "return" : this.resumable(row) ? "resume" : "open"}`;
+		const headerRows =
+			item?.kind === "header"
+				? item.band.rows.filter((r) => !r.self && !r.elsewhere && !r.id.startsWith("pending:"))
+				: [];
+		let x: string | undefined;
+		if (width >= 80 && !text) {
+			if (row) x = "ctrl+x to delete";
+			else if (item?.kind === "header" && this.navigated && headerRows.length > 0) x = "ctrl+x to delete all";
 		}
-		let enter: [string, string] | undefined;
-		if (item?.kind === "header") enter = ["enter", this.collapsed.has(item.band.key) ? "expand" : "collapse"];
-		else if (item?.kind === "more") enter = ["enter", "show all"];
-		else if (item?.kind === "row") enter = ["enter", item.row.self ? "return" : "open"];
-		const x: [string, string] | undefined =
-			!item || width < 80 || item.kind === "more" || (item?.kind === "row" && item.row.self)
-				? undefined
-				: ["ctrl+x", item?.kind === "header" ? "delete all" : "delete"];
+		const find = composing && !text.trim().startsWith("/") && width >= 49 ? "ctrl+f to find" : undefined;
 		return this.hints(width, [
 			enter,
-			width >= 55 && item?.kind === "row" ? ["space", "reply"] : undefined,
+			item?.kind === "header" && !text && !this.onboarding
+				? `enter to ${this.collapsed.has(item.band.key) ? "expand" : "collapse"}`
+				: undefined,
+			item?.kind === "more" && !text ? "enter to show all" : undefined,
+			item?.kind === "row" && !text && width >= 55 ? "space to reply" : undefined,
 			x,
-			["?", "for shortcuts"],
-		]).replace("? to for shortcuts", "? for shortcuts");
+			text ? "esc to clear" : "? for shortcuts",
+			find,
+		]);
+	}
+
+	/** The composer: every line, the first after `❯`, the rest from the left edge. */
+	private composerLinesFor(width: number, dim: boolean): string[] {
+		const lines = this.composerLines.map((line, i) => truncateToWidth(i === 0 ? `❯ ${line}` : line, width));
+		const current = promptLine(this.composer, width, lines.length ? "" : "describe a task for a new session");
+		lines.push(lines.length ? current.replace(/^❯ /, "") : current);
+		if (this.composerImages.length) {
+			const n = this.composerImages.length;
+			lines.push(truncateToWidth(cc.fg("muted", `${n} image${n === 1 ? "" : "s"} attached · esc to clear`), width));
+		}
+		if (this.pasting) lines.push(truncateToWidth(cc.fg("muted", "Reading clipboard…"), width));
+		return dim ? lines.map((line) => faint(stripAnsi(line))) : lines;
 	}
 
 	render(width: number): string[] {
@@ -1528,76 +1972,73 @@ export class AgentView implements Component, Focusable {
 			return this.attachment.render(width);
 		}
 		const rows = this.opts.ui.terminal.rows;
-		const header = [...this.headerLines(width)];
-		const status = this.statusLine();
-		if (status) header.push(truncateToWidth(status, width));
-		header.push("");
-
 		const rule = faint("─".repeat(width));
 		let footer: string[];
 		if (this.mode === "peek" && this.selectedRow) footer = this.renderPeek(this.selectedRow, width);
-		else if (this.mode === "rename") {
-			footer = [
-				rule,
-				`${cc.fg("muted", "rename ")}${promptLine(this.renameInput, width - 7, "")}`,
-				rule,
-				this.hints(width, [
-					["enter", "save"],
-					["esc", "cancel"],
-				]),
-			];
-		} else {
-			const above = this.composerLines
-				.slice(-5)
-				.map((line, i, shown) =>
-					truncateToWidth(`${i === 0 && shown.length === this.composerLines.length ? "❯" : " "} ${line}`, width),
-				);
-			const current = promptLine(this.composer, width, above.length ? "" : "describe a task for a new session");
+		else if (this.mode === "resume") footer = this.renderResume(width);
+		else {
 			// Explains the view above the composer while only your own session is listed.
-			const onlySelf = this.rows.length === 1 && this.rows[0].self && !this.composerText();
-			const intro = onlySelf
-				? [
-						...wrapTextWithAnsi(
-							cc.fg(
-								"muted",
-								"A different way to work: hand off a bigger task than you would chat through, and it is organized in the sections above so you know when it needs you.",
-							),
-							width - 1,
-						).map((line) => ` ${line}`),
-						"",
-					]
-				: [];
+			const intro =
+				this.allRows.every((r) => r.self) && !this.composerText()
+					? [
+							"",
+							...wrapTextWithAnsi(
+								cc.fg(
+									"muted",
+									"A different way to work: hand off a bigger task than you would chat through, and it is organized in the sections above so you know when it needs you.",
+								),
+								width - 1,
+							).map((line) => ` ${line}`),
+							"",
+						]
+					: [];
 			footer = [
 				...intro,
 				rule,
-				...above,
-				...(this.composerImages.length
-					? [
-							truncateToWidth(
-								cc.fg(
-									"muted",
-									` ${this.composerImages.length} image${this.composerImages.length === 1 ? "" : "s"} attached · esc to clear`,
-								),
-								width,
-							),
-						]
-					: []),
-				...(this.pasting ? [truncateToWidth(cc.fg("muted", " Reading clipboard…"), width)] : []),
-				above.length ? current.replace(/^❯/, " ") : current,
+				...this.composerLinesFor(width, this.mode === "rename"),
 				rule,
-				...(this.mode === "help" ? this.renderHelp(width) : [this.listFooter(width)]),
+				...(this.mode === "help" ? this.renderHelp(width) : [this.footerSlot(width)]),
 			];
 		}
 
-		let body: string[];
-		let focusLine = 0;
-		if (this.mode === "resume") body = this.renderResume(width);
-		else ({ lines: body, focusLine } = this.renderBody(width));
-
-		const budget = Math.max(1, rows - header.length - footer.length);
-		let start = 0;
-		if (body.length > budget) start = Math.min(Math.max(0, focusLine - Math.floor(budget / 2)), body.length - budget);
-		const windowed = body.slice(start, start + budget).map((line) => truncateToWidth(line, width));
-		return [...header, ...windowed, ...Array(Math.max(0, budget - windowed.length)).fill(""), ...footer];
+		const { lines: body, focusLine } = this.renderBody(width);
+		const budget = Math.max(1, rows - footer.length);
+		// Scroll only as far as keeps the focus in view; a header brings its blank line along.
+		const top = this.selected?.kind === "header" ? Math.max(0, focusLine - 1) : focusLine;
+		if (this.items[0]?.key === this.selectedKey) this.scrollStart = 0;
+		else if (top < this.scrollStart) this.scrollStart = top;
+		else if (focusLine >= this.scrollStart + budget) this.scrollStart = focusLine - budget + 1;
+		this.scrollStart = Math.max(0, Math.min(this.scrollStart, Math.max(0, body.length - budget)));
+		const windowed = body
+			.slice(this.scrollStart, this.scrollStart + budget)
+			.map((line) => truncateToWidth(line, width));
+		return [...windowed, ...Array(Math.max(0, budget - windowed.length)).fill(""), ...footer];
 	}
+}
+
+/** Claude Code's whitespace cleanup for a row's text: tags dropped, every run of space one space. */
+function clean(text: string): string {
+	return text
+		.replace(/<(system-reminder|task-notification)>[\s\S]*?(<\/\1>|$)/g, " ")
+		.replace(/<\/?[\w-]+>/g, " ")
+		.replace(/[\x00-\x1f\x7f\s]+/g, " ")
+		.trim();
+}
+
+/** A path cut in the middle to fit: `~/a/…/c/d`, else `…/d`. */
+export function middleEllipsis(path: string, max: number): string {
+	if (visibleWidth(path) <= max) return path;
+	const parts = path.split("/");
+	const last = parts.pop() ?? "";
+	const first = parts.shift() ?? "";
+	let tail = last;
+	for (let i = parts.length - 1; i >= 0; i--) {
+		const next = `${parts[i]}/${tail}`;
+		if (visibleWidth(`${first}/…/${next}`) > max) break;
+		tail = next;
+	}
+	const shaped = `${first}/…/${tail}`;
+	if (visibleWidth(shaped) <= max) return shaped;
+	if (visibleWidth(`…/${last}`) <= max) return `…/${last}`;
+	return truncateToWidth(`…/${last}`, max, "…");
 }
