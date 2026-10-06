@@ -64,7 +64,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `permissions.deny`, Alt+M | deny rules block matching tool calls; the footer shows pi's `defaultProjectTrust` (`⏵⏵ always` / `⏸ ask` / `✕ never`) and Alt+M cycles it — see [Permissions](#permissions) |
 | `/tasks` | background tasks dialog (alias `/bashes`): shells (`run_in_background`, Ctrl+B on the model's running bash, or a foreground command past its `timeout`), monitors; running tasks only; Enter shows a task's output tail, `x` stops it (the model is told without a turn starting), and updates wait while the dialog is open. The model's bash is Claude Code's: `timeout` in milliseconds (2 minutes by default), a command still running then - or on Ctrl+B after 2s, or when you send a message - moves to the background instead of being killed, and the model reads a task's output file with `read`. The footer pill counts the running shells and monitors; ↓ from an empty prompt selects it and Enter opens the dialog. A shell writes its whole output to a file named in its start result and exit notification; `task_stop` stops it. A job notifies the model once when it exits, and once more if it goes quiet for 45s on what reads as an interactive prompt (`(y/n)`, `Press Enter`, …); the `monitor` tool turns each stdout line of a long-running command, or each frame of a WebSocket (`ws`), into an event that wakes the model (Claude Code's `Monitor`; stderr goes to the output file; every monitor expires after `timeout_ms`, 5 minutes by default and at most 30, with one notice so the model can re-arm it) |
 | `/rewind` | file checkpoints per turn; restores the files, the conversation, or both. Checkpoints are git commits kept under `refs/bluclawd/checkpoints/<session>/`: the newest 50 per session, and another session's refs are pruned after 30 days |
-| `←` on an empty prompt (or `/agent-view`) | agent view, as Claude Code's `claude agents`: background sessions in Needs input / Working / Completed bands (empty ones hidden; ctrl+s: by directory, this one first, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing (a working session's current tool), age. Type a task + enter to start a background session (ctrl+enter: start it here), shift+enter / alt+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, ctrl+v attaches a clipboard image to the new-session composer, an unknown `/command` is sent as the task, space peeks and replies (1-9 fills in an option, `/stop` stops it; a reply draft is kept per session), enter/→ opens any session, including Working and Needs input, as this window's own pi session while the one here moves to the background (every row is the same kind of session: a full pi session, in this window or in the background), ↑↓ wrap, alt/ctrl+↑↓ jump between bands, alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes (this window's own session too: the window moves to a new one), ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` / `n:<name>` filter (ctrl+f turns the text into a name search), `/resume` brings a past session back and opens it, `/model <name>` (or `default`) sets the model for new ones, `?` shows the shortcuts, esc returns to your session, and ctrl+c twice (or `exit`, `/exit`) quits pi with the sessions still running. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press. Background sessions run under a local daemon (`daemon/`, a Unix socket in `~/.pi/server`), so they keep running after pi exits or its terminal closes, and so does a turn that was in progress in this window when you quit: as in Claude Code, quitting first waits for the running tool to finish ("Backgrounding after the current tool finishes…", ctrl+c stops waiting), then the daemon carries the turn on with a hidden continuation, so the tool is neither cut off nor run again. Agent View detects both changed daemon code and a changed Pi installation, restarting an obsolete daemon only when it owns no running sessions. If startup fails, the Failed row retains its session file and can still be opened. A session that was idle when pi exited is kept as a row with no process (it resumes when opened or replied to); every row stays until ctrl+x deletes it; it reports presence to radius.pi.dev only when a radius credential or `RADIUS_API_KEY` is configured |
+| `←` on an empty prompt (or `/agent-view`) | agent view, as Claude Code's `claude agents`: background sessions in Needs input / Working / Completed bands (empty ones hidden; ctrl+s: by directory, this one first, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing (a working session's current tool), age. Type a task + enter to start a background session (ctrl+enter: start it here), shift+enter / alt+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, ctrl+v attaches a clipboard image to the new-session composer, an unknown `/command` is sent as the task, space peeks and replies (1-9 fills in an option, `/stop` stops it; a reply draft is kept per session), enter/→ opens any session, including Working and Needs input (with tmux: an instant switch, see [Session switching](#session-switching)), as this window's own pi session while the one here moves to the background (every row is the same kind of session: a full pi session, in this window or in the background), ↑↓ wrap, alt/ctrl+↑↓ jump between bands, alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes (this window's own session too: the window moves to a new one), ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` / `n:<name>` filter (ctrl+f turns the text into a name search), `/resume` brings a past session back and opens it, `/model <name>` (or `default`) sets the model for new ones, `?` shows the shortcuts, esc returns to your session, and ctrl+c twice (or `exit`, `/exit`) quits pi with the sessions still running. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press. Background sessions run under a local daemon (`daemon/`, a Unix socket in `~/.pi/server`), so they keep running after pi exits or its terminal closes, and so does a turn that was in progress in this window when you quit: as in Claude Code, quitting first waits for the running tool to finish ("Backgrounding after the current tool finishes…", ctrl+c stops waiting), then the daemon carries the turn on with a hidden continuation, so the tool is neither cut off nor run again. Agent View detects both changed daemon code and a changed Pi installation, restarting an obsolete daemon only when it owns no running sessions. If startup fails, the Failed row retains its session file and can still be opened. A session that was idle when pi exited is kept as a row with no process (it resumes when opened or replied to); every row stays until ctrl+x deletes it; it reports presence to radius.pi.dev only when a radius credential or `RADIUS_API_KEY` is configured |
 | `/status`, `/context` | model, auth, safety, session, context window |
 | `/theme` | theme |
 | `/help` | all of the above, grouped |
@@ -112,12 +112,24 @@ node --experimental-strip-types scripts/probe-extensions.ts   # what each extens
 
 ## Session switching
 
-Every row in agent view is a pi session, and one of them at a time is this window's: its full
-pi UI. The rest run as pi processes under the daemon. Enter/→ swaps them: the one you open moves
-into this window, and the one that was here moves to the background. Neither turn is lost. A
-session that was working first lets its running tool finish (as quitting pi does), then carries
-its turn on wherever it went, with a hidden continuation rather than a visible prompt. Esc while a
-session is being handed over leaves it running in the background.
+With [tmux](https://github.com/tmux/tmux) installed, every session is a full interactive pi of its
+own, running in a private tmux server next to the daemon's socket (`~/.pi/server/tmux.sock`).
+`pi` in a terminal starts its session there and attaches, so the terminal is only a viewer: all
+sessions run at once, and enter/→ in agent view switches the terminal to another session
+instantly — nothing waits, nothing is interrupted, and the one you left keeps working. A new
+session from the composer is a new pane with the task as its first prompt; ctrl+enter switches to
+it. Ctrl+c twice or ctrl+d on an empty prompt (and ctrl+c twice or `exit` in agent view) leave
+tmux, and every session keeps running, even with the terminal closed; running `pi` again starts a
+new session and lists them all. Ctrl+x stops a session's turn, then ends its pi; on this terminal's
+own session it moves the terminal to a new one first. A peek reply is the session's next prompt.
+`/quit` inside a session ends it, but a turn in progress carries on in a new pane once its running
+tool finishes. tmux runs with no prefix key and no status line, passing keys through as CSI u.
+`BLUCLAWD_TMUX=0` opts out.
+
+Without tmux, one session at a time is this window's: enter/→ swaps the one you open into this
+window and moves the one here to the daemon. A session that was working first lets its running
+tool finish, then carries its turn on wherever it went, with a hidden continuation rather than a
+visible prompt. Esc while a session is being handed over leaves it running in the background.
 
 An empty foreground prompt opens Agent View with one ←. Just after editing text or navigating
 history, it asks for a second press to avoid accidentally leaving the conversation. Sessions
@@ -149,9 +161,10 @@ reading the API:
   rows, no `@repo` / `@agent` mentions, and no worktree isolation for background
   sessions. The composer is not a full multi-line editor (no `[Image #N]` / `[Pasted text]`
   tokens), and there is no mouse support.
-  Opening a working session moves its turn: the model request in flight restarts in its new
-  window once the running tool has finished, so the session's partial reply is regenerated.
-  This window's own session cannot be pinned. `tab` does not browse subagents.
+  In tmux mode a peek reply cannot answer a session's open dialog (enter opens it to answer),
+  and each idle session is a running pi process. Without tmux, opening a working session moves
+  its turn: the model request in flight restarts in its new window once the running tool has
+  finished, and this window's own session cannot be pinned. `tab` does not browse subagents.
 
 ## Permissions
 

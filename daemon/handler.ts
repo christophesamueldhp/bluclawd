@@ -25,6 +25,7 @@ import type {
 	RpcRequest,
 	RpcStreamRequest,
 	SaveRequest,
+	SendRequest,
 	ServerRequest,
 	ServerResponse,
 	ShutdownRequest,
@@ -62,6 +63,7 @@ function toInstanceSummary(instance: InstanceRecord, activity?: AgentActivity, e
 		radiusPiId: instance.radiusPiId,
 		activity,
 		external,
+		pane: instance.pane,
 	};
 }
 
@@ -99,7 +101,7 @@ export async function handleIpcRequest(request: RegisterRequest): Promise<Regist
 export async function handleIpcRequest(request: UnregisterRequest): Promise<UnregisterResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ShutdownRequest): Promise<ShutdownResponse | ErrorResponse>;
 export async function handleIpcRequest(
-	request: DeleteRequest | RenameRequest | MetaRequest | AnswerRequest | SaveRequest | ReleaseRequest,
+	request: DeleteRequest | RenameRequest | MetaRequest | AnswerRequest | SaveRequest | ReleaseRequest | SendRequest,
 ): Promise<AckResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse> {
@@ -204,14 +206,24 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				id: request.instance.id,
 				status: "online",
 				cwd: request.instance.cwd,
-				createdAt: now,
+				createdAt: request.instance.createdAt ?? now,
 				lastSeenAt: now,
 				label: request.instance.label,
 				sessionId: request.instance.sessionId,
 				sessionFile: request.instance.sessionFile,
+				pane: request.instance.pane,
+				detail: request.instance.detail,
+				turns: request.instance.turns,
 			};
 			const release = supervisor.registerExternal(record, request.instance.activity ?? "idle");
-			return { type: "register_result", ok: true, release };
+			const messages = supervisor.drainExternal(record.id);
+			return { type: "register_result", ok: true, release, ...(messages.length ? { messages } : {}) };
+		}
+
+		case "send": {
+			return supervisor.sendExternal(request.instanceId, request.message)
+				? { type: "ack", ok: true }
+				: unknownInstanceError(request.instanceId);
 		}
 
 		case "unregister": {

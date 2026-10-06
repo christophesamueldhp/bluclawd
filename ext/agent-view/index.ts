@@ -23,16 +23,17 @@ import {
 	matchesKey,
 	type TUI,
 } from "@earendil-works/pi-tui";
-import { lastLine, textOf } from "../../daemon/session-state.ts";
+import { lastLine, textOf, toolActivity } from "../../daemon/session-state.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
 import { AgentView, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, CONTINUE_COMMAND, CONTINUE_TEXT, handOff, handOffAfterExit } from "./hand-off.ts";
-import { type InstanceSummary, OrchestratorClient } from "./orchestrator-client.ts";
+import { type InstanceSummary, OrchestratorClient, type PaneMessage } from "./orchestrator-client.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
 import { collectRows, labelFromTask } from "./rows.ts";
 import { deriveLabel, ForegroundActivity, SelfRegistration, type SelfSessionInfo } from "./self-registration.ts";
+import { CONTINUE_ENV, OPEN_VIEW_ENV, piCommand, Tmux } from "./tmux.ts";
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
@@ -49,6 +50,8 @@ const DONE_FLASH_MS = 2500;
 const LEFT_ARM_MS = 3000;
 /** An edit this recent makes the first ← arm instead of opening. */
 const LEFT_EDIT_MS = 2000;
+/** pi exits on a second ctrl+c this soon after the first; a pane detaches instead. */
+const CTRL_C_MS = 500;
 const STATUS_KEY = STATUS_KEYS.agents;
 /** The command ←← dispatches; not meant to be typed. */
 const AGENT_VIEW_COMMAND = "agent-view";
@@ -69,6 +72,31 @@ export function withoutAgentViewCommand(current: AutocompleteProvider): Autocomp
 			return items.length > 0 ? { ...base, items } : null;
 		},
 	};
+}
+
+/** pi's ways to pick a session; a pane is given the one its launcher already picked. */
+const SESSION_FLAGS: ReadonlySet<string> = new Set(["-c", "--continue", "-r", "--resume"]);
+const SESSION_VALUE_FLAGS: ReadonlySet<string> = new Set(["--session", "--session-id", "--fork"]);
+
+/** The arguments a launching pi hands its pane: its own, with the session it resolved. */
+export function paneArgs(argv: string[], sessionFile: string | undefined): string[] {
+	if (!sessionFile || !existsSync(sessionFile)) return argv;
+	const out: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		if (arg === "--") {
+			out.push(...argv.slice(i));
+			break;
+		}
+		if (SESSION_FLAGS.has(arg)) continue;
+		if (SESSION_VALUE_FLAGS.has(arg)) {
+			i++;
+			continue;
+		}
+		if ([...SESSION_VALUE_FLAGS].some((flag) => arg.startsWith(`${flag}=`))) continue;
+		out.push(arg);
+	}
+	return ["--session", sessionFile, ...out];
 }
 
 function isRealCwd(cwd: string): boolean {
@@ -108,13 +136,27 @@ const agentView: InlineExtension = {
 		let autocompleteAdded = false;
 		// Set while quitting waits for the turn's tools to finish.
 		let onToolsSettled: (() => void) | undefined;
+		// Pane mode: this pi runs in a tmux session of agent view's own (tmux.ts).
+		const pane = Tmux.currentPane();
+		const panes = new Tmux();
+		let launched = false;
+		// What the turn in progress is doing, for this session's row in other windows.
+		let liveDetail: string | undefined;
 
-		const selfInfo = (ctx: ExtensionContext): SelfSessionInfo => ({
-			cwd: ctx.sessionManager.getCwd(),
-			sessionId: ctx.sessionManager.getSessionId(),
-			sessionFile: ctx.sessionManager.getSessionFile(),
-			label: deriveLabel(ctx.sessionManager.getSessionName(), ctx.sessionManager.getEntries()),
-		});
+		const selfInfo = (ctx: ExtensionContext): SelfSessionInfo => {
+			const row = selfRow(ctx);
+			return {
+				cwd: ctx.sessionManager.getCwd(),
+				sessionId: ctx.sessionManager.getSessionId(),
+				sessionFile: ctx.sessionManager.getSessionFile(),
+				// A pane is listed like any row; a plain window only marks rows "open elsewhere".
+				label: pane ? row.label : deriveLabel(ctx.sessionManager.getSessionName(), ctx.sessionManager.getEntries()),
+				pane,
+				detail: row.detail,
+				turns: row.turns,
+				createdAt: row.createdAt,
+			};
+		};
 
 		/** This window's session as an agent-view row. */
 		const selfRow = (ctx: ExtensionContext): InstanceSummary => {
@@ -133,10 +175,16 @@ const agentView: InlineExtension = {
 				sessionId: ctx.sessionManager.getSessionId(),
 				sessionFile: ctx.sessionManager.getSessionFile(),
 				label: name?.trim() || (firstUser ? labelFromTask(firstUser) : undefined),
-				detail: lastAssistant ? lastLine(textOf(lastAssistant.message.content)) : undefined,
+				detail:
+					activity.current === "working" && liveDetail
+						? liveDetail
+						: lastAssistant
+							? lastLine(textOf(lastAssistant.message.content))
+							: undefined,
 				turns: messages.some((e) => e.message.role === "assistant") ? 1 : 0,
 				createdAt: ctx.sessionManager.getHeader()?.timestamp,
 				external: true,
+				pane,
 			};
 		};
 
@@ -154,7 +202,47 @@ const agentView: InlineExtension = {
 				sessionFile,
 				model: model ? { provider: model.provider, id: model.id } : undefined,
 				working: !ctx.isIdle(),
+				pane: !!pane,
+				command: pane ? piCommand() : undefined,
 			};
+		};
+
+		/**
+		 * Pane mode's launcher: `pi` run in a terminal starts its session as a pane and attaches to
+		 * it, so this process is only that terminal's tmux client. Before the TUI has done anything
+		 * but draw, and before an argument prompt is sent. False when tmux could not start it.
+		 */
+		const launchInTmux = (ctx: ExtensionContext): boolean => {
+			let name: string;
+			try {
+				name = panes.newSession({
+					cwd: ctx.cwd,
+					args: paneArgs(process.argv.slice(2), ctx.sessionManager.getSessionFile()),
+				});
+			} catch (error) {
+				ctx.ui.notify(
+					`Agent view sessions swap into this window — tmux couldn't start: ${error instanceof Error ? error.message : String(error)}`,
+					"warning",
+				);
+				return false;
+			}
+			let tui: TUI | undefined;
+			ctx.ui.setWidget("agent-view:launch", (widgetTui) => {
+				tui = widgetTui;
+				return { render: () => [], invalidate: () => {} };
+			});
+			ctx.ui.setWidget("agent-view:launch", undefined);
+			tui?.stop();
+			panes.attach(name);
+			process.exit(0);
+		};
+
+		/** Pane mode: what another window's agent view asks of this session. */
+		const onPaneMessage = (ctx: ExtensionContext, message: PaneMessage): void => {
+			if (message.type === "prompt") {
+				pi.sendUserMessage(message.text, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+			} else if (message.type === "abort") ctx.abort();
+			else pi.setSessionName(message.name);
 		};
 
 		/** The `← for agents` footer hint: `← N agents` while sessions wait on you, `← N done`
@@ -173,7 +261,7 @@ const agentView: InlineExtension = {
 			const tick = async (): Promise<void> => {
 				let text = theme.fg("dim", "← for agents");
 				try {
-					const rows = collectRows(await client.list(), undefined);
+					const rows = collectRows(await client.list(), undefined).filter((r) => r.id !== registration?.id);
 					const waiting = rows.filter((r) => r.state === "needs").length;
 					const done = new Set(rows.filter((r) => r.state === "done" || r.state === "failed").map((r) => r.id));
 					const fresh = finished ? [...done].filter((id) => !finished?.has(id)).length : 0;
@@ -212,6 +300,10 @@ const agentView: InlineExtension = {
 			// Agent view is a terminal affordance. RPC children (the daemon's own sessions) have a
 			// UI too, but registering one as a window would mark its own row "open elsewhere".
 			if (ctx.mode !== "tui") return;
+			if (!pane && !launched && Tmux.available()) {
+				launched = true;
+				if (launchInTmux(ctx)) return;
+			}
 			registration?.stop();
 			activity = new ForegroundActivity();
 			registration = new SelfRegistration(
@@ -219,8 +311,22 @@ const agentView: InlineExtension = {
 				() => selfInfo(ctx),
 				// Session switching needs a command context, as ←← does.
 				() => pi.sendUserMessage(`/${RELEASE_COMMAND}`, { expandPromptTemplates: true }),
+				(message) => onPaneMessage(ctx, message),
+				pane,
 			);
 			registration.start();
+			// A pane started to carry on a turn, or to show agent view, does so once.
+			if (process.env[CONTINUE_ENV]) {
+				delete process.env[CONTINUE_ENV];
+				pi.sendMessage(
+					{ customType: CONTINUE_COMMAND, content: CONTINUE_TEXT, display: false },
+					{ triggerTurn: true },
+				);
+			}
+			if (process.env[OPEN_VIEW_ENV]) {
+				delete process.env[OPEN_VIEW_ENV];
+				pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
+			}
 			stopPill?.();
 			const offPill = startPill(ctx);
 			if (!autocompleteAdded) {
@@ -237,6 +343,7 @@ const agentView: InlineExtension = {
 			// One ← opens the roster, with a second press required only just after editing/history.
 			let armedAt = 0;
 			let editedAt = 0;
+			let ctrlCAt = 0;
 			const disarm = (): void => {
 				if (!armedAt) return;
 				armedAt = 0;
@@ -246,6 +353,24 @@ const agentView: InlineExtension = {
 			const offKey = ctx.ui.onTerminalInput((data) => {
 				// Kitty reports a release (and a held key) as separate events; only presses count.
 				if (isKeyRelease(data) || isKeyRepeat(data)) return undefined;
+				// Pane mode: pi's own exit keys (ctrl+c twice, ctrl+d on an empty prompt) leave tmux
+				// instead, as quitting Claude Code leaves its sessions running.
+				if (pane && !viewOpen && !tui?.hasOverlay()) {
+					const empty = ctx.ui.getEditorText() === "";
+					if (matchesKey(data, "ctrl+d") && empty) {
+						panes.detach();
+						return { consume: true };
+					}
+					if (matchesKey(data, "ctrl+c")) {
+						const now = Date.now();
+						if (now - ctrlCAt < CTRL_C_MS) {
+							ctrlCAt = 0;
+							panes.detach();
+							return { consume: true };
+						}
+						ctrlCAt = now;
+					}
+				}
 				if (
 					ctx.ui.getEditorText() !== "" ||
 					matchesKey(data, "backspace") ||
@@ -292,8 +417,12 @@ const agentView: InlineExtension = {
 		pi.on("agent_start", track);
 		pi.on("turn_start", track);
 		pi.on("agent_settled", (event) => {
+			liveDetail = undefined;
 			track(event);
 			onToolsSettled?.();
+		});
+		pi.on("tool_execution_start", (event) => {
+			liveDetail = toolActivity(event.toolName, event.args);
 		});
 		pi.on("ui_prompt_start", track);
 		pi.on("ui_prompt_end", track);
@@ -376,6 +505,15 @@ const agentView: InlineExtension = {
 								done(undefined);
 								ctx.shutdown();
 							},
+							panes: pane
+								? {
+										current: pane,
+										switchTo: (name) => panes.switchTo(name),
+										start: (cwd, args, env) => panes.newSession({ cwd, args, env }),
+										kill: (name) => panes.kill(name),
+										detach: () => panes.detach(),
+									}
+								: undefined,
 							listModels: () =>
 								ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id })),
 							isKnownCommand: (name) =>

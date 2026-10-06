@@ -29,6 +29,8 @@ export interface AgentRow {
 	self: boolean;
 	/** Open in another window's foreground — attaching here would make a second writer. */
 	elsewhere: boolean;
+	/** Pane mode: the tmux session its pi runs in. */
+	pane?: string;
 	updatedAt?: string;
 }
 
@@ -79,6 +81,7 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 		sortOrder: inst.sortOrder,
 		self,
 		elsewhere: false,
+		pane: inst.pane,
 		updatedAt: inst.lastSeenAt,
 	};
 }
@@ -88,19 +91,22 @@ function needsText(needs: PendingNeeds): string {
 }
 
 /**
- * The rows agent view lists: the daemon's sessions plus this window's own (`self`, built by the
- * caller). Other windows' foreground sessions are not listed, but a stored row they hold open is
- * marked `elsewhere`. One row per session file; this window's own and then a live one win over a
- * stored twin.
+ * The rows agent view lists: the daemon's sessions, every pane's pi, and this window's own
+ * (`self`, built by the caller). Other plain windows' sessions are not listed, but a stored row
+ * they hold open is marked `elsewhere`. One row per session file; this window's own and then a
+ * live one win over a stored twin.
  */
 export function collectRows(instances: InstanceSummary[], self: InstanceSummary | undefined): AgentRow[] {
 	const heldElsewhere = new Set(
 		instances.filter((i) => i.external && i.id !== self?.id && i.sessionFile).map((i) => i.sessionFile),
 	);
-	const listed = instances.filter((i) => !i.external);
-	const rows = (self ? [self, ...listed] : listed).map((i) => {
+	const listed = instances.filter((i) => (!i.external || i.pane) && i.id !== self?.id);
+	// A pane's own pin and order are kept by the daemon, on its registration.
+	const registered = self && instances.find((i) => i.id === self.id);
+	const own = self && registered ? { ...self, pinned: registered.pinned, sortOrder: registered.sortOrder } : self;
+	const rows = (own ? [own, ...listed] : listed).map((i) => {
 		const row = rowFromSummary(i, self?.id);
-		if (!row.self && row.sessionFile && heldElsewhere.has(row.sessionFile)) {
+		if (!row.self && !row.pane && row.sessionFile && heldElsewhere.has(row.sessionFile)) {
 			row.elsewhere = true;
 			row.detail = "open in another terminal · enter moves it here";
 		}

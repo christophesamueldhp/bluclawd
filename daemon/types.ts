@@ -36,4 +36,6 @@ export interface InstanceRecord {
 	finishedAt?: string;
 	pinned?: boolean;
 	sortOrder?: number;
+	/** The tmux session an interactive pi runs this session in (agent view's pane mode). */
+	pane?: string;
 }

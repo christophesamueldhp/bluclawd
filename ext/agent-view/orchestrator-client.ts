@@ -30,6 +30,8 @@ export interface InstanceSummary {
 	sortOrder?: number;
 	/** The blocking prompt a live session is waiting on. */
 	needs?: PendingNeeds;
+	/** The tmux session its interactive pi runs in. */
+	pane?: string;
 }
 
 /** Mirror of daemon/session-state.ts SessionNeeds. */
@@ -49,7 +51,14 @@ export interface RegisterInput {
 	sessionFile?: string;
 	label?: string;
 	activity?: AgentActivity;
+	pane?: string;
+	detail?: string;
+	turns?: number;
+	createdAt?: string;
 }
+
+/** Mirror of daemon/ipc/protocol.ts PaneMessage. */
+export type PaneMessage = { type: "prompt"; text: string } | { type: "abort" } | { type: "rename"; name: string };
 
 type Request =
 	| { type: "list" }
@@ -66,6 +75,7 @@ type Request =
 	| { type: "rpc"; instanceId: string; command: unknown }
 	| { type: "register"; instance: RegisterInput }
 	| { type: "unregister"; instanceId: string }
+	| { type: "send"; instanceId: string; message: PaneMessage }
 	| { type: "shutdown" }
 	| { type: "delete"; instanceId: string }
 	| { type: "rename"; instanceId: string; name: string }
@@ -83,6 +93,7 @@ interface AnyResponse {
 	version?: string;
 	buildId?: string;
 	release?: boolean;
+	messages?: PaneMessage[];
 	working?: boolean;
 	response?: { success: boolean; error?: string };
 }
@@ -253,9 +264,15 @@ export class OrchestratorClient {
 	}
 
 	/** Register/heartbeat this foreground session as an external instance. */
-	async register(instance: RegisterInput): Promise<{ release: boolean }> {
+	async register(instance: RegisterInput): Promise<{ release: boolean; messages: PaneMessage[] }> {
 		const res = await this.request({ type: "register", instance }, 1000);
-		return { release: res.release === true };
+		return { release: res.release === true, messages: res.messages ?? [] };
+	}
+
+	/** Queue a message for a pane's pi; it acts on it within a heartbeat. */
+	async send(instanceId: string, message: PaneMessage): Promise<void> {
+		const res = await this.request({ type: "send", instanceId, message });
+		if (res.type !== "ack") throw new Error(res.error ?? "The agent daemon is out of date — restart pi to update it");
 	}
 
 	/** Ask the window holding `sessionFile` to let it go. False when this daemon predates the request. */

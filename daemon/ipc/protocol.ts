@@ -61,7 +61,21 @@ export interface RegisterRequest {
 		sessionFile?: string;
 		label?: string;
 		activity?: AgentActivity;
+		pane?: string;
+		detail?: string;
+		turns?: number;
+		createdAt?: string;
 	};
+}
+
+/** What another window asks a pane's pi to do; delivered with its next heartbeat. */
+export type PaneMessage = { type: "prompt"; text: string } | { type: "abort" } | { type: "rename"; name: string };
+
+/** Queue a message for a self-registered session. */
+export interface SendRequest {
+	type: "send";
+	instanceId: string;
+	message: PaneMessage;
 }
 
 export interface UnregisterRequest {
@@ -126,6 +140,7 @@ interface RequestMap {
 	rpc_stream: RpcStreamRequest;
 	register: RegisterRequest;
 	unregister: UnregisterRequest;
+	send: SendRequest;
 	shutdown: ShutdownRequest;
 	delete: DeleteRequest;
 	rename: RenameRequest;
@@ -159,6 +174,7 @@ export interface InstanceSummary {
 	sortOrder?: number;
 	/** The blocking prompt a live session is waiting on. */
 	needs?: SessionNeeds;
+	pane?: string;
 }
 
 interface ResponseBase {
@@ -213,6 +229,8 @@ export interface RegisterResponse extends ResponseBase {
 	type: "register_result";
 	/** Another window wants this session: let it go. */
 	release?: boolean;
+	/** Messages queued for it with `send`. */
+	messages?: PaneMessage[];
 }
 
 export interface UnregisterResponse extends ResponseBase {
@@ -244,6 +262,7 @@ interface ResponseMap {
 	rpc: RpcBridgeResponse;
 	rpc_stream: RpcReadyResponse;
 	register: RegisterResponse;
+	send: AckResponse;
 	unregister: UnregisterResponse;
 	shutdown: ShutdownResponse;
 	delete: AckResponse;

@@ -1,11 +1,16 @@
 import { randomUUID } from "node:crypto";
-import type { AgentActivity, OrchestratorClient, RegisterInput } from "./orchestrator-client.ts";
+import type { AgentActivity, OrchestratorClient, PaneMessage, RegisterInput } from "./orchestrator-client.ts";
 
 export interface SelfSessionInfo {
 	cwd: string;
 	sessionId?: string;
 	sessionFile?: string;
 	label?: string;
+	/** Pane mode: the tmux session this pi runs in, and what its row shows. */
+	pane?: string;
+	detail?: string;
+	turns?: number;
+	createdAt?: string;
 }
 
 /** The subset of a session entry needed to derive a title — structural, so pi's SessionEntry fits. */
@@ -93,18 +98,29 @@ const HEARTBEAT_MS = 3000;
  * if the daemon is down a heartbeat silently no-ops and re-registers once one exists.
  */
 export class SelfRegistration {
-	readonly id = randomUUID();
+	readonly id: string;
 	private readonly client: OrchestratorClient;
 	private readonly getInfo: () => SelfSessionInfo;
 	private readonly onRelease: () => void;
+	private readonly onMessage: (message: PaneMessage) => void;
 	private activity: AgentActivity = "idle";
 	private timer: ReturnType<typeof setInterval> | undefined;
 
-	/** `onRelease`: another window wants this session — switch this one away from it. */
-	constructor(client: OrchestratorClient, getInfo: () => SelfSessionInfo, onRelease: () => void = () => {}) {
+	/** `onRelease`: another window wants this session — switch this one away from it.
+	 *  `onMessage`: another window's agent view asks this session something (pane mode).
+	 *  `id`: a pane registers under its tmux session's name, so its row outlives a session switch. */
+	constructor(
+		client: OrchestratorClient,
+		getInfo: () => SelfSessionInfo,
+		onRelease: () => void = () => {},
+		onMessage: (message: PaneMessage) => void = () => {},
+		id: string = randomUUID(),
+	) {
 		this.client = client;
 		this.getInfo = getInfo;
 		this.onRelease = onRelease;
+		this.onMessage = onMessage;
+		this.id = id;
 	}
 
 	start(): void {
@@ -134,10 +150,15 @@ export class SelfRegistration {
 			sessionFile: info.sessionFile,
 			label: info.label,
 			activity: this.activity,
+			pane: info.pane,
+			detail: info.detail,
+			turns: info.turns,
+			createdAt: info.createdAt,
 		};
 		try {
 			const res = await this.client.register(instance);
 			if (res?.release) this.onRelease();
+			for (const message of res?.messages ?? []) this.onMessage(message);
 		} catch {
 			// daemon may be down; the next tick retries (register is an upsert).
 		}

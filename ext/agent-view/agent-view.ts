@@ -47,6 +47,7 @@ import {
 	stateBandOf,
 	type ViewMode,
 } from "./rows.ts";
+import { CONTINUE_ENV, OPEN_VIEW_ENV } from "./tmux.ts";
 
 export interface PastSession {
 	sessionFile: string;
@@ -84,6 +85,8 @@ export interface AgentViewOptions {
 	onDeleteSelf?: () => void;
 	/** ctrl+r on this window's own session. */
 	onRenameSelf?: (name: string) => void;
+	/** Pane mode: every session is a pi in its own tmux session (see tmux.ts). */
+	panes?: PaneOps;
 	/** A peek reply to this window's own session: sent as its next prompt once the view closes. */
 	onSelfReply?: (text: string) => void;
 	/** ctrl+enter: start a session in this window with `task` as its first prompt. */
@@ -105,6 +108,18 @@ export interface AgentViewOptions {
 	fileExists?: (path: string) => boolean;
 }
 
+/** What agent view needs from tmux in pane mode. */
+export interface PaneOps {
+	/** This pi's own tmux session. */
+	current: string;
+	switchTo(pane: string): void;
+	/** Start pi with `args` in a new tmux session; returns its name. */
+	start(cwd: string, args: string[], env?: Record<string, string>): string;
+	kill(pane: string): void;
+	/** Leave tmux; every session keeps running. */
+	detach(): void;
+}
+
 type Item =
 	| { kind: "header"; key: string; band: Band }
 	| { kind: "row"; key: string; band: Band; row: AgentRow }
@@ -121,6 +136,8 @@ const CTRL_C_MS = 800;
 const EXIT_WORDS = new Set(["exit", "quit", ":q", ":q!", ":wq", ":wq!"]);
 /** How long a takeover waits for the other terminal: its next heartbeat (3s), then abort and switch. */
 const RELEASE_WAIT_MS = 15_000;
+/** How long a new pane's row shows as starting before it should have registered. */
+const PANE_START_MS = 15_000;
 const RELEASE_POLL_MS = 300;
 
 type Color = Parameters<typeof theme.fg>[0];
@@ -430,6 +447,13 @@ export class AgentView implements Component, Focusable {
 
 	private recompute(): void {
 		this.allRows = collectRows(this.instances, this.opts.self?.());
+		// A new pane's placeholder gives way to its row once it registers, keeping the focus.
+		for (const placeholder of this.pending.filter((p) => p.pane)) {
+			const row = this.allRows.find((r) => r.pane === placeholder.pane);
+			if (!row) continue;
+			this.pending = this.pending.filter((p) => p !== placeholder);
+			if (this.selectedKey === placeholder.id) this.selectedKey = row.id;
+		}
 		const all = [...this.allRows, ...this.pending];
 		const text = this.composerText();
 		const filter = queryFilter(text);
@@ -631,6 +655,10 @@ export class AgentView implements Component, Focusable {
 		}
 		const cwd = this.dispatchCwd();
 		const model = this.dispatchModel;
+		if (this.opts.panes) {
+			this.startPane(open, draft, task, images, cwd, model);
+			return;
+		}
 		if (open && this.opts.onCreateAndOpen && cwd === this.opts.cwd) {
 			this.clearDraft();
 			this.teardown();
@@ -682,6 +710,113 @@ export class AgentView implements Component, Focusable {
 		}
 	}
 
+	/** Pane mode: a new session is a pi of its own, started with the task as its first prompt.
+	 *  Its row is a placeholder until the pane registers. */
+	private startPane(
+		open: boolean,
+		draft: string,
+		task: string,
+		images: ImageContent[],
+		cwd: string,
+		model: { provider: string; id: string } | undefined,
+	): void {
+		const panes = this.opts.panes;
+		if (!panes) return;
+		this.clearDraft();
+		let pane: string;
+		try {
+			pane = panes.start(cwd, [
+				...(model ? ["--model", `${model.provider}/${model.id}`] : []),
+				"--",
+				...imageFiles(images).map((file) => `@${file}`),
+				...(task ? [task] : []),
+			]);
+		} catch (error) {
+			this.setComposer(draft);
+			this.composerImages = images;
+			this.say(`Couldn't start it — ${error instanceof Error ? error.message : String(error)}`, "error");
+			return;
+		}
+		if (open) {
+			this.leaveFor(pane);
+			return;
+		}
+		const placeholder: AgentRow = {
+			id: `pending:${pane}`,
+			label: labelFromTask(task || "Image task"),
+			cwd,
+			state: "working",
+			alive: true,
+			detail: "starting…",
+			pinned: false,
+			self: false,
+			elsewhere: false,
+			pane,
+			createdAt: new Date().toISOString(),
+		};
+		this.pending.push(placeholder);
+		this.selectedKey = placeholder.id;
+		this.userMoved = true;
+		this.recompute();
+		this.render_();
+		// A pi that never registers (it failed to start) stops being shown as starting.
+		setTimeout(() => {
+			this.pending = this.pending.filter((p) => p !== placeholder);
+			if (!this.closed) void this.refresh();
+		}, PANE_START_MS);
+	}
+
+	/** Pane mode: show `pane` in this terminal; this view closes so its session shows on return. */
+	private leaveFor(pane: string): void {
+		try {
+			this.opts.panes?.switchTo(pane);
+		} catch (error) {
+			this.say(`Couldn't open — ${error instanceof Error ? error.message : String(error)}`, "error");
+			return;
+		}
+		this.close();
+	}
+
+	/** Pane mode: open a row. A pane is switched to; a session with no pane gets one. */
+	private async openPane(row: AgentRow, panes: PaneOps, sessionFile: string): Promise<void> {
+		if (row.pane) {
+			this.leaveFor(row.pane);
+			return;
+		}
+		if (row.elsewhere) {
+			this.say("This session is open in a terminal outside agent view — close pi there to open it here", "error");
+			return;
+		}
+		this.opening = row.id;
+		this.render_();
+		let resume = false;
+		try {
+			// A background process from before pane mode lets its running tool finish first.
+			if (row.alive) resume = await this.opts.client.handOver(row.id);
+		} catch (error) {
+			if (this.opening !== row.id) return;
+			this.opening = undefined;
+			this.say(`Couldn't open — ${error instanceof Error ? error.message : String(error)}`, "error");
+			return;
+		}
+		let pane: string;
+		try {
+			pane = panes.start(row.cwd, ["--session", sessionFile], resume ? { [CONTINUE_ENV]: "1" } : undefined);
+		} catch (error) {
+			this.opening = undefined;
+			this.say(`Couldn't open — ${error instanceof Error ? error.message : String(error)}`, "error");
+			return;
+		}
+		// The pane's own row replaces the stored one.
+		await this.opts.client.delete(row.id).catch(() => undefined);
+		if (this.closed || this.opening !== row.id) {
+			if (!this.closed) await this.refresh();
+			return; // cancelled: it runs on in the background
+		}
+		this.opening = undefined;
+		this.leaveFor(pane);
+	}
+
 	/**
 	 * Enter / →: make the session this window's own, as a full pi session; the one here moves to the
 	 * background. A background process lets its running tools finish and hands the session over;
@@ -699,6 +834,10 @@ export class AgentView implements Component, Focusable {
 					? "No session file recorded — use /resume to reopen its saved conversation"
 					: "Still starting — try again in a moment",
 			);
+			return;
+		}
+		if (this.opts.panes) {
+			await this.openPane(row, this.opts.panes, row.sessionFile);
 			return;
 		}
 		const exists = this.opts.fileExists ?? existsSync;
@@ -811,7 +950,14 @@ export class AgentView implements Component, Focusable {
 			if (targets.length === 0 || this.composing()) return;
 			if (this.armed?.key === item.key) {
 				this.disarm();
-				await Promise.all(targets.map((r) => this.opts.client.delete(r.id).catch(() => undefined)));
+				await Promise.all(
+					targets
+						.map(async (r) => {
+							if (r.pane) this.opts.panes?.kill(r.pane);
+							await this.opts.client.delete(r.id);
+						})
+						.map((p) => p.catch(() => undefined)),
+				);
 				await this.refresh();
 				return;
 			}
@@ -822,6 +968,10 @@ export class AgentView implements Component, Focusable {
 		if (row.self) {
 			if (this.armed?.key === row.id) {
 				this.disarm();
+				if (this.opts.panes) {
+					await this.deleteOwnPane(row, this.opts.panes);
+					return;
+				}
 				this.teardown();
 				this.opts.onDeleteSelf?.();
 				return;
@@ -842,6 +992,7 @@ export class AgentView implements Component, Focusable {
 		if (this.armed?.key === row.id) {
 			this.disarm();
 			try {
+				if (row.pane) this.opts.panes?.kill(row.pane);
 				await this.opts.client.delete(row.id);
 				if (this.mode === "peek") this.mode = "list";
 			} catch (error) {
@@ -851,6 +1002,15 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		this.arm(row.id);
+		if (row.pane) {
+			// A pane's pi keeps running until deleted; the first press stops its turn.
+			if (row.state === "working" || row.state === "needs") {
+				this.justKilled = row.id;
+				await this.opts.client.send(row.id, { type: "abort" }).catch(() => undefined);
+				await this.refresh();
+			}
+			return;
+		}
 		if (row.alive) {
 			this.justKilled = row.id;
 			try {
@@ -862,10 +1022,29 @@ export class AgentView implements Component, Focusable {
 		}
 	}
 
+	/** Pane mode: this terminal moves to a new session, in agent view, and this pane ends. */
+	private async deleteOwnPane(row: AgentRow, panes: PaneOps): Promise<void> {
+		let next: string;
+		try {
+			next = panes.start(this.opts.cwd, [], { [OPEN_VIEW_ENV]: "1" });
+			panes.switchTo(next);
+		} catch (error) {
+			this.say(`Couldn't delete — ${error instanceof Error ? error.message : String(error)}`, "error");
+			return;
+		}
+		this.teardown();
+		await this.opts.client.delete(row.id).catch(() => undefined);
+		try {
+			panes.kill(panes.current);
+		} catch {
+			// This pi stays, in the background; its row is back with its next heartbeat.
+		}
+	}
+
 	private async togglePin(): Promise<void> {
 		const row = this.selectedRow;
 		if (!row || row.id.startsWith("pending:")) return;
-		if (row.self) {
+		if (row.self && !this.opts.panes) {
 			this.say("Only background sessions can be pinned", "error");
 			return;
 		}
@@ -923,6 +1102,13 @@ export class AgentView implements Component, Focusable {
 			await this.refresh();
 			return;
 		}
+		if (row.pane) {
+			await this.opts.client
+				.send(row.id, { type: "rename", name })
+				.catch(() => this.say("Couldn't rename — the session may have ended.", "error"));
+			await this.refresh();
+			return;
+		}
 		await this.opts.client
 			.rename(row.id, name)
 			.catch(() =>
@@ -956,6 +1142,14 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		this.mode = "list";
+		if (this.opts.panes) {
+			try {
+				this.leaveFor(this.opts.panes.start(past.cwd, ["--session", past.sessionFile]));
+			} catch (error) {
+				this.say(`Couldn't resume — ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+			return;
+		}
 		try {
 			const instance = await this.opts.client.spawn({
 				cwd: past.cwd,
@@ -976,6 +1170,12 @@ export class AgentView implements Component, Focusable {
 
 	/** Leave pi itself (ctrl+c twice, exit words, /exit): background sessions keep running. */
 	private quit(): void {
+		if (this.opts.panes) {
+			const panes = this.opts.panes;
+			this.close();
+			panes.detach();
+			return;
+		}
 		if (!this.opts.onQuit) {
 			this.close();
 			return;
@@ -1060,7 +1260,8 @@ export class AgentView implements Component, Focusable {
 				await this.refresh();
 				return;
 			}
-			await this.opts.client.stop(row.id).catch((error) => {
+			const stop = row.pane ? this.opts.client.send(row.id, { type: "abort" }) : this.opts.client.stop(row.id);
+			await stop.catch((error) => {
 				this.replyError = `Couldn't stop — ${error instanceof Error ? error.message : String(error)}`;
 			});
 			await this.refresh();
@@ -1070,6 +1271,10 @@ export class AgentView implements Component, Focusable {
 			this.teardown();
 			this.opts.onSelfReply?.(text);
 			this.opts.onClose();
+			return;
+		}
+		if (this.opts.panes) {
+			await this.replyToPane(row, text, this.opts.panes);
 			return;
 		}
 		const needs = row.needs;
@@ -1108,6 +1313,33 @@ export class AgentView implements Component, Focusable {
 					prompt: text,
 					model: this.dispatchModel,
 				});
+			}
+			this.reply.setValue("");
+			this.replyDrafts.delete(row.id);
+		} catch (error) {
+			this.replyError = `Couldn't send — ${error instanceof Error ? error.message : String(error)}`;
+		}
+		await this.refresh();
+	}
+
+	/** Pane mode: a reply is the session's next prompt (queued behind a turn in progress). A
+	 *  session with no pane gets one, with the reply as its first prompt. */
+	private async replyToPane(row: AgentRow, text: string, panes: PaneOps): Promise<void> {
+		try {
+			if (row.pane) {
+				if (row.state === "needs") {
+					this.replyError = "it's waiting on a question — enter opens it to answer";
+					this.render_();
+					return;
+				}
+				await this.opts.client.send(row.id, { type: "prompt", text });
+			} else if (row.sessionFile && !row.alive) {
+				panes.start(row.cwd, ["--session", row.sessionFile, "--", text]);
+				await this.opts.client.delete(row.id).catch(() => undefined);
+			} else {
+				this.replyError = "enter opens it";
+				this.render_();
+				return;
 			}
 			this.reply.setValue("");
 			this.replyDrafts.delete(row.id);
@@ -2012,4 +2244,15 @@ export function middleEllipsis(path: string, max: number): string {
 	if (visibleWidth(shaped) <= max) return shaped;
 	if (visibleWidth(`…/${last}`) <= max) return `…/${last}`;
 	return truncateToWidth(`…/${last}`, max, "…");
+}
+
+/** Clipboard images as files, for a new pane's pi to take as `@file` arguments. */
+function imageFiles(images: ImageContent[]): string[] {
+	if (images.length === 0) return [];
+	const dir = mkdtempSync(join(tmpdir(), "bluclawd-images-"));
+	return images.map((image, i) => {
+		const file = join(dir, `image-${i + 1}.${image.mimeType.split("/")[1] ?? "png"}`);
+		writeFileSync(file, Buffer.from(image.data, "base64"));
+		return file;
+	});
 }

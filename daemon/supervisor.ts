@@ -14,6 +14,7 @@ import {
 	isBlockingUiMethod,
 	reduceActivity,
 } from "./activity.ts";
+import type { PaneMessage } from "./ipc/protocol.ts";
 import { radiusPresence } from "./radius.ts";
 import { createRpcProcessInstance, type RpcProcessInstance } from "./rpc-process.ts";
 import {
@@ -86,6 +87,8 @@ interface ExternalInstance {
 	lastSeenAt: number;
 	/** Another window wants this session: told to the holder on its next heartbeat. */
 	release?: boolean;
+	/** Messages for a pane's pi, drained by its next heartbeat. */
+	inbox: PaneMessage[];
 }
 
 /** External (self-registered) instances expire this long after their last heartbeat. */
@@ -355,7 +358,20 @@ export class ServerSupervisor {
 	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = Date.now()): boolean {
 		const previous = this.externalInstances.get(record.id);
 		const release = previous?.release === true && previous.record.sessionFile === record.sessionFile;
-		this.externalInstances.set(record.id, { record: cloneInstance(record), activity, lastSeenAt: now });
+		// A heartbeat restates what the session knows; its age and agent-view meta are kept here.
+		const kept = previous
+			? {
+					createdAt: previous.record.createdAt,
+					pinned: previous.record.pinned,
+					sortOrder: previous.record.sortOrder,
+				}
+			: {};
+		this.externalInstances.set(record.id, {
+			record: cloneInstance({ ...record, ...kept }),
+			activity,
+			lastSeenAt: now,
+			inbox: previous?.inbox ?? [],
+		});
 		return release;
 	}
 
@@ -372,6 +388,23 @@ export class ServerSupervisor {
 
 	unregisterExternal(id: string): void {
 		this.externalInstances.delete(id);
+	}
+
+	/** Queue a message for a self-registered session; false when none is registered as `id`. */
+	sendExternal(id: string, message: PaneMessage): boolean {
+		const entry = this.externalInstances.get(id);
+		if (!entry) return false;
+		entry.inbox.push(message);
+		return true;
+	}
+
+	/** The messages queued for a self-registered session, now delivered. */
+	drainExternal(id: string): PaneMessage[] {
+		const entry = this.externalInstances.get(id);
+		if (!entry || entry.inbox.length === 0) return [];
+		const messages = entry.inbox;
+		entry.inbox = [];
+		return messages;
 	}
 
 	/** External instances, reaping any whose last heartbeat is older than the TTL. */
@@ -597,6 +630,8 @@ export class ServerSupervisor {
 
 	/** Remove the row. The session's .jsonl stays on disk, resumable with /resume. */
 	async deleteInstance(instanceId: string): Promise<boolean> {
+		// A self-registered session's process is its window's; its row goes until it registers again.
+		if (this.externalInstances.delete(instanceId)) return true;
 		const known = this.getInstance(instanceId);
 		if (!known) return false;
 		await this.stopInstance(instanceId);
@@ -616,6 +651,11 @@ export class ServerSupervisor {
 
 	/** Agent-view-only fields: pin and manual order. */
 	setInstanceMeta(instanceId: string, meta: { pinned?: boolean; sortOrder?: number }): InstanceRecord | undefined {
+		const external = this.externalInstances.get(instanceId);
+		if (external) {
+			external.record = { ...external.record, ...meta };
+			return cloneInstance(external.record);
+		}
 		const live = this.liveInstances.get(instanceId);
 		if (live) {
 			live.record = { ...live.record, ...meta };

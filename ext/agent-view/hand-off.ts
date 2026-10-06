@@ -10,6 +10,7 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { currentDaemonBuildId, OrchestratorClient, piPackageRoot } from "./orchestrator-client.ts";
+import { CONTINUE_ENV, Tmux } from "./tmux.ts";
 
 /** What the daemon needs to keep a session running in the background. */
 export interface BackgroundableSession {
@@ -19,6 +20,10 @@ export interface BackgroundableSession {
 	model?: { provider: string; id: string };
 	/** A turn was in progress: leaving cuts it off, so wherever it goes next carries on. */
 	working: boolean;
+	/** It ran in a pane (tmux.ts): it carries on in a new pane, not in the daemon. */
+	pane?: boolean;
+	/** The pi that pane runs ({@link piCommand}): this helper's own argv is not pi's. */
+	command?: string[];
 }
 
 /** The worker command that carries on a turn cut off by a move (window switch, pi exit). */
@@ -76,6 +81,15 @@ async function main(pid: number, outgoing: BackgroundableSession): Promise<void>
 	while (isAlive(pid)) {
 		if (Date.now() > deadline) return;
 		await new Promise((resolve) => setTimeout(resolve, 100));
+	}
+	if (outgoing.pane && outgoing.working) {
+		new Tmux().newSession({
+			cwd: outgoing.cwd,
+			args: ["--session", outgoing.sessionFile],
+			env: { [CONTINUE_ENV]: "1" },
+			command: outgoing.command,
+		});
+		return;
 	}
 	const client = new OrchestratorClient();
 	if (!(await client.ensureDaemon())) return;
