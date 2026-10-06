@@ -75,7 +75,7 @@ const sessions: InstanceSummary[] = [
 		label: "title screen",
 		outcome: "done",
 		turns: 1,
-		detail: "result: menu done",
+		detail: "menu done",
 		createdAt: ago(9),
 		finishedAt: ago(3),
 	},
@@ -180,10 +180,10 @@ describe("rows", () => {
 			rowFromSummary({ id: "x", status: "online", cwd: HERE, ...inst }, undefined).state;
 		expect(state({ activity: "working" })).toBe("working");
 		expect(state({ activity: "awaiting_input" })).toBe("needs");
-		expect(state({ activity: "idle", question: "which one?" })).toBe("needs");
 		expect(state({ activity: "idle", turns: 0 })).toBe("idle");
 		expect(state({ activity: "idle", turns: 1 })).toBe("done");
 		expect(state({ activity: "idle", outcome: "failed" })).toBe("failed");
+		expect(state({ activity: "idle", outcome: "stopped", turns: 1 })).toBe("stopped");
 		expect(state({ status: "stopped" })).toBe("stopped");
 		expect(state({ status: "stopped", outcome: "done" })).toBe("done");
 		expect(state({ status: "starting" })).toBe("working");

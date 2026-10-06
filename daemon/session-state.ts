@@ -4,9 +4,9 @@
  * work with any provider, so it uses the fallback Claude Code itself uses between summaries:
  * the session's own recent output).
  *
- * Children are told (SENTINEL_INSTRUCTIONS, passed as --append-system-prompt) to end a turn with
- * a `result:` / `needs input:` / `failed:` line, the same convention Claude Code gives its
- * background sessions. When a turn ends without one, the last line of assistant text stands in.
+ * The outcome comes from pi's own signals only, with nothing added to the system prompt: a model
+ * error is Failed, an interrupted turn Stopped, any other settled turn Done. Needs input is a
+ * blocking prompt (`needsFromRequest`), never words in the reply.
  */
 
 import { closeSync, fstatSync, openSync, readSync } from "node:fs";
@@ -25,29 +25,7 @@ export interface SessionNeeds {
 	since?: string;
 }
 
-export const SENTINEL_INSTRUCTIONS = [
-	"You are running as a background session. Nobody is watching the transcript; a one-line status is shown for you in a session list.",
-	"When you finish a turn, end your final message with exactly one of these lines, on its own line:",
-	"result: <one short sentence saying what you produced>",
-	"needs input: <the one question you need the user to answer>",
-	"failed: <one short sentence saying what went wrong>",
-].join("\n");
-
 const DETAIL_MAX = 200;
-
-type Sentinel = { kind: "result" | "needs" | "failed"; text: string };
-
-/** The LAST sentinel line in `text`, if any. */
-export function scanSentinel(text: string): Sentinel | undefined {
-	let found: Sentinel | undefined;
-	for (const raw of text.split("\n")) {
-		const match = /^\s*(?:[*_`>-]\s*)*(result|needs input|failed)\s*:\s*(?:[*_`]+\s*)?(.+?)\s*[*_`]*\s*$/i.exec(raw);
-		if (!match) continue;
-		const word = match[1].toLowerCase();
-		found = { kind: word === "result" ? "result" : word === "failed" ? "failed" : "needs", text: clip(match[2]) };
-	}
-	return found;
-}
 
 function clip(text: string): string {
 	const oneLine = text.replace(/\s+/g, " ").trim();
@@ -108,8 +86,6 @@ export function needsFromRequest(request: RpcExtensionUIRequest): SessionNeeds |
 export class SessionStateTracker {
 	detail: string | undefined;
 	outcome: SessionOutcome | undefined;
-	/** A `needs input:` line from the last turn — the session is waiting on a free-text answer. */
-	needsText: string | undefined;
 	turns = 0;
 	finishedAt: string | undefined;
 	private lastAssistant: MessageLike | undefined;
@@ -135,7 +111,6 @@ export class SessionStateTracker {
 		switch (event.type) {
 			case "agent_start":
 				this.outcome = undefined;
-				this.needsText = undefined;
 				this.finishedAt = undefined;
 				this.lastAssistant = undefined;
 				break;
@@ -178,15 +153,7 @@ export class SessionStateTracker {
 			this.detail = clip(message.errorMessage || "the model request failed");
 			return;
 		}
-		const sentinel = scanSentinel(textOf(message?.content));
-		if (sentinel?.kind === "needs") {
-			this.outcome = undefined;
-			this.needsText = sentinel.text;
-			this.detail = sentinel.text;
-			return;
-		}
-		this.outcome = sentinel?.kind === "failed" ? "failed" : "done";
-		if (sentinel) this.detail = sentinel.kind === "result" ? `result: ${sentinel.text}` : sentinel.text;
+		this.outcome = message?.stopReason === "aborted" ? "stopped" : "done";
 	}
 }
 
@@ -198,7 +165,7 @@ const TAIL_BYTES = 16 * 1024;
  */
 export function readSessionTail(
 	sessionFile: string,
-): { detail?: string; outcome?: SessionOutcome; question?: string; turns: number } | undefined {
+): { detail?: string; outcome?: SessionOutcome; turns: number } | undefined {
 	let fd: number | undefined;
 	try {
 		fd = openSync(sessionFile, "r");
@@ -219,7 +186,7 @@ export function readSessionTail(
 		const tracker = new SessionStateTracker();
 		tracker.apply({ type: "message_end", message: last });
 		tracker.apply({ type: "agent_settled" });
-		return { detail: tracker.detail, outcome: tracker.outcome, question: tracker.needsText, turns: 1 };
+		return { detail: tracker.detail, outcome: tracker.outcome, turns: 1 };
 	} catch {
 		return undefined;
 	} finally {

@@ -159,9 +159,9 @@ reading the API:
   back to dark and prints "Theme not found". The theme is declared in
   `package.json`'s `pi.themes` instead, which pi registers before startup.
 - **Agent view differs from Claude Code's in a few places.** Row text comes from each
-  session's own output — background sessions are asked to end a turn with a `result:` /
-  `needs input:` / `failed:` line — not from a Haiku-class summary, so it works with any
-  provider. There are no pull-request badges (no Ready for review band), no `!` shell-job
+  session's own output, and its state from pi's own signals (a model error is Failed, an
+  interrupted turn Stopped, a blocking prompt Needs input) — nothing is added to the system
+  prompt and there is no Haiku-class summary, so it works with any provider. There are no pull-request badges (no Ready for review band), no `!` shell-job
   rows, no `@repo` / `@agent` mentions, and no worktree isolation for background
   sessions. The composer is not a full multi-line editor (no `[Image #N]` / `[Pasted text]`
   tokens), and there is no mouse support.

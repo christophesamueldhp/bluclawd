@@ -48,7 +48,6 @@ function toInstanceSummary(instance: InstanceRecord, activity?: AgentActivity, e
 		lastSeenAt: instance.lastSeenAt,
 		detail: (external ? undefined : supervisor.getLiveDetail(instance.id)) ?? instance.detail,
 		outcome: instance.outcome,
-		question: instance.question,
 		turns: instance.turns,
 		finishedAt: instance.finishedAt,
 		pinned: instance.pinned,

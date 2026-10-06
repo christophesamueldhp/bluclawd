@@ -17,13 +17,7 @@ import {
 import type { PaneMessage } from "./ipc/protocol.ts";
 import { radiusPresence } from "./radius.ts";
 import { createRpcProcessInstance, type RpcProcessInstance } from "./rpc-process.ts";
-import {
-	needsFromRequest,
-	readSessionTail,
-	SENTINEL_INSTRUCTIONS,
-	type SessionNeeds,
-	SessionStateTracker,
-} from "./session-state.ts";
+import { needsFromRequest, readSessionTail, type SessionNeeds, SessionStateTracker } from "./session-state.ts";
 import { getInstance, loadInstances, removeInstance, saveInstances, upsertInstance } from "./storage.ts";
 import type { InstanceRecord, InstanceStatus } from "./types.ts";
 
@@ -219,7 +213,6 @@ export class ServerSupervisor {
 		this.updateRecord(live, {
 			detail: tracker.detail,
 			outcome: tracker.outcome,
-			question: tracker.needsText,
 			turns: tracker.turns,
 			finishedAt: tracker.finishedAt,
 		});
@@ -505,7 +498,6 @@ export class ServerSupervisor {
 				sessionFile: options.sessionFile,
 				detail: previous?.detail ?? tail?.detail,
 				outcome: previous ? undefined : tail?.outcome,
-				question: previous ? undefined : tail?.question,
 				turns: previous?.turns ?? tail?.turns,
 			},
 			resources: {},
@@ -526,7 +518,6 @@ export class ServerSupervisor {
 				sessionFile: options.sessionFile,
 				provider: options.provider,
 				model: options.model,
-				appendSystemPrompt: SENTINEL_INSTRUCTIONS,
 			});
 			this.bindRpcProcess(live, rpcProcess);
 			await this.syncInstanceRecord(live);
@@ -562,7 +553,6 @@ export class ServerSupervisor {
 			sessionFile: options.sessionFile,
 			detail: tail?.detail ?? previous?.detail,
 			outcome: tail?.outcome ?? "stopped",
-			question: tail?.question,
 			turns: previous?.turns ?? tail?.turns,
 			finishedAt: now,
 		};

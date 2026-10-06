@@ -2,33 +2,11 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import {
-	lastLine,
-	needsFromRequest,
-	readSessionTail,
-	SessionStateTracker,
-	scanSentinel,
-} from "../daemon/session-state.ts";
+import { lastLine, needsFromRequest, readSessionTail, SessionStateTracker } from "../daemon/session-state.ts";
 
 const assistant = (text: string, extra: Record<string, unknown> = {}) => ({
 	type: "message_end",
 	message: { role: "assistant", content: [{ type: "text", text }], ...extra },
-});
-
-describe("scanSentinel", () => {
-	it("finds the last sentinel line, case-insensitive, markdown-tolerant", () => {
-		expect(scanSentinel("did stuff\nresult: tests pass")).toEqual({ kind: "result", text: "tests pass" });
-		expect(scanSentinel("**Needs input:** double jump or wall climb?")).toEqual({
-			kind: "needs",
-			text: "double jump or wall climb?",
-		});
-		expect(scanSentinel("result: first\nfailed: build broke")).toEqual({ kind: "failed", text: "build broke" });
-		expect(scanSentinel("no sentinel here")).toBeUndefined();
-	});
-
-	it("does not match the word mid-sentence", () => {
-		expect(scanSentinel("the result: is fine")).toBeUndefined();
-	});
 });
 
 describe("lastLine", () => {
@@ -53,10 +31,10 @@ describe("SessionStateTracker", () => {
 		expect(t.detail).toBe("todo");
 	});
 
-	it("a settled turn with a result line is Done with that result as detail", () => {
+	it("a settled turn is Done, its last line of assistant text the detail", () => {
 		const t = new SessionStateTracker();
 		t.apply({ type: "agent_start" });
-		t.apply(assistant("Working on it.\nresult: menu, options, and credits done"));
+		t.apply(assistant("Working on it.\nresult: menu, options, and credits done", { stopReason: "stop" }));
 		t.apply({ type: "agent_settled" }, new Date("2026-09-23T10:00:00Z"));
 		expect(t.outcome).toBe("done");
 		expect(t.detail).toBe("result: menu, options, and credits done");
@@ -64,30 +42,34 @@ describe("SessionStateTracker", () => {
 		expect(t.finishedAt).toBe("2026-09-23T10:00:00.000Z");
 	});
 
-	it("a needs-input line leaves the session waiting, not done", () => {
+	it("a question in the reply text is not a needs-input state: only a blocking prompt is", () => {
 		const t = new SessionStateTracker();
 		t.apply({ type: "agent_start" });
 		t.apply(assistant("needs input: double jump or wall climb?"));
 		t.apply({ type: "agent_settled" });
-		expect(t.outcome).toBeUndefined();
-		expect(t.needsText).toBe("double jump or wall climb?");
+		expect(t.outcome).toBe("done");
 	});
 
-	it("a failed line or a model error is Failed", () => {
+	it("a model error is Failed; an interrupted turn is Stopped", () => {
 		const a = new SessionStateTracker();
 		a.apply(assistant("failed: could not reach the database"));
 		a.apply({ type: "agent_settled" });
-		expect(a.outcome).toBe("failed");
-		expect(a.detail).toBe("could not reach the database");
+		expect(a.outcome).toBe("done");
 
 		const b = new SessionStateTracker();
 		b.apply(assistant("", { stopReason: "error", errorMessage: "429 rate limited" }));
 		b.apply({ type: "agent_settled" });
 		expect(b.outcome).toBe("failed");
 		expect(b.detail).toBe("429 rate limited");
+
+		const c = new SessionStateTracker();
+		c.apply(assistant("Halfway there", { stopReason: "aborted" }));
+		c.apply({ type: "agent_settled" });
+		expect(c.outcome).toBe("stopped");
+		expect(c.detail).toBe("Halfway there");
 	});
 
-	it("without a sentinel the last line of assistant text is the detail", () => {
+	it("the detail follows the run: prompt, reply, failed tool of assistant text is the detail", () => {
 		const t = new SessionStateTracker();
 		t.apply({ type: "message_start", message: { role: "user", content: "fix the flaky test" } });
 		expect(t.detail).toBe("> fix the flaky test");
@@ -99,7 +81,7 @@ describe("SessionStateTracker", () => {
 		expect(t.outcome).toBe("done");
 	});
 
-	it("a new run clears the previous outcome and question", () => {
+	it("a new run clears the previous outcome", () => {
 		const t = new SessionStateTracker({ outcome: "done", turns: 2 });
 		t.apply({ type: "agent_start" });
 		expect(t.outcome).toBeUndefined();
@@ -142,7 +124,6 @@ describe("readSessionTail", () => {
 		expect(readSessionTail(file)).toEqual({
 			detail: "result: wrote haiku.txt",
 			outcome: "done",
-			question: undefined,
 			turns: 1,
 		});
 	});

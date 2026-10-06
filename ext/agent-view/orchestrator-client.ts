@@ -22,8 +22,6 @@ export interface InstanceSummary {
 	external?: boolean;
 	detail?: string;
 	outcome?: "done" | "failed" | "stopped";
-	/** A `needs input:` line the session ended its last turn with. */
-	question?: string;
 	turns?: number;
 	finishedAt?: string;
 	pinned?: boolean;

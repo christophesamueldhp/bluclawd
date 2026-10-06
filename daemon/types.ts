@@ -30,8 +30,6 @@ export interface InstanceRecord {
 	/** Agent-view row state (daemon/session-state.ts), persisted so a row survives a restart. */
 	detail?: string;
 	outcome?: "done" | "failed" | "stopped";
-	/** A `needs input:` line the session ended its last turn with. */
-	question?: string;
 	turns?: number;
 	finishedAt?: string;
 	pinned?: boolean;

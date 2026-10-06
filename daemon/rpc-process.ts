@@ -33,17 +33,11 @@ function toError(error: unknown): Error {
 /** Build the shared arg tail for an RPC child: resume an existing session and/or pin its model.
  *  `main()` parses `--session <path>` and `--provider <name> --model <pattern>` before the mode
  *  branch, so a pinned model wins over the weak settings default a fresh child would otherwise pick. */
-export function buildRpcTailArgs(opts: {
-	sessionFile?: string;
-	provider?: string;
-	model?: string;
-	appendSystemPrompt?: string;
-}): string[] {
+export function buildRpcTailArgs(opts: { sessionFile?: string; provider?: string; model?: string }): string[] {
 	const args: string[] = [];
 	if (opts.sessionFile) args.push("--session", opts.sessionFile);
 	if (opts.provider) args.push("--provider", opts.provider);
 	if (opts.model) args.push("--model", opts.model);
-	if (opts.appendSystemPrompt) args.push("--append-system-prompt", opts.appendSystemPrompt);
 	return args;
 }
 
@@ -66,7 +60,6 @@ export class RpcProcessInstance {
 		sessionFile?: string;
 		provider?: string;
 		model?: string;
-		appendSystemPrompt?: string;
 	}) {
 		const rpcCommand = this.getSpawnCommand(options);
 		this.process = spawn(rpcCommand.command, rpcCommand.args, {
@@ -80,12 +73,7 @@ export class RpcProcessInstance {
 		this.attachListeners();
 	}
 
-	private getSpawnCommand(opts: {
-		sessionFile?: string;
-		provider?: string;
-		model?: string;
-		appendSystemPrompt?: string;
-	}): {
+	private getSpawnCommand(opts: { sessionFile?: string; provider?: string; model?: string }): {
 		command: string;
 		args: string[];
 	} {
@@ -277,7 +265,6 @@ export function createRpcProcessInstance(options: {
 	sessionFile?: string;
 	provider?: string;
 	model?: string;
-	appendSystemPrompt?: string;
 }): RpcProcessInstance {
 	return new RpcProcessInstance(options);
 }

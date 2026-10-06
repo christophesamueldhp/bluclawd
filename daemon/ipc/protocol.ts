@@ -167,7 +167,6 @@ export interface InstanceSummary {
 	lastSeenAt?: string;
 	detail?: string;
 	outcome?: "done" | "failed" | "stopped";
-	question?: string;
 	turns?: number;
 	finishedAt?: string;
 	pinned?: boolean;

@@ -66,7 +66,6 @@ vi.mock("../daemon/rpc-process.ts", () => ({
 
 const { ServerSupervisor } = await import("../daemon/supervisor.ts");
 const { loadInstances } = await import("../daemon/storage.ts");
-const { SENTINEL_INSTRUCTIONS } = await import("../daemon/session-state.ts");
 
 describe("agent-view session lifecycle", () => {
 	let prevEnv: string | undefined;
@@ -83,10 +82,9 @@ describe("agent-view session lifecycle", () => {
 		else process.env.PI_SERVER_DIR = prevEnv;
 	});
 
-	it("children get the sentinel instructions", async () => {
+	it("children run with pi's own system prompt", async () => {
 		await new ServerSupervisor().spawnInstance({ cwd: "/p" });
-		const options = FakeChild.spawnOptions[0];
-		expect(options.appendSystemPrompt).toBe(SENTINEL_INSTRUCTIONS);
+		expect(FakeChild.spawnOptions[0]).not.toHaveProperty("appendSystemPrompt");
 	});
 
 	it("stop keeps the row; delete removes it", async () => {

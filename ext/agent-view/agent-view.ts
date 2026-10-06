@@ -1978,13 +1978,7 @@ export class AgentView implements Component, Focusable {
 				body.push(truncateToWidth(`  ${cc.fg("muted", `${i + 1}.`.padEnd(3))}${clean(option)}`, inner, "…"));
 			});
 		} else {
-			const text = needs
-				? needs.message
-					? `${needs.title} — ${needs.message}`
-					: needs.title
-				: row.state === "needs" && row.question
-					? row.question
-					: row.detail;
+			const text = needs ? (needs.message ? `${needs.title} — ${needs.message}` : needs.title) : row.detail;
 			const shown = row.state === "working" && !needs ? clean(text) : this.dimMarkdown(text);
 			const cap = Math.max(5, this.opts.ui.terminal.rows - 8 - 6);
 			if (text) body.push(...wrapTextWithAnsi(shown, inner).slice(0, cap));

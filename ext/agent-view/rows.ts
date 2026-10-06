@@ -19,8 +19,6 @@ export interface AgentRow {
 	detail: string;
 	/** The blocking prompt it is waiting on (answerable from the peek panel). */
 	needs?: PendingNeeds;
-	/** A free-text `needs input:` question. */
-	question?: string;
 	createdAt?: string;
 	finishedAt?: string;
 	pinned: boolean;
@@ -50,16 +48,15 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 	if (inst.status === "starting") state = "working";
 	else if (alive) {
 		if (inst.activity === "working") state = "working";
-		else if (inst.activity === "awaiting_input" || inst.needs || inst.question) state = "needs";
+		else if (inst.activity === "awaiting_input" || inst.needs) state = "needs";
 		else if (inst.outcome === "failed") state = "failed";
+		else if (inst.outcome === "stopped") state = "stopped";
 		else if (inst.outcome === "done" || (inst.turns ?? 0) > 0) state = "done";
 		else state = "idle";
 	} else state = inst.outcome === "failed" ? "failed" : inst.outcome === "done" ? "done" : "stopped";
 
-	// The daemon keeps the `result:` sentinel's word; the row shows only what it says.
-	let detail = (inst.detail ?? "").replace(/^result:\s*/i, "");
+	let detail = inst.detail ?? "";
 	if (inst.needs) detail = needsText(inst.needs);
-	else if (state === "needs" && inst.question) detail = inst.question;
 	else if (inst.status === "starting") detail = "starting…";
 	// An idle session's line depends on focus, so the view writes it.
 	else if (state === "idle") detail = "";
@@ -74,7 +71,6 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 		alive,
 		detail,
 		needs: inst.needs,
-		question: inst.question,
 		createdAt: inst.createdAt,
 		finishedAt: inst.finishedAt,
 		pinned: inst.pinned === true,
