@@ -100,7 +100,7 @@ const HEARTBEAT_MS = 3000;
 export class SelfRegistration {
 	readonly id: string;
 	private readonly client: OrchestratorClient;
-	private readonly getInfo: () => SelfSessionInfo;
+	private readonly getInfo: () => SelfSessionInfo | undefined;
 	private readonly onRelease: () => void;
 	private readonly onMessage: (message: PaneMessage) => void;
 	private activity: AgentActivity = "idle";
@@ -108,10 +108,11 @@ export class SelfRegistration {
 
 	/** `onRelease`: another window wants this session — switch this one away from it.
 	 *  `onMessage`: another window's agent view asks this session something (pane mode).
-	 *  `id`: a pane registers under its tmux session's name, so its row outlives a session switch. */
+	 *  `id`: a pane registers under its tmux session's name, so its row outlives a session switch.
+	 *  `getInfo` returns undefined while there is no session to list yet. */
 	constructor(
 		client: OrchestratorClient,
-		getInfo: () => SelfSessionInfo,
+		getInfo: () => SelfSessionInfo | undefined,
 		onRelease: () => void = () => {},
 		onMessage: (message: PaneMessage) => void = () => {},
 		id: string = randomUUID(),
@@ -143,6 +144,7 @@ export class SelfRegistration {
 
 	private async heartbeat(): Promise<void> {
 		const info = this.getInfo();
+		if (!info) return;
 		const instance: RegisterInput = {
 			id: this.id,
 			cwd: info.cwd,

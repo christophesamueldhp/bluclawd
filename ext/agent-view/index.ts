@@ -143,7 +143,18 @@ const agentView: InlineExtension = {
 		// What the turn in progress is doing, for this session's row in other windows.
 		let liveDetail: string | undefined;
 
-		const selfInfo = (ctx: ExtensionContext): SelfSessionInfo => {
+		// A pane nothing has been asked in yet is not a session: it isn't listed anywhere, and it
+		// ends when the terminal leaves it, so agent view can empty and no unlisted pi lingers.
+		const blank = (ctx: ExtensionContext): boolean =>
+			!!pane && !ctx.sessionManager.getEntries().some((e) => e.type === "message");
+		/** Leave this pane: tmux keeps a session running, a blank pane ends. */
+		const leavePane = (ctx: ExtensionContext): void => {
+			if (blank(ctx) && pane) panes.kill(pane);
+			else panes.detach();
+		};
+
+		const selfInfo = (ctx: ExtensionContext): SelfSessionInfo | undefined => {
+			if (blank(ctx)) return undefined;
 			const row = selfRow(ctx);
 			return {
 				cwd: ctx.sessionManager.getCwd(),
@@ -362,14 +373,14 @@ const agentView: InlineExtension = {
 				if (pane && !viewOpen && !tui?.hasOverlay()) {
 					const empty = ctx.ui.getEditorText() === "";
 					if (matchesKey(data, "ctrl+d") && empty) {
-						panes.detach();
+						leavePane(ctx);
 						return { consume: true };
 					}
 					if (matchesKey(data, "ctrl+c")) {
 						const now = Date.now();
 						if (now - ctrlCAt < CTRL_C_MS) {
 							ctrlCAt = 0;
-							panes.detach();
+							leavePane(ctx);
 							return { consume: true };
 						}
 						ctrlCAt = now;
@@ -502,7 +513,7 @@ const agentView: InlineExtension = {
 							modelName: model?.name,
 							cwd: ctx.cwd,
 							home: process.env.HOME ?? "",
-							self: () => selfRow(ctx),
+							self: () => (blank(ctx) ? undefined : selfRow(ctx)),
 							onClose: () => done(undefined),
 							// Quitting leaves through pi's own shutdown, which hands this session to the daemon.
 							onQuit: () => {
@@ -512,10 +523,14 @@ const agentView: InlineExtension = {
 							panes: pane
 								? {
 										current: pane,
-										switchTo: (name) => panes.switchTo(name),
+										switchTo: (name) => {
+											const ending = blank(ctx);
+											panes.switchTo(name);
+											if (ending) panes.kill(pane);
+										},
 										start: (cwd, args, env) => panes.newSession({ cwd, args, env }),
 										kill: (name) => panes.kill(name),
-										detach: () => panes.detach(),
+										detach: () => leavePane(ctx),
 									}
 								: undefined,
 							listModels: () =>

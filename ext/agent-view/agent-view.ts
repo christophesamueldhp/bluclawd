@@ -1923,7 +1923,7 @@ export class AgentView implements Component, Focusable {
 	/** Everything above the composer, scrolled as one: Claude Code's header scrolls with its list. */
 	private renderBody(width: number): { lines: string[]; focusLine: number } {
 		const lines = ["", ...this.headerLines(width), ""];
-		if (this.opts.self) {
+		if (this.opts.self?.()) {
 			lines.push(
 				...wrapTextWithAnsi(
 					cc.fg(

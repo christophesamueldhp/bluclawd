@@ -7,6 +7,7 @@ import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
 import { paneArgs } from "../ext/agent-view/index.ts";
 import type { InstanceSummary, OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
 import { collectRows } from "../ext/agent-view/rows.ts";
+import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
 import { CONTINUE_ENV, OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../ext/agent-view/tmux.ts";
 
 const plainTheme = {
@@ -61,7 +62,7 @@ function setup(instances: InstanceSummary[], self?: InstanceSummary) {
 		appName: "bluclawd",
 		cwd: HERE,
 		home: "/home/me",
-		self: self ? () => self : undefined,
+		self: () => self,
 		onClose: () => closed++,
 		onOpen: () => calls.push(["onOpen"]),
 		panes,
@@ -171,6 +172,20 @@ describe("agent view in pane mode", () => {
 		view.handleInput("\x03");
 		view.handleInput("\x03");
 		expect(calls.at(-1)).toEqual(["detach"]);
+	});
+
+	it("a blank pane isn't a session: the list can empty, and it registers once asked something", async () => {
+		const { view } = setup([]);
+		expect(view.render(80).join("\n")).not.toContain("moved to the background");
+		const registered: unknown[] = [];
+		const client = { register: async (i: unknown) => registered.push(i) } as unknown as OrchestratorClient;
+		let asked = false;
+		const reg = new SelfRegistration(client, () => (asked ? { cwd: HERE, pane: "pi-self" } : undefined));
+		await reg.refresh();
+		expect(registered).toEqual([]);
+		asked = true;
+		await reg.refresh();
+		expect(registered).toMatchObject([{ cwd: HERE, pane: "pi-self" }]);
 	});
 
 	it("lists every pane as an ordinary row, this terminal's own once", () => {
