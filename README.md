@@ -64,7 +64,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `permissions.deny`, Alt+M | deny rules block matching tool calls; the footer shows pi's `defaultProjectTrust` (`⏵⏵ always` / `⏸ ask` / `✕ never`) and Alt+M cycles it — see [Permissions](#permissions) |
 | `/tasks` | background tasks dialog (alias `/bashes`): shells (`run_in_background`, Ctrl+B on the model's running bash, or a foreground command past its `timeout`), monitors; running tasks only; Enter shows a task's output tail, `x` stops it (the model is told without a turn starting), and updates wait while the dialog is open. The model's bash is Claude Code's: `timeout` in milliseconds (2 minutes by default), a command still running then - or on Ctrl+B after 2s, or when you send a message - moves to the background instead of being killed, and the model reads a task's output file with `read`. The footer pill counts the running shells and monitors; ↓ from an empty prompt selects it and Enter opens the dialog. A shell writes its whole output to a file named in its start result and exit notification; `task_stop` stops it. A job notifies the model once when it exits, and once more if it goes quiet for 45s on what reads as an interactive prompt (`(y/n)`, `Press Enter`, …); the `monitor` tool turns each stdout line of a long-running command, or each frame of a WebSocket (`ws`), into an event that wakes the model (Claude Code's `Monitor`; stderr goes to the output file; every monitor expires after `timeout_ms`, 5 minutes by default and at most 30, with one notice so the model can re-arm it) |
 | `/rewind` | file checkpoints per turn; restores the files, the conversation, or both. Checkpoints are git commits kept under `refs/bluclawd/checkpoints/<session>/`: the newest 50 per session, and another session's refs are pruned after 30 days |
-| `←` twice on an empty prompt (or `/agent-view`) | persistent daemon-owned conversations in Needs input / Working / Completed bands. Enter/→ changes the subscription, not the running process; A→B→A recovers complete partial text, tools and pending standard dialogs. Roster task + Enter starts background work; Ctrl+Enter attaches its child with the chosen `/model` and image attachments. Ctrl+X stops deliberately, then a second press within 2 seconds deletes the row, including the currently displayed session, leaving a blank composer. Saved `.jsonl` transcripts are retained for explicit `/resume`. Quit, terminal disconnect, reload and view navigation never send continuation prompts or replay uncertain submissions. Compatible daemon attachment does not restart children; incompatible live daemons report an upgrade limitation. Presence reporting remains opt-in via Radius credentials. |
+| `←` twice on an empty prompt (or `/agent-view`) | persistent daemon-owned conversations in Needs input / Working / Completed bands. Enter/→ changes the subscription, not the running process; A→B→A recovers complete partial text, tools and pending standard dialogs. Roster task + Enter starts background work; Ctrl+Enter attaches its child with the chosen `/model` and image attachments. Ctrl+X stops deliberately, then a second press within 2 seconds deletes the row, including the currently displayed session, leaving a blank composer. Saved `.jsonl` transcripts are retained for explicit `/resume`. Quit, terminal disconnect, reload and view navigation never send continuation prompts or replay uncertain submissions. Compatible daemon attachment does not restart children; incompatible live daemons offer an upgrade recovery dialog. Presence reporting remains opt-in via Radius credentials. |
 | `/status`, `/context` | model, auth, safety, session, context window |
 | `/theme` | theme |
 | `/help` | all of the above, grouped |
@@ -85,6 +85,14 @@ hand wave; `"prefersReducedMotion": true` in settings turns it off.
 
 
 ## Updating
+
+After a package update, an older agent-view daemon may still own live sessions. Bluclawd opens
+an upgrade dialog before starting persistent views. Choose **Keep sessions running** to defer
+the upgrade, **Check again** after stopping sessions elsewhere, or **Stop daemon sessions and
+upgrade** to review and confirm stopping the listed sessions. Stopping interrupts running work;
+saved conversations remain available via `/resume`. Sessions in other terminals are excluded.
+The daemon restarts once it owns no live sessions. Pending input and drafts are retained when
+the upgrade is deferred; use `/agent-view` to retry or `/quit` to exit.
 
 ```bash
 npm update    # bump the @earendil-works/pi-* peer/dev dependency versions

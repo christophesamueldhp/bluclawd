@@ -49,21 +49,52 @@ export function createManagedRuntime(
 		clearTimeout(timer);
 		old?.();
 	};
-	async function protocol(client: OrchestratorClient) {
+	async function protocol(client: OrchestratorClient, ctx: ExtensionCommandContext): Promise<boolean> {
 		if (!(await client.ensureDaemon())) throw new Error("Agent daemon unavailable; input retained");
-		const info = await client.getDaemonInfo();
-		if (info.viewProtocol === VIEW_PROTOCOL_VERSION) return;
-		if (
-			(await client.list()).some(
-				(row) => row.status === "online" || row.status === "starting" || row.status === "stopping",
-			)
-		)
-			throw new Error(
-				"Agent daemon needs a view-protocol upgrade; live sessions were not restarted. Finish/stop them and retry.",
+		while ((await client.getDaemonInfo()).viewProtocol !== VIEW_PROTOCOL_VERSION) {
+			const live = (await client.list()).filter(
+				(row) =>
+					!row.external && (row.status === "online" || row.status === "starting" || row.status === "stopping"),
 			);
-		const result = await client.restartDaemon();
-		if (!result.restarted || (await client.getDaemonInfo()).viewProtocol !== VIEW_PROTOCOL_VERSION)
-			throw new Error("Agent daemon does not support persistent views; upgrade and retry");
+			if (!live.length) {
+				const result = await client.restartDaemon();
+				if (!result.restarted)
+					throw new Error(`Agent daemon upgrade failed: ${result.reason ?? "the new daemon did not start"}`);
+				if ((await client.getDaemonInfo()).viewProtocol !== VIEW_PROTOCOL_VERSION)
+					throw new Error("Agent daemon does not support persistent views; upgrade and retry");
+				return true;
+			}
+			// Native dialogs work even when the old daemon cannot open a persistent view.
+			// Release the startup gate so Escape can dismiss the recovery dialog.
+			offGate?.();
+			offGate = undefined;
+			const keep = "Keep sessions running";
+			const refresh = "Check again";
+			const stop = "Stop daemon sessions and upgrade";
+			const choice = await ctx.ui.select(
+				`Agent daemon upgrade · ${live.length} live session${live.length === 1 ? "" : "s"}`,
+				[keep, refresh, stop],
+			);
+			if (choice === refresh) continue;
+			if (choice !== stop) {
+				ctx.ui.notify(
+					"Daemon upgrade deferred; input retained. Use /agent-view to retry or /quit to exit.",
+					"info",
+				);
+				return false;
+			}
+			const confirmed = await ctx.ui.confirm(
+				"Stop sessions and upgrade daemon?",
+				[
+					...live.map((row) => `${row.label || row.id} · ${row.activity ?? row.status} · ${row.cwd}`),
+					"Running work will be interrupted. Saved conversations remain available via /resume.",
+				].join("\n"),
+			);
+			if (!confirmed) continue;
+			for (const row of live) await client.stop(row.id);
+			// Recheck before restarting: another terminal may have started a session meanwhile.
+		}
+		return true;
 	}
 	function flush(): Promise<void> {
 		if (flushWork) return flushWork;
@@ -293,13 +324,17 @@ export function createManagedRuntime(
 			starting = true;
 			try {
 				const client = new OrchestratorClient();
-				await protocol(client);
+				if (!(await protocol(client, ctx))) return;
 				if (state.phase === "managed") await start(ctx);
 				else await bootstrapManagedSession(ctx, state, start);
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			} finally {
 				starting = false;
+				if (!shell) {
+					offGate?.();
+					offGate = undefined;
+				}
 			}
 		},
 		input(event: InputEvent, ctx: ExtensionContext): InputEventResult | undefined {

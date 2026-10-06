@@ -17,12 +17,21 @@ import { createManagedRuntime } from "../ext/agent-view/managed-runtime.ts";
 import type { ManagedUiState } from "../ext/agent-view/managed-state.ts";
 
 const mock = vi.hoisted(() => ({
-	rows: [] as Array<{ id: string; status: string; cwd: string; sessionFile?: string }>,
+	rows: [] as Array<{
+		id: string;
+		status: string;
+		cwd: string;
+		sessionFile?: string;
+		label?: string;
+		activity?: string;
+		external?: boolean;
+	}>,
 	protocol: 1,
 	sent: [] as RpcCommand[],
 	spawns: [] as unknown[],
 	close: vi.fn(),
-	restart: vi.fn(async () => ({ restarted: false })),
+	restart: vi.fn(async (): Promise<{ restarted: boolean; reason?: string }> => ({ restarted: false })),
+	stop: vi.fn(async (_id: string) => {}),
 	opens: [] as string[],
 }));
 vi.mock("../ext/agent-view/orchestrator-client.ts", async (original) => ({
@@ -47,6 +56,7 @@ vi.mock("../ext/agent-view/orchestrator-client.ts", async (original) => ({
 			return { messages: [] };
 		}
 		restartDaemon = mock.restart;
+		stop = mock.stop;
 	},
 }));
 vi.mock("../ext/agent-view/view-client.ts", () => ({
@@ -99,7 +109,13 @@ beforeEach(() => {
 	mock.spawns = [];
 	mock.opens = [];
 	mock.close.mockClear();
-	mock.restart.mockClear();
+	mock.restart.mockReset();
+	mock.restart.mockResolvedValue({ restarted: false });
+	mock.stop.mockReset();
+	mock.stop.mockImplementation(async (id) => {
+		const row = mock.rows.find((row) => row.id === id);
+		if (row) row.status = "stopped";
+	});
 });
 afterEach(() => {
 	for (const fn of dispose.splice(0)) fn();
@@ -115,6 +131,9 @@ function fixture(state: ManagedUiState = { phase: "managed", drafts: {}, pending
 		getColorMode: () => "truecolor",
 	} as unknown as Theme;
 	const notify = vi.fn();
+	const select = vi.fn(async (_title: string, options: string[]): Promise<string | undefined> => options[0]);
+	const confirm = vi.fn(async () => false);
+	const offGate = vi.fn();
 	const ctx = {
 		mode: "tui",
 		cwd: dir,
@@ -124,7 +143,9 @@ function fixture(state: ManagedUiState = { phase: "managed", drafts: {}, pending
 		newSession: vi.fn(),
 		ui: {
 			notify,
-			onTerminalInput: () => () => {},
+			select,
+			confirm,
+			onTerminalInput: () => offGate,
 			getEditorText: () => "",
 			setEditorText: () => {},
 			custom: vi.fn(
@@ -147,7 +168,7 @@ function fixture(state: ManagedUiState = { phase: "managed", drafts: {}, pending
 	const sendUserMessage = vi.fn();
 	const runtime = createManagedRuntime({ sendUserMessage } as unknown as ExtensionAPI, state, async () => []);
 	dispose.push(runtime.dispose);
-	return { runtime, state, ctx, notify, sendUserMessage };
+	return { runtime, state, ctx, notify, select, confirm, offGate, sendUserMessage };
 }
 describe("managed UI runtime lifecycle", () => {
 	it("startup slash commands disclose unavailable screens instead of becoming prompts", async () => {
@@ -218,7 +239,133 @@ describe("managed UI runtime lifecycle", () => {
 		await f.runtime.bootstrap(f.ctx);
 		expect(mock.restart).not.toHaveBeenCalled();
 		expect(mock.opens).toEqual([]);
-		expect(f.notify).toHaveBeenCalledWith(expect.stringContaining("live sessions were not restarted"), "error");
+		expect(mock.stop).not.toHaveBeenCalled();
+		expect(f.select).toHaveBeenCalledWith(expect.stringContaining("1 live session"), [
+			"Keep sessions running",
+			"Check again",
+			"Stop daemon sessions and upgrade",
+		]);
+		expect(f.notify).toHaveBeenCalledWith(expect.stringContaining("/agent-view to retry"), "info");
+	});
+	it("deferred upgrade retains startup input and releases the terminal gate", async () => {
+		mock.protocol = 0;
+		mock.rows = [{ id: "a", status: "online", cwd: dir }];
+		const input = { text: "do this once", images: [] };
+		const f = fixture({ phase: "managed", drafts: {}, pendingInput: [input] });
+		f.runtime.sessionStart(f.ctx);
+		f.select.mockImplementationOnce(async () => {
+			expect(f.offGate).toHaveBeenCalledOnce();
+			return undefined;
+		});
+		await f.runtime.bootstrap(f.ctx);
+		expect(f.offGate).toHaveBeenCalledOnce();
+		expect(f.state.pendingInput).toEqual([input]);
+		expect(mock.sent).toEqual([]);
+		mock.protocol = 1;
+		await f.runtime.agents(f.ctx);
+		expect(mock.sent.filter((command) => command.type === "prompt")).toEqual([
+			expect.objectContaining({ message: input.text }),
+		]);
+		expect(f.state.pendingInput).toEqual([]);
+	});
+	it("checks again without stopping a live session", async () => {
+		mock.protocol = 0;
+		mock.rows = [{ id: "a", status: "online", cwd: dir }];
+		const f = fixture();
+		f.select.mockImplementationOnce(async () => {
+			mock.protocol = 1;
+			return "Check again";
+		});
+		await f.runtime.bootstrap(f.ctx);
+		expect(mock.stop).not.toHaveBeenCalled();
+		expect(mock.restart).not.toHaveBeenCalled();
+		expect(f.ctx.ui.custom).toHaveBeenCalledOnce();
+	});
+	it("requires confirmation before stopping sessions for an upgrade", async () => {
+		mock.protocol = 0;
+		mock.rows = [{ id: "a", status: "online", cwd: dir }];
+		const f = fixture();
+		f.select.mockResolvedValueOnce("Stop daemon sessions and upgrade");
+		await f.runtime.bootstrap(f.ctx);
+		expect(f.confirm).toHaveBeenCalledOnce();
+		expect(mock.stop).not.toHaveBeenCalled();
+		expect(mock.restart).not.toHaveBeenCalled();
+	});
+	it("confirmed upgrade stops owned sessions, preserves drafts, and restarts", async () => {
+		mock.protocol = 0;
+		mock.rows = [
+			{ id: "a", status: "online", activity: "working", label: "build", cwd: dir },
+			{ id: "b", status: "starting", cwd: dir },
+			{ id: "c", status: "stopping", cwd: dir },
+			{ id: "saved", status: "stopped", cwd: dir },
+			{ id: "window", status: "online", external: true, cwd: dir },
+		];
+		mock.restart.mockImplementationOnce(async () => {
+			expect(mock.rows.filter((row) => !row.external && row.status !== "stopped")).toEqual([]);
+			mock.protocol = 1;
+			return { restarted: true };
+		});
+		const f = fixture({ phase: "managed", drafts: { a: { text: "unsent", images: [] } }, pendingInput: [] });
+		f.select.mockResolvedValueOnce("Stop daemon sessions and upgrade");
+		f.confirm.mockResolvedValueOnce(true);
+		await f.runtime.bootstrap(f.ctx);
+		expect(mock.stop.mock.calls).toEqual([["a"], ["b"], ["c"]]);
+		expect(f.confirm).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("build · working"));
+		expect(mock.restart).toHaveBeenCalledOnce();
+		expect(f.state.drafts.a.text).toBe("unsent");
+		expect(f.ctx.ui.custom).toHaveBeenCalledOnce();
+		expect(mock.spawns).toEqual([]);
+	});
+	it("external windows do not block a daemon with no owned sessions from upgrading", async () => {
+		mock.protocol = 0;
+		mock.rows = [{ id: "window", status: "online", external: true, cwd: dir }];
+		mock.restart.mockImplementationOnce(async () => {
+			mock.protocol = 1;
+			return { restarted: true };
+		});
+		const f = fixture();
+		await f.runtime.bootstrap(f.ctx);
+		expect(f.select).not.toHaveBeenCalled();
+		expect(mock.stop).not.toHaveBeenCalled();
+		expect(mock.restart).toHaveBeenCalledOnce();
+		expect(f.ctx.ui.custom).toHaveBeenCalledOnce();
+	});
+	it("rechecks new sessions before restarting rather than stopping them without confirmation", async () => {
+		mock.protocol = 0;
+		mock.rows = [{ id: "a", status: "online", cwd: dir }];
+		mock.stop.mockImplementationOnce(async () => {
+			mock.rows = [{ id: "new-owner", status: "online", cwd: dir }];
+		});
+		const f = fixture();
+		f.select.mockResolvedValueOnce("Stop daemon sessions and upgrade");
+		f.confirm.mockResolvedValueOnce(true);
+		await f.runtime.bootstrap(f.ctx);
+		expect(f.select).toHaveBeenCalledTimes(2);
+		expect(mock.stop.mock.calls).toEqual([["a"]]);
+		expect(mock.restart).not.toHaveBeenCalled();
+	});
+	it("a failed stop retains input and prevents restart", async () => {
+		mock.protocol = 0;
+		mock.rows = [{ id: "a", status: "online", cwd: dir }];
+		mock.stop.mockRejectedValueOnce(new Error("stop refused"));
+		const input = { text: "pending", images: [] };
+		const f = fixture({ phase: "managed", drafts: {}, pendingInput: [input] });
+		f.select.mockResolvedValueOnce("Stop daemon sessions and upgrade");
+		f.confirm.mockResolvedValueOnce(true);
+		await f.runtime.bootstrap(f.ctx);
+		expect(mock.restart).not.toHaveBeenCalled();
+		expect(f.state.pendingInput).toEqual([input]);
+		expect(f.notify).toHaveBeenCalledWith("stop refused", "error");
+	});
+	it("reports the daemon restart refusal and retains input", async () => {
+		mock.protocol = 0;
+		mock.restart.mockResolvedValueOnce({ restarted: false, reason: "2 running sessions" });
+		const input = { text: "pending", images: [] };
+		const f = fixture({ phase: "managed", drafts: {}, pendingInput: [input] });
+		await f.runtime.bootstrap(f.ctx);
+		expect(f.state.pendingInput).toEqual([input]);
+		expect(f.ctx.ui.custom).not.toHaveBeenCalled();
+		expect(f.notify).toHaveBeenCalledWith(expect.stringContaining("2 running sessions"), "error");
 	});
 	it("compatible daemon attach does not restart any process", async () => {
 		const f = fixture();
