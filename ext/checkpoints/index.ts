@@ -52,6 +52,7 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, InlineExtension, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { isKeyRelease, isKeyRepeat, matchesKey, type TUI } from "@earendil-works/pi-tui";
 
 const CHECKPOINT_CUSTOM_TYPE = "checkpoint";
 const CHECKPOINT_REF_PREFIX = "refs/bluclawd/checkpoints/";
@@ -483,9 +484,45 @@ export function factory(pi: ExtensionAPI): void {
 			});
 	}
 
-	pi.on("session_start", async () => {
+	pi.on("session_start", async (_event, ctx) => {
 		failedCaptureCount = 0;
+		if (ctx.mode === "tui") listenForDoubleEscape(ctx);
 	});
+
+	/**
+	 * Esc twice on an empty, idle prompt opens /rewind, as it opens rewind in Claude Code; pi's own
+	 * double Esc (its /tree) never sees the second press.
+	 */
+	let offDoubleEscape: (() => void) | undefined;
+	const listenForDoubleEscape = (ctx: ExtensionContext): void => {
+		offDoubleEscape?.();
+		// A zero-line widget, only to get hold of the TUI and see whether a dialog has the keys.
+		let tui: TUI | undefined;
+		ctx.ui.setWidget("checkpoints:tui", (widgetTui) => {
+			tui = widgetTui;
+			return { render: () => [], invalidate: () => {} };
+		});
+		let escapeAt = 0;
+		offDoubleEscape = ctx.ui.onTerminalInput((data) => {
+			if (isKeyRelease(data) || isKeyRepeat(data)) return undefined;
+			if (!matchesKey(data, "escape")) {
+				escapeAt = 0;
+				return undefined;
+			}
+			if (!ctx.isIdle() || ctx.ui.getEditorText() !== "" || tui?.hasOverlay()) {
+				escapeAt = 0;
+				return undefined;
+			}
+			const now = Date.now();
+			if (now - escapeAt < DOUBLE_ESCAPE_MS) {
+				escapeAt = 0;
+				pi.sendUserMessage("/rewind", { expandPromptTemplates: true });
+				return { consume: true };
+			}
+			escapeAt = now;
+			return undefined;
+		});
+	};
 
 	pi.on("turn_start", async (_event, ctx) => {
 		checkpointCurrentTurn(ctx);
@@ -587,6 +624,9 @@ export function factory(pi: ExtensionAPI): void {
 		},
 	});
 }
+
+/** pi's own double-Esc window. */
+const DOUBLE_ESCAPE_MS = 500;
 
 const checkpointsExtension: InlineExtension = { name: "checkpoints", factory };
 export default checkpointsExtension.factory;
