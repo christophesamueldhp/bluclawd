@@ -29,7 +29,7 @@ import { type InstanceSummary, OrchestratorClient, type PaneMessage } from "./or
 import { loadViewMode, saveViewMode } from "./prefs.ts";
 import { collectRows, labelFromTask } from "./rows.ts";
 import { deriveLabel, ForegroundActivity, SelfRegistration, type SelfSessionInfo } from "./self-registration.ts";
-import { OPEN_VIEW_ENV, Tmux } from "./tmux.ts";
+import { NORMAL_ENV, OPEN_VIEW_ENV, Tmux } from "./tmux.ts";
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
@@ -41,8 +41,8 @@ const DONE_FLASH_MS = 2500;
 const LEFT_ARM_MS = 3000;
 /** An edit this recent makes the first ← arm instead of opening. */
 const LEFT_EDIT_MS = 2000;
-/** pi exits on a second ctrl+c this soon after the first; a pane detaches instead. */
-const CTRL_C_MS = 500;
+/** A second ctrl+c or ctrl+d this soon after the first exits (pi's own window for ctrl+c). */
+const EXIT_PRESS_MS = 500;
 const STATUS_KEY = STATUS_KEYS.agents;
 const NEEDS_TMUX = "Agent view needs tmux — install it (brew install tmux) and start pi again";
 /** The command ←← dispatches; not meant to be typed. */
@@ -68,6 +68,41 @@ export function withoutAgentViewCommand(current: AutocompleteProvider): Autocomp
 export function isQuitAlias(text: string): boolean {
 	const trimmed = text.trim();
 	return trimmed === "/exit" || EXIT_WORDS.has(trimmed);
+}
+
+/** What an exit key or word does, as in Claude Code. */
+export type ExitAction =
+	/** Stop the turn in progress. */
+	| "abort"
+	/** The first of a double press: arm it (ctrl+c also reaches pi, which clears the editor). */
+	| "first"
+	/** End the session; a turn in progress dies with it. */
+	| "quit"
+	/** Leave tmux; the session keeps running. */
+	| "detach"
+	/** Swallowed: a background session has no ctrl+d exit. */
+	| "ignore"
+	/** Not an exit: pi's own key (ctrl+d with text deletes forward). */
+	| "pass";
+
+/**
+ * Claude Code's exit keys. A normal session (the one `claude` started in this terminal) ends on
+ * ctrl+c twice, ctrl+d twice, an exit word or /exit; a background session detaches on the same,
+ * except ctrl+d, which it ignores. Ctrl+c while a turn runs stops the turn.
+ */
+export function exitAction(
+	key: "ctrl+c" | "ctrl+d" | "exit",
+	state: { normal: boolean; idle: boolean; empty: boolean; sincePrevious: number },
+): ExitAction {
+	const leave = state.normal ? "quit" : "detach";
+	if (key === "exit") return leave;
+	if (key === "ctrl+c") {
+		if (!state.idle) return "abort";
+		return state.sincePrevious < EXIT_PRESS_MS ? leave : "first";
+	}
+	if (!state.empty) return "pass";
+	if (!state.normal) return "ignore";
+	return state.sincePrevious < EXIT_PRESS_MS ? "quit" : "first";
 }
 
 /** pi's ways to pick a session; a pane is given the one its launcher already picked. */
@@ -137,8 +172,22 @@ const agentView: InlineExtension = {
 		// until it runs: no other window lists it, and it ends when the terminal leaves it.
 		const blank = (ctx: ExtensionContext): boolean =>
 			!!pane && !ctx.sessionManager.getEntries().some((e) => e.type === "message");
-		// Set while tmux ends this blank pane when its terminal detaches or closes.
+		// A normal session, as Claude Code's: the pane `pi` started in this terminal, until ← opens
+		// agent view. Quitting ends it, and so does closing its terminal.
+		let normal = false;
+		// Set while tmux ends this pane when its terminal detaches or closes: a blank pane, or a
+		// normal session.
 		let endsOnDetach = false;
+		const syncEndOnDetach = (ctx: ExtensionContext): void => {
+			const want = !!pane && (normal || blank(ctx));
+			if (!pane || want === endsOnDetach) return;
+			try {
+				panes.endOnDetach(pane, want);
+				endsOnDetach = want;
+			} catch {
+				// tmux is gone with it; quitting ends it all the same
+			}
+		};
 		// Set on a pane started only to show agent view, after this terminal's session was deleted.
 		let viewHost = false;
 		// Agent view there has no session of this terminal's, as Claude Code's once its origin is
@@ -217,6 +266,7 @@ const agentView: InlineExtension = {
 				name = panes.newSession({
 					cwd: ctx.cwd,
 					args: paneArgs(process.argv.slice(2), ctx.sessionManager.getSessionFile()),
+					env: { [NORMAL_ENV]: "1" },
 				});
 			} catch (error) {
 				ctx.ui.notify(
@@ -325,14 +375,9 @@ const agentView: InlineExtension = {
 				pane,
 			);
 			registration.start();
-			if (blank(ctx) && !endsOnDetach) {
-				try {
-					panes.endOnDetach(pane, true);
-					endsOnDetach = true;
-				} catch {
-					// it ends on quitting all the same
-				}
-			}
+			if (process.env[NORMAL_ENV]) normal = true;
+			delete process.env[NORMAL_ENV];
+			syncEndOnDetach(ctx);
 			// A pane started to show agent view does so once.
 			if (openView) {
 				pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
@@ -353,7 +398,46 @@ const agentView: InlineExtension = {
 			// One ← opens the roster, with a second press required only just after editing/history.
 			let armedAt = 0;
 			let editedAt = 0;
-			let ctrlCAt = 0;
+			const pressedAt = { "ctrl+c": 0, "ctrl+d": 0 };
+			let exitHintAt = 0;
+			const exitHint = (text: string): void => {
+				const at = Date.now();
+				exitHintAt = at;
+				leftHint = theme.fg("dim", text);
+				paintPill?.();
+				setTimeout(() => {
+					if (exitHintAt !== at) return;
+					exitHintAt = 0;
+					leftHint = undefined;
+					paintPill?.();
+				}, EXIT_PRESS_MS * 3);
+			};
+			const act = (action: ExitAction, key: "ctrl+c" | "ctrl+d" | "exit"): { consume: true } | undefined => {
+				switch (action) {
+					case "abort":
+						pressedAt["ctrl+c"] = 0;
+						ctx.abort();
+						return { consume: true };
+					case "first":
+						pressedAt[key as "ctrl+c" | "ctrl+d"] = Date.now();
+						exitHint(
+							`Press ${key === "ctrl+c" ? "Ctrl-C" : "Ctrl-D"} again to exit${normal ? "" : " · this session keeps running"}`,
+						);
+						// pi clears the editor on ctrl+c; its own second press never comes.
+						return key === "ctrl+c" ? undefined : { consume: true };
+					case "quit":
+						ctx.shutdown();
+						return { consume: true };
+					case "detach":
+						if (key === "exit") ctx.ui.setEditorText("");
+						leavePane(blank(ctx));
+						return { consume: true };
+					case "ignore":
+						return { consume: true };
+					case "pass":
+						return undefined;
+				}
+			};
 			const disarm = (): void => {
 				if (!armedAt) return;
 				armedAt = 0;
@@ -368,27 +452,24 @@ const agentView: InlineExtension = {
 			const offKey = ctx.ui.onTerminalInput((data) => {
 				// Kitty reports a release (and a held key) as separate events; only presses count.
 				if (isKeyRelease(data) || isKeyRepeat(data)) return undefined;
-				// pi's own exit keys (ctrl+c twice, ctrl+d on an empty prompt) leave tmux instead, as
-				// quitting Claude Code leaves its sessions running.
+				// Claude Code's exit keys and words replace pi's own (exitAction).
 				if (!viewOpen && !tui?.hasOverlay()) {
-					const empty = ctx.ui.getEditorText() === "";
-					if (matchesKey(data, "ctrl+d") && empty) {
-						leavePane(blank(ctx));
-						return { consume: true };
-					}
-					if (matchesKey(data, "ctrl+c")) {
-						const now = Date.now();
-						if (now - ctrlCAt < CTRL_C_MS) {
-							ctrlCAt = 0;
-							leavePane(blank(ctx));
-							return { consume: true };
-						}
-						ctrlCAt = now;
+					for (const key of ["ctrl+c", "ctrl+d"] as const) {
+						if (!matchesKey(data, key)) continue;
+						const state = {
+							normal,
+							idle: ctx.isIdle(),
+							empty: ctx.ui.getEditorText() === "",
+							sincePrevious: Date.now() - pressedAt[key],
+						};
+						return act(exitAction(key, state), key);
 					}
 				}
-				// Claude Code runs /exit for these; submitting them as /quit runs pi's own quit.
 				if (!viewOpen && matchesKey(data, "enter") && isQuitAlias(ctx.ui.getEditorText()) && editorFocused()) {
-					ctx.ui.setEditorText("/quit");
+					const action = exitAction("exit", { normal, idle: true, empty: false, sincePrevious: 0 });
+					// Submitting /quit runs pi's own quit.
+					if (action === "quit") ctx.ui.setEditorText("/quit");
+					else return act(action, "exit");
 				}
 				if (
 					ctx.ui.getEditorText() !== "" ||
@@ -430,16 +511,9 @@ const agentView: InlineExtension = {
 			const current = activity.apply(event);
 			registration?.setActivity(current);
 		};
-		pi.on("agent_start", (event) => {
-			// Asked something: a session now, which runs on after its terminal leaves.
-			if (endsOnDetach && pane) {
-				endsOnDetach = false;
-				try {
-					panes.endOnDetach(pane, false);
-				} catch {
-					// tmux is gone with it
-				}
-			}
+		pi.on("agent_start", (event, ctx) => {
+			// Asked something: a session now, which a background pane runs on after its terminal leaves.
+			syncEndOnDetach(ctx);
 			track(event);
 		});
 		pi.on("turn_start", track);
@@ -472,6 +546,9 @@ const agentView: InlineExtension = {
 			}
 			if (viewOpen) return;
 			viewOpen = true;
+			// ← moves a normal session to the background, as in Claude Code: from here on it detaches.
+			normal = false;
+			syncEndOnDetach(ctx);
 			const model = ctx.model;
 			// A global setting, so the project's settings are not read. As Claude Code, the mode
 			// shows only when it is not the default (pi's is "ask").
@@ -505,12 +582,17 @@ const agentView: InlineExtension = {
 									if (ending) panes.kill(pane);
 								},
 								start: (cwd, args, env) => panes.newSession({ cwd, args, env }),
+								end: (name) => panes.end(name),
 								kill: (name) => panes.kill(name),
 								unlist: async () => {
 									await registration?.stop();
 									registration = undefined;
 								},
 								detach: () => leavePane(blank(ctx)),
+								startShell: (cwd, command) => panes.startShell(cwd, command),
+								listShells: () => panes.listShells(),
+								stopShell: (name) => panes.stopShell(name),
+								capture: (name, lines) => panes.capture(name, lines),
 							},
 							listModels: () =>
 								ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id })),

@@ -48,11 +48,16 @@ function setup(instances: InstanceSummary[], self?: InstanceSummary) {
 			calls.push(["start", cwd, args, env]);
 			return `pi-new${++started}`;
 		},
+		end: (name) => calls.push(["end", name]),
 		kill: (name) => calls.push(["kill", name]),
 		unlist: async () => {
 			calls.push(["unlist"]);
 		},
 		detach: () => calls.push(["detach"]),
+		startShell: () => "sh-new",
+		listShells: () => [],
+		stopShell: () => {},
+		capture: () => [],
 	};
 	let closed = 0;
 	const view = new AgentView({
@@ -123,17 +128,16 @@ describe("agent view in pane mode", () => {
 		expect(view.selectedKeyForTest()).toBe("pi-new1");
 	});
 
-	it("ctrl+x stops a pane's turn, then ends its pi and removes its row", async () => {
-		const { view, calls, flush } = setup([paneRow("pi-a")]);
+	it("ctrl+x ends a pane's pi, as quitting does, then removes its row", async () => {
+		const rows = [paneRow("pi-a")];
+		const { view, calls, flush } = setup(rows);
 		view.handleInput(CTRL_X);
 		await flush();
-		expect(calls).toEqual([["send", "pi-a", { type: "abort" }]]);
+		expect(calls).toEqual([["end", "pi-a"]]);
+		// Its pi saves the session as a stopped row on its way out; that row is what goes.
+		rows.splice(0, 1, { id: "stored-a", status: "stopped", cwd: HERE, sessionFile: "/s/pi-a.jsonl" });
 		view.handleInput(CTRL_X);
-		await flush();
-		expect(calls.slice(1)).toEqual([
-			["kill", "pi-a"],
-			["delete", "pi-a"],
-		]);
+		await vi.waitFor(() => expect(calls.slice(1)).toEqual([["delete", "stored-a"]]));
 	});
 
 	it("ctrl+x twice on this terminal's own session moves it to a new one in agent view, then ends it", async () => {

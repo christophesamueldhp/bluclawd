@@ -55,6 +55,7 @@ test/           vitest suites, self-contained — no monorepo, no fixture files
 | `agent-view` | `/agent-view` (what `←` twice dispatches) |
 | `help` | `/help` |
 | `vibes` | spinner verbs |
+| `paste` | Claude Code's paste in the prompt and agent view's composer: a paste over 800 characters or 2 lines shows as `[Pasted text #N +L lines]`, a ctrl+v image as `[Image #N]` (sent as an image), and pasting the same thing again right after shows the text or the image's file |
 
 ## What it adds
 
@@ -64,11 +65,11 @@ Claude Code's names and behaviours, on top of pi's own commands:
 |---|---|
 | `permissions.deny`, Alt+M | deny rules block matching tool calls; the footer shows pi's `defaultProjectTrust` (`⏵⏵ always` / `⏸ ask` / `✕ never`) and Alt+M cycles it — see [Permissions](#permissions) |
 | `/tasks` | background tasks dialog (alias `/bashes`): shells (`run_in_background`, Ctrl+B on the model's running bash, or a foreground command past its `timeout`), monitors; running tasks only; Enter shows a task's output tail, `x` stops it (the model is told without a turn starting), and updates wait while the dialog is open. The model's bash is Claude Code's: `timeout` in milliseconds (2 minutes by default), a command still running then - or on Ctrl+B after 2s, or when you send a message - moves to the background instead of being killed, and the model reads a task's output file with `read`. The footer pill counts the running shells and monitors; ↓ from an empty prompt selects it and Enter opens the dialog. A shell writes its whole output to a file named in its start result and exit notification; `task_stop` stops it. A job notifies the model once when it exits, and once more if it goes quiet for 45s on what reads as an interactive prompt (`(y/n)`, `Press Enter`, …); the `monitor` tool turns each stdout line of a long-running command, or each frame of a WebSocket (`ws`), into an event that wakes the model (Claude Code's `Monitor`; stderr goes to the output file; every monitor expires after `timeout_ms`, 5 minutes by default and at most 30, with one notice so the model can re-arm it) |
-| `/rewind` | file checkpoints per turn; restores the files, the conversation, or both. Checkpoints are git commits kept under `refs/bluclawd/checkpoints/<session>/`: the newest 50 per session, and another session's refs are pruned after 30 days |
-| `←` on an empty prompt (or `/agent-view`) | agent view, as Claude Code's `claude agents`: background sessions in Needs input (blocked on a prompt) / Working (a turn running) / Idle (nothing running) bands (empty ones hidden; ctrl+s: by directory, this one first, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing (a working session's current tool), age. Type a task + enter to start a background session (ctrl+enter: start it and switch to it), shift+enter / alt+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, ctrl+v attaches a clipboard image to the new-session composer, an unknown `/command` is sent as the task, space peeks and replies (the reply is the session's next prompt, `/stop` stops it; a reply draft is kept per session), enter/→ switches this terminal to any session at once, including Working and Needs input (see [Session switching](#session-switching)), ↑↓ wrap, alt/ctrl+↑↓ jump between bands, alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes (this terminal's own session too: the terminal moves to agent view), ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` / `n:<name>` filter (ctrl+f turns the text into a name search), `/resume` brings a past session back and opens it, `/model <name>` (or `default`) sets the model for new ones, the hint line starts with the mode new ones start in (`⏵⏵ always` or `✕ never`; nothing at pi's default, `ask`), `?` shows the shortcuts, esc returns to your session, and ctrl+c twice (or `exit`, `/exit`) leaves tmux with the sessions still running. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press. Every session is a pi of its own in tmux, so it keeps running after its terminal leaves or closes; a local daemon (`daemon/`, a Unix socket in `~/.pi/server`) only lists them. Agent View detects both changed daemon code and a changed Pi installation, and restarts an obsolete daemon. A session that was idle when its pi quit is kept as a row with no process (it resumes when opened or replied to); every row stays until ctrl+x deletes it |
+| `/rewind` (or Esc twice on an empty prompt, as in Claude Code) | file checkpoints per turn; restores the files, the conversation, or both. Checkpoints are git commits kept under `refs/bluclawd/checkpoints/<session>/`: the newest 50 per session, and another session's refs are pruned after 30 days |
+| `←` on an empty prompt (or `/agent-view`) | agent view, as Claude Code's `claude agents`: background sessions in Needs input (blocked on a prompt) / Working (a turn running) / Idle (nothing running) bands (empty ones hidden; ctrl+s: by directory, this one first, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing (a working session's current tool), age. Type a task + enter to start a background session (ctrl+enter: start it and switch to it), shift+enter / alt+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, ctrl+v attaches a clipboard image to the new-session composer, an unknown `/command` is sent as the task, `!<command>` runs it in your shell as a row of its own (its last output line while it runs, then done, `exit N — …` or stopped; enter shows its output, ctrl+x stops it then removes the row, and it is never run again), space peeks and replies (the reply is the session's next prompt, `/stop` stops it; a reply draft is kept per session), enter/→ switches this terminal to any session at once, including Working and Needs input (see [Session switching](#session-switching)), ↑↓ wrap, alt/ctrl+↑↓ jump between bands, alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes (this terminal's own session too: the terminal moves to agent view), ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` / `n:<name>` filter (ctrl+f turns the text into a name search), `/resume` brings a past session back and opens it, `/model <name>` (or `default`) sets the model for new ones, the hint line starts with the mode new ones start in (`⏵⏵ always` or `✕ never`; nothing at pi's default, `ask`), `?` shows the shortcuts, esc returns to your session, and ctrl+c twice (or `exit`, `/exit`) leaves tmux with the sessions still running. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press. Every session is a pi of its own in tmux, so it keeps running after its terminal leaves or closes; a local daemon (`daemon/`, a Unix socket in `~/.pi/server`) only lists them. Agent View detects both changed daemon code and a changed Pi installation, and restarts an obsolete daemon. A session that was idle when its pi quit is kept as a row with no process (it resumes when opened or replied to); every row stays until ctrl+x deletes it |
 | `/status`, `/context` | model, auth, safety, session, context window |
 | `/theme` | theme |
-| `exit`, `/exit`, `quit`, `:q`, `:wq` alone at the prompt | `/quit`, as Claude Code runs `/exit` for them |
+| `exit`, `/exit`, `quit`, `:q`, `:wq` alone at the prompt | as Claude Code's `/exit`: ends a normal session, detaches from a background one (see [Session switching](#session-switching)) |
 | `/help` | all of the above, grouped |
 
 bluclawd draws no footer of its own. Its footer items go through pi's `setStatus`, keyed so they
@@ -120,15 +121,19 @@ own, running in a private tmux server next to the daemon's socket (`~/.pi/server
 sessions run at once, and enter/→ in agent view switches the terminal to another session
 instantly — nothing waits, nothing is interrupted, and the one you left keeps working. A new
 session from the composer is a new pane with the task as its first prompt; ctrl+enter switches to
-it. Ctrl+c twice or ctrl+d on an empty prompt (and ctrl+c twice or `exit` in agent view) leave
-tmux, and every session keeps running, even with the terminal closed; running `pi` again starts a
-new session and lists them all. Ctrl+x stops a session's turn, then ends its pi; on this terminal's
-own session it moves the terminal to agent view with no session of its own, as Claude Code does
-once the session you came from is deleted: the list can be empty, and esc quits from there. A
-session nothing has been asked in yet ends when you quit at its prompt. A peek reply is the
-session's next prompt.
-`/quit` (or `exit`, `/exit`) inside a session ends it, as in Claude Code: a turn in progress dies with
-its pi, and the session stays listed as a stopped row. tmux runs with no prefix key and no status line, passing keys through as CSI u.
+it. Exit keys follow Claude Code's split between a normal session and a background one. The
+session `pi` starts in a terminal is normal until ← opens agent view: ctrl+c twice, ctrl+d twice,
+`exit` or `/exit` end it, and so does closing its terminal. Every other session is a background
+one: ctrl+c twice, `exit` or `/exit` leave tmux while it keeps running, even with the terminal
+closed, and ctrl+d does nothing; running `pi` again starts a new session and lists them all.
+Ctrl+c while a turn runs stops the turn, and `/quit` ends any session. Ending a session kills a
+turn in progress with its pi, and the session stays listed as a stopped row. In agent view,
+ctrl+c twice or `exit` leave tmux, and ctrl+x on a running session ends its pi (the row stays,
+stopped) and a second press deletes the row; on this terminal's own session the first press stops
+its turn and the second moves the terminal to agent view with no session of its own, as Claude
+Code does once the session you came from is deleted: the list can be empty, and esc quits from
+there. A session nothing has been asked in yet ends when its terminal leaves it. A peek reply is
+the session's next prompt. tmux runs with no prefix key and no status line, passing keys through as CSI u.
 
 Without tmux, agent view is off: pi says so once at startup (and again on ←), and the rest of
 bluclawd works as usual.
@@ -157,10 +162,8 @@ reading the API:
 - **Agent view differs from Claude Code's in a few places.** Row text comes from each
   session's own output, and its state from pi's own signals (a model error is Failed, an
   interrupted turn Stopped, a blocking prompt Needs input) — nothing is added to the system
-  prompt and there is no Haiku-class summary, so it works with any provider. There are no pull-request badges (no Ready for review band), no `!` shell-job
-  rows, no `@repo` / `@agent` mentions, and no worktree isolation for background
-  sessions. The composer is not a full multi-line editor (no `[Image #N]` / `[Pasted text]`
-  tokens), and there is no mouse support.
+  prompt and there is no Haiku-class summary, so it works with any provider. There are no pull-request badges (no Ready for review band), no `@repo` / `@agent` mentions, and no worktree isolation for background
+  sessions, and there is no mouse support.
   A peek reply cannot answer a session's open dialog (enter opens it to answer), and each idle
   session is a running pi process. `tab` does not browse subagents.
 

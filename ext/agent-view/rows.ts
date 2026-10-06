@@ -4,6 +4,7 @@
  */
 
 import type { InstanceSummary } from "./orchestrator-client.ts";
+import type { ShellInfo } from "./tmux.ts";
 
 export type RowState = "working" | "needs" | "idle" | "done" | "failed" | "stopped";
 
@@ -25,7 +26,39 @@ export interface AgentRow {
 	self: boolean;
 	/** Pane mode: the tmux session its pi runs in. */
 	pane?: string;
+	/** A `!` command's tmux session: the row is the command, not a pi session. */
+	shell?: string;
 	updatedAt?: string;
+}
+
+/** A `!` command as a row, as Claude Code's: working while it runs (its last output line the
+ *  detail), then done, failed with its exit status, or stopped. */
+export function rowFromShell(info: ShellInfo): AgentRow {
+	const last = info.lastLine?.trim() || undefined;
+	let state: RowState = "working";
+	let detail = last ?? "";
+	if (info.stopped && info.exit !== undefined) {
+		state = "stopped";
+		detail = "stopped";
+	} else if (info.exit === "0") {
+		state = "done";
+		detail = last ?? "(no output)";
+	} else if (info.exit !== undefined) {
+		state = "failed";
+		detail = last ? `exit ${info.exit} — ${last}` : `exit ${info.exit}`;
+	}
+	return {
+		id: info.name,
+		label: labelFromTask(`!${info.command}`),
+		cwd: info.cwd,
+		state,
+		alive: info.exit === undefined,
+		detail,
+		createdAt: info.createdAt,
+		pinned: false,
+		self: false,
+		shell: info.name,
+	};
 }
 
 /** Untitled-row fallback: the first three words of the task. */

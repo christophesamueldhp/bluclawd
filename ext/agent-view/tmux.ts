@@ -15,6 +15,8 @@ import { getServerDir } from "../../daemon/paths.ts";
 
 /** Set in a pane's environment: the tmux session its pi runs in. */
 export const PANE_ENV = "BLUCLAWD_PANE";
+/** Set on the pane `pi` starts in a terminal: a normal session, as Claude Code's, until ← backgrounds it. */
+export const NORMAL_ENV = "BLUCLAWD_NORMAL";
 /** Set on a pane that should open agent view once it starts. */
 export const OPEN_VIEW_ENV = "BLUCLAWD_OPEN_VIEW";
 
@@ -54,6 +56,26 @@ function piEnv(): Record<string, string> {
 	}
 	return env;
 }
+
+/** A `!` command agent view started, as its tmux session reports it. */
+export interface ShellInfo {
+	/** Its tmux session. */
+	name: string;
+	command: string;
+	cwd: string;
+	createdAt: string;
+	/** Its exit status, once it has ended. */
+	exit?: string;
+	/** Ended by ctrl+x. */
+	stopped: boolean;
+	lastLine?: string;
+}
+
+const SHELL_PREFIX = "sh-";
+const SHELL_COMMAND_ENV = "BLUCLAWD_SHELL_COMMAND";
+/** Runs the command in the user's shell, puts its exit status on the session, and keeps the pane
+ *  (and its output) until the row is deleted. A command is never run again. */
+const SHELL_WRAPPER = `"\${SHELL:-/bin/sh}" -c "$${SHELL_COMMAND_ENV}"; tmux set-option -q @bluclawd_exit "$?"; while :; do sleep 3600; done`;
 
 export interface PaneSpec {
 	cwd: string;
@@ -109,6 +131,79 @@ export class Tmux {
 		return name;
 	}
 
+	/** Start a `!` command in a session of its own; returns the session's name. */
+	startShell(cwd: string, command: string): string {
+		const name = `${SHELL_PREFIX}${randomUUID().slice(0, 8)}`;
+		const size = process.stdout.columns && process.stdout.rows ? process.stdout : undefined;
+		this.run([
+			"new-session",
+			"-d",
+			"-s",
+			name,
+			"-c",
+			cwd,
+			...(size ? ["-x", String(size.columns), "-y", String(size.rows)] : []),
+			"-e",
+			`${SHELL_COMMAND_ENV}=${command}`,
+			"/bin/sh",
+			"-c",
+			SHELL_WRAPPER,
+		]);
+		this.run(["set-option", "-t", `=${name}:`, "@bluclawd_command", command]);
+		this.run(["set-option", "-t", `=${name}:`, "@bluclawd_cwd", cwd]);
+		return name;
+	}
+
+	/** The `!` commands this server runs or ran, each with its last line of output. */
+	listShells(): ShellInfo[] {
+		let out: string;
+		try {
+			out = this.run([
+				"list-sessions",
+				"-F",
+				"#{session_name}\t#{session_created}\t#{@bluclawd_exit}\t#{@bluclawd_stopped}\t#{@bluclawd_cwd}\t#{@bluclawd_command}",
+			]);
+		} catch {
+			return []; // no server yet
+		}
+		const shells: ShellInfo[] = [];
+		for (const line of out.split("\n")) {
+			const [name, created, exit, stopped, cwd, ...command] = line.split("\t");
+			if (!name?.startsWith(SHELL_PREFIX)) continue;
+			let lastLine: string | undefined;
+			try {
+				lastLine = this.capture(name, 50).at(-1);
+			} catch {
+				// it ended meanwhile
+			}
+			shells.push({
+				name,
+				command: command.join("\t"),
+				cwd: cwd ?? "",
+				createdAt: new Date(Number(created) * 1000).toISOString(),
+				exit: exit || undefined,
+				stopped: stopped === "1",
+				lastLine,
+			});
+		}
+		return shells;
+	}
+
+	/** Stop a running `!` command; its row stays, stopped. */
+	stopShell(name: string): void {
+		this.run(["set-option", "-t", `=${name}:`, "@bluclawd_stopped", "1"]);
+		const pid = this.run(["display-message", "-p", "-t", `=${name}:`, "#{pane_pid}"]).trim();
+		// The command is the wrapper's child: the wrapper stays, to record how it ended.
+		spawnSync("pkill", ["-TERM", "-P", pid], { stdio: "ignore" });
+	}
+
+	/** The last `lines` lines of a session's output, trailing blank lines dropped. */
+	capture(name: string, lines: number): string[] {
+		const out = this.run(["capture-pane", "-p", "-t", `=${name}:`, "-S", `-${lines}`]).split("\n");
+		while (out.length > 0 && !out[out.length - 1].trim()) out.pop();
+		return out.map((line) => line.trimEnd());
+	}
+
 	/** Attach this terminal to `name`; returns when the client detaches or the server ends. */
 	attach(name: string): void {
 		this.run(["attach-session", "-t", `=${name}`], { inherit: true, outsideTmux: true });
@@ -133,9 +228,14 @@ export class Tmux {
 		);
 	}
 
+	/** End a pane's pi as quitting does: tmux hangs it up, and it saves its session as a stopped row. */
+	end(name: string): void {
+		this.run(["kill-session", "-t", `=${name}`]);
+	}
+
 	/**
-	 * End a pane's pi at once. SIGKILL, not tmux's SIGHUP: a hung-up pi treats it as quitting
-	 * and would carry the session on in a new pane.
+	 * End a pane's pi at once, leaving nothing behind. SIGKILL, not tmux's SIGHUP: a hung-up pi
+	 * saves its session as a stopped row, which deleting it must not leave.
 	 */
 	kill(name: string): void {
 		let pid: number;

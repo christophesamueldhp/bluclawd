@@ -26,6 +26,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { stripAnsi } from "../_shared/ansi.ts";
+import { PasteTokens, shouldCollapse } from "../_shared/paste-tokens.ts";
 import { theme } from "../_shared/theme.ts";
 import { mascotGlyphs, REST, renderMascot } from "../branding/mascot.ts";
 import { type AgentClipboard, readAgentClipboard } from "./clipboard.ts";
@@ -42,11 +43,12 @@ import {
 	queryFilter,
 	type RowState,
 	rowAge,
+	rowFromShell,
 	STATE_WORDS,
 	stateBandOf,
 	type ViewMode,
 } from "./rows.ts";
-import { OPEN_VIEW_ENV } from "./tmux.ts";
+import { OPEN_VIEW_ENV, type ShellInfo } from "./tmux.ts";
 
 export interface PastSession {
 	sessionFile: string;
@@ -100,11 +102,21 @@ export interface PaneOps {
 	switchTo(pane: string): void;
 	/** Start pi with `args` in a new tmux session; returns its name. */
 	start(cwd: string, args: string[], env?: Record<string, string>): string;
+	/** End a pane's pi as quitting does: it saves its session as a stopped row. */
+	end(pane: string): void;
+	/** End a pane's pi at once, leaving no row behind. */
 	kill(pane: string): void;
 	/** Stop listing this pi's session anywhere; resolves once no heartbeat can list it again. */
 	unlist(): Promise<void>;
 	/** Leave tmux; every session keeps running. */
 	detach(): void;
+	/** Run a `!` command in a session of its own; returns its name. */
+	startShell(cwd: string, command: string): string;
+	listShells(): ShellInfo[];
+	/** Stop a running `!` command; its row stays, stopped. */
+	stopShell(name: string): void;
+	/** A session's last `lines` lines of output. */
+	capture(name: string, lines: number): string[];
 }
 
 type Item =
@@ -121,6 +133,8 @@ const ARM_MS = 2000;
 const CTRL_C_MS = 800;
 /** Bare words that quit, as in Claude Code. */
 export const EXIT_WORDS = new Set(["exit", "quit", ":q", ":q!", ":wq", ":wq!"]);
+/** How many times (150ms apart) a delete waits for the row a stopped pi saves. */
+const STOP_SAVE_POLLS = 20;
 /** How long a new pane's row shows as starting before it should have registered. */
 const PANE_START_MS = 15_000;
 
@@ -226,7 +240,12 @@ export class AgentView implements Component, Focusable {
 	private readonly composer = new Input();
 	/** Lines above the composer's current one (ctrl+j / shift+enter); Input itself is single-line. */
 	private composerLines: string[] = [];
-	private composerImages: ImageContent[] = [];
+	/** The composer's paste tokens, as Claude Code's: `[Pasted text #N +L lines]` and `[Image #N]`. */
+	private readonly pastes = new PasteTokens();
+	/** The `!` commands the tmux server runs or ran: rows of their own. */
+	private shells: ShellInfo[] = [];
+	/** The Input's own paste: one line at the cursor. */
+	private readonly insertIntoComposer: (text: string) => void;
 	private pasting = false;
 	private draftVersion = 0;
 	/** True while ctrl+g's editor owns the terminal. */
@@ -252,6 +271,8 @@ export class AgentView implements Component, Focusable {
 	private notice: { text: string; kind: "hint" | "error" } | undefined;
 	/** The row a ctrl+x stopped on its first press: it reads "stopped · ctrl+x again to delete". */
 	private justKilled: string | undefined;
+	/** A row whose pi that ctrl+x ended, shown stopped until the row its pi saves arrives. */
+	private stopping: { row: AgentRow; until: number } | undefined;
 	/** Peek reply drafts by row, kept across navigation. */
 	private readonly replyDrafts = new Map<string, string>();
 	/** The peek's own send/answer error, shown inside the box. */
@@ -284,8 +305,51 @@ export class AgentView implements Component, Focusable {
 		this.opts = opts;
 		this.viewMode = opts.loadViewMode?.() ?? "state";
 		this.dispatchModel = opts.model;
+		const composer = this.composer as unknown as { handlePaste(text: string): void };
+		const insert = composer.handlePaste.bind(this.composer);
+		this.insertIntoComposer = insert;
+		composer.handlePaste = (text) => this.pasteIntoComposer(text, insert);
 		// This window's own row shows at once, before the daemon (maybe cold-starting) answers.
 		this.recompute();
+	}
+
+	/**
+	 * A paste into the composer, as Claude Code's: a long one is a `[Pasted text #N +L lines]` token,
+	 * the same paste again right after shows what the token holds, and a short one goes in as typed.
+	 * `insert` is the Input's own paste, which puts one line at the cursor.
+	 */
+	private pasteIntoComposer(pasted: string, insert: (text: string) => void): void {
+		const text = pasted.replace(/\r\n?/g, "\n").replace(/\t/g, "    ");
+		if (this.expandRepeat("text", text)) return;
+		if (shouldCollapse(text)) {
+			insert(this.pastes.addText(text));
+			return;
+		}
+		this.pastes.settle();
+		const [first = "", ...rest] = text.split("\n");
+		insert(first);
+		for (const line of rest) {
+			this.composerLines.push(this.composer.getValue());
+			this.composer.setValue("");
+			insert(line);
+		}
+	}
+
+	/** The same paste again, right after its token: the token gives way to what it holds. */
+	private expandRepeat(kind: "text" | "image", content: string, same?: (a: string, b: string) => boolean): boolean {
+		const repeat = this.pastes.repeatOf(kind, content, same);
+		const value = this.composer.getValue();
+		if (!repeat || !value.endsWith(repeat.token)) return false;
+		const lines = [...this.composerLines, value.slice(0, -repeat.token.length) + repeat.content]
+			.join("\n")
+			.split("\n");
+		this.pastes.settle();
+		// Not setComposer: it types ctrl+e into the Input, which is still in the middle of this paste.
+		const last = lines.pop() ?? "";
+		this.composerLines = lines;
+		this.composer.setValue(last);
+		(this.composer as unknown as { cursor: number }).cursor = last.length;
+		return true;
 	}
 
 	async onShow(): Promise<void> {
@@ -333,7 +397,12 @@ export class AgentView implements Component, Focusable {
 	/** A task (or slash command) is typed, as opposed to nothing or a filter. */
 	private composing(): boolean {
 		const text = this.composerText();
-		return (!!text.trim() || this.composerImages.length > 0) && !queryFilter(text);
+		return !!text.trim() && !queryFilter(text);
+	}
+
+	private composerCursorAtEnd(): boolean {
+		const cursor = (this.composer as unknown as { cursor?: number }).cursor;
+		return cursor === undefined || cursor === this.composer.getValue().length;
 	}
 
 	private setComposer(text: string): void {
@@ -345,7 +414,7 @@ export class AgentView implements Component, Focusable {
 
 	private clearDraft(): void {
 		this.setComposer("");
-		this.composerImages = [];
+		this.pastes.clear();
 		this.draftVersion++;
 	}
 
@@ -357,9 +426,14 @@ export class AgentView implements Component, Focusable {
 		try {
 			const clipboard = await (this.opts.readClipboard ?? readAgentClipboard)();
 			if (this.closed || version !== this.draftVersion) return;
-			// ctrl+v attaches an image, as in Claude Code; text arrives by the terminal's own paste.
-			if (clipboard.image) this.composerImages.push(clipboard.image);
-			else this.say("No image found in clipboard", "error");
+			// ctrl+v attaches an image as an [Image #N] token, as in Claude Code; the same image again
+			// shows its file. Text arrives by the terminal's own paste.
+			if (clipboard.image) {
+				const [file] = imageFiles([clipboard.image]);
+				if (!this.expandRepeat("image", file, sameBytes)) {
+					this.insertIntoComposer(this.pastes.addImage(file));
+				}
+			} else this.say("No image found in clipboard", "error");
 		} catch {
 			if (!this.closed) this.say("Couldn't read an image from the clipboard", "error");
 		} finally {
@@ -423,6 +497,11 @@ export class AgentView implements Component, Focusable {
 		} catch {
 			this.connectionLost = true;
 		} finally {
+			try {
+				this.shells = this.opts.panes.listShells();
+			} catch {
+				this.shells = [];
+			}
 			this.refreshing = false;
 		}
 		if (this.closed) return; // Its self callback may already belong to a disposed session.
@@ -431,7 +510,7 @@ export class AgentView implements Component, Focusable {
 	}
 
 	private recompute(): void {
-		this.allRows = collectRows(this.instances, this.opts.self?.());
+		this.allRows = [...collectRows(this.instances, this.opts.self?.()), ...this.shells.map(rowFromShell)];
 		// A new pane's placeholder gives way to its row once it registers, keeping the focus.
 		for (const placeholder of this.pending.filter((p) => p.pane)) {
 			const row = this.allRows.find((r) => r.pane === placeholder.pane);
@@ -439,7 +518,8 @@ export class AgentView implements Component, Focusable {
 			this.pending = this.pending.filter((p) => p !== placeholder);
 			if (this.selectedKey === placeholder.id) this.selectedKey = row.id;
 		}
-		const all = [...this.allRows, ...this.pending];
+		this.followStopping();
+		const all = [...this.allRows, ...this.pending, ...(this.stopping ? [this.stopping.row] : [])];
 		const text = this.composerText();
 		const filter = queryFilter(text);
 		this.rows = filter ? all.filter(filter) : all;
@@ -632,8 +712,9 @@ export class AgentView implements Component, Focusable {
 	private async dispatch(open: boolean): Promise<void> {
 		if (this.pasting) return;
 		const draft = this.composerText();
-		const task = draft.trim();
-		const images = [...this.composerImages];
+		// Text tokens are sent as what was pasted; image tokens stay, and their images go along.
+		const task = this.pastes.expandText(draft).trim();
+		const images = this.pastes.imagesIn(draft);
 		if (task.length < 4 && images.length === 0) {
 			this.say("Too short — describe the task");
 			return;
@@ -649,23 +730,22 @@ export class AgentView implements Component, Focusable {
 		open: boolean,
 		draft: string,
 		task: string,
-		images: ImageContent[],
+		images: string[],
 		cwd: string,
 		model: { provider: string; id: string } | undefined,
 	): void {
 		const panes = this.opts.panes;
-		this.clearDraft();
 		let pane: string;
 		try {
 			pane = panes.start(cwd, [
 				...(model ? ["--model", `${model.provider}/${model.id}`] : []),
 				"--",
-				...imageFiles(images).map((file) => `@${file}`),
+				...images.map((file) => `@${file}`),
 				...(task ? [task] : []),
 			]);
+			this.clearDraft();
 		} catch (error) {
 			this.setComposer(draft);
-			this.composerImages = images;
 			this.say(`Couldn't start it — ${error instanceof Error ? error.message : String(error)}`, "error");
 			return;
 		}
@@ -735,8 +815,30 @@ export class AgentView implements Component, Focusable {
 	}
 
 	/** Enter / →: show the session in this terminal; the one here keeps running in its own pane. */
+	/** A `!` command: a row of its own, in its own tmux session. */
+	private startShell(command: string): void {
+		let name: string;
+		try {
+			name = this.opts.panes.startShell(this.dispatchCwd(), command);
+		} catch (error) {
+			this.say(`Couldn't run it — ${error instanceof Error ? error.message : String(error)}`, "error");
+			return;
+		}
+		this.clearDraft();
+		this.selectedKey = name;
+		this.userMoved = true;
+		void this.refresh();
+	}
+
 	private async open(row: AgentRow): Promise<void> {
 		if (this.closed || this.opening) return;
+		// A `!` command opens on its output.
+		if (row.shell) {
+			this.mode = "peek";
+			this.reply.setValue("");
+			this.render_();
+			return;
+		}
 		if (row.self) {
 			this.close();
 			return;
@@ -770,7 +872,45 @@ export class AgentView implements Component, Focusable {
 		this.render_();
 	}
 
-	/** ctrl+x: stop a running session (first press), delete it (second press within 2s). */
+	/**
+	 * The row ctrl+x stopped keeps the focus and the armed delete: it stands in until its pi has
+	 * saved it as a stopped row, which then takes its place.
+	 */
+	private followStopping(): void {
+		const stopping = this.stopping;
+		if (!stopping) return;
+		const file = stopping.row.sessionFile;
+		const live = this.allRows.find((r) => r.id === stopping.row.id && r.alive);
+		const saved = file ? this.allRows.find((r) => r.sessionFile === file && !r.alive) : undefined;
+		if (saved) {
+			this.stopping = undefined;
+			if (this.selectedKey === stopping.row.id) this.selectedKey = saved.id;
+			if (this.armed?.key === stopping.row.id) this.armed.key = saved.id;
+			if (this.justKilled === stopping.row.id) this.justKilled = saved.id;
+			return;
+		}
+		if (live) {
+			// Still on its way out: the live row shows until it goes.
+			this.allRows = this.allRows.filter((r) => r !== live);
+			return;
+		}
+		if (Date.now() > stopping.until) this.stopping = undefined;
+	}
+
+	/** The stored row a stopped pi saved for `file`, waiting a moment for it to arrive. */
+	private async savedRowFor(file: string): Promise<string | undefined> {
+		for (let i = 0; i < STOP_SAVE_POLLS; i++) {
+			const saved = (await this.opts.client.list().catch(() => [])).find(
+				(inst) => !inst.external && inst.sessionFile === file,
+			);
+			if (saved) return saved.id;
+			await new Promise((resolve) => setTimeout(resolve, 150));
+		}
+		return undefined;
+	}
+
+	/** ctrl+x, as Claude Code's: a running session's pi ends on the first press and its row stays,
+	 *  stopped; the second press (within 2s) deletes the row. */
 	private async stopOrDelete(): Promise<void> {
 		const item = this.selected;
 		if (!item || item.kind === "more") return;
@@ -782,6 +922,7 @@ export class AgentView implements Component, Focusable {
 				await Promise.all(
 					targets
 						.map(async (r) => {
+							if (r.shell) return this.opts.panes.kill(r.shell);
 							if (r.pane) this.opts.panes.kill(r.pane);
 							await this.opts.client.delete(r.id);
 						})
@@ -794,6 +935,27 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		const row = item.row;
+		if (row.shell) {
+			// As Claude Code's: the first press stops a running command, the second removes the row.
+			if (this.armed?.key === row.id) {
+				this.disarm();
+				this.opts.panes.kill(row.shell);
+				if (this.mode === "peek") this.mode = "list";
+				await this.refresh();
+				return;
+			}
+			this.arm(row.id);
+			if (row.alive) {
+				this.justKilled = row.id;
+				try {
+					this.opts.panes.stopShell(row.shell);
+				} catch (error) {
+					this.say(`Couldn't stop — ${error instanceof Error ? error.message : String(error)}`, "error");
+				}
+				await this.refresh();
+			}
+			return;
+		}
 		if (row.self) {
 			if (this.armed?.key === row.id) {
 				this.disarm();
@@ -811,9 +973,13 @@ export class AgentView implements Component, Focusable {
 		if (row.id.startsWith("pending:")) return;
 		if (this.armed?.key === row.id) {
 			this.disarm();
+			const stopping = this.stopping?.row.id === row.id ? this.stopping.row : undefined;
+			this.stopping = undefined;
 			try {
-				if (row.pane) this.opts.panes.kill(row.pane);
-				await this.opts.client.delete(row.id);
+				if (row.pane && row.alive) this.opts.panes.kill(row.pane);
+				// Its pi may still be saving the row it leaves behind: that is the one to delete.
+				const id = stopping?.sessionFile ? ((await this.savedRowFor(stopping.sessionFile)) ?? row.id) : row.id;
+				await this.opts.client.delete(id);
 				if (this.mode === "peek") this.mode = "list";
 			} catch (error) {
 				this.say(`Couldn't delete — ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -822,10 +988,18 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		this.arm(row.id);
-		// A pane's pi keeps running until deleted; the first press stops its turn.
 		if (row.pane && stoppable(row)) {
 			this.justKilled = row.id;
-			await this.opts.client.send(row.id, { type: "abort" }).catch(() => undefined);
+			this.stopping = {
+				row: { ...row, alive: false, state: "stopped", pane: undefined },
+				until: Date.now() + STOP_SAVE_POLLS * 150,
+			};
+			try {
+				this.opts.panes.end(row.pane);
+			} catch (error) {
+				this.stopping = undefined;
+				this.say(`Couldn't stop — ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
 			await this.refresh();
 		}
 	}
@@ -853,6 +1027,10 @@ export class AgentView implements Component, Focusable {
 	private async togglePin(): Promise<void> {
 		const row = this.selectedRow;
 		if (!row || row.id.startsWith("pending:")) return;
+		if (row.shell) {
+			this.say("A shell command can't be pinned");
+			return;
+		}
 		const verb = row.pinned ? "unpin" : "pin";
 		try {
 			await this.opts.client.setMeta(row.id, { pinned: !row.pinned });
@@ -883,6 +1061,10 @@ export class AgentView implements Component, Focusable {
 	private startRename(): void {
 		const row = this.selectedRow;
 		if (!row || row.id.startsWith("pending:")) return;
+		if (row.shell) {
+			this.say("A shell command can't be renamed");
+			return;
+		}
 		this.renameInput.setValue(row.label);
 		this.renameInput.handleInput("\x05"); // ctrl+e: cursor to the end, after the current name
 		this.renameFrom = this.mode === "peek" ? "peek" : "list";
@@ -1019,11 +1201,22 @@ export class AgentView implements Component, Focusable {
 
 	private async sendReply(row: AgentRow): Promise<void> {
 		const text = this.reply.getValue().trim();
-		if (!text) {
+		if (!text && !row.shell) {
 			void this.open(row);
 			return;
 		}
 		this.replyError = undefined;
+		if (row.shell) {
+			if (text === "/stop" && row.alive) {
+				this.reply.setValue("");
+				this.opts.panes.stopShell(row.shell);
+				await this.refresh();
+				return;
+			}
+			if (text) this.replyError = "a shell command takes no reply — ctrl+x stops it";
+			this.render_();
+			return;
+		}
 		if (text === "/stop" && row.alive && row.state === "working") {
 			this.reply.setValue("");
 			this.replyDrafts.delete(row.id);
@@ -1149,7 +1342,7 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		if (this.mode === "peek") this.closePeek();
-		if (this.composerText() || this.composerImages.length) {
+		if (this.composerText()) {
 			this.clearDraft();
 			this.recompute();
 		}
@@ -1166,7 +1359,7 @@ export class AgentView implements Component, Focusable {
 	private handleEsc(): void {
 		if (this.mode === "peek") this.closePeek();
 		else if (this.mode === "help") this.mode = "list";
-		else if (this.composerText() || this.composerImages.length || this.pasting) {
+		else if (this.composerText() || this.pasting) {
 			this.clearDraft();
 			this.restoreFocusAfterFilter();
 			this.recompute();
@@ -1344,6 +1537,15 @@ export class AgentView implements Component, Focusable {
 			this.afterComposerEdit(text);
 			return;
 		}
+		// A paste token deletes as one unit, as in the prompt.
+		const value = this.composer.getValue();
+		const token = this.pastes.ranges(value).at(-1);
+		if (matchesKey(data, "backspace") && token?.end === value.length && this.composerCursorAtEnd()) {
+			this.composer.setValue(value.slice(0, token.start));
+			this.composer.handleInput("\x05");
+			this.afterComposerEdit(text);
+			return;
+		}
 		if (matchesKey(data, "backspace") && this.composer.getValue() === "" && this.composerLines.length > 0) {
 			this.setComposer(this.composerLines.join("\n"));
 			this.afterComposerEdit(text);
@@ -1374,7 +1576,7 @@ export class AgentView implements Component, Focusable {
 				return;
 			}
 		}
-		if (!text && !this.composerImages.length) {
+		if (!text) {
 			if (matchesKey(data, "?") || matchesKey(data, "shift+?")) {
 				this.mode = "help";
 				this.render_();
@@ -1399,14 +1601,19 @@ export class AgentView implements Component, Focusable {
 	private handleEnter(ctrlEnter: boolean): void {
 		const text = this.composerText();
 		const trimmed = text.trim();
-		if (EXIT_WORDS.has(trimmed.toLowerCase()) && this.composerImages.length === 0) {
+		if (EXIT_WORDS.has(trimmed.toLowerCase())) {
 			this.clearDraft();
 			this.quit();
 			return;
 		}
-		if (trimmed.startsWith("/") && this.composerImages.length === 0 && this.runViewCommand(trimmed)) {
+		if (trimmed.startsWith("/") && this.runViewCommand(trimmed)) {
 			this.recompute();
 			this.render_();
+			return;
+		}
+		// !command runs it in the user's shell as a row of its own, as in Claude Code.
+		if (trimmed.startsWith("!") && trimmed.slice(1).trim()) {
+			this.startShell(this.pastes.expandText(trimmed).slice(1).trim());
 			return;
 		}
 		if (this.composing()) {
@@ -1669,7 +1876,16 @@ export class AgentView implements Component, Focusable {
 		const text = row.detail;
 		const shown = row.state === "working" ? clean(text) : this.dimMarkdown(text);
 		const cap = Math.max(5, this.opts.ui.terminal.rows - 8 - 6);
-		if (text) body.push(...wrapTextWithAnsi(shown, inner).slice(0, cap));
+		if (row.shell) {
+			// A `!` command's peek is its output, as much of the end as fits.
+			let output: string[] = [];
+			try {
+				output = this.opts.panes.capture(row.shell, cap);
+			} catch {
+				// its session is gone
+			}
+			for (const line of output.slice(-cap)) body.push(truncateToWidth(clean(line), inner, "…"));
+		} else if (text) body.push(...wrapTextWithAnsi(shown, inner).slice(0, cap));
 		const since = row.state === "needs" ? row.finishedAt : undefined;
 		if (since) {
 			body.push(
@@ -1701,7 +1917,8 @@ export class AgentView implements Component, Focusable {
 
 	/** A finished or stopped run with no process: enter starts it again. */
 	private resumable(row: AgentRow): boolean {
-		return !row.alive && (row.state === "failed" || row.state === "stopped");
+		// A shell command is never run again for you, as in Claude Code.
+		return !row.shell && !row.alive && (row.state === "failed" || row.state === "stopped");
 	}
 
 	/** `/resume`: a bordered box over the composer, as Claude Code's picker. */
@@ -1857,10 +2074,6 @@ export class AgentView implements Component, Focusable {
 		const lines = this.composerLines.map((line, i) => truncateToWidth(i === 0 ? `❯ ${line}` : line, width));
 		const current = promptLine(this.composer, width, lines.length ? "" : "describe a task for a new session");
 		lines.push(lines.length ? current.replace(/^❯ /, "") : current);
-		if (this.composerImages.length) {
-			const n = this.composerImages.length;
-			lines.push(truncateToWidth(cc.fg("muted", `${n} image${n === 1 ? "" : "s"} attached · esc to clear`), width));
-		}
 		if (this.pasting) lines.push(truncateToWidth(cc.fg("muted", "Reading clipboard…"), width));
 		return dim ? lines.map((line) => faint(stripAnsi(line))) : lines;
 	}
@@ -1944,6 +2157,14 @@ export function middleEllipsis(path: string, max: number): string {
 }
 
 /** Clipboard images as files, for a new pane's pi to take as `@file` arguments. */
+function sameBytes(a: string, b: string): boolean {
+	try {
+		return readFileSync(a).equals(readFileSync(b));
+	} catch {
+		return false;
+	}
+}
+
 function imageFiles(images: ImageContent[]): string[] {
 	if (images.length === 0) return [];
 	const dir = mkdtempSync(join(tmpdir(), "bluclawd-images-"));

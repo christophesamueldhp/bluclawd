@@ -125,11 +125,16 @@ function fakePanes(calls: Calls): PaneOps {
 			calls.push(["start", cwd, args, ...(env ? [env] : [])]);
 			return `pane-${++n}`;
 		},
+		end: (pane) => calls.push(["end", pane]),
 		kill: (pane) => calls.push(["kill", pane]),
 		unlist: async () => {
 			calls.push(["unlist"]);
 		},
 		detach: () => calls.push(["detach"]),
+		startShell: () => "sh-new",
+		listShells: () => [],
+		stopShell: () => {},
+		capture: () => [],
 	};
 }
 
@@ -393,17 +398,45 @@ describe("AgentView keys", () => {
 		expect(text().join("\n")).toContain("/resume");
 	});
 
-	it("Ctrl+V attaches an image to a new background session, including an image-only prompt", async () => {
+	it("Ctrl+V attaches an image as an [Image #N] token, including an image-only prompt; the image goes along", async () => {
 		const image = { type: "image" as const, mimeType: "image/png", data: "aW1hZ2U=" };
 		const { view, calls, text, flush } = makeView({ readClipboard: async () => ({ image }) });
 		view.handleInput("\x16");
 		await flush();
-		expect(text().join("\n")).toContain("1 image attached");
+		expect(text().join("\n")).toContain("❯ [Image #1]");
 		view.handleInput(ENTER);
 		await flush();
 		expect(calls[0]?.[0]).toBe("start");
-		expect((calls[0]?.[2] as string[]).at(-1)).toMatch(/^@.*\.png$/);
-		expect(text().join("\n")).not.toContain("image attached");
+		expect((calls[0]?.[2] as string[]).slice(-2)).toEqual([expect.stringMatching(/^@.*\.png$/), "[Image #1]"]);
+		expect(text().join("\n")).not.toContain("❯ [Image #1]");
+	});
+
+	it("the same image again shows its file instead of the token", async () => {
+		const image = { type: "image" as const, mimeType: "image/png", data: "aW1hZ2U=" };
+		const { view, text, flush } = makeView({ readClipboard: async () => ({ image }) });
+		view.handleInput("\x16");
+		await flush();
+		view.handleInput("\x16");
+		await flush();
+		expect(text().join("\n")).toMatch(/❯ \/\S+\.png/);
+	});
+
+	it("a long paste is a [Pasted text] token: deleted in one go, shown by pasting again, sent in full", async () => {
+		const pasted = "first line\nsecond line\nthird line";
+		const { view, calls, text, flush } = makeView();
+		for (const ch of "fix ") view.handleInput(ch);
+		view.handleInput(`\x1b[200~${pasted}\x1b[201~`);
+		expect(text().join("\n")).toContain("❯ fix [Pasted text #1 +2 lines]");
+		view.handleInput("\x7f");
+		expect(text().join("\n")).toContain("❯ fix ");
+		expect(text().join("\n")).not.toContain("[Pasted text");
+		view.handleInput(`\x1b[200~${pasted}\x1b[201~`);
+		view.handleInput(`\x1b[200~${pasted}\x1b[201~`);
+		expect(text().join("\n")).toContain("❯ fix first line\nsecond line\nthird line");
+		view.handleInput(`\x1b[200~${"x".repeat(900)}\x1b[201~`);
+		view.handleInput(ENTER);
+		await flush();
+		expect((calls[0]?.[2] as string[]).at(-1)).toBe(`fix ${pasted}${"x".repeat(900)}`);
 	});
 
 	it("Ctrl+V only attaches images, as in Claude Code, and keeps the composer text", async () => {
@@ -423,7 +456,7 @@ describe("AgentView keys", () => {
 		await flush();
 		view.handleInput(ESC);
 		expect(closed()).toBe(0);
-		expect(text().join("\n")).not.toContain("image attached");
+		expect(text().join("\n")).not.toContain("[Image #1]");
 		view.handleInput(ESC);
 		expect(closed()).toBe(1);
 	});
@@ -445,7 +478,9 @@ describe("AgentView keys", () => {
 		view.handleInput(ENTER);
 		await flush();
 		expect(calls[0]?.[0]).toBe("start");
-		expect(calls[0]?.[2]).toEqual(expect.arrayContaining(["describe image", expect.stringMatching(/^@.*\.png$/)]));
+		expect(calls[0]?.[2]).toEqual(
+			expect.arrayContaining(["describe image[Image #1]", expect.stringMatching(/^@.*\.png$/)]),
+		);
 	});
 
 	it("ctrl+c clears the draft and arms the exit at once; a second press leaves tmux", () => {
@@ -510,20 +545,24 @@ describe("AgentView keys", () => {
 		expect(calls[0]).toEqual(["send", "done", { type: "prompt", text: "now add sound" }]);
 	});
 
-	it("ctrl+x stops a running session's turn, a second press ends its pi and deletes the row", async () => {
-		const { view, calls, text, flush } = makeView();
+	it("ctrl+x ends a running session's pi, which leaves a stopped row; a second press deletes that row", async () => {
+		const work = { ...sessions[1], sessionFile: "/w.jsonl" };
+		let instances: InstanceSummary[] = [sessions[0], work];
+		const { view, calls, text, flush } = makeView({ list: () => instances });
+		view.setInstancesForTest(instances);
 		view.handleInput(DOWN);
 		view.handleInput(DOWN); // Working header → collision detection
 		view.handleInput(CTRL_X);
 		await flush();
-		expect(calls).toEqual([["send", "work", { type: "abort" }]]);
-		expect(text().join("\n")).toContain("ctrl+x again to delete");
+		expect(calls).toEqual([["end", "p-work"]]);
+		expect(text().join("\n")).toContain("stopped · ctrl+x again to delete");
+		// Its pi saved it as a stopped row on its way out.
+		instances = [
+			sessions[0],
+			{ id: "stored-w", status: "stopped", cwd: THERE, sessionFile: "/w.jsonl", outcome: "stopped" },
+		];
 		view.handleInput(CTRL_X);
-		await flush();
-		expect(calls.slice(1)).toEqual([
-			["kill", "p-work"],
-			["delete", "work"],
-		]);
+		await vi.waitFor(() => expect(calls.at(-1)).toEqual(["delete", "stored-w"]));
 	});
 
 	it("esc dismisses an armed delete instead of closing", () => {
