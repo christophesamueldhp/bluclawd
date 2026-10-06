@@ -13,7 +13,7 @@
  *   `Bash(npm *)` does not match `npmx`.
  */
 
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
 
@@ -311,11 +311,70 @@ function expandVars(s: string): string {
 	return s.replace(/\$\{(\w+)\}|\$(\w+)/g, (m, braced, bare) => process.env[braced ?? bare] ?? m);
 }
 
+const GLOB_CHARS = /[*?[]/;
+/** Directory entries one glob may scan; past this it is denied rather than half-checked. */
+const MAX_GLOB_ENTRIES = 10_000;
+
+/** One path segment of a shell glob as an anchored RegExp: `*`, `?` and `[...]` (`[!...]` negated). */
+function globSegmentRegExp(segment: string): RegExp {
+	let body = "";
+	for (let i = 0; i < segment.length; i++) {
+		const c = segment[i];
+		// A `]` right after `[` is part of the class, as in the shell.
+		const end = c === "[" ? segment.indexOf("]", i + 2) : -1;
+		if (c === "*") body += "[^/]*";
+		else if (c === "?") body += "[^/]";
+		else if (end !== -1) {
+			const cls = segment
+				.slice(i + 1, end)
+				.replace(/^!/, "^")
+				.replace(/\\/g, "\\\\");
+			body += `[${cls}]`;
+			i = end;
+		} else body += REGEX_META.has(c) ? `\\${c}` : c;
+	}
+	return new RegExp(`^${body}$`);
+}
+
+/**
+ * The paths an absolute path's globs expand to on disk, as bash does without globstar:
+ * per segment, and a leading dot only when the pattern writes one. Throws past
+ * `MAX_GLOB_ENTRIES`, which `deniedBy` counts as a match.
+ */
+function expandGlob(absPath: string): string[] {
+	let paths = ["/"];
+	let scanned = 0;
+	for (const segment of absPath.split("/").filter(Boolean)) {
+		if (!GLOB_CHARS.test(segment)) {
+			paths = paths.map((p) => join(p, segment));
+			continue;
+		}
+		const pattern = globSegmentRegExp(segment);
+		const next: string[] = [];
+		for (const dir of paths) {
+			let names: string[];
+			try {
+				names = readdirSync(dir);
+			} catch {
+				continue;
+			}
+			scanned += names.length;
+			if (scanned > MAX_GLOB_ENTRIES) throw new Error(`glob too broad to check: ${absPath}`);
+			for (const name of names) {
+				if ((segment.startsWith(".") || !name.startsWith(".")) && pattern.test(name)) next.push(join(dir, name));
+			}
+		}
+		paths = next;
+	}
+	return paths;
+}
+
 /**
  * Every path a bash command names, resolved like a tool path, so a Read/Edit rule
  * reaches `cat ~/.ssh/id_rsa`. Redirect targets always count; another word counts when
- * it looks like a path (`/`, `~`, `.`) or exists, relative to the cwd or any `cd`
- * target. Which words the command really opens is unknown; testing them all only blocks more.
+ * it looks like a path (`/`, `~`, `.`), is a glob, or exists, relative to the cwd or
+ * any `cd` target. A glob also counts as every path it expands to, so `cat ~/.ss?/id_rsa`
+ * is caught too. Which words the command really opens is unknown; testing them all only blocks more.
  */
 function bashPathCandidates(subjects: string[], cwd: string): string[] {
 	const words = new Set<string>();
@@ -334,14 +393,18 @@ function bashPathCandidates(subjects: string[], cwd: string): string[] {
 		}
 	}
 	const out = new Set<string>();
-	const addResolved = (word: string, base: string) => {
-		const resolved = resolveToCwd(homeExpand(word), base);
-		out.add(resolved);
-		const real = realpathIfSymlink(resolved);
+	const addPath = (path: string) => {
+		out.add(path);
+		const real = realpathIfSymlink(path);
 		if (real !== undefined) out.add(real);
 	};
+	const addResolved = (word: string, base: string) => {
+		const resolved = resolveToCwd(homeExpand(word), base);
+		addPath(resolved);
+		if (GLOB_CHARS.test(word)) for (const match of expandGlob(resolved)) addPath(match);
+	};
 	for (const word of words) {
-		const pathLike = /^[~./]/.test(word) || word.includes("/") || redirects.has(word);
+		const pathLike = /^[~./]/.test(word) || word.includes("/") || redirects.has(word) || GLOB_CHARS.test(word);
 		for (const base of bases) {
 			if (pathLike || existsSync(resolveToCwd(word, base))) {
 				out.add(homeExpand(word));

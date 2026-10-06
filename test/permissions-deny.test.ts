@@ -147,6 +147,37 @@ describe("deniedBy", () => {
 		expect(denied(["Read(/proj/**)"], "bash", { command: "npm test" })).toBe(false);
 	});
 
+	it("expands a command's globs the way the shell will", () => {
+		const dir = mkdtempSync(join(tmpdir(), "deny-glob-"));
+		try {
+			mkdirSync(join(dir, ".ssh"));
+			writeFileSync(join(dir, ".ssh", "id_rsa"), "");
+			writeFileSync(join(dir, "secrets.txt"), "");
+			const ssh = [`Read(${dir}/.ssh/**)`];
+			for (const command of [`cat ${dir}/.ss*/id_rsa`, "cat .s?h/id_rsa", "cat .[s]sh/id_rsa", "cat .ssh/id_*"]) {
+				expect(deniedBy(ssh, "bash", { command }, dir), command).toBeDefined();
+			}
+			// Like the shell, `*` does not match a leading dot.
+			expect(deniedBy(ssh, "bash", { command: "cat */id_rsa" }, dir)).toBeUndefined();
+			expect(deniedBy(["Read(secrets.txt)"], "bash", { command: "cat secret*" }, dir)).toBeDefined();
+			expect(deniedBy(["Read(secrets.txt)"], "bash", { command: "cat other*" }, dir)).toBeUndefined();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("denies a glob too broad to check rather than half-checking it", () => {
+		const dir = mkdtempSync(join(tmpdir(), "deny-glob-wide-"));
+		try {
+			mkdirSync(join(dir, "many"));
+			for (let i = 0; i <= 10_000; i++) writeFileSync(join(dir, "many", `f${i}`), "");
+			expect(deniedBy(["Read(/nowhere/**)"], "bash", { command: "cat many/*/x" }, dir)).toBeDefined();
+			expect(deniedBy(["Read(/nowhere/**)"], "bash", { command: "cat many/f1" }, dir)).toBeUndefined();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("follows cd, and a bare file name that exists", () => {
 		const dir = mkdtempSync(join(tmpdir(), "deny-cd-"));
 		try {
