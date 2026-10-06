@@ -18,10 +18,10 @@ describe("exit keys, as Claude Code", () => {
 		expect(exitAction("ctrl+c", { ...background, sincePrevious: 900 })).toBe("first");
 	});
 
-	it("ctrl+d twice on an empty prompt ends a normal session; a background session ignores it", () => {
+	it("ctrl+d twice on an empty prompt ends a normal session; one press detaches from a background one", () => {
 		expect(exitAction("ctrl+d", normal)).toBe("first");
 		expect(exitAction("ctrl+d", { ...normal, sincePrevious: 100 })).toBe("quit");
-		expect(exitAction("ctrl+d", background)).toBe("ignore");
+		expect(exitAction("ctrl+d", background)).toBe("detach");
 		// With text it is pi's delete-forward.
 		expect(exitAction("ctrl+d", { ...normal, empty: false })).toBe("pass");
 		expect(exitAction("ctrl+d", { ...background, empty: false })).toBe("pass");

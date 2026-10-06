@@ -80,15 +80,13 @@ export type ExitAction =
 	| "quit"
 	/** Leave tmux; the session keeps running. */
 	| "detach"
-	/** Swallowed: a background session has no ctrl+d exit. */
-	| "ignore"
 	/** Not an exit: pi's own key (ctrl+d with text deletes forward). */
 	| "pass";
 
 /**
  * Claude Code's exit keys. A normal session (the one `claude` started in this terminal) ends on
  * ctrl+c twice, ctrl+d twice, an exit word or /exit; a background session detaches on the same,
- * except ctrl+d, which it ignores. Ctrl+c while a turn runs stops the turn.
+ * except that one ctrl+d detaches it. Ctrl+c while a turn runs stops the turn.
  */
 export function exitAction(
 	key: "ctrl+c" | "ctrl+d" | "exit",
@@ -101,7 +99,7 @@ export function exitAction(
 		return state.sincePrevious < EXIT_PRESS_MS ? leave : "first";
 	}
 	if (!state.empty) return "pass";
-	if (!state.normal) return "ignore";
+	if (!state.normal) return "detach";
 	return state.sincePrevious < EXIT_PRESS_MS ? "quit" : "first";
 }
 
@@ -431,8 +429,6 @@ const agentView: InlineExtension = {
 					case "detach":
 						if (key === "exit") ctx.ui.setEditorText("");
 						leavePane(blank(ctx));
-						return { consume: true };
-					case "ignore":
 						return { consume: true };
 					case "pass":
 						return undefined;
