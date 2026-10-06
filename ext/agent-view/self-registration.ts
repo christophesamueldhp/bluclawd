@@ -105,6 +105,8 @@ export class SelfRegistration {
 	private readonly onMessage: (message: PaneMessage) => void;
 	private activity: AgentActivity = "idle";
 	private timer: ReturnType<typeof setInterval> | undefined;
+	private inflight: Promise<void> | undefined;
+	private stopped = false;
 
 	/** `onRelease`: another window wants this session — switch this one away from it.
 	 *  `onMessage`: another window's agent view asks this session something (pane mode).
@@ -142,7 +144,14 @@ export class SelfRegistration {
 		await this.heartbeat();
 	}
 
-	private async heartbeat(): Promise<void> {
+	private heartbeat(): Promise<void> {
+		if (this.stopped) return Promise.resolve();
+		const beat = this.beat();
+		this.inflight = beat;
+		return beat;
+	}
+
+	private async beat(): Promise<void> {
 		const info = this.getInfo();
 		if (!info) return;
 		const instance: RegisterInput = {
@@ -167,10 +176,13 @@ export class SelfRegistration {
 	}
 
 	async stop(): Promise<void> {
+		this.stopped = true;
 		if (this.timer) {
 			clearInterval(this.timer);
 			this.timer = undefined;
 		}
+		// A register still on its way would list the session again after the unregister.
+		await this.inflight;
 		try {
 			await this.client.unregister(this.id);
 		} catch {

@@ -116,6 +116,8 @@ export interface PaneOps {
 	/** Start pi with `args` in a new tmux session; returns its name. */
 	start(cwd: string, args: string[], env?: Record<string, string>): string;
 	kill(pane: string): void;
+	/** Stop listing this pi's session anywhere; resolves once no heartbeat can list it again. */
+	unlist(): Promise<void>;
 	/** Leave tmux; every session keeps running. */
 	detach(): void;
 }
@@ -1033,6 +1035,7 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		this.teardown();
+		await panes.unlist();
 		await this.opts.client.delete(row.id).catch(() => undefined);
 		try {
 			panes.kill(panes.current);
@@ -1462,7 +1465,11 @@ export class AgentView implements Component, Focusable {
 			this.restoreFocusAfterFilter();
 			this.recompute();
 		} else if (this.armed) this.disarm();
-		else {
+		else if (this.opts.panes && !this.opts.self?.()) {
+			// No session of this terminal's to return to: as in Claude Code, esc quits.
+			this.quit();
+			return;
+		} else {
 			this.close();
 			return;
 		}

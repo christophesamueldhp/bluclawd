@@ -121,10 +121,10 @@ session from the composer is a new pane with the task as its first prompt; ctrl+
 it. Ctrl+c twice or ctrl+d on an empty prompt (and ctrl+c twice or `exit` in agent view) leave
 tmux, and every session keeps running, even with the terminal closed; running `pi` again starts a
 new session and lists them all. Ctrl+x stops a session's turn, then ends its pi; on this terminal's
-own session it moves the terminal to a new one first. A pi that hasn't been asked anything yet is
-not a session: it isn't listed, and it ends when the terminal leaves it, so deleting the last
-session leaves agent view empty and quitting from there closes pi. A peek reply is the session's
-next prompt.
+own session it moves the terminal to agent view with no session of its own, as Claude Code does
+once the session you came from is deleted: the list can be empty, and esc quits from there. A
+session nothing has been asked in yet ends when you quit at its prompt. A peek reply is the
+session's next prompt.
 `/quit` inside a session ends it, but a turn in progress carries on in a new pane once its running
 tool finishes. tmux runs with no prefix key and no status line, passing keys through as CSI u.
 `BLUCLAWD_TMUX=0` opts out.

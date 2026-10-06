@@ -143,18 +143,21 @@ const agentView: InlineExtension = {
 		// What the turn in progress is doing, for this session's row in other windows.
 		let liveDetail: string | undefined;
 
-		// A pane nothing has been asked in yet is not a session: it isn't listed anywhere, and it
-		// ends when the terminal leaves it, so agent view can empty and no unlisted pi lingers.
+		// Set on a pane started only to show agent view, after this terminal's session was deleted.
+		let viewHost = false;
 		const blank = (ctx: ExtensionContext): boolean =>
 			!!pane && !ctx.sessionManager.getEntries().some((e) => e.type === "message");
-		/** Leave this pane: tmux keeps a session running, a blank pane ends. */
-		const leavePane = (ctx: ExtensionContext): void => {
-			if (blank(ctx) && pane) panes.kill(pane);
+		// Such a pane is not a session, as Claude Code's agent view has none once its origin is
+		// deleted: it isn't listed, esc quits, and it ends when the terminal leaves it.
+		const hosting = (ctx: ExtensionContext): boolean => viewHost && blank(ctx);
+		/** Leave this pane: tmux keeps a session running; one with nothing in it ends. */
+		const leavePane = (ending: boolean): void => {
+			if (ending && pane) panes.kill(pane);
 			else panes.detach();
 		};
 
 		const selfInfo = (ctx: ExtensionContext): SelfSessionInfo | undefined => {
-			if (blank(ctx)) return undefined;
+			if (hosting(ctx)) return undefined;
 			const row = selfRow(ctx);
 			return {
 				cwd: ctx.sessionManager.getCwd(),
@@ -320,6 +323,10 @@ const agentView: InlineExtension = {
 				if (launchInTmux(ctx)) return;
 			}
 			registration?.stop();
+			// Before the first heartbeat, which must not list a pane that only hosts agent view.
+			const openView = !!process.env[OPEN_VIEW_ENV];
+			delete process.env[OPEN_VIEW_ENV];
+			if (openView) viewHost = true;
 			activity = new ForegroundActivity();
 			registration = new SelfRegistration(
 				new OrchestratorClient(),
@@ -338,8 +345,7 @@ const agentView: InlineExtension = {
 					{ triggerTurn: true },
 				);
 			}
-			if (process.env[OPEN_VIEW_ENV]) {
-				delete process.env[OPEN_VIEW_ENV];
+			if (openView) {
 				pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
 			}
 			stopPill?.();
@@ -373,14 +379,14 @@ const agentView: InlineExtension = {
 				if (pane && !viewOpen && !tui?.hasOverlay()) {
 					const empty = ctx.ui.getEditorText() === "";
 					if (matchesKey(data, "ctrl+d") && empty) {
-						leavePane(ctx);
+						leavePane(blank(ctx));
 						return { consume: true };
 					}
 					if (matchesKey(data, "ctrl+c")) {
 						const now = Date.now();
 						if (now - ctrlCAt < CTRL_C_MS) {
 							ctrlCAt = 0;
-							leavePane(ctx);
+							leavePane(blank(ctx));
 							return { consume: true };
 						}
 						ctrlCAt = now;
@@ -513,7 +519,7 @@ const agentView: InlineExtension = {
 							modelName: model?.name,
 							cwd: ctx.cwd,
 							home: process.env.HOME ?? "",
-							self: () => (blank(ctx) ? undefined : selfRow(ctx)),
+							self: () => (hosting(ctx) ? undefined : selfRow(ctx)),
 							onClose: () => done(undefined),
 							// Quitting leaves through pi's own shutdown, which hands this session to the daemon.
 							onQuit: () => {
@@ -524,13 +530,17 @@ const agentView: InlineExtension = {
 								? {
 										current: pane,
 										switchTo: (name) => {
-											const ending = blank(ctx);
+											const ending = hosting(ctx);
 											panes.switchTo(name);
 											if (ending) panes.kill(pane);
 										},
 										start: (cwd, args, env) => panes.newSession({ cwd, args, env }),
 										kill: (name) => panes.kill(name),
-										detach: () => leavePane(ctx),
+										unlist: async () => {
+											await registration?.stop();
+											registration = undefined;
+										},
+										detach: () => leavePane(hosting(ctx)),
 									}
 								: undefined,
 							listModels: () =>

@@ -53,6 +53,9 @@ function setup(instances: InstanceSummary[], self?: InstanceSummary) {
 			return `pi-new${++started}`;
 		},
 		kill: (name) => calls.push(["kill", name]),
+		unlist: async () => {
+			calls.push(["unlist"]);
+		},
 		detach: () => calls.push(["detach"]),
 	};
 	let closed = 0;
@@ -156,6 +159,7 @@ describe("agent view in pane mode", () => {
 		expect(calls).toEqual([
 			["start", HERE, [], { [OPEN_VIEW_ENV]: "1" }],
 			["switchTo", "pi-new1"],
+			["unlist"],
 			["delete", "pi-self"],
 			["kill", "pi-self"],
 		]);
@@ -186,6 +190,40 @@ describe("agent view in pane mode", () => {
 		asked = true;
 		await reg.refresh();
 		expect(registered).toMatchObject([{ cwd: HERE, pane: "pi-self" }]);
+	});
+
+	it("esc returns to this terminal's session, or quits once there is none, as in Claude Code", () => {
+		const own = setup([], paneRow("pi-self", { activity: "idle" }));
+		own.view.handleInput("\x1b");
+		expect(own.closed()).toBe(1);
+		expect(own.calls).toEqual([]);
+		const none = setup([paneRow("pi-a")]);
+		none.view.handleInput("\x1b");
+		expect(none.calls).toEqual([["detach"]]);
+	});
+
+	it("unregistering waits for a heartbeat on its way, which would list the session again", async () => {
+		const order: string[] = [];
+		let land = () => {};
+		const client = {
+			register: () =>
+				new Promise<void>((resolve) => {
+					land = () => {
+						order.push("register");
+						resolve();
+					};
+				}),
+			unregister: async () => {
+				order.push("unregister");
+			},
+		} as unknown as OrchestratorClient;
+		const reg = new SelfRegistration(client, () => ({ cwd: HERE, pane: "pi-self" }));
+		void reg.refresh();
+		const stopped = reg.stop();
+		land();
+		await stopped;
+		await reg.refresh();
+		expect(order).toEqual(["register", "unregister"]);
 	});
 
 	it("lists every pane as an ordinary row, this terminal's own once", () => {
