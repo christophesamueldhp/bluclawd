@@ -46,6 +46,23 @@ For commands that are harder to parse at a glance (piped commands, obscure flags
 - git reset --hard origin/main → "Discard all local changes and match remote main"
 - curl -s url | jq '.data[]' → "Fetch JSON from URL and extract data array elements"`;
 
+/**
+ * What codemode scripts receive: pi's bash result, which finished commands keep, plus the task a
+ * backgrounded command became. Declared here because pi's schema is not exported.
+ */
+const outputSchema = Type.Object({
+	output: Type.String({
+		description:
+			"Combined stdout and stderr, possibly truncated; for a backgrounded command, the notice naming its task",
+	}),
+	truncated: Type.Boolean(),
+	full_output_path: Type.Optional(Type.String({ description: "Full output, when truncated" })),
+	exit_code: Type.Optional(Type.Number({ description: "Absent while the command runs in the background" })),
+	wall_time_seconds: Type.Number(),
+	background_task_id: Type.Optional(Type.String({ description: "Set when the command went to the background" })),
+	output_file: Type.Optional(Type.String({ description: "Where a backgrounded command writes its output" })),
+});
+
 interface BashDetails {
 	/** Set when the command went to (or started in) the background. */
 	backgroundTaskId?: string;
@@ -146,6 +163,7 @@ export function createClaudeBashTool(options: ClaudeBashOptions): ToolDefinition
 					]),
 		],
 		parameters,
+		outputSchema,
 		// pi draws `(timeout Ns)` from the argument, which is milliseconds here.
 		renderCall(args, theme, context) {
 			const timeout = (args as { timeout?: unknown }).timeout;
@@ -162,6 +180,7 @@ export function createClaudeBashTool(options: ClaudeBashOptions): ToolDefinition
 		async execute(id, rawParams, signal, onUpdate, ctx) {
 			const { description, run_in_background, timeout, ...rest } = rawParams as Params;
 			const command = String(rest.command ?? "");
+			const startedAt = performance.now();
 			const ops = options.operations;
 			const owner = ctx?.sessionManager?.getSessionId();
 			// A child session's jobs carry its session id as their agent id: the main
@@ -189,7 +208,18 @@ export function createClaudeBashTool(options: ClaudeBashOptions): ToolDefinition
 					cwd,
 					endsWithFinalResponse: options.endsWithFinalResponse,
 				});
-				return { content: [{ type: "text" as const, text }], details: { backgroundTaskId: job.id } };
+				const structuredContent = {
+					output: text,
+					truncated: false,
+					wall_time_seconds: Math.round((performance.now() - startedAt) / 100) / 10,
+					background_task_id: job.id,
+					...(job.outputFile ? { output_file: job.outputFile } : {}),
+				};
+				return {
+					content: [{ type: "text" as const, text }],
+					details: { backgroundTaskId: job.id },
+					structuredContent,
+				};
 			};
 
 			if (run_in_background && !disabled) {

@@ -199,3 +199,57 @@ describe("formatClaudeDuration (Claude Code's Qt)", () => {
 		expect(formatClaudeDuration(ms)).toBe(out);
 	});
 });
+
+describe("structured results for codemode scripts", () => {
+	type Structured = Record<string, unknown>;
+	const structured = (result: unknown) => (result as { structuredContent?: Structured }).structuredContent;
+
+	it("declares pi's bash fields, exit_code optional, and the background fields", () => {
+		const { tool } = makeTool(fakeOps().ops);
+		const schema = tool.outputSchema as { properties: Record<string, unknown>; required?: string[] };
+		expect(Object.keys(schema.properties)).toEqual([
+			"output",
+			"truncated",
+			"full_output_path",
+			"exit_code",
+			"wall_time_seconds",
+			"background_task_id",
+			"output_file",
+		]);
+		expect(schema.required).toEqual(["output", "truncated", "wall_time_seconds"]);
+	});
+
+	it("gives a run_in_background job its task id and output file, without an exit code", async () => {
+		const { tool } = makeTool(fakeOps().ops);
+		const result = await tool.execute(
+			"s2",
+			{ command: "tail -f log", run_in_background: true } as never,
+			undefined,
+			undefined,
+			ctx,
+		);
+		const id = (result.details as { backgroundTaskId: string }).backgroundTaskId;
+		expect(structured(result)).toEqual({
+			output: text(result),
+			truncated: false,
+			wall_time_seconds: 0,
+			background_task_id: id,
+			output_file: backgroundBashJobs.get(id)?.outputFile,
+		});
+	});
+
+	it("does the same for a command moved to the background at its timeout", async () => {
+		const { tool } = makeTool(fakeOps().ops);
+		const result = await tool.execute(
+			"s3",
+			{ command: "npm run dev", timeout: 20 } as never,
+			undefined,
+			undefined,
+			ctx,
+		);
+		const id = (result.details as { backgroundTaskId: string }).backgroundTaskId;
+		expect(structured(result)).toMatchObject({ output: text(result), truncated: false, background_task_id: id });
+		expect(structured(result)).not.toHaveProperty("exit_code");
+		expect(structured(result)?.wall_time_seconds).toEqual(expect.any(Number));
+	});
+});
