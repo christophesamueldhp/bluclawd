@@ -11,13 +11,14 @@ import { getKeybindings, type TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import type { AgentView } from "../ext/agent-view/agent-view.ts";
+import { CONTINUE_COMMAND, CONTINUE_PROMPT } from "../ext/agent-view/hand-off.ts";
 import agentView from "../ext/agent-view/index.ts";
 
 const state = vi.hoisted(() => ({
 	spawned: [] as unknown[],
 	rows: [] as Array<Record<string, unknown>>,
-	attached: [] as string[],
-	requests: [] as unknown[],
+	handedOver: [] as string[],
+	deleted: [] as string[],
 	image: { type: "image" as const, mimeType: "image/png", data: "AQID" },
 }));
 vi.mock("../ext/agent-view/clipboard.ts", () => ({ readAgentClipboard: async () => ({ image: state.image }) }));
@@ -33,20 +34,12 @@ vi.mock("../ext/agent-view/orchestrator-client.ts", async (original) => ({
 		async list() {
 			return state.rows;
 		}
-		async attach(id: string) {
-			state.attached.push(id);
-			return {
-				close: () => {},
-				answer: () => {},
-				request: async (request: { type: string }) => {
-					state.requests.push(request);
-					if (request.type === "get_entries")
-						return { success: true, command: "get_entries", data: { entries: [], leafId: null } };
-					if (request.type === "get_state")
-						return { success: true, command: "get_state", data: { isStreaming: true } };
-					return { success: true, command: request.type };
-				},
-			};
+		async delete(id: string) {
+			state.deleted.push(id);
+		}
+		async handOver(id: string) {
+			state.handedOver.push(id);
+			return true;
 		}
 		async spawn(options: Record<string, unknown>) {
 			state.spawned.push(options);
@@ -74,8 +67,8 @@ beforeAll(() => initTheme("dark", false));
 afterEach(() => {
 	if (dir) rmSync(dir, { recursive: true, force: true });
 	state.spawned = [];
-	state.attached = [];
-	state.requests = [];
+	state.handedOver = [];
+	state.deleted = [];
 	state.rows = [];
 });
 function setup() {
@@ -90,8 +83,11 @@ function setup() {
 	];
 	let handler!: (_args: string, ctx: ExtensionCommandContext) => Promise<void>;
 	let releaseHandler!: typeof handler;
+	const events: Record<string, (event: unknown) => void> = {};
 	agentView({
-		on: () => {},
+		on: (name: string, fn: (event: unknown) => void) => {
+			events[name] = fn;
+		},
 		registerCommand: (name, command) => {
 			if (name === "agent-view") handler = command.handler as typeof handler;
 			if (name === "agent-view-release") releaseHandler = command.handler as typeof handler;
@@ -104,7 +100,15 @@ function setup() {
 	});
 	const waitForIdle = vi.fn(() => turn);
 	const abort = vi.fn();
-	const replace = vi.fn(async () => ({ cancelled: false }));
+	const replaced = {
+		sendMessage: vi.fn(async () => {}),
+		sendUserMessage: vi.fn(async () => {}),
+		ui: { notify: () => {} },
+	};
+	const replace = vi.fn(async (_target?: unknown, options?: { withSession?: (ctx: unknown) => Promise<void> }) => {
+		await options?.withSession?.(replaced);
+		return { cancelled: false };
+	});
 	const ctx = {
 		cwd: dir,
 		model: { provider: "test", id: "model" },
@@ -120,7 +124,7 @@ function setup() {
 			getHeader: () => undefined,
 		},
 		switchSession: replace,
-		newSession: replace,
+		newSession: (options: unknown) => replace(undefined, options as Parameters<typeof replace>[1]),
 		ui: {
 			notify: () => {},
 			setTitle: () => {},
@@ -138,6 +142,10 @@ function setup() {
 	return {
 		run: () => handler("", ctx),
 		runRelease: () => releaseHandler("", ctx),
+		events,
+		replaced,
+		outgoing,
+		incoming,
 		view: () => view,
 		finishTurn,
 		waitForIdle,
@@ -146,35 +154,52 @@ function setup() {
 	};
 }
 describe("Agent View native foreground and live background", () => {
-	it("attaches a working target immediately while the native foreground turn keeps running", async () => {
+	it("swaps a working target in as this window's own pi session; both turns carry on", async () => {
 		const flow = setup();
+		flow.events.agent_start({ type: "agent_start" });
 		const running = flow.run();
 		await vi.waitFor(() => expect(flow.view()?.selectedKeyForTest()).toBe("self:self"));
 		await vi.waitFor(() => expect(flow.view().render(100).join("\n")).toContain("incoming"));
 		flow.view().handleInput("\x1b2");
-		await vi.waitFor(() => expect(state.attached).toEqual(["incoming"]));
-		expect(flow.waitForIdle).not.toHaveBeenCalled();
-		expect(flow.abort).not.toHaveBeenCalled();
+		await vi.waitFor(() => expect(state.handedOver).toEqual(["incoming"]));
+		// This window's turn first lets its running tool finish.
+		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(flow.replace).not.toHaveBeenCalled();
-		expect(state.spawned).toEqual([]);
-		flow.view().handleInput("\x1b[D");
-		flow.view().close();
+		flow.events.turn_end({ type: "turn_end", toolResults: [{}] });
 		await running;
-		expect(state.requests.some((request: { type: string }) => request.type === "abort")).toBe(false);
+		expect(flow.abort).not.toHaveBeenCalled();
+		expect(flow.replace).toHaveBeenCalledWith(flow.incoming, expect.anything());
+		expect(state.spawned).toEqual([expect.objectContaining({ sessionFile: flow.outgoing, prompt: CONTINUE_PROMPT })]);
+		expect(flow.replaced.sendMessage).toHaveBeenCalledWith(
+			expect.objectContaining({ customType: CONTINUE_COMMAND, display: false }),
+			{ triggerTurn: true },
+		);
 	});
-	it("creates and attaches an image-only background conversation instead of replacing the native runtime", async () => {
+	it("ctrl+x twice on this window's own session deletes it and moves to a new one, still in agent view", async () => {
+		const flow = setup();
+		state.rows.push({ id: "twin", status: "stopped", cwd: flow.outgoing, sessionFile: flow.outgoing });
+		const running = flow.run();
+		await vi.waitFor(() => expect(flow.view()?.selectedKeyForTest()).toBe("self:self"));
+		flow.view().handleInput("\x18");
+		flow.view().handleInput("\x18");
+		flow.finishTurn();
+		await running;
+		expect(flow.abort).toHaveBeenCalledOnce();
+		expect(flow.replace).toHaveBeenCalledWith(undefined, expect.anything());
+		expect(state.deleted).toEqual(["twin"]);
+		expect(state.spawned).toEqual([]);
+		expect(flow.replaced.sendUserMessage).toHaveBeenCalledWith("/agent-view", { expandPromptTemplates: true });
+	});
+	it("ctrl+enter starts an image-only conversation here, as a new pi session", async () => {
 		const flow = setup();
 		const running = flow.run();
 		flow.view().handleInput("\x16");
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		flow.view().handleInput("\x1b[13;5u");
-		await vi.waitFor(() => expect(state.attached).toEqual(["new"]));
-		expect(state.spawned).toEqual([expect.objectContaining({ images: [state.image], prompt: "" })]);
-		expect(flow.replace).not.toHaveBeenCalled();
-		expect(flow.abort).not.toHaveBeenCalled();
-		expect(flow.waitForIdle).not.toHaveBeenCalled();
-		flow.view().close();
 		await running;
+		expect(flow.replace).toHaveBeenCalledOnce();
+		expect(flow.replaced.sendUserMessage).toHaveBeenCalledWith([state.image]);
+		expect(flow.abort).not.toHaveBeenCalled();
 	});
 	it("another terminal's ownership transfer still waits rather than aborting the native turn", async () => {
 		const flow = setup();

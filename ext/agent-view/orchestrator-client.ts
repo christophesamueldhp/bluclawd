@@ -5,7 +5,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { daemonBuildId, getSocketPath } from "../../daemon/paths.ts";
-import { attachRpc } from "./rpc-attachment.ts";
 
 export type AgentActivity = "idle" | "working" | "awaiting_input";
 type InstanceStatus = "starting" | "online" | "stopping" | "stopped" | "error";
@@ -63,7 +62,7 @@ type Request =
 			model?: string;
 	  }
 	| { type: "stop"; instanceId: string }
-	| { type: "release_idle"; instanceId: string }
+	| { type: "hand_over"; instanceId: string }
 	| { type: "rpc"; instanceId: string; command: unknown }
 	| { type: "register"; instance: RegisterInput }
 	| { type: "unregister"; instanceId: string }
@@ -84,6 +83,7 @@ interface AnyResponse {
 	version?: string;
 	buildId?: string;
 	release?: boolean;
+	working?: boolean;
 	response?: { success: boolean; error?: string };
 }
 
@@ -145,13 +145,6 @@ export class OrchestratorClient {
 
 	constructor(socketPath: string = getSocketPath()) {
 		this.socketPath = socketPath;
-	}
-
-	attach(
-		instanceId: string,
-		...callbacks: Parameters<typeof attachRpc> extends [string, string, ...infer Rest] ? Rest : never
-	) {
-		return attachRpc(this.socketPath, instanceId, ...callbacks);
 	}
 
 	private request(req: Request, timeoutMs = 2000): Promise<AnyResponse> {
@@ -218,13 +211,12 @@ export class OrchestratorClient {
 		await this.request({ type: "stop", instanceId }, 10_000);
 	}
 
-	/** Old daemons cannot silently interpret this request as an unconditional stop. */
-	async releaseIdle(instanceId: string): Promise<void> {
-		const response = await this.request({ type: "release_idle", instanceId }, 10_000);
-		if (response.type !== "stop_result")
-			throw new Error(
-				"Daemon cannot transfer sessions safely; update it or stop the idle session with Ctrl+X first",
-			);
+	/** Stop a session so this window can open it, once its running tools finish. Returns whether its
+	 *  turn was still in progress. Unbounded: a tool may run for minutes. */
+	async handOver(instanceId: string): Promise<boolean> {
+		const response = await this.request({ type: "hand_over", instanceId }, 2 ** 31 - 1);
+		if (response.type !== "stop_result") throw new Error("The agent daemon is out of date — restart pi to update it");
+		return response.working === true;
 	}
 
 	/** Send a message to a running session without attaching: a new prompt when it is idle, a

@@ -59,7 +59,7 @@ describe("Agent View new-session RPC", () => {
 
 describe("safe transfer to native Pi", () => {
 	it.each([
-		{ type: "stop_result", ok: true, instanceId: "a" },
+		{ type: "stop_result", ok: true, instanceId: "a", working: true },
 		{ version: "old", buildId: "legacy" },
 	])("uses a distinct request and checks the daemon's acknowledgement: %j", async (response) => {
 		dir = await mkdtemp(join(tmpdir(), "bluclawd-native-transfer-"));
@@ -72,9 +72,9 @@ describe("safe transfer to native Pi", () => {
 		);
 		const socket = join(dir, "server.sock");
 		await new Promise<void>((resolve) => server?.listen(socket, resolve));
-		const transfer = new OrchestratorClient(socket).releaseIdle("a");
-		if ("type" in response) await expect(transfer).resolves.toBeUndefined();
-		else await expect(transfer).rejects.toThrow("cannot transfer sessions safely");
-		expect(requests).toEqual([{ type: "release_idle", instanceId: "a" }]);
+		const transfer = new OrchestratorClient(socket).handOver("a");
+		if ("type" in response) await expect(transfer).resolves.toBe(true);
+		else await expect(transfer).rejects.toThrow("out of date");
+		expect(requests).toEqual([{ type: "hand_over", instanceId: "a" }]);
 	});
 });

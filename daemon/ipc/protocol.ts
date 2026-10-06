@@ -29,9 +29,9 @@ export interface StopRequest {
 	instanceId: string;
 }
 
-/** Transfer an idle background session to a native Pi window without interrupting a turn. */
-export interface ReleaseIdleRequest {
-	type: "release_idle";
+/** Stop a background session so a window can open it; a turn in progress first finishes its tools. */
+export interface HandOverRequest {
+	type: "hand_over";
 	instanceId: string;
 }
 
@@ -120,7 +120,7 @@ interface RequestMap {
 	spawn: SpawnRequest;
 	list: ListRequest;
 	stop: StopRequest;
-	release_idle: ReleaseIdleRequest;
+	hand_over: HandOverRequest;
 	status: StatusRequest;
 	rpc: RpcRequest;
 	rpc_stream: RpcStreamRequest;
@@ -190,6 +190,8 @@ export interface ListResponse extends ResponseBase {
 export interface StopResponse extends ResponseBase {
 	type: "stop_result";
 	instanceId?: string;
+	/** hand_over: the turn was still in progress, so whoever opens the session carries it on. */
+	working?: boolean;
 }
 
 export interface StatusResponse extends ResponseBase {
@@ -237,6 +239,7 @@ interface ResponseMap {
 	spawn: SpawnResponse;
 	list: ListResponse;
 	stop: StopResponse;
+	hand_over: StopResponse;
 	status: StatusResponse;
 	rpc: RpcBridgeResponse;
 	rpc_stream: RpcReadyResponse;

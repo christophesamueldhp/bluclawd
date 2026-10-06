@@ -538,16 +538,10 @@ export class ServerSupervisor {
 	}
 
 	/** Stop the process; the row stays (Stopped, or Done/Failed if the run had already ended). */
-	async stopInstance(instanceId: string, onlyIfIdle = false): Promise<InstanceRecord | undefined> {
+	async stopInstance(instanceId: string): Promise<InstanceRecord | undefined> {
 		const live = this.liveInstances.get(instanceId);
 		if (!live) {
 			return this.getInstance(instanceId);
-		}
-		if (
-			onlyIfIdle &&
-			(live.record.status !== "online" || live.activityState.activity !== "idle" || live.pendingUiRequest)
-		) {
-			throw new Error("Session is still working or waiting for input; open it when idle");
 		}
 
 		this.setStatus(live, "stopping");
@@ -565,6 +559,40 @@ export class ServerSupervisor {
 			upsertInstance(live.record);
 		}
 		return cloneInstance(live.record);
+	}
+
+	/**
+	 * Stop a session so a window can open its file. A turn in progress first lets its running tools
+	 * finish, as quitting pi does, unless it is blocked on a prompt only a window can answer.
+	 * `working`: the turn was still in progress, so the window carries it on.
+	 */
+	async handOver(instanceId: string): Promise<{ record: InstanceRecord | undefined; working: boolean }> {
+		const live = this.liveInstances.get(instanceId);
+		if (live?.record.status === "starting") throw new Error("Still starting — try again in a moment");
+		const busy = (): boolean =>
+			this.liveInstances.get(instanceId) === live &&
+			live?.activityState.activity === "working" &&
+			!live.pendingUiRequest;
+		if (live && busy()) {
+			await new Promise<void>((resolve) => {
+				const done = (): void => {
+					clearInterval(poll);
+					live.subscribers.delete(onEvent);
+					resolve();
+				};
+				const onEvent: AgentSessionEventListener = (event) => {
+					if (event.type === "agent_settled" || (event.type === "turn_end" && event.toolResults.length > 0))
+						done();
+				};
+				// A prompt or an exit ends the wait too; neither arrives as a session event.
+				const poll = setInterval(() => {
+					if (!busy()) done();
+				}, 250);
+				live.subscribers.add(onEvent);
+			});
+		}
+		const working = !!live && this.liveInstances.get(instanceId) === live && live.activityState.activity !== "idle";
+		return { record: await this.stopInstance(instanceId), working };
 	}
 
 	/** Remove the row. The session's .jsonl stays on disk, resumable with /resume. */

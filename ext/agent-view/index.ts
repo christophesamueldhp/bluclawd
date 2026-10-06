@@ -29,7 +29,6 @@ import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
 import { AgentView, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, CONTINUE_COMMAND, CONTINUE_TEXT, handOff, handOffAfterExit } from "./hand-off.ts";
-import { NativeAttachment } from "./native-attachment.ts";
 import { type InstanceSummary, OrchestratorClient } from "./orchestrator-client.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
 import { collectRows, labelFromTask } from "./rows.ts";
@@ -40,6 +39,7 @@ const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
 
 type ViewAction =
 	| { type: "open"; sessionFile: string; resume: boolean }
+	| { type: "delete" }
 	| { type: "create"; model?: { provider: string; id: string }; task: string; images: ImageContent[] };
 
 const TMP_ROOTS = [tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"];
@@ -286,7 +286,8 @@ const agentView: InlineExtension = {
 		});
 
 		const track = (event: { type: string; kind?: string }): void => {
-			registration?.setActivity(activity.apply(event));
+			const current = activity.apply(event);
+			registration?.setActivity(current);
 		};
 		pi.on("agent_start", track);
 		pi.on("turn_start", track);
@@ -309,11 +310,18 @@ const agentView: InlineExtension = {
 			// A closed terminal (SIGHUP) cannot wait: pi exits on the next write that fails, before
 			// the hand-off. The synchronous write is the probe; then the turn is cut off as before.
 			try {
-				writeSync(1, `${theme.fg("dim", "Backgrounding after the current tool finishes… (ctrl+c to stop it now)")}\n`);
+				writeSync(
+					1,
+					`${theme.fg("dim", "Backgrounding after the current tool finishes… (ctrl+c to stop it now)")}\n`,
+				);
 			} catch {
 				return;
 			}
-			await new Promise<void>((resolve) => {
+			await toolsSettled();
+		};
+
+		const toolsSettled = (): Promise<void> =>
+			new Promise<void>((resolve) => {
 				const done = (): void => {
 					onToolsSettled = undefined;
 					process.off("SIGINT", done);
@@ -322,7 +330,6 @@ const agentView: InlineExtension = {
 				onToolsSettled = done;
 				process.once("SIGINT", done);
 			});
-		};
 
 		pi.on("session_shutdown", async (event, ctx) => {
 			registration?.stop();
@@ -356,8 +363,6 @@ const agentView: InlineExtension = {
 						const view = new AgentView({
 							ui: tui,
 							client,
-							attachSession: (instance, detach) =>
-								new NativeAttachment(tui, client, instance, detach, _keybindings),
 							appName: "bluclawd",
 							version: VERSION,
 							model: model ? { provider: model.provider, id: model.id } : undefined,
@@ -379,6 +384,9 @@ const agentView: InlineExtension = {
 							onSelfReply: (text) =>
 								pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "followUp" }),
 							onOpen: (sessionFile, _cwd, resume) => done({ type: "open", sessionFile, resume }),
+							onStopSelf: () => ctx.abort(),
+							onDeleteSelf: () => done({ type: "delete" }),
+							onRenameSelf: (name) => pi.setSessionName(name),
 							onCreateAndOpen: (_cwd, spawnModel, task, images) =>
 								done({ type: "create", model: spawnModel, task, images }),
 							loadPastSessions,
@@ -394,11 +402,15 @@ const agentView: InlineExtension = {
 					{ overlay: true, overlayOptions: FULL_SCREEN },
 				);
 				if (!action) return;
-				// Native Pi replaces the runtime on a switch. Let its turn settle first
-				// so disposal cannot abort a tool or persist an interrupted assistant message.
-				if (!ctx.isIdle()) {
-					ctx.ui.notify("Waiting for this session to finish before switching", "info");
-					await ctx.waitForIdle();
+				if (action.type === "delete") {
+					await deleteSession(ctx);
+					return;
+				}
+				// The switch disposes this session. As on quit, a turn in progress first lets its
+				// running tools finish; the daemon then carries the turn on in the background.
+				if (!ctx.isIdle() && activity.current === "working") {
+					ctx.ui.notify("Switching after the current tool finishes…", "info");
+					await toolsSettled();
 				}
 				// Only plain data survives replacement. The command awaits the whole transition;
 				// hand-off runs only in the fresh context, after dispose and never on cancellation.
@@ -406,8 +418,15 @@ const agentView: InlineExtension = {
 				openedFromView = true;
 				if (action.type === "open") {
 					await ctx.switchSession(action.sessionFile, {
-						withSession: async () => {
+						withSession: async (replaced) => {
 							await handOff(outgoing);
+							// Its turn was cut off by the move: it carries on here, with no visible prompt.
+							if (action.resume) {
+								await replaced.sendMessage(
+									{ customType: CONTINUE_COMMAND, content: CONTINUE_TEXT, display: false },
+									{ triggerTurn: true },
+								);
+							}
 						},
 					});
 				} else {
@@ -434,6 +453,29 @@ const agentView: InlineExtension = {
 				viewOpen = false;
 				closeView = undefined;
 			}
+		};
+
+		/**
+		 * ctrl+x twice on this window's own row: the session leaves agent view like any other, and
+		 * this window moves to a new one, still in agent view. The .jsonl stays, resumable with /resume.
+		 */
+		const deleteSession = async (ctx: ExtensionCommandContext): Promise<void> => {
+			const sessionFile = ctx.sessionManager.getSessionFile();
+			if (!ctx.isIdle()) {
+				ctx.abort();
+				await ctx.waitForIdle();
+			}
+			await ctx.newSession({
+				withSession: async (replaced) => {
+					// Rows this session left behind earlier (a stored twin) go with it.
+					const client = new OrchestratorClient();
+					const twins = sessionFile
+						? (await client.list().catch(() => [])).filter((i) => !i.external && i.sessionFile === sessionFile)
+						: [];
+					await Promise.all(twins.map((i) => client.delete(i.id).catch(() => undefined)));
+					void replaced.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
+				},
+			});
 		};
 
 		/**

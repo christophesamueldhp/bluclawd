@@ -105,7 +105,11 @@ function fakeClient(calls: Calls, list: () => InstanceSummary[] = () => sessions
 		ensureDaemon: async () => true,
 		getDaemonInfo: async () => ({ running: false }),
 		stop: record("stop"),
-		releaseIdle: record("releaseIdle"),
+		// A working session's turn is still in progress once its tools finish.
+		handOver: async (id: string) => {
+			calls.push(["handOver", id]);
+			return list().find((i) => i.id === id)?.activity === "working";
+		},
 		delete: record("delete"),
 		rename: record("rename"),
 		setMeta: record("setMeta"),
@@ -347,20 +351,19 @@ describe("AgentView keys", () => {
 		expect(opened).toEqual(["/c.jsonl"]);
 	});
 
-	it("opening a working session leaves its turn running and the roster usable", async () => {
-		const { view, calls, opened, resumed, text, flush } = makeView();
+	it("opening a working session moves it into this window, where its turn carries on", async () => {
+		const { view, calls, opened, resumed, flush } = makeView();
 		view.setInstancesForTest([
 			{ id: "w", status: "online", activity: "working", cwd: HERE, sessionFile: "/w.jsonl", createdAt: ago(1) },
 		]);
 		view.handleInput(ENTER);
 		for (let i = 0; i < 5; i++) await flush();
-		expect(calls).toEqual([]);
-		expect(opened).toEqual([]);
-		expect(resumed).toEqual([]);
-		expect(text().join("\n")).toContain("still working");
-		view.handleInput(ESC);
+		expect(calls).toEqual([["handOver", "w"]]);
+		expect(opened).toEqual(["/w.jsonl"]);
+		expect(resumed).toEqual([true]);
 	});
-	it("a newly busy writer cannot be stopped from an outdated idle row", async () => {
+
+	it("a row drawn idle whose session has since started working still carries the turn over", async () => {
 		const writer: InstanceSummary = {
 			id: "w",
 			status: "online",
@@ -368,20 +371,19 @@ describe("AgentView keys", () => {
 			cwd: HERE,
 			sessionFile: "/w.jsonl",
 		};
-		const { view, calls, opened, flush } = makeView({ list: () => [writer] });
+		const { view, calls, resumed, flush } = makeView({ list: () => [writer] });
 		view.setInstancesForTest([{ ...writer, activity: "idle" }]);
 		view.handleInput(ENTER);
-		await flush();
-		expect(calls).toEqual([]);
-		expect(opened).toEqual([]);
-		view.handleInput(ESC);
+		for (let i = 0; i < 5; i++) await flush();
+		expect(calls).toEqual([["handOver", "w"]]);
+		expect(resumed).toEqual([true]);
 	});
 
 	it("does not open a live session if stopping its writer fails, and keeps the view usable", async () => {
 		const calls: Calls = [];
 		const row: InstanceSummary = { id: "w", status: "online", activity: "idle", cwd: HERE, sessionFile: "/w.jsonl" };
 		const client = fakeClient(calls, () => [row]);
-		client.releaseIdle = async () => {
+		client.handOver = async () => {
 			throw new Error("stop timed out");
 		};
 		let opened = false;
@@ -438,12 +440,19 @@ describe("AgentView keys", () => {
 		await expect(showing).resolves.toBeUndefined();
 	});
 
-	it("Esc cancels an in-flight open while the background writer is stopping", async () => {
-		let finish!: () => void;
-		const row: InstanceSummary = { id: "w", status: "online", activity: "idle", cwd: HERE, sessionFile: "/w.jsonl" };
-		const client = fakeClient([], () => [row]);
-		client.releaseIdle = () =>
-			new Promise<void>((resolve) => {
+	it("Esc during a hand-over leaves a turn in progress running in the background", async () => {
+		let finish!: (working: boolean) => void;
+		const calls: Calls = [];
+		const row: InstanceSummary = {
+			id: "w",
+			status: "online",
+			activity: "working",
+			cwd: HERE,
+			sessionFile: "/w.jsonl",
+		};
+		const client = fakeClient(calls, () => [row]);
+		client.handOver = () =>
+			new Promise<boolean>((resolve) => {
 				finish = resolve;
 			});
 		let opened = false;
@@ -463,9 +472,13 @@ describe("AgentView keys", () => {
 		view.handleInput(ENTER);
 		await vi.waitFor(() => expect(finish).toBeDefined());
 		view.handleInput(ESC);
-		finish();
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		finish(true);
+		await vi.waitFor(() => expect(calls.length).toBeGreaterThan(0));
 		expect(opened).toBe(false);
+		expect(calls[0]).toEqual([
+			"spawn",
+			expect.objectContaining({ sessionFile: "/w.jsonl", prompt: CONTINUE_PROMPT }),
+		]);
 	});
 
 	it("explains how to recover a legacy Failed row that never recorded its file", () => {
@@ -483,7 +496,7 @@ describe("AgentView keys", () => {
 		]);
 		view.handleInput(ENTER);
 		for (let i = 0; i < 5; i++) await flush();
-		expect(calls).toEqual([["releaseIdle", "d"]]);
+		expect(calls).toEqual([["handOver", "d"]]);
 		expect(resumed).toEqual([false]);
 	});
 
@@ -761,7 +774,7 @@ describe("AgentView keys", () => {
 		expect(closed()).toBe(1);
 	});
 
-	it("ctrl+t pins; your own session cannot be stopped or pinned", async () => {
+	it("ctrl+t cannot pin your own session", async () => {
 		const self: InstanceSummary = {
 			id: "me",
 			status: "online",
@@ -773,13 +786,36 @@ describe("AgentView keys", () => {
 		};
 		const { view, calls, text, flush } = makeView({ self });
 		expect(view.selectedKeyForTest()).toBe("me");
-		view.handleInput(CTRL_X);
-		expect(text().join("\n")).toContain("this is the session you're in");
 		view.handleInput(CTRL_T);
+		expect(text().join("\n")).toContain("Only background sessions can be pinned");
 		await flush();
 		expect(calls).toEqual([]);
 		view.handleInput(ENTER);
 		expect(calls).toEqual([]);
+	});
+
+	it("ctrl+x stops your own session's turn, a second press deletes it", async () => {
+		const self: InstanceSummary = { id: "me", status: "online", activity: "working", cwd: HERE, external: true };
+		let stopped = 0;
+		let deleted = 0;
+		const view = new AgentView({
+			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+			client: fakeClient([], () => []),
+			appName: "bluclawd",
+			cwd: HERE,
+			home: HOME,
+			self: () => self,
+			onClose: () => {},
+			onOpen: () => {},
+			onStopSelf: () => stopped++,
+			onDeleteSelf: () => deleted++,
+		});
+		view.setInstancesForTest([]);
+		view.handleInput(CTRL_X);
+		expect(stopped).toBe(1);
+		expect(view.render(100).map(stripAnsi).join("\n")).toContain("ctrl+x again to delete");
+		view.handleInput(CTRL_X);
+		await vi.waitFor(() => expect(deleted).toBe(1));
 	});
 
 	it("enter on your own session returns to it; on another it opens there", async () => {
@@ -805,7 +841,7 @@ describe("AgentView keys", () => {
 		expect(text()[2]).toContain("openai/gpt-5 (session)");
 		for (const ch of "/compact") view.handleInput(ch);
 		view.handleInput(ENTER);
-		expect(text().join("\n")).toContain("/compact isn't available in agent view — attach to a session to run it");
+		expect(text().join("\n")).toContain("/compact isn't available in agent view — open a session to run it");
 	});
 });
 

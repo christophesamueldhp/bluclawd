@@ -11,13 +11,13 @@ import type {
 	AnswerRequest,
 	DeleteRequest,
 	ErrorResponse,
+	HandOverRequest,
 	InstanceSummary,
 	ListRequest,
 	ListResponse,
 	MetaRequest,
 	RegisterRequest,
 	RegisterResponse,
-	ReleaseIdleRequest,
 	ReleaseRequest,
 	RenameRequest,
 	RpcBridgeResponse,
@@ -91,7 +91,7 @@ function unknownInstanceError(instanceId: string): ErrorResponse {
 export async function handleIpcRequest(request: SpawnRequest): Promise<SpawnResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ListRequest): Promise<ListResponse | ErrorResponse>;
 export async function handleIpcRequest(request: StopRequest): Promise<StopResponse | ErrorResponse>;
-export async function handleIpcRequest(request: ReleaseIdleRequest): Promise<StopResponse | ErrorResponse>;
+export async function handleIpcRequest(request: HandOverRequest): Promise<StopResponse | ErrorResponse>;
 export async function handleIpcRequest(request: StatusRequest): Promise<StatusResponse | ErrorResponse>;
 export async function handleIpcRequest(request: RpcRequest): Promise<RpcBridgeResponse | ErrorResponse>;
 export async function handleIpcRequest(request: RpcStreamRequest): Promise<RpcReadyResponse | ErrorResponse>;
@@ -146,9 +146,8 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 			};
 		}
 
-		case "release_idle":
 		case "stop": {
-			const instance = await supervisor.stopInstance(request.instanceId, request.type === "release_idle");
+			const instance = await supervisor.stopInstance(request.instanceId);
 			if (!instance) {
 				return unknownInstanceError(request.instanceId);
 			}
@@ -157,6 +156,20 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				type: "stop_result",
 				ok: true,
 				instanceId: request.instanceId,
+			};
+		}
+
+		case "hand_over": {
+			const { record, working } = await supervisor.handOver(request.instanceId);
+			if (!record) {
+				return unknownInstanceError(request.instanceId);
+			}
+
+			return {
+				type: "stop_result",
+				ok: true,
+				instanceId: request.instanceId,
+				working,
 			};
 		}
 

@@ -113,30 +113,40 @@ describe("agent-view session lifecycle", () => {
 		expect(loadInstances()[0].outcome).toBe("done");
 	});
 
-	it("native transfer refuses a writer that became busy after the roster was drawn", async () => {
+	it("hand-over lets a turn's running tools finish, then reports the turn still in progress", async () => {
 		const supervisor = new ServerSupervisor();
 		const row = await supervisor.spawnInstance({ cwd: "/p" });
 		const child = FakeChild.last!;
 		child.emit({ type: "agent_start" });
-		await expect(supervisor.stopInstance(row.id, true)).rejects.toThrow("still working");
+		const handing = supervisor.handOver(row.id);
+		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(child.disposed).toBe(false);
-		expect(supervisor.getInstance(row.id)?.status).toBe("online");
-		expect(supervisor.getActivity(row.id)).toBe("working");
-		child.emit({ type: "message_end", message: { role: "assistant", content: "result: completed" } });
-		child.emit({ type: "agent_settled" });
-		await supervisor.stopInstance(row.id, true);
+		child.emit({
+			type: "turn_end",
+			message: { role: "assistant", content: [] },
+			toolResults: [{ role: "toolResult" }],
+		});
+		await expect(handing).resolves.toMatchObject({ working: true });
 		expect(child.disposed).toBe(true);
-		expect(loadInstances()[0]).toMatchObject({ status: "stopped", outcome: "done" });
+		expect(supervisor.getInstance(row.id)?.status).toBe("stopped");
 	});
 
-	it("native transfer preserves an unanswered dialog", async () => {
+	it("hand-over of an idle session stops it at once and reports no turn", async () => {
 		const supervisor = new ServerSupervisor();
 		const row = await supervisor.spawnInstance({ cwd: "/p" });
 		const child = FakeChild.last!;
+		await expect(supervisor.handOver(row.id)).resolves.toMatchObject({ working: false });
+		expect(child.disposed).toBe(true);
+	});
+
+	it("hand-over does not wait on a prompt only a window can answer", async () => {
+		const supervisor = new ServerSupervisor();
+		const row = await supervisor.spawnInstance({ cwd: "/p" });
+		const child = FakeChild.last!;
+		child.emit({ type: "agent_start" });
 		child.uiHandler?.({ type: "extension_ui_request", method: "input", id: "q", title: "Your choice?" });
-		await expect(supervisor.stopInstance(row.id, true)).rejects.toThrow("waiting for input");
-		expect(child.disposed).toBe(false);
-		expect(supervisor.getPendingNeeds(row.id)?.requestId).toBe("q");
+		await expect(supervisor.handOver(row.id)).resolves.toMatchObject({ working: true });
+		expect(child.disposed).toBe(true);
 		expect(child.answered).toEqual([]);
 	});
 
@@ -154,7 +164,7 @@ describe("agent-view session lifecycle", () => {
 			new Promise<void>((resolve) => {
 				finish = resolve;
 			});
-		const release = supervisor.stopInstance(row.id, true);
+		const release = supervisor.stopInstance(row.id);
 		expect(supervisor.getInstance(row.id)?.status).toBe("stopping");
 		const prompt = { type: "prompt" as const, message: "must not run" };
 		expect(await supervisor.handleRpc(row.id, prompt)).toBeUndefined();
