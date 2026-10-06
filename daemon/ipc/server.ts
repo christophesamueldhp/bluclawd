@@ -1,6 +1,11 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
-import type { AgentSessionEvent, RpcExtensionUIRequest, RpcResponse } from "@earendil-works/pi-coding-agent";
+import type {
+	AgentSessionEvent,
+	JsonAgentSessionEvent,
+	RpcExtensionUIRequest,
+	RpcResponse,
+} from "@earendil-works/pi-coding-agent";
 import { BUILD_ID, getSocketPath, VERSION } from "../config.ts";
 import {
 	type ErrorResponse,
@@ -93,7 +98,13 @@ export async function startIpcServer(handler: IpcRequestHandler): Promise<Server
 					const rpcStream = handler.openRpcStream(
 						request.instanceId,
 						(response) => safeWrite(response),
-						(event) => safeWrite(event),
+						(event) => {
+							if (event.type === "message_update" && event.message.role === "assistant") {
+								const { message, ...delta } = event;
+								// RpcProcess preserves the original JSON delta fields while adding its local snapshot.
+								safeWrite({ ...delta, usage: message.usage } as JsonAgentSessionEvent);
+							} else safeWrite(event);
+						},
 						(request) => safeWrite(request),
 					);
 					if (!rpcStream) {

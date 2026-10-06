@@ -4,11 +4,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
 	AgentSessionEvent,
+	JsonAgentSessionEvent,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcResponse,
 } from "@earendil-works/pi-coding-agent";
+import { AssistantStream } from "./assistant-stream.ts";
 import { isBunBinary } from "./config.ts";
 
 interface PendingRequest {
@@ -54,6 +56,7 @@ export class RpcProcessInstance {
 	private stderrBuffer = "";
 	private readonly pendingRequests = new Map<string, PendingRequest>();
 	private readonly eventListeners = new Set<(event: AgentSessionEvent) => void>();
+	private readonly assistantStream = new AssistantStream();
 	private readonly exitListeners = new Set<(error?: Error) => void>();
 	private uiRequestHandler: ((request: RpcExtensionUIRequest) => void) | undefined;
 
@@ -175,8 +178,10 @@ export class RpcProcessInstance {
 			}
 
 			default: {
+				const event = this.assistantStream.apply(parsed as JsonAgentSessionEvent);
+				if (!event) return;
 				for (const listener of this.eventListeners) {
-					listener(parsed as AgentSessionEvent);
+					listener(event);
 				}
 			}
 		}

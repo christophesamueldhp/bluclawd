@@ -188,6 +188,50 @@ describe("agent-view session lifecycle", () => {
 		expect(loadInstances()[0]).toMatchObject({ status: "stopped", outcome: "failed" });
 	});
 
+	it("reattaches to the same running worker and replays only its current output", async () => {
+		const supervisor = new ServerSupervisor();
+		const row = await supervisor.spawnInstance({ cwd: "/p" });
+		const child = FakeChild.last!;
+		child.emit({ type: "agent_start" });
+		child.emit({
+			type: "message_update",
+			message: { role: "assistant", content: [{ type: "text", text: "latest partial" }] },
+		});
+		child.emit({ type: "tool_execution_start", toolCallId: "t", toolName: "bash", args: {} });
+		const partial = {
+			type: "tool_execution_update",
+			toolCallId: "t",
+			toolName: "bash",
+			args: {},
+			partialResult: { content: [{ type: "text", text: "tool progress" }] },
+		};
+		child.emit(partial);
+		const events: unknown[] = [];
+		const first = supervisor.openRpcStream(
+			row.id,
+			(event) => events.push(event),
+			() => {},
+		)!;
+		expect(events).toHaveLength(2);
+		expect(events[0]).toMatchObject({ type: "message_start", message: { content: [{ text: "latest partial" }] } });
+		expect(events).toContainEqual(partial);
+		first.close();
+		expect(child.disposed).toBe(false);
+		expect(supervisor.getActivity(row.id)).toBe("working");
+		child.emit({ type: "message_end", message: { role: "assistant" } });
+		child.emit({ type: "tool_execution_end", toolCallId: "t" });
+		const after: unknown[] = [];
+		const second = supervisor.openRpcStream(
+			row.id,
+			(event) => after.push(event),
+			() => {},
+		)!;
+		expect(after).toEqual([]);
+		expect(FakeChild.spawnOptions).toHaveLength(1);
+		second.close();
+		await supervisor.stopInstance(row.id);
+	});
+
 	it("resuming a known session file revives the same row, and never spawns a second writer", async () => {
 		const supervisor = new ServerSupervisor();
 		const first = await supervisor.spawnInstance({ cwd: "/p", sessionFile: "/tmp/a.jsonl", label: "walk cycle" });

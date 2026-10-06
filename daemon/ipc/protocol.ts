@@ -1,5 +1,6 @@
 import type {
 	AgentSessionEvent,
+	JsonAgentSessionEvent,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -252,7 +253,13 @@ interface ResponseMap {
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;
 type RpcClientMessage = RpcCommand | RpcExtensionUIResponse;
-type RpcServerMessage = RpcReadyResponse | RpcResponse | AgentSessionEvent | RpcExtensionUIRequest | ErrorResponse;
+type RpcServerMessage =
+	| RpcReadyResponse
+	| RpcResponse
+	| AgentSessionEvent
+	| JsonAgentSessionEvent
+	| RpcExtensionUIRequest
+	| ErrorResponse;
 export type ProtocolMessage = ServerRequest | ServerResponse | RpcClientMessage | RpcServerMessage;
 
 export function encodeMessage(message: ProtocolMessage): string {

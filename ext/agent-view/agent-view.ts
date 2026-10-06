@@ -67,6 +67,17 @@ export interface AgentViewOptions {
 	/** Open a session in this window; the one here goes to the background. `resume`: its turn was
 	 *  cut off by the move, so it should carry on here. */
 	onOpen: (sessionFile: string, cwd: string, resume: boolean) => void;
+	/** Attach a terminal view while the daemon remains the session's sole writer. */
+	attachSession?: (
+		instance: InstanceSummary,
+		detach: () => void,
+	) => Component & {
+		connect(): Promise<void>;
+		close(): void;
+		handleInput(data: string): void;
+		focused?: boolean;
+		update?(instances: InstanceSummary[]): void;
+	};
 	/** A peek reply to this window's own session: sent as its next prompt once the view closes. */
 	onSelfReply?: (text: string) => void;
 	/** ctrl+enter: start a session in this window with `task` as its first prompt. */
@@ -243,6 +254,7 @@ export class AgentView implements Component, Focusable {
 	private closed = false;
 	private lastTitle = "";
 	private userMoved = false;
+	private attachment?: ReturnType<NonNullable<AgentViewOptions["attachSession"]>>;
 
 	constructor(opts: AgentViewOptions) {
 		this.opts = opts;
@@ -282,6 +294,8 @@ export class AgentView implements Component, Focusable {
 	/** Every path that abandons the view: close, open, create-and-open. */
 	private teardown(): void {
 		this.closed = true;
+		this.attachment?.close();
+		this.attachment = undefined;
 		this.opening = undefined;
 		if (this.pollTimer) clearInterval(this.pollTimer);
 		if (this.spinTimer) clearInterval(this.spinTimer);
@@ -391,6 +405,7 @@ export class AgentView implements Component, Focusable {
 			this.refreshing = false;
 		}
 		if (this.closed) return; // Its self callback may already belong to a disposed session.
+		this.attachment?.update?.(this.instances);
 		this.recompute();
 		this.render_();
 	}
@@ -511,7 +526,7 @@ export class AgentView implements Component, Focusable {
 		}
 		const cwd = this.dispatchCwd();
 		const model = this.dispatchModel;
-		if (open && this.opts.onCreateAndOpen && cwd === this.opts.cwd) {
+		if (open && this.opts.onCreateAndOpen && !this.opts.attachSession && cwd === this.opts.cwd) {
 			this.clearDraft();
 			this.teardown();
 			this.opts.onCreateAndOpen(cwd, model, task, images);
@@ -573,6 +588,53 @@ export class AgentView implements Component, Focusable {
 					: "Still starting — try again in a moment",
 			);
 			return;
+		}
+		if (this.opts.attachSession && !row.elsewhere) {
+			this.opening = row.id;
+			try {
+				const owners = (await this.opts.client.list()).filter(
+					(instance) =>
+						instance.sessionFile === row.sessionFile &&
+						(instance.status === "online" || instance.status === "starting" || instance.status === "stopping"),
+				);
+				if (this.closed || this.opening !== row.id) return;
+				if (!owners.some((owner) => owner.external)) {
+					let instance = owners[0];
+					if (!instance)
+						instance = await this.opts.client.spawn({
+							cwd: row.cwd,
+							sessionFile: row.sessionFile,
+							label: row.label,
+						});
+					if (this.closed || this.opening !== row.id) return;
+					if (!instance || instance.status !== "online") throw new Error("Still starting — try again in a moment");
+					const attachment = this.opts.attachSession(instance, () => {
+						this.attachment?.close();
+						this.attachment = undefined;
+						this.opening = undefined;
+						this.mode = "list";
+						this.syncTitle();
+						void this.refresh();
+						this.render_();
+					});
+					this.attachment = attachment;
+					this.render_();
+					await attachment.connect();
+					if (this.closed || this.attachment !== attachment) return attachment.close();
+					this.opening = undefined;
+					this.selectedKey = instance.id;
+					this.render_();
+					return;
+				}
+			} catch (error) {
+				if (this.closed || this.opening !== row.id) return;
+				this.attachment?.close();
+				this.attachment = undefined;
+				this.opening = undefined;
+				this.say(`Couldn't attach — ${error instanceof Error ? error.message : String(error)}`, "error");
+				return;
+			}
+			this.opening = undefined;
 		}
 		const exists = this.opts.fileExists ?? existsSync;
 		this.opening = row.id;
@@ -916,6 +978,10 @@ export class AgentView implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		if (this.attachment) {
+			this.attachment.handleInput(data);
+			return;
+		}
 		if (this.mode === "help") {
 			this.mode = "list";
 			if (this.isEsc(data) || matchesKey(data, "?") || matchesKey(data, "shift+?")) {
@@ -1165,7 +1231,9 @@ export class AgentView implements Component, Focusable {
 		this.render_();
 	}
 
-	invalidate(): void {}
+	invalidate(): void {
+		this.attachment?.invalidate();
+	}
 
 	// ---- test seams ----------------------------------------------------------------------
 
@@ -1455,6 +1523,10 @@ export class AgentView implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		if (this.attachment) {
+			this.attachment.focused = this.focused;
+			return this.attachment.render(width);
+		}
 		const rows = this.opts.ui.terminal.rows;
 		const header = [...this.headerLines(width)];
 		const status = this.statusLine();

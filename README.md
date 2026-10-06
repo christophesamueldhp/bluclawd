@@ -64,7 +64,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `permissions.deny`, Alt+M | deny rules block matching tool calls; the footer shows pi's `defaultProjectTrust` (`⏵⏵ always` / `⏸ ask` / `✕ never`) and Alt+M cycles it — see [Permissions](#permissions) |
 | `/tasks` | background tasks dialog (alias `/bashes`): shells (`run_in_background`, Ctrl+B on the model's running bash, or a foreground command past its `timeout`), monitors; running tasks only; Enter shows a task's output tail, `x` stops it (the model is told without a turn starting), and updates wait while the dialog is open. The model's bash is Claude Code's: `timeout` in milliseconds (2 minutes by default), a command still running then - or on Ctrl+B after 2s, or when you send a message - moves to the background instead of being killed, and the model reads a task's output file with `read`. The footer pill counts the running shells and monitors; ↓ from an empty prompt selects it and Enter opens the dialog. A shell writes its whole output to a file named in its start result and exit notification; `task_stop` stops it. A job notifies the model once when it exits, and once more if it goes quiet for 45s on what reads as an interactive prompt (`(y/n)`, `Press Enter`, …); the `monitor` tool turns each stdout line of a long-running command, or each frame of a WebSocket (`ws`), into an event that wakes the model (Claude Code's `Monitor`; stderr goes to the output file; every monitor expires after `timeout_ms`, 5 minutes by default and at most 30, with one notice so the model can re-arm it) |
 | `/rewind` | file checkpoints per turn; restores the files, the conversation, or both. Checkpoints are git commits kept under `refs/bluclawd/checkpoints/<session>/`: the newest 50 per session, and another session's refs are pruned after 30 days |
-| `←` twice on an empty prompt (or `/agent-view`) | agent view, as Claude Code's `claude agents`: background sessions in Needs input / Working / Completed bands (ctrl+s: by directory, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing, age. Type a task + enter to start a background session (ctrl+enter: start it here), shift+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, ctrl+v pastes an image attachment (or clipboard text) into the new-session composer, space peeks and replies (1-9 answers a pending question), enter/→ opens an idle session in Pi's native chat (the current turn finishes before switching; a busy target keeps working and can be inspected/replied to with space), alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes, ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` filters, `/resume` brings a past session back, `/model` sets the model for new ones. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press. Background sessions run under a local daemon (`daemon/`, a Unix socket in `~/.pi/server`), so they keep running after pi exits or its terminal closes, and so does a turn that was in progress in this window when you quit: the daemon resumes it with a "continue where you left off" prompt. Switching through Agent View never aborts a turn or sends a continuation prompt. Agent View detects both changed daemon code and a changed Pi installation, restarting an obsolete daemon only when it owns no running sessions. If startup fails, the Failed row retains its session file and can still be opened. A session that was idle when pi exited is kept as a row with no process (it resumes when opened or replied to); every row stays until ctrl+x deletes it; it reports presence to radius.pi.dev only when a radius credential or `RADIUS_API_KEY` is configured |
+| `←` on an empty prompt (or `/agent-view`) | agent view, as Claude Code's `claude agents`: background sessions in Needs input / Working / Completed bands (ctrl+s: by directory, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing, age. Type a task + enter to start a background session (ctrl+enter: start it here), shift+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, ctrl+v pastes an image attachment (or clipboard text) into the new-session composer, space peeks and replies (1-9 answers a pending question), enter/→ attaches to a background session immediately, including Working and Needs input; its conversation uses Pi's own message, tool, editor, and dialog components; ← on an empty prompt or Ctrl+Z detaches to the list without stopping the worker or the foreground turn, alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes, ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` filters, `/resume` brings a past session back, `/model` sets the model for new ones. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press. Background sessions run under a local daemon (`daemon/`, a Unix socket in `~/.pi/server`), so they keep running after pi exits or its terminal closes, and so does a turn that was in progress in this window when you quit: the daemon resumes it with a "continue where you left off" prompt. Attaching and detaching background sessions never aborts a turn or sends a continuation prompt. Agent View detects both changed daemon code and a changed Pi installation, restarting an obsolete daemon only when it owns no running sessions. If startup fails, the Failed row retains its session file and can still be opened. A session that was idle when pi exited is kept as a row with no process (it resumes when opened or replied to); every row stays until ctrl+x deletes it; it reports presence to radius.pi.dev only when a radius credential or `RADIUS_API_KEY` is configured |
 | `/status`, `/context` | model, auth, safety, session, context window |
 | `/theme` | theme |
 | `/help` | all of the above, grouped |
@@ -112,13 +112,22 @@ node --experimental-strip-types scripts/probe-extensions.ts   # what each extens
 
 ## Session switching
 
-The conversation, editor, footer, and built-in commands use native Pi. Agent View only opens
-when requested; it does not replace the conversation screen or bootstrap a second runtime.
-Opening Agent View leaves the current turn running. Switching through Agent View waits
-for the current native turn to settle. A background session that is working or awaiting a
-dialog stays in Agent View; use Space to inspect or reply, then open it when idle. The daemon
-checks again before releasing an idle writer, so an outdated roster cannot abort newer work.
-Saved sessions open without an automatic continuation prompt. Ctrl+X remains an explicit stop.
+The foreground conversation keeps its native Pi runtime. Agent View opens only when requested.
+Enter/→ attaches to a background worker over the daemon's existing RPC stream, whether it is
+working, idle, or awaiting a dialog. The foreground turn keeps running too: attaching does not
+replace its runtime. Attached conversations use Pi's own markdown messages, tool output,
+multiline editor, and dialog components, with one visible composer.
+
+Press ← with an empty prompt or Ctrl+Z to detach to the roster. Only the viewer socket closes;
+the worker stays alive and remains the sole writer of its transcript. Reattaching restores the
+active branch, in-flight output, and pending dialog. Saved sessions restart without an automatic
+continuation prompt. Replies to a working session enter its follow-up queue. Esc/Ctrl+C and
+`/stop` explicitly interrupt the attached response; Ctrl+X in the roster explicitly stops a worker.
+
+An empty foreground prompt opens Agent View with one ←. Just after editing text or navigating
+history, it asks for a second press to avoid accidentally leaving the conversation. Sessions
+owned by another native terminal still require an ownership transfer, which waits for that
+terminal's turn to finish.
 
 ## What this layer cannot do
 
@@ -138,19 +147,15 @@ reading the API:
   theme.** pi resolves the configured theme before that hook runs, so it falls
   back to dark and prints "Theme not found". The theme is declared in
   `package.json`'s `pi.themes` instead, which pi registers before startup.
-- **`newSession()` takes no model**, so agent view's ctrl+enter (start a task in this
-  window) says so when `/model` chose a different one.
 - **Agent view differs from Claude Code's in a few places.** Row text comes from each
   session's own output — background sessions are asked to end a turn with a `result:` /
   `needs input:` / `failed:` line — not from a Haiku-class summary, so it works with any
   provider. There are no pull-request badges (no Ready for review band), no `!` shell-job
   rows, no `@repo` / `@agent` mentions, and no worktree isolation for background
-  sessions. Opening a session here stops its background process first (pi holds one
-  session per window), and a session leaving this window goes to a new background process, so
-  a turn in progress is cut off and resumed with a "continue" prompt rather than carried over
-  mid-tool: a running command starts again. `←`
-  always takes two presses (Claude Code opens on one when the prompt was already
-  empty), and `tab` does not browse subagents.
+  sessions. Background conversation attachment uses Pi's exported components; it is not
+  a second native InteractiveMode runtime. Terminal-only built-in commands and custom extension
+  renderers are not all available over RPC. `/model provider/model`, `/compact`, `/name`, `/stop`,
+  and the worker's RPC-compatible extension commands are supported. `tab` does not browse subagents.
 
 ## Permissions
 

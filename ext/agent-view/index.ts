@@ -1,5 +1,5 @@
 /**
- * Agent view (← twice on an empty prompt).
+ * Agent view (← on an empty prompt).
  *
  * Session switching lives on `ExtensionCommandContext`, not the plain context, so ← dispatches
  * the hidden `/agent-view` command rather than opening the view itself.
@@ -28,6 +28,7 @@ import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
 import { AgentView, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, handOff, handOffAfterExit } from "./hand-off.ts";
+import { NativeAttachment } from "./native-attachment.ts";
 import { type InstanceSummary, OrchestratorClient } from "./orchestrator-client.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
 import { collectRows, labelFromTask } from "./rows.ts";
@@ -228,10 +229,9 @@ const agentView: InlineExtension = {
 				tui = widgetTui;
 				return { render: () => [], invalidate: () => {} };
 			});
-			// ← twice on an empty prompt opens agent view: the first press shows a "Press ← again"
-			// hint, the second switches. Nothing is taken while an overlay or dialog has the
-			// keyboard, or while the prompt holds text.
+			// One ← opens the roster, with a second press required only just after editing/history.
 			let armedAt = 0;
+			let editedAt = 0;
 			const disarm = (): void => {
 				if (!armedAt) return;
 				armedAt = 0;
@@ -241,6 +241,13 @@ const agentView: InlineExtension = {
 			const offKey = ctx.ui.onTerminalInput((data) => {
 				// Kitty reports a release (and a held key) as separate events; only presses count.
 				if (isKeyRelease(data) || isKeyRepeat(data)) return undefined;
+				if (
+					ctx.ui.getEditorText() !== "" ||
+					matchesKey(data, "backspace") ||
+					matchesKey(data, "up") ||
+					matchesKey(data, "down")
+				)
+					editedAt = Date.now();
 				if (viewOpen || !matchesKey(data, "left") || ctx.ui.getEditorText() !== "") {
 					disarm();
 					return undefined;
@@ -252,7 +259,7 @@ const agentView: InlineExtension = {
 					disarm();
 					return undefined;
 				}
-				if (Date.now() - armedAt < LEFT_ARM_MS) {
+				if (Date.now() - editedAt >= LEFT_ARM_MS || (armedAt && Date.now() - armedAt < LEFT_ARM_MS)) {
 					disarm();
 					pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
 					return { consume: true };
@@ -308,9 +315,12 @@ const agentView: InlineExtension = {
 			try {
 				const action = await ctx.ui.custom<ViewAction | undefined>(
 					(tui, _theme, _keybindings, done) => {
+						const client = new OrchestratorClient();
 						const view = new AgentView({
 							ui: tui,
-							client: new OrchestratorClient(),
+							client,
+							attachSession: (instance, detach) =>
+								new NativeAttachment(tui, client, instance, detach, _keybindings),
 							appName: "bluclawd",
 							version: VERSION,
 							model: model ? { provider: model.provider, id: model.id } : undefined,
@@ -403,7 +413,7 @@ const agentView: InlineExtension = {
 		};
 
 		pi.registerCommand(AGENT_VIEW_COMMAND, {
-			description: "Agent view (press ← twice on an empty prompt)",
+			description: "Agent view (press ← on an empty prompt)",
 			handler: async (_args, ctx) => openAgentView(ctx),
 		});
 		pi.registerCommand(RELEASE_COMMAND, {

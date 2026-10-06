@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import { daemonBuildId, getSocketPath } from "../../daemon/paths.ts";
+import { attachRpc } from "./rpc-attachment.ts";
 
 export type AgentActivity = "idle" | "working" | "awaiting_input";
 type InstanceStatus = "starting" | "online" | "stopping" | "stopped" | "error";
@@ -144,6 +145,13 @@ export class OrchestratorClient {
 
 	constructor(socketPath: string = getSocketPath()) {
 		this.socketPath = socketPath;
+	}
+
+	attach(
+		instanceId: string,
+		...callbacks: Parameters<typeof attachRpc> extends [string, string, ...infer Rest] ? Rest : never
+	) {
+		return attachRpc(this.socketPath, instanceId, ...callbacks);
 	}
 
 	private request(req: Request, timeoutMs = 2000): Promise<AnyResponse> {

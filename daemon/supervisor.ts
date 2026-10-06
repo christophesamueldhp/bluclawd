@@ -43,6 +43,8 @@ interface LiveInstance {
 	onUiRequest?: (request: RpcExtensionUIRequest) => void;
 	unsubscribeEvents?: () => void;
 	unsubscribeExit?: () => void;
+	/** Only in-flight output, so an attaching viewer sees progress emitted before it connected. */
+	replay?: Map<string, AgentSessionEvent>;
 }
 
 function cloneInstance(record: InstanceRecord): InstanceRecord {
@@ -118,6 +120,7 @@ export class ServerSupervisor {
 	}
 
 	private clearBindings(live: LiveInstance): void {
+		live.replay?.clear();
 		live.unsubscribeEvents?.();
 		live.unsubscribeExit?.();
 		live.unsubscribeEvents = undefined;
@@ -132,7 +135,14 @@ export class ServerSupervisor {
 	private bindRpcProcess(live: LiveInstance, rpcProcess: RpcProcessInstance): void {
 		this.clearBindings(live);
 		live.resources.rpcProcess = rpcProcess;
+		live.replay = new Map();
 		live.unsubscribeEvents = rpcProcess.onEvent((event) => {
+			if (event.type === "message_start" || event.type === "message_update") live.replay.set("message", event);
+			else if (event.type === "message_end") live.replay.delete("message");
+			else if (event.type === "tool_execution_start" || event.type === "tool_execution_update")
+				live.replay.set(`tool:${event.toolCallId}`, event);
+			else if (event.type === "tool_execution_end") live.replay.delete(`tool:${event.toolCallId}`);
+			else if (event.type === "agent_settled") live.replay.clear();
 			live.activityState = reduceActivity(live.activityState, { kind: "agent_event", type: event.type });
 			live.tracker.apply(event as Parameters<SessionStateTracker["apply"]>[0]);
 			// Persisted at run boundaries only: every streamed delta would rewrite instances.json.
@@ -295,6 +305,10 @@ export class ServerSupervisor {
 			return undefined;
 		}
 		live.subscribers.add(onEvent);
+		for (const event of live.replay?.values() ?? []) {
+			// Seed a late viewer once; subsequent wire updates remain compact deltas.
+			onEvent(event.type === "message_update" ? { type: "message_start", message: event.message } : event);
+		}
 		live.onUiRequest = onUiRequest;
 		// Replay an already-outstanding prompt so a viewer attaching mid-block still sees it.
 		if (live.pendingUiRequest) onUiRequest(live.pendingUiRequest);
