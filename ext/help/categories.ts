@@ -59,7 +59,6 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 	status: "Info & diagnostics",
 	context: "Info & diagnostics",
 	tasks: "Info & diagnostics",
-	bashes: "Info & diagnostics",
 	changelog: "Info & diagnostics",
 	keybindings: "Info & diagnostics",
 	help: "Info & diagnostics",

@@ -410,12 +410,10 @@ const backgroundBash: InlineExtension = {
 			return commandBlock(lines);
 		});
 
-		for (const name of ["tasks", "bashes"]) {
-			pi.registerCommand(name, {
-				description: name === "tasks" ? "View and manage everything running in the background" : "Alias for /tasks",
-				handler: (_args, commandCtx) => showTasks(commandCtx),
-			});
-		}
+		pi.registerCommand("tasks", {
+			description: "View and manage everything running in the background",
+			handler: (_args, commandCtx) => showTasks(commandCtx),
+		});
 
 		async function showTasks(commandCtx: ExtensionCommandContext): Promise<void> {
 			if (commandCtx.hasUI) {
