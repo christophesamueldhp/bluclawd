@@ -12,6 +12,8 @@ export async function sendIpcRequest(request: ServerRequest): Promise<ServerResp
 
 		const cleanup = () => {
 			socket.removeAllListeners();
+			// A reset after we are done is harmless; with no listener it would throw.
+			socket.on("error", () => {});
 			socket.end();
 		};
 

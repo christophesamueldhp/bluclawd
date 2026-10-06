@@ -137,6 +137,8 @@ export class OrchestratorClient {
 				settled = true;
 				clearTimeout(timer);
 				socket.removeAllListeners();
+				// A reset after we are done is harmless; with no listener it would throw.
+				socket.on("error", () => {});
 				socket.end();
 				fn();
 			};

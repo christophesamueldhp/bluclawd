@@ -22,6 +22,8 @@ export async function startIpcServer(handler: IpcRequestHandler): Promise<Server
 
 	const server = createServer((socket) => {
 		let buffer = "";
+		// A client that resets mid-request must not become an uncaught exception that stops the daemon.
+		socket.on("error", () => socket.destroy());
 
 		socket.on("data", async (chunk: Buffer | string) => {
 			buffer += chunk.toString();
