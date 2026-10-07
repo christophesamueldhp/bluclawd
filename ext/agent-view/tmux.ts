@@ -19,6 +19,8 @@ export const PANE_ENV = "BLUCLAWD_PANE";
 export const NORMAL_ENV = "BLUCLAWD_NORMAL";
 /** Set on a pane started only to show agent view, which it opens with {@link AGENT_VIEW_COMMAND}. */
 export const OPEN_VIEW_ENV = "BLUCLAWD_OPEN_VIEW";
+/** Set with {@link OPEN_VIEW_ENV}: the row of the session being deleted, which that view leaves out. */
+export const HIDE_ENV = "BLUCLAWD_HIDE";
 /** The command ←← dispatches; not meant to be typed. */
 export const AGENT_VIEW_COMMAND = "agent-view";
 
@@ -214,6 +216,16 @@ export class Tmux {
 	/** Show `name` in the terminal this pane is shown in. */
 	switchTo(name: string): void {
 		this.run(["switch-client", "-t", `=${name}`]);
+	}
+
+	/** Mark `name`'s agent view as drawn: a terminal waiting to move there can switch now. */
+	markViewReady(name: string): void {
+		this.run(["set-option", "-t", `=${name}:`, "@bluclawd_view_ready", "1"]);
+	}
+
+	/** Whether `name`'s agent view has drawn; throws once the session is gone. */
+	viewReady(name: string): boolean {
+		return this.run(["display-message", "-p", "-t", `=${name}:`, "#{@bluclawd_view_ready}"]).trim() === "1";
 	}
 
 	/** Leave tmux: the terminal returns to its shell, every pane keeps running. */

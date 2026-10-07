@@ -8,7 +8,7 @@ import { paneArgs } from "../ext/agent-view/index.ts";
 import type { InstanceSummary, OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
 import { collectRows } from "../ext/agent-view/rows.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
-import { OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../ext/agent-view/tmux.ts";
+import { HIDE_ENV, OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../ext/agent-view/tmux.ts";
 
 const plainTheme = {
 	fg: (_c: string, s: string) => s,
@@ -48,6 +48,9 @@ function setup(instances: InstanceSummary[], self?: InstanceSummary) {
 			calls.push(["start", cwd, args, env]);
 			return `pi-new${++started}`;
 		},
+		waitForView: async (name) => {
+			calls.push(["waitForView", name]);
+		},
 		end: (name) => calls.push(["end", name]),
 		kill: (name) => calls.push(["kill", name]),
 		unlist: async () => {
@@ -74,7 +77,7 @@ function setup(instances: InstanceSummary[], self?: InstanceSummary) {
 	const flush = async () => {
 		for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
 	};
-	return { view, calls, closed: () => closed, flush };
+	return { view, calls, closed: () => closed, flush, panes };
 }
 
 const paneRow = (id: string, extra: Partial<InstanceSummary> = {}): InstanceSummary => ({
@@ -147,12 +150,79 @@ describe("agent view in pane mode", () => {
 		view.handleInput(CTRL_X);
 		await flush();
 		expect(calls).toEqual([
-			["start", HERE, ["--", "/agent-view"], { [OPEN_VIEW_ENV]: "1" }],
+			["start", HERE, ["--", "/agent-view"], { [OPEN_VIEW_ENV]: "1", [HIDE_ENV]: "pi-self" }],
+			["waitForView", "pi-new1"],
 			["switchTo", "pi-new1"],
 			["unlist"],
 			["delete", "pi-self"],
 			["kill", "pi-self"],
 		]);
+	});
+
+	it("deleting this terminal's session keeps this view up, keys ignored, until the new one has drawn", async () => {
+		const self = paneRow("pi-self", { activity: "idle" });
+		const { view, calls, closed, flush, panes } = setup([], self);
+		let drawn: () => void = () => {};
+		panes.waitForView = (name) => {
+			calls.push(["waitForView", name]);
+			return new Promise((resolve) => {
+				drawn = resolve;
+			});
+		};
+		view.handleInput(CTRL_X);
+		view.handleInput(CTRL_X);
+		await flush();
+		view.handleInput(ENTER);
+		view.handleInput("\x1b");
+		await flush();
+		expect(calls.map((c) => c[0])).toEqual(["start", "waitForView"]);
+		expect(closed()).toBe(0);
+		drawn();
+		await vi.waitFor(() => expect(calls.at(-1)).toEqual(["kill", "pi-self"]));
+		expect(calls.map((c) => c[0])).toEqual(["start", "waitForView", "switchTo", "unlist", "delete", "kill"]);
+	});
+
+	it("if the new pane ends before drawing, deleting this terminal's session is called off", async () => {
+		const self = paneRow("pi-self", { activity: "idle" });
+		const { view, calls, flush, panes } = setup([], self);
+		panes.waitForView = async () => {
+			throw new Error("can't find session");
+		};
+		view.handleInput(CTRL_X);
+		view.handleInput(CTRL_X);
+		await flush();
+		expect(calls).toEqual([
+			["start", HERE, ["--", "/agent-view"], { [OPEN_VIEW_ENV]: "1", [HIDE_ENV]: "pi-self" }],
+			["kill", "pi-new1"],
+		]);
+		expect(view.render(100).join("\n")).toContain("Couldn't delete — can't find session");
+	});
+
+	it("a view opened by a delete leaves that row out, and reports its first loaded frame once", async () => {
+		const drawn = vi.fn();
+		const view = new AgentView({
+			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+			client: {
+				list: async () => [paneRow("pi-gone", { label: "deleted one" }), paneRow("pi-a", { label: "kept one" })],
+				ensureDaemon: async () => true,
+				getDaemonInfo: async () => ({ running: false }),
+			} as unknown as OrchestratorClient,
+			appName: "bluclawd",
+			cwd: HERE,
+			home: "/home/me",
+			panes: { listShells: () => [] } as unknown as PaneOps,
+			onClose: () => {},
+			hide: "pi-gone",
+			onDrawn: drawn,
+		});
+		view.render(100);
+		await view.onShow();
+		const text = view.render(100).join("\n");
+		view.render(100);
+		await vi.waitFor(() => expect(drawn).toHaveBeenCalledTimes(1));
+		expect(text).toContain("kept one");
+		expect(text).not.toContain("deleted one");
+		view.close();
 	});
 
 	it("a peek reply becomes the pane's next prompt; ctrl+c twice leaves tmux", async () => {
@@ -260,6 +330,20 @@ describe("tmux", () => {
 		expect(runs).toEqual([
 			["switch-client", "-t", "=pi-a"],
 			["display-message", "-p", "-t", "=pi-b:", "#{pane_pid}"],
+		]);
+	});
+
+	it("marks and reads a pane's drawn agent view as a session option", () => {
+		const runs: string[][] = [];
+		const tmux = new Tmux("/srv", (args) => {
+			runs.push(args);
+			return "1\n";
+		});
+		tmux.markViewReady("pi-a");
+		expect(tmux.viewReady("pi-a")).toBe(true);
+		expect(runs).toEqual([
+			["set-option", "-t", "=pi-a:", "@bluclawd_view_ready", "1"],
+			["display-message", "-p", "-t", "=pi-a:", "#{@bluclawd_view_ready}"],
 		]);
 	});
 

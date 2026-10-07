@@ -125,6 +125,9 @@ function fakePanes(calls: Calls): PaneOps {
 			calls.push(["start", cwd, args, ...(env ? [env] : [])]);
 			return `pane-${++n}`;
 		},
+		waitForView: async (pane) => {
+			calls.push(["waitForView", pane]);
+		},
 		end: (pane) => calls.push(["end", pane]),
 		kill: (pane) => calls.push(["kill", pane]),
 		unlist: async () => {
@@ -623,7 +626,8 @@ describe("AgentView keys", () => {
 		// This terminal moves to a new pane showing agent view; this one ends.
 		await vi.waitFor(() => expect(calls.at(-1)).toEqual(["kill", "pane-self"]));
 		expect(calls).toEqual([
-			["start", HERE, ["--", "/agent-view"], { BLUCLAWD_OPEN_VIEW: "1" }],
+			["start", HERE, ["--", "/agent-view"], { BLUCLAWD_OPEN_VIEW: "1", BLUCLAWD_HIDE: "me" }],
+			["waitForView", "pane-1"],
 			["switchTo", "pane-1"],
 			["unlist"],
 			["delete", "me"],

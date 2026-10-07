@@ -74,6 +74,7 @@ function setup(shells: ShellInfo[]) {
 		current: "pi-self",
 		switchTo: () => {},
 		start: () => "pi-new",
+		waitForView: async () => {},
 		end: () => {},
 		kill: (name) => calls.push(["kill", name]),
 		unlist: async () => {},

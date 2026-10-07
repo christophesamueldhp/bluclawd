@@ -29,7 +29,7 @@ import { type InstanceSummary, OrchestratorClient, type PaneMessage } from "./or
 import { loadViewMode, saveViewMode } from "./prefs.ts";
 import { collectRows, labelFromTask } from "./rows.ts";
 import { deriveLabel, ForegroundActivity, SelfRegistration, type SelfSessionInfo } from "./self-registration.ts";
-import { AGENT_VIEW_COMMAND, NORMAL_ENV, OPEN_VIEW_ENV, Tmux } from "./tmux.ts";
+import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, Tmux } from "./tmux.ts";
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
@@ -43,6 +43,8 @@ const LEFT_ARM_MS = 3000;
 const LEFT_EDIT_MS = 2000;
 /** A second ctrl+c or ctrl+d this soon after the first exits (pi's own window for ctrl+c). */
 const EXIT_PRESS_MS = 500;
+/** How many times (50ms apart) deleting this terminal's session waits for the pane it moves to. */
+const VIEW_READY_POLLS = 100;
 const STATUS_KEY = STATUS_KEYS.agents;
 const NEEDS_TMUX = "Agent view needs tmux — install it (brew install tmux) and start pi again";
 const HIDDEN_COMMANDS: ReadonlySet<string> = new Set([AGENT_VIEW_COMMAND]);
@@ -186,6 +188,8 @@ const agentView: InlineExtension = {
 		};
 		// Set on a pane started only to show agent view, after this terminal's session was deleted.
 		let viewHost = false;
+		// The row of the session whose deletion started this pane, until that row is gone.
+		let hide: string | undefined;
 		// Agent view there has no session of this terminal's, as Claude Code's once its origin is
 		// deleted: no own row, and esc quits.
 		const hosting = (ctx: ExtensionContext): boolean => viewHost && blank(ctx);
@@ -362,6 +366,8 @@ const agentView: InlineExtension = {
 			// Before the first heartbeat, which must not list a pane that only hosts agent view.
 			if (process.env[OPEN_VIEW_ENV]) viewHost = true;
 			delete process.env[OPEN_VIEW_ENV];
+			hide ??= process.env[HIDE_ENV];
+			delete process.env[HIDE_ENV];
 			activity = new ForegroundActivity();
 			registration = new SelfRegistration(
 				new OrchestratorClient(),
@@ -571,6 +577,11 @@ const agentView: InlineExtension = {
 									if (ending) panes.kill(pane);
 								},
 								start: (cwd, args, env) => panes.newSession({ cwd, args, env }),
+								waitForView: async (name) => {
+									for (let i = 0; i < VIEW_READY_POLLS && !panes.viewReady(name); i++) {
+										await new Promise((resolve) => setTimeout(resolve, 50));
+									}
+								},
 								end: (name) => panes.end(name),
 								kill: (name) => panes.kill(name),
 								unlist: async () => {
@@ -596,6 +607,16 @@ const agentView: InlineExtension = {
 							loadViewMode: () => loadViewMode(getAgentDir()),
 							saveViewMode: (mode) => saveViewMode(getAgentDir(), mode),
 							setTitle: (title) => ctx.ui.setTitle(title ?? sessionTitle()),
+							hide,
+							onDrawn: viewHost
+								? () => {
+										try {
+											panes.markViewReady(pane);
+										} catch {
+											// the terminal waiting on it switches after a few seconds anyway
+										}
+									}
+								: undefined,
 						});
 						// The roster loads on show, not on construct — without this it opens empty.
 						void view.onShow();

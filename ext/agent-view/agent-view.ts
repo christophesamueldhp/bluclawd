@@ -48,7 +48,7 @@ import {
 	stateBandOf,
 	type ViewMode,
 } from "./rows.ts";
-import { AGENT_VIEW_COMMAND, OPEN_VIEW_ENV, type ShellInfo } from "./tmux.ts";
+import { AGENT_VIEW_COMMAND, HIDE_ENV, OPEN_VIEW_ENV, type ShellInfo } from "./tmux.ts";
 
 export interface PastSession {
 	sessionFile: string;
@@ -93,6 +93,10 @@ export interface AgentViewOptions {
 	saveViewMode?: (mode: ViewMode) => void;
 	/** The terminal tab title while the view is open; undefined restores the session's own. */
 	setTitle?: (title: string | undefined) => void;
+	/** A row not to list: the session whose deletion opened this view, until its row is gone. */
+	hide?: string;
+	/** Called once the loaded roster has drawn. */
+	onDrawn?: () => void;
 }
 
 /** What agent view needs from tmux in pane mode. */
@@ -102,6 +106,9 @@ export interface PaneOps {
 	switchTo(pane: string): void;
 	/** Start pi with `args` in a new tmux session; returns its name. */
 	start(cwd: string, args: string[], env?: Record<string, string>): string;
+	/** Resolves once a pane started to show agent view has drawn it, or after a few seconds; rejects
+	 *  if the pane ends first. */
+	waitForView(pane: string): Promise<void>;
 	/** End a pane's pi as quitting does: it saves its session as a stopped row. */
 	end(pane: string): void;
 	/** End a pane's pi at once, leaving no row behind. */
@@ -298,6 +305,11 @@ export class AgentView implements Component, Focusable {
 	private pollTimer: ReturnType<typeof setInterval> | undefined;
 	private refreshing = false;
 	private closed = false;
+	/** Set once the first roster is in; the next frame drawn is reported to onDrawn. */
+	private loaded = false;
+	private drawn = false;
+	/** This terminal is moving to another pane: keys wait for it. */
+	private leaving = false;
 	private lastTitle = "";
 	private userMoved = false;
 
@@ -370,6 +382,8 @@ export class AgentView implements Component, Focusable {
 		}
 		await this.refresh();
 		if (this.closed) return;
+		this.loaded = true;
+		this.opts.ui.requestRender();
 		this.pollTimer = setInterval(() => void this.refresh(), 1000);
 	}
 
@@ -492,7 +506,7 @@ export class AgentView implements Component, Focusable {
 		if (this.refreshing || this.closed) return;
 		this.refreshing = true;
 		try {
-			this.instances = await this.opts.client.list();
+			this.instances = (await this.opts.client.list()).filter((inst) => inst.id !== this.opts.hide);
 			this.connectionLost = false;
 		} catch {
 			this.connectionLost = true;
@@ -1006,13 +1020,28 @@ export class AgentView implements Component, Focusable {
 
 	/** Pane mode: this terminal moves to a new session, in agent view, and this pane ends. */
 	private async deleteOwnPane(row: AgentRow, panes: PaneOps): Promise<void> {
-		let next: string;
+		let next: string | undefined;
+		this.leaving = true;
+		this.say("Deleting…");
 		try {
 			// Its first prompt, not its session_start: an extension starting after this one (paste's
 			// editor) would take the keyboard from a view opened there.
-			next = panes.start(this.opts.cwd, ["--", `/${AGENT_VIEW_COMMAND}`], { [OPEN_VIEW_ENV]: "1" });
+			next = panes.start(this.opts.cwd, ["--", `/${AGENT_VIEW_COMMAND}`], {
+				[OPEN_VIEW_ENV]: "1",
+				[HIDE_ENV]: row.id,
+			});
+			// Switching at once would show the new pi starting up, then its prompt, then its agent view.
+			await panes.waitForView(next);
 			panes.switchTo(next);
 		} catch (error) {
+			this.leaving = false;
+			if (next) {
+				try {
+					panes.kill(next);
+				} catch {
+					// it ended already
+				}
+			}
 			this.say(`Couldn't delete — ${error instanceof Error ? error.message : String(error)}`, "error");
 			return;
 		}
@@ -1297,6 +1326,7 @@ export class AgentView implements Component, Focusable {
 	}
 
 	handleInput(data: string): void {
+		if (this.leaving) return;
 		if (this.mode === "resume") {
 			this.handleResumeInput(data);
 			return;
@@ -2081,6 +2111,11 @@ export class AgentView implements Component, Focusable {
 	}
 
 	render(width: number): string[] {
+		if (this.loaded && !this.drawn) {
+			this.drawn = true;
+			// Once this frame has reached the terminal: tmux takes the mark and the output by different ways.
+			if (this.opts.onDrawn) setTimeout(this.opts.onDrawn, 30);
+		}
 		const rows = this.opts.ui.terminal.rows;
 		const rule = faint("─".repeat(width));
 		let footer: string[];
