@@ -29,7 +29,7 @@ import { type InstanceSummary, OrchestratorClient, type PaneMessage } from "./or
 import { loadViewMode, saveViewMode } from "./prefs.ts";
 import { collectRows, labelFromTask } from "./rows.ts";
 import { deriveLabel, ForegroundActivity, SelfRegistration, type SelfSessionInfo } from "./self-registration.ts";
-import { NORMAL_ENV, OPEN_VIEW_ENV, Tmux } from "./tmux.ts";
+import { AGENT_VIEW_COMMAND, NORMAL_ENV, OPEN_VIEW_ENV, Tmux } from "./tmux.ts";
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
@@ -45,8 +45,6 @@ const LEFT_EDIT_MS = 2000;
 const EXIT_PRESS_MS = 500;
 const STATUS_KEY = STATUS_KEYS.agents;
 const NEEDS_TMUX = "Agent view needs tmux — install it (brew install tmux) and start pi again";
-/** The command ←← dispatches; not meant to be typed. */
-const AGENT_VIEW_COMMAND = "agent-view";
 const HIDDEN_COMMANDS: ReadonlySet<string> = new Set([AGENT_VIEW_COMMAND]);
 
 /** Autocomplete without the agent view commands. */
@@ -362,9 +360,8 @@ const agentView: InlineExtension = {
 			}
 			registration?.stop();
 			// Before the first heartbeat, which must not list a pane that only hosts agent view.
-			const openView = !!process.env[OPEN_VIEW_ENV];
+			if (process.env[OPEN_VIEW_ENV]) viewHost = true;
 			delete process.env[OPEN_VIEW_ENV];
-			if (openView) viewHost = true;
 			activity = new ForegroundActivity();
 			registration = new SelfRegistration(
 				new OrchestratorClient(),
@@ -376,10 +373,6 @@ const agentView: InlineExtension = {
 			if (process.env[NORMAL_ENV]) normal = true;
 			delete process.env[NORMAL_ENV];
 			syncEndOnDetach(ctx);
-			// A pane started to show agent view does so once.
-			if (openView) {
-				pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
-			}
 			stopPill?.();
 			const offPill = startPill(ctx);
 			if (!autocompleteAdded) {

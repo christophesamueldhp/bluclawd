@@ -623,7 +623,7 @@ describe("AgentView keys", () => {
 		// This terminal moves to a new pane showing agent view; this one ends.
 		await vi.waitFor(() => expect(calls.at(-1)).toEqual(["kill", "pane-self"]));
 		expect(calls).toEqual([
-			["start", HERE, [], { BLUCLAWD_OPEN_VIEW: "1" }],
+			["start", HERE, ["--", "/agent-view"], { BLUCLAWD_OPEN_VIEW: "1" }],
 			["switchTo", "pane-1"],
 			["unlist"],
 			["delete", "me"],

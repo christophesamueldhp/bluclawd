@@ -147,7 +147,7 @@ describe("agent view in pane mode", () => {
 		view.handleInput(CTRL_X);
 		await flush();
 		expect(calls).toEqual([
-			["start", HERE, [], { [OPEN_VIEW_ENV]: "1" }],
+			["start", HERE, ["--", "/agent-view"], { [OPEN_VIEW_ENV]: "1" }],
 			["switchTo", "pi-new1"],
 			["unlist"],
 			["delete", "pi-self"],

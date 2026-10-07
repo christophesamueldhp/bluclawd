@@ -48,7 +48,7 @@ import {
 	stateBandOf,
 	type ViewMode,
 } from "./rows.ts";
-import { OPEN_VIEW_ENV, type ShellInfo } from "./tmux.ts";
+import { AGENT_VIEW_COMMAND, OPEN_VIEW_ENV, type ShellInfo } from "./tmux.ts";
 
 export interface PastSession {
 	sessionFile: string;
@@ -1008,7 +1008,9 @@ export class AgentView implements Component, Focusable {
 	private async deleteOwnPane(row: AgentRow, panes: PaneOps): Promise<void> {
 		let next: string;
 		try {
-			next = panes.start(this.opts.cwd, [], { [OPEN_VIEW_ENV]: "1" });
+			// Its first prompt, not its session_start: an extension starting after this one (paste's
+			// editor) would take the keyboard from a view opened there.
+			next = panes.start(this.opts.cwd, ["--", `/${AGENT_VIEW_COMMAND}`], { [OPEN_VIEW_ENV]: "1" });
 			panes.switchTo(next);
 		} catch (error) {
 			this.say(`Couldn't delete — ${error instanceof Error ? error.message : String(error)}`, "error");

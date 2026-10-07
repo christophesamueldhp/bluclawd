@@ -17,8 +17,10 @@ import { getServerDir } from "../../daemon/paths.ts";
 export const PANE_ENV = "BLUCLAWD_PANE";
 /** Set on the pane `pi` starts in a terminal: a normal session, as Claude Code's, until ← backgrounds it. */
 export const NORMAL_ENV = "BLUCLAWD_NORMAL";
-/** Set on a pane that should open agent view once it starts. */
+/** Set on a pane started only to show agent view, which it opens with {@link AGENT_VIEW_COMMAND}. */
 export const OPEN_VIEW_ENV = "BLUCLAWD_OPEN_VIEW";
+/** The command ←← dispatches; not meant to be typed. */
+export const AGENT_VIEW_COMMAND = "agent-view";
 
 const CONFIG = `set -g prefix None
 set -g prefix2 None
