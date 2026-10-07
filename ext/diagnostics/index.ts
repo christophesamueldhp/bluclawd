@@ -2,8 +2,10 @@
  * `/context` and `/status` — diagnostics built from the public extension
  * context alone.
  *
- * `/status` deliberately does NOT reproduce pi's own session summary, which pi
- * keeps private behind `/session`; the report points there instead.
+ * Each fact has one home: pi's own `/session` owns the session name, file, ID,
+ * message/token counts and cost; `/context` owns the context window and its
+ * usage; `/status` owns the model, auth and project trust, and points at the
+ * other two instead of repeating them.
  *
  * Output goes through `appendEntry` + `registerEntryRenderer` rather than
  * `ctx.ui.notify` (which dims everything and does not persist in the session).
@@ -25,9 +27,6 @@ export interface StatusData {
 	defaultProjectTrust: string;
 	projectTrusted: boolean;
 	cwd: string;
-	sessionFile?: string;
-	sessionName?: string;
-	contextWindow?: number;
 }
 
 /** Exported pure for tests; `theme` is the only styling dependency. */
@@ -45,16 +44,11 @@ export function formatStatus(
 	// Billing is always named when there is a model to bill, as on the footer.
 	const billing = data.model ? dim(data.subscription ? " · subscription" : " · per token") : "";
 	lines.push(`${dim("Auth:")} ${auth}${billing}`);
-	if (data.contextWindow)
-		lines.push(`${dim("Context window:")} ${formatTokens(data.contextWindow)} ${dim("(/context)")}`);
-	lines.push("", theme.bold("Safety"));
+	lines.push("", theme.bold("Project"));
+	lines.push(`${dim("Working directory:")} ${data.cwd}`);
 	lines.push(`${dim("Project trust:")} ${data.projectTrusted ? "trusted" : "not trusted"} ${dim("(/trust)")}`);
 	lines.push(`${dim("Trust default:")} ${data.defaultProjectTrust} ${dim("(alt+m)")}`);
-	lines.push("", theme.bold("Session"));
-	lines.push(`${dim("Working directory:")} ${data.cwd}`);
-	if (data.sessionName) lines.push(`${dim("Name:")} ${data.sessionName}`);
-	lines.push(`${dim("File:")} ${data.sessionFile ?? "not saved (ephemeral)"}`);
-	lines.push(dim("Entry counts, tree, and history: /session"));
+	lines.push("", dim("Session file, messages, tokens and cost: /session · context window usage: /context"));
 	return lines;
 }
 
@@ -86,9 +80,7 @@ const diagnostics: InlineExtension = {
 				return commandBlock(lines);
 			}
 
-			lines.push(
-				`${theme.fg("dim", "Model:")} ${data.model} ${theme.fg("dim", `(window ${formatTokens(data.contextWindow)})`)}`,
-			);
+			lines.push(`${theme.fg("dim", "Window:")} ${formatTokens(data.contextWindow)}`);
 
 			if (data.tokens === null || data.tokens === undefined || data.percent === null || data.percent === undefined) {
 				lines.push(`${theme.fg("dim", "In context:")} unknown until the next assistant response`);
@@ -120,7 +112,7 @@ const diagnostics: InlineExtension = {
 		);
 
 		pi.registerCommand("status", {
-			description: "Show model, auth, project trust, and session info",
+			description: "Show model, auth, and project trust",
 			handler: async (_args, ctx) => {
 				const model = ctx.model;
 				let authSource: string | undefined;
@@ -131,12 +123,6 @@ const diagnostics: InlineExtension = {
 					} catch {
 						authSource = undefined;
 					}
-				}
-				let sessionFile: string | undefined;
-				try {
-					sessionFile = ctx.sessionManager.getSessionFile() ?? undefined;
-				} catch {
-					sessionFile = undefined;
 				}
 				pi.appendEntry<StatusData>("bluclawd:status", {
 					piVersion: VERSION,
@@ -150,9 +136,6 @@ const diagnostics: InlineExtension = {
 					}).getDefaultProjectTrust(),
 					projectTrusted: ctx.isProjectTrusted(),
 					cwd: ctx.cwd,
-					sessionFile,
-					sessionName: ctx.sessionManager.getSessionName(),
-					contextWindow: model?.contextWindow,
 				});
 			},
 		});
