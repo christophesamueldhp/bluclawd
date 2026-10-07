@@ -16,6 +16,7 @@ import type { Component } from "@earendil-works/pi-tui";
 import { prefersReducedMotion } from "../_shared/settings.ts";
 import { setSharedTheme } from "../_shared/theme.ts";
 import { mascotGlyphs } from "./mascot.ts";
+import { AUTO_THEME, ThemePicker, themeOptions } from "./theme-picker.ts";
 import { MascotPlayer, pickEntrance, WelcomeHeader, type WelcomeHeaderInfo } from "./welcome-header.ts";
 
 function tildePath(path: string): string {
@@ -34,14 +35,73 @@ const branding: InlineExtension = {
 					.getAllThemes()
 					.map((entry) => entry.name)
 					.sort();
+				const openSettings = () =>
+					SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
+				const save = async (setting: string) => {
+					try {
+						const settings = openSettings();
+						settings.setTheme(setting);
+						await settings.flush();
+					} catch {
+						ctx.ui.notify(
+							`Theme "${setting}" applied for this session; could not save it to settings.`,
+							"warning",
+						);
+						return;
+					}
+					ctx.ui.notify(`Theme set to "${setting}".`, "info");
+				};
+				// A light/dark pair resolves by the terminal's appearance, which the system theme is generated from.
+				const resolve = (setting: string | undefined): string => {
+					const pair = setting?.split("/");
+					if (pair?.length !== 2) return setting ?? "system";
+					return ctx.ui.getTheme("system")?.appearance === "light" ? pair[0] : pair[1];
+				};
+				// Shown as an instance, which pi does not write to settings.
+				const show = (setting: string | undefined) => {
+					const theme = ctx.ui.getTheme(resolve(setting));
+					if (theme) ctx.ui.setTheme(theme);
+				};
+
 				let name = args.trim();
 				if (!name) {
 					if (!ctx.hasUI) {
 						ctx.ui.notify(`Usage: /theme <name>. Available: ${names.join(", ")}`, "info");
 						return;
 					}
-					name = (await ctx.ui.select("Theme", names)) ?? "";
-					if (!name) return;
+					let saved: string | undefined;
+					try {
+						saved = openSettings().getThemeSetting();
+					} catch {
+						// Unreadable settings: taken as pi's default, the system theme.
+					}
+					const chosen = await ctx.ui.custom<string | undefined>(
+						(tui, theme, _keybindings, done) =>
+							new ThemePicker(
+								theme,
+								themeOptions(names),
+								saved ?? "system",
+								(value) => {
+									show(value);
+									tui.requestRender();
+								},
+								done,
+							),
+					);
+					if (chosen === undefined) {
+						// Back to the saved theme; a plain name goes by name so pi tracks it as the setting again.
+						if (saved && !saved.includes("/")) ctx.ui.setTheme(saved);
+						else show(saved);
+						return;
+					}
+					if (chosen === AUTO_THEME) {
+						// pi cannot apply a pair from an extension: show its theme now, and pi resolves the
+						// pair from settings at the next start.
+						show(chosen);
+						await save(chosen);
+						return;
+					}
+					name = chosen;
 				}
 				if (!names.includes(name)) {
 					ctx.ui.notify(`Unknown theme "${name}". Available: ${names.join(", ")}`, "error");
@@ -52,15 +112,7 @@ const branding: InlineExtension = {
 					ctx.ui.notify(`Failed to load theme "${name}": ${result.error ?? "unknown error"}`, "error");
 					return;
 				}
-				try {
-					const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
-					settings.setTheme(name);
-					await settings.flush();
-				} catch {
-					ctx.ui.notify(`Theme "${name}" applied for this session; could not save it to settings.`, "warning");
-					return;
-				}
-				ctx.ui.notify(`Theme set to "${name}".`, "info");
+				await save(name);
 			},
 		});
 
