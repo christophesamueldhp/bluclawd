@@ -22,17 +22,30 @@ import { notifyListeners, sharedRef } from "./global-state.ts";
 /** Why a foreground command moved to the background: Ctrl+B, its timeout, or a message the user sent. */
 export type DetachReason = "user" | "timeout" | "message";
 
-/** A foreground command counts as a task only after this long; before that, neither Ctrl+B nor a message moves it. */
-const FOREGROUND_TASK_AFTER_MS = 2000;
+/**
+ * A foreground command counts as a task only after this long; before that, neither Ctrl+B nor a
+ * message moves it, and /tasks does not list it.
+ */
+export const FOREGROUND_TASK_AFTER_MS = 2000;
 
 export interface ForegroundShell {
+	/** For /tasks to follow it by; not a task id the model sees. */
+	id: string;
 	command: string;
 	startedAt: number;
 	/** Session id of the session running it. */
 	owner?: string;
+	/** The subagent child running it; absent for the main session. */
+	agentId?: string;
+	/** What it has written so far (the newest part, capped as a job's buffer is). */
+	output(): string;
 	/** Moves it to the background; `timeout` (seconds) when its timeout did it. */
 	detach(reason: DetachReason, timeout?: number): void;
+	/** Kills it; the tool call ends as aborted. */
+	stop(): void;
 }
+
+let nextId = 0;
 
 const state = sharedRef("foregroundShells", {
 	running: new Set<ForegroundShell>(),
@@ -136,9 +149,13 @@ export function detachableExec(inner: BackgroundExec, options: DetachOptions = {
 
 		return new Promise((resolve, reject) => {
 			const shell: ForegroundShell = {
+				id: `f${++nextId}`,
 				command,
 				startedAt: Date.now(),
 				owner: options.owner,
+				agentId: options.agentId,
+				output: () => Buffer.concat(replay).toString("utf-8"),
+				stop: () => abort.abort(),
 				detach: (reason, movedAt) => {
 					if (!attached) return;
 					attached = false;

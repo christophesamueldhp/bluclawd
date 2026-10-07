@@ -22,6 +22,11 @@ import { agentTasks } from "../_shared/agent-tasks.ts";
 import { stripAnsi } from "../_shared/ansi.ts";
 import { type BackgroundJobInfo, backgroundBashJobs, jobOutcome } from "../_shared/background-bash.ts";
 import { formatClaudeDuration } from "../_shared/bash-limits.ts";
+import {
+	FOREGROUND_TASK_AFTER_MS,
+	type ForegroundShell,
+	runningForegroundShells,
+} from "../_shared/foreground-shells.ts";
 
 /** The detail view reads the file's last 8 KiB and shows its last 10 lines. */
 const DETAIL_TAIL_BYTES = 8192;
@@ -56,6 +61,8 @@ export interface TaskRow {
 	startedAt: number;
 	endedAt?: number;
 	job?: BackgroundJobInfo;
+	/** Set for the model's bash still running in the foreground. */
+	foreground?: ForegroundShell;
 }
 
 /** Every task of the session `owner`, newest first. */
@@ -85,6 +92,24 @@ export function taskRows(owner: string | undefined): TaskRow[] {
 	return [...shells, ...agents].reverse().sort((a, b) => b.startedAt - a.startedAt);
 }
 
+/**
+ * The model's foreground bash commands that have run long enough to count as tasks (as Ctrl+B
+ * takes them), of the session `owner` and its subagents.
+ */
+export function foregroundRows(owner: string | undefined, now = Date.now()): TaskRow[] {
+	return runningForegroundShells()
+		.filter((shell) => now - shell.startedAt >= FOREGROUND_TASK_AFTER_MS)
+		.filter((shell) => owner === undefined || shell.owner === owner || shell.agentId !== undefined)
+		.map((shell) => ({
+			id: shell.id,
+			kind: "shell",
+			label: shell.command,
+			state: "running",
+			startedAt: shell.startedAt,
+			foreground: shell,
+		}));
+}
+
 /** `512 bytes`, `8.2KB`, `3MB`: a trailing `.0` is dropped. */
 function formatSize(bytes: number): string {
 	const kb = bytes / 1024;
@@ -101,12 +126,17 @@ const clean = (s: string) => stripAnsi(s).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "
  * The last lines of a job's output file (its memory copy when there is no file), the
  * file's size, and how many bytes of it were read. As Claude Code counts them: the
  * last ten newline-separated pieces, empty ones dropped, so output that ends in a
- * newline shows nine.
+ * newline shows nine. A foreground command has no file yet: its output so far is in memory.
  */
-function outputTail(job: BackgroundJobInfo): { lines: string[]; size: number; read: number } {
+function outputTail(row: TaskRow): { lines: string[]; size: number; read: number } {
+	const job = row.job;
 	let text = "";
 	let size = 0;
-	if (job.outputFile) {
+	if (row.foreground) {
+		text = row.foreground.output();
+		size = Buffer.byteLength(text);
+	} else if (!job) return { lines: [], size: 0, read: 0 };
+	else if (job.outputFile) {
 		try {
 			size = statSync(job.outputFile).size;
 			const length = Math.min(size, DETAIL_TAIL_BYTES);
@@ -139,6 +169,7 @@ function outputTail(job: BackgroundJobInfo): { lines: string[]; size: number; re
 /** Stops a task as the user; the model is told. */
 function stopTask(row: TaskRow): void {
 	if (row.kind === "agent") agentTasks()?.stop(row.id);
+	else if (row.foreground) row.foreground.stop();
 	else backgroundBashJobs.kill(row.id, { byUser: true });
 }
 
@@ -158,9 +189,14 @@ function sectionOf(row: TaskRow): Section {
 /** A WebSocket monitor has no detail view. */
 const hasDetail = (row: TaskRow) => sectionOf(row) !== "monitors";
 
-/** The tasks the dialog lists: running ones only, in section order, newest first within each. */
+/**
+ * The tasks the dialog lists: running ones only, the model's foreground bash among them, in
+ * section order, newest first within each.
+ */
 function visibleRows(owner: string | undefined): TaskRow[] {
-	const rows = taskRows(owner).filter((row) => row.state === "running");
+	const rows = [...foregroundRows(owner), ...taskRows(owner).filter((row) => row.state === "running")].sort(
+		(a, b) => b.startedAt - a.startedAt,
+	);
 	return SECTIONS.flatMap(([section]) => rows.filter((row) => sectionOf(row) === section));
 }
 
@@ -171,6 +207,9 @@ const META: Record<TaskState, string> = {
 	failed: "error",
 	killed: "stopped",
 };
+
+/** A foreground command is told apart from the background ones it sits among. */
+const metaOf = (row: TaskRow) => (row.foreground ? "foreground" : META[row.state]);
 
 type ListLine = { kind: "gap" } | { kind: "heading"; text: string } | { kind: "row"; row: TaskRow; index: number };
 
@@ -373,7 +412,7 @@ export class TasksDialog implements Component {
 		// pushed to the right edge.
 		const labels = rows.map((r) => clean(r.label));
 		const labelWidth = Math.max(0, ...labels.map(visibleWidth));
-		const metaWidth = Math.max(0, ...rows.map((r) => visibleWidth(META[r.state])));
+		const metaWidth = Math.max(0, ...rows.map((r) => visibleWidth(metaOf(r))));
 		const rowWidth = Math.max(1, width - 2);
 		const columns = 2 + labelWidth + META_GAP + metaWidth <= rowWidth;
 
@@ -381,7 +420,7 @@ export class TasksDialog implements Component {
 			const focused = i === cursor;
 			const pointer = focused ? SUGGESTION(POINTER) : " ";
 			const icon = row.state === "running" ? t.fg("dim", RUNNING_ICON) : " ";
-			const meta = META[row.state];
+			const meta = metaOf(row);
 			const room = columns ? labelWidth : Math.max(1, rowWidth - 2 - META_GAP - visibleWidth(meta));
 			const label = truncateToWidth(labels[i], room, "…");
 			const gap = columns
@@ -424,7 +463,7 @@ export class TasksDialog implements Component {
 		const monitor = row.job?.kind === "monitor";
 		const title = row.kind === "agent" ? "Agent details" : monitor ? "Monitor details" : "Shell details";
 		const code = row.job?.exit?.code;
-		const statusText = `${row.state}${code !== undefined && code !== null ? ` (exit code: ${code})` : ""}`;
+		const statusText = `${row.state}${row.foreground ? " (foreground)" : ""}${code !== undefined && code !== null ? ` (exit code: ${code})` : ""}`;
 		const status =
 			row.state === "running"
 				? BACKGROUND(statusText)
@@ -433,8 +472,9 @@ export class TasksDialog implements Component {
 			["Status:", status],
 			["Runtime:", formatClaudeDuration((row.endedAt ?? Date.now()) - row.startedAt)],
 		];
-		if (row.job) {
-			const command = clean(row.job.command);
+		const shell = row.job ?? row.foreground;
+		if (shell) {
+			const command = clean(shell.command);
 			fields.push([
 				monitor ? "Script:" : "Command:",
 				command.length > MAX_COMMAND_CHARS ? `${command.slice(0, MAX_COMMAND_CHARS)}…` : command,
@@ -452,10 +492,10 @@ export class TasksDialog implements Component {
 			const indent = " ".repeat(labelWidth + TABLE_GAP);
 			for (const [i, part] of wrapped.entries()) table.push(`${i === 0 ? lead : indent}${part}`);
 		}
-		if (!row.job) return this.titled(title, undefined, table);
+		if (!shell) return this.titled(title, undefined, table);
 
 		const out = [...table, "", t.bold("Output:")];
-		const { lines, size, read } = outputTail(row.job);
+		const { lines, size, read } = outputTail(row);
 		if (lines.length === 0) {
 			out.push(t.fg("dim", "No output available"));
 			return this.titled(title, undefined, out);

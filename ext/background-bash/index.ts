@@ -252,11 +252,13 @@ const backgroundBash: InlineExtension = {
 				const timer = setInterval(() => dialogTui.requestRender(), 1000);
 				const offJobs = backgroundBashJobs.subscribe(() => dialogTui.requestRender());
 				const offHeld = subscribeNotificationHold(() => dialogTui.requestRender());
+				const offForeground = subscribeForegroundShells(() => dialogTui.requestRender());
 				return Object.assign(dialog as Component, {
 					dispose: () => {
 						clearInterval(timer);
 						offJobs();
 						offHeld();
+						offForeground();
 					},
 				});
 			});

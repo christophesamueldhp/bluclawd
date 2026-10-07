@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { stripAnsi } from "../ext/_shared/ansi.ts";
 import { type BackgroundExec, backgroundBashJobs } from "../ext/_shared/background-bash.ts";
+import { detachableExec, runningForegroundShells } from "../ext/_shared/foreground-shells.ts";
 import { TasksDialog } from "../ext/background-bash/tasks-dialog.ts";
 
 const theme = { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => t, bold: (t: string) => t } as any;
@@ -202,5 +203,57 @@ describe("/tasks dialog (Claude Code's Background dialog)", () => {
 		dialog.handleInput("x");
 		await tick();
 		expect(backgroundBashJobs.get(a.id)).toMatchObject({ killed: true, stoppedByUser: true });
+	});
+});
+
+describe("/tasks dialog: the model's foreground bash", () => {
+	/** A foreground command through detachableExec, whose output and end the test drives. */
+	function foreground(command: string, owner: string) {
+		let emit!: (s: string) => void;
+		const exec: BackgroundExec = (_c, _w, { onData, signal }) =>
+			new Promise((_resolve, reject) => {
+				emit = (s) => onData(Buffer.from(s));
+				signal?.addEventListener("abort", () => reject(new Error("aborted")));
+			});
+		const run = detachableExec(exec, { owner })(command, "/", { onData: () => {} });
+		return { run, emit: (s: string) => emit(s) };
+	}
+
+	afterEach(() => vi.useRealTimers());
+
+	it("lists it once it has run 2s, with its output, and x kills it", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		const me = session();
+		const { run, emit } = foreground("npm test", me);
+		emit("PASS a.test.ts\n");
+		expect(open(me).screen()).toContain("No tasks currently running");
+
+		vi.setSystemTime(Date.now() + 2000);
+		backgroundBashJobs.start({ command: "npm run dev", cwd: "/", owner: me, exec: forever });
+		const { dialog, screen } = open(me);
+		const list = screen();
+		expect(list).toContain(`${RUNNING} npm run dev   running`);
+		expect(list).toContain(`${RUNNING} npm test      foreground`);
+
+		// The background shell started last, so it leads.
+		dialog.handleInput("\x1b[B");
+		dialog.handleInput("\r");
+		const detail = screen();
+		expect(detail).toContain("  Status:   running (foreground)\n");
+		expect(detail).toContain("  Command:  npm test\n");
+		expect(detail).toContain("PASS a.test.ts");
+
+		dialog.handleInput("x");
+		await expect(run).rejects.toThrow("aborted");
+		expect(screen()).not.toContain("npm test");
+	});
+
+	it("is not another session's", () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		const { run } = foreground("npm test", "someone-else");
+		run.catch(() => {});
+		vi.setSystemTime(Date.now() + 2000);
+		expect(open(session()).screen()).toContain("No tasks currently running");
+		for (const shell of runningForegroundShells()) shell.stop();
 	});
 });
