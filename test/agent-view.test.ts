@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -151,6 +151,7 @@ function makeView(
 		list?: () => InstanceSummary[];
 		readClipboard?: () => Promise<{ image?: { type: "image"; data: string; mimeType: string }; text?: string }>;
 		mode?: string;
+		listModels?: () => Array<{ provider: string; id: string }>;
 	} = {},
 ) {
 	const calls: Calls = [];
@@ -173,6 +174,7 @@ function makeView(
 		readClipboard: opts.readClipboard,
 		isKnownCommand: (name) => name === "compact",
 		mode: opts.mode,
+		listModels: opts.listModels,
 	});
 	const setInstances = view.setInstancesForTest.bind(view);
 	view.setInstancesForTest = (rows) => {
@@ -732,6 +734,87 @@ describe("AgentView keys", () => {
 
 		typed("/zz");
 		expect(menu()).toEqual([]);
+	});
+
+	it("tab after /cd completes the directory as a shell does, listing them when several match", () => {
+		const { view, text } = makeView();
+		const typed = (s: string) => {
+			for (const ch of s) view.handleInput(ch);
+		};
+		const composer = () => (text().find((line) => line.startsWith("❯")) ?? "").trimEnd();
+		const menu = () =>
+			text()
+				.filter((line) => /^\s+\S+\/$/.test(line))
+				.map((line) => line.trim());
+		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-cd-tab-")));
+		for (const dir of ["api", "app", "docs", ".git"]) mkdirSync(join(root, dir));
+		writeFileSync(join(root, "apple.txt"), "");
+
+		typed(`/cd ${root}/d`);
+		view.handleInput("\t");
+		expect(composer()).toBe(`❯ /cd ${root}/docs/`);
+		view.handleInput(ESC);
+
+		// Several match: tab fills in what they share and lists them (files are left out); ↓ and tab pick one.
+		typed(`/cd ${root}/a`);
+		view.handleInput("\t");
+		expect(composer()).toBe(`❯ /cd ${root}/ap`);
+		expect(menu()).toEqual(["api/", "app/"]);
+		view.handleInput(DOWN);
+		view.handleInput("\t");
+		expect(composer()).toBe(`❯ /cd ${root}/app/`);
+		expect(menu()).toEqual([]);
+		view.handleInput(ENTER);
+		expect(stripAnsi(view.render(200)[2])).toContain(join(root, "app"));
+
+		// Relative to where new sessions start; enter on the list takes the highlighted one; dot
+		// directories only when asked for.
+		typed("/cd ../");
+		view.handleInput("\t");
+		expect(menu()).toEqual(["api/", "app/", "docs/"]);
+		view.handleInput(ENTER);
+		expect(composer()).toBe("❯ /cd ../api/");
+		view.handleInput(ESC);
+		typed("/cd ../.");
+		view.handleInput("\t");
+		expect(composer()).toBe("❯ /cd ../.git/");
+	});
+
+	it("tab after /model completes the model, by provider/id or by id alone", () => {
+		const { view, text } = makeView({
+			listModels: () => [
+				{ provider: "anthropic", id: "claude-opus" },
+				{ provider: "anthropic", id: "claude-sonnet" },
+				{ provider: "openai", id: "gpt-5" },
+			],
+		});
+		const typed = (s: string) => {
+			for (const ch of s) view.handleInput(ch);
+		};
+		const composer = () => (text().find((line) => line.startsWith("❯")) ?? "").trimEnd();
+		const menu = () =>
+			text()
+				.filter((line) => /^\s+[\w-]+(\/[\w-]+)?$/.test(line))
+				.map((line) => line.trim());
+
+		typed("/model gpt");
+		view.handleInput("\t");
+		expect(composer()).toBe("❯ /model openai/gpt-5");
+		view.handleInput(ESC);
+
+		typed("/model an");
+		view.handleInput("\t");
+		expect(composer()).toBe("❯ /model anthropic/claude-");
+		expect(menu()).toEqual(["anthropic/claude-opus", "anthropic/claude-sonnet"]);
+		view.handleInput(DOWN);
+		view.handleInput("\t");
+		expect(composer()).toBe("❯ /model anthropic/claude-sonnet");
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("Model set to anthropic/claude-sonnet");
+
+		typed("/model ");
+		view.handleInput("\t");
+		expect(menu()).toEqual(["anthropic/claude-opus", "anthropic/claude-sonnet", "openai/gpt-5", "default"]);
 	});
 });
 

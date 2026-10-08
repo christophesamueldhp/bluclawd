@@ -9,7 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
@@ -146,6 +146,10 @@ const VIEW_COMMANDS: Array<{ name: string; arg?: string; description: string }> 
 	{ name: "resume", description: "Resume a past session" },
 	{ name: "exit", description: "Leave agent view; sessions keep running" },
 ];
+/** A tab completion of a view command's argument: what it fills in, and how the list shows it. */
+type Completion = { value: string; label: string };
+/** How many suggestions show under the composer at once. */
+const MENU_ROWS = 8;
 /** Bare words that quit, as in Claude Code. */
 export const EXIT_WORDS = new Set(["exit", "quit", ":q", ":q!", ":wq", ":wq!"]);
 /** How many times (150ms apart) a delete waits for the row a stopped pi saves. */
@@ -308,6 +312,8 @@ export class AgentView implements Component, Focusable {
 	private dispatchDir: string | undefined;
 	/** The highlighted `/` suggestion. */
 	private suggestionIndex = 0;
+	/** The arguments tab listed after `/cd` or `/model`, while the composer still holds what it completed. */
+	private argMenu: { text: string; items: Completion[] } | undefined;
 	private past: PastSession[] = [];
 	private pastIndex = 0;
 	private pastLoading = false;
@@ -1223,11 +1229,7 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		const dir = resolveToCwd(arg, this.dispatchCwd());
-		let isDir = false;
-		try {
-			isDir = statSync(dir).isDirectory();
-		} catch {}
-		if (!isDir) {
+		if (!isDirectory(dir)) {
 			this.say(`No such directory: ${this.shorten(dir)}`, "error");
 			return;
 		}
@@ -1256,6 +1258,84 @@ export class AgentView implements Component, Focusable {
 		this.setComposer(`/${command.name}${command.arg ? " " : ""}`);
 		this.afterComposerEdit(before);
 		return true;
+	}
+
+	/** The arguments tab listed, while the composer is as tab left it. */
+	private argChoices(): Completion[] {
+		const menu = this.argMenu;
+		return this.mode === "list" && menu?.text === this.composerText() ? menu.items : [];
+	}
+
+	/** What `/` or tab lists under the composer. */
+	private menu(): Array<{ label: string; description?: string }> {
+		const args = this.argChoices();
+		if (args.length) return args;
+		return this.suggestions().map((c) => ({
+			label: `/${c.name}${c.arg ? ` ${c.arg}` : ""}`,
+			description: c.description,
+		}));
+	}
+
+	/** Tab after `/cd ` or `/model `, as a shell's: one match is filled in; several fill in what they
+	 *  share and are listed, and tab or enter then takes the highlighted one. Enter (`pick`) only
+	 *  takes from the list. Returns whether it acted. */
+	private completeArgument(pick: boolean): boolean {
+		const match = /^(\/(cd|model)\s+)(.*)$/.exec(this.composerText());
+		if (this.mode !== "list" || !match) return false;
+		const [, command, name, arg] = match;
+		const listed = this.argChoices();
+		if (listed.length) {
+			this.fillArgument(`${command}${listed[this.suggestionIndex].value}`);
+			return true;
+		}
+		if (pick) return false;
+		const items = name === "cd" ? this.dirCompletions(arg) : this.modelCompletions(arg);
+		if (items.length === 0) return true;
+		if (items.length === 1) {
+			this.fillArgument(`${command}${items[0].value}`);
+			return true;
+		}
+		let shared = items[0].value;
+		for (const { value } of items) while (!value.startsWith(shared)) shared = shared.slice(0, -1);
+		const completed = `${command}${shared.length > arg.length ? shared : arg}`;
+		this.fillArgument(completed);
+		this.argMenu = { text: completed, items };
+		return true;
+	}
+
+	/** The directories `/cd <arg>` could mean; dot directories only once a `.` is typed. */
+	private dirCompletions(arg: string): Completion[] {
+		const head = arg.slice(0, arg.lastIndexOf("/") + 1);
+		const prefix = arg.slice(head.length);
+		const dir = resolveToCwd(head || ".", this.dispatchCwd());
+		try {
+			return readdirSync(dir, { withFileTypes: true })
+				.filter((e) => e.name.startsWith(prefix) && (prefix.startsWith(".") || !e.name.startsWith(".")))
+				.filter((e) => e.isDirectory() || (e.isSymbolicLink() && isDirectory(join(dir, e.name))))
+				.map((e) => e.name)
+				.sort()
+				.map((name) => ({ value: `${head}${name}/`, label: `${name}/` }));
+		} catch {
+			return [];
+		}
+	}
+
+	/** The models `/model <arg>` could mean, matched as `setModel` matches them. */
+	private modelCompletions(arg: string): Completion[] {
+		const want = arg.toLowerCase();
+		const names = (this.opts.listModels?.() ?? [])
+			.filter((m) => `${m.provider}/${m.id}`.toLowerCase().startsWith(want) || m.id.toLowerCase().startsWith(want))
+			.map((m) => `${m.provider}/${m.id}`);
+		if ("default".startsWith(want)) names.push("default");
+		return names.map((name) => ({ value: name, label: name }));
+	}
+
+	private fillArgument(text: string): void {
+		const before = this.composerText();
+		this.argMenu = undefined;
+		this.setComposer(text);
+		this.afterComposerEdit(before);
+		this.suggestionIndex = 0;
 	}
 
 	/** Slash commands agent view runs itself. A known command that needs a session says so; any
@@ -1526,7 +1606,7 @@ export class AgentView implements Component, Focusable {
 		}
 		if (this.isUp(data) || this.isDown(data)) {
 			const delta = this.isUp(data) ? -1 : 1;
-			const menu = peek ? [] : this.suggestions();
+			const menu = peek ? [] : this.menu();
 			if (menu.length) {
 				this.suggestionIndex = (this.suggestionIndex + delta + menu.length) % menu.length;
 				this.render_();
@@ -1653,7 +1733,7 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		if (matchesKey(data, "tab")) {
-			this.completeSuggestion(false);
+			if (!this.completeSuggestion(false)) this.completeArgument(false);
 			return;
 		}
 		if (!text && matchesKey(data, "right") && item?.kind === "row") {
@@ -1698,7 +1778,7 @@ export class AgentView implements Component, Focusable {
 
 	/** What enter does: quit on an exit word, run a view command, start a task, or act on the focus. */
 	private handleEnter(ctrlEnter: boolean): void {
-		if (this.completeSuggestion(true)) return;
+		if (this.completeSuggestion(true) || this.completeArgument(true)) return;
 		const text = this.composerText();
 		const trimmed = text.trim();
 		if (EXIT_WORDS.has(trimmed.toLowerCase())) {
@@ -2172,19 +2252,24 @@ export class AgentView implements Component, Focusable {
 		);
 	}
 
-	/** The `/` suggestions under the composer, as Claude Code's; undefined when there are none. */
+	/** The `/` or argument suggestions under the composer, as Claude Code's; undefined when there are none. */
 	private renderSuggestions(width: number): string[] | undefined {
-		const menu = this.suggestions();
+		const menu = this.menu();
 		if (menu.length === 0) return undefined;
-		const usage = (c: (typeof VIEW_COMMANDS)[number]) => `/${c.name}${c.arg ? ` ${c.arg}` : ""}`;
-		const column = Math.max(...menu.map((c) => usage(c).length)) + 4;
-		return menu.map((c, i) =>
-			truncateToWidth(
-				cc.fg(i === this.suggestionIndex ? "accent" : "muted", `  ${usage(c).padEnd(column)}${c.description}`),
-				width,
-				"…",
-			),
-		);
+		const column = Math.max(...menu.map((c) => c.label.length)) + 4;
+		const start = Math.max(0, Math.min(this.suggestionIndex - MENU_ROWS + 1, menu.length - MENU_ROWS));
+		return menu
+			.slice(start, start + MENU_ROWS)
+			.map((c, i) =>
+				truncateToWidth(
+					cc.fg(
+						start + i === this.suggestionIndex ? "accent" : "muted",
+						c.description ? `  ${c.label.padEnd(column)}${c.description}` : `  ${c.label}`,
+					),
+					width,
+					"…",
+				),
+			);
 	}
 
 	/** The composer: every line, the first after `❯`, the rest from the left edge. */
@@ -2246,6 +2331,14 @@ export class AgentView implements Component, Focusable {
 			.slice(this.scrollStart, this.scrollStart + budget)
 			.map((line) => truncateToWidth(line, width));
 		return [...windowed, ...Array(Math.max(0, budget - windowed.length)).fill(""), ...footer];
+	}
+}
+
+function isDirectory(path: string): boolean {
+	try {
+		return statSync(path).isDirectory();
+	} catch {
+		return false;
 	}
 }
 
