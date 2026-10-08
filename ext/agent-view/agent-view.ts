@@ -9,7 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
@@ -27,6 +27,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { stripAnsi } from "../_shared/ansi.ts";
 import { PasteTokens, shouldCollapse } from "../_shared/paste-tokens.ts";
+import { resolveToCwd } from "../_shared/path-resolve.ts";
 import { theme } from "../_shared/theme.ts";
 import { mascotGlyphs, REST, renderMascot } from "../branding/mascot.ts";
 import { type AgentClipboard, readAgentClipboard } from "./clipboard.ts";
@@ -296,6 +297,8 @@ export class AgentView implements Component, Focusable {
 	private connectionLost = false;
 	private opening: string | undefined;
 	private dispatchModel: { provider: string; id: string } | undefined;
+	/** `/cd`: where new sessions start, over the focus in the directory view. */
+	private dispatchDir: string | undefined;
 	private past: PastSession[] = [];
 	private pastIndex = 0;
 	private pastLoading = false;
@@ -661,6 +664,7 @@ export class AgentView implements Component, Focusable {
 
 	/** Where a new session runs: the selected directory when grouped by directory, else here. */
 	private dispatchCwd(): string {
+		if (this.dispatchDir) return this.dispatchDir;
 		if (this.viewMode !== "directory") return this.opts.cwd;
 		const item = this.selected;
 		if (item?.kind === "row") return item.row.cwd;
@@ -1202,6 +1206,26 @@ export class AgentView implements Component, Focusable {
 		this.say(`Model set to ${name(model)} (session-scoped, not persisted)`);
 	}
 
+	/** `/cd <dir>`: new sessions start there, relative to where they start now; bare `/cd` goes back. */
+	private setDir(arg: string): void {
+		if (!arg) {
+			this.dispatchDir = undefined;
+			this.say(`New sessions start in ${this.shorten(this.dispatchCwd())}`);
+			return;
+		}
+		const dir = resolveToCwd(arg, this.dispatchCwd());
+		let isDir = false;
+		try {
+			isDir = statSync(dir).isDirectory();
+		} catch {}
+		if (!isDir) {
+			this.say(`No such directory: ${this.shorten(dir)}`, "error");
+			return;
+		}
+		this.dispatchDir = dir;
+		this.say(`New sessions start in ${this.shorten(dir)} (session-scoped)`);
+	}
+
 	/** Slash commands agent view runs itself. A known command that needs a session says so; any
 	 *  other `/text` (a skill, a prompt template) is a task. Returns whether it was handled. */
 	private runViewCommand(text: string): boolean {
@@ -1222,6 +1246,10 @@ export class AgentView implements Component, Focusable {
 			case "model":
 				this.clearDraft();
 				this.setModel(arg);
+				return true;
+			case "cd":
+				this.clearDraft();
+				this.setDir(arg);
 				return true;
 			default:
 				if (!this.opts.isKnownCommand?.(command)) return false;

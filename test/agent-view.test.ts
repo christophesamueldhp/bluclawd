@@ -1,4 +1,4 @@
-import { mkdtempSync, realpathSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -134,7 +134,10 @@ function fakePanes(calls: Calls): PaneOps {
 			calls.push(["unlist"]);
 		},
 		detach: () => calls.push(["detach"]),
-		startShell: () => "sh-new",
+		startShell: (cwd, command) => {
+			calls.push(["startShell", cwd, command]);
+			return "sh-new";
+		},
 		listShells: () => [],
 		stopShell: () => {},
 		capture: () => [],
@@ -663,6 +666,33 @@ describe("AgentView keys", () => {
 		for (const ch of "/compact") view.handleInput(ch);
 		view.handleInput(ENTER);
 		expect(text().join("\n")).toContain("/compact isn't available in agent view — open a session to run it");
+	});
+
+	it("/cd sets the directory new sessions start in; bare /cd goes back", () => {
+		const { view, calls, text } = makeView();
+		const where = () => stripAnsi(view.render(200)[2]);
+		const type = (s: string) => {
+			for (const ch of s) view.handleInput(ch);
+			view.handleInput(ENTER);
+		};
+		const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-cd-")));
+		mkdirSync(join(root, "api"));
+		type(`/cd ${root}`);
+		type("/cd api");
+		expect(where()).toContain(join(root, "api"));
+		type("write the tests");
+		type("!ls");
+		expect(calls.filter(([op]) => op === "start" || op === "startShell")).toEqual([
+			["start", join(root, "api"), ["--model", "opencode-go/kimi", "--", "write the tests"]],
+			["startShell", join(root, "api"), "ls"],
+		]);
+
+		type("/cd nope");
+		expect(text().join("\n")).toContain(`No such directory: ${join(root, "api", "nope")}`);
+		expect(where()).toContain(join(root, "api"));
+
+		type("/cd");
+		expect(where()).toContain("~/proj/here");
 	});
 });
 
