@@ -38,10 +38,16 @@
  * preview. The current state is captured first so the restore is undoable; if
  * that capture fails, restoring needs a separate "unrecoverable" confirmation. The index is
  * then reset to HEAD so the result reads as ordinary uncommitted work (what was
- * staged is not recorded, as with `git stash pop` without `--index`). Files
- * created after the checkpoint are removed as in Claude Code, by diffing it
- * against the safety net (`read-tree` alone leaves untracked ones); without a
- * safety net they are left alone, as nothing could bring them back.
+ * staged is not recorded, as with `git stash pop` without `--index`).
+ *
+ * ── New files: only the agent's are removed ─────────────────────────────────
+ * As in Claude Code, a restore removes the files the agent created since the
+ * checkpoint and keeps the user's. A `write`/`bash`/`powershell` call lists
+ * the untracked files before and after it runs; the new ones are appended as a
+ * `checkpoint-created` entry. A restore diffs the checkpoint against the safety
+ * net for the files added since, removes the agent's (`read-tree` alone leaves
+ * untracked ones) and writes the user's back. Without a safety net no file is
+ * removed, as nothing could bring it back.
  *
  * ── Refs are namespaced per session ──────────────────────────────────────────
  * Sessions sharing one `.git` must not sweep each other's refs; see
@@ -275,10 +281,41 @@ export async function captureCheckpoint(
 	}
 }
 
+/** A path from the repository root as a pathspec, whatever `cwd` is. */
+function topPathspec(path: string, magic = ""): string {
+	return `:(top,literal${magic})${path}`;
+}
+
+/** Paths (from the repository root) in `currentSha` but not in `sha`; undefined on a git error. */
+async function addedFiles(
+	cwd: string,
+	exec: ExtensionAPI["exec"],
+	sha: string,
+	currentSha: string,
+): Promise<string[] | undefined> {
+	const result = await exec("git", ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", sha, currentSha], {
+		cwd,
+		timeout: GIT_TIMEOUT_MS,
+	}).catch(() => undefined);
+	return result?.code === 0 ? result.stdout.split("\0").filter(Boolean) : undefined;
+}
+
+/** Of the files added since `sha`, the ones a restore keeps: all but the agent's. */
+async function userAddedFiles(
+	cwd: string,
+	exec: ExtensionAPI["exec"],
+	sha: string,
+	currentSha: string,
+	agentCreated: ReadonlySet<string>,
+): Promise<string[]> {
+	return ((await addedFiles(cwd, exec, sha, currentSha)) ?? []).filter((path) => !agentCreated.has(path));
+}
+
 /**
  * Restore the working tree to a checkpoint; only call it from an explicit,
  * user-confirmed action. `currentSha`, a capture of the tree being replaced,
- * names the files added since the checkpoint, which are removed too. The index
+ * names the files added since the checkpoint: those in `agentCreated` (paths
+ * from the repository root) are removed, the rest kept as they are. The index
  * is then reset to HEAD so the result reads as ordinary uncommitted work instead
  * of a fully staged tree. Returns false (never throws) if the sha can't be restored.
  */
@@ -287,14 +324,10 @@ export async function restoreCheckpoint(
 	exec: ExtensionAPI["exec"],
 	sha: string,
 	currentSha?: string,
+	agentCreated: ReadonlySet<string> = new Set(),
 ): Promise<boolean> {
-	const added = currentSha
-		? await exec("git", ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", sha, currentSha], {
-				cwd,
-				timeout: GIT_TIMEOUT_MS,
-			}).catch(() => undefined)
-		: undefined;
-	if (currentSha && added?.code !== 0) return false;
+	const added = currentSha ? await addedFiles(cwd, exec, sha, currentSha) : [];
+	if (!added) return false;
 
 	const result = await exec("git", ["read-tree", "--reset", "-u", sha], {
 		cwd,
@@ -302,18 +335,24 @@ export async function restoreCheckpoint(
 	}).catch(() => undefined);
 	if (result?.code !== 0) return false;
 
-	// read-tree removed the tracked ones; with the index now at `sha`, the rest are
-	// untracked. Paths are from the repository root, whatever `cwd` is.
-	const pathspecs = (added?.stdout ?? "")
-		.split("\0")
-		.filter(Boolean)
-		.map((path) => `:(top,literal)${path}`);
-	if (pathspecs.length > 0) {
-		const clean = await exec("git", ["clean", "-f", "-q", "--", ...pathspecs], {
+	// read-tree removed the tracked ones; with the index now at `sha`, the rest
+	// are untracked.
+	const remove = added.filter((path) => agentCreated.has(path)).map((path) => topPathspec(path));
+	if (remove.length > 0) {
+		const clean = await exec("git", ["clean", "-f", "-q", "--", ...remove], {
 			cwd,
 			timeout: RESTORE_TIMEOUT_MS,
 		}).catch(() => undefined);
 		if (clean?.code !== 0) return false;
+	}
+	// The user's: read-tree removed the tracked ones, so write them all back.
+	const keep = added.filter((path) => !agentCreated.has(path)).map((path) => topPathspec(path));
+	if (currentSha && keep.length > 0) {
+		const checkout = await exec("git", ["checkout", currentSha, "--", ...keep], {
+			cwd,
+			timeout: RESTORE_TIMEOUT_MS,
+		}).catch(() => undefined);
+		if (checkout?.code !== 0) return false;
 	}
 
 	const head = await headSha(cwd, exec);
@@ -389,18 +428,24 @@ async function pruneOldCheckpointRefs(
 /** Lines of `git diff --stat` shown in the restore confirmation before it is clipped. */
 const PREVIEW_MAX_LINES = 20;
 
+/** Pathspecs that leave `paths` (from the repository root) out of a diff. */
+function excludeArgs(paths: string[]): string[] {
+	return paths.length > 0 ? ["--", ...paths.map((path) => topPathspec(path, ",exclude"))] : [];
+}
+
 /**
  * `git diff --stat` from one checkpoint commit to another — what restoring
- * `toSha` changes relative to the tree captured as `fromSha`. Undefined on any
- * git error; the empty string when the trees are identical.
+ * `toSha` changes relative to the tree captured as `fromSha`, leaving out
+ * `exclude`. Undefined on any git error; the empty string when the trees are identical.
  */
 async function diffStat(
 	cwd: string,
 	exec: ExtensionAPI["exec"],
 	fromSha: string,
 	toSha: string,
+	exclude: string[] = [],
 ): Promise<string | undefined> {
-	const result = await exec("git", ["diff", "--stat", "--stat-width=80", fromSha, toSha], {
+	const result = await exec("git", ["diff", "--stat", "--stat-width=80", fromSha, toSha, ...excludeArgs(exclude)], {
 		cwd,
 		timeout: GIT_TIMEOUT_MS,
 	}).catch(() => undefined);
@@ -421,16 +466,18 @@ interface DiffStats {
 
 /**
  * What changes from `fromSha` to `toSha`, or to the working tree's tracked
- * files when `toSha` is undefined. Undefined on any git error, e.g. a sha whose
- * ref was pruned and the commit collected.
+ * files when `toSha` is undefined, leaving out `exclude`. Undefined on any git
+ * error, e.g. a sha whose ref was pruned and the commit collected.
  */
 async function diffNumstat(
 	cwd: string,
 	exec: ExtensionAPI["exec"],
 	fromSha: string,
 	toSha?: string,
+	exclude: string[] = [],
 ): Promise<DiffStats | undefined> {
-	const result = await exec("git", ["diff", "--numstat", "--no-renames", fromSha, ...(toSha ? [toSha] : [])], {
+	const args = ["diff", "--numstat", "--no-renames", fromSha, ...(toSha ? [toSha] : []), ...excludeArgs(exclude)];
+	const result = await exec("git", args, {
 		cwd,
 		timeout: GIT_TIMEOUT_MS,
 	}).catch(() => undefined);
@@ -495,7 +542,14 @@ async function restoreWithSafetyNet(
 	// against the working tree would skip untracked files.
 	const safetySha = await captureCheckpoint(ctx.cwd, pi.exec, ctx.sessionManager.getSessionId());
 	if (safetySha) {
-		const stat = await diffStat(ctx.cwd, pi.exec, safetySha, targetSha);
+		const kept = await userAddedFiles(
+			ctx.cwd,
+			pi.exec,
+			targetSha,
+			safetySha,
+			agentCreatedFiles(ctx.sessionManager.getEntries()),
+		);
+		const stat = await diffStat(ctx.cwd, pi.exec, safetySha, targetSha, kept);
 		if (stat !== undefined && stat.trim() === "") {
 			ctx.ui.notify("Working tree already matches this checkpoint.", "info");
 			return { restored: false };
@@ -543,7 +597,8 @@ async function restoreOverSafetyNet(
 		}
 	}
 
-	const restored = await restoreCheckpoint(ctx.cwd, pi.exec, targetSha, safetySha);
+	const agentCreated = agentCreatedFiles(ctx.sessionManager.getEntries());
+	const restored = await restoreCheckpoint(ctx.cwd, pi.exec, targetSha, safetySha, agentCreated);
 	if (restored) {
 		ctx.ui.notify("Working tree restored to checkpoint.", "info");
 		return { restored: true, safety };
@@ -558,6 +613,32 @@ async function restoreOverSafetyNet(
 		"error",
 	);
 	return { restored: false };
+}
+
+const CREATED_CUSTOM_TYPE = "checkpoint-created";
+/** The tools whose new files a restore removes. */
+const CREATING_TOOLS = new Set(["write", "bash", "powershell"]);
+
+/** Untracked, not ignored files in the whole repository, by path from its root; undefined outside one. */
+async function untrackedFiles(cwd: string, exec: ExtensionAPI["exec"]): Promise<Set<string> | undefined> {
+	const result = await exec("git", ["ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--", ":/"], {
+		cwd,
+		timeout: GIT_TIMEOUT_MS,
+	}).catch(() => undefined);
+	return result?.code === 0 ? new Set(result.stdout.split("\0").filter(Boolean)) : undefined;
+}
+
+/**
+ * The files the agent created this session, by path from the repository root.
+ * Every entry counts, not just the branch's: a conversation rewind leaves the files.
+ */
+export function agentCreatedFiles(entries: SessionEntry[]): Set<string> {
+	const paths = new Set<string>();
+	for (const entry of entries) {
+		if (entry.type !== "custom" || entry.customType !== CREATED_CUSTOM_TYPE) continue;
+		for (const path of (entry.data as { paths?: string[] } | undefined)?.paths ?? []) paths.add(path);
+	}
+	return paths;
 }
 
 /** Overlap guard for the message_end background capture. */
@@ -651,6 +732,22 @@ export function factory(pi: ExtensionAPI): void {
 		if (event.message.role === "user") checkpointUserMessage(ctx, event.message);
 	});
 
+	// Untracked files before each creating tool call, by toolCallId.
+	const untrackedBefore = new Map<string, Set<string>>();
+	pi.on("tool_call", async (event, ctx) => {
+		if (!CREATING_TOOLS.has(event.toolName)) return;
+		const before = await untrackedFiles(ctx.cwd, pi.exec);
+		if (before) untrackedBefore.set(event.toolCallId, before);
+	});
+	pi.on("tool_result", async (event, ctx) => {
+		const before = untrackedBefore.get(event.toolCallId);
+		if (!before) return;
+		untrackedBefore.delete(event.toolCallId);
+		const after = await untrackedFiles(ctx.cwd, pi.exec);
+		const created = [...(after ?? [])].filter((path) => !before.has(path));
+		if (created.length > 0) pi.appendEntry(CREATED_CUSTOM_TYPE, { paths: created });
+	});
+
 	// Offer to put the code back where it was when the forked-at prompt began.
 	// Always asks first (the one confirmation with the preview lives in
 	// restoreWithSafetyNet), never auto-restores.
@@ -737,7 +834,18 @@ export function factory(pi: ExtensionAPI): void {
 			if (!row) return;
 			const target = stats[index] ? row.checkpoint : undefined;
 
-			const effect = target && currentSha ? await diffNumstat(ctx.cwd, pi.exec, currentSha, target.sha) : undefined;
+			const kept =
+				target && currentSha
+					? await userAddedFiles(
+							ctx.cwd,
+							pi.exec,
+							target.sha,
+							currentSha,
+							agentCreatedFiles(ctx.sessionManager.getEntries()),
+						)
+					: [];
+			const effect =
+				target && currentSha ? await diffNumstat(ctx.cwd, pi.exec, currentSha, target.sha, kept) : undefined;
 			const BOTH = "Restore code and conversation";
 			const TALK = "Restore conversation";
 			const CODE = "Restore code";

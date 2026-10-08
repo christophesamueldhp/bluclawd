@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+	agentCreatedFiles,
 	captureCheckpoint,
 	checkpointForTurn,
 	factory,
@@ -193,7 +194,12 @@ function makeCtx(
 			notify: (message: string, type?: string) => notices.push({ message, type }),
 			input: async () => undefined,
 		},
-		sessionManager: { getBranch: () => entries, getLeafEntry: () => entries.at(-1), getSessionId: () => SESSION },
+		sessionManager: {
+			getBranch: () => entries,
+			getEntries: () => entries,
+			getLeafEntry: () => entries.at(-1),
+			getSessionId: () => SESSION,
+		},
 		navigateTree: async (id: string) => {
 			navigated.push(id);
 			return { cancelled: false };
@@ -369,7 +375,7 @@ describe("restoreCheckpoint — index state afterwards", () => {
 		expect(await status()).toEqual([" M a.txt", "?? later.txt", "?? new.txt"]);
 	});
 
-	it("removes the files the replaced tree added over the checkpoint, tracked or not", async () => {
+	it("removes the files the agent added since the checkpoint and keeps the user's, tracked or not", async () => {
 		const { dir, exec, git, write, read, status } = await makeRepo();
 		await write("a.txt", "v1\n");
 		const sha = await capture(dir, exec);
@@ -378,14 +384,19 @@ describe("restoreCheckpoint — index state afterwards", () => {
 		await write("new.txt", "new\n");
 		await mkdir(join(dir, "sub"));
 		await write("sub/staged.txt", "staged\n");
-		await git("add", "sub/staged.txt");
+		await write("mine.txt", "mine\n");
+		await write("mine-staged.txt", "mine staged\n");
+		await git("add", "sub/staged.txt", "mine-staged.txt");
 		const current = await capture(dir, exec);
-		expect(await restoreCheckpoint(dir, exec, sha, current)).toBe(true);
+		const agentCreated = new Set(["new.txt", "sub/staged.txt"]);
+		expect(await restoreCheckpoint(dir, exec, sha, current, agentCreated)).toBe(true);
 
 		expect(await read("a.txt")).toBe("v1\n");
 		await expect(read("new.txt")).rejects.toThrow();
 		await expect(read("sub/staged.txt")).rejects.toThrow();
-		expect(await status()).toEqual([" M a.txt"]);
+		expect(await read("mine.txt")).toBe("mine\n");
+		expect(await read("mine-staged.txt")).toBe("mine staged\n");
+		expect(await status()).toEqual([" M a.txt", "?? mine-staged.txt", "?? mine.txt"]);
 	});
 
 	it("removes added files anywhere in the repository when run from a subdirectory", async () => {
@@ -396,7 +407,7 @@ describe("restoreCheckpoint — index state afterwards", () => {
 		await write("top-new.txt", "new\n");
 		const current = await capture(dir, exec);
 
-		expect(await restoreCheckpoint(join(dir, "sub"), exec, sha, current)).toBe(true);
+		expect(await restoreCheckpoint(join(dir, "sub"), exec, sha, current, new Set(["top-new.txt"]))).toBe(true);
 		await expect(read("top-new.txt")).rejects.toThrow();
 		expect(await read("sub/keep.txt")).toBe("keep\n");
 	});
@@ -445,7 +456,8 @@ describe("/rewind", () => {
 		]);
 		expect(selectCalls[1]?.title).toContain("Confirm you want to restore to the point before you sent this message:");
 		expect(selectCalls[1]?.title).toContain("make v1");
-		expect(selectCalls[1]?.title).toContain("The code will be restored +1 -2 in a.txt and b.txt.");
+		// b.txt is the user's (no tool created it), so a restore keeps it.
+		expect(selectCalls[1]?.title).toContain("The code will be restored +1 -1 in a.txt.");
 		expect(selectCalls[1]?.options).toEqual([RESTORE_BOTH, RESTORE_TALK, RESTORE_CODE, "Never mind"]);
 	});
 
@@ -497,17 +509,22 @@ describe("/rewind", () => {
 		expect(undo.navigated).toEqual([]);
 	});
 
-	it("Restore code removes a file created after the checkpoint; undoing brings it back", async () => {
+	it("Restore code removes a file the agent created after the checkpoint, not the user's; undo brings it back", async () => {
 		const { dir, exec, write, read } = await makeRepo();
 		const sha = await capture(dir, exec);
 		const entries = [userEntry("u1", "add b"), checkpointEntry(sha, "u1", "add b")];
-		await write("b.txt", "new\n");
-
-		const { commands } = loadFactory(exec, entries);
+		const { commands, handlers } = loadFactory(exec, entries);
 		const { ctx, selectCalls } = makeCtx(dir, entries, { select: [0, RESTORE_CODE] });
+		await write("mine.txt", "mine\n");
+		const call = { toolCallId: "t1", toolName: "bash", input: { command: "echo new > b.txt" } };
+		await handlers.get("tool_call")?.({ type: "tool_call", ...call }, ctx);
+		await write("b.txt", "new\n");
+		await handlers.get("tool_result")?.({ type: "tool_result", ...call, content: [], isError: false }, ctx);
+
 		await commands.get("rewind")?.("", ctx);
 		expect(selectCalls[1]?.title).toContain("The code will be restored +0 -1 in b.txt.");
 		await expect(read("b.txt")).rejects.toThrow();
+		expect(await read("mine.txt")).toBe("mine\n");
 
 		const undo = makeCtx(dir, entries, { select: [0, RESTORE_CODE] });
 		await commands.get("rewind")?.("", undo.ctx);
@@ -682,6 +699,28 @@ describe("message_end capture", () => {
 
 		const [checkpoint] = listCheckpoints(entries);
 		expect(checkpoint).toMatchObject({ turnEntryId: "u1", subject: "the prompt" });
+	});
+
+	it("records the files a write or bash call creates, not ones that were already there", async () => {
+		const { dir, exec, write } = await makeRepo();
+		await mkdir(join(dir, "sub"));
+		await write("already.txt", "x\n");
+		const entries: SessionEntry[] = [];
+		const { handlers } = loadFactory(exec, entries);
+		const { ctx } = makeCtx(join(dir, "sub"), entries);
+
+		for (const [toolName, file] of [
+			["write", "sub/w.txt"],
+			["bash", "b.txt"],
+			["read", "r.txt"],
+		] as const) {
+			const call = { toolCallId: toolName, toolName, input: {} };
+			await handlers.get("tool_call")?.({ type: "tool_call", ...call }, ctx);
+			await write(file, "x\n");
+			await handlers.get("tool_result")?.({ type: "tool_result", ...call, content: [], isError: false }, ctx);
+		}
+
+		expect([...agentCreatedFiles(entries)].sort()).toEqual(["b.txt", "sub/w.txt"]);
 	});
 
 	it("does not checkpoint on turns or on other messages", async () => {

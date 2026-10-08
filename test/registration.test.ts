@@ -9,7 +9,7 @@ import { recordExtensions } from "../scripts/probe-extensions.ts";
  */
 const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts: number; events: number }> = {
 	permissions: { commands: [], tools: [], shortcuts: 1, events: 2 },
-	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 3 },
+	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 5 },
 	"background-bash": {
 		commands: ["tasks"],
 		tools: ["bash", "monitor", "task_stop"],
