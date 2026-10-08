@@ -694,6 +694,45 @@ describe("AgentView keys", () => {
 		type("/cd");
 		expect(where()).toContain("~/proj/here");
 	});
+
+	it("/ suggests agent view's commands: tab or enter completes, enter on an exact one runs it", () => {
+		const { view, text } = makeView();
+		const typed = (s: string) => {
+			for (const ch of s) view.handleInput(ch);
+		};
+		const menu = () => text().filter((line) => /^\s+\/\w/.test(line));
+		typed("/");
+		expect(menu().map((line) => line.trim().split(/\s+/)[0])).toEqual(["/cd", "/model", "/resume", "/exit"]);
+		typed("m");
+		expect(menu()).toEqual([expect.stringMatching(/\/model <name>\s+Set the model for new sessions/)]);
+		// Enter on a command that takes an argument fills it in, waiting for the argument.
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("❯ /model ");
+		expect(text().join("\n")).not.toContain("Usage");
+		expect(menu()).toEqual([]);
+		view.handleInput(ESC);
+
+		// ↓ moves through the suggestions, not the list; enter runs one that takes no argument.
+		typed("/");
+		view.handleInput(DOWN);
+		view.handleInput(DOWN);
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("Resume a past session");
+		view.handleInput(ESC);
+
+		typed("/c");
+		view.handleInput("\t");
+		expect(text().join("\n")).toContain("❯ /cd ");
+		view.handleInput(ESC);
+
+		// Typed out in full, enter runs it as it is.
+		typed("/cd");
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("New sessions start in ~/proj/here");
+
+		typed("/zz");
+		expect(menu()).toEqual([]);
+	});
 });
 
 describe("piPackageRoot", () => {

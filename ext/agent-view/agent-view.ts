@@ -139,6 +139,13 @@ const SPINNER = [...FRAMES, ...[...FRAMES].reverse()];
 const ARM_MS = 2000;
 /** Claude Code's double ctrl+c window. */
 const CTRL_C_MS = 800;
+/** The slash commands agent view runs itself, as `/` suggests them. */
+const VIEW_COMMANDS: Array<{ name: string; arg?: string; description: string }> = [
+	{ name: "cd", arg: "<dir>", description: "Set the directory new sessions start in" },
+	{ name: "model", arg: "<name>", description: "Set the model for new sessions" },
+	{ name: "resume", description: "Resume a past session" },
+	{ name: "exit", description: "Leave agent view; sessions keep running" },
+];
 /** Bare words that quit, as in Claude Code. */
 export const EXIT_WORDS = new Set(["exit", "quit", ":q", ":q!", ":wq", ":wq!"]);
 /** How many times (150ms apart) a delete waits for the row a stopped pi saves. */
@@ -299,6 +306,8 @@ export class AgentView implements Component, Focusable {
 	private dispatchModel: { provider: string; id: string } | undefined;
 	/** `/cd`: where new sessions start, over the focus in the directory view. */
 	private dispatchDir: string | undefined;
+	/** The highlighted `/` suggestion. */
+	private suggestionIndex = 0;
 	private past: PastSession[] = [];
 	private pastIndex = 0;
 	private pastLoading = false;
@@ -1226,6 +1235,29 @@ export class AgentView implements Component, Focusable {
 		this.say(`New sessions start in ${this.shorten(dir)} (session-scoped)`);
 	}
 
+	/** The view commands a lone `/word` in the composer starts. */
+	private suggestions(): typeof VIEW_COMMANDS {
+		const text = this.composerText();
+		if (this.mode !== "list" || !/^\/\S*$/.test(text)) return [];
+		return VIEW_COMMANDS.filter((c) => c.name.startsWith(text.slice(1)));
+	}
+
+	/** Tab, or enter on a suggestion: one that takes an argument is filled in to wait for it, one that
+	 *  takes none is run by enter, and enter runs a command typed out in full as it is. Returns
+	 *  whether the composer was completed. */
+	private completeSuggestion(enter: boolean): boolean {
+		const command = this.suggestions()[this.suggestionIndex];
+		if (!command) return false;
+		const before = this.composerText();
+		if (enter && (!command.arg || before === `/${command.name}`)) {
+			this.setComposer(`/${command.name}`);
+			return false;
+		}
+		this.setComposer(`/${command.name}${command.arg ? " " : ""}`);
+		this.afterComposerEdit(before);
+		return true;
+	}
+
 	/** Slash commands agent view runs itself. A known command that needs a session says so; any
 	 *  other `/text` (a skill, a prompt template) is a task. Returns whether it was handled. */
 	private runViewCommand(text: string): boolean {
@@ -1494,7 +1526,11 @@ export class AgentView implements Component, Focusable {
 		}
 		if (this.isUp(data) || this.isDown(data)) {
 			const delta = this.isUp(data) ? -1 : 1;
-			if (peek) this.move(delta, { rowsOnly: true, wrap: true });
+			const menu = peek ? [] : this.suggestions();
+			if (menu.length) {
+				this.suggestionIndex = (this.suggestionIndex + delta + menu.length) % menu.length;
+				this.render_();
+			} else if (peek) this.move(delta, { rowsOnly: true, wrap: true });
 			else if (composing) this.moveTarget(delta);
 			else this.move(delta, { wrap: true });
 			return true;
@@ -1616,7 +1652,10 @@ export class AgentView implements Component, Focusable {
 			this.handleEnter(ctrlEnter);
 			return;
 		}
-		if (matchesKey(data, "tab")) return;
+		if (matchesKey(data, "tab")) {
+			this.completeSuggestion(false);
+			return;
+		}
 		if (!text && matchesKey(data, "right") && item?.kind === "row") {
 			void this.open(item.row);
 			return;
@@ -1659,6 +1698,7 @@ export class AgentView implements Component, Focusable {
 
 	/** What enter does: quit on an exit word, run a view command, start a task, or act on the focus. */
 	private handleEnter(ctrlEnter: boolean): void {
+		if (this.completeSuggestion(true)) return;
 		const text = this.composerText();
 		const trimmed = text.trim();
 		if (EXIT_WORDS.has(trimmed.toLowerCase())) {
@@ -1700,7 +1740,10 @@ export class AgentView implements Component, Focusable {
 	/** After the composer changed: notices clear, and a filter keeps the focus it had before it. */
 	private afterComposerEdit(before: string): void {
 		const after = this.composerText();
-		if (after !== before) this.notice = undefined;
+		if (after !== before) {
+			this.notice = undefined;
+			this.suggestionIndex = 0;
+		}
 		const wasFilter = !!queryFilter(before);
 		const isFilter = !!queryFilter(after);
 		if (isFilter && !wasFilter) this.beforeFilter = this.selectedKey;
@@ -2129,6 +2172,21 @@ export class AgentView implements Component, Focusable {
 		);
 	}
 
+	/** The `/` suggestions under the composer, as Claude Code's; undefined when there are none. */
+	private renderSuggestions(width: number): string[] | undefined {
+		const menu = this.suggestions();
+		if (menu.length === 0) return undefined;
+		const usage = (c: (typeof VIEW_COMMANDS)[number]) => `/${c.name}${c.arg ? ` ${c.arg}` : ""}`;
+		const column = Math.max(...menu.map((c) => usage(c).length)) + 4;
+		return menu.map((c, i) =>
+			truncateToWidth(
+				cc.fg(i === this.suggestionIndex ? "accent" : "muted", `  ${usage(c).padEnd(column)}${c.description}`),
+				width,
+				"…",
+			),
+		);
+	}
+
 	/** The composer: every line, the first after `❯`, the rest from the left edge. */
 	private composerLinesFor(width: number, dim: boolean): string[] {
 		const lines = this.composerLines.map((line, i) => truncateToWidth(i === 0 ? `❯ ${line}` : line, width));
@@ -2170,7 +2228,9 @@ export class AgentView implements Component, Focusable {
 				rule,
 				...this.composerLinesFor(width, this.mode === "rename"),
 				rule,
-				...(this.mode === "help" ? this.renderHelp(width) : [this.footerSlot(width)]),
+				...(this.mode === "help"
+					? this.renderHelp(width)
+					: (this.renderSuggestions(width) ?? [this.footerSlot(width)])),
 			];
 		}
 
