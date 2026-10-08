@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
@@ -160,19 +160,30 @@ function loadFactory(exec: Exec, entries: SessionEntry[]) {
 	return { handlers, commands };
 }
 
-/** Scripted UI: `select` answers are option indexes, `confirm` answers are booleans, both consumed in order. */
-function makeCtx(dir: string, entries: SessionEntry[], script: { select?: number[]; confirm?: boolean[] } = {}) {
+/**
+ * Scripted UI: `select` answers are option indexes (or option labels), `confirm` answers are booleans, both
+ * consumed in order.
+ */
+function makeCtx(
+	dir: string,
+	entries: SessionEntry[],
+	script: { select?: Array<number | string>; confirm?: boolean[] } = {},
+) {
 	const selects = [...(script.select ?? [])];
 	const confirms = [...(script.confirm ?? [])];
 	const notices: Array<{ message: string; type?: string }> = [];
 	const navigated: string[] = [];
 	const confirmMessages: string[] = [];
+	const selectCalls: Array<{ title: string; options: string[] }> = [];
 	const ctx = {
 		cwd: dir,
 		hasUI: true,
 		ui: {
-			select: async (_title: string, options: string[]) => {
-				const i = selects.shift();
+			select: async (title: string, options: string[]) => {
+				selectCalls.push({ title, options });
+				const pick = selects.shift();
+				if (typeof pick === "string") return options.includes(pick) ? pick : undefined;
+				const i = pick;
 				return i === undefined ? undefined : options[i];
 			},
 			confirm: async (_title: string, message: string) => {
@@ -188,10 +199,15 @@ function makeCtx(dir: string, entries: SessionEntry[], script: { select?: number
 			return { cancelled: false };
 		},
 	} as unknown as ExtensionContext;
-	return { ctx, notices, navigated, confirmMessages };
+	return { ctx, notices, navigated, confirmMessages, selectCalls };
 }
 
 const appendedSubjects = (entries: SessionEntry[]) => listCheckpoints(entries).map((c) => c.subject);
+
+async function waitFor(condition: () => boolean): Promise<void> {
+	const deadline = Date.now() + 5000;
+	while (!condition() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+}
 
 // ── unit: pure helpers ───────────────────────────────────────────────────────
 
@@ -353,6 +369,38 @@ describe("restoreCheckpoint — index state afterwards", () => {
 		expect(await status()).toEqual([" M a.txt", "?? later.txt", "?? new.txt"]);
 	});
 
+	it("removes the files the replaced tree added over the checkpoint, tracked or not", async () => {
+		const { dir, exec, git, write, read, status } = await makeRepo();
+		await write("a.txt", "v1\n");
+		const sha = await capture(dir, exec);
+
+		await write("a.txt", "v2\n");
+		await write("new.txt", "new\n");
+		await mkdir(join(dir, "sub"));
+		await write("sub/staged.txt", "staged\n");
+		await git("add", "sub/staged.txt");
+		const current = await capture(dir, exec);
+		expect(await restoreCheckpoint(dir, exec, sha, current)).toBe(true);
+
+		expect(await read("a.txt")).toBe("v1\n");
+		await expect(read("new.txt")).rejects.toThrow();
+		await expect(read("sub/staged.txt")).rejects.toThrow();
+		expect(await status()).toEqual([" M a.txt"]);
+	});
+
+	it("removes added files anywhere in the repository when run from a subdirectory", async () => {
+		const { dir, exec, write, read } = await makeRepo();
+		await mkdir(join(dir, "sub"));
+		await write("sub/keep.txt", "keep\n");
+		const sha = await capture(dir, exec);
+		await write("top-new.txt", "new\n");
+		const current = await capture(dir, exec);
+
+		expect(await restoreCheckpoint(join(dir, "sub"), exec, sha, current)).toBe(true);
+		await expect(read("top-new.txt")).rejects.toThrow();
+		expect(await read("sub/keep.txt")).toBe("keep\n");
+	});
+
 	it("works on an unborn HEAD (fresh git init, no commits)", async () => {
 		const { dir, exec, write, read, status } = await makeRepo({ commit: false });
 		await write("a.txt", "first\n");
@@ -366,8 +414,64 @@ describe("restoreCheckpoint — index state afterwards", () => {
 
 // ── integration: handlers through the factory ────────────────────────────────
 
-describe("/rewind (files only)", () => {
-	it("checkpoints the current tree as a safety net, then restores the chosen one", async () => {
+describe("/rewind", () => {
+	const RESTORE_BOTH = "Restore code and conversation";
+	const RESTORE_TALK = "Restore conversation";
+	const RESTORE_CODE = "Restore code";
+
+	it("lists every prompt newest first with what it changed, then offers Claude Code's options", async () => {
+		const { dir, exec, write } = await makeRepo();
+		const first = await capture(dir, exec);
+		await write("a.txt", "v1\n");
+		await write("b.txt", "b\n");
+		const second = await capture(dir, exec);
+		const entries = [
+			userEntry("u1", "make v1"),
+			checkpointEntry(first, "u1", "make v1"),
+			userEntry("u2", "only talk"),
+			userEntry("u3", "make v2"),
+			checkpointEntry(second, "u3", "make v2"),
+		];
+		await write("a.txt", "v2\n");
+
+		const { commands } = loadFactory(exec, entries);
+		const { ctx, selectCalls } = makeCtx(dir, entries, { select: [2] });
+		await commands.get("rewind")?.("", ctx);
+
+		expect(selectCalls[0]?.options).toEqual([
+			"make v2 · a.txt +1 -1",
+			"only talk · ⚠ No code restore",
+			"make v1 · 2 files changed +2 -1",
+		]);
+		expect(selectCalls[1]?.title).toContain("Confirm you want to restore to the point before you sent this message:");
+		expect(selectCalls[1]?.title).toContain("make v1");
+		expect(selectCalls[1]?.title).toContain("The code will be restored +1 -2 in a.txt and b.txt.");
+		expect(selectCalls[1]?.options).toEqual([RESTORE_BOTH, RESTORE_TALK, RESTORE_CODE, "Never mind"]);
+	});
+
+	it("offers only the conversation for a prompt without a checkpoint", async () => {
+		const { dir, exec } = await makeRepo();
+		const entries = [userEntry("u1", "chat")];
+
+		const { commands } = loadFactory(exec, entries);
+		const { ctx, selectCalls, navigated } = makeCtx(dir, entries, { select: [0, RESTORE_TALK] });
+		await commands.get("rewind")?.("", ctx);
+
+		expect(selectCalls[1]?.options).toEqual([RESTORE_TALK, "Never mind"]);
+		expect(navigated).toEqual(["u1"]);
+	});
+
+	it("says there is nothing to rewind to before the first prompt", async () => {
+		const { dir, exec } = await makeRepo();
+		const { commands } = loadFactory(exec, []);
+		const { ctx, notices, selectCalls } = makeCtx(dir, []);
+		await commands.get("rewind")?.("", ctx);
+
+		expect(selectCalls).toEqual([]);
+		expect(notices.at(-1)?.message).toContain("Nothing to rewind to yet.");
+	});
+
+	it("Restore code restores without a second confirmation and keeps a safety net", async () => {
 		const { dir, exec, write, read } = await makeRepo();
 		await write("a.txt", "v1\n");
 		const sha = await capture(dir, exec);
@@ -375,24 +479,42 @@ describe("/rewind (files only)", () => {
 		await write("a.txt", "v2\n");
 
 		const { commands } = loadFactory(exec, entries);
-		// select 0 = the only checkpoint, select 0 = "Files only", one confirm with the preview
-		const { ctx, notices, navigated, confirmMessages } = makeCtx(dir, entries, { select: [0, 0], confirm: [true] });
+		const { ctx, notices, navigated, confirmMessages } = makeCtx(dir, entries, { select: [0, RESTORE_CODE] });
 		await commands.get("rewind")?.("", ctx);
 
-		expect(confirmMessages).toHaveLength(1);
-		expect(confirmMessages[0]).toContain("a.txt");
+		expect(confirmMessages).toEqual([]);
 		expect(await read("a.txt")).toBe("v1\n");
 		expect(appendedSubjects(entries)).toContain("(before rewind)");
 		expect(notices.at(-1)?.message).toContain("restored");
 		expect(navigated).toEqual([]);
 
-		// The safety net itself restores v2.
-		const safety = listCheckpoints(entries).find((c) => c.subject === "(before rewind)");
-		expect(await restoreCheckpoint(dir, exec, safety?.sha ?? "")).toBe(true);
+		// /rewind lists the safety net as a code-only row of its own, which brings v2 back.
+		const undo = makeCtx(dir, entries, { select: [0, RESTORE_CODE] });
+		await commands.get("rewind")?.("", undo.ctx);
+		expect(undo.selectCalls[0]?.options[0]).toBe("(before rewind) · a.txt +1 -1");
+		expect(undo.selectCalls[1]?.options).toEqual([RESTORE_CODE, "Never mind"]);
 		expect(await read("a.txt")).toBe("v2\n");
+		expect(undo.navigated).toEqual([]);
 	});
 
-	it("declining the preview leaves the tree alone and appends no entry", async () => {
+	it("Restore code removes a file created after the checkpoint; undoing brings it back", async () => {
+		const { dir, exec, write, read } = await makeRepo();
+		const sha = await capture(dir, exec);
+		const entries = [userEntry("u1", "add b"), checkpointEntry(sha, "u1", "add b")];
+		await write("b.txt", "new\n");
+
+		const { commands } = loadFactory(exec, entries);
+		const { ctx, selectCalls } = makeCtx(dir, entries, { select: [0, RESTORE_CODE] });
+		await commands.get("rewind")?.("", ctx);
+		expect(selectCalls[1]?.title).toContain("The code will be restored +0 -1 in b.txt.");
+		await expect(read("b.txt")).rejects.toThrow();
+
+		const undo = makeCtx(dir, entries, { select: [0, RESTORE_CODE] });
+		await commands.get("rewind")?.("", undo.ctx);
+		expect(await read("b.txt")).toBe("new\n");
+	});
+
+	it("Never mind leaves the tree alone and appends no entry", async () => {
 		const { dir, exec, write, read } = await makeRepo();
 		await write("a.txt", "v1\n");
 		const sha = await capture(dir, exec);
@@ -400,25 +522,26 @@ describe("/rewind (files only)", () => {
 		await write("a.txt", "v2\n");
 
 		const { commands } = loadFactory(exec, entries);
-		const { ctx, notices } = makeCtx(dir, entries, { select: [0, 0], confirm: [false] });
+		const { ctx, navigated } = makeCtx(dir, entries, { select: [0, "Never mind"] });
 		await commands.get("rewind")?.("", ctx);
 
 		expect(await read("a.txt")).toBe("v2\n");
 		expect(appendedSubjects(entries)).not.toContain("(before rewind)");
-		expect(notices.some((n) => n.message.includes("restored"))).toBe(false);
+		expect(navigated).toEqual([]);
 	});
 
-	it("short-circuits when the working tree already matches the checkpoint", async () => {
+	it("says the code has not changed when the tree already matches the checkpoint", async () => {
 		const { dir, exec, write } = await makeRepo();
 		await write("a.txt", "v1\n");
 		const sha = await capture(dir, exec);
 		const entries = [userEntry("u1", "make v1"), checkpointEntry(sha, "u1", "make v1")];
 
 		const { commands } = loadFactory(exec, entries);
-		const { ctx, notices, confirmMessages } = makeCtx(dir, entries, { select: [0, 0], confirm: [true] });
+		const { ctx, notices, selectCalls } = makeCtx(dir, entries, { select: [0, RESTORE_CODE] });
 		await commands.get("rewind")?.("", ctx);
 
-		expect(confirmMessages).toEqual([]);
+		expect(selectCalls[0]?.options).toEqual(["make v1 · No code changes"]);
+		expect(selectCalls[1]?.title).toContain("The code has not changed (nothing will be restored).");
 		expect(notices.at(-1)?.message).toContain("already matches");
 		expect(appendedSubjects(entries)).not.toContain("(before rewind)");
 	});
@@ -431,7 +554,7 @@ describe("/rewind (files only)", () => {
 		await write("a.txt", "v2\n");
 
 		const { commands } = loadFactory(failOnce(exec, "write-tree"), entries);
-		const declined = makeCtx(dir, entries, { select: [0, 0], confirm: [false] });
+		const declined = makeCtx(dir, entries, { select: [0, RESTORE_CODE], confirm: [false] });
 		await commands.get("rewind")?.("", declined.ctx);
 		expect(declined.confirmMessages[0]).toContain("UNRECOVERABLE");
 		expect(await read("a.txt")).toBe("v2\n");
@@ -440,15 +563,13 @@ describe("/rewind (files only)", () => {
 		expect(appendedSubjects(entries)).not.toContain("(before rewind)");
 
 		const { commands: again } = loadFactory(failOnce(exec, "write-tree"), entries);
-		const accepted = makeCtx(dir, entries, { select: [0, 0], confirm: [true] });
+		const accepted = makeCtx(dir, entries, { select: [0, RESTORE_CODE], confirm: [true] });
 		await again.get("rewind")?.("", accepted.ctx);
 		expect(await read("a.txt")).toBe("v1\n");
 		expect(appendedSubjects(entries)).not.toContain("(before rewind)");
 	});
-});
 
-describe("/rewind (files and conversation)", () => {
-	it("keeps the safety net on the branch the conversation lands on, so /rewind can undo it", async () => {
+	it("Restore code and conversation keeps the safety net on the branch the conversation lands on", async () => {
 		const { dir, exec, write, read } = await makeRepo();
 		await write("a.txt", "v1\n");
 		const sha = await capture(dir, exec);
@@ -456,8 +577,8 @@ describe("/rewind (files and conversation)", () => {
 		await write("a.txt", "v2\n");
 
 		const { commands } = loadFactory(exec, entries);
-		// select 0 = the only checkpoint, select 1 = "Files and conversation"
-		const { ctx, navigated } = makeCtx(dir, entries, { select: [0, 1], confirm: [true] });
+		// Row 1 = "make v1" (rows are newest first).
+		const { ctx, navigated } = makeCtx(dir, entries, { select: [1, RESTORE_BOTH] });
 		const oldLeaf = "u2";
 		// pi moves the leaf to the parent of the user message, leaving the later entries off-branch.
 		(ctx as unknown as { navigateTree: (id: string) => Promise<{ cancelled: boolean }> }).navigateTree = async (
@@ -475,6 +596,22 @@ describe("/rewind (files and conversation)", () => {
 		expect(safety?.turnEntryId).toBe(oldLeaf);
 		expect(await restoreCheckpoint(dir, exec, safety?.sha ?? "")).toBe(true);
 		expect(await read("a.txt")).toBe("v2\n");
+	});
+
+	it("Restore conversation leaves the files alone", async () => {
+		const { dir, exec, write, read } = await makeRepo();
+		await write("a.txt", "v1\n");
+		const sha = await capture(dir, exec);
+		const entries = [userEntry("u1", "make v1"), checkpointEntry(sha, "u1", "make v1")];
+		await write("a.txt", "v2\n");
+
+		const { commands } = loadFactory(exec, entries);
+		const { ctx, navigated } = makeCtx(dir, entries, { select: [0, RESTORE_TALK] });
+		await commands.get("rewind")?.("", ctx);
+
+		expect(navigated).toEqual(["u1"]);
+		expect(await read("a.txt")).toBe("v2\n");
+		expect(appendedSubjects(entries)).not.toContain("(before rewind)");
 	});
 });
 
@@ -526,27 +663,42 @@ describe("session_before_fork", () => {
 	});
 });
 
-describe("turn_start capture", () => {
-	it("labels the checkpoint with the user message that is persisted AFTER turn_start fires", async () => {
-		// pi's agent loop emits turn_start before message_start/message_end for the
-		// prompt, so the branch has no user message for this turn yet when the
-		// handler runs; it appears while the capture's git calls are in flight.
+describe("message_end capture", () => {
+	it("checkpoints a user message, labeled by that message even when a later one lands first", async () => {
+		// pi persists a message only after extensions see its message_end, so the
+		// entry appears while the capture's git calls are in flight, possibly
+		// followed by a steering message.
 		const { dir, exec } = await makeRepo();
 		const entries: SessionEntry[] = [userEntry("u0", "previous prompt")];
 		const { handlers } = loadFactory(exec, entries);
 		const { ctx } = makeCtx(dir, entries);
+		const prompt = userEntry("u1", "the prompt");
+		const { message } = prompt as unknown as { message: unknown };
 
-		const turn = handlers.get("turn_start")?.({ type: "turn_start", turnIndex: 0, timestamp: Date.now() }, ctx);
-		entries.push(userEntry("u1", "the prompt that started this turn"));
-		await turn;
-		const deadline = Date.now() + 5000;
-		while (listCheckpoints(entries).length === 0 && Date.now() < deadline) {
-			await new Promise((r) => setTimeout(r, 20));
-		}
+		const pending = handlers.get("message_end")?.({ type: "message_end", message }, ctx);
+		entries.push(prompt, userEntry("u2", "a steer that landed later"));
+		await pending;
+		await waitFor(() => listCheckpoints(entries).length > 0);
 
 		const [checkpoint] = listCheckpoints(entries);
-		expect(checkpoint).toBeDefined();
-		expect(checkpoint?.turnEntryId).toBe("u1");
-		expect(checkpoint?.subject).toBe("the prompt that started this turn");
+		expect(checkpoint).toMatchObject({ turnEntryId: "u1", subject: "the prompt" });
+	});
+
+	it("does not checkpoint on turns or on other messages", async () => {
+		const { dir, exec } = await makeRepo();
+		let calls = 0;
+		const counting: Exec = (command, args, options) => {
+			calls++;
+			return exec(command, args, options);
+		};
+		const { handlers } = loadFactory(counting, []);
+		const { ctx } = makeCtx(dir, []);
+
+		expect(handlers.has("turn_start")).toBe(false);
+		await handlers.get("message_end")?.(
+			{ type: "message_end", message: { role: "assistant", content: [], timestamp: Date.now() } },
+			ctx,
+		);
+		expect(calls).toBe(0);
 	});
 });

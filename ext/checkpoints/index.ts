@@ -1,8 +1,9 @@
 /**
- * Checkpoints: a restorable git snapshot of the working tree at the start of
- * every turn, so `/rewind` can restore the files, the conversation, or both.
- * The conversation is rewound with `ctx.navigateTree` to the user message that
- * started the turn.
+ * Checkpoints: a restorable git snapshot of the working tree whenever a user
+ * message (a prompt, a steer or a follow-up) enters the conversation, so
+ * `/rewind` can restore the files, the conversation, or both, as Claude Code's
+ * rewind does. The conversation is rewound with `ctx.navigateTree` to the user
+ * message, which leaves the session just before it with its text in the editor.
  *
  * `navigateTree`, NOT `ctx.fork`: calling fork from this command handler
  * terminates the session (exit code 1, no stderr). navigateTree reaches the same
@@ -24,22 +25,23 @@
  * The temp index lives under `os.tmpdir()` and is removed in a `finally`.
  *
  * ── Capture is fire-and-forget ───────────────────────────────────────────────
- * `turn_start` handlers are awaited inline, so the capture runs detached and its
- * entry is appended once the sha resolves. `turnEntryId`/`subject` are read at
- * THAT point, not at turn_start: turn_start fires before the prompt's user
- * message is persisted (on message_end), so the branch at turn_start still ends
- * at the PREVIOUS prompt. `isCapturing` drops an overlapping background capture;
- * the safety-net capture before a restore bypasses it.
+ * `message_end` handlers are awaited inline, so the capture runs detached and
+ * its entry is appended once the sha resolves. `turnEntryId`/`subject` are read
+ * at THAT point: extensions see a message's message_end before pi persists it.
+ * `isCapturing` drops an overlapping background capture; the safety-net capture
+ * before a restore bypasses it.
  *
  * ── Restore is destructive and fail-closed ───────────────────────────────────
  * `git read-tree --reset -u <sha>` resets the index and working tree in one
- * step, and only runs through `restoreWithSafetyNet` after a confirmation. That
- * captures the current state first so the restore is undoable; if the capture
- * fails, restoring needs a separate "unrecoverable" confirmation. The index is
+ * step, and only runs after the user chose it: in `/rewind` the option menu is
+ * the confirmation (as in Claude Code), the fork-point offer asks with a
+ * preview. The current state is captured first so the restore is undoable; if
+ * that capture fails, restoring needs a separate "unrecoverable" confirmation. The index is
  * then reset to HEAD so the result reads as ordinary uncommitted work (what was
  * staged is not recorded, as with `git stash pop` without `--index`). Files
- * created after the checkpoint and never added survive a restore: `read-tree`
- * only touches paths that differ from the index.
+ * created after the checkpoint are removed as in Claude Code, by diffing it
+ * against the safety net (`read-tree` alone leaves untracked ones); without a
+ * safety net they are left alone, as nothing could bring them back.
  *
  * ── Refs are namespaced per session ──────────────────────────────────────────
  * Sessions sharing one `.git` must not sweep each other's refs; see
@@ -50,8 +52,14 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext, InlineExtension, SessionEntry } from "@earendil-works/pi-coding-agent";
+import { basename, join } from "node:path";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	InlineExtension,
+	SessionEntry,
+	SessionMessageEntry,
+} from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, isKeyRepeat, matchesKey, type TUI } from "@earendil-works/pi-tui";
 
 const CHECKPOINT_CUSTOM_TYPE = "checkpoint";
@@ -74,9 +82,9 @@ const MAX_CHECKPOINT_REFS = 50;
 interface CheckpointData {
 	/** Commit sha of the snapshot. */
 	sha: string;
-	/** Id of the session entry (the user message) that started the turn this checkpoint belongs to. */
+	/** Id of the session entry (the user message) this checkpoint was taken for. */
 	turnEntryId: string;
-	/** Short label for display — usually the user message text that started the turn. */
+	/** Short label for display — usually that user message's text. */
 	subject: string;
 }
 
@@ -107,9 +115,9 @@ export function listCheckpoints(entries: SessionEntry[]): Checkpoint[] {
 }
 
 /**
- * The checkpoint to restore when forking at the user message `turnEntryId`:
- * the OLDEST capture of that turn. A prompt runs several turns, each captured
- * with the same turnEntryId; the first capture is the tree before the prompt
+ * The checkpoint of the user message `turnEntryId`, for /rewind and forking:
+ * the OLDEST capture with that id. Older sessions captured every turn of a
+ * prompt under the same id; the first capture is the tree before the prompt
  * changed anything, which is what replaying the prompt from scratch needs.
  */
 export function checkpointForTurn(entries: SessionEntry[], turnEntryId: string): Checkpoint | undefined {
@@ -138,23 +146,30 @@ function truncateSubject(text: string): string {
 	return `${singleLine.slice(0, SUBJECT_MAX_CHARS - 1)}…`;
 }
 
+type UserEntry = SessionMessageEntry & { message: Extract<SessionMessageEntry["message"], { role: "user" }> };
+
+function userEntries(branch: SessionEntry[]): UserEntry[] {
+	return branch.filter((e): e is UserEntry => e.type === "message" && e.message.role === "user");
+}
+
+function userSubject(entry: UserEntry): string {
+	return truncateSubject(extractUserText(entry.message.content));
+}
+
 /**
- * Walk a branch (root->leaf order, e.g. from `ctx.sessionManager.getBranch()`)
- * backward to find the user message that started the current turn, for labeling.
+ * The entry `message` was persisted as (pi appends the very object it emits),
+ * else the latest user message on the branch, for labeling.
  */
-function findTurnContext(branch: SessionEntry[]): {
+function findTurnContext(
+	branch: SessionEntry[],
+	message: unknown,
+): {
 	turnEntryId: string;
 	subject: string;
 } {
-	for (let i = branch.length - 1; i >= 0; i--) {
-		const entry = branch[i];
-		if (entry?.type === "message" && entry.message.role === "user") {
-			return {
-				turnEntryId: entry.id,
-				subject: truncateSubject(extractUserText(entry.message.content)),
-			};
-		}
-	}
+	const users = userEntries(branch);
+	const entry = users.find((e) => e.message === message) ?? users.at(-1);
+	if (entry) return { turnEntryId: entry.id, subject: userSubject(entry) };
 	const leaf = branch[branch.length - 1];
 	return { turnEntryId: leaf?.id ?? "", subject: "(session start)" };
 }
@@ -262,16 +277,44 @@ export async function captureCheckpoint(
 
 /**
  * Restore the working tree to a checkpoint; only call it from an explicit,
- * user-confirmed action. The index is then reset to HEAD so the result reads as
- * ordinary uncommitted work instead of a fully staged tree. Returns false (never
- * throws) if the sha can't be restored.
+ * user-confirmed action. `currentSha`, a capture of the tree being replaced,
+ * names the files added since the checkpoint, which are removed too. The index
+ * is then reset to HEAD so the result reads as ordinary uncommitted work instead
+ * of a fully staged tree. Returns false (never throws) if the sha can't be restored.
  */
-export async function restoreCheckpoint(cwd: string, exec: ExtensionAPI["exec"], sha: string): Promise<boolean> {
+export async function restoreCheckpoint(
+	cwd: string,
+	exec: ExtensionAPI["exec"],
+	sha: string,
+	currentSha?: string,
+): Promise<boolean> {
+	const added = currentSha
+		? await exec("git", ["diff", "--name-only", "-z", "--no-renames", "--diff-filter=A", sha, currentSha], {
+				cwd,
+				timeout: GIT_TIMEOUT_MS,
+			}).catch(() => undefined)
+		: undefined;
+	if (currentSha && added?.code !== 0) return false;
+
 	const result = await exec("git", ["read-tree", "--reset", "-u", sha], {
 		cwd,
 		timeout: RESTORE_TIMEOUT_MS,
 	}).catch(() => undefined);
 	if (result?.code !== 0) return false;
+
+	// read-tree removed the tracked ones; with the index now at `sha`, the rest are
+	// untracked. Paths are from the repository root, whatever `cwd` is.
+	const pathspecs = (added?.stdout ?? "")
+		.split("\0")
+		.filter(Boolean)
+		.map((path) => `:(top,literal)${path}`);
+	if (pathspecs.length > 0) {
+		const clean = await exec("git", ["clean", "-f", "-q", "--", ...pathspecs], {
+			cwd,
+			timeout: RESTORE_TIMEOUT_MS,
+		}).catch(() => undefined);
+		if (clean?.code !== 0) return false;
+	}
 
 	const head = await headSha(cwd, exec);
 	const unstage = await exec("git", head ? ["reset", "-q"] : ["read-tree", "--empty"], {
@@ -370,13 +413,75 @@ function clipLines(text: string, max: number): string {
 	return `${lines.slice(0, max).join("\n")}\n… and ${lines.length - max} more`;
 }
 
+interface DiffStats {
+	files: string[];
+	insertions: number;
+	deletions: number;
+}
+
 /**
- * The whole destructive sequence, shared by `/rewind` and the fork-point
- * offer: safety-net capture → ONE confirmation that previews what the restore
- * changes (or the fail-closed prompt if the safety capture failed) → append
- * the safety-net entry → restore → report. `restored` is true only when the tree
- * was restored; `safety` is the safety-net entry's data, when one was appended.
- * `intro` is the question the confirmation opens with.
+ * What changes from `fromSha` to `toSha`, or to the working tree's tracked
+ * files when `toSha` is undefined. Undefined on any git error, e.g. a sha whose
+ * ref was pruned and the commit collected.
+ */
+async function diffNumstat(
+	cwd: string,
+	exec: ExtensionAPI["exec"],
+	fromSha: string,
+	toSha?: string,
+): Promise<DiffStats | undefined> {
+	const result = await exec("git", ["diff", "--numstat", "--no-renames", fromSha, ...(toSha ? [toSha] : [])], {
+		cwd,
+		timeout: GIT_TIMEOUT_MS,
+	}).catch(() => undefined);
+	if (result?.code !== 0) return undefined;
+	const stats: DiffStats = { files: [], insertions: 0, deletions: 0 };
+	for (const line of result.stdout.split("\n")) {
+		const [added, removed, file] = line.split("\t");
+		if (!file) continue;
+		stats.files.push(file);
+		// Binary files show "-" for both counts.
+		stats.insertions += Number.parseInt(added ?? "", 10) || 0;
+		stats.deletions += Number.parseInt(removed ?? "", 10) || 0;
+	}
+	return stats;
+}
+
+/** A prompt row's note in /rewind, worded as in Claude Code. */
+function rowNote(stats: DiffStats | undefined): string {
+	if (!stats) return "⚠ No code restore";
+	const counts = `+${stats.insertions} -${stats.deletions}`;
+	if (stats.files.length === 0) return "No code changes";
+	if (stats.files.length === 1) return `${basename(stats.files[0] ?? "")} ${counts}`;
+	return `${stats.files.length} files changed ${counts}`;
+}
+
+/** What "Restore code" would do, worded as in Claude Code. */
+function restoreEffect(stats: DiffStats): string {
+	const [first = "", second = ""] = stats.files.map((file) => basename(file));
+	if (!first) return "The code has not changed (nothing will be restored).";
+	const files =
+		stats.files.length === 1
+			? first
+			: stats.files.length === 2
+				? `${first} and ${second}`
+				: `${first} and ${stats.files.length - 1} other files`;
+	return `The code will be restored +${stats.insertions} -${stats.deletions} in ${files}.`;
+}
+
+/** Suffix repeats with " (2)", " (3)", ... so `select`'s answer maps back to one row. */
+function uniqueLabels(labels: string[]): string[] {
+	const seen = new Map<string, number>();
+	return labels.map((label) => {
+		const n = (seen.get(label) ?? 0) + 1;
+		seen.set(label, n);
+		return n === 1 ? label : `${label} (${n})`;
+	});
+}
+
+/**
+ * The fork-point offer: safety-net capture → ONE confirmation that previews
+ * what the restore changes → `restoreOverSafetyNet`.
  */
 async function restoreWithSafetyNet(
 	pi: ExtensionAPI,
@@ -389,7 +494,6 @@ async function restoreWithSafetyNet(
 	// The captured tree doubles as the preview base, since `git diff <sha>`
 	// against the working tree would skip untracked files.
 	const safetySha = await captureCheckpoint(ctx.cwd, pi.exec, ctx.sessionManager.getSessionId());
-	let safety: CheckpointData | undefined;
 	if (safetySha) {
 		const stat = await diffStat(ctx.cwd, pi.exec, safetySha, targetSha);
 		if (stat !== undefined && stat.trim() === "") {
@@ -403,6 +507,27 @@ async function restoreWithSafetyNet(
 		);
 		// Declined: no entry is appended; the safety-net ref is swept by the next prune.
 		if (!proceed) return { restored: false };
+	}
+	return restoreOverSafetyNet(pi, ctx, targetSha, safetySha, safetySubject, intro);
+}
+
+/**
+ * The destructive tail shared by `/rewind` and the fork-point offer, once the
+ * user chose to restore: append the safety-net entry for `safetySha` (or ask the
+ * fail-closed question when the capture failed) → restore → report. `restored`
+ * is true only when the tree was restored; `safety` is the safety-net entry's
+ * data, when one was appended. `intro` opens the fail-closed question.
+ */
+async function restoreOverSafetyNet(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	targetSha: string,
+	safetySha: string | undefined,
+	safetySubject: string,
+	intro: string,
+): Promise<{ restored: boolean; safety?: CheckpointData }> {
+	let safety: CheckpointData | undefined;
+	if (safetySha) {
 		safety = { sha: safetySha, turnEntryId: ctx.sessionManager.getLeafEntry()?.id ?? "", subject: safetySubject };
 		pi.appendEntry(CHECKPOINT_CUSTOM_TYPE, safety);
 	} else {
@@ -418,7 +543,7 @@ async function restoreWithSafetyNet(
 		}
 	}
 
-	const restored = await restoreCheckpoint(ctx.cwd, pi.exec, targetSha);
+	const restored = await restoreCheckpoint(ctx.cwd, pi.exec, targetSha, safetySha);
 	if (restored) {
 		ctx.ui.notify("Working tree restored to checkpoint.", "info");
 		return { restored: true, safety };
@@ -435,13 +560,13 @@ async function restoreWithSafetyNet(
 	return { restored: false };
 }
 
-/** Overlap guard for the turn_start background capture. */
+/** Overlap guard for the message_end background capture. */
 let isCapturing = false;
 
 /**
  * Background captures this session that failed while `cwd` WAS a git repo;
  * reset on `session_start`. "Not a git repo" is expected and not counted —
- * these are turns silently left without a safety net.
+ * these are prompts silently left without a safety net.
  */
 let failedCaptureCount = 0;
 
@@ -450,15 +575,14 @@ let failedCaptureCount = 0;
  * (bootstrap + trust-resolving pass).
  */
 export function factory(pi: ExtensionAPI): void {
-	function checkpointCurrentTurn(ctx: ExtensionContext): void {
-		if (isCapturing) return; // an in-flight capture: the next turn_start will try again
+	function checkpointUserMessage(ctx: ExtensionContext, message: unknown): void {
+		if (isCapturing) return; // an in-flight capture: this message goes without a checkpoint
 		isCapturing = true;
 		const sessionId = ctx.sessionManager.getSessionId();
 		void captureCheckpoint(ctx.cwd, pi.exec, sessionId)
 			.then(async (sha) => {
-				// Read AFTER the capture, not at turn_start: the prompt's user message
-				// is persisted on message_end, which comes after turn_start.
-				const { turnEntryId, subject } = findTurnContext(ctx.sessionManager.getBranch());
+				// Read AFTER the capture: pi persists the message after its message_end handlers.
+				const { turnEntryId, subject } = findTurnContext(ctx.sessionManager.getBranch(), message);
 				if (sha) {
 					pi.appendEntry(CHECKPOINT_CUSTOM_TYPE, { sha, turnEntryId, subject });
 					// Fire-and-forget, like capture itself — doesn't gate isCapturing below.
@@ -466,13 +590,13 @@ export function factory(pi: ExtensionAPI): void {
 					return;
 				}
 				// "Not a git repo" is expected and gets no notice; any other failure
-				// (index.lock, timeout, ...) left this turn without a safety net.
+				// (index.lock, timeout, ...) left this prompt without a safety net.
 				if (!(await isGitRepo(ctx.cwd, pi.exec))) return;
 				failedCaptureCount++;
 				if (failedCaptureCount === 1 && ctx.hasUI) {
 					ctx.ui.notify(
-						`Checkpoint capture failed for "${subject}" — this turn has no safety net for /rewind. ` +
-							"Run /rewind to see which turns are covered.",
+						`Checkpoint capture failed for "${subject}" — this prompt has no code restore in /rewind. ` +
+							"Run /rewind to see which prompts are covered.",
 						"warning",
 					);
 				}
@@ -523,8 +647,8 @@ export function factory(pi: ExtensionAPI): void {
 		});
 	};
 
-	pi.on("turn_start", async (_event, ctx) => {
-		checkpointCurrentTurn(ctx);
+	pi.on("message_end", async (event, ctx) => {
+		if (event.message.role === "user") checkpointUserMessage(ctx, event.message);
 	});
 
 	// Offer to put the code back where it was when the forked-at prompt began.
@@ -559,67 +683,102 @@ export function factory(pi: ExtensionAPI): void {
 				return;
 			}
 
-			const checkpoints = listCheckpoints(ctx.sessionManager.getBranch());
+			// One row per prompt, plus the safety nets (taken for no prompt) so a rewind
+			// can be undone; newest first, so select starts on the most recent.
+			const branch = ctx.sessionManager.getBranch();
+			const promptIds = new Set(userEntries(branch).map((e) => e.id));
+			const checkpointsById = new Map(listCheckpoints(branch).map((c) => [c.entryId, c]));
+			const points: Array<{ prompt?: UserEntry; checkpoint?: Checkpoint; subject: string }> = [];
+			for (const entry of branch) {
+				if (entry.type === "message" && promptIds.has(entry.id)) {
+					const prompt = entry as UserEntry;
+					points.push({ prompt, checkpoint: checkpointForTurn(branch, prompt.id), subject: userSubject(prompt) });
+				}
+				const checkpoint = checkpointsById.get(entry.id);
+				if (checkpoint && !promptIds.has(checkpoint.turnEntryId))
+					points.push({ checkpoint, subject: checkpoint.subject });
+			}
+			points.reverse();
+			if (points.length === 0) {
+				ctx.ui.notify("Nothing to rewind to yet.", "info");
+				return;
+			}
+
+			// The current tree: the base for each row's changes and the restore preview,
+			// and the safety net if a restore follows (unused, its ref goes with the next prune).
+			// Bypasses the isCapturing guard: this is a foreground, user-awaited action.
+			const currentSha = await captureCheckpoint(ctx.cwd, pi.exec, ctx.sessionManager.getSessionId());
+			// What changed since each point: its checkpoint to the next newer one, or to now.
+			// A failed diff (no checkpoint, or its commit is gone) means no code restore.
+			let newerSha = currentSha;
+			const rows = points.map((point) => {
+				const { checkpoint } = point;
+				const row = { ...point, toSha: newerSha };
+				if (checkpoint) newerSha = checkpoint.sha;
+				return row;
+			});
+			const stats = await Promise.all(
+				rows.map((row) =>
+					row.checkpoint ? diffNumstat(ctx.cwd, pi.exec, row.checkpoint.sha, row.toSha) : undefined,
+				),
+			);
+
 			// Surface capture failures here too: this is where users check what they
 			// can rewind to.
 			const failureNote =
 				failedCaptureCount > 0
-					? ` (${failedCaptureCount} checkpoint${failedCaptureCount === 1 ? "" : "s"} failed to capture this session — those turns have no safety net)`
+					? ` (${failedCaptureCount} checkpoint${failedCaptureCount === 1 ? "" : "s"} failed to capture this session — those prompts have no code restore)`
 					: "";
-			if (checkpoints.length === 0) {
-				ctx.ui.notify(`No checkpoints yet.${failureNote}`, failedCaptureCount > 0 ? "warning" : "info");
-				return;
-			}
-
-			// Suffixed with a sha fragment so two checkpoints that render an identical
-			// timestamp+subject (e.g. two captures within the same second) still map
-			// back to the right entry via labels.indexOf() below.
-			const labels = checkpoints.map(
-				(c) => `${new Date(c.timestamp).toLocaleString()} — ${c.subject} (${c.sha.slice(0, 7)})`,
-			);
-			const choice = await ctx.ui.select(`Rewind to which checkpoint?${failureNote}`, labels);
+			const labels = uniqueLabels(rows.map((row, i) => `${row.subject} · ${rowNote(stats[i])}`));
+			const choice = await ctx.ui.select(`Rewind to:${failureNote}`, labels);
 			if (!choice) return;
-			const target = checkpoints[labels.indexOf(choice)];
-			if (!target) return;
+			const index = labels.indexOf(choice);
+			const row = rows[index];
+			if (!row) return;
+			const target = stats[index] ? row.checkpoint : undefined;
 
-			// The git checkpoint restores files; the conversation lives in pi's
-			// session tree and is rewound to the user message that started the turn.
-			const canRewindTalk = Boolean(target.turnEntryId);
-			const SCOPES = [
-				{ label: "Files only — restore the working tree, keep the conversation", files: true, talk: false },
-				{ label: "Files and conversation — restore the tree and rewind the conversation", files: true, talk: true },
-				{
-					label: "Conversation only — rewind the conversation to that turn, leave files alone",
-					files: false,
-					talk: true,
-				},
-			].filter((scope) => !scope.talk || canRewindTalk);
-			let scopeChoice = SCOPES[0];
-			if (SCOPES.length > 1) {
-				const scopeLabels = SCOPES.map((scope) => scope.label);
-				const picked = await ctx.ui.select("Rewind what?", scopeLabels);
-				if (!picked) return;
-				scopeChoice = SCOPES[scopeLabels.indexOf(picked)];
-			}
-			if (!scopeChoice) return;
+			const effect = target && currentSha ? await diffNumstat(ctx.cwd, pi.exec, currentSha, target.sha) : undefined;
+			const BOTH = "Restore code and conversation";
+			const TALK = "Restore conversation";
+			const CODE = "Restore code";
+			const scope = await ctx.ui.select(
+				[
+					row.prompt
+						? "Confirm you want to restore to the point before you sent this message:"
+						: "Confirm you want to restore the code to this checkpoint:",
+					row.subject,
+					...(effect ? [restoreEffect(effect)] : []),
+				].join("\n\n"),
+				!row.prompt ? [CODE, "Never mind"] : target ? [BOTH, TALK, CODE, "Never mind"] : [TALK, "Never mind"],
+			);
+			if (scope !== BOTH && scope !== TALK && scope !== CODE) return;
 
 			// Conversation only: the working tree is untouched and navigating is
 			// non-destructive, so there is nothing to snapshot first.
-			if (!scopeChoice.files) {
-				await ctx.navigateTree(target.turnEntryId);
+			if (scope === TALK || !target) {
+				if (row.prompt) await ctx.navigateTree(row.prompt.id);
 				return;
 			}
 
-			const { restored, safety } = await restoreWithSafetyNet(
-				pi,
-				ctx,
-				target.sha,
-				"(before rewind)",
-				`Restore the working tree to the checkpoint "${target.subject}"?`,
-			);
+			let safety: CheckpointData | undefined;
+			if (effect?.files.length === 0) {
+				ctx.ui.notify("Working tree already matches this checkpoint.", "info");
+				if (scope === CODE) return;
+			} else {
+				const result = await restoreOverSafetyNet(
+					pi,
+					ctx,
+					target.sha,
+					currentSha,
+					"(before rewind)",
+					`Restore the working tree to the checkpoint "${target.subject}"?`,
+				);
+				if (!result.restored) return;
+				safety = result.safety;
+			}
 			// Move the conversation after the restore: it swaps what the session points at.
-			if (!restored || !scopeChoice.talk) return;
-			const { cancelled } = await ctx.navigateTree(target.turnEntryId);
+			if (scope === CODE || !row.prompt) return;
+			const { cancelled } = await ctx.navigateTree(row.prompt.id);
 			// The safety net was appended on the branch just left, where /rewind no longer
 			// lists it and pruning drops its ref; repeat it on the branch we landed on.
 			if (!cancelled && safety) pi.appendEntry(CHECKPOINT_CUSTOM_TYPE, safety);
