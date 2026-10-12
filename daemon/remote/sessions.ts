@@ -1,0 +1,60 @@
+// daemon/remote/sessions.ts
+/**
+ * The phone's session list: agent view's own rows and bands (ext/agent-view/rows.ts, pure), so
+ * the phone and the terminal agree on what is Needs input, Working or Idle.
+ *
+ * rows.ts sits outside daemon/, so editing it does not change the daemon's build id: a running
+ * daemon keeps the old rows until it restarts.
+ */
+import { type AgentRow, buildBands, collectRows, type RowState } from "../../ext/agent-view/rows.ts";
+import type { InstanceSummary } from "../ipc/protocol.ts";
+
+export type RemoteBand = "pinned" | "needs" | "working" | "idle";
+
+export interface RemoteSession {
+	id: string;
+	label: string;
+	cwd: string;
+	band: RemoteBand;
+	state: RowState;
+	/** A pane's pi runs it; a stored row has no process. */
+	alive: boolean;
+	detail: string;
+	createdAt?: string;
+	finishedAt?: string;
+}
+
+function sessionRows(instances: InstanceSummary[]): AgentRow[] {
+	return collectRows(instances, undefined).filter((row) => !row.shell && !row.id.startsWith("pending:"));
+}
+
+/** In display order: agent view's state bands, each sorted as agent view sorts it. */
+export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
+	const sessions: RemoteSession[] = [];
+	for (const band of buildBands(sessionRows(instances), "state", (path) => path)) {
+		for (const row of band.rows) {
+			sessions.push({
+				id: row.id,
+				label: row.label,
+				cwd: row.cwd,
+				band: band.key as RemoteBand,
+				state: row.state,
+				alive: row.alive,
+				detail: row.detail,
+				createdAt: row.createdAt,
+				finishedAt: row.finishedAt,
+			});
+		}
+	}
+	return sessions;
+}
+
+/** `running`: a pane's pi is registered as this id, so a queued message reaches it. */
+export function findSession(
+	instances: InstanceSummary[],
+	id: string,
+): { sessionFile?: string; running: boolean } | undefined {
+	const row = sessionRows(instances).find((r) => r.id === id);
+	if (!row) return undefined;
+	return { sessionFile: row.sessionFile, running: instances.some((i) => i.id === id && i.external === true) };
+}
