@@ -2,15 +2,27 @@
  * `/remote-control`: control every agent-view session from a phone, as Claude Code's Remote
  * Control does. The daemon serves the phone (daemon/remote/); this command is its switch, shows
  * how to pair, and manages paired devices. In a pane, it also streams the reply in progress to
- * the phones watching the session (live.ts).
+ * the phones watching the session (live.ts), reports its model and usage, and runs the phone's
+ * model switch and compaction (report.ts).
  */
-import type { ExtensionAPI, ExtensionCommandContext, InlineExtension } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+	InlineExtension,
+} from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { remotePort } from "../_shared/settings.ts";
-import { currentDaemonBuildId, OrchestratorClient, type RemoteResult } from "../agent-view/orchestrator-client.ts";
+import {
+	currentDaemonBuildId,
+	OrchestratorClient,
+	type PaneMessage,
+	type RemoteResult,
+} from "../agent-view/orchestrator-client.ts";
 import { Tmux } from "../agent-view/tmux.ts";
 import { LiveForwarder } from "./live.ts";
 import { pairingText } from "./message.ts";
+import { applyPaneMessage, buildReport } from "./report.ts";
 import { serve, tailscaleInfo } from "./tailscale.ts";
 
 function message(error: unknown): string {
@@ -130,7 +142,33 @@ function factory(pi: ExtensionAPI): void {
 	// Only a pane registers (agent view), so only a pane can be watched.
 	const pane = Tmux.currentPane();
 	const live = pane ? liveForwarder(pane) : undefined;
-	pi.events.on("bluclawd:remote-watched", (watched) => live?.setWatched(watched === true));
+	const client = new OrchestratorClient();
+	let reports = Promise.resolve();
+	/** The session's context, for the bus, whose events carry none. */
+	let session: ExtensionContext | undefined;
+	let watched = false;
+	const report = (ctx: ExtensionContext): void => {
+		// As agent view registers: a `pi -p` run inside the pane must not report as the pane.
+		if (!pane || ctx.mode !== "tui") return;
+		session = ctx;
+		const next = buildReport(ctx, pi);
+		reports = reports.then(() => client.remoteReport(pane, next)).catch(() => {});
+	};
+	pi.on("session_start", (_event, ctx) => report(ctx));
+	pi.on("model_select", (_event, ctx) => report(ctx));
+	pi.on("thinking_level_select", (_event, ctx) => report(ctx));
+	pi.on("turn_end", (_event, ctx) => report(ctx));
+	pi.on("session_compact", (_event, ctx) => report(ctx));
+	pi.events.on("bluclawd:pane-message", (message) => {
+		if (session) applyPaneMessage(message as PaneMessage, session, pi);
+	});
+	pi.events.on("bluclawd:remote-watched", (data) => {
+		const opened = data === true && !watched;
+		watched = data === true;
+		live?.setWatched(watched);
+		// A restarted daemon has no report until the next turn: a phone opening the session sends it again.
+		if (opened && session) report(session);
+	});
 	pi.on("message_update", (event) => live?.onMessageUpdate(event.message));
 	pi.on("tool_execution_start", (event) => live?.onToolStart(event.toolCallId, event.toolName, event.args));
 	pi.on("tool_execution_end", (event) => live?.onToolEnd(event.toolCallId));

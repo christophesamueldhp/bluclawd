@@ -63,6 +63,15 @@ export interface LiveSnapshot {
 	tools: Array<{ id: string; name: string; summary: string; running: boolean }>;
 }
 
+/** Mirror of daemon/ipc/protocol.ts PaneReport. */
+export interface PaneReport {
+	model?: { provider: string; id: string; name?: string };
+	models: Array<{ provider: string; id: string; name?: string }>;
+	thinkingLevel?: string;
+	context?: { tokens: number | null; contextWindow: number; percent: number | null };
+	usage?: { input: number; output: number; cost: number };
+}
+
 /** Mirror of daemon/ipc/protocol.ts RemoteDeviceInfo. */
 export interface RemoteDeviceInfo {
 	id: string;
@@ -98,7 +107,8 @@ type Request =
 	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
 	| { type: "save"; cwd: string; label?: string; sessionFile: string }
 	| ({ type: "remote" } & RemoteAction)
-	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null };
+	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null }
+	| { type: "remote_report"; instanceId: string; report: PaneReport };
 
 interface AnyResponse {
 	type: string;
@@ -273,6 +283,11 @@ export class OrchestratorClient {
 	/** The reply this pane is streaming, for the phones watching it; null once it is finished. */
 	async remoteLive(instanceId: string, live: LiveSnapshot | null): Promise<void> {
 		await this.request({ type: "remote_live", instanceId, live }, 1000);
+	}
+
+	/** This pane's model, context and usage, for the phone's status sheet. */
+	async remoteReport(instanceId: string, report: PaneReport): Promise<void> {
+		await this.request({ type: "remote_report", instanceId, report }, 1000);
 	}
 
 	async unregister(instanceId: string): Promise<void> {
