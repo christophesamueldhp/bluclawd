@@ -96,3 +96,29 @@ describe("SelfRegistration heartbeats", () => {
 		expect(calls.at(-1)).toMatchObject({ leafId: "e7", launch: { command: piCommand() } });
 	});
 });
+
+describe("SelfRegistration watched flag", () => {
+	it("reports after every heartbeat whether a phone watches the session", async () => {
+		const replies: Array<{ watched?: boolean } | Error> = [{ watched: true }, {}, new Error("daemon down")];
+		const client = {
+			register: async () => {
+				const reply = replies.shift();
+				if (reply instanceof Error) throw reply;
+				return { messages: [], ...reply };
+			},
+			unregister: async () => {},
+		} as unknown as OrchestratorClient;
+		const watched: boolean[] = [];
+		const reg = new SelfRegistration(
+			client,
+			() => ({ cwd: "/p" }),
+			() => {},
+			"pi-1",
+			(w) => watched.push(w),
+		);
+		await reg.refresh();
+		await reg.refresh();
+		await reg.refresh();
+		expect(watched).toEqual([true, false, false]);
+	});
+});

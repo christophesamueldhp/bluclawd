@@ -299,6 +299,8 @@ const agentView: InlineExtension = {
 				pi.sendUserMessage(message.text, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
 			} else if (message.type === "abort") ctx.abort();
 			else if (message.type === "rename") pi.setSessionName(message.name);
+			// The rest are remote control's (ext/remote).
+			else pi.events.emit("bluclawd:pane-message", message);
 		};
 
 		/** The `← for agents` footer hint: `← N agents` while sessions wait on you, `← N done`
@@ -377,6 +379,7 @@ const agentView: InlineExtension = {
 				() => selfInfo(ctx),
 				(message) => onPaneMessage(ctx, message),
 				pane,
+				(watched) => pi.events.emit("bluclawd:remote-watched", watched),
 			);
 			registration.start();
 			if (process.env[NORMAL_ENV]) normal = true;

@@ -56,6 +56,13 @@ export type PaneMessage =
 	| { type: "fork"; entryId: string }
 	| { type: "clone" };
 
+/** Mirror of daemon/ipc/protocol.ts LiveSnapshot. */
+export interface LiveSnapshot {
+	text: string;
+	thinking?: string;
+	tools: Array<{ id: string; name: string; summary: string; running: boolean }>;
+}
+
 /** Mirror of daemon/ipc/protocol.ts RemoteDeviceInfo. */
 export interface RemoteDeviceInfo {
 	id: string;
@@ -90,7 +97,8 @@ type Request =
 	| { type: "rename"; instanceId: string; name: string }
 	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
 	| { type: "save"; cwd: string; label?: string; sessionFile: string }
-	| ({ type: "remote" } & RemoteAction);
+	| ({ type: "remote" } & RemoteAction)
+	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null };
 
 interface AnyResponse {
 	type: string;
@@ -101,6 +109,7 @@ interface AnyResponse {
 	version?: string;
 	buildId?: string;
 	messages?: PaneMessage[];
+	watched?: boolean;
 }
 
 /** Path to the daemon's CLI entry, for the ensureDaemon() auto-start. */
@@ -243,9 +252,9 @@ export class OrchestratorClient {
 	}
 
 	/** Register/heartbeat a pane's pi. */
-	async register(instance: RegisterInput): Promise<{ messages: PaneMessage[] }> {
+	async register(instance: RegisterInput): Promise<{ messages: PaneMessage[]; watched: boolean }> {
 		const res = await this.request({ type: "register", instance }, 1000);
-		return { messages: res.messages ?? [] };
+		return { messages: res.messages ?? [], watched: res.watched === true };
 	}
 
 	/** Queue a message for a pane's pi; it acts on it within a heartbeat. */
@@ -259,6 +268,11 @@ export class OrchestratorClient {
 		const res = await this.request({ type: "remote", ...action }, 5000);
 		if (res.type !== "remote_result") throw new Error("The agent daemon is out of date — restart pi to update it");
 		return res as unknown as RemoteResult;
+	}
+
+	/** The reply this pane is streaming, for the phones watching it; null once it is finished. */
+	async remoteLive(instanceId: string, live: LiveSnapshot | null): Promise<void> {
+		await this.request({ type: "remote_live", instanceId, live }, 1000);
 	}
 
 	async unregister(instanceId: string): Promise<void> {
