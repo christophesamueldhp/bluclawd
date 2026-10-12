@@ -1,12 +1,15 @@
 /**
  * `/remote-control`: control every agent-view session from a phone, as Claude Code's Remote
  * Control does. The daemon serves the phone (daemon/remote/); this command is its switch, shows
- * how to pair, and manages paired devices.
+ * how to pair, and manages paired devices. In a pane, it also streams the reply in progress to
+ * the phones watching the session (live.ts).
  */
 import type { ExtensionAPI, ExtensionCommandContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { remotePort } from "../_shared/settings.ts";
 import { currentDaemonBuildId, OrchestratorClient, type RemoteResult } from "../agent-view/orchestrator-client.ts";
+import { Tmux } from "../agent-view/tmux.ts";
+import { LiveForwarder } from "./live.ts";
 import { pairingText } from "./message.ts";
 import { serve, tailscaleInfo } from "./tailscale.ts";
 
@@ -114,7 +117,26 @@ async function devices(client: OrchestratorClient, ctx: ExtensionCommandContext)
 	ctx.ui.notify(`Revoked ${device.name}`, "info");
 }
 
+function liveForwarder(pane: string): LiveForwarder {
+	const client = new OrchestratorClient();
+	let queue = Promise.resolve();
+	// One request at a time, so a null never overtakes the snapshot it clears.
+	return new LiveForwarder((snapshot) => {
+		queue = queue.then(() => client.remoteLive(pane, snapshot)).catch(() => {});
+	});
+}
+
 function factory(pi: ExtensionAPI): void {
+	// Only a pane registers (agent view), so only a pane can be watched.
+	const pane = Tmux.currentPane();
+	const live = pane ? liveForwarder(pane) : undefined;
+	pi.events.on("bluclawd:remote-watched", (watched) => live?.setWatched(watched === true));
+	pi.on("message_update", (event) => live?.onMessageUpdate(event.message));
+	pi.on("tool_execution_start", (event) => live?.onToolStart(event.toolCallId, event.toolName, event.args));
+	pi.on("tool_execution_end", (event) => live?.onToolEnd(event.toolCallId));
+	pi.on("message_end", () => live?.onMessageEnd());
+	pi.on("agent_end", () => live?.onAgentEnd());
+
 	pi.registerCommand("remote-control", {
 		description: "Control sessions from your phone: on/off, pair, devices",
 		handler: async (args, ctx) => {

@@ -92,7 +92,7 @@ export function activeBranch(entries: Entry[], leafId?: string): Entry[] {
 	return branch.reverse();
 }
 
-function clip(text: string): { text: string; truncated: boolean } {
+export function clip(text: string): { text: string; truncated: boolean } {
 	return text.length > TEXT_MAX
 		? { text: `${text.slice(0, TEXT_MAX)}…`, truncated: true }
 		: { text, truncated: false };
