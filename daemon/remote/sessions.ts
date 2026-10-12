@@ -51,11 +51,12 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 	return sessions;
 }
 
-/** `running`: a pane's pi is registered as this id, so a queued message reaches it. */
+/** `running`: a pane's pi is registered as this id, so a queued message reaches it. `busy`: mid-turn,
+ *  working or waiting on an answer. */
 export function findSession(
 	instances: InstanceSummary[],
 	id: string,
-): { sessionFile?: string; cwd: string; running: boolean; working: boolean; leafId?: string } | undefined {
+): { sessionFile?: string; cwd: string; running: boolean; busy: boolean; leafId?: string } | undefined {
 	const row = sessionRows(instances).find((r) => r.id === id);
 	if (!row) return undefined;
 	const pane = instances.find((i) => i.id === id && i.external === true);
@@ -63,7 +64,7 @@ export function findSession(
 		sessionFile: row.sessionFile,
 		cwd: row.cwd,
 		running: pane !== undefined,
-		working: row.state === "working",
+		busy: row.state === "working" || row.state === "needs",
 		...(pane?.leafId ? { leafId: pane.leafId } : {}),
 	};
 }

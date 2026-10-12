@@ -162,7 +162,7 @@ describe("remote HTTP API", () => {
 			],
 			thinkingLevel: "high",
 			context: { tokens: 12_000, contextWindow: 200_000, percent: 6 },
-			usage: { input: 150, output: 25, cost: 0.75 },
+			usage: { input: 150, output: 25, cacheRead: 0, cacheWrite: 0, cost: 0.75 },
 		};
 
 		it("gives a running session's latest report, and none before it has sent one", async () => {
@@ -217,7 +217,7 @@ describe("remote HTTP API", () => {
 			expect(sent).toEqual([]);
 		});
 
-		it("compacts a running session once it is not working", async () => {
+		it("compacts a running session once it is neither working nor waiting on an answer", async () => {
 			const token = await pair();
 			const compact = (id: string) =>
 				fetch(`${base}/api/sessions/${id}/compact`, { method: "POST", headers: authJson(token), body: "{}" });
@@ -227,6 +227,11 @@ describe("remote HTTP API", () => {
 			const stored = await compact("stored");
 			expect(stored.status).toBe(409);
 			expect(await stored.json()).toEqual({ error: "session_not_running" });
+			// Waiting on a dialog is mid-turn, which compacting would abort.
+			instances = [{ ...instances[0], activity: "awaiting_input" }, instances[1]];
+			const needs = await compact("live");
+			expect(needs.status).toBe(409);
+			expect(await needs.json()).toEqual({ error: "session_busy" });
 			expect(sent).toEqual([]);
 			instances = [{ ...instances[0], activity: "idle" }, instances[1]];
 			expect((await compact("live")).status).toBe(202);

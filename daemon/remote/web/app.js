@@ -12,7 +12,7 @@ import { settle } from "./live.js";
 /** @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
 /** @typedef {{ provider: string, id: string, name?: string }} ReportModel */
-/** @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cost: number } }} Report */
+/** @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number } }} Report */
 
 const BANDS = [
 	["pinned", "Pinned"],
@@ -27,9 +27,11 @@ const WATCHDOG_MS = 35_000;
 const START_TIMEOUT_MS = 60_000;
 /** How long a finished reply stays on screen without a transcript fetch that has it. */
 const LIVE_CLEAR_MS = 3000;
+/** A compaction with nothing to compact, or one the pane skipped as busy, reports nothing. */
+const COMPACT_GIVE_UP_MS = 120_000;
 const ERRORS = {
 	session_not_running: "This session is not running. Open it on the Mac to continue.",
-	session_busy: "The session is working. Try again once it is done.",
+	session_busy: "The session is busy. Try again once it is done.",
 	no_status: "This session has not reported its status yet.",
 	invalid_cwd: "That directory does not exist on the Mac.",
 	invalid_model: "That model name is not valid.",
@@ -91,6 +93,8 @@ let startTimer;
 let liveEnded = false;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let liveClear;
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let compactGiveUp;
 /** Which view the DOM holds: "pair", "list" or "chat:<id>". */
 let shown = "";
 let lastLog = "";
@@ -565,12 +569,13 @@ ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
 		return `${head}<p class="muted">${esc(errorText(why))}</p>`;
 	}
 	const usage = report.usage;
-	const busy = session?.state === "working" || state.compacting || !session?.alive;
+	// Waiting on an answer is mid-turn too, and compacting would abort the turn.
+	const busy = session?.state === "working" || session?.state === "needs" || state.compacting || !session?.alive;
 	return `${head}<dl class="facts">
 <dt><label for="model">Model</label></dt><dd><select id="model">${modelOptions(report)}</select></dd>
 <dt>Thinking</dt><dd>${esc(report.thinkingLevel ?? "off")}</dd>
 <dt>Context</dt><dd>${contextHtml(report.context)}</dd>
-<dt>Tokens</dt><dd>${usage ? `↑ ${esc(tokens(usage.input))} in · ↓ ${esc(tokens(usage.output))} out` : "Unknown"}</dd>
+<dt>Tokens</dt><dd>${usage ? `↑ ${esc(tokens(usage.input))} in · ↓ ${esc(tokens(usage.output))} out${usage.cacheRead ? ` · R ${esc(tokens(usage.cacheRead))}` : ""}${usage.cacheWrite ? ` · W ${esc(tokens(usage.cacheWrite))}` : ""}` : "Unknown"}</dd>
 <dt>Cost</dt><dd>${usage ? `$${esc(usage.cost.toFixed(3))}` : "Unknown"}</dd>
 </dl><button class="compact" id="compact"${busy ? " disabled" : ""}>${state.compacting ? "Compacting…" : "Compact"}</button>`;
 }
@@ -791,6 +796,11 @@ async function compact() {
 	const id = state.open;
 	if (!id) return;
 	state.compacting = true;
+	clearTimeout(compactGiveUp);
+	compactGiveUp = setTimeout(() => {
+		state.compacting = false;
+		render();
+	}, COMPACT_GIVE_UP_MS);
 	render();
 	try {
 		await api.compact(id);

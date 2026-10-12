@@ -112,7 +112,7 @@ export interface PaneReport {
 	models: Array<{ provider: string; id: string; name?: string }>;
 	thinkingLevel?: string;
 	context?: { tokens: number | null; contextWindow: number; percent: number | null };
-	usage?: { input: number; output: number; cost: number };
+	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
 }
 
 /** A pane's latest PaneReport, sent when it changes (session start, model, thinking level, turn end). */

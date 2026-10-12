@@ -157,7 +157,10 @@ describe("remote control switch", () => {
 			webDir: dir,
 		});
 		setRemoteControl(control);
-		const report = { models: [{ provider: "openai", id: "gpt-5" }], usage: { input: 1, output: 2, cost: 0 } };
+		const report = {
+			models: [{ provider: "openai", id: "gpt-5" }],
+			usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0 },
+		};
 		// Kept while remote control is off, so the phone has it once it is on.
 		expect(await handleIpcRequest({ type: "remote_report", instanceId: "pane-1", report })).toMatchObject({
 			type: "ack",
@@ -195,6 +198,47 @@ describe("remote control switch", () => {
 		expect((await status()).status).toBe(404);
 		expect(received.split("event: status").length).toBe(signals);
 		controller.abort();
+	});
+
+	it("drops the report of a pane that went away without unregistering, but not the sender's own", async () => {
+		const pane = (id: string): InstanceSummary => ({
+			id,
+			status: "online",
+			cwd: "/p",
+			external: true,
+			activity: "idle",
+		});
+		let instances: InstanceSummary[] = [pane("pane-1"), pane("pane-2")];
+		control = new RemoteControl({
+			store: new RemoteStore(join(dir, "remote.json")),
+			listInstances: () => instances,
+			send: () => true,
+			deleteInstance: () => false,
+			webDir: dir,
+		});
+		const report = { models: [] };
+		control.report("pane-1", report);
+		control.report("pane-2", report);
+		// pane-2 is reaped; pane-1's next report, unchanged, prunes it.
+		instances = [pane("pane-1")];
+		control.report("pane-1", report);
+		// A pane's first report may arrive before it is listed.
+		control.report("pane-3", report);
+		instances = [pane("pane-1"), pane("pane-2"), pane("pane-3")];
+		const on = await control.handle({ type: "remote", action: "on", port: 0 });
+		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
+		const base = `http://127.0.0.1:${on.port}`;
+		const paired = await fetch(`${base}/api/pair`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ code: on.code, deviceName: "iPhone" }),
+		});
+		const { token } = (await paired.json()) as { token: string };
+		const status = (id: string) =>
+			fetch(`${base}/api/sessions/${id}/status`, { headers: { authorization: `Bearer ${token}` } });
+		expect((await status("pane-1")).status).toBe(200);
+		expect((await status("pane-2")).status).toBe(404);
+		expect((await status("pane-3")).status).toBe(200);
 	});
 
 	describe("push notifications", () => {

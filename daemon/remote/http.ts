@@ -273,7 +273,7 @@ async function handle(
 		if (!offered) return json(res, 400, { error: "invalid_model" });
 		message = { type: "set_model", provider, id: modelId };
 	} else if (action === "compact") {
-		if (session.running && session.working) return json(res, 409, { error: "session_busy" });
+		if (session.running && session.busy) return json(res, 409, { error: "session_busy" });
 		message = { type: "compact" };
 	} else {
 		message = { type: "abort" };

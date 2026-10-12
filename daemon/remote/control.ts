@@ -91,6 +91,10 @@ export class RemoteControl {
 			this.reports.delete(sessionId);
 			return;
 		}
+		// A pane that dies without unregistering is only reaped from the list; its first report may
+		// arrive before it is listed, so the sender's own is kept.
+		const live = new Set(this.deps.listInstances().flatMap((i) => (i.external ? [i.id] : [])));
+		for (const id of this.reports.keys()) if (id !== sessionId && !live.has(id)) this.reports.delete(id);
 		const key = JSON.stringify(report);
 		if (this.reports.get(sessionId)?.key === key) return;
 		this.reports.set(sessionId, { report, key });
