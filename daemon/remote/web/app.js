@@ -8,6 +8,7 @@ import { api, getToken, setToken, Unauthorized } from "./api.js";
 
 /** @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string }} Session */
 /** @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean }} Message */
+/** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
 
 const BANDS = [
 	["pinned", "Pinned"],
@@ -41,6 +42,7 @@ const state = {
 	/** @type {string | undefined} */ open: undefined,
 	/** @type {Message[]} */ messages: [],
 	/** @type {{ text: string, before: number }[]} */ pending: [],
+	/** The open session's reply in progress, streamed by its pane. @type {LiveSnapshot | undefined} */ live: undefined,
 	/** @type {string[]} */ directories: [],
 	/**
 	 * A pane started from here, until its row is listed (`pane` is unset while the request is out).
@@ -194,6 +196,9 @@ async function loadMessages() {
 		if (state.open !== id || request !== messagesRequest) return;
 		state.messages = messages;
 		state.messagesLoaded = true;
+		// The transcript has what was streamed so far; only a tool still running is not in it yet.
+		const running = state.live?.tools.filter((t) => t.running) ?? [];
+		state.live = running.length ? { text: "", tools: running } : undefined;
 		// A sent prompt is pending until the transcript has one more copy of its text than when it was sent.
 		state.pending = state.pending.filter((p) => userCount(messages, p.text) <= p.before);
 		render();
@@ -249,6 +254,13 @@ function connect() {
 	current.addEventListener("messages", () => {
 		alive();
 		void loadMessages();
+	});
+	current.addEventListener("live", (/** @type {MessageEvent} */ event) => {
+		alive();
+		const { sessionId, live } = JSON.parse(event.data);
+		if (sessionId !== state.open) return;
+		state.live = live ?? undefined;
+		render();
 	});
 	current.addEventListener("ping", alive);
 	current.onerror = () => {
@@ -308,10 +320,10 @@ function chatShell() {
 <button class="send" aria-label="Send"><span aria-hidden="true">↑</span></button></form>`;
 }
 
-/** @param {string} name @param {string} summary @param {Message | undefined} result @param {string} key */
-function toolHtml(name, summary, result, key) {
+/** @param {string} name @param {string} summary @param {Message | undefined} result @param {string} key @param {boolean} [running] */
+function toolHtml(name, summary, result, key, running = false) {
 	const title = `${esc(name.charAt(0).toUpperCase() + name.slice(1))}(${esc(summary)})`;
-	if (!result) return `<div class="t">${title}</div>`;
+	if (!result) return `<div class="t${running ? " running" : ""}">${title}</div>`;
 	const first = (result.text ?? "").split("\n").find((line) => line.trim()) ?? (result.ok ? "done" : "error");
 	return `<details class="t${result.ok ? "" : " err"}" data-key="${esc(key)}"><summary>${title}<br>⎿ ${esc(first)}</summary>
 <pre>${esc(result.text ?? "")}${result.truncated ? "\n…" : ""}</pre></details>`;
@@ -323,6 +335,7 @@ function logHtml(session) {
 	const results = new Map();
 	for (const m of state.messages) if (m.kind === "toolResult" && m.toolCallId) results.set(m.toolCallId, m);
 	const calls = new Set(state.messages.flatMap((m) => (m.tools ?? []).map((t) => t.id)));
+	const running = new Set((state.live?.tools ?? []).filter((t) => t.running).map((t) => t.id));
 	const parts = [];
 	for (const m of state.messages) {
 		if (m.kind === "user") parts.push(`<div class="u">${esc(m.text)}</div>`);
@@ -334,19 +347,44 @@ function logHtml(session) {
 			}
 			if (m.text) parts.push(`<div class="a">${esc(m.text)}</div>`);
 			for (const [index, tool] of (m.tools ?? []).entries()) {
-				parts.push(toolHtml(tool.name, tool.summary, results.get(tool.id), tool.id || `${m.id}:${index}`));
+				const key = tool.id || `${m.id}:${index}`;
+				parts.push(toolHtml(tool.name, tool.summary, results.get(tool.id), key, running.has(tool.id)));
 			}
 			if (m.error) parts.push(`<div class="t err">${esc(m.error)}</div>`);
 		} else if (m.kind === "toolResult" && !(m.toolCallId && calls.has(m.toolCallId))) {
 			parts.push(toolHtml(m.toolName ?? "tool", "", m, m.id));
 		} else if (m.kind === "marker") parts.push(`<div class="marker">${esc(m.text)}</div>`);
 	}
+	const live = state.live ? liveHtml(state.live, calls) : "";
+	if (live) parts.push(live);
 	for (const { text } of state.pending) {
 		parts.push(`<div class="u">${esc(text)}</div><div class="queued">sent · waiting for the session</div>`);
 	}
-	if (session?.state === "working") parts.push(`<div class="working">✻ ${esc(session.detail || "Working…")}</div>`);
+	// The reply in progress replaces the working line once it shows something.
+	const streaming = live !== "" || running.size > 0;
+	if (session?.state === "working" && !streaming)
+		parts.push(`<div class="working">✻ ${esc(session.detail || "Working…")}</div>`);
 	if (parts.length) return parts.join("");
 	return `<p class="empty">${state.messagesLoaded ? "Nothing in this session yet." : "Loading…"}</p>`;
+}
+
+/**
+ * The reply in progress, after the transcript. A tool call the transcript already shows has its
+ * spinner there instead of a second block here.
+ * @param {LiveSnapshot} live @param {Set<string>} calls
+ */
+function liveHtml(live, calls) {
+	const parts = [];
+	if (live.thinking) {
+		parts.push(
+			`<details class="think" data-key="think:live"><summary>Thinking</summary><pre>${esc(live.thinking)}</pre></details>`,
+		);
+	}
+	if (live.text) parts.push(`<div class="a">${esc(live.text)}</div>`);
+	for (const tool of live.tools) {
+		if (!calls.has(tool.id)) parts.push(toolHtml(tool.name, tool.summary, undefined, tool.id, tool.running));
+	}
+	return parts.join("");
 }
 
 /** @param {Session | undefined} session */
@@ -557,6 +595,7 @@ function route() {
 		state.open = open;
 		state.messages = [];
 		state.messagesLoaded = false;
+		state.live = undefined;
 		state.error = undefined;
 		connect();
 	}
