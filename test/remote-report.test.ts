@@ -1,5 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
-import { applyPaneMessage, buildReport } from "../ext/remote/report.ts";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, describe, expect, it, vi } from "vitest";
+import remoteFactory from "../ext/remote/index.ts";
+import { applyPaneMessage, buildReport, navigate } from "../ext/remote/report.ts";
 
 const model = (provider: string, id: string, name?: string, reasoning = false) => ({ provider, id, name, reasoning });
 
@@ -40,7 +44,7 @@ function fakes(
 		isIdle: () => options.idle ?? true,
 		compact: vi.fn(),
 	};
-	const pi = { getThinkingLevel: () => "high", setModel: vi.fn(async () => true) };
+	const pi = { getThinkingLevel: () => "high", setModel: vi.fn(async () => true), sendUserMessage: vi.fn() };
 	return { ctx, pi };
 }
 
@@ -108,8 +112,128 @@ describe("applyPaneMessage", () => {
 
 	it("ignores messages it does not handle", () => {
 		const { ctx, pi } = fakes();
-		applyPaneMessage({ type: "clone" }, ctx as never, pi as never);
+		applyPaneMessage({ type: "rename", name: "x" }, ctx as never, pi as never);
 		expect(pi.setModel).not.toHaveBeenCalled();
 		expect(ctx.compact).not.toHaveBeenCalled();
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+	});
+});
+
+describe("tree, fork and clone from the phone", () => {
+	it("dispatches each as a /remote-control command, which pi runs without writing a message", () => {
+		const { ctx, pi } = fakes();
+		applyPaneMessage({ type: "tree", entryId: "1a2b3c4d" }, ctx as never, pi as never);
+		applyPaneMessage({ type: "fork", entryId: "1a2b3c4d" }, ctx as never, pi as never);
+		applyPaneMessage({ type: "clone" }, ctx as never, pi as never);
+		expect(pi.sendUserMessage.mock.calls).toEqual([
+			["/remote-control tree 1a2b3c4d", { expandPromptTemplates: true }],
+			["/remote-control fork 1a2b3c4d", { expandPromptTemplates: true }],
+			["/remote-control clone", { expandPromptTemplates: true }],
+		]);
+	});
+
+	it("dispatches nothing while the session is not idle", () => {
+		const { ctx, pi } = fakes({ idle: false });
+		applyPaneMessage({ type: "tree", entryId: "1a2b3c4d" }, ctx as never, pi as never);
+		applyPaneMessage({ type: "fork", entryId: "1a2b3c4d" }, ctx as never, pi as never);
+		applyPaneMessage({ type: "clone" }, ctx as never, pi as never);
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+	});
+});
+
+describe("navigate", () => {
+	const dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-navigate-"));
+	const saved = join(dir, "saved.jsonl");
+	writeFileSync(saved, "");
+	afterAll(() => rmSync(dir, { recursive: true, force: true }));
+
+	function command(options: { file?: string; leaf?: string | null } = {}) {
+		const entries = new Map<string, unknown>([
+			["aaaa0001", { type: "message", id: "aaaa0001", message: { role: "user", content: "hi" } }],
+			["aaaa0002", { type: "message", id: "aaaa0002", message: { role: "assistant", content: [] } }],
+		]);
+		return {
+			sessionManager: {
+				getEntry: (id: string) => entries.get(id),
+				getLeafId: () => (options.leaf === undefined ? "aaaa0002" : options.leaf),
+				getSessionFile: () => options.file ?? saved,
+			},
+			navigateTree: vi.fn(async () => ({ cancelled: false })),
+			fork: vi.fn(async () => ({ cancelled: false })),
+		};
+	}
+
+	it("goes back to an entry, forks before a user message, and clones at the leaf", async () => {
+		const ctx = command();
+		expect(await navigate("tree aaaa0002", ctx as never)).toBe(true);
+		expect(await navigate("fork aaaa0001", ctx as never)).toBe(true);
+		expect(await navigate(" clone ", ctx as never)).toBe(true);
+		expect(ctx.navigateTree.mock.calls).toEqual([["aaaa0002"]]);
+		expect(ctx.fork.mock.calls).toEqual([
+			["aaaa0001", { position: "before" }],
+			["aaaa0002", { position: "at" }],
+		]);
+	});
+
+	it("leaves anything else to the public subcommands", async () => {
+		const ctx = command();
+		for (const args of ["", "pair", "devices", "tree", "fork", "tree a b", "fork aaaa0001 x", "clone x", "treex"]) {
+			expect(await navigate(args, ctx as never)).toBe(false);
+		}
+		expect(ctx.navigateTree).not.toHaveBeenCalled();
+		expect(ctx.fork).not.toHaveBeenCalled();
+	});
+
+	// pi ends the pane when a fork throws, so none of these may reach it.
+	it("does nothing for an unknown entry, a fork from a reply, an empty session or an unsaved file", async () => {
+		const ctx = command();
+		expect(await navigate("tree ffff0000", ctx as never)).toBe(true);
+		expect(await navigate("fork ffff0000", ctx as never)).toBe(true);
+		expect(await navigate("fork aaaa0002", ctx as never)).toBe(true);
+		const empty = command({ leaf: null });
+		expect(await navigate("clone", empty as never)).toBe(true);
+		const unsaved = command({ file: join(dir, "unsaved.jsonl") });
+		expect(await navigate("fork aaaa0001", unsaved as never)).toBe(true);
+		expect(await navigate("clone", unsaved as never)).toBe(true);
+		for (const c of [ctx, empty, unsaved]) {
+			expect(c.navigateTree).not.toHaveBeenCalled();
+			expect(c.fork).not.toHaveBeenCalled();
+		}
+	});
+});
+
+describe("/remote-control", () => {
+	function register() {
+		let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+		const pi = {
+			on: () => {},
+			events: { on: () => {} },
+			registerCommand: (_name: string, command: { handler: typeof handler }) => {
+				handler = command.handler;
+			},
+		};
+		remoteFactory(pi as never);
+		if (!handler) throw new Error("not registered");
+		return handler;
+	}
+
+	it("shows the same usage for an unknown or malformed subcommand, internal ones included", async () => {
+		const handler = register();
+		for (const args of ["nope", "tree", "fork a b", "clone x"]) {
+			const notify = vi.fn();
+			await handler(args, { ui: { notify } });
+			expect(notify.mock.calls).toEqual([["Usage: /remote-control [pair | devices]", "warning"]]);
+		}
+	});
+
+	it("runs the phone's tree, fork and clone without a word to the user", async () => {
+		const handler = register();
+		const notify = vi.fn();
+		const navigateTree = vi.fn(async () => ({ cancelled: false }));
+		const entry = { type: "message", id: "aaaa0001", message: { role: "user", content: "hi" } };
+		const sessionManager = { getEntry: () => entry, getSessionFile: () => undefined, getLeafId: () => "aaaa0001" };
+		await handler("tree aaaa0001", { ui: { notify }, sessionManager, navigateTree });
+		expect(navigateTree).toHaveBeenCalledWith("aaaa0001");
+		expect(notify).not.toHaveBeenCalled();
 	});
 });

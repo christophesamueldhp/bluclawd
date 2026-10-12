@@ -3,7 +3,7 @@
  * Control does. The daemon serves the phone (daemon/remote/); this command is its switch, shows
  * how to pair, and manages paired devices. In a pane, it also streams the reply in progress to
  * the phones watching the session (live.ts), reports its model and usage, and runs the phone's
- * model switch and compaction (report.ts).
+ * model switch, compaction, tree navigation, fork and clone (report.ts).
  */
 import type {
 	ExtensionAPI,
@@ -22,7 +22,7 @@ import {
 import { Tmux } from "../agent-view/tmux.ts";
 import { LiveForwarder } from "./live.ts";
 import { pairingText } from "./message.ts";
-import { applyPaneMessage, buildReport } from "./report.ts";
+import { applyPaneMessage, buildReport, navigate } from "./report.ts";
 import { serve, tailscaleInfo } from "./tailscale.ts";
 
 function message(error: unknown): string {
@@ -178,6 +178,8 @@ function factory(pi: ExtensionAPI): void {
 	pi.registerCommand("remote-control", {
 		description: "Control sessions from your phone: on/off, pair, devices",
 		handler: async (args, ctx) => {
+			// The phone's tree, fork and clone (report.ts), not offered to the user.
+			if (await navigate(args, ctx)) return;
 			const sub = args.trim();
 			if (sub && sub !== "pair" && sub !== "devices") {
 				ctx.ui.notify("Usage: /remote-control [pair | devices]", "warning");
