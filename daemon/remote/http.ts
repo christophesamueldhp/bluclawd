@@ -49,6 +49,8 @@ const MESSAGES_DEFAULT = 50;
 const MESSAGES_MAX = 200;
 /** `provider/id`; the id may itself contain slashes. Never a leading dash: it is an argument to pi. */
 const MODEL_PATTERN = /^\w[\w.-]*\/[\w.:/@+-]+$/;
+/** pi's entry ids (8 hex digits, or a whole UUID): one word on the pane's `/remote-control` line. */
+const ENTRY_PATTERN = /^[0-9a-f-]{8,36}$/;
 
 const CONTENT_TYPES: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
@@ -220,7 +222,7 @@ async function handle(
 		return json(res, 200, { ok: true });
 	}
 
-	const match = /^\/api\/sessions\/([^/]+)\/(messages|status|prompt|abort|model|compact)$/.exec(path);
+	const match = /^\/api\/sessions\/([^/]+)\/(messages|status|prompt|abort|model|compact|tree|fork|clone)$/.exec(path);
 	if (!match) return json(res, 404, { error: "not_found" });
 	let id: string;
 	try {
@@ -275,6 +277,23 @@ async function handle(
 	} else if (action === "compact") {
 		if (session.running && session.busy) return json(res, 409, { error: "session_busy" });
 		message = { type: "compact" };
+	} else if (action === "tree" || action === "fork") {
+		const { entryId } = body;
+		if (typeof entryId !== "string" || !ENTRY_PATTERN.test(entryId)) {
+			return json(res, 400, { error: "invalid_entry" });
+		}
+		if (!session.running) return json(res, 409, { error: "session_not_running" });
+		if (session.busy) return json(res, 409, { error: "session_busy" });
+		// What the phone shows: the active branch, from the leaf the pane reports. Forking "before"
+		// is editing a message of yours, the only entry pi forks before.
+		const target = loadTranscript(session.sessionFile, Number.MAX_SAFE_INTEGER, session.leafId).find(
+			(m) => m.id === entryId,
+		);
+		if (!target || (action === "fork" && target.kind !== "user")) return json(res, 400, { error: "invalid_entry" });
+		message = { type: action, entryId };
+	} else if (action === "clone") {
+		if (session.running && session.busy) return json(res, 409, { error: "session_busy" });
+		message = { type: "clone" };
 	} else {
 		message = { type: "abort" };
 	}

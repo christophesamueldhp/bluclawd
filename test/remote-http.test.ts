@@ -239,6 +239,85 @@ describe("remote HTTP API", () => {
 		});
 	});
 
+	describe("tree, fork and clone", () => {
+		const assistant = (id: string, parentId: string, text: string) =>
+			`${JSON.stringify({ type: "message", id, parentId, message: { role: "assistant", content: [{ type: "text", text }] } })}\n`;
+
+		beforeEach(() => {
+			writeFileSync(
+				join(dir, "live.jsonl"),
+				entry("aaaa0001", null, "first") +
+					assistant("bbbb0002", "aaaa0001", "one") +
+					entry("cccc0003", "bbbb0002", "second") +
+					assistant("dddd0004", "cccc0003", "two"),
+			);
+			instances = [{ ...instances[0], activity: "idle" }, instances[1]];
+		});
+
+		const post = (token: string, id: string, action: string, body: unknown = {}) =>
+			fetch(`${base}/api/sessions/${id}/${action}`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify(body),
+			});
+
+		it("goes back to an entry, edits from a message of yours, and clones an idle session", async () => {
+			const token = await pair();
+			expect((await post(token, "live", "tree", { entryId: "bbbb0002" })).status).toBe(202);
+			expect((await post(token, "live", "fork", { entryId: "cccc0003" })).status).toBe(202);
+			expect((await post(token, "live", "clone")).status).toBe(202);
+			expect(sent).toEqual([
+				{ id: "live", message: { type: "tree", entryId: "bbbb0002" } },
+				{ id: "live", message: { type: "fork", entryId: "cccc0003" } },
+				{ id: "live", message: { type: "clone" } },
+			]);
+		});
+
+		it("refuses a busy or stored session", async () => {
+			const token = await pair();
+			const all = [
+				["tree", { entryId: "bbbb0002" }],
+				["fork", { entryId: "cccc0003" }],
+				["clone", {}],
+			] as const;
+			for (const activity of ["working", "awaiting_input"] as const) {
+				instances = [{ ...instances[0], activity }, instances[1]];
+				for (const [action, body] of all) {
+					const res = await post(token, "live", action, body);
+					expect(res.status).toBe(409);
+					expect(await res.json()).toEqual({ error: "session_busy" });
+				}
+			}
+			for (const [action, body] of all) {
+				const res = await post(token, "stored", action, body);
+				expect(res.status).toBe(409);
+				expect(await res.json()).toEqual({ error: "session_not_running" });
+			}
+			expect(sent).toEqual([]);
+		});
+
+		it("refuses an entry that is malformed, not on the active branch, or, to fork, not a message of yours", async () => {
+			const token = await pair();
+			const refused = async (action: string, body: unknown) => {
+				const res = await post(token, "live", action, body);
+				expect(res.status).toBe(400);
+				expect(await res.json()).toEqual({ error: "invalid_entry" });
+			};
+			// Each would reach the pane as a command line: one token, nothing else.
+			for (const entryId of [undefined, 1, "", "cccc0003 x", "cccc0003\nclone", "../cccc0003"]) {
+				await refused("tree", { entryId });
+				await refused("fork", { entryId });
+			}
+			await refused("tree", { entryId: "eeee0005" });
+			await refused("fork", { entryId: "bbbb0002" });
+			// Gone back to the first reply: the second exchange is off the branch.
+			instances = [{ ...instances[0], leafId: "bbbb0002" }, instances[1]];
+			await refused("tree", { entryId: "dddd0004" });
+			await refused("fork", { entryId: "cccc0003" });
+			expect(sent).toEqual([]);
+		});
+	});
+
 	it("refuses a stored session without a file, an empty or oversized prompt, and an oversized body", async () => {
 		instances = [...instances, { id: "fileless", status: "stopped", cwd: "/p" }];
 		const token = await pair();
