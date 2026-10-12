@@ -1,4 +1,3 @@
-// ext/remote/message.ts
 /** What `/remote-control` shows once the phone can reach the daemon. */
 export function pairingText(url: string, code: string, expiresAt: number, now: number = Date.now()): string {
 	const minutes = Math.max(1, Math.round((expiresAt - now) / 60_000));

@@ -1,4 +1,3 @@
-// daemon/remote/sessions.ts
 /**
  * The phone's session list: agent view's own rows and bands (ext/agent-view/rows.ts, pure), so
  * the phone and the terminal agree on what is Needs input, Working or Idle.

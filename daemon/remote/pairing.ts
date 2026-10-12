@@ -1,4 +1,3 @@
-// daemon/remote/pairing.ts
 /**
  * Who may use remote control: paired devices, each holding a random token of which only the
  * SHA-256 hash is kept, in remote.json next to the daemon's socket (owner-only). A device pairs
@@ -32,7 +31,7 @@ export interface RemoteState {
 
 export type ClaimResult = { token: string; deviceId: string } | { error: "invalid_code" | "expired_code" };
 
-export function getRemotePath(): string {
+function getRemotePath(): string {
 	return join(getServerDir(), "remote.json");
 }
 

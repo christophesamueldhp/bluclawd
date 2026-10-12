@@ -23,6 +23,10 @@ const ERRORS = {
 	unknown_session: "This session is gone.",
 	invalid_code: "That code is wrong or was already used. Run /remote-control pair for a new one.",
 	expired_code: "That code expired. Run /remote-control pair for a new one.",
+	empty_prompt: "Type a message first.",
+	prompt_too_large: "That message is too long.",
+	body_too_large: "That message is too long.",
+	internal_error: "Something went wrong on the Mac.",
 };
 
 const state = {
@@ -221,7 +225,7 @@ function chatShell() {
 	return `<header class="bar"><a class="back" href="#">‹ Sessions</a><span class="title" id="title"></span>
 <button class="stop" id="stop" hidden>Stop</button></header>
 <div id="banner"></div><section class="scroll" id="scroll"><div class="log" id="log"></div></section>
-<form class="composer" id="composer"><textarea id="text" rows="1" placeholder="Reply" aria-label="Reply"></textarea>
+<form class="composer" id="composer"><textarea id="text" rows="1" placeholder="Reply" aria-label="Reply" maxlength="32768"></textarea>
 <button class="send" aria-label="Send"><span aria-hidden="true">↑</span></button></form>`;
 }
 

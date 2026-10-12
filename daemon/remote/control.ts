@@ -8,7 +8,7 @@ import type { ErrorResponse, InstanceSummary, PaneMessage, RemoteRequest, Remote
 import { type RemoteServer, startRemoteServer } from "./http.ts";
 import { RemoteStore } from "./pairing.ts";
 
-export const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "web");
+const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "web");
 
 export interface RemoteControlDeps {
 	listInstances(): InstanceSummary[];
@@ -90,7 +90,10 @@ export class RemoteControl {
 				await this.apply();
 				return this.result();
 			case "pair":
-				if (!this.server) return { type: "error", ok: false, error: "remote control is not listening" };
+				if (!this.server) {
+					const why = this.listenError ? `: ${this.listenError}` : "";
+					return { type: "error", ok: false, error: `remote control is not listening${why}` };
+				}
 				return this.result(this.store.createCode());
 			case "revoke":
 				if (!request.deviceId || !this.store.revoke(request.deviceId)) {

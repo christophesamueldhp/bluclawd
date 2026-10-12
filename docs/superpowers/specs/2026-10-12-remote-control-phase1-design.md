@@ -40,7 +40,7 @@ Each phase gets its own spec, plan and implementation. This spec covers phase 1 
 | Server → phone | SSE (Server-Sent Events) | No `ws` dependency; iOS Safari supports EventSource |
 | Storage | JSON file, not SQLite | A handful of device records |
 | Dependencies | None in phase 1 | bluclawd has no runtime dependencies |
-| PWA code | Vanilla JS ES modules with `// @ts-check`, no build step, no framework | Served as static files; checked by `tsc` through a separate `daemon/remote/web/tsconfig.json` (`checkJs`, DOM lib) added to `npm run typecheck`, so Node code gets no DOM types |
+| PWA code | Vanilla JS ES modules with `// @ts-check` (all but `sw.js`, whose service-worker scope DOM types do not describe), no build step, no framework | Served as static files; checked by `tsc` through a separate `daemon/remote/web/tsconfig.json` (`checkJs`, DOM lib) added to `npm run typecheck`, so Node code gets no DOM types |
 | Navigation | Session list → chat (Messages-style) | Several running sessions are visible at a glance |
 | Visual style | Hybrid: iOS chrome (SF font, native navigation, round composer), monospace Claude Code–style tool calls (`Bash(…)` ⎿), bluclawd mascot cyan `#00c0e8` accent, `✻` working line with the session's `detail` | Readable prose with bluclawd's identity; light and dark follow the phone, using the `bluclawd` / `bluclawd-light` palettes |
 
@@ -64,7 +64,7 @@ iPhone PWA ──HTTPS── tailscale serve ──HTTP── daemon/remote/ (12
 - `daemon/remote/transcript.ts`: session JSONL → `RemoteMessage[]`. Pure function over file text.
 - `daemon/remote/events.ts`: SSE client set, registry-change and JSONL-growth signals.
 - `daemon/remote/web/`: `index.html`, `manifest.webmanifest`, `sw.js` (offline shell cache
-  only), `app.js` and its modules, `style.css`, icons.
+  only), `app.js` and its modules, `style.css`. No app icon yet: iOS uses a page snapshot.
 - `ext/remote/index.ts`: the `/remote-control` command. It talks to the daemon over the existing
   Unix socket through one new IPC request, `remote`, whose `action` is `status`, `on`, `off`,
   `pair`, `devices` or `revoke`. Added to `package.json`'s `pi.extensions` and to `/help`.
@@ -115,7 +115,7 @@ cross-site requests; no CORS headers are ever sent.
 | `GET /api/sessions/:id/messages?limit=50` | Last `limit` messages (max 200) of the active branch |
 | `POST /api/sessions/:id/prompt` `{text}` | `send` → `PaneMessage { type: "prompt" }`; the pane delivers it as a follow-up when a turn is running, as an agent-view peek reply does |
 | `POST /api/sessions/:id/abort` | `send` → `PaneMessage { type: "abort" }` |
-| `GET /api/events?token=` | SSE: `sessions` (registry changed), `messages {sessionId}` (that session's JSONL grew); a comment ping every 25s |
+| `GET /api/events?token=&session=<id>` | SSE: `sessions` (registry changed), `messages {sessionId}` (the open session's JSONL changed), and a `ping` event every 25 s that the app's watchdog uses to notice a dead stream |
 
 Events carry no content, only "refetch" signals; after any reconnect the phone refetches the list
 and the open chat, so a dropped stream never leaves stale state.
@@ -180,8 +180,8 @@ vitest suites in `test/`, self-contained (JSONL fixtures are inline strings, as 
 - `remote-http`: server on a random port with a temporary `PI_SERVER_DIR`; 401 without a token,
   pair → token → sessions → prompt (the `PaneMessage` is queued), abort, 409, 404, 413, static
   files served without a token.
-- `remote-events`: SSE gets `messages` when the JSONL grows and `sessions` when the registry
-  changes.
+- SSE (in `remote-http`): `messages` when the JSONL grows, `sessions` when the registry
+  changes but not when only its order does, and a revoked device's stream ends.
 - Extension registration test updated for `/remote-control`.
 
 Manual check: daemon with a temporary `PI_SERVER_DIR` exercised with `curl`; then a real iPhone

@@ -1,4 +1,3 @@
-// ext/remote/index.ts
 /**
  * `/remote-control`: control every agent-view session from a phone, as Claude Code's Remote
  * Control does. The daemon serves the phone (daemon/remote/); this command is its switch, shows

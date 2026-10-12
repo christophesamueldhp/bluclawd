@@ -1,4 +1,3 @@
-// ext/remote/tailscale.ts
 /**
  * The phone reaches remote control through Tailscale: `tailscale serve` proxies this machine's
  * tailnet HTTPS name to the daemon's 127.0.0.1 listener, reachable only from the tailnet.
@@ -32,9 +31,23 @@ export function commandError(
 	return error.killed === true || error.signal ? `${TIMEOUT_MESSAGE}\n${text}` : text;
 }
 
-function run(args: string[]): Promise<string> {
+/** The macOS app ships its CLI inside the bundle and puts it on PATH only when asked to. */
+const BINARIES = ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
+
+async function run(args: string[]): Promise<string> {
+	for (const [i, binary] of BINARIES.entries()) {
+		try {
+			return await runWith(binary, args);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT" || i === BINARIES.length - 1) throw error;
+		}
+	}
+	throw new Error("unreachable");
+}
+
+function runWith(binary: string, args: string[]): Promise<string> {
 	return new Promise((resolve, reject) => {
-		execFile("tailscale", args, { timeout: 10_000 }, (error, stdout, stderr) => {
+		execFile(binary, args, { timeout: 10_000 }, (error, stdout, stderr) => {
 			if (!error) return resolve(stdout);
 			error.message = commandError(error, stdout, stderr);
 			reject(error);

@@ -1,4 +1,3 @@
-// daemon/remote/transcript.ts
 /**
  * A session's .jsonl as the phone's chat. The active branch is the `parentId` chain from the
  * file's last entry (pi appends to the branch it is on); each entry is reduced to what a phone

@@ -41,7 +41,8 @@ const CONTENT_TYPES: Record<string, string> = {
 	".svg": "image/svg+xml",
 };
 
-const CSP = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'";
+const CSP =
+	"default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'";
 
 class HttpError extends Error {
 	readonly status: number;
