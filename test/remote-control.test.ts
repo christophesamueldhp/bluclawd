@@ -145,6 +145,58 @@ describe("remote control switch", () => {
 		controller.abort();
 	});
 
+	it("keeps each pane's latest report for the phone, and signals a change to the phones that have it open", async () => {
+		const instances: InstanceSummary[] = [
+			{ id: "pane-1", status: "online", cwd: "/p", external: true, activity: "idle" },
+		];
+		control = new RemoteControl({
+			store: new RemoteStore(join(dir, "remote.json")),
+			listInstances: () => instances,
+			send: () => true,
+			deleteInstance: () => false,
+			webDir: dir,
+		});
+		setRemoteControl(control);
+		const report = { models: [{ provider: "openai", id: "gpt-5" }], usage: { input: 1, output: 2, cost: 0 } };
+		// Kept while remote control is off, so the phone has it once it is on.
+		expect(await handleIpcRequest({ type: "remote_report", instanceId: "pane-1", report })).toMatchObject({
+			type: "ack",
+			ok: true,
+		});
+		const on = await control.handle({ type: "remote", action: "on", port: 0 });
+		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
+		const base = `http://127.0.0.1:${on.port}`;
+		const paired = await fetch(`${base}/api/pair`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ code: on.code, deviceName: "iPhone" }),
+		});
+		const { token } = (await paired.json()) as { token: string };
+		const status = () =>
+			fetch(`${base}/api/sessions/pane-1/status`, { headers: { authorization: `Bearer ${token}` } });
+		expect(await (await status()).json()).toEqual({ report });
+
+		const controller = new AbortController();
+		const res = await fetch(`${base}/api/events?token=${token}&session=pane-1`, { signal: controller.signal });
+		const reader = res.body!.getReader();
+		let received = "";
+		const until = async (needle: string) => {
+			while (!received.includes(needle)) received += new TextDecoder().decode((await reader.read()).value);
+		};
+		await until(": connected");
+		const next = { ...report, thinkingLevel: "high" };
+		await handleIpcRequest({ type: "remote_report", instanceId: "pane-1", report: next });
+		await until("event: status");
+		expect(await (await status()).json()).toEqual({ report: next });
+		// The same report again is not a change.
+		const signals = received.split("event: status").length;
+		await handleIpcRequest({ type: "remote_report", instanceId: "pane-1", report: next });
+		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
+		expect((await status()).status).toBe(404);
+		expect(received.split("event: status").length).toBe(signals);
+		controller.abort();
+	});
+
 	describe("push notifications", () => {
 		const subscription = (endpoint: string): WebPushSubscription => ({
 			endpoint,
@@ -255,9 +307,12 @@ describe("remote control switch", () => {
 		});
 	});
 
-	it("acknowledges a pane's live reply when remote control is unavailable", async () => {
+	it("acknowledges a pane's live reply and report when remote control is unavailable", async () => {
 		expect(
 			await handleIpcRequest({ type: "remote_live", instanceId: "pane-1", live: { text: "", tools: [] } }),
+		).toMatchObject({ type: "ack", ok: true });
+		expect(
+			await handleIpcRequest({ type: "remote_report", instanceId: "pane-1", report: { models: [] } }),
 		).toMatchObject({ type: "ack", ok: true });
 	});
 

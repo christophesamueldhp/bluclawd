@@ -58,11 +58,23 @@ describe("remote sessions", () => {
 		]);
 	});
 
-	it("finds a session's file and whether a pane runs it", () => {
+	it("finds a session's file, whether a pane runs it and whether it is working", () => {
 		const stored: InstanceSummary = { id: "old", status: "stopped", cwd: "/p", sessionFile: "/s/old.jsonl" };
-		const list = [stored, live("b", "idle", { leafId: "e3" })];
-		expect(findSession(list, "b")).toEqual({ sessionFile: "/s/b.jsonl", cwd: "/p", running: true, leafId: "e3" });
-		expect(findSession(list, "old")).toEqual({ sessionFile: "/s/old.jsonl", cwd: "/p", running: false });
+		const list = [stored, live("b", "idle", { leafId: "e3" }), live("c", "working")];
+		expect(findSession(list, "b")).toEqual({
+			sessionFile: "/s/b.jsonl",
+			cwd: "/p",
+			running: true,
+			working: false,
+			leafId: "e3",
+		});
+		expect(findSession(list, "c")).toMatchObject({ running: true, working: true });
+		expect(findSession(list, "old")).toEqual({
+			sessionFile: "/s/old.jsonl",
+			cwd: "/p",
+			running: false,
+			working: false,
+		});
 		expect(findSession(list, "zzz")).toBeUndefined();
 	});
 });

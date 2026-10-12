@@ -8,7 +8,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
-import type { InstanceSummary, LiveSnapshot, PaneLaunch, PaneMessage } from "../ipc/protocol.ts";
+import type { InstanceSummary, LiveSnapshot, PaneLaunch, PaneMessage, PaneReport } from "../ipc/protocol.ts";
 import { RemoteEvents } from "./events.ts";
 import type { RemoteStore } from "./pairing.ts";
 import { findSession, remoteSessions } from "./sessions.ts";
@@ -26,6 +26,8 @@ export interface RemoteDeps {
 	launch(): PaneLaunch | undefined;
 	/** Start a pane; returns its tmux session name, the id its row registers as. */
 	startSession(spec: SessionSpec): string;
+	/** A running pane's latest report. */
+	report(sessionId: string): PaneReport | undefined;
 	webDir: string;
 }
 
@@ -36,6 +38,8 @@ export interface RemoteServer {
 	watching(): Set<string>;
 	/** Push a pane's reply in progress (null: finished) to the phones that have its session open. */
 	live(sessionId: string, live: LiveSnapshot | null): void;
+	/** Tell the phones that have this session open its report changed. */
+	status(sessionId: string): void;
 	close(): Promise<void>;
 }
 
@@ -216,7 +220,7 @@ async function handle(
 		return json(res, 200, { ok: true });
 	}
 
-	const match = /^\/api\/sessions\/([^/]+)\/(messages|prompt|abort)$/.exec(path);
+	const match = /^\/api\/sessions\/([^/]+)\/(messages|status|prompt|abort|model|compact)$/.exec(path);
 	if (!match) return json(res, 404, { error: "not_found" });
 	let id: string;
 	try {
@@ -233,6 +237,11 @@ async function handle(
 		const requested = Number.parseInt(url.searchParams.get("limit") ?? "", 10) || MESSAGES_DEFAULT;
 		const limit = Math.min(Math.max(requested, 1), MESSAGES_MAX);
 		return json(res, 200, { messages: loadTranscript(found.sessionFile, limit, found.leafId) });
+	}
+	if (action === "status") {
+		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
+		const report = found.running ? deps.report(id) : undefined;
+		return report ? json(res, 200, { report }) : json(res, 404, { error: "no_status" });
 	}
 
 	if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
@@ -253,6 +262,19 @@ async function handle(
 			return json(res, 202, { ok: true, pane });
 		}
 		message = { type: "prompt", text };
+	} else if (action === "model") {
+		const { provider, id: modelId } = body;
+		if (typeof provider !== "string" || typeof modelId !== "string" || !provider || !modelId) {
+			return json(res, 400, { error: "invalid_model" });
+		}
+		if (!session.running) return json(res, 409, { error: "session_not_running" });
+		// Only a model the pane offered: the phone picks from that list, nothing else reaches the pane.
+		const offered = deps.report(id)?.models.some((m) => m.provider === provider && m.id === modelId);
+		if (!offered) return json(res, 400, { error: "invalid_model" });
+		message = { type: "set_model", provider, id: modelId };
+	} else if (action === "compact") {
+		if (session.running && session.working) return json(res, 409, { error: "session_busy" });
+		message = { type: "compact" };
 	} else {
 		message = { type: "abort" };
 	}
@@ -287,6 +309,7 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 				port: typeof address === "object" && address ? address.port : port,
 				watching: () => events.watching(),
 				live: (id, live) => events.live(id, live),
+				status: (id) => events.status(id),
 				close: () =>
 					new Promise<void>((done) => {
 						events.close();

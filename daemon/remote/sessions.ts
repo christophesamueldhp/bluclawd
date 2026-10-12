@@ -55,7 +55,7 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 export function findSession(
 	instances: InstanceSummary[],
 	id: string,
-): { sessionFile?: string; cwd: string; running: boolean; leafId?: string } | undefined {
+): { sessionFile?: string; cwd: string; running: boolean; working: boolean; leafId?: string } | undefined {
 	const row = sessionRows(instances).find((r) => r.id === id);
 	if (!row) return undefined;
 	const pane = instances.find((i) => i.id === id && i.external === true);
@@ -63,6 +63,7 @@ export function findSession(
 		sessionFile: row.sessionFile,
 		cwd: row.cwd,
 		running: pane !== undefined,
+		working: row.state === "working",
 		...(pane?.leafId ? { leafId: pane.leafId } : {}),
 	};
 }

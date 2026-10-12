@@ -105,6 +105,23 @@ export interface RemoteLiveRequest {
 	live: LiveSnapshot | null;
 }
 
+/** What the phone's status sheet shows of a pane. */
+export interface PaneReport {
+	model?: { provider: string; id: string; name?: string };
+	/** The models it can switch to. */
+	models: Array<{ provider: string; id: string; name?: string }>;
+	thinkingLevel?: string;
+	context?: { tokens: number | null; contextWindow: number; percent: number | null };
+	usage?: { input: number; output: number; cost: number };
+}
+
+/** A pane's latest PaneReport, sent when it changes (session start, model, thinking level, turn end). */
+export interface RemoteReportRequest {
+	type: "remote_report";
+	instanceId: string;
+	report: PaneReport;
+}
+
 /** Remote control from a phone (daemon/remote/): its switch, pairing codes and paired devices. */
 export interface RemoteRequest {
 	type: "remote";
@@ -128,6 +145,7 @@ interface RequestMap {
 	save: SaveRequest;
 	remote: RemoteRequest;
 	remote_live: RemoteLiveRequest;
+	remote_report: RemoteReportRequest;
 }
 
 export type ServerRequest = RequestMap[keyof RequestMap];
@@ -196,7 +214,7 @@ export interface ShutdownResponse extends ResponseBase {
 	type: "shutdown_result";
 }
 
-/** Reply to send / delete / rename / meta / save / remote_live. */
+/** Reply to send / delete / rename / meta / save / remote_live / remote_report. */
 export interface AckResponse extends ResponseBase {
 	type: "ack";
 	instance?: InstanceSummary;
@@ -242,6 +260,7 @@ interface ResponseMap {
 	save: AckResponse;
 	remote: RemoteResponse;
 	remote_live: AckResponse;
+	remote_report: AckResponse;
 }
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;

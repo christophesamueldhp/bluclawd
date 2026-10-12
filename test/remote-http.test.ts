@@ -3,7 +3,7 @@ import { request } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { InstanceSummary, PaneLaunch, PaneMessage } from "../daemon/ipc/protocol.ts";
+import type { InstanceSummary, PaneLaunch, PaneMessage, PaneReport } from "../daemon/ipc/protocol.ts";
 import { BODY_MAX, PROMPT_MAX, type RemoteServer, startRemoteServer } from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { SessionSpec } from "../daemon/remote/spawn.ts";
@@ -23,6 +23,7 @@ describe("remote HTTP API", () => {
 	let started: SessionSpec[];
 	let deleted: string[];
 	let startFails: boolean;
+	let reports: Map<string, PaneReport>;
 
 	beforeEach(async () => {
 		dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-http-"));
@@ -47,6 +48,7 @@ describe("remote HTTP API", () => {
 		started = [];
 		deleted = [];
 		startFails = false;
+		reports = new Map();
 		store = new RemoteStore(join(dir, "remote.json"));
 		server = await startRemoteServer(
 			{
@@ -68,6 +70,7 @@ describe("remote HTTP API", () => {
 					instances = instances.filter((i) => i.id !== id);
 					return true;
 				},
+				report: (id) => reports.get(id),
 			},
 			0,
 		);
@@ -148,6 +151,87 @@ describe("remote HTTP API", () => {
 			{ id: "live", message: { type: "prompt", text: "next" } },
 			{ id: "live", message: { type: "abort" } },
 		]);
+	});
+
+	describe("status, model and compact", () => {
+		const report: PaneReport = {
+			model: { provider: "anthropic", id: "claude-opus", name: "Opus" },
+			models: [
+				{ provider: "anthropic", id: "claude-opus", name: "Opus" },
+				{ provider: "openai", id: "gpt-5", name: "GPT-5" },
+			],
+			thinkingLevel: "high",
+			context: { tokens: 12_000, contextWindow: 200_000, percent: 6 },
+			usage: { input: 150, output: 25, cost: 0.75 },
+		};
+
+		it("gives a running session's latest report, and none before it has sent one", async () => {
+			const token = await pair();
+			const status = () => fetch(`${base}/api/sessions/live/status`, { headers: auth(token) });
+			const before = await status();
+			expect(before.status).toBe(404);
+			expect(await before.json()).toEqual({ error: "no_status" });
+			reports.set("live", report);
+			const after = await status();
+			expect(after.status).toBe(200);
+			expect(await after.json()).toEqual({ report });
+			reports.set("stored", report);
+			expect((await fetch(`${base}/api/sessions/stored/status`, { headers: auth(token) })).status).toBe(404);
+			expect(
+				(await fetch(`${base}/api/sessions/live/status`, { method: "POST", headers: authJson(token) })).status,
+			).toBe(405);
+		});
+
+		it("switches a running session to a model it offers", async () => {
+			reports.set("live", report);
+			const token = await pair();
+			const res = await fetch(`${base}/api/sessions/live/model`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify({ provider: "openai", id: "gpt-5" }),
+			});
+			expect(res.status).toBe(202);
+			expect(sent).toEqual([{ id: "live", message: { type: "set_model", provider: "openai", id: "gpt-5" } }]);
+		});
+
+		it("refuses a model that is malformed or not offered, and a session that is not running", async () => {
+			reports.set("live", report);
+			const token = await pair();
+			const model = (id: string, body: unknown) =>
+				fetch(`${base}/api/sessions/${id}/model`, {
+					method: "POST",
+					headers: authJson(token),
+					body: JSON.stringify(body),
+				});
+			for (const body of [{}, { provider: "openai" }, { provider: "", id: "gpt-5" }, { provider: 1, id: "gpt-5" }]) {
+				const res = await model("live", body);
+				expect(res.status).toBe(400);
+				expect(await res.json()).toEqual({ error: "invalid_model" });
+			}
+			expect((await model("live", { provider: "openai", id: "gpt-4" })).status).toBe(400);
+			const stored = await model("stored", { provider: "openai", id: "gpt-5" });
+			expect(stored.status).toBe(409);
+			expect(await stored.json()).toEqual({ error: "session_not_running" });
+			reports.delete("live");
+			expect((await model("live", { provider: "openai", id: "gpt-5" })).status).toBe(400);
+			expect(sent).toEqual([]);
+		});
+
+		it("compacts a running session once it is not working", async () => {
+			const token = await pair();
+			const compact = (id: string) =>
+				fetch(`${base}/api/sessions/${id}/compact`, { method: "POST", headers: authJson(token), body: "{}" });
+			const busy = await compact("live");
+			expect(busy.status).toBe(409);
+			expect(await busy.json()).toEqual({ error: "session_busy" });
+			const stored = await compact("stored");
+			expect(stored.status).toBe(409);
+			expect(await stored.json()).toEqual({ error: "session_not_running" });
+			expect(sent).toEqual([]);
+			instances = [{ ...instances[0], activity: "idle" }, instances[1]];
+			expect((await compact("live")).status).toBe(202);
+			expect(sent).toEqual([{ id: "live", message: { type: "compact" } }]);
+		});
 	});
 
 	it("refuses a stored session without a file, an empty or oversized prompt, and an oversized body", async () => {
@@ -521,6 +605,19 @@ describe("remote HTTP API", () => {
 			expect(first).toContain(": connected");
 			expect(first).not.toContain("event: live");
 			again.controller.abort();
+		});
+
+		it("signals a status change to the clients that have the session open, without its content", async () => {
+			const token = await pair();
+			const watcher = await open(token, "live");
+			const bystander = await open(token);
+			expect((await watcher.collect(200)).text).toContain(": connected");
+			server.status("live");
+			const text = (await watcher.collect(300)).text;
+			expect(text).toContain(`event: status\ndata: ${JSON.stringify({ sessionId: "live" })}`);
+			expect((await bystander.collect(200)).text).not.toContain("event: status");
+			watcher.controller.abort();
+			bystander.controller.abort();
 		});
 
 		it("tells a watcher the reply ended even when the daemon kept no snapshot of it", async () => {

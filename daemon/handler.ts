@@ -10,6 +10,7 @@ import type {
 	RegisterRequest,
 	RegisterResponse,
 	RemoteLiveRequest,
+	RemoteReportRequest,
 	RemoteRequest,
 	RemoteResponse,
 	RenameRequest,
@@ -90,7 +91,14 @@ export async function handleIpcRequest(request: UnregisterRequest): Promise<Unre
 export async function handleIpcRequest(request: ShutdownRequest): Promise<ShutdownResponse | ErrorResponse>;
 export async function handleIpcRequest(request: RemoteRequest): Promise<RemoteResponse | ErrorResponse>;
 export async function handleIpcRequest(
-	request: DeleteRequest | RenameRequest | MetaRequest | SaveRequest | SendRequest | RemoteLiveRequest,
+	request:
+		| DeleteRequest
+		| RenameRequest
+		| MetaRequest
+		| SaveRequest
+		| SendRequest
+		| RemoteLiveRequest
+		| RemoteReportRequest,
 ): Promise<AckResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse> {
@@ -147,6 +155,7 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 		case "unregister": {
 			supervisor.unregisterExternal(request.instanceId);
 			remoteControl?.live(request.instanceId, null);
+			remoteControl?.report(request.instanceId, undefined);
 			return { type: "unregister_result", ok: true };
 		}
 
@@ -190,6 +199,11 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 
 		case "remote_live": {
 			remoteControl?.live(request.instanceId, request.live);
+			return { type: "ack", ok: true };
+		}
+
+		case "remote_report": {
+			remoteControl?.report(request.instanceId, request.report);
 			return { type: "ack", ok: true };
 		}
 

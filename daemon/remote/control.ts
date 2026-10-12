@@ -11,6 +11,7 @@ import type {
 	LiveSnapshot,
 	PaneLaunch,
 	PaneMessage,
+	PaneReport,
 	RemoteRequest,
 	RemoteResponse,
 } from "../ipc/protocol.ts";
@@ -51,6 +52,8 @@ export class RemoteControl {
 	/** Only while some device is subscribed, so a change nobody was subscribed for is never sent late. */
 	private notifier: Notifier | undefined;
 	private readonly sendPush: (subscription: WebPushSubscription, payload: string) => Promise<PushResult>;
+	/** Each pane's latest report, kept while the listener is off so the phone has it once it is on. */
+	private readonly reports = new Map<string, { report: PaneReport; key: string }>();
 
 	constructor(deps: RemoteControlDeps) {
 		this.deps = deps;
@@ -80,6 +83,18 @@ export class RemoteControl {
 
 	live(sessionId: string, live: LiveSnapshot | null): void {
 		this.server?.live(sessionId, live);
+	}
+
+	/** A pane's latest report; undefined once it is gone. */
+	report(sessionId: string, report: PaneReport | undefined): void {
+		if (!report) {
+			this.reports.delete(sessionId);
+			return;
+		}
+		const key = JSON.stringify(report);
+		if (this.reports.get(sessionId)?.key === key) return;
+		this.reports.set(sessionId, { report, key });
+		this.server?.status(sessionId);
 	}
 
 	launch(): PaneLaunch | undefined {
@@ -114,6 +129,7 @@ export class RemoteControl {
 					deleteInstance: this.deps.deleteInstance,
 					launch: () => this.launch(),
 					startSession: (spec) => startSession({ ...spec, tmux: this.tmux }),
+					report: (id) => this.reports.get(id)?.report,
 					webDir: this.deps.webDir ?? WEB_DIR,
 				},
 				state.port,

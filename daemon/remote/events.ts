@@ -1,7 +1,7 @@
 /**
  * Server-Sent Events for the phone. Mostly "refetch" signals with no content: `sessions` when the
  * list changes, `messages` when the .jsonl of the session a client has open changes or its pane
- * moves to another leaf. The exception is `live`: the reply a pane is streaming, sent only to
+ * moves to another leaf, `status` when its pane's report changes. The exception is `live`: the reply a pane is streaming, sent only to
  * the clients that have its session open.
  * Polled once a second while any client is connected, which is also when a revoked device is cut off; the registry itself changes on the panes'
  * 3s heartbeats.
@@ -110,6 +110,11 @@ export class RemoteEvents {
 			if (!client.isAuthorized()) this.drop(client);
 			else send(client.res, "live", { sessionId, live });
 		}
+	}
+
+	/** The session's pane sent a new report, which the phone fetches if it shows it. */
+	status(sessionId: string): void {
+		for (const client of this.clients) if (client.sessionId === sessionId) send(client.res, "status", { sessionId });
 	}
 
 	private drop(client: Client): void {
