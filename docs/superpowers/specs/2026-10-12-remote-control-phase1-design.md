@@ -66,8 +66,8 @@ iPhone PWA ──HTTPS── tailscale serve ──HTTP── daemon/remote/ (12
 - `daemon/remote/web/`: `index.html`, `manifest.webmanifest`, `sw.js` (offline shell cache
   only), `app.js` and its modules, `style.css`, icons.
 - `ext/remote/index.ts`: the `/remote-control` command. It talks to the daemon over the existing
-  Unix socket through new IPC requests (`remote_status`, `remote_set`, `remote_pair_code`,
-  `remote_devices`, `remote_revoke`). Added to `package.json`'s `pi.extensions` and to `/help`.
+  Unix socket through one new IPC request, `remote`, whose `action` is `status`, `on`, `off`,
+  `pair`, `devices` or `revoke`. Added to `package.json`'s `pi.extensions` and to `/help`.
 
 `daemon/remote/` calls the supervisor and handler functions directly; it does not go through the
 socket.

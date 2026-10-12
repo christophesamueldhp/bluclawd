@@ -181,7 +181,7 @@ export function transcriptFrom(text: string, limit: number): RemoteMessage[] {
 	const messages = activeBranch(parseEntries(text))
 		.map(toRemote)
 		.filter((message): message is RemoteMessage => message !== undefined);
-	return messages.slice(-limit);
+	return limit > 0 ? messages.slice(-limit) : [];
 }
 
 /** A session that has not written its file yet has an empty transcript. */

@@ -54,7 +54,10 @@ export class RemoteStore {
 			return {
 				enabled: raw.enabled === true,
 				port: Number.isInteger(raw.port) ? (raw.port as number) : DEFAULT_PORT,
-				devices: Array.isArray(raw.devices) ? raw.devices : [],
+				// A hand-edited entry without a token hash would make every authenticate() throw.
+				devices: Array.isArray(raw.devices)
+					? raw.devices.filter((d) => typeof d?.id === "string" && typeof d.tokenHash === "string")
+					: [],
 			};
 		} catch {
 			return { enabled: false, port: DEFAULT_PORT, devices: [] };

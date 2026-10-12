@@ -77,6 +77,9 @@ describe("remote pairing", () => {
 
 	it("treats a corrupt remote.json as empty", () => {
 		store.setEnabled(true);
+		writeFileSync(path, JSON.stringify({ enabled: true, devices: [null, { id: "x" }] }));
+		expect(store.load().devices).toEqual([]);
+		expect(store.authenticate("anything", 1)).toBeUndefined();
 		writeFileSync(path, "{nope");
 		expect(store.load()).toEqual({ enabled: false, port: DEFAULT_PORT, devices: [] });
 	});

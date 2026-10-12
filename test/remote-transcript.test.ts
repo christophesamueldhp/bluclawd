@@ -130,4 +130,10 @@ describe("remote transcript", () => {
 	it("an empty file has no branch", () => {
 		expect(activeBranch([])).toEqual([]);
 	});
+
+	it("stops at a parentId cycle instead of looping", () => {
+		const text = jsonl(msg("a", "b", { role: "user", content: "a" }), msg("b", "a", { role: "user", content: "b" }));
+		expect(transcriptFrom(text, 50).map((m) => m.id)).toEqual(["a", "b"]);
+		expect(transcriptFrom(text, 0)).toEqual([]);
+	});
 });
