@@ -1,8 +1,9 @@
 // @ts-check
 /**
  * bluclawd's remote control on a phone: the session list (agent view's bands) with a composer
- * that starts a session, and one session's chat. Only the parts that change are re-rendered, so
- * the composers keep their text, focus and keyboard while updates arrive.
+ * that starts a session, and one session's chat, whose title opens its status sheet. Only the
+ * parts that change are re-rendered, so the composers keep their text, focus and keyboard while
+ * updates arrive.
  */
 import { api, getToken, setToken, Unauthorized } from "./api.js";
 import { settle } from "./live.js";
@@ -10,6 +11,8 @@ import { settle } from "./live.js";
 /** @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string }} Session */
 /** @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
+/** @typedef {{ provider: string, id: string, name?: string }} ReportModel */
+/** @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cost: number } }} Report */
 
 const BANDS = [
 	["pinned", "Pinned"],
@@ -26,6 +29,8 @@ const START_TIMEOUT_MS = 60_000;
 const LIVE_CLEAR_MS = 3000;
 const ERRORS = {
 	session_not_running: "This session is not running. Open it on the Mac to continue.",
+	session_busy: "The session is working. Try again once it is done.",
+	no_status: "This session has not reported its status yet.",
 	invalid_cwd: "That directory does not exist on the Mac.",
 	invalid_model: "That model name is not valid.",
 	no_launch: "Start pi on the Mac once, so the phone knows how to start it.",
@@ -60,6 +65,12 @@ const state = {
 	online: true,
 	/** Show "Enable notifications". */
 	offerPush: false,
+	/** The open session's status sheet. */
+	sheetOpen: false,
+	/** Its pane's report: undefined while loading, null when it has sent none. @type {Report | null | undefined} */
+	report: undefined,
+	/** Compact was asked for and the pane has not reported since. */
+	compacting: false,
 	/** @type {string | undefined} */ error: undefined,
 };
 
@@ -73,6 +84,7 @@ let offlineTimer;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let watchdog;
 let messagesRequest = 0;
+let statusRequest = 0;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let startTimer;
 /** The reply on screen has ended (or may have, while the stream was down): see settle(). */
@@ -216,6 +228,26 @@ async function loadMessages() {
 	}
 }
 
+async function loadStatus() {
+	const id = state.open;
+	if (!id || !state.sheetOpen) return;
+	const request = ++statusRequest;
+	/** @type {Report | null} */
+	let report;
+	try {
+		report = await api.status(id);
+	} catch (error) {
+		if (!(error instanceof Error && error.message === "no_status")) {
+			handleError(error);
+			return;
+		}
+		report = null;
+	}
+	if (state.open !== id || request !== statusRequest) return;
+	state.report = report;
+	render();
+}
+
 /** @param {Message[]} messages @param {string} text */
 function userCount(messages, text) {
 	// Trimmed: a prompt starting with @ reaches pi with a space before it.
@@ -268,6 +300,7 @@ function connect() {
 		if (state.live) endLive();
 		void loadSessions();
 		void loadMessages();
+		void loadStatus();
 	};
 	current.addEventListener("sessions", () => {
 		alive();
@@ -290,6 +323,12 @@ function connect() {
 		liveEnded = false;
 		state.live = live;
 		render();
+	});
+	current.addEventListener("status", (/** @type {MessageEvent} */ event) => {
+		alive();
+		if (JSON.parse(event.data).sessionId !== state.open) return;
+		state.compacting = false;
+		void loadStatus();
 	});
 	current.addEventListener("ping", alive);
 	current.onerror = () => {
@@ -395,11 +434,12 @@ function rowsHtml() {
 }
 
 function chatShell() {
-	return `<header class="bar"><a class="back" href="#">‹ Sessions</a><span class="title" id="title"></span>
+	return `<header class="bar"><a class="back" href="#">‹ Sessions</a><button class="title" id="title" aria-haspopup="dialog"></button>
 <button class="stop" id="stop" hidden>Stop</button></header>
 <div id="banner"></div><section class="scroll" id="scroll"><div class="log" id="log"></div></section>
 <form class="composer" id="composer"><textarea id="text" rows="1" placeholder="Reply" aria-label="Reply" maxlength="32768"></textarea>
-<button class="send" aria-label="Send"><span aria-hidden="true">↑</span></button></form>`;
+<button class="send" aria-label="Send"><span aria-hidden="true">↑</span></button></form>
+<div class="backdrop" id="backdrop" hidden></div><section class="sheet" id="sheet" role="dialog" aria-label="Session status" hidden></section>`;
 }
 
 /** @param {string} name @param {string} summary @param {Message | undefined} result @param {string} key @param {boolean} [running] */
@@ -479,6 +519,62 @@ function bannerHtml(session) {
 	return "";
 }
 
+/** @param {number} count */
+function tokens(count) {
+	if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+	if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
+	return String(count);
+}
+
+/** @param {Report} report */
+function modelOptions(report) {
+	const current = report.model;
+	let html = current ? "" : `<option value="" selected disabled>None selected</option>`;
+	report.models.forEach((model, index) => {
+		if (model.provider !== report.models[index - 1]?.provider) {
+			html += `${index ? "</optgroup>" : ""}<optgroup label="${esc(model.provider)}">`;
+		}
+		const selected = current?.provider === model.provider && current.id === model.id ? " selected" : "";
+		html += `<option value="${index}"${selected}>${esc(model.name ?? model.id)}</option>`;
+	});
+	return report.models.length ? `${html}</optgroup>` : html;
+}
+
+/** @param {Report["context"]} context */
+function contextHtml(context) {
+	if (!context) return "Unknown";
+	if (context.tokens === null || context.percent === null) {
+		return `${esc(tokens(context.contextWindow))} window · known after the next reply`;
+	}
+	const percent = Math.min(100, Math.max(0, context.percent));
+	// A class per 10%: the CSP allows no inline style for a width.
+	const step = Math.ceil(percent / 10) * 10;
+	const level = percent >= 85 ? " full" : percent >= 60 ? " high" : "";
+	return `<div class="gauge" role="meter" aria-label="Context used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${esc(Math.round(percent))}"><span class="p${esc(step)}${level}"></span></div>
+<small>${esc(tokens(context.tokens))} of ${esc(tokens(context.contextWindow))} (${esc(Math.round(percent))}%)</small>`;
+}
+
+/** @param {Session | undefined} session */
+function sheetHtml(session) {
+	const report = state.report;
+	const head = `<header class="sheet-bar"><h2>Status</h2><button class="close" id="sheet-close">Done</button></header>
+${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
+	if (report === undefined) return `${head}<p class="muted">Loading…</p>`;
+	if (report === null) {
+		const why = session && !session.alive ? "session_not_running" : "no_status";
+		return `${head}<p class="muted">${esc(errorText(why))}</p>`;
+	}
+	const usage = report.usage;
+	const busy = session?.state === "working" || state.compacting || !session?.alive;
+	return `${head}<dl class="facts">
+<dt><label for="model">Model</label></dt><dd><select id="model">${modelOptions(report)}</select></dd>
+<dt>Thinking</dt><dd>${esc(report.thinkingLevel ?? "off")}</dd>
+<dt>Context</dt><dd>${contextHtml(report.context)}</dd>
+<dt>Tokens</dt><dd>${usage ? `↑ ${esc(tokens(usage.input))} in · ↓ ${esc(tokens(usage.output))} out` : "Unknown"}</dd>
+<dt>Cost</dt><dd>${usage ? `$${esc(usage.cost.toFixed(3))}` : "Unknown"}</dd>
+</dl><button class="compact" id="compact"${busy ? " disabled" : ""}>${state.compacting ? "Compacting…" : "Compact"}</button>`;
+}
+
 // ---- render ----
 
 function render() {
@@ -543,6 +639,7 @@ function updateChat() {
 	const stranded = session !== undefined && !session.alive && !session.resumable;
 	// One pane starts at a time, so a resume waits for any start in flight.
 	const blocked = resuming || stranded || (state.starting !== undefined && session?.resumable === true);
+	updateSheet(session);
 	const text = $("#text");
 	text.disabled = blocked;
 	$(".send").disabled = blocked;
@@ -553,6 +650,18 @@ function updateChat() {
 			: session?.resumable
 				? "Reply resumes it"
 				: "Reply";
+}
+
+/** Rebuilt only when it changes, so an open model picker is not reset under the finger. @param {Session | undefined} session */
+function updateSheet(session) {
+	const sheet = $("#sheet");
+	sheet.hidden = !state.sheetOpen;
+	$("#backdrop").hidden = !state.sheetOpen;
+	if (!state.sheetOpen) return;
+	const html = sheetHtml(session);
+	if (sheet.dataset.html === html) return;
+	sheet.innerHTML = html;
+	sheet.dataset.html = html;
 }
 
 function bindPair() {
@@ -635,6 +744,60 @@ function bindChat() {
 			handleError(error);
 		}
 	});
+	$("#title").addEventListener("click", openSheet);
+	$("#backdrop").addEventListener("click", closeSheet);
+	const sheet = $("#sheet");
+	sheet.addEventListener("click", (/** @type {Event} */ event) => {
+		const target = /** @type {Element} */ (event.target);
+		if (target.closest("#sheet-close")) closeSheet();
+		else if (target.closest("#compact")) void compact();
+	});
+	sheet.addEventListener("change", (/** @type {Event} */ event) => {
+		const target = /** @type {HTMLSelectElement} */ (event.target);
+		if (target.id === "model") void switchModel(target.value);
+	});
+}
+
+function openSheet() {
+	state.sheetOpen = true;
+	state.report = undefined;
+	state.error = undefined;
+	render();
+	void loadStatus();
+}
+
+function closeSheet() {
+	state.sheetOpen = false;
+	state.compacting = false;
+	render();
+}
+
+/** The pane reports the switch within a heartbeat, which refreshes the sheet. @param {string} value */
+async function switchModel(value) {
+	const id = state.open;
+	const model = state.report?.models[Number(value)];
+	if (!id || !model) return;
+	try {
+		await api.setModel(id, model.provider, model.id);
+		void loadStatus();
+	} catch (error) {
+		// Back to the model the pane reported.
+		$("#sheet").dataset.html = "";
+		handleError(error);
+	}
+}
+
+async function compact() {
+	const id = state.open;
+	if (!id) return;
+	state.compacting = true;
+	render();
+	try {
+		await api.compact(id);
+	} catch (error) {
+		state.compacting = false;
+		handleError(error);
+	}
 }
 
 async function send() {
@@ -683,6 +846,9 @@ function route() {
 		liveEnded = false;
 		clearTimeout(liveClear);
 		state.error = undefined;
+		state.sheetOpen = false;
+		state.report = undefined;
+		state.compacting = false;
 		connect();
 	}
 	render();

@@ -73,6 +73,12 @@ export const api = {
 	prompt: (id, text) => call("POST", `${session(id)}/prompt`, { text }),
 	/** @param {string} id */
 	abort: (id) => call("POST", `${session(id)}/abort`, {}),
+	/** @param {string} id */
+	status: async (id) => (await call("GET", `${session(id)}/status`)).report,
+	/** @param {string} id @param {string} provider @param {string} modelId */
+	setModel: (id, provider, modelId) => call("POST", `${session(id)}/model`, { provider, id: modelId }),
+	/** @param {string} id */
+	compact: (id) => call("POST", `${session(id)}/compact`, {}),
 	/** `subscribed`: this device's notifications reach it. @returns {Promise<{ publicKey: string, subscribed: boolean }>} */
 	pushKey: () => call("GET", "/api/push/key"),
 	/** @param {PushSubscriptionJSON} subscription */
