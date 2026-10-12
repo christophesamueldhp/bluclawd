@@ -109,7 +109,7 @@ All JSON under `/api`; all require the token except `POST /api/pair`.
 | Endpoint | Behaviour |
 |---|---|
 | `POST /api/pair` `{code, deviceName}` → `{token}` | Exchange a pairing code for a token |
-| `GET /api/sessions` | The daemon's `list`: `id, label, cwd, activity, detail, outcome, status, createdAt, finishedAt, pinned, sortOrder, running` |
+| `GET /api/sessions` | The daemon's `list` as agent view's rows (`collectRows` / `buildBands`), in display order: `id, label, cwd, band, state, alive, detail, createdAt, finishedAt` |
 | `GET /api/sessions/:id/messages?limit=50` | Last `limit` messages (max 200) of the active branch |
 | `POST /api/sessions/:id/prompt` `{text}` | `send` → `PaneMessage { type: "prompt" }`; the pane delivers it as a follow-up when a turn is running, as an agent-view peek reply does |
 | `POST /api/sessions/:id/abort` | `send` → `PaneMessage { type: "abort" }` |
