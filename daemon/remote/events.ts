@@ -1,7 +1,7 @@
 /**
  * Server-Sent Events for the phone. They carry no content, only "refetch" signals: `sessions`
  * when the list changes, `messages` when the .jsonl of the session a client has open changes.
- * Polled once a second while any client is connected; the registry itself changes on the panes'
+ * Polled once a second while any client is connected, which is also when a revoked device is cut off; the registry itself changes on the panes'
  * 3s heartbeats.
  */
 import { statSync } from "node:fs";
@@ -17,6 +17,7 @@ interface Client {
 	res: ServerResponse;
 	sessionId?: string;
 	fileSignature?: string;
+	isAuthorized: () => boolean;
 }
 
 const INTERVAL_MS = 1000;
@@ -48,8 +49,11 @@ export class RemoteEvents {
 		this.sources = sources;
 	}
 
-	/** `sessionId`: the session the client has open, whose file it is told about. */
-	add(res: ServerResponse, sessionId?: string): void {
+	/**
+	 * `sessionId`: the session the client has open, whose file it is told about.
+	 * `isAuthorized`: checked every tick; a client that fails it is disconnected.
+	 */
+	add(res: ServerResponse, sessionId?: string, isAuthorized: () => boolean = () => true): void {
 		res.writeHead(200, {
 			"content-type": "text/event-stream",
 			"cache-control": "no-store",
@@ -59,6 +63,7 @@ export class RemoteEvents {
 		const client: Client = {
 			res,
 			sessionId,
+			isAuthorized,
 			fileSignature: sessionId ? fileSignature(this.sources.sessionFile(sessionId)) : undefined,
 		};
 		this.clients.add(client);
@@ -78,6 +83,11 @@ export class RemoteEvents {
 		this.lastSessions = sessions;
 		const ping = ++this.ticks % PING_EVERY_TICKS === 0;
 		for (const client of this.clients) {
+			if (!client.isAuthorized()) {
+				client.res.end();
+				this.clients.delete(client);
+				continue;
+			}
 			if (changed) send(client.res, "sessions", {});
 			if (client.sessionId) {
 				const signature = fileSignature(this.sources.sessionFile(client.sessionId));

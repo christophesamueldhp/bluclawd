@@ -103,6 +103,10 @@ async function handle(
 	const url = new URL(req.url ?? "/", "http://localhost");
 	const path = url.pathname;
 	if (!path.startsWith("/api/")) return serveStatic(deps.webDir, path, req, res);
+	// Not a "simple" CORS content type, so a cross-site page cannot POST here without a preflight, which is never granted.
+	if (req.method === "POST" && !(req.headers["content-type"] ?? "").startsWith("application/json")) {
+		return json(res, 415, { error: "unsupported_media_type" });
+	}
 
 	if (path === "/api/pair" && req.method === "POST") {
 		const body = await readJson(req);
@@ -114,7 +118,7 @@ async function handle(
 	if (!deps.store.authenticate(token)) return json(res, 401, { error: "unauthorized" });
 
 	if (path === "/api/events" && req.method === "GET") {
-		events.add(res, url.searchParams.get("session") ?? undefined);
+		events.add(res, url.searchParams.get("session") ?? undefined, () => deps.store.authenticate(token) !== undefined);
 		return;
 	}
 	if (path === "/api/sessions" && req.method === "GET") {
@@ -123,7 +127,12 @@ async function handle(
 
 	const match = /^\/api\/sessions\/([^/]+)\/(messages|prompt|abort)$/.exec(path);
 	if (!match) return json(res, 404, { error: "not_found" });
-	const id = decodeURIComponent(match[1]);
+	let id: string;
+	try {
+		id = decodeURIComponent(match[1]);
+	} catch {
+		return json(res, 404, { error: "unknown_session" });
+	}
 	const session = findSession(deps.listInstances(), id);
 	if (!session) return json(res, 404, { error: "unknown_session" });
 	const action = match[2];
@@ -152,7 +161,9 @@ async function handle(
 
 export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.0.1"): Promise<RemoteServer> {
 	const events = new RemoteEvents({
-		sessionsSignature: () => JSON.stringify(remoteSessions(deps.listInstances())),
+		// Sorted: agent view's order shifts with every heartbeat and is not a change.
+		sessionsSignature: () =>
+			JSON.stringify(remoteSessions(deps.listInstances()).sort((a, b) => a.id.localeCompare(b.id))),
 		sessionFile: (id) => findSession(deps.listInstances(), id)?.sessionFile,
 	});
 	const server: Server = createServer((req, res) => {

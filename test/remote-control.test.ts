@@ -56,10 +56,24 @@ describe("remote control switch", () => {
 		const blocker = createServer();
 		await new Promise<void>((resolve) => blocker.listen(0, "127.0.0.1", () => resolve()));
 		const { port } = blocker.address() as { port: number };
-		const on = await control.handle({ type: "remote", action: "on", port });
-		expect(on).toMatchObject({ enabled: true, listening: false });
-		expect((on as { listenError?: string }).listenError).toContain("EADDRINUSE");
-		blocker.close();
+		try {
+			const on = await control.handle({ type: "remote", action: "on", port });
+			expect(on).toMatchObject({ enabled: true, listening: false });
+			expect((on as { listenError?: string }).listenError).toContain("EADDRINUSE");
+		} finally {
+			await new Promise((r) => blocker.close(() => r(undefined)));
+		}
+	});
+
+	it("starts one server when switched on twice at once", async () => {
+		const [a, b] = await Promise.all([
+			control.handle({ type: "remote", action: "on", port: 0 }),
+			control.handle({ type: "remote", action: "on", port: 0 }),
+		]);
+		if (a.type !== "remote_result" || b.type !== "remote_result") throw new Error("not a result");
+		await control.handle({ type: "remote", action: "off" });
+		await expect(fetch(`http://127.0.0.1:${a.port}/api/sessions`)).rejects.toThrow();
+		await expect(fetch(`http://127.0.0.1:${b.port}/api/sessions`)).rejects.toThrow();
 	});
 
 	it("refuses a pairing code while off, and an unknown device", async () => {

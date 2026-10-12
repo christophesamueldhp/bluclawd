@@ -24,16 +24,28 @@ export class RemoteControl {
 	/** The configured port the running server was started for. */
 	private serverPort: number | undefined;
 	private listenError: string | undefined;
+	/** Serialises apply and stop, so overlapping switches cannot start two servers. */
+	private queue: Promise<void> = Promise.resolve();
 
 	constructor(deps: RemoteControlDeps) {
 		this.deps = deps;
 		this.store = deps.store ?? new RemoteStore();
 	}
 
+	private run(step: () => Promise<void>): Promise<void> {
+		const result = this.queue.then(step);
+		this.queue = result.catch(() => undefined);
+		return result;
+	}
+
 	/** Start or stop the listener to match remote.json. */
-	async apply(): Promise<void> {
+	apply(): Promise<void> {
+		return this.run(() => this.applyNow());
+	}
+
+	private async applyNow(): Promise<void> {
 		const state = this.store.load();
-		if (this.server && (!state.enabled || this.serverPort !== state.port)) await this.stop();
+		if (this.server && (!state.enabled || this.serverPort !== state.port)) await this.stopNow();
 		if (!state.enabled) {
 			this.listenError = undefined;
 			return;
@@ -56,7 +68,11 @@ export class RemoteControl {
 		}
 	}
 
-	async stop(): Promise<void> {
+	stop(): Promise<void> {
+		return this.run(() => this.stopNow());
+	}
+
+	private async stopNow(): Promise<void> {
 		const server = this.server;
 		this.server = undefined;
 		this.serverPort = undefined;

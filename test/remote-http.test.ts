@@ -61,12 +61,15 @@ describe("remote HTTP API", () => {
 		const { code } = store.createCode();
 		const res = await fetch(`${base}/api/pair`, {
 			method: "POST",
+			headers: json,
 			body: JSON.stringify({ code, deviceName: "iPhone" }),
 		});
 		expect(res.status).toBe(200);
 		return ((await res.json()) as { token: string }).token;
 	}
 	const auth = (token: string) => ({ authorization: `Bearer ${token}` });
+	const json = { "content-type": "application/json" };
+	const authJson = (token: string) => ({ ...auth(token), ...json });
 
 	it("serves the PWA without a token, and nothing outside its directory", async () => {
 		expect((await fetch(`${base}/`)).headers.get("content-type")).toContain("text/html");
@@ -85,6 +88,7 @@ describe("remote HTTP API", () => {
 		store.createCode();
 		const res = await fetch(`${base}/api/pair`, {
 			method: "POST",
+			headers: json,
 			body: JSON.stringify({ code: "abc", deviceName: "x" }),
 		});
 		expect(res.status).toBe(400);
@@ -111,11 +115,11 @@ describe("remote HTTP API", () => {
 		const token = await pair();
 		const prompt = await fetch(`${base}/api/sessions/live/prompt`, {
 			method: "POST",
-			headers: auth(token),
+			headers: authJson(token),
 			body: JSON.stringify({ text: "next" }),
 		});
 		expect(prompt.status).toBe(202);
-		const abort = await fetch(`${base}/api/sessions/live/abort`, { method: "POST", headers: auth(token) });
+		const abort = await fetch(`${base}/api/sessions/live/abort`, { method: "POST", headers: authJson(token) });
 		expect(abort.status).toBe(202);
 		expect(sent).toEqual([
 			{ id: "live", message: { type: "prompt", text: "next" } },
@@ -126,7 +130,7 @@ describe("remote HTTP API", () => {
 	it("refuses a stored session, an empty or oversized prompt, and an oversized body", async () => {
 		const token = await pair();
 		const post = (path: string, body: string) =>
-			fetch(`${base}${path}`, { method: "POST", headers: auth(token), body });
+			fetch(`${base}${path}`, { method: "POST", headers: authJson(token), body });
 		expect((await post("/api/sessions/stored/prompt", JSON.stringify({ text: "hi" }))).status).toBe(409);
 		expect((await post("/api/sessions/live/prompt", JSON.stringify({ text: "  " }))).status).toBe(400);
 		expect(
@@ -157,5 +161,92 @@ describe("remote HTTP API", () => {
 		instances = [...instances, { id: "new", status: "online", cwd: "/p", external: true, activity: "idle" }];
 		await until("event: sessions");
 		controller.abort();
+	});
+
+	it("requires a JSON content type on every POST", async () => {
+		const { code } = store.createCode();
+		const res = await fetch(`${base}/api/pair`, {
+			method: "POST",
+			headers: { "content-type": "text/plain" },
+			body: JSON.stringify({ code, deviceName: "x" }),
+		});
+		expect(res.status).toBe(415);
+		expect(await res.json()).toEqual({ error: "unsupported_media_type" });
+		const token = await pair();
+		const bare = await fetch(`${base}/api/sessions/live/abort`, { method: "POST", headers: auth(token) });
+		expect(bare.status).toBe(415);
+		expect(sent).toEqual([]);
+	});
+
+	it("answers 404 for a malformed percent-encoded session id", async () => {
+		const token = await pair();
+		const res = await fetch(`${base}/api/sessions/%E0%A4%A/messages`, { headers: auth(token) });
+		expect(res.status).toBe(404);
+		expect(await res.json()).toEqual({ error: "unknown_session" });
+	});
+
+	describe("event stream", () => {
+		const open = async (token: string) => {
+			const controller = new AbortController();
+			const res = await fetch(`${base}/api/events?token=${token}`, { signal: controller.signal });
+			const reader = res.body!.getReader();
+			const decoder = new TextDecoder();
+			// One read stays pending across calls: abandoning a timed-out read would swallow its chunk.
+			let pending: ReturnType<typeof reader.read> | undefined;
+			/** Everything that arrives within `ms`, or until the stream ends. */
+			const collect = async (ms: number) => {
+				let text = "";
+				let ended = false;
+				const deadline = Date.now() + ms;
+				while (Date.now() < deadline) {
+					const timeout = new Promise<"timeout">((r) => setTimeout(() => r("timeout"), deadline - Date.now()));
+					pending ??= reader.read();
+					const next = await Promise.race([pending, timeout]);
+					if (next === "timeout") break;
+					pending = undefined;
+					if (next.done) {
+						ended = true;
+						break;
+					}
+					text += decoder.decode(next.value);
+				}
+				return { text, ended };
+			};
+			return { collect, controller };
+		};
+
+		it("ignores a reordering of the same sessions, and still signals a real change", async () => {
+			const token = await pair();
+			const one = { ...instances[0], lastSeenAt: "2026-10-12T10:00:03Z" };
+			const two: InstanceSummary = {
+				id: "two",
+				status: "online",
+				cwd: "/p",
+				external: true,
+				activity: "working",
+				lastSeenAt: "2026-10-12T10:00:00Z",
+			};
+			instances = [one, two];
+			const { collect, controller } = await open(token);
+			expect((await collect(200)).text).toContain(": connected");
+			// Agent view sorts by recency, so a newer heartbeat on "two" swaps the rows.
+			instances = [
+				{ ...one, lastSeenAt: "2026-10-12T10:00:06Z" },
+				{ ...two, lastSeenAt: "2026-10-12T10:00:09Z" },
+			];
+			expect((await collect(1500)).text).not.toContain("event: sessions");
+			instances = [...instances, { id: "three", status: "online", cwd: "/p", external: true, activity: "idle" }];
+			expect((await collect(2500)).text).toContain("event: sessions");
+			controller.abort();
+		});
+
+		it("closes the stream of a device that was revoked", async () => {
+			const token = await pair();
+			const { collect, controller } = await open(token);
+			await collect(200);
+			store.revoke(store.load().devices[0].id);
+			expect((await collect(2500)).ended).toBe(true);
+			controller.abort();
+		});
 	});
 });

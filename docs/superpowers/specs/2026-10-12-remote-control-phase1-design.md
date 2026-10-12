@@ -95,7 +95,7 @@ socket.
 5. A code is invalidated after 5 wrong attempts. Without a valid token, everything returns 401
    except the static PWA files and `POST /api/pair`.
 6. The listener binds `127.0.0.1` only. The port is `remote.port` from pi settings (default
-   7878), read by the extension and passed to the daemon with `remote_set`, which persists it.
+   7878), read by the extension and passed to the daemon with the `remote` request's `on` action, which persists it.
 
 Known limits: the daemon runs only once some `pi` has started it (no launchd yet); the phone
 cannot reach a sleeping Mac; the transcript's branch is the `parentId` chain from the file's last
@@ -104,7 +104,9 @@ URL (phase 2 may switch to a cookie set by `POST /api/pair`).
 
 ## API
 
-All JSON under `/api`; all require the token except `POST /api/pair`.
+All JSON under `/api`; all require the token except `POST /api/pair`. Every POST must send
+`content-type: application/json` (415 `unsupported_media_type` otherwise), which forces a CORS preflight on
+cross-site requests; no CORS headers are ever sent.
 
 | Endpoint | Behaviour |
 |---|---|
@@ -161,6 +163,7 @@ registry changes on 3 s heartbeats anyway, and polling needs no per-platform fal
 
 - Prompt or abort to a session with no process (stored or stopped row): `409 session_not_running`;
   the phone says to open it on the Mac. Resuming from the phone is phase 2.
+- A revoked device's open event stream is closed within a second.
 - Unknown session id: 404. Body over 64 KB or prompt text over 32 KB: 413.
 - No path ever comes from the request; transcripts are read only from the registry's
   `sessionFile`.
