@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { OrchestratorClient, RegisterInput } from "../ext/agent-view/orchestrator-client.ts";
 import { deriveLabel, ForegroundActivity, SelfRegistration } from "../ext/agent-view/self-registration.ts";
+import { piCommand } from "../ext/agent-view/tmux.ts";
 
 describe("ForegroundActivity (what the roster shows for THIS window)", () => {
 	it("starts idle, works during an agent run, and settles back to idle", () => {
@@ -86,5 +87,12 @@ describe("SelfRegistration heartbeats", () => {
 		reg.setActivity("working"); // unchanged: no extra heartbeat
 		await new Promise((r) => setTimeout(r, 0));
 		expect(calls.length).toBe(1);
+	});
+
+	it("tells the daemon its leaf and how to start another pi like it", async () => {
+		const { client, calls } = fakeClient();
+		const reg = new SelfRegistration(client, () => ({ cwd: "/p", leafId: "e7" }));
+		await reg.refresh();
+		expect(calls.at(-1)).toMatchObject({ leafId: "e7", launch: { command: piCommand() } });
 	});
 });

@@ -202,6 +202,7 @@ const agentView: InlineExtension = {
 		const selfInfo = (ctx: ExtensionContext): SelfSessionInfo | undefined => {
 			if (blank(ctx)) return undefined;
 			const row = selfRow(ctx);
+			const leafId = ctx.sessionManager.getLeafId() ?? undefined;
 			return {
 				cwd: ctx.sessionManager.getCwd(),
 				sessionId: ctx.sessionManager.getSessionId(),
@@ -211,6 +212,8 @@ const agentView: InlineExtension = {
 				detail: row.detail,
 				turns: row.turns,
 				createdAt: row.createdAt,
+				// Only once it differs: a heartbeat lags the file, whose last entry is otherwise the leaf.
+				leafId: leafId !== ctx.sessionManager.getEntries().at(-1)?.id ? leafId : undefined,
 			};
 		};
 
@@ -295,7 +298,7 @@ const agentView: InlineExtension = {
 			if (message.type === "prompt") {
 				pi.sendUserMessage(message.text, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
 			} else if (message.type === "abort") ctx.abort();
-			else pi.setSessionName(message.name);
+			else if (message.type === "rename") pi.setSessionName(message.name);
 		};
 
 		/** The `← for agents` footer hint: `← N agents` while sessions wait on you, `← N done`

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AgentActivity, OrchestratorClient, PaneMessage, RegisterInput } from "./orchestrator-client.ts";
+import { piCommand } from "./tmux.ts";
 
 export interface SelfSessionInfo {
 	cwd: string;
@@ -11,6 +12,7 @@ export interface SelfSessionInfo {
 	detail?: string;
 	turns?: number;
 	createdAt?: string;
+	leafId?: string;
 }
 
 /** The subset of a session entry needed to derive a title — structural, so pi's SessionEntry fits. */
@@ -161,6 +163,8 @@ export class SelfRegistration {
 			detail: info.detail,
 			turns: info.turns,
 			createdAt: info.createdAt,
+			leafId: info.leafId,
+			launch: { command: piCommand() },
 		};
 		try {
 			const res = await this.client.register(instance);

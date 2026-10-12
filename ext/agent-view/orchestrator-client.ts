@@ -27,6 +27,7 @@ export interface InstanceSummary {
 	sortOrder?: number;
 	/** The tmux session its interactive pi runs in. */
 	pane?: string;
+	leafId?: string;
 }
 
 export interface RegisterInput {
@@ -40,10 +41,20 @@ export interface RegisterInput {
 	detail?: string;
 	turns?: number;
 	createdAt?: string;
+	leafId?: string;
+	launch?: { command: string[] };
 }
 
 /** Mirror of daemon/ipc/protocol.ts PaneMessage. */
-export type PaneMessage = { type: "prompt"; text: string } | { type: "abort" } | { type: "rename"; name: string };
+export type PaneMessage =
+	| { type: "prompt"; text: string }
+	| { type: "abort" }
+	| { type: "rename"; name: string }
+	| { type: "compact" }
+	| { type: "set_model"; provider: string; id: string }
+	| { type: "tree"; entryId: string }
+	| { type: "fork"; entryId: string }
+	| { type: "clone" };
 
 /** Mirror of daemon/ipc/protocol.ts RemoteDeviceInfo. */
 export interface RemoteDeviceInfo {

@@ -24,11 +24,27 @@ export interface RegisterRequest {
 		detail?: string;
 		turns?: number;
 		createdAt?: string;
+		/** The entry pi appends to next, when it is not the file's last entry (after a /tree). */
+		leafId?: string;
+		/** How to start another pi like this one, so the daemon can start panes. */
+		launch?: PaneLaunch;
 	};
 }
 
+export interface PaneLaunch {
+	command: string[];
+}
+
 /** What another window asks a pane's pi to do; delivered with its next heartbeat. */
-export type PaneMessage = { type: "prompt"; text: string } | { type: "abort" } | { type: "rename"; name: string };
+export type PaneMessage =
+	| { type: "prompt"; text: string }
+	| { type: "abort" }
+	| { type: "rename"; name: string }
+	| { type: "compact" }
+	| { type: "set_model"; provider: string; id: string }
+	| { type: "tree"; entryId: string }
+	| { type: "fork"; entryId: string }
+	| { type: "clone" };
 
 /** Queue a message for a self-registered session. */
 export interface SendRequest {
@@ -120,6 +136,7 @@ export interface InstanceSummary {
 	pinned?: boolean;
 	sortOrder?: number;
 	pane?: string;
+	leafId?: string;
 }
 
 interface ResponseBase {
