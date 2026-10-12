@@ -7,6 +7,7 @@
  * project, so a reader here never sees an untrusted project's values.
  */
 import type { SettingsManager } from "@earendil-works/pi-coding-agent";
+import { DEFAULT_PORT } from "../../daemon/remote/pairing.ts";
 
 interface PermissionSettings {
 	deny?: string[];
@@ -45,4 +46,10 @@ export function denyRules(sm: SettingsManager): string[] {
 	const of = (settings: unknown) =>
 		((settings as Mergeable).permissions as PermissionSettings | undefined)?.deny ?? [];
 	return [...new Set([...of(sm.getGlobalSettings()), ...of(sm.getProjectSettings())])];
+}
+
+/** `remote.port`: where remote control listens on 127.0.0.1. */
+export function remotePort(sm: SettingsManager): number {
+	const port = (merged(sm).remote as { port?: unknown } | undefined)?.port;
+	return typeof port === "number" && Number.isInteger(port) && port > 0 && port < 65536 ? port : DEFAULT_PORT;
 }

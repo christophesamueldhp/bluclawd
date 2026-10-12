@@ -45,6 +45,30 @@ export interface RegisterInput {
 /** Mirror of daemon/ipc/protocol.ts PaneMessage. */
 export type PaneMessage = { type: "prompt"; text: string } | { type: "abort" } | { type: "rename"; name: string };
 
+/** Mirror of daemon/ipc/protocol.ts RemoteDeviceInfo. */
+export interface RemoteDeviceInfo {
+	id: string;
+	name: string;
+	createdAt: string;
+	lastUsedAt?: string;
+}
+
+/** Mirror of daemon/ipc/protocol.ts RemoteResponse, without the envelope. */
+export interface RemoteResult {
+	enabled: boolean;
+	port: number;
+	listening: boolean;
+	listenError?: string;
+	code?: string;
+	expiresAt?: number;
+	devices: RemoteDeviceInfo[];
+}
+
+export type RemoteAction =
+	| { action: "status" | "off" | "pair" | "devices" }
+	| { action: "on"; port?: number }
+	| { action: "revoke"; deviceId: string };
+
 type Request =
 	| { type: "list" }
 	| { type: "register"; instance: RegisterInput }
@@ -54,7 +78,8 @@ type Request =
 	| { type: "delete"; instanceId: string }
 	| { type: "rename"; instanceId: string; name: string }
 	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
-	| { type: "save"; cwd: string; label?: string; sessionFile: string };
+	| { type: "save"; cwd: string; label?: string; sessionFile: string }
+	| ({ type: "remote" } & RemoteAction);
 
 interface AnyResponse {
 	type: string;
@@ -216,6 +241,13 @@ export class OrchestratorClient {
 	async send(instanceId: string, message: PaneMessage): Promise<void> {
 		const res = await this.request({ type: "send", instanceId, message });
 		if (res.type !== "ack") throw new Error(res.error ?? "The agent daemon is out of date — restart pi to update it");
+	}
+
+	/** Remote control's switch, pairing codes and devices (daemon/remote/). */
+	async remote(action: RemoteAction): Promise<RemoteResult> {
+		const res = await this.request({ type: "remote", ...action }, 5000);
+		if (res.type !== "remote_result") throw new Error("The agent daemon is out of date — restart pi to update it");
+		return res as unknown as RemoteResult;
 	}
 
 	async unregister(instanceId: string): Promise<void> {
