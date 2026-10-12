@@ -52,6 +52,7 @@ const CATEGORY_OF: Record<string, CategoryTitle> = {
 
 	// Extensions & integrations
 	"agent-view": "Session",
+	"remote-control": "Session",
 	login: "Extensions & integrations",
 	logout: "Extensions & integrations",
 

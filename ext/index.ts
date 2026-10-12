@@ -25,6 +25,7 @@ import diagnostics from "./diagnostics/index.ts";
 import help from "./help/index.ts";
 import paste from "./paste/index.ts";
 import permissions from "./permissions/index.ts";
+import remote from "./remote/index.ts";
 import vibes from "./vibes/index.ts";
 
 export function bluclawdExtensions(): InlineExtension[] {
@@ -35,6 +36,7 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "branding", factory: branding },
 		{ name: "diagnostics", factory: diagnostics },
 		{ name: "agent-view", factory: agentView },
+		{ name: "remote", factory: remote },
 		{ name: "help", factory: help },
 		{ name: "vibes", factory: vibes },
 		{ name: "paste", factory: paste },
