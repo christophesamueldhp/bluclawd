@@ -1,0 +1,9 @@
+{
+	"name": "bluclawd",
+	"short_name": "bluclawd",
+	"start_url": "/",
+	"scope": "/",
+	"display": "standalone",
+	"background_color": "#141414",
+	"theme_color": "#141414"
+}
