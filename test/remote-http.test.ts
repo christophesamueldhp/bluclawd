@@ -358,9 +358,10 @@ describe("remote HTTP API", () => {
 	});
 
 	describe("event stream", () => {
-		const open = async (token: string) => {
+		const open = async (token: string, session?: string) => {
 			const controller = new AbortController();
-			const res = await fetch(`${base}/api/events?token=${token}`, { signal: controller.signal });
+			const query = session ? `&session=${session}` : "";
+			const res = await fetch(`${base}/api/events?token=${token}${query}`, { signal: controller.signal });
 			const reader = res.body!.getReader();
 			const decoder = new TextDecoder();
 			// One read stays pending across calls: abandoning a timed-out read would swallow its chunk.
@@ -458,12 +459,34 @@ describe("remote HTTP API", () => {
 			for (let i = 0; i < 50 && server.watching().size > 0; i++) await new Promise((r) => setTimeout(r, 20));
 			expect(server.watching()).toEqual(new Set());
 			// Gone with its last watcher: a new one is not sent the old reply.
-			const again = new AbortController();
-			const next = await fetch(`${base}/api/events?token=${token}&session=live`, { signal: again.signal });
-			const nextReader = next.body!.getReader();
-			const first = new TextDecoder().decode((await nextReader.read()).value);
+			const again = await open(token, "live");
+			const first = (await again.collect(400)).text;
+			expect(first).toContain(": connected");
 			expect(first).not.toContain("event: live");
-			again.abort();
+			again.controller.abort();
+		});
+
+		it("tells a watcher the reply ended even when the daemon kept no snapshot of it", async () => {
+			const token = await pair();
+			const watcher = await open(token, "live");
+			expect((await watcher.collect(200)).text).toContain(": connected");
+			server.live("live", null);
+			expect((await watcher.collect(300)).text).toContain(
+				`data: ${JSON.stringify({ sessionId: "live", live: null })}`,
+			);
+			watcher.controller.abort();
+		});
+
+		it("sends a revoked device no live reply, and closes its stream", async () => {
+			const token = await pair();
+			const watcher = await open(token, "live");
+			expect((await watcher.collect(200)).text).toContain(": connected");
+			store.revoke(store.load().devices[0].id);
+			server.live("live", { text: "secret", tools: [] });
+			const after = await watcher.collect(500);
+			expect(after.text).not.toContain("event: live");
+			expect(after.ended).toBe(true);
+			watcher.controller.abort();
 		});
 
 		it("closes the stream of a device that was revoked", async () => {

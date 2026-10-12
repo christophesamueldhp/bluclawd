@@ -5,6 +5,7 @@
  * the composers keep their text, focus and keyboard while updates arrive.
  */
 import { api, getToken, setToken, Unauthorized } from "./api.js";
+import { settle } from "./live.js";
 
 /** @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string }} Session */
 /** @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean }} Message */
@@ -21,6 +22,8 @@ const OFFLINE_AFTER_MS = 5000;
 const WATCHDOG_MS = 35_000;
 /** A pane that has not registered by then did not start (pi failed, or tmux did). */
 const START_TIMEOUT_MS = 60_000;
+/** How long a finished reply stays on screen without a transcript fetch that has it. */
+const LIVE_CLEAR_MS = 3000;
 const ERRORS = {
 	session_not_running: "This session is not running. Open it on the Mac to continue.",
 	invalid_cwd: "That directory does not exist on the Mac.",
@@ -68,6 +71,10 @@ let watchdog;
 let messagesRequest = 0;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let startTimer;
+/** The reply on screen has ended (or may have, while the stream was down): see settle(). */
+let liveEnded = false;
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let liveClear;
 /** Which view the DOM holds: "pair", "list" or "chat:<id>". */
 let shown = "";
 let lastLog = "";
@@ -196,9 +203,7 @@ async function loadMessages() {
 		if (state.open !== id || request !== messagesRequest) return;
 		state.messages = messages;
 		state.messagesLoaded = true;
-		// The transcript has what was streamed so far; only a tool still running is not in it yet.
-		const running = state.live?.tools.filter((t) => t.running) ?? [];
-		state.live = running.length ? { text: "", tools: running } : undefined;
+		state.live = settle(state.live, liveEnded, messages);
 		// A sent prompt is pending until the transcript has one more copy of its text than when it was sent.
 		state.pending = state.pending.filter((p) => userCount(messages, p.text) <= p.before);
 		render();
@@ -211,6 +216,16 @@ async function loadMessages() {
 function userCount(messages, text) {
 	// Trimmed: a prompt starting with @ reaches pi with a space before it.
 	return messages.filter((m) => m.kind === "user" && m.text?.trim() === text).length;
+}
+
+/** The reply on screen stays until a transcript fetch has it, which pi may not have written yet. */
+function endLive() {
+	clearTimeout(liveClear);
+	liveEnded = true;
+	liveClear = setTimeout(() => {
+		state.live = undefined;
+		render();
+	}, LIVE_CLEAR_MS);
 }
 
 /** @param {boolean} online */
@@ -244,6 +259,8 @@ function connect() {
 		offlineTimer = undefined;
 		alive();
 		setOnline(true);
+		// Its end may have been missed while the stream was down; one still streaming is sent again at once.
+		if (state.live) endLive();
 		void loadSessions();
 		void loadMessages();
 	};
@@ -259,7 +276,14 @@ function connect() {
 		alive();
 		const { sessionId, live } = JSON.parse(event.data);
 		if (sessionId !== state.open) return;
-		state.live = live ?? undefined;
+		if (!live) {
+			endLive();
+			void loadMessages();
+			return;
+		}
+		clearTimeout(liveClear);
+		liveEnded = false;
+		state.live = live;
 		render();
 	});
 	current.addEventListener("ping", alive);
@@ -596,6 +620,8 @@ function route() {
 		state.messages = [];
 		state.messagesLoaded = false;
 		state.live = undefined;
+		liveEnded = false;
+		clearTimeout(liveClear);
 		state.error = undefined;
 		connect();
 	}

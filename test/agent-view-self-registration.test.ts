@@ -122,3 +122,54 @@ describe("SelfRegistration watched flag", () => {
 		expect(watched).toEqual([true, false, false]);
 	});
 });
+
+describe("SelfRegistration.stop", () => {
+	it("unregisters and resolves when pi's API is gone by the time an in-flight register lands", async () => {
+		let land: (reply: { watched: boolean; messages: [] }) => void = () => {};
+		const unregistered: string[] = [];
+		const client = {
+			register: () =>
+				new Promise((resolve) => {
+					land = resolve;
+				}),
+			unregister: async (id: string) => {
+				unregistered.push(id);
+			},
+		} as unknown as OrchestratorClient;
+		let told = 0;
+		const reg = new SelfRegistration(
+			client,
+			() => ({ cwd: "/p" }),
+			() => {},
+			"pi-1",
+			() => {
+				told++;
+				throw new Error("extension API invalidated");
+			},
+		);
+		const beat = reg.refresh();
+		const stopping = reg.stop();
+		land({ watched: true, messages: [] });
+		await expect(stopping).resolves.toBeUndefined();
+		await expect(beat).resolves.toBeUndefined();
+		expect(unregistered).toEqual(["pi-1"]);
+		expect(told).toBe(0);
+	});
+
+	it("keeps a throwing onWatched from failing the heartbeat", async () => {
+		const client = {
+			register: async () => ({ watched: true, messages: [] }),
+			unregister: async () => {},
+		} as unknown as OrchestratorClient;
+		const reg = new SelfRegistration(
+			client,
+			() => ({ cwd: "/p" }),
+			() => {},
+			"pi-1",
+			() => {
+				throw new Error("boom");
+			},
+		);
+		await expect(reg.refresh()).resolves.toBeUndefined();
+	});
+});

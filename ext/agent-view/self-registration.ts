@@ -178,7 +178,13 @@ export class SelfRegistration {
 		} catch {
 			// daemon may be down; the next tick retries (register is an upsert).
 		}
-		this.onWatched(watched);
+		// Stopped meanwhile: pi may have invalidated the extension API the callback uses.
+		if (this.stopped) return;
+		try {
+			this.onWatched(watched);
+		} catch {
+			// a heartbeat must not reject: stop() awaits it and the timer fires it unawaited
+		}
 	}
 
 	async stop(): Promise<void> {
@@ -188,7 +194,11 @@ export class SelfRegistration {
 			this.timer = undefined;
 		}
 		// A register still on its way would list the session again after the unregister.
-		await this.inflight;
+		try {
+			await this.inflight;
+		} catch {
+			// a failed heartbeat must not skip the unregister
+		}
 		try {
 			await this.client.unregister(this.id);
 		} catch {

@@ -1,7 +1,7 @@
 // Caches the app shell so the app opens, and says the Mac is unreachable, when the Mac is not.
 // The API is never cached.
-const CACHE = "bluclawd-shell-v2";
-const SHELL = ["/", "/index.html", "/style.css", "/app.js", "/api.js", "/manifest.webmanifest"];
+const CACHE = "bluclawd-shell-v3";
+const SHELL = ["/", "/index.html", "/style.css", "/app.js", "/api.js", "/live.js", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
 	event.waitUntil(

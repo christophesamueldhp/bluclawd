@@ -93,17 +93,28 @@ export class RemoteEvents {
 		return ids;
 	}
 
-	/** A pane's reply so far, or null once it is finished; ignored for a session no client has open. */
+	/**
+	 * A pane's reply so far, or null once it is finished; a snapshot is ignored for a session no client has open.
+	 * A null is always sent: a phone may still show a snapshot forgotten here, e.g. when its stream
+	 * reconnected (the last watcher leaving drops it) or the daemon restarted.
+	 */
 	live(sessionId: string, live: LiveSnapshot | null): void {
-		if (live === null) {
-			if (!this.lives.delete(sessionId)) return;
-		} else {
+		if (live === null) this.lives.delete(sessionId);
+		else {
 			if (!this.watching().has(sessionId)) return;
 			this.lives.set(sessionId, live);
 		}
 		for (const client of this.clients) {
-			if (client.sessionId === sessionId) send(client.res, "live", { sessionId, live });
+			if (client.sessionId !== sessionId) continue;
+			// Checked here too: the reply is content, and the tick that cuts a revoked device off is up to 1s away.
+			if (!client.isAuthorized()) this.drop(client);
+			else send(client.res, "live", { sessionId, live });
 		}
+	}
+
+	private drop(client: Client): void {
+		client.res.end();
+		this.clients.delete(client);
 	}
 
 	private tick(): void {
@@ -113,8 +124,7 @@ export class RemoteEvents {
 		const ping = ++this.ticks % PING_EVERY_TICKS === 0;
 		for (const client of this.clients) {
 			if (!client.isAuthorized()) {
-				client.res.end();
-				this.clients.delete(client);
+				this.drop(client);
 				continue;
 			}
 			if (changed) send(client.res, "sessions", {});
