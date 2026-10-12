@@ -1,8 +1,8 @@
 // @ts-check
 /**
- * bluclawd's remote control on a phone: the session list (agent view's bands) and one
- * session's chat. Only the parts that change are re-rendered, so the composer keeps its text,
- * focus and keyboard while updates arrive.
+ * bluclawd's remote control on a phone: the session list (agent view's bands) with a composer
+ * that starts a session, and one session's chat. Only the parts that change are re-rendered, so
+ * the composers keep their text, focus and keyboard while updates arrive.
  */
 import { api, getToken, setToken, Unauthorized } from "./api.js";
 
@@ -18,8 +18,15 @@ const BANDS = [
 const OFFLINE_AFTER_MS = 5000;
 /** The server pings every 25 s; a stream silent for longer is dead even if the browser has not noticed. */
 const WATCHDOG_MS = 35_000;
+/** A pane that has not registered by then did not start (pi failed, or tmux did). */
+const START_TIMEOUT_MS = 60_000;
 const ERRORS = {
 	session_not_running: "This session is not running. Open it on the Mac to continue.",
+	invalid_cwd: "That directory does not exist on the Mac.",
+	invalid_model: "That model name is not valid.",
+	no_launch: "Start pi on the Mac once, so the phone knows how to start it.",
+	start_failed: "The Mac could not start the session.",
+	start_timeout: "The session did not show up. Check it on the Mac.",
 	unknown_session: "This session is gone.",
 	invalid_code: "That code is wrong or was already used. Run /remote-control pair for a new one.",
 	expired_code: "That code expired. Run /remote-control pair for a new one.",
@@ -34,6 +41,13 @@ const state = {
 	/** @type {string | undefined} */ open: undefined,
 	/** @type {Message[]} */ messages: [],
 	/** @type {{ text: string, before: number }[]} */ pending: [],
+	/** @type {string[]} */ directories: [],
+	/**
+	 * A pane started from here, until its row is listed (`pane` is unset while the request is out).
+	 * `from`: the stored session it resumes, whose row is gone meanwhile.
+	 * @type {{ pane?: string, from?: string } | undefined}
+	 */
+	starting: undefined,
 	loaded: false,
 	messagesLoaded: false,
 	online: true,
@@ -50,6 +64,8 @@ let offlineTimer;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let watchdog;
 let messagesRequest = 0;
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let startTimer;
 /** Which view the DOM holds: "pair", "list" or "chat:<id>". */
 let shown = "";
 let lastLog = "";
@@ -80,6 +96,11 @@ function deviceName() {
 	return /iPad/.test(ua) ? "iPad" : /iPhone/.test(ua) ? "iPhone" : /Android/.test(ua) ? "Android" : "Browser";
 }
 
+/** @param {string} path */
+function shortPath(path) {
+	return path.replace(/^\/(Users|home)\/[^/]+/, "~");
+}
+
 function standalone() {
 	return matchMedia("(display-mode: standalone)").matches || /** @type {any} */ (navigator).standalone === true;
 }
@@ -104,15 +125,49 @@ async function loadSessions() {
 		state.sessions = await api.sessions();
 		state.loaded = true;
 		state.error = undefined;
+		const starting = state.starting;
+		if (starting?.pane && state.sessions.some((s) => s.id === starting.pane)) {
+			state.starting = undefined;
+			clearTimeout(startTimer);
+			// The resumed session's row is the new pane's: follow it, without a history entry for the old one.
+			if (starting.from && state.open === starting.from) {
+				location.replace(`#s/${encodeURIComponent(starting.pane)}`);
+				return;
+			}
+		}
+		render();
+		if (!state.open) void loadDirectories();
+	} catch (error) {
+		handleError(error);
+	}
+}
+
+async function loadDirectories() {
+	try {
+		state.directories = await api.directories();
 		render();
 	} catch (error) {
 		handleError(error);
 	}
 }
 
+/** @param {string} pane @param {string} [from] */
+function waitForPane(pane, from) {
+	const starting = { pane, from };
+	state.starting = starting;
+	clearTimeout(startTimer);
+	startTimer = setTimeout(() => {
+		if (state.starting !== starting) return;
+		state.starting = undefined;
+		state.error = errorText("start_timeout");
+		render();
+	}, START_TIMEOUT_MS);
+	void loadSessions();
+}
+
 async function loadMessages() {
 	const id = state.open;
-	if (!id) return;
+	if (!id || state.starting?.from === id) return;
 	const request = ++messagesRequest;
 	try {
 		/** @type {Message[]} */
@@ -201,7 +256,11 @@ function pairView() {
 
 function listShell() {
 	return `<header class="bar"><h1>Sessions</h1><span class="muted" id="online"></span></header>
-<div id="banner"></div><section class="scroll" id="rows"></section>`;
+<div id="banner"></div><section class="scroll" id="rows"></section>
+<form class="composer new" id="new-task"><textarea id="task" rows="1" placeholder="New task…" aria-label="New task" maxlength="32768"></textarea>
+<div class="where"><select id="cwd" aria-label="Directory"></select>
+<input id="cwd-other" placeholder="/path/to/project" aria-label="Directory path" autocapitalize="off" autocomplete="off" spellcheck="false" hidden>
+<button class="start" id="start">Start</button></div></form>`;
 }
 
 /** @param {Session} s */
@@ -214,7 +273,7 @@ function rowHtml(s) {
 
 function rowsHtml() {
 	if (!state.loaded) return `<p class="empty">Loading…</p>`;
-	if (state.sessions.length === 0) return `<p class="empty">No sessions. Start one in agent view on the Mac.</p>`;
+	if (state.sessions.length === 0) return `<p class="empty">No sessions. Start one below.</p>`;
 	return BANDS.map(([key, title]) => {
 		const rows = state.sessions.filter((s) => s.band === key);
 		return rows.length ? `<h2 class="band">${title}</h2>${rows.map(rowHtml).join("")}` : "";
@@ -289,7 +348,8 @@ function render() {
 		lastLog = "";
 		app.innerHTML = view === "pair" ? pairView() : view === "list" ? listShell() : chatShell();
 		if (view === "pair") bindPair();
-		else if (view !== "list") bindChat();
+		else if (view === "list") bindList();
+		else bindChat();
 	}
 	if (view === "list") updateList();
 	else if (view !== "pair") updateChat();
@@ -300,11 +360,31 @@ function updateList() {
 	$("#online").classList.toggle("on", state.online);
 	$("#banner").innerHTML = bannerHtml(undefined);
 	$("#rows").innerHTML = rowsHtml();
+	updateDirectories();
+	const start = $("#start");
+	start.disabled = state.starting !== undefined;
+	start.textContent = state.starting ? "Starting…" : "Start";
+}
+
+/** Recent directories, then "Other…" for a typed path; the choice survives a refresh. */
+function updateDirectories() {
+	const select = $("#cwd");
+	const options = state.directories.map((d) => `<option value="${esc(d)}">${esc(shortPath(d))}</option>`);
+	const html = [...options, `<option value="">Other…</option>`].join("");
+	if (select.dataset.html !== html) {
+		const chosen = select.options.length > 0 ? select.value : undefined;
+		select.innerHTML = html;
+		select.dataset.html = html;
+		if (chosen !== undefined && [...select.options].some((o) => o.value === chosen)) select.value = chosen;
+	}
+	$("#cwd-other").hidden = select.value !== "";
 }
 
 function updateChat() {
 	const session = state.sessions.find((s) => s.id === state.open);
-	$("#title").textContent = session?.label ?? "";
+	const resuming = state.starting?.from !== undefined && state.starting.from === state.open;
+	// Kept while a resumed session's row gives way to its pane's.
+	if (!resuming) $("#title").textContent = session?.label ?? "";
 	$("#stop").hidden = session?.state !== "working";
 	$("#banner").innerHTML = bannerHtml(session);
 	const html = logHtml(session);
@@ -319,10 +399,9 @@ function updateChat() {
 		if (atBottom) scroll.scrollTop = scroll.scrollHeight;
 	}
 	const text = $("#text");
-	const stopped = session !== undefined && !session.alive;
-	text.disabled = stopped;
-	$(".send").disabled = stopped;
-	text.placeholder = stopped ? "Not running: open it on the Mac" : "Reply";
+	text.disabled = resuming;
+	$(".send").disabled = resuming;
+	text.placeholder = resuming ? "Starting…" : session && !session.alive ? "Reply resumes it" : "Reply";
 }
 
 function bindPair() {
@@ -345,12 +424,52 @@ function bindPair() {
 	});
 }
 
+/** @param {HTMLTextAreaElement} text */
+function grow(text) {
+	text.style.height = "auto";
+	text.style.height = `${Math.min(text.scrollHeight, 140)}px`;
+}
+
+function bindList() {
+	const task = $("#task");
+	task.addEventListener("input", () => grow(task));
+	$("#cwd").addEventListener("change", () => {
+		const other = $("#cwd-other");
+		other.hidden = $("#cwd").value !== "";
+		if (!other.hidden) other.focus();
+	});
+	$("#new-task").addEventListener("submit", (/** @type {Event} */ event) => {
+		event.preventDefault();
+		void startTask();
+	});
+}
+
+async function startTask() {
+	const task = $("#task");
+	const value = task.value.trim();
+	const cwd = $("#cwd").value || $("#cwd-other").value.trim();
+	if (!value || state.starting) return;
+	if (!cwd) {
+		state.error = "Type the directory to start it in.";
+		render();
+		return;
+	}
+	state.starting = {};
+	render();
+	try {
+		const { pane } = await api.start(cwd, value);
+		task.value = "";
+		grow(task);
+		waitForPane(pane);
+	} catch (error) {
+		state.starting = undefined;
+		handleError(error);
+	}
+}
+
 function bindChat() {
 	const text = $("#text");
-	text.addEventListener("input", () => {
-		text.style.height = "auto";
-		text.style.height = `${Math.min(text.scrollHeight, 140)}px`;
-	});
+	text.addEventListener("input", () => grow(text));
 	$("#composer").addEventListener("submit", (/** @type {Event} */ event) => {
 		event.preventDefault();
 		void send();
@@ -378,7 +497,8 @@ async function send() {
 	render();
 	$("#scroll").scrollTop = $("#scroll").scrollHeight;
 	try {
-		await api.prompt(id, value);
+		const { pane } = await api.prompt(id, value);
+		if (pane) waitForPane(pane, id);
 	} catch (error) {
 		const failed = state.pending.map((p) => p.text).lastIndexOf(value);
 		if (failed >= 0) state.pending.splice(failed, 1);

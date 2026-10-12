@@ -63,9 +63,13 @@ export const api = {
 		return data.token;
 	},
 	sessions: async () => (await call("GET", "/api/sessions")).sessions,
+	/** @returns {Promise<string[]>} */
+	directories: async () => (await call("GET", "/api/directories")).directories,
+	/** @param {string} cwd @param {string} task @returns {Promise<{ pane: string }>} */
+	start: (cwd, task) => call("POST", "/api/sessions", { cwd, task }),
 	/** @param {string} id */
 	messages: async (id) => (await call("GET", `${session(id)}/messages?limit=100`)).messages,
-	/** @param {string} id @param {string} text */
+	/** A stored session resumes in a new pane, named in the reply. @param {string} id @param {string} text @returns {Promise<{ pane?: string }>} */
 	prompt: (id, text) => call("POST", `${session(id)}/prompt`, { text }),
 	/** @param {string} id */
 	abort: (id) => call("POST", `${session(id)}/abort`, {}),

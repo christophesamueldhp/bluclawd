@@ -67,6 +67,12 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .composer textarea { flex: 1; resize: none; border: 0; border-radius: 18px; padding: 8px 14px; background: var(--panel); color: var(--text); font: inherit; max-height: 140px; }
 .send { width: 44px; height: 44px; flex: none; border-radius: 50%; border: 0; background: var(--accent); color: #000; font-size: 18px; }
 .send:disabled { opacity: .35; }
+.composer.new { flex-direction: column; align-items: stretch; }
+.composer.new textarea { flex: none; }
+.where { display: flex; gap: 8px; }
+.where select, .where input { flex: 1; min-width: 0; height: 44px; border: 0; border-radius: 12px; padding: 0 12px; background: var(--panel); color: var(--text); font: inherit; }
+.start { flex: none; height: 44px; padding: 0 20px; border: 0; border-radius: 22px; background: var(--accent); color: #000; font: inherit; font-weight: 600; }
+.start:disabled { opacity: .5; }
 #online.on { color: var(--accent); }
 .empty { color: var(--muted); text-align: center; margin: 40px 16px; }
 .pair { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 12px; padding: 24px; text-align: center; }
