@@ -41,10 +41,11 @@ export async function serve(): Promise<void> {
 
 		shutdownPromise = (async () => {
 			server.close();
-			await remote.stop();
+			// Before the slow stop, so a replacement daemon's new socket is never the one deleted.
 			if (existsSync(socketPath)) {
 				unlinkSync(socketPath);
 			}
+			await remote.stop();
 		})();
 
 		await shutdownPromise;
