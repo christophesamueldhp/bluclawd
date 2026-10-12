@@ -8,7 +8,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
-import type { InstanceSummary, PaneLaunch, PaneMessage } from "../ipc/protocol.ts";
+import type { InstanceSummary, LiveSnapshot, PaneLaunch, PaneMessage } from "../ipc/protocol.ts";
 import { RemoteEvents } from "./events.ts";
 import type { RemoteStore } from "./pairing.ts";
 import { findSession, remoteSessions } from "./sessions.ts";
@@ -31,6 +31,10 @@ export interface RemoteDeps {
 export interface RemoteServer {
 	/** The port actually bound (differs from the requested one only for port 0). */
 	port: number;
+	/** The sessions a phone has open on its event stream. */
+	watching(): Set<string>;
+	/** Push a pane's reply in progress (null: finished) to the phones that have its session open. */
+	live(sessionId: string, live: LiveSnapshot | null): void;
 	close(): Promise<void>;
 }
 
@@ -264,6 +268,8 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 			const address = server.address();
 			resolve({
 				port: typeof address === "object" && address ? address.port : port,
+				watching: () => events.watching(),
+				live: (id, live) => events.live(id, live),
 				close: () =>
 					new Promise<void>((done) => {
 						events.close();

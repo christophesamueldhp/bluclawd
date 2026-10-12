@@ -1,12 +1,14 @@
 /**
- * Server-Sent Events for the phone. They carry no content, only "refetch" signals: `sessions`
- * when the list changes, `messages` when the .jsonl of the session a client has open changes or
- * its pane moves to another leaf.
+ * Server-Sent Events for the phone. Mostly "refetch" signals with no content: `sessions` when the
+ * list changes, `messages` when the .jsonl of the session a client has open changes or its pane
+ * moves to another leaf. The exception is `live`: the reply a pane is streaming, sent only to
+ * the clients that have its session open.
  * Polled once a second while any client is connected, which is also when a revoked device is cut off; the registry itself changes on the panes'
  * 3s heartbeats.
  */
 import { statSync } from "node:fs";
 import type { ServerResponse } from "node:http";
+import type { LiveSnapshot } from "../ipc/protocol.ts";
 
 export interface EventSources {
 	/** Changes exactly when the phone's session list would. */
@@ -46,6 +48,8 @@ export class RemoteEvents {
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private lastSessions: string | undefined;
 	private ticks = 0;
+	/** Per watched session: what a client that opens it mid-reply is sent at once. */
+	private readonly lives = new Map<string, LiveSnapshot>();
 
 	constructor(sources: EventSources) {
 		this.sources = sources;
@@ -69,13 +73,36 @@ export class RemoteEvents {
 			messagesSignature: sessionId ? this.messagesSignature(sessionId) : undefined,
 		};
 		this.clients.add(client);
+		const live = sessionId ? this.lives.get(sessionId) : undefined;
+		if (live) send(res, "live", { sessionId, live });
 		res.on("close", () => {
 			this.clients.delete(client);
+			if (sessionId && !this.watching().has(sessionId)) this.lives.delete(sessionId);
 			if (this.clients.size === 0) this.stopTimer();
 		});
 		if (!this.timer) {
 			this.lastSessions = this.sources.sessionsSignature();
 			this.timer = setInterval(() => this.tick(), INTERVAL_MS);
+		}
+	}
+
+	/** The sessions some client has open. */
+	watching(): Set<string> {
+		const ids = new Set<string>();
+		for (const client of this.clients) if (client.sessionId) ids.add(client.sessionId);
+		return ids;
+	}
+
+	/** A pane's reply so far, or null once it is finished; ignored for a session no client has open. */
+	live(sessionId: string, live: LiveSnapshot | null): void {
+		if (live === null) {
+			if (!this.lives.delete(sessionId)) return;
+		} else {
+			if (!this.watching().has(sessionId)) return;
+			this.lives.set(sessionId, live);
+		}
+		for (const client of this.clients) {
+			if (client.sessionId === sessionId) send(client.res, "live", { sessionId, live });
 		}
 	}
 
@@ -110,6 +137,7 @@ export class RemoteEvents {
 		this.stopTimer();
 		for (const client of this.clients) client.res.end();
 		this.clients.clear();
+		this.lives.clear();
 	}
 
 	private stopTimer(): void {

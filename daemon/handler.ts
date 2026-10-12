@@ -9,6 +9,7 @@ import type {
 	MetaRequest,
 	RegisterRequest,
 	RegisterResponse,
+	RemoteLiveRequest,
 	RemoteRequest,
 	RemoteResponse,
 	RenameRequest,
@@ -89,7 +90,7 @@ export async function handleIpcRequest(request: UnregisterRequest): Promise<Unre
 export async function handleIpcRequest(request: ShutdownRequest): Promise<ShutdownResponse | ErrorResponse>;
 export async function handleIpcRequest(request: RemoteRequest): Promise<RemoteResponse | ErrorResponse>;
 export async function handleIpcRequest(
-	request: DeleteRequest | RenameRequest | MetaRequest | SaveRequest | SendRequest,
+	request: DeleteRequest | RenameRequest | MetaRequest | SaveRequest | SendRequest | RemoteLiveRequest,
 ): Promise<AckResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse> {
@@ -129,7 +130,12 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 			if (request.instance.launch) remoteControl?.noteLaunch(request.instance.launch);
 			supervisor.registerExternal(record, request.instance.activity ?? "idle");
 			const messages = supervisor.drainExternal(record.id);
-			return { type: "register_result", ok: true, ...(messages.length ? { messages } : {}) };
+			return {
+				type: "register_result",
+				ok: true,
+				...(messages.length ? { messages } : {}),
+				...(remoteControl?.watched(record.id) ? { watched: true } : {}),
+			};
 		}
 
 		case "send": {
@@ -140,6 +146,7 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 
 		case "unregister": {
 			supervisor.unregisterExternal(request.instanceId);
+			remoteControl?.live(request.instanceId, null);
 			return { type: "unregister_result", ok: true };
 		}
 
@@ -179,6 +186,11 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 			if (!remoteControl)
 				return { type: "error", ok: false, error: "remote control is not available in this process" };
 			return remoteControl.handle(request);
+		}
+
+		case "remote_live": {
+			remoteControl?.live(request.instanceId, request.live);
+			return { type: "ack", ok: true };
 		}
 
 		case "shutdown": {

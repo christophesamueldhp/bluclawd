@@ -91,6 +91,20 @@ export interface SaveRequest {
 	sessionFile: string;
 }
 
+/** The reply a pane is streaming, while a phone has its session open. */
+export interface LiveSnapshot {
+	text: string;
+	thinking?: string;
+	tools: Array<{ id: string; name: string; summary: string; running: boolean }>;
+}
+
+/** A pane's latest LiveSnapshot, or null once the reply is finished (or no phone watches it). */
+export interface RemoteLiveRequest {
+	type: "remote_live";
+	instanceId: string;
+	live: LiveSnapshot | null;
+}
+
 /** Remote control from a phone (daemon/remote/): its switch, pairing codes and paired devices. */
 export interface RemoteRequest {
 	type: "remote";
@@ -113,6 +127,7 @@ interface RequestMap {
 	meta: MetaRequest;
 	save: SaveRequest;
 	remote: RemoteRequest;
+	remote_live: RemoteLiveRequest;
 }
 
 export type ServerRequest = RequestMap[keyof RequestMap];
@@ -169,6 +184,8 @@ export interface RegisterResponse extends ResponseBase {
 	type: "register_result";
 	/** Messages queued for it with `send`. */
 	messages?: PaneMessage[];
+	/** A phone has this session open on its event stream. */
+	watched?: boolean;
 }
 
 export interface UnregisterResponse extends ResponseBase {
@@ -179,7 +196,7 @@ export interface ShutdownResponse extends ResponseBase {
 	type: "shutdown_result";
 }
 
-/** Reply to send / delete / rename / meta / save. */
+/** Reply to send / delete / rename / meta / save / remote_live. */
 export interface AckResponse extends ResponseBase {
 	type: "ack";
 	instance?: InstanceSummary;
@@ -224,6 +241,7 @@ interface ResponseMap {
 	meta: AckResponse;
 	save: AckResponse;
 	remote: RemoteResponse;
+	remote_live: AckResponse;
 }
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;

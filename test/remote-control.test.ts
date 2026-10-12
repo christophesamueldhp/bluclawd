@@ -108,6 +108,45 @@ describe("remote control switch", () => {
 		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
 	});
 
+	it("tells a heartbeat when a phone watches its session, and streams what the pane sends", async () => {
+		setRemoteControl(control);
+		const on = await control.handle({ type: "remote", action: "on", port: 0 });
+		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
+		const base = `http://127.0.0.1:${on.port}`;
+		const beat = () => handleIpcRequest({ type: "register", instance: { id: "pane-1", cwd: "/p" } });
+		expect(await beat()).not.toHaveProperty("watched");
+		const paired = await fetch(`${base}/api/pair`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ code: on.code, deviceName: "iPhone" }),
+		});
+		const { token } = (await paired.json()) as { token: string };
+		const controller = new AbortController();
+		const res = await fetch(`${base}/api/events?token=${token}&session=pane-1`, { signal: controller.signal });
+		const reader = res.body!.getReader();
+		let received = "";
+		const until = async (needle: string) => {
+			while (!received.includes(needle)) received += new TextDecoder().decode((await reader.read()).value);
+		};
+		await until(": connected");
+		expect(await beat()).toMatchObject({ type: "register_result", watched: true });
+		const live = { text: "Working on it", tools: [] };
+		expect(await handleIpcRequest({ type: "remote_live", instanceId: "pane-1", live })).toMatchObject({
+			type: "ack",
+			ok: true,
+		});
+		await until(JSON.stringify({ sessionId: "pane-1", live }));
+		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
+		await until(JSON.stringify({ sessionId: "pane-1", live: null }));
+		controller.abort();
+	});
+
+	it("acknowledges a pane's live reply when remote control is unavailable", async () => {
+		expect(
+			await handleIpcRequest({ type: "remote_live", instanceId: "pane-1", live: { text: "", tools: [] } }),
+		).toMatchObject({ type: "ack", ok: true });
+	});
+
 	it("is reached through the daemon's IPC handler", async () => {
 		expect(await handleIpcRequest({ type: "remote", action: "status" })).toMatchObject({ type: "error" });
 		setRemoteControl(control);

@@ -8,6 +8,7 @@ import { Tmux } from "../../ext/agent-view/tmux.ts";
 import type {
 	ErrorResponse,
 	InstanceSummary,
+	LiveSnapshot,
 	PaneLaunch,
 	PaneMessage,
 	RemoteRequest,
@@ -57,6 +58,15 @@ export class RemoteControl {
 		} catch {
 			// a heartbeat must not fail over remote.json; the next one retries
 		}
+	}
+
+	/** A phone has this session open, so its pane should stream its reply. */
+	watched(sessionId: string): boolean {
+		return this.server?.watching().has(sessionId) === true;
+	}
+
+	live(sessionId: string, live: LiveSnapshot | null): void {
+		this.server?.live(sessionId, live);
 	}
 
 	launch(): PaneLaunch | undefined {

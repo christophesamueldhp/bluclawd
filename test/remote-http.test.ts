@@ -412,6 +412,60 @@ describe("remote HTTP API", () => {
 			controller.abort();
 		});
 
+		it("streams a watched session's live reply to the clients that have it open, and forgets it when they leave", async () => {
+			const token = await pair();
+			const watcher = await (async () => {
+				const controller = new AbortController();
+				const res = await fetch(`${base}/api/events?token=${token}&session=live`, { signal: controller.signal });
+				const reader = res.body!.getReader();
+				const decoder = new TextDecoder();
+				let received = "";
+				const until = async (needle: string) => {
+					while (!received.includes(needle)) {
+						const { value, done } = await reader.read();
+						if (done) throw new Error("stream ended");
+						received += decoder.decode(value);
+					}
+					return received;
+				};
+				return { until, controller };
+			})();
+			const bystander = await open(token);
+			await watcher.until(": connected");
+			expect(server.watching()).toEqual(new Set(["live"]));
+			const snapshot = { text: "Hel", tools: [{ id: "c1", name: "bash", summary: "ls", running: true }] };
+			server.live("live", snapshot);
+			// Not watched: not kept, not sent.
+			server.live("other", { text: "x", tools: [] });
+			const sent = await watcher.until("event: live");
+			expect(sent).toContain(`data: ${JSON.stringify({ sessionId: "live", live: snapshot })}`);
+			server.live("live", null);
+			await watcher.until(`data: ${JSON.stringify({ sessionId: "live", live: null })}`);
+			expect((await bystander.collect(200)).text).not.toContain("event: live");
+
+			// A client that opens the session mid-reply gets the reply so far at once.
+			server.live("live", snapshot);
+			const late = new AbortController();
+			const res = await fetch(`${base}/api/events?token=${token}&session=live`, { signal: late.signal });
+			const reader = res.body!.getReader();
+			let text = "";
+			while (!text.includes("event: live")) text += new TextDecoder().decode((await reader.read()).value);
+			expect(text).toContain(JSON.stringify(snapshot));
+			late.abort();
+
+			watcher.controller.abort();
+			bystander.controller.abort();
+			for (let i = 0; i < 50 && server.watching().size > 0; i++) await new Promise((r) => setTimeout(r, 20));
+			expect(server.watching()).toEqual(new Set());
+			// Gone with its last watcher: a new one is not sent the old reply.
+			const again = new AbortController();
+			const next = await fetch(`${base}/api/events?token=${token}&session=live`, { signal: again.signal });
+			const nextReader = next.body!.getReader();
+			const first = new TextDecoder().decode((await nextReader.read()).value);
+			expect(first).not.toContain("event: live");
+			again.abort();
+		});
+
 		it("closes the stream of a device that was revoked", async () => {
 			const token = await pair();
 			const { collect, controller } = await open(token);
