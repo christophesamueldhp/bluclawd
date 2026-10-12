@@ -9,6 +9,8 @@ import type {
 	MetaRequest,
 	RegisterRequest,
 	RegisterResponse,
+	RemoteRequest,
+	RemoteResponse,
 	RenameRequest,
 	SaveRequest,
 	SendRequest,
@@ -21,6 +23,7 @@ import type {
 	UnregisterRequest,
 	UnregisterResponse,
 } from "./ipc/protocol.ts";
+import type { RemoteControl } from "./remote/control.ts";
 import { supervisor } from "./supervisor.ts";
 import type { InstanceRecord } from "./types.ts";
 
@@ -53,6 +56,22 @@ export function setShutdownHook(hook: (() => void) | undefined): void {
 	shutdownHook = hook;
 }
 
+/** Installed by serve.ts: remote control's switch. Unset outside `serve` (tests). */
+let remoteControl: RemoteControl | undefined;
+
+export function setRemoteControl(control: RemoteControl | undefined): void {
+	remoteControl = control;
+}
+
+/** Every row agent view lists: stored rows, then each pane's pi with its activity. */
+export function listSummaries(): InstanceSummary[] {
+	const stored = supervisor.listInstances().map((instance) => toInstanceSummary(instance));
+	const external = supervisor
+		.listExternalInstances()
+		.map(({ record, activity }) => toInstanceSummary(record, activity, true));
+	return [...stored, ...external];
+}
+
 function unknownInstanceError(instanceId: string): ErrorResponse {
 	return {
 		type: "error",
@@ -67,6 +86,7 @@ export async function handleIpcRequest(request: StatusRequest): Promise<StatusRe
 export async function handleIpcRequest(request: RegisterRequest): Promise<RegisterResponse | ErrorResponse>;
 export async function handleIpcRequest(request: UnregisterRequest): Promise<UnregisterResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ShutdownRequest): Promise<ShutdownResponse | ErrorResponse>;
+export async function handleIpcRequest(request: RemoteRequest): Promise<RemoteResponse | ErrorResponse>;
 export async function handleIpcRequest(
 	request: DeleteRequest | RenameRequest | MetaRequest | SaveRequest | SendRequest,
 ): Promise<AckResponse | ErrorResponse>;
@@ -74,15 +94,7 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse> {
 	switch (request.type) {
 		case "list": {
-			const stored = supervisor.listInstances().map((instance) => toInstanceSummary(instance));
-			const external = supervisor
-				.listExternalInstances()
-				.map(({ record, activity }) => toInstanceSummary(record, activity, true));
-			return {
-				type: "list_result",
-				ok: true,
-				instances: [...stored, ...external],
-			};
+			return { type: "list_result", ok: true, instances: listSummaries() };
 		}
 
 		case "status": {
@@ -158,6 +170,12 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				sessionFile: request.sessionFile,
 			});
 			return { type: "ack", ok: true, instance: toInstanceSummary(instance) };
+		}
+
+		case "remote": {
+			if (!remoteControl)
+				return { type: "error", ok: false, error: "remote control is not available in this process" };
+			return remoteControl.handle(request);
 		}
 
 		case "shutdown": {

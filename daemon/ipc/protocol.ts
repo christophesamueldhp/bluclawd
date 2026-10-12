@@ -75,6 +75,16 @@ export interface SaveRequest {
 	sessionFile: string;
 }
 
+/** Remote control from a phone (daemon/remote/): its switch, pairing codes and paired devices. */
+export interface RemoteRequest {
+	type: "remote";
+	action: "status" | "on" | "off" | "pair" | "devices" | "revoke";
+	/** With `on`: the port to listen on (pi's `remote.port` setting). */
+	port?: number;
+	/** With `revoke`. */
+	deviceId?: string;
+}
+
 interface RequestMap {
 	list: ListRequest;
 	status: StatusRequest;
@@ -86,6 +96,7 @@ interface RequestMap {
 	rename: RenameRequest;
 	meta: MetaRequest;
 	save: SaveRequest;
+	remote: RemoteRequest;
 }
 
 export type ServerRequest = RequestMap[keyof RequestMap];
@@ -157,6 +168,27 @@ export interface AckResponse extends ResponseBase {
 	instance?: InstanceSummary;
 }
 
+export interface RemoteDeviceInfo {
+	id: string;
+	name: string;
+	createdAt: string;
+	lastUsedAt?: string;
+}
+
+export interface RemoteResponse extends ResponseBase {
+	type: "remote_result";
+	enabled: boolean;
+	/** The port bound while listening, else the configured one. */
+	port: number;
+	listening: boolean;
+	/** Why the listener could not start (e.g. the port is in use). */
+	listenError?: string;
+	/** With `on` and `pair`: a 6-digit pairing code and when it expires (epoch ms). */
+	code?: string;
+	expiresAt?: number;
+	devices: RemoteDeviceInfo[];
+}
+
 export interface ErrorResponse extends ResponseBase {
 	type: "error";
 	ok: false;
@@ -174,6 +206,7 @@ interface ResponseMap {
 	rename: AckResponse;
 	meta: AckResponse;
 	save: AckResponse;
+	remote: RemoteResponse;
 }
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;

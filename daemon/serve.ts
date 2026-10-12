@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { dirname } from "node:path";
 import { getSocketPath } from "./config.ts";
-import { handleIpcRequest, setShutdownHook } from "./handler.ts";
+import { handleIpcRequest, listSummaries, setRemoteControl, setShutdownHook } from "./handler.ts";
 import { startIpcServer } from "./ipc/server.ts";
+import { RemoteControl } from "./remote/control.ts";
 import { supervisor } from "./supervisor.ts";
 
 export async function serve(): Promise<void> {
@@ -24,6 +25,13 @@ export async function serve(): Promise<void> {
 
 	console.log(`server listening on ${socketPath}`);
 
+	const remote = new RemoteControl({
+		listInstances: listSummaries,
+		send: (id, message) => supervisor.sendExternal(id, message),
+	});
+	setRemoteControl(remote);
+	await remote.apply();
+
 	let shutdownPromise: Promise<void> | undefined;
 	const shutdown = async (exitCode: number) => {
 		if (shutdownPromise) {
@@ -33,6 +41,7 @@ export async function serve(): Promise<void> {
 
 		shutdownPromise = (async () => {
 			server.close();
+			await remote.stop();
 			if (existsSync(socketPath)) {
 				unlinkSync(socketPath);
 			}
