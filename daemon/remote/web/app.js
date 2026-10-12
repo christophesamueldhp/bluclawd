@@ -16,6 +16,8 @@ const BANDS = [
 	["idle", "Idle"],
 ];
 const OFFLINE_AFTER_MS = 5000;
+/** The server pings every 25 s; a stream silent for longer is dead even if the browser has not noticed. */
+const WATCHDOG_MS = 35_000;
 const ERRORS = {
 	session_not_running: "This session is not running. Open it on the Mac to continue.",
 	unknown_session: "This session is gone.",
@@ -27,7 +29,9 @@ const state = {
 	/** @type {Session[]} */ sessions: [],
 	/** @type {string | undefined} */ open: undefined,
 	/** @type {Message[]} */ messages: [],
-	/** @type {string[]} */ pending: [],
+	/** @type {{ text: string, before: number }[]} */ pending: [],
+	loaded: false,
+	messagesLoaded: false,
 	online: true,
 	/** @type {string | undefined} */ error: undefined,
 };
@@ -39,6 +43,9 @@ const app = $("#app");
 let source;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let offlineTimer;
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let watchdog;
+let messagesRequest = 0;
 /** Which view the DOM holds: "pair", "list" or "chat:<id>". */
 let shown = "";
 let lastLog = "";
@@ -82,13 +89,16 @@ function handleError(error) {
 		render();
 		return;
 	}
-	state.error = errorText(error instanceof Error ? error.message : String(error));
+	// A dropped connection or a 5xx is the offline banner's business, not raw text.
+	const message = error instanceof Error ? error.message : String(error);
+	if (!(error instanceof TypeError) && !/^HTTP 5\d\d$/.test(message)) state.error = errorText(message);
 	render();
 }
 
 async function loadSessions() {
 	try {
 		state.sessions = await api.sessions();
+		state.loaded = true;
 		state.error = undefined;
 		render();
 	} catch (error) {
@@ -99,17 +109,24 @@ async function loadSessions() {
 async function loadMessages() {
 	const id = state.open;
 	if (!id) return;
+	const request = ++messagesRequest;
 	try {
 		/** @type {Message[]} */
 		const messages = await api.messages(id);
-		if (state.open !== id) return;
+		if (state.open !== id || request !== messagesRequest) return;
 		state.messages = messages;
-		// A sent prompt is pending until the transcript shows it.
-		state.pending = state.pending.filter((text) => !messages.some((m) => m.kind === "user" && m.text === text));
+		state.messagesLoaded = true;
+		// A sent prompt is pending until the transcript has one more copy of its text than when it was sent.
+		state.pending = state.pending.filter((p) => userCount(messages, p.text) <= p.before);
 		render();
 	} catch (error) {
 		handleError(error);
 	}
+}
+
+/** @param {Message[]} messages @param {string} text */
+function userCount(messages, text) {
+	return messages.filter((m) => m.kind === "user" && m.text === text).length;
 }
 
 /** @param {boolean} online */
@@ -123,18 +140,38 @@ function setOnline(online) {
 function connect() {
 	source?.close();
 	source = undefined;
+	clearTimeout(offlineTimer);
+	clearTimeout(watchdog);
+	offlineTimer = watchdog = undefined;
 	if (!getToken()) return;
 	const current = api.events(state.open);
 	source = current;
+	// A sleeping Mac leaves the connection hanging without an error, so the timer starts with every stream.
+	offlineTimer = setTimeout(() => setOnline(false), OFFLINE_AFTER_MS);
+	const alive = () => {
+		clearTimeout(watchdog);
+		watchdog = setTimeout(() => {
+			setOnline(false);
+			connect();
+		}, WATCHDOG_MS);
+	};
 	current.onopen = () => {
 		clearTimeout(offlineTimer);
 		offlineTimer = undefined;
+		alive();
 		setOnline(true);
 		void loadSessions();
 		void loadMessages();
 	};
-	current.addEventListener("sessions", () => void loadSessions());
-	current.addEventListener("messages", () => void loadMessages());
+	current.addEventListener("sessions", () => {
+		alive();
+		void loadSessions();
+	});
+	current.addEventListener("messages", () => {
+		alive();
+		void loadMessages();
+	});
+	current.addEventListener("ping", alive);
 	current.onerror = () => {
 		offlineTimer ??= setTimeout(() => setOnline(false), OFFLINE_AFTER_MS);
 		// EventSource gives up on an HTTP error, such as a revoked token: find out which, then retry.
@@ -166,12 +203,13 @@ function listShell() {
 /** @param {Session} s */
 function rowHtml(s) {
 	const glyph = s.state === "needs" ? "✻" : s.state === "working" ? "" : "∙";
-	return `<a class="row" href="#s/${encodeURIComponent(s.id)}"><span class="glyph ${esc(s.state)}">${glyph}</span>
+	return `<a class="row" href="#s/${encodeURIComponent(s.id)}"><span class="glyph ${esc(s.state)}" aria-hidden="true">${glyph}</span>
 <span class="name">${esc(s.label)}<small>${esc(s.detail || s.state)}</small></span>
 <span class="age">${age(s.finishedAt ?? s.createdAt)}</span></a>`;
 }
 
 function rowsHtml() {
+	if (!state.loaded) return `<p class="empty">Loading…</p>`;
 	if (state.sessions.length === 0) return `<p class="empty">No sessions. Start one in agent view on the Mac.</p>`;
 	return BANDS.map(([key, title]) => {
 		const rows = state.sessions.filter((s) => s.band === key);
@@ -183,8 +221,8 @@ function chatShell() {
 	return `<header class="bar"><a class="back" href="#">‹ Sessions</a><span class="title" id="title"></span>
 <button class="stop" id="stop" hidden>Stop</button></header>
 <div id="banner"></div><section class="scroll" id="scroll"><div class="log" id="log"></div></section>
-<form class="composer" id="composer"><textarea id="text" rows="1" placeholder="Reply"></textarea>
-<button class="send" aria-label="Send">↑</button></form>`;
+<form class="composer" id="composer"><textarea id="text" rows="1" placeholder="Reply" aria-label="Reply"></textarea>
+<button class="send" aria-label="Send"><span aria-hidden="true">↑</span></button></form>`;
 }
 
 /** @param {string} name @param {string} summary @param {Message | undefined} result @param {string} key */
@@ -212,17 +250,20 @@ function logHtml(session) {
 				);
 			}
 			if (m.text) parts.push(`<div class="a">${esc(m.text)}</div>`);
-			for (const tool of m.tools ?? []) parts.push(toolHtml(tool.name, tool.summary, results.get(tool.id), tool.id));
+			for (const [index, tool] of (m.tools ?? []).entries()) {
+				parts.push(toolHtml(tool.name, tool.summary, results.get(tool.id), tool.id || `${m.id}:${index}`));
+			}
 			if (m.error) parts.push(`<div class="t err">${esc(m.error)}</div>`);
 		} else if (m.kind === "toolResult" && !(m.toolCallId && calls.has(m.toolCallId))) {
 			parts.push(toolHtml(m.toolName ?? "tool", "", m, m.id));
 		} else if (m.kind === "marker") parts.push(`<div class="marker">${esc(m.text)}</div>`);
 	}
-	for (const text of state.pending) {
+	for (const { text } of state.pending) {
 		parts.push(`<div class="u">${esc(text)}</div><div class="queued">sent · waiting for the session</div>`);
 	}
 	if (session?.state === "working") parts.push(`<div class="working">✻ ${esc(session.detail || "Working…")}</div>`);
-	return parts.length ? parts.join("") : `<p class="empty">Nothing in this session yet.</p>`;
+	if (parts.length) return parts.join("");
+	return `<p class="empty">${state.messagesLoaded ? "Nothing in this session yet." : "Loading…"}</p>`;
 }
 
 /** @param {Session | undefined} session */
@@ -285,7 +326,13 @@ function bindPair() {
 		event.preventDefault();
 		const code = $("#code").value.replace(/\D/g, "");
 		try {
-			setToken(await api.pair(code, deviceName()));
+			const token = await api.pair(code, deviceName());
+			try {
+				setToken(token);
+			} catch {
+				$("#pair-error").textContent = "This browser blocks storage; remote control needs it";
+				return;
+			}
 			render();
 			connect();
 		} catch (error) {
@@ -322,13 +369,17 @@ async function send() {
 	if (!value || !id) return;
 	text.value = "";
 	text.style.height = "auto";
-	state.pending.push(value);
+	const before = userCount(state.messages, value) + state.pending.filter((p) => p.text === value).length;
+	state.pending.push({ text: value, before });
 	render();
+	$("#scroll").scrollTop = $("#scroll").scrollHeight;
 	try {
 		await api.prompt(id, value);
 	} catch (error) {
-		state.pending = state.pending.filter((p) => p !== value);
-		text.value = value;
+		const failed = state.pending.map((p) => p.text).lastIndexOf(value);
+		if (failed >= 0) state.pending.splice(failed, 1);
+		for (const p of state.pending.slice(Math.max(failed, 0))) if (p.text === value) p.before--;
+		if (!text.value) text.value = value;
 		handleError(error);
 	}
 }
@@ -341,6 +392,7 @@ function route() {
 	if (open !== state.open) {
 		state.open = open;
 		state.messages = [];
+		state.messagesLoaded = false;
 		state.pending = [];
 		state.error = undefined;
 		connect();

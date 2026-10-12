@@ -73,6 +73,7 @@ describe("remote HTTP API", () => {
 
 	it("serves the PWA without a token, and nothing outside its directory", async () => {
 		expect((await fetch(`${base}/`)).headers.get("content-type")).toContain("text/html");
+		expect((await fetch(`${base}/`)).headers.get("content-security-policy")).toContain("default-src 'self'");
 		expect((await fetch(`${base}/app.js`)).status).toBe(200);
 		expect((await fetch(`${base}/..%2Fremote.json`)).status).toBe(404);
 		expect((await fetch(`${base}/missing.js`)).status).toBe(404);

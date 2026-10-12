@@ -21,7 +21,7 @@ interface Client {
 }
 
 const INTERVAL_MS = 1000;
-/** A comment line this often keeps proxies and the phone from dropping an idle stream. */
+/** A named event (not a comment, so the phone sees it) this often keeps the stream alive and lets the phone notice a dead one. */
 const PING_EVERY_TICKS = 25;
 
 function fileSignature(file: string | undefined): string {
@@ -96,7 +96,7 @@ export class RemoteEvents {
 					send(client.res, "messages", { sessionId: client.sessionId });
 				}
 			}
-			if (ping) client.res.write(": ping\n\n");
+			if (ping) send(client.res, "ping", {});
 		}
 	}
 

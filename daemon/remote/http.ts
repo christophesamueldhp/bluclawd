@@ -41,6 +41,8 @@ const CONTENT_TYPES: Record<string, string> = {
 	".svg": "image/svg+xml",
 };
 
+const CSP = "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'";
+
 class HttpError extends Error {
 	readonly status: number;
 	constructor(status: number, code: string) {
@@ -90,7 +92,12 @@ function serveStatic(webDir: string, path: string, req: IncomingMessage, res: Se
 		res.end("not found");
 		return;
 	}
-	res.writeHead(200, { "content-type": type, "cache-control": "no-cache", "x-content-type-options": "nosniff" });
+	res.writeHead(200, {
+		"content-type": type,
+		"cache-control": "no-cache",
+		"x-content-type-options": "nosniff",
+		"content-security-policy": CSP,
+	});
 	res.end(req.method === "HEAD" ? undefined : readFileSync(join(webDir, name)));
 }
 
