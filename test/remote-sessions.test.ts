@@ -58,9 +58,9 @@ describe("remote sessions", () => {
 
 	it("finds a session's file and whether a pane runs it", () => {
 		const stored: InstanceSummary = { id: "old", status: "stopped", cwd: "/p", sessionFile: "/s/old.jsonl" };
-		const list = [stored, live("b", "idle")];
-		expect(findSession(list, "b")).toEqual({ sessionFile: "/s/b.jsonl", running: true });
-		expect(findSession(list, "old")).toEqual({ sessionFile: "/s/old.jsonl", running: false });
+		const list = [stored, live("b", "idle", { leafId: "e3" })];
+		expect(findSession(list, "b")).toEqual({ sessionFile: "/s/b.jsonl", cwd: "/p", running: true, leafId: "e3" });
+		expect(findSession(list, "old")).toEqual({ sessionFile: "/s/old.jsonl", cwd: "/p", running: false });
 		expect(findSession(list, "zzz")).toBeUndefined();
 	});
 });

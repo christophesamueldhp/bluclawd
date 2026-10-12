@@ -88,6 +88,16 @@ describe("remote transcript", () => {
 		expect(transcriptFrom(text, 50).map((m) => m.id)).toEqual(["u1", "u3"]);
 	});
 
+	it("follows the leaf the pane reports, and the last entry when the file lacks it", () => {
+		const text = jsonl(
+			msg("u1", null, { role: "user", content: "first" }),
+			msg("u2", "u1", { role: "user", content: "gone back from" }),
+			msg("u3", "u2", { role: "user", content: "more" }),
+		);
+		expect(transcriptFrom(text, 50, "u1").map((m) => m.id)).toEqual(["u1"]);
+		expect(transcriptFrom(text, 50, "zz").map((m) => m.id)).toEqual(["u1", "u2", "u3"]);
+	});
+
 	it("skips lines that do not parse, such as a half-written last line", () => {
 		const text = `${jsonl(msg("u1", null, { role: "user", content: "hi" }))}\n{"type":"mess`;
 		expect(parseEntries(text)).toHaveLength(1);

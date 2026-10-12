@@ -28,6 +28,7 @@ export async function serve(): Promise<void> {
 	const remote = new RemoteControl({
 		listInstances: listSummaries,
 		send: (id, message) => supervisor.sendExternal(id, message),
+		deleteInstance: (id) => supervisor.deleteInstance(id),
 	});
 	setRemoteControl(remote);
 	await remote.apply();

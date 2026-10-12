@@ -2,9 +2,10 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { InstanceSummary, PaneMessage } from "../daemon/ipc/protocol.ts";
+import type { InstanceSummary, PaneLaunch, PaneMessage } from "../daemon/ipc/protocol.ts";
 import { BODY_MAX, PROMPT_MAX, type RemoteServer, startRemoteServer } from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
+import type { SessionSpec } from "../daemon/remote/spawn.ts";
 
 const entry = (id: string, parentId: string | null, content: string) =>
 	`${JSON.stringify({ type: "message", id, parentId, message: { role: "user", content } })}\n`;
@@ -16,6 +17,10 @@ describe("remote HTTP API", () => {
 	let base: string;
 	let instances: InstanceSummary[];
 	let sent: Array<{ id: string; message: PaneMessage }>;
+	let launch: PaneLaunch | undefined;
+	let started: SessionSpec[];
+	let deleted: string[];
+	let startFails: boolean;
 
 	beforeEach(async () => {
 		dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-http-"));
@@ -36,6 +41,10 @@ describe("remote HTTP API", () => {
 			{ id: "stored", status: "stopped", cwd: "/p", sessionFile: join(dir, "stored.jsonl") },
 		];
 		sent = [];
+		launch = { command: ["node", "pi.js"] };
+		started = [];
+		deleted = [];
+		startFails = false;
 		store = new RemoteStore(join(dir, "remote.json"));
 		server = await startRemoteServer(
 			{
@@ -44,6 +53,16 @@ describe("remote HTTP API", () => {
 				listInstances: () => instances,
 				send: (id, message) => {
 					sent.push({ id, message });
+					return true;
+				},
+				launch: () => launch,
+				startSession: (spec) => {
+					if (startFails) throw new Error("tmux: no server");
+					started.push(spec);
+					return "pi-0000000a";
+				},
+				deleteInstance: (id) => {
+					deleted.push(id);
 					return true;
 				},
 			},
@@ -128,17 +147,107 @@ describe("remote HTTP API", () => {
 		]);
 	});
 
-	it("refuses a stored session, an empty or oversized prompt, and an oversized body", async () => {
+	it("refuses a stored session without a file, an empty or oversized prompt, and an oversized body", async () => {
+		instances = [...instances, { id: "fileless", status: "stopped", cwd: "/p" }];
 		const token = await pair();
 		const post = (path: string, body: string) =>
 			fetch(`${base}${path}`, { method: "POST", headers: authJson(token), body });
-		expect((await post("/api/sessions/stored/prompt", JSON.stringify({ text: "hi" }))).status).toBe(409);
+		expect((await post("/api/sessions/fileless/prompt", JSON.stringify({ text: "hi" }))).status).toBe(409);
+		expect((await post("/api/sessions/stored/abort", "{}")).status).toBe(409);
 		expect((await post("/api/sessions/live/prompt", JSON.stringify({ text: "  " }))).status).toBe(400);
 		expect(
 			(await post("/api/sessions/live/prompt", JSON.stringify({ text: "x".repeat(PROMPT_MAX + 1) }))).status,
 		).toBe(413);
 		expect((await post("/api/sessions/live/prompt", "x".repeat(BODY_MAX + 1))).status).toBe(413);
 		expect(sent).toEqual([]);
+		expect(started).toEqual([]);
+	});
+
+	it("resumes a stored session with the reply as its first prompt, replacing its row", async () => {
+		const token = await pair();
+		const res = await fetch(`${base}/api/sessions/stored/prompt`, {
+			method: "POST",
+			headers: authJson(token),
+			body: JSON.stringify({ text: "carry on" }),
+		});
+		expect(res.status).toBe(202);
+		expect(await res.json()).toEqual({ ok: true, pane: "pi-0000000a" });
+		expect(started).toEqual([{ cwd: "/p", task: "carry on", sessionFile: join(dir, "stored.jsonl"), launch }]);
+		expect(deleted).toEqual(["stored"]);
+		expect(sent).toEqual([]);
+	});
+
+	it("starts a new session in a directory", async () => {
+		const token = await pair();
+		const start = (body: object) =>
+			fetch(`${base}/api/sessions`, { method: "POST", headers: authJson(token), body: JSON.stringify(body) });
+		const res = await start({ cwd: dir, task: "  fix the build ", model: "anthropic/claude-opus-5-5" });
+		expect(res.status).toBe(201);
+		expect(await res.json()).toEqual({ pane: "pi-0000000a" });
+		expect((await start({ cwd: dir, task: "go" })).status).toBe(201);
+		expect(started).toEqual([
+			{ cwd: dir, task: "fix the build", model: "anthropic/claude-opus-5-5", launch },
+			{ cwd: dir, task: "go", launch },
+		]);
+	});
+
+	it("refuses to start a session with a bad directory, task or model, or before any pane registered", async () => {
+		const token = await pair();
+		const start = async (body: object) => {
+			const res = await fetch(`${base}/api/sessions`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify(body),
+			});
+			return [res.status, ((await res.json()) as { error?: string }).error];
+		};
+		expect(await start({ cwd: "relative", task: "go" })).toEqual([400, "invalid_cwd"]);
+		expect(await start({ cwd: join(dir, "missing"), task: "go" })).toEqual([400, "invalid_cwd"]);
+		expect(await start({ cwd: join(dir, "live.jsonl"), task: "go" })).toEqual([400, "invalid_cwd"]);
+		expect(await start({ cwd: dir, task: " " })).toEqual([400, "empty_prompt"]);
+		expect(await start({ cwd: dir, task: "x".repeat(PROMPT_MAX + 1) })).toEqual([413, "prompt_too_large"]);
+		expect(await start({ cwd: dir, task: "go", model: "opus" })).toEqual([400, "invalid_model"]);
+		expect(await start({ cwd: dir, task: "go", model: "--model/x" })).toEqual([400, "invalid_model"]);
+		launch = undefined;
+		expect(await start({ cwd: dir, task: "go" })).toEqual([503, "no_launch"]);
+		const resume = await fetch(`${base}/api/sessions/stored/prompt`, {
+			method: "POST",
+			headers: authJson(token),
+			body: JSON.stringify({ text: "hi" }),
+		});
+		expect(resume.status).toBe(503);
+		expect(started).toEqual([]);
+		expect(deleted).toEqual([]);
+	});
+
+	it("keeps a stored row whose pane failed to start", async () => {
+		startFails = true;
+		const token = await pair();
+		const post = (path: string, body: object) =>
+			fetch(`${base}${path}`, { method: "POST", headers: authJson(token), body: JSON.stringify(body) });
+		const resume = await post("/api/sessions/stored/prompt", { text: "hi" });
+		expect([resume.status, await resume.json()]).toEqual([500, { error: "start_failed" }]);
+		expect((await post("/api/sessions", { cwd: dir, task: "go" })).status).toBe(500);
+		expect(deleted).toEqual([]);
+	});
+
+	it("lists the directories of listed sessions, most recent first", async () => {
+		instances = [
+			{ id: "a", status: "online", cwd: "/old", external: true, createdAt: "2026-10-01T00:00:00Z" },
+			{ id: "b", status: "online", cwd: "/new", external: true, createdAt: "2026-10-03T00:00:00Z" },
+			{ id: "c", status: "stopped", cwd: "/old", sessionFile: "/s/c.jsonl", createdAt: "2026-10-02T00:00:00Z" },
+		];
+		const token = await pair();
+		const res = await fetch(`${base}/api/directories`, { headers: auth(token) });
+		expect(await res.json()).toEqual({ directories: ["/new", "/old"] });
+	});
+
+	it("reads a running session's transcript from the leaf it reports", async () => {
+		appendFileSync(join(dir, "live.jsonl"), entry("u2", "u1", "gone back from"));
+		instances = [{ ...instances[0], leafId: "u1" }];
+		const token = await pair();
+		const res = await fetch(`${base}/api/sessions/live/messages`, { headers: auth(token) });
+		expect(((await res.json()) as { messages: Array<{ id: string }> }).messages.map((m) => m.id)).toEqual(["u1"]);
 	});
 
 	it("signals transcript and list changes over SSE", async () => {
@@ -161,6 +270,14 @@ describe("remote HTTP API", () => {
 		await until("event: messages");
 		instances = [...instances, { id: "new", status: "online", cwd: "/p", external: true, activity: "idle" }];
 		await until("event: sessions");
+		// A pane going back with /tree moves its leaf without writing to the file.
+		const signalled = received.split("event: messages").length;
+		instances = instances.map((i) => (i.id === "live" ? { ...i, leafId: "u1" } : i));
+		while (received.split("event: messages").length === signalled) {
+			const { value, done } = await reader.read();
+			if (done) throw new Error("stream ended");
+			received += decoder.decode(value);
+		}
 		controller.abort();
 	});
 

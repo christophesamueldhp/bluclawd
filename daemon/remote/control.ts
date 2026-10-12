@@ -4,22 +4,36 @@
  */
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ErrorResponse, InstanceSummary, PaneMessage, RemoteRequest, RemoteResponse } from "../ipc/protocol.ts";
+import { Tmux } from "../../ext/agent-view/tmux.ts";
+import type {
+	ErrorResponse,
+	InstanceSummary,
+	PaneLaunch,
+	PaneMessage,
+	RemoteRequest,
+	RemoteResponse,
+} from "../ipc/protocol.ts";
 import { type RemoteServer, startRemoteServer } from "./http.ts";
 import { RemoteStore } from "./pairing.ts";
+import { startSession } from "./spawn.ts";
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "web");
 
 export interface RemoteControlDeps {
 	listInstances(): InstanceSummary[];
 	send(sessionId: string, message: PaneMessage): boolean;
+	deleteInstance(sessionId: string): boolean;
 	store?: RemoteStore;
+	tmux?: Tmux;
 	webDir?: string;
 }
 
 export class RemoteControl {
 	readonly store: RemoteStore;
 	private readonly deps: RemoteControlDeps;
+	private readonly tmux: Tmux;
+	/** What this process last wrote, so a heartbeat does not read remote.json. */
+	private launchNoted: string | undefined;
 	private server: RemoteServer | undefined;
 	/** The configured port the running server was started for. */
 	private serverPort: number | undefined;
@@ -30,6 +44,23 @@ export class RemoteControl {
 	constructor(deps: RemoteControlDeps) {
 		this.deps = deps;
 		this.store = deps.store ?? new RemoteStore();
+		this.tmux = deps.tmux ?? new Tmux();
+	}
+
+	/** Every heartbeat says how its pi was started; the latest one is kept. */
+	noteLaunch(launch: PaneLaunch): void {
+		const key = JSON.stringify(launch);
+		if (key === this.launchNoted) return;
+		try {
+			this.store.setLaunch(launch);
+			this.launchNoted = key;
+		} catch {
+			// a heartbeat must not fail over remote.json; the next one retries
+		}
+	}
+
+	launch(): PaneLaunch | undefined {
+		return this.store.load().launch;
 	}
 
 	private run(step: () => Promise<void>): Promise<void> {
@@ -57,6 +88,9 @@ export class RemoteControl {
 					store: this.store,
 					listInstances: this.deps.listInstances,
 					send: this.deps.send,
+					deleteInstance: this.deps.deleteInstance,
+					launch: () => this.launch(),
+					startSession: (spec) => startSession({ ...spec, tmux: this.tmux }),
 					webDir: this.deps.webDir ?? WEB_DIR,
 				},
 				state.port,

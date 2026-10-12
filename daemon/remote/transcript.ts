@@ -1,6 +1,7 @@
 /**
  * A session's .jsonl as the phone's chat. The active branch is the `parentId` chain from the
- * file's last entry (pi appends to the branch it is on); each entry is reduced to what a phone
+ * pane's leaf when it reports one (after a /tree), else from the file's last entry (pi appends to
+ * the branch it is on); each entry is reduced to what a phone
  * shows. Pure apart from `loadTranscript`'s one read.
  */
 import { readFileSync } from "node:fs";
@@ -74,11 +75,13 @@ export function parseEntries(text: string): Entry[] {
 	return entries;
 }
 
-/** The entries from the root to the file's last entry, following `parentId`. */
-export function activeBranch(entries: Entry[]): Entry[] {
+/** The entries from the root to `leafId`, or to the file's last entry, following `parentId`. */
+export function activeBranch(entries: Entry[], leafId?: string): Entry[] {
 	const byId = new Map<string, Entry>();
 	for (const entry of entries) if (entry.id && entry.type !== "session") byId.set(entry.id, entry);
-	let current = [...entries].reverse().find((entry) => entry.id && entry.type !== "session");
+	let current =
+		(leafId ? byId.get(leafId) : undefined) ??
+		[...entries].reverse().find((entry) => entry.id && entry.type !== "session");
 	const branch: Entry[] = [];
 	const seen = new Set<string>();
 	while (current?.id && !seen.has(current.id)) {
@@ -176,15 +179,15 @@ function toRemote(entry: Entry): RemoteMessage | undefined {
 }
 
 /** The last `limit` messages of the active branch. */
-export function transcriptFrom(text: string, limit: number): RemoteMessage[] {
-	const messages = activeBranch(parseEntries(text))
+export function transcriptFrom(text: string, limit: number, leafId?: string): RemoteMessage[] {
+	const messages = activeBranch(parseEntries(text), leafId)
 		.map(toRemote)
 		.filter((message): message is RemoteMessage => message !== undefined);
 	return limit > 0 ? messages.slice(-limit) : [];
 }
 
 /** A session that has not written its file yet has an empty transcript. */
-export function loadTranscript(sessionFile: string | undefined, limit: number): RemoteMessage[] {
+export function loadTranscript(sessionFile: string | undefined, limit: number, leafId?: string): RemoteMessage[] {
 	if (!sessionFile) return [];
 	let text: string;
 	try {
@@ -192,5 +195,5 @@ export function loadTranscript(sessionFile: string | undefined, limit: number): 
 	} catch {
 		return [];
 	}
-	return transcriptFrom(text, limit);
+	return transcriptFrom(text, limit, leafId);
 }

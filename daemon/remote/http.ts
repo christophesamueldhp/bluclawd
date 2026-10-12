@@ -4,13 +4,14 @@
  * paired device's token: a bearer header, or `?token=` on the SSE stream, which EventSource
  * cannot give headers.
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { extname, join } from "node:path";
-import type { InstanceSummary, PaneMessage } from "../ipc/protocol.ts";
+import { extname, isAbsolute, join } from "node:path";
+import type { InstanceSummary, PaneLaunch, PaneMessage } from "../ipc/protocol.ts";
 import { RemoteEvents } from "./events.ts";
 import type { RemoteStore } from "./pairing.ts";
 import { findSession, remoteSessions } from "./sessions.ts";
+import type { SessionSpec } from "./spawn.ts";
 import { loadTranscript } from "./transcript.ts";
 
 export interface RemoteDeps {
@@ -18,6 +19,11 @@ export interface RemoteDeps {
 	listInstances(): InstanceSummary[];
 	/** Queue a message for a pane's pi; false when no pane is registered as that id. */
 	send(sessionId: string, message: PaneMessage): boolean;
+	deleteInstance(sessionId: string): boolean;
+	/** How to start a pane's pi; undefined until a pane has registered. */
+	launch(): PaneLaunch | undefined;
+	/** Start a pane; returns its tmux session name, the id its row registers as. */
+	startSession(spec: SessionSpec): string;
 	webDir: string;
 }
 
@@ -31,6 +37,8 @@ export const BODY_MAX = 64 * 1024;
 export const PROMPT_MAX = 32 * 1024;
 const MESSAGES_DEFAULT = 50;
 const MESSAGES_MAX = 200;
+/** `provider/id`; the id may itself contain slashes. Never a leading dash: it is an argument to pi. */
+const MODEL_PATTERN = /^\w[\w.-]*\/\S+$/;
 
 const CONTENT_TYPES: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
@@ -76,6 +84,29 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 		return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 	} catch {
 		throw new HttpError(400, "invalid_json");
+	}
+}
+
+function isDirectory(path: string): boolean {
+	try {
+		return isAbsolute(path) && statSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+function promptIn(body: Record<string, unknown>, key: string): string {
+	const text = typeof body[key] === "string" ? body[key] : "";
+	if (!text.trim()) throw new HttpError(400, "empty_prompt");
+	if (text.length > PROMPT_MAX) throw new HttpError(413, "prompt_too_large");
+	return text;
+}
+
+function start(deps: RemoteDeps, spec: SessionSpec): string {
+	try {
+		return deps.startSession(spec);
+	} catch {
+		throw new HttpError(500, "start_failed");
 	}
 }
 
@@ -132,6 +163,31 @@ async function handle(
 	if (path === "/api/sessions" && req.method === "GET") {
 		return json(res, 200, { sessions: remoteSessions(deps.listInstances()) });
 	}
+	if (path === "/api/sessions" && req.method === "POST") {
+		const body = await readJson(req);
+		const cwd = typeof body.cwd === "string" ? body.cwd : "";
+		if (!isDirectory(cwd)) return json(res, 400, { error: "invalid_cwd" });
+		const task = promptIn(body, "task");
+		const model = body.model;
+		if (model !== undefined && (typeof model !== "string" || !MODEL_PATTERN.test(model))) {
+			return json(res, 400, { error: "invalid_model" });
+		}
+		const launch = deps.launch();
+		if (!launch) return json(res, 503, { error: "no_launch" });
+		const pane = start(deps, {
+			cwd,
+			task: task.trim(),
+			...(typeof model === "string" ? { model } : {}),
+			launch,
+		});
+		return json(res, 201, { pane });
+	}
+	if (path === "/api/directories" && req.method === "GET") {
+		const sessions = remoteSessions(deps.listInstances()).sort((a, b) =>
+			(b.createdAt ?? "").localeCompare(a.createdAt ?? ""),
+		);
+		return json(res, 200, { directories: [...new Set(sessions.map((s) => s.cwd))] });
+	}
 
 	const match = /^\/api\/sessions\/([^/]+)\/(messages|prompt|abort)$/.exec(path);
 	if (!match) return json(res, 404, { error: "not_found" });
@@ -149,16 +205,22 @@ async function handle(
 		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
 		const requested = Number.parseInt(url.searchParams.get("limit") ?? "", 10) || MESSAGES_DEFAULT;
 		const limit = Math.min(Math.max(requested, 1), MESSAGES_MAX);
-		return json(res, 200, { messages: loadTranscript(session.sessionFile, limit) });
+		return json(res, 200, { messages: loadTranscript(session.sessionFile, limit, session.leafId) });
 	}
 
 	if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
 	const body = await readJson(req);
 	let message: PaneMessage;
 	if (action === "prompt") {
-		const text = typeof body.text === "string" ? body.text : "";
-		if (!text.trim()) return json(res, 400, { error: "empty_prompt" });
-		if (text.length > PROMPT_MAX) return json(res, 413, { error: "prompt_too_large" });
+		const text = promptIn(body, "text");
+		// A stored row has no process: it resumes as agent view's peek reply resumes it.
+		if (!session.running && session.sessionFile) {
+			const launch = deps.launch();
+			if (!launch) return json(res, 503, { error: "no_launch" });
+			const pane = start(deps, { cwd: session.cwd, task: text, sessionFile: session.sessionFile, launch });
+			deps.deleteInstance(id);
+			return json(res, 202, { ok: true, pane });
+		}
 		message = { type: "prompt", text };
 	} else {
 		message = { type: "abort" };
@@ -173,6 +235,7 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 		sessionsSignature: () =>
 			JSON.stringify(remoteSessions(deps.listInstances()).sort((a, b) => a.id.localeCompare(b.id))),
 		sessionFile: (id) => findSession(deps.listInstances(), id)?.sessionFile,
+		leafId: (id) => findSession(deps.listInstances(), id)?.leafId,
 	});
 	const server: Server = createServer((req, res) => {
 		handle(deps, events, req, res).catch((error: unknown) => {

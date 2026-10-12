@@ -7,6 +7,7 @@
 import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { PaneLaunch } from "../ipc/protocol.ts";
 import { getServerDir } from "../paths.ts";
 
 export const DEFAULT_PORT = 7878;
@@ -27,12 +28,19 @@ export interface RemoteState {
 	enabled: boolean;
 	port: number;
 	devices: RemoteDevice[];
+	/** How the latest pane's pi was started, so the phone can start panes with none running. */
+	launch?: PaneLaunch;
 }
 
 export type ClaimResult = { token: string; deviceId: string } | { error: "invalid_code" | "expired_code" };
 
 function getRemotePath(): string {
 	return join(getServerDir(), "remote.json");
+}
+
+function isLaunch(value: unknown): value is PaneLaunch {
+	const command = (value as Partial<PaneLaunch> | undefined)?.command;
+	return Array.isArray(command) && command.length > 0 && command.every((part) => typeof part === "string");
 }
 
 function hashToken(token: string): string {
@@ -57,6 +65,7 @@ export class RemoteStore {
 				devices: Array.isArray(raw.devices)
 					? raw.devices.filter((d) => typeof d?.id === "string" && typeof d.tokenHash === "string")
 					: [],
+				launch: isLaunch(raw.launch) ? raw.launch : undefined,
 			};
 		} catch {
 			return { enabled: false, port: DEFAULT_PORT, devices: [] };
@@ -76,6 +85,14 @@ export class RemoteStore {
 		if (port !== undefined) state.port = port;
 		this.save(state);
 		return state;
+	}
+
+	/** Written only when it changed. */
+	setLaunch(launch: PaneLaunch): void {
+		const state = this.load();
+		if (JSON.stringify(state.launch) === JSON.stringify(launch)) return;
+		state.launch = launch;
+		this.save(state);
 	}
 
 	/** A new code replaces any earlier one. */

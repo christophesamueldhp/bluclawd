@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { handleIpcRequest, setRemoteControl } from "../daemon/handler.ts";
+import { handleIpcRequest, listSummaries, setRemoteControl } from "../daemon/handler.ts";
 import { RemoteControl } from "../daemon/remote/control.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 
@@ -15,6 +15,7 @@ describe("remote control switch", () => {
 			store: new RemoteStore(join(dir, "remote.json")),
 			listInstances: () => [],
 			send: () => true,
+			deleteInstance: () => false,
 			webDir: dir,
 		});
 
@@ -82,6 +83,29 @@ describe("remote control switch", () => {
 			type: "error",
 			ok: false,
 		});
+	});
+
+	it("keeps the launch command of the latest heartbeat, rewriting remote.json only when it changes", async () => {
+		setRemoteControl(control);
+		const beat = (command: string[]) =>
+			handleIpcRequest({
+				type: "register",
+				instance: { id: "pane-1", cwd: "/p", leafId: "e2", launch: { command } },
+			});
+		await beat(["node", "pi.js"]);
+		expect(control.store.load().launch).toEqual({ command: ["node", "pi.js"] });
+		expect(listSummaries().find((i) => i.id === "pane-1")).toMatchObject({ external: true, leafId: "e2" });
+		const written = statSync(join(dir, "remote.json")).ino;
+		await beat(["node", "pi.js"]);
+		control = make();
+		setRemoteControl(control);
+		await beat(["node", "pi.js"]);
+		expect(statSync(join(dir, "remote.json")).ino).toBe(written);
+		await control.handle({ type: "remote", action: "off" });
+		expect(control.store.load().launch).toEqual({ command: ["node", "pi.js"] });
+		await beat(["node", "other.js"]);
+		expect(control.launch()).toEqual({ command: ["node", "other.js"] });
+		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
 	});
 
 	it("is reached through the daemon's IPC handler", async () => {

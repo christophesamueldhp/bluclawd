@@ -46,6 +46,7 @@ function toInstanceSummary(instance: InstanceRecord, activity?: AgentActivity, e
 		activity,
 		external,
 		pane: instance.pane,
+		leafId: instance.leafId,
 	};
 }
 
@@ -123,7 +124,9 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				pane: request.instance.pane,
 				detail: request.instance.detail,
 				turns: request.instance.turns,
+				leafId: request.instance.leafId,
 			};
+			if (request.instance.launch) remoteControl?.noteLaunch(request.instance.launch);
 			supervisor.registerExternal(record, request.instance.activity ?? "idle");
 			const messages = supervisor.drainExternal(record.id);
 			return { type: "register_result", ok: true, ...(messages.length ? { messages } : {}) };

@@ -1,6 +1,7 @@
 /**
  * Server-Sent Events for the phone. They carry no content, only "refetch" signals: `sessions`
- * when the list changes, `messages` when the .jsonl of the session a client has open changes.
+ * when the list changes, `messages` when the .jsonl of the session a client has open changes or
+ * its pane moves to another leaf.
  * Polled once a second while any client is connected, which is also when a revoked device is cut off; the registry itself changes on the panes'
  * 3s heartbeats.
  */
@@ -11,12 +12,13 @@ export interface EventSources {
 	/** Changes exactly when the phone's session list would. */
 	sessionsSignature(): string;
 	sessionFile(sessionId: string): string | undefined;
+	leafId(sessionId: string): string | undefined;
 }
 
 interface Client {
 	res: ServerResponse;
 	sessionId?: string;
-	fileSignature?: string;
+	messagesSignature?: string;
 	isAuthorized: () => boolean;
 }
 
@@ -64,7 +66,7 @@ export class RemoteEvents {
 			res,
 			sessionId,
 			isAuthorized,
-			fileSignature: sessionId ? fileSignature(this.sources.sessionFile(sessionId)) : undefined,
+			messagesSignature: sessionId ? this.messagesSignature(sessionId) : undefined,
 		};
 		this.clients.add(client);
 		res.on("close", () => {
@@ -90,14 +92,18 @@ export class RemoteEvents {
 			}
 			if (changed) send(client.res, "sessions", {});
 			if (client.sessionId) {
-				const signature = fileSignature(this.sources.sessionFile(client.sessionId));
-				if (signature !== client.fileSignature) {
-					client.fileSignature = signature;
+				const signature = this.messagesSignature(client.sessionId);
+				if (signature !== client.messagesSignature) {
+					client.messagesSignature = signature;
 					send(client.res, "messages", { sessionId: client.sessionId });
 				}
 			}
 			if (ping) send(client.res, "ping", {});
 		}
+	}
+
+	private messagesSignature(sessionId: string): string {
+		return `${fileSignature(this.sources.sessionFile(sessionId))}:${this.sources.leafId(sessionId) ?? ""}`;
 	}
 
 	close(): void {
