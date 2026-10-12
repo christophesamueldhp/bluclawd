@@ -6,7 +6,7 @@
  */
 import { api, getToken, setToken, Unauthorized } from "./api.js";
 
-/** @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string }} Session */
+/** @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string }} Session */
 /** @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean }} Message */
 
 const BANDS = [
@@ -69,6 +69,16 @@ let startTimer;
 /** Which view the DOM holds: "pair", "list" or "chat:<id>". */
 let shown = "";
 let lastLog = "";
+/**
+ * The pane a resumed session's chat moved to: the replies still pending move with it.
+ * @type {string | undefined}
+ */
+let followed;
+/**
+ * A message for the list, shown by its next refresh (which would otherwise clear it).
+ * @type {string | undefined}
+ */
+let notice;
 
 /** @param {unknown} text */
 function esc(text) {
@@ -124,13 +134,15 @@ async function loadSessions() {
 	try {
 		state.sessions = await api.sessions();
 		state.loaded = true;
-		state.error = undefined;
+		state.error = notice;
+		notice = undefined;
 		const starting = state.starting;
 		if (starting?.pane && state.sessions.some((s) => s.id === starting.pane)) {
 			state.starting = undefined;
 			clearTimeout(startTimer);
 			// The resumed session's row is the new pane's: follow it, without a history entry for the old one.
 			if (starting.from && state.open === starting.from) {
+				followed = starting.pane;
 				location.replace(`#s/${encodeURIComponent(starting.pane)}`);
 				return;
 			}
@@ -159,6 +171,13 @@ function waitForPane(pane, from) {
 	startTimer = setTimeout(() => {
 		if (state.starting !== starting) return;
 		state.starting = undefined;
+		if (from !== undefined && state.open === from) {
+			// The resumed row is gone: back to the list, where the message outlives the reconnect.
+			notice = errorText("start_timeout");
+			location.hash = "";
+			route();
+			return;
+		}
 		state.error = errorText("start_timeout");
 		render();
 	}, START_TIMEOUT_MS);
@@ -185,7 +204,8 @@ async function loadMessages() {
 
 /** @param {Message[]} messages @param {string} text */
 function userCount(messages, text) {
-	return messages.filter((m) => m.kind === "user" && m.text === text).length;
+	// Trimmed: a prompt starting with @ reaches pi with a space before it.
+	return messages.filter((m) => m.kind === "user" && m.text?.trim() === text).length;
 }
 
 /** @param {boolean} online */
@@ -399,10 +419,19 @@ function updateChat() {
 		for (const d of log.querySelectorAll("details")) if (open.has(d.dataset.key)) d.open = true;
 		if (atBottom) scroll.scrollTop = scroll.scrollHeight;
 	}
+	const stranded = session !== undefined && !session.alive && !session.resumable;
+	// One pane starts at a time, so a resume waits for any start in flight.
+	const blocked = resuming || stranded || (state.starting !== undefined && session?.resumable === true);
 	const text = $("#text");
-	text.disabled = resuming;
-	$(".send").disabled = resuming;
-	text.placeholder = resuming ? "Starting…" : session && !session.alive ? "Reply resumes it" : "Reply";
+	text.disabled = blocked;
+	$(".send").disabled = blocked;
+	text.placeholder = resuming
+		? "Starting…"
+		: stranded
+			? "Not running: open it on the Mac"
+			: session?.resumable
+				? "Reply resumes it"
+				: "Reply";
 }
 
 function bindPair() {
@@ -490,7 +519,9 @@ async function send() {
 	const text = $("#text");
 	const value = text.value.trim();
 	const id = state.open;
-	if (!value || !id) return;
+	const resume = state.sessions.find((s) => s.id === id)?.resumable === true;
+	if (!value || !id || (resume && state.starting)) return;
+	if (resume) state.starting = { from: id };
 	text.value = "";
 	text.style.height = "auto";
 	const before = userCount(state.messages, value) + state.pending.filter((p) => p.text === value).length;
@@ -500,7 +531,12 @@ async function send() {
 	try {
 		const { pane } = await api.prompt(id, value);
 		if (pane) waitForPane(pane, id);
+		else if (resume) {
+			state.starting = undefined;
+			render();
+		}
 	} catch (error) {
+		if (resume) state.starting = undefined;
 		const failed = state.pending.map((p) => p.text).lastIndexOf(value);
 		if (failed >= 0) state.pending.splice(failed, 1);
 		for (const p of state.pending.slice(Math.max(failed, 0))) if (p.text === value) p.before--;
@@ -515,10 +551,12 @@ function route() {
 	const match = /^#s\/(.+)$/.exec(location.hash);
 	const open = match ? decodeURIComponent(match[1]) : undefined;
 	if (open !== state.open) {
+		// Following a resumed session to its pane keeps the reply on screen until pi writes it.
+		if (open === undefined || open !== followed) state.pending = [];
+		followed = undefined;
 		state.open = open;
 		state.messages = [];
 		state.messagesLoaded = false;
-		state.pending = [];
 		state.error = undefined;
 		connect();
 	}

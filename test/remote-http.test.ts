@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { request } from "node:http";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { InstanceSummary, PaneLaunch, PaneMessage } from "../daemon/ipc/protocol.ts";
@@ -63,6 +64,7 @@ describe("remote HTTP API", () => {
 				},
 				deleteInstance: (id) => {
 					deleted.push(id);
+					instances = instances.filter((i) => i.id !== id);
 					return true;
 				},
 			},
@@ -208,6 +210,8 @@ describe("remote HTTP API", () => {
 		expect(await start({ cwd: dir, task: "x".repeat(PROMPT_MAX + 1) })).toEqual([413, "prompt_too_large"]);
 		expect(await start({ cwd: dir, task: "go", model: "opus" })).toEqual([400, "invalid_model"]);
 		expect(await start({ cwd: dir, task: "go", model: "--model/x" })).toEqual([400, "invalid_model"]);
+		expect(await start({ cwd: dir, task: "go", model: "anthropic/x; rm -rf ~" })).toEqual([400, "invalid_model"]);
+		expect(await start({ cwd: dir, task: "go", model: "anthropic/x;y" })).toEqual([400, "invalid_model"]);
 		launch = undefined;
 		expect(await start({ cwd: dir, task: "go" })).toEqual([503, "no_launch"]);
 		const resume = await fetch(`${base}/api/sessions/stored/prompt`, {
@@ -218,6 +222,56 @@ describe("remote HTTP API", () => {
 		expect(resume.status).toBe(503);
 		expect(started).toEqual([]);
 		expect(deleted).toEqual([]);
+	});
+
+	it("expands a leading ~ in the directory to the home directory", async () => {
+		const token = await pair();
+		const start = (cwd: string) =>
+			fetch(`${base}/api/sessions`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify({ cwd, task: "go" }),
+			});
+		mkdirSync(join(dir, "sub"));
+		const home = process.env.HOME;
+		process.env.HOME = dir;
+		try {
+			expect((await start("~")).status).toBe(201);
+			expect((await start("~/sub")).status).toBe(201);
+			expect((await start("~/missing")).status).toBe(400);
+			expect((await start("~nobody")).status).toBe(400);
+			expect(started.map((s) => s.cwd)).toEqual([homedir(), join(dir, "sub")]);
+		} finally {
+			process.env.HOME = home;
+		}
+	});
+
+	it("resumes a stored session once when two replies race", async () => {
+		const token = await pair();
+		const body = JSON.stringify({ text: "first" });
+		// The first reply's body arrives only after the second reply was handled.
+		const slow = request(`${base}/api/sessions/stored/prompt`, {
+			method: "POST",
+			headers: { ...authJson(token), "content-length": Buffer.byteLength(body) },
+		});
+		const slowStatus = new Promise<number>((resolve, reject) => {
+			slow.on("response", (res) => {
+				res.resume();
+				resolve(res.statusCode ?? 0);
+			});
+			slow.on("error", reject);
+		});
+		slow.flushHeaders();
+		await new Promise((r) => setTimeout(r, 100));
+		const fast = await fetch(`${base}/api/sessions/stored/prompt`, {
+			method: "POST",
+			headers: authJson(token),
+			body: JSON.stringify({ text: "second" }),
+		});
+		slow.end(body);
+		expect([fast.status, await slowStatus]).toEqual([202, 409]);
+		expect(started.map((s) => s.task)).toEqual(["second"]);
+		expect(deleted).toEqual(["stored"]);
 	});
 
 	it("keeps a stored row whose pane failed to start", async () => {

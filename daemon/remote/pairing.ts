@@ -56,9 +56,20 @@ export class RemoteStore {
 	}
 
 	load(): RemoteState {
+		const read = this.readRaw();
+		return typeof read === "object" ? read.state : { enabled: false, port: DEFAULT_PORT, devices: [] };
+	}
+
+	private readRaw(): { state: RemoteState } | "missing" | "unreadable" {
+		let raw: Partial<RemoteState>;
 		try {
-			const raw = JSON.parse(readFileSync(this.path, "utf8")) as Partial<RemoteState>;
-			return {
+			raw = JSON.parse(readFileSync(this.path, "utf8")) as Partial<RemoteState>;
+		} catch (error) {
+			return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable";
+		}
+		if (!raw || typeof raw !== "object") return "unreadable";
+		return {
+			state: {
 				enabled: raw.enabled === true,
 				port: Number.isInteger(raw.port) ? (raw.port as number) : DEFAULT_PORT,
 				// A hand-edited entry without a token hash would make every authenticate() throw.
@@ -66,10 +77,8 @@ export class RemoteStore {
 					? raw.devices.filter((d) => typeof d?.id === "string" && typeof d.tokenHash === "string")
 					: [],
 				launch: isLaunch(raw.launch) ? raw.launch : undefined,
-			};
-		} catch {
-			return { enabled: false, port: DEFAULT_PORT, devices: [] };
-		}
+			},
+		};
 	}
 
 	private save(state: RemoteState): void {
@@ -87,9 +96,11 @@ export class RemoteStore {
 		return state;
 	}
 
-	/** Written only when it changed. */
+	/** Written only when it changed. Throws over an unreadable file: only the user's own command resets it. */
 	setLaunch(launch: PaneLaunch): void {
-		const state = this.load();
+		const read = this.readRaw();
+		if (read === "unreadable") throw new Error(`${this.path} is unreadable`);
+		const state = read === "missing" ? this.load() : read.state;
 		if (JSON.stringify(state.launch) === JSON.stringify(launch)) return;
 		state.launch = launch;
 		this.save(state);

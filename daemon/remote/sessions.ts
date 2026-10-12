@@ -18,6 +18,8 @@ export interface RemoteSession {
 	state: RowState;
 	/** A pane's pi runs it; a stored row has no process. */
 	alive: boolean;
+	/** A stored row with a session file: a reply starts a pane that resumes it. */
+	resumable: boolean;
 	detail: string;
 	createdAt?: string;
 	finishedAt?: string;
@@ -39,6 +41,7 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 				band: band.key as RemoteBand,
 				state: row.state,
 				alive: row.alive,
+				resumable: !row.alive && Boolean(row.sessionFile),
 				detail: row.detail,
 				createdAt: row.createdAt,
 				finishedAt: row.finishedAt,

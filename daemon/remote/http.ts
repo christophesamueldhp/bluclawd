@@ -6,6 +6,7 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
 import type { InstanceSummary, PaneLaunch, PaneMessage } from "../ipc/protocol.ts";
 import { RemoteEvents } from "./events.ts";
@@ -38,7 +39,7 @@ export const PROMPT_MAX = 32 * 1024;
 const MESSAGES_DEFAULT = 50;
 const MESSAGES_MAX = 200;
 /** `provider/id`; the id may itself contain slashes. Never a leading dash: it is an argument to pi. */
-const MODEL_PATTERN = /^\w[\w.-]*\/\S+$/;
+const MODEL_PATTERN = /^\w[\w.-]*\/[\w.:/@+-]+$/;
 
 const CONTENT_TYPES: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
@@ -93,6 +94,11 @@ function isDirectory(path: string): boolean {
 	} catch {
 		return false;
 	}
+}
+
+/** A phone has no shell to expand `~` for it. */
+function expandHome(path: string): string {
+	return path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 }
 
 function promptIn(body: Record<string, unknown>, key: string): string {
@@ -165,7 +171,7 @@ async function handle(
 	}
 	if (path === "/api/sessions" && req.method === "POST") {
 		const body = await readJson(req);
-		const cwd = typeof body.cwd === "string" ? body.cwd : "";
+		const cwd = typeof body.cwd === "string" ? expandHome(body.cwd) : "";
 		if (!isDirectory(cwd)) return json(res, 400, { error: "invalid_cwd" });
 		const task = promptIn(body, "task");
 		const model = body.model;
@@ -197,19 +203,23 @@ async function handle(
 	} catch {
 		return json(res, 404, { error: "unknown_session" });
 	}
-	const session = findSession(deps.listInstances(), id);
-	if (!session) return json(res, 404, { error: "unknown_session" });
+	const found = findSession(deps.listInstances(), id);
+	if (!found) return json(res, 404, { error: "unknown_session" });
 	const action = match[2];
 
 	if (action === "messages") {
 		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
 		const requested = Number.parseInt(url.searchParams.get("limit") ?? "", 10) || MESSAGES_DEFAULT;
 		const limit = Math.min(Math.max(requested, 1), MESSAGES_MAX);
-		return json(res, 200, { messages: loadTranscript(session.sessionFile, limit, session.leafId) });
+		return json(res, 200, { messages: loadTranscript(found.sessionFile, limit, found.leafId) });
 	}
 
 	if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
 	const body = await readJson(req);
+	// Looked up again after the body: a concurrent reply may have resumed this row meanwhile, and
+	// from here to deleteInstance nothing awaits, so a stored row starts one pane only.
+	const session = findSession(deps.listInstances(), id);
+	if (!session) return json(res, 409, { error: "session_not_running" });
 	let message: PaneMessage;
 	if (action === "prompt") {
 		const text = promptIn(body, "text");

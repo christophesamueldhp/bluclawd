@@ -83,4 +83,17 @@ describe("remote pairing", () => {
 		writeFileSync(path, "{nope");
 		expect(store.load()).toEqual({ enabled: false, port: DEFAULT_PORT, devices: [] });
 	});
+
+	it("keeps a corrupt remote.json from a heartbeat's launch, and writes one where there is none", () => {
+		const launch = { command: ["node", "pi.js"] };
+		writeFileSync(path, "{nope");
+		expect(() => store.setLaunch(launch)).toThrow();
+		expect(readFileSync(path, "utf8")).toBe("{nope");
+		store.setEnabled(false);
+		store.setLaunch(launch);
+		expect(store.load().launch).toEqual(launch);
+		rmSync(path);
+		store.setLaunch(launch);
+		expect(store.load().launch).toEqual(launch);
+	});
 });

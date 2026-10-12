@@ -37,6 +37,25 @@ describe("starting a pane from the phone", () => {
 		expect(runs(calls[0], 4)).toEqual([...launch.command, "--session", "/s/a.jsonl", "--", "next"]);
 	});
 
+	it("keeps a task or reply starting with @ from being read as a file", () => {
+		const { tmux, calls } = fakeTmux();
+		startSession({ cwd: "/p", task: "@src/app.ts explain", launch, tmux });
+		startSession({ cwd: "/p", task: "@me thoughts?", sessionFile: "/s/a.jsonl", launch, tmux });
+		expect(calls[0].at(-1)).toBe(" @src/app.ts explain");
+		expect(calls[1].at(-1)).toBe(" @me thoughts?");
+	});
+
+	it("keeps a trailing ; from ending the tmux command", () => {
+		const { tmux, calls } = fakeTmux();
+		startSession({ cwd: "/p", task: "run tests;", launch: { command: ["/bin/pi;"] }, tmux });
+		startSession({ cwd: "/p", task: "a\\;", launch, tmux });
+		startSession({ cwd: "/p", task: "a; b", launch, tmux });
+		expect(calls[0].slice(-3)).toEqual(["/bin/pi\\;", "--", "run tests\\;"]);
+		// tmux turns the last `\;` into `;`, giving back `a\;`.
+		expect(calls[1].at(-1)).toBe("a\\\\;");
+		expect(calls[2].at(-1)).toBe("a; b");
+	});
+
 	it("surfaces a tmux failure", () => {
 		const { tmux } = fakeTmux(true);
 		expect(() => startSession({ cwd: "/p", task: "go", launch, tmux })).toThrow("no server");

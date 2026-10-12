@@ -90,6 +90,11 @@ export interface PaneSpec {
 	command?: string[];
 }
 
+/** tmux reads an argument ending in `;` as a command separator; `\;` there is a literal `;`. */
+function literalArg(arg: string): string {
+	return arg.endsWith(";") ? `${arg.slice(0, -1)}\\;` : arg;
+}
+
 type Run = (args: string[], options?: { inherit?: boolean; outsideTmux?: boolean }) => string;
 
 export class Tmux {
@@ -129,8 +134,8 @@ export class Tmux {
 			spec.cwd,
 			...(size ? ["-x", String(size.columns), "-y", String(size.rows)] : []),
 			...Object.entries(env).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
-			...(spec.command ?? piCommand()),
-			...spec.args,
+			...(spec.command ?? piCommand()).map(literalArg),
+			...spec.args.map(literalArg),
 		]);
 		return name;
 	}
