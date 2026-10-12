@@ -134,11 +134,11 @@ transcript.
 
 ### Change detection
 
-For each session open on a connected phone, `events.ts` watches its `sessionFile` with
-`fs.watch`, falling back to a 1s `stat` poll. Any change in size or mtime (growth, or a
-rewrite that shrinks it) sends `messages`.
-Registry changes (register, unregister, activity or detail change, delete, rename) send
-`sessions`, debounced to 250 ms.
+While any phone is connected, `events.ts` polls once a second: the session list's signature
+(its JSON) and, for each connected client, the `stat` (size and mtime) of the `sessionFile` of
+the session it has open. Any change in the list sends `sessions`; any change in size or mtime
+(growth, or a rewrite that shrinks the file) sends `messages`. A poll replaces `fs.watch`: the
+registry changes on 3 s heartbeats anyway, and polling needs no per-platform fallback.
 
 ## PWA screens
 
