@@ -8,6 +8,7 @@ export interface PushNotification {
 	sessionId: string;
 }
 
+const TITLE_MAX = 60;
 const BODY_MAX = 120;
 const WORDS: Partial<Record<RowState, string>> = {
 	needs: "Needs input",
@@ -15,6 +16,8 @@ const WORDS: Partial<Record<RowState, string>> = {
 	idle: "Done",
 	failed: "Failed",
 };
+
+const capped = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
 
 export class Notifier {
 	private last = new Map<string, RowState>();
@@ -29,8 +32,8 @@ export class Notifier {
 			if (this.last.get(session.id) !== "working" || !word) continue;
 			const body = session.detail ? `${word} — ${session.detail}` : word;
 			notifications.push({
-				title: session.label,
-				body: body.length > BODY_MAX ? `${body.slice(0, BODY_MAX - 1)}…` : body,
+				title: capped(session.label, TITLE_MAX),
+				body: capped(body, BODY_MAX),
 				sessionId: session.id,
 			});
 		}

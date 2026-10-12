@@ -7,6 +7,7 @@ import {
 	createCipheriv,
 	createECDH,
 	createPrivateKey,
+	createPublicKey,
 	generateKeyPairSync,
 	hkdfSync,
 	randomBytes,
@@ -29,6 +30,11 @@ export type PushResult = "ok" | "gone" | "error";
 const RECORD_SIZE = 4096;
 const TOKEN_LIFETIME_S = 12 * 3600;
 const SEND_TIMEOUT_MS = 10_000;
+// Push services accept a body of 4096 bytes: the 86-byte header, the plaintext, the delimiter and the 16-byte tag.
+const HEADER_SIZE = 86;
+const MAX_PLAINTEXT = RECORD_SIZE - HEADER_SIZE - 16 - 1;
+// The daemon posts to this URL, so it must be a push service and not an address on the Mac's network.
+const PUSH_HOSTS = ["web.push.apple.com", "fcm.googleapis.com", "updates.push.services.mozilla.com"];
 const BASE64URL = /^[\w-]+=*$/;
 
 function decoded(text: unknown, length: number): Buffer | undefined {
@@ -42,12 +48,27 @@ export function parseSubscription(value: unknown): WebPushSubscription | undefin
 	const { endpoint, keys } = (value ?? {}) as { endpoint?: unknown; keys?: { p256dh?: unknown; auth?: unknown } };
 	if (typeof endpoint !== "string" || endpoint.length > 2048) return undefined;
 	try {
-		if (new URL(endpoint).protocol !== "https:") return undefined;
+		const { protocol, hostname } = new URL(endpoint);
+		if (protocol !== "https:") return undefined;
+		if (!PUSH_HOSTS.includes(hostname) && !hostname.endsWith(".notify.windows.com")) return undefined;
 	} catch {
 		return undefined;
 	}
 	const p256dh = decoded(keys?.p256dh, 65);
 	if (!p256dh || p256dh[0] !== 4 || !decoded(keys?.auth, 16)) return undefined;
+	try {
+		createPublicKey({
+			key: {
+				kty: "EC",
+				crv: "P-256",
+				x: p256dh.subarray(1, 33).toString("base64url"),
+				y: p256dh.subarray(33).toString("base64url"),
+			},
+			format: "jwk",
+		});
+	} catch {
+		return undefined;
+	}
 	return { endpoint, keys: { p256dh: keys.p256dh as string, auth: keys.auth as string } };
 }
 
@@ -82,7 +103,7 @@ function hkdf(ikm: Buffer, salt: Buffer, info: Buffer | string, length: number):
 }
 
 /**
- * One record, so `plaintext` must fit in 4079 bytes. `fixed` replaces the random salt and the
+ * One record, and the whole request must stay within the 4096 bytes every push service accepts. `fixed` replaces the random salt and the
  * ephemeral key, for RFC 8291's test vector only.
  */
 export function encryptPayload(
@@ -91,6 +112,7 @@ export function encryptPayload(
 	auth: string,
 	fixed?: { salt: Buffer; privateKey: Buffer },
 ): Buffer {
+	if (plaintext.length > MAX_PLAINTEXT) throw new Error("push payload too large");
 	const uaPublic = Buffer.from(p256dh, "base64url");
 	const ecdh = createECDH("prime256v1");
 	if (fixed) ecdh.setPrivateKey(fixed.privateKey);
@@ -131,6 +153,7 @@ export async function sendPush(
 				urgency: "high",
 			},
 			body: new Uint8Array(body),
+			redirect: "error",
 			signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
 		});
 		// Unread, the body would hold its connection.

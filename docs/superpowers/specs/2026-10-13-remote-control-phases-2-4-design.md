@@ -57,8 +57,10 @@ that basis and are recorded here so they can be revisited.
 ### U3. Push notifications
 
 - VAPID key pair (P-256) made on first use, kept in `remote.json`. `GET /api/push/key` → the
-  public key. `POST /api/push/subscribe` `{ endpoint, keys: { p256dh, auth } }` stores the
-  subscription on the calling device (replacing its previous one); `POST /api/push/unsubscribe`.
+  public key and `subscribed` (whether the calling device has a subscription). `POST /api/push/subscribe` `{ endpoint, keys: { p256dh, auth } }` stores the
+  subscription on the calling device (replacing its previous one), only if the endpoint is https on
+  `web.push.apple.com`, `fcm.googleapis.com`, `updates.push.services.mozilla.com` or
+  `*.notify.windows.com` and `p256dh` is a P-256 point (else `invalid_subscription`); `POST /api/push/unsubscribe`.
   Revoking a device drops its subscription.
 - `daemon/remote/webpush.ts`: VAPID JWT (ES256, `aud` = endpoint origin, `exp` ≤ 12 h,
   `sub` = `mailto:` from settings or `https://github.com/christophesamueldhp/bluclawd`) and RFC
@@ -116,7 +118,7 @@ that basis and are recorded here so they can be revisited.
 
 ## Error handling
 
-New codes: `invalid_cwd`, `no_launch` (503), `session_busy` (409), `push_unsubscribed`. The PWA
+New codes: `invalid_cwd`, `no_launch` (503), `session_busy` (409). The PWA
 maps each to a sentence. A pane message the pane does not understand (an older pane) is ignored
 by it; the phone sees no change rather than an error.
 

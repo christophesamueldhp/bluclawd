@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
 	encryptPayload,
 	generateVapidKeys,
+	parseSubscription,
 	sendPush,
 	vapidAuthorization,
 	type WebPushSubscription,
@@ -43,7 +44,7 @@ function receiver(): { subscription: WebPushSubscription; privateKey: Buffer; au
 	const auth = randomBytes(16);
 	return {
 		subscription: {
-			endpoint: "https://push.example.test/send/abc?x=1",
+			endpoint: "https://web.push.apple.com/send/abc?x=1",
 			keys: { p256dh: b64(ecdh.getPublicKey()), auth: b64(auth) },
 		},
 		privateKey: ecdh.getPrivateKey(),
@@ -151,5 +152,67 @@ describe("web push", () => {
 		expect(await sendPush(subscription, "hello", keys, "https://example.test", offline)).toBe("error");
 		const broken = { ...subscription, keys: { ...subscription.keys, p256dh: b64(Buffer.alloc(65, 4)) } };
 		expect(await sendPush(broken, "hello", keys, "https://example.test", fetchImpl)).toBe("error");
+	});
+
+	it("refuses a payload that would make the whole request over 4096 bytes, without sending", async () => {
+		const { subscription } = receiver();
+		expect(() => encryptPayload(Buffer.alloc(3993), subscription.keys.p256dh, subscription.keys.auth)).not.toThrow();
+		expect(() => encryptPayload(Buffer.alloc(3994), subscription.keys.p256dh, subscription.keys.auth)).toThrow();
+		let called = false;
+		const fetchImpl = async () => {
+			called = true;
+			return new Response(null, { status: 201 });
+		};
+		expect(
+			await sendPush(subscription, "x".repeat(3994), generateVapidKeys(), "https://example.test", fetchImpl),
+		).toBe("error");
+		expect(called).toBe(false);
+	});
+
+	it("does not follow a redirect from the push service", async () => {
+		const { subscription } = receiver();
+		let init: RequestInit | undefined;
+		const fetchImpl = async (_url: string | URL | Request, options?: RequestInit) => {
+			init = options;
+			return new Response(null, { status: 201 });
+		};
+		await sendPush(subscription, "hello", generateVapidKeys(), "https://example.test", fetchImpl);
+		expect(init?.redirect).toBe("error");
+	});
+
+	describe("parseSubscription", () => {
+		const keys = () => receiver().subscription.keys;
+		const offCurve = b64(Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)]));
+
+		it("accepts the push services' hosts", () => {
+			for (const host of [
+				"web.push.apple.com",
+				"fcm.googleapis.com",
+				"updates.push.services.mozilla.com",
+				"wns2-par02p.notify.windows.com",
+			]) {
+				const endpoint = `https://${host}/send/abc`;
+				expect(parseSubscription({ endpoint, keys: keys() })?.endpoint).toBe(endpoint);
+			}
+		});
+
+		it("refuses an endpoint that is not a push service's", () => {
+			for (const endpoint of [
+				"https://127.0.0.1/send",
+				"https://localhost:7878/api",
+				"https://169.254.169.254/latest",
+				"https://evilweb.push.apple.com/x",
+				"https://web.push.apple.com.evil.test/x",
+				"https://notify.windows.com/x",
+				"http://web.push.apple.com/x",
+			]) {
+				expect(parseSubscription({ endpoint, keys: keys() })).toBeUndefined();
+			}
+		});
+
+		it("refuses a p256dh that is not a point on the curve", () => {
+			const endpoint = "https://web.push.apple.com/x";
+			expect(parseSubscription({ endpoint, keys: { ...keys(), p256dh: offCurve } })).toBeUndefined();
+		});
 	});
 });

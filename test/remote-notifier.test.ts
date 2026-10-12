@@ -51,6 +51,15 @@ describe("notifier", () => {
 		expect(note.body.endsWith("…")).toBe(true);
 	});
 
+	it("keeps the title short", () => {
+		const notifier = new Notifier();
+		const long = { ...session("a", "working"), label: "t".repeat(200) };
+		notifier.observe([long]);
+		const [note] = notifier.observe([{ ...long, state: "done" }]);
+		expect(note.title).toHaveLength(60);
+		expect(note.title.endsWith("…")).toBe(true);
+	});
+
 	it("notifies again for each new turn, and forgets a session that disappeared", () => {
 		const notifier = new Notifier();
 		notifier.observe([session("a", "working")]);

@@ -321,9 +321,13 @@ async function checkPush() {
 	}
 }
 
+let enablingPush = false;
+
 async function enablePush() {
 	// Asked before any await: iOS shows the prompt only while the tap still counts as a user gesture.
 	const permission = Notification.requestPermission();
+	if (enablingPush) return;
+	enablingPush = true;
 	try {
 		if ((await permission) !== "granted") throw new Error("push_denied");
 		const { publicKey } = await api.pushKey();
@@ -340,6 +344,8 @@ async function enablePush() {
 		render();
 	} catch (error) {
 		handleError(error);
+	} finally {
+		enablingPush = false;
 	}
 }
 

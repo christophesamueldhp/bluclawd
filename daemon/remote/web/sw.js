@@ -56,7 +56,7 @@ self.addEventListener("push", (event) => {
 		self.registration.showNotification(title, {
 			body,
 			data: { sessionId },
-			...(sessionId ? { tag: sessionId } : {}),
+			...(sessionId ? { tag: sessionId, renotify: true } : {}),
 		}),
 	);
 });

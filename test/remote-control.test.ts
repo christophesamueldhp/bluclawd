@@ -8,6 +8,7 @@ import type { InstanceSummary } from "../daemon/ipc/protocol.ts";
 import { RemoteControl } from "../daemon/remote/control.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { PushResult, WebPushSubscription } from "../daemon/remote/webpush.ts";
+import { validP256dh } from "./support/push.ts";
 
 describe("remote control switch", () => {
 	let dir: string;
@@ -148,13 +149,14 @@ describe("remote control switch", () => {
 		const subscription = (endpoint: string): WebPushSubscription => ({
 			endpoint,
 			keys: {
-				p256dh: Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)]).toString("base64url"),
+				p256dh: validP256dh(),
 				auth: "AAAAAAAAAAAAAAAAAAAAAA",
 			},
 		});
 		let instances: InstanceSummary[];
 		let pushes: Array<{ endpoint: string; payload: unknown }>;
 		let results: Record<string, PushResult>;
+		let duringPush: (() => void) | undefined;
 		const pane = (activity: "working" | "idle"): InstanceSummary => ({
 			id: "pane-1",
 			status: "online",
@@ -177,6 +179,7 @@ describe("remote control switch", () => {
 			instances = [pane("working")];
 			pushes = [];
 			results = {};
+			duringPush = undefined;
 			control = new RemoteControl({
 				store: new RemoteStore(join(dir, "remote.json")),
 				listInstances: () => instances,
@@ -185,6 +188,7 @@ describe("remote control switch", () => {
 				webDir: dir,
 				sendPush: async (push, payload) => {
 					pushes.push({ endpoint: push.endpoint, payload: JSON.parse(payload) });
+					duringPush?.();
 					return results[push.endpoint] ?? "ok";
 				},
 			});
@@ -194,9 +198,9 @@ describe("remote control switch", () => {
 			const phone = pairDevice(control.store);
 			const pad = pairDevice(control.store);
 			pairDevice(control.store);
-			control.store.setPush(phone, subscription("https://push.test/phone"));
-			control.store.setPush(pad, subscription("https://push.test/pad"));
-			results["https://push.test/pad"] = "gone";
+			control.store.setPush(phone, subscription("https://web.push.apple.com/phone"));
+			control.store.setPush(pad, subscription("https://web.push.apple.com/pad"));
+			results["https://web.push.apple.com/pad"] = "gone";
 			await control.handle({ type: "remote", action: "on", port: 0 });
 			await vi.advanceTimersByTimeAsync(2000);
 			expect(pushes).toEqual([]);
@@ -204,28 +208,41 @@ describe("remote control switch", () => {
 			await vi.advanceTimersByTimeAsync(1000);
 			const payload = { title: "fix the build", body: "Done — All green", sessionId: "pane-1" };
 			expect(pushes).toEqual([
-				{ endpoint: "https://push.test/phone", payload },
-				{ endpoint: "https://push.test/pad", payload },
+				{ endpoint: "https://web.push.apple.com/phone", payload },
+				{ endpoint: "https://web.push.apple.com/pad", payload },
 			]);
 			await vi.advanceTimersByTimeAsync(3000);
 			expect(pushes).toHaveLength(2);
 			expect(control.store.load().devices.map((d) => d.push?.endpoint)).toEqual([
-				"https://push.test/phone",
+				"https://web.push.apple.com/phone",
 				undefined,
 				undefined,
 			]);
 		});
 
+		it("keeps the subscription a device made after the one the push service said is gone", async () => {
+			const phone = pairDevice(control.store);
+			control.store.setPush(phone, subscription("https://web.push.apple.com/old"));
+			results["https://web.push.apple.com/old"] = "gone";
+			duringPush = () => control.store.setPush(phone, subscription("https://web.push.apple.com/new"));
+			await control.handle({ type: "remote", action: "on", port: 0 });
+			await vi.advanceTimersByTimeAsync(1000);
+			instances = [pane("idle")];
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(pushes.map((p) => p.endpoint)).toEqual(["https://web.push.apple.com/old"]);
+			expect(control.store.load().devices[0].push?.endpoint).toBe("https://web.push.apple.com/new");
+		});
+
 		it("does not send late what changed while no device was subscribed, nor while off", async () => {
 			const phone = pairDevice(control.store);
-			control.store.setPush(phone, subscription("https://push.test/phone"));
+			control.store.setPush(phone, subscription("https://web.push.apple.com/phone"));
 			await control.handle({ type: "remote", action: "on", port: 0 });
 			await vi.advanceTimersByTimeAsync(1000);
 			control.store.setPush(phone, undefined);
 			await vi.advanceTimersByTimeAsync(1000);
 			instances = [pane("idle")];
 			await vi.advanceTimersByTimeAsync(1000);
-			control.store.setPush(phone, subscription("https://push.test/phone"));
+			control.store.setPush(phone, subscription("https://web.push.apple.com/phone"));
 			await vi.advanceTimersByTimeAsync(2000);
 			expect(pushes).toEqual([]);
 			instances = [pane("working")];

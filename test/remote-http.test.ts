@@ -7,6 +7,7 @@ import type { InstanceSummary, PaneLaunch, PaneMessage } from "../daemon/ipc/pro
 import { BODY_MAX, PROMPT_MAX, type RemoteServer, startRemoteServer } from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { SessionSpec } from "../daemon/remote/spawn.ts";
+import { validP256dh } from "./support/push.ts";
 
 const entry = (id: string, parentId: string | null, content: string) =>
 	`${JSON.stringify({ type: "message", id, parentId, message: { role: "user", content } })}\n`;
@@ -358,7 +359,7 @@ describe("remote HTTP API", () => {
 	});
 
 	describe("push subscriptions", () => {
-		const p256dh = Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)]).toString("base64url");
+		const p256dh = validP256dh();
 		const auth16 = Buffer.alloc(16, 1).toString("base64url");
 		const key = async (token: string) =>
 			(await (await fetch(`${base}/api/push/key`, { headers: auth(token) })).json()) as {

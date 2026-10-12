@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_PORT, RemoteStore } from "../daemon/remote/pairing.ts";
+import { validP256dh } from "./support/push.ts";
 
 describe("remote pairing", () => {
 	let dir: string;
@@ -100,7 +101,7 @@ describe("remote pairing", () => {
 	const subscription = (endpoint = "https://web.push.apple.com/abc") => ({
 		endpoint,
 		keys: {
-			p256dh: Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)]).toString("base64url"),
+			p256dh: validP256dh(),
 			auth: "AAAAAAAAAAAAAAAAAAAAAA",
 		},
 	});
