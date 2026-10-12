@@ -372,7 +372,8 @@ function updateDirectories() {
 	const options = state.directories.map((d) => `<option value="${esc(d)}">${esc(shortPath(d))}</option>`);
 	const html = [...options, `<option value="">Other…</option>`].join("");
 	if (select.dataset.html !== html) {
-		const chosen = select.options.length > 0 ? select.value : undefined;
+		// Only "Other…" offered yet is not a choice: the most recent directory becomes the default.
+		const chosen = select.options.length > 1 ? select.value : undefined;
 		select.innerHTML = html;
 		select.dataset.html = html;
 		if (chosen !== undefined && [...select.options].some((o) => o.value === chosen)) select.value = chosen;
