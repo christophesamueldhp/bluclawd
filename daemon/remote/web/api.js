@@ -73,6 +73,10 @@ export const api = {
 	prompt: (id, text) => call("POST", `${session(id)}/prompt`, { text }),
 	/** @param {string} id */
 	abort: (id) => call("POST", `${session(id)}/abort`, {}),
+	/** `subscribed`: this device's notifications reach it. @returns {Promise<{ publicKey: string, subscribed: boolean }>} */
+	pushKey: () => call("GET", "/api/push/key"),
+	/** @param {PushSubscriptionJSON} subscription */
+	subscribe: (subscription) => call("POST", "/api/push/subscribe", subscription),
 	/** @param {string | undefined} sessionId */
 	events(sessionId) {
 		const token = encodeURIComponent(getToken() ?? "");

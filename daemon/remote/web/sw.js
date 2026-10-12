@@ -1,6 +1,6 @@
 // Caches the app shell so the app opens, and says the Mac is unreachable, when the Mac is not.
 // The API is never cached.
-const CACHE = "bluclawd-shell-v3";
+const CACHE = "bluclawd-shell-v4";
 const SHELL = ["/", "/index.html", "/style.css", "/app.js", "/api.js", "/live.js", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
@@ -40,6 +40,40 @@ async function shellResponse(request) {
 		return (await cached()) ?? Response.error();
 	}
 }
+
+// iOS revokes the subscription of an app whose push shows nothing, so one is always shown.
+self.addEventListener("push", (event) => {
+	let data = {};
+	try {
+		data = event.data?.json() ?? {};
+	} catch {
+		// not JSON: the defaults below
+	}
+	const title = typeof data?.title === "string" && data.title ? data.title : "bluclawd";
+	const body = typeof data?.body === "string" && data.body ? data.body : "A session needs you";
+	const sessionId = typeof data?.sessionId === "string" ? data.sessionId : undefined;
+	event.waitUntil(
+		self.registration.showNotification(title, {
+			body,
+			data: { sessionId },
+			...(sessionId ? { tag: sessionId } : {}),
+		}),
+	);
+});
+
+self.addEventListener("notificationclick", (event) => {
+	event.notification.close();
+	const sessionId = event.notification.data?.sessionId;
+	const hash = typeof sessionId === "string" ? `#s/${encodeURIComponent(sessionId)}` : "";
+	event.waitUntil(
+		self.clients.matchAll({ type: "window", includeUncontrolled: true }).then(async (clients) => {
+			const [client] = clients;
+			if (!client) return self.clients.openWindow(`/${hash}`);
+			await client.focus();
+			if (sessionId) client.postMessage({ open: sessionId });
+		}),
+	);
+});
 
 self.addEventListener("fetch", (event) => {
 	const url = new URL(event.request.url);

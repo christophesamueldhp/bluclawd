@@ -38,6 +38,8 @@ const ERRORS = {
 	prompt_too_large: "That message is too long.",
 	body_too_large: "That message is too long.",
 	internal_error: "Something went wrong on the Mac.",
+	push_denied: "Notifications are off for bluclawd. Turn them on in Settings › Notifications.",
+	invalid_subscription: "The Mac did not accept this phone's notification subscription.",
 };
 
 const state = {
@@ -56,6 +58,8 @@ const state = {
 	loaded: false,
 	messagesLoaded: false,
 	online: true,
+	/** Show "Enable notifications". */
+	offerPush: false,
 	/** @type {string | undefined} */ error: undefined,
 };
 
@@ -259,6 +263,7 @@ function connect() {
 		offlineTimer = undefined;
 		alive();
 		setOnline(true);
+		void checkPush();
 		// Its end may have been missed while the stream was down; one still streaming is sent again at once.
 		if (state.live) endLive();
 		void loadSessions();
@@ -298,6 +303,52 @@ function connect() {
 	};
 }
 
+// ---- notifications ----
+
+function pushSupported() {
+	return standalone() && "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+}
+
+/** Offered until this device is subscribed: a re-paired phone keeps its permission but not its subscription. */
+async function checkPush() {
+	if (!pushSupported()) return;
+	try {
+		const { subscribed } = await api.pushKey();
+		state.offerPush = Notification.permission !== "granted" || !subscribed;
+		render();
+	} catch (error) {
+		handleError(error);
+	}
+}
+
+async function enablePush() {
+	// Asked before any await: iOS shows the prompt only while the tap still counts as a user gesture.
+	const permission = Notification.requestPermission();
+	try {
+		if ((await permission) !== "granted") throw new Error("push_denied");
+		const { publicKey } = await api.pushKey();
+		const { pushManager } = await navigator.serviceWorker.ready;
+		// One made for an earlier key (a reset remote.json) cannot be reused.
+		await (await pushManager.getSubscription())?.unsubscribe();
+		const subscription = await pushManager.subscribe({
+			userVisibleOnly: true,
+			applicationServerKey: bytes(publicKey),
+		});
+		await api.subscribe(subscription.toJSON());
+		state.offerPush = false;
+		state.error = undefined;
+		render();
+	} catch (error) {
+		handleError(error);
+	}
+}
+
+/** @param {string} base64url */
+function bytes(base64url) {
+	const binary = atob(base64url.replace(/-/g, "+").replace(/_/g, "/"));
+	return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+}
+
 // ---- views ----
 
 function pairView() {
@@ -311,7 +362,8 @@ function pairView() {
 }
 
 function listShell() {
-	return `<header class="bar"><h1>Sessions</h1><span class="muted" id="online"></span></header>
+	return `<header class="bar"><h1>Sessions</h1><button class="notify" id="notify" hidden>Enable notifications</button>
+<span class="muted" id="online"></span></header>
 <div id="banner"></div><section class="scroll" id="rows"></section>
 <form class="composer new" id="new-task"><textarea id="task" rows="1" placeholder="New task…" aria-label="New task" maxlength="32768"></textarea>
 <div class="where"><select id="cwd" aria-label="Directory"></select>
@@ -440,6 +492,7 @@ function render() {
 function updateList() {
 	$("#online").textContent = state.online ? "● online" : "offline";
 	$("#online").classList.toggle("on", state.online);
+	$("#notify").hidden = !state.offerPush;
 	$("#banner").innerHTML = bannerHtml(undefined);
 	$("#rows").innerHTML = rowsHtml();
 	updateDirectories();
@@ -525,6 +578,7 @@ function grow(text) {
 function bindList() {
 	const task = $("#task");
 	task.addEventListener("input", () => grow(task));
+	$("#notify").addEventListener("click", () => void enablePush());
 	$("#cwd").addEventListener("change", () => {
 		const other = $("#cwd-other");
 		other.hidden = $("#cwd").value !== "";
@@ -636,7 +690,14 @@ document.addEventListener("visibilitychange", () => {
 setInterval(() => {
 	if (shown === "list") updateList();
 }, 30_000);
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+if ("serviceWorker" in navigator) {
+	navigator.serviceWorker.register("sw.js").catch(() => {});
+	// A notification tapped while the app is open: sw.js asks it to open that session.
+	navigator.serviceWorker.addEventListener("message", (/** @type {MessageEvent} */ event) => {
+		const id = event.data?.open;
+		if (typeof id === "string") location.hash = `#s/${encodeURIComponent(id)}`;
+	});
+}
 
 state.open = /^#s\/(.+)$/.exec(location.hash)?.[1];
 if (state.open) state.open = decodeURIComponent(state.open);
