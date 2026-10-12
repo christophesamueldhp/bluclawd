@@ -252,6 +252,7 @@ function render() {
 
 function updateList() {
 	$("#online").textContent = state.online ? "● online" : "offline";
+	$("#online").classList.toggle("on", state.online);
 	$("#banner").innerHTML = bannerHtml(undefined);
 	$("#rows").innerHTML = rowsHtml();
 }
@@ -275,7 +276,8 @@ function updateChat() {
 	const text = $("#text");
 	const stopped = session !== undefined && !session.alive;
 	text.disabled = stopped;
-	text.placeholder = stopped ? "Open this session on the Mac to continue" : "Reply";
+	$(".send").disabled = stopped;
+	text.placeholder = stopped ? "Not running: open it on the Mac" : "Reply";
 }
 
 function bindPair() {
