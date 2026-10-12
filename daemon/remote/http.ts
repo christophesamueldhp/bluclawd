@@ -94,7 +94,12 @@ function serveStatic(webDir: string, path: string, req: IncomingMessage, res: Se
 	res.end(req.method === "HEAD" ? undefined : readFileSync(join(webDir, name)));
 }
 
-async function handle(deps: RemoteDeps, events: RemoteEvents, req: IncomingMessage, res: ServerResponse): Promise<void> {
+async function handle(
+	deps: RemoteDeps,
+	events: RemoteEvents,
+	req: IncomingMessage,
+	res: ServerResponse,
+): Promise<void> {
 	const url = new URL(req.url ?? "/", "http://localhost");
 	const path = url.pathname;
 	if (!path.startsWith("/api/")) return serveStatic(deps.webDir, path, req, res);

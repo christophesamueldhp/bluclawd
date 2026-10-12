@@ -25,7 +25,14 @@ describe("remote HTTP API", () => {
 		writeFileSync(join(web, "app.js"), "export {};");
 		writeFileSync(join(dir, "live.jsonl"), entry("u1", null, "hello"));
 		instances = [
-			{ id: "live", status: "online", cwd: "/p", external: true, activity: "working", sessionFile: join(dir, "live.jsonl") },
+			{
+				id: "live",
+				status: "online",
+				cwd: "/p",
+				external: true,
+				activity: "working",
+				sessionFile: join(dir, "live.jsonl"),
+			},
 			{ id: "stored", status: "stopped", cwd: "/p", sessionFile: join(dir, "stored.jsonl") },
 		];
 		sent = [];
@@ -52,7 +59,10 @@ describe("remote HTTP API", () => {
 
 	async function pair(): Promise<string> {
 		const { code } = store.createCode();
-		const res = await fetch(`${base}/api/pair`, { method: "POST", body: JSON.stringify({ code, deviceName: "iPhone" }) });
+		const res = await fetch(`${base}/api/pair`, {
+			method: "POST",
+			body: JSON.stringify({ code, deviceName: "iPhone" }),
+		});
 		expect(res.status).toBe(200);
 		return ((await res.json()) as { token: string }).token;
 	}
@@ -73,7 +83,10 @@ describe("remote HTTP API", () => {
 
 	it("rejects a wrong pairing code", async () => {
 		store.createCode();
-		const res = await fetch(`${base}/api/pair`, { method: "POST", body: JSON.stringify({ code: "abc", deviceName: "x" }) });
+		const res = await fetch(`${base}/api/pair`, {
+			method: "POST",
+			body: JSON.stringify({ code: "abc", deviceName: "x" }),
+		});
 		expect(res.status).toBe(400);
 		expect(await res.json()).toEqual({ error: "invalid_code" });
 	});
@@ -112,12 +125,13 @@ describe("remote HTTP API", () => {
 
 	it("refuses a stored session, an empty or oversized prompt, and an oversized body", async () => {
 		const token = await pair();
-		const post = (path: string, body: string) => fetch(`${base}${path}`, { method: "POST", headers: auth(token), body });
+		const post = (path: string, body: string) =>
+			fetch(`${base}${path}`, { method: "POST", headers: auth(token), body });
 		expect((await post("/api/sessions/stored/prompt", JSON.stringify({ text: "hi" }))).status).toBe(409);
 		expect((await post("/api/sessions/live/prompt", JSON.stringify({ text: "  " }))).status).toBe(400);
-		expect((await post("/api/sessions/live/prompt", JSON.stringify({ text: "x".repeat(PROMPT_MAX + 1) }))).status).toBe(
-			413,
-		);
+		expect(
+			(await post("/api/sessions/live/prompt", JSON.stringify({ text: "x".repeat(PROMPT_MAX + 1) }))).status,
+		).toBe(413);
 		expect((await post("/api/sessions/live/prompt", "x".repeat(BODY_MAX + 1))).status).toBe(413);
 		expect(sent).toEqual([]);
 	});
