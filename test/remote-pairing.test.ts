@@ -96,4 +96,51 @@ describe("remote pairing", () => {
 		store.setLaunch(launch);
 		expect(store.load().launch).toEqual(launch);
 	});
+
+	const subscription = (endpoint = "https://web.push.apple.com/abc") => ({
+		endpoint,
+		keys: {
+			p256dh: Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)]).toString("base64url"),
+			auth: "AAAAAAAAAAAAAAAAAAAAAA",
+		},
+	});
+
+	it("makes the VAPID keys once and keeps them", () => {
+		const keys = store.vapidKeys();
+		expect(Buffer.from(keys.publicKey, "base64url")).toHaveLength(65);
+		expect(new RemoteStore(path).vapidKeys()).toEqual(keys);
+		expect(statSync(path).mode & 0o777).toBe(0o600);
+	});
+
+	it("does not replace an unreadable remote.json to make VAPID keys", () => {
+		writeFileSync(path, "{nope");
+		expect(() => store.vapidKeys()).toThrow();
+		expect(readFileSync(path, "utf8")).toBe("{nope");
+	});
+
+	it("keeps one push subscription per device, dropped with the device", () => {
+		pairDevice("iPhone");
+		pairDevice("iPad");
+		const [phone, pad] = store.load().devices;
+		expect(store.setPush(phone.id, subscription("https://web.push.apple.com/1"))).toBe(true);
+		expect(store.setPush(phone.id, subscription("https://web.push.apple.com/2"))).toBe(true);
+		expect(store.setPush(pad.id, subscription("https://web.push.apple.com/3"))).toBe(true);
+		expect(store.setPush("nope", subscription())).toBe(false);
+		expect(store.load().devices.map((d) => d.push?.endpoint)).toEqual([
+			"https://web.push.apple.com/2",
+			"https://web.push.apple.com/3",
+		]);
+		store.setPush(pad.id, undefined);
+		expect(store.load().devices[1]).not.toHaveProperty("push");
+		store.revoke(phone.id);
+		expect(store.load().devices.some((d) => d.push)).toBe(false);
+	});
+
+	it("drops a malformed push subscription from remote.json", () => {
+		pairDevice();
+		const raw = JSON.parse(readFileSync(path, "utf8"));
+		raw.devices[0].push = { endpoint: "http://insecure.test", keys: { p256dh: "x", auth: "y" } };
+		writeFileSync(path, JSON.stringify(raw));
+		expect(store.load().devices[0]).not.toHaveProperty("push");
+	});
 });

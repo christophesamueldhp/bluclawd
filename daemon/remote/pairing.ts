@@ -9,6 +9,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { PaneLaunch } from "../ipc/protocol.ts";
 import { getServerDir } from "../paths.ts";
+import { generateVapidKeys, parseSubscription, type VapidKeys, type WebPushSubscription } from "./webpush.ts";
 
 export const DEFAULT_PORT = 7878;
 const CODE_TTL_MS = 5 * 60_000;
@@ -22,6 +23,8 @@ export interface RemoteDevice {
 	tokenHash: string;
 	createdAt: string;
 	lastUsedAt?: string;
+	/** Where this device's notifications go, once it enabled them. */
+	push?: WebPushSubscription;
 }
 
 export interface RemoteState {
@@ -30,6 +33,8 @@ export interface RemoteState {
 	devices: RemoteDevice[];
 	/** How the latest pane's pi was started, so the phone can start panes with none running. */
 	launch?: PaneLaunch;
+	/** The daemon's key pair for signing push requests, made on first use. */
+	vapid?: VapidKeys;
 }
 
 export type ClaimResult = { token: string; deviceId: string } | { error: "invalid_code" | "expired_code" };
@@ -41,6 +46,11 @@ function getRemotePath(): string {
 function isLaunch(value: unknown): value is PaneLaunch {
 	const command = (value as Partial<PaneLaunch> | undefined)?.command;
 	return Array.isArray(command) && command.length > 0 && command.every((part) => typeof part === "string");
+}
+
+function isVapid(value: unknown): value is VapidKeys {
+	const keys = value as Partial<VapidKeys> | undefined;
+	return typeof keys?.publicKey === "string" && typeof keys.privateKey === "string";
 }
 
 function hashToken(token: string): string {
@@ -74,9 +84,12 @@ export class RemoteStore {
 				port: Number.isInteger(raw.port) ? (raw.port as number) : DEFAULT_PORT,
 				// A hand-edited entry without a token hash would make every authenticate() throw.
 				devices: Array.isArray(raw.devices)
-					? raw.devices.filter((d) => typeof d?.id === "string" && typeof d.tokenHash === "string")
+					? raw.devices
+							.filter((d) => typeof d?.id === "string" && typeof d.tokenHash === "string")
+							.map(({ push, ...device }) => (parseSubscription(push) ? { ...device, push } : device))
 					: [],
 				launch: isLaunch(raw.launch) ? raw.launch : undefined,
+				vapid: isVapid(raw.vapid) ? raw.vapid : undefined,
 			},
 		};
 	}
@@ -104,6 +117,29 @@ export class RemoteStore {
 		if (JSON.stringify(state.launch) === JSON.stringify(launch)) return;
 		state.launch = launch;
 		this.save(state);
+	}
+
+	/** Made on first use. Throws over an unreadable file, as setLaunch does: a phone's request must not reset it. */
+	vapidKeys(): VapidKeys {
+		const read = this.readRaw();
+		if (read === "unreadable") throw new Error(`${this.path} is unreadable`);
+		const state = read === "missing" ? this.load() : read.state;
+		if (state.vapid) return state.vapid;
+		state.vapid = generateVapidKeys();
+		this.save(state);
+		return state.vapid;
+	}
+
+	/** Replaces the device's subscription; undefined drops it. False for an unknown device. */
+	setPush(deviceId: string, push: WebPushSubscription | undefined): boolean {
+		const state = this.load();
+		const device = state.devices.find((d) => d.id === deviceId);
+		if (!device) return false;
+		if (JSON.stringify(device.push) === JSON.stringify(push)) return true;
+		if (push) device.push = push;
+		else delete device.push;
+		this.save(state);
+		return true;
 	}
 
 	/** A new code replaces any earlier one. */

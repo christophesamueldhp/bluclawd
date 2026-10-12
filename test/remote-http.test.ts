@@ -357,6 +357,62 @@ describe("remote HTTP API", () => {
 		expect(await res.json()).toEqual({ error: "unknown_session" });
 	});
 
+	describe("push subscriptions", () => {
+		const p256dh = Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)]).toString("base64url");
+		const auth16 = Buffer.alloc(16, 1).toString("base64url");
+		const key = async (token: string) =>
+			(await (await fetch(`${base}/api/push/key`, { headers: auth(token) })).json()) as {
+				publicKey: string;
+				subscribed: boolean;
+			};
+		const post = (token: string, path: string, body: object) =>
+			fetch(`${base}/api/push/${path}`, { method: "POST", headers: authJson(token), body: JSON.stringify(body) });
+
+		it("gives the VAPID public key, the same each time, only to a paired device", async () => {
+			expect((await fetch(`${base}/api/push/key`)).status).toBe(401);
+			const token = await pair();
+			const first = await key(token);
+			expect(Buffer.from(first.publicKey, "base64url")).toHaveLength(65);
+			expect(first.subscribed).toBe(false);
+			expect((await key(token)).publicKey).toBe(first.publicKey);
+		});
+
+		it("subscribes and unsubscribes the calling device only", async () => {
+			const phone = await pair();
+			const other = await pair();
+			const subscription = { endpoint: "https://web.push.apple.com/abc", keys: { p256dh, auth: auth16 } };
+			const res = await post(phone, "subscribe", subscription);
+			expect(res.status).toBe(200);
+			expect(await res.json()).toEqual({ ok: true });
+			expect(store.load().devices.map((d) => d.push)).toEqual([subscription, undefined]);
+			expect((await key(phone)).subscribed).toBe(true);
+			expect((await key(other)).subscribed).toBe(false);
+			expect((await post(other, "unsubscribe", {})).status).toBe(200);
+			expect(store.load().devices[0].push).toEqual(subscription);
+			expect((await post(phone, "unsubscribe", {})).status).toBe(200);
+			expect(store.load().devices[0].push).toBeUndefined();
+		});
+
+		it("refuses a subscription that is not a browser's", async () => {
+			const token = await pair();
+			const bad = [
+				{},
+				{ endpoint: "http://web.push.apple.com/abc", keys: { p256dh, auth: auth16 } },
+				{ endpoint: "not a url", keys: { p256dh, auth: auth16 } },
+				{ endpoint: "https://web.push.apple.com/abc", keys: { p256dh: p256dh.slice(4), auth: auth16 } },
+				{ endpoint: "https://web.push.apple.com/abc", keys: { p256dh: `A${p256dh.slice(1)}`, auth: auth16 } },
+				{ endpoint: "https://web.push.apple.com/abc", keys: { p256dh, auth: "short" } },
+				{ endpoint: "https://web.push.apple.com/abc", keys: { p256dh, auth: `${auth16.slice(1)}!` } },
+			];
+			for (const body of bad) {
+				const res = await post(token, "subscribe", body);
+				expect(res.status).toBe(400);
+				expect(await res.json()).toEqual({ error: "invalid_subscription" });
+			}
+			expect(store.load().devices[0].push).toBeUndefined();
+		});
+	});
+
 	describe("event stream", () => {
 		const open = async (token: string, session?: string) => {
 			const controller = new AbortController();

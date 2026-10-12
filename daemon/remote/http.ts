@@ -14,6 +14,7 @@ import type { RemoteStore } from "./pairing.ts";
 import { findSession, remoteSessions } from "./sessions.ts";
 import type { SessionSpec } from "./spawn.ts";
 import { loadTranscript } from "./transcript.ts";
+import { parseSubscription } from "./webpush.ts";
 
 export interface RemoteDeps {
 	store: RemoteStore;
@@ -164,7 +165,8 @@ async function handle(
 	}
 
 	const token = path === "/api/events" ? (url.searchParams.get("token") ?? "") : bearer(req);
-	if (!deps.store.authenticate(token)) return json(res, 401, { error: "unauthorized" });
+	const device = deps.store.authenticate(token);
+	if (!device) return json(res, 401, { error: "unauthorized" });
 
 	if (path === "/api/events" && req.method === "GET") {
 		events.add(res, url.searchParams.get("session") ?? undefined, () => deps.store.authenticate(token) !== undefined);
@@ -197,6 +199,21 @@ async function handle(
 			(b.createdAt ?? "").localeCompare(a.createdAt ?? ""),
 		);
 		return json(res, 200, { directories: [...new Set(sessions.map((s) => s.cwd))] });
+	}
+
+	if (path === "/api/push/key" && req.method === "GET") {
+		// `subscribed`: a re-paired device keeps its notification permission but has no subscription here.
+		return json(res, 200, { publicKey: deps.store.vapidKeys().publicKey, subscribed: device.push !== undefined });
+	}
+	if (path === "/api/push/subscribe" && req.method === "POST") {
+		const push = parseSubscription(await readJson(req));
+		if (!push) return json(res, 400, { error: "invalid_subscription" });
+		deps.store.setPush(device.id, push);
+		return json(res, 200, { ok: true });
+	}
+	if (path === "/api/push/unsubscribe" && req.method === "POST") {
+		deps.store.setPush(device.id, undefined);
+		return json(res, 200, { ok: true });
 	}
 
 	const match = /^\/api\/sessions\/([^/]+)\/(messages|prompt|abort)$/.exec(path);
