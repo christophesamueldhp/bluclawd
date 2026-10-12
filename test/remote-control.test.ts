@@ -2,10 +2,12 @@ import { mkdtempSync, rmSync, statSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleIpcRequest, listSummaries, setRemoteControl } from "../daemon/handler.ts";
+import type { InstanceSummary } from "../daemon/ipc/protocol.ts";
 import { RemoteControl } from "../daemon/remote/control.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
+import type { PushResult, WebPushSubscription } from "../daemon/remote/webpush.ts";
 
 describe("remote control switch", () => {
 	let dir: string;
@@ -24,6 +26,7 @@ describe("remote control switch", () => {
 		control = make();
 	});
 	afterEach(async () => {
+		vi.useRealTimers();
 		await control.stop();
 		setRemoteControl(undefined);
 		rmSync(dir, { recursive: true, force: true });
@@ -139,6 +142,100 @@ describe("remote control switch", () => {
 		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
 		await until(JSON.stringify({ sessionId: "pane-1", live: null }));
 		controller.abort();
+	});
+
+	describe("push notifications", () => {
+		const subscription = (endpoint: string): WebPushSubscription => ({
+			endpoint,
+			keys: {
+				p256dh: Buffer.concat([Buffer.from([4]), Buffer.alloc(64, 7)]).toString("base64url"),
+				auth: "AAAAAAAAAAAAAAAAAAAAAA",
+			},
+		});
+		let instances: InstanceSummary[];
+		let pushes: Array<{ endpoint: string; payload: unknown }>;
+		let results: Record<string, PushResult>;
+		const pane = (activity: "working" | "idle"): InstanceSummary => ({
+			id: "pane-1",
+			status: "online",
+			cwd: "/p",
+			external: true,
+			label: "fix the build",
+			activity,
+			turns: 1,
+			detail: activity === "idle" ? "All green" : "",
+		});
+		const pairDevice = (store: RemoteStore) => {
+			const { code } = store.createCode();
+			const claimed = store.claim(code, "iPhone");
+			if (!("deviceId" in claimed)) throw new Error(claimed.error);
+			return claimed.deviceId;
+		};
+
+		beforeEach(() => {
+			vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+			instances = [pane("working")];
+			pushes = [];
+			results = {};
+			control = new RemoteControl({
+				store: new RemoteStore(join(dir, "remote.json")),
+				listInstances: () => instances,
+				send: () => true,
+				deleteInstance: () => false,
+				webDir: dir,
+				sendPush: async (push, payload) => {
+					pushes.push({ endpoint: push.endpoint, payload: JSON.parse(payload) });
+					return results[push.endpoint] ?? "ok";
+				},
+			});
+		});
+
+		it("pushes to every subscribed device when a session stops working, and drops a gone subscription", async () => {
+			const phone = pairDevice(control.store);
+			const pad = pairDevice(control.store);
+			pairDevice(control.store);
+			control.store.setPush(phone, subscription("https://push.test/phone"));
+			control.store.setPush(pad, subscription("https://push.test/pad"));
+			results["https://push.test/pad"] = "gone";
+			await control.handle({ type: "remote", action: "on", port: 0 });
+			await vi.advanceTimersByTimeAsync(2000);
+			expect(pushes).toEqual([]);
+			instances = [pane("idle")];
+			await vi.advanceTimersByTimeAsync(1000);
+			const payload = { title: "fix the build", body: "Done — All green", sessionId: "pane-1" };
+			expect(pushes).toEqual([
+				{ endpoint: "https://push.test/phone", payload },
+				{ endpoint: "https://push.test/pad", payload },
+			]);
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(pushes).toHaveLength(2);
+			expect(control.store.load().devices.map((d) => d.push?.endpoint)).toEqual([
+				"https://push.test/phone",
+				undefined,
+				undefined,
+			]);
+		});
+
+		it("does not send late what changed while no device was subscribed, nor while off", async () => {
+			const phone = pairDevice(control.store);
+			control.store.setPush(phone, subscription("https://push.test/phone"));
+			await control.handle({ type: "remote", action: "on", port: 0 });
+			await vi.advanceTimersByTimeAsync(1000);
+			control.store.setPush(phone, undefined);
+			await vi.advanceTimersByTimeAsync(1000);
+			instances = [pane("idle")];
+			await vi.advanceTimersByTimeAsync(1000);
+			control.store.setPush(phone, subscription("https://push.test/phone"));
+			await vi.advanceTimersByTimeAsync(2000);
+			expect(pushes).toEqual([]);
+			instances = [pane("working")];
+			await vi.advanceTimersByTimeAsync(1000);
+			await control.handle({ type: "remote", action: "off" });
+			instances = [pane("idle")];
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(pushes).toEqual([]);
+			expect(vi.getTimerCount()).toBe(0);
+		});
 	});
 
 	it("acknowledges a pane's live reply when remote control is unavailable", async () => {

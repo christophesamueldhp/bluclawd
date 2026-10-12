@@ -15,10 +15,15 @@ import type {
 	RemoteResponse,
 } from "../ipc/protocol.ts";
 import { type RemoteServer, startRemoteServer } from "./http.ts";
+import { Notifier } from "./notifier.ts";
 import { RemoteStore } from "./pairing.ts";
+import { remoteSessions } from "./sessions.ts";
 import { startSession } from "./spawn.ts";
+import { type PushResult, sendPush, type WebPushSubscription } from "./webpush.ts";
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "web");
+const NOTIFY_INTERVAL_MS = 1000;
+const PUSH_SUBJECT = "https://github.com/christophesamueldhp/bluclawd";
 
 export interface RemoteControlDeps {
 	listInstances(): InstanceSummary[];
@@ -27,6 +32,7 @@ export interface RemoteControlDeps {
 	store?: RemoteStore;
 	tmux?: Tmux;
 	webDir?: string;
+	sendPush?: (subscription: WebPushSubscription, payload: string) => Promise<PushResult>;
 }
 
 export class RemoteControl {
@@ -41,11 +47,18 @@ export class RemoteControl {
 	private listenError: string | undefined;
 	/** Serialises apply and stop, so overlapping switches cannot start two servers. */
 	private queue: Promise<void> = Promise.resolve();
+	private notifyTimer: ReturnType<typeof setInterval> | undefined;
+	/** Only while some device is subscribed, so a change nobody was subscribed for is never sent late. */
+	private notifier: Notifier | undefined;
+	private readonly sendPush: (subscription: WebPushSubscription, payload: string) => Promise<PushResult>;
 
 	constructor(deps: RemoteControlDeps) {
 		this.deps = deps;
 		this.store = deps.store ?? new RemoteStore();
 		this.tmux = deps.tmux ?? new Tmux();
+		this.sendPush =
+			deps.sendPush ??
+			((subscription, payload) => sendPush(subscription, payload, this.store.vapidKeys(), PUSH_SUBJECT));
 	}
 
 	/** Every heartbeat says how its pi was started; the latest one is kept. */
@@ -107,6 +120,8 @@ export class RemoteControl {
 			);
 			this.serverPort = state.port;
 			this.listenError = undefined;
+			this.notifyTimer = setInterval(() => this.notify(), NOTIFY_INTERVAL_MS);
+			this.notifyTimer.unref();
 		} catch (error) {
 			this.listenError = error instanceof Error ? error.message : String(error);
 		}
@@ -120,7 +135,37 @@ export class RemoteControl {
 		const server = this.server;
 		this.server = undefined;
 		this.serverPort = undefined;
+		clearInterval(this.notifyTimer);
+		this.notifyTimer = undefined;
+		this.notifier = undefined;
 		await server?.close();
+	}
+
+	/** Pushes each session that stopped working to every subscribed device. */
+	private notify(): void {
+		// A throw from a timer reaches the daemon's uncaughtException handler, which shuts it down.
+		try {
+			const devices = this.store.load().devices.filter((device) => device.push);
+			if (devices.length === 0) {
+				this.notifier = undefined;
+				return;
+			}
+			this.notifier ??= new Notifier();
+			for (const notification of this.notifier.observe(remoteSessions(this.deps.listInstances()))) {
+				const payload = JSON.stringify(notification);
+				for (const { id, push } of devices) {
+					this.sendPush(push!, payload)
+						.then((result) => {
+							// Only that subscription: the device may have subscribed again meanwhile.
+							const current = this.store.load().devices.find((device) => device.id === id)?.push;
+							if (result === "gone" && current?.endpoint === push!.endpoint) this.store.setPush(id, undefined);
+						})
+						.catch(() => undefined);
+				}
+			}
+		} catch {
+			// the next tick retries
+		}
 	}
 
 	async handle(request: RemoteRequest): Promise<RemoteResponse | ErrorResponse> {
