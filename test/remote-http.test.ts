@@ -132,6 +132,38 @@ describe("remote HTTP API", () => {
 		expect((await fetch(`${base}/missing.js`)).status).toBe(404);
 	});
 
+	it("answers only a loopback or tailnet Host, so a rebound DNS name reaches nothing", async () => {
+		const get = (path: string, host: string) =>
+			new Promise<{ status: number; body: string }>((resolve, reject) => {
+				const req = request(`${base}${path}`, { headers: { host } }, (res) => {
+					let body = "";
+					res.on("data", (chunk) => {
+						body += chunk;
+					});
+					res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+				});
+				req.on("error", reject);
+				req.end();
+			});
+		const port = server.port;
+		for (const host of [
+			`127.0.0.1:${port}`,
+			"127.0.0.1",
+			`localhost:${port}`,
+			"LOCALHOST",
+			`[::1]:${port}`,
+			"mac.tail1234.ts.net",
+			"Mac.Tail1234.TS.NET:443",
+		]) {
+			expect((await get("/", host)).status, host).toBe(200);
+		}
+		for (const host of ["evil.example", `evil.example:${port}`, "ts.net", "mac.ts.net.evil.example", "127.0.0.2"]) {
+			for (const path of ["/", "/app.js", "/api/sessions", "/api/events?token=x"]) {
+				expect(await get(path, host), `${host}${path}`).toEqual({ status: 421, body: '{"error":"bad_host"}' });
+			}
+		}
+	});
+
 	it("rejects the API without a valid token", async () => {
 		expect((await fetch(`${base}/api/sessions`)).status).toBe(401);
 		expect((await fetch(`${base}/api/sessions`, { headers: auth("bogus") })).status).toBe(401);

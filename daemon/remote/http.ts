@@ -63,6 +63,9 @@ const KEYS = new Set(["Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "
 /** One at a time: Escape and the key after it would reach pi as one Alt chord. */
 const KEYS_MAX = 1;
 const TEXT_MAX = 1024;
+/** Against DNS rebinding: a page whose name resolves to 127.0.0.1 still sends its own name. Tailscale
+ *  serve forwards the tailnet name; a loopback name is the Mac itself. */
+const HOST_PATTERN = /^(127\.0\.0\.1|localhost|\[::1\]|([a-z0-9-]+\.)+ts\.net)(:\d+)?$/i;
 
 const CONTENT_TYPES: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
@@ -190,6 +193,7 @@ async function handle(
 	req: IncomingMessage,
 	res: ServerResponse,
 ): Promise<void> {
+	if (!HOST_PATTERN.test(req.headers.host ?? "")) return json(res, 421, { error: "bad_host" });
 	const url = new URL(req.url ?? "/", "http://localhost");
 	const path = url.pathname;
 	if (!path.startsWith("/api/")) return serveStatic(deps.webDir, path, req, res);
