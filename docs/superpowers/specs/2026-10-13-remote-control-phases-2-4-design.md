@@ -133,3 +133,24 @@ Every PWA change gets a browser check at 390×844 in light and dark with a demo 
 ## Out of scope
 
 An app icon, launchd auto-start, images from the phone, more than one Mac.
+
+## Deviations from this design
+
+- U1: a phone resume keeps the stored row until the pane the daemon started registers, then
+  deletes it (the live twin is shown meanwhile, and another reply to the stored row is 409
+  `session_busy`). A pane the daemon started from the phone that has not registered within 90 s
+  is ended; a resumed one's stored row stays. A launch whose node or script is gone answers 503
+  `no_launch`. The latest launch is kept in memory, and in `remote.json` only while remote
+  control is on.
+- U3: "Enable notifications" is offered while the device has no subscription, not only while
+  permission is not granted (a re-paired phone keeps its permission but not its subscription).
+- U4/U5: compact, tree, fork and clone are refused while Needs input too, not only while Working,
+  and with 409 `pane_too_old` for a pane that sends no report (an older bluclawd), as is a model
+  switch. A compact goes alone in its heartbeat, as a navigation does; a compact the pane skips or
+  pi rejects reports again, and every report is signalled to the phone, unchanged ones too.
+- U5: a ⋯ button on each message, not a long press, with "Edit in a new session" (fork),
+  "Edit here" (tree to your message) and "Go back to here" (tree to a reply). A fork or clone is
+  skipped while the pane's editor holds a draft, which pi's fork would replace.
+- U6: one key per request (`keys` holds a single key), so Escape and the key after it never
+  reach pi as one Alt chord.
+- U7: `wait` only wakes the pane; its next register drains the messages, as a heartbeat does.

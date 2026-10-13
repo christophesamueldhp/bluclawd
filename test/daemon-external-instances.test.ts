@@ -101,7 +101,7 @@ describe("waiting for a pane's next message", () => {
 		expect(new ServerSupervisor().waitExternal("ext-1", 25_000)).toBeUndefined();
 	});
 
-	it("answers false once the time is up with nothing queued", async () => {
+	it("answers none once the time is up with nothing queued", async () => {
 		vi.useFakeTimers();
 		const supervisor = new ServerSupervisor();
 		supervisor.registerExternal(rec("ext-1"), "idle");

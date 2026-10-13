@@ -42,7 +42,12 @@ export interface RegisterInput {
 	turns?: number;
 	createdAt?: string;
 	leafId?: string;
-	launch?: { command: string[] };
+	launch?: PaneLaunch;
+}
+
+/** Mirror of daemon/ipc/protocol.ts PaneLaunch. */
+export interface PaneLaunch {
+	command: string[];
 }
 
 /** Mirror of daemon/ipc/protocol.ts PaneMessage. */
