@@ -4,7 +4,7 @@
  * paired device's token: a bearer header, or `?token=` on the SSE stream, which EventSource
  * cannot give headers.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
@@ -23,11 +23,13 @@ export interface RemoteDeps {
 	listInstances(): InstanceSummary[];
 	/** Queue a message for a pane's pi; false when no pane is registered as that id. */
 	send(sessionId: string, message: PaneMessage): boolean;
-	deleteInstance(sessionId: string): boolean;
 	/** How to start a pane's pi; undefined until a pane has registered. */
 	launch(): PaneLaunch | undefined;
-	/** Start a pane; returns its tmux session name, the id its row registers as. */
-	startSession(spec: SessionSpec): string;
+	/** Start a pane; returns its tmux session name, the id its row registers as. `replaces`: the
+	 *  stored row it resumes, which goes once the pane registers. */
+	startSession(spec: SessionSpec, replaces?: string): string;
+	/** A pane started to resume this stored row has not registered yet. */
+	resuming(storedId: string): boolean;
 	/** A running pane's latest report. */
 	report(sessionId: string): PaneReport | undefined;
 	/** Agent view's tmux server: what a pane shows, and keys typed into it. */
@@ -141,9 +143,19 @@ function keysIn(body: Record<string, unknown>): { keys: string[] } | { text: str
 	throw new HttpError(400, "invalid_keys");
 }
 
-function start(deps: RemoteDeps, spec: SessionSpec): string {
+/** How to start a pane's pi, while its files are still there: a pane started with a node or pi
+ *  that has moved since (an upgrade) would die at once. */
+function launchOf(deps: RemoteDeps): PaneLaunch | undefined {
+	const launch = deps.launch();
+	if (!launch) return undefined;
+	const [command, ...args] = launch.command;
+	const script = args.at(-1);
+	return command && existsSync(command) && (script === undefined || existsSync(script)) ? launch : undefined;
+}
+
+function start(deps: RemoteDeps, spec: SessionSpec, replaces?: string): string {
 	try {
-		return deps.startSession(spec);
+		return deps.startSession(spec, replaces);
 	} catch {
 		throw new HttpError(500, "start_failed");
 	}
@@ -212,7 +224,7 @@ async function handle(
 		if (model !== undefined && (typeof model !== "string" || !MODEL_PATTERN.test(model))) {
 			return json(res, 400, { error: "invalid_model" });
 		}
-		const launch = deps.launch();
+		const launch = launchOf(deps);
 		if (!launch) return json(res, 503, { error: "no_launch" });
 		const pane = start(deps, {
 			cwd,
@@ -295,7 +307,7 @@ async function handle(
 	if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
 	const body = await readJson(req);
 	// Looked up again after the body: a concurrent reply may have resumed this row meanwhile, and
-	// from here to deleteInstance nothing awaits, so a stored row starts one pane only.
+	// from the resuming check to the start nothing awaits, so a stored row starts one pane only.
 	const session = findSession(deps.listInstances(), id);
 	if (!session) return json(res, 409, { error: "session_not_running" });
 	let message: PaneMessage;
@@ -303,10 +315,11 @@ async function handle(
 		const text = promptIn(body, "text");
 		// A stored row has no process: it resumes as agent view's peek reply resumes it.
 		if (!session.running && session.sessionFile) {
-			const launch = deps.launch();
+			const launch = launchOf(deps);
 			if (!launch) return json(res, 503, { error: "no_launch" });
-			const pane = start(deps, { cwd: session.cwd, task: text, sessionFile: session.sessionFile, launch });
-			deps.deleteInstance(id);
+			// Its row stays until the pane registers, so a pane that never does leaves it as it was.
+			if (deps.resuming(id)) return json(res, 409, { error: "session_busy" });
+			const pane = start(deps, { cwd: session.cwd, task: text, sessionFile: session.sessionFile, launch }, id);
 			return json(res, 202, { ok: true, pane });
 		}
 		message = { type: "prompt", text };

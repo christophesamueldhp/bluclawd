@@ -19,7 +19,7 @@ import { type RemoteServer, startRemoteServer } from "./http.ts";
 import { Notifier } from "./notifier.ts";
 import { RemoteStore } from "./pairing.ts";
 import { remoteSessions } from "./sessions.ts";
-import { startSession } from "./spawn.ts";
+import { type SessionSpec, startSession } from "./spawn.ts";
 import { type PushResult, sendPush, type WebPushSubscription } from "./webpush.ts";
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "web");
@@ -27,6 +27,9 @@ const NOTIFY_INTERVAL_MS = 1000;
 const PUSH_SUBJECT = "https://github.com/christophesamueldhp/bluclawd";
 /** Each tmux command is a quick round-trip to the server: a hung one must not hold up the daemon. */
 const TMUX_TIMEOUT_MS = 2000;
+/** A pane the phone started that has not registered by then never will: it is ended, not left
+ *  running unseen. Past the phone's own wait (START_TIMEOUT_MS in web/app.js). */
+const START_TIMEOUT_MS = 90_000;
 
 export interface RemoteControlDeps {
 	listInstances(): InstanceSummary[];
@@ -42,8 +45,11 @@ export class RemoteControl {
 	readonly store: RemoteStore;
 	private readonly deps: RemoteControlDeps;
 	private readonly tmux: Tmux;
-	/** What this process last wrote, so a heartbeat does not read remote.json. */
+	/** The latest heartbeat's launch, and what remote.json holds (so a heartbeat does not read it). */
+	private latestLaunch: PaneLaunch | undefined;
 	private launchNoted: string | undefined;
+	/** Panes started from the phone that have not registered yet, by tmux session name. */
+	private readonly starting = new Map<string, { replaces?: string; timer: ReturnType<typeof setTimeout> }>();
 	private server: RemoteServer | undefined;
 	/** The configured port the running server was started for. */
 	private serverPort: number | undefined;
@@ -66,16 +72,46 @@ export class RemoteControl {
 			((subscription, payload) => sendPush(subscription, payload, this.store.vapidKeys(), PUSH_SUBJECT));
 	}
 
-	/** Every heartbeat says how its pi was started; the latest one is kept. */
+	/** Every heartbeat says how its pi was started; the latest one is kept, and in remote.json while on. */
 	noteLaunch(launch: PaneLaunch): void {
+		this.latestLaunch = launch;
+		if (this.server) this.saveLaunch();
+	}
+
+	private saveLaunch(): void {
+		const launch = this.latestLaunch;
 		const key = JSON.stringify(launch);
-		if (key === this.launchNoted) return;
+		if (!launch || key === this.launchNoted) return;
 		try {
 			this.store.setLaunch(launch);
 			this.launchNoted = key;
 		} catch {
 			// a heartbeat must not fail over remote.json; the next one retries
 		}
+	}
+
+	/** A pane registered: one the phone started is up, and the stored row it resumes gives way to it. */
+	registered(sessionId: string): void {
+		const started = this.starting.get(sessionId);
+		if (!started) return;
+		clearTimeout(started.timer);
+		this.starting.delete(sessionId);
+		if (started.replaces) this.deps.deleteInstance(started.replaces);
+	}
+
+	private startSession(spec: SessionSpec, replaces?: string): string {
+		const pane = startSession({ ...spec, tmux: this.tmux });
+		const timer = setTimeout(() => {
+			if (!this.starting.delete(pane)) return;
+			try {
+				this.tmux.end(pane);
+			} catch {
+				// it ended already; a throw from a timer would shut the daemon down
+			}
+		}, START_TIMEOUT_MS);
+		timer.unref();
+		this.starting.set(pane, { replaces, timer });
+		return pane;
 	}
 
 	/** A phone has this session open, so its pane should stream its reply. */
@@ -104,7 +140,7 @@ export class RemoteControl {
 	}
 
 	launch(): PaneLaunch | undefined {
-		return this.store.load().launch;
+		return this.latestLaunch ?? this.store.load().launch;
 	}
 
 	private run(step: () => Promise<void>): Promise<void> {
@@ -132,9 +168,9 @@ export class RemoteControl {
 					store: this.store,
 					listInstances: this.deps.listInstances,
 					send: this.deps.send,
-					deleteInstance: this.deps.deleteInstance,
 					launch: () => this.launch(),
-					startSession: (spec) => startSession({ ...spec, tmux: this.tmux }),
+					startSession: (spec, replaces) => this.startSession(spec, replaces),
+					resuming: (id) => [...this.starting.values()].some((started) => started.replaces === id),
 					report: (id) => this.reports.get(id)?.report,
 					tmux: this.tmux,
 					webDir: this.deps.webDir ?? WEB_DIR,
@@ -143,6 +179,9 @@ export class RemoteControl {
 			);
 			this.serverPort = state.port;
 			this.listenError = undefined;
+			// The phone needs one as soon as it is on.
+			this.launchNoted = state.launch ? JSON.stringify(state.launch) : undefined;
+			this.saveLaunch();
 			this.notifyTimer = setInterval(() => this.notify(), NOTIFY_INTERVAL_MS);
 			this.notifyTimer.unref();
 		} catch (error) {

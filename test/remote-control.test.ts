@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import type { InstanceSummary } from "../daemon/ipc/protocol.ts";
 import { RemoteControl } from "../daemon/remote/control.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { PushResult, WebPushSubscription } from "../daemon/remote/webpush.ts";
+import { Tmux } from "../ext/agent-view/tmux.ts";
 import { validP256dh } from "./support/push.ts";
 
 describe("remote control switch", () => {
@@ -89,27 +90,135 @@ describe("remote control switch", () => {
 		});
 	});
 
-	it("keeps the launch command of the latest heartbeat, rewriting remote.json only when it changes", async () => {
+	it("keeps the latest heartbeat's launch command, in remote.json only while on and when it changes", async () => {
 		setRemoteControl(control);
+		const file = join(dir, "remote.json");
 		const beat = (command: string[]) =>
 			handleIpcRequest({
 				type: "register",
 				instance: { id: "pane-1", cwd: "/p", leafId: "e2", launch: { command } },
 			});
 		await beat(["node", "pi.js"]);
-		expect(control.store.load().launch).toEqual({ command: ["node", "pi.js"] });
+		expect(control.launch()).toEqual({ command: ["node", "pi.js"] });
 		expect(listSummaries().find((i) => i.id === "pane-1")).toMatchObject({ external: true, leafId: "e2" });
-		const written = statSync(join(dir, "remote.json")).ino;
+		// Off: nothing is written for it.
+		expect(existsSync(file)).toBe(false);
+		// On: the phone needs it at once.
+		await control.handle({ type: "remote", action: "on", port: 0 });
+		expect(control.store.load().launch).toEqual({ command: ["node", "pi.js"] });
+		const written = statSync(file).ino;
 		await beat(["node", "pi.js"]);
+		expect(statSync(file).ino).toBe(written);
+		await beat(["node", "other.js"]);
+		expect(control.store.load().launch).toEqual({ command: ["node", "other.js"] });
+		// A restarted daemon has it before any heartbeat, and does not write it again.
+		await control.stop();
 		control = make();
 		setRemoteControl(control);
-		await beat(["node", "pi.js"]);
-		expect(statSync(join(dir, "remote.json")).ino).toBe(written);
-		await control.handle({ type: "remote", action: "off" });
-		expect(control.store.load().launch).toEqual({ command: ["node", "pi.js"] });
-		await beat(["node", "other.js"]);
+		await control.apply();
 		expect(control.launch()).toEqual({ command: ["node", "other.js"] });
+		const rewritten = statSync(file).ino;
+		await beat(["node", "other.js"]);
+		expect(statSync(file).ino).toBe(rewritten);
+		await control.handle({ type: "remote", action: "off" });
+		const off = statSync(file).ino;
+		await beat(["node", "third.js"]);
+		expect(control.launch()).toEqual({ command: ["node", "third.js"] });
+		expect(statSync(file).ino).toBe(off);
 		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
+	});
+
+	describe("panes the phone starts", () => {
+		const START_TIMEOUT_MS = 90_000;
+		let instances: InstanceSummary[];
+		let deleted: string[];
+		let tmuxCalls: string[][];
+		let base: string;
+		let token: string;
+
+		beforeEach(async () => {
+			instances = [{ id: "stored", status: "stopped", cwd: dir, sessionFile: join(dir, "s.jsonl") }];
+			deleted = [];
+			tmuxCalls = [];
+			control = new RemoteControl({
+				store: new RemoteStore(join(dir, "remote.json")),
+				listInstances: () => instances,
+				send: () => true,
+				deleteInstance: (id) => {
+					deleted.push(id);
+					return true;
+				},
+				tmux: new Tmux(dir, (args) => {
+					tmuxCalls.push(args);
+					return "";
+				}),
+				webDir: dir,
+			});
+			setRemoteControl(control);
+			writeFileSync(join(dir, "pi.js"), "");
+			control.noteLaunch({ command: [process.execPath, join(dir, "pi.js")] });
+			const on = await control.handle({ type: "remote", action: "on", port: 0 });
+			if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
+			base = `http://127.0.0.1:${on.port}`;
+			const paired = await fetch(`${base}/api/pair`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ code: on.code, deviceName: "iPhone" }),
+			});
+			token = ((await paired.json()) as { token: string }).token;
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		});
+
+		const post = async (path: string, body: object) => {
+			const res = await fetch(`${base}${path}`, {
+				method: "POST",
+				headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+				body: JSON.stringify(body),
+			});
+			return { status: res.status, body: (await res.json()) as { pane?: string; error?: string } };
+		};
+		const register = (id: string) =>
+			handleIpcRequest({ type: "register", instance: { id, cwd: dir, sessionFile: join(dir, "s.jsonl") } });
+		const killed = () => tmuxCalls.filter((args) => args[0] === "kill-session").map((args) => args[2]);
+
+		it("drops a resumed session's stored row once its pane registers, and only then", async () => {
+			const { status, body } = await post("/api/sessions/stored/prompt", { text: "carry on" });
+			expect(status).toBe(202);
+			expect(deleted).toEqual([]);
+			// A second reply before the pane is up would start a second one.
+			expect(await post("/api/sessions/stored/prompt", { text: "again" })).toEqual({
+				status: 409,
+				body: { error: "session_busy" },
+			});
+			await register(body.pane!);
+			expect(deleted).toEqual(["stored"]);
+			await register(body.pane!);
+			expect(deleted).toEqual(["stored"]);
+			vi.advanceTimersByTime(START_TIMEOUT_MS);
+			expect(killed()).toEqual([]);
+			await handleIpcRequest({ type: "unregister", instanceId: body.pane! });
+		});
+
+		it("ends a pane it started that never registered, keeping the stored row it would have resumed", async () => {
+			const task = await post("/api/sessions", { cwd: dir, task: "go" });
+			const resume = await post("/api/sessions/stored/prompt", { text: "carry on" });
+			vi.advanceTimersByTime(START_TIMEOUT_MS - 1);
+			expect(killed()).toEqual([]);
+			vi.advanceTimersByTime(1);
+			expect(killed()).toEqual([`=${task.body.pane}`, `=${resume.body.pane}`]);
+			expect(deleted).toEqual([]);
+			// The stored row can be resumed again.
+			expect((await post("/api/sessions/stored/prompt", { text: "carry on" })).status).toBe(202);
+		});
+
+		it("leaves a pane it started alone once it registered", async () => {
+			const task = await post("/api/sessions", { cwd: dir, task: "go" });
+			await register(task.body.pane!);
+			vi.advanceTimersByTime(START_TIMEOUT_MS);
+			expect(killed()).toEqual([]);
+			expect(deleted).toEqual([]);
+			await handleIpcRequest({ type: "unregister", instanceId: task.body.pane! });
+		});
 	});
 
 	it("tells a heartbeat when a phone watches its session, and streams what the pane sends", async () => {

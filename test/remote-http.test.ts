@@ -21,7 +21,7 @@ describe("remote HTTP API", () => {
 	let sent: Array<{ id: string; message: PaneMessage }>;
 	let launch: PaneLaunch | undefined;
 	let started: SessionSpec[];
-	let deleted: string[];
+	let resuming: Set<string>;
 	let startFails: boolean;
 	let reports: Map<string, PaneReport>;
 	let screens: Map<string, string[]>;
@@ -48,9 +48,10 @@ describe("remote HTTP API", () => {
 			{ id: "stored", status: "stopped", cwd: "/p", sessionFile: join(dir, "stored.jsonl") },
 		];
 		sent = [];
-		launch = { command: ["node", "pi.js"] };
+		writeFileSync(join(dir, "pi.js"), "");
+		launch = { command: [process.execPath, join(dir, "pi.js")] };
 		started = [];
-		deleted = [];
+		resuming = new Set();
 		startFails = false;
 		reports = new Map();
 		screens = new Map();
@@ -75,16 +76,13 @@ describe("remote HTTP API", () => {
 					return true;
 				},
 				launch: () => launch,
-				startSession: (spec) => {
+				startSession: (spec, replaces) => {
 					if (startFails) throw new Error("tmux: no server");
 					started.push(spec);
+					if (replaces) resuming.add(replaces);
 					return "pi-0000000a";
 				},
-				deleteInstance: (id) => {
-					deleted.push(id);
-					instances = instances.filter((i) => i.id !== id);
-					return true;
-				},
+				resuming: (id) => resuming.has(id),
 				report: (id) => reports.get(id),
 				tmux: {
 					// All of it: a main-screen pane gives its history and the visible screen too.
@@ -468,7 +466,7 @@ describe("remote HTTP API", () => {
 		expect(started).toEqual([]);
 	});
 
-	it("resumes a stored session with the reply as its first prompt, replacing its row", async () => {
+	it("resumes a stored session with the reply as its first prompt, its row kept until the pane registers", async () => {
 		const token = await pair();
 		const res = await fetch(`${base}/api/sessions/stored/prompt`, {
 			method: "POST",
@@ -478,7 +476,7 @@ describe("remote HTTP API", () => {
 		expect(res.status).toBe(202);
 		expect(await res.json()).toEqual({ ok: true, pane: "pi-0000000a" });
 		expect(started).toEqual([{ cwd: "/p", task: "carry on", sessionFile: join(dir, "stored.jsonl"), launch }]);
-		expect(deleted).toEqual(["stored"]);
+		expect(resuming).toEqual(new Set(["stored"]));
 		expect(sent).toEqual([]);
 	});
 
@@ -515,16 +513,28 @@ describe("remote HTTP API", () => {
 		expect(await start({ cwd: dir, task: "go", model: "--model/x" })).toEqual([400, "invalid_model"]);
 		expect(await start({ cwd: dir, task: "go", model: "anthropic/x; rm -rf ~" })).toEqual([400, "invalid_model"]);
 		expect(await start({ cwd: dir, task: "go", model: "anthropic/x;y" })).toEqual([400, "invalid_model"]);
+		const resume = async () => {
+			const res = await fetch(`${base}/api/sessions/stored/prompt`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify({ text: "hi" }),
+			});
+			return [res.status, ((await res.json()) as { error?: string }).error];
+		};
+		// A pi upgraded since its pane started may have moved: its pane would die at once.
+		for (const command of [
+			[join(dir, "old-node"), join(dir, "pi.js")],
+			[process.execPath, join(dir, "old-pi.js")],
+		]) {
+			launch = { command };
+			expect(await start({ cwd: dir, task: "go" })).toEqual([503, "no_launch"]);
+			expect(await resume()).toEqual([503, "no_launch"]);
+		}
 		launch = undefined;
 		expect(await start({ cwd: dir, task: "go" })).toEqual([503, "no_launch"]);
-		const resume = await fetch(`${base}/api/sessions/stored/prompt`, {
-			method: "POST",
-			headers: authJson(token),
-			body: JSON.stringify({ text: "hi" }),
-		});
-		expect(resume.status).toBe(503);
+		expect(await resume()).toEqual([503, "no_launch"]);
 		expect(started).toEqual([]);
-		expect(deleted).toEqual([]);
+		expect(resuming.size).toBe(0);
 	});
 
 	it("expands a leading ~ in the directory to the home directory", async () => {
@@ -573,8 +583,14 @@ describe("remote HTTP API", () => {
 		});
 		slow.end(body);
 		expect([fast.status, await slowStatus]).toEqual([202, 409]);
+		// Its row stays until the pane registers: a reply meanwhile waits for that pane.
+		const again = await fetch(`${base}/api/sessions/stored/prompt`, {
+			method: "POST",
+			headers: authJson(token),
+			body: JSON.stringify({ text: "third" }),
+		});
+		expect([again.status, await again.json()]).toEqual([409, { error: "session_busy" }]);
 		expect(started.map((s) => s.task)).toEqual(["second"]);
-		expect(deleted).toEqual(["stored"]);
 	});
 
 	it("keeps a stored row whose pane failed to start", async () => {
@@ -585,7 +601,7 @@ describe("remote HTTP API", () => {
 		const resume = await post("/api/sessions/stored/prompt", { text: "hi" });
 		expect([resume.status, await resume.json()]).toEqual([500, { error: "start_failed" }]);
 		expect((await post("/api/sessions", { cwd: dir, task: "go" })).status).toBe(500);
-		expect(deleted).toEqual([]);
+		expect(resuming.size).toBe(0);
 	});
 
 	it("lists the directories of listed sessions, most recent first", async () => {
