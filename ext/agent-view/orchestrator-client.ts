@@ -97,7 +97,8 @@ export interface RemoteResult {
 }
 
 export type RemoteAction =
-	| { action: "status" | "off" | "pair" | "devices" }
+	| { action: "status"; launch?: PaneLaunch }
+	| { action: "off" | "pair" | "devices" }
 	| { action: "on"; port?: number }
 	| { action: "revoke"; deviceId: string };
 

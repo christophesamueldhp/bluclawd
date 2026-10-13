@@ -128,6 +128,13 @@ describe("remote control switch", () => {
 		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
 	});
 
+	it("learns the launch command from /remote-control too, as a fresh pi has no heartbeat yet", async () => {
+		await control.handle({ type: "remote", action: "on", port: 0, launch: { command: ["node", "pi.js"] } });
+		expect(control.store.load().launch).toEqual({ command: ["node", "pi.js"] });
+		await control.handle({ type: "remote", action: "status", launch: { command: [] } });
+		expect(control.launch()).toEqual({ command: ["node", "pi.js"] });
+	});
+
 	describe("panes the phone starts", () => {
 		const START_TIMEOUT_MS = 90_000;
 		let instances: InstanceSummary[];

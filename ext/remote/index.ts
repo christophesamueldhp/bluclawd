@@ -19,7 +19,7 @@ import {
 	type PaneMessage,
 	type RemoteResult,
 } from "../agent-view/orchestrator-client.ts";
-import { Tmux } from "../agent-view/tmux.ts";
+import { piCommand, Tmux } from "../agent-view/tmux.ts";
 import { LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
 import { applyPaneMessage, buildReport, navigate } from "./report.ts";
@@ -190,7 +190,7 @@ function factory(pi: ExtensionAPI): void {
 			const { client } = started;
 			try {
 				if (sub === "devices") return await devices(client, ctx);
-				const status = await client.remote({ action: "status" });
+				const status = await client.remote({ action: "status", launch: { command: piCommand() } });
 				if (sub === "pair") {
 					if (!status.enabled) {
 						ctx.ui.notify("Remote control is off: run /remote-control to turn it on", "info");

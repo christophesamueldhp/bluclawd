@@ -136,6 +136,8 @@ export interface RemoteRequest {
 	port?: number;
 	/** With `revoke`. */
 	deviceId?: string;
+	/** How the asking pi was started: a fresh pi has no heartbeat to say it yet. */
+	launch?: PaneLaunch;
 }
 
 interface RequestMap {

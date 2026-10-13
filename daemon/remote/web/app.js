@@ -58,7 +58,7 @@ const ERRORS = {
 	invalid_entry: "That message is no longer in this session.",
 	not_moved: "The session did not move.",
 	invalid_keys: "That can't be typed into the session. Use the keys for Enter, Tab and Esc.",
-	no_launch: "Start pi on the Mac once, so the phone knows how to start it.",
+	no_launch: "Run /remote-control pair in a pi on the Mac once, so the phone knows how to start pi.",
 	start_failed: "The Mac could not start the session.",
 	start_timeout: "The session did not show up. Check it on the Mac.",
 	unknown_session: "This session is gone.",

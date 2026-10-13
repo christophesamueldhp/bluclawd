@@ -230,6 +230,10 @@ export class RemoteControl {
 	}
 
 	async handle(request: RemoteRequest): Promise<RemoteResponse | ErrorResponse> {
+		const command = request.launch?.command;
+		if (Array.isArray(command) && command.length > 0 && command.every((part) => typeof part === "string")) {
+			this.noteLaunch({ command });
+		}
 		switch (request.action) {
 			case "on":
 				this.store.setEnabled(true, request.port);
