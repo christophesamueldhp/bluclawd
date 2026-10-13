@@ -38,6 +38,7 @@ const ERRORS = {
 	invalid_cwd: "That directory does not exist on the Mac.",
 	invalid_model: "That model name is not valid.",
 	invalid_entry: "That message is no longer in this session.",
+	not_moved: "The session did not move.",
 	no_launch: "Start pi on the Mac once, so the phone knows how to start it.",
 	start_failed: "The Mac could not start the session.",
 	start_timeout: "The session did not show up. Check it on the Mac.",
@@ -104,6 +105,8 @@ let liveClear;
 let compactGiveUp;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let navigateGiveUp;
+/** The transcript a tree, fork or clone left, to tell on a reconnect whether it has moved. */
+let navigatedFrom = "";
 /** Which view the DOM holds: "pair", "list" or "chat:<id>". */
 let shown = "";
 let lastLog = "";
@@ -312,7 +315,10 @@ function connect() {
 		// Its end may have been missed while the stream was down; one still streaming is sent again at once.
 		if (state.live) endLive();
 		void loadSessions();
-		void loadMessages();
+		// A "messages" event missed while the stream was down would have ended the wait.
+		void loadMessages().then(() => {
+			if (state.navigating && transcriptKey(state.messages) !== navigatedFrom) endNavigating();
+		});
 		void loadStatus();
 	};
 	current.addEventListener("sessions", () => {
@@ -868,8 +874,14 @@ async function move(call, fill) {
 	if (!id) return;
 	closeSheet();
 	state.navigating = true;
+	navigatedFrom = transcriptKey(state.messages);
 	clearTimeout(navigateGiveUp);
-	navigateGiveUp = setTimeout(endNavigating, NAVIGATE_GIVE_UP_MS);
+	// The reply box may hold an edit's text, which would go to the session as it is.
+	navigateGiveUp = setTimeout(() => {
+		if (!state.navigating) return;
+		state.error = errorText("not_moved");
+		endNavigating();
+	}, NAVIGATE_GIVE_UP_MS);
 	render();
 	try {
 		await call(id);
@@ -881,6 +893,11 @@ async function move(call, fill) {
 		endNavigating();
 		handleError(error);
 	}
+}
+
+/** @param {Message[]} messages */
+function transcriptKey(messages) {
+	return messages.map((m) => m.id).join("\n");
 }
 
 function endNavigating() {
@@ -946,7 +963,7 @@ async function send() {
 	const value = text.value.trim();
 	const id = state.open;
 	const resume = state.sessions.find((s) => s.id === id)?.resumable === true;
-	if (!value || !id || (resume && state.starting)) return;
+	if (!value || !id || state.navigating || (resume && state.starting)) return;
 	if (resume) state.starting = { from: id };
 	text.value = "";
 	text.style.height = "auto";
