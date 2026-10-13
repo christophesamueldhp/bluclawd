@@ -95,6 +95,15 @@ function literalArg(arg: string): string {
 	return arg.endsWith(";") ? `${arg.slice(0, -1)}\\;` : arg;
 }
 
+function screenLines(out: string): string[] {
+	const lines = out.split("\n");
+	while (lines.length > 0 && !lines[lines.length - 1].trim()) lines.pop();
+	return lines.map((line) => line.trimEnd());
+}
+
+/** Each command but attach is a quick round-trip to the server: a hung one must not hold up the daemon. */
+const EXEC_TIMEOUT_MS = 2000;
+
 type Run = (args: string[], options?: { inherit?: boolean; outsideTmux?: boolean }) => string;
 
 export class Tmux {
@@ -113,6 +122,18 @@ export class Tmux {
 	/** Whether tmux is installed: agent view needs it. */
 	static available(): boolean {
 		return spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
+	}
+
+	/** Whether a command failed because its session, or the whole server, is not there. */
+	static gone(error: unknown): boolean {
+		// stderr, not the message: that also holds the command's arguments, such as text typed.
+		const stderr = (error as { stderr?: unknown } | undefined)?.stderr;
+		return (
+			typeof stderr === "string" &&
+			/can't find (session|window|pane)|no server running|error connecting to .* \(No such file or directory\)/.test(
+				stderr,
+			)
+		);
 	}
 
 	/** The tmux session this process runs in, when it is a pane's pi. */
@@ -208,9 +229,16 @@ export class Tmux {
 
 	/** The last `lines` lines of a session's output, trailing blank lines dropped. */
 	capture(name: string, lines: number): string[] {
-		const out = this.run(["capture-pane", "-p", "-t", `=${name}:`, "-S", `-${lines}`]).split("\n");
-		while (out.length > 0 && !out[out.length - 1].trim()) out.pop();
-		return out.map((line) => line.trimEnd());
+		return screenLines(this.run(["capture-pane", "-p", "-t", `=${name}:`, "-S", `-${lines}`]));
+	}
+
+	/** What a session's pane shows, trailing blank lines dropped; on the main screen, `history` lines above it too. */
+	screen(name: string, history: number): string[] {
+		// A fullscreen pi is on the alternate screen: the main screen's history is from before it.
+		const alternate = this.run(["display-message", "-p", "-t", `=${name}:`, "#{alternate_on}"]).trim() === "1";
+		return screenLines(
+			this.run(["capture-pane", "-p", "-t", `=${name}:`, ...(alternate ? [] : ["-S", `-${history}`])]),
+		);
 	}
 
 	/** Press keys in a session's pane, by tmux key name (`Up`, `Enter`, …). */
@@ -299,6 +327,11 @@ export class Tmux {
 			spawnSync("tmux", argv, { stdio: "inherit", env });
 			return "";
 		}
-		return execFileSync("tmux", argv, { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] });
+		return execFileSync("tmux", argv, {
+			encoding: "utf8",
+			env,
+			stdio: ["ignore", "pipe", "pipe"],
+			timeout: EXEC_TIMEOUT_MS,
+		});
 	}
 }

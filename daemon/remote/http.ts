@@ -9,7 +9,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
 import { stripAnsi } from "../../ext/_shared/ansi.ts";
-import type { Tmux } from "../../ext/agent-view/tmux.ts";
+import { Tmux } from "../../ext/agent-view/tmux.ts";
 import type { InstanceSummary, LiveSnapshot, PaneLaunch, PaneMessage, PaneReport } from "../ipc/protocol.ts";
 import { RemoteEvents } from "./events.ts";
 import type { RemoteStore } from "./pairing.ts";
@@ -31,7 +31,7 @@ export interface RemoteDeps {
 	/** A running pane's latest report. */
 	report(sessionId: string): PaneReport | undefined;
 	/** Agent view's tmux server: what a pane shows, and keys typed into it. */
-	tmux: Pick<Tmux, "capture" | "sendKeys" | "sendText">;
+	tmux: Pick<Tmux, "screen" | "sendKeys" | "sendText">;
 	webDir: string;
 }
 
@@ -56,9 +56,10 @@ const MODEL_PATTERN = /^\w[\w.-]*\/[\w.:/@+-]+$/;
 /** pi's entry ids (8 hex digits, or a whole UUID): one word on the pane's `/remote-control` line. */
 const ENTRY_PATTERN = /^[0-9a-f-]{8,36}$/;
 const SCREEN_LINES = 60;
-/** What a dialog needs, and nothing that would interrupt or quit pi (no C-c, no C-d). */
+/** What a dialog needs. Never C-c or C-d, which quit pi; Escape still aborts a turn, as it does on the Mac. */
 const KEYS = new Set(["Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "Space", "BSpace"]);
-const KEYS_MAX = 16;
+/** One at a time: Escape and the key after it would reach pi as one Alt chord. */
+const KEYS_MAX = 1;
 const TEXT_MAX = 1024;
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -135,7 +136,7 @@ function keysIn(body: Record<string, unknown>): { keys: string[] } | { text: str
 		if (keys.every((key) => typeof key === "string" && KEYS.has(key))) return { keys };
 	}
 	if (keys === undefined && typeof text === "string" && text.length > 0 && text.length <= TEXT_MAX) {
-		if (!/[\u0000-\u001f\u007f-\u009f]/.test(text)) return { text };
+		if (!/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(text)) return { text };
 	}
 	throw new HttpError(400, "invalid_keys");
 }
@@ -270,19 +271,20 @@ async function handle(
 	if (action === "screen" || action === "keys") {
 		if (req.method !== (action === "screen" ? "GET" : "POST")) return json(res, 405, { error: "method_not_allowed" });
 		const input = action === "keys" ? keysIn(await readJson(req)) : undefined;
-		// The tmux session its pi registered from, never a name from the request.
-		const pane = findSession(deps.listInstances(), id)?.pane;
+		// The tmux session its pi registered from, never a name from the request; looked up again after a body.
+		const pane = (input ? findSession(deps.listInstances(), id) : found)?.pane;
 		if (!pane) return json(res, 404, { error: "unknown_session" });
 		let lines: string[] = [];
 		try {
-			if (!input) lines = deps.tmux.capture(pane, SCREEN_LINES);
+			if (!input) lines = deps.tmux.screen(pane, SCREEN_LINES);
 			else if ("keys" in input) deps.tmux.sendKeys(pane, input.keys);
 			else deps.tmux.sendText(pane, input.text);
-		} catch {
-			// Its tmux session ended before its pi unregistered.
+		} catch (error) {
+			// Its tmux session ended before its pi unregistered; any other failure is the Mac's.
+			if (!Tmux.gone(error)) throw error;
 			return json(res, 404, { error: "unknown_session" });
 		}
-		// capture-pane gives that much history and the visible screen too.
+		// A main-screen pane gives that much history above its screen; a tall screen may be longer still.
 		return json(res, 200, input ? { ok: true } : { lines: lines.slice(-SCREEN_LINES).map(stripAnsi) });
 	}
 

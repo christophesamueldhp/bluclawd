@@ -101,6 +101,8 @@ const state = {
 	screen: undefined,
 	/** Keys or text are on their way to the pane. */
 	typing: false,
+	/** The terminal sheet's own error code, so the banner keeps its Answer button. @type {string | undefined} */
+	termError: undefined,
 	/** @type {string | undefined} */ error: undefined,
 };
 
@@ -185,6 +187,9 @@ function standalone() {
 function handleError(error) {
 	if (error instanceof Unauthorized) {
 		source?.close();
+		// The terminal sheet closes: no polling meanwhile, and it does not pop up again once paired anew.
+		state.terminal = false;
+		pollScreen();
 		render();
 		return;
 	}
@@ -289,7 +294,7 @@ async function loadStatus() {
 
 async function loadScreen() {
 	const id = state.open;
-	if (!id || !state.terminal) return;
+	if (!id || !state.terminal || state.termError === "unknown_session") return;
 	const request = ++screenRequest;
 	try {
 		const lines = await api.screen(id);
@@ -297,15 +302,29 @@ async function loadScreen() {
 		state.screen = lines;
 		render();
 	} catch (error) {
-		handleError(error);
+		// A stale reply must not stop a newer sheet's polling.
+		if (error instanceof Unauthorized || request === screenRequest) terminalError(error);
 	}
+}
+
+/** In the sheet, not the banner. @param {unknown} error */
+function terminalError(error) {
+	if (error instanceof Unauthorized) {
+		handleError(error);
+		return;
+	}
+	const message = error instanceof Error ? error.message : String(error);
+	if (!(error instanceof TypeError) && !/^HTTP 5\d\d$/.test(message)) state.termError = message;
+	// A gone pane stays gone: its last screen and the message stay, the polling stops.
+	if (message === "unknown_session") pollScreen();
+	render();
 }
 
 /** While the terminal sheet is open and the app is on screen. */
 function pollScreen() {
 	clearInterval(screenTimer);
 	screenTimer = undefined;
-	if (state.terminal && document.visibilityState === "visible") {
+	if (state.terminal && state.termError !== "unknown_session" && document.visibilityState === "visible") {
 		screenTimer = setInterval(() => void loadScreen(), SCREEN_POLL_MS);
 	}
 }
@@ -817,8 +836,8 @@ function updateTerminal(sheet) {
 		sheet.dataset.html = "terminal";
 	}
 	const error = $("#term-error");
-	error.textContent = state.error ?? "";
-	error.hidden = !state.error;
+	error.textContent = state.termError ? errorText(state.termError) : "";
+	error.hidden = !state.termError;
 	const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (sheet.querySelectorAll(".press, #term-send"));
 	for (const button of buttons) button.disabled = state.typing;
 	const screen = $("#screen");
@@ -928,6 +947,10 @@ function bindChat() {
 			if (key) void answer({ keys: [key] });
 		}
 	});
+	// The text field keeps focus, and iOS its keyboard, while a key is pressed; the click still comes.
+	sheet.addEventListener("pointerdown", (/** @type {Event} */ event) => {
+		if (/** @type {Element} */ (event.target).closest(".press")) event.preventDefault();
+	});
 	sheet.addEventListener("submit", (/** @type {Event} */ event) => {
 		event.preventDefault();
 		const text = $("#term-input")?.value;
@@ -971,7 +994,7 @@ function openTerminal() {
 	state.sheetOpen = false;
 	state.menu = undefined;
 	state.screen = undefined;
-	state.error = undefined;
+	state.termError = undefined;
 	// A fresh text field, not the one left from the last time it was open.
 	$("#sheet").dataset.html = "";
 	render();
@@ -984,7 +1007,7 @@ async function answer(input) {
 	const id = state.open;
 	if (!id || state.typing) return;
 	state.typing = true;
-	state.error = undefined;
+	state.termError = undefined;
 	render();
 	try {
 		if ("keys" in input) await api.keys(id, input.keys);
@@ -995,7 +1018,7 @@ async function answer(input) {
 		}
 		setTimeout(() => void loadScreen(), SCREEN_SETTLE_MS);
 	} catch (error) {
-		handleError(error);
+		terminalError(error);
 	} finally {
 		state.typing = false;
 		render();

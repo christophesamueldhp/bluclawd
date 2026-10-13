@@ -26,6 +26,7 @@ describe("remote HTTP API", () => {
 	let reports: Map<string, PaneReport>;
 	let screens: Map<string, string[]>;
 	let typed: Array<{ pane: string; keys?: string[]; text?: string }>;
+	let tmuxFails: boolean;
 
 	beforeEach(async () => {
 		dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-http-"));
@@ -54,6 +55,15 @@ describe("remote HTTP API", () => {
 		reports = new Map();
 		screens = new Map();
 		typed = [];
+		tmuxFails = false;
+		// As Tmux throws: tmux's own complaint on stderr.
+		const reach = (pane: string) => {
+			if (tmuxFails)
+				throw Object.assign(new Error("Command failed: tmux"), { stderr: "server exited unexpectedly\n" });
+			if (!screens.has(pane)) {
+				throw Object.assign(new Error("Command failed: tmux"), { stderr: `can't find session: ${pane}\n` });
+			}
+		};
 		store = new RemoteStore(join(dir, "remote.json"));
 		server = await startRemoteServer(
 			{
@@ -77,17 +87,17 @@ describe("remote HTTP API", () => {
 				},
 				report: (id) => reports.get(id),
 				tmux: {
-					capture: (pane, lines) => {
-						const screen = screens.get(pane);
-						if (!screen) throw new Error("can't find session");
-						return screen.slice(-lines);
+					// All of it: a main-screen pane gives its history and the visible screen too.
+					screen: (pane) => {
+						reach(pane);
+						return screens.get(pane) ?? [];
 					},
 					sendKeys: (pane, keys) => {
-						if (!screens.has(pane)) throw new Error("can't find session");
+						reach(pane);
 						typed.push({ pane, keys });
 					},
 					sendText: (pane, text) => {
-						if (!screens.has(pane)) throw new Error("can't find session");
+						reach(pane);
 						typed.push({ pane, text });
 					},
 				},
@@ -373,12 +383,12 @@ describe("remote HTTP API", () => {
 		it("presses allowed keys and types text into the session's own pane", async () => {
 			screens.set("pi-live", []);
 			const token = await pair();
-			const pressed = await keys(token, "live", { keys: ["Down", "Down", "Enter"] });
+			const pressed = await keys(token, "live", { keys: ["Down"] });
 			expect(pressed.status).toBe(200);
 			expect(await pressed.json()).toEqual({ ok: true });
 			expect((await keys(token, "live", { text: "-rf; echo hi" })).status).toBe(200);
 			expect(typed).toEqual([
-				{ pane: "pi-live", keys: ["Down", "Down", "Enter"] },
+				{ pane: "pi-live", keys: ["Down"] },
 				{ pane: "pi-live", text: "-rf; echo hi" },
 			]);
 			expect((await fetch(`${base}/api/sessions/live/keys`, { headers: auth(token) })).status).toBe(405);
@@ -393,13 +403,16 @@ describe("remote HTTP API", () => {
 				{ keys: "Enter" },
 				{ keys: ["C-c"] },
 				{ keys: ["Enter", 1] },
-				{ keys: Array(17).fill("Up") },
+				// One at a time: Escape and the next key would reach pi as an Alt chord.
+				{ keys: ["Escape", "Up"] },
 				{ text: "" },
 				{ text: 5 },
 				{ text: "x".repeat(1025) },
 				{ text: "yes\n" },
 				{ text: "a\tb" },
 				{ text: "\u001b[A" },
+				{ text: "a\u2028b" },
+				{ text: "a\u2029b" },
 				{ keys: ["Enter"], text: "y" },
 			]) {
 				const res = await keys(token, "live", body);
@@ -407,7 +420,7 @@ describe("remote HTTP API", () => {
 				expect(await res.json()).toEqual({ error: "invalid_keys" });
 			}
 			expect((await keys(token, "live", { text: "x".repeat(1024) })).status).toBe(200);
-			expect((await keys(token, "live", { keys: Array(16).fill("Up") })).status).toBe(200);
+			expect((await keys(token, "live", { keys: ["Escape"] })).status).toBe(200);
 			expect(typed).toHaveLength(2);
 		});
 
@@ -424,6 +437,18 @@ describe("remote HTTP API", () => {
 				expect(await res.json()).toEqual({ error: "unknown_session" });
 			}
 			expect(typed).toEqual([]);
+		});
+
+		it("answers 500, not 404, when tmux fails while the pane is there", async () => {
+			screens.set("pi-live", ["› Allow"]);
+			tmuxFails = true;
+			const token = await pair();
+			const screen = await fetch(`${base}/api/sessions/live/screen`, { headers: auth(token) });
+			expect(screen.status).toBe(500);
+			expect(await screen.json()).toEqual({ error: "internal_error" });
+			const res = await keys(token, "live", { text: "y" });
+			expect(res.status).toBe(500);
+			expect(await res.json()).toEqual({ error: "internal_error" });
 		});
 	});
 

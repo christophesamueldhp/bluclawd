@@ -390,6 +390,39 @@ describe("tmux", () => {
 		]);
 	});
 
+	it("shows a fullscreen pane's screen alone, and a main-screen pane's with its history", () => {
+		const runs: string[][] = [];
+		let alternate = "1";
+		const tmux = new Tmux("/srv", (args) => {
+			runs.push(args);
+			return args[0] === "display-message" ? `${alternate}\n` : "› Allow  \nDeny\n\n\n";
+		});
+		expect(tmux.screen("pi-a", 60)).toEqual(["› Allow", "Deny"]);
+		alternate = "0";
+		tmux.screen("pi-a", 60);
+		expect(runs).toEqual([
+			["display-message", "-p", "-t", "=pi-a:", "#{alternate_on}"],
+			["capture-pane", "-p", "-t", "=pi-a:"],
+			["display-message", "-p", "-t", "=pi-a:", "#{alternate_on}"],
+			["capture-pane", "-p", "-t", "=pi-a:", "-S", "-60"],
+		]);
+	});
+
+	it("tells a session or server that is not there from any other failure", () => {
+		const failed = (stderr: string) => Object.assign(new Error(`Command failed: tmux\n${stderr}`), { stderr });
+		expect(Tmux.gone(failed("can't find session: pi-a\n"))).toBe(true);
+		expect(Tmux.gone(failed("can't find pane: %3\n"))).toBe(true);
+		expect(Tmux.gone(failed("no server running on /srv/tmux.sock\n"))).toBe(true);
+		expect(Tmux.gone(failed("error connecting to /srv/tmux.sock (No such file or directory)\n"))).toBe(true);
+		expect(Tmux.gone(failed("server exited unexpectedly\n"))).toBe(false);
+		expect(Tmux.gone(failed("error connecting to /srv/tmux.sock (Permission denied)\n"))).toBe(false);
+		// What the command sent is no evidence: only tmux's own complaint is.
+		expect(Tmux.gone(new Error("Command failed: tmux send-keys -l -- can't find session"))).toBe(false);
+		expect(Tmux.gone(Object.assign(new Error("spawnSync tmux ETIMEDOUT"), { code: "ETIMEDOUT", stderr: "" }))).toBe(
+			false,
+		);
+	});
+
 	it("never ends a session it cannot SIGKILL the pi of: a hung-up pi would carry it on", () => {
 		const runs: string[][] = [];
 		const tmux = new Tmux("/srv", (args) => {
