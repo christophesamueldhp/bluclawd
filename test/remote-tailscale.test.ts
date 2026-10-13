@@ -1,7 +1,24 @@
 // test/remote-tailscale.test.ts
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { pairingText } from "../ext/remote/message.ts";
-import { commandError, connectedName, funnelOn, serveState } from "../ext/remote/tailscale.ts";
+import {
+	commandError,
+	connectedName,
+	EnableNeeded,
+	enablePrompt,
+	funnelOn,
+	serve,
+	serveState,
+} from "../ext/remote/tailscale.ts";
+
+const SERVE_OFF = `Serve is not enabled on your tailnet.
+To enable, visit:
+
+         https://login.tailscale.com/f/serve?node=nAbC123
+`;
 
 const serveConfig = (path: string, proxy: string) => ({
 	TCP: { "443": { HTTPS: true } },
@@ -46,6 +63,46 @@ describe("remote control: tailscale and pairing text", () => {
 			"tailscale did not finish within 10s\npartial",
 		);
 		expect(commandError({ message: "x", signal: "SIGTERM" }, "", "")).toBe("tailscale did not finish within 10s\nx");
+	});
+
+	it("tells a feature the tailnet has to turn on from the link tailscale prints for it", () => {
+		expect(enablePrompt(SERVE_OFF)).toBe(
+			"Tailscale Serve is off for your tailnet. Turn it on at https://login.tailscale.com/f/serve?node=nAbC123 (once), then run /remote-control pair.",
+		);
+		expect(
+			enablePrompt(
+				"HTTPS is not enabled on your tailnet.\nTo enable, visit:\n\n  https://login.tailscale.com/f/https\n",
+			),
+		).toBe(
+			"Tailscale HTTPS is off for your tailnet. Turn it on at https://login.tailscale.com/f/https (once), then run /remote-control pair.",
+		);
+		// Until the link has arrived, and for any other output, there is nothing to say yet.
+		expect(enablePrompt("Serve is not enabled on your tailnet.\nTo enable, visit:\n")).toBeUndefined();
+		expect(enablePrompt("Available on the internet:\nhttps://mac.tail1.ts.net/\n")).toBeUndefined();
+	});
+
+	it("stops a tailscale serve that waits for Serve to be turned on, with the link, well before its timeout", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "bluclawd-tailscale-"));
+		try {
+			const fake = join(dir, "tailscale");
+			const [head, ...rest] = SERVE_OFF.split("\n\n");
+			writeFileSync(
+				fake,
+				`#!/bin/sh\nprintf '%s\\n\\n' '${head}'\nsleep 0.2\nprintf '%s' '${rest.join("")}'\nexec sleep 30\n`,
+			);
+			chmodSync(fake, 0o755);
+			const started = Date.now();
+			const failed = await serve(7878, [fake]).catch((error: unknown) => error);
+			expect(Date.now() - started).toBeLessThan(5000);
+			expect(failed).toBeInstanceOf(EnableNeeded);
+			expect((failed as Error).message).toContain("https://login.tailscale.com/f/serve?node=nAbC123");
+			const ok = join(dir, "ok");
+			writeFileSync(ok, "#!/bin/sh\necho 'Available within your tailnet'\n");
+			chmodSync(ok, 0o755);
+			await expect(serve(7878, [ok])).resolves.toBeUndefined();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("tells how to pair, with the code in two groups", () => {

@@ -23,7 +23,7 @@ import { piCommand, Tmux } from "../agent-view/tmux.ts";
 import { LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
 import { applyPaneMessage, buildReport, navigate } from "./report.ts";
-import { serve, tailscaleInfo } from "./tailscale.ts";
+import { EnableNeeded, serve, tailscaleInfo } from "./tailscale.ts";
 
 function message(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -95,7 +95,8 @@ async function show(result: RemoteResult, ctx: ExtensionCommandContext): Promise
 		try {
 			await serve(result.port);
 		} catch (error) {
-			ctx.ui.notify(`tailscale serve failed: ${message(error)}`, "error");
+			if (error instanceof EnableNeeded) ctx.ui.notify(error.message, "warning");
+			else ctx.ui.notify(`tailscale serve failed: ${message(error)}`, "error");
 			return;
 		}
 	}

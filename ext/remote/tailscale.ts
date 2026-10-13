@@ -31,27 +31,56 @@ export function commandError(
 	return error.killed === true || error.signal ? `${TIMEOUT_MESSAGE}\n${text}` : text;
 }
 
+/** A feature the tailnet has not turned on: tailscale prints where to turn it on, then waits. */
+export class EnableNeeded extends Error {}
+
+/** What to tell the user once tailscale's "… is not enabled … visit <link>" has arrived. */
+export function enablePrompt(output: string): string | undefined {
+	const line = output.split("\n").find((l) => /not enabled/i.test(l));
+	const url = /https:\/\/login\.tailscale\.com\/\S+/.exec(output)?.[0];
+	if (!line || !url) return undefined;
+	const feature = /\bHTTPS\b/i.test(line) ? "HTTPS" : "Serve";
+	return `Tailscale ${feature} is off for your tailnet. Turn it on at ${url} (once), then run /remote-control pair.`;
+}
+
 /** The macOS app ships its CLI inside the bundle and puts it on PATH only when asked to. */
 const BINARIES = ["tailscale", "/Applications/Tailscale.app/Contents/MacOS/Tailscale"];
 
-async function run(args: string[]): Promise<string> {
-	for (const [i, binary] of BINARIES.entries()) {
+async function run(
+	args: string[],
+	binaries = BINARIES,
+	watch?: (output: string) => string | undefined,
+): Promise<string> {
+	for (const [i, binary] of binaries.entries()) {
 		try {
-			return await runWith(binary, args);
+			return await runWith(binary, args, watch);
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT" || i === BINARIES.length - 1) throw error;
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT" || i === binaries.length - 1) throw error;
 		}
 	}
 	throw new Error("unreachable");
 }
 
-function runWith(binary: string, args: string[]): Promise<string> {
+/** `watch`: read the output as it arrives; a message from it ends the command at once. */
+function runWith(binary: string, args: string[], watch?: (output: string) => string | undefined): Promise<string> {
 	return new Promise((resolve, reject) => {
-		execFile(binary, args, { timeout: 10_000 }, (error, stdout, stderr) => {
+		const child = execFile(binary, args, { timeout: 10_000 }, (error, stdout, stderr) => {
 			if (!error) return resolve(stdout);
 			error.message = commandError(error, stdout, stderr);
 			reject(error);
 		});
+		if (!watch) return;
+		let output = "";
+		const read = (chunk: Buffer | string) => {
+			if (child.killed) return;
+			output += chunk;
+			const message = watch(output);
+			if (!message) return;
+			reject(new EnableNeeded(message));
+			child.kill();
+		};
+		child.stdout?.on("data", read);
+		child.stderr?.on("data", read);
 	});
 }
 
@@ -94,7 +123,8 @@ export async function tailscaleInfo(port: number): Promise<TailscaleInfo> {
 	return { installed: true, dnsName, serve: serveState(config, dnsName, port), funnel: funnelOn(config, dnsName) };
 }
 
-/** Proxy https://<this machine's tailnet name>/ to 127.0.0.1:<port>, in the background. */
-export async function serve(port: number): Promise<void> {
-	await run(["serve", "--bg", String(port)]);
+/** Proxy https://<this machine's tailnet name>/ to 127.0.0.1:<port>, in the background. Throws
+ *  EnableNeeded when the tailnet has Serve or HTTPS off, which tailscale would wait on. */
+export async function serve(port: number, binaries = BINARIES): Promise<void> {
+	await run(["serve", "--bg", String(port)], binaries, enablePrompt);
 }
