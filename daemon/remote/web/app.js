@@ -31,6 +31,9 @@ const LIVE_CLEAR_MS = 3000;
 const COMPACT_GIVE_UP_MS = 120_000;
 /** A tree, fork or clone the pane skipped (or one that changed nothing) shows nothing either. */
 const NAVIGATE_GIVE_UP_MS = 15_000;
+/** A sent prompt holds the session's actions back until its turn is seen starting, or this long:
+ *  one pi does not show verbatim (a command, a template) is never matched in the transcript. */
+const PENDING_GRACE_MS = 15_000;
 const SCREEN_POLL_MS = 2000;
 /** pi redraws a moment after a key reaches it. */
 const SCREEN_SETTLE_MS = 150;
@@ -72,7 +75,11 @@ const state = {
 	/** @type {Session[]} */ sessions: [],
 	/** @type {string | undefined} */ open: undefined,
 	/** @type {Message[]} */ messages: [],
-	/** @type {{ text: string, before: number }[]} */ pending: [],
+	/**
+	 * Prompts sent and not yet in the transcript. `started`: the session was seen working since.
+	 * @type {{ text: string, before: number, sentAt: number, started?: boolean }[]}
+	 */
+	pending: [],
 	/** The open session's reply in progress, streamed by its pane. @type {LiveSnapshot | undefined} */ live: undefined,
 	/** @type {string[]} */ directories: [],
 	/**
@@ -157,6 +164,12 @@ let followed;
  * @type {string | undefined}
  */
 let notice;
+/**
+ * The open session's turn ended, as of a list asked for at this time: the next transcript fetch
+ * drops the prompts sent before then that it still lacks, which pi did not write as sent.
+ * @type {number | undefined}
+ */
+let turnEndedAt;
 
 /** @param {unknown} text */
 function esc(text) {
@@ -213,7 +226,16 @@ function handleError(error) {
 
 async function loadSessions() {
 	try {
+		const asked = Date.now();
+		const was = state.sessions.find((s) => s.id === state.open)?.state;
 		state.sessions = await api.sessions();
+		const now = state.sessions.find((s) => s.id === state.open)?.state;
+		if (now === "working") {
+			for (const p of state.pending) if (p.sentAt < asked) p.started = true;
+		} else if (was === "working" && now !== undefined && now !== "needs") {
+			turnEndedAt = asked;
+			void loadMessages();
+		}
 		state.loaded = true;
 		state.error = notice;
 		notice = undefined;
@@ -252,8 +274,10 @@ function waitForPane(pane, from) {
 	startTimer = setTimeout(() => {
 		if (state.starting !== starting) return;
 		state.starting = undefined;
+		// What was sent reached no session.
+		state.pending = [];
 		if (from !== undefined && state.open === from) {
-			// The resumed row is gone: back to the list, where the message outlives the reconnect.
+			// Back to the list, where the message outlives the reconnect.
 			notice = errorText("start_timeout");
 			location.hash = "";
 			route();
@@ -290,6 +314,9 @@ async function loadMessages() {
 		state.live = settle(state.live, liveEnded, latest);
 		// A sent prompt is pending until the transcript has one more copy of its text than when it was sent.
 		state.pending = state.pending.filter((p) => userCount(state.messages, p.text) <= p.before);
+		const ended = turnEndedAt;
+		turnEndedAt = undefined;
+		if (ended !== undefined) state.pending = state.pending.filter((p) => p.sentAt >= ended);
 		render();
 	} catch (error) {
 		handleError(error);
@@ -739,7 +766,7 @@ ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
 /**
  * Waiting on an answer is mid-turn too, and compacting, going back or forking would cut the turn
  * short; a second one before the first has moved the session would race it. So would one right
- * behind a sent prompt, whose turn may not have started yet.
+ * behind a sent prompt, whose turn may not have started yet (see PENDING_GRACE_MS).
  * @param {Session | undefined} session
  */
 function isBusy(session) {
@@ -748,7 +775,7 @@ function isBusy(session) {
 		session?.state === "needs" ||
 		state.compacting ||
 		state.navigating ||
-		state.pending.length > 0 ||
+		state.pending.some((p) => !p.started && Date.now() - p.sentAt < PENDING_GRACE_MS) ||
 		!session?.alive
 	);
 }
@@ -1211,7 +1238,9 @@ async function send() {
 	text.value = "";
 	text.style.height = "auto";
 	const before = userCount(state.messages, value) + state.pending.filter((p) => p.text === value).length;
-	state.pending.push({ text: value, before });
+	state.pending.push({ text: value, before, sentAt: Date.now() });
+	// The actions it holds back come back by themselves once the grace is over.
+	setTimeout(render, PENDING_GRACE_MS);
 	render();
 	$("#scroll").scrollTop = $("#scroll").scrollHeight;
 	try {
@@ -1240,6 +1269,7 @@ function route() {
 		// Following a resumed session to its pane keeps the reply on screen until pi writes it.
 		if (open === undefined || open !== followed) state.pending = [];
 		followed = undefined;
+		turnEndedAt = undefined;
 		state.open = open;
 		state.messages = [];
 		state.messagesLoaded = false;
