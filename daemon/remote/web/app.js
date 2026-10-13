@@ -35,6 +35,7 @@ const ERRORS = {
 	no_status: "This session has not reported its status yet.",
 	invalid_cwd: "That directory does not exist on the Mac.",
 	invalid_model: "That model name is not valid.",
+	invalid_entry: "That message is no longer in this session.",
 	no_launch: "Start pi on the Mac once, so the phone knows how to start it.",
 	start_failed: "The Mac could not start the session.",
 	start_timeout: "The session did not show up. Check it on the Mac.",
@@ -73,6 +74,8 @@ const state = {
 	report: undefined,
 	/** Compact was asked for and the pane has not reported since. */
 	compacting: false,
+	/** The message whose actions the sheet shows instead of the status. @type {{ id: string, text: string } | undefined} */
+	menu: undefined,
 	/** @type {string | undefined} */ error: undefined,
 };
 
@@ -464,8 +467,11 @@ function logHtml(session) {
 	const running = new Set((state.live?.tools ?? []).filter((t) => t.running).map((t) => t.id));
 	const parts = [];
 	for (const m of state.messages) {
-		if (m.kind === "user") parts.push(`<div class="u">${esc(m.text)}</div>`);
-		else if (m.kind === "assistant") {
+		if (m.kind === "user") {
+			parts.push(
+				`<div class="mine"><button class="more" data-id="${esc(m.id)}" aria-label="Actions for this message" aria-haspopup="dialog">⋯</button><div class="u">${esc(m.text)}</div></div>`,
+			);
+		} else if (m.kind === "assistant") {
 			if (m.thinking) {
 				parts.push(
 					`<details class="think" data-key="think:${esc(m.id)}"><summary>Thinking</summary><pre>${esc(m.thinking)}</pre></details>`,
@@ -569,15 +575,31 @@ ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
 		return `${head}<p class="muted">${esc(errorText(why))}</p>`;
 	}
 	const usage = report.usage;
-	// Waiting on an answer is mid-turn too, and compacting would abort the turn.
-	const busy = session?.state === "working" || session?.state === "needs" || state.compacting || !session?.alive;
+	const busy = isBusy(session);
 	return `${head}<dl class="facts">
 <dt><label for="model">Model</label></dt><dd><select id="model">${modelOptions(report)}</select></dd>
 <dt>Thinking</dt><dd>${esc(report.thinkingLevel ?? "off")}</dd>
 <dt>Context</dt><dd>${contextHtml(report.context)}</dd>
 <dt>Tokens</dt><dd>${usage ? `↑ ${esc(tokens(usage.input))} in · ↓ ${esc(tokens(usage.output))} out${usage.cacheRead ? ` · R ${esc(tokens(usage.cacheRead))}` : ""}${usage.cacheWrite ? ` · W ${esc(tokens(usage.cacheWrite))}` : ""}` : "Unknown"}</dd>
 <dt>Cost</dt><dd>${usage ? `$${esc(usage.cost.toFixed(3))}` : "Unknown"}</dd>
-</dl><button class="compact" id="compact"${busy ? " disabled" : ""}>${state.compacting ? "Compacting…" : "Compact"}</button>`;
+</dl><button class="compact" id="compact"${busy ? " disabled" : ""}>${state.compacting ? "Compacting…" : "Compact"}</button>
+<button class="compact clone" id="clone"${busy ? " disabled" : ""}>Clone session</button>`;
+}
+
+/** Waiting on an answer is mid-turn too, and compacting, going back or forking would cut the turn short. @param {Session | undefined} session */
+function isBusy(session) {
+	return session?.state === "working" || session?.state === "needs" || state.compacting || !session?.alive;
+}
+
+/** @param {Session | undefined} session @param {{ id: string, text: string }} menu */
+function menuHtml(session, menu) {
+	const busy = isBusy(session);
+	const why = !session?.alive ? errorText("session_not_running") : "Available once the session is idle.";
+	const disabled = busy ? " disabled" : "";
+	return `<header class="sheet-bar"><h2>Your message</h2><button class="close" id="sheet-close">Done</button></header>
+<p class="quote">${esc(menu.text)}</p>${busy ? `<p class="muted">${esc(why)}</p>` : ""}
+<div class="actions"><button class="action" id="edit-here"${disabled}>Edit from here<small>A new session from before this message, with its text in the reply box.</small></button>
+<button class="action" id="back-here"${disabled}>Go back to here<small>This session continues from before this message.</small></button></div>`;
 }
 
 // ---- render ----
@@ -660,10 +682,12 @@ function updateChat() {
 /** Rebuilt only when it changes, so an open model picker is not reset under the finger. @param {Session | undefined} session */
 function updateSheet(session) {
 	const sheet = $("#sheet");
-	sheet.hidden = !state.sheetOpen;
-	$("#backdrop").hidden = !state.sheetOpen;
-	if (!state.sheetOpen) return;
-	const html = sheetHtml(session);
+	const open = state.sheetOpen || state.menu !== undefined;
+	sheet.hidden = !open;
+	$("#backdrop").hidden = !open;
+	if (!open) return;
+	sheet.setAttribute("aria-label", state.menu ? "Message actions" : "Session status");
+	const html = state.menu ? menuHtml(session, state.menu) : sheetHtml(session);
 	if (sheet.dataset.html === html) return;
 	sheet.innerHTML = html;
 	sheet.dataset.html = html;
@@ -756,6 +780,17 @@ function bindChat() {
 		const target = /** @type {Element} */ (event.target);
 		if (target.closest("#sheet-close")) closeSheet();
 		else if (target.closest("#compact")) void compact();
+		else if (target.closest("#clone")) void clone();
+		else if (target.closest("#edit-here")) void editFrom();
+		else if (target.closest("#back-here")) void goBack();
+	});
+	$("#log").addEventListener("click", (/** @type {Event} */ event) => {
+		const more = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".more"));
+		const message = state.messages.find((m) => m.kind === "user" && m.id === more?.dataset.id);
+		if (!message) return;
+		state.menu = { id: message.id, text: message.text ?? "" };
+		state.error = undefined;
+		render();
 	});
 	sheet.addEventListener("change", (/** @type {Event} */ event) => {
 		const target = /** @type {HTMLSelectElement} */ (event.target);
@@ -774,7 +809,49 @@ function openSheet() {
 function closeSheet() {
 	state.sheetOpen = false;
 	state.compacting = false;
+	state.menu = undefined;
 	render();
+}
+
+/** Its row follows the clone on the next heartbeat, with the same transcript. */
+async function clone() {
+	const id = state.open;
+	if (!id) return;
+	closeSheet();
+	try {
+		await api.clone(id);
+	} catch (error) {
+		handleError(error);
+	}
+}
+
+/** The sheet closes at once, so a second tap cannot send it twice; an error shows on the chat. */
+async function editFrom() {
+	const id = state.open;
+	const menu = state.menu;
+	if (!id || !menu) return;
+	closeSheet();
+	try {
+		await api.fork(id, menu.id);
+		if (state.open !== id) return;
+		const text = $("#text");
+		text.value = menu.text;
+		grow(text);
+	} catch (error) {
+		handleError(error);
+	}
+}
+
+async function goBack() {
+	const id = state.open;
+	const menu = state.menu;
+	if (!id || !menu) return;
+	closeSheet();
+	try {
+		await api.tree(id, menu.id);
+	} catch (error) {
+		handleError(error);
+	}
 }
 
 /** The pane reports the switch within a heartbeat, which refreshes the sheet. @param {string} value */
@@ -859,6 +936,7 @@ function route() {
 		state.sheetOpen = false;
 		state.report = undefined;
 		state.compacting = false;
+		state.menu = undefined;
 		connect();
 	}
 	render();

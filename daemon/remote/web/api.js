@@ -79,6 +79,12 @@ export const api = {
 	setModel: (id, provider, modelId) => call("POST", `${session(id)}/model`, { provider, id: modelId }),
 	/** @param {string} id */
 	compact: (id) => call("POST", `${session(id)}/compact`, {}),
+	/** Back to before a message of yours, in the same session. @param {string} id @param {string} entryId */
+	tree: (id, entryId) => call("POST", `${session(id)}/tree`, { entryId }),
+	/** A new session from before a message of yours. @param {string} id @param {string} entryId */
+	fork: (id, entryId) => call("POST", `${session(id)}/fork`, { entryId }),
+	/** @param {string} id */
+	clone: (id) => call("POST", `${session(id)}/clone`, {}),
 	/** `subscribed`: this device's notifications reach it. @returns {Promise<{ publicKey: string, subscribed: boolean }>} */
 	pushKey: () => call("GET", "/api/push/key"),
 	/** @param {PushSubscriptionJSON} subscription */
