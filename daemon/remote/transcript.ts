@@ -178,16 +178,30 @@ function toRemote(entry: Entry): RemoteMessage | undefined {
 	}
 }
 
-/** The last `limit` messages of the active branch. */
-export function transcriptFrom(text: string, limit: number, leafId?: string): RemoteMessage[] {
-	const messages = activeBranch(parseEntries(text), leafId)
+/** The last `limit` messages of the active branch, or the last ones before the message `before`:
+ *  none when it is not on the branch. */
+export function transcriptFrom(text: string, limit: number, leafId?: string, before?: string): RemoteMessage[] {
+	let messages = activeBranch(parseEntries(text), leafId)
 		.map(toRemote)
 		.filter((message): message is RemoteMessage => message !== undefined);
+	if (before !== undefined)
+		messages = messages.slice(
+			0,
+			Math.max(
+				messages.findIndex((m) => m.id === before),
+				0,
+			),
+		);
 	return limit > 0 ? messages.slice(-limit) : [];
 }
 
 /** A session that has not written its file yet has an empty transcript. */
-export function loadTranscript(sessionFile: string | undefined, limit: number, leafId?: string): RemoteMessage[] {
+export function loadTranscript(
+	sessionFile: string | undefined,
+	limit: number,
+	leafId?: string,
+	before?: string,
+): RemoteMessage[] {
 	if (!sessionFile) return [];
 	let text: string;
 	try {
@@ -195,5 +209,5 @@ export function loadTranscript(sessionFile: string | undefined, limit: number, l
 	} catch {
 		return [];
 	}
-	return transcriptFrom(text, limit, leafId);
+	return transcriptFrom(text, limit, leafId, before);
 }

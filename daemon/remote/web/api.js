@@ -67,8 +67,12 @@ export const api = {
 	directories: async () => (await call("GET", "/api/directories")).directories,
 	/** @param {string} cwd @param {string} task @returns {Promise<{ pane: string }>} */
 	start: (cwd, task) => call("POST", "/api/sessions", { cwd, task }),
-	/** @param {string} id */
-	messages: async (id) => (await call("GET", `${session(id)}/messages?limit=100`)).messages,
+	/**
+	 * The latest messages, or those before the message `before`; `more`: older ones are left.
+	 * @param {string} id @param {string} [before] @returns {Promise<{ messages: any[], more: boolean }>}
+	 */
+	messages: (id, before) =>
+		call("GET", `${session(id)}/messages?limit=100${before ? `&before=${encodeURIComponent(before)}` : ""}`),
 	/** A stored session resumes in a new pane, named in the reply. @param {string} id @param {string} text @returns {Promise<{ pane?: string }>} */
 	prompt: (id, text) => call("POST", `${session(id)}/prompt`, { text }),
 	/** @param {string} id */

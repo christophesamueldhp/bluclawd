@@ -261,7 +261,11 @@ async function handle(
 		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
 		const requested = Number.parseInt(url.searchParams.get("limit") ?? "", 10) || MESSAGES_DEFAULT;
 		const limit = Math.min(Math.max(requested, 1), MESSAGES_MAX);
-		return json(res, 200, { messages: loadTranscript(found.sessionFile, limit, found.leafId) });
+		const before = url.searchParams.get("before") ?? undefined;
+		if (before !== undefined && !ENTRY_PATTERN.test(before)) return json(res, 400, { error: "invalid_entry" });
+		// One past the page tells whether older messages are left.
+		const page = loadTranscript(found.sessionFile, limit + 1, found.leafId, before);
+		return json(res, 200, { messages: page.slice(-limit), more: page.length > limit });
 	}
 	if (action === "status") {
 		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });

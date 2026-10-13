@@ -599,6 +599,25 @@ describe("remote HTTP API", () => {
 		expect(await res.json()).toEqual({ directories: ["/new", "/old"] });
 	});
 
+	it("pages a transcript back from a message, and says whether older ones are left", async () => {
+		const ids = ["a1a1a1a1", "b2b2b2b2", "c3c3c3c3", "d4d4d4d4"];
+		writeFileSync(join(dir, "live.jsonl"), ids.map((id, i) => entry(id, i ? ids[i - 1] : null, `m${i}`)).join(""));
+		const token = await pair();
+		const page = async (query: string) => {
+			const res = await fetch(`${base}/api/sessions/live/messages?${query}`, { headers: auth(token) });
+			const body = (await res.json()) as { messages?: Array<{ id: string }>; more?: boolean; error?: string };
+			return { status: res.status, ids: body.messages?.map((m) => m.id), more: body.more, error: body.error };
+		};
+		expect(await page("limit=2")).toMatchObject({ ids: ["c3c3c3c3", "d4d4d4d4"], more: true });
+		expect(await page("limit=2&before=c3c3c3c3")).toMatchObject({ ids: ["a1a1a1a1", "b2b2b2b2"], more: false });
+		expect(await page("limit=1&before=c3c3c3c3")).toMatchObject({ ids: ["b2b2b2b2"], more: true });
+		expect(await page("before=a1a1a1a1")).toMatchObject({ status: 200, ids: [], more: false });
+		// Not on the branch (it moved since the page was loaded): nothing older to show from there.
+		expect(await page("before=e5e5e5e5")).toMatchObject({ status: 200, ids: [], more: false });
+		expect(await page("before=..%2Fx")).toMatchObject({ status: 400, error: "invalid_entry" });
+		expect(await page("limit=100000")).toMatchObject({ ids: ids, more: false });
+	});
+
 	it("reads a running session's transcript from the leaf it reports", async () => {
 		appendFileSync(join(dir, "live.jsonl"), entry("u2", "u1", "gone back from"));
 		instances = [{ ...instances[0], leafId: "u1" }];
@@ -612,7 +631,7 @@ describe("remote HTTP API", () => {
 		const token = await pair();
 		const res = await fetch(`${base}/api/sessions/live/messages`, { headers: auth(token) });
 		expect(res.status).toBe(200);
-		expect(await res.json()).toEqual({ messages: [] });
+		expect(await res.json()).toEqual({ messages: [], more: false });
 	});
 
 	it("signals transcript and list changes over SSE", async () => {

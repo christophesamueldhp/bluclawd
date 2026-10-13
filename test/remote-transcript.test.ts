@@ -137,6 +137,22 @@ describe("remote transcript", () => {
 		expect(toolSummary({})).toBe("");
 	});
 
+	it("pages back from a message: the last ones before it, none before one not on the branch", () => {
+		const text = jsonl(
+			msg("u1", null, { role: "user", content: "1" }),
+			msg("u2", "u1", { role: "user", content: "2" }),
+			msg("u3", "u2", { role: "user", content: "3" }),
+			msg("u4", "u3", { role: "user", content: "4" }),
+			msg("x9", "u1", { role: "user", content: "another branch" }),
+			msg("u5", "u4", { role: "user", content: "5" }),
+		);
+		expect(transcriptFrom(text, 2, undefined, "u4").map((m) => m.id)).toEqual(["u2", "u3"]);
+		expect(transcriptFrom(text, 50, undefined, "u4").map((m) => m.id)).toEqual(["u1", "u2", "u3"]);
+		expect(transcriptFrom(text, 50, undefined, "u1")).toEqual([]);
+		expect(transcriptFrom(text, 50, undefined, "x9")).toEqual([]);
+		expect(transcriptFrom(text, 50, "u3", "u3").map((m) => m.id)).toEqual(["u1", "u2"]);
+	});
+
 	it("an empty file has no branch", () => {
 		expect(activeBranch([])).toEqual([]);
 	});

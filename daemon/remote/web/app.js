@@ -82,6 +82,10 @@ const state = {
 	starting: undefined,
 	loaded: false,
 	messagesLoaded: false,
+	/** Older messages are left before the first one shown. */
+	more: false,
+	/** Older messages are on their way. */
+	loadingOlder: false,
 	online: true,
 	/** Show "Enable notifications". */
 	offerPush: false,
@@ -115,6 +119,8 @@ let source;
 let offlineTimer;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let watchdog;
+/** Older messages load this far (px) ahead of the log's top, so they are usually there when it is reached. */
+const OLDER_MARGIN = 400;
 let messagesRequest = 0;
 let statusRequest = 0;
 let screenRequest = 0;
@@ -135,6 +141,10 @@ let navigatedFrom = "";
 /** Which view the DOM holds: "pair", "list" or "chat:<id>". */
 let shown = "";
 let lastLog = "";
+/** The next log update prepends older messages: it keeps what is on screen in place. */
+let prepending = false;
+/** @type {IntersectionObserver | undefined} */
+let olderObserver;
 /**
  * The pane a resumed session's chat moved to: the replies still pending move with it.
  * @type {string | undefined}
@@ -258,18 +268,56 @@ async function loadMessages() {
 	if (!id || state.starting?.from === id) return;
 	const request = ++messagesRequest;
 	try {
-		/** @type {Message[]} */
-		const messages = await api.messages(id);
+		const page = await api.messages(id);
 		if (state.open !== id || request !== messagesRequest) return;
-		state.messages = messages;
+		/** @type {Message[]} */
+		const latest = page.messages;
+		// Older messages loaded above stay while the latest page follows on from them (it starts
+		// among them); after a tree, fork or clone it does not, and replaces them.
+		const at = latest.length ? state.messages.findIndex((m) => m.id === latest[0].id) : -1;
+		if (at > 0) state.messages = [...state.messages.slice(0, at), ...latest];
+		else {
+			state.messages = latest;
+			state.more = page.more;
+		}
 		state.messagesLoaded = true;
-		state.live = settle(state.live, liveEnded, messages);
+		state.live = settle(state.live, liveEnded, latest);
 		// A sent prompt is pending until the transcript has one more copy of its text than when it was sent.
-		state.pending = state.pending.filter((p) => userCount(messages, p.text) <= p.before);
+		state.pending = state.pending.filter((p) => userCount(state.messages, p.text) <= p.before);
 		render();
 	} catch (error) {
 		handleError(error);
 	}
+}
+
+/** The page before the first message shown, put above it; again while the top stays in view. */
+async function loadOlder() {
+	const id = state.open;
+	const first = state.messages[0];
+	if (!id || !first || !state.more || state.loadingOlder) return;
+	state.loadingOlder = true;
+	render();
+	let loaded = false;
+	try {
+		const page = await api.messages(id, first.id);
+		// Not after a refresh that replaced the log meanwhile: this page would be another branch's.
+		if (state.open === id && state.messages[0]?.id === first.id) {
+			/** @type {Message[]} */
+			const older = page.messages;
+			for (const p of state.pending) p.before += userCount(older, p.text);
+			state.messages = [...older, ...state.messages];
+			state.more = page.more;
+			prepending = true;
+			loaded = true;
+		}
+	} catch (error) {
+		handleError(error);
+	}
+	if (state.open !== id) return;
+	state.loadingOlder = false;
+	render();
+	// The observer only reports a change: a short page can leave the top in view.
+	if (loaded && $("#scroll").scrollTop < OLDER_MARGIN) void loadOlder();
 }
 
 async function loadStatus() {
@@ -521,7 +569,7 @@ function rowsHtml() {
 function chatShell() {
 	return `<header class="bar"><a class="back" href="#">‹ Sessions</a><button class="title" id="title" aria-haspopup="dialog"></button>
 <button class="stop" id="stop" hidden>Stop</button></header>
-<div id="banner"></div><section class="scroll" id="scroll"><div class="log" id="log"></div></section>
+<div id="banner"></div><section class="scroll" id="scroll"><div class="older" id="older"></div><div class="log" id="log"></div></section>
 <form class="composer" id="composer"><textarea id="text" rows="1" placeholder="Reply" aria-label="Reply" maxlength="32768"></textarea>
 <button class="send" aria-label="Send"><span aria-hidden="true">↑</span></button></form>
 <div class="backdrop" id="backdrop" hidden></div><section class="sheet" id="sheet" role="dialog" aria-label="Session status" hidden></section>`;
@@ -781,17 +829,24 @@ function updateChat() {
 		banner.innerHTML = bannerNow;
 		banner.dataset.html = bannerNow;
 	}
+	const scroll = $("#scroll");
+	const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
+	const height = scroll.scrollHeight;
+	// Its height stays the same while loading, so only what is put above moves the log.
+	const older = $("#older");
+	older.hidden = !state.more;
+	older.textContent = state.loadingOlder ? "Loading…" : "";
 	const html = logHtml(session);
 	if (html !== lastLog) {
 		lastLog = html;
-		const scroll = $("#scroll");
-		const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
 		const log = $("#log");
 		const open = new Set([...log.querySelectorAll("details[open]")].map((d) => d.dataset.key));
 		log.innerHTML = html;
 		for (const d of log.querySelectorAll("details")) if (open.has(d.dataset.key)) d.open = true;
-		if (atBottom) scroll.scrollTop = scroll.scrollHeight;
+		if (prepending) scroll.scrollTop += scroll.scrollHeight - height;
+		else if (atBottom) scroll.scrollTop = scroll.scrollHeight;
 	}
+	prepending = false;
 	const stranded = session !== undefined && !session.alive && !session.resumable;
 	// One pane starts at a time, so a resume waits for any start in flight.
 	const blocked = resuming || stranded || (state.starting !== undefined && session?.resumable === true);
@@ -913,6 +968,14 @@ async function startTask() {
 }
 
 function bindChat() {
+	olderObserver?.disconnect();
+	olderObserver = new IntersectionObserver(
+		(entries) => {
+			if (entries.some((entry) => entry.isIntersecting)) void loadOlder();
+		},
+		{ root: $("#scroll"), rootMargin: `${OLDER_MARGIN}px 0px 0px 0px` },
+	);
+	olderObserver.observe($("#older"));
 	const text = $("#text");
 	text.addEventListener("input", () => grow(text));
 	$("#composer").addEventListener("submit", (/** @type {Event} */ event) => {
@@ -1163,6 +1226,8 @@ function route() {
 		state.open = open;
 		state.messages = [];
 		state.messagesLoaded = false;
+		state.more = false;
+		state.loadingOlder = false;
 		state.live = undefined;
 		liveEnded = false;
 		clearTimeout(liveClear);
