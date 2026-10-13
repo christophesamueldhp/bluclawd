@@ -297,6 +297,7 @@ export class AgentView implements Component, Focusable {
 	private readonly replyDrafts = new Map<string, string>();
 	/** The peek's own send/answer error, shown inside the box. */
 	private replyError: string | undefined;
+	private replying = false;
 	/** The first visible body line; moved only as far as keeps the focus on screen. */
 	private scrollStart = 0;
 	/** The focused item's index, for when that item disappears. */
@@ -1423,7 +1424,12 @@ export class AgentView implements Component, Focusable {
 			this.opts.onClose();
 			return;
 		}
-		await this.replyToPane(row, text, this.opts.panes);
+		// A second enter before this reply is sent would send it again: for a stored row, a second pane.
+		if (this.replying) return;
+		this.replying = true;
+		await this.replyToPane(row, text, this.opts.panes).finally(() => {
+			this.replying = false;
+		});
 	}
 
 	/** Pane mode: a reply is the session's next prompt (queued behind a turn in progress). A

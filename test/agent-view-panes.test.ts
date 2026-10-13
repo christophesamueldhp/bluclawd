@@ -142,6 +142,23 @@ describe("agent view in pane mode", () => {
 		expect(view.render(100).join("\n")).toContain("Already being resumed from your phone");
 	});
 
+	it("enter twice on a stored session's reply starts one pane", async () => {
+		const stored: InstanceSummary = {
+			id: "s",
+			status: "stopped",
+			cwd: HERE,
+			sessionFile: "/s/s.jsonl",
+			outcome: "done",
+		};
+		const { view, calls, flush } = setup([stored]);
+		view.handleInput(" ");
+		for (const ch of "carry on") view.handleInput(ch);
+		view.handleInput(ENTER);
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls.filter(([name]) => name === "start")).toHaveLength(1);
+	});
+
 	it("a task starts a new pane with it as the first prompt; its row replaces the placeholder", async () => {
 		const instances: InstanceSummary[] = [];
 		const { view, calls, flush } = setup(instances);
