@@ -485,7 +485,7 @@ describe("daemon: pane registrations", () => {
 		expect(supervisor.sendExternal("pi-a", { type: "abort" })).toBe(false);
 	});
 
-	it("delivers a navigation alone, keeping what comes before and after it for other heartbeats", () => {
+	it("delivers a navigation or a compact alone, keeping what comes before and after it for other heartbeats", () => {
 		const supervisor = new ServerSupervisor();
 		supervisor.registerExternal(rec("pi-a", "2026-01-01T00:00:00Z"), "idle");
 		supervisor.sendExternal("pi-a", { type: "rename", name: "x" });
@@ -493,11 +493,15 @@ describe("daemon: pane registrations", () => {
 		supervisor.sendExternal("pi-a", { type: "prompt", text: "edited" });
 		supervisor.sendExternal("pi-a", { type: "clone" });
 		supervisor.sendExternal("pi-a", { type: "tree", entryId: "1a2b3c4d" });
+		supervisor.sendExternal("pi-a", { type: "compact" });
+		supervisor.sendExternal("pi-a", { type: "prompt", text: "after" });
 		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "rename", name: "x" }]);
 		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "fork", entryId: "1a2b3c4d" }]);
 		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "prompt", text: "edited" }]);
 		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "clone" }]);
 		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "tree", entryId: "1a2b3c4d" }]);
+		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "compact" }]);
+		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "prompt", text: "after" }]);
 		expect(supervisor.drainExternal("pi-a")).toEqual([]);
 	});
 });

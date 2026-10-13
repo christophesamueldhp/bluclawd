@@ -55,17 +55,21 @@ export function buildReport(ctx: ExtensionContext, pi: Pick<ExtensionAPI, "getTh
 /** The pane messages agent view hands to remote control; an unknown model is ignored, and so are
  *  compact, tree, fork and clone unless the session is idle, since they would cut a turn short.
  *  Tree, fork and clone need a command's context, so they run as `/remote-control`, which pi
- *  executes without writing anything to the session. */
+ *  executes without writing anything to the session. The phone shows a compact until the pane
+ *  reports again: `reportAgain` does when one is skipped or fails, which pi reports nothing for. */
 export function applyPaneMessage(
 	message: PaneMessage,
 	ctx: ExtensionContext,
 	pi: Pick<ExtensionAPI, "setModel" | "sendUserMessage" | "getCommands">,
+	reportAgain: () => void = () => {},
 ): void {
 	if (message.type === "set_model") {
 		const model = ctx.modelRegistry.find(message.provider, message.id);
 		if (model) pi.setModel(model).catch(() => {});
+	} else if (message.type === "compact") {
+		if (ctx.isIdle()) ctx.compact({ onError: reportAgain });
+		else reportAgain();
 	} else if (!ctx.isIdle()) return;
-	else if (message.type === "compact") ctx.compact();
 	else if (message.type === "tree" || message.type === "fork" || message.type === "clone") {
 		// Another extension's command of the same name renames both (remote-control:1, :2), and the
 		// line would then reach the model as a prompt.
@@ -78,7 +82,8 @@ export function applyPaneMessage(
 /**
  * `/remote-control tree <entryId>`, `fork <entryId>` and `clone`, as the phone dispatches them;
  * false for anything else. An entry pi would refuse is skipped here, since a fork that throws
- * ends the pane's pi.
+ * ends the pane's pi; so is a fork or clone over a draft in the pane's editor, which pi replaces
+ * with the forked message (the phone gives up waiting and says the session did not move).
  */
 export async function navigate(args: string, ctx: ExtensionCommandContext): Promise<boolean> {
 	const words = args.trim().split(/\s+/);
@@ -90,7 +95,7 @@ export async function navigate(args: string, ctx: ExtensionCommandContext): Prom
 		return true;
 	}
 	const file = sessions.getSessionFile();
-	if (file && !existsSync(file)) return true;
+	if ((file && !existsSync(file)) || ctx.ui.getEditorText().trim()) return true;
 	if (sub === "clone") {
 		const leaf = sessions.getLeafId();
 		if (leaf) await ctx.fork(leaf, { position: "at" });

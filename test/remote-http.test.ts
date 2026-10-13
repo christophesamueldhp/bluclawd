@@ -241,11 +241,13 @@ describe("remote HTTP API", () => {
 			expect(stored.status).toBe(409);
 			expect(await stored.json()).toEqual({ error: "session_not_running" });
 			reports.delete("live");
-			expect((await model("live", { provider: "openai", id: "gpt-5" })).status).toBe(400);
+			const old = await model("live", { provider: "openai", id: "gpt-5" });
+			expect([old.status, await old.json()]).toEqual([409, { error: "pane_too_old" }]);
 			expect(sent).toEqual([]);
 		});
 
 		it("compacts a running session once it is neither working nor waiting on an answer", async () => {
+			reports.set("live", report);
 			const token = await pair();
 			const compact = (id: string) =>
 				fetch(`${base}/api/sessions/${id}/compact`, { method: "POST", headers: authJson(token), body: "{}" });
@@ -280,6 +282,7 @@ describe("remote HTTP API", () => {
 					assistant("dddd0004", "cccc0003", "two"),
 			);
 			instances = [{ ...instances[0], activity: "idle" }, instances[1]];
+			reports.set("live", { models: [] });
 		});
 
 		const post = (token: string, id: string, action: string, body: unknown = {}) =>
@@ -299,6 +302,21 @@ describe("remote HTTP API", () => {
 				{ id: "live", message: { type: "fork", entryId: "cccc0003" } },
 				{ id: "live", message: { type: "clone" } },
 			]);
+		});
+
+		it("refuses a pane that reports nothing, an older bluclawd's, which would ignore it", async () => {
+			reports.clear();
+			const token = await pair();
+			for (const [action, body] of [
+				["tree", { entryId: "bbbb0002" }],
+				["fork", { entryId: "cccc0003" }],
+				["clone", {}],
+				["compact", {}],
+			] as const) {
+				const res = await post(token, "live", action, body);
+				expect([res.status, await res.json()]).toEqual([409, { error: "pane_too_old" }]);
+			}
+			expect(sent).toEqual([]);
 		});
 
 		it("refuses a busy or stored session", async () => {

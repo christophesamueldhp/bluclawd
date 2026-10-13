@@ -108,16 +108,23 @@ describe("applyPaneMessage", () => {
 		expect(pi.setModel).toHaveBeenCalledTimes(1);
 	});
 
-	it("compacts", () => {
+	it("compacts, and reports again when pi refuses, so the phone stops showing it as compacting", () => {
 		const { ctx, pi } = fakes();
-		applyPaneMessage({ type: "compact" }, ctx as never, pi as never);
-		expect(ctx.compact).toHaveBeenCalled();
+		const reportAgain = vi.fn();
+		applyPaneMessage({ type: "compact" }, ctx as never, pi as never, reportAgain);
+		expect(ctx.compact).toHaveBeenCalledTimes(1);
+		expect(reportAgain).not.toHaveBeenCalled();
+		const [options] = ctx.compact.mock.calls[0] as unknown as [{ onError: (error: Error) => void }];
+		options.onError(new Error("Nothing to compact (session too small)"));
+		expect(reportAgain).toHaveBeenCalledTimes(1);
 	});
 
-	it("does not compact a session that is not idle, since compacting aborts its turn", () => {
+	it("does not compact a session that is not idle, since compacting aborts its turn, and reports again", () => {
 		const { ctx, pi } = fakes({ idle: false });
-		applyPaneMessage({ type: "compact" }, ctx as never, pi as never);
+		const reportAgain = vi.fn();
+		applyPaneMessage({ type: "compact" }, ctx as never, pi as never, reportAgain);
 		expect(ctx.compact).not.toHaveBeenCalled();
+		expect(reportAgain).toHaveBeenCalledTimes(1);
 	});
 
 	it("ignores messages it does not handle", () => {
@@ -170,7 +177,7 @@ describe("navigate", () => {
 	writeFileSync(saved, "");
 	afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-	function command(options: { file?: string; leaf?: string | null } = {}) {
+	function command(options: { file?: string; leaf?: string | null; draft?: string } = {}) {
 		const entries = new Map<string, unknown>([
 			["aaaa0001", { type: "message", id: "aaaa0001", message: { role: "user", content: "hi" } }],
 			["aaaa0002", { type: "message", id: "aaaa0002", message: { role: "assistant", content: [] } }],
@@ -183,6 +190,7 @@ describe("navigate", () => {
 			},
 			navigateTree: vi.fn(async () => ({ cancelled: false })),
 			fork: vi.fn(async () => ({ cancelled: false })),
+			ui: { getEditorText: () => options.draft ?? "" },
 		};
 	}
 
@@ -196,6 +204,16 @@ describe("navigate", () => {
 			["aaaa0001", { position: "before" }],
 			["aaaa0002", { position: "at" }],
 		]);
+	});
+
+	it("does not fork or clone over a draft in the pane's editor, which pi would replace", async () => {
+		const ctx = command({ draft: "half a thought" });
+		expect(await navigate("fork aaaa0001", ctx as never)).toBe(true);
+		expect(await navigate("clone", ctx as never)).toBe(true);
+		expect(ctx.fork).not.toHaveBeenCalled();
+		// pi fills only an empty editor on a tree move.
+		expect(await navigate("tree aaaa0002", ctx as never)).toBe(true);
+		expect(ctx.navigateTree).toHaveBeenCalledTimes(1);
 	});
 
 	it("leaves anything else to the public subcommands", async () => {

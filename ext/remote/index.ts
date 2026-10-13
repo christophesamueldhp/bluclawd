@@ -160,7 +160,8 @@ function factory(pi: ExtensionAPI): void {
 	pi.on("turn_end", (_event, ctx) => report(ctx));
 	pi.on("session_compact", (_event, ctx) => report(ctx));
 	pi.events.on("bluclawd:pane-message", (message) => {
-		if (session) applyPaneMessage(message as PaneMessage, session, pi);
+		const ctx = session;
+		if (ctx) applyPaneMessage(message as PaneMessage, ctx, pi, () => report(ctx));
 	});
 	pi.events.on("bluclawd:remote-watched", (data) => {
 		const opened = data === true && !watched;

@@ -61,7 +61,7 @@ export class RemoteControl {
 	private notifier: Notifier | undefined;
 	private readonly sendPush: (subscription: WebPushSubscription, payload: string) => Promise<PushResult>;
 	/** Each pane's latest report, kept while the listener is off so the phone has it once it is on. */
-	private readonly reports = new Map<string, { report: PaneReport; key: string }>();
+	private readonly reports = new Map<string, PaneReport>();
 
 	constructor(deps: RemoteControlDeps) {
 		this.deps = deps;
@@ -123,7 +123,8 @@ export class RemoteControl {
 		this.server?.live(sessionId, live);
 	}
 
-	/** A pane's latest report; undefined once it is gone. */
+	/** A pane's latest report; undefined once it is gone. Each one is signalled, unchanged too: the
+	 *  phone shows a compact until its pane reports again, which it also does when one did nothing. */
 	report(sessionId: string, report: PaneReport | undefined): void {
 		if (!report) {
 			this.reports.delete(sessionId);
@@ -133,9 +134,7 @@ export class RemoteControl {
 		// arrive before it is listed, so the sender's own is kept.
 		const live = new Set(this.deps.listInstances().flatMap((i) => (i.external ? [i.id] : [])));
 		for (const id of this.reports.keys()) if (id !== sessionId && !live.has(id)) this.reports.delete(id);
-		const key = JSON.stringify(report);
-		if (this.reports.get(sessionId)?.key === key) return;
-		this.reports.set(sessionId, { report, key });
+		this.reports.set(sessionId, report);
 		this.server?.status(sessionId);
 	}
 
@@ -171,7 +170,7 @@ export class RemoteControl {
 					launch: () => this.launch(),
 					startSession: (spec, replaces) => this.startSession(spec, replaces),
 					resuming: (id) => [...this.starting.values()].some((started) => started.replaces === id),
-					report: (id) => this.reports.get(id)?.report,
+					report: (id) => this.reports.get(id),
 					tmux: this.tmux,
 					webDir: this.deps.webDir ?? WEB_DIR,
 				},

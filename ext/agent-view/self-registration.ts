@@ -111,8 +111,8 @@ export class SelfRegistration {
 	private stopped = false;
 	/** The wait in flight, ended by stop(). */
 	private waiting: AbortController | undefined;
-	/** The last register delivered a tree, fork or clone: what follows it is for where the pane
-	 *  moves to, so it waits for the next heartbeat, as the daemon's drain intends. Likewise after a
+	/** The last register delivered a tree, fork, clone or compact: what follows it is for where the
+	 *  pane moves to, so it waits for the next heartbeat, as the daemon's drain intends. Likewise after a
 	 *  prompt: pi still reports the pane idle until its turn starts, so a move right behind it would
 	 *  cut that turn short; the turn's agent_start heartbeat takes what follows. */
 	private moved = false;
@@ -185,7 +185,12 @@ export class SelfRegistration {
 			watched = res?.watched === true;
 			const messages = res?.messages ?? [];
 			this.moved = messages.some(
-				(m) => m.type === "tree" || m.type === "fork" || m.type === "clone" || m.type === "prompt",
+				(m) =>
+					m.type === "tree" ||
+					m.type === "fork" ||
+					m.type === "clone" ||
+					m.type === "compact" ||
+					m.type === "prompt",
 			);
 			if (!this.moved) this.wait();
 			for (const message of messages) {

@@ -254,7 +254,7 @@ describe("remote control switch", () => {
 		controller.abort();
 	});
 
-	it("keeps each pane's latest report for the phone, and signals a change to the phones that have it open", async () => {
+	it("keeps each pane's latest report for the phone, and signals each one to the phones that have it open", async () => {
 		const instances: InstanceSummary[] = [
 			{ id: "pane-1", status: "online", cwd: "/p", external: true, activity: "idle" },
 		];
@@ -300,12 +300,14 @@ describe("remote control switch", () => {
 		await handleIpcRequest({ type: "remote_report", instanceId: "pane-1", report: next });
 		await until("event: status");
 		expect(await (await status()).json()).toEqual({ report: next });
-		// The same report again is not a change.
+		// The same report again still signals: a compact the pane skipped or pi refused changes nothing.
 		const signals = received.split("event: status").length;
 		await handleIpcRequest({ type: "remote_report", instanceId: "pane-1", report: next });
+		while (received.split("event: status").length === signals) {
+			received += new TextDecoder().decode((await reader.read()).value);
+		}
 		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
 		expect((await status()).status).toBe(404);
-		expect(received.split("event: status").length).toBe(signals);
 		controller.abort();
 	});
 

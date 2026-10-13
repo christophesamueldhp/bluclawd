@@ -310,6 +310,10 @@ async function handle(
 	// from the resuming check to the start nothing awaits, so a stored row starts one pane only.
 	const session = findSession(deps.listInstances(), id);
 	if (!session) return json(res, 409, { error: "session_not_running" });
+	// A pane from an older bluclawd sends no report, and would ignore what only a newer one runs.
+	if (action !== "prompt" && action !== "abort" && session.running && !deps.report(id)) {
+		return json(res, 409, { error: "pane_too_old" });
+	}
 	let message: PaneMessage;
 	if (action === "prompt") {
 		const text = promptIn(body, "text");
