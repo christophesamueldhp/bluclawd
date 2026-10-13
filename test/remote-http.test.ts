@@ -473,6 +473,14 @@ describe("remote HTTP API", () => {
 		expect(((await res.json()) as { messages: Array<{ id: string }> }).messages.map((m) => m.id)).toEqual(["u1"]);
 	});
 
+	it("reads an empty transcript for a running session whose file pi has not written yet", async () => {
+		instances = [{ ...instances[0], activity: "idle", sessionFile: join(dir, "forked.jsonl") }];
+		const token = await pair();
+		const res = await fetch(`${base}/api/sessions/live/messages`, { headers: auth(token) });
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ messages: [] });
+	});
+
 	it("signals transcript and list changes over SSE", async () => {
 		const token = await pair();
 		const controller = new AbortController();

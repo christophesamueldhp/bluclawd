@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ServerSupervisor } from "../daemon/supervisor.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
-import { paneArgs } from "../ext/agent-view/index.ts";
+import { isBlankPane, paneArgs } from "../ext/agent-view/index.ts";
 import type { InstanceSummary, OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
 import { collectRows } from "../ext/agent-view/rows.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
@@ -252,6 +252,19 @@ describe("agent view in pane mode", () => {
 		expect(registered).toMatchObject([{ cwd: HERE, pane: "pi-self" }]);
 	});
 
+	it("a fork is a session before its first message, so its row stays listed", () => {
+		const sessions = (entries: Array<{ type: string }>, parentSession?: string) => ({
+			getEntries: () => entries,
+			getHeader: () => ({ type: "session" as const, id: "s", timestamp: "", cwd: HERE, parentSession }),
+		});
+		// pi starts a session with these, before anything is asked.
+		const setup = [{ type: "model_change" }, { type: "thinking_level_change" }];
+		expect(isBlankPane("pi-self", sessions(setup) as never)).toBe(true);
+		expect(isBlankPane("pi-self", sessions(setup, "/s/old.jsonl") as never)).toBe(false);
+		expect(isBlankPane("pi-self", sessions([...setup, { type: "message" }]) as never)).toBe(false);
+		expect(isBlankPane(undefined, sessions(setup) as never)).toBe(false);
+	});
+
 	it("esc returns to this terminal's session, or quits once there is none, as in Claude Code", () => {
 		const own = setup([], paneRow("pi-self", { activity: "idle" }));
 		own.view.handleInput("\x1b");
@@ -407,5 +420,22 @@ describe("daemon: pane registrations", () => {
 		expect(await supervisor.deleteInstance("pi-a")).toBe(true);
 		expect(supervisor.listExternalInstances(2000)).toEqual([]);
 		expect(supervisor.sendExternal("pi-a", { type: "abort" })).toBe(false);
+	});
+
+	it("delivers one navigation per heartbeat, keeping what follows it for the next one", () => {
+		const supervisor = new ServerSupervisor();
+		supervisor.registerExternal(rec("pi-a", "2026-01-01T00:00:00Z"), "idle");
+		supervisor.sendExternal("pi-a", { type: "rename", name: "x" });
+		supervisor.sendExternal("pi-a", { type: "fork", entryId: "1a2b3c4d" });
+		supervisor.sendExternal("pi-a", { type: "prompt", text: "edited" });
+		supervisor.sendExternal("pi-a", { type: "clone" });
+		supervisor.sendExternal("pi-a", { type: "tree", entryId: "1a2b3c4d" });
+		expect(supervisor.drainExternal("pi-a")).toEqual([
+			{ type: "rename", name: "x" },
+			{ type: "fork", entryId: "1a2b3c4d" },
+		]);
+		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "prompt", text: "edited" }, { type: "clone" }]);
+		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "tree", entryId: "1a2b3c4d" }]);
+		expect(supervisor.drainExternal("pi-a")).toEqual([]);
 	});
 });

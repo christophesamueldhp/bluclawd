@@ -174,7 +174,12 @@ export class SelfRegistration {
 		try {
 			const res = await this.client.register(instance);
 			watched = res?.watched === true;
-			for (const message of res?.messages ?? []) this.onMessage(message);
+			for (const message of res?.messages ?? []) {
+				// Stopped meanwhile: the session they were for is gone, so they wait for whatever
+				// registers as this id next (the pane's next session), or go with the row.
+				if (this.stopped) await this.client.send(this.id, message);
+				else this.onMessage(message);
+			}
 		} catch {
 			// daemon may be down; the next tick retries (register is an upsert).
 		}
@@ -187,7 +192,8 @@ export class SelfRegistration {
 		}
 	}
 
-	async stop(): Promise<void> {
+	/** `unregister: false`: the pane's next session carries on its row, under the same id. */
+	async stop(options: { unregister?: boolean } = {}): Promise<void> {
 		this.stopped = true;
 		if (this.timer) {
 			clearInterval(this.timer);
@@ -199,6 +205,7 @@ export class SelfRegistration {
 		} catch {
 			// a failed heartbeat must not skip the unregister
 		}
+		if (options.unregister === false) return;
 		try {
 			await this.client.unregister(this.id);
 		} catch {

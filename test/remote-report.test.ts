@@ -16,7 +16,12 @@ const usage = (input: number, output: number, cacheRead: number, cacheWrite: num
 });
 
 function fakes(
-	options: { current?: ReturnType<typeof model>; available?: ReturnType<typeof model>[]; idle?: boolean } = {},
+	options: {
+		current?: ReturnType<typeof model>;
+		available?: ReturnType<typeof model>[];
+		idle?: boolean;
+		commands?: string[];
+	} = {},
 ) {
 	const available = options.available ?? [];
 	const ctx = {
@@ -44,7 +49,12 @@ function fakes(
 		isIdle: () => options.idle ?? true,
 		compact: vi.fn(),
 	};
-	const pi = { getThinkingLevel: () => "high", setModel: vi.fn(async () => true), sendUserMessage: vi.fn() };
+	const pi = {
+		getThinkingLevel: () => "high",
+		setModel: vi.fn(async () => true),
+		sendUserMessage: vi.fn(),
+		getCommands: () => (options.commands ?? ["remote-control"]).map((name) => ({ name, source: "extension" })),
+	};
 	return { ctx, pi };
 }
 
@@ -130,6 +140,19 @@ describe("tree, fork and clone from the phone", () => {
 			["/remote-control fork 1a2b3c4d", { expandPromptTemplates: true }],
 			["/remote-control clone", { expandPromptTemplates: true }],
 		]);
+	});
+
+	// Two extensions with the command make pi name them remote-control:1 and :2: the text would reach the model.
+	it("dispatches nothing when /remote-control is not this extension's command by that name", () => {
+		for (const commands of [["remote-control:1", "remote-control:2"], []]) {
+			const { ctx, pi } = fakes({ commands });
+			applyPaneMessage({ type: "clone" }, ctx as never, pi as never);
+			expect(pi.sendUserMessage).not.toHaveBeenCalled();
+		}
+		const { ctx, pi } = fakes();
+		pi.getCommands = () => [{ name: "remote-control", source: "prompt" }];
+		applyPaneMessage({ type: "clone" }, ctx as never, pi as never);
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
 	});
 
 	it("dispatches nothing while the session is not idle", () => {

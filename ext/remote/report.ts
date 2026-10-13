@@ -59,7 +59,7 @@ export function buildReport(ctx: ExtensionContext, pi: Pick<ExtensionAPI, "getTh
 export function applyPaneMessage(
 	message: PaneMessage,
 	ctx: ExtensionContext,
-	pi: Pick<ExtensionAPI, "setModel" | "sendUserMessage">,
+	pi: Pick<ExtensionAPI, "setModel" | "sendUserMessage" | "getCommands">,
 ): void {
 	if (message.type === "set_model") {
 		const model = ctx.modelRegistry.find(message.provider, message.id);
@@ -67,6 +67,9 @@ export function applyPaneMessage(
 	} else if (!ctx.isIdle()) return;
 	else if (message.type === "compact") ctx.compact();
 	else if (message.type === "tree" || message.type === "fork" || message.type === "clone") {
+		// Another extension's command of the same name renames both (remote-control:1, :2), and the
+		// line would then reach the model as a prompt.
+		if (!pi.getCommands().some((c) => c.name === "remote-control" && c.source === "extension")) return;
 		const args = message.type === "clone" ? "clone" : `${message.type} ${message.entryId}`;
 		pi.sendUserMessage(`/remote-control ${args}`, { expandPromptTemplates: true });
 	}

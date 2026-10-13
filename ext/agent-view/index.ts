@@ -128,6 +128,19 @@ export function paneArgs(argv: string[], sessionFile: string | undefined): strin
 	return ["--session", sessionFile, ...out];
 }
 
+/**
+ * A pane nothing has been asked in yet is not a session, as a Claude Code session isn't one until
+ * it runs: no other window lists it, and it ends when the terminal leaves it. A fork is one from
+ * the start, even of the conversation before its first message, which pi writes no file for yet:
+ * its row carries on the one it was forked from.
+ */
+export function isBlankPane(
+	pane: string | undefined,
+	sessions: Pick<ExtensionContext["sessionManager"], "getEntries" | "getHeader">,
+): boolean {
+	return !!pane && !sessions.getHeader()?.parentSession && !sessions.getEntries().some((e) => e.type === "message");
+}
+
 function isRealCwd(cwd: string): boolean {
 	return existsSync(cwd) && !TMP_ROOTS.some((root) => cwd === root || cwd.startsWith(`${root}/`));
 }
@@ -166,10 +179,7 @@ const agentView: InlineExtension = {
 		// What the turn in progress is doing, for this session's row in other windows.
 		let liveDetail: string | undefined;
 
-		// A pane nothing has been asked in yet is not a session, as a Claude Code session isn't one
-		// until it runs: no other window lists it, and it ends when the terminal leaves it.
-		const blank = (ctx: ExtensionContext): boolean =>
-			!!pane && !ctx.sessionManager.getEntries().some((e) => e.type === "message");
+		const blank = (ctx: ExtensionContext): boolean => isBlankPane(pane, ctx.sessionManager);
 		// A normal session, as Claude Code's: the pane `pi` started in this terminal, until ← opens
 		// agent view. Quitting ends it, and so does closing its terminal.
 		let normal = false;
@@ -528,7 +538,12 @@ const agentView: InlineExtension = {
 		pi.on("ui_prompt_start", track);
 		pi.on("ui_prompt_end", track);
 		pi.on("session_shutdown", async (event, ctx) => {
-			registration?.stop();
+			// A fork, resume or reload goes on in this pane, whose next session registers under the same
+			// id: its row and the messages queued for it stay, and pi awaits this, so no late heartbeat
+			// of this one lands after the next one's. A new session is blank until asked something.
+			if (event.reason === "fork" || event.reason === "resume" || event.reason === "reload") {
+				await registration?.stop({ unregister: false });
+			} else registration?.stop();
 			registration = undefined;
 			stopPill?.();
 			stopPill = undefined;

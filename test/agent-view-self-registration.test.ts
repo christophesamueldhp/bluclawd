@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { OrchestratorClient, RegisterInput } from "../ext/agent-view/orchestrator-client.ts";
+import type { OrchestratorClient, PaneMessage, RegisterInput } from "../ext/agent-view/orchestrator-client.ts";
 import { deriveLabel, ForegroundActivity, SelfRegistration } from "../ext/agent-view/self-registration.ts";
 import { piCommand } from "../ext/agent-view/tmux.ts";
 
@@ -154,6 +154,65 @@ describe("SelfRegistration.stop", () => {
 		await expect(beat).resolves.toBeUndefined();
 		expect(unregistered).toEqual(["pi-1"]);
 		expect(told).toBe(0);
+	});
+
+	it("can stop without unregistering, for the next session of the same pane to carry on its row", async () => {
+		let land: (reply: { watched: boolean; messages: [] }) => void = () => {};
+		const order: string[] = [];
+		const client = {
+			register: () =>
+				new Promise((resolve) => {
+					land = (reply) => {
+						order.push("register");
+						resolve(reply);
+					};
+				}),
+			unregister: async () => {
+				order.push("unregister");
+			},
+		} as unknown as OrchestratorClient;
+		const reg = new SelfRegistration(
+			client,
+			() => ({ cwd: "/p" }),
+			() => {},
+			"pi-1",
+		);
+		void reg.refresh();
+		const stopping = reg.stop({ unregister: false });
+		land({ watched: false, messages: [] });
+		await stopping;
+		expect(order).toEqual(["register"]);
+	});
+
+	it("queues again what a register on its way drains after the stop, instead of running it in a gone session", async () => {
+		let land: (reply: { watched: boolean; messages: PaneMessage[] }) => void = () => {};
+		const requeued: Array<[string, PaneMessage]> = [];
+		const client = {
+			register: () =>
+				new Promise((resolve) => {
+					land = resolve;
+				}),
+			unregister: async () => {},
+			send: async (id: string, message: PaneMessage) => {
+				requeued.push([id, message]);
+			},
+		} as unknown as OrchestratorClient;
+		const handled: PaneMessage[] = [];
+		const reg = new SelfRegistration(
+			client,
+			() => ({ cwd: "/p" }),
+			(m) => handled.push(m),
+			"pi-1",
+		);
+		void reg.refresh();
+		const stopping = reg.stop({ unregister: false });
+		land({ watched: false, messages: [{ type: "prompt", text: "edited" }, { type: "abort" }] });
+		await stopping;
+		expect(handled).toEqual([]);
+		expect(requeued).toEqual([
+			["pi-1", { type: "prompt", text: "edited" }],
+			["pi-1", { type: "abort" }],
+		]);
 	});
 
 	it("keeps a throwing onWatched from failing the heartbeat", async () => {
