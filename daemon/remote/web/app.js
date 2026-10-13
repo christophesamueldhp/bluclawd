@@ -121,6 +121,7 @@ let offlineTimer;
 let watchdog;
 /** Older messages load this far (px) ahead of the log's top, so they are usually there when it is reached. */
 const OLDER_MARGIN = 400;
+const OLDER_RETRY_MS = 2000;
 let messagesRequest = 0;
 let statusRequest = 0;
 let screenRequest = 0;
@@ -277,6 +278,10 @@ async function loadMessages() {
 		const at = latest.length ? state.messages.findIndex((m) => m.id === latest[0].id) : -1;
 		if (at > 0) state.messages = [...state.messages.slice(0, at), ...latest];
 		else {
+			// A pending reply's count no longer includes the copies of its text that went with them.
+			const kept = new Set(latest.map((m) => m.id));
+			const gone = state.messages.filter((m) => !kept.has(m.id));
+			for (const p of state.pending) p.before -= userCount(gone, p.text);
 			state.messages = latest;
 			state.more = page.more;
 		}
@@ -294,10 +299,11 @@ async function loadMessages() {
 async function loadOlder() {
 	const id = state.open;
 	const first = state.messages[0];
-	if (!id || !first || !state.more || state.loadingOlder) return;
+	// An old session file's messages have no ids to page by.
+	if (!id || !first?.id || !state.more || state.loadingOlder) return;
 	state.loadingOlder = true;
 	render();
-	let loaded = false;
+	let failed = false;
 	try {
 		const page = await api.messages(id, first.id);
 		// Not after a refresh that replaced the log meanwhile: this page would be another branch's.
@@ -308,16 +314,23 @@ async function loadOlder() {
 			state.messages = [...older, ...state.messages];
 			state.more = page.more;
 			prepending = true;
-			loaded = true;
 		}
 	} catch (error) {
+		failed = true;
 		handleError(error);
 	}
 	if (state.open !== id) return;
 	state.loadingOlder = false;
 	render();
-	// The observer only reports a change: a short page can leave the top in view.
-	if (loaded && $("#scroll").scrollTop < OLDER_MARGIN) void loadOlder();
+	// The observer only reports a change: a short or dropped page can leave the top in view, and so
+	// can a failed one, tried again a little later so that it does not repeat as fast as it fails.
+	if (!failed) {
+		if ($("#scroll").scrollTop < OLDER_MARGIN) void loadOlder();
+	} else {
+		setTimeout(() => {
+			if (state.open === id && $("#scroll")?.scrollTop < OLDER_MARGIN) void loadOlder();
+		}, OLDER_RETRY_MS);
+	}
 }
 
 async function loadStatus() {
@@ -845,9 +858,10 @@ function updateChat() {
 		const open = new Set([...log.querySelectorAll("details[open]")].map((d) => d.dataset.key));
 		log.innerHTML = html;
 		for (const d of log.querySelectorAll("details")) if (open.has(d.dataset.key)) d.open = true;
-		if (prepending) scroll.scrollTop += scroll.scrollHeight - height;
-		else if (atBottom) scroll.scrollTop = scroll.scrollHeight;
+		if (atBottom && !prepending) scroll.scrollTop = scroll.scrollHeight;
 	}
+	// Also when the page loaded was empty and only "#older" went.
+	if (prepending) scroll.scrollTop += scroll.scrollHeight - height;
 	prepending = false;
 	const stranded = session !== undefined && !session.alive && !session.resumable;
 	// One pane starts at a time, so a resume waits for any start in flight.

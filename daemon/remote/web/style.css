@@ -54,8 +54,9 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .u { align-self: flex-end; max-width: 85%; background: var(--message); border-radius: 16px; padding: 8px 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .mine { align-self: flex-end; display: flex; align-items: center; max-width: 85%; min-width: 0; }
 .mine .u { align-self: auto; max-width: none; min-width: 0; }
-.theirs { display: flex; align-items: flex-end; }
-.theirs .a { flex: 1; min-width: 0; }
+.theirs { display: flex; align-items: flex-start; }
+/* Its first line (16px × 1.4) centred on the 44px ⋯ beside it. */
+.theirs .a { flex: 1; min-width: 0; padding-top: calc((44px - 16px * 1.4) / 2); }
 .more { flex: none; width: 44px; height: 44px; padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 20px; line-height: 1; }
 .a { white-space: pre-wrap; overflow-wrap: anywhere; }
 .t { font-size: 12px; line-height: 1.45; background: var(--panel); border-left: 2px solid var(--accent); border-radius: 4px; padding: 6px 10px; color: var(--muted); overflow-wrap: anywhere; }

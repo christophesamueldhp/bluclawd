@@ -157,8 +157,9 @@ the Home Screen and enter the code. The phone keeps a token; the daemon keeps on
 
 The phone lists every agent-view session in its bands, with what it is doing. A session's chat
 shows its conversation (older messages load at the top), streams the reply in progress, sends a
-prompt, which reaches the session at once, and Stop ends its turn. A reply to a stopped session
-resumes it, and Start begins a new one in a recent directory. Tapping the title shows the model
+prompt, which reaches the session at once (within a few seconds right after a move, or while an
+older daemon still runs), and Stop ends its turn. A reply to a stopped session resumes it, and
+Start begins a new one in a recent directory. Tapping the title shows the model
 (and switches it), context and usage, and compacts or clones the session; a message's ⋯ edits it
 here or in a new session, or goes back to a reply. When a session waits on a dialog, Answer shows
 its screen and sends it keys. Enable notifications to hear when a session finishes or needs you:
