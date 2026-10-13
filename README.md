@@ -161,8 +161,12 @@ than one Mac, add one Home Screen app per Mac: each has its own ts.net address a
 (`~/Library/LaunchAgents/dev.bluclawd.daemon.plist`, its log in `~/.pi/server/daemon.log`), so the
 phone reaches the Mac before any `pi` has run; running it again turns it off, and `/remote-control`
 shows whether it is on. It runs the node and pi it was turned on from: turn it off and on again after
-moving either. A session the phone starts before any `pi` has run since login gets launchd's
-environment rather than your shell's, so an API key exported only in your shell profile is missing.
+moving either. It runs the daemon through your login shell (zsh in place of fish or another shell
+that is not POSIX), which reads your login profile (`~/.zprofile`, `~/.profile`) but not
+`~/.zshrc`. An API key exported only in `~/.zshrc` is then missing from a session the phone starts
+before any `pi` has run since login and, because every session shares one tmux server that keeps
+the environment it started with, from every session started after it, on the Mac too, until that
+server ends with the last session.
 
 The phone lists every agent-view session in its bands, with what it is doing. A session's chat
 shows its conversation (older messages load at the top), streams the reply in progress, sends a

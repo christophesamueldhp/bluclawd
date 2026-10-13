@@ -6,7 +6,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { getServerDir } from "../../daemon/paths.ts";
 import { daemonCommand } from "../agent-view/orchestrator-client.ts";
 import { piEnv } from "../agent-view/tmux.ts";
@@ -24,6 +24,13 @@ export interface AutostartDeps {
 	log: string;
 }
 
+/** The user's login shell; `exec "$@"` needs a POSIX one. */
+function loginShell(): string {
+	const shell = process.env.SHELL;
+	const posix = shell && isAbsolute(shell) && existsSync(shell) && /^(ba|z|k|da)?sh$/.test(basename(shell));
+	return posix ? shell : "/bin/zsh";
+}
+
 export function autostartDeps(): AutostartDeps {
 	const daemon = daemonCommand();
 	return {
@@ -33,8 +40,11 @@ export function autostartDeps(): AutostartDeps {
 		launchctl: (args) => {
 			execFileSync("launchctl", args, { stdio: "pipe" });
 		},
-		command: daemon.command,
-		// launchd's PATH lacks Homebrew's, where tmux usually is.
+		// Through the login shell: the private tmux server the daemon may start builds every later pane
+		// from the environment it starts with, and launchd's has no LANG and none of the user's keys.
+		command: [loginShell(), "-l", "-c", 'exec "$@"', "bluclawd-daemon", ...daemon.command],
+		// For a profile that leaves out Homebrew's PATH, where tmux usually is; path_helper and the
+		// profile put theirs first.
 		env: { PATH: process.env.PATH ?? "/usr/bin:/bin", ...piEnv(), ...daemon.env },
 		log: join(getServerDir(), "daemon.log"),
 	};

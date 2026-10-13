@@ -1,4 +1,5 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -58,12 +59,44 @@ describe("/remote-control autostart", () => {
 
 	it("is built from the command pi starts the daemon with", () => {
 		vi.stubEnv("PI_SERVER_DIR", join(dir, "server"));
+		vi.stubEnv("SHELL", "/bin/sh");
 		const built = autostartDeps();
-		expect(built.command).toEqual(daemonCommand().command);
+		expect(built.command).toEqual([
+			"/bin/sh",
+			"-l",
+			"-c",
+			'exec "$@"',
+			"bluclawd-daemon",
+			...daemonCommand().command,
+		]);
 		expect(built.command.slice(-2)).toEqual([expect.stringMatching(/daemon\/cli\.ts$/), "serve"]);
 		expect(built.env.PATH).toBe(process.env.PATH);
 		expect(built.env.PI_SERVER_DIR).toBe(join(dir, "server"));
 		expect(built.log).toBe(join(dir, "server", "daemon.log"));
+	});
+
+	it("runs the daemon through the user's login shell, for the environment its profile sets", () => {
+		const shell = join(dir, "bash");
+		writeFileSync(shell, "");
+		vi.stubEnv("SHELL", shell);
+		expect(autostartDeps().command.slice(0, 5)).toEqual([shell, "-l", "-c", 'exec "$@"', "bluclawd-daemon"]);
+		// Not a path, missing, or not a POSIX shell, which `exec "$@"` needs.
+		const fish = join(dir, "fish");
+		writeFileSync(fish, "");
+		for (const other of ["zsh", join(dir, "missing"), fish, ""]) {
+			vi.stubEnv("SHELL", other);
+			expect(autostartDeps().command[0]).toBe("/bin/zsh");
+		}
+		// The shell hands the daemon its arguments as they are.
+		vi.stubEnv("SHELL", "/bin/sh");
+		const prefix = autostartDeps().command.slice(0, 5);
+		const args = ["a b", "$HOME", "'q'"];
+		const script = "process.stdout.write(JSON.stringify(process.argv.slice(1)))";
+		const out = execFileSync(prefix[0], [...prefix.slice(1), process.execPath, "-e", script, ...args], {
+			encoding: "utf8",
+			env: { HOME: dir, PATH: "/usr/bin:/bin" },
+		});
+		expect(JSON.parse(out)).toEqual(args);
 	});
 
 	it("turns on by writing the plist and loading it, again when already on, and off by unloading and removing it", () => {
