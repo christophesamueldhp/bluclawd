@@ -21,7 +21,7 @@ import {
 	type RemoteResult,
 } from "../agent-view/orchestrator-client.ts";
 import { piCommand, Tmux } from "../agent-view/tmux.ts";
-import { autostartDeps, autostartOn, autostartStatus, toggleAutostart } from "./autostart.ts";
+import { autostartDeps, autostartOn, autostartStatus, refreshAutostart, toggleAutostart } from "./autostart.ts";
 import { LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
 import { applyPaneMessage, buildReport, navigate } from "./report.ts";
@@ -201,6 +201,13 @@ function factory(pi: ExtensionAPI): void {
 				// Unloading ends a daemon launchd started; loading has launchd start one.
 				if (deps.platform === "darwin" && !autostartOn(deps)) await new OrchestratorClient().ensureDaemon();
 				return;
+			}
+			// Its node may have moved since it was written, as a node upgrade does. Here, not at every
+			// session start: any pi starting, a dev checkout's too, would point it at itself.
+			try {
+				refreshAutostart(autostartDeps());
+			} catch {
+				// the status says when it is out of date
 			}
 			const started = await daemon();
 			if ("error" in started) {

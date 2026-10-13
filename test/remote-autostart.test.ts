@@ -8,8 +8,10 @@ import {
 	type AutostartDeps,
 	autostartDeps,
 	autostartOn,
+	autostartStatus,
 	LABEL,
 	plist,
+	refreshAutostart,
 	setAutostart,
 	toggleAutostart,
 } from "../ext/remote/autostart.ts";
@@ -103,6 +105,8 @@ describe("/remote-control autostart", () => {
 		setAutostart(true, deps);
 		expect(readFileSync(path(), "utf8")).toBe(plist(deps));
 		expect(autostartOn(deps)).toBe(true);
+		// launchd does not create the log's directory.
+		expect(existsSync(join(dir, "server"))).toBe(true);
 		expect(calls).toEqual([
 			["bootout", `gui/501/${LABEL}`],
 			["bootstrap", "gui/501", path()],
@@ -121,6 +125,39 @@ describe("/remote-control autostart", () => {
 		expect(autostartOn(deps)).toBe(false);
 		// Off again: nothing loaded, nothing to remove.
 		setAutostart(false, deps);
+	});
+
+	it("rewrites an outdated plist, as after a node upgrade, for the next login, and only one that is there", () => {
+		refreshAutostart(deps);
+		expect(existsSync(path())).toBe(false);
+		setAutostart(true, deps);
+		calls = [];
+		deps.command = ["/opt/homebrew/Cellar/node/25.0.0/bin/node", "/x/daemon/cli.ts", "serve"];
+		deps.env = { ...deps.env, PI_SERVER_DIR: "/elsewhere" };
+		refreshAutostart(deps);
+		expect(readFileSync(path(), "utf8")).toBe(plist(deps));
+		expect(calls).toEqual([]);
+		deps.platform = "linux";
+		deps.command = ["/other/node"];
+		refreshAutostart(deps);
+		expect(readFileSync(path(), "utf8")).not.toBe(plist(deps));
+	});
+
+	it("says it is on, or that it needs a refresh when the node or script it runs is gone", () => {
+		expect(autostartStatus(deps)).toBe("Starts at login: off (/remote-control autostart turns it on)");
+		const node = join(dir, "node & co");
+		const cli = join(dir, "cli.ts");
+		writeFileSync(node, "");
+		writeFileSync(cli, "");
+		deps.command = ["/bin/sh", "-l", "-c", 'exec "$@"', "bluclawd-daemon", node, cli, "serve"];
+		setAutostart(true, deps);
+		expect(autostartStatus(deps)).toBe("Starts at login: on");
+		rmSync(node);
+		expect(autostartStatus(deps)).toBe(
+			`Starts at login: on (needs refresh: ${node} is gone; /remote-control autostart twice sets it again)`,
+		);
+		deps.platform = "linux";
+		expect(autostartStatus(deps)).toBeUndefined();
 	});
 
 	it("toggles, and says so", () => {

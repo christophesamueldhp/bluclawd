@@ -4,9 +4,9 @@
  * still replaces a daemon from older code with one of its own, which launchd leaves alone.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import { getServerDir } from "../../daemon/paths.ts";
 import { daemonCommand } from "../agent-view/orchestrator-client.ts";
 import { piEnv } from "../agent-view/tmux.ts";
@@ -57,6 +57,15 @@ function xml(value: string): string {
 		.replace(/>/g, "&gt;")
 		.replace(/"/g, "&quot;")
 		.replace(/'/g, "&apos;");
+}
+
+function unxml(value: string): string {
+	return value
+		.replace(/&lt;/g, "<")
+		.replace(/&gt;/g, ">")
+		.replace(/&quot;/g, '"')
+		.replace(/&apos;/g, "'")
+		.replace(/&amp;/g, "&");
 }
 
 export function plist({ command, env, log }: Pick<AutostartDeps, "command" | "env" | "log">): string {
@@ -112,8 +121,28 @@ export function setAutostart(on: boolean, deps: AutostartDeps): void {
 		return;
 	}
 	mkdirSync(deps.dir, { recursive: true });
+	mkdirSync(dirname(deps.log), { recursive: true });
 	writeFileSync(path, plist(deps));
 	deps.launchctl(["bootstrap", `gui/${deps.uid}`, path]);
+}
+
+/** Points a plist that is there at the node and pi running now, as after a node upgrade moved
+ *  node. launchd reads it at the next login, so it is not loaded again. */
+export function refreshAutostart(deps: AutostartDeps): void {
+	if (deps.platform !== "darwin" || !autostartOn(deps)) return;
+	const path = plistPath(deps);
+	const text = plist(deps);
+	if (readFileSync(path, "utf8") === text) return;
+	mkdirSync(dirname(deps.log), { recursive: true });
+	writeFileSync(path, text);
+}
+
+/** The first file the plist runs that is gone. */
+function missingFile(deps: AutostartDeps): string | undefined {
+	const text = readFileSync(plistPath(deps), "utf8");
+	const array = /<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/.exec(text)?.[1] ?? "";
+	const args = [...array.matchAll(/<string>([^<]*)<\/string>/g)].map(([, arg]) => unxml(arg));
+	return args.find((arg) => isAbsolute(arg) && !existsSync(arg));
 }
 
 export function toggleAutostart(deps: AutostartDeps): string {
@@ -128,5 +157,9 @@ export function toggleAutostart(deps: AutostartDeps): string {
 /** For /remote-control's own output; undefined where there is no autostart. */
 export function autostartStatus(deps: AutostartDeps): string | undefined {
 	if (deps.platform !== "darwin") return undefined;
-	return autostartOn(deps) ? "Starts at login: on" : "Starts at login: off (/remote-control autostart turns it on)";
+	if (!autostartOn(deps)) return "Starts at login: off (/remote-control autostart turns it on)";
+	const missing = missingFile(deps);
+	return missing
+		? `Starts at login: on (needs refresh: ${missing} is gone; /remote-control autostart twice sets it again)`
+		: "Starts at login: on";
 }
