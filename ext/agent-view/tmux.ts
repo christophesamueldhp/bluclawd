@@ -101,18 +101,19 @@ function screenLines(out: string): string[] {
 	return lines.map((line) => line.trimEnd());
 }
 
-/** Each command but attach is a quick round-trip to the server: a hung one must not hold up the daemon. */
-const EXEC_TIMEOUT_MS = 2000;
-
 type Run = (args: string[], options?: { inherit?: boolean; outsideTmux?: boolean }) => string;
 
 export class Tmux {
 	readonly dir: string;
 	private readonly run: Run;
+	private readonly timeoutMs: number | undefined;
 
-	constructor(dir: string = getServerDir(), run?: Run) {
+	/** `timeoutMs`: give up on a command (attach aside) after this long, so a hung one cannot hold
+	 *  up the daemon. Not for agent view: a killed client's new-session may still start the pane. */
+	constructor(dir: string = getServerDir(), run?: Run, options: { timeoutMs?: number } = {}) {
 		this.dir = dir;
 		this.run = run ?? ((args, options) => this.exec(args, options));
+		this.timeoutMs = options.timeoutMs;
 	}
 
 	get socket(): string {
@@ -331,7 +332,7 @@ export class Tmux {
 			encoding: "utf8",
 			env,
 			stdio: ["ignore", "pipe", "pipe"],
-			timeout: EXEC_TIMEOUT_MS,
+			timeout: this.timeoutMs,
 		});
 	}
 }

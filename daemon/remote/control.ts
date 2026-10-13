@@ -25,6 +25,8 @@ import { type PushResult, sendPush, type WebPushSubscription } from "./webpush.t
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "web");
 const NOTIFY_INTERVAL_MS = 1000;
 const PUSH_SUBJECT = "https://github.com/christophesamueldhp/bluclawd";
+/** Each tmux command is a quick round-trip to the server: a hung one must not hold up the daemon. */
+const TMUX_TIMEOUT_MS = 2000;
 
 export interface RemoteControlDeps {
 	listInstances(): InstanceSummary[];
@@ -58,7 +60,7 @@ export class RemoteControl {
 	constructor(deps: RemoteControlDeps) {
 		this.deps = deps;
 		this.store = deps.store ?? new RemoteStore();
-		this.tmux = deps.tmux ?? new Tmux();
+		this.tmux = deps.tmux ?? new Tmux(undefined, undefined, { timeoutMs: TMUX_TIMEOUT_MS });
 		this.sendPush =
 			deps.sendPush ??
 			((subscription, payload) => sendPush(subscription, payload, this.store.vapidKeys(), PUSH_SUBJECT));
