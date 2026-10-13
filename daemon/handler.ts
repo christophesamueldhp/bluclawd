@@ -161,7 +161,12 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 		case "wait": {
 			const waiting = supervisor.waitExternal(request.instanceId, WAIT_MS);
 			if (!waiting) return unknownInstanceError(request.instanceId);
-			return { type: "wait_result", ok: true, ...((await waiting) ? { queued: true } : {}) };
+			const outcome = await waiting;
+			return {
+				type: "wait_result",
+				ok: true,
+				...(outcome === "queued" ? { queued: true } : outcome === "superseded" ? { superseded: true } : {}),
+			};
 		}
 
 		case "unregister": {

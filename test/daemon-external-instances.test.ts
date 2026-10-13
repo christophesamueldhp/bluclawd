@@ -86,7 +86,7 @@ describe("waiting for a pane's next message", () => {
 		supervisor.registerExternal(rec("ext-1"), "idle");
 		const waiting = supervisor.waitExternal("ext-1", 25_000);
 		supervisor.sendExternal("ext-1", { type: "prompt", text: "hi" });
-		await expect(waiting).resolves.toBe(true);
+		await expect(waiting).resolves.toBe("queued");
 		expect(supervisor.drainExternal("ext-1")).toEqual([{ type: "prompt", text: "hi" }]);
 	});
 
@@ -94,7 +94,7 @@ describe("waiting for a pane's next message", () => {
 		const supervisor = new ServerSupervisor();
 		supervisor.registerExternal(rec("ext-1"), "idle");
 		supervisor.sendExternal("ext-1", { type: "abort" });
-		await expect(supervisor.waitExternal("ext-1", 25_000)).resolves.toBe(true);
+		await expect(supervisor.waitExternal("ext-1", 25_000)).resolves.toBe("queued");
 	});
 
 	it("is refused for a pane that is not registered", () => {
@@ -105,14 +105,14 @@ describe("waiting for a pane's next message", () => {
 		vi.useFakeTimers();
 		const supervisor = new ServerSupervisor();
 		supervisor.registerExternal(rec("ext-1"), "idle");
-		let result: boolean | undefined;
+		let result: string | undefined;
 		void supervisor.waitExternal("ext-1", 25_000)?.then((queued) => {
 			result = queued;
 		});
 		await vi.advanceTimersByTimeAsync(24_999);
 		expect(result).toBeUndefined();
 		await vi.advanceTimersByTimeAsync(1);
-		expect(result).toBe(false);
+		expect(result).toBe("none");
 		// The settled wait's timer is gone: a later message wakes nothing and stays queued.
 		supervisor.sendExternal("ext-1", { type: "abort" });
 		expect(supervisor.drainExternal("ext-1")).toEqual([{ type: "abort" }]);
@@ -123,9 +123,9 @@ describe("waiting for a pane's next message", () => {
 		supervisor.registerExternal(rec("ext-1"), "idle");
 		const older = supervisor.waitExternal("ext-1", 25_000);
 		const newer = supervisor.waitExternal("ext-1", 25_000);
-		await expect(older).resolves.toBe(false);
+		await expect(older).resolves.toBe("superseded");
 		supervisor.sendExternal("ext-1", { type: "abort" });
-		await expect(newer).resolves.toBe(true);
+		await expect(newer).resolves.toBe("queued");
 	});
 
 	it("settles a pane's wait when it unregisters or its row is deleted", async () => {
@@ -136,8 +136,20 @@ describe("waiting for a pane's next message", () => {
 		const two = supervisor.waitExternal("ext-2", 25_000);
 		supervisor.unregisterExternal("ext-1");
 		supervisor.deleteInstance("ext-2");
-		await expect(one).resolves.toBe(false);
-		await expect(two).resolves.toBe(false);
+		await expect(one).resolves.toBe("none");
+		await expect(two).resolves.toBe("none");
+	});
+
+	it("settles a pane's wait when its row is reaped", async () => {
+		const supervisor = new ServerSupervisor();
+		supervisor.registerExternal(rec("ext-1"), "idle", 0);
+		let result: string | undefined;
+		void supervisor.waitExternal("ext-1", 25_000)?.then((outcome) => {
+			result = outcome;
+		});
+		expect(supervisor.listExternalInstances(20_000)).toEqual([]);
+		await Promise.resolve();
+		expect(result).toBe("none");
 	});
 
 	it("settles every wait at shutdown", async () => {
@@ -146,6 +158,6 @@ describe("waiting for a pane's next message", () => {
 		supervisor.registerExternal(rec("ext-2"), "idle");
 		const waits = [supervisor.waitExternal("ext-1", 25_000), supervisor.waitExternal("ext-2", 25_000)];
 		supervisor.settleWaits();
-		await expect(Promise.all(waits)).resolves.toEqual([false, false]);
+		await expect(Promise.all(waits)).resolves.toEqual(["none", "none"]);
 	});
 });

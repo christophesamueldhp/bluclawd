@@ -304,7 +304,7 @@ describe("SelfRegistration waits for its next message", () => {
 
 	it("waits once registered, and registers at once when woken, to take what was queued", async () => {
 		vi.useFakeTimers();
-		const { client, registers, waits } = waitingClient([[], [{ type: "prompt", text: "hi" }]]);
+		const { client, registers, waits } = waitingClient([[], [{ type: "abort" }]]);
 		const handled: PaneMessage[] = [];
 		const reg = started(client, handled);
 		await vi.advanceTimersByTimeAsync(0);
@@ -313,7 +313,7 @@ describe("SelfRegistration waits for its next message", () => {
 		waits[0].answer(true);
 		await vi.advanceTimersByTimeAsync(0);
 		expect(registers).toHaveLength(2);
-		expect(handled).toEqual([{ type: "prompt", text: "hi" }]);
+		expect(handled).toEqual([{ type: "abort" }]);
 		expect(waits).toHaveLength(2);
 		await reg.stop();
 	});
@@ -359,6 +359,32 @@ describe("SelfRegistration waits for its next message", () => {
 		await vi.advanceTimersByTimeAsync(3000);
 		expect(registers).toHaveLength(3);
 		expect(waits).toHaveLength(2);
+		await reg.stop();
+	});
+
+	it("after a prompt, leaves a move queued behind it to the turn's first heartbeat", async () => {
+		vi.useFakeTimers();
+		const { client, registers, waits } = waitingClient([
+			[],
+			[{ type: "prompt", text: "hi" }],
+			[{ type: "tree", entryId: "1a2b3c4d" }],
+		]);
+		const handled: PaneMessage[] = [];
+		const reg = started(client, handled);
+		await vi.advanceTimersByTimeAsync(0);
+		waits[0].answer(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(handled).toEqual([{ type: "prompt", text: "hi" }]);
+		expect(registers).toHaveLength(2);
+		expect(waits).toHaveLength(1);
+		// agent_start's heartbeat, by which pi no longer reports the pane idle.
+		reg.setActivity("working");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(registers).toHaveLength(3);
+		expect(handled).toEqual([
+			{ type: "prompt", text: "hi" },
+			{ type: "tree", entryId: "1a2b3c4d" },
+		]);
 		await reg.stop();
 	});
 

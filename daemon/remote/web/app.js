@@ -724,7 +724,8 @@ ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
 
 /**
  * Waiting on an answer is mid-turn too, and compacting, going back or forking would cut the turn
- * short; a second one before the first has moved the session would race it.
+ * short; a second one before the first has moved the session would race it. So would one right
+ * behind a sent prompt, whose turn may not have started yet.
  * @param {Session | undefined} session
  */
 function isBusy(session) {
@@ -733,6 +734,7 @@ function isBusy(session) {
 		session?.state === "needs" ||
 		state.compacting ||
 		state.navigating ||
+		state.pending.length > 0 ||
 		!session?.alive
 	);
 }

@@ -122,6 +122,7 @@ interface AnyResponse {
 	messages?: PaneMessage[];
 	watched?: boolean;
 	queued?: boolean;
+	superseded?: boolean;
 }
 
 /** Path to the daemon's CLI entry, for the ensureDaemon() auto-start. */
@@ -186,13 +187,19 @@ export class OrchestratorClient {
 
 	private request(req: Request, timeoutMs = 2000, signal?: AbortSignal): Promise<AnyResponse> {
 		return new Promise<AnyResponse>((resolve, reject) => {
+			if (signal?.aborted) {
+				reject(new Error("orchestrator request aborted"));
+				return;
+			}
 			const socket = createConnection(this.socketPath);
 			let buffer = "";
 			let settled = false;
+			const abort = () => done(() => reject(new Error("orchestrator request aborted")));
 			const done = (fn: () => void): void => {
 				if (settled) return;
 				settled = true;
 				clearTimeout(timer);
+				signal?.removeEventListener("abort", abort);
 				socket.removeAllListeners();
 				// A reset after we are done is harmless; with no listener it would throw.
 				socket.on("error", () => {});
@@ -204,9 +211,7 @@ export class OrchestratorClient {
 			if (signal) {
 				socket.unref();
 				timer.unref();
-				const abort = () => done(() => reject(new Error("orchestrator request aborted")));
-				if (signal.aborted) abort();
-				else signal.addEventListener("abort", abort, { once: true });
+				signal.addEventListener("abort", abort, { once: true });
 			}
 			socket.on("connect", () => socket.write(`${JSON.stringify(req)}\n`));
 			socket.on("data", (chunk: Buffer) => {
@@ -279,11 +284,12 @@ export class OrchestratorClient {
 
 	/**
 	 * Held open until a message is queued for this pane (true) or the daemon's 25 s pass with none
-	 * (false); undefined from a daemon that predates the request, which answers it with no type.
+	 * (false); undefined when a newer wait for the same id replaced it, or from a daemon that
+	 * predates the request, which answers it with no type.
 	 */
 	async wait(instanceId: string, signal: AbortSignal): Promise<boolean | undefined> {
 		const res = await this.request({ type: "wait", instanceId }, 30_000, signal);
-		return res.type === "wait_result" ? res.queued === true : undefined;
+		return res.type === "wait_result" && !res.superseded ? res.queued === true : undefined;
 	}
 
 	/** Queue a message for a pane's pi; it acts on it within a heartbeat. */

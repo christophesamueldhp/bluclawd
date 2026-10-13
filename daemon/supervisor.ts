@@ -20,6 +20,10 @@ interface ExternalInstance {
 /** External (self-registered) instances expire this long after their last heartbeat. */
 const EXTERNAL_TTL_MS = 15_000;
 
+/** How a pane's wait ends: a message is queued for it; none came (time up, or its row went); or a
+ *  newer wait for the same id replaced it. */
+export type WaitOutcome = "queued" | "none" | "superseded";
+
 /**
  * Agent view's registry. Every running session is a pane's pi that registers itself with a
  * heartbeat; the daemon runs no sessions. A session whose pi quit while idle stays as a stored
@@ -28,7 +32,7 @@ const EXTERNAL_TTL_MS = 15_000;
 export class ServerSupervisor {
 	private readonly externalInstances = new Map<string, ExternalInstance>();
 	/** Each pane's pending wait, by id; kept apart from its entry, which every heartbeat replaces. */
-	private readonly waits = new Map<string, (queued: boolean) => void>();
+	private readonly waits = new Map<string, (outcome: WaitOutcome) => void>();
 
 	/** Register/heartbeat a pane's pi. */
 	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = Date.now()): void {
@@ -51,7 +55,7 @@ export class ServerSupervisor {
 
 	unregisterExternal(id: string): void {
 		this.externalInstances.delete(id);
-		this.settleWait(id, false);
+		this.settleWait(id, "none");
 	}
 
 	/** Queue a message for a self-registered session; false when none is registered as `id`. */
@@ -59,47 +63,50 @@ export class ServerSupervisor {
 		const entry = this.externalInstances.get(id);
 		if (!entry) return false;
 		entry.inbox.push(message);
-		this.settleWait(id, true);
+		this.settleWait(id, "queued");
 		return true;
 	}
 
 	/**
-	 * True once a message is queued for a self-registered session (at once if one is), false after
-	 * `timeoutMs` with none or when settled; undefined when none is registered as `id`. It drains
-	 * nothing: the pane's next register does, so no message goes into a reply its pane may no longer
-	 * read, and a navigation still goes alone. One per pane: a newer wait settles the older one (an
-	 * old runtime's and its successor's overlap across a fork or reload).
+	 * "queued" once a message is queued for a self-registered session (at once if one is), "none"
+	 * after `timeoutMs` with none or when its row goes; undefined when none is registered as `id`.
+	 * It drains nothing: the pane's next register does, so no message goes into a reply its pane may
+	 * no longer read, and a navigation still goes alone. One per pane: a newer wait settles the older
+	 * one as "superseded" (an old runtime's and its successor's overlap across a fork or reload), on
+	 * which that pane waits again only after its next heartbeat, so two live panes on one id do not
+	 * replace each other's waits in a loop.
 	 */
-	waitExternal(id: string, timeoutMs: number): Promise<boolean> | undefined {
+	waitExternal(id: string, timeoutMs: number): Promise<WaitOutcome> | undefined {
 		const entry = this.externalInstances.get(id);
 		if (!entry) return undefined;
-		this.settleWait(id, false);
-		if (entry.inbox.length > 0) return Promise.resolve(true);
+		this.settleWait(id, "superseded");
+		if (entry.inbox.length > 0) return Promise.resolve("queued");
 		return new Promise((resolve) => {
-			const timer = setTimeout(() => this.settleWait(id, false), timeoutMs);
-			this.waits.set(id, (queued) => {
+			const timer = setTimeout(() => this.settleWait(id, "none"), timeoutMs);
+			this.waits.set(id, (outcome) => {
 				clearTimeout(timer);
-				resolve(queued);
+				resolve(outcome);
 			});
 		});
 	}
 
-	/** At shutdown: every pending wait answers false. */
+	/** At shutdown: every pending wait answers "none". */
 	settleWaits(): void {
-		for (const id of [...this.waits.keys()]) this.settleWait(id, false);
+		for (const id of [...this.waits.keys()]) this.settleWait(id, "none");
 	}
 
-	private settleWait(id: string, queued: boolean): void {
+	private settleWait(id: string, outcome: WaitOutcome): void {
 		const settle = this.waits.get(id);
 		if (!settle) return;
 		this.waits.delete(id);
-		settle(queued);
+		settle(outcome);
 	}
 
 	/** The messages queued for a self-registered session, now delivered. A tree, fork or clone goes
 	 *  alone: what follows it is for the branch or session the pane moves to, which the next
-	 *  heartbeat comes from, and a prompt just before it would still find the pane idle, so the
-	 *  move would cut its turn short. */
+	 *  heartbeat comes from. A move just behind a prompt would still find the pane idle and cut its
+	 *  turn short, so the pane registers again after a prompt only at its next heartbeat (the turn's
+	 *  start), not when woken. */
 	drainExternal(id: string): PaneMessage[] {
 		const entry = this.externalInstances.get(id);
 		if (!entry || entry.inbox.length === 0) return [];
@@ -113,6 +120,7 @@ export class ServerSupervisor {
 		for (const [id, entry] of this.externalInstances) {
 			if (now - entry.lastSeenAt > EXTERNAL_TTL_MS) {
 				this.externalInstances.delete(id);
+				this.settleWait(id, "none");
 				continue;
 			}
 			out.push({ record: cloneInstance(entry.record), activity: entry.activity });
@@ -177,7 +185,7 @@ export class ServerSupervisor {
 	deleteInstance(instanceId: string): boolean {
 		// A self-registered session's process is its pane's; its row goes until it registers again.
 		if (this.externalInstances.delete(instanceId)) {
-			this.settleWait(instanceId, false);
+			this.settleWait(instanceId, "none");
 			return true;
 		}
 		if (!getInstance(instanceId)) return false;

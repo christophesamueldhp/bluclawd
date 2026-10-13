@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import type { Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -75,5 +76,45 @@ describe("instant delivery to a pane", () => {
 		controller.abort();
 		await expect(waiting).rejects.toThrow("aborted");
 		await client.unregister("pane-wait-abort");
+	});
+
+	it("does not connect for a wait already aborted, and leaves no listener on a wait's signal", async () => {
+		let connections = 0;
+		server.on("connection", () => connections++);
+		const client = new OrchestratorClient();
+		await client.register({ id: "pane-wait-signal", cwd: dir });
+		connections = 0;
+		const controller = new AbortController();
+		controller.abort();
+		await expect(client.wait("pane-wait-signal", controller.signal)).rejects.toThrow("aborted");
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(connections).toBe(0);
+
+		const signal = new AbortController().signal;
+		const waiting = client.wait("pane-wait-signal", signal);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		supervisor.settleWaits();
+		await expect(waiting).resolves.toBe(false);
+		expect(getEventListeners(signal, "abort")).toHaveLength(0);
+		await client.unregister("pane-wait-signal");
+	});
+
+	it("does not loop on waits when two live registrations share a pane id", async () => {
+		const waits = vi.spyOn(supervisor, "waitExternal");
+		const regs = [0, 1].map(
+			() =>
+				new SelfRegistration(
+					new OrchestratorClient(),
+					() => ({ cwd: dir }),
+					() => {},
+					"pane-wait-shared",
+				),
+		);
+		for (const reg of regs) reg.start();
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+		for (const reg of regs) await reg.stop();
+		expect(waits.mock.calls.length).toBeGreaterThan(0);
+		expect(waits.mock.calls.length).toBeLessThan(10);
+		waits.mockRestore();
 	});
 });

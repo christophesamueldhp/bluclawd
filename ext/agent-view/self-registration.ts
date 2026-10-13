@@ -112,7 +112,9 @@ export class SelfRegistration {
 	/** The wait in flight, ended by stop(). */
 	private waiting: AbortController | undefined;
 	/** The last register delivered a tree, fork or clone: what follows it is for where the pane
-	 *  moves to, so it waits for the next heartbeat, as the daemon's drain intends. */
+	 *  moves to, so it waits for the next heartbeat, as the daemon's drain intends. Likewise after a
+	 *  prompt: pi still reports the pane idle until its turn starts, so a move right behind it would
+	 *  cut that turn short; the turn's agent_start heartbeat takes what follows. */
 	private moved = false;
 
 	/** `onMessage`: another window's agent view asks this session something.
@@ -182,7 +184,9 @@ export class SelfRegistration {
 			const res = await this.client.register(instance);
 			watched = res?.watched === true;
 			const messages = res?.messages ?? [];
-			this.moved = messages.some((m) => m.type === "tree" || m.type === "fork" || m.type === "clone");
+			this.moved = messages.some(
+				(m) => m.type === "tree" || m.type === "fork" || m.type === "clone" || m.type === "prompt",
+			);
 			if (!this.moved) this.wait();
 			for (const message of messages) {
 				// Stopped meanwhile: the session they were for is gone, so they wait for whatever
@@ -207,8 +211,9 @@ export class SelfRegistration {
 	/**
 	 * One wait at a time, from the first register that succeeds: a message queued for this pane
 	 * wakes it, and the register that follows drains it at once, the same way a heartbeat does. A
-	 * wait that fails, or that a daemon from before `wait` answers, waits again after the next
-	 * register that succeeds: heartbeats deliver meanwhile, and a restarted daemon is waited on.
+	 * wait that fails, that a newer wait for this id replaced (another live pane under the same id),
+	 * or that a daemon from before `wait` answers, waits again after the next register that
+	 * succeeds: heartbeats deliver meanwhile, and a restarted daemon is waited on.
 	 */
 	private wait(): void {
 		if (this.waiting || this.stopped || !this.timer) return;

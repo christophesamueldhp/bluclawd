@@ -213,10 +213,13 @@ export interface RegisterResponse extends ResponseBase {
 	watched?: boolean;
 }
 
-/** `queued`: a message waits for the pane, which registers to drain it (the wait carries none). */
+/** `queued`: a message waits for the pane, which registers to drain it (the wait carries none).
+ *  `superseded`: a newer wait for the same id replaced this one; the pane waits again only after
+ *  its next heartbeat. */
 export interface WaitResponse extends ResponseBase {
 	type: "wait_result";
 	queued?: boolean;
+	superseded?: boolean;
 }
 
 export interface UnregisterResponse extends ResponseBase {
