@@ -108,6 +108,11 @@ export class RemoteControl {
 		if (started.replaces) this.deps.deleteInstance(started.replaces);
 	}
 
+	/** A pane started to resume this stored row has not registered yet. */
+	resuming(storedId: string): boolean {
+		return [...this.starting.values()].some((started) => started.replaces === storedId);
+	}
+
 	private startSession(spec: SessionSpec, replaces?: string): string {
 		const pane = startSession({ ...spec, tmux: this.tmux });
 		const timer = setTimeout(() => {
@@ -182,7 +187,7 @@ export class RemoteControl {
 					send: this.deps.send,
 					launch: () => this.launch(),
 					startSession: (spec, replaces) => this.startSession(spec, replaces),
-					resuming: (id) => [...this.starting.values()].some((started) => started.replaces === id),
+					resuming: (id) => this.resuming(id),
 					report: (id) => this.reports.get(id),
 					tmux: this.tmux,
 					webDir: this.deps.webDir ?? WEB_DIR,

@@ -28,6 +28,8 @@ export interface InstanceSummary {
 	/** The tmux session its interactive pi runs in. */
 	pane?: string;
 	leafId?: string;
+	/** A stored row a phone is resuming: its pane has not registered yet. */
+	resuming?: boolean;
 }
 
 export interface RegisterInput {

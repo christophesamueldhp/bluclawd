@@ -225,6 +225,20 @@ describe("remote control switch", () => {
 			await handleIpcRequest({ type: "unregister", instanceId: body.pane! });
 		});
 
+		it("lists a stored row as being resumed until the phone's pane registers, so agent view starts no second one", async () => {
+			vi.stubEnv("PI_SERVER_DIR", dir);
+			const saved = await handleIpcRequest({ type: "save", cwd: dir, sessionFile: join(dir, "s.jsonl") });
+			if (saved.type !== "ack" || !saved.instance) throw new Error("not saved");
+			const id = saved.instance.id;
+			instances = listSummaries();
+			expect(instances.find((i) => i.id === id)).not.toHaveProperty("resuming");
+			const { body } = await post(`/api/sessions/${id}/prompt`, { text: "carry on" });
+			expect(listSummaries().find((i) => i.id === id)).toMatchObject({ resuming: true });
+			await register(body.pane!);
+			expect(listSummaries().find((i) => i.id === id)).not.toHaveProperty("resuming");
+			await handleIpcRequest({ type: "unregister", instanceId: body.pane! });
+		});
+
 		it("ends a pane it started that never registered, keeping the stored row it would have resumed", async () => {
 			const task = await post("/api/sessions", { cwd: dir, task: "go" });
 			const resume = await post("/api/sessions/stored/prompt", { text: "carry on" });

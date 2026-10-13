@@ -154,6 +154,7 @@ const MENU_ROWS = 8;
 export const EXIT_WORDS = new Set(["exit", "quit", ":q", ":q!", ":wq", ":wq!"]);
 /** How many times (150ms apart) a delete waits for the row a stopped pi saves. */
 const STOP_SAVE_POLLS = 20;
+const RESUMING_FROM_PHONE = "Already being resumed from your phone";
 /** How long a new pane's row shows as starting before it should have registered. */
 const PANE_START_MS = 15_000;
 
@@ -829,6 +830,13 @@ export class AgentView implements Component, Focusable {
 		}
 		this.opening = row.id;
 		this.render_();
+		const resuming = await this.resumingFromPhone(row);
+		if (this.closed || this.opening !== row.id) return; // cancelled before anything started
+		if (resuming) {
+			this.opening = undefined;
+			this.say(RESUMING_FROM_PHONE);
+			return;
+		}
 		let pane: string;
 		try {
 			pane = panes.start(row.cwd, ["--session", sessionFile]);
@@ -845,6 +853,13 @@ export class AgentView implements Component, Focusable {
 		}
 		this.opening = undefined;
 		this.leaveFor(pane);
+	}
+
+	/** A phone's resume starts its pane before the stored row goes, and this view lists it a second
+	 *  later: a pane here too would write the same session file. */
+	private async resumingFromPhone(row: AgentRow): Promise<boolean> {
+		const listed = await this.opts.client.list().catch(() => []);
+		return listed.some((inst) => inst.id === row.id && inst.resuming === true);
 	}
 
 	/** Enter / →: show the session in this terminal; the one here keeps running in its own pane. */
@@ -1423,6 +1438,11 @@ export class AgentView implements Component, Focusable {
 				}
 				await this.opts.client.send(row.id, { type: "prompt", text });
 			} else if (row.sessionFile && !row.alive) {
+				if (await this.resumingFromPhone(row)) {
+					this.replyError = RESUMING_FROM_PHONE;
+					this.render_();
+					return;
+				}
 				panes.start(row.cwd, ["--session", row.sessionFile, "--", text]);
 				await this.opts.client.delete(row.id).catch(() => undefined);
 			} else {

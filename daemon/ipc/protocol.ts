@@ -179,6 +179,8 @@ export interface InstanceSummary {
 	sortOrder?: number;
 	pane?: string;
 	leafId?: string;
+	/** A stored row a phone is resuming: its pane has not registered yet. */
+	resuming?: boolean;
 }
 
 interface ResponseBase {
