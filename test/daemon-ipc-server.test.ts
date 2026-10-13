@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BUILD_ID, VERSION } from "../daemon/config.ts";
 import { type IpcRequestHandler, startIpcServer } from "../daemon/ipc/server.ts";
+import { OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
 
 /**
  * Every response the daemon sends should carry its own version/buildId, so a
@@ -70,5 +71,17 @@ describe("startIpcServer — version echo", () => {
 		expect(response.ok).toBe(false);
 		expect(response.version).toBe(VERSION);
 		expect(response.buildId).toBe(BUILD_ID);
+	});
+
+	it("reads a large request whole, with characters cut across its reads", async () => {
+		const received: unknown[] = [];
+		server = await startIpcServer((async (request: unknown) => {
+			received.push(request);
+			return { type: "ack", ok: true };
+		}) as IpcRequestHandler);
+		// Three bytes a character: some fall across the socket's reads.
+		const name = "✻".repeat(200_000);
+		await new OrchestratorClient(join(tempDir, "server.sock")).rename("pane", name);
+		expect(received).toEqual([{ type: "rename", instanceId: "pane", name }]);
 	});
 });

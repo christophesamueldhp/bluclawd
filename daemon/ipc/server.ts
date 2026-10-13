@@ -1,5 +1,6 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { createConnection, createServer, type Server } from "node:net";
+import { StringDecoder } from "node:string_decoder";
 import { BUILD_ID, getSocketPath, VERSION } from "../config.ts";
 import {
 	type ErrorResponse,
@@ -22,11 +23,13 @@ export async function startIpcServer(handler: IpcRequestHandler): Promise<Server
 
 	const server = createServer((socket) => {
 		let buffer = "";
+		// A large request comes in many reads, which can split a character.
+		const decoder = new StringDecoder("utf8");
 		// A client that resets mid-request must not become an uncaught exception that stops the daemon.
 		socket.on("error", () => socket.destroy());
 
 		socket.on("data", async (chunk: Buffer | string) => {
-			buffer += chunk.toString();
+			buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
 			const newlineIndex = buffer.indexOf("\n");
 			if (newlineIndex === -1) {
 				return;
