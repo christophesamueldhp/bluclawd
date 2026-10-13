@@ -213,6 +213,8 @@ export interface RegisterResponse extends ResponseBase {
 	messages?: PaneMessage[];
 	/** A phone has this session open on its event stream. */
 	watched?: boolean;
+	/** The daemon has no report from this pane (it restarted since the last one): send one now. */
+	wantReport?: boolean;
 }
 
 /** `queued`: a message waits for the pane, which registers to drain it (the wait carries none).

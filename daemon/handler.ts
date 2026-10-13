@@ -150,6 +150,7 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				ok: true,
 				...(messages.length ? { messages } : {}),
 				...(remoteControl?.watched(record.id) ? { watched: true } : {}),
+				...(remoteControl && !remoteControl.hasReport(record.id) ? { wantReport: true } : {}),
 			};
 		}
 

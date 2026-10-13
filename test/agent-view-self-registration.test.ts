@@ -123,6 +123,28 @@ describe("SelfRegistration watched flag", () => {
 	});
 });
 
+describe("SelfRegistration report request", () => {
+	it("passes on each heartbeat's request for a report, which a restarted daemon lacks", async () => {
+		const replies: Array<{ wantReport?: boolean }> = [{ wantReport: true }, {}];
+		const client = {
+			register: async () => ({ messages: [], watched: false, ...replies.shift() }),
+			unregister: async () => {},
+		} as unknown as OrchestratorClient;
+		let asked = 0;
+		const reg = new SelfRegistration(
+			client,
+			() => ({ cwd: "/p" }),
+			() => {},
+			"pi-1",
+			() => {},
+			() => asked++,
+		);
+		await reg.refresh();
+		await reg.refresh();
+		expect(asked).toBe(1);
+	});
+});
+
 describe("SelfRegistration.stop", () => {
 	it("unregisters and resolves when pi's API is gone by the time an in-flight register lands", async () => {
 		let land: (reply: { watched: boolean; messages: [] }) => void = () => {};

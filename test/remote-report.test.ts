@@ -2,6 +2,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
+import { OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
+import { PANE_ENV } from "../ext/agent-view/tmux.ts";
 import remoteFactory from "../ext/remote/index.ts";
 import { applyPaneMessage, buildReport, navigate } from "../ext/remote/report.ts";
 
@@ -265,6 +267,29 @@ describe("/remote-control", () => {
 			await handler(args, { ui: { notify } });
 			expect(notify.mock.calls).toEqual([["Usage: /remote-control [pair | devices]", "warning"]]);
 		}
+	});
+
+	it("reports at once when the daemon asks for it, as a restarted one does", async () => {
+		const sent = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
+		const handlers = new Map<string, (event: unknown, ctx?: unknown) => void>();
+		const pi = {
+			on: (name: string, handler: (event: unknown, ctx: unknown) => void) => handlers.set(name, handler),
+			events: { on: (name: string, handler: (data: unknown) => void) => handlers.set(name, handler) },
+			registerCommand: () => {},
+			getThinkingLevel: () => "off",
+		};
+		process.env[PANE_ENV] = "pi-report";
+		try {
+			remoteFactory(pi as never);
+		} finally {
+			delete process.env[PANE_ENV];
+		}
+		const { ctx } = fakes({ current: model("openai", "gpt-5") });
+		handlers.get("session_start")?.({}, { ...ctx, mode: "tui" });
+		handlers.get("bluclawd:remote-want-report")?.(true);
+		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(2));
+		expect(sent.mock.calls.map(([pane]) => pane)).toEqual(["pi-report", "pi-report"]);
+		sent.mockRestore();
 	});
 
 	it("runs the phone's tree, fork and clone without a word to the user", async () => {

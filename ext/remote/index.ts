@@ -166,6 +166,9 @@ function factory(pi: ExtensionAPI): void {
 		// A restarted daemon has no report until the next turn: a phone opening the session sends it again.
 		if (opened && session) report(session);
 	});
+	pi.events.on("bluclawd:remote-want-report", () => {
+		if (session) report(session);
+	});
 	pi.on("message_update", (event) => live?.onMessageUpdate(event.message));
 	pi.on("tool_execution_start", (event) => live?.onToolStart(event.toolCallId, event.toolName, event.args));
 	pi.on("tool_execution_end", (event) => live?.onToolEnd(event.toolCallId));

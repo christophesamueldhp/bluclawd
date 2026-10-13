@@ -105,6 +105,7 @@ export class SelfRegistration {
 	private readonly getInfo: () => SelfSessionInfo | undefined;
 	private readonly onMessage: (message: PaneMessage) => void;
 	private readonly onWatched: (watched: boolean) => void;
+	private readonly onWantReport: () => void;
 	private activity: AgentActivity = "idle";
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private readonly inflight = new Set<Promise<void>>();
@@ -120,18 +121,21 @@ export class SelfRegistration {
 	/** `onMessage`: another window's agent view asks this session something.
 	 *  `id`: a pane registers under its tmux session's name, so its row outlives a session switch.
 	 *  `getInfo` returns undefined while there is no session to list yet.
-	 *  `onWatched`: after each heartbeat, whether a phone has this session open. */
+	 *  `onWatched`: after each heartbeat, whether a phone has this session open.
+	 *  `onWantReport`: the daemon has no report from this pane, as after it restarted. */
 	constructor(
 		client: OrchestratorClient,
 		getInfo: () => SelfSessionInfo | undefined,
 		onMessage: (message: PaneMessage) => void = () => {},
 		id: string = randomUUID(),
 		onWatched: (watched: boolean) => void = () => {},
+		onWantReport: () => void = () => {},
 	) {
 		this.client = client;
 		this.getInfo = getInfo;
 		this.onMessage = onMessage;
 		this.onWatched = onWatched;
+		this.onWantReport = onWantReport;
 		this.id = id;
 	}
 
@@ -180,9 +184,11 @@ export class SelfRegistration {
 			launch: { command: piCommand() },
 		};
 		let watched = false;
+		let wantReport = false;
 		try {
 			const res = await this.client.register(instance);
 			watched = res?.watched === true;
+			wantReport = res?.wantReport === true;
 			const messages = res?.messages ?? [];
 			this.moved = messages.some(
 				(m) =>
@@ -208,6 +214,7 @@ export class SelfRegistration {
 		if (this.stopped) return;
 		try {
 			this.onWatched(watched);
+			if (wantReport) this.onWantReport();
 		} catch {
 			// a heartbeat must not reject: stop() awaits it and the timer fires it unawaited
 		}

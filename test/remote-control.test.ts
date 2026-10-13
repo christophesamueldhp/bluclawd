@@ -247,6 +247,18 @@ describe("remote control switch", () => {
 		});
 	});
 
+	it("asks a heartbeat for a report while it has none for the pane, as after a daemon restart", async () => {
+		const beat = () => handleIpcRequest({ type: "register", instance: { id: "pane-1", cwd: "/p" } });
+		expect(await beat()).not.toHaveProperty("wantReport");
+		setRemoteControl(control);
+		expect(await beat()).toMatchObject({ type: "register_result", wantReport: true });
+		await handleIpcRequest({ type: "remote_report", instanceId: "pane-1", report: { models: [] } });
+		expect(await beat()).not.toHaveProperty("wantReport");
+		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
+		expect(await beat()).toMatchObject({ wantReport: true });
+		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
+	});
+
 	it("tells a heartbeat when a phone watches its session, and streams what the pane sends", async () => {
 		setRemoteControl(control);
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });

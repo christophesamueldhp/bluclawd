@@ -127,6 +127,7 @@ interface AnyResponse {
 	buildId?: string;
 	messages?: PaneMessage[];
 	watched?: boolean;
+	wantReport?: boolean;
 	queued?: boolean;
 	superseded?: boolean;
 }
@@ -283,9 +284,11 @@ export class OrchestratorClient {
 	}
 
 	/** Register/heartbeat a pane's pi. */
-	async register(instance: RegisterInput): Promise<{ messages: PaneMessage[]; watched: boolean }> {
+	async register(
+		instance: RegisterInput,
+	): Promise<{ messages: PaneMessage[]; watched: boolean; wantReport: boolean }> {
 		const res = await this.request({ type: "register", instance }, 1000);
-		return { messages: res.messages ?? [], watched: res.watched === true };
+		return { messages: res.messages ?? [], watched: res.watched === true, wantReport: res.wantReport === true };
 	}
 
 	/**

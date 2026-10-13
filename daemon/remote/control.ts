@@ -147,6 +147,10 @@ export class RemoteControl {
 		this.server?.status(sessionId);
 	}
 
+	hasReport(sessionId: string): boolean {
+		return this.reports.has(sessionId);
+	}
+
 	launch(): PaneLaunch | undefined {
 		return [this.keptLaunch, this.latestLaunch].find(launchUsable);
 	}

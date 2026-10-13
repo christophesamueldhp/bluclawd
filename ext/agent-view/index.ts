@@ -409,6 +409,7 @@ const agentView: InlineExtension = {
 				(message) => onPaneMessage(ctx, message),
 				pane,
 				(watched) => pi.events.emit("bluclawd:remote-watched", watched),
+				() => pi.events.emit("bluclawd:remote-want-report", true),
 			);
 			registration.start();
 			if (process.env[NORMAL_ENV]) normal = true;
