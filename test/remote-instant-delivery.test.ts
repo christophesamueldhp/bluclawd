@@ -57,6 +57,22 @@ describe("instant delivery to a pane", () => {
 		expect(supervisor.listExternalInstances().some((e) => e.record.id === "pane-wait-e2e")).toBe(false);
 	});
 
+	it("hands a pane several MB of images, and text cut across many reads, within its register's timeout", async () => {
+		const client = new OrchestratorClient();
+		await client.register({ id: "pane-images", cwd: dir });
+		const png = Buffer.alloc(5 * 1024 * 1024, 7);
+		png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		const messages: PaneMessage[] = [
+			{ type: "prompt", text: "look", images: [{ mimeType: "image/png", data: png.toString("base64") }] },
+			// Three bytes a character: some fall across the socket's reads.
+			{ type: "prompt", text: "✻".repeat(200_000) },
+		];
+		for (const message of messages) supervisor.sendExternal("pane-images", message);
+		const { messages: delivered } = await client.register({ id: "pane-images", cwd: dir });
+		expect(delivered).toEqual(messages);
+		await client.unregister("pane-images");
+	});
+
 	it("answers a pending wait at shutdown", async () => {
 		const client = new OrchestratorClient();
 		await client.register({ id: "pane-wait-settle", cwd: dir });
