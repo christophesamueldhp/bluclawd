@@ -4,7 +4,7 @@
  * paired device's token: a bearer header, or `?token=` on the SSE stream, which EventSource
  * cannot give headers.
  */
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
@@ -14,7 +14,7 @@ import type { InstanceSummary, LiveSnapshot, PaneLaunch, PaneMessage, PaneReport
 import { RemoteEvents } from "./events.ts";
 import type { RemoteStore } from "./pairing.ts";
 import { findSession, remoteSessions } from "./sessions.ts";
-import type { SessionSpec } from "./spawn.ts";
+import { launchUsable, type SessionSpec } from "./spawn.ts";
 import { loadTranscript } from "./transcript.ts";
 import { parseSubscription } from "./webpush.ts";
 
@@ -146,14 +146,10 @@ function keysIn(body: Record<string, unknown>): { keys: string[] } | { text: str
 	throw new HttpError(400, "invalid_keys");
 }
 
-/** How to start a pane's pi, while its files are still there: a pane started with a node or pi
- *  that has moved since (an upgrade) would die at once. */
+/** How to start a pane's pi, while its files are still there. */
 function launchOf(deps: RemoteDeps): PaneLaunch | undefined {
 	const launch = deps.launch();
-	if (!launch) return undefined;
-	const [command, ...args] = launch.command;
-	const script = args.at(-1);
-	return command && existsSync(command) && (script === undefined || existsSync(script)) ? launch : undefined;
+	return launchUsable(launch) ? launch : undefined;
 }
 
 function start(deps: RemoteDeps, spec: SessionSpec, replaces?: string): string {

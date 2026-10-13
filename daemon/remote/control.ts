@@ -19,7 +19,7 @@ import { type RemoteServer, startRemoteServer } from "./http.ts";
 import { Notifier } from "./notifier.ts";
 import { RemoteStore } from "./pairing.ts";
 import { remoteSessions } from "./sessions.ts";
-import { type SessionSpec, startSession } from "./spawn.ts";
+import { launchUsable, type SessionSpec, startSession } from "./spawn.ts";
 import { type PushResult, sendPush, type WebPushSubscription } from "./webpush.ts";
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "web");
@@ -45,9 +45,13 @@ export class RemoteControl {
 	readonly store: RemoteStore;
 	private readonly deps: RemoteControlDeps;
 	private readonly tmux: Tmux;
-	/** The latest heartbeat's launch, and what remote.json holds (so a heartbeat does not read it). */
+	/** The latest heartbeat's launch. */
 	private latestLaunch: PaneLaunch | undefined;
-	private launchNoted: string | undefined;
+	/** The launch kept: /remote-control's, else a heartbeat's while none usable was kept. Panes started
+	 *  differently would otherwise rewrite remote.json on every heartbeat. */
+	private keptLaunch: PaneLaunch | undefined;
+	/** What remote.json holds, so a heartbeat does not read it. */
+	private launchWritten: string | undefined;
 	/** Panes started from the phone that have not registered yet, by tmux session name. */
 	private readonly starting = new Map<string, { replaces?: string; timer: ReturnType<typeof setTimeout> }>();
 	private server: RemoteServer | undefined;
@@ -70,21 +74,26 @@ export class RemoteControl {
 		this.sendPush =
 			deps.sendPush ??
 			((subscription, payload) => sendPush(subscription, payload, this.store.vapidKeys(), PUSH_SUBJECT));
+		this.keptLaunch = this.store.load().launch;
+		this.launchWritten = this.keptLaunch && JSON.stringify(this.keptLaunch);
 	}
 
-	/** Every heartbeat says how its pi was started; the latest one is kept, and in remote.json while on. */
-	noteLaunch(launch: PaneLaunch): void {
+	/** Every heartbeat says how its pi was started, and so does /remote-control (`chosen`), whose
+	 *  launch is always kept; the one kept is in remote.json while on. */
+	noteLaunch(launch: PaneLaunch, chosen = false): void {
 		this.latestLaunch = launch;
+		const kept = JSON.stringify(launch) === JSON.stringify(this.keptLaunch);
+		if (chosen || (!kept && !launchUsable(this.keptLaunch))) this.keptLaunch = launch;
 		if (this.server) this.saveLaunch();
 	}
 
 	private saveLaunch(): void {
-		const launch = this.latestLaunch;
+		const launch = this.keptLaunch;
 		const key = JSON.stringify(launch);
-		if (!launch || key === this.launchNoted) return;
+		if (!launch || key === this.launchWritten) return;
 		try {
 			this.store.setLaunch(launch);
-			this.launchNoted = key;
+			this.launchWritten = key;
 		} catch {
 			// a heartbeat must not fail over remote.json; the next one retries
 		}
@@ -139,7 +148,7 @@ export class RemoteControl {
 	}
 
 	launch(): PaneLaunch | undefined {
-		return this.latestLaunch ?? this.store.load().launch;
+		return [this.keptLaunch, this.latestLaunch].find(launchUsable);
 	}
 
 	private run(step: () => Promise<void>): Promise<void> {
@@ -179,7 +188,6 @@ export class RemoteControl {
 			this.serverPort = state.port;
 			this.listenError = undefined;
 			// The phone needs one as soon as it is on.
-			this.launchNoted = state.launch ? JSON.stringify(state.launch) : undefined;
 			this.saveLaunch();
 			this.notifyTimer = setInterval(() => this.notify(), NOTIFY_INTERVAL_MS);
 			this.notifyTimer.unref();
@@ -232,7 +240,7 @@ export class RemoteControl {
 	async handle(request: RemoteRequest): Promise<RemoteResponse | ErrorResponse> {
 		const command = request.launch?.command;
 		if (Array.isArray(command) && command.length > 0 && command.every((part) => typeof part === "string")) {
-			this.noteLaunch({ command });
+			this.noteLaunch({ command }, true);
 		}
 		switch (request.action) {
 			case "on":

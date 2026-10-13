@@ -90,49 +90,68 @@ describe("remote control switch", () => {
 		});
 	});
 
-	it("keeps the latest heartbeat's launch command, in remote.json only while on and when it changes", async () => {
+	it("keeps one launch command in remote.json: a heartbeat's only while none usable is there, /remote-control's always", async () => {
 		setRemoteControl(control);
 		const file = join(dir, "remote.json");
+		const [a, b, c] = ["a.js", "b.js", "c.js"].map((name) => {
+			writeFileSync(join(dir, name), "");
+			return [process.execPath, join(dir, name)];
+		});
 		const beat = (command: string[]) =>
 			handleIpcRequest({
 				type: "register",
 				instance: { id: "pane-1", cwd: "/p", leafId: "e2", launch: { command } },
 			});
-		await beat(["node", "pi.js"]);
-		expect(control.launch()).toEqual({ command: ["node", "pi.js"] });
+		await beat(a);
+		expect(control.launch()).toEqual({ command: a });
 		expect(listSummaries().find((i) => i.id === "pane-1")).toMatchObject({ external: true, leafId: "e2" });
 		// Off: nothing is written for it.
 		expect(existsSync(file)).toBe(false);
 		// On: the phone needs it at once.
 		await control.handle({ type: "remote", action: "on", port: 0 });
-		expect(control.store.load().launch).toEqual({ command: ["node", "pi.js"] });
+		expect(control.store.load().launch).toEqual({ command: a });
 		const written = statSync(file).ino;
-		await beat(["node", "pi.js"]);
+		// Two panes started differently, alternating: the one kept stays, and nothing is written.
+		await beat(b);
+		await beat(a);
+		await beat(b);
 		expect(statSync(file).ino).toBe(written);
-		await beat(["node", "other.js"]);
-		expect(control.store.load().launch).toEqual({ command: ["node", "other.js"] });
+		expect(control.launch()).toEqual({ command: a });
+		// Its script gone (an upgrade): the latest usable one starts panes, and the next heartbeat keeps it.
+		rmSync(join(dir, "a.js"));
+		expect(control.launch()).toEqual({ command: b });
+		await beat(b);
+		expect(control.store.load().launch).toEqual({ command: b });
+		// /remote-control's replaces a usable one.
+		await control.handle({ type: "remote", action: "status", launch: { command: c } });
+		expect(control.store.load().launch).toEqual({ command: c });
+		expect(control.launch()).toEqual({ command: c });
 		// A restarted daemon has it before any heartbeat, and does not write it again.
 		await control.stop();
 		control = make();
 		setRemoteControl(control);
 		await control.apply();
-		expect(control.launch()).toEqual({ command: ["node", "other.js"] });
+		expect(control.launch()).toEqual({ command: c });
 		const rewritten = statSync(file).ino;
-		await beat(["node", "other.js"]);
+		await beat(b);
 		expect(statSync(file).ino).toBe(rewritten);
 		await control.handle({ type: "remote", action: "off" });
 		const off = statSync(file).ino;
-		await beat(["node", "third.js"]);
-		expect(control.launch()).toEqual({ command: ["node", "third.js"] });
+		rmSync(join(dir, "c.js"));
+		await beat(b);
+		expect(control.launch()).toEqual({ command: b });
 		expect(statSync(file).ino).toBe(off);
 		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
 	});
 
 	it("learns the launch command from /remote-control too, as a fresh pi has no heartbeat yet", async () => {
-		await control.handle({ type: "remote", action: "on", port: 0, launch: { command: ["node", "pi.js"] } });
-		expect(control.store.load().launch).toEqual({ command: ["node", "pi.js"] });
+		writeFileSync(join(dir, "pi.js"), "");
+		const command = [process.execPath, join(dir, "pi.js")];
+		await control.handle({ type: "remote", action: "status", launch: { command } });
+		await control.handle({ type: "remote", action: "on", port: 0 });
+		expect(control.store.load().launch).toEqual({ command });
 		await control.handle({ type: "remote", action: "status", launch: { command: [] } });
-		expect(control.launch()).toEqual({ command: ["node", "pi.js"] });
+		expect(control.launch()).toEqual({ command });
 	});
 
 	describe("panes the phone starts", () => {

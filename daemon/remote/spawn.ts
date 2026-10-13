@@ -2,8 +2,18 @@
  * Panes the phone starts: a pi of its own in agent view's tmux server, with the arguments agent
  * view's composer and peek reply give it, so the session is the same as one started on the Mac.
  */
+import { existsSync } from "node:fs";
 import { Tmux } from "../../ext/agent-view/tmux.ts";
 import type { PaneLaunch } from "../ipc/protocol.ts";
+
+/** Its files are still there: a pane started with a node or pi that has moved since (an upgrade)
+ *  would die at once. */
+export function launchUsable(launch: PaneLaunch | undefined): launch is PaneLaunch {
+	if (!launch) return false;
+	const [command, ...args] = launch.command;
+	const script = args.at(-1);
+	return command !== undefined && existsSync(command) && (script === undefined || existsSync(script));
+}
 
 export interface SessionSpec {
 	cwd: string;
