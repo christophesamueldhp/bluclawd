@@ -302,11 +302,12 @@ export class OrchestratorClient {
 		await this.request({ type: "meta", instanceId, ...meta });
 	}
 
-	/** Register/heartbeat a pane's pi. */
+	/** Register/heartbeat a pane's pi. Its timeout is long: the messages a response drains are lost
+	 *  if the pane, busy for a moment, reads it too late. */
 	async register(
 		instance: RegisterInput,
 	): Promise<{ messages: PaneMessage[]; watched: boolean; wantReport: boolean }> {
-		const res = await this.request({ type: "register", instance }, 1000);
+		const res = await this.request({ type: "register", instance }, 3000);
 		return { messages: res.messages ?? [], watched: res.watched === true, wantReport: res.wantReport === true };
 	}
 

@@ -73,6 +73,19 @@ describe("instant delivery to a pane", () => {
 		await client.unregister("pane-images");
 	});
 
+	it("keeps the messages a register drains while the pane is busy for over a second", async () => {
+		const client = new OrchestratorClient();
+		await client.register({ id: "pane-busy", cwd: dir });
+		supervisor.sendExternal("pane-busy", { type: "prompt", text: "hi" });
+		const registering = client.register({ id: "pane-busy", cwd: dir });
+		const until = Date.now() + 1500;
+		while (Date.now() < until) {
+			// the pane's event loop is busy
+		}
+		await expect(registering).resolves.toMatchObject({ messages: [{ type: "prompt", text: "hi" }] });
+		await client.unregister("pane-busy");
+	});
+
 	it("answers a pending wait at shutdown", async () => {
 		const client = new OrchestratorClient();
 		await client.register({ id: "pane-wait-settle", cwd: dir });
