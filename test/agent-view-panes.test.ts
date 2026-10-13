@@ -331,6 +331,21 @@ describe("tmux", () => {
 		vi.unstubAllEnvs();
 	});
 
+	it("keeps a pane whose new-session timed out after tmux had made it, and fails one tmux never made", () => {
+		const runs: string[][] = [];
+		let made = true;
+		const tmux = new Tmux("/srv", (args) => {
+			runs.push(args);
+			if (args[0] === "new-session") throw new Error("ETIMEDOUT");
+			if (args[0] === "has-session" && !made) throw new Error("can't find session");
+			return "";
+		});
+		const name = tmux.newSession({ cwd: HERE, args: [] });
+		expect(runs.at(-1)).toEqual(["has-session", "-t", `=${name}`]);
+		made = false;
+		expect(() => tmux.newSession({ cwd: HERE, args: [] })).toThrow("ETIMEDOUT");
+	});
+
 	it("targets sessions by exact name", () => {
 		const runs: string[][] = [];
 		const tmux = new Tmux("/srv", (args) => {

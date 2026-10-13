@@ -51,7 +51,8 @@ const ERRORS = {
 	session_not_running: "This session is not running. Open it on the Mac to continue.",
 	session_busy: "The session is busy. Try again once it is done.",
 	no_status: "This session has not reported its status yet.",
-	pane_too_old: "This session runs an older bluclawd; restart it to use this.",
+	pane_too_old:
+		"This session has not reported yet. Try again in a moment; if this persists, restart it (it may run an older bluclawd).",
 	invalid_cwd: "That directory does not exist on the Mac.",
 	invalid_model: "That model name is not valid.",
 	invalid_entry: "That message is no longer in this session.",

@@ -147,18 +147,27 @@ export class Tmux {
 		const name = `pi-${randomUUID().slice(0, 8)}`;
 		const env = { ...piEnv(), ...spec.env, [PANE_ENV]: name };
 		const size = process.stdout.columns && process.stdout.rows ? process.stdout : undefined;
-		this.run([
-			"new-session",
-			"-d",
-			"-s",
-			name,
-			"-c",
-			spec.cwd,
-			...(size ? ["-x", String(size.columns), "-y", String(size.rows)] : []),
-			...Object.entries(env).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
-			...(spec.command ?? piCommand()).map(literalArg),
-			...spec.args.map(literalArg),
-		]);
+		try {
+			this.run([
+				"new-session",
+				"-d",
+				"-s",
+				name,
+				"-c",
+				spec.cwd,
+				...(size ? ["-x", String(size.columns), "-y", String(size.rows)] : []),
+				...Object.entries(env).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
+				...(spec.command ?? piCommand()).map(literalArg),
+				...spec.args.map(literalArg),
+			]);
+		} catch (error) {
+			// A client killed by the timeout may still have had its session made; that pane runs.
+			try {
+				this.run(["has-session", "-t", `=${name}`]);
+			} catch {
+				throw error;
+			}
+		}
 		return name;
 	}
 
