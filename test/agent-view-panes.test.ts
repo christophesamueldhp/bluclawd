@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ServerSupervisor } from "../daemon/supervisor.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
-import { isBlankPane, paneArgs } from "../ext/agent-view/index.ts";
+import { isBlankPane, paneArgs, shutdownPlan } from "../ext/agent-view/index.ts";
 import type { InstanceSummary, OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
 import { collectRows } from "../ext/agent-view/rows.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
@@ -401,6 +401,20 @@ describe("paneArgs", () => {
 			"-c",
 		]);
 		expect(paneArgs(["-r"], undefined)).toEqual(["-r"]);
+	});
+});
+
+describe("shutdownPlan", () => {
+	it("keeps the row for the pane's next session only when it carries on this one", () => {
+		const keep = { await: true, unregister: false };
+		const drop = { await: true, unregister: true };
+		expect(shutdownPlan({ reason: "fork", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(keep);
+		expect(shutdownPlan({ reason: "reload" }, "/s/a.jsonl")).toEqual(keep);
+		expect(shutdownPlan({ reason: "resume", targetSessionFile: "/s/a.jsonl" }, "/s/a.jsonl")).toEqual(keep);
+		expect(shutdownPlan({ reason: "resume" }, undefined)).toEqual(keep);
+		expect(shutdownPlan({ reason: "resume", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(drop);
+		expect(shutdownPlan({ reason: "new", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(drop);
+		expect(shutdownPlan({ reason: "quit" }, "/s/a.jsonl")).toEqual({ await: false, unregister: true });
 	});
 });
 

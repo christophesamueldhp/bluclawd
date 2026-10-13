@@ -184,6 +184,38 @@ describe("SelfRegistration.stop", () => {
 		expect(order).toEqual(["register"]);
 	});
 
+	it("waits for every register on its way, not only the latest, before unregistering", async () => {
+		const lands: Array<() => void> = [];
+		const order: string[] = [];
+		const client = {
+			register: () =>
+				new Promise((resolve) => {
+					const n = lands.length + 1;
+					lands.push(() => {
+						order.push(`register-${n}`);
+						resolve({ watched: false, messages: [] });
+					});
+				}),
+			unregister: async () => {
+				order.push("unregister");
+			},
+		} as unknown as OrchestratorClient;
+		const reg = new SelfRegistration(
+			client,
+			() => ({ cwd: "/p" }),
+			() => {},
+			"pi-1",
+		);
+		void reg.refresh();
+		reg.setActivity("working");
+		const stopping = reg.stop();
+		lands[1]();
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		lands[0]();
+		await stopping;
+		expect(order).toEqual(["register-2", "register-1", "unregister"]);
+	});
+
 	it("queues again what a register on its way drains after the stop, instead of running it in a gone session", async () => {
 		let land: (reply: { watched: boolean; messages: PaneMessage[] }) => void = () => {};
 		const requeued: Array<[string, PaneMessage]> = [];

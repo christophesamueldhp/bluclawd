@@ -107,7 +107,7 @@ export class SelfRegistration {
 	private readonly onWatched: (watched: boolean) => void;
 	private activity: AgentActivity = "idle";
 	private timer: ReturnType<typeof setInterval> | undefined;
-	private inflight: Promise<void> | undefined;
+	private readonly inflight = new Set<Promise<void>>();
 	private stopped = false;
 
 	/** `onMessage`: another window's agent view asks this session something.
@@ -149,7 +149,9 @@ export class SelfRegistration {
 	private heartbeat(): Promise<void> {
 		if (this.stopped) return Promise.resolve();
 		const beat = this.beat();
-		this.inflight = beat;
+		this.inflight.add(beat);
+		const done = () => this.inflight.delete(beat);
+		beat.then(done, done);
 		return beat;
 	}
 
@@ -176,7 +178,9 @@ export class SelfRegistration {
 			watched = res?.watched === true;
 			for (const message of res?.messages ?? []) {
 				// Stopped meanwhile: the session they were for is gone, so they wait for whatever
-				// registers as this id next (the pane's next session), or go with the row.
+				// registers as this id next (the pane's next session), or go with the row. They go behind
+				// anything queued since: the phone holds Send and its moves until the session has moved, so
+				// little is, and navigate() skips a tree or fork to an entry the next session lacks.
 				if (this.stopped) await this.client.send(this.id, message);
 				else this.onMessage(message);
 			}
@@ -199,12 +203,9 @@ export class SelfRegistration {
 			clearInterval(this.timer);
 			this.timer = undefined;
 		}
-		// A register still on its way would list the session again after the unregister.
-		try {
-			await this.inflight;
-		} catch {
-			// a failed heartbeat must not skip the unregister
-		}
+		// A register still on its way would list the session again after the unregister, or land
+		// after the next session's first one. A failed heartbeat must not skip the unregister.
+		await Promise.allSettled([...this.inflight]);
 		if (options.unregister === false) return;
 		try {
 			await this.client.unregister(this.id);

@@ -141,6 +141,25 @@ export function isBlankPane(
 	return !!pane && !sessions.getHeader()?.parentSession && !sessions.getEntries().some((e) => e.type === "message");
 }
 
+/**
+ * What `session_shutdown` does with this pane's registration. A fork, reload, or resume of the
+ * same file goes on in this pane, whose next session registers under the same id: its row (pin,
+ * order, age) and the messages queued for it stay. Resuming another session starts that one's own
+ * row, as a new session does. pi awaits the handler, so the stop is awaited where a session follows,
+ * and no late heartbeat of this one lands after the next one's.
+ */
+export function shutdownPlan(
+	event: { reason: string; targetSessionFile?: string },
+	currentFile: string | undefined,
+): { await: boolean; unregister: boolean } {
+	if (event.reason === "quit") return { await: false, unregister: true };
+	const carriesOn =
+		event.reason === "fork" ||
+		event.reason === "reload" ||
+		(event.reason === "resume" && event.targetSessionFile === currentFile);
+	return { await: true, unregister: !carriesOn };
+}
+
 function isRealCwd(cwd: string): boolean {
 	return existsSync(cwd) && !TMP_ROOTS.some((root) => cwd === root || cwd.startsWith(`${root}/`));
 }
@@ -538,13 +557,9 @@ const agentView: InlineExtension = {
 		pi.on("ui_prompt_start", track);
 		pi.on("ui_prompt_end", track);
 		pi.on("session_shutdown", async (event, ctx) => {
-			// A fork, resume or reload goes on in this pane, whose next session registers under the same
-			// id: its row and the messages queued for it stay, and pi awaits this, so no late heartbeat
-			// of this one lands after the next one's. A new session is blank until asked something.
-			if (event.reason === "fork" || event.reason === "resume" || event.reason === "reload") {
-				await registration?.stop({ unregister: false });
-			} else if (event.reason === "new") await registration?.stop();
-			else registration?.stop();
+			const plan = shutdownPlan(event, ctx.sessionManager.getSessionFile());
+			const stopping = registration?.stop({ unregister: plan.unregister });
+			if (plan.await) await stopping;
 			registration = undefined;
 			stopPill?.();
 			stopPill = undefined;
