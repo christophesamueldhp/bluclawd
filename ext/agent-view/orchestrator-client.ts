@@ -52,9 +52,15 @@ export interface PaneLaunch {
 	command: string[];
 }
 
+/** Mirror of daemon/ipc/protocol.ts PaneImage. */
+export interface PaneImage {
+	mimeType: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+	data: string;
+}
+
 /** Mirror of daemon/ipc/protocol.ts PaneMessage. */
 export type PaneMessage =
-	| { type: "prompt"; text: string }
+	| { type: "prompt"; text: string; images?: PaneImage[] }
 	| { type: "abort" }
 	| { type: "rename"; name: string }
 	| { type: "compact" }
@@ -210,7 +216,7 @@ export class OrchestratorClient {
 				return;
 			}
 			const socket = createConnection(this.socketPath);
-			let buffer = "";
+			const chunks: Buffer[] = [];
 			let settled = false;
 			const abort = () => done(() => reject(new Error("orchestrator request aborted")));
 			const done = (fn: () => void): void => {
@@ -233,9 +239,11 @@ export class OrchestratorClient {
 			}
 			socket.on("connect", () => socket.write(`${JSON.stringify(req)}\n`));
 			socket.on("data", (chunk: Buffer) => {
-				buffer += chunk.toString();
+				// Decoded whole: a reply with a phone's images comes in many reads, which can split a character.
+				chunks.push(chunk);
+				if (!chunk.includes(0x0a)) return;
+				const buffer = Buffer.concat(chunks).toString();
 				const nl = buffer.indexOf("\n");
-				if (nl === -1) return;
 				const line = buffer.slice(0, nl).trim();
 				if (!line) return;
 				try {

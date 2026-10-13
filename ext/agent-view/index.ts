@@ -325,7 +325,13 @@ const agentView: InlineExtension = {
 		/** Pane mode: what another window's agent view asks of this session. */
 		const onPaneMessage = (ctx: ExtensionContext, message: PaneMessage): void => {
 			if (message.type === "prompt") {
-				pi.sendUserMessage(message.text, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+				const content = message.images?.length
+					? [
+							{ type: "text" as const, text: message.text },
+							...message.images.map((image) => ({ type: "image" as const, ...image })),
+						]
+					: message.text;
+				pi.sendUserMessage(content, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
 			} else if (message.type === "abort") ctx.abort();
 			else if (message.type === "rename") pi.setSessionName(message.name);
 			// The rest are remote control's (ext/remote).

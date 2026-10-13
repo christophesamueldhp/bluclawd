@@ -4,7 +4,15 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { InstanceSummary, PaneLaunch, PaneMessage, PaneReport } from "../daemon/ipc/protocol.ts";
-import { BODY_MAX, PROMPT_MAX, type RemoteServer, startRemoteServer } from "../daemon/remote/http.ts";
+import {
+	BODY_MAX,
+	IMAGE_MAX,
+	IMAGES_MAX,
+	PROMPT_BODY_MAX,
+	PROMPT_MAX,
+	type RemoteServer,
+	startRemoteServer,
+} from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { SessionSpec } from "../daemon/remote/spawn.ts";
 import { validP256dh } from "./support/push.ts";
@@ -211,6 +219,97 @@ describe("remote HTTP API", () => {
 			{ id: "live", message: { type: "prompt", text: "next" } },
 			{ id: "live", message: { type: "abort" } },
 		]);
+	});
+
+	describe("images", () => {
+		const magic: Record<string, number[]> = {
+			"image/jpeg": [0xff, 0xd8, 0xff, 0xe0],
+			"image/png": [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+			"image/gif": [...Buffer.from("GIF89a")],
+			"image/webp": [...Buffer.from("RIFF"), 0, 0, 0, 0, ...Buffer.from("WEBP")],
+		};
+		const image = (mimeType: string, size = 64) => {
+			const bytes = Buffer.alloc(size, 1);
+			bytes.set(magic[mimeType]!);
+			return { mimeType, data: bytes.toString("base64") };
+		};
+		const prompt = async (id: string, body: object) => {
+			const token = await pair();
+			const res = await fetch(`${base}/api/sessions/${id}/prompt`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify(body),
+			});
+			return [res.status, ((await res.json()) as { error?: string }).error];
+		};
+
+		it("queues a running session's prompt with up to four images of each type, as large as 5 MB each", async () => {
+			const images = Object.keys(magic).map((type) => image(type));
+			expect(await prompt("live", { text: "look", images })).toEqual([202, undefined]);
+			// Four at the limit: past the plain body limit.
+			const large = Array.from({ length: IMAGES_MAX }, () => image("image/jpeg", IMAGE_MAX));
+			expect(await prompt("live", { text: "big", images: large })).toEqual([202, undefined]);
+			expect(sent).toEqual([
+				{ id: "live", message: { type: "prompt", text: "look", images } },
+				{ id: "live", message: { type: "prompt", text: "big", images: large } },
+			]);
+		});
+
+		it("refuses an image that is not base64 of what its type says, too many, or one over 5 MB", async () => {
+			const png = image("image/png");
+			expect(await prompt("live", { text: "x", images: [{ ...png, mimeType: "image/jpeg" }] })).toEqual([
+				400,
+				"invalid_image",
+			]);
+			expect(await prompt("live", { text: "x", images: [{ ...png, mimeType: "image/svg+xml" }] })).toEqual([
+				400,
+				"invalid_image",
+			]);
+			expect(await prompt("live", { text: "x", images: [{ ...png, data: `${png.data.slice(1)}!` }] })).toEqual([
+				400,
+				"invalid_image",
+			]);
+			expect(await prompt("live", { text: "x", images: [{ mimeType: "image/png" }] })).toEqual([
+				400,
+				"invalid_image",
+			]);
+			expect(await prompt("live", { text: "x", images: png })).toEqual([400, "invalid_image"]);
+			expect(await prompt("live", { text: "x", images: Array(IMAGES_MAX + 1).fill(png) })).toEqual([
+				400,
+				"invalid_image",
+			]);
+			expect(await prompt("live", { text: "x", images: [image("image/png", IMAGE_MAX + 1)] })).toEqual([
+				413,
+				"image_too_large",
+			]);
+			expect(sent).toEqual([]);
+		});
+
+		it("refuses images for a session that would start, which takes its prompt as an argument", async () => {
+			expect(await prompt("stored", { text: "x", images: [image("image/png")] })).toEqual([
+				400,
+				"images_need_running",
+			]);
+			const token = await pair();
+			const res = await fetch(`${base}/api/sessions`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify({ cwd: dir, task: "go", images: [image("image/png")] }),
+			});
+			expect([res.status, ((await res.json()) as { error?: string }).error]).toEqual([400, "images_need_running"]);
+			expect(started).toEqual([]);
+			expect(sent).toEqual([]);
+		});
+
+		it("keeps the plain body limit on every other route", async () => {
+			const token = await pair();
+			const res = await fetch(`${base}/api/sessions/live/abort`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify({ pad: "x".repeat(BODY_MAX) }),
+			});
+			expect(res.status).toBe(413);
+		});
 	});
 
 	describe("status, model and compact", () => {
@@ -511,7 +610,7 @@ describe("remote HTTP API", () => {
 		expect(
 			(await post("/api/sessions/live/prompt", JSON.stringify({ text: "x".repeat(PROMPT_MAX + 1) }))).status,
 		).toBe(413);
-		expect((await post("/api/sessions/live/prompt", "x".repeat(BODY_MAX + 1))).status).toBe(413);
+		expect((await post("/api/sessions/live/prompt", "x".repeat(PROMPT_BODY_MAX + 1))).status).toBe(413);
 		expect(sent).toEqual([]);
 		expect(started).toEqual([]);
 	});

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { settle } from "../daemon/remote/web/live.js";
+import { promptKey, sentText, settle } from "../daemon/remote/web/live.js";
 
 const assistant = (id: string, text: string, thinking?: string) => ({
 	kind: "assistant",
@@ -41,5 +41,23 @@ describe("settle (the phone's reply in progress once a transcript fetch lands)",
 
 	it("is nothing without a reply in progress", () => {
 		expect(settle(undefined, true, [assistant("a1", "Hi")])).toBeUndefined();
+	});
+});
+
+describe("a sent prompt as the transcript shows it", () => {
+	it("is its text, then a line per image", () => {
+		expect(promptKey("look", 0)).toBe("look");
+		expect(promptKey("look", 2)).toBe("look\n[Image]\n[Image]");
+	});
+
+	it("matches a user message without the notes pi adds about an image it resized or converted", () => {
+		expect(sentText(" @a.ts look\n[Image]")).toBe("@a.ts look\n[Image]");
+		const resized =
+			"look\n\n[Image: original 4000x3000, displayed at 2000x1500. Multiply coordinates by 2.00 to map to original image.]\n[Image converted from image/heic to image/png.]\n[Image]\n[Image]";
+		expect(sentText(resized)).toBe(promptKey("look", 2));
+	});
+
+	it("keeps such a line in a prompt without images", () => {
+		expect(sentText("look\n\n[Image: original]")).toBe("look\n\n[Image: original]");
 	});
 });

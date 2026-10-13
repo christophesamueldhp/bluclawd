@@ -23,3 +23,20 @@ export function settle(live, ended, messages) {
 	const rest = written ? { text: "", tools } : { ...live, tools };
 	return rest.text || rest.thinking || rest.tools.length ? rest : undefined;
 }
+
+/**
+ * What the transcript shows for a prompt sent with `images` images: an image is an `[Image]` line.
+ * @param {string} text @param {number} images
+ */
+export function promptKey(text, images) {
+	return [text, ...Array(images).fill("[Image]")].join("\n");
+}
+
+/**
+ * A user message's text as it was sent: pi puts a note on an image it resized or converted
+ * (`[Image: original …]`) under the prompt's text, above the transcript's `[Image]` lines.
+ * @param {string} text
+ */
+export function sentText(text) {
+	return text.trim().replace(/\n\n\[Image[ :][^\n]*\](?:\n\[Image[ :][^\n]*\])*(?=(?:\n\[Image\])+$)/, "");
+}

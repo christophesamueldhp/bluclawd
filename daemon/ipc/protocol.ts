@@ -35,9 +35,15 @@ export interface PaneLaunch {
 	command: string[];
 }
 
+/** An image a phone sends with a prompt, as pi takes it: base64 bytes and their type. */
+export interface PaneImage {
+	mimeType: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+	data: string;
+}
+
 /** What another window asks a pane's pi to do; delivered with its next heartbeat. */
 export type PaneMessage =
-	| { type: "prompt"; text: string }
+	| { type: "prompt"; text: string; images?: PaneImage[] }
 	| { type: "abort" }
 	| { type: "rename"; name: string }
 	| { type: "compact" }

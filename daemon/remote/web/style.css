@@ -77,6 +77,15 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .composer textarea { flex: 1; resize: none; border: 0; border-radius: 18px; padding: 8px 14px; background: var(--panel); color: var(--text); font: inherit; max-height: 140px; }
 .send { width: 44px; height: 44px; flex: none; border-radius: 50%; border: 0; background: var(--accent); color: #000; font-size: 18px; }
 .send:disabled { opacity: .35; }
+.attach { width: 44px; height: 44px; flex: none; padding: 0; border-radius: 50%; border: 0; background: var(--panel); color: var(--accent); font-size: 26px; line-height: 1; }
+.attach:disabled { opacity: .35; }
+.thumbs { display: flex; gap: 8px; padding: 8px 12px 0; border-top: 1px solid var(--line); overflow-x: auto; }
+.thumbs[hidden] { display: none; }
+.thumbs:not([hidden]) + .composer { border-top: 0; }
+.thumb { position: relative; flex: none; }
+.thumb img, .pictures img { display: block; width: 72px; height: 72px; object-fit: cover; border-radius: 10px; }
+.remove { position: absolute; top: 2px; right: 2px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: rgb(0 0 0 / .6); color: #fff; font-size: 14px; line-height: 1; }
+.pictures { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
 .composer.new { flex-direction: column; align-items: stretch; }
 .composer.new textarea { flex: none; }
 .where { display: flex; gap: 8px; }

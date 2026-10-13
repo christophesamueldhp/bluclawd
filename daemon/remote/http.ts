@@ -10,7 +10,7 @@ import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
 import { stripAnsi } from "../../ext/_shared/ansi.ts";
 import { Tmux } from "../../ext/agent-view/tmux.ts";
-import type { InstanceSummary, LiveSnapshot, PaneLaunch, PaneMessage, PaneReport } from "../ipc/protocol.ts";
+import type { InstanceSummary, LiveSnapshot, PaneImage, PaneLaunch, PaneMessage, PaneReport } from "../ipc/protocol.ts";
 import { RemoteEvents } from "./events.ts";
 import type { RemoteStore } from "./pairing.ts";
 import { findSession, remoteSessions } from "./sessions.ts";
@@ -51,6 +51,21 @@ export interface RemoteServer {
 
 export const BODY_MAX = 64 * 1024;
 export const PROMPT_MAX = 32 * 1024;
+export const IMAGES_MAX = 4;
+/** Decoded. */
+export const IMAGE_MAX = 5 * 1024 * 1024;
+const IMAGE_BASE64_MAX = Math.ceil(IMAGE_MAX / 3) * 4;
+/** A prompt's body: its text and its images, base64. */
+export const PROMPT_BODY_MAX = BODY_MAX + IMAGES_MAX * IMAGE_BASE64_MAX;
+const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+/** What each image type's bytes start with. */
+const IMAGE_MAGIC: Record<PaneImage["mimeType"], (bytes: Buffer) => boolean> = {
+	"image/jpeg": (bytes) => bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff,
+	"image/png": (bytes) => bytes.subarray(0, 8).equals(PNG_SIGNATURE),
+	"image/gif": (bytes) => /^GIF8[79]a$/.test(bytes.toString("latin1", 0, 6)),
+	"image/webp": (bytes) => bytes.toString("latin1", 0, 4) === "RIFF" && bytes.toString("latin1", 8, 12) === "WEBP",
+};
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 const MESSAGES_DEFAULT = 50;
 const MESSAGES_MAX = 200;
 /** `provider/id`; the id may itself contain slashes. Never a leading dash: it is an argument to pi. */
@@ -97,14 +112,14 @@ function json(res: ServerResponse, status: number, body: unknown): void {
 }
 
 /** Reads the whole body even past the limit, so the 413 reaches a client still sending. */
-async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
+async function readJson(req: IncomingMessage, max = BODY_MAX): Promise<Record<string, unknown>> {
 	let size = 0;
 	const chunks: Buffer[] = [];
 	for await (const chunk of req) {
 		size += (chunk as Buffer).length;
-		if (size <= BODY_MAX) chunks.push(chunk as Buffer);
+		if (size <= max) chunks.push(chunk as Buffer);
 	}
-	if (size > BODY_MAX) throw new HttpError(413, "body_too_large");
+	if (size > max) throw new HttpError(413, "body_too_large");
 	if (size === 0) return {};
 	try {
 		const value = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
@@ -132,6 +147,25 @@ function promptIn(body: Record<string, unknown>, key: string): string {
 	if (!text.trim()) throw new HttpError(400, "empty_prompt");
 	if (text.length > PROMPT_MAX) throw new HttpError(413, "prompt_too_large");
 	return text;
+}
+
+/** A prompt's images, if it has any: each base64 of the type it says it is. */
+function imagesIn(body: Record<string, unknown>): PaneImage[] | undefined {
+	const { images } = body;
+	if (images === undefined || (Array.isArray(images) && images.length === 0)) return undefined;
+	if (!Array.isArray(images) || images.length > IMAGES_MAX) throw new HttpError(400, "invalid_image");
+	return images.map((image: unknown) => {
+		const { mimeType, data } = (image ?? {}) as Record<string, unknown>;
+		const known = typeof mimeType === "string" && Object.hasOwn(IMAGE_MAGIC, mimeType);
+		if (!known || typeof data !== "string") throw new HttpError(400, "invalid_image");
+		if (data.length > IMAGE_BASE64_MAX) throw new HttpError(413, "image_too_large");
+		if (data.length % 4 !== 0 || !BASE64.test(data)) throw new HttpError(400, "invalid_image");
+		const bytes = Buffer.from(data, "base64");
+		if (bytes.length > IMAGE_MAX) throw new HttpError(413, "image_too_large");
+		const type = mimeType as PaneImage["mimeType"];
+		if (!IMAGE_MAGIC[type](bytes)) throw new HttpError(400, "invalid_image");
+		return { mimeType: type, data };
+	});
 }
 
 /** Keys from the allowlist, or printable text: a control character in it would be a keystroke past the allowlist. */
@@ -218,6 +252,8 @@ async function handle(
 	if (path === "/api/sessions" && req.method === "POST") {
 		const body = await readJson(req);
 		const cwd = typeof body.cwd === "string" ? expandHome(body.cwd) : "";
+		// pi takes a new session's first prompt as an argument, which carries no images.
+		if (body.images !== undefined) return json(res, 400, { error: "images_need_running" });
 		if (!isDirectory(cwd)) return json(res, 400, { error: "invalid_cwd" });
 		const task = promptIn(body, "task");
 		const model = body.model;
@@ -305,7 +341,7 @@ async function handle(
 	}
 
 	if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
-	const body = await readJson(req);
+	const body = await readJson(req, action === "prompt" ? PROMPT_BODY_MAX : BODY_MAX);
 	// Looked up again after the body: a concurrent reply may have resumed this row meanwhile, and
 	// from the resuming check to the start nothing awaits, so a stored row starts one pane only.
 	const session = findSession(deps.listInstances(), id);
@@ -317,8 +353,11 @@ async function handle(
 	let message: PaneMessage;
 	if (action === "prompt") {
 		const text = promptIn(body, "text");
+		const images = imagesIn(body);
 		// A stored row has no process: it resumes as agent view's peek reply resumes it.
 		if (!session.running && session.sessionFile) {
+			// Its first prompt is an argument to pi, as a new session's is.
+			if (images) return json(res, 400, { error: "images_need_running" });
 			const launch = launchOf(deps);
 			if (!launch) return json(res, 503, { error: "no_launch" });
 			// Its row stays until the pane registers, so a pane that never does leaves it as it was.
@@ -326,7 +365,7 @@ async function handle(
 			const pane = start(deps, { cwd: session.cwd, task: text, sessionFile: session.sessionFile, launch }, id);
 			return json(res, 202, { ok: true, pane });
 		}
-		message = { type: "prompt", text };
+		message = images ? { type: "prompt", text, images } : { type: "prompt", text };
 	} else if (action === "model") {
 		const { provider, id: modelId } = body;
 		if (typeof provider !== "string" || typeof modelId !== "string" || !provider || !modelId) {

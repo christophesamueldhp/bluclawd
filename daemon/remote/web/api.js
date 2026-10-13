@@ -73,8 +73,13 @@ export const api = {
 	 */
 	messages: (id, before) =>
 		call("GET", `${session(id)}/messages?limit=100${before ? `&before=${encodeURIComponent(before)}` : ""}`),
-	/** A stored session resumes in a new pane, named in the reply. @param {string} id @param {string} text @returns {Promise<{ pane?: string }>} */
-	prompt: (id, text) => call("POST", `${session(id)}/prompt`, { text }),
+	/**
+	 * A stored session resumes in a new pane, named in the reply; only a running one takes images.
+	 * @param {string} id @param {string} text @param {{ mimeType: string, data: string }[]} [images] base64
+	 * @returns {Promise<{ pane?: string }>}
+	 */
+	prompt: (id, text, images = []) =>
+		call("POST", `${session(id)}/prompt`, images.length ? { text, images } : { text }),
 	/** @param {string} id */
 	abort: (id) => call("POST", `${session(id)}/abort`, {}),
 	/** @param {string} id */
