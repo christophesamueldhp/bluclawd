@@ -2,7 +2,7 @@
  * The phone reaches remote control through Tailscale: `tailscale serve` proxies this machine's
  * tailnet HTTPS name to the daemon's 127.0.0.1 listener, reachable only from the tailnet.
  */
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 
 export type ServeState = "ours" | "other" | "none";
 
@@ -34,10 +34,11 @@ export function commandError(
 /** A feature the tailnet has not turned on: tailscale prints where to turn it on, then waits. */
 export class EnableNeeded extends Error {}
 
-/** What to tell the user once tailscale's "… is not enabled … visit <link>" has arrived. */
+/** What to tell the user once tailscale's "… is not enabled … visit <link>" has arrived. The link
+ *  counts once whitespace follows it: until then, its next read may carry more of it. */
 export function enablePrompt(output: string): string | undefined {
 	const line = output.split("\n").find((l) => /not enabled/i.test(l));
-	const url = /https:\/\/login\.tailscale\.com\/\S+/.exec(output)?.[0];
+	const url = /https:\/\/login\.tailscale\.com\/\S+(?=\s)/.exec(output)?.[0];
 	if (!line || !url) return undefined;
 	const feature = /\bHTTPS\b/i.test(line) ? "HTTPS" : "Serve";
 	return `Tailscale ${feature} is off for your tailnet. Turn it on at ${url} (once), then run /remote-control pair.`;
@@ -64,23 +65,58 @@ async function run(
 /** `watch`: read the output as it arrives; a message from it ends the command at once. */
 function runWith(binary: string, args: string[], watch?: (output: string) => string | undefined): Promise<string> {
 	return new Promise((resolve, reject) => {
-		const child = execFile(binary, args, { timeout: 10_000 }, (error, stdout, stderr) => {
-			if (!error) return resolve(stdout);
-			error.message = commandError(error, stdout, stderr);
-			reject(error);
-		});
-		if (!watch) return;
+		// Its own process group, ended whole: a wrapper script that runs tailscale without exec would
+		// otherwise leave it waiting.
+		const child = spawn(binary, args, { detached: true, stdio: ["ignore", "pipe", "pipe"] });
+		const kill = () => {
+			if (child.pid === undefined) return;
+			try {
+				process.kill(-child.pid, "SIGTERM");
+			} catch {
+				child.kill();
+			}
+		};
+		let timedOut = false;
+		const timer = setTimeout(() => {
+			timedOut = true;
+			kill();
+		}, 10_000);
+		let stdout = "";
+		let stderr = "";
 		let output = "";
-		const read = (chunk: Buffer | string) => {
-			if (child.killed) return;
+		let stopped = false;
+		const read = (chunk: string) => {
+			if (stopped || !watch) return;
 			output += chunk;
 			const message = watch(output);
 			if (!message) return;
+			stopped = true;
 			reject(new EnableNeeded(message));
-			child.kill();
+			kill();
 		};
-		child.stdout?.on("data", read);
-		child.stderr?.on("data", read);
+		child.stdout.setEncoding("utf8");
+		child.stderr.setEncoding("utf8");
+		child.stdout.on("data", (chunk: string) => {
+			stdout += chunk;
+			read(chunk);
+		});
+		child.stderr.on("data", (chunk: string) => {
+			stderr += chunk;
+			read(chunk);
+		});
+		child.on("error", (error) => {
+			clearTimeout(timer);
+			reject(error);
+		});
+		child.on("close", (code, signal) => {
+			clearTimeout(timer);
+			if (code === 0) return resolve(stdout);
+			// Exited after printing the link last, with nothing after it.
+			const message = stopped ? undefined : watch?.(`${output}\n`);
+			if (message) return reject(new EnableNeeded(message));
+			const failed = { message: `Command failed: ${binary} ${args.join(" ")}`, killed: timedOut, signal };
+			reject(new Error(commandError(failed, stdout, stderr)));
+		});
 	});
 }
 

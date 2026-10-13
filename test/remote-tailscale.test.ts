@@ -1,8 +1,9 @@
 // test/remote-tailscale.test.ts
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { pairingText } from "../ext/remote/message.ts";
 import {
 	commandError,
@@ -101,6 +102,54 @@ describe("remote control: tailscale and pairing text", () => {
 			chmodSync(ok, 0o755);
 			await expect(serve(7878, [ok])).resolves.toBeUndefined();
 		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("waits for the whole link, cut across reads, or for tailscale to exit after it", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "bluclawd-tailscale-"));
+		try {
+			const cut = join(dir, "cut");
+			writeFileSync(
+				cut,
+				"#!/bin/sh\nprintf 'Serve is not enabled on your tailnet.\\nTo enable, visit:\\n\\n  https://login.tailscale.com/f/ser'\nsleep 0.3\nprintf 've?node=nAbC123\\n'\nexec sleep 30\n",
+			);
+			chmodSync(cut, 0o755);
+			const failed = await serve(7878, [cut]).catch((error: unknown) => error);
+			expect(failed).toBeInstanceOf(EnableNeeded);
+			expect((failed as Error).message).toContain("https://login.tailscale.com/f/serve?node=nAbC123 (once)");
+			const exited = join(dir, "exited");
+			writeFileSync(
+				exited,
+				"#!/bin/sh\nprintf 'Serve is not enabled on your tailnet.\\nTo enable, visit:\\n\\n  https://login.tailscale.com/f/serve?node=nAbC123'\nexit 1\n",
+			);
+			chmodSync(exited, 0o755);
+			const ended = await serve(7878, [exited]).catch((error: unknown) => error);
+			expect(ended).toBeInstanceOf(EnableNeeded);
+			expect((ended as Error).message).toContain("https://login.tailscale.com/f/serve?node=nAbC123 (once)");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("leaves nothing running when it stops a tailscale that a wrapper script runs without exec", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "bluclawd-tailscale-"));
+		const marker = `bluclawd-tailscale-child-${process.pid}-${Date.now()}`;
+		const running = () => execFileSync("ps", ["-axo", "command"], { encoding: "utf8" }).includes(marker);
+		try {
+			const wrapper = join(dir, "tailscale");
+			// One process with the marker in its argv, started before the link is printed: a process
+			// forked as the group is signalled escapes it.
+			writeFileSync(
+				wrapper,
+				`#!/bin/sh\n'${process.execPath}' -e 'setTimeout(() => {}, 30000)' ${marker} &\nsleep 0.3\nprintf '%s' '${SERVE_OFF}'\nwait\n`,
+			);
+			chmodSync(wrapper, 0o755);
+			const failed = await serve(7878, [wrapper]).catch((error: unknown) => error);
+			expect(failed).toBeInstanceOf(EnableNeeded);
+			await vi.waitFor(() => expect(running()).toBe(false), { timeout: 3000, interval: 50 });
+		} finally {
+			spawnSync("pkill", ["-f", marker]);
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
