@@ -85,6 +85,12 @@ export const api = {
 	fork: (id, entryId) => call("POST", `${session(id)}/fork`, { entryId }),
 	/** @param {string} id */
 	clone: (id) => call("POST", `${session(id)}/clone`, {}),
+	/** The last lines its pane shows. @param {string} id @returns {Promise<string[]>} */
+	screen: async (id) => (await call("GET", `${session(id)}/screen`)).lines,
+	/** Press keys in its pane, by tmux name ("Up", "Enter", …). @param {string} id @param {string[]} keys */
+	keys: (id, keys) => call("POST", `${session(id)}/keys`, { keys }),
+	/** Type text into its pane as it is. @param {string} id @param {string} text */
+	type: (id, text) => call("POST", `${session(id)}/keys`, { text }),
 	/** `subscribed`: this device's notifications reach it. @returns {Promise<{ publicKey: string, subscribed: boolean }>} */
 	pushKey: () => call("GET", "/api/push/key"),
 	/** @param {PushSubscriptionJSON} subscription */

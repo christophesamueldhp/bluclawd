@@ -31,6 +31,19 @@ const LIVE_CLEAR_MS = 3000;
 const COMPACT_GIVE_UP_MS = 120_000;
 /** A tree, fork or clone the pane skipped (or one that changed nothing) shows nothing either. */
 const NAVIGATE_GIVE_UP_MS = 15_000;
+const SCREEN_POLL_MS = 2000;
+/** pi redraws a moment after a key reaches it. */
+const SCREEN_SETTLE_MS = 150;
+/** The terminal sheet's keys: tmux's name, and the button's face. */
+const PRESS = [
+	["Up", "↑"],
+	["Down", "↓"],
+	["Left", "←"],
+	["Right", "→"],
+	["Enter", "⏎"],
+	["Escape", "Esc"],
+	["Tab", "Tab"],
+];
 const ERRORS = {
 	session_not_running: "This session is not running. Open it on the Mac to continue.",
 	session_busy: "The session is busy. Try again once it is done.",
@@ -39,6 +52,7 @@ const ERRORS = {
 	invalid_model: "That model name is not valid.",
 	invalid_entry: "That message is no longer in this session.",
 	not_moved: "The session did not move.",
+	invalid_keys: "That can't be typed into the session. Use the keys for Enter, Tab and Esc.",
 	no_launch: "Start pi on the Mac once, so the phone knows how to start it.",
 	start_failed: "The Mac could not start the session.",
 	start_timeout: "The session did not show up. Check it on the Mac.",
@@ -81,6 +95,12 @@ const state = {
 	navigating: false,
 	/** The message whose actions the sheet shows instead of the status. @type {{ id: string, text: string, kind: string } | undefined} */
 	menu: undefined,
+	/** The terminal sheet: the pane's screen, and keys to answer its dialog with. */
+	terminal: false,
+	/** What the pane shows: undefined while loading. @type {string[] | undefined} */
+	screen: undefined,
+	/** Keys or text are on their way to the pane. */
+	typing: false,
 	/** @type {string | undefined} */ error: undefined,
 };
 
@@ -95,6 +115,9 @@ let offlineTimer;
 let watchdog;
 let messagesRequest = 0;
 let statusRequest = 0;
+let screenRequest = 0;
+/** @type {ReturnType<typeof setInterval> | undefined} */
+let screenTimer;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let startTimer;
 /** The reply on screen has ended (or may have, while the stream was down): see settle(). */
@@ -262,6 +285,29 @@ async function loadStatus() {
 	if (state.open !== id || request !== statusRequest) return;
 	state.report = report;
 	render();
+}
+
+async function loadScreen() {
+	const id = state.open;
+	if (!id || !state.terminal) return;
+	const request = ++screenRequest;
+	try {
+		const lines = await api.screen(id);
+		if (state.open !== id || !state.terminal || request !== screenRequest) return;
+		state.screen = lines;
+		render();
+	} catch (error) {
+		handleError(error);
+	}
+}
+
+/** While the terminal sheet is open and the app is on screen. */
+function pollScreen() {
+	clearInterval(screenTimer);
+	screenTimer = undefined;
+	if (state.terminal && document.visibilityState === "visible") {
+		screenTimer = setInterval(() => void loadScreen(), SCREEN_POLL_MS);
+	}
 }
 
 /** @param {Message[]} messages @param {string} text */
@@ -546,7 +592,8 @@ function bannerHtml(session) {
 	if (!state.online) return `<div class="banner off">Mac unreachable. Retrying…</div>`;
 	if (state.error) return `<div class="banner off">${esc(state.error)}</div>`;
 	if (session?.state === "needs") {
-		return `<div class="banner">This session is waiting for an answer to a dialog on the Mac. A reply sent here becomes its next prompt.</div>`;
+		return `<div class="banner needs"><span>This session is waiting for an answer to a dialog. A reply sent here becomes its next prompt.</span>
+<button class="answer" id="answer" aria-haspopup="dialog">Answer</button></div>`;
 	}
 	return "";
 }
@@ -648,6 +695,17 @@ function menuHtml(session, menu) {
 <div class="actions">${actions}</div>`;
 }
 
+function terminalHtml() {
+	const keys = PRESS.map(
+		([key, face]) => `<button class="press" data-press="${key}" aria-label="${key}">${face}</button>`,
+	).join("");
+	return `<header class="sheet-bar"><h2>Answer</h2><button class="close" id="sheet-close">Done</button></header>
+<p class="error" id="term-error" hidden></p><pre class="screen" id="screen" tabindex="0" aria-label="The session's screen"></pre>
+<div class="keys" role="group" aria-label="Keys">${keys}</div>
+<form class="term-text" id="term-form"><input id="term-input" aria-label="Text to type" placeholder="Text to type" maxlength="1024" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
+<button class="term-send" id="term-send">Send</button></form>`;
+}
+
 // ---- render ----
 
 function render() {
@@ -697,7 +755,13 @@ function updateChat() {
 	// Kept while a resumed session's row gives way to its pane's.
 	if (!resuming) $("#title").textContent = session?.label ?? "";
 	$("#stop").hidden = session?.state !== "working";
-	$("#banner").innerHTML = bannerHtml(session);
+	const banner = $("#banner");
+	const bannerNow = bannerHtml(session);
+	// Rebuilt only when it changes, so a tap on Answer is not lost to a refresh.
+	if (banner.dataset.html !== bannerNow) {
+		banner.innerHTML = bannerNow;
+		banner.dataset.html = bannerNow;
+	}
 	const html = logHtml(session);
 	if (html !== lastLog) {
 		lastLog = html;
@@ -728,15 +792,41 @@ function updateChat() {
 /** Rebuilt only when it changes, so an open model picker is not reset under the finger. @param {Session | undefined} session */
 function updateSheet(session) {
 	const sheet = $("#sheet");
-	const open = state.sheetOpen || state.menu !== undefined;
+	const open = state.sheetOpen || state.menu !== undefined || state.terminal;
 	sheet.hidden = !open;
 	$("#backdrop").hidden = !open;
 	if (!open) return;
-	sheet.setAttribute("aria-label", state.menu ? "Message actions" : "Session status");
+	sheet.setAttribute(
+		"aria-label",
+		state.terminal ? "Answer the dialog" : state.menu ? "Message actions" : "Session status",
+	);
+	if (state.terminal) {
+		updateTerminal(sheet);
+		return;
+	}
 	const html = state.menu ? menuHtml(session, state.menu) : sheetHtml(session);
 	if (sheet.dataset.html === html) return;
 	sheet.innerHTML = html;
 	sheet.dataset.html = html;
+}
+
+/** Built once, so the text field keeps its text and keyboard; then only the screen changes. @param {HTMLElement} sheet */
+function updateTerminal(sheet) {
+	if (sheet.dataset.html !== "terminal") {
+		sheet.innerHTML = terminalHtml();
+		sheet.dataset.html = "terminal";
+	}
+	const error = $("#term-error");
+	error.textContent = state.error ?? "";
+	error.hidden = !state.error;
+	const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (sheet.querySelectorAll(".press, #term-send"));
+	for (const button of buttons) button.disabled = state.typing;
+	const screen = $("#screen");
+	const text = state.screen ? state.screen.join("\n") : "Loading…";
+	if (screen.textContent === text) return;
+	const atBottom = screen.scrollHeight - screen.scrollTop - screen.clientHeight < 40;
+	screen.textContent = text;
+	if (atBottom) screen.scrollTop = screen.scrollHeight;
 }
 
 function bindPair() {
@@ -820,6 +910,9 @@ function bindChat() {
 		}
 	});
 	$("#title").addEventListener("click", openSheet);
+	$("#banner").addEventListener("click", (/** @type {Event} */ event) => {
+		if (/** @type {Element} */ (event.target).closest("#answer")) openTerminal();
+	});
 	$("#backdrop").addEventListener("click", closeSheet);
 	const sheet = $("#sheet");
 	sheet.addEventListener("click", (/** @type {Event} */ event) => {
@@ -830,6 +923,15 @@ function bindChat() {
 		else if (target.closest("#edit-new")) edit("fork");
 		else if (target.closest("#edit-here")) edit("tree");
 		else if (target.closest("#back-here")) goBack();
+		else if (target.closest(".press")) {
+			const key = /** @type {HTMLElement} */ (target.closest(".press")).dataset.press;
+			if (key) void answer({ keys: [key] });
+		}
+	});
+	sheet.addEventListener("submit", (/** @type {Event} */ event) => {
+		event.preventDefault();
+		const text = $("#term-input")?.value;
+		if (text) void answer({ text });
 	});
 	$("#log").addEventListener("click", (/** @type {Event} */ event) => {
 		const more = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".more"));
@@ -859,7 +961,45 @@ function closeSheet() {
 	state.sheetOpen = false;
 	state.compacting = false;
 	state.menu = undefined;
+	state.terminal = false;
+	pollScreen();
 	render();
+}
+
+function openTerminal() {
+	state.terminal = true;
+	state.sheetOpen = false;
+	state.menu = undefined;
+	state.screen = undefined;
+	state.error = undefined;
+	// A fresh text field, not the one left from the last time it was open.
+	$("#sheet").dataset.html = "";
+	render();
+	void loadScreen();
+	pollScreen();
+}
+
+/** Keys, or text, into the open session's pane; then its screen again. @param {{ keys: string[] } | { text: string }} input */
+async function answer(input) {
+	const id = state.open;
+	if (!id || state.typing) return;
+	state.typing = true;
+	state.error = undefined;
+	render();
+	try {
+		if ("keys" in input) await api.keys(id, input.keys);
+		else {
+			await api.type(id, input.text);
+			const field = $("#term-input");
+			if (field?.value === input.text) field.value = "";
+		}
+		setTimeout(() => void loadScreen(), SCREEN_SETTLE_MS);
+	} catch (error) {
+		handleError(error);
+	} finally {
+		state.typing = false;
+		render();
+	}
 }
 
 /**
@@ -1010,6 +1150,9 @@ function route() {
 		state.navigating = false;
 		clearTimeout(navigateGiveUp);
 		state.menu = undefined;
+		state.terminal = false;
+		state.screen = undefined;
+		pollScreen();
 		connect();
 	}
 	render();
@@ -1018,7 +1161,11 @@ function route() {
 window.addEventListener("hashchange", route);
 // iOS suspends a backgrounded app's stream: reopen it on return.
 document.addEventListener("visibilitychange", () => {
-	if (document.visibilityState === "visible") connect();
+	pollScreen();
+	if (document.visibilityState === "visible") {
+		connect();
+		void loadScreen();
+	}
 });
 setInterval(() => {
 	if (shown === "list") updateList();

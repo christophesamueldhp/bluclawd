@@ -112,3 +112,13 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .action { width: 100%; min-height: 44px; padding: 10px 14px; border: 0; border-radius: 12px; background: var(--panel); color: var(--accent); font: inherit; font-weight: 600; text-align: left; }
 .action small { display: block; margin-top: 2px; color: var(--muted); font-size: 13px; font-weight: 400; }
 .action:disabled { opacity: .5; }
+.banner.needs { display: flex; align-items: center; gap: 10px; }
+.banner.needs span { flex: 1; min-width: 0; }
+.answer { flex: none; min-height: 44px; padding: 0 16px; border: 0; border-radius: 22px; background: var(--accent); color: #000; font: inherit; font-weight: 600; }
+.screen { margin: 4px 0 12px; padding: 6px 8px; max-height: 45dvh; overflow: auto; -webkit-overflow-scrolling: touch; background: var(--panel); border-radius: 8px; color: var(--text); font: 9.5px/1.35 ui-monospace, "SF Mono", Menlo, monospace; white-space: pre; }
+.keys { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin-bottom: 8px; }
+.press { min-width: 0; height: 44px; padding: 0; border: 0; border-radius: 10px; background: var(--panel); color: var(--text); font: inherit; font-size: 15px; font-weight: 600; }
+.term-text { display: flex; gap: 8px; }
+.term-text input { flex: 1; min-width: 0; height: 44px; border: 0; border-radius: 12px; padding: 0 12px; background: var(--panel); color: var(--text); font: inherit; }
+.term-send { flex: none; height: 44px; padding: 0 18px; border: 0; border-radius: 22px; background: var(--accent); color: #000; font: inherit; font-weight: 600; }
+.press:disabled, .term-send:disabled { opacity: .5; }
