@@ -109,6 +109,13 @@ export class SelfRegistration {
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private readonly inflight = new Set<Promise<void>>();
 	private stopped = false;
+	/** The wait in flight, ended by stop(). */
+	private waiting: AbortController | undefined;
+	/** False once the daemon turns out to predate `wait`: heartbeats alone deliver. */
+	private canWait = true;
+	/** The last register delivered a tree, fork or clone: what follows it is for where the pane
+	 *  moves to, so it waits for the next heartbeat, as the daemon's drain intends. */
+	private moved = false;
 
 	/** `onMessage`: another window's agent view asks this session something.
 	 *  `id`: a pane registers under its tmux session's name, so its row outlives a session switch.
@@ -176,7 +183,10 @@ export class SelfRegistration {
 		try {
 			const res = await this.client.register(instance);
 			watched = res?.watched === true;
-			for (const message of res?.messages ?? []) {
+			const messages = res?.messages ?? [];
+			this.moved = messages.some((m) => m.type === "tree" || m.type === "fork" || m.type === "clone");
+			if (!this.moved) this.wait();
+			for (const message of messages) {
 				// Stopped meanwhile: the session they were for is gone, so they wait for whatever
 				// registers as this id next (the pane's next session), or go with the row. They go behind
 				// anything queued since: the phone holds Send and its moves until the session has moved, so
@@ -196,6 +206,27 @@ export class SelfRegistration {
 		}
 	}
 
+	/**
+	 * One wait at a time, from the first register that succeeds: a message queued for this pane
+	 * wakes it, and the register that follows drains it at once, the same way a heartbeat does. A
+	 * wait that fails waits again after the next register that succeeds.
+	 */
+	private wait(): void {
+		if (this.waiting || !this.canWait || this.stopped || !this.timer) return;
+		const waiting = new AbortController();
+		this.waiting = waiting;
+		const done = () => {
+			if (this.waiting === waiting) this.waiting = undefined;
+		};
+		this.client.wait(this.id, waiting.signal).then((queued) => {
+			done();
+			if (queued === undefined) this.canWait = false;
+			else if (this.moved) return;
+			else if (queued) void this.heartbeat();
+			else this.wait();
+		}, done);
+	}
+
 	/** `unregister: false`: the pane's next session carries on its row, under the same id. */
 	async stop(options: { unregister?: boolean } = {}): Promise<void> {
 		this.stopped = true;
@@ -203,6 +234,8 @@ export class SelfRegistration {
 			clearInterval(this.timer);
 			this.timer = undefined;
 		}
+		// A wait carries no messages, so ending it loses none.
+		this.waiting?.abort();
 		// A register still on its way would list the session again after the unregister, or land
 		// after the next session's first one. A failed heartbeat must not skip the unregister.
 		await Promise.allSettled([...this.inflight]);

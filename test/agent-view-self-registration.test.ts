@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OrchestratorClient, PaneMessage, RegisterInput } from "../ext/agent-view/orchestrator-client.ts";
 import { deriveLabel, ForegroundActivity, SelfRegistration } from "../ext/agent-view/self-registration.ts";
 import { piCommand } from "../ext/agent-view/tmux.ts";
@@ -262,5 +262,155 @@ describe("SelfRegistration.stop", () => {
 			},
 		);
 		await expect(reg.refresh()).resolves.toBeUndefined();
+	});
+});
+
+describe("SelfRegistration waits for its next message", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	/** A daemon whose registers answer `replies` in turn (then none), and whose waits the test answers. */
+	function waitingClient(replies: Array<PaneMessage[] | Error> = []) {
+		const registers: number[] = [];
+		const waits: Array<{ answer: (queued: boolean | undefined | Error) => void; signal: AbortSignal }> = [];
+		const client = {
+			register: async () => {
+				registers.push(Date.now());
+				const reply = replies.shift() ?? [];
+				if (reply instanceof Error) throw reply;
+				return { watched: false, messages: reply };
+			},
+			unregister: async () => {},
+			send: async () => {},
+			wait: (_id: string, signal: AbortSignal) =>
+				new Promise<boolean | undefined>((resolve, reject) => {
+					waits.push({ answer: (q) => (q instanceof Error ? reject(q) : resolve(q)), signal });
+				}),
+		} as unknown as OrchestratorClient;
+		return { client, registers, waits };
+	}
+
+	function started(client: OrchestratorClient, handled: PaneMessage[] = []) {
+		const reg = new SelfRegistration(
+			client,
+			() => ({ cwd: "/p" }),
+			(m) => handled.push(m),
+			"pi-1",
+		);
+		reg.start();
+		return reg;
+	}
+
+	it("waits once registered, and registers at once when woken, to take what was queued", async () => {
+		vi.useFakeTimers();
+		const { client, registers, waits } = waitingClient([[], [{ type: "prompt", text: "hi" }]]);
+		const handled: PaneMessage[] = [];
+		const reg = started(client, handled);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(registers).toHaveLength(1);
+		expect(waits).toHaveLength(1);
+		waits[0].answer(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(registers).toHaveLength(2);
+		expect(handled).toEqual([{ type: "prompt", text: "hi" }]);
+		expect(waits).toHaveLength(2);
+		await reg.stop();
+	});
+
+	it("waits again when a wait ends with nothing queued", async () => {
+		vi.useFakeTimers();
+		const { client, registers, waits } = waitingClient();
+		const reg = started(client);
+		await vi.advanceTimersByTimeAsync(0);
+		waits[0].answer(false);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(registers).toHaveLength(1);
+		expect(waits).toHaveLength(2);
+		await reg.stop();
+	});
+
+	it("does not wait before a register has succeeded, nor without being started", async () => {
+		vi.useFakeTimers();
+		const { client, waits } = waitingClient([new Error("daemon down")]);
+		const reg = started(client);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(waits).toHaveLength(0);
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(waits).toHaveLength(1);
+		await reg.stop();
+
+		const other = waitingClient();
+		const unstarted = new SelfRegistration(other.client, () => ({ cwd: "/p" }));
+		await unstarted.refresh();
+		expect(other.waits).toHaveLength(0);
+	});
+
+	it("after a tree, fork or clone, leaves what follows it to the next heartbeat", async () => {
+		vi.useFakeTimers();
+		const { client, registers, waits } = waitingClient([[], [{ type: "fork", entryId: "1a2b3c4d" }], []]);
+		const handled: PaneMessage[] = [];
+		const reg = started(client, handled);
+		await vi.advanceTimersByTimeAsync(0);
+		waits[0].answer(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(handled).toEqual([{ type: "fork", entryId: "1a2b3c4d" }]);
+		expect(waits).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(registers).toHaveLength(3);
+		expect(waits).toHaveLength(2);
+		await reg.stop();
+	});
+
+	it("does not register on a wake that comes after a navigation another heartbeat delivered", async () => {
+		vi.useFakeTimers();
+		const { client, registers, waits } = waitingClient([[], [{ type: "tree", entryId: "1a2b3c4d" }]]);
+		const reg = started(client);
+		await vi.advanceTimersByTimeAsync(0);
+		reg.setActivity("working");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(registers).toHaveLength(2);
+		waits[0].answer(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(registers).toHaveLength(2);
+		expect(waits).toHaveLength(1);
+		await reg.stop();
+	});
+
+	it("waits again only after the next heartbeat when a wait fails", async () => {
+		vi.useFakeTimers();
+		const { client, waits } = waitingClient();
+		const reg = started(client);
+		await vi.advanceTimersByTimeAsync(0);
+		waits[0].answer(new Error("Unknown instance: pi-1"));
+		await vi.advanceTimersByTimeAsync(2999);
+		expect(waits).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(waits).toHaveLength(2);
+		await reg.stop();
+	});
+
+	it("stops waiting for good on a daemon that does not know the request, heartbeats going on", async () => {
+		vi.useFakeTimers();
+		const { client, registers, waits } = waitingClient();
+		const reg = started(client);
+		await vi.advanceTimersByTimeAsync(0);
+		waits[0].answer(undefined);
+		await vi.advanceTimersByTimeAsync(6000);
+		expect(registers).toHaveLength(3);
+		expect(waits).toHaveLength(1);
+		await reg.stop();
+	});
+
+	it("ends its wait on stop, and a wake that still comes registers nothing", async () => {
+		vi.useFakeTimers();
+		const { client, registers, waits } = waitingClient();
+		const reg = started(client);
+		await vi.advanceTimersByTimeAsync(0);
+		await reg.stop({ unregister: false });
+		expect(waits[0].signal.aborted).toBe(true);
+		waits[0].answer(true);
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(registers).toHaveLength(1);
 	});
 });

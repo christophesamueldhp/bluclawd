@@ -100,6 +100,7 @@ type Request =
 	| { type: "list" }
 	| { type: "register"; instance: RegisterInput }
 	| { type: "unregister"; instanceId: string }
+	| { type: "wait"; instanceId: string }
 	| { type: "send"; instanceId: string; message: PaneMessage }
 	| { type: "shutdown" }
 	| { type: "delete"; instanceId: string }
@@ -120,6 +121,7 @@ interface AnyResponse {
 	buildId?: string;
 	messages?: PaneMessage[];
 	watched?: boolean;
+	queued?: boolean;
 }
 
 /** Path to the daemon's CLI entry, for the ensureDaemon() auto-start. */
@@ -182,7 +184,7 @@ export class OrchestratorClient {
 		this.socketPath = socketPath;
 	}
 
-	private request(req: Request, timeoutMs = 2000): Promise<AnyResponse> {
+	private request(req: Request, timeoutMs = 2000, signal?: AbortSignal): Promise<AnyResponse> {
 		return new Promise<AnyResponse>((resolve, reject) => {
 			const socket = createConnection(this.socketPath);
 			let buffer = "";
@@ -198,6 +200,14 @@ export class OrchestratorClient {
 				fn();
 			};
 			const timer = setTimeout(() => done(() => reject(new Error("orchestrator request timed out"))), timeoutMs);
+			// Only a wait has a signal: held open for long, it must not keep pi alive, and stop() ends it.
+			if (signal) {
+				socket.unref();
+				timer.unref();
+				const abort = () => done(() => reject(new Error("orchestrator request aborted")));
+				if (signal.aborted) abort();
+				else signal.addEventListener("abort", abort, { once: true });
+			}
 			socket.on("connect", () => socket.write(`${JSON.stringify(req)}\n`));
 			socket.on("data", (chunk: Buffer) => {
 				buffer += chunk.toString();
@@ -265,6 +275,15 @@ export class OrchestratorClient {
 	async register(instance: RegisterInput): Promise<{ messages: PaneMessage[]; watched: boolean }> {
 		const res = await this.request({ type: "register", instance }, 1000);
 		return { messages: res.messages ?? [], watched: res.watched === true };
+	}
+
+	/**
+	 * Held open until a message is queued for this pane (true) or the daemon's 25 s pass with none
+	 * (false); undefined from a daemon that predates the request, which answers it with no type.
+	 */
+	async wait(instanceId: string, signal: AbortSignal): Promise<boolean | undefined> {
+		const res = await this.request({ type: "wait", instanceId }, 30_000, signal);
+		return res.type === "wait_result" ? res.queued === true : undefined;
 	}
 
 	/** Queue a message for a pane's pi; it acts on it within a heartbeat. */
