@@ -390,15 +390,18 @@ describe("SelfRegistration waits for its next message", () => {
 		await reg.stop();
 	});
 
-	it("stops waiting for good on a daemon that does not know the request, heartbeats going on", async () => {
+	it("on a daemon that does not know the request, asks again only at the next heartbeat", async () => {
 		vi.useFakeTimers();
 		const { client, registers, waits } = waitingClient();
 		const reg = started(client);
 		await vi.advanceTimersByTimeAsync(0);
 		waits[0].answer(undefined);
-		await vi.advanceTimersByTimeAsync(6000);
-		expect(registers).toHaveLength(3);
+		await vi.advanceTimersByTimeAsync(2999);
+		expect(registers).toHaveLength(1);
 		expect(waits).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(registers).toHaveLength(2);
+		expect(waits).toHaveLength(2);
 		await reg.stop();
 	});
 

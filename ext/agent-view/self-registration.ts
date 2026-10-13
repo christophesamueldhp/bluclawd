@@ -111,8 +111,6 @@ export class SelfRegistration {
 	private stopped = false;
 	/** The wait in flight, ended by stop(). */
 	private waiting: AbortController | undefined;
-	/** False once the daemon turns out to predate `wait`: heartbeats alone deliver. */
-	private canWait = true;
 	/** The last register delivered a tree, fork or clone: what follows it is for where the pane
 	 *  moves to, so it waits for the next heartbeat, as the daemon's drain intends. */
 	private moved = false;
@@ -209,10 +207,11 @@ export class SelfRegistration {
 	/**
 	 * One wait at a time, from the first register that succeeds: a message queued for this pane
 	 * wakes it, and the register that follows drains it at once, the same way a heartbeat does. A
-	 * wait that fails waits again after the next register that succeeds.
+	 * wait that fails, or that a daemon from before `wait` answers, waits again after the next
+	 * register that succeeds: heartbeats deliver meanwhile, and a restarted daemon is waited on.
 	 */
 	private wait(): void {
-		if (this.waiting || !this.canWait || this.stopped || !this.timer) return;
+		if (this.waiting || this.stopped || !this.timer) return;
 		const waiting = new AbortController();
 		this.waiting = waiting;
 		const done = () => {
@@ -220,9 +219,8 @@ export class SelfRegistration {
 		};
 		this.client.wait(this.id, waiting.signal).then((queued) => {
 			done();
-			if (queued === undefined) this.canWait = false;
-			else if (this.moved) return;
-			else if (queued) void this.heartbeat();
+			if (queued === undefined || this.moved) return;
+			if (queued) void this.heartbeat();
 			else this.wait();
 		}, done);
 	}
