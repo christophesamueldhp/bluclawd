@@ -6,12 +6,13 @@
  * updates arrive.
  */
 import { api, getToken, setToken, Unauthorized } from "./api.js";
-import { settle } from "./live.js";
+import { promptKey, sentText, settle } from "./live.js";
 
 /** @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string }} Session */
 /** @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
 /** @typedef {{ provider: string, id: string, name?: string }} ReportModel */
+/** @typedef {{ mimeType: string, data: string, thumb: string }} Attachment base64 `data`, a data URL `thumb` */
 /** @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number } }} Report */
 
 const BANDS = [
@@ -35,6 +36,15 @@ const NAVIGATE_GIVE_UP_MS = 15_000;
  *  one pi does not show verbatim (a command, a template) is never matched in the transcript. */
 const PENDING_GRACE_MS = 15_000;
 const SCREEN_POLL_MS = 2000;
+/** The daemon takes at most 4 images, 5 MB each, with a prompt. */
+const ATTACH_MAX = 4;
+/** A photo is scaled to this on its long side and sent as a JPEG. */
+const IMAGE_SIDE_MAX = 1600;
+const JPEG_QUALITY = 0.85;
+/** A PNG, GIF or WebP this small and no larger than IMAGE_SIDE_MAX goes as it is (a screenshot stays sharp). */
+const KEEP_BYTES_MAX = 1024 * 1024;
+const KEEP_TYPES = ["image/png", "image/gif", "image/webp"];
+const THUMB_SIDE = 160;
 /** pi redraws a moment after a key reaches it. */
 const SCREEN_SETTLE_MS = 150;
 /** The terminal sheet's keys: tmux's name, and the button's face. */
@@ -67,6 +77,11 @@ const ERRORS = {
 	empty_prompt: "Type a message first.",
 	prompt_too_large: "That message is too long.",
 	body_too_large: "That message is too long.",
+	invalid_image: "That image could not be sent.",
+	image_too_large: "That image is too large to send.",
+	images_need_running: "Images go only to a running session: send the text to resume it, then attach them.",
+	unreadable_image: "That image could not be read.",
+	too_many_images: `Up to ${ATTACH_MAX} images at a time.`,
 	internal_error: "Something went wrong on the Mac.",
 	push_denied: "Notifications are off for bluclawd. Turn them on in Settings › Notifications.",
 	invalid_subscription: "The Mac did not accept this phone's notification subscription.",
@@ -77,10 +92,13 @@ const state = {
 	/** @type {string | undefined} */ open: undefined,
 	/** @type {Message[]} */ messages: [],
 	/**
-	 * Prompts sent and not yet in the transcript. `started`: the session was seen working since.
-	 * @type {{ text: string, before: number, sentAt: number, started?: boolean }[]}
+	 * Prompts sent and not yet in the transcript. `text`: as the transcript will show it (see
+	 * promptKey); `prompt`: as typed, `thumbs`: its images'. `started`: the session was seen working since.
+	 * @type {{ text: string, prompt: string, thumbs: string[], before: number, sentAt: number, started?: boolean }[]}
 	 */
 	pending: [],
+	/** Images for the open session's next prompt. @type {Attachment[]} */
+	attachments: [],
 	/** The open session's reply in progress, streamed by its pane. @type {LiveSnapshot | undefined} */ live: undefined,
 	/** @type {string[]} */ directories: [],
 	/**
@@ -422,7 +440,7 @@ function pollScreen() {
 /** @param {Message[]} messages @param {string} text */
 function userCount(messages, text) {
 	// Trimmed: a prompt starting with @ reaches pi with a space before it.
-	return messages.filter((m) => m.kind === "user" && m.text?.trim() === text).length;
+	return messages.filter((m) => m.kind === "user" && sentText(m.text ?? "") === text).length;
 }
 
 /** The reply on screen stays until a transcript fetch has it, which pi may not have written yet. */
@@ -612,7 +630,10 @@ function chatShell() {
 	return `<header class="bar"><a class="back" href="#">‹ Sessions</a><button class="title" id="title" aria-haspopup="dialog"></button>
 <button class="stop" id="stop" hidden>Stop</button></header>
 <div id="banner"></div><section class="scroll" id="scroll"><div class="older" id="older"></div><div class="log" id="log"></div></section>
-<form class="composer" id="composer"><textarea id="text" rows="1" placeholder="Reply" aria-label="Reply" maxlength="32768"></textarea>
+<div class="thumbs" id="thumbs" hidden></div>
+<form class="composer" id="composer"><button type="button" class="attach" id="attach" aria-label="Attach image"><span aria-hidden="true">+</span></button>
+<input type="file" id="file" accept="image/*" multiple hidden>
+<textarea id="text" rows="1" placeholder="Reply" aria-label="Reply" maxlength="32768"></textarea>
 <button class="send" aria-label="Send"><span aria-hidden="true">↑</span></button></form>
 <div class="backdrop" id="backdrop" hidden></div><section class="sheet" id="sheet" role="dialog" aria-label="Session status" hidden></section>`;
 }
@@ -666,8 +687,11 @@ function logHtml(session) {
 	}
 	const live = state.live ? liveHtml(state.live, calls) : "";
 	if (live) parts.push(live);
-	for (const { text } of state.pending) {
-		parts.push(`<div class="u">${esc(text)}</div><div class="queued">sent · waiting for the session</div>`);
+	for (const { prompt, thumbs } of state.pending) {
+		const pictures = thumbs.map((thumb) => `<img src="${esc(thumb)}" alt="Image">`).join("");
+		parts.push(
+			`<div class="u">${pictures ? `<div class="pictures">${pictures}</div>` : ""}${esc(prompt)}</div><div class="queued">sent · waiting for the session</div>`,
+		);
 	}
 	// The reply in progress replaces the working line once it shows something.
 	const streaming = live !== "" || running.size > 0;
@@ -899,13 +923,31 @@ function updateChat() {
 	const text = $("#text");
 	text.disabled = blocked;
 	$(".send").disabled = blocked || state.navigating;
+	// A resumed session's first prompt is an argument to pi, which carries no images.
+	$("#attach").disabled = blocked || session?.resumable === true || state.attachments.length >= ATTACH_MAX;
 	text.placeholder = resuming
 		? "Starting…"
 		: stranded
 			? "Not running: open it on the Mac"
 			: session?.resumable
-				? "Reply resumes it"
+				? "Reply resumes it (text only)"
 				: "Reply";
+	updateThumbs();
+}
+
+/** The images for the next prompt, above the composer, each with its remove button. */
+function updateThumbs() {
+	const thumbs = $("#thumbs");
+	const html = state.attachments
+		.map(
+			(a, i) =>
+				`<span class="thumb"><img src="${esc(a.thumb)}" alt="Image ${i + 1}"><button type="button" class="remove" data-index="${i}" aria-label="Remove image ${i + 1}">✕</button></span>`,
+		)
+		.join("");
+	if (thumbs.dataset.html === html) return;
+	thumbs.innerHTML = html;
+	thumbs.dataset.html = html;
+	thumbs.hidden = html === "";
 }
 
 /** Rebuilt only when it changes, so an open model picker is not reset under the finger. @param {Session | undefined} session */
@@ -1026,6 +1068,19 @@ function bindChat() {
 	$("#composer").addEventListener("submit", (/** @type {Event} */ event) => {
 		event.preventDefault();
 		void send();
+	});
+	const file = $("#file");
+	$("#attach").addEventListener("click", () => file.click());
+	file.addEventListener("change", () => {
+		const files = [...file.files];
+		file.value = "";
+		void attach(files);
+	});
+	$("#thumbs").addEventListener("click", (/** @type {Event} */ event) => {
+		const remove = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".remove"));
+		if (!remove) return;
+		state.attachments.splice(Number(remove.dataset.index), 1);
+		render();
 	});
 	$("#stop").addEventListener("click", async () => {
 		const id = state.open;
@@ -1229,23 +1284,100 @@ async function compact() {
 	}
 }
 
+/** @param {File[]} files */
+async function attach(files) {
+	const id = state.open;
+	const room = ATTACH_MAX - state.attachments.length;
+	if (files.length > room) state.error = errorText("too_many_images");
+	for (const file of files.slice(0, Math.max(room, 0))) {
+		try {
+			const image = await readImage(file);
+			if (state.open !== id) return;
+			// Another pick may have filled it meanwhile.
+			if (state.attachments.length < ATTACH_MAX) state.attachments.push(image);
+		} catch {
+			state.error = errorText("unreadable_image");
+		}
+		render();
+	}
+	render();
+}
+
+/**
+ * A picked image as a prompt sends it: as it is when small, else scaled down to a JPEG.
+ * @param {File} file @returns {Promise<Attachment>}
+ */
+async function readImage(file) {
+	const bitmap = await createImageBitmap(file);
+	try {
+		const keep =
+			KEEP_TYPES.includes(file.type) &&
+			file.size <= KEEP_BYTES_MAX &&
+			Math.max(bitmap.width, bitmap.height) <= IMAGE_SIDE_MAX;
+		const url = keep ? await dataUrl(file) : jpeg(bitmap, IMAGE_SIDE_MAX);
+		return {
+			mimeType: keep ? file.type : "image/jpeg",
+			data: url.slice(url.indexOf(",") + 1),
+			thumb: jpeg(bitmap, THUMB_SIDE),
+		};
+	} finally {
+		bitmap.close();
+	}
+}
+
+/** The image scaled to fit `side` on its long side, as a JPEG data URL. @param {ImageBitmap} bitmap @param {number} side */
+function jpeg(bitmap, side) {
+	const scale = Math.min(1, side / Math.max(bitmap.width, bitmap.height));
+	const canvas = document.createElement("canvas");
+	canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+	canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+	const context = /** @type {CanvasRenderingContext2D} */ (canvas.getContext("2d"));
+	// A JPEG has no transparency: what was see-through turns white, not black.
+	context.fillStyle = "#fff";
+	context.fillRect(0, 0, canvas.width, canvas.height);
+	context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+	return canvas.toDataURL("image/jpeg", JPEG_QUALITY);
+}
+
+/** @param {Blob} blob @returns {Promise<string>} */
+function dataUrl(blob) {
+	return new Promise((resolve, reject) => {
+		const reader = new FileReader();
+		reader.onload = () => resolve(String(reader.result));
+		reader.onerror = () => reject(reader.error);
+		reader.readAsDataURL(blob);
+	});
+}
+
 async function send() {
 	const text = $("#text");
 	const value = text.value.trim();
 	const id = state.open;
 	const resume = state.sessions.find((s) => s.id === id)?.resumable === true;
 	if (!value || !id || state.navigating || (resume && state.starting)) return;
+	const images = state.attachments;
+	if (resume && images.length) {
+		state.error = errorText("images_need_running");
+		render();
+		return;
+	}
 	if (resume) state.starting = { from: id };
 	text.value = "";
 	text.style.height = "auto";
-	const before = userCount(state.messages, value) + state.pending.filter((p) => p.text === value).length;
-	state.pending.push({ text: value, before, sentAt: Date.now() });
+	state.attachments = [];
+	const key = promptKey(value, images.length);
+	const before = userCount(state.messages, key) + state.pending.filter((p) => p.text === key).length;
+	state.pending.push({ text: key, prompt: value, thumbs: images.map((i) => i.thumb), before, sentAt: Date.now() });
 	// The actions it holds back come back by themselves once the grace is over.
 	setTimeout(render, PENDING_GRACE_MS);
 	render();
 	$("#scroll").scrollTop = $("#scroll").scrollHeight;
 	try {
-		const { pane } = await api.prompt(id, value);
+		const { pane } = await api.prompt(
+			id,
+			value,
+			images.map(({ mimeType, data }) => ({ mimeType, data })),
+		);
 		if (pane) waitForPane(pane, id);
 		else if (resume) {
 			state.starting = undefined;
@@ -1253,10 +1385,11 @@ async function send() {
 		}
 	} catch (error) {
 		if (resume) state.starting = undefined;
-		const failed = state.pending.map((p) => p.text).lastIndexOf(value);
+		const failed = state.pending.map((p) => p.text).lastIndexOf(key);
 		if (failed >= 0) state.pending.splice(failed, 1);
-		for (const p of state.pending.slice(Math.max(failed, 0))) if (p.text === value) p.before--;
+		for (const p of state.pending.slice(Math.max(failed, 0))) if (p.text === key) p.before--;
 		if (!text.value) text.value = value;
+		if (state.open === id && !state.attachments.length) state.attachments = images;
 		handleError(error);
 	}
 }
@@ -1269,6 +1402,7 @@ function route() {
 	if (open !== state.open) {
 		// Following a resumed session to its pane keeps the reply on screen until pi writes it.
 		if (open === undefined || open !== followed) state.pending = [];
+		state.attachments = [];
 		followed = undefined;
 		turnEndedAt = undefined;
 		state.open = open;

@@ -165,11 +165,14 @@ here or in a new session, or goes back to a reply. When a session waits on a dia
 its screen and sends it keys. Enable notifications to hear when a session finishes or needs you:
 on iOS only in the app opened from the Home Screen, iOS 16.4 or later.
 
+A prompt to a running session can carry up to four images (+ beside the reply field); a reply
+that resumes or starts a session is text only.
+
 A paired phone can read every session, tool output included, prompt any of them, and press keys
 in a pane: it is effectively a shell as you on this Mac. Its token does not expire; revoke a phone
 with `/remote-control devices`.
 
-What the phone cannot do: send images, show an app icon of its own, reach more than one Mac, or
+What the phone cannot do: reach more than one Mac, or
 work without the daemon running (any `pi` starts it; nothing starts it at login) and the Mac
 awake. A new bluclawd reaches the phone once the daemon restarts, which agent view and
 `/remote-control` do when they find its code changed.
