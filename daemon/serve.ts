@@ -41,6 +41,7 @@ export async function serve(): Promise<void> {
 		}
 
 		shutdownPromise = (async () => {
+			supervisor.settleWaits();
 			server.close();
 			// Before the slow stop, so a replacement daemon's new socket is never the one deleted.
 			if (existsSync(socketPath)) {

@@ -27,6 +27,8 @@ const EXTERNAL_TTL_MS = 15_000;
  */
 export class ServerSupervisor {
 	private readonly externalInstances = new Map<string, ExternalInstance>();
+	/** Each pane's pending wait, by id; kept apart from its entry, which every heartbeat replaces. */
+	private readonly waits = new Map<string, (queued: boolean) => void>();
 
 	/** Register/heartbeat a pane's pi. */
 	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = Date.now()): void {
@@ -49,6 +51,7 @@ export class ServerSupervisor {
 
 	unregisterExternal(id: string): void {
 		this.externalInstances.delete(id);
+		this.settleWait(id, false);
 	}
 
 	/** Queue a message for a self-registered session; false when none is registered as `id`. */
@@ -56,7 +59,41 @@ export class ServerSupervisor {
 		const entry = this.externalInstances.get(id);
 		if (!entry) return false;
 		entry.inbox.push(message);
+		this.settleWait(id, true);
 		return true;
+	}
+
+	/**
+	 * True once a message is queued for a self-registered session (at once if one is), false after
+	 * `timeoutMs` with none or when settled; undefined when none is registered as `id`. It drains
+	 * nothing: the pane's next register does, so no message goes into a reply its pane may no longer
+	 * read, and a navigation still goes alone. One per pane: a newer wait settles the older one (an
+	 * old runtime's and its successor's overlap across a fork or reload).
+	 */
+	waitExternal(id: string, timeoutMs: number): Promise<boolean> | undefined {
+		const entry = this.externalInstances.get(id);
+		if (!entry) return undefined;
+		this.settleWait(id, false);
+		if (entry.inbox.length > 0) return Promise.resolve(true);
+		return new Promise((resolve) => {
+			const timer = setTimeout(() => this.settleWait(id, false), timeoutMs);
+			this.waits.set(id, (queued) => {
+				clearTimeout(timer);
+				resolve(queued);
+			});
+		});
+	}
+
+	/** At shutdown: every pending wait answers false. */
+	settleWaits(): void {
+		for (const id of [...this.waits.keys()]) this.settleWait(id, false);
+	}
+
+	private settleWait(id: string, queued: boolean): void {
+		const settle = this.waits.get(id);
+		if (!settle) return;
+		this.waits.delete(id);
+		settle(queued);
 	}
 
 	/** The messages queued for a self-registered session, now delivered. A tree, fork or clone goes
@@ -139,7 +176,10 @@ export class ServerSupervisor {
 	/** Remove the row. The session's .jsonl stays on disk, resumable with /resume. */
 	deleteInstance(instanceId: string): boolean {
 		// A self-registered session's process is its pane's; its row goes until it registers again.
-		if (this.externalInstances.delete(instanceId)) return true;
+		if (this.externalInstances.delete(instanceId)) {
+			this.settleWait(instanceId, false);
+			return true;
+		}
 		if (!getInstance(instanceId)) return false;
 		removeInstance(instanceId);
 		return true;

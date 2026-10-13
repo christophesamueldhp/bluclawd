@@ -24,6 +24,8 @@ import type {
 	StatusResponse,
 	UnregisterRequest,
 	UnregisterResponse,
+	WaitRequest,
+	WaitResponse,
 } from "./ipc/protocol.ts";
 import type { RemoteControl } from "./remote/control.ts";
 import { supervisor } from "./supervisor.ts";
@@ -51,6 +53,9 @@ function toInstanceSummary(instance: InstanceRecord, activity?: AgentActivity, e
 		leafId: instance.leafId,
 	};
 }
+
+/** Below the pane's 30 s request timeout, so a wait is answered rather than given up on. */
+const WAIT_MS = 25_000;
 
 /** Installed by serve.ts: the process's own graceful shutdown. Unset outside `serve` (tests). */
 let shutdownHook: (() => void) | undefined;
@@ -87,6 +92,7 @@ function unknownInstanceError(instanceId: string): ErrorResponse {
 export async function handleIpcRequest(request: ListRequest): Promise<ListResponse | ErrorResponse>;
 export async function handleIpcRequest(request: StatusRequest): Promise<StatusResponse | ErrorResponse>;
 export async function handleIpcRequest(request: RegisterRequest): Promise<RegisterResponse | ErrorResponse>;
+export async function handleIpcRequest(request: WaitRequest): Promise<WaitResponse | ErrorResponse>;
 export async function handleIpcRequest(request: UnregisterRequest): Promise<UnregisterResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ShutdownRequest): Promise<ShutdownResponse | ErrorResponse>;
 export async function handleIpcRequest(request: RemoteRequest): Promise<RemoteResponse | ErrorResponse>;
@@ -150,6 +156,12 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 			return supervisor.sendExternal(request.instanceId, request.message)
 				? { type: "ack", ok: true }
 				: unknownInstanceError(request.instanceId);
+		}
+
+		case "wait": {
+			const waiting = supervisor.waitExternal(request.instanceId, WAIT_MS);
+			if (!waiting) return unknownInstanceError(request.instanceId);
+			return { type: "wait_result", ok: true, ...((await waiting) ? { queued: true } : {}) };
 		}
 
 		case "unregister": {

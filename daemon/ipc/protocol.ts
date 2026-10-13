@@ -53,6 +53,12 @@ export interface SendRequest {
 	message: PaneMessage;
 }
 
+/** Held open until a message is queued for the pane, or 25 s pass with none. */
+export interface WaitRequest {
+	type: "wait";
+	instanceId: string;
+}
+
 export interface UnregisterRequest {
 	type: "unregister";
 	instanceId: string;
@@ -138,6 +144,7 @@ interface RequestMap {
 	register: RegisterRequest;
 	unregister: UnregisterRequest;
 	send: SendRequest;
+	wait: WaitRequest;
 	shutdown: ShutdownRequest;
 	delete: DeleteRequest;
 	rename: RenameRequest;
@@ -206,6 +213,12 @@ export interface RegisterResponse extends ResponseBase {
 	watched?: boolean;
 }
 
+/** `queued`: a message waits for the pane, which registers to drain it (the wait carries none). */
+export interface WaitResponse extends ResponseBase {
+	type: "wait_result";
+	queued?: boolean;
+}
+
 export interface UnregisterResponse extends ResponseBase {
 	type: "unregister_result";
 }
@@ -252,6 +265,7 @@ interface ResponseMap {
 	status: StatusResponse;
 	register: RegisterResponse;
 	send: AckResponse;
+	wait: WaitResponse;
 	unregister: UnregisterResponse;
 	shutdown: ShutdownResponse;
 	delete: AckResponse;
