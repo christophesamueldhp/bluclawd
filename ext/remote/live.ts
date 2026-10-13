@@ -24,6 +24,28 @@ interface Part {
 
 type LiveTool = LiveSnapshot["tools"][number];
 
+/**
+ * One send at a time, each with the latest snapshot: one a newer one replaced while a send was on
+ * its way is skipped, and a null (the latest once a reply ends) never overtakes the snapshot it clears.
+ */
+export function latestOnly(send: (live: LiveSnapshot | null) => Promise<unknown>): (live: LiveSnapshot | null) => void {
+	let next: { live: LiveSnapshot | null } | undefined;
+	let sending = false;
+	const drain = async () => {
+		sending = true;
+		while (next) {
+			const { live } = next;
+			next = undefined;
+			await send(live).catch(() => {});
+		}
+		sending = false;
+	};
+	return (live) => {
+		next = { live };
+		if (!sending) void drain();
+	};
+}
+
 export class LiveForwarder {
 	private readonly send: (live: LiveSnapshot | null) => void;
 	private readonly now: () => number;

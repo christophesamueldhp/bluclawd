@@ -833,6 +833,22 @@ describe("remote HTTP API", () => {
 			controller.abort();
 		});
 
+		it("ends the reply of a pane that went away mid-reply without saying so", async () => {
+			const token = await pair();
+			const watcher = await open(token, "live");
+			expect((await watcher.collect(200)).text).toContain(": connected");
+			const snapshot = { text: "Hel", tools: [] };
+			server.live("live", snapshot);
+			expect((await watcher.collect(200)).text).toContain(JSON.stringify({ sessionId: "live", live: snapshot }));
+			// Reaped from the list: it died without unregistering.
+			instances = instances.filter((i) => i.id !== "live");
+			expect((await watcher.collect(1500)).text).toContain(JSON.stringify({ sessionId: "live", live: null }));
+			const late = await open(token, "live");
+			expect((await late.collect(300)).text).not.toContain("event: live");
+			late.controller.abort();
+			watcher.controller.abort();
+		});
+
 		it("streams a watched session's live reply to the clients that have it open, and forgets it when they leave", async () => {
 			const token = await pair();
 			const watcher = await (async () => {

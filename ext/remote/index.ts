@@ -20,7 +20,7 @@ import {
 	type RemoteResult,
 } from "../agent-view/orchestrator-client.ts";
 import { Tmux } from "../agent-view/tmux.ts";
-import { LiveForwarder } from "./live.ts";
+import { LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
 import { applyPaneMessage, buildReport, navigate } from "./report.ts";
 import { serve, tailscaleInfo } from "./tailscale.ts";
@@ -131,11 +131,7 @@ async function devices(client: OrchestratorClient, ctx: ExtensionCommandContext)
 
 function liveForwarder(pane: string): LiveForwarder {
 	const client = new OrchestratorClient();
-	let queue = Promise.resolve();
-	// One request at a time, so a null never overtakes the snapshot it clears.
-	return new LiveForwarder((snapshot) => {
-		queue = queue.then(() => client.remoteLive(pane, snapshot)).catch(() => {});
-	});
+	return new LiveForwarder(latestOnly((snapshot) => client.remoteLive(pane, snapshot)));
 }
 
 function factory(pi: ExtensionAPI): void {

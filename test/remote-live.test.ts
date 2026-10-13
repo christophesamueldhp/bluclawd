@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LiveSnapshot } from "../ext/agent-view/orchestrator-client.ts";
-import { LiveForwarder } from "../ext/remote/live.ts";
+import { LiveForwarder, latestOnly } from "../ext/remote/live.ts";
 
 const assistant = (...content: unknown[]) => ({ role: "assistant", content });
 
@@ -118,5 +118,39 @@ describe("LiveForwarder", () => {
 		live.setWatched(true);
 		live.onMessageUpdate(assistant({ type: "thinking", thinking: "x".repeat(5000) }));
 		expect(sent[0]?.thinking).toHaveLength(2049);
+	});
+});
+
+describe("latestOnly", () => {
+	it("sends one at a time, skipping what a later snapshot replaced meanwhile, so the null comes last", async () => {
+		const sent: Array<LiveSnapshot | null> = [];
+		const done: Array<() => void> = [];
+		const forward = latestOnly((live) => {
+			sent.push(live);
+			return new Promise<void>((resolve) => done.push(resolve));
+		});
+		const snapshot = (text: string): LiveSnapshot => ({ text, tools: [] });
+		forward(snapshot("a"));
+		forward(snapshot("ab"));
+		forward(snapshot("abc"));
+		forward(null);
+		expect(sent).toEqual([snapshot("a")]);
+		done.shift()?.();
+		await vi.waitFor(() => expect(sent).toEqual([snapshot("a"), null]));
+		done.shift()?.();
+		await Promise.resolve();
+		forward(snapshot("next"));
+		await vi.waitFor(() => expect(sent).toEqual([snapshot("a"), null, snapshot("next")]));
+	});
+
+	it("goes on after a failed send", async () => {
+		const sent: Array<LiveSnapshot | null> = [];
+		const forward = latestOnly(async (live) => {
+			sent.push(live);
+			throw new Error("daemon down");
+		});
+		forward({ text: "a", tools: [] });
+		forward(null);
+		await vi.waitFor(() => expect(sent).toEqual([{ text: "a", tools: [] }, null]));
 	});
 });

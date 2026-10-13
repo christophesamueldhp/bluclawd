@@ -371,6 +371,7 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 			JSON.stringify(remoteSessions(deps.listInstances()).sort((a, b) => a.id.localeCompare(b.id))),
 		sessionFile: (id) => findSession(deps.listInstances(), id)?.sessionFile,
 		leafId: (id) => findSession(deps.listInstances(), id)?.leafId,
+		listed: () => new Set(deps.listInstances().map((i) => i.id)),
 	});
 	const server: Server = createServer((req, res) => {
 		handle(deps, events, req, res).catch((error: unknown) => {

@@ -15,6 +15,8 @@ export interface EventSources {
 	sessionsSignature(): string;
 	sessionFile(sessionId: string): string | undefined;
 	leafId(sessionId: string): string | undefined;
+	/** The ids of the sessions listed now. */
+	listed(): Set<string>;
 }
 
 interface Client {
@@ -123,6 +125,11 @@ export class RemoteEvents {
 	}
 
 	private tick(): void {
+		if (this.lives.size > 0) {
+			// A pane that died mid-reply never sends the null that ends it.
+			const listed = this.sources.listed();
+			for (const id of [...this.lives.keys()]) if (!listed.has(id)) this.live(id, null);
+		}
 		const sessions = this.sources.sessionsSignature();
 		const changed = sessions !== this.lastSessions;
 		this.lastSessions = sessions;
