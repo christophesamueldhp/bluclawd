@@ -90,15 +90,30 @@ export interface PaneSpec {
 	command?: string[];
 }
 
+/** tmux reads an argument ending in `;` as a command separator; `\;` there is a literal `;`. */
+function literalArg(arg: string): string {
+	return arg.endsWith(";") ? `${arg.slice(0, -1)}\\;` : arg;
+}
+
+function screenLines(out: string): string[] {
+	const lines = out.split("\n");
+	while (lines.length > 0 && !lines[lines.length - 1].trim()) lines.pop();
+	return lines.map((line) => line.trimEnd());
+}
+
 type Run = (args: string[], options?: { inherit?: boolean; outsideTmux?: boolean }) => string;
 
 export class Tmux {
 	readonly dir: string;
 	private readonly run: Run;
+	private readonly timeoutMs: number | undefined;
 
-	constructor(dir: string = getServerDir(), run?: Run) {
+	/** `timeoutMs`: give up on a command (attach aside) after this long, so a hung one cannot hold
+	 *  up the daemon. Not for agent view: a killed client's new-session may still start the pane. */
+	constructor(dir: string = getServerDir(), run?: Run, options: { timeoutMs?: number } = {}) {
 		this.dir = dir;
 		this.run = run ?? ((args, options) => this.exec(args, options));
+		this.timeoutMs = options.timeoutMs;
 	}
 
 	get socket(): string {
@@ -108,6 +123,18 @@ export class Tmux {
 	/** Whether tmux is installed: agent view needs it. */
 	static available(): boolean {
 		return spawnSync("tmux", ["-V"], { stdio: "ignore" }).status === 0;
+	}
+
+	/** Whether a command failed because its session, or the whole server, is not there. */
+	static gone(error: unknown): boolean {
+		// stderr, not the message: that also holds the command's arguments, such as text typed.
+		const stderr = (error as { stderr?: unknown } | undefined)?.stderr;
+		return (
+			typeof stderr === "string" &&
+			/can't find (session|window|pane)|no server running|error connecting to .* \(No such file or directory\)/.test(
+				stderr,
+			)
+		);
 	}
 
 	/** The tmux session this process runs in, when it is a pane's pi. */
@@ -120,18 +147,27 @@ export class Tmux {
 		const name = `pi-${randomUUID().slice(0, 8)}`;
 		const env = { ...piEnv(), ...spec.env, [PANE_ENV]: name };
 		const size = process.stdout.columns && process.stdout.rows ? process.stdout : undefined;
-		this.run([
-			"new-session",
-			"-d",
-			"-s",
-			name,
-			"-c",
-			spec.cwd,
-			...(size ? ["-x", String(size.columns), "-y", String(size.rows)] : []),
-			...Object.entries(env).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
-			...(spec.command ?? piCommand()),
-			...spec.args,
-		]);
+		try {
+			this.run([
+				"new-session",
+				"-d",
+				"-s",
+				name,
+				"-c",
+				spec.cwd,
+				...(size ? ["-x", String(size.columns), "-y", String(size.rows)] : []),
+				...Object.entries(env).flatMap(([key, value]) => ["-e", `${key}=${value}`]),
+				...(spec.command ?? piCommand()).map(literalArg),
+				...spec.args.map(literalArg),
+			]);
+		} catch (error) {
+			// A client killed by the timeout may still have had its session made; that pane runs.
+			try {
+				this.run(["has-session", "-t", `=${name}`]);
+			} catch {
+				throw error;
+			}
+		}
 		return name;
 	}
 
@@ -203,9 +239,26 @@ export class Tmux {
 
 	/** The last `lines` lines of a session's output, trailing blank lines dropped. */
 	capture(name: string, lines: number): string[] {
-		const out = this.run(["capture-pane", "-p", "-t", `=${name}:`, "-S", `-${lines}`]).split("\n");
-		while (out.length > 0 && !out[out.length - 1].trim()) out.pop();
-		return out.map((line) => line.trimEnd());
+		return screenLines(this.run(["capture-pane", "-p", "-t", `=${name}:`, "-S", `-${lines}`]));
+	}
+
+	/** What a session's pane shows, trailing blank lines dropped; on the main screen, `history` lines above it too. */
+	screen(name: string, history: number): string[] {
+		// A fullscreen pi is on the alternate screen: the main screen's history is from before it.
+		const alternate = this.run(["display-message", "-p", "-t", `=${name}:`, "#{alternate_on}"]).trim() === "1";
+		return screenLines(
+			this.run(["capture-pane", "-p", "-t", `=${name}:`, ...(alternate ? [] : ["-S", `-${history}`])]),
+		);
+	}
+
+	/** Press keys in a session's pane, by tmux key name (`Up`, `Enter`, …). */
+	sendKeys(name: string, keys: string[]): void {
+		this.run(["send-keys", "-t", `=${name}:`, ...keys]);
+	}
+
+	/** Type `text` into a session's pane as it is, never read as key names. */
+	sendText(name: string, text: string): void {
+		this.run(["send-keys", "-t", `=${name}:`, "-l", "--", literalArg(text)]);
 	}
 
 	/** Attach this terminal to `name`; returns when the client detaches or the server ends. */
@@ -284,6 +337,11 @@ export class Tmux {
 			spawnSync("tmux", argv, { stdio: "inherit", env });
 			return "";
 		}
-		return execFileSync("tmux", argv, { encoding: "utf8", env, stdio: ["ignore", "pipe", "pipe"] });
+		return execFileSync("tmux", argv, {
+			encoding: "utf8",
+			env,
+			stdio: ["ignore", "pipe", "pipe"],
+			timeout: this.timeoutMs,
+		});
 	}
 }

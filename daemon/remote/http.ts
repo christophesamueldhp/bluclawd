@@ -4,26 +4,48 @@
  * paired device's token: a bearer header, or `?token=` on the SSE stream, which EventSource
  * cannot give headers.
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { extname, join } from "node:path";
-import type { InstanceSummary, PaneMessage } from "../ipc/protocol.ts";
+import { homedir } from "node:os";
+import { extname, isAbsolute, join } from "node:path";
+import { stripAnsi } from "../../ext/_shared/ansi.ts";
+import { Tmux } from "../../ext/agent-view/tmux.ts";
+import type { InstanceSummary, LiveSnapshot, PaneLaunch, PaneMessage, PaneReport } from "../ipc/protocol.ts";
 import { RemoteEvents } from "./events.ts";
 import type { RemoteStore } from "./pairing.ts";
 import { findSession, remoteSessions } from "./sessions.ts";
+import type { SessionSpec } from "./spawn.ts";
 import { loadTranscript } from "./transcript.ts";
+import { parseSubscription } from "./webpush.ts";
 
 export interface RemoteDeps {
 	store: RemoteStore;
 	listInstances(): InstanceSummary[];
 	/** Queue a message for a pane's pi; false when no pane is registered as that id. */
 	send(sessionId: string, message: PaneMessage): boolean;
+	/** How to start a pane's pi; undefined until a pane has registered. */
+	launch(): PaneLaunch | undefined;
+	/** Start a pane; returns its tmux session name, the id its row registers as. `replaces`: the
+	 *  stored row it resumes, which goes once the pane registers. */
+	startSession(spec: SessionSpec, replaces?: string): string;
+	/** A pane started to resume this stored row has not registered yet. */
+	resuming(storedId: string): boolean;
+	/** A running pane's latest report. */
+	report(sessionId: string): PaneReport | undefined;
+	/** Agent view's tmux server: what a pane shows, and keys typed into it. */
+	tmux: Pick<Tmux, "screen" | "sendKeys" | "sendText">;
 	webDir: string;
 }
 
 export interface RemoteServer {
 	/** The port actually bound (differs from the requested one only for port 0). */
 	port: number;
+	/** The sessions a phone has open on its event stream. */
+	watching(): Set<string>;
+	/** Push a pane's reply in progress (null: finished) to the phones that have its session open. */
+	live(sessionId: string, live: LiveSnapshot | null): void;
+	/** Tell the phones that have this session open its report changed. */
+	status(sessionId: string): void;
 	close(): Promise<void>;
 }
 
@@ -31,6 +53,16 @@ export const BODY_MAX = 64 * 1024;
 export const PROMPT_MAX = 32 * 1024;
 const MESSAGES_DEFAULT = 50;
 const MESSAGES_MAX = 200;
+/** `provider/id`; the id may itself contain slashes. Never a leading dash: it is an argument to pi. */
+const MODEL_PATTERN = /^\w[\w.-]*\/[\w.:/@+-]+$/;
+/** pi's entry ids (8 hex digits, or a whole UUID): one word on the pane's `/remote-control` line. */
+const ENTRY_PATTERN = /^[0-9a-f-]{8,36}$/;
+const SCREEN_LINES = 60;
+/** What a dialog needs. Never C-c or C-d, which quit pi; Escape still aborts a turn, as it does on the Mac. */
+const KEYS = new Set(["Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "Space", "BSpace"]);
+/** One at a time: Escape and the key after it would reach pi as one Alt chord. */
+const KEYS_MAX = 1;
+const TEXT_MAX = 1024;
 
 const CONTENT_TYPES: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
@@ -79,6 +111,56 @@ async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> 
 	}
 }
 
+function isDirectory(path: string): boolean {
+	try {
+		return isAbsolute(path) && statSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+/** A phone has no shell to expand `~` for it. */
+function expandHome(path: string): string {
+	return path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
+}
+
+function promptIn(body: Record<string, unknown>, key: string): string {
+	const text = typeof body[key] === "string" ? body[key] : "";
+	if (!text.trim()) throw new HttpError(400, "empty_prompt");
+	if (text.length > PROMPT_MAX) throw new HttpError(413, "prompt_too_large");
+	return text;
+}
+
+/** Keys from the allowlist, or printable text: a control character in it would be a keystroke past the allowlist. */
+function keysIn(body: Record<string, unknown>): { keys: string[] } | { text: string } {
+	const { keys, text } = body;
+	if (text === undefined && Array.isArray(keys) && keys.length > 0 && keys.length <= KEYS_MAX) {
+		if (keys.every((key) => typeof key === "string" && KEYS.has(key))) return { keys };
+	}
+	if (keys === undefined && typeof text === "string" && text.length > 0 && text.length <= TEXT_MAX) {
+		if (!/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(text)) return { text };
+	}
+	throw new HttpError(400, "invalid_keys");
+}
+
+/** How to start a pane's pi, while its files are still there: a pane started with a node or pi
+ *  that has moved since (an upgrade) would die at once. */
+function launchOf(deps: RemoteDeps): PaneLaunch | undefined {
+	const launch = deps.launch();
+	if (!launch) return undefined;
+	const [command, ...args] = launch.command;
+	const script = args.at(-1);
+	return command && existsSync(command) && (script === undefined || existsSync(script)) ? launch : undefined;
+}
+
+function start(deps: RemoteDeps, spec: SessionSpec, replaces?: string): string {
+	try {
+		return deps.startSession(spec, replaces);
+	} catch {
+		throw new HttpError(500, "start_failed");
+	}
+}
+
 function bearer(req: IncomingMessage): string {
 	const header = req.headers.authorization ?? "";
 	return header.startsWith("Bearer ") ? header.slice(7) : "";
@@ -123,7 +205,8 @@ async function handle(
 	}
 
 	const token = path === "/api/events" ? (url.searchParams.get("token") ?? "") : bearer(req);
-	if (!deps.store.authenticate(token)) return json(res, 401, { error: "unauthorized" });
+	const device = deps.store.authenticate(token);
+	if (!device) return json(res, 401, { error: "unauthorized" });
 
 	if (path === "/api/events" && req.method === "GET") {
 		events.add(res, url.searchParams.get("session") ?? undefined, () => deps.store.authenticate(token) !== undefined);
@@ -132,8 +215,49 @@ async function handle(
 	if (path === "/api/sessions" && req.method === "GET") {
 		return json(res, 200, { sessions: remoteSessions(deps.listInstances()) });
 	}
+	if (path === "/api/sessions" && req.method === "POST") {
+		const body = await readJson(req);
+		const cwd = typeof body.cwd === "string" ? expandHome(body.cwd) : "";
+		if (!isDirectory(cwd)) return json(res, 400, { error: "invalid_cwd" });
+		const task = promptIn(body, "task");
+		const model = body.model;
+		if (model !== undefined && (typeof model !== "string" || !MODEL_PATTERN.test(model))) {
+			return json(res, 400, { error: "invalid_model" });
+		}
+		const launch = launchOf(deps);
+		if (!launch) return json(res, 503, { error: "no_launch" });
+		const pane = start(deps, {
+			cwd,
+			task: task.trim(),
+			...(typeof model === "string" ? { model } : {}),
+			launch,
+		});
+		return json(res, 201, { pane });
+	}
+	if (path === "/api/directories" && req.method === "GET") {
+		const sessions = remoteSessions(deps.listInstances()).sort((a, b) =>
+			(b.createdAt ?? "").localeCompare(a.createdAt ?? ""),
+		);
+		return json(res, 200, { directories: [...new Set(sessions.map((s) => s.cwd))] });
+	}
 
-	const match = /^\/api\/sessions\/([^/]+)\/(messages|prompt|abort)$/.exec(path);
+	if (path === "/api/push/key" && req.method === "GET") {
+		// `subscribed`: a re-paired device keeps its notification permission but has no subscription here.
+		return json(res, 200, { publicKey: deps.store.vapidKeys().publicKey, subscribed: device.push !== undefined });
+	}
+	if (path === "/api/push/subscribe" && req.method === "POST") {
+		const push = parseSubscription(await readJson(req));
+		if (!push) return json(res, 400, { error: "invalid_subscription" });
+		deps.store.setPush(device.id, push);
+		return json(res, 200, { ok: true });
+	}
+	if (path === "/api/push/unsubscribe" && req.method === "POST") {
+		deps.store.setPush(device.id, undefined);
+		return json(res, 200, { ok: true });
+	}
+
+	const match =
+		/^\/api\/sessions\/([^/]+)\/(messages|status|screen|keys|prompt|abort|model|compact|tree|fork|clone)$/.exec(path);
 	if (!match) return json(res, 404, { error: "not_found" });
 	let id: string;
 	try {
@@ -141,25 +265,98 @@ async function handle(
 	} catch {
 		return json(res, 404, { error: "unknown_session" });
 	}
-	const session = findSession(deps.listInstances(), id);
-	if (!session) return json(res, 404, { error: "unknown_session" });
+	const found = findSession(deps.listInstances(), id);
+	if (!found) return json(res, 404, { error: "unknown_session" });
 	const action = match[2];
 
 	if (action === "messages") {
 		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
 		const requested = Number.parseInt(url.searchParams.get("limit") ?? "", 10) || MESSAGES_DEFAULT;
 		const limit = Math.min(Math.max(requested, 1), MESSAGES_MAX);
-		return json(res, 200, { messages: loadTranscript(session.sessionFile, limit) });
+		const before = url.searchParams.get("before") ?? undefined;
+		if (before !== undefined && !ENTRY_PATTERN.test(before)) return json(res, 400, { error: "invalid_entry" });
+		// One past the page tells whether older messages are left.
+		const page = loadTranscript(found.sessionFile, limit + 1, found.leafId, before);
+		return json(res, 200, { messages: page.slice(-limit), more: page.length > limit });
+	}
+	if (action === "status") {
+		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
+		const report = found.running ? deps.report(id) : undefined;
+		return report ? json(res, 200, { report }) : json(res, 404, { error: "no_status" });
+	}
+	if (action === "screen" || action === "keys") {
+		if (req.method !== (action === "screen" ? "GET" : "POST")) return json(res, 405, { error: "method_not_allowed" });
+		const input = action === "keys" ? keysIn(await readJson(req)) : undefined;
+		// The tmux session its pi registered from, never a name from the request; looked up again after a body.
+		const pane = (input ? findSession(deps.listInstances(), id) : found)?.pane;
+		if (!pane) return json(res, 404, { error: "unknown_session" });
+		let lines: string[] = [];
+		try {
+			if (!input) lines = deps.tmux.screen(pane, SCREEN_LINES);
+			else if ("keys" in input) deps.tmux.sendKeys(pane, input.keys);
+			else deps.tmux.sendText(pane, input.text);
+		} catch (error) {
+			// Its tmux session ended before its pi unregistered; any other failure is the Mac's.
+			if (!Tmux.gone(error)) throw error;
+			return json(res, 404, { error: "unknown_session" });
+		}
+		// A main-screen pane gives that much history above its screen; a tall screen may be longer still.
+		return json(res, 200, input ? { ok: true } : { lines: lines.slice(-SCREEN_LINES).map(stripAnsi) });
 	}
 
 	if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
 	const body = await readJson(req);
+	// Looked up again after the body: a concurrent reply may have resumed this row meanwhile, and
+	// from the resuming check to the start nothing awaits, so a stored row starts one pane only.
+	const session = findSession(deps.listInstances(), id);
+	if (!session) return json(res, 409, { error: "session_not_running" });
+	// A pane from an older bluclawd sends no report, and would ignore what only a newer one runs.
+	if (action !== "prompt" && action !== "abort" && session.running && !deps.report(id)) {
+		return json(res, 409, { error: "pane_too_old" });
+	}
 	let message: PaneMessage;
 	if (action === "prompt") {
-		const text = typeof body.text === "string" ? body.text : "";
-		if (!text.trim()) return json(res, 400, { error: "empty_prompt" });
-		if (text.length > PROMPT_MAX) return json(res, 413, { error: "prompt_too_large" });
+		const text = promptIn(body, "text");
+		// A stored row has no process: it resumes as agent view's peek reply resumes it.
+		if (!session.running && session.sessionFile) {
+			const launch = launchOf(deps);
+			if (!launch) return json(res, 503, { error: "no_launch" });
+			// Its row stays until the pane registers, so a pane that never does leaves it as it was.
+			if (deps.resuming(id)) return json(res, 409, { error: "session_busy" });
+			const pane = start(deps, { cwd: session.cwd, task: text, sessionFile: session.sessionFile, launch }, id);
+			return json(res, 202, { ok: true, pane });
+		}
 		message = { type: "prompt", text };
+	} else if (action === "model") {
+		const { provider, id: modelId } = body;
+		if (typeof provider !== "string" || typeof modelId !== "string" || !provider || !modelId) {
+			return json(res, 400, { error: "invalid_model" });
+		}
+		if (!session.running) return json(res, 409, { error: "session_not_running" });
+		// Only a model the pane offered: the phone picks from that list, nothing else reaches the pane.
+		const offered = deps.report(id)?.models.some((m) => m.provider === provider && m.id === modelId);
+		if (!offered) return json(res, 400, { error: "invalid_model" });
+		message = { type: "set_model", provider, id: modelId };
+	} else if (action === "compact") {
+		if (session.running && session.busy) return json(res, 409, { error: "session_busy" });
+		message = { type: "compact" };
+	} else if (action === "tree" || action === "fork") {
+		const { entryId } = body;
+		if (typeof entryId !== "string" || !ENTRY_PATTERN.test(entryId)) {
+			return json(res, 400, { error: "invalid_entry" });
+		}
+		if (!session.running) return json(res, 409, { error: "session_not_running" });
+		if (session.busy) return json(res, 409, { error: "session_busy" });
+		// What the phone shows: the active branch, from the leaf the pane reports. Forking "before"
+		// is editing a message of yours, the only entry pi forks before.
+		const target = loadTranscript(session.sessionFile, Number.MAX_SAFE_INTEGER, session.leafId).find(
+			(m) => m.id === entryId,
+		);
+		if (!target || (action === "fork" && target.kind !== "user")) return json(res, 400, { error: "invalid_entry" });
+		message = { type: action, entryId };
+	} else if (action === "clone") {
+		if (session.running && session.busy) return json(res, 409, { error: "session_busy" });
+		message = { type: "clone" };
 	} else {
 		message = { type: "abort" };
 	}
@@ -173,6 +370,8 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 		sessionsSignature: () =>
 			JSON.stringify(remoteSessions(deps.listInstances()).sort((a, b) => a.id.localeCompare(b.id))),
 		sessionFile: (id) => findSession(deps.listInstances(), id)?.sessionFile,
+		leafId: (id) => findSession(deps.listInstances(), id)?.leafId,
+		listed: () => new Set(deps.listInstances().map((i) => i.id)),
 	});
 	const server: Server = createServer((req, res) => {
 		handle(deps, events, req, res).catch((error: unknown) => {
@@ -191,6 +390,9 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 			const address = server.address();
 			resolve({
 				port: typeof address === "object" && address ? address.port : port,
+				watching: () => events.watching(),
+				live: (id, live) => events.live(id, live),
+				status: (id) => events.status(id),
 				close: () =>
 					new Promise<void>((done) => {
 						events.close();

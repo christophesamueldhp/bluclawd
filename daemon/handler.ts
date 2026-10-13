@@ -9,6 +9,8 @@ import type {
 	MetaRequest,
 	RegisterRequest,
 	RegisterResponse,
+	RemoteLiveRequest,
+	RemoteReportRequest,
 	RemoteRequest,
 	RemoteResponse,
 	RenameRequest,
@@ -22,6 +24,8 @@ import type {
 	StatusResponse,
 	UnregisterRequest,
 	UnregisterResponse,
+	WaitRequest,
+	WaitResponse,
 } from "./ipc/protocol.ts";
 import type { RemoteControl } from "./remote/control.ts";
 import { supervisor } from "./supervisor.ts";
@@ -46,8 +50,12 @@ function toInstanceSummary(instance: InstanceRecord, activity?: AgentActivity, e
 		activity,
 		external,
 		pane: instance.pane,
+		leafId: instance.leafId,
 	};
 }
+
+/** Below the pane's 30 s request timeout, so a wait is answered rather than given up on. */
+const WAIT_MS = 25_000;
 
 /** Installed by serve.ts: the process's own graceful shutdown. Unset outside `serve` (tests). */
 let shutdownHook: (() => void) | undefined;
@@ -84,11 +92,19 @@ function unknownInstanceError(instanceId: string): ErrorResponse {
 export async function handleIpcRequest(request: ListRequest): Promise<ListResponse | ErrorResponse>;
 export async function handleIpcRequest(request: StatusRequest): Promise<StatusResponse | ErrorResponse>;
 export async function handleIpcRequest(request: RegisterRequest): Promise<RegisterResponse | ErrorResponse>;
+export async function handleIpcRequest(request: WaitRequest): Promise<WaitResponse | ErrorResponse>;
 export async function handleIpcRequest(request: UnregisterRequest): Promise<UnregisterResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ShutdownRequest): Promise<ShutdownResponse | ErrorResponse>;
 export async function handleIpcRequest(request: RemoteRequest): Promise<RemoteResponse | ErrorResponse>;
 export async function handleIpcRequest(
-	request: DeleteRequest | RenameRequest | MetaRequest | SaveRequest | SendRequest,
+	request:
+		| DeleteRequest
+		| RenameRequest
+		| MetaRequest
+		| SaveRequest
+		| SendRequest
+		| RemoteLiveRequest
+		| RemoteReportRequest,
 ): Promise<AckResponse | ErrorResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse>;
 export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse> {
@@ -123,10 +139,18 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				pane: request.instance.pane,
 				detail: request.instance.detail,
 				turns: request.instance.turns,
+				leafId: request.instance.leafId,
 			};
+			if (request.instance.launch) remoteControl?.noteLaunch(request.instance.launch);
 			supervisor.registerExternal(record, request.instance.activity ?? "idle");
+			remoteControl?.registered(record.id);
 			const messages = supervisor.drainExternal(record.id);
-			return { type: "register_result", ok: true, ...(messages.length ? { messages } : {}) };
+			return {
+				type: "register_result",
+				ok: true,
+				...(messages.length ? { messages } : {}),
+				...(remoteControl?.watched(record.id) ? { watched: true } : {}),
+			};
 		}
 
 		case "send": {
@@ -135,8 +159,21 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				: unknownInstanceError(request.instanceId);
 		}
 
+		case "wait": {
+			const waiting = supervisor.waitExternal(request.instanceId, WAIT_MS);
+			if (!waiting) return unknownInstanceError(request.instanceId);
+			const outcome = await waiting;
+			return {
+				type: "wait_result",
+				ok: true,
+				...(outcome === "queued" ? { queued: true } : outcome === "superseded" ? { superseded: true } : {}),
+			};
+		}
+
 		case "unregister": {
 			supervisor.unregisterExternal(request.instanceId);
+			remoteControl?.live(request.instanceId, null);
+			remoteControl?.report(request.instanceId, undefined);
 			return { type: "unregister_result", ok: true };
 		}
 
@@ -176,6 +213,16 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 			if (!remoteControl)
 				return { type: "error", ok: false, error: "remote control is not available in this process" };
 			return remoteControl.handle(request);
+		}
+
+		case "remote_live": {
+			remoteControl?.live(request.instanceId, request.live);
+			return { type: "ack", ok: true };
+		}
+
+		case "remote_report": {
+			remoteControl?.report(request.instanceId, request.report);
+			return { type: "ack", ok: true };
 		}
 
 		case "shutdown": {

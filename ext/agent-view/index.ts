@@ -128,6 +128,38 @@ export function paneArgs(argv: string[], sessionFile: string | undefined): strin
 	return ["--session", sessionFile, ...out];
 }
 
+/**
+ * A pane nothing has been asked in yet is not a session, as a Claude Code session isn't one until
+ * it runs: no other window lists it, and it ends when the terminal leaves it. A fork is one from
+ * the start, even of the conversation before its first message, which pi writes no file for yet:
+ * its row carries on the one it was forked from.
+ */
+export function isBlankPane(
+	pane: string | undefined,
+	sessions: Pick<ExtensionContext["sessionManager"], "getEntries" | "getHeader">,
+): boolean {
+	return !!pane && !sessions.getHeader()?.parentSession && !sessions.getEntries().some((e) => e.type === "message");
+}
+
+/**
+ * What `session_shutdown` does with this pane's registration. A fork, reload, or resume of the
+ * same file goes on in this pane, whose next session registers under the same id: its row (pin,
+ * order, age) and the messages queued for it stay. Resuming another session starts that one's own
+ * row, as a new session does. pi awaits the handler, so the stop is awaited where a session follows,
+ * and no late heartbeat of this one lands after the next one's.
+ */
+export function shutdownPlan(
+	event: { reason: string; targetSessionFile?: string },
+	currentFile: string | undefined,
+): { await: boolean; unregister: boolean } {
+	if (event.reason === "quit") return { await: false, unregister: true };
+	const carriesOn =
+		event.reason === "fork" ||
+		event.reason === "reload" ||
+		(event.reason === "resume" && event.targetSessionFile === currentFile);
+	return { await: true, unregister: !carriesOn };
+}
+
 function isRealCwd(cwd: string): boolean {
 	return existsSync(cwd) && !TMP_ROOTS.some((root) => cwd === root || cwd.startsWith(`${root}/`));
 }
@@ -166,10 +198,7 @@ const agentView: InlineExtension = {
 		// What the turn in progress is doing, for this session's row in other windows.
 		let liveDetail: string | undefined;
 
-		// A pane nothing has been asked in yet is not a session, as a Claude Code session isn't one
-		// until it runs: no other window lists it, and it ends when the terminal leaves it.
-		const blank = (ctx: ExtensionContext): boolean =>
-			!!pane && !ctx.sessionManager.getEntries().some((e) => e.type === "message");
+		const blank = (ctx: ExtensionContext): boolean => isBlankPane(pane, ctx.sessionManager);
 		// A normal session, as Claude Code's: the pane `pi` started in this terminal, until ← opens
 		// agent view. Quitting ends it, and so does closing its terminal.
 		let normal = false;
@@ -202,6 +231,7 @@ const agentView: InlineExtension = {
 		const selfInfo = (ctx: ExtensionContext): SelfSessionInfo | undefined => {
 			if (blank(ctx)) return undefined;
 			const row = selfRow(ctx);
+			const leafId = ctx.sessionManager.getLeafId() ?? undefined;
 			return {
 				cwd: ctx.sessionManager.getCwd(),
 				sessionId: ctx.sessionManager.getSessionId(),
@@ -211,6 +241,8 @@ const agentView: InlineExtension = {
 				detail: row.detail,
 				turns: row.turns,
 				createdAt: row.createdAt,
+				// Only once it differs: a heartbeat lags the file, whose last entry is otherwise the leaf.
+				leafId: leafId !== ctx.sessionManager.getEntries().at(-1)?.id ? leafId : undefined,
 			};
 		};
 
@@ -295,7 +327,9 @@ const agentView: InlineExtension = {
 			if (message.type === "prompt") {
 				pi.sendUserMessage(message.text, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
 			} else if (message.type === "abort") ctx.abort();
-			else pi.setSessionName(message.name);
+			else if (message.type === "rename") pi.setSessionName(message.name);
+			// The rest are remote control's (ext/remote).
+			else pi.events.emit("bluclawd:pane-message", message);
 		};
 
 		/** The `← for agents` footer hint: `← N agents` while sessions wait on you, `← N done`
@@ -374,6 +408,7 @@ const agentView: InlineExtension = {
 				() => selfInfo(ctx),
 				(message) => onPaneMessage(ctx, message),
 				pane,
+				(watched) => pi.events.emit("bluclawd:remote-watched", watched),
 			);
 			registration.start();
 			if (process.env[NORMAL_ENV]) normal = true;
@@ -522,7 +557,9 @@ const agentView: InlineExtension = {
 		pi.on("ui_prompt_start", track);
 		pi.on("ui_prompt_end", track);
 		pi.on("session_shutdown", async (event, ctx) => {
-			registration?.stop();
+			const plan = shutdownPlan(event, ctx.sessionManager.getSessionFile());
+			const stopping = registration?.stop({ unregister: plan.unregister });
+			if (plan.await) await stopping;
 			registration = undefined;
 			stopPill?.();
 			stopPill = undefined;

@@ -31,6 +31,7 @@ export function recordExtensions(): Record<string, ExtensionRecord> {
 					r.shortcuts++;
 				},
 				on: (event: string) => r.events.push(event),
+				events: { on: () => noop, emit: noop },
 				registerEntryRenderer: noop,
 				registerMessageRenderer: noop,
 				registerMarkdownTransformer: noop,

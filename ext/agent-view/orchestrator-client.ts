@@ -27,6 +27,7 @@ export interface InstanceSummary {
 	sortOrder?: number;
 	/** The tmux session its interactive pi runs in. */
 	pane?: string;
+	leafId?: string;
 }
 
 export interface RegisterInput {
@@ -40,10 +41,41 @@ export interface RegisterInput {
 	detail?: string;
 	turns?: number;
 	createdAt?: string;
+	leafId?: string;
+	launch?: PaneLaunch;
+}
+
+/** Mirror of daemon/ipc/protocol.ts PaneLaunch. */
+export interface PaneLaunch {
+	command: string[];
 }
 
 /** Mirror of daemon/ipc/protocol.ts PaneMessage. */
-export type PaneMessage = { type: "prompt"; text: string } | { type: "abort" } | { type: "rename"; name: string };
+export type PaneMessage =
+	| { type: "prompt"; text: string }
+	| { type: "abort" }
+	| { type: "rename"; name: string }
+	| { type: "compact" }
+	| { type: "set_model"; provider: string; id: string }
+	| { type: "tree"; entryId: string }
+	| { type: "fork"; entryId: string }
+	| { type: "clone" };
+
+/** Mirror of daemon/ipc/protocol.ts LiveSnapshot. */
+export interface LiveSnapshot {
+	text: string;
+	thinking?: string;
+	tools: Array<{ id: string; name: string; summary: string; running: boolean }>;
+}
+
+/** Mirror of daemon/ipc/protocol.ts PaneReport. */
+export interface PaneReport {
+	model?: { provider: string; id: string; name?: string };
+	models: Array<{ provider: string; id: string; name?: string }>;
+	thinkingLevel?: string;
+	context?: { tokens: number | null; contextWindow: number; percent: number | null };
+	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
+}
 
 /** Mirror of daemon/ipc/protocol.ts RemoteDeviceInfo. */
 export interface RemoteDeviceInfo {
@@ -73,13 +105,16 @@ type Request =
 	| { type: "list" }
 	| { type: "register"; instance: RegisterInput }
 	| { type: "unregister"; instanceId: string }
+	| { type: "wait"; instanceId: string }
 	| { type: "send"; instanceId: string; message: PaneMessage }
 	| { type: "shutdown" }
 	| { type: "delete"; instanceId: string }
 	| { type: "rename"; instanceId: string; name: string }
 	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
 	| { type: "save"; cwd: string; label?: string; sessionFile: string }
-	| ({ type: "remote" } & RemoteAction);
+	| ({ type: "remote" } & RemoteAction)
+	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null }
+	| { type: "remote_report"; instanceId: string; report: PaneReport };
 
 interface AnyResponse {
 	type: string;
@@ -90,6 +125,9 @@ interface AnyResponse {
 	version?: string;
 	buildId?: string;
 	messages?: PaneMessage[];
+	watched?: boolean;
+	queued?: boolean;
+	superseded?: boolean;
 }
 
 /** Path to the daemon's CLI entry, for the ensureDaemon() auto-start. */
@@ -152,15 +190,21 @@ export class OrchestratorClient {
 		this.socketPath = socketPath;
 	}
 
-	private request(req: Request, timeoutMs = 2000): Promise<AnyResponse> {
+	private request(req: Request, timeoutMs = 2000, signal?: AbortSignal): Promise<AnyResponse> {
 		return new Promise<AnyResponse>((resolve, reject) => {
+			if (signal?.aborted) {
+				reject(new Error("orchestrator request aborted"));
+				return;
+			}
 			const socket = createConnection(this.socketPath);
 			let buffer = "";
 			let settled = false;
+			const abort = () => done(() => reject(new Error("orchestrator request aborted")));
 			const done = (fn: () => void): void => {
 				if (settled) return;
 				settled = true;
 				clearTimeout(timer);
+				signal?.removeEventListener("abort", abort);
 				socket.removeAllListeners();
 				// A reset after we are done is harmless; with no listener it would throw.
 				socket.on("error", () => {});
@@ -168,6 +212,12 @@ export class OrchestratorClient {
 				fn();
 			};
 			const timer = setTimeout(() => done(() => reject(new Error("orchestrator request timed out"))), timeoutMs);
+			// Only a wait has a signal: held open for long, it must not keep pi alive, and stop() ends it.
+			if (signal) {
+				socket.unref();
+				timer.unref();
+				signal.addEventListener("abort", abort, { once: true });
+			}
 			socket.on("connect", () => socket.write(`${JSON.stringify(req)}\n`));
 			socket.on("data", (chunk: Buffer) => {
 				buffer += chunk.toString();
@@ -232,9 +282,19 @@ export class OrchestratorClient {
 	}
 
 	/** Register/heartbeat a pane's pi. */
-	async register(instance: RegisterInput): Promise<{ messages: PaneMessage[] }> {
+	async register(instance: RegisterInput): Promise<{ messages: PaneMessage[]; watched: boolean }> {
 		const res = await this.request({ type: "register", instance }, 1000);
-		return { messages: res.messages ?? [] };
+		return { messages: res.messages ?? [], watched: res.watched === true };
+	}
+
+	/**
+	 * Held open until a message is queued for this pane (true) or the daemon's 25 s pass with none
+	 * (false); undefined when a newer wait for the same id replaced it, or from a daemon that
+	 * predates the request, which answers it with no type.
+	 */
+	async wait(instanceId: string, signal: AbortSignal): Promise<boolean | undefined> {
+		const res = await this.request({ type: "wait", instanceId }, 30_000, signal);
+		return res.type === "wait_result" && !res.superseded ? res.queued === true : undefined;
 	}
 
 	/** Queue a message for a pane's pi; it acts on it within a heartbeat. */
@@ -248,6 +308,16 @@ export class OrchestratorClient {
 		const res = await this.request({ type: "remote", ...action }, 5000);
 		if (res.type !== "remote_result") throw new Error("The agent daemon is out of date — restart pi to update it");
 		return res as unknown as RemoteResult;
+	}
+
+	/** The reply this pane is streaming, for the phones watching it; null once it is finished. */
+	async remoteLive(instanceId: string, live: LiveSnapshot | null): Promise<void> {
+		await this.request({ type: "remote_live", instanceId, live }, 1000);
+	}
+
+	/** This pane's model, context and usage, for the phone's status sheet. */
+	async remoteReport(instanceId: string, report: PaneReport): Promise<void> {
+		await this.request({ type: "remote_report", instanceId, report }, 1000);
 	}
 
 	async unregister(instanceId: string): Promise<void> {

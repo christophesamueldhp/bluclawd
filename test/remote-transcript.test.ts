@@ -88,6 +88,16 @@ describe("remote transcript", () => {
 		expect(transcriptFrom(text, 50).map((m) => m.id)).toEqual(["u1", "u3"]);
 	});
 
+	it("follows the leaf the pane reports, and the last entry when the file lacks it", () => {
+		const text = jsonl(
+			msg("u1", null, { role: "user", content: "first" }),
+			msg("u2", "u1", { role: "user", content: "gone back from" }),
+			msg("u3", "u2", { role: "user", content: "more" }),
+		);
+		expect(transcriptFrom(text, 50, "u1").map((m) => m.id)).toEqual(["u1"]);
+		expect(transcriptFrom(text, 50, "zz").map((m) => m.id)).toEqual(["u1", "u2", "u3"]);
+	});
+
 	it("skips lines that do not parse, such as a half-written last line", () => {
 		const text = `${jsonl(msg("u1", null, { role: "user", content: "hi" }))}\n{"type":"mess`;
 		expect(parseEntries(text)).toHaveLength(1);
@@ -125,6 +135,22 @@ describe("remote transcript", () => {
 		expect(toolSummary({ path: "a.ts", offset: 3 })).toBe("a.ts");
 		expect(toolSummary({ command: "echo 1\necho 2" })).toBe("echo 1");
 		expect(toolSummary({})).toBe("");
+	});
+
+	it("pages back from a message: the last ones before it, none before one not on the branch", () => {
+		const text = jsonl(
+			msg("u1", null, { role: "user", content: "1" }),
+			msg("u2", "u1", { role: "user", content: "2" }),
+			msg("u3", "u2", { role: "user", content: "3" }),
+			msg("u4", "u3", { role: "user", content: "4" }),
+			msg("x9", "u1", { role: "user", content: "another branch" }),
+			msg("u5", "u4", { role: "user", content: "5" }),
+		);
+		expect(transcriptFrom(text, 2, undefined, "u4").map((m) => m.id)).toEqual(["u2", "u3"]);
+		expect(transcriptFrom(text, 50, undefined, "u4").map((m) => m.id)).toEqual(["u1", "u2", "u3"]);
+		expect(transcriptFrom(text, 50, undefined, "u1")).toEqual([]);
+		expect(transcriptFrom(text, 50, undefined, "x9")).toEqual([]);
+		expect(transcriptFrom(text, 50, "u3", "u3").map((m) => m.id)).toEqual(["u1", "u2"]);
 	});
 
 	it("an empty file has no branch", () => {

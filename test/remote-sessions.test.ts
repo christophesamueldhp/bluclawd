@@ -30,7 +30,7 @@ describe("remote sessions", () => {
 			["b", "working"],
 			["a", "idle"],
 		]);
-		expect(sessions[1]).toMatchObject({ detail: "npm test", alive: true, state: "working" });
+		expect(sessions[1]).toMatchObject({ detail: "npm test", alive: true, resumable: false, state: "working" });
 		expect(sessions[2].label).toBe("idle one");
 	});
 
@@ -50,17 +50,32 @@ describe("remote sessions", () => {
 			sessionFile: "/s/x.jsonl",
 			outcome: "done",
 		};
-		expect(remoteSessions([stored])[0]).toMatchObject({ id: "old", alive: false, band: "idle" });
+		expect(remoteSessions([stored])[0]).toMatchObject({ id: "old", alive: false, resumable: true, band: "idle" });
+		const { sessionFile: _, ...fileless } = stored;
+		expect(remoteSessions([fileless])[0]).toMatchObject({ id: "old", alive: false, resumable: false });
 		expect(remoteSessions([stored, live("new", "idle", { sessionFile: "/s/x.jsonl" })]).map((s) => s.id)).toEqual([
 			"new",
 		]);
 	});
 
-	it("finds a session's file and whether a pane runs it", () => {
+	it("finds a session's file, whether a pane runs it and whether it is mid-turn", () => {
 		const stored: InstanceSummary = { id: "old", status: "stopped", cwd: "/p", sessionFile: "/s/old.jsonl" };
-		const list = [stored, live("b", "idle")];
-		expect(findSession(list, "b")).toEqual({ sessionFile: "/s/b.jsonl", running: true });
-		expect(findSession(list, "old")).toEqual({ sessionFile: "/s/old.jsonl", running: false });
+		const list = [stored, live("b", "idle", { leafId: "e3" }), live("c", "working"), live("d", "awaiting_input")];
+		expect(findSession(list, "b")).toEqual({
+			sessionFile: "/s/b.jsonl",
+			cwd: "/p",
+			running: true,
+			busy: false,
+			leafId: "e3",
+		});
+		expect(findSession(list, "c")).toMatchObject({ running: true, busy: true });
+		expect(findSession(list, "d")).toMatchObject({ running: true, busy: true });
+		expect(findSession(list, "old")).toEqual({
+			sessionFile: "/s/old.jsonl",
+			cwd: "/p",
+			running: false,
+			busy: false,
+		});
 		expect(findSession(list, "zzz")).toBeUndefined();
 	});
 });

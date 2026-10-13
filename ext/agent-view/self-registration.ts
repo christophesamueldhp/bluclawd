@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AgentActivity, OrchestratorClient, PaneMessage, RegisterInput } from "./orchestrator-client.ts";
+import { piCommand } from "./tmux.ts";
 
 export interface SelfSessionInfo {
 	cwd: string;
@@ -11,6 +12,7 @@ export interface SelfSessionInfo {
 	detail?: string;
 	turns?: number;
 	createdAt?: string;
+	leafId?: string;
 }
 
 /** The subset of a session entry needed to derive a title — structural, so pi's SessionEntry fits. */
@@ -102,23 +104,34 @@ export class SelfRegistration {
 	private readonly client: OrchestratorClient;
 	private readonly getInfo: () => SelfSessionInfo | undefined;
 	private readonly onMessage: (message: PaneMessage) => void;
+	private readonly onWatched: (watched: boolean) => void;
 	private activity: AgentActivity = "idle";
 	private timer: ReturnType<typeof setInterval> | undefined;
-	private inflight: Promise<void> | undefined;
+	private readonly inflight = new Set<Promise<void>>();
 	private stopped = false;
+	/** The wait in flight, ended by stop(). */
+	private waiting: AbortController | undefined;
+	/** The last register delivered a tree, fork, clone or compact: what follows it is for where the
+	 *  pane moves to, so it waits for the next heartbeat, as the daemon's drain intends. Likewise after a
+	 *  prompt: pi still reports the pane idle until its turn starts, so a move right behind it would
+	 *  cut that turn short; the turn's agent_start heartbeat takes what follows. */
+	private moved = false;
 
 	/** `onMessage`: another window's agent view asks this session something.
 	 *  `id`: a pane registers under its tmux session's name, so its row outlives a session switch.
-	 *  `getInfo` returns undefined while there is no session to list yet. */
+	 *  `getInfo` returns undefined while there is no session to list yet.
+	 *  `onWatched`: after each heartbeat, whether a phone has this session open. */
 	constructor(
 		client: OrchestratorClient,
 		getInfo: () => SelfSessionInfo | undefined,
 		onMessage: (message: PaneMessage) => void = () => {},
 		id: string = randomUUID(),
+		onWatched: (watched: boolean) => void = () => {},
 	) {
 		this.client = client;
 		this.getInfo = getInfo;
 		this.onMessage = onMessage;
+		this.onWatched = onWatched;
 		this.id = id;
 	}
 
@@ -143,7 +156,9 @@ export class SelfRegistration {
 	private heartbeat(): Promise<void> {
 		if (this.stopped) return Promise.resolve();
 		const beat = this.beat();
-		this.inflight = beat;
+		this.inflight.add(beat);
+		const done = () => this.inflight.delete(beat);
+		beat.then(done, done);
 		return beat;
 	}
 
@@ -161,23 +176,78 @@ export class SelfRegistration {
 			detail: info.detail,
 			turns: info.turns,
 			createdAt: info.createdAt,
+			leafId: info.leafId,
+			launch: { command: piCommand() },
 		};
+		let watched = false;
 		try {
 			const res = await this.client.register(instance);
-			for (const message of res?.messages ?? []) this.onMessage(message);
+			watched = res?.watched === true;
+			const messages = res?.messages ?? [];
+			this.moved = messages.some(
+				(m) =>
+					m.type === "tree" ||
+					m.type === "fork" ||
+					m.type === "clone" ||
+					m.type === "compact" ||
+					m.type === "prompt",
+			);
+			if (!this.moved) this.wait();
+			for (const message of messages) {
+				// Stopped meanwhile: the session they were for is gone, so they wait for whatever
+				// registers as this id next (the pane's next session), or go with the row. They go behind
+				// anything queued since: the phone holds Send and its moves until the session has moved, so
+				// little is, and navigate() skips a tree or fork to an entry the next session lacks.
+				if (this.stopped) await this.client.send(this.id, message);
+				else this.onMessage(message);
+			}
 		} catch {
 			// daemon may be down; the next tick retries (register is an upsert).
 		}
+		// Stopped meanwhile: pi may have invalidated the extension API the callback uses.
+		if (this.stopped) return;
+		try {
+			this.onWatched(watched);
+		} catch {
+			// a heartbeat must not reject: stop() awaits it and the timer fires it unawaited
+		}
 	}
 
-	async stop(): Promise<void> {
+	/**
+	 * One wait at a time, from the first register that succeeds: a message queued for this pane
+	 * wakes it, and the register that follows drains it at once, the same way a heartbeat does. A
+	 * wait that fails, that a newer wait for this id replaced (another live pane under the same id),
+	 * or that a daemon from before `wait` answers, waits again after the next register that
+	 * succeeds: heartbeats deliver meanwhile, and a restarted daemon is waited on.
+	 */
+	private wait(): void {
+		if (this.waiting || this.stopped || !this.timer) return;
+		const waiting = new AbortController();
+		this.waiting = waiting;
+		const done = () => {
+			if (this.waiting === waiting) this.waiting = undefined;
+		};
+		this.client.wait(this.id, waiting.signal).then((queued) => {
+			done();
+			if (queued === undefined || this.moved) return;
+			if (queued) void this.heartbeat();
+			else this.wait();
+		}, done);
+	}
+
+	/** `unregister: false`: the pane's next session carries on its row, under the same id. */
+	async stop(options: { unregister?: boolean } = {}): Promise<void> {
 		this.stopped = true;
 		if (this.timer) {
 			clearInterval(this.timer);
 			this.timer = undefined;
 		}
-		// A register still on its way would list the session again after the unregister.
-		await this.inflight;
+		// A wait carries no messages, so ending it loses none.
+		this.waiting?.abort();
+		// A register still on its way would list the session again after the unregister, or land
+		// after the next session's first one. A failed heartbeat must not skip the unregister.
+		await Promise.allSettled([...this.inflight]);
+		if (options.unregister === false) return;
 		try {
 			await this.client.unregister(this.id);
 		} catch {

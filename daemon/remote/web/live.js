@@ -1,0 +1,25 @@
+// @ts-check
+/** @typedef {import("./app.js").LiveSnapshot} LiveSnapshot @typedef {import("./app.js").Message} Message */
+
+/**
+ * What is left of the reply in progress once a transcript fetch lands. A tool goes once the
+ * transcript has its result. The text and thinking go only once the reply `ended` (its pane sent
+ * null) and the transcript's last assistant message starts with them: pi writes the message after
+ * it tells the phone the reply ended, so a fetch can land before the message is there, and a
+ * fetch mid-reply never has it.
+ * @param {LiveSnapshot | undefined} live @param {boolean} ended @param {Message[]} messages
+ * @returns {LiveSnapshot | undefined}
+ */
+export function settle(live, ended, messages) {
+	if (!live) return undefined;
+	const done = new Set(messages.map((m) => (m.kind === "toolResult" ? m.toolCallId : undefined)));
+	const tools = live.tools.filter((t) => !done.has(t.id));
+	const last = [...messages].reverse().find((m) => m.kind === "assistant");
+	const written =
+		ended &&
+		last !== undefined &&
+		(last.text ?? "").startsWith(live.text) &&
+		(last.thinking ?? "").startsWith(live.thinking ?? "");
+	const rest = written ? { text: "", tools } : { ...live, tools };
+	return rest.text || rest.thinking || rest.tools.length ? rest : undefined;
+}

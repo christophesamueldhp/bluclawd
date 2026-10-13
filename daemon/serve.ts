@@ -28,6 +28,7 @@ export async function serve(): Promise<void> {
 	const remote = new RemoteControl({
 		listInstances: listSummaries,
 		send: (id, message) => supervisor.sendExternal(id, message),
+		deleteInstance: (id) => supervisor.deleteInstance(id),
 	});
 	setRemoteControl(remote);
 	await remote.apply();
@@ -40,6 +41,7 @@ export async function serve(): Promise<void> {
 		}
 
 		shutdownPromise = (async () => {
+			supervisor.settleWaits();
 			server.close();
 			// Before the slow stop, so a replacement daemon's new socket is never the one deleted.
 			if (existsSync(socketPath)) {

@@ -18,6 +18,8 @@ export interface RemoteSession {
 	state: RowState;
 	/** A pane's pi runs it; a stored row has no process. */
 	alive: boolean;
+	/** A stored row with a session file: a reply starts a pane that resumes it. */
+	resumable: boolean;
 	detail: string;
 	createdAt?: string;
 	finishedAt?: string;
@@ -39,6 +41,7 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 				band: band.key as RemoteBand,
 				state: row.state,
 				alive: row.alive,
+				resumable: !row.alive && Boolean(row.sessionFile),
 				detail: row.detail,
 				createdAt: row.createdAt,
 				finishedAt: row.finishedAt,
@@ -48,12 +51,21 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 	return sessions;
 }
 
-/** `running`: a pane's pi is registered as this id, so a queued message reaches it. */
+/** `running`: a pane's pi is registered as this id, so a queued message reaches it. `busy`: mid-turn,
+ *  working or waiting on an answer. `pane`: the tmux session that pi registered from, if any. */
 export function findSession(
 	instances: InstanceSummary[],
 	id: string,
-): { sessionFile?: string; running: boolean } | undefined {
+): { sessionFile?: string; cwd: string; running: boolean; busy: boolean; leafId?: string; pane?: string } | undefined {
 	const row = sessionRows(instances).find((r) => r.id === id);
 	if (!row) return undefined;
-	return { sessionFile: row.sessionFile, running: instances.some((i) => i.id === id && i.external === true) };
+	const pane = instances.find((i) => i.id === id && i.external === true);
+	return {
+		sessionFile: row.sessionFile,
+		cwd: row.cwd,
+		running: pane !== undefined,
+		busy: row.state === "working" || row.state === "needs",
+		...(pane?.leafId ? { leafId: pane.leafId } : {}),
+		...(pane?.pane ? { pane: pane.pane } : {}),
+	};
 }

@@ -1,13 +1,28 @@
 /**
  * `/remote-control`: control every agent-view session from a phone, as Claude Code's Remote
  * Control does. The daemon serves the phone (daemon/remote/); this command is its switch, shows
- * how to pair, and manages paired devices.
+ * how to pair, and manages paired devices. In a pane, it also streams the reply in progress to
+ * the phones watching the session (live.ts), reports its model and usage, and runs the phone's
+ * model switch, compaction, tree navigation, fork and clone (report.ts).
  */
-import type { ExtensionAPI, ExtensionCommandContext, InlineExtension } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+	InlineExtension,
+} from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { remotePort } from "../_shared/settings.ts";
-import { currentDaemonBuildId, OrchestratorClient, type RemoteResult } from "../agent-view/orchestrator-client.ts";
+import {
+	currentDaemonBuildId,
+	OrchestratorClient,
+	type PaneMessage,
+	type RemoteResult,
+} from "../agent-view/orchestrator-client.ts";
+import { Tmux } from "../agent-view/tmux.ts";
+import { LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
+import { applyPaneMessage, buildReport, navigate } from "./report.ts";
 import { serve, tailscaleInfo } from "./tailscale.ts";
 
 function message(error: unknown): string {
@@ -114,10 +129,54 @@ async function devices(client: OrchestratorClient, ctx: ExtensionCommandContext)
 	ctx.ui.notify(`Revoked ${device.name}`, "info");
 }
 
+function liveForwarder(pane: string): LiveForwarder {
+	const client = new OrchestratorClient();
+	return new LiveForwarder(latestOnly((snapshot) => client.remoteLive(pane, snapshot)));
+}
+
 function factory(pi: ExtensionAPI): void {
+	// Only a pane registers (agent view), so only a pane can be watched.
+	const pane = Tmux.currentPane();
+	const live = pane ? liveForwarder(pane) : undefined;
+	const client = new OrchestratorClient();
+	let reports = Promise.resolve();
+	/** The session's context, for the bus, whose events carry none. */
+	let session: ExtensionContext | undefined;
+	let watched = false;
+	const report = (ctx: ExtensionContext): void => {
+		// As agent view registers: a `pi -p` run inside the pane must not report as the pane.
+		if (!pane || ctx.mode !== "tui") return;
+		session = ctx;
+		const next = buildReport(ctx, pi);
+		reports = reports.then(() => client.remoteReport(pane, next)).catch(() => {});
+	};
+	pi.on("session_start", (_event, ctx) => report(ctx));
+	pi.on("model_select", (_event, ctx) => report(ctx));
+	pi.on("thinking_level_select", (_event, ctx) => report(ctx));
+	pi.on("turn_end", (_event, ctx) => report(ctx));
+	pi.on("session_compact", (_event, ctx) => report(ctx));
+	pi.events.on("bluclawd:pane-message", (message) => {
+		const ctx = session;
+		if (ctx) applyPaneMessage(message as PaneMessage, ctx, pi, () => report(ctx));
+	});
+	pi.events.on("bluclawd:remote-watched", (data) => {
+		const opened = data === true && !watched;
+		watched = data === true;
+		live?.setWatched(watched);
+		// A restarted daemon has no report until the next turn: a phone opening the session sends it again.
+		if (opened && session) report(session);
+	});
+	pi.on("message_update", (event) => live?.onMessageUpdate(event.message));
+	pi.on("tool_execution_start", (event) => live?.onToolStart(event.toolCallId, event.toolName, event.args));
+	pi.on("tool_execution_end", (event) => live?.onToolEnd(event.toolCallId));
+	pi.on("message_end", () => live?.onMessageEnd());
+	pi.on("agent_end", () => live?.onAgentEnd());
+
 	pi.registerCommand("remote-control", {
 		description: "Control sessions from your phone: on/off, pair, devices",
 		handler: async (args, ctx) => {
+			// The phone's tree, fork and clone (report.ts), not offered to the user.
+			if (await navigate(args, ctx)) return;
 			const sub = args.trim();
 			if (sub && sub !== "pair" && sub !== "devices") {
 				ctx.ui.notify("Usage: /remote-control [pair | devices]", "warning");

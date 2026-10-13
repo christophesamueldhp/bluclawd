@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_PORT, RemoteStore } from "../daemon/remote/pairing.ts";
+import { validP256dh } from "./support/push.ts";
 
 describe("remote pairing", () => {
 	let dir: string;
@@ -82,5 +83,65 @@ describe("remote pairing", () => {
 		expect(store.authenticate("anything", 1)).toBeUndefined();
 		writeFileSync(path, "{nope");
 		expect(store.load()).toEqual({ enabled: false, port: DEFAULT_PORT, devices: [] });
+	});
+
+	it("keeps a corrupt remote.json from a heartbeat's launch, and writes one where there is none", () => {
+		const launch = { command: ["node", "pi.js"] };
+		writeFileSync(path, "{nope");
+		expect(() => store.setLaunch(launch)).toThrow();
+		expect(readFileSync(path, "utf8")).toBe("{nope");
+		store.setEnabled(false);
+		store.setLaunch(launch);
+		expect(store.load().launch).toEqual(launch);
+		rmSync(path);
+		store.setLaunch(launch);
+		expect(store.load().launch).toEqual(launch);
+	});
+
+	const subscription = (endpoint = "https://web.push.apple.com/abc") => ({
+		endpoint,
+		keys: {
+			p256dh: validP256dh(),
+			auth: "AAAAAAAAAAAAAAAAAAAAAA",
+		},
+	});
+
+	it("makes the VAPID keys once and keeps them", () => {
+		const keys = store.vapidKeys();
+		expect(Buffer.from(keys.publicKey, "base64url")).toHaveLength(65);
+		expect(new RemoteStore(path).vapidKeys()).toEqual(keys);
+		expect(statSync(path).mode & 0o777).toBe(0o600);
+	});
+
+	it("does not replace an unreadable remote.json to make VAPID keys", () => {
+		writeFileSync(path, "{nope");
+		expect(() => store.vapidKeys()).toThrow();
+		expect(readFileSync(path, "utf8")).toBe("{nope");
+	});
+
+	it("keeps one push subscription per device, dropped with the device", () => {
+		pairDevice("iPhone");
+		pairDevice("iPad");
+		const [phone, pad] = store.load().devices;
+		expect(store.setPush(phone.id, subscription("https://web.push.apple.com/1"))).toBe(true);
+		expect(store.setPush(phone.id, subscription("https://web.push.apple.com/2"))).toBe(true);
+		expect(store.setPush(pad.id, subscription("https://web.push.apple.com/3"))).toBe(true);
+		expect(store.setPush("nope", subscription())).toBe(false);
+		expect(store.load().devices.map((d) => d.push?.endpoint)).toEqual([
+			"https://web.push.apple.com/2",
+			"https://web.push.apple.com/3",
+		]);
+		store.setPush(pad.id, undefined);
+		expect(store.load().devices[1]).not.toHaveProperty("push");
+		store.revoke(phone.id);
+		expect(store.load().devices.some((d) => d.push)).toBe(false);
+	});
+
+	it("drops a malformed push subscription from remote.json", () => {
+		pairDevice();
+		const raw = JSON.parse(readFileSync(path, "utf8"));
+		raw.devices[0].push = { endpoint: "http://insecure.test", keys: { p256dh: "x", auth: "y" } };
+		writeFileSync(path, JSON.stringify(raw));
+		expect(store.load().devices[0]).not.toHaveProperty("push");
 	});
 });

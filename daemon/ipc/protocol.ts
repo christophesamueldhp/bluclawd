@@ -24,17 +24,39 @@ export interface RegisterRequest {
 		detail?: string;
 		turns?: number;
 		createdAt?: string;
+		/** The entry pi appends to next, when it is not the file's last entry (after a /tree). */
+		leafId?: string;
+		/** How to start another pi like this one, so the daemon can start panes. */
+		launch?: PaneLaunch;
 	};
 }
 
+export interface PaneLaunch {
+	command: string[];
+}
+
 /** What another window asks a pane's pi to do; delivered with its next heartbeat. */
-export type PaneMessage = { type: "prompt"; text: string } | { type: "abort" } | { type: "rename"; name: string };
+export type PaneMessage =
+	| { type: "prompt"; text: string }
+	| { type: "abort" }
+	| { type: "rename"; name: string }
+	| { type: "compact" }
+	| { type: "set_model"; provider: string; id: string }
+	| { type: "tree"; entryId: string }
+	| { type: "fork"; entryId: string }
+	| { type: "clone" };
 
 /** Queue a message for a self-registered session. */
 export interface SendRequest {
 	type: "send";
 	instanceId: string;
 	message: PaneMessage;
+}
+
+/** Held open until a message is queued for the pane, or 25 s pass with none. */
+export interface WaitRequest {
+	type: "wait";
+	instanceId: string;
 }
 
 export interface UnregisterRequest {
@@ -75,6 +97,37 @@ export interface SaveRequest {
 	sessionFile: string;
 }
 
+/** The reply a pane is streaming, while a phone has its session open. */
+export interface LiveSnapshot {
+	text: string;
+	thinking?: string;
+	tools: Array<{ id: string; name: string; summary: string; running: boolean }>;
+}
+
+/** A pane's latest LiveSnapshot, or null once the reply is finished (or no phone watches it). */
+export interface RemoteLiveRequest {
+	type: "remote_live";
+	instanceId: string;
+	live: LiveSnapshot | null;
+}
+
+/** What the phone's status sheet shows of a pane. */
+export interface PaneReport {
+	model?: { provider: string; id: string; name?: string };
+	/** The models it can switch to. */
+	models: Array<{ provider: string; id: string; name?: string }>;
+	thinkingLevel?: string;
+	context?: { tokens: number | null; contextWindow: number; percent: number | null };
+	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
+}
+
+/** A pane's latest PaneReport, sent when it changes (session start, model, thinking level, turn end). */
+export interface RemoteReportRequest {
+	type: "remote_report";
+	instanceId: string;
+	report: PaneReport;
+}
+
 /** Remote control from a phone (daemon/remote/): its switch, pairing codes and paired devices. */
 export interface RemoteRequest {
 	type: "remote";
@@ -91,12 +144,15 @@ interface RequestMap {
 	register: RegisterRequest;
 	unregister: UnregisterRequest;
 	send: SendRequest;
+	wait: WaitRequest;
 	shutdown: ShutdownRequest;
 	delete: DeleteRequest;
 	rename: RenameRequest;
 	meta: MetaRequest;
 	save: SaveRequest;
 	remote: RemoteRequest;
+	remote_live: RemoteLiveRequest;
+	remote_report: RemoteReportRequest;
 }
 
 export type ServerRequest = RequestMap[keyof RequestMap];
@@ -120,6 +176,7 @@ export interface InstanceSummary {
 	pinned?: boolean;
 	sortOrder?: number;
 	pane?: string;
+	leafId?: string;
 }
 
 interface ResponseBase {
@@ -152,6 +209,17 @@ export interface RegisterResponse extends ResponseBase {
 	type: "register_result";
 	/** Messages queued for it with `send`. */
 	messages?: PaneMessage[];
+	/** A phone has this session open on its event stream. */
+	watched?: boolean;
+}
+
+/** `queued`: a message waits for the pane, which registers to drain it (the wait carries none).
+ *  `superseded`: a newer wait for the same id replaced this one; the pane waits again only after
+ *  its next heartbeat. */
+export interface WaitResponse extends ResponseBase {
+	type: "wait_result";
+	queued?: boolean;
+	superseded?: boolean;
 }
 
 export interface UnregisterResponse extends ResponseBase {
@@ -162,7 +230,7 @@ export interface ShutdownResponse extends ResponseBase {
 	type: "shutdown_result";
 }
 
-/** Reply to send / delete / rename / meta / save. */
+/** Reply to send / delete / rename / meta / save / remote_live / remote_report. */
 export interface AckResponse extends ResponseBase {
 	type: "ack";
 	instance?: InstanceSummary;
@@ -200,6 +268,7 @@ interface ResponseMap {
 	status: StatusResponse;
 	register: RegisterResponse;
 	send: AckResponse;
+	wait: WaitResponse;
 	unregister: UnregisterResponse;
 	shutdown: ShutdownResponse;
 	delete: AckResponse;
@@ -207,6 +276,8 @@ interface ResponseMap {
 	meta: AckResponse;
 	save: AckResponse;
 	remote: RemoteResponse;
+	remote_live: AckResponse;
+	remote_report: AckResponse;
 }
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;

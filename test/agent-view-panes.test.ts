@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ServerSupervisor } from "../daemon/supervisor.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
-import { paneArgs } from "../ext/agent-view/index.ts";
+import { isBlankPane, paneArgs, shutdownPlan } from "../ext/agent-view/index.ts";
 import type { InstanceSummary, OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
 import { collectRows } from "../ext/agent-view/rows.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
@@ -252,6 +252,19 @@ describe("agent view in pane mode", () => {
 		expect(registered).toMatchObject([{ cwd: HERE, pane: "pi-self" }]);
 	});
 
+	it("a fork is a session before its first message, so its row stays listed", () => {
+		const sessions = (entries: Array<{ type: string }>, parentSession?: string) => ({
+			getEntries: () => entries,
+			getHeader: () => ({ type: "session" as const, id: "s", timestamp: "", cwd: HERE, parentSession }),
+		});
+		// pi starts a session with these, before anything is asked.
+		const setup = [{ type: "model_change" }, { type: "thinking_level_change" }];
+		expect(isBlankPane("pi-self", sessions(setup) as never)).toBe(true);
+		expect(isBlankPane("pi-self", sessions(setup, "/s/old.jsonl") as never)).toBe(false);
+		expect(isBlankPane("pi-self", sessions([...setup, { type: "message" }]) as never)).toBe(false);
+		expect(isBlankPane(undefined, sessions(setup) as never)).toBe(false);
+	});
+
 	it("esc returns to this terminal's session, or quits once there is none, as in Claude Code", () => {
 		const own = setup([], paneRow("pi-self", { activity: "idle" }));
 		own.view.handleInput("\x1b");
@@ -318,6 +331,21 @@ describe("tmux", () => {
 		vi.unstubAllEnvs();
 	});
 
+	it("keeps a pane whose new-session timed out after tmux had made it, and fails one tmux never made", () => {
+		const runs: string[][] = [];
+		let made = true;
+		const tmux = new Tmux("/srv", (args) => {
+			runs.push(args);
+			if (args[0] === "new-session") throw new Error("ETIMEDOUT");
+			if (args[0] === "has-session" && !made) throw new Error("can't find session");
+			return "";
+		});
+		const name = tmux.newSession({ cwd: HERE, args: [] });
+		expect(runs.at(-1)).toEqual(["has-session", "-t", `=${name}`]);
+		made = false;
+		expect(() => tmux.newSession({ cwd: HERE, args: [] })).toThrow("ETIMEDOUT");
+	});
+
 	it("targets sessions by exact name", () => {
 		const runs: string[][] = [];
 		const tmux = new Tmux("/srv", (args) => {
@@ -361,6 +389,55 @@ describe("tmux", () => {
 		]);
 	});
 
+	it("sends keys by name, and text literally, to a pane by exact name", () => {
+		const runs: string[][] = [];
+		const tmux = new Tmux("/srv", (args) => {
+			runs.push(args);
+			return "";
+		});
+		tmux.sendKeys("pi-a", ["Down", "Enter"]);
+		tmux.sendText("pi-a", "-n yes");
+		tmux.sendText("pi-a", "a; b;");
+		expect(runs).toEqual([
+			["send-keys", "-t", "=pi-a:", "Down", "Enter"],
+			["send-keys", "-t", "=pi-a:", "-l", "--", "-n yes"],
+			["send-keys", "-t", "=pi-a:", "-l", "--", "a; b\\;"],
+		]);
+	});
+
+	it("shows a fullscreen pane's screen alone, and a main-screen pane's with its history", () => {
+		const runs: string[][] = [];
+		let alternate = "1";
+		const tmux = new Tmux("/srv", (args) => {
+			runs.push(args);
+			return args[0] === "display-message" ? `${alternate}\n` : "› Allow  \nDeny\n\n\n";
+		});
+		expect(tmux.screen("pi-a", 60)).toEqual(["› Allow", "Deny"]);
+		alternate = "0";
+		tmux.screen("pi-a", 60);
+		expect(runs).toEqual([
+			["display-message", "-p", "-t", "=pi-a:", "#{alternate_on}"],
+			["capture-pane", "-p", "-t", "=pi-a:"],
+			["display-message", "-p", "-t", "=pi-a:", "#{alternate_on}"],
+			["capture-pane", "-p", "-t", "=pi-a:", "-S", "-60"],
+		]);
+	});
+
+	it("tells a session or server that is not there from any other failure", () => {
+		const failed = (stderr: string) => Object.assign(new Error(`Command failed: tmux\n${stderr}`), { stderr });
+		expect(Tmux.gone(failed("can't find session: pi-a\n"))).toBe(true);
+		expect(Tmux.gone(failed("can't find pane: %3\n"))).toBe(true);
+		expect(Tmux.gone(failed("no server running on /srv/tmux.sock\n"))).toBe(true);
+		expect(Tmux.gone(failed("error connecting to /srv/tmux.sock (No such file or directory)\n"))).toBe(true);
+		expect(Tmux.gone(failed("server exited unexpectedly\n"))).toBe(false);
+		expect(Tmux.gone(failed("error connecting to /srv/tmux.sock (Permission denied)\n"))).toBe(false);
+		// What the command sent is no evidence: only tmux's own complaint is.
+		expect(Tmux.gone(new Error("Command failed: tmux send-keys -l -- can't find session"))).toBe(false);
+		expect(Tmux.gone(Object.assign(new Error("spawnSync tmux ETIMEDOUT"), { code: "ETIMEDOUT", stderr: "" }))).toBe(
+			false,
+		);
+	});
+
 	it("never ends a session it cannot SIGKILL the pi of: a hung-up pi would carry it on", () => {
 		const runs: string[][] = [];
 		const tmux = new Tmux("/srv", (args) => {
@@ -391,6 +468,20 @@ describe("paneArgs", () => {
 	});
 });
 
+describe("shutdownPlan", () => {
+	it("keeps the row for the pane's next session only when it carries on this one", () => {
+		const keep = { await: true, unregister: false };
+		const drop = { await: true, unregister: true };
+		expect(shutdownPlan({ reason: "fork", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(keep);
+		expect(shutdownPlan({ reason: "reload" }, "/s/a.jsonl")).toEqual(keep);
+		expect(shutdownPlan({ reason: "resume", targetSessionFile: "/s/a.jsonl" }, "/s/a.jsonl")).toEqual(keep);
+		expect(shutdownPlan({ reason: "resume" }, undefined)).toEqual(keep);
+		expect(shutdownPlan({ reason: "resume", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(drop);
+		expect(shutdownPlan({ reason: "new", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(drop);
+		expect(shutdownPlan({ reason: "quit" }, "/s/a.jsonl")).toEqual({ await: false, unregister: true });
+	});
+});
+
 describe("daemon: pane registrations", () => {
 	const rec = (id: string, createdAt: string) => ({ id, status: "online" as const, cwd: HERE, createdAt, pane: id });
 
@@ -407,5 +498,25 @@ describe("daemon: pane registrations", () => {
 		expect(await supervisor.deleteInstance("pi-a")).toBe(true);
 		expect(supervisor.listExternalInstances(2000)).toEqual([]);
 		expect(supervisor.sendExternal("pi-a", { type: "abort" })).toBe(false);
+	});
+
+	it("delivers a navigation or a compact alone, keeping what comes before and after it for other heartbeats", () => {
+		const supervisor = new ServerSupervisor();
+		supervisor.registerExternal(rec("pi-a", "2026-01-01T00:00:00Z"), "idle");
+		supervisor.sendExternal("pi-a", { type: "rename", name: "x" });
+		supervisor.sendExternal("pi-a", { type: "fork", entryId: "1a2b3c4d" });
+		supervisor.sendExternal("pi-a", { type: "prompt", text: "edited" });
+		supervisor.sendExternal("pi-a", { type: "clone" });
+		supervisor.sendExternal("pi-a", { type: "tree", entryId: "1a2b3c4d" });
+		supervisor.sendExternal("pi-a", { type: "compact" });
+		supervisor.sendExternal("pi-a", { type: "prompt", text: "after" });
+		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "rename", name: "x" }]);
+		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "fork", entryId: "1a2b3c4d" }]);
+		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "prompt", text: "edited" }]);
+		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "clone" }]);
+		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "tree", entryId: "1a2b3c4d" }]);
+		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "compact" }]);
+		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "prompt", text: "after" }]);
+		expect(supervisor.drainExternal("pi-a")).toEqual([]);
 	});
 });

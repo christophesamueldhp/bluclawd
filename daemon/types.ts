@@ -23,4 +23,6 @@ export interface InstanceRecord {
 	sortOrder?: number;
 	/** The tmux session an interactive pi runs this session in (agent view's pane mode). */
 	pane?: string;
+	/** A pane's leaf, when it is not its file's last entry; never stored. */
+	leafId?: string;
 }
