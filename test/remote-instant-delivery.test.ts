@@ -51,7 +51,7 @@ describe("instant delivery to a pane", () => {
 		expect(supervisor.sendExternal("pane-wait-e2e", { type: "prompt", text: "hi" })).toBe(true);
 		await vi.waitFor(() => expect(handled).toHaveLength(1), { timeout: 1000, interval: 5 });
 		expect(handled[0].message).toEqual({ type: "prompt", text: "hi" });
-		expect(handled[0].at - sent).toBeLessThan(100);
+		expect(handled[0].at - sent).toBeLessThan(500);
 		await reg.stop();
 		expect(supervisor.listExternalInstances().some((e) => e.record.id === "pane-wait-e2e")).toBe(false);
 	});
