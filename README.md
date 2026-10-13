@@ -155,10 +155,19 @@ the Home Screen and enter the code. The phone keeps a token; the daemon keeps on
 `~/.pi/server/remote.json`. Turning remote control off leaves `tailscale serve` in place;
 `tailscale serve --https=443 off` removes it.
 
-What the phone cannot do yet: new or resumed sessions, token-by-token streaming (a reply shows
-when its message is complete, and a prompt reaches its session within the 3 s heartbeat),
-answering a session's open dialog, push notifications, `/compact`, model switching, and
-tree / fork. The daemon must be running (any `pi` starts it) and the Mac awake.
+The phone lists every agent-view session in its bands, with what it is doing. A session's chat
+shows its conversation (older messages load at the top), streams the reply in progress, sends a
+prompt, which reaches the session at once, and Stop ends its turn. A reply to a stopped session
+resumes it, and Start begins a new one in a recent directory. Tapping the title shows the model
+(and switches it), context and usage, and compacts or clones the session; a message's ⋯ edits it
+here or in a new session, or goes back to a reply. When a session waits on a dialog, Answer shows
+its screen and sends it keys. Enable notifications to hear when a session finishes or needs you:
+on iOS only in the app opened from the Home Screen, iOS 16.4 or later.
+
+What the phone cannot do: send images, show an app icon of its own, reach more than one Mac, or
+work without the daemon running (any `pi` starts it; nothing starts it at login) and the Mac
+awake. A new bluclawd reaches the phone once the daemon restarts, which agent view and
+`/remote-control` do when they find its code changed.
 
 ## What this layer cannot do
 
