@@ -265,7 +265,7 @@ describe("/remote-control", () => {
 		for (const args of ["nope", "tree", "fork a b", "clone x"]) {
 			const notify = vi.fn();
 			await handler(args, { ui: { notify } });
-			expect(notify.mock.calls).toEqual([["Usage: /remote-control [pair | devices]", "warning"]]);
+			expect(notify.mock.calls).toEqual([["Usage: /remote-control [pair | devices | autostart]", "warning"]]);
 		}
 	});
 

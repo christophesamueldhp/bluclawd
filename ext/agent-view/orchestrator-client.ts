@@ -187,6 +187,15 @@ export function currentDaemonBuildId(): string {
 	return daemonBuildId(dirname(cliPath), piPackageRoot() ?? process.env.PI_PACKAGE_ROOT);
 }
 
+/** How pi starts the daemon, on top of its own environment; the login item runs the same
+ *  (ext/remote/autostart.ts). */
+export function daemonCommand(): { command: string[]; env: Record<string, string> } {
+	const cli = daemonCliPath();
+	const hook = join(dirname(cli), "pi-resolve-hook.mjs");
+	const root = piPackageRoot();
+	return { command: [process.execPath, "--import", hook, cli, "serve"], env: root ? { PI_PACKAGE_ROOT: root } : {} };
+}
+
 export class OrchestratorClient {
 	private readonly socketPath: string;
 
@@ -368,13 +377,11 @@ export class OrchestratorClient {
 	async ensureDaemon(): Promise<boolean> {
 		if (await this.isRunning()) return true;
 		try {
-			const cli = daemonCliPath();
-			const hook = join(dirname(cli), "pi-resolve-hook.mjs");
-			const root = piPackageRoot();
-			spawn(process.execPath, ["--import", hook, cli, "serve"], {
+			const { command, env } = daemonCommand();
+			spawn(command[0], command.slice(1), {
 				detached: true,
 				stdio: "ignore",
-				env: root ? { ...process.env, PI_PACKAGE_ROOT: root } : process.env,
+				env: { ...process.env, ...env },
 			}).unref();
 		} catch {
 			return false;

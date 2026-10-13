@@ -1,9 +1,10 @@
 /**
  * `/remote-control`: control every agent-view session from a phone, as Claude Code's Remote
  * Control does. The daemon serves the phone (daemon/remote/); this command is its switch, shows
- * how to pair, and manages paired devices. In a pane, it also streams the reply in progress to
- * the phones watching the session (live.ts), reports its model and usage, and runs the phone's
- * model switch, compaction, tree navigation, fork and clone (report.ts).
+ * how to pair, manages paired devices, and starts the daemon at login (autostart.ts). In a pane,
+ * it also streams the reply in progress to the phones watching the session (live.ts), reports its
+ * model and usage, and runs the phone's model switch, compaction, tree navigation, fork and clone
+ * (report.ts).
  */
 import type {
 	ExtensionAPI,
@@ -20,6 +21,7 @@ import {
 	type RemoteResult,
 } from "../agent-view/orchestrator-client.ts";
 import { piCommand, Tmux } from "../agent-view/tmux.ts";
+import { autostartDeps, autostartOn, autostartStatus, toggleAutostart } from "./autostart.ts";
 import { LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
 import { applyPaneMessage, buildReport, navigate } from "./report.ts";
@@ -55,7 +57,10 @@ async function show(result: RemoteResult, ctx: ExtensionCommandContext): Promise
 		return;
 	}
 	if (!result.code || !result.expiresAt) return;
-	const pairing = (url: string) => pairingText(url, result.code ?? "", result.expiresAt ?? 0);
+	const pairing = (url: string) =>
+		[pairingText(url, result.code ?? "", result.expiresAt ?? 0), autostartStatus(autostartDeps())]
+			.filter(Boolean)
+			.join("\n");
 	const tailscale = await tailscaleInfo(result.port);
 	if (!tailscale.installed) {
 		const code = `${result.code.slice(0, 3)} ${result.code.slice(3)}`;
@@ -177,13 +182,24 @@ function factory(pi: ExtensionAPI): void {
 	pi.on("agent_end", () => live?.onAgentEnd());
 
 	pi.registerCommand("remote-control", {
-		description: "Control sessions from your phone: on/off, pair, devices",
+		description: "Control sessions from your phone: on/off, pair, devices, autostart",
 		handler: async (args, ctx) => {
 			// The phone's tree, fork and clone (report.ts), not offered to the user.
 			if (await navigate(args, ctx)) return;
 			const sub = args.trim();
-			if (sub && sub !== "pair" && sub !== "devices") {
-				ctx.ui.notify("Usage: /remote-control [pair | devices]", "warning");
+			if (sub && sub !== "pair" && sub !== "devices" && sub !== "autostart") {
+				ctx.ui.notify("Usage: /remote-control [pair | devices | autostart]", "warning");
+				return;
+			}
+			if (sub === "autostart") {
+				const deps = autostartDeps();
+				try {
+					ctx.ui.notify(toggleAutostart(deps), "info");
+				} catch (error) {
+					ctx.ui.notify(`Starting at login: ${message(error)}`, "error");
+				}
+				// Unloading ends a daemon launchd started; loading has launchd start one.
+				if (deps.platform === "darwin" && !autostartOn(deps)) await new OrchestratorClient().ensureDaemon();
 				return;
 			}
 			const started = await daemon();

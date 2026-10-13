@@ -53,7 +53,7 @@ export function piCommand(): string[] {
  * Where this pi keeps its state, which a pane must share. The server's environment (that of the
  * pi that started it) covers the rest; nothing secret goes on tmux's command line.
  */
-function piEnv(): Record<string, string> {
+export function piEnv(): Record<string, string> {
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(process.env)) {
 		if (value !== undefined && /^PI_\w*(DIR|ROOT)$/.test(key)) env[key] = value;
