@@ -475,7 +475,7 @@ function logHtml(session) {
 	const parts = [];
 	/** @param {Message} m */
 	const more = (m) =>
-		`<button class="more" data-id="${esc(m.id)}" aria-label="Actions for “${esc(snippet(m.text))}”" aria-haspopup="dialog">⋯</button>`;
+		`<button class="more" data-id="${esc(m.id)}" aria-label="${snippet(m.text) ? `Actions for “${esc(snippet(m.text))}”` : "Actions for this message"}" aria-haspopup="dialog">⋯</button>`;
 	const last = state.messages.at(-1);
 	for (const m of state.messages) {
 		if (m.kind === "user") {

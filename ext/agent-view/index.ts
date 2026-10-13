@@ -543,7 +543,8 @@ const agentView: InlineExtension = {
 			// of this one lands after the next one's. A new session is blank until asked something.
 			if (event.reason === "fork" || event.reason === "resume" || event.reason === "reload") {
 				await registration?.stop({ unregister: false });
-			} else registration?.stop();
+			} else if (event.reason === "new") await registration?.stop();
+			else registration?.stop();
 			registration = undefined;
 			stopPill?.();
 			stopPill = undefined;

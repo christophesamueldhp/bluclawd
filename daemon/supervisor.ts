@@ -59,14 +59,15 @@ export class ServerSupervisor {
 		return true;
 	}
 
-	/** The messages queued for a self-registered session, now delivered: up to the first tree, fork
-	 *  or clone, since what follows it is for the branch or session the pane moves to, which the
-	 *  next heartbeat comes from. */
+	/** The messages queued for a self-registered session, now delivered. A tree, fork or clone goes
+	 *  alone: what follows it is for the branch or session the pane moves to, which the next
+	 *  heartbeat comes from, and a prompt just before it would still find the pane idle, so the
+	 *  move would cut its turn short. */
 	drainExternal(id: string): PaneMessage[] {
 		const entry = this.externalInstances.get(id);
 		if (!entry || entry.inbox.length === 0) return [];
 		const moves = entry.inbox.findIndex((m) => m.type === "tree" || m.type === "fork" || m.type === "clone");
-		return entry.inbox.splice(0, moves === -1 ? entry.inbox.length : moves + 1);
+		return entry.inbox.splice(0, moves === -1 ? entry.inbox.length : Math.max(moves, 1));
 	}
 
 	/** External instances, reaping any whose last heartbeat is older than the TTL. */
