@@ -36,7 +36,7 @@ const NAVIGATE_GIVE_UP_MS = 15_000;
  *  one pi does not show verbatim (a command, a template) is never matched in the transcript. */
 const PENDING_GRACE_MS = 15_000;
 const SCREEN_POLL_MS = 2000;
-/** The daemon takes at most 4 images, 5 MB each, with a prompt. */
+/** The daemon takes at most 4 images, 2 MB each, with a prompt. */
 const ATTACH_MAX = 4;
 /** A photo is scaled to this on its long side and sent as a JPEG. */
 const IMAGE_SIDE_MAX = 1600;

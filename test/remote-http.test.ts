@@ -243,7 +243,7 @@ describe("remote HTTP API", () => {
 			return [res.status, ((await res.json()) as { error?: string }).error];
 		};
 
-		it("queues a running session's prompt with up to four images of each type, as large as 5 MB each", async () => {
+		it("queues a running session's prompt with up to four images of each type, as large as 2 MB each", async () => {
 			const images = Object.keys(magic).map((type) => image(type));
 			expect(await prompt("live", { text: "look", images })).toEqual([202, undefined]);
 			// Four at the limit: past the plain body limit.
@@ -255,7 +255,7 @@ describe("remote HTTP API", () => {
 			]);
 		});
 
-		it("refuses an image that is not base64 of what its type says, too many, or one over 5 MB", async () => {
+		it("refuses an image that is not base64 of what its type says, too many, or one over 2 MB", async () => {
 			const png = image("image/png");
 			expect(await prompt("live", { text: "x", images: [{ ...png, mimeType: "image/jpeg" }] })).toEqual([
 				400,
@@ -278,7 +278,7 @@ describe("remote HTTP API", () => {
 				400,
 				"invalid_image",
 			]);
-			expect(await prompt("live", { text: "x", images: [image("image/png", IMAGE_MAX + 1)] })).toEqual([
+			expect(await prompt("live", { text: "x", images: [image("image/png", 2 * 1024 * 1024 + 1)] })).toEqual([
 				413,
 				"image_too_large",
 			]);

@@ -52,8 +52,8 @@ export interface RemoteServer {
 export const BODY_MAX = 64 * 1024;
 export const PROMPT_MAX = 32 * 1024;
 export const IMAGES_MAX = 4;
-/** Decoded. */
-export const IMAGE_MAX = 5 * 1024 * 1024;
+/** Decoded; the phone app sends at most about 1.4 MB. */
+export const IMAGE_MAX = 2 * 1024 * 1024;
 const IMAGE_BASE64_MAX = Math.ceil(IMAGE_MAX / 3) * 4;
 /** A prompt's body: its text and its images, base64. */
 export const PROMPT_BODY_MAX = BODY_MAX + IMAGES_MAX * IMAGE_BASE64_MAX;
