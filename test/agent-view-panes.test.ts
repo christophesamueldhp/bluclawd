@@ -374,6 +374,22 @@ describe("tmux", () => {
 		]);
 	});
 
+	it("sends keys by name, and text literally, to a pane by exact name", () => {
+		const runs: string[][] = [];
+		const tmux = new Tmux("/srv", (args) => {
+			runs.push(args);
+			return "";
+		});
+		tmux.sendKeys("pi-a", ["Down", "Enter"]);
+		tmux.sendText("pi-a", "-n yes");
+		tmux.sendText("pi-a", "a; b;");
+		expect(runs).toEqual([
+			["send-keys", "-t", "=pi-a:", "Down", "Enter"],
+			["send-keys", "-t", "=pi-a:", "-l", "--", "-n yes"],
+			["send-keys", "-t", "=pi-a:", "-l", "--", "a; b\\;"],
+		]);
+	});
+
 	it("never ends a session it cannot SIGKILL the pi of: a hung-up pi would carry it on", () => {
 		const runs: string[][] = [];
 		const tmux = new Tmux("/srv", (args) => {

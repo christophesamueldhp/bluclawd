@@ -8,6 +8,8 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
+import { stripAnsi } from "../../ext/_shared/ansi.ts";
+import type { Tmux } from "../../ext/agent-view/tmux.ts";
 import type { InstanceSummary, LiveSnapshot, PaneLaunch, PaneMessage, PaneReport } from "../ipc/protocol.ts";
 import { RemoteEvents } from "./events.ts";
 import type { RemoteStore } from "./pairing.ts";
@@ -28,6 +30,8 @@ export interface RemoteDeps {
 	startSession(spec: SessionSpec): string;
 	/** A running pane's latest report. */
 	report(sessionId: string): PaneReport | undefined;
+	/** Agent view's tmux server: what a pane shows, and keys typed into it. */
+	tmux: Pick<Tmux, "capture" | "sendKeys" | "sendText">;
 	webDir: string;
 }
 
@@ -51,6 +55,11 @@ const MESSAGES_MAX = 200;
 const MODEL_PATTERN = /^\w[\w.-]*\/[\w.:/@+-]+$/;
 /** pi's entry ids (8 hex digits, or a whole UUID): one word on the pane's `/remote-control` line. */
 const ENTRY_PATTERN = /^[0-9a-f-]{8,36}$/;
+const SCREEN_LINES = 60;
+/** What a dialog needs, and nothing that would interrupt or quit pi (no C-c, no C-d). */
+const KEYS = new Set(["Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "Space", "BSpace"]);
+const KEYS_MAX = 16;
+const TEXT_MAX = 1024;
 
 const CONTENT_TYPES: Record<string, string> = {
 	".html": "text/html; charset=utf-8",
@@ -117,6 +126,18 @@ function promptIn(body: Record<string, unknown>, key: string): string {
 	if (!text.trim()) throw new HttpError(400, "empty_prompt");
 	if (text.length > PROMPT_MAX) throw new HttpError(413, "prompt_too_large");
 	return text;
+}
+
+/** Keys from the allowlist, or printable text: a control character in it would be a keystroke past the allowlist. */
+function keysIn(body: Record<string, unknown>): { keys: string[] } | { text: string } {
+	const { keys, text } = body;
+	if (text === undefined && Array.isArray(keys) && keys.length > 0 && keys.length <= KEYS_MAX) {
+		if (keys.every((key) => typeof key === "string" && KEYS.has(key))) return { keys };
+	}
+	if (keys === undefined && typeof text === "string" && text.length > 0 && text.length <= TEXT_MAX) {
+		if (!/[\u0000-\u001f\u007f-\u009f]/.test(text)) return { text };
+	}
+	throw new HttpError(400, "invalid_keys");
 }
 
 function start(deps: RemoteDeps, spec: SessionSpec): string {
@@ -222,7 +243,8 @@ async function handle(
 		return json(res, 200, { ok: true });
 	}
 
-	const match = /^\/api\/sessions\/([^/]+)\/(messages|status|prompt|abort|model|compact|tree|fork|clone)$/.exec(path);
+	const match =
+		/^\/api\/sessions\/([^/]+)\/(messages|status|screen|keys|prompt|abort|model|compact|tree|fork|clone)$/.exec(path);
 	if (!match) return json(res, 404, { error: "not_found" });
 	let id: string;
 	try {
@@ -244,6 +266,24 @@ async function handle(
 		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
 		const report = found.running ? deps.report(id) : undefined;
 		return report ? json(res, 200, { report }) : json(res, 404, { error: "no_status" });
+	}
+	if (action === "screen" || action === "keys") {
+		if (req.method !== (action === "screen" ? "GET" : "POST")) return json(res, 405, { error: "method_not_allowed" });
+		const input = action === "keys" ? keysIn(await readJson(req)) : undefined;
+		// The tmux session its pi registered from, never a name from the request.
+		const pane = findSession(deps.listInstances(), id)?.pane;
+		if (!pane) return json(res, 404, { error: "unknown_session" });
+		let lines: string[] = [];
+		try {
+			if (!input) lines = deps.tmux.capture(pane, SCREEN_LINES);
+			else if ("keys" in input) deps.tmux.sendKeys(pane, input.keys);
+			else deps.tmux.sendText(pane, input.text);
+		} catch {
+			// Its tmux session ended before its pi unregistered.
+			return json(res, 404, { error: "unknown_session" });
+		}
+		// capture-pane gives that much history and the visible screen too.
+		return json(res, 200, input ? { ok: true } : { lines: lines.slice(-SCREEN_LINES).map(stripAnsi) });
 	}
 
 	if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });

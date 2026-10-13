@@ -24,6 +24,8 @@ describe("remote HTTP API", () => {
 	let deleted: string[];
 	let startFails: boolean;
 	let reports: Map<string, PaneReport>;
+	let screens: Map<string, string[]>;
+	let typed: Array<{ pane: string; keys?: string[]; text?: string }>;
 
 	beforeEach(async () => {
 		dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-http-"));
@@ -40,6 +42,7 @@ describe("remote HTTP API", () => {
 				external: true,
 				activity: "working",
 				sessionFile: join(dir, "live.jsonl"),
+				pane: "pi-live",
 			},
 			{ id: "stored", status: "stopped", cwd: "/p", sessionFile: join(dir, "stored.jsonl") },
 		];
@@ -49,6 +52,8 @@ describe("remote HTTP API", () => {
 		deleted = [];
 		startFails = false;
 		reports = new Map();
+		screens = new Map();
+		typed = [];
 		store = new RemoteStore(join(dir, "remote.json"));
 		server = await startRemoteServer(
 			{
@@ -71,6 +76,21 @@ describe("remote HTTP API", () => {
 					return true;
 				},
 				report: (id) => reports.get(id),
+				tmux: {
+					capture: (pane, lines) => {
+						const screen = screens.get(pane);
+						if (!screen) throw new Error("can't find session");
+						return screen.slice(-lines);
+					},
+					sendKeys: (pane, keys) => {
+						if (!screens.has(pane)) throw new Error("can't find session");
+						typed.push({ pane, keys });
+					},
+					sendText: (pane, text) => {
+						if (!screens.has(pane)) throw new Error("can't find session");
+						typed.push({ pane, text });
+					},
+				},
 			},
 			0,
 		);
@@ -315,6 +335,95 @@ describe("remote HTTP API", () => {
 			await refused("tree", { entryId: "dddd0004" });
 			await refused("fork", { entryId: "cccc0003" });
 			expect(sent).toEqual([]);
+		});
+	});
+
+	describe("screen and keys", () => {
+		const keys = (token: string, id: string, body: unknown) =>
+			fetch(`${base}/api/sessions/${id}/keys`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify(body),
+			});
+
+		beforeEach(() => {
+			instances = [
+				{ ...instances[0], activity: "awaiting_input" },
+				instances[1],
+				// A pi outside agent view's tmux: running, with no pane to read or type into.
+				{ id: "plain", status: "online", cwd: "/p", external: true, activity: "awaiting_input" },
+			];
+		});
+
+		it("gives the last 60 lines of a running session's pane, without colours", async () => {
+			const lines = Array.from({ length: 70 }, (_, i) => `line ${i}`);
+			screens.set("pi-live", [...lines.slice(0, -1), "\u001b[36m› Allow\u001b[0m"]);
+			const token = await pair();
+			const res = await fetch(`${base}/api/sessions/live/screen`, { headers: auth(token) });
+			expect(res.status).toBe(200);
+			const { lines: screen } = (await res.json()) as { lines: string[] };
+			expect(screen).toHaveLength(60);
+			expect(screen[0]).toBe("line 10");
+			expect(screen.at(-1)).toBe("› Allow");
+			expect(
+				(await fetch(`${base}/api/sessions/live/screen`, { method: "POST", headers: authJson(token) })).status,
+			).toBe(405);
+		});
+
+		it("presses allowed keys and types text into the session's own pane", async () => {
+			screens.set("pi-live", []);
+			const token = await pair();
+			const pressed = await keys(token, "live", { keys: ["Down", "Down", "Enter"] });
+			expect(pressed.status).toBe(200);
+			expect(await pressed.json()).toEqual({ ok: true });
+			expect((await keys(token, "live", { text: "-rf; echo hi" })).status).toBe(200);
+			expect(typed).toEqual([
+				{ pane: "pi-live", keys: ["Down", "Down", "Enter"] },
+				{ pane: "pi-live", text: "-rf; echo hi" },
+			]);
+			expect((await fetch(`${base}/api/sessions/live/keys`, { headers: auth(token) })).status).toBe(405);
+		});
+
+		it("refuses keys outside the allowlist, control characters, and anything but one of keys or text", async () => {
+			screens.set("pi-live", []);
+			const token = await pair();
+			for (const body of [
+				{},
+				{ keys: [] },
+				{ keys: "Enter" },
+				{ keys: ["C-c"] },
+				{ keys: ["Enter", 1] },
+				{ keys: Array(17).fill("Up") },
+				{ text: "" },
+				{ text: 5 },
+				{ text: "x".repeat(1025) },
+				{ text: "yes\n" },
+				{ text: "a\tb" },
+				{ text: "\u001b[A" },
+				{ keys: ["Enter"], text: "y" },
+			]) {
+				const res = await keys(token, "live", body);
+				expect(res.status, JSON.stringify(body)).toBe(400);
+				expect(await res.json()).toEqual({ error: "invalid_keys" });
+			}
+			expect((await keys(token, "live", { text: "x".repeat(1024) })).status).toBe(200);
+			expect((await keys(token, "live", { keys: Array(16).fill("Up") })).status).toBe(200);
+			expect(typed).toHaveLength(2);
+		});
+
+		it("answers 404 for a stored session, one without a pane, and a pane that is gone", async () => {
+			screens.set("stored", ["not a pane"]);
+			screens.set("plain", ["not a pane"]);
+			const token = await pair();
+			for (const id of ["stored", "plain", "nope", "live"]) {
+				const screen = await fetch(`${base}/api/sessions/${id}/screen`, { headers: auth(token) });
+				expect(screen.status, id).toBe(404);
+				expect(await screen.json()).toEqual({ error: "unknown_session" });
+				const res = await keys(token, id, { keys: ["Enter"] });
+				expect(res.status, id).toBe(404);
+				expect(await res.json()).toEqual({ error: "unknown_session" });
+			}
+			expect(typed).toEqual([]);
 		});
 	});
 

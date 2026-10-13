@@ -213,6 +213,16 @@ export class Tmux {
 		return out.map((line) => line.trimEnd());
 	}
 
+	/** Press keys in a session's pane, by tmux key name (`Up`, `Enter`, …). */
+	sendKeys(name: string, keys: string[]): void {
+		this.run(["send-keys", "-t", `=${name}:`, ...keys]);
+	}
+
+	/** Type `text` into a session's pane as it is, never read as key names. */
+	sendText(name: string, text: string): void {
+		this.run(["send-keys", "-t", `=${name}:`, "-l", "--", literalArg(text)]);
+	}
+
 	/** Attach this terminal to `name`; returns when the client detaches or the server ends. */
 	attach(name: string): void {
 		this.run(["attach-session", "-t", `=${name}`], { inherit: true, outsideTmux: true });

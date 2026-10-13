@@ -134,6 +134,7 @@ export class RemoteControl {
 					launch: () => this.launch(),
 					startSession: (spec) => startSession({ ...spec, tmux: this.tmux }),
 					report: (id) => this.reports.get(id)?.report,
+					tmux: this.tmux,
 					webDir: this.deps.webDir ?? WEB_DIR,
 				},
 				state.port,
