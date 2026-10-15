@@ -109,6 +109,21 @@ export function exitAction(
 	return state.sincePrevious < EXIT_PRESS_MS ? "quit" : "first";
 }
 
+/**
+ * How another window's prompt reaches this pi: queued behind a turn in progress, and a slash
+ * command run as if typed here (an extension command, a skill, a prompt template). Not with
+ * images: pi runs an extension command with its text alone, and the images would be lost.
+ */
+export function promptOptions(
+	message: { text: string; images?: unknown[] },
+	idle: boolean,
+): { deliverAs?: "followUp"; expandPromptTemplates?: true } {
+	return {
+		...(idle ? {} : { deliverAs: "followUp" as const }),
+		...(!message.images?.length && message.text.startsWith("/") ? { expandPromptTemplates: true as const } : {}),
+	};
+}
+
 /** pi's ways to pick a session; a pane is given the one its launcher already picked. */
 const SESSION_FLAGS: ReadonlySet<string> = new Set(["-c", "--continue", "-r", "--resume"]);
 const SESSION_VALUE_FLAGS: ReadonlySet<string> = new Set(["--session", "--session-id", "--fork"]);
@@ -343,7 +358,7 @@ const agentView: InlineExtension = {
 							...message.images.map((image) => ({ type: "image" as const, ...image })),
 						]
 					: message.text;
-				pi.sendUserMessage(content, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+				pi.sendUserMessage(content, promptOptions(message, ctx.isIdle()));
 			} else if (message.type === "abort") ctx.abort();
 			else if (message.type === "rename") pi.setSessionName(message.name);
 			// The rest are remote control's (ext/remote).
