@@ -142,6 +142,19 @@ describe("/remote-control", () => {
 		expect(ui.notify.mock.calls[0]![0]).toContain(pairing("105377"));
 	});
 
+	it("says why it cannot pair while on but not listening, as with its port in use", async () => {
+		enabled = true;
+		vi.mocked(OrchestratorClient.prototype.remote).mockImplementation(async (action) => {
+			actions.push(action);
+			if (action.action === "pair") throw new Error("The agent daemon is out of date — restart pi to update it");
+			return { enabled, port: 7878, listening: false, listenError: "listen EADDRINUSE", devices };
+		});
+		const { ui, done } = run("", { select: [PAIR] });
+		await done;
+		expect(actions.map((a) => a.action)).toEqual(["status"]);
+		expect(ui.notify.mock.calls[0]).toEqual([expect.stringContaining("could not listen"), "error"]);
+	});
+
 	it("lists the paired phones, from which one is revoked", async () => {
 		enabled = true;
 		const { ui, done } = run("", { select: ["Paired phones (2)…", undefined] });

@@ -174,7 +174,8 @@ async function menu(client: OrchestratorClient, status: RemoteResult, ctx: Exten
 	const items = [PAIR, phones, ...(startAtLogin ? [startAtLogin] : []), OFF];
 	const picked = await ctx.ui.select("Remote control is on", items);
 	if (picked === undefined) return;
-	if (picked === PAIR) await show(await client.remote({ action: "pair" }), ctx);
+	// Not listening, the daemon gives no code: show() says why instead.
+	if (picked === PAIR) await show(status.listening ? await client.remote({ action: "pair" }) : status, ctx);
 	else if (picked === phones) await devices(client, ctx);
 	else if (picked === OFF) await turnOff(client, status.port, ctx);
 	else if (picked === startAtLogin) await toggleStartAtLogin(ctx);
