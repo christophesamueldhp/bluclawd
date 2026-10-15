@@ -2,8 +2,8 @@
  * The phone's session list: agent view's own rows and bands (daemon/rows.ts, pure), so
  * the phone and the terminal agree on what is Needs input, Working or Idle.
  *
- * rows.ts sits outside daemon/, so editing it does not change the daemon's build id: a running
- * daemon keeps the old rows until it restarts.
+ * rows.ts is under daemon/, so editing it changes the daemon's build id and agent view
+ * restarts the daemon: the phone never runs older rows than the terminal.
  */
 
 import type { InstanceSummary } from "../ipc/protocol.ts";
