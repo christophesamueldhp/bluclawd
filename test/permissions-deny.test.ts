@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { denyRules } from "../ext/_shared/settings.ts";
+import { denyRules, invalidDenyScopes } from "../ext/_shared/settings.ts";
 import permissions, { TRUST_CHANGED, trustStatusText } from "../ext/permissions/index.ts";
 import { deniedBy } from "../ext/permissions/rules.ts";
 
@@ -30,6 +30,15 @@ describe("denyRules: global and project lists", () => {
 
 	it("an empty project list cannot drop the user's global rules", () => {
 		expect(denyRules(sm({ deny: ["Read(~/.ssh/**)"] }, { deny: [] }))).toEqual(["Read(~/.ssh/**)"]);
+	});
+
+	it("reads a lone rule as one rule, never as its letters, and skips what is not a rule", () => {
+		expect(denyRules(sm({ deny: "Bash(rm *)" }, { deny: ["WebFetch", 3] }))).toEqual(["Bash(rm *)", "WebFetch"]);
+	});
+
+	it("names each scope whose deny is not a list of rules", () => {
+		expect(invalidDenyScopes(sm({ deny: { rm: true } }, { deny: ["WebFetch"] }))).toEqual(["global"]);
+		expect(invalidDenyScopes(sm({ deny: "Bash(rm *)" }, undefined))).toEqual([]);
 	});
 
 	it("reads nothing but deny", () => {
@@ -308,6 +317,17 @@ describe("the extension", () => {
 		await handlers.session_start({}, ctx);
 		expect(notes.some((n) => n.includes("deny rules") && n.includes(globalSettings()))).toBe(true);
 		expect((await call("webfetch", { url: "https://example.com" }))?.block).toBe(true);
+	});
+
+	it("blocks with a lone rule, and warns when deny is not rules at all", async () => {
+		const lone = load({ permissions: { deny: "Bash(rm *)" } });
+		await lone.handlers.session_start({}, lone.ctx);
+		expect((await lone.call("bash", { command: "rm x" }))?.block).toBe(true);
+		expect(lone.notes).toEqual([]);
+
+		const broken = load({ permissions: { deny: { rm: true } } });
+		await broken.handlers.session_start({}, broken.ctx);
+		expect(broken.notes).toEqual(["global permissions.deny is not a list of rules: none of it is in effect"]);
 	});
 
 	it("judges a monitor as bash, and a websearch batch query by query", async () => {

@@ -9,10 +9,6 @@
 import type { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_PORT } from "../../daemon/remote/pairing.ts";
 
-interface PermissionSettings {
-	deny?: string[];
-}
-
 type Mergeable = Record<string, unknown>;
 
 function isPlainObject(value: unknown): value is Mergeable {
@@ -43,9 +39,24 @@ export function prefersReducedMotion(sm: SettingsManager): boolean {
  * let a project's `deny: []` drop the user's global rules.
  */
 export function denyRules(sm: SettingsManager): string[] {
-	const of = (settings: unknown) =>
-		((settings as Mergeable).permissions as PermissionSettings | undefined)?.deny ?? [];
-	return [...new Set([...of(sm.getGlobalSettings()), ...of(sm.getProjectSettings())])];
+	return [...new Set([...(rulesOf(sm.getGlobalSettings()) ?? []), ...(rulesOf(sm.getProjectSettings()) ?? [])])];
+}
+
+/** The scopes whose `permissions.deny` is neither a list nor a single rule: none of it applies. */
+export function invalidDenyScopes(sm: SettingsManager): Array<"global" | "project"> {
+	return (["global", "project"] as const).filter(
+		(scope) => rulesOf(scope === "global" ? sm.getGlobalSettings() : sm.getProjectSettings()) === undefined,
+	);
+}
+
+/** A scope's deny rules: a lone string is one rule, not its letters; undefined when they are not rules at all. */
+function rulesOf(settings: unknown): string[] | undefined {
+	const permissions = (settings as Mergeable).permissions;
+	const deny = isPlainObject(permissions) ? permissions.deny : undefined;
+	if (deny === undefined) return [];
+	if (typeof deny === "string") return [deny];
+	if (Array.isArray(deny)) return deny.filter((rule): rule is string => typeof rule === "string");
+	return undefined;
 }
 
 /** `remote.port`: where remote control listens on 127.0.0.1. */

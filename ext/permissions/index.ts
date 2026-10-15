@@ -82,11 +82,9 @@ function factory(pi: ExtensionAPI): void {
 
 	function loadDeny(ctx: ExtensionContext): void {
 		const sm = settings(ctx);
-		try {
-			deny = forkSettings.denyRules(sm);
-		} catch {
-			deny = [];
-			ctx.ui.notify("permissions.deny is not a list: no deny rules are in effect", "warning");
+		deny = forkSettings.denyRules(sm);
+		for (const scope of forkSettings.invalidDenyScopes(sm)) {
+			ctx.ui.notify(`${scope} permissions.deny is not a list of rules: none of it is in effect`, "warning");
 		}
 		// pi reads an unparseable settings file as empty, which would drop its deny rules silently.
 		for (const { path, scope } of sm.drainErrors()) {
