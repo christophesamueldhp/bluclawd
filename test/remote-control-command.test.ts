@@ -34,6 +34,7 @@ describe("/remote-control", () => {
 	let enabled: boolean;
 	let actions: RemoteAction[];
 	let code: string;
+	let secret: string;
 	const devices = [
 		{ id: "d1", name: "iPhone", createdAt: "2026-10-01T10:00:00.000Z" },
 		{ id: "d2", name: "iPad", createdAt: "2026-10-02T10:00:00.000Z" },
@@ -61,6 +62,7 @@ describe("/remote-control", () => {
 		enabled = false;
 		actions = [];
 		code = "482913";
+		secret = "Qm3xZ8vT1pLk9sWc2rYb0A";
 		vi.spyOn(OrchestratorClient.prototype, "ensureDaemon").mockResolvedValue(true);
 		vi.spyOn(OrchestratorClient.prototype, "getDaemonInfo").mockResolvedValue({
 			buildId: currentDaemonBuildId(),
@@ -71,7 +73,7 @@ describe("/remote-control", () => {
 			if (action.action === "off") enabled = false;
 			const paired = action.action === "on" || action.action === "pair";
 			const result: RemoteResult = { enabled, port: 7878, listening: enabled, devices };
-			return paired ? { ...result, code, expiresAt: Date.now() + 5 * 60_000 } : result;
+			return paired ? { ...result, code, secret, expiresAt: Date.now() + 10 * 60_000 } : result;
 		});
 	});
 	afterEach(() => {
@@ -98,9 +100,9 @@ describe("/remote-control", () => {
 		return { ui, done };
 	}
 
-	const pairing = (pairCode: string) => renderQr(qrMatrix(`https://${HOST}/#pair=${pairCode}`));
+	const pairing = (pairSecret: string) => renderQr(qrMatrix(`https://${HOST}/#pair=${pairSecret}`));
 
-	it("when off, turns on and shows the address, a QR code of the pairing link, and the code under it", async () => {
+	it("when off, turns on and shows the address, a QR code of the pairing link, and the code dimmed under it", async () => {
 		const { ui, done } = run("");
 		await done;
 		expect(actions.map((a) => a.action)).toEqual(["status", "on"]);
@@ -110,10 +112,11 @@ describe("/remote-control", () => {
 		expect(type).toBe("info");
 		const lines = text.split("\n");
 		expect(lines[0]).toBe(`Remote control is on: https://${HOST}`);
-		expect(text).toContain(pairing("482913"));
-		const after = text.slice(text.indexOf(pairing("482913")) + pairing("482913").length).split("\n");
+		expect(lines[1]).toBe("Scan with your phone's camera to pair it (valid 10 minutes, once):");
+		expect(text).toContain(`\n${pairing(secret)}\n`);
+		const after = text.slice(text.indexOf(pairing(secret)) + pairing(secret).length).split("\n");
 		expect(after.slice(1)).toEqual([
-			"Code for the Home Screen app: 482 913 (valid 5 minutes, once)",
+			"\x1b[2mCan't scan? Type 482 913 in the app\x1b[22m",
 			"Starts at login: off (turn it on from /remote-control)",
 		]);
 	});
@@ -136,10 +139,12 @@ describe("/remote-control", () => {
 	it("pairs a new phone with a new code's QR code", async () => {
 		enabled = true;
 		code = "105377";
+		secret = "Zx9-_aBcDeFgHiJkLmNoPq";
 		const { ui, done } = run("", { select: [PAIR] });
 		await done;
 		expect(actions.map((a) => a.action)).toEqual(["status", "pair"]);
-		expect(ui.notify.mock.calls[0]![0]).toContain(pairing("105377"));
+		expect(ui.notify.mock.calls[0]![0]).toContain(pairing(secret));
+		expect(ui.notify.mock.calls[0]![0]).toContain("Type 105 377 in the app");
 	});
 
 	it("says why it cannot pair while on but not listening, as with its port in use", async () => {
@@ -203,7 +208,7 @@ describe("/remote-control", () => {
 		const pair = run("pair");
 		await pair.done;
 		expect(pair.ui.select).not.toHaveBeenCalled();
-		expect(pair.ui.notify.mock.calls[0]![0]).toContain(pairing("482913"));
+		expect(pair.ui.notify.mock.calls[0]![0]).toContain(pairing(secret));
 		const autostart = run("autostart");
 		await autostart.done;
 		expect(existsSync(join(deps.dir, `${LABEL}.plist`))).toBe(true);

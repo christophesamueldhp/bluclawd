@@ -39,6 +39,7 @@ describe("remote control switch", () => {
 		expect(on).toMatchObject({ type: "remote_result", ok: true, enabled: true, listening: true });
 		if (on.type !== "remote_result") throw new Error(on.error);
 		expect(on.code).toMatch(/^\d{6}$/);
+		expect(on.secret).toMatch(/^[\w-]{22}$/);
 		expect((await fetch(`http://127.0.0.1:${on.port}/api/sessions`)).status).toBe(401);
 		expect(await control.handle({ type: "remote", action: "off" })).toMatchObject({
 			enabled: false,

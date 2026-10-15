@@ -1,11 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { pairCode } from "../daemon/remote/web/api.js";
+import { pairLink } from "../daemon/remote/web/api.js";
 
-describe("the pairing link's code (the phone app's #pair=<code>)", () => {
-	it("is the six digits after #pair=, and nothing else is", () => {
-		expect(pairCode("#pair=482913")).toBe("482913");
-		for (const hash of ["", "#", "#pair=48291", "#pair=4829130", "#pair=48291a", "#pair=482913&x", "#s/pane-1"]) {
-			expect(pairCode(hash)).toBeUndefined();
+describe("the phone app's pairing links", () => {
+	const secret = "Qm3xZ8vT1pLk9sWc2rYb0A";
+
+	it("takes the QR code's secret from #pair= and the Home Screen app's handoff from #handoff=", () => {
+		expect(pairLink(`#pair=${secret}`)).toEqual({ secret });
+		expect(pairLink("#handoff=Zx9-_aBcDeFgHiJkLmNoPq")).toEqual({ handoff: "Zx9-_aBcDeFgHiJkLmNoPq" });
+	});
+
+	it("takes nothing else", () => {
+		for (const hash of [
+			"",
+			"#",
+			"#pair=482913",
+			`#pair=${secret.slice(1)}`,
+			`#pair=${secret}A`,
+			`#pair=${secret}&x`,
+			`#pair=${secret.slice(1)}+`,
+			`#handoff=${secret.slice(1)}`,
+			`#other=${secret}`,
+			"#s/pane-1",
+		]) {
+			expect(pairLink(hash), hash).toBeUndefined();
 		}
 	});
 });

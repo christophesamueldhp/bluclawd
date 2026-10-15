@@ -263,8 +263,10 @@ export interface RemoteResponse extends ResponseBase {
 	listening: boolean;
 	/** Why the listener could not start (e.g. the port is in use). */
 	listenError?: string;
-	/** With `on` and `pair`: a 6-digit pairing code and when it expires (epoch ms). */
+	/** With `on` and `pair`: the QR code's pairing secret, the 6-digit code that also pairs, and
+	 *  when both expire (epoch ms). */
 	code?: string;
+	secret?: string;
 	expiresAt?: number;
 	devices: RemoteDeviceInfo[];
 }

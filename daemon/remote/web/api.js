@@ -25,11 +25,14 @@ function clearToken() {
 }
 
 /**
- * The code in the link /remote-control's QR code opens: `#pair=<6 digits>`.
- * @param {string} hash
+ * What pairs this app in its address: the secret in the link /remote-control's QR code opens
+ * (`#pair=`), or the handoff the Home Screen app opens with (`#handoff=`, its manifest's start_url).
+ * @param {string} hash @returns {{ secret: string } | { handoff: string } | undefined}
  */
-export function pairCode(hash) {
-	return /^#pair=(\d{6})$/.exec(hash)?.[1];
+export function pairLink(hash) {
+	const match = /^#(pair|handoff)=([\w-]{22})$/.exec(hash);
+	if (!match) return undefined;
+	return match[1] === "pair" ? { secret: match[2] } : { handoff: match[2] };
 }
 
 /** The token was revoked (or never valid): the app goes back to pairing. */
@@ -59,17 +62,22 @@ async function call(method, path, body) {
 const session = (id) => `/api/sessions/${encodeURIComponent(id)}`;
 
 export const api = {
-	/** @param {string} code @param {string} deviceName @returns {Promise<string>} */
-	async pair(code, deviceName) {
-		const res = await fetch("/api/pair", {
+	/**
+	 * @param {{ code: string } | { secret: string } | { handoff: string }} credential
+	 * @param {string} deviceName @returns {Promise<string>}
+	 */
+	async pair(credential, deviceName) {
+		const res = await fetch("handoff" in credential ? "/api/pair/handoff" : "/api/pair", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ code, deviceName }),
+			body: JSON.stringify({ ...credential, deviceName }),
 		});
 		const data = await res.json().catch(() => ({}));
 		if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
 		return data.token;
 	},
+	/** Pairs the Home Screen app this browser adds, once. @returns {Promise<string>} */
+	handoff: async () => (await call("POST", "/api/handoff", {})).handoff,
 	sessions: async () => (await call("GET", "/api/sessions")).sessions,
 	/** @returns {Promise<string[]>} */
 	directories: async () => (await call("GET", "/api/directories")).directories,

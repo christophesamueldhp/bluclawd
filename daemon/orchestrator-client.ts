@@ -77,6 +77,7 @@ export interface RemoteResult {
 	listening: boolean;
 	listenError?: string;
 	code?: string;
+	secret?: string;
 	expiresAt?: number;
 	devices: RemoteDeviceInfo[];
 }

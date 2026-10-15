@@ -89,7 +89,13 @@ self.addEventListener("notificationclick", (event) => {
 
 self.addEventListener("fetch", (event) => {
 	const url = new URL(event.request.url);
-	if (event.request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/"))
+	// A query carries a secret (the manifest's handoff), which must not land in the cache.
+	if (
+		event.request.method !== "GET" ||
+		url.origin !== self.location.origin ||
+		url.pathname.startsWith("/api/") ||
+		url.search
+	)
 		return;
 	// Network first: a new build shows at once; the cache is for when the Mac is slow, down or erroring.
 	event.respondWith(shellResponse(event.request));

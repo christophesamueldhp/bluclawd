@@ -40,9 +40,72 @@ describe("remote pairing", () => {
 		expect(statSync(path).mode & 0o777).toBe(0o600);
 	});
 
-	it("expires a code after five minutes", () => {
+	it("expires a code after ten minutes", () => {
 		const { code } = store.createCode(0);
-		expect(store.claim(code, "iPhone", 5 * 60_000 + 1)).toEqual({ error: "expired_code" });
+		expect(store.claim(code, "iPhone", 10 * 60_000 + 1)).toEqual({ error: "expired_code" });
+		const { code: again } = store.createCode(0);
+		expect("token" in store.claim(again, "iPhone", 10 * 60_000)).toBe(true);
+	});
+
+	it("pairs by the QR code's secret once, within ten minutes, however many wrong secrets came first", () => {
+		const { secret, expiresAt } = store.createCode(0);
+		expect(secret).toMatch(/^[\w-]{22}$/);
+		expect(expiresAt).toBe(10 * 60_000);
+		for (let i = 0; i < 20; i++)
+			expect(store.claimSecret(`${i}`.padEnd(22, "x"), "x", 1)).toEqual({ error: "invalid_code" });
+		const result = store.claimSecret(secret, "iPhone", 2);
+		if (!("token" in result)) throw new Error(result.error);
+		expect(store.authenticate(result.token, 3)?.name).toBe("iPhone");
+		expect(store.claimSecret(secret, "iPhone", 4)).toEqual({ error: "invalid_code" });
+		expect(readFileSync(path, "utf8")).not.toContain(secret);
+		const later = store.createCode(0).secret;
+		expect(store.claimSecret(later, "iPhone", 10 * 60_000 + 1)).toEqual({ error: "expired_code" });
+	});
+
+	it("pairs one device per QR code: the secret and the code end together", () => {
+		const first = store.createCode(0);
+		expect("token" in store.claimSecret(first.secret, "iPhone", 1)).toBe(true);
+		expect(store.claim(first.code, "iPad", 1)).toEqual({ error: "invalid_code" });
+		const second = store.createCode(0);
+		expect("token" in store.claim(second.code, "iPad", 1)).toBe(true);
+		expect(store.claimSecret(second.secret, "iPhone", 1)).toEqual({ error: "invalid_code" });
+		expect(store.load().devices.map((d) => d.name)).toEqual(["iPhone", "iPad"]);
+	});
+
+	it("keeps the QR code's secret once wrong codes have used up the code's attempts", () => {
+		const { code, secret } = store.createCode(0);
+		const wrong = code === "000000" ? "111111" : "000000";
+		for (let i = 0; i < 5; i++) store.claim(wrong, "x", 1);
+		expect(store.claim(code, "x", 1)).toEqual({ error: "invalid_code" });
+		expect("token" in store.claimSecret(secret, "iPhone", 1)).toBe(true);
+	});
+
+	it("hands a paired device's pairing to its Home Screen app once, as a device of its own, within 30 minutes", () => {
+		const token = pairDevice("iPhone");
+		const device = store.authenticate(token, 2)!;
+		const handoff = store.issueHandoff(device.id, 0);
+		expect(handoff).toMatch(/^[\w-]{22}$/);
+		expect(store.exchangeHandoff("x".repeat(22), "iPhone (Home Screen)", 1)).toEqual({ error: "invalid_handoff" });
+		const result = store.exchangeHandoff(handoff, "iPhone (Home Screen)", 1);
+		if (!("token" in result)) throw new Error(result.error);
+		expect(store.authenticate(result.token, 2)?.name).toBe("iPhone (Home Screen)");
+		expect(store.authenticate(token, 2)?.id).toBe(device.id);
+		expect(store.exchangeHandoff(handoff, "iPhone (Home Screen)", 2)).toEqual({ error: "invalid_handoff" });
+		expect(readFileSync(path, "utf8")).not.toContain(handoff);
+		const late = store.issueHandoff(device.id, 0);
+		expect(store.exchangeHandoff(late, "x", 30 * 60_000 + 1)).toEqual({ error: "invalid_handoff" });
+	});
+
+	it("keeps only a device's latest handoff, and none once the device is removed", () => {
+		const device = store.authenticate(pairDevice("iPhone"), 2)!;
+		const first = store.issueHandoff(device.id, 0);
+		const second = store.issueHandoff(device.id, 0);
+		expect(store.exchangeHandoff(first, "x", 1)).toEqual({ error: "invalid_handoff" });
+		const third = store.issueHandoff(device.id, 0);
+		expect(second).not.toBe(third);
+		store.revoke(device.id);
+		expect(store.exchangeHandoff(third, "x", 1)).toEqual({ error: "invalid_handoff" });
+		expect(store.load().devices).toEqual([]);
 	});
 
 	it("invalidates a code after five wrong attempts", () => {

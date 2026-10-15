@@ -1,8 +1,8 @@
 /**
  * The phone's HTTP API and the PWA's static files, on 127.0.0.1 only: the phone reaches it
- * through `tailscale serve`, never directly. Every /api route except POST /api/pair needs a
- * paired device's token: a bearer header, or `?token=` on the SSE stream, which EventSource
- * cannot give headers.
+ * through `tailscale serve`, never directly. Every /api route except pairing (POST /api/pair and
+ * /api/pair/handoff) needs a paired device's token: a bearer header, or `?token=` on the SSE
+ * stream, which EventSource cannot give headers.
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -12,7 +12,7 @@ import { stripAnsi } from "../ansi.ts";
 import type { InstanceSummary, LiveSnapshot, PaneImage, PaneLaunch, PaneMessage, PaneReport } from "../ipc/protocol.ts";
 import { Tmux } from "../tmux.ts";
 import { RemoteEvents } from "./events.ts";
-import type { RemoteStore } from "./pairing.ts";
+import { type ClaimResult, type RemoteStore, SECRET_PATTERN } from "./pairing.ts";
 import { findSession, remoteSessions } from "./sessions.ts";
 import { launchUsable, type SessionSpec } from "./spawn.ts";
 import { loadTranscript } from "./transcript.ts";
@@ -200,7 +200,8 @@ function bearer(req: IncomingMessage): string {
 }
 
 /** Only a file that is in the web directory by that exact name: no path from the request is joined. */
-function serveStatic(webDir: string, path: string, req: IncomingMessage, res: ServerResponse): void {
+function serveStatic(webDir: string, url: URL, req: IncomingMessage, res: ServerResponse): void {
+	const path = url.pathname;
 	const name = path === "/" ? "index.html" : path.slice(1);
 	const type = CONTENT_TYPES[extname(name)];
 	if ((req.method !== "GET" && req.method !== "HEAD") || !type || !readdirSync(webDir).includes(name)) {
@@ -208,13 +209,24 @@ function serveStatic(webDir: string, path: string, req: IncomingMessage, res: Se
 		res.end("not found");
 		return;
 	}
+	// The Home Screen app Safari adds opens at its manifest's start_url: the page asks for this one
+	// with its device's handoff, which pairs that app (web/app.js). Only its shape is checked here.
+	const handoff = url.searchParams.get("handoff") ?? "";
+	const start = name === "manifest.webmanifest" && SECRET_PATTERN.test(handoff) ? `/#handoff=${handoff}` : undefined;
 	res.writeHead(200, {
 		"content-type": type,
-		"cache-control": "no-cache",
+		"cache-control": start ? "no-store" : "no-cache",
 		"x-content-type-options": "nosniff",
 		"content-security-policy": CSP,
 	});
-	res.end(req.method === "HEAD" ? undefined : readFileSync(join(webDir, name)));
+	const body = readFileSync(join(webDir, name));
+	if (req.method === "HEAD") res.end();
+	else res.end(start ? JSON.stringify({ ...JSON.parse(body.toString("utf8")), start_url: start }) : body);
+}
+
+function claimed(res: ServerResponse, result: ClaimResult): void {
+	if ("token" in result) json(res, 200, { token: result.token });
+	else json(res, 400, { error: result.error });
 }
 
 async function handle(
@@ -226,7 +238,7 @@ async function handle(
 	if (!HOST_PATTERN.test(req.headers.host ?? "")) return json(res, 421, { error: "bad_host" });
 	const url = new URL(req.url ?? "/", "http://localhost");
 	const path = url.pathname;
-	if (!path.startsWith("/api/")) return serveStatic(deps.webDir, path, req, res);
+	if (!path.startsWith("/api/")) return serveStatic(deps.webDir, url, req, res);
 	// Not a "simple" CORS content type, so a cross-site page cannot POST here without a preflight, which is never granted.
 	if (req.method === "POST" && !(req.headers["content-type"] ?? "").startsWith("application/json")) {
 		return json(res, 415, { error: "unsupported_media_type" });
@@ -234,8 +246,13 @@ async function handle(
 
 	if (path === "/api/pair" && req.method === "POST") {
 		const body = await readJson(req);
-		const result = deps.store.claim(String(body.code ?? ""), String(body.deviceName ?? ""));
-		return "token" in result ? json(res, 200, { token: result.token }) : json(res, 400, { error: result.error });
+		const name = String(body.deviceName ?? "");
+		if (typeof body.secret === "string") return claimed(res, deps.store.claimSecret(body.secret, name));
+		return claimed(res, deps.store.claim(String(body.code ?? ""), name));
+	}
+	if (path === "/api/pair/handoff" && req.method === "POST") {
+		const body = await readJson(req);
+		return claimed(res, deps.store.exchangeHandoff(String(body.handoff ?? ""), String(body.deviceName ?? "")));
 	}
 
 	const token = path === "/api/events" ? (url.searchParams.get("token") ?? "") : bearer(req);
@@ -245,6 +262,9 @@ async function handle(
 	if (path === "/api/events" && req.method === "GET") {
 		events.add(res, url.searchParams.get("session") ?? undefined, () => deps.store.authenticate(token) !== undefined);
 		return;
+	}
+	if (path === "/api/handoff" && req.method === "POST") {
+		return json(res, 200, { handoff: deps.store.issueHandoff(device.id) });
 	}
 	if (path === "/api/sessions" && req.method === "GET") {
 		return json(res, 200, { sessions: remoteSessions(deps.listInstances()) });

@@ -276,7 +276,7 @@ export class RemoteControl {
 		}
 	}
 
-	private result(code?: { code: string; expiresAt: number }): RemoteResponse {
+	private result(code?: { code: string; secret: string; expiresAt: number }): RemoteResponse {
 		const state = this.store.load();
 		return {
 			type: "remote_result",

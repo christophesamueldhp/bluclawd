@@ -5,7 +5,7 @@
  * parts that change are re-rendered, so the composers keep their text, focus and keyboard while
  * updates arrive.
  */
-import { api, getToken, pairCode, setToken, Unauthorized } from "./api.js";
+import { api, getToken, pairLink, setToken, Unauthorized } from "./api.js";
 import { promptKey, sentText, settle } from "./live.js";
 
 /** @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string }} Session */
@@ -74,6 +74,8 @@ const ERRORS = {
 	unknown_session: "This session is gone.",
 	invalid_code: "That code is wrong or was already used. Run /remote-control on the Mac for a new one.",
 	expired_code: "That code expired. Run /remote-control on the Mac for a new one.",
+	invalid_handoff:
+		"This app's pairing from Safari was used or expired. Type the code /remote-control shows on the Mac.",
 	empty_prompt: "Type a message first.",
 	prompt_too_large: "That message is too long.",
 	body_too_large: "That message is too long.",
@@ -215,7 +217,9 @@ function age(iso) {
 
 function deviceName() {
 	const ua = navigator.userAgent;
-	return /iPad/.test(ua) ? "iPad" : /iPhone/.test(ua) ? "iPhone" : /Android/.test(ua) ? "Android" : "Browser";
+	const name = /iPad/.test(ua) ? "iPad" : /iPhone/.test(ua) ? "iPhone" : /Android/.test(ua) ? "Android" : "Browser";
+	// Told apart from the browser it was added from, which stays paired.
+	return standalone() ? `${name} (Home Screen)` : name;
 }
 
 /** @param {string} path */
@@ -594,7 +598,7 @@ function bytes(base64url) {
 function pairView() {
 	return `<form class="pair" id="pair">
 <div class="logo">✻</div><h1>bluclawd</h1>
-<p class="muted">On the Mac, run <code>/remote-control</code> and scan the QR code, or type the 6-digit code shown under it.</p>
+<p class="muted">On the Mac, run <code>/remote-control</code> and scan the QR code with your phone's camera. Can't scan? Type the 6-digit code shown under it.</p>
 <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="000000" aria-label="Pairing code">
 <button>Pair</button><div class="error" id="pair-error"></div></form>`;
 }
@@ -729,7 +733,7 @@ function bannerHtml(session) {
 <button class="answer" id="answer" aria-haspopup="dialog">Answer</button></div>`;
 	}
 	if (!session && state.homeScreenHint) {
-		return `<div class="banner hint"><span>Add to Home Screen for notifications: Share → Add to Home Screen.</span>
+		return `<div class="banner hint"><span>Now Share → Add to Home Screen. The app opens already paired.</span>
 <button class="dismiss" id="dismiss-hint" aria-label="Dismiss">×</button></div>`;
 	}
 	return "";
@@ -1000,10 +1004,10 @@ function updateTerminal(sheet) {
 	if (atBottom) screen.scrollTop = screen.scrollHeight;
 }
 
-/** @param {string} code */
-async function pair(code) {
+/** @param {{ code: string } | { secret: string } | { handoff: string }} credential */
+async function pair(credential) {
 	try {
-		const token = await api.pair(code, deviceName());
+		const token = await api.pair(credential, deviceName());
 		try {
 			setToken(token);
 		} catch {
@@ -1013,15 +1017,32 @@ async function pair(code) {
 		state.homeScreenHint = !standalone();
 		render();
 		connect();
+		void offerHandoff();
 	} catch (error) {
 		$("#pair-error").textContent = errorText(error instanceof Error ? error.message : String(error));
+	}
+}
+
+/**
+ * A browser's pairing, carried into the Home Screen app added from it, which may not share its
+ * storage: iOS opens that app at the manifest's start_url, which the daemon sets to this device's
+ * handoff (once, 30 minutes) when the manifest is asked for with it.
+ */
+async function offerHandoff() {
+	if (standalone() || !getToken()) return;
+	try {
+		const handoff = await api.handoff();
+		$('link[rel="manifest"]').href = `manifest.webmanifest?handoff=${encodeURIComponent(handoff)}`;
+	} catch (error) {
+		// Otherwise the Home Screen app asks for a code.
+		if (error instanceof Unauthorized) handleError(error);
 	}
 }
 
 function bindPair() {
 	$("#pair").addEventListener("submit", (/** @type {Event} */ event) => {
 		event.preventDefault();
-		void pair($("#code").value.replace(/\D/g, ""));
+		void pair({ code: $("#code").value.replace(/\D/g, "") });
 	});
 }
 
@@ -1417,14 +1438,15 @@ async function send() {
 // ---- routing ----
 
 /**
- * The QR code's link pairs this browser, unless it is paired already. The code leaves the address
- * at once, so it is in no bookmark or history; pairing renders once its answer is in.
+ * The QR code's link, or the Home Screen app's start_url, pairs this app unless it is paired
+ * already: the app opens at its start_url every time. The secret leaves the address at once, so it
+ * is in no bookmark or history; pairing renders once its answer is in.
  */
 function claimLink() {
-	const code = pairCode(location.hash);
-	if (!code) return;
+	const link = pairLink(location.hash);
+	if (!link) return;
 	history.replaceState(null, "", location.pathname + location.search);
-	if (!getToken()) void pair(code);
+	if (!getToken()) void pair(link);
 }
 
 function route() {
@@ -1467,6 +1489,8 @@ document.addEventListener("visibilitychange", () => {
 	if (document.visibilityState === "visible") {
 		connect();
 		void loadScreen();
+		// A fresh one: Safari may sit in the background longer than a handoff lasts.
+		void offerHandoff();
 	}
 });
 setInterval(() => {
@@ -1486,3 +1510,4 @@ state.open = /^#s\/(.+)$/.exec(location.hash)?.[1];
 if (state.open) state.open = decodeURIComponent(state.open);
 render();
 connect();
+void offerHandoff();

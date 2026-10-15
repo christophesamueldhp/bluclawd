@@ -155,11 +155,16 @@ describe("remote control: tailscale and pairing text", () => {
 		}
 	});
 
-	it("shows a QR code of the pairing link, and under it the code in two groups", () => {
-		const text = pairingText("https://mac.tail1234.ts.net", "482913", 5 * 60_000, 0);
+	it("shows a QR code of the pairing link with its secret, and under it the code in two groups", () => {
+		const secret = "Qm3xZ8vT1pLk9sWc2rYb0A";
+		const text = pairingText("https://mac.tail1234.ts.net", secret, "482913", 10 * 60_000, 0);
 		expect(text).toContain("https://mac.tail1234.ts.net");
-		expect(text).toContain(renderQr(qrMatrix("https://mac.tail1234.ts.net/#pair=482913")));
-		expect(text).toContain("482 913 (valid 5 minutes, once)");
-		expect(pairingText("https://mac.tail1234.ts.net", "482913", 60_000, 0)).toContain("(valid 1 minute, once)");
+		expect(text).toContain(renderQr(qrMatrix(`https://mac.tail1234.ts.net/#pair=${secret}`)));
+		expect(text).toContain("(valid 10 minutes, once)");
+		expect(text).toContain("Type 482 913 in the app");
+		expect(text).not.toContain("482913");
+		expect(pairingText("https://mac.tail1234.ts.net", secret, "482913", 60_000, 0)).toContain(
+			"(valid 1 minute, once)",
+		);
 	});
 });

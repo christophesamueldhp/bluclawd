@@ -57,9 +57,12 @@ async function show(result: RemoteResult, ctx: ExtensionCommandContext): Promise
 		);
 		return;
 	}
-	if (!result.code || !result.expiresAt) return;
+	if (!result.code || !result.secret || !result.expiresAt) return;
 	const pairing = (url: string) =>
-		[pairingText(url, result.code ?? "", result.expiresAt ?? 0), autostartStatus(autostartDeps())]
+		[
+			pairingText(url, result.secret ?? "", result.code ?? "", result.expiresAt ?? 0),
+			autostartStatus(autostartDeps()),
+		]
 			.filter(Boolean)
 			.join("\n");
 	const tailscale = await tailscaleInfo(result.port);
