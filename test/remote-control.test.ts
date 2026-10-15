@@ -537,6 +537,38 @@ describe("remote control switch", () => {
 			controller.abort();
 		});
 
+		it("pushes nothing to a device with the app open on any screen, and again once it closed its stream", async () => {
+			const { code } = control.store.createCode();
+			const claimed = control.store.claim(code, "iPhone");
+			if (!("token" in claimed)) throw new Error(claimed.error);
+			const pad = pairDevice(control.store);
+			control.store.setPush(claimed.deviceId, subscription("https://web.push.apple.com/phone"));
+			control.store.setPush(pad, subscription("https://web.push.apple.com/pad"));
+			const on = await control.handle({ type: "remote", action: "on", port: 0 });
+			if (on.type !== "remote_result") throw new Error(on.error);
+			// The session list: a stream with no session.
+			const controller = new AbortController();
+			const res = await fetch(`http://127.0.0.1:${on.port}/api/events?token=${claimed.token}`, {
+				signal: controller.signal,
+			});
+			await res.body!.getReader().read();
+			await vi.advanceTimersByTimeAsync(1000);
+			instances = [pane("idle")];
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(pushes.map((p) => p.endpoint)).toEqual(["https://web.push.apple.com/pad"]);
+			// Hidden: the phone closed its stream.
+			controller.abort();
+			// The daemon sees the stream close a moment later: each round is a new turn ending.
+			for (let i = 0; i < 50; i++) {
+				instances = [pane("working")];
+				await vi.advanceTimersByTimeAsync(1000);
+				instances = [pane("idle")];
+				await vi.advanceTimersByTimeAsync(1000);
+				if (pushes.some((p) => p.endpoint === "https://web.push.apple.com/phone")) break;
+			}
+			expect(pushes.map((p) => p.endpoint)).toContain("https://web.push.apple.com/phone");
+		});
+
 		it("keeps the subscription a device made after the one the push service said is gone", async () => {
 			const phone = pairDevice(control.store);
 			control.store.setPush(phone, subscription("https://web.push.apple.com/old"));

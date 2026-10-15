@@ -191,7 +191,8 @@ Start begins a new one in a recent or typed directory. Tapping the title shows t
 (and switches it), context and usage, and compacts or clones the session; a message's ⋯ edits it
 here or in a new session, or goes back to a reply. When a session waits on a dialog, Answer shows
 its screen and sends it keys. Enable notifications to hear when a session finishes or needs you:
-on iOS only in the app opened from the Home Screen, iOS 16.4 or later.
+on iOS only in the app opened from the Home Screen, iOS 16.4 or later. A phone with the app open
+in the foreground, on any screen, gets none; your other phones still do.
 
 A prompt to a running session can carry up to four images (+ beside the reply field); a reply
 that resumes or starts a session is text only. The images in a conversation, a prompt's or a

@@ -1425,8 +1425,9 @@ describe("remote HTTP API", () => {
 			})();
 			const bystander = await open(token);
 			await watcher.until(": connected");
-			// With the device whose stream it is.
-			expect(server.watching()).toEqual(new Map([["live", new Set([store.load().devices[0]!.id])]]));
+			expect(server.watching()).toEqual(new Set(["live"]));
+			// The device whose streams they are, the bystander's (no session) too.
+			expect(server.present()).toEqual(new Set([store.load().devices[0]!.id]));
 			const snapshot = { text: "Hel", tools: [{ id: "c1", name: "bash", summary: "ls", running: true }] };
 			server.live("live", snapshot);
 			// Not watched: not kept, not sent.
@@ -1450,7 +1451,9 @@ describe("remote HTTP API", () => {
 			watcher.controller.abort();
 			bystander.controller.abort();
 			for (let i = 0; i < 50 && server.watching().size > 0; i++) await new Promise((r) => setTimeout(r, 20));
-			expect(server.watching()).toEqual(new Map());
+			expect(server.watching()).toEqual(new Set());
+			for (let i = 0; i < 50 && server.present().size > 0; i++) await new Promise((r) => setTimeout(r, 20));
+			expect(server.present()).toEqual(new Set());
 			// Gone with its last watcher: a new one is not sent the old reply.
 			const again = await open(token, "live");
 			const first = (await again.collect(400)).text;

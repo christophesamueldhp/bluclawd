@@ -49,8 +49,10 @@ export interface RemoteDeps {
 export interface RemoteServer {
 	/** The port actually bound (differs from the requested one only for port 0). */
 	port: number;
-	/** The sessions a phone has open on its event stream, each with the ids of the devices that have it open. */
-	watching(): Map<string, Set<string>>;
+	/** The sessions a phone has open on its event stream. */
+	watching(): Set<string>;
+	/** The devices with an event stream open: the app is in the foreground there. */
+	present(): Set<string>;
 	/** Push a pane's reply in progress (null: finished) to the phones that have its session open. */
 	live(sessionId: string, live: LiveSnapshot | null): void;
 	/** Tell the phones that have this session open its report changed. */
@@ -593,6 +595,7 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 			resolve({
 				port: typeof address === "object" && address ? address.port : port,
 				watching: () => events.watching(),
+				present: () => events.present(),
 				live: (id, live) => events.live(id, live),
 				status: (id) => events.status(id),
 				close: () =>
