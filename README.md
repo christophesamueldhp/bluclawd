@@ -190,6 +190,11 @@ on iOS only in the app opened from the Home Screen, iOS 16.4 or later.
 A prompt to a running session can carry up to four images (+ beside the reply field); a reply
 that resumes or starts a session is text only. The images in a conversation, a prompt's or a
 tool's (`read` on a PNG), show as thumbnails as they scroll into view; tap one for full screen.
+The model gets a phone's image as it gets a pasted one. The Mac shows neither as a picture, in
+any terminal: pi draws only a prompt's text (a pasted image at least leaves its `[Image #1]`
+marker in it; a phone's leaves none), and a tool's image only outside tmux, while every
+agent-view session runs in tmux, where pi turns image protocols off and does not wrap them for
+tmux's passthrough.
 
 A paired phone can read every session, tool output included, prompt any of them, and press keys
 in a pane: it is effectively a shell as you on this Mac. Its token does not expire; revoke a phone
