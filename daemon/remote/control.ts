@@ -35,6 +35,8 @@ export interface RemoteControlDeps {
 	listInstances(): InstanceSummary[];
 	send(sessionId: string, message: PaneMessage): boolean;
 	deleteInstance(sessionId: string): boolean;
+	renameInstance: RemoteDeps["renameInstance"];
+	setPinned: RemoteDeps["setPinned"];
 	statusLine?: RemoteDeps["statusLine"];
 	store?: RemoteStore;
 	tmux?: Tmux;
@@ -190,6 +192,9 @@ export class RemoteControl {
 					startSession: (spec, replaces) => this.startSession(spec, replaces),
 					resuming: (id) => this.resuming(id),
 					report: (id) => this.reports.get(id),
+					renameInstance: this.deps.renameInstance,
+					setPinned: this.deps.setPinned,
+					deleteInstance: this.deps.deleteInstance,
 					statusLine: this.deps.statusLine,
 					tmux: this.tmux,
 					webDir: this.deps.webDir ?? WEB_DIR,

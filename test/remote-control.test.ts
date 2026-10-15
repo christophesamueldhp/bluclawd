@@ -20,6 +20,8 @@ describe("remote control switch", () => {
 			listInstances: () => [],
 			send: () => true,
 			deleteInstance: () => false,
+			renameInstance: () => false,
+			setPinned: () => false,
 			webDir: dir,
 		});
 
@@ -171,6 +173,8 @@ describe("remote control switch", () => {
 				store: new RemoteStore(join(dir, "remote.json")),
 				listInstances: () => instances,
 				send: () => true,
+				renameInstance: () => false,
+				setPinned: () => false,
 				deleteInstance: (id) => {
 					deleted.push(id);
 					return true;
@@ -316,6 +320,8 @@ describe("remote control switch", () => {
 			listInstances: () => instances,
 			send: () => true,
 			deleteInstance: () => false,
+			renameInstance: () => false,
+			setPinned: () => false,
 			webDir: dir,
 		});
 		setRemoteControl(control);
@@ -378,6 +384,8 @@ describe("remote control switch", () => {
 			listInstances: () => instances,
 			send: () => true,
 			deleteInstance: () => false,
+			renameInstance: () => false,
+			setPinned: () => false,
 			webDir: dir,
 		});
 		const report = { models: [] };
@@ -412,6 +420,8 @@ describe("remote control switch", () => {
 			listInstances: () => [{ id: "pane-1", status: "online", cwd: "/p", external: true, activity: "idle" }],
 			send: () => true,
 			deleteInstance: () => false,
+			renameInstance: () => false,
+			setPinned: () => false,
 			statusLine: async (cwd) => (cwd === "/p" ? { git } : {}),
 			webDir: dir,
 		});
@@ -469,6 +479,8 @@ describe("remote control switch", () => {
 				listInstances: () => instances,
 				send: () => true,
 				deleteInstance: () => false,
+				renameInstance: () => false,
+				setPinned: () => false,
 				webDir: dir,
 				sendPush: async (push, payload) => {
 					pushes.push({ endpoint: push.endpoint, payload: JSON.parse(payload) });

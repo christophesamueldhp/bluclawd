@@ -38,6 +38,7 @@ describe("remote HTTP API", () => {
 	let tmuxFails: boolean;
 	let statusExtra: StatusLine;
 	let statusCwds: string[];
+	let changed: unknown[][];
 
 	beforeEach(async () => {
 		dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-http-"));
@@ -70,6 +71,7 @@ describe("remote HTTP API", () => {
 		tmuxFails = false;
 		statusExtra = {};
 		statusCwds = [];
+		changed = [];
 		// As Tmux throws: tmux's own complaint on stderr.
 		const reach = (pane: string) => {
 			if (tmuxFails)
@@ -97,6 +99,18 @@ describe("remote HTTP API", () => {
 				},
 				resuming: (id) => resuming.has(id),
 				report: (id) => reports.get(id),
+				renameInstance: (id, name) => {
+					changed.push(["rename", id, name]);
+					return instances.some((i) => i.id === id && !i.external);
+				},
+				setPinned: (id, pinned) => {
+					changed.push(["pin", id, pinned]);
+					return instances.some((i) => i.id === id);
+				},
+				deleteInstance: (id) => {
+					changed.push(["delete", id]);
+					return instances.some((i) => i.id === id && !i.external);
+				},
 				statusLine: async (cwd) => {
 					statusCwds.push(cwd);
 					return statusExtra;
@@ -695,6 +709,121 @@ describe("remote HTTP API", () => {
 			await refused("tree", { entryId: "dddd0004" });
 			await refused("fork", { entryId: "cccc0003" });
 			expect(sent).toEqual([]);
+		});
+	});
+
+	describe("rename, pin and delete", () => {
+		const call = async (token: string, method: string, path: string, body?: object) => {
+			const res = await fetch(`${base}/api/sessions/${path}`, {
+				method,
+				headers: authJson(token),
+				...(body ? { body: JSON.stringify(body) } : {}),
+			});
+			return [res.status, await res.json()];
+		};
+
+		it("renames a running session through its pane, an older one's too, and a stored one in the daemon", async () => {
+			const token = await pair();
+			expect(reports.has("live")).toBe(false);
+			expect(await call(token, "POST", "live/rename", { name: "  fix the build  " })).toEqual([202, { ok: true }]);
+			expect(sent).toEqual([{ id: "live", message: { type: "rename", name: "fix the build" } }]);
+			expect(await call(token, "POST", "stored/rename", { name: "later" })).toEqual([200, { ok: true }]);
+			expect(changed).toEqual([["rename", "stored", "later"]]);
+		});
+
+		it("refuses an empty, overlong or multi-line name, a terminal escape, and an unknown session", async () => {
+			const token = await pair();
+			const escape = `${String.fromCharCode(27)}[31mred`;
+			for (const name of [undefined, 7, "   ", "x".repeat(101), "a\nb", escape]) {
+				expect(await call(token, "POST", "stored/rename", { name })).toEqual([400, { error: "invalid_name" }]);
+			}
+			expect(await call(token, "POST", "stored/rename", { name: "x".repeat(100) })).toEqual([200, { ok: true }]);
+			expect(await call(token, "POST", "nope/rename", { name: "x" })).toEqual([404, { error: "unknown_session" }]);
+			expect(sent).toEqual([]);
+		});
+
+		it("pins and unpins a running or stored session", async () => {
+			const token = await pair();
+			expect(await call(token, "POST", "live/pin", { pinned: true })).toEqual([200, { ok: true }]);
+			expect(await call(token, "POST", "stored/pin", { pinned: false })).toEqual([200, { ok: true }]);
+			for (const pinned of [undefined, "true", 1]) {
+				expect(await call(token, "POST", "stored/pin", { pinned })).toEqual([400, { error: "invalid_pinned" }]);
+			}
+			expect(await call(token, "POST", "nope/pin", { pinned: true })).toEqual([404, { error: "unknown_session" }]);
+			expect(changed).toEqual([
+				["pin", "live", true],
+				["pin", "stored", false],
+			]);
+			expect(sent).toEqual([]);
+		});
+
+		it("deletes a stored row, never a running session's or one being resumed", async () => {
+			const token = await pair();
+			expect(await call(token, "DELETE", "live")).toEqual([409, { error: "session_running" }]);
+			resuming.add("stored");
+			expect(await call(token, "DELETE", "stored")).toEqual([409, { error: "session_busy" }]);
+			resuming.clear();
+			expect(await call(token, "DELETE", "stored")).toEqual([200, { ok: true }]);
+			expect(await call(token, "DELETE", "nope")).toEqual([404, { error: "unknown_session" }]);
+			expect(await call(token, "DELETE", "%E0%A4%A")).toEqual([404, { error: "unknown_session" }]);
+			expect(changed).toEqual([["delete", "stored"]]);
+		});
+
+		it("needs a paired device's token for each", async () => {
+			const unauthorized = (method: string, path: string) =>
+				fetch(`${base}/api/sessions/${path}`, {
+					method,
+					headers: json,
+					body: method === "POST" ? "{}" : undefined,
+				});
+			expect((await unauthorized("POST", "stored/rename")).status).toBe(401);
+			expect((await unauthorized("POST", "stored/pin")).status).toBe(401);
+			expect((await unauthorized("DELETE", "stored")).status).toBe(401);
+			expect(changed).toEqual([]);
+		});
+	});
+
+	describe("models for a new session", () => {
+		const models = async (token: string) =>
+			(await (await fetch(`${base}/api/models`, { headers: auth(token) })).json()) as {
+				models: Array<{ provider: string; id: string; name?: string }>;
+			};
+
+		it("lists every running pane's models once, sorted, and none before any pane reported", async () => {
+			const token = await pair();
+			expect(await models(token)).toEqual({ models: [] });
+			instances = [...instances, { id: "two", status: "online", cwd: "/p", external: true, activity: "idle" }];
+			const opus = { provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5" };
+			const gpt = { provider: "openai", id: "gpt-5" };
+			const sonnet = { provider: "anthropic", id: "claude-sonnet-5", name: "Claude Sonnet 5" };
+			reports.set("live", { models: [gpt, opus] });
+			reports.set("two", { models: [opus, sonnet] });
+			// A stored row's report is a pane's that went: not listed.
+			reports.set("stored", { models: [{ provider: "old", id: "gone" }] });
+			expect(await models(token)).toEqual({ models: [opus, sonnet, gpt] });
+			expect((await fetch(`${base}/api/models`)).status).toBe(401);
+		});
+
+		it("starts a new session with any model it lists", async () => {
+			const token = await pair();
+			reports.set("live", {
+				models: [
+					{ provider: "openrouter", id: "anthropic/claude-opus-5-5:beta" },
+					{ provider: "anthropic", id: "claude-opus-5-5" },
+				],
+			});
+			for (const { provider, id } of (await models(token)).models) {
+				const res = await fetch(`${base}/api/sessions`, {
+					method: "POST",
+					headers: authJson(token),
+					body: JSON.stringify({ cwd: dir, task: "go", model: `${provider}/${id}` }),
+				});
+				expect(res.status).toBe(201);
+			}
+			expect(started.map((s) => s.model)).toEqual([
+				"anthropic/claude-opus-5-5",
+				"openrouter/anthropic/claude-opus-5-5:beta",
+			]);
 		});
 	});
 
