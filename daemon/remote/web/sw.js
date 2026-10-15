@@ -8,6 +8,7 @@ const SHELL = [
 	"/app.js",
 	"/api.js",
 	"/live.js",
+	"/statusbar.js",
 	"/manifest.webmanifest",
 	"/favicon-32.png",
 	"/apple-touch-icon.png",
