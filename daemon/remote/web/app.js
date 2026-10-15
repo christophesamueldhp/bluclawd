@@ -6,8 +6,9 @@
  * updates arrive.
  */
 import { api, clearToken, getToken, pairLink, setToken, Unauthorized } from "./api.js";
-import { promptKey, sentText, settle, shownText } from "./live.js";
+import { giveUp, promptKey, promptText, sentText, settle, shortcut, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
+import { filterSessions } from "./search.js";
 import { barHtml, factsHtml, thinkingHtml, tokens } from "./statusbar.js";
 
 /** @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string }} Session */
@@ -37,7 +38,14 @@ const NAVIGATE_GIVE_UP_MS = 15_000;
 /** A sent prompt holds the session's actions back until its turn is seen starting, or this long:
  *  one pi does not show verbatim (a command, a template) is never matched in the transcript. */
 const PENDING_GRACE_MS = 15_000;
+/** A sent prompt the session neither ran nor wrote by then never reached it (pi turns one away while compacting). */
+const PROMPT_GIVE_UP_MS = 20_000;
+/** An error shows this long, unless a tap or another screen ends it sooner. */
+const ERROR_MS = 6000;
+const COPIED_MS = 1500;
 const SCREEN_POLL_MS = 2000;
+/** Less taken off the visible height than this is a toolbar, not the keyboard. */
+const KEYBOARD_MIN = 120;
 /** The daemon takes at most 4 images, 2 MB each, with a prompt. */
 const ATTACH_MAX = 4;
 /** A photo is scaled to this on its long side and sent as a JPEG. */
@@ -49,7 +57,7 @@ const KEEP_TYPES = ["image/png", "image/gif", "image/webp"];
 const THUMB_SIDE = 160;
 /** pi redraws a moment after a key reaches it. */
 const SCREEN_SETTLE_MS = 150;
-/** The terminal sheet's keys: tmux's name, and the button's face. */
+/** The terminal sheet's keys: tmux's name, the button's face, and its spoken name when not tmux's. */
 const PRESS = [
 	["Up", "↑"],
 	["Down", "↓"],
@@ -58,6 +66,8 @@ const PRESS = [
 	["Enter", "⏎"],
 	["Escape", "Esc"],
 	["Tab", "Tab"],
+	["Space", "␣"],
+	["BSpace", "⌫", "Backspace"],
 ];
 const ERRORS = {
 	session_not_running: "This session is not running. Open it on the Mac to continue.",
@@ -70,11 +80,13 @@ const ERRORS = {
 	invalid_thinking: "The model does not offer that thinking level.",
 	invalid_trust: "That trust mode is not one of always, ask or never.",
 	invalid_entry: "That message is no longer in this session.",
-	not_moved: "The session did not move.",
+	not_moved: "The session did not move. If its prompt on the Mac has unsent text, clear it and retry.",
+	not_delivered: "Not delivered — check the session on the Mac.",
+	unreachable: "Could not reach the Mac.",
 	invalid_keys: "That can't be typed into the session. Use the keys for Enter, Tab and Esc.",
 	no_launch: "Run /remote-control in a pi on the Mac once, so the phone knows how to start pi.",
 	start_failed: "The Mac could not start the session.",
-	start_timeout: "The session did not show up. Check it on the Mac.",
+	start_timeout: "The session did not start. Try again.",
 	unknown_session: "This session is gone.",
 	unknown_device: "That phone was removed already.",
 	invalid_code: "That code is wrong or was already used. Run /remote-control on the Mac for a new one.",
@@ -100,14 +112,17 @@ const state = {
 	/** @type {Message[]} */ messages: [],
 	/**
 	 * Prompts sent and not yet in the transcript. `text`: as the transcript will show it (see
-	 * promptKey); `prompt`: as typed, `thumbs`: its images'. `started`: the session was seen working since.
-	 * @type {{ text: string, prompt: string, thumbs: string[], before: number, sentAt: number, started?: boolean }[]}
+	 * promptKey); `prompt`: as typed, `images`: as sent. `started`: the session was seen working since.
+	 * `last`: the transcript's last message when it was sent.
+	 * @type {{ id: number, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string }[]}
 	 */
 	pending: [],
 	/** Images for the open session's next prompt. @type {Attachment[]} */
 	attachments: [],
 	/** The open session's reply in progress, streamed by its pane. @type {LiveSnapshot | undefined} */ live: undefined,
 	/** @type {string[]} */ directories: [],
+	/** What the session list is searched for. */
+	query: "",
 	/**
 	 * A pane started from here, until its row is listed (`pane` is unset while the request is out).
 	 * `from`: the stored session it resumes, whose row is gone meanwhile.
@@ -127,12 +142,22 @@ const state = {
 	sheetOpen: false,
 	/** Its pane's report: undefined while loading, null when it has sent none. @type {Report | null | undefined} */
 	report: undefined,
-	/** Compact was asked for and the pane has not reported since. */
+	/** Compact was asked for and the pane has not reported since: Send waits, closing the sheet or not. */
 	compacting: false,
+	/** /model was typed: its picker gets the focus once the sheet shows it. */
+	focusModel: false,
+	/** Stop was asked for and the session is still mid-turn. */
+	stopping: false,
 	/** Tree, fork or clone was asked for and the open chat's transcript has not changed since. */
 	navigating: false,
-	/** The message whose actions the sheet shows instead of the status. @type {{ id: string, text: string, kind: string } | undefined} */
+	/**
+	 * The message whose actions the sheet shows instead of the status. `back`: a reply the session
+	 * can go back to.
+	 * @type {{ id: string, text: string, kind: string, back: boolean } | undefined}
+	 */
 	menu: undefined,
+	/** Its text was just copied. */
+	copied: false,
 	/** The terminal sheet: the pane's screen, and keys to answer its dialog with. */
 	terminal: false,
 	/** Paired in Safari: the Home Screen app is the one iOS notifies. */
@@ -179,11 +204,14 @@ let liveClear;
 let compactGiveUp;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let navigateGiveUp;
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let errorTimer;
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let copiedTimer;
 /** The transcript a tree, fork or clone left, to tell on a reconnect whether it has moved. */
 let navigatedFrom = "";
 /** Which view the DOM holds: "pair", "list", "phones" or "chat:<id>". */
 let shown = "";
-let lastLog = "";
 /** The next log update prepends older messages: it keeps what is on screen in place. */
 let prepending = false;
 /** @type {IntersectionObserver | undefined} */
@@ -201,11 +229,20 @@ const PICTURES_MAX = 30;
 const picturesLoading = new Set();
 /** Not fetched again until the session is opened again. @type {Set<string>} */
 const picturesFailed = new Set();
+/** Keeps the log where it was as images change size (see bindChat). @type {ResizeObserver | undefined} */
+let pictureSizes;
+/** The log was scrolled to its end before its last change of size. */
+let stuck = true;
+let pendingId = 0;
 /**
  * The pane a resumed session's chat moved to: the replies still pending move with it.
  * @type {string | undefined}
  */
 let followed;
+/** The open chat was opened from the list, whose history entry "‹ Sessions" goes back to. */
+let backToList = false;
+/** The count on the app's badge; none set yet. */
+let badged = -1;
 /**
  * A message for the list, shown by its next refresh (which would otherwise clear it).
  * @type {string | undefined}
@@ -223,7 +260,7 @@ function esc(text) {
 	return String(text).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 }
 
-/** The log is rebuilt with every streamed chunk: each reply's markdown is rendered once. */
+/** The transcript is rebuilt whenever it changes other than at its end: each reply's markdown is rendered once. */
 /** @type {Map<string, string>} */
 const rendered = new Map();
 const RENDERED_MAX = 500;
@@ -273,8 +310,8 @@ function standalone() {
 
 // ---- data ----
 
-/** @param {unknown} error */
-function handleError(error) {
+/** @param {unknown} error @param {string} [prefix] what failed, before why */
+function handleError(error, prefix = "") {
 	if (error instanceof Unauthorized) {
 		source?.close();
 		// The terminal sheet closes: no polling meanwhile, and it does not pop up again once paired anew.
@@ -283,9 +320,31 @@ function handleError(error) {
 		render();
 		return;
 	}
-	// A dropped connection or a 5xx is the offline banner's business, not raw text.
+	showError(prefix + failure(error));
+}
+
+/** A refresh's: a dropped connection or a 5xx is the offline banner's business. @param {unknown} error */
+function loadError(error) {
 	const message = error instanceof Error ? error.message : String(error);
-	if (!(error instanceof TypeError) && !/^HTTP 5\d\d$/.test(message)) state.error = errorText(message);
+	if (error instanceof TypeError || /^HTTP 5\d\d$/.test(message)) return;
+	handleError(error);
+}
+
+/** Why a request failed, in words: a dropped connection or a 5xx is not raw text. @param {unknown} error */
+function failure(error) {
+	const message = error instanceof Error ? error.message : String(error);
+	if (error instanceof TypeError) return errorText("unreachable");
+	return errorText(/^HTTP 5\d\d$/.test(message) ? "internal_error" : message);
+}
+
+/** Until the next tap, another screen, or ERROR_MS: a refresh does not take it away. @param {string} text */
+function showError(text) {
+	state.error = text;
+	clearTimeout(errorTimer);
+	errorTimer = setTimeout(() => {
+		state.error = undefined;
+		render();
+	}, ERROR_MS);
 	render();
 }
 
@@ -302,7 +361,8 @@ async function loadSessions() {
 			void loadMessages();
 		}
 		state.loaded = true;
-		state.error = notice;
+		badge(state.sessions.filter((s) => s.state === "needs").length);
+		if (notice) showError(notice);
 		notice = undefined;
 		const starting = state.starting;
 		if (starting?.pane && state.sessions.some((s) => s.id === starting.pane)) {
@@ -314,11 +374,27 @@ async function loadSessions() {
 				location.replace(`#s/${encodeURIComponent(starting.pane)}`);
 				return;
 			}
+			// A task started from the list opens, unless another screen was opened meanwhile.
+			if (!starting.from && !state.open && !state.phones) {
+				location.hash = `#s/${encodeURIComponent(starting.pane)}`;
+				return;
+			}
 		}
 		render();
 		if (!state.open) void loadDirectories();
 	} catch (error) {
-		handleError(error);
+		loadError(error);
+	}
+}
+
+/** The Home Screen icon's badge: how many sessions wait on an answer. @param {number} count */
+function badge(count) {
+	if (count === badged || !("setAppBadge" in navigator)) return;
+	badged = count;
+	try {
+		(count ? navigator.setAppBadge(count) : navigator.clearAppBadge()).catch(() => {});
+	} catch {
+		// not allowed here (a browser tab rather than the Home Screen app)
 	}
 }
 
@@ -327,7 +403,7 @@ async function loadDirectories() {
 		state.directories = await api.directories();
 		render();
 	} catch (error) {
-		handleError(error);
+		loadError(error);
 	}
 }
 
@@ -348,8 +424,7 @@ function waitForPane(pane, from) {
 			route();
 			return;
 		}
-		state.error = errorText("start_timeout");
-		render();
+		showError(errorText("start_timeout"));
 	}, START_TIMEOUT_MS);
 	void loadSessions();
 }
@@ -384,7 +459,7 @@ async function loadMessages() {
 		if (ended !== undefined) state.pending = state.pending.filter((p) => p.sentAt >= ended);
 		render();
 	} catch (error) {
-		handleError(error);
+		loadError(error);
 	}
 }
 
@@ -410,7 +485,7 @@ async function loadOlder() {
 		}
 	} catch (error) {
 		failed = true;
-		handleError(error);
+		loadError(error);
 	}
 	if (state.open !== id) return;
 	state.loadingOlder = false;
@@ -437,7 +512,7 @@ async function loadStatus() {
 		report = await api.status(id);
 	} catch (error) {
 		if (!(error instanceof Error && error.message === "no_status")) {
-			handleError(error);
+			loadError(error);
 			return;
 		}
 		report = null;
@@ -596,7 +671,7 @@ async function checkPush() {
 		state.offerPush = Notification.permission !== "granted" || !subscribed;
 		render();
 	} catch (error) {
-		handleError(error);
+		loadError(error);
 	}
 }
 
@@ -647,7 +722,8 @@ function pairView() {
 function listShell() {
 	return `<header class="bar"><h1>Sessions</h1><button class="notify" id="notify" hidden>Enable notifications</button>
 <span class="muted" id="online"></span><a class="phones" href="#phones" aria-label="Paired phones">⋯</a></header>
-<div id="banner"></div><section class="scroll" id="rows"></section>
+<div id="banner"></div><div class="search"><input type="search" id="search" placeholder="Search" aria-label="Search sessions" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search"></div>
+<section class="scroll" id="rows"></section>
 <form class="composer new" id="new-task"><textarea id="task" rows="1" placeholder="New task…" aria-label="New task" maxlength="32768"></textarea>
 <div class="where"><select id="cwd" aria-label="Directory"></select>
 <input id="cwd-other" placeholder="/path/to/project" aria-label="Directory path" autocapitalize="off" autocomplete="off" spellcheck="false" hidden>
@@ -665,8 +741,10 @@ function rowHtml(s) {
 function rowsHtml() {
 	if (!state.loaded) return `<p class="empty">Loading…</p>`;
 	if (state.sessions.length === 0) return `<p class="empty">No sessions. Start one below.</p>`;
+	const found = filterSessions(state.sessions, state.query);
+	if (found.length === 0) return `<p class="empty">No sessions match “${esc(state.query.trim())}”.</p>`;
 	return BANDS.map(([key, title]) => {
-		const rows = state.sessions.filter((s) => s.band === key);
+		const rows = found.filter((s) => s.band === key);
 		return rows.length ? `<h2 class="band">${title}</h2>${rows.map(rowHtml).join("")}` : "";
 	}).join("");
 }
@@ -675,7 +753,8 @@ function chatShell() {
 	return `<header class="bar"><a class="back" href="#">‹ Sessions</a><button class="title" id="title" aria-haspopup="dialog"></button>
 <button class="stop" id="stop" hidden>Stop</button></header>
 <button class="statusbar" id="statusbar" aria-haspopup="dialog" aria-label="Status" hidden></button>
-<div id="banner"></div><section class="scroll" id="scroll"><div class="older" id="older"></div><div class="log" id="log"></div></section>
+<div id="banner"></div><section class="scroll" id="scroll"><div class="older" id="older"></div><div class="log" id="log">
+<div class="part" id="msgs"></div><div class="part" id="live"></div><div class="part" id="pending"></div><div class="part" id="working"></div></div></section>
 <div class="thumbs" id="thumbs" hidden></div>
 <form class="composer" id="composer"><button type="button" class="attach" id="attach" aria-label="Attach image"><span aria-hidden="true">+</span></button>
 <input type="file" id="file" accept="image/*" multiple hidden>
@@ -710,22 +789,43 @@ function toolHtml(name, summary, result, key, running = false) {
 <pre>${esc(text)}${result.truncated ? "\n…" : ""}</pre></details>${picturesHtml(result)}`;
 }
 
-/** @param {Session | undefined} session */
-function logHtml(session) {
+/**
+ * The log's four parts: the transcript, the reply in progress, the prompts sent and not yet in
+ * the transcript, and the working line. Each is replaced only when it changes (see updatePart), so
+ * a streamed chunk leaves the transcript alone: a selection in it, and its images, stay.
+ * @param {Session | undefined} session
+ */
+function logParts(session) {
+	const calls = new Set(state.messages.flatMap((m) => (m.tools ?? []).map((t) => t.id)));
+	const running = new Set((state.live?.tools ?? []).filter((t) => t.running).map((t) => t.id));
+	const live = state.live ? liveHtml(state.live, calls) : "";
+	const pending = pendingHtml();
+	// The reply in progress replaces the working line once it shows something.
+	const streaming = live !== "" || running.size > 0;
+	const working =
+		session?.state === "working" && !streaming
+			? `<div class="working">✻ ${esc(session.detail || "Working…")}</div>`
+			: "";
+	let msgs = transcriptHtml(calls, running);
+	if (!msgs && !live && !pending && !working) {
+		msgs = `<p class="empty">${state.messagesLoaded ? "Nothing in this session yet." : "Loading…"}</p>`;
+	}
+	return { msgs, live, pending, working };
+}
+
+/** @param {Set<string>} calls the transcript's tool calls @param {Set<string>} running those the reply in progress runs */
+function transcriptHtml(calls, running) {
 	/** @type {Map<string, Message>} */
 	const results = new Map();
 	for (const m of state.messages) if (m.kind === "toolResult" && m.toolCallId) results.set(m.toolCallId, m);
-	const calls = new Set(state.messages.flatMap((m) => (m.tools ?? []).map((t) => t.id)));
-	const running = new Set((state.live?.tools ?? []).filter((t) => t.running).map((t) => t.id));
 	const parts = [];
 	/** @param {Message} m */
 	const more = (m) =>
 		`<button class="more" data-id="${esc(m.id)}" aria-label="${snippet(m.text) ? `Actions for “${esc(snippet(m.text))}”` : "Actions for this message"}" aria-haspopup="dialog">⋯</button>`;
-	const last = state.messages.at(-1);
 	for (const m of state.messages) {
 		if (m.kind === "user") {
 			parts.push(
-				`<div class="mine">${more(m)}<div class="u">${picturesHtml(m)}${esc(shownText(m.text ?? "", m.images))}</div></div>`,
+				`<div class="mine${m.images?.length ? " pics" : ""}">${more(m)}<div class="u">${picturesHtml(m)}${esc(shownText(m.text ?? "", m.images))}</div></div>`,
 			);
 		} else if (m.kind === "assistant") {
 			if (m.thinking) {
@@ -733,14 +833,7 @@ function logHtml(session) {
 					`<details class="think" data-key="think:${esc(m.id)}"><summary>Thinking</summary><pre>${esc(m.thinking)}</pre></details>`,
 				);
 			}
-			// A reply of its own, not a step between tool calls, and not where the session already is.
-			const back = m.text && !m.tools?.length && m !== last;
-			if (m.text)
-				parts.push(
-					back
-						? `<div class="theirs"><div class="a">${md(m.text)}</div>${more(m)}</div>`
-						: `<div class="a">${md(m.text)}</div>`,
-				);
+			if (m.text) parts.push(`<div class="theirs"><div class="a">${md(m.text)}</div>${more(m)}</div>`);
 			for (const [index, tool] of (m.tools ?? []).entries()) {
 				const key = tool.id || `${m.id}:${index}`;
 				parts.push(toolHtml(tool.name, tool.summary, results.get(tool.id), key, running.has(tool.id)));
@@ -750,20 +843,21 @@ function logHtml(session) {
 			parts.push(toolHtml(m.toolName ?? "tool", "", m, m.id));
 		} else if (m.kind === "marker") parts.push(`<div class="marker">${esc(m.text)}</div>`);
 	}
-	const live = state.live ? liveHtml(state.live, calls) : "";
-	if (live) parts.push(live);
-	for (const { prompt, thumbs } of state.pending) {
-		const pictures = thumbs.map((thumb) => `<img src="${esc(thumb)}" alt="Image">`).join("");
-		parts.push(
-			`<div class="u">${pictures ? `<div class="pictures">${pictures}</div>` : ""}${esc(prompt)}</div><div class="queued">sent · waiting for the session</div>`,
-		);
-	}
-	// The reply in progress replaces the working line once it shows something.
-	const streaming = live !== "" || running.size > 0;
-	if (session?.state === "working" && !streaming)
-		parts.push(`<div class="working">✻ ${esc(session.detail || "Working…")}</div>`);
-	if (parts.length) return parts.join("");
-	return `<p class="empty">${state.messagesLoaded ? "Nothing in this session yet." : "Loading…"}</p>`;
+	return parts.join("");
+}
+
+/** Each sent prompt's images show large, from what was sent (see paintPending). */
+function pendingHtml() {
+	return state.pending
+		.map(({ id, prompt, images }) => {
+			const buttons = images.map(
+				(_, index) =>
+					`<button type="button" class="pic" data-pending="${id}" data-index="${index}" aria-label="Image ${index + 1}, full screen"><img alt="Image"></button>`,
+			);
+			const pictures = buttons.length ? `<div class="pictures">${buttons.join("")}</div>` : "";
+			return `<div class="u${pictures ? " pics" : ""}">${pictures}${esc(prompt)}</div><div class="queued">sent · waiting for the session</div>`;
+		})
+		.join("");
 }
 
 /**
@@ -787,12 +881,16 @@ function liveHtml(live, calls) {
 
 /** @param {Session | undefined} session */
 function bannerHtml(session) {
-	if (!state.online) return `<div class="banner off">Mac unreachable. Retrying…</div>`;
-	if (state.error) return `<div class="banner off">${esc(state.error)}</div>`;
+	if (!state.online) {
+		return `<div class="banner off">Mac unreachable — it may be asleep, offline, or remote control is off. Retrying…</div>`;
+	}
+	const error = state.error ? `<div class="banner off">${esc(state.error)}</div>` : "";
+	// An error does not hide the way to answer.
 	if (session?.state === "needs") {
-		return `<div class="banner needs"><span>This session is waiting for an answer to a dialog. A reply sent here becomes its next prompt.</span>
+		return `${error}<div class="banner needs"><span>This session is waiting for an answer to a dialog. A reply sent here becomes its next prompt.</span>
 <button class="answer" id="answer" aria-haspopup="dialog">Answer</button></div>`;
 	}
+	if (error) return error;
 	if (!session && state.homeScreenHint) {
 		return `<div class="banner hint"><span>Now Share → Add to Home Screen. The app opens already paired.</span>
 <button class="dismiss" id="dismiss-hint" aria-label="Dismiss">×</button></div>`;
@@ -874,28 +972,67 @@ function snippet(text) {
 	return line.length > 40 ? `${line.slice(0, 39)}…` : line;
 }
 
-/** @param {Session | undefined} session @param {{ id: string, text: string, kind: string }} menu */
+/** @param {Session | undefined} session @param {NonNullable<typeof state.menu>} menu */
 function menuHtml(session, menu) {
-	const busy = isBusy(session);
+	// A step between tool calls, or where the session already is, is not a reply to go back to.
+	const moves = menu.kind === "user" || menu.back;
+	const busy = moves && isBusy(session);
 	const why = !session?.alive
 		? errorText("session_not_running")
 		: state.navigating
 			? "Available once the session has moved."
 			: "Available once the session is idle.";
 	const disabled = busy ? " disabled" : "";
+	const copy = `<button class="action" id="copy">${state.copied ? "Copied" : "Copy"}<small>${menu.kind === "user" ? "This message's text." : "This reply's text, as markdown."}</small></button>`;
 	const actions =
 		menu.kind === "user"
 			? `<button class="action" id="edit-new"${disabled}>Edit in a new session<small>A new session without this message and everything after it, with its text in the reply box.</small></button>
 <button class="action" id="edit-here"${disabled}>Edit here<small>This message and everything after it leave this session's branch, and its text goes in the reply box.</small></button>`
-			: `<button class="action" id="back-here"${disabled}>Go back to here<small>Everything after this reply leaves this session's branch.</small></button>`;
+			: menu.back
+				? `<button class="action" id="back-here"${disabled}>Go back to here<small>Everything after this reply leaves this session's branch.</small></button>`
+				: "";
 	return `<header class="sheet-bar"><h2>${menu.kind === "user" ? "Your message" : "Reply"}</h2><button class="close" id="sheet-close">Done</button></header>
 <p class="quote">${esc(menu.text)}</p>${busy ? `<p class="muted">${esc(why)}</p>` : ""}
-<div class="actions">${actions}</div>`;
+<div class="actions">${copy}${actions}</div>`;
+}
+
+/**
+ * The open message's text to the clipboard: the Clipboard API within the tap (Safari allows it
+ * only there), else a selected text field and the copy command.
+ */
+function copyMessage() {
+	const menu = state.menu;
+	if (!menu) return;
+	const text = menu.kind === "user" ? promptText(menu.text) : menu.text;
+	const done = () => {
+		state.copied = true;
+		clearTimeout(copiedTimer);
+		copiedTimer = setTimeout(() => {
+			state.copied = false;
+			render();
+		}, COPIED_MS);
+		render();
+	};
+	const fallback = () => {
+		const field = document.createElement("textarea");
+		field.value = text;
+		field.readOnly = true;
+		field.className = "clip";
+		document.body.append(field);
+		field.select();
+		field.setSelectionRange(0, text.length);
+		const copied = document.execCommand("copy");
+		field.remove();
+		if (copied) done();
+		else showError("This browser did not allow copying.");
+	};
+	if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+	else fallback();
 }
 
 function terminalHtml() {
 	const keys = PRESS.map(
-		([key, face]) => `<button class="press" data-press="${key}" aria-label="${key}">${face}</button>`,
+		([key, face, label = key]) => `<button class="press" data-press="${key}" aria-label="${label}">${face}</button>`,
 	).join("");
 	return `<header class="sheet-bar"><h2>Answer</h2><button class="close" id="sheet-close">Done</button></header>
 <p class="error" id="term-error" hidden></p><pre class="screen" id="screen" tabindex="0" aria-label="The session's screen"></pre>
@@ -910,7 +1047,6 @@ function render() {
 	const view = !getToken() ? "pair" : state.open ? `chat:${state.open}` : state.phones ? "phones" : "list";
 	if (view !== shown) {
 		shown = view;
-		lastLog = "";
 		app.innerHTML =
 			view === "pair" ? pairView() : view === "list" ? listShell() : view === "phones" ? phonesShell() : chatShell();
 		if (view === "pair") bindPair();
@@ -961,7 +1097,13 @@ function updateChat() {
 	const resuming = state.starting?.from !== undefined && state.starting.from === state.open;
 	// Kept while a resumed session's row gives way to its pane's.
 	if (!resuming) $("#title").textContent = session?.label ?? "";
-	$("#stop").hidden = session?.state !== "working";
+	// Mid-turn, a dialog waiting on an answer included.
+	const turn = session?.state === "working" || session?.state === "needs";
+	if (!turn) state.stopping = false;
+	const stop = $("#stop");
+	stop.hidden = !turn;
+	stop.disabled = state.stopping;
+	stop.textContent = state.stopping ? "Stopping…" : "Stop";
 	const bar = $("#statusbar");
 	const barNow = barHtml(state.report, session && shortPath(session.cwd), Date.now());
 	if (bar.dataset.html !== barNow) {
@@ -983,16 +1125,14 @@ function updateChat() {
 	const older = $("#older");
 	older.hidden = !state.more;
 	older.textContent = state.loadingOlder ? "Loading…" : "";
-	const html = logHtml(session);
-	if (html !== lastLog) {
-		lastLog = html;
-		const log = $("#log");
-		const open = new Set([...log.querySelectorAll("details[open]")].map((d) => d.dataset.key));
-		log.innerHTML = html;
-		for (const d of log.querySelectorAll("details")) if (open.has(d.dataset.key)) d.open = true;
-		showPictures(log);
-		if (atBottom && !prepending) scroll.scrollTop = scroll.scrollHeight;
-	}
+	const parts = logParts(session);
+	const msgs = updatePart($("#msgs"), parts.msgs);
+	if (msgs) showPictures($("#msgs"));
+	const pending = updatePart($("#pending"), parts.pending);
+	if (pending) paintPending();
+	const live = updatePart($("#live"), parts.live);
+	const working = updatePart($("#working"), parts.working);
+	if ((msgs || pending || live || working) && atBottom && !prepending) scroll.scrollTop = scroll.scrollHeight;
 	// Also when the page loaded was empty and only "#older" went.
 	if (prepending) scroll.scrollTop += scroll.scrollHeight - height;
 	prepending = false;
@@ -1001,18 +1141,44 @@ function updateChat() {
 	const blocked = resuming || stranded || (state.starting !== undefined && session?.resumable === true);
 	updateSheet(session);
 	const text = $("#text");
-	text.disabled = blocked;
-	$(".send").disabled = blocked || state.navigating;
+	text.disabled = blocked || state.compacting;
+	$(".send").disabled = blocked || state.navigating || state.compacting;
 	// A resumed session's first prompt is an argument to pi, which carries no images.
 	$("#attach").disabled = blocked || session?.resumable === true || state.attachments.length >= ATTACH_MAX;
 	text.placeholder = resuming
 		? "Starting…"
-		: stranded
-			? "Not running: open it on the Mac"
-			: session?.resumable
-				? "Reply resumes it (text only)"
-				: "Reply";
+		: state.compacting
+			? "Compacting…"
+			: stranded
+				? "Not running: open it on the Mac"
+				: session?.resumable
+					? "Reply resumes it (text only)"
+					: "Reply";
 	updateThumbs();
+}
+
+/** What each of the log's parts holds. @type {WeakMap<Element, string>} */
+const partHtml = new WeakMap();
+
+/**
+ * A part of the log, replaced only when its HTML changes; what only adds to the end (a new
+ * message, another sent prompt) is appended, so what was there stays as it is.
+ * @param {HTMLElement} part @param {string} html @returns {boolean} whether it changed
+ */
+function updatePart(part, html) {
+	const was = partHtml.get(part) ?? "";
+	if (html === was) return false;
+	partHtml.set(part, html);
+	if (html.startsWith(was)) {
+		part.insertAdjacentHTML("beforeend", html.slice(was.length));
+		return true;
+	}
+	const open = new Set(
+		[...part.querySelectorAll("details[open]")].map((d) => /** @type {HTMLElement} */ (d).dataset.key),
+	);
+	part.innerHTML = html;
+	for (const d of part.querySelectorAll("details")) if (open.has(d.dataset.key)) d.open = true;
+	return true;
 }
 
 /** The images for the next prompt, above the composer, each with its remove button. */
@@ -1049,6 +1215,12 @@ function updateSheet(session) {
 	if (sheet.dataset.html === html) return;
 	sheet.innerHTML = html;
 	sheet.dataset.html = html;
+	// Asked for by /model: there once the report is in.
+	const model = $("#model");
+	if (state.focusModel && model) {
+		state.focusModel = false;
+		model.focus();
+	}
 }
 
 /** Built once, so the text field keeps its text and keyboard; then only the screen changes. @param {HTMLElement} sheet */
@@ -1121,6 +1293,13 @@ function grow(text) {
 function bindList() {
 	const task = $("#task");
 	task.addEventListener("input", () => grow(task));
+	// Outside the rows, which every update replaces, so it keeps its focus and keyboard.
+	const search = $("#search");
+	search.value = state.query;
+	search.addEventListener("input", () => {
+		state.query = search.value;
+		updateList();
+	});
 	$("#notify").addEventListener("click", () => void enablePush());
 	$("#banner").addEventListener("click", (/** @type {Event} */ event) => {
 		if (!(/** @type {Element} */ (event.target).closest("#dismiss-hint"))) return;
@@ -1144,8 +1323,7 @@ async function startTask() {
 	const cwd = $("#cwd").value || $("#cwd-other").value.trim();
 	if (!value || state.starting) return;
 	if (!cwd) {
-		state.error = "Type the directory to start it in.";
-		render();
+		showError("Type the directory to start it in.");
 		return;
 	}
 	state.starting = {};
@@ -1182,6 +1360,22 @@ function bindChat() {
 		},
 		{ root: $("#scroll"), rootMargin: `${OLDER_MARGIN}px 0px` },
 	);
+	pictureSizes?.disconnect();
+	pictureSizes = new ResizeObserver(keepPlace);
+	stuck = true;
+	const scroll = $("#scroll");
+	scroll.addEventListener("scroll", () => {
+		stuck = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
+	});
+	// A picture keeps its placeholder's height until its image is in (load does not bubble).
+	$("#log").addEventListener(
+		"load",
+		(/** @type {Event} */ event) => {
+			const pic = /** @type {Element} */ (event.target).closest(".pic");
+			pic?.classList.add("loaded");
+		},
+		true,
+	);
 	$("#viewer").addEventListener("click", closeViewer);
 	const text = $("#text");
 	text.addEventListener("input", () => grow(text));
@@ -1204,12 +1398,21 @@ function bindChat() {
 	});
 	$("#stop").addEventListener("click", async () => {
 		const id = state.open;
-		if (!id) return;
+		if (!id || state.stopping) return;
+		state.stopping = true;
+		render();
 		try {
 			await api.abort(id);
 		} catch (error) {
+			state.stopping = false;
 			handleError(error);
 		}
+	});
+	// Back to the list's own entry, rather than a new one after this chat's.
+	$(".back").addEventListener("click", (/** @type {Event} */ event) => {
+		if (!backToList) return;
+		event.preventDefault();
+		history.back();
 	});
 	$("#title").addEventListener("click", openSheet);
 	$("#statusbar").addEventListener("click", openSheet);
@@ -1221,6 +1424,7 @@ function bindChat() {
 	sheet.addEventListener("click", (/** @type {Event} */ event) => {
 		const target = /** @type {Element} */ (event.target);
 		if (target.closest("#sheet-close")) closeSheet();
+		else if (target.closest("#copy")) copyMessage();
 		else if (target.closest("#compact")) void compact();
 		else if (target.closest("#clone")) void move((id) => api.clone(id));
 		else if (target.closest("#edit-new")) edit("fork");
@@ -1243,7 +1447,9 @@ function bindChat() {
 	$("#log").addEventListener("click", (/** @type {Event} */ event) => {
 		const pic = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".pic"));
 		if (pic) {
-			const url = pictures.get(pictureKey(pic.dataset.entry ?? "", pic.dataset.index ?? ""));
+			const url = pic.dataset.pending
+				? pendingPicture(pic)
+				: pictures.get(pictureKey(pic.dataset.entry ?? "", pic.dataset.index ?? ""));
 			if (url) openViewer(url);
 			return;
 		}
@@ -1252,7 +1458,9 @@ function bindChat() {
 			(m) => (m.kind === "user" || m.kind === "assistant") && m.id === more?.dataset.id,
 		);
 		if (!message) return;
-		state.menu = { id: message.id, text: message.text ?? "", kind: message.kind };
+		const back = message.kind === "assistant" && !message.tools?.length && message !== state.messages.at(-1);
+		state.menu = { id: message.id, text: message.text ?? "", kind: message.kind, back };
+		state.copied = false;
 		state.error = undefined;
 		render();
 	});
@@ -1274,7 +1482,7 @@ function openSheet() {
 
 function closeSheet() {
 	state.sheetOpen = false;
-	state.compacting = false;
+	state.focusModel = false;
 	state.menu = undefined;
 	state.terminal = false;
 	pollScreen();
@@ -1334,7 +1542,7 @@ async function move(call, fill) {
 	// The reply box may hold an edit's text, which would go to the session as it is.
 	navigateGiveUp = setTimeout(() => {
 		if (!state.navigating) return;
-		state.error = errorText("not_moved");
+		showError(errorText("not_moved"));
 		endNavigating();
 	}, NAVIGATE_GIVE_UP_MS);
 	render();
@@ -1366,12 +1574,7 @@ function endNavigating() {
 function edit(how) {
 	const menu = state.menu;
 	if (!menu) return;
-	// The transcript shows an image as an "[Image]" line; only the text goes back, as pi's editor gets it.
-	const text = menu.text
-		.split("\n")
-		.filter((line) => line !== "[Image]")
-		.join("\n");
-	void move((id) => api[how](id, menu.id), text);
+	void move((id) => api[how](id, menu.id), promptText(menu.text));
 }
 
 /** Back to a reply, which stays. */
@@ -1431,7 +1634,7 @@ async function compact() {
 async function attach(files) {
 	const id = state.open;
 	const room = ATTACH_MAX - state.attachments.length;
-	if (files.length > room) state.error = errorText("too_many_images");
+	if (files.length > room) showError(errorText("too_many_images"));
 	for (const file of files.slice(0, Math.max(room, 0))) {
 		try {
 			const image = await readImage(file);
@@ -1439,7 +1642,7 @@ async function attach(files) {
 			// Another pick may have filled it meanwhile.
 			if (state.attachments.length < ATTACH_MAX) state.attachments.push(image);
 		} catch {
-			state.error = errorText("unreadable_image");
+			showError(errorText("unreadable_image"));
 		}
 		render();
 	}
@@ -1508,8 +1711,53 @@ function paint(button) {
 function showPictures(log) {
 	pictureObserver?.disconnect();
 	for (const button of /** @type {NodeListOf<HTMLElement>} */ (log.querySelectorAll(".pic"))) {
+		pictureSizes?.observe(button);
 		if (!paint(button)) pictureObserver?.observe(button);
 	}
+}
+
+/** The sent prompts' images, from what was sent. */
+function paintPending() {
+	for (const button of /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll("#pending .pic"))) {
+		const img = /** @type {HTMLImageElement} */ (button.querySelector("img"));
+		const url = pendingPicture(button);
+		if (!url || img.getAttribute("src") === url) continue;
+		pictureSizes?.observe(button);
+		img.src = url;
+	}
+}
+
+/** @param {HTMLElement} button @returns {string | undefined} */
+function pendingPicture(button) {
+	const entry = state.pending.find((p) => String(p.id) === button.dataset.pending);
+	const image = entry?.images[Number(button.dataset.index)];
+	return image && `data:${image.mimeType};base64,${image.data}`;
+}
+
+/**
+ * An image's size changes as it loads: from its placeholder's, and again whenever the transcript
+ * is rebuilt. One above what is on screen moves the log by as much, so what is on screen stays;
+ * the log's end stays in view if it was.
+ * @param {ResizeObserverEntry[]} entries
+ */
+function keepPlace(entries) {
+	const scroll = $("#scroll");
+	if (!scroll) return;
+	const top = scroll.getBoundingClientRect().top;
+	let above = 0;
+	for (const entry of entries) {
+		const button = /** @type {HTMLElement} */ (entry.target);
+		const height = entry.borderBoxSize[0]?.blockSize ?? 0;
+		const was = Number(button.dataset.height ?? height);
+		button.dataset.height = String(height);
+		if (!button.isConnected) {
+			pictureSizes?.unobserve(button);
+			continue;
+		}
+		if (button.getBoundingClientRect().bottom - (height - was) <= top) above += height - was;
+	}
+	if (stuck) scroll.scrollTop = scroll.scrollHeight;
+	else if (above) scroll.scrollTop += above;
 }
 
 /** @param {string} entry @param {number} index */
@@ -1565,12 +1813,25 @@ async function send() {
 	const text = $("#text");
 	const value = text.value.trim();
 	const id = state.open;
-	const resume = state.sessions.find((s) => s.id === id)?.resumable === true;
-	if (!value || !id || state.navigating || (resume && state.starting)) return;
+	const session = state.sessions.find((s) => s.id === id);
+	const resume = session?.resumable === true;
+	// pi turns a prompt away while it compacts, and the transcript would never show it.
+	if (!value || !id || state.navigating || state.compacting || (resume && state.starting)) return;
+	// What a running session's own sheet does, done here rather than sent.
+	const command = session?.alive && !resume ? shortcut(value) : undefined;
+	if (command) {
+		text.value = "";
+		grow(text);
+		if (command === "model") {
+			state.focusModel = true;
+			openSheet();
+		} else if (isBusy(session)) showError("Compact is available once the session is idle.");
+		else void compact();
+		return;
+	}
 	const images = state.attachments;
 	if (resume && images.length) {
-		state.error = errorText("images_need_running");
-		render();
+		showError(errorText("images_need_running"));
 		return;
 	}
 	if (resume) state.starting = { from: id };
@@ -1579,9 +1840,12 @@ async function send() {
 	state.attachments = [];
 	const key = promptKey(value, images.length);
 	const before = userCount(state.messages, key) + state.pending.filter((p) => p.text === key).length;
-	state.pending.push({ text: key, prompt: value, thumbs: images.map((i) => i.thumb), before, sentAt: Date.now() });
+	const last = state.messages.at(-1)?.id ?? "";
+	const entry = { id: ++pendingId, text: key, prompt: value, images, before, sentAt: Date.now(), last };
+	state.pending.push(entry);
 	// The actions it holds back come back by themselves once the grace is over.
 	setTimeout(render, PENDING_GRACE_MS);
+	setTimeout(() => checkPending(id, entry), PROMPT_GIVE_UP_MS);
 	render();
 	$("#scroll").scrollTop = $("#scroll").scrollHeight;
 	try {
@@ -1597,12 +1861,41 @@ async function send() {
 		}
 	} catch (error) {
 		if (resume) state.starting = undefined;
-		const failed = state.pending.map((p) => p.text).lastIndexOf(key);
-		if (failed >= 0) state.pending.splice(failed, 1);
-		for (const p of state.pending.slice(Math.max(failed, 0))) if (p.text === key) p.before--;
-		if (!text.value) text.value = value;
-		if (state.open === id && !state.attachments.length) state.attachments = images;
-		handleError(error);
+		forget(entry);
+		putBack(id, entry);
+		handleError(error, "Not sent: ");
+	}
+}
+
+/** @typedef {(typeof state.pending)[number]} Pending */
+
+/** A sent prompt no longer waited for: those sent after it with the same text no longer count it. @param {Pending} entry */
+function forget(entry) {
+	const at = state.pending.indexOf(entry);
+	if (at < 0) return;
+	state.pending.splice(at, 1);
+	for (const p of state.pending.slice(at)) if (p.text === entry.text) p.before--;
+}
+
+/** A prompt that did not reach its session, back in the reply box above what was typed since, with its images. @param {string} id @param {Pending} entry */
+function putBack(id, entry) {
+	if (state.open !== id) return;
+	const text = $("#text");
+	text.value = text.value ? `${entry.prompt}\n${text.value}` : entry.prompt;
+	grow(text);
+	if (!state.attachments.length) state.attachments = entry.images;
+}
+
+/** A sent prompt still waiting PROMPT_GIVE_UP_MS on (see giveUp); a resume's is waitForPane's. @param {string} id @param {Pending} entry */
+function checkPending(id, entry) {
+	if (state.open !== id || !state.pending.includes(entry) || state.starting) return;
+	const verdict = giveUp(entry, state.sessions.find((s) => s.id === id)?.state, state.messages.at(-1)?.id ?? "");
+	if (verdict === "wait") return;
+	forget(entry);
+	if (verdict === "drop") render();
+	else {
+		putBack(id, entry);
+		showError(errorText("not_delivered"));
 	}
 }
 
@@ -1646,7 +1939,7 @@ async function loadDevices() {
 		state.devices = await api.devices();
 		render();
 	} catch (error) {
-		handleError(error);
+		loadError(error);
 	}
 }
 
@@ -1708,10 +2001,13 @@ function claimLink() {
 
 function route() {
 	claimLink();
+	const fromList = !state.open && !state.phones;
 	routePhones();
 	const match = /^#s\/(.+)$/.exec(location.hash);
 	const open = match ? decodeURIComponent(match[1]) : undefined;
 	if (open !== state.open) {
+		// A resumed session's pane replaces its entry, which still follows the list's.
+		backToList = open !== undefined && (fromList || (open === followed && backToList));
 		// Following a resumed session to its pane keeps the reply on screen until pi writes it.
 		if (open === undefined || open !== followed) state.pending = [];
 		state.attachments = [];
@@ -1732,9 +2028,12 @@ function route() {
 		state.sheetOpen = false;
 		state.report = undefined;
 		state.compacting = false;
+		state.focusModel = false;
+		state.stopping = false;
 		state.navigating = false;
 		clearTimeout(navigateGiveUp);
 		state.menu = undefined;
+		state.copied = false;
 		state.terminal = false;
 		state.screen = undefined;
 		pollScreen();
@@ -1743,7 +2042,40 @@ function route() {
 	render();
 }
 
+/**
+ * iOS leaves the layout viewport, and 100dvh, the screen's height while the keyboard is up, and
+ * scrolls the page to show the field typed in, pushing the header out of sight. The app takes the
+ * height that shows instead, a sheet sits on the keyboard, and the page stays at its top.
+ */
+function fitViewport() {
+	const viewport = window.visualViewport;
+	if (!viewport) return;
+	if (window.scrollY) window.scrollTo(0, 0);
+	const root = document.documentElement;
+	// In layout pixels, as a pinch zoom leaves them.
+	const height = viewport.height * viewport.scale;
+	const keyboard = Math.max(0, root.clientHeight - height - viewport.offsetTop * viewport.scale);
+	root.style.setProperty("--app-h", `${height}px`);
+	root.style.setProperty("--keyboard", `${keyboard}px`);
+	root.classList.toggle("keyboard", keyboard > KEYBOARD_MIN);
+}
+
+// A tap on a button or a link is the next action an error lasts until (see showError); it shows
+// once the tap is handled, which may bring another.
+document.addEventListener(
+	"click",
+	(/** @type {Event} */ event) => {
+		if (state.error === undefined || !(/** @type {Element} */ (event.target).closest("button, a"))) return;
+		state.error = undefined;
+		clearTimeout(errorTimer);
+		setTimeout(render);
+	},
+	true,
+);
 window.addEventListener("hashchange", route);
+window.visualViewport?.addEventListener("resize", fitViewport);
+window.visualViewport?.addEventListener("scroll", fitViewport);
+fitViewport();
 // iOS suspends a backgrounded app's stream: reopen it on return.
 document.addEventListener("visibilitychange", () => {
 	pollScreen();
