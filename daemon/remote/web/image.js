@@ -78,7 +78,8 @@ export async function readImage(file) {
 		}
 		throw new Error("image_too_large");
 	} finally {
-		if (image.source instanceof ImageBitmap) image.source.close();
+		// An <img> has nothing to close; a browser without ImageBitmap never made one.
+		if ("close" in image.source) image.source.close();
 	}
 }
 
