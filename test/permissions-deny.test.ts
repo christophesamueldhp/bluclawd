@@ -298,6 +298,16 @@ describe("the extension", () => {
 		expect(await call("write", { path: ".git/hooks/pre-commit" })).toBeUndefined();
 	});
 
+	it("warns when a settings file cannot be read, and keeps the other file's rules", async () => {
+		const { handlers, ctx, call, notes } = load({});
+		writeFileSync(globalSettings(), '{ "permissions": { "deny": ["Bash(rm *)"] ');
+		mkdirSync(join(dir, ".pi"));
+		writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ permissions: { deny: ["WebFetch"] } }));
+		await handlers.session_start({}, ctx);
+		expect(notes.some((n) => n.includes("deny rules") && n.includes(globalSettings()))).toBe(true);
+		expect((await call("webfetch", { url: "https://example.com" }))?.block).toBe(true);
+	});
+
 	it("judges a monitor as bash, and a websearch batch query by query", async () => {
 		const { handlers, ctx, call } = load({ permissions: { deny: ["Bash(rm *)", "WebSearch(*secret*)"] } });
 		await handlers.session_start({}, ctx);
