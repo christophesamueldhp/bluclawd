@@ -1,0 +1,201 @@
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+	currentDaemonBuildId,
+	OrchestratorClient,
+	type RemoteAction,
+	type RemoteResult,
+} from "../ext/agent-view/orchestrator-client.ts";
+import { type AutostartDeps, autostartDeps, LABEL } from "../ext/remote/autostart.ts";
+import remoteFactory from "../ext/remote/index.ts";
+import { qrMatrix, renderQr } from "../ext/remote/qr.ts";
+import { serve, tailscaleInfo } from "../ext/remote/tailscale.ts";
+
+// Never the real tailscale, launchctl or LaunchAgents.
+vi.mock("../ext/remote/tailscale.ts", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../ext/remote/tailscale.ts")>()),
+	tailscaleInfo: vi.fn(),
+	serve: vi.fn(),
+}));
+vi.mock("../ext/remote/autostart.ts", async (importOriginal) => ({
+	...(await importOriginal<typeof import("../ext/remote/autostart.ts")>()),
+	autostartDeps: vi.fn(),
+}));
+
+const HOST = "mac.tail1234.ts.net";
+const PAIR = "Pair a new phone";
+const OFF = "Turn off remote control";
+
+describe("/remote-control", () => {
+	let dir: string;
+	let deps: AutostartDeps;
+	let enabled: boolean;
+	let actions: RemoteAction[];
+	let code: string;
+	const devices = [
+		{ id: "d1", name: "iPhone", createdAt: "2026-10-01T10:00:00.000Z" },
+		{ id: "d2", name: "iPad", createdAt: "2026-10-02T10:00:00.000Z" },
+	];
+
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-command-"));
+		vi.stubEnv("HOME", dir);
+		vi.stubEnv("PI_CODING_AGENT_DIR", join(dir, "agent"));
+		vi.stubEnv("PI_SERVER_DIR", join(dir, "server"));
+		deps = {
+			platform: "darwin",
+			dir: join(dir, "LaunchAgents"),
+			uid: 501,
+			launchctl: vi.fn((args: string[]) => {
+				if (args[0] === "bootout") throw new Error("not loaded");
+			}),
+			command: ["/usr/local/bin/node", "/x/daemon/cli.ts", "serve"],
+			env: { PATH: "/usr/bin" },
+			log: join(dir, "server", "daemon.log"),
+		};
+		vi.mocked(autostartDeps).mockImplementation(() => deps);
+		vi.mocked(tailscaleInfo).mockResolvedValue({ installed: true, dnsName: HOST, serve: "ours", funnel: false });
+		vi.mocked(serve).mockResolvedValue();
+		enabled = false;
+		actions = [];
+		code = "482913";
+		vi.spyOn(OrchestratorClient.prototype, "ensureDaemon").mockResolvedValue(true);
+		vi.spyOn(OrchestratorClient.prototype, "getDaemonInfo").mockResolvedValue({
+			buildId: currentDaemonBuildId(),
+		} as never);
+		vi.spyOn(OrchestratorClient.prototype, "remote").mockImplementation(async (action) => {
+			actions.push(action);
+			if (action.action === "on") enabled = true;
+			if (action.action === "off") enabled = false;
+			const paired = action.action === "on" || action.action === "pair";
+			const result: RemoteResult = { enabled, port: 7878, listening: enabled, devices };
+			return paired ? { ...result, code, expiresAt: Date.now() + 5 * 60_000 } : result;
+		});
+	});
+	afterEach(() => {
+		vi.restoreAllMocks();
+		rmSync(dir, { recursive: true, force: true });
+	});
+
+	function run(args: string, answers: { select?: (string | undefined)[]; confirm?: boolean } = {}) {
+		let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+		remoteFactory({
+			on: () => {},
+			events: { on: () => {} },
+			registerCommand: (_name: string, command: { handler: typeof handler }) => {
+				handler = command.handler;
+			},
+		} as never);
+		const selects = [...(answers.select ?? [])];
+		const ui = {
+			notify: vi.fn(),
+			select: vi.fn(async (_title: string, _items: string[]) => selects.shift()),
+			confirm: vi.fn(async () => answers.confirm ?? false),
+		};
+		const done = handler!(args, { cwd: dir, isProjectTrusted: () => false, ui });
+		return { ui, done };
+	}
+
+	const pairing = (pairCode: string) => renderQr(qrMatrix(`https://${HOST}/#pair=${pairCode}`));
+
+	it("when off, turns on and shows the address, a QR code of the pairing link, and the code under it", async () => {
+		const { ui, done } = run("");
+		await done;
+		expect(actions.map((a) => a.action)).toEqual(["status", "on"]);
+		expect(ui.select).not.toHaveBeenCalled();
+		expect(ui.notify).toHaveBeenCalledTimes(1);
+		const [text, type] = ui.notify.mock.calls[0]!;
+		expect(type).toBe("info");
+		const lines = text.split("\n");
+		expect(lines[0]).toBe(`Remote control is on: https://${HOST}`);
+		expect(text).toContain(pairing("482913"));
+		const after = text.slice(text.indexOf(pairing("482913")) + pairing("482913").length).split("\n");
+		expect(after.slice(1)).toEqual([
+			"Code for the Home Screen app: 482 913 (valid 5 minutes, once)",
+			"Starts at login: off (turn it on from /remote-control)",
+		]);
+	});
+
+	it("when on, offers a menu, and cancelling it changes nothing", async () => {
+		enabled = true;
+		const { ui, done } = run("", { select: [undefined] });
+		await done;
+		expect(ui.select).toHaveBeenCalledWith("Remote control is on", [
+			PAIR,
+			"Paired phones (2)…",
+			"Start at login: off",
+			OFF,
+		]);
+		expect(actions.map((a) => a.action)).toEqual(["status"]);
+		expect(ui.notify).not.toHaveBeenCalled();
+		expect(deps.launchctl).not.toHaveBeenCalled();
+	});
+
+	it("pairs a new phone with a new code's QR code", async () => {
+		enabled = true;
+		code = "105377";
+		const { ui, done } = run("", { select: [PAIR] });
+		await done;
+		expect(actions.map((a) => a.action)).toEqual(["status", "pair"]);
+		expect(ui.notify.mock.calls[0]![0]).toContain(pairing("105377"));
+	});
+
+	it("lists the paired phones, from which one is revoked", async () => {
+		enabled = true;
+		const { ui, done } = run("", { select: ["Paired phones (2)…", undefined] });
+		await done;
+		expect(ui.select).toHaveBeenCalledTimes(2);
+		expect(ui.select.mock.calls[1]![1]).toHaveLength(2);
+		expect(actions.map((a) => a.action)).toEqual(["status", "devices"]);
+	});
+
+	it("turns start at login on, then off, saying which in the menu", async () => {
+		enabled = true;
+		const plist = join(deps.dir, `${LABEL}.plist`);
+		const first = run("", { select: ["Start at login: off"] });
+		await first.done;
+		expect(existsSync(plist)).toBe(true);
+		expect(first.ui.notify.mock.calls[0]![0]).toContain("starts at login now");
+		const second = run("", { select: ["Start at login: on"] });
+		await second.done;
+		expect(second.ui.select.mock.calls[0]![1]).toContain("Start at login: on");
+		expect(existsSync(plist)).toBe(false);
+	});
+
+	it("leaves start at login out where there is none", async () => {
+		enabled = true;
+		deps.platform = "linux";
+		const { ui, done } = run("", { select: [undefined] });
+		await done;
+		expect(ui.select.mock.calls[0]![1]).toEqual([PAIR, "Paired phones (2)…", OFF]);
+	});
+
+	it("turns off only once confirmed", async () => {
+		enabled = true;
+		const declined = run("", { select: [OFF], confirm: false });
+		await declined.done;
+		expect(declined.ui.confirm).toHaveBeenCalledTimes(1);
+		expect(actions.map((a) => a.action)).toEqual(["status"]);
+		expect(enabled).toBe(true);
+		const confirmed = run("", { select: [OFF], confirm: true });
+		await confirmed.done;
+		expect(enabled).toBe(false);
+		expect(confirmed.ui.notify.mock.calls[0]![0]).toContain("Remote control is off");
+	});
+
+	it("still runs pair, devices and autostart as before, and names only /remote-control in its usage", async () => {
+		enabled = true;
+		const pair = run("pair");
+		await pair.done;
+		expect(pair.ui.select).not.toHaveBeenCalled();
+		expect(pair.ui.notify.mock.calls[0]![0]).toContain(pairing("482913"));
+		const autostart = run("autostart");
+		await autostart.done;
+		expect(existsSync(join(deps.dir, `${LABEL}.plist`))).toBe(true);
+		const usage = run("nope");
+		await usage.done;
+		expect(usage.ui.notify.mock.calls).toEqual([["Usage: /remote-control", "warning"]]);
+	});
+});

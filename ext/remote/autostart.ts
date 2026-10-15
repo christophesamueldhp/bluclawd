@@ -150,16 +150,16 @@ export function toggleAutostart(deps: AutostartDeps): string {
 	const on = !autostartOn(deps);
 	setAutostart(on, deps);
 	return on
-		? `The agent daemon starts at login now (${plistPath(deps)}); /remote-control autostart turns it off`
+		? `The agent daemon starts at login now (${plistPath(deps)}); turn it off from /remote-control`
 		: "The agent daemon no longer starts at login";
 }
 
 /** For /remote-control's own output; undefined where there is no autostart. */
 export function autostartStatus(deps: AutostartDeps): string | undefined {
 	if (deps.platform !== "darwin") return undefined;
-	if (!autostartOn(deps)) return "Starts at login: off (/remote-control autostart turns it on)";
+	if (!autostartOn(deps)) return "Starts at login: off (turn it on from /remote-control)";
 	const missing = missingFile(deps);
 	return missing
-		? `Starts at login: on (needs refresh: ${missing} is gone; /remote-control autostart twice sets it again)`
+		? `Starts at login: on (needs refresh: ${missing} is gone; turn it off and on again from /remote-control)`
 		: "Starts at login: on";
 }

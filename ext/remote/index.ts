@@ -1,7 +1,8 @@
 /**
  * `/remote-control`: control every agent-view session from a phone, as Claude Code's Remote
- * Control does. The daemon serves the phone (daemon/remote/); this command is its switch, shows
- * how to pair, manages paired devices, and starts the daemon at login (autostart.ts). In a pane,
+ * Control does. The daemon serves the phone (daemon/remote/); this command turns it on and shows a
+ * QR code that pairs a phone, and once it is on, a menu: pair another phone, the paired phones,
+ * starting the daemon at login (autostart.ts), turning it off. In a pane,
  * it also streams the reply in progress to the phones watching the session (live.ts), reports its
  * model and usage, and runs the phone's model switch, compaction, tree navigation, fork and clone
  * (report.ts).
@@ -51,7 +52,7 @@ async function show(result: RemoteResult, ctx: ExtensionCommandContext): Promise
 	if (!result.listening) {
 		ctx.ui.notify(
 			`Remote control could not listen on 127.0.0.1:${result.port}: ${result.listenError ?? "unknown error"}. ` +
-				'Set "remote": { "port": <port> } in settings for another port, then run /remote-control twice.',
+				'Set "remote": { "port": <port> } in settings for another port, then turn remote control off and on again from /remote-control.',
 			"error",
 		);
 		return;
@@ -73,7 +74,7 @@ async function show(result: RemoteResult, ctx: ExtensionCommandContext): Promise
 	}
 	if (!tailscale.dnsName) {
 		ctx.ui.notify(
-			"Tailscale is not connected: open the Tailscale app and log in (or run `tailscale up`), then /remote-control pair",
+			"Tailscale is not connected: open the Tailscale app and log in (or run `tailscale up`), then run /remote-control again",
 			"warning",
 		);
 		return;
@@ -117,7 +118,7 @@ async function show(result: RemoteResult, ctx: ExtensionCommandContext): Promise
 async function devices(client: OrchestratorClient, ctx: ExtensionCommandContext): Promise<void> {
 	const { devices } = await client.remote({ action: "devices" });
 	if (devices.length === 0) {
-		ctx.ui.notify("No paired devices. /remote-control pair shows a code.", "info");
+		ctx.ui.notify("No paired phones: pair one from /remote-control", "info");
 		return;
 	}
 	const labels = devices.map(
@@ -133,6 +134,50 @@ async function devices(client: OrchestratorClient, ctx: ExtensionCommandContext)
 	if (!device || !(await ctx.ui.confirm(`Revoke ${device.name}?`, "It will have to pair again."))) return;
 	await client.remote({ action: "revoke", deviceId: device.id });
 	ctx.ui.notify(`Revoked ${device.name}`, "info");
+}
+
+async function toggleStartAtLogin(ctx: ExtensionCommandContext): Promise<void> {
+	const deps = autostartDeps();
+	try {
+		ctx.ui.notify(toggleAutostart(deps), "info");
+	} catch (error) {
+		ctx.ui.notify(`Starting at login: ${message(error)}`, "error");
+	}
+	// Unloading ends a daemon launchd started; loading has launchd start one.
+	if (deps.platform === "darwin" && !autostartOn(deps)) await new OrchestratorClient().ensureDaemon();
+}
+
+async function turnOff(client: OrchestratorClient, port: number, ctx: ExtensionCommandContext): Promise<void> {
+	const ok = await ctx.ui.confirm(
+		"Turn off remote control?",
+		"Paired phones stay paired, but cannot reach this Mac until you turn it on again.",
+	);
+	if (!ok) return;
+	await client.remote({ action: "off" });
+	const tailscale = await tailscaleInfo(port);
+	ctx.ui.notify(
+		tailscale.serve === "ours" && tailscale.dnsName
+			? `Remote control is off (tailscale serve still proxies https://${tailscale.dnsName} to the port; \`tailscale serve --https=443 off\` removes it)`
+			: "Remote control is off",
+		"info",
+	);
+}
+
+const PAIR = "Pair a new phone";
+const OFF = "Turn off remote control";
+
+/** Once on, `/remote-control` asks what to do rather than turning off at a stray enter. */
+async function menu(client: OrchestratorClient, status: RemoteResult, ctx: ExtensionCommandContext): Promise<void> {
+	const deps = autostartDeps();
+	const startAtLogin = deps.platform === "darwin" ? `Start at login: ${autostartOn(deps) ? "on" : "off"}` : undefined;
+	const phones = `Paired phones (${status.devices.length})…`;
+	const items = [PAIR, phones, ...(startAtLogin ? [startAtLogin] : []), OFF];
+	const picked = await ctx.ui.select("Remote control is on", items);
+	if (picked === undefined) return;
+	if (picked === PAIR) await show(await client.remote({ action: "pair" }), ctx);
+	else if (picked === phones) await devices(client, ctx);
+	else if (picked === OFF) await turnOff(client, status.port, ctx);
+	else if (picked === startAtLogin) await toggleStartAtLogin(ctx);
 }
 
 function liveForwarder(pane: string): LiveForwarder {
@@ -182,26 +227,17 @@ function factory(pi: ExtensionAPI): void {
 	pi.on("agent_end", () => live?.onAgentEnd());
 
 	pi.registerCommand("remote-control", {
-		description: "Control sessions from your phone: on/off, pair, devices, autostart",
+		description: "Control your sessions from your phone",
 		handler: async (args, ctx) => {
 			// The phone's tree, fork and clone (report.ts), not offered to the user.
 			if (await navigate(args, ctx)) return;
+			// pair, devices and autostart: the menu's items, as the subcommands they were before it.
 			const sub = args.trim();
 			if (sub && sub !== "pair" && sub !== "devices" && sub !== "autostart") {
-				ctx.ui.notify("Usage: /remote-control [pair | devices | autostart]", "warning");
+				ctx.ui.notify("Usage: /remote-control", "warning");
 				return;
 			}
-			if (sub === "autostart") {
-				const deps = autostartDeps();
-				try {
-					ctx.ui.notify(toggleAutostart(deps), "info");
-				} catch (error) {
-					ctx.ui.notify(`Starting at login: ${message(error)}`, "error");
-				}
-				// Unloading ends a daemon launchd started; loading has launchd start one.
-				if (deps.platform === "darwin" && !autostartOn(deps)) await new OrchestratorClient().ensureDaemon();
-				return;
-			}
+			if (sub === "autostart") return await toggleStartAtLogin(ctx);
 			// Its node may have moved since it was written, as a node upgrade does. Here, not at every
 			// session start: any pi starting, a dev checkout's too, would point it at itself.
 			try {
@@ -225,17 +261,7 @@ function factory(pi: ExtensionAPI): void {
 					}
 					return await show(await client.remote({ action: "pair" }), ctx);
 				}
-				if (status.enabled) {
-					await client.remote({ action: "off" });
-					const tailscale = await tailscaleInfo(status.port);
-					ctx.ui.notify(
-						tailscale.serve === "ours" && tailscale.dnsName
-							? `Remote control is off (tailscale serve still proxies https://${tailscale.dnsName} to the port; \`tailscale serve --https=443 off\` removes it)`
-							: "Remote control is off",
-						"info",
-					);
-					return;
-				}
+				if (status.enabled) return await menu(client, status, ctx);
 				const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
 				await show(await client.remote({ action: "on", port: remotePort(settings) }), ctx);
 			} catch (error) {

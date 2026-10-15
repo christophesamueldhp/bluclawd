@@ -41,7 +41,7 @@ export function enablePrompt(output: string): string | undefined {
 	const url = /https:\/\/login\.tailscale\.com\/\S+(?=\s)/.exec(output)?.[0];
 	if (!line || !url) return undefined;
 	const feature = /\bHTTPS\b/i.test(line) ? "HTTPS" : "Serve";
-	return `Tailscale ${feature} is off for your tailnet. Turn it on at ${url} (once), then run /remote-control pair.`;
+	return `Tailscale ${feature} is off for your tailnet. Turn it on at ${url} (once), then run /remote-control again.`;
 }
 
 /** The macOS app ships its CLI inside the bundle and puts it on PATH only when asked to. */

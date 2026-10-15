@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { pairingText } from "../ext/remote/message.ts";
+import { qrMatrix, renderQr } from "../ext/remote/qr.ts";
 import {
 	commandError,
 	connectedName,
@@ -68,14 +69,14 @@ describe("remote control: tailscale and pairing text", () => {
 
 	it("tells a feature the tailnet has to turn on from the link tailscale prints for it", () => {
 		expect(enablePrompt(SERVE_OFF)).toBe(
-			"Tailscale Serve is off for your tailnet. Turn it on at https://login.tailscale.com/f/serve?node=nAbC123 (once), then run /remote-control pair.",
+			"Tailscale Serve is off for your tailnet. Turn it on at https://login.tailscale.com/f/serve?node=nAbC123 (once), then run /remote-control again.",
 		);
 		expect(
 			enablePrompt(
 				"HTTPS is not enabled on your tailnet.\nTo enable, visit:\n\n  https://login.tailscale.com/f/https\n",
 			),
 		).toBe(
-			"Tailscale HTTPS is off for your tailnet. Turn it on at https://login.tailscale.com/f/https (once), then run /remote-control pair.",
+			"Tailscale HTTPS is off for your tailnet. Turn it on at https://login.tailscale.com/f/https (once), then run /remote-control again.",
 		);
 		// Until the link has arrived, and for any other output, there is nothing to say yet.
 		expect(enablePrompt("Serve is not enabled on your tailnet.\nTo enable, visit:\n")).toBeUndefined();
@@ -154,11 +155,11 @@ describe("remote control: tailscale and pairing text", () => {
 		}
 	});
 
-	it("tells how to pair, with the code in two groups", () => {
+	it("shows a QR code of the pairing link, and under it the code in two groups", () => {
 		const text = pairingText("https://mac.tail1234.ts.net", "482913", 5 * 60_000, 0);
 		expect(text).toContain("https://mac.tail1234.ts.net");
-		expect(text).toContain("482 913");
-		expect(text).toContain("expires in 5 min");
-		expect(text).toContain("Add to Home Screen");
+		expect(text).toContain(renderQr(qrMatrix("https://mac.tail1234.ts.net/#pair=482913")));
+		expect(text).toContain("482 913 (valid 5 minutes, once)");
+		expect(pairingText("https://mac.tail1234.ts.net", "482913", 60_000, 0)).toContain("(valid 1 minute, once)");
 	});
 });

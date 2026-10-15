@@ -144,7 +144,7 @@ describe("/remote-control autostart", () => {
 	});
 
 	it("says it is on, or that it needs a refresh when the node or script it runs is gone", () => {
-		expect(autostartStatus(deps)).toBe("Starts at login: off (/remote-control autostart turns it on)");
+		expect(autostartStatus(deps)).toBe("Starts at login: off (turn it on from /remote-control)");
 		const node = join(dir, "node & co");
 		const cli = join(dir, "cli.ts");
 		writeFileSync(node, "");
@@ -154,7 +154,7 @@ describe("/remote-control autostart", () => {
 		expect(autostartStatus(deps)).toBe("Starts at login: on");
 		rmSync(node);
 		expect(autostartStatus(deps)).toBe(
-			`Starts at login: on (needs refresh: ${node} is gone; /remote-control autostart twice sets it again)`,
+			`Starts at login: on (needs refresh: ${node} is gone; turn it off and on again from /remote-control)`,
 		);
 		deps.platform = "linux";
 		expect(autostartStatus(deps)).toBeUndefined();
