@@ -1,0 +1,153 @@
+/**
+ * `/context` and `/status`, registered by the help extension: diagnostics built
+ * from the public extension context alone.
+ *
+ * Each fact has one home: pi's own `/session` owns the session name, file, ID,
+ * message/token counts and cost; `/context` owns the context window and its
+ * usage; `/status` owns the model, auth and project trust, and points at the
+ * other two instead of repeating them.
+ *
+ * Output goes through `appendEntry` + `registerEntryRenderer` rather than
+ * `ctx.ui.notify` (which dims everything and does not persist in the session).
+ */
+
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
+import { commandBlock } from "../_shared/command-block.ts";
+import { isUsingSubscription } from "./session-usage.ts";
+
+/** Snapshot rendered by `/status`. Plain data so it survives in the session file. */
+export interface StatusData {
+	piVersion: string;
+	model?: string;
+	modelName?: string;
+	thinkingLevel?: string;
+	authSource?: string;
+	subscription: boolean;
+	defaultProjectTrust: string;
+	projectTrusted: boolean;
+	cwd: string;
+}
+
+/** Exported pure for tests; `theme` is the only styling dependency. */
+export function formatStatus(
+	data: StatusData,
+	theme: { bold(s: string): string; fg(color: "dim", s: string): string },
+): string[] {
+	const dim = (s: string) => theme.fg("dim", s);
+	const lines: string[] = [theme.bold("Status")];
+	lines.push(`${dim("pi:")} v${data.piVersion} ${dim("· bluclawd package")}`);
+	lines.push("", theme.bold("Model"));
+	lines.push(`${dim("Model:")} ${data.model ?? "none selected"}${data.modelName ? dim(` (${data.modelName})`) : ""}`);
+	lines.push(`${dim("Effort:")} ${data.thinkingLevel ?? "off"} ${dim("(/thinking)")}`);
+	const auth = data.authSource ?? "not configured";
+	// Billing is always named when there is a model to bill, as on the footer.
+	const billing = data.model ? dim(data.subscription ? " · subscription" : " · per token") : "";
+	lines.push(`${dim("Auth:")} ${auth}${billing}`);
+	lines.push("", theme.bold("Project"));
+	lines.push(`${dim("Working directory:")} ${data.cwd}`);
+	lines.push(`${dim("Project trust:")} ${data.projectTrusted ? "trusted" : "not trusted"} ${dim("(/trust)")}`);
+	lines.push(`${dim("Trust default:")} ${data.defaultProjectTrust} ${dim("(alt+m)")}`);
+	lines.push("", dim("Session file, messages, tokens and cost: /session · context window usage: /context"));
+	return lines;
+}
+
+const BAR_WIDTH = 20;
+
+interface ContextData {
+	model?: string;
+	contextWindow?: number;
+	tokens?: number | null;
+	percent?: number | null;
+	systemPromptChars?: number;
+}
+
+function formatTokens(value: number): string {
+	if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+	if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
+	return String(value);
+}
+
+export function registerDiagnostics(pi: ExtensionAPI): void {
+	pi.registerEntryRenderer<ContextData>("bluclawd:context", (entry, _options, theme) => {
+		const data = entry.data;
+		const lines: string[] = [theme.bold("Context")];
+
+		if (!data?.model || data.contextWindow === undefined) {
+			lines.push("Context usage is unknown (no model selected or the model has no context window).");
+			return commandBlock(lines);
+		}
+
+		lines.push(`${theme.fg("dim", "Window:")} ${formatTokens(data.contextWindow)}`);
+
+		if (data.tokens === null || data.tokens === undefined || data.percent === null || data.percent === undefined) {
+			lines.push(`${theme.fg("dim", "In context:")} unknown until the next assistant response`);
+			return commandBlock(lines);
+		}
+
+		const filled = Math.min(BAR_WIDTH, Math.max(0, Math.round((data.percent / 100) * BAR_WIDTH)));
+		const bar = `[${"█".repeat(filled)}${"░".repeat(BAR_WIDTH - filled)}]`;
+		lines.push(`${theme.fg("dim", "In context:")} ${formatTokens(data.tokens)} (${data.percent.toFixed(1)}%) ${bar}`);
+
+		// Four characters per token, pi's own rough estimate: a hint, not an accounting figure.
+		const systemPromptEstimate = Math.round((data.systemPromptChars ?? 0) / 4);
+		lines.push(
+			`  ${theme.fg("dim", "System prompt incl. project context & skills (est.):")} ~${formatTokens(systemPromptEstimate)}`,
+		);
+		lines.push(
+			`  ${theme.fg("dim", "Messages & tool results (est.):")} ~${formatTokens(Math.max(data.tokens - systemPromptEstimate, 0))}`,
+		);
+		lines.push(
+			`${theme.fg("dim", "Free:")} ${formatTokens(Math.max(data.contextWindow - data.tokens, 0))} (${(100 - data.percent).toFixed(1)}%)`,
+		);
+		return commandBlock(lines);
+	});
+
+	pi.registerEntryRenderer<StatusData>("bluclawd:status", (entry, _options, theme) =>
+		commandBlock(entry.data ? formatStatus(entry.data, theme) : []),
+	);
+
+	pi.registerCommand("status", {
+		description: "Show model, auth, and project trust",
+		handler: async (_args, ctx) => {
+			const model = ctx.model;
+			let authSource: string | undefined;
+			if (model) {
+				try {
+					const status = ctx.modelRegistry.getProviderAuthStatus(model.provider);
+					authSource = status.configured ? (status.label ?? status.source ?? "configured") : undefined;
+				} catch {
+					authSource = undefined;
+				}
+			}
+			pi.appendEntry<StatusData>("bluclawd:status", {
+				piVersion: VERSION,
+				model: model ? `${model.provider}/${model.id}` : undefined,
+				modelName: model?.name,
+				thinkingLevel: model?.reasoning ? ctx.thinkingLevel : undefined,
+				authSource,
+				subscription: isUsingSubscription(ctx),
+				defaultProjectTrust: SettingsManager.create(ctx.cwd, undefined, {
+					projectTrusted: ctx.isProjectTrusted(),
+				}).getDefaultProjectTrust(),
+				projectTrusted: ctx.isProjectTrusted(),
+				cwd: ctx.cwd,
+			});
+		},
+	});
+
+	pi.registerCommand("context", {
+		description: "Show context window usage",
+		handler: async (_args, ctx) => {
+			const model = ctx.model;
+			const usage = ctx.getContextUsage();
+			pi.appendEntry<ContextData>("bluclawd:context", {
+				model: model ? `${model.provider}/${model.id}` : undefined,
+				contextWindow: usage?.contextWindow,
+				tokens: usage?.tokens,
+				percent: usage?.percent,
+				systemPromptChars: ctx.getSystemPrompt().length,
+			});
+		},
+	});
+}

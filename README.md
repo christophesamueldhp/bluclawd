@@ -43,7 +43,7 @@ scripts/        probe-extensions.ts — headless report of what each extension r
 test/           vitest suites, self-contained — no monorepo, no fixture files
 ```
 
-8 extensions, no runtime dependencies (pi's own packages are peers):
+9 extensions, no runtime dependencies (pi's own packages are peers):
 
 | Extension | Registers |
 |---|---|
@@ -51,10 +51,9 @@ test/           vitest suites, self-contained — no monorepo, no fixture files
 | `checkpoints` | `/rewind` |
 | `background-bash` | `/tasks`; the `bash`, `monitor` and `task_stop` tools |
 | `branding` | `/theme`; welcome header and mascot |
-| `diagnostics` | `/status`, `/context` |
 | `agent-view` | `/agent-view` (what `←` twice dispatches) |
 | `remote` | `/remote-control` |
-| `help` | `/help` |
+| `help` | `/help`, `/status`, `/context` |
 | `vibes` | spinner verbs |
 | `paste` | Claude Code's paste in the prompt and agent view's composer: a paste over 800 characters or 2 lines shows as `[Pasted text #N +L lines]`, a ctrl+v image as `[Image #N]` (sent as an image), and pasting the same thing again right after shows the text or the image's file |
 

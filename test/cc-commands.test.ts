@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatStatus } from "../ext/diagnostics/index.ts";
+import { formatStatus } from "../ext/help/diagnostics.ts";
 
 const plain = { bold: (s: string) => s, fg: (_c: string, s: string) => s };
 

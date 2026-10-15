@@ -1,4 +1,6 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { bluclawdExtensions } from "../ext/index.ts";
 import { recordExtensions } from "../scripts/probe-extensions.ts";
 
 /**
@@ -17,7 +19,6 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 		events: 3,
 	},
 	branding: { commands: ["theme"], tools: [], shortcuts: 0, events: 1 },
-	diagnostics: { commands: ["context", "status"], tools: [], shortcuts: 0, events: 0 },
 	"agent-view": {
 		commands: ["agent-view"],
 		tools: [],
@@ -25,7 +26,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 		events: 8,
 	},
 	remote: { commands: ["remote-control"], tools: [], shortcuts: 0, events: 10 },
-	help: { commands: ["help"], tools: [], shortcuts: 0, events: 0 },
+	help: { commands: ["help", "context", "status"], tools: [], shortcuts: 0, events: 0 },
 	vibes: { commands: [], tools: [], shortcuts: 0, events: 2 },
 	paste: { commands: [], tools: [], shortcuts: 0, events: 2 },
 };
@@ -33,8 +34,15 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 describe("bluclawd extension registration", () => {
 	const rec = recordExtensions();
 
-	it("registers exactly the 10 expected extensions, no more, no fewer", () => {
+	it("registers exactly the 9 expected extensions, no more, no fewer", () => {
 		expect(Object.keys(rec).sort()).toEqual(Object.keys(EXPECTED).sort());
+	});
+
+	it("lists the extensions in package.json's order", () => {
+		const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
+			pi: { extensions: string[] };
+		};
+		expect(bluclawdExtensions().map((e) => `./ext/${e.name}/index.ts`)).toEqual(manifest.pi.extensions);
 	});
 
 	it("has no factory that throws during registration", () => {

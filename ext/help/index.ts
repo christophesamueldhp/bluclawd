@@ -1,6 +1,6 @@
 /**
  * `/help` — pi's built-ins, extension commands, prompt templates and skills,
- * grouped by what you are trying to do.
+ * grouped by what you are trying to do. Also `/status` and `/context` (diagnostics.ts).
  *
  * `pi.getCommands()` does NOT include built-ins, so the vendored built-in table
  * is merged in here. Extension commands that shadow a built-in name are
@@ -12,6 +12,7 @@ import { VERSION } from "@earendil-works/pi-coding-agent";
 import { Container, Spacer, Text } from "@earendil-works/pi-tui";
 import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { categorizeCommands } from "./categories.ts";
+import { registerDiagnostics } from "./diagnostics.ts";
 
 interface HelpEntry {
 	name: string;
@@ -33,6 +34,8 @@ function pad(name: string, width: number): string {
 const help: InlineExtension = {
 	name: "help",
 	factory: (pi) => {
+		registerDiagnostics(pi);
+
 		pi.registerEntryRenderer<HelpData>("bluclawd:help", (entry, _options, theme) => {
 			const data = entry.data;
 			if (!data) return new Text("", 1, 0);

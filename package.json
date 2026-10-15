@@ -10,7 +10,6 @@
       "./ext/checkpoints/index.ts",
       "./ext/background-bash/index.ts",
       "./ext/branding/index.ts",
-      "./ext/diagnostics/index.ts",
       "./ext/agent-view/index.ts",
       "./ext/remote/index.ts",
       "./ext/help/index.ts",

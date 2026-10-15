@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { isUsingSubscription } from "../ext/_shared/session-usage.ts";
 import { STATUS_KEYS } from "../ext/_shared/status-keys.ts";
+import { isUsingSubscription } from "../ext/help/session-usage.ts";
 
 describe("isUsingSubscription", () => {
 	const ctxFor = (provider: string) =>
