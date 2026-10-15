@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
@@ -8,6 +8,18 @@ vi.mock("node:child_process", async (actual) => ({
 	...(await actual<typeof import("node:child_process")>()),
 	execFileSync,
 }));
+/** The files written, counted. */
+const writes = vi.hoisted(() => vi.fn());
+vi.mock("node:fs", async (actual) => {
+	const fs = await actual<typeof import("node:fs")>();
+	return {
+		...fs,
+		writeFileSync: (...args: Parameters<typeof fs.writeFileSync>) => {
+			writes(args[0]);
+			return fs.writeFileSync(...args);
+		},
+	};
+});
 
 const { Tmux } = await import("../daemon/tmux.ts");
 
@@ -23,5 +35,19 @@ describe("tmux command timeout", () => {
 	it("gives up on a hung command only when asked to, as the daemon does", () => {
 		expect(timeoutOf(new Tmux(dir))).toBeUndefined();
 		expect(timeoutOf(new Tmux(dir, undefined, { timeoutMs: 2000 }))).toBe(2000);
+	});
+
+	it("writes its config with its first command only, not with every one", () => {
+		const own = join(dir, "own");
+		const tmux = new Tmux(own);
+		writes.mockClear();
+		execFileSync.mockClear();
+		for (let i = 0; i < 3; i++) tmux.screen("pi-1", 10);
+		const config = join(own, "tmux.conf");
+		expect(writes.mock.calls.filter(([file]) => file === config)).toHaveLength(1);
+		expect(readFileSync(config, "utf8")).toContain("set -g prefix None");
+		// Two commands a screen: which screen it is, then its lines.
+		expect(execFileSync.mock.calls).toHaveLength(6);
+		for (const call of execFileSync.mock.calls) expect(call[1]).toEqual(expect.arrayContaining(["-f", config]));
 	});
 });

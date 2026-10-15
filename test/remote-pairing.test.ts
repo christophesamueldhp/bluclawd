@@ -2,9 +2,22 @@
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_PORT, RemoteStore } from "../daemon/remote/pairing.ts";
 import { validP256dh } from "./support/push.ts";
+
+/** The store's own reads, counted. */
+const reads = vi.hoisted(() => vi.fn());
+vi.mock("node:fs", async (actual) => {
+	const fs = await actual<typeof import("node:fs")>();
+	return {
+		...fs,
+		readFileSync: (...args: Parameters<typeof fs.readFileSync>) => {
+			reads(args[0]);
+			return fs.readFileSync(...args);
+		},
+	};
+});
 
 describe("remote pairing", () => {
 	let dir: string;
@@ -126,6 +139,24 @@ describe("remote pairing", () => {
 		expect(store.revoke(device.id)).toBe(true);
 		expect(store.authenticate(token, 3)).toBeUndefined();
 		expect(store.revoke(device.id)).toBe(false);
+	});
+
+	it("reads remote.json again only once it changed, its own writes and anyone else's", () => {
+		const token = pairDevice("iPhone");
+		expect(store.authenticate(token, 2)?.name).toBe("iPhone");
+		reads.mockClear();
+		for (let i = 0; i < 10; i++) {
+			expect(store.authenticate(token, 3)?.name).toBe("iPhone");
+			expect(store.load().devices).toHaveLength(1);
+		}
+		expect(reads.mock.calls.filter(([file]) => file === path)).toHaveLength(0);
+		store.setEnabled(true, 9000);
+		expect(store.load()).toMatchObject({ enabled: true, port: 9000 });
+		// Another writer: a different length, so not hidden by a write in the same millisecond.
+		const edited = { ...JSON.parse(readFileSync(path, "utf8")), devices: [], port: 9001 };
+		writeFileSync(path, JSON.stringify(edited));
+		expect(store.load()).toMatchObject({ enabled: true, port: 9001, devices: [] });
+		expect(store.authenticate(token, 4)).toBeUndefined();
 	});
 
 	it("names a device that sent no name", () => {

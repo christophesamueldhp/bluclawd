@@ -6,7 +6,7 @@
  * Secrets and codes live only in the daemon's memory.
  */
 import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { PaneLaunch } from "../ipc/protocol.ts";
 import { getServerDir } from "../paths.ts";
@@ -78,17 +78,31 @@ export class RemoteStore {
 	private pairing: { secret: string; code?: string; expiresAt: number; attempts: number } | undefined;
 	/** Each paired device's latest handoff. */
 	private readonly handoffs = new Map<string, { secret: string; expiresAt: number }>();
+	/** The file as last parsed, by its size and mtime: the daemon reads it every second while a phone
+	 *  is connected, and it rarely changes. A write by anyone else changes the key. */
+	private cached: { key: string; state: RemoteState; byToken?: Map<string, RemoteDevice> } | undefined;
 
 	constructor(path: string = getRemotePath()) {
 		this.path = path;
 	}
 
+	/** Shared with the cache: change it only to save it. */
 	load(): RemoteState {
 		const read = this.readRaw();
 		return typeof read === "object" ? read.state : { enabled: false, port: DEFAULT_PORT, devices: [] };
 	}
 
 	private readRaw(): { state: RemoteState } | "missing" | "unreadable" {
+		let key: string;
+		try {
+			const stat = statSync(this.path);
+			key = `${stat.size}:${stat.mtimeMs}`;
+		} catch (error) {
+			this.cached = undefined;
+			return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable";
+		}
+		if (this.cached?.key === key) return { state: this.cached.state };
+		this.cached = undefined;
 		let raw: Partial<RemoteState>;
 		try {
 			raw = JSON.parse(readFileSync(this.path, "utf8")) as Partial<RemoteState>;
@@ -96,23 +110,25 @@ export class RemoteStore {
 			return (error as NodeJS.ErrnoException).code === "ENOENT" ? "missing" : "unreadable";
 		}
 		if (!raw || typeof raw !== "object") return "unreadable";
-		return {
-			state: {
-				enabled: raw.enabled === true,
-				port: Number.isInteger(raw.port) ? (raw.port as number) : DEFAULT_PORT,
-				// A hand-edited entry without a token hash would make every authenticate() throw.
-				devices: Array.isArray(raw.devices)
-					? raw.devices
-							.filter((d) => typeof d?.id === "string" && typeof d.tokenHash === "string")
-							.map(({ push, ...device }) => (parseSubscription(push) ? { ...device, push } : device))
-					: [],
-				launch: isLaunch(raw.launch) ? raw.launch : undefined,
-				vapid: isVapid(raw.vapid) ? raw.vapid : undefined,
-			},
+		const state: RemoteState = {
+			enabled: raw.enabled === true,
+			port: Number.isInteger(raw.port) ? (raw.port as number) : DEFAULT_PORT,
+			// A hand-edited entry without a token hash would make every authenticate() throw.
+			devices: Array.isArray(raw.devices)
+				? raw.devices
+						.filter((d) => typeof d?.id === "string" && typeof d.tokenHash === "string")
+						.map(({ push, ...device }) => (parseSubscription(push) ? { ...device, push } : device))
+				: [],
+			launch: isLaunch(raw.launch) ? raw.launch : undefined,
+			vapid: isVapid(raw.vapid) ? raw.vapid : undefined,
 		};
+		this.cached = { key, state };
+		return { state };
 	}
 
+	/** Forgets the file as parsed first: a write that fails must not leave what it changed cached. */
 	private save(state: RemoteState): void {
+		this.cached = undefined;
 		mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 });
 		const tmp = `${this.path}.tmp`;
 		writeFileSync(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
@@ -234,12 +250,13 @@ export class RemoteStore {
 
 	authenticate(token: string, now: number = Date.now()): RemoteDevice | undefined {
 		if (!token) return undefined;
-		const hash = Buffer.from(hashToken(token), "hex");
 		const state = this.load();
-		const device = state.devices.find((d) => {
-			const stored = Buffer.from(d.tokenHash, "hex");
-			return stored.length === hash.length && timingSafeEqual(stored, hash);
-		});
+		// By hash, built once per parse: the stream checks each phone's token every second. A lookup
+		// by its hash leaks nothing of the token through timing.
+		const cached = this.cached?.state === state ? this.cached : undefined;
+		const byToken = cached?.byToken ?? new Map(state.devices.map((d) => [d.tokenHash, d]));
+		if (cached) cached.byToken = byToken;
+		const device = byToken.get(hashToken(token));
 		if (!device) return undefined;
 		const lastUsed = device.lastUsedAt ? Date.parse(device.lastUsedAt) : 0;
 		if (now - lastUsed > LAST_USED_RESOLUTION_MS) {

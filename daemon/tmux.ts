@@ -107,6 +107,8 @@ export class Tmux {
 	readonly dir: string;
 	private readonly run: Run;
 	private readonly timeoutMs: number | undefined;
+	/** tmux.conf is written by this instance's first command, not by each: the daemon runs several a second. */
+	private configured = false;
 
 	/** `timeoutMs`: give up on a command (attach aside) after this long, so a hung one cannot hold
 	 *  up the daemon. Not for agent view: a killed client's new-session may still start the pane. */
@@ -333,9 +335,12 @@ export class Tmux {
 	}
 
 	private exec(args: string[], options: { inherit?: boolean; outsideTmux?: boolean } = {}): string {
-		mkdirSync(this.dir, { recursive: true });
 		const config = join(this.dir, "tmux.conf");
-		writeFileSync(config, CONFIG);
+		if (!this.configured) {
+			mkdirSync(this.dir, { recursive: true });
+			writeFileSync(config, CONFIG);
+			this.configured = true;
+		}
 		const env = { ...process.env };
 		// Attaching from inside another tmux is refused unless TMUX is unset.
 		if (options.outsideTmux) delete env.TMUX;

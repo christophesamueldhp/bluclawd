@@ -516,6 +516,27 @@ describe("remote control switch", () => {
 			]);
 		});
 
+		it("looks at no session, and reads remote.json no more, while no device is subscribed", async () => {
+			pairDevice(control.store);
+			const listed = vi.fn(() => instances);
+			control = new RemoteControl({
+				store: new RemoteStore(join(dir, "remote.json")),
+				listInstances: listed,
+				send: () => true,
+				deleteInstance: () => false,
+				renameInstance: () => false,
+				setPinned: () => false,
+				webDir: dir,
+				sendPush: async () => "ok",
+			});
+			await control.handle({ type: "remote", action: "on", port: 0 });
+			const read = vi.spyOn(JSON, "parse");
+			await vi.advanceTimersByTimeAsync(5000);
+			expect(listed).not.toHaveBeenCalled();
+			expect(read).not.toHaveBeenCalled();
+			read.mockRestore();
+		});
+
 		it("pushes nothing to a device that has the session open, which shows it already", async () => {
 			const { code } = control.store.createCode();
 			const claimed = control.store.claim(code, "iPhone");

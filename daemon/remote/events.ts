@@ -148,6 +148,8 @@ export class RemoteEvents {
 		const changed = sessions !== this.lastSessions;
 		this.lastSessions = sessions;
 		const ping = ++this.ticks % PING_EVERY_TICKS === 0;
+		// Once per session a tick, however many clients have it open: each lookup lists every row.
+		const signatures = new Map<string, string>();
 		for (const client of this.clients) {
 			if (!client.isAuthorized()) {
 				this.drop(client);
@@ -155,7 +157,11 @@ export class RemoteEvents {
 			}
 			if (changed) send(client.res, "sessions", {});
 			if (client.sessionId) {
-				const signature = this.messagesSignature(client.sessionId);
+				let signature = signatures.get(client.sessionId);
+				if (signature === undefined) {
+					signature = this.messagesSignature(client.sessionId);
+					signatures.set(client.sessionId, signature);
+				}
 				if (signature !== client.messagesSignature) {
 					client.messagesSignature = signature;
 					send(client.res, "messages", { sessionId: client.sessionId });
