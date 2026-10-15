@@ -15,7 +15,7 @@ import type {
 	RemoteResponse,
 } from "../ipc/protocol.ts";
 import { Tmux } from "../tmux.ts";
-import { type RemoteServer, startRemoteServer } from "./http.ts";
+import { type RemoteDeps, type RemoteServer, startRemoteServer } from "./http.ts";
 import { Notifier } from "./notifier.ts";
 import { RemoteStore } from "./pairing.ts";
 import { remoteSessions } from "./sessions.ts";
@@ -35,6 +35,7 @@ export interface RemoteControlDeps {
 	listInstances(): InstanceSummary[];
 	send(sessionId: string, message: PaneMessage): boolean;
 	deleteInstance(sessionId: string): boolean;
+	statusLine?: RemoteDeps["statusLine"];
 	store?: RemoteStore;
 	tmux?: Tmux;
 	webDir?: string;
@@ -189,6 +190,7 @@ export class RemoteControl {
 					startSession: (spec, replaces) => this.startSession(spec, replaces),
 					resuming: (id) => this.resuming(id),
 					report: (id) => this.reports.get(id),
+					statusLine: this.deps.statusLine,
 					tmux: this.tmux,
 					webDir: this.deps.webDir ?? WEB_DIR,
 				},

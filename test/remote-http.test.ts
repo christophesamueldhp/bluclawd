@@ -15,6 +15,7 @@ import {
 } from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { SessionSpec } from "../daemon/remote/spawn.ts";
+import type { StatusLine } from "../daemon/remote/statusline.ts";
 import { validP256dh } from "./support/push.ts";
 
 const entry = (id: string, parentId: string | null, content: string) =>
@@ -35,6 +36,8 @@ describe("remote HTTP API", () => {
 	let screens: Map<string, string[]>;
 	let typed: Array<{ pane: string; keys?: string[]; text?: string }>;
 	let tmuxFails: boolean;
+	let statusExtra: StatusLine;
+	let statusCwds: string[];
 
 	beforeEach(async () => {
 		dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-http-"));
@@ -65,6 +68,8 @@ describe("remote HTTP API", () => {
 		screens = new Map();
 		typed = [];
 		tmuxFails = false;
+		statusExtra = {};
+		statusCwds = [];
 		// As Tmux throws: tmux's own complaint on stderr.
 		const reach = (pane: string) => {
 			if (tmuxFails)
@@ -92,6 +97,10 @@ describe("remote HTTP API", () => {
 				},
 				resuming: (id) => resuming.has(id),
 				report: (id) => reports.get(id),
+				statusLine: async (cwd) => {
+					statusCwds.push(cwd);
+					return statusExtra;
+				},
 				tmux: {
 					// All of it: a main-screen pane gives its history and the visible screen too.
 					screen: (pane) => {
@@ -397,6 +406,71 @@ describe("remote HTTP API", () => {
 			instances = [{ ...instances[0], activity: "idle" }, instances[1]];
 			expect((await compact("live")).status).toBe(202);
 			expect(sent).toEqual([{ id: "live", message: { type: "compact" } }]);
+		});
+
+		it("adds the git state and usage limits of the session's own directory to its report", async () => {
+			reports.set("live", report);
+			statusExtra = {
+				git: { branch: "main", owner: "christophe", added: 3, removed: 1 },
+				limits: { sessionUsage: 43, sessionResetAt: "2026-10-15T12:30:00Z" },
+			};
+			const token = await pair();
+			const res = await fetch(`${base}/api/sessions/live/status`, { headers: auth(token) });
+			expect(await res.json()).toEqual({ report: { ...report, ...statusExtra } });
+			expect(statusCwds).toEqual(["/p"]);
+		});
+
+		const post = async (token: string, id: string, action: string, body: unknown) => {
+			const res = await fetch(`${base}/api/sessions/${id}/${action}`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify(body),
+			});
+			return [res.status, await res.json()];
+		};
+
+		it("sets a thinking level the running session's model offers, even mid-turn", async () => {
+			reports.set("live", { ...report, thinkingLevels: ["off", "low", "medium", "high"] });
+			const token = await pair();
+			expect(await post(token, "live", "thinking", { level: "low" })).toEqual([202, { ok: true }]);
+			expect(sent).toEqual([{ id: "live", message: { type: "set_thinking", level: "low" } }]);
+		});
+
+		it("refuses a thinking level the model does not offer, or any for a model without thinking", async () => {
+			reports.set("live", { ...report, thinkingLevels: ["off", "low", "medium", "high"] });
+			const token = await pair();
+			for (const body of [{}, { level: 3 }, { level: "xhigh" }, { level: "" }]) {
+				expect(await post(token, "live", "thinking", body)).toEqual([400, { error: "invalid_thinking" }]);
+			}
+			reports.set("live", report);
+			expect(await post(token, "live", "thinking", { level: "high" })).toEqual([400, { error: "invalid_thinking" }]);
+			expect(await post(token, "stored", "thinking", { level: "low" })).toEqual([
+				409,
+				{ error: "session_not_running" },
+			]);
+			expect(sent).toEqual([]);
+		});
+
+		it("sets the trust mode through a running session that reports it", async () => {
+			reports.set("live", { ...report, trust: "always" });
+			const token = await pair();
+			expect(await post(token, "live", "trust", { trust: "ask" })).toEqual([202, { ok: true }]);
+			expect(sent).toEqual([{ id: "live", message: { type: "set_trust", trust: "ask" } }]);
+		});
+
+		it("refuses a trust mode Alt+M does not cycle through, a stored session, and a pane that reports none", async () => {
+			reports.set("live", { ...report, trust: "always" });
+			const token = await pair();
+			for (const body of [{}, { trust: "sometimes" }, { trust: ["ask"] }, { trust: "ASK" }]) {
+				expect(await post(token, "live", "trust", body)).toEqual([400, { error: "invalid_trust" }]);
+			}
+			expect(await post(token, "stored", "trust", { trust: "ask" })).toEqual([
+				409,
+				{ error: "session_not_running" },
+			]);
+			reports.set("live", report);
+			expect(await post(token, "live", "trust", { trust: "ask" })).toEqual([409, { error: "pane_too_old" }]);
+			expect(sent).toEqual([]);
 		});
 	});
 

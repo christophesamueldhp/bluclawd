@@ -15,6 +15,7 @@ import { RemoteEvents } from "./events.ts";
 import type { RemoteStore } from "./pairing.ts";
 import { findSession, remoteSessions } from "./sessions.ts";
 import { launchUsable, type SessionSpec } from "./spawn.ts";
+import type { StatusLine } from "./statusline.ts";
 import { loadTranscript } from "./transcript.ts";
 import { parseSubscription } from "./webpush.ts";
 
@@ -32,6 +33,8 @@ export interface RemoteDeps {
 	resuming(storedId: string): boolean;
 	/** A running pane's latest report. */
 	report(sessionId: string): PaneReport | undefined;
+	/** What the status adds to a report for a session's directory: git state and usage limits. */
+	statusLine?(cwd: string): Promise<StatusLine>;
 	/** Agent view's tmux server: what a pane shows, and keys typed into it. */
 	tmux: Pick<Tmux, "screen" | "sendKeys" | "sendText">;
 	webDir: string;
@@ -72,6 +75,8 @@ const MESSAGES_MAX = 200;
 const MODEL_PATTERN = /^\w[\w.-]*\/[\w.:/@+-]+$/;
 /** pi's entry ids (8 hex digits, or a whole UUID): one word on the pane's `/remote-control` line. */
 const ENTRY_PATTERN = /^[0-9a-f-]{8,36}$/;
+/** pi's `defaultProjectTrust` values, as Alt+M cycles them. */
+const TRUST = ["always", "ask", "never"] as const;
 const SCREEN_LINES = 60;
 /** What a dialog needs. Never C-c or C-d, which quit pi; Escape still aborts a turn, as it does on the Mac. */
 const KEYS = new Set(["Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "Space", "BSpace"]);
@@ -293,7 +298,9 @@ async function handle(
 	}
 
 	const match =
-		/^\/api\/sessions\/([^/]+)\/(messages|status|screen|keys|prompt|abort|model|compact|tree|fork|clone)$/.exec(path);
+		/^\/api\/sessions\/([^/]+)\/(messages|status|screen|keys|prompt|abort|model|thinking|trust|compact|tree|fork|clone)$/.exec(
+			path,
+		);
 	if (!match) return json(res, 404, { error: "not_found" });
 	let id: string;
 	try {
@@ -318,7 +325,8 @@ async function handle(
 	if (action === "status") {
 		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
 		const report = found.running ? deps.report(id) : undefined;
-		return report ? json(res, 200, { report }) : json(res, 404, { error: "no_status" });
+		if (!report) return json(res, 404, { error: "no_status" });
+		return json(res, 200, { report: { ...report, ...(await deps.statusLine?.(found.cwd)) } });
 	}
 	if (action === "screen" || action === "keys") {
 		if (req.method !== (action === "screen" ? "GET" : "POST")) return json(res, 405, { error: "method_not_allowed" });
@@ -376,6 +384,21 @@ async function handle(
 		const offered = deps.report(id)?.models.some((m) => m.provider === provider && m.id === modelId);
 		if (!offered) return json(res, 400, { error: "invalid_model" });
 		message = { type: "set_model", provider, id: modelId };
+	} else if (action === "thinking") {
+		if (!session.running) return json(res, 409, { error: "session_not_running" });
+		// Only a level the pane offered for its model: none when the model does not reason.
+		const { level } = body;
+		if (typeof level !== "string" || !deps.report(id)?.thinkingLevels?.includes(level)) {
+			return json(res, 400, { error: "invalid_thinking" });
+		}
+		message = { type: "set_thinking", level };
+	} else if (action === "trust") {
+		if (!session.running) return json(res, 409, { error: "session_not_running" });
+		const trust = TRUST.find((value) => value === body.trust);
+		if (!trust) return json(res, 400, { error: "invalid_trust" });
+		// A pane that reports no trust mode is too old to set one.
+		if (deps.report(id)?.trust === undefined) return json(res, 409, { error: "pane_too_old" });
+		message = { type: "set_trust", trust };
 	} else if (action === "compact") {
 		if (session.running && session.busy) return json(res, 409, { error: "session_busy" });
 		message = { type: "compact" };

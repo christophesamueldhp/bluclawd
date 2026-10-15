@@ -404,6 +404,30 @@ describe("remote control switch", () => {
 		expect((await status("pane-3")).status).toBe(200);
 	});
 
+	it("gives the phone the status line the daemon was started with", async () => {
+		const git = { branch: "main", added: 1, removed: 2 };
+		control = new RemoteControl({
+			store: new RemoteStore(join(dir, "remote.json")),
+			listInstances: () => [{ id: "pane-1", status: "online", cwd: "/p", external: true, activity: "idle" }],
+			send: () => true,
+			deleteInstance: () => false,
+			statusLine: async (cwd) => (cwd === "/p" ? { git } : {}),
+			webDir: dir,
+		});
+		control.report("pane-1", { models: [] });
+		const on = await control.handle({ type: "remote", action: "on", port: 0 });
+		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
+		const base = `http://127.0.0.1:${on.port}`;
+		const paired = await fetch(`${base}/api/pair`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ code: on.code, deviceName: "iPhone" }),
+		});
+		const { token } = (await paired.json()) as { token: string };
+		const res = await fetch(`${base}/api/sessions/pane-1/status`, { headers: { authorization: `Bearer ${token}` } });
+		expect(await res.json()).toEqual({ report: { models: [], git } });
+	});
+
 	describe("push notifications", () => {
 		const subscription = (endpoint: string): WebPushSubscription => ({
 			endpoint,
