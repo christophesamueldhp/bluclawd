@@ -254,7 +254,9 @@ function factory(pi: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			const sub = args.trim();
 			// The phone's tree, fork and clone (report.ts), not offered to the user: typed, they are not run.
-			if (dispatched.delete(sub) && (await navigate(sub, ctx, (notice) => report(ctx, notice)))) return;
+			// The session's own context reports, not the command's.
+			const refuse = (notice: string) => session && report(session, notice);
+			if (dispatched.delete(sub) && (await navigate(sub, ctx, refuse))) return;
 			// pair, devices and autostart: the menu's items, as the subcommands they were before it.
 			if (sub && sub !== "pair" && sub !== "devices" && sub !== "autostart") {
 				ctx.ui.notify(USAGE, "warning");
