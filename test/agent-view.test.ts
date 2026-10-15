@@ -922,4 +922,89 @@ describe("AgentView look", () => {
 		).toMatch(/ A different way to work: .* in the sections above so you know when it needs you\./);
 		expect(lines.slice(0, 8).join("\n")).not.toContain("different way");
 	});
+
+	it("draws a roster listed before it opened in its first frame, intro and all left out", () => {
+		const self: InstanceSummary = { id: "me", status: "online", cwd: HERE, label: "current session", external: true };
+		const view = new AgentView({
+			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+			client: fakeClient([]),
+			panes: fakePanes([]),
+			appName: "bluclawd",
+			cwd: HERE,
+			home: HOME,
+			self: () => self,
+			onClose: () => {},
+			instances: sessions,
+		});
+		const shown = view.render(100).map(stripAnsi).join("\n");
+		expect(shown).toContain("power-up design");
+		expect(shown).not.toContain("different way");
+	});
+
+	it("explains the view only once the roster is in: a frame before it would flash the intro", async () => {
+		const self: InstanceSummary = { id: "me", status: "online", cwd: HERE, label: "current session", external: true };
+		const view = new AgentView({
+			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+			client: fakeClient([], () => []),
+			panes: fakePanes([]),
+			appName: "bluclawd",
+			cwd: HERE,
+			home: HOME,
+			self: () => self,
+			onClose: () => {},
+		});
+		const text = () => view.render(100).map(stripAnsi).join("\n");
+		expect(text()).toContain("current session");
+		expect(text()).not.toContain("different way");
+		await view.onShow();
+		expect(text()).toContain("different way");
+		view.close();
+	});
+
+	it("keeps a pane's row through a daemon restart until that pane heartbeats again", async () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			const pane: InstanceSummary = {
+				id: "pi-a",
+				status: "online",
+				cwd: HERE,
+				label: "carried on",
+				external: true,
+				pane: "pi-a",
+				activity: "working",
+			};
+			let listed: InstanceSummary[] = [];
+			const client = {
+				...fakeClient([], () => listed),
+				getDaemonInfo: async () => ({ running: true, buildId: "an older build" }),
+				restartDaemon: async () => ({ restarted: true }),
+			} as unknown as OrchestratorClient;
+			const view = new AgentView({
+				ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
+				client,
+				panes: fakePanes([]),
+				appName: "bluclawd",
+				cwd: HERE,
+				home: HOME,
+				onClose: () => {},
+				instances: [pane],
+			});
+			const text = () => view.render(100).map(stripAnsi).join("\n");
+			const refresh = () => (view as unknown as { refresh(): Promise<void> }).refresh();
+			// The restarted daemon has not heard from the pane yet.
+			await view.onShow();
+			expect(text()).toContain("carried on");
+			listed = [{ ...pane, label: "re-registered" }];
+			await refresh();
+			expect(text()).toContain("re-registered");
+			// A pane that never heartbeats again is gone once a heartbeat would have come.
+			listed = [];
+			vi.setSystemTime(Date.now() + 10_000);
+			await refresh();
+			expect(text()).not.toContain("re-registered");
+			view.close();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
 });

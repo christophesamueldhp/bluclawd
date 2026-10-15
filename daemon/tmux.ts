@@ -137,6 +137,13 @@ export class Tmux {
 		);
 	}
 
+	/** A failure in tmux's own words: the message also holds the whole command line. */
+	static reason(error: unknown): string {
+		const stderr = (error as { stderr?: unknown } | undefined)?.stderr;
+		const said = typeof stderr === "string" ? stderr.trim().split("\n").at(-1)?.trim() : undefined;
+		return said || (error instanceof Error ? error.message : String(error));
+	}
+
 	/** The tmux session this process runs in, when it is a pane's pi. */
 	static currentPane(): string | undefined {
 		return process.env[PANE_ENV] || undefined;

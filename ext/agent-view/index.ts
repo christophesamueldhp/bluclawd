@@ -51,6 +51,8 @@ const LEFT_EDIT_MS = 2000;
 const EXIT_PRESS_MS = 500;
 /** How many times (50ms apart) deleting this terminal's session waits for the pane it moves to. */
 const VIEW_READY_POLLS = 100;
+/** How long ← waits on the roster before opening agent view without it. */
+const PRELOAD_MS = 250;
 const STATUS_KEY = STATUS_KEYS.agents;
 const NEEDS_TMUX = "Agent view needs tmux — install it (brew install tmux) and start pi again";
 const HIDDEN_COMMANDS: ReadonlySet<string> = new Set([AGENT_VIEW_COMMAND]);
@@ -623,9 +625,15 @@ const agentView: InlineExtension = {
 				return name ? `π - ${name} - ${dir}` : `π - ${dir}`;
 			};
 			try {
+				const client = new OrchestratorClient();
+				// The roster as it stands, so the first frame is the whole view rather than one that fills in
+				// a moment later. A daemon slow to answer, or not running yet, is left to the view's own load.
+				const instances = await Promise.race([
+					client.list().catch(() => undefined),
+					new Promise<undefined>((resolve) => setTimeout(resolve, PRELOAD_MS)),
+				]);
 				await ctx.ui.custom<void>(
 					(tui, _theme, _keybindings, done) => {
-						const client = new OrchestratorClient();
 						const view = new AgentView({
 							ui: tui,
 							client,
@@ -677,6 +685,7 @@ const agentView: InlineExtension = {
 							saveViewMode: (mode) => saveViewMode(getAgentDir(), mode),
 							setTitle: (title) => ctx.ui.setTitle(title ?? sessionTitle()),
 							hide,
+							instances,
 							onDrawn: viewHost
 								? () => {
 										try {

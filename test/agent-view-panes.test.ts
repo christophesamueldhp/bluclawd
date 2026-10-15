@@ -80,6 +80,15 @@ function setup(instances: InstanceSummary[], self?: InstanceSummary) {
 	return { view, calls, closed: () => closed, flush, panes };
 }
 
+/** A failed tmux command, as execFileSync throws it: the command line in the message, tmux's words in stderr. */
+const tmuxFailure = (stderr: string) =>
+	Object.assign(
+		new Error(`Command failed: tmux -S /srv/tmux.sock -f /srv/tmux.conf switch-client -t =pi-a\n${stderr}`),
+		{
+			stderr,
+		},
+	);
+
 const paneRow = (id: string, extra: Partial<InstanceSummary> = {}): InstanceSummary => ({
 	id,
 	status: "online",
@@ -99,6 +108,32 @@ describe("agent view in pane mode", () => {
 		await flush();
 		expect(calls).toEqual([["switchTo", "pi-a"]]);
 		expect(closed()).toBe(1);
+	});
+
+	it("a pane that is gone says so rather than tmux's command line, and the roster refreshes", async () => {
+		const listed = [paneRow("pi-a")];
+		const { view, closed, flush, panes } = setup(listed);
+		panes.switchTo = () => {
+			throw tmuxFailure("can't find session: pi-a\n");
+		};
+		listed.length = 0;
+		view.handleInput(ENTER);
+		await flush();
+		const shown = view.render(100).join("\n");
+		expect(shown).toContain("Couldn't open — that session's pane is gone");
+		expect(shown).not.toContain("Command failed");
+		expect(shown).not.toContain("pi-a");
+		expect(closed()).toBe(0);
+	});
+
+	it("any other tmux failure to open shows tmux's own words", async () => {
+		const { view, flush, panes } = setup([paneRow("pi-a")]);
+		panes.switchTo = () => {
+			throw tmuxFailure("no current client\n");
+		};
+		view.handleInput(ENTER);
+		await flush();
+		expect(view.render(100).join("\n")).toContain("Couldn't open — no current client");
 	});
 
 	it("a stored session gets a pane of its own, then the terminal switches to it", async () => {
@@ -476,6 +511,14 @@ describe("tmux", () => {
 		expect(Tmux.gone(Object.assign(new Error("spawnSync tmux ETIMEDOUT"), { code: "ETIMEDOUT", stderr: "" }))).toBe(
 			false,
 		);
+	});
+
+	it("words a failure by tmux's own complaint, not the command that failed", () => {
+		expect(Tmux.reason(tmuxFailure("no current client\n"))).toBe("no current client");
+		expect(Tmux.reason(Object.assign(new Error("spawnSync tmux ETIMEDOUT"), { stderr: "" }))).toBe(
+			"spawnSync tmux ETIMEDOUT",
+		);
+		expect(Tmux.reason("odd")).toBe("odd");
 	});
 
 	it("never ends a session it cannot SIGKILL the pi of: a hung-up pi would carry it on", () => {

@@ -48,7 +48,7 @@ import {
 	stateBandOf,
 	type ViewMode,
 } from "../../daemon/rows.ts";
-import { AGENT_VIEW_COMMAND, HIDE_ENV, OPEN_VIEW_ENV, type ShellInfo } from "../../daemon/tmux.ts";
+import { AGENT_VIEW_COMMAND, HIDE_ENV, OPEN_VIEW_ENV, type ShellInfo, Tmux } from "../../daemon/tmux.ts";
 import { mascotGlyphs, REST, renderMascot } from "../_shared/mascot.ts";
 import { PasteTokens, shouldCollapse } from "../_shared/paste-tokens.ts";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
@@ -102,6 +102,8 @@ export interface AgentViewOptions {
 	hide?: string;
 	/** Called once the loaded roster has drawn. */
 	onDrawn?: () => void;
+	/** The roster as listed just before the view opened, so its first frame is the whole of it. */
+	instances?: InstanceSummary[];
 }
 
 /** What agent view needs from tmux in pane mode. */
@@ -161,6 +163,8 @@ const STOP_SAVE_POLLS = 20;
 const RESUMING_FROM_PHONE = "Already being resumed from your phone";
 /** How long a new pane's row shows as starting before it should have registered. */
 const PANE_START_MS = 15_000;
+/** A pane heartbeats every 3s (self-registration.ts), so a restarted daemon has them all back by this. */
+const RESTART_GRACE_MS = 5000;
 
 type Color = Parameters<typeof theme.fg>[0];
 
@@ -331,6 +335,10 @@ export class AgentView implements Component, Focusable {
 	private closed = false;
 	/** Set once the first roster is in; the next frame drawn is reported to onDrawn. */
 	private loaded = false;
+	/** A roster has been listed: until then, only this window's own row is known. */
+	private listed = false;
+	/** When this view restarted an older daemon, which lost every pane's registration. */
+	private restartedAt = Number.NEGATIVE_INFINITY;
 	private drawn = false;
 	/** This terminal is moving to another pane: keys wait for it. */
 	private leaving = false;
@@ -345,6 +353,15 @@ export class AgentView implements Component, Focusable {
 		const insert = composer.handlePaste.bind(this.composer);
 		this.insertIntoComposer = insert;
 		composer.handlePaste = (text) => this.pasteIntoComposer(text, insert);
+		if (opts.instances) {
+			this.instances = opts.instances.filter((inst) => inst.id !== opts.hide);
+			this.listed = true;
+			try {
+				this.shells = opts.panes.listShells();
+			} catch {
+				// listed by the first refresh
+			}
+		}
 		// This window's own row shows at once, before the daemon (maybe cold-starting) answers.
 		this.recompute();
 	}
@@ -399,6 +416,7 @@ export class AgentView implements Component, Focusable {
 			if (info.running && info.buildId !== currentDaemonBuildId()) {
 				const result = await this.opts.client.restartDaemon();
 				if (this.closed) return;
+				if (result.restarted) this.restartedAt = Date.now();
 				this.daemonNotice = result.restarted
 					? ""
 					: `background service is an older build — not restarted: ${result.reason ?? "unknown reason"}`;
@@ -530,7 +548,14 @@ export class AgentView implements Component, Focusable {
 		if (this.refreshing || this.closed) return;
 		this.refreshing = true;
 		try {
-			this.instances = (await this.opts.client.list()).filter((inst) => inst.id !== this.opts.hide);
+			const listed = (await this.opts.client.list()).filter((inst) => inst.id !== this.opts.hide);
+			// A restarted daemon knows a pane only from its next heartbeat: until then its row stays as it was.
+			const carried =
+				Date.now() - this.restartedAt < RESTART_GRACE_MS
+					? this.instances.filter((inst) => inst.pane && !listed.some((l) => l.id === inst.id))
+					: [];
+			this.instances = [...listed, ...carried];
+			this.listed = true;
 			this.connectionLost = false;
 		} catch {
 			this.connectionLost = true;
@@ -785,7 +810,7 @@ export class AgentView implements Component, Focusable {
 			this.clearDraft();
 		} catch (error) {
 			this.setComposer(draft);
-			this.say(`Couldn't start it — ${error instanceof Error ? error.message : String(error)}`, "error");
+			this.say(`Couldn't start it — ${Tmux.reason(error)}`, "error");
 			return;
 		}
 		if (open) {
@@ -821,7 +846,10 @@ export class AgentView implements Component, Focusable {
 		try {
 			this.opts.panes.switchTo(pane);
 		} catch (error) {
-			this.say(`Couldn't open — ${error instanceof Error ? error.message : String(error)}`, "error");
+			if (Tmux.gone(error)) {
+				this.say("Couldn't open — that session's pane is gone", "error");
+				void this.refresh();
+			} else this.say(`Couldn't open — ${Tmux.reason(error)}`, "error");
 			return;
 		}
 		this.close();
@@ -847,7 +875,7 @@ export class AgentView implements Component, Focusable {
 			pane = panes.start(row.cwd, ["--session", sessionFile]);
 		} catch (error) {
 			this.opening = undefined;
-			this.say(`Couldn't open — ${error instanceof Error ? error.message : String(error)}`, "error");
+			this.say(`Couldn't open — ${Tmux.reason(error)}`, "error");
 			return;
 		}
 		// The pane's own row replaces the stored one.
@@ -1875,6 +1903,7 @@ export class AgentView implements Component, Focusable {
 
 	setInstancesForTest(instances: InstanceSummary[]): void {
 		this.instances = instances;
+		this.listed = true;
 		this.recompute();
 	}
 
@@ -2325,7 +2354,7 @@ export class AgentView implements Component, Focusable {
 		else {
 			// Explains the view above the composer while only your own session is listed.
 			const intro =
-				this.allRows.every((r) => r.self) && !this.composerText()
+				(this.listed || this.loaded) && this.allRows.every((r) => r.self) && !this.composerText()
 					? [
 							"",
 							...wrapTextWithAnsi(
