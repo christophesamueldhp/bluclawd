@@ -1,6 +1,14 @@
 // test/remote-transcript.test.ts
 import { describe, expect, it } from "vitest";
-import { activeBranch, parseEntries, TEXT_MAX, toolSummary, transcriptFrom } from "../daemon/remote/transcript.ts";
+import {
+	activeBranch,
+	imageFrom,
+	parseEntries,
+	TEXT_MAX,
+	toolSummary,
+	transcriptFrom,
+} from "../daemon/remote/transcript.ts";
+import { promptKey } from "../daemon/remote/web/live.js";
 
 const jsonl = (...entries: object[]) => entries.map((entry) => JSON.stringify(entry)).join("\n");
 const msg = (id: string, parentId: string | null, message: object) => ({
@@ -56,7 +64,7 @@ describe("remote transcript", () => {
 		);
 		expect(transcriptFrom(text, 50)).toEqual([
 			{ kind: "marker", id: "m0", text: "Model: anthropic/claude-opus-5-5" },
-			{ kind: "user", id: "u1", text: "run the tests\n[Image]" },
+			{ kind: "user", id: "u1", text: "run the tests\n[Image]", images: [{ index: 0, mimeType: "image/png" }] },
 			{
 				kind: "assistant",
 				id: "a1",
@@ -151,6 +159,59 @@ describe("remote transcript", () => {
 		expect(transcriptFrom(text, 50, undefined, "u1")).toEqual([]);
 		expect(transcriptFrom(text, 50, undefined, "x9")).toEqual([]);
 		expect(transcriptFrom(text, 50, "u3", "u3").map((m) => m.id)).toEqual(["u1", "u2"]);
+	});
+
+	describe("images", () => {
+		const png = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
+		const jpeg = { type: "image", data: "/9j/4AAQ", mimeType: "image/jpeg" };
+		const text = jsonl(
+			msg("u1", null, { role: "user", content: [{ type: "text", text: "look" }, png, jpeg] }),
+			msg("a1", "u1", {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "c1", name: "read", arguments: { path: "/p/a.png" } }],
+			}),
+			msg("r1", "a1", {
+				role: "toolResult",
+				toolCallId: "c1",
+				toolName: "read",
+				content: [{ type: "text", text: "Read image file [image/png]" }, png],
+			}),
+			msg("u2", "r1", { role: "user", content: "no picture" }),
+			msg("u3", "u1", { role: "user", content: [{ type: "text", text: "elsewhere" }, png] }),
+		);
+
+		it("are referenced by position and type, without their data, and still an [Image] line", () => {
+			const messages = transcriptFrom(text, 50, "u2");
+			expect(messages.find((m) => m.id === "u1")).toEqual({
+				kind: "user",
+				id: "u1",
+				text: "look\n[Image]\n[Image]",
+				images: [
+					{ index: 0, mimeType: "image/png" },
+					{ index: 1, mimeType: "image/jpeg" },
+				],
+			});
+			expect(messages.find((m) => m.id === "r1")).toMatchObject({
+				text: "Read image file [image/png]\n[Image]",
+				images: [{ index: 0, mimeType: "image/png" }],
+			});
+			// What the phone matches its pending prompt by.
+			expect(messages.find((m) => m.id === "u1")?.text).toBe(promptKey("look", 2));
+			expect(messages.find((m) => m.id === "u2")).toEqual({ kind: "user", id: "u2", text: "no picture" });
+			expect(JSON.stringify(messages)).not.toContain("iVBORw0KGgo");
+		});
+
+		it("are found by entry and position on the active branch only", () => {
+			expect(imageFrom(text, "u1", 1, "u2")).toEqual({ mimeType: "image/jpeg", data: "/9j/4AAQ" });
+			expect(imageFrom(text, "r1", 0, "u2")).toEqual({ mimeType: "image/png", data: "iVBORw0KGgo=" });
+			expect(imageFrom(text, "u1", 2, "u2")).toBeUndefined();
+			expect(imageFrom(text, "u2", 0, "u2")).toBeUndefined();
+			expect(imageFrom(text, "a1", 0, "u2")).toBeUndefined();
+			expect(imageFrom(text, "nope", 0, "u2")).toBeUndefined();
+			// The other branch, which the pane is not on.
+			expect(imageFrom(text, "u3", 0, "u2")).toBeUndefined();
+			expect(imageFrom(text, "u3", 0)).toEqual({ mimeType: "image/png", data: "iVBORw0KGgo=" });
+		});
 	});
 
 	it("an empty file has no branch", () => {

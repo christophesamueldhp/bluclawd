@@ -186,8 +186,8 @@ one tmux server that keeps the environment it started with, from every session s
 on the Mac too, until that server ends with the last session.
 
 The phone lists every agent-view session in its bands, with what it is doing. A session's chat
-shows its conversation (older messages load at the top), streams the reply in progress, sends a
-prompt, which reaches the session at once (within a few seconds right after a move, or while an
+shows its conversation, replies with their markdown rendered (older messages load at the top),
+streams the reply in progress, sends a prompt, which reaches the session at once (within a few seconds right after a move, or while an
 older daemon still runs), and Stop ends its turn. A reply to a stopped session resumes it, and
 Start begins a new one in a recent or typed directory. Tapping the title shows the model
 (and switches it), context and usage, and compacts or clones the session; a message's ⋯ edits it
@@ -196,7 +196,13 @@ its screen and sends it keys. Enable notifications to hear when a session finish
 on iOS only in the app opened from the Home Screen, iOS 16.4 or later.
 
 A prompt to a running session can carry up to four images (+ beside the reply field); a reply
-that resumes or starts a session is text only.
+that resumes or starts a session is text only. The images in a conversation, a prompt's or a
+tool's (`read` on a PNG), show as thumbnails as they scroll into view; tap one for full screen.
+The model gets a phone's image as it gets a pasted one. The Mac shows neither as a picture, in
+any terminal: pi draws only a prompt's text (a pasted image at least leaves its `[Image #1]`
+marker in it; a phone's leaves none), and a tool's image only outside tmux, while every
+agent-view session runs in tmux, where pi turns image protocols off and does not wrap them for
+tmux's passthrough.
 
 A paired phone can read every session, tool output included, prompt any of them, and press keys
 in a pane: it is effectively a shell as you on this Mac. Its token does not expire; revoke a phone

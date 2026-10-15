@@ -912,6 +912,66 @@ describe("remote HTTP API", () => {
 		expect(await page("limit=100000")).toMatchObject({ ids: ids, more: false });
 	});
 
+	describe("a transcript's images", () => {
+		const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+		const line = (id: string, parentId: string | null, role: string, content: unknown[]) =>
+			`${JSON.stringify({ type: "message", id, parentId, message: { role, content, toolName: "read" } })}\n`;
+		const image = (mimeType: string, data = png) => ({ type: "image", mimeType, data: data.toString("base64") });
+
+		beforeEach(() => {
+			writeFileSync(
+				join(dir, "live.jsonl"),
+				line("aaaaaaaa", null, "user", [{ type: "text", text: "look" }, image("image/png")]) +
+					line("bbbbbbbb", "aaaaaaaa", "toolResult", [{ type: "text", text: "Read" }, image("image/svg+xml")]) +
+					line("cccccccc", "bbbbbbbb", "user", [{ type: "text", text: "on" }]) +
+					line("dddddddd", "aaaaaaaa", "user", [image("image/png")]),
+			);
+			instances = [{ ...instances[0], leafId: "cccccccc" }, instances[1]];
+		});
+		const get = (path: string, token?: string) =>
+			fetch(`${base}/api/sessions/${path}`, token ? { headers: auth(token) } : undefined);
+
+		it("serves one as its type, privately cached and never sniffed", async () => {
+			const token = await pair();
+			const res = await get("live/images/aaaaaaaa/0", token);
+			expect(res.status).toBe(200);
+			expect(res.headers.get("content-type")).toBe("image/png");
+			expect(res.headers.get("cache-control")).toMatch(/^private, max-age=\d+$/);
+			expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+			expect(Buffer.from(await res.arrayBuffer())).toEqual(png);
+		});
+
+		it("needs a paired device's token", async () => {
+			expect((await get("live/images/aaaaaaaa/0")).status).toBe(401);
+			expect((await get("live/images/aaaaaaaa/0", "bogus")).status).toBe(401);
+		});
+
+		it("finds only an image on the session's branch, of a type the phone shows", async () => {
+			const token = await pair();
+			const status = async (path: string) => {
+				const res = await get(path, token);
+				return [res.status, ((await res.json()) as { error: string }).error];
+			};
+			expect(await status("live/images/aaaaaaaa/1")).toEqual([404, "unknown_image"]);
+			expect(await status("live/images/cccccccc/0")).toEqual([404, "unknown_image"]);
+			expect(await status("live/images/eeeeeeee/0")).toEqual([404, "unknown_image"]);
+			// On the branch the pane left.
+			expect(await status("live/images/dddddddd/0")).toEqual([404, "unknown_image"]);
+			expect(await status("live/images/bbbbbbbb/0")).toEqual([415, "unsupported_image"]);
+			expect(await status("nope/images/aaaaaaaa/0")).toEqual([404, "unknown_session"]);
+			expect(await status("stored/images/aaaaaaaa/0")).toEqual([404, "unknown_image"]);
+			expect(await status("live/images/aaaaaaaa/-1")).toEqual([404, "not_found"]);
+			expect(await status("live/images/..%2Fx/0")).toEqual([404, "not_found"]);
+			expect(await status("live/images/aaaaaaaa/99999")).toEqual([404, "not_found"]);
+			const post = await fetch(`${base}/api/sessions/live/images/aaaaaaaa/0`, {
+				method: "POST",
+				headers: authJson(token),
+				body: "{}",
+			});
+			expect(post.status).toBe(405);
+		});
+	});
+
 	it("reads a running session's transcript from the leaf it reports", async () => {
 		appendFileSync(join(dir, "live.jsonl"), entry("u2", "u1", "gone back from"));
 		instances = [{ ...instances[0], leafId: "u1" }];

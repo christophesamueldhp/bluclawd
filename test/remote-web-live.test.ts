@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { promptKey, sentText, settle } from "../daemon/remote/web/live.js";
+import { promptKey, sentText, settle, shownText } from "../daemon/remote/web/live.js";
 
 const assistant = (id: string, text: string, thinking?: string) => ({
 	kind: "assistant",
@@ -59,5 +59,22 @@ describe("a sent prompt as the transcript shows it", () => {
 
 	it("keeps such a line in a prompt without images", () => {
 		expect(sentText("look\n\n[Image: original]")).toBe("look\n\n[Image: original]");
+	});
+});
+
+describe("a message's text in its bubble", () => {
+	const png = { index: 0, mimeType: "image/png" };
+
+	it("leaves out its [Image] lines when its images show instead", () => {
+		expect(shownText("look\n[Image]\n[Image]", [png, { ...png, index: 1 }])).toBe("look");
+		expect(shownText("Read image file [image/png]\n[Image]", [png])).toBe("Read image file [image/png]");
+	});
+
+	it("keeps them without images to show, and keeps a line that only mentions one", () => {
+		expect(shownText("look\n[Image]", undefined)).toBe("look\n[Image]");
+		expect(shownText("look\n[Image]", [])).toBe("look\n[Image]");
+		expect(shownText("see [Image] here\n[Image: original 4000x3000]\n[Image]", [png])).toBe(
+			"see [Image] here\n[Image: original 4000x3000]",
+		);
 	});
 });

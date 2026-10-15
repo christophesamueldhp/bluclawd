@@ -58,7 +58,7 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 /* Its first line (16px × 1.4) centred on the 44px ⋯ beside it. */
 .theirs .a { flex: 1; min-width: 0; padding-top: calc((44px - 16px * 1.4) / 2); }
 .more { flex: none; width: 44px; height: 44px; padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 20px; line-height: 1; }
-.a { white-space: pre-wrap; overflow-wrap: anywhere; }
+.a { overflow-wrap: anywhere; }
 .t { font-size: 12px; line-height: 1.45; background: var(--panel); border-left: 2px solid var(--accent); border-radius: 4px; padding: 6px 10px; color: var(--muted); overflow-wrap: anywhere; }
 .t.err { border-left-color: var(--red); }
 .t.running::before { content: "◐"; display: inline-block; margin-right: 6px; color: var(--accent); animation: spin 1s linear infinite; }
@@ -138,3 +138,38 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .unpair { flex: none; align-self: center; min-height: 44px; padding: 0 8px; border: 0; background: none; color: var(--red); font: inherit; font-weight: 600; }
 .unpair.cancel { color: var(--accent); }
 .device small { white-space: normal; }
+/* A reply's markdown (markdown.js), compact for a phone. */
+.a p, .a ul, .a ol, .a blockquote, .a .code, .a .table { margin: 0 0 8px; }
+.a h1, .a h2, .a h3, .a h4, .a h5, .a h6 { margin: 14px 0 6px; line-height: 1.25; font-weight: 600; }
+.a > :first-child { margin-top: 0; }
+.a > :last-child { margin-bottom: 0; }
+.a h1 { font-size: 20px; }
+.a h2 { font-size: 18px; }
+.a h3 { font-size: 16px; }
+.a h4, .a h5, .a h6 { font-size: 15px; color: var(--muted); }
+.a ul, .a ol { padding-left: 22px; }
+.a li + li { margin-top: 2px; }
+.a li > ul, .a li > ol, .a li > .code, .a li > .table { margin: 4px 0; }
+.a li.task { list-style: none; }
+.a li.task input { margin: 0 2px 0 -20px; vertical-align: -2px; }
+.a blockquote { padding-left: 10px; margin-left: 0; margin-right: 0; border-left: 3px solid var(--line); color: var(--muted); }
+.a code { font: 13.5px ui-monospace, "SF Mono", Menlo, monospace; background: var(--panel); border-radius: 4px; padding: 1px 4px; }
+.a .code { background: var(--panel); border-radius: 8px; }
+.a .lang { padding: 6px 10px 0; color: var(--muted); font: 11px ui-monospace, "SF Mono", Menlo, monospace; }
+.a pre { margin: 0; padding: 8px 10px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.a pre code { padding: 0; background: none; font-size: 12.5px; line-height: 1.45; }
+.a hr { border: 0; border-top: 1px solid var(--line); margin: 12px 0; }
+.a .table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.a table { border-collapse: collapse; font-size: 14px; }
+.a th, .a td { border: 1px solid var(--line); padding: 4px 8px; vertical-align: top; text-align: left; overflow-wrap: normal; }
+.a th { background: var(--panel); font-weight: 600; }
+.a th.c, .a td.c { text-align: center; }
+.a th.r, .a td.r { text-align: right; }
+.a a { color: var(--accent); }
+/* A message's images: the size a sent one's thumbnail had, and full screen when tapped. */
+.pic { flex: none; padding: 0; border: 0; border-radius: 10px; background: var(--panel); color: var(--muted); font-size: 11px; }
+.u .pictures:last-child { margin-bottom: 0; }
+.log > .pictures { margin: -4px 0 0 12px; }
+.viewer { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); background: rgb(0 0 0 / .92); }
+.viewer[hidden] { display: none; }
+.viewer img { max-width: 100%; max-height: 100%; object-fit: contain; }
