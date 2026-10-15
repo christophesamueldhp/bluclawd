@@ -9,6 +9,7 @@ const SHELL = [
 	"/api.js",
 	"/live.js",
 	"/markdown.js",
+	"/search.js",
 	"/statusbar.js",
 	"/manifest.webmanifest",
 	"/favicon-32.png",
@@ -35,23 +36,27 @@ self.addEventListener("activate", (event) => {
 	);
 });
 
-const NETWORK_TIMEOUT_MS = 3000;
-
-/** @param {Request} request */
-async function shellResponse(request) {
-	const cached = () => caches.match(request).then((hit) => hit ?? caches.match("/"));
-	const network = fetch(request);
-	network.catch(() => {});
-	const timeout = new Promise((resolve) => setTimeout(resolve, NETWORK_TIMEOUT_MS, null));
-	try {
-		const response = await Promise.race([network, timeout]);
-		if (!response) return (await cached()) ?? network;
-		if (!response.ok) return (await caches.match(request)) ?? response;
-		const copy = response.clone();
-		caches.open(CACHE).then((cache) => cache.put(request, copy));
+/**
+ * Stale while revalidating: the cached copy at once, so the app opens instantly even while the Mac
+ * sleeps, and the network's into the cache for the next open. Only what is not cached yet waits on
+ * the network; a page the cache lacks falls back to the shell's.
+ * @param {FetchEvent} event
+ */
+async function shellResponse(event) {
+	const { request } = event;
+	const network = fetch(request).then(async (response) => {
+		if (response.ok) await (await caches.open(CACHE)).put(request, response.clone());
 		return response;
+	});
+	const cached = await caches.match(request);
+	if (cached) {
+		event.waitUntil(network.catch(() => {}));
+		return cached;
+	}
+	try {
+		return await network;
 	} catch {
-		return (await cached()) ?? Response.error();
+		return (await caches.match("/")) ?? Response.error();
 	}
 }
 
@@ -99,6 +104,6 @@ self.addEventListener("fetch", (event) => {
 		url.search
 	)
 		return;
-	// Network first: a new build shows at once; the cache is for when the Mac is slow, down or erroring.
-	event.respondWith(shellResponse(event.request));
+	// A new build shows from the open after the one that fetched it.
+	event.respondWith(shellResponse(event));
 });
