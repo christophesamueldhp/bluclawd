@@ -1,14 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-	giveUp,
-	promptKey,
-	promptText,
-	refused,
-	sentText,
-	settle,
-	shortcut,
-	shownText,
-} from "../daemon/remote/web/live.js";
+import { giveUp, promptKey, promptText, refused, sentText, settle, shownText } from "../daemon/remote/web/live.js";
 
 const assistant = (id: string, text: string, thinking?: string) => ({
 	kind: "assistant",
@@ -112,19 +103,6 @@ describe("a sent prompt still waiting once its time is up", () => {
 	});
 });
 
-describe("the commands the phone runs itself", () => {
-	it("are /compact and /model, typed alone", () => {
-		expect(shortcut("/compact")).toBe("compact");
-		expect(shortcut(" /model\n")).toBe("model");
-	});
-
-	it("leaves anything else to be sent", () => {
-		for (const text of ["/compact now", "/models", "/reload", "compact", "/Model", "please /model"]) {
-			expect(shortcut(text), text).toBeUndefined();
-		}
-	});
-});
-
 describe("the commands the phone does not send", () => {
 	it("are /remote-control and /agent-view, with or without arguments", () => {
 		for (const text of ["/remote-control", " /remote-control off\n", "/agent-view", "/agent-view peek"]) {
@@ -139,7 +117,7 @@ describe("the commands the phone does not send", () => {
 	});
 });
 
-describe("a message of yours for the reply box or the clipboard", () => {
+describe("a message of yours for the reply box", () => {
 	it("is its text without the transcript's [Image] lines", () => {
 		expect(promptText("look at these\n[Image]\n[Image]")).toBe("look at these");
 		expect(promptText("see [Image] here\n\n[Image: original 4000x3000]")).toBe(

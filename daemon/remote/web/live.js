@@ -71,16 +71,6 @@ export function giveUp(pending, sessionState, last) {
 }
 
 /**
- * The commands the phone runs itself rather than sending: `/compact` is its Compact, and `/model`
- * its model picker. Anything else is sent as typed.
- * @param {string} text @returns {"compact" | "model" | undefined}
- */
-export function shortcut(text) {
-	const command = text.trim();
-	return command === "/compact" ? "compact" : command === "/model" ? "model" : undefined;
-}
-
-/**
  * The commands the phone does not send: they drive the Mac's terminal (its remote control, agent
  * view), not the session. Every other "/" line goes, and runs as a command or template in the pane.
  * @param {string} text
@@ -91,7 +81,7 @@ export function refused(text) {
 }
 
 /**
- * A message of yours as pi's editor holds it, for the reply box or the clipboard: the transcript
+ * A message of yours as pi's editor holds it, for the reply box: the transcript
  * shows each image as an `[Image]` line, and only the text is kept.
  * @param {string} text
  */
