@@ -67,7 +67,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `/tasks` | background tasks dialog: shells (`run_in_background`, Ctrl+B on the model's running bash, or a foreground command past its `timeout`), monitors, and the model's bash still running in the foreground once it has run 2s (marked `foreground`; `x` kills it; Claude Code does not list these); running tasks only; Enter shows a task's output tail, `x` stops it (the model is told without a turn starting), and updates wait while the dialog is open. The model's bash is Claude Code's: `timeout` in milliseconds (2 minutes by default), a command still running then - or on Ctrl+B after 2s, or when you send a message - moves to the background instead of being killed, and the model reads a task's output file with `read`. The footer pill counts the running shells and monitors; ↓ from an empty prompt selects it and Enter opens the dialog. A shell writes its whole output to a file named in its start result and exit notification; `task_stop` stops it. A job notifies the model once when it exits, and once more if it goes quiet for 45s on what reads as an interactive prompt (`(y/n)`, `Press Enter`, …); the `monitor` tool turns each stdout line of a long-running command, or each frame of a WebSocket (`ws`), into an event that wakes the model (Claude Code's `Monitor`; stderr goes to the output file; every monitor expires after `timeout_ms`, 5 minutes by default and at most 30, with one notice so the model can re-arm it) |
 | `/rewind` (or Esc twice on an empty prompt, as in Claude Code) | Claude Code's rewind: a file checkpoint per message you send; lists your prompts newest first with what each changed (`a.ts +3 -1`, `No code changes`, `⚠ No code restore`), then Restore code and conversation / Restore conversation (the prompt returns to the editor) / Restore code / Never mind, with no further confirmation (the current files are checkpointed first and listed as `(before rewind)`, so `/rewind` undoes it). New files the agent created since the point (`write`, `bash`) are removed and your own are kept, as in Claude Code; unlike Claude Code it also restores files changed through bash or by hand. Checkpoints are git commits kept under `refs/bluclawd/checkpoints/<session>/`: the newest 50 per session, and another session's refs are pruned after 30 days |
 | `←` on an empty prompt (or `/agent-view`) | agent view, as Claude Code's `claude agents`: background sessions in Needs input (blocked on a prompt) / Working (a turn running) / Idle (nothing running) bands (empty ones hidden; ctrl+s: by directory, this one first, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing (a working session's current tool), age. Type a task + enter to start a background session (ctrl+enter: start it and switch to it), shift+enter / alt+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, ctrl+v attaches a clipboard image to the new-session composer, an unknown `/command` is sent as the task, `!<command>` runs it in your shell as a row of its own (its last output line while it runs, then done, `exit N — …` or stopped; enter shows its output, ctrl+x stops it then removes the row, and it is never run again), space peeks and replies (the reply is the session's next prompt, `/stop` stops it; a reply draft is kept per session), enter/→ switches this terminal to any session at once, including Working and Needs input (see [Session switching](#session-switching)), ↑↓ wrap, alt/ctrl+↑↓ jump between bands, alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes (this terminal's own session too: the terminal moves to agent view), ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` / `n:<name>` filter (ctrl+f turns the text into a name search), `/resume` brings a past session back and opens it, `/model <name>` (or `default`) sets the model for new ones, `/cd <dir>` sets the directory they start in (relative to the current one; bare `/cd` goes back), tab completes the model or directory (several matches are listed: ↑↓ and tab or enter pick one), typing `/` lists these commands (↑↓ to pick, tab or enter completes one that takes an argument, enter runs the rest), the hint line starts with the mode new ones start in (`⏵⏵ always` or `✕ never`; nothing at pi's default, `ask`), `?` shows the shortcuts, esc returns to your session, and ctrl+c twice (or `exit`, `/exit`) leaves tmux with the sessions still running. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press. Every session is a pi of its own in tmux, so it keeps running after its terminal leaves or closes; a local daemon (`daemon/`, a Unix socket in `~/.pi/server`) only lists them. Agent View detects both changed daemon code and a changed Pi installation, and restarts an obsolete daemon. A session that was idle when its pi quit is kept as a row with no process (it resumes when opened or replied to); every row stays until ctrl+x deletes it |
-| `/remote-control` | Claude Code's Remote Control, for every agent-view session: a phone app (a PWA the daemon serves) lists them in agent view's bands, shows a session's conversation and its reply as it streams, sends it a prompt, stops its turn, starts and resumes sessions, switches the model, compacts, edits, goes back or clones, answers a dialog, and notifies you. `/remote-control` turns it on (and off), `/remote-control pair` shows a new pairing code, `/remote-control devices` lists and revokes paired phones, `/remote-control autostart` starts the daemon at login (macOS) — see [Remote control](#remote-control) |
+| `/remote-control` | Claude Code's Remote Control, for every agent-view session: a phone app (a PWA the daemon serves) lists them in agent view's bands, shows a session's conversation and its reply as it streams, sends it a prompt, stops its turn, starts and resumes sessions, switches the model, compacts, edits, goes back or clones, answers a dialog, and notifies you. `/remote-control` turns it on and shows a QR code that pairs your phone; once on, it offers a menu: pair a new phone, the paired phones (revoke one), start at login (macOS), turn off — see [Remote control](#remote-control) |
 | `/status`, `/context` | `/status`: model, auth, project trust; `/context`: context window usage (session file, messages, tokens and cost stay in pi's `/session`) |
 | `/theme` | Claude Code's theme picker: Auto (match terminal), Dark / Light mode, their colorblind-friendly and ANSI-only variants (Claude Code's six palettes, with the bluclawd mascot cyan as accent), then every other pi theme; the focused theme previews live over a `demo.js` diff, Enter saves it, Esc restores the saved one. `/theme <name>` sets one directly |
 | `exit`, `/exit`, `quit`, `:q`, `:wq` alone at the prompt | as Claude Code's `/exit`: ends a normal session, detaches from a background one (see [Session switching](#session-switching)) |
@@ -148,22 +148,31 @@ The daemon serves a phone app on `127.0.0.1` only (port 7878, or `"remote": { "p
 settings); the phone reaches it over [Tailscale](https://tailscale.com), never the LAN or the
 internet. Once, on the Mac: install Tailscale and log in, then run `/remote-control` in any pi
 session. It offers to run `tailscale serve --bg 7878`, which gives this Mac an HTTPS address on
-your tailnet, and shows that address and a 6-digit code (5 minutes, single use). On the phone,
-also on your tailnet: open the address in Safari, Share → Add to Home Screen, open the app from
-the Home Screen and enter the code. The phone keeps a token; the daemon keeps only its hash, in
-`~/.pi/server/remote.json`. Turning remote control off leaves `tailscale serve` in place;
-`tailscale serve --https=443 off` removes it. If your tailnet has Serve or HTTPS certificates
-turned off, `/remote-control` shows the link that turns them on, once for the tailnet. For more
-than one Mac, add one Home Screen app per Mac: each has its own ts.net address and pairs on its own.
+your tailnet, and shows that address, a QR code and, under it, a 6-digit code (5 minutes, single
+use). On the phone, also on your tailnet, scan the QR code with the camera: Safari opens the
+address and pairs at once. For notifications, then add it to the Home Screen (Share → Add to Home
+Screen) and open it from there; if iOS does not carry Safari's pairing over to the Home Screen app,
+it asks for the 6-digit code once (run `/remote-control` again for a new one). The phone keeps a
+token; the daemon keeps only its hash, in `~/.pi/server/remote.json`. If your tailnet has Serve
+or HTTPS certificates turned off, `/remote-control` shows the link that turns them on, once for
+the tailnet. For more than one Mac, add one Home Screen app per Mac: each has its own ts.net
+address and pairs on its own.
 
-`/remote-control autostart` (macOS) starts the daemon at login with a LaunchAgent
-(`~/Library/LaunchAgents/dev.bluclawd.daemon.plist`, its log in `~/.pi/server/daemon.log`), so the
-phone reaches the Mac before any `pi` has run; running it again turns it off, and `/remote-control`
-shows whether it is on. It runs the node and pi that last ran `/remote-control` (any subcommand
-but `autostart`): after moving either, as a node upgrade does, `/remote-control devices` points it
-at the new ones for the next login. It runs the daemon through your login shell (zsh in place of
-fish or another shell that is not POSIX), which reads your login profile (`~/.zprofile`,
-`~/.profile`) but not `~/.zshrc`. An API key exported only in `~/.zshrc` is then missing from a
+Once remote control is on, `/remote-control` shows a menu:
+
+- **Pair a new phone**: a new QR code and 6-digit code.
+- **Paired phones (n)…**: each phone with when it paired and was last used; enter revokes one.
+- **Start at login: on/off** (macOS): starts the daemon at login with a LaunchAgent
+  (`~/Library/LaunchAgents/dev.bluclawd.daemon.plist`, its log in `~/.pi/server/daemon.log`), so
+  the phone reaches the Mac before any `pi` has run.
+- **Turn off remote control**, once confirmed. It leaves `tailscale serve` in place;
+  `tailscale serve --https=443 off` removes it.
+
+Started at login, the daemon runs the node and pi that last ran `/remote-control`: after moving
+either, as a node upgrade does, running `/remote-control` points it at the new ones for the next
+login. The LaunchAgent runs the daemon through your login shell (zsh in place of fish or another
+shell that is not POSIX), which reads your login profile (`~/.zprofile`, `~/.profile`) but not
+`~/.zshrc`. An API key exported only in `~/.zshrc` is then missing from a
 session the phone starts before any `pi` has run since login and, because every session shares
 one tmux server that keeps the environment it started with, from every session started after it,
 on the Mac too, until that server ends with the last session.
@@ -183,7 +192,7 @@ that resumes or starts a session is text only.
 
 A paired phone can read every session, tool output included, prompt any of them, and press keys
 in a pane: it is effectively a shell as you on this Mac. Its token does not expire; revoke a phone
-with `/remote-control devices`.
+from `/remote-control`'s Paired phones.
 
 What the phone cannot do: work without the daemon running (any `pi` starts it, and so does login
 with autostart on) and the Mac awake. A new bluclawd reaches the phone once the daemon restarts,
