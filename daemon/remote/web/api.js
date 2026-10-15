@@ -121,6 +121,10 @@ export const api = {
 	status: async (id) => (await call("GET", `${session(id)}/status`)).report,
 	/** @param {string} id @param {string} provider @param {string} modelId */
 	setModel: (id, provider, modelId) => call("POST", `${session(id)}/model`, { provider, id: modelId }),
+	/** One of the levels its report offers. @param {string} id @param {string} level */
+	setThinking: (id, level) => call("POST", `${session(id)}/thinking`, { level }),
+	/** pi's defaultProjectTrust: "always", "ask" or "never". @param {string} id @param {string} trust */
+	setTrust: (id, trust) => call("POST", `${session(id)}/trust`, { trust }),
 	/** @param {string} id */
 	compact: (id) => call("POST", `${session(id)}/compact`, {}),
 	/** In the same session, back to before a message of yours, or to a reply. @param {string} id @param {string} entryId */

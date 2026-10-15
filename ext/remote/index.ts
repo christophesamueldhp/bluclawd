@@ -4,8 +4,8 @@
  * QR code that pairs a phone, and once it is on, a menu: pair another phone, the paired phones,
  * starting the daemon at login (autostart.ts), turning it off. In a pane,
  * it also streams the reply in progress to the phones watching the session (live.ts), reports its
- * model and usage, and runs the phone's model switch, compaction, tree navigation, fork and clone
- * (report.ts).
+ * model, usage and trust mode, and runs the phone's model, thinking level and trust mode switches,
+ * compaction, tree navigation, fork and clone (report.ts).
  */
 import type {
 	ExtensionAPI,
@@ -22,6 +22,7 @@ import {
 } from "../../daemon/orchestrator-client.ts";
 import { piCommand, Tmux } from "../../daemon/tmux.ts";
 import { remotePort } from "../_shared/settings.ts";
+import { TRUST_CHANGED } from "../permissions/index.ts";
 import { autostartDeps, autostartOn, autostartStatus, refreshAutostart, toggleAutostart } from "./autostart.ts";
 import { LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
@@ -231,6 +232,9 @@ function factory(pi: ExtensionAPI): void {
 		if (opened && session) report(session);
 	});
 	pi.events.on("bluclawd:remote-want-report", () => {
+		if (session) report(session);
+	});
+	pi.events.on(TRUST_CHANGED, () => {
 		if (session) report(session);
 	});
 	pi.on("message_update", (event) => live?.onMessageUpdate(event.message));

@@ -1,11 +1,13 @@
 /**
  * What the phone's status sheet shows of a pane (its model, the models it can switch to,
- * thinking level, context and session usage), and the phone's actions run in the pane.
+ * thinking level, context, session usage and trust mode), and the phone's actions run in the pane.
  */
 import { existsSync } from "node:fs";
-import type { Usage } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type ModelThinkingLevel, type Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { PaneMessage, PaneReport } from "../../daemon/orchestrator-client.ts";
+import type { ProjectTrust } from "../_shared/trust-badge.ts";
+import { projectTrust, setProjectTrust, TRUST_CYCLE } from "../permissions/index.ts";
 
 type ReportModel = PaneReport["models"][number];
 
@@ -13,7 +15,11 @@ function reportModel(model: { provider: string; id: string; name?: string }): Re
 	return { provider: model.provider, id: model.id, ...(model.name ? { name: model.name } : {}) };
 }
 
-export function buildReport(ctx: ExtensionContext, pi: Pick<ExtensionAPI, "getThinkingLevel">): PaneReport {
+export function buildReport(
+	ctx: ExtensionContext,
+	pi: Pick<ExtensionAPI, "getThinkingLevel">,
+	trustOf: (ctx: ExtensionContext) => ProjectTrust = projectTrust,
+): PaneReport {
 	const current = ctx.model;
 	const models = new Map<string, ReportModel>();
 	// The current model too, so the picker can show it selected.
@@ -44,11 +50,14 @@ export function buildReport(ctx: ExtensionContext, pi: Pick<ExtensionAPI, "getTh
 		models: [...models.values()].sort(
 			(a, b) => a.provider.localeCompare(b.provider) || (a.name ?? a.id).localeCompare(b.name ?? b.id),
 		),
-		...(current?.reasoning ? { thinkingLevel: pi.getThinkingLevel() } : {}),
+		...(current?.reasoning
+			? { thinkingLevel: pi.getThinkingLevel(), thinkingLevels: getSupportedThinkingLevels(current) }
+			: {}),
 		...(context
 			? { context: { tokens: context.tokens, contextWindow: context.contextWindow, percent: context.percent } }
 			: {}),
 		usage,
+		trust: trustOf(ctx),
 	};
 }
 
@@ -56,16 +65,28 @@ export function buildReport(ctx: ExtensionContext, pi: Pick<ExtensionAPI, "getTh
  *  compact, tree, fork and clone unless the session is idle, since they would cut a turn short.
  *  Tree, fork and clone need a command's context, so they run as `/remote-control`, which pi
  *  executes without writing anything to the session. The phone shows a compact until the pane
- *  reports again: `reportAgain` does when one is skipped or fails, which pi reports nothing for. */
+ *  reports again: `reportAgain` does when one is skipped or fails, which pi reports nothing for,
+ *  and for a thinking level pi does not change to, so the phone's picker goes back. */
 export function applyPaneMessage(
 	message: PaneMessage,
 	ctx: ExtensionContext,
-	pi: Pick<ExtensionAPI, "setModel" | "sendUserMessage" | "getCommands">,
+	pi: Pick<
+		ExtensionAPI,
+		"setModel" | "sendUserMessage" | "getCommands" | "getThinkingLevel" | "setThinkingLevel" | "events"
+	>,
 	reportAgain: () => void = () => {},
 ): void {
 	if (message.type === "set_model") {
 		const model = ctx.modelRegistry.find(message.provider, message.id);
 		if (model) pi.setModel(model).catch(() => {});
+	} else if (message.type === "set_thinking") {
+		const level = message.level as ModelThinkingLevel;
+		const offered = ctx.model?.reasoning === true && getSupportedThinkingLevels(ctx.model).includes(level);
+		if (offered && level !== pi.getThinkingLevel()) pi.setThinkingLevel(level);
+		else reportAgain();
+	} else if (message.type === "set_trust") {
+		// Reported again on TRUST_CHANGED, as Alt+M's is.
+		if (TRUST_CYCLE.includes(message.trust)) setProjectTrust(pi, ctx, message.trust).catch(reportAgain);
 	} else if (message.type === "compact") {
 		if (ctx.isIdle()) ctx.compact({ onError: reportAgain });
 		else reportAgain();

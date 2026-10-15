@@ -4,6 +4,7 @@ import { getSocketPath } from "./config.ts";
 import { handleIpcRequest, listSummaries, setRemoteControl, setShutdownHook } from "./handler.ts";
 import { startIpcServer } from "./ipc/server.ts";
 import { RemoteControl } from "./remote/control.ts";
+import { statusLine } from "./remote/statusline.ts";
 import { supervisor } from "./supervisor.ts";
 
 export async function serve(): Promise<void> {
@@ -29,6 +30,7 @@ export async function serve(): Promise<void> {
 		listInstances: listSummaries,
 		send: (id, message) => supervisor.sendExternal(id, message),
 		deleteInstance: (id) => supervisor.deleteInstance(id),
+		statusLine: statusLine(),
 	});
 	setRemoteControl(remote);
 	await remote.apply();

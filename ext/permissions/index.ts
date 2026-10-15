@@ -3,7 +3,7 @@
  *
  * pi asks nothing before a tool runs; this adds one thing on top: a tool call that
  * matches a `permissions.deny` rule (global or project settings) is blocked outright.
- * The footer shows pi's `defaultProjectTrust`, and Alt+M cycles it.
+ * The footer shows pi's `defaultProjectTrust`; Alt+M cycles it, and the phone's status sheet sets it.
  *
  * Registered first so a denied call is blocked before any other extension sees it.
  */
@@ -22,11 +22,43 @@ import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { type ProjectTrust, trustBadge } from "../_shared/trust-badge.ts";
 import { deniedBy, displayRule, searchQueries } from "./rules.ts";
 
-const TRUST_CYCLE: readonly ProjectTrust[] = ["always", "ask", "never"];
+export const TRUST_CYCLE: readonly ProjectTrust[] = ["always", "ask", "never"];
+/** On pi's event bus whenever `defaultProjectTrust` is set here, so remote control reports it. */
+export const TRUST_CHANGED = "bluclawd:trust-changed";
 
 /** The footer badge for a `defaultProjectTrust` value. */
 export function trustStatusText(ctx: ExtensionContext, trust: ProjectTrust): string {
 	return `${trustBadge(ctx.ui.theme, trust)} ${ctx.ui.theme.fg("dim", "(alt+m to cycle)")}`;
+}
+
+function settings(ctx: ExtensionContext): SettingsManager {
+	return SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
+}
+
+export function projectTrust(ctx: ExtensionContext): ProjectTrust {
+	return settings(ctx).getDefaultProjectTrust();
+}
+
+function refreshBadge(ctx: ExtensionContext): void {
+	try {
+		ctx.ui.setStatus(STATUS_KEYS.mode, trustStatusText(ctx, projectTrust(ctx)));
+	} catch {
+		// Stale extension instance after a reload — nothing to draw on.
+	}
+}
+
+/** Alt+M's, and the phone's: saved to global settings, the badge redrawn, and announced. */
+export async function setProjectTrust(
+	pi: Pick<ExtensionAPI, "events">,
+	ctx: ExtensionContext,
+	trust: ProjectTrust,
+): Promise<void> {
+	const sm = settings(ctx);
+	sm.setDefaultProjectTrust(trust);
+	await sm.flush();
+	refreshBadge(ctx);
+	ctx.ui.notify(`defaultProjectTrust: ${trust} — applies to projects opened from now on`, "info");
+	pi.events.emit(TRUST_CHANGED, trust);
 }
 
 /**
@@ -48,10 +80,6 @@ function governed(tool: string, input: Record<string, unknown>): { tool: string;
 function factory(pi: ExtensionAPI): void {
 	let deny: string[] = [];
 
-	function settings(ctx: ExtensionContext): SettingsManager {
-		return SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
-	}
-
 	function loadDeny(ctx: ExtensionContext): void {
 		const sm = settings(ctx);
 		try {
@@ -63,14 +91,6 @@ function factory(pi: ExtensionAPI): void {
 		// pi reads an unparseable settings file as empty, which would drop its deny rules silently.
 		for (const { path, scope } of sm.drainErrors()) {
 			ctx.ui.notify(`${path ?? `${scope} settings`} could not be read: its deny rules are not in effect`, "warning");
-		}
-	}
-
-	function refreshBadge(ctx: ExtensionContext): void {
-		try {
-			ctx.ui.setStatus(STATUS_KEYS.mode, trustStatusText(ctx, settings(ctx).getDefaultProjectTrust()));
-		} catch {
-			// Stale extension instance after a reload — nothing to draw on.
 		}
 	}
 
@@ -95,12 +115,8 @@ function factory(pi: ExtensionAPI): void {
 	pi.registerShortcut(Key.alt("m"), {
 		description: "Cycle defaultProjectTrust (always / ask / never)",
 		handler: async (ctx) => {
-			const sm = settings(ctx);
-			const next = TRUST_CYCLE[(TRUST_CYCLE.indexOf(sm.getDefaultProjectTrust()) + 1) % TRUST_CYCLE.length];
-			sm.setDefaultProjectTrust(next);
-			await sm.flush();
-			refreshBadge(ctx);
-			ctx.ui.notify(`defaultProjectTrust: ${next} — applies to projects opened from now on`, "info");
+			const next = TRUST_CYCLE[(TRUST_CYCLE.indexOf(projectTrust(ctx)) + 1) % TRUST_CYCLE.length];
+			await setProjectTrust(pi, ctx, next);
 		},
 	});
 }

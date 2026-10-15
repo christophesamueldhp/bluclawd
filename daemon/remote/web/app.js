@@ -1,21 +1,21 @@
 // @ts-check
 /**
  * bluclawd's remote control on a phone: the session list (agent view's bands) with a composer
- * that starts a session, and one session's chat, whose title opens its status sheet. Only the
+ * that starts a session, and one session's chat, whose title and status bar open its status sheet. Only the
  * parts that change are re-rendered, so the composers keep their text, focus and keyboard while
  * updates arrive.
  */
 import { api, clearToken, getToken, pairLink, setToken, Unauthorized } from "./api.js";
 import { promptKey, sentText, settle, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
+import { barHtml, factsHtml, thinkingHtml, tokens } from "./statusbar.js";
 
 /** @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string }} Session */
 /** @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
-/** @typedef {{ provider: string, id: string, name?: string }} ReportModel */
 /** @typedef {{ id: string, name: string, createdAt: string, lastUsedAt?: string, current: boolean }} Device `current`: this one */
 /** @typedef {{ mimeType: string, data: string, thumb: string }} Attachment base64 `data`, a data URL `thumb` */
-/** @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number } }} Report */
+/** @typedef {import("./statusbar.js").Report} Report */
 
 const BANDS = [
 	["pinned", "Pinned"],
@@ -67,6 +67,8 @@ const ERRORS = {
 		"This session has not reported yet. Try again in a moment; if this persists, restart it (it may run an older bluclawd).",
 	invalid_cwd: "That directory does not exist on the Mac.",
 	invalid_model: "That model name is not valid.",
+	invalid_thinking: "The model does not offer that thinking level.",
+	invalid_trust: "That trust mode is not one of always, ask or never.",
 	invalid_entry: "That message is no longer in this session.",
 	not_moved: "The session did not move.",
 	invalid_keys: "That can't be typed into the session. Use the keys for Enter, Tab and Esc.",
@@ -424,9 +426,10 @@ async function loadOlder() {
 	}
 }
 
+/** For the status bar too, so whenever a chat is open. */
 async function loadStatus() {
 	const id = state.open;
-	if (!id || !state.sheetOpen) return;
+	if (!id) return;
 	const request = ++statusRequest;
 	/** @type {Report | null} */
 	let report;
@@ -671,6 +674,7 @@ function rowsHtml() {
 function chatShell() {
 	return `<header class="bar"><a class="back" href="#">‹ Sessions</a><button class="title" id="title" aria-haspopup="dialog"></button>
 <button class="stop" id="stop" hidden>Stop</button></header>
+<button class="statusbar" id="statusbar" aria-haspopup="dialog" aria-label="Status" hidden></button>
 <div id="banner"></div><section class="scroll" id="scroll"><div class="older" id="older"></div><div class="log" id="log"></div></section>
 <div class="thumbs" id="thumbs" hidden></div>
 <form class="composer" id="composer"><button type="button" class="attach" id="attach" aria-label="Attach image"><span aria-hidden="true">+</span></button>
@@ -796,13 +800,6 @@ function bannerHtml(session) {
 	return "";
 }
 
-/** @param {number} count */
-function tokens(count) {
-	if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
-	if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
-	return String(count);
-}
-
 /** @param {Report} report */
 function modelOptions(report) {
 	const current = report.model;
@@ -845,10 +842,11 @@ ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
 	const busy = isBusy(session);
 	return `${head}<dl class="facts">
 <dt><label for="model">Model</label></dt><dd><select id="model">${modelOptions(report)}</select></dd>
-<dt>Thinking</dt><dd>${esc(report.thinkingLevel ?? "off")}</dd>
+${thinkingHtml(report)}
 <dt>Context</dt><dd>${contextHtml(report.context)}</dd>
 <dt>Tokens</dt><dd>${usage ? `↑ ${esc(tokens(usage.input))} in · ↓ ${esc(tokens(usage.output))} out${usage.cacheRead ? ` · R ${esc(tokens(usage.cacheRead))}` : ""}${usage.cacheWrite ? ` · W ${esc(tokens(usage.cacheWrite))}` : ""}` : "Unknown"}</dd>
 <dt>Cost</dt><dd>${usage ? `$${esc(usage.cost.toFixed(3))}` : "Unknown"}</dd>
+${factsHtml(report, session && shortPath(session.cwd), Date.now())}
 </dl><button class="compact" id="compact"${busy ? " disabled" : ""}>${state.compacting ? "Compacting…" : "Compact"}</button>
 <button class="compact clone" id="clone"${busy ? " disabled" : ""}>Clone session</button>`;
 }
@@ -964,6 +962,13 @@ function updateChat() {
 	// Kept while a resumed session's row gives way to its pane's.
 	if (!resuming) $("#title").textContent = session?.label ?? "";
 	$("#stop").hidden = session?.state !== "working";
+	const bar = $("#statusbar");
+	const barNow = barHtml(state.report, session && shortPath(session.cwd), Date.now());
+	if (bar.dataset.html !== barNow) {
+		bar.innerHTML = barNow;
+		bar.dataset.html = barNow;
+		bar.hidden = barNow === "";
+	}
 	const banner = $("#banner");
 	const bannerNow = bannerHtml(session);
 	// Rebuilt only when it changes, so a tap on Answer is not lost to a refresh.
@@ -1207,6 +1212,7 @@ function bindChat() {
 		}
 	});
 	$("#title").addEventListener("click", openSheet);
+	$("#statusbar").addEventListener("click", openSheet);
 	$("#banner").addEventListener("click", (/** @type {Event} */ event) => {
 		if (/** @type {Element} */ (event.target).closest("#answer")) openTerminal();
 	});
@@ -1253,12 +1259,14 @@ function bindChat() {
 	sheet.addEventListener("change", (/** @type {Event} */ event) => {
 		const target = /** @type {HTMLSelectElement} */ (event.target);
 		if (target.id === "model") void switchModel(target.value);
+		else if (target.id === "thinking") void switchSetting((id) => api.setThinking(id, target.value));
+		else if (target.id === "trust") void switchSetting((id) => api.setTrust(id, target.value));
 	});
 }
 
+/** The bar's report shows until the fresh one is in. */
 function openSheet() {
 	state.sheetOpen = true;
-	state.report = undefined;
 	state.error = undefined;
 	render();
 	void loadStatus();
@@ -1382,6 +1390,20 @@ async function switchModel(value) {
 		void loadStatus();
 	} catch (error) {
 		// Back to the model the pane reported.
+		$("#sheet").dataset.html = "";
+		handleError(error);
+	}
+}
+
+/** The thinking level or trust mode, as a model switch: the pane reports the change. @param {(id: string) => Promise<unknown>} call */
+async function switchSetting(call) {
+	const id = state.open;
+	if (!id) return;
+	try {
+		await call(id);
+		void loadStatus();
+	} catch (error) {
+		// Back to what the pane reported.
 		$("#sheet").dataset.html = "";
 		handleError(error);
 	}
@@ -1732,8 +1754,10 @@ document.addEventListener("visibilitychange", () => {
 		void offerHandoff();
 	}
 });
+// The list's ages, and the status bar's time to each usage limit's reset.
 setInterval(() => {
 	if (shown === "list") updateList();
+	else if (shown.startsWith("chat:")) updateChat();
 }, 30_000);
 if ("serviceWorker" in navigator) {
 	navigator.serviceWorker.register("sw.js").catch(() => {});

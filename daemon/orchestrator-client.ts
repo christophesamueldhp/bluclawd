@@ -42,6 +42,8 @@ export type PaneMessage =
 	| { type: "rename"; name: string }
 	| { type: "compact" }
 	| { type: "set_model"; provider: string; id: string }
+	| { type: "set_thinking"; level: string }
+	| { type: "set_trust"; trust: "always" | "ask" | "never" }
 	| { type: "tree"; entryId: string }
 	| { type: "fork"; entryId: string }
 	| { type: "clone" };
@@ -58,6 +60,8 @@ export interface PaneReport {
 	model?: { provider: string; id: string; name?: string };
 	models: Array<{ provider: string; id: string; name?: string }>;
 	thinkingLevel?: string;
+	thinkingLevels?: string[];
+	trust?: "always" | "ask" | "never";
 	context?: { tokens: number | null; contextWindow: number; percent: number | null };
 	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
 }
