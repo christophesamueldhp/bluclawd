@@ -178,8 +178,8 @@ one tmux server that keeps the environment it started with, from every session s
 on the Mac too, until that server ends with the last session.
 
 The phone lists every agent-view session in its bands, with what it is doing. A session's chat
-shows its conversation (older messages load at the top), streams the reply in progress, sends a
-prompt, which reaches the session at once (within a few seconds right after a move, or while an
+shows its conversation, replies with their markdown rendered (older messages load at the top),
+streams the reply in progress, sends a prompt, which reaches the session at once (within a few seconds right after a move, or while an
 older daemon still runs), and Stop ends its turn. A reply to a stopped session resumes it, and
 Start begins a new one in a recent or typed directory. Tapping the title shows the model
 (and switches it), context and usage, and compacts or clones the session; a message's ⋯ edits it

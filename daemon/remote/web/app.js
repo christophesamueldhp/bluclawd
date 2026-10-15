@@ -7,6 +7,7 @@
  */
 import { api, getToken, pairCode, setToken, Unauthorized } from "./api.js";
 import { promptKey, sentText, settle } from "./live.js";
+import { markdown } from "./markdown.js";
 
 /** @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string }} Session */
 /** @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean }} Message */
@@ -195,6 +196,22 @@ let turnEndedAt;
 /** @param {unknown} text */
 function esc(text) {
 	return String(text).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+}
+
+/** The log is rebuilt with every streamed chunk: each reply's markdown is rendered once. */
+/** @type {Map<string, string>} */
+const rendered = new Map();
+const RENDERED_MAX = 500;
+
+/** @param {string | undefined} text */
+function md(text = "") {
+	let html = rendered.get(text);
+	if (html === undefined) {
+		if (rendered.size >= RENDERED_MAX) rendered.clear();
+		html = markdown(text);
+		rendered.set(text, html);
+	}
+	return html;
 }
 
 /** @param {string | undefined} code */
@@ -673,8 +690,8 @@ function logHtml(session) {
 			if (m.text)
 				parts.push(
 					back
-						? `<div class="theirs"><div class="a">${esc(m.text)}</div>${more(m)}</div>`
-						: `<div class="a">${esc(m.text)}</div>`,
+						? `<div class="theirs"><div class="a">${md(m.text)}</div>${more(m)}</div>`
+						: `<div class="a">${md(m.text)}</div>`,
 				);
 			for (const [index, tool] of (m.tools ?? []).entries()) {
 				const key = tool.id || `${m.id}:${index}`;
@@ -713,7 +730,7 @@ function liveHtml(live, calls) {
 			`<details class="think" data-key="think:live"><summary>Thinking</summary><pre>${esc(live.thinking)}</pre></details>`,
 		);
 	}
-	if (live.text) parts.push(`<div class="a">${esc(live.text)}</div>`);
+	if (live.text) parts.push(`<div class="a">${markdown(live.text)}</div>`);
 	for (const tool of live.tools) {
 		if (!calls.has(tool.id)) parts.push(toolHtml(tool.name, tool.summary, undefined, tool.id, tool.running));
 	}
