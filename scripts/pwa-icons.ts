@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import { BODY_COLOR, EYE_COLOR, SOURCE } from "../ext/_shared/mascot.ts";
 
-/** The app's dark background: iOS fills a touch icon's transparency with black. */
-const BACKGROUND = "#141414";
+/** White, opaque: iOS fills a touch icon's transparency with black. */
+const BACKGROUND = "#ffffff";
 /** The mascot's width as a share of the icon's, in whole pixels per grid block so it stays crisp. */
 const SCALE = 0.7;
 

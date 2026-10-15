@@ -29,18 +29,18 @@ describe("PWA icons", () => {
 		expect(committed.pixels).toEqual(decode(renderIcon(size)).pixels);
 	});
 
-	it("draws the mascot centred on the app's background, a whole pixel square per grid block", () => {
+	it("draws the mascot centred on white, a whole pixel square per grid block", () => {
 		const icon = decode(renderIcon(180));
 		// 6 px blocks: the 20×15 grid is 120×90, from (30, 45).
-		expect(colorAt(icon, 0, 0)).toBe("#141414");
-		expect(colorAt(icon, 179, 179)).toBe("#141414");
+		expect(colorAt(icon, 0, 0)).toBe("#ffffff");
+		expect(colorAt(icon, 179, 179)).toBe("#ffffff");
 		// Row 4, column 5: the left eye's top-left pixel and block.
 		expect(colorAt(icon, 30 + 5 * 6, 45 + 4 * 6)).toBe(EYE_COLOR);
 		expect(colorAt(icon, 30 + 5 * 6 - 1, 45 + 4 * 6)).toBe(BODY_COLOR);
 		// The head's top row (columns 8–11), and the gap left of it.
 		expect(colorAt(icon, 30 + 8 * 6, 45)).toBe(BODY_COLOR);
-		expect(colorAt(icon, 30 + 8 * 6 - 1, 45)).toBe("#141414");
-		expect(colorAt(icon, 30 + 8 * 6, 44)).toBe("#141414");
+		expect(colorAt(icon, 30 + 8 * 6 - 1, 45)).toBe("#ffffff");
+		expect(colorAt(icon, 30 + 8 * 6, 44)).toBe("#ffffff");
 	});
 
 	it("is linked from the page, the manifest and the offline shell", () => {
