@@ -15,21 +15,22 @@ const session = (id: string, state: RemoteSession["state"], detail = ""): Remote
 });
 
 describe("notificationEscape", () => {
-	it("writes OSC 777, wrapped for tmux's passthrough with every ESC doubled", () => {
-		expect(notificationEscape("task a", "Done", "xterm-ghostty", false)).toBe("\x1b]777;notify;task a;Done\x07");
-		expect(notificationEscape("task a", "Done", "xterm-ghostty", true)).toBe(
+	it("writes OSC 777, wrapped once per tmux level with every ESC doubled", () => {
+		expect(notificationEscape("task a", "Done", "xterm-ghostty", 0)).toBe("\x1b]777;notify;task a;Done\x07");
+		expect(notificationEscape("task a", "Done", "xterm-ghostty", 1)).toBe(
 			"\x1bPtmux;\x1b\x1b]777;notify;task a;Done\x07\x1b\\",
+		);
+		expect(notificationEscape("task a", "Done", "xterm-ghostty", 2)).toBe(
+			"\x1bPtmux;\x1b\x1bPtmux;\x1b\x1b\x1b\x1b]777;notify;task a;Done\x07\x1b\x1b\\\x1b\\",
 		);
 	});
 
 	it("writes OSC 99 for kitty", () => {
-		expect(notificationEscape("t", "b", "xterm-kitty", false)).toBe(
-			"\x1b]99;i=1:d=0;t\x1b\\\x1b]99;i=1:p=body;b\x1b\\",
-		);
+		expect(notificationEscape("t", "b", "xterm-kitty", 0)).toBe("\x1b]99;i=1:d=0;t\x1b\\\x1b]99;i=1:p=body;b\x1b\\");
 	});
 
 	it("keeps control characters out, and a title's ; from ending it early", () => {
-		expect(notificationEscape("a;b\x07", "x\x1by\nz", "xterm-ghostty", false)).toBe("\x1b]777;notify;a,b;xy z\x07");
+		expect(notificationEscape("a;b\x07", "x\x1by\nz", "xterm-ghostty", 0)).toBe("\x1b]777;notify;a,b;xy z\x07");
 	});
 });
 
@@ -81,9 +82,18 @@ describe("watchSessions", () => {
 		w.set([session("x", "done", "Fixed it"), session("y", "needs")]);
 		await w.tick();
 		expect(w.written).toEqual([
-			notificationEscape("task x", "Done — Fixed it", "xterm-ghostty", true),
-			notificationEscape("task y", "Needs input", "xterm-ghostty", true),
+			notificationEscape("task x", "Done — Fixed it", "xterm-ghostty", 1),
+			notificationEscape("task y", "Needs input", "xterm-ghostty", 1),
 		]);
+	});
+
+	it("wraps once more when the terminal showing it is itself a tmux pane", async () => {
+		const w = setup("pi-a", [{ session: "pi-a", termname: "tmux-256color" }]);
+		w.set([session("x", "working")]);
+		await w.tick();
+		w.set([session("x", "done")]);
+		await w.tick();
+		expect(w.written).toEqual([notificationEscape("task x", "Done", "tmux-256color", 2)]);
 	});
 
 	it("stays quiet in a pane no terminal shows, and asks tmux only when there is news", async () => {

@@ -5,7 +5,8 @@
  *
  * Every agent view session is a tmux pane and most are shown in no terminal, so each pane watches
  * every session through the daemon, and only the pane a terminal shows writes the notification,
- * through tmux's passthrough (on in the private server's config). With several terminals
+ * through tmux's passthrough (on in the private server's config), wrapped once more when that
+ * terminal is itself a pane of the user's own tmux, which then needs allow-passthrough too. With several terminals
  * attached, the one showing the pane named first does, so each change is announced once. With no
  * terminal attached nothing is: remote control's phone push covers that. A pi outside tmux
  * notifies when its own turn settles.
@@ -21,14 +22,16 @@ const POLL_MS = 2000;
 
 const clean = (text: string) => text.replace(/[\r\n]+/g, " ").replace(/[\x00-\x1f\x7f]/g, "");
 
-/** The escape that asks the terminal for a notification; `inTmux` wraps it for tmux's passthrough. */
-export function notificationEscape(title: string, body: string, termname: string, inTmux: boolean): string {
+/** The escape that asks the terminal for a notification, wrapped for the passthrough of each of `tmuxLevels` tmuxes. */
+export function notificationEscape(title: string, body: string, termname: string, tmuxLevels: number): string {
 	const t = clean(title).replaceAll(";", ",");
 	const b = clean(body);
 	const sequence = termname.includes("kitty")
 		? `\x1b]99;i=1:d=0;${t}\x1b\\\x1b]99;i=1:p=body;${b}\x1b\\`
 		: `\x1b]777;notify;${t};${b}\x07`;
-	return inTmux ? `\x1bPtmux;${sequence.replaceAll("\x1b", "\x1b\x1b")}\x1b\\` : sequence;
+	let out = sequence;
+	for (let i = 0; i < tmuxLevels; i++) out = `\x1bPtmux;${out.replaceAll("\x1b", "\x1b\x1b")}\x1b\\`;
+	return out;
 }
 
 /** The client showing `pane`, if no client shows a pane named before it. */
@@ -53,7 +56,9 @@ export function watchSessions(deps: WatchDeps): () => Promise<void> {
 			if (notes.length === 0) return;
 			const client = shownBy(deps.clients(), deps.pane);
 			if (!client) return;
-			for (const note of notes) deps.write(notificationEscape(note.title, note.body, client.termname, true));
+			// A terminal that is itself a tmux pane (pi run inside the user's own tmux) needs one more wrap.
+			const levels = /^(tmux|screen)/.test(client.termname) ? 2 : 1;
+			for (const note of notes) deps.write(notificationEscape(note.title, note.body, client.termname, levels));
 		} catch {
 			// no daemon or no tmux server: the next poll tries again
 		}
@@ -95,7 +100,7 @@ function factory(pi: ExtensionAPI): void {
 	pi.on("agent_settled", (_event, ctx) => {
 		if (!ctx.hasUI || Tmux.currentPane()) return;
 		const termname = process.env.KITTY_WINDOW_ID ? "xterm-kitty" : (process.env.TERM ?? "");
-		process.stdout.write(notificationEscape("pi", "Ready for input", termname, Boolean(process.env.TMUX)));
+		process.stdout.write(notificationEscape("pi", "Ready for input", termname, process.env.TMUX ? 1 : 0));
 	});
 }
 
