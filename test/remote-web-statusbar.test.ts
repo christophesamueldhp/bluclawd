@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { barHtml, factsHtml, thinkingHtml, tokens, untilText } from "../daemon/remote/web/statusbar.js";
+import {
+	barHtml,
+	columns,
+	contrast,
+	elapsedText,
+	factsHtml,
+	spanStyle,
+	thinkingHtml,
+	tokens,
+	untilText,
+} from "../daemon/remote/web/statusbar.js";
 
 const now = Date.parse("2026-10-15T10:12:00Z");
 const report = {
@@ -104,5 +114,70 @@ describe("the status sheet's pickers and facts", () => {
 
 	it("offers no trust picker for a pane that reports no trust mode", () => {
 		expect(factsHtml({ models: [] }, undefined, now)).toBe("");
+	});
+});
+
+describe("the user's pistatusline on the phone", () => {
+	it("keeps each span's colours, exactly, while they read on the theme", () => {
+		expect(spanStyle({ text: "main", fg: "#5f87af" }, true)).toEqual({ color: "#5f87af", classes: [] });
+		expect(spanStyle({ text: "opus", fg: "#ff0000", bold: true }, false)).toEqual({
+			color: "#ff0000",
+			classes: ["b"],
+		});
+		expect(spanStyle({ text: "x", dim: true, italic: true, underline: true }, false)).toEqual({
+			classes: ["d", "i", "u"],
+		});
+		// Truecolour and 256-colour shades are the user's own choice, readable or not.
+		expect(spanStyle({ text: "x", fg: "#fefefe" }, false)).toEqual({ color: "#fefefe", classes: [] });
+	});
+
+	it("draws a named terminal colour too faint on the theme in the app's own shade of it", () => {
+		// Yellow, white and bright green on white; black and blue on dark.
+		for (const fg of ["#cdcd00", "#ffff00", "#ffffff", "#e5e5e5", "#00ff00", "#00cdcd"]) {
+			const { color } = spanStyle({ text: "x", fg }, false);
+			expect(color, fg).not.toBe(fg);
+			expect(contrast(color!, "#ffffff"), fg).toBeGreaterThanOrEqual(3);
+		}
+		for (const fg of ["#000000", "#0000ee"]) {
+			const { color } = spanStyle({ text: "x", fg }, true);
+			expect(color, fg).not.toBe(fg);
+			expect(contrast(color!, "#141414"), fg).toBeGreaterThanOrEqual(3);
+		}
+		// The same colours read on the other theme, and stay.
+		expect(spanStyle({ text: "x", fg: "#ffff00" }, true).color).toBe("#ffff00");
+		expect(spanStyle({ text: "x", fg: "#0000ee" }, false).color).toBe("#0000ee");
+	});
+
+	it("keeps a span's own background, with text that reads on it", () => {
+		expect(spanStyle({ text: " ok ", fg: "#000000", bg: "#00cd00" }, true)).toEqual({
+			color: "#000000",
+			background: "#00cd00",
+			classes: [],
+		});
+		// No colour of its own: the theme's text, unless it would not read there.
+		expect(spanStyle({ text: " x ", bg: "#e5e5e5" }, false)).toEqual({ background: "#e5e5e5", classes: [] });
+		expect(spanStyle({ text: " x ", bg: "#e5e5e5" }, true)).toEqual({
+			color: "#141414",
+			background: "#e5e5e5",
+			classes: [],
+		});
+	});
+
+	it("asks for as many characters as fit across the bar, within what the Mac renders", () => {
+		expect(columns(358, 6.6)).toBe(54);
+		expect(columns(100, 6.6)).toBe(20);
+		expect(columns(5000, 6.6)).toBe(200);
+		expect(columns(0, 6.6)).toBe(0);
+		expect(columns(358, 0)).toBe(0);
+	});
+});
+
+describe("a background task's running time", () => {
+	it("counts minutes, then hours, then days", () => {
+		expect(elapsedText(now - 20_000, now)).toBe("<1m");
+		expect(elapsedText(now + 5000, now)).toBe("<1m");
+		expect(elapsedText(now - 35 * 60_000, now)).toBe("35m");
+		expect(elapsedText(now - 125 * 60_000, now)).toBe("2h05m");
+		expect(elapsedText(now - (4 * 24 + 6) * 3_600_000, now)).toBe("4d6h");
 	});
 });

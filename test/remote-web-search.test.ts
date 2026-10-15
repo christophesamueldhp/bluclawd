@@ -73,6 +73,7 @@ describe("suggesting the session's commands", () => {
 		{ name: "/model", description: "Switch the model" },
 		{ name: "remote-control" },
 		{ name: "agent-view" },
+		{ name: "exit", source: "builtin" as const },
 		{ name: "reload" },
 		{ name: "review" },
 	];
@@ -97,6 +98,8 @@ describe("suggesting the session's commands", () => {
 	it("never offers the commands the phone refuses to send", () => {
 		expect(names("/remote")).toEqual([]);
 		expect(names("/agent")).toEqual([]);
+		// The Mac refuses it from a phone.
+		expect(names("/ex")).toEqual([]);
 	});
 
 	it("offers nothing when the session reports no commands", () => {

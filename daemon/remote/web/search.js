@@ -30,8 +30,8 @@ const COMMANDS_SHOWN = 6;
 
 /**
  * The session's commands a reply box starting with "/" suggests: those whose name starts with
- * what is typed after it, while the command's name is all there is. The phone's own refusals
- * (refused() in live.js) are not offered.
+ * what is typed after it, while the command's name is all there is. Those the phone does not send
+ * (refused() in live.js), and /exit, which the Mac refuses from it, are not offered.
  * @param {Command[] | undefined} commands @param {string} text @returns {Command[]}
  */
 export function matchCommands(commands, text) {
@@ -41,7 +41,7 @@ export function matchCommands(commands, text) {
 	return commands
 		.filter((c) => {
 			const name = fold(c.name.replace(/^\//, ""));
-			return name.startsWith(wanted) && name !== "remote-control" && name !== "agent-view";
+			return name.startsWith(wanted) && !["remote-control", "agent-view", "exit"].includes(name);
 		})
 		.slice(0, COMMANDS_SHOWN);
 }

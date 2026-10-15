@@ -13,13 +13,13 @@ import { giveUp, promptKey, promptText, refused, sentText, settle, shownText } f
 import { markdown } from "./markdown.js";
 import { diffSummary, markerKind, resultSummary } from "./output.js";
 import { filterSessions, matchCommands } from "./search.js";
-import { barHtml, factsHtml, thinkingHtml, tokens } from "./statusbar.js";
+import { barHtml, columns, elapsedText, factsHtml, spanStyle, thinkingHtml, tokens } from "./statusbar.js";
 
 /**
  * `sessionId`: pi's, the same under another row id; `dialog`: the one it waits on, while it needs input.
  * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string, sessionId?: string, dialog?: { kind: string, title?: string } }} Session
  */
-/** @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
+/** `aborted`: a reply its turn was stopped in, empty when stopped before it said anything. @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, aborted?: boolean, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
 /** @typedef {{ id: string, name: string, createdAt: string, lastUsedAt?: string, current: boolean }} Device `current`: this one */
 /** @typedef {import("./image.js").Attachment} Attachment */
@@ -113,6 +113,11 @@ const ERRORS = {
 	unknown_entry: "That output is no longer in this session.",
 	not_found: "The Mac does not know that request. It may run an older bluclawd.",
 	terminal_command: "That command drives the Mac's terminal, so the phone does not send it.",
+	command_refused: "That command drives the Mac's terminal, so the phone does not send it.",
+	unsent_draft: "Clear the unsent text in this session's prompt on the Mac first, then send the command again.",
+	forbidden: "Only the Mac removes another phone: run /remote-control there.",
+	unknown_task: "That task has ended already.",
+	no_output: "That task has no output to show.",
 };
 
 const state = {
@@ -166,6 +171,14 @@ const state = {
 	menu: undefined,
 	/** The terminal sheet: the pane's screen, and keys to answer its dialog with. */
 	terminal: false,
+	/** The background tasks sheet. */
+	tasksSheet: false,
+	/** Each task's output as last fetched, while shown in the sheet. @type {Map<string, { lines?: string[], size?: number, loading?: boolean, error?: string }>} */
+	taskOutputs: new Map(),
+	/** The task whose Stop asks to be confirmed. @type {string | undefined} */
+	confirmStop: undefined,
+	/** Tasks asked to stop that the report still lists. @type {Set<string>} */
+	stoppingTasks: new Set(),
 	/** Paired in Safari: the Home Screen app is the one iOS notifies. */
 	homeScreenHint: false,
 	/** The list's ⋯ sheet, with "Disconnect this phone". */
@@ -201,6 +214,13 @@ const OLDER_MARGIN = 400;
 const OLDER_RETRY_MS = 2000;
 let messagesRequest = 0;
 let statusRequest = 0;
+/** The status bar's width in characters its pistatusline lines were last asked for. */
+let statusCols = 0;
+/** Each session's commands for the reply box, as last fetched: they rarely change. @type {Map<string, import("./statusbar.js").Command[]>} */
+const commandsCache = new Map();
+/** The open session's commands were asked for since it opened. */
+let commandsAsked = false;
+const darkScheme = window.matchMedia("(prefers-color-scheme: dark)");
 let screenRequest = 0;
 /** @type {ReturnType<typeof setInterval> | undefined} */
 let screenTimer;
@@ -555,10 +575,11 @@ async function loadStatus() {
 	const id = state.open;
 	if (!id) return;
 	const request = ++statusRequest;
+	statusCols = barColumns();
 	/** @type {Report | null} */
 	let report;
 	try {
-		report = await api.status(id);
+		report = await api.status(id, statusCols);
 	} catch (error) {
 		if (!(error instanceof Error && error.message === "no_status")) {
 			loadError(error);
@@ -568,6 +589,14 @@ async function loadStatus() {
 	}
 	if (state.open !== id || request !== statusRequest) return;
 	state.report = report;
+	// A pane has them once it has reported.
+	if (report && !commandsAsked) {
+		commandsAsked = true;
+		void loadCommands();
+	}
+	for (const task of state.stoppingTasks) {
+		if (!report?.tasks?.some((t) => t.id === task)) state.stoppingTasks.delete(task);
+	}
 	// The pane skipped a fork, clone or edit sent from here: it will not move, so nothing waits on it.
 	const skipped = report?.notice;
 	if (skipped && skipped.at !== noticeAt) {
@@ -577,6 +606,71 @@ async function loadStatus() {
 		return;
 	}
 	render();
+}
+
+/** The open session's commands, for the reply box's suggestions; none until its pane reports them. */
+async function loadCommands() {
+	const id = state.open;
+	if (!id) return;
+	try {
+		const commands = await api.commands(id);
+		commandsCache.set(id, commands);
+		if (state.open === id) render();
+	} catch (error) {
+		// Only suggestions: a failure leaves the ones cached, and the next open asks again.
+		if (error instanceof Unauthorized) handleError(error);
+	}
+}
+
+/**
+ * How many characters of the status bar's monospace font fit across it: pistatusline's lines are
+ * rendered at that width. Measured on the chat's width, which the bar spans whether shown or not.
+ */
+function barColumns() {
+	const bar = $("#statusbar");
+	if (!bar) return 0;
+	const style = getComputedStyle(bar);
+	const width =
+		($("#scroll")?.clientWidth ?? 0) - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
+	let probe = $("#cols-probe");
+	if (!probe) {
+		probe = document.createElement("span");
+		probe.id = "cols-probe";
+		probe.className = "cols-probe";
+		probe.textContent = "M".repeat(100);
+		document.body.append(probe);
+	}
+	return columns(width, probe.getBoundingClientRect().width / 100);
+}
+
+/**
+ * pistatusline's lines, span by span: each one's colours are set on its element, which the CSP
+ * allows where it refuses a style attribute. Rebuilt only when they or the appearance change.
+ * @param {HTMLElement} bar @param {import("./statusbar.js").StatusSpan[][]} lines
+ */
+function paintStatusline(bar, lines) {
+	const dark = darkScheme.matches;
+	const key = `${dark}:${JSON.stringify(lines)}`;
+	if (bar.dataset.html === key) return;
+	bar.dataset.html = key;
+	bar.classList.add("pistatusline");
+	bar.replaceChildren(
+		...lines.map((spans) => {
+			const line = document.createElement("span");
+			line.className = "sl";
+			for (const span of spans) {
+				const run = document.createElement("span");
+				const { color, background, classes } = spanStyle(span, dark);
+				run.textContent = span.text;
+				if (classes.length) run.className = classes.join(" ");
+				if (color) run.style.color = color;
+				if (background) run.style.backgroundColor = background;
+				line.append(run);
+			}
+			return line;
+		}),
+	);
+	bar.hidden = lines.length === 0;
 }
 
 async function loadScreen() {
@@ -822,7 +916,7 @@ function rowsHtml() {
 
 function chatShell() {
 	return `<header class="bar"><a class="back" href="#">‹ Sessions</a><button class="title" id="title" aria-haspopup="dialog"></button>
-<button class="stop" id="stop" hidden>Stop</button></header>
+<button class="tasks-pill" id="tasks-pill" aria-haspopup="dialog" hidden></button><button class="stop" id="stop" hidden>Stop</button></header>
 <button class="statusbar" id="statusbar" aria-haspopup="dialog" aria-label="Status" hidden></button>
 <div id="banner"></div><section class="scroll" id="scroll"><div class="older" id="older"></div><div class="log" id="log">
 <div class="part" id="msgs"></div><div class="part" id="live"></div><div class="part" id="pending"></div><div class="part" id="working"></div></div></section>
@@ -940,6 +1034,8 @@ function transcriptHtml(calls, running) {
 				parts.push(toolHtml(tool.name, tool.summary, results.get(tool.id), key, running.has(tool.id)));
 			}
 			if (m.error) parts.push(`<div class="t err">${outHtml([m.error])}</div>`);
+			// Stopped from the phone or by Esc on the Mac, as Claude Code shows it.
+			if (m.aborted) parts.push(`<div class="t interrupted">${outHtml(["Interrupted"])}</div>`);
 		} else if (m.kind === "toolResult" && !(m.toolCallId && calls.has(m.toolCallId))) {
 			parts.push(toolHtml(m.toolName ?? "tool", "", m, m.id));
 		} else if (m.kind === "marker") {
@@ -1152,6 +1248,36 @@ function terminalHtml() {
 <button class="term-send" id="term-send">Send</button></form>`;
 }
 
+const TASK_KINDS = { shell: "Shell", monitor: "Monitor", agent: "Agent" };
+
+/** The pane's background tasks, as /tasks lists them: each one's output a tap away, and Stop, confirmed in place. */
+function tasksHtml() {
+	const tasks = state.report?.tasks ?? [];
+	const now = Date.now();
+	const rows = tasks.map((task) => {
+		const id = esc(task.id);
+		const output = state.taskOutputs.get(task.id);
+		const stopping = state.stoppingTasks.has(task.id);
+		const kind = `${TASK_KINDS[task.kind] ?? task.kind}${task.foreground ? " · foreground" : ""}`;
+		const shown = output?.lines
+			? `<pre class="task-out">${esc(output.lines.join("\n") || "(No output yet)")}</pre>`
+			: output?.error
+				? `<p class="error">${esc(errorText(output.error))}</p>`
+				: "";
+		const outputButton = task.output
+			? `<button class="task-btn" data-output="${id}"${output?.loading ? " disabled" : ""}>${output?.loading ? "Loading…" : output?.lines ? "Hide output" : "Output"}</button>`
+			: "";
+		const stop =
+			state.confirmStop === task.id
+				? `<div class="confirm-delete"><span>Stop this task?</span><button class="unpair cancel" data-stop-cancel>Cancel</button><button class="unpair" data-stop-confirm="${id}">Stop</button></div>`
+				: `<button class="task-btn danger" data-stop="${id}"${stopping ? " disabled" : ""}>${stopping ? "Stopping…" : "Stop"}</button>`;
+		return `<li class="task"><div class="task-head"><span class="task-kind">${esc(kind)}</span><span class="task-age">${esc(elapsedText(task.startedAt, now))}</span></div>
+<div class="task-label">${esc(task.label)}</div><div class="task-actions">${outputButton}${stop}</div>${shown}</li>`;
+	});
+	return `<header class="sheet-bar"><h2>Background tasks</h2><button class="close" id="sheet-close">Done</button></header>
+${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}${rows.length ? `<ul class="tasks">${rows.join("")}</ul>` : `<p class="muted">No background tasks are running.</p>`}`;
+}
+
 // ---- render ----
 
 function render() {
@@ -1254,12 +1380,22 @@ function updateChat() {
 	stop.disabled = state.stopping;
 	stop.textContent = state.stopping ? "Stopping…" : "Stop";
 	const bar = $("#statusbar");
-	const barNow = barHtml(state.report, session && shortPath(session.cwd), Date.now());
-	if (bar.dataset.html !== barNow) {
-		bar.innerHTML = barNow;
-		bar.dataset.html = barNow;
-		bar.hidden = barNow === "";
+	const lines = state.report?.statusline?.lines;
+	// The user's own pistatusline, as on the Mac; else the bar's own reading of the report.
+	if (lines) paintStatusline(bar, lines);
+	else {
+		const barNow = barHtml(state.report, session && shortPath(session.cwd), Date.now());
+		if (bar.dataset.html !== barNow) {
+			bar.classList.remove("pistatusline");
+			bar.innerHTML = barNow;
+			bar.dataset.html = barNow;
+			bar.hidden = barNow === "";
+		}
 	}
+	const tasks = state.report?.tasks?.length ?? 0;
+	const pill = $("#tasks-pill");
+	pill.hidden = tasks === 0;
+	pill.innerHTML = `<span>${tasks} task${tasks === 1 ? "" : "s"}</span>`;
 	const banner = $("#banner");
 	const bannerNow = bannerHtml(session);
 	// Rebuilt only when it changes, so a tap on Answer is not lost to a refresh.
@@ -1311,7 +1447,7 @@ function updateChat() {
 /** The session's commands for what the reply box starts with (matchCommands), above it; none reported, none shown. */
 function updateCommands() {
 	const list = $("#commands");
-	const found = matchCommands(state.report?.commands, $("#text").value);
+	const found = matchCommands(state.open ? commandsCache.get(state.open) : undefined, $("#text").value);
 	const html = found
 		.map(
 			(c) =>
@@ -1366,16 +1502,29 @@ function updateThumbs() {
 /** Rebuilt only when it changes, so an open model picker is not reset under the finger. @param {Session | undefined} session */
 function updateSheet(session) {
 	const sheet = $("#sheet");
-	const open = state.sheetOpen || state.menu !== undefined || state.terminal;
+	const open = state.sheetOpen || state.menu !== undefined || state.terminal || state.tasksSheet;
 	sheet.hidden = !open;
 	$("#backdrop").hidden = !open;
 	if (!open) return;
 	sheet.setAttribute(
 		"aria-label",
-		state.terminal ? "Answer the dialog" : state.menu ? "Message actions" : "Session status",
+		state.terminal
+			? "Answer the dialog"
+			: state.menu
+				? "Message actions"
+				: state.tasksSheet
+					? "Background tasks"
+					: "Session status",
 	);
 	if (state.terminal) {
 		updateTerminal(sheet, session);
+		return;
+	}
+	if (state.tasksSheet) {
+		const html = tasksHtml();
+		if (sheet.dataset.html === html) return;
+		sheet.innerHTML = html;
+		sheet.dataset.html = html;
 		return;
 	}
 	if (state.menu) {
@@ -1658,6 +1807,7 @@ function bindChat() {
 	});
 	$("#title").addEventListener("click", openSheet);
 	$("#statusbar").addEventListener("click", openSheet);
+	$("#tasks-pill").addEventListener("click", openTasks);
 	$("#banner").addEventListener("click", (/** @type {Event} */ event) => {
 		const target = /** @type {Element} */ (event.target);
 		const reply = /** @type {HTMLElement | null} */ (target.closest("[data-reply]"));
@@ -1679,6 +1829,13 @@ function bindChat() {
 			render();
 		} else if (target.closest("#delete-confirm")) void deleteSession();
 		else if (reply) void replyConfirm(reply.dataset.reply === "yes");
+		else if (target.closest("[data-output]"))
+			void toggleTaskOutput(/** @type {HTMLElement} */ (target.closest("[data-output]")).dataset.output ?? "");
+		else if (target.closest("[data-stop], [data-stop-cancel]")) {
+			state.confirmStop = /** @type {HTMLElement | null} */ (target.closest("[data-stop]"))?.dataset.stop;
+			render();
+		} else if (target.closest("[data-stop-confirm]"))
+			void stopTask(/** @type {HTMLElement} */ (target.closest("[data-stop-confirm]")).dataset.stopConfirm ?? "");
 		else if (target.closest(".press")) {
 			const key = /** @type {HTMLElement} */ (target.closest(".press")).dataset.press;
 			if (key) void answer({ keys: [key] });
@@ -1729,6 +1886,7 @@ function bindChat() {
 /** The bar's report shows until the fresh one is in. */
 function openSheet() {
 	state.sheetOpen = true;
+	state.tasksSheet = false;
 	state.error = undefined;
 	state.confirmDelete = false;
 	// A fresh name field, holding the name the session has now.
@@ -1742,13 +1900,67 @@ function closeSheet() {
 	state.confirmDelete = false;
 	state.menu = undefined;
 	state.terminal = false;
+	state.tasksSheet = false;
+	state.confirmStop = undefined;
+	state.taskOutputs.clear();
 	pollScreen();
 	render();
+}
+
+/** Its list is the report's, which the pane sends again while the chat is open. */
+function openTasks() {
+	state.tasksSheet = true;
+	state.sheetOpen = false;
+	state.menu = undefined;
+	state.terminal = false;
+	state.error = undefined;
+	state.confirmStop = undefined;
+	state.taskOutputs.clear();
+	pollScreen();
+	render();
+}
+
+/** A task's last lines under it, or hidden again. @param {string} taskId */
+async function toggleTaskOutput(taskId) {
+	const id = state.open;
+	if (!id || state.taskOutputs.get(taskId)?.loading) return;
+	if (state.taskOutputs.get(taskId)?.lines) {
+		state.taskOutputs.delete(taskId);
+		render();
+		return;
+	}
+	state.taskOutputs.set(taskId, { loading: true });
+	render();
+	try {
+		const { lines, size } = await api.taskOutput(id, taskId);
+		if (state.open === id && state.tasksSheet) state.taskOutputs.set(taskId, { lines, size });
+	} catch (error) {
+		if (error instanceof Unauthorized) return handleError(error);
+		const code = error instanceof Error ? error.message : String(error);
+		state.taskOutputs.set(taskId, { error: error instanceof TypeError ? "unreachable" : code });
+	}
+	render();
+}
+
+/** As /tasks' `x` does: the model is told. The task stays listed until the pane's next report. @param {string} taskId */
+async function stopTask(taskId) {
+	const id = state.open;
+	state.confirmStop = undefined;
+	if (!id) return;
+	state.stoppingTasks.add(taskId);
+	render();
+	try {
+		await api.stopTask(id, taskId);
+	} catch (error) {
+		state.stoppingTasks.delete(taskId);
+		handleError(error);
+	}
 }
 
 function openTerminal() {
 	state.terminal = true;
 	state.sheetOpen = false;
+	state.tasksSheet = false;
 	state.menu = undefined;
 	state.screen = undefined;
 	state.termError = undefined;
@@ -2174,6 +2386,10 @@ async function send() {
 		else if (resume) {
 			state.starting = undefined;
 			render();
+		} else if (state.open === id && !state.terminal && isBuiltin(id, value)) {
+			// pi's own commands (/model, /tree, /resume…) open a selector in the pane, which waits there
+			// without the session needing input: its screen and keys answer it.
+			openTerminal();
 		}
 	} catch (error) {
 		if (resume) state.starting = undefined;
@@ -2181,6 +2397,12 @@ async function send() {
 		putBack(id, entry);
 		handleError(error, "Not sent: ");
 	}
+}
+
+/** A prompt that runs one of pi's own commands. @param {string} id @param {string} text */
+function isBuiltin(id, text) {
+	const name = /^\/(\S+)/.exec(text)?.[1];
+	return name !== undefined && commandsCache.get(id)?.some((c) => c.name === name && c.source === "builtin") === true;
 }
 
 /** @typedef {(typeof state.pending)[number]} Pending */
@@ -2297,6 +2519,12 @@ function route() {
 		state.screen = undefined;
 		state.answered = undefined;
 		state.confirmDelete = false;
+		state.tasksSheet = false;
+		state.confirmStop = undefined;
+		state.taskOutputs.clear();
+		state.stoppingTasks.clear();
+		// Asked again with its first report: the cached ones show meanwhile.
+		commandsAsked = false;
 		pollScreen();
 		connect();
 	}
@@ -2335,6 +2563,11 @@ document.addEventListener(
 	true,
 );
 window.addEventListener("hashchange", route);
+// pistatusline's lines again at a new width, after a rotation; a change of appearance repaints them.
+window.addEventListener("resize", () => {
+	if (shown.startsWith("chat:") && state.report?.statusline && barColumns() !== statusCols) void loadStatus();
+});
+darkScheme.addEventListener("change", render);
 window.visualViewport?.addEventListener("resize", fitViewport);
 window.visualViewport?.addEventListener("scroll", fitViewport);
 fitViewport();

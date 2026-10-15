@@ -130,8 +130,14 @@ export const api = {
 	output: (id, entryId) => call("GET", `${session(id)}/messages/${encodeURIComponent(entryId)}/output`),
 	/** @param {string} id */
 	abort: (id) => call("POST", `${session(id)}/abort`, {}),
-	/** @param {string} id */
-	status: async (id) => (await call("GET", `${session(id)}/status`)).report,
+	/** `cols`: the status bar's width in characters, for pistatusline's lines. @param {string} id @param {number} [cols] */
+	status: async (id, cols) => (await call("GET", `${session(id)}/status${cols ? `?cols=${cols}` : ""}`)).report,
+	/** What its prompt runs for a "/": pi's own commands, then the rest. @param {string} id @returns {Promise<import("./statusbar.js").Command[]>} */
+	commands: async (id) => (await call("GET", `${session(id)}/commands`)).commands,
+	/** A background task's last lines. @param {string} id @param {string} taskId @returns {Promise<{ lines: string[], size: number }>} */
+	taskOutput: (id, taskId) => call("GET", `${session(id)}/tasks/${encodeURIComponent(taskId)}/output`),
+	/** @param {string} id @param {string} taskId */
+	stopTask: (id, taskId) => call("POST", `${session(id)}/tasks/${encodeURIComponent(taskId)}/stop`, {}),
 	/** @param {string} id @param {string} provider @param {string} modelId */
 	setModel: (id, provider, modelId) => call("POST", `${session(id)}/model`, { provider, id: modelId }),
 	/** One of the levels its report offers. @param {string} id @param {string} level */
