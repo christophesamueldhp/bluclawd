@@ -8,6 +8,7 @@ import {
 	toolSummary,
 	transcriptFrom,
 } from "../daemon/remote/transcript.ts";
+import { promptKey } from "../daemon/remote/web/live.js";
 
 const jsonl = (...entries: object[]) => entries.map((entry) => JSON.stringify(entry)).join("\n");
 const msg = (id: string, parentId: string | null, message: object) => ({
@@ -194,6 +195,8 @@ describe("remote transcript", () => {
 				text: "Read image file [image/png]\n[Image]",
 				images: [{ index: 0, mimeType: "image/png" }],
 			});
+			// What the phone matches its pending prompt by.
+			expect(messages.find((m) => m.id === "u1")?.text).toBe(promptKey("look", 2));
 			expect(messages.find((m) => m.id === "u2")).toEqual({ kind: "user", id: "u2", text: "no picture" });
 			expect(JSON.stringify(messages)).not.toContain("iVBORw0KGgo");
 		});
