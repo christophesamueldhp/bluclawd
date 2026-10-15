@@ -7,17 +7,22 @@
 /** @typedef {{ branch: string, owner?: string, added: number, removed: number }} GitInfo */
 /** @typedef {{ sessionUsage?: number, sessionResetAt?: string, weeklyUsage?: number, weeklyResetAt?: string }} UsageLimits */
 /** @typedef {{ provider: string, id: string, name?: string }} ReportModel */
+/** A command the session runs for a prompt that starts with "/" and its name. @typedef {{ name: string, description?: string }} Command */
 /**
  * A pane's report, with what the Mac adds for its directory (`git`, `limits`).
  * `notice`: why the phone's last fork, clone or edit did not run, until the pane's next report (`at`: epoch ms).
- * @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, git?: GitInfo, limits?: UsageLimits, notice?: { text: string, at: number } }} Report
+ * @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, git?: GitInfo, limits?: UsageLimits, notice?: { text: string, at: number }, commands?: Command[] }} Report
  */
 
-/** pi's `defaultProjectTrust` values, as Alt+M cycles them, and their footer badges. */
+/**
+ * pi's `defaultProjectTrust` values, as Alt+M cycles them, their footer badges, and their names in
+ * the picker. U+FE0E keeps a glyph text: iOS draws a bare ⏸ as a colour emoji. An option cannot be
+ * styled, so the picker shows words alone.
+ */
 export const TRUST = [
-	["always", "⏵⏵ always"],
-	["ask", "⏸ ask"],
-	["never", "✕ never"],
+	["always", "⏵\uFE0E⏵\uFE0E always", "Always"],
+	["ask", "⏸\uFE0E ask", "Ask"],
+	["never", "✕\uFE0E never", "Never"],
 ];
 
 /** @param {unknown} text */
@@ -164,8 +169,8 @@ export function factsHtml(report, cwd, now) {
 	}
 	if (report.trust) {
 		const options = TRUST.map(
-			([value, badge]) =>
-				`<option value="${value}"${value === report.trust ? " selected" : ""}>${esc(badge)}</option>`,
+			([value, , name]) =>
+				`<option value="${value}"${value === report.trust ? " selected" : ""}>${esc(name)}</option>`,
 		).join("");
 		rows.push(
 			`<dt><label for="trust">Trust</label></dt><dd><select id="trust">${options}</select><small>pi's defaultProjectTrust, as Alt+M cycles it: applies to projects opened from now on</small></dd>`,

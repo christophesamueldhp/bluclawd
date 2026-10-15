@@ -78,9 +78,9 @@ export const api = {
 	},
 	/** Pairs the Home Screen app this browser adds, once. @returns {Promise<string>} */
 	handoff: async () => (await call("POST", "/api/handoff", {})).handoff,
-	/** This device's paired phones, `current` among them. @returns {Promise<import("./app.js").Device[]>} */
+	/** The paired phones the Mac lists to this one, `current` among them. @returns {Promise<import("./app.js").Device[]>} */
 	devices: async () => (await call("GET", "/api/devices")).devices,
-	/** @param {string} id */
+	/** Only ever this phone's own id: the Mac removes any other. @param {string} id */
 	removeDevice: (id) => call("DELETE", `/api/devices/${encodeURIComponent(id)}`),
 	sessions: async () => (await call("GET", "/api/sessions")).sessions,
 	/** @returns {Promise<string[]>} */
@@ -138,14 +138,10 @@ export const api = {
 	setThinking: (id, level) => call("POST", `${session(id)}/thinking`, { level }),
 	/** pi's defaultProjectTrust: "always", "ask" or "never". @param {string} id @param {string} trust */
 	setTrust: (id, trust) => call("POST", `${session(id)}/trust`, { trust }),
-	/** @param {string} id */
-	compact: (id) => call("POST", `${session(id)}/compact`, {}),
 	/** In the same session, back to before a message of yours, or to a reply. @param {string} id @param {string} entryId */
 	tree: (id, entryId) => call("POST", `${session(id)}/tree`, { entryId }),
 	/** A new session from before a message of yours. @param {string} id @param {string} entryId */
 	fork: (id, entryId) => call("POST", `${session(id)}/fork`, { entryId }),
-	/** @param {string} id */
-	clone: (id) => call("POST", `${session(id)}/clone`, {}),
 	/** The last lines its pane shows. @param {string} id @returns {Promise<string[]>} */
 	screen: async (id) => (await call("GET", `${session(id)}/screen`)).lines,
 	/** Press keys in its pane, by tmux name ("Up", "Enter", …). @param {string} id @param {string[]} keys */

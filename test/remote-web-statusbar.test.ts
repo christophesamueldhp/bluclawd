@@ -32,8 +32,13 @@ describe("the chat's status bar", () => {
 		const html = barHtml(report, "~/Projects/bluclawd", now);
 		expect(html.match(/class="line"/g)).toHaveLength(2);
 		expect(text(html)).toBe(
-			"Opus • high 34% 1.2M · $3.21 ⏵⏵ always\n~/Projects/bluclawd main +12 −3 5h 43% 2h18m wk 46% 4d23h",
+			"Opus • high 34% 1.2M · $3.21 ⏵︎⏵︎ always\n~/Projects/bluclawd main +12 −3 5h 43% 2h18m wk 46% 4d23h",
 		);
+		// Every badge glyph as text: iOS draws a bare ⏸ as a colour emoji.
+		for (const trust of ["always", "ask", "never"]) {
+			const badge = text(barHtml({ models: [], trust }, undefined, now));
+			expect(badge.replace(/[a-z ]/g, "").replace(/(.)︎/gu, ""), trust).toBe("");
+		}
 		// The context gauge's width is a class: the CSP allows no inline style.
 		expect(html).toContain('class="p40"');
 		expect(html).not.toContain("style=");
@@ -91,7 +96,9 @@ describe("the status sheet's pickers and facts", () => {
 		expect(html).toContain("43% used · resets in 2h18m");
 		expect(html).toContain("46% used · resets in 4d23h");
 		expect(html).toContain('<select id="trust">');
-		expect(html).toContain('<option value="always" selected>⏵⏵ always</option>');
+		// Words alone: an option cannot be styled, and iOS draws a bare ⏸ as a colour emoji.
+		expect(html).toContain('<option value="always" selected>Always</option>');
+		expect(html).toContain('<option value="ask">Ask</option>');
 		expect(html.match(/<option/g)).toHaveLength(3);
 	});
 
