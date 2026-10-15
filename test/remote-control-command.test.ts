@@ -7,7 +7,7 @@ import {
 	OrchestratorClient,
 	type RemoteAction,
 	type RemoteResult,
-} from "../ext/agent-view/orchestrator-client.ts";
+} from "../daemon/orchestrator-client.ts";
 import { type AutostartDeps, autostartDeps, LABEL } from "../ext/remote/autostart.ts";
 import remoteFactory from "../ext/remote/index.ts";
 import { qrMatrix, renderQr } from "../ext/remote/qr.ts";
