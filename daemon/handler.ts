@@ -51,6 +51,7 @@ function toInstanceSummary(instance: InstanceRecord, activity?: AgentActivity, e
 		external,
 		pane: instance.pane,
 		leafId: instance.leafId,
+		dialog: instance.dialog,
 	};
 }
 
@@ -142,7 +143,9 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				pane: request.instance.pane,
 				detail: request.instance.detail,
 				turns: request.instance.turns,
+				finishedAt: request.instance.finishedAt,
 				leafId: request.instance.leafId,
+				dialog: request.instance.dialog,
 			};
 			if (request.instance.launch) remoteControl?.noteLaunch(request.instance.launch);
 			supervisor.registerExternal(record, request.instance.activity ?? "idle");
@@ -209,6 +212,7 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				cwd: request.cwd,
 				label: request.label,
 				sessionFile: request.sessionFile,
+				sessionId: request.sessionId,
 			});
 			return { type: "ack", ok: true, instance: toInstanceSummary(instance) };
 		}

@@ -20,13 +20,21 @@ export interface RegisterInput {
 	detail?: string;
 	turns?: number;
 	createdAt?: string;
+	finishedAt?: string;
 	leafId?: string;
+	dialog?: PaneDialog;
 	launch?: PaneLaunch;
 }
 
 /** Mirror of daemon/ipc/protocol.ts PaneLaunch. */
 export interface PaneLaunch {
 	command: string[];
+}
+
+/** Mirror of daemon/ipc/protocol.ts PaneDialog. */
+export interface PaneDialog {
+	kind: string;
+	title?: string;
 }
 
 /** Mirror of daemon/ipc/protocol.ts PaneImage. */
@@ -64,6 +72,7 @@ export interface PaneReport {
 	trust?: "always" | "ask" | "never";
 	context?: { tokens: number | null; contextWindow: number; percent: number | null };
 	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
+	notice?: { text: string; at: number };
 }
 
 /** Mirror of daemon/ipc/protocol.ts RemoteDeviceInfo. */
@@ -102,7 +111,7 @@ type Request =
 	| { type: "delete"; instanceId: string }
 	| { type: "rename"; instanceId: string; name: string }
 	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
-	| { type: "save"; cwd: string; label?: string; sessionFile: string }
+	| { type: "save"; cwd: string; label?: string; sessionFile: string; sessionId?: string }
 	| ({ type: "remote" } & RemoteAction)
 	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null }
 	| { type: "remote_report"; instanceId: string; report: PaneReport };
@@ -268,8 +277,9 @@ export class OrchestratorClient {
 	}
 
 	/** List a session as a stopped row without starting it; it resumes when opened. */
-	async save(session: { cwd: string; label?: string; sessionFile: string }): Promise<void> {
-		await this.request({ type: "save", cwd: session.cwd, label: session.label, sessionFile: session.sessionFile });
+	async save(session: { cwd: string; label?: string; sessionFile: string; sessionId?: string }): Promise<void> {
+		const { cwd, label, sessionFile, sessionId } = session;
+		await this.request({ type: "save", cwd, label, sessionFile, sessionId });
 	}
 
 	async delete(instanceId: string): Promise<void> {

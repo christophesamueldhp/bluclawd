@@ -25,4 +25,6 @@ export interface InstanceRecord {
 	pane?: string;
 	/** A pane's leaf, when it is not its file's last entry; never stored. */
 	leafId?: string;
+	/** The dialog a pane waits on; never stored. */
+	dialog?: { kind: string; title?: string };
 }

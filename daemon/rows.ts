@@ -29,6 +29,10 @@ export interface AgentRow {
 	/** A `!` command's tmux session: the row is the command, not a pi session. */
 	shell?: string;
 	updatedAt?: string;
+	/** pi's session id. */
+	sessionId?: string;
+	/** Needs input: the dialog it waits on, when its pane says. */
+	dialog?: { kind: string; title?: string };
 }
 
 /** A `!` command as a row, as Claude Code's: working while it runs (its last output line the
@@ -105,6 +109,8 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 		self,
 		pane: inst.pane,
 		updatedAt: inst.lastSeenAt,
+		sessionId: inst.sessionId,
+		...(state === "needs" && inst.dialog ? { dialog: inst.dialog } : {}),
 	};
 }
 

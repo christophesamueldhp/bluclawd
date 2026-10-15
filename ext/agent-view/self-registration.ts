@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type {
 	AgentActivity,
 	OrchestratorClient,
+	PaneDialog,
 	PaneMessage,
 	RegisterInput,
 } from "../../daemon/orchestrator-client.ts";
@@ -17,7 +18,9 @@ export interface SelfSessionInfo {
 	detail?: string;
 	turns?: number;
 	createdAt?: string;
+	finishedAt?: string;
 	leafId?: string;
+	dialog?: PaneDialog;
 }
 
 /** The subset of a session entry needed to derive a title — structural, so pi's SessionEntry fits. */
@@ -63,13 +66,14 @@ const BLOCKING_PROMPT_KINDS: ReadonlySet<string> = new Set(["select", "confirm",
  * Derives the foreground session's activity from pi's extension events, mirroring what the
  * daemon derives for its children from their RPC stream (daemon/activity.ts): a run is
  * "working" from agent_start until agent_settled; a blocking UI prompt is "awaiting_input"
- * until answered, then back to whatever the run state was.
+ * until answered, then back to whatever the run state was. `dialog`: the prompt waited on.
  */
 export class ForegroundActivity {
 	current: AgentActivity = "idle";
+	dialog: PaneDialog | undefined;
 	private running = false;
 
-	apply(event: { type: string; kind?: string }): AgentActivity {
+	apply(event: { type: string; kind?: string; title?: string }): AgentActivity {
 		switch (event.type) {
 			case "agent_start":
 			case "turn_start":
@@ -79,16 +83,30 @@ export class ForegroundActivity {
 			case "agent_settled":
 				this.running = false;
 				this.current = "idle";
+				this.dialog = undefined;
 				break;
 			case "ui_prompt_start":
-				if (event.kind && BLOCKING_PROMPT_KINDS.has(event.kind)) this.current = "awaiting_input";
+				if (event.kind && BLOCKING_PROMPT_KINDS.has(event.kind)) {
+					this.current = "awaiting_input";
+					this.dialog = { kind: event.kind, ...(event.title?.trim() ? { title: event.title.trim() } : {}) };
+				}
 				break;
 			case "ui_prompt_end":
-				if (event.kind && BLOCKING_PROMPT_KINDS.has(event.kind)) this.current = this.running ? "working" : "idle";
+				if (event.kind && BLOCKING_PROMPT_KINDS.has(event.kind)) {
+					this.current = this.running ? "working" : "idle";
+					this.dialog = undefined;
+				}
 				break;
 		}
 		return this.current;
 	}
+}
+
+/** A row's line while it waits on a dialog with a title. */
+export function dialogDetail(activity: ForegroundActivity): string | undefined {
+	return activity.current === "awaiting_input" && activity.dialog?.title
+		? `Waiting: ${activity.dialog.title}`
+		: undefined;
 }
 
 /**
@@ -185,7 +203,9 @@ export class SelfRegistration {
 			detail: info.detail,
 			turns: info.turns,
 			createdAt: info.createdAt,
+			finishedAt: info.finishedAt,
 			leafId: info.leafId,
+			dialog: info.dialog,
 			launch: { command: piCommand() },
 		};
 		let watched = false;

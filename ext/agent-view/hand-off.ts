@@ -16,6 +16,7 @@ export interface BackgroundableSession {
 	cwd: string;
 	label?: string;
 	sessionFile: string;
+	sessionId?: string;
 }
 
 /** How long the helper waits for pi to exit; past this it gives up rather than add a second writer. */

@@ -29,7 +29,13 @@ import { trustBadge } from "../_shared/trust-badge.ts";
 import { AgentView, EXIT_WORDS, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, handOffAfterExit } from "./hand-off.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
-import { deriveLabel, ForegroundActivity, SelfRegistration, type SelfSessionInfo } from "./self-registration.ts";
+import {
+	deriveLabel,
+	dialogDetail,
+	ForegroundActivity,
+	SelfRegistration,
+	type SelfSessionInfo,
+} from "./self-registration.ts";
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
@@ -241,8 +247,10 @@ const agentView: InlineExtension = {
 				detail: row.detail,
 				turns: row.turns,
 				createdAt: row.createdAt,
+				finishedAt: row.finishedAt,
 				// Only once it differs: a heartbeat lags the file, whose last entry is otherwise the leaf.
 				leafId: leafId !== ctx.sessionManager.getEntries().at(-1)?.id ? leafId : undefined,
+				dialog: activity.current === "awaiting_input" ? activity.dialog : undefined,
 			};
 		};
 
@@ -264,13 +272,16 @@ const agentView: InlineExtension = {
 				sessionFile: ctx.sessionManager.getSessionFile(),
 				label: name?.trim() || (firstUser ? labelFromTask(firstUser) : undefined),
 				detail:
-					activity.current === "working" && liveDetail
+					dialogDetail(activity) ??
+					(activity.current === "working" && liveDetail
 						? liveDetail
 						: lastAssistant
 							? lastLine(textOf(lastAssistant.message.content))
-							: undefined,
+							: undefined),
 				turns: messages.some((e) => e.message.role === "assistant") ? 1 : 0,
 				createdAt: ctx.sessionManager.getHeader()?.timestamp,
+				// Its last entry's: once idle, when its last turn ended. Every heartbeat restates its lastSeenAt.
+				finishedAt: entries.at(-1)?.timestamp,
 				external: true,
 				pane,
 			};
@@ -284,6 +295,7 @@ const agentView: InlineExtension = {
 				cwd: ctx.sessionManager.getCwd(),
 				label: ctx.sessionManager.getSessionName() ?? selfRow(ctx).label,
 				sessionFile,
+				sessionId: ctx.sessionManager.getSessionId(),
 			};
 		};
 
@@ -544,7 +556,7 @@ const agentView: InlineExtension = {
 			};
 		});
 
-		const track = (event: { type: string; kind?: string }): void => {
+		const track = (event: { type: string; kind?: string; title?: string }): void => {
 			const current = activity.apply(event);
 			registration?.setActivity(current);
 		};
