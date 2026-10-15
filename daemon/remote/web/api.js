@@ -88,6 +88,21 @@ export const api = {
 	 */
 	prompt: (id, text, images = []) =>
 		call("POST", `${session(id)}/prompt`, images.length ? { text, images } : { text }),
+	/**
+	 * An image in a message, by the message's id and its position there: an `<img>` cannot send the token.
+	 * @param {string} id @param {string} entryId @param {number} index @returns {Promise<Blob>}
+	 */
+	async image(id, entryId, index) {
+		const res = await fetch(`${session(id)}/images/${encodeURIComponent(entryId)}/${index}`, {
+			headers: { authorization: `Bearer ${getToken() ?? ""}` },
+		});
+		if (res.status === 401) {
+			clearToken();
+			throw new Unauthorized("unauthorized");
+		}
+		if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `HTTP ${res.status}`);
+		return res.blob();
+	},
 	/** @param {string} id */
 	abort: (id) => call("POST", `${session(id)}/abort`, {}),
 	/** @param {string} id */

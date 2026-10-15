@@ -14,8 +14,14 @@ export interface RemoteToolCall {
 	summary: string;
 }
 
+/** An image in a message, which the phone fetches by its message's id and this position. */
+export interface RemoteImage {
+	index: number;
+	mimeType: string;
+}
+
 export type RemoteMessage =
-	| { kind: "user"; id: string; text: string }
+	| { kind: "user"; id: string; text: string; images?: RemoteImage[] }
 	| { kind: "assistant"; id: string; text: string; thinking?: string; tools: RemoteToolCall[]; error?: string }
 	| {
 			kind: "toolResult";
@@ -25,6 +31,7 @@ export type RemoteMessage =
 			ok: boolean;
 			text: string;
 			truncated: boolean;
+			images?: RemoteImage[];
 	  }
 	| { kind: "marker"; id: string; text: string };
 
@@ -39,6 +46,8 @@ interface Part {
 	id?: string;
 	name?: string;
 	arguments?: unknown;
+	data?: string;
+	mimeType?: string;
 }
 
 interface Entry {
@@ -116,6 +125,21 @@ function plainText(content: unknown): string {
 		.join("\n");
 }
 
+/** A message's image parts, base64 as pi stores them. */
+function imagesOf(content: unknown): Array<{ mimeType: string; data: string }> {
+	return partsOf(content).flatMap((part) =>
+		part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string"
+			? [{ mimeType: part.mimeType, data: part.data }]
+			: [],
+	);
+}
+
+/** The `images` a message carries, if it has any. */
+function imageRefs(content: unknown): { images?: RemoteImage[] } {
+	const images = imagesOf(content).map(({ mimeType }, index) => ({ index, mimeType }));
+	return images.length ? { images } : {};
+}
+
 /** The argument a tool call is about, as Claude Code shows it: `Bash(npm test)`. */
 export function toolSummary(args: unknown): string {
 	const a = (args ?? {}) as Record<string, unknown>;
@@ -137,7 +161,7 @@ function toRemote(entry: Entry): RemoteMessage | undefined {
 	const message = entry.message;
 	switch (message.role) {
 		case "user":
-			return { kind: "user", id, text: plainText(message.content) };
+			return { kind: "user", id, text: plainText(message.content), ...imageRefs(message.content) };
 		case "assistant": {
 			const parts = partsOf(message.content);
 			const text = textOf(message.content);
@@ -169,6 +193,7 @@ function toRemote(entry: Entry): RemoteMessage | undefined {
 				ok: message.isError !== true,
 				text,
 				truncated,
+				...imageRefs(message.content),
 			};
 		}
 		case "bashExecution":
@@ -193,6 +218,33 @@ export function transcriptFrom(text: string, limit: number, leafId?: string, bef
 			),
 		);
 	return limit > 0 ? messages.slice(-limit) : [];
+}
+
+/** The image at `index` in a user message or tool result on the active branch, as the transcript refers to it. */
+export function imageFrom(
+	text: string,
+	entryId: string,
+	index: number,
+	leafId?: string,
+): { mimeType: string; data: string } | undefined {
+	const entry = activeBranch(parseEntries(text), leafId).find((e) => e.id === entryId);
+	const role = entry?.type === "message" ? entry.message?.role : undefined;
+	if (role !== "user" && role !== "toolResult") return undefined;
+	return imagesOf(entry?.message?.content)[index];
+}
+
+export function loadImage(
+	sessionFile: string | undefined,
+	entryId: string,
+	index: number,
+	leafId?: string,
+): { mimeType: string; data: string } | undefined {
+	if (!sessionFile) return undefined;
+	try {
+		return imageFrom(readFileSync(sessionFile, "utf8"), entryId, index, leafId);
+	} catch {
+		return undefined;
+	}
 }
 
 /** A session that has not written its file yet has an empty transcript. */

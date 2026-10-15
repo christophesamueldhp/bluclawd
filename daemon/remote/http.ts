@@ -15,7 +15,7 @@ import { RemoteEvents } from "./events.ts";
 import type { RemoteStore } from "./pairing.ts";
 import { findSession, remoteSessions } from "./sessions.ts";
 import { launchUsable, type SessionSpec } from "./spawn.ts";
-import { loadTranscript } from "./transcript.ts";
+import { loadImage, loadTranscript } from "./transcript.ts";
 import { parseSubscription } from "./webpush.ts";
 
 export interface RemoteDeps {
@@ -67,6 +67,7 @@ const IMAGE_MAGIC: Record<PaneImage["mimeType"], (bytes: Buffer) => boolean> = {
 };
 const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 const MESSAGES_DEFAULT = 50;
+const IMAGE_MAX_AGE_S = 7 * 24 * 60 * 60;
 const MESSAGES_MAX = 200;
 /** `provider/id`; the id may itself contain slashes. Never a leading dash: it is an argument to pi. */
 const MODEL_PATTERN = /^\w[\w.-]*\/[\w.:/@+-]+$/;
@@ -290,6 +291,33 @@ async function handle(
 	if (path === "/api/push/unsubscribe" && req.method === "POST") {
 		deps.store.setPush(device.id, undefined);
 		return json(res, 200, { ok: true });
+	}
+
+	const picture = /^\/api\/sessions\/([^/]+)\/images\/([0-9a-f-]{8,36})\/(\d{1,3})$/.exec(path);
+	if (picture) {
+		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
+		let pictured: string;
+		try {
+			pictured = decodeURIComponent(picture[1]);
+		} catch {
+			return json(res, 404, { error: "unknown_session" });
+		}
+		const session = findSession(deps.listInstances(), pictured);
+		if (!session) return json(res, 404, { error: "unknown_session" });
+		const image = loadImage(session.sessionFile, picture[2], Number(picture[3]), session.leafId);
+		if (!image) return json(res, 404, { error: "unknown_image" });
+		// Only a type the phone shows as an image, never one a browser would run (SVG, HTML).
+		if (!Object.hasOwn(IMAGE_MAGIC, image.mimeType)) return json(res, 415, { error: "unsupported_image" });
+		const bytes = Buffer.from(image.data, "base64");
+		res.writeHead(200, {
+			"content-type": image.mimeType,
+			"content-length": bytes.length,
+			// An entry never changes: the same id and position is the same image.
+			"cache-control": `private, max-age=${IMAGE_MAX_AGE_S}`,
+			"x-content-type-options": "nosniff",
+		});
+		res.end(bytes);
+		return;
 	}
 
 	const match =

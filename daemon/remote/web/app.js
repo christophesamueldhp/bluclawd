@@ -6,11 +6,11 @@
  * updates arrive.
  */
 import { api, getToken, pairCode, setToken, Unauthorized } from "./api.js";
-import { promptKey, sentText, settle } from "./live.js";
+import { promptKey, sentText, settle, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 
 /** @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string }} Session */
-/** @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean }} Message */
+/** @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
 /** @typedef {{ provider: string, id: string, name?: string }} ReportModel */
 /** @typedef {{ mimeType: string, data: string, thumb: string }} Attachment base64 `data`, a data URL `thumb` */
@@ -176,6 +176,19 @@ let lastLog = "";
 let prepending = false;
 /** @type {IntersectionObserver | undefined} */
 let olderObserver;
+/** Fetches a message's image as it nears the screen. @type {IntersectionObserver | undefined} */
+let pictureObserver;
+/**
+ * The open session's images fetched so far, as data URLs (the CSP allows no blob: URL), by
+ * pictureKey; the oldest go past PICTURES_MAX, and are fetched again if shown again.
+ * @type {Map<string, string>}
+ */
+const pictures = new Map();
+const PICTURES_MAX = 30;
+/** @type {Set<string>} */
+const picturesLoading = new Set();
+/** Not fetched again until the session is opened again. @type {Set<string>} */
+const picturesFailed = new Set();
 /**
  * The pane a resumed session's chat moved to: the replies still pending move with it.
  * @type {string | undefined}
@@ -652,16 +665,33 @@ function chatShell() {
 <input type="file" id="file" accept="image/*" multiple hidden>
 <textarea id="text" rows="1" placeholder="Reply" aria-label="Reply" maxlength="32768"></textarea>
 <button class="send" aria-label="Send"><span aria-hidden="true">↑</span></button></form>
-<div class="backdrop" id="backdrop" hidden></div><section class="sheet" id="sheet" role="dialog" aria-label="Session status" hidden></section>`;
+<div class="backdrop" id="backdrop" hidden></div><section class="sheet" id="sheet" role="dialog" aria-label="Session status" hidden></section>
+<div class="viewer" id="viewer" role="dialog" aria-label="Image" hidden><img id="viewer-img" alt="Image"></div>`;
+}
+
+/**
+ * A message's images, each a button that shows it full screen; their `src` is set once fetched
+ * (see showPictures), so the log's HTML stays small and the same while they load.
+ * @param {Message} m
+ */
+function picturesHtml(m) {
+	if (!m.images?.length) return "";
+	const buttons = m.images.map(
+		(image) =>
+			`<button type="button" class="pic" data-entry="${esc(m.id)}" data-index="${esc(image.index)}" aria-label="Image ${esc(image.index + 1)}, full screen"><img alt="Image"></button>`,
+	);
+	return `<div class="pictures">${buttons.join("")}</div>`;
 }
 
 /** @param {string} name @param {string} summary @param {Message | undefined} result @param {string} key @param {boolean} [running] */
 function toolHtml(name, summary, result, key, running = false) {
 	const title = `${esc(name.charAt(0).toUpperCase() + name.slice(1))}(${esc(summary)})`;
 	if (!result) return `<div class="t${running ? " running" : ""}">${title}</div>`;
-	const first = (result.text ?? "").split("\n").find((line) => line.trim()) ?? (result.ok ? "done" : "error");
+	const text = shownText(result.text ?? "", result.images);
+	const first = text.split("\n").find((line) => line.trim()) ?? (result.ok ? "done" : "error");
+	// Its images show without opening it.
 	return `<details class="t${result.ok ? "" : " err"}" data-key="${esc(key)}"><summary>${title}<br>⎿ ${esc(first)}</summary>
-<pre>${esc(result.text ?? "")}${result.truncated ? "\n…" : ""}</pre></details>`;
+<pre>${esc(text)}${result.truncated ? "\n…" : ""}</pre></details>${picturesHtml(result)}`;
 }
 
 /** @param {Session | undefined} session */
@@ -678,7 +708,9 @@ function logHtml(session) {
 	const last = state.messages.at(-1);
 	for (const m of state.messages) {
 		if (m.kind === "user") {
-			parts.push(`<div class="mine">${more(m)}<div class="u">${esc(m.text)}</div></div>`);
+			parts.push(
+				`<div class="mine">${more(m)}<div class="u">${picturesHtml(m)}${esc(shownText(m.text ?? "", m.images))}</div></div>`,
+			);
 		} else if (m.kind === "assistant") {
 			if (m.thinking) {
 				parts.push(
@@ -938,6 +970,7 @@ function updateChat() {
 		const open = new Set([...log.querySelectorAll("details[open]")].map((d) => d.dataset.key));
 		log.innerHTML = html;
 		for (const d of log.querySelectorAll("details")) if (open.has(d.dataset.key)) d.open = true;
+		showPictures(log);
 		if (atBottom && !prepending) scroll.scrollTop = scroll.scrollHeight;
 	}
 	// Also when the page loaded was empty and only "#older" went.
@@ -1100,6 +1133,19 @@ function bindChat() {
 		{ root: $("#scroll"), rootMargin: `${OLDER_MARGIN}px 0px 0px 0px` },
 	);
 	olderObserver.observe($("#older"));
+	pictureObserver?.disconnect();
+	pictureObserver = new IntersectionObserver(
+		(entries) => {
+			for (const entry of entries) {
+				if (!entry.isIntersecting) continue;
+				pictureObserver?.unobserve(entry.target);
+				const { entry: entryId, index } = /** @type {HTMLElement} */ (entry.target).dataset;
+				if (entryId) void loadPicture(entryId, Number(index));
+			}
+		},
+		{ root: $("#scroll"), rootMargin: `${OLDER_MARGIN}px 0px` },
+	);
+	$("#viewer").addEventListener("click", closeViewer);
 	const text = $("#text");
 	text.addEventListener("input", () => grow(text));
 	$("#composer").addEventListener("submit", (/** @type {Event} */ event) => {
@@ -1157,6 +1203,12 @@ function bindChat() {
 		if (text) void answer({ text });
 	});
 	$("#log").addEventListener("click", (/** @type {Event} */ event) => {
+		const pic = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".pic"));
+		if (pic) {
+			const url = pictures.get(pictureKey(pic.dataset.entry ?? "", pic.dataset.index ?? ""));
+			if (url) openViewer(url);
+			return;
+		}
 		const more = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".more"));
 		const message = state.messages.find(
 			(m) => (m.kind === "user" || m.kind === "assistant") && m.id === more?.dataset.id,
@@ -1376,6 +1428,75 @@ function jpeg(bitmap, side) {
 	return canvas.toDataURL("image/jpeg", JPEG_QUALITY);
 }
 
+/** An image of the open session's, by its message's id and its position there. @param {string} entry @param {string | number} index */
+function pictureKey(entry, index) {
+	return `${state.open}\n${entry}\n${index}`;
+}
+
+/** A picture button gets its image if fetched, and says so if it could not be. @param {HTMLElement} button */
+function paint(button) {
+	const key = pictureKey(button.dataset.entry ?? "", button.dataset.index ?? "");
+	const url = pictures.get(key);
+	const img = /** @type {HTMLImageElement} */ (button.querySelector("img"));
+	if (url) {
+		if (img.getAttribute("src") !== url) img.src = url;
+		return true;
+	}
+	if (picturesFailed.has(key)) {
+		button.classList.add("failed");
+		img.alt = "Image unavailable";
+		return true;
+	}
+	return false;
+}
+
+/** After the log is rebuilt: its pictures fetched already show at once, the rest as they near the screen. @param {HTMLElement} log */
+function showPictures(log) {
+	pictureObserver?.disconnect();
+	for (const button of /** @type {NodeListOf<HTMLElement>} */ (log.querySelectorAll(".pic"))) {
+		if (!paint(button)) pictureObserver?.observe(button);
+	}
+}
+
+/** @param {string} entry @param {number} index */
+async function loadPicture(entry, index) {
+	const id = state.open;
+	const key = pictureKey(entry, index);
+	if (!id || pictures.has(key) || picturesLoading.has(key) || picturesFailed.has(key)) return;
+	picturesLoading.add(key);
+	try {
+		const url = await dataUrl(await api.image(id, entry, index));
+		if (state.open !== id) return;
+		if (pictures.size >= PICTURES_MAX) pictures.delete(/** @type {string} */ (pictures.keys().next().value));
+		pictures.set(key, url);
+	} catch (error) {
+		if (error instanceof Unauthorized) {
+			handleError(error);
+			return;
+		}
+		// Offline or the Mac failing: it is fetched again once the log is next rebuilt.
+		const message = error instanceof Error ? error.message : String(error);
+		if (state.open !== id || error instanceof TypeError || /^HTTP 5\d\d$/.test(message)) return;
+		picturesFailed.add(key);
+	} finally {
+		picturesLoading.delete(key);
+	}
+	for (const button of /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll("#log .pic"))) {
+		if (button.dataset.entry === entry && button.dataset.index === String(index)) paint(button);
+	}
+}
+
+/** @param {string} url */
+function openViewer(url) {
+	$("#viewer-img").src = url;
+	$("#viewer").hidden = false;
+}
+
+function closeViewer() {
+	$("#viewer").hidden = true;
+	$("#viewer-img").removeAttribute("src");
+}
+
 /** @param {Blob} blob @returns {Promise<string>} */
 function dataUrl(blob) {
 	return new Promise((resolve, reject) => {
@@ -1452,6 +1573,9 @@ function route() {
 		// Following a resumed session to its pane keeps the reply on screen until pi writes it.
 		if (open === undefined || open !== followed) state.pending = [];
 		state.attachments = [];
+		pictures.clear();
+		picturesLoading.clear();
+		picturesFailed.clear();
 		followed = undefined;
 		turnEndedAt = undefined;
 		state.open = open;

@@ -188,7 +188,8 @@ its screen and sends it keys. Enable notifications to hear when a session finish
 on iOS only in the app opened from the Home Screen, iOS 16.4 or later.
 
 A prompt to a running session can carry up to four images (+ beside the reply field); a reply
-that resumes or starts a session is text only.
+that resumes or starts a session is text only. The images in a conversation, a prompt's or a
+tool's (`read` on a PNG), show as thumbnails as they scroll into view; tap one for full screen.
 
 A paired phone can read every session, tool output included, prompt any of them, and press keys
 in a pane: it is effectively a shell as you on this Mac. Its token does not expire; revoke a phone

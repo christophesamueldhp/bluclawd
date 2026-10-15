@@ -162,3 +162,10 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .a th.c, .a td.c { text-align: center; }
 .a th.r, .a td.r { text-align: right; }
 .a a { color: var(--accent); }
+/* A message's images: the size a sent one's thumbnail had, and full screen when tapped. */
+.pic { flex: none; padding: 0; border: 0; border-radius: 10px; background: var(--panel); color: var(--muted); font-size: 11px; }
+.u .pictures:last-child { margin-bottom: 0; }
+.log > .pictures { margin: -4px 0 0 12px; }
+.viewer { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); background: rgb(0 0 0 / .92); }
+.viewer[hidden] { display: none; }
+.viewer img { max-width: 100%; max-height: 100%; object-fit: contain; }

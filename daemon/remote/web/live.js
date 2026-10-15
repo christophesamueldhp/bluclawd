@@ -33,6 +33,20 @@ export function promptKey(text, images) {
 }
 
 /**
+ * A message's text as its bubble shows it: without its `[Image]` lines when its images show
+ * instead. Only for display; matching and editing go by the transcript's text.
+ * @param {string} text @param {unknown[] | undefined} images
+ */
+export function shownText(text, images) {
+	return images?.length
+		? text
+				.split("\n")
+				.filter((line) => line !== "[Image]")
+				.join("\n")
+		: text;
+}
+
+/**
  * A user message's text as it was sent: pi puts a note on an image it resized or converted
  * (`[Image: original …]`) under the prompt's text, above the transcript's `[Image]` lines.
  * @param {string} text
