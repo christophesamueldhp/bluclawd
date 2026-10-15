@@ -24,6 +24,7 @@ export interface RegisterInput {
 	finishedAt?: string;
 	leafId?: string;
 	dialog?: PaneDialog;
+	draft?: boolean;
 	launch?: PaneLaunch;
 }
 
@@ -55,7 +56,9 @@ export type PaneMessage =
 	| { type: "set_trust"; trust: "always" | "ask" | "never" }
 	| { type: "tree"; entryId: string }
 	| { type: "fork"; entryId: string }
-	| { type: "clone" };
+	| { type: "clone" }
+	| { type: "command"; text: string }
+	| { type: "stop_task"; id: string };
 
 /** Mirror of daemon/ipc/protocol.ts LiveSnapshot. */
 export interface LiveSnapshot {
@@ -74,6 +77,26 @@ export interface PaneReport {
 	context?: { tokens: number | null; contextWindow: number; percent: number | null };
 	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
 	notice?: { text: string; at: number };
+	commands?: PaneCommand[];
+	tasks?: PaneTask[];
+	pistatusline?: { worker: string; config: string };
+}
+
+/** Mirror of daemon/ipc/protocol.ts PaneTask. */
+export interface PaneTask {
+	id: string;
+	kind: "shell" | "monitor" | "agent";
+	label: string;
+	startedAt: number;
+	foreground?: boolean;
+	outputFile?: string;
+}
+
+/** Mirror of daemon/ipc/protocol.ts PaneCommand. */
+export interface PaneCommand {
+	name: string;
+	description?: string;
+	source: "builtin" | "extension" | "prompt" | "skill";
 }
 
 /** Mirror of daemon/ipc/protocol.ts RemoteDeviceInfo. */

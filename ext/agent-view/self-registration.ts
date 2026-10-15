@@ -21,6 +21,8 @@ export interface SelfSessionInfo {
 	finishedAt?: string;
 	leafId?: string;
 	dialog?: PaneDialog;
+	/** Its prompt holds unsent text: the phone's slash commands wait for it to be sent or cleared. */
+	draft?: boolean;
 }
 
 /** The subset of a session entry needed to derive a title — structural, so pi's SessionEntry fits. */
@@ -138,7 +140,8 @@ export class SelfRegistration {
 	/** The last register delivered a tree, fork, clone or compact: what follows it is for where the
 	 *  pane moves to, so it waits for the next heartbeat, as the daemon's drain intends. Likewise after a
 	 *  prompt: pi still reports the pane idle until its turn starts, so a move right behind it would
-	 *  cut that turn short; the turn's agent_start heartbeat takes what follows. */
+	 *  cut that turn short; the turn's agent_start heartbeat takes what follows. A slash command may be
+	 *  either (/compact, /new, a skill). */
 	private moved = false;
 	/** A heartbeat has listed this session: before its first prompt is in the session there is nothing to list. */
 	private listed = false;
@@ -216,6 +219,7 @@ export class SelfRegistration {
 			finishedAt: info.finishedAt,
 			leafId: info.leafId,
 			dialog: info.dialog,
+			...(info.draft ? { draft: true } : {}),
 			launch: { command: piCommand() },
 		};
 		let watched = false;
@@ -231,7 +235,8 @@ export class SelfRegistration {
 					m.type === "fork" ||
 					m.type === "clone" ||
 					m.type === "compact" ||
-					m.type === "prompt",
+					m.type === "prompt" ||
+					m.type === "command",
 			);
 			if (!this.moved) this.wait();
 			for (const message of messages) {

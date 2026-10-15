@@ -62,11 +62,22 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 }
 
 /** `running`: a pane's pi is registered as this id, so a queued message reaches it. `busy`: mid-turn,
- *  working or waiting on an answer. `pane`: the tmux session that pi registered from, if any. */
+ *  working or waiting on an answer. `pane`: the tmux session that pi registered from, if any.
+ *  `draft`: its prompt held unsent text at its last heartbeat. */
 export function findSession(
 	instances: InstanceSummary[],
 	id: string,
-): { sessionFile?: string; cwd: string; running: boolean; busy: boolean; leafId?: string; pane?: string } | undefined {
+):
+	| {
+			sessionFile?: string;
+			cwd: string;
+			running: boolean;
+			busy: boolean;
+			leafId?: string;
+			pane?: string;
+			draft?: boolean;
+	  }
+	| undefined {
 	const row = sessionRows(instances).find((r) => r.id === id);
 	if (!row) return undefined;
 	const pane = instances.find((i) => i.id === id && i.external === true);
@@ -77,5 +88,6 @@ export function findSession(
 		busy: row.state === "working" || row.state === "needs",
 		...(pane?.leafId ? { leafId: pane.leafId } : {}),
 		...(pane?.pane ? { pane: pane.pane } : {}),
+		...(pane?.draft ? { draft: true } : {}),
 	};
 }

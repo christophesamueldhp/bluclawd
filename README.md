@@ -171,8 +171,8 @@ Once remote control is on, `/remote-control` shows a menu:
 - **Turn off remote control**, once confirmed. It leaves `tailscale serve` in place;
   `tailscale serve --https=443 off` removes it.
 
-On the phone, ⋯ in the Sessions header opens its own Paired phones list, which marks this phone:
-Remove there asks first, and removing this phone signs it out.
+The Mac is the root: a phone can disconnect only itself (which signs it out), never another;
+removing the others is `/remote-control`'s Paired phones.
 
 Started at login, the daemon runs the node and pi that last ran `/remote-control`: after moving
 either, as a node upgrade does, running `/remote-control` points it at the new ones for the next
@@ -186,12 +186,17 @@ on the Mac too, until that server ends with the last session.
 The phone lists every agent-view session in its bands, with what it is doing. A session's chat
 shows its conversation, replies with their markdown rendered (older messages load at the top),
 streams the reply in progress, sends a prompt, which reaches the session at once (within a few seconds right after a move, or while an
-older daemon still runs), and Stop ends its turn. A reply to a stopped session resumes it, and
+older daemon still runs), and Stop ends its turn (the chat then says it was interrupted). A reply
+starting with `/` runs as if typed in the session's prompt on the Mac, pi's own commands
+(`/compact`, `/model`, `/tree`, `/new`, …) included, once the session is idle and that prompt
+empty; one that opens a selector waits there for Answer. `/remote-control`, `/agent-view` and
+`/exit` stay on the Mac, and `/quit` ends the session's pi. A reply to a stopped session resumes it, and
 Start begins a new one in a recent or typed directory. Tapping the title shows the model
 (and switches it), context and usage, and compacts or clones the session; a message's ⋯ edits it
 here or in a new session, or goes back to a reply. When a session waits on a dialog, Answer shows
 its screen and sends it keys. Enable notifications to hear when a session finishes or needs you:
-on iOS only in the app opened from the Home Screen, iOS 16.4 or later.
+on iOS only in the app opened from the Home Screen, iOS 16.4 or later. A phone with the app open
+in the foreground, on any screen, gets none; your other phones still do.
 
 A prompt to a running session can carry up to four images (+ beside the reply field); a reply
 that resumes or starts a session is text only. The images in a conversation, a prompt's or a

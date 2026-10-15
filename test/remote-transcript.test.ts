@@ -71,7 +71,6 @@ describe("remote transcript", () => {
 			{ type: "compaction", id: "k1", parentId: "b1", summary: "…" },
 		);
 		expect(transcriptFrom(text, 50)).toEqual([
-			{ kind: "marker", id: "m0", text: "Model: anthropic/claude-opus-5-5" },
 			{ kind: "user", id: "u1", text: "run the tests\n[Image]", images: [{ index: 0, mimeType: "image/png" }] },
 			{
 				kind: "assistant",
@@ -140,11 +139,60 @@ describe("remote transcript", () => {
 	it("keeps a failed model request and drops an empty assistant message", () => {
 		const text = jsonl(
 			msg("a1", null, { role: "assistant", content: [], stopReason: "error", errorMessage: "rate limited" }),
-			msg("a2", "a1", { role: "assistant", content: [], stopReason: "aborted" }),
+			msg("a2", "a1", { role: "assistant", content: [], stopReason: "stop" }),
 		);
 		expect(transcriptFrom(text, 50)).toEqual([
 			{ kind: "assistant", id: "a1", text: "", tools: [], error: "rate limited" },
 		]);
+	});
+
+	it("marks a turn the user stopped, before any reply, mid-reply and during a tool", () => {
+		// As pi writes them: the provider's abort, and the run's own when it was stopped before a request.
+		const aborted = (id: string, parentId: string, content: object[]) =>
+			msg(id, parentId, {
+				role: "assistant",
+				content,
+				stopReason: "aborted",
+				errorMessage: "Request was aborted",
+				usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },
+			});
+		const text = jsonl(
+			msg("u1", null, { role: "user", content: "go" }),
+			aborted("a1", "u1", [{ type: "text", text: "" }]),
+			msg("u2", "a1", { role: "user", content: "again" }),
+			aborted("a2", "u2", [{ type: "text", text: "Half a repl" }]),
+			msg("u3", "a2", { role: "user", content: "run it" }),
+			msg("a3", "u3", {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "c1", name: "bash", arguments: { command: "sleep 60" } }],
+				stopReason: "toolUse",
+			}),
+			msg("r1", "a3", {
+				role: "toolResult",
+				toolCallId: "c1",
+				toolName: "bash",
+				isError: true,
+				content: [{ type: "text", text: "Command aborted" }],
+			}),
+			aborted("a4", "r1", []),
+		);
+		expect(transcriptFrom(text, 50).filter((m) => m.kind === "assistant")).toEqual([
+			{ kind: "assistant", id: "a1", text: "", tools: [], aborted: true },
+			{ kind: "assistant", id: "a2", text: "Half a repl", tools: [], aborted: true },
+			{ kind: "assistant", id: "a3", text: "", tools: [{ id: "c1", name: "bash", summary: "sleep 60" }] },
+			{ kind: "assistant", id: "a4", text: "", tools: [], aborted: true },
+		]);
+	});
+
+	it("hides model and thinking level changes, as Claude Code's transcript does", () => {
+		const text = jsonl(
+			{ type: "model_change", id: "m0", parentId: null, provider: "anthropic", modelId: "claude-opus-5-5" },
+			{ type: "thinking_level_change", id: "t0", parentId: "m0", thinkingLevel: "high" },
+			msg("u1", "t0", { role: "user", content: "hi" }),
+			{ type: "model_change", id: "m1", parentId: "u1", provider: "openai", modelId: "gpt-5" },
+			{ type: "session_info", id: "n1", parentId: "m1", name: "renamed" },
+		);
+		expect(transcriptFrom(text, 50)).toEqual([{ kind: "user", id: "u1", text: "hi" }]);
 	});
 
 	it("summarises a tool call by its main argument", () => {

@@ -38,6 +38,7 @@ describe("remote HTTP API", () => {
 	let tmuxFails: boolean;
 	let statusExtra: StatusLine;
 	let statusCwds: string[];
+	let renders: Array<{ id: string; cwd: string; cols: number }>;
 	let changed: unknown[][];
 
 	beforeEach(async () => {
@@ -71,6 +72,7 @@ describe("remote HTTP API", () => {
 		tmuxFails = false;
 		statusExtra = {};
 		statusCwds = [];
+		renders = [];
 		changed = [];
 		// As Tmux throws: tmux's own complaint on stderr.
 		const reach = (pane: string) => {
@@ -114,6 +116,10 @@ describe("remote HTTP API", () => {
 				statusLine: async (cwd) => {
 					statusCwds.push(cwd);
 					return statusExtra;
+				},
+				renderStatusline: async (session, report, cols) => {
+					renders.push({ id: session.id, cwd: session.cwd, cols });
+					return report.pistatusline ? [[{ text: `${cols} columns`, bold: true }]] : undefined;
 				},
 				tmux: {
 					// All of it: a main-screen pane gives its history and the visible screen too.
@@ -324,20 +330,22 @@ describe("remote HTTP API", () => {
 			});
 		});
 
-		it("removes one, this device too, which can then do nothing", async () => {
+		it("lets a phone disconnect only itself, which can then do nothing: the Mac removes the others", async () => {
 			const phone = await pair();
 			const pad = await pair();
 			const [phoneId, padId] = store.load().devices.map((d) => d.id);
 			const remove = (token: string, id: string) =>
 				fetch(`${base}/api/devices/${encodeURIComponent(id!)}`, { method: "DELETE", headers: auth(token) });
 			expect((await fetch(`${base}/api/devices/${padId}`, { method: "DELETE" })).status).toBe(401);
-			expect((await remove(phone, padId!)).status).toBe(200);
-			expect((await fetch(`${base}/api/sessions`, { headers: auth(pad) })).status).toBe(401);
-			expect((await remove(phone, padId!)).status).toBe(404);
-			expect((await remove(phone, "%")).status).toBe(404);
+			const refused = await remove(phone, padId!);
+			expect(refused.status).toBe(403);
+			expect(await refused.json()).toEqual({ error: "forbidden" });
+			expect((await remove(phone, "unknown")).status).toBe(403);
+			expect((await fetch(`${base}/api/devices/%`, { method: "DELETE", headers: auth(phone) })).status).toBe(404);
+			expect((await fetch(`${base}/api/sessions`, { headers: auth(pad) })).status).toBe(200);
 			expect((await remove(phone, phoneId!)).status).toBe(200);
 			expect((await fetch(`${base}/api/sessions`, { headers: auth(phone) })).status).toBe(401);
-			expect(store.load().devices).toEqual([]);
+			expect(store.load().devices.map((d) => d.id)).toEqual([padId]);
 		});
 	});
 
@@ -371,6 +379,114 @@ describe("remote HTTP API", () => {
 			{ id: "live", message: { type: "prompt", text: "next" } },
 			{ id: "live", message: { type: "abort" } },
 		]);
+	});
+
+	describe("slash commands", () => {
+		const send = async (text: string, id = "live", images?: object[]) => {
+			const token = await pair();
+			const res = await fetch(`${base}/api/sessions/${id}/prompt`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify({ text, ...(images ? { images } : {}) }),
+			});
+			return [res.status, ((await res.json()) as { error?: string }).error];
+		};
+		const commands = [{ name: "compact", source: "builtin" as const }];
+
+		it("has an idle pane type one into its prompt, as on the Mac, and lists the pane's commands", async () => {
+			instances[0]!.activity = "idle";
+			reports.set("live", { models: [], commands });
+			expect(await send("/compact keep the notes")).toEqual([202, undefined]);
+			expect(await send("  /skill:pdf report.pdf")).toEqual([202, undefined]);
+			expect(sent.map((s) => s.message)).toEqual([
+				{ type: "command", text: "/compact keep the notes" },
+				{ type: "command", text: "  /skill:pdf report.pdf" },
+			]);
+			const token = await pair();
+			const list = await fetch(`${base}/api/sessions/live/commands`, { headers: auth(token) });
+			expect(await list.json()).toEqual({ commands });
+			// The status, fetched after every report, leaves them out.
+			const status = await fetch(`${base}/api/sessions/live/status`, { headers: auth(token) });
+			expect((await status.json()) as object).toEqual({ report: { models: [] } });
+		});
+
+		it("refuses one while the session works or waits, or its prompt holds a draft, and the Mac-only ones", async () => {
+			reports.set("live", { models: [], commands });
+			expect(await send("/compact")).toEqual([409, "session_busy"]);
+			instances[0]!.activity = "idle";
+			instances[0]!.draft = true;
+			expect(await send("/compact")).toEqual([409, "unsent_draft"]);
+			for (const text of ["/remote-control", "/remote-control pair", "/agent-view", "/exit"]) {
+				expect(await send(text)).toEqual([400, "command_refused"]);
+			}
+			// A stored row too, which would run it as its first prompt.
+			expect(await send("/agent-view", "stored")).toEqual([400, "command_refused"]);
+			expect(sent).toEqual([]);
+			// Text that is not a command goes as a prompt, as before; a draft does not hold it up.
+			expect(await send("compact it")).toEqual([202, undefined]);
+			expect(sent.map((s) => s.message)).toEqual([{ type: "prompt", text: "compact it" }]);
+		});
+
+		it("sends it as a prompt to a pane too old to report its commands, and with images", async () => {
+			instances[0]!.activity = "idle";
+			reports.set("live", { models: [] });
+			expect(await send("/compact")).toEqual([202, undefined]);
+			const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 1, 1, 1]).toString("base64");
+			reports.set("live", { models: [], commands });
+			expect(await send("/describe", "live", [{ mimeType: "image/png", data: png }])).toEqual([202, undefined]);
+			expect(sent.map((s) => s.message.type)).toEqual(["prompt", "prompt"]);
+		});
+	});
+
+	describe("background tasks", () => {
+		it("lists a pane's tasks in its status, keeping their output files on the Mac", async () => {
+			const token = await pair();
+			const output = join(dir, "b1.output");
+			reports.set("live", {
+				models: [],
+				tasks: [
+					{ id: "b1", kind: "shell", label: "npm run dev", startedAt: 1, outputFile: output },
+					{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2, foreground: true },
+				],
+			});
+			const res = await fetch(`${base}/api/sessions/live/status`, { headers: auth(token) });
+			expect(((await res.json()) as { report: object }).report).toEqual({
+				models: [],
+				tasks: [
+					{ id: "b1", kind: "shell", label: "npm run dev", startedAt: 1, output: true },
+					{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2, foreground: true },
+				],
+			});
+		});
+
+		it("gives a task's output tail as /tasks shows it, and stops a task the pane reported", async () => {
+			const token = await pair();
+			const output = join(dir, "b1.output");
+			const lines = Array.from({ length: 30 }, (_, i) => `line ${i}`);
+			writeFileSync(output, `${"x".repeat(9000)}\n${lines.join("\n")}\n\x1b[31mred\x1b[0m\r\n`);
+			reports.set("live", {
+				models: [],
+				tasks: [
+					{ id: "b1", kind: "shell", label: "npm run dev", startedAt: 1, outputFile: output },
+					{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2, foreground: true },
+				],
+			});
+			const tail = await fetch(`${base}/api/sessions/live/tasks/b1/output`, { headers: auth(token) });
+			expect(await tail.json()).toEqual({ lines: [...lines.slice(-8), "red"], size: expect.any(Number) });
+			const none = await fetch(`${base}/api/sessions/live/tasks/f2/output`, { headers: auth(token) });
+			expect([none.status, await none.json()]).toEqual([404, { error: "no_output" }]);
+			const stop = (task: string, id = "live") =>
+				fetch(`${base}/api/sessions/${id}/tasks/${task}/stop`, { method: "POST", headers: authJson(token) });
+			expect((await stop("f2")).status).toBe(202);
+			expect(sent).toEqual([{ id: "live", message: { type: "stop_task", id: "f2" } }]);
+			const unknown = await stop("b9");
+			expect([unknown.status, await unknown.json()]).toEqual([404, { error: "unknown_task" }]);
+			expect((await stop("b1", "stored")).status).toBe(404);
+			expect((await stop("../x")).status).toBe(404);
+			const get = await fetch(`${base}/api/sessions/live/tasks/b1/stop`, { headers: auth(token) });
+			expect(get.status).toBe(405);
+			expect(sent).toHaveLength(1);
+		});
 	});
 
 	describe("images", () => {
@@ -561,6 +677,35 @@ describe("remote HTTP API", () => {
 			const res = await fetch(`${base}/api/sessions/live/status`, { headers: auth(token) });
 			expect(await res.json()).toEqual({ report: { ...report, ...statusExtra } });
 			expect(statusCwds).toEqual(["/p"]);
+		});
+
+		it("draws the pane's pistatusline at the width the phone asks for, in place of the git state and limits", async () => {
+			const paths = { worker: "/pi/dist/render-worker.js", config: "/agent/pistatusline/settings.json" };
+			reports.set("live", { ...report, pistatusline: paths });
+			statusExtra = { git: { branch: "main", added: 0, removed: 0 } };
+			const token = await pair();
+			const status = async (query: string) =>
+				(await (await fetch(`${base}/api/sessions/live/status${query}`, { headers: auth(token) })).json()) as {
+					report: Record<string, unknown>;
+				};
+			expect((await status("?cols=52")).report).toEqual({
+				...report,
+				statusline: { lines: [[{ text: "52 columns", bold: true }]] },
+			});
+			expect(renders).toEqual([{ id: "live", cwd: "/p", cols: 52 }]);
+			expect(statusCwds).toEqual([]);
+			// Kept to what a phone may ask for; no width, or none that parses, is the plain status.
+			expect((await status("?cols=999")).report.statusline).toEqual({
+				lines: [[{ text: "200 columns", bold: true }]],
+			});
+			expect((await status("?cols=5")).report.statusline).toEqual({ lines: [[{ text: "20 columns", bold: true }]] });
+			for (const query of ["", "?cols=wide", "?cols=-1"]) {
+				expect((await status(query)).report).toEqual({ ...report, ...statusExtra });
+			}
+			expect(renders).toHaveLength(3);
+			// A pane without pistatusline, or one it could not render: the git state and limits as before.
+			reports.set("live", report);
+			expect((await status("?cols=52")).report).toEqual({ ...report, ...statusExtra });
 		});
 
 		const post = async (token: string, id: string, action: string, body: unknown) => {
@@ -1423,8 +1568,9 @@ describe("remote HTTP API", () => {
 			})();
 			const bystander = await open(token);
 			await watcher.until(": connected");
-			// With the device whose stream it is.
-			expect(server.watching()).toEqual(new Map([["live", new Set([store.load().devices[0]!.id])]]));
+			expect(server.watching()).toEqual(new Set(["live"]));
+			// The device whose streams they are, the bystander's (no session) too.
+			expect(server.present()).toEqual(new Set([store.load().devices[0]!.id]));
 			const snapshot = { text: "Hel", tools: [{ id: "c1", name: "bash", summary: "ls", running: true }] };
 			server.live("live", snapshot);
 			// Not watched: not kept, not sent.
@@ -1448,7 +1594,9 @@ describe("remote HTTP API", () => {
 			watcher.controller.abort();
 			bystander.controller.abort();
 			for (let i = 0; i < 50 && server.watching().size > 0; i++) await new Promise((r) => setTimeout(r, 20));
-			expect(server.watching()).toEqual(new Map());
+			expect(server.watching()).toEqual(new Set());
+			for (let i = 0; i < 50 && server.present().size > 0; i++) await new Promise((r) => setTimeout(r, 20));
+			expect(server.present()).toEqual(new Set());
 			// Gone with its last watcher: a new one is not sent the old reply.
 			const again = await open(token, "live");
 			const first = (await again.collect(400)).text;

@@ -4,8 +4,8 @@
  * QR code that pairs a phone, and once it is on, a menu: pair another phone, the paired phones,
  * starting the daemon at login (autostart.ts), turning it off. In a pane,
  * it also streams the reply in progress to the phones watching the session (live.ts), reports its
- * model, usage and trust mode, and runs the phone's model, thinking level and trust mode switches,
- * compaction, tree navigation, fork and clone (report.ts).
+ * model, usage, trust mode and slash commands, and runs the phone's model, thinking level and trust
+ * mode switches, compaction, tree navigation, fork, clone and slash commands (report.ts).
  */
 import type {
 	ExtensionAPI,
@@ -18,15 +18,25 @@ import {
 	currentDaemonBuildId,
 	OrchestratorClient,
 	type PaneMessage,
+	type PaneReport,
 	type RemoteResult,
 } from "../../daemon/orchestrator-client.ts";
 import { piCommand, Tmux } from "../../daemon/tmux.ts";
+import { holdTui } from "../_shared/hold-tui.ts";
 import { remotePort } from "../_shared/settings.ts";
 import { TRUST_CHANGED } from "../permissions/index.ts";
 import { autostartDeps, autostartOn, autostartStatus, refreshAutostart, toggleAutostart } from "./autostart.ts";
 import { LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
-import { applyPaneMessage, buildReport, navigate } from "./report.ts";
+import {
+	applyPaneMessage,
+	buildReport,
+	navigate,
+	paneTasks,
+	pistatuslinePaths,
+	submitCommand,
+	watchTasks,
+} from "./report.ts";
 import { EnableNeeded, serve, tailscaleInfo } from "./tailscale.ts";
 
 function message(error: unknown): string {
@@ -206,29 +216,66 @@ function factory(pi: ExtensionAPI): void {
 	// Only a pane registers (agent view), so only a pane can be watched.
 	const pane = Tmux.currentPane();
 	const live = pane ? liveForwarder(pane) : undefined;
+	/** Presses Enter in this pane for a phone's slash command; a hung tmux must not hold up pi. */
+	const commandKeys = new Tmux(undefined, undefined, { timeoutMs: 2000 });
 	const client = new OrchestratorClient();
 	let reports = Promise.resolve();
 	/** The session's context, for the bus, whose events carry none. */
 	let session: ExtensionContext | undefined;
+	/** The session's TUI, which the phone's slash commands check has its prompt focused. */
+	let tui: ReturnType<typeof holdTui> | undefined;
 	let watched = false;
 	/** The phone's tree, fork and clone sent as `/remote-control` and not yet run. */
 	const dispatched = new Set<string>();
+	/** The task list the last report carried, so a change that leaves it as it was sends none. */
+	let reportedTasks = "";
+	let unwatchTasks: (() => void) | undefined;
+	/** Where pistatusline is, looked up once per session. */
+	let statusline: PaneReport["pistatusline"];
 	/** `notice`: what the pane could not do for the phone, which this report alone carries. */
 	const report = (ctx: ExtensionContext, notice?: string): void => {
 		// As agent view registers: a `pi -p` run inside the pane must not report as the pane.
 		if (!pane || ctx.mode !== "tui") return;
 		session = ctx;
-		const next = { ...buildReport(ctx, pi), ...(notice ? { notice: { text: notice, at: Date.now() } } : {}) };
+		const next = {
+			...buildReport(ctx, pi),
+			...(statusline ? { pistatusline: statusline } : {}),
+			...(notice ? { notice: { text: notice, at: Date.now() } } : {}),
+		};
+		reportedTasks = JSON.stringify(next.tasks);
 		reports = reports.then(() => client.remoteReport(pane, next)).catch(() => {});
 	};
-	pi.on("session_start", (_event, ctx) => report(ctx));
-	pi.on("model_select", (_event, ctx) => report(ctx));
-	pi.on("thinking_level_select", (_event, ctx) => report(ctx));
-	pi.on("turn_end", (_event, ctx) => report(ctx));
-	pi.on("session_compact", (_event, ctx) => report(ctx));
-	pi.events.on("bluclawd:pane-message", (message) => {
+	/** A change the phone shows, reported only while a phone has the session open: opening it sends
+	 *  a fresh report, so a session nobody watches sends one per session, not one per turn. */
+	const changed = (ctx: ExtensionContext): void => {
+		if (watched) report(ctx);
+		else if (pane && ctx.mode === "tui") session = ctx;
+	};
+	pi.on("session_start", (_event, ctx) => {
+		if (pane && ctx.mode === "tui") {
+			tui = holdTui(ctx, "remote:tui");
+			statusline = pistatuslinePaths(pi);
+			unwatchTasks?.();
+			unwatchTasks = watchTasks(() => {
+				const ctx = session;
+				if (!ctx || !watched) return;
+				if (JSON.stringify(paneTasks(ctx.sessionManager.getSessionId())) !== reportedTasks) report(ctx);
+			});
+		}
+		report(ctx);
+	});
+	pi.on("model_select", (_event, ctx) => changed(ctx));
+	pi.on("thinking_level_select", (_event, ctx) => changed(ctx));
+	pi.on("turn_end", (_event, ctx) => changed(ctx));
+	pi.on("session_compact", (_event, ctx) => changed(ctx));
+	pi.events.on("bluclawd:pane-message", (data) => {
 		const ctx = session;
-		if (ctx) applyPaneMessage(message as PaneMessage, ctx, pi, () => report(ctx), dispatched);
+		if (!ctx || !pane) return;
+		const message = data as PaneMessage;
+		if (message.type === "command") {
+			const enter = () => commandKeys.sendKeys(pane, ["Enter"]);
+			submitCommand(message.text, ctx, tui?.(), enter, (notice) => report(ctx, notice));
+		} else applyPaneMessage(message, ctx, pi, () => report(ctx), dispatched);
 	});
 	pi.events.on("bluclawd:remote-watched", (data) => {
 		const opened = data === true && !watched;
@@ -241,7 +288,7 @@ function factory(pi: ExtensionAPI): void {
 		if (session) report(session);
 	});
 	pi.events.on(TRUST_CHANGED, () => {
-		if (session) report(session);
+		if (session) changed(session);
 	});
 	pi.on("message_update", (event) => live?.onMessageUpdate(event.message));
 	pi.on("tool_execution_start", (event) => live?.onToolStart(event.toolCallId, event.toolName, event.args));
@@ -251,6 +298,8 @@ function factory(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", () => {
 		// As a turn's end: no timer left to send, and the phone's snapshot of ours cleared.
 		live?.onAgentEnd();
+		unwatchTasks?.();
+		unwatchTasks = undefined;
 		session = undefined;
 	});
 

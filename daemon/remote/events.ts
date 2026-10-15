@@ -5,6 +5,9 @@
  * the clients that have its session open.
  * Polled once a second while any client is connected, which is also when a revoked device is cut off; the registry itself changes on the panes'
  * 3s heartbeats.
+ * A device with a stream open has the app in the foreground, so it gets no push: the phone closes
+ * its stream when hidden (visibilitychange) and opens it again when visible. One a phone dropped
+ * without closing (no network) counts until a write to it fails.
  */
 import { statSync } from "node:fs";
 import type { ServerResponse } from "node:http";
@@ -13,8 +16,8 @@ import type { LiveSnapshot } from "../ipc/protocol.ts";
 export interface EventSources {
 	/** Changes exactly when the phone's session list would. */
 	sessionsSignature(): string;
-	sessionFile(sessionId: string): string | undefined;
-	leafId(sessionId: string): string | undefined;
+	/** A session's file and the leaf its pane is on: one lookup for both, each tick. */
+	session(sessionId: string): { sessionFile?: string; leafId?: string } | undefined;
 	/** The ids of the sessions listed now. */
 	listed(): Set<string>;
 }
@@ -91,16 +94,19 @@ export class RemoteEvents {
 		}
 	}
 
-	/** The sessions some client has open, each with the devices that have it open. */
-	watching(): Map<string, Set<string>> {
-		const watched = new Map<string, Set<string>>();
-		for (const client of this.clients) {
-			if (!client.sessionId) continue;
-			const devices = watched.get(client.sessionId) ?? new Set<string>();
-			if (client.deviceId) devices.add(client.deviceId);
-			watched.set(client.sessionId, devices);
-		}
+	/** The sessions some client has open. */
+	watching(): Set<string> {
+		const watched = new Set<string>();
+		for (const client of this.clients) if (client.sessionId) watched.add(client.sessionId);
 		return watched;
+	}
+
+	/** The devices with a stream open, on any screen: the app is in the foreground there, as the
+	 *  phone closes its stream while hidden and opens it again once visible. */
+	present(): Set<string> {
+		const devices = new Set<string>();
+		for (const client of this.clients) if (client.deviceId) devices.add(client.deviceId);
+		return devices;
 	}
 
 	/**
@@ -160,7 +166,8 @@ export class RemoteEvents {
 	}
 
 	private messagesSignature(sessionId: string): string {
-		return `${fileSignature(this.sources.sessionFile(sessionId))}:${this.sources.leafId(sessionId) ?? ""}`;
+		const session = this.sources.session(sessionId);
+		return `${fileSignature(session?.sessionFile)}:${session?.leafId ?? ""}`;
 	}
 
 	close(): void {

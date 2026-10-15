@@ -268,6 +268,7 @@ const agentView: InlineExtension = {
 				// Only once it differs: a heartbeat lags the file, whose last entry is otherwise the leaf.
 				leafId: leafId !== ctx.sessionManager.getEntries().at(-1)?.id ? leafId : undefined,
 				dialog: activity.current === "awaiting_input" ? activity.dialog : undefined,
+				draft: ctx.ui.getEditorText().trim() !== "",
 			};
 		};
 

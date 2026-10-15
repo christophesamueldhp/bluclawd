@@ -114,6 +114,21 @@ describe("LiveForwarder", () => {
 		expect(sent).toHaveLength(3);
 	});
 
+	it("clears a turn stopped during a tool, as pi ends it: the tool, the aborted message, the run", () => {
+		live.setWatched(true);
+		live.onMessageUpdate(assistant({ type: "toolCall", id: "c1", name: "bash", arguments: { command: "sleep 60" } }));
+		live.onMessageEnd();
+		live.onToolStart("c1", "bash", { command: "sleep 60" });
+		vi.advanceTimersByTime(300);
+		live.onToolEnd("c1");
+		// pi's empty aborted assistant message has a message_end but no update.
+		const before = sent.length;
+		live.onMessageEnd();
+		live.onAgentEnd();
+		vi.advanceTimersByTime(1000);
+		expect(sent.slice(before)).toEqual([null]);
+	});
+
 	it("cuts long thinking as the transcript does", () => {
 		live.setWatched(true);
 		live.onMessageUpdate(assistant({ type: "thinking", thinking: "x".repeat(5000) }));

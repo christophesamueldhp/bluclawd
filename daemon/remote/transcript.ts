@@ -22,7 +22,16 @@ export interface RemoteImage {
 
 export type RemoteMessage =
 	| { kind: "user"; id: string; text: string; images?: RemoteImage[] }
-	| { kind: "assistant"; id: string; text: string; thinking?: string; tools: RemoteToolCall[]; error?: string }
+	| {
+			kind: "assistant";
+			id: string;
+			text: string;
+			thinking?: string;
+			tools: RemoteToolCall[];
+			error?: string;
+			/** Stopped by the user (Stop, Esc): Claude Code's "Interrupted by user". Its text may be empty. */
+			aborted?: true;
+	  }
 	| {
 			kind: "toolResult";
 			id: string;
@@ -58,10 +67,19 @@ interface Part {
 	mimeType?: string;
 }
 
-interface Entry {
+/** A token count as pi stores one, on an assistant message or a summary. */
+export interface EntryUsage {
+	input?: number;
+	output?: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+}
+
+export interface Entry {
 	type?: string;
 	id?: string;
 	parentId?: string | null;
+	timestamp?: string;
 	message?: {
 		role?: string;
 		content?: unknown;
@@ -72,11 +90,13 @@ interface Entry {
 		errorMessage?: string;
 		command?: string;
 		details?: { diff?: unknown };
+		usage?: EntryUsage;
 	};
-	provider?: string;
-	modelId?: string;
 	content?: unknown;
 	display?: boolean;
+	/** A compaction's, a branch summary's or a usage entry's. */
+	usage?: EntryUsage;
+	tokensBefore?: number;
 }
 
 export function parseEntries(text: string): Entry[] {
@@ -158,7 +178,7 @@ export function toolSummary(args: unknown): string {
 
 function toRemote(entry: Entry): RemoteMessage | undefined {
 	const id = entry.id ?? "";
-	if (entry.type === "model_change") return { kind: "marker", id, text: `Model: ${entry.provider}/${entry.modelId}` };
+	// As Claude Code's transcript: a model or thinking level change shows nowhere but the status line.
 	if (entry.type === "compaction") return { kind: "marker", id, text: "Conversation compacted" };
 	if (entry.type === "custom_message" && entry.display) {
 		const text = firstLine(plainText(entry.content));
@@ -180,7 +200,9 @@ function toRemote(entry: Entry): RemoteMessage | undefined {
 				.filter((part) => part.type === "toolCall")
 				.map((part) => ({ id: part.id ?? "", name: part.name ?? "tool", summary: toolSummary(part.arguments) }));
 			const error = message.stopReason === "error" ? message.errorMessage || "the model request failed" : undefined;
-			if (!text && !thinking && tools.length === 0 && !error) return undefined;
+			// pi ends a stopped turn with one, empty when it was stopped before any reply or during a tool.
+			const aborted = message.stopReason === "aborted";
+			if (!text && !thinking && tools.length === 0 && !error && !aborted) return undefined;
 			return {
 				kind: "assistant",
 				id,
@@ -188,6 +210,7 @@ function toRemote(entry: Entry): RemoteMessage | undefined {
 				...(thinking ? { thinking: clip(thinking).text } : {}),
 				tools,
 				...(error ? { error } : {}),
+				...(aborted ? { aborted: true as const } : {}),
 			};
 		}
 		case "toolResult": {
@@ -282,6 +305,16 @@ export function loadImage(
 		return imageOf(entriesOf(sessionFile), entryId, index, leafId);
 	} catch {
 		return undefined;
+	}
+}
+
+/** The active branch's entries, as pi's getBranch() gives them; none when the file cannot be read. */
+export function loadBranch(sessionFile: string | undefined, leafId?: string): Entry[] {
+	if (!sessionFile) return [];
+	try {
+		return activeBranch(entriesOf(sessionFile), leafId);
+	} catch {
+		return [];
 	}
 }
 

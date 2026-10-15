@@ -4,6 +4,7 @@ import { getSocketPath } from "./config.ts";
 import { handleIpcRequest, listSummaries, setRemoteControl, setShutdownHook } from "./handler.ts";
 import { startIpcServer } from "./ipc/server.ts";
 import { RemoteControl } from "./remote/control.ts";
+import { pistatusline } from "./remote/pistatusline.ts";
 import { statusLine } from "./remote/statusline.ts";
 import { supervisor } from "./supervisor.ts";
 
@@ -33,6 +34,7 @@ export async function serve(): Promise<void> {
 		renameInstance: (id, name) => supervisor.renameInstance(id, name) !== undefined,
 		setPinned: (id, pinned) => supervisor.setInstanceMeta(id, { pinned }) !== undefined,
 		statusLine: statusLine(),
+		renderStatusline: pistatusline(),
 	});
 	setRemoteControl(remote);
 	await remote.apply();

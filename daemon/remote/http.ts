@@ -4,15 +4,24 @@
  * /api/pair/handoff) needs a paired device's token: a bearer header, or `?token=` on the SSE
  * stream, which EventSource cannot give headers.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
 import { stripAnsi } from "../ansi.ts";
-import type { InstanceSummary, LiveSnapshot, PaneImage, PaneLaunch, PaneMessage, PaneReport } from "../ipc/protocol.ts";
+import {
+	type InstanceSummary,
+	type LiveSnapshot,
+	type PaneImage,
+	type PaneLaunch,
+	type PaneMessage,
+	type PaneReport,
+	PHONE_REFUSED_COMMANDS,
+} from "../ipc/protocol.ts";
 import { Tmux } from "../tmux.ts";
 import { RemoteEvents } from "./events.ts";
 import { type ClaimResult, type RemoteStore, SECRET_PATTERN } from "./pairing.ts";
+import type { StatuslineSession, StatusSpan } from "./pistatusline.ts";
 import { findSession, remoteSessions } from "./sessions.ts";
 import { launchUsable, type SessionSpec } from "./spawn.ts";
 import type { StatusLine } from "./statusline.ts";
@@ -41,6 +50,8 @@ export interface RemoteDeps {
 	deleteInstance(sessionId: string): boolean;
 	/** What the status adds to a report for a session's directory: git state and usage limits. */
 	statusLine?(cwd: string): Promise<StatusLine>;
+	/** The pane's pistatusline rendered at `cols` columns, as styled spans per line. */
+	renderStatusline?(session: StatuslineSession, report: PaneReport, cols: number): Promise<StatusSpan[][] | undefined>;
 	/** Agent view's tmux server: what a pane shows, and keys typed into it. */
 	tmux: Pick<Tmux, "screen" | "sendKeys" | "sendText">;
 	webDir: string;
@@ -49,8 +60,10 @@ export interface RemoteDeps {
 export interface RemoteServer {
 	/** The port actually bound (differs from the requested one only for port 0). */
 	port: number;
-	/** The sessions a phone has open on its event stream, each with the ids of the devices that have it open. */
-	watching(): Map<string, Set<string>>;
+	/** The sessions a phone has open on its event stream. */
+	watching(): Set<string>;
+	/** The devices with an event stream open: the app is in the foreground there. */
+	present(): Set<string>;
 	/** Push a pane's reply in progress (null: finished) to the phones that have its session open. */
 	live(sessionId: string, live: LiveSnapshot | null): void;
 	/** Tell the phones that have this session open its report changed. */
@@ -91,6 +104,12 @@ const KEYS = new Set(["Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "
 const KEYS_MAX = 1;
 const TEXT_MAX = 1024;
 const NAME_MAX = 100;
+/** The widths a phone may ask the status line for. */
+const COLS_MIN = 20;
+const COLS_MAX = 200;
+/** A task's output tail, as /tasks' detail view reads it. */
+const TAIL_BYTES = 8192;
+const TAIL_LINES = 10;
 /** Never in typed text or a name: a control character would be a keystroke, or a terminal escape in agent view. */
 const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 /** Against DNS rebinding: a page whose name resolves to 127.0.0.1 still sends its own name. Tailscale
@@ -193,6 +212,32 @@ function keysIn(body: Record<string, unknown>): { keys: string[] } | { text: str
 		if (!CONTROL.test(text)) return { text };
 	}
 	throw new HttpError(400, "invalid_keys");
+}
+
+/** A task's output as /tasks' detail view shows it: the last lines of the file's last 8 KiB, empty
+ *  ones dropped, without the escapes and control characters the command wrote for its terminal. */
+function outputTail(file: string): { lines: string[]; size: number } | undefined {
+	if (!isAbsolute(file)) return undefined;
+	try {
+		const size = statSync(file).size;
+		const length = Math.min(size, TAIL_BYTES);
+		const buffer = Buffer.alloc(length);
+		const fd = openSync(file, "r");
+		try {
+			readSync(fd, buffer, 0, length, size - length);
+		} finally {
+			closeSync(fd);
+		}
+		const lines = buffer
+			.toString("utf8")
+			.split("\n")
+			.slice(-TAIL_LINES)
+			.map((line) => stripAnsi(line).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ""))
+			.filter(Boolean);
+		return { lines, size };
+	} catch {
+		return undefined;
+	}
 }
 
 /** How to start a pane's pi, while its files are still there. */
@@ -300,6 +345,8 @@ async function handle(
 		} catch {
 			return json(res, 404, { error: "unknown_device" });
 		}
+		// The Mac is the root: a phone disconnects only itself; /remote-control removes the others.
+		if (id !== device.id) return json(res, 403, { error: "forbidden" });
 		return deps.store.revoke(id) ? json(res, 200, { ok: true }) : json(res, 404, { error: "unknown_device" });
 	}
 	if (path === "/api/sessions" && req.method === "GET") {
@@ -403,6 +450,31 @@ async function handle(
 		return;
 	}
 
+	// A background task the pane reported: the tail of its output, or stopping it as /tasks' `x` does.
+	const task = /^\/api\/sessions\/([^/]+)\/tasks\/([\w.:-]{1,64})\/(output|stop)$/.exec(path);
+	if (task) {
+		const [, encoded = "", taskId = "", verb] = task;
+		if (req.method !== (verb === "output" ? "GET" : "POST")) return json(res, 405, { error: "method_not_allowed" });
+		if (verb === "stop") await readJson(req);
+		let taskOf: string;
+		try {
+			taskOf = decodeURIComponent(encoded);
+		} catch {
+			return json(res, 404, { error: "unknown_session" });
+		}
+		const session = findSession(deps.listInstances(), taskOf);
+		if (!session) return json(res, 404, { error: "unknown_session" });
+		const known = session.running ? deps.report(taskOf)?.tasks?.find((t) => t.id === taskId) : undefined;
+		if (!known) return json(res, 404, { error: "unknown_task" });
+		if (verb === "output") {
+			const tail = known.outputFile ? outputTail(known.outputFile) : undefined;
+			return tail ? json(res, 200, tail) : json(res, 404, { error: "no_output" });
+		}
+		if (!deps.send(taskOf, { type: "stop_task", id: taskId }))
+			return json(res, 409, { error: "session_not_running" });
+		return json(res, 202, { ok: true });
+	}
+
 	// A tool result's whole output: the transcript cuts it to TEXT_MAX.
 	const output = /^\/api\/sessions\/([^/]+)\/messages\/([0-9a-f-]{8,36})\/output$/.exec(path);
 	if (output) {
@@ -420,7 +492,7 @@ async function handle(
 	}
 
 	const match =
-		/^\/api\/sessions\/([^/]+)\/(messages|status|screen|keys|prompt|abort|model|thinking|trust|compact|tree|fork|clone|rename|pin)$/.exec(
+		/^\/api\/sessions\/([^/]+)\/(messages|status|commands|screen|keys|prompt|abort|model|thinking|trust|compact|tree|fork|clone|rename|pin)$/.exec(
 			path,
 		);
 	if (!match) return json(res, 404, { error: "not_found" });
@@ -448,7 +520,28 @@ async function handle(
 		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
 		const report = found.running ? deps.report(id) : undefined;
 		if (!report) return json(res, 404, { error: "no_status" });
-		return json(res, 200, { report: { ...report, ...(await deps.statusLine?.(found.cwd)) } });
+		// Fetched again after every report: the commands, which rarely change, have their own route.
+		const { commands: _commands, pistatusline: _paths, tasks, ...shown } = report;
+		// A task's output file stays here: the phone asks for its tail.
+		const listed = tasks?.map(({ outputFile, ...task }) => ({ ...task, ...(outputFile ? { output: true } : {}) }));
+		// pistatusline's own lines at the phone's width, which show git and the usage limits themselves.
+		const cols = /^\d{1,3}$/.test(url.searchParams.get("cols") ?? "") ? Number(url.searchParams.get("cols")) : 0;
+		const pane = cols ? deps.listInstances().find((i) => i.id === id && i.external) : undefined;
+		const lines =
+			pane &&
+			(await deps.renderStatusline?.(
+				{ ...found, id, createdAt: pane.createdAt, sessionId: pane.sessionId },
+				report,
+				Math.min(Math.max(cols, COLS_MIN), COLS_MAX),
+			));
+		const extra = lines ? { statusline: { lines } } : await deps.statusLine?.(found.cwd);
+		return json(res, 200, { report: { ...shown, ...(listed ? { tasks: listed } : {}), ...extra } });
+	}
+	if (action === "commands") {
+		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
+		const report = found.running ? deps.report(id) : undefined;
+		if (!report) return json(res, 404, { error: "no_status" });
+		return json(res, 200, { commands: report.commands ?? [] });
 	}
 	if (action === "screen" || action === "keys") {
 		if (req.method !== (action === "screen" ? "GET" : "POST")) return json(res, 405, { error: "method_not_allowed" });
@@ -485,6 +578,12 @@ async function handle(
 	if (action === "prompt") {
 		const text = promptIn(body, "text");
 		const images = imagesIn(body);
+		// A slash command, as pi reads one: typed into the pane's prompt (a phone's images never are).
+		const command =
+			!images && text.trimStart().startsWith("/") ? text.trimStart().slice(1).split(/\s/)[0] : undefined;
+		if (command !== undefined && PHONE_REFUSED_COMMANDS.has(command)) {
+			return json(res, 400, { error: "command_refused" });
+		}
 		// A stored row has no process: it resumes as agent view's peek reply resumes it.
 		if (!session.running && session.sessionFile) {
 			// Its first prompt is an argument to pi, as a new session's is.
@@ -496,7 +595,13 @@ async function handle(
 			const pane = start(deps, { cwd: session.cwd, task: text, sessionFile: session.sessionFile, launch }, id);
 			return json(res, 202, { ok: true, pane });
 		}
-		message = images ? { type: "prompt", text, images } : { type: "prompt", text };
+		// A pane that reports its commands types them in; an older one runs them as a prompt.
+		if (command !== undefined && session.running && deps.report(id)?.commands) {
+			// Only into an idle, empty prompt, which the pane checks again: its heartbeat may be 3s old.
+			if (session.busy) return json(res, 409, { error: "session_busy" });
+			if (session.draft) return json(res, 409, { error: "unsent_draft" });
+			message = { type: "command", text };
+		} else message = images ? { type: "prompt", text, images } : { type: "prompt", text };
 	} else if (action === "model") {
 		const { provider, id: modelId } = body;
 		if (typeof provider !== "string" || typeof modelId !== "string" || !provider || !modelId) {
@@ -569,8 +674,7 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 		// Sorted: agent view's order shifts with every heartbeat and is not a change.
 		sessionsSignature: () =>
 			JSON.stringify(remoteSessions(deps.listInstances()).sort((a, b) => a.id.localeCompare(b.id))),
-		sessionFile: (id) => findSession(deps.listInstances(), id)?.sessionFile,
-		leafId: (id) => findSession(deps.listInstances(), id)?.leafId,
+		session: (id) => findSession(deps.listInstances(), id),
 		listed: () => new Set(deps.listInstances().map((i) => i.id)),
 	});
 	const server: Server = createServer((req, res) => {
@@ -591,6 +695,7 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 			resolve({
 				port: typeof address === "object" && address ? address.port : port,
 				watching: () => events.watching(),
+				present: () => events.present(),
 				live: (id, live) => events.live(id, live),
 				status: (id) => events.status(id),
 				close: () =>

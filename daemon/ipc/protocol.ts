@@ -30,6 +30,8 @@ export interface RegisterRequest {
 		leafId?: string;
 		/** The dialog it waits on, while it does. */
 		dialog?: PaneDialog;
+		/** Its prompt holds unsent text. */
+		draft?: boolean;
 		/** How to start another pi like this one, so the daemon can start panes. */
 		launch?: PaneLaunch;
 	};
@@ -62,7 +64,11 @@ export type PaneMessage =
 	| { type: "set_trust"; trust: "always" | "ask" | "never" }
 	| { type: "tree"; entryId: string }
 	| { type: "fork"; entryId: string }
-	| { type: "clone" };
+	| { type: "clone" }
+	/** A text-only prompt starting with "/": typed into the pane's prompt and submitted, as on the Mac. */
+	| { type: "command"; text: string }
+	/** Stop a background task, as /tasks' `x` does: the model is told. */
+	| { type: "stop_task"; id: string };
 
 /** Queue a message for a self-registered session. */
 export interface SendRequest {
@@ -145,6 +151,37 @@ export interface PaneReport {
 	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
 	/** What the pane could not do for the phone, only in the report sent right after; `at`: epoch ms. */
 	notice?: { text: string; at: number };
+	/** The slash commands its prompt runs: pi's built-in ones, then extension commands, prompt
+	 *  templates and skills (`skill:name`). */
+	commands?: PaneCommand[];
+	/** Its running background tasks, as /tasks lists them: shells, monitors, then subagent runs, newest
+	 *  first in each; at most 20. */
+	tasks?: PaneTask[];
+	/** Where the pane's pistatusline is (its render worker and settings), when it draws pi's footer:
+	 *  the daemon renders its lines for the phone with it. */
+	pistatusline?: { worker: string; config: string };
+}
+
+/** A background task: a shell, a monitor or a subagent run, or the model's bash past 2s in the
+ *  foreground (`foreground`). `outputFile`: where a shell or monitor writes its output. */
+export interface PaneTask {
+	id: string;
+	kind: "shell" | "monitor" | "agent";
+	label: string;
+	/** Epoch ms. */
+	startedAt: number;
+	foreground?: boolean;
+	outputFile?: string;
+}
+
+/** Commands that drive the Mac's own screen (remote control's menu, agent view, detaching), never run from a phone. */
+export const PHONE_REFUSED_COMMANDS: ReadonlySet<string> = new Set(["remote-control", "agent-view", "exit"]);
+
+/** A slash command, without its "/". */
+export interface PaneCommand {
+	name: string;
+	description?: string;
+	source: "builtin" | "extension" | "prompt" | "skill";
 }
 
 /** A pane's latest PaneReport, sent when it changes (session start, model, thinking level, turn end). */
@@ -206,6 +243,8 @@ export interface InstanceSummary {
 	pane?: string;
 	leafId?: string;
 	dialog?: PaneDialog;
+	/** A pane's prompt holds unsent text, as of its last heartbeat. */
+	draft?: boolean;
 	/** A stored row a phone is resuming: its pane has not registered yet. */
 	resuming?: boolean;
 	/** A pane's pi: how many times it stopped working, which a turn too quick for a poll still adds to. */
