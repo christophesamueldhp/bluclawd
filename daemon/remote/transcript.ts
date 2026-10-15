@@ -2,9 +2,9 @@
  * A session's .jsonl as the phone's chat. The active branch is the `parentId` chain from the
  * pane's leaf when it reports one (after a /tree), else from the file's last entry (pi appends to
  * the branch it is on); each entry is reduced to what a phone
- * shows. Pure apart from `loadTranscript`'s one read.
+ * shows. Pure apart from the `load*` functions' reads, which share a cache of parsed files.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { textOf } from "../session-state.ts";
 
 export interface RemoteToolCall {
@@ -32,12 +32,20 @@ export type RemoteMessage =
 			text: string;
 			truncated: boolean;
 			images?: RemoteImage[];
+			/** An edit's diff, as pi shows it. */
+			diff?: string;
+			diffTruncated?: boolean;
 	  }
 	| { kind: "marker"; id: string; text: string };
 
 /** A tool result or a thinking block is cut to this many characters. */
 export const TEXT_MAX = 2048;
+/** A diff, and a tool result's whole output when the phone asks for it, are cut to these. */
+export const DIFF_MAX = 16 * 1024;
+export const OUTPUT_MAX = 256 * 1024;
 const SUMMARY_MAX = 120;
+/** Parsed files kept, the least recently read dropped first. */
+const PARSED_MAX = 8;
 
 interface Part {
 	type?: string;
@@ -63,6 +71,7 @@ interface Entry {
 		stopReason?: string;
 		errorMessage?: string;
 		command?: string;
+		details?: { diff?: unknown };
 	};
 	provider?: string;
 	modelId?: string;
@@ -101,10 +110,8 @@ export function activeBranch(entries: Entry[], leafId?: string): Entry[] {
 	return branch.reverse();
 }
 
-export function clip(text: string): { text: string; truncated: boolean } {
-	return text.length > TEXT_MAX
-		? { text: `${text.slice(0, TEXT_MAX)}…`, truncated: true }
-		: { text, truncated: false };
+export function clip(text: string, max = TEXT_MAX): { text: string; truncated: boolean } {
+	return text.length > max ? { text: `${text.slice(0, max)}…`, truncated: true } : { text, truncated: false };
 }
 
 function firstLine(text: string): string {
@@ -185,6 +192,8 @@ function toRemote(entry: Entry): RemoteMessage | undefined {
 		}
 		case "toolResult": {
 			const { text, truncated } = clip(plainText(message.content));
+			const diff = message.details?.diff;
+			const clipped = typeof diff === "string" && diff ? clip(diff, DIFF_MAX) : undefined;
 			return {
 				kind: "toolResult",
 				id,
@@ -194,6 +203,7 @@ function toRemote(entry: Entry): RemoteMessage | undefined {
 				text,
 				truncated,
 				...imageRefs(message.content),
+				...(clipped ? { diff: clipped.text, diffTruncated: clipped.truncated } : {}),
 			};
 		}
 		case "bashExecution":
@@ -206,7 +216,11 @@ function toRemote(entry: Entry): RemoteMessage | undefined {
 /** The last `limit` messages of the active branch, or the last ones before the message `before`:
  *  none when it is not on the branch. */
 export function transcriptFrom(text: string, limit: number, leafId?: string, before?: string): RemoteMessage[] {
-	let messages = activeBranch(parseEntries(text), leafId)
+	return messagesOf(parseEntries(text), limit, leafId, before);
+}
+
+function messagesOf(entries: Entry[], limit: number, leafId?: string, before?: string): RemoteMessage[] {
+	let messages = activeBranch(entries, leafId)
 		.map(toRemote)
 		.filter((message): message is RemoteMessage => message !== undefined);
 	if (before !== undefined)
@@ -227,10 +241,34 @@ export function imageFrom(
 	index: number,
 	leafId?: string,
 ): { mimeType: string; data: string } | undefined {
-	const entry = activeBranch(parseEntries(text), leafId).find((e) => e.id === entryId);
+	return imageOf(parseEntries(text), entryId, index, leafId);
+}
+
+function imageOf(
+	entries: Entry[],
+	entryId: string,
+	index: number,
+	leafId?: string,
+): { mimeType: string; data: string } | undefined {
+	const entry = activeBranch(entries, leafId).find((e) => e.id === entryId);
 	const role = entry?.type === "message" ? entry.message?.role : undefined;
 	if (role !== "user" && role !== "toolResult") return undefined;
 	return imagesOf(entry?.message?.content)[index];
+}
+
+/** Each file read lately, parsed, with the size and mtime it had: least recently read first. */
+const parsed = new Map<string, { signature: string; entries: Entry[] }>();
+
+/** A file's entries, parsed again only once its size or mtime changed. Throws when it cannot be read. */
+function entriesOf(sessionFile: string): Entry[] {
+	const stat = statSync(sessionFile);
+	const signature = `${stat.size}:${stat.mtimeMs}`;
+	const cached = parsed.get(sessionFile);
+	parsed.delete(sessionFile);
+	const entries = cached?.signature === signature ? cached.entries : parseEntries(readFileSync(sessionFile, "utf8"));
+	parsed.set(sessionFile, { signature, entries });
+	if (parsed.size > PARSED_MAX) parsed.delete(parsed.keys().next().value as string);
+	return entries;
 }
 
 export function loadImage(
@@ -241,7 +279,7 @@ export function loadImage(
 ): { mimeType: string; data: string } | undefined {
 	if (!sessionFile) return undefined;
 	try {
-		return imageFrom(readFileSync(sessionFile, "utf8"), entryId, index, leafId);
+		return imageOf(entriesOf(sessionFile), entryId, index, leafId);
 	} catch {
 		return undefined;
 	}
@@ -255,11 +293,27 @@ export function loadTranscript(
 	before?: string,
 ): RemoteMessage[] {
 	if (!sessionFile) return [];
-	let text: string;
 	try {
-		text = readFileSync(sessionFile, "utf8");
+		return messagesOf(entriesOf(sessionFile), limit, leafId, before);
 	} catch {
 		return [];
 	}
-	return transcriptFrom(text, limit, leafId, before);
+}
+
+/** The whole output of a tool result on the active branch, up to OUTPUT_MAX characters. */
+export function loadOutput(
+	sessionFile: string | undefined,
+	entryId: string,
+	leafId?: string,
+): { text: string; truncated: boolean } | undefined {
+	if (!sessionFile) return undefined;
+	let entries: Entry[];
+	try {
+		entries = entriesOf(sessionFile);
+	} catch {
+		return undefined;
+	}
+	const entry = activeBranch(entries, leafId).find((e) => e.id === entryId);
+	if (entry?.type !== "message" || entry.message?.role !== "toolResult") return undefined;
+	return clip(plainText(entry.message.content), OUTPUT_MAX);
 }

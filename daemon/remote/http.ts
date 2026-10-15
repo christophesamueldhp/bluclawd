@@ -16,7 +16,7 @@ import { type ClaimResult, type RemoteStore, SECRET_PATTERN } from "./pairing.ts
 import { findSession, remoteSessions } from "./sessions.ts";
 import { launchUsable, type SessionSpec } from "./spawn.ts";
 import type { StatusLine } from "./statusline.ts";
-import { loadImage, loadTranscript } from "./transcript.ts";
+import { loadImage, loadOutput, loadTranscript } from "./transcript.ts";
 import { parseSubscription } from "./webpush.ts";
 
 export interface RemoteDeps {
@@ -363,6 +363,22 @@ async function handle(
 		});
 		res.end(bytes);
 		return;
+	}
+
+	// A tool result's whole output: the transcript cuts it to TEXT_MAX.
+	const output = /^\/api\/sessions\/([^/]+)\/messages\/([0-9a-f-]{8,36})\/output$/.exec(path);
+	if (output) {
+		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
+		let outputOf: string;
+		try {
+			outputOf = decodeURIComponent(output[1]);
+		} catch {
+			return json(res, 404, { error: "unknown_session" });
+		}
+		const session = findSession(deps.listInstances(), outputOf);
+		if (!session) return json(res, 404, { error: "unknown_session" });
+		const result = loadOutput(session.sessionFile, output[2], session.leafId);
+		return result ? json(res, 200, result) : json(res, 404, { error: "unknown_entry" });
 	}
 
 	const match =

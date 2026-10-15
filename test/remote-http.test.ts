@@ -1046,6 +1046,37 @@ describe("remote HTTP API", () => {
 		});
 	});
 
+	it("gives an edit's diff with its result, and a tool result's whole output on request", async () => {
+		const result = (id: string, parentId: string, text: string, details?: object) =>
+			`${JSON.stringify({ type: "message", id, parentId, message: { role: "toolResult", toolName: "edit", content: [{ type: "text", text }], details } })}\n`;
+		writeFileSync(
+			join(dir, "live.jsonl"),
+			entry("aaaaaaaa", null, "go") +
+				result("bbbbbbbb", "aaaaaaaa", "Successfully replaced 1 block(s).", { diff: "-a\n+b" }) +
+				result("cccccccc", "bbbbbbbb", "z".repeat(5000)),
+		);
+		const token = await pair();
+		const get = async (path: string, init?: RequestInit) => {
+			const res = await fetch(`${base}/api/sessions/${path}`, { headers: auth(token), ...init });
+			return [res.status, await res.json()];
+		};
+		const [, page] = (await get("live/messages")) as [number, { messages: Array<Record<string, unknown>> }];
+		expect(page.messages[1]).toMatchObject({ id: "bbbbbbbb", diff: "-a\n+b", diffTruncated: false });
+		expect(page.messages[2]).toMatchObject({ id: "cccccccc", truncated: true });
+		expect(await get("live/messages/cccccccc/output")).toEqual([200, { text: "z".repeat(5000), truncated: false }]);
+		expect(await get("live/messages/aaaaaaaa/output")).toEqual([404, { error: "unknown_entry" }]);
+		expect(await get("live/messages/eeeeeeee/output")).toEqual([404, { error: "unknown_entry" }]);
+		expect(await get("nope/messages/cccccccc/output")).toEqual([404, { error: "unknown_session" }]);
+		expect(await get("live/messages/x/output")).toEqual([404, { error: "not_found" }]);
+		expect((await fetch(`${base}/api/sessions/live/messages/cccccccc/output`)).status).toBe(401);
+		const post = await get("live/messages/cccccccc/output", {
+			method: "POST",
+			headers: authJson(token),
+			body: "{}",
+		});
+		expect(post).toEqual([405, { error: "method_not_allowed" }]);
+	});
+
 	it("reads a running session's transcript from the leaf it reports", async () => {
 		appendFileSync(join(dir, "live.jsonl"), entry("u2", "u1", "gone back from"));
 		instances = [{ ...instances[0], leafId: "u1" }];
