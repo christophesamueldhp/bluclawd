@@ -36,6 +36,27 @@ describe("agent-view stored rows", () => {
 		expect(loadInstances()).toHaveLength(1);
 	});
 
+	it("a pane's pin carries over to its stored row once its pi quits", () => {
+		const supervisor = new ServerSupervisor();
+		const pane = { status: "online" as const, cwd: "/p", createdAt: new Date().toISOString() };
+		supervisor.registerExternal({ ...pane, id: "pi-a", sessionFile: "/nonexistent/a.jsonl" }, "idle");
+		supervisor.setInstanceMeta("pi-a", { pinned: true, sortOrder: 2 });
+		supervisor.registerExternal({ ...pane, id: "pi-b", sessionFile: "/nonexistent/b.jsonl" }, "idle");
+		supervisor.unregisterExternal("pi-a");
+		supervisor.unregisterExternal("pi-b");
+
+		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/a.jsonl" })).toMatchObject({
+			pinned: true,
+			sortOrder: 2,
+		});
+		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/b.jsonl" }).pinned).toBeUndefined();
+
+		// Saved before its unregister lands: a quitting pane does not wait for it.
+		supervisor.registerExternal({ ...pane, id: "pi-c", sessionFile: "/nonexistent/c.jsonl" }, "idle");
+		supervisor.setInstanceMeta("pi-c", { pinned: true });
+		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/c.jsonl" }).pinned).toBe(true);
+	});
+
 	it("rename and delete act on a stored row; the session file stays", () => {
 		const supervisor = new ServerSupervisor();
 		const saved = supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/s.jsonl" });

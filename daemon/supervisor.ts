@@ -9,6 +9,11 @@ function cloneInstance(record: InstanceRecord): InstanceRecord {
 	return { ...record };
 }
 
+/** A row's agent-view meta, once it has any. */
+function paneMeta({ pinned, sortOrder }: InstanceRecord): Pick<InstanceRecord, "pinned" | "sortOrder"> | undefined {
+	return pinned !== undefined || sortOrder !== undefined ? { pinned, sortOrder } : undefined;
+}
+
 interface ExternalInstance {
 	record: InstanceRecord;
 	activity: AgentActivity;
@@ -35,6 +40,9 @@ export class ServerSupervisor {
 	private readonly externalInstances = new Map<string, ExternalInstance>();
 	/** Each pane's pending wait, by id; kept apart from its entry, which every heartbeat replaces. */
 	private readonly waits = new Map<string, (outcome: WaitOutcome) => void>();
+	/** The pin and order of panes that unregistered, by session file, for the stored row their
+	 *  hand-off saves next. */
+	private readonly quitMeta = new Map<string, Pick<InstanceRecord, "pinned" | "sortOrder">>();
 
 	/** Register/heartbeat a pane's pi. */
 	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = Date.now()): void {
@@ -57,6 +65,9 @@ export class ServerSupervisor {
 	}
 
 	unregisterExternal(id: string): void {
+		const record = this.externalInstances.get(id)?.record;
+		const meta = record && paneMeta(record);
+		if (record?.sessionFile && meta) this.quitMeta.set(record.sessionFile, meta);
 		this.externalInstances.delete(id);
 		this.settleWait(id, "none");
 	}
@@ -170,8 +181,14 @@ export class ServerSupervisor {
 		const now = new Date().toISOString();
 		const previous = loadInstances().find((instance) => instance.sessionFile === options.sessionFile);
 		const tail = readSessionTail(options.sessionFile);
+		// Pinned or moved while its pane ran, newer than the row it may have had before. A pane that
+		// quits does not wait to unregister, so its row may still be listed.
+		const pane = [...this.externalInstances.values()].find((e) => e.record.sessionFile === options.sessionFile);
+		const meta = this.quitMeta.get(options.sessionFile) ?? (pane && paneMeta(pane.record));
+		this.quitMeta.delete(options.sessionFile);
 		const record: InstanceRecord = {
 			...previous,
+			...meta,
 			id: previous?.id ?? randomUUID(),
 			status: "stopped",
 			cwd: previous?.cwd ?? options.cwd,
