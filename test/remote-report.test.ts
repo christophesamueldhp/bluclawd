@@ -6,8 +6,8 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 import { PANE_ENV } from "../daemon/tmux.ts";
 import { projectTrust, TRUST_CHANGED } from "../ext/permissions/index.ts";
-import remoteFactory from "../ext/remote/index.ts";
-import { applyPaneMessage, buildReport, navigate } from "../ext/remote/report.ts";
+import remoteFactory, { USAGE } from "../ext/remote/index.ts";
+import { applyPaneMessage, buildReport, DRAFT_NOTICE, navigate } from "../ext/remote/report.ts";
 
 const model = (provider: string, id: string, name?: string, reasoning = false) => ({ provider, id, name, reasoning });
 /** The trust mode, without reading the developer's own settings. */
@@ -236,14 +236,18 @@ describe("thinking level and trust mode from the phone", () => {
 describe("tree, fork and clone from the phone", () => {
 	it("dispatches each as a /remote-control command, which pi runs without writing a message", () => {
 		const { ctx, pi } = fakes();
-		applyPaneMessage({ type: "tree", entryId: "1a2b3c4d" }, ctx as never, pi as never);
-		applyPaneMessage({ type: "fork", entryId: "1a2b3c4d" }, ctx as never, pi as never);
-		applyPaneMessage({ type: "clone" }, ctx as never, pi as never);
+		const dispatched = new Set<string>();
+		const reportAgain = () => {};
+		applyPaneMessage({ type: "tree", entryId: "1a2b3c4d" }, ctx as never, pi as never, reportAgain, dispatched);
+		applyPaneMessage({ type: "fork", entryId: "1a2b3c4d" }, ctx as never, pi as never, reportAgain, dispatched);
+		applyPaneMessage({ type: "clone" }, ctx as never, pi as never, reportAgain, dispatched);
 		expect(pi.sendUserMessage.mock.calls).toEqual([
 			["/remote-control tree 1a2b3c4d", { expandPromptTemplates: true }],
 			["/remote-control fork 1a2b3c4d", { expandPromptTemplates: true }],
 			["/remote-control clone", { expandPromptTemplates: true }],
 		]);
+		// What the command runs: the same line typed is not the phone's.
+		expect([...dispatched]).toEqual(["tree 1a2b3c4d", "fork 1a2b3c4d", "clone"]);
 	});
 
 	// Two extensions with the command make pi name them remote-control:1 and :2: the text would reach the model.
@@ -303,14 +307,17 @@ describe("navigate", () => {
 		]);
 	});
 
-	it("does not fork or clone over a draft in the pane's editor, which pi would replace", async () => {
+	it("does not fork or clone over a draft in the pane's editor, which pi would replace, and says why", async () => {
 		const ctx = command({ draft: "half a thought" });
-		expect(await navigate("fork aaaa0001", ctx as never)).toBe(true);
-		expect(await navigate("clone", ctx as never)).toBe(true);
+		const refuse = vi.fn();
+		expect(await navigate("fork aaaa0001", ctx as never, refuse)).toBe(true);
+		expect(await navigate("clone", ctx as never, refuse)).toBe(true);
 		expect(ctx.fork).not.toHaveBeenCalled();
+		expect(refuse.mock.calls).toEqual([[DRAFT_NOTICE], [DRAFT_NOTICE]]);
 		// pi fills only an empty editor on a tree move.
-		expect(await navigate("tree aaaa0002", ctx as never)).toBe(true);
+		expect(await navigate("tree aaaa0002", ctx as never, refuse)).toBe(true);
 		expect(ctx.navigateTree).toHaveBeenCalledTimes(1);
+		expect(refuse).toHaveBeenCalledTimes(2);
 	});
 
 	it("leaves anything else to the public subcommands", async () => {
@@ -357,13 +364,17 @@ describe("/remote-control", () => {
 		return handler;
 	}
 
-	it("shows the same usage for an unknown or malformed subcommand, internal ones included", async () => {
+	it("shows the same usage for an unknown or malformed subcommand, and for the phone's own typed by hand", async () => {
 		const handler = register();
-		for (const args of ["nope", "tree", "fork a b", "clone x"]) {
+		const navigateTree = vi.fn();
+		const fork = vi.fn();
+		for (const args of ["nope", "tree", "fork a b", "clone x", "clone", "tree aaaa0001", "fork aaaa0001"]) {
 			const notify = vi.fn();
-			await handler(args, { ui: { notify } });
-			expect(notify.mock.calls).toEqual([["Usage: /remote-control", "warning"]]);
+			await handler(args, { ui: { notify, getEditorText: () => "" }, navigateTree, fork });
+			expect(notify.mock.calls).toEqual([[USAGE, "warning"]]);
 		}
+		expect(navigateTree).not.toHaveBeenCalled();
+		expect(fork).not.toHaveBeenCalled();
 	});
 
 	it("reports at once when the daemon asks for it, as a restarted one does, and when the trust mode changes", async () => {
@@ -426,14 +437,57 @@ describe("/remote-control", () => {
 		live.mockRestore();
 	});
 
-	it("runs the phone's tree, fork and clone without a word to the user", async () => {
-		const handler = register();
-		const notify = vi.fn();
-		const navigateTree = vi.fn(async () => ({ cancelled: false }));
+	it("runs the phone's tree, fork and clone without a word to the user, and tells the phone why one did not", async () => {
+		const sent = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
+		const handlers = new Map<string, (event: unknown, ctx?: unknown) => void>();
+		let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
+		const { ctx: base, pi: fake } = fakes({ current: model("openai", "gpt-5") });
 		const entry = { type: "message", id: "aaaa0001", message: { role: "user", content: "hi" } };
-		const sessionManager = { getEntry: () => entry, getSessionFile: () => undefined, getLeafId: () => "aaaa0001" };
-		await handler("tree aaaa0001", { ui: { notify }, sessionManager, navigateTree });
-		expect(navigateTree).toHaveBeenCalledWith("aaaa0001");
-		expect(notify).not.toHaveBeenCalled();
+		let draft = "";
+		const ctx = {
+			...base,
+			mode: "tui",
+			sessionManager: {
+				...base.sessionManager,
+				getEntry: () => entry,
+				getSessionFile: () => undefined,
+				getLeafId: () => "aaaa0001",
+			},
+			navigateTree: vi.fn(async () => ({ cancelled: false })),
+			fork: vi.fn(async () => ({ cancelled: false })),
+			ui: { ...base.ui, getEditorText: () => draft },
+		};
+		const pi = {
+			...fake,
+			on: (name: string, handler: (event: unknown, ctx: unknown) => void) => handlers.set(name, handler),
+			events: { on: (name: string, handler: (data: unknown) => void) => handlers.set(name, handler) },
+			registerCommand: (_name: string, registered: { handler: typeof command }) => {
+				command = registered.handler;
+			},
+			// As pi does with expandPromptTemplates: the line runs the extension's command.
+			sendUserMessage: vi.fn((text: string) => void command?.(text.slice("/remote-control ".length), ctx)),
+		};
+		process.env[PANE_ENV] = "pi-nav";
+		try {
+			remoteFactory(pi as never);
+		} finally {
+			delete process.env[PANE_ENV];
+		}
+		handlers.get("session_start")?.({}, ctx);
+		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
+		handlers.get("bluclawd:pane-message")?.({ type: "tree", entryId: "aaaa0001" });
+		await vi.waitFor(() => expect(ctx.navigateTree).toHaveBeenCalledWith("aaaa0001"));
+		// A draft in the Mac's prompt: no fork, and the next report says why, that once.
+		draft = "half a thought";
+		handlers.get("bluclawd:pane-message")?.({ type: "fork", entryId: "aaaa0001" });
+		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(2));
+		expect(ctx.fork).not.toHaveBeenCalled();
+		expect(sent.mock.calls[1]![1]).toMatchObject({ notice: { text: DRAFT_NOTICE, at: expect.any(Number) } });
+		expect(sent.mock.calls[0]![1]).not.toHaveProperty("notice");
+		draft = "";
+		handlers.get("bluclawd:pane-message")?.({ type: "clone" });
+		await vi.waitFor(() => expect(ctx.fork).toHaveBeenCalledWith("aaaa0001", { position: "at" }));
+		expect(base.ui.notify).not.toHaveBeenCalled();
+		sent.mockRestore();
 	});
 });

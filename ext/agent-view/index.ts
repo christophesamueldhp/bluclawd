@@ -29,7 +29,13 @@ import { trustBadge } from "../_shared/trust-badge.ts";
 import { AgentView, EXIT_WORDS, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, handOffAfterExit } from "./hand-off.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
-import { deriveLabel, ForegroundActivity, SelfRegistration, type SelfSessionInfo } from "./self-registration.ts";
+import {
+	deriveLabel,
+	dialogDetail,
+	ForegroundActivity,
+	SelfRegistration,
+	type SelfSessionInfo,
+} from "./self-registration.ts";
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
@@ -101,6 +107,21 @@ export function exitAction(
 	if (!state.empty) return "pass";
 	if (!state.normal) return "detach";
 	return state.sincePrevious < EXIT_PRESS_MS ? "quit" : "first";
+}
+
+/**
+ * How another window's prompt reaches this pi: queued behind a turn in progress, and a slash
+ * command run as if typed here (an extension command, a skill, a prompt template). Not with
+ * images: pi runs an extension command with its text alone, and the images would be lost.
+ */
+export function promptOptions(
+	message: { text: string; images?: unknown[] },
+	idle: boolean,
+): { deliverAs?: "followUp"; expandPromptTemplates?: true } {
+	return {
+		...(idle ? {} : { deliverAs: "followUp" as const }),
+		...(!message.images?.length && message.text.startsWith("/") ? { expandPromptTemplates: true as const } : {}),
+	};
 }
 
 /** pi's ways to pick a session; a pane is given the one its launcher already picked. */
@@ -241,8 +262,10 @@ const agentView: InlineExtension = {
 				detail: row.detail,
 				turns: row.turns,
 				createdAt: row.createdAt,
+				finishedAt: row.finishedAt,
 				// Only once it differs: a heartbeat lags the file, whose last entry is otherwise the leaf.
 				leafId: leafId !== ctx.sessionManager.getEntries().at(-1)?.id ? leafId : undefined,
+				dialog: activity.current === "awaiting_input" ? activity.dialog : undefined,
 			};
 		};
 
@@ -264,13 +287,16 @@ const agentView: InlineExtension = {
 				sessionFile: ctx.sessionManager.getSessionFile(),
 				label: name?.trim() || (firstUser ? labelFromTask(firstUser) : undefined),
 				detail:
-					activity.current === "working" && liveDetail
+					dialogDetail(activity) ??
+					(activity.current === "working" && liveDetail
 						? liveDetail
 						: lastAssistant
 							? lastLine(textOf(lastAssistant.message.content))
-							: undefined,
+							: undefined),
 				turns: messages.some((e) => e.message.role === "assistant") ? 1 : 0,
 				createdAt: ctx.sessionManager.getHeader()?.timestamp,
+				// Its last entry's: once idle, when its last turn ended. Every heartbeat restates its lastSeenAt.
+				finishedAt: entries.at(-1)?.timestamp,
 				external: true,
 				pane,
 			};
@@ -284,6 +310,7 @@ const agentView: InlineExtension = {
 				cwd: ctx.sessionManager.getCwd(),
 				label: ctx.sessionManager.getSessionName() ?? selfRow(ctx).label,
 				sessionFile,
+				sessionId: ctx.sessionManager.getSessionId(),
 			};
 		};
 
@@ -327,7 +354,7 @@ const agentView: InlineExtension = {
 							...message.images.map((image) => ({ type: "image" as const, ...image })),
 						]
 					: message.text;
-				pi.sendUserMessage(content, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+				pi.sendUserMessage(content, promptOptions(message, ctx.isIdle()));
 			} else if (message.type === "abort") ctx.abort();
 			else if (message.type === "rename") pi.setSessionName(message.name);
 			// The rest are remote control's (ext/remote).
@@ -539,7 +566,7 @@ const agentView: InlineExtension = {
 			};
 		});
 
-		const track = (event: { type: string; kind?: string }): void => {
+		const track = (event: { type: string; kind?: string; title?: string }): void => {
 			const current = activity.apply(event);
 			registration?.setActivity(current);
 		};

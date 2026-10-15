@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { OrchestratorClient, PaneMessage, RegisterInput } from "../daemon/orchestrator-client.ts";
 import { piCommand } from "../daemon/tmux.ts";
-import { deriveLabel, ForegroundActivity, SelfRegistration } from "../ext/agent-view/self-registration.ts";
+import {
+	deriveLabel,
+	dialogDetail,
+	ForegroundActivity,
+	SelfRegistration,
+} from "../ext/agent-view/self-registration.ts";
 
 describe("ForegroundActivity (what the roster shows for THIS window)", () => {
 	it("starts idle, works during an agent run, and settles back to idle", () => {
@@ -35,6 +40,27 @@ describe("ForegroundActivity (what the roster shows for THIS window)", () => {
 	it("ignores unrelated events", () => {
 		const fg = new ForegroundActivity();
 		expect(fg.apply({ type: "tool_execution_start" })).toBe("idle");
+	});
+
+	it("keeps the dialog waited on, whose title the row's line shows, until it is answered", () => {
+		const fg = new ForegroundActivity();
+		fg.apply({ type: "agent_start" });
+		expect(dialogDetail(fg)).toBeUndefined();
+		fg.apply({ type: "ui_prompt_start", kind: "confirm", title: " Allow bash? " });
+		expect(fg.dialog).toEqual({ kind: "confirm", title: "Allow bash?" });
+		expect(dialogDetail(fg)).toBe("Waiting: Allow bash?");
+		fg.apply({ type: "ui_prompt_end", kind: "confirm", title: "Allow bash?" });
+		expect(fg.dialog).toBeUndefined();
+		expect(dialogDetail(fg)).toBeUndefined();
+		// No title: the kind alone, and the row keeps its own line.
+		fg.apply({ type: "ui_prompt_start", kind: "input" });
+		expect(fg.dialog).toEqual({ kind: "input" });
+		expect(dialogDetail(fg)).toBeUndefined();
+		fg.apply({ type: "agent_settled" });
+		expect(fg.dialog).toBeUndefined();
+		// A view is no dialog.
+		fg.apply({ type: "ui_prompt_start", kind: "custom", title: "Agents" });
+		expect(fg.dialog).toBeUndefined();
 	});
 });
 
@@ -94,6 +120,14 @@ describe("SelfRegistration heartbeats", () => {
 		const reg = new SelfRegistration(client, () => ({ cwd: "/p", leafId: "e7" }));
 		await reg.refresh();
 		expect(calls.at(-1)).toMatchObject({ leafId: "e7", launch: { command: piCommand() } });
+	});
+
+	it("tells the daemon when its last turn ended and the dialog it waits on", async () => {
+		const { client, calls } = fakeClient();
+		const dialog = { kind: "select", title: "Pick a model" };
+		const reg = new SelfRegistration(client, () => ({ cwd: "/p", finishedAt: "2026-10-15T10:00:00.000Z", dialog }));
+		await reg.refresh();
+		expect(calls.at(-1)).toMatchObject({ finishedAt: "2026-10-15T10:00:00.000Z", dialog });
 	});
 });
 

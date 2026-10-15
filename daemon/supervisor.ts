@@ -161,7 +161,7 @@ export class ServerSupervisor {
 	 * process: it resumes from its `.jsonl` when opened or replied to. A row the daemon already has
 	 * for that file is reused, so the session keeps its id, name and pin.
 	 */
-	saveInstance(options: { cwd: string; label?: string; sessionFile: string }): InstanceRecord {
+	saveInstance(options: { cwd: string; label?: string; sessionFile: string; sessionId?: string }): InstanceRecord {
 		const now = new Date().toISOString();
 		const previous = loadInstances().find((instance) => instance.sessionFile === options.sessionFile);
 		const tail = readSessionTail(options.sessionFile);
@@ -173,6 +173,7 @@ export class ServerSupervisor {
 			createdAt: previous?.createdAt ?? now,
 			lastSeenAt: now,
 			label: previous?.label ?? options.label,
+			sessionId: options.sessionId ?? previous?.sessionId,
 			sessionFile: options.sessionFile,
 			detail: tail?.detail ?? previous?.detail,
 			outcome: tail?.outcome ?? "stopped",

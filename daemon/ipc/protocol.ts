@@ -24,8 +24,12 @@ export interface RegisterRequest {
 		detail?: string;
 		turns?: number;
 		createdAt?: string;
+		/** When its session's last entry was written: once idle, when its last turn ended. */
+		finishedAt?: string;
 		/** The entry pi appends to next, when it is not the file's last entry (after a /tree). */
 		leafId?: string;
+		/** The dialog it waits on, while it does. */
+		dialog?: PaneDialog;
 		/** How to start another pi like this one, so the daemon can start panes. */
 		launch?: PaneLaunch;
 	};
@@ -33,6 +37,12 @@ export interface RegisterRequest {
 
 export interface PaneLaunch {
 	command: string[];
+}
+
+/** A blocking dialog in a pane's pi: pi's prompt kind (select, confirm, input, editor) and its title. */
+export interface PaneDialog {
+	kind: string;
+	title?: string;
 }
 
 /** An image a phone sends with a prompt, as pi takes it: base64 bytes and their type. */
@@ -103,6 +113,8 @@ export interface SaveRequest {
 	cwd: string;
 	label?: string;
 	sessionFile: string;
+	/** pi's session id, so the phone can follow the session to this row. */
+	sessionId?: string;
 }
 
 /** The reply a pane is streaming, while a phone has its session open. */
@@ -131,6 +143,8 @@ export interface PaneReport {
 	trust?: "always" | "ask" | "never";
 	context?: { tokens: number | null; contextWindow: number; percent: number | null };
 	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
+	/** What the pane could not do for the phone, only in the report sent right after; `at`: epoch ms. */
+	notice?: { text: string; at: number };
 }
 
 /** A pane's latest PaneReport, sent when it changes (session start, model, thinking level, turn end). */
@@ -191,6 +205,7 @@ export interface InstanceSummary {
 	sortOrder?: number;
 	pane?: string;
 	leafId?: string;
+	dialog?: PaneDialog;
 	/** A stored row a phone is resuming: its pane has not registered yet. */
 	resuming?: boolean;
 }

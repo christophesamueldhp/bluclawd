@@ -16,7 +16,7 @@ import { type ClaimResult, type RemoteStore, SECRET_PATTERN } from "./pairing.ts
 import { findSession, remoteSessions } from "./sessions.ts";
 import { launchUsable, type SessionSpec } from "./spawn.ts";
 import type { StatusLine } from "./statusline.ts";
-import { loadImage, loadTranscript } from "./transcript.ts";
+import { loadImage, loadOutput, loadTranscript } from "./transcript.ts";
 import { parseSubscription } from "./webpush.ts";
 
 export interface RemoteDeps {
@@ -33,6 +33,12 @@ export interface RemoteDeps {
 	resuming(storedId: string): boolean;
 	/** A running pane's latest report. */
 	report(sessionId: string): PaneReport | undefined;
+	/** Name a stored row; false when there is none by that id. A pane's pi names its own. */
+	renameInstance(sessionId: string, name: string): boolean;
+	/** Pin or unpin a row, a pane's or a stored one; false when there is none by that id. */
+	setPinned(sessionId: string, pinned: boolean): boolean;
+	/** Remove a row; its .jsonl stays on disk. */
+	deleteInstance(sessionId: string): boolean;
 	/** What the status adds to a report for a session's directory: git state and usage limits. */
 	statusLine?(cwd: string): Promise<StatusLine>;
 	/** Agent view's tmux server: what a pane shows, and keys typed into it. */
@@ -43,8 +49,8 @@ export interface RemoteDeps {
 export interface RemoteServer {
 	/** The port actually bound (differs from the requested one only for port 0). */
 	port: number;
-	/** The sessions a phone has open on its event stream. */
-	watching(): Set<string>;
+	/** The sessions a phone has open on its event stream, each with the ids of the devices that have it open. */
+	watching(): Map<string, Set<string>>;
 	/** Push a pane's reply in progress (null: finished) to the phones that have its session open. */
 	live(sessionId: string, live: LiveSnapshot | null): void;
 	/** Tell the phones that have this session open its report changed. */
@@ -84,6 +90,9 @@ const KEYS = new Set(["Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "
 /** One at a time: Escape and the key after it would reach pi as one Alt chord. */
 const KEYS_MAX = 1;
 const TEXT_MAX = 1024;
+const NAME_MAX = 100;
+/** Never in typed text or a name: a control character would be a keystroke, or a terminal escape in agent view. */
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 /** Against DNS rebinding: a page whose name resolves to 127.0.0.1 still sends its own name. Tailscale
  *  serve forwards the tailnet name; a loopback name is the Mac itself. */
 const HOST_PATTERN = /^(127\.0\.0\.1|localhost|\[::1\]|([a-z0-9-]+\.)+ts\.net)(:\d+)?$/i;
@@ -181,7 +190,7 @@ function keysIn(body: Record<string, unknown>): { keys: string[] } | { text: str
 		if (keys.every((key) => typeof key === "string" && KEYS.has(key))) return { keys };
 	}
 	if (keys === undefined && typeof text === "string" && text.length > 0 && text.length <= TEXT_MAX) {
-		if (!/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/.test(text)) return { text };
+		if (!CONTROL.test(text)) return { text };
 	}
 	throw new HttpError(400, "invalid_keys");
 }
@@ -266,7 +275,8 @@ async function handle(
 	if (!device) return json(res, 401, { error: "unauthorized" });
 
 	if (path === "/api/events" && req.method === "GET") {
-		events.add(res, url.searchParams.get("session") ?? undefined, () => deps.store.authenticate(token) !== undefined);
+		const session = url.searchParams.get("session") ?? undefined;
+		events.add(res, session, () => deps.store.authenticate(token) !== undefined, device.id);
 		return;
 	}
 	if (path === "/api/handoff" && req.method === "POST") {
@@ -322,6 +332,34 @@ async function handle(
 		);
 		return json(res, 200, { directories: [...new Set(sessions.map((s) => s.cwd))] });
 	}
+	if (path === "/api/models" && req.method === "GET") {
+		// What a new session can start with: the models the running panes offer.
+		const models = new Map<string, PaneReport["models"][number]>();
+		for (const instance of deps.listInstances()) {
+			if (!instance.external) continue;
+			for (const model of deps.report(instance.id)?.models ?? []) models.set(`${model.provider}/${model.id}`, model);
+		}
+		const sorted = [...models.values()].sort(
+			(a, b) => a.provider.localeCompare(b.provider) || (a.name ?? a.id).localeCompare(b.name ?? b.id),
+		);
+		return json(res, 200, { models: sorted });
+	}
+	const removingSession = /^\/api\/sessions\/([^/]+)$/.exec(path);
+	if (removingSession && req.method === "DELETE") {
+		let id: string;
+		try {
+			id = decodeURIComponent(removingSession[1]!);
+		} catch {
+			return json(res, 404, { error: "unknown_session" });
+		}
+		const session = findSession(deps.listInstances(), id);
+		if (!session) return json(res, 404, { error: "unknown_session" });
+		// A pane's row comes back with its next heartbeat: its pi has to quit first.
+		if (session.running) return json(res, 409, { error: "session_running" });
+		// Its row goes once the pane resuming it registers.
+		if (deps.resuming(id)) return json(res, 409, { error: "session_busy" });
+		return deps.deleteInstance(id) ? json(res, 200, { ok: true }) : json(res, 404, { error: "unknown_session" });
+	}
 
 	if (path === "/api/push/key" && req.method === "GET") {
 		// `subscribed`: a re-paired device keeps its notification permission but has no subscription here.
@@ -365,8 +403,24 @@ async function handle(
 		return;
 	}
 
+	// A tool result's whole output: the transcript cuts it to TEXT_MAX.
+	const output = /^\/api\/sessions\/([^/]+)\/messages\/([0-9a-f-]{8,36})\/output$/.exec(path);
+	if (output) {
+		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
+		let outputOf: string;
+		try {
+			outputOf = decodeURIComponent(output[1]);
+		} catch {
+			return json(res, 404, { error: "unknown_session" });
+		}
+		const session = findSession(deps.listInstances(), outputOf);
+		if (!session) return json(res, 404, { error: "unknown_session" });
+		const result = loadOutput(session.sessionFile, output[2], session.leafId);
+		return result ? json(res, 200, result) : json(res, 404, { error: "unknown_entry" });
+	}
+
 	const match =
-		/^\/api\/sessions\/([^/]+)\/(messages|status|screen|keys|prompt|abort|model|thinking|trust|compact|tree|fork|clone)$/.exec(
+		/^\/api\/sessions\/([^/]+)\/(messages|status|screen|keys|prompt|abort|model|thinking|trust|compact|tree|fork|clone|rename|pin)$/.exec(
 			path,
 		);
 	if (!match) return json(res, 404, { error: "not_found" });
@@ -423,7 +477,8 @@ async function handle(
 	const session = findSession(deps.listInstances(), id);
 	if (!session) return json(res, 409, { error: "session_not_running" });
 	// A pane from an older bluclawd sends no report, and would ignore what only a newer one runs.
-	if (action !== "prompt" && action !== "abort" && session.running && !deps.report(id)) {
+	const anyPane = action === "prompt" || action === "abort" || action === "rename" || action === "pin";
+	if (!anyPane && session.running && !deps.report(id)) {
 		return json(res, 409, { error: "pane_too_old" });
 	}
 	let message: PaneMessage;
@@ -487,6 +542,21 @@ async function handle(
 	} else if (action === "clone") {
 		if (session.running && session.busy) return json(res, 409, { error: "session_busy" });
 		message = { type: "clone" };
+	} else if (action === "rename") {
+		const name = typeof body.name === "string" ? body.name.trim() : "";
+		if (!name || name.length > NAME_MAX || CONTROL.test(name)) return json(res, 400, { error: "invalid_name" });
+		// A pane's pi names its session, as agent view's rename does; a stored row is the daemon's.
+		if (!session.running) {
+			return deps.renameInstance(id, name)
+				? json(res, 200, { ok: true })
+				: json(res, 404, { error: "unknown_session" });
+		}
+		message = { type: "rename", name };
+	} else if (action === "pin") {
+		if (typeof body.pinned !== "boolean") return json(res, 400, { error: "invalid_pinned" });
+		return deps.setPinned(id, body.pinned)
+			? json(res, 200, { ok: true })
+			: json(res, 404, { error: "unknown_session" });
 	} else {
 		message = { type: "abort" };
 	}

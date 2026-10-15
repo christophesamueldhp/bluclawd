@@ -35,6 +35,8 @@ export interface RemoteControlDeps {
 	listInstances(): InstanceSummary[];
 	send(sessionId: string, message: PaneMessage): boolean;
 	deleteInstance(sessionId: string): boolean;
+	renameInstance: RemoteDeps["renameInstance"];
+	setPinned: RemoteDeps["setPinned"];
 	statusLine?: RemoteDeps["statusLine"];
 	store?: RemoteStore;
 	tmux?: Tmux;
@@ -190,6 +192,9 @@ export class RemoteControl {
 					startSession: (spec, replaces) => this.startSession(spec, replaces),
 					resuming: (id) => this.resuming(id),
 					report: (id) => this.reports.get(id),
+					renameInstance: this.deps.renameInstance,
+					setPinned: this.deps.setPinned,
+					deleteInstance: this.deps.deleteInstance,
 					statusLine: this.deps.statusLine,
 					tmux: this.tmux,
 					webDir: this.deps.webDir ?? WEB_DIR,
@@ -221,7 +226,8 @@ export class RemoteControl {
 		await server?.close();
 	}
 
-	/** Pushes each session that stopped working to every subscribed device. */
+	/** Pushes each session that stopped working or needs input to every subscribed device that does
+	 *  not have it open: that one shows it already. */
 	private notify(): void {
 		// A throw from a timer reaches the daemon's uncaughtException handler, which shuts it down.
 		try {
@@ -231,9 +237,12 @@ export class RemoteControl {
 				return;
 			}
 			this.notifier ??= new Notifier();
-			for (const notification of this.notifier.observe(remoteSessions(this.deps.listInstances()))) {
+			const notifications = this.notifier.observe(remoteSessions(this.deps.listInstances()));
+			const watching = notifications.length ? this.server?.watching() : undefined;
+			for (const notification of notifications) {
 				const payload = JSON.stringify(notification);
 				for (const { id, push } of devices) {
+					if (watching?.get(notification.sessionId)?.has(id)) continue;
 					this.sendPush(push!, payload)
 						.then((result) => {
 							// Only that subscription: the device may have subscribed again meanwhile.

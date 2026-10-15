@@ -178,6 +178,9 @@ async function turnOff(client: OrchestratorClient, port: number, ctx: ExtensionC
 
 const PAIR = "Pair a new phone";
 const OFF = "Turn off remote control";
+export const USAGE =
+	"Usage: /remote-control, with no arguments: it turns remote control on, then offers a menu " +
+	"(pair a new phone, paired phones, start at login, turn off)";
 
 /** Once on, `/remote-control` asks what to do rather than turning off at a stray enter. */
 async function menu(client: OrchestratorClient, status: RemoteResult, ctx: ExtensionCommandContext): Promise<void> {
@@ -208,11 +211,14 @@ function factory(pi: ExtensionAPI): void {
 	/** The session's context, for the bus, whose events carry none. */
 	let session: ExtensionContext | undefined;
 	let watched = false;
-	const report = (ctx: ExtensionContext): void => {
+	/** The phone's tree, fork and clone sent as `/remote-control` and not yet run. */
+	const dispatched = new Set<string>();
+	/** `notice`: what the pane could not do for the phone, which this report alone carries. */
+	const report = (ctx: ExtensionContext, notice?: string): void => {
 		// As agent view registers: a `pi -p` run inside the pane must not report as the pane.
 		if (!pane || ctx.mode !== "tui") return;
 		session = ctx;
-		const next = buildReport(ctx, pi);
+		const next = { ...buildReport(ctx, pi), ...(notice ? { notice: { text: notice, at: Date.now() } } : {}) };
 		reports = reports.then(() => client.remoteReport(pane, next)).catch(() => {});
 	};
 	pi.on("session_start", (_event, ctx) => report(ctx));
@@ -222,7 +228,7 @@ function factory(pi: ExtensionAPI): void {
 	pi.on("session_compact", (_event, ctx) => report(ctx));
 	pi.events.on("bluclawd:pane-message", (message) => {
 		const ctx = session;
-		if (ctx) applyPaneMessage(message as PaneMessage, ctx, pi, () => report(ctx));
+		if (ctx) applyPaneMessage(message as PaneMessage, ctx, pi, () => report(ctx), dispatched);
 	});
 	pi.events.on("bluclawd:remote-watched", (data) => {
 		const opened = data === true && !watched;
@@ -251,12 +257,14 @@ function factory(pi: ExtensionAPI): void {
 	pi.registerCommand("remote-control", {
 		description: "Control your sessions from your phone",
 		handler: async (args, ctx) => {
-			// The phone's tree, fork and clone (report.ts), not offered to the user.
-			if (await navigate(args, ctx)) return;
-			// pair, devices and autostart: the menu's items, as the subcommands they were before it.
 			const sub = args.trim();
+			// The phone's tree, fork and clone (report.ts), not offered to the user: typed, they are not run.
+			// The session's own context reports, not the command's.
+			const refuse = (notice: string) => session && report(session, notice);
+			if (dispatched.delete(sub) && (await navigate(sub, ctx, refuse))) return;
+			// pair, devices and autostart: the menu's items, as the subcommands they were before it.
 			if (sub && sub !== "pair" && sub !== "devices" && sub !== "autostart") {
-				ctx.ui.notify("Usage: /remote-control", "warning");
+				ctx.ui.notify(USAGE, "warning");
 				return;
 			}
 			if (sub === "autostart") return await toggleStartAtLogin(ctx);

@@ -24,6 +24,22 @@ describe("notifier", () => {
 		expect(notifier.observe([session("a", "needs", "Allow bash?")])).toEqual([]);
 	});
 
+	it("notifies when an idle session comes to need input, but not when that answer settles it again", () => {
+		const notifier = new Notifier();
+		notifier.observe([session("a", "idle"), session("b", "done"), session("c", "needs")]);
+		expect(
+			notifier.observe([
+				session("a", "needs", "Waiting: Allow bash?"),
+				session("b", "needs"),
+				session("c", "needs"),
+			]),
+		).toEqual([
+			{ title: "task a", body: "Needs input — Waiting: Allow bash?", sessionId: "a" },
+			{ title: "task b", body: "Needs input", sessionId: "b" },
+		]);
+		expect(notifier.observe([session("a", "idle"), session("b", "done"), session("c", "idle")])).toEqual([]);
+	});
+
 	it("says Done, Failed or Needs input, with the detail when there is one", () => {
 		const notifier = new Notifier();
 		const ids = ["a", "b", "c", "d", "e"];

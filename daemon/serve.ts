@@ -30,6 +30,8 @@ export async function serve(): Promise<void> {
 		listInstances: listSummaries,
 		send: (id, message) => supervisor.sendExternal(id, message),
 		deleteInstance: (id) => supervisor.deleteInstance(id),
+		renameInstance: (id, name) => supervisor.renameInstance(id, name) !== undefined,
+		setPinned: (id, pinned) => supervisor.setInstanceMeta(id, { pinned }) !== undefined,
 		statusLine: statusLine(),
 	});
 	setRemoteControl(remote);

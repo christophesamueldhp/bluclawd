@@ -20,6 +20,8 @@ describe("remote control switch", () => {
 			listInstances: () => [],
 			send: () => true,
 			deleteInstance: () => false,
+			renameInstance: () => false,
+			setPinned: () => false,
 			webDir: dir,
 		});
 
@@ -171,6 +173,8 @@ describe("remote control switch", () => {
 				store: new RemoteStore(join(dir, "remote.json")),
 				listInstances: () => instances,
 				send: () => true,
+				renameInstance: () => false,
+				setPinned: () => false,
 				deleteInstance: (id) => {
 					deleted.push(id);
 					return true;
@@ -316,6 +320,8 @@ describe("remote control switch", () => {
 			listInstances: () => instances,
 			send: () => true,
 			deleteInstance: () => false,
+			renameInstance: () => false,
+			setPinned: () => false,
 			webDir: dir,
 		});
 		setRemoteControl(control);
@@ -378,6 +384,8 @@ describe("remote control switch", () => {
 			listInstances: () => instances,
 			send: () => true,
 			deleteInstance: () => false,
+			renameInstance: () => false,
+			setPinned: () => false,
 			webDir: dir,
 		});
 		const report = { models: [] };
@@ -412,6 +420,8 @@ describe("remote control switch", () => {
 			listInstances: () => [{ id: "pane-1", status: "online", cwd: "/p", external: true, activity: "idle" }],
 			send: () => true,
 			deleteInstance: () => false,
+			renameInstance: () => false,
+			setPinned: () => false,
 			statusLine: async (cwd) => (cwd === "/p" ? { git } : {}),
 			webDir: dir,
 		});
@@ -469,6 +479,8 @@ describe("remote control switch", () => {
 				listInstances: () => instances,
 				send: () => true,
 				deleteInstance: () => false,
+				renameInstance: () => false,
+				setPinned: () => false,
 				webDir: dir,
 				sendPush: async (push, payload) => {
 					pushes.push({ endpoint: push.endpoint, payload: JSON.parse(payload) });
@@ -502,6 +514,27 @@ describe("remote control switch", () => {
 				undefined,
 				undefined,
 			]);
+		});
+
+		it("pushes nothing to a device that has the session open, which shows it already", async () => {
+			const { code } = control.store.createCode();
+			const claimed = control.store.claim(code, "iPhone");
+			if (!("token" in claimed)) throw new Error(claimed.error);
+			const pad = pairDevice(control.store);
+			control.store.setPush(claimed.deviceId, subscription("https://web.push.apple.com/phone"));
+			control.store.setPush(pad, subscription("https://web.push.apple.com/pad"));
+			const on = await control.handle({ type: "remote", action: "on", port: 0 });
+			if (on.type !== "remote_result") throw new Error(on.error);
+			const controller = new AbortController();
+			const res = await fetch(`http://127.0.0.1:${on.port}/api/events?token=${claimed.token}&session=pane-1`, {
+				signal: controller.signal,
+			});
+			await res.body!.getReader().read();
+			await vi.advanceTimersByTimeAsync(1000);
+			instances = [pane("idle")];
+			await vi.advanceTimersByTimeAsync(1000);
+			expect(pushes.map((p) => p.endpoint)).toEqual(["https://web.push.apple.com/pad"]);
+			controller.abort();
 		});
 
 		it("keeps the subscription a device made after the one the push service said is gone", async () => {

@@ -1,8 +1,16 @@
 // test/remote-transcript.test.ts
-import { describe, expect, it } from "vitest";
+import { appendFileSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	activeBranch,
+	DIFF_MAX,
 	imageFrom,
+	loadImage,
+	loadOutput,
+	loadTranscript,
+	OUTPUT_MAX,
 	parseEntries,
 	TEXT_MAX,
 	toolSummary,
@@ -222,5 +230,93 @@ describe("remote transcript", () => {
 		const text = jsonl(msg("a", "b", { role: "user", content: "a" }), msg("b", "a", { role: "user", content: "b" }));
 		expect(transcriptFrom(text, 50).map((m) => m.id)).toEqual(["a", "b"]);
 		expect(transcriptFrom(text, 0)).toEqual([]);
+	});
+
+	it("keeps an edit's diff, cut to 16 KB, and none for a result without one", () => {
+		const edit = (id: string, diff: unknown) =>
+			msg(id, null, {
+				role: "toolResult",
+				toolCallId: "c",
+				toolName: "edit",
+				content: [{ type: "text", text: "Successfully replaced 1 block(s) in a.ts." }],
+				details: { diff },
+			});
+		const diff = "- old\n+ new";
+		expect(transcriptFrom(jsonl(edit("r1", diff)), 50)[0]).toMatchObject({
+			text: "Successfully replaced 1 block(s) in a.ts.",
+			diff,
+			diffTruncated: false,
+		});
+		const long = transcriptFrom(jsonl(edit("r1", "+".repeat(DIFF_MAX + 5))), 50)[0] as { diff: string };
+		expect(long).toMatchObject({ diffTruncated: true });
+		expect(long.diff).toHaveLength(DIFF_MAX + 1);
+		for (const none of [undefined, "", 42]) {
+			expect(transcriptFrom(jsonl(edit("r1", none)), 50)[0]).not.toHaveProperty("diff");
+		}
+	});
+
+	describe("reading the file", () => {
+		let dir: string;
+		beforeEach(() => {
+			dir = mkdtempSync(join(tmpdir(), "bluclawd-transcript-"));
+		});
+		afterEach(() => rmSync(dir, { recursive: true, force: true }));
+		const user = (id: string, parentId: string | null, content: string) =>
+			`${JSON.stringify(msg(id, parentId, { role: "user", content }))}\n`;
+		const at = new Date("2026-10-15T10:00:00Z");
+
+		it("parses a file again only once its size or mtime changes", () => {
+			const file = join(dir, "s.jsonl");
+			writeFileSync(file, user("u1", null, "aaaa"));
+			utimesSync(file, at, at);
+			expect(loadTranscript(file, 50)).toMatchObject([{ id: "u1", text: "aaaa" }]);
+			// Same size and mtime: the entries parsed before.
+			writeFileSync(file, user("u1", null, "bbbb"));
+			utimesSync(file, at, at);
+			expect(loadTranscript(file, 50)).toMatchObject([{ id: "u1", text: "aaaa" }]);
+			// An entry appended: parsed again, for every reader.
+			appendFileSync(file, user("u2", "u1", "more"));
+			expect(loadTranscript(file, 50).map((m) => [m.id, m.text])).toEqual([
+				["u1", "bbbb"],
+				["u2", "more"],
+			]);
+			expect(loadImage(file, "u2", 0)).toBeUndefined();
+		});
+
+		it("keeps the eight files read last", () => {
+			const files = Array.from({ length: 9 }, (_, i) => join(dir, `s${i}.jsonl`));
+			for (const file of files) {
+				writeFileSync(file, user("u1", null, "aaaa"));
+				utimesSync(file, at, at);
+				loadTranscript(file, 50);
+			}
+			for (const file of files) {
+				writeFileSync(file, user("u1", null, "bbbb"));
+				utimesSync(file, at, at);
+			}
+			// The first was dropped for the ninth; reading it drops the second.
+			expect(loadTranscript(files[0], 50)[0]).toMatchObject({ text: "bbbb" });
+			expect(loadTranscript(files[2], 50)[0]).toMatchObject({ text: "aaaa" });
+			expect(loadTranscript(files[1], 50)[0]).toMatchObject({ text: "bbbb" });
+		});
+
+		it("gives a tool result's whole output, up to 256 KB, on the active branch only", () => {
+			const file = join(dir, "s.jsonl");
+			const result = (id: string, parentId: string, text: string) =>
+				`${JSON.stringify(msg(id, parentId, { role: "toolResult", toolCallId: "c", toolName: "bash", content: [{ type: "text", text }] }))}\n`;
+			writeFileSync(
+				file,
+				user("u1", null, "go") +
+					result("r1", "u1", "x".repeat(TEXT_MAX * 2)) +
+					result("r2", "r1", "y".repeat(OUTPUT_MAX + 3)) +
+					user("u9", "u1", "elsewhere"),
+			);
+			expect(loadOutput(file, "r1", "r2")).toEqual({ text: "x".repeat(TEXT_MAX * 2), truncated: false });
+			expect(loadOutput(file, "r2", "r2")).toEqual({ text: `${"y".repeat(OUTPUT_MAX)}…`, truncated: true });
+			expect(loadOutput(file, "u1", "r2")).toBeUndefined();
+			expect(loadOutput(file, "r1")).toBeUndefined();
+			expect(loadOutput(join(dir, "missing.jsonl"), "r1")).toBeUndefined();
+			expect(loadOutput(undefined, "r1")).toBeUndefined();
+		});
 	});
 });

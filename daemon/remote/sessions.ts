@@ -24,6 +24,10 @@ export interface RemoteSession {
 	detail: string;
 	createdAt?: string;
 	finishedAt?: string;
+	/** pi's session id: the same session under another row id, once it quits on the Mac or resumes. */
+	sessionId?: string;
+	/** While it needs input: the dialog it waits on. */
+	dialog?: { kind: string; title?: string };
 }
 
 function sessionRows(instances: InstanceSummary[]): AgentRow[] {
@@ -46,6 +50,8 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 				detail: row.detail,
 				createdAt: row.createdAt,
 				finishedAt: row.finishedAt,
+				sessionId: row.sessionId,
+				...(row.dialog ? { dialog: row.dialog } : {}),
 			});
 		}
 	}

@@ -7,7 +7,7 @@ import { ServerSupervisor } from "../daemon/supervisor.ts";
 import { HIDE_ENV, OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../daemon/tmux.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
-import { isBlankPane, paneArgs, shutdownPlan } from "../ext/agent-view/index.ts";
+import { isBlankPane, paneArgs, promptOptions, shutdownPlan } from "../ext/agent-view/index.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
 
 const plainTheme = {
@@ -505,6 +505,18 @@ describe("paneArgs", () => {
 			"-c",
 		]);
 		expect(paneArgs(["-r"], undefined)).toEqual(["-r"]);
+	});
+});
+
+describe("promptOptions", () => {
+	it("runs a phone's slash command as typed on the Mac, and queues a prompt behind a turn", () => {
+		expect(promptOptions({ text: "/skill:review the diff" }, true)).toEqual({ expandPromptTemplates: true });
+		expect(promptOptions({ text: "/fix" }, false)).toEqual({ deliverAs: "followUp", expandPromptTemplates: true });
+		expect(promptOptions({ text: "fix /tmp/a" }, true)).toEqual({});
+		expect(promptOptions({ text: " /fix" }, false)).toEqual({ deliverAs: "followUp" });
+		// pi would run an extension command with its text alone: the images go as a plain message.
+		expect(promptOptions({ text: "/fix", images: [{}] }, true)).toEqual({});
+		expect(promptOptions({ text: "/fix", images: [] }, true)).toEqual({ expandPromptTemplates: true });
 	});
 });
 
