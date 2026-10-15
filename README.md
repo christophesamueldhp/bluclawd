@@ -171,8 +171,8 @@ Once remote control is on, `/remote-control` shows a menu:
 - **Turn off remote control**, once confirmed. It leaves `tailscale serve` in place;
   `tailscale serve --https=443 off` removes it.
 
-On the phone, ⋯ in the Sessions header opens its own Paired phones list, which marks this phone:
-Remove there asks first, and removing this phone signs it out.
+The Mac is the root: a phone can disconnect only itself (which signs it out), never another;
+removing the others is `/remote-control`'s Paired phones.
 
 Started at login, the daemon runs the node and pi that last ran `/remote-control`: after moving
 either, as a node upgrade does, running `/remote-control` points it at the new ones for the next

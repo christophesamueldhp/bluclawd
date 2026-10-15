@@ -324,20 +324,22 @@ describe("remote HTTP API", () => {
 			});
 		});
 
-		it("removes one, this device too, which can then do nothing", async () => {
+		it("lets a phone disconnect only itself, which can then do nothing: the Mac removes the others", async () => {
 			const phone = await pair();
 			const pad = await pair();
 			const [phoneId, padId] = store.load().devices.map((d) => d.id);
 			const remove = (token: string, id: string) =>
 				fetch(`${base}/api/devices/${encodeURIComponent(id!)}`, { method: "DELETE", headers: auth(token) });
 			expect((await fetch(`${base}/api/devices/${padId}`, { method: "DELETE" })).status).toBe(401);
-			expect((await remove(phone, padId!)).status).toBe(200);
-			expect((await fetch(`${base}/api/sessions`, { headers: auth(pad) })).status).toBe(401);
-			expect((await remove(phone, padId!)).status).toBe(404);
-			expect((await remove(phone, "%")).status).toBe(404);
+			const refused = await remove(phone, padId!);
+			expect(refused.status).toBe(403);
+			expect(await refused.json()).toEqual({ error: "forbidden" });
+			expect((await remove(phone, "unknown")).status).toBe(403);
+			expect((await fetch(`${base}/api/devices/%`, { method: "DELETE", headers: auth(phone) })).status).toBe(404);
+			expect((await fetch(`${base}/api/sessions`, { headers: auth(pad) })).status).toBe(200);
 			expect((await remove(phone, phoneId!)).status).toBe(200);
 			expect((await fetch(`${base}/api/sessions`, { headers: auth(phone) })).status).toBe(401);
-			expect(store.load().devices).toEqual([]);
+			expect(store.load().devices.map((d) => d.id)).toEqual([padId]);
 		});
 	});
 

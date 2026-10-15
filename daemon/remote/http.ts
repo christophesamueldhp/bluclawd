@@ -300,6 +300,8 @@ async function handle(
 		} catch {
 			return json(res, 404, { error: "unknown_device" });
 		}
+		// The Mac is the root: a phone disconnects only itself; /remote-control removes the others.
+		if (id !== device.id) return json(res, 403, { error: "forbidden" });
 		return deps.store.revoke(id) ? json(res, 200, { ok: true }) : json(res, 404, { error: "unknown_device" });
 	}
 	if (path === "/api/sessions" && req.method === "GET") {
