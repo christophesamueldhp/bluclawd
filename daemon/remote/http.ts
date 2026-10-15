@@ -21,6 +21,7 @@ import {
 import { Tmux } from "../tmux.ts";
 import { RemoteEvents } from "./events.ts";
 import { type ClaimResult, type RemoteStore, SECRET_PATTERN } from "./pairing.ts";
+import type { StatuslineSession, StatusSpan } from "./pistatusline.ts";
 import { findSession, remoteSessions } from "./sessions.ts";
 import { launchUsable, type SessionSpec } from "./spawn.ts";
 import type { StatusLine } from "./statusline.ts";
@@ -49,6 +50,8 @@ export interface RemoteDeps {
 	deleteInstance(sessionId: string): boolean;
 	/** What the status adds to a report for a session's directory: git state and usage limits. */
 	statusLine?(cwd: string): Promise<StatusLine>;
+	/** The pane's pistatusline rendered at `cols` columns, as styled spans per line. */
+	renderStatusline?(session: StatuslineSession, report: PaneReport, cols: number): Promise<StatusSpan[][] | undefined>;
 	/** Agent view's tmux server: what a pane shows, and keys typed into it. */
 	tmux: Pick<Tmux, "screen" | "sendKeys" | "sendText">;
 	webDir: string;
@@ -101,6 +104,9 @@ const KEYS = new Set(["Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "
 const KEYS_MAX = 1;
 const TEXT_MAX = 1024;
 const NAME_MAX = 100;
+/** The widths a phone may ask the status line for. */
+const COLS_MIN = 20;
+const COLS_MAX = 200;
 /** A task's output tail, as /tasks' detail view reads it. */
 const TAIL_BYTES = 8192;
 const TAIL_LINES = 10;
@@ -515,12 +521,21 @@ async function handle(
 		const report = found.running ? deps.report(id) : undefined;
 		if (!report) return json(res, 404, { error: "no_status" });
 		// Fetched again after every report: the commands, which rarely change, have their own route.
-		const { commands: _commands, tasks, ...shown } = report;
+		const { commands: _commands, pistatusline: _paths, tasks, ...shown } = report;
 		// A task's output file stays here: the phone asks for its tail.
 		const listed = tasks?.map(({ outputFile, ...task }) => ({ ...task, ...(outputFile ? { output: true } : {}) }));
-		return json(res, 200, {
-			report: { ...shown, ...(listed ? { tasks: listed } : {}), ...(await deps.statusLine?.(found.cwd)) },
-		});
+		// pistatusline's own lines at the phone's width, which show git and the usage limits themselves.
+		const cols = /^\d{1,3}$/.test(url.searchParams.get("cols") ?? "") ? Number(url.searchParams.get("cols")) : 0;
+		const pane = cols ? deps.listInstances().find((i) => i.id === id && i.external) : undefined;
+		const lines =
+			pane &&
+			(await deps.renderStatusline?.(
+				{ ...found, id, createdAt: pane.createdAt, sessionId: pane.sessionId },
+				report,
+				Math.min(Math.max(cols, COLS_MIN), COLS_MAX),
+			));
+		const extra = lines ? { statusline: { lines } } : await deps.statusLine?.(found.cwd);
+		return json(res, 200, { report: { ...shown, ...(listed ? { tasks: listed } : {}), ...extra } });
 	}
 	if (action === "commands") {
 		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });

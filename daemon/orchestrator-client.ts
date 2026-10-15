@@ -79,6 +79,7 @@ export interface PaneReport {
 	notice?: { text: string; at: number };
 	commands?: PaneCommand[];
 	tasks?: PaneTask[];
+	pistatusline?: { worker: string; config: string };
 }
 
 /** Mirror of daemon/ipc/protocol.ts PaneTask. */

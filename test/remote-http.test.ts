@@ -38,6 +38,7 @@ describe("remote HTTP API", () => {
 	let tmuxFails: boolean;
 	let statusExtra: StatusLine;
 	let statusCwds: string[];
+	let renders: Array<{ id: string; cwd: string; cols: number }>;
 	let changed: unknown[][];
 
 	beforeEach(async () => {
@@ -71,6 +72,7 @@ describe("remote HTTP API", () => {
 		tmuxFails = false;
 		statusExtra = {};
 		statusCwds = [];
+		renders = [];
 		changed = [];
 		// As Tmux throws: tmux's own complaint on stderr.
 		const reach = (pane: string) => {
@@ -114,6 +116,10 @@ describe("remote HTTP API", () => {
 				statusLine: async (cwd) => {
 					statusCwds.push(cwd);
 					return statusExtra;
+				},
+				renderStatusline: async (session, report, cols) => {
+					renders.push({ id: session.id, cwd: session.cwd, cols });
+					return report.pistatusline ? [[{ text: `${cols} columns`, bold: true }]] : undefined;
 				},
 				tmux: {
 					// All of it: a main-screen pane gives its history and the visible screen too.
@@ -671,6 +677,35 @@ describe("remote HTTP API", () => {
 			const res = await fetch(`${base}/api/sessions/live/status`, { headers: auth(token) });
 			expect(await res.json()).toEqual({ report: { ...report, ...statusExtra } });
 			expect(statusCwds).toEqual(["/p"]);
+		});
+
+		it("draws the pane's pistatusline at the width the phone asks for, in place of the git state and limits", async () => {
+			const paths = { worker: "/pi/dist/render-worker.js", config: "/agent/pistatusline/settings.json" };
+			reports.set("live", { ...report, pistatusline: paths });
+			statusExtra = { git: { branch: "main", added: 0, removed: 0 } };
+			const token = await pair();
+			const status = async (query: string) =>
+				(await (await fetch(`${base}/api/sessions/live/status${query}`, { headers: auth(token) })).json()) as {
+					report: Record<string, unknown>;
+				};
+			expect((await status("?cols=52")).report).toEqual({
+				...report,
+				statusline: { lines: [[{ text: "52 columns", bold: true }]] },
+			});
+			expect(renders).toEqual([{ id: "live", cwd: "/p", cols: 52 }]);
+			expect(statusCwds).toEqual([]);
+			// Kept to what a phone may ask for; no width, or none that parses, is the plain status.
+			expect((await status("?cols=999")).report.statusline).toEqual({
+				lines: [[{ text: "200 columns", bold: true }]],
+			});
+			expect((await status("?cols=5")).report.statusline).toEqual({ lines: [[{ text: "20 columns", bold: true }]] });
+			for (const query of ["", "?cols=wide", "?cols=-1"]) {
+				expect((await status(query)).report).toEqual({ ...report, ...statusExtra });
+			}
+			expect(renders).toHaveLength(3);
+			// A pane without pistatusline, or one it could not render: the git state and limits as before.
+			reports.set("live", report);
+			expect((await status("?cols=52")).report).toEqual({ ...report, ...statusExtra });
 		});
 
 		const post = async (token: string, id: string, action: string, body: unknown) => {

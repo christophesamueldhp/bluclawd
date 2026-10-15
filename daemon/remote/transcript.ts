@@ -67,10 +67,19 @@ interface Part {
 	mimeType?: string;
 }
 
-interface Entry {
+/** A token count as pi stores one, on an assistant message or a summary. */
+export interface EntryUsage {
+	input?: number;
+	output?: number;
+	cacheRead?: number;
+	cacheWrite?: number;
+}
+
+export interface Entry {
 	type?: string;
 	id?: string;
 	parentId?: string | null;
+	timestamp?: string;
 	message?: {
 		role?: string;
 		content?: unknown;
@@ -81,9 +90,13 @@ interface Entry {
 		errorMessage?: string;
 		command?: string;
 		details?: { diff?: unknown };
+		usage?: EntryUsage;
 	};
 	content?: unknown;
 	display?: boolean;
+	/** A compaction's, a branch summary's or a usage entry's. */
+	usage?: EntryUsage;
+	tokensBefore?: number;
 }
 
 export function parseEntries(text: string): Entry[] {
@@ -292,6 +305,16 @@ export function loadImage(
 		return imageOf(entriesOf(sessionFile), entryId, index, leafId);
 	} catch {
 		return undefined;
+	}
+}
+
+/** The active branch's entries, as pi's getBranch() gives them; none when the file cannot be read. */
+export function loadBranch(sessionFile: string | undefined, leafId?: string): Entry[] {
+	if (!sessionFile) return [];
+	try {
+		return activeBranch(entriesOf(sessionFile), leafId);
+	} catch {
+		return [];
 	}
 }
 

@@ -38,6 +38,7 @@ export interface RemoteControlDeps {
 	renameInstance: RemoteDeps["renameInstance"];
 	setPinned: RemoteDeps["setPinned"];
 	statusLine?: RemoteDeps["statusLine"];
+	renderStatusline?: RemoteDeps["renderStatusline"];
 	store?: RemoteStore;
 	tmux?: Tmux;
 	webDir?: string;
@@ -196,6 +197,7 @@ export class RemoteControl {
 					setPinned: this.deps.setPinned,
 					deleteInstance: this.deps.deleteInstance,
 					statusLine: this.deps.statusLine,
+					renderStatusline: this.deps.renderStatusline,
 					tmux: this.tmux,
 					webDir: this.deps.webDir ?? WEB_DIR,
 				},

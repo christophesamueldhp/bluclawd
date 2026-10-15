@@ -157,6 +157,9 @@ export interface PaneReport {
 	/** Its running background tasks, as /tasks lists them: shells, monitors, then subagent runs, newest
 	 *  first in each; at most 20. */
 	tasks?: PaneTask[];
+	/** Where the pane's pistatusline is (its render worker and settings), when it draws pi's footer:
+	 *  the daemon renders its lines for the phone with it. */
+	pistatusline?: { worker: string; config: string };
 }
 
 /** A background task: a shell, a monitor or a subagent run, or the model's bash past 2s in the

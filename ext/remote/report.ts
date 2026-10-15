@@ -3,9 +3,15 @@
  * thinking level, context, session usage, trust mode, slash commands and background tasks), and
  * the phone's actions run in the pane.
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { getSupportedThinkingLevels, type ModelThinkingLevel, type Usage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	type ExtensionContext,
+	getAgentDir,
+} from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { PHONE_REFUSED_COMMANDS } from "../../daemon/ipc/protocol.ts";
 import type { PaneCommand, PaneMessage, PaneReport, PaneTask } from "../../daemon/orchestrator-client.ts";
@@ -32,6 +38,29 @@ const TASK_LABEL_MAX = 200;
 const TASKS_SETTLE_MS = 250;
 
 const capped = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+
+/**
+ * Where pistatusline is, when it draws this pi's footer: its render worker beside its extension
+ * (the file its /pistatusline command comes from) and its settings, for the daemon to render its
+ * lines for the phone. Undefined without it, or with it turned off.
+ */
+export function pistatuslinePaths(
+	pi: Pick<ExtensionAPI, "getCommands">,
+	agentDir: string = getAgentDir(),
+): PaneReport["pistatusline"] {
+	const extension = pi.getCommands().find((c) => c.name === "pistatusline" && c.source === "extension")
+		?.sourceInfo?.path;
+	if (!extension || !isAbsolute(extension)) return undefined;
+	const worker = join(dirname(extension), "render-worker.js");
+	const dir = join(agentDir, "pistatusline");
+	let enabled = true;
+	try {
+		enabled = (JSON.parse(readFileSync(join(dir, "state.json"), "utf8")) as { enabled?: unknown }).enabled !== false;
+	} catch {
+		// no state yet: on, as pistatusline starts
+	}
+	return enabled && existsSync(worker) ? { worker, config: join(dir, "settings.json") } : undefined;
+}
 
 /** The session's running background tasks, as /tasks lists them. */
 export function paneTasks(owner: string | undefined): PaneTask[] {
