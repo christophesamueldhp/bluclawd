@@ -1,4 +1,5 @@
-/** Which session changes are worth a push: one that stops working, by finishing or by needing an answer. */
+/** Which session changes are worth a push: one that stops working, by finishing or by needing an
+ *  answer, and one that comes to need an answer from idle too. */
 import type { RowState } from "../rows.ts";
 import type { RemoteSession } from "./sessions.ts";
 
@@ -29,7 +30,9 @@ export class Notifier {
 		for (const session of sessions) {
 			seen.set(session.id, session.state);
 			const word = WORDS[session.state];
-			if (this.last.get(session.id) !== "working" || !word) continue;
+			const was = this.last.get(session.id);
+			const asks = session.state === "needs" && was !== undefined && was !== "needs";
+			if (!word || (was !== "working" && !asks)) continue;
 			const body = session.detail ? `${word} — ${session.detail}` : word;
 			notifications.push({
 				title: capped(session.label, TITLE_MAX),

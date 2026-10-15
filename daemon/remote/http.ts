@@ -49,8 +49,8 @@ export interface RemoteDeps {
 export interface RemoteServer {
 	/** The port actually bound (differs from the requested one only for port 0). */
 	port: number;
-	/** The sessions a phone has open on its event stream. */
-	watching(): Set<string>;
+	/** The sessions a phone has open on its event stream, each with the ids of the devices that have it open. */
+	watching(): Map<string, Set<string>>;
 	/** Push a pane's reply in progress (null: finished) to the phones that have its session open. */
 	live(sessionId: string, live: LiveSnapshot | null): void;
 	/** Tell the phones that have this session open its report changed. */
@@ -275,7 +275,8 @@ async function handle(
 	if (!device) return json(res, 401, { error: "unauthorized" });
 
 	if (path === "/api/events" && req.method === "GET") {
-		events.add(res, url.searchParams.get("session") ?? undefined, () => deps.store.authenticate(token) !== undefined);
+		const session = url.searchParams.get("session") ?? undefined;
+		events.add(res, session, () => deps.store.authenticate(token) !== undefined, device.id);
 		return;
 	}
 	if (path === "/api/handoff" && req.method === "POST") {

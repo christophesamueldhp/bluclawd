@@ -24,6 +24,7 @@ interface Client {
 	sessionId?: string;
 	messagesSignature?: string;
 	isAuthorized: () => boolean;
+	deviceId?: string;
 }
 
 const INTERVAL_MS = 1000;
@@ -60,8 +61,9 @@ export class RemoteEvents {
 	/**
 	 * `sessionId`: the session the client has open, whose file it is told about.
 	 * `isAuthorized`: checked every tick; a client that fails it is disconnected.
+	 * `deviceId`: the paired device whose stream it is.
 	 */
-	add(res: ServerResponse, sessionId?: string, isAuthorized: () => boolean = () => true): void {
+	add(res: ServerResponse, sessionId?: string, isAuthorized: () => boolean = () => true, deviceId?: string): void {
 		res.writeHead(200, {
 			"content-type": "text/event-stream",
 			"cache-control": "no-store",
@@ -72,6 +74,7 @@ export class RemoteEvents {
 			res,
 			sessionId,
 			isAuthorized,
+			deviceId,
 			messagesSignature: sessionId ? this.messagesSignature(sessionId) : undefined,
 		};
 		this.clients.add(client);
@@ -88,11 +91,16 @@ export class RemoteEvents {
 		}
 	}
 
-	/** The sessions some client has open. */
-	watching(): Set<string> {
-		const ids = new Set<string>();
-		for (const client of this.clients) if (client.sessionId) ids.add(client.sessionId);
-		return ids;
+	/** The sessions some client has open, each with the devices that have it open. */
+	watching(): Map<string, Set<string>> {
+		const watched = new Map<string, Set<string>>();
+		for (const client of this.clients) {
+			if (!client.sessionId) continue;
+			const devices = watched.get(client.sessionId) ?? new Set<string>();
+			if (client.deviceId) devices.add(client.deviceId);
+			watched.set(client.sessionId, devices);
+		}
+		return watched;
 	}
 
 	/**
