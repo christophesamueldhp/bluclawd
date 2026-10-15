@@ -66,7 +66,8 @@ export function buildReport(
  *  Tree, fork and clone need a command's context, so they run as `/remote-control`, which pi
  *  executes without writing anything to the session. The phone shows a compact until the pane
  *  reports again: `reportAgain` does when one is skipped or fails, which pi reports nothing for,
- *  and for a thinking level pi does not change to, so the phone's picker goes back. */
+ *  and for a thinking level pi does not change to, so the phone's picker goes back. `dispatched`:
+ *  the `/remote-control` arguments sent and not yet run, which the command runs only as these. */
 export function applyPaneMessage(
 	message: PaneMessage,
 	ctx: ExtensionContext,
@@ -75,6 +76,7 @@ export function applyPaneMessage(
 		"setModel" | "sendUserMessage" | "getCommands" | "getThinkingLevel" | "setThinkingLevel" | "events"
 	>,
 	reportAgain: () => void = () => {},
+	dispatched: Set<string> = new Set(),
 ): void {
 	if (message.type === "set_model") {
 		const model = ctx.modelRegistry.find(message.provider, message.id);
@@ -96,17 +98,25 @@ export function applyPaneMessage(
 		// line would then reach the model as a prompt.
 		if (!pi.getCommands().some((c) => c.name === "remote-control" && c.source === "extension")) return;
 		const args = message.type === "clone" ? "clone" : `${message.type} ${message.entryId}`;
+		dispatched.add(args);
 		pi.sendUserMessage(`/remote-control ${args}`, { expandPromptTemplates: true });
 	}
 }
+
+/** Why a fork or clone did not happen, for the phone to say. */
+export const DRAFT_NOTICE = "Clear the unsent text in the session's prompt on the Mac and retry";
 
 /**
  * `/remote-control tree <entryId>`, `fork <entryId>` and `clone`, as the phone dispatches them;
  * false for anything else. An entry pi would refuse is skipped here, since a fork that throws
  * ends the pane's pi; so is a fork or clone over a draft in the pane's editor, which pi replaces
- * with the forked message (the phone gives up waiting and says the session did not move).
+ * with the forked message: `refuse` tells the phone why.
  */
-export async function navigate(args: string, ctx: ExtensionCommandContext): Promise<boolean> {
+export async function navigate(
+	args: string,
+	ctx: ExtensionCommandContext,
+	refuse: (notice: string) => void = () => {},
+): Promise<boolean> {
 	const words = args.trim().split(/\s+/);
 	const [sub, entryId = ""] = words;
 	if (words.length !== (sub === "clone" ? 1 : sub === "tree" || sub === "fork" ? 2 : 0)) return false;
@@ -116,7 +126,11 @@ export async function navigate(args: string, ctx: ExtensionCommandContext): Prom
 		return true;
 	}
 	const file = sessions.getSessionFile();
-	if ((file && !existsSync(file)) || ctx.ui.getEditorText().trim()) return true;
+	if (file && !existsSync(file)) return true;
+	if (ctx.ui.getEditorText().trim()) {
+		refuse(DRAFT_NOTICE);
+		return true;
+	}
 	if (sub === "clone") {
 		const leaf = sessions.getLeafId();
 		if (leaf) await ctx.fork(leaf, { position: "at" });

@@ -9,7 +9,7 @@ import {
 	type RemoteResult,
 } from "../daemon/orchestrator-client.ts";
 import { type AutostartDeps, autostartDeps, LABEL } from "../ext/remote/autostart.ts";
-import remoteFactory from "../ext/remote/index.ts";
+import remoteFactory, { USAGE } from "../ext/remote/index.ts";
 import { qrMatrix, renderQr } from "../ext/remote/qr.ts";
 import { serve, tailscaleInfo } from "../ext/remote/tailscale.ts";
 
@@ -259,6 +259,6 @@ describe("/remote-control", () => {
 		expect(existsSync(join(deps.dir, `${LABEL}.plist`))).toBe(true);
 		const usage = run("nope");
 		await usage.done;
-		expect(usage.ui.notify.mock.calls).toEqual([["Usage: /remote-control", "warning"]]);
+		expect(usage.ui.notify.mock.calls).toEqual([[USAGE, "warning"]]);
 	});
 });
