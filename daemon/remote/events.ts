@@ -16,8 +16,8 @@ import type { LiveSnapshot } from "../ipc/protocol.ts";
 export interface EventSources {
 	/** Changes exactly when the phone's session list would. */
 	sessionsSignature(): string;
-	sessionFile(sessionId: string): string | undefined;
-	leafId(sessionId: string): string | undefined;
+	/** A session's file and the leaf its pane is on: one lookup for both, each tick. */
+	session(sessionId: string): { sessionFile?: string; leafId?: string } | undefined;
 	/** The ids of the sessions listed now. */
 	listed(): Set<string>;
 }
@@ -166,7 +166,8 @@ export class RemoteEvents {
 	}
 
 	private messagesSignature(sessionId: string): string {
-		return `${fileSignature(this.sources.sessionFile(sessionId))}:${this.sources.leafId(sessionId) ?? ""}`;
+		const session = this.sources.session(sessionId);
+		return `${fileSignature(session?.sessionFile)}:${session?.leafId ?? ""}`;
 	}
 
 	close(): void {

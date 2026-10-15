@@ -245,6 +245,12 @@ function factory(pi: ExtensionAPI): void {
 		reportedTasks = JSON.stringify(next.tasks);
 		reports = reports.then(() => client.remoteReport(pane, next)).catch(() => {});
 	};
+	/** A change the phone shows, reported only while a phone has the session open: opening it sends
+	 *  a fresh report, so a session nobody watches sends one per session, not one per turn. */
+	const changed = (ctx: ExtensionContext): void => {
+		if (watched) report(ctx);
+		else if (pane && ctx.mode === "tui") session = ctx;
+	};
 	pi.on("session_start", (_event, ctx) => {
 		if (pane && ctx.mode === "tui") {
 			tui = holdTui(ctx, "remote:tui");
@@ -252,15 +258,16 @@ function factory(pi: ExtensionAPI): void {
 			unwatchTasks?.();
 			unwatchTasks = watchTasks(() => {
 				const ctx = session;
-				if (ctx && JSON.stringify(paneTasks(ctx.sessionManager.getSessionId())) !== reportedTasks) report(ctx);
+				if (!ctx || !watched) return;
+				if (JSON.stringify(paneTasks(ctx.sessionManager.getSessionId())) !== reportedTasks) report(ctx);
 			});
 		}
 		report(ctx);
 	});
-	pi.on("model_select", (_event, ctx) => report(ctx));
-	pi.on("thinking_level_select", (_event, ctx) => report(ctx));
-	pi.on("turn_end", (_event, ctx) => report(ctx));
-	pi.on("session_compact", (_event, ctx) => report(ctx));
+	pi.on("model_select", (_event, ctx) => changed(ctx));
+	pi.on("thinking_level_select", (_event, ctx) => changed(ctx));
+	pi.on("turn_end", (_event, ctx) => changed(ctx));
+	pi.on("session_compact", (_event, ctx) => changed(ctx));
 	pi.events.on("bluclawd:pane-message", (data) => {
 		const ctx = session;
 		if (!ctx || !pane) return;
@@ -281,7 +288,7 @@ function factory(pi: ExtensionAPI): void {
 		if (session) report(session);
 	});
 	pi.events.on(TRUST_CHANGED, () => {
-		if (session) report(session);
+		if (session) changed(session);
 	});
 	pi.on("message_update", (event) => live?.onMessageUpdate(event.message));
 	pi.on("tool_execution_start", (event) => live?.onToolStart(event.toolCallId, event.toolName, event.args));

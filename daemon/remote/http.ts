@@ -674,8 +674,7 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 		// Sorted: agent view's order shifts with every heartbeat and is not a change.
 		sessionsSignature: () =>
 			JSON.stringify(remoteSessions(deps.listInstances()).sort((a, b) => a.id.localeCompare(b.id))),
-		sessionFile: (id) => findSession(deps.listInstances(), id)?.sessionFile,
-		leafId: (id) => findSession(deps.listInstances(), id)?.leafId,
+		session: (id) => findSession(deps.listInstances(), id),
 		listed: () => new Set(deps.listInstances().map((i) => i.id)),
 	});
 	const server: Server = createServer((req, res) => {

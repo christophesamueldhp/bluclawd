@@ -578,7 +578,7 @@ describe("/remote-control", () => {
 		expect(fork).not.toHaveBeenCalled();
 	});
 
-	it("reports at once when the daemon asks for it, as a restarted one does, and when the trust mode changes", async () => {
+	it("reports when the daemon asks for it, as a restarted one does, and changes only while a phone watches", async () => {
 		const sent = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
 		const handlers = new Map<string, (event: unknown, ctx?: unknown) => void>();
 		const pi = {
@@ -599,9 +599,18 @@ describe("/remote-control", () => {
 		handlers.get("bluclawd:remote-want-report")?.(true);
 		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(2));
 		expect(sent.mock.calls.map(([pane]) => pane)).toEqual(["pi-report", "pi-report"]);
+		// Nobody has the session open: a turn's end or Alt+M sends nothing, until a phone opens it.
+		handlers.get("turn_end")?.({}, { ...ctx, mode: "tui" });
+		handlers.get(TRUST_CHANGED)?.("never");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(sent).toHaveBeenCalledTimes(2);
+		handlers.get("bluclawd:remote-watched")?.(true);
+		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(3));
 		// Alt+M on the Mac, or the phone's picker: the phone's bar shows the new mode.
 		handlers.get(TRUST_CHANGED)?.("never");
-		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(3));
+		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(4));
+		handlers.get("turn_end")?.({}, { ...ctx, mode: "tui" });
+		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(5));
 		sent.mockRestore();
 	});
 
