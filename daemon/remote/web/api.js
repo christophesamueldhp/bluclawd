@@ -24,6 +24,14 @@ function clearToken() {
 	}
 }
 
+/**
+ * The code in the link /remote-control's QR code opens: `#pair=<6 digits>`.
+ * @param {string} hash
+ */
+export function pairCode(hash) {
+	return /^#pair=(\d{6})$/.exec(hash)?.[1];
+}
+
 /** The token was revoked (or never valid): the app goes back to pairing. */
 export class Unauthorized extends Error {}
 

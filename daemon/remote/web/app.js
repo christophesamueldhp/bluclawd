@@ -5,7 +5,7 @@
  * parts that change are re-rendered, so the composers keep their text, focus and keyboard while
  * updates arrive.
  */
-import { api, getToken, setToken, Unauthorized } from "./api.js";
+import { api, getToken, pairCode, setToken, Unauthorized } from "./api.js";
 import { promptKey, sentText, settle } from "./live.js";
 
 /** @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string }} Session */
@@ -68,12 +68,12 @@ const ERRORS = {
 	invalid_entry: "That message is no longer in this session.",
 	not_moved: "The session did not move.",
 	invalid_keys: "That can't be typed into the session. Use the keys for Enter, Tab and Esc.",
-	no_launch: "Run /remote-control pair in a pi on the Mac once, so the phone knows how to start pi.",
+	no_launch: "Run /remote-control in a pi on the Mac once, so the phone knows how to start pi.",
 	start_failed: "The Mac could not start the session.",
 	start_timeout: "The session did not show up. Check it on the Mac.",
 	unknown_session: "This session is gone.",
-	invalid_code: "That code is wrong or was already used. Run /remote-control pair for a new one.",
-	expired_code: "That code expired. Run /remote-control pair for a new one.",
+	invalid_code: "That code is wrong or was already used. Run /remote-control on the Mac for a new one.",
+	expired_code: "That code expired. Run /remote-control on the Mac for a new one.",
 	empty_prompt: "Type a message first.",
 	prompt_too_large: "That message is too long.",
 	body_too_large: "That message is too long.",
@@ -128,6 +128,8 @@ const state = {
 	menu: undefined,
 	/** The terminal sheet: the pane's screen, and keys to answer its dialog with. */
 	terminal: false,
+	/** Paired in Safari: the Home Screen app is the one iOS notifies. */
+	homeScreenHint: false,
 	/** What the pane shows: undefined while loading. @type {string[] | undefined} */
 	screen: undefined,
 	/** Keys or text are on their way to the pane. */
@@ -590,11 +592,9 @@ function bytes(base64url) {
 // ---- views ----
 
 function pairView() {
-	const hint = standalone()
-		? "Enter the code <code>/remote-control</code> shows on your Mac."
-		: "First add this page to your Home Screen (Share → Add to Home Screen), open it from there, then pair.";
 	return `<form class="pair" id="pair">
-<div class="logo">✻</div><h1>bluclawd</h1><p class="muted">${hint}</p>
+<div class="logo">✻</div><h1>bluclawd</h1>
+<p class="muted">On the Mac, run <code>/remote-control</code> and scan the QR code, or type the 6-digit code shown under it.</p>
 <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="000000" aria-label="Pairing code">
 <button>Pair</button><div class="error" id="pair-error"></div></form>`;
 }
@@ -727,6 +727,10 @@ function bannerHtml(session) {
 	if (session?.state === "needs") {
 		return `<div class="banner needs"><span>This session is waiting for an answer to a dialog. A reply sent here becomes its next prompt.</span>
 <button class="answer" id="answer" aria-haspopup="dialog">Answer</button></div>`;
+	}
+	if (!session && state.homeScreenHint) {
+		return `<div class="banner hint"><span>Add to Home Screen for notifications: Share → Add to Home Screen.</span>
+<button class="dismiss" id="dismiss-hint" aria-label="Dismiss">×</button></div>`;
 	}
 	return "";
 }
@@ -861,7 +865,13 @@ function updateList() {
 	$("#online").textContent = state.online ? "● online" : "offline";
 	$("#online").classList.toggle("on", state.online);
 	$("#notify").hidden = !state.offerPush;
-	$("#banner").innerHTML = bannerHtml(undefined);
+	const banner = $("#banner");
+	const bannerNow = bannerHtml(undefined);
+	// Rebuilt only when it changes, so a tap on its dismiss button is not lost to a refresh.
+	if (banner.dataset.html !== bannerNow) {
+		banner.innerHTML = bannerNow;
+		banner.dataset.html = bannerNow;
+	}
 	$("#rows").innerHTML = rowsHtml();
 	updateDirectories();
 	const start = $("#start");
@@ -990,23 +1000,28 @@ function updateTerminal(sheet) {
 	if (atBottom) screen.scrollTop = screen.scrollHeight;
 }
 
-function bindPair() {
-	$("#pair").addEventListener("submit", async (/** @type {Event} */ event) => {
-		event.preventDefault();
-		const code = $("#code").value.replace(/\D/g, "");
+/** @param {string} code */
+async function pair(code) {
+	try {
+		const token = await api.pair(code, deviceName());
 		try {
-			const token = await api.pair(code, deviceName());
-			try {
-				setToken(token);
-			} catch {
-				$("#pair-error").textContent = "This browser blocks storage; remote control needs it";
-				return;
-			}
-			render();
-			connect();
-		} catch (error) {
-			$("#pair-error").textContent = errorText(error instanceof Error ? error.message : String(error));
+			setToken(token);
+		} catch {
+			$("#pair-error").textContent = "This browser blocks storage; remote control needs it";
+			return;
 		}
+		state.homeScreenHint = !standalone();
+		render();
+		connect();
+	} catch (error) {
+		$("#pair-error").textContent = errorText(error instanceof Error ? error.message : String(error));
+	}
+}
+
+function bindPair() {
+	$("#pair").addEventListener("submit", (/** @type {Event} */ event) => {
+		event.preventDefault();
+		void pair($("#code").value.replace(/\D/g, ""));
 	});
 }
 
@@ -1020,6 +1035,11 @@ function bindList() {
 	const task = $("#task");
 	task.addEventListener("input", () => grow(task));
 	$("#notify").addEventListener("click", () => void enablePush());
+	$("#banner").addEventListener("click", (/** @type {Event} */ event) => {
+		if (!(/** @type {Element} */ (event.target).closest("#dismiss-hint"))) return;
+		state.homeScreenHint = false;
+		updateList();
+	});
 	$("#cwd").addEventListener("change", () => {
 		const other = $("#cwd-other");
 		other.hidden = $("#cwd").value !== "";
@@ -1396,7 +1416,19 @@ async function send() {
 
 // ---- routing ----
 
+/**
+ * The QR code's link pairs this browser, unless it is paired already. The code leaves the address
+ * at once, so it is in no bookmark or history; pairing renders once its answer is in.
+ */
+function claimLink() {
+	const code = pairCode(location.hash);
+	if (!code) return;
+	history.replaceState(null, "", location.pathname + location.search);
+	if (!getToken()) void pair(code);
+}
+
 function route() {
+	claimLink();
 	const match = /^#s\/(.+)$/.exec(location.hash);
 	const open = match ? decodeURIComponent(match[1]) : undefined;
 	if (open !== state.open) {
@@ -1449,6 +1481,7 @@ if ("serviceWorker" in navigator) {
 	});
 }
 
+claimLink();
 state.open = /^#s\/(.+)$/.exec(location.hash)?.[1];
 if (state.open) state.open = decodeURIComponent(state.open);
 render();
