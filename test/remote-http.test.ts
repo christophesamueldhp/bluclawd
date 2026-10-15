@@ -733,8 +733,8 @@ describe("remote HTTP API", () => {
 
 		it("refuses an empty, overlong or multi-line name, a terminal escape, and an unknown session", async () => {
 			const token = await pair();
-			const escape = `${String.fromCharCode(27)}[31mred`;
-			for (const name of [undefined, 7, "   ", "x".repeat(101), "a\nb", escape]) {
+			const red = `${String.fromCharCode(27)}[31mred`;
+			for (const name of [undefined, 7, "   ", "x".repeat(101), "a\nb", red]) {
 				expect(await call(token, "POST", "stored/rename", { name })).toEqual([400, { error: "invalid_name" }]);
 			}
 			expect(await call(token, "POST", "stored/rename", { name: "x".repeat(100) })).toEqual([200, { ok: true }]);
