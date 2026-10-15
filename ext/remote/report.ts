@@ -5,11 +5,38 @@
 import { existsSync } from "node:fs";
 import { getSupportedThinkingLevels, type ModelThinkingLevel, type Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { PaneMessage, PaneReport } from "../../daemon/orchestrator-client.ts";
+import type { TUI } from "@earendil-works/pi-tui";
+import { PHONE_REFUSED_COMMANDS } from "../../daemon/ipc/protocol.ts";
+import type { PaneCommand, PaneMessage, PaneReport } from "../../daemon/orchestrator-client.ts";
+import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import type { ProjectTrust } from "../_shared/trust-badge.ts";
 import { projectTrust, setProjectTrust, TRUST_CYCLE } from "../permissions/index.ts";
 
 type ReportModel = PaneReport["models"][number];
+
+/** Bounds on what every report carries for the phone's autocomplete. */
+const COMMANDS_MAX = 200;
+const DESCRIPTION_MAX = 100;
+
+/** The slash commands the pane's prompt runs, as its autocomplete lists them, but for the Mac-only ones. */
+export function paneCommands(pi: Pick<ExtensionAPI, "getCommands">): PaneCommand[] {
+	const commands: PaneCommand[] = [
+		...BUILTIN_SLASH_COMMANDS.map(({ name, description }) => ({ name, description, source: "builtin" as const })),
+		...pi.getCommands().map(({ name, description, source }) => ({ name, description, source })),
+	];
+	return commands
+		.filter((command) => !PHONE_REFUSED_COMMANDS.has(command.name))
+		.slice(0, COMMANDS_MAX)
+		.map(({ name, description, source }) => {
+			const text = description?.trim();
+			if (!text) return { name, source };
+			return {
+				name,
+				description: text.length > DESCRIPTION_MAX ? `${text.slice(0, DESCRIPTION_MAX - 1)}…` : text,
+				source,
+			};
+		});
+}
 
 function reportModel(model: { provider: string; id: string; name?: string }): ReportModel {
 	return { provider: model.provider, id: model.id, ...(model.name ? { name: model.name } : {}) };
@@ -17,7 +44,7 @@ function reportModel(model: { provider: string; id: string; name?: string }): Re
 
 export function buildReport(
 	ctx: ExtensionContext,
-	pi: Pick<ExtensionAPI, "getThinkingLevel">,
+	pi: Pick<ExtensionAPI, "getThinkingLevel" | "getCommands">,
 	trustOf: (ctx: ExtensionContext) => ProjectTrust = projectTrust,
 ): PaneReport {
 	const current = ctx.model;
@@ -61,6 +88,7 @@ export function buildReport(
 			: {}),
 		usage,
 		trust: trustOf(ctx),
+		commands: paneCommands(pi),
 	};
 }
 
@@ -106,8 +134,43 @@ export function applyPaneMessage(
 	}
 }
 
-/** Why a fork or clone did not happen, for the phone to say. */
+/** Why a fork, clone or slash command did not happen, for the phone to say. */
 export const DRAFT_NOTICE = "Clear the unsent text in the session's prompt on the Mac and retry";
+export const BUSY_NOTICE = "The session is busy: send the command once it is idle";
+export const DIALOG_NOTICE = "A dialog is open in the session on the Mac: answer or close it, then retry";
+
+/**
+ * A phone's slash command, run as if typed in the pane's prompt on the Mac: the text goes into the
+ * prompt and `enter` presses Enter there, so pi's own handling runs it, its built-in commands too
+ * (/compact, /model, …; one that opens a selector waits there for the phone's Answer). Setting the
+ * text, unlike typing it, opens no autocomplete that Enter would pick from. Only into an idle,
+ * empty prompt that has the keyboard: anything else would send or lose what is there, or press
+ * Enter in a dialog. `refuse` tells the phone why it did not run.
+ */
+export function submitCommand(
+	text: string,
+	ctx: ExtensionContext,
+	tui: TUI | undefined,
+	enter: () => void,
+	refuse: (notice: string) => void,
+): void {
+	// getFocusedComponent is on pi-tui's TUI class, not its TUI interface; only the prompt has getText.
+	const focused = (tui as { getFocusedComponent?: () => unknown } | undefined)?.getFocusedComponent?.();
+	const prompt = typeof (focused as { getText?: unknown } | null)?.getText === "function";
+	if (!ctx.isIdle()) refuse(BUSY_NOTICE);
+	else if (!tui || tui.hasOverlay() || !prompt) refuse(DIALOG_NOTICE);
+	else if (ctx.ui.getEditorText().trim()) refuse(DRAFT_NOTICE);
+	else {
+		ctx.ui.setEditorText(text);
+		try {
+			enter();
+		} catch {
+			// tmux is gone or hung: nothing was sent.
+			ctx.ui.setEditorText("");
+			refuse("The session's prompt on the Mac could not be reached: retry");
+		}
+	}
+}
 
 /**
  * `/remote-control tree <entryId>`, `fork <entryId>` and `clone`, as the phone dispatches them;

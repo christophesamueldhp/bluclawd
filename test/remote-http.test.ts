@@ -375,6 +375,63 @@ describe("remote HTTP API", () => {
 		]);
 	});
 
+	describe("slash commands", () => {
+		const send = async (text: string, id = "live", images?: object[]) => {
+			const token = await pair();
+			const res = await fetch(`${base}/api/sessions/${id}/prompt`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify({ text, ...(images ? { images } : {}) }),
+			});
+			return [res.status, ((await res.json()) as { error?: string }).error];
+		};
+		const commands = [{ name: "compact", source: "builtin" as const }];
+
+		it("has an idle pane type one into its prompt, as on the Mac, and lists the pane's commands", async () => {
+			instances[0]!.activity = "idle";
+			reports.set("live", { models: [], commands });
+			expect(await send("/compact keep the notes")).toEqual([202, undefined]);
+			expect(await send("  /skill:pdf report.pdf")).toEqual([202, undefined]);
+			expect(sent.map((s) => s.message)).toEqual([
+				{ type: "command", text: "/compact keep the notes" },
+				{ type: "command", text: "  /skill:pdf report.pdf" },
+			]);
+			const token = await pair();
+			const list = await fetch(`${base}/api/sessions/live/commands`, { headers: auth(token) });
+			expect(await list.json()).toEqual({ commands });
+			// The status, fetched after every report, leaves them out.
+			const status = await fetch(`${base}/api/sessions/live/status`, { headers: auth(token) });
+			expect((await status.json()) as object).toEqual({ report: { models: [] } });
+		});
+
+		it("refuses one while the session works or waits, or its prompt holds a draft, and the Mac-only ones", async () => {
+			reports.set("live", { models: [], commands });
+			expect(await send("/compact")).toEqual([409, "session_busy"]);
+			instances[0]!.activity = "idle";
+			instances[0]!.draft = true;
+			expect(await send("/compact")).toEqual([409, "unsent_draft"]);
+			for (const text of ["/remote-control", "/remote-control pair", "/agent-view", "/exit"]) {
+				expect(await send(text)).toEqual([400, "command_refused"]);
+			}
+			// A stored row too, which would run it as its first prompt.
+			expect(await send("/agent-view", "stored")).toEqual([400, "command_refused"]);
+			expect(sent).toEqual([]);
+			// Text that is not a command goes as a prompt, as before; a draft does not hold it up.
+			expect(await send("compact it")).toEqual([202, undefined]);
+			expect(sent.map((s) => s.message)).toEqual([{ type: "prompt", text: "compact it" }]);
+		});
+
+		it("sends it as a prompt to a pane too old to report its commands, and with images", async () => {
+			instances[0]!.activity = "idle";
+			reports.set("live", { models: [] });
+			expect(await send("/compact")).toEqual([202, undefined]);
+			const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 1, 1, 1]).toString("base64");
+			reports.set("live", { models: [], commands });
+			expect(await send("/describe", "live", [{ mimeType: "image/png", data: png }])).toEqual([202, undefined]);
+			expect(sent.map((s) => s.message.type)).toEqual(["prompt", "prompt"]);
+		});
+	});
+
 	describe("images", () => {
 		const magic: Record<string, number[]> = {
 			"image/jpeg": [0xff, 0xd8, 0xff, 0xe0],

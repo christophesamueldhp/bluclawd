@@ -57,6 +57,7 @@ function toInstanceSummary(
 		pane: instance.pane,
 		leafId: instance.leafId,
 		dialog: instance.dialog,
+		...(instance.draft ? { draft: true } : {}),
 		settled,
 	};
 }
@@ -152,6 +153,7 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				finishedAt: request.instance.finishedAt,
 				leafId: request.instance.leafId,
 				dialog: request.instance.dialog,
+				...(request.instance.draft === true ? { draft: true } : {}),
 			};
 			if (request.instance.launch) remoteControl?.noteLaunch(request.instance.launch);
 			supervisor.registerExternal(record, request.instance.activity ?? "idle");

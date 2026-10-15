@@ -27,4 +27,6 @@ export interface InstanceRecord {
 	leafId?: string;
 	/** The dialog a pane waits on; never stored. */
 	dialog?: { kind: string; title?: string };
+	/** A pane's prompt holds unsent text; never stored. */
+	draft?: boolean;
 }

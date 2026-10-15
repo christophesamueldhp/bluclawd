@@ -186,7 +186,11 @@ on the Mac too, until that server ends with the last session.
 The phone lists every agent-view session in its bands, with what it is doing. A session's chat
 shows its conversation, replies with their markdown rendered (older messages load at the top),
 streams the reply in progress, sends a prompt, which reaches the session at once (within a few seconds right after a move, or while an
-older daemon still runs), and Stop ends its turn. A reply to a stopped session resumes it, and
+older daemon still runs), and Stop ends its turn (the chat then says it was interrupted). A reply
+starting with `/` runs as if typed in the session's prompt on the Mac, pi's own commands
+(`/compact`, `/model`, `/tree`, `/new`, …) included, once the session is idle and that prompt
+empty; one that opens a selector waits there for Answer. `/remote-control`, `/agent-view` and
+`/exit` stay on the Mac, and `/quit` ends the session's pi. A reply to a stopped session resumes it, and
 Start begins a new one in a recent or typed directory. Tapping the title shows the model
 (and switches it), context and usage, and compacts or clones the session; a message's ⋯ edits it
 here or in a new session, or goes back to a reply. When a session waits on a dialog, Answer shows

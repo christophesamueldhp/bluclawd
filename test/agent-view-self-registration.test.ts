@@ -145,6 +145,17 @@ describe("SelfRegistration heartbeats", () => {
 		await reg.refresh();
 		expect(calls.at(-1)).toMatchObject({ finishedAt: "2026-10-15T10:00:00.000Z", dialog });
 	});
+
+	it("tells the daemon while its prompt holds unsent text, which a phone's slash command waits for", async () => {
+		const { client, calls } = fakeClient();
+		let draft = true;
+		const reg = new SelfRegistration(client, () => ({ cwd: "/p", draft }));
+		await reg.refresh();
+		expect(calls.at(-1)).toMatchObject({ draft: true });
+		draft = false;
+		await reg.refresh();
+		expect(calls.at(-1)).not.toHaveProperty("draft");
+	});
 });
 
 describe("SelfRegistration watched flag", () => {
@@ -418,24 +429,25 @@ describe("SelfRegistration waits for its next message", () => {
 		expect(other.waits).toHaveLength(0);
 	});
 
-	it.each([[{ type: "fork", entryId: "1a2b3c4d" }], [{ type: "compact" }]] as PaneMessage[][])(
-		"after %o, leaves what follows it to the next heartbeat",
-		async (message) => {
-			vi.useFakeTimers();
-			const { client, registers, waits } = waitingClient([[], [message], []]);
-			const handled: PaneMessage[] = [];
-			const reg = started(client, handled);
-			await vi.advanceTimersByTimeAsync(0);
-			waits[0].answer(true);
-			await vi.advanceTimersByTimeAsync(0);
-			expect(handled).toEqual([message]);
-			expect(waits).toHaveLength(1);
-			await vi.advanceTimersByTimeAsync(3000);
-			expect(registers).toHaveLength(3);
-			expect(waits).toHaveLength(2);
-			await reg.stop();
-		},
-	);
+	it.each([
+		[{ type: "fork", entryId: "1a2b3c4d" }],
+		[{ type: "compact" }],
+		[{ type: "command", text: "/new" }],
+	] as PaneMessage[][])("after %o, leaves what follows it to the next heartbeat", async (message) => {
+		vi.useFakeTimers();
+		const { client, registers, waits } = waitingClient([[], [message], []]);
+		const handled: PaneMessage[] = [];
+		const reg = started(client, handled);
+		await vi.advanceTimersByTimeAsync(0);
+		waits[0].answer(true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(handled).toEqual([message]);
+		expect(waits).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(3000);
+		expect(registers).toHaveLength(3);
+		expect(waits).toHaveLength(2);
+		await reg.stop();
+	});
 
 	it("after a prompt, leaves a move queued behind it to the turn's first heartbeat", async () => {
 		vi.useFakeTimers();

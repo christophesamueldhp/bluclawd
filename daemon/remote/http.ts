@@ -9,7 +9,15 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
 import { stripAnsi } from "../ansi.ts";
-import type { InstanceSummary, LiveSnapshot, PaneImage, PaneLaunch, PaneMessage, PaneReport } from "../ipc/protocol.ts";
+import {
+	type InstanceSummary,
+	type LiveSnapshot,
+	type PaneImage,
+	type PaneLaunch,
+	type PaneMessage,
+	type PaneReport,
+	PHONE_REFUSED_COMMANDS,
+} from "../ipc/protocol.ts";
 import { Tmux } from "../tmux.ts";
 import { RemoteEvents } from "./events.ts";
 import { type ClaimResult, type RemoteStore, SECRET_PATTERN } from "./pairing.ts";
@@ -424,7 +432,7 @@ async function handle(
 	}
 
 	const match =
-		/^\/api\/sessions\/([^/]+)\/(messages|status|screen|keys|prompt|abort|model|thinking|trust|compact|tree|fork|clone|rename|pin)$/.exec(
+		/^\/api\/sessions\/([^/]+)\/(messages|status|commands|screen|keys|prompt|abort|model|thinking|trust|compact|tree|fork|clone|rename|pin)$/.exec(
 			path,
 		);
 	if (!match) return json(res, 404, { error: "not_found" });
@@ -452,7 +460,15 @@ async function handle(
 		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
 		const report = found.running ? deps.report(id) : undefined;
 		if (!report) return json(res, 404, { error: "no_status" });
-		return json(res, 200, { report: { ...report, ...(await deps.statusLine?.(found.cwd)) } });
+		// Fetched again after every report: the commands, which rarely change, have their own route.
+		const { commands: _commands, ...shown } = report;
+		return json(res, 200, { report: { ...shown, ...(await deps.statusLine?.(found.cwd)) } });
+	}
+	if (action === "commands") {
+		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
+		const report = found.running ? deps.report(id) : undefined;
+		if (!report) return json(res, 404, { error: "no_status" });
+		return json(res, 200, { commands: report.commands ?? [] });
 	}
 	if (action === "screen" || action === "keys") {
 		if (req.method !== (action === "screen" ? "GET" : "POST")) return json(res, 405, { error: "method_not_allowed" });
@@ -489,6 +505,12 @@ async function handle(
 	if (action === "prompt") {
 		const text = promptIn(body, "text");
 		const images = imagesIn(body);
+		// A slash command, as pi reads one: typed into the pane's prompt (a phone's images never are).
+		const command =
+			!images && text.trimStart().startsWith("/") ? text.trimStart().slice(1).split(/\s/)[0] : undefined;
+		if (command !== undefined && PHONE_REFUSED_COMMANDS.has(command)) {
+			return json(res, 400, { error: "command_refused" });
+		}
 		// A stored row has no process: it resumes as agent view's peek reply resumes it.
 		if (!session.running && session.sessionFile) {
 			// Its first prompt is an argument to pi, as a new session's is.
@@ -500,7 +522,13 @@ async function handle(
 			const pane = start(deps, { cwd: session.cwd, task: text, sessionFile: session.sessionFile, launch }, id);
 			return json(res, 202, { ok: true, pane });
 		}
-		message = images ? { type: "prompt", text, images } : { type: "prompt", text };
+		// A pane that reports its commands types them in; an older one runs them as a prompt.
+		if (command !== undefined && session.running && deps.report(id)?.commands) {
+			// Only into an idle, empty prompt, which the pane checks again: its heartbeat may be 3s old.
+			if (session.busy) return json(res, 409, { error: "session_busy" });
+			if (session.draft) return json(res, 409, { error: "unsent_draft" });
+			message = { type: "command", text };
+		} else message = images ? { type: "prompt", text, images } : { type: "prompt", text };
 	} else if (action === "model") {
 		const { provider, id: modelId } = body;
 		if (typeof provider !== "string" || typeof modelId !== "string" || !provider || !modelId) {
