@@ -12,7 +12,6 @@
       "./ext/branding/index.ts",
       "./ext/agent-view/index.ts",
       "./ext/remote/index.ts",
-      "./ext/notifications/index.ts",
       "./ext/help/index.ts",
       "./ext/vibes/index.ts",
       "./ext/paste/index.ts"

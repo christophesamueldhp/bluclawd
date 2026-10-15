@@ -26,7 +26,6 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 		events: 9,
 	},
 	remote: { commands: ["remote-control"], tools: [], shortcuts: 0, events: 11 },
-	notifications: { commands: [], tools: [], shortcuts: 0, events: 3 },
 	help: { commands: ["help", "context", "status"], tools: [], shortcuts: 0, events: 0 },
 	vibes: { commands: [], tools: [], shortcuts: 0, events: 2 },
 	paste: { commands: [], tools: [], shortcuts: 0, events: 2 },
@@ -35,7 +34,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 describe("bluclawd extension registration", () => {
 	const rec = recordExtensions();
 
-	it("registers exactly the 10 expected extensions, no more, no fewer", () => {
+	it("registers exactly the 9 expected extensions, no more, no fewer", () => {
 		expect(Object.keys(rec).sort()).toEqual(Object.keys(EXPECTED).sort());
 	});
 

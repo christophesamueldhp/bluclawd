@@ -22,7 +22,6 @@ import backgroundBash from "./background-bash/index.ts";
 import branding from "./branding/index.ts";
 import checkpoints from "./checkpoints/index.ts";
 import help from "./help/index.ts";
-import notifications from "./notifications/index.ts";
 import paste from "./paste/index.ts";
 import permissions from "./permissions/index.ts";
 import remote from "./remote/index.ts";
@@ -36,7 +35,6 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "branding", factory: branding },
 		{ name: "agent-view", factory: agentView },
 		{ name: "remote", factory: remote },
-		{ name: "notifications", factory: notifications },
 		{ name: "help", factory: help },
 		{ name: "vibes", factory: vibes },
 		{ name: "paste", factory: paste },

@@ -103,11 +103,6 @@ function screenLines(out: string): string[] {
 
 type Run = (args: string[], options?: { inherit?: boolean; outsideTmux?: boolean }) => string;
 
-export interface TmuxClient {
-	session: string;
-	termname: string;
-}
-
 export class Tmux {
 	readonly dir: string;
 	private readonly run: Run;
@@ -284,17 +279,6 @@ export class Tmux {
 	/** Whether `name`'s agent view has drawn; throws once the session is gone. */
 	viewReady(name: string): boolean {
 		return this.run(["display-message", "-p", "-t", `=${name}:`, "#{@bluclawd_view_ready}"]).trim() === "1";
-	}
-
-	/** The terminals attached to this server: the session each shows, and its terminal type. */
-	clients(): TmuxClient[] {
-		return this.run(["list-clients", "-F", "#{client_session}\t#{client_termname}"])
-			.split("\n")
-			.filter(Boolean)
-			.map((line) => {
-				const [session = "", termname = ""] = line.split("\t");
-				return { session, termname };
-			});
 	}
 
 	/** Leave tmux: the terminal returns to its shell, every pane keeps running. */
