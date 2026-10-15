@@ -1,13 +1,17 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 import { PANE_ENV } from "../daemon/tmux.ts";
+import { projectTrust, TRUST_CHANGED } from "../ext/permissions/index.ts";
 import remoteFactory from "../ext/remote/index.ts";
 import { applyPaneMessage, buildReport, navigate } from "../ext/remote/report.ts";
 
 const model = (provider: string, id: string, name?: string, reasoning = false) => ({ provider, id, name, reasoning });
+/** The trust mode, without reading the developer's own settings. */
+const ask = () => "ask" as const;
 
 const usage = (input: number, output: number, cacheRead: number, cacheWrite: number, total: number) => ({
 	input,
@@ -23,6 +27,7 @@ function fakes(
 		available?: ReturnType<typeof model>[];
 		idle?: boolean;
 		commands?: string[];
+		cwd?: string;
 	} = {},
 ) {
 	const available = options.available ?? [];
@@ -50,9 +55,18 @@ function fakes(
 		},
 		isIdle: () => options.idle ?? true,
 		compact: vi.fn(),
+		cwd: options.cwd ?? "/proj",
+		isProjectTrusted: () => true,
+		ui: {
+			setStatus: vi.fn(),
+			notify: vi.fn(),
+			theme: { fg: (_color: string, text: string) => text, getColorMode: () => "256" },
+		},
 	};
 	const pi = {
-		getThinkingLevel: () => "high",
+		getThinkingLevel: vi.fn(() => "high"),
+		setThinkingLevel: vi.fn(),
+		events: { emit: vi.fn() },
 		setModel: vi.fn(async () => true),
 		sendUserMessage: vi.fn(),
 		getCommands: () => (options.commands ?? ["remote-control"]).map((name) => ({ name, source: "extension" })),
@@ -72,7 +86,7 @@ describe("buildReport", () => {
 				model("anthropic", "claude-sonnet", "Sonnet"),
 			],
 		});
-		expect(buildReport(ctx as never, pi as never)).toEqual({
+		expect(buildReport(ctx as never, pi as never, ask)).toEqual({
 			model: { provider: "anthropic", id: "claude-opus", name: "Opus" },
 			models: [
 				{ provider: "anthropic", id: "claude-opus", name: "Opus" },
@@ -80,21 +94,36 @@ describe("buildReport", () => {
 				{ provider: "openai", id: "gpt-5", name: "GPT-5" },
 			],
 			thinkingLevel: "high",
+			thinkingLevels: ["off", "minimal", "low", "medium", "high"],
 			context: { tokens: 12_000, contextWindow: 200_000, percent: 6 },
 			usage: { input: 170, output: 30, cacheRead: 1000, cacheWrite: 230, cost: 0.984375 },
+			trust: "ask",
 		});
 	});
 
 	it("lists the current model even when it is not available, and no thinking for a model without it", () => {
 		const { ctx, pi } = fakes({ current: model("local", "llama") });
-		const report = buildReport(ctx as never, pi as never);
+		const report = buildReport(ctx as never, pi as never, ask);
 		expect(report.models).toEqual([{ provider: "local", id: "llama" }]);
 		expect(report.thinkingLevel).toBeUndefined();
+		expect(report.thinkingLevels).toBeUndefined();
+	});
+
+	it("offers the thinking levels pi offers for the model: xhigh and max only where it maps them", () => {
+		const gpt = { ...model("openai", "gpt-5", "GPT-5", true), thinkingLevelMap: { minimal: null, xhigh: "xhigh" } };
+		const { ctx, pi } = fakes({ current: gpt });
+		expect(buildReport(ctx as never, pi as never, ask).thinkingLevels).toEqual([
+			"off",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+		]);
 	});
 
 	it("has no model before one is selected", () => {
 		const { ctx, pi } = fakes();
-		const report = buildReport(ctx as never, pi as never);
+		const report = buildReport(ctx as never, pi as never, ask);
 		expect(report.model).toBeUndefined();
 		expect(report.models).toEqual([]);
 	});
@@ -135,6 +164,72 @@ describe("applyPaneMessage", () => {
 		expect(pi.setModel).not.toHaveBeenCalled();
 		expect(ctx.compact).not.toHaveBeenCalled();
 		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+	});
+});
+
+/** pi's settings in a temporary home, never the developer's own. */
+function tempHome(): { settings: () => string; dir: () => string } {
+	let home = "";
+	beforeEach(() => {
+		home = mkdtempSync(join(tmpdir(), "bluclawd-remote-home-"));
+		for (const key of Object.keys(process.env)) if (key.endsWith("_CODING_AGENT_DIR")) vi.stubEnv(key, undefined);
+		vi.stubEnv("HOME", home);
+		expect(getAgentDir().startsWith(home)).toBe(true);
+		mkdirSync(getAgentDir(), { recursive: true });
+	});
+	afterEach(() => rmSync(home, { recursive: true, force: true }));
+	return { settings: () => join(getAgentDir(), "settings.json"), dir: () => home };
+}
+
+describe("thinking level and trust mode from the phone", () => {
+	const home = tempHome();
+	const opus = model("anthropic", "claude-opus", "Opus", true);
+
+	it("sets a thinking level pi offers for the model, which pi reports", () => {
+		const { ctx, pi } = fakes({ current: opus });
+		const reportAgain = vi.fn();
+		applyPaneMessage({ type: "set_thinking", level: "low" }, ctx as never, pi as never, reportAgain);
+		expect(pi.setThinkingLevel).toHaveBeenCalledWith("low");
+		expect(reportAgain).not.toHaveBeenCalled();
+	});
+
+	it("reports again, changing nothing, for a level the model lacks, its level already, or a model without thinking", () => {
+		for (const [current, level] of [
+			[opus, "xhigh"],
+			[opus, "high"],
+			[opus, "turbo"],
+			[model("local", "llama"), "low"],
+		] as const) {
+			const { ctx, pi } = fakes({ current });
+			const reportAgain = vi.fn();
+			applyPaneMessage({ type: "set_thinking", level }, ctx as never, pi as never, reportAgain);
+			expect(pi.setThinkingLevel).not.toHaveBeenCalled();
+			expect(reportAgain).toHaveBeenCalledTimes(1);
+		}
+	});
+
+	it("sets the trust mode as Alt+M does: saved to global settings, the badge redrawn, and announced", async () => {
+		writeFileSync(home.settings(), JSON.stringify({ defaultProjectTrust: "always" }));
+		const { ctx, pi } = fakes({ cwd: home.dir() });
+		applyPaneMessage({ type: "set_trust", trust: "never" }, ctx as never, pi as never);
+		await vi.waitFor(() => expect(pi.events.emit).toHaveBeenCalledWith(TRUST_CHANGED, "never"));
+		expect(JSON.parse(readFileSync(home.settings(), "utf8")).defaultProjectTrust).toBe("never");
+		expect(ctx.ui.setStatus).toHaveBeenCalledWith("1-mode", "✕ never (alt+m to cycle)");
+		expect(projectTrust(ctx as never)).toBe("never");
+	});
+
+	it("ignores a trust mode Alt+M does not cycle through", () => {
+		writeFileSync(home.settings(), JSON.stringify({ defaultProjectTrust: "ask" }));
+		const { ctx, pi } = fakes({ cwd: home.dir() });
+		applyPaneMessage({ type: "set_trust", trust: "sometimes" as never }, ctx as never, pi as never);
+		expect(pi.events.emit).not.toHaveBeenCalled();
+		expect(JSON.parse(readFileSync(home.settings(), "utf8")).defaultProjectTrust).toBe("ask");
+	});
+
+	it("reports the trust mode in pi's settings", () => {
+		writeFileSync(home.settings(), JSON.stringify({ defaultProjectTrust: "never" }));
+		const { ctx, pi } = fakes({ cwd: home.dir() });
+		expect(buildReport(ctx as never, pi as never).trust).toBe("never");
 	});
 });
 
@@ -246,6 +341,8 @@ describe("navigate", () => {
 });
 
 describe("/remote-control", () => {
+	tempHome();
+
 	function register() {
 		let handler: ((args: string, ctx: unknown) => Promise<void>) | undefined;
 		const pi = {
@@ -269,7 +366,7 @@ describe("/remote-control", () => {
 		}
 	});
 
-	it("reports at once when the daemon asks for it, as a restarted one does", async () => {
+	it("reports at once when the daemon asks for it, as a restarted one does, and when the trust mode changes", async () => {
 		const sent = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
 		const handlers = new Map<string, (event: unknown, ctx?: unknown) => void>();
 		const pi = {
@@ -289,6 +386,9 @@ describe("/remote-control", () => {
 		handlers.get("bluclawd:remote-want-report")?.(true);
 		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(2));
 		expect(sent.mock.calls.map(([pane]) => pane)).toEqual(["pi-report", "pi-report"]);
+		// Alt+M on the Mac, or the phone's picker: the phone's bar shows the new mode.
+		handlers.get(TRUST_CHANGED)?.("never");
+		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(3));
 		sent.mockRestore();
 	});
 

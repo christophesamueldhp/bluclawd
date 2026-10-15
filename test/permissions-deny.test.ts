@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { denyRules } from "../ext/_shared/settings.ts";
-import permissions, { trustStatusText } from "../ext/permissions/index.ts";
+import permissions, { TRUST_CHANGED, trustStatusText } from "../ext/permissions/index.ts";
 import { deniedBy } from "../ext/permissions/rules.ts";
 
 const cwd = "/proj";
@@ -264,6 +264,7 @@ describe("the extension", () => {
 		let shortcut: ((ctx: any) => Promise<void>) | undefined;
 		const status: Record<string, string | undefined> = {};
 		const notes: string[] = [];
+		const announced: unknown[] = [];
 		permissions({
 			on: (event: string, handler: any) => {
 				handlers[event] = handler;
@@ -271,6 +272,7 @@ describe("the extension", () => {
 			registerShortcut: (_key: unknown, def: any) => {
 				shortcut = def.handler;
 			},
+			events: { emit: (name: string, data: unknown) => announced.push([name, data]) },
 		} as any);
 		const ctx = {
 			cwd: dir,
@@ -284,7 +286,7 @@ describe("the extension", () => {
 			},
 		};
 		const call = (toolName: string, input: Record<string, unknown>) => handlers.tool_call({ toolName, input }, ctx);
-		return { handlers, ctx, call, status, notes, press: () => shortcut?.(ctx) };
+		return { handlers, ctx, call, status, notes, announced, press: () => shortcut?.(ctx) };
 	}
 
 	it("blocks a denied call with the rule, and runs everything else", async () => {
@@ -316,8 +318,8 @@ describe("the extension", () => {
 		expect(await call("websearch", { queries: ["vitest"] })).toBeUndefined();
 	});
 
-	it("shows defaultProjectTrust and cycles it with Alt+M, saved to global settings", async () => {
-		const { handlers, ctx, status, press, notes } = load({ defaultProjectTrust: "always" });
+	it("shows defaultProjectTrust and cycles it with Alt+M, saved to global settings and announced", async () => {
+		const { handlers, ctx, status, press, notes, announced } = load({ defaultProjectTrust: "always" });
 		await handlers.session_start({}, ctx);
 		expect(status["1-mode"]).toBe("⏵⏵ always (alt+m to cycle)");
 		await press();
@@ -328,6 +330,12 @@ describe("the extension", () => {
 		expect(status["1-mode"]).toBe("✕ never (alt+m to cycle)");
 		await press();
 		expect(JSON.parse(readFileSync(globalSettings(), "utf8")).defaultProjectTrust).toBe("always");
+		// Remote control reports each one, so a phone's status bar shows it.
+		expect(announced).toEqual([
+			[TRUST_CHANGED, "ask"],
+			[TRUST_CHANGED, "never"],
+			[TRUST_CHANGED, "always"],
+		]);
 	});
 
 	it("paints always amber in truecolor", () => {
