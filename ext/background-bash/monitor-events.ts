@@ -1,10 +1,10 @@
 /**
  * The pure pieces of the monitor tool: lines into batches, batches into a
  * rate, and the tail of a job's output. Nothing here spawns a process or
- * talks to pi; the wiring lives in the sandbox extension.
+ * talks to pi; the wiring lives in `monitor-tool.ts` and `index.ts`.
  */
 
-import { stripAnsi } from "./ansi.ts";
+import { stripAnsi } from "../../daemon/ansi.ts";
 import { type BackgroundJobInfo, jobOutcome } from "./background-bash.ts";
 
 export interface Batch {

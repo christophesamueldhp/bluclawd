@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
-import { OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
-import { PANE_ENV } from "../ext/agent-view/tmux.ts";
+import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
+import { PANE_ENV } from "../daemon/tmux.ts";
 import remoteFactory from "../ext/remote/index.ts";
 import { applyPaneMessage, buildReport, navigate } from "../ext/remote/report.ts";
 

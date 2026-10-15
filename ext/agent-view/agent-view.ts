@@ -25,13 +25,12 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { stripAnsi } from "../_shared/ansi.ts";
-import { PasteTokens, shouldCollapse } from "../_shared/paste-tokens.ts";
-import { resolveToCwd } from "../_shared/path-resolve.ts";
-import { theme } from "../_shared/theme.ts";
-import { mascotGlyphs, REST, renderMascot } from "../branding/mascot.ts";
-import { type AgentClipboard, readAgentClipboard } from "./clipboard.ts";
-import { currentDaemonBuildId, type InstanceSummary, type OrchestratorClient } from "./orchestrator-client.ts";
+import { stripAnsi } from "../../daemon/ansi.ts";
+import {
+	currentDaemonBuildId,
+	type InstanceSummary,
+	type OrchestratorClient,
+} from "../../daemon/orchestrator-client.ts";
 import {
 	type AgentRow,
 	type Band,
@@ -48,8 +47,13 @@ import {
 	STATE_WORDS,
 	stateBandOf,
 	type ViewMode,
-} from "./rows.ts";
-import { AGENT_VIEW_COMMAND, HIDE_ENV, OPEN_VIEW_ENV, type ShellInfo } from "./tmux.ts";
+} from "../../daemon/rows.ts";
+import { AGENT_VIEW_COMMAND, HIDE_ENV, OPEN_VIEW_ENV, type ShellInfo } from "../../daemon/tmux.ts";
+import { mascotGlyphs, REST, renderMascot } from "../_shared/mascot.ts";
+import { PasteTokens, shouldCollapse } from "../_shared/paste-tokens.ts";
+import { resolveToCwd } from "../_shared/path-resolve.ts";
+import { theme } from "../_shared/theme.ts";
+import { type AgentClipboard, readAgentClipboard } from "./clipboard.ts";
 
 export interface PastSession {
 	sessionFile: string;

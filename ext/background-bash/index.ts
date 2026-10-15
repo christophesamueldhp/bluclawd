@@ -5,7 +5,7 @@
  * renderers for job events.
  *
  * The job registry, and the shell half of all three tools, sits in
- * `_shared/background-bash.ts`. Change one, look at the others.
+ * `background-bash.ts`. Change one, look at the others.
  *
  * Without a UI, `/tasks` renders through `appendEntry` rather than
  * `ctx.ui.notify`, which would flatten its colours. Entries are persisted JSON,
@@ -21,37 +21,31 @@ import type {
 import { createLocalBashOperations, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Box, type Component, matchesKey, Text, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { stripAnsi } from "../../daemon/ansi.ts";
 import { subscribeAgentTasks } from "../_shared/agent-tasks.ts";
-import { stripAnsi } from "../_shared/ansi.ts";
-import {
-	backgroundBashJobs,
-	describeJobStatus,
-	isShellTaskId,
-	noTaskError,
-	shellTaskStop,
-} from "../_shared/background-bash.ts";
-import { backgroundTasksDisabled } from "../_shared/bash-limits.ts";
 import { commandBlock } from "../_shared/command-block.ts";
-import { detachAll, runningForegroundShells, subscribeForegroundShells } from "../_shared/foreground-shells.ts";
 import { sharedRef } from "../_shared/global-state.ts";
-import { clearMainSession, mainSession, setMainSession } from "../_shared/main-session.ts";
+import { STATUS_KEYS } from "../_shared/status-keys.ts";
+import { backgroundBashJobs, describeJobStatus, isShellTaskId, noTaskError, shellTaskStop } from "./background-bash.ts";
+import { backgroundTasksDisabled } from "./bash-limits.ts";
+import { createClaudeBashTool } from "./bash-tool.ts";
+import { detachAll, runningForegroundShells, subscribeForegroundShells } from "./foreground-shells.ts";
+import { clearMainSession, mainSession, setMainSession } from "./main-session.ts";
 import {
 	MONITOR_MESSAGE_TYPE,
 	type MonitorMessageDetails,
 	TASK_EXIT_MESSAGE_TYPE,
 	type TaskExitDetails,
-} from "../_shared/monitor-events.ts";
+} from "./monitor-events.ts";
+import { createMonitorTool } from "./monitor-tool.ts";
 import {
 	deliverOrHold,
 	heldNotifications,
 	heldNotificationsLine,
 	holdNotifications,
 	subscribeNotificationHold,
-} from "../_shared/notification-hold.ts";
-import { findOrphanShells, orphanShellMessage, SHELL_END_ENTRY, SHELL_START_ENTRY } from "../_shared/orphan-shells.ts";
-import { STATUS_KEYS } from "../_shared/status-keys.ts";
-import { createClaudeBashTool } from "./bash-tool.ts";
-import { createMonitorTool } from "./monitor-tool.ts";
+} from "./notification-hold.ts";
+import { findOrphanShells, orphanShellMessage, SHELL_END_ENTRY, SHELL_START_ENTRY } from "./orphan-shells.ts";
 import { type TaskRow, TasksDialog, taskRows } from "./tasks-dialog.ts";
 
 const MAX_COMMAND_CHARS = 80;

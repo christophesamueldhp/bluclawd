@@ -13,9 +13,8 @@ import { homedir } from "node:os";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import { SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
+import { mascotGlyphs } from "../_shared/mascot.ts";
 import { prefersReducedMotion } from "../_shared/settings.ts";
-import { setSharedTheme } from "../_shared/theme.ts";
-import { mascotGlyphs } from "./mascot.ts";
 import { AUTO_THEME, ThemePicker, themeOptions } from "./theme-picker.ts";
 import { MascotPlayer, pickEntrance, WelcomeHeader, type WelcomeHeaderInfo } from "./welcome-header.ts";
 
@@ -117,10 +116,6 @@ const branding: InlineExtension = {
 		});
 
 		pi.on("session_start", (event, ctx) => {
-			// Other components read this shared reference because pi's theme
-			// singleton isn't part of the public package export.
-			setSharedTheme(ctx.ui.theme);
-
 			ctx.ui.setHeader((tui, theme) => {
 				const glyphs = mascotGlyphs();
 				let reducedMotion = false;

@@ -3,7 +3,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
-import { BODY_COLOR, EYE_COLOR, SOURCE } from "../ext/branding/mascot.ts";
+import { BODY_COLOR, EYE_COLOR, SOURCE } from "../ext/_shared/mascot.ts";
 
 /** The app's dark background: iOS fills a touch icon's transparency with black. */
 const BACKGROUND = "#141414";

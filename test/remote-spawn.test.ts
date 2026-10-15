@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { startSession } from "../daemon/remote/spawn.ts";
-import { Tmux } from "../ext/agent-view/tmux.ts";
+import { Tmux } from "../daemon/tmux.ts";
 
 describe("starting a pane from the phone", () => {
 	const launch = { command: ["/usr/bin/node", "/pi/cli.js"] };

@@ -4,15 +4,12 @@ import { join, resolve } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteProvider, TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { setSharedTheme } from "../ext/_shared/theme.ts";
-import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
-import { withoutAgentViewCommand } from "../ext/agent-view/index.ts";
 import {
 	currentDaemonBuildId,
 	type InstanceSummary,
 	type OrchestratorClient,
 	piPackageRoot,
-} from "../ext/agent-view/orchestrator-client.ts";
+} from "../daemon/orchestrator-client.ts";
 import {
 	buildBands,
 	collectRows,
@@ -21,7 +18,10 @@ import {
 	queryFilter,
 	rowAge,
 	rowFromSummary,
-} from "../ext/agent-view/rows.ts";
+} from "../daemon/rows.ts";
+import { setSharedTheme } from "../ext/_shared/theme.ts";
+import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
+import { withoutAgentViewCommand } from "../ext/agent-view/index.ts";
 
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BUILD_ID, VERSION } from "../daemon/config.ts";
 import { type IpcRequestHandler, startIpcServer } from "../daemon/ipc/server.ts";
-import { OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
+import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 
 /**
  * Every response the daemon sends should carry its own version/buildId, so a

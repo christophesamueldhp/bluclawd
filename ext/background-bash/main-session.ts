@@ -7,7 +7,7 @@
  * the old session's end and the new one's start they wait here.
  */
 
-import { sharedRef } from "./global-state.ts";
+import { sharedRef } from "../_shared/global-state.ts";
 import type { EventDelivery, OutgoingMessage } from "./monitor-events.ts";
 
 export interface MainSessionSink {

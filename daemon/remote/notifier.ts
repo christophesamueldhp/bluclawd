@@ -1,5 +1,5 @@
 /** Which session changes are worth a push: one that stops working, by finishing or by needing an answer. */
-import type { RowState } from "../../ext/agent-view/rows.ts";
+import type { RowState } from "../rows.ts";
 import type { RemoteSession } from "./sessions.ts";
 
 export interface PushNotification {

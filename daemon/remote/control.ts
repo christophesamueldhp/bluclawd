@@ -4,7 +4,6 @@
  */
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Tmux } from "../../ext/agent-view/tmux.ts";
 import type {
 	ErrorResponse,
 	InstanceSummary,
@@ -15,6 +14,7 @@ import type {
 	RemoteRequest,
 	RemoteResponse,
 } from "../ipc/protocol.ts";
+import { Tmux } from "../tmux.ts";
 import { type RemoteServer, startRemoteServer } from "./http.ts";
 import { Notifier } from "./notifier.ts";
 import { RemoteStore } from "./pairing.ts";

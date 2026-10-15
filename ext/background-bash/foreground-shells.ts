@@ -1,9 +1,8 @@
 /**
  * Ctrl+B: moving the model's running foreground bash into the background.
- * The sandbox extension wraps the foreground exec with
- * `detachableExec`; background-bash owns the key and calls `detachAll`. The two
- * load in separate module graphs, so the set of running foreground shells is a
- * sharedRef.
+ * The bash tool wraps the foreground exec with `detachableExec`; the Ctrl+B key
+ * calls `detachAll`. The set of running foreground shells is a sharedRef so it
+ * survives pi rebuilding the extension runtime.
  *
  * Detaching hands the live process to the job registry without restarting it:
  * output produced so far is replayed into the job, later output goes there
@@ -11,13 +10,13 @@
  * tool turns into its "moved to background" result.
  */
 
+import { notifyListeners, sharedRef } from "../_shared/global-state.ts";
 import {
 	type BackgroundExec,
 	type BackgroundJobInfo,
 	backgroundBashJobs,
 	DEFAULT_MAX_BUFFER_BYTES,
 } from "./background-bash.ts";
-import { notifyListeners, sharedRef } from "./global-state.ts";
 
 /** Why a foreground command moved to the background: Ctrl+B, its timeout, or a message the user sent. */
 export type DetachReason = "user" | "timeout" | "message";

@@ -1,12 +1,13 @@
 /**
- * The phone's session list: agent view's own rows and bands (ext/agent-view/rows.ts, pure), so
+ * The phone's session list: agent view's own rows and bands (daemon/rows.ts, pure), so
  * the phone and the terminal agree on what is Needs input, Working or Idle.
  *
  * rows.ts sits outside daemon/, so editing it does not change the daemon's build id: a running
  * daemon keeps the old rows until it restarts.
  */
-import { type AgentRow, buildBands, collectRows, type RowState } from "../../ext/agent-view/rows.ts";
+
 import type { InstanceSummary } from "../ipc/protocol.ts";
+import { type AgentRow, buildBands, collectRows, type RowState } from "../rows.ts";
 
 export type RemoteBand = "pinned" | "needs" | "working" | "idle";
 

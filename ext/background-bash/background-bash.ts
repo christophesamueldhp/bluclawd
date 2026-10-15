@@ -19,8 +19,8 @@ import { createWriteStream, mkdirSync, type WriteStream, writeFileSync } from "n
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
+import { sharedRef } from "../_shared/global-state.ts";
 import { classifyExit, SIGNAL_EXIT_CODE } from "./exit-status.ts";
-import { sharedRef } from "./global-state.ts";
 import { splitLines } from "./lines.ts";
 
 /** Cap on buffered output per job; the oldest chunks are dropped past this. */
@@ -538,9 +538,9 @@ export class BackgroundJobRegistry {
 /**
  * The process-wide registry used by the bash tool, task_stop, and /tasks.
  *
- * `sandbox` starts jobs and `background-bash` reads them, and pi loads each
- * top-level extension in its own module graph, so a plain module constant
- * would be two registries. `sharedRef` keeps it one (see global-state.ts).
+ * pi re-imports an extension each time it rebuilds the runtime (/new, /resume,
+ * fork, /reload), so a plain module constant would lose the running jobs.
+ * `sharedRef` keeps one registry for the process (see global-state.ts).
  */
 export const backgroundBashJobs = sharedRef("backgroundBashJobs", new BackgroundJobRegistry()).get();
 

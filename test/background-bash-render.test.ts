@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
+import backgroundBash, { tasksPillLabel } from "../ext/background-bash/index.ts";
 import {
 	MONITOR_MESSAGE_TYPE,
 	type MonitorMessageDetails,
 	TASK_EXIT_MESSAGE_TYPE,
 	type TaskExitDetails,
-} from "../ext/_shared/monitor-events.ts";
-import backgroundBash, { tasksPillLabel } from "../ext/background-bash/index.ts";
+} from "../ext/background-bash/monitor-events.ts";
 
 type Renderer = (message: any, options: any, theme: any) => { render(width: number): string[] } | undefined;
 

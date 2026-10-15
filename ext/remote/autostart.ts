@@ -7,9 +7,9 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
+import { daemonCommand } from "../../daemon/orchestrator-client.ts";
 import { getServerDir } from "../../daemon/paths.ts";
-import { daemonCommand } from "../agent-view/orchestrator-client.ts";
-import { piEnv } from "../agent-view/tmux.ts";
+import { piEnv } from "../../daemon/tmux.ts";
 
 export const LABEL = "dev.bluclawd.daemon";
 

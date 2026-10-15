@@ -3,9 +3,10 @@
  * tool events reduced to a LiveSnapshot, sent at most every LIVE_INTERVAL_MS (message_update
  * fires per token) and cleared with null once the transcript has it.
  */
+
+import type { LiveSnapshot } from "../../daemon/orchestrator-client.ts";
 import { clip, toolSummary } from "../../daemon/remote/transcript.ts";
 import { textOf } from "../../daemon/session-state.ts";
-import type { LiveSnapshot } from "../agent-view/orchestrator-client.ts";
 
 export const LIVE_INTERVAL_MS = 300;
 

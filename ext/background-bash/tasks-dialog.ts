@@ -18,15 +18,11 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { stripAnsi } from "../../daemon/ansi.ts";
 import { agentTasks } from "../_shared/agent-tasks.ts";
-import { stripAnsi } from "../_shared/ansi.ts";
-import { type BackgroundJobInfo, backgroundBashJobs, jobOutcome } from "../_shared/background-bash.ts";
-import { formatClaudeDuration } from "../_shared/bash-limits.ts";
-import {
-	FOREGROUND_TASK_AFTER_MS,
-	type ForegroundShell,
-	runningForegroundShells,
-} from "../_shared/foreground-shells.ts";
+import { type BackgroundJobInfo, backgroundBashJobs, jobOutcome } from "./background-bash.ts";
+import { formatClaudeDuration } from "./bash-limits.ts";
+import { FOREGROUND_TASK_AFTER_MS, type ForegroundShell, runningForegroundShells } from "./foreground-shells.ts";
 
 /** The detail view reads the file's last 8 KiB and shows its last 10 lines. */
 const DETAIL_TAIL_BYTES = 8192;

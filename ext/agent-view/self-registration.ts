@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
-import type { AgentActivity, OrchestratorClient, PaneMessage, RegisterInput } from "./orchestrator-client.ts";
-import { piCommand } from "./tmux.ts";
+import type {
+	AgentActivity,
+	OrchestratorClient,
+	PaneMessage,
+	RegisterInput,
+} from "../../daemon/orchestrator-client.ts";
+import { piCommand } from "../../daemon/tmux.ts";
 
 export interface SelfSessionInfo {
 	cwd: string;

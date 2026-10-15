@@ -36,7 +36,7 @@ dependency); it is not how `pi install` loads this package.
 package.json    the pi package manifest (pi.extensions, pi.themes, peer dependencies)
 bin.mjs         convenience entry point for local runs
 themes/         the bluclawd themes: Claude Code's six palettes
-daemon/         agent view's session registry (state in ~/.pi/server, or $PI_SERVER_DIR)
+daemon/         agent view's session registry (state in ~/.pi/server, or $PI_SERVER_DIR), and its client, tmux and row code the extensions share
 ext/            the feature layer, one directory per extension
   _shared/      cross-extension state (via globalThis), settings readers, vendored pi internals
 scripts/        probe-extensions.ts — headless report of what each extension registers
@@ -97,8 +97,8 @@ npm test      # confirm nothing broke against the new pi
 ```
 
 There is no upstream merge here — this repo owns no pi source to merge into.
-The dependency this actually has on pi's internals: `ext/_shared/` vendors a
-handful of small pi functions/tables that pi does not export publicly
+The dependency this actually has on pi's internals: `ext/_shared/` (and
+`daemon/ansi.ts`) vendor a handful of small pi functions/tables that pi does not export publicly
 (`stripAnsi`, the built-in slash-command list, a security-relevant path
 resolver). Each is documented in its own file with what drifts
 if pi changes it — mostly cosmetic (a stale `/help` line), one

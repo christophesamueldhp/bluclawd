@@ -1,7 +1,7 @@
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { backgroundBashJobs } from "../ext/_shared/background-bash.ts";
-import { formatClaudeDuration } from "../ext/_shared/bash-limits.ts";
+import { backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
+import { formatClaudeDuration } from "../ext/background-bash/bash-limits.ts";
 import { backgroundStartText, createClaudeBashTool } from "../ext/background-bash/bash-tool.ts";
 
 /** Operations whose runs the test ends; each call is recorded with its timeout. */
@@ -143,7 +143,7 @@ describe("timeouts", () => {
 	});
 
 	it("CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS moves the main agent's command sooner, never under 2s", async () => {
-		const { autoBackgroundTimeoutMs } = await import("../ext/_shared/bash-limits.ts");
+		const { autoBackgroundTimeoutMs } = await import("../ext/background-bash/bash-limits.ts");
 		vi.stubEnv("CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS", "500");
 		expect(autoBackgroundTimeoutMs(120_000, { isMain: true, canAutoBackground: true })).toBe(2000);
 		expect(autoBackgroundTimeoutMs(120_000, { isMain: false, canAutoBackground: true })).toBe(120_000);

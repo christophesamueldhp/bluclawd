@@ -5,11 +5,11 @@ import { join } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import type { OrchestratorClient } from "../daemon/orchestrator-client.ts";
+import { rowFromShell } from "../daemon/rows.ts";
+import { type ShellInfo, Tmux } from "../daemon/tmux.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
-import type { OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
-import { rowFromShell } from "../ext/agent-view/rows.ts";
-import { type ShellInfo, Tmux } from "../ext/agent-view/tmux.ts";
 
 const plainTheme = {
 	fg: (_c: string, s: string) => s,

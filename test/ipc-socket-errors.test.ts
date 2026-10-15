@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { sendIpcRequest } from "../daemon/ipc/client.ts";
 import { startIpcServer } from "../daemon/ipc/server.ts";
-import { OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
+import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 
 /** Every client socket the code under test opens, so a test can fail one after the reply. */
 const clientSockets: net.Socket[] = [];

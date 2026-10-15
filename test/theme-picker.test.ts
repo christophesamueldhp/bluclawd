@@ -1,6 +1,6 @@
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { beforeAll, describe, expect, it } from "vitest";
-import { stripAnsi } from "../ext/_shared/ansi.ts";
+import { stripAnsi } from "../daemon/ansi.ts";
 import { AUTO_THEME, ThemePicker, themeOptions } from "../ext/branding/theme-picker.ts";
 
 const theme = { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => t, bold: (t: string) => t } as any;

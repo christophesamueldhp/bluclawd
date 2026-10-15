@@ -1,14 +1,14 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import type { InstanceSummary, OrchestratorClient } from "../daemon/orchestrator-client.ts";
+import { collectRows } from "../daemon/rows.ts";
 import { ServerSupervisor } from "../daemon/supervisor.ts";
+import { HIDE_ENV, OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../daemon/tmux.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
 import { isBlankPane, paneArgs, shutdownPlan } from "../ext/agent-view/index.ts";
-import type { InstanceSummary, OrchestratorClient } from "../ext/agent-view/orchestrator-client.ts";
-import { collectRows } from "../ext/agent-view/rows.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
-import { HIDE_ENV, OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../ext/agent-view/tmux.ts";
 
 const plainTheme = {
 	fg: (_c: string, s: string) => s,

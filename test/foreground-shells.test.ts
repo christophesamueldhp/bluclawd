@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { type BackgroundExec, backgroundBashJobs } from "../ext/_shared/background-bash.ts";
+import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
 import {
 	detachAll,
 	detachableExec,
 	runningForegroundShells,
 	ShellDetachedError,
-} from "../ext/_shared/foreground-shells.ts";
+} from "../ext/background-bash/foreground-shells.ts";
 
 /** An exec whose output and exit the test drives. */
 function controlled() {

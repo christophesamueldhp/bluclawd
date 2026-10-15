@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleIpcRequest } from "../daemon/handler.ts";
 import { startIpcServer } from "../daemon/ipc/server.ts";
+import { OrchestratorClient, type PaneMessage } from "../daemon/orchestrator-client.ts";
 import { supervisor } from "../daemon/supervisor.ts";
-import { OrchestratorClient, type PaneMessage } from "../ext/agent-view/orchestrator-client.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
 
 /** A real daemon socket in a temp PI_SERVER_DIR, with a pane's registration as its client. */

@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { type BackgroundExec, BackgroundJobRegistry } from "../ext/_shared/background-bash.ts";
-import { notificationContent } from "../ext/_shared/monitor-events.ts";
+import { type BackgroundExec, BackgroundJobRegistry } from "../ext/background-bash/background-bash.ts";
+import { notificationContent } from "../ext/background-bash/monitor-events.ts";
 import {
 	findOrphanShells,
 	orphanShellMessage,
 	SHELL_END_ENTRY,
 	SHELL_START_ENTRY,
 	type ShellStartRecord,
-} from "../ext/_shared/orphan-shells.ts";
+} from "../ext/background-bash/orphan-shells.ts";
 
 const start = (taskId: string): { type: string; customType: string; data: ShellStartRecord } => ({
 	type: "custom",

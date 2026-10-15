@@ -2,9 +2,9 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type BackgroundExec, BackgroundJobRegistry, jobOutcome } from "../ext/_shared/background-bash.ts";
-import { classifyExit } from "../ext/_shared/exit-status.ts";
-import { taskExitSummary } from "../ext/_shared/monitor-events.ts";
+import { type BackgroundExec, BackgroundJobRegistry, jobOutcome } from "../ext/background-bash/background-bash.ts";
+import { classifyExit } from "../ext/background-bash/exit-status.ts";
+import { taskExitSummary } from "../ext/background-bash/monitor-events.ts";
 
 describe("classifyExit (Claude Code's xle/a6t)", () => {
 	it.each([

@@ -1,7 +1,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import { piPackageRoot } from "./orchestrator-client.ts";
+import { piPackageRoot } from "../../daemon/orchestrator-client.ts";
 
 export interface AgentClipboard {
 	image?: ImageContent;

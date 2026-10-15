@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { OrchestratorClient, PaneMessage, RegisterInput } from "../ext/agent-view/orchestrator-client.ts";
+import type { OrchestratorClient, PaneMessage, RegisterInput } from "../daemon/orchestrator-client.ts";
+import { piCommand } from "../daemon/tmux.ts";
 import { deriveLabel, ForegroundActivity, SelfRegistration } from "../ext/agent-view/self-registration.ts";
-import { piCommand } from "../ext/agent-view/tmux.ts";
 
 describe("ForegroundActivity (what the roster shows for THIS window)", () => {
 	it("starts idle, works during an agent run, and settles back to idle", () => {

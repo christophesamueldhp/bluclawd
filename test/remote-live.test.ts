@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LiveSnapshot } from "../ext/agent-view/orchestrator-client.ts";
+import type { LiveSnapshot } from "../daemon/orchestrator-client.ts";
 import { LiveForwarder, latestOnly } from "../ext/remote/live.ts";
 
 const assistant = (...content: unknown[]) => ({ role: "assistant", content });

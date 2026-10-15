@@ -9,7 +9,7 @@
 
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { currentDaemonBuildId, OrchestratorClient, piPackageRoot } from "./orchestrator-client.ts";
+import { currentDaemonBuildId, OrchestratorClient, piPackageRoot } from "../../daemon/orchestrator-client.ts";
 
 /** What it takes to keep a session in agent view once its pi has quit. */
 export interface BackgroundableSession {

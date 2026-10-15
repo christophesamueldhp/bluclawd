@@ -15,7 +15,7 @@ import {
 	SEQUENCES,
 	type SequenceName,
 	withHold,
-} from "./mascot.ts";
+} from "../_shared/mascot.ts";
 
 const bold = (text: string) => `\x1b[1m${text}\x1b[22m`;
 const faint = (text: string) => `\x1b[2m${text}\x1b[22m`;

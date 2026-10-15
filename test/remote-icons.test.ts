@@ -5,7 +5,7 @@ import photon from "@silvia-odwyer/photon-node";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type RemoteServer, startRemoteServer } from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
-import { BODY_COLOR, EYE_COLOR } from "../ext/branding/mascot.ts";
+import { BODY_COLOR, EYE_COLOR } from "../ext/_shared/mascot.ts";
 import { ICONS, renderIcon, WEB_DIR } from "../scripts/pwa-icons.ts";
 
 function decode(bytes: Buffer): { width: number; height: number; pixels: Uint8Array } {

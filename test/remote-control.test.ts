@@ -8,7 +8,7 @@ import type { InstanceSummary } from "../daemon/ipc/protocol.ts";
 import { RemoteControl } from "../daemon/remote/control.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { PushResult, WebPushSubscription } from "../daemon/remote/webpush.ts";
-import { Tmux } from "../ext/agent-view/tmux.ts";
+import { Tmux } from "../daemon/tmux.ts";
 import { validP256dh } from "./support/push.ts";
 
 describe("remote control switch", () => {

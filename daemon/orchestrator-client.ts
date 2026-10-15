@@ -3,34 +3,11 @@ import { readFileSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { daemonBuildId, getSocketPath } from "../../daemon/paths.ts";
+import type { InstanceSummary } from "./ipc/protocol.ts";
+import { daemonBuildId, getSocketPath } from "./paths.ts";
 
 export type AgentActivity = "idle" | "working" | "awaiting_input";
-type InstanceStatus = "starting" | "online" | "stopping" | "stopped" | "error";
-
-export interface InstanceSummary {
-	id: string;
-	status: InstanceStatus;
-	cwd: string;
-	label?: string;
-	sessionId?: string;
-	sessionFile?: string;
-	createdAt?: string;
-	lastSeenAt?: string;
-	activity?: AgentActivity;
-	external?: boolean;
-	detail?: string;
-	outcome?: "done" | "failed" | "stopped";
-	turns?: number;
-	finishedAt?: string;
-	pinned?: boolean;
-	sortOrder?: number;
-	/** The tmux session its interactive pi runs in. */
-	pane?: string;
-	leafId?: string;
-	/** A stored row a phone is resuming: its pane has not registered yet. */
-	resuming?: boolean;
-}
+export type { InstanceSummary };
 
 export interface RegisterInput {
 	id: string;
@@ -144,7 +121,7 @@ interface AnyResponse {
 function daemonCliPath(): string {
 	// This package ships its own daemon (daemon/cli.ts, run by node's native type stripping);
 	// `@earendil-works/pi-server` is not a dependency here.
-	return join(dirname(fileURLToPath(import.meta.url)), "..", "..", "daemon", "cli.ts");
+	return join(dirname(fileURLToPath(import.meta.url)), "cli.ts");
 }
 
 /**

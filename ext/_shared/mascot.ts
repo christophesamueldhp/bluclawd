@@ -2,7 +2,7 @@
  * The bluclawd mascot as a pixel grid, its poses, its animation sequences, and a
  * renderer to terminal block glyphs.
  *
- * `mascot.svg` is the source: it embeds a 2000×1500 raster (a color image and a
+ * `ext/branding/mascot.svg` is the source: it embeds a 2000×1500 raster (a color image and a
  * luminance mask) that is pixel art on a 20×15 grid of 100 px blocks.
  * `SOURCE` below is that grid, and a test checks it against the SVG. Every pose
  * only moves parts of the grid — eyes, arms, the whole sprite — and never

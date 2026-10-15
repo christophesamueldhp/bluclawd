@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { daemonCommand } from "../ext/agent-view/orchestrator-client.ts";
+import { daemonCommand } from "../daemon/orchestrator-client.ts";
 import {
 	type AutostartDeps,
 	autostartDeps,

@@ -11,7 +11,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getServerDir } from "../../daemon/paths.ts";
+import { getServerDir } from "./paths.ts";
 
 /** Set in a pane's environment: the tmux session its pi runs in. */
 export const PANE_ENV = "BLUCLAWD_PANE";

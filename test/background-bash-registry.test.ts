@@ -6,13 +6,13 @@ import {
 	looksLikePrompt,
 	STALL_MS,
 	STALL_POLL_MS,
-} from "../ext/_shared/background-bash.ts";
+} from "../ext/background-bash/background-bash.ts";
 
-type Registry = typeof import("../ext/_shared/background-bash.ts");
+type Registry = typeof import("../ext/background-bash/background-bash.ts");
 
 /** Two separately-loaded copies of the module, as pi's loader gives two top-level extensions. */
 async function twoCopies(): Promise<[Registry, Registry]> {
-	const path = new URL("../ext/_shared/background-bash.ts", import.meta.url).pathname;
+	const path = new URL("../ext/background-bash/background-bash.ts", import.meta.url).pathname;
 	const a = (await import(`${path}?copy=a`)) as Registry;
 	const b = (await import(`${path}?copy=b`)) as Registry;
 	expect(a.BackgroundJobRegistry).not.toBe(b.BackgroundJobRegistry);

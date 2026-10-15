@@ -2,14 +2,14 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { type BackgroundExec, BackgroundJobRegistry, jobOutcome } from "../ext/_shared/background-bash.ts";
-import { taskExitSummary } from "../ext/_shared/monitor-events.ts";
+import { type BackgroundExec, BackgroundJobRegistry, jobOutcome } from "../ext/background-bash/background-bash.ts";
+import { taskExitSummary } from "../ext/background-bash/monitor-events.ts";
 import {
 	deliverOrHold,
 	heldNotifications,
 	heldNotificationsLine,
 	holdNotifications,
-} from "../ext/_shared/notification-hold.ts";
+} from "../ext/background-bash/notification-hold.ts";
 
 describe("updates wait while the tasks panel is open (Claude Code 2.1.278)", () => {
 	it("delivers at once without a hold, and on release with one", () => {

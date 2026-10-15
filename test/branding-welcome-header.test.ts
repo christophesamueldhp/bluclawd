@@ -1,6 +1,6 @@
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
-import { FRAME_MS, SEQUENCES } from "../ext/branding/mascot.ts";
+import { FRAME_MS, SEQUENCES } from "../ext/_shared/mascot.ts";
 import {
 	type Clock,
 	elidePath,

@@ -18,18 +18,18 @@ import {
 	matchesKey,
 	type TUI,
 } from "@earendil-works/pi-tui";
+import { type InstanceSummary, OrchestratorClient, type PaneMessage } from "../../daemon/orchestrator-client.ts";
+import { collectRows, labelFromTask } from "../../daemon/rows.ts";
 import { lastLine, textOf, toolActivity } from "../../daemon/session-state.ts";
+import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, Tmux } from "../../daemon/tmux.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
-import { trustBadge } from "../permissions/index.ts";
+import { trustBadge } from "../_shared/trust-badge.ts";
 import { AgentView, EXIT_WORDS, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, handOffAfterExit } from "./hand-off.ts";
-import { type InstanceSummary, OrchestratorClient, type PaneMessage } from "./orchestrator-client.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
-import { collectRows, labelFromTask } from "./rows.ts";
 import { deriveLabel, ForegroundActivity, SelfRegistration, type SelfSessionInfo } from "./self-registration.ts";
-import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, Tmux } from "./tmux.ts";
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;

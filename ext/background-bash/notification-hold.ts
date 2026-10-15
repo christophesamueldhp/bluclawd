@@ -4,7 +4,7 @@
  * The panel and the senders live in separate module graphs, so the hold is a sharedRef.
  */
 
-import { notifyListeners, sharedRef } from "./global-state.ts";
+import { notifyListeners, sharedRef } from "../_shared/global-state.ts";
 
 const state = sharedRef("notificationHold", {
 	holds: 0,

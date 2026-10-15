@@ -3,7 +3,7 @@
  * is blocked on a prompt, running a turn, or idle; the band order puts what needs you on top. Pure — the view renders what these functions return.
  */
 
-import type { InstanceSummary } from "./orchestrator-client.ts";
+import type { InstanceSummary } from "./ipc/protocol.ts";
 import type { ShellInfo } from "./tmux.ts";
 
 export type RowState = "working" | "needs" | "idle" | "done" | "failed" | "stopped";

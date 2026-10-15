@@ -2,7 +2,8 @@
  * The main session's background subagent runs, as `/tasks` and the footer see
  * them. Subagents and background-bash load in separate module graphs, so the
  * source crosses over through sharedRef; only the root session's subagents
- * instance publishes one (a nested child has no background runs).
+ * instance publishes one (a nested child has no background runs). No extension
+ * in this package publishes one yet: this is the hook a subagents extension uses.
  */
 
 import { notifyListeners, sharedRef } from "./global-state.ts";

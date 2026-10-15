@@ -9,7 +9,7 @@ vi.mock("node:child_process", async (actual) => ({
 	execFileSync,
 }));
 
-const { Tmux } = await import("../ext/agent-view/tmux.ts");
+const { Tmux } = await import("../daemon/tmux.ts");
 
 describe("tmux command timeout", () => {
 	const dir = mkdtempSync(join(tmpdir(), "bc-tmux-timeout-"));

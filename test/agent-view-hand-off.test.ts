@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { currentDaemonBuildId } from "../ext/agent-view/orchestrator-client.ts";
+import { currentDaemonBuildId } from "../daemon/orchestrator-client.ts";
 
 const HELPER = join(import.meta.dirname, "..", "ext", "agent-view", "hand-off.ts");
 

@@ -1,6 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ViewMode } from "./rows.ts";
+import type { ViewMode } from "../../daemon/rows.ts";
 
 const PREFS_FILE = "agent-view-prefs.json";
 

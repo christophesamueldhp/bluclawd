@@ -2,8 +2,8 @@ import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Tmux } from "../daemon/tmux.ts";
 import agentView from "../ext/agent-view/index.ts";
-import { Tmux } from "../ext/agent-view/tmux.ts";
 
 /** A PATH holding only a `tmux` that answers `-V`, or nothing at all. */
 function pathWith(tmux: boolean): string {

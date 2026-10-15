@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { stripAnsi } from "../ext/_shared/ansi.ts";
-import { type BackgroundExec, backgroundBashJobs } from "../ext/_shared/background-bash.ts";
-import { detachableExec, runningForegroundShells } from "../ext/_shared/foreground-shells.ts";
+import { stripAnsi } from "../daemon/ansi.ts";
+import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
+import { detachableExec, runningForegroundShells } from "../ext/background-bash/foreground-shells.ts";
 import { TasksDialog } from "../ext/background-bash/tasks-dialog.ts";
 
 const theme = { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => t, bold: (t: string) => t } as any;

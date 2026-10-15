@@ -19,7 +19,7 @@ import {
 	SEQUENCES,
 	SOURCE,
 	withHold,
-} from "../ext/branding/mascot.ts";
+} from "../ext/_shared/mascot.ts";
 
 const POSES: Pose[] = ["default", "look-left", "look-right", "arms-up"];
 const GLYPHS: Glyphs[] = ["octant", "halfblock"];

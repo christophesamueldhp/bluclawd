@@ -10,7 +10,7 @@ import type { BashOperations, ToolDefinition } from "@earendil-works/pi-coding-a
 import { createBashTool, createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { type Static, Type } from "typebox";
-import { type BackgroundJobInfo, backgroundBashJobs } from "../_shared/background-bash.ts";
+import { type BackgroundJobInfo, backgroundBashJobs } from "./background-bash.ts";
 import {
 	autoBackgroundTimeoutMs,
 	backgroundTasksDisabled,
@@ -19,8 +19,8 @@ import {
 	effectiveTimeoutMs,
 	formatClaudeDuration,
 	maxTimeoutMs,
-} from "../_shared/bash-limits.ts";
-import { type DetachReason, detachableExec, ShellDetachedError } from "../_shared/foreground-shells.ts";
+} from "./bash-limits.ts";
+import { type DetachReason, detachableExec, ShellDetachedError } from "./foreground-shells.ts";
 import {
 	EVENT_DELIVERY,
 	type EventDelivery,
@@ -29,8 +29,8 @@ import {
 	shouldNotifyExit,
 	taskExitMessage,
 	taskStallMessage,
-} from "../_shared/monitor-events.ts";
-import type { ShellStartRecord } from "../_shared/orphan-shells.ts";
+} from "./monitor-events.ts";
+import type { ShellStartRecord } from "./orphan-shells.ts";
 
 const DESCRIPTION_TEXT = `Clear, concise description of what this command does in active voice. Never use words like "complex" or "risk" in the description - just describe what it does.
 

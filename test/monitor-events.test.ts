@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { BackgroundJobInfo } from "../ext/_shared/background-bash.ts";
-import { splitLines } from "../ext/_shared/lines.ts";
+import type { BackgroundJobInfo } from "../ext/background-bash/background-bash.ts";
+import { splitLines } from "../ext/background-bash/lines.ts";
 import {
 	EventBatcher,
 	eventText,
@@ -17,7 +17,7 @@ import {
 	taskExitMessage,
 	taskExitSummary,
 	taskStallMessage,
-} from "../ext/_shared/monitor-events.ts";
+} from "../ext/background-bash/monitor-events.ts";
 
 describe("splitLines", () => {
 	it("returns whole lines and carries the partial tail", () => {

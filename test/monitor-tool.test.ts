@@ -1,6 +1,6 @@
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type BackgroundExec, BackgroundJobRegistry } from "../ext/_shared/background-bash.ts";
+import { type BackgroundExec, BackgroundJobRegistry } from "../ext/background-bash/background-bash.ts";
 import { createMonitorTool, stdoutOnly, websocketExec } from "../ext/background-bash/monitor-tool.ts";
 
 function harness(exec: BackgroundExec) {

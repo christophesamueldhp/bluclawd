@@ -5,12 +5,13 @@
 
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { monitorSource } from "../_shared/monitor-source.ts";
 import {
 	type BackgroundExec,
 	type BackgroundJobInfo,
 	type BackgroundJobRegistry,
 	backgroundBashJobs,
-} from "../_shared/background-bash.ts";
+} from "./background-bash.ts";
 import {
 	EVENT_DELIVERY,
 	EventBatcher,
@@ -22,8 +23,7 @@ import {
 	type OutgoingMessage,
 	TokenBucket,
 	taskExitMessage,
-} from "../_shared/monitor-events.ts";
-import { monitorSource } from "../_shared/monitor-source.ts";
+} from "./monitor-events.ts";
 
 /**
  * Claude Code's bounded monitor: every watch expires. `timeout_ms` defaults to 5

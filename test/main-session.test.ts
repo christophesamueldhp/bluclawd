@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clearMainSession, mainSession, setMainSession } from "../ext/_shared/main-session.ts";
+import { clearMainSession, mainSession, setMainSession } from "../ext/background-bash/main-session.ts";
 
 describe("main session sink (background jobs outlive a session switch)", () => {
 	it("sends to the current main session, and holds what arrives between sessions for the next", () => {

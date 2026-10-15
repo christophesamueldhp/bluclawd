@@ -5,7 +5,7 @@
 import { existsSync } from "node:fs";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { PaneMessage, PaneReport } from "../agent-view/orchestrator-client.ts";
+import type { PaneMessage, PaneReport } from "../../daemon/orchestrator-client.ts";
 
 type ReportModel = PaneReport["models"][number];
 

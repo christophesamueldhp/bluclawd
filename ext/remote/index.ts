@@ -13,14 +13,14 @@ import type {
 	InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
-import { remotePort } from "../_shared/settings.ts";
 import {
 	currentDaemonBuildId,
 	OrchestratorClient,
 	type PaneMessage,
 	type RemoteResult,
-} from "../agent-view/orchestrator-client.ts";
-import { piCommand, Tmux } from "../agent-view/tmux.ts";
+} from "../../daemon/orchestrator-client.ts";
+import { piCommand, Tmux } from "../../daemon/tmux.ts";
+import { remotePort } from "../_shared/settings.ts";
 import { autostartDeps, autostartOn, autostartStatus, refreshAutostart, toggleAutostart } from "./autostart.ts";
 import { LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";

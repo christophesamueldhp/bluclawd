@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { type BackgroundExec, backgroundBashJobs, shellTaskStop } from "../ext/_shared/background-bash.ts";
+import { type BackgroundExec, backgroundBashJobs, shellTaskStop } from "../ext/background-bash/background-bash.ts";
 import backgroundBash from "../ext/background-bash/index.ts";
 
 /** An exec that runs until it is aborted. */

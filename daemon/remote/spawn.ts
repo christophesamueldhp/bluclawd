@@ -3,8 +3,8 @@
  * view's composer and peek reply give it, so the session is the same as one started on the Mac.
  */
 import { existsSync } from "node:fs";
-import { Tmux } from "../../ext/agent-view/tmux.ts";
 import type { PaneLaunch } from "../ipc/protocol.ts";
+import { Tmux } from "../tmux.ts";
 
 /** Its files are still there: a pane started with a node or pi that has moved since (an upgrade)
  *  would die at once. */
