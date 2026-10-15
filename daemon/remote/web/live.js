@@ -81,6 +81,16 @@ export function shortcut(text) {
 }
 
 /**
+ * The commands the phone does not send: they drive the Mac's terminal (its remote control, agent
+ * view), not the session. Every other "/" line goes, and runs as a command or template in the pane.
+ * @param {string} text
+ */
+export function refused(text) {
+	const command = text.trim();
+	return command.startsWith("/remote-control") || command.startsWith("/agent-view");
+}
+
+/**
  * A message of yours as pi's editor holds it, for the reply box or the clipboard: the transcript
  * shows each image as an `[Image]` line, and only the text is kept.
  * @param {string} text

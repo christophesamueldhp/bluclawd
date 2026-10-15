@@ -85,8 +85,16 @@ export const api = {
 	sessions: async () => (await call("GET", "/api/sessions")).sessions,
 	/** @returns {Promise<string[]>} */
 	directories: async () => (await call("GET", "/api/directories")).directories,
-	/** @param {string} cwd @param {string} task @returns {Promise<{ pane: string }>} */
-	start: (cwd, task) => call("POST", "/api/sessions", { cwd, task }),
+	/** `model`: "provider/id", else pi's default. @param {string} cwd @param {string} task @param {string} [model] @returns {Promise<{ pane: string }>} */
+	start: (cwd, task, model) => call("POST", "/api/sessions", model ? { cwd, task, model } : { cwd, task }),
+	/** What a new session can start with: the running panes' models. @returns {Promise<import("./statusbar.js").ReportModel[]>} */
+	models: async () => (await call("GET", "/api/models")).models,
+	/** A pane takes the name on its next heartbeat. @param {string} id @param {string} name */
+	rename: (id, name) => call("POST", `${session(id)}/rename`, { name }),
+	/** @param {string} id @param {boolean} pinned */
+	pin: (id, pinned) => call("POST", `${session(id)}/pin`, { pinned }),
+	/** A stored row only; its session file stays on the Mac. @param {string} id */
+	deleteSession: (id) => call("DELETE", session(id)),
 	/**
 	 * The latest messages, or those before the message `before`; `more`: older ones are left.
 	 * @param {string} id @param {string} [before] @returns {Promise<{ messages: any[], more: boolean }>}
@@ -115,6 +123,11 @@ export const api = {
 		if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? `HTTP ${res.status}`);
 		return res.blob();
 	},
+	/**
+	 * A tool result's whole output, which a message cuts short.
+	 * @param {string} id @param {string} entryId @returns {Promise<{ text: string, truncated: boolean }>}
+	 */
+	output: (id, entryId) => call("GET", `${session(id)}/messages/${encodeURIComponent(entryId)}/output`),
 	/** @param {string} id */
 	abort: (id) => call("POST", `${session(id)}/abort`, {}),
 	/** @param {string} id */
