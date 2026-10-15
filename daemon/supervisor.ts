@@ -11,7 +11,8 @@ function cloneInstance(record: InstanceRecord): InstanceRecord {
 
 /** A row's agent-view meta, once it has any. */
 function paneMeta({ pinned, sortOrder }: InstanceRecord): Pick<InstanceRecord, "pinned" | "sortOrder"> | undefined {
-	return pinned !== undefined || sortOrder !== undefined ? { pinned, sortOrder } : undefined;
+	if (pinned === undefined && sortOrder === undefined) return undefined;
+	return { ...(pinned !== undefined ? { pinned } : {}), ...(sortOrder !== undefined ? { sortOrder } : {}) };
 }
 
 interface ExternalInstance {
@@ -184,7 +185,7 @@ export class ServerSupervisor {
 		// Pinned or moved while its pane ran, newer than the row it may have had before. A pane that
 		// quits does not wait to unregister, so its row may still be listed.
 		const pane = [...this.externalInstances.values()].find((e) => e.record.sessionFile === options.sessionFile);
-		const meta = this.quitMeta.get(options.sessionFile) ?? (pane && paneMeta(pane.record));
+		const meta = (pane && paneMeta(pane.record)) ?? this.quitMeta.get(options.sessionFile);
 		this.quitMeta.delete(options.sessionFile);
 		const record: InstanceRecord = {
 			...previous,
