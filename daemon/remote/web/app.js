@@ -6,13 +6,18 @@
  * updates arrive.
  */
 import { api, clearToken, getToken, pairLink, setToken, Unauthorized } from "./api.js";
-import { giveUp, promptKey, promptText, sentText, settle, shortcut, shownText } from "./live.js";
+import { diffCounts, diffHtml } from "./diff.js";
+import { ageAt, successor } from "./list.js";
+import { giveUp, promptKey, promptText, refused, sentText, settle, shortcut, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 import { filterSessions } from "./search.js";
 import { barHtml, factsHtml, thinkingHtml, tokens } from "./statusbar.js";
 
-/** @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string }} Session */
-/** @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
+/**
+ * `sessionId`: pi's, the same under another row id; `dialog`: the one it waits on, while it needs input.
+ * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string, sessionId?: string, dialog?: { kind: string, title?: string } }} Session
+ */
+/** @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
 /** @typedef {{ id: string, name: string, createdAt: string, lastUsedAt?: string, current: boolean }} Device `current`: this one */
 /** @typedef {{ mimeType: string, data: string, thumb: string }} Attachment base64 `data`, a data URL `thumb` */
@@ -57,6 +62,12 @@ const KEEP_TYPES = ["image/png", "image/gif", "image/webp"];
 const THUMB_SIDE = 160;
 /** pi redraws a moment after a key reaches it. */
 const SCREEN_SETTLE_MS = 150;
+/** Yes or No, once sent, waits this long for the row to leave its dialog before it can be sent again. */
+const ANSWERED_MS = 10_000;
+/** A pane takes a new name on its next heartbeat; the phone shows it meanwhile, this long at most. */
+const RENAME_HOLD_MS = 15_000;
+/** pi's entry ids, which a tool result's whole output is asked for by. */
+const ENTRY_ID = /^[0-9a-f-]{8,36}$/;
 /** The terminal sheet's keys: tmux's name, the button's face, and its spoken name when not tmux's. */
 const PRESS = [
 	["Up", "↑"],
@@ -104,6 +115,12 @@ const ERRORS = {
 	internal_error: "Something went wrong on the Mac.",
 	push_denied: "Notifications are off for bluclawd. Turn them on in Settings › Notifications.",
 	invalid_subscription: "The Mac did not accept this phone's notification subscription.",
+	invalid_name: "A name is 1 to 100 characters on one line.",
+	invalid_pinned: "The Mac did not understand that pin.",
+	session_running: "This session is running. Quit it on the Mac first, then delete it here.",
+	unknown_entry: "That output is no longer in this session.",
+	not_found: "The Mac does not know that request. It may run an older bluclawd.",
+	terminal_command: "That command drives the Mac's terminal, so the phone does not send it.",
 };
 
 const state = {
@@ -121,6 +138,7 @@ const state = {
 	attachments: [],
 	/** The open session's reply in progress, streamed by its pane. @type {LiveSnapshot | undefined} */ live: undefined,
 	/** @type {string[]} */ directories: [],
+	/** What a new session can start with. @type {import("./statusbar.js").ReportModel[]} */ models: [],
 	/** What the session list is searched for. */
 	query: "",
 	/**
@@ -172,6 +190,12 @@ const state = {
 	screen: undefined,
 	/** Keys or text are on their way to the pane. */
 	typing: false,
+	/** Yes or No went to the open session's confirm dialog at this time (see ANSWERED_MS). @type {number | undefined} */
+	answered: undefined,
+	/** The open session's new name is on its way. */
+	saving: false,
+	/** Its Delete asks to be confirmed. */
+	confirmDelete: false,
 	/** The terminal sheet's own error code, so the banner keeps its Answer button. @type {string | undefined} */
 	termError: undefined,
 	/** @type {string | undefined} */ error: undefined,
@@ -241,6 +265,17 @@ let pendingId = 0;
 let followed;
 /** The open chat was opened from the list, whose history entry "‹ Sessions" goes back to. */
 let backToList = false;
+/** The open chat's pi session, as last listed: its row may go, and the chat follows it to its next one. @type {string | undefined} */
+let openSessionId;
+/** The last notice a pane's report carried (its `at`): each shows once. @type {number | undefined} */
+let noticeAt;
+/** A name just given, shown until the list has it (see holdRename). @type {{ id: string, name: string, until: number } | undefined} */
+let renamed;
+/**
+ * The open session's tool results asked for in full, by entry id: the text, or why it is not there.
+ * @type {Map<string, { text?: string, truncated?: boolean, error?: string, loading?: boolean }>}
+ */
+const outputs = new Map();
 /** The count on the app's badge; none set yet. */
 let badged = -1;
 /**
@@ -353,6 +388,7 @@ async function loadSessions() {
 		const asked = Date.now();
 		const was = state.sessions.find((s) => s.id === state.open)?.state;
 		state.sessions = await api.sessions();
+		holdRename();
 		const now = state.sessions.find((s) => s.id === state.open)?.state;
 		if (now === "working") {
 			for (const p of state.pending) if (p.sentAt < asked) p.started = true;
@@ -380,8 +416,39 @@ async function loadSessions() {
 				return;
 			}
 		}
+		// The open session under another row id (it quit on the Mac, or resumed there): followed as a
+		// resume from here is, unless that resume is the one under way.
+		const open = state.sessions.find((s) => s.id === state.open);
+		if (open) openSessionId = open.sessionId;
+		else if (state.open && state.starting?.from !== state.open) {
+			const next = successor(state.sessions, state.open, openSessionId);
+			if (next) {
+				followed = next;
+				location.replace(`#s/${encodeURIComponent(next)}`);
+				return;
+			}
+		}
 		render();
-		if (!state.open) void loadDirectories();
+		if (!state.open) {
+			void loadDirectories();
+			void loadModels();
+		}
+	} catch (error) {
+		loadError(error);
+	}
+}
+
+/** A name given from here shows until the list has it, or RENAME_HOLD_MS (a pane that did not take it). */
+function holdRename() {
+	const row = renamed && state.sessions.find((s) => s.id === renamed?.id);
+	if (!renamed || !row || row.label === renamed.name || Date.now() > renamed.until) renamed = undefined;
+	else row.label = renamed.name;
+}
+
+async function loadModels() {
+	try {
+		state.models = await api.models();
+		render();
 	} catch (error) {
 		loadError(error);
 	}
@@ -519,6 +586,14 @@ async function loadStatus() {
 	}
 	if (state.open !== id || request !== statusRequest) return;
 	state.report = report;
+	// The pane skipped a fork, clone or edit sent from here: it will not move, so nothing waits on it.
+	const skipped = report?.notice;
+	if (skipped && skipped.at !== noticeAt) {
+		noticeAt = skipped.at;
+		endNavigating();
+		showError(skipped.text);
+		return;
+	}
 	render();
 }
 
@@ -725,6 +800,7 @@ function listShell() {
 <div id="banner"></div><div class="search"><input type="search" id="search" placeholder="Search" aria-label="Search sessions" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search"></div>
 <section class="scroll" id="rows"></section>
 <form class="composer new" id="new-task"><textarea id="task" rows="1" placeholder="New task…" aria-label="New task" maxlength="32768"></textarea>
+<select class="pick" id="new-model" aria-label="Model" hidden></select>
 <div class="where"><select id="cwd" aria-label="Directory"></select>
 <input id="cwd-other" placeholder="/path/to/project" aria-label="Directory path" autocapitalize="off" autocomplete="off" spellcheck="false" hidden>
 <button class="start" id="start">Start</button></div></form>`;
@@ -735,7 +811,7 @@ function rowHtml(s) {
 	const glyph = s.state === "needs" ? "✻" : s.state === "working" ? "" : "∙";
 	return `<a class="row" href="#s/${encodeURIComponent(s.id)}"><span class="glyph ${esc(s.state)}" aria-hidden="true">${glyph}</span>
 <span class="name">${esc(s.label)}<small>${esc(s.detail || s.state)}</small></span>
-<span class="age">${age(s.finishedAt ?? s.createdAt)}</span></a>`;
+<span class="age">${age(ageAt(s))}</span></a>`;
 }
 
 function rowsHtml() {
@@ -782,11 +858,32 @@ function picturesHtml(m) {
 function toolHtml(name, summary, result, key, running = false) {
 	const title = `${esc(name.charAt(0).toUpperCase() + name.slice(1))}(${esc(summary)})`;
 	if (!result) return `<div class="t${running ? " running" : ""}">${title}</div>`;
-	const text = shownText(result.text ?? "", result.images);
+	const head = `<details class="t${result.ok ? "" : " err"}" data-key="${esc(key)}"><summary>${title}<br>⎿ `;
+	// An edit shows what it changed, rather than that it did.
+	if (result.diff) {
+		const { added, removed } = diffCounts(result.diff);
+		return `${head}<span class="plus">+${added}</span> <span class="minus">−${removed}</span></summary>
+${diffHtml(result.diff, result.diffTruncated)}</details>${picturesHtml(result)}`;
+	}
+	const full = outputs.get(result.id);
+	const text = shownText(full?.text ?? result.text ?? "", result.images);
+	const cut = full?.text !== undefined ? full.truncated : result.truncated;
 	const first = text.split("\n").find((line) => line.trim()) ?? (result.ok ? "done" : "error");
 	// Its images show without opening it.
-	return `<details class="t${result.ok ? "" : " err"}" data-key="${esc(key)}"><summary>${title}<br>⎿ ${esc(first)}</summary>
-<pre>${esc(text)}${result.truncated ? "\n…" : ""}</pre></details>${picturesHtml(result)}`;
+	return `${head}${esc(first)}</summary>
+<pre>${esc(text)}${cut ? "\n…" : ""}</pre>${fullOutputHtml(result, full)}</details>${picturesHtml(result)}`;
+}
+
+/**
+ * The button that fetches a cut-short output whole (see loadOutput), and why it failed if it did.
+ * An old session file's messages have no ids to ask by.
+ * @param {Message} result @param {{ text?: string, error?: string, loading?: boolean } | undefined} full
+ */
+function fullOutputHtml(result, full) {
+	if (!result.truncated || !ENTRY_ID.test(result.id) || full?.text !== undefined) return "";
+	const error = full?.error ? `<p class="error">${esc(full.error)}</p>` : "";
+	const label = full?.loading ? "Loading…" : full?.error ? "Try again" : "Show full output";
+	return `${error}<button type="button" class="full" data-entry="${esc(result.id)}"${full?.loading ? " disabled" : ""}>${label}</button>`;
 }
 
 /**
@@ -887,7 +984,13 @@ function bannerHtml(session) {
 	const error = state.error ? `<div class="banner off">${esc(state.error)}</div>` : "";
 	// An error does not hide the way to answer.
 	if (session?.state === "needs") {
-		return `${error}<div class="banner needs"><span>This session is waiting for an answer to a dialog. A reply sent here becomes its next prompt.</span>
+		const title = session.dialog?.title;
+		const text = title
+			? `Waiting: ${esc(title)}`
+			: "This session is waiting for an answer to a dialog. A reply sent here becomes its next prompt.";
+		// Answer stays beside Yes and No: the screen shows what is being confirmed.
+		const confirm = isConfirm(session);
+		return `${error}<div class="banner needs${confirm ? " confirm" : ""}"><span>${text}</span>${confirm ? replyHtml() : ""}
 <button class="answer" id="answer" aria-haspopup="dialog">Answer</button></div>`;
 	}
 	if (error) return error;
@@ -896,6 +999,17 @@ function bannerHtml(session) {
 <button class="dismiss" id="dismiss-hint" aria-label="Dismiss">×</button></div>`;
 	}
 	return "";
+}
+
+/** @param {Session | undefined} session */
+function isConfirm(session) {
+	return session?.state === "needs" && session.dialog?.kind === "confirm";
+}
+
+/** A confirm dialog's answers, held back while one is on its way or just went (see replyConfirm). */
+function replyHtml() {
+	const disabled = state.typing || state.answered !== undefined ? " disabled" : "";
+	return `<button class="reply" data-reply="yes"${disabled}>Yes</button><button class="reply" data-reply="no"${disabled}>No</button>`;
 }
 
 /** @param {Report} report */
@@ -947,6 +1061,26 @@ ${thinkingHtml(report)}
 ${factsHtml(report, session && shortPath(session.cwd), Date.now())}
 </dl><button class="compact" id="compact"${busy ? " disabled" : ""}>${state.compacting ? "Compacting…" : "Compact"}</button>
 <button class="compact clone" id="clone"${busy ? " disabled" : ""}>Clone session</button>`;
+}
+
+/** Built once each time the sheet opens, so what is typed stays while the rest refreshes. @param {Session | undefined} session */
+function renameHtml(session) {
+	return `<form class="rename" id="rename-form"><label for="rename">Name</label>
+<input id="rename" value="${esc(session?.label ?? "")}" maxlength="100" autocomplete="off" enterkeyhint="done">
+<button class="save" id="rename-save">Save</button></form>`;
+}
+
+/** Pin, and for a stored session (none runs it) Delete, which asks first. @param {Session | undefined} session */
+function manageHtml(session) {
+	if (!session) return "";
+	const pinned = session.band === "pinned";
+	const pin = `<button class="action" id="pin">${pinned ? "Unpin" : "Pin"}<small>${pinned ? "Back in its band in the list." : "At the top of the list."}</small></button>`;
+	if (session.alive) return `<div class="actions">${pin}</div>`;
+	const remove = state.confirmDelete
+		? `<div class="confirm-delete"><span>Delete it from the list? Its session file stays on the Mac.</span>
+<button class="unpair cancel" id="delete-cancel">Cancel</button><button class="unpair" id="delete-confirm">Delete</button></div>`
+		: `<button class="action danger" id="delete">Delete<small>Off the list; its session file stays on the Mac.</small></button>`;
+	return `<div class="actions">${pin}${remove}</div>`;
 }
 
 /**
@@ -1036,6 +1170,7 @@ function terminalHtml() {
 	).join("");
 	return `<header class="sheet-bar"><h2>Answer</h2><button class="close" id="sheet-close">Done</button></header>
 <p class="error" id="term-error" hidden></p><pre class="screen" id="screen" tabindex="0" aria-label="The session's screen"></pre>
+<div class="confirm-keys" id="confirm-keys" role="group" aria-label="Answer the confirmation" hidden><button class="press" data-reply="yes">Yes</button><button class="press" data-reply="no">No</button></div>
 <div class="keys" role="group" aria-label="Keys">${keys}</div>
 <form class="term-text" id="term-form"><input id="term-input" aria-label="Text to type" placeholder="Text to type" maxlength="1024" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
 <button class="term-send" id="term-send">Send</button></form>`;
@@ -1072,6 +1207,7 @@ function updateList() {
 	}
 	$("#rows").innerHTML = rowsHtml();
 	updateDirectories();
+	updateModels();
 	const start = $("#start");
 	start.disabled = state.starting !== undefined;
 	start.textContent = state.starting ? "Starting…" : "Start";
@@ -1092,6 +1228,26 @@ function updateDirectories() {
 	$("#cwd-other").hidden = select.value !== "";
 }
 
+/** The running panes' models by provider, after "Default" (pi's own choice); none offered, no picker. */
+function updateModels() {
+	const select = $("#new-model");
+	let html = `<option value="">Default</option>`;
+	state.models.forEach((model, index) => {
+		if (model.provider !== state.models[index - 1]?.provider) {
+			html += `${index ? "</optgroup>" : ""}<optgroup label="${esc(model.provider)}">`;
+		}
+		html += `<option value="${esc(`${model.provider}/${model.id}`)}">${esc(model.name ?? model.id)}</option>`;
+	});
+	if (state.models.length) html += "</optgroup>";
+	if (select.dataset.html !== html) {
+		const chosen = select.value;
+		select.innerHTML = html;
+		select.dataset.html = html;
+		if ([...select.options].some((o) => o.value === chosen)) select.value = chosen;
+	}
+	select.hidden = state.models.length === 0;
+}
+
 function updateChat() {
 	const session = state.sessions.find((s) => s.id === state.open);
 	const resuming = state.starting?.from !== undefined && state.starting.from === state.open;
@@ -1100,6 +1256,7 @@ function updateChat() {
 	// Mid-turn, a dialog waiting on an answer included.
 	const turn = session?.state === "working" || session?.state === "needs";
 	if (!turn) state.stopping = false;
+	if (session?.state !== "needs") state.answered = undefined;
 	const stop = $("#stop");
 	stop.hidden = !turn;
 	stop.disabled = state.stopping;
@@ -1208,13 +1365,25 @@ function updateSheet(session) {
 		state.terminal ? "Answer the dialog" : state.menu ? "Message actions" : "Session status",
 	);
 	if (state.terminal) {
-		updateTerminal(sheet);
+		updateTerminal(sheet, session);
 		return;
 	}
-	const html = state.menu ? menuHtml(session, state.menu) : sheetHtml(session);
-	if (sheet.dataset.html === html) return;
-	sheet.innerHTML = html;
-	sheet.dataset.html = html;
+	if (state.menu) {
+		const html = menuHtml(session, state.menu);
+		if (sheet.dataset.html === html) return;
+		sheet.innerHTML = html;
+		sheet.dataset.html = html;
+		return;
+	}
+	// The status, then the session's name, pin and delete: each part replaced only when it changes,
+	// and the name's field not at all, so it keeps what is typed in it.
+	if (sheet.dataset.html !== "status") {
+		sheet.innerHTML = `<div class="part" id="sheet-status"></div>${renameHtml(session)}<div class="part" id="sheet-manage"></div>`;
+		sheet.dataset.html = "status";
+	}
+	updatePart($("#sheet-status"), sheetHtml(session));
+	updatePart($("#sheet-manage"), manageHtml(session));
+	$("#rename-save").disabled = state.saving;
 	// Asked for by /model: there once the report is in.
 	const model = $("#model");
 	if (state.focusModel && model) {
@@ -1223,8 +1392,12 @@ function updateSheet(session) {
 	}
 }
 
-/** Built once, so the text field keeps its text and keyboard; then only the screen changes. @param {HTMLElement} sheet */
-function updateTerminal(sheet) {
+/**
+ * Built once, so the text field keeps its text and keyboard; then only the screen changes, and
+ * whether it offers Yes and No.
+ * @param {HTMLElement} sheet @param {Session | undefined} session
+ */
+function updateTerminal(sheet, session) {
 	if (sheet.dataset.html !== "terminal") {
 		sheet.innerHTML = terminalHtml();
 		sheet.dataset.html = "terminal";
@@ -1232,8 +1405,10 @@ function updateTerminal(sheet) {
 	const error = $("#term-error");
 	error.textContent = state.termError ? errorText(state.termError) : "";
 	error.hidden = !state.termError;
+	$("#confirm-keys").hidden = !isConfirm(session);
 	const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (sheet.querySelectorAll(".press, #term-send"));
-	for (const button of buttons) button.disabled = state.typing;
+	for (const button of buttons)
+		button.disabled = state.typing || (button.dataset.reply !== undefined && state.answered !== undefined);
 	const screen = $("#screen");
 	const text = state.screen ? state.screen.join("\n") : "Loading…";
 	if (screen.textContent === text) return;
@@ -1329,7 +1504,7 @@ async function startTask() {
 	state.starting = {};
 	render();
 	try {
-		const { pane } = await api.start(cwd, value);
+		const { pane } = await api.start(cwd, value, $("#new-model").value || undefined);
 		task.value = "";
 		grow(task);
 		waitForPane(pane);
@@ -1417,12 +1592,16 @@ function bindChat() {
 	$("#title").addEventListener("click", openSheet);
 	$("#statusbar").addEventListener("click", openSheet);
 	$("#banner").addEventListener("click", (/** @type {Event} */ event) => {
-		if (/** @type {Element} */ (event.target).closest("#answer")) openTerminal();
+		const target = /** @type {Element} */ (event.target);
+		const reply = /** @type {HTMLElement | null} */ (target.closest("[data-reply]"));
+		if (reply) void replyConfirm(reply.dataset.reply === "yes");
+		else if (target.closest("#answer")) openTerminal();
 	});
 	$("#backdrop").addEventListener("click", closeSheet);
 	const sheet = $("#sheet");
 	sheet.addEventListener("click", (/** @type {Event} */ event) => {
 		const target = /** @type {Element} */ (event.target);
+		const reply = /** @type {HTMLElement | null} */ (target.closest("[data-reply]"));
 		if (target.closest("#sheet-close")) closeSheet();
 		else if (target.closest("#copy")) copyMessage();
 		else if (target.closest("#compact")) void compact();
@@ -1430,6 +1609,12 @@ function bindChat() {
 		else if (target.closest("#edit-new")) edit("fork");
 		else if (target.closest("#edit-here")) edit("tree");
 		else if (target.closest("#back-here")) goBack();
+		else if (target.closest("#pin")) void togglePin();
+		else if (target.closest("#delete, #delete-cancel")) {
+			state.confirmDelete = target.closest("#delete") !== null;
+			render();
+		} else if (target.closest("#delete-confirm")) void deleteSession();
+		else if (reply) void replyConfirm(reply.dataset.reply === "yes");
 		else if (target.closest(".press")) {
 			const key = /** @type {HTMLElement} */ (target.closest(".press")).dataset.press;
 			if (key) void answer({ keys: [key] });
@@ -1441,10 +1626,19 @@ function bindChat() {
 	});
 	sheet.addEventListener("submit", (/** @type {Event} */ event) => {
 		event.preventDefault();
+		if (/** @type {Element} */ (event.target).id === "rename-form") {
+			void rename();
+			return;
+		}
 		const text = $("#term-input")?.value;
 		if (text) void answer({ text });
 	});
 	$("#log").addEventListener("click", (/** @type {Event} */ event) => {
+		const full = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".full"));
+		if (full?.dataset.entry) {
+			void loadOutput(full.dataset.entry);
+			return;
+		}
 		const pic = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".pic"));
 		if (pic) {
 			const url = pic.dataset.pending
@@ -1476,12 +1670,16 @@ function bindChat() {
 function openSheet() {
 	state.sheetOpen = true;
 	state.error = undefined;
+	state.confirmDelete = false;
+	// A fresh name field, holding the name the session has now.
+	$("#sheet").dataset.html = "";
 	render();
 	void loadStatus();
 }
 
 function closeSheet() {
 	state.sheetOpen = false;
+	state.confirmDelete = false;
 	state.focusModel = false;
 	state.menu = undefined;
 	state.terminal = false;
@@ -1502,27 +1700,64 @@ function openTerminal() {
 	pollScreen();
 }
 
-/** Keys, or text, into the open session's pane; then its screen again. @param {{ keys: string[] } | { text: string }} input */
+/**
+ * Keys, or text, into the open session's pane; then its screen again. The keys go one a request,
+ * each once the one before is in: Escape and the key after it would reach pi as one Alt chord.
+ * @param {{ keys: string[] } | { text: string }} input @returns {Promise<boolean>} whether all of it went
+ */
 async function answer(input) {
 	const id = state.open;
-	if (!id || state.typing) return;
+	if (!id || state.typing) return false;
 	state.typing = true;
 	state.termError = undefined;
 	render();
 	try {
-		if ("keys" in input) await api.keys(id, input.keys);
+		if ("keys" in input) for (const key of input.keys) await api.keys(id, [key]);
 		else {
 			await api.type(id, input.text);
 			const field = $("#term-input");
 			if (field?.value === input.text) field.value = "";
 		}
 		setTimeout(() => void loadScreen(), SCREEN_SETTLE_MS);
+		return true;
 	} catch (error) {
-		terminalError(error);
+		// From the banner, the error shows there.
+		if (state.terminal) terminalError(error);
+		else handleError(error);
+		return false;
 	} finally {
 		state.typing = false;
 		render();
 	}
+}
+
+/**
+ * Yes or No to a confirm dialog. pi's is a list of the two: Up or Down picks one wherever its cursor
+ * is (it stops at either end), and Enter takes it. Were the dialog gone, Up and Enter would send the
+ * editor's last prompt again, and the list lags the pane by up to a heartbeat: so the dialog is
+ * looked for once more first, and the answer is not offered again until the row has moved on (or
+ * ANSWERED_MS, for a second dialog the list never saw it leave for).
+ * @param {boolean} yes
+ */
+async function replyConfirm(yes) {
+	const id = state.open;
+	if (!id || state.typing || state.answered !== undefined) return;
+	const at = Date.now();
+	state.answered = at;
+	render();
+	await loadSessions();
+	const sent =
+		state.open === id &&
+		isConfirm(state.sessions.find((s) => s.id === id)) &&
+		(await answer({ keys: [yes ? "Up" : "Down", "Enter"] }));
+	if (!sent && state.answered === at) state.answered = undefined;
+	else
+		setTimeout(() => {
+			if (state.answered !== at) return;
+			state.answered = undefined;
+			render();
+		}, ANSWERED_MS);
+	render();
 }
 
 /**
@@ -1610,6 +1845,82 @@ async function switchSetting(call) {
 		$("#sheet").dataset.html = "";
 		handleError(error);
 	}
+}
+
+/** The name in the sheet's field, shown at once: a pane takes it on its next heartbeat (see holdRename). */
+async function rename() {
+	const id = state.open;
+	const field = $("#rename");
+	const name = field?.value.trim() ?? "";
+	if (!id || state.saving || name === state.sessions.find((s) => s.id === id)?.label) return;
+	if (!name) {
+		showError(errorText("invalid_name"));
+		return;
+	}
+	state.saving = true;
+	render();
+	try {
+		await api.rename(id, name);
+		renamed = { id, name, until: Date.now() + RENAME_HOLD_MS };
+		holdRename();
+		field.blur();
+	} catch (error) {
+		handleError(error);
+	} finally {
+		state.saving = false;
+		render();
+	}
+}
+
+async function togglePin() {
+	const id = state.open;
+	const session = state.sessions.find((s) => s.id === id);
+	if (!id || !session) return;
+	try {
+		await api.pin(id, session.band !== "pinned");
+		await loadSessions();
+	} catch (error) {
+		handleError(error);
+	}
+}
+
+/** A stored session off the list (its file stays), and back to the list. */
+async function deleteSession() {
+	const id = state.open;
+	if (!id) return;
+	state.confirmDelete = false;
+	try {
+		await api.deleteSession(id);
+	} catch (error) {
+		handleError(error);
+		return;
+	}
+	if (state.open !== id) return;
+	closeSheet();
+	// As "‹ Sessions" goes: to the list's own entry when the chat was opened from it.
+	if (backToList) history.back();
+	else location.hash = "";
+}
+
+/** A cut-short tool result's whole output, into its block in place of the cut one. @param {string} entry */
+async function loadOutput(entry) {
+	const id = state.open;
+	if (!id || outputs.get(entry)?.loading) return;
+	outputs.set(entry, { loading: true });
+	render();
+	try {
+		const { text, truncated } = await api.output(id, entry);
+		if (state.open !== id) return;
+		outputs.set(entry, { text, truncated });
+	} catch (error) {
+		if (error instanceof Unauthorized) {
+			handleError(error);
+			return;
+		}
+		if (state.open !== id) return;
+		outputs.set(entry, { error: failure(error) });
+	}
+	render();
 }
 
 async function compact() {
@@ -1817,6 +2128,11 @@ async function send() {
 	const resume = session?.resumable === true;
 	// pi turns a prompt away while it compacts, and the transcript would never show it.
 	if (!value || !id || state.navigating || state.compacting || (resume && state.starting)) return;
+	// Left in the reply box, to change.
+	if (refused(value)) {
+		showError(errorText("terminal_command"));
+		return;
+	}
 	// What a running session's own sheet does, done here rather than sent.
 	const command = session?.alive && !resume ? shortcut(value) : undefined;
 	if (command) {
@@ -2014,7 +2330,9 @@ function route() {
 		pictures.clear();
 		picturesLoading.clear();
 		picturesFailed.clear();
+		outputs.clear();
 		followed = undefined;
+		openSessionId = undefined;
 		turnEndedAt = undefined;
 		state.open = open;
 		state.messages = [];
@@ -2036,6 +2354,8 @@ function route() {
 		state.copied = false;
 		state.terminal = false;
 		state.screen = undefined;
+		state.answered = undefined;
+		state.confirmDelete = false;
 		pollScreen();
 		connect();
 	}

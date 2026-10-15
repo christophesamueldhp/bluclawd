@@ -9,7 +9,8 @@
 /** @typedef {{ provider: string, id: string, name?: string }} ReportModel */
 /**
  * A pane's report, with what the Mac adds for its directory (`git`, `limits`).
- * @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, git?: GitInfo, limits?: UsageLimits }} Report
+ * `notice`: why the phone's last fork, clone or edit did not run, until the pane's next report (`at`: epoch ms).
+ * @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, git?: GitInfo, limits?: UsageLimits, notice?: { text: string, at: number } }} Report
  */
 
 /** pi's `defaultProjectTrust` values, as Alt+M cycles them, and their footer badges. */

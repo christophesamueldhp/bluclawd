@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { giveUp, promptKey, promptText, sentText, settle, shortcut, shownText } from "../daemon/remote/web/live.js";
+import {
+	giveUp,
+	promptKey,
+	promptText,
+	refused,
+	sentText,
+	settle,
+	shortcut,
+	shownText,
+} from "../daemon/remote/web/live.js";
 
 const assistant = (id: string, text: string, thinking?: string) => ({
 	kind: "assistant",
@@ -112,6 +121,20 @@ describe("the commands the phone runs itself", () => {
 	it("leaves anything else to be sent", () => {
 		for (const text of ["/compact now", "/models", "/reload", "compact", "/Model", "please /model"]) {
 			expect(shortcut(text), text).toBeUndefined();
+		}
+	});
+});
+
+describe("the commands the phone does not send", () => {
+	it("are /remote-control and /agent-view, with or without arguments", () => {
+		for (const text of ["/remote-control", " /remote-control off\n", "/agent-view", "/agent-view peek"]) {
+			expect(refused(text), text).toBe(true);
+		}
+	});
+
+	it("lets any other line go, a command or a template included", () => {
+		for (const text of ["/compact", "/reload", "/review the diff", "run /agent-view", "remote-control", ""]) {
+			expect(refused(text), text).toBe(false);
 		}
 	});
 });

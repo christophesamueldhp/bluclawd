@@ -9,6 +9,7 @@
 	--line: #e5e5e5;
 	--accent: #00c0e8;
 	--red: #ab2b3f;
+	--green: #2c7a39;
 	--yellow: #b07d00;
 	color-scheme: light dark;
 }
@@ -22,6 +23,7 @@
 		--dim: #505050;
 		--line: #2a2a2a;
 		--red: #ff6b80;
+		--green: #4eba65;
 		--yellow: #ffc107;
 	}
 }
@@ -87,6 +89,14 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .t summary, .think summary { list-style: none; cursor: pointer; }
 .t summary::-webkit-details-marker, .think summary::-webkit-details-marker { display: none; }
 .t pre, .think pre { white-space: pre-wrap; margin: 6px 0 0; color: var(--text); font: inherit; }
+/* An edit's diff (diff.js): its lines as pi shows them, scrolled sideways rather than wrapped. */
+.t pre.diff { white-space: pre; overflow-x: auto; -webkit-overflow-scrolling: touch; overflow-wrap: normal; color: var(--muted); }
+.diff .add, .plus { color: var(--green); }
+.diff .del, .minus { color: var(--red); }
+.t .note { margin: 6px 0 0; font-style: italic; }
+.full { display: block; min-height: 44px; margin-top: 6px; padding: 0 14px; border: 0; border-radius: 10px; background: var(--message); color: var(--accent); font: inherit; font-weight: 600; }
+.full:disabled { opacity: .5; }
+.t .error { margin: 6px 0 0; font-size: 12px; min-height: 0; }
 .think { font-size: 13px; color: var(--muted); font-style: italic; }
 .think summary::before { content: "▸ "; }
 .think[open] summary::before { content: "▾ "; }
@@ -150,10 +160,30 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .action { width: 100%; min-height: 44px; padding: 10px 14px; border: 0; border-radius: 12px; background: var(--panel); color: var(--accent); font: inherit; font-weight: 600; text-align: left; }
 .action small { display: block; margin-top: 2px; color: var(--muted); font-size: 13px; font-weight: 400; }
 .action:disabled { opacity: .5; }
+.action.danger { color: var(--red); }
+/* The status sheet's session part: its name, pin and delete. */
+.rename { display: flex; align-items: center; gap: 8px; margin: 20px 0 0; padding-top: 16px; border-top: 1px solid var(--line); }
+.rename label { color: var(--muted); font-size: 14px; }
+.rename input { flex: 1; min-width: 0; height: 44px; border: 0; border-radius: 12px; padding: 0 12px; background: var(--panel); color: var(--text); font: inherit; }
+.save { flex: none; height: 44px; padding: 0 18px; border: 0; border-radius: 22px; background: var(--accent); color: #000; font: inherit; font-weight: 600; }
+.save:disabled { opacity: .5; }
+#sheet-manage .actions { margin-top: 12px; }
+.confirm-delete { display: flex; align-items: center; gap: 4px; padding: 6px 4px 6px 14px; border-radius: 12px; background: var(--panel); font-size: 14px; }
+.confirm-delete span { flex: 1; min-width: 0; }
+/* The new session's model, on its own line: its names are long. */
+.pick { height: 44px; border: 0; border-radius: 12px; padding: 0 12px; background: var(--panel); color: var(--text); font: inherit; }
 .banner.needs, .banner.hint { display: flex; align-items: center; gap: 10px; }
 .banner.needs span, .banner.hint span { flex: 1; min-width: 0; }
 .dismiss { flex: none; min-width: 44px; min-height: 44px; border: 0; background: none; color: inherit; font: inherit; font-size: 20px; }
 .answer { flex: none; min-height: 44px; padding: 0 16px; border: 0; border-radius: 22px; background: var(--accent); color: #000; font: inherit; font-weight: 600; }
+/* A confirm dialog's: its title above Yes and No, and Answer at the end of their line. */
+.banner.confirm { flex-wrap: wrap; }
+.banner.confirm span { flex-basis: 100%; font-weight: 600; }
+.banner.confirm .answer { margin-left: auto; }
+.reply { flex: none; min-width: 72px; min-height: 44px; padding: 0 16px; border: 0; border-radius: 22px; background: var(--bg); color: var(--text); font: inherit; font-weight: 600; }
+.reply:disabled { opacity: .5; }
+.confirm-keys { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 6px; }
+.confirm-keys[hidden] { display: none; }
 .screen { margin: 4px 0 12px; padding: 6px 8px; max-height: 45dvh; overflow: auto; -webkit-overflow-scrolling: touch; background: var(--panel); border-radius: 8px; color: var(--text); font: 9.5px/1.35 ui-monospace, "SF Mono", Menlo, monospace; white-space: pre; }
 .keys { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 8px; }
 .press[data-press="Space"] { grid-column: span 2; }
