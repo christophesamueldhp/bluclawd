@@ -33,6 +33,8 @@ export interface AgentRow {
 	sessionId?: string;
 	/** Needs input: the dialog it waits on, when its pane says. */
 	dialog?: { kind: string; title?: string };
+	/** A pane's pi: how many times it stopped working (the daemon counts). */
+	settled?: number;
 }
 
 /** A `!` command as a row, as Claude Code's: working while it runs (its last output line the
@@ -111,6 +113,7 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 		updatedAt: inst.lastSeenAt,
 		sessionId: inst.sessionId,
 		...(state === "needs" && inst.dialog ? { dialog: inst.dialog } : {}),
+		...(inst.settled !== undefined ? { settled: inst.settled } : {}),
 	};
 }
 

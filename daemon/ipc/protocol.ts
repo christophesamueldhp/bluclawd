@@ -208,6 +208,8 @@ export interface InstanceSummary {
 	dialog?: PaneDialog;
 	/** A stored row a phone is resuming: its pane has not registered yet. */
 	resuming?: boolean;
+	/** A pane's pi: how many times it stopped working, which a turn too quick for a poll still adds to. */
+	settled?: number;
 }
 
 interface ResponseBase {

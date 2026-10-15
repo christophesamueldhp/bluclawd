@@ -115,6 +115,22 @@ describe("SelfRegistration heartbeats", () => {
 		expect(calls.length).toBe(1);
 	});
 
+	it("lists a new session as working once it has one, so even a turn too quick for a heartbeat is seen working", async () => {
+		const { client, calls } = fakeClient();
+		let info: { cwd: string } | undefined;
+		const reg = new SelfRegistration(client, () => info);
+		reg.setActivity("working"); // agent_start: the prompt is not in the session yet
+		await new Promise((r) => setTimeout(r, 0));
+		expect(calls).toEqual([]);
+		info = { cwd: "/p" }; // the reply starts: the prompt is
+		reg.ensureListed();
+		await new Promise((r) => setTimeout(r, 0));
+		expect(calls.map((c) => c.activity)).toEqual(["working"]);
+		reg.ensureListed(); // listed already: nothing more
+		await new Promise((r) => setTimeout(r, 0));
+		expect(calls.length).toBe(1);
+	});
+
 	it("tells the daemon its leaf and how to start another pi like it", async () => {
 		const { client, calls } = fakeClient();
 		const reg = new SelfRegistration(client, () => ({ cwd: "/p", leafId: "e7" }));

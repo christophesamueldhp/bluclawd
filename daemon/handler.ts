@@ -31,7 +31,12 @@ import type { RemoteControl } from "./remote/control.ts";
 import { supervisor } from "./supervisor.ts";
 import type { InstanceRecord } from "./types.ts";
 
-function toInstanceSummary(instance: InstanceRecord, activity?: AgentActivity, external?: boolean): InstanceSummary {
+function toInstanceSummary(
+	instance: InstanceRecord,
+	activity?: AgentActivity,
+	external?: boolean,
+	settled?: number,
+): InstanceSummary {
 	return {
 		createdAt: instance.createdAt,
 		lastSeenAt: instance.lastSeenAt,
@@ -52,6 +57,7 @@ function toInstanceSummary(instance: InstanceRecord, activity?: AgentActivity, e
 		pane: instance.pane,
 		leafId: instance.leafId,
 		dialog: instance.dialog,
+		settled,
 	};
 }
 
@@ -80,7 +86,7 @@ export function listSummaries(): InstanceSummary[] {
 	}));
 	const external = supervisor
 		.listExternalInstances()
-		.map(({ record, activity }) => toInstanceSummary(record, activity, true));
+		.map(({ record, activity, settled }) => toInstanceSummary(record, activity, true, settled));
 	return [...stored, ...external];
 }
 

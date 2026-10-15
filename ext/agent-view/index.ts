@@ -576,6 +576,9 @@ const agentView: InlineExtension = {
 			track(event);
 		});
 		pi.on("turn_start", track);
+		pi.on("message_start", (event) => {
+			if (event.message.role === "assistant") registration?.ensureListed();
+		});
 		pi.on("agent_settled", (event) => {
 			liveDetail = undefined;
 			track(event);

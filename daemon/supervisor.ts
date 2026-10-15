@@ -15,6 +15,8 @@ interface ExternalInstance {
 	lastSeenAt: number;
 	/** Messages for a pane's pi, drained by its next heartbeat. */
 	inbox: PaneMessage[];
+	/** How many times it stopped working: a turn too quick for a poll to see still counts. */
+	settled: number;
 }
 
 /** External (self-registered) instances expire this long after their last heartbeat. */
@@ -50,6 +52,7 @@ export class ServerSupervisor {
 			activity,
 			lastSeenAt: now,
 			inbox: previous?.inbox ?? [],
+			settled: (previous?.settled ?? 0) + (previous?.activity === "working" && activity !== "working" ? 1 : 0),
 		});
 	}
 
@@ -117,15 +120,17 @@ export class ServerSupervisor {
 	}
 
 	/** External instances, reaping any whose last heartbeat is older than the TTL. */
-	listExternalInstances(now: number = Date.now()): Array<{ record: InstanceRecord; activity: AgentActivity }> {
-		const out: Array<{ record: InstanceRecord; activity: AgentActivity }> = [];
+	listExternalInstances(
+		now: number = Date.now(),
+	): Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> {
+		const out: Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> = [];
 		for (const [id, entry] of this.externalInstances) {
 			if (now - entry.lastSeenAt > EXTERNAL_TTL_MS) {
 				this.externalInstances.delete(id);
 				this.settleWait(id, "none");
 				continue;
 			}
-			out.push({ record: cloneInstance(entry.record), activity: entry.activity });
+			out.push({ record: cloneInstance(entry.record), activity: entry.activity, settled: entry.settled });
 		}
 		return out;
 	}

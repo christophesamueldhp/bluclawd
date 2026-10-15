@@ -24,6 +24,19 @@ describe("external (self-registered) instances", () => {
 		expect(supervisor.listExternalInstances(10_000).length).toBe(1);
 	});
 
+	it("counts each time a session stops working, however briefly it worked", () => {
+		const supervisor = new ServerSupervisor();
+		supervisor.registerExternal(rec("ext-1"), "idle", 1000);
+		supervisor.registerExternal(rec("ext-1"), "working", 1100);
+		supervisor.registerExternal(rec("ext-1"), "working", 1200);
+		supervisor.registerExternal(rec("ext-1"), "idle", 1300);
+		supervisor.registerExternal(rec("ext-1"), "idle", 1400);
+		expect(supervisor.listExternalInstances(1400)[0].settled).toBe(1);
+		supervisor.registerExternal(rec("ext-1"), "working", 1500);
+		supervisor.registerExternal(rec("ext-1"), "awaiting_input", 1600);
+		expect(supervisor.listExternalInstances(1600)[0].settled).toBe(2);
+	});
+
 	it("reaps an external instance whose heartbeat is past the TTL", () => {
 		const supervisor = new ServerSupervisor();
 		supervisor.registerExternal(rec("ext-1"), "working", 1000);

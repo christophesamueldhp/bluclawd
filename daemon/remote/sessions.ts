@@ -28,6 +28,8 @@ export interface RemoteSession {
 	sessionId?: string;
 	/** While it needs input: the dialog it waits on. */
 	dialog?: { kind: string; title?: string };
+	/** How many times it stopped working: the notifier's cue for a turn too quick to be seen working. */
+	settled?: number;
 }
 
 function sessionRows(instances: InstanceSummary[]): AgentRow[] {
@@ -52,6 +54,7 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 				finishedAt: row.finishedAt,
 				sessionId: row.sessionId,
 				...(row.dialog ? { dialog: row.dialog } : {}),
+				...(row.settled !== undefined ? { settled: row.settled } : {}),
 			});
 		}
 	}

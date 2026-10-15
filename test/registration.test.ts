@@ -23,7 +23,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 		commands: ["agent-view"],
 		tools: [],
 		shortcuts: 0,
-		events: 8,
+		events: 9,
 	},
 	remote: { commands: ["remote-control"], tools: [], shortcuts: 0, events: 11 },
 	notifications: { commands: [], tools: [], shortcuts: 0, events: 3 },

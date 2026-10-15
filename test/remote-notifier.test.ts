@@ -59,6 +59,27 @@ describe("notifier", () => {
 		]);
 	});
 
+	it("notifies a turn too quick for any poll to see it working", () => {
+		const notifier = new Notifier();
+		notifier.observe([{ ...session("a", "done", "hi"), settled: 1 }]);
+		expect(notifier.observe([{ ...session("a", "done", "hello"), settled: 1 }])).toEqual([]);
+		expect(notifier.observe([{ ...session("a", "done", "hello"), settled: 2 }])).toEqual([
+			{ title: "task a", body: "Done — hello", sessionId: "a" },
+		]);
+	});
+
+	it("notifies a new session whose first turn ended before any look, but not on the very first look", () => {
+		const notifier = new Notifier();
+		expect(notifier.observe([{ ...session("a", "done"), settled: 2 }])).toEqual([]);
+		expect(
+			notifier.observe([
+				{ ...session("a", "done"), settled: 2 },
+				{ ...session("b", "done", "hi"), settled: 1 },
+			]),
+		).toEqual([{ title: "task b", body: "Done — hi", sessionId: "b" }]);
+		expect(notifier.observe([{ ...session("c", "done"), settled: 0 }])).toEqual([]);
+	});
+
 	it("keeps the body short", () => {
 		const notifier = new Notifier();
 		notifier.observe([session("a", "working")]);

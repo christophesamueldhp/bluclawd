@@ -38,6 +38,10 @@ describe("remote sessions", () => {
 		expect(sessions[2].label).toBe("idle one");
 	});
 
+	it("carries how many times each session stopped working", () => {
+		expect(remoteSessions([live("a", "idle", { settled: 3 })])[0].settled).toBe(3);
+	});
+
 	it("puts pinned rows in their own band, first", () => {
 		const sessions = remoteSessions([live("a", "working"), live("p", "idle", { pinned: true })]);
 		expect(sessions.map((s) => [s.id, s.band])).toEqual([

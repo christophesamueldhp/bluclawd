@@ -140,6 +140,8 @@ export class SelfRegistration {
 	 *  prompt: pi still reports the pane idle until its turn starts, so a move right behind it would
 	 *  cut that turn short; the turn's agent_start heartbeat takes what follows. */
 	private moved = false;
+	/** A heartbeat has listed this session: before its first prompt is in the session there is nothing to list. */
+	private listed = false;
 
 	/** `onMessage`: another window's agent view asks this session something.
 	 *  `id`: a pane registers under its tmux session's name, so its row outlives a session switch.
@@ -174,6 +176,13 @@ export class SelfRegistration {
 		void this.heartbeat();
 	}
 
+	/** List the session now if no heartbeat has: a new session's first turn starts before its prompt is
+	 *  in the session, so that turn's working heartbeat had nothing to list, and a turn quicker than the
+	 *  next heartbeat would never be seen working. */
+	ensureListed(): void {
+		if (!this.listed) void this.heartbeat();
+	}
+
 	/** Force an immediate re-registration — e.g. right after switching the foreground session,
 	 *  so the newly-opened session appears at once instead of waiting for the next heartbeat. */
 	async refresh(): Promise<void> {
@@ -192,6 +201,7 @@ export class SelfRegistration {
 	private async beat(): Promise<void> {
 		const info = this.getInfo();
 		if (!info) return;
+		this.listed = true;
 		const instance: RegisterInput = {
 			id: this.id,
 			cwd: info.cwd,
