@@ -11,7 +11,7 @@ import { recordExtensions } from "../scripts/probe-extensions.ts";
  */
 const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts: number; events: number }> = {
 	permissions: { commands: [], tools: [], shortcuts: 1, events: 2 },
-	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 5 },
+	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 6 },
 	"background-bash": {
 		commands: ["tasks"],
 		tools: ["bash", "monitor", "task_stop"],
@@ -25,7 +25,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 		shortcuts: 0,
 		events: 8,
 	},
-	remote: { commands: ["remote-control"], tools: [], shortcuts: 0, events: 10 },
+	remote: { commands: ["remote-control"], tools: [], shortcuts: 0, events: 11 },
 	notifications: { commands: [], tools: [], shortcuts: 0, events: 3 },
 	help: { commands: ["help", "context", "status"], tools: [], shortcuts: 0, events: 0 },
 	vibes: { commands: [], tools: [], shortcuts: 0, events: 2 },

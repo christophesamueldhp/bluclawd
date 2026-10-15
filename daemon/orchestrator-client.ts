@@ -3,10 +3,11 @@ import { readFileSync, realpathSync } from "node:fs";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { AgentActivity } from "./activity.ts";
 import type { InstanceSummary } from "./ipc/protocol.ts";
 import { daemonBuildId, getSocketPath } from "./paths.ts";
 
-export type AgentActivity = "idle" | "working" | "awaiting_input";
+export type { AgentActivity };
 export type { InstanceSummary };
 
 export interface RegisterInput {

@@ -25,6 +25,8 @@ interface HelpData {
 	commands: HelpEntry[];
 	templates: HelpEntry[];
 	skills: HelpEntry[];
+	/** Whether agent view was there; an entry from before this field shows its keys. */
+	agentView?: boolean;
 }
 
 function pad(name: string, width: number): string {
@@ -48,11 +50,13 @@ const help: InlineExtension = {
 			lines.push(
 				`  ${theme.fg("accent", "@ <path>")}  ${theme.fg("dim", "mention a file (Tab autocompletes paths)")}`,
 			);
+			if (data.agentView !== false) {
+				lines.push(
+					`  ${theme.fg("accent", "← ←")}       ${theme.fg("dim", "agent view: background sessions (on an empty prompt)")}`,
+				);
+			}
 			lines.push(
-				`  ${theme.fg("accent", "← ←")}       ${theme.fg("dim", "agent view: background sessions (on an empty prompt)")}`,
-			);
-			lines.push(
-				`  ${theme.fg("accent", "Alt+M")}     ${theme.fg("dim", "cycle defaultProjectTrust — /hotkeys lists every shortcut")}`,
+				`  ${theme.fg("accent", "/hotkeys")}  ${theme.fg("dim", "every keyboard shortcut, extensions' too")}`,
 			);
 
 			const width =
@@ -116,6 +120,7 @@ const help: InlineExtension = {
 					commands,
 					templates: pick("prompt"),
 					skills: pick("skill"),
+					agentView: registered.some((c) => c.source === "extension" && c.name === "agent-view"),
 				});
 			},
 		});

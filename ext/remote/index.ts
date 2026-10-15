@@ -242,6 +242,11 @@ function factory(pi: ExtensionAPI): void {
 	pi.on("tool_execution_end", (event) => live?.onToolEnd(event.toolCallId));
 	pi.on("message_end", () => live?.onMessageEnd());
 	pi.on("agent_end", () => live?.onAgentEnd());
+	pi.on("session_shutdown", () => {
+		// As a turn's end: no timer left to send, and the phone's snapshot of ours cleared.
+		live?.onAgentEnd();
+		session = undefined;
+	});
 
 	pi.registerCommand("remote-control", {
 		description: "Control your sessions from your phone",

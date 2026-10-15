@@ -392,6 +392,40 @@ describe("/remote-control", () => {
 		sent.mockRestore();
 	});
 
+	it("lets go at session end: no report from the bus, and no live snapshot left to send", async () => {
+		const reported = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
+		const live = vi.spyOn(OrchestratorClient.prototype, "remoteLive").mockResolvedValue();
+		const handlers = new Map<string, (event: unknown, ctx?: unknown) => void>();
+		const pi = {
+			on: (name: string, handler: (event: unknown, ctx: unknown) => void) => handlers.set(name, handler),
+			events: { on: (name: string, handler: (data: unknown) => void) => handlers.set(name, handler) },
+			registerCommand: () => {},
+			getThinkingLevel: () => "off",
+		};
+		process.env[PANE_ENV] = "pi-report";
+		try {
+			remoteFactory(pi as never);
+		} finally {
+			delete process.env[PANE_ENV];
+		}
+		const { ctx } = fakes({ current: model("openai", "gpt-5") });
+		handlers.get("session_start")?.({}, { ...ctx, mode: "tui" });
+		handlers.get("bluclawd:remote-watched")?.(true);
+		const said = (text: string) => ({ message: { role: "assistant", content: [{ type: "text", text }] } });
+		handlers.get("message_update")?.(said("a"));
+		// Within the interval: held for a timer, which the session's end must not leave behind.
+		handlers.get("message_update")?.(said("ab"));
+		handlers.get("session_shutdown")?.({}, ctx);
+		await new Promise((resolve) => setTimeout(resolve, 400));
+		expect(live.mock.calls.map(([, snapshot]) => snapshot === null)).toEqual([false, true]);
+		const reports = reported.mock.calls.length;
+		handlers.get("bluclawd:remote-want-report")?.(true);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(reported.mock.calls.length).toBe(reports);
+		reported.mockRestore();
+		live.mockRestore();
+	});
+
 	it("runs the phone's tree, fork and clone without a word to the user", async () => {
 		const handler = register();
 		const notify = vi.fn();

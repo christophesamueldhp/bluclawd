@@ -16,13 +16,13 @@ import {
 	isKeyRelease,
 	isKeyRepeat,
 	matchesKey,
-	type TUI,
 } from "@earendil-works/pi-tui";
 import { type InstanceSummary, OrchestratorClient, type PaneMessage } from "../../daemon/orchestrator-client.ts";
 import { collectRows, labelFromTask } from "../../daemon/rows.ts";
 import { lastLine, textOf, toolActivity } from "../../daemon/session-state.ts";
 import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, Tmux } from "../../daemon/tmux.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
+import { holdTui } from "../_shared/hold-tui.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
 import { trustBadge } from "../_shared/trust-badge.ts";
@@ -307,11 +307,7 @@ const agentView: InlineExtension = {
 				);
 				return false;
 			}
-			let tui: TUI | undefined;
-			ctx.ui.setWidget("agent-view:launch", (widgetTui) => {
-				tui = widgetTui;
-				return { render: () => [], invalidate: () => {} };
-			});
+			const tui = holdTui(ctx, "agent-view:launch")();
 			ctx.ui.setWidget("agent-view:launch", undefined);
 			// Fullscreen pi copies its last frame to the terminal's own screen on stop; this one is
 			// not the session's, so it would stay behind once tmux leaves.
@@ -345,6 +341,7 @@ const agentView: InlineExtension = {
 			let finished: Set<string> | undefined;
 			let flashUntil = 0;
 			let flashCount = 0;
+			let flashTimer: ReturnType<typeof setTimeout> | undefined;
 			let stopped = false;
 			let last = theme.fg("dim", "← for agents");
 			const paint = (): void => {
@@ -362,7 +359,8 @@ const agentView: InlineExtension = {
 					if (fresh > 0) {
 						flashCount = fresh;
 						flashUntil = Date.now() + DONE_FLASH_MS;
-						setTimeout(() => void tick(), DONE_FLASH_MS);
+						clearTimeout(flashTimer);
+						flashTimer = setTimeout(() => void tick(), DONE_FLASH_MS);
 					}
 					if (waiting > 0) {
 						const n = waiting > 99 ? "99+" : String(waiting);
@@ -381,6 +379,7 @@ const agentView: InlineExtension = {
 			return () => {
 				stopped = true;
 				clearInterval(timer);
+				clearTimeout(flashTimer);
 				paintPill = undefined;
 				ctx.ui.setStatus(STATUS_KEY, undefined);
 			};
@@ -427,13 +426,9 @@ const agentView: InlineExtension = {
 				autocompleteAdded = true;
 				ctx.ui.addAutocompleteProvider(withoutAgentViewCommand);
 			}
-			// A zero-line widget, only to get hold of the TUI: onTerminalInput sees keys before any
-			// dialog does, so ← must check that the main editor really has the keyboard.
-			let tui: TUI | undefined;
-			ctx.ui.setWidget("agent-view:tui", (widgetTui) => {
-				tui = widgetTui;
-				return { render: () => [], invalidate: () => {} };
-			});
+			// The TUI: onTerminalInput sees keys before any dialog does, so ← must check that the main
+			// editor really has the keyboard.
+			const tui = holdTui(ctx, "agent-view:tui");
 			// One ← opens the roster, with a second press required only just after editing/history.
 			let armedAt = 0;
 			let editedAt = 0;
@@ -483,14 +478,14 @@ const agentView: InlineExtension = {
 			};
 			const editorFocused = (): boolean => {
 				// getFocusedComponent is on pi-tui's TUI class, not its TUI interface.
-				const focused = (tui as { getFocusedComponent?: () => unknown } | undefined)?.getFocusedComponent?.();
+				const focused = (tui() as { getFocusedComponent?: () => unknown } | undefined)?.getFocusedComponent?.();
 				return typeof (focused as { getText?: unknown } | null)?.getText === "function";
 			};
 			const offKey = ctx.ui.onTerminalInput((data) => {
 				// Kitty reports a release (and a held key) as separate events; only presses count.
 				if (isKeyRelease(data) || isKeyRepeat(data)) return undefined;
 				// Claude Code's exit keys and words replace pi's own (exitAction).
-				if (!viewOpen && !tui?.hasOverlay()) {
+				if (!viewOpen && !tui()?.hasOverlay()) {
 					for (const key of ["ctrl+c", "ctrl+d"] as const) {
 						if (!matchesKey(data, key)) continue;
 						const state = {
@@ -519,7 +514,7 @@ const agentView: InlineExtension = {
 					disarm();
 					return undefined;
 				}
-				if (!tui || tui.hasOverlay() || !editorFocused()) {
+				if (!tui() || tui()?.hasOverlay() || !editorFocused()) {
 					disarm();
 					return undefined;
 				}

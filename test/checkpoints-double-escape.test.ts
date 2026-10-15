@@ -15,6 +15,7 @@ async function load(state: { idle?: boolean; text?: string; overlay?: boolean } 
 		sendUserMessage: (text: string) => sent.push(text),
 	} as never);
 	let onKey: ((data: string) => { consume?: boolean } | undefined) | undefined;
+	const released = { listener: false, widget: false };
 	const tui = { hasOverlay: () => !!state.overlay, getFocusedComponent: () => ({ getText: () => "" }) };
 	const ctx = {
 		mode: "tui",
@@ -24,13 +25,23 @@ async function load(state: { idle?: boolean; text?: string; overlay?: boolean } 
 			getEditorText: () => state.text ?? "",
 			onTerminalInput: (handler: typeof onKey) => {
 				onKey = handler;
-				return () => {};
+				return () => {
+					released.listener = true;
+				};
 			},
-			setWidget: (_key: string, factory?: (tui: unknown) => unknown) => factory?.(tui),
+			setWidget: (_key: string, factory?: (tui: unknown) => unknown) => {
+				if (factory) factory(tui);
+				else released.widget = true;
+			},
 		},
 	};
 	await handlers.session_start({}, ctx);
-	return { press: (data: string) => onKey?.(data), sent };
+	return {
+		press: (data: string) => onKey?.(data),
+		sent,
+		released,
+		shutdown: () => handlers.session_shutdown?.({}, ctx),
+	};
 }
 
 describe("Esc Esc opens /rewind, as in Claude Code", () => {
@@ -48,5 +59,13 @@ describe("Esc Esc opens /rewind, as in Claude Code", () => {
 			expect(press(ESC)).toBeUndefined();
 			expect(sent).toEqual([]);
 		}
+	});
+});
+
+describe("session end", () => {
+	it("lets go of the keyboard and the TUI it held", async () => {
+		const { shutdown, released } = await load();
+		await shutdown();
+		expect(released).toEqual({ listener: true, widget: true });
 	});
 });

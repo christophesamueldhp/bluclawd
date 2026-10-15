@@ -66,7 +66,8 @@ import type {
 	SessionEntry,
 	SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, isKeyRepeat, matchesKey, type TUI } from "@earendil-works/pi-tui";
+import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
+import { holdTui } from "../_shared/hold-tui.ts";
 
 const CHECKPOINT_CUSTOM_TYPE = "checkpoint";
 const CHECKPOINT_REF_PREFIX = "refs/bluclawd/checkpoints/";
@@ -693,6 +694,13 @@ export function factory(pi: ExtensionAPI): void {
 		if (ctx.mode === "tui") listenForDoubleEscape(ctx);
 	});
 
+	pi.on("session_shutdown", async (_event, ctx) => {
+		if (!offDoubleEscape) return;
+		offDoubleEscape();
+		offDoubleEscape = undefined;
+		ctx.ui.setWidget("checkpoints:tui", undefined);
+	});
+
 	/**
 	 * Esc twice on an empty, idle prompt opens /rewind, as it opens rewind in Claude Code; pi's own
 	 * double Esc (its /tree) never sees the second press.
@@ -700,12 +708,8 @@ export function factory(pi: ExtensionAPI): void {
 	let offDoubleEscape: (() => void) | undefined;
 	const listenForDoubleEscape = (ctx: ExtensionContext): void => {
 		offDoubleEscape?.();
-		// A zero-line widget, only to get hold of the TUI and see whether a dialog has the keys.
-		let tui: TUI | undefined;
-		ctx.ui.setWidget("checkpoints:tui", (widgetTui) => {
-			tui = widgetTui;
-			return { render: () => [], invalidate: () => {} };
-		});
+		// The TUI, to see whether a dialog has the keys.
+		const tui = holdTui(ctx, "checkpoints:tui");
 		let escapeAt = 0;
 		offDoubleEscape = ctx.ui.onTerminalInput((data) => {
 			if (isKeyRelease(data) || isKeyRepeat(data)) return undefined;
@@ -713,7 +717,7 @@ export function factory(pi: ExtensionAPI): void {
 				escapeAt = 0;
 				return undefined;
 			}
-			if (!ctx.isIdle() || ctx.ui.getEditorText() !== "" || tui?.hasOverlay()) {
+			if (!ctx.isIdle() || ctx.ui.getEditorText() !== "" || tui()?.hasOverlay()) {
 				escapeAt = 0;
 				return undefined;
 			}
