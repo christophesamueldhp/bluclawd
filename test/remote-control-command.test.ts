@@ -35,7 +35,7 @@ describe("/remote-control", () => {
 	let actions: RemoteAction[];
 	let code: string;
 	let secret: string;
-	const devices = [
+	const devices: RemoteResult["devices"] = [
 		{ id: "d1", name: "iPhone", createdAt: "2026-10-01T10:00:00.000Z" },
 		{ id: "d2", name: "iPad", createdAt: "2026-10-02T10:00:00.000Z" },
 	];
@@ -160,13 +160,58 @@ describe("/remote-control", () => {
 		expect(ui.notify.mock.calls[0]).toEqual([expect.stringContaining("could not listen"), "error"]);
 	});
 
-	it("lists the paired phones, from which one is revoked", async () => {
-		enabled = true;
-		const { ui, done } = run("", { select: ["Paired phones (2)…", undefined] });
-		await done;
-		expect(ui.select).toHaveBeenCalledTimes(2);
-		expect(ui.select.mock.calls[1]![1]).toHaveLength(2);
-		expect(actions.map((a) => a.action)).toEqual(["status", "devices"]);
+	describe("paired phones", () => {
+		const PHONES = "Paired phones (2)…";
+		const REMOVE_ALL = "Remove all phones";
+		const removed = () => actions.flatMap((a) => (a.action === "revoke" ? [a.deviceId] : []));
+
+		it("lists each with when it paired and was last used, then Remove all phones", async () => {
+			enabled = true;
+			devices[1] = { ...devices[1]!, lastUsedAt: "2026-10-03T10:00:00.000Z" };
+			const { ui, done } = run("", { select: [PHONES, undefined] });
+			await done;
+			const [title, items] = ui.select.mock.calls[1]!;
+			expect(title).toBe("Paired phones (enter removes one)");
+			expect(items).toHaveLength(3);
+			expect(items[0]).toMatch(/^1\. iPhone · paired .*2026/);
+			expect(items[0]).not.toContain("last used");
+			expect(items[1]).toMatch(/^2\. iPad · paired .* · last used .*2026/);
+			expect(items[2]).toBe(REMOVE_ALL);
+			expect(actions.map((a) => a.action)).toEqual(["status", "devices"]);
+			delete devices[1]!.lastUsedAt;
+		});
+
+		it("removes the phone picked, once confirmed", async () => {
+			enabled = true;
+			const declined = run("", { select: [PHONES, (await phoneLabel(1))!], confirm: false });
+			await declined.done;
+			expect(declined.ui.confirm).toHaveBeenCalledWith("Remove iPad?", "It will have to pair again.");
+			expect(removed()).toEqual([]);
+			const confirmed = run("", { select: [PHONES, (await phoneLabel(1))!], confirm: true });
+			await confirmed.done;
+			expect(removed()).toEqual(["d2"]);
+			expect(confirmed.ui.notify).toHaveBeenCalledWith("Removed iPad", "info");
+		});
+
+		it("removes every phone, once confirmed", async () => {
+			enabled = true;
+			const declined = run("", { select: [PHONES, REMOVE_ALL], confirm: false });
+			await declined.done;
+			expect(declined.ui.confirm).toHaveBeenCalledWith("Remove all 2 phones?", "Each will have to pair again.");
+			expect(removed()).toEqual([]);
+			const confirmed = run("", { select: [PHONES, REMOVE_ALL], confirm: true });
+			await confirmed.done;
+			expect(removed()).toEqual(["d1", "d2"]);
+			expect(confirmed.ui.notify).toHaveBeenCalledWith("Removed 2 phones", "info");
+		});
+
+		/** The menu's label for devices[index], as the list shows it. */
+		async function phoneLabel(index: number): Promise<string | undefined> {
+			const { ui, done } = run("", { select: [PHONES, undefined] });
+			await done;
+			actions = [];
+			return ui.select.mock.calls[1]![1][index];
+		}
 	});
 
 	it("turns start at login on, then off, saying which in the menu", async () => {

@@ -260,6 +260,64 @@ describe("remote HTTP API", () => {
 		});
 	});
 
+	describe("paired devices", () => {
+		it("lists them, marking the one asking, with neither token hashes nor push endpoints", async () => {
+			const phone = await pair();
+			const pad = await pair();
+			store.setPush(store.authenticate(pad)!.id, {
+				endpoint: "https://web.push.apple.com/secret",
+				keys: { p256dh: validP256dh(), auth: "AAAAAAAAAAAAAAAAAAAAAA" },
+			});
+			expect((await fetch(`${base}/api/devices`)).status).toBe(401);
+			const res = await fetch(`${base}/api/devices`, { headers: auth(phone) });
+			expect(res.status).toBe(200);
+			const text = await res.text();
+			for (const secret of [
+				"tokenHash",
+				"push",
+				"web.push.apple.com",
+				...store.load().devices.map((d) => d.tokenHash),
+			]) {
+				expect(text).not.toContain(secret);
+			}
+			const [first, second] = store.load().devices;
+			expect(JSON.parse(text)).toEqual({
+				devices: [
+					{
+						id: first!.id,
+						name: "iPhone",
+						createdAt: first!.createdAt,
+						lastUsedAt: first!.lastUsedAt,
+						current: true,
+					},
+					{
+						id: second!.id,
+						name: "iPhone",
+						createdAt: second!.createdAt,
+						lastUsedAt: second!.lastUsedAt,
+						current: false,
+					},
+				],
+			});
+		});
+
+		it("removes one, this device too, which can then do nothing", async () => {
+			const phone = await pair();
+			const pad = await pair();
+			const [phoneId, padId] = store.load().devices.map((d) => d.id);
+			const remove = (token: string, id: string) =>
+				fetch(`${base}/api/devices/${encodeURIComponent(id!)}`, { method: "DELETE", headers: auth(token) });
+			expect((await fetch(`${base}/api/devices/${padId}`, { method: "DELETE" })).status).toBe(401);
+			expect((await remove(phone, padId!)).status).toBe(200);
+			expect((await fetch(`${base}/api/sessions`, { headers: auth(pad) })).status).toBe(401);
+			expect((await remove(phone, padId!)).status).toBe(404);
+			expect((await remove(phone, "%")).status).toBe(404);
+			expect((await remove(phone, phoneId!)).status).toBe(200);
+			expect((await fetch(`${base}/api/sessions`, { headers: auth(phone) })).status).toBe(401);
+			expect(store.load().devices).toEqual([]);
+		});
+	});
+
 	it("lists sessions and reads a transcript", async () => {
 		const token = await pair();
 		const list = (await (await fetch(`${base}/api/sessions`, { headers: auth(token) })).json()) as {

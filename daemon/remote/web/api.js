@@ -16,7 +16,7 @@ export function setToken(token) {
 	localStorage.setItem(TOKEN_KEY, token);
 }
 
-function clearToken() {
+export function clearToken() {
 	try {
 		localStorage.removeItem(TOKEN_KEY);
 	} catch {
@@ -78,6 +78,10 @@ export const api = {
 	},
 	/** Pairs the Home Screen app this browser adds, once. @returns {Promise<string>} */
 	handoff: async () => (await call("POST", "/api/handoff", {})).handoff,
+	/** This device's paired phones, `current` among them. @returns {Promise<import("./app.js").Device[]>} */
+	devices: async () => (await call("GET", "/api/devices")).devices,
+	/** @param {string} id */
+	removeDevice: (id) => call("DELETE", `/api/devices/${encodeURIComponent(id)}`),
 	sessions: async () => (await call("GET", "/api/sessions")).sessions,
 	/** @returns {Promise<string[]>} */
 	directories: async () => (await call("GET", "/api/directories")).directories,

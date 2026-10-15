@@ -118,6 +118,8 @@ async function show(result: RemoteResult, ctx: ExtensionCommandContext): Promise
 	ctx.ui.notify(pairing(url), "info");
 }
 
+const REMOVE_ALL = "Remove all phones";
+
 async function devices(client: OrchestratorClient, ctx: ExtensionCommandContext): Promise<void> {
 	const { devices } = await client.remote({ action: "devices" });
 	if (devices.length === 0) {
@@ -131,12 +133,19 @@ async function devices(client: OrchestratorClient, ctx: ExtensionCommandContext)
 				? ` · last used ${new Date(d.lastUsedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}`
 				: ""),
 	);
-	const picked = await ctx.ui.select("Paired devices (enter revokes)", labels);
+	const picked = await ctx.ui.select("Paired phones (enter removes one)", [...labels, REMOVE_ALL]);
 	if (picked === undefined) return;
+	if (picked === REMOVE_ALL) {
+		const phones = `${devices.length} phone${devices.length === 1 ? "" : "s"}`;
+		if (!(await ctx.ui.confirm(`Remove all ${phones}?`, "Each will have to pair again."))) return;
+		for (const device of devices) await client.remote({ action: "revoke", deviceId: device.id });
+		ctx.ui.notify(`Removed ${phones}`, "info");
+		return;
+	}
 	const device = devices[labels.indexOf(picked)];
-	if (!device || !(await ctx.ui.confirm(`Revoke ${device.name}?`, "It will have to pair again."))) return;
+	if (!device || !(await ctx.ui.confirm(`Remove ${device.name}?`, "It will have to pair again."))) return;
 	await client.remote({ action: "revoke", deviceId: device.id });
-	ctx.ui.notify(`Revoked ${device.name}`, "info");
+	ctx.ui.notify(`Removed ${device.name}`, "info");
 }
 
 async function toggleStartAtLogin(ctx: ExtensionCommandContext): Promise<void> {

@@ -5,13 +5,14 @@
  * parts that change are re-rendered, so the composers keep their text, focus and keyboard while
  * updates arrive.
  */
-import { api, getToken, pairLink, setToken, Unauthorized } from "./api.js";
+import { api, clearToken, getToken, pairLink, setToken, Unauthorized } from "./api.js";
 import { promptKey, sentText, settle } from "./live.js";
 
 /** @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string }} Session */
 /** @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
 /** @typedef {{ provider: string, id: string, name?: string }} ReportModel */
+/** @typedef {{ id: string, name: string, createdAt: string, lastUsedAt?: string, current: boolean }} Device `current`: this one */
 /** @typedef {{ mimeType: string, data: string, thumb: string }} Attachment base64 `data`, a data URL `thumb` */
 /** @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number } }} Report */
 
@@ -72,6 +73,7 @@ const ERRORS = {
 	start_failed: "The Mac could not start the session.",
 	start_timeout: "The session did not show up. Check it on the Mac.",
 	unknown_session: "This session is gone.",
+	unknown_device: "That phone was removed already.",
 	invalid_code: "That code is wrong or was already used. Run /remote-control on the Mac for a new one.",
 	expired_code: "That code expired. Run /remote-control on the Mac for a new one.",
 	invalid_handoff:
@@ -132,6 +134,12 @@ const state = {
 	terminal: false,
 	/** Paired in Safari: the Home Screen app is the one iOS notifies. */
 	homeScreenHint: false,
+	/** The paired phones screen is open (`#phones`). */
+	phones: false,
+	/** The paired phones: undefined while loading. @type {Device[] | undefined} */
+	devices: undefined,
+	/** The phone whose Remove asks to be confirmed. @type {string | undefined} */
+	confirming: undefined,
 	/** What the pane shows: undefined while loading. @type {string[] | undefined} */
 	screen: undefined,
 	/** Keys or text are on their way to the pane. */
@@ -170,7 +178,7 @@ let compactGiveUp;
 let navigateGiveUp;
 /** The transcript a tree, fork or clone left, to tell on a reconnect whether it has moved. */
 let navigatedFrom = "";
-/** Which view the DOM holds: "pair", "list" or "chat:<id>". */
+/** Which view the DOM holds: "pair", "list", "phones" or "chat:<id>". */
 let shown = "";
 let lastLog = "";
 /** The next log update prepends older messages: it keeps what is on screen in place. */
@@ -605,7 +613,7 @@ function pairView() {
 
 function listShell() {
 	return `<header class="bar"><h1>Sessions</h1><button class="notify" id="notify" hidden>Enable notifications</button>
-<span class="muted" id="online"></span></header>
+<span class="muted" id="online"></span><a class="phones" href="#phones" aria-label="Paired phones">⋯</a></header>
 <div id="banner"></div><section class="scroll" id="rows"></section>
 <form class="composer new" id="new-task"><textarea id="task" rows="1" placeholder="New task…" aria-label="New task" maxlength="32768"></textarea>
 <div class="where"><select id="cwd" aria-label="Directory"></select>
@@ -852,16 +860,19 @@ function terminalHtml() {
 // ---- render ----
 
 function render() {
-	const view = !getToken() ? "pair" : state.open ? `chat:${state.open}` : "list";
+	const view = !getToken() ? "pair" : state.open ? `chat:${state.open}` : state.phones ? "phones" : "list";
 	if (view !== shown) {
 		shown = view;
 		lastLog = "";
-		app.innerHTML = view === "pair" ? pairView() : view === "list" ? listShell() : chatShell();
+		app.innerHTML =
+			view === "pair" ? pairView() : view === "list" ? listShell() : view === "phones" ? phonesShell() : chatShell();
 		if (view === "pair") bindPair();
 		else if (view === "list") bindList();
+		else if (view === "phones") bindPhones();
 		else bindChat();
 	}
 	if (view === "list") updateList();
+	else if (view === "phones") updatePhones();
 	else if (view !== "pair") updateChat();
 }
 
@@ -1435,6 +1446,92 @@ async function send() {
 	}
 }
 
+// ---- paired phones ----
+
+function phonesShell() {
+	return `<header class="bar"><a class="back" href="#">‹ Sessions</a><h1>Paired phones</h1></header>
+<div id="banner"></div><section class="scroll" id="devices"></section>`;
+}
+
+/** @param {Device} device */
+function deviceHtml(device) {
+	const id = esc(device.id);
+	if (state.confirming === device.id) {
+		return `<div class="row device"><span class="name">Remove ${esc(device.name)}?<small>${device.current ? "This phone" : "It"} will have to pair again.</small></span>
+<button class="unpair cancel" data-cancel>Cancel</button><button class="unpair" data-confirm="${id}">Remove</button></div>`;
+	}
+	const day = (/** @type {string} */ iso) => new Date(iso).toLocaleDateString(undefined, { dateStyle: "medium" });
+	const facts = [
+		device.current ? "This phone" : "",
+		`paired ${day(device.createdAt)}`,
+		device.lastUsedAt ? `last used ${day(device.lastUsedAt)}` : "",
+	];
+	return `<div class="row device"><span class="name">${esc(device.name)}<small>${esc(facts.filter(Boolean).join(" · "))}</small></span>
+<button class="unpair" data-remove="${id}">Remove</button></div>`;
+}
+
+function updatePhones() {
+	const banner = state.error ? `<div class="banner off">${esc(state.error)}</div>` : "";
+	if ($("#banner").innerHTML !== banner) $("#banner").innerHTML = banner;
+	const devices = state.devices;
+	$("#devices").innerHTML = !devices
+		? `<p class="empty">Loading…</p>`
+		: devices.length
+			? devices.map(deviceHtml).join("")
+			: `<p class="empty">No paired phones.</p>`;
+}
+
+async function loadDevices() {
+	try {
+		state.devices = await api.devices();
+		render();
+	} catch (error) {
+		handleError(error);
+	}
+}
+
+/** @param {string} id */
+async function removeDevice(id) {
+	const device = state.devices?.find((d) => d.id === id);
+	state.confirming = undefined;
+	try {
+		await api.removeDevice(id);
+	} catch (error) {
+		handleError(error);
+		void loadDevices();
+		return;
+	}
+	if (!device?.current) return void loadDevices();
+	// Signed out: back to pairing.
+	clearToken();
+	source?.close();
+	history.replaceState(null, "", location.pathname + location.search);
+	state.phones = false;
+	render();
+}
+
+function bindPhones() {
+	void loadDevices();
+	$("#devices").addEventListener("click", (/** @type {Event} */ event) => {
+		const button = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest("button"));
+		if (!button) return;
+		if (button.dataset.remove) state.confirming = button.dataset.remove;
+		else if (button.dataset.confirm) void removeDevice(button.dataset.confirm);
+		else state.confirming = undefined;
+		updatePhones();
+	});
+}
+
+/** Opening or leaving the paired phones screen. */
+function routePhones() {
+	const phones = location.hash === "#phones";
+	if (phones === state.phones) return;
+	state.phones = phones;
+	state.devices = undefined;
+	state.confirming = undefined;
+	state.error = undefined;
+}
+
 // ---- routing ----
 
 /**
@@ -1451,6 +1548,7 @@ function claimLink() {
 
 function route() {
 	claimLink();
+	routePhones();
 	const match = /^#s\/(.+)$/.exec(location.hash);
 	const open = match ? decodeURIComponent(match[1]) : undefined;
 	if (open !== state.open) {
@@ -1506,6 +1604,7 @@ if ("serviceWorker" in navigator) {
 }
 
 claimLink();
+routePhones();
 state.open = /^#s\/(.+)$/.exec(location.hash)?.[1];
 if (state.open) state.open = decodeURIComponent(state.open);
 render();

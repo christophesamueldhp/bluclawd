@@ -266,6 +266,26 @@ async function handle(
 	if (path === "/api/handoff" && req.method === "POST") {
 		return json(res, 200, { handoff: deps.store.issueHandoff(device.id) });
 	}
+	if (path === "/api/devices" && req.method === "GET") {
+		const devices = deps.store.load().devices.map(({ id, name, createdAt, lastUsedAt }) => ({
+			id,
+			name,
+			createdAt,
+			lastUsedAt,
+			current: id === device.id,
+		}));
+		return json(res, 200, { devices });
+	}
+	const removing = /^\/api\/devices\/([^/]+)$/.exec(path);
+	if (removing && req.method === "DELETE") {
+		let id: string;
+		try {
+			id = decodeURIComponent(removing[1]!);
+		} catch {
+			return json(res, 404, { error: "unknown_device" });
+		}
+		return deps.store.revoke(id) ? json(res, 200, { ok: true }) : json(res, 404, { error: "unknown_device" });
+	}
 	if (path === "/api/sessions" && req.method === "GET") {
 		return json(res, 200, { sessions: remoteSessions(deps.listInstances()) });
 	}
