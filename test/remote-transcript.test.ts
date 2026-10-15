@@ -17,6 +17,7 @@ import {
 	transcriptFrom,
 } from "../daemon/remote/transcript.ts";
 import { promptKey } from "../daemon/remote/web/live.js";
+import { resultSummary } from "../daemon/remote/web/output.js";
 
 const jsonl = (...entries: object[]) => entries.map((entry) => JSON.stringify(entry)).join("\n");
 const msg = (id: string, parentId: string | null, message: object) => ({
@@ -94,6 +95,30 @@ describe("remote transcript", () => {
 		]);
 	});
 
+	it("shows a background task's notice as the Mac draws it, not the reminder written for the model", () => {
+		const notice = (id: string, parentId: string | null, customType: string, details: object) => ({
+			type: "custom_message",
+			id,
+			parentId,
+			customType,
+			display: true,
+			content: "<system-reminder>\n[SYSTEM NOTIFICATION - NOT USER INPUT]\n…\n</system-reminder>",
+			details,
+		});
+		const text = jsonl(
+			notice("t1", null, "bluclawd:task-exit", {
+				id: "b1",
+				end: 'Task "Run tests" was stopped by the user',
+				state: "killed",
+			}),
+			notice("m1", "t1", "bluclawd:monitor", { id: "w1", description: "watch the build", lines: ["built"] }),
+		);
+		expect(transcriptFrom(text, 50)).toEqual([
+			{ kind: "marker", id: "t1", text: 'Task "Run tests" was stopped by the user' },
+			{ kind: "marker", id: "m1", text: "monitor w1 · watch the build" },
+		]);
+	});
+
 	it("follows the branch the file's last entry is on", () => {
 		const text = jsonl(
 			msg("u1", null, { role: "user", content: "first" }),
@@ -134,6 +159,23 @@ describe("remote transcript", () => {
 		expect(messages).toHaveLength(1);
 		expect(messages[0]).toMatchObject({ kind: "toolResult", truncated: true });
 		expect((messages[0] as { text: string }).text).toHaveLength(TEXT_MAX + 1);
+	});
+
+	it("keeps pi's note on what a long read left out, which the phone counts its lines from", () => {
+		const note = "[Showing lines 1-382 of 2001 (50.0KB limit). Use offset=383 to continue.]";
+		const text = jsonl(
+			msg("r1", null, {
+				role: "toolResult",
+				toolCallId: "c",
+				toolName: "read",
+				isError: false,
+				content: [{ type: "text", text: `${"line\n".repeat(10_000)}\n${note}` }],
+			}),
+		);
+		const [result] = transcriptFrom(text, 1) as { text: string; truncated: boolean }[];
+		expect(result!.truncated).toBe(true);
+		expect(result!.text.endsWith(`…\n\n${note}`)).toBe(true);
+		expect(resultSummary("read", result!)).toEqual(["Read 382 lines"]);
 	});
 
 	it("keeps a failed model request and drops an empty assistant message", () => {

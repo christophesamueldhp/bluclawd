@@ -94,6 +94,9 @@ export interface Entry {
 	};
 	content?: unknown;
 	display?: boolean;
+	/** A custom message's. */
+	customType?: string;
+	details?: { id?: unknown; description?: unknown; end?: unknown };
 	/** A compaction's, a branch summary's or a usage entry's. */
 	usage?: EntryUsage;
 	tokensBefore?: number;
@@ -176,12 +179,22 @@ export function toolSummary(args: unknown): string {
 	return typeof value === "string" ? firstLine(value) : "";
 }
 
+/** A background task's notice (ext/background-bash) as the Mac draws it: its content is a reminder
+ *  written for the model. */
+function noticeText({ customType, details }: Entry): string | undefined {
+	if (customType === "bluclawd:task-exit" && typeof details?.end === "string") return details.end;
+	if (customType === "bluclawd:monitor" && typeof details?.description === "string") {
+		return `monitor ${String(details.id)} · ${details.description}`;
+	}
+	return undefined;
+}
+
 function toRemote(entry: Entry): RemoteMessage | undefined {
 	const id = entry.id ?? "";
 	// As Claude Code's transcript: a model or thinking level change shows nowhere but the status line.
 	if (entry.type === "compaction") return { kind: "marker", id, text: "Conversation compacted" };
 	if (entry.type === "custom_message" && entry.display) {
-		const text = firstLine(plainText(entry.content));
+		const text = firstLine(noticeText(entry) ?? plainText(entry.content));
 		return text ? { kind: "marker", id, text } : undefined;
 	}
 	if (entry.type !== "message" || !entry.message) return undefined;
@@ -214,7 +227,13 @@ function toRemote(entry: Entry): RemoteMessage | undefined {
 			};
 		}
 		case "toolResult": {
-			const { text, truncated } = clip(plainText(message.content));
+			const full = plainText(message.content);
+			const cut = clip(full);
+			// pi ends a long result with a note on what it left out ("[Showing lines 1-382 of 2001 …]"),
+			// past the cut: kept, the phone counts the lines from it.
+			const note = cut.truncated ? /\n\n(\[[^\n]{1,200}\])$/.exec(full)?.[1] : undefined;
+			const { truncated } = cut;
+			const text = note ? `${cut.text}\n\n${note}` : cut.text;
 			const diff = message.details?.diff;
 			const clipped = typeof diff === "string" && diff ? clip(diff, DIFF_MAX) : undefined;
 			return {
