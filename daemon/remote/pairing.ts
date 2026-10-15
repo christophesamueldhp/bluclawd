@@ -197,9 +197,11 @@ export class RemoteStore {
 		return this.addDevice(deviceName, now);
 	}
 
-	/** For the Home Screen app this device's browser adds, which may not share its storage. Replaces
-	 *  the device's earlier one. */
+	/** For the Home Screen app this device's browser adds, which may not share its storage. The same
+	 *  one until it expires or is used: iOS keeps the one it read when the app was added. */
 	issueHandoff(deviceId: string, now: number = Date.now()): string {
+		const current = this.handoffs.get(deviceId);
+		if (current && now <= current.expiresAt) return current.secret;
 		const secret = newSecret();
 		this.handoffs.set(deviceId, { secret, expiresAt: now + HANDOFF_TTL_MS });
 		return secret;

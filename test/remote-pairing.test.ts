@@ -96,16 +96,19 @@ describe("remote pairing", () => {
 		expect(store.exchangeHandoff(late, "x", 30 * 60_000 + 1)).toEqual({ error: "invalid_handoff" });
 	});
 
-	it("keeps only a device's latest handoff, and none once the device is removed", () => {
+	it("gives a device the same handoff until it is used or expires, and none once the device is removed", () => {
 		const device = store.authenticate(pairDevice("iPhone"), 2)!;
 		const first = store.issueHandoff(device.id, 0);
-		const second = store.issueHandoff(device.id, 0);
-		expect(store.exchangeHandoff(first, "x", 1)).toEqual({ error: "invalid_handoff" });
-		const third = store.issueHandoff(device.id, 0);
-		expect(second).not.toBe(third);
+		expect(store.issueHandoff(device.id, 30 * 60_000)).toBe(first);
+		const fresh = store.issueHandoff(device.id, 30 * 60_000 + 1);
+		expect(fresh).not.toBe(first);
+		expect(store.exchangeHandoff(first, "x", 30 * 60_000 + 2)).toEqual({ error: "invalid_handoff" });
+		expect("token" in store.exchangeHandoff(fresh, "x", 30 * 60_000 + 2)).toBe(true);
+		const next = store.issueHandoff(device.id, 30 * 60_000 + 3);
+		expect(next).not.toBe(fresh);
 		store.revoke(device.id);
-		expect(store.exchangeHandoff(third, "x", 1)).toEqual({ error: "invalid_handoff" });
-		expect(store.load().devices).toEqual([]);
+		expect(store.exchangeHandoff(next, "x", 30 * 60_000 + 4)).toEqual({ error: "invalid_handoff" });
+		expect(store.load().devices.map((d) => d.name)).toEqual(["x"]);
 	});
 
 	it("invalidates a code after five wrong attempts", () => {
