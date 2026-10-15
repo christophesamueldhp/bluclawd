@@ -290,13 +290,12 @@ export function qrMatrix(text: string, mask?: number): boolean[][] {
 	return grid.modules;
 }
 
-/** Black on white whatever the terminal's colours, as scanners want: 256-colour 16 and 231 are
- *  the colour cube's black and white, which themes leave alone. Not dimmed, as pi dims a notice. */
-const OPEN = "\x1b[22;38;5;16;48;5;231m";
-const CLOSE = "\x1b[39;49m";
+/** In the terminal's own colours: dark modules in its foreground on its background, so the code
+ *  is inverted on a dark terminal, which scanners read too. Only resets: not dimmed, as pi dims a notice. */
+const OPEN = "\x1b[22;39;49m";
 const QUIET = 4;
 
-/** Two module rows to a line with half blocks, in a light quiet zone of 4 modules. */
+/** Two module rows to a line with half blocks, in a blank quiet zone of 4 modules. */
 export function renderQr(matrix: boolean[][]): string {
 	const width = matrix.length + QUIET * 2;
 	const dark = (x: number, y: number) => matrix[y - QUIET]?.[x - QUIET] === true;
@@ -308,7 +307,7 @@ export function renderQr(matrix: boolean[][]): string {
 			const bottom = dark(x, y + 1);
 			line += top && bottom ? "█" : top ? "▀" : bottom ? "▄" : " ";
 		}
-		lines.push(`${OPEN}${line}${CLOSE}`);
+		lines.push(`${OPEN}${line}`);
 	}
 	return lines.join("\n");
 }

@@ -100,17 +100,18 @@ describe("QR code", () => {
 		}
 	});
 
-	it("draws dark modules in black on white, two rows to a line, inside a 4-module quiet zone", () => {
+	it("draws dark modules in the terminal's own foreground on its background, two rows to a line, inside a blank 4-module quiet zone", () => {
 		const matrix = qrMatrix("https://mac.tail1234.ts.net/#pair=482913");
 		const size = matrix.length;
 		const lines = renderQr(matrix).split("\n");
 		expect(lines).toHaveLength(Math.ceil((size + 8) / 2));
-		const open = "\x1b[22;38;5;16;48;5;231m";
-		const close = "\x1b[39;49m";
+		// Only resets: undimmed, default foreground and background, so a dark terminal shows it inverted.
+		const open = "\x1b[22;39;49m";
 		const body = lines.map((line) => {
-			expect(line.startsWith(open) && line.endsWith(close)).toBe(true);
-			return line.slice(open.length, -close.length);
+			expect(line.startsWith(open)).toBe(true);
+			return line.slice(open.length);
 		});
+		expect(body.join("")).not.toContain("\x1b");
 		expect(body.every((line) => [...line].length === size + 8)).toBe(true);
 		expect(body.slice(0, 2)).toEqual([" ".repeat(size + 8), " ".repeat(size + 8)]);
 		// Rows 0 and 1 of the finder: all dark, then dark at both ends only.
