@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { promptKey, sentText, settle, shownText } from "../daemon/remote/web/live.js";
+import { giveUp, promptKey, promptText, sentText, settle, shortcut, shownText } from "../daemon/remote/web/live.js";
 
 const assistant = (id: string, text: string, thinking?: string) => ({
 	kind: "assistant",
@@ -75,6 +75,52 @@ describe("a message's text in its bubble", () => {
 		expect(shownText("look\n[Image]", [])).toBe("look\n[Image]");
 		expect(shownText("see [Image] here\n[Image: original 4000x3000]\n[Image]", [png])).toBe(
 			"see [Image] here\n[Image: original 4000x3000]",
+		);
+	});
+});
+
+describe("a sent prompt still waiting once its time is up", () => {
+	const sent = { prompt: "fix it", last: "m1" };
+
+	it("fails when the session sat idle and its transcript did not move: it never got there", () => {
+		expect(giveUp(sent, "idle", "m1")).toBe("fail");
+		expect(giveUp(sent, undefined, "m1")).toBe("fail");
+	});
+
+	it("waits while the session works or waits on a dialog, or once it was seen working", () => {
+		expect(giveUp(sent, "working", "m1")).toBe("wait");
+		expect(giveUp(sent, "needs", "m1")).toBe("wait");
+		expect(giveUp({ ...sent, started: true }, "idle", "m1")).toBe("wait");
+	});
+
+	it("goes quietly when the transcript moved, as pi wrote it otherwise", () => {
+		expect(giveUp(sent, "idle", "m2")).toBe("drop");
+	});
+
+	it("goes quietly for a command, which may write nothing", () => {
+		expect(giveUp({ prompt: "/reload", last: "m1" }, "idle", "m1")).toBe("drop");
+		expect(giveUp({ prompt: "/reload", last: "m1" }, "working", "m1")).toBe("wait");
+	});
+});
+
+describe("the commands the phone runs itself", () => {
+	it("are /compact and /model, typed alone", () => {
+		expect(shortcut("/compact")).toBe("compact");
+		expect(shortcut(" /model\n")).toBe("model");
+	});
+
+	it("leaves anything else to be sent", () => {
+		for (const text of ["/compact now", "/models", "/reload", "compact", "/Model", "please /model"]) {
+			expect(shortcut(text), text).toBeUndefined();
+		}
+	});
+});
+
+describe("a message of yours for the reply box or the clipboard", () => {
+	it("is its text without the transcript's [Image] lines", () => {
+		expect(promptText("look at these\n[Image]\n[Image]")).toBe("look at these");
+		expect(promptText("see [Image] here\n\n[Image: original 4000x3000]")).toBe(
+			"see [Image] here\n\n[Image: original 4000x3000]",
 		);
 	});
 });
