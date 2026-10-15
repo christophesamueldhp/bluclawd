@@ -5,6 +5,8 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 import { PANE_ENV, Tmux } from "../daemon/tmux.ts";
+import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
+import { detachableExec, runningForegroundShells } from "../ext/background-bash/foreground-shells.ts";
 import { projectTrust, TRUST_CHANGED } from "../ext/permissions/index.ts";
 import remoteFactory, { USAGE } from "../ext/remote/index.ts";
 import {
@@ -14,7 +16,9 @@ import {
 	DIALOG_NOTICE,
 	DRAFT_NOTICE,
 	navigate,
+	paneTasks,
 	submitCommand,
+	watchTasks,
 } from "../ext/remote/report.ts";
 
 const model = (provider: string, id: string, name?: string, reasoning = false) => ({ provider, id, name, reasoning });
@@ -47,6 +51,7 @@ function fakes(
 		},
 		getContextUsage: () => ({ tokens: 12_000, contextWindow: 200_000, percent: 6 }),
 		sessionManager: {
+			getSessionId: () => "report-session",
 			getEntries: () => [
 				{ type: "message", message: { role: "user", content: "hi" } },
 				{ type: "message", message: { role: "assistant", usage: usage(100, 20, 1000, 200, 0.5) } },
@@ -111,6 +116,7 @@ describe("buildReport", () => {
 			context: { tokens: 12_000, contextWindow: 200_000, percent: 6 },
 			usage: { input: 170, output: 30, cacheRead: 1000, cacheWrite: 230, cost: 0.984375 },
 			trust: "ask",
+			tasks: [],
 		});
 	});
 
@@ -388,6 +394,82 @@ describe("slash commands from the phone", () => {
 		submitCommand("/new", ctx as never, tui as never, enter, refuse);
 		expect(editor.text).toBe("");
 		expect(refuse).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("background tasks for the phone", () => {
+	const forever: BackgroundExec = (_c, _w, { signal }) =>
+		new Promise((_r, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+	let owner = 0;
+	const session = () => `phone-tasks-${++owner}`;
+	afterEach(() => {
+		for (const job of backgroundBashJobs.list()) backgroundBashJobs.kill(job.id);
+	});
+
+	it("lists the session's running tasks as /tasks does, bounded, with where a shell writes its output", async () => {
+		const me = session();
+		backgroundBashJobs.start({ command: "npm run dev", cwd: "/", owner: me, exec: forever });
+		backgroundBashJobs.start({ command: `echo ${"x".repeat(300)}`, cwd: "/", owner: me, exec: forever });
+		backgroundBashJobs.start({ command: "true", cwd: "/", owner: me, exec: async () => ({ exitCode: 0 }) });
+		backgroundBashJobs.start({ command: "someone else's", cwd: "/", owner: session(), exec: forever });
+		await new Promise((r) => setTimeout(r, 0));
+		const tasks = paneTasks(me);
+		expect(tasks.map((t) => [t.kind, t.label.slice(0, 11)])).toEqual([
+			["shell", "echo xxxxxx"],
+			["shell", "npm run dev"],
+		]);
+		expect(tasks[0]!.label).toHaveLength(200);
+		const job = backgroundBashJobs.get(tasks[1]!.id)!;
+		expect(tasks[1]).toEqual({
+			id: job.id,
+			kind: "shell",
+			label: "npm run dev",
+			startedAt: job.startedAt,
+			...(job.outputFile ? { outputFile: job.outputFile } : {}),
+		});
+	});
+
+	it("stops one as the user, whether a turn runs or not, and reports again for one that is gone", async () => {
+		const me = session();
+		const id = backgroundBashJobs.start({ command: "npm run dev", cwd: "/", owner: me, exec: forever }).id;
+		const { ctx, pi } = fakes({ idle: false });
+		const busy = { ...ctx, sessionManager: { ...ctx.sessionManager, getSessionId: () => me } };
+		const reportAgain = vi.fn();
+		applyPaneMessage({ type: "stop_task", id }, busy as never, pi as never, reportAgain);
+		await new Promise((r) => setTimeout(r, 0));
+		expect(backgroundBashJobs.get(id)).toMatchObject({ killed: true, stoppedByUser: true });
+		expect(reportAgain).not.toHaveBeenCalled();
+		applyPaneMessage({ type: "stop_task", id: "b-gone" }, busy as never, pi as never, reportAgain);
+		expect(reportAgain).toHaveBeenCalledTimes(1);
+	});
+
+	it("looks again once tasks start or end, and once the model's bash has run 2s in the foreground", async () => {
+		vi.useFakeTimers();
+		try {
+			const check = vi.fn();
+			const stop = watchTasks(check);
+			const job = backgroundBashJobs.start({ command: "npm run dev", cwd: "/", exec: forever });
+			backgroundBashJobs.start({ command: "tail -f log", cwd: "/", exec: forever });
+			await vi.advanceTimersByTimeAsync(300);
+			// Two starts this close: one look.
+			expect(check).toHaveBeenCalledTimes(1);
+			backgroundBashJobs.kill(job.id);
+			await vi.advanceTimersByTimeAsync(300);
+			expect(check).toHaveBeenCalledTimes(2);
+			const run = detachableExec(forever)("sleep 60", "/", { onData: () => {} });
+			await vi.advanceTimersByTimeAsync(300);
+			expect(check).toHaveBeenCalledTimes(3);
+			await vi.advanceTimersByTimeAsync(2000);
+			expect(check).toHaveBeenCalledTimes(4);
+			stop();
+			for (const shell of runningForegroundShells()) shell.stop();
+			await run.catch(() => {});
+			backgroundBashJobs.start({ command: "after", cwd: "/", exec: forever });
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(check).toHaveBeenCalledTimes(4);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 

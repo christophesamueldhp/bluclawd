@@ -57,7 +57,8 @@ export type PaneMessage =
 	| { type: "tree"; entryId: string }
 	| { type: "fork"; entryId: string }
 	| { type: "clone" }
-	| { type: "command"; text: string };
+	| { type: "command"; text: string }
+	| { type: "stop_task"; id: string };
 
 /** Mirror of daemon/ipc/protocol.ts LiveSnapshot. */
 export interface LiveSnapshot {
@@ -77,6 +78,17 @@ export interface PaneReport {
 	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
 	notice?: { text: string; at: number };
 	commands?: PaneCommand[];
+	tasks?: PaneTask[];
+}
+
+/** Mirror of daemon/ipc/protocol.ts PaneTask. */
+export interface PaneTask {
+	id: string;
+	kind: "shell" | "monitor" | "agent";
+	label: string;
+	startedAt: number;
+	foreground?: boolean;
+	outputFile?: string;
 }
 
 /** Mirror of daemon/ipc/protocol.ts PaneCommand. */

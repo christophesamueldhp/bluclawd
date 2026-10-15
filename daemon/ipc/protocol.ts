@@ -66,7 +66,9 @@ export type PaneMessage =
 	| { type: "fork"; entryId: string }
 	| { type: "clone" }
 	/** A text-only prompt starting with "/": typed into the pane's prompt and submitted, as on the Mac. */
-	| { type: "command"; text: string };
+	| { type: "command"; text: string }
+	/** Stop a background task, as /tasks' `x` does: the model is told. */
+	| { type: "stop_task"; id: string };
 
 /** Queue a message for a self-registered session. */
 export interface SendRequest {
@@ -152,6 +154,21 @@ export interface PaneReport {
 	/** The slash commands its prompt runs: pi's built-in ones, then extension commands, prompt
 	 *  templates and skills (`skill:name`). */
 	commands?: PaneCommand[];
+	/** Its running background tasks, as /tasks lists them: shells, monitors, then subagent runs, newest
+	 *  first in each; at most 20. */
+	tasks?: PaneTask[];
+}
+
+/** A background task: a shell, a monitor or a subagent run, or the model's bash past 2s in the
+ *  foreground (`foreground`). `outputFile`: where a shell or monitor writes its output. */
+export interface PaneTask {
+	id: string;
+	kind: "shell" | "monitor" | "agent";
+	label: string;
+	/** Epoch ms. */
+	startedAt: number;
+	foreground?: boolean;
+	outputFile?: string;
 }
 
 /** Commands that drive the Mac's own screen (remote control's menu, agent view, detaching), never run from a phone. */

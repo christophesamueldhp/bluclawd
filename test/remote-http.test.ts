@@ -432,6 +432,57 @@ describe("remote HTTP API", () => {
 		});
 	});
 
+	describe("background tasks", () => {
+		it("lists a pane's tasks in its status, keeping their output files on the Mac", async () => {
+			const token = await pair();
+			const output = join(dir, "b1.output");
+			reports.set("live", {
+				models: [],
+				tasks: [
+					{ id: "b1", kind: "shell", label: "npm run dev", startedAt: 1, outputFile: output },
+					{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2, foreground: true },
+				],
+			});
+			const res = await fetch(`${base}/api/sessions/live/status`, { headers: auth(token) });
+			expect(((await res.json()) as { report: object }).report).toEqual({
+				models: [],
+				tasks: [
+					{ id: "b1", kind: "shell", label: "npm run dev", startedAt: 1, output: true },
+					{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2, foreground: true },
+				],
+			});
+		});
+
+		it("gives a task's output tail as /tasks shows it, and stops a task the pane reported", async () => {
+			const token = await pair();
+			const output = join(dir, "b1.output");
+			const lines = Array.from({ length: 30 }, (_, i) => `line ${i}`);
+			writeFileSync(output, `${"x".repeat(9000)}\n${lines.join("\n")}\n\x1b[31mred\x1b[0m\r\n`);
+			reports.set("live", {
+				models: [],
+				tasks: [
+					{ id: "b1", kind: "shell", label: "npm run dev", startedAt: 1, outputFile: output },
+					{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2, foreground: true },
+				],
+			});
+			const tail = await fetch(`${base}/api/sessions/live/tasks/b1/output`, { headers: auth(token) });
+			expect(await tail.json()).toEqual({ lines: [...lines.slice(-8), "red"], size: expect.any(Number) });
+			const none = await fetch(`${base}/api/sessions/live/tasks/f2/output`, { headers: auth(token) });
+			expect([none.status, await none.json()]).toEqual([404, { error: "no_output" }]);
+			const stop = (task: string, id = "live") =>
+				fetch(`${base}/api/sessions/${id}/tasks/${task}/stop`, { method: "POST", headers: authJson(token) });
+			expect((await stop("f2")).status).toBe(202);
+			expect(sent).toEqual([{ id: "live", message: { type: "stop_task", id: "f2" } }]);
+			const unknown = await stop("b9");
+			expect([unknown.status, await unknown.json()]).toEqual([404, { error: "unknown_task" }]);
+			expect((await stop("b1", "stored")).status).toBe(404);
+			expect((await stop("../x")).status).toBe(404);
+			const get = await fetch(`${base}/api/sessions/live/tasks/b1/stop`, { headers: auth(token) });
+			expect(get.status).toBe(405);
+			expect(sent).toHaveLength(1);
+		});
+	});
+
 	describe("images", () => {
 		const magic: Record<string, number[]> = {
 			"image/jpeg": [0xff, 0xd8, 0xff, 0xe0],

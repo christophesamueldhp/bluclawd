@@ -4,7 +4,7 @@
  * /api/pair/handoff) needs a paired device's token: a bearer header, or `?token=` on the SSE
  * stream, which EventSource cannot give headers.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
@@ -101,6 +101,9 @@ const KEYS = new Set(["Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "
 const KEYS_MAX = 1;
 const TEXT_MAX = 1024;
 const NAME_MAX = 100;
+/** A task's output tail, as /tasks' detail view reads it. */
+const TAIL_BYTES = 8192;
+const TAIL_LINES = 10;
 /** Never in typed text or a name: a control character would be a keystroke, or a terminal escape in agent view. */
 const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 /** Against DNS rebinding: a page whose name resolves to 127.0.0.1 still sends its own name. Tailscale
@@ -203,6 +206,32 @@ function keysIn(body: Record<string, unknown>): { keys: string[] } | { text: str
 		if (!CONTROL.test(text)) return { text };
 	}
 	throw new HttpError(400, "invalid_keys");
+}
+
+/** A task's output as /tasks' detail view shows it: the last lines of the file's last 8 KiB, empty
+ *  ones dropped, without the escapes and control characters the command wrote for its terminal. */
+function outputTail(file: string): { lines: string[]; size: number } | undefined {
+	if (!isAbsolute(file)) return undefined;
+	try {
+		const size = statSync(file).size;
+		const length = Math.min(size, TAIL_BYTES);
+		const buffer = Buffer.alloc(length);
+		const fd = openSync(file, "r");
+		try {
+			readSync(fd, buffer, 0, length, size - length);
+		} finally {
+			closeSync(fd);
+		}
+		const lines = buffer
+			.toString("utf8")
+			.split("\n")
+			.slice(-TAIL_LINES)
+			.map((line) => stripAnsi(line).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, ""))
+			.filter(Boolean);
+		return { lines, size };
+	} catch {
+		return undefined;
+	}
 }
 
 /** How to start a pane's pi, while its files are still there. */
@@ -415,6 +444,31 @@ async function handle(
 		return;
 	}
 
+	// A background task the pane reported: the tail of its output, or stopping it as /tasks' `x` does.
+	const task = /^\/api\/sessions\/([^/]+)\/tasks\/([\w.:-]{1,64})\/(output|stop)$/.exec(path);
+	if (task) {
+		const [, encoded = "", taskId = "", verb] = task;
+		if (req.method !== (verb === "output" ? "GET" : "POST")) return json(res, 405, { error: "method_not_allowed" });
+		if (verb === "stop") await readJson(req);
+		let taskOf: string;
+		try {
+			taskOf = decodeURIComponent(encoded);
+		} catch {
+			return json(res, 404, { error: "unknown_session" });
+		}
+		const session = findSession(deps.listInstances(), taskOf);
+		if (!session) return json(res, 404, { error: "unknown_session" });
+		const known = session.running ? deps.report(taskOf)?.tasks?.find((t) => t.id === taskId) : undefined;
+		if (!known) return json(res, 404, { error: "unknown_task" });
+		if (verb === "output") {
+			const tail = known.outputFile ? outputTail(known.outputFile) : undefined;
+			return tail ? json(res, 200, tail) : json(res, 404, { error: "no_output" });
+		}
+		if (!deps.send(taskOf, { type: "stop_task", id: taskId }))
+			return json(res, 409, { error: "session_not_running" });
+		return json(res, 202, { ok: true });
+	}
+
 	// A tool result's whole output: the transcript cuts it to TEXT_MAX.
 	const output = /^\/api\/sessions\/([^/]+)\/messages\/([0-9a-f-]{8,36})\/output$/.exec(path);
 	if (output) {
@@ -461,8 +515,12 @@ async function handle(
 		const report = found.running ? deps.report(id) : undefined;
 		if (!report) return json(res, 404, { error: "no_status" });
 		// Fetched again after every report: the commands, which rarely change, have their own route.
-		const { commands: _commands, ...shown } = report;
-		return json(res, 200, { report: { ...shown, ...(await deps.statusLine?.(found.cwd)) } });
+		const { commands: _commands, tasks, ...shown } = report;
+		// A task's output file stays here: the phone asks for its tail.
+		const listed = tasks?.map(({ outputFile, ...task }) => ({ ...task, ...(outputFile ? { output: true } : {}) }));
+		return json(res, 200, {
+			report: { ...shown, ...(listed ? { tasks: listed } : {}), ...(await deps.statusLine?.(found.cwd)) },
+		});
 	}
 	if (action === "commands") {
 		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });

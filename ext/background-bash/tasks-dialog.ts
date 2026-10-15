@@ -163,7 +163,7 @@ function outputTail(row: TaskRow): { lines: string[]; size: number; read: number
 }
 
 /** Stops a task as the user; the model is told. */
-function stopTask(row: TaskRow): void {
+export function stopTask(row: TaskRow): void {
 	if (row.kind === "agent") agentTasks()?.stop(row.id);
 	else if (row.foreground) row.foreground.stop();
 	else backgroundBashJobs.kill(row.id, { byUser: true });
@@ -189,7 +189,7 @@ const hasDetail = (row: TaskRow) => sectionOf(row) !== "monitors";
  * The tasks the dialog lists: running ones only, the model's foreground bash among them, in
  * section order, newest first within each.
  */
-function visibleRows(owner: string | undefined): TaskRow[] {
+export function visibleRows(owner: string | undefined): TaskRow[] {
 	const rows = [...foregroundRows(owner), ...taskRows(owner).filter((row) => row.state === "running")].sort(
 		(a, b) => b.startedAt - a.startedAt,
 	);

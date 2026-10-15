@@ -27,7 +27,7 @@ import { TRUST_CHANGED } from "../permissions/index.ts";
 import { autostartDeps, autostartOn, autostartStatus, refreshAutostart, toggleAutostart } from "./autostart.ts";
 import { LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
-import { applyPaneMessage, buildReport, navigate, submitCommand } from "./report.ts";
+import { applyPaneMessage, buildReport, navigate, paneTasks, submitCommand, watchTasks } from "./report.ts";
 import { EnableNeeded, serve, tailscaleInfo } from "./tailscale.ts";
 
 function message(error: unknown): string {
@@ -218,16 +218,27 @@ function factory(pi: ExtensionAPI): void {
 	let watched = false;
 	/** The phone's tree, fork and clone sent as `/remote-control` and not yet run. */
 	const dispatched = new Set<string>();
+	/** The task list the last report carried, so a change that leaves it as it was sends none. */
+	let reportedTasks = "";
+	let unwatchTasks: (() => void) | undefined;
 	/** `notice`: what the pane could not do for the phone, which this report alone carries. */
 	const report = (ctx: ExtensionContext, notice?: string): void => {
 		// As agent view registers: a `pi -p` run inside the pane must not report as the pane.
 		if (!pane || ctx.mode !== "tui") return;
 		session = ctx;
 		const next = { ...buildReport(ctx, pi), ...(notice ? { notice: { text: notice, at: Date.now() } } : {}) };
+		reportedTasks = JSON.stringify(next.tasks);
 		reports = reports.then(() => client.remoteReport(pane, next)).catch(() => {});
 	};
 	pi.on("session_start", (_event, ctx) => {
-		if (pane && ctx.mode === "tui") tui = holdTui(ctx, "remote:tui");
+		if (pane && ctx.mode === "tui") {
+			tui = holdTui(ctx, "remote:tui");
+			unwatchTasks?.();
+			unwatchTasks = watchTasks(() => {
+				const ctx = session;
+				if (ctx && JSON.stringify(paneTasks(ctx.sessionManager.getSessionId())) !== reportedTasks) report(ctx);
+			});
+		}
 		report(ctx);
 	});
 	pi.on("model_select", (_event, ctx) => report(ctx));
@@ -264,6 +275,8 @@ function factory(pi: ExtensionAPI): void {
 	pi.on("session_shutdown", () => {
 		// As a turn's end: no timer left to send, and the phone's snapshot of ours cleared.
 		live?.onAgentEnd();
+		unwatchTasks?.();
+		unwatchTasks = undefined;
 		session = undefined;
 	});
 
