@@ -79,7 +79,7 @@ export function giveUp(pending, sessionState, last) {
  */
 export function refused(text) {
 	const command = text.trim();
-	return command.startsWith("/remote-control") || command.startsWith("/agent-view");
+	return /^\/(remote-control|agent-view|exit|quit)(\s|$)/.test(command);
 }
 
 /**

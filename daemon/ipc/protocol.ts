@@ -175,7 +175,7 @@ export interface PaneTask {
 }
 
 /** Commands that drive the Mac's own screen (remote control's menu, agent view, detaching), never run from a phone. */
-export const PHONE_REFUSED_COMMANDS: ReadonlySet<string> = new Set(["remote-control", "agent-view", "exit"]);
+export const PHONE_REFUSED_COMMANDS: ReadonlySet<string> = new Set(["remote-control", "agent-view", "exit", "quit"]);
 
 /** A slash command, without its "/". */
 export interface PaneCommand {
