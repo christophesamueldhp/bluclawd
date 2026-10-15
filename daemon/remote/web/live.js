@@ -41,8 +41,10 @@ export function shownText(text, images) {
 	return images?.length
 		? text
 				.split("\n")
-				.filter((line) => line !== "[Image]")
+				// pi's note on an image it resized (`[Image: original …]`) too: the picture shows itself.
+				.filter((line) => !/^\[Image(?:[ :].*)?\]$/.test(line))
 				.join("\n")
+				.trimEnd()
 		: text;
 }
 

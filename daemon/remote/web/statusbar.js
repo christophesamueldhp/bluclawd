@@ -289,8 +289,25 @@ export function spanStyle(span, dark) {
 	const named = color ? XTERM.indexOf(color.toLowerCase()) : -1;
 	if (color && named >= 0 && contrast(color, theme.bg) < MIN_CONTRAST) {
 		color = READABLE[dark ? "dark" : "light"][named];
-	}
+	} else if (color && contrast(color, theme.bg) < MIN_CONTRAST) color = readable(color, theme.text, theme.bg);
 	return { ...(color ? { color } : {}), classes };
+}
+
+/** `color` moved toward `toward` (the theme's text colour) just far enough to read on `bg`. @param {string} color @param {string} toward @param {string} bg */
+function readable(color, toward, bg) {
+	const channels = (hex) => [1, 3, 5].map((at) => Number.parseInt(hex.slice(at, at + 2), 16));
+	const [from, to] = [channels(color), channels(toward)];
+	for (let step = 1; step <= 10; step++) {
+		const mixed = `#${from
+			.map((c, i) =>
+				Math.round(c + ((to[i] - c) * step) / 10)
+					.toString(16)
+					.padStart(2, "0"),
+			)
+			.join("")}`;
+		if (contrast(mixed, bg) >= MIN_CONTRAST) return mixed;
+	}
+	return toward;
 }
 
 /** How many monospace characters fit, within what the Mac renders (20 to 200); 0 when unknown. @param {number} width @param {number} charWidth */

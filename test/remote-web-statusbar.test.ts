@@ -127,8 +127,11 @@ describe("the user's pistatusline on the phone", () => {
 		expect(spanStyle({ text: "x", dim: true, italic: true, underline: true }, false)).toEqual({
 			classes: ["d", "i", "u"],
 		});
-		// Truecolour and 256-colour shades are the user's own choice, readable or not.
-		expect(spanStyle({ text: "x", fg: "#fefefe" }, false)).toEqual({ color: "#fefefe", classes: [] });
+		// A truecolour or 256-colour shade too faint on the theme moves toward the text colour until it reads.
+		const faint = spanStyle({ text: "Session:", fg: "#ffff5f" }, false).color ?? "";
+		expect(faint).not.toBe("#ffff5f");
+		expect(contrast(faint, "#ffffff")).toBeGreaterThanOrEqual(3);
+		expect(spanStyle({ text: "x", fg: "#ffff5f" }, true)).toEqual({ color: "#ffff5f", classes: [] });
 	});
 
 	it("draws a named terminal colour too faint on the theme in the app's own shade of it", () => {

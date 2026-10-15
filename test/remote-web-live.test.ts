@@ -73,9 +73,16 @@ describe("a message's text in its bubble", () => {
 	it("keeps them without images to show, and keeps a line that only mentions one", () => {
 		expect(shownText("look\n[Image]", undefined)).toBe("look\n[Image]");
 		expect(shownText("look\n[Image]", [])).toBe("look\n[Image]");
-		expect(shownText("see [Image] here\n[Image: original 4000x3000]\n[Image]", [png])).toBe(
-			"see [Image] here\n[Image: original 4000x3000]",
-		);
+		expect(shownText("see [Image] here\n[Image]", [png])).toBe("see [Image] here");
+	});
+
+	it("leaves out pi's note on an image it resized, as the picture shows instead", () => {
+		expect(
+			shownText(
+				"look\n\n[Image: original 2048x1536, displayed at 2000x1500. Multiply coordinates by 1.02.]\n[Image]",
+				[png],
+			),
+		).toBe("look");
 	});
 });
 
