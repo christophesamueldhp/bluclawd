@@ -22,8 +22,11 @@ export function buildReport(
 ): PaneReport {
 	const current = ctx.model;
 	const models = new Map<string, ReportModel>();
-	// The current model too, so the picker can show it selected.
-	for (const model of [...(current ? [current] : []), ...ctx.modelRegistry.getAvailable()]) {
+	// What pi's /model offers: the scoped models (`enabledModels`, `--models`) when there are any,
+	// else every available one. The current model too, so the picker can show it selected.
+	const scoped = (ctx.scopedModels ?? []).map((scopedModel) => scopedModel.model);
+	const offered = scoped.length > 0 ? scoped : ctx.modelRegistry.getAvailable();
+	for (const model of [...(current ? [current] : []), ...offered]) {
 		models.set(`${model.provider}/${model.id}`, reportModel(model));
 	}
 	// As pi's footer totals them (its addUsageToTotals is not exported).

@@ -101,6 +101,26 @@ describe("buildReport", () => {
 		});
 	});
 
+	it("offers only the scoped models when pi has a scope (enabledModels, --models), as its /model does", () => {
+		const opus = model("anthropic", "claude-opus", "Opus", true);
+		const sonnet = model("anthropic", "claude-sonnet", "Sonnet");
+		const gpt = model("openai", "gpt-5", "GPT-5");
+		const { ctx, pi } = fakes({ current: opus, available: [opus, sonnet, gpt] });
+		const scopedCtx = { ...ctx, scopedModels: [{ model: gpt }, { model: sonnet, thinkingLevel: "low" }] };
+		expect(buildReport(scopedCtx as never, pi as never, ask).models).toEqual([
+			{ provider: "anthropic", id: "claude-opus", name: "Opus" },
+			{ provider: "anthropic", id: "claude-sonnet", name: "Sonnet" },
+			{ provider: "openai", id: "gpt-5", name: "GPT-5" },
+		]);
+		// An empty scope is no scope: every available model.
+		const unscoped = { ...ctx, scopedModels: [] };
+		expect(buildReport(unscoped as never, pi as never, ask).models).toHaveLength(3);
+		const narrow = { ...ctx, current: undefined, model: sonnet, scopedModels: [{ model: sonnet }] };
+		expect(buildReport(narrow as never, pi as never, ask).models).toEqual([
+			{ provider: "anthropic", id: "claude-sonnet", name: "Sonnet" },
+		]);
+	});
+
 	it("lists the current model even when it is not available, and no thinking for a model without it", () => {
 		const { ctx, pi } = fakes({ current: model("local", "llama") });
 		const report = buildReport(ctx as never, pi as never, ask);
