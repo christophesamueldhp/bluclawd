@@ -129,6 +129,47 @@ export function readUsageLimits(path: string = USAGE_CACHE): UsageLimits | undef
 	return Object.keys(limits).length ? limits : undefined;
 }
 
+const isNumber = (value: unknown) => typeof value === "number" && Number.isFinite(value);
+const isTime = (value: unknown) => typeof value === "string" && !Number.isNaN(Date.parse(value));
+
+/** pistatusline's usage fields (its UsageData) and what each holds: only these leave its cache file. */
+const PLAN_USAGE_FIELDS: Record<string, (value: unknown) => boolean> = {
+	sessionUsage: isNumber,
+	sessionResetAt: isTime,
+	weeklyUsage: isNumber,
+	weeklyResetAt: isTime,
+	weeklySonnetUsage: isNumber,
+	weeklySonnetResetAt: isTime,
+	weeklyOpusUsage: isNumber,
+	weeklyOpusResetAt: isTime,
+	fableUsage: isNumber,
+	fableResetAt: isTime,
+	extraUsageEnabled: (value) => typeof value === "boolean",
+	extraUsageLimit: isNumber,
+	extraUsageUsed: isNumber,
+	extraUsageUtilization: isNumber,
+	extraUsageCurrency: (value) => typeof value === "string" && /^[A-Za-z]{3}$/.test(value),
+};
+
+/** The plan usage pistatusline keeps for one provider (`usage/<provider>.json` beside its settings), as
+ *  its renderer takes it; undefined when the file is missing, unreadable or has none of its fields. */
+export function readPlanUsage(path: string): Record<string, number | string | boolean> | undefined {
+	let data: unknown;
+	try {
+		data = JSON.parse(readFileSync(path, "utf8"));
+	} catch {
+		return undefined;
+	}
+	if (!data || typeof data !== "object") return undefined;
+	const record = data as Record<string, unknown>;
+	const usage = Object.fromEntries(
+		Object.entries(PLAN_USAGE_FIELDS)
+			.filter(([key, valid]) => valid(record[key]))
+			.map(([key]) => [key, record[key] as number | string | boolean]),
+	);
+	return Object.keys(usage).length ? usage : undefined;
+}
+
 /** For a session's directory: its git state, cached, and the usage limits, read each time (the file is tiny). */
 export function statusLine(
 	git: (cwd: string) => Promise<GitInfo | undefined> = gitInfoCache(),
