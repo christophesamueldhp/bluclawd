@@ -857,7 +857,7 @@ function pairView() {
 }
 
 function listShell() {
-	return `<header class="bar"><h1>Sessions</h1><button class="notify" id="notify" hidden>Enable notifications</button>
+	return `<header class="bar"><h1>Sessions</h1><button class="notify" id="notify" hidden>Notify me</button>
 <span class="muted" id="online"></span><button class="phone-menu" id="phone-menu" aria-label="This phone" aria-haspopup="dialog">⋯</button></header>
 <div id="banner"></div><form class="search" id="search-form" role="search"><span class="field"><input type="search" id="search" placeholder="Search" aria-label="Search sessions" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search">
 <button type="button" class="clear" id="search-clear" aria-label="Clear search" hidden>×</button></span>

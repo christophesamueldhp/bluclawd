@@ -46,11 +46,13 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 17px/1.4 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; -webkit-text-size-adjust: 100%; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
 #app { height: var(--app-h, 100dvh); display: flex; flex-direction: column; background: var(--bg); padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+/* The keyboard covers the home indicator's inset. */
+.keyboard #app { padding-bottom: 0; }
 button { -webkit-user-select: none; user-select: none; }
 .mono, .t { font-family: var(--mono); }
 /* The header: opaque and on whole pixels, under the status bar's safe area (see #app), so its text is never drawn over anything. */
 .bar { position: relative; z-index: 1; flex: none; display: flex; align-items: center; gap: var(--s3); min-height: 52px; padding: var(--s1) var(--s4); background: var(--bg); border-bottom: 1px solid var(--line); }
-.bar h1 { font-size: 28px; line-height: 1.2; font-weight: 700; letter-spacing: -.01em; margin: 0; flex: 1; }
+.bar h1 { font-size: 28px; line-height: 1.2; font-weight: 700; letter-spacing: -.01em; margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .title { flex: 1; min-width: 0; min-height: 44px; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 600; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .title::after { content: " ›"; color: var(--muted); font-weight: 400; }
 .back { display: flex; align-items: center; min-height: 44px; color: var(--link); text-decoration: none; white-space: nowrap; }
@@ -60,9 +62,9 @@ button { -webkit-user-select: none; user-select: none; }
 .tasks-pill { flex: none; min-height: 44px; padding: 0; border: 0; background: none; color: var(--link); font: 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-weight: 600; font-variant-numeric: tabular-nums; }
 .tasks-pill span { display: inline-block; padding: 4px 10px; border-radius: 12px; background: var(--panel); white-space: nowrap; }
 .tasks-pill[hidden] { display: none; }
-.notify { background: none; border: 0; color: var(--link); font: inherit; font-size: 15px; font-weight: 600; padding: 0 var(--s1); min-height: 44px; }
+.notify { background: none; border: 0; color: var(--link); font: inherit; font-size: 15px; font-weight: 600; padding: 0 var(--s1); min-height: 44px; white-space: nowrap; }
 .muted { color: var(--muted); font-size: 15px; }
-#online { font-size: 13px; font-weight: 500; }
+#online { flex: none; font-size: 13px; font-weight: 500; white-space: nowrap; }
 #online.on { color: var(--green); }
 .phone-menu { flex: none; width: 44px; height: 44px; margin-right: calc(-1 * var(--s3)); padding: 0; border: 0; background: none; color: var(--link); font: inherit; font-size: 24px; line-height: 1; }
 /* pistatusline's two lines under pi, each cut short rather than wrapped; the branch, then the directory, give way first. */
