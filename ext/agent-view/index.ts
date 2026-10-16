@@ -126,6 +126,19 @@ export function promptOptions(
 	};
 }
 
+/**
+ * Another window's prompt as pi takes it: an image gets an `[Image #N]` line under the text, as a
+ * paste in the editor does, since pi's chat shows a message's text and not its images.
+ */
+export function promptContent(message: { text: string; images?: Array<{ mimeType: string; data: string }> }) {
+	if (!message.images?.length) return message.text;
+	const marks = message.images.map((_, i) => `[Image #${i + 1}]`).join("\n");
+	return [
+		{ type: "text" as const, text: `${message.text}\n\n${marks}` },
+		...message.images.map((image) => ({ type: "image" as const, ...image })),
+	];
+}
+
 /** pi's ways to pick a session; a pane is given the one its launcher already picked. */
 const SESSION_FLAGS: ReadonlySet<string> = new Set(["-c", "--continue", "-r", "--resume"]);
 const SESSION_VALUE_FLAGS: ReadonlySet<string> = new Set(["--session", "--session-id", "--fork"]);
@@ -351,13 +364,7 @@ const agentView: InlineExtension = {
 		/** Pane mode: what another window's agent view asks of this session. */
 		const onPaneMessage = (ctx: ExtensionContext, message: PaneMessage): void => {
 			if (message.type === "prompt") {
-				const content = message.images?.length
-					? [
-							{ type: "text" as const, text: message.text },
-							...message.images.map((image) => ({ type: "image" as const, ...image })),
-						]
-					: message.text;
-				pi.sendUserMessage(content, promptOptions(message, ctx.isIdle()));
+				pi.sendUserMessage(promptContent(message), promptOptions(message, ctx.isIdle()));
 			} else if (message.type === "abort") ctx.abort();
 			else if (message.type === "rename") pi.setSessionName(message.name);
 			// The rest are remote control's (ext/remote).

@@ -50,11 +50,12 @@ export function shownText(text, images) {
 
 /**
  * A user message's text as it was sent: pi puts a note on an image it resized or converted
- * (`[Image: original …]`) under the prompt's text, above the transcript's `[Image]` lines.
+ * (`[Image: original …]`) under the prompt's text, above the transcript's `[Image]` lines, and
+ * the pane an `[Image #N]` line per image, for the Mac's chat, which shows no image.
  * @param {string} text
  */
 export function sentText(text) {
-	return text.trim().replace(/\n\n\[Image[ :][^\n]*\](?:\n\[Image[ :][^\n]*\])*(?=(?:\n\[Image\])+$)/, "");
+	return text.trim().replace(/\n\n\[Image[ :][^\n]*\](?:\n\n?\[Image[ :][^\n]*\])*(?=(?:\n\[Image\])+$)/, "");
 }
 
 /**
@@ -84,12 +85,13 @@ export function refused(text) {
 
 /**
  * A message of yours as pi's editor holds it, for the reply box: the transcript
- * shows each image as an `[Image]` line, and only the text is kept.
+ * shows each image as an `[Image]` line, and the pane put an `[Image #N]` line for it: only the text is kept.
  * @param {string} text
  */
 export function promptText(text) {
 	return text
 		.split("\n")
-		.filter((line) => line !== "[Image]")
-		.join("\n");
+		.filter((line) => line !== "[Image]" && !/^\[Image #\d+\]$/.test(line))
+		.join("\n")
+		.trimEnd();
 }

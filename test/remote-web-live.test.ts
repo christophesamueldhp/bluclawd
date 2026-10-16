@@ -57,6 +57,12 @@ describe("a sent prompt as the transcript shows it", () => {
 		expect(sentText(resized)).toBe(promptKey("look", 2));
 	});
 
+	it("matches one with the pane's [Image #N] lines, with or without pi's notes", () => {
+		expect(sentText("look\n\n[Image #1]\n[Image #2]\n[Image]\n[Image]")).toBe(promptKey("look", 2));
+		const resized = "look\n\n[Image #1]\n\n[Image: original 4000x3000, displayed at 2000x1500.]\n[Image]";
+		expect(sentText(resized)).toBe(promptKey("look", 1));
+	});
+
 	it("keeps such a line in a prompt without images", () => {
 		expect(sentText("look\n\n[Image: original]")).toBe("look\n\n[Image: original]");
 	});
@@ -74,6 +80,10 @@ describe("a message's text in its bubble", () => {
 		expect(shownText("look\n[Image]", undefined)).toBe("look\n[Image]");
 		expect(shownText("look\n[Image]", [])).toBe("look\n[Image]");
 		expect(shownText("see [Image] here\n[Image]", [png])).toBe("see [Image] here");
+	});
+
+	it("leaves out the pane's [Image #N] lines too", () => {
+		expect(shownText("look\n\n[Image #1]\n[Image]", [png])).toBe("look");
 	});
 
 	it("leaves out pi's note on an image it resized, as the picture shows instead", () => {
@@ -127,6 +137,7 @@ describe("the commands the phone does not send", () => {
 describe("a message of yours for the reply box", () => {
 	it("is its text without the transcript's [Image] lines", () => {
 		expect(promptText("look at these\n[Image]\n[Image]")).toBe("look at these");
+		expect(promptText("look at these\n\n[Image #1]\n[Image #2]\n[Image]\n[Image]")).toBe("look at these");
 		expect(promptText("see [Image] here\n\n[Image: original 4000x3000]")).toBe(
 			"see [Image] here\n\n[Image: original 4000x3000]",
 		);

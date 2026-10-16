@@ -7,7 +7,7 @@ import { ServerSupervisor } from "../daemon/supervisor.ts";
 import { HIDE_ENV, OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../daemon/tmux.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
-import { isBlankPane, paneArgs, promptOptions, shutdownPlan } from "../ext/agent-view/index.ts";
+import { isBlankPane, paneArgs, promptContent, promptOptions, shutdownPlan } from "../ext/agent-view/index.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
 
 const plainTheme = {
@@ -560,6 +560,19 @@ describe("promptOptions", () => {
 		// pi would run an extension command with its text alone: the images go as a plain message.
 		expect(promptOptions({ text: "/fix", images: [{}] }, true)).toEqual({});
 		expect(promptOptions({ text: "/fix", images: [] }, true)).toEqual({ expandPromptTemplates: true });
+	});
+});
+
+describe("promptContent", () => {
+	it("puts an [Image #N] line per image under the text, for the Mac's chat, which shows no image", () => {
+		expect(promptContent({ text: "look" })).toBe("look");
+		expect(promptContent({ text: "look", images: [] })).toBe("look");
+		const png = { mimeType: "image/png", data: "AA==" };
+		expect(promptContent({ text: "look", images: [png, png] })).toEqual([
+			{ type: "text", text: "look\n\n[Image #1]\n[Image #2]" },
+			{ type: "image", ...png },
+			{ type: "image", ...png },
+		]);
 	});
 });
 
