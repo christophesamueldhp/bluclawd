@@ -13,7 +13,7 @@ import { giveUp, promptKey, promptText, refused, sentText, settle, shownText } f
 import { markdown } from "./markdown.js";
 import { diffSummary, markerKind, resultSummary } from "./output.js";
 import { filterSessions, matchCommands } from "./search.js";
-import { barHtml, columns, elapsedText, factsHtml, spanStyle, thinkingHtml, tokens } from "./statusbar.js";
+import { barHtml, compactLines, elapsedText, factsHtml, spanStyle, thinkingHtml, tokens } from "./statusbar.js";
 
 /**
  * `sessionId`: pi's, the same under another row id; `dialog`: the one it waits on, while it needs input.
@@ -214,8 +214,10 @@ const OLDER_MARGIN = 400;
 const OLDER_RETRY_MS = 2000;
 let messagesRequest = 0;
 let statusRequest = 0;
+/** pistatusline draws its lines this wide, the most it is asked for, so nothing of them is cut; the
+ *  room its flex separators fill is taken out again (compactLines), and the bar scrolls sideways. */
+const STATUS_COLS = 200;
 /** The status bar's width in characters its pistatusline lines were last asked for. */
-let statusCols = 0;
 /** Each session's commands for the reply box, as last fetched: they rarely change. @type {Map<string, import("./statusbar.js").Command[]>} */
 const commandsCache = new Map();
 /** The open session's commands were asked for since it opened. */
@@ -575,11 +577,10 @@ async function loadStatus() {
 	const id = state.open;
 	if (!id) return;
 	const request = ++statusRequest;
-	statusCols = statusWidth();
 	/** @type {Report | null} */
 	let report;
 	try {
-		report = await api.status(id, statusCols);
+		report = await api.status(id, STATUS_COLS);
 	} catch (error) {
 		if (!(error instanceof Error && error.message === "no_status")) {
 			loadError(error);
@@ -588,8 +589,6 @@ async function loadStatus() {
 		report = null;
 	}
 	if (state.open !== id || request !== statusRequest) return;
-	// The Mac's width, once known: the lines come again as wide as there.
-	if (report?.statusline && (report.columns ?? 0) > statusCols) setTimeout(() => void loadStatus());
 	state.report = report;
 	// A pane has them once it has reported.
 	if (report && !commandsAsked) {
@@ -625,32 +624,6 @@ async function loadCommands() {
 }
 
 /**
- * How many characters of the status bar's monospace font fit across it: pistatusline's lines are
- * rendered at that width. Measured on the chat's width, which the bar spans whether shown or not.
- */
-function barColumns() {
-	const bar = $("#statusbar");
-	if (!bar) return 0;
-	const style = getComputedStyle(bar);
-	const width =
-		($("#scroll")?.clientWidth ?? 0) - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
-	let probe = $("#cols-probe");
-	if (!probe) {
-		probe = document.createElement("span");
-		probe.id = "cols-probe";
-		probe.className = "cols-probe";
-		probe.textContent = "M".repeat(100);
-		document.body.append(probe);
-	}
-	return columns(width, probe.getBoundingClientRect().width / 100);
-}
-
-/** The width pistatusline's lines are drawn at: the Mac's, as there, or the phone's when wider. */
-function statusWidth() {
-	return Math.min(200, Math.max(barColumns(), state.report?.columns ?? 0));
-}
-
-/**
  * pistatusline's lines, span by span: each one's colours are set on its element, which the CSP
  * allows where it refuses a style attribute. Rebuilt only when they or the appearance change.
  * @param {HTMLElement} bar @param {import("./statusbar.js").StatusSpan[][]} lines
@@ -662,7 +635,7 @@ function paintStatusline(bar, lines) {
 	bar.dataset.html = key;
 	bar.classList.add("pistatusline");
 	bar.replaceChildren(
-		...lines.map((spans) => {
+		...compactLines(lines).map((spans) => {
 			const line = document.createElement("span");
 			line.className = "sl";
 			for (const span of spans) {
@@ -2575,10 +2548,7 @@ document.addEventListener(
 	true,
 );
 window.addEventListener("hashchange", route);
-// pistatusline's lines again at a new width, after a rotation; a change of appearance repaints them.
-window.addEventListener("resize", () => {
-	if (shown.startsWith("chat:") && state.report?.statusline && statusWidth() !== statusCols) void loadStatus();
-});
+// A change of appearance repaints pistatusline's lines.
 darkScheme.addEventListener("change", render);
 window.visualViewport?.addEventListener("resize", fitViewport);
 window.visualViewport?.addEventListener("scroll", fitViewport);

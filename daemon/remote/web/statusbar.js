@@ -20,7 +20,7 @@
  * A pane's report, with what the Mac adds for its directory: pistatusline's own lines at the
  * phone's width (`statusline`), else `git` and `limits`.
  * `notice`: why the phone's last fork, clone or edit did not run, until the pane's next report (`at`: epoch ms).
- * @typedef {{ columns?: number, model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, git?: GitInfo, limits?: UsageLimits, notice?: { text: string, at: number }, statusline?: { lines: StatusSpan[][] }, tasks?: Task[] }} Report
+ * @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, git?: GitInfo, limits?: UsageLimits, notice?: { text: string, at: number }, statusline?: { lines: StatusSpan[][] }, tasks?: Task[] }} Report
  */
 
 /**
@@ -310,10 +310,19 @@ function readable(color, toward, bg) {
 	return toward;
 }
 
-/** How many monospace characters fit, within what the Mac renders (20 to 200); 0 when unknown. @param {number} width @param {number} charWidth */
-export function columns(width, charWidth) {
-	if (!(width > 0 && charWidth > 0)) return 0;
-	return Math.min(200, Math.max(20, Math.floor(width / charWidth)));
+/**
+ * pistatusline's lines as drawn at its widest, without the room its flex separators fill there: a
+ * run of three or more spaces becomes two, and each line ends at its last character.
+ * @param {StatusSpan[][]} lines @returns {StatusSpan[][]}
+ */
+export function compactLines(lines) {
+	return lines.map((spans) => {
+		const out = spans.map((span) => ({ ...span, text: span.text.replace(/ {3,}/g, "  ") }));
+		while (out.length && !out.at(-1)?.bg && out.at(-1)?.text.trim() === "") out.pop();
+		const last = out.at(-1);
+		if (last && !last.bg) out[out.length - 1] = { ...last, text: last.text.trimEnd() };
+		return out;
+	});
 }
 
 /** How long a task has run: "<1m", "35m", "2h05m", "4d6h". @param {number} startedAt epoch ms @param {number} now */

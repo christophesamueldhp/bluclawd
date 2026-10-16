@@ -120,18 +120,6 @@ describe("buildReport", () => {
 		});
 	});
 
-	it("says how wide the pane's terminal is, so the phone draws pistatusline as wide", () => {
-		const { ctx, pi } = fakes({ current: model("openai", "gpt-5") });
-		const columns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
-		Object.defineProperty(process.stdout, "columns", { value: 132, configurable: true });
-		try {
-			expect(buildReport(ctx as never, pi as never, ask).columns).toBe(132);
-		} finally {
-			if (columns) Object.defineProperty(process.stdout, "columns", columns);
-			else delete (process.stdout as { columns?: number }).columns;
-		}
-	});
-
 	it("offers only the scoped models when pi has a scope (enabledModels, --models), as its /model does", () => {
 		const opus = model("anthropic", "claude-opus", "Opus", true);
 		const sonnet = model("anthropic", "claude-sonnet", "Sonnet");

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
 	barHtml,
-	columns,
+	compactLines,
 	contrast,
 	elapsedText,
 	factsHtml,
@@ -166,12 +166,22 @@ describe("the user's pistatusline on the phone", () => {
 		});
 	});
 
-	it("asks for as many characters as fit across the bar, within what the Mac renders", () => {
-		expect(columns(358, 6.6)).toBe(54);
-		expect(columns(100, 6.6)).toBe(20);
-		expect(columns(5000, 6.6)).toBe(200);
-		expect(columns(0, 6.6)).toBe(0);
-		expect(columns(358, 0)).toBe(0);
+	it("takes out the room a flex separator fills at the widest, so nothing is cut and nothing gapes", () => {
+		const lines = [
+			[
+				{ text: "Opus 5.5 ", fg: "#ffffff" },
+				{ text: "                                        " },
+				{ text: "~/Projects/b  |  x", fg: "#808080" },
+				{ text: "         " },
+			],
+			[{ text: `Session: 99%${" ".repeat(30)}355.8M tokens   ` }],
+		];
+		expect(compactLines(lines)).toEqual([
+			[{ text: "Opus 5.5 ", fg: "#ffffff" }, { text: "  " }, { text: "~/Projects/b  |  x", fg: "#808080" }],
+			[{ text: "Session: 99%  355.8M tokens" }],
+		]);
+		// A coloured background's own spaces stay: they are what draws a bar.
+		expect(compactLines([[{ text: "     ", bg: "#444444" }]])).toEqual([[{ text: "  ", bg: "#444444" }]]);
 	});
 });
 
