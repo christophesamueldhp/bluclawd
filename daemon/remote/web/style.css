@@ -78,7 +78,10 @@ button { -webkit-user-select: none; user-select: none; }
 /* The user's own pistatusline, as the Mac draws it: its lines at the bar's width in characters,
    each span's colours set by app.js. */
 .statusbar.pistatusline { gap: 0; font: var(--status-font); color: var(--text); font-variant-numeric: normal; }
-.statusbar .sl { display: block; min-height: 1.35em; overflow: hidden; white-space: pre; }
+/* As wide as the Mac draws it: swiped sideways to see the rest. */
+.statusbar.pistatusline { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; cursor: pointer; }
+.statusbar.pistatusline::-webkit-scrollbar { display: none; }
+.statusbar .sl { display: block; width: max-content; min-width: 100%; min-height: 1.35em; white-space: pre; }
 .sl .b { font-weight: 700; }
 .sl .d { opacity: .6; }
 .sl .i { font-style: italic; }
@@ -304,8 +307,10 @@ button { -webkit-user-select: none; user-select: none; }
 /* A message's images, as wide as its bubble, and full screen when tapped. A placeholder holds an
    image's place until it is in (app.js keeps the log where it was as it changes size). */
 .pic { display: block; width: 100%; min-height: 160px; padding: 0; border: 0; border-radius: 12px; overflow: hidden; background: var(--panel); color: var(--muted); font-size: 11px; }
-.pic.loaded { min-height: 0; background: none; }
+/* Once loaded, never past its own size: a small picture is not blown up into a blur. */
+.pic.loaded { width: auto; max-width: 100%; min-height: 0; background: none; }
 .pic img { display: block; width: 100%; height: auto; max-height: 60vh; object-fit: contain; }
+.pic.loaded img { width: auto; max-width: 100%; }
 .pic img:not([src]) { display: none; }
 .pic.failed { min-height: 44px; }
 .pic.failed::after { content: "Image unavailable"; }

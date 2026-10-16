@@ -163,6 +163,7 @@ export function buildReport(
 	}
 	const context = ctx.getContextUsage();
 	return {
+		...(process.stdout.columns ? { columns: process.stdout.columns } : {}),
 		...(current ? { model: reportModel(current) } : {}),
 		models: [...models.values()].sort(
 			(a, b) => a.provider.localeCompare(b.provider) || (a.name ?? a.id).localeCompare(b.name ?? b.id),

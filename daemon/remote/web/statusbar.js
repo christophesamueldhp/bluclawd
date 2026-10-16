@@ -20,7 +20,7 @@
  * A pane's report, with what the Mac adds for its directory: pistatusline's own lines at the
  * phone's width (`statusline`), else `git` and `limits`.
  * `notice`: why the phone's last fork, clone or edit did not run, until the pane's next report (`at`: epoch ms).
- * @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, git?: GitInfo, limits?: UsageLimits, notice?: { text: string, at: number }, statusline?: { lines: StatusSpan[][] }, tasks?: Task[] }} Report
+ * @typedef {{ columns?: number, model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, git?: GitInfo, limits?: UsageLimits, notice?: { text: string, at: number }, statusline?: { lines: StatusSpan[][] }, tasks?: Task[] }} Report
  */
 
 /**

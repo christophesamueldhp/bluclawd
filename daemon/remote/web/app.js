@@ -575,7 +575,7 @@ async function loadStatus() {
 	const id = state.open;
 	if (!id) return;
 	const request = ++statusRequest;
-	statusCols = barColumns();
+	statusCols = statusWidth();
 	/** @type {Report | null} */
 	let report;
 	try {
@@ -588,6 +588,8 @@ async function loadStatus() {
 		report = null;
 	}
 	if (state.open !== id || request !== statusRequest) return;
+	// The Mac's width, once known: the lines come again as wide as there.
+	if (report?.statusline && (report.columns ?? 0) > statusCols) setTimeout(() => void loadStatus());
 	state.report = report;
 	// A pane has them once it has reported.
 	if (report && !commandsAsked) {
@@ -641,6 +643,11 @@ function barColumns() {
 		document.body.append(probe);
 	}
 	return columns(width, probe.getBoundingClientRect().width / 100);
+}
+
+/** The width pistatusline's lines are drawn at: the Mac's, as there, or the phone's when wider. */
+function statusWidth() {
+	return Math.min(200, Math.max(barColumns(), state.report?.columns ?? 0));
 }
 
 /**
@@ -917,7 +924,7 @@ function rowsHtml() {
 function chatShell() {
 	return `<header class="bar"><a class="back" href="#">‹ Sessions</a><button class="title" id="title" aria-haspopup="dialog"></button>
 <button class="tasks-pill" id="tasks-pill" aria-haspopup="dialog" hidden></button><button class="stop" id="stop" hidden>Stop</button></header>
-<button class="statusbar" id="statusbar" aria-haspopup="dialog" aria-label="Status" hidden></button>
+<div class="statusbar" id="statusbar" role="button" tabindex="0" aria-haspopup="dialog" aria-label="Status" hidden></div>
 <div id="banner"></div><section class="scroll" id="scroll"><div class="older" id="older"></div><div class="log" id="log">
 <div class="part" id="msgs"></div><div class="part" id="live"></div><div class="part" id="pending"></div><div class="part" id="working"></div></div></section>
 <div class="commands" id="commands" role="listbox" aria-label="Commands" hidden></div><div class="thumbs" id="thumbs" hidden></div>
@@ -1807,6 +1814,11 @@ function bindChat() {
 	});
 	$("#title").addEventListener("click", openSheet);
 	$("#statusbar").addEventListener("click", openSheet);
+	$("#statusbar").addEventListener("keydown", (/** @type {KeyboardEvent} */ event) => {
+		if (event.key !== "Enter" && event.key !== " ") return;
+		event.preventDefault();
+		openSheet();
+	});
 	$("#tasks-pill").addEventListener("click", openTasks);
 	$("#banner").addEventListener("click", (/** @type {Event} */ event) => {
 		const target = /** @type {Element} */ (event.target);
@@ -2565,7 +2577,7 @@ document.addEventListener(
 window.addEventListener("hashchange", route);
 // pistatusline's lines again at a new width, after a rotation; a change of appearance repaints them.
 window.addEventListener("resize", () => {
-	if (shown.startsWith("chat:") && state.report?.statusline && barColumns() !== statusCols) void loadStatus();
+	if (shown.startsWith("chat:") && state.report?.statusline && statusWidth() !== statusCols) void loadStatus();
 });
 darkScheme.addEventListener("change", render);
 window.visualViewport?.addEventListener("resize", fitViewport);

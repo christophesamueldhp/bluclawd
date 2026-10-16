@@ -69,6 +69,8 @@ export interface LiveSnapshot {
 
 /** Mirror of daemon/ipc/protocol.ts PaneReport. */
 export interface PaneReport {
+	/** The pane's terminal width: the phone draws pistatusline's lines as wide, scrolling sideways. */
+	columns?: number;
 	model?: { provider: string; id: string; name?: string };
 	models: Array<{ provider: string; id: string; name?: string }>;
 	thinkingLevel?: string;
