@@ -30,6 +30,8 @@ const TMUX_TIMEOUT_MS = 2000;
 /** A pane the phone started that has not registered by then never will: it is ended, not left
  *  running unseen. Past the phone's own wait (START_TIMEOUT_MS in web/app.js). */
 const START_TIMEOUT_MS = 90_000;
+/** How long whether a terminal shows pi is taken as known. */
+const TERMINAL_CHECK_MS = 1500;
 
 export interface RemoteControlDeps {
 	listInstances(): InstanceSummary[];
@@ -59,6 +61,8 @@ export class RemoteControl {
 	/** Panes started from the phone that have not registered yet, by tmux session name. */
 	private readonly starting = new Map<string, ReturnType<typeof setTimeout>>();
 	private server: RemoteServer | undefined;
+	/** Whether a terminal shows pi, as last asked of tmux: the phone's stream asks every second. */
+	private terminal: { open: boolean; at: number } | undefined;
 	/** The configured port the running server was started for. */
 	private serverPort: number | undefined;
 	private listenError: string | undefined;
@@ -101,6 +105,14 @@ export class RemoteControl {
 		} catch {
 			// a heartbeat must not fail over remote.json; the next one retries
 		}
+	}
+
+	private terminalOpen(): boolean {
+		const now = Date.now();
+		if (!this.terminal || now - this.terminal.at >= TERMINAL_CHECK_MS) {
+			this.terminal = { open: this.tmux.attached(), at: now };
+		}
+		return this.terminal.open;
 	}
 
 	/** A pane registered: one the phone started is up. */
@@ -184,6 +196,7 @@ export class RemoteControl {
 					launch: () => this.launch(),
 					startSession: (spec) => this.startSession(spec),
 					report: (id) => this.reports.get(id),
+					terminalOpen: () => this.terminalOpen(),
 					renameInstance: this.deps.renameInstance,
 					setPinned: this.deps.setPinned,
 					deleteInstance: this.deps.deleteInstance,

@@ -74,6 +74,7 @@ const PRESS = [
 ];
 const ERRORS = {
 	session_not_running: "This session is not running. Open it on the Mac to continue.",
+	pi_not_open: "pi is not open on the Mac. Open it in a terminal there to continue.",
 	session_busy: "The session is busy. Try again once it is done.",
 	no_status: "This session has not reported its status yet.",
 	pane_too_old:
@@ -152,6 +153,8 @@ const state = {
 	/** Older messages are on their way. */
 	loadingOlder: false,
 	online: true,
+	/** A terminal on the Mac shows pi: without one, every session is read only here. */
+	terminalOpen: true,
 	/** Show "Enable notifications". */
 	offerPush: false,
 	/** The open session's status sheet. */
@@ -390,7 +393,9 @@ async function loadSessions() {
 	try {
 		const asked = Date.now();
 		const was = state.sessions.find((s) => s.id === state.open)?.state;
-		state.sessions = await api.sessions();
+		const listed = await api.sessions();
+		state.sessions = listed.sessions;
+		state.terminalOpen = listed.terminalOpen !== false;
 		holdRename();
 		const now = state.sessions.find((s) => s.id === state.open)?.state;
 		if (now === "working") {
@@ -1052,12 +1057,20 @@ function liveHtml(live, calls) {
 	return parts.join("");
 }
 
+/** A session the phone can prompt or change: running, with a terminal on the Mac showing pi. @param {Session | undefined} session */
+function canAct(session) {
+	return session?.alive === true && state.terminalOpen;
+}
+
 /** @param {Session | undefined} session */
 function bannerHtml(session) {
 	if (!state.online) {
 		return `<div class="banner off">Mac unreachable — it may be asleep, offline, or remote control is off. Retrying…</div>`;
 	}
 	const error = state.error ? `<div class="banner off">${esc(state.error)}</div>` : "";
+	if (state.loaded && !state.terminalOpen) {
+		return `${error}<div class="banner closed">pi is not open on the Mac: everything here is read only until a terminal there shows it again.</div>`;
+	}
 	// An error does not hide the way to answer.
 	if (session?.state === "needs") {
 		const title = session.dialog?.title;
@@ -1172,7 +1185,7 @@ function isBusy(session) {
 		session?.state === "needs" ||
 		state.navigating ||
 		state.pending.some((p) => !p.started && Date.now() - p.sentAt < PENDING_GRACE_MS) ||
-		!session?.alive
+		!canAct(session)
 	);
 }
 
@@ -1191,9 +1204,11 @@ function menuHtml(session, menu) {
 	const busy = isBusy(session);
 	const why = !session?.alive
 		? errorText("session_not_running")
-		: state.navigating
-			? "Available once the session has moved."
-			: "Available once the session is idle.";
+		: !state.terminalOpen
+			? errorText("pi_not_open")
+			: state.navigating
+				? "Available once the session has moved."
+				: "Available once the session is idle.";
 	const disabled = busy ? " disabled" : "";
 	const actions =
 		menu.kind === "user"
@@ -1263,8 +1278,9 @@ function render() {
 }
 
 function updateList() {
-	$("#online").textContent = state.online ? "● online" : "offline";
-	$("#online").classList.toggle("on", state.online);
+	const live = state.online && state.terminalOpen;
+	$("#online").textContent = live ? "● online" : state.online ? "pi closed" : "offline";
+	$("#online").classList.toggle("on", live);
 	$("#notify").hidden = !state.offerPush;
 	const banner = $("#banner");
 	const bannerNow = bannerHtml(undefined);
@@ -1278,7 +1294,7 @@ function updateList() {
 	updateDirectories();
 	updateModels();
 	const start = $("#start");
-	start.disabled = state.starting !== undefined;
+	start.disabled = state.starting !== undefined || !state.terminalOpen;
 	start.textContent = state.starting ? "Starting…" : "Start";
 	updatePhoneSheet();
 }
@@ -1343,7 +1359,7 @@ function updateChat() {
 	if (!turn) state.stopping = false;
 	if (session?.state !== "needs") state.answered = undefined;
 	const stop = $("#stop");
-	stop.hidden = !turn;
+	stop.hidden = !turn || !state.terminalOpen;
 	stop.disabled = state.stopping;
 	stop.textContent = state.stopping ? "Stopping…" : "Stop";
 	const bar = $("#statusbar");
@@ -1388,8 +1404,8 @@ function updateChat() {
 	// Also when the page loaded was empty and only "#older" went.
 	if (prepending) scroll.scrollTop += scroll.scrollHeight - height;
 	prepending = false;
-	// Closed on the Mac: read only here, until it is opened there again.
-	const closed = session !== undefined && !session.alive;
+	// Closed on the Mac, or no terminal there shows pi: read only here.
+	const closed = session !== undefined && !canAct(session);
 	updateSheet(session);
 	const text = $("#text");
 	text.disabled = closed;
@@ -1398,7 +1414,7 @@ function updateChat() {
 	attach.disabled = closed || state.attachments.length + state.reading >= ATTACH_MAX;
 	attach.classList.toggle("busy", state.reading > 0);
 	attach.setAttribute("aria-label", state.reading ? "Reading the photos…" : "Attach photos");
-	text.placeholder = closed ? "Disconnected" : "Reply";
+	text.placeholder = !closed ? "Reply" : session?.alive ? "Read only" : "Disconnected";
 	updateThumbs();
 	updateCommands();
 }
@@ -2314,7 +2330,7 @@ async function send() {
 	const id = state.open;
 	const session = state.sessions.find((s) => s.id === id);
 	// Photos still being read go with it once they are in.
-	if (!value || !id || !session?.alive || state.navigating || state.reading) return;
+	if (!value || !id || !canAct(session) || state.navigating || state.reading) return;
 	// Left in the reply box, to change. Any other "/" line goes, and the pane runs it as a command.
 	if (refused(value)) {
 		showError(errorText("terminal_command"));

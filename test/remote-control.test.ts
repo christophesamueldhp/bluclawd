@@ -27,6 +27,8 @@ describe("remote control switch", () => {
 
 	beforeEach(() => {
 		dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-control-"));
+		// The tmux it asks whether a terminal shows pi is this test's, which no server runs.
+		vi.stubEnv("PI_SERVER_DIR", dir);
 		control = make();
 	});
 	afterEach(async () => {
@@ -163,6 +165,7 @@ describe("remote control switch", () => {
 		let deleted: string[];
 		let deleteInstance: (id: string) => boolean;
 		let tmuxCalls: string[][];
+		let clients: string;
 		let base: string;
 		let token: string;
 
@@ -174,6 +177,7 @@ describe("remote control switch", () => {
 				return true;
 			};
 			tmuxCalls = [];
+			clients = "/dev/ttys001\n";
 			control = new RemoteControl({
 				store: new RemoteStore(join(dir, "remote.json")),
 				listInstances: () => instances,
@@ -183,7 +187,7 @@ describe("remote control switch", () => {
 				deleteInstance: (id) => deleteInstance(id),
 				tmux: new Tmux(dir, (args) => {
 					tmuxCalls.push(args);
-					return "";
+					return args[0] === "list-clients" ? clients : "";
 				}),
 				webDir: dir,
 			});
@@ -221,6 +225,15 @@ describe("remote control switch", () => {
 			vi.advanceTimersByTime(1);
 			expect(killed()).toEqual([`=${task.body.pane}`]);
 			expect(deleted).toEqual([]);
+		});
+
+		it("takes no new session while no terminal on the Mac shows pi", async () => {
+			clients = "";
+			expect(await post("/api/sessions", { cwd: dir, task: "go" })).toEqual({
+				status: 409,
+				body: { error: "pi_not_open" },
+			});
+			expect(tmuxCalls.filter((args) => args[0] === "new-session")).toEqual([]);
 		});
 
 		it("leaves a pane it started alone once it registered", async () => {

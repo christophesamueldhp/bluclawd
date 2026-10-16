@@ -37,6 +37,8 @@ export interface RemoteDeps {
 	launch(): PaneLaunch | undefined;
 	/** Start a pane; returns its tmux session name, the id its row registers as. */
 	startSession(spec: SessionSpec): string;
+	/** A terminal on the Mac shows pi: without one, the phone only reads. */
+	terminalOpen(): boolean;
 	/** A running pane's latest report. */
 	report(sessionId: string): PaneReport | undefined;
 	/** Name a stored row; false when there is none by that id. A pane's pi names its own. */
@@ -346,8 +348,13 @@ async function handle(
 		if (id !== device.id) return json(res, 403, { error: "forbidden" });
 		return deps.store.revoke(id) ? json(res, 200, { ok: true }) : json(res, 404, { error: "unknown_device" });
 	}
+	// The Mac is the root: with no terminal showing pi there, nothing changes from here. Before any
+	// body is read, so a photo is not read only to be refused.
+	if (path.startsWith("/api/sessions") && req.method !== "GET" && !deps.terminalOpen()) {
+		return json(res, 409, { error: "pi_not_open" });
+	}
 	if (path === "/api/sessions" && req.method === "GET") {
-		return json(res, 200, { sessions: remoteSessions(deps.listInstances()) });
+		return json(res, 200, { sessions: remoteSessions(deps.listInstances()), terminalOpen: deps.terminalOpen() });
 	}
 	if (path === "/api/sessions" && req.method === "POST") {
 		const body = await readJson(req);
@@ -656,7 +663,10 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 	const events = new RemoteEvents({
 		// Sorted: agent view's order shifts with every heartbeat and is not a change.
 		sessionsSignature: () =>
-			JSON.stringify(remoteSessions(deps.listInstances()).sort((a, b) => a.id.localeCompare(b.id))),
+			JSON.stringify([
+				deps.terminalOpen(),
+				remoteSessions(deps.listInstances()).sort((a, b) => a.id.localeCompare(b.id)),
+			]),
 		session: (id) => findSession(deps.listInstances(), id),
 		listed: () => new Set(deps.listInstances().map((i) => i.id)),
 	});

@@ -290,6 +290,15 @@ export class Tmux {
 		return this.run(["display-message", "-p", "-t", `=${name}:`, "#{@bluclawd_view_ready}"]).trim() === "1";
 	}
 
+	/** Whether a terminal shows one of this server's sessions; no server, none does. */
+	attached(): boolean {
+		try {
+			return this.run(["list-clients", "-F", "#{client_name}"]).trim() !== "";
+		} catch {
+			return false;
+		}
+	}
+
 	/** Leave tmux: the terminal returns to its shell, every pane keeps running. */
 	detach(): void {
 		this.run(["detach-client"]);

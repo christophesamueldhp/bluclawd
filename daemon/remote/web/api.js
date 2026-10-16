@@ -82,7 +82,7 @@ export const api = {
 	devices: async () => (await call("GET", "/api/devices")).devices,
 	/** Only ever this phone's own id: the Mac removes any other. @param {string} id */
 	removeDevice: (id) => call("DELETE", `/api/devices/${encodeURIComponent(id)}`),
-	sessions: async () => (await call("GET", "/api/sessions")).sessions,
+	sessions: () => call("GET", "/api/sessions"),
 	/** @returns {Promise<string[]>} */
 	directories: async () => (await call("GET", "/api/directories")).directories,
 	/** `model`: "provider/id", else pi's default. @param {string} cwd @param {string} task @param {string} [model] @returns {Promise<{ pane: string }>} */

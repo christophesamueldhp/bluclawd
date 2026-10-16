@@ -29,6 +29,7 @@ describe("the app's modules", () => {
 				send: () => false,
 				launch: () => undefined,
 				startSession: () => "",
+				terminalOpen: () => true,
 				renameInstance: () => false,
 				setPinned: () => false,
 				deleteInstance: () => false,

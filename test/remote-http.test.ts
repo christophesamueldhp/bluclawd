@@ -31,6 +31,7 @@ describe("remote HTTP API", () => {
 	let launch: PaneLaunch | undefined;
 	let started: SessionSpec[];
 	let startFails: boolean;
+	let terminalOpen: boolean;
 	let reports: Map<string, PaneReport>;
 	let screens: Map<string, string[]>;
 	let typed: Array<{ pane: string; keys?: string[]; text?: string }>;
@@ -64,6 +65,7 @@ describe("remote HTTP API", () => {
 		launch = { command: [process.execPath, join(dir, "pi.js")] };
 		started = [];
 		startFails = false;
+		terminalOpen = true;
 		reports = new Map();
 		screens = new Map();
 		typed = [];
@@ -96,6 +98,7 @@ describe("remote HTTP API", () => {
 					started.push(spec);
 					return "pi-0000000a";
 				},
+				terminalOpen: () => terminalOpen,
 				report: (id) => reports.get(id),
 				renameInstance: (id, name) => {
 					changed.push(["rename", id, name]);
@@ -1063,6 +1066,39 @@ describe("remote HTTP API", () => {
 			expect(res.status).toBe(500);
 			expect(await res.json()).toEqual({ error: "internal_error" });
 		});
+	});
+
+	it("only reads while no terminal on the Mac shows pi", async () => {
+		const token = await pair();
+		const list = async () =>
+			(await (await fetch(`${base}/api/sessions`, { headers: auth(token) })).json()) as {
+				terminalOpen: boolean;
+			};
+		expect((await list()).terminalOpen).toBe(true);
+		terminalOpen = false;
+		expect((await list()).terminalOpen).toBe(false);
+		const send = async (method: string, path: string, body?: object) => {
+			const res = await fetch(`${base}${path}`, {
+				method,
+				headers: authJson(token),
+				...(body ? { body: JSON.stringify(body) } : {}),
+			});
+			return [res.status, ((await res.json()) as { error?: string }).error];
+		};
+		for (const [method, path, body] of [
+			["POST", "/api/sessions/live/prompt", { text: "hi" }],
+			["POST", "/api/sessions/live/abort", {}],
+			["POST", "/api/sessions/live/keys", { keys: ["Enter"] }],
+			["POST", "/api/sessions", { cwd: dir, task: "go" }],
+			["DELETE", "/api/sessions/stored", undefined],
+		] as const) {
+			expect(await send(method, path, body), path).toEqual([409, "pi_not_open"]);
+		}
+		expect(sent).toEqual([]);
+		expect(started).toEqual([]);
+		expect(changed).toEqual([]);
+		const messages = await fetch(`${base}/api/sessions/live/messages`, { headers: auth(token) });
+		expect(messages.status).not.toBe(409);
 	});
 
 	it("refuses a closed session, with or without a file, which only the Mac opens again", async () => {

@@ -71,6 +71,7 @@ describe("PWA icons", () => {
 					send: () => false,
 					launch: () => undefined,
 					startSession: () => "",
+					terminalOpen: () => true,
 					renameInstance: () => false,
 					setPinned: () => false,
 					deleteInstance: () => false,

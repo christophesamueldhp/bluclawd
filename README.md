@@ -191,7 +191,9 @@ starting with `/` runs as if typed in the session's prompt on the Mac, pi's own 
 (`/compact`, `/model`, `/tree`, `/new`, …) included, once the session is idle and that prompt
 empty; one that opens a selector waits there for Answer. `/remote-control`, `/agent-view` and
 `/exit` and `/quit` stay on the Mac. A session closed on the Mac shows as disconnected, read only:
-only the Mac opens it again, and the phone follows it there by itself. Start begins a new one in a
+only the Mac opens it again, and the phone follows it there by itself. While no terminal on the Mac shows pi, the
+phone only reads ("pi closed"): sessions still running in the background are listed and notify,
+but nothing is sent, stopped or started until a terminal shows pi again. Start begins a new one in a
 recent or typed directory. Tapping the title shows the model
 (and switches it), context and usage, and compacts or clones the session; a message's ⋯ edits it
 here or in a new session, or goes back to a reply. When a session waits on a dialog, Answer shows
