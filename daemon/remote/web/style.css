@@ -106,6 +106,7 @@ button { -webkit-user-select: none; user-select: none; }
 /* A hairline between rows, inset to the text as iOS's. */
 .row + .row::before { content: ""; position: absolute; top: 0; left: calc(var(--s4) + 16px + var(--s3)); right: 0; border-top: 1px solid var(--line); }
 .row:active { background: var(--panel); }
+.row.closed .name, .row.closed .glyph { opacity: 0.55; }
 .row .name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row small { display: block; color: var(--muted); font-size: 15px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .age { flex: none; align-self: flex-start; padding-top: 2px; color: var(--muted); font-size: 15px; font-variant-numeric: tabular-nums; }
@@ -166,6 +167,7 @@ button { -webkit-user-select: none; user-select: none; }
 .working { color: var(--link); font-size: 15px; }
 .banner { flex: none; margin: var(--s2) var(--s4) 0; padding: 10px var(--s3); border-radius: 10px; font-size: 15px; background: color-mix(in srgb, var(--yellow) 18%, var(--bg)); }
 .banner.off { background: color-mix(in srgb, var(--red) 16%, var(--bg)); }
+.banner.closed { background: var(--panel); color: var(--muted); }
 .composer { flex: none; display: flex; gap: var(--s2); align-items: flex-end; padding: var(--s2) var(--s3); background: var(--bg); border-top: 1px solid var(--line); }
 .composer textarea { flex: 1; min-height: 44px; resize: none; border: 0; border-radius: 22px; padding: 11px var(--s4); background: var(--panel); color: var(--text); font: 16px/22px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-height: 140px; }
 .send { width: 44px; height: 44px; flex: none; border-radius: 50%; border: 0; background: var(--accent); color: #000; font-size: 20px; font-weight: 600; }

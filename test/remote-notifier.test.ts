@@ -9,7 +9,6 @@ const session = (id: string, state: RemoteSession["state"], detail = ""): Remote
 	band: state === "working" ? "working" : state === "needs" ? "needs" : "idle",
 	state,
 	alive: true,
-	resumable: false,
 	detail,
 });
 

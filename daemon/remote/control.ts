@@ -57,7 +57,7 @@ export class RemoteControl {
 	/** What remote.json holds, so a heartbeat does not read it. */
 	private launchWritten: string | undefined;
 	/** Panes started from the phone that have not registered yet, by tmux session name. */
-	private readonly starting = new Map<string, { replaces?: string; timer: ReturnType<typeof setTimeout> }>();
+	private readonly starting = new Map<string, ReturnType<typeof setTimeout>>();
 	private server: RemoteServer | undefined;
 	/** The configured port the running server was started for. */
 	private serverPort: number | undefined;
@@ -103,21 +103,13 @@ export class RemoteControl {
 		}
 	}
 
-	/** A pane registered: one the phone started is up, and the stored row it resumes gives way to it. */
+	/** A pane registered: one the phone started is up. */
 	registered(sessionId: string): void {
-		const started = this.starting.get(sessionId);
-		if (!started) return;
-		clearTimeout(started.timer);
+		clearTimeout(this.starting.get(sessionId));
 		this.starting.delete(sessionId);
-		if (started.replaces) this.deps.deleteInstance(started.replaces);
 	}
 
-	/** A pane started to resume this stored row has not registered yet. */
-	resuming(storedId: string): boolean {
-		return [...this.starting.values()].some((started) => started.replaces === storedId);
-	}
-
-	private startSession(spec: SessionSpec, replaces?: string): string {
+	private startSession(spec: SessionSpec): string {
 		const pane = startSession({ ...spec, tmux: this.tmux });
 		const timer = setTimeout(() => {
 			if (!this.starting.delete(pane)) return;
@@ -128,7 +120,7 @@ export class RemoteControl {
 			}
 		}, START_TIMEOUT_MS);
 		timer.unref();
-		this.starting.set(pane, { replaces, timer });
+		this.starting.set(pane, timer);
 		return pane;
 	}
 
@@ -190,8 +182,7 @@ export class RemoteControl {
 					listInstances: this.deps.listInstances,
 					send: this.deps.send,
 					launch: () => this.launch(),
-					startSession: (spec, replaces) => this.startSession(spec, replaces),
-					resuming: (id) => this.resuming(id),
+					startSession: (spec) => this.startSession(spec),
 					report: (id) => this.reports.get(id),
 					renameInstance: this.deps.renameInstance,
 					setPinned: this.deps.setPinned,

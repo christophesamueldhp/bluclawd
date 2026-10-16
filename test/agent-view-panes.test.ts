@@ -154,29 +154,6 @@ describe("agent view in pane mode", () => {
 		]);
 	});
 
-	it("a stored session a phone is resuming gets no second pane, from enter or a peek reply", async () => {
-		const stored: InstanceSummary = {
-			id: "s",
-			status: "stopped",
-			cwd: HERE,
-			sessionFile: "/s/s.jsonl",
-			outcome: "done",
-		};
-		const { view, calls, flush } = setup([stored]);
-		// The phone started its pane after this view last listed the row.
-		stored.resuming = true;
-		view.handleInput(ENTER);
-		await flush();
-		expect(calls).toEqual([]);
-		expect(view.render(100).join("\n")).toContain("Already being resumed from your phone");
-		view.handleInput(" ");
-		for (const ch of "carry on") view.handleInput(ch);
-		view.handleInput(ENTER);
-		await flush();
-		expect(calls).toEqual([]);
-		expect(view.render(100).join("\n")).toContain("Already being resumed from your phone");
-	});
-
 	it("enter twice on a stored session's reply starts one pane", async () => {
 		const stored: InstanceSummary = {
 			id: "s",

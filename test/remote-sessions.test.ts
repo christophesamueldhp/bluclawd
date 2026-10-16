@@ -34,7 +34,7 @@ describe("remote sessions", () => {
 			["b", "working"],
 			["a", "idle"],
 		]);
-		expect(sessions[1]).toMatchObject({ detail: "npm test", alive: true, resumable: false, state: "working" });
+		expect(sessions[1]).toMatchObject({ detail: "npm test", alive: true, state: "working" });
 		expect(sessions[2].label).toBe("idle one");
 	});
 
@@ -58,9 +58,9 @@ describe("remote sessions", () => {
 			sessionFile: "/s/x.jsonl",
 			outcome: "done",
 		};
-		expect(remoteSessions([stored])[0]).toMatchObject({ id: "old", alive: false, resumable: true, band: "idle" });
+		expect(remoteSessions([stored])[0]).toMatchObject({ id: "old", alive: false, band: "idle" });
 		const { sessionFile: _, ...fileless } = stored;
-		expect(remoteSessions([fileless])[0]).toMatchObject({ id: "old", alive: false, resumable: false });
+		expect(remoteSessions([fileless])[0]).toMatchObject({ id: "old", alive: false });
 		expect(remoteSessions([stored, live("new", "idle", { sessionFile: "/s/x.jsonl" })]).map((s) => s.id)).toEqual([
 			"new",
 		]);

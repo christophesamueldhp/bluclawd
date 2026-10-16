@@ -35,11 +35,8 @@ export interface RemoteDeps {
 	send(sessionId: string, message: PaneMessage): boolean;
 	/** How to start a pane's pi; undefined until a pane has registered. */
 	launch(): PaneLaunch | undefined;
-	/** Start a pane; returns its tmux session name, the id its row registers as. `replaces`: the
-	 *  stored row it resumes, which goes once the pane registers. */
-	startSession(spec: SessionSpec, replaces?: string): string;
-	/** A pane started to resume this stored row has not registered yet. */
-	resuming(storedId: string): boolean;
+	/** Start a pane; returns its tmux session name, the id its row registers as. */
+	startSession(spec: SessionSpec): string;
 	/** A running pane's latest report. */
 	report(sessionId: string): PaneReport | undefined;
 	/** Name a stored row; false when there is none by that id. A pane's pi names its own. */
@@ -246,9 +243,9 @@ function launchOf(deps: RemoteDeps): PaneLaunch | undefined {
 	return launchUsable(launch) ? launch : undefined;
 }
 
-function start(deps: RemoteDeps, spec: SessionSpec, replaces?: string): string {
+function start(deps: RemoteDeps, spec: SessionSpec): string {
 	try {
-		return deps.startSession(spec, replaces);
+		return deps.startSession(spec);
 	} catch {
 		throw new HttpError(500, "start_failed");
 	}
@@ -403,8 +400,6 @@ async function handle(
 		if (!session) return json(res, 404, { error: "unknown_session" });
 		// A pane's row comes back with its next heartbeat: its pi has to quit first.
 		if (session.running) return json(res, 409, { error: "session_running" });
-		// Its row goes once the pane resuming it registers.
-		if (deps.resuming(id)) return json(res, 409, { error: "session_busy" });
 		return deps.deleteInstance(id) ? json(res, 200, { ok: true }) : json(res, 404, { error: "unknown_session" });
 	}
 
@@ -565,8 +560,7 @@ async function handle(
 
 	if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
 	const body = await readJson(req, action === "prompt" ? PROMPT_BODY_MAX : BODY_MAX);
-	// Looked up again after the body: a concurrent reply may have resumed this row meanwhile, and
-	// from the resuming check to the start nothing awaits, so a stored row starts one pane only.
+	// Looked up again after the body, which may have taken a while.
 	const session = findSession(deps.listInstances(), id);
 	if (!session) return json(res, 409, { error: "session_not_running" });
 	// A pane from an older bluclawd sends no report, and would ignore what only a newer one runs.
@@ -583,17 +577,6 @@ async function handle(
 			!images && text.trimStart().startsWith("/") ? text.trimStart().slice(1).split(/\s/)[0] : undefined;
 		if (command !== undefined && PHONE_REFUSED_COMMANDS.has(command)) {
 			return json(res, 400, { error: "command_refused" });
-		}
-		// A stored row has no process: it resumes as agent view's peek reply resumes it.
-		if (!session.running && session.sessionFile) {
-			// Its first prompt is an argument to pi, as a new session's is.
-			if (images) return json(res, 400, { error: "images_need_running" });
-			const launch = launchOf(deps);
-			if (!launch) return json(res, 503, { error: "no_launch" });
-			// Its row stays until the pane registers, so a pane that never does leaves it as it was.
-			if (deps.resuming(id)) return json(res, 409, { error: "session_busy" });
-			const pane = start(deps, { cwd: session.cwd, task: text, sessionFile: session.sessionFile, launch }, id);
-			return json(res, 202, { ok: true, pane });
 		}
 		// A pane that reports its commands types them in; an older one runs them as a prompt.
 		if (command !== undefined && session.running && deps.report(id)?.commands) {

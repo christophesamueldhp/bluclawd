@@ -17,7 +17,7 @@ import { barHtml, compactLines, elapsedText, factsHtml, spanStyle, thinkingHtml,
 
 /**
  * `sessionId`: pi's, the same under another row id; `dialog`: the one it waits on, while it needs input.
- * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, resumable: boolean, detail: string, createdAt?: string, finishedAt?: string, sessionId?: string, dialog?: { kind: string, title?: string } }} Session
+ * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, sessionId?: string, dialog?: { kind: string, title?: string } }} Session
  */
 /** `aborted`: a reply its turn was stopped in, empty when stopped before it said anything. @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, aborted?: boolean, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
@@ -101,7 +101,7 @@ const ERRORS = {
 	body_too_large: "That message is too long.",
 	invalid_image: "That image could not be sent.",
 	image_too_large: "That image is too large to send, even made smaller.",
-	images_need_running: "Images go only to a running session: send the text to resume it, then attach them.",
+	images_need_running: "Images go only to a running session.",
 	unreadable_image: "That image could not be read.",
 	too_many_images: `Up to ${ATTACH_MAX} images at a time.`,
 	internal_error: "Something went wrong on the Mac.",
@@ -142,8 +142,7 @@ const state = {
 	query: "",
 	/**
 	 * A pane started from here, until its row is listed (`pane` is unset while the request is out).
-	 * `from`: the stored session it resumes, whose row is gone meanwhile.
-	 * @type {{ pane?: string, from?: string } | undefined}
+	 * @type {{ pane?: string } | undefined}
 	 */
 	starting: undefined,
 	loaded: false,
@@ -408,23 +407,17 @@ async function loadSessions() {
 		if (starting?.pane && state.sessions.some((s) => s.id === starting.pane)) {
 			state.starting = undefined;
 			clearTimeout(startTimer);
-			// The resumed session's row is the new pane's: follow it, without a history entry for the old one.
-			if (starting.from && state.open === starting.from) {
-				followed = starting.pane;
-				location.replace(`#s/${encodeURIComponent(starting.pane)}`);
-				return;
-			}
 			// A task started from the list opens, unless another screen was opened meanwhile.
-			if (!starting.from && !state.open) {
+			if (!state.open) {
 				location.hash = `#s/${encodeURIComponent(starting.pane)}`;
 				return;
 			}
 		}
-		// The open session under another row id (it quit on the Mac, or resumed there): followed as a
-		// resume from here is, unless that resume is the one under way.
+		// The open session under another row id (it quit on the Mac, or was opened there again): followed,
+		// without a history entry for the old one.
 		const open = state.sessions.find((s) => s.id === state.open);
 		if (open) openSessionId = open.sessionId;
-		else if (state.open && state.starting?.from !== state.open) {
+		else if (state.open) {
 			const next = successor(state.sessions, state.open, openSessionId);
 			if (next) {
 				followed = next;
@@ -478,9 +471,9 @@ async function loadDirectories() {
 	}
 }
 
-/** @param {string} pane @param {string} [from] */
-function waitForPane(pane, from) {
-	const starting = { pane, from };
+/** @param {string} pane */
+function waitForPane(pane) {
+	const starting = { pane };
 	state.starting = starting;
 	clearTimeout(startTimer);
 	startTimer = setTimeout(() => {
@@ -488,13 +481,6 @@ function waitForPane(pane, from) {
 		state.starting = undefined;
 		// What was sent reached no session.
 		state.pending = [];
-		if (from !== undefined && state.open === from) {
-			// Back to the list, where the message outlives the reconnect.
-			notice = errorText("start_timeout");
-			location.hash = "";
-			route();
-			return;
-		}
 		showError(errorText("start_timeout"));
 	}, START_TIMEOUT_MS);
 	void loadSessions();
@@ -502,7 +488,7 @@ function waitForPane(pane, from) {
 
 async function loadMessages() {
 	const id = state.open;
-	if (!id || state.starting?.from === id) return;
+	if (!id) return;
 	const request = ++messagesRequest;
 	try {
 		const page = await api.messages(id);
@@ -877,8 +863,8 @@ function rowHtml(s) {
 	const glyph = s.state === "needs" ? "✻" : s.state === "working" ? "" : "∙";
 	// The project's folder, which the search matches too.
 	const where = s.cwd.split("/").filter(Boolean).at(-1);
-	const detail = [where, s.detail || s.state].filter(Boolean).join(" · ");
-	return `<a class="row" href="#s/${encodeURIComponent(s.id)}"><span class="glyph ${esc(s.state)}" aria-hidden="true">${glyph}</span>
+	const detail = [where, s.alive ? s.detail || s.state : "disconnected"].filter(Boolean).join(" · ");
+	return `<a class="row${s.alive ? "" : " closed"}" href="#s/${encodeURIComponent(s.id)}"><span class="glyph ${esc(s.state)}" aria-hidden="true">${glyph}</span>
 <span class="name">${esc(s.label)}<small>${esc(detail)}</small></span>
 <span class="age">${age(ageAt(s))}</span></a>`;
 }
@@ -1082,6 +1068,9 @@ function bannerHtml(session) {
 		const confirm = isConfirm(session);
 		return `${error}<div class="banner needs${confirm ? " confirm" : ""}"><span>${text}</span>${confirm ? replyHtml() : ""}
 <button class="answer" id="answer" aria-haspopup="dialog">Answer</button></div>`;
+	}
+	if (session && !session.alive) {
+		return `${error}<div class="banner closed">Disconnected: this session was closed on the Mac. It reconnects here once it is opened there again.</div>`;
 	}
 	if (error) return error;
 	if (!session && state.homeScreenHint) {
@@ -1348,9 +1337,7 @@ function updateModels() {
 
 function updateChat() {
 	const session = state.sessions.find((s) => s.id === state.open);
-	const resuming = state.starting?.from !== undefined && state.starting.from === state.open;
-	// Kept while a resumed session's row gives way to its pane's.
-	if (!resuming) $("#title").textContent = session?.label ?? "";
+	$("#title").textContent = session?.label ?? "";
 	// Mid-turn, a dialog waiting on an answer included.
 	const turn = session?.state === "working" || session?.state === "needs";
 	if (!turn) state.stopping = false;
@@ -1401,25 +1388,17 @@ function updateChat() {
 	// Also when the page loaded was empty and only "#older" went.
 	if (prepending) scroll.scrollTop += scroll.scrollHeight - height;
 	prepending = false;
-	const stranded = session !== undefined && !session.alive && !session.resumable;
-	// One pane starts at a time, so a resume waits for any start in flight.
-	const blocked = resuming || stranded || (state.starting !== undefined && session?.resumable === true);
+	// Closed on the Mac: read only here, until it is opened there again.
+	const closed = session !== undefined && !session.alive;
 	updateSheet(session);
 	const text = $("#text");
-	text.disabled = blocked;
-	$(".send").disabled = blocked || state.navigating || state.reading > 0;
-	// A resumed session's first prompt is an argument to pi, which carries no images.
+	text.disabled = closed;
+	$(".send").disabled = closed || state.navigating || state.reading > 0;
 	const attach = $("#attach");
-	attach.disabled = blocked || session?.resumable === true || state.attachments.length + state.reading >= ATTACH_MAX;
+	attach.disabled = closed || state.attachments.length + state.reading >= ATTACH_MAX;
 	attach.classList.toggle("busy", state.reading > 0);
 	attach.setAttribute("aria-label", state.reading ? "Reading the photos…" : "Attach photos");
-	text.placeholder = resuming
-		? "Starting…"
-		: stranded
-			? "Not running: open it on the Mac"
-			: session?.resumable
-				? "Reply resumes it (text only)"
-				: "Reply";
+	text.placeholder = closed ? "Disconnected" : "Reply";
 	updateThumbs();
 	updateCommands();
 }
@@ -2334,20 +2313,14 @@ async function send() {
 	const value = text.value.trim();
 	const id = state.open;
 	const session = state.sessions.find((s) => s.id === id);
-	const resume = session?.resumable === true;
 	// Photos still being read go with it once they are in.
-	if (!value || !id || state.navigating || state.reading || (resume && state.starting)) return;
+	if (!value || !id || !session?.alive || state.navigating || state.reading) return;
 	// Left in the reply box, to change. Any other "/" line goes, and the pane runs it as a command.
 	if (refused(value)) {
 		showError(errorText("terminal_command"));
 		return;
 	}
 	const images = state.attachments;
-	if (resume && images.length) {
-		showError(errorText("images_need_running"));
-		return;
-	}
-	if (resume) state.starting = { from: id };
 	text.value = "";
 	text.style.height = "auto";
 	state.attachments = [];
@@ -2362,22 +2335,17 @@ async function send() {
 	render();
 	$("#scroll").scrollTop = $("#scroll").scrollHeight;
 	try {
-		const { pane } = await api.prompt(
+		await api.prompt(
 			id,
 			value,
 			images.map(({ mimeType, data }) => ({ mimeType, data })),
 		);
-		if (pane) waitForPane(pane, id);
-		else if (resume) {
-			state.starting = undefined;
-			render();
-		} else if (state.open === id && !state.terminal && isBuiltin(id, value)) {
+		if (state.open === id && !state.terminal && isBuiltin(id, value)) {
 			// pi's own commands (/model, /tree, /resume…) open a selector in the pane, which waits there
 			// without the session needing input: its screen and keys answer it.
 			openTerminal();
 		}
 	} catch (error) {
-		if (resume) state.starting = undefined;
 		forget(entry);
 		putBack(id, entry);
 		handleError(error, "Not sent: ");
@@ -2409,7 +2377,7 @@ function putBack(id, entry) {
 	if (!state.attachments.length) state.attachments = entry.images;
 }
 
-/** A sent prompt still waiting PROMPT_GIVE_UP_MS on (see giveUp); a resume's is waitForPane's. @param {string} id @param {Pending} entry */
+/** A sent prompt still waiting PROMPT_GIVE_UP_MS on (see giveUp). @param {string} id @param {Pending} entry */
 function checkPending(id, entry) {
 	if (state.open !== id || !state.pending.includes(entry) || state.starting) return;
 	const verdict = giveUp(entry, state.sessions.find((s) => s.id === id)?.state, state.messages.at(-1)?.id ?? "");

@@ -30,7 +30,6 @@ describe("remote HTTP API", () => {
 	let sent: Array<{ id: string; message: PaneMessage }>;
 	let launch: PaneLaunch | undefined;
 	let started: SessionSpec[];
-	let resuming: Set<string>;
 	let startFails: boolean;
 	let reports: Map<string, PaneReport>;
 	let screens: Map<string, string[]>;
@@ -64,7 +63,6 @@ describe("remote HTTP API", () => {
 		writeFileSync(join(dir, "pi.js"), "");
 		launch = { command: [process.execPath, join(dir, "pi.js")] };
 		started = [];
-		resuming = new Set();
 		startFails = false;
 		reports = new Map();
 		screens = new Map();
@@ -93,13 +91,11 @@ describe("remote HTTP API", () => {
 					return true;
 				},
 				launch: () => launch,
-				startSession: (spec, replaces) => {
+				startSession: (spec) => {
 					if (startFails) throw new Error("tmux: no server");
 					started.push(spec);
-					if (replaces) resuming.add(replaces);
 					return "pi-0000000a";
 				},
-				resuming: (id) => resuming.has(id),
 				report: (id) => reports.get(id),
 				renameInstance: (id, name) => {
 					changed.push(["rename", id, name]);
@@ -553,11 +549,7 @@ describe("remote HTTP API", () => {
 			expect(sent).toEqual([]);
 		});
 
-		it("refuses images for a session that would start, which takes its prompt as an argument", async () => {
-			expect(await prompt("stored", { text: "x", images: [image("image/png")] })).toEqual([
-				400,
-				"images_need_running",
-			]);
+		it("refuses images for a new session, which takes its prompt as an argument", async () => {
 			const token = await pair();
 			const res = await fetch(`${base}/api/sessions`, {
 				method: "POST",
@@ -902,12 +894,9 @@ describe("remote HTTP API", () => {
 			expect(sent).toEqual([]);
 		});
 
-		it("deletes a stored row, never a running session's or one being resumed", async () => {
+		it("deletes a stored row, never a running session's", async () => {
 			const token = await pair();
 			expect(await call(token, "DELETE", "live")).toEqual([409, { error: "session_running" }]);
-			resuming.add("stored");
-			expect(await call(token, "DELETE", "stored")).toEqual([409, { error: "session_busy" }]);
-			resuming.clear();
 			expect(await call(token, "DELETE", "stored")).toEqual([200, { ok: true }]);
 			expect(await call(token, "DELETE", "nope")).toEqual([404, { error: "unknown_session" }]);
 			expect(await call(token, "DELETE", "%E0%A4%A")).toEqual([404, { error: "unknown_session" }]);
@@ -1076,6 +1065,21 @@ describe("remote HTTP API", () => {
 		});
 	});
 
+	it("refuses a closed session, with or without a file, which only the Mac opens again", async () => {
+		const token = await pair();
+		const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 1, 1, 1]).toString("base64");
+		for (const body of [{ text: "carry on" }, { text: "look", images: [{ mimeType: "image/png", data: png }] }]) {
+			const res = await fetch(`${base}/api/sessions/stored/prompt`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify(body),
+			});
+			expect([res.status, await res.json()]).toEqual([409, { error: "session_not_running" }]);
+		}
+		expect(started).toEqual([]);
+		expect(sent).toEqual([]);
+	});
+
 	it("refuses a stored session without a file, an empty or oversized prompt, and an oversized body", async () => {
 		instances = [...instances, { id: "fileless", status: "stopped", cwd: "/p" }];
 		const token = await pair();
@@ -1090,20 +1094,6 @@ describe("remote HTTP API", () => {
 		expect((await post("/api/sessions/live/prompt", "x".repeat(PROMPT_BODY_MAX + 1))).status).toBe(413);
 		expect(sent).toEqual([]);
 		expect(started).toEqual([]);
-	});
-
-	it("resumes a stored session with the reply as its first prompt, its row kept until the pane registers", async () => {
-		const token = await pair();
-		const res = await fetch(`${base}/api/sessions/stored/prompt`, {
-			method: "POST",
-			headers: authJson(token),
-			body: JSON.stringify({ text: "carry on" }),
-		});
-		expect(res.status).toBe(202);
-		expect(await res.json()).toEqual({ ok: true, pane: "pi-0000000a" });
-		expect(started).toEqual([{ cwd: "/p", task: "carry on", sessionFile: join(dir, "stored.jsonl"), launch }]);
-		expect(resuming).toEqual(new Set(["stored"]));
-		expect(sent).toEqual([]);
 	});
 
 	it("starts a new session in a directory", async () => {
@@ -1139,14 +1129,6 @@ describe("remote HTTP API", () => {
 		expect(await start({ cwd: dir, task: "go", model: "--model/x" })).toEqual([400, "invalid_model"]);
 		expect(await start({ cwd: dir, task: "go", model: "anthropic/x; rm -rf ~" })).toEqual([400, "invalid_model"]);
 		expect(await start({ cwd: dir, task: "go", model: "anthropic/x;y" })).toEqual([400, "invalid_model"]);
-		const resume = async () => {
-			const res = await fetch(`${base}/api/sessions/stored/prompt`, {
-				method: "POST",
-				headers: authJson(token),
-				body: JSON.stringify({ text: "hi" }),
-			});
-			return [res.status, ((await res.json()) as { error?: string }).error];
-		};
 		// A pi upgraded since its pane started may have moved: its pane would die at once.
 		for (const command of [
 			[join(dir, "old-node"), join(dir, "pi.js")],
@@ -1154,13 +1136,10 @@ describe("remote HTTP API", () => {
 		]) {
 			launch = { command };
 			expect(await start({ cwd: dir, task: "go" })).toEqual([503, "no_launch"]);
-			expect(await resume()).toEqual([503, "no_launch"]);
 		}
 		launch = undefined;
 		expect(await start({ cwd: dir, task: "go" })).toEqual([503, "no_launch"]);
-		expect(await resume()).toEqual([503, "no_launch"]);
 		expect(started).toEqual([]);
-		expect(resuming.size).toBe(0);
 	});
 
 	it("expands a leading ~ in the directory to the home directory", async () => {
@@ -1185,49 +1164,15 @@ describe("remote HTTP API", () => {
 		}
 	});
 
-	it("resumes a stored session once when two replies race", async () => {
-		const token = await pair();
-		const body = JSON.stringify({ text: "first" });
-		// The first reply's body arrives only after the second reply was handled.
-		const slow = request(`${base}/api/sessions/stored/prompt`, {
-			method: "POST",
-			headers: { ...authJson(token), "content-length": Buffer.byteLength(body) },
-		});
-		const slowStatus = new Promise<number>((resolve, reject) => {
-			slow.on("response", (res) => {
-				res.resume();
-				resolve(res.statusCode ?? 0);
-			});
-			slow.on("error", reject);
-		});
-		slow.flushHeaders();
-		await new Promise((r) => setTimeout(r, 100));
-		const fast = await fetch(`${base}/api/sessions/stored/prompt`, {
-			method: "POST",
-			headers: authJson(token),
-			body: JSON.stringify({ text: "second" }),
-		});
-		slow.end(body);
-		expect([fast.status, await slowStatus]).toEqual([202, 409]);
-		// Its row stays until the pane registers: a reply meanwhile waits for that pane.
-		const again = await fetch(`${base}/api/sessions/stored/prompt`, {
-			method: "POST",
-			headers: authJson(token),
-			body: JSON.stringify({ text: "third" }),
-		});
-		expect([again.status, await again.json()]).toEqual([409, { error: "session_busy" }]);
-		expect(started.map((s) => s.task)).toEqual(["second"]);
-	});
-
-	it("keeps a stored row whose pane failed to start", async () => {
+	it("answers start_failed when a new session's pane fails to start", async () => {
 		startFails = true;
 		const token = await pair();
-		const post = (path: string, body: object) =>
-			fetch(`${base}${path}`, { method: "POST", headers: authJson(token), body: JSON.stringify(body) });
-		const resume = await post("/api/sessions/stored/prompt", { text: "hi" });
-		expect([resume.status, await resume.json()]).toEqual([500, { error: "start_failed" }]);
-		expect((await post("/api/sessions", { cwd: dir, task: "go" })).status).toBe(500);
-		expect(resuming.size).toBe(0);
+		const res = await fetch(`${base}/api/sessions`, {
+			method: "POST",
+			headers: authJson(token),
+			body: JSON.stringify({ cwd: dir, task: "go" }),
+		});
+		expect([res.status, await res.json()]).toEqual([500, { error: "start_failed" }]);
 	});
 
 	it("lists the directories of listed sessions, most recent first", async () => {

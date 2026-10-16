@@ -8,7 +8,6 @@ import type { InstanceSummary } from "../daemon/ipc/protocol.ts";
 import { RemoteControl } from "../daemon/remote/control.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { PushResult, WebPushSubscription } from "../daemon/remote/webpush.ts";
-import { supervisor } from "../daemon/supervisor.ts";
 import { Tmux } from "../daemon/tmux.ts";
 import { validP256dh } from "./support/push.ts";
 
@@ -215,64 +214,13 @@ describe("remote control switch", () => {
 			handleIpcRequest({ type: "register", instance: { id, cwd: dir, sessionFile: join(dir, "s.jsonl") } });
 		const killed = () => tmuxCalls.filter((args) => args[0] === "kill-session").map((args) => args[2]);
 
-		it("drops a resumed session's stored row once its pane registers, and only then", async () => {
-			const { status, body } = await post("/api/sessions/stored/prompt", { text: "carry on" });
-			expect(status).toBe(202);
-			expect(deleted).toEqual([]);
-			// A second reply before the pane is up would start a second one.
-			expect(await post("/api/sessions/stored/prompt", { text: "again" })).toEqual({
-				status: 409,
-				body: { error: "session_busy" },
-			});
-			await register(body.pane!);
-			expect(deleted).toEqual(["stored"]);
-			await register(body.pane!);
-			expect(deleted).toEqual(["stored"]);
-			vi.advanceTimersByTime(START_TIMEOUT_MS);
-			expect(killed()).toEqual([]);
-			await handleIpcRequest({ type: "unregister", instanceId: body.pane! });
-		});
-
-		it("lists a stored row as being resumed until the phone's pane registers, so agent view starts no second one", async () => {
-			vi.stubEnv("PI_SERVER_DIR", dir);
-			const saved = await handleIpcRequest({ type: "save", cwd: dir, sessionFile: join(dir, "s.jsonl") });
-			if (saved.type !== "ack" || !saved.instance) throw new Error("not saved");
-			const id = saved.instance.id;
-			instances = listSummaries();
-			expect(instances.find((i) => i.id === id)).not.toHaveProperty("resuming");
-			const { body } = await post(`/api/sessions/${id}/prompt`, { text: "carry on" });
-			expect(listSummaries().find((i) => i.id === id)).toMatchObject({ resuming: true });
-			await register(body.pane!);
-			expect(listSummaries().find((i) => i.id === id)).not.toHaveProperty("resuming");
-			await handleIpcRequest({ type: "unregister", instanceId: body.pane! });
-		});
-
-		it("a pinned stored row the phone resumes stays pinned as its pane's row", async () => {
-			vi.stubEnv("PI_SERVER_DIR", dir);
-			deleteInstance = (id) => supervisor.deleteInstance(id);
-			const saved = await handleIpcRequest({ type: "save", cwd: dir, sessionFile: join(dir, "s.jsonl") });
-			if (saved.type !== "ack" || !saved.instance) throw new Error("not saved");
-			const id = saved.instance.id;
-			await handleIpcRequest({ type: "meta", instanceId: id, pinned: true, sortOrder: 4 });
-			instances = listSummaries();
-			const { body } = await post(`/api/sessions/${id}/prompt`, { text: "carry on" });
-			await register(body.pane!);
-			const rows = listSummaries();
-			expect(rows.find((i) => i.id === id)).toBeUndefined();
-			expect(rows.find((i) => i.id === body.pane)).toMatchObject({ external: true, pinned: true, sortOrder: 4 });
-			await handleIpcRequest({ type: "unregister", instanceId: body.pane! });
-		});
-
-		it("ends a pane it started that never registered, keeping the stored row it would have resumed", async () => {
+		it("ends a pane it started that never registered", async () => {
 			const task = await post("/api/sessions", { cwd: dir, task: "go" });
-			const resume = await post("/api/sessions/stored/prompt", { text: "carry on" });
 			vi.advanceTimersByTime(START_TIMEOUT_MS - 1);
 			expect(killed()).toEqual([]);
 			vi.advanceTimersByTime(1);
-			expect(killed()).toEqual([`=${task.body.pane}`, `=${resume.body.pane}`]);
+			expect(killed()).toEqual([`=${task.body.pane}`]);
 			expect(deleted).toEqual([]);
-			// The stored row can be resumed again.
-			expect((await post("/api/sessions/stored/prompt", { text: "carry on" })).status).toBe(202);
 		});
 
 		it("leaves a pane it started alone once it registered", async () => {
