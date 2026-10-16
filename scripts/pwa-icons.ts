@@ -8,7 +8,7 @@ import { BODY_COLOR, EYE_COLOR, SOURCE } from "../ext/_shared/mascot.ts";
 /** White, opaque: iOS fills a touch icon's transparency with black. */
 const BACKGROUND = "#ffffff";
 /** The mascot's width as a share of the icon's, in whole pixels per grid block so it stays crisp. */
-const SCALE = 0.7;
+const SCALE = 0.75;
 
 export const ICONS: Record<string, number> = {
 	"apple-touch-icon.png": 180,

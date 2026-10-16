@@ -81,6 +81,8 @@ button { -webkit-user-select: none; user-select: none; }
 /* As wide as the Mac draws it: swiped sideways to see the rest. */
 .statusbar.pistatusline { overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; cursor: pointer; }
 .statusbar.pistatusline::-webkit-scrollbar { display: none; }
+/* Faded at its right edge while more of it is a swipe away (app.js marks its end). */
+.statusbar.pistatusline:not(.end) { -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent); }
 .statusbar .sl { display: block; width: max-content; min-width: 100%; min-height: 1.35em; white-space: pre; }
 .sl .b { font-weight: 700; }
 .sl .d { opacity: .6; }
@@ -110,7 +112,7 @@ button { -webkit-user-select: none; user-select: none; }
 .row .name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row small { display: block; color: var(--muted); font-size: 15px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .age { flex: none; align-self: flex-start; padding-top: 2px; color: var(--muted); font-size: 15px; font-variant-numeric: tabular-nums; }
-.glyph { flex: none; width: 16px; text-align: center; color: var(--dim); }
+.glyph { flex: none; width: 16px; text-align: center; color: var(--muted); }
 .glyph.needs { color: var(--yellow); }
 .glyph.failed { color: var(--red); }
 .glyph.working { color: var(--accent); }
@@ -168,6 +170,8 @@ button { -webkit-user-select: none; user-select: none; }
 .banner { flex: none; margin: var(--s2) var(--s4) 0; padding: 10px var(--s3); border-radius: 10px; font-size: 15px; background: color-mix(in srgb, var(--yellow) 18%, var(--bg)); }
 .banner.off { background: color-mix(in srgb, var(--red) 16%, var(--bg)); }
 .banner.closed { background: var(--panel); color: var(--muted); }
+/* In a chat, under the log and above the reply box, where the thumb answers. */
+.scroll + #banner .banner { margin: var(--s2) var(--s4); }
 .composer { flex: none; display: flex; gap: var(--s2); align-items: flex-end; padding: var(--s2) var(--s3); background: var(--bg); border-top: 1px solid var(--line); }
 .composer textarea { flex: 1; min-height: 44px; resize: none; border: 0; border-radius: 22px; padding: 11px var(--s4); background: var(--panel); color: var(--text); font: 16px/22px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-height: 140px; }
 .send { width: 44px; height: 44px; flex: none; border-radius: 50%; border: 0; background: var(--accent); color: #000; font-size: 20px; font-weight: 600; }
@@ -193,14 +197,33 @@ button { -webkit-user-select: none; user-select: none; }
 .pictures { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
 .composer.new { flex-direction: column; align-items: stretch; }
 .composer.new textarea { flex: none; }
+/* The model and directory show once a task is being written (nothing starts without one), and while it starts. */
+.composer.new:not(:focus-within, .starting):has(textarea:placeholder-shown) :is(.pick, .where) { display: none; }
 .where { display: flex; gap: var(--s2); }
 .where select, .where input { flex: 1; min-width: 0; height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; }
 .start { flex: none; height: 44px; padding: 0 20px; border: 0; border-radius: 22px; background: var(--accent); color: #000; font: inherit; font-weight: 600; }
 .start:disabled { opacity: .5; }
 .empty { color: var(--muted); text-align: center; margin: 40px var(--s4); }
+/* The mascot (mascot.js) rolls its eyes around its head while something loads: one 4 px square per pixel. */
+.loader { display: flex; justify-content: center; margin: 40px var(--s4); }
+.loader svg { width: 80px; height: 60px; }
+.loader .body { fill: var(--accent); }
+.loader .eyes { fill: #1e1e1e; animation: roll 1.2s steps(1, end) infinite; }
+.loader .label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@keyframes roll {
+	0% { transform: translate(0, -1px); }
+	12.5% { transform: translate(1px, -1px); }
+	25% { transform: translate(1px, 0); }
+	37.5% { transform: translate(1px, 1px); }
+	50% { transform: translate(0, 1px); }
+	62.5% { transform: translate(-1px, 1px); }
+	75% { transform: translate(-1px, 0); }
+	87.5%, 100% { transform: translate(-1px, -1px); }
+}
+@media (prefers-reduced-motion: reduce) { .loader .eyes { animation-duration: 4s; } }
 .pair { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: var(--s3); padding: var(--s5); text-align: center; }
 .pair h1 { margin: 0; font-size: 28px; }
-.pair .logo { font-size: 40px; color: var(--accent); }
+.pair .logo { display: block; width: 120px; height: 90px; }
 .pair input { font: 28px var(--mono); letter-spacing: .3em; text-align: center; width: 11ch; padding: 10px; border-radius: 10px; border: 1px solid var(--dim); background: var(--panel); color: var(--text); }
 .pair button { min-height: 44px; background: var(--accent); color: #000; border: 0; border-radius: 12px; padding: 12px 40px; font: inherit; font-weight: 600; }
 .error { color: var(--red); font-size: 15px; min-height: 1.4em; }

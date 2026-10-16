@@ -5,7 +5,8 @@ import photon from "@silvia-odwyer/photon-node";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { type RemoteServer, startRemoteServer } from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
-import { BODY_COLOR, EYE_COLOR } from "../ext/_shared/mascot.ts";
+import { GRID, loaderHtml } from "../daemon/remote/web/mascot.js";
+import { BODY_COLOR, EYE_COLOR, SOURCE } from "../ext/_shared/mascot.ts";
 import { ICONS, renderIcon, WEB_DIR } from "../scripts/pwa-icons.ts";
 
 function decode(bytes: Buffer): { width: number; height: number; pixels: Uint8Array } {
@@ -31,16 +32,16 @@ describe("PWA icons", () => {
 
 	it("draws the mascot centred on white, a whole pixel square per grid block", () => {
 		const icon = decode(renderIcon(180));
-		// 6 px blocks: the 20×15 grid is 120×90, from (30, 45).
+		// 7 px blocks: the 20×15 grid is 140×105, from (20, 37).
 		expect(colorAt(icon, 0, 0)).toBe("#ffffff");
 		expect(colorAt(icon, 179, 179)).toBe("#ffffff");
 		// Row 4, column 5: the left eye's top-left pixel and block.
-		expect(colorAt(icon, 30 + 5 * 6, 45 + 4 * 6)).toBe(EYE_COLOR);
-		expect(colorAt(icon, 30 + 5 * 6 - 1, 45 + 4 * 6)).toBe(BODY_COLOR);
+		expect(colorAt(icon, 20 + 5 * 7, 37 + 4 * 7)).toBe(EYE_COLOR);
+		expect(colorAt(icon, 20 + 5 * 7 - 1, 37 + 4 * 7)).toBe(BODY_COLOR);
 		// The head's top row (columns 8–11), and the gap left of it.
-		expect(colorAt(icon, 30 + 8 * 6, 45)).toBe(BODY_COLOR);
-		expect(colorAt(icon, 30 + 8 * 6 - 1, 45)).toBe("#ffffff");
-		expect(colorAt(icon, 30 + 8 * 6, 44)).toBe("#ffffff");
+		expect(colorAt(icon, 20 + 8 * 7, 37)).toBe(BODY_COLOR);
+		expect(colorAt(icon, 20 + 8 * 7 - 1, 37)).toBe("#ffffff");
+		expect(colorAt(icon, 20 + 8 * 7, 36)).toBe("#ffffff");
 	});
 
 	it("is linked from the page, the manifest and the offline shell", () => {
@@ -92,5 +93,24 @@ describe("PWA icons", () => {
 			expect(res.headers.get("content-type")).toBe("image/png");
 			expect(Buffer.from(await res.arrayBuffer())).toEqual(readFileSync(join(WEB_DIR, name)));
 		});
+	});
+});
+
+describe("the phone's mascot", () => {
+	it("is branding's mascot.svg, unchanged", () => {
+		const branding = join(import.meta.dirname, "..", "ext", "branding", "mascot.svg");
+		expect(readFileSync(join(WEB_DIR, "mascot.svg"))).toEqual(readFileSync(branding));
+		const sw = readFileSync(join(WEB_DIR, "sw.js"), "utf8");
+		expect(sw).toContain(`"/mascot.svg"`);
+		expect(sw).toContain(`"/mascot.js"`);
+	});
+
+	it("loads as mascot.svg's grid, its two eyes a group of their own", () => {
+		expect(GRID).toEqual(SOURCE);
+		const html = loaderHtml();
+		expect(html).toContain(
+			`<g class="eyes"><rect x="5" y="4" width="2" height="2"/><rect x="13" y="4" width="2" height="2"/></g>`,
+		);
+		expect(html).toContain("Loading…");
 	});
 });

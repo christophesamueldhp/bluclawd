@@ -11,6 +11,7 @@ import { dataUrl, isImageFile, readImage } from "./image.js";
 import { ageAt, successor } from "./list.js";
 import { giveUp, promptKey, promptText, refused, sentText, settle, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
+import { loaderHtml } from "./mascot.js";
 import { diffSummary, markerKind, resultSummary } from "./output.js";
 import { filterSessions, matchCommands } from "./search.js";
 import { barHtml, compactLines, elapsedText, factsHtml, spanStyle, thinkingHtml, tokens } from "./statusbar.js";
@@ -644,6 +645,11 @@ function paintStatusline(bar, lines) {
 	bar.hidden = lines.length === 0;
 }
 
+/** Faded at its right edge until swiped to its end (see style.css). @param {HTMLElement} bar */
+function markStatuslineEnd(bar) {
+	bar.classList.toggle("end", bar.scrollLeft + bar.clientWidth >= bar.scrollWidth - 1);
+}
+
 async function loadScreen() {
 	const id = state.open;
 	if (!id || !state.terminal || state.termError === "unknown_session") return;
@@ -842,7 +848,7 @@ function bytes(base64url) {
 
 function pairView() {
 	return `<form class="pair" id="pair">
-<div class="logo">✻</div><h1>bluclawd</h1>
+<img class="logo" src="mascot.svg" alt=""><h1>bluclawd</h1>
 <p class="muted">On the Mac, run <code>/remote-control</code> and scan the QR code with your phone's camera. Can't scan? Type the 6-digit code shown under it.</p>
 <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="000000" aria-label="Pairing code">
 <button>Pair</button><div class="error" id="pair-error"></div></form>`;
@@ -865,17 +871,19 @@ function listShell() {
 
 /** @param {Session} s */
 function rowHtml(s) {
-	const glyph = s.state === "needs" ? "✻" : s.state === "working" ? "" : "∙";
+	const glyph = s.state === "needs" ? "✻" : s.state === "working" || s.state === "idle" ? "" : "∙";
 	// The project's folder, which the search matches too.
 	const where = s.cwd.split("/").filter(Boolean).at(-1);
-	const detail = [where, s.alive ? s.detail || s.state : "disconnected"].filter(Boolean).join(" · ");
+	// What it waits on or does; its band already names its state.
+	const doing = s.alive ? s.dialog?.title || s.detail : "disconnected";
+	const detail = [where, doing].filter(Boolean).join(" · ");
 	return `<a class="row${s.alive ? "" : " closed"}" href="#s/${encodeURIComponent(s.id)}"><span class="glyph ${esc(s.state)}" aria-hidden="true">${glyph}</span>
 <span class="name">${esc(s.label)}<small>${esc(detail)}</small></span>
 <span class="age">${age(ageAt(s))}</span></a>`;
 }
 
 function rowsHtml() {
-	if (!state.loaded) return `<p class="empty">Loading…</p>`;
+	if (!state.loaded) return loaderHtml();
 	if (state.sessions.length === 0) return `<p class="empty">No sessions. Start one below.</p>`;
 	const found = filterSessions(state.sessions, state.query);
 	if (found.length === 0) return `<p class="empty">No sessions match “${esc(state.query.trim())}”.</p>`;
@@ -889,9 +897,9 @@ function chatShell() {
 	return `<header class="bar"><a class="back" href="#">‹ Sessions</a><button class="title" id="title" aria-haspopup="dialog"></button>
 <button class="tasks-pill" id="tasks-pill" aria-haspopup="dialog" hidden></button><button class="stop" id="stop" hidden>Stop</button></header>
 <div class="statusbar" id="statusbar" role="button" tabindex="0" aria-haspopup="dialog" aria-label="Status" hidden></div>
-<div id="banner"></div><section class="scroll" id="scroll"><div class="older" id="older"></div><div class="log" id="log">
+<section class="scroll" id="scroll"><div class="older" id="older"></div><div class="log" id="log">
 <div class="part" id="msgs"></div><div class="part" id="live"></div><div class="part" id="pending"></div><div class="part" id="working"></div></div></section>
-<div class="commands" id="commands" role="listbox" aria-label="Commands" hidden></div><div class="thumbs" id="thumbs" hidden></div>
+<div id="banner"></div><div class="commands" id="commands" role="listbox" aria-label="Commands" hidden></div><div class="thumbs" id="thumbs" hidden></div>
 <form class="composer" id="composer"><button type="button" class="attach" id="attach" aria-label="Attach photos"><span aria-hidden="true">+</span></button>
 <input type="file" id="file" accept="image/*" multiple hidden>
 <textarea id="text" rows="1" placeholder="Reply" aria-label="Reply" maxlength="32768"></textarea>
@@ -974,7 +982,7 @@ function logParts(session) {
 			: "";
 	let msgs = transcriptHtml(calls, running);
 	if (!msgs && !live && !pending && !working) {
-		msgs = `<p class="empty">${state.messagesLoaded ? "Nothing in this session yet." : "Loading…"}</p>`;
+		msgs = state.messagesLoaded ? `<p class="empty">Nothing in this session yet.</p>` : loaderHtml();
 	}
 	return { msgs, live, pending, working };
 }
@@ -1137,7 +1145,7 @@ function sheetHtml(session) {
 	const report = state.report;
 	const head = `<header class="sheet-bar"><h2>Status</h2><button class="close" id="sheet-close">Done</button></header>
 ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
-	if (report === undefined) return `${head}<p class="muted">Loading…</p>`;
+	if (report === undefined) return `${head}${loaderHtml()}`;
 	if (report === null) {
 		const why = session && !session.alive ? "session_not_running" : "no_status";
 		return `${head}<p class="muted">${esc(errorText(why))}</p>`;
@@ -1289,13 +1297,19 @@ function updateList() {
 		banner.innerHTML = bannerNow;
 		banner.dataset.html = bannerNow;
 	}
-	$("#rows").innerHTML = rowsHtml();
+	// Replaced only when it changes, so the loading mascot keeps rolling its eyes.
+	const rows = rowsHtml();
+	if ($("#rows").dataset.html !== rows) {
+		$("#rows").innerHTML = rows;
+		$("#rows").dataset.html = rows;
+	}
 	$("#search-clear").hidden = state.query === "";
 	updateDirectories();
 	updateModels();
 	const start = $("#start");
 	start.disabled = state.starting !== undefined || !state.terminalOpen;
 	start.textContent = state.starting ? "Starting…" : "Start";
+	$("#new-task").classList.toggle("starting", state.starting !== undefined);
 	updatePhoneSheet();
 }
 
@@ -1365,8 +1379,10 @@ function updateChat() {
 	const bar = $("#statusbar");
 	const lines = state.report?.statusline?.lines;
 	// The user's own pistatusline, as on the Mac; else the bar's own reading of the report.
-	if (lines) paintStatusline(bar, lines);
-	else {
+	if (lines) {
+		paintStatusline(bar, lines);
+		markStatuslineEnd(bar);
+	} else {
 		const barNow = barHtml(state.report, session && shortPath(session.cwd), Date.now());
 		if (bar.dataset.html !== barNow) {
 			bar.classList.remove("pistatusline");
@@ -1379,16 +1395,17 @@ function updateChat() {
 	const pill = $("#tasks-pill");
 	pill.hidden = tasks === 0;
 	pill.innerHTML = `<span>${tasks} task${tasks === 1 ? "" : "s"}</span>`;
-	const banner = $("#banner");
-	const bannerNow = bannerHtml(session);
-	// Rebuilt only when it changes, so a tap on Answer is not lost to a refresh.
-	if (banner.dataset.html !== bannerNow) {
-		banner.innerHTML = bannerNow;
-		banner.dataset.html = bannerNow;
-	}
 	const scroll = $("#scroll");
 	const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
 	const height = scroll.scrollHeight;
+	const banner = $("#banner");
+	const bannerNow = bannerHtml(session);
+	// Rebuilt only when it changes, so a tap on Answer is not lost to a refresh.
+	const bannerChanged = banner.dataset.html !== bannerNow;
+	if (bannerChanged) {
+		banner.innerHTML = bannerNow;
+		banner.dataset.html = bannerNow;
+	}
 	// Its height stays the same while loading, so only what is put above moves the log.
 	const older = $("#older");
 	older.hidden = !state.more;
@@ -1400,7 +1417,9 @@ function updateChat() {
 	if (pending) paintPending();
 	const live = updatePart($("#live"), parts.live);
 	const working = updatePart($("#working"), parts.working);
-	if ((msgs || pending || live || working) && atBottom && !prepending) scroll.scrollTop = scroll.scrollHeight;
+	// The banner sits under the log, so the log's end stays in view above it.
+	if ((msgs || pending || live || working || bannerChanged) && atBottom && !prepending)
+		scroll.scrollTop = scroll.scrollHeight;
 	// Also when the page loaded was empty and only "#older" went.
 	if (prepending) scroll.scrollTop += scroll.scrollHeight - height;
 	prepending = false;
@@ -1781,6 +1800,7 @@ function bindChat() {
 		history.back();
 	});
 	$("#title").addEventListener("click", openSheet);
+	$("#statusbar").addEventListener("scroll", () => markStatuslineEnd($("#statusbar")), { passive: true });
 	$("#statusbar").addEventListener("click", openSheet);
 	$("#statusbar").addEventListener("keydown", (/** @type {KeyboardEvent} */ event) => {
 		if (event.key !== "Enter" && event.key !== " ") return;

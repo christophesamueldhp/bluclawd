@@ -1,6 +1,6 @@
 // Caches the app shell so the app opens, and says the Mac is unreachable, when the Mac is not.
 // The API is never cached.
-const CACHE = "bluclawd-shell-v20";
+const CACHE = "bluclawd-shell-v22";
 const SHELL = [
 	"/",
 	"/index.html",
@@ -15,6 +15,8 @@ const SHELL = [
 	"/output.js",
 	"/search.js",
 	"/statusbar.js",
+	"/mascot.js",
+	"/mascot.svg",
 	"/manifest.webmanifest",
 	"/favicon-32.png",
 	"/apple-touch-icon.png",
