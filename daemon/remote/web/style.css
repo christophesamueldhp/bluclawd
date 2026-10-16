@@ -45,7 +45,7 @@
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 17px/1.4 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; -webkit-text-size-adjust: 100%; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
-#app { height: var(--app-h, 100dvh); display: flex; flex-direction: column; background: var(--bg); padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+#app { height: var(--app-h, 100dvh); display: flex; flex-direction: column; background: var(--bg); padding: calc(env(safe-area-inset-top) + var(--s2)) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 /* The keyboard covers the home indicator's inset. */
 .keyboard #app { padding-bottom: 0; }
 button { -webkit-user-select: none; user-select: none; }
