@@ -184,6 +184,8 @@ const state = {
 	stoppingTasks: new Set(),
 	/** Paired in Safari: the Home Screen app is the one iOS notifies. */
 	homeScreenHint: false,
+	/** A new build's service worker took over: this page still runs the old one until it reloads. */
+	updateReady: false,
 	/** The list's ⋯ sheet, with "Disconnect this phone". */
 	phoneSheet: false,
 	/** Its Disconnect asks to be confirmed. */
@@ -1101,6 +1103,13 @@ function bannerHtml(session) {
 	return "";
 }
 
+function updateHtml() {
+	return state.updateReady
+		? `<div class="banner hint"><span>A new version of bluclawd is ready.</span>
+<button class="answer" id="reload-app">Reload</button></div>`
+		: "";
+}
+
 /** @param {Session | undefined} session */
 function isConfirm(session) {
 	return session?.state === "needs" && session.dialog?.kind === "confirm";
@@ -1291,7 +1300,7 @@ function updateList() {
 	$("#online").classList.toggle("on", live);
 	$("#notify").hidden = !state.offerPush;
 	const banner = $("#banner");
-	const bannerNow = bannerHtml(undefined);
+	const bannerNow = updateHtml() + bannerHtml(undefined);
 	// Rebuilt only when it changes, so a tap on its dismiss button is not lost to a refresh.
 	if (banner.dataset.html !== bannerNow) {
 		banner.innerHTML = bannerNow;
@@ -1399,7 +1408,7 @@ function updateChat() {
 	const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
 	const height = scroll.scrollHeight;
 	const banner = $("#banner");
-	const bannerNow = bannerHtml(session);
+	const bannerNow = updateHtml() + bannerHtml(session);
 	// Rebuilt only when it changes, so a tap on Answer is not lost to a refresh.
 	const bannerChanged = banner.dataset.html !== bannerNow;
 	if (bannerChanged) {
@@ -2580,7 +2589,26 @@ setInterval(() => {
 	else if (shown.startsWith("chat:")) updateChat();
 }, 30_000);
 if ("serviceWorker" in navigator) {
+	// The first install takes control too, and that is no new version.
+	const updating = navigator.serviceWorker.controller !== null;
 	navigator.serviceWorker.register("sw.js").catch(() => {});
+	navigator.serviceWorker.addEventListener("controllerchange", () => {
+		if (!updating) return;
+		state.updateReady = true;
+		render();
+	});
+	// A Home Screen app comes back from the background without a page load, which is when the
+	// browser looks for a new sw.js on its own.
+	document.addEventListener("visibilitychange", () => {
+		if (document.visibilityState !== "visible") return;
+		navigator.serviceWorker
+			.getRegistration()
+			.then((registration) => registration?.update())
+			.catch(() => {});
+	});
+	app.addEventListener("click", (/** @type {Event} */ event) => {
+		if (/** @type {Element} */ (event.target).closest("#reload-app")) location.reload();
+	});
 	// A notification tapped while the app is open: sw.js asks it to open that session.
 	navigator.serviceWorker.addEventListener("message", (/** @type {MessageEvent} */ event) => {
 		const id = event.data?.open;
