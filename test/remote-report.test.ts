@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 import { PANE_ENV, Tmux } from "../daemon/tmux.ts";
 import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
@@ -15,7 +15,6 @@ import {
 	buildReport,
 	DIALOG_NOTICE,
 	DRAFT_NOTICE,
-	navigate,
 	paneTasks,
 	submitCommand,
 	watchTasks,
@@ -160,7 +159,7 @@ describe("buildReport", () => {
 		]);
 	});
 
-	it("lists the slash commands for the phone's autocomplete: pi's own, then the rest, but for the Mac-only ones", () => {
+	it("lists only the slash commands a phone may run: pi's compact, new and reload, then templates and skills", () => {
 		const { ctx, pi } = fakes();
 		const commands = [
 			{ name: "remote-control", source: "extension", description: "Control your sessions from your phone" },
@@ -171,12 +170,8 @@ describe("buildReport", () => {
 		];
 		const report = buildReport(ctx as never, { ...pi, getCommands: () => commands } as never, ask);
 		const names = report.commands!.map((c) => c.name);
-		expect(names.slice(0, 3)).toEqual(["settings", "model", "tree"]);
-		expect(names).toContain("compact");
-		expect(names).not.toContain("remote-control");
-		expect(names).not.toContain("agent-view");
-		expect(report.commands!.slice(-3)).toEqual([
-			{ name: "tasks", description: "View and manage everything running in the background", source: "extension" },
+		expect(names).toEqual(["new", "compact", "reload", "review", "skill:pdf"]);
+		expect(report.commands!.slice(-2)).toEqual([
 			{ name: "review", description: `${"Review the diff. ".repeat(20).trim().slice(0, 99)}…`, source: "prompt" },
 			{ name: "skill:pdf", source: "skill" },
 		]);
@@ -205,31 +200,10 @@ describe("applyPaneMessage", () => {
 		expect(pi.setModel).toHaveBeenCalledTimes(1);
 	});
 
-	it("compacts, and reports again when pi refuses, so the phone stops showing it as compacting", () => {
-		const { ctx, pi } = fakes();
-		const reportAgain = vi.fn();
-		applyPaneMessage({ type: "compact" }, ctx as never, pi as never, reportAgain);
-		expect(ctx.compact).toHaveBeenCalledTimes(1);
-		expect(reportAgain).not.toHaveBeenCalled();
-		const [options] = ctx.compact.mock.calls[0] as unknown as [{ onError: (error: Error) => void }];
-		options.onError(new Error("Nothing to compact (session too small)"));
-		expect(reportAgain).toHaveBeenCalledTimes(1);
-	});
-
-	it("does not compact a session that is not idle, since compacting aborts its turn, and reports again", () => {
-		const { ctx, pi } = fakes({ idle: false });
-		const reportAgain = vi.fn();
-		applyPaneMessage({ type: "compact" }, ctx as never, pi as never, reportAgain);
-		expect(ctx.compact).not.toHaveBeenCalled();
-		expect(reportAgain).toHaveBeenCalledTimes(1);
-	});
-
 	it("ignores messages it does not handle", () => {
 		const { ctx, pi } = fakes();
 		applyPaneMessage({ type: "rename", name: "x" }, ctx as never, pi as never);
 		expect(pi.setModel).not.toHaveBeenCalled();
-		expect(ctx.compact).not.toHaveBeenCalled();
-		expect(pi.sendUserMessage).not.toHaveBeenCalled();
 	});
 });
 
@@ -296,45 +270,6 @@ describe("thinking level and trust mode from the phone", () => {
 		writeFileSync(home.settings(), JSON.stringify({ defaultProjectTrust: "never" }));
 		const { ctx, pi } = fakes({ cwd: home.dir() });
 		expect(buildReport(ctx as never, pi as never).trust).toBe("never");
-	});
-});
-
-describe("tree, fork and clone from the phone", () => {
-	it("dispatches each as a /remote-control command, which pi runs without writing a message", () => {
-		const { ctx, pi } = fakes();
-		const dispatched = new Set<string>();
-		const reportAgain = () => {};
-		applyPaneMessage({ type: "tree", entryId: "1a2b3c4d" }, ctx as never, pi as never, reportAgain, dispatched);
-		applyPaneMessage({ type: "fork", entryId: "1a2b3c4d" }, ctx as never, pi as never, reportAgain, dispatched);
-		applyPaneMessage({ type: "clone" }, ctx as never, pi as never, reportAgain, dispatched);
-		expect(pi.sendUserMessage.mock.calls).toEqual([
-			["/remote-control tree 1a2b3c4d", { expandPromptTemplates: true }],
-			["/remote-control fork 1a2b3c4d", { expandPromptTemplates: true }],
-			["/remote-control clone", { expandPromptTemplates: true }],
-		]);
-		// What the command runs: the same line typed is not the phone's.
-		expect([...dispatched]).toEqual(["tree 1a2b3c4d", "fork 1a2b3c4d", "clone"]);
-	});
-
-	// Two extensions with the command make pi name them remote-control:1 and :2: the text would reach the model.
-	it("dispatches nothing when /remote-control is not this extension's command by that name", () => {
-		for (const commands of [["remote-control:1", "remote-control:2"], []]) {
-			const { ctx, pi } = fakes({ commands });
-			applyPaneMessage({ type: "clone" }, ctx as never, pi as never);
-			expect(pi.sendUserMessage).not.toHaveBeenCalled();
-		}
-		const { ctx, pi } = fakes();
-		pi.getCommands = () => [{ name: "remote-control", source: "prompt" }];
-		applyPaneMessage({ type: "clone" }, ctx as never, pi as never);
-		expect(pi.sendUserMessage).not.toHaveBeenCalled();
-	});
-
-	it("dispatches nothing while the session is not idle", () => {
-		const { ctx, pi } = fakes({ idle: false });
-		applyPaneMessage({ type: "tree", entryId: "1a2b3c4d" }, ctx as never, pi as never);
-		applyPaneMessage({ type: "fork", entryId: "1a2b3c4d" }, ctx as never, pi as never);
-		applyPaneMessage({ type: "clone" }, ctx as never, pi as never);
-		expect(pi.sendUserMessage).not.toHaveBeenCalled();
 	});
 });
 
@@ -473,81 +408,6 @@ describe("background tasks for the phone", () => {
 	});
 });
 
-describe("navigate", () => {
-	const dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-navigate-"));
-	const saved = join(dir, "saved.jsonl");
-	writeFileSync(saved, "");
-	afterAll(() => rmSync(dir, { recursive: true, force: true }));
-
-	function command(options: { file?: string; leaf?: string | null; draft?: string } = {}) {
-		const entries = new Map<string, unknown>([
-			["aaaa0001", { type: "message", id: "aaaa0001", message: { role: "user", content: "hi" } }],
-			["aaaa0002", { type: "message", id: "aaaa0002", message: { role: "assistant", content: [] } }],
-		]);
-		return {
-			sessionManager: {
-				getEntry: (id: string) => entries.get(id),
-				getLeafId: () => (options.leaf === undefined ? "aaaa0002" : options.leaf),
-				getSessionFile: () => options.file ?? saved,
-			},
-			navigateTree: vi.fn(async () => ({ cancelled: false })),
-			fork: vi.fn(async () => ({ cancelled: false })),
-			ui: { getEditorText: () => options.draft ?? "" },
-		};
-	}
-
-	it("goes back to an entry, forks before a user message, and clones at the leaf", async () => {
-		const ctx = command();
-		expect(await navigate("tree aaaa0002", ctx as never)).toBe(true);
-		expect(await navigate("fork aaaa0001", ctx as never)).toBe(true);
-		expect(await navigate(" clone ", ctx as never)).toBe(true);
-		expect(ctx.navigateTree.mock.calls).toEqual([["aaaa0002"]]);
-		expect(ctx.fork.mock.calls).toEqual([
-			["aaaa0001", { position: "before" }],
-			["aaaa0002", { position: "at" }],
-		]);
-	});
-
-	it("does not fork or clone over a draft in the pane's editor, which pi would replace, and says why", async () => {
-		const ctx = command({ draft: "half a thought" });
-		const refuse = vi.fn();
-		expect(await navigate("fork aaaa0001", ctx as never, refuse)).toBe(true);
-		expect(await navigate("clone", ctx as never, refuse)).toBe(true);
-		expect(ctx.fork).not.toHaveBeenCalled();
-		expect(refuse.mock.calls).toEqual([[DRAFT_NOTICE], [DRAFT_NOTICE]]);
-		// pi fills only an empty editor on a tree move.
-		expect(await navigate("tree aaaa0002", ctx as never, refuse)).toBe(true);
-		expect(ctx.navigateTree).toHaveBeenCalledTimes(1);
-		expect(refuse).toHaveBeenCalledTimes(2);
-	});
-
-	it("leaves anything else to the public subcommands", async () => {
-		const ctx = command();
-		for (const args of ["", "pair", "devices", "tree", "fork", "tree a b", "fork aaaa0001 x", "clone x", "treex"]) {
-			expect(await navigate(args, ctx as never)).toBe(false);
-		}
-		expect(ctx.navigateTree).not.toHaveBeenCalled();
-		expect(ctx.fork).not.toHaveBeenCalled();
-	});
-
-	// pi ends the pane when a fork throws, so none of these may reach it.
-	it("does nothing for an unknown entry, a fork from a reply, an empty session or an unsaved file", async () => {
-		const ctx = command();
-		expect(await navigate("tree ffff0000", ctx as never)).toBe(true);
-		expect(await navigate("fork ffff0000", ctx as never)).toBe(true);
-		expect(await navigate("fork aaaa0002", ctx as never)).toBe(true);
-		const empty = command({ leaf: null });
-		expect(await navigate("clone", empty as never)).toBe(true);
-		const unsaved = command({ file: join(dir, "unsaved.jsonl") });
-		expect(await navigate("fork aaaa0001", unsaved as never)).toBe(true);
-		expect(await navigate("clone", unsaved as never)).toBe(true);
-		for (const c of [ctx, empty, unsaved]) {
-			expect(c.navigateTree).not.toHaveBeenCalled();
-			expect(c.fork).not.toHaveBeenCalled();
-		}
-	});
-});
-
 describe("/remote-control", () => {
 	tempHome();
 
@@ -647,60 +507,6 @@ describe("/remote-control", () => {
 		expect(reported.mock.calls.length).toBe(reports);
 		reported.mockRestore();
 		live.mockRestore();
-	});
-
-	it("runs the phone's tree, fork and clone without a word to the user, and tells the phone why one did not", async () => {
-		const sent = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
-		const handlers = new Map<string, (event: unknown, ctx?: unknown) => void>();
-		let command: ((args: string, ctx: unknown) => Promise<void>) | undefined;
-		const { ctx: base, pi: fake } = fakes({ current: model("openai", "gpt-5") });
-		const entry = { type: "message", id: "aaaa0001", message: { role: "user", content: "hi" } };
-		let draft = "";
-		const ctx = {
-			...base,
-			mode: "tui",
-			sessionManager: {
-				...base.sessionManager,
-				getEntry: () => entry,
-				getSessionFile: () => undefined,
-				getLeafId: () => "aaaa0001",
-			},
-			navigateTree: vi.fn(async () => ({ cancelled: false })),
-			fork: vi.fn(async () => ({ cancelled: false })),
-			ui: { ...base.ui, getEditorText: () => draft },
-		};
-		const pi = {
-			...fake,
-			on: (name: string, handler: (event: unknown, ctx: unknown) => void) => handlers.set(name, handler),
-			events: { on: (name: string, handler: (data: unknown) => void) => handlers.set(name, handler) },
-			registerCommand: (_name: string, registered: { handler: typeof command }) => {
-				command = registered.handler;
-			},
-			// As pi does with expandPromptTemplates: the line runs the extension's command.
-			sendUserMessage: vi.fn((text: string) => void command?.(text.slice("/remote-control ".length), ctx)),
-		};
-		process.env[PANE_ENV] = "pi-nav";
-		try {
-			remoteFactory(pi as never);
-		} finally {
-			delete process.env[PANE_ENV];
-		}
-		handlers.get("session_start")?.({}, ctx);
-		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
-		handlers.get("bluclawd:pane-message")?.({ type: "tree", entryId: "aaaa0001" });
-		await vi.waitFor(() => expect(ctx.navigateTree).toHaveBeenCalledWith("aaaa0001"));
-		// A draft in the Mac's prompt: no fork, and the next report says why, that once.
-		draft = "half a thought";
-		handlers.get("bluclawd:pane-message")?.({ type: "fork", entryId: "aaaa0001" });
-		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(2));
-		expect(ctx.fork).not.toHaveBeenCalled();
-		expect(sent.mock.calls[1]![1]).toMatchObject({ notice: { text: DRAFT_NOTICE, at: expect.any(Number) } });
-		expect(sent.mock.calls[0]![1]).not.toHaveProperty("notice");
-		draft = "";
-		handlers.get("bluclawd:pane-message")?.({ type: "clone" });
-		await vi.waitFor(() => expect(ctx.fork).toHaveBeenCalledWith("aaaa0001", { position: "at" }));
-		expect(base.ui.notify).not.toHaveBeenCalled();
-		sent.mockRestore();
 	});
 
 	it("types the phone's slash command into its own pane's prompt and presses Enter in that tmux session", async () => {

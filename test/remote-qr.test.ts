@@ -4,10 +4,10 @@ import { Text } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { qrMatrix, renderQr } from "../ext/remote/qr.ts";
 
-/** CoreImage's CIQRCodeGenerator at level M, written by a Swift script as rows of 0/1 without the
+/** CoreImage's CIQRCodeGenerator at level L, written by a Swift script as rows of 0/1 without the
  *  quiet zone, each code under a `# <text> <size>` line. */
 function fixtures(): { text: string; rows: string[] }[] {
-	const lines = readFileSync(join(import.meta.dirname, "fixtures", "qr-coreimage-m.txt"), "utf8").split("\n");
+	const lines = readFileSync(join(import.meta.dirname, "fixtures", "qr-coreimage-l.txt"), "utf8").split("\n");
 	const codes: { text: string; rows: string[] }[] = [];
 	for (const [i, line] of lines.entries()) {
 		if (!line.startsWith("# ")) continue;
@@ -47,29 +47,29 @@ function bch(data: number, poly: number, degree: number): number {
 describe("QR code", () => {
 	it("matches CoreImage's codes module for module, once both use the same mask", () => {
 		const codes = fixtures();
-		expect(codes.map((c) => c.rows.length)).toEqual([21, 33, 49, 57]);
+		expect(codes.map((c) => c.rows.length)).toEqual([21, 33, 41, 45, 53, 57]);
 		for (const { text, rows: expected } of codes) {
-			// The mask CoreImage chose, from its format bits (level M is 00).
+			// The mask CoreImage chose, from its format bits (level L is 01).
 			const [format] = formatBits(expected.map((row) => [...row].map((c) => c === "1")));
 			const mask = ((format ^ 0x5412) >> 10) & 7;
 			expect(rows(qrMatrix(text, mask)), text).toEqual(expected);
 		}
 	});
 
-	it("picks the smallest version that holds the text at level M, from 1 to 10", () => {
-		// Byte-mode capacity at level M of versions 1 to 10.
-		const capacity = [14, 26, 42, 62, 84, 106, 122, 152, 180, 213];
+	it("picks the smallest version that holds the text at level L, from 1 to 10", () => {
+		// Byte-mode capacity at level L of versions 1 to 10.
+		const capacity = [17, 32, 53, 78, 106, 134, 154, 192, 230, 271];
 		for (const [i, length] of capacity.entries()) {
 			const version = i + 1;
 			expect(qrMatrix("a".repeat(length)).length).toBe(17 + 4 * version);
 			if (version < 10) expect(qrMatrix("a".repeat(length + 1)).length).toBe(21 + 4 * version);
 		}
-		expect(() => qrMatrix("a".repeat(214))).toThrow();
+		expect(() => qrMatrix("a".repeat(272))).toThrow();
 	});
 
 	it("is well formed at every version: finders, timing, dark module, format and version bits", () => {
 		const finder = ["1111111", "1000001", "1011101", "1011101", "1011101", "1000001", "1111111"];
-		for (const length of [14, 26, 42, 62, 84, 106, 122, 152, 180, 213]) {
+		for (const length of [17, 32, 53, 78, 106, 134, 154, 192, 230, 271]) {
 			const matrix = qrMatrix("x".repeat(length));
 			const size = matrix.length;
 			const version = (size - 17) / 4;
@@ -85,7 +85,7 @@ describe("QR code", () => {
 			const [first, second] = formatBits(matrix);
 			expect(second).toBe(first);
 			const format = first ^ 0x5412;
-			expect(format >> 13).toBe(0); // level M
+			expect(format >> 13).toBe(1); // level L
 			expect(bch(format >> 10, 0x537, 10)).toBe(format & 0x3ff);
 			if (version < 7) continue;
 			let bottomLeft = 0;
@@ -100,11 +100,11 @@ describe("QR code", () => {
 		}
 	});
 
-	it("draws dark modules in the terminal's own foreground on its background, two rows to a line, inside a blank 4-module quiet zone", () => {
+	it("draws dark modules in the terminal's own foreground on its background, two rows to a line, inside a blank 2-module quiet zone", () => {
 		const matrix = qrMatrix("https://mac.tail1234.ts.net/#pair=482913");
 		const size = matrix.length;
 		const lines = renderQr(matrix).split("\n");
-		expect(lines).toHaveLength(Math.ceil((size + 8) / 2));
+		expect(lines).toHaveLength(Math.ceil((size + 4) / 2));
 		// Only resets: undimmed, default foreground and background, so a dark terminal shows it inverted.
 		const open = "\x1b[22;39;49m";
 		const body = lines.map((line) => {
@@ -112,11 +112,11 @@ describe("QR code", () => {
 			return line.slice(open.length);
 		});
 		expect(body.join("")).not.toContain("\x1b");
-		expect(body.every((line) => [...line].length === size + 8)).toBe(true);
-		expect(body.slice(0, 2)).toEqual([" ".repeat(size + 8), " ".repeat(size + 8)]);
+		expect(body.every((line) => [...line].length === size + 4)).toBe(true);
+		expect(body[0]).toBe(" ".repeat(size + 4));
 		// Rows 0 and 1 of the finder: all dark, then dark at both ends only.
-		expect(body[2]!.slice(4, 11)).toBe("█▀▀▀▀▀█");
-		const dark = (x: number, y: number) => matrix[y - 4]?.[x - 4] === true;
+		expect(body[1]!.slice(2, 9)).toBe("█▀▀▀▀▀█");
+		const dark = (x: number, y: number) => matrix[y - 2]?.[x - 2] === true;
 		for (const [line, text] of body.entries()) {
 			[...text].forEach((char, x) => {
 				const glyph = { "00": " ", "10": "▀", "01": "▄", "11": "█" }[

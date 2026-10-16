@@ -448,38 +448,14 @@ describe("tmux", () => {
 		]);
 	});
 
-	it("sends keys by name, and text literally, to a pane by exact name", () => {
+	it("sends keys by name to a pane by exact name", () => {
 		const runs: string[][] = [];
 		const tmux = new Tmux("/srv", (args) => {
 			runs.push(args);
 			return "";
 		});
 		tmux.sendKeys("pi-a", ["Down", "Enter"]);
-		tmux.sendText("pi-a", "-n yes");
-		tmux.sendText("pi-a", "a; b;");
-		expect(runs).toEqual([
-			["send-keys", "-t", "=pi-a:", "Down", "Enter"],
-			["send-keys", "-t", "=pi-a:", "-l", "--", "-n yes"],
-			["send-keys", "-t", "=pi-a:", "-l", "--", "a; b\\;"],
-		]);
-	});
-
-	it("shows a fullscreen pane's screen alone, and a main-screen pane's with its history", () => {
-		const runs: string[][] = [];
-		let alternate = "1";
-		const tmux = new Tmux("/srv", (args) => {
-			runs.push(args);
-			return args[0] === "display-message" ? `${alternate}\n` : "› Allow  \nDeny\n\n\n";
-		});
-		expect(tmux.screen("pi-a", 60)).toEqual(["› Allow", "Deny"]);
-		alternate = "0";
-		tmux.screen("pi-a", 60);
-		expect(runs).toEqual([
-			["display-message", "-p", "-t", "=pi-a:", "#{alternate_on}"],
-			["capture-pane", "-p", "-t", "=pi-a:"],
-			["display-message", "-p", "-t", "=pi-a:", "#{alternate_on}"],
-			["capture-pane", "-p", "-t", "=pi-a:", "-S", "-60"],
-		]);
+		expect(runs).toEqual([["send-keys", "-t", "=pi-a:", "Down", "Enter"]]);
 	});
 
 	it("tells a session or server that is not there from any other failure", () => {
@@ -601,23 +577,17 @@ describe("daemon: pane registrations", () => {
 		expect(supervisor.sendExternal("pi-a", { type: "abort" })).toBe(false);
 	});
 
-	it("delivers a navigation or a compact alone, keeping what comes before and after it for other heartbeats", () => {
+	it("delivers everything queued, in order, in one drain", () => {
 		const supervisor = new ServerSupervisor();
 		supervisor.registerExternal(rec("pi-a", "2026-01-01T00:00:00Z"), "idle");
 		supervisor.sendExternal("pi-a", { type: "rename", name: "x" });
-		supervisor.sendExternal("pi-a", { type: "fork", entryId: "1a2b3c4d" });
-		supervisor.sendExternal("pi-a", { type: "prompt", text: "edited" });
-		supervisor.sendExternal("pi-a", { type: "clone" });
-		supervisor.sendExternal("pi-a", { type: "tree", entryId: "1a2b3c4d" });
-		supervisor.sendExternal("pi-a", { type: "compact" });
-		supervisor.sendExternal("pi-a", { type: "prompt", text: "after" });
-		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "rename", name: "x" }]);
-		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "fork", entryId: "1a2b3c4d" }]);
-		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "prompt", text: "edited" }]);
-		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "clone" }]);
-		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "tree", entryId: "1a2b3c4d" }]);
-		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "compact" }]);
-		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "prompt", text: "after" }]);
+		supervisor.sendExternal("pi-a", { type: "prompt", text: "first" });
+		supervisor.sendExternal("pi-a", { type: "abort" });
+		expect(supervisor.drainExternal("pi-a")).toEqual([
+			{ type: "rename", name: "x" },
+			{ type: "prompt", text: "first" },
+			{ type: "abort" },
+		]);
 		expect(supervisor.drainExternal("pi-a")).toEqual([]);
 	});
 });

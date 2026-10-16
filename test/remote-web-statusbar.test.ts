@@ -8,7 +8,6 @@ import {
 	spanStyle,
 	thinkingHtml,
 	tokens,
-	untilText,
 } from "../daemon/remote/web/statusbar.js";
 
 const now = Date.parse("2026-10-15T10:12:00Z");
@@ -21,12 +20,6 @@ const report = {
 	context: { tokens: 68_000, contextWindow: 200_000, percent: 34 },
 	usage: { input: 1_000_000, output: 150_000, cacheRead: 40_000, cacheWrite: 10_000, cost: 3.2149 },
 	git: { branch: "main", owner: "christophe", added: 12, removed: 3 },
-	limits: {
-		sessionUsage: 43.4,
-		sessionResetAt: "2026-10-15T12:30:00Z",
-		weeklyUsage: 46,
-		weeklyResetAt: "2026-10-20T10:00:00Z",
-	},
 };
 /** What the bar says, without its markup. */
 const text = (html: string) =>
@@ -38,15 +31,13 @@ const text = (html: string) =>
 		.trim();
 
 describe("the chat's status bar", () => {
-	it("shows the session, then where it is and the plan's limits, as pistatusline does", () => {
-		const html = barHtml(report, "~/Projects/bluclawd", now);
+	it("shows the session, then where it is, as pistatusline does", () => {
+		const html = barHtml(report, "~/Projects/bluclawd");
 		expect(html.match(/class="line"/g)).toHaveLength(2);
-		expect(text(html)).toBe(
-			"Opus • high 34% 1.2M · $3.21 ⏵︎⏵︎ always\n~/Projects/bluclawd main +12 −3 5h 43% 2h18m wk 46% 4d23h",
-		);
+		expect(text(html)).toBe("Opus • high 34% 1.2M · $3.21 ⏵︎⏵︎ always\n~/Projects/bluclawd main +12 −3");
 		// Every badge glyph as text: iOS draws a bare ⏸ as a colour emoji.
 		for (const trust of ["always", "ask", "never"]) {
-			const badge = text(barHtml({ models: [], trust }, undefined, now));
+			const badge = text(barHtml({ models: [], trust }, undefined));
 			expect(badge.replace(/[a-z ]/g, "").replace(/(.)︎/gu, ""), trust).toBe("");
 		}
 		// The context gauge's width is a class: the CSP allows no inline style.
@@ -54,35 +45,19 @@ describe("the chat's status bar", () => {
 		expect(html).not.toContain("style=");
 	});
 
-	it("leaves out what is unknown: no report yet, no thinking, no git, no limits", () => {
-		expect(barHtml(undefined, "~/p", now)).toBe(
-			'<span class="line"><span class="grow cwd"><bdi>~/p</bdi></span></span>',
-		);
-		expect(barHtml(null, undefined, now)).toBe("");
-		const plain = barHtml({ models: [], model: { provider: "local", id: "llama" } }, undefined, now);
+	it("leaves out what is unknown: no report yet, no thinking, no git", () => {
+		expect(barHtml(undefined, "~/p")).toBe('<span class="line"><span class="grow cwd"><bdi>~/p</bdi></span></span>');
+		expect(barHtml(null, undefined)).toBe("");
+		const plain = barHtml({ models: [], model: { provider: "local", id: "llama" } }, undefined);
 		expect(text(plain)).toBe("llama");
 		const unknownContext = { models: [], context: { tokens: null, contextWindow: 200_000, percent: null } };
-		expect(barHtml(unknownContext, undefined, now)).toBe("");
-	});
-
-	it("drops a usage window whose reset has passed: the Mac's cache has not seen the new one", () => {
-		const limits = { sessionUsage: 90, sessionResetAt: "2026-10-15T09:00:00Z", weeklyUsage: 46 };
-		expect(text(barHtml({ models: [], limits }, undefined, now))).toBe("wk 46%");
+		expect(barHtml(unknownContext, undefined)).toBe("");
 	});
 
 	it("escapes what it shows", () => {
-		const html = barHtml({ models: [], git: { branch: "<b>x</b>", added: 0, removed: 0 } }, '~/"a"&b', now);
+		const html = barHtml({ models: [], git: { branch: "<b>x</b>", added: 0, removed: 0 } }, '~/"a"&b');
 		expect(html).toContain("&#60;b&#62;x&#60;/b&#62;");
 		expect(html).toContain("~/&#34;a&#34;&#38;b");
-	});
-
-	it("counts down to a reset in minutes, hours and days", () => {
-		expect(untilText("2026-10-15T10:47:00Z", now)).toBe("35m");
-		expect(untilText("2026-10-15T12:17:00Z", now)).toBe("2h05m");
-		expect(untilText("2026-10-19T16:12:00Z", now)).toBe("4d6h");
-		expect(untilText("2026-10-15T10:00:00Z", now)).toBeUndefined();
-		expect(untilText("soon", now)).toBeUndefined();
-		expect(untilText(undefined, now)).toBeUndefined();
 	});
 
 	it("shortens token counts", () => {
@@ -99,12 +74,11 @@ describe("the status sheet's pickers and facts", () => {
 		expect(thinkingHtml({ models: [] })).toBe("<dt>Thinking</dt><dd>off</dd>");
 	});
 
-	it("shows the directory, git, both limits and the trust mode picker", () => {
-		const html = factsHtml(report, "~/Projects/bluclawd", now);
+	it("shows the directory, git and the trust mode picker, and no plan usage", () => {
+		const html = factsHtml(report, "~/Projects/bluclawd");
 		expect(html).toContain("<dd>~/Projects/bluclawd</dd>");
 		expect(html).toContain("christophe · main");
-		expect(html).toContain("43% used · resets in 2h18m");
-		expect(html).toContain("46% used · resets in 4d23h");
+		expect(html).not.toContain("limit");
 		expect(html).toContain('<select id="trust">');
 		// Words alone: an option cannot be styled, and iOS draws a bare ⏸ as a colour emoji.
 		expect(html).toContain('<option value="always" selected>Always</option>');
@@ -113,7 +87,7 @@ describe("the status sheet's pickers and facts", () => {
 	});
 
 	it("offers no trust picker for a pane that reports no trust mode", () => {
-		expect(factsHtml({ models: [] }, undefined, now)).toBe("");
+		expect(factsHtml({ models: [] }, undefined)).toBe("");
 	});
 });
 

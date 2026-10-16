@@ -137,11 +137,8 @@ export class SelfRegistration {
 	private stopped = false;
 	/** The wait in flight, ended by stop(). */
 	private waiting: AbortController | undefined;
-	/** The last register delivered a tree, fork, clone or compact: what follows it is for where the
-	 *  pane moves to, so it waits for the next heartbeat, as the daemon's drain intends. Likewise after a
-	 *  prompt: pi still reports the pane idle until its turn starts, so a move right behind it would
-	 *  cut that turn short; the turn's agent_start heartbeat takes what follows. A slash command may be
-	 *  either (/compact, /new, a skill). */
+	/** The last register delivered a prompt or a slash command: pi still reports the pane idle until
+	 *  its turn starts, so what follows waits for the turn's agent_start heartbeat, which takes it. */
 	private moved = false;
 	/** A heartbeat has listed this session: before its first prompt is in the session there is nothing to list. */
 	private listed = false;
@@ -229,21 +226,12 @@ export class SelfRegistration {
 			watched = res?.watched === true;
 			wantReport = res?.wantReport === true;
 			const messages = res?.messages ?? [];
-			this.moved = messages.some(
-				(m) =>
-					m.type === "tree" ||
-					m.type === "fork" ||
-					m.type === "clone" ||
-					m.type === "compact" ||
-					m.type === "prompt" ||
-					m.type === "command",
-			);
+			this.moved = messages.some((m) => m.type === "prompt" || m.type === "command");
 			if (!this.moved) this.wait();
 			for (const message of messages) {
 				// Stopped meanwhile: the session they were for is gone, so they wait for whatever
-				// registers as this id next (the pane's next session), or go with the row. They go behind
-				// anything queued since: the phone holds Send and its moves until the session has moved, so
-				// little is, and navigate() skips a tree or fork to an entry the next session lacks.
+				// registers as this id next (the pane's next session), or go with the row, behind
+				// anything queued since.
 				if (this.stopped) await this.client.send(this.id, message);
 				else this.onMessage(message);
 			}

@@ -144,20 +144,12 @@ export const api = {
 	setThinking: (id, level) => call("POST", `${session(id)}/thinking`, { level }),
 	/** pi's defaultProjectTrust: "always", "ask" or "never". @param {string} id @param {string} trust */
 	setTrust: (id, trust) => call("POST", `${session(id)}/trust`, { trust }),
-	/** In the same session, back to before a message of yours, or to a reply. @param {string} id @param {string} entryId */
-	tree: (id, entryId) => call("POST", `${session(id)}/tree`, { entryId }),
-	/** A new session from before a message of yours. @param {string} id @param {string} entryId */
-	fork: (id, entryId) => call("POST", `${session(id)}/fork`, { entryId }),
-	/** The last lines its pane shows. @param {string} id @returns {Promise<string[]>} */
-	screen: async (id) => (await call("GET", `${session(id)}/screen`)).lines,
-	/** Press keys in its pane, by tmux name ("Up", "Enter", …). @param {string} id @param {string[]} keys */
-	keys: (id, keys) => call("POST", `${session(id)}/keys`, { keys }),
-	/** Type text into its pane as it is. @param {string} id @param {string} text */
-	type: (id, text) => call("POST", `${session(id)}/keys`, { text }),
 	/** `subscribed`: this device's notifications reach it. @returns {Promise<{ publicKey: string, subscribed: boolean }>} */
 	pushKey: () => call("GET", "/api/push/key"),
 	/** @param {PushSubscriptionJSON} subscription */
 	subscribe: (subscription) => call("POST", "/api/push/subscribe", subscription),
+	/** This device's subscription forgotten by the Mac. */
+	unsubscribe: () => call("POST", "/api/push/unsubscribe", {}),
 	/** @param {string | undefined} sessionId */
 	events(sessionId) {
 		const token = encodeURIComponent(getToken() ?? "");

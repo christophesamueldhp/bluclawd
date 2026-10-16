@@ -16,9 +16,8 @@ import {
 	type PaneLaunch,
 	type PaneMessage,
 	type PaneReport,
-	PHONE_REFUSED_COMMANDS,
+	phoneMayRun,
 } from "../ipc/protocol.ts";
-import { Tmux } from "../tmux.ts";
 import { RemoteEvents } from "./events.ts";
 import { type ClaimResult, type RemoteStore, SECRET_PATTERN } from "./pairing.ts";
 import type { StatuslineSession, StatusSpan } from "./pistatusline.ts";
@@ -47,12 +46,10 @@ export interface RemoteDeps {
 	setPinned(sessionId: string, pinned: boolean): boolean;
 	/** Remove a row; its .jsonl stays on disk. */
 	deleteInstance(sessionId: string): boolean;
-	/** What the status adds to a report for a session's directory: git state and usage limits. */
+	/** What the status adds to a report for a session's directory: its git state. */
 	statusLine?(cwd: string): Promise<StatusLine>;
 	/** The pane's pistatusline rendered at `cols` columns, as styled spans per line. */
 	renderStatusline?(session: StatuslineSession, report: PaneReport, cols: number): Promise<StatusSpan[][] | undefined>;
-	/** Agent view's tmux server: what a pane shows, and keys typed into it. */
-	tmux: Pick<Tmux, "screen" | "sendKeys" | "sendText">;
 	webDir: string;
 }
 
@@ -96,12 +93,6 @@ const MODEL_PATTERN = /^\w[\w.-]*\/[\w.:/@+-]+$/;
 const ENTRY_PATTERN = /^[0-9a-f-]{8,36}$/;
 /** pi's `defaultProjectTrust` values, as Alt+M cycles them. */
 const TRUST = ["always", "ask", "never"] as const;
-const SCREEN_LINES = 60;
-/** What a dialog needs. Never C-c or C-d, which quit pi; Escape still aborts a turn, as it does on the Mac. */
-const KEYS = new Set(["Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "Space", "BSpace"]);
-/** One at a time: Escape and the key after it would reach pi as one Alt chord. */
-const KEYS_MAX = 1;
-const TEXT_MAX = 1024;
 const NAME_MAX = 100;
 /** The widths a phone may ask the status line for. */
 const COLS_MIN = 20;
@@ -201,16 +192,9 @@ function imagesIn(body: Record<string, unknown>): PaneImage[] | undefined {
 	});
 }
 
-/** Keys from the allowlist, or printable text: a control character in it would be a keystroke past the allowlist. */
-function keysIn(body: Record<string, unknown>): { keys: string[] } | { text: string } {
-	const { keys, text } = body;
-	if (text === undefined && Array.isArray(keys) && keys.length > 0 && keys.length <= KEYS_MAX) {
-		if (keys.every((key) => typeof key === "string" && KEYS.has(key))) return { keys };
-	}
-	if (keys === undefined && typeof text === "string" && text.length > 0 && text.length <= TEXT_MAX) {
-		if (!CONTROL.test(text)) return { text };
-	}
-	throw new HttpError(400, "invalid_keys");
+/** The command a "/" line names, as pi reads one (`/compact`, `/skill:pdf …`); none for text such as a path. */
+function commandName(text: string): string | undefined {
+	return /^\/([\w.:-]+)(?:\s|$)/.exec(text.trimStart())?.[1];
 }
 
 /** A task's output as /tasks' detail view shows it: the last lines of the file's last 8 KiB, empty
@@ -363,6 +347,8 @@ async function handle(
 		if (body.images !== undefined) return json(res, 400, { error: "images_need_running" });
 		if (!isDirectory(cwd)) return json(res, 400, { error: "invalid_cwd" });
 		const task = promptIn(body, "task");
+		// No pane lists its commands yet, so a new session starts with none.
+		if (commandName(task) !== undefined) return json(res, 400, { error: "command_refused" });
 		const model = body.model;
 		if (model !== undefined && (typeof model !== "string" || !MODEL_PATTERN.test(model))) {
 			return json(res, 400, { error: "invalid_model" });
@@ -494,9 +480,7 @@ async function handle(
 	}
 
 	const match =
-		/^\/api\/sessions\/([^/]+)\/(messages|status|commands|screen|keys|prompt|abort|model|thinking|trust|compact|tree|fork|clone|rename|pin)$/.exec(
-			path,
-		);
+		/^\/api\/sessions\/([^/]+)\/(messages|status|commands|prompt|abort|model|thinking|trust|rename|pin)$/.exec(path);
 	if (!match) return json(res, 404, { error: "not_found" });
 	let id: string;
 	try {
@@ -526,7 +510,7 @@ async function handle(
 		const { commands: _commands, pistatusline: _paths, tasks, ...shown } = report;
 		// A task's output file stays here: the phone asks for its tail.
 		const listed = tasks?.map(({ outputFile, ...task }) => ({ ...task, ...(outputFile ? { output: true } : {}) }));
-		// pistatusline's own lines at the phone's width, which show git and the usage limits themselves.
+		// pistatusline's own lines at the phone's width, which show git (and the plan usage pistatusline keeps) themselves.
 		const cols = /^\d{1,3}$/.test(url.searchParams.get("cols") ?? "") ? Number(url.searchParams.get("cols")) : 0;
 		const pane = cols ? deps.listInstances().find((i) => i.id === id && i.external) : undefined;
 		const lines =
@@ -545,26 +529,6 @@ async function handle(
 		if (!report) return json(res, 404, { error: "no_status" });
 		return json(res, 200, { commands: report.commands ?? [] });
 	}
-	if (action === "screen" || action === "keys") {
-		if (req.method !== (action === "screen" ? "GET" : "POST")) return json(res, 405, { error: "method_not_allowed" });
-		const input = action === "keys" ? keysIn(await readJson(req)) : undefined;
-		// The tmux session its pi registered from, never a name from the request; looked up again after a body.
-		const pane = (input ? findSession(deps.listInstances(), id) : found)?.pane;
-		if (!pane) return json(res, 404, { error: "unknown_session" });
-		let lines: string[] = [];
-		try {
-			if (!input) lines = deps.tmux.screen(pane, SCREEN_LINES);
-			else if ("keys" in input) deps.tmux.sendKeys(pane, input.keys);
-			else deps.tmux.sendText(pane, input.text);
-		} catch (error) {
-			// Its tmux session ended before its pi unregistered; any other failure is the Mac's.
-			if (!Tmux.gone(error)) throw error;
-			return json(res, 404, { error: "unknown_session" });
-		}
-		// A main-screen pane gives that much history above its screen; a tall screen may be longer still.
-		return json(res, 200, input ? { ok: true } : { lines: lines.slice(-SCREEN_LINES).map(stripAnsi) });
-	}
-
 	if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
 	const body = await readJson(req, action === "prompt" ? PROMPT_BODY_MAX : BODY_MAX);
 	// Looked up again after the body, which may have taken a while.
@@ -580,13 +544,11 @@ async function handle(
 		const text = promptIn(body, "text");
 		const images = imagesIn(body);
 		// A slash command, as pi reads one: typed into the pane's prompt (a phone's images never are).
-		const command =
-			!images && text.trimStart().startsWith("/") ? text.trimStart().slice(1).split(/\s/)[0] : undefined;
-		if (command !== undefined && PHONE_REFUSED_COMMANDS.has(command)) {
-			return json(res, 400, { error: "command_refused" });
-		}
-		// A pane that reports its commands types them in; an older one runs them as a prompt.
-		if (command !== undefined && session.running && deps.report(id)?.commands) {
+		const command = images ? undefined : commandName(text);
+		if (command !== undefined) {
+			// Only one the pane lists for a phone: a pane that lists none (an older one) runs none.
+			const listed = deps.report(id)?.commands?.find((c) => c.name === command);
+			if (!listed || !phoneMayRun(listed)) return json(res, 400, { error: "command_refused" });
 			// Only into an idle, empty prompt, which the pane checks again: its heartbeat may be 3s old.
 			if (session.busy) return json(res, 409, { error: "session_busy" });
 			if (session.draft) return json(res, 409, { error: "unsent_draft" });
@@ -617,26 +579,6 @@ async function handle(
 		// A pane that reports no trust mode is too old to set one.
 		if (deps.report(id)?.trust === undefined) return json(res, 409, { error: "pane_too_old" });
 		message = { type: "set_trust", trust };
-	} else if (action === "compact") {
-		if (session.running && session.busy) return json(res, 409, { error: "session_busy" });
-		message = { type: "compact" };
-	} else if (action === "tree" || action === "fork") {
-		const { entryId } = body;
-		if (typeof entryId !== "string" || !ENTRY_PATTERN.test(entryId)) {
-			return json(res, 400, { error: "invalid_entry" });
-		}
-		if (!session.running) return json(res, 409, { error: "session_not_running" });
-		if (session.busy) return json(res, 409, { error: "session_busy" });
-		// What the phone shows: the active branch, from the leaf the pane reports. Forking "before"
-		// is editing a message of yours, the only entry pi forks before.
-		const target = loadTranscript(session.sessionFile, Number.MAX_SAFE_INTEGER, session.leafId).find(
-			(m) => m.id === entryId,
-		);
-		if (!target || (action === "fork" && target.kind !== "user")) return json(res, 400, { error: "invalid_entry" });
-		message = { type: action, entryId };
-	} else if (action === "clone") {
-		if (session.running && session.busy) return json(res, 409, { error: "session_busy" });
-		message = { type: "clone" };
 	} else if (action === "rename") {
 		const name = typeof body.name === "string" ? body.name.trim() : "";
 		if (!name || name.length > NAME_MAX || CONTROL.test(name)) return json(res, 400, { error: "invalid_name" });

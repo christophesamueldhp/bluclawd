@@ -3,14 +3,14 @@
  * renderer (the worker each pane already runs, found where the pane reports pistatusline is
  * installed) renders its configured lines at the phone's width, from what the daemon knows of the
  * session: the pane's report, the session's .jsonl and the plan usage pistatusline keeps for the
- * model's provider beside its settings (else, for Anthropic, USAGE_CACHE's four fields). One worker
- * for the daemon, started by the first request and ended a minute after the last. Its ANSI lines go
- * out as styled spans, so the phone parses no escapes.
+ * model's provider beside its settings, as its footer shows it (none for a provider it keeps none
+ * for). One worker for the daemon, started by the first request and ended a minute after the last.
+ * Its ANSI lines go out as styled spans, so the phone parses no escapes.
  */
 import { dirname, join } from "node:path";
 import { Worker } from "node:worker_threads";
 import type { PaneReport } from "../ipc/protocol.ts";
-import { readPlanUsage, readUsageLimits, USAGE_CACHE } from "./statusline.ts";
+import { readPlanUsage } from "./statusline.ts";
 import { type Entry, type EntryUsage, loadBranch } from "./transcript.ts";
 
 /** A run of text in one style. Colours are `#rrggbb`; the 16 named ones as xterm draws them. */
@@ -63,14 +63,11 @@ const CACHE_MS = 2000;
 const PROVIDER = /^[a-z0-9][a-z0-9._-]*$/i;
 
 /** As pistatusline picks its plan usage, by the model's provider: what it last showed for that
- *  provider (its usage/<provider>.json), else for Anthropic the ccstatusline cache, else none. */
-function planUsage(report: PaneReport, configPath: string, usagePath: string): object | null {
+ *  provider (its usage/<provider>.json), else none. */
+function planUsage(report: PaneReport, configPath: string): object | null {
 	const provider = report.model?.provider;
-	const cached =
-		provider && PROVIDER.test(provider)
-			? readPlanUsage(join(dirname(configPath), "usage", `${provider}.json`))
-			: undefined;
-	return cached ?? (provider === "anthropic" ? (readUsageLimits(usagePath) ?? null) : null);
+	if (!provider || !PROVIDER.test(provider)) return null;
+	return readPlanUsage(join(dirname(configPath), "usage", `${provider}.json`)) ?? null;
 }
 
 const finite = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
@@ -341,7 +338,6 @@ export class StatuslineRenderer {
  *  pane reports none or they could not be rendered. Renders sharing a key within CACHE_MS share one. */
 export function pistatusline(
 	renderer: StatuslineRenderer = new StatuslineRenderer(),
-	usagePath: string = USAGE_CACHE,
 	now: () => number = Date.now,
 ): (session: StatuslineSession, report: PaneReport, cols: number) => Promise<StatusSpan[][] | undefined> {
 	const cache = new Map<string, { at: number; lines: Promise<StatusSpan[][] | undefined> }>();
@@ -359,7 +355,7 @@ export function pistatusline(
 				status: statusJson(session, report, now()),
 				records: transcriptRecords(loadBranch(session.sessionFile, session.leafId)),
 				sessionName: null,
-				usage: planUsage(report, paths.config, usagePath),
+				usage: planUsage(report, paths.config),
 			})
 			.then((rendered) => rendered?.map(ansiSpans));
 		cache.set(key, { at: now(), lines });

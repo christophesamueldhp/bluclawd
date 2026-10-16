@@ -260,17 +260,14 @@ describe("pistatusline for the phone", () => {
 				extraUsageCurrency: "USD",
 			}),
 		);
-		// The ccstatusline cache, which the Anthropic file outranks.
-		const usagePath = join(dir, "plan-ccstatusline.json");
-		writeFileSync(usagePath, JSON.stringify({ sessionUsage: 99 }));
 		const { renderer, requests } = fakeRenderer();
-		const render = pistatusline(renderer, usagePath);
+		const render = pistatusline(renderer);
 		const paths = { worker: "/w/render-worker.js", config: join(agent, "pistatusline", "settings.json") };
 		const withModel = (provider: string, id: string) => ({ ...report, model: { provider, id }, pistatusline: paths });
 		await render(session, withModel("opencode-go", "glm-5"), 52);
 		await render(session, withModel("anthropic", "claude-opus-4-5"), 52);
 		await render(session, withModel("kimi-coding", "k2"), 52);
-		await render(session, withModel("../../plan-ccstatusline", "x"), 52);
+		await render(session, withModel("../../plan-agent", "x"), 52);
 		expect(requests.map((r) => r.request.usage)).toEqual([
 			{ sessionUsage: 63, sessionResetAt: "2026-10-16T12:00:00.000Z", weeklyUsage: 21 },
 			{ sessionUsage: 8, weeklyOpusUsage: 3, extraUsageEnabled: true, extraUsageCurrency: "USD" },
@@ -279,19 +276,9 @@ describe("pistatusline for the phone", () => {
 		]);
 	});
 
-	it("falls back, for Anthropic only, to the ccstatusline cache's four fields", async () => {
-		const usagePath = join(dir, "usage.json");
-		writeFileSync(
-			usagePath,
-			JSON.stringify({
-				sessionUsage: 42,
-				weeklyUsage: 17,
-				tokenHash: "secret",
-				sessionResetAt: "2026-10-15T12:00:00Z",
-			}),
-		);
+	it("gives no plan usage for a provider pistatusline keeps none for, Anthropic included", async () => {
 		const { renderer, requests } = fakeRenderer();
-		const render = pistatusline(renderer, usagePath);
+		const render = pistatusline(renderer);
 		const paths = {
 			worker: "/pi/pistatusline/dist/render-worker.js",
 			config: join(dir, "no-agent", "pistatusline", "settings.json"),
@@ -299,11 +286,7 @@ describe("pistatusline for the phone", () => {
 		expect(await render(session, report, 52)).toBeUndefined();
 		expect(await render(session, { ...report, pistatusline: paths }, 52)).toEqual([[{ text: "line", bold: true }]]);
 		expect(requests[0]).toMatchObject({ path: paths.worker, request: { configPath: paths.config, width: 52 } });
-		expect(requests[0]!.request.usage).toEqual({
-			sessionUsage: 42,
-			weeklyUsage: 17,
-			sessionResetAt: "2026-10-15T12:00:00Z",
-		});
+		expect(requests[0]!.request.usage).toBeNull();
 		const openai = { ...report, model: { provider: "openai", id: "gpt-5" }, pistatusline: paths };
 		await render(session, openai, 52);
 		expect(requests[1]!.request.usage).toBeNull();
@@ -312,7 +295,7 @@ describe("pistatusline for the phone", () => {
 	it("shares a render among the status fetches of the same report and width that come close together", async () => {
 		let now = 0;
 		const { renderer, requests } = fakeRenderer();
-		const render = pistatusline(renderer, join(dir, "none.json"), () => now);
+		const render = pistatusline(renderer, () => now);
 		const withPaths = { ...report, pistatusline: { worker: "/w/render-worker.js", config: join(dir, "c.json") } };
 		await render(session, withPaths, 52);
 		await render(session, withPaths, 52);

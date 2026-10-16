@@ -5,7 +5,7 @@
  * starting the daemon at login (autostart.ts), turning it off. In a pane,
  * it also streams the reply in progress to the phones watching the session (live.ts), reports its
  * model, usage, trust mode and slash commands, and runs the phone's model, thinking level and trust
- * mode switches, compaction, tree navigation, fork, clone and slash commands (report.ts).
+ * mode switches, slash commands and task stops (report.ts).
  */
 import type {
 	ExtensionAPI,
@@ -28,15 +28,7 @@ import { TRUST_CHANGED } from "../permissions/index.ts";
 import { autostartDeps, autostartOn, autostartStatus, refreshAutostart, toggleAutostart } from "./autostart.ts";
 import { LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
-import {
-	applyPaneMessage,
-	buildReport,
-	navigate,
-	paneTasks,
-	pistatuslinePaths,
-	submitCommand,
-	watchTasks,
-} from "./report.ts";
+import { applyPaneMessage, buildReport, paneTasks, pistatuslinePaths, submitCommand, watchTasks } from "./report.ts";
 import { EnableNeeded, serve, tailscaleInfo } from "./tailscale.ts";
 
 function message(error: unknown): string {
@@ -131,32 +123,35 @@ async function show(result: RemoteResult, ctx: ExtensionCommandContext): Promise
 
 const REMOVE_ALL = "Remove all phones";
 
+/** The paired phones, shown again after each removal (or a declined one) until escape leaves it. */
 async function devices(client: OrchestratorClient, ctx: ExtensionCommandContext): Promise<void> {
-	const { devices } = await client.remote({ action: "devices" });
-	if (devices.length === 0) {
-		ctx.ui.notify("No paired phones: pair one from /remote-control", "info");
-		return;
+	for (;;) {
+		const { devices } = await client.remote({ action: "devices" });
+		if (devices.length === 0) {
+			ctx.ui.notify("No paired phones: pair one from /remote-control", "info");
+			return;
+		}
+		const labels = devices.map(
+			(d, i) =>
+				`${i + 1}. ${d.name} · paired ${new Date(d.createdAt).toLocaleDateString(undefined, { dateStyle: "medium" })}` +
+				(d.lastUsedAt
+					? ` · last used ${new Date(d.lastUsedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}`
+					: ""),
+		);
+		const picked = await ctx.ui.select("Paired phones (enter removes one)", [...labels, REMOVE_ALL]);
+		if (picked === undefined) return;
+		if (picked === REMOVE_ALL) {
+			const phones = `${devices.length} phone${devices.length === 1 ? "" : "s"}`;
+			if (!(await ctx.ui.confirm(`Remove all ${phones}?`, "Each will have to pair again."))) continue;
+			for (const device of devices) await client.remote({ action: "revoke", deviceId: device.id });
+			ctx.ui.notify(`Removed ${phones}`, "info");
+			return;
+		}
+		const device = devices[labels.indexOf(picked)];
+		if (!device || !(await ctx.ui.confirm(`Remove ${device.name}?`, "It will have to pair again."))) continue;
+		await client.remote({ action: "revoke", deviceId: device.id });
+		ctx.ui.notify(`Removed ${device.name}`, "info");
 	}
-	const labels = devices.map(
-		(d, i) =>
-			`${i + 1}. ${d.name} · paired ${new Date(d.createdAt).toLocaleDateString(undefined, { dateStyle: "medium" })}` +
-			(d.lastUsedAt
-				? ` · last used ${new Date(d.lastUsedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}`
-				: ""),
-	);
-	const picked = await ctx.ui.select("Paired phones (enter removes one)", [...labels, REMOVE_ALL]);
-	if (picked === undefined) return;
-	if (picked === REMOVE_ALL) {
-		const phones = `${devices.length} phone${devices.length === 1 ? "" : "s"}`;
-		if (!(await ctx.ui.confirm(`Remove all ${phones}?`, "Each will have to pair again."))) return;
-		for (const device of devices) await client.remote({ action: "revoke", deviceId: device.id });
-		ctx.ui.notify(`Removed ${phones}`, "info");
-		return;
-	}
-	const device = devices[labels.indexOf(picked)];
-	if (!device || !(await ctx.ui.confirm(`Remove ${device.name}?`, "It will have to pair again."))) return;
-	await client.remote({ action: "revoke", deviceId: device.id });
-	ctx.ui.notify(`Removed ${device.name}`, "info");
 }
 
 async function toggleStartAtLogin(ctx: ExtensionCommandContext): Promise<void> {
@@ -225,8 +220,6 @@ function factory(pi: ExtensionAPI): void {
 	/** The session's TUI, which the phone's slash commands check has its prompt focused. */
 	let tui: ReturnType<typeof holdTui> | undefined;
 	let watched = false;
-	/** The phone's tree, fork and clone sent as `/remote-control` and not yet run. */
-	const dispatched = new Set<string>();
 	/** The task list the last report carried, so a change that leaves it as it was sends none. */
 	let reportedTasks = "";
 	let unwatchTasks: (() => void) | undefined;
@@ -275,7 +268,7 @@ function factory(pi: ExtensionAPI): void {
 		if (message.type === "command") {
 			const enter = () => commandKeys.sendKeys(pane, ["Enter"]);
 			submitCommand(message.text, ctx, tui?.(), enter, (notice) => report(ctx, notice));
-		} else applyPaneMessage(message, ctx, pi, () => report(ctx), dispatched);
+		} else applyPaneMessage(message, ctx, pi, () => report(ctx));
 	});
 	pi.events.on("bluclawd:remote-watched", (data) => {
 		const opened = data === true && !watched;
@@ -307,10 +300,6 @@ function factory(pi: ExtensionAPI): void {
 		description: "Control your sessions from your phone",
 		handler: async (args, ctx) => {
 			const sub = args.trim();
-			// The phone's tree, fork and clone (report.ts), not offered to the user: typed, they are not run.
-			// The session's own context reports, not the command's.
-			const refuse = (notice: string) => session && report(session, notice);
-			if (dispatched.delete(sub) && (await navigate(sub, ctx, refuse))) return;
 			// pair, devices and autostart: the menu's items, as the subcommands they were before it.
 			if (sub && sub !== "pair" && sub !== "devices" && sub !== "autostart") {
 				ctx.ui.notify(USAGE, "warning");

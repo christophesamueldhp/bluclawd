@@ -7,9 +7,10 @@
  */
 import { api, clearToken, getToken, pairLink, setToken, Unauthorized } from "./api.js";
 import { diffCounts, diffHtml } from "./diff.js";
+import { ICONS } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
 import { ageAt, successor } from "./list.js";
-import { giveUp, promptKey, promptText, refused, sentText, settle, shownText } from "./live.js";
+import { giveUp, promptKey, refused, sentText, settle, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 import { loaderHtml } from "./mascot.js";
 import { diffSummary, markerKind, resultSummary } from "./output.js";
@@ -26,6 +27,8 @@ import { barHtml, compactLines, elapsedText, factsHtml, spanStyle, thinkingHtml,
 /** @typedef {import("./image.js").Attachment} Attachment */
 /** @typedef {import("./statusbar.js").Report} Report */
 
+/** This build's version, as sw.js caches it (a test keeps the two the same). */
+const VERSION = "0.0.30";
 const BANDS = [
 	["pinned", "Pinned"],
 	["needs", "Needs input"],
@@ -39,40 +42,18 @@ const WATCHDOG_MS = 35_000;
 const START_TIMEOUT_MS = 60_000;
 /** How long a finished reply stays on screen without a transcript fetch that has it. */
 const LIVE_CLEAR_MS = 3000;
-/** A tree or fork the pane skipped (or one that changed nothing) shows nothing. */
-const NAVIGATE_GIVE_UP_MS = 15_000;
-/** A sent prompt holds the session's actions back until its turn is seen starting, or this long:
- *  one pi does not show verbatim (a command, a template) is never matched in the transcript. */
-const PENDING_GRACE_MS = 15_000;
 /** A sent prompt the session neither ran nor wrote by then never reached it (pi turns one away while compacting). */
 const PROMPT_GIVE_UP_MS = 20_000;
 /** An error shows this long, unless a tap or another screen ends it sooner. */
 const ERROR_MS = 6000;
-const SCREEN_POLL_MS = 2000;
 /** Less taken off the visible height than this is a toolbar, not the keyboard. */
 const KEYBOARD_MIN = 120;
 /** The daemon takes at most 4 images, 2 MB each (image.js makes a photo fit), with a prompt. */
 const ATTACH_MAX = 4;
-/** pi redraws a moment after a key reaches it. */
-const SCREEN_SETTLE_MS = 150;
-/** Yes or No, once sent, waits this long for the row to leave its dialog before it can be sent again. */
-const ANSWERED_MS = 10_000;
 /** A pane takes a new name on its next heartbeat; the phone shows it meanwhile, this long at most. */
 const RENAME_HOLD_MS = 15_000;
 /** pi's entry ids, which a tool result's whole output is asked for by. */
 const ENTRY_ID = /^[0-9a-f-]{8,36}$/;
-/** The terminal sheet's keys: tmux's name, the button's face, and its spoken name when not tmux's. */
-const PRESS = [
-	["Up", "↑"],
-	["Down", "↓"],
-	["Left", "←"],
-	["Right", "→"],
-	["Enter", "⏎"],
-	["Escape", "Esc"],
-	["Tab", "Tab"],
-	["Space", "␣"],
-	["BSpace", "⌫", "Backspace"],
-];
 const ERRORS = {
 	session_not_running: "This session is not running. Open it on the Mac to continue.",
 	pi_not_open: "pi is not open on the Mac. Open it in a terminal there to continue.",
@@ -85,10 +66,8 @@ const ERRORS = {
 	invalid_thinking: "The model does not offer that thinking level.",
 	invalid_trust: "That trust mode is not one of always, ask or never.",
 	invalid_entry: "That message is no longer in this session.",
-	not_moved: "The session did not move. If its prompt on the Mac has unsent text, clear it and retry.",
 	not_delivered: "Not delivered — check the session on the Mac.",
 	unreachable: "Could not reach the Mac.",
-	invalid_keys: "That can't be typed into the session. Use the keys for Enter, Tab and Esc.",
 	no_launch: "Run /remote-control in a pi on the Mac once, so the phone knows how to start pi.",
 	start_failed: "The Mac could not start the session.",
 	start_timeout: "The session did not start. Try again.",
@@ -114,8 +93,8 @@ const ERRORS = {
 	session_running: "This session is running. Quit it on the Mac first, then delete it here.",
 	unknown_entry: "That output is no longer in this session.",
 	not_found: "The Mac does not know that request. It may run an older bluclawd.",
-	terminal_command: "That command drives the Mac's terminal, so the phone does not send it.",
-	command_refused: "That command drives the Mac's terminal, so the phone does not send it.",
+	terminal_command: "That command runs only on the Mac, so the phone does not send it.",
+	command_refused: "That command runs only on the Mac, so the phone does not send it.",
 	unsent_draft: "Clear the unsent text in this session's prompt on the Mac first, then send the command again.",
 	forbidden: "Only the Mac removes another phone: run /remote-control there.",
 	unknown_task: "That task has ended already.",
@@ -164,16 +143,6 @@ const state = {
 	report: undefined,
 	/** Stop was asked for and the session is still mid-turn. */
 	stopping: false,
-	/** Tree or fork was asked for and the open chat's transcript has not changed since. */
-	navigating: false,
-	/**
-	 * The message whose actions the sheet shows instead of the status: a message of yours, or a
-	 * reply the session can go back to.
-	 * @type {{ id: string, text: string, kind: string } | undefined}
-	 */
-	menu: undefined,
-	/** The terminal sheet: the pane's screen, and keys to answer its dialog with. */
-	terminal: false,
 	/** The background tasks sheet. */
 	tasksSheet: false,
 	/** Each task's output as last fetched, while shown in the sheet. @type {Map<string, { lines?: string[], size?: number, loading?: boolean, error?: string }>} */
@@ -190,18 +159,10 @@ const state = {
 	phoneSheet: false,
 	/** Its Disconnect asks to be confirmed. */
 	confirmDisconnect: false,
-	/** What the pane shows: undefined while loading. @type {string[] | undefined} */
-	screen: undefined,
-	/** Keys or text are on their way to the pane. */
-	typing: false,
-	/** Yes or No went to the open session's confirm dialog at this time (see ANSWERED_MS). @type {number | undefined} */
-	answered: undefined,
 	/** The open session's new name is on its way. */
 	saving: false,
 	/** Its Delete asks to be confirmed. */
 	confirmDelete: false,
-	/** The terminal sheet's own error code, so the banner keeps its Answer button. @type {string | undefined} */
-	termError: undefined,
 	/** @type {string | undefined} */ error: undefined,
 };
 
@@ -228,9 +189,6 @@ const commandsCache = new Map();
 /** The open session's commands were asked for since it opened. */
 let commandsAsked = false;
 const darkScheme = window.matchMedia("(prefers-color-scheme: dark)");
-let screenRequest = 0;
-/** @type {ReturnType<typeof setInterval> | undefined} */
-let screenTimer;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let startTimer;
 /** The reply on screen has ended (or may have, while the stream was down): see settle(). */
@@ -238,11 +196,7 @@ let liveEnded = false;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let liveClear;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
-let navigateGiveUp;
-/** @type {ReturnType<typeof setTimeout> | undefined} */
 let errorTimer;
-/** The transcript a tree or fork left, to tell on a reconnect whether it has moved. */
-let navigatedFrom = "";
 /** Which view the DOM holds: "pair", "list" or "chat:<id>". */
 let shown = "";
 /** The next log update prepends older messages: it keeps what is on screen in place. */
@@ -358,9 +312,6 @@ function standalone() {
 function handleError(error, prefix = "") {
 	if (error instanceof Unauthorized) {
 		source?.close();
-		// The terminal sheet closes: no polling meanwhile, and it does not pop up again once paired anew.
-		state.terminal = false;
-		pollScreen();
 		render();
 		return;
 	}
@@ -504,7 +455,7 @@ async function loadMessages() {
 		/** @type {Message[]} */
 		const latest = page.messages;
 		// Older messages loaded above stay while the latest page follows on from them (it starts
-		// among them); after a tree, fork or clone it does not, and replaces them.
+		// among them); after the session moved (a /tree or /fork, here or on the Mac) it does not, and replaces them.
 		const at = latest.length ? state.messages.findIndex((m) => m.id === latest[0].id) : -1;
 		if (at > 0) state.messages = [...state.messages.slice(0, at), ...latest];
 		else {
@@ -592,11 +543,10 @@ async function loadStatus() {
 	for (const task of state.stoppingTasks) {
 		if (!report?.tasks?.some((t) => t.id === task)) state.stoppingTasks.delete(task);
 	}
-	// The pane skipped a fork, clone or edit sent from here: it will not move, so nothing waits on it.
+	// Why the pane did not run a slash command sent from here.
 	const skipped = report?.notice;
 	if (skipped && skipped.at !== noticeAt) {
 		noticeAt = skipped.at;
-		endNavigating();
 		showError(skipped.text);
 		return;
 	}
@@ -650,43 +600,6 @@ function paintStatusline(bar, lines) {
 /** Faded at its right edge until swiped to its end (see style.css). @param {HTMLElement} bar */
 function markStatuslineEnd(bar) {
 	bar.classList.toggle("end", bar.scrollLeft + bar.clientWidth >= bar.scrollWidth - 1);
-}
-
-async function loadScreen() {
-	const id = state.open;
-	if (!id || !state.terminal || state.termError === "unknown_session") return;
-	const request = ++screenRequest;
-	try {
-		const lines = await api.screen(id);
-		if (state.open !== id || !state.terminal || request !== screenRequest) return;
-		state.screen = lines;
-		render();
-	} catch (error) {
-		// A stale reply must not stop a newer sheet's polling.
-		if (error instanceof Unauthorized || request === screenRequest) terminalError(error);
-	}
-}
-
-/** In the sheet, not the banner. @param {unknown} error */
-function terminalError(error) {
-	if (error instanceof Unauthorized) {
-		handleError(error);
-		return;
-	}
-	const message = error instanceof Error ? error.message : String(error);
-	if (!(error instanceof TypeError) && !/^HTTP 5\d\d$/.test(message)) state.termError = message;
-	// A gone pane stays gone: its last screen and the message stay, the polling stops.
-	if (message === "unknown_session") pollScreen();
-	render();
-}
-
-/** While the terminal sheet is open and the app is on screen. */
-function pollScreen() {
-	clearInterval(screenTimer);
-	screenTimer = undefined;
-	if (state.terminal && state.termError !== "unknown_session" && document.visibilityState === "visible") {
-		screenTimer = setInterval(() => void loadScreen(), SCREEN_POLL_MS);
-	}
 }
 
 /** @param {Message[]} messages @param {string} text */
@@ -748,10 +661,7 @@ function connect() {
 		// Its end may have been missed while the stream was down; one still streaming is sent again at once.
 		if (state.live) endLive();
 		void loadSessions();
-		// A "messages" event missed while the stream was down would have ended the wait.
-		void loadMessages().then(() => {
-			if (state.navigating && transcriptKey(state.messages) !== navigatedFrom) endNavigating();
-		});
+		void loadMessages();
 		void loadStatus();
 	};
 	current.addEventListener("sessions", () => {
@@ -760,7 +670,6 @@ function connect() {
 	});
 	current.addEventListener("messages", () => {
 		alive();
-		endNavigating();
 		void loadMessages();
 	});
 	current.addEventListener("live", (/** @type {MessageEvent} */ event) => {
@@ -823,8 +732,13 @@ async function enablePush() {
 		if ((await permission) !== "granted") throw new Error("push_denied");
 		const { publicKey } = await api.pushKey();
 		const { pushManager } = await navigator.serviceWorker.ready;
-		// One made for an earlier key (a reset remote.json) cannot be reused.
-		await (await pushManager.getSubscription())?.unsubscribe();
+		// One made for an earlier key (a reset remote.json) cannot be reused. The Mac forgets it too, so
+		// it holds no dead endpoint should the new one fail.
+		const old = await pushManager.getSubscription();
+		if (old) {
+			await old.unsubscribe();
+			await api.unsubscribe();
+		}
 		const subscription = await pushManager.subscribe({
 			userVisibleOnly: true,
 			applicationServerKey: bytes(publicKey),
@@ -857,8 +771,8 @@ function pairView() {
 }
 
 function listShell() {
-	return `<header class="bar"><h1>Sessions</h1><button class="notify" id="notify" hidden>Notify me</button>
-<span class="muted" id="online"></span><button class="phone-menu" id="phone-menu" aria-label="This phone" aria-haspopup="dialog">⋯</button></header>
+	return `<header class="bar"><h1>Sessions</h1><span class="dot" id="online" role="img"></span>
+<button class="icon-btn" id="notify" aria-label="Turn on notifications" hidden>${ICONS.bell}</button><button class="icon-btn" id="phone-menu" aria-label="This phone" aria-haspopup="dialog">${ICONS.more}</button></header>
 <div id="banner"></div><form class="search" id="search-form" role="search"><span class="field"><input type="search" id="search" placeholder="Search" aria-label="Search sessions" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search">
 <button type="button" class="clear" id="search-clear" aria-label="Clear search" hidden>×</button></span>
 <button type="button" class="cancel" id="search-cancel" hidden>Cancel</button></form>
@@ -868,7 +782,7 @@ function listShell() {
 <select class="pick" id="new-model" aria-label="Model" hidden></select>
 <div class="where"><select id="cwd" aria-label="Directory"></select>
 <input id="cwd-other" placeholder="/path/to/project" aria-label="Directory path" autocapitalize="off" autocomplete="off" spellcheck="false" hidden>
-<button class="start" id="start">Start</button></div></form>`;
+<button class="start" id="start" aria-label="Start">${ICONS.send}</button></div></form>`;
 }
 
 /** @param {Session} s */
@@ -896,16 +810,16 @@ function rowsHtml() {
 }
 
 function chatShell() {
-	return `<header class="bar"><a class="back" href="#">‹ Sessions</a><button class="title" id="title" aria-haspopup="dialog"></button>
-<button class="tasks-pill" id="tasks-pill" aria-haspopup="dialog" hidden></button><button class="stop" id="stop" hidden>Stop</button></header>
+	return `<header class="bar"><a class="back icon-btn" href="#" aria-label="Sessions">${ICONS.back}</a><button class="title" id="title" aria-haspopup="dialog"></button>
+<button class="tasks-pill" id="tasks-pill" aria-haspopup="dialog" hidden></button><button class="icon-btn stop" id="stop" aria-label="Stop" hidden>${ICONS.stop}</button></header>
 <div class="statusbar" id="statusbar" role="button" tabindex="0" aria-haspopup="dialog" aria-label="Status" hidden></div>
 <section class="scroll" id="scroll"><div class="older" id="older"></div><div class="log" id="log">
 <div class="part" id="msgs"></div><div class="part" id="live"></div><div class="part" id="pending"></div><div class="part" id="working"></div></div></section>
 <div id="banner"></div><div class="commands" id="commands" role="listbox" aria-label="Commands" hidden></div><div class="thumbs" id="thumbs" hidden></div>
-<form class="composer" id="composer"><button type="button" class="attach" id="attach" aria-label="Attach photos"><span aria-hidden="true">+</span></button>
+<form class="composer" id="composer"><button type="button" class="attach" id="attach" aria-label="Attach photos">${ICONS.attach}</button>
 <input type="file" id="file" accept="image/*" multiple hidden>
 <textarea id="text" rows="1" placeholder="Reply" aria-label="Reply" maxlength="32768"></textarea>
-<button class="send" aria-label="Send"><span aria-hidden="true">↑</span></button></form>
+<button class="send" aria-label="Send">${ICONS.send}</button></form>
 <div class="backdrop" id="backdrop" hidden></div><section class="sheet" id="sheet" role="dialog" aria-label="Session status" hidden></section>
 <div class="viewer" id="viewer" role="dialog" aria-label="Image" hidden><img id="viewer-img" alt="Image"></div>`;
 }
@@ -995,21 +909,17 @@ function transcriptHtml(calls, running) {
 	const results = new Map();
 	for (const m of state.messages) if (m.kind === "toolResult" && m.toolCallId) results.set(m.toolCallId, m);
 	const parts = [];
-	/** Only where it has an action (see menuHtml): its text is selected and copied as any text is. @param {Message} m */
-	const more = (m) =>
-		`<button class="more" data-id="${esc(m.id)}" aria-label="${snippet(m.text) ? `Actions for “${esc(snippet(m.text))}”` : "Actions for this message"}" aria-haspopup="dialog">⋯</button>`;
 	// The session's start is shown only once no older messages are left to load.
 	let prompted = state.more;
 	for (const m of state.messages) {
 		if (m.kind === "user") {
 			prompted = true;
 			parts.push(
-				`<div class="mine${m.images?.length ? " pics" : ""}">${more(m)}<div class="u">${picturesHtml(m)}${esc(shownText(m.text ?? "", m.images))}</div></div>`,
+				`<div class="u${m.images?.length ? " pics" : ""}">${picturesHtml(m)}${esc(shownText(m.text ?? "", m.images))}</div>`,
 			);
 		} else if (m.kind === "assistant") {
 			if (m.thinking) parts.push(thinkingBlock(m.thinking, `think:${m.id}`));
-			if (m.text)
-				parts.push(`<div class="theirs"><div class="a">${md(m.text)}</div>${canGoBack(m) ? more(m) : ""}</div>`);
+			if (m.text) parts.push(`<div class="a">${md(m.text)}</div>`);
 			for (const [index, tool] of (m.tools ?? []).entries()) {
 				const key = tool.id || `${m.id}:${index}`;
 				parts.push(toolHtml(tool.name, tool.summary, results.get(tool.id), key, running.has(tool.id)));
@@ -1031,11 +941,6 @@ function transcriptHtml(calls, running) {
 /** Hidden until tapped, as in Claude Code. @param {string} thinking @param {string} key */
 function thinkingBlock(thinking, key) {
 	return `<details class="think" data-key="${esc(key)}"><summary>Thinking</summary><pre>${esc(thinking)}</pre></details>`;
-}
-
-/** A reply between tool calls, or where the session already is, is not one to go back to. @param {Message} m */
-function canGoBack(m) {
-	return m.kind === "assistant" && !m.tools?.length && m !== state.messages.at(-1);
 }
 
 /** Each sent prompt's images show large, from what was sent (see paintPending). */
@@ -1081,16 +986,11 @@ function bannerHtml(session) {
 	if (state.loaded && !state.terminalOpen) {
 		return `${error}<div class="banner closed">pi is not open on the Mac: everything here is read only until a terminal there shows it again.</div>`;
 	}
-	// An error does not hide the way to answer.
+	// A dialog is answered on the Mac, as pi asks it there: the phone only says what it waits on.
 	if (session?.state === "needs") {
 		const title = session.dialog?.title;
-		const text = title
-			? `Waiting: ${esc(title)}`
-			: "This session is waiting for an answer to a dialog. A reply sent here becomes its next prompt.";
-		// Answer stays beside Yes and No: the screen shows what is being confirmed.
-		const confirm = isConfirm(session);
-		return `${error}<div class="banner needs${confirm ? " confirm" : ""}"><span>${text}</span>${confirm ? replyHtml() : ""}
-<button class="answer" id="answer" aria-haspopup="dialog">Answer</button></div>`;
+		const text = title ? `Waiting on the Mac: ${esc(title)}` : "Waiting for an answer on the Mac.";
+		return `${error}<div class="banner needs">${text}</div>`;
 	}
 	if (session && !session.alive) {
 		return `${error}<div class="banner closed">Disconnected: this session was closed on the Mac. It reconnects here once it is opened there again.</div>`;
@@ -1108,17 +1008,6 @@ function updateHtml() {
 		? `<div class="banner hint"><span>A new version of bluclawd is ready.</span>
 <button class="answer" id="reload-app">Reload</button></div>`
 		: "";
-}
-
-/** @param {Session | undefined} session */
-function isConfirm(session) {
-	return session?.state === "needs" && session.dialog?.kind === "confirm";
-}
-
-/** A confirm dialog's answers, held back while one is on its way or just went (see replyConfirm). */
-function replyHtml() {
-	const disabled = state.typing || state.answered !== undefined ? " disabled" : "";
-	return `<button class="reply" data-reply="yes"${disabled}>Yes</button><button class="reply" data-reply="no"${disabled}>No</button>`;
 }
 
 /** @param {Report} report */
@@ -1152,7 +1041,11 @@ function contextHtml(context) {
 /** @param {Session | undefined} session */
 function sheetHtml(session) {
 	const report = state.report;
-	const head = `<header class="sheet-bar"><h2>Status</h2><button class="close" id="sheet-close">Done</button></header>
+	const pinned = session?.band === "pinned";
+	const pin = session
+		? `<button class="icon-btn${pinned ? " on" : ""}" id="pin" aria-label="${pinned ? "Unpin" : "Pin to the top"}" aria-pressed="${pinned}">${pinned ? ICONS.pinned : ICONS.pin}</button>`
+		: "";
+	const head = `<header class="sheet-bar"><h2>Status</h2><span class="sheet-tools">${pin}<button class="icon-btn close" id="sheet-close" aria-label="Close">${ICONS.close}</button></span></header>
 ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
 	if (report === undefined) return `${head}${loaderHtml()}`;
 	if (report === null) {
@@ -1166,7 +1059,7 @@ ${thinkingHtml(report)}
 <dt>Context</dt><dd>${contextHtml(report.context)}</dd>
 <dt>Tokens</dt><dd>${usage ? `↑ ${esc(tokens(usage.input))} in · ↓ ${esc(tokens(usage.output))} out${usage.cacheRead ? ` · R ${esc(tokens(usage.cacheRead))}` : ""}${usage.cacheWrite ? ` · W ${esc(tokens(usage.cacheWrite))}` : ""}` : "Unknown"}</dd>
 <dt>Cost</dt><dd>${usage ? `$${esc(usage.cost.toFixed(3))}` : "Unknown"}</dd>
-${factsHtml(report, session && shortPath(session.cwd), Date.now())}
+${factsHtml(report, session && shortPath(session.cwd))}
 </dl>`;
 }
 
@@ -1174,79 +1067,17 @@ ${factsHtml(report, session && shortPath(session.cwd), Date.now())}
 function renameHtml(session) {
 	return `<form class="rename" id="rename-form"><label for="rename">Name</label>
 <input id="rename" value="${esc(session?.label ?? "")}" maxlength="100" autocomplete="off" enterkeyhint="done">
-<button class="save" id="rename-save">Save</button></form>`;
+<button class="save" id="rename-save" aria-label="Save name">${ICONS.check}</button></form>`;
 }
 
-/** Pin, and for a stored session (none runs it) Delete, which asks first. @param {Session | undefined} session */
+/** For a stored session (none runs it), Delete, which asks first. @param {Session | undefined} session */
 function manageHtml(session) {
-	if (!session) return "";
-	const pinned = session.band === "pinned";
-	const pin = `<button class="action" id="pin">${pinned ? "Unpin" : "Pin"}<small>${pinned ? "Back in its band in the list." : "At the top of the list."}</small></button>`;
-	if (session.alive) return `<div class="actions">${pin}</div>`;
+	if (!session || session.alive) return "";
 	const remove = state.confirmDelete
 		? `<div class="confirm-delete"><span>Delete it from the list? Its session file stays on the Mac.</span>
 <button class="unpair cancel" id="delete-cancel">Cancel</button><button class="unpair" id="delete-confirm">Delete</button></div>`
 		: `<button class="action danger" id="delete">Delete<small>Off the list; its session file stays on the Mac.</small></button>`;
-	return `<div class="actions">${pin}${remove}</div>`;
-}
-
-/**
- * Waiting on an answer is mid-turn too, and going back or forking would cut the turn short; a
- * second one before the first has moved the session would race it. So would one right behind a
- * sent prompt, whose turn may not have started yet (see PENDING_GRACE_MS).
- * @param {Session | undefined} session
- */
-function isBusy(session) {
-	return (
-		session?.state === "working" ||
-		session?.state === "needs" ||
-		state.navigating ||
-		state.pending.some((p) => !p.started && Date.now() - p.sentAt < PENDING_GRACE_MS) ||
-		!canAct(session)
-	);
-}
-
-/** A message's first line, short enough for a button's label. @param {string | undefined} text */
-function snippet(text) {
-	const line = (text ?? "").trim().split("\n")[0];
-	return line.length > 40 ? `${line.slice(0, 39)}…` : line;
-}
-
-/**
- * Edit for a message of yours, Go back for a reply (see canGoBack); copying is the text's own
- * long press.
- * @param {Session | undefined} session @param {NonNullable<typeof state.menu>} menu
- */
-function menuHtml(session, menu) {
-	const busy = isBusy(session);
-	const why = !session?.alive
-		? errorText("session_not_running")
-		: !state.terminalOpen
-			? errorText("pi_not_open")
-			: state.navigating
-				? "Available once the session has moved."
-				: "Available once the session is idle.";
-	const disabled = busy ? " disabled" : "";
-	const actions =
-		menu.kind === "user"
-			? `<button class="action" id="edit-new"${disabled}>Edit in a new session<small>A new session without this message and everything after it, with its text in the reply box.</small></button>
-<button class="action" id="edit-here"${disabled}>Edit here<small>This message and everything after it leave this session's branch, and its text goes in the reply box.</small></button>`
-			: `<button class="action" id="back-here"${disabled}>Go back to here<small>Everything after this reply leaves this session's branch.</small></button>`;
-	return `<header class="sheet-bar"><h2>${menu.kind === "user" ? "Your message" : "Reply"}</h2><button class="close" id="sheet-close">Done</button></header>
-<p class="quote">${esc(menu.text)}</p>${busy ? `<p class="muted">${esc(why)}</p>` : ""}
-<div class="actions">${actions}</div>`;
-}
-
-function terminalHtml() {
-	const keys = PRESS.map(
-		([key, face, label = key]) => `<button class="press" data-press="${key}" aria-label="${label}">${face}</button>`,
-	).join("");
-	return `<header class="sheet-bar"><h2>Answer</h2><button class="close" id="sheet-close">Done</button></header>
-<p class="error" id="term-error" hidden></p><pre class="screen" id="screen" tabindex="0" aria-label="The session's screen"></pre>
-<div class="confirm-keys" id="confirm-keys" role="group" aria-label="Answer the confirmation" hidden><button class="press" data-reply="yes">Yes</button><button class="press" data-reply="no">No</button></div>
-<div class="keys" role="group" aria-label="Keys">${keys}</div>
-<form class="term-text" id="term-form"><input id="term-input" aria-label="Text to type" placeholder="Text to type" maxlength="1024" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="send">
-<button class="term-send" id="term-send">Send</button></form>`;
+	return `<div class="actions">${remove}</div>`;
 }
 
 const TASK_KINDS = { shell: "Shell", monitor: "Monitor", agent: "Agent" };
@@ -1275,7 +1106,7 @@ function tasksHtml() {
 		return `<li class="task"><div class="task-head"><span class="task-kind">${esc(kind)}</span><span class="task-age">${esc(elapsedText(task.startedAt, now))}</span></div>
 <div class="task-label">${esc(task.label)}</div><div class="task-actions">${outputButton}${stop}</div>${shown}</li>`;
 	});
-	return `<header class="sheet-bar"><h2>Background tasks</h2><button class="close" id="sheet-close">Done</button></header>
+	return `<header class="sheet-bar"><h2>Background tasks</h2><button class="icon-btn close" id="sheet-close" aria-label="Close">${ICONS.close}</button></header>
 ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}${rows.length ? `<ul class="tasks">${rows.join("")}</ul>` : `<p class="muted">No background tasks are running.</p>`}`;
 }
 
@@ -1296,8 +1127,11 @@ function render() {
 
 function updateList() {
 	const live = state.online && state.terminalOpen;
-	$("#online").textContent = live ? "● online" : state.online ? "pi closed" : "offline";
-	$("#online").classList.toggle("on", live);
+	const online = $("#online");
+	const status = live ? "Online" : state.online ? "pi is closed on the Mac" : "Offline";
+	online.setAttribute("aria-label", status);
+	online.title = status;
+	online.classList.toggle("on", live);
 	$("#notify").hidden = !state.offerPush;
 	const banner = $("#banner");
 	const bannerNow = updateHtml() + bannerHtml(undefined);
@@ -1317,7 +1151,7 @@ function updateList() {
 	updateModels();
 	const start = $("#start");
 	start.disabled = state.starting !== undefined || !state.terminalOpen;
-	start.textContent = state.starting ? "Starting…" : "Start";
+	start.classList.toggle("busy", state.starting !== undefined);
 	$("#new-task").classList.toggle("starting", state.starting !== undefined);
 	updatePhoneSheet();
 }
@@ -1332,8 +1166,8 @@ function updatePhoneSheet() {
 		? `<div class="confirm-delete"><span>Disconnect this phone? It will have to pair again.</span>
 <button class="unpair cancel" id="disconnect-cancel">Cancel</button><button class="unpair" id="disconnect-confirm">Disconnect</button></div>`
 		: `<button class="action danger" id="disconnect">Disconnect this phone<small>It stops reaching the Mac until it pairs again. Other phones are removed on the Mac.</small></button>`;
-	const html = `<header class="sheet-bar"><h2>This phone</h2><button class="close" id="sheet-close">Done</button></header>
-${error}<div class="actions">${action}</div>`;
+	const html = `<header class="sheet-bar"><h2>This phone</h2><button class="icon-btn close" id="sheet-close" aria-label="Close">${ICONS.close}</button></header>
+${error}<div class="actions">${action}</div><p class="version">bluclawd ${VERSION}</p>`;
 	if (sheet.dataset.html === html) return;
 	sheet.innerHTML = html;
 	sheet.dataset.html = html;
@@ -1380,11 +1214,10 @@ function updateChat() {
 	// Mid-turn, a dialog waiting on an answer included.
 	const turn = session?.state === "working" || session?.state === "needs";
 	if (!turn) state.stopping = false;
-	if (session?.state !== "needs") state.answered = undefined;
 	const stop = $("#stop");
 	stop.hidden = !turn || !state.terminalOpen;
 	stop.disabled = state.stopping;
-	stop.textContent = state.stopping ? "Stopping…" : "Stop";
+	stop.classList.toggle("busy", state.stopping);
 	const bar = $("#statusbar");
 	const lines = state.report?.statusline?.lines;
 	// The user's own pistatusline, as on the Mac; else the bar's own reading of the report.
@@ -1392,7 +1225,7 @@ function updateChat() {
 		paintStatusline(bar, lines);
 		markStatuslineEnd(bar);
 	} else {
-		const barNow = barHtml(state.report, session && shortPath(session.cwd), Date.now());
+		const barNow = barHtml(state.report, session && shortPath(session.cwd));
 		if (bar.dataset.html !== barNow) {
 			bar.classList.remove("pistatusline");
 			bar.innerHTML = barNow;
@@ -1403,7 +1236,12 @@ function updateChat() {
 	const tasks = state.report?.tasks?.length ?? 0;
 	const pill = $("#tasks-pill");
 	pill.hidden = tasks === 0;
-	pill.innerHTML = `<span>${tasks} task${tasks === 1 ? "" : "s"}</span>`;
+	const pillNow = `<span>${ICONS.tasks}${tasks}</span>`;
+	if (pill.dataset.html !== pillNow) {
+		pill.innerHTML = pillNow;
+		pill.dataset.html = pillNow;
+	}
+	pill.setAttribute("aria-label", `${tasks} background task${tasks === 1 ? "" : "s"}`);
 	const scroll = $("#scroll");
 	const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
 	const height = scroll.scrollHeight;
@@ -1437,7 +1275,7 @@ function updateChat() {
 	updateSheet(session);
 	const text = $("#text");
 	text.disabled = closed;
-	$(".send").disabled = closed || state.navigating || state.reading > 0;
+	$(".send").disabled = closed || state.reading > 0;
 	const attach = $("#attach");
 	attach.disabled = closed || state.attachments.length + state.reading >= ATTACH_MAX;
 	attach.classList.toggle("busy", state.reading > 0);
@@ -1505,33 +1343,13 @@ function updateThumbs() {
 /** Rebuilt only when it changes, so an open model picker is not reset under the finger. @param {Session | undefined} session */
 function updateSheet(session) {
 	const sheet = $("#sheet");
-	const open = state.sheetOpen || state.menu !== undefined || state.terminal || state.tasksSheet;
+	const open = state.sheetOpen || state.tasksSheet;
 	sheet.hidden = !open;
 	$("#backdrop").hidden = !open;
 	if (!open) return;
-	sheet.setAttribute(
-		"aria-label",
-		state.terminal
-			? "Answer the dialog"
-			: state.menu
-				? "Message actions"
-				: state.tasksSheet
-					? "Background tasks"
-					: "Session status",
-	);
-	if (state.terminal) {
-		updateTerminal(sheet, session);
-		return;
-	}
+	sheet.setAttribute("aria-label", state.tasksSheet ? "Background tasks" : "Session status");
 	if (state.tasksSheet) {
 		const html = tasksHtml();
-		if (sheet.dataset.html === html) return;
-		sheet.innerHTML = html;
-		sheet.dataset.html = html;
-		return;
-	}
-	if (state.menu) {
-		const html = menuHtml(session, state.menu);
 		if (sheet.dataset.html === html) return;
 		sheet.innerHTML = html;
 		sheet.dataset.html = html;
@@ -1546,31 +1364,6 @@ function updateSheet(session) {
 	updatePart($("#sheet-status"), sheetHtml(session));
 	updatePart($("#sheet-manage"), manageHtml(session));
 	$("#rename-save").disabled = state.saving;
-}
-
-/**
- * Built once, so the text field keeps its text and keyboard; then only the screen changes, and
- * whether it offers Yes and No.
- * @param {HTMLElement} sheet @param {Session | undefined} session
- */
-function updateTerminal(sheet, session) {
-	if (sheet.dataset.html !== "terminal") {
-		sheet.innerHTML = terminalHtml();
-		sheet.dataset.html = "terminal";
-	}
-	const error = $("#term-error");
-	error.textContent = state.termError ? errorText(state.termError) : "";
-	error.hidden = !state.termError;
-	$("#confirm-keys").hidden = !isConfirm(session);
-	const buttons = /** @type {NodeListOf<HTMLButtonElement>} */ (sheet.querySelectorAll(".press, #term-send"));
-	for (const button of buttons)
-		button.disabled = state.typing || (button.dataset.reply !== undefined && state.answered !== undefined);
-	const screen = $("#screen");
-	const text = state.screen ? state.screen.join("\n") : "Loading…";
-	if (screen.textContent === text) return;
-	const atBottom = screen.scrollHeight - screen.scrollTop - screen.clientHeight < 40;
-	screen.textContent = text;
-	if (atBottom) screen.scrollTop = screen.scrollHeight;
 }
 
 /** @param {{ code: string } | { secret: string } | { handoff: string }} credential */
@@ -1817,27 +1610,16 @@ function bindChat() {
 		openSheet();
 	});
 	$("#tasks-pill").addEventListener("click", openTasks);
-	$("#banner").addEventListener("click", (/** @type {Event} */ event) => {
-		const target = /** @type {Element} */ (event.target);
-		const reply = /** @type {HTMLElement | null} */ (target.closest("[data-reply]"));
-		if (reply) void replyConfirm(reply.dataset.reply === "yes");
-		else if (target.closest("#answer")) openTerminal();
-	});
 	$("#backdrop").addEventListener("click", closeSheet);
 	const sheet = $("#sheet");
 	sheet.addEventListener("click", (/** @type {Event} */ event) => {
 		const target = /** @type {Element} */ (event.target);
-		const reply = /** @type {HTMLElement | null} */ (target.closest("[data-reply]"));
 		if (target.closest("#sheet-close")) closeSheet();
-		else if (target.closest("#edit-new")) edit("fork");
-		else if (target.closest("#edit-here")) edit("tree");
-		else if (target.closest("#back-here")) goBack();
 		else if (target.closest("#pin")) void togglePin();
 		else if (target.closest("#delete, #delete-cancel")) {
 			state.confirmDelete = target.closest("#delete") !== null;
 			render();
 		} else if (target.closest("#delete-confirm")) void deleteSession();
-		else if (reply) void replyConfirm(reply.dataset.reply === "yes");
 		else if (target.closest("[data-output]"))
 			void toggleTaskOutput(/** @type {HTMLElement} */ (target.closest("[data-output]")).dataset.output ?? "");
 		else if (target.closest("[data-stop], [data-stop-cancel]")) {
@@ -1845,23 +1627,10 @@ function bindChat() {
 			render();
 		} else if (target.closest("[data-stop-confirm]"))
 			void stopTask(/** @type {HTMLElement} */ (target.closest("[data-stop-confirm]")).dataset.stopConfirm ?? "");
-		else if (target.closest(".press")) {
-			const key = /** @type {HTMLElement} */ (target.closest(".press")).dataset.press;
-			if (key) void answer({ keys: [key] });
-		}
-	});
-	// The text field keeps focus, and iOS its keyboard, while a key is pressed; the click still comes.
-	sheet.addEventListener("pointerdown", (/** @type {Event} */ event) => {
-		if (/** @type {Element} */ (event.target).closest(".press")) event.preventDefault();
 	});
 	sheet.addEventListener("submit", (/** @type {Event} */ event) => {
 		event.preventDefault();
-		if (/** @type {Element} */ (event.target).id === "rename-form") {
-			void rename();
-			return;
-		}
-		const text = $("#term-input")?.value;
-		if (text) void answer({ text });
+		if (/** @type {Element} */ (event.target).id === "rename-form") void rename();
 	});
 	$("#log").addEventListener("click", (/** @type {Event} */ event) => {
 		const full = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".full"));
@@ -1870,19 +1639,11 @@ function bindChat() {
 			return;
 		}
 		const pic = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".pic"));
-		if (pic) {
-			const url = pic.dataset.pending
-				? pendingPicture(pic)
-				: pictures.get(pictureKey(pic.dataset.entry ?? "", pic.dataset.index ?? ""));
-			if (url) openViewer(url);
-			return;
-		}
-		const more = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".more"));
-		const message = state.messages.find((m) => (m.kind === "user" || canGoBack(m)) && m.id === more?.dataset.id);
-		if (!message) return;
-		state.menu = { id: message.id, text: message.text ?? "", kind: message.kind };
-		state.error = undefined;
-		render();
+		if (!pic) return;
+		const url = pic.dataset.pending
+			? pendingPicture(pic)
+			: pictures.get(pictureKey(pic.dataset.entry ?? "", pic.dataset.index ?? ""));
+		if (url) openViewer(url);
 	});
 	sheet.addEventListener("change", (/** @type {Event} */ event) => {
 		const target = /** @type {HTMLSelectElement} */ (event.target);
@@ -1907,12 +1668,9 @@ function openSheet() {
 function closeSheet() {
 	state.sheetOpen = false;
 	state.confirmDelete = false;
-	state.menu = undefined;
-	state.terminal = false;
 	state.tasksSheet = false;
 	state.confirmStop = undefined;
 	state.taskOutputs.clear();
-	pollScreen();
 	render();
 }
 
@@ -1920,12 +1678,9 @@ function closeSheet() {
 function openTasks() {
 	state.tasksSheet = true;
 	state.sheetOpen = false;
-	state.menu = undefined;
-	state.terminal = false;
 	state.error = undefined;
 	state.confirmStop = undefined;
 	state.taskOutputs.clear();
-	pollScreen();
 	render();
 }
 
@@ -1964,138 +1719,6 @@ async function stopTask(taskId) {
 		state.stoppingTasks.delete(taskId);
 		handleError(error);
 	}
-}
-
-function openTerminal() {
-	state.terminal = true;
-	state.sheetOpen = false;
-	state.tasksSheet = false;
-	state.menu = undefined;
-	state.screen = undefined;
-	state.termError = undefined;
-	// A fresh text field, not the one left from the last time it was open.
-	$("#sheet").dataset.html = "";
-	render();
-	void loadScreen();
-	pollScreen();
-}
-
-/**
- * Keys, or text, into the open session's pane; then its screen again. The keys go one a request,
- * each once the one before is in: Escape and the key after it would reach pi as one Alt chord.
- * @param {{ keys: string[] } | { text: string }} input @returns {Promise<boolean>} whether all of it went
- */
-async function answer(input) {
-	const id = state.open;
-	if (!id || state.typing) return false;
-	state.typing = true;
-	state.termError = undefined;
-	render();
-	try {
-		if ("keys" in input) for (const key of input.keys) await api.keys(id, [key]);
-		else {
-			await api.type(id, input.text);
-			const field = $("#term-input");
-			if (field?.value === input.text) field.value = "";
-		}
-		setTimeout(() => void loadScreen(), SCREEN_SETTLE_MS);
-		return true;
-	} catch (error) {
-		// From the banner, the error shows there.
-		if (state.terminal) terminalError(error);
-		else handleError(error);
-		return false;
-	} finally {
-		state.typing = false;
-		render();
-	}
-}
-
-/**
- * Yes or No to a confirm dialog. pi's is a list of the two: Up or Down picks one wherever its cursor
- * is (it stops at either end), and Enter takes it. Were the dialog gone, Up and Enter would send the
- * editor's last prompt again, and the list lags the pane by up to a heartbeat: so the dialog is
- * looked for once more first, and the answer is not offered again until the row has moved on (or
- * ANSWERED_MS, for a second dialog the list never saw it leave for).
- * @param {boolean} yes
- */
-async function replyConfirm(yes) {
-	const id = state.open;
-	if (!id || state.typing || state.answered !== undefined) return;
-	const at = Date.now();
-	state.answered = at;
-	render();
-	await loadSessions();
-	const sent =
-		state.open === id &&
-		isConfirm(state.sessions.find((s) => s.id === id)) &&
-		(await answer({ keys: [yes ? "Up" : "Down", "Enter"] }));
-	if (!sent && state.answered === at) state.answered = undefined;
-	else
-		setTimeout(() => {
-			if (state.answered !== at) return;
-			state.answered = undefined;
-			render();
-		}, ANSWERED_MS);
-	render();
-}
-
-/**
- * Tree or fork. The pane runs it on its next heartbeat, and the open chat's transcript changes
- * once it has. Until then Send and these actions wait: what they sent would go to the session or
- * branch being left.
- * The sheet closes at once, and an error shows on the chat.
- * @param {(id: string) => Promise<unknown>} call @param {string} [fill] the reply box's text once asked
- */
-async function move(call, fill) {
-	const id = state.open;
-	if (!id) return;
-	closeSheet();
-	state.navigating = true;
-	navigatedFrom = transcriptKey(state.messages);
-	clearTimeout(navigateGiveUp);
-	// The reply box may hold an edit's text, which would go to the session as it is.
-	navigateGiveUp = setTimeout(() => {
-		if (!state.navigating) return;
-		showError(errorText("not_moved"));
-		endNavigating();
-	}, NAVIGATE_GIVE_UP_MS);
-	render();
-	try {
-		await call(id);
-		if (state.open !== id || fill === undefined) return;
-		const text = $("#text");
-		text.value = fill;
-		grow(text);
-	} catch (error) {
-		endNavigating();
-		handleError(error);
-	}
-}
-
-/** @param {Message[]} messages */
-function transcriptKey(messages) {
-	return messages.map((m) => m.id).join("\n");
-}
-
-function endNavigating() {
-	clearTimeout(navigateGiveUp);
-	if (!state.navigating) return;
-	state.navigating = false;
-	render();
-}
-
-/** A message of yours, again in the reply box: in a new session, or here. @param {"fork" | "tree"} how */
-function edit(how) {
-	const menu = state.menu;
-	if (!menu) return;
-	void move((id) => api[how](id, menu.id), promptText(menu.text));
-}
-
-/** Back to a reply, which stays. */
-function goBack() {
-	const menu = state.menu;
-	if (menu) void move((id) => api.tree(id, menu.id));
 }
 
 /** The pane reports the switch within a heartbeat, which refreshes the sheet. @param {string} value */
@@ -2359,9 +1982,9 @@ async function send() {
 	const id = state.open;
 	const session = state.sessions.find((s) => s.id === id);
 	// Photos still being read go with it once they are in.
-	if (!value || !id || !canAct(session) || state.navigating || state.reading) return;
-	// Left in the reply box, to change. Any other "/" line goes, and the pane runs it as a command.
-	if (refused(value)) {
+	if (!value || !id || !canAct(session) || state.reading) return;
+	// Left in the reply box, to change. A command listed for the phone goes, and the pane runs it.
+	if (state.attachments.length === 0 && refused(value, commandsCache.get(id))) {
 		showError(errorText("terminal_command"));
 		return;
 	}
@@ -2374,8 +1997,6 @@ async function send() {
 	const last = state.messages.at(-1)?.id ?? "";
 	const entry = { id: ++pendingId, text: key, prompt: value, images, before, sentAt: Date.now(), last };
 	state.pending.push(entry);
-	// The actions it holds back come back by themselves once the grace is over.
-	setTimeout(render, PENDING_GRACE_MS);
 	setTimeout(() => checkPending(id, entry), PROMPT_GIVE_UP_MS);
 	render();
 	$("#scroll").scrollTop = $("#scroll").scrollHeight;
@@ -2385,22 +2006,11 @@ async function send() {
 			value,
 			images.map(({ mimeType, data }) => ({ mimeType, data })),
 		);
-		if (state.open === id && !state.terminal && isBuiltin(id, value)) {
-			// pi's own commands (/model, /tree, /resume…) open a selector in the pane, which waits there
-			// without the session needing input: its screen and keys answer it.
-			openTerminal();
-		}
 	} catch (error) {
 		forget(entry);
 		putBack(id, entry);
 		handleError(error, "Not sent: ");
 	}
-}
-
-/** A prompt that runs one of pi's own commands. @param {string} id @param {string} text */
-function isBuiltin(id, text) {
-	const name = /^\/(\S+)/.exec(text)?.[1];
-	return name !== undefined && commandsCache.get(id)?.some((c) => c.name === name && c.source === "builtin") === true;
 }
 
 /** @typedef {(typeof state.pending)[number]} Pending */
@@ -2508,14 +2118,8 @@ function route() {
 		state.sheetOpen = false;
 		state.report = undefined;
 		state.stopping = false;
-		state.navigating = false;
-		clearTimeout(navigateGiveUp);
-		state.menu = undefined;
 		state.phoneSheet = false;
 		state.confirmDisconnect = false;
-		state.terminal = false;
-		state.screen = undefined;
-		state.answered = undefined;
 		state.confirmDelete = false;
 		state.tasksSheet = false;
 		state.confirmStop = undefined;
@@ -2523,7 +2127,6 @@ function route() {
 		state.stoppingTasks.clear();
 		// Asked again with its first report: the cached ones show meanwhile.
 		commandsAsked = false;
-		pollScreen();
 		connect();
 	}
 	render();
@@ -2570,10 +2173,8 @@ fitViewport();
 // that has it open, and iOS suspends a backgrounded app's stream anyway. Reopened on return, it
 // fetches everything again (see connect), so the chat catches up.
 document.addEventListener("visibilitychange", () => {
-	pollScreen();
 	if (document.visibilityState === "visible") {
 		connect();
-		void loadScreen();
 		// A fresh one: Safari may sit in the background longer than a handoff lasts.
 		void offerHandoff();
 	} else closeStream();
@@ -2583,7 +2184,7 @@ window.addEventListener("pagehide", closeStream);
 window.addEventListener("pageshow", (/** @type {PageTransitionEvent} */ event) => {
 	if (event.persisted && document.visibilityState === "visible") connect();
 });
-// The list's ages, and the status bar's time to each usage limit's reset.
+// The list's ages, and the running time of each background task.
 setInterval(() => {
 	if (shown === "list") updateList();
 	else if (shown.startsWith("chat:")) updateChat();

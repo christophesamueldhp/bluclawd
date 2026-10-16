@@ -146,7 +146,7 @@ export class RemoteControl {
 	}
 
 	/** A pane's latest report; undefined once it is gone. Each one is signalled, unchanged too: the
-	 *  phone shows a compact until its pane reports again, which it also does when one did nothing. */
+	 *  phone's pickers go back to what the pane reports when a switch did nothing. */
 	report(sessionId: string, report: PaneReport | undefined): void {
 		if (!report) {
 			this.reports.delete(sessionId);
@@ -202,7 +202,6 @@ export class RemoteControl {
 					deleteInstance: this.deps.deleteInstance,
 					statusLine: this.deps.statusLine,
 					renderStatusline: this.deps.renderStatusline,
-					tmux: this.tmux,
 					webDir: this.deps.webDir ?? WEB_DIR,
 				},
 				state.port,

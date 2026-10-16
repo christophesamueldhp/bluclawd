@@ -1,14 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	diffTotals,
 	type GitRun,
 	gitInfo,
 	gitInfoCache,
 	originOwner,
-	readUsageLimits,
 	statusLine,
 } from "../daemon/remote/statusline.ts";
 
@@ -76,45 +72,10 @@ describe("git state for the status bar", () => {
 	});
 });
 
-describe("usage limits from pistatusline's cache", () => {
-	const dir = mkdtempSync(join(tmpdir(), "bluclawd-usage-"));
-	afterAll(() => rmSync(dir, { recursive: true, force: true }));
-	const cache = (name: string, content: string) => {
-		const path = join(dir, name);
-		writeFileSync(path, content);
-		return path;
-	};
-	const fields = {
-		sessionUsage: 43,
-		sessionResetAt: "2026-10-15T12:30:00.839522+00:00",
-		weeklyUsage: 46,
-		weeklyResetAt: "2026-10-20T10:00:00.839540+00:00",
-	};
-
-	it("reads the four limit fields and nothing else, never the token's hash", () => {
-		const secret = "f00dfeedcafe";
-		const path = cache(
-			"usage.json",
-			JSON.stringify({ ...fields, extraUsageEnabled: true, weeklyOpusUsage: 3, tokenHash: secret }),
-		);
-		const limits = readUsageLimits(path);
-		expect(limits).toEqual(fields);
-		expect(JSON.stringify(limits)).not.toContain(secret);
-	});
-
-	it("keeps only well-formed fields, and gives nothing for a missing or malformed file", () => {
-		const path = cache("odd.json", JSON.stringify({ sessionUsage: "43", sessionResetAt: "soon", weeklyUsage: 46 }));
-		expect(readUsageLimits(path)).toEqual({ weeklyUsage: 46 });
-		expect(readUsageLimits(cache("none.json", JSON.stringify({ tokenHash: "x" })))).toBeUndefined();
-		expect(readUsageLimits(cache("bad.json", "{ not json"))).toBeUndefined();
-		expect(readUsageLimits(cache("null.json", "null"))).toBeUndefined();
-		expect(readUsageLimits(join(dir, "missing.json"))).toBeUndefined();
-	});
-
-	it("puts both beside a report, each left out when unknown", async () => {
-		const path = cache("limits.json", JSON.stringify({ ...fields, tokenHash: "x" }));
+describe("the status beside a report", () => {
+	it("is the directory's git state, left out when unknown", async () => {
 		const git = { branch: "main", added: 1, removed: 0 };
-		expect(await statusLine(async () => git, path)("/p")).toEqual({ git, limits: fields });
-		expect(await statusLine(async () => undefined, join(dir, "missing.json"))("/p")).toEqual({});
+		expect(await statusLine(async () => git)("/p")).toEqual({ git });
+		expect(await statusLine(async () => undefined)("/p")).toEqual({});
 	});
 });

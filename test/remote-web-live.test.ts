@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { giveUp, promptKey, promptText, refused, sentText, settle, shownText } from "../daemon/remote/web/live.js";
+import { giveUp, promptKey, refused, sentText, settle, shownText } from "../daemon/remote/web/live.js";
 
 const assistant = (id: string, text: string, thinking?: string) => ({
 	kind: "assistant",
@@ -121,25 +121,21 @@ describe("a sent prompt still waiting once its time is up", () => {
 });
 
 describe("the commands the phone does not send", () => {
-	it("are /remote-control and /agent-view, with or without arguments", () => {
-		for (const text of ["/remote-control", " /remote-control off\n", "/agent-view", "/agent-view peek"]) {
-			expect(refused(text), text).toBe(true);
+	const commands = [{ name: "compact" }, { name: "review" }, { name: "skill:pdf" }];
+
+	it("are those the session does not list for a phone, with or without arguments", () => {
+		for (const text of ["/remote-control", " /agent-view peek\n", "/tree", "/fork 1a2b", "/settings", "/model"]) {
+			expect(refused(text, commands), text).toBe(true);
 		}
 	});
 
-	it("lets any other line go, a command or a template included", () => {
-		for (const text of ["/compact", "/reload", "/review the diff", "run /agent-view", "remote-control", ""]) {
-			expect(refused(text), text).toBe(false);
+	it("lets a listed command go, and any line that is not a command", () => {
+		for (const text of ["/compact", "/review the diff", "/skill:pdf a.pdf", "run /tree", "/Users/me/a.md", ""]) {
+			expect(refused(text, commands), text).toBe(false);
 		}
 	});
-});
 
-describe("a message of yours for the reply box", () => {
-	it("is its text without the transcript's [Image] lines", () => {
-		expect(promptText("look at these\n[Image]\n[Image]")).toBe("look at these");
-		expect(promptText("look at these\n\n[Image #1]\n[Image #2]\n[Image]\n[Image]")).toBe("look at these");
-		expect(promptText("see [Image] here\n\n[Image: original 4000x3000]")).toBe(
-			"see [Image] here\n\n[Image: original 4000x3000]",
-		);
+	it("leaves it to the Mac while the session has listed none", () => {
+		expect(refused("/settings", undefined)).toBe(false);
 	});
 });

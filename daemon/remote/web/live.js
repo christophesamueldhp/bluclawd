@@ -74,24 +74,12 @@ export function giveUp(pending, sessionState, last) {
 }
 
 /**
- * The commands the phone does not send: they drive the Mac's terminal (its remote control, agent
- * view), not the session. Every other "/" line goes, and runs as a command or template in the pane.
- * @param {string} text
+ * A "/" line the phone does not send: it names a command the session does not list for a phone
+ * (protocol.ts's phoneMayRun), which runs only on the Mac. Unknown while the session has listed
+ * none yet: the Mac refuses it then. Text such as a path is no command.
+ * @param {string} text @param {{ name: string }[] | undefined} commands the session's, for a phone
  */
-export function refused(text) {
-	const command = text.trim();
-	return /^\/(remote-control|agent-view|exit|quit)(\s|$)/.test(command);
-}
-
-/**
- * A message of yours as pi's editor holds it, for the reply box: the transcript
- * shows each image as an `[Image]` line, and the pane put an `[Image #N]` line for it: only the text is kept.
- * @param {string} text
- */
-export function promptText(text) {
-	return text
-		.split("\n")
-		.filter((line) => line !== "[Image]" && !/^\[Image #\d+\]$/.test(line))
-		.join("\n")
-		.trimEnd();
+export function refused(text, commands) {
+	const name = /^\/([\w.:-]+)(?:\s|$)/.exec(text.trimStart())?.[1];
+	return name !== undefined && commands !== undefined && !commands.some((c) => c.name === name);
 }

@@ -58,13 +58,9 @@ export type PaneMessage =
 	| { type: "prompt"; text: string; images?: PaneImage[] }
 	| { type: "abort" }
 	| { type: "rename"; name: string }
-	| { type: "compact" }
 	| { type: "set_model"; provider: string; id: string }
 	| { type: "set_thinking"; level: string }
 	| { type: "set_trust"; trust: "always" | "ask" | "never" }
-	| { type: "tree"; entryId: string }
-	| { type: "fork"; entryId: string }
-	| { type: "clone" }
 	/** A text-only prompt starting with "/": typed into the pane's prompt and submitted, as on the Mac. */
 	| { type: "command"; text: string }
 	/** Stop a background task, as /tasks' `x` does: the model is told. */
@@ -174,14 +170,25 @@ export interface PaneTask {
 	outputFile?: string;
 }
 
-/** Commands that drive the Mac's own screen (remote control's menu, agent view, detaching), never run from a phone. */
-export const PHONE_REFUSED_COMMANDS: ReadonlySet<string> = new Set(["remote-control", "agent-view", "exit", "quit"]);
-
 /** A slash command, without its "/". */
 export interface PaneCommand {
 	name: string;
 	description?: string;
 	source: "builtin" | "extension" | "prompt" | "skill";
+}
+
+/**
+ * pi's own commands a phone may run. As Claude Code's Remote Control runs only the commands whose
+ * result is the conversation itself, these open no selector or screen on the Mac that the phone
+ * cannot see, and rewrite nothing already sent (a sent message is only ever stopped from the phone).
+ */
+export const PHONE_BUILTIN_COMMANDS: ReadonlySet<string> = new Set(["compact", "new", "reload"]);
+
+/** Whether a phone may run a command: one of those, or a prompt template or a skill, which only
+ *  become a prompt. Never an extension's: it may open its own screen on the Mac. */
+export function phoneMayRun(command: PaneCommand): boolean {
+	if (command.source === "builtin") return PHONE_BUILTIN_COMMANDS.has(command.name);
+	return command.source === "prompt" || command.source === "skill";
 }
 
 /** A pane's latest PaneReport, sent when it changes (session start, model, thinking level, turn end). */

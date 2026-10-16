@@ -42,12 +42,11 @@ describe("tmux command timeout", () => {
 		const tmux = new Tmux(own);
 		writes.mockClear();
 		execFileSync.mockClear();
-		for (let i = 0; i < 3; i++) tmux.screen("pi-1", 10);
+		for (let i = 0; i < 3; i++) tmux.capture("pi-1", 10);
 		const config = join(own, "tmux.conf");
 		expect(writes.mock.calls.filter(([file]) => file === config)).toHaveLength(1);
 		expect(readFileSync(config, "utf8")).toContain("set -g prefix None");
-		// Two commands a screen: which screen it is, then its lines.
-		expect(execFileSync.mock.calls).toHaveLength(6);
+		expect(execFileSync.mock.calls).toHaveLength(3);
 		for (const call of execFileSync.mock.calls) expect(call[1]).toEqual(expect.arrayContaining(["-f", config]));
 	});
 });

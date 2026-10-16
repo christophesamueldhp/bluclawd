@@ -77,7 +77,6 @@ describe("PWA icons", () => {
 					setPinned: () => false,
 					deleteInstance: () => false,
 					report: () => undefined,
-					tmux: { screen: () => [], sendKeys: () => {}, sendText: () => {} },
 				},
 				0,
 			);

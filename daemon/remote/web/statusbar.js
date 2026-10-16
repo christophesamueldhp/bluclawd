@@ -5,7 +5,6 @@
  */
 
 /** @typedef {{ branch: string, owner?: string, added: number, removed: number }} GitInfo */
-/** @typedef {{ sessionUsage?: number, sessionResetAt?: string, weeklyUsage?: number, weeklyResetAt?: string }} UsageLimits */
 /** @typedef {{ provider: string, id: string, name?: string }} ReportModel */
 /**
  * A command the session runs for a prompt that starts with "/" and its name; `builtin` ones are pi's own.
@@ -18,9 +17,9 @@
  */
 /**
  * A pane's report, with what the Mac adds for its directory: pistatusline's own lines at the
- * phone's width (`statusline`), else `git` and `limits`.
- * `notice`: why the phone's last fork, clone or edit did not run, until the pane's next report (`at`: epoch ms).
- * @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, git?: GitInfo, limits?: UsageLimits, notice?: { text: string, at: number }, statusline?: { lines: StatusSpan[][] }, tasks?: Task[] }} Report
+ * phone's width (`statusline`), else `git`.
+ * `notice`: why the phone's last slash command did not run, until the pane's next report (`at`: epoch ms).
+ * @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, git?: GitInfo, notice?: { text: string, at: number }, statusline?: { lines: StatusSpan[][] }, tasks?: Task[] }} Report
  */
 
 /**
@@ -44,29 +43,6 @@ export function tokens(count) {
 	if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
 	if (count >= 1_000) return `${(count / 1_000).toFixed(1)}k`;
 	return String(count);
-}
-
-/** How long until `iso`: "35m", "2h05m", "4d6h"; undefined once it has passed. @param {string | undefined} iso @param {number} now */
-export function untilText(iso, now) {
-	const ms = iso ? Date.parse(iso) - now : Number.NaN;
-	if (!(ms > 0)) return undefined;
-	const minutes = Math.ceil(ms / 60_000);
-	if (minutes < 60) return `${minutes}m`;
-	const hours = Math.floor(minutes / 60);
-	if (hours < 24) return `${hours}h${String(minutes % 60).padStart(2, "0")}m`;
-	return `${Math.floor(hours / 24)}d${hours % 24}h`;
-}
-
-/**
- * A usage window's percent and time to reset; none once its reset has passed, since the Mac's cache
- * has not seen the new window yet.
- * @param {number | undefined} percent @param {string | undefined} resetAt @param {number} now
- */
-function usageWindow(percent, resetAt, now) {
-	if (typeof percent !== "number") return undefined;
-	const until = untilText(resetAt, now);
-	if (resetAt && !until) return undefined;
-	return { percent: Math.round(percent), until };
 }
 
 /** A class per 10%: the CSP allows no inline style for a width. @param {number} value @param {string} label @param {string} [kind] */
@@ -93,10 +69,10 @@ function changesHtml(git) {
 
 /**
  * Two lines: the session (model • thinking, context, tokens and cost, trust mode), then where it is
- * and the plan's limits (directory, git branch and changes, 5-hour and weekly usage).
- * @param {Report | null | undefined} report @param {string | undefined} cwd as shown, `~` for home @param {number} now
+ * (directory, git branch and changes).
+ * @param {Report | null | undefined} report @param {string | undefined} cwd as shown, `~` for home
  */
-export function barHtml(report, cwd, now) {
+export function barHtml(report, cwd) {
 	const first = [];
 	const second = [];
 	const model = report?.model;
@@ -124,16 +100,6 @@ export function barHtml(report, cwd, now) {
 		second.push(`<span class="grow branch">${esc(git.branch)}</span>`);
 		if (changes) second.push(`<span>${changes}</span>`);
 	}
-	const limits = report?.limits;
-	for (const [name, percent, resetAt] of /** @type {const} */ ([
-		["5h", limits?.sessionUsage, limits?.sessionResetAt],
-		["wk", limits?.weeklyUsage, limits?.weeklyResetAt],
-	])) {
-		const use = usageWindow(percent, resetAt, now);
-		if (use) {
-			second.push(`<span>${name} ${esc(use.percent)}%${use.until ? ` ${esc(use.until)}` : ""}</span>`);
-		}
-	}
 	return [first, second]
 		.filter((line) => line.length)
 		.map((line) => `<span class="line">${line.join("")}</span>`)
@@ -151,10 +117,10 @@ export function thinkingHtml(report) {
 }
 
 /**
- * The sheet's rows after the session's own: directory, git, usage limits and the trust mode picker.
- * @param {Report} report @param {string | undefined} cwd as shown, `~` for home @param {number} now
+ * The sheet's rows after the session's own: directory, git and the trust mode picker.
+ * @param {Report} report @param {string | undefined} cwd as shown, `~` for home
  */
-export function factsHtml(report, cwd, now) {
+export function factsHtml(report, cwd) {
 	const rows = [];
 	if (cwd) rows.push(`<dt>Directory</dt><dd>${esc(cwd)}</dd>`);
 	const git = report.git;
@@ -163,18 +129,6 @@ export function factsHtml(report, cwd, now) {
 		rows.push(
 			`<dt>Git</dt><dd>${git.owner ? `${esc(git.owner)} · ` : ""}${esc(git.branch)}${changes ? `<small>${changes}</small>` : ""}</dd>`,
 		);
-	}
-	const limits = report.limits;
-	for (const [name, percent, resetAt] of /** @type {const} */ ([
-		["5-hour limit", limits?.sessionUsage, limits?.sessionResetAt],
-		["Weekly limit", limits?.weeklyUsage, limits?.weeklyResetAt],
-	])) {
-		const use = usageWindow(percent, resetAt, now);
-		if (use) {
-			rows.push(
-				`<dt>${name}</dt><dd>${gauge(use.percent, name)}<small>${esc(use.percent)}% used${use.until ? ` · resets in ${esc(use.until)}` : ""}</small></dd>`,
-			);
-		}
 	}
 	if (report.trust) {
 		const options = TRUST.map(

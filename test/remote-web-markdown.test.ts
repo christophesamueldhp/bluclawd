@@ -19,6 +19,13 @@ describe("the app's modules", () => {
 		for (const name of modules) expect(sw).toContain(`"/${name}"`);
 	});
 
+	it("show the version the offline shell caches, 0.0.N", () => {
+		const version = (file: string) =>
+			/const VERSION = "([^"]+)";/.exec(readFileSync(join(WEB_DIR, file), "utf8"))?.[1];
+		expect(version("sw.js")).toMatch(/^0\.0\.\d+$/);
+		expect(version("app.js")).toBe(version("sw.js"));
+	});
+
 	it("serves markdown.js as a script", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "bluclawd-markdown-"));
 		const server = await startRemoteServer(
@@ -34,7 +41,6 @@ describe("the app's modules", () => {
 				setPinned: () => false,
 				deleteInstance: () => false,
 				report: () => undefined,
-				tmux: { screen: () => [], sendKeys: () => {}, sendText: () => {} },
 			},
 			0,
 		);

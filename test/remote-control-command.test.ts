@@ -205,6 +205,24 @@ describe("/remote-control", () => {
 			expect(confirmed.ui.notify).toHaveBeenCalledWith("Removed 2 phones", "info");
 		});
 
+		it("lists the phones left again after a removal, and after a declined one, until escape", async () => {
+			enabled = true;
+			const label = (await phoneLabel(1))!;
+			vi.mocked(OrchestratorClient.prototype.remote).mockImplementation(async (action) => {
+				actions.push(action);
+				const left = devices.filter((d) => !removed().includes(d.id));
+				return { enabled, port: 7878, listening: true, devices: left };
+			});
+			const { ui, done } = run("", { select: [PHONES, label, label, undefined], confirm: true });
+			ui.confirm.mockResolvedValueOnce(false);
+			await done;
+			expect(removed()).toEqual(["d2"]);
+			const lists = ui.select.mock.calls.slice(1).map(([, items]) => items.length);
+			// Both phones, again after the declined removal, then only the one left.
+			expect(lists).toEqual([3, 3, 2]);
+			expect(ui.notify).toHaveBeenCalledWith("Removed iPad", "info");
+		});
+
 		/** The menu's label for devices[index], as the list shows it. */
 		async function phoneLabel(index: number): Promise<string | undefined> {
 			const { ui, done } = run("", { select: [PHONES, undefined] });

@@ -1,13 +1,14 @@
 /**
  * A QR code for `/remote-control`'s pairing link, drawn in the terminal: byte mode, error
- * correction level M, versions 1 to 10 (up to 213 bytes, plenty for a ts.net link).
+ * correction level L (the code is on a screen, not worn paper, and a lower level makes it smaller),
+ * versions 1 to 10 (up to 271 bytes, plenty for a ts.net link).
  */
 
-/** Per version at level M: error correction codewords per block, and the number of blocks. */
-const EC_PER_BLOCK = [10, 16, 26, 18, 24, 16, 18, 22, 22, 26];
-const BLOCKS = [1, 1, 1, 2, 2, 4, 4, 4, 5, 5];
-/** Level M's two format bits. */
-const LEVEL_M = 0;
+/** Per version at level L: error correction codewords per block, and the number of blocks. */
+const EC_PER_BLOCK = [7, 10, 15, 20, 26, 18, 20, 24, 30, 18];
+const BLOCKS = [1, 1, 1, 1, 1, 2, 2, 2, 2, 4];
+/** Level L's two format bits. */
+const LEVEL_L = 1;
 
 /** Product in GF(256) modulo x^8 + x^4 + x^3 + x^2 + 1. */
 function multiply(x: number, y: number): number {
@@ -185,7 +186,7 @@ class Grid {
 	}
 
 	format(mask: number): void {
-		const data = (LEVEL_M << 3) | mask;
+		const data = (LEVEL_L << 3) | mask;
 		const bits = ((data << 10) | bch(data, 0x537, 10)) ^ 0x5412;
 		const bit = (i: number) => ((bits >>> i) & 1) === 1;
 		for (let i = 0; i <= 5; i++) this.set(8, i, bit(i));
@@ -293,9 +294,9 @@ export function qrMatrix(text: string, mask?: number): boolean[][] {
 /** In the terminal's own colours: dark modules in its foreground on its background, so the code
  *  is inverted on a dark terminal, which scanners read too. Only resets: not dimmed, as pi dims a notice. */
 const OPEN = "\x1b[22;39;49m";
-const QUIET = 4;
+const QUIET = 2;
 
-/** Two module rows to a line with half blocks, in a blank quiet zone of 4 modules. */
+/** Two module rows to a line with half blocks, in a blank quiet zone of 2 modules: the terminal around it is blank too. */
 export function renderQr(matrix: boolean[][]): string {
 	const width = matrix.length + QUIET * 2;
 	const dark = (x: number, y: number) => matrix[y - QUIET]?.[x - QUIET] === true;

@@ -429,33 +429,28 @@ describe("SelfRegistration waits for its next message", () => {
 		expect(other.waits).toHaveLength(0);
 	});
 
-	it.each([
-		[{ type: "fork", entryId: "1a2b3c4d" }],
-		[{ type: "compact" }],
-		[{ type: "command", text: "/new" }],
-	] as PaneMessage[][])("after %o, leaves what follows it to the next heartbeat", async (message) => {
-		vi.useFakeTimers();
-		const { client, registers, waits } = waitingClient([[], [message], []]);
-		const handled: PaneMessage[] = [];
-		const reg = started(client, handled);
-		await vi.advanceTimersByTimeAsync(0);
-		waits[0].answer(true);
-		await vi.advanceTimersByTimeAsync(0);
-		expect(handled).toEqual([message]);
-		expect(waits).toHaveLength(1);
-		await vi.advanceTimersByTimeAsync(3000);
-		expect(registers).toHaveLength(3);
-		expect(waits).toHaveLength(2);
-		await reg.stop();
-	});
+	it.each([[{ type: "prompt", text: "hi" }], [{ type: "command", text: "/new" }]] as PaneMessage[][])(
+		"after %o, leaves what follows it to the next heartbeat",
+		async (message) => {
+			vi.useFakeTimers();
+			const { client, registers, waits } = waitingClient([[], [message], []]);
+			const handled: PaneMessage[] = [];
+			const reg = started(client, handled);
+			await vi.advanceTimersByTimeAsync(0);
+			waits[0].answer(true);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(handled).toEqual([message]);
+			expect(waits).toHaveLength(1);
+			await vi.advanceTimersByTimeAsync(3000);
+			expect(registers).toHaveLength(3);
+			expect(waits).toHaveLength(2);
+			await reg.stop();
+		},
+	);
 
-	it("after a prompt, leaves a move queued behind it to the turn's first heartbeat", async () => {
+	it("after a prompt, leaves a Stop queued behind it to the turn's first heartbeat", async () => {
 		vi.useFakeTimers();
-		const { client, registers, waits } = waitingClient([
-			[],
-			[{ type: "prompt", text: "hi" }],
-			[{ type: "tree", entryId: "1a2b3c4d" }],
-		]);
+		const { client, registers, waits } = waitingClient([[], [{ type: "prompt", text: "hi" }], [{ type: "abort" }]]);
 		const handled: PaneMessage[] = [];
 		const reg = started(client, handled);
 		await vi.advanceTimersByTimeAsync(0);
@@ -468,16 +463,13 @@ describe("SelfRegistration waits for its next message", () => {
 		reg.setActivity("working");
 		await vi.advanceTimersByTimeAsync(0);
 		expect(registers).toHaveLength(3);
-		expect(handled).toEqual([
-			{ type: "prompt", text: "hi" },
-			{ type: "tree", entryId: "1a2b3c4d" },
-		]);
+		expect(handled).toEqual([{ type: "prompt", text: "hi" }, { type: "abort" }]);
 		await reg.stop();
 	});
 
-	it("does not register on a wake that comes after a navigation another heartbeat delivered", async () => {
+	it("does not register on a wake that comes after a prompt another heartbeat delivered", async () => {
 		vi.useFakeTimers();
-		const { client, registers, waits } = waitingClient([[], [{ type: "tree", entryId: "1a2b3c4d" }]]);
+		const { client, registers, waits } = waitingClient([[], [{ type: "prompt", text: "hi" }]]);
 		const reg = started(client);
 		await vi.advanceTimersByTimeAsync(0);
 		reg.setActivity("working");

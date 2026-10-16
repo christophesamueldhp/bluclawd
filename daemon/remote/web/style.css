@@ -50,23 +50,29 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 .keyboard #app { padding-bottom: 0; }
 button { -webkit-user-select: none; user-select: none; }
 .mono, .t { font-family: var(--mono); }
+/* icons.js: a button's icon in its text colour; the button carries the name. */
+.icon { display: block; width: 22px; height: 22px; flex: none; }
+.icon-btn { flex: none; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; background: none; color: var(--link); }
+.icon-btn.on { color: var(--accent); }
+.icon-btn[hidden] { display: none; }
+.icon-btn:disabled { opacity: .4; }
+.busy { animation: pulse 1s ease-in-out infinite; }
 /* The header: opaque and on whole pixels, under the status bar's safe area (see #app), so its text is never drawn over anything. */
-.bar { position: relative; z-index: 1; flex: none; display: flex; align-items: center; gap: var(--s3); min-height: 52px; padding: var(--s1) var(--s4); background: var(--bg); border-bottom: 1px solid var(--line); }
-.bar h1 { font-size: 28px; line-height: 1.2; font-weight: 700; letter-spacing: -.01em; margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar { position: relative; z-index: 1; flex: none; display: flex; align-items: center; gap: var(--s1); min-height: 52px; padding: var(--s1) var(--s2) var(--s1) var(--s4); background: var(--bg); }
+.bar h1 { font-size: 24px; line-height: 1.2; font-weight: 700; letter-spacing: -.01em; margin: 0; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Online, pi closed or offline: a dot, named for a screen reader and in its tooltip. */
+.dot { flex: none; width: 8px; height: 8px; margin: 0 var(--s2); border-radius: 50%; background: var(--dim); }
+.dot.on { background: var(--green); }
 .title { flex: 1; min-width: 0; min-height: 44px; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 600; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .title::after { content: " ›"; color: var(--muted); font-weight: 400; }
-.back { display: flex; align-items: center; min-height: 44px; color: var(--link); text-decoration: none; white-space: nowrap; }
-.stop { background: none; border: 0; color: var(--red); font: inherit; font-weight: 600; padding: 0 var(--s2); min-height: 44px; }
-.stop:disabled { opacity: .5; }
+.bar .back { margin-left: calc(-1 * var(--s3)); }
+.icon-btn.stop { color: var(--red); }
 /* How many background tasks the session runs: a tap lists them. */
 .tasks-pill { flex: none; min-height: 44px; padding: 0; border: 0; background: none; color: var(--link); font: 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-weight: 600; font-variant-numeric: tabular-nums; }
-.tasks-pill span { display: inline-block; padding: 4px 10px; border-radius: 12px; background: var(--panel); white-space: nowrap; }
+.tasks-pill span { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 12px; background: var(--panel); white-space: nowrap; }
+.tasks-pill .icon { width: 14px; height: 14px; }
 .tasks-pill[hidden] { display: none; }
-.notify { background: none; border: 0; color: var(--link); font: inherit; font-size: 15px; font-weight: 600; padding: 0 var(--s1); min-height: 44px; white-space: nowrap; }
 .muted { color: var(--muted); font-size: 15px; }
-#online { flex: none; font-size: 13px; font-weight: 500; white-space: nowrap; }
-#online.on { color: var(--green); }
-.phone-menu { flex: none; width: 44px; height: 44px; margin-right: calc(-1 * var(--s3)); padding: 0; border: 0; background: none; color: var(--link); font: inherit; font-size: 24px; line-height: 1; }
 /* pistatusline's two lines under pi, each cut short rather than wrapped; the branch, then the directory, give way first. */
 .statusbar { position: relative; z-index: 1; flex: none; display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 6px var(--s4); border: 0; border-bottom: 1px solid var(--line); background: var(--bg); color: var(--secondary); font: 13px/1.35 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-variant-numeric: tabular-nums; text-align: left; }
 .statusbar[hidden] { display: none; }
@@ -105,7 +111,7 @@ button { -webkit-user-select: none; user-select: none; }
 .clear { position: absolute; top: 0; right: 0; width: 36px; height: 36px; padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 20px; line-height: 36px; }
 .clear[hidden], .cancel[hidden] { display: none; }
 .cancel { flex: none; min-height: 44px; margin: -4px 0; padding: 0 var(--s1); border: 0; background: none; color: var(--link); font: inherit; }
-.band { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: var(--s4) var(--s4) var(--s1); font-weight: 600; }
+.band { font-size: 13px; color: var(--muted); margin: var(--s4) var(--s4) var(--s1); font-weight: 600; }
 .row { display: flex; gap: var(--s3); align-items: center; min-height: 60px; padding: var(--s2) var(--s4); color: inherit; text-decoration: none; position: relative; }
 /* A hairline between rows, inset to the text as iOS's. */
 .row + .row::before { content: ""; position: absolute; top: 0; left: calc(var(--s4) + 16px + var(--s3)); right: 0; border-top: 1px solid var(--line); }
@@ -128,13 +134,6 @@ button { -webkit-user-select: none; user-select: none; }
 /* Messages are text: a long press selects and copies them, as anywhere on iOS. */
 .u, .a, .t pre, .think pre, .marker { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
 .u { align-self: flex-end; max-width: 85%; background: var(--message); border-radius: 18px; padding: var(--s2) 14px; font-size: 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.mine { align-self: flex-end; display: flex; align-items: center; max-width: 85%; min-width: 0; }
-.mine .u { align-self: auto; max-width: none; min-width: 0; }
-.theirs { display: flex; align-items: flex-start; }
-.theirs .a { flex: 1; min-width: 0; }
-/* ⋯ sits beside the reply's first line, without moving it. */
-.more { flex: none; width: 44px; height: 44px; margin: -11px -12px -11px 0; padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 20px; line-height: 1; }
-.mine .more { margin: 0 0 0 -8px; }
 .a { font-size: 16px; line-height: 1.45; overflow-wrap: anywhere; }
 /* A tool call and its result, as Claude Code shows them: "● Bash(npm test)" and "⎿ …" under it. */
 .t { font-size: 13px; line-height: 1.45; color: var(--secondary); overflow-wrap: anywhere; }
@@ -149,7 +148,7 @@ button { -webkit-user-select: none; user-select: none; }
 .lines { min-width: 0; white-space: pre-wrap; }
 .t.err .lines, .t.interrupted .lines { color: var(--red); }
 /* Under the call the turn stopped at, as one block with it. */
-.t + .t.interrupted, .theirs + .t.interrupted { margin-top: calc(-1 * var(--s2)); }
+.t + .t.interrupted, .a + .t.interrupted { margin-top: calc(-1 * var(--s2)); }
 .t summary, .think summary { list-style: none; cursor: pointer; }
 .t summary::-webkit-details-marker, .think summary::-webkit-details-marker { display: none; }
 .t pre, .think pre { white-space: pre-wrap; margin: 6px 0 0; padding: var(--s2) 10px; border-radius: 8px; background: var(--panel); color: var(--text); font: inherit; }
@@ -174,13 +173,12 @@ button { -webkit-user-select: none; user-select: none; }
 .banner.closed { background: var(--panel); color: var(--muted); }
 /* In a chat, under the log and above the reply box, where the thumb answers. */
 .scroll + #banner .banner { margin: var(--s2) var(--s4); }
-.composer { flex: none; display: flex; gap: var(--s2); align-items: flex-end; padding: var(--s2) var(--s3); background: var(--bg); border-top: 1px solid var(--line); }
+.composer { flex: none; display: flex; gap: var(--s2); align-items: flex-end; padding: var(--s2) var(--s3); background: var(--bg); }
 .composer textarea { flex: 1; min-height: 44px; resize: none; border: 0; border-radius: 22px; padding: 11px var(--s4); background: var(--panel); color: var(--text); font: 16px/22px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-height: 140px; }
-.send { width: 44px; height: 44px; flex: none; border-radius: 50%; border: 0; background: var(--accent); color: #000; font-size: 20px; font-weight: 600; }
-.send:disabled { opacity: .35; }
-.attach { width: 44px; height: 44px; flex: none; padding: 0; border-radius: 50%; border: 0; background: var(--panel); color: var(--link); font-size: 28px; line-height: 1; }
-.attach:disabled { opacity: .35; }
-.attach.busy span { display: inline-block; animation: pulse 1s ease-in-out infinite; }
+/* Round icon buttons: the accent one sends or starts, the grey one attaches. */
+.send, .start, .save, .attach { flex: none; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: var(--accent); color: #000; }
+.attach { background: var(--panel); color: var(--link); }
+.send:disabled, .start:disabled, .save:disabled, .attach:disabled { opacity: .35; }
 /* The session's commands for what the reply box starts with: a short list above it. */
 .commands { flex: none; max-height: 40vh; overflow-y: auto; -webkit-overflow-scrolling: touch; border-top: 1px solid var(--line); background: var(--bg); }
 .commands[hidden] { display: none; }
@@ -189,10 +187,8 @@ button { -webkit-user-select: none; user-select: none; }
 .command:active { background: var(--panel); }
 .command b { font-family: var(--mono); font-size: 15px; font-weight: 600; }
 .command small { display: block; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.thumbs { flex: none; display: flex; gap: var(--s2); padding: var(--s2) var(--s3) 0; border-top: 1px solid var(--line); overflow-x: auto; }
+.thumbs { flex: none; display: flex; gap: var(--s2); padding: var(--s2) var(--s3) 0; overflow-x: auto; }
 .thumbs[hidden] { display: none; }
-.thumbs:not([hidden]) + .composer { border-top: 0; }
-.commands:not([hidden]) + .thumbs { border-top: 0; }
 .thumb { position: relative; flex: none; }
 .thumb img { display: block; width: 72px; height: 72px; object-fit: cover; border-radius: 10px; }
 .remove { position: absolute; top: 2px; right: 2px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: rgb(0 0 0 / .6); color: #fff; font-size: 14px; line-height: 1; }
@@ -201,10 +197,8 @@ button { -webkit-user-select: none; user-select: none; }
 .composer.new textarea { flex: none; }
 /* The model and directory show once a task is being written (nothing starts without one), and while it starts. */
 .composer.new:not(:focus-within, .starting):has(textarea:placeholder-shown) :is(.pick, .where) { display: none; }
-.where { display: flex; gap: var(--s2); }
+.where { display: flex; gap: var(--s2); align-items: center; }
 .where select, .where input { flex: 1; min-width: 0; height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; }
-.start { flex: none; height: 44px; padding: 0 20px; border: 0; border-radius: 22px; background: var(--accent); color: #000; font: inherit; font-weight: 600; }
-.start:disabled { opacity: .5; }
 .empty { color: var(--muted); text-align: center; margin: 40px var(--s4); }
 /* The mascot (mascot.js) rolls its eyes around its head while something loads: one 4 px square per pixel. */
 .loader { display: flex; justify-content: center; margin: 40px var(--s4); }
@@ -232,14 +226,15 @@ button { -webkit-user-select: none; user-select: none; }
 .backdrop { position: fixed; inset: 0; z-index: 10; background: rgb(0 0 0 / .35); }
 .sheet { position: fixed; left: 0; right: 0; bottom: var(--keyboard, 0px); z-index: 11; max-height: calc(var(--app-h, 100dvh) * .85); overflow-y: auto; background: var(--bg); border-radius: 14px 14px 0 0; box-shadow: 0 -4px 24px var(--shadow); padding: var(--s1) max(var(--s4), env(safe-area-inset-right)) calc(var(--s4) + env(safe-area-inset-bottom)) max(var(--s4), env(safe-area-inset-left)); }
 .sheet[hidden], .backdrop[hidden] { display: none; }
-/* With the keyboard up (app.js's fitViewport) the home indicator is hidden, and the answer sheet's
-   text field stays in view above it. */
+/* With the keyboard up (app.js's fitViewport) the home indicator is hidden, and a sheet's text
+   field stays in view above it. */
 .keyboard #app { padding-bottom: 0; }
 .keyboard .sheet { max-height: calc(var(--app-h) - env(safe-area-inset-top) - 8px); padding-bottom: var(--s4); }
-.keyboard .screen { max-height: calc(var(--app-h) * .3); }
 .sheet-bar { display: flex; align-items: center; justify-content: space-between; min-height: 52px; }
 .sheet-bar h2 { font-size: 17px; font-weight: 600; margin: 0; }
-.close { background: none; border: 0; color: var(--link); font: inherit; font-weight: 600; min-height: 44px; padding: 0 var(--s1); }
+.sheet-bar .close { margin-right: calc(-1 * var(--s3)); color: var(--muted); }
+.sheet-tools { display: flex; align-items: center; }
+.version { margin: var(--s4) 0 0; color: var(--muted); font-size: 13px; text-align: center; }
 .facts { display: grid; grid-template-columns: auto 1fr; gap: 14px var(--s4); align-items: center; margin: var(--s2) 0 var(--s5); }
 .facts dt { color: var(--muted); font-size: 15px; }
 .facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
@@ -251,7 +246,6 @@ button { -webkit-user-select: none; user-select: none; }
 .gauge span.full { background: var(--red); }
 .p0 { width: 0; } .p10 { width: 10%; } .p20 { width: 20%; } .p30 { width: 30%; } .p40 { width: 40%; } .p50 { width: 50%; }
 .p60 { width: 60%; } .p70 { width: 70%; } .p80 { width: 80%; } .p90 { width: 90%; } .p100 { width: 100%; }
-.quote { margin: var(--s1) 0 var(--s3); color: var(--muted); font-size: 15px; white-space: pre-wrap; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .actions { display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s2); }
 .action { width: 100%; min-height: 44px; padding: 10px 14px; border: 0; border-radius: 12px; background: var(--panel); color: var(--link); font: inherit; font-weight: 600; text-align: left; }
 .action small { display: block; margin-top: 2px; color: var(--muted); font-size: 13px; font-weight: 400; }
@@ -261,8 +255,6 @@ button { -webkit-user-select: none; user-select: none; }
 .rename { display: flex; align-items: center; gap: var(--s2); margin: 20px 0 0; padding-top: var(--s4); border-top: 1px solid var(--line); }
 .rename label { color: var(--muted); font-size: 15px; }
 .rename input { flex: 1; min-width: 0; height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; }
-.save { flex: none; height: 44px; padding: 0 18px; border: 0; border-radius: 22px; background: var(--accent); color: #000; font: inherit; font-weight: 600; }
-.save:disabled { opacity: .5; }
 #sheet-manage .actions { margin-top: var(--s3); }
 .confirm-delete { display: flex; align-items: center; gap: var(--s1); padding: 6px var(--s1) 6px 14px; border-radius: 12px; background: var(--panel); font-size: 15px; }
 .confirm-delete span { flex: 1; min-width: 0; }
@@ -280,26 +272,10 @@ button { -webkit-user-select: none; user-select: none; }
 .task .error { margin: var(--s1) 0 0; font-size: 13px; min-height: 0; }
 /* The new session's model, on its own line: its names are long. */
 .pick { height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; }
-.banner.needs, .banner.hint { display: flex; align-items: center; gap: 10px; }
-.banner.needs span, .banner.hint span { flex: 1; min-width: 0; }
+.banner.hint { display: flex; align-items: center; gap: 10px; }
+.banner.hint span { flex: 1; min-width: 0; }
 .dismiss { flex: none; min-width: 44px; min-height: 44px; border: 0; background: none; color: inherit; font: inherit; font-size: 20px; }
 .answer { flex: none; min-height: 44px; padding: 0 var(--s4); border: 0; border-radius: 22px; background: var(--accent); color: #000; font: inherit; font-weight: 600; }
-/* A confirm dialog's: its title above Yes and No, and Answer at the end of their line. */
-.banner.confirm { flex-wrap: wrap; }
-.banner.confirm span { flex-basis: 100%; font-weight: 600; }
-.banner.confirm .answer { margin-left: auto; }
-.reply { flex: none; min-width: 72px; min-height: 44px; padding: 0 var(--s4); border: 0; border-radius: 22px; background: var(--bg); color: var(--text); font: inherit; font-weight: 600; }
-.reply:disabled { opacity: .5; }
-.confirm-keys { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 6px; }
-.confirm-keys[hidden] { display: none; }
-.screen { margin: var(--s1) 0 var(--s3); padding: 6px var(--s2); max-height: 45dvh; overflow: auto; -webkit-overflow-scrolling: touch; background: var(--panel); border-radius: 8px; color: var(--text); font: 9.5px/1.35 var(--mono); white-space: pre; }
-.keys { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: var(--s2); }
-.press[data-press="Space"] { grid-column: span 2; }
-.press { min-width: 0; height: 44px; padding: 0; border: 0; border-radius: 10px; background: var(--panel); color: var(--text); font: inherit; font-size: 15px; font-weight: 600; }
-.term-text { display: flex; gap: var(--s2); }
-.term-text input { flex: 1; min-width: 0; height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; }
-.term-send { flex: none; height: 44px; padding: 0 18px; border: 0; border-radius: 22px; background: var(--accent); color: #000; font: inherit; font-weight: 600; }
-.press:disabled, .term-send:disabled { opacity: .5; }
 .unpair { flex: none; align-self: center; min-height: 44px; padding: 0 var(--s2); border: 0; background: none; color: var(--red); font: inherit; font-weight: 600; }
 .unpair.cancel { color: var(--link); }
 /* A reply's markdown (markdown.js), compact for a phone. */
@@ -340,8 +316,7 @@ button { -webkit-user-select: none; user-select: none; }
 .pic img:not([src]) { display: none; }
 .pic.failed { min-height: 44px; }
 .pic.failed::after { content: "Image unavailable"; }
-.mine.pics, .u.pics { width: 85%; }
-.mine.pics .u { flex: 1; }
+.u.pics { width: 85%; }
 .u .pictures:last-child { margin-bottom: 0; }
 .part > .pictures { margin: -4px 0 0 var(--s3); }
 .viewer { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); background: rgb(0 0 0 / .92); }

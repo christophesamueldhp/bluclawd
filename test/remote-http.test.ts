@@ -33,9 +33,6 @@ describe("remote HTTP API", () => {
 	let startFails: boolean;
 	let terminalOpen: boolean;
 	let reports: Map<string, PaneReport>;
-	let screens: Map<string, string[]>;
-	let typed: Array<{ pane: string; keys?: string[]; text?: string }>;
-	let tmuxFails: boolean;
 	let statusExtra: StatusLine;
 	let statusCwds: string[];
 	let renders: Array<{ id: string; cwd: string; cols: number }>;
@@ -67,21 +64,10 @@ describe("remote HTTP API", () => {
 		startFails = false;
 		terminalOpen = true;
 		reports = new Map();
-		screens = new Map();
-		typed = [];
-		tmuxFails = false;
 		statusExtra = {};
 		statusCwds = [];
 		renders = [];
 		changed = [];
-		// As Tmux throws: tmux's own complaint on stderr.
-		const reach = (pane: string) => {
-			if (tmuxFails)
-				throw Object.assign(new Error("Command failed: tmux"), { stderr: "server exited unexpectedly\n" });
-			if (!screens.has(pane)) {
-				throw Object.assign(new Error("Command failed: tmux"), { stderr: `can't find session: ${pane}\n` });
-			}
-		};
 		store = new RemoteStore(join(dir, "remote.json"));
 		server = await startRemoteServer(
 			{
@@ -119,21 +105,6 @@ describe("remote HTTP API", () => {
 				renderStatusline: async (session, report, cols) => {
 					renders.push({ id: session.id, cwd: session.cwd, cols });
 					return report.pistatusline ? [[{ text: `${cols} columns`, bold: true }]] : undefined;
-				},
-				tmux: {
-					// All of it: a main-screen pane gives its history and the visible screen too.
-					screen: (pane) => {
-						reach(pane);
-						return screens.get(pane) ?? [];
-					},
-					sendKeys: (pane, keys) => {
-						reach(pane);
-						typed.push({ pane, keys });
-					},
-					sendText: (pane, text) => {
-						reach(pane);
-						typed.push({ pane, text });
-					},
 				},
 			},
 			0,
@@ -390,7 +361,10 @@ describe("remote HTTP API", () => {
 			});
 			return [res.status, ((await res.json()) as { error?: string }).error];
 		};
-		const commands = [{ name: "compact", source: "builtin" as const }];
+		const commands = [
+			{ name: "compact", source: "builtin" as const },
+			{ name: "skill:pdf", source: "skill" as const },
+		];
 
 		it("has an idle pane type one into its prompt, as on the Mac, and lists the pane's commands", async () => {
 			instances[0]!.activity = "idle";
@@ -410,12 +384,24 @@ describe("remote HTTP API", () => {
 		});
 
 		it("refuses one while the session works or waits, or its prompt holds a draft, and the Mac-only ones", async () => {
-			reports.set("live", { models: [], commands });
+			// As an older pane lists them: pi's own selector, and an extension's command, which phoneMayRun refuses.
+			reports.set("live", {
+				models: [],
+				commands: [...commands, { name: "settings", source: "builtin" }, { name: "tasks", source: "extension" }],
+			});
 			expect(await send("/compact")).toEqual([409, "session_busy"]);
 			instances[0]!.activity = "idle";
 			instances[0]!.draft = true;
 			expect(await send("/compact")).toEqual([409, "unsent_draft"]);
-			for (const text of ["/remote-control", "/remote-control pair", "/agent-view", "/exit"]) {
+			for (const text of [
+				"/remote-control pair",
+				"/agent-view",
+				"/tree",
+				"/fork",
+				"/settings",
+				"/tasks",
+				"/model",
+			]) {
 				expect(await send(text)).toEqual([400, "command_refused"]);
 			}
 			// A stored row too, which would run it as its first prompt.
@@ -423,17 +409,18 @@ describe("remote HTTP API", () => {
 			expect(sent).toEqual([]);
 			// Text that is not a command goes as a prompt, as before; a draft does not hold it up.
 			expect(await send("compact it")).toEqual([202, undefined]);
-			expect(sent.map((s) => s.message)).toEqual([{ type: "prompt", text: "compact it" }]);
+			expect(await send("/Users/me/notes.md says hi")).toEqual([202, undefined]);
+			expect(sent.map((s) => s.message.type)).toEqual(["prompt", "prompt"]);
 		});
 
-		it("sends it as a prompt to a pane too old to report its commands, and with images", async () => {
+		it("refuses one to a pane too old to list its commands, and sends a slash line with images as a prompt", async () => {
 			instances[0]!.activity = "idle";
 			reports.set("live", { models: [] });
-			expect(await send("/compact")).toEqual([202, undefined]);
+			expect(await send("/compact")).toEqual([400, "command_refused"]);
 			const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 1, 1, 1]).toString("base64");
 			reports.set("live", { models: [], commands });
 			expect(await send("/describe", "live", [{ mimeType: "image/png", data: png }])).toEqual([202, undefined]);
-			expect(sent.map((s) => s.message.type)).toEqual(["prompt", "prompt"]);
+			expect(sent.map((s) => s.message.type)).toEqual(["prompt"]);
 		});
 	});
 
@@ -640,33 +627,24 @@ describe("remote HTTP API", () => {
 			expect(sent).toEqual([]);
 		});
 
-		it("compacts a running session once it is neither working nor waiting on an answer", async () => {
+		it("has no way to rewrite a session's history: no tree, fork, clone or compact", async () => {
 			reports.set("live", report);
 			const token = await pair();
-			const compact = (id: string) =>
-				fetch(`${base}/api/sessions/${id}/compact`, { method: "POST", headers: authJson(token), body: "{}" });
-			const busy = await compact("live");
-			expect(busy.status).toBe(409);
-			expect(await busy.json()).toEqual({ error: "session_busy" });
-			const stored = await compact("stored");
-			expect(stored.status).toBe(409);
-			expect(await stored.json()).toEqual({ error: "session_not_running" });
-			// Waiting on a dialog is mid-turn, which compacting would abort.
-			instances = [{ ...instances[0], activity: "awaiting_input" }, instances[1]];
-			const needs = await compact("live");
-			expect(needs.status).toBe(409);
-			expect(await needs.json()).toEqual({ error: "session_busy" });
+			for (const action of ["tree", "fork", "clone", "compact"]) {
+				const res = await fetch(`${base}/api/sessions/live/${action}`, {
+					method: "POST",
+					headers: authJson(token),
+					body: JSON.stringify({ entryId: "bbbb0002" }),
+				});
+				expect(res.status, action).toBe(404);
+			}
 			expect(sent).toEqual([]);
-			instances = [{ ...instances[0], activity: "idle" }, instances[1]];
-			expect((await compact("live")).status).toBe(202);
-			expect(sent).toEqual([{ id: "live", message: { type: "compact" } }]);
 		});
 
-		it("adds the git state and usage limits of the session's own directory to its report", async () => {
+		it("adds the git state of the session's own directory to its report", async () => {
 			reports.set("live", report);
 			statusExtra = {
 				git: { branch: "main", owner: "christophe", added: 3, removed: 1 },
-				limits: { sessionUsage: 43, sessionResetAt: "2026-10-15T12:30:00Z" },
 			};
 			const token = await pair();
 			const res = await fetch(`${base}/api/sessions/live/status`, { headers: auth(token) });
@@ -674,7 +652,7 @@ describe("remote HTTP API", () => {
 			expect(statusCwds).toEqual(["/p"]);
 		});
 
-		it("draws the pane's pistatusline at the width the phone asks for, in place of the git state and limits", async () => {
+		it("draws the pane's pistatusline at the width the phone asks for, in place of the git state", async () => {
 			const paths = { worker: "/pi/dist/render-worker.js", config: "/agent/pistatusline/settings.json" };
 			reports.set("live", { ...report, pistatusline: paths });
 			statusExtra = { git: { branch: "main", added: 0, removed: 0 } };
@@ -698,7 +676,7 @@ describe("remote HTTP API", () => {
 				expect((await status(query)).report).toEqual({ ...report, ...statusExtra });
 			}
 			expect(renders).toHaveLength(3);
-			// A pane without pistatusline, or one it could not render: the git state and limits as before.
+			// A pane without pistatusline, or one it could not render: the git state as before.
 			reports.set("live", report);
 			expect((await status("?cols=52")).report).toEqual({ ...report, ...statusExtra });
 		});
@@ -753,101 +731,6 @@ describe("remote HTTP API", () => {
 			]);
 			reports.set("live", report);
 			expect(await post(token, "live", "trust", { trust: "ask" })).toEqual([409, { error: "pane_too_old" }]);
-			expect(sent).toEqual([]);
-		});
-	});
-
-	describe("tree, fork and clone", () => {
-		const assistant = (id: string, parentId: string, text: string) =>
-			`${JSON.stringify({ type: "message", id, parentId, message: { role: "assistant", content: [{ type: "text", text }] } })}\n`;
-
-		beforeEach(() => {
-			writeFileSync(
-				join(dir, "live.jsonl"),
-				entry("aaaa0001", null, "first") +
-					assistant("bbbb0002", "aaaa0001", "one") +
-					entry("cccc0003", "bbbb0002", "second") +
-					assistant("dddd0004", "cccc0003", "two"),
-			);
-			instances = [{ ...instances[0], activity: "idle" }, instances[1]];
-			reports.set("live", { models: [] });
-		});
-
-		const post = (token: string, id: string, action: string, body: unknown = {}) =>
-			fetch(`${base}/api/sessions/${id}/${action}`, {
-				method: "POST",
-				headers: authJson(token),
-				body: JSON.stringify(body),
-			});
-
-		it("goes back to an entry, edits from a message of yours, and clones an idle session", async () => {
-			const token = await pair();
-			expect((await post(token, "live", "tree", { entryId: "bbbb0002" })).status).toBe(202);
-			expect((await post(token, "live", "fork", { entryId: "cccc0003" })).status).toBe(202);
-			expect((await post(token, "live", "clone")).status).toBe(202);
-			expect(sent).toEqual([
-				{ id: "live", message: { type: "tree", entryId: "bbbb0002" } },
-				{ id: "live", message: { type: "fork", entryId: "cccc0003" } },
-				{ id: "live", message: { type: "clone" } },
-			]);
-		});
-
-		it("refuses a pane that reports nothing, an older bluclawd's, which would ignore it", async () => {
-			reports.clear();
-			const token = await pair();
-			for (const [action, body] of [
-				["tree", { entryId: "bbbb0002" }],
-				["fork", { entryId: "cccc0003" }],
-				["clone", {}],
-				["compact", {}],
-			] as const) {
-				const res = await post(token, "live", action, body);
-				expect([res.status, await res.json()]).toEqual([409, { error: "pane_too_old" }]);
-			}
-			expect(sent).toEqual([]);
-		});
-
-		it("refuses a busy or stored session", async () => {
-			const token = await pair();
-			const all = [
-				["tree", { entryId: "bbbb0002" }],
-				["fork", { entryId: "cccc0003" }],
-				["clone", {}],
-			] as const;
-			for (const activity of ["working", "awaiting_input"] as const) {
-				instances = [{ ...instances[0], activity }, instances[1]];
-				for (const [action, body] of all) {
-					const res = await post(token, "live", action, body);
-					expect(res.status).toBe(409);
-					expect(await res.json()).toEqual({ error: "session_busy" });
-				}
-			}
-			for (const [action, body] of all) {
-				const res = await post(token, "stored", action, body);
-				expect(res.status).toBe(409);
-				expect(await res.json()).toEqual({ error: "session_not_running" });
-			}
-			expect(sent).toEqual([]);
-		});
-
-		it("refuses an entry that is malformed, not on the active branch, or, to fork, not a message of yours", async () => {
-			const token = await pair();
-			const refused = async (action: string, body: unknown) => {
-				const res = await post(token, "live", action, body);
-				expect(res.status).toBe(400);
-				expect(await res.json()).toEqual({ error: "invalid_entry" });
-			};
-			// Each would reach the pane as a command line: one token, nothing else.
-			for (const entryId of [undefined, 1, "", "cccc0003 x", "cccc0003\nclone", "../cccc0003"]) {
-				await refused("tree", { entryId });
-				await refused("fork", { entryId });
-			}
-			await refused("tree", { entryId: "eeee0005" });
-			await refused("fork", { entryId: "bbbb0002" });
-			// Gone back to the first reply: the second exchange is off the branch.
-			instances = [{ ...instances[0], leafId: "bbbb0002" }, instances[1]];
-			await refused("tree", { entryId: "dddd0004" });
-			await refused("fork", { entryId: "cccc0003" });
 			expect(sent).toEqual([]);
 		});
 	});
@@ -964,110 +847,6 @@ describe("remote HTTP API", () => {
 		});
 	});
 
-	describe("screen and keys", () => {
-		const keys = (token: string, id: string, body: unknown) =>
-			fetch(`${base}/api/sessions/${id}/keys`, {
-				method: "POST",
-				headers: authJson(token),
-				body: JSON.stringify(body),
-			});
-
-		beforeEach(() => {
-			instances = [
-				{ ...instances[0], activity: "awaiting_input" },
-				instances[1],
-				// A pi outside agent view's tmux: running, with no pane to read or type into.
-				{ id: "plain", status: "online", cwd: "/p", external: true, activity: "awaiting_input" },
-			];
-		});
-
-		it("gives the last 60 lines of a running session's pane, without colours", async () => {
-			const lines = Array.from({ length: 70 }, (_, i) => `line ${i}`);
-			screens.set("pi-live", [...lines.slice(0, -1), "\u001b[36m› Allow\u001b[0m"]);
-			const token = await pair();
-			const res = await fetch(`${base}/api/sessions/live/screen`, { headers: auth(token) });
-			expect(res.status).toBe(200);
-			const { lines: screen } = (await res.json()) as { lines: string[] };
-			expect(screen).toHaveLength(60);
-			expect(screen[0]).toBe("line 10");
-			expect(screen.at(-1)).toBe("› Allow");
-			expect(
-				(await fetch(`${base}/api/sessions/live/screen`, { method: "POST", headers: authJson(token) })).status,
-			).toBe(405);
-		});
-
-		it("presses allowed keys and types text into the session's own pane", async () => {
-			screens.set("pi-live", []);
-			const token = await pair();
-			const pressed = await keys(token, "live", { keys: ["Down"] });
-			expect(pressed.status).toBe(200);
-			expect(await pressed.json()).toEqual({ ok: true });
-			expect((await keys(token, "live", { text: "-rf; echo hi" })).status).toBe(200);
-			expect(typed).toEqual([
-				{ pane: "pi-live", keys: ["Down"] },
-				{ pane: "pi-live", text: "-rf; echo hi" },
-			]);
-			expect((await fetch(`${base}/api/sessions/live/keys`, { headers: auth(token) })).status).toBe(405);
-		});
-
-		it("refuses keys outside the allowlist, control characters, and anything but one of keys or text", async () => {
-			screens.set("pi-live", []);
-			const token = await pair();
-			for (const body of [
-				{},
-				{ keys: [] },
-				{ keys: "Enter" },
-				{ keys: ["C-c"] },
-				{ keys: ["Enter", 1] },
-				// One at a time: Escape and the next key would reach pi as an Alt chord.
-				{ keys: ["Escape", "Up"] },
-				{ text: "" },
-				{ text: 5 },
-				{ text: "x".repeat(1025) },
-				{ text: "yes\n" },
-				{ text: "a\tb" },
-				{ text: "\u001b[A" },
-				{ text: "a\u2028b" },
-				{ text: "a\u2029b" },
-				{ keys: ["Enter"], text: "y" },
-			]) {
-				const res = await keys(token, "live", body);
-				expect(res.status, JSON.stringify(body)).toBe(400);
-				expect(await res.json()).toEqual({ error: "invalid_keys" });
-			}
-			expect((await keys(token, "live", { text: "x".repeat(1024) })).status).toBe(200);
-			expect((await keys(token, "live", { keys: ["Escape"] })).status).toBe(200);
-			expect(typed).toHaveLength(2);
-		});
-
-		it("answers 404 for a stored session, one without a pane, and a pane that is gone", async () => {
-			screens.set("stored", ["not a pane"]);
-			screens.set("plain", ["not a pane"]);
-			const token = await pair();
-			for (const id of ["stored", "plain", "nope", "live"]) {
-				const screen = await fetch(`${base}/api/sessions/${id}/screen`, { headers: auth(token) });
-				expect(screen.status, id).toBe(404);
-				expect(await screen.json()).toEqual({ error: "unknown_session" });
-				const res = await keys(token, id, { keys: ["Enter"] });
-				expect(res.status, id).toBe(404);
-				expect(await res.json()).toEqual({ error: "unknown_session" });
-			}
-			expect(typed).toEqual([]);
-		});
-
-		it("answers 500, not 404, when tmux fails while the pane is there", async () => {
-			screens.set("pi-live", ["› Allow"]);
-			tmuxFails = true;
-			const token = await pair();
-			const screen = await fetch(`${base}/api/sessions/live/screen`, { headers: auth(token) });
-			expect(screen.status).toBe(500);
-			expect(await screen.json()).toEqual({ error: "internal_error" });
-			const res = await keys(token, "live", { text: "y" });
-			expect(res.status).toBe(500);
-			expect(await res.json()).toEqual({ error: "internal_error" });
-		});
-	});
-
 	it("only reads while no terminal on the Mac shows pi", async () => {
 		const token = await pair();
 		const list = async () =>
@@ -1140,6 +919,9 @@ describe("remote HTTP API", () => {
 		expect(res.status).toBe(201);
 		expect(await res.json()).toEqual({ pane: "pi-0000000a" });
 		expect((await start({ cwd: dir, task: "go" })).status).toBe(201);
+		// No pane lists its commands yet: a new session starts with none.
+		const command = await start({ cwd: dir, task: "/settings" });
+		expect([command.status, await command.json()]).toEqual([400, { error: "command_refused" }]);
 		expect(started).toEqual([
 			{ cwd: dir, task: "fix the build", model: "anthropic/claude-opus-5-5", launch },
 			{ cwd: dir, task: "go", launch },

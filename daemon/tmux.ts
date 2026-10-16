@@ -251,23 +251,9 @@ export class Tmux {
 		return screenLines(this.run(["capture-pane", "-p", "-t", `=${name}:`, "-S", `-${lines}`]));
 	}
 
-	/** What a session's pane shows, trailing blank lines dropped; on the main screen, `history` lines above it too. */
-	screen(name: string, history: number): string[] {
-		// A fullscreen pi is on the alternate screen: the main screen's history is from before it.
-		const alternate = this.run(["display-message", "-p", "-t", `=${name}:`, "#{alternate_on}"]).trim() === "1";
-		return screenLines(
-			this.run(["capture-pane", "-p", "-t", `=${name}:`, ...(alternate ? [] : ["-S", `-${history}`])]),
-		);
-	}
-
 	/** Press keys in a session's pane, by tmux key name (`Up`, `Enter`, …). */
 	sendKeys(name: string, keys: string[]): void {
 		this.run(["send-keys", "-t", `=${name}:`, ...keys]);
-	}
-
-	/** Type `text` into a session's pane as it is, never read as key names. */
-	sendText(name: string, text: string): void {
-		this.run(["send-keys", "-t", `=${name}:`, "-l", "--", literalArg(text)]);
 	}
 
 	/** Attach this terminal to `name`; returns when the client detaches or the server ends. */

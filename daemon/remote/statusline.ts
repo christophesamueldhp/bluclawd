@@ -1,12 +1,10 @@
 /**
  * What the phone's status bar shows beside a pane's report, as pistatusline shows it under pi on
- * the Mac: the git state of the session's directory, and the plan's usage limits from the cache
- * pistatusline keeps (never fetched here).
+ * the Mac: the git state of the session's directory; and, for pistatusline's own lines, the plan
+ * usage it keeps per provider (never fetched here).
  */
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 
 export interface GitInfo {
 	/** The branch, or the commit when detached. */
@@ -18,17 +16,8 @@ export interface GitInfo {
 	removed: number;
 }
 
-/** Only these four of the cache's fields: the rest (a token's hash among them) never leave it. */
-export interface UsageLimits {
-	sessionUsage?: number;
-	sessionResetAt?: string;
-	weeklyUsage?: number;
-	weeklyResetAt?: string;
-}
-
 export interface StatusLine {
 	git?: GitInfo;
-	limits?: UsageLimits;
 }
 
 /** Resolves git's stdout; rejects when git fails, times out or is missing. */
@@ -37,7 +26,6 @@ export type GitRun = (cwd: string, args: string[]) => Promise<string>;
 const GIT_TIMEOUT_MS = 2000;
 /** As pistatusline's gitCacheTtlSeconds: a phone polling the status spawns git at most this often per directory. */
 const GIT_TTL_MS = 5000;
-export const USAGE_CACHE = join(homedir(), ".cache", "ccstatusline", "usage.json");
 
 /** No fsmonitor hook, external diff or textconv runs, and no index lock is taken from under a pi using git. */
 export const runGit: GitRun = (cwd, args) =>
@@ -106,29 +94,6 @@ export function gitInfoCache(
 	};
 }
 
-/** Undefined when the cache is missing, unreadable or has none of the four. */
-export function readUsageLimits(path: string = USAGE_CACHE): UsageLimits | undefined {
-	let data: unknown;
-	try {
-		data = JSON.parse(readFileSync(path, "utf8"));
-	} catch {
-		return undefined;
-	}
-	if (!data || typeof data !== "object") return undefined;
-	const { sessionUsage, sessionResetAt, weeklyUsage, weeklyResetAt } = data as Record<string, unknown>;
-	const percent = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : undefined);
-	const time = (value: unknown) => (typeof value === "string" && !Number.isNaN(Date.parse(value)) ? value : undefined);
-	const limits: UsageLimits = Object.fromEntries(
-		Object.entries({
-			sessionUsage: percent(sessionUsage),
-			sessionResetAt: time(sessionResetAt),
-			weeklyUsage: percent(weeklyUsage),
-			weeklyResetAt: time(weeklyResetAt),
-		}).filter(([, value]) => value !== undefined),
-	);
-	return Object.keys(limits).length ? limits : undefined;
-}
-
 const isNumber = (value: unknown) => typeof value === "number" && Number.isFinite(value);
 const isTime = (value: unknown) => typeof value === "string" && !Number.isNaN(Date.parse(value));
 
@@ -170,14 +135,12 @@ export function readPlanUsage(path: string): Record<string, number | string | bo
 	return Object.keys(usage).length ? usage : undefined;
 }
 
-/** For a session's directory: its git state, cached, and the usage limits, read each time (the file is tiny). */
+/** For a session's directory: its git state, cached. */
 export function statusLine(
 	git: (cwd: string) => Promise<GitInfo | undefined> = gitInfoCache(),
-	usagePath: string = USAGE_CACHE,
 ): (cwd: string) => Promise<StatusLine> {
 	return async (cwd) => {
 		const info = await git(cwd);
-		const limits = readUsageLimits(usagePath);
-		return { ...(info ? { git: info } : {}), ...(limits ? { limits } : {}) };
+		return info ? { git: info } : {};
 	};
 }

@@ -122,18 +122,11 @@ export class ServerSupervisor {
 		settle(outcome);
 	}
 
-	/** The messages queued for a self-registered session, now delivered. A tree, fork or clone goes
-	 *  alone: what follows it is for the branch or session the pane moves to, which the next
-	 *  heartbeat comes from; so does a compact, which a prompt right behind it would find running. A
-	 *  move just behind a prompt would still find the pane idle and cut its turn short, so the pane
-	 *  registers again after a prompt only at its next heartbeat (the turn's start), not when woken. */
+	/** The messages queued for a self-registered session, now delivered. */
 	drainExternal(id: string): PaneMessage[] {
 		const entry = this.externalInstances.get(id);
 		if (!entry || entry.inbox.length === 0) return [];
-		const moves = entry.inbox.findIndex(
-			(m) => m.type === "tree" || m.type === "fork" || m.type === "clone" || m.type === "compact",
-		);
-		return entry.inbox.splice(0, moves === -1 ? entry.inbox.length : Math.max(moves, 1));
+		return entry.inbox.splice(0);
 	}
 
 	/** External instances, reaping any whose last heartbeat is older than the TTL. */

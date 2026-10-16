@@ -50,13 +50,9 @@ export type PaneMessage =
 	| { type: "prompt"; text: string; images?: PaneImage[] }
 	| { type: "abort" }
 	| { type: "rename"; name: string }
-	| { type: "compact" }
 	| { type: "set_model"; provider: string; id: string }
 	| { type: "set_thinking"; level: string }
 	| { type: "set_trust"; trust: "always" | "ask" | "never" }
-	| { type: "tree"; entryId: string }
-	| { type: "fork"; entryId: string }
-	| { type: "clone" }
 	| { type: "command"; text: string }
 	| { type: "stop_task"; id: string };
 
