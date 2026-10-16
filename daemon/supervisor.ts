@@ -44,10 +44,15 @@ export class ServerSupervisor {
 	/** The pin and order of panes that unregistered, by session file, for the stored row their
 	 *  hand-off saves next. */
 	private readonly quitMeta = new Map<string, Pick<InstanceRecord, "pinned" | "sortOrder">>();
+	/** The pin and order of stored rows deleted before a pane resuming them registered, by session
+	 *  file, for that pane's row. */
+	private readonly resumedMeta = new Map<string, Pick<InstanceRecord, "pinned" | "sortOrder">>();
 
 	/** Register/heartbeat a pane's pi. */
 	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = Date.now()): void {
 		const previous = this.externalInstances.get(record.id);
+		const resumed = record.sessionFile ? this.resumedMeta.get(record.sessionFile) : undefined;
+		if (record.sessionFile) this.resumedMeta.delete(record.sessionFile);
 		// A heartbeat restates what the session knows; its age and agent-view meta are kept here.
 		const kept = previous
 			? {
@@ -57,7 +62,7 @@ export class ServerSupervisor {
 				}
 			: {};
 		this.externalInstances.set(record.id, {
-			record: cloneInstance({ ...record, ...kept }),
+			record: cloneInstance({ ...record, ...kept, ...resumed }),
 			activity,
 			lastSeenAt: now,
 			inbox: previous?.inbox ?? [],
@@ -214,7 +219,16 @@ export class ServerSupervisor {
 			this.settleWait(instanceId, "none");
 			return true;
 		}
-		if (!getInstance(instanceId)) return false;
+		const stored = getInstance(instanceId);
+		if (!stored) return false;
+		// A pane resuming it keeps its pin and order: the phone's goes once its pane registered,
+		// agent view's before it has.
+		const meta = paneMeta(stored);
+		if (stored.sessionFile && meta) {
+			const pane = [...this.externalInstances.values()].find((e) => e.record.sessionFile === stored.sessionFile);
+			if (pane) pane.record = { ...pane.record, ...meta };
+			else this.resumedMeta.set(stored.sessionFile, meta);
+		}
 		removeInstance(instanceId);
 		return true;
 	}

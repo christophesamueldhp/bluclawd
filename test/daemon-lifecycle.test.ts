@@ -57,6 +57,37 @@ describe("agent-view stored rows", () => {
 		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/c.jsonl" }).pinned).toBe(true);
 	});
 
+	it("a stored row's pin carries over to the pane resuming it, deleted before or after it registers", () => {
+		const supervisor = new ServerSupervisor();
+		const pane = { status: "online" as const, cwd: "/p", createdAt: new Date().toISOString() };
+		const pinnedRow = (file: string) => {
+			const saved = supervisor.saveInstance({ cwd: "/p", sessionFile: file });
+			supervisor.setInstanceMeta(saved.id, { pinned: true, sortOrder: 3 });
+			return saved.id;
+		};
+		const listed = (id: string) => supervisor.listExternalInstances().find((e) => e.record.id === id)?.record;
+
+		// Agent view: the stored row goes as soon as its pane starts, before that pane registers.
+		supervisor.deleteInstance(pinnedRow("/nonexistent/mac.jsonl"));
+		supervisor.registerExternal({ ...pane, id: "pi-other", sessionFile: "/nonexistent/other.jsonl" }, "idle");
+		supervisor.registerExternal({ ...pane, id: "pi-mac", sessionFile: "/nonexistent/mac.jsonl" }, "idle");
+		supervisor.registerExternal({ ...pane, id: "pi-mac", sessionFile: "/nonexistent/mac.jsonl" }, "idle");
+		expect(listed("pi-mac")).toMatchObject({ pinned: true, sortOrder: 3 });
+		expect(listed("pi-other")?.pinned).toBeUndefined();
+		// Carried once: a later pane on that file is not pinned again.
+		supervisor.unregisterExternal("pi-mac");
+		supervisor.registerExternal({ ...pane, id: "pi-mac-2", sessionFile: "/nonexistent/mac.jsonl" }, "idle");
+		expect(listed("pi-mac-2")?.pinned).toBeUndefined();
+
+		// The phone: the stored row goes once its pane registered.
+		const phoneRow = pinnedRow("/nonexistent/phone.jsonl");
+		supervisor.registerExternal({ ...pane, id: "pi-phone", sessionFile: "/nonexistent/phone.jsonl" }, "idle");
+		supervisor.deleteInstance(phoneRow);
+		supervisor.registerExternal({ ...pane, id: "pi-phone", sessionFile: "/nonexistent/phone.jsonl" }, "idle");
+		expect(listed("pi-phone")).toMatchObject({ pinned: true, sortOrder: 3 });
+		expect(loadInstances()).toEqual([]);
+	});
+
 	it("rename and delete act on a stored row; the session file stays", () => {
 		const supervisor = new ServerSupervisor();
 		const saved = supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/s.jsonl" });

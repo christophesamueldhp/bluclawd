@@ -8,6 +8,7 @@ import type { InstanceSummary } from "../daemon/ipc/protocol.ts";
 import { RemoteControl } from "../daemon/remote/control.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { PushResult, WebPushSubscription } from "../daemon/remote/webpush.ts";
+import { supervisor } from "../daemon/supervisor.ts";
 import { Tmux } from "../daemon/tmux.ts";
 import { validP256dh } from "./support/push.ts";
 
@@ -161,6 +162,7 @@ describe("remote control switch", () => {
 		const START_TIMEOUT_MS = 90_000;
 		let instances: InstanceSummary[];
 		let deleted: string[];
+		let deleteInstance: (id: string) => boolean;
 		let tmuxCalls: string[][];
 		let base: string;
 		let token: string;
@@ -168,6 +170,10 @@ describe("remote control switch", () => {
 		beforeEach(async () => {
 			instances = [{ id: "stored", status: "stopped", cwd: dir, sessionFile: join(dir, "s.jsonl") }];
 			deleted = [];
+			deleteInstance = (id) => {
+				deleted.push(id);
+				return true;
+			};
 			tmuxCalls = [];
 			control = new RemoteControl({
 				store: new RemoteStore(join(dir, "remote.json")),
@@ -175,10 +181,7 @@ describe("remote control switch", () => {
 				send: () => true,
 				renameInstance: () => false,
 				setPinned: () => false,
-				deleteInstance: (id) => {
-					deleted.push(id);
-					return true;
-				},
+				deleteInstance: (id) => deleteInstance(id),
 				tmux: new Tmux(dir, (args) => {
 					tmuxCalls.push(args);
 					return "";
@@ -241,6 +244,22 @@ describe("remote control switch", () => {
 			expect(listSummaries().find((i) => i.id === id)).toMatchObject({ resuming: true });
 			await register(body.pane!);
 			expect(listSummaries().find((i) => i.id === id)).not.toHaveProperty("resuming");
+			await handleIpcRequest({ type: "unregister", instanceId: body.pane! });
+		});
+
+		it("a pinned stored row the phone resumes stays pinned as its pane's row", async () => {
+			vi.stubEnv("PI_SERVER_DIR", dir);
+			deleteInstance = (id) => supervisor.deleteInstance(id);
+			const saved = await handleIpcRequest({ type: "save", cwd: dir, sessionFile: join(dir, "s.jsonl") });
+			if (saved.type !== "ack" || !saved.instance) throw new Error("not saved");
+			const id = saved.instance.id;
+			await handleIpcRequest({ type: "meta", instanceId: id, pinned: true, sortOrder: 4 });
+			instances = listSummaries();
+			const { body } = await post(`/api/sessions/${id}/prompt`, { text: "carry on" });
+			await register(body.pane!);
+			const rows = listSummaries();
+			expect(rows.find((i) => i.id === id)).toBeUndefined();
+			expect(rows.find((i) => i.id === body.pane)).toMatchObject({ external: true, pinned: true, sortOrder: 4 });
 			await handleIpcRequest({ type: "unregister", instanceId: body.pane! });
 		});
 
