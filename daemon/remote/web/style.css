@@ -289,12 +289,16 @@ button.setting:active, .option:active { background: var(--message); }
 .task-out { margin: var(--s1) 0 0; padding: var(--s2) 10px; max-height: 40vh; overflow: auto; -webkit-overflow-scrolling: touch; border-radius: 8px; background: var(--bg); font: 11px/1.4 var(--mono); white-space: pre; -webkit-user-select: text; user-select: text; }
 .task .error { margin: var(--s1) 0 0; font-size: 13px; min-height: 0; }
 /* The new session's model, on its own line: its names are long. */
-.pick { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; text-align: left; }
+.pick { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--s2); height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; text-align: left; }
 .pick[hidden] { display: none; }
 .pick span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pick .icon { width: 18px; height: 18px; color: var(--muted); }
 /* The directory field's suggestions, right above it. */
-.composer .dirs { max-height: 35vh; margin: 0 calc(-1 * var(--s3)); }
+/* While a path is typed, the session list gives its room to the folder suggestions, which fill it
+   down to the field, right above the keyboard. */
+#app:has(#cwd:focus) :is(#rows, #banner, .search) { display: none; }
+#app:has(#cwd:focus) .composer.new { flex: 1; min-height: 0; }
+.composer .dirs { flex: 1 1 auto; min-height: 0; max-height: none; margin: 0 calc(-1 * var(--s3)); }
 .dirs .command b { font-family: inherit; font-size: 16px; }
 .banner.hint { display: flex; align-items: center; gap: 10px; }
 .banner.hint span { flex: 1; min-width: 0; }

@@ -29,7 +29,7 @@ import { barHtml, compactLines, elapsedText, settingsHtml, spanStyle, TRUST, tok
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.31";
+const VERSION = "0.0.32";
 const BANDS = [
 	["pinned", "Pinned"],
 	["needs", "Needs input"],
@@ -1163,7 +1163,7 @@ function updatePhoneSheet() {
 	const action = state.confirmDisconnect
 		? `<div class="confirm-delete"><span>Disconnect this phone? It will have to pair again.</span>
 <button class="unpair cancel" id="disconnect-cancel">Cancel</button><button class="unpair" id="disconnect-confirm">Disconnect</button></div>`
-		: `<button class="action danger" id="disconnect">Disconnect this phone<small>It stops reaching the Mac until it pairs again. Other phones are removed on the Mac.</small></button>`;
+		: `<button class="action danger" id="disconnect">Disconnect this phone<small>Only this one: it stops reaching the Mac until it pairs again. Other paired phones stay connected.</small></button>`;
 	const html = `<header class="sheet-bar"><h2>This phone</h2><button class="icon-btn close" id="sheet-close" aria-label="Close">${ICONS.close}</button></header>
 ${error}<div class="actions">${action}</div><p class="version">bluclawd ${VERSION}</p>`;
 	if (sheet.dataset.html === html) return;
@@ -1236,6 +1236,8 @@ function updateModels() {
 }
 
 function pickNewModel() {
+	// The keyboard down, so the sheet shows whole.
+	/** @type {HTMLElement | null} */ (document.activeElement)?.blur();
 	const toValue = (/** @type {{ provider: string, id: string }} */ m) => `${m.provider}/${m.id}`;
 	const groups = [{ options: [{ value: "", label: "Default model" }] }, ...modelGroups(state.models, toValue)];
 	openPicker({ title: "Model", groups, value: state.newModel }, (value) => {
@@ -1554,6 +1556,9 @@ function bindList() {
 		state.homeScreenHint = false;
 		updateList();
 	});
+	// Kept from taking the focus: the field losing it would hide this button (with no task typed yet)
+	// before the tap lands on it.
+	$("#new-model").addEventListener("pointerdown", (/** @type {Event} */ event) => event.preventDefault());
 	$("#new-model").addEventListener("click", pickNewModel);
 	const cwd = $("#cwd");
 	cwd.addEventListener("focus", () => {
