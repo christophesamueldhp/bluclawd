@@ -236,7 +236,50 @@ describe("pistatusline for the phone", () => {
 		return { renderer, requests };
 	};
 
-	it("renders the pane's pistatusline, giving it only the usage cache's four fields, and only for Anthropic", async () => {
+	it("gives the renderer the plan usage pistatusline keeps for the model's provider, only its usage fields", async () => {
+		const agent = join(dir, "plan-agent");
+		mkdirSync(join(agent, "pistatusline", "usage"), { recursive: true });
+		writeFileSync(
+			join(agent, "pistatusline", "usage", "opencode-go.json"),
+			JSON.stringify({
+				fetchedAt: "2026-10-16T10:00:00.000Z",
+				sessionUsage: 63,
+				sessionResetAt: "2026-10-16T12:00:00.000Z",
+				weeklyUsage: 21,
+				weeklyResetAt: "not a time",
+				apiKey: "secret",
+			}),
+		);
+		writeFileSync(
+			join(agent, "pistatusline", "usage", "anthropic.json"),
+			JSON.stringify({
+				fetchedAt: "2026-10-16T10:00:00.000Z",
+				sessionUsage: 8,
+				weeklyOpusUsage: 3,
+				extraUsageEnabled: true,
+				extraUsageCurrency: "USD",
+			}),
+		);
+		// The ccstatusline cache, which the Anthropic file outranks.
+		const usagePath = join(dir, "plan-ccstatusline.json");
+		writeFileSync(usagePath, JSON.stringify({ sessionUsage: 99 }));
+		const { renderer, requests } = fakeRenderer();
+		const render = pistatusline(renderer, usagePath);
+		const paths = { worker: "/w/render-worker.js", config: join(agent, "pistatusline", "settings.json") };
+		const withModel = (provider: string, id: string) => ({ ...report, model: { provider, id }, pistatusline: paths });
+		await render(session, withModel("opencode-go", "glm-5"), 52);
+		await render(session, withModel("anthropic", "claude-opus-4-5"), 52);
+		await render(session, withModel("kimi-coding", "k2"), 52);
+		await render(session, withModel("../../plan-ccstatusline", "x"), 52);
+		expect(requests.map((r) => r.request.usage)).toEqual([
+			{ sessionUsage: 63, sessionResetAt: "2026-10-16T12:00:00.000Z", weeklyUsage: 21 },
+			{ sessionUsage: 8, weeklyOpusUsage: 3, extraUsageEnabled: true, extraUsageCurrency: "USD" },
+			null,
+			null,
+		]);
+	});
+
+	it("falls back, for Anthropic only, to the ccstatusline cache's four fields", async () => {
 		const usagePath = join(dir, "usage.json");
 		writeFileSync(
 			usagePath,
@@ -249,7 +292,10 @@ describe("pistatusline for the phone", () => {
 		);
 		const { renderer, requests } = fakeRenderer();
 		const render = pistatusline(renderer, usagePath);
-		const paths = { worker: "/pi/pistatusline/dist/render-worker.js", config: "/agent/pistatusline/settings.json" };
+		const paths = {
+			worker: "/pi/pistatusline/dist/render-worker.js",
+			config: join(dir, "no-agent", "pistatusline", "settings.json"),
+		};
 		expect(await render(session, report, 52)).toBeUndefined();
 		expect(await render(session, { ...report, pistatusline: paths }, 52)).toEqual([[{ text: "line", bold: true }]]);
 		expect(requests[0]).toMatchObject({ path: paths.worker, request: { configPath: paths.config, width: 52 } });
@@ -267,7 +313,7 @@ describe("pistatusline for the phone", () => {
 		let now = 0;
 		const { renderer, requests } = fakeRenderer();
 		const render = pistatusline(renderer, join(dir, "none.json"), () => now);
-		const withPaths = { ...report, pistatusline: { worker: "/w/render-worker.js", config: "/c.json" } };
+		const withPaths = { ...report, pistatusline: { worker: "/w/render-worker.js", config: join(dir, "c.json") } };
 		await render(session, withPaths, 52);
 		await render(session, withPaths, 52);
 		expect(requests).toHaveLength(1);
