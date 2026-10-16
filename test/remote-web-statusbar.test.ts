@@ -4,10 +4,10 @@ import {
 	compactLines,
 	contrast,
 	elapsedText,
-	factsHtml,
+	settingsHtml,
 	spanStyle,
-	thinkingHtml,
 	tokens,
+	whereHtml,
 } from "../daemon/remote/web/statusbar.js";
 
 const now = Date.parse("2026-10-15T10:12:00Z");
@@ -65,29 +65,29 @@ describe("the chat's status bar", () => {
 	});
 });
 
-describe("the status sheet's pickers and facts", () => {
-	it("picks among the levels pi offers for the model, else shows the level", () => {
-		const picker = thinkingHtml(report);
-		expect(picker).toContain('<select id="thinking">');
-		expect(picker.match(/<option/g)).toHaveLength(4);
-		expect(picker).toContain("<option selected>high</option>");
-		expect(thinkingHtml({ models: [] })).toBe("<dt>Thinking</dt><dd>off</dd>");
+describe("the status sheet's settings and where it is", () => {
+	const models = [{ provider: "anthropic", id: "claude-opus", name: "Opus" }];
+
+	it("lists the model, thinking and trust as rows a tap picks another value for", () => {
+		const html = settingsHtml({ ...report, models });
+		expect(text(html)).toBe("Model Opus › Thinking high › Trust Always ›");
+		expect(html.match(/<button type="button" class="setting" data-pick="(\w+)"/g)).toHaveLength(3);
+		// No hint under trust: its name says enough.
+		expect(html).not.toContain("defaultProjectTrust");
 	});
 
-	it("shows the directory, git and the trust mode picker, and no plan usage", () => {
-		const html = factsHtml(report, "~/Projects/bluclawd");
-		expect(html).toContain("<dd>~/Projects/bluclawd</dd>");
-		expect(html).toContain("christophe · main");
+	it("shows a value no tap changes as a plain row, and no trust row for a pane without one", () => {
+		const html = settingsHtml({ models: [] });
+		expect(text(html)).toBe("Model None selected Thinking off");
+		expect(html).not.toContain("data-pick");
+	});
+
+	it("says where the session is in two grey lines, and no plan usage", () => {
+		const html = whereHtml(report, "~/Projects/bluclawd");
+		expect(html.match(/<p class="meta">/g)).toHaveLength(2);
+		expect(text(html)).toBe("~/Projects/bluclawd christophe · main +12 −3");
 		expect(html).not.toContain("limit");
-		expect(html).toContain('<select id="trust">');
-		// Words alone: an option cannot be styled, and iOS draws a bare ⏸ as a colour emoji.
-		expect(html).toContain('<option value="always" selected>Always</option>');
-		expect(html).toContain('<option value="ask">Ask</option>');
-		expect(html.match(/<option/g)).toHaveLength(3);
-	});
-
-	it("offers no trust picker for a pane that reports no trust mode", () => {
-		expect(factsHtml({ models: [] }, undefined)).toBe("");
+		expect(whereHtml({ models: [] }, undefined)).toBe("");
 	});
 });
 

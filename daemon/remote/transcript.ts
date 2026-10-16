@@ -37,6 +37,8 @@ export type RemoteMessage =
 			id: string;
 			toolCallId?: string;
 			toolName: string;
+			/** A `!` line's command, run by pi itself rather than by the model: it has no call. */
+			command?: string;
 			ok: boolean;
 			text: string;
 			truncated: boolean;
@@ -89,6 +91,9 @@ export interface Entry {
 		stopReason?: string;
 		errorMessage?: string;
 		command?: string;
+		output?: string;
+		exitCode?: number;
+		cancelled?: boolean;
 		details?: { diff?: unknown };
 		usage?: EntryUsage;
 	};
@@ -248,8 +253,12 @@ function toRemote(entry: Entry): RemoteMessage | undefined {
 				...(clipped ? { diff: clipped.text, diffTruncated: clipped.truncated } : {}),
 			};
 		}
-		case "bashExecution":
-			return typeof message.command === "string" ? { kind: "marker", id, text: `!${message.command}` } : undefined;
+		case "bashExecution": {
+			if (typeof message.command !== "string") return undefined;
+			const { text, truncated } = clip(message.output ?? "");
+			const ok = !message.cancelled && (message.exitCode === undefined || message.exitCode === 0);
+			return { kind: "toolResult", id, toolName: "bash", command: message.command, ok, text, truncated };
+		}
 		default:
 			return undefined;
 	}
@@ -366,6 +375,8 @@ export function loadOutput(
 		return undefined;
 	}
 	const entry = activeBranch(entries, leafId).find((e) => e.id === entryId);
-	if (entry?.type !== "message" || entry.message?.role !== "toolResult") return undefined;
+	if (entry?.type !== "message") return undefined;
+	if (entry.message?.role === "bashExecution") return clip(entry.message.output ?? "", OUTPUT_MAX);
+	if (entry.message?.role !== "toolResult") return undefined;
 	return clip(plainText(entry.message.content), OUTPUT_MAX);
 }

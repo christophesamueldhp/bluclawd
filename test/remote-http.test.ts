@@ -413,6 +413,21 @@ describe("remote HTTP API", () => {
 			expect(sent.map((s) => s.message.type)).toEqual(["prompt", "prompt"]);
 		});
 
+		it("types a `!` shell line into an idle pane's prompt, which runs it as pi's own shell", async () => {
+			reports.set("live", { models: [] });
+			expect(await send("!ls -la")).toEqual([409, "session_busy"]);
+			instances[0]!.activity = "idle";
+			expect(await send("!ls -la")).toEqual([202, undefined]);
+			expect(await send("!! git status")).toEqual([202, undefined]);
+			// A lone "!" is text, as pi reads it.
+			expect(await send("!")).toEqual([202, undefined]);
+			expect(sent.map((s) => s.message)).toEqual([
+				{ type: "command", text: "!ls -la" },
+				{ type: "command", text: "!! git status" },
+				{ type: "prompt", text: "!" },
+			]);
+		});
+
 		it("refuses one to a pane too old to list its commands, and sends a slash line with images as a prompt", async () => {
 			instances[0]!.activity = "idle";
 			reports.set("live", { models: [] });
@@ -1002,6 +1017,31 @@ describe("remote HTTP API", () => {
 		const token = await pair();
 		const res = await fetch(`${base}/api/directories`, { headers: auth(token) });
 		expect(await res.json()).toEqual({ directories: ["/new", "/old"] });
+	});
+
+	it("completes a typed directory path with the folders it may go on to", async () => {
+		for (const name of ["Projects", "photos", ".config", "Public"]) mkdirSync(join(dir, name));
+		writeFileSync(join(dir, "plan.txt"), "");
+		const token = await pair();
+		const complete = async (under: string) =>
+			(
+				await (
+					await fetch(`${base}/api/directories?under=${encodeURIComponent(under)}`, { headers: auth(token) })
+				).json()
+			).directories;
+		const home = process.env.HOME;
+		process.env.HOME = dir;
+		try {
+			// Whatever the case, folders only, the hidden ones once a "." is typed.
+			expect(await complete("~/p")).toEqual(["photos", "Projects", "Public"].map((n) => join(dir, n)));
+			expect(await complete(`${dir}/pr`)).toEqual([join(dir, "Projects")]);
+			expect(await complete("~/.c")).toEqual([join(dir, ".config")]);
+			expect(await complete("~/Projects/")).toEqual([]);
+			expect(await complete("~/missing/x")).toEqual([]);
+			expect(await complete("relative")).toEqual([]);
+		} finally {
+			process.env.HOME = home;
+		}
 	});
 
 	it("pages a transcript back from a message, and says whether older ones are left", async () => {

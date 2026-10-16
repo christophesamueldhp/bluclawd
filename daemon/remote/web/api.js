@@ -85,6 +85,9 @@ export const api = {
 	sessions: () => call("GET", "/api/sessions"),
 	/** @returns {Promise<string[]>} */
 	directories: async () => (await call("GET", "/api/directories")).directories,
+	/** The folders a typed path may go on to, as a shell's Tab offers them. @param {string} path @returns {Promise<string[]>} */
+	completeDirectory: async (path) =>
+		(await call("GET", `/api/directories?under=${encodeURIComponent(path)}`)).directories,
 	/** `model`: "provider/id", else pi's default. @param {string} cwd @param {string} task @param {string} [model] @returns {Promise<{ pane: string }>} */
 	start: (cwd, task, model) => call("POST", "/api/sessions", model ? { cwd, task, model } : { cwd, task }),
 	/** What a new session can start with: the running panes' models. @returns {Promise<import("./statusbar.js").ReportModel[]>} */

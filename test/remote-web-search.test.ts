@@ -20,7 +20,7 @@ const sessions = [
 const ids = (query: string) => filterSessions(sessions, query).map((s) => s.id);
 
 describe("searching the session list", () => {
-	it("keeps the rows whose name, directory or detail has the query, whatever the case", () => {
+	it("keeps the rows whose name, directory or detail has a word starting with the query, whatever the case", () => {
 		expect(ids("parser")).toEqual(["a"]);
 		expect(ids("BLUCLAWD")).toEqual(["a"]);
 		expect(ids("readme")).toEqual(["b"]);
@@ -28,19 +28,21 @@ describe("searching the session list", () => {
 		expect(ids("  api ")).toEqual(["c"]);
 	});
 
-	it("filters from the first letter: the home folder every path shares does not match", () => {
-		// "/Users/christophesamueldhp" has c, h, r, i, s, t, o, p, e, a, m, u, l and d in it.
-		expect(ids("c")).toEqual(["b", "c", "d"]);
-		expect(ids("h")).toEqual(["a"]);
+	it("filters from the first letter by words' starts: a letter inside a word, or the home folder, does not match", () => {
+		// "Reading README.md" has a "d" and "Fix the parser" an "e" inside a word; "/Users/christophesamueldhp" both.
+		expect(ids("c")).toEqual(["d"]);
+		expect(ids("d")).toEqual(["b"]);
+		expect(ids("e")).toEqual([]);
 		expect(ids("w")).toEqual(["b", "c"]);
-		expect(ids("u")).toEqual(["d"]);
 		expect(ids("b")).toEqual(["a", "d"]);
 	});
 
-	it("matches a directory's parts by their start", () => {
+	it("matches every field by its words' starts", () => {
 		expect(ids("blu")).toEqual(["a"]);
 		expect(ids("clawd")).toEqual([]);
 		expect(ids("work")).toEqual(["c"]);
+		expect(ids("arser")).toEqual([]);
+		expect(ids("readme.md")).toEqual(["b"]);
 	});
 
 	it("ignores accents, either way round", () => {
@@ -63,7 +65,7 @@ describe("searching the session list", () => {
 	});
 
 	it("keeps the list's order, so the bands stay as they were", () => {
-		expect(ids("e")).toEqual(["a", "b", "c", "d"]);
+		expect(ids("p")).toEqual(["a", "b", "d"]);
 	});
 });
 

@@ -61,7 +61,7 @@ export function sentText(text) {
 /**
  * What becomes of a sent prompt still waiting once its time is up. One whose session was seen
  * working since, or is working or waiting on a dialog now, waits on (its turn's end drops it). Else
- * it reached the session only if the transcript moved meanwhile, or it is a command, which may
+ * it reached the session only if the transcript moved meanwhile, or it is a command or a `!` line, which may
  * write nothing: it goes quietly. One that did neither never got there: it "fails", and goes back
  * into the reply box.
  * @param {{ prompt: string, started?: boolean, last: string }} pending `last`: the transcript's last message when sent
@@ -70,7 +70,7 @@ export function sentText(text) {
  */
 export function giveUp(pending, sessionState, last) {
 	if (pending.started || sessionState === "working" || sessionState === "needs") return "wait";
-	return pending.prompt.startsWith("/") || last !== pending.last ? "drop" : "fail";
+	return /^\s*[/!]/.test(pending.prompt) || last !== pending.last ? "drop" : "fail";
 }
 
 /**

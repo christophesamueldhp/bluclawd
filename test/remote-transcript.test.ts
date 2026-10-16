@@ -68,7 +68,7 @@ describe("remote transcript", () => {
 				display: true,
 				content: "Task done\nmore",
 			},
-			msg("b1", "x1", { role: "bashExecution", command: "ls", exitCode: 0 }),
+			msg("b1", "x1", { role: "bashExecution", command: "ls", output: "a.txt\n", exitCode: 0 }),
 			{ type: "compaction", id: "k1", parentId: "b1", summary: "…" },
 		);
 		expect(transcriptFrom(text, 50)).toEqual([
@@ -90,7 +90,7 @@ describe("remote transcript", () => {
 				truncated: false,
 			},
 			{ kind: "marker", id: "x1", text: "Task done" },
-			{ kind: "marker", id: "b1", text: "!ls" },
+			{ kind: "toolResult", id: "b1", toolName: "bash", command: "ls", ok: true, text: "a.txt\n", truncated: false },
 			{ kind: "marker", id: "k1", text: "Conversation compacted" },
 		]);
 	});

@@ -23,5 +23,6 @@ export const ICONS = {
 	send: svg(`<path d="M12 19V5M5 12l7-7 7 7"/>`),
 	attach: svg(`<path d="M12 5v14M5 12h14"/>`),
 	check: svg(`<path d="M20 6L9 17l-5-5"/>`),
+	updown: svg(`<path d="M8 9l4-4 4 4M8 15l4 4 4-4"/>`),
 	tasks: svg(`<path d="M4 17l6-6-6-6M12 19h8"/>`),
 };

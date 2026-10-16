@@ -14,21 +14,22 @@ import { giveUp, promptKey, refused, sentText, settle, shownText } from "./live.
 import { markdown } from "./markdown.js";
 import { loaderHtml } from "./mascot.js";
 import { diffSummary, markerKind, resultSummary } from "./output.js";
-import { filterSessions, matchCommands } from "./search.js";
-import { barHtml, compactLines, elapsedText, factsHtml, spanStyle, thinkingHtml, tokens } from "./statusbar.js";
+import { closePicker, modelGroups, openPicker } from "./picker.js";
+import { filterSessions, fold, matchCommands } from "./search.js";
+import { barHtml, compactLines, elapsedText, settingsHtml, spanStyle, TRUST, tokens, whereHtml } from "./statusbar.js";
 
 /**
  * `sessionId`: pi's, the same under another row id; `dialog`: the one it waits on, while it needs input.
  * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, sessionId?: string, dialog?: { kind: string, title?: string } }} Session
  */
-/** `aborted`: a reply its turn was stopped in, empty when stopped before it said anything. @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, aborted?: boolean, toolCallId?: string, toolName?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
+/** `aborted`: a reply its turn was stopped in, empty when stopped before it said anything. @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, aborted?: boolean, toolCallId?: string, toolName?: string, command?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
 /** @typedef {{ id: string, name: string, createdAt: string, lastUsedAt?: string, current: boolean }} Device `current`: this one */
 /** @typedef {import("./image.js").Attachment} Attachment */
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.30";
+const VERSION = "0.0.31";
 const BANDS = [
 	["pinned", "Pinned"],
 	["needs", "Needs input"],
@@ -119,6 +120,12 @@ const state = {
 	/** The open session's reply in progress, streamed by its pane. @type {LiveSnapshot | undefined} */ live: undefined,
 	/** @type {string[]} */ directories: [],
 	/** What a new session can start with. @type {import("./statusbar.js").ReportModel[]} */ models: [],
+	/** The new session's model, "provider/id": pi's default when empty. */
+	newModel: "",
+	/** The directory field holds what was typed or picked, not the most recent directory it starts with. */
+	cwdEdited: false,
+	/** The folders the directory field's path may go on to. @type {string[]} */
+	completions: [],
 	/** What the session list is searched for. */
 	query: "",
 	/**
@@ -779,9 +786,9 @@ function listShell() {
 <section class="scroll" id="rows"></section>
 <div class="backdrop" id="backdrop" hidden></div><section class="sheet" id="sheet" role="dialog" aria-label="This phone" hidden></section>
 <form class="composer new" id="new-task"><textarea id="task" rows="1" placeholder="New task…" aria-label="New task" maxlength="32768"></textarea>
-<select class="pick" id="new-model" aria-label="Model" hidden></select>
-<div class="where"><select id="cwd" aria-label="Directory"></select>
-<input id="cwd-other" placeholder="/path/to/project" aria-label="Directory path" autocapitalize="off" autocomplete="off" spellcheck="false" hidden>
+<button type="button" class="pick" id="new-model" aria-label="Model" aria-haspopup="dialog" hidden></button>
+<div class="commands dirs" id="cwd-list" role="listbox" aria-label="Directories" hidden></div>
+<div class="where"><input id="cwd" placeholder="~/path/to/project" aria-label="Directory" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="done">
 <button class="start" id="start" aria-label="Start">${ICONS.send}</button></div></form>`;
 }
 
@@ -928,7 +935,8 @@ function transcriptHtml(calls, running) {
 			// Stopped from the phone or by Esc on the Mac, as Claude Code shows it.
 			if (m.aborted) parts.push(`<div class="t interrupted">${outHtml(["Interrupted"])}</div>`);
 		} else if (m.kind === "toolResult" && !(m.toolCallId && calls.has(m.toolCallId))) {
-			parts.push(toolHtml(m.toolName ?? "tool", "", m, m.id));
+			// A `!` line's, which pi ran rather than the model: `● Bash(ls)`.
+			parts.push(toolHtml(m.toolName ?? "tool", m.command ?? "", m, m.id));
 		} else if (m.kind === "marker") {
 			const kind = markerKind(m.text ?? "", !prompted);
 			if (kind === "interrupted") parts.push(`<div class="t interrupted">${outHtml([m.text ?? ""])}</div>`);
@@ -1010,32 +1018,28 @@ function updateHtml() {
 		: "";
 }
 
-/** @param {Report} report */
-function modelOptions(report) {
-	const current = report.model;
-	let html = current ? "" : `<option value="" selected disabled>None selected</option>`;
-	report.models.forEach((model, index) => {
-		if (model.provider !== report.models[index - 1]?.provider) {
-			html += `${index ? "</optgroup>" : ""}<optgroup label="${esc(model.provider)}">`;
-		}
-		const selected = current?.provider === model.provider && current.id === model.id ? " selected" : "";
-		html += `<option value="${index}"${selected}>${esc(model.name ?? model.id)}</option>`;
-	});
-	return report.models.length ? `${html}</optgroup>` : html;
-}
-
-/** @param {Report["context"]} context */
+/** Its line, then its gauge. @param {Report["context"]} context */
 function contextHtml(context) {
-	if (!context) return "Unknown";
+	if (!context) return "";
 	if (context.tokens === null || context.percent === null) {
-		return `${esc(tokens(context.contextWindow))} window · known after the next reply`;
+		return `<div class="context"><span>Context</span><span>${esc(tokens(context.contextWindow))} · after the next reply</span></div>`;
 	}
 	const percent = Math.min(100, Math.max(0, context.percent));
 	// A class per 10%: the CSP allows no inline style for a width.
 	const step = Math.ceil(percent / 10) * 10;
 	const level = percent >= 85 ? " full" : percent >= 60 ? " high" : "";
-	return `<div class="gauge" role="meter" aria-label="Context used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${esc(Math.round(percent))}"><span class="p${esc(step)}${level}"></span></div>
-<small>${esc(tokens(context.tokens))} of ${esc(tokens(context.contextWindow))} (${esc(Math.round(percent))}%)</small>`;
+	return `<div class="context"><span>Context</span><span>${esc(tokens(context.tokens))} / ${esc(tokens(context.contextWindow))} · ${esc(Math.round(percent))}%</span></div>
+<div class="gauge" role="meter" aria-label="Context used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${esc(Math.round(percent))}"><span class="p${esc(step)}${level}"></span></div>`;
+}
+
+/** Tokens and cost on one line. @param {Report["usage"]} usage */
+function usageHtml(usage) {
+	if (!usage) return "";
+	const parts = [`↑ ${tokens(usage.input)}`, `↓ ${tokens(usage.output)}`];
+	if (usage.cacheRead) parts.push(`R ${tokens(usage.cacheRead)}`);
+	if (usage.cacheWrite) parts.push(`W ${tokens(usage.cacheWrite)}`);
+	parts.push(`$${usage.cost.toFixed(3)}`);
+	return `<p class="meta">${esc(parts.join(" · "))}</p>`;
 }
 
 /** @param {Session | undefined} session */
@@ -1052,15 +1056,8 @@ ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
 		const why = session && !session.alive ? "session_not_running" : "no_status";
 		return `${head}<p class="muted">${esc(errorText(why))}</p>`;
 	}
-	const usage = report.usage;
-	return `${head}<dl class="facts">
-<dt><label for="model">Model</label></dt><dd><select id="model">${modelOptions(report)}</select></dd>
-${thinkingHtml(report)}
-<dt>Context</dt><dd>${contextHtml(report.context)}</dd>
-<dt>Tokens</dt><dd>${usage ? `↑ ${esc(tokens(usage.input))} in · ↓ ${esc(tokens(usage.output))} out${usage.cacheRead ? ` · R ${esc(tokens(usage.cacheRead))}` : ""}${usage.cacheWrite ? ` · W ${esc(tokens(usage.cacheWrite))}` : ""}` : "Unknown"}</dd>
-<dt>Cost</dt><dd>${usage ? `$${esc(usage.cost.toFixed(3))}` : "Unknown"}</dd>
-${factsHtml(report, session && shortPath(session.cwd))}
-</dl>`;
+	return `${head}${settingsHtml(report)}
+<div class="numbers">${contextHtml(report.context)}${usageHtml(report.usage)}${whereHtml(report, session && shortPath(session.cwd))}</div>`;
 }
 
 /** Built once each time the sheet opens, so what is typed stays while the rest refreshes. @param {Session | undefined} session */
@@ -1116,6 +1113,7 @@ function render() {
 	const view = !getToken() ? "pair" : state.open ? `chat:${state.open}` : "list";
 	if (view !== shown) {
 		shown = view;
+		closePicker();
 		app.innerHTML = view === "pair" ? pairView() : view === "list" ? listShell() : chatShell();
 		if (view === "pair") bindPair();
 		else if (view === "list") bindList();
@@ -1173,39 +1171,117 @@ ${error}<div class="actions">${action}</div><p class="version">bluclawd ${VERSIO
 	sheet.dataset.html = html;
 }
 
-/** Recent directories, then "Other…" for a typed path; the choice survives a refresh. */
+/**
+ * The directory field, which starts with the most recent directory, and its suggestions while it
+ * has the focus: the recent directories that match what is typed, then the folders its path may go
+ * on to (completeDirectory). A recent one is a choice; a folder is a step, as a shell's Tab.
+ */
 function updateDirectories() {
-	const select = $("#cwd");
-	const options = state.directories.map((d) => `<option value="${esc(d)}">${esc(shortPath(d))}</option>`);
-	const html = [...options, `<option value="">Other…</option>`].join("");
-	if (select.dataset.html !== html) {
-		// Only "Other…" offered yet is not a choice: the most recent directory becomes the default.
-		const chosen = select.options.length > 1 ? select.value : undefined;
-		select.innerHTML = html;
-		select.dataset.html = html;
-		if (chosen !== undefined && [...select.options].some((o) => o.value === chosen)) select.value = chosen;
+	const field = $("#cwd");
+	if (!state.cwdEdited && field.value === "" && state.directories.length)
+		field.value = shortPath(state.directories[0]);
+	const list = $("#cwd-list");
+	const typed = field.value.trim();
+	const recent = state.directories
+		.map(shortPath)
+		.filter((d) => !state.cwdEdited || (d !== typed && fold(d).includes(fold(typed))));
+	const folders = state.cwdEdited ? state.completions.map(shortPath).filter((d) => !recent.includes(d)) : [];
+	/** @param {string} path @param {boolean} step */
+	const item = (path, step) => {
+		const cut = path.lastIndexOf("/");
+		return `<button type="button" class="command" role="option" data-dir="${esc(path)}"${step ? " data-step" : ""}><b>${esc(path.slice(cut + 1) || path)}</b><small>${esc(path.slice(0, cut + 1))}</small></button>`;
+	};
+	const html = [...recent.map((d) => item(d, false)), ...folders.map((d) => item(d, true))].join("");
+	if (list.dataset.html !== html) {
+		list.innerHTML = html;
+		list.dataset.html = html;
 	}
-	$("#cwd-other").hidden = select.value !== "";
+	list.hidden = html === "" || document.activeElement !== field;
 }
 
-/** The running panes' models by provider, after "Default" (pi's own choice); none offered, no picker. */
-function updateModels() {
-	const select = $("#new-model");
-	let html = `<option value="">Default</option>`;
-	state.models.forEach((model, index) => {
-		if (model.provider !== state.models[index - 1]?.provider) {
-			html += `${index ? "</optgroup>" : ""}<optgroup label="${esc(model.provider)}">`;
-		}
-		html += `<option value="${esc(`${model.provider}/${model.id}`)}">${esc(model.name ?? model.id)}</option>`;
-	});
-	if (state.models.length) html += "</optgroup>";
-	if (select.dataset.html !== html) {
-		const chosen = select.value;
-		select.innerHTML = html;
-		select.dataset.html = html;
-		if ([...select.options].some((o) => o.value === chosen)) select.value = chosen;
+/** @type {ReturnType<typeof setTimeout> | undefined} */
+let completing;
+
+/** The folders the typed path may go on to, unless more was typed meanwhile. */
+function completeDirectory() {
+	clearTimeout(completing);
+	const typed = $("#cwd").value.trim();
+	if (!/^[~/]/.test(typed)) {
+		state.completions = [];
+		updateDirectories();
+		return;
 	}
-	select.hidden = state.models.length === 0;
+	completing = setTimeout(async () => {
+		try {
+			const folders = await api.completeDirectory(typed);
+			if ($("#cwd")?.value.trim() !== typed) return;
+			state.completions = folders;
+			updateDirectories();
+		} catch (error) {
+			if (error instanceof Unauthorized) handleError(error);
+		}
+	}, 150);
+}
+
+/** The new session's model, pi's default unless one the running panes offer is picked; none offered, no picker. */
+function updateModels() {
+	const button = $("#new-model");
+	const model = state.models.find((m) => `${m.provider}/${m.id}` === state.newModel);
+	const html = `<span>${esc(model ? (model.name ?? model.id) : "Default model")}</span>${ICONS.updown}`;
+	if (button.dataset.html !== html) {
+		button.innerHTML = html;
+		button.dataset.html = html;
+	}
+	button.hidden = state.models.length === 0;
+}
+
+function pickNewModel() {
+	const toValue = (/** @type {{ provider: string, id: string }} */ m) => `${m.provider}/${m.id}`;
+	const groups = [{ options: [{ value: "", label: "Default model" }] }, ...modelGroups(state.models, toValue)];
+	openPicker({ title: "Model", groups, value: state.newModel }, (value) => {
+		state.newModel = value;
+		updateModels();
+	});
+}
+
+/**
+ * A setting of the status sheet, picked as the Mac would: the sheet shows the new value at once,
+ * and the pane's next report confirms it (or puts back the old one).
+ * @param {string} key its `data-pick`
+ */
+function pickSetting(key) {
+	const report = state.report;
+	if (!report) return;
+	if (key === "model") {
+		const current = String(
+			report.models.findIndex((m) => m.provider === report.model?.provider && m.id === report.model?.id),
+		);
+		openPicker(
+			{ title: "Model", groups: modelGroups(report.models, (_m, index) => String(index)), value: current },
+			(value) => {
+				if (value === current) return;
+				state.report = { ...report, model: report.models[Number(value)] };
+				render();
+				void switchModel(value);
+			},
+		);
+	} else if (key === "thinking") {
+		const options = (report.thinkingLevels ?? []).map((level) => ({ value: level, label: level }));
+		openPicker({ title: "Thinking", groups: [{ options }], value: report.thinkingLevel ?? "" }, (level) => {
+			if (level === report.thinkingLevel) return;
+			state.report = { ...report, thinkingLevel: level };
+			render();
+			void switchSetting((id) => api.setThinking(id, level));
+		});
+	} else if (key === "trust") {
+		const options = TRUST.map(([value, , label]) => ({ value, label }));
+		openPicker({ title: "Trust", groups: [{ options }], value: report.trust ?? "" }, (trust) => {
+			if (trust === report.trust) return;
+			state.report = { ...report, trust };
+			render();
+			void switchSetting((id) => api.setTrust(id, trust));
+		});
+	}
 }
 
 function updateChat() {
@@ -1478,10 +1554,43 @@ function bindList() {
 		state.homeScreenHint = false;
 		updateList();
 	});
-	$("#cwd").addEventListener("change", () => {
-		const other = $("#cwd-other");
-		other.hidden = $("#cwd").value !== "";
-		if (!other.hidden) other.focus();
+	$("#new-model").addEventListener("click", pickNewModel);
+	const cwd = $("#cwd");
+	cwd.addEventListener("focus", () => {
+		// The most recent directory, selected: typing replaces it, and its list offers the others.
+		// iOS ignores a selection made while it focuses the field.
+		if (!state.cwdEdited) requestAnimationFrame(() => cwd.setSelectionRange(0, cwd.value.length));
+		updateDirectories();
+	});
+	cwd.addEventListener("blur", updateDirectories);
+	cwd.addEventListener("input", () => {
+		state.cwdEdited = true;
+		updateDirectories();
+		completeDirectory();
+	});
+	// Done puts the keyboard away; the task starts from its own button.
+	cwd.addEventListener("keydown", (/** @type {KeyboardEvent} */ event) => {
+		if (event.key !== "Enter") return;
+		event.preventDefault();
+		cwd.blur();
+	});
+	const dirs = $("#cwd-list");
+	// Kept from taking the focus, so the keyboard stays up while a path is built.
+	dirs.addEventListener("pointerdown", (/** @type {Event} */ event) => event.preventDefault());
+	dirs.addEventListener("click", (/** @type {Event} */ event) => {
+		const item = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest("[data-dir]"));
+		if (!item) return;
+		state.cwdEdited = true;
+		const step = item.dataset.step !== undefined;
+		cwd.value = `${item.dataset.dir}${step ? "/" : ""}`;
+		// Its end in view, where the next folder goes.
+		cwd.setSelectionRange(cwd.value.length, cwd.value.length);
+		cwd.scrollLeft = cwd.scrollWidth;
+		if (step) {
+			state.completions = [];
+			completeDirectory();
+			updateDirectories();
+		} else cwd.blur();
 	});
 	$("#new-task").addEventListener("submit", (/** @type {Event} */ event) => {
 		event.preventDefault();
@@ -1492,7 +1601,10 @@ function bindList() {
 async function startTask() {
 	const task = $("#task");
 	const value = task.value.trim();
-	const cwd = $("#cwd").value || $("#cwd-other").value.trim();
+	// "~/a/" as a folder step left it: the same directory.
+	const cwd = $("#cwd")
+		.value.trim()
+		.replace(/(.)\/+$/, "$1");
 	if (!value || state.starting) return;
 	if (!cwd) {
 		showError("Type the directory to start it in.");
@@ -1501,7 +1613,7 @@ async function startTask() {
 	state.starting = {};
 	render();
 	try {
-		const { pane } = await api.start(cwd, value, $("#new-model").value || undefined);
+		const { pane } = await api.start(cwd, value, state.newModel || undefined);
 		task.value = "";
 		grow(task);
 		waitForPane(pane);
@@ -1615,6 +1727,8 @@ function bindChat() {
 	sheet.addEventListener("click", (/** @type {Event} */ event) => {
 		const target = /** @type {Element} */ (event.target);
 		if (target.closest("#sheet-close")) closeSheet();
+		else if (target.closest("[data-pick]"))
+			pickSetting(/** @type {HTMLElement} */ (target.closest("[data-pick]")).dataset.pick ?? "");
 		else if (target.closest("#pin")) void togglePin();
 		else if (target.closest("#delete, #delete-cancel")) {
 			state.confirmDelete = target.closest("#delete") !== null;
@@ -1644,12 +1758,6 @@ function bindChat() {
 			? pendingPicture(pic)
 			: pictures.get(pictureKey(pic.dataset.entry ?? "", pic.dataset.index ?? ""));
 		if (url) openViewer(url);
-	});
-	sheet.addEventListener("change", (/** @type {Event} */ event) => {
-		const target = /** @type {HTMLSelectElement} */ (event.target);
-		if (target.id === "model") void switchModel(target.value);
-		else if (target.id === "thinking") void switchSetting((id) => api.setThinking(id, target.value));
-		else if (target.id === "trust") void switchSetting((id) => api.setTrust(id, target.value));
 	});
 }
 
@@ -1728,11 +1836,10 @@ async function switchModel(value) {
 	if (!id || !model) return;
 	try {
 		await api.setModel(id, model.provider, model.id);
-		void loadStatus();
 	} catch (error) {
-		// Back to the model the pane reported.
-		$("#sheet").dataset.html = "";
 		handleError(error);
+		// Back to the model the pane reported, shown before it went.
+		void loadStatus();
 	}
 }
 
@@ -1742,11 +1849,10 @@ async function switchSetting(call) {
 	if (!id) return;
 	try {
 		await call(id);
-		void loadStatus();
 	} catch (error) {
-		// Back to what the pane reported.
-		$("#sheet").dataset.html = "";
 		handleError(error);
+		// Back to what the pane reported, shown before it went.
+		void loadStatus();
 	}
 }
 

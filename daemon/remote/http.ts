@@ -166,6 +166,36 @@ function expandHome(path: string): string {
 	return path === "~" ? homedir() : path.startsWith("~/") ? join(homedir(), path.slice(2)) : path;
 }
 
+/** Folders offered for a typed path at once. */
+const COMPLETIONS_MAX = 20;
+
+/**
+ * The folders a typed directory path may go on to, as a shell's Tab offers them: those in its
+ * parent whose name starts with its last part, whatever the case. Hidden ones only once a "." is
+ * typed. Folders only: a phone starts pi in one, and sees nothing else on the Mac this way.
+ */
+function completeDirectory(typed: string): string[] {
+	const path = expandHome(typed.trim());
+	if (!isAbsolute(path)) return [];
+	const cut = path.lastIndexOf("/") + 1;
+	const parent = path.slice(0, cut);
+	const start = path.slice(cut).toLowerCase();
+	try {
+		return readdirSync(parent, { withFileTypes: true })
+			.filter(
+				(e) =>
+					(e.isDirectory() || (e.isSymbolicLink() && isDirectory(join(parent, e.name)))) &&
+					e.name.toLowerCase().startsWith(start) &&
+					(start.startsWith(".") || !e.name.startsWith(".")),
+			)
+			.map((e) => join(parent, e.name))
+			.sort((a, b) => a.localeCompare(b))
+			.slice(0, COMPLETIONS_MAX);
+	} catch {
+		return [];
+	}
+}
+
 function promptIn(body: Record<string, unknown>, key: string): string {
 	const text = typeof body[key] === "string" ? body[key] : "";
 	if (!text.trim()) throw new HttpError(400, "empty_prompt");
@@ -364,6 +394,8 @@ async function handle(
 		return json(res, 201, { pane });
 	}
 	if (path === "/api/directories" && req.method === "GET") {
+		const typed = url.searchParams.get("under");
+		if (typed !== null) return json(res, 200, { directories: completeDirectory(typed) });
 		const sessions = remoteSessions(deps.listInstances()).sort((a, b) =>
 			(b.createdAt ?? "").localeCompare(a.createdAt ?? ""),
 		);
@@ -545,10 +577,12 @@ async function handle(
 		const images = imagesIn(body);
 		// A slash command, as pi reads one: typed into the pane's prompt (a phone's images never are).
 		const command = images ? undefined : commandName(text);
-		if (command !== undefined) {
+		// A `!` or `!!` line is pi's own shell, which only its prompt runs: sent to the model, it is text.
+		const shell = !images && /^!+\s*\S/.test(text.trimStart());
+		if (command !== undefined || shell) {
 			// Only one the pane lists for a phone: a pane that lists none (an older one) runs none.
 			const listed = deps.report(id)?.commands?.find((c) => c.name === command);
-			if (!listed || !phoneMayRun(listed)) return json(res, 400, { error: "command_refused" });
+			if (!shell && (!listed || !phoneMayRun(listed))) return json(res, 400, { error: "command_refused" });
 			// Only into an idle, empty prompt, which the pane checks again: its heartbeat may be 3s old.
 			if (session.busy) return json(res, 409, { error: "session_busy" });
 			if (session.draft) return json(res, 409, { error: "unsent_draft" });

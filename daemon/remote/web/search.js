@@ -7,21 +7,27 @@ export function fold(text) {
 	return text.normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
 }
 
+/** A text's words, folded: what a search matches the start of. @param {string} text */
+const wordsOf = (text) =>
+	fold(text)
+		.split(/[^\p{L}\p{N}]+/u)
+		.filter(Boolean);
+
 /**
- * The rows a search of the session list keeps: those where every word of the query is in the
- * name or the detail, or starts a part of the directory, whatever the case and accents. The
- * directory is taken without the home folder, and only by its parts' starts: the full path of every
- * session has nearly every letter in it, so a first letter would keep them all. An empty query
+ * The rows a search of the session list keeps: those where every word of the query starts a word
+ * of the name, the detail or the directory, whatever the case and accents, as iOS's own searches
+ * match. Not anywhere in a word: a first letter would keep nearly every row, its last message
+ * having that letter somewhere. The directory is taken without the home folder. An empty query
  * keeps them all, in their order.
  * @param {Session[]} sessions @param {string} query @returns {Session[]}
  */
 export function filterSessions(sessions, query) {
-	const words = fold(query).split(/\s+/).filter(Boolean);
+	const words = wordsOf(query);
 	if (!words.length) return sessions;
 	return sessions.filter((s) => {
-		const text = [fold(s.label ?? ""), fold(s.detail ?? "")];
-		const parts = fold((s.cwd ?? "").replace(/^\/(Users|home)\/[^/]+/, "")).split(/[^\p{L}\p{N}]+/u);
-		return words.every((word) => text.some((t) => t.includes(word)) || parts.some((p) => p.startsWith(word)));
+		const cwd = (s.cwd ?? "").replace(/^\/(Users|home)\/[^/]+/, "");
+		const starts = [...wordsOf(s.label ?? ""), ...wordsOf(s.detail ?? ""), ...wordsOf(cwd)];
+		return words.every((word) => starts.some((p) => p.startsWith(word)));
 	});
 }
 

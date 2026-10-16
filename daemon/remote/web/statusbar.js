@@ -24,8 +24,7 @@
 
 /**
  * pi's `defaultProjectTrust` values, as Alt+M cycles them, their footer badges, and their names in
- * the picker. U+FE0E keeps a glyph text: iOS draws a bare ⏸ as a colour emoji. An option cannot be
- * styled, so the picker shows words alone.
+ * the sheet. U+FE0E keeps a glyph text: iOS draws a bare ⏸ as a colour emoji.
  */
 export const TRUST = [
 	["always", "⏵\uFE0E⏵\uFE0E always", "Always"],
@@ -106,40 +105,48 @@ export function barHtml(report, cwd) {
 		.join("");
 }
 
-/** A picker of the levels pi offers for the model, else the level as text. @param {Report} report */
-export function thinkingHtml(report) {
-	const levels = report.thinkingLevels ?? [];
-	if (levels.length < 2) return `<dt>Thinking</dt><dd>${esc(report.thinkingLevel ?? "off")}</dd>`;
-	const options = levels
-		.map((level) => `<option${level === report.thinkingLevel ? " selected" : ""}>${esc(level)}</option>`)
-		.join("");
-	return `<dt><label for="thinking">Thinking</label></dt><dd><select id="thinking">${options}</select></dd>`;
+/**
+ * One of the sheet's settings: its name, and its value with a chevron when a tap picks another
+ * (app.js opens picker.js for its `data-pick`).
+ * @param {string} key @param {string} label @param {string} value @param {boolean} pickable
+ */
+function settingHtml(key, label, value, pickable) {
+	const inner = `<span class="label">${esc(label)}</span><span class="value">${esc(value)}</span>`;
+	return pickable
+		? `<button type="button" class="setting" data-pick="${key}">${inner}<span class="chevron" aria-hidden="true">›</span></button>`
+		: `<div class="setting">${inner}</div>`;
 }
 
 /**
- * The sheet's rows after the session's own: directory, git and the trust mode picker.
+ * The sheet's settings, as one grouped list: the model, the thinking level among those pi offers
+ * for it, and the trust mode when the pane reports one.
+ * @param {Report} report
+ */
+export function settingsHtml(report) {
+	const model = report.model ? (report.model.name ?? report.model.id) : "None selected";
+	const levels = report.thinkingLevels ?? [];
+	const rows = [
+		settingHtml("model", "Model", model, report.models.length > 0),
+		settingHtml("thinking", "Thinking", report.thinkingLevel ?? "off", levels.length > 1),
+	];
+	const trust = TRUST.find(([value]) => value === report.trust);
+	if (trust) rows.push(settingHtml("trust", "Trust", trust[2], true));
+	return `<div class="settings">${rows.join("")}</div>`;
+}
+
+/**
+ * Where the session is, under its numbers: the directory, then git's owner, branch and changes.
  * @param {Report} report @param {string | undefined} cwd as shown, `~` for home
  */
-export function factsHtml(report, cwd) {
-	const rows = [];
-	if (cwd) rows.push(`<dt>Directory</dt><dd>${esc(cwd)}</dd>`);
+export function whereHtml(report, cwd) {
+	const lines = [];
+	if (cwd) lines.push(esc(cwd));
 	const git = report.git;
 	if (git) {
 		const changes = changesHtml(git);
-		rows.push(
-			`<dt>Git</dt><dd>${git.owner ? `${esc(git.owner)} · ` : ""}${esc(git.branch)}${changes ? `<small>${changes}</small>` : ""}</dd>`,
-		);
+		lines.push(`${git.owner ? `${esc(git.owner)} · ` : ""}${esc(git.branch)}${changes ? ` ${changes}` : ""}`);
 	}
-	if (report.trust) {
-		const options = TRUST.map(
-			([value, , name]) =>
-				`<option value="${value}"${value === report.trust ? " selected" : ""}>${esc(name)}</option>`,
-		).join("");
-		rows.push(
-			`<dt><label for="trust">Trust</label></dt><dd><select id="trust">${options}</select><small>pi's defaultProjectTrust, as Alt+M cycles it: applies to projects opened from now on</small></dd>`,
-		);
-	}
-	return rows.join("");
+	return lines.map((line) => `<p class="meta">${line}</p>`).join("");
 }
 
 /** The 16 named terminal colours, as pistatusline's spans give them (xterm's). */

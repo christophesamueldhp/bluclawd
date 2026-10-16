@@ -198,7 +198,7 @@ button { -webkit-user-select: none; user-select: none; }
 /* The model and directory show once a task is being written (nothing starts without one), and while it starts. */
 .composer.new:not(:focus-within, .starting):has(textarea:placeholder-shown) :is(.pick, .where) { display: none; }
 .where { display: flex; gap: var(--s2); align-items: center; }
-.where select, .where input { flex: 1; min-width: 0; height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; }
+.where input { flex: 1; min-width: 0; height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; }
 .empty { color: var(--muted); text-align: center; margin: 40px var(--s4); }
 /* The mascot (mascot.js) rolls its eyes around its head while something loads: one 4 px square per pixel. */
 .loader { display: flex; justify-content: center; margin: 40px var(--s4); }
@@ -235,11 +235,29 @@ button { -webkit-user-select: none; user-select: none; }
 .sheet-bar .close { margin-right: calc(-1 * var(--s3)); color: var(--muted); }
 .sheet-tools { display: flex; align-items: center; }
 .version { margin: var(--s4) 0 0; color: var(--muted); font-size: 13px; text-align: center; }
-.facts { display: grid; grid-template-columns: auto 1fr; gap: 14px var(--s4); align-items: center; margin: var(--s2) 0 var(--s5); }
-.facts dt { color: var(--muted); font-size: 15px; }
-.facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
-.facts small { display: block; color: var(--muted); font-size: 13px; margin-top: var(--s1); }
-.facts select { width: 100%; height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; }
+/* The status sheet: its settings as one grouped list, as iOS's Settings, then its numbers in grey. */
+.settings, .options { border-radius: 12px; background: var(--panel); overflow: hidden; }
+.setting, .option { position: relative; display: flex; align-items: center; gap: var(--s3); width: 100%; min-height: 48px; padding: 0 var(--s4); border: 0; background: none; color: var(--text); font: inherit; text-align: left; }
+.setting + .setting::before, .option + .option::before { content: ""; position: absolute; top: 0; left: var(--s4); right: 0; border-top: 1px solid var(--line); }
+button.setting:active, .option:active { background: var(--message); }
+.setting .label { flex: 1; }
+.setting .value { min-width: 0; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.setting .chevron { margin-right: -4px; color: var(--dim); font-size: 22px; line-height: 1; }
+.numbers { display: flex; flex-direction: column; gap: 6px; margin: var(--s5) 0 var(--s4); }
+.context { display: flex; justify-content: space-between; gap: var(--s2); font-size: 15px; }
+.context span + span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.meta { margin: 0; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.gauge + .meta { margin-top: 2px; }
+/* A choice (picker.js), over everything but the image viewer. */
+.picker-backdrop { z-index: 12; }
+.sheet.picker { z-index: 13; max-height: calc(var(--app-h, 100dvh) * .7); }
+.picker .group { margin: var(--s3) var(--s1) 6px; color: var(--muted); font-size: 13px; font-weight: 600; }
+.option span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.option[aria-selected="true"] { color: var(--link); font-weight: 600; }
+.option .icon { width: 20px; height: 20px; }
+@keyframes rise { from { transform: translateY(100%); } }
+.sheet:not([hidden]) { animation: rise .22s ease-out; }
+@media (prefers-reduced-motion: reduce) { .sheet:not([hidden]) { animation: none; } }
 .gauge { display: block; height: 8px; border-radius: 4px; background: var(--panel); overflow: hidden; }
 .gauge span { display: block; height: 100%; border-radius: 4px; background: var(--accent); }
 .gauge span.high { background: var(--yellow); }
@@ -271,7 +289,13 @@ button { -webkit-user-select: none; user-select: none; }
 .task-out { margin: var(--s1) 0 0; padding: var(--s2) 10px; max-height: 40vh; overflow: auto; -webkit-overflow-scrolling: touch; border-radius: 8px; background: var(--bg); font: 11px/1.4 var(--mono); white-space: pre; -webkit-user-select: text; user-select: text; }
 .task .error { margin: var(--s1) 0 0; font-size: 13px; min-height: 0; }
 /* The new session's model, on its own line: its names are long. */
-.pick { height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; }
+.pick { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; text-align: left; }
+.pick[hidden] { display: none; }
+.pick span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick .icon { width: 18px; height: 18px; color: var(--muted); }
+/* The directory field's suggestions, right above it. */
+.composer .dirs { max-height: 35vh; margin: 0 calc(-1 * var(--s3)); }
+.dirs .command b { font-family: inherit; font-size: 16px; }
 .banner.hint { display: flex; align-items: center; gap: 10px; }
 .banner.hint span { flex: 1; min-width: 0; }
 .dismiss { flex: none; min-width: 44px; min-height: 44px; border: 0; background: none; color: inherit; font: inherit; font-size: 20px; }
