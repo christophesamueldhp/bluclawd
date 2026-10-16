@@ -1215,7 +1215,8 @@ export class AgentView implements Component, Focusable {
 		}
 	}
 
-	/** Leave pi itself (ctrl+c twice, exit words, /exit): background sessions keep running. */
+	/** Leave pi itself (ctrl+c twice, exit words, /exit): background sessions keep running, and this
+	 *  terminal's own session ends if it is idle (leaveViewAction). */
 	private quit(): void {
 		this.close();
 		this.opts.panes.detach();

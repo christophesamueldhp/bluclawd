@@ -112,6 +112,20 @@ export function exitAction(
 }
 
 /**
+ * What leaving pi from agent view does to this pane: the session `pi` started in this terminal
+ * ends with it while idle, as if quit from its own prompt; mid-turn it runs on in the background, as
+ * every other session does. A blank pane, with nothing to keep, ends.
+ */
+export function leaveViewAction(state: {
+	startedHere: boolean;
+	idle: boolean;
+	blank: boolean;
+}): "quit" | "kill" | "detach" {
+	if (state.blank) return "kill";
+	return state.startedHere && state.idle ? "quit" : "detach";
+}
+
+/**
  * How another window's prompt reaches this pi: queued behind a turn in progress, and a slash
  * command run as if typed here (an extension command, a skill, a prompt template). Not with
  * images: pi runs an extension command with its text alone, and the images would be lost.
@@ -238,6 +252,8 @@ const agentView: InlineExtension = {
 		// A normal session, as Claude Code's: the pane `pi` started in this terminal, until ← opens
 		// agent view. Quitting ends it, and so does closing its terminal.
 		let normal = false;
+		// The pane `pi` started in this terminal, which stays so once ← moved it to the background.
+		let startedHere = false;
 		// Set while tmux ends this pane when its terminal detaches or closes: a blank pane, or a
 		// normal session.
 		let endsOnDetach = false;
@@ -454,7 +470,7 @@ const agentView: InlineExtension = {
 				() => pi.events.emit("bluclawd:remote-want-report", true),
 			);
 			registration.start();
-			if (process.env[NORMAL_ENV]) normal = true;
+			if (process.env[NORMAL_ENV]) normal = startedHere = true;
 			delete process.env[NORMAL_ENV];
 			syncEndOnDetach(ctx);
 			stopPill?.();
@@ -673,7 +689,11 @@ const agentView: InlineExtension = {
 									await registration?.stop();
 									registration = undefined;
 								},
-								detach: () => leavePane(blank(ctx)),
+								detach: () => {
+									const action = leaveViewAction({ startedHere, idle: ctx.isIdle(), blank: blank(ctx) });
+									if (action === "quit") ctx.shutdown();
+									else leavePane(action === "kill");
+								},
 								startShell: (cwd, command) => panes.startShell(cwd, command),
 								listShells: () => panes.listShells(),
 								stopShell: (name) => panes.stopShell(name),

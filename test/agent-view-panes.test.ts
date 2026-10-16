@@ -7,7 +7,14 @@ import { ServerSupervisor } from "../daemon/supervisor.ts";
 import { HIDE_ENV, OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../daemon/tmux.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
-import { isBlankPane, paneArgs, promptContent, promptOptions, shutdownPlan } from "../ext/agent-view/index.ts";
+import {
+	isBlankPane,
+	leaveViewAction,
+	paneArgs,
+	promptContent,
+	promptOptions,
+	shutdownPlan,
+} from "../ext/agent-view/index.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
 
 const plainTheme = {
@@ -537,6 +544,15 @@ describe("promptOptions", () => {
 		// pi would run an extension command with its text alone: the images go as a plain message.
 		expect(promptOptions({ text: "/fix", images: [{}] }, true)).toEqual({});
 		expect(promptOptions({ text: "/fix", images: [] }, true)).toEqual({ expandPromptTemplates: true });
+	});
+});
+
+describe("leaveViewAction", () => {
+	it("ends the terminal's own session while idle, and leaves it running mid-turn as any other", () => {
+		expect(leaveViewAction({ startedHere: true, idle: true, blank: false })).toBe("quit");
+		expect(leaveViewAction({ startedHere: true, idle: false, blank: false })).toBe("detach");
+		expect(leaveViewAction({ startedHere: false, idle: true, blank: false })).toBe("detach");
+		expect(leaveViewAction({ startedHere: false, idle: true, blank: true })).toBe("kill");
 	});
 });
 
