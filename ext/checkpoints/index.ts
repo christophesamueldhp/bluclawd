@@ -14,9 +14,9 @@
  * ── Capture never touches the real index or working tree ─────────────────────
  * It works in a separate temporary index via `env GIT_INDEX_FILE=<tmp> git ...`
  * (POSIX-only; `ExecOptions` has no env passthrough):
- *   1. `read-tree HEAD` (skipped on an unborn HEAD), then `add -A`. Without the
- *      HEAD seed, tracked files matching .gitignore (the committed-then-ignored
- *      `.env` pattern) are missing from the tree and a restore DELETES them.
+ *   1. Copy the real index (or `read-tree HEAD` if it is missing), then `add -A`.
+ *      This keeps tracked files matching .gitignore, including staged additions;
+ *      without them a restore could delete files the snapshot never captured.
  *   2. `write-tree`, then `commit-tree [-p HEAD]` with fixed synthetic
  *      author/committer, so it never depends on the user's `git config`.
  *   3. `update-ref refs/bluclawd/checkpoints/<sessionId>/<sha>` keeps the commit
@@ -28,8 +28,8 @@
  * `message_end` handlers are awaited inline, so the capture runs detached and
  * its entry is appended once the sha resolves. `turnEntryId`/`subject` are read
  * at THAT point: extensions see a message's message_end before pi persists it.
- * `isCapturing` drops an overlapping background capture; the safety-net capture
- * before a restore bypasses it.
+ * Tool calls wait for the pending capture before executing. An overlapping
+ * message skips capture; the safety-net capture before a restore bypasses it.
  *
  * ── Restore is destructive and fail-closed ───────────────────────────────────
  * `git read-tree --reset -u <sha>` resets the index and working tree in one
@@ -56,9 +56,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
+import { copyFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -223,15 +223,44 @@ export async function captureCheckpoint(
 
 	const tmpIndex = join(tmpdir(), `bluclawd-checkpoint-${randomUUID()}.index`);
 	try {
-		// Seed with HEAD so `add -A` keeps tracked files that match .gitignore;
-		// without them a restore would delete those files.
 		const head = await headSha(cwd, exec);
-		if (head) {
-			const seed = await exec("env", [`GIT_INDEX_FILE=${tmpIndex}`, "git", "read-tree", head], {
-				cwd,
-				timeout: GIT_TIMEOUT_MS,
-			}).catch(() => undefined);
-			if (!seed || seed.code !== 0) return undefined;
+		const index = await exec("git", ["rev-parse", "--git-path", "index"], {
+			cwd,
+			timeout: GIT_TIMEOUT_MS,
+		}).catch(() => undefined);
+		if (index?.code !== 0 || !index.stdout.trim()) return undefined;
+		try {
+			await copyFile(resolve(cwd, index.stdout.trim()), tmpIndex);
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
+			if (head) {
+				const seed = await exec("env", [`GIT_INDEX_FILE=${tmpIndex}`, "git", "read-tree", head], {
+					cwd,
+					timeout: GIT_TIMEOUT_MS,
+				}).catch(() => undefined);
+				if (seed?.code !== 0) return undefined;
+			}
+		}
+
+		// Index optimization flags must not hide working-tree changes from the snapshot.
+		const flags = await exec("env", [`GIT_INDEX_FILE=${tmpIndex}`, "git", "ls-files", "-v", "-z", "--", ":/"], {
+			cwd,
+			timeout: GIT_TIMEOUT_MS,
+		}).catch(() => undefined);
+		if (flags?.code !== 0) return undefined;
+		const flagged = flags.stdout
+			.split("\0")
+			.filter((entry) => /^[a-zS] /.test(entry))
+			.map((entry) => entry.slice(2));
+		for (let i = 0; i < flagged.length; i += 100) {
+			for (const flag of ["--no-assume-unchanged", "--no-skip-worktree"]) {
+				const cleared = await exec(
+					"env",
+					[`GIT_INDEX_FILE=${tmpIndex}`, "git", "update-index", flag, "--", ...flagged.slice(i, i + 100)],
+					{ cwd, timeout: GIT_TIMEOUT_MS },
+				).catch(() => undefined);
+				if (cleared?.code !== 0) return undefined;
+			}
 		}
 
 		const add = await exec("env", [`GIT_INDEX_FILE=${tmpIndex}`, "git", "add", "-A"], {
@@ -538,7 +567,7 @@ async function restoreWithSafetyNet(
 	safetySubject: string,
 	intro: string,
 ): Promise<{ restored: boolean; safety?: CheckpointData }> {
-	// Bypasses the isCapturing guard: this is a foreground, user-awaited action.
+	// Captured directly: this is a foreground, user-awaited action.
 	// The captured tree doubles as the preview base, since `git diff <sha>`
 	// against the working tree would skip untracked files.
 	const safetySha = await captureCheckpoint(ctx.cwd, pi.exec, ctx.sessionManager.getSessionId());
@@ -642,9 +671,6 @@ export function agentCreatedFiles(entries: SessionEntry[]): Set<string> {
 	return paths;
 }
 
-/** Overlap guard for the message_end background capture. */
-let isCapturing = false;
-
 /**
  * Background captures this session that failed while `cwd` WAS a git repo;
  * reset on `session_start`. "Not a git repo" is expected and not counted —
@@ -657,17 +683,17 @@ let failedCaptureCount = 0;
  * (bootstrap + trust-resolving pass).
  */
 export function factory(pi: ExtensionAPI): void {
+	let pendingCapture: Promise<void> | undefined;
 	function checkpointUserMessage(ctx: ExtensionContext, message: unknown): void {
-		if (isCapturing) return; // an in-flight capture: this message goes without a checkpoint
-		isCapturing = true;
+		if (pendingCapture) return; // an in-flight capture: this message goes without a checkpoint
 		const sessionId = ctx.sessionManager.getSessionId();
-		void captureCheckpoint(ctx.cwd, pi.exec, sessionId)
+		pendingCapture = captureCheckpoint(ctx.cwd, pi.exec, sessionId)
 			.then(async (sha) => {
 				// Read AFTER the capture: pi persists the message after its message_end handlers.
 				const { turnEntryId, subject } = findTurnContext(ctx.sessionManager.getBranch(), message);
 				if (sha) {
 					pi.appendEntry(CHECKPOINT_CUSTOM_TYPE, { sha, turnEntryId, subject });
-					// Fire-and-forget, like capture itself — doesn't gate isCapturing below.
+					// Pruning does not delay tool execution.
 					void pruneOldCheckpointRefs(ctx.cwd, pi.exec, sessionId, ctx.sessionManager.getBranch());
 					return;
 				}
@@ -685,7 +711,7 @@ export function factory(pi: ExtensionAPI): void {
 			})
 			.catch(() => {})
 			.finally(() => {
-				isCapturing = false;
+				pendingCapture = undefined;
 			});
 	}
 
@@ -739,6 +765,7 @@ export function factory(pi: ExtensionAPI): void {
 	// Untracked files before each creating tool call, by toolCallId.
 	const untrackedBefore = new Map<string, Set<string>>();
 	pi.on("tool_call", async (event, ctx) => {
+		await pendingCapture;
 		if (!CREATING_TOOLS.has(event.toolName)) return;
 		const before = await untrackedFiles(ctx.cwd, pi.exec);
 		if (before) untrackedBefore.set(event.toolCallId, before);
@@ -807,7 +834,7 @@ export function factory(pi: ExtensionAPI): void {
 
 			// The current tree: the base for each row's changes and the restore preview,
 			// and the safety net if a restore follows (unused, its ref goes with the next prune).
-			// Bypasses the isCapturing guard: this is a foreground, user-awaited action.
+			// Captured directly: this is a foreground, user-awaited action.
 			const currentSha = await captureCheckpoint(ctx.cwd, pi.exec, ctx.sessionManager.getSessionId());
 			// What changed since each point: its checkpoint to the next newer one, or to now.
 			// A failed diff (no checkpoint, or its commit is gone) means no code restore.

@@ -376,6 +376,11 @@ function expandVars(s: string): string {
 	return s.replace(/\$\{(\w+)\}|\$(\w+)/g, (m, braced, bare) => process.env[braced ?? bare] ?? m);
 }
 
+/** Shell words retain quoted/escaped whitespace; operators stay separate for redirects. */
+function shellWords(command: string): string[] {
+	return command.match(/(?:\\[\s\S]|'[^']*'|"(?:\\[\s\S]|[^"\\])*"|[^\s'"\\<>;&|()])+|[<>]+&?/g) ?? [];
+}
+
 const GLOB_CHARS = /[*?[]/;
 /** Directory entries one glob may scan; past this it is denied rather than half-checked. */
 const MAX_GLOB_ENTRIES = 10_000;
@@ -448,13 +453,22 @@ function bashPathCandidates(subjects: string[], cwd: string): string[] {
 	for (const s of subjects) {
 		const plain = expandVars(dequote(s));
 		for (const m of plain.matchAll(/[<>]+&?\s*([^\s<>&|;]+)/g)) redirects.add(m[1]);
-		const cd = /^cd\s+(\S+)/.exec(plain);
-		if (cd) bases.add(resolveToCwd(homeExpand(cd[1]), cwd));
-		for (const token of plain.replace(/\d*[<>]+&?/g, " ").split(/\s+/)) {
-			// `--file=x`, `if=/dev/sda`: the value is the path.
-			const value = token.includes("=") ? token.slice(token.indexOf("=") + 1) : "";
-			if (value) words.add(value);
-			if (token && !token.startsWith("-")) words.add(token);
+		const forms = [
+			plain.replace(/\d*[<>]+&?/g, " ").split(/\s+/),
+			shellWords(s).map((word) => expandVars(dequote(word))),
+		];
+		for (const tokens of forms) {
+			if (tokens[0] === "cd" && tokens[1]) bases.add(resolveToCwd(homeExpand(tokens[1]), cwd));
+			for (const [i, token] of tokens.entries()) {
+				if (/^[<>]+&?$/.test(token)) {
+					if (tokens[i + 1]) redirects.add(tokens[i + 1]);
+					continue;
+				}
+				// `--file=x`, `if=/dev/sda`: the value is the path.
+				const value = token.includes("=") ? token.slice(token.indexOf("=") + 1) : "";
+				if (value) words.add(value);
+				if (token && !token.startsWith("-")) words.add(token);
+			}
 		}
 	}
 	const out = new Set<string>();

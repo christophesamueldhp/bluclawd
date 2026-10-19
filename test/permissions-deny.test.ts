@@ -156,6 +156,21 @@ describe("deniedBy", () => {
 		expect(denied(["Read(/proj/**)"], "bash", { command: "npm test" })).toBe(false);
 	});
 
+	it("preserves quoted and escaped whitespace in bash paths", () => {
+		const rules = ["Read(private dir/**)"];
+		for (const command of [
+			"cat 'private dir/key'",
+			'cat "private dir/key"',
+			"cat private\\ dir/key",
+			"cat 'private 'dir/key",
+			"cd 'private dir' && cat ./key",
+		]) {
+			expect(denied(rules, "bash", { command }), command).toBe(true);
+		}
+		expect(denied(["Edit(private file)"], "bash", { command: "echo x > 'private file'" })).toBe(true);
+		expect(denied(rules, "bash", { command: "cat 'public dir/key'" })).toBe(false);
+	});
+
 	it("expands a command's globs the way the shell will", () => {
 		const dir = mkdtempSync(join(tmpdir(), "deny-glob-"));
 		try {

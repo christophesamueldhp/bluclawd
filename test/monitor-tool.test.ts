@@ -117,6 +117,48 @@ describe("monitor tool", () => {
 		expect(sent.length).toBe(afterExit);
 	});
 
+	it("stops sustained overload even while refilled tokens deliver occasional events", async () => {
+		let onDataRef!: (b: Buffer) => void;
+		const exec: BackgroundExec = (_c, _d, { onData, signal }) =>
+			new Promise((_resolve, reject) => {
+				onDataRef = onData;
+				signal?.addEventListener("abort", () => reject(new Error("aborted")));
+			});
+		const registry = new BackgroundJobRegistry({ outputRoot: null });
+		const tool = createMonitorTool({ cwd: "/", exec, registry, sendMessage: () => {} });
+		await tool.execute("c1", { command: "x", description: "d" }, undefined, undefined, undefined as any);
+		for (let i = 0; i < 300; i++) {
+			onDataRef(Buffer.from(`${i}\n`));
+			await vi.advanceTimersByTimeAsync(200);
+		}
+		expect(registry.list()[0]?.stopReason).toContain("Monitor stopped — too much output");
+	});
+
+	it("resets the overload window after the source has recovered", async () => {
+		let onDataRef!: (b: Buffer) => void;
+		const exec: BackgroundExec = (_c, _d, { onData }) =>
+			new Promise(() => {
+				onDataRef = onData;
+			});
+		const registry = new BackgroundJobRegistry({ outputRoot: null });
+		const tool = createMonitorTool({
+			cwd: "/",
+			exec,
+			registry,
+			sendMessage: () => {},
+			rateLimit: { capacity: 1, refillMs: 1000, maxSuppressMs: 2000 },
+		});
+		await tool.execute("c1", { command: "x", description: "d" }, undefined, undefined, undefined as any);
+		for (let episode = 0; episode < 2; episode++) {
+			for (let i = 0; i < 6; i++) {
+				onDataRef(Buffer.from(`${i}\n`));
+				await vi.advanceTimersByTimeAsync(250);
+			}
+			await vi.advanceTimersByTimeAsync(1500);
+		}
+		expect(registry.list()[0]?.killed).toBe(false);
+	});
+
 	it("reports how many events it suppressed once the bucket refills", async () => {
 		let onDataRef!: (b: Buffer) => void;
 		const exec: BackgroundExec = (_c, _d, { onData }) =>

@@ -243,6 +243,8 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 			const bucket = new TokenBucket(rateLimit);
 			let suppressed = 0;
 			let suppressedSince: number | undefined;
+			let lastSuppressedAt: number | undefined;
+			let overloadSuppressed = 0;
 			const batcher = new EventBatcher({
 				delayMs: BATCH_WINDOW_MS,
 				// Every line of a batch is one event; eventText applies the caps.
@@ -266,12 +268,20 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 				// exit guard alone would let it steer on until it finally died.
 				if (job.exit || job.killed) return;
 				const now = Date.now();
+				// A refilled token alone is not recovery while other batches are still suppressed.
+				if (lastSuppressedAt !== undefined && now - lastSuppressedAt >= rateLimit.refillMs) {
+					suppressedSince = undefined;
+					lastSuppressedAt = undefined;
+					overloadSuppressed = 0;
+				}
 				if (!bucket.take(now)) {
 					suppressed++;
+					overloadSuppressed++;
 					suppressedSince ??= now;
+					lastSuppressedAt = now;
 					if (now - suppressedSince > rateLimit.maxSuppressMs) {
 						registry.kill(job.id, {
-							reason: `[Monitor stopped — too much output (${suppressed} events suppressed over ${Math.round((now - suppressedSince) / 1000)}s). Restart with a more selective source.]`,
+							reason: `[Monitor stopped — too much output (${overloadSuppressed} events suppressed over ${Math.round((now - suppressedSince) / 1000)}s). Restart with a more selective source.]`,
 						});
 					}
 					return;
@@ -283,7 +293,6 @@ export function createMonitorTool(deps: MonitorToolDeps): ToolDefinition<typeof 
 							]
 						: [];
 				suppressed = 0;
-				suppressedSince = undefined;
 				registry.recordEvent(job.id);
 				deps.sendMessage(monitorEventMessage(job, [...notice, ...lines]), EVENT_DELIVERY);
 			};

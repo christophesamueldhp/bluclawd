@@ -2,7 +2,12 @@ import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	SessionEntry,
+	SessionMessageEntry,
+} from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	agentCreatedFiles,
@@ -298,6 +303,35 @@ describe("captureCheckpoint", () => {
 		expect(statusBefore).toEqual([" M a.txt", "?? new.txt"]);
 		const leftovers = (await readdir(tmpdir())).filter((f) => f.startsWith("bluclawd-checkpoint-"));
 		expect(leftovers).toEqual([]);
+	});
+
+	it("captures staged additions that match .gitignore without changing the real index", async () => {
+		const { dir, exec, git, write, status } = await makeRepo();
+		await write("staged.txt", "staged\n");
+		await git("add", "staged.txt");
+		await write(".gitignore", "staged.txt\n");
+		await write("staged.txt", "working tree\n");
+		const indexBefore = await readFile(join(dir, ".git", "index"));
+		const statusBefore = await status();
+
+		const sha = await capture(dir, exec);
+
+		expect(await git("show", `${sha}:staged.txt`)).toBe("working tree\n");
+		expect(await readFile(join(dir, ".git", "index"))).toEqual(indexBefore);
+		expect(await status()).toEqual(statusBefore);
+	});
+
+	it.each(["--assume-unchanged", "--skip-worktree"])("does not inherit %s from the real index", async (flag) => {
+		const { dir, exec, git, write } = await makeRepo();
+		await mkdir(join(dir, "sub"));
+		await git("update-index", flag, "a.txt");
+		await write("a.txt", "working tree\n");
+		const indexBefore = await readFile(join(dir, ".git", "index"));
+
+		const sha = await capture(join(dir, "sub"), exec);
+
+		expect(await git("show", `${sha}:a.txt`)).toBe("working tree\n");
+		expect(await readFile(join(dir, ".git", "index"))).toEqual(indexBefore);
 	});
 
 	it("records the sha under refs/bluclawd/checkpoints/<sessionId>/ with the commit as parent", async () => {
@@ -681,6 +715,62 @@ describe("session_before_fork", () => {
 });
 
 describe("message_end capture", () => {
+	it("holds tool calls until the prompt's checkpoint has captured the working tree", async () => {
+		const { dir, exec, git, write } = await makeRepo();
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let capturing = false;
+		const delayed: Exec = async (command, args, options) => {
+			if (args.includes("add")) {
+				capturing = true;
+				await gate;
+			}
+			return exec(command, args, options);
+		};
+		const entries: SessionEntry[] = [];
+		const { handlers } = loadFactory(delayed, entries);
+		const { ctx } = makeCtx(dir, entries);
+		const prompt = userEntry("u1", "change a.txt");
+		await handlers.get("message_end")?.({ message: (prompt as SessionMessageEntry).message }, ctx);
+		entries.push(prompt);
+		await waitFor(() => capturing);
+
+		let toolStarted = false;
+		const pending = handlers
+			.get("tool_call")?.({ toolName: "edit", toolCallId: "e1" }, ctx)
+			.then(async () => {
+				toolStarted = true;
+				await write("a.txt", "after tool write\n");
+			});
+		try {
+			await Promise.resolve();
+			expect(toolStarted).toBe(false);
+		} finally {
+			release();
+			await pending;
+			await waitFor(() => listCheckpoints(entries).length > 0);
+		}
+		const [checkpoint] = listCheckpoints(entries);
+		expect(await git("show", `${checkpoint.sha}:a.txt`)).toBe("base\n");
+	});
+
+	it("releases tool calls and warns when checkpoint capture fails", async () => {
+		const { dir, exec } = await makeRepo();
+		const entries: SessionEntry[] = [];
+		const { handlers } = loadFactory(failOnce(exec, "write-tree"), entries);
+		const { ctx, notices } = makeCtx(dir, entries);
+		const prompt = userEntry("u1", "change a.txt");
+		await handlers.get("message_end")?.({ message: (prompt as SessionMessageEntry).message }, ctx);
+		entries.push(prompt);
+
+		await handlers.get("tool_call")?.({ toolName: "edit", toolCallId: "e1" }, ctx);
+
+		expect(listCheckpoints(entries)).toEqual([]);
+		expect(notices.some((notice) => notice.message.includes("Checkpoint capture failed"))).toBe(true);
+	});
+
 	it("checkpoints a user message, labeled by that message even when a later one lands first", async () => {
 		// pi persists a message only after extensions see its message_end, so the
 		// entry appears while the capture's git calls are in flight, possibly
