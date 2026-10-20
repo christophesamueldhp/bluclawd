@@ -34,7 +34,21 @@ export interface SandboxEngine {
 export type SandboxStatus = { kind: "off" } | { kind: "ready" } | { kind: "unavailable"; reason: string };
 
 // Shared, since the sandbox extension and background-bash each load their own copy of this module.
-const state = sharedRef<{ status: SandboxStatus; engine?: SandboxEngine }>("sandbox", { status: { kind: "off" } });
+const state = sharedRef<{
+	status: SandboxStatus;
+	engine?: SandboxEngine;
+	/** Whether `srt` is initialized, which `markSandboxUnavailable` does not undo. */
+	initialized: boolean;
+	ask: AskNetwork;
+	/** Start and stop run one at a time, in call order. */
+	queue: Promise<unknown>;
+}>("sandbox", { status: { kind: "off" }, initialized: false, ask: async () => false, queue: Promise.resolve() });
+
+function serialized<T>(task: () => Promise<T>): Promise<T> {
+	const run = state.get().queue.then(task);
+	state.set({ ...state.get(), queue: run.catch(() => undefined) });
+	return run;
+}
 
 const LINUX_HINT =
 	"install bubblewrap and socat (apt install bubblewrap socat); on Ubuntu 24.04+ also allow unprivileged user namespaces, see the README";
@@ -58,7 +72,7 @@ async function engine(): Promise<SandboxEngine> {
 	if (current) return current;
 	// Loaded when a sandbox first starts, so a session without one never loads it.
 	const { SandboxManager } = await import("@anthropic-ai/sandbox-runtime");
-	const loaded = SandboxManager as unknown as SandboxEngine;
+	const loaded: SandboxEngine = SandboxManager;
 	setSandboxEngine(loaded);
 	return loaded;
 }
@@ -67,19 +81,25 @@ export function markSandboxUnavailable(reason: string): SandboxStatus {
 	return setStatus({ kind: "unavailable", reason });
 }
 
-export async function startSandbox(
+export function startSandbox(
 	config: RuntimeConfig,
 	ask: AskNetwork,
 	platform: NodeJS.Platform = process.platform,
 ): Promise<SandboxStatus> {
+	return serialized(() => start(config, ask, platform));
+}
+
+async function start(config: RuntimeConfig, ask: AskNetwork, platform: NodeJS.Platform): Promise<SandboxStatus> {
+	// `srt` keeps the callback it gets at initialize, so it gets one that follows the latest session's.
+	state.set({ ...state.get(), ask });
 	if (platform === "win32") {
 		return markSandboxUnavailable("the sandbox needs macOS, Linux or WSL2; on Windows run pi in WSL2");
 	}
 	try {
 		const sandbox = await engine();
-		if (state.get().status.kind === "ready") {
+		if (state.get().initialized) {
 			sandbox.updateConfig(config);
-			return sandboxStatus();
+			return setStatus({ kind: "ready" });
 		}
 		if (!sandbox.isSupportedPlatform()) return markSandboxUnavailable(`the sandbox does not support ${platform}`);
 		const { errors } = sandbox.checkDependencies();
@@ -88,17 +108,20 @@ export async function startSandbox(
 				platform === "linux" ? `${errors.join("; ")}: ${LINUX_HINT}` : errors.join("; "),
 			);
 		}
-		await sandbox.initialize(config, ask, true);
+		await sandbox.initialize(config, (request) => state.get().ask(request), true);
+		state.set({ ...state.get(), initialized: true });
 		return setStatus({ kind: "ready" });
 	} catch (error) {
 		return markSandboxUnavailable(error instanceof Error ? error.message : String(error));
 	}
 }
 
-export async function stopSandbox(): Promise<void> {
-	const { status, engine: sandbox } = state.get();
-	setStatus({ kind: "off" });
-	if (status.kind === "ready" && sandbox) await sandbox.reset();
+export function stopSandbox(): Promise<void> {
+	return serialized(async () => {
+		const { initialized, engine: sandbox } = state.get();
+		state.set({ ...state.get(), status: { kind: "off" }, initialized: false });
+		if (initialized && sandbox) await sandbox.reset();
+	});
 }
 
 /**

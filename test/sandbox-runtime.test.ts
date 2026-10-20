@@ -4,6 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeConfig } from "../ext/sandbox/config.ts";
 import {
+	type AskNetwork,
 	type Exec,
 	markSandboxUnavailable,
 	type SandboxEngine,
@@ -46,12 +47,13 @@ function fakeEngine(overrides: Partial<SandboxEngine> = {}): SandboxEngine & { c
 
 function spyExec(): Exec & { commands: string[] } {
 	const commands: string[] = [];
-	const exec = (async (command: string) => {
-		commands.push(command);
-		return { exitCode: 0 };
-	}) as unknown as Exec & { commands: string[] };
-	exec.commands = commands;
-	return exec;
+	return Object.assign(
+		async (command: string) => {
+			commands.push(command);
+			return { exitCode: 0 };
+		},
+		{ commands },
+	);
 }
 
 const options = () => ({ onData: vi.fn() });
@@ -104,6 +106,47 @@ describe("startSandbox", () => {
 			kind: "unavailable",
 			reason: "proxy failed to start",
 		});
+	});
+
+	it("sends a network question to the latest start's ask", async () => {
+		let given: AskNetwork | undefined;
+		setSandboxEngine(
+			fakeEngine({
+				initialize: async (_config, ask) => {
+					given = ask;
+				},
+			}),
+		);
+		const first = vi.fn(async () => false);
+		const second = vi.fn(async () => true);
+		await startSandbox(config, first, "darwin");
+		await startSandbox(config, second, "darwin");
+		expect(await given?.({ host: "example.com", port: 443 })).toBe(true);
+		expect(first).not.toHaveBeenCalled();
+	});
+
+	it("applies the config of a start that follows markSandboxUnavailable, and still resets on stop", async () => {
+		const engine = fakeEngine();
+		setSandboxEngine(engine);
+		await startSandbox(config, deny, "darwin");
+		markSandboxUnavailable("invalid settings");
+		expect(await startSandbox(config, deny, "darwin")).toEqual({ kind: "ready" });
+		expect(engine.calls).toEqual(["initialize", "updateConfig"]);
+		markSandboxUnavailable("invalid settings");
+		await stopSandbox();
+		expect(engine.calls).toContain("reset");
+	});
+
+	it("initializes once when two starts overlap", async () => {
+		const engine = fakeEngine({
+			initialize: async () => {
+				await new Promise((resolve) => setTimeout(resolve, 5));
+				engine.calls.push("initialize");
+			},
+		});
+		setSandboxEngine(engine);
+		await Promise.all([startSandbox(config, deny, "darwin"), startSandbox(config, deny, "darwin")]);
+		expect(engine.calls).toEqual(["initialize", "updateConfig"]);
 	});
 
 	it("stops: resets the engine and is off", async () => {
