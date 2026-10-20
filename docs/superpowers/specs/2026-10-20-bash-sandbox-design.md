@@ -45,6 +45,10 @@ same model: the sandbox wraps shell commands, and deny rules keep governing pi's
 - `filesystem.denyRead` / `filesystem.denyWrite`: extra paths, merged with the paths taken from
   deny rules.
 - Path entries accept `~/…`, absolute paths, and paths relative to the working directory.
+- Every other key is `srt`'s own, under the same name, and is passed through as written (the
+  keys are listed in `docs/sandbox-settings.md`). The finished config is checked against
+  `srt`'s schema at each session start; a value it refuses, or a key it would drop as unknown,
+  makes the sandbox unavailable.
 
 The resulting `srt` config:
 
@@ -54,7 +58,8 @@ The resulting `srt` config:
 | `filesystem.denyWrite` | Every `Edit(<path>)` and `Write(<path>)` deny rule, plus `sandbox.filesystem.denyWrite` |
 | `filesystem.allowWrite` | The working directory, `os.tmpdir()`, plus `sandbox.filesystem.allowWrite` |
 | `network.allowedDomains` | `sandbox.network.allowedDomains` |
-| `network.deniedDomains` | Empty |
+| `network.deniedDomains` | `sandbox.network.deniedDomains`, else empty |
+| Every other field | The same key under `sandbox`, as written |
 
 Rule paths are converted to absolute paths, because `srt` on Linux skips a pattern whose first
 path component is a wildcard:
@@ -179,7 +184,6 @@ in-process WebSocket and stays outside the sandbox; it reads no files.
 - pi's in-process tools (`read`, `grep`, `find`, `ls`, `edit`, `write`): governed by deny rules,
   including the folder-grep filter.
 - MCP servers, other extensions, and pi itself.
-- Credential masking and TLS inspection (`srt`'s `credentials` and `tlsTerminate`).
 
 A program the model runs inside the sandbox cannot read a denied `.env` either, so an app that
 loads `.env` at start fails under the sandbox. The user runs it with `!`.

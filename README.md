@@ -333,6 +333,10 @@ when a session starts, so `/reload` after editing:
   per session, the one prompt bluclawd adds (without a UI, the host is refused).
 - Rule paths are anchored at the working directory: `Read(**/.env*)` covers `.env` files
   under the project. Add others to `filesystem.denyRead`, e.g. `~/**/.env*`.
+- Every other key of the sandbox runtime's config goes under `sandbox` as written, e.g.
+  `credentials` to hide environment variables or `network.deniedDomains`: see
+  [docs/sandbox-settings.md](docs/sandbox-settings.md). A key the runtime does not know counts
+  as a malformed setting.
 - When the sandbox cannot run, or its `sandbox` setting is malformed, the model's `bash` and
   `monitor` are refused and pi says why. There is no unsandboxed fallback. `bash` is also
   refused when bluclawd's background-bash extension is disabled, since pi's own `bash` does
