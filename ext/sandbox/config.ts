@@ -1,9 +1,12 @@
 /**
- * The `sandbox` settings, and the `srt` config they make together with the deny rules.
+ * The `sandbox` settings, and the `srt` config they make together with the deny rules. Every
+ * key besides `enabled` is `srt`'s own and is handed to it as written; bluclawd adds the deny
+ * rules' paths, the project and temp to the four path and domain lists.
  *
  * Only global settings are read: a repository's files must not loosen or switch off the sandbox.
  */
 import { isAbsolute, join } from "node:path";
+import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { pathRule } from "../permissions/rules.ts";
 
@@ -12,6 +15,8 @@ export interface SandboxSettings {
 	allowWrite: string[];
 	denyRead: string[];
 	denyWrite: string[];
+	/** The `sandbox` object as written, without `enabled`. */
+	written: Record<string, unknown>;
 }
 
 export type SandboxSetting =
@@ -19,10 +24,11 @@ export type SandboxSetting =
 	| { kind: "on"; settings: SandboxSettings }
 	| { kind: "invalid"; reason: string };
 
-/** The fields of `srt`'s `SandboxRuntimeConfig` that bluclawd sets. */
+/** An `srt` config before `srt`'s schema has checked it. */
 export interface RuntimeConfig {
-	network: { allowedDomains: string[]; deniedDomains: string[] };
-	filesystem: { denyRead: string[]; allowWrite: string[]; denyWrite: string[] };
+	network: { allowedDomains: string[]; [key: string]: unknown };
+	filesystem: { denyRead: string[]; allowWrite: string[]; denyWrite: string[]; [key: string]: unknown };
+	[key: string]: unknown;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -59,14 +65,19 @@ export function parseSandbox(value: unknown): SandboxSetting {
 		denyWrite: strings(filesystem.denyWrite, "sandbox.filesystem.denyWrite"),
 	};
 	for (const list of Object.values(lists)) if (typeof list === "string") return { kind: "invalid", reason: list };
-	return value.enabled === true ? { kind: "on", settings: lists as SandboxSettings } : { kind: "off" };
+	const { enabled, ...written } = value;
+	return enabled === true
+		? { kind: "on", settings: { ...(lists as Omit<SandboxSettings, "written">), written } }
+		: { kind: "off" };
 }
 
 /**
  * A rule or settings path as the sandbox takes it: absolute, since `srt` on Linux skips a
  * pattern whose first component is a wildcard. A relative path is under the working directory.
  */
-function sandboxPath(path: string, cwd: string, home: string): string {
+function sandboxPath(written: string, cwd: string, home: string): string {
+	// `srt` refuses a deny glob ending in a separator, since as a pattern it can match no path.
+	const path = written.replace(/(.)\/+$/, "$1");
 	if (path.startsWith("//")) return path.slice(1);
 	if (path === "~") return home;
 	if (path.startsWith("~/")) return join(home, path.slice(2));
@@ -86,12 +97,41 @@ export function runtimeConfig(
 			return parsed && verbs.includes(parsed.verb) ? [parsed.path] : [];
 		});
 	const paths = (list: string[]) => [...new Set(list.map((path) => sandboxPath(path, cwd, home)))];
+	const { network, filesystem, ...rest } = settings.written;
 	return {
-		network: { allowedDomains: [...settings.allowedDomains], deniedDomains: [] },
+		...rest,
+		network: { deniedDomains: [], ...(network as object), allowedDomains: [...settings.allowedDomains] },
 		filesystem: {
+			...(filesystem as object),
 			denyRead: paths([...ruled(["Read"]), ...settings.denyRead]),
 			allowWrite: paths([cwd, tmp, ...settings.allowWrite]),
 			denyWrite: paths([...ruled(["Edit", "Write"]), ...settings.denyWrite]),
 		},
 	};
+}
+
+/** Paths of the keys in `given` that `kept` lacks. */
+function droppedKeys(given: unknown, kept: unknown, path: string): string[] {
+	if (Array.isArray(given) && Array.isArray(kept)) {
+		return given.flatMap((value, i) => droppedKeys(value, kept[i], `${path}.${i}`));
+	}
+	if (!isPlainObject(given) || !isPlainObject(kept)) return [];
+	return Object.entries(given).flatMap(([key, value]) =>
+		key in kept ? droppedKeys(value, kept[key], `${path}.${key}`) : [`${path}.${key}`],
+	);
+}
+
+/**
+ * The config as `srt` takes it, or what is wrong with it. `srt` checks only a config it reads
+ * from a file, and its schema drops a key it does not know, which would leave a misspelled
+ * protection off.
+ */
+export async function checkRuntimeConfig(config: RuntimeConfig): Promise<SandboxRuntimeConfig | string> {
+	const { SandboxRuntimeConfigSchema } = await import("@anthropic-ai/sandbox-runtime");
+	const result = SandboxRuntimeConfigSchema.safeParse(config);
+	if (!result.success) {
+		return result.error.issues.map((issue) => `${["sandbox", ...issue.path].join(".")}: ${issue.message}`).join("; ");
+	}
+	const dropped = droppedKeys(config, result.data, "sandbox");
+	return dropped.length > 0 ? `${dropped.join(", ")} is not a sandbox setting` : result.data;
 }

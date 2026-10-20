@@ -4,9 +4,10 @@
  * through `wrapExec`.
  */
 import { randomUUID } from "node:crypto";
+import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { sharedRef } from "../_shared/global-state.ts";
-import type { RuntimeConfig } from "./config.ts";
+import { checkRuntimeConfig, type RuntimeConfig } from "./config.ts";
 
 export type Exec = BashOperations["exec"];
 
@@ -17,8 +18,8 @@ export type AskNetwork = (request: { host: string; port: number | undefined }) =
 export interface SandboxEngine {
 	isSupportedPlatform(): boolean;
 	checkDependencies(): { errors: string[]; warnings: string[] };
-	initialize(config: RuntimeConfig, ask: AskNetwork, enableLogMonitor: boolean): Promise<void>;
-	updateConfig(config: RuntimeConfig): void;
+	initialize(config: SandboxRuntimeConfig, ask: AskNetwork, enableLogMonitor: boolean): Promise<void>;
+	updateConfig(config: SandboxRuntimeConfig): void;
 	wrapWithSandbox(
 		command: string,
 		binShell: string | undefined,
@@ -104,9 +105,11 @@ async function start(config: RuntimeConfig, ask: AskNetwork, platform: NodeJS.Pl
 		return markSandboxUnavailable("the sandbox needs macOS, Linux or WSL2; on Windows run pi in WSL2");
 	}
 	try {
+		const checked = await checkRuntimeConfig(config);
+		if (typeof checked === "string") return markSandboxUnavailable(checked);
 		const sandbox = await engine();
 		if (state.get().initialized) {
-			sandbox.updateConfig(config);
+			sandbox.updateConfig(checked);
 			return setStatus({ kind: "ready" });
 		}
 		if (!sandbox.isSupportedPlatform()) return markSandboxUnavailable(`the sandbox does not support ${platform}`);
@@ -116,7 +119,7 @@ async function start(config: RuntimeConfig, ask: AskNetwork, platform: NodeJS.Pl
 				platform === "linux" ? `${errors.join("; ")}: ${LINUX_HINT}` : errors.join("; "),
 			);
 		}
-		await sandbox.initialize(config, (request) => state.get().ask(request), true);
+		await sandbox.initialize(checked, (request) => state.get().ask(request), true);
 		state.set({ ...state.get(), initialized: true });
 		return setStatus({ kind: "ready" });
 	} catch (error) {

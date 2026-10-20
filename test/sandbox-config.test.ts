@@ -4,9 +4,9 @@
 import type { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { pathRule } from "../ext/permissions/rules.ts";
-import { parseSandbox, runtimeConfig, sandboxSetting } from "../ext/sandbox/config.ts";
+import { checkRuntimeConfig, parseSandbox, runtimeConfig, sandboxSetting } from "../ext/sandbox/config.ts";
 
-const none = { allowedDomains: [], allowWrite: [], denyRead: [], denyWrite: [] };
+const none = { allowedDomains: [], allowWrite: [], denyRead: [], denyWrite: [], written: {} };
 
 describe("pathRule", () => {
 	it("reads Read, Edit and Write rules with a path, any case", () => {
@@ -28,7 +28,11 @@ describe("parseSandbox", () => {
 	it("is on with its lists, missing ones empty", () => {
 		expect(parseSandbox({ enabled: true, network: { allowedDomains: ["github.com"] } })).toEqual({
 			kind: "on",
-			settings: { ...none, allowedDomains: ["github.com"] },
+			settings: {
+				...none,
+				allowedDomains: ["github.com"],
+				written: { network: { allowedDomains: ["github.com"] } },
+			},
 		});
 	});
 
@@ -81,6 +85,13 @@ describe("runtimeConfig", () => {
 		]);
 	});
 
+	it("drops a trailing separator, which srt refuses on a deny glob", async () => {
+		const config = runtimeConfig(none, ["Read(**/secrets/)", "Read(~/)", "Edit(//)"], cwd, home, tmp);
+		expect(config.filesystem.denyRead).toEqual(["/proj/**/secrets", "/home/u"]);
+		expect(config.filesystem.denyWrite).toEqual(["/"]);
+		expect(typeof (await checkRuntimeConfig(config))).toBe("object");
+	});
+
 	it("denies writing what Edit and Write rules deny, and ignores other rules", () => {
 		const config = runtimeConfig(
 			none,
@@ -100,6 +111,7 @@ describe("runtimeConfig", () => {
 				allowWrite: ["~/.npm"],
 				denyRead: ["~/**/.env*", "~/**/.env*"],
 				denyWrite: ["/etc"],
+				written: {},
 			},
 			["Read(~/**/.env*)"],
 			cwd,
@@ -114,5 +126,45 @@ describe("runtimeConfig", () => {
 				denyWrite: ["/etc"],
 			},
 		});
+	});
+});
+
+describe("srt's own settings", () => {
+	const written = {
+		credentials: { envVars: [{ name: "API_TOKEN", mode: "deny" }] },
+		network: { allowedDomains: ["github.com"], deniedDomains: ["*:22"], strictAllowlist: true },
+		filesystem: { allowRead: ["~/.ssh/known_hosts"], denyRead: ["~/.ssh"] },
+	};
+	const setting = parseSandbox({ enabled: true, ...written });
+	const config =
+		setting.kind === "on"
+			? runtimeConfig(setting.settings, ["Read(**/.env*)"], "/proj", "/home/u", "/tmp/x")
+			: undefined;
+
+	it("reach the config as written, around bluclawd's own lists", () => {
+		expect(config).toEqual({
+			credentials: { envVars: [{ name: "API_TOKEN", mode: "deny" }] },
+			network: { allowedDomains: ["github.com"], deniedDomains: ["*:22"], strictAllowlist: true },
+			filesystem: {
+				allowRead: ["~/.ssh/known_hosts"],
+				denyRead: ["/proj/**/.env*", "/home/u/.ssh"],
+				allowWrite: ["/proj", "/tmp/x"],
+				denyWrite: [],
+			},
+		});
+	});
+
+	it("pass srt's schema", async () => {
+		expect(await checkRuntimeConfig(config!)).toEqual(config);
+	});
+
+	it("name a value srt refuses, or a key it does not know", async () => {
+		const base = runtimeConfig(none, [], "/proj", "/home/u", "/tmp/x");
+		expect(await checkRuntimeConfig({ ...base, credentials: { envVars: [{ name: "X", mode: "hide" }] } })).toContain(
+			"sandbox.credentials.envVars.0.mode",
+		);
+		expect(
+			await checkRuntimeConfig({ ...base, credential: {}, network: { ...base.network, deniedDomain: ["x.com"] } }),
+		).toBe("sandbox.network.deniedDomain, sandbox.credential is not a sandbox setting");
 	});
 });

@@ -4,9 +4,9 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RuntimeConfig } from "../ext/sandbox/config.ts";
 import sandbox, { networkAsker } from "../ext/sandbox/index.ts";
 import {
 	forgetWrappedExec,
@@ -78,7 +78,7 @@ describe("networkAsker", () => {
 describe("the extension", () => {
 	let home: string;
 	let dir: string;
-	let engine: SandboxEngine & { configs: RuntimeConfig[]; resets: number };
+	let engine: SandboxEngine & { configs: SandboxRuntimeConfig[]; resets: number };
 	const saved: Record<string, string | undefined> = {};
 
 	beforeEach(() => {
@@ -93,7 +93,7 @@ describe("the extension", () => {
 		}
 		process.env.HOME = home;
 		mkdirSync(getAgentDir(), { recursive: true });
-		const configs: RuntimeConfig[] = [];
+		const configs: SandboxRuntimeConfig[] = [];
 		engine = {
 			configs,
 			resets: 0,
@@ -248,6 +248,18 @@ describe("the extension", () => {
 		await wrong.start();
 		expect(sandboxStatus()).toEqual({ kind: "unavailable", reason: "sandbox.enabled is not true or false" });
 		expect(wrong.notes[0]).toContain("sandbox.enabled is not true or false");
+	});
+
+	it("cannot run with a key srt does not know, so a misspelled protection never goes missing", async () => {
+		const { start, call, notes } = load({ sandbox: { enabled: true, credential: { envVars: [] } } });
+		await start();
+		expect(sandboxStatus()).toEqual({
+			kind: "unavailable",
+			reason: "sandbox.credential is not a sandbox setting",
+		});
+		expect(notes[0]).toContain("sandbox.credential is not a sandbox setting");
+		expect(engine.configs).toEqual([]);
+		expect(await call("powershell")).toMatchObject({ block: true });
 	});
 
 	it("stops when a later session start no longer enables it", async () => {

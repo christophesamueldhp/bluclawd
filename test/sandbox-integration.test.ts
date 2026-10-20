@@ -41,9 +41,16 @@ describe.skipIf(!supported)(
 			dir = realpathSync(mkdtempSync(join(tmpdir(), "bluclawd-sandbox-it-")));
 			writeFileSync(join(dir, ".env"), "SECRET=hunter2\n");
 			writeFileSync(join(dir, "app.ts"), "const SECRET = process.env.SECRET;\n");
+			process.env.BLUCLAWD_IT_TOKEN = "hunter3";
 			setSandboxEngine(undefined);
 			const config = runtimeConfig(
-				{ allowedDomains: [], allowWrite: [], denyRead: [], denyWrite: [] },
+				{
+					allowedDomains: [],
+					allowWrite: [],
+					denyRead: [],
+					denyWrite: [],
+					written: { credentials: { envVars: [{ name: "BLUCLAWD_IT_TOKEN", mode: "deny" }] } },
+				},
 				["Read(**/.env*)"],
 				dir,
 				homedir(),
@@ -54,6 +61,7 @@ describe.skipIf(!supported)(
 
 		afterAll(async () => {
 			await stopSandbox();
+			delete process.env.BLUCLAWD_IT_TOKEN;
 			rmSync(dir, { recursive: true, force: true });
 			rmSync(probe, { force: true });
 		});
@@ -76,6 +84,12 @@ describe.skipIf(!supported)(
 			const outside = await run(`echo x > ${probe}`);
 			expect(outside.code).not.toBe(0);
 			expect(existsSync(probe)).toBe(false);
+		});
+
+		it("hides an environment variable srt's credentials setting denies", async () => {
+			const { output } = await run('echo "token=$BLUCLAWD_IT_TOKEN"');
+			expect(output).toContain("token=");
+			expect(output).not.toContain("hunter3");
 		});
 
 		it("refuses a host the user did not allow", async () => {
