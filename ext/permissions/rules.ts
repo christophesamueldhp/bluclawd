@@ -135,6 +135,14 @@ function capitalize(s: string): string {
 	return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+/** A Read, Edit or Write rule's verb and path, the way the deny rules read it; undefined for any other rule. */
+export function pathRule(rule: string): { verb: "Read" | "Edit" | "Write"; path: string } | undefined {
+	const parts = ruleParts(rule);
+	if (!parts) return undefined;
+	const verb = capitalize(parts.verb);
+	return verb === "Read" || verb === "Edit" || verb === "Write" ? { verb, path: parts.subject } : undefined;
+}
+
 function homeExpand(s: string): string {
 	return s.replace(/^~/, process.env.HOME ?? "~");
 }
