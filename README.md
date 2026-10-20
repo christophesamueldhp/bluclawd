@@ -304,3 +304,43 @@ Claude Code), **web search/fetch and MCP** (install a pi package for those; deny
 rules still cover them). Also not ported: **PDF input** (would mean reimplementing four
 provider wire formats behind `before_provider_request` — a shared-type change
 in pi's own `packages/ai`, not reachable through the extension API at all).
+
+### Sandbox
+
+Deny rules match the text of a call, so `grep -r KEY .` or a script that opens `.env`
+still reads it. Turn on the sandbox to have the operating system stop that: the model's
+`bash` and `monitor` commands, and everything they start, then run inside Anthropic's
+[sandbox runtime](https://github.com/anthropics/sandbox-runtime), the one Claude Code uses.
+Set it in `~/.pi/agent/settings.json` (a project's settings cannot change it); it is read
+when a session starts, so `/reload` after editing:
+
+```json
+{
+  "sandbox": {
+    "enabled": true,
+    "network": { "allowedDomains": ["registry.npmjs.org", "github.com"] },
+    "filesystem": { "allowWrite": ["~/.npm"], "denyRead": [], "denyWrite": [] }
+  },
+  "permissions": { "deny": ["Read(**/.env*)"] }
+}
+```
+
+- Reads: everything except what a `Read` rule denies, plus `filesystem.denyRead`.
+- Writes: the working directory and the temp directory, plus `filesystem.allowWrite`; never
+  what an `Edit` or `Write` rule denies. Under the sandbox a `Write` rule blocks `>>` too.
+- Network: hosts in `network.allowedDomains`. For any other host, pi asks once per session,
+  the one prompt bluclawd adds (without a UI, the host is refused).
+- Rule paths are anchored at the working directory: `Read(**/.env*)` covers `.env` files
+  under the project. Add others to `filesystem.denyRead`, e.g. `~/**/.env*`.
+- When the sandbox cannot run, or its settings are malformed, the model's `bash` and
+  `monitor` are refused and pi says why. There is no unsandboxed fallback. pi's
+  `powershell` tool is blocked while it is on.
+- Outside the sandbox: commands you type with `!`, pi's own tools (`read`, `grep`, `edit`,
+  …, which the deny rules govern), MCP servers and other extensions. An app the model
+  starts cannot read `.env` either; run it yourself with `!`.
+
+| Platform | Needs |
+|---|---|
+| macOS | Nothing (Seatbelt) |
+| Linux, WSL2 | `bubblewrap` and `socat` (`apt install bubblewrap socat`). On Ubuntu 24.04+, unprivileged user namespaces must be allowed by AppArmor: see [Anthropic's notes](https://code.claude.com/docs/en/sandboxing) |
+| Windows | Not supported; run pi in WSL2 |
