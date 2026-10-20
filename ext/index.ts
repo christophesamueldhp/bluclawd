@@ -14,7 +14,7 @@
  * name. `package.json`'s `pi.extensions` array is the source of truth for
  * ordering — keep this list in sync with it. Order matters only for
  * permissions, which must see `tool_call` before anything that might answer
- * it — keep it first.
+ * it — keep it first — and sandbox, which comes right after it.
  */
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import agentView from "./agent-view/index.ts";
@@ -25,11 +25,13 @@ import help from "./help/index.ts";
 import paste from "./paste/index.ts";
 import permissions from "./permissions/index.ts";
 import remote from "./remote/index.ts";
+import sandbox from "./sandbox/index.ts";
 import vibes from "./vibes/index.ts";
 
 export function bluclawdExtensions(): InlineExtension[] {
 	return [
 		{ name: "permissions", factory: permissions },
+		{ name: "sandbox", factory: sandbox },
 		{ name: "checkpoints", factory: checkpoints },
 		{ name: "background-bash", factory: backgroundBash },
 		{ name: "branding", factory: branding },

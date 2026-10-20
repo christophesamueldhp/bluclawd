@@ -121,7 +121,9 @@ writes, so `Read(**/.env*)` alone still lets the model append to `.env`.
 - `session_start`: read settings and deny rules (`ext/_shared/settings.ts`). When on, build the
   config and `start()` it. When it ends `unavailable`, notify once:
   `Sandbox is on but cannot run: <reason>. The model's bash and monitor are refused.`
-- `session_shutdown`: `stop()`.
+- `session_shutdown` with `reason: "quit"`: `stop()`. Background shells outlive `/new`,
+  `/resume` and `/fork`, so any other shutdown keeps the sandbox, and the next `session_start`
+  updates its config and network callback.
 - `tool_call`: while the sandbox is not `off`, block `powershell` with
   `The sandbox is on and powershell does not run inside it; use bash.`
 - Network ask callback, given to `start()`:
