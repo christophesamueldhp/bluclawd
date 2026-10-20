@@ -128,7 +128,7 @@ export function sandboxWraps(): boolean {
 	return state.get().wrapped;
 }
 
-/** For tests: forgets that a wrapped exec exists. */
+/** Forgets that a wrapped exec exists, until background-bash loads and wraps again. */
 export function forgetWrappedExec(): void {
 	state.set({ ...state.get(), wrapped: false });
 }

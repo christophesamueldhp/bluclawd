@@ -20,6 +20,7 @@ import { denyRules } from "../_shared/settings.ts";
 import { runtimeConfig, sandboxSetting } from "./config.ts";
 import {
 	type AskNetwork,
+	forgetWrappedExec,
 	markSandboxUnavailable,
 	type SandboxStatus,
 	sandboxStatus,
@@ -69,6 +70,9 @@ function notifyUnavailable(ctx: ExtensionContext, status: SandboxStatus): void {
 }
 
 function factory(pi: ExtensionAPI): void {
+	// Extensions load again on /reload, sandbox before background-bash: a background-bash that is
+	// no longer loaded must not leave its earlier wrap recorded.
+	forgetWrappedExec();
 	let ctx: ExtensionContext | undefined;
 	const asker = networkAsker(() => ctx);
 

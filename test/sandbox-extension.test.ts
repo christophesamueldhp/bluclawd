@@ -199,6 +199,16 @@ describe("the extension", () => {
 		expect(await call("bash")).toBeUndefined();
 	});
 
+	it("blocks bash after a reload that no longer loads background-bash", async () => {
+		wrapExec(
+			async () => ({ exitCode: 0 }),
+			() => undefined,
+		);
+		const { start, call } = load({ sandbox: { enabled: true } });
+		await start();
+		expect(await call("bash")).toMatchObject({ block: true });
+	});
+
 	it("leaves bash alone while the sandbox is off", async () => {
 		const { start, call } = load({});
 		await start();
