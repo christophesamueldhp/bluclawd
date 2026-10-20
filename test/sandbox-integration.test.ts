@@ -1,27 +1,21 @@
 /**
  * The real sandbox runtime around a real shell: a Read-denied .env stays unreadable to any
  * command, writes stay in the project, and an unlisted host is refused. Skipped where `srt`
- * cannot run (native Windows, Linux without bubblewrap/socat).
+ * cannot run (native Windows, Linux without bubblewrap, socat or ripgrep).
  */
-import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runtimeConfig } from "../ext/sandbox/config.ts";
 import { setSandboxEngine, startSandbox, stopSandbox, wrapExec } from "../ext/sandbox/runtime.ts";
 
-function has(binary: string): boolean {
-	try {
-		execFileSync("which", [binary], { stdio: "ignore" });
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-const supported = process.platform === "darwin" || (process.platform === "linux" && has("bwrap") && has("socat"));
+const supported =
+	process.platform !== "win32" &&
+	SandboxManager.isSupportedPlatform() &&
+	SandboxManager.checkDependencies().errors.length === 0;
 
 describe.skipIf(!supported)(
 	"the sandbox, for real",
@@ -86,7 +80,7 @@ describe.skipIf(!supported)(
 
 		it("refuses a host the user did not allow", async () => {
 			const { output } = await run("curl -sS -m 10 https://example.com -o /dev/null -w '%{http_code}'");
-			expect(output).toMatch(/403|000/);
+			expect(output).toContain("403");
 		});
 	},
 	120_000,

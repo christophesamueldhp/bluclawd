@@ -39,10 +39,18 @@ const state = sharedRef<{
 	engine?: SandboxEngine;
 	/** Whether `srt` is initialized, which `markSandboxUnavailable` does not undo. */
 	initialized: boolean;
+	/** Whether a wrapped exec exists, i.e. bluclawd's bash is loaded. */
+	wrapped: boolean;
 	ask: AskNetwork;
 	/** Start and stop run one at a time, in call order. */
 	queue: Promise<unknown>;
-}>("sandbox", { status: { kind: "off" }, initialized: false, ask: async () => false, queue: Promise.resolve() });
+}>("sandbox", {
+	status: { kind: "off" },
+	initialized: false,
+	wrapped: false,
+	ask: async () => false,
+	queue: Promise.resolve(),
+});
 
 function serialized<T>(task: () => Promise<T>): Promise<T> {
 	const run = state.get().queue.then(task);
@@ -51,7 +59,7 @@ function serialized<T>(task: () => Promise<T>): Promise<T> {
 }
 
 const LINUX_HINT =
-	"install bubblewrap and socat (apt install bubblewrap socat); on Ubuntu 24.04+ also allow unprivileged user namespaces, see the README";
+	"install bubblewrap, socat and ripgrep (apt install bubblewrap socat ripgrep); on Ubuntu 24.04+ also allow unprivileged user namespaces, see the README";
 
 export function sandboxStatus(): SandboxStatus {
 	return state.get().status;
@@ -116,6 +124,15 @@ async function start(config: RuntimeConfig, ask: AskNetwork, platform: NodeJS.Pl
 	}
 }
 
+export function sandboxWraps(): boolean {
+	return state.get().wrapped;
+}
+
+/** For tests: forgets that a wrapped exec exists. */
+export function forgetWrappedExec(): void {
+	state.set({ ...state.get(), wrapped: false });
+}
+
 export function stopSandbox(): Promise<void> {
 	return serialized(async () => {
 		const { initialized, engine: sandbox } = state.get();
@@ -130,6 +147,8 @@ export function stopSandbox(): Promise<void> {
  * this process's event loop.
  */
 export function wrapExec(exec: Exec, shellPath: () => string | undefined): Exec {
+	// Recorded at load: pi's own bash, which this does not wrap, runs when no wrapped exec is ever created.
+	state.set({ ...state.get(), wrapped: true });
 	return async (command, cwd, options) => {
 		const { status, engine: sandbox } = state.get();
 		if (status.kind === "off") return exec(command, cwd, options);

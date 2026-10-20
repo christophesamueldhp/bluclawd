@@ -85,7 +85,7 @@ describe("startSandbox", () => {
 		);
 		const status = await startSandbox(config, deny, "linux");
 		expect(status.kind === "unavailable" && status.reason).toContain("bubblewrap (bwrap) not installed");
-		expect(status.kind === "unavailable" && status.reason).toContain("apt install bubblewrap socat");
+		expect(status.kind === "unavailable" && status.reason).toContain("apt install bubblewrap socat ripgrep");
 	});
 
 	it("is unavailable when the platform is unsupported or the engine throws", async () => {

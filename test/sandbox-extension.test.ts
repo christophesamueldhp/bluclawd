@@ -8,7 +8,14 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RuntimeConfig } from "../ext/sandbox/config.ts";
 import sandbox, { networkAsker } from "../ext/sandbox/index.ts";
-import { type SandboxEngine, sandboxStatus, setSandboxEngine, stopSandbox } from "../ext/sandbox/runtime.ts";
+import {
+	forgetWrappedExec,
+	type SandboxEngine,
+	sandboxStatus,
+	setSandboxEngine,
+	stopSandbox,
+	wrapExec,
+} from "../ext/sandbox/runtime.ts";
 
 describe("networkAsker", () => {
 	const ui = (answer: boolean) => ({ hasUI: true, ui: { confirm: vi.fn(async () => answer) } });
@@ -110,6 +117,7 @@ describe("the extension", () => {
 	afterEach(async () => {
 		await stopSandbox();
 		setSandboxEngine(undefined);
+		forgetWrappedExec();
 		for (const [key, value] of Object.entries(saved)) {
 			if (value === undefined) delete process.env[key];
 			else process.env[key] = value;
@@ -159,6 +167,10 @@ describe("the extension", () => {
 			sandbox: { enabled: true, network: { allowedDomains: ["github.com"] } },
 			permissions: { deny: ["Read(**/.env*)"] },
 		});
+		wrapExec(
+			async () => ({ exitCode: 0 }),
+			() => undefined,
+		);
 		await start();
 		expect(sandboxStatus()).toEqual({ kind: "ready" });
 		expect(engine.configs[0].filesystem.denyRead).toEqual([join(dir, "**/.env*")]);
@@ -169,6 +181,48 @@ describe("the extension", () => {
 			reason: "The sandbox is on and powershell does not run inside it; use bash.",
 		});
 		expect(await call("bash")).toBeUndefined();
+	});
+
+	it("blocks bash while no wrapped bash is loaded, and allows it once one is", async () => {
+		const { start, call } = load({ sandbox: { enabled: true } });
+		await start();
+		expect(sandboxStatus()).toEqual({ kind: "ready" });
+		expect(await call("bash")).toEqual({
+			block: true,
+			reason:
+				"The sandbox is on but bluclawd's bash, which runs inside it, is not loaded; enable bluclawd's background-bash extension.",
+		});
+		wrapExec(
+			async () => ({ exitCode: 0 }),
+			() => undefined,
+		);
+		expect(await call("bash")).toBeUndefined();
+	});
+
+	it("leaves bash alone while the sandbox is off", async () => {
+		const { start, call } = load({});
+		await start();
+		expect(await call("bash")).toBeUndefined();
+	});
+
+	it("marks the sandbox unavailable when starting it throws", async () => {
+		const { start, ctx, notes } = load({ sandbox: { enabled: true } });
+		ctx.isProjectTrusted = () => {
+			throw new Error("boom");
+		};
+		await start();
+		expect(sandboxStatus()).toEqual({ kind: "unavailable", reason: "boom" });
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain("boom");
+	});
+
+	it("warns when the global settings cannot be read", async () => {
+		const { start, notes } = load({});
+		writeFileSync(join(getAgentDir(), "settings.json"), "{ not json");
+		await start();
+		expect(sandboxStatus()).toEqual({ kind: "off" });
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain("could not be read");
 	});
 
 	it("warns once when the sandbox cannot run, or its settings are wrong", async () => {
