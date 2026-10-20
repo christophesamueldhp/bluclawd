@@ -20,6 +20,9 @@ import {
 	Input,
 	type KeyId,
 	matchesKey,
+	parseColor,
+	styleText,
+	styleTextWithAnsi,
 	type TUI,
 	truncateToWidth,
 	visibleWidth,
@@ -208,21 +211,14 @@ function xterm256(n: number): [number, number, number] {
 	return [level(Math.floor(i / 36)), level(Math.floor(i / 6) % 6), level(i % 6)];
 }
 
-function sgr(layer: 38 | 48, hex: string): string {
-	const [r, g, b] = [1, 3, 5].map((i) => Number.parseInt(hex.slice(i, i + 2), 16));
-	if (theme.getColorMode() === "truecolor") return `\x1b[${layer};2;${r};${g};${b}m`;
-	const cube = (x: number) => (x < 48 ? 0 : x < 115 ? 1 : Math.floor((x - 35) / 40));
-	return `\x1b[${layer};5;${16 + 36 * cube(r) + 6 * cube(g) + cube(b)}m`;
-}
-
 const cc = {
 	fg(color: Color, text: string): string {
 		const hex = isLightTheme() ? undefined : CC_DARK[color];
-		return hex ? `${sgr(38, hex)}${text}\x1b[39m` : theme.fg(color, text);
+		return hex ? styleText(text, { fg: parseColor(hex) }, theme.getColorMode()) : theme.fg(color, text);
 	},
 	bg(color: "userMessageBg", text: string): string {
 		const hex = isLightTheme() ? undefined : CC_DARK[color];
-		return hex ? `${sgr(48, hex)}${text}\x1b[49m` : theme.bg(color, text);
+		return hex ? styleText(text, { bg: parseColor(hex) }, theme.getColorMode()) : theme.bg(color, text);
 	},
 };
 
@@ -244,7 +240,7 @@ const MASCOT_MIN_COLUMNS = 70;
 
 /** SGR faint, for rules and the peek box. */
 function faint(text: string): string {
-	return `\x1b[2m${text}\x1b[22m`;
+	return styleTextWithAnsi(text, undefined, undefined, { dim: true });
 }
 
 /** An Input line with a `❯` prompt; empty, the cursor sits on the placeholder's first letter. */
@@ -252,7 +248,7 @@ function promptLine(input: Input, width: number, placeholder: string): string {
 	if (!input.getValue()) {
 		const [first = " ", ...rest] = [...placeholder];
 		return truncateToWidth(
-			`${cc.fg("muted", "❯")} \x1b[7m${cc.fg("muted", first)}\x1b[27m${cc.fg("muted", rest.join(""))}`,
+			`${cc.fg("muted", "❯")} ${styleTextWithAnsi(cc.fg("muted", first), undefined, undefined, { inverse: true })}${cc.fg("muted", rest.join(""))}`,
 			width,
 		);
 	}
@@ -2117,7 +2113,7 @@ export class AgentView implements Component, Focusable {
 		}
 		body.push("");
 		body.push(promptLine(this.reply, inner, "reply"));
-		if (this.replyError) body.push(truncateToWidth(`\x1b[2m${cc.fg("error", this.replyError)}\x1b[22m`, inner, "…"));
+		if (this.replyError) body.push(truncateToWidth(faint(cc.fg("error", this.replyError)), inner, "…"));
 		const border = (l: string, r: string) => faint(`${l}${"─".repeat(Math.max(0, width - 2))}${r}`);
 		const boxed = [border("╭", "╮")];
 		for (const line of body) {

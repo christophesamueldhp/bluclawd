@@ -14,6 +14,9 @@ import {
 	type Component,
 	getKeybindings,
 	matchesKey,
+	rgbColor,
+	styleText,
+	styleTextWithAnsi,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -38,10 +41,10 @@ const META_GAP = 3;
 const MIN_VISIBLE_LINES = 7;
 
 /** The focused row's colour. */
-const SUGGESTION = (text: string) => `\x1b[38;2;177;185;249m${text}\x1b[39m`;
+const SUGGESTION = (text: string) => styleText(text, { fg: rgbColor(177, 185, 249) }, "truecolor");
 /** The dialog's rule, titles and a running status. */
-const BACKGROUND = (text: string) => `\x1b[38;2;0;204;204m${text}\x1b[39m`;
-const ITALIC = (text: string) => `\x1b[3m${text}\x1b[23m`;
+const BACKGROUND = (text: string) => styleText(text, { fg: rgbColor(0, 204, 204) }, "truecolor");
+const ITALIC = (text: string) => styleTextWithAnsi(text, undefined, undefined, { italic: true });
 const POINTER = "❯";
 /** A running task's icon (`⏺` on macOS, `●` elsewhere). */
 const RUNNING_ICON = process.platform === "darwin" ? "⏺" : "●";

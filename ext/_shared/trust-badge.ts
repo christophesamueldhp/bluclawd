@@ -3,16 +3,17 @@
  */
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
+import { rgbColor, styleText } from "@earendil-works/pi-tui";
 
 export type ProjectTrust = "always" | "ask" | "never";
 
-const AMBER = "\x1b[38;2;255;193;7m";
+const AMBER = rgbColor(255, 193, 7);
 
 /** The colored badge for a `defaultProjectTrust` value. */
 export function trustBadge(theme: Theme, trust: ProjectTrust): string {
 	return trust === "always"
 		? theme.getColorMode() === "truecolor"
-			? `${AMBER}⏵⏵ always\x1b[39m`
+			? styleText("⏵⏵ always", { fg: AMBER }, "truecolor")
 			: theme.fg("warning", "⏵⏵ always")
 		: trust === "ask"
 			? theme.fg("muted", "⏸ ask")

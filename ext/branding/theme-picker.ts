@@ -8,7 +8,7 @@
  */
 
 import { renderDiff, type Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, getKeybindings, truncateToWidth } from "@earendil-works/pi-tui";
+import { type Component, getKeybindings, styleTextWithAnsi, truncateToWidth } from "@earendil-works/pi-tui";
 
 /** pi's light/dark pair setting: the theme follows the terminal's appearance. */
 export const AUTO_THEME = "bluclawd-light/bluclawd";
@@ -34,7 +34,7 @@ const DEMO_DIFF = [
 const PAD = 2;
 const POINTER = "❯";
 const CHECK = "✔";
-const ITALIC = (text: string) => `\x1b[3m${text}\x1b[23m`;
+const ITALIC = (text: string) => styleTextWithAnsi(text, undefined, undefined, { italic: true });
 
 export interface ThemeOption {
 	label: string;

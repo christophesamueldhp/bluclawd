@@ -253,9 +253,9 @@ describe("renderMascot", () => {
 		for (const frame of ALL_FRAMES.filter((f) => !f.poof)) {
 			const decoded = Array.from({ length: 16 }, () => Array<string>(24).fill("."));
 			for (const [cy, line] of renderMascot(frame, glyphs).entries()) {
-				const cells = line.match(/\x1b\[38;2;([\d;]+?);(?:48;2;([\d;]+)|49)m(.)\x1b\[0m|(.)/gu)!;
+				const cells = line.match(/\x1b\[38;2;([\d;]+?)m(?:\x1b\[48;2;([\d;]+)m|\x1b\[49m)(.)\x1b\[0m|(.)/gu)!;
 				for (const [cx, cell] of cells.entries()) {
-					const m = /\x1b\[38;2;(\d+;\d+;\d+);(?:48;2;(\d+;\d+;\d+)|49)m(.)\x1b\[0m/u.exec(cell);
+					const m = /\x1b\[38;2;(\d+;\d+;\d+)m(?:\x1b\[48;2;(\d+;\d+;\d+)m|\x1b\[49m)(.)\x1b\[0m/u.exec(cell);
 					const mask = m ? inverse.get(m[3]!)! : 0;
 					for (let bit = 0; bit < w * h; bit++) {
 						const on = (mask >> bit) & 1;

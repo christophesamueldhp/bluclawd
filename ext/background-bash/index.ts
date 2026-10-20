@@ -19,7 +19,16 @@ import type {
 	InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { createLocalBashOperations, SettingsManager } from "@earendil-works/pi-coding-agent";
-import { Box, type Component, matchesKey, Text, type TUI } from "@earendil-works/pi-tui";
+import {
+	Box,
+	type Component,
+	matchesKey,
+	rgbColor,
+	styleText,
+	styleTextWithAnsi,
+	Text,
+	type TUI,
+} from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { stripAnsi } from "../../daemon/ansi.ts";
 import { subscribeAgentTasks } from "../_shared/agent-tasks.ts";
@@ -79,8 +88,8 @@ const NOTIFICATION_DOT_COLOR: Record<string, "success" | "error" | "warning" | u
 	killed: "warning",
 };
 
-const PILL = (text: string) => `\x1b[38;2;0;204;204m${text}\x1b[39m`;
-const INVERSE = (text: string) => `\x1b[7m${text}\x1b[27m`;
+const PILL = (text: string) => styleText(text, { fg: rgbColor(0, 204, 204) }, "truecolor");
+const INVERSE = (text: string) => styleTextWithAnsi(text, undefined, undefined, { inverse: true });
 /** The Ctrl+B hint shows once a foreground command has run this long. */
 const BACKGROUND_HINT_MS = 2000;
 

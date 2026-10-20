@@ -18,6 +18,8 @@
  * terminals that lack octant glyphs.
  */
 
+import { backgroundAnsi, foregroundAnsi, parseColor } from "@earendil-works/pi-tui";
+
 /** `.` transparent, `#` body, `o` eye. */
 type Pixel = "." | "#" | "o";
 
@@ -292,11 +294,11 @@ export function glyphFor(glyphs: Glyphs, mask: number): string {
 	return glyphs === "octant" ? OCTANTS[mask]! : HALF_BLOCKS[mask]!;
 }
 
-function rgb(hex: string): string {
-	return `${Number.parseInt(hex.slice(1, 3), 16)};${Number.parseInt(hex.slice(3, 5), 16)};${Number.parseInt(hex.slice(5, 7), 16)}`;
-}
-
-const COLOR: Record<Exclude<Pixel, ".">, string> = { "#": rgb(BODY_COLOR), o: rgb(EYE_COLOR) };
+const INK: Record<Exclude<Pixel, ".">, string> = {
+	"#": foregroundAnsi(parseColor(BODY_COLOR), "truecolor"),
+	o: foregroundAnsi(parseColor(EYE_COLOR), "truecolor"),
+};
+const BODY_BACK = backgroundAnsi(parseColor(BODY_COLOR), "truecolor");
 
 /** The frame as a canvas of pixels, sprite placed by its crouch and slide. */
 export function frameCanvas(frame: MascotFrame, glyphs: Glyphs): Pixel[][] {
@@ -352,8 +354,8 @@ export function renderMascot(frame: MascotFrame, glyphs: Glyphs, dim: (text: str
 				line += " ";
 				continue;
 			}
-			const back = ink === "o" && pixels.includes("#") ? `48;2;${COLOR["#"]}` : "49";
-			line += `\x1b[38;2;${COLOR[ink]};${back}m${glyphFor(glyphs, mask)}\x1b[0m`;
+			const back = ink === "o" && pixels.includes("#") ? BODY_BACK : "\x1b[49m";
+			line += `${INK[ink]}${back}${glyphFor(glyphs, mask)}\x1b[0m`;
 		}
 		lines.push(line);
 	}
@@ -371,5 +373,5 @@ export function renderMascot(frame: MascotFrame, glyphs: Glyphs, dim: (text: str
 
 /** One entry per cell of a rendered line (each cell is a styled glyph or a space). */
 function splitCells(line: string): string[] {
-	return line.match(/\x1b\[[0-9;]*m[^\x1b]\x1b\[0m|[^\x1b]/gu) ?? [];
+	return line.match(/(?:\x1b\[[0-9;]*m)+[^\x1b]\x1b\[0m|[^\x1b]/gu) ?? [];
 }

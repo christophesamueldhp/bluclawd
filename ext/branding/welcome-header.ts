@@ -3,7 +3,7 @@
  * and dim version, dim model · provider, dim cwd — centered on each other. In
  * the fullscreen renderer the mascot plays an entrance sequence on each launch.
  */
-import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, styleTextWithAnsi, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
 	ENTRANCES,
 	FRAME_MS,
@@ -17,8 +17,8 @@ import {
 	withHold,
 } from "../_shared/mascot.ts";
 
-const bold = (text: string) => `\x1b[1m${text}\x1b[22m`;
-const faint = (text: string) => `\x1b[2m${text}\x1b[22m`;
+const bold = (text: string) => styleTextWithAnsi(text, undefined, undefined, { bold: true });
+const faint = (text: string) => styleTextWithAnsi(text, undefined, undefined, { dim: true });
 
 export interface WelcomeHeaderInfo {
 	version: string;
