@@ -29,7 +29,7 @@ import { barHtml, compactLines, elapsedText, settingsHtml, spanStyle, TRUST, tok
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.32";
+const VERSION = "0.0.33";
 const BANDS = [
 	["pinned", "Pinned"],
 	["needs", "Needs input"],
@@ -235,6 +235,8 @@ let pendingId = 0;
 let followed;
 /** The open chat was opened from the list, whose history entry "‹ Sessions" goes back to. */
 let backToList = false;
+/** A finger on the status sheet's thinking slider. */
+let sliding = false;
 /** The open chat's pi session, as last listed: its row may go, and the chat follows it to its next one. @type {string | undefined} */
 let openSessionId;
 /** The last notice a pane's report carried (its `at`): each shows once. @type {number | undefined} */
@@ -1267,14 +1269,6 @@ function pickSetting(key) {
 				void switchModel(value);
 			},
 		);
-	} else if (key === "thinking") {
-		const options = (report.thinkingLevels ?? []).map((level) => ({ value: level, label: level }));
-		openPicker({ title: "Thinking", groups: [{ options }], value: report.thinkingLevel ?? "" }, (level) => {
-			if (level === report.thinkingLevel) return;
-			state.report = { ...report, thinkingLevel: level };
-			render();
-			void switchSetting((id) => api.setThinking(id, level));
-		});
 	} else if (key === "trust") {
 		const options = TRUST.map(([value, , label]) => ({ value, label }));
 		openPicker({ title: "Trust", groups: [{ options }], value: report.trust ?? "" }, (trust) => {
@@ -1284,6 +1278,33 @@ function pickSetting(key) {
 			void switchSetting((id) => api.setTrust(id, trust));
 		});
 	}
+}
+
+/**
+ * The thinking slider at a level of the report's: shown as it moves, sent once let go (`send`),
+ * as a picked setting is.
+ * @param {number} index @param {boolean} send
+ */
+function slideThinking(index, send) {
+	const report = state.report;
+	const level = report?.thinkingLevels?.[index];
+	if (!report || level === undefined) return;
+	sliding = !send;
+	const slider = /** @type {HTMLInputElement | null} */ (document.getElementById("thinking"));
+	if (slider) {
+		slider.value = String(index);
+		slider.setAttribute("aria-valuetext", level);
+		const value = slider.parentElement?.querySelector(".value");
+		if (value) value.textContent = level;
+	}
+	if (!send) return;
+	if (level === report.thinkingLevel) {
+		render();
+		return;
+	}
+	state.report = { ...report, thinkingLevel: level };
+	render();
+	void switchSetting((id) => api.setThinking(id, level));
 }
 
 function updateChat() {
@@ -1439,7 +1460,8 @@ function updateSheet(session) {
 		sheet.innerHTML = `<div class="part" id="sheet-status"></div>${renameHtml(session)}<div class="part" id="sheet-manage"></div>`;
 		sheet.dataset.html = "status";
 	}
-	updatePart($("#sheet-status"), sheetHtml(session));
+	// Not under a finger on the thinking slider: a new one would drop the drag.
+	if (!sliding) updatePart($("#sheet-status"), sheetHtml(session));
 	updatePart($("#sheet-manage"), manageHtml(session));
 	$("#rename-save").disabled = state.saving;
 }
@@ -1734,6 +1756,8 @@ function bindChat() {
 		if (target.closest("#sheet-close")) closeSheet();
 		else if (target.closest("[data-pick]"))
 			pickSetting(/** @type {HTMLElement} */ (target.closest("[data-pick]")).dataset.pick ?? "");
+		else if (target.closest("[data-level]"))
+			slideThinking(Number(/** @type {HTMLElement} */ (target.closest("[data-level]")).dataset.level), true);
 		else if (target.closest("#pin")) void togglePin();
 		else if (target.closest("#delete, #delete-cancel")) {
 			state.confirmDelete = target.closest("#delete") !== null;
@@ -1747,6 +1771,17 @@ function bindChat() {
 		} else if (target.closest("[data-stop-confirm]"))
 			void stopTask(/** @type {HTMLElement} */ (target.closest("[data-stop-confirm]")).dataset.stopConfirm ?? "");
 	});
+	for (const type of ["input", "change"])
+		sheet.addEventListener(type, (/** @type {Event} */ event) => {
+			const target = /** @type {HTMLInputElement} */ (event.target);
+			if (target.id === "thinking") slideThinking(Number(target.value), type === "change");
+		});
+	// Let go where it started, Safari sends no `change`; and its `change` may come after this.
+	for (const type of ["pointerup", "pointercancel"])
+		window.addEventListener(type, () => {
+			const slider = /** @type {HTMLInputElement | null} */ (document.getElementById("thinking"));
+			if (sliding && slider) slideThinking(Number(slider.value), true);
+		});
 	sheet.addEventListener("submit", (/** @type {Event} */ event) => {
 		event.preventDefault();
 		if (/** @type {Element} */ (event.target).id === "rename-form") void rename();

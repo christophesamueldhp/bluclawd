@@ -118,6 +118,20 @@ function settingHtml(key, label, value, pickable) {
 }
 
 /**
+ * The thinking level as a slider with a stop for each level pi offers, in pi's order, its name
+ * under it a tap picks too: iOS moves a range's thumb only by dragging it (app.js sends it).
+ * @param {string[]} levels @param {string} level
+ */
+function thinkingHtml(levels, level) {
+	const at = levels.indexOf(level);
+	const ticks = levels
+		.map((name, index) => `<button type="button" tabindex="-1" data-level="${index}">${esc(name)}</button>`)
+		.join("");
+	const slider = `<input type="range" id="thinking" min="0" max="${levels.length - 1}" step="1" value="${Math.max(at, 0)}" aria-label="Thinking" aria-valuetext="${esc(level)}">`;
+	return `<div class="setting slider"><span class="label">Thinking</span><span class="value">${esc(level)}</span>${slider}<div class="ticks" aria-hidden="true">${ticks}</div></div>`;
+}
+
+/**
  * The sheet's settings, as one grouped list: the model, the thinking level among those pi offers
  * for it, and the trust mode when the pane reports one.
  * @param {Report} report
@@ -125,9 +139,10 @@ function settingHtml(key, label, value, pickable) {
 export function settingsHtml(report) {
 	const model = report.model ? (report.model.name ?? report.model.id) : "None selected";
 	const levels = report.thinkingLevels ?? [];
+	const level = report.thinkingLevel ?? "off";
 	const rows = [
 		settingHtml("model", "Model", model, report.models.length > 0),
-		settingHtml("thinking", "Thinking", report.thinkingLevel ?? "off", levels.length > 1),
+		levels.length > 1 ? thinkingHtml(levels, level) : settingHtml("thinking", "Thinking", level, false),
 	];
 	const trust = TRUST.find(([value]) => value === report.trust);
 	if (trust) rows.push(settingHtml("trust", "Trust", trust[2], true));

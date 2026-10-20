@@ -68,10 +68,12 @@ describe("the chat's status bar", () => {
 describe("the status sheet's settings and where it is", () => {
 	const models = [{ provider: "anthropic", id: "claude-opus", name: "Opus" }];
 
-	it("lists the model, thinking and trust as rows a tap picks another value for", () => {
+	it("lists the model and trust as rows a tap picks another value for, and thinking as a slider", () => {
 		const html = settingsHtml({ ...report, models });
-		expect(text(html)).toBe("Model Opus › Thinking high › Trust Always ›");
-		expect(html.match(/<button type="button" class="setting" data-pick="(\w+)"/g)).toHaveLength(3);
+		expect(text(html)).toBe("Model Opus › Thinking high off low medium high Trust Always ›");
+		expect(html.match(/<button type="button" class="setting" data-pick="(\w+)"/g)).toHaveLength(2);
+		expect(html).toContain('<input type="range" id="thinking" min="0" max="3" step="1" value="3"');
+		expect(html.match(/data-level="\d"/g)).toHaveLength(4);
 		// No hint under trust: its name says enough.
 		expect(html).not.toContain("defaultProjectTrust");
 	});
