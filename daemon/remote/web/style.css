@@ -139,10 +139,11 @@ button { -webkit-user-select: none; user-select: none; }
 .t { font-size: 13px; line-height: 1.45; color: var(--secondary); overflow-wrap: anywhere; }
 .t .call { display: block; color: var(--text); }
 .t .call b { font-weight: 600; }
-.t .dot { color: var(--muted); }
-.t.ok .dot { color: var(--green); }
-.t.err .dot { color: var(--red); }
-.t.running .dot { color: var(--muted); animation: pulse 1.2s ease-in-out infinite; }
+/* Not .dot: that class is the header's online dot, whose box drew a grey bead around this glyph. */
+.t .bullet { color: var(--muted); }
+.t.ok .bullet { color: var(--green); }
+.t.err .bullet { color: var(--red); }
+.t.running .bullet { animation: pulse 1.2s ease-in-out infinite; }
 .out { display: flex; gap: var(--s2); padding-left: 2px; }
 .hook { flex: none; color: var(--muted); }
 .lines { min-width: 0; white-space: pre-wrap; }
@@ -165,6 +166,14 @@ button { -webkit-user-select: none; user-select: none; }
 .think summary { display: inline-flex; align-items: center; min-height: 32px; }
 .think summary::before { content: "▸"; display: inline-block; width: 1em; }
 .think[open] summary::before { content: "▾"; }
+/* A run of finished tool calls, one line until tapped (app.js's groupHtml); its calls along a rule. */
+.run { font-size: 14px; color: var(--muted); }
+.run > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; min-height: 32px; }
+.run > summary::-webkit-details-marker { display: none; }
+.run > summary::before { content: "▸"; display: inline-block; width: 1em; }
+.run[open] > summary::before { content: "▾"; }
+.run .steps { display: flex; flex-direction: column; gap: var(--s3); margin: var(--s1) 0 0 5px; padding-left: var(--s3); border-left: 1px solid var(--line); }
+.run + .t.interrupted { margin-top: calc(-1 * var(--s2)); }
 .marker { align-self: center; max-width: 85%; font-size: 13px; color: var(--muted); text-align: center; }
 .queued { align-self: flex-end; font-size: 12px; color: var(--muted); margin-top: calc(-1 * var(--s2)); }
 .working { color: var(--link); font-size: 15px; }

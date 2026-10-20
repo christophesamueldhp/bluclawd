@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { diffSummary, markerKind, resultSummary } from "../daemon/remote/web/output.js";
+import { diffSummary, groupSummary, markerKind, resultSummary } from "../daemon/remote/web/output.js";
 
 const numbered = (count: number) => Array.from({ length: count }, (_, i) => `line ${i + 1}`).join("\n");
 
@@ -88,5 +88,14 @@ describe("how a marker shows", () => {
 	it("shows the rest as they are", () => {
 		expect(markerKind("Conversation compacted", false)).toBe("plain");
 		expect(markerKind("!npm test", true)).toBe("plain");
+	});
+});
+
+describe("a run of tool calls, folded into one line as Claude Code does", () => {
+	it("says what the calls did, in the order they first came", () => {
+		expect(groupSummary(["bash", "bash"])).toBe("Ran 2 commands");
+		expect(groupSummary(["read", "bash", "edit", "bash"])).toBe("Read a file, ran 2 commands, edited a file");
+		expect(groupSummary(["write", "grep", "find", "ls"])).toBe("Wrote a file, searched 2 times, listed a folder");
+		expect(groupSummary(["PowerShell", "subagent", "subagent"])).toBe("Ran a command, used 2 tools");
 	});
 });

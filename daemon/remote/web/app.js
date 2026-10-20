@@ -13,7 +13,7 @@ import { ageAt, successor } from "./list.js";
 import { giveUp, promptKey, refused, sentText, settle, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 import { loaderHtml } from "./mascot.js";
-import { diffSummary, markerKind, resultSummary } from "./output.js";
+import { diffSummary, groupSummary, markerKind, resultSummary } from "./output.js";
 import { closePicker, modelGroups, openPicker } from "./picker.js";
 import { filterSessions, fold, matchCommands } from "./search.js";
 import { barHtml, compactLines, elapsedText, settingsHtml, spanStyle, TRUST, tokens, whereHtml } from "./statusbar.js";
@@ -29,7 +29,7 @@ import { barHtml, compactLines, elapsedText, settingsHtml, spanStyle, TRUST, tok
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.33";
+const VERSION = "0.0.35";
 const BANDS = [
 	["pinned", "Pinned"],
 	["needs", "Needs input"],
@@ -858,7 +858,7 @@ function outHtml(lines) {
  * @param {string} name @param {string} summary @param {Message | undefined} result @param {string} key @param {boolean} [running]
  */
 function toolHtml(name, summary, result, key, running = false) {
-	const call = `<span class="call"><span class="dot" aria-hidden="true">●</span> <b>${esc(name.charAt(0).toUpperCase() + name.slice(1))}</b>${summary ? `(${esc(summary)})` : ""}</span>`;
+	const call = `<span class="call"><span class="bullet" aria-hidden="true">●</span> <b>${esc(name.charAt(0).toUpperCase() + name.slice(1))}</b>${summary ? `(${esc(summary)})` : ""}</span>`;
 	if (!result) return `<div class="t${running ? " running" : ""}">${call}</div>`;
 	const kind = result.ok ? "t ok" : "t err";
 	if (result.diff) {
@@ -918,21 +918,50 @@ function transcriptHtml(calls, running) {
 	const results = new Map();
 	for (const m of state.messages) if (m.kind === "toolResult" && m.toolCallId) results.set(m.toolCallId, m);
 	const parts = [];
+	// Finished calls in a row, and the thinking between them, fold into one line (see groupHtml).
+	/** @type {string[]} */
+	let held = [];
+	/** @type {string[]} */
+	let names = [];
+	let groupKey = "";
+	const flush = () => {
+		if (names.length) parts.push(groupHtml(names, held, groupKey));
+		else parts.push(...held);
+		held = [];
+		names = [];
+	};
 	// The session's start is shown only once no older messages are left to load.
 	let prompted = state.more;
 	for (const m of state.messages) {
+		// A call's result shows in its call's block, and a hidden marker not at all: neither ends the run.
+		const ofCall = m.kind === "toolResult" && m.toolCallId && calls.has(m.toolCallId);
+		const hidden = m.kind === "marker" && markerKind(m.text ?? "", !prompted) === "hidden";
+		if (m.kind !== "assistant" && !ofCall && !hidden) flush();
 		if (m.kind === "user") {
 			prompted = true;
 			parts.push(
 				`<div class="u${m.images?.length ? " pics" : ""}">${picturesHtml(m)}${esc(shownText(m.text ?? "", m.images))}</div>`,
 			);
 		} else if (m.kind === "assistant") {
-			if (m.thinking) parts.push(thinkingBlock(m.thinking, `think:${m.id}`));
-			if (m.text) parts.push(`<div class="a">${md(m.text)}</div>`);
+			if (m.thinking) held.push(thinkingBlock(m.thinking, `think:${m.id}`));
+			if (m.text) {
+				flush();
+				parts.push(`<div class="a">${md(m.text)}</div>`);
+			}
 			for (const [index, tool] of (m.tools ?? []).entries()) {
 				const key = tool.id || `${m.id}:${index}`;
-				parts.push(toolHtml(tool.name, tool.summary, results.get(tool.id), key, running.has(tool.id)));
+				const result = results.get(tool.id);
+				// What runs, or waits on its result, shows on its own.
+				if (!result || running.has(tool.id)) {
+					flush();
+					parts.push(toolHtml(tool.name, tool.summary, result, key, running.has(tool.id)));
+					continue;
+				}
+				if (!names.length) groupKey = `group:${key}`;
+				names.push(tool.name);
+				held.push(toolHtml(tool.name, tool.summary, result, key));
 			}
+			if (m.error || m.aborted) flush();
 			if (m.error) parts.push(`<div class="t err">${outHtml([m.error])}</div>`);
 			// Stopped from the phone or by Esc on the Mac, as Claude Code shows it.
 			if (m.aborted) parts.push(`<div class="t interrupted">${outHtml(["Interrupted"])}</div>`);
@@ -945,7 +974,17 @@ function transcriptHtml(calls, running) {
 			else if (kind === "plain") parts.push(`<div class="marker">${esc(m.text)}</div>`);
 		}
 	}
+	flush();
 	return parts.join("");
+}
+
+/**
+ * Finished tool calls folded into one line, as Claude Code does: "▸ Ran 2 commands, edited a file";
+ * a tap shows each call, and a tap on a call its output.
+ * @param {string[]} names the calls' tools @param {string[]} blocks the calls', and the thinking between them @param {string} key
+ */
+function groupHtml(names, blocks, key) {
+	return `<details class="run" data-key="${esc(key)}"><summary>${esc(groupSummary(names))}</summary><div class="steps">${blocks.join("")}</div></details>`;
 }
 
 /** Hidden until tapped, as in Claude Code. @param {string} thinking @param {string} key */

@@ -85,3 +85,37 @@ export function markerKind(text, beforeFirstPrompt) {
 	if (beforeFirstPrompt && /^Model: /.test(text)) return "hidden";
 	return "plain";
 }
+
+/** What a run of tool calls did, by tool: the verb and the thing it counts. */
+const GROUP_VERBS = /** @type {Record<string, [string, string]>} */ ({
+	bash: ["ran", "command"],
+	powershell: ["ran", "command"],
+	read: ["read", "file"],
+	edit: ["edited", "file"],
+	write: ["wrote", "file"],
+	grep: ["searched", "time"],
+	find: ["searched", "time"],
+	glob: ["searched", "time"],
+	ls: ["listed", "folder"],
+});
+
+/**
+ * The one line a run of finished tool calls folds into: "Ran 2 commands, edited a file".
+ * @param {string[]} tools the calls' tool names, in order
+ */
+export function groupSummary(tools) {
+	/** @type {Map<string, number>} */
+	const counts = new Map();
+	for (const tool of tools) {
+		const [verb, thing] = GROUP_VERBS[tool.toLowerCase()] ?? ["used", "tool"];
+		const phrase = `${verb} ${thing}`;
+		counts.set(phrase, (counts.get(phrase) ?? 0) + 1);
+	}
+	const said = [...counts].map(([phrase, n]) => {
+		const [verb, thing] = phrase.split(" ");
+		if (thing === "time") return `${verb} ${n === 1 ? "once" : `${n} times`}`;
+		return `${verb} ${n === 1 ? `a ${thing}` : `${n} ${thing}s`}`;
+	});
+	const line = said.join(", ");
+	return line.charAt(0).toUpperCase() + line.slice(1);
+}
