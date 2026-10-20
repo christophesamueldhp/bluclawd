@@ -99,16 +99,17 @@ export class ThemePicker implements Component {
 		const pad = " ".repeat(PAD);
 		const inner = Math.max(1, width - 2 * PAD);
 		const line = (text: string) => (text === "" ? "" : truncateToWidth(`${pad}${text}`, width, "…"));
-		const rule = (char: string, color: "mdLink" | "dim") => t.fg(color, char.repeat(Math.max(0, width)));
+		// mdCode is Claude Code's `permission` colour in bluclawd's themes, the one its picker is drawn in.
+		const rule = (char: string, color: "mdCode" | "dim") => t.fg(color, char.repeat(Math.max(0, width)));
 
-		const out = ["", rule("─", "mdLink")];
-		out.push(line(t.bold(t.fg("mdLink", "Theme"))), "");
+		const out = ["", rule("─", "mdCode")];
+		out.push(line(t.bold(t.fg("mdCode", "Theme"))), "");
 		out.push(line(t.bold("Choose the text style that looks best with your terminal")), "");
 		this.options.forEach((option, i) => {
 			const focused = i === this.index;
-			const pointer = focused ? t.fg("mdLink", POINTER) : " ";
+			const pointer = focused ? t.fg("mdCode", POINTER) : " ";
 			const check = option.value === this.current ? t.fg("success", CHECK) : " ";
-			const label = focused ? t.fg("mdLink", option.label) : option.label;
+			const label = focused ? t.fg("mdCode", option.label) : option.label;
 			out.push(line(`${pointer} ${check} ${label}`));
 		});
 		out.push("", rule("╌", "dim"));

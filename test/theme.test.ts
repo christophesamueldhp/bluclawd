@@ -54,7 +54,7 @@ describe("bluclawd theme", () => {
 		expect(color("error")).toBe("#ff6b80");
 		expect(color("warning")).toBe("#ffc107");
 		expect(color("bashMode")).toBe("#fd5db1");
-		expect(color("mdLink")).toBe("#b1b9f9");
+		expect(color("mdCode")).toBe("#b1b9f9");
 	});
 
 	it("keeps the bluclawd mascot cyan as the accent", () => {
@@ -137,13 +137,31 @@ describe("bluclawd theme variants", () => {
 		expect(load("bluclawd-light-ansi").parsed.appearance).toBe("light");
 	});
 
+	// Claude Code 2.1.304's markdown renderer: inline code and plain code blocks in `permission`, link
+	// text in the terminal's blueBright (dark) or blue (light), and quotes, bullets and rules uncoloured.
+	it.each([
+		["bluclawd", "#b1b9f9", 12, "#ffffff"],
+		["bluclawd-light", "#5769f7", 4, "#000000"],
+		["bluclawd-dark-daltonized", "#99ccff", 12, "#ffffff"],
+		["bluclawd-light-daltonized", "#3366ff", 4, "#000000"],
+		["bluclawd-dark-ansi", 12, 12, 15],
+		["bluclawd-light-ansi", 4, 4, 0],
+	])("%s draws markdown as Claude Code's renderer does", (name, permission, link, text) => {
+		const { color } = load(name);
+		expect(color("mdCode")).toBe(permission);
+		expect(color("mdCodeBlock")).toBe(permission);
+		expect(color("mdLink")).toBe(link);
+		expect(color("mdHeading")).toBe(text);
+		for (const token of ["mdQuote", "mdListBullet", "mdHr"]) expect(color(token), token).toBe(text);
+	});
+
 	it("light mode uses CC's light values", () => {
 		const { color } = load("bluclawd-light");
 		expect(color("text")).toBe("#000000");
 		expect(color("muted")).toBe("#666666");
 		expect(color("success")).toBe("#2c7a39");
 		expect(color("error")).toBe("#ab2b3f");
-		expect(color("mdLink")).toBe("#5769f7");
+		expect(color("mdCode")).toBe("#5769f7");
 		expect(color("userMessageBg")).toBe("#f0f0f0");
 		expect(color("toolDiffAdded")).toBe("#2f9d44");
 		expect(color("thinkingMax")).toBe("#8700ff");
