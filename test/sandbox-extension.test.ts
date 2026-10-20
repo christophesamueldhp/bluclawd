@@ -40,6 +40,26 @@ describe("networkAsker", () => {
 		expect(await asker.ask({ host: "x.com", port: undefined })).toBe(true);
 	});
 
+	it("opens one dialog at a time", async () => {
+		let open = 0;
+		let maxOpen = 0;
+		const confirm = vi.fn(async () => {
+			open++;
+			maxOpen = Math.max(maxOpen, open);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			open--;
+			return true;
+		});
+		const asker = networkAsker(() => ({ hasUI: true, ui: { confirm } }) as any);
+		const answers = await Promise.all([
+			asker.ask({ host: "a.com", port: 443 }),
+			asker.ask({ host: "b.com", port: 443 }),
+		]);
+		expect(answers).toEqual([true, true]);
+		expect(confirm).toHaveBeenCalledTimes(2);
+		expect(maxOpen).toBe(1);
+	});
+
 	it("denies when reading the session throws", async () => {
 		const asker = networkAsker(() => {
 			throw new Error("stale ctx");
@@ -164,6 +184,16 @@ describe("the extension", () => {
 		await wrong.start();
 		expect(sandboxStatus()).toEqual({ kind: "unavailable", reason: "sandbox.enabled is not true or false" });
 		expect(wrong.notes[0]).toContain("sandbox.enabled is not true or false");
+	});
+
+	it("stops when a later session start no longer enables it", async () => {
+		const { start } = load({ sandbox: { enabled: true } });
+		await start();
+		expect(sandboxStatus()).toEqual({ kind: "ready" });
+		writeFileSync(join(getAgentDir(), "settings.json"), "{}");
+		await start();
+		expect(engine.resets).toBe(1);
+		expect(sandboxStatus()).toEqual({ kind: "off" });
 	});
 
 	it("stops on quit only; another session start updates the config", async () => {

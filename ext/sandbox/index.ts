@@ -20,25 +20,30 @@ import { denyRules } from "../_shared/settings.ts";
 import { runtimeConfig, sandboxSetting } from "./config.ts";
 import { type AskNetwork, markSandboxUnavailable, sandboxStatus, startSandbox, stopSandbox } from "./runtime.ts";
 
-/** Asks the user once per host and port per session; concurrent asks share one dialog; no UI denies. */
+/** Asks the user once per host and port per session, one dialog at a time; no UI denies. */
 export function networkAsker(context: () => ExtensionContext | undefined): { ask: AskNetwork; forget(): void } {
 	const answers = new Map<string, Promise<boolean>>();
+	// pi's dialog replaces an open one without settling it, so a dialog opens only after the last settled.
+	let chain: Promise<unknown> = Promise.resolve();
 	return {
 		ask: ({ host, port }) => {
 			const target = port === undefined ? host : `${host}:${port}`;
 			let answer = answers.get(target);
 			if (!answer) {
-				// pi throws when an extension touches the ctx of a replaced session.
-				try {
-					const ctx = context();
-					answer = ctx?.hasUI
-						? ctx.ui
-								.confirm("Network access", `Allow the model's commands to reach ${target} for this session?`)
-								.catch(() => false)
-						: Promise.resolve(false);
-				} catch {
-					answer = Promise.resolve(false);
-				}
+				answer = chain.then(async () => {
+					// pi throws when an extension touches the ctx of a replaced session.
+					try {
+						const ctx = context();
+						if (!ctx?.hasUI) return false;
+						return await ctx.ui.confirm(
+							"Network access",
+							`Allow the model's commands to reach ${target} for this session?`,
+						);
+					} catch {
+						return false;
+					}
+				});
+				chain = answer;
 				answers.set(target, answer);
 			}
 			return answer;
