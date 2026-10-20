@@ -171,6 +171,39 @@ describe("deniedBy", () => {
 		expect(denied(rules, "bash", { command: "cat 'public dir/key'" })).toBe(false);
 	});
 
+	it("reads a bash output redirect target as written, not read", () => {
+		const read = ["Read(**/.env*)"];
+		const write = ["Write(**/.env*)"];
+		const edit = ["Edit(**/.env*)"];
+		for (const command of [
+			"echo B=2 >> .env",
+			"printf 'B=2\\n' >>.env",
+			"cat >> .env <<'EOF'",
+			"timeout 5 echo B=2 >> .env",
+			"if true; then echo B=2 >> .env; fi",
+		]) {
+			expect(denied(read, "bash", { command }), command).toBe(false);
+			expect(denied(write, "bash", { command }), command).toBe(false);
+			expect(denied(edit, "bash", { command }), command).toBe(true);
+		}
+		for (const command of ["echo B=2 > .env", "echo B=2 2> .env"]) {
+			expect(denied(read, "bash", { command }), command).toBe(false);
+			expect(denied(write, "bash", { command }), command).toBe(true);
+			expect(denied(edit, "bash", { command }), command).toBe(true);
+		}
+		// Named as a plain word or an input redirect, it may be read.
+		for (const command of [
+			"cat < .env",
+			"cat .env >> out",
+			"cat .env >> .env",
+			"echo x >> .env; cat .env",
+			"sed -i s/a/b/ .env",
+			"tee -a .env",
+		]) {
+			expect(denied(read, "bash", { command }), command).toBe(true);
+		}
+	});
+
 	it("expands a command's globs the way the shell will", () => {
 		const dir = mkdtempSync(join(tmpdir(), "deny-glob-"));
 		try {
@@ -351,6 +384,35 @@ describe("the extension", () => {
 		expect((await call("monitor", { command: "rm x", description: "d" }))?.block).toBe(true);
 		expect((await call("websearch", { queries: ["vitest", "the secret plan"] }))?.block).toBe(true);
 		expect(await call("websearch", { queries: ["vitest"] })).toBeUndefined();
+	});
+
+	it("judges powershell as bash", async () => {
+		const { handlers, ctx, call } = load({ permissions: { deny: ["Read(**/.env*)"] } });
+		writeFileSync(join(dir, ".env"), "A=1\n");
+		await handlers.session_start({}, ctx);
+		expect((await call("powershell", { command: "Get-Content .env" }))?.block).toBe(true);
+		expect((await call("powershell", { command: "Select-String -Path .env -Pattern A" }))?.block).toBe(true);
+		expect(await call("powershell", { command: "Get-ChildItem" })).toBeUndefined();
+	});
+
+	it("leaves a Read-denied file's lines out of a folder grep", async () => {
+		const { handlers, ctx } = load({ permissions: { deny: ["Read(**/.env*)"] } });
+		mkdirSync(join(dir, "sub"));
+		await handlers.session_start({}, ctx);
+		const grep = (input: Record<string, unknown>, text: string, toolName = "grep") =>
+			handlers.tool_result({ toolName, input, content: [{ type: "text", text }], isError: false }, ctx);
+
+		expect(
+			await grep({ pattern: "A" }, ".env:1: A=1\nsub/.env-1- B=2\nsrc/a-1-b.ts:3: A\n\n[Some lines truncated]"),
+		).toEqual({ content: [{ type: "text", text: "src/a-1-b.ts:3: A\n\n[Some lines truncated]" }] });
+		expect(await grep({ pattern: "A", path: "sub" }, ".env.local:2: A=1\nx.ts:1: A")).toEqual({
+			content: [{ type: "text", text: "x.ts:1: A" }],
+		});
+		expect(await grep({ pattern: "A", path: "." }, ".env:1: A=1\n\n[100 matches limit reached]")).toEqual({
+			content: [{ type: "text", text: "No matches found" }],
+		});
+		expect(await grep({ pattern: "A" }, "src/a.ts:3: A")).toBeUndefined();
+		expect(await grep({ pattern: "A" }, ".env:1: A=1", "read")).toBeUndefined();
 	});
 
 	it("shows defaultProjectTrust and cycles it with Alt+M, saved to global settings and announced", async () => {

@@ -13,7 +13,7 @@
  *   `Bash(npm *)` does not match `npmx`.
  */
 
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
 
@@ -285,6 +285,8 @@ function bashRuleSubjects(command: string, depth = 0): string[] {
 			const tokens = form.split(/\s+/);
 			if (COMMAND_PREFIXES.has(basename(tokens[0] ?? ""))) {
 				for (let i = 1; i < Math.min(tokens.length, PREFIX_ARG_LIMIT + 2); i++) {
+					// A redirect target is not where a command starts.
+					if (REDIRECT.test(tokens[i - 1])) continue;
 					for (const nested of bashRuleSubjects(tokens.slice(i).join(" "), depth + 1)) candidates.add(nested);
 				}
 			}
@@ -445,54 +447,82 @@ function expandGlob(absPath: string): string[] {
  * it looks like a path (`/`, `~`, `.`), is a glob, or exists, relative to the cwd or
  * any `cd` target. A glob also counts as every path it expands to, so `cat ~/.ss?/id_rsa`
  * is caught too. Which words the command really opens is unknown; testing them all only blocks more.
+ *
+ * Paths come back by how the command uses them: an output redirect target is written,
+ * never read — `>>` appends (`append`), any other `>` truncates (`truncate`). Everything
+ * else, `<` included, may be read (`plain`).
  */
-function bashPathCandidates(subjects: string[], cwd: string): string[] {
-	const words = new Set<string>();
+function bashPathCandidates(subjects: string[], cwd: string): Record<BashPathUse, string[]> {
+	const words: Record<BashPathUse, Set<string>> = { plain: new Set(), append: new Set(), truncate: new Set() };
 	const redirects = new Set<string>();
 	const bases = new Set([cwd]);
 	for (const s of subjects) {
 		const plain = expandVars(dequote(s));
 		for (const m of plain.matchAll(/[<>]+&?\s*([^\s<>&|;]+)/g)) redirects.add(m[1]);
 		const forms = [
-			plain.replace(/\d*[<>]+&?/g, " ").split(/\s+/),
+			plain.replace(/(\d*[<>]+&?)/g, " $1 ").split(/\s+/),
 			shellWords(s).map((word) => expandVars(dequote(word))),
 		];
 		for (const tokens of forms) {
 			if (tokens[0] === "cd" && tokens[1]) bases.add(resolveToCwd(homeExpand(tokens[1]), cwd));
 			for (const [i, token] of tokens.entries()) {
-				if (/^[<>]+&?$/.test(token)) {
+				if (REDIRECT.test(token)) {
 					if (tokens[i + 1]) redirects.add(tokens[i + 1]);
 					continue;
 				}
+				const use = redirectUse(tokens[i - 1]);
 				// `--file=x`, `if=/dev/sda`: the value is the path.
 				const value = token.includes("=") ? token.slice(token.indexOf("=") + 1) : "";
-				if (value) words.add(value);
-				if (token && !token.startsWith("-")) words.add(token);
+				if (value) words[use].add(value);
+				if (token && !token.startsWith("-")) words[use].add(token);
 			}
 		}
 	}
-	const out = new Set<string>();
-	const addPath = (path: string) => {
-		out.add(path);
-		const real = realpathIfSymlink(path);
-		if (real !== undefined) out.add(real);
-	};
-	const addResolved = (word: string, base: string) => {
-		const resolved = resolveToCwd(homeExpand(word), base);
-		addPath(resolved);
-		if (GLOB_CHARS.test(word)) for (const match of expandGlob(resolved)) addPath(match);
-	};
-	for (const word of words) {
-		const pathLike = /^[~./]/.test(word) || word.includes("/") || redirects.has(word) || GLOB_CHARS.test(word);
-		for (const base of bases) {
-			if (pathLike || existsSync(resolveToCwd(word, base))) {
-				out.add(homeExpand(word));
-				addResolved(word, base);
+	const resolve = (uses: Set<string>): string[] => {
+		const out = new Set<string>();
+		const addPath = (path: string) => {
+			out.add(path);
+			const real = realpathIfSymlink(path);
+			if (real !== undefined) out.add(real);
+		};
+		const addResolved = (word: string, base: string) => {
+			const resolved = resolveToCwd(homeExpand(word), base);
+			addPath(resolved);
+			if (GLOB_CHARS.test(word)) for (const match of expandGlob(resolved)) addPath(match);
+		};
+		for (const word of uses) {
+			const pathLike = /^[~./]/.test(word) || word.includes("/") || redirects.has(word) || GLOB_CHARS.test(word);
+			for (const base of bases) {
+				if (pathLike || existsSync(resolveToCwd(word, base))) {
+					out.add(homeExpand(word));
+					addResolved(word, base);
+				}
 			}
 		}
-	}
-	return [...out];
+		return [...out];
+	};
+	return { plain: resolve(words.plain), append: resolve(words.append), truncate: resolve(words.truncate) };
 }
+
+type BashPathUse = "plain" | "append" | "truncate";
+
+/** A redirect operator token: `<`, `>`, `>>`, `2>`, `>&`, `<<`. */
+const REDIRECT = /^\d*[<>]+&?$/;
+
+/** How the word after `previous` is used: written when `previous` is an output redirect. */
+function redirectUse(previous: string | undefined): BashPathUse {
+	if (previous === undefined || !REDIRECT.test(previous) || previous.includes("<")) return "plain";
+	return /^\d*>>$/.test(previous) ? "append" : "truncate";
+}
+
+/**
+ * The bash path uses a file rule guards: a Read-family rule what may be read, a Write
+ * rule also what is overwritten, an Edit rule every change, appends included.
+ */
+const BASH_USES_GUARDED: Record<string, BashPathUse[]> = {
+	Write: ["plain", "truncate"],
+	Edit: ["plain", "truncate", "append"],
+};
 
 /**
  * The first rule in `deny` that matches this tool call, or undefined. A rule that fails
@@ -523,17 +553,21 @@ export function deniedBy(
 		if (real !== undefined) pathCandidates.push(real);
 	}
 
-	let bashPaths: string[] | undefined;
+	let bashPaths: Record<BashPathUse, string[]> | undefined;
 
 	const matches = (rule: string): boolean => {
 		try {
 			const parts = ruleParts(rule);
 			if (parts === undefined) return false;
 			// A file rule also guards the paths a bash command names.
-			if (isBash && cwd && PATH_VERBS.has(capitalize(parts.verb))) {
+			const ruleVerb = capitalize(parts.verb);
+			if (isBash && cwd && PATH_VERBS.has(ruleVerb)) {
 				bashPaths ??= bashPathCandidates(respellings(), cwd);
+				const paths = bashPaths;
 				const patterns = pathRulePatterns(parts.subject, cwd);
-				return bashPaths.some((candidate) => patterns.some((pattern) => pattern.test(candidate)));
+				return (BASH_USES_GUARDED[ruleVerb] ?? ["plain"]).some((use) =>
+					paths[use].some((candidate) => patterns.some((pattern) => pattern.test(candidate))),
+				);
 			}
 			if (!ruleVerbCovers(parts.verb, verb)) return false;
 			if (verb === "WebFetch") {
@@ -553,4 +587,38 @@ export function deniedBy(
 		}
 	};
 	return deny.find(matches);
+}
+
+/** A grep match line's separator: `<file>:<n>: <text>`, or `<file>-<n>- <text>` for context. */
+const GREP_LINE = /[:-]\d+[:-] /g;
+
+/**
+ * A folder grep's output without the lines from files a rule denies, or undefined when it
+ * has none. A file name can hold a separator too, so every split of a line is tried.
+ */
+export function grepOutputWithoutDenied(
+	deny: string[],
+	input: Record<string, unknown>,
+	output: string,
+	cwd: string,
+): string | undefined {
+	const dir = resolveToCwd(String(input.path ?? "") || ".", cwd);
+	// A one-file grep was judged before it ran.
+	if (!isDirectory(dir)) return undefined;
+	const fromDenied = (line: string) =>
+		[...line.matchAll(GREP_LINE)].some(
+			(m) => deniedBy(deny, "grep", { path: join(dir, line.slice(0, m.index)) }, cwd) !== undefined,
+		);
+	const lines = output.split("\n");
+	const kept = lines.filter((line) => !fromDenied(line));
+	if (kept.length === lines.length) return undefined;
+	return kept.some((line) => new RegExp(GREP_LINE.source).test(line)) ? kept.join("\n") : "No matches found";
+}
+
+function isDirectory(path: string): boolean {
+	try {
+		return statSync(path).isDirectory();
+	} catch {
+		return false;
+	}
 }

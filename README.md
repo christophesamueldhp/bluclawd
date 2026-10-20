@@ -281,8 +281,14 @@ pi package registers; `dir/**` covers
 `dir` itself too. A bash rule also matches the command behind wrappers (`sudo`,
 `timeout`, `nice`, `env`, `xargs`, `sh -c '…'`, `eval`, …), shell keywords,
 quoting (`'rm'`, `\rm`), `/bin/…`, `$(…)`, and any part of a `&&`/`;`/`|` chain.
-A `Read`/`Edit` rule also blocks a bash command that names a matching path —
-`cat ~/.ssh/id_rsa`, `echo x > .git/config`, `cd secret && cat key`. Deny rules
+A file rule also blocks a bash command that names a matching path —
+`cat ~/.ssh/id_rsa`, `cd secret && cat key` — except where the command only writes
+it: an output redirect target is never read, so a `Read` rule lets `echo x >> .env`
+and `echo x > .env` through, a `Write` rule only `>>`, and an `Edit` rule neither
+(`echo x > .git/config` is an `Edit` rule's). `Read(**/.env*)` + `Write(**/.env*)`
+keeps `.env` unread and whole while `>>` still appends to it. `powershell` is
+judged as bash, and a `grep` over a folder drops the lines it found in a denied
+file. Deny rules
 match text, not behavior: a command that builds the path or name at run time
 (`$(printf rm)`, a variable set earlier, a glob like `~/.ss*`) is not caught.
 

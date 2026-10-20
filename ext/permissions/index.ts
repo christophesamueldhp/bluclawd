@@ -13,6 +13,7 @@ import type {
 	ExtensionContext,
 	InlineExtension,
 	ToolCallEventResult,
+	ToolResultEventResult,
 } from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
@@ -20,7 +21,7 @@ import { monitorSource } from "../_shared/monitor-source.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { type ProjectTrust, trustBadge } from "../_shared/trust-badge.ts";
-import { deniedBy, displayRule, searchQueries } from "./rules.ts";
+import { deniedBy, displayRule, grepOutputWithoutDenied, searchQueries } from "./rules.ts";
 
 export const TRUST_CYCLE: readonly ProjectTrust[] = ["always", "ask", "never"];
 /** On pi's event bus whenever `defaultProjectTrust` is set here, so remote control reports it. */
@@ -62,14 +63,16 @@ export async function setProjectTrust(
 }
 
 /**
- * The tool name and input deny rules are matched against: `monitor` runs a shell like
- * bash, or opens a WebSocket judged as a fetch; MCP resources count as their server's tools.
+ * The tool name and input deny rules are matched against: `monitor` and `powershell` run a
+ * shell like bash, or `monitor` opens a WebSocket judged as a fetch; MCP resources count as
+ * their server's tools.
  */
 function governed(tool: string, input: Record<string, unknown>): { tool: string; input: Record<string, unknown> } {
 	if (tool === "monitor") {
 		const source = monitorSource(input);
 		return source.kind === "ws" ? { tool: "webfetch", input: { url: source.url } } : { tool: "bash", input };
 	}
+	if (tool === "powershell") return { tool: "bash", input };
 	if (tool === "mcp_read_resource" || tool === "mcp_list_resources") {
 		const server = typeof input.server === "string" ? input.server : "";
 		if (server) return { tool: `mcp__${server}__${tool.slice("mcp_".length)}`, input };
@@ -108,6 +111,20 @@ function factory(pi: ExtensionAPI): void {
 				: deniedBy(deny, tool, input, ctx.cwd);
 		if (rule === undefined) return undefined;
 		return { block: true, reason: `Blocked by permission rule (deny): ${displayRule(rule)}` };
+	});
+
+	// A folder grep reads every file in it, so a denied file's lines are dropped from what it found.
+	pi.on("tool_result", async (event, ctx): Promise<ToolResultEventResult | undefined> => {
+		if (event.toolName !== "grep" || event.isError) return undefined;
+		let changed = false;
+		const content = event.content.map((part) => {
+			if (part.type !== "text") return part;
+			const text = grepOutputWithoutDenied(deny, event.input, part.text, ctx.cwd);
+			if (text === undefined) return part;
+			changed = true;
+			return { ...part, text };
+		});
+		return changed ? { content } : undefined;
 	});
 
 	pi.registerShortcut(Key.alt("m"), {

@@ -10,7 +10,7 @@ import { recordExtensions } from "../scripts/probe-extensions.ts";
  * changed may still structurally match) and only throws here.
  */
 const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts: number; events: number }> = {
-	permissions: { commands: [], tools: [], shortcuts: 1, events: 2 },
+	permissions: { commands: [], tools: [], shortcuts: 1, events: 3 },
 	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 6 },
 	"background-bash": {
 		commands: ["tasks"],
