@@ -38,5 +38,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit && tsc -p daemon/remote/web",
     "lint": "biome check ."
+  },
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.81"
   }
 }
