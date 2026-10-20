@@ -237,10 +237,12 @@ reading the API:
   theme.** pi resolves the configured theme before that hook runs, so it falls
   back to dark and prints "Theme not found". The theme is declared in
   `package.json`'s `pi.themes` instead, which pi registers before startup.
-- **`/theme`'s Auto applies fully only from the next start.** pi has no
-  extension API for a light/dark pair setting: `/theme` saves the pair and
-  shows the theme for the terminal's current appearance, but the session does
-  not follow a light/dark switch until pi restarts or reloads. Claude Code's
+- **`/theme`'s Auto follows only terminals that report light/dark switches.**
+  pi has no extension API for a light/dark pair setting: `/theme` saves the
+  pair, shows the theme for the terminal's current appearance, and follows the
+  terminal's switch reports (mode 2031) itself until pi restarts and follows the
+  pair on its own. A terminal that sends no such reports gets the other theme
+  only at the next start. Claude Code's
   syntax-highlighting toggle and its "New custom theme…" editor have no pi
   counterpart; pi's other themes are listed after Claude Code's six.
 - **Agent view differs from Claude Code's in a few places.** Row text comes from each
