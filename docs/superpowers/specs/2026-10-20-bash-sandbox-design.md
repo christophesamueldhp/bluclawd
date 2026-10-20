@@ -18,11 +18,11 @@ same model: the sandbox wraps shell commands, and deny rules keep governing pi's
 | Scope | Reads, writes and network | `srt` always isolates all three, and Anthropic's model needs both layers: without file isolation a process can read secrets, without network isolation it can send them out |
 | Activation | Opt-in: `sandbox.enabled: true` in global settings | Same default as Claude Code. Other bluclawd users are not blocked by an update |
 | Settings scope | Global settings only (`~/.pi/agent/settings.json`) | A repository's files must not loosen or switch off the sandbox |
-| Unlisted network host | Ask the user, once per host per session; deny without a UI | Same as Claude Code's default |
+| Unlisted network host | Ask the user, once per host and port per session; deny without a UI | Same as Claude Code's default |
 | Sandbox cannot start | Fail closed: the model's `bash` and `monitor` are refused with the reason | Same as Claude Code's `failIfUnavailable`. A secret is never exposed by a silent fallback |
 | Escape hatch | None | No `excludedCommands`, no unsandboxed retry. The user can still run a command with `!`, which is not sandboxed (same as Claude Code) |
 | Native Windows | Unavailable, "use WSL2" | Claude Code runs unsandboxed there; `srt`'s Windows support is alpha and needs an elevated install |
-| `powershell` tool | Blocked while the sandbox is on | It is pi's own tool and does not run through bluclawd's exec, so it would bypass the sandbox |
+| `powershell` and pi's `bash` | Blocked while the sandbox is on (`bash` only when bluclawd's background-bash is not loaded) | They are pi's own tools and do not run through bluclawd's exec, so they would bypass the sandbox |
 | Nested Docker | No `enableWeakerNestedSandbox` | Anthropic says it "considerably weakens security" |
 
 ## Settings
@@ -78,11 +78,13 @@ writes, so `Read(**/.env*)` alone still lets the model append to `.env`.
 
 ### U1. `ext/sandbox/config.ts`: settings to `srt` config
 
-- `sandboxSettings(sm)`: reads `sandbox` from global settings only. Returns
-  `{ enabled: false }`, `{ enabled: true, settings }`, or `{ invalid: reason }` when `sandbox` is
-  not an object, `enabled` is not a boolean, or a list holds a non-string.
-- `runtimeConfig(settings, denyRules, cwd, home)`: pure function returning `SandboxRuntimeConfig`,
+- `sandboxSetting(sm)`: reads `sandbox` from global settings only. Returns `{ kind: "off" }`,
+  `{ kind: "on", settings }`, or `{ kind: "invalid", reason }` when `sandbox` is not an object,
+  `enabled` is not a boolean, or a list holds a non-string.
+- `runtimeConfig(settings, denyRules, cwd, home, tmp)`: pure function returning `RuntimeConfig`,
   following the tables above. Rules that are not `Read`/`Edit`/`Write` with a path are ignored.
+- Settings pi cannot parse at all are read as empty, so the sandbox is off; the extension warns
+  (U3). It cannot tell whether the user had enabled it, so `bash` is not refused.
 - An invalid `sandbox` with `enabled` not explicitly `false` counts as on and unavailable, so a
   typo never switches the sandbox off.
 
@@ -90,18 +92,22 @@ writes, so `Read(**/.env*)` alone still lets the model append to `.env`.
 
 - State, held with `sharedRef` so every extension instance in the process sees the same one:
   `{ kind: "off" }`, `{ kind: "ready" }`, or `{ kind: "unavailable", reason }`.
-- `start(config, ask)`:
+- `startSandbox(config, ask, platform?)` and `stopSandbox()` run one at a time, in call order. An
+  `initialized` flag, not the status, picks `updateConfig` over `initialize` and gates `reset()`,
+  since `unavailable` does not undo an initialize. `srt` keeps the callback it gets at initialize,
+  so it gets a trampoline to the latest session's `ask`.
+- `startSandbox`:
   - Native Windows: `unavailable`, "the sandbox needs macOS, Linux or WSL2; on Windows run pi in
     WSL2".
   - `!SandboxManager.isSupportedPlatform()`: `unavailable` with the platform name.
   - `SandboxManager.checkDependencies()` reports errors (for example bubblewrap or socat missing):
-    `unavailable` with those errors and the install hint (`apt install bubblewrap socat`; on
+    `unavailable` with those errors and the install hint (`apt install bubblewrap socat ripgrep`; on
     Ubuntu 24.04+ the AppArmor user-namespace setting, linked from the README).
   - Otherwise `SandboxManager.initialize(config, ask, true)` (log monitor on, for violations).
     A throw is `unavailable` with its message. Success is `ready`.
   - Already `ready` (a second `session_start` in the same process): `SandboxManager.updateConfig`.
-- `stop()`: `SandboxManager.reset()`, state `off`.
-- `wrapExec(exec)`: returns an `exec` with the same signature (`BashOperations["exec"]`):
+- `stopSandbox`: `SandboxManager.reset()` when initialized, state `off`.
+- `wrapExec(exec, shellPath)`: records in the shared state that a wrapped exec exists (U3), and returns an `exec` with the same signature (`BashOperations["exec"]`):
   - `off`: calls `exec` unchanged.
   - `unavailable`: rejects with `Error("The sandbox is on but cannot run: <reason>")`. The command
     does not run.
@@ -118,34 +124,43 @@ writes, so `Read(**/.env*)` alone still lets the model append to `.env`.
 
 - Registered in `package.json` right after `./ext/permissions/index.ts`, so a deny rule still
   blocks a call before the sandbox sees it.
-- `session_start`: read settings and deny rules (`ext/_shared/settings.ts`). When on, build the
-  config and `start()` it. When it ends `unavailable`, notify once:
-  `Sandbox is on but cannot run: <reason>. The model's bash and monitor are refused.`
+- `session_start`: read settings and deny rules (`ext/_shared/settings.ts`). When pi reports its
+  global settings unreadable, warn `Sandbox is off: <path> could not be read.` When on, build the
+  config and start it. When it ends `unavailable`, notify once:
+  `Sandbox is on but cannot run: <reason>. The model's bash and monitor are refused.` A throw
+  anywhere in the handler marks the sandbox `unavailable` with the same notice, never `off`.
 - `session_shutdown` with `reason: "quit"`: `stop()`. Background shells outlive `/new`,
   `/resume` and `/fork`, so any other shutdown keeps the sandbox, and the next `session_start`
   updates its config and network callback.
 - `tool_call`: while the sandbox is not `off`, block `powershell` with
-  `The sandbox is on and powershell does not run inside it; use bash.`
+  `The sandbox is on and powershell does not run inside it; use bash.`, and block `bash` when no
+  wrapped exec exists (background-bash disabled, so pi's own unwrapped `bash` would run) with
+  `The sandbox is on but bluclawd's bash, which runs inside it, is not loaded; enable bluclawd's background-bash extension.`
 - Network ask callback, given to `start()`:
   - Answers cached per session, keyed `host:port`, both allow and deny.
   - Concurrent asks for the same key share one pending promise, so one dialog appears.
-  - `ctx.hasUI` false: deny.
+  - Dialogs run one at a time across hosts: pi's dialog replaces an open one without settling it.
+  - `ctx.hasUI` false, or a stale ctx (pi throws on a replaced session's): deny.
   - Otherwise `ctx.ui.confirm("Network access", "Allow the model's commands to reach <host>:<port> for this session?")`.
 
 ### U4. `ext/background-bash/index.ts`: one line
 
 ```ts
-exec: wrapExec((command, cwd, options) => createLocalBashOperations({ shellPath }).exec(command, cwd, options)),
+exec: wrapExec(
+	(command, cwd, options) => createLocalBashOperations({ shellPath }).exec(command, cwd, options),
+	() => shellPath,
+),
 ```
 
-with `shellPath` passed through to `wrapWithSandbox`. This is the only path the model's `bash`
-(foreground and `run_in_background`), `monitor` and subagent shells run through.
+with `shellPath` passed through to `wrapWithSandbox`. The model's `bash` (foreground and
+`run_in_background`) and `monitor`'s command sources run through it. `monitor`'s `ws` source is an
+in-process WebSocket and stays outside the sandbox; it reads no files.
 
 ### U5. Dependency and docs
 
 - `package.json`: `"dependencies": { "@anthropic-ai/sandbox-runtime": "0.0.81" }`. bluclawd has
-  no `dependencies` yet; pi installs a git package's dependencies on install (`docs/packages.md`),
-  so every machine that installs bluclawd gets `srt`.
+  no `dependencies` yet; pi installs the dependencies of an npm or git package on install (`docs/packages.md`), so
+  those installs get `srt`. A local-path install does not: run `npm install` in the repo.
 - README, Permissions section: a Sandbox subsection with the settings, the platform table, the
   difference in `**/` anchoring, what runs outside the sandbox, and the Linux setup.
 
@@ -154,7 +169,7 @@ with `shellPath` passed through to `wrapWithSandbox`. This is the only path the 
 | Platform | Mechanism | Needs | When missing |
 |---|---|---|---|
 | macOS | Seatbelt (`sandbox-exec`) | Nothing | — |
-| Linux, WSL2 | bubblewrap, socat, optional seccomp filter | `bubblewrap` and `socat` packages; on Ubuntu 24.04+ unprivileged user namespaces allowed by AppArmor | `unavailable` with the install hint |
+| Linux, WSL2 | bubblewrap, socat, optional seccomp filter | `bubblewrap`, `socat` and `ripgrep` packages; on Ubuntu 24.04+ unprivileged user namespaces allowed by AppArmor | `unavailable` with the install hint |
 | Native Windows | — | — | `unavailable`, "use WSL2" |
 | Inside Docker | bubblewrap often cannot create namespaces | Privileged namespaces | `unavailable` |
 
@@ -178,10 +193,10 @@ loads `.env` at start fails under the sandbox. The user runs it with `!`.
   runs the wrapped command with the same cwd, env, signal and timeout; `unavailable` rejects and
   runs nothing; violations are appended; native Windows and failed dependency checks give
   `unavailable` with their reasons; a second start updates the config.
-- `index.ts` (unit): `powershell` blocked only while the sandbox is on; one warning when
+- `index.ts` (unit): `powershell` (and `bash` without a wrapped exec) blocked only while the sandbox is on; one warning when
   unavailable; ask callback caching, one dialog for concurrent asks, deny without a UI.
 - `registration.test.ts`: the new extension's event count.
-- Integration with the real `srt`, skipped where the platform or its dependencies are missing:
+- Integration with the real `srt`, skipped where `srt` reports the platform unsupported or a dependency missing (its own `checkDependencies`):
   - `grep -r A .` in a folder holding `.env` prints the other file's line and not `.env`'s.
   - `echo x >> .env` in the working directory succeeds; writing to the home directory fails.
   - A host outside the allowlist, denied by the ask callback, fails with the proxy's 403.

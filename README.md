@@ -10,6 +10,7 @@ top.
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # pi itself
 brew install tmux                                                  # agent view needs it
+npm install --omit=dev --omit=peer --prefix /path/to/this/repo     # the sandbox runtime
 pi install /path/to/this/repo                                     # this layer
 pi                                                                 # run it
 ```
@@ -328,19 +329,23 @@ when a session starts, so `/reload` after editing:
 - Reads: everything except what a `Read` rule denies, plus `filesystem.denyRead`.
 - Writes: the working directory and the temp directory, plus `filesystem.allowWrite`; never
   what an `Edit` or `Write` rule denies. Under the sandbox a `Write` rule blocks `>>` too.
-- Network: hosts in `network.allowedDomains`. For any other host, pi asks once per session,
-  the one prompt bluclawd adds (without a UI, the host is refused).
+- Network: hosts in `network.allowedDomains`. For any other host, pi asks once per host and port
+  per session, the one prompt bluclawd adds (without a UI, the host is refused).
 - Rule paths are anchored at the working directory: `Read(**/.env*)` covers `.env` files
   under the project. Add others to `filesystem.denyRead`, e.g. `~/**/.env*`.
-- When the sandbox cannot run, or its settings are malformed, the model's `bash` and
-  `monitor` are refused and pi says why. There is no unsandboxed fallback. pi's
-  `powershell` tool is blocked while it is on.
+- When the sandbox cannot run, or its `sandbox` setting is malformed, the model's `bash` and
+  `monitor` are refused and pi says why. There is no unsandboxed fallback. `bash` is also
+  refused when bluclawd's background-bash extension is disabled, since pi's own `bash` does
+  not run inside the sandbox. pi's `powershell` tool is blocked while it is on. Settings pi
+  cannot parse at all turn the sandbox off, with a warning.
 - Outside the sandbox: commands you type with `!`, pi's own tools (`read`, `grep`, `edit`,
-  …, which the deny rules govern), MCP servers and other extensions. An app the model
+  …, which the deny rules govern), MCP servers and other extensions; `monitor`'s `ws` source
+  (an in-process WebSocket that reads no files); and background jobs already running when you
+  turn the sandbox on, until they are restarted. An app the model
   starts cannot read `.env` either; run it yourself with `!`.
 
 | Platform | Needs |
 |---|---|
 | macOS | Nothing (Seatbelt) |
-| Linux, WSL2 | `bubblewrap` and `socat` (`apt install bubblewrap socat`). On Ubuntu 24.04+, unprivileged user namespaces must be allowed by AppArmor: see [Anthropic's notes](https://code.claude.com/docs/en/sandboxing) |
+| Linux, WSL2 | `bubblewrap`, `socat` and `ripgrep` (`apt install bubblewrap socat ripgrep`). On Ubuntu 24.04+, unprivileged user namespaces must be allowed by AppArmor: see [Anthropic's notes](https://code.claude.com/docs/en/sandboxing) |
 | Windows | Not supported; run pi in WSL2 |
