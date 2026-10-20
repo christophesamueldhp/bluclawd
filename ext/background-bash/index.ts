@@ -35,6 +35,7 @@ import { subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { sharedRef } from "../_shared/global-state.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
+import { wrapExec } from "../sandbox/runtime.ts";
 import { backgroundBashJobs, describeJobStatus, isShellTaskId, noTaskError, shellTaskStop } from "./background-bash.ts";
 import { backgroundTasksDisabled } from "./bash-limits.ts";
 import { createClaudeBashTool } from "./bash-tool.ts";
@@ -141,8 +142,12 @@ const backgroundBash: InlineExtension = {
 
 		// The user's configured shell, read per session.
 		let shellPath: string | undefined;
+		// Inside the sandbox when it is on (ext/sandbox): every model shell command runs through here.
 		const operations: BashOperations = {
-			exec: (command, cwd, options) => createLocalBashOperations({ shellPath }).exec(command, cwd, options),
+			exec: wrapExec(
+				(command, cwd, options) => createLocalBashOperations({ shellPath }).exec(command, cwd, options),
+				() => shellPath,
+			),
 		};
 		const localCwd = process.cwd();
 

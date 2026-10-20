@@ -218,3 +218,14 @@ describe("wrapExec", () => {
 		expect(exec.commands).toEqual([]);
 	});
 });
+
+describe("background-bash", () => {
+	it("runs its exec through wrapExec", async () => {
+		const source = await import("node:fs").then((fs) =>
+			fs.readFileSync(new URL("../ext/background-bash/index.ts", import.meta.url), "utf8"),
+		);
+		expect(source).toMatch(
+			/exec: wrapExec\(\s*\(command, cwd, options\) => createLocalBashOperations\(\{ shellPath \}\)\.exec\(command, cwd, options\),\s*\(\) => shellPath,\s*\)/,
+		);
+	});
+});
