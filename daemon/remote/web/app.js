@@ -39,7 +39,7 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.38";
+const VERSION = "0.0.39";
 const BANDS = [
 	["pinned", "Pinned"],
 	["needs", "Needs input"],
@@ -838,8 +838,8 @@ function chatShell() {
 <section class="scroll" id="scroll"><div class="older" id="older"></div><div class="log" id="log">
 <div class="part" id="msgs"></div><div class="part" id="live"></div><div class="part" id="pending"></div><div class="part" id="working"></div></div></section>
 <div id="banner"></div><div class="commands" id="commands" role="listbox" aria-label="Commands" hidden></div><div class="thumbs" id="thumbs" hidden></div>
-<form class="composer" id="composer"><button type="button" class="attach" id="attach" aria-label="Attach photos">${ICONS.attach}</button>
-<input type="file" id="file" accept="image/*" multiple hidden>
+<form class="composer" id="composer"><label class="attach" id="attach">${ICONS.attach}
+<input type="file" id="file" accept="image/*" multiple aria-label="Attach photos"></label>
 <textarea id="text" rows="1" placeholder="Reply" aria-label="Reply" maxlength="32768"></textarea>
 <button class="send" aria-label="Send">${ICONS.send}</button></form>
 <div class="backdrop" id="backdrop" hidden></div><section class="sheet" id="sheet" role="dialog" aria-label="Session status" hidden></section>
@@ -1499,9 +1499,10 @@ function updateChat() {
 	text.disabled = closed;
 	$(".send").disabled = closed || state.reading > 0;
 	const attach = $("#attach");
-	attach.disabled = closed || state.attachments.length + state.reading >= ATTACH_MAX;
+	const file = $("#file");
+	file.disabled = closed || state.attachments.length + state.reading >= ATTACH_MAX;
 	attach.classList.toggle("busy", state.reading > 0);
-	attach.setAttribute("aria-label", state.reading ? "Reading the photos…" : "Attach photos");
+	file.setAttribute("aria-label", state.reading ? "Reading the photos…" : "Attach photos");
 	text.placeholder = !closed ? "Reply" : session?.alive ? "Read only" : "Disconnected";
 	updateThumbs();
 	updateCommands();
@@ -1849,7 +1850,6 @@ function bindChat() {
 		updateCommands();
 	});
 	const file = $("#file");
-	$("#attach").addEventListener("click", () => file.click());
 	file.addEventListener("change", () => {
 		const files = [...file.files];
 		file.value = "";

@@ -201,8 +201,11 @@ button { -webkit-user-select: none; user-select: none; }
 .composer textarea { flex: 1; min-height: 44px; resize: none; border: 0; border-radius: 22px; padding: 11px var(--s4); background: var(--panel); color: var(--text); font: 16px/22px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-height: 140px; }
 /* Round icon buttons: the accent one sends or starts, the grey one attaches. */
 .send, .start, .save, .attach { flex: none; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: var(--accent); color: #000; }
-.attach { background: var(--panel); color: var(--link); }
-.send:disabled, .start:disabled, .save:disabled, .attach:disabled { opacity: .35; }
+.attach { position: relative; background: var(--panel); color: var(--link); }
+/* Safari anchors its native photo menu to the file input, so keep it over the plus button. */
+.attach input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.attach:has(input:focus-visible) { outline: 2px solid var(--link); outline-offset: 2px; }
+.send:disabled, .start:disabled, .save:disabled, .attach:has(input:disabled) { opacity: .35; }
 /* The session's commands for what the reply box starts with: a short list above it. */
 .commands { flex: none; max-height: 40vh; overflow-y: auto; -webkit-overflow-scrolling: touch; border-top: 1px solid var(--line); background: var(--bg); }
 .commands[hidden] { display: none; }
