@@ -14,6 +14,7 @@ export function attachSuggestions(
 	render: () => void,
 	dim: (text: string) => string,
 	getSessionName: () => string | undefined = () => undefined,
+	isEnabled: () => boolean = () => true,
 ) {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let request: AbortController | undefined;
@@ -26,7 +27,8 @@ export function attachSuggestions(
 		const cursor = editor.getCursor();
 		return cursor.line === lines.length - 1 && cursor.col === lines[cursor.line].length;
 	};
-	const canSuggest = () => atEnd() && !editor.isShowingAutocomplete() && !/^\s*[!/]/.test(editor.getText());
+	const canSuggest = () =>
+		isEnabled() && atEnd() && !editor.isShowingAutocomplete() && !/^\s*[!/]/.test(editor.getText());
 	const eligible = () => isIdle() && canSuggest();
 	const visible = () => suggestion && draft === editor.getText() && eligible();
 	const clear = () => {

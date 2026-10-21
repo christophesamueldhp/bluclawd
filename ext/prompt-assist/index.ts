@@ -1,7 +1,7 @@
 import { CustomEditor, type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { Editor } from "@earendil-works/pi-tui";
 import { attachSuggestions } from "./editor.ts";
-import { DEFAULT_MODEL, loadAssistModel, saveAssistModel } from "./prefs.ts";
+import { DEFAULT_MODEL, loadAssistEnabled, loadAssistModel, saveAssistEnabled, saveAssistModel } from "./prefs.ts";
 
 export function conversation(ctx: ExtensionContext): string {
 	return ctx.sessionManager
@@ -33,11 +33,14 @@ export default function promptAssist(pi: ExtensionAPI) {
 	let warned = false;
 	let generation = 0;
 	let selectedModel = DEFAULT_MODEL;
+	let enabled = true;
 
 	pi.registerCommand("prompt-assist", {
-		description: "Choose the model for prompt suggestions and session titles (provider/model, or default)",
+		description: "Enable/disable prompt assistance (on/off), or choose its model (provider/model, or default)",
 		getArgumentCompletions: (prefix) => {
 			const values = [
+				"on",
+				"off",
 				"default",
 				...(current?.modelRegistry.getAvailable() ?? []).map((model) => `${model.provider}/${model.id}`),
 			];
@@ -46,20 +49,37 @@ export default function promptAssist(pi: ExtensionAPI) {
 				.map((value) => ({ value, label: value }));
 		},
 		handler: async (args, ctx) => {
+			let choice = args.trim();
+			if (choice === "on" || choice === "off") {
+				enabled = choice === "on";
+				generation++;
+				editor?.clear();
+				naming?.abort();
+				attempted = false;
+				warned = false;
+				const message = `Prompt assistance ${enabled ? "enabled" : "disabled"} (suggestions and automatic session titles).`;
+				try {
+					saveAssistEnabled(getAgentDir(), enabled);
+					ctx.ui.notify(`${message} Saved for future sessions.`, "info");
+				} catch {
+					ctx.ui.notify(`${message} Applied for this session, but could not save the preference.`, "warning");
+				}
+				if (enabled) editor?.schedule(0);
+				return;
+			}
 			const models = ctx.modelRegistry
 				.getAvailable()
 				.map((model) => `${model.provider}/${model.id}`)
 				.sort();
-			let choice = args.trim();
 			if (!choice) {
 				if (!ctx.hasUI || models.length === 0) {
 					ctx.ui.notify(
-						`Prompt assist: ${selectedModel}. Use /prompt-assist provider/model with an authenticated Pi model.`,
+						`Prompt assist ${enabled ? "on" : "off"}: ${selectedModel}. Use /prompt-assist on/off, or provider/model with an authenticated Pi model.`,
 						"info",
 					);
 					return;
 				}
-				choice = await ctx.ui.select(`Prompt assist model (current: ${selectedModel})`, models);
+				choice = await ctx.ui.select(`Prompt assist ${enabled ? "on" : "off"} (current: ${selectedModel})`, models);
 				if (!choice) return;
 			}
 			if (choice === "default") choice = DEFAULT_MODEL;
@@ -103,6 +123,7 @@ export default function promptAssist(pi: ExtensionAPI) {
 		signal: AbortSignal,
 		maxTokens: number,
 	) => {
+		if (!enabled || signal.aborted) return "";
 		const separator = selectedModel.indexOf("/");
 		const model = ctx.modelRegistry.find(selectedModel.slice(0, separator), selectedModel.slice(separator + 1));
 		if (!model || !ctx.modelRegistry.hasConfiguredAuth(model)) {
@@ -145,6 +166,7 @@ export default function promptAssist(pi: ExtensionAPI) {
 
 	const startNaming = (ctx: ExtensionContext, context: string) => {
 		if (
+			!enabled ||
 			attempted ||
 			pi.getSessionName() ||
 			ctx.sessionManager.getEntries().some((entry) => entry.type === "session_info")
@@ -187,6 +209,7 @@ export default function promptAssist(pi: ExtensionAPI) {
 		naming?.abort();
 		current = ctx;
 		selectedModel = loadAssistModel(getAgentDir());
+		enabled = loadAssistEnabled(getAgentDir());
 		attempted = false;
 		warned = false;
 		if (ctx.mode !== "tui") return;
@@ -223,6 +246,7 @@ export default function promptAssist(pi: ExtensionAPI) {
 				() => tui.requestRender(),
 				(text) => current.ui.theme.fg("dim", text),
 				() => pi.getSessionName(),
+				() => enabled,
 			);
 			return component;
 		};

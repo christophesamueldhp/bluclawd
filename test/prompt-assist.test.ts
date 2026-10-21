@@ -4,16 +4,30 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClaudePasteEditor } from "../ext/paste/index.ts";
 import { attachSuggestions } from "../ext/prompt-assist/editor.ts";
 import promptAssist, { conversation } from "../ext/prompt-assist/index.ts";
-import { DEFAULT_MODEL, loadAssistModel, saveAssistModel } from "../ext/prompt-assist/prefs.ts";
+import {
+	DEFAULT_MODEL,
+	loadAssistEnabled,
+	loadAssistModel,
+	saveAssistEnabled,
+	saveAssistModel,
+} from "../ext/prompt-assist/prefs.ts";
 
 vi.mock("../ext/prompt-assist/prefs.ts", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../ext/prompt-assist/prefs.ts")>();
-	return { ...actual, loadAssistModel: vi.fn(() => actual.DEFAULT_MODEL), saveAssistModel: vi.fn() };
+	return {
+		...actual,
+		loadAssistModel: vi.fn(() => actual.DEFAULT_MODEL),
+		saveAssistModel: vi.fn(),
+		loadAssistEnabled: vi.fn(() => true),
+		saveAssistEnabled: vi.fn(),
+	};
 });
 
 beforeEach(() => {
 	vi.mocked(loadAssistModel).mockReturnValue(DEFAULT_MODEL);
 	vi.mocked(saveAssistModel).mockReset();
+	vi.mocked(loadAssistEnabled).mockReturnValue(true);
+	vi.mocked(saveAssistEnabled).mockReset();
 });
 
 const tui = { requestRender: vi.fn(), terminal: { rows: 40, columns: 100 } };
@@ -359,6 +373,100 @@ describe("next-prompt display and early naming", () => {
 		expect(editor.render(80)[0]).toContain(name);
 		idle = false;
 		expect(editor.render(80)[0]).not.toContain(name);
+	});
+});
+
+describe("prompt assist enable/disable", () => {
+	it("restores disabled state and does not infer on typing, settlement, reload, or first prompt", async () => {
+		vi.useFakeTimers();
+		vi.mocked(loadAssistEnabled).mockReturnValue(false);
+		const h = harness();
+		const editor = h.factory()(tui, theme, keys);
+		editor.handleInput("write tests");
+		h.emit("before_agent_start");
+		h.emit("agent_settled");
+		await vi.advanceTimersByTimeAsync(700);
+		h.emit("session_start");
+		await vi.advanceTimersByTimeAsync(700);
+		expect(h.stream).not.toHaveBeenCalled();
+		expect(h.ctx.modelRegistry.find).not.toHaveBeenCalled();
+		h.emit("session_shutdown");
+	});
+
+	it("can turn assistance off without model credentials and saves the choice", async () => {
+		const h = harness();
+		h.ctx.modelRegistry.getAvailable.mockReturnValue([]);
+		await h.command("off");
+		expect(saveAssistEnabled).toHaveBeenCalledWith(expect.any(String), false);
+		expect(h.ctx.modelRegistry.getAvailable).not.toHaveBeenCalled();
+		expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("disabled"), "info");
+		expect(h.completions("off")).toContainEqual({ value: "off", label: "off" });
+	});
+
+	it("enables suggestions immediately and saves the choice", async () => {
+		vi.useFakeTimers();
+		vi.mocked(loadAssistEnabled).mockReturnValue(false);
+		const h = harness({ name: "Existing title" });
+		const editor = h.factory()(tui, theme, keys);
+		editor.focused = true;
+		await h.command("on");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(saveAssistEnabled).toHaveBeenCalledWith(expect.any(String), true);
+		expect(h.stream).toHaveBeenCalledOnce();
+		h.response.resolve(answer("Run the tests"));
+		await vi.advanceTimersByTimeAsync(0);
+		editor.handleInput("\x1b[C");
+		expect(editor.getText()).toBe("Run the tests");
+		h.emit("session_shutdown");
+	});
+
+	it("aborts a pending suggestion, clears ghost text, and preserves the draft and session name", async () => {
+		vi.useFakeTimers();
+		const h = harness({ name: "Manual title" });
+		const editor = h.factory()(tui, theme, keys);
+		editor.focused = true;
+		editor.handleInput("write");
+		await vi.advanceTimersByTimeAsync(700);
+		const options = h.stream.mock.calls[0][2] as { signal: AbortSignal };
+		await h.command("off");
+		expect(options.signal.aborted).toBe(true);
+		h.response.resolve(answer(" obsolete suggestion"));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(editor.render(100).join("\n")).not.toContain("obsolete suggestion");
+		expect(editor.render(100)[0]).toContain("Manual title");
+		expect(editor.getText()).toBe("write");
+		expect(h.pi.getSessionName()).toBe("Manual title");
+		h.emit("session_shutdown");
+	});
+
+	it("discards an in-flight automatic name when disabled", async () => {
+		const h = harness();
+		h.emit("before_agent_start");
+		await h.command("off");
+		h.response.resolve(answer("Obsolete title"));
+		await new Promise((done) => setTimeout(done, 0));
+		expect(h.pi.setSessionName).not.toHaveBeenCalled();
+	});
+
+	it("keeps assistance disabled when selecting a different model", async () => {
+		vi.mocked(loadAssistEnabled).mockReturnValue(false);
+		const h = harness();
+		await h.command("custom/vendor/fast-model");
+		h.emit("before_agent_start");
+		expect(saveAssistModel).toHaveBeenCalledWith(expect.any(String), "custom/vendor/fast-model");
+		expect(saveAssistEnabled).not.toHaveBeenCalled();
+		expect(h.stream).not.toHaveBeenCalled();
+	});
+
+	it("applies the toggle for this session even if saving fails", async () => {
+		const h = harness();
+		vi.mocked(saveAssistEnabled).mockImplementation(() => {
+			throw new Error("read-only");
+		});
+		await h.command("off");
+		h.emit("before_agent_start");
+		expect(h.stream).not.toHaveBeenCalled();
+		expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("could not save"), "warning");
 	});
 });
 
