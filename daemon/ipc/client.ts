@@ -1,4 +1,5 @@
 import { createConnection } from "node:net";
+import { StringDecoder } from "node:string_decoder";
 import { getSocketPath } from "../config.ts";
 import { encodeMessage, parseResponseLine, type ServerRequest, type ServerResponse } from "./protocol.ts";
 
@@ -8,6 +9,7 @@ export async function sendIpcRequest(request: ServerRequest): Promise<ServerResp
 	return new Promise<ServerResponse>((resolve, reject) => {
 		const socket = createConnection(socketPath);
 		let buffer = "";
+		const decoder = new StringDecoder("utf8");
 		let settled = false;
 
 		const cleanup = () => {
@@ -22,7 +24,7 @@ export async function sendIpcRequest(request: ServerRequest): Promise<ServerResp
 		});
 
 		socket.on("data", (chunk: Buffer | string) => {
-			buffer += chunk.toString();
+			buffer += typeof chunk === "string" ? chunk : decoder.write(chunk);
 			const newlineIndex = buffer.indexOf("\n");
 			if (newlineIndex === -1) {
 				return;

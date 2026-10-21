@@ -148,9 +148,45 @@ const hasTmux = spawnSync("tmux", ["-V"]).status === 0;
 
 describe.skipIf(!hasTmux)("tmux runs a ! command", () => {
 	let tmux: Tmux | undefined;
+	const children: number[] = [];
 	afterEach(() => {
+		for (const pid of children.splice(0)) {
+			try {
+				process.kill(pid, "SIGKILL");
+			} catch {}
+		}
 		if (tmux) spawnSync("tmux", ["-S", tmux.socket, "kill-server"]);
 	});
+
+	it("stops nested command descendants, including ones ignoring TERM, without ending the wrapper", async () => {
+		tmux = new Tmux(mkdtempSync(join(tmpdir(), "bc-shell-tree-")));
+		const name = tmux.startShell(tmpdir(), "/bin/sh -c 'trap \"\" TERM; sleep 30 & echo child=$!; wait'");
+		const other = tmux.startShell(tmpdir(), "sleep 30");
+		let pid = 0;
+		await vi.waitFor(
+			() => {
+				pid = Number(/child=(\d+)/.exec(tmux?.capture(name, 20).join("\n") ?? "")?.[1]);
+				expect(pid).toBeGreaterThan(1);
+			},
+			{ timeout: 5000 },
+		);
+		children.push(pid);
+
+		tmux.stopShell(name);
+
+		await vi.waitFor(
+			() => {
+				const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+				expect(state === "" || state.startsWith("Z")).toBe(true);
+				expect(tmux?.listShells().find((s) => s.name === name)).toMatchObject({
+					stopped: true,
+					exit: expect.any(String),
+				});
+			},
+			{ timeout: 5000 },
+		);
+		expect(tmux.listShells().find((s) => s.name === other)).toMatchObject({ stopped: false, exit: undefined });
+	}, 10_000);
 
 	it("records its exit status and keeps its output; stopping marks it stopped", async () => {
 		tmux = new Tmux(mkdtempSync(join(tmpdir(), "bc-shell-")));

@@ -9,9 +9,9 @@
 
 import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { getServerDir } from "./paths.ts";
+import { ensureServerDir, getServerDir } from "./paths.ts";
 
 /** Set in a pane's environment: the tmux session its pi runs in. */
 export const PANE_ENV = "BLUCLAWD_PANE";
@@ -241,9 +241,25 @@ export class Tmux {
 	/** Stop a running `!` command; its row stays, stopped. */
 	stopShell(name: string): void {
 		this.run(["set-option", "-t", `=${name}:`, "@bluclawd_stopped", "1"]);
-		const pid = this.run(["display-message", "-p", "-t", `=${name}:`, "#{pane_pid}"]).trim();
-		// The command is the wrapper's child: the wrapper stays, to record how it ended.
-		spawnSync("pkill", ["-TERM", "-P", pid], { stdio: "ignore" });
+		const pid = Number(this.run(["display-message", "-p", "-t", `=${name}:`, "#{pane_pid}"]).trim());
+		if (!(pid > 1)) throw new Error(`couldn't find the shell running in ${name}`);
+		// Snapshot before killing parents: otherwise their children are reparented and lost.
+		const processes = execFileSync("ps", ["-axo", "pid=,ppid="], { encoding: "utf8" })
+			.trim()
+			.split("\n")
+			.map((line) => line.trim().split(/\s+/).map(Number));
+		const tree = [pid];
+		for (let i = 0; i < tree.length; i++) {
+			for (const [child, parent] of processes) if (parent === tree[i]) tree.push(child);
+		}
+		// Leave the wrapper alive to record the exit and retain the output pane.
+		for (const child of tree.slice(1).reverse()) {
+			try {
+				process.kill(child, "SIGKILL");
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+			}
+		}
 	}
 
 	/** The last `lines` lines of a session's output, trailing blank lines dropped. */
@@ -332,7 +348,7 @@ export class Tmux {
 	private exec(args: string[], options: { inherit?: boolean; outsideTmux?: boolean } = {}): string {
 		const config = join(this.dir, "tmux.conf");
 		if (!this.configured) {
-			mkdirSync(this.dir, { recursive: true });
+			ensureServerDir(this.dir);
 			writeFileSync(config, CONFIG);
 			this.configured = true;
 		}

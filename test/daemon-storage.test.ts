@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -29,6 +29,12 @@ describe("instances.json storage", () => {
 	it("returns [] when the JSON is valid but not an array", () => {
 		writeFileSync(getInstancesPath(), '{"not":"an array"}');
 		expect(loadInstances()).toEqual([]);
+	});
+
+	it("tightens permissions on an existing server directory before writing", () => {
+		chmodSync(dir, 0o755);
+		saveInstances([]);
+		expect(statSync(dir).mode & 0o777).toBe(0o700);
 	});
 
 	it("round-trips saved instances and leaves no .tmp file behind (atomic write)", () => {

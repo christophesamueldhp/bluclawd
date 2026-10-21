@@ -1,8 +1,8 @@
-import { existsSync, mkdirSync, unlinkSync } from "node:fs";
-import { dirname } from "node:path";
+import { existsSync, unlinkSync } from "node:fs";
 import { getSocketPath } from "./config.ts";
 import { handleIpcRequest, listSummaries, setRemoteControl, setShutdownHook } from "./handler.ts";
 import { startIpcServer } from "./ipc/server.ts";
+import { ensureServerDir } from "./paths.ts";
 import { RemoteControl } from "./remote/control.ts";
 import { pistatusline } from "./remote/pistatusline.ts";
 import { statusLine } from "./remote/statusline.ts";
@@ -10,9 +10,7 @@ import { supervisor } from "./supervisor.ts";
 
 export async function serve(): Promise<void> {
 	const socketPath = getSocketPath();
-	// 0700: owner-only — the socket is an unauthenticated local control channel (it queues
-	// prompts for running sessions).
-	mkdirSync(dirname(socketPath), { recursive: true, mode: 0o700 });
+	ensureServerDir();
 	const server = await startIpcServer(handleIpcRequest);
 
 	try {

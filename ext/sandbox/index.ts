@@ -17,7 +17,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { denyRules } from "../_shared/settings.ts";
-import { runtimeConfig, sandboxSetting } from "./config.ts";
+import { runtimeConfig, sandboxSetting, saveSandboxEnabled } from "./config.ts";
 import {
 	type AskNetwork,
 	forgetWrappedExec,
@@ -76,7 +76,7 @@ function factory(pi: ExtensionAPI): void {
 	let ctx: ExtensionContext | undefined;
 	const asker = networkAsker(() => ctx);
 
-	pi.on("session_start", async (_event, startCtx) => {
+	async function applySettings(startCtx: ExtensionContext): Promise<void> {
 		ctx = startCtx;
 		asker.forget();
 		try {
@@ -102,6 +102,50 @@ function factory(pi: ExtensionAPI): void {
 		} catch (error) {
 			notifyUnavailable(startCtx, markSandboxUnavailable(error instanceof Error ? error.message : String(error)));
 		}
+	}
+
+	pi.on("session_start", async (_event, startCtx) => applySettings(startCtx));
+
+	pi.registerCommand("sandbox", {
+		description: "Manage the global shell sandbox (/sandbox [on|off|status])",
+		getArgumentCompletions: (prefix) =>
+			["on", "off", "status"].filter((value) => value.startsWith(prefix)).map((value) => ({ value, label: value })),
+		handler: async (args, commandCtx) => {
+			let action = args.trim();
+			if (!action && commandCtx.hasUI) {
+				const status = sandboxStatus();
+				const choice = await commandCtx.ui.select(`Sandbox: ${status.kind}`, ["Status", "Turn on", "Turn off"]);
+				if (choice === undefined) return;
+				action = choice === "Turn on" ? "on" : choice === "Turn off" ? "off" : "status";
+			}
+			if (!action) action = "status";
+			if (!["on", "off", "status"].includes(action)) {
+				commandCtx.ui.notify("Usage: /sandbox [on|off|status]", "warning");
+				return;
+			}
+			if (action !== "status") {
+				await commandCtx.waitForIdle();
+				try {
+					saveSandboxEnabled(action === "on");
+				} catch (error) {
+					commandCtx.ui.notify(
+						`Could not save sandbox settings: ${error instanceof Error ? error.message : String(error)}`,
+						"error",
+					);
+					return;
+				}
+				await applySettings(commandCtx);
+			}
+			const status = sandboxStatus();
+			if (status.kind === "unavailable") {
+				if (action === "status") notifyUnavailable(commandCtx, status);
+				return;
+			}
+			commandCtx.ui.notify(
+				`Sandbox: ${status.kind === "ready" ? "on" : "off"}.${status.kind === "ready" && !sandboxWraps() ? " Enable bluclawd's background-bash extension; bash is blocked without it." : ""}${action !== "status" ? " Saved globally. Restart existing background jobs; they do not change sandbox mode." : ""}`,
+				"info",
+			);
+		},
 	});
 
 	// Background shells outlive /new, /resume and /fork, so only quitting takes the sandbox down.

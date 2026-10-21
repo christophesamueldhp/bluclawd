@@ -3,7 +3,7 @@
  * Side-effect free, so the agent-view extension imports it directly instead of
  * keeping its own copy in step with the daemon's.
  */
-import { type Dirent, readdirSync, realpathSync, statSync } from "node:fs";
+import { chmodSync, type Dirent, mkdirSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -29,6 +29,12 @@ export function getServerDir(): string {
 
 	const piDir = process.env.PI_CONFIG_DIR || join(homedir(), ".pi");
 	return join(piDir, "server");
+}
+
+/** The unauthenticated control sockets must stay behind an owner-only directory. */
+export function ensureServerDir(dir: string = getServerDir()): void {
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	chmodSync(dir, 0o700);
 }
 
 export function getSocketPath(): string {

@@ -312,8 +312,13 @@ Deny rules match the text of a call, so `grep -r KEY .` or a script that opens `
 still reads it. Turn on the sandbox to have the operating system stop that: the model's
 `bash` and `monitor` commands, and everything they start, then run inside Anthropic's
 [sandbox runtime](https://github.com/anthropics/sandbox-runtime), the one Claude Code uses.
-Set it in `~/.pi/agent/settings.json` (a project's settings cannot change it); it is read
-when a session starts, so `/reload` after editing:
+Run `/sandbox` for a menu, `/sandbox on` to enable, `/sandbox off` to disable, or
+`/sandbox status` to inspect the current runtime. On/off is saved globally and applied
+immediately after the agent is idle; existing background jobs must be restarted. The command
+preserves existing policy settings and does not add any deny rules or allowed domains.
+
+Configure the policy in `~/.pi/agent/settings.json` (a project's settings cannot change it);
+it is read when a session starts, so `/reload` after editing:
 
 ```json
 {

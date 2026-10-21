@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -53,6 +53,26 @@ describe("readSessionTail", () => {
 			outcome: "stopped",
 			turns: 1,
 		});
+	});
+
+	it("reads a complete assistant entry larger than the tail window", () => {
+		const file = write([reply("older reply"), reply(`${"✻".repeat(20_000)}\nCompleted successfully`)]);
+		expect(readSessionTail(file)).toEqual({ detail: "Completed successfully", outcome: "done", turns: 1 });
+	});
+
+	it("finds the assistant before a large tool result and an incomplete trailing entry", () => {
+		const file = write([
+			reply("Halfway there", { stopReason: "aborted" }),
+			{ type: "message", message: { role: "toolResult", content: "x".repeat(40_000) } },
+		]);
+		appendFileSync(file, '{"type":');
+		expect(readSessionTail(file)).toEqual({ detail: "Halfway there", outcome: "stopped", turns: 1 });
+	});
+
+	it("reads the first entry without a trailing newline", () => {
+		const file = write([]);
+		writeFileSync(file, JSON.stringify(reply("Done")));
+		expect(readSessionTail(file)).toEqual({ detail: "Done", outcome: "done", turns: 1 });
 	});
 
 	it("reports a session with no assistant reply as never run, and a missing file as unknown", () => {

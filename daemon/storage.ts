@@ -1,15 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { getInstancesPath, getServerDir } from "./config.ts";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { getInstancesPath } from "./config.ts";
+import { ensureServerDir } from "./paths.ts";
 import type { InstanceRecord } from "./types.ts";
-
-function ensureServerDir(): void {
-	const serverDir = getServerDir();
-	if (!existsSync(serverDir)) {
-		// 0700: the socket here is an unauthenticated control channel that queues prompts for
-		// running sessions — keep it owner-only. (Local-trust model; see the socket server.)
-		mkdirSync(serverDir, { recursive: true, mode: 0o700 });
-	}
-}
 
 export function loadInstances(): InstanceRecord[] {
 	const instancesPath = getInstancesPath();

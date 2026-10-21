@@ -11,7 +11,7 @@ import { recordExtensions } from "../scripts/probe-extensions.ts";
  */
 const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts: number; events: number }> = {
 	permissions: { commands: [], tools: [], shortcuts: 1, events: 3 },
-	sandbox: { commands: [], tools: [], shortcuts: 0, events: 3 },
+	sandbox: { commands: ["sandbox"], tools: [], shortcuts: 0, events: 3 },
 	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 6 },
 	"background-bash": {
 		commands: ["tasks"],

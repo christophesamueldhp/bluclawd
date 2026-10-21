@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
@@ -31,6 +31,15 @@ describe("tmux command timeout", () => {
 		tmux.newSession({ cwd: "/p", args: [], command: ["/bin/pi"] });
 		return (execFileSync.mock.calls[0][2] as { timeout?: number }).timeout;
 	};
+
+	it("makes both new and existing server directories owner-only", () => {
+		const own = join(dir, "private");
+		new Tmux(own).attached();
+		expect(statSync(own).mode & 0o777).toBe(0o700);
+		chmodSync(own, 0o755);
+		new Tmux(own).attached();
+		expect(statSync(own).mode & 0o777).toBe(0o700);
+	});
 
 	it("gives up on a hung command only when asked to, as the daemon does", () => {
 		expect(timeoutOf(new Tmux(dir))).toBeUndefined();

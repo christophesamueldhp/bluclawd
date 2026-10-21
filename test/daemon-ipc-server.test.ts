@@ -1,9 +1,10 @@
 import { mkdtemp, rm } from "node:fs/promises";
-import { createConnection, type Server } from "node:net";
+import { createConnection, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BUILD_ID, VERSION } from "../daemon/config.ts";
+import { sendIpcRequest } from "../daemon/ipc/client.ts";
 import { type IpcRequestHandler, startIpcServer } from "../daemon/ipc/server.ts";
 import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 
@@ -71,6 +72,25 @@ describe("startIpcServer — version echo", () => {
 		expect(response.ok).toBe(false);
 		expect(response.version).toBe(VERSION);
 		expect(response.buildId).toBe(BUILD_ID);
+	});
+
+	it("preserves Unicode in CLI responses split inside a UTF-8 character", async () => {
+		const response = {
+			type: "list_result",
+			ok: true,
+			instances: [{ id: "pane", label: "Session ✻ 中文" }],
+		};
+		const bytes = Buffer.from(`${JSON.stringify(response)}\n`);
+		const cut = bytes.indexOf(Buffer.from("✻")) + 1;
+		server = createServer((socket) => {
+			socket.once("data", () => {
+				socket.write(bytes.subarray(0, cut));
+				setTimeout(() => socket.end(bytes.subarray(cut)), 20);
+			});
+		});
+		await new Promise<void>((resolve) => server?.listen(join(tempDir, "server.sock"), resolve));
+
+		expect(await sendIpcRequest({ type: "list" })).toEqual(response);
 	});
 
 	it("reads a large request whole, with characters cut across its reads", async () => {

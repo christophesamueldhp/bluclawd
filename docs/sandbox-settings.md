@@ -41,6 +41,19 @@ form works in `filesystem.allowRead`, but not in these four lists. Paths in othe
 (`allowRead`, `credentials.files`) reach `srt` as written: `srt` expands `~`, and resolves a
 relative path against pi's own working directory.
 
+### Commands
+
+- `/sandbox`: open a status/on/off menu (without a UI, show status).
+- `/sandbox on` or `/sandbox off`: save `sandbox.enabled` globally, preserving all other
+  settings, and apply it after the agent is idle. Restart existing background jobs; their
+  sandbox mode does not change. Other running pi instances pick it up on reload or restart.
+- `/sandbox status`: show the current runtime state and any startup failure, without writing settings.
+
+The command changes only `enabled`; configure domains, filesystem rules and credentials in
+`settings.json`. Enabling without a policy adds no deny rules or allowed domains. Unreadable
+or malformed global settings are not overwritten. If activation fails, the setting stays on
+and the model's shell commands remain blocked until the configuration is fixed or sandbox is disabled.
+
 ### When a change applies
 
 - `/reload`, or a new session: the file and network lists, `credentials` deny entries, and most

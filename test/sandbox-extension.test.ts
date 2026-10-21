@@ -1,7 +1,7 @@
 /**
  * The sandbox extension: settings to a running sandbox, the network dialog, and powershell.
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
@@ -130,7 +130,11 @@ describe("the extension", () => {
 		writeFileSync(join(getAgentDir(), "settings.json"), JSON.stringify(settings));
 		const handlers: Record<string, (event: any, ctx: any) => Promise<any>> = {};
 		const notes: string[] = [];
+		const commands: Record<string, any> = {};
 		sandbox({
+			registerCommand: (name: string, command: any) => {
+				commands[name] = command;
+			},
 			on: (event: string, handler: any) => {
 				handlers[event] = handler;
 			},
@@ -139,12 +143,100 @@ describe("the extension", () => {
 			cwd: dir,
 			hasUI: true,
 			isProjectTrusted: () => true,
-			ui: { notify: (text: string) => notes.push(text), confirm: async () => false },
+			waitForIdle: vi.fn(async () => {}),
+			ui: {
+				notify: (text: string) => notes.push(text),
+				confirm: async () => false,
+				select: vi.fn<(...args: any[]) => Promise<string | undefined>>(async () => undefined),
+			},
 		};
 		const start = () => handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
 		const call = (toolName: string) => handlers.tool_call({ toolName, input: { command: "Get-Content x" } }, ctx);
-		return { handlers, ctx, notes, start, call };
+		const command = (args = "") => commands.sandbox.handler(args, ctx);
+		return { handlers, ctx, notes, start, call, command, commands };
 	}
+
+	it("enables immediately and preserves global settings and sandbox policy", async () => {
+		const settings = { theme: "system", sandbox: { enabled: false, network: { allowedDomains: ["github.com"] } } };
+		const { start, command, ctx, notes } = load(settings);
+		await start();
+		await command("on");
+		expect(ctx.waitForIdle).toHaveBeenCalledOnce();
+		expect(sandboxStatus()).toEqual({ kind: "ready" });
+		expect(engine.configs[0].network.allowedDomains).toEqual(["github.com"]);
+		expect(JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8"))).toEqual({
+			...settings,
+			sandbox: { ...settings.sandbox, enabled: true },
+		});
+		expect(notes.at(-1)).toContain("Saved globally");
+	});
+
+	it("disables immediately and retains the policy for the next activation", async () => {
+		const settings = { sandbox: { enabled: true, filesystem: { denyRead: ["secret"] } } };
+		const { start, command } = load(settings);
+		await start();
+		await command("off");
+		expect(sandboxStatus()).toEqual({ kind: "off" });
+		expect(engine.resets).toBe(1);
+		expect(JSON.parse(readFileSync(join(getAgentDir(), "settings.json"), "utf8"))).toEqual({
+			sandbox: { ...settings.sandbox, enabled: false },
+		});
+	});
+
+	it("shows status without writing or waiting, including without a UI", async () => {
+		const { start, command, ctx, notes } = load({});
+		await start();
+		ctx.hasUI = false;
+		await command();
+		expect(notes).toEqual(["Sandbox: off."]);
+		expect(ctx.waitForIdle).not.toHaveBeenCalled();
+		expect(ctx.ui.select).not.toHaveBeenCalled();
+		expect(readFileSync(join(getAgentDir(), "settings.json"), "utf8")).toBe("{}");
+	});
+
+	it("opens a menu and does nothing on cancellation", async () => {
+		const { start, command, ctx } = load({});
+		await start();
+		await command();
+		expect(ctx.ui.select).toHaveBeenCalledOnce();
+		expect(ctx.waitForIdle).not.toHaveBeenCalled();
+		ctx.ui.select.mockResolvedValue("Turn on");
+		await command();
+		expect(sandboxStatus()).toEqual({ kind: "ready" });
+	});
+
+	it("rejects unknown actions and completes known subcommands", async () => {
+		const { command, commands, notes, ctx } = load({});
+		await command("oops");
+		expect(notes).toEqual(["Usage: /sandbox [on|off|status]"]);
+		expect(ctx.waitForIdle).not.toHaveBeenCalled();
+		expect(commands.sandbox.getArgumentCompletions("o")).toEqual([
+			{ value: "on", label: "on" },
+			{ value: "off", label: "off" },
+		]);
+	});
+
+	it("does not overwrite malformed settings or change the runtime on save failure", async () => {
+		const { start, command, notes } = load({ sandbox: { enabled: true } });
+		await start();
+		const path = join(getAgentDir(), "settings.json");
+		writeFileSync(path, "{ broken");
+		await command("off");
+		expect(sandboxStatus()).toEqual({ kind: "ready" });
+		expect(readFileSync(path, "utf8")).toBe("{ broken");
+		expect(notes.at(-1)).toContain("Could not save sandbox settings");
+	});
+
+	it("keeps commands blocked and reports an activation failure", async () => {
+		const { start, command, call, notes } = load({ sandbox: { credential: {} } });
+		await start();
+		await command("on");
+		expect(sandboxStatus().kind).toBe("unavailable");
+		expect(notes.at(-1)).toContain("sandbox.credential");
+		expect(await call("powershell")).toMatchObject({ block: true });
+		await command("status");
+		expect(notes.at(-1)).toContain("cannot run");
+	});
 
 	it("stays off without sandbox.enabled, and leaves powershell alone", async () => {
 		const { start, call, notes } = load({});

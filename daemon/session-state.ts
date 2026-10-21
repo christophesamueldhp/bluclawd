@@ -62,8 +62,8 @@ function outcomeOf(message: MessageLike): { detail?: string; outcome: SessionOut
 const TAIL_BYTES = 16 * 1024;
 
 /**
- * Where a session left off, from the last 16KB of its .jsonl — how agent view fills in a row
- * for a session whose pi quit.
+ * Where a session left off, scanning its .jsonl backwards in blocks until a complete assistant
+ * entry is found — how agent view fills in a row for a session whose pi quit.
  */
 export function readSessionTail(
 	sessionFile: string,
@@ -72,20 +72,35 @@ export function readSessionTail(
 	try {
 		fd = openSync(sessionFile, "r");
 		const size = fstatSync(fd).size;
-		const length = Math.min(size, TAIL_BYTES);
-		const buffer = Buffer.alloc(length);
-		readSync(fd, buffer, 0, length, size - length);
-		let last: MessageLike | undefined;
-		for (const line of buffer.toString("utf8").split("\n")) {
-			try {
-				const entry = JSON.parse(line) as { type?: string; message?: MessageLike };
-				if (entry.type === "message" && entry.message?.role === "assistant") last = entry.message;
-			} catch {
-				// the first line of the window is usually cut mid-entry
+		let offset = size;
+		let parts: Buffer[] = [];
+		while (offset > 0) {
+			const length = Math.min(offset, TAIL_BYTES);
+			offset -= length;
+			// A sentinel newline lets the first entry use the same boundary logic.
+			const prefix = offset === 0 ? 1 : 0;
+			const buffer = Buffer.alloc(length + prefix);
+			if (prefix) buffer[0] = 0x0a;
+			readSync(fd, buffer, prefix, length, offset);
+			let end = buffer.length;
+			for (let i = buffer.length - 1; i >= 0; i--) {
+				if (buffer[i] !== 0x0a) continue;
+				parts.push(buffer.subarray(i + 1, end));
+				const line = Buffer.concat(parts.reverse()).toString("utf8");
+				parts = [];
+				end = i;
+				try {
+					const entry = JSON.parse(line) as { type?: string; message?: MessageLike };
+					if (entry.type === "message" && entry.message?.role === "assistant") {
+						return { ...outcomeOf(entry.message), turns: 1 };
+					}
+				} catch {
+					// Ignore blank, malformed, or partially-written entries.
+				}
 			}
+			if (end > 0) parts.push(buffer.subarray(0, end));
 		}
-		if (!last) return { turns: 0 };
-		return { ...outcomeOf(last), turns: 1 };
+		return { turns: 0 };
 	} catch {
 		return undefined;
 	} finally {

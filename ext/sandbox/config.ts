@@ -5,9 +5,10 @@
  *
  * Only global settings are read: a repository's files must not loosen or switch off the sandbox.
  */
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
-import type { SettingsManager } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { pathRule } from "../permissions/rules.ts";
 
 export interface SandboxSettings {
@@ -41,6 +42,27 @@ function strings(value: unknown, name: string): string[] | string {
 	return Array.isArray(value) && value.every((v) => typeof v === "string")
 		? value
 		: `${name} is not a list of strings`;
+}
+
+export function saveSandboxEnabled(enabled: boolean): void {
+	const dir = getAgentDir();
+	const path = join(dir, "settings.json");
+	let settings: unknown;
+	try {
+		settings = JSON.parse(readFileSync(path, "utf8"));
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+			throw new Error("Global settings could not be read or parsed; fix settings.json first");
+		}
+		settings = {};
+	}
+	if (!isPlainObject(settings)) throw new Error("Global settings must be an object");
+	if (settings.sandbox !== undefined && !isPlainObject(settings.sandbox)) {
+		throw new Error("sandbox is not an object; fix global settings first");
+	}
+	settings.sandbox = { ...(settings.sandbox as Record<string, unknown> | undefined), enabled };
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(path, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
 }
 
 export function sandboxSetting(sm: SettingsManager): SandboxSetting {
