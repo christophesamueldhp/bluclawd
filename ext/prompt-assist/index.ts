@@ -212,7 +212,7 @@ export default function promptAssist(pi: ExtensionAPI) {
 		});
 	};
 
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", (event, ctx) => {
 		generation++;
 		editor?.clear();
 		naming?.abort();
@@ -232,6 +232,21 @@ export default function promptAssist(pi: ExtensionAPI) {
 			const component = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
 			// Compose with the paste editor instead of replacing its behavior.
 			if (!("getCursor" in component) || !("isShowingAutocomplete" in component)) return component;
+			// Pi restores history on startup/resume, but only copies draft text when replacing editors on reload.
+			if (event.reason === "reload") {
+				for (const entry of current.sessionManager.getBranch()) {
+					if (entry.type !== "message" || entry.message.role !== "user") continue;
+					const content = entry.message.content;
+					const text =
+						typeof content === "string"
+							? content
+							: content
+									.filter((block) => block.type === "text")
+									.map((block) => block.text)
+									.join("\n");
+					component.addToHistory?.(text);
+				}
+			}
 			editor = attachSuggestions(
 				component as Editor,
 				async (draft, signal) => {

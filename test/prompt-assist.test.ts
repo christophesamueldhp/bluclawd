@@ -55,7 +55,9 @@ function deferred<T>() {
 	return { promise, resolve: (value: T) => resolve(value) };
 }
 
-function harness(options: { name?: string; entries?: unknown[]; mode?: string; factory?: unknown } = {}) {
+function harness(
+	options: { name?: string; entries?: unknown[]; mode?: string; factory?: unknown; reason?: string } = {},
+) {
 	const handlers = new Map<string, (...args: any[]) => any>();
 	const commands = new Map<string, any>();
 	let name = options.name;
@@ -105,7 +107,7 @@ function harness(options: { name?: string; entries?: unknown[]; mode?: string; f
 	};
 	promptAssist(pi as never);
 	const emit = (event: string, data = { prompt: "Fix login validation" } as any) => handlers.get(event)?.(data, ctx);
-	emit("session_start");
+	emit("session_start", { reason: options.reason ?? "startup" });
 	return {
 		ctx,
 		pi,
@@ -121,6 +123,69 @@ function harness(options: { name?: string; entries?: unknown[]; mode?: string; f
 const answer = (text: string) => ({ stopReason: "stop", content: [{ type: "text", text }] });
 
 afterEach(() => vi.useRealTimers());
+
+describe("prompt history", () => {
+	it.each([true, false])("restores native history after reload with assistance enabled=%s", (enabled) => {
+		vi.mocked(loadAssistEnabled).mockReturnValue(enabled);
+		const h = harness({
+			reason: "reload",
+			entries: [
+				{ type: "message", message: { role: "user", content: "First prompt" } },
+				{ type: "message", message: { role: "assistant", content: "Not a prompt" } },
+				{
+					type: "message",
+					message: {
+						role: "user",
+						content: [
+							{ type: "text", text: "Second prompt" },
+							{ type: "image", data: "ignored" },
+						],
+					},
+				},
+			],
+		});
+		const editor = h.factory()(tui, theme, keys);
+		editor.setText("Unsent draft");
+		editor.handleInput("\x1b[A");
+		editor.handleInput("\x1b[A");
+		expect(editor.getText()).toBe("Second prompt");
+		editor.handleInput("\x1b[A");
+		expect(editor.getText()).toBe("First prompt");
+		editor.handleInput("\x1b[B");
+		expect(editor.getText()).toBe("Second prompt");
+		editor.handleInput("\x1b[B");
+		expect(editor.getText()).toBe("Unsent draft");
+		h.emit("session_shutdown");
+	});
+
+	it.each(["startup", "resume", "fork"])("does not duplicate Pi's history hydration on %s", (reason) => {
+		const h = harness({ reason });
+		const editor = h.factory()(tui, theme, keys);
+		editor.addToHistory("First prompt");
+		editor.addToHistory("Fix login validation");
+		editor.handleInput("\x1b[A");
+		expect(editor.getText()).toBe("Fix login validation");
+		editor.handleInput("\x1b[A");
+		expect(editor.getText()).toBe("First prompt");
+		editor.handleInput("\x1b[A");
+		expect(editor.getText()).toBe("First prompt");
+		h.emit("session_shutdown");
+	});
+
+	it("lets native Up dismiss ghost text and browse history without accepting the suggestion", async () => {
+		vi.useFakeTimers();
+		const { editor, assist } = makeEditor(vi.fn(async () => "Suggested next prompt"));
+		editor.addToHistory("Previous prompt");
+		assist.schedule(0);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(stripTerminalSequences(editor.render(100).join("\n"))).toContain("Suggested next prompt");
+		editor.handleInput("\x1b[A");
+		expect(editor.getText()).toBe("Previous prompt");
+		editor.handleInput("\x1b[B");
+		expect(editor.getText()).toBe("");
+		assist.clear();
+	});
+});
 
 describe("prompt suggestions", () => {
 	it("debounces typing, renders ghost text, accepts Tab without submitting, and preserves undo", async () => {
