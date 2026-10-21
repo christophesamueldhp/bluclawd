@@ -877,6 +877,58 @@ describe("AgentView keys", () => {
 		expect(composer()).toBe("❯ /cd ../.git/");
 	});
 
+	it("/model opens a searchable picker and applies its selection to new sessions", async () => {
+		const { view, text, calls, flush } = makeView({
+			listModels: () => [
+				{ provider: "opencode-go", id: "kimi" },
+				{ provider: "anthropic", id: "claude-opus" },
+				{ provider: "anthropic", id: "claude-sonnet" },
+			],
+		});
+		for (const ch of "/model") view.handleInput(ch);
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("Select model");
+		expect(text().join("\n")).toMatch(/opencode-go\/kimi\s+current/);
+		for (const ch of "claude") view.handleInput(ch);
+		expect(text().join("\n")).toContain("anthropic/claude-opus");
+		expect(text().join("\n")).not.toContain("opencode-go/kimi  current");
+		view.handleInput(DOWN);
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("Model set to anthropic/claude-sonnet");
+		expect(text().join("\n")).not.toContain("Select model");
+		for (const ch of "new task") view.handleInput(ch);
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]).toEqual(["start", HERE, ["--model", "anthropic/claude-sonnet", "--", "new task"]]);
+	});
+
+	it.each([ESC, "\x03"])("cancels the model picker without changing models or exiting (%j)", async (cancel) => {
+		const { view, text, calls, closed, flush } = makeView({
+			listModels: () => [{ provider: "openai", id: "gpt-5" }],
+		});
+		for (const ch of "/model") view.handleInput(ch);
+		view.handleInput(ENTER);
+		view.handleInput(cancel);
+		expect(text().join("\n")).not.toContain("Select model");
+		expect(closed()).toBe(0);
+		for (const ch of "new task") view.handleInput(ch);
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls[0]).toEqual(["start", HERE, ["--model", "opencode-go/kimi", "--", "new task"]]);
+	});
+
+	it("keeps an unmatched model search open and allows resetting to the default", () => {
+		const { view, text } = makeView({ listModels: () => [] });
+		for (const ch of "/model") view.handleInput(ch);
+		view.handleInput(ENTER);
+		for (const ch of "missing") view.handleInput(ch);
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("Select model");
+		for (let i = 0; i < "missing".length; i++) view.handleInput("\x7f");
+		view.handleInput(ENTER);
+		expect(text().join("\n")).toContain("Model reset to default");
+	});
+
 	it("tab after /model completes the model, by provider/id or by id alone", () => {
 		const { view, text } = makeView({
 			listModels: () => [

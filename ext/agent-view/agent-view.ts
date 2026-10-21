@@ -16,11 +16,13 @@ import type { ImageContent } from "@earendil-works/pi-ai";
 import {
 	type Component,
 	type Focusable,
+	fuzzyFilter,
 	getKeybindings,
 	Input,
 	type KeyId,
 	matchesKey,
 	parseColor,
+	SelectList,
 	styleText,
 	styleTextWithAnsi,
 	type TUI,
@@ -141,7 +143,7 @@ type Item =
 	| { kind: "row"; key: string; band: Band; row: AgentRow }
 	| { kind: "more"; key: string; band: Band; hidden: number };
 
-type Mode = "list" | "peek" | "rename" | "resume" | "help";
+type Mode = "list" | "peek" | "rename" | "resume" | "help" | "model";
 
 const FRAMES = ["·", "✢", "✳", "✶", "✻", "✽"];
 const SPINNER = [...FRAMES, ...[...FRAMES].reverse()];
@@ -271,6 +273,8 @@ export class AgentView implements Component, Focusable {
 	private editing = false;
 	private readonly reply = new Input();
 	private readonly renameInput = new Input();
+	private readonly modelSearch = new Input();
+	private modelPicker: SelectList | undefined;
 	private instances: InstanceSummary[] = [];
 	private rows: AgentRow[] = [];
 	/** Every listed session, before the composer's filter: what the counts and title report. */
@@ -1210,7 +1214,14 @@ export class AgentView implements Component, Focusable {
 	/** `/model <name>`: an exact `provider/id` or id, else the only one it starts. */
 	private setModel(arg: string): void {
 		if (!arg) {
-			this.say("Usage: /model <name> — session-scoped, not persisted");
+			this.modelSearch.setValue("");
+			this.updateModelPicker();
+			const current = this.dispatchModel;
+			const index = (this.opts.listModels?.() ?? []).findIndex(
+				(m) => m.provider === current?.provider && m.id === current.id,
+			);
+			this.modelPicker?.setSelectedIndex(Math.max(0, index));
+			this.mode = "model";
 			return;
 		}
 		if (arg === "default") {
@@ -1238,6 +1249,44 @@ export class AgentView implements Component, Focusable {
 		}
 		this.dispatchModel = model;
 		this.say(`Model set to ${name(model)} (session-scoped, not persisted)`);
+	}
+
+	private updateModelPicker(): void {
+		const current = this.dispatchModel;
+		const items = (this.opts.listModels?.() ?? []).map((m) => ({
+			value: `${m.provider}/${m.id}`,
+			label: `${m.provider}/${m.id}`,
+			description: m.provider === current?.provider && m.id === current.id ? "current" : "",
+		}));
+		items.push({ value: "default", label: "default", description: "Reset to session model" });
+		this.modelPicker = new SelectList(
+			fuzzyFilter(items, this.modelSearch.getValue(), (item) => item.value),
+			Math.max(1, Math.min(MENU_ROWS, this.opts.ui.terminal.rows - 12)),
+			{
+				selectedPrefix: (text) => cc.fg("accent", text),
+				selectedText: (text) => cc.fg("accent", text),
+				description: (text) => cc.fg("muted", text),
+				scrollInfo: (text) => cc.fg("muted", text),
+				noMatch: (text) => cc.fg("warning", text),
+			},
+		);
+		this.modelPicker.onSelect = (item) => {
+			this.mode = "list";
+			this.setModel(item.value);
+		};
+		this.modelPicker.onCancel = () => {
+			this.mode = "list";
+		};
+	}
+
+	private handleModelInput(data: string): void {
+		if (this.isEsc(data) || matchesKey(data, "ctrl+c")) this.mode = "list";
+		else if (this.isUp(data) || this.isDown(data) || this.isEnter(data)) this.modelPicker?.handleInput(data);
+		else {
+			this.modelSearch.handleInput(data);
+			this.updateModelPicker();
+		}
+		this.render_();
 	}
 
 	/** `/cd <dir>`: new sessions start there, relative to where they start now; bare `/cd` goes back. */
@@ -1491,6 +1540,10 @@ export class AgentView implements Component, Focusable {
 
 	handleInput(data: string): void {
 		if (this.leaving) return;
+		if (this.mode === "model") {
+			this.handleModelInput(data);
+			return;
+		}
 		if (this.mode === "resume") {
 			this.handleResumeInput(data);
 			return;
@@ -2291,7 +2344,16 @@ export class AgentView implements Component, Focusable {
 		let footer: string[];
 		if (this.mode === "peek" && this.selectedRow) footer = this.renderPeek(this.selectedRow, width);
 		else if (this.mode === "resume") footer = this.renderResume(width);
-		else {
+		else if (this.mode === "model") {
+			this.modelSearch.focused = this.focused;
+			footer = [
+				rule,
+				cc.fg("accent", "Select model"),
+				promptLine(this.modelSearch, width, "Search models"),
+				...(this.modelPicker?.render(width) ?? []),
+				this.hints(width, ["↑↓ select · enter confirm · esc cancel"]),
+			];
+		} else {
 			footer = [
 				rule,
 				...this.composerLinesFor(width, this.mode === "rename"),
