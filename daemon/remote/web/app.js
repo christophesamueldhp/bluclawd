@@ -9,14 +9,24 @@ import { api, clearToken, getToken, pairLink, setToken, Unauthorized } from "./a
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
-import { ageAt, successor } from "./list.js";
+import { ageAt, STATE_WORDS, statusGlyph, successor } from "./list.js";
 import { giveUp, promptKey, refused, sentText, settle, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 import { loaderHtml } from "./mascot.js";
 import { diffSummary, groupSummary, markerKind, resultSummary } from "./output.js";
 import { closePicker, modelGroups, openPicker } from "./picker.js";
 import { filterSessions, fold, matchCommands } from "./search.js";
-import { barHtml, compactLines, elapsedText, settingsHtml, spanStyle, TRUST, tokens, whereHtml } from "./statusbar.js";
+import {
+	barHtml,
+	compactLines,
+	contextLevel,
+	elapsedText,
+	settingsHtml,
+	spanStyle,
+	TRUST,
+	tokens,
+	whereHtml,
+} from "./statusbar.js";
 
 /**
  * `sessionId`: pi's, the same under another row id; `dialog`: the one it waits on, while it needs input.
@@ -29,7 +39,7 @@ import { barHtml, compactLines, elapsedText, settingsHtml, spanStyle, TRUST, tok
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.35";
+const VERSION = "0.0.36";
 const BANDS = [
 	["pinned", "Pinned"],
 	["needs", "Needs input"],
@@ -787,7 +797,9 @@ function listShell() {
 <button type="button" class="cancel" id="search-cancel" hidden>Cancel</button></form>
 <section class="scroll" id="rows"></section>
 <div class="backdrop" id="backdrop" hidden></div><section class="sheet" id="sheet" role="dialog" aria-label="This phone" hidden></section>
+<div class="commands" id="new-commands" role="listbox" aria-label="New task commands" hidden></div>
 <form class="composer new" id="new-task"><textarea id="task" rows="1" placeholder="New task…" aria-label="New task" maxlength="32768"></textarea>
+<button type="button" class="pick" id="new-resume" aria-haspopup="dialog">Resume a past session${ICONS.updown}</button>
 <button type="button" class="pick" id="new-model" aria-label="Model" aria-haspopup="dialog" hidden></button>
 <div class="commands dirs" id="cwd-list" role="listbox" aria-label="Directories" hidden></div>
 <div class="where"><input id="cwd" placeholder="~/path/to/project" aria-label="Directory" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="done">
@@ -796,14 +808,15 @@ function listShell() {
 
 /** @param {Session} s */
 function rowHtml(s) {
-	const glyph = s.state === "needs" ? "✻" : s.state === "working" || s.state === "idle" ? "" : "∙";
+	const glyph = statusGlyph(s);
+	const status = STATE_WORDS[/** @type {keyof typeof STATE_WORDS} */ (s.state)] ?? s.state;
 	// The project's folder, which the search matches too.
 	const where = s.cwd.split("/").filter(Boolean).at(-1);
 	// What it waits on or does; its band already names its state.
-	const doing = s.alive ? s.dialog?.title || s.detail : "disconnected";
+	const doing = s.dialog?.title || s.detail;
 	const detail = [where, doing].filter(Boolean).join(" · ");
 	return `<a class="row${s.alive ? "" : " closed"}" href="#s/${encodeURIComponent(s.id)}"><span class="glyph ${esc(s.state)}" aria-hidden="true">${glyph}</span>
-<span class="name">${esc(s.label)}<small>${esc(detail)}</small></span>
+<span class="name">${esc(s.label)}<small><span class="session-state ${esc(s.state)}">${esc(status)}</span>${detail ? ` · ${esc(detail)}` : ""}</small></span>
 <span class="age">${age(ageAt(s))}</span></a>`;
 }
 
@@ -1068,9 +1081,10 @@ function contextHtml(context) {
 	const percent = Math.min(100, Math.max(0, context.percent));
 	// A class per 10%: the CSP allows no inline style for a width.
 	const step = Math.ceil(percent / 10) * 10;
-	const level = percent >= 85 ? " full" : percent >= 60 ? " high" : "";
-	return `<div class="context"><span>Context</span><span>${esc(tokens(context.tokens))} / ${esc(tokens(context.contextWindow))} · ${esc(Math.round(percent))}%</span></div>
-<div class="gauge" role="meter" aria-label="Context used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${esc(Math.round(percent))}"><span class="p${esc(step)}${level}"></span></div>`;
+	const level = contextLevel(percent);
+	const color = level === "normal" ? "" : ` ${level}`;
+	return `<div class="context"><span>Context</span><span class="context-used ${level}">${esc(tokens(context.tokens))} / ${esc(tokens(context.contextWindow))} · ${esc(Math.round(percent))}%</span></div>
+<div class="gauge" role="meter" aria-label="Context used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${esc(Math.round(percent))}"><span class="p${esc(step)}${color}"></span></div>`;
 }
 
 /** Tokens and cost on one line. @param {Report["usage"]} usage */
@@ -1188,6 +1202,7 @@ function updateList() {
 	$("#search-clear").hidden = state.query === "";
 	updateDirectories();
 	updateModels();
+	updateNewCommands();
 	const start = $("#start");
 	start.disabled = state.starting !== undefined || !state.terminalOpen;
 	start.classList.toggle("busy", state.starting !== undefined);
@@ -1276,6 +1291,55 @@ function updateModels() {
 	button.hidden = state.models.length === 0;
 }
 
+function pickResume() {
+	/** @type {HTMLElement | null} */ (document.activeElement)?.blur();
+	const sessions = state.sessions.filter((s) => !s.alive);
+	if (!sessions.length) {
+		showError("No past sessions to resume.");
+		return;
+	}
+	openPicker(
+		{
+			title: "Resume a past session",
+			groups: [{ options: sessions.map((s) => ({ value: s.id, label: `${s.label} · ${shortPath(s.cwd)}` })) }],
+			value: "",
+		},
+		(id) => {
+			location.hash = `#s/${encodeURIComponent(id)}`;
+		},
+	);
+}
+
+const NEW_COMMANDS = [
+	{ name: "cd", description: "Set the directory new sessions start in" },
+	{ name: "model", description: "Set the model for new sessions" },
+	{ name: "resume", description: "Resume a past session" },
+];
+
+function updateNewCommands() {
+	const value = $("#task").value;
+	const commands = value.startsWith("/") ? matchCommands(NEW_COMMANDS, value) : [];
+	const list = $("#new-commands");
+	list.innerHTML = commands
+		.map(
+			(c) =>
+				`<button type="button" class="command" role="option" data-new-command="${c.name}"><b>/${c.name}</b><small>${esc(c.description)}</small></button>`,
+		)
+		.join("");
+	list.hidden = commands.length === 0;
+}
+
+/** @param {string} name */
+function runNewCommand(name) {
+	const task = $("#task");
+	task.value = "";
+	grow(task);
+	updateNewCommands();
+	if (name === "model") pickNewModel();
+	else if (name === "resume") pickResume();
+	else if (name === "cd") $("#cwd").focus();
+}
+
 function pickNewModel() {
 	// The keyboard down, so the sheet shows whole.
 	/** @type {HTMLElement | null} */ (document.activeElement)?.blur();
@@ -1333,6 +1397,7 @@ function slideThinking(index, send) {
 	if (slider) {
 		slider.value = String(index);
 		slider.setAttribute("aria-valuetext", level);
+		slider.parentElement?.setAttribute("data-thinking", level);
 		const value = slider.parentElement?.querySelector(".value");
 		if (value) value.textContent = level;
 	}
@@ -1555,7 +1620,18 @@ function grow(text) {
 
 function bindList() {
 	const task = $("#task");
-	task.addEventListener("input", () => grow(task));
+	task.addEventListener("input", () => {
+		grow(task);
+		updateNewCommands();
+	});
+	$("#new-commands").addEventListener("pointerdown", (/** @type {Event} */ event) => event.preventDefault());
+	$("#new-commands").addEventListener("click", (/** @type {Event} */ event) => {
+		const item = /** @type {HTMLElement | null} */ (
+			/** @type {Element} */ (event.target).closest("[data-new-command]")
+		);
+		if (item?.dataset.newCommand) runNewCommand(item.dataset.newCommand);
+	});
+	$("#new-resume").addEventListener("click", pickResume);
 	// Outside the rows, which every update replaces, so it keeps its focus, caret and keyboard.
 	const search = $("#search");
 	search.value = state.query;
@@ -1667,6 +1743,10 @@ function bindList() {
 async function startTask() {
 	const task = $("#task");
 	const value = task.value.trim();
+	if (NEW_COMMANDS.some((c) => value === `/${c.name}`)) {
+		runNewCommand(value.slice(1));
+		return;
+	}
 	// "~/a/" as a folder step left it: the same directory.
 	const cwd = $("#cwd")
 		.value.trim()

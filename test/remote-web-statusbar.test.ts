@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	barHtml,
 	compactLines,
+	contextLevel,
 	contrast,
 	elapsedText,
 	settingsHtml,
@@ -44,6 +45,35 @@ describe("the chat's status bar", () => {
 		expect(html).toContain('class="p40"');
 		expect(html).not.toContain("style=");
 	});
+
+	it.each([
+		[0, "normal"],
+		[70, "normal"],
+		[70.1, "high"],
+		[90, "high"],
+		[90.1, "full"],
+		[100, "full"],
+	])("colors context at %s%% as %s, matching pi's warning thresholds", (percent, level) => {
+		expect(contextLevel(Number(percent))).toBe(level);
+		const html = barHtml({ ...report, context: { ...report.context, percent: Number(percent) } }, undefined);
+		expect(html).toContain(`class="context-used ${level}"`);
+	});
+
+	it.each(["off", "minimal", "low", "medium", "high", "xhigh", "max"])(
+		"marks thinking %s for its own color in the bar and settings",
+		(level) => {
+			const colored = {
+				...report,
+				thinkingLevel: level,
+				thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+			};
+			expect(barHtml(colored, undefined)).toContain(`class="thinking-level" data-thinking="${level}"`);
+			expect(settingsHtml(colored)).toContain(`class="setting slider" data-thinking="${level}"`);
+			expect(settingsHtml({ models: [], thinkingLevel: level })).toContain(
+				`class="setting" data-thinking="${level}"`,
+			);
+		},
+	);
 
 	it("leaves out what is unknown: no report yet, no thinking, no git", () => {
 		expect(barHtml(undefined, "~/p")).toBe('<span class="line"><span class="grow cwd"><bdi>~/p</bdi></span></span>');

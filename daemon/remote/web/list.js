@@ -12,6 +12,20 @@ export function ageAt(session) {
 	return (quiet ? session.finishedAt : undefined) ?? session.createdAt;
 }
 
+export const STATE_WORDS = {
+	working: "Working",
+	needs: "Needs input",
+	idle: "Idle",
+	done: "Done",
+	failed: "Failed",
+	stopped: "Stopped",
+};
+
+/** The same live, working and disconnected glyphs as terminal agent view. @param {Session} session */
+export function statusGlyph(session) {
+	return !session.alive ? "∙" : session.state === "working" ? "" : "✻";
+}
+
 /**
  * The row an open chat moves to once its own is gone from the list: the same pi session under
  * another row id (it quit on the Mac and is stored now, or it resumed in a new pane).

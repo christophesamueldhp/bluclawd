@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { ageAt, successor } from "../daemon/remote/web/list.js";
+import { ageAt, STATE_WORDS, statusGlyph, successor } from "../daemon/remote/web/list.js";
+import { STATE_WORDS as TERMINAL_STATE_WORDS } from "../daemon/rows.ts";
 
 const row = (id: string, state: string, more: Record<string, unknown> = {}) => ({
 	id,
@@ -14,6 +15,19 @@ const row = (id: string, state: string, more: Record<string, unknown> = {}) => (
 });
 const createdAt = "2026-10-15T10:00:00.000Z";
 const finishedAt = "2026-10-15T11:00:00.000Z";
+
+describe("session status on the phone", () => {
+	it("uses the same state names as terminal agent view", () => {
+		expect(STATE_WORDS).toEqual(TERMINAL_STATE_WORDS);
+	});
+
+	it("animates only live working sessions and keeps the terminal glyphs for other states", () => {
+		for (const state of Object.keys(STATE_WORDS)) {
+			expect(statusGlyph(row("a", state))).toBe(state === "working" ? "" : "✻");
+			expect(statusGlyph(row("a", state, { alive: false }))).toBe("∙");
+		}
+	});
+});
 
 describe("a row's age on the phone", () => {
 	it("counts from its last entry once it is quiet", () => {

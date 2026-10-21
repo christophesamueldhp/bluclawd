@@ -15,6 +15,12 @@
 	--green: #2c7a39;
 	--yellow: #a06f00;
 	--shadow: rgb(0 0 0 / .18);
+	--thinking-minimal: #466fa5;
+	--thinking-low: #467a36;
+	--thinking-medium: #946500;
+	--thinking-high: #ac541e;
+	--thinking-xhigh: #b93e36;
+	--thinking-max: #8700ff;
 	/* One spacing scale: 4, 8, 12, 16, 24. */
 	--s1: 4px;
 	--s2: 8px;
@@ -41,6 +47,12 @@
 		--green: #4eba65;
 		--yellow: #ffc107;
 		--shadow: rgb(0 0 0 / .5);
+		--thinking-minimal: #82aadc;
+		--thinking-low: #91c882;
+		--thinking-medium: #fac35f;
+		--thinking-high: #f58b57;
+		--thinking-xhigh: #eb5f57;
+		--thinking-max: #af87ff;
 	}
 }
 * { box-sizing: border-box; }
@@ -114,18 +126,28 @@ button { -webkit-user-select: none; user-select: none; }
 .band { font-size: 13px; color: var(--muted); margin: var(--s4) var(--s4) var(--s1); font-weight: 600; }
 .row { display: flex; gap: var(--s3); align-items: center; min-height: 60px; padding: var(--s2) var(--s4); color: inherit; text-decoration: none; position: relative; }
 /* A hairline between rows, inset to the text as iOS's. */
-.row + .row::before { content: ""; position: absolute; top: 0; left: calc(var(--s4) + 16px + var(--s3)); right: 0; border-top: 1px solid var(--line); }
+.row + .row::before { content: ""; position: absolute; top: 0; left: calc(var(--s4) + 28px + var(--s3)); right: 0; border-top: 1px solid var(--line); }
 .row:active { background: var(--panel); }
 .row.closed .name, .row.closed .glyph { opacity: 0.55; }
 .row .name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row small { display: block; color: var(--muted); font-size: 15px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .age { flex: none; align-self: flex-start; padding-top: 2px; color: var(--muted); font-size: 15px; font-variant-numeric: tabular-nums; }
-.glyph { flex: none; width: 16px; text-align: center; color: var(--muted); }
-.glyph.needs { color: var(--yellow); }
-.glyph.failed { color: var(--red); }
-.glyph.working { color: var(--accent); }
-.glyph.working::before { content: "◐"; display: inline-block; animation: spin 1s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
+.row .glyph { flex: none; width: 28px; font-size: 28px; line-height: 1; text-align: center; color: var(--muted); }
+.glyph.needs, .glyph.stopped, .session-state.needs, .session-state.stopped { color: var(--yellow); }
+.glyph.failed, .session-state.failed { color: var(--red); }
+.glyph.done, .session-state.done { color: var(--green); }
+.glyph.working, .session-state.working { color: var(--accent); }
+/* Terminal agent view's forward/reverse frames, one every 120 ms. */
+.row:not(.closed) .glyph.working::before { content: "·"; display: inline-block; animation: session-spin 1.44s step-end infinite; }
+@keyframes session-spin {
+	0%, 91.667% { content: "·"; }
+	8.333%, 83.333% { content: "✢"; }
+	16.667%, 75% { content: "✳"; }
+	25%, 66.667% { content: "✶"; }
+	33.333%, 58.333% { content: "✻"; }
+	41.667%, 50% { content: "✽"; }
+}
+@media (prefers-reduced-motion: reduce) { .row:not(.closed) .glyph.working::before { content: "✻"; animation: none; } }
 @keyframes pulse { 50% { opacity: .25; } }
 .log { padding: var(--s3) var(--s4) var(--s4); display: flex; flex-direction: column; gap: var(--s3); }
 /* The log's parts (app.js's logParts) lay out as one. */
@@ -164,13 +186,13 @@ button { -webkit-user-select: none; user-select: none; }
 .t .error { margin: 6px 0 0; font-size: 13px; min-height: 0; }
 .think { font-size: 14px; color: var(--muted); }
 .think summary { display: inline-flex; align-items: center; min-height: 32px; }
-.think summary::before { content: "▸"; display: inline-block; width: 1em; }
+.think summary::before { content: "▸"; display: inline-block; width: 28px; font-size: 24px; line-height: 1; }
 .think[open] summary::before { content: "▾"; }
 /* A run of finished tool calls, one line until tapped (app.js's groupHtml); its calls along a rule. */
 .run { font-size: 14px; color: var(--muted); }
 .run > summary { list-style: none; cursor: pointer; display: inline-flex; align-items: center; min-height: 32px; }
 .run > summary::-webkit-details-marker { display: none; }
-.run > summary::before { content: "▸"; display: inline-block; width: 1em; }
+.run > summary::before { content: "▸"; display: inline-block; width: 28px; font-size: 24px; line-height: 1; }
 .run[open] > summary::before { content: "▾"; }
 .run .steps { display: flex; flex-direction: column; gap: var(--s3); margin: var(--s1) 0 0 5px; padding-left: var(--s3); border-left: 1px solid var(--line); }
 .run + .t.interrupted { margin-top: calc(-1 * var(--s2)); }
@@ -204,8 +226,8 @@ button { -webkit-user-select: none; user-select: none; }
 .pictures { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
 .composer.new { flex-direction: column; align-items: stretch; }
 .composer.new textarea { flex: none; }
-/* The model and directory show once a task is being written (nothing starts without one), and while it starts. */
-.composer.new:not(:focus-within, .starting):has(textarea:placeholder-shown) :is(.pick, .where) { display: none; }
+/* The directory shows once a task is being written, and while it starts. */
+.composer.new:not(:focus-within, .starting):has(textarea:placeholder-shown) .where { display: none; }
 .where { display: flex; gap: var(--s2); align-items: center; }
 .where input { flex: 1; min-width: 0; height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; }
 .empty { color: var(--muted); text-align: center; margin: 40px var(--s4); }
@@ -260,6 +282,18 @@ button.setting:active, .option:active { background: var(--message); }
 .numbers { display: flex; flex-direction: column; gap: 6px; margin: var(--s5) 0 var(--s4); }
 .context { display: flex; justify-content: space-between; gap: var(--s2); font-size: 15px; }
 .context span + span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.context-used.normal, .context .context-used.normal { color: var(--green); }
+.context-used.high, .context .context-used.high { color: var(--yellow); }
+.context-used.full, .context .context-used.full { color: var(--red); }
+[data-thinking] { --thinking: var(--muted); }
+[data-thinking="minimal"] { --thinking: var(--thinking-minimal); }
+[data-thinking="low"] { --thinking: var(--thinking-low); }
+[data-thinking="medium"] { --thinking: var(--thinking-medium); }
+[data-thinking="high"] { --thinking: var(--thinking-high); }
+[data-thinking="xhigh"] { --thinking: var(--thinking-xhigh); }
+[data-thinking="max"] { --thinking: var(--thinking-max); }
+.thinking-level, .setting[data-thinking] .value, .slider .ticks button[data-thinking] { color: var(--thinking); }
+.slider[data-thinking] input { accent-color: var(--thinking); }
 .meta { margin: 0; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .gauge + .meta { margin-top: 2px; }
 /* A choice (picker.js), over everything but the image viewer. */
@@ -273,7 +307,7 @@ button.setting:active, .option:active { background: var(--message); }
 .sheet:not([hidden]) { animation: rise .22s ease-out; }
 @media (prefers-reduced-motion: reduce) { .sheet:not([hidden]) { animation: none; } }
 .gauge { display: block; height: 8px; border-radius: 4px; background: var(--panel); overflow: hidden; }
-.gauge span { display: block; height: 100%; border-radius: 4px; background: var(--accent); }
+.gauge span { display: block; height: 100%; border-radius: 4px; background: var(--green); }
 .gauge span.high { background: var(--yellow); }
 .gauge span.full { background: var(--red); }
 .p0 { width: 0; } .p10 { width: 10%; } .p20 { width: 20%; } .p30 { width: 30%; } .p40 { width: 40%; } .p50 { width: 50%; }

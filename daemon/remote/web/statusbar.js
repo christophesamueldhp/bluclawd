@@ -44,12 +44,18 @@ export function tokens(count) {
 	return String(count);
 }
 
+/** pi's footer warns above 70% and reports an error above 90%. @param {number} percent */
+export function contextLevel(percent) {
+	return percent > 90 ? "full" : percent > 70 ? "high" : "normal";
+}
+
 /** A class per 10%: the CSP allows no inline style for a width. @param {number} value @param {string} label @param {string} [kind] */
 function gauge(value, label, kind = "") {
 	const percent = Math.min(100, Math.max(0, value));
 	const step = Math.ceil(percent / 10) * 10;
-	const level = percent >= 85 ? " full" : percent >= 60 ? " high" : "";
-	return `<span class="gauge${kind}" role="meter" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${esc(Math.round(percent))}"><span class="p${step}${level}"></span></span>`;
+	const level = contextLevel(percent);
+	const color = level === "normal" ? "" : ` ${level}`;
+	return `<span class="gauge${kind}" role="meter" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${esc(Math.round(percent))}"><span class="p${step}${color}"></span></span>`;
 }
 
 /** @param {string | undefined} trust */
@@ -76,13 +82,15 @@ export function barHtml(report, cwd) {
 	const second = [];
 	const model = report?.model;
 	if (model) {
-		const thinking = report.thinkingLevel ? ` • ${esc(report.thinkingLevel)}` : "";
+		const thinking = report.thinkingLevel
+			? ` • <span class="thinking-level" data-thinking="${esc(report.thinkingLevel)}">${esc(report.thinkingLevel)}</span>`
+			: "";
 		first.push(`<span class="model grow">${esc(model.name ?? model.id)}${thinking}</span>`);
 	}
 	const context = report?.context;
 	if (context && context.percent !== null) {
 		first.push(
-			`<span>${gauge(context.percent, "Context used", " mini")} ${esc(Math.round(context.percent))}%</span>`,
+			`<span class="context-used ${contextLevel(context.percent)}">${gauge(context.percent, "Context used", " mini")} ${esc(Math.round(context.percent))}%</span>`,
 		);
 	}
 	const usage = report?.usage;
@@ -114,7 +122,7 @@ function settingHtml(key, label, value, pickable) {
 	const inner = `<span class="label">${esc(label)}</span><span class="value">${esc(value)}</span>`;
 	return pickable
 		? `<button type="button" class="setting" data-pick="${key}">${inner}<span class="chevron" aria-hidden="true">›</span></button>`
-		: `<div class="setting">${inner}</div>`;
+		: `<div class="setting"${key === "thinking" ? ` data-thinking="${esc(value)}"` : ""}>${inner}</div>`;
 }
 
 /**
@@ -125,10 +133,13 @@ function settingHtml(key, label, value, pickable) {
 function thinkingHtml(levels, level) {
 	const at = levels.indexOf(level);
 	const ticks = levels
-		.map((name, index) => `<button type="button" tabindex="-1" data-level="${index}">${esc(name)}</button>`)
+		.map(
+			(name, index) =>
+				`<button type="button" tabindex="-1" data-thinking="${esc(name)}" data-level="${index}">${esc(name)}</button>`,
+		)
 		.join("");
 	const slider = `<input type="range" id="thinking" min="0" max="${levels.length - 1}" step="1" value="${Math.max(at, 0)}" aria-label="Thinking" aria-valuetext="${esc(level)}">`;
-	return `<div class="setting slider"><span class="label">Thinking</span><span class="value">${esc(level)}</span>${slider}<div class="ticks" aria-hidden="true">${ticks}</div></div>`;
+	return `<div class="setting slider" data-thinking="${esc(level)}"><span class="label">Thinking</span><span class="value">${esc(level)}</span>${slider}<div class="ticks" aria-hidden="true">${ticks}</div></div>`;
 }
 
 /**
