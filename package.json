@@ -15,7 +15,8 @@
       "./ext/remote/index.ts",
       "./ext/help/index.ts",
       "./ext/vibes/index.ts",
-      "./ext/paste/index.ts"
+      "./ext/paste/index.ts",
+      "./ext/prompt-assist/index.ts"
     ],
     "themes": ["./themes"]
   },

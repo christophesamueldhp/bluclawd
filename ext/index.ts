@@ -24,6 +24,7 @@ import checkpoints from "./checkpoints/index.ts";
 import help from "./help/index.ts";
 import paste from "./paste/index.ts";
 import permissions from "./permissions/index.ts";
+import promptAssist from "./prompt-assist/index.ts";
 import remote from "./remote/index.ts";
 import sandbox from "./sandbox/index.ts";
 import vibes from "./vibes/index.ts";
@@ -40,5 +41,6 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "help", factory: help },
 		{ name: "vibes", factory: vibes },
 		{ name: "paste", factory: paste },
+		{ name: "prompt-assist", factory: promptAssist },
 	];
 }

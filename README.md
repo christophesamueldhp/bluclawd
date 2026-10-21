@@ -15,6 +15,11 @@ pi install /path/to/this/repo                                     # this layer
 pi                                                                 # run it
 ```
 
+For updates from Git, install with `pi install git:github.com/christophesamueldhp/bluclawd`.
+Then `pi update --all` updates Pi and installed packages, including newly published bluclawd
+features. Restart Pi or run `/reload` in an existing session to load the updated extensions.
+Prompt assistance is included and enabled by default; no separate extension installation is needed.
+
 Identity is plain pi — `~/.pi/agent`, the `pi` binary. The name "bluclawd"
 shows up in the welcome header and nowhere else; there is no rebrand.
 
@@ -44,7 +49,7 @@ scripts/        probe-extensions.ts — headless report of what each extension r
 test/           vitest suites, self-contained — no monorepo, no fixture files
 ```
 
-9 extensions, no runtime dependencies (pi's own packages are peers):
+11 extensions, no runtime dependencies (pi's own packages are peers):
 
 | Extension | Registers |
 |---|---|
@@ -56,7 +61,25 @@ test/           vitest suites, self-contained — no monorepo, no fixture files
 | `remote` | `/remote-control` |
 | `help` | `/help`, `/status`, `/context` |
 | `vibes` | spinner verbs |
+| `prompt-assist` | `/prompt-assist`; prompt suggestions and automatic session titles with a selectable Pi model; manual rename stays available |
 | `paste` | Claude Code's paste in the prompt and agent view's composer: a paste over 800 characters or 2 lines shows as `[Pasted text #N +L lines]`, a ctrl+v image as `[Image #N]` (sent as an image), and pasting the same thing again right after shows the text or the image's file |
+
+Prompt assistance defaults to **OpenCode Go / MiMo-V2.6-Flash**, independently of your coding model.
+Use **`/prompt-assist`** to pick any available, authenticated Pi chat model, including custom
+providers. **`/prompt-assist provider/model`** selects one directly (Tab completes IDs), and
+**`/prompt-assist default`** returns to MiMo. The same selection serves suggestions and session
+titles, and is saved globally in `~/.pi/agent/bluclawd/prompt-assist.json` (under `$PI_CODING_AGENT_DIR`
+when overridden) for future sessions and package updates. Changing it leaves the main coding model unchanged.
+
+After 700 ms without typing, assistance can show a dim prompt continuation; after a response,
+it can suggest the next prompt. **Tab** accepts without sending; **Esc** dismisses. Command/file
+completion takes priority. Only a short text-only conversation excerpt and the draft are sent
+to the selected provider; assistance does not read repository files or include tool output.
+The selected provider must be authenticated; unavailable models produce a warning, not a silent fallback.
+
+An unnamed session gets an English title after its first response. Rename it at any time with
+pi's **`/name Your title`**, or **Ctrl+R** in agent view. Automatic naming never replaces a
+manually assigned name, including one assigned while generation is still running.
 
 ## What it adds
 
@@ -69,6 +92,7 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | `/rewind` (or Esc twice on an empty prompt, as in Claude Code) | Claude Code's rewind: a file checkpoint per message you send; lists your prompts newest first with what each changed (`a.ts +3 -1`, `No code changes`, `⚠ No code restore`), then Restore code and conversation / Restore conversation (the prompt returns to the editor) / Restore code / Never mind, with no further confirmation (the current files are checkpointed first and listed as `(before rewind)`, so `/rewind` undoes it). New files the agent created since the point (`write`, `bash`) are removed and your own are kept, as in Claude Code; unlike Claude Code it also restores files changed through bash or by hand. Checkpoints are git commits kept under `refs/bluclawd/checkpoints/<session>/`: the newest 50 per session, and another session's refs are pruned after 30 days |
 | `←` on an empty prompt (or `/agent-view`) | agent view, as Claude Code's `claude agents`: background sessions in Needs input (blocked on a prompt) / Working (a turn running) / Idle (nothing running) bands (empty ones hidden; ctrl+s: by directory, this one first, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing (a working session's current tool), age. Type a task + enter to start a background session (ctrl+enter: start it and switch to it), shift+enter / alt+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, ctrl+v attaches a clipboard image to the new-session composer, an unknown `/command` is sent as the task, `!<command>` runs it in your shell as a row of its own (its last output line while it runs, then done, `exit N — …` or stopped; enter shows its output, ctrl+x stops it then removes the row, and it is never run again), space peeks and replies (the reply is the session's next prompt, `/stop` stops it; a reply draft is kept per session), enter/→ switches this terminal to any session at once, including Working and Needs input (see [Session switching](#session-switching)), ↑↓ wrap, alt/ctrl+↑↓ jump between bands, alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes (this terminal's own session too: the terminal moves to agent view), ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` / `n:<name>` filter (ctrl+f turns the text into a name search), `/resume` brings a past session back and opens it, `/model <name>` (or `default`) sets the model for new ones, `/cd <dir>` sets the directory they start in (relative to the current one; bare `/cd` goes back), tab completes the model or directory (several matches are listed: ↑↓ and tab or enter pick one), typing `/` lists these commands (↑↓ to pick, tab or enter completes one that takes an argument, enter runs the rest), the hint line starts with the mode new ones start in (`⏵⏵ always` or `✕ never`; nothing at pi's default, `ask`), `?` shows the shortcuts, esc returns to your session, and ctrl+c twice (or `exit`, `/exit`) leaves tmux with the sessions still running, except the one `pi` started in this terminal, which ends with it while idle. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press. Every session is a pi of its own in tmux, so it keeps running after its terminal leaves or closes; a local daemon (`daemon/`, a Unix socket in `~/.pi/server`) only lists them. Agent View detects both changed daemon code and a changed Pi installation, and restarts an obsolete daemon. A session that was idle when its pi quit is kept as a row with no process (it resumes when opened or replied to); every row stays until ctrl+x deletes it |
 | `/remote-control` | Claude Code's Remote Control, for every agent-view session: a phone app (a PWA the daemon serves) lists them in agent view's bands, shows a session's conversation and its reply as it streams, sends it a prompt, stops its turn, starts sessions, switches the model, and notifies you; a message once sent is never edited from the phone, only stopped. `/remote-control` turns it on and shows a QR code that pairs your phone; once on, it offers a menu: pair a new phone, the paired phones (remove one or all), start at login (macOS), turn off — see [Remote control](#remote-control) |
+| `/prompt-assist [provider/model\|default]` | choose and save the Pi model for prompt suggestions and session titles, without changing the coding model |
 | `/status`, `/context` | `/status`: model, auth, project trust; `/context`: context window usage (session file, messages, tokens and cost stay in pi's `/session`) |
 | `/theme` | Claude Code's theme picker: Auto (match terminal), Dark / Light mode, their colorblind-friendly and ANSI-only variants (Claude Code's six palettes, with the bluclawd mascot cyan as accent), then every other pi theme; the focused theme previews live over a `demo.js` diff, Enter saves it, Esc restores the saved one. `/theme <name>` sets one directly |
 | `exit`, `/exit`, `quit`, `:q`, `:wq` alone at the prompt | as Claude Code's `/exit`: ends a normal session, detaches from a background one (see [Session switching](#session-switching)) |

@@ -30,12 +30,13 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	help: { commands: ["help", "context", "status"], tools: [], shortcuts: 0, events: 0 },
 	vibes: { commands: [], tools: [], shortcuts: 0, events: 2 },
 	paste: { commands: [], tools: [], shortcuts: 0, events: 2 },
+	"prompt-assist": { commands: ["prompt-assist"], tools: [], shortcuts: 0, events: 5 },
 };
 
 describe("bluclawd extension registration", () => {
 	const rec = recordExtensions();
 
-	it("registers exactly the 10 expected extensions, no more, no fewer", () => {
+	it("registers exactly the 11 expected extensions, no more, no fewer", () => {
 		expect(Object.keys(rec).sort()).toEqual(Object.keys(EXPECTED).sort());
 	});
 
