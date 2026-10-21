@@ -126,28 +126,21 @@ button { -webkit-user-select: none; user-select: none; }
 .band { font-size: 13px; color: var(--muted); margin: var(--s4) var(--s4) var(--s1); font-weight: 600; }
 .row { display: flex; gap: var(--s3); align-items: center; min-height: 60px; padding: var(--s2) var(--s4); color: inherit; text-decoration: none; position: relative; }
 /* A hairline between rows, inset to the text as iOS's. */
-.row + .row::before { content: ""; position: absolute; top: 0; left: calc(var(--s4) + 28px + var(--s3)); right: 0; border-top: 1px solid var(--line); }
+.row + .row::before { content: ""; position: absolute; top: 0; left: calc(var(--s4) + 20px + var(--s3)); right: 0; border-top: 1px solid var(--line); }
 .row:active { background: var(--panel); }
 .row.closed .name, .row.closed .glyph { opacity: 0.55; }
 .row .name { flex: 1; min-width: 0; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row small { display: block; color: var(--muted); font-size: 15px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .age { flex: none; align-self: flex-start; padding-top: 2px; color: var(--muted); font-size: 15px; font-variant-numeric: tabular-nums; }
-.row .glyph { flex: none; width: 28px; font-size: 28px; line-height: 1; text-align: center; color: var(--muted); }
+.row .glyph { flex: none; width: 20px; font-size: 20px; line-height: 1; text-align: center; color: var(--muted); }
 .glyph.needs, .glyph.stopped, .session-state.needs, .session-state.stopped { color: var(--yellow); }
 .glyph.failed, .session-state.failed { color: var(--red); }
 .glyph.done, .session-state.done { color: var(--green); }
 .glyph.working, .session-state.working { color: var(--accent); }
-/* Terminal agent view's forward/reverse frames, one every 120 ms. */
-.row:not(.closed) .glyph.working::before { content: "·"; display: inline-block; animation: session-spin 1.44s step-end infinite; }
-@keyframes session-spin {
-	0%, 91.667% { content: "·"; }
-	8.333%, 83.333% { content: "✢"; }
-	16.667%, 75% { content: "✳"; }
-	25%, 66.667% { content: "✶"; }
-	33.333%, 58.333% { content: "✻"; }
-	41.667%, 50% { content: "✽"; }
-}
-@media (prefers-reduced-motion: reduce) { .row:not(.closed) .glyph.working::before { content: "✻"; animation: none; } }
+/* A fixed SVG avoids the changing widths and baselines of animated text glyphs. */
+.row .glyph.working .icon { width: 20px; height: 20px; animation: session-spin 1.6s linear infinite; }
+@keyframes session-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .row .glyph.working .icon { animation: none; } }
 @keyframes pulse { 50% { opacity: .25; } }
 .log { padding: var(--s3) var(--s4) var(--s4); display: flex; flex-direction: column; gap: var(--s3); }
 /* The log's parts (app.js's logParts) lay out as one. */

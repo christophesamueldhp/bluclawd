@@ -39,7 +39,7 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.36";
+const VERSION = "0.0.37";
 const BANDS = [
 	["pinned", "Pinned"],
 	["needs", "Needs input"],
@@ -808,7 +808,7 @@ function listShell() {
 
 /** @param {Session} s */
 function rowHtml(s) {
-	const glyph = statusGlyph(s);
+	const glyph = s.alive && s.state === "working" ? ICONS.working : statusGlyph(s);
 	const status = STATE_WORDS[/** @type {keyof typeof STATE_WORDS} */ (s.state)] ?? s.state;
 	// The project's folder, which the search matches too.
 	const where = s.cwd.split("/").filter(Boolean).at(-1);
