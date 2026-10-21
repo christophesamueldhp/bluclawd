@@ -257,13 +257,14 @@ export function countRows(rows: AgentRow[]): AgentCounts {
 const BAND_ALIASES: Record<ReturnType<typeof stateBandOf>, string[]> = {
 	needs: ["blocked", "needs input", "input"],
 	working: ["active", "working"],
-	idle: ["idle", "completed", "done", "failed", "stopped"],
+	idle: ["idle"],
 };
 
 function stateMatches(row: AgentRow, want: string): boolean {
 	return (
 		row.state.startsWith(want) ||
 		STATE_WORDS[row.state].toLowerCase().startsWith(want) ||
+		(row.state === "done" && "completed".startsWith(want)) ||
 		BAND_ALIASES[stateBandOf(row)].some((alias) => alias.startsWith(want))
 	);
 }
@@ -327,7 +328,7 @@ export const STATE_WORDS: Record<RowState, string> = {
 	working: "Working",
 	needs: "Needs input",
 	idle: "Idle",
-	done: "Idle",
-	failed: "Idle",
-	stopped: "Idle",
+	done: "Done",
+	failed: "Failed",
+	stopped: "Stopped",
 };

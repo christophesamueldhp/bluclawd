@@ -11,7 +11,7 @@
 import { spawn } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import type { ImageContent } from "@earendil-works/pi-ai";
 import {
 	type Component,
@@ -222,18 +222,14 @@ const cc = {
 	},
 };
 
-/** Only a blocking prompt has a color: the rest say just whether a turn is running. */
-const ICON_COLOR: Record<RowState, Color> = {
-	working: "muted",
+const STATE_COLOR: Record<RowState, Color> = {
+	working: "accent",
 	needs: "warning",
 	idle: "muted",
-	done: "muted",
-	failed: "muted",
-	stopped: "muted",
+	done: "success",
+	failed: "error",
+	stopped: "warning",
 };
-
-/** The state word in the directory view; "Working" stays in the plain text color. */
-const WORD_COLOR: Record<RowState, Color> = { ...ICON_COLOR, working: "text" };
 
 /** The header shows the mascot only this wide. */
 const MASCOT_MIN_COLUMNS = 70;
@@ -307,8 +303,6 @@ export class AgentView implements Component, Focusable {
 	private lastIndex = 0;
 	/** The focus before a filter was typed, restored when it is cleared. */
 	private beforeFilter: string | undefined;
-	/** A header reached with the arrows offers "ctrl+x to delete all"; one focused on open does not. */
-	private navigated = false;
 	private daemonNotice = "";
 	private connectionLost = false;
 	private opening: string | undefined;
@@ -330,8 +324,6 @@ export class AgentView implements Component, Focusable {
 	private closed = false;
 	/** Set once the first roster is in; the next frame drawn is reported to onDrawn. */
 	private loaded = false;
-	/** A roster has been listed: until then, only this window's own row is known. */
-	private listed = false;
 	/** When this view restarted an older daemon, which lost every pane's registration. */
 	private restartedAt = Number.NEGATIVE_INFINITY;
 	private drawn = false;
@@ -350,7 +342,6 @@ export class AgentView implements Component, Focusable {
 		composer.handlePaste = (text) => this.pasteIntoComposer(text, insert);
 		if (opts.instances) {
 			this.instances = opts.instances.filter((inst) => inst.id !== opts.hide);
-			this.listed = true;
 			try {
 				this.shells = opts.panes.listShells();
 			} catch {
@@ -550,7 +541,6 @@ export class AgentView implements Component, Focusable {
 					? this.instances.filter((inst) => inst.pane && !listed.some((l) => l.id === inst.id))
 					: [];
 			this.instances = [...listed, ...carried];
-			this.listed = true;
 			this.connectionLost = false;
 		} catch {
 			this.connectionLost = true;
@@ -738,7 +728,6 @@ export class AgentView implements Component, Focusable {
 			this.items.findIndex((i) => i.key === key),
 		);
 		this.userMoved = true;
-		this.navigated = true;
 		this.notice = undefined;
 		this.reply.setValue(this.replyDrafts.get(key) ?? "");
 		this.reply.handleInput("\x05");
@@ -1880,7 +1869,6 @@ export class AgentView implements Component, Focusable {
 
 	setInstancesForTest(instances: InstanceSummary[]): void {
 		this.instances = instances;
-		this.listed = true;
 		this.recompute();
 	}
 
@@ -1919,13 +1907,11 @@ export class AgentView implements Component, Focusable {
 		return renderMascot(REST, mascotGlyphs()).map((art, i) => `${art} ${text[i] ?? ""}`);
 	}
 
-	private icon(row: AgentRow, focused: boolean): string {
+	private icon(row: AgentRow): string {
 		if (this.opening === row.id) return SPINNER[this.frame];
 		const glyph =
 			this.justKilled === row.id || !row.alive ? "∙" : row.state === "working" ? SPINNER[this.frame] : "✻";
-		// Working has no color of its own: gray, or the text color when focused.
-		if (row.state === "working") return cc.fg(focused ? "text" : "muted", glyph);
-		return cc.fg(ICON_COLOR[row.state], glyph);
+		return cc.fg(STATE_COLOR[row.state], glyph);
 	}
 
 	private armedFor(row: AgentRow): boolean {
@@ -1936,7 +1922,7 @@ export class AgentView implements Component, Focusable {
 		);
 	}
 
-	private rowDetail(row: AgentRow, focused: boolean): string {
+	private rowDetail(row: AgentRow): string {
 		if (this.opening === row.id)
 			return cc.fg(
 				"muted",
@@ -1950,14 +1936,10 @@ export class AgentView implements Component, Focusable {
 				this.justKilled === row.id ? "stopped · ctrl+x again to delete" : "ctrl+x again to delete",
 			);
 		}
-		let text = clean(row.detail);
-		// Not prompted yet: what to do about it, which depends on where the focus is.
-		if (row.state === "idle") {
-			text = !focused ? "send a prompt to start" : row.self ? basename(row.cwd) : "space to send it a prompt";
-		}
+		const text = clean(row.detail);
 		if (this.viewMode !== "directory") return cc.fg("muted", text);
 		const word = STATE_WORDS[row.state];
-		const shown = row.state === "working" ? word : cc.fg(WORD_COLOR[row.state], word);
+		const shown = cc.fg(STATE_COLOR[row.state], word);
 		return text ? `${shown}${cc.fg("muted", ` · ${text}`)}` : shown;
 	}
 
@@ -1972,9 +1954,9 @@ export class AgentView implements Component, Focusable {
 		const age = rowAge(row, Date.now()).padStart(ageWidth);
 		const fixed = visibleWidth(pad) + 2 + labelWidth + 2 + 2 + ageWidth;
 		const detailWidth = Math.max(0, width - fixed);
-		const detail = truncateToWidth(this.rowDetail(row, focused), detailWidth, "…");
+		const detail = truncateToWidth(this.rowDetail(row), detailWidth, "…");
 		const line =
-			`${pad}${this.icon(row, focused)} ${name}${" ".repeat(Math.max(0, labelWidth - visibleWidth(name)))}  ` +
+			`${pad}${this.icon(row)} ${name}${" ".repeat(Math.max(0, labelWidth - visibleWidth(name)))}  ` +
 			`${detail}${" ".repeat(Math.max(0, detailWidth - visibleWidth(detail)))}  ${cc.fg("muted", age)}`;
 		const fitted = truncateToWidth(line, width);
 		if (!focused || this.composing()) return fitted;
@@ -2025,11 +2007,6 @@ export class AgentView implements Component, Focusable {
 			lines.push(cc.fg("muted", "  no sessions match"));
 			return { lines, focusLine };
 		}
-		const helper: Record<string, string> = {
-			needs: "Sessions that have a question or need your decision land here",
-			working: "Sessions actively working — they keep running even if you close the terminal",
-			idle: "Sessions with nothing running wait here",
-		};
 		const bandCount = this.items.filter((i) => i.kind === "header").length;
 		let first = true;
 		for (const item of this.items) {
@@ -2039,9 +2016,6 @@ export class AgentView implements Component, Focusable {
 				first = false;
 				if (focused) focusLine = lines.length;
 				lines.push(this.renderBand(item, width, focused, bandCount));
-				if (this.onboarding && helper[item.band.key]) {
-					lines.push(...wrapTextWithAnsi(cc.fg("muted", helper[item.band.key]), width - 1).map((l) => ` ${l}`));
-				}
 				continue;
 			}
 			first = false;
@@ -2108,7 +2082,7 @@ export class AgentView implements Component, Focusable {
 		const since = row.state === "needs" ? row.finishedAt : undefined;
 		if (since) {
 			body.push(
-				cc.fg(ICON_COLOR[row.state], `  waiting ${compactAge(Date.now() - (Date.parse(since) || Date.now()))}`),
+				cc.fg(STATE_COLOR[row.state], `  waiting ${compactAge(Date.now() - (Date.parse(since) || Date.now()))}`),
 			);
 		}
 		body.push("");
@@ -2263,14 +2237,6 @@ export class AgentView implements Component, Focusable {
 		let enter: string | undefined;
 		if (composing) enter = "enter to create";
 		else if (row) enter = `enter to ${row.self ? "return" : this.resumable(row) ? "resume" : "open"}`;
-		const headerRows =
-			item?.kind === "header" ? item.band.rows.filter((r) => !r.self && !r.id.startsWith("pending:")) : [];
-		let x: string | undefined;
-		if (width >= 80 && !text) {
-			if (row) x = "ctrl+x to delete";
-			else if (item?.kind === "header" && this.navigated && headerRows.length > 0) x = "ctrl+x to delete all";
-		}
-		const find = composing && !text.trim().startsWith("/") && width >= 49 ? "ctrl+f to find" : undefined;
 		return this.hints(
 			width,
 			[
@@ -2279,10 +2245,7 @@ export class AgentView implements Component, Focusable {
 					? `enter to ${this.collapsed.has(item.band.key) ? "expand" : "collapse"}`
 					: undefined,
 				item?.kind === "more" && !text ? "enter to show all" : undefined,
-				item?.kind === "row" && !text && width >= 55 ? "space to reply" : undefined,
-				x,
 				text ? "esc to clear" : "? for shortcuts",
-				find,
 			],
 			this.opts.mode,
 		);
@@ -2311,7 +2274,7 @@ export class AgentView implements Component, Focusable {
 	/** The composer: every line, the first after `❯`, the rest from the left edge. */
 	private composerLinesFor(width: number, dim: boolean): string[] {
 		const lines = this.composerLines.map((line, i) => truncateToWidth(i === 0 ? `❯ ${line}` : line, width));
-		const current = promptLine(this.composer, width, lines.length ? "" : "describe a task for a new session");
+		const current = promptLine(this.composer, width, "");
 		lines.push(lines.length ? current.replace(/^❯ /, "") : current);
 		if (this.pasting) lines.push(truncateToWidth(cc.fg("muted", "Reading clipboard…"), width));
 		return dim ? lines.map((line) => faint(stripAnsi(line))) : lines;
@@ -2329,23 +2292,7 @@ export class AgentView implements Component, Focusable {
 		if (this.mode === "peek" && this.selectedRow) footer = this.renderPeek(this.selectedRow, width);
 		else if (this.mode === "resume") footer = this.renderResume(width);
 		else {
-			// Explains the view above the composer while only your own session is listed.
-			const intro =
-				(this.listed || this.loaded) && this.allRows.every((r) => r.self) && !this.composerText()
-					? [
-							"",
-							...wrapTextWithAnsi(
-								cc.fg(
-									"muted",
-									"A different way to work: hand off a bigger task than you would chat through, and it is organized in the sections above so you know when it needs you.",
-								),
-								width - 1,
-							).map((line) => ` ${line}`),
-							"",
-						]
-					: [];
 			footer = [
-				...intro,
 				rule,
 				...this.composerLinesFor(width, this.mode === "rename"),
 				rule,

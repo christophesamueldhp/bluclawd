@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { AutocompleteProvider, TUI } from "@earendil-works/pi-tui";
+import { type AutocompleteProvider, parseColor, styleText, type TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
 	currentDaemonBuildId,
@@ -18,6 +18,7 @@ import {
 	queryFilter,
 	rowAge,
 	rowFromSummary,
+	STATE_WORDS,
 } from "../daemon/rows.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
@@ -251,6 +252,37 @@ describe("rows", () => {
 		expect(compactAge(3 * 3_600_000)).toBe("3h");
 	});
 
+	it.each([
+		["working", ["work"]],
+		["active", ["work"]],
+		["needs", ["ask"]],
+		["blocked", ["ask"]],
+		["input", ["ask"]],
+		["idle", ["done", "gone", "fresh", "stopped"]],
+		["done", ["done"]],
+		["completed", ["done"]],
+		["failed", ["gone"]],
+		["stopped", ["stopped"]],
+		["d", ["done"]],
+		["comp", ["done"]],
+		["f", ["gone"]],
+		["stop", ["stopped"]],
+		["unknown", []],
+		["idle s:failed", ["gone"]],
+		["done s:failed", []],
+		["FAILED", ["gone"]],
+	])("s:%s selects only matching states or activity groups", (filter, expected) => {
+		const rows = collectRows(
+			[
+				...sessions,
+				{ id: "fresh", status: "online", activity: "idle", cwd: HERE },
+				{ id: "stopped", status: "stopped", outcome: "stopped", cwd: HERE },
+			],
+			undefined,
+		);
+		expect(rows.filter(queryFilter(`s:${filter}`) ?? (() => false)).map((r) => r.id)).toEqual(expected);
+	});
+
 	it("s:<state> filters; plain text is a task, not a filter", () => {
 		const rows = collectRows(sessions, undefined);
 		expect(rows.filter(queryFilter("s:blocked") ?? (() => false)).map((r) => r.id)).toEqual(["ask"]);
@@ -260,6 +292,54 @@ describe("rows", () => {
 });
 
 describe("AgentView render", () => {
+	it.each([
+		{ state: "working", color: "accent", hex: "#00c0e8", activity: "working" },
+		{ state: "needs", color: "warning", hex: "#ffc107", activity: "awaiting_input" },
+		{ state: "idle", color: "muted", hex: "#999999", activity: "idle" },
+		{ state: "done", color: "success", hex: "#4eba65", outcome: "done" },
+		{ state: "failed", color: "error", hex: "#ff6b80", outcome: "failed" },
+		{ state: "stopped", color: "warning", hex: "#ffc107", outcome: "stopped" },
+	] as const)("colors $state icons and directory status in dark and light themes", (status) => {
+		const instance: InstanceSummary = {
+			id: "colored",
+			status: "online",
+			cwd: HERE,
+			label: "colored session",
+			...("activity" in status ? { activity: status.activity } : { outcome: status.outcome }),
+		};
+		try {
+			for (const light of [false, true]) {
+				const fg = vi.fn((_color: string, text: string) => text);
+				setSharedTheme({
+					...plainTheme,
+					fg,
+					getBgAnsi: () => (light ? "\x1b[48;2;255;255;255m" : ""),
+				} as unknown as Theme);
+				const { view } = makeView();
+				view.setInstancesForTest([instance]);
+				const glyph = status.state === "working" ? "·" : "✻";
+				const colored = (text: string) => styleText(text, { fg: parseColor(status.hex) }, "truecolor");
+				for (const directory of [false, true]) {
+					if (directory) view.handleInput(CTRL_S);
+					for (let focus = 0; focus < 2; focus++) {
+						fg.mockClear();
+						const line = view.render(100).find((line) => line.includes("colored session"));
+						if (light) {
+							expect(fg).toHaveBeenCalledWith(status.color, glyph);
+							if (directory) expect(fg).toHaveBeenCalledWith(status.color, STATE_WORDS[status.state]);
+						} else {
+							expect(line).toContain(colored(glyph));
+							if (directory) expect(line).toContain(colored(STATE_WORDS[status.state]));
+						}
+						view.handleInput(DOWN);
+					}
+				}
+			}
+		} finally {
+			setSharedTheme(plainTheme);
+		}
+	});
+
 	it("shows the header, the three bands and one line per session", () => {
 		const text = makeView().text();
 		expect(text[0]).toBe(""); // Claude Code pads the top of the list
@@ -271,7 +351,9 @@ describe("AgentView render", () => {
 		expect(body).toMatch(/Working\n.*collision detection\s+Adding swept-AABB checks/);
 		expect(body).toMatch(/Idle\n.*title screen\s+menu done\s+6m/);
 		expect(body).toContain("∙ sound effects");
-		expect(body).toContain("describe a task for a new session");
+		expect(body).not.toContain("describe a task for a new session");
+		expect(text.at(-1)).toContain("? for shortcuts");
+		expect(text.at(-1)).not.toMatch(/space to reply|ctrl\+x|ctrl\+f/);
 	});
 
 	it("prefixes the state word in the directory view", () => {
@@ -280,18 +362,33 @@ describe("AgentView render", () => {
 		const shown = text().join("\n");
 		// The launcher's directory first, its sessions oldest first.
 		expect(shown).toMatch(
-			/~\/proj\/here\n.*sound effects\s+Idle · build broke[\s\S]*power-up design\s+Needs input · Allow bash[\s\S]*~\/proj\/there/,
+			/~\/proj\/here\n.*sound effects\s+Failed · build broke[\s\S]*power-up design\s+Needs input · Allow bash[\s\S]*~\/proj\/there/,
 		);
 	});
 
-	it("with nothing running, shows every band with what lands there, and the intro", () => {
+	it("with nothing running, shows the bands without onboarding explanations", () => {
 		const { view, text } = makeView();
 		view.setInstancesForTest([]);
 		const shown = text().join("\n");
-		expect(shown).toMatch(/Needs input\n Sessions that have a question/);
-		expect(shown).toMatch(/Working\n Sessions actively working/);
-		expect(shown).toMatch(/Idle\n Sessions with nothing running wait here/);
-		expect(shown).toContain("A different way to work");
+		for (const band of ["Needs input", "Working", "Idle"]) expect(shown).toContain(band);
+		expect(shown).not.toContain("Sessions that");
+		expect(shown).not.toContain("Sessions actively");
+		expect(shown).not.toContain("Sessions with");
+		expect(shown).not.toContain("A different way to work");
+	});
+
+	it.each([
+		{ outcome: "done", label: "Done" },
+		{ outcome: "failed", label: "Failed" },
+		{ outcome: "stopped", label: "Stopped" },
+	] as const)("shows $label in directory view while keeping the session in the Idle band", ({ outcome, label }) => {
+		const { view, text } = makeView();
+		view.setInstancesForTest([
+			{ id: "ended", status: "stopped", cwd: HERE, label: "ended session", outcome, detail: "last result" },
+		]);
+		expect(text().join("\n")).toMatch(/Idle\n.*ended session/);
+		view.handleInput(CTRL_S);
+		expect(text().join("\n")).toMatch(new RegExp(`ended session\\s+${label} · last result`));
 	});
 
 	it("hides an empty band once anything is listed", () => {
@@ -907,20 +1004,14 @@ describe("AgentView look", () => {
 		expect(rows[1]).toMatch(/^ {2}ctrl\+f to find {8,}ctrl\+j for newline {8}/);
 	});
 
-	it("with only this session listed, explains the view just above the composer", () => {
+	it("with only this session listed, omits the intro and idle prompting hints", () => {
 		const self: InstanceSummary = { id: "me", status: "online", cwd: HERE, label: "current session", external: true };
 		const { view, text } = makeView({ self });
 		view.setInstancesForTest([]);
-		const lines = text();
-		const rule = lines.findIndex((l) => l.startsWith("─"));
-		expect(lines[rule - 1]).toBe("");
-		expect(
-			lines
-				.slice(0, rule - 1)
-				.join(" ")
-				.replace(/\s+/g, " "),
-		).toMatch(/ A different way to work: .* in the sections above so you know when it needs you\./);
-		expect(lines.slice(0, 8).join("\n")).not.toContain("different way");
+		const shown = text().join("\n");
+		expect(shown).toContain("current session");
+		expect(shown).not.toContain("different way");
+		expect(shown).not.toMatch(/send a prompt|space to send/);
 	});
 
 	it("draws a roster listed before it opened in its first frame, intro and all left out", () => {
@@ -941,7 +1032,7 @@ describe("AgentView look", () => {
 		expect(shown).not.toContain("different way");
 	});
 
-	it("explains the view only once the roster is in: a frame before it would flash the intro", async () => {
+	it("keeps the intro hidden before and after the roster loads", async () => {
 		const self: InstanceSummary = { id: "me", status: "online", cwd: HERE, label: "current session", external: true };
 		const view = new AgentView({
 			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
@@ -957,7 +1048,7 @@ describe("AgentView look", () => {
 		expect(text()).toContain("current session");
 		expect(text()).not.toContain("different way");
 		await view.onShow();
-		expect(text()).toContain("different way");
+		expect(text()).not.toContain("different way");
 		view.close();
 	});
 
