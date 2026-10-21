@@ -71,15 +71,27 @@ providers. **`/prompt-assist provider/model`** selects one directly (Tab complet
 titles, and is saved globally in `~/.pi/agent/bluclawd/prompt-assist.json` (under `$PI_CODING_AGENT_DIR`
 when overridden) for future sessions and package updates. Changing it leaves the main coding model unchanged.
 
-After 700 ms without typing, assistance can show a dim prompt continuation; after a response,
-it can suggest the next prompt. **Tab** accepts without sending; **Esc** dismisses. Command/file
+After a response has fully finished (including retries and queued work), assistance automatically
+requests a dim next-prompt suggestion in the empty editor, without requiring you to type first.
+It also refreshes the suggestion when resuming or reloading a conversation. While typing,
+continuations are requested after a 700 ms pause. Provider latency still applies; background
+requests allow up to 30 seconds. Suggestions target **2–12 words**, with no extra character cutoff
+on the draft or returned suggestion. The request still has a 64-output-token budget; these token
+budgets and the bounded conversation excerpt are bluclawd cost controls, not documented Claude Code limits.
+**Right arrow (`→`)** or **Tab** accepts without sending;
+**Enter** submits the accepted text, and **Esc** dismisses. Without a visible suggestion, Right arrow
+keeps its normal cursor movement. Command/file
 completion takes priority. Only a short text-only conversation excerpt and the draft are sent
 to the selected provider; assistance does not read repository files or include tool output.
 The selected provider must be authenticated; unavailable models produce a warning, not a silent fallback.
 
-An unnamed session gets an English title after its first response. Rename it at any time with
-pi's **`/name Your title`**, or **Ctrl+R** in agent view. Automatic naming never replaces a
-manually assigned name, including one assigned while generation is still running.
+An unnamed session starts generating an English **2–5 word noun-phrase title** as soon as its
+first prompt is submitted, without waiting for the main response. The background request uses
+the first 1,500 characters of that prompt and a 32-output-token budget; it does not apply a
+separate 80-character cutoff to the returned title. The title appears on the editor's upper border while idle.
+A completely empty session has no topic to name yet. Rename it at any time with pi's
+**`/name Your title`**, or **Ctrl+R** in agent view. Automatic naming never replaces a manually
+assigned name, including one assigned while generation is still running.
 
 ## What it adds
 

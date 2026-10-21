@@ -1,5 +1,5 @@
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ClaudePasteEditor } from "../ext/paste/index.ts";
 import { attachSuggestions } from "../ext/prompt-assist/editor.ts";
@@ -90,7 +90,7 @@ function harness(options: { name?: string; entries?: unknown[]; mode?: string; f
 		}),
 	};
 	promptAssist(pi as never);
-	const emit = (event: string) => handlers.get(event)?.({}, ctx);
+	const emit = (event: string, data = { prompt: "Fix login validation" } as any) => handlers.get(event)?.(data, ctx);
 	emit("session_start");
 	return {
 		ctx,
@@ -127,6 +127,44 @@ describe("prompt suggestions", () => {
 		expect(submit).not.toHaveBeenCalled();
 		editor.handleInput("\x1f");
 		expect(editor.getText()).toBe("write unit");
+	});
+
+	it("accepts the displayed next-prompt suggestion with Right arrow without submitting", async () => {
+		vi.useFakeTimers();
+		const { editor, assist } = makeEditor(vi.fn(async () => "oke susun spec N5"));
+		const submit = vi.fn();
+		editor.onSubmit = submit;
+		assist.schedule(0);
+		await vi.advanceTimersByTimeAsync(0);
+		editor.handleInput("\x1b[C");
+		expect(editor.getText()).toBe("oke susun spec N5");
+		expect(submit).not.toHaveBeenCalled();
+		editor.handleInput("\r");
+		expect(submit).toHaveBeenCalledWith("oke susun spec N5");
+	});
+
+	it("accepts a continuation with Right arrow only at the end, preserving ordinary cursor movement", async () => {
+		vi.useFakeTimers();
+		const { editor } = makeEditor();
+		editor.handleInput("write");
+		await vi.advanceTimersByTimeAsync(700);
+		editor.handleInput("\x1b[C");
+		expect(editor.getText()).toBe("write tests");
+		editor.handleInput("\x1b[D");
+		const cursor = editor.getCursor();
+		editor.handleInput("\x1b[C");
+		expect(editor.getCursor().col).toBe(cursor.col + 1);
+		expect(editor.getText()).toBe("write tests");
+	});
+
+	it("does not let Right arrow accept a prompt suggestion while command/file completion is visible", async () => {
+		vi.useFakeTimers();
+		const { editor } = makeEditor();
+		editor.handleInput("write");
+		await vi.advanceTimersByTimeAsync(700);
+		editor.isShowingAutocomplete = () => true;
+		editor.handleInput("\x1b[C");
+		expect(editor.getText()).toBe("write");
 	});
 
 	it("ignores stale responses after further typing and clears on Escape", async () => {
@@ -207,6 +245,19 @@ describe("prompt suggestions", () => {
 		expect(editor.getText()).toBe("write");
 	});
 
+	it("does not impose arbitrary character cutoffs on drafts or returned suggestions", async () => {
+		vi.useFakeTimers();
+		const suggestion = ` inspect ${"component".repeat(40)}`;
+		const { editor, assist, generate } = makeEditor(vi.fn(async () => suggestion));
+		const draft = `review ${"x".repeat(2100)}`;
+		editor.setText(draft);
+		assist.schedule();
+		await vi.advanceTimersByTimeAsync(700);
+		expect(generate).toHaveBeenCalledWith(draft, expect.any(AbortSignal));
+		editor.handleInput("\x1b[C");
+		expect(editor.getText()).toBe(draft + suggestion);
+	});
+
 	it("keeps collapsed paste expansion intact", () => {
 		const { editor } = makeEditor();
 		const text = "one\ntwo\nthree\nfour\nfive";
@@ -219,12 +270,104 @@ describe("prompt suggestions", () => {
 	});
 });
 
+describe("next-prompt display and early naming", () => {
+	it("shows the next prompt on an empty editor only after final settlement, without typing", async () => {
+		vi.useFakeTimers();
+		const h = harness({ name: "knowledge-graph-ceiba" });
+		const editor = h.factory()(tui, theme, keys);
+		editor.focused = true;
+		h.ctx.isIdle = () => false;
+		h.emit("agent_end");
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(h.stream).not.toHaveBeenCalled();
+		h.ctx.isIdle = () => true;
+		h.emit("agent_settled");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(h.stream).toHaveBeenCalledOnce();
+		expect(JSON.parse((h.stream.mock.calls[0][1] as any).messages[0].content).draft).toBe("");
+		expect((h.stream.mock.calls[0][1] as any).systemPrompt).toContain("2-12 words");
+		h.response.resolve(answer("oke susun spec N5"));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(editor.render(100)[0]).toContain("knowledge-graph-ceiba");
+		expect(stripTerminalSequences(editor.render(100).join("\n"))).toContain("oke susun spec N5");
+		expect(editor.getText()).toBe("");
+		const submit = vi.fn();
+		editor.onSubmit = submit;
+		editor.handleInput("\t");
+		expect(editor.getText()).toBe("oke susun spec N5");
+		expect(submit).not.toHaveBeenCalled();
+		h.emit("session_shutdown");
+	});
+
+	it("starts naming from the first prompt before the main response is complete", async () => {
+		const h = harness();
+		h.emit("before_agent_start", { messageType: "user", prompt: "Build a login form" });
+		h.emit("agent_start");
+		expect(h.stream).toHaveBeenCalledOnce();
+		expect((h.stream.mock.calls[0][1] as any).messages[0].content).toBe("Build a login form");
+		h.response.resolve(answer("Build Login Form"));
+		await vi.waitFor(() => expect(h.pi.getSessionName()).toBe("Build Login Form"));
+		h.emit("before_agent_start", { messageType: "user", prompt: "Add tests too" });
+		expect(h.stream).toHaveBeenCalledOnce();
+	});
+
+	it("requests a 2-5 word topic title without cutting identifying names at 80 characters", async () => {
+		const h = harness();
+		h.emit("before_agent_start");
+		expect((h.stream.mock.calls[0][1] as any).systemPrompt).toContain("2-5 words");
+		const title = `${"Component".repeat(12)} regression`;
+		h.response.resolve(answer(title));
+		await vi.waitFor(() => expect(h.pi.getSessionName()).toBe(title));
+	});
+
+	it("does not name a session from custom messages or empty input", () => {
+		const h = harness();
+		h.emit("before_agent_start", { messageType: "custom" });
+		h.emit("before_agent_start", { messageType: "user", prompt: "   " });
+		expect(h.stream).not.toHaveBeenCalled();
+	});
+
+	it("requests a next-prompt suggestion on resume or reload with an existing conversation", async () => {
+		vi.useFakeTimers();
+		const h = harness({ name: "Existing session" });
+		h.factory()(tui, theme, keys);
+		h.emit("session_start");
+		await vi.advanceTimersByTimeAsync(0);
+		expect(h.stream).toHaveBeenCalledOnce();
+		h.emit("session_shutdown");
+		h.response.resolve(answer("Run the tests"));
+	});
+
+	it("shows the current name on the border, fits narrow widths, and preserves working status", () => {
+		const editor = new ClaudePasteEditor(tui as never, theme as never, keys as never);
+		let name = "knowledge-graph-ceiba-修正";
+		let idle = true;
+		const assist = attachSuggestions(
+			editor,
+			async () => "",
+			() => idle,
+			tui.requestRender,
+			(text) => text,
+			() => name,
+		);
+		expect(editor.render(80)[0]).toContain(name);
+		for (const width of [1, 5, 12, 20, 80]) {
+			expect(editor.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
+		}
+		name = "My manual title";
+		assist.refresh();
+		expect(editor.render(80)[0]).toContain(name);
+		idle = false;
+		expect(editor.render(80)[0]).not.toContain(name);
+	});
+});
+
 describe("prompt assist model selection", () => {
 	it("selects any available Pi model, saves it, and uses it for naming without MiMo-specific parameters", async () => {
 		const h = harness();
 		await h.command("custom/vendor/fast-model");
 		expect(saveAssistModel).toHaveBeenCalledWith(expect.any(String), "custom/vendor/fast-model");
-		h.emit("agent_end");
+		h.emit("before_agent_start");
 		expect(h.ctx.modelRegistry.find).toHaveBeenCalledWith("custom", "vendor/fast-model");
 		expect(h.stream.mock.calls[0][2]).not.toHaveProperty("samplingParams");
 		h.response.resolve(answer("Custom model title"));
@@ -247,7 +390,7 @@ describe("prompt assist model selection", () => {
 	it("restores the saved model on session start and can reset to MiMo", async () => {
 		vi.mocked(loadAssistModel).mockReturnValue("custom/vendor/fast-model");
 		const h = harness();
-		h.emit("agent_end");
+		h.emit("before_agent_start");
 		expect(h.ctx.modelRegistry.find).toHaveBeenCalledWith("custom", "vendor/fast-model");
 		await h.command("default");
 		expect(saveAssistModel).toHaveBeenCalledWith(expect.any(String), DEFAULT_MODEL);
@@ -283,7 +426,7 @@ describe("prompt assist model selection", () => {
 		});
 		await h.command("custom/vendor/fast-model");
 		expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("could not save"), "warning");
-		h.emit("agent_end");
+		h.emit("before_agent_start");
 		expect(h.ctx.modelRegistry.find).toHaveBeenCalledWith("custom", "vendor/fast-model");
 		h.emit("session_shutdown");
 		h.response.resolve(answer("Ignored"));
@@ -293,7 +436,7 @@ describe("prompt assist model selection", () => {
 describe("session assistance", () => {
 	it("names once in the background, uses MiMo with session affinity, and allows subsequent manual rename", async () => {
 		const h = harness();
-		expect(h.emit("agent_end")).toBeUndefined();
+		expect(h.emit("before_agent_start")).toBeUndefined();
 		expect(h.ctx.modelRegistry.find).toHaveBeenCalledWith("opencode-go", "mimo-v2.6-flash");
 		expect(h.stream.mock.calls[0][2]).toMatchObject({
 			sessionId: "session-1",
@@ -304,14 +447,14 @@ describe("session assistance", () => {
 		h.response.resolve(answer("Fix Login Validation"));
 		await vi.waitFor(() => expect(h.pi.setSessionName).toHaveBeenCalledWith("Fix Login Validation"));
 		h.pi.setSessionName("My custom title");
-		h.emit("agent_end");
+		h.emit("before_agent_start");
 		expect(h.pi.getSessionName()).toBe("My custom title");
 		expect(h.stream).toHaveBeenCalledTimes(1);
 	});
 
 	it("never overwrites a manual rename during generation", async () => {
 		const h = harness();
-		h.emit("agent_end");
+		h.emit("before_agent_start");
 		h.pi.setSessionName("Manual title");
 		h.response.resolve(answer("Automatic title"));
 		await new Promise((done) => setTimeout(done, 0));
@@ -322,7 +465,7 @@ describe("session assistance", () => {
 	it("skips named sessions and previously cleared names", () => {
 		for (const options of [{ name: "Existing" }, { entries: [{ type: "session_info", name: "" }] }]) {
 			const h = harness(options);
-			h.emit("agent_end");
+			h.emit("before_agent_start");
 			expect(h.stream).not.toHaveBeenCalled();
 		}
 	});
@@ -330,7 +473,7 @@ describe("session assistance", () => {
 	it("discards naming after switching sessions or shutting down", async () => {
 		for (const event of ["session_start", "session_shutdown"]) {
 			const h = harness();
-			h.emit("agent_end");
+			h.emit("before_agent_start");
 			h.emit(event);
 			h.response.resolve(answer("Old session title"));
 			await new Promise((done) => setTimeout(done, 0));
@@ -389,8 +532,8 @@ describe("session assistance", () => {
 	it("fails softly without model access and warns only once", () => {
 		const h = harness();
 		h.ctx.modelRegistry.find.mockReturnValue(undefined);
-		h.emit("agent_end");
-		h.emit("agent_end");
+		h.emit("before_agent_start");
+		h.emit("before_agent_start");
 		expect(h.stream).not.toHaveBeenCalled();
 		expect(h.ctx.ui.notify).toHaveBeenCalledOnce();
 	});

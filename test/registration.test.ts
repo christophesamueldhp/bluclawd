@@ -30,7 +30,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	help: { commands: ["help", "context", "status"], tools: [], shortcuts: 0, events: 0 },
 	vibes: { commands: [], tools: [], shortcuts: 0, events: 2 },
 	paste: { commands: [], tools: [], shortcuts: 0, events: 2 },
-	"prompt-assist": { commands: ["prompt-assist"], tools: [], shortcuts: 0, events: 5 },
+	"prompt-assist": { commands: ["prompt-assist"], tools: [], shortcuts: 0, events: 6 },
 };
 
 describe("bluclawd extension registration", () => {

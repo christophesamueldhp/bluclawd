@@ -13,6 +13,7 @@ export function attachSuggestions(
 	isIdle: () => boolean,
 	render: () => void,
 	dim: (text: string) => string,
+	getSessionName: () => string | undefined = () => undefined,
 ) {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let request: AbortController | undefined;
@@ -36,11 +37,11 @@ export function attachSuggestions(
 		suggestion = "";
 		render();
 	};
-	const schedule = () => {
+	const schedule = (delay = 700) => {
 		clear();
 		if (!canSuggest()) return;
 		const text = editor.getText();
-		if (text.length > 2000 || /\[(?:Pasted text|Image) #/.test(text)) return;
+		if (/\[(?:Pasted text|Image) #/.test(text)) return;
 		const version = revision;
 		timer = setTimeout(async () => {
 			if (!eligible()) return;
@@ -50,17 +51,17 @@ export function attachSuggestions(
 				const value = await generate(text, controller.signal);
 				if (controller.signal.aborted || version !== revision || text !== editor.getText() || !eligible()) return;
 				draft = text;
-				suggestion = value.replace(/[\x00-\x1f\x7f-\x9f]/g, "").slice(0, 240);
+				suggestion = value.replace(/[\x00-\x1f\x7f-\x9f]/g, "");
 				render();
 			} catch {
 				// Suggestions are optional and must never interrupt editing.
 			}
-		}, 700);
+		}, delay);
 	};
 
 	const baseInput = editor.handleInput.bind(editor);
 	editor.handleInput = (data) => {
-		if (visible() && matchesKey(data, "tab")) {
+		if (visible() && (matchesKey(data, "right") || matchesKey(data, "tab"))) {
 			const suffix = suggestion;
 			clear();
 			editor.insertTextAtCursor(suffix);
@@ -89,17 +90,25 @@ export function attachSuggestions(
 	const baseRender = editor.render.bind(editor);
 	editor.render = (width) => {
 		const lines = baseRender(width);
+		const name = getSessionName();
+		if (name && isIdle() && width >= 12) {
+			const title = stripTerminalSequences(name).replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+			const label = ` ${truncateToWidth(title, Math.min(60, width - 8), "…")} ─`;
+			lines[0] = truncateToWidth(lines[0], width - visibleWidth(label), "") + dim(label);
+		}
 		if (!editor.focused || !visible()) return lines;
 		const row = lines.findIndex((line) => line.includes(CURSOR_MARKER));
 		if (row < 0) return lines;
-		const before = lines[row].split(CURSOR_MARKER)[0];
+		const cursorIndex = lines[row].indexOf(CURSOR_MARKER);
+		const before = lines[row].slice(0, cursorIndex);
 		const remaining = Math.max(0, width - visibleWidth(before) - editor.getPaddingX());
 		const ghost = stripTerminalSequences(truncateToWidth(suggestion, remaining, ""));
 		if (!ghost) return lines;
 		const first = [...new Intl.Segmenter().segment(ghost)][0].segment;
-		lines[row] = before + CURSOR_MARKER + dim(`\x1b[7m${first}\x1b[27m${ghost.slice(first.length)}`);
+		const cursorCell = lines[row].slice(cursorIndex + CURSOR_MARKER.length).trimEnd();
+		lines[row] = before + CURSOR_MARKER + cursorCell.replace(" ", dim(first)) + dim(ghost.slice(first.length));
 		lines[row] += " ".repeat(Math.max(0, width - visibleWidth(lines[row])));
 		return lines;
 	};
-	return { clear, schedule };
+	return { clear, schedule, refresh: render };
 }
