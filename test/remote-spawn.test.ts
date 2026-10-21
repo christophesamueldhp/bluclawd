@@ -37,6 +37,12 @@ describe("starting a pane from the phone", () => {
 		expect(runs(calls[0], 4)).toEqual([...launch.command, "--session", "/s/a.jsonl", "--", "next"]);
 	});
 
+	it("opens a saved conversation without submitting an empty prompt", () => {
+		const { tmux, calls } = fakeTmux();
+		startSession({ cwd: "/p", task: "", sessionFile: "/s/a.jsonl", launch, tmux });
+		expect(runs(calls[0], 2)).toEqual([...launch.command, "--session", "/s/a.jsonl"]);
+	});
+
 	it("keeps a task or reply starting with @ from being read as a file", () => {
 		const { tmux, calls } = fakeTmux();
 		startSession({ cwd: "/p", task: "@src/app.ts explain", launch, tmux });

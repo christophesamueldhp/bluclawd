@@ -32,7 +32,7 @@ export function startSession({ tmux = new Tmux(), ...spec }: SessionSpec & { tmu
 	// it is missing; it does not trim, so a leading space keeps it a message.
 	const task = spec.task.startsWith("@") ? ` ${spec.task}` : spec.task;
 	const args = spec.sessionFile
-		? ["--session", spec.sessionFile, "--", task]
+		? ["--session", spec.sessionFile, ...(task ? ["--", task] : [])]
 		: [...(spec.model ? ["--model", spec.model] : []), "--", task];
 	return tmux.newSession({ cwd: spec.cwd, command: spec.launch.command, args });
 }

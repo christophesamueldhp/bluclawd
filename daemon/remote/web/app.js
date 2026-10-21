@@ -39,7 +39,7 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.37";
+const VERSION = "0.0.38";
 const BANDS = [
 	["pinned", "Pinned"],
 	["needs", "Needs input"],
@@ -1279,7 +1279,7 @@ function completeDirectory() {
 	}, 150);
 }
 
-/** The new session's model, pi's default unless one the running panes offer is picked; none offered, no picker. */
+/** The new session's model, pi's default unless one the running panes offer is picked. */
 function updateModels() {
 	const button = $("#new-model");
 	const model = state.models.find((m) => `${m.provider}/${m.id}` === state.newModel);
@@ -1288,26 +1288,45 @@ function updateModels() {
 		button.innerHTML = html;
 		button.dataset.html = html;
 	}
-	button.hidden = state.models.length === 0;
+	button.hidden = false;
 }
 
-function pickResume() {
+async function pickResume() {
 	/** @type {HTMLElement | null} */ (document.activeElement)?.blur();
-	const sessions = state.sessions.filter((s) => !s.alive);
-	if (!sessions.length) {
-		showError("No past sessions to resume.");
-		return;
+	const cwd = $("#cwd").value.trim();
+	openPicker({ title: "Looking for past sessions…", groups: [], value: "" }, () => {});
+	try {
+		const sessions = await api.pastSessions(cwd);
+		openPicker(
+			{
+				title: sessions.length ? "Resume a past session" : "No past sessions in this directory",
+				groups: [{ options: sessions.map((s) => ({ value: s.sessionFile, label: s.label })) }],
+				value: "",
+			},
+			(file) => {
+				const session = sessions.find((s) => s.sessionFile === file);
+				if (!session) return;
+				if (session.id) location.hash = `#s/${encodeURIComponent(session.id)}`;
+				else void resumePast(session.cwd, file);
+			},
+		);
+	} catch (error) {
+		closePicker();
+		handleError(error);
 	}
-	openPicker(
-		{
-			title: "Resume a past session",
-			groups: [{ options: sessions.map((s) => ({ value: s.id, label: `${s.label} · ${shortPath(s.cwd)}` })) }],
-			value: "",
-		},
-		(id) => {
-			location.hash = `#s/${encodeURIComponent(id)}`;
-		},
-	);
+}
+
+/** @param {string} cwd @param {string} sessionFile */
+async function resumePast(cwd, sessionFile) {
+	state.starting = {};
+	render();
+	try {
+		const { pane } = await api.resume(cwd, sessionFile);
+		waitForPane(pane);
+	} catch (error) {
+		state.starting = undefined;
+		handleError(error);
+	}
 }
 
 const NEW_COMMANDS = [
@@ -1620,6 +1639,7 @@ function grow(text) {
 
 function bindList() {
 	const task = $("#task");
+	task.addEventListener("focus", () => $("#new-task").classList.add("expanded"));
 	task.addEventListener("input", () => {
 		grow(task);
 		updateNewCommands();

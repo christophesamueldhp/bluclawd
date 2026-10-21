@@ -18,6 +18,7 @@ import {
 	type PaneReport,
 	phoneMayRun,
 } from "../ipc/protocol.ts";
+import { labelFromTask } from "../rows.ts";
 import { RemoteEvents } from "./events.ts";
 import { type ClaimResult, type RemoteStore, SECRET_PATTERN } from "./pairing.ts";
 import type { StatuslineSession, StatusSpan } from "./pistatusline.ts";
@@ -366,6 +367,37 @@ async function handle(
 	// body is read, so a photo is not read only to be refused.
 	if (path.startsWith("/api/sessions") && req.method !== "GET" && !deps.terminalOpen()) {
 		return json(res, 409, { error: "pi_not_open" });
+	}
+	if (path === "/api/sessions/past" && req.method === "GET") {
+		const cwd = expandHome(url.searchParams.get("cwd") ?? "");
+		if (!isDirectory(cwd)) return json(res, 400, { error: "invalid_cwd" });
+		const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+		const instances = deps.listInstances();
+		const sessions = (await SessionManager.list(cwd))
+			.filter((s) => s.messageCount > 0 && !instances.some((i) => i.external && i.sessionFile === s.path))
+			.sort((a, b) => b.modified.getTime() - a.modified.getTime())
+			.slice(0, 50)
+			.map((s) => ({
+				id: instances.find((i) => i.sessionFile === s.path)?.id,
+				sessionFile: s.path,
+				cwd: s.cwd || cwd,
+				label: s.name || labelFromTask(s.firstMessage),
+			}));
+		return json(res, 200, { sessions });
+	}
+	if (path === "/api/sessions/resume" && req.method === "POST") {
+		const body = await readJson(req);
+		const cwd = typeof body.cwd === "string" ? expandHome(body.cwd) : "";
+		if (!isDirectory(cwd)) return json(res, 400, { error: "invalid_cwd" });
+		const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+		const saved = (await SessionManager.list(cwd)).find((s) => s.path === body.sessionFile && s.messageCount > 0);
+		if (!saved) return json(res, 404, { error: "unknown_session" });
+		if (deps.listInstances().some((i) => i.external && i.sessionFile === saved.path))
+			return json(res, 409, { error: "session_running" });
+		const launch = launchOf(deps);
+		if (!launch) return json(res, 503, { error: "no_launch" });
+		const pane = start(deps, { cwd: saved.cwd || cwd, sessionFile: saved.path, task: "", launch });
+		return json(res, 201, { pane });
 	}
 	if (path === "/api/sessions" && req.method === "GET") {
 		return json(res, 200, { sessions: remoteSessions(deps.listInstances()), terminalOpen: deps.terminalOpen() });

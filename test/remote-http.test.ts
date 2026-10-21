@@ -2,7 +2,8 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "n
 import { request } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { type SessionInfo, SessionManager } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { InstanceSummary, PaneLaunch, PaneMessage, PaneReport } from "../daemon/ipc/protocol.ts";
 import {
 	BODY_MAX,
@@ -17,6 +18,8 @@ import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { SessionSpec } from "../daemon/remote/spawn.ts";
 import type { StatusLine } from "../daemon/remote/statusline.ts";
 import { validP256dh } from "./support/push.ts";
+
+vi.mock("@earendil-works/pi-coding-agent", () => ({ SessionManager: { list: vi.fn() } }));
 
 const entry = (id: string, parentId: string | null, content: string) =>
 	`${JSON.stringify({ type: "message", id, parentId, message: { role: "user", content } })}\n`;
@@ -39,6 +42,7 @@ describe("remote HTTP API", () => {
 	let changed: unknown[][];
 
 	beforeEach(async () => {
+		vi.mocked(SessionManager.list).mockReset().mockResolvedValue([]);
 		dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-http-"));
 		const web = join(dir, "web");
 		mkdirSync(web);
@@ -130,6 +134,62 @@ describe("remote HTTP API", () => {
 	const auth = (token: string) => ({ authorization: `Bearer ${token}` });
 	const json = { "content-type": "application/json" };
 	const authJson = (token: string) => ({ ...auth(token), ...json });
+
+	function saved(path: string, modified = 1): SessionInfo {
+		return {
+			path,
+			id: path,
+			cwd: dir,
+			created: new Date(0),
+			modified: new Date(modified),
+			messageCount: 1,
+			firstMessage: "Past conversation",
+			allMessagesText: "",
+		};
+	}
+
+	it("lists saved conversations newest first, including sessions absent from the rows", async () => {
+		const token = await pair();
+		vi.mocked(SessionManager.list).mockResolvedValue([
+			saved(join(dir, "stored.jsonl")),
+			{ ...saved(join(dir, "past.jsonl"), 2), name: "Saved task" },
+			saved(join(dir, "live.jsonl")),
+			{ ...saved(join(dir, "empty.jsonl")), messageCount: 0 },
+		]);
+		const res = await fetch(`${base}/api/sessions/past?cwd=${encodeURIComponent(dir)}`, { headers: auth(token) });
+		expect(res.status).toBe(200);
+		expect((await res.json()).sessions).toEqual([
+			{ sessionFile: join(dir, "past.jsonl"), cwd: dir, label: "Saved task" },
+			{ id: "stored", sessionFile: join(dir, "stored.jsonl"), cwd: dir, label: "Past conversation" },
+		]);
+		expect(SessionManager.list).toHaveBeenCalledWith(dir);
+	});
+
+	it("returns an explicit empty history", async () => {
+		const token = await pair();
+		const res = await fetch(`${base}/api/sessions/past?cwd=${encodeURIComponent(dir)}`, { headers: auth(token) });
+		expect(await res.json()).toEqual({ sessions: [] });
+	});
+
+	it("resumes only a saved conversation from the requested directory without sending a prompt", async () => {
+		const token = await pair();
+		const sessionFile = join(dir, "past.jsonl");
+		vi.mocked(SessionManager.list).mockResolvedValue([saved(sessionFile)]);
+		const resume = (file: string) =>
+			fetch(`${base}/api/sessions/resume`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify({ cwd: dir, sessionFile: file }),
+			});
+		expect((await resume("/arbitrary/file.jsonl")).status).toBe(404);
+		expect((await resume(sessionFile)).status).toBe(201);
+		expect(started).toEqual([{ cwd: dir, sessionFile, task: "", launch }]);
+		instances.push({ id: "resumed", status: "online", external: true, cwd: dir, sessionFile });
+		expect((await resume(sessionFile)).status).toBe(409);
+		terminalOpen = false;
+		expect((await resume(sessionFile)).status).toBe(409);
+		expect(started).toHaveLength(1);
+	});
 
 	it("serves the PWA without a token, and nothing outside its directory", async () => {
 		expect((await fetch(`${base}/`)).headers.get("content-type")).toContain("text/html");

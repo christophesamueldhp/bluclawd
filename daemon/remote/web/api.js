@@ -83,6 +83,10 @@ export const api = {
 	/** Only ever this phone's own id: the Mac removes any other. @param {string} id */
 	removeDevice: (id) => call("DELETE", `/api/devices/${encodeURIComponent(id)}`),
 	sessions: () => call("GET", "/api/sessions"),
+	/** Saved conversations for the new task's directory. @param {string} cwd @returns {Promise<{ id?: string, sessionFile: string, cwd: string, label: string }[]>} */
+	pastSessions: async (cwd) => (await call("GET", `/api/sessions/past?cwd=${encodeURIComponent(cwd)}`)).sessions,
+	/** @param {string} cwd @param {string} sessionFile @returns {Promise<{ pane: string }>} */
+	resume: (cwd, sessionFile) => call("POST", "/api/sessions/resume", { cwd, sessionFile }),
 	/** @returns {Promise<string[]>} */
 	directories: async () => (await call("GET", "/api/directories")).directories,
 	/** The folders a typed path may go on to, as a shell's Tab offers them. @param {string} path @returns {Promise<string[]>} */
