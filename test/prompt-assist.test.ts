@@ -512,6 +512,7 @@ describe("prompt assist model selection", () => {
 		h.ctx.ui.select.mockResolvedValue("custom/vendor/fast-model");
 		await h.command();
 		expect(h.ctx.ui.select).toHaveBeenCalledWith(expect.stringContaining(DEFAULT_MODEL), [
+			"Turn off prompt assistance",
 			"custom/vendor/fast-model",
 			DEFAULT_MODEL,
 		]);
@@ -519,10 +520,42 @@ describe("prompt assist model selection", () => {
 		expect(h.completions("FAST")).toEqual([{ value: "custom/vendor/fast-model", label: "custom/vendor/fast-model" }]);
 	});
 
+	it.each([true, false])(
+		"offers the opposite toggle in the picker when enabled=%s, even without models",
+		async (enabled) => {
+			vi.mocked(loadAssistEnabled).mockReturnValue(enabled);
+			const h = harness();
+			h.ctx.modelRegistry.getAvailable.mockReturnValue([]);
+			const toggle = enabled ? "Turn off prompt assistance" : "Turn on prompt assistance";
+			h.ctx.ui.select.mockResolvedValue(toggle);
+			await h.command();
+			expect(h.ctx.ui.select).toHaveBeenCalledWith(
+				expect.stringContaining(`Prompt assist ${enabled ? "on" : "off"}`),
+				[toggle],
+			);
+			expect(saveAssistEnabled).toHaveBeenCalledWith(expect.any(String), !enabled);
+			expect(saveAssistModel).not.toHaveBeenCalled();
+			h.emit("before_agent_start");
+			expect(h.stream).toHaveBeenCalledTimes(enabled ? 0 : 1);
+			h.emit("session_shutdown");
+		},
+	);
+
+	it("reports state without opening the picker when no UI is available", async () => {
+		const h = harness();
+		h.ctx.hasUI = false;
+		await h.command();
+		expect(h.ctx.ui.select).not.toHaveBeenCalled();
+		expect(h.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Prompt assist on"), "info");
+		expect(saveAssistEnabled).not.toHaveBeenCalled();
+		expect(saveAssistModel).not.toHaveBeenCalled();
+	});
+
 	it("does not change the preference when the picker is cancelled or the model is unavailable", async () => {
 		const h = harness();
 		await h.command();
 		await h.command("unknown/model");
+		expect(saveAssistEnabled).not.toHaveBeenCalled();
 		expect(saveAssistModel).not.toHaveBeenCalled();
 		expect(h.ctx.ui.notify).toHaveBeenLastCalledWith(expect.stringContaining("not available"), "error");
 	});

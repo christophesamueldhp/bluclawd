@@ -50,6 +50,26 @@ export default function promptAssist(pi: ExtensionAPI) {
 		},
 		handler: async (args, ctx) => {
 			let choice = args.trim();
+			if (!choice) {
+				if (!ctx.hasUI) {
+					ctx.ui.notify(
+						`Prompt assist ${enabled ? "on" : "off"}: ${selectedModel}. Use /prompt-assist on/off, or provider/model with an authenticated Pi model.`,
+						"info",
+					);
+					return;
+				}
+				const toggle = enabled ? "Turn off prompt assistance" : "Turn on prompt assistance";
+				const models = ctx.modelRegistry
+					.getAvailable()
+					.map((model) => `${model.provider}/${model.id}`)
+					.sort();
+				choice = await ctx.ui.select(`Prompt assist ${enabled ? "on" : "off"} (current: ${selectedModel})`, [
+					toggle,
+					...models,
+				]);
+				if (!choice) return;
+				if (choice === toggle) choice = enabled ? "off" : "on";
+			}
 			if (choice === "on" || choice === "off") {
 				enabled = choice === "on";
 				generation++;
@@ -71,17 +91,6 @@ export default function promptAssist(pi: ExtensionAPI) {
 				.getAvailable()
 				.map((model) => `${model.provider}/${model.id}`)
 				.sort();
-			if (!choice) {
-				if (!ctx.hasUI || models.length === 0) {
-					ctx.ui.notify(
-						`Prompt assist ${enabled ? "on" : "off"}: ${selectedModel}. Use /prompt-assist on/off, or provider/model with an authenticated Pi model.`,
-						"info",
-					);
-					return;
-				}
-				choice = await ctx.ui.select(`Prompt assist ${enabled ? "on" : "off"} (current: ${selectedModel})`, models);
-				if (!choice) return;
-			}
 			if (choice === "default") choice = DEFAULT_MODEL;
 			if (!models.includes(choice)) {
 				ctx.ui.notify(
