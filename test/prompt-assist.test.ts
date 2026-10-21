@@ -574,10 +574,13 @@ describe("prompt assist model selection", () => {
 
 	it("opens a picker and supports argument completion", async () => {
 		const h = harness();
-		h.ctx.ui.select.mockResolvedValue("custom/vendor/fast-model");
+		h.ctx.ui.select.mockResolvedValueOnce("Choose model").mockResolvedValueOnce("custom/vendor/fast-model");
 		await h.command();
-		expect(h.ctx.ui.select).toHaveBeenCalledWith(expect.stringContaining(DEFAULT_MODEL), [
+		expect(h.ctx.ui.select).toHaveBeenNthCalledWith(1, expect.stringContaining(DEFAULT_MODEL), [
 			"Turn off prompt assistance",
+			"Choose model",
+		]);
+		expect(h.ctx.ui.select).toHaveBeenNthCalledWith(2, expect.stringContaining(DEFAULT_MODEL), [
 			"custom/vendor/fast-model",
 			DEFAULT_MODEL,
 		]);
@@ -596,8 +599,10 @@ describe("prompt assist model selection", () => {
 			await h.command();
 			expect(h.ctx.ui.select).toHaveBeenCalledWith(
 				expect.stringContaining(`Prompt assist ${enabled ? "on" : "off"}`),
-				[toggle],
+				[toggle, "Choose model"],
 			);
+			expect(h.ctx.ui.select).toHaveBeenCalledTimes(1);
+			expect(h.ctx.modelRegistry.getAvailable).not.toHaveBeenCalled();
 			expect(saveAssistEnabled).toHaveBeenCalledWith(expect.any(String), !enabled);
 			expect(saveAssistModel).not.toHaveBeenCalled();
 			h.emit("before_agent_start");
@@ -605,6 +610,15 @@ describe("prompt assist model selection", () => {
 			h.emit("session_shutdown");
 		},
 	);
+
+	it("does not change preferences when the model submenu is cancelled", async () => {
+		const h = harness();
+		h.ctx.ui.select.mockResolvedValueOnce("Choose model").mockResolvedValueOnce(undefined);
+		await h.command();
+		expect(h.ctx.ui.select).toHaveBeenCalledTimes(2);
+		expect(saveAssistEnabled).not.toHaveBeenCalled();
+		expect(saveAssistModel).not.toHaveBeenCalled();
+	});
 
 	it("reports state without opening the picker when no UI is available", async () => {
 		const h = harness();

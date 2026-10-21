@@ -59,16 +59,20 @@ export default function promptAssist(pi: ExtensionAPI) {
 					return;
 				}
 				const toggle = enabled ? "Turn off prompt assistance" : "Turn on prompt assistance";
-				const models = ctx.modelRegistry
-					.getAvailable()
-					.map((model) => `${model.provider}/${model.id}`)
-					.sort();
 				choice = await ctx.ui.select(`Prompt assist ${enabled ? "on" : "off"} (current: ${selectedModel})`, [
 					toggle,
-					...models,
+					"Choose model",
 				]);
 				if (!choice) return;
 				if (choice === toggle) choice = enabled ? "off" : "on";
+				else if (choice === "Choose model") {
+					const models = ctx.modelRegistry
+						.getAvailable()
+						.map((model) => `${model.provider}/${model.id}`)
+						.sort();
+					choice = await ctx.ui.select(`Choose prompt assist model (current: ${selectedModel})`, models);
+					if (!choice) return;
+				}
 			}
 			if (choice === "on" || choice === "off") {
 				enabled = choice === "on";
