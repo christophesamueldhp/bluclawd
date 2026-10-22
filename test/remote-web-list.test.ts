@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { ageAt, STATE_WORDS, statusGlyph, successor } from "../daemon/remote/web/list.js";
 import { STATE_WORDS as TERMINAL_STATE_WORDS } from "../daemon/rows.ts";
@@ -19,6 +20,21 @@ const finishedAt = "2026-10-15T11:00:00.000Z";
 describe("session status on the phone", () => {
 	it("uses the same state names as terminal agent view", () => {
 		expect(STATE_WORDS).toEqual(TERMINAL_STATE_WORDS);
+	});
+
+	it("matches terminal agent view's spinner frames and timing", () => {
+		const terminal = readFileSync(new URL("../ext/agent-view/agent-view.ts", import.meta.url), "utf8");
+		const css = readFileSync(new URL("../daemon/remote/web/style.css", import.meta.url), "utf8");
+		const frames = JSON.parse(terminal.match(/const FRAMES = (\[[^;]+\]);/)![1]) as string[];
+		const animation = css.match(/@keyframes session-spin \{([\s\S]*?)\n\}/)![1];
+		const steps = [...animation.matchAll(/([\d.]+)% \{ content: "([^"]+)"; \}/g)];
+		expect(steps.map((step) => step[2])).toEqual([...frames, ...[...frames].reverse()]);
+		steps.forEach((step, i) => {
+			expect(Number(step[1])).toBeCloseTo((i * 100) / steps.length, 5);
+		});
+		expect(terminal).toContain("}, 120);");
+		expect(css).toContain("animation: session-spin 1.44s steps(1, end) infinite");
+		expect(css).toContain('.session-spinner::before { content: "✻"; animation: none; }');
 	});
 
 	it("animates only live working sessions and keeps the terminal glyphs for other states", () => {

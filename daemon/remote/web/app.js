@@ -808,7 +808,7 @@ function listShell() {
 
 /** @param {Session} s */
 function rowHtml(s) {
-	const glyph = s.alive && s.state === "working" ? ICONS.working : statusGlyph(s);
+	const glyph = s.alive && s.state === "working" ? '<span class="session-spinner"></span>' : statusGlyph(s);
 	const status = STATE_WORDS[/** @type {keyof typeof STATE_WORDS} */ (s.state)] ?? s.state;
 	// The project's folder, which the search matches too.
 	const where = s.cwd.split("/").filter(Boolean).at(-1);

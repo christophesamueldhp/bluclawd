@@ -9,7 +9,6 @@ const svg = (paths, fill = "none") =>
 	`<svg class="icon" viewBox="0 0 24 24" fill="${fill}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
 
 export const ICONS = {
-	working: svg(`<path d="M12 3v18M4.2 7.5l15.6 9M4.2 16.5l15.6-9"/>`),
 	back: svg(`<path d="M15 18l-6-6 6-6"/>`),
 	bell: svg(`<path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>`),
 	close: svg(`<path d="M18 6L6 18M6 6l12 12"/>`),
