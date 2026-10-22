@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ageAt, STATE_WORDS, statusGlyph, successor } from "../daemon/remote/web/list.js";
+import { ageAt, STATE_WORDS, sessionGroups, statusGlyph, successor, viewMode } from "../daemon/remote/web/list.js";
 import { STATE_WORDS as TERMINAL_STATE_WORDS } from "../daemon/rows.ts";
 
 const row = (id: string, state: string, more: Record<string, unknown> = {}) => ({
@@ -17,6 +17,45 @@ const row = (id: string, state: string, more: Record<string, unknown> = {}) => (
 const createdAt = "2026-10-15T10:00:00.000Z";
 const finishedAt = "2026-10-15T11:00:00.000Z";
 
+describe("session grouping on the phone", () => {
+	const sessions = [
+		row("working", "working", { cwd: "/z/project" }),
+		row("pinned", "needs", { cwd: "/z/project", band: "pinned" }),
+		row("done", "done", { cwd: "/a/project" }),
+		row("needs", "needs", { cwd: "/z/project" }),
+	];
+
+	it("defaults to status unless the saved preference is directory", () => {
+		for (const value of [null, "", "state", "invalid"]) expect(viewMode(value)).toBe("state");
+		expect(viewMode("directory")).toBe("directory");
+	});
+
+	it("keeps the existing status bands and their row order", () => {
+		expect(sessionGroups(sessions, "state")).toEqual([
+			{ title: "Pinned", rows: [sessions[1]] },
+			{ title: "Needs input", rows: [sessions[3]] },
+			{ title: "Working", rows: [sessions[0]] },
+			{ title: "Idle", rows: [sessions[2]] },
+		]);
+	});
+
+	it("groups by full path alphabetically, keeping pinned sessions separate", () => {
+		expect(sessionGroups(sessions, "directory")).toEqual([
+			{ title: "Pinned", rows: [sessions[1]] },
+			{ title: "/a/project", rows: [sessions[2]] },
+			{ title: "/z/project", rows: [sessions[0], sessions[3]] },
+		]);
+	});
+
+	it("omits empty groups and groups only the sessions provided by search", () => {
+		for (const mode of ["state", "directory"] as const) {
+			expect(sessionGroups([], mode)).toEqual([]);
+			expect(sessionGroups([sessions[1]!], mode)).toEqual([{ title: "Pinned", rows: [sessions[1]] }]);
+		}
+		expect(sessionGroups([sessions[3]!], "directory")).toEqual([{ title: "/z/project", rows: [sessions[3]] }]);
+	});
+});
+
 describe("session status on the phone", () => {
 	it("uses the same state names as terminal agent view", () => {
 		expect(STATE_WORDS).toEqual(TERMINAL_STATE_WORDS);
@@ -28,7 +67,9 @@ describe("session status on the phone", () => {
 		const frames = JSON.parse(terminal.match(/const FRAMES = (\[[^;]+\]);/)![1]) as string[];
 		const animation = css.match(/@keyframes session-spin \{([\s\S]*?)\n\}/)![1];
 		const steps = [...animation.matchAll(/([\d.]+)% \{ content: "([^"]+)"; \}/g)];
-		expect(steps.map((step) => step[2])).toEqual([...frames, ...[...frames].reverse()]);
+		expect(steps.map((step) => step[2]?.replaceAll("\uFE0E", ""))).toEqual([...frames, ...[...frames].reverse()]);
+		// iOS otherwise renders this frame as a white asterisk in a green emoji box.
+		expect(steps.filter((step) => step[2]?.startsWith("✳")).map((step) => step[2])).toEqual(["✳\uFE0E", "✳\uFE0E"]);
 		steps.forEach((step, i) => {
 			expect(Number(step[1])).toBeCloseTo((i * 100) / steps.length, 5);
 		});

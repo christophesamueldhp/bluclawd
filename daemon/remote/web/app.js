@@ -9,7 +9,7 @@ import { api, clearToken, getToken, pairLink, setToken, Unauthorized } from "./a
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
-import { ageAt, STATE_WORDS, statusGlyph, successor } from "./list.js";
+import { ageAt, STATE_WORDS, sessionGroups, statusGlyph, successor, viewMode } from "./list.js";
 import { giveUp, promptKey, refused, sentText, settle, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 import { loaderHtml } from "./mascot.js";
@@ -39,13 +39,16 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.40";
-const BANDS = [
-	["pinned", "Pinned"],
-	["needs", "Needs input"],
-	["working", "Working"],
-	["idle", "Idle"],
-];
+const VERSION = "0.0.42";
+const VIEW_MODE_KEY = "bluclawd-view-mode";
+
+function loadViewMode() {
+	try {
+		return viewMode(localStorage.getItem(VIEW_MODE_KEY));
+	} catch {
+		return viewMode(null);
+	}
+}
 const OFFLINE_AFTER_MS = 5000;
 /** The server pings every 25 s; a stream silent for longer is dead even if the browser has not noticed. */
 const WATCHDOG_MS = 35_000;
@@ -138,6 +141,7 @@ const state = {
 	completions: [],
 	/** What the session list is searched for. */
 	query: "",
+	viewMode: loadViewMode(),
 	/**
 	 * A pane started from here, until its row is listed (`pane` is unset while the request is out).
 	 * @type {{ pane?: string } | undefined}
@@ -795,6 +799,7 @@ function listShell() {
 <div id="banner"></div><form class="search" id="search-form" role="search"><span class="field"><input type="search" id="search" placeholder="Search" aria-label="Search sessions" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search">
 <button type="button" class="clear" id="search-clear" aria-label="Clear search" hidden>×</button></span>
 <button type="button" class="cancel" id="search-cancel" hidden>Cancel</button></form>
+<label class="view-mode">Group by <select id="view-mode" aria-label="Group sessions by"><option value="state">Status</option><option value="directory">Path</option></select></label>
 <section class="scroll" id="rows"></section>
 <div class="backdrop" id="backdrop" hidden></div><section class="sheet" id="sheet" role="dialog" aria-label="This phone" hidden></section>
 <div class="commands" id="new-commands" role="listbox" aria-label="New task commands" hidden></div>
@@ -825,10 +830,9 @@ function rowsHtml() {
 	if (state.sessions.length === 0) return `<p class="empty">No sessions. Start one below.</p>`;
 	const found = filterSessions(state.sessions, state.query);
 	if (found.length === 0) return `<p class="empty">No sessions match “${esc(state.query.trim())}”.</p>`;
-	return BANDS.map(([key, title]) => {
-		const rows = found.filter((s) => s.band === key);
-		return rows.length ? `<h2 class="band">${title}</h2>${rows.map(rowHtml).join("")}` : "";
-	}).join("");
+	return sessionGroups(found, state.viewMode)
+		.map(({ title, rows }) => `<h2 class="band">${esc(title)}</h2>${rows.map(rowHtml).join("")}`)
+		.join("");
 }
 
 function chatShell() {
@@ -1639,6 +1643,17 @@ function grow(text) {
 }
 
 function bindList() {
+	const mode = $("#view-mode");
+	mode.value = state.viewMode;
+	mode.addEventListener("change", () => {
+		state.viewMode = viewMode(mode.value);
+		try {
+			localStorage.setItem(VIEW_MODE_KEY, state.viewMode);
+		} catch {
+			// The view still changes when browser storage is blocked.
+		}
+		updateList();
+	});
 	const task = $("#task");
 	task.addEventListener("focus", () => $("#new-task").classList.add("expanded"));
 	task.addEventListener("input", () => {

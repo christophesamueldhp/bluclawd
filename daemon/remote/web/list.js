@@ -21,6 +21,34 @@ export const STATE_WORDS = {
 	stopped: "Stopped",
 };
 
+/** @typedef {"state" | "directory"} ViewMode */
+
+/** @param {string | null} value @returns {ViewMode} */
+export function viewMode(value) {
+	return value === "directory" ? "directory" : "state";
+}
+
+/**
+ * Pinned sessions stay first in either view, as in terminal agent view.
+ * @param {Session[]} sessions @param {ViewMode} mode
+ * @returns {{ title: string, rows: Session[] }[]}
+ */
+export function sessionGroups(sessions, mode) {
+	const pinned = sessions.filter((s) => s.band === "pinned");
+	const rest = sessions.filter((s) => s.band !== "pinned");
+	const groups = pinned.length ? [{ title: "Pinned", rows: pinned }] : [];
+	if (mode === "state") {
+		for (const key of ["needs", "working", "idle"]) {
+			const rows = rest.filter((s) => s.band === key);
+			if (rows.length) groups.push({ title: STATE_WORDS[key], rows });
+		}
+	} else {
+		const paths = [...new Set(rest.map((s) => s.cwd))].sort((a, b) => a.localeCompare(b));
+		for (const path of paths) groups.push({ title: path, rows: rest.filter((s) => s.cwd === path) });
+	}
+	return groups;
+}
+
 /** The same live, working and disconnected glyphs as terminal agent view. @param {Session} session */
 export function statusGlyph(session) {
 	return !session.alive ? "∙" : session.state === "working" ? "" : "✻";
