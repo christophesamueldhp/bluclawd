@@ -237,9 +237,10 @@ button { -webkit-user-select: none; user-select: none; }
 .remove { position: absolute; top: 2px; right: 2px; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 50%; background: rgb(0 0 0 / .6); color: #fff; font-size: 14px; line-height: 1; }
 .pictures { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px; }
 .composer.new { flex-direction: column; align-items: stretch; }
-.composer.new textarea { flex: none; }
+.task-input { display: flex; gap: var(--s2); align-items: flex-end; }
+.task-input textarea { min-width: 0; }
 /* Keep task options together, including after a picker dismisses the keyboard. */
-.composer.new:not(.expanded, .starting) :is(.pick, .where, .dirs) { display: none; }
+.composer.new:not(.expanded) :is(.pick, .where, .dirs) { display: none; }
 .where { display: flex; gap: var(--s2); align-items: center; }
 .where input { flex: 1; min-width: 0; height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; }
 .empty { color: var(--muted); text-align: center; margin: 40px var(--s4); }

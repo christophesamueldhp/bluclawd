@@ -803,11 +803,12 @@ function listShell() {
 <section class="scroll" id="rows"></section>
 <div class="backdrop" id="backdrop" hidden></div><section class="sheet" id="sheet" role="dialog" aria-label="This phone" hidden></section>
 <div class="commands" id="new-commands" role="listbox" aria-label="New task commands" hidden></div>
-<form class="composer new" id="new-task"><textarea id="task" rows="1" placeholder="New task…" aria-label="New task" maxlength="32768"></textarea>
+<form class="composer new" id="new-task"><div class="task-input"><textarea id="task" rows="1" placeholder="New task…" aria-label="New task" maxlength="32768"></textarea>
+<button type="button" class="icon-btn" id="new-options" aria-label="Show task options" aria-expanded="false" aria-controls="new-resume new-model cwd-list new-where">${ICONS.updown}</button></div>
 <button type="button" class="pick" id="new-resume" aria-haspopup="dialog">Resume a past session${ICONS.updown}</button>
 <button type="button" class="pick" id="new-model" aria-label="Model" aria-haspopup="dialog" hidden></button>
 <div class="commands dirs" id="cwd-list" role="listbox" aria-label="Directories" hidden></div>
-<div class="where"><input id="cwd" placeholder="~/path/to/project" aria-label="Directory" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="done">
+<div class="where" id="new-where"><input id="cwd" placeholder="~/path/to/project" aria-label="Directory" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="done">
 <button class="start" id="start" aria-label="Start">${ICONS.send}</button></div></form>`;
 }
 
@@ -1360,7 +1361,10 @@ function runNewCommand(name) {
 	updateNewCommands();
 	if (name === "model") pickNewModel();
 	else if (name === "resume") pickResume();
-	else if (name === "cd") $("#cwd").focus();
+	else if (name === "cd") {
+		setNewOptions(true);
+		$("#cwd").focus();
+	}
 }
 
 function pickNewModel() {
@@ -1642,6 +1646,15 @@ function grow(text) {
 	text.style.height = `${Math.min(text.scrollHeight, 140)}px`;
 }
 
+/** @param {boolean} expanded */
+function setNewOptions(expanded) {
+	$("#new-task").classList.toggle("expanded", expanded);
+	const button = $("#new-options");
+	button.setAttribute("aria-expanded", String(expanded));
+	button.setAttribute("aria-label", expanded ? "Hide task options" : "Show task options");
+	if (!expanded) $("#cwd").blur();
+}
+
 function bindList() {
 	const mode = $("#view-mode");
 	mode.value = state.viewMode;
@@ -1655,7 +1668,9 @@ function bindList() {
 		updateList();
 	});
 	const task = $("#task");
-	task.addEventListener("focus", () => $("#new-task").classList.add("expanded"));
+	$("#new-options").addEventListener("click", () => {
+		setNewOptions(!$("#new-task").classList.contains("expanded"));
+	});
 	task.addEventListener("input", () => {
 		grow(task);
 		updateNewCommands();
