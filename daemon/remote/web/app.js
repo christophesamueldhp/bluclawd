@@ -39,7 +39,7 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.39";
+const VERSION = "0.0.40";
 const BANDS = [
 	["pinned", "Pinned"],
 	["needs", "Needs input"],
