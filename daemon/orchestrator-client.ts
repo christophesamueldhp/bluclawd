@@ -72,6 +72,14 @@ export interface PaneReport {
 	trust?: "always" | "ask" | "never";
 	context?: { tokens: number | null; contextWindow: number; percent: number | null };
 	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
+	backgroundSubagentUsage?: {
+		runCount: number;
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+		cost: number | null;
+	};
 	notice?: { text: string; at: number };
 	commands?: PaneCommand[];
 	tasks?: PaneTask[];
@@ -86,6 +94,8 @@ export interface PaneTask {
 	startedAt: number;
 	foreground?: boolean;
 	outputFile?: string;
+	status?: string;
+	model?: string;
 }
 
 /** Mirror of daemon/ipc/protocol.ts PaneCommand. */

@@ -10,6 +10,7 @@
       "./ext/sandbox/index.ts",
       "./ext/checkpoints/index.ts",
       "./ext/background-bash/index.ts",
+      "./ext/subagents/index.ts",
       "./ext/branding/index.ts",
       "./ext/agent-view/index.ts",
       "./ext/remote/index.ts",

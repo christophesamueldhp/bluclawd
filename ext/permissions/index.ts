@@ -17,11 +17,10 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
-import { monitorSource } from "../_shared/monitor-source.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { type ProjectTrust, trustBadge } from "../_shared/trust-badge.ts";
-import { deniedBy, displayRule, grepOutputWithoutDenied, searchQueries } from "./rules.ts";
+import { evaluateToolCallDeny, filterDeniedGrepToolResult } from "./policy.ts";
 
 export const TRUST_CYCLE: readonly ProjectTrust[] = ["always", "ask", "never"];
 /** On pi's event bus whenever `defaultProjectTrust` is set here, so remote control reports it. */
@@ -62,24 +61,6 @@ export async function setProjectTrust(
 	pi.events.emit(TRUST_CHANGED, trust);
 }
 
-/**
- * The tool name and input deny rules are matched against: `monitor` and `powershell` run a
- * shell like bash, or `monitor` opens a WebSocket judged as a fetch; MCP resources count as
- * their server's tools.
- */
-function governed(tool: string, input: Record<string, unknown>): { tool: string; input: Record<string, unknown> } {
-	if (tool === "monitor") {
-		const source = monitorSource(input);
-		return source.kind === "ws" ? { tool: "webfetch", input: { url: source.url } } : { tool: "bash", input };
-	}
-	if (tool === "powershell") return { tool: "bash", input };
-	if (tool === "mcp_read_resource" || tool === "mcp_list_resources") {
-		const server = typeof input.server === "string" ? input.server : "";
-		if (server) return { tool: `mcp__${server}__${tool.slice("mcp_".length)}`, input };
-	}
-	return { tool, input };
-}
-
 function factory(pi: ExtensionAPI): void {
 	let deny: string[] = [];
 
@@ -101,30 +82,22 @@ function factory(pi: ExtensionAPI): void {
 	});
 
 	pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
-		const { tool, input } = governed(event.toolName, event.input as Record<string, unknown>);
-		// A websearch batch is matched query by query, so `queries` cannot carry one past a rule.
-		const rule =
-			tool === "websearch" && Array.isArray(input.queries)
-				? searchQueries(input)
-						.map((query) => deniedBy(deny, tool, { query }, ctx.cwd))
-						.find((r) => r !== undefined)
-				: deniedBy(deny, tool, input, ctx.cwd);
-		if (rule === undefined) return undefined;
-		return { block: true, reason: `Blocked by permission rule (deny): ${displayRule(rule)}` };
+		return evaluateToolCallDeny(deny, event.toolName, event.input as Record<string, unknown>, ctx.cwd);
 	});
 
 	// A folder grep reads every file in it, so a denied file's lines are dropped from what it found.
 	pi.on("tool_result", async (event, ctx): Promise<ToolResultEventResult | undefined> => {
-		if (event.toolName !== "grep" || event.isError) return undefined;
-		let changed = false;
-		const content = event.content.map((part) => {
-			if (part.type !== "text") return part;
-			const text = grepOutputWithoutDenied(deny, event.input, part.text, ctx.cwd);
-			if (text === undefined) return part;
-			changed = true;
-			return { ...part, text };
-		});
-		return changed ? { content } : undefined;
+		return filterDeniedGrepToolResult(
+			deny,
+			{
+				toolName: event.toolName,
+				input: event.input as Record<string, unknown>,
+				content: event.content as Array<{ type: string; text?: string; [k: string]: unknown }>,
+				structuredContent: event.structuredContent,
+				isError: event.isError,
+			},
+			ctx.cwd,
+		);
 	});
 
 	pi.registerShortcut(Key.alt("m"), {

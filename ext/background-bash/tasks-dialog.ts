@@ -57,6 +57,10 @@ export interface TaskRow {
 	kind: TaskKind;
 	label: string;
 	state: TaskState;
+	statusText?: string;
+	model?: string;
+	outputFile?: string;
+	agentOutput?: () => string;
 	startedAt: number;
 	endedAt?: number;
 	job?: BackgroundJobInfo;
@@ -80,13 +84,20 @@ export function taskRows(owner: string | undefined): TaskRow[] {
 		endedAt: job.exit?.at,
 		job,
 	}));
-	const agents: TaskRow[] = (agentTasks()?.list() ?? []).map((run) => ({
-		id: run.id,
-		kind: "agent",
-		label: `${run.agent}: ${run.task}`,
-		state: "running",
-		startedAt: run.startedAt,
-	}));
+	const agents: TaskRow[] = (agentTasks()?.list(owner) ?? [])
+		.filter((run) => owner === undefined || run.owner === undefined || run.owner === owner)
+		.map((run) => ({
+			id: run.id,
+			kind: "agent",
+			label: `${run.agent}: ${run.task}`,
+			state: "running",
+			statusText: run.status ?? "running",
+			model: run.model,
+			outputFile: run.outputFile,
+			agentOutput: run.output,
+			startedAt: run.startedAt,
+			endedAt: run.endedAt,
+		}));
 	// Reversed first: the sort is stable, so tasks started in the same millisecond stay newest first.
 	return [...shells, ...agents].reverse().sort((a, b) => b.startedAt - a.startedAt);
 }
@@ -134,6 +145,27 @@ function outputTail(row: TaskRow): { lines: string[]; size: number; read: number
 	if (row.foreground) {
 		text = row.foreground.output();
 		size = Buffer.byteLength(text);
+	} else if (row.kind === "agent") {
+		if (row.agentOutput) {
+			text = row.agentOutput();
+			size = Buffer.byteLength(text);
+		} else if (row.outputFile) {
+			try {
+				size = statSync(row.outputFile).size;
+				const length = Math.min(size, DETAIL_TAIL_BYTES);
+				const buffer = Buffer.alloc(length);
+				const fd = openSync(row.outputFile, "r");
+				try {
+					readSync(fd, buffer, 0, length, size - length);
+				} finally {
+					closeSync(fd);
+				}
+				text = buffer.toString("utf-8");
+			} catch {
+				text = "";
+				size = 0;
+			}
+		}
 	} else if (!job) return { lines: [], size: 0, read: 0 };
 	else if (job.outputFile) {
 		try {
@@ -166,10 +198,42 @@ function outputTail(row: TaskRow): { lines: string[]; size: number; read: number
 }
 
 /** Stops a task as the user; the model is told. */
-export function stopTask(row: TaskRow): void {
-	if (row.kind === "agent") agentTasks()?.stop(row.id);
+export function stopTask(row: TaskRow, owner?: string, source: "user" | "remote" = "user"): void {
+	if (row.kind === "agent") agentTasks()?.stop(row.id, { owner, source });
 	else if (row.foreground) row.foreground.stop();
 	else backgroundBashJobs.kill(row.id, { byUser: true });
+}
+
+function completedAgentRow(id: string, owner: string | undefined): TaskRow | undefined {
+	const source = agentTasks();
+	const run = source?.getRun?.(id, owner) as
+		| {
+				runId: string;
+				agentName: string;
+				taskSummary?: string;
+				status: string;
+				provider: string;
+				modelId: string;
+				admittedAt: number;
+				startedAt?: number;
+				endedAt?: number;
+				reportPath?: string;
+		  }
+		| undefined;
+	if (!run) return undefined;
+	const state: TaskState = run.status === "completed" ? "completed" : run.status === "cancelled" ? "killed" : "failed";
+	return {
+		id: run.runId,
+		kind: "agent",
+		label: `${run.agentName}: ${run.taskSummary || run.agentName}`,
+		state,
+		statusText: run.status,
+		model: `${run.provider}/${run.modelId}`,
+		outputFile: run.reportPath,
+		agentOutput: () => source?.getReport?.(id, owner) ?? "",
+		startedAt: run.startedAt ?? run.admittedAt,
+		endedAt: run.endedAt,
+	};
 }
 
 /** Sections, in display order: a shell's section holds its command monitors too. */
@@ -208,7 +272,8 @@ const META: Record<TaskState, string> = {
 };
 
 /** A foreground command is told apart from the background ones it sits among. */
-const metaOf = (row: TaskRow) => (row.foreground ? "foreground" : META[row.state]);
+const metaOf = (row: TaskRow) =>
+	row.foreground ? "foreground" : row.kind === "agent" && row.statusText ? row.statusText : META[row.state];
 
 type ListLine = { kind: "gap" } | { kind: "heading"; text: string } | { kind: "row"; row: TaskRow; index: number };
 
@@ -297,12 +362,12 @@ export class TasksDialog implements Component {
 		const kb = getKeybindings();
 		const rows = visibleRows(this.owner);
 		if (this.detail !== undefined) {
-			const row = rows.find((r) => r.id === this.detail);
+			const row = rows.find((r) => r.id === this.detail) ?? completedAgentRow(this.detail, this.owner);
 			if (matchesKey(data, "left")) this.leaveDetail(rows);
 			else if (kb.matches(data, "tui.select.cancel") || data === "\r" || data === " ") {
 				this.closeFromDetail();
 				return;
-			} else if (data === "x" && row?.state === "running") stopTask(row);
+			} else if (data === "x" && row?.state === "running") stopTask(row, this.owner);
 			this.requestRender();
 			return;
 		}
@@ -319,7 +384,7 @@ export class TasksDialog implements Component {
 		else if (data === "x") {
 			// The task under the cursor is not the one that was focused: swallow this one press.
 			if (this.focusLost) this.focusLost = false;
-			else stopTask(current);
+			else stopTask(current, this.owner);
 		}
 		this.requestRender();
 	}
@@ -327,7 +392,7 @@ export class TasksDialog implements Component {
 	render(width: number): string[] {
 		const rows = visibleRows(this.owner);
 		if (this.detail !== undefined) {
-			const row = rows.find((r) => r.id === this.detail);
+			const row = rows.find((r) => r.id === this.detail) ?? completedAgentRow(this.detail, this.owner);
 			if (row) return this.frame(width, this.renderDetail(row, width - 2 * PAD), this.detailHints(row));
 			// The task ended while on screen: a dialog opened straight to it closes, else back to the list.
 			if (this.direct) {
@@ -462,7 +527,8 @@ export class TasksDialog implements Component {
 		const monitor = row.job?.kind === "monitor";
 		const title = row.kind === "agent" ? "Agent details" : monitor ? "Monitor details" : "Shell details";
 		const code = row.job?.exit?.code;
-		const statusText = `${row.state}${row.foreground ? " (foreground)" : ""}${code !== undefined && code !== null ? ` (exit code: ${code})` : ""}`;
+		const baseStatus = row.kind === "agent" && row.statusText ? row.statusText : row.state;
+		const statusText = `${baseStatus}${row.foreground ? " (foreground)" : ""}${code !== undefined && code !== null ? ` (exit code: ${code})` : ""}`;
 		const status =
 			row.state === "running"
 				? BACKGROUND(statusText)
@@ -471,6 +537,9 @@ export class TasksDialog implements Component {
 			["Status:", status],
 			["Runtime:", formatClaudeDuration((row.endedAt ?? Date.now()) - row.startedAt)],
 		];
+		if (row.kind === "agent" && row.model) {
+			fields.push(["Model:", clean(row.model)]);
+		}
 		const shell = row.job ?? row.foreground;
 		if (shell) {
 			const command = clean(shell.command);
@@ -491,7 +560,7 @@ export class TasksDialog implements Component {
 			const indent = " ".repeat(labelWidth + TABLE_GAP);
 			for (const [i, part] of wrapped.entries()) table.push(`${i === 0 ? lead : indent}${part}`);
 		}
-		if (!shell) return this.titled(title, undefined, table);
+		if (!shell && row.kind !== "agent") return this.titled(title, undefined, table);
 
 		const out = [...table, "", t.bold("Output:")];
 		const { lines, size, read } = outputTail(row);

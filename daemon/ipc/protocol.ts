@@ -145,6 +145,15 @@ export interface PaneReport {
 	trust?: "always" | "ask" | "never";
 	context?: { tokens: number | null; contextWindow: number; percent: number | null };
 	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
+	/** Separate usage ledger for background subagent runs not included in foreground toolResult entries. */
+	backgroundSubagentUsage?: {
+		runCount: number;
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+		cost: number | null;
+	};
 	/** What the pane could not do for the phone, only in the report sent right after; `at`: epoch ms. */
 	notice?: { text: string; at: number };
 	/** The slash commands its prompt runs: pi's built-in ones, then extension commands, prompt
@@ -168,6 +177,8 @@ export interface PaneTask {
 	startedAt: number;
 	foreground?: boolean;
 	outputFile?: string;
+	status?: string;
+	model?: string;
 }
 
 /** A slash command, without its "/". */

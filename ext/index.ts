@@ -27,6 +27,7 @@ import permissions from "./permissions/index.ts";
 import promptAssist from "./prompt-assist/index.ts";
 import remote from "./remote/index.ts";
 import sandbox from "./sandbox/index.ts";
+import subagents from "./subagents/index.ts";
 import vibes from "./vibes/index.ts";
 
 export function bluclawdExtensions(): InlineExtension[] {
@@ -35,6 +36,7 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "sandbox", factory: sandbox },
 		{ name: "checkpoints", factory: checkpoints },
 		{ name: "background-bash", factory: backgroundBash },
+		{ name: "subagents", factory: subagents },
 		{ name: "branding", factory: branding },
 		{ name: "agent-view", factory: agentView },
 		{ name: "remote", factory: remote },

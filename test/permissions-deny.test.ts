@@ -91,6 +91,13 @@ describe("deniedBy", () => {
 		expect(denied(["Bash(**)"], "task_stop", {})).toBe(false);
 	});
 
+	it("matches Subagent and Subagent(agentName) deny rules against the delegated agent name", () => {
+		expect(denied(["Subagent"], "subagent", { agent: "explorer" })).toBe(true);
+		expect(denied(["Subagent(explorer)"], "subagent", { agent: "explorer" })).toBe(true);
+		expect(denied(["Subagent(explorer)"], "subagent", { agent: "reviewer" })).toBe(false);
+		expect(denied(["Subagent(rev*)"], "subagent", { agent: "reviewer" })).toBe(true);
+	});
+
 	it("sees through exec wrappers and shell keywords, flag values included", () => {
 		const rules = ["Bash(rm *)"];
 		for (const command of [
