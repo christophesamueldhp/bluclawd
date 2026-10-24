@@ -220,6 +220,54 @@ describe("Task 6 (M1) — Foreground subagent tool integration", () => {
 		}
 	});
 
+	it("refuses isolated definitions before model resolution or run storage while release is blocked", async () => {
+		const cwd = makeTempDir("isolated-cwd");
+		const agentDir = makeTempDir("isolated-agent");
+		mkdirSync(join(agentDir, "agents"));
+		writeFileSync(
+			join(agentDir, "agents", "api-auditor.md"),
+			[
+				"---",
+				"name: api-auditor",
+				"description: Verification.",
+				"tools: [read, bash]",
+				"model: missing/model",
+				"---",
+				"Run verification.",
+			].join("\n"),
+		);
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
+		try {
+			await session.bindExtensions({ mode: "print" });
+			const before = faux.state.callCount;
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall(
+						"subagent",
+						{
+							agent: "api-auditor",
+							task: "Run verification.",
+						},
+						{ id: "isolated_blocked" },
+					),
+				]),
+				fauxAssistantMessage("Execution unavailable."),
+			]);
+			await session.prompt("Delegate verification.", { expandPromptTemplates: false });
+			const result = session.messages.find((m) => m.role === "toolResult" && m.toolCallId === "isolated_blocked");
+			expect(result?.role === "toolResult" && result.isError).toBe(true);
+			if (result?.role === "toolResult") {
+				expect(result.content).toEqual([
+					expect.objectContaining({ text: expect.stringMatching(/isolated.*not (released|enabled)/i) }),
+				]);
+			}
+			expect(faux.state.callCount - before).toBe(2);
+			expect(existsSync(join(agentDir, "bluclawd", "subagents", session.sessionId))).toBe(false);
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("enforces Subagent deny rules, task input size bounds, and unknown role errors before child model activity", async () => {
 		const cwd = makeTempDir("deny-cwd");
 		const agentDir = makeTempDir("deny-agent");

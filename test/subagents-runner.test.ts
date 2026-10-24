@@ -5,7 +5,11 @@ import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-work
 import { ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { createSubagentPolicySnapshot } from "../ext/permissions/policy.ts";
-import { discoverAgentDefinitions, resolveAgentDefinition } from "../ext/subagents/definitions.ts";
+import {
+	discoverAgentDefinitions,
+	isReadOnlySubagentTools,
+	resolveAgentDefinition,
+} from "../ext/subagents/definitions.ts";
 import {
 	captureWorkspaceSnapshot,
 	MAX_CHILD_TOOL_OUTPUT_BYTES,
@@ -123,6 +127,7 @@ describe("Task 4 (M1) — Restricted child runner", () => {
 			const { registry, faux, model } = await createTestParentRegistry(agentDir);
 			const catalog = discoverAgentDefinitions({ cwd, agentDir, projectTrusted: true });
 			const explorer = resolveAgentDefinition(catalog, "explorer").definition!;
+			if (!isReadOnlySubagentTools(explorer.tools)) throw new Error("Expected read-only explorer");
 			const policy = createSubagentPolicySnapshot({
 				cwd,
 				denyRules: ["Read(.env)"],
@@ -221,6 +226,7 @@ describe("Task 4 (M1) — Restricted child runner", () => {
 		const { registry, faux, model } = await createTestParentRegistry(agentDir);
 		const catalog = discoverAgentDefinitions({ cwd, agentDir, projectTrusted: true });
 		const explorer = resolveAgentDefinition(catalog, "explorer").definition!;
+		if (!isReadOnlySubagentTools(explorer.tools)) throw new Error("Expected read-only explorer");
 		const policy = createSubagentPolicySnapshot({
 			cwd,
 			denyRules: [],
