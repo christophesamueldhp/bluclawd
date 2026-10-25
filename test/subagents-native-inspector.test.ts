@@ -1,4 +1,4 @@
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readdir, readFile, rename, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -16,6 +16,38 @@ import {
 import { withSubagentPreparation } from "../ext/subagents/preparation.ts";
 import { captureSourceSnapshot } from "../ext/subagents/source-snapshot.ts";
 import { createSubagentFixture } from "./helpers/subagent-fixture.ts";
+
+const probeScheduling = vi.hoisted(() => ({ waitForExit: false, exitObserved: false }));
+vi.mock("node:child_process", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("node:child_process")>();
+	return {
+		...actual,
+		spawn(command: string, args: string[], options: SpawnOptions) {
+			const child = actual.spawn(command, args, options);
+			if (probeScheduling.waitForExit && Array.isArray(args) && args[0] === "v1" && args[1] === "probe") {
+				// Hold the parent until the real probe exits, before it can finish stdin.
+				const started = performance.now();
+				while (performance.now() - started < 500) {
+					try {
+						const state = actual.execFileSync("/bin/ps", ["-o", "stat=", "-p", String(child.pid)], {
+							env: { PATH: "/usr/bin:/bin", LC_ALL: "C" },
+							stdio: ["ignore", "pipe", "ignore"],
+							encoding: "utf8",
+							timeout: 100,
+							maxBuffer: 1024,
+						});
+						if (!state.trim().startsWith("Z")) continue;
+					} catch (error) {
+						if ((error as { status?: number }).status !== 1) continue;
+					}
+					probeScheduling.exitObserved = true;
+					break;
+				}
+			}
+			return child;
+		},
+	};
+});
 
 const native = process.platform === "darwin" && process.arch === "arm64" && process.getuid?.() !== 0;
 const signal = new AbortController().signal;
@@ -85,6 +117,8 @@ beforeAll(async () => {
 	if (native) inspector = await build();
 }, 15000);
 afterEach(async () => {
+	probeScheduling.waitForExit = false;
+	probeScheduling.exitObserved = false;
 	vi.useRealTimers();
 	vi.unstubAllEnvs();
 	for (const item of children.splice(0)) {
@@ -241,6 +275,26 @@ describe.skipIf(!native)("locally compiled macOS inspector", () => {
 			),
 		).toBe("refused");
 		expect(own.child.exitCode).toBeNull();
+	});
+
+	it("accepts an input-free ABI probe that exits before the parent finishes stdin", async () => {
+		const cookie = cookies();
+		const own = await control(cookie);
+		const member = (await inspectNativeProcesses(inspector, cookie, signal)).matches[0];
+		probeScheduling.waitForExit = true;
+		const result = await signalNativeProcess(
+			inspector,
+			{
+				identity: { ...member, uid: 0 },
+				cookies: cookie,
+				signal: "SIGKILL",
+			},
+			signal,
+		);
+		expect(probeScheduling.exitObserved).toBe(true);
+		expect(result).toBe("refused");
+		expect(own.child.exitCode).toBeNull();
+		expect(own.child.signalCode).toBeNull();
 	});
 
 	it("terminates a TERM-resistant owned process and observes actual exit without stopping a sibling", async () => {

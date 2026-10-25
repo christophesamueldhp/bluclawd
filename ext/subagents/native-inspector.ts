@@ -142,7 +142,7 @@ async function request(
 	if (Buffer.byteLength(input) > 4096 || timeout <= 0) throw new Error("Native inspector request limit");
 	const response = await new Promise<{ code: number | null; stdout: string }>((resolve, reject) => {
 		const child = spawn(path, ["v1", op, ...args], {
-			stdio: ["pipe", "pipe", "pipe"],
+			stdio: [op === "probe" ? "ignore" : "pipe", "pipe", "pipe"],
 			env: { PATH: "/usr/bin:/bin", LC_ALL: "C", HOME: "/dev/null" },
 			signal,
 			timeout: Math.min(1000, timeout),
@@ -154,7 +154,7 @@ async function request(
 		child.on("error", () => {
 			failed = true;
 		});
-		child.stdin.on("error", () => {
+		child.stdin?.on("error", () => {
 			failed = true;
 		});
 		child.stdout.on("data", (chunk: Buffer) => {
@@ -173,7 +173,7 @@ async function request(
 			if (failed || termination || signal.aborted) reject(new Error("Native inspector transport failed"));
 			else resolve({ code, stdout: Buffer.concat(chunks).toString("utf8") });
 		});
-		child.stdin.end(input);
+		child.stdin?.end(input);
 	});
 	let envelope: unknown;
 	try {
