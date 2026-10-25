@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { evaluateToolCallDeny } from "../permissions/policy.ts";
 import { type IsolatedSubagentPolicySnapshot, isValidIsolatedSubagentPolicySnapshot } from "./execution-policy.ts";
+import { assertSubagentPreparation, type SubagentPreparationContext, withSubagentPreparation } from "./preparation.ts";
 import {
 	assertPreparationCurrent,
 	createSafeGitExec,
@@ -357,41 +358,6 @@ async function writeTree(
 	return tree;
 }
 
-const preparationGroups = new Map<string, { active: number; waiting: Array<{ start(): void }> }>();
-async function acquirePreparation(key: string, signal: AbortSignal): Promise<() => void> {
-	signal.throwIfAborted();
-	let group = preparationGroups.get(key);
-	if (!group) {
-		group = { active: 0, waiting: [] };
-		preparationGroups.set(key, group);
-	}
-	const release = () => {
-		const next = group.waiting.shift();
-		if (next) next.start();
-		else if (--group.active === 0) preparationGroups.delete(key);
-	};
-	if (group.active < 2) {
-		group.active++;
-		return release;
-	}
-	if (group.waiting.length >= 4) throw new Error("Snapshot preparation queue is at capacity");
-	return new Promise((resolve, reject) => {
-		const waiter = {
-			start: () => {
-				signal.removeEventListener("abort", abort);
-				resolve(release);
-			},
-		};
-		const abort = () => {
-			const i = group.waiting.indexOf(waiter);
-			if (i >= 0) group.waiting.splice(i, 1);
-			reject(signal.reason);
-		};
-		group.waiting.push(waiter);
-		signal.addEventListener("abort", abort, { once: true });
-	});
-}
-
 export async function captureSourceSnapshot(options: {
 	agentDir: string;
 	parentSessionId: string;
@@ -400,6 +366,7 @@ export async function captureSourceSnapshot(options: {
 	policy: IsolatedSubagentPolicySnapshot;
 	exec: Exec;
 	signal: AbortSignal;
+	preparation?: SubagentPreparationContext;
 	isCurrent(): boolean;
 }): Promise<SourceSnapshot> {
 	if (
@@ -409,85 +376,81 @@ export async function captureSourceSnapshot(options: {
 		options.runtimeGeneration < 0
 	)
 		throw new Error("Invalid source snapshot policy or owner");
-	const deadline = new AbortController();
-	const timer = setTimeout(() => deadline.abort(new Error("Snapshot preparation timed out")), 30_000);
-	const signal = AbortSignal.any([options.signal, deadline.signal]);
-	let release: (() => void) | undefined;
-	const check = () => assertPreparationCurrent(signal, options.isCurrent);
-	try {
+	if (options.preparation === undefined)
+		return withSubagentPreparation(options, (preparation) => captureSourceSnapshot({ ...options, preparation }));
+	const preparation = options.preparation;
+	assertSubagentPreparation(preparation, options.parentSessionId, options.runtimeGeneration);
+	const signal = AbortSignal.any([options.signal, preparation.signal]);
+	const check = () => {
+		assertSubagentPreparation(preparation, options.parentSessionId, options.runtimeGeneration);
+		assertPreparationCurrent(signal, options.isCurrent);
+	};
+	check();
+	const exec: Exec = async (...args) => {
 		check();
-		release = await acquirePreparation(`${options.parentSessionId}/${options.runtimeGeneration}`, signal);
+		const result = await options.exec(...args);
 		check();
-		const exec: Exec = async (...args) => {
-			check();
-			const result = await options.exec(...args);
-			check();
-			return result;
-		};
-		const repository = await resolveRepositoryIdentity(options.policy.cwd, exec, signal);
-		privateDirectory(resolve(options.agentDir));
-		const snapshotId = `src_${randomUUID()}`;
-		const dir = snapshotDirectory(options.agentDir, options.parentSessionId, snapshotId);
-		if (isWithin(repository.root, dir))
-			throw new Error("Source snapshot storage must be outside the source repository");
-		privateDirectory(dir);
-		const initial = await sourceState(exec, repository, options.policy, dir, signal);
-		const repoDir = join(dir, "repo.git");
-		privateDirectory(repoDir);
-		await gitText(exec, repoDir, ["init", "--bare", "--quiet", "--template=", "--initial-branch=snapshot"], signal);
-		const objects = await sourceObjects(exec, repository.root, [...initial.base, ...initial.index], dir, signal);
-		const ids = [...objects.keys()];
-		const imported = await importBlobs(
-			exec,
-			repoDir,
-			[...objects.values(), ...initial.work.map((file) => file.data)],
-			dir,
-			signal,
-		);
-		const mapped = new Map(ids.map((id, i) => [id, imported[i]]));
-		const baseTree = await writeTree(
-			exec,
-			repoDir,
-			initial.base.map((row) => ({ ...row, oid: mapped.get(row.oid)! })),
-			dir,
-			signal,
-		);
-		const indexTree = await writeTree(
-			exec,
-			repoDir,
-			initial.index.map((row) => ({ ...row, oid: mapped.get(row.oid)! })),
-			dir,
-			signal,
-		);
-		const working = initial.work.map((file, i) => ({
-			path: file.path,
-			mode: file.mode,
-			oid: imported[ids.length + i],
-		}));
-		const worktreeTree = await writeTree(exec, repoDir, working, dir, signal);
-		const final = await sourceState(exec, repository, options.policy, dir, signal);
-		if (initial.fingerprint !== final.fingerprint || initial.head !== final.head)
-			throw new Error("Source changed during snapshot capture; retry");
-		check();
-		const source: SourceSnapshot = Object.freeze({
-			snapshotId,
-			parentSessionId: options.parentSessionId,
-			runtimeGeneration: options.runtimeGeneration,
-			originEntryId: options.originEntryId,
-			repository,
-			sourceHead: initial.head,
-			sourceFingerprint: initial.fingerprint,
-			baseTree,
-			indexTree,
-			worktreeTree,
-			repoDir,
-		});
-		writeFileSync(join(dir, "snapshot.json"), JSON.stringify(source), { mode: 0o600, flag: "wx" });
-		return source;
-	} finally {
-		clearTimeout(timer);
-		release?.();
-	}
+		return result;
+	};
+	const repository = await resolveRepositoryIdentity(options.policy.cwd, exec, signal);
+	privateDirectory(resolve(options.agentDir));
+	const snapshotId = `src_${randomUUID()}`;
+	const dir = snapshotDirectory(options.agentDir, options.parentSessionId, snapshotId);
+	if (isWithin(repository.root, dir)) throw new Error("Source snapshot storage must be outside the source repository");
+	privateDirectory(dir);
+	const initial = await sourceState(exec, repository, options.policy, dir, signal);
+	const repoDir = join(dir, "repo.git");
+	privateDirectory(repoDir);
+	await gitText(exec, repoDir, ["init", "--bare", "--quiet", "--template=", "--initial-branch=snapshot"], signal);
+	const objects = await sourceObjects(exec, repository.root, [...initial.base, ...initial.index], dir, signal);
+	const ids = [...objects.keys()];
+	const imported = await importBlobs(
+		exec,
+		repoDir,
+		[...objects.values(), ...initial.work.map((file) => file.data)],
+		dir,
+		signal,
+	);
+	const mapped = new Map(ids.map((id, i) => [id, imported[i]]));
+	const baseTree = await writeTree(
+		exec,
+		repoDir,
+		initial.base.map((row) => ({ ...row, oid: mapped.get(row.oid)! })),
+		dir,
+		signal,
+	);
+	const indexTree = await writeTree(
+		exec,
+		repoDir,
+		initial.index.map((row) => ({ ...row, oid: mapped.get(row.oid)! })),
+		dir,
+		signal,
+	);
+	const working = initial.work.map((file, i) => ({
+		path: file.path,
+		mode: file.mode,
+		oid: imported[ids.length + i],
+	}));
+	const worktreeTree = await writeTree(exec, repoDir, working, dir, signal);
+	const final = await sourceState(exec, repository, options.policy, dir, signal);
+	if (initial.fingerprint !== final.fingerprint || initial.head !== final.head)
+		throw new Error("Source changed during snapshot capture; retry");
+	check();
+	const source: SourceSnapshot = Object.freeze({
+		snapshotId,
+		parentSessionId: options.parentSessionId,
+		runtimeGeneration: options.runtimeGeneration,
+		originEntryId: options.originEntryId,
+		repository,
+		sourceHead: initial.head,
+		sourceFingerprint: initial.fingerprint,
+		baseTree,
+		indexTree,
+		worktreeTree,
+		repoDir,
+	});
+	writeFileSync(join(dir, "snapshot.json"), JSON.stringify(source), { mode: 0o600, flag: "wx" });
+	return source;
 }
 
 export async function captureWorkspaceTree(options: {
