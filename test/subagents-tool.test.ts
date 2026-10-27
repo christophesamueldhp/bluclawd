@@ -1877,3 +1877,93 @@ describe("Ticket #18 — One orchestrator wake-up for close child messages and c
 		}
 	});
 });
+
+describe("Ticket #20 — Stop all agents and inspect child progress", () => {
+	it("shows live progress, survives an orchestrator interrupt, and stops every child at once", async () => {
+		const cwd = makeTempDir("progress-cwd");
+		const agentDir = makeTempDir("progress-agent");
+		let open!: () => void;
+		const opened = new Promise<void>((resolve) => {
+			open = resolve;
+		});
+		const childGate = defineTool({
+			name: "child_gate",
+			label: "Child gate",
+			description: "Waits until the test opens it.",
+			parameters: Type.Object({}),
+			execute: async (_id, _params, signal) => {
+				await Promise.race([opened, new Promise((resolve) => signal?.addEventListener("abort", resolve))]);
+				return { content: [{ type: "text", text: "opened" }], details: undefined };
+			},
+		});
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir, extraTools: [childGate] });
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			const spawn = (name: string, id: string) =>
+				fauxToolCall(
+					"subagent",
+					{
+						agent: "general-purpose",
+						name,
+						task: `Work as ${name}.`,
+						background: true,
+						model: "faux-tool/faux-alt",
+						thinkingLevel: "off",
+					},
+					{ id },
+				);
+			let parentStep = 0;
+			const main = [
+				fauxAssistantMessage([spawn("api", "spawn_api"), spawn("ui", "spawn_ui")]),
+				fauxAssistantMessage("Launched."),
+			];
+			faux.setResponses(
+				Array.from(
+					{ length: 12 },
+					() => (_c: TranscriptContext, _o: unknown, _s: unknown, model: { id: string }) =>
+						model.id === "faux-alt"
+							? fauxAssistantMessage([fauxToolCall("child_gate", {}, { id: `gate_${Math.random()}` })])
+							: (main[parentStep++] ?? fauxAssistantMessage("Parent ack.")),
+				),
+			);
+			await session.prompt("Delegate two.", { expandPromptTemplates: false });
+			const runIds = ["spawn_api", "spawn_ui"].map(
+				(id) => (toolResultText(session, id).result?.details as { runId: string }).runId,
+			);
+			const statusOf = () =>
+				runIds.map((id) => agentTasks()?.getRun?.(id) as { status: string; toolCallCount: number });
+			for (let i = 0; i < 300 && statusOf().some((run) => run?.toolCallCount !== 1); i++) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+
+			// Esc on the orchestrator's turn leaves background children running.
+			await session.abort();
+			expect(statusOf().map((run) => run.status)).toEqual(["running", "running"]);
+
+			faux.setResponses([
+				fauxAssistantMessage([fauxToolCall("subagent_status", {}, { id: "status" })]),
+				fauxAssistantMessage([fauxToolCall("subagent_stop", { agent: "all" }, { id: "stop_all" })]),
+				fauxAssistantMessage("Stopped."),
+			]);
+			await session.prompt("Check and stop them.", { expandPromptTemplates: false });
+
+			const status = toolResultText(session, "status").text;
+			for (const name of ["api", "ui"]) expect(status).toContain(`${name} (general-purpose, sub_`);
+			expect(status).toMatch(/turns: 1, tool calls: 1, elapsed: \d+s/);
+			expect(status).toMatch(/last activity: tool child_gate \d+s ago; last message: never/);
+			expect(toolResultText(session, "stop_all").text).toContain("Stopped 2 subagents.");
+			for (let i = 0; i < 300 && agentTasks()?.list(session.sessionId).length; i++) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			for (const id of runIds) {
+				expect(readPersistedRunRecord(agentDir, session.sessionId, id)).toMatchObject({
+					status: "cancelled",
+					stopSource: "model",
+				});
+			}
+		} finally {
+			open();
+			session.dispose();
+		}
+	});
+});

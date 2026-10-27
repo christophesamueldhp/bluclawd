@@ -225,8 +225,11 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				label: "Message agent",
 				description: `Send a short message to the orchestrator ("parent") or a sibling by name or run ID while you work. You are ${name ? `${name} (${address})` : address}. ${SUBAGENT_ROSTER_TOOL} lists who is running. Delivery is not a reply; keep working.`,
 				parameters: messageParameters,
-				execute: async (_toolCallId, params) =>
-					formatReceipt(await messageBus.send({ address, scope }, params.to.trim(), params.content)),
+				execute: async (_toolCallId, params) => {
+					const receipt = await messageBus.send({ address, scope }, params.to.trim(), params.content);
+					if (receipt.status === "accepted") scheduler.recordMessageSent(address);
+					return formatReceipt(receipt);
+				},
 			});
 
 		const isOwnedAndValid = (record: Readonly<SubagentRunRecord>, checkBranch = true): boolean => {
@@ -508,6 +511,14 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				}
 				return scheduler.cancelRun(id, stopOptions?.source ?? "user", `Stopped subagent ${id}`);
 			},
+			stopAll: (stopOptions?: { owner?: string; source?: SubagentStopSource }): number => {
+				const owner = stopOptions?.owner ?? activeParentSessionId;
+				if (!owner) return 0;
+				return scheduler
+					.listActiveRuns(owner)
+					.filter((run) => scheduler.cancelRun(run.runId, stopOptions?.source ?? "user", "Stopped all subagents"))
+					.length;
+			},
 			getReport: (id: string, owner?: string): string | undefined => {
 				const targetOwner = owner ?? activeParentSessionId;
 				if (!targetOwner) return undefined;
@@ -682,6 +693,90 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				return formatReceipt(
 					await messageBus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, params.to.trim(), params.content),
 				);
+			},
+		});
+
+		const ago = (at: number | undefined, now: number) =>
+			at === undefined ? "never" : `${Math.round((now - at) / 1000)}s ago`;
+		const describeProgress = (run: Readonly<SubagentRunRecord>, now: number) => {
+			const activity = run.lastActivity
+				? `${run.lastActivity.kind === "tool" ? `tool ${run.lastActivity.detail ?? "?"}` : "model turn"} ${ago(run.lastActivity.at, now)}`
+				: "none yet";
+			return [
+				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${run.status}`,
+				`  task: ${run.taskSummary}`,
+				`  turns: ${run.turnCount}, tool calls: ${run.toolCallCount}, elapsed: ${ago(run.startedAt ?? run.admittedAt, now).replace(" ago", "")}`,
+				`  last activity: ${activity}; last message: ${ago(run.lastMessageAt, now)}`,
+			].join("\n");
+		};
+		const findOwnedRun = (target: string) =>
+			scheduler.listActiveRuns(activeParentSessionId).find((run) => run.runId === target || run.name === target);
+
+		pi.registerTool({
+			name: "subagent_status",
+			label: "Subagent status",
+			exposure: "model-only",
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+			description:
+				"Show the progress of your running subagents: status, turns, tool calls, elapsed time, last activity and last message. Use it to judge whether a child is still productive; stop one with subagent_stop.",
+			parameters: Type.Object(
+				{ agent: Type.Optional(Type.String({ description: "A subagent name or run ID; omit for all." })) },
+				{ additionalProperties: false },
+			),
+			execute: async (_toolCallId, params) => {
+				const now = Date.now();
+				const target = params.agent?.trim();
+				const runs = target
+					? [findOwnedRun(target)].filter((run) => run !== undefined)
+					: scheduler.listActiveRuns(activeParentSessionId);
+				const text =
+					runs.length > 0
+						? runs.map((run) => describeProgress(run, now)).join("\n\n")
+						: target
+							? `No running subagent "${target}".`
+							: "No subagents are running.";
+				return {
+					content: [{ type: "text", text }],
+					details: undefined,
+					isError: target !== undefined && runs.length === 0,
+				};
+			},
+		});
+
+		pi.registerTool({
+			name: "subagent_stop",
+			label: "Stop subagent",
+			exposure: "model-only",
+			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+			description:
+				'Stop a running subagent by name or run ID, or every running subagent with "all". A stopped child cannot be resumed.',
+			parameters: Type.Object(
+				{ agent: Type.String({ description: 'A subagent name or run ID, or "all".' }) },
+				{ additionalProperties: false },
+			),
+			execute: async (_toolCallId, params) => {
+				const target = params.agent.trim();
+				if (target === "all") {
+					const stopped = taskSource.stopAll?.({ source: "model" }) ?? 0;
+					return {
+						content: [{ type: "text", text: `Stopped ${stopped} subagent${stopped === 1 ? "" : "s"}.` }],
+						details: undefined,
+					};
+				}
+				const run = findOwnedRun(target);
+				const stopped = run !== undefined && taskSource.stop(run.runId, { source: "model" });
+				return {
+					content: [
+						{
+							type: "text",
+							text: stopped
+								? `Stopping ${run.name ?? run.runId} (${run.runId}).`
+								: `No running subagent "${target}".`,
+						},
+					],
+					details: undefined,
+					isError: !stopped,
+				};
 			},
 		});
 

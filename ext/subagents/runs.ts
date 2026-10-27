@@ -89,13 +89,17 @@ export interface SubagentRunRecord {
 	foregroundUsageAttributed: boolean;
 	backgroundDeliveryAttempted: boolean;
 	lastProgressText?: string;
+	/** The child's latest model turn or tool call; absent on older records. */
+	lastActivity?: { kind: "turn" | "tool"; detail?: string; at: number };
+	/** When the child last sent an agent message. */
+	lastMessageAt?: number;
 	summaryText?: string;
 }
 
 export interface SubagentRunController {
 	markRunning(childSessionId?: string, thinkingLevel?: string): void;
 	recordTurn(): void;
-	recordToolCall(): void;
+	recordToolCall(toolName?: string): void;
 	recordToolExecution(toolName: string, isError: boolean): void;
 	recordUsage(delta: Partial<SubagentUsageTotals>): void;
 	updateProgress(text: string): void;
@@ -257,6 +261,11 @@ export class SubagentRunScheduler {
 		return managed ? structuredClone(managed.record) : undefined;
 	}
 
+	recordMessageSent(runId: string): void {
+		const managed = this.runs.get(runId);
+		if (managed && !isTerminalSubagentStatus(managed.record.status)) managed.record.lastMessageAt = this.now();
+	}
+
 	listRuns(): Readonly<SubagentRunRecord>[] {
 		return Array.from(this.runs.values()).map((m) => structuredClone(m.record));
 	}
@@ -409,10 +418,12 @@ export class SubagentRunScheduler {
 			recordTurn: () => {
 				if (isTerminalSubagentStatus(managed.record.status)) return;
 				managed.record.turnCount++;
+				managed.record.lastActivity = { kind: "turn", at: this.now() };
 			},
-			recordToolCall: () => {
+			recordToolCall: (toolName?: string) => {
 				if (isTerminalSubagentStatus(managed.record.status)) return;
 				managed.record.toolCallCount++;
+				managed.record.lastActivity = { kind: "tool", detail: toolName, at: this.now() };
 			},
 			recordToolExecution: (toolName: string, isError: boolean) => {
 				if (isTerminalSubagentStatus(managed.record.status)) return;

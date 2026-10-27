@@ -316,8 +316,8 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 	});
 
 	const lifecycleExtension: ExtensionFactory = (pi: ExtensionAPI) => {
-		pi.on("tool_call", async () => {
-			options.controller.recordToolCall();
+		pi.on("tool_call", async (event) => {
+			options.controller.recordToolCall(event.toolName);
 			if (options.signal.aborted) {
 				return {
 					block: true,

@@ -313,8 +313,11 @@ preserved; the full suite includes three failing detached/double-fork cleanup as
 Ask the parent to delegate distinct pieces of work with explicit files or areas in each task.
 The model calls `subagent` with `{ "agent": "general-purpose", "task": "Add input validation to src/auth.ts" }`;
 `"background": true` returns immediately instead of waiting. There is no `/agents` command.
-Background runs appear in `/tasks` and the phone's task sheet; local, model-issued, and remote
-stops use the same session-owned run. User and remote stops do not start an unsolicited parent turn.
+Background runs appear in `/tasks` (`X` stops every running agent) and the phone's task sheet;
+local, model-issued, and remote stops use the same session-owned run. The orchestrator checks
+progress with `subagent_status` (status, turns, tool calls, elapsed time, last activity and last
+message) and stops one child or `"all"` with `subagent_stop`; nothing stops a child automatically.
+Interrupting the orchestrator's turn leaves background children running. User and remote stops do not start an unsolicited parent turn.
 Print/JSON invocations support foreground delegation only; background also works in RPC mode.
 
 Custom roles are Markdown files in `~/.pi/agent/agents/` or a trusted project's `.pi/agents/`.

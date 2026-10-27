@@ -381,7 +381,9 @@ export class TasksDialog implements Component {
 		if (kb.matches(data, "tui.select.up")) this.focus(rows, index - 1);
 		else if (kb.matches(data, "tui.select.down")) this.focus(rows, index + 1);
 		else if (data === "\r" && hasDetail(current)) this.detail = current.id;
-		else if (data === "x") {
+		else if (data === "X" && rows.some((row) => row.kind === "agent" && row.state === "running")) {
+			agentTasks()?.stopAll?.({ owner: this.owner, source: "user" });
+		} else if (data === "x") {
 			// The task under the cursor is not the one that was focused: swallow this one press.
 			if (this.focusLost) this.focusLost = false;
 			else stopTask(current, this.owner);
@@ -435,6 +437,7 @@ export class TasksDialog implements Component {
 			"↑/↓ to select",
 			...(!current || hasDetail(current) ? ["Enter to view"] : []),
 			...(current ? ["x to stop"] : []),
+			...(rows.some((row) => row.kind === "agent" && row.state === "running") ? ["X to stop all agents"] : []),
 			"Esc to close",
 		];
 	}

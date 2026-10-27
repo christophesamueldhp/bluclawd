@@ -29,6 +29,8 @@ export interface AgentTaskSource {
 	list(owner?: string): AgentTaskInfo[];
 	/** Stops an owned run through `/tasks` or `task_stop`; false for an unknown or unauthorized id. */
 	stop(id: string, options?: AgentTaskStopOptions): boolean;
+	/** Stops every running run the owner has; returns how many were stopped. */
+	stopAll?(options?: AgentTaskStopOptions): number;
 	getReport?(id: string, owner?: string): string | undefined;
 	getRun?(id: string, owner?: string): unknown;
 }

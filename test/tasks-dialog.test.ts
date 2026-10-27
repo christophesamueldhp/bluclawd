@@ -257,3 +257,40 @@ describe("/tasks dialog: the model's foreground bash", () => {
 		for (const shell of runningForegroundShells()) shell.stop();
 	});
 });
+
+describe("Ticket #20 — stop all agents from /tasks", () => {
+	it("stops every running agent of this session with X and shows the hint only while agents run", async () => {
+		const { publishAgentTasks } = await import("../ext/_shared/agent-tasks.ts");
+		const me = session();
+		const calls: Array<{ owner?: string; source?: string }> = [];
+		let running = true;
+		const unpublish = publishAgentTasks({
+			list: (listOwner) =>
+				running && listOwner === me
+					? ["sub_1", "sub_2"].map((id) => ({
+							id,
+							owner: me,
+							agent: "general-purpose",
+							task: `Build ${id}`,
+							startedAt: Date.now(),
+							status: "running",
+						}))
+					: [],
+			stop: () => false,
+			stopAll: (options) => {
+				calls.push({ owner: options?.owner, source: options?.source });
+				running = false;
+				return 1;
+			},
+		});
+		try {
+			const { dialog, screen } = open(me);
+			expect(screen()).toContain("X to stop all agents");
+			dialog.handleInput("X");
+			expect(calls).toEqual([{ owner: me, source: "user" }]);
+			expect(screen()).not.toContain("X to stop all agents");
+		} finally {
+			unpublish();
+		}
+	});
+});
