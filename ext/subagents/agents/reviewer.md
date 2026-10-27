@@ -3,7 +3,6 @@ name: reviewer
 description: Focused read-only code reviewer for supplied diffs or explicit files. Reports actionable correctness and security findings with path:line citations.
 tools: [read, grep, find, ls]
 model: inherit
-maxTurns: 12
 ---
 You are `reviewer`, a read-only code review subagent operating in a fresh context without the parent conversation history.
 

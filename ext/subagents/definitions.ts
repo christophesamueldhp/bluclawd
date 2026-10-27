@@ -23,9 +23,6 @@ export function isReadOnlySubagentTools(
 	return workspaceModeForTools(tools) === "shared";
 }
 
-export const MAX_DEFINITION_BYTES = 32 * 1024;
-export const MAX_DESCRIPTION_CHARS = 512;
-export const MAX_CUSTOM_DEFINITIONS = 32;
 export const MAX_SUBAGENT_TURNS = 12;
 
 export type AgentDefinitionSource = "bundled" | "user" | "project";
@@ -33,10 +30,8 @@ export type AgentDefinitionSource = "bundled" | "user" | "project";
 export interface AgentDefinition {
 	readonly name: string;
 	readonly description: string;
-	readonly tools: readonly SupportedSubagentTool[];
-	readonly workspaceMode: SubagentWorkspaceMode;
+	readonly tools?: readonly SupportedSubagentTool[];
 	readonly model: "inherit" | `${string}/${string}`;
-	readonly maxTurns: number;
 	readonly instructions: string;
 	readonly source: AgentDefinitionSource;
 	readonly filePath: string;
@@ -61,7 +56,7 @@ export interface ResolveAgentDefinitionResult {
 	readonly error?: string;
 }
 
-const SUPPORTED_FRONTMATTER_KEYS = new Set(["name", "description", "tools", "model", "maxTurns"]);
+const SUPPORTED_FRONTMATTER_KEYS = new Set(["name", "description", "tools", "model"]);
 const ALLOWED_TOOL_SET = new Set<string>(ALLOWED_SUBAGENT_TOOLS);
 const SUPPORTED_TOOL_SET = new Set<string>(SUPPORTED_SUBAGENT_TOOLS);
 const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -72,7 +67,7 @@ const CONTROL_CHAR_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 const BUNDLED_AGENTS_DIR = join(dirname(fileURLToPath(import.meta.url)), "agents");
 
 function deepFreezeDefinition(def: AgentDefinition): AgentDefinition {
-	Object.freeze(def.tools);
+	if (def.tools) Object.freeze(def.tools);
 	return Object.freeze(def);
 }
 
@@ -97,7 +92,7 @@ function parseToolsField(rawTools: unknown): {
 	error?: string;
 } {
 	if (rawTools === undefined) {
-		return { ok: true, tools: [...ALLOWED_SUBAGENT_TOOLS] };
+		return { ok: true };
 	}
 	let items: unknown[];
 	if (Array.isArray(rawTools)) {
@@ -189,14 +184,6 @@ function parseSingleDefinitionFile(
 		};
 	}
 
-	if (stat.size > MAX_DEFINITION_BYTES) {
-		return {
-			ok: false,
-			candidateNames: [fallbackStem],
-			error: `Agent definition "${filePath}" exceeds maximum size of ${MAX_DEFINITION_BYTES} bytes (${stat.size} bytes)`,
-		};
-	}
-
 	let raw: string;
 	try {
 		raw = readFileSync(resolvedPath, "utf8");
@@ -205,14 +192,6 @@ function parseSingleDefinitionFile(
 			ok: false,
 			candidateNames: [fallbackStem],
 			error: `Failed to read agent definition "${filePath}": ${err instanceof Error ? err.message : String(err)}`,
-		};
-	}
-
-	if (Buffer.byteLength(raw, "utf8") > MAX_DEFINITION_BYTES) {
-		return {
-			ok: false,
-			candidateNames: [extractHeuristicName(raw, filePath), fallbackStem],
-			error: `Agent definition "${filePath}" exceeds maximum size of ${MAX_DEFINITION_BYTES} bytes`,
 		};
 	}
 
@@ -248,6 +227,13 @@ function parseSingleDefinitionFile(
 	const candidateNames = Array.from(new Set([rawName, fallbackStem].filter((n) => n.length > 0)));
 
 	for (const key of Object.keys(fm)) {
+		if (key === "maxTurns") {
+			return {
+				ok: false,
+				candidateNames,
+				error: `Obsolete field "maxTurns" in "${filePath}": per-role turn limits are no longer supported; remove this field.`,
+			};
+		}
 		if (!SUPPORTED_FRONTMATTER_KEYS.has(key)) {
 			return {
 				ok: false,
@@ -280,16 +266,16 @@ function parseSingleDefinitionFile(
 			error: `Missing required "description" in "${filePath}"`,
 		};
 	}
-	if (rawDescription.length > MAX_DESCRIPTION_CHARS || CONTROL_CHAR_RE.test(rawDescription)) {
+	if (CONTROL_CHAR_RE.test(rawDescription)) {
 		return {
 			ok: false,
 			candidateNames,
-			error: `Invalid "description" in "${filePath}": must be <= ${MAX_DESCRIPTION_CHARS} characters without control characters`,
+			error: `Invalid "description" in "${filePath}": must not contain control characters`,
 		};
 	}
 
 	const toolsResult = parseToolsField(fm.tools);
-	if (!toolsResult.ok || !toolsResult.tools) {
+	if (!toolsResult.ok) {
 		return {
 			ok: false,
 			candidateNames,
@@ -320,23 +306,6 @@ function parseSingleDefinitionFile(
 		}
 	}
 
-	let maxTurns = MAX_SUBAGENT_TURNS;
-	if (fm.maxTurns !== undefined) {
-		if (
-			typeof fm.maxTurns !== "number" ||
-			!Number.isInteger(fm.maxTurns) ||
-			fm.maxTurns < 1 ||
-			fm.maxTurns > MAX_SUBAGENT_TURNS
-		) {
-			return {
-				ok: false,
-				candidateNames,
-				error: `Invalid "maxTurns" in "${filePath}": must be an integer between 1 and ${MAX_SUBAGENT_TURNS}`,
-			};
-		}
-		maxTurns = fm.maxTurns;
-	}
-
 	const instructions = parsed.body.trim();
 	if (!instructions) {
 		return {
@@ -352,9 +321,7 @@ function parseSingleDefinitionFile(
 			name: rawName,
 			description: rawDescription,
 			tools: toolsResult.tools,
-			workspaceMode: workspaceModeForTools(toolsResult.tools),
 			model,
-			maxTurns,
 			instructions,
 			source,
 			filePath: resolvedPath,
@@ -391,7 +358,6 @@ interface ScopeLoadResult {
 	valid: Map<string, AgentDefinition>;
 	invalid: Map<string, string>;
 	diagnostics: string[];
-	fileCount: number;
 }
 
 function loadScopeDirectory(dirPath: string, source: AgentDefinitionSource): ScopeLoadResult {
@@ -401,7 +367,7 @@ function loadScopeDirectory(dirPath: string, source: AgentDefinitionSource): Sco
 
 	const listed = listMarkdownFiles(dirPath);
 	if (!listed) {
-		return { valid, invalid, diagnostics, fileCount: 0 };
+		return { valid, invalid, diagnostics };
 	}
 
 	for (const filePath of listed.files) {
@@ -433,7 +399,7 @@ function loadScopeDirectory(dirPath: string, source: AgentDefinitionSource): Sco
 		valid.set(definition.name, definition);
 	}
 
-	return { valid, invalid, diagnostics, fileCount: listed.files.length };
+	return { valid, invalid, diagnostics };
 }
 
 export function discoverAgentDefinitions(options: DiscoverAgentDefinitionsOptions): AgentDefinitionCatalog {
@@ -452,7 +418,6 @@ export function discoverAgentDefinitions(options: DiscoverAgentDefinitionsOption
 		valid: new Map(),
 		invalid: new Map(),
 		diagnostics: [],
-		fileCount: 0,
 	};
 
 	if (projectTrusted) {
@@ -464,20 +429,6 @@ export function discoverAgentDefinitions(options: DiscoverAgentDefinitionsOption
 				`Ignored ${untrustedFiles.files.length} agent definition(s) in "${projectAgentsDir}" from untrusted project.`,
 			);
 		}
-	}
-
-	const totalCustomFiles = userScope.fileCount + projectScope.fileCount;
-	if (totalCustomFiles > MAX_CUSTOM_DEFINITIONS) {
-		diagnostics.push(
-			`Discovered ${totalCustomFiles} custom agent definitions across user/project scopes, exceeding the maximum of ${MAX_CUSTOM_DEFINITIONS}. Using bundled defaults only.`,
-		);
-		const bundledList = Array.from(bundledScope.valid.values()).sort((a, b) => a.name.localeCompare(b.name));
-		return Object.freeze({
-			definitions: Object.freeze(bundledList),
-			byName: new Map(bundledScope.valid),
-			invalidByName: new Map(bundledScope.invalid),
-			diagnostics: Object.freeze(diagnostics),
-		});
 	}
 
 	diagnostics.push(...userScope.diagnostics, ...projectScope.diagnostics);
@@ -545,7 +496,7 @@ export function formatAgentRoutingDescriptions(catalog: AgentDefinitionCatalog):
 	return catalog.definitions
 		.map((def) => {
 			const sourceTag = def.source === "bundled" ? "" : ` [${def.source} override]`;
-			return `- \`${def.name}\`${sourceTag} (tools: ${def.tools.join(", ")}; maxTurns: ${def.maxTurns}): ${def.description}`;
+			return `- \`${def.name}\`${sourceTag}${def.tools ? ` (tools: ${def.tools.join(", ")})` : ""}: ${def.description}`;
 		})
 		.join("\n");
 }

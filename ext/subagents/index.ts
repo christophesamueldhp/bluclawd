@@ -21,6 +21,7 @@ import { deliverOrHold } from "../background-bash/notification-hold.ts";
 import { createSubagentPolicySnapshot, evaluateSubagentDelegationDeny } from "../permissions/policy.ts";
 import {
 	type AgentDefinitionCatalog,
+	ALLOWED_SUBAGENT_TOOLS,
 	discoverAgentDefinitions,
 	EXTENDED_SUBAGENTS_RELEASED,
 	formatAgentRoutingDescriptions,
@@ -576,7 +577,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 				const definition = resolvedDef.definition;
-				if (!isReadOnlySubagentTools(definition.tools)) {
+				// Omitted tools stay read-only until parent-authority dispatch replaces this runner.
+				const requestedTools = definition.tools ?? ALLOWED_SUBAGENT_TOOLS;
+				if (!isReadOnlySubagentTools(requestedTools)) {
 					return {
 						content: [
 							{
@@ -595,7 +598,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const policyRes = createSubagentPolicySnapshot({
 					cwd,
 					denyRules,
-					allowedTools: definition.tools,
+					allowedTools: requestedTools,
 				});
 				if (!policyRes.ok || !policyRes.snapshot) {
 					return {
@@ -701,7 +704,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					taskSummary: summarizeTaskLabel(taskText),
 					startSnapshot,
 					deliveryMode: isBackground ? "background" : "foreground",
-					maxTurns: definition.maxTurns,
 					maxToolCalls: MAX_SUBAGENT_TOOL_CALLS,
 					maxReportedTokens: MAX_SUBAGENT_REPORTED_TOKENS,
 					// Foreground runs link to the invoking tool call's signal; background runs outlive the launch tool call

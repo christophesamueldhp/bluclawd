@@ -6,10 +6,6 @@ import {
 	ALLOWED_SUBAGENT_TOOLS,
 	discoverAgentDefinitions,
 	formatAgentRoutingDescriptions,
-	MAX_CUSTOM_DEFINITIONS,
-	MAX_DEFINITION_BYTES,
-	MAX_DESCRIPTION_CHARS,
-	MAX_SUBAGENT_TURNS,
 	resolveAgentDefinition,
 	workspaceModeForTools,
 } from "../ext/subagents/definitions.ts";
@@ -46,7 +42,6 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 			expect(explorer.definition.source).toBe("bundled");
 			expect(explorer.definition.tools).toEqual(ALLOWED_SUBAGENT_TOOLS);
 			expect(explorer.definition.model).toBe("inherit");
-			expect(explorer.definition.maxTurns).toBe(MAX_SUBAGENT_TURNS);
 			expect(explorer.definition.instructions).toContain("path:line");
 			expect(explorer.definition.instructions).toContain("Scope");
 			expect(explorer.definition.instructions).toContain("Blockers");
@@ -58,7 +53,6 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 		if (reviewer.ok) {
 			expect(reviewer.definition.source).toBe("bundled");
 			expect(reviewer.definition.tools).toEqual(ALLOWED_SUBAGENT_TOOLS);
-			expect(reviewer.definition.workspaceMode).toBe("shared");
 			expect(reviewer.definition.instructions).toContain("path:line");
 			expect(reviewer.definition.instructions).toContain("Scope");
 			expect(reviewer.definition.instructions).toContain("Blockers");
@@ -82,7 +76,6 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 				"description: User customized explorer.",
 				"tools: [read, grep]",
 				"model: openai/gpt-5",
-				"maxTurns: 6",
 				"---",
 				"User explorer body.",
 			].join("\n"),
@@ -96,7 +89,6 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 				"name: explorer",
 				"description: Project customized explorer.",
 				"tools: [read]",
-				"maxTurns: 4",
 				"---",
 				"Project explorer body.",
 			].join("\n"),
@@ -111,7 +103,6 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 			expect(trustedExplorer.definition.source).toBe("project");
 			expect(trustedExplorer.definition.description).toBe("Project customized explorer.");
 			expect(trustedExplorer.definition.tools).toEqual(["read"]);
-			expect(trustedExplorer.definition.maxTurns).toBe(4);
 		}
 
 		// When project is untrusted, project definitions are ignored and user overrides bundled
@@ -123,12 +114,11 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 			expect(untrustedExplorer.definition.description).toBe("User customized explorer.");
 			expect(untrustedExplorer.definition.tools).toEqual(["read", "grep"]);
 			expect(untrustedExplorer.definition.model).toBe("openai/gpt-5");
-			expect(untrustedExplorer.definition.maxTurns).toBe(6);
 		}
 		expect(untrustedCatalog.diagnostics.some((d) => d.includes("untrusted project"))).toBe(true);
 	});
 
-	it("rejects invalid YAML, unknown capability fields, forbidden tools, unverified model aliases, oversized files, and duplicate names without silent fallback", () => {
+	it("rejects invalid YAML, unknown capability fields, forbidden tools, unverified model aliases, obsolete maxTurns, and duplicate names without silent fallback", () => {
 		const cwd = makeTempDir("invalid-cwd");
 		const agentDir = makeTempDir("invalid-agent");
 		const userAgentsDir = join(agentDir, "agents");
@@ -162,7 +152,7 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 			"utf8",
 		);
 
-		// 3. Unverified model alias (`sonnet`) and excessive maxTurns (`50`)
+		// 3. Unverified model alias (`sonnet`)
 		writeFileSync(
 			join(userAgentsDir, "bad-model.md"),
 			[
@@ -170,10 +160,16 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 				"name: bad-model",
 				"description: Uses alias instead of provider/model.",
 				"model: sonnet",
-				"maxTurns: 50",
 				"---",
 				"Body",
 			].join("\n"),
+			"utf8",
+		);
+
+		// 3b. Obsolete maxTurns
+		writeFileSync(
+			join(userAgentsDir, "legacy-turns.md"),
+			["---", "name: legacy-turns", "description: Declares a turn limit.", "maxTurns: 50", "---", "Body"].join("\n"),
 			"utf8",
 		);
 
@@ -189,23 +185,14 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 			"utf8",
 		);
 
-		// 5. Oversized file (> 32 KiB)
-		writeFileSync(
-			join(userAgentsDir, "huge.md"),
-			["---", "name: huge", "description: Huge file.", "---", "x".repeat(MAX_DEFINITION_BYTES + 100)].join("\n"),
-			"utf8",
-		);
-
-		// 6. Unsafe name (reserved prefix `sub_`) and oversized description
+		// 5. Unsafe name (reserved prefix `sub_`)
 		writeFileSync(
 			join(userAgentsDir, "sub_reserved.md"),
-			["---", "name: sub_reserved", `description: ${"d".repeat(MAX_DESCRIPTION_CHARS + 10)}`, "---", "Body"].join(
-				"\n",
-			),
+			["---", "name: sub_reserved", "description: Reserved prefix.", "---", "Body"].join("\n"),
 			"utf8",
 		);
 
-		// 7. Malformed YAML
+		// 6. Malformed YAML
 		writeFileSync(join(userAgentsDir, "malformed.md"), ["---", "name: [unclosed", "---", "Body"].join("\n"), "utf8");
 
 		const catalog = discoverAgentDefinitions({ cwd, agentDir, projectTrusted: true });
@@ -235,9 +222,19 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 			expect(dup.error).toMatch(/duplicate/i);
 		}
 
-		// Oversized file rejected
-		const huge = resolveAgentDefinition(catalog, "huge");
-		expect(huge.ok).toBe(false);
+		// Model alias rejected
+		const badModel = resolveAgentDefinition(catalog, "bad-model");
+		expect(badModel.ok).toBe(false);
+		if (!badModel.ok) {
+			expect(badModel.error).toContain("sonnet");
+		}
+
+		// Obsolete maxTurns rejected with a remove-field diagnostic
+		const legacyTurns = resolveAgentDefinition(catalog, "legacy-turns");
+		expect(legacyTurns.ok).toBe(false);
+		if (!legacyTurns.ok) {
+			expect(legacyTurns.error).toMatch(/maxTurns.*remove this field/);
+		}
 
 		// Routing description list only exposes valid definitions (`reviewer`)
 		const routing = formatAgentRoutingDescriptions(catalog);
@@ -246,9 +243,9 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 		expect(routing).not.toContain("duplicate-role");
 	});
 
-	it("falls back to bundled defaults with a diagnostic on aggregate custom definition overflow and rejects external symlinks", () => {
-		const cwd = makeTempDir("overflow-cwd");
-		const agentDir = makeTempDir("overflow-agent");
+	it("rejects agent definition symlinks that escape the scope directory", () => {
+		const cwd = makeTempDir("symlink-cwd");
+		const agentDir = makeTempDir("symlink-agent");
 		const outsideDir = makeTempDir("outside");
 		const userAgentsDir = join(agentDir, "agents");
 		mkdirSync(userAgentsDir, { recursive: true });
@@ -263,19 +260,6 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 
 		const symlinkCatalog = discoverAgentDefinitions({ cwd, agentDir, projectTrusted: true });
 		expect(resolveAgentDefinition(symlinkCatalog, "escaped").ok).toBe(false);
-
-		// Now exceed MAX_CUSTOM_DEFINITIONS (32)
-		for (let i = 0; i < MAX_CUSTOM_DEFINITIONS + 2; i++) {
-			writeFileSync(
-				join(userAgentsDir, `agent-${i}.md`),
-				["---", `name: agent-${i}`, `description: Agent ${i}.`, "---", "Body"].join("\n"),
-				"utf8",
-			);
-		}
-
-		const overflowCatalog = discoverAgentDefinitions({ cwd, agentDir, projectTrusted: true });
-		expect(overflowCatalog.definitions.map((d) => d.name)).toEqual(["explorer", "reviewer"]);
-		expect(overflowCatalog.diagnostics.some((d) => d.includes("maximum of 32"))).toBe(true);
 	});
 
 	it.each([
@@ -283,7 +267,7 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 		["explorer", ["write"]],
 		["reviewer", ["edit", "grep"]],
 		["builder", ["read", "grep", "find", "ls", "edit", "write", "bash"]],
-	])("derives isolation for arbitrary and overridden %s tools", (name, tools) => {
+	])("keeps an explicit %s tools list as an opt-in restriction", (name, tools) => {
 		const cwd = makeTempDir("capabilities");
 		const agentDir = makeTempDir("capabilities-agent");
 		const agents = join(agentDir, "agents");
@@ -302,20 +286,18 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 		const result = resolveAgentDefinition(discoverAgentDefinitions({ cwd, agentDir }), name);
 		expect(result.ok).toBe(true);
 		expect(result.definition?.tools).toEqual(tools);
-		expect(result.definition?.workspaceMode).toBe("isolated");
 	});
 
-	it("does not grant legacy custom agents shell or write tools", () => {
-		const cwd = makeTempDir("legacy");
-		const agentDir = makeTempDir("legacy-agent");
+	it("treats a saved role without tools as inheriting the parent's capabilities", () => {
+		const cwd = makeTempDir("inherit");
+		const agentDir = makeTempDir("inherit-agent");
 		mkdirSync(join(agentDir, "agents"));
 		writeFileSync(
 			join(agentDir, "agents", "general-purpose.md"),
-			"---\nname: general-purpose\ndescription: Legacy agent.\n---\nInspect only.",
+			"---\nname: general-purpose\ndescription: Any task.\n---\nDo the assigned work.",
 		);
 		const role = resolveAgentDefinition(discoverAgentDefinitions({ cwd, agentDir }), "general-purpose").definition!;
-		expect(role.tools).toEqual(["read", "grep", "find", "ls"]);
-		expect(role.workspaceMode).toBe("shared");
+		expect(role.tools).toBeUndefined();
 	});
 
 	it.each([

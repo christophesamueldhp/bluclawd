@@ -322,16 +322,16 @@ name: api-review
 description: Review explicitly supplied API handler files for defects.
 tools: read, grep, find, ls
 model: inherit
-maxTurns: 8
 ---
 Review only the supplied targets. Cite path:line evidence, state omissions, and never claim tests ran.
 ```
 
-Reload after changing definitions. Only these five frontmatter fields are supported, and custom
-roles cannot add shell, write/edit, MCP, skills, hooks, or nested delegation. Explicit models use
-`provider/model`; virtual routers and model aliases are unsupported. Children get a fresh conversation
-and applicable trusted instructions, not the parent's history. This is SDK/tool isolation, **not an
-OS security boundary** against faulty trusted extensions.
+Reload after changing definitions. Only these four frontmatter fields are supported; the obsolete
+`maxTurns` field is rejected with a remove-field diagnostic. Omitting `tools` currently runs read
+tools only. Custom roles cannot add shell, write/edit, MCP, skills, hooks, or nested delegation.
+Explicit models use `provider/model`; virtual routers and model aliases are unsupported. Children
+get a fresh conversation and applicable trusted instructions, not the parent's history. This is
+SDK/tool isolation, **not an OS security boundary** against faulty trusted extensions.
 
 Reports and private child transcripts live outside the repository under
 `<getAgentDir()>/bluclawd/subagents/<parent-session>/<run>/`. The parent gets a bounded, untrusted

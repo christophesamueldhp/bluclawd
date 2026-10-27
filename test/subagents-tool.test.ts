@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, Type } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools, Type } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -387,6 +387,111 @@ describe("Task 6 (M1) — Foreground subagent tool integration", () => {
 				const text = bgResult.content.map((c) => (c.type === "text" ? c.text : "")).join("");
 				expect(text).toContain('not supported in one-shot "print" mode');
 			}
+		} finally {
+			session.dispose();
+		}
+	});
+});
+
+describe("Ticket #7 — Uncapped saved roles", () => {
+	function writeRole(dir: string, name: string, extra: string[] = []) {
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, `${name}.md`),
+			["---", `name: ${name}`, `description: Role ${name}.`, ...extra, "---", "Do the assigned work."].join("\n"),
+		);
+	}
+
+	async function routedDescription(cwd: string, agentDir: string) {
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
+		try {
+			await session.bindExtensions({ mode: "print" });
+			let description = "";
+			faux.setResponses([
+				(context) => {
+					description = getCurrentTools(context.messages).find((t) => t.name === "subagent")?.description ?? "";
+					return fauxAssistantMessage("Done.");
+				},
+			]);
+			await session.prompt("Which roles exist?", { expandPromptTemplates: false });
+			return description;
+		} finally {
+			session.dispose();
+		}
+	}
+
+	it("offers every one of 40 saved roles to the orchestrator", async () => {
+		const cwd = makeTempDir("roles40-cwd");
+		const agentDir = makeTempDir("roles40-agent");
+		for (let i = 0; i < 30; i++) writeRole(join(agentDir, "agents"), `user-role-${i}`);
+		for (let i = 0; i < 10; i++) writeRole(join(cwd, ".pi", "agents"), `project-role-${i}`);
+
+		const description = await routedDescription(cwd, agentDir);
+
+		for (let i = 0; i < 30; i++) expect(description).toContain(`user-role-${i}`);
+		for (let i = 0; i < 10; i++) expect(description).toContain(`project-role-${i}`);
+		expect(description).not.toMatch(/maxTurns/);
+	});
+
+	it("offers a saved role with a long description and large instructions", async () => {
+		const cwd = makeTempDir("large-cwd");
+		const agentDir = makeTempDir("large-agent");
+		mkdirSync(join(agentDir, "agents"), { recursive: true });
+		const description = `Large role ${"d".repeat(600)}`;
+		writeFileSync(
+			join(agentDir, "agents", "large-role.md"),
+			["---", "name: large-role", `description: ${description}`, "---", "x".repeat(40 * 1024)].join("\n"),
+		);
+
+		expect(await routedDescription(cwd, agentDir)).toContain(description);
+	});
+
+	it("runs a saved role without tools on the current read-only path", async () => {
+		const cwd = makeTempDir("inherit-cwd");
+		const agentDir = makeTempDir("inherit-agent");
+		writeRole(join(agentDir, "agents"), "general-purpose");
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
+		try {
+			await session.bindExtensions({ mode: "print" });
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("subagent", { agent: "general-purpose", task: "Report." }, { id: "inherit" }),
+				]),
+				(context) => {
+					const childTools = getCurrentTools(context.messages).map((t) => t.name);
+					return fauxAssistantMessage(`Child tools: ${childTools.sort().join(",")}`);
+				},
+				fauxAssistantMessage("Done."),
+			]);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+			const result = session.messages.find((m) => m.role === "toolResult" && m.toolCallId === "inherit");
+			expect(result?.role === "toolResult" && result.isError).toBe(false);
+			const text =
+				result?.role === "toolResult" ? result.content.map((c) => (c.type === "text" ? c.text : "")).join("") : "";
+			expect(text).toContain("Child tools: find,grep,ls,read");
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("refuses a saved role that still declares the obsolete maxTurns field", async () => {
+		const cwd = makeTempDir("maxturns-cwd");
+		const agentDir = makeTempDir("maxturns-agent");
+		writeRole(join(agentDir, "agents"), "explorer", ["maxTurns: 6"]);
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
+		try {
+			await session.bindExtensions({ mode: "print" });
+			faux.setResponses([
+				fauxAssistantMessage([fauxToolCall("subagent", { agent: "explorer", task: "Inspect." }, { id: "legacy" })]),
+				fauxAssistantMessage("Refused."),
+			]);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+			const result = session.messages.find((m) => m.role === "toolResult" && m.toolCallId === "legacy");
+			expect(result?.role === "toolResult" && result.isError).toBe(true);
+			const text =
+				result?.role === "toolResult" ? result.content.map((c) => (c.type === "text" ? c.text : "")).join("") : "";
+			expect(text).toMatch(/maxTurns/);
+			expect(text).toMatch(/remove/i);
 		} finally {
 			session.dispose();
 		}

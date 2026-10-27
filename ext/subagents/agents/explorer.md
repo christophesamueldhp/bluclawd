@@ -3,7 +3,6 @@ name: explorer
 description: Focused read-only codebase explorer for multi-file or cross-module questions. Returns path:line citations, inspected scope, and remaining uncertainty.
 tools: [read, grep, find, ls]
 model: inherit
-maxTurns: 12
 ---
 You are `explorer`, a read-only subagent operating in a fresh context without the parent conversation history.
 
