@@ -2049,7 +2049,6 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
 		try {
 			await session.bindExtensions({ mode: "rpc" });
-			const signal = new AbortController();
 			faux.setResponses([
 				fauxAssistantMessage([
 					fauxToolCall(
@@ -2079,7 +2078,6 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 			]);
 			await session.prompt("Run two.", { expandPromptTemplates: false });
 			expect(toolResultText(session, "sib").text).toMatch(/sibling receipt: .*done-one.* has finished/);
-			signal.abort();
 
 			const doneRun = (toolResultText(session, "done").result?.details as { runId: string }).runId;
 			await session.reload();
@@ -2094,6 +2092,75 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 			const afterReload = toolResultText(session, "after_reload");
 			expect(afterReload.result?.isError).toBe(true);
 			expect(afterReload.text).toMatch(/invalidated: .*reloaded or replaced; spawn a new subagent/);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("refuses to resume a stopped child", async () => {
+		const cwd = makeTempDir("resume-stopped-cwd");
+		const agentDir = makeTempDir("resume-stopped-agent");
+		const hold = defineTool({
+			name: "hold",
+			label: "Hold",
+			description: "Waits until aborted.",
+			parameters: Type.Object({}),
+			execute: async (_id, _params, signal) => {
+				await new Promise((resolve) => signal?.addEventListener("abort", resolve));
+				return { content: [{ type: "text", text: "aborted" }], details: undefined };
+			},
+		});
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir, extraTools: [hold] });
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			let parentStep = 0;
+			const main = [
+				fauxAssistantMessage([
+					fauxToolCall(
+						"subagent",
+						{
+							agent: "general-purpose",
+							name: "stuck",
+							task: "Hold.",
+							background: true,
+							model: "faux-tool/faux-alt",
+							thinkingLevel: "off",
+						},
+						{ id: "spawn" },
+					),
+				]),
+				fauxAssistantMessage("Launched."),
+			];
+			faux.setResponses(
+				Array.from(
+					{ length: 8 },
+					() => (_c: TranscriptContext, _o: unknown, _s: unknown, model: { id: string }) =>
+						model.id === "faux-alt"
+							? fauxAssistantMessage([fauxToolCall("hold", {}, { id: `hold_${Math.random()}` })])
+							: (main[parentStep++] ?? fauxAssistantMessage("Parent ack.")),
+				),
+			);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+			const runId = (toolResultText(session, "spawn").result?.details as { runId: string }).runId;
+			faux.setResponses([
+				fauxAssistantMessage([fauxToolCall("subagent_stop", { agent: "stuck" }, { id: "stop" })]),
+				fauxAssistantMessage("Stopped."),
+			]);
+			await session.prompt("Stop it.", { expandPromptTemplates: false });
+			await waitFor(() => readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "cancelled");
+
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("subagent_message", { to: "stuck", content: "Go on." }, { id: "again" }),
+				]),
+				fauxAssistantMessage("Ok."),
+			]);
+			await session.prompt("Resume it.", { expandPromptTemplates: false });
+			const again = toolResultText(session, "again");
+			expect(again.result?.isError).toBe(true);
+			expect(again.text).toMatch(
+				/unavailable: "stuck" \(sub_[^)]+\) is cancelled; only a completed subagent can be resumed/,
+			);
 		} finally {
 			session.dispose();
 		}
