@@ -22,7 +22,9 @@ import { createSubagentPolicySnapshot, evaluateSubagentDelegationDeny } from "..
 import {
 	type AgentDefinitionCatalog,
 	discoverAgentDefinitions,
+	EXTENDED_SUBAGENTS_RELEASED,
 	formatAgentRoutingDescriptions,
+	isReadOnlySubagentTools,
 	resolveAgentDefinition,
 } from "./definitions.ts";
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
@@ -574,6 +576,20 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 				const definition = resolvedDef.definition;
+				if (!isReadOnlySubagentTools(definition.tools)) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: !EXTENDED_SUBAGENTS_RELEASED
+									? "Isolated subagent execution is not released; shell/write capabilities remain disabled."
+									: "Isolated subagent execution backend is unavailable.",
+							},
+						],
+						details: undefined,
+						isError: true,
+					};
+				}
 
 				// 4. Validate child read-policy snapshot
 				const policyRes = createSubagentPolicySnapshot({

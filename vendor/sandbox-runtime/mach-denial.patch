@@ -1,0 +1,670 @@
+diff --git a/src/sandbox/macos-sandbox-utils.ts b/src/sandbox/macos-sandbox-utils.ts
+index 1eb0db7..523c4fa 100644
+--- a/src/sandbox/macos-sandbox-utils.ts
++++ b/src/sandbox/macos-sandbox-utils.ts
+@@ -1,3 +1,4 @@
++// Modified for bluclawd: explicit Mach-lookup denial. See BLUCLAWD-NOTICE.txt.
+ import { quote } from '../utils/shell-quote.js'
+ import { spawn } from 'child_process'
+ import * as path from 'path'
+@@ -57,6 +58,7 @@ export interface MacOSSandboxParams {
+   allowAllUnixSockets?: boolean
+   allowLocalBinding?: boolean
+   allowMachLookup?: string[]
++  denyMachLookup?: string[]
+   readConfig: FsReadRestrictionConfig | undefined
+   writeConfig: FsWriteRestrictionConfig | undefined
+   /** Environment variable names to unset for the sandboxed child (env -u) */
+@@ -1055,6 +1057,7 @@ function generateSandboxProfile({
+   allowAllUnixSockets,
+   allowLocalBinding,
+   allowMachLookup,
++  denyMachLookup,
+   allowPty,
+   allowGitConfig = false,
+   enableWeakerNetworkIsolation = false,
+@@ -1072,6 +1075,7 @@ function generateSandboxProfile({
+   allowAllUnixSockets?: boolean
+   allowLocalBinding?: boolean
+   allowMachLookup?: string[]
++  denyMachLookup?: string[]
+   allowPty?: boolean
+   allowGitConfig?: boolean
+   enableWeakerNetworkIsolation?: boolean
+@@ -1396,6 +1400,16 @@ function generateSandboxProfile({
+     profile.push(')')
+   }
+ 
++  if (denyMachLookup?.length) {
++    profile.push('')
++    profile.push('; Explicit Mach denials take precedence over all allowances')
++    profile.push(
++      ...denyMachLookup.map(
++        name => `(deny mach-lookup (global-name ${escapePath(name)}))`,
++      ),
++    )
++  }
++
+   return profile.join('\n')
+ }
+ 
+@@ -1425,6 +1439,7 @@ export function wrapCommandWithSandboxMacOS(
+     allowAllUnixSockets,
+     allowLocalBinding,
+     allowMachLookup,
++    denyMachLookup,
+     readConfig,
+     writeConfig,
+     unsetEnvVars,
+@@ -1479,7 +1494,8 @@ export function wrapCommandWithSandboxMacOS(
+     !hasReadRestrictions &&
+     !hasWriteRestrictions &&
+     !hasEnvRestrictions &&
+-    !hasGitConfig
++    !hasGitConfig &&
++    !denyMachLookup?.length
+   ) {
+     return command
+   }
+@@ -1501,6 +1517,7 @@ export function wrapCommandWithSandboxMacOS(
+     allowAllUnixSockets,
+     allowLocalBinding,
+     allowMachLookup,
++    denyMachLookup,
+     allowPty,
+     allowGitConfig,
+     enableWeakerNetworkIsolation,
+diff --git a/src/sandbox/sandbox-config.ts b/src/sandbox/sandbox-config.ts
+index 3c4f969..18f7ba4 100644
+--- a/src/sandbox/sandbox-config.ts
++++ b/src/sandbox/sandbox-config.ts
+@@ -1,3 +1,4 @@
++// Modified for bluclawd: explicit Mach-lookup denial. See BLUCLAWD-NOTICE.txt.
+ /**
+  * Configuration for Sandbox Runtime
+  * This is the main configuration interface that consumers pass to SandboxManager.initialize()
+@@ -757,6 +758,25 @@ export const NetworkConfigSchema = z.object({
+     .describe(
+       'macOS only: Additional XPC/Mach service names to allow looking up. Supports trailing-wildcard prefix matching (e.g., "2BUA8C4S2C.com.1password.*"). Needed for tools like 1Password CLI, Playwright, or the iOS Simulator that communicate via XPC.',
+     ),
++  denyMachLookup: z
++    .array(
++      z
++        .string()
++        .refine(
++          value =>
++            Buffer.byteLength(value, 'utf8') > 0 &&
++            Buffer.byteLength(value, 'utf8') <= 127 &&
++            !/[*\p{Cc}]/u.test(value),
++          {
++            message:
++              'Expected an exact Mach service name of 1–127 UTF-8 bytes without wildcards or control characters.',
++          },
++        ),
++    )
++    .optional()
++    .describe(
++      'Exact global Mach service names to deny. Session and per-execution denials are unioned; unsupported backends refuse nonempty denials.',
++    ),
+   httpProxyPort: z
+     .number()
+     .int()
+diff --git a/src/sandbox/sandbox-manager.ts b/src/sandbox/sandbox-manager.ts
+index 545f5df..110619d 100644
+--- a/src/sandbox/sandbox-manager.ts
++++ b/src/sandbox/sandbox-manager.ts
+@@ -1,3 +1,4 @@
++// Modified for bluclawd: explicit Mach-lookup denial. See BLUCLAWD-NOTICE.txt.
+ import {
+   hasNameReading,
+   literalReadLists,
+@@ -41,6 +42,7 @@ import type { RipgrepConfig } from '../utils/ripgrep.js'
+ import { getPlatform, getWslVersion } from '../utils/platform.js'
+ import * as fs from 'fs'
+ import { randomBytes } from 'node:crypto'
++import { NetworkConfigSchema } from './sandbox-config.js'
+ import type {
+   CredentialsConfig,
+   FilesystemPathEntry,
+@@ -1131,7 +1133,18 @@ async function initializeSteps(
+   }
+ 
+   // Store config for use by other functions
+-  config = runtimeConfig
++  config =
++    runtimeConfig.network.denyMachLookup === undefined
++      ? runtimeConfig
++      : {
++          ...runtimeConfig,
++          network: {
++            ...runtimeConfig.network,
++            denyMachLookup: NetworkConfigSchema.shape.denyMachLookup
++              .unwrap()
++              .parse(runtimeConfig.network.denyMachLookup),
++          },
++        }
+   configInstalls++
+ 
+   // Resolve parent/upstream proxy from config or HTTP_PROXY env before we
+@@ -2226,6 +2239,40 @@ function getAllowMachLookup(): string[] | undefined {
+   return config?.network?.allowMachLookup
+ }
+ 
++function copyMachLookupDenials(
++  customConfig?: Partial<SandboxRuntimeConfig>,
++): Partial<SandboxRuntimeConfig> | undefined {
++  if (customConfig?.network?.denyMachLookup === undefined) return customConfig
++  return {
++    ...customConfig,
++    network: {
++      ...customConfig.network,
++      denyMachLookup: NetworkConfigSchema.shape.denyMachLookup
++        .unwrap()
++        .parse(customConfig.network.denyMachLookup),
++    },
++  }
++}
++
++function getDenyMachLookup(
++  customConfig?: Partial<SandboxRuntimeConfig>,
++): string[] {
++  const denied = [
++    ...new Set([
++      ...(NetworkConfigSchema.shape.denyMachLookup.parse(
++        config?.network?.denyMachLookup,
++      ) ?? []),
++      ...(NetworkConfigSchema.shape.denyMachLookup.parse(
++        customConfig?.network?.denyMachLookup,
++      ) ?? []),
++    ]),
++  ]
++  if (denied.length > 0 && getPlatform() !== 'macos') {
++    throw new Error('denyMachLookup is unsupported on this sandbox backend.')
++  }
++  return denied
++}
++
+ function getIgnoreViolations(): Record<string, string[]> | undefined {
+   return config?.ignoreViolations
+ }
+@@ -2397,6 +2444,7 @@ async function wrapWithSandbox(
+   abortSignal?: AbortSignal,
+   options?: WrapWithSandboxOptions,
+ ): Promise<string> {
++  customConfig = copyMachLookupDenials(customConfig)
+   return wrapWithSandboxAgain(
+     0,
+     command,
+@@ -2446,6 +2494,7 @@ async function wrapWithSandboxOnce(
+   options?: WrapWithSandboxOptions,
+ ): Promise<string> {
+   const platform = getPlatform()
++  const denyMachLookup = getDenyMachLookup(customConfig)
+   const commandId = options?.commandId
+   registerCommandText(command, options)
+   const startedWith = config
+@@ -2703,6 +2752,7 @@ async function wrapWithSandboxOnce(
+         allowAllUnixSockets: getAllowAllUnixSockets(),
+         allowLocalBinding: getAllowLocalBinding(),
+         allowMachLookup: getAllowMachLookup(),
++        denyMachLookup,
+         ignoreViolations: getIgnoreViolations(),
+         allowPty,
+         allowGitConfig: getAllowGitConfig(),
+@@ -2806,6 +2856,8 @@ async function wrapWithSandboxArgv(
+   cwd?: string,
+   options?: WrapWithSandboxOptions,
+ ): Promise<{ argv: string[]; env: NodeJS.ProcessEnv }> {
++  customConfig = copyMachLookupDenials(customConfig)
++  getDenyMachLookup(customConfig)
+   const platform = getPlatform()
+ 
+   if (platform === 'windows') {
+diff --git a/test/fixtures/mach-lookup.c b/test/fixtures/mach-lookup.c
+new file mode 100644
+index 0000000..afd6198
+--- /dev/null
++++ b/test/fixtures/mach-lookup.c
+@@ -0,0 +1,22 @@
++#include <mach/mach.h>
++#include <servers/bootstrap.h>
++#include <stdio.h>
++#include <unistd.h>
++
++int main(void) {
++  const char *names[] = {"com.apple.securityd.xpc", "com.apple.SecurityServer"};
++  alarm(1);
++  fputs("probe_started\n", stderr);
++  fflush(stderr);
++  printf("{\"version\":1,\"lookups\":[");
++  for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
++    mach_port_t port = MACH_PORT_NULL;
++    kern_return_t kr = bootstrap_look_up(bootstrap_port, names[i], &port);
++    if (kr == KERN_SUCCESS && MACH_PORT_VALID(port)) {
++      (void)mach_port_deallocate(mach_task_self(), port);
++    }
++    printf("%s{\"service\":\"%s\",\"kr\":%d}", i ? "," : "", names[i], kr);
++  }
++  puts("]}");
++  return 0;
++}
+diff --git a/test/sandbox/mach-lookup-config.test.ts b/test/sandbox/mach-lookup-config.test.ts
+new file mode 100644
+index 0000000..31f31d7
+--- /dev/null
++++ b/test/sandbox/mach-lookup-config.test.ts
+@@ -0,0 +1,200 @@
++import { afterEach, describe, expect, test, spyOn } from 'bun:test'
++import {
++  NetworkConfigSchema,
++  SandboxManager,
++  SandboxRuntimeConfigSchema,
++  type SandboxRuntimeConfig,
++} from '../../src/index.js'
++import * as platform from '../../src/utils/platform.js'
++
++function config(denials?: readonly string[]): SandboxRuntimeConfig {
++  return {
++    network: {
++      allowedDomains: [],
++      deniedDomains: [],
++      ...(denials === undefined ? {} : { denyMachLookup: [...denials] }),
++    },
++    filesystem: { disabled: true, denyRead: [], allowWrite: [], denyWrite: [] },
++  }
++}
++
++afterEach(async () => {
++  await SandboxManager.reset()
++})
++
++describe('exact Mach lookup denial configuration', () => {
++  test('retains the public denial array instead of stripping unknown keys', () => {
++    const parsed = SandboxRuntimeConfigSchema.parse(
++      config(['com.apple.securityd.xpc', 'com.apple.SecurityServer']),
++    )
++    expect(parsed.network.denyMachLookup).toEqual([
++      'com.apple.securityd.xpc',
++      'com.apple.SecurityServer',
++    ])
++  })
++
++  test.each([
++    '',
++    '*',
++    'com.example.*',
++    'a*b',
++    'a\0b',
++    'a\nb',
++    'a\u0085b',
++    'a'.repeat(128),
++    'é'.repeat(64),
++  ])('rejects invalid exact name %j', name => {
++    expect(NetworkConfigSchema.safeParse(config([name]).network).success).toBe(
++      false,
++    )
++  })
++
++  test('preserves omitted, empty and UTF-8 byte-boundary values', () => {
++    expect(
++      SandboxRuntimeConfigSchema.parse(config()).network.denyMachLookup,
++    ).toBeUndefined()
++    expect(
++      SandboxRuntimeConfigSchema.parse(config([])).network.denyMachLookup,
++    ).toEqual([])
++    expect(
++      SandboxRuntimeConfigSchema.parse(config(['é'.repeat(63) + 'a'])).network
++        .denyMachLookup,
++    ).toEqual(['é'.repeat(63) + 'a'])
++  })
++
++  test('treats punctuation as literal data, not a policy fragment', () => {
++    const name = 'com.example.") (allow default) ("\\name'
++    expect(
++      SandboxRuntimeConfigSchema.parse(config([name])).network.denyMachLookup,
++    ).toEqual([name])
++  })
++
++  test.if(process.platform === 'darwin').each([
++    {
++      session: ['com.example.session'],
++      custom: undefined,
++      want: ['com.example.session'],
++    },
++    {
++      session: ['com.example.session'],
++      custom: [],
++      want: ['com.example.session'],
++    },
++    {
++      session: [],
++      custom: ['com.example.custom'],
++      want: ['com.example.custom'],
++    },
++    {
++      session: ['com.example.shared'],
++      custom: ['com.example.shared', 'com.example.custom'],
++      want: ['com.example.shared', 'com.example.custom'],
++    },
++  ])(
++    'carries session/custom union through real wrapping: %j',
++    async ({ session, custom, want }) => {
++      const initial = config(session)
++      const override =
++        custom === undefined ? undefined : { network: config(custom).network }
++      const before = structuredClone({ initial, override })
++      SandboxManager.updateConfig(initial)
++      const wrapped = await SandboxManager.wrapWithSandbox(
++        'true',
++        '/bin/sh',
++        override,
++      )
++      for (const name of want) {
++        const rule = `(deny mach-lookup (global-name ${JSON.stringify(name)}))`
++        expect(wrapped.split(rule).length - 1).toBe(1)
++      }
++      expect({ initial, override }).toEqual(before)
++    },
++  )
++
++  test.if(process.platform === 'darwin')(
++    'copies custom denials before the asynchronous wrapping turn',
++    async () => {
++      SandboxManager.updateConfig(config())
++      const override = { network: config(['com.example.original']).network }
++      const wrapping = SandboxManager.wrapWithSandbox(
++        'true',
++        '/bin/sh',
++        override,
++      )
++      override.network.denyMachLookup!.splice(0)
++      const wrapped = await wrapping
++      expect(wrapped).toContain(
++        '(deny mach-lookup (global-name "com.example.original"))',
++      )
++    },
++  )
++
++  test.if(process.platform === 'darwin')(
++    'uses a replacement session policy without dropping the copied custom denial',
++    async () => {
++      SandboxManager.updateConfig(config(['com.example.old']))
++      const wrapping = SandboxManager.wrapWithSandbox('true', '/bin/sh', {
++        network: config(['com.example.custom']).network,
++      })
++      await Promise.resolve()
++      SandboxManager.updateConfig(config(['com.example.new']))
++      const wrapped = await wrapping
++      expect(wrapped).not.toContain(
++        '(deny mach-lookup (global-name "com.example.old"))',
++      )
++      expect(wrapped).toContain(
++        '(deny mach-lookup (global-name "com.example.new"))',
++      )
++      expect(wrapped).toContain(
++        '(deny mach-lookup (global-name "com.example.custom"))',
++      )
++    },
++  )
++
++  test.if(process.platform === 'darwin')(
++    'copies initialized session denials independently of caller arrays',
++    async () => {
++      const initial = config(['com.example.initial'])
++      initial.network.httpProxyPort = 31090
++      initial.network.socksProxyPort = 31091
++      initial.ripgrep = { command: '/opt/homebrew/bin/rg' }
++      await SandboxManager.initialize(initial)
++      initial.network.denyMachLookup!.splice(0)
++      const wrapped = await SandboxManager.wrapWithSandbox('true', '/bin/sh')
++      expect(
++        wrapped.includes(
++          '(deny mach-lookup (global-name "com.example.initial"))',
++        ),
++      ).toBe(true)
++    },
++  )
++
++  test('refuses Windows argv without requiring a native helper', async () => {
++    SandboxManager.updateConfig(config(['com.example.required']))
++    const platformSpy = spyOn(platform, 'getPlatform').mockReturnValue(
++      'windows',
++    )
++    try {
++      await expect(SandboxManager.wrapWithSandboxArgv('true')).rejects.toThrow(
++        'denyMachLookup',
++      )
++    } finally {
++      platformSpy.mockRestore()
++    }
++  })
++
++  test('rejects nonempty denials on a non-macOS backend through both public wrappers', async () => {
++    SandboxManager.updateConfig(config(['com.example.required']))
++    const platformSpy = spyOn(platform, 'getPlatform').mockReturnValue('linux')
++    try {
++      await expect(SandboxManager.wrapWithSandbox('true')).rejects.toThrow(
++        'denyMachLookup',
++      )
++      await expect(SandboxManager.wrapWithSandboxArgv('true')).rejects.toThrow(
++        'denyMachLookup',
++      )
++    } finally {
++      platformSpy.mockRestore()
++    }
++  })
++})
+diff --git a/test/sandbox/macos-mach-lookup-deny.test.ts b/test/sandbox/macos-mach-lookup-deny.test.ts
+new file mode 100644
+index 0000000..946d3d7
+--- /dev/null
++++ b/test/sandbox/macos-mach-lookup-deny.test.ts
+@@ -0,0 +1,208 @@
++import { afterEach, beforeAll, describe, expect, test } from 'bun:test'
++import { spawnSync } from 'node:child_process'
++import { mkdtempSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { fileURLToPath } from 'node:url'
++import { SandboxManager, type SandboxRuntimeConfig } from '../../src/index.js'
++import { wrapCommandWithSandboxMacOS } from '../../src/sandbox/macos-sandbox-utils.js'
++
++const services = ['com.apple.securityd.xpc', 'com.apple.SecurityServer']
++let executable: string
++let directory: string
++const env = () => ({
++  PATH: '/usr/bin:/bin',
++  HOME: directory,
++  TMPDIR: directory,
++  OPENSSL_CONF: '/dev/null',
++})
++const command = () => "'" + executable.replace(/'/g, "'\"'\"'") + "'"
++
++function probe(wrapped?: string): number[] {
++  const started = performance.now()
++  const result = spawnSync(
++    wrapped ? '/bin/sh' : executable,
++    wrapped ? ['-c', wrapped] : [],
++    {
++      env: env(),
++      encoding: 'utf8',
++      timeout: 2500,
++      maxBuffer: 8192,
++    },
++  )
++  if (result.error || result.status !== 0 || result.signal) {
++    console.error(
++      JSON.stringify({
++        phase: wrapped ? 'inside' : 'outside',
++        elapsedMs: Math.round(performance.now() - started),
++        code:
++          result.error && 'code' in result.error
++            ? result.error.code
++            : undefined,
++        status: result.status,
++        signal: result.signal,
++        enteredMain: result.stderr?.includes('probe_started') === true,
++        stdoutBytes: result.stdout?.length ?? 0,
++      }),
++    )
++  }
++  expect(result.error).toBeUndefined()
++  expect(result.signal).toBeNull()
++  expect(result.status).toBe(0)
++  const report = JSON.parse(result.stdout)
++  expect(report.version).toBe(1)
++  expect(
++    report.lookups.map((entry: { service: string }) => entry.service),
++  ).toEqual(services)
++  const codes: number[] = report.lookups.map(
++    (entry: { kr: number }) => entry.kr,
++  )
++  expect(codes.every(Number.isInteger)).toBe(true)
++  return codes
++}
++
++function session(
++  denials: readonly string[] | undefined,
++  allows?: readonly string[],
++): SandboxRuntimeConfig {
++  return {
++    network: {
++      allowedDomains: [],
++      deniedDomains: [],
++      ...(denials === undefined ? {} : { denyMachLookup: [...denials] }),
++      allowMachLookup: allows === undefined ? undefined : [...allows],
++    },
++    filesystem: { disabled: true, denyRead: [], allowWrite: [], denyWrite: [] },
++  }
++}
++
++describe.if(process.platform === 'darwin')(
++  'native single-profile Mach lookup denial',
++  () => {
++    beforeAll(() => {
++      directory = mkdtempSync(join(tmpdir(), 'mach-denial-'))
++      executable = join(directory, 'lookup')
++      const build = spawnSync(
++        '/Library/Developer/CommandLineTools/usr/bin/clang',
++        [
++          '-Wall',
++          '-Wextra',
++          '-Werror',
++          '-isysroot',
++          '/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk',
++          fileURLToPath(new URL('../fixtures/mach-lookup.c', import.meta.url)),
++          '-o',
++          executable,
++        ],
++        { env: env(), encoding: 'utf8', timeout: 10000, maxBuffer: 8192 },
++      )
++      expect(build.error).toBeUndefined()
++      expect(build.status).toBe(0)
++    })
++
++    afterEach(async () => {
++      await SandboxManager.reset()
++    })
++
++    test.each([
++      {
++        label: 'built-in allowances',
++        allows: undefined,
++        sessionDenies: services,
++        customDenies: undefined,
++      },
++      {
++        label: 'exact conflicting allowances',
++        allows: services,
++        sessionDenies: services,
++        customDenies: undefined,
++      },
++      {
++        label: 'wildcard conflicting allowance and empty override',
++        allows: ['*'],
++        sessionDenies: services,
++        customDenies: [],
++      },
++      {
++        label: 'literal quotes and backslashes',
++        allows: ['*'],
++        sessionDenies: [...services, 'com.example.") (allow default) ("\\name'],
++        customDenies: undefined,
++      },
++      {
++        label: 'per-execution only',
++        allows: undefined,
++        sessionDenies: [],
++        customDenies: services,
++      },
++      {
++        label: 'session/custom union',
++        allows: ['com.apple.*'],
++        sessionDenies: [services[0]!],
++        customDenies: [services[1]!],
++      },
++    ])(
++      'blocks positively controlled brokers: $label',
++      async ({ allows, sessionDenies, customDenies, label }) => {
++        const initial = session(sessionDenies, allows)
++        const override =
++          customDenies === undefined
++            ? undefined
++            : { network: session(customDenies).network }
++        const original = structuredClone({ initial, override })
++        SandboxManager.updateConfig(initial)
++        const before = probe()
++        const wrapped = await SandboxManager.wrapWithSandbox(
++          command(),
++          '/bin/sh',
++          override,
++        )
++        const inside = probe(wrapped)
++        const after = probe()
++        expect(before.some((kr, i) => kr === 0 && after[i] === 0)).toBe(true)
++        for (let i = 0; i < services.length; i++) {
++          if (before[i] === 0 && after[i] === 0)
++            expect([1100, 1102]).toContain(inside[i])
++          else expect([before[i], after[i]]).toEqual([1102, 1102])
++        }
++        console.log(JSON.stringify({ label, services, before, inside, after }))
++        expect({ initial, override }).toEqual(original)
++        expect(SandboxManager.getConfig()).toEqual(initial)
++      },
++    )
++
++    test('a Mach-only restriction cannot take the no-sandbox fast path', () => {
++      const before = probe()
++      const params = {
++        command: command(),
++        needsNetworkRestriction: false,
++        readConfig: undefined,
++        writeConfig: undefined,
++        denyMachLookup: services,
++      }
++      const inside = probe(wrapCommandWithSandboxMacOS(params))
++      const after = probe()
++      expect(before.some((kr, i) => kr === 0 && after[i] === 0)).toBe(true)
++      for (let i = 0; i < services.length; i++) {
++        if (before[i] === 0 && after[i] === 0)
++          expect([1100, 1102]).toContain(inside[i])
++        else expect([before[i], after[i]]).toEqual([1102, 1102])
++      }
++    })
++
++    test.each([{ denials: undefined }, { denials: [] }])(
++      'omitted/empty denials preserve successful broker lookup: %j',
++      async ({ denials }) => {
++        SandboxManager.updateConfig(session(denials))
++        const before = probe()
++        const inside = probe(
++          await SandboxManager.wrapWithSandbox(command(), '/bin/sh'),
++        )
++        const after = probe()
++        expect(before.some((kr, i) => kr === 0 && after[i] === 0)).toBe(true)
++        expect(inside).toEqual(before)
++        expect(after).toEqual(before)
++      },
++    )
++  },
++)

@@ -11,6 +11,7 @@ import {
 	MAX_DESCRIPTION_CHARS,
 	MAX_SUBAGENT_TURNS,
 	resolveAgentDefinition,
+	workspaceModeForTools,
 } from "../ext/subagents/definitions.ts";
 
 const tempDirs: string[] = [];
@@ -57,6 +58,7 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 		if (reviewer.ok) {
 			expect(reviewer.definition.source).toBe("bundled");
 			expect(reviewer.definition.tools).toEqual(ALLOWED_SUBAGENT_TOOLS);
+			expect(reviewer.definition.workspaceMode).toBe("shared");
 			expect(reviewer.definition.instructions).toContain("path:line");
 			expect(reviewer.definition.instructions).toContain("Scope");
 			expect(reviewer.definition.instructions).toContain("Blockers");
@@ -146,14 +148,14 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 			"utf8",
 		);
 
-		// 2. Forbidden tool (`bash`)
+		// 2. Unsupported external tool
 		writeFileSync(
 			join(userAgentsDir, "shell-worker.md"),
 			[
 				"---",
 				"name: shell-worker",
 				"description: Attempts to enable bash.",
-				"tools: [read, bash]",
+				"tools: [read, mcp__external__write]",
 				"---",
 				"Body",
 			].join("\n"),
@@ -223,7 +225,7 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 		const shellWorker = resolveAgentDefinition(catalog, "shell-worker");
 		expect(shellWorker.ok).toBe(false);
 		if (!shellWorker.ok) {
-			expect(shellWorker.error).toContain("bash");
+			expect(shellWorker.error).toContain("mcp__external__write");
 		}
 
 		// Duplicate name in same scope fails closed
@@ -275,6 +277,62 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 		expect(overflowCatalog.definitions.map((d) => d.name)).toEqual(["explorer", "reviewer"]);
 		expect(overflowCatalog.diagnostics.some((d) => d.includes("maximum of 32"))).toBe(true);
 	});
+
+	it.each([
+		["api-auditor", ["read", "bash"]],
+		["explorer", ["write"]],
+		["reviewer", ["edit", "grep"]],
+		["builder", ["read", "grep", "find", "ls", "edit", "write", "bash"]],
+	])("derives isolation for arbitrary and overridden %s tools", (name, tools) => {
+		const cwd = makeTempDir("capabilities");
+		const agentDir = makeTempDir("capabilities-agent");
+		const agents = join(agentDir, "agents");
+		mkdirSync(agents);
+		writeFileSync(
+			join(agents, `${name}.md`),
+			[
+				"---",
+				`name: ${name}`,
+				"description: Explicit capabilities.",
+				`tools: [${tools.join(", ")}]`,
+				"---",
+				"Stay within the supplied task.",
+			].join("\n"),
+		);
+		const result = resolveAgentDefinition(discoverAgentDefinitions({ cwd, agentDir }), name);
+		expect(result.ok).toBe(true);
+		expect(result.definition?.tools).toEqual(tools);
+		expect(result.definition?.workspaceMode).toBe("isolated");
+	});
+
+	it("does not grant legacy custom agents shell or write tools", () => {
+		const cwd = makeTempDir("legacy");
+		const agentDir = makeTempDir("legacy-agent");
+		mkdirSync(join(agentDir, "agents"));
+		writeFileSync(
+			join(agentDir, "agents", "general-purpose.md"),
+			"---\nname: general-purpose\ndescription: Legacy agent.\n---\nInspect only.",
+		);
+		const role = resolveAgentDefinition(discoverAgentDefinitions({ cwd, agentDir }), "general-purpose").definition!;
+		expect(role.tools).toEqual(["read", "grep", "find", "ls"]);
+		expect(role.workspaceMode).toBe("shared");
+	});
+
+	it.each([
+		{ tools: ["read", "bash"], want: "isolated" },
+		{ tools: ["write"], want: "isolated" },
+		{ tools: ["edit"], want: "isolated" },
+		{ tools: ["read", "grep"], want: "shared" },
+	])("classifies capabilities without consulting an agent name: $tools", ({ tools, want }) => {
+		expect(workspaceModeForTools(tools as never)).toBe(want);
+	});
+
+	it.each([[], ["read", "unknown"], ["Read"], [null], "bash", undefined].map((tools) => ({ tools })))(
+		"rejects malformed capability selection $tools",
+		({ tools }) => {
+			expect(() => workspaceModeForTools(tools as never)).toThrow(/invalid subagent tools/i);
+		},
+	);
 
 	it("freezes discovered definitions so mid-run file edits do not mutate active definitions until reload", () => {
 		const cwd = makeTempDir("freeze-cwd");
