@@ -37,12 +37,6 @@ import {
 } from "./runner.ts";
 import {
 	isTerminalSubagentStatus,
-	MAX_ACTIVE_SUBAGENTS,
-	MAX_PARENT_TURN_RUNS,
-	MAX_PARENT_TURN_TOKENS,
-	MAX_QUEUED_SUBAGENTS,
-	MAX_SUBAGENT_REPORTED_TOKENS,
-	MAX_SUBAGENT_TOOL_CALLS,
 	type SubagentRunRecord,
 	SubagentRunScheduler,
 	type SubagentStopSource,
@@ -64,9 +58,6 @@ const BACKGROUND_BATCH_WINDOW_MS = 40;
 
 export interface SubagentExtensionOptions {
 	agentDir?: string;
-	deadlineMs?: number;
-	maxParentTurnRuns?: number;
-	maxParentTurnTokens?: number;
 	batchWindowMs?: number;
 }
 
@@ -80,7 +71,7 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog): string 
 		"When to delegate:",
 		"- Multi-file codebase exploration where intermediate search output does not belong in the main conversation.",
 		"- Independent code review of a supplied diff or explicit target files.",
-		"- Two independent read-only investigations that can run in parallel (up to 2 active).",
+		"- Independent read-only investigations that can run in parallel.",
 		"",
 		"When NOT to delegate (use direct `grep`, `find`, or `read` instead):",
 		"- Single-symbol or single-file lookups where the target path is already known.",
@@ -146,11 +137,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					activeCtx.ui.setStatus(STATUS_KEYS.subagents, undefined);
 				} else {
 					const runningCount = activeRuns.filter((r) => r.status === "running" || r.status === "starting").length;
-					const queuedCount = activeRuns.filter((r) => r.status === "queued").length;
 					const stoppingCount = activeRuns.filter((r) => r.status === "stopping").length;
 					const parts: string[] = [];
 					if (runningCount > 0) parts.push(`${runningCount} subagent${runningCount === 1 ? "" : "s"}`);
-					if (queuedCount > 0) parts.push(`${queuedCount} queued`);
 					if (stoppingCount > 0) parts.push(`${stoppingCount} stopping`);
 					activeCtx.ui.setStatus(STATUS_KEYS.subagents, activeCtx.ui.theme.fg("dim", parts.join(" · ")));
 				}
@@ -241,9 +230,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		}
 
 		const scheduler = new SubagentRunScheduler({
-			defaultDeadlineMs: options.deadlineMs,
-			maxParentTurnRuns: options.maxParentTurnRuns ?? MAX_PARENT_TURN_RUNS,
-			maxParentTurnTokens: options.maxParentTurnTokens ?? MAX_PARENT_TURN_TOKENS,
 			onStateChange: (record) => {
 				const agentDir = resolveAgentDir();
 				writePersistedRunRecord(agentDir, record);
@@ -704,8 +690,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					taskSummary: summarizeTaskLabel(taskText),
 					startSnapshot,
 					deliveryMode: isBackground ? "background" : "foreground",
-					maxToolCalls: MAX_SUBAGENT_TOOL_CALLS,
-					maxReportedTokens: MAX_SUBAGENT_REPORTED_TOKENS,
 					// Foreground runs link to the invoking tool call's signal; background runs outlive the launch tool call
 					signal: isBackground ? undefined : signal,
 					context: execContext,
@@ -747,7 +731,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 								text: [
 									`Background subagent launched: ${handle.runId}`,
 									`Agent: ${definition.name} (${modelCheck.model.provider}/${modelCheck.model.id})`,
-									`Status: ${handle.record.status} (max ${MAX_ACTIVE_SUBAGENTS} active, ${MAX_QUEUED_SUBAGENTS} queued)`,
+									`Status: ${handle.record.status}`,
 									"The final report will be delivered to this session branch when complete. Use `task_stop` with this run ID to cancel.",
 								].join("\n"),
 							},

@@ -23,8 +23,6 @@ export function isReadOnlySubagentTools(
 	return workspaceModeForTools(tools) === "shared";
 }
 
-export const MAX_SUBAGENT_TURNS = 12;
-
 export type AgentDefinitionSource = "bundled" | "user" | "project";
 
 export interface AgentDefinition {

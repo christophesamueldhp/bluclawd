@@ -293,12 +293,12 @@ export async function runRestrictedSubagent(options: RunRestrictedSubagentOption
 	});
 
 	const lifecycleExtension: ExtensionFactory = (pi: ExtensionAPI) => {
-		pi.on("tool_call", async (event) => {
-			options.controller.recordToolCall(event.toolName, event.input);
+		pi.on("tool_call", async () => {
+			options.controller.recordToolCall();
 			if (options.signal.aborted) {
 				return {
 					block: true,
-					reason: "Subagent run stopped due to budget, repetition, or cancellation limit.",
+					reason: "Subagent run was stopped.",
 					terminate: true,
 				};
 			}
@@ -306,13 +306,7 @@ export async function runRestrictedSubagent(options: RunRestrictedSubagentOption
 		});
 
 		pi.on("tool_result", async (event): Promise<ToolResultEventResult | undefined> => {
-			if (event.isError) {
-				const errText = event.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
-				if (errText.includes("Blocked by permission rule (deny):")) {
-					options.controller.recordPolicyDenial(errText);
-				}
-				return undefined;
-			}
+			if (event.isError) return undefined;
 
 			let capped = false;
 			const nextContent = event.content.map((part) => {

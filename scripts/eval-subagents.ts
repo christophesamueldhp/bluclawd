@@ -346,7 +346,7 @@ async function main(): Promise<void> {
 					noContextFiles: true,
 					disabledBuiltinExtensions: ["mcp", "codemode", "tool_search"],
 					extensionFactories: [
-						...(mode === "delegation" ? [createSubagentsExtension({ agentDir, deadlineMs: 60_000 })] : []),
+						...(mode === "delegation" ? [createSubagentsExtension({ agentDir })] : []),
 						(pi) => {
 							pi.on("tool_call", async (event) => {
 								if (event.toolName === "subagent") delegations++;

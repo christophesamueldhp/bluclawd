@@ -68,7 +68,6 @@ async function createTestSession(options: {
 	cwd: string;
 	agentDir: string;
 	mode?: "tui" | "rpc" | "print" | "json";
-	deadlineMs?: number;
 	batchWindowMs?: number;
 	tokensPerSecond?: number;
 }) {
@@ -104,7 +103,6 @@ async function createTestSession(options: {
 		extensionFactories: [
 			createSubagentsExtension({
 				agentDir: options.agentDir,
-				deadlineMs: options.deadlineMs,
 				batchWindowMs: options.batchWindowMs ?? 15,
 			}),
 		],
@@ -205,6 +203,13 @@ describe("Task 7 (M2) — Background execution, session-bound delivery, drift wa
 
 			await session.prompt("Launch background explorer.", { expandPromptTemplates: false });
 			expect(session.getLastAssistantText()).toBe("Background explorer launched; continuing parent work.");
+
+			const launch = session.messages.find(
+				(m) => m.role === "toolResult" && (m as { toolCallId?: string }).toolCallId === "call_bg_1",
+			) as { content?: Array<{ type: string; text?: string }> } | undefined;
+			const launchText = launch?.content?.map((c) => (c.type === "text" ? c.text : "")).join("") ?? "";
+			expect(launchText).toContain("Status: starting");
+			expect(launchText).not.toMatch(/queued|deadline|max \d+ active/i);
 
 			// Background child is still alive after parent turn completed!
 			const activeList = agentTasks()?.list(session.sessionId) ?? [];

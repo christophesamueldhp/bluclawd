@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,6 +6,7 @@ import { createEmptySubagentUsage, type SubagentRunRecord } from "../ext/subagen
 import {
 	appendParentRunReference,
 	ensureRunStorageDir,
+	getSubagentsRootDir,
 	readBackgroundUsageLedger,
 	readBoundedSubagentReport,
 	readPersistedRunRecord,
@@ -57,14 +58,11 @@ function makeRecord(overrides: Partial<SubagentRunRecord> = {}): SubagentRunReco
 		snapshotDrifted: false,
 		admittedAt: 1000,
 		startedAt: 1050,
-		deadlineAt: 301000,
 		deliveryMode: "foreground",
 		status: "running",
 		complete: false,
 		turnCount: 1,
 		toolCallCount: 2,
-		repeatedCallCount: 1,
-		repeatedDenialCount: 0,
 		usage: {
 			...createEmptySubagentUsage(),
 			input: 200,
@@ -182,6 +180,42 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 
 		const reloadedCompleted = readPersistedRunRecord(agentDir, completedRec.parentSessionId, "sub_done_2");
 		expect(reloadedCompleted?.status).toBe("completed");
+	});
+
+	it("decodes legacy quota records and reconciles a legacy queued run as interrupted without restarting it", () => {
+		const agentDir = makeTempDir("legacy");
+		const parentSessionId = "sess_legacy_1";
+		const writeLegacy = (runId: string, status: string, stopSource?: string) => {
+			const legacy = {
+				...makeRecord({ runId, parentSessionId }),
+				status,
+				stopSource,
+				deadlineAt: 301000,
+				repeatedCallCount: 3,
+				repeatedDenialCount: 0,
+			};
+			const dir = join(getSubagentsRootDir(agentDir), parentSessionId, runId);
+			mkdirSync(dir, { recursive: true });
+			writeFileSync(join(dir, "record.json"), JSON.stringify(legacy));
+			return { type: "custom", customType: SUBAGENT_RUN_CUSTOM_ENTRY, data: { runId } };
+		};
+		const entries = [
+			writeLegacy("sub_legacy_queued", "queued"),
+			writeLegacy("sub_legacy_timeout", "timed_out", "deadline"),
+			writeLegacy("sub_legacy_budget", "budget_exceeded", "budget"),
+		];
+
+		const reconciled = reconcileInterruptedRuns(agentDir, parentSessionId, entries, new Set());
+
+		expect(reconciled.map((r) => [r.runId, r.status])).toEqual([["sub_legacy_queued", "interrupted"]]);
+		expect(readPersistedRunRecord(agentDir, parentSessionId, "sub_legacy_timeout")).toMatchObject({
+			status: "timed_out",
+			stopSource: "deadline",
+		});
+		expect(readPersistedRunRecord(agentDir, parentSessionId, "sub_legacy_budget")).toMatchObject({
+			status: "budget_exceeded",
+			stopSource: "budget",
+		});
 	});
 
 	it("tracks background child usage separately from foreground attributed usage", () => {

@@ -218,10 +218,11 @@ describe("Task 4 (M1) — Restricted child runner", () => {
 		},
 	);
 
-	it("enforces repetitive-call loop termination and preserves partial output and error causes against the real SDK", async () => {
+	it("lets repeated identical calls and repeated denials run to completion and preserves partial output and error causes against the real SDK", async () => {
 		const cwd = makeTempDir("loop-cwd");
 		const agentDir = makeTempDir("loop-agent");
 		writeFileSync(join(cwd, "a.ts"), "export const a = 1;\n", "utf8");
+		writeFileSync(join(cwd, ".env"), "TOKEN=1\n", "utf8");
 
 		const { registry, faux, model } = await createTestParentRegistry(agentDir);
 		const catalog = discoverAgentDefinitions({ cwd, agentDir, projectTrusted: true });
@@ -229,19 +230,28 @@ describe("Task 4 (M1) — Restricted child runner", () => {
 		if (!isReadOnlySubagentTools(explorer.tools)) throw new Error("Expected read-only explorer");
 		const policy = createSubagentPolicySnapshot({
 			cwd,
-			denyRules: [],
+			denyRules: ["Read(.env)"],
 			allowedTools: explorer.tools,
 		}).snapshot!;
 
-		// 3 identical tool calls in a row -> scheduler + runner terminate early as budget_exceeded
 		faux.setResponses([
-			fauxAssistantMessage([
-				{ type: "text", text: "Partial observation from turn 1." },
-				fauxToolCall("read", { path: "a.ts" }, { id: "r1" }),
-			]),
+			fauxAssistantMessage([fauxToolCall("read", { path: "a.ts" }, { id: "r1" })]),
 			fauxAssistantMessage([fauxToolCall("read", { path: "a.ts" }, { id: "r2" })]),
 			fauxAssistantMessage([fauxToolCall("read", { path: "a.ts" }, { id: "r3" })]),
-			fauxAssistantMessage("Should not reach turn 4."),
+			fauxAssistantMessage([fauxToolCall("read", { path: "a.ts" }, { id: "r4" })]),
+			fauxAssistantMessage([fauxToolCall("read", { path: ".env" }, { id: "d1" })]),
+			fauxAssistantMessage([fauxToolCall("read", { path: ".env" }, { id: "d2" })]),
+			fauxAssistantMessage([fauxToolCall("read", { path: ".env" }, { id: "d3" })]),
+			fauxAssistantMessage([fauxToolCall("read", { path: ".env" }, { id: "d4" })]),
+			(context) => {
+				const denied = context.messages.filter(
+					(m) =>
+						m.role === "toolResult" &&
+						m.isError &&
+						m.content.some((c) => c.type === "text" && c.text.includes("Blocked by permission rule")),
+				);
+				return fauxAssistantMessage(`Finished after repeated calls. denied=${denied.length}`);
+			},
 		]);
 
 		const scheduler = new SubagentRunScheduler({
@@ -274,10 +284,9 @@ describe("Task 4 (M1) — Restricted child runner", () => {
 		}).handle!;
 
 		const loopResult = await loopHandle.completion;
-		expect(loopResult.status).toBe("budget_exceeded");
-		expect(loopResult.complete).toBe(false);
-		expect(loopResult.stopReason).toMatch(/repetitive/i);
-		expect(loopResult.summaryText).toContain("Partial observation from turn 1.");
+		expect(loopResult.status).toBe("completed");
+		expect(loopResult.complete).toBe(true);
+		expect(loopResult.summaryText).toContain("Finished after repeated calls. denied=4");
 
 		// Provider error after partial output preserves partial text and marks status failed
 		faux.setResponses([
