@@ -6,6 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { monitorSource } from "../_shared/monitor-source.ts";
 import { ALLOWED_SUBAGENT_TOOLS, type AllowedSubagentTool } from "../subagents/definitions.ts";
+import { SUBAGENT_MESSAGE_TOOL } from "../subagents/messages.ts";
 import { deniedBy, displayRule, grepOutputWithoutDenied, pathListOutputWithoutDenied, searchQueries } from "./rules.ts";
 
 const CAPABILITY_CEILING = new Set<string>(ALLOWED_SUBAGENT_TOOLS);
@@ -214,6 +215,8 @@ export function createChildPolicyExtension(snapshot: SubagentReadPolicySnapshot)
 
 	return (pi: ExtensionAPI) => {
 		pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
+			// Messaging only carries text between agents of the same parent; it reads and writes nothing.
+			if (event.toolName === SUBAGENT_MESSAGE_TOOL) return undefined;
 			if (!CAPABILITY_CEILING.has(event.toolName) || !allowedSet.has(event.toolName)) {
 				return {
 					block: true,

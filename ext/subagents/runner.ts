@@ -116,6 +116,8 @@ export interface RunRestrictedSubagentOptions extends SubagentRunnerExecuteParam
 	parentModelRegistry: ModelRegistry;
 	projectTrusted: boolean;
 	childSessionDir?: string;
+	/** Extra runtime-bound tools for the child, such as its message tool. */
+	childTools?: readonly ToolDefinition[];
 	onChildSessionCreated?: (session: AgentSession) => void;
 }
 
@@ -389,9 +391,9 @@ export async function runRestrictedSubagent(options: RunRestrictedSubagentOption
 		model: resolvedModel.model,
 		thinkingLevel: resolvedModel.thinkingLevel,
 		noTools: "builtin",
-		tools: [...options.policySnapshot.allowedTools],
+		tools: [...options.policySnapshot.allowedTools, ...(options.childTools ?? []).map((tool) => tool.name)],
 		excludeTools: FORBIDDEN_TOOL_PATTERNS,
-		customTools: approvedTools,
+		customTools: [...approvedTools, ...(options.childTools ?? [])],
 		resourceLoader,
 		sessionManager,
 		settingsManager,

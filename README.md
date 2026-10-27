@@ -347,6 +347,14 @@ nothing is substituted, so a role or call that picks a non-reasoning model must 
 `thinkingLevel: off`. A role omits `thinkingLevel` to inherit it. `subagent_models` lists each model's auth status, supported thinking levels,
 and whether a child can run it.
 
+While runs are in progress, `subagent_message({ to, content })` carries text between the
+orchestrator (`parent`) and running children (`sub_…`), including sibling to sibling within the
+same parent session. The sender is bound by the runtime, never taken from the message. A child
+receives messages at its next safe point without a new turn; a child message wakes an idle
+orchestrator. Receipts say `accepted`, `unavailable` (unknown, finished, or other session), or
+`invalidated` (session reloaded), never handled. Messages are untrusted data: they cannot approve
+actions, grant tools, or restart a finished child.
+
 Reports and private child transcripts live outside the repository under
 `<getAgentDir()>/bluclawd/subagents/<parent-session>/<run>/`. The parent gets a bounded, untrusted
 report with runtime-owned execution and verification fields. `Verification: not_run` means the child

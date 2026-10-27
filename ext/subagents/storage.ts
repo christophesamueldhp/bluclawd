@@ -1,4 +1,13 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+	appendFileSync,
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { sanitizeReportText } from "./results.ts";
@@ -298,6 +307,18 @@ export function reconcileInterruptedRuns(
 	}
 
 	return interrupted;
+}
+
+/** Appends one line per message attempt (who, to whom, order, outcome) to the session's message record. */
+export function appendSubagentMessageRecord(agentDir: string, parentSessionId: string, record: object): void {
+	if (!isSafePathSegment(parentSessionId)) return;
+	const sessionDir = join(getSubagentsRootDir(agentDir), parentSessionId);
+	try {
+		ensurePrivateDir(sessionDir);
+		appendFileSync(join(sessionDir, "messages.jsonl"), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+	} catch {
+		// The receipt already reached the sender; a lost audit line must not fail the message.
+	}
 }
 
 function getBackgroundLedgerPath(agentDir: string, parentSessionId: string): string | undefined {

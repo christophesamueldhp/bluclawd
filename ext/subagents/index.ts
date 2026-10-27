@@ -1,11 +1,14 @@
 import { join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import {
+	type AgentSession,
+	defineTool,
 	type ExtensionAPI,
 	type ExtensionContext,
 	getAgentDir,
 	type InlineExtension,
 	SettingsManager,
+	type ToolDefinition,
 	type ToolLoadout,
 	type ToolLoadoutChanges,
 } from "@earendil-works/pi-coding-agent";
@@ -33,6 +36,14 @@ import {
 	SUBAGENT_THINKING_LEVELS,
 	type SubagentModelSpec,
 } from "./definitions.ts";
+import {
+	PARENT_MESSAGE_ADDRESS,
+	SUBAGENT_MESSAGE_TOOL,
+	SubagentMessageBus,
+	type SubagentMessageReceipt,
+	type SubagentMessageScope,
+	subagentMessagePayload,
+} from "./messages.ts";
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
 import {
 	captureWorkspaceSnapshot,
@@ -49,6 +60,7 @@ import {
 } from "./runs.ts";
 import {
 	appendParentRunReference,
+	appendSubagentMessageRecord,
 	ensureRunStorageDir,
 	readBoundedSubagentReport,
 	readPersistedRunRecord,
@@ -117,6 +129,39 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			details: SubagentResultDetails;
 		}> = [];
 		let batchTimer: ReturnType<typeof setTimeout> | undefined;
+		const messageBus = new SubagentMessageBus((record, senderScope) =>
+			appendSubagentMessageRecord(resolveAgentDir(), senderScope.parentSessionId, { ...record, at: Date.now() }),
+		);
+
+		const messageParameters = Type.Object(
+			{
+				to: Type.String({ description: 'Recipient: a subagent run ID (sub_…) or "parent" for the orchestrator.' }),
+				content: Type.String({ description: "Message text." }),
+			},
+			{ additionalProperties: false },
+		);
+		const formatReceipt = (receipt: SubagentMessageReceipt) => ({
+			content: [
+				{
+					type: "text" as const,
+					text:
+						receipt.status === "accepted"
+							? `Message ${receipt.seq} accepted for delivery (not yet handled).`
+							: `Message ${receipt.seq} ${receipt.status}: ${receipt.reason ?? ""}`,
+				},
+			],
+			details: receipt,
+			isError: receipt.status !== "accepted",
+		});
+		const createChildMessageTool = (address: string, scope: SubagentMessageScope): ToolDefinition =>
+			defineTool({
+				name: SUBAGENT_MESSAGE_TOOL,
+				label: "Message agent",
+				description: `Send a short message to the orchestrator ("parent") or a sibling subagent run ID while you work. Your run ID is ${address}. An unknown recipient's receipt lists who is reachable. Delivery is not a reply; keep working.`,
+				parameters: messageParameters,
+				execute: async (_toolCallId, params) =>
+					formatReceipt(await messageBus.send({ address, scope }, params.to.trim(), params.content)),
+			});
 
 		const isOwnedAndValid = (record: Readonly<SubagentRunRecord>, checkBranch = true): boolean => {
 			if (!activeCtx) return false;
@@ -279,19 +324,56 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const execCtx = params.context as RunExecutionContext;
 				const storage = ensureRunStorageDir(execCtx.agentDir, params.record.parentSessionId, params.record.runId);
 				if (!storage.ok || !storage.runDir) throw new Error(storage.error ?? "Subagent storage is unavailable.");
-				return runRestrictedSubagent({
-					...params,
-					agentDir: execCtx.agentDir,
-					definition: execCtx.definition,
-					task: execCtx.task,
-					policySnapshot: execCtx.policySnapshot,
-					requestedModel: execCtx.requestedModel,
-					parentModel: execCtx.parentModel,
-					requestedThinkingLevel: execCtx.requestedThinkingLevel,
-					parentModelRegistry: execCtx.parentModelRegistry,
-					projectTrusted: execCtx.projectTrusted,
-					childSessionDir: storage.runDir,
+				const { runId } = params.record;
+				const scope = {
+					parentSessionId: params.record.parentSessionId,
+					runtimeGeneration: params.record.runtimeGeneration,
+				};
+				// Messages sent while the child session is still being created wait for it, or fail if it never starts.
+				let resolveSession!: (session: AgentSession) => void;
+				let rejectSession!: (err: Error) => void;
+				const sessionReady = new Promise<AgentSession>((resolve, reject) => {
+					resolveSession = resolve;
+					rejectSession = reject;
 				});
+				sessionReady.catch(() => {});
+				messageBus.register(runId, {
+					scope,
+					deliver: async (message) => {
+						if (scheduler.getRun(runId)?.status === "stopping") throw new Error("it is stopping");
+						const childSession = await sessionReady;
+						// A message never starts a turn on its own; it waits for the child's next safe boundary.
+						await childSession.sendCustomMessage(subagentMessagePayload(message), {
+							deliverAs: "steer",
+							triggerTurn: false,
+						});
+					},
+				});
+				try {
+					return await runRestrictedSubagent({
+						...params,
+						agentDir: execCtx.agentDir,
+						definition: execCtx.definition,
+						task: execCtx.task,
+						policySnapshot: execCtx.policySnapshot,
+						requestedModel: execCtx.requestedModel,
+						parentModel: execCtx.parentModel,
+						requestedThinkingLevel: execCtx.requestedThinkingLevel,
+						parentModelRegistry: execCtx.parentModelRegistry,
+						projectTrusted: execCtx.projectTrusted,
+						childSessionDir: storage.runDir,
+						childTools: [createChildMessageTool(runId, scope)],
+						onChildSessionCreated: (session) => {
+							session.subscribe((event) => {
+								if (event.type === "agent_end") messageBus.unregister(runId, "has finished");
+							});
+							resolveSession(session);
+						},
+					});
+				} finally {
+					rejectSession(new Error("it ended before it could receive messages"));
+					messageBus.unregister(runId, "has finished");
+				}
 			},
 		});
 
@@ -345,8 +427,26 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			},
 		};
 
+		const registerParentEndpoint = () => {
+			if (!activeParentSessionId) return;
+			const scope = { parentSessionId: activeParentSessionId, runtimeGeneration };
+			messageBus.register(PARENT_MESSAGE_ADDRESS, {
+				scope,
+				deliver: async (message) => {
+					deliverOrHold(() => {
+						if (!activeCtx || runtimeGeneration !== scope.runtimeGeneration) return;
+						if (activeParentSessionId !== scope.parentSessionId) return;
+						// Like background completion notices, a child's message wakes an idle orchestrator.
+						pi.sendMessage(subagentMessagePayload(message), { deliverAs: "steer", triggerTurn: true });
+					});
+				},
+			});
+		};
+
 		const invalidateCurrentSessionRuns = (reason: string) => {
 			runtimeGeneration++;
+			// Children of the old generation now get "invalidated" when they message the orchestrator.
+			registerParentEndpoint();
 			if (batchTimer) {
 				clearTimeout(batchTimer);
 				batchTimer = undefined;
@@ -402,6 +502,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 			unpublishTasks?.();
 			unpublishTasks = publishAgentTasks(taskSource);
+			registerParentEndpoint();
 			refreshFooterStatus();
 		});
 
@@ -434,10 +535,39 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		pi.on("session_shutdown", async () => {
 			invalidateCurrentSessionRuns("Parent session shutting down");
+			messageBus.unregister(PARENT_MESSAGE_ADDRESS, "has shut down");
 			await scheduler.waitForSettled();
 			unpublishTasks?.();
 			unpublishTasks = undefined;
 			activeCtx = undefined;
+		});
+
+		pi.registerTool({
+			name: SUBAGENT_MESSAGE_TOOL,
+			label: "Message agent",
+			exposure: "model-only",
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: false,
+				openWorldHint: false,
+			},
+			description:
+				"Send a message to a running subagent by run ID (sub_…). It reaches the child at its next safe point without starting a new turn; the receipt says accepted, unavailable, or invalidated, never handled.",
+			parameters: messageParameters,
+			execute: async (_toolCallId, params) => {
+				if (!activeParentSessionId) {
+					return {
+						content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
+						details: undefined,
+						isError: true,
+					};
+				}
+				const scope = { parentSessionId: activeParentSessionId, runtimeGeneration };
+				return formatReceipt(
+					await messageBus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, params.to.trim(), params.content),
+				);
+			},
 		});
 
 		pi.registerTool({
