@@ -1,7 +1,23 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, getCurrentTools, Type } from "@earendil-works/pi-ai";
+import {
+	fauxAssistantMessage,
+	fauxProvider,
+	fauxToolCall,
+	getCurrentTools,
+	getSystemMessageText,
+	Type,
+} from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	DefaultResourceLoader,
@@ -492,6 +508,109 @@ describe("Ticket #7 — Uncapped saved roles", () => {
 				result?.role === "toolResult" ? result.content.map((c) => (c.type === "text" ? c.text : "")).join("") : "";
 			expect(text).toMatch(/maxTurns/);
 			expect(text).toMatch(/remove/i);
+		} finally {
+			session.dispose();
+		}
+	});
+});
+
+describe("Ticket #11 — Inline run-local roles", () => {
+	function toolResultText(session: { messages: readonly unknown[] }, id: string) {
+		const result = session.messages.find(
+			(m) => (m as { role?: string }).role === "toolResult" && (m as { toolCallId?: string }).toolCallId === id,
+		) as { isError?: boolean; content: Array<{ type: string; text?: string }>; details?: unknown } | undefined;
+		const text = result?.content.map((c) => (c.type === "text" ? c.text : "")).join("") ?? "";
+		return { result, text };
+	}
+
+	it("runs an inline role over a same-named saved role, reports its source as inline, and writes no definition file", async () => {
+		const cwd = makeTempDir("inline-cwd");
+		const agentDir = makeTempDir("inline-agent");
+		const savedPath = join(agentDir, "agents", "schema-checker.md");
+		mkdirSync(dirname(savedPath), { recursive: true });
+		writeFileSync(savedPath, "---\nname: schema-checker\ndescription: Saved role.\n---\nSAVED-MARKER\n");
+		const savedBefore = statSync(savedPath).mtimeMs;
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
+		try {
+			await session.bindExtensions({ mode: "print" });
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall(
+						"subagent",
+						{
+							agent: {
+								name: "schema-checker",
+								description: "Checks schema files.",
+								instructions: "INLINE-MARKER: inspect only the schema directory.",
+							},
+							task: "Check the schema.",
+						},
+						{ id: "inline_ok" },
+					),
+				]),
+				(context) => {
+					const sys = context.messages.find((m) => m.role === "system");
+					const sysText = sys?.role === "system" ? getSystemMessageText(sys) : "";
+					return fauxAssistantMessage(`Child saw marker: ${sysText.includes("INLINE-MARKER")}`);
+				},
+				fauxAssistantMessage("Done."),
+			]);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+
+			const { result, text } = toolResultText(session, "inline_ok");
+			expect(result?.isError, text).toBe(false);
+			expect(text).toContain("Child saw marker: true");
+			expect(text).toContain("agent=schema-checker, source=inline");
+			const record = readPersistedRunRecord(
+				agentDir,
+				session.sessionId,
+				(result?.details as { runId: string }).runId,
+			);
+			expect(record).toMatchObject({ agentName: "schema-checker", definitionSource: "inline" });
+			expect(readdirSync(join(agentDir, "agents"))).toEqual(["schema-checker.md"]);
+			expect(readFileSync(savedPath, "utf8")).toContain("SAVED-MARKER");
+			expect(statSync(savedPath).mtimeMs).toBe(savedBefore);
+			expect(existsSync(join(cwd, ".pi"))).toBe(false);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("rejects invalid inline roles and inline tool widening before admission", async () => {
+		const cwd = makeTempDir("inline-bad-cwd");
+		const agentDir = makeTempDir("inline-bad-agent");
+		const role = { name: "checker", description: "Checks.", instructions: "Check." };
+		const cases = [
+			{
+				id: "bad_name",
+				agent: { ...role, name: "Bad Name" },
+				error: /Invalid agent name "Bad Name" in inline role/,
+			},
+			{ id: "reserved", agent: { ...role, name: "sub_checker" }, error: /reserved task prefixes/ },
+			{ id: "control", agent: { ...role, description: "Bad\u0007desc" }, error: /control characters/ },
+			{ id: "empty_body", agent: { ...role, instructions: "   " }, error: /non-empty instructions/ },
+			{ id: "widen", agent: { ...role, tools: ["read", "bash"] }, error: /not released/ },
+			{ id: "unknown_tool", agent: { ...role, tools: ["mcp"] }, error: /forbidden or unknown tool "mcp"/ },
+		];
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
+		try {
+			await session.bindExtensions({ mode: "print" });
+			const before = faux.state.callCount;
+			faux.setResponses([
+				fauxAssistantMessage(
+					cases.map((c) => fauxToolCall("subagent", { agent: c.agent, task: "Check." }, { id: c.id })),
+				),
+				fauxAssistantMessage("Refused."),
+			]);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+
+			for (const c of cases) {
+				const { result, text } = toolResultText(session, c.id);
+				expect(result?.isError, c.id).toBe(true);
+				expect(text, c.id).toMatch(c.error);
+			}
+			expect(faux.state.callCount - before).toBe(2);
+			expect(existsSync(join(agentDir, "bluclawd", "subagents", session.sessionId))).toBe(false);
 		} finally {
 			session.dispose();
 		}

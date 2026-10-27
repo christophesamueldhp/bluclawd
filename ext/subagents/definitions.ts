@@ -23,7 +23,7 @@ export function isReadOnlySubagentTools(
 	return workspaceModeForTools(tools) === "shared";
 }
 
-export type AgentDefinitionSource = "bundled" | "user" | "project";
+export type AgentDefinitionSource = "bundled" | "user" | "project" | "inline";
 
 export interface AgentDefinition {
 	readonly name: string;
@@ -32,7 +32,15 @@ export interface AgentDefinition {
 	readonly model: "inherit" | `${string}/${string}`;
 	readonly instructions: string;
 	readonly source: AgentDefinitionSource;
-	readonly filePath: string;
+	readonly filePath?: string;
+}
+
+export interface InlineAgentRole {
+	readonly name: string;
+	readonly description: string;
+	readonly instructions: string;
+	readonly tools?: readonly string[];
+	readonly model?: string;
 }
 
 export interface AgentDefinitionCatalog {
@@ -120,6 +128,57 @@ function parseToolsField(rawTools: unknown): {
 		}
 	}
 	return { ok: true, tools: deduped };
+}
+
+type RoleFields = Pick<AgentDefinition, "name" | "description" | "tools" | "model">;
+
+function validateRoleFields(
+	fields: Record<string, unknown>,
+	where: string,
+): { ok: boolean; value?: RoleFields; error?: string } {
+	const rawName = typeof fields.name === "string" ? fields.name.trim() : "";
+	if (!rawName) {
+		return { ok: false, error: `Missing required "name" ${where}` };
+	}
+	if (!AGENT_NAME_RE.test(rawName) || RESERVED_NAME_PREFIXES.some((prefix) => rawName.startsWith(prefix))) {
+		return {
+			ok: false,
+			error: `Invalid agent name "${rawName}" ${where}; must match ${AGENT_NAME_RE.source} and not start with reserved task prefixes (${RESERVED_NAME_PREFIXES.join(", ")})`,
+		};
+	}
+
+	const rawDescription = typeof fields.description === "string" ? fields.description.trim() : "";
+	if (!rawDescription) {
+		return { ok: false, error: `Missing required "description" ${where}` };
+	}
+	if (CONTROL_CHAR_RE.test(rawDescription)) {
+		return { ok: false, error: `Invalid "description" ${where}: must not contain control characters` };
+	}
+
+	const toolsResult = parseToolsField(fields.tools);
+	if (!toolsResult.ok) {
+		return { ok: false, error: `Invalid tools ${where}: ${toolsResult.error ?? "invalid tools"}` };
+	}
+
+	let model: "inherit" | `${string}/${string}` = "inherit";
+	if (fields.model !== undefined) {
+		if (typeof fields.model !== "string") {
+			return { ok: false, error: `Invalid "model" ${where}: must be "inherit" or "provider/model"` };
+		}
+		const trimmedModel = fields.model.trim();
+		if (trimmedModel === "inherit") {
+			model = "inherit";
+		} else if (MODEL_SPEC_RE.test(trimmedModel)) {
+			model = trimmedModel as `${string}/${string}`;
+		} else {
+			return {
+				ok: false,
+				error: `Invalid "model" value "${trimmedModel}" ${where}: must be "inherit" or explicit "provider/model" (model aliases are not supported)`,
+			};
+		}
+	}
+
+	return { ok: true, value: { name: rawName, description: rawDescription, tools: toolsResult.tools, model } };
 }
 
 function parseSingleDefinitionFile(
@@ -241,67 +300,9 @@ function parseSingleDefinitionFile(
 		}
 	}
 
-	if (!rawName) {
-		return {
-			ok: false,
-			candidateNames,
-			error: `Missing required "name" in "${filePath}"`,
-		};
-	}
-	if (!AGENT_NAME_RE.test(rawName) || RESERVED_NAME_PREFIXES.some((prefix) => rawName.startsWith(prefix))) {
-		return {
-			ok: false,
-			candidateNames,
-			error: `Invalid agent name "${rawName}" in "${filePath}"; must match ${AGENT_NAME_RE.source} and not start with reserved task prefixes (${RESERVED_NAME_PREFIXES.join(", ")})`,
-		};
-	}
-
-	const rawDescription = typeof fm.description === "string" ? fm.description.trim() : "";
-	if (!rawDescription) {
-		return {
-			ok: false,
-			candidateNames,
-			error: `Missing required "description" in "${filePath}"`,
-		};
-	}
-	if (CONTROL_CHAR_RE.test(rawDescription)) {
-		return {
-			ok: false,
-			candidateNames,
-			error: `Invalid "description" in "${filePath}": must not contain control characters`,
-		};
-	}
-
-	const toolsResult = parseToolsField(fm.tools);
-	if (!toolsResult.ok) {
-		return {
-			ok: false,
-			candidateNames,
-			error: `Invalid tools in "${filePath}": ${toolsResult.error ?? "invalid tools"}`,
-		};
-	}
-
-	let model: "inherit" | `${string}/${string}` = "inherit";
-	if (fm.model !== undefined) {
-		if (typeof fm.model !== "string") {
-			return {
-				ok: false,
-				candidateNames,
-				error: `Invalid "model" in "${filePath}": must be "inherit" or "provider/model"`,
-			};
-		}
-		const trimmedModel = fm.model.trim();
-		if (trimmedModel === "inherit") {
-			model = "inherit";
-		} else if (MODEL_SPEC_RE.test(trimmedModel)) {
-			model = trimmedModel as `${string}/${string}`;
-		} else {
-			return {
-				ok: false,
-				candidateNames,
-				error: `Invalid "model" value "${trimmedModel}" in "${filePath}": must be "inherit" or explicit "provider/model" (model aliases are not supported)`,
-			};
-		}
+	const fields = validateRoleFields(fm, `in "${filePath}"`);
+	if (!fields.ok || !fields.value) {
+		return { ok: false, candidateNames, error: fields.error };
 	}
 
 	const instructions = parsed.body.trim();
@@ -316,10 +317,7 @@ function parseSingleDefinitionFile(
 	return {
 		ok: true,
 		definition: deepFreezeDefinition({
-			name: rawName,
-			description: rawDescription,
-			tools: toolsResult.tools,
-			model,
+			...fields.value,
 			instructions,
 			source,
 			filePath: resolvedPath,
@@ -462,6 +460,18 @@ export function discoverAgentDefinitions(options: DiscoverAgentDefinitionsOption
 		invalidByName: new Map(effectiveInvalid),
 		diagnostics: Object.freeze(diagnostics),
 	});
+}
+
+export function createInlineAgentDefinition(role: InlineAgentRole): ResolveAgentDefinitionResult {
+	const fields = validateRoleFields({ ...role }, "in inline role");
+	if (!fields.ok || !fields.value) {
+		return { ok: false, error: fields.error };
+	}
+	const instructions = role.instructions.trim();
+	if (!instructions) {
+		return { ok: false, error: `Inline role "${fields.value.name}" must have non-empty instructions` };
+	}
+	return { ok: true, definition: deepFreezeDefinition({ ...fields.value, instructions, source: "inline" }) };
 }
 
 export function resolveAgentDefinition(

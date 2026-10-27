@@ -333,6 +333,11 @@ Explicit models use `provider/model`; virtual routers and model aliases are unsu
 get a fresh conversation and applicable trusted instructions, not the parent's history. This is
 SDK/tool isolation, **not an OS security boundary** against faulty trusted extensions.
 
+The parent can also pass an inline role instead of a name:
+`{ "agent": { "name": "schema-check", "description": "…", "instructions": "…" }, "task": "…" }`,
+with optional `tools` and `model`. An inline role is validated like a saved one, recorded with
+source `inline`, and never written to disk.
+
 Reports and private child transcripts live outside the repository under
 `<getAgentDir()>/bluclawd/subagents/<parent-session>/<run>/`. The parent gets a bounded, untrusted
 report with runtime-owned execution and verification fields. `Verification: not_run` means the child

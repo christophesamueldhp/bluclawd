@@ -193,7 +193,7 @@ export function buildSubagentResultEnvelope(
 	const assembleReport = (summaryContent: string) =>
 		[
 			UNTRUSTED_REPORT_HEADER,
-			`Run: ${record.runId} (agent=${record.agentName}, model=${record.provider}/${record.modelId})`,
+			`Run: ${record.runId} (agent=${record.agentName}, source=${record.definitionSource}, model=${record.provider}/${record.modelId})`,
 			`Execution: ${record.status}`,
 			`Complete: ${record.complete ? "true" : "false"}`,
 			`Snapshot: ${snapshotText}`,

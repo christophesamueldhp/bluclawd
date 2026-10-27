@@ -22,6 +22,7 @@ import { createSubagentPolicySnapshot, evaluateSubagentDelegationDeny } from "..
 import {
 	type AgentDefinitionCatalog,
 	ALLOWED_SUBAGENT_TOOLS,
+	createInlineAgentDefinition,
 	discoverAgentDefinitions,
 	EXTENDED_SUBAGENTS_RELEASED,
 	formatAgentRoutingDescriptions,
@@ -457,9 +458,21 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				};
 			},
 			parameters: Type.Object({
-				agent: Type.String({
-					description: "Subagent role name (for example 'explorer' or 'reviewer').",
-				}),
+				agent: Type.Union([
+					Type.String({
+						description: "Saved subagent role name (for example 'explorer' or 'reviewer').",
+					}),
+					Type.Object(
+						{
+							name: Type.String({ description: "Run-local role name; never saved." }),
+							description: Type.String({ description: "One-line purpose of this role." }),
+							instructions: Type.String({ description: "System instructions for the child." }),
+							tools: Type.Optional(Type.Array(Type.String())),
+							model: Type.Optional(Type.String({ description: '"inherit" or "provider/model".' })),
+						},
+						{ additionalProperties: false, description: "Inline role used only for this run." },
+					),
+				]),
 				task: Type.String({
 					description:
 						"Self-contained task instructions with explicit file paths, symbols, or diff context (max 32 KiB).",
@@ -488,11 +501,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const agentDir = resolveAgentDir();
 				const cwd = ctx.cwd;
 				const projectTrusted = ctx.isProjectTrusted();
-				const agentName = (params.agent ?? "").trim();
+				const inlineRole = typeof params.agent === "string" ? undefined : params.agent;
+				const agentName = (typeof params.agent === "string" ? params.agent : params.agent.name).trim();
 				const taskText = params.task ?? "";
 				const isBackground = params.background === true;
 
-				if (!agentName) {
+				if (!agentName && !inlineRole) {
 					return {
 						content: [{ type: "text", text: "Missing required parameter: agent" }],
 						details: undefined,
@@ -546,15 +560,18 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 
-				// 3. Resolve definition from frozen runtime catalog (or discover once ifsession_start was skipped)
-				const currentCatalog =
-					catalog ??
-					discoverAgentDefinitions({
-						cwd,
-						agentDir,
-						projectTrusted,
-					});
-				const resolvedDef = resolveAgentDefinition(currentCatalog, agentName);
+				// 3. Validate an inline role, or resolve a saved one from the frozen catalog (discovered once if session_start was skipped)
+				const resolvedDef = inlineRole
+					? createInlineAgentDefinition(inlineRole)
+					: resolveAgentDefinition(
+							catalog ??
+								discoverAgentDefinitions({
+									cwd,
+									agentDir,
+									projectTrusted,
+								}),
+							agentName,
+						);
 				if (!resolvedDef.ok || !resolvedDef.definition) {
 					return {
 						content: [{ type: "text", text: resolvedDef.error ?? `Unknown subagent "${agentName}"` }],
