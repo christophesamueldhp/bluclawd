@@ -72,6 +72,8 @@ import {
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const BACKGROUND_BATCH_WINDOW_MS = 40;
+/** Recorded until the child session reports the level the SDK chose for its model. */
+const SDK_DEFAULT_THINKING = "model default";
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent that works in this same checkout";
 /** Pi built-in extensions a child runs itself, over its own copies of the orchestrator's tools. */
 const CHILD_BUILTIN_EXTENSIONS = ["codemode", "tool_search"];
@@ -285,7 +287,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			builtinExtensions: readonly string[];
 			requestedModel: SubagentModelSpec;
 			parentModel: ExtensionContext["model"];
-			requestedThinkingLevel: string;
+			requestedThinkingLevel: string | undefined;
 			parentModelRegistry: ExtensionContext["modelRegistry"];
 			projectTrusted: boolean;
 		}
@@ -857,10 +859,13 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				}
 				const parentThinkingLevel = pi.getThinkingLevel();
 				const requestedModel = spawnModel ?? definition.model;
-				const requestedThinkingLevel =
+				const explicitThinkingLevel =
 					params.thinkingLevel === "inherit"
 						? parentThinkingLevel
-						: (params.thinkingLevel ?? definition.thinkingLevel ?? parentThinkingLevel);
+						: (params.thinkingLevel ?? definition.thinkingLevel);
+				// A chosen model without a level gets the SDK's default for that model; an inherited one keeps the parent's.
+				const requestedThinkingLevel =
+					explicitThinkingLevel ?? (requestedModel === "inherit" ? parentThinkingLevel : undefined);
 				const modelCheck = await resolveChildModelAndRuntime({
 					agentDir,
 					requestedModel,
@@ -868,7 +873,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					requestedThinkingLevel,
 					parentModelRegistry: ctx.modelRegistry,
 				});
-				if (!modelCheck.ok || !modelCheck.model || !modelCheck.thinkingLevel) {
+				if (!modelCheck.ok || !modelCheck.model) {
 					return {
 						content: [
 							{
@@ -950,7 +955,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					definitionSource: definition.source,
 					provider: modelCheck.model.provider,
 					modelId: modelCheck.model.id,
-					thinkingLevel: modelCheck.thinkingLevel,
+					thinkingLevel: modelCheck.thinkingLevel ?? SDK_DEFAULT_THINKING,
 					cwd,
 					taskSummary: summarizeTaskLabel(taskText),
 					startSnapshot,
@@ -1005,7 +1010,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							deliveryMode: "background",
 							provider: modelCheck.model.provider,
 							modelId: modelCheck.model.id,
-							thinkingLevel: modelCheck.thinkingLevel,
+							thinkingLevel: modelCheck.thinkingLevel ?? SDK_DEFAULT_THINKING,
 							turnCount: 0,
 							toolCallCount: 0,
 							snapshotDrifted: false,

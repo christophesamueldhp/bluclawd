@@ -798,7 +798,7 @@ describe("Ticket #10 — Per-spawn model and thinking selection", () => {
 			},
 			{
 				id: "inherited_unsupported",
-				args: { model: "faux-tool/faux-alt" },
+				args: { model: "faux-tool/faux-alt", thinkingLevel: "inherit" },
 				error: /Thinking level "low" is not supported/,
 			},
 			{
@@ -1515,4 +1515,59 @@ describe("Ticket #14 — Children run with parent authority in the shared checko
 			}
 		},
 	);
+});
+
+describe("Ticket #21 — SDK default thinking level for a chosen model", () => {
+	async function spawnAndRead(agentDir: string, cwd: string, spawn: Record<string, unknown>) {
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
+		try {
+			await session.bindExtensions({ mode: "print" });
+			faux.setResponses([
+				fauxAssistantMessage([fauxToolCall("subagent", { task: "Report.", ...spawn }, { id: "spawn" })]),
+				fauxAssistantMessage("Child done."),
+				fauxAssistantMessage("Done."),
+			]);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+			const { result, text } = toolResultText(session, "spawn");
+			const runId = (result?.details as { runId?: string } | undefined)?.runId;
+			return {
+				isError: result?.isError,
+				text,
+				record: runId ? readPersistedRunRecord(agentDir, session.sessionId, runId) : undefined,
+			};
+		} finally {
+			session.dispose();
+		}
+	}
+
+	it("runs a chosen non-reasoning model without a level at off instead of failing on the parent's level", async () => {
+		const agentDir = makeTempDir("default-off-agent");
+		const res = await spawnAndRead(agentDir, makeTempDir("default-off-cwd"), {
+			agent: "general-purpose",
+			model: "faux-tool/faux-alt",
+		});
+		expect(res.isError, res.text).toBe(false);
+		expect(res.record).toMatchObject({ status: "completed", modelId: "faux-alt", thinkingLevel: "off" });
+	});
+
+	it("honors the user's per-model thinking setting for a chosen model, while explicit and inherited levels still win", async () => {
+		const agentDir = makeTempDir("default-setting-agent");
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({ modelThinkingLevels: { "faux-tool/faux-main": "high" } }),
+		);
+		const cwd = makeTempDir("default-setting-cwd");
+		const chosen = await spawnAndRead(agentDir, cwd, { agent: "general-purpose", model: "faux-tool/faux-main" });
+		expect(chosen.record).toMatchObject({ status: "completed", thinkingLevel: "high" });
+
+		const explicit = await spawnAndRead(agentDir, cwd, {
+			agent: "general-purpose",
+			model: "faux-tool/faux-main",
+			thinkingLevel: "minimal",
+		});
+		expect(explicit.record).toMatchObject({ status: "completed", thinkingLevel: "minimal" });
+
+		const inherited = await spawnAndRead(agentDir, cwd, { agent: "general-purpose" });
+		expect(inherited.record).toMatchObject({ status: "completed", thinkingLevel: "low" });
+	});
 });

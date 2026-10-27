@@ -91,7 +91,7 @@ export interface SubagentRunRecord {
 }
 
 export interface SubagentRunController {
-	markRunning(childSessionId?: string): void;
+	markRunning(childSessionId?: string, thinkingLevel?: string): void;
 	recordTurn(): void;
 	recordToolCall(): void;
 	recordToolExecution(toolName: string, isError: boolean): void;
@@ -395,9 +395,10 @@ export class SubagentRunScheduler {
 		this.emitChange(managed);
 
 		const controller: SubagentRunController = {
-			markRunning: (childSessionId?: string) => {
+			markRunning: (childSessionId?: string, thinkingLevel?: string) => {
 				if (isTerminalSubagentStatus(managed.record.status) || managed.record.status === "stopping") return;
 				if (childSessionId) managed.record.childSessionId = childSessionId;
+				if (thinkingLevel) managed.record.thinkingLevel = thinkingLevel;
 				managed.record.status = "running";
 				this.emitChange(managed);
 			},

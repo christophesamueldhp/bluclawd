@@ -345,11 +345,12 @@ with optional `tools`, `model`, and `thinkingLevel`. An inline role is validated
 one, recorded with source `inline`, and never written to disk.
 
 A call may also set `model` (`provider/model` or `inherit`) and `thinkingLevel` (`off` … `max` or
-`inherit`). Each is chosen independently: the call's value, else the role's, else the parent's.
+`inherit`). Each is chosen independently: the call's value, else the role's. With neither, an
+inherited model keeps the parent's thinking level, and a chosen model gets pi's default for it (the
+user's per-model setting, else the default thinking level, fitted to what the model supports).
 `inherit` on the call picks the parent even when the role sets a value. An unknown model, missing
-auth, a virtual router, or a thinking level the model does not support fails before the run starts;
-nothing is substituted, so a role or call that picks a non-reasoning model must also set
-`thinkingLevel: off`. A role omits `thinkingLevel` to inherit it. `subagent_models` lists each model's auth status, supported thinking levels,
+auth, a virtual router, or an explicitly requested thinking level the model does not support fails
+before the run starts; nothing is substituted. `subagent_models` lists each model's auth status, supported thinking levels,
 and whether a child can run it.
 
 While runs are in progress, `subagent_message({ to, content })` carries text between the

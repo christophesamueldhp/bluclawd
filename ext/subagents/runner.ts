@@ -200,13 +200,17 @@ export async function resolveChildModelAndRuntime(options: ResolveChildModelOpti
 		};
 	}
 
-	const thinkingLevel = options.requestedThinkingLevel;
+	const requestedLevel = options.requestedThinkingLevel;
 	const supportedLevels = getSupportedThinkingLevels(targetModel);
-	if (!isSubagentThinkingLevel(thinkingLevel) || !supportedLevels.includes(thinkingLevel)) {
-		return {
-			ok: false,
-			error: `Thinking level "${thinkingLevel}" is not supported by subagent model "${targetModel.provider}/${targetModel.id}" (supported: ${supportedLevels.join(", ")}).`,
-		};
+	let thinkingLevel: ThinkingLevel | undefined;
+	if (requestedLevel !== undefined) {
+		if (!isSubagentThinkingLevel(requestedLevel) || !supportedLevels.includes(requestedLevel)) {
+			return {
+				ok: false,
+				error: `Thinking level "${requestedLevel}" is not supported by subagent model "${targetModel.provider}/${targetModel.id}" (supported: ${supportedLevels.join(", ")}).`,
+			};
+		}
+		thinkingLevel = requestedLevel;
 	}
 
 	if (!modelRuntime.hasConfiguredAuth(targetModel.provider)) {
@@ -301,10 +305,14 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 
 	const cwd = options.record.cwd;
 	const agentDir = options.agentDir ?? getAgentDir();
+	// The user's thinking defaults let the SDK pick the level for a model chosen without one.
+	const userSettings = SettingsManager.create(cwd, agentDir, { projectTrusted: options.projectTrusted });
 	const settingsManager = SettingsManager.inMemory({
 		compaction: { enabled: false },
 		cacheWarming: "off",
 		retry: { enabled: false },
+		defaultThinkingLevel: userSettings.getDefaultThinkingLevel(),
+		modelThinkingLevels: userSettings.getAllModelThinkingLevels(),
 	});
 
 	const lifecycleExtension: ExtensionFactory = (pi: ExtensionAPI) => {
@@ -462,7 +470,7 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 	try {
 		await session.bindExtensions({});
 		session.setActiveToolsByName([...options.activeToolNames]);
-		options.controller.markRunning(session.sessionId);
+		options.controller.markRunning(session.sessionId, session.thinkingLevel);
 
 		if (options.signal.aborted) {
 			return {
