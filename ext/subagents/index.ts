@@ -250,6 +250,31 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				refreshFooterStatus();
 				notifyAgentTasksChanged();
 			},
+			onFinalize: async (settledRecord) => {
+				const agentDir = resolveAgentDir();
+				const record: SubagentRunRecord = structuredClone(settledRecord);
+				const reportRes = writeFullSubagentReport(
+					agentDir,
+					record,
+					buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).fullReportText,
+				);
+				if (!reportRes.ok || !reportRes.reportPath) {
+					throw new Error(reportRes.error ?? "full report was not persisted");
+				}
+				record.reportPath = reportRes.reportPath;
+				if (record.deliveryMode === "foreground") {
+					record.foregroundUsageAttributed = true;
+				} else {
+					record.backgroundDeliveryAttempted = true;
+					recordBackgroundUsageInLedger(agentDir, record);
+				}
+				const recordRes = writePersistedRunRecord(agentDir, record);
+				if (!recordRes.ok) throw new Error(recordRes.error ?? "run record was not persisted");
+				if (isOwnedAndValid(record, false)) {
+					appendParentRunReference(pi, record);
+				}
+				return record;
+			},
 			executeRun: async (params) => {
 				const execCtx = params.context as RunExecutionContext;
 				const storage = ensureRunStorageDir(execCtx.agentDir, params.record.parentSessionId, params.record.runId);
@@ -269,36 +294,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				});
 			},
 		});
-
-		const finalizeAndPersistRun = (
-			agentDir: string,
-			completedRecord: Readonly<SubagentRunRecord>,
-			deliveryMode: "foreground" | "background",
-		) => {
-			const mutableRecord: SubagentRunRecord = structuredClone(completedRecord);
-			const initialEnvelope = buildSubagentResultEnvelope(mutableRecord, MAX_PARENT_REPORT_BYTES);
-			const reportRes = writeFullSubagentReport(agentDir, mutableRecord, initialEnvelope.fullReportText);
-			if (reportRes.ok && reportRes.reportPath) {
-				mutableRecord.reportPath = reportRes.reportPath;
-			} else {
-				mutableRecord.reportPath = undefined;
-			}
-			if (deliveryMode === "foreground") {
-				mutableRecord.foregroundUsageAttributed = true;
-			} else {
-				mutableRecord.backgroundDeliveryAttempted = true;
-				recordBackgroundUsageInLedger(agentDir, mutableRecord);
-			}
-
-			writePersistedRunRecord(agentDir, mutableRecord);
-			if (isOwnedAndValid(mutableRecord, false)) {
-				appendParentRunReference(pi, mutableRecord);
-			}
-			const finalEnvelope = buildSubagentResultEnvelope(mutableRecord, MAX_PARENT_REPORT_BYTES);
-			refreshFooterStatus();
-			notifyAgentTasksChanged();
-			return { record: mutableRecord, envelope: finalEnvelope };
-		};
 
 		const taskSource: AgentTaskSource = {
 			list: (owner?: string): AgentTaskInfo[] => {
@@ -439,6 +434,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		pi.on("session_shutdown", async () => {
 			invalidateCurrentSessionRuns("Parent session shutting down");
+			await scheduler.waitForSettled();
 			unpublishTasks?.();
 			unpublishTasks = undefined;
 			activeCtx = undefined;
@@ -818,12 +814,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 				if (isBackground) {
 					void handle.completion.then((completedRecord) => {
-						const { record: persistedRecord, envelope } = finalizeAndPersistRun(
-							agentDir,
-							completedRecord,
-							"background",
-						);
-						scheduleBackgroundDelivery(persistedRecord, envelope.parentText, envelope.details);
+						const envelope = buildSubagentResultEnvelope(completedRecord, MAX_PARENT_REPORT_BYTES);
+						scheduleBackgroundDelivery(completedRecord, envelope.parentText, envelope.details);
 					});
 
 					return {
@@ -856,7 +848,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				}
 
 				const completedRecord = await handle.completion;
-				const { envelope } = finalizeAndPersistRun(agentDir, completedRecord, "foreground");
+				const envelope = buildSubagentResultEnvelope(completedRecord, MAX_PARENT_REPORT_BYTES);
 
 				return {
 					content: [{ type: "text", text: envelope.parentText }],

@@ -185,3 +185,91 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 		expect(scheduler.listActiveRuns()).toEqual([]);
 	});
 });
+
+describe("Ticket #12 — Completion resolves only after durable finalization", () => {
+	const tick = () => new Promise((resolve) => setTimeout(resolve, 10));
+
+	it("keeps a run active and its completion pending until the finalizer finishes", async () => {
+		const finalizerGate = deferred();
+		let finalizerCalls = 0;
+		const scheduler = new SubagentRunScheduler({
+			executeRun: async () => ({ status: "completed", complete: true, summaryText: "done" }),
+			onFinalize: async (record) => {
+				finalizerCalls++;
+				await finalizerGate.promise;
+				return { ...record, reportPath: "/durable/report.md" };
+			},
+		});
+		const handle = scheduler.admit(makeRequest()).handle!;
+		let resolved = false;
+		void handle.completion.then(() => {
+			resolved = true;
+		});
+
+		await tick();
+		expect(finalizerCalls).toBe(1);
+		expect(resolved).toBe(false);
+		expect(scheduler.listActiveRuns().map((r) => r.runId)).toEqual([handle.runId]);
+		// A stop that arrives while the run is being stored is acknowledged but cannot change the outcome
+		expect(scheduler.cancelRun(handle.runId, "user")).toBe(true);
+
+		finalizerGate.resolve();
+		const done = await handle.completion;
+		expect(done).toMatchObject({ status: "completed", reportPath: "/durable/report.md" });
+		expect(finalizerCalls).toBe(1);
+		expect(scheduler.listActiveRuns()).toEqual([]);
+	});
+
+	it("turns a failing finalizer into a failed durable outcome", async () => {
+		const changes: string[] = [];
+		const finalized: string[] = [];
+		const scheduler = new SubagentRunScheduler({
+			executeRun: async () => ({ status: "completed", complete: true, summaryText: "done" }),
+			onFinalize: async (record) => {
+				finalized.push(record.status);
+				if (record.status === "completed") throw new Error("disk full");
+				return record;
+			},
+			onStateChange: (record) => changes.push(record.status),
+		});
+		const done = await scheduler.admit(makeRequest()).handle!.completion;
+		expect(done).toMatchObject({ status: "failed", complete: false });
+		expect(done.errorMessage).toMatch(/finaliz.*disk full/i);
+		expect(changes.at(-1)).toBe("failed");
+		expect(changes).not.toContain("completed");
+		// The failed outcome goes through the same durable path, replacing anything the first attempt stored
+		expect(finalized).toEqual(["completed", "failed"]);
+	});
+
+	it("waits for runners and finalizers to settle and writes nothing afterwards", async () => {
+		const runnerGate = deferred<SubagentRunnerOutcome>();
+		const finalizerGate = deferred();
+		let changesAfterSettled = 0;
+		let settled = false;
+		const scheduler = new SubagentRunScheduler({
+			// Ignores the abort signal, like a runner whose child is still unwinding
+			executeRun: () => runnerGate.promise,
+			onFinalize: async (record) => {
+				await finalizerGate.promise;
+				return record;
+			},
+			onStateChange: () => {
+				if (settled) changesAfterSettled++;
+			},
+		});
+		const handle = scheduler.admit(makeRequest()).handle!;
+		scheduler.cancelRunsForSession("sess_1");
+		const drained = scheduler.waitForSettled().then(() => {
+			settled = true;
+		});
+
+		runnerGate.resolve({ status: "completed", complete: true, summaryText: "late" });
+		await tick();
+		expect(settled).toBe(false);
+		finalizerGate.resolve();
+		await drained;
+		expect((await handle.completion).status).toBe("cancelled");
+		await tick();
+		expect(changesAfterSettled).toBe(0);
+	});
+});

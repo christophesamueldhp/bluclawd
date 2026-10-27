@@ -219,8 +219,23 @@ describe("Task 7 (M2) — Background execution, session-bound delivery, drift wa
 			// Modify tracked.ts in the parent working tree while the background child is running
 			writeFileSync(join(cwd, "tracked.ts"), "export const v = 2;\n", "utf8");
 
+			// The run may leave /tasks only once its report, ledger entry and terminal record are durable
+			const durableWhenUnlisted = new Promise<unknown>((resolve) => {
+				const off = subscribeAgentTasks(() => {
+					if ((agentTasks()?.list(session.sessionId) ?? []).length > 0) return;
+					off();
+					const record = readPersistedRunRecord(agentDir, session.sessionId, runId);
+					resolve({
+						status: record?.status,
+						reportWritten: record?.reportPath !== undefined,
+						ledgered: readBackgroundUsageLedger(agentDir, session.sessionId).recordedRunIds.includes(runId),
+					});
+				});
+			});
+
 			// Let background child complete
 			resolveChildStep();
+			expect(await durableWhenUnlisted).toEqual({ status: "completed", reportWritten: true, ledgered: true });
 
 			await waitForCondition(() => {
 				return session.messages.some(

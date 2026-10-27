@@ -149,6 +149,8 @@ export interface AdmitSubagentRunResult {
 export interface SubagentRunSchedulerOptions {
 	now?: () => number;
 	onStateChange?: (record: Readonly<SubagentRunRecord>) => void;
+	/** Durably stores a settled run before it turns terminal; a throw fails the run. */
+	onFinalize?: (record: Readonly<SubagentRunRecord>) => Promise<Readonly<SubagentRunRecord>>;
 	executeRun: (params: SubagentRunnerExecuteParams & { context?: unknown }) => Promise<SubagentRunnerOutcome>;
 }
 
@@ -223,12 +225,14 @@ interface InternalManagedRun {
 	resolveCompletion: (record: Readonly<SubagentRunRecord>) => void;
 	completionPromise: Promise<Readonly<SubagentRunRecord>>;
 	disposed: boolean;
+	finalizing: boolean;
 	context?: unknown;
 }
 
 export class SubagentRunScheduler {
 	private readonly now: () => number;
 	private readonly onStateChange?: (record: Readonly<SubagentRunRecord>) => void;
+	private readonly onFinalize?: (record: Readonly<SubagentRunRecord>) => Promise<Readonly<SubagentRunRecord>>;
 	private readonly executeRun: (
 		params: SubagentRunnerExecuteParams & { context?: unknown },
 	) => Promise<SubagentRunnerOutcome>;
@@ -238,6 +242,7 @@ export class SubagentRunScheduler {
 	constructor(options: SubagentRunSchedulerOptions) {
 		this.now = options.now ?? (() => Date.now());
 		this.onStateChange = options.onStateChange;
+		this.onFinalize = options.onFinalize;
 		this.executeRun = options.executeRun;
 	}
 
@@ -315,6 +320,7 @@ export class SubagentRunScheduler {
 			resolveCompletion,
 			completionPromise,
 			disposed: false,
+			finalizing: false,
 			context: request.context,
 		};
 
@@ -419,9 +425,9 @@ export class SubagentRunScheduler {
 					controller,
 					context: managed.context,
 				});
-				this.finalizeManagedRun(managed, outcome);
+				await this.finalizeManagedRun(managed, outcome);
 			} catch (err) {
-				this.finalizeManagedRun(managed, {
+				await this.finalizeManagedRun(managed, {
 					status: managed.pendingTerminalStatus ?? "failed",
 					complete: false,
 					summaryText: managed.record.summaryText ?? "",
@@ -433,7 +439,7 @@ export class SubagentRunScheduler {
 	}
 
 	private triggerStop(managed: InternalManagedRun, source: SubagentStopSource, reason: string): void {
-		if (isTerminalSubagentStatus(managed.record.status)) {
+		if (managed.finalizing || isTerminalSubagentStatus(managed.record.status)) {
 			return;
 		}
 		if (!managed.pendingTerminalStatus) {
@@ -453,13 +459,13 @@ export class SubagentRunScheduler {
 		}
 	}
 
-	private finalizeManagedRun(managed: InternalManagedRun, outcome: SubagentRunnerOutcome): void {
-		if (isTerminalSubagentStatus(managed.record.status)) {
+	private async finalizeManagedRun(managed: InternalManagedRun, outcome: SubagentRunnerOutcome): Promise<void> {
+		if (managed.finalizing || isTerminalSubagentStatus(managed.record.status)) {
 			return;
 		}
+		managed.finalizing = true;
 
 		const finalStatus: SubagentTerminalStatus = managed.pendingTerminalStatus ?? outcome.status;
-		managed.record.status = finalStatus;
 		managed.record.endedAt = this.now();
 		managed.record.complete = finalStatus === "completed" ? outcome.complete : false;
 		managed.record.summaryText = outcome.summaryText;
@@ -496,9 +502,35 @@ export class SubagentRunScheduler {
 			});
 		}
 
+		let finalized: SubagentRunRecord = { ...structuredClone(managed.record), status: finalStatus };
+		if (this.onFinalize) {
+			try {
+				finalized = structuredClone(await this.onFinalize(finalized));
+			} catch (err) {
+				finalized = {
+					...finalized,
+					status: "failed",
+					complete: false,
+					errorMessage: `Run finalization failed: ${err instanceof Error ? err.message : String(err)}`,
+				};
+				// Store the failure the same way so nothing durable still reads as a success.
+				try {
+					finalized = structuredClone(await this.onFinalize(finalized));
+				} catch {
+					// Storage is unusable; the failure stays visible in memory.
+				}
+			}
+		}
+		managed.record = finalized;
+
 		this.disposeManagedResources(managed);
 		this.emitChange(managed);
 		managed.resolveCompletion(structuredClone(managed.record));
+	}
+
+	/** Resolves once every run this scheduler owns has settled and been stored. */
+	async waitForSettled(): Promise<void> {
+		await Promise.all(Array.from(this.runs.values(), (managed) => managed.completionPromise));
 	}
 
 	private disposeManagedResources(managed: InternalManagedRun): void {
