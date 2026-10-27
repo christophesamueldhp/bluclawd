@@ -176,6 +176,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			details: receipt,
 			isError: receipt.status !== "accepted",
 		});
+		const senderRole = (address: string) => scheduler.getRun(address)?.agentName;
+
 		/** Live agents in a parent scope, one line each, for a child's prompt or roster query. */
 		const describeRoster = (parentSessionId: string, self: string, includeSelf: boolean): string[] =>
 			scheduler
@@ -407,7 +409,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							if (scheduler.getRun(runId)?.status === "stopping") throw new Error("it is stopping");
 							const childSession = await sessionReady;
 							// A message never starts a turn on its own; it waits for the child's next safe boundary.
-							await childSession.sendCustomMessage(subagentMessagePayload(message), {
+							await childSession.sendCustomMessage(subagentMessagePayload(message, senderRole(message.from)), {
 								deliverAs: "steer",
 								triggerTurn: false,
 							});
@@ -519,7 +521,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						if (!activeCtx || runtimeGeneration !== scope.runtimeGeneration) return;
 						if (activeParentSessionId !== scope.parentSessionId) return;
 						// Like background completion notices, a child's message wakes an idle orchestrator.
-						pi.sendMessage(subagentMessagePayload(message), { deliverAs: "steer", triggerTurn: true });
+						pi.sendMessage(subagentMessagePayload(message, senderRole(message.from)), {
+							deliverAs: "steer",
+							triggerTurn: true,
+						});
 					});
 				},
 			});

@@ -360,8 +360,10 @@ sibling to sibling within the same parent session. A child's task lists the agen
 and its `subagent_roster` tool shows the current list. The sender is bound by the runtime, never taken from the message. A child
 receives messages at its next safe point without a new turn; a child message wakes an idle
 orchestrator. Receipts say `accepted`, `unavailable` (unknown, finished, or other session), or
-`invalidated` (session reloaded), never handled. Messages are untrusted data: they cannot approve
-actions, grant tools, or restart a finished child.
+`invalidated` (session reloaded), never handled. The runtime frames each message by
+its bound sender: from the orchestrator it is task direction a child follows as a course correction,
+from a sibling it is information or a request the child weighs, and from a child it is a report. No
+message is user approval: none can approve actions, grant tools, or restart a finished child.
 
 Reports and private child transcripts live outside the repository under
 `<getAgentDir()>/bluclawd/subagents/<parent-session>/<run>/`. The parent gets a bounded, untrusted

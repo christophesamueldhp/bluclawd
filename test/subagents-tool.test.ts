@@ -1058,9 +1058,9 @@ describe("Ticket #13 — Messages between orchestrator, children and siblings", 
 
 			expect(toolResultText(session, "down_1").text).toMatch(/accepted/);
 			expect(childSaw.a).toContain("PARENT-HELLO");
-			expect(childSaw.a).toContain("Untrusted agent message");
+			expect(childSaw.a).toContain("Task direction from the orchestrator");
 			expect(childSaw.b).toContain("SIBLING-HELLO");
-			expect(childSaw.b).toMatch(new RegExp(`From: explorer-\\d+ \\(${ids.a}\\)`));
+			expect(childSaw.b).toMatch(new RegExp(`Message from sibling agent explorer-\\d+ \\(explorer, ${ids.a}\\)`));
 			expect(childTurns).toEqual({ a: 2, b: 2 });
 		} finally {
 			session.dispose();
