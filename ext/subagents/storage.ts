@@ -353,11 +353,13 @@ export function recordBackgroundUsageInLedger(
 	if (record.deliveryMode === "foreground" || record.foregroundUsageAttributed) {
 		return current;
 	}
-	if (current.recordedRunIds.includes(record.runId)) {
+	// Each resumed generation of a run carries only its own usage.
+	const ledgerKey = record.generation ? `${record.runId}#${record.generation}` : record.runId;
+	if (current.recordedRunIds.includes(ledgerKey)) {
 		return current;
 	}
 
-	current.recordedRunIds.push(record.runId);
+	current.recordedRunIds.push(ledgerKey);
 	current.runCount = current.recordedRunIds.length;
 	addSubagentUsage(current.usage, record.usage);
 

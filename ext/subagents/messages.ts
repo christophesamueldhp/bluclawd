@@ -68,6 +68,8 @@ export class SubagentMessageBus {
 	private readonly closed = new Map<string, string>();
 	/** Live agent names and the addresses they stand for. */
 	private readonly names = new Map<string, string>();
+	/** Names of agents that ended, so a message to one says why instead of "unknown". */
+	private readonly closedNames = new Map<string, string>();
 
 	private readonly onRecord?: (record: SubagentMessageRecord, senderScope: SubagentMessageScope) => void;
 
@@ -78,18 +80,37 @@ export class SubagentMessageBus {
 	register(address: string, endpoint: SubagentMessageEndpoint, name?: string): void {
 		this.closed.delete(address);
 		this.endpoints.set(address, endpoint);
-		if (name) this.names.set(name, address);
+		if (name) {
+			this.names.set(name, address);
+			this.closedNames.delete(name);
+		}
 	}
 
 	unregister(address: string, reason: string): void {
 		if (this.endpoints.delete(address)) this.closed.set(address, reason);
-		const name = this.nameOf(address);
-		if (name) this.names.delete(name);
+		for (const [name, target] of this.names) {
+			if (target !== address) continue;
+			this.names.delete(name);
+			this.closedNames.set(name, address);
+		}
 	}
 
 	private nameOf(address: string): string | undefined {
-		for (const [name, target] of this.names) if (target === address) return name;
+		for (const names of [this.names, this.closedNames]) {
+			for (const [name, target] of names) if (target === address) return name;
+		}
 		return undefined;
+	}
+
+	/** Records a message the runtime delivers itself, such as the prompt that resumes a finished child. */
+	accept(
+		from: { readonly address: string; readonly scope: SubagentMessageScope },
+		to: string,
+		toName?: string,
+	): SubagentMessageReceipt {
+		const receipt = { status: "accepted" as const, seq: this.nextSeq++, to, toName };
+		this.onRecord?.({ ...receipt, from: from.address, fromName: this.nameOf(from.address) }, from.scope);
+		return receipt;
 	}
 
 	async send(
@@ -99,7 +120,7 @@ export class SubagentMessageBus {
 	): Promise<SubagentMessageReceipt> {
 		// The sequence number is taken before any await so concurrent senders share one ordering.
 		const seq = this.nextSeq++;
-		const address = this.names.get(to) ?? to;
+		const address = this.names.get(to) ?? this.closedNames.get(to) ?? to;
 		const names = { fromName: this.nameOf(from.address), toName: this.nameOf(address) };
 		const receipt = {
 			...(await this.route(seq, from.address, from.scope, address, content, names)),
@@ -136,7 +157,10 @@ export class SubagentMessageBus {
 		const endpoint = this.endpoints.get(to);
 		if (!endpoint) {
 			const closedReason = this.closed.get(to);
-			if (closedReason) return { status: "unavailable", seq, reason: `"${to}" ${closedReason}.` };
+			if (closedReason) {
+				const label = names.toName ? `"${names.toName}" (${to})` : `"${to}"`;
+				return { status: "unavailable", seq, reason: `${label} ${closedReason}.` };
+			}
 			const reachable = this.reachableFrom(from, senderScope);
 			return {
 				status: "unavailable",

@@ -367,7 +367,15 @@ idle orchestrator once, or steers a busy one at its next boundary. Receipts say 
 `invalidated` (session reloaded), never handled. The runtime frames each message by
 its bound sender: from the orchestrator it is task direction a child follows as a course correction,
 from a sibling it is information or a request the child weighs, and from a child it is a report. No
-message is user approval: none can approve actions, grant tools, or restart a finished child.
+message is user approval: none can approve actions or grant tools.
+
+A message from the orchestrator to a child that has **completed** resumes it in the background with
+its saved transcript, the same name, run ID, role, model and thinking level, and the message as its
+next instruction; its report arrives like a background completion. Only the orchestrator can do
+this: a sibling's message to a finished child is refused as finished, and a stopped, failed or
+interrupted child cannot be resumed. Each resumed generation's usage is counted once in the
+background ledger. After a reload, a run from before it cannot be resumed; spawn a new child that
+reads the earlier report.
 
 Reports and private child transcripts live outside the repository under
 `<getAgentDir()>/bluclawd/subagents/<parent-session>/<run>/`. The parent gets a bounded, untrusted

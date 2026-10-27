@@ -59,6 +59,8 @@ export interface SubagentRunRecord {
 	originEntryId?: string;
 	/** Unique among the parent's live runs; absent on older records. */
 	name?: string;
+	/** How many times the orchestrator resumed this run after it completed; absent before the first resume. */
+	generation?: number;
 	childSessionId?: string;
 	transcriptPath?: string;
 	reportPath?: string;
@@ -360,6 +362,53 @@ export class SubagentRunScheduler {
 				completion: completionPromise,
 			},
 		};
+	}
+
+	/**
+	 * Runs a completed run again under the same identity, in the background. Its usage starts from zero so
+	 * the earlier generation's usage, already attributed, is never counted twice.
+	 */
+	resume(runId: string, extendContext: (context: unknown) => unknown): AdmitSubagentRunResult {
+		const managed = this.runs.get(runId);
+		if (!managed) return { ok: false, error: "Subagent run is unknown." };
+		if (managed.record.status !== "completed") {
+			return { ok: false, error: `Subagent run is ${managed.record.status}; only a completed run can be resumed.` };
+		}
+		let resolveCompletion!: (rec: Readonly<SubagentRunRecord>) => void;
+		const completionPromise = new Promise<Readonly<SubagentRunRecord>>((res) => {
+			resolveCompletion = res;
+		});
+		Object.assign(managed, {
+			record: {
+				...managed.record,
+				endedAt: undefined,
+				endSnapshot: undefined,
+				stopReason: undefined,
+				stopSource: undefined,
+				errorMessage: undefined,
+				summaryText: undefined,
+				generation: (managed.record.generation ?? 0) + 1,
+				status: "starting",
+				complete: false,
+				deliveryMode: "background",
+				usage: createEmptySubagentUsage(),
+				foregroundUsageAttributed: false,
+				backgroundDeliveryAttempted: false,
+			} satisfies SubagentRunRecord,
+			abortController: new AbortController(),
+			callerSignal: undefined,
+			callerAbortListener: undefined,
+			pendingTerminalStatus: undefined,
+			pendingStopReason: undefined,
+			pendingStopSource: undefined,
+			resolveCompletion,
+			completionPromise,
+			disposed: false,
+			finalizing: false,
+			context: extendContext(managed.context),
+		});
+		this.startManagedRun(managed);
+		return { ok: true, handle: { runId, record: structuredClone(managed.record), completion: completionPromise } };
 	}
 
 	cancelRun(runId: string, source: SubagentStopSource = "user", reason = "Subagent run cancelled"): boolean {

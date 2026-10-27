@@ -94,7 +94,7 @@ describe("Ticket #16 — Agent names", () => {
 		bus.unregister("sub_a", "has finished");
 		expect(await bus.send({ address: "sub_b", scope }, "backend", "late")).toMatchObject({
 			status: "unavailable",
-			reason: /No running agent "backend"/,
+			reason: '"backend" (sub_a) has finished.',
 		});
 		bus.register("sub_c", { scope, deliver }, "backend");
 		expect(await bus.send({ address: "sub_b", scope }, "backend", "reused")).toMatchObject({ status: "accepted" });

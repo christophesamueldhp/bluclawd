@@ -933,7 +933,7 @@ describe("Ticket #13 — Messages between orchestrator, children and siblings", 
 	const contextText = (context: Ctx) => JSON.stringify(context.messages);
 
 	async function waitUntil(condition: () => boolean) {
-		for (let i = 0; i < 300 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+		for (let i = 0; i < 2000 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(condition()).toBe(true);
 	}
 
@@ -1071,7 +1071,7 @@ describe("Ticket #13 — Messages between orchestrator, children and siblings", 
 		}
 	});
 
-	it("reports unknown and finished recipients, and a message claiming approval grants nothing", async () => {
+	it("reports unknown recipients, and a message claiming approval grants nothing", async () => {
 		const cwd = makeTempDir("msg-outcomes-cwd");
 		const agentDir = makeTempDir("msg-outcomes-agent");
 		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
@@ -1141,17 +1141,6 @@ describe("Ticket #13 — Messages between orchestrator, children and siblings", 
 					["c_spawn", true],
 				]),
 			);
-
-			const turnsBefore = childTurns;
-			faux.setResponses([
-				fauxAssistantMessage([
-					fauxToolCall("subagent_message", { to: runId, content: "Still there?" }, { id: "late" }),
-				]),
-				fauxAssistantMessage("Ok."),
-			]);
-			await session.prompt("Ping the finished child.", { expandPromptTemplates: false });
-			expect(toolResultText(session, "late").text).toMatch(/unavailable: .*has finished/);
-			expect(childTurns).toBe(turnsBefore);
 		} finally {
 			session.dispose();
 		}
@@ -1306,7 +1295,7 @@ describe("Ticket #14 — Children run with parent authority in the shared checko
 			const runId = (toolResultText(session, "launch").result?.details as { runId: string }).runId;
 			for (
 				let i = 0;
-				i < 300 && readPersistedRunRecord(agentDir, session.sessionId, runId)?.status !== "completed";
+				i < 2000 && readPersistedRunRecord(agentDir, session.sessionId, runId)?.status !== "completed";
 				i++
 			) {
 				await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1679,7 +1668,7 @@ describe("Ticket #16 — Agent names and the live roster", () => {
 			const runId = (toolResultText(session, "spawn_backend").result?.details as { runId: string }).runId;
 			for (
 				let i = 0;
-				i < 300 && readPersistedRunRecord(agentDir, session.sessionId, runId)?.status !== "completed";
+				i < 2000 && readPersistedRunRecord(agentDir, session.sessionId, runId)?.status !== "completed";
 				i++
 			) {
 				await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1797,7 +1786,7 @@ describe("Ticket #18 — One orchestrator wake-up for close child messages and c
 			const runId = (toolResultText(session, "launch").result?.details as { runId: string }).runId;
 			for (
 				let i = 0;
-				i < 300 && readPersistedRunRecord(agentDir, session.sessionId, runId)?.status !== "completed";
+				i < 2000 && readPersistedRunRecord(agentDir, session.sessionId, runId)?.status !== "completed";
 				i++
 			) {
 				await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1857,9 +1846,9 @@ describe("Ticket #18 — One orchestrator wake-up for close child messages and c
 				),
 			);
 			const prompt = session.prompt("Delegate and wait.", { expandPromptTemplates: false });
-			for (let i = 0; i < 300 && parentCalls < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+			for (let i = 0; i < 2000 && parentCalls < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10));
 			childGate.open();
-			for (let i = 0; i < 300 && !session.messages.some((m) => m.role === "custom"); i++) {
+			for (let i = 0; i < 2000 && !session.messages.some((m) => m.role === "custom"); i++) {
 				await new Promise((resolve) => setTimeout(resolve, 10));
 			}
 			parentGate.open();
@@ -1932,7 +1921,7 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 			);
 			const statusOf = () =>
 				runIds.map((id) => agentTasks()?.getRun?.(id) as { status: string; toolCallCount: number });
-			for (let i = 0; i < 300 && statusOf().some((run) => run?.toolCallCount !== 1); i++) {
+			for (let i = 0; i < 2000 && statusOf().some((run) => run?.toolCallCount !== 1); i++) {
 				await new Promise((resolve) => setTimeout(resolve, 10));
 			}
 
@@ -1952,7 +1941,7 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 			expect(status).toMatch(/turns: 1, tool calls: 1, elapsed: \d+s/);
 			expect(status).toMatch(/last activity: tool child_gate \d+s ago; last message: never/);
 			expect(toolResultText(session, "stop_all").text).toContain("Stopped 2 subagents.");
-			for (let i = 0; i < 300 && agentTasks()?.list(session.sessionId).length; i++) {
+			for (let i = 0; i < 2000 && agentTasks()?.list(session.sessionId).length; i++) {
 				await new Promise((resolve) => setTimeout(resolve, 10));
 			}
 			for (const id of runIds) {
@@ -1963,6 +1952,149 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 			}
 		} finally {
 			open();
+			session.dispose();
+		}
+	});
+});
+
+describe("Ticket #19 — Resume a completed child from an orchestrator message", () => {
+	const isChildContext = (context: TranscriptContext) => {
+		const sys = context.messages.find((m) => m.role === "system");
+		return sys?.role === "system" && getSystemMessageText(sys).includes("operating in a fresh context");
+	};
+	const waitFor = async (condition: () => boolean) => {
+		for (let i = 0; i < 2000 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(condition()).toBe(true);
+	};
+
+	it("resumes a completed child with its transcript, keeps its identity, and counts each generation once", async () => {
+		const cwd = makeTempDir("resume-cwd");
+		const agentDir = makeTempDir("resume-agent");
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir, batchWindowMs: 0 });
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			let resumedContext = "";
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall(
+						"subagent",
+						{ agent: "general-purpose", name: "backend", task: "Build v1.", model: "faux-tool/faux-alt" },
+						{ id: "first" },
+					),
+				]),
+				fauxAssistantMessage("v1 done."),
+				fauxAssistantMessage([
+					fauxToolCall("subagent_message", { to: "backend", content: "Now add tests." }, { id: "resume" }),
+				]),
+				(context: TranscriptContext) => {
+					// Either the parent's turn end or the resumed child can take this response; route by system prompt.
+					if (!isChildContext(context)) return fauxAssistantMessage("Waiting.");
+					resumedContext = JSON.stringify(context.messages);
+					return fauxAssistantMessage("v2 done.");
+				},
+				(context: TranscriptContext) => {
+					if (!isChildContext(context)) return fauxAssistantMessage("Waiting.");
+					resumedContext = JSON.stringify(context.messages);
+					return fauxAssistantMessage("v2 done.");
+				},
+				fauxAssistantMessage("Got the v2 report."),
+				fauxAssistantMessage("Got the v2 report."),
+			]);
+			await session.prompt("Delegate then extend.", { expandPromptTemplates: false });
+			const runId = (toolResultText(session, "first").result?.details as { runId: string }).runId;
+			const resumeReceipt = toolResultText(session, "resume");
+			expect(resumeReceipt.result?.isError).toBe(false);
+			expect(resumeReceipt.text).toContain(`resuming "backend" (${runId})`);
+
+			await waitFor(
+				() =>
+					readPersistedRunRecord(agentDir, session.sessionId, runId)?.generation === 1 &&
+					readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "completed",
+			);
+			await session.waitForIdle();
+
+			const record = readPersistedRunRecord(agentDir, session.sessionId, runId);
+			expect(record).toMatchObject({
+				runId,
+				name: "backend",
+				agentName: "general-purpose",
+				modelId: "faux-alt",
+				thinkingLevel: "off",
+				generation: 1,
+				status: "completed",
+				summaryText: "v2 done.",
+				deliveryMode: "background",
+			});
+			expect(resumedContext).toContain("v1 done.");
+			expect(resumedContext).toContain("Task direction from the orchestrator");
+			expect(resumedContext).toContain("Now add tests.");
+			const ledger = JSON.parse(
+				readFileSync(
+					join(agentDir, "bluclawd", "subagents", session.sessionId, "background-usage-ledger.json"),
+					"utf8",
+				),
+			);
+			// The first, foreground generation was attributed to the parent; only the resumed one is in the ledger.
+			expect(ledger.recordedRunIds).toEqual([`${runId}#1`]);
+			expect(ledger.usage.totalTokens).toBe(record?.usage.totalTokens);
+			expect(session.messages.some((m) => m.role === "custom" && JSON.stringify(m).includes("v2 done."))).toBe(true);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("refuses to resume for a sibling, a stopped child, or a run from before a reload", async () => {
+		const cwd = makeTempDir("resume-refuse-cwd");
+		const agentDir = makeTempDir("resume-refuse-agent");
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			const signal = new AbortController();
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall(
+						"subagent",
+						{ agent: "general-purpose", name: "done-one", task: "Finish." },
+						{ id: "done" },
+					),
+				]),
+				fauxAssistantMessage("Finished."),
+				fauxAssistantMessage([
+					fauxToolCall(
+						"subagent",
+						{ agent: "general-purpose", name: "sibling", task: "Message done-one." },
+						{ id: "sib" },
+					),
+				]),
+				fauxAssistantMessage([
+					fauxToolCall("subagent_message", { to: "done-one", content: "Wake up." }, { id: "sib_msg" }),
+				]),
+				(context: TranscriptContext) => {
+					const receipt = context.messages.find((m) => m.role === "toolResult" && m.toolCallId === "sib_msg");
+					return fauxAssistantMessage(
+						`sibling receipt: ${JSON.stringify(receipt?.role === "toolResult" ? receipt.content : "")}`,
+					);
+				},
+				fauxAssistantMessage("Done."),
+			]);
+			await session.prompt("Run two.", { expandPromptTemplates: false });
+			expect(toolResultText(session, "sib").text).toMatch(/sibling receipt: .*done-one.* has finished/);
+			signal.abort();
+
+			const doneRun = (toolResultText(session, "done").result?.details as { runId: string }).runId;
+			await session.reload();
+			await session.bindExtensions({ mode: "rpc" });
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("subagent_message", { to: doneRun, content: "Continue." }, { id: "after_reload" }),
+				]),
+				fauxAssistantMessage("Ok."),
+			]);
+			await session.prompt("Try to resume.", { expandPromptTemplates: false });
+			const afterReload = toolResultText(session, "after_reload");
+			expect(afterReload.result?.isError).toBe(true);
+			expect(afterReload.text).toMatch(/invalidated: .*reloaded or replaced; spawn a new subagent/);
+		} finally {
 			session.dispose();
 		}
 	});

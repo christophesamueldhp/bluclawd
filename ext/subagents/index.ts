@@ -49,9 +49,11 @@ import {
 	captureWorkspaceSnapshot,
 	createParentToolProxies,
 	describeSubagentModels,
+	type ParentToolSnapshot,
 	resolveChildModelAndRuntime,
 	runSubagent,
 	sanitizeDiagnosticText,
+	snapshotParentTools,
 } from "./runner.ts";
 import {
 	isTerminalSubagentStatus,
@@ -353,11 +355,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			definition: NonNullable<ReturnType<typeof resolveAgentDefinition>["definition"]>;
 			task: string;
 			parent: ExtensionToolContext;
-			loadout: ToolLoadout;
-			proxiedToolNames: readonly string[];
+			parentTools: readonly ParentToolSnapshot[];
 			activeToolNames: readonly string[];
 			builtinExtensions: readonly string[];
 			requestedModel: SubagentModelSpec;
+			/** Set when the orchestrator resumes a completed run: its transcript and the message to continue with. */
+			resume?: { transcriptPath: string; prompt: string };
 			parentModel: ExtensionContext["model"];
 			requestedThinkingLevel: string | undefined;
 			parentModelRegistry: ExtensionContext["modelRegistry"];
@@ -437,20 +440,18 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					params.record.name,
 				);
 				// Nested usage is folded into the launch tool result until it is emitted; later usage is counted here.
-				const parentTools = createParentToolProxies(
-					execCtx.parent,
-					execCtx.loadout,
-					execCtx.proxiedToolNames,
-					(usage) => {
-						if (emittedLaunchResults.has(runId)) params.controller.recordUsage(usage);
-					},
-				);
+				const parentTools = createParentToolProxies(execCtx.parent, execCtx.parentTools, (usage) => {
+					if (emittedLaunchResults.has(runId)) params.controller.recordUsage(usage);
+				});
 				try {
 					return await runSubagent({
 						...params,
 						agentDir: execCtx.agentDir,
 						definition: execCtx.definition,
-						task: withRoster(execCtx.task, describeRoster(params.record.parentSessionId, runId, false)),
+						task: execCtx.resume
+							? execCtx.resume.prompt
+							: withRoster(execCtx.task, describeRoster(params.record.parentSessionId, runId, false)),
+						resumeSessionFile: execCtx.resume?.transcriptPath,
 						requestedModel: execCtx.requestedModel,
 						parentModel: execCtx.parentModel,
 						requestedThinkingLevel: execCtx.requestedThinkingLevel,
@@ -679,7 +680,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				openWorldHint: false,
 			},
 			description:
-				"Send a message to a running subagent by name or run ID (sub_…). It reaches the child at its next safe point without starting a new turn; the receipt says accepted, unavailable, or invalidated, never handled.",
+				"Send a message to a subagent by name or run ID (sub_…). A running child gets it at its next safe point without a new turn. A completed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
 			parameters: messageParameters,
 			execute: async (_toolCallId, params) => {
 				if (!activeParentSessionId) {
@@ -690,11 +691,83 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 				const scope = { parentSessionId: activeParentSessionId, runtimeGeneration };
-				return formatReceipt(
-					await messageBus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, params.to.trim(), params.content),
-				);
+				const to = params.to.trim();
+				const finished = findFinishedRun(to);
+				if (finished) return resumeRun(finished, params.content, scope);
+				return formatReceipt(await messageBus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, params.content));
 			},
 		});
+
+		/** A run of this session that ended and is no longer reachable under the given name or run ID. */
+		const findFinishedRun = (target: string): Readonly<SubagentRunRecord> | undefined => {
+			if (!activeParentSessionId) return undefined;
+			const live = scheduler.listActiveRuns(activeParentSessionId);
+			if (live.some((run) => run.runId === target || run.name === target)) return undefined;
+			const known = scheduler
+				.listRuns()
+				.filter(
+					(run) => run.parentSessionId === activeParentSessionId && (run.runId === target || run.name === target),
+				)
+				.sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))[0];
+			// A reload replaces this extension, so a run from before it is only on disk.
+			return known ?? readPersistedRunRecord(resolveAgentDir(), activeParentSessionId, target);
+		};
+
+		const resumeRun = (run: Readonly<SubagentRunRecord>, content: string, scope: SubagentMessageScope) => {
+			const label = run.name ? `"${run.name}" (${run.runId})` : `"${run.runId}"`;
+			const refuse = (status: "unavailable" | "invalidated", reason: string) =>
+				formatReceipt({ status, seq: 0, to: run.runId, toName: run.name, reason });
+			if (run.runtimeGeneration !== runtimeGeneration || !scheduler.getRun(run.runId)) {
+				return refuse(
+					"invalidated",
+					`${label} belongs to a session that was reloaded or replaced; spawn a new subagent and point it at ${run.reportPath ?? "the earlier report"}.`,
+				);
+			}
+			if (run.status !== "completed") {
+				return refuse("unavailable", `${label} is ${run.status}; only a completed subagent can be resumed.`);
+			}
+			if (!run.transcriptPath) return refuse("unavailable", `${label} has no saved transcript to resume.`);
+			const holder = run.name
+				? scheduler.listActiveRuns(scope.parentSessionId).find((r) => r.name === run.name)
+				: undefined;
+			if (holder) return refuse("unavailable", `${label} cannot resume: its name is now used by ${holder.runId}.`);
+
+			const receipt = messageBus.accept({ address: PARENT_MESSAGE_ADDRESS, scope }, run.runId, run.name);
+			const prompt = subagentMessagePayload({
+				seq: receipt.seq,
+				from: PARENT_MESSAGE_ADDRESS,
+				to: run.runId,
+				toName: run.name,
+				content,
+			}).content[0].text;
+			// The earlier launch result is long emitted, so the SDK attributes none of this generation's nested usage.
+			emittedLaunchResults.add(run.runId);
+			const resumed = scheduler.resume(run.runId, (context) => ({
+				...(context as RunExecutionContext),
+				requestedModel: `${run.provider}/${run.modelId}`,
+				requestedThinkingLevel: run.thinkingLevel,
+				resume: { transcriptPath: run.transcriptPath, prompt },
+			}));
+			if (!resumed.ok || !resumed.handle) {
+				emittedLaunchResults.delete(run.runId);
+				return refuse("unavailable", resumed.error ?? `${label} could not be resumed.`);
+			}
+			void resumed.handle.completion.then((completedRecord) => {
+				const envelope = buildSubagentResultEnvelope(completedRecord, MAX_PARENT_REPORT_BYTES);
+				scheduleBackgroundDelivery(completedRecord, envelope.parentText, envelope.details);
+			});
+			refreshFooterStatus();
+			notifyAgentTasksChanged();
+			return {
+				...formatReceipt(receipt),
+				content: [
+					{
+						type: "text" as const,
+						text: `Message ${receipt.seq} accepted: resuming ${label} in the background with its earlier context. Its report will be delivered when it finishes.`,
+					},
+				],
+			};
+		};
 
 		const ago = (at: number | undefined, now: number) =>
 			at === undefined ? "never" : `${Math.round((now - at) / 1000)}s ago`;
@@ -1150,8 +1223,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					definition,
 					task: taskText,
 					parent: toolCtx,
-					loadout,
-					proxiedToolNames: callableNames.filter((name) => selectedNames.includes(name)),
+					parentTools: snapshotParentTools(
+						loadout,
+						callableNames.filter((name) => selectedNames.includes(name)),
+					),
 					activeToolNames: selectedNames.filter((name) => declaredNames.has(name)),
 					builtinExtensions: builtinNames.filter((name) => selectedNames.includes(name)),
 					requestedModel,

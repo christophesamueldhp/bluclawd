@@ -95,6 +95,8 @@ export interface RunSubagentOptions extends SubagentRunnerExecuteParams {
 	parentModelRegistry: ModelRegistry;
 	projectTrusted: boolean;
 	childSessionDir?: string;
+	/** A finished child's transcript to continue instead of starting a new one. */
+	resumeSessionFile?: string;
 	/** The orchestrator's tools as the child runs them, plus runtime-bound tools such as its message tool. */
 	childTools: readonly ToolDefinition[];
 	/** Tools declared to the child's model; the others stay reachable only through codemode or tool search. */
@@ -255,13 +257,10 @@ function extractAssistantText(message: unknown): string {
 	return chunks.join("\n\n");
 }
 
-/** One child tool per named parent tool, each executed by the orchestrator's session with its hooks and rules. */
-export function createParentToolProxies(
-	parent: Pick<ExtensionToolContext, "executeTool">,
-	loadout: ToolLoadout,
-	names: readonly string[],
-	onNestedUsage: (usage: Usage) => void,
-): ToolDefinition[] {
+/** The parts of a callable parent tool a child copy needs, taken while the SDK's loadout is current. */
+export type ParentToolSnapshot = Omit<ToolDefinition, "execute">;
+
+export function snapshotParentTools(loadout: ToolLoadout, names: readonly string[]): ParentToolSnapshot[] {
 	return loadout.callable
 		.filter((tool) => names.includes(tool.name))
 		.map((tool) => {
@@ -275,14 +274,25 @@ export function createParentToolProxies(
 				exposure: loadout.getExposure(tool.name),
 				namespace: loadout.getNamespace(tool.name),
 				promptGuidelines: guidelines.length > 0 ? [...guidelines] : undefined,
-				execute: async (_toolCallId, args, signal, onUpdate) => {
-					const outcome = await parent.executeTool(tool.name, args, { signal, onUpdate });
-					const { usage, ...result } = outcome.result;
-					if (usage) onNestedUsage(usage);
-					return { ...result, isError: outcome.isError };
-				},
 			};
 		});
+}
+
+/** One child tool per parent tool, each executed by the orchestrator's session with its hooks and rules. */
+export function createParentToolProxies(
+	parent: Pick<ExtensionToolContext, "executeTool">,
+	tools: readonly ParentToolSnapshot[],
+	onNestedUsage: (usage: Usage) => void,
+): ToolDefinition[] {
+	return tools.map((tool) => ({
+		...tool,
+		execute: async (_toolCallId, args, signal, onUpdate) => {
+			const outcome = await parent.executeTool(tool.name, args, { signal, onUpdate });
+			const { usage, ...result } = outcome.result;
+			if (usage) onNestedUsage(usage);
+			return { ...result, isError: outcome.isError };
+		},
+	}));
 }
 
 export async function runSubagent(options: RunSubagentOptions): Promise<SubagentRunnerOutcome> {
@@ -357,9 +367,11 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 	});
 	await resourceLoader.reload();
 
-	const sessionManager = options.childSessionDir
-		? SessionManager.create(cwd, options.childSessionDir)
-		: SessionManager.inMemory(cwd);
+	const sessionManager = options.resumeSessionFile
+		? SessionManager.open(options.resumeSessionFile, options.childSessionDir)
+		: options.childSessionDir
+			? SessionManager.create(cwd, options.childSessionDir)
+			: SessionManager.inMemory(cwd);
 
 	const { session } = await createAgentSession({
 		cwd,
