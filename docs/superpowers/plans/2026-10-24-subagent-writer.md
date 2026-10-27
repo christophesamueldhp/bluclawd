@@ -12,7 +12,7 @@
 
 **Predecessor:** `docs/superpowers/plans/2026-10-23-subagents.md`; M0–M2 baseline commit `519889c` on `feat/read-only-subagents`.
 
-**Status:** Historical plan, superseded as product scope by `docs/superpowers/specs/2026-10-24-configurable-subagents-design.md`. The replacement role-neutral plan is `docs/superpowers/plans/2026-10-24-configurable-subagents.md` (awaiting review). Do not implement a separate writer role or resume these obsolete tasks. The real cleanup gate failed in the retained isolated checkout; changing names/workspace defaults does not make that proof pass.
+**Status:** Historical task plan, superseded as product scope by `docs/superpowers/specs/2026-10-24-configurable-subagents-design.md`. Task 0 remains blocked with the real cleanup evidence below; Tasks 1–6 have not started and must not be resumed without a replacement plan. No new product capability or commits have been added.
 
 ## Global Constraints
 
@@ -84,6 +84,33 @@ Cover write/edit/read/grep/find/ls, shell reads/writes, traversal and symlink sw
 - [ ] **Step 3: Implement only the minimal test-owned subprocess/sandbox prototype.** Scrub environment and constrain all file/search/shell processes; use existing public APIs. Do not invent a second product backend or keep widening permissions until a test starts.
 - [ ] **Step 4: Run proof plus existing feasibility tests.** `npm test -- test/subagents-writer-backend.test.ts test/subagents-writer-sandbox.test.ts`. Proceed only when every required assertion actually passes on the intended backend. If detached cleanup or filesystem containment cannot be established, record the failure, leave writer disabled, and return to the user before Task 1. Run this proof on Linux before claiming Linux support; macOS success cannot stand in for it or vice versa.
 - [ ] **Step 5: Review evidence and request authorization for the proposed local commit:** `test: prove subprocess writer isolation and cleanup`. Commit only authorized fixture/test/evidence changes; do not claim M3 shipped.
+
+### Recorded Task 0 blocker (macOS; not a completed proof)
+
+Environment: macOS 27.0.1, Node v26.8.1, Pi SDK 1.0.4, sandbox-runtime 0.0.81. The isolated execution checkout is on `feat/subagent-writer`, based on `519889c`.
+
+The new `test/subagents-writer-backend.test.ts` exercises a private controller with its own sandbox manager and scrubbed environment. Its fixture descendants self-expire after three seconds. Assertions observe actual heartbeat writes after public SDK cancellation, sandbox reset, and controller exit; an exit notification is not mistaken for descendant settlement.
+
+| Cleanup case | Observed outcome |
+| --- | --- |
+| Attached foreground process, explicit stop | Pass |
+| Background child with inherited stdio/process group, explicit stop | Pass |
+| Detached/new-session child, explicit stop | FAIL: continued writing after controller exit |
+| Double-fork/adopted child, explicit stop | FAIL: continued writing after controller exit |
+| Double-fork/adopted child, owner control pipe EOF | FAIL: continued writing after controller exit |
+
+The public SDK cancellation path kills the original POSIX process group. New-session/adopted descendants can be outside that group. Sandbox reset does not establish their termination. This is a counterexample to this tested composition, not a claim that every conceivable macOS backend is impossible. No new backend, process scanner, privileged helper, or narrower capability has been substituted.
+
+Verification performed:
+- Corrected development baseline: `101 passed (101)` files, `1174 passed (1174)` tests.
+- Targeted cleanup proof: `2 passed / 3 failed`; failures are the detached, double-fork, and owner-pipe-loss cases above.
+- Full suite including the new failing proof: `101 passed / 1 failed` files; `1176 passed / 3 failed` tests. All original tests passed. The suite is deliberately **not green**; failures have not been skipped or reclassified as expected successes.
+- Typecheck passed. Final lint/diff checks are recorded in the execution ledger.
+- Full direct-file/search/network/symlink boundary proof, command-timeout/abrupt-owner-death coverage, and Linux execution were not run after this cleanup prerequisite failed. No `probe-tool.mjs` or product writer was built.
+
+Two setup errors were corrected before counting safety outcomes: a development `node_modules` symlink broke the existing package-root test and was replaced with a local APFS clone; the default macOS temporary pathname made the sandbox's Unix socket exceed its path limit, so test-owned fixtures use a short private `/private/tmp` root. Neither error is counted as evidence of unsafe process cleanup.
+
+Per the approved hard gate, stop before Task 1 and ask the user whether to pursue a narrower file-only writer or a backend with stronger OS process containment. Do not mark Task 0 complete or enable writer from mocked dependency checks.
 
 ## Task 1: Exact-Base Workspaces and Immutable Writer Policy
 
@@ -256,6 +283,6 @@ it("keeps delegation unique and exposes apply only as a user command", () => {
 - Type scan: existing public imports from `runner.ts` stay valid via re-exports; old definitions/records default to read-only; parent `record.cwd` remains distinct from `workspace.executionCwd`; all later references use the exact interface names above.
 - Review Focus: each of the five cases is assigned concrete tests in its owning task. Lease/refusal and unsupported backend outcomes are intentional, not excuses to mark unexecuted safety proofs complete.
 - Builder calls: refuse sparse/index-suppressed/filter/LFS cases initially; use a private cross-process lease with no automatic stale takeover; keep apply TUI-only initially; choose native execution as preserved by the approved design. These do not relax the approved boundaries.
-- Current verification is documentation-only. Test commands above are planned commands, not claims that M3 has been implemented or tested.
+- At planning time no product tests had run. The recorded Task 0 section now contains actual partial proof/full-suite evidence; later task commands remain planned, not completion claims.
 
 After the user reviews this plan, execute natively with `executing-plans` in an isolated workspace prepared through `using-git-worktrees`. Preserve/carry the approved spec and this plan together; do not discard the current documentation changes. Stop at Task 0's safety gate if proof fails, even if later tasks are otherwise implementable. Obtain authorization before planned local commits. Re-check availability of an independent reviewer before final release; never fabricate a reviewer when no tool exists.
