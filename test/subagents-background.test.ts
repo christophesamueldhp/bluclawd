@@ -292,7 +292,8 @@ describe("Task 7 (M2) — Background execution, session-bound delivery, drift wa
 			const step = async (context: TranscriptContext) => {
 				if (isChildContext(context)) {
 					await bothGate;
-					if (lastUserText(context).includes("fails")) {
+					// The task is the first line; later lines list sibling tasks.
+					if (lastUserText(context).split("\n")[0].includes("fails")) {
 						return fauxAssistantMessage("", {
 							stopReason: "error",
 							errorMessage: "429 Rate limit exceeded",

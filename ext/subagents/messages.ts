@@ -12,7 +12,9 @@ export interface SubagentMessageScope {
 export interface SubagentMessage {
 	readonly seq: number;
 	readonly from: string;
+	readonly fromName?: string;
 	readonly to: string;
+	readonly toName?: string;
 	readonly content: string;
 }
 
@@ -20,6 +22,9 @@ export interface SubagentMessageReceipt {
 	readonly status: "accepted" | "unavailable" | "invalidated";
 	readonly seq: number;
 	readonly reason?: string;
+	/** The recipient's address and, for a named agent, its name. */
+	readonly to?: string;
+	readonly toName?: string;
 }
 
 export interface SubagentMessageEndpoint {
@@ -30,7 +35,9 @@ export interface SubagentMessageEndpoint {
 
 export interface SubagentMessageRecord extends SubagentMessageReceipt {
 	readonly from: string;
+	readonly fromName?: string;
 	readonly to: string;
+	readonly toName?: string;
 }
 
 /** The custom-message payload both the orchestrator and children receive. */
@@ -38,7 +45,10 @@ export function subagentMessagePayload(message: SubagentMessage) {
 	return {
 		customType: SUBAGENT_MESSAGE_CUSTOM_TYPE,
 		content: [
-			{ type: "text" as const, text: `${UNTRUSTED_MESSAGE_HEADER}\nFrom: ${message.from}\n\n${message.content}` },
+			{
+				type: "text" as const,
+				text: `${UNTRUSTED_MESSAGE_HEADER}\nFrom: ${message.fromName ? `${message.fromName} (${message.from})` : message.from}\n\n${message.content}`,
+			},
 		],
 		display: true,
 		details: message,
@@ -49,6 +59,8 @@ export class SubagentMessageBus {
 	private nextSeq = 1;
 	private readonly endpoints = new Map<string, SubagentMessageEndpoint>();
 	private readonly closed = new Map<string, string>();
+	/** Live agent names and the addresses they stand for. */
+	private readonly names = new Map<string, string>();
 
 	private readonly onRecord?: (record: SubagentMessageRecord, senderScope: SubagentMessageScope) => void;
 
@@ -56,13 +68,21 @@ export class SubagentMessageBus {
 		this.onRecord = onRecord;
 	}
 
-	register(address: string, endpoint: SubagentMessageEndpoint): void {
+	register(address: string, endpoint: SubagentMessageEndpoint, name?: string): void {
 		this.closed.delete(address);
 		this.endpoints.set(address, endpoint);
+		if (name) this.names.set(name, address);
 	}
 
 	unregister(address: string, reason: string): void {
 		if (this.endpoints.delete(address)) this.closed.set(address, reason);
+		const name = this.nameOf(address);
+		if (name) this.names.delete(name);
+	}
+
+	private nameOf(address: string): string | undefined {
+		for (const [name, target] of this.names) if (target === address) return name;
+		return undefined;
 	}
 
 	async send(
@@ -72,8 +92,14 @@ export class SubagentMessageBus {
 	): Promise<SubagentMessageReceipt> {
 		// The sequence number is taken before any await so concurrent senders share one ordering.
 		const seq = this.nextSeq++;
-		const receipt = await this.route(seq, from.address, from.scope, to, content);
-		this.onRecord?.({ ...receipt, from: from.address, to }, from.scope);
+		const address = this.names.get(to) ?? to;
+		const names = { fromName: this.nameOf(from.address), toName: this.nameOf(address) };
+		const receipt = {
+			...(await this.route(seq, from.address, from.scope, address, content, names)),
+			to: address,
+			toName: names.toName,
+		};
+		this.onRecord?.({ ...receipt, from: from.address, fromName: names.fromName }, from.scope);
 		return receipt;
 	}
 
@@ -85,7 +111,10 @@ export class SubagentMessageBus {
 					endpoint.scope.parentSessionId === scope.parentSessionId &&
 					endpoint.scope.runtimeGeneration === scope.runtimeGeneration,
 			)
-			.map(([other]) => other);
+			.map(([other]) => {
+				const name = this.nameOf(other);
+				return name ? `${name} (${other})` : other;
+			});
 	}
 
 	private async route(
@@ -94,6 +123,7 @@ export class SubagentMessageBus {
 		senderScope: SubagentMessageScope,
 		to: string,
 		content: string,
+		names: { fromName?: string; toName?: string },
 	): Promise<SubagentMessageReceipt> {
 		if (to === from) return { status: "unavailable", seq, reason: "An agent cannot message itself." };
 		const endpoint = this.endpoints.get(to);
@@ -114,7 +144,7 @@ export class SubagentMessageBus {
 			return { status: "invalidated", seq, reason: "The parent session was reloaded or replaced." };
 		}
 		try {
-			await endpoint.deliver({ seq, from, to, content });
+			await endpoint.deliver({ seq, from, to, content, ...names });
 			return { status: "accepted", seq };
 		} catch (err) {
 			return {

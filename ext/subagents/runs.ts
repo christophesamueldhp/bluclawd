@@ -57,6 +57,8 @@ export interface SubagentRunRecord {
 	parentTurnId: string;
 	originToolCallId: string;
 	originEntryId?: string;
+	/** Unique among the parent's live runs; absent on older records. */
+	name?: string;
 	childSessionId?: string;
 	transcriptPath?: string;
 	reportPath?: string;
@@ -124,6 +126,7 @@ export interface AdmitSubagentRunRequest {
 	parentTurnId: string;
 	originToolCallId: string;
 	originEntryId?: string;
+	name?: string;
 	agentName: string;
 	definitionSource: AgentDefinitionSource;
 	provider: string;
@@ -287,6 +290,7 @@ export class SubagentRunScheduler {
 			parentTurnId: request.parentTurnId,
 			originToolCallId: request.originToolCallId,
 			originEntryId: request.originEntryId,
+			name: request.name,
 			agentName: request.agentName,
 			definitionSource: request.definitionSource,
 			provider: request.provider,

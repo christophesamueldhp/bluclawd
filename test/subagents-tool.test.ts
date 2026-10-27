@@ -507,7 +507,7 @@ describe("Ticket #7 — Uncapped saved roles", () => {
 			expect(result?.role === "toolResult" && result.isError).toBe(false);
 			const text =
 				result?.role === "toolResult" ? result.content.map((c) => (c.type === "text" ? c.text : "")).join("") : "";
-			expect(text).toContain("Child tools: bash,edit,read,subagent_message,write");
+			expect(text).toContain("Child tools: bash,edit,read,subagent_message,subagent_roster,write");
 		} finally {
 			session.dispose();
 		}
@@ -1011,7 +1011,11 @@ describe("Ticket #13 — Messages between orchestrator, children and siblings", 
 		let parentTurns = 0;
 		const step = async (context: Ctx) => {
 			if (isChild(context)) {
-				const who = contextText(context).includes("TASK-A") ? "a" : "b";
+				// A later child sees earlier siblings' tasks in its roster, so only the first line names its own task.
+				const task = context.messages
+					.map((m) => (m.role === "user" ? JSON.stringify(m.content) : ""))
+					.find((text) => /^"?(\[\{"type":"text","text":")?TASK-[AB]/.test(text));
+				const who = task?.includes("TASK-A") && !task.startsWith('[{"type":"text","text":"TASK-B') ? "a" : "b";
 				childTurns[who]++;
 				if (childTurns[who] === 1) {
 					await (who === "a" ? releaseA.promise : releaseB.promise);
@@ -1056,7 +1060,7 @@ describe("Ticket #13 — Messages between orchestrator, children and siblings", 
 			expect(childSaw.a).toContain("PARENT-HELLO");
 			expect(childSaw.a).toContain("Untrusted agent message");
 			expect(childSaw.b).toContain("SIBLING-HELLO");
-			expect(childSaw.b).toContain(`From: ${ids.a}`);
+			expect(childSaw.b).toMatch(new RegExp(`From: explorer-\\d+ \\(${ids.a}\\)`));
 			expect(childTurns).toEqual({ a: 2, b: 2 });
 		} finally {
 			session.dispose();
@@ -1202,7 +1206,9 @@ describe("Ticket #14 — Children run with parent authority in the shared checko
 			expect(result?.isError, text).toBe(false);
 			expect(readFileSync(join(cwd, "worker.ts"), "utf8")).toBe("export const worker = 1;\n");
 			expect(existsSync(join(cwd, "blocked.txt"))).toBe(false);
-			expect(text).toContain("tools=bash,read,subagent_message,write ok=false denied=true bash=true");
+			expect(text).toContain(
+				"tools=bash,read,subagent_message,subagent_roster,write ok=false denied=true bash=true",
+			);
 			expect(calls).toContainEqual({ toolName: "write", parentToolCallId: "launch" });
 			expect(calls).toContainEqual({ toolName: "bash", parentToolCallId: "launch" });
 			expect(text).toMatch(/Tool executions \(observed\): .*write 2 \(1 failed\)/);
@@ -1348,7 +1354,7 @@ describe("Ticket #14 — Children run with parent authority in the shared checko
 			]);
 			await session.prompt("Delegate.", { expandPromptTemplates: false });
 
-			expect(toolResultText(session, "narrow").text).toContain("tools=read,subagent_message");
+			expect(toolResultText(session, "narrow").text).toContain("tools=read,subagent_message,subagent_roster");
 			const unknown = toolResultText(session, "unknown");
 			expect(unknown.result?.isError).toBe(true);
 			expect(unknown.text).toContain("names tools the orchestrator cannot give a child: deploy");
@@ -1401,7 +1407,7 @@ describe("Ticket #14 — Children run with parent authority in the shared checko
 			await session.prompt("Delegate.", { expandPromptTemplates: false });
 
 			expect(toolResultText(session, "launch").text).toContain(
-				"tools=mcp__docs__search,read,subagent_message result=hits for auth",
+				"tools=mcp__docs__search,read,subagent_message,subagent_roster result=hits for auth",
 			);
 			expect(calls).toContainEqual({ toolName: "mcp__docs__search", parentToolCallId: "launch" });
 		} finally {
@@ -1569,5 +1575,145 @@ describe("Ticket #21 — SDK default thinking level for a chosen model", () => {
 
 		const inherited = await spawnAndRead(agentDir, cwd, { agent: "general-purpose" });
 		expect(inherited.record).toMatchObject({ status: "completed", thinkingLevel: "low" });
+	});
+});
+
+describe("Ticket #16 — Agent names and the live roster", () => {
+	it("names runs, rejects a live duplicate, shows later children the roster, and routes messages by name", async () => {
+		const cwd = makeTempDir("names-cwd");
+		const agentDir = makeTempDir("names-agent");
+		let release!: () => void;
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const hold = defineTool({
+			name: "hold",
+			label: "Hold",
+			description: "Waits until the test releases it.",
+			parameters: Type.Object({}),
+			execute: async () => {
+				await released;
+				return { content: [{ type: "text", text: "released" }], details: undefined };
+			},
+		});
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir, extraTools: [hold] });
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			let frontendPrompt = "";
+			let rosterSeen = "";
+			let backendInbox = "";
+			const backend = [
+				fauxAssistantMessage([fauxToolCall("hold", {}, { id: "hold" })]),
+				(context: TranscriptContext) => {
+					backendInbox = JSON.stringify(context.messages);
+					return fauxAssistantMessage("Backend done.");
+				},
+			];
+			const main = [
+				fauxAssistantMessage([
+					fauxToolCall(
+						"subagent",
+						{
+							agent: "general-purpose",
+							name: "backend",
+							task: "Build the API.",
+							background: true,
+							model: "faux-tool/faux-alt",
+							thinkingLevel: "off",
+						},
+						{ id: "spawn_backend" },
+					),
+				]),
+				fauxAssistantMessage([
+					fauxToolCall(
+						"subagent",
+						{ agent: "general-purpose", name: "backend", task: "Duplicate." },
+						{ id: "dup" },
+					),
+					fauxToolCall(
+						"subagent",
+						{ agent: "general-purpose", name: "frontend", task: "Build the UI." },
+						{ id: "fe" },
+					),
+				]),
+				(context: TranscriptContext) => {
+					const firstUser = context.messages.find((m) => m.role === "user");
+					frontendPrompt = JSON.stringify(firstUser?.content ?? "");
+					return fauxAssistantMessage([fauxToolCall("subagent_roster", {}, { id: "roster" })]);
+				},
+				(context: TranscriptContext) => {
+					const roster = context.messages.find((m) => m.role === "toolResult" && m.toolCallId === "roster");
+					rosterSeen = JSON.stringify(roster?.role === "toolResult" ? roster.content : "");
+					return fauxAssistantMessage("Frontend done.");
+				},
+				fauxAssistantMessage([
+					fauxToolCall("subagent_message", { to: "backend", content: "Use REST." }, { id: "msg" }),
+				]),
+				fauxAssistantMessage("Done."),
+			];
+			let mainStep = 0;
+			let backendStep = 0;
+			const respond = (context: TranscriptContext, _o: unknown, _s: unknown, model: { id: string }) => {
+				const step = model.id === "faux-alt" ? backend[backendStep++] : main[mainStep++];
+				if (!step) return fauxAssistantMessage("Parent ack.");
+				return typeof step === "function" ? step(context) : step;
+			};
+			faux.setResponses(Array.from({ length: 12 }, () => respond));
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+
+			const dup = toolResultText(session, "dup");
+			expect(dup.result?.isError).toBe(true);
+			expect(dup.text).toMatch(/name "backend" is already used by running agent sub_/);
+			expect(toolResultText(session, "fe").result?.isError).toBe(false);
+			expect(frontendPrompt).toContain("backend");
+			expect(frontendPrompt).toContain("Build the API.");
+			expect(rosterSeen).toContain("backend");
+			expect(rosterSeen).toContain("frontend");
+			expect(toolResultText(session, "msg").text).toContain("accepted");
+
+			release();
+			const runId = (toolResultText(session, "spawn_backend").result?.details as { runId: string }).runId;
+			for (
+				let i = 0;
+				i < 300 && readPersistedRunRecord(agentDir, session.sessionId, runId)?.status !== "completed";
+				i++
+			) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			await session.waitForIdle();
+			expect(readPersistedRunRecord(agentDir, session.sessionId, runId)).toMatchObject({ name: "backend" });
+			expect(backendInbox).toContain("Use REST.");
+		} finally {
+			release();
+			session.dispose();
+		}
+	});
+
+	it("names an unnamed run after its role and refuses reserved or malformed names", async () => {
+		const cwd = makeTempDir("autoname-cwd");
+		const agentDir = makeTempDir("autoname-agent");
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
+		try {
+			await session.bindExtensions({ mode: "print" });
+			faux.setResponses([
+				fauxAssistantMessage([fauxToolCall("subagent", { agent: "explorer", task: "Look." }, { id: "auto" })]),
+				fauxAssistantMessage("Child done."),
+				fauxAssistantMessage([
+					fauxToolCall("subagent", { agent: "explorer", name: "parent", task: "x" }, { id: "reserved" }),
+					fauxToolCall("subagent", { agent: "explorer", name: "Bad Name", task: "x" }, { id: "malformed" }),
+				]),
+				fauxAssistantMessage("Done."),
+			]);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+
+			const auto = toolResultText(session, "auto");
+			const runId = (auto.result?.details as { runId: string }).runId;
+			expect(readPersistedRunRecord(agentDir, session.sessionId, runId)).toMatchObject({ name: "explorer-1" });
+			expect(auto.text).toContain("name=explorer-1");
+			expect(toolResultText(session, "reserved").text).toMatch(/Invalid subagent name "parent"/);
+			expect(toolResultText(session, "malformed").text).toMatch(/Invalid subagent name "Bad Name"/);
+		} finally {
+			session.dispose();
+		}
 	});
 });

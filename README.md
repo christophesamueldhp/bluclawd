@@ -353,9 +353,11 @@ auth, a virtual router, or an explicitly requested thinking level the model does
 before the run starts; nothing is substituted. `subagent_models` lists each model's auth status, supported thinking levels,
 and whether a child can run it.
 
-While runs are in progress, `subagent_message({ to, content })` carries text between the
-orchestrator (`parent`) and running children (`sub_…`), including sibling to sibling within the
-same parent session. The sender is bound by the runtime, never taken from the message. A child
+Each run has a name, unique among the running agents of the session: the call's `name`, or
+`<role>-<n>`. While runs are in progress, `subagent_message({ to, content })` carries text between
+the orchestrator (`parent`) and running children, addressed by name or `sub_…` run ID, including
+sibling to sibling within the same parent session. A child's task lists the agents already running,
+and its `subagent_roster` tool shows the current list. The sender is bound by the runtime, never taken from the message. A child
 receives messages at its next safe point without a new turn; a child message wakes an idle
 orchestrator. Receipts say `accepted`, `unavailable` (unknown, finished, or other session), or
 `invalidated` (session reloaded), never handled. Messages are untrusted data: they cannot approve

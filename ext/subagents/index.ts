@@ -74,6 +74,8 @@ export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const BACKGROUND_BATCH_WINDOW_MS = 40;
 /** Recorded until the child session reports the level the SDK chose for its model. */
 const SDK_DEFAULT_THINKING = "model default";
+const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const SUBAGENT_ROSTER_TOOL = "subagent_roster";
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent that works in this same checkout";
 /** Pi built-in extensions a child runs itself, over its own copies of the orchestrator's tools. */
 const CHILD_BUILTIN_EXTENSIONS = ["codemode", "tool_search"];
@@ -105,6 +107,17 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog): string 
 	].join("\n");
 }
 
+function withRoster(task: string, roster: readonly string[]): string {
+	if (roster.length === 0) return task;
+	return [
+		task,
+		"",
+		"## Agents working now",
+		...roster,
+		`Coordinate with them through subagent_message; ${SUBAGENT_ROSTER_TOOL} shows the current list.`,
+	].join("\n");
+}
+
 function summarizeTaskLabel(task: string): string {
 	const firstLine =
 		task
@@ -128,6 +141,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		let latestLoadout: ToolLoadout | undefined;
 		/** Runs whose launch tool result the parent has emitted; the SDK no longer attributes their nested usage. */
 		const emittedLaunchResults = new Set<string>();
+		const autoNameCounters = new Map<string, number>();
 
 		// Batching queue for background completion notices per (sessionId, generation)
 		let pendingNotices: Array<{
@@ -142,7 +156,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		const messageParameters = Type.Object(
 			{
-				to: Type.String({ description: 'Recipient: a subagent run ID (sub_…) or "parent" for the orchestrator.' }),
+				to: Type.String({
+					description: 'Recipient: an agent name, a run ID (sub_…), or "parent" for the orchestrator.',
+				}),
 				content: Type.String({ description: "Message text." }),
 			},
 			{ additionalProperties: false },
@@ -153,18 +169,53 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					type: "text" as const,
 					text:
 						receipt.status === "accepted"
-							? `Message ${receipt.seq} accepted for delivery (not yet handled).`
+							? `Message ${receipt.seq} accepted for delivery to ${receipt.toName ? `${receipt.toName} (${receipt.to})` : receipt.to} (not yet handled).`
 							: `Message ${receipt.seq} ${receipt.status}: ${receipt.reason ?? ""}`,
 				},
 			],
 			details: receipt,
 			isError: receipt.status !== "accepted",
 		});
-		const createChildMessageTool = (address: string, scope: SubagentMessageScope): ToolDefinition =>
+		/** Live agents in a parent scope, one line each, for a child's prompt or roster query. */
+		const describeRoster = (parentSessionId: string, self: string, includeSelf: boolean): string[] =>
+			scheduler
+				.listActiveRuns(parentSessionId)
+				.filter((run) => includeSelf || run.runId !== self)
+				.map(
+					(run) =>
+						`- ${run.name ?? run.runId} (${run.agentName}, ${run.runId}, ${run.status}): ${run.taskSummary}${run.runId === self ? " (you)" : ""}`,
+				);
+
+		const createChildRosterTool = (address: string, scope: SubagentMessageScope): ToolDefinition =>
+			defineTool({
+				name: SUBAGENT_ROSTER_TOOL,
+				label: "List agents",
+				description:
+					'List the agents running now: the orchestrator ("parent") and every subagent with its name, role, run ID, status and task.',
+				parameters: Type.Object({}, { additionalProperties: false }),
+				execute: async () => {
+					const others = describeRoster(scope.parentSessionId, address, true);
+					return {
+						content: [
+							{
+								type: "text",
+								text: ["- parent: the orchestrator", ...others].join("\n"),
+							},
+						],
+						details: undefined,
+					};
+				},
+			});
+
+		const createChildMessageTool = (
+			address: string,
+			name: string | undefined,
+			scope: SubagentMessageScope,
+		): ToolDefinition =>
 			defineTool({
 				name: SUBAGENT_MESSAGE_TOOL,
 				label: "Message agent",
-				description: `Send a short message to the orchestrator ("parent") or a sibling subagent run ID while you work. Your run ID is ${address}. An unknown recipient's receipt lists who is reachable. Delivery is not a reply; keep working.`,
+				description: `Send a short message to the orchestrator ("parent") or a sibling by name or run ID while you work. You are ${name ? `${name} (${address})` : address}. ${SUBAGENT_ROSTER_TOOL} lists who is running. Delivery is not a reply; keep working.`,
 				parameters: messageParameters,
 				execute: async (_toolCallId, params) =>
 					formatReceipt(await messageBus.send({ address, scope }, params.to.trim(), params.content)),
@@ -348,18 +399,22 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					rejectSession = reject;
 				});
 				sessionReady.catch(() => {});
-				messageBus.register(runId, {
-					scope,
-					deliver: async (message) => {
-						if (scheduler.getRun(runId)?.status === "stopping") throw new Error("it is stopping");
-						const childSession = await sessionReady;
-						// A message never starts a turn on its own; it waits for the child's next safe boundary.
-						await childSession.sendCustomMessage(subagentMessagePayload(message), {
-							deliverAs: "steer",
-							triggerTurn: false,
-						});
+				messageBus.register(
+					runId,
+					{
+						scope,
+						deliver: async (message) => {
+							if (scheduler.getRun(runId)?.status === "stopping") throw new Error("it is stopping");
+							const childSession = await sessionReady;
+							// A message never starts a turn on its own; it waits for the child's next safe boundary.
+							await childSession.sendCustomMessage(subagentMessagePayload(message), {
+								deliverAs: "steer",
+								triggerTurn: false,
+							});
+						},
 					},
-				});
+					params.record.name,
+				);
 				// Nested usage is folded into the launch tool result until it is emitted; later usage is counted here.
 				const parentTools = createParentToolProxies(
 					execCtx.parent,
@@ -374,15 +429,19 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						...params,
 						agentDir: execCtx.agentDir,
 						definition: execCtx.definition,
-						task: execCtx.task,
+						task: withRoster(execCtx.task, describeRoster(params.record.parentSessionId, runId, false)),
 						requestedModel: execCtx.requestedModel,
 						parentModel: execCtx.parentModel,
 						requestedThinkingLevel: execCtx.requestedThinkingLevel,
 						parentModelRegistry: execCtx.parentModelRegistry,
 						projectTrusted: execCtx.projectTrusted,
 						childSessionDir: storage.runDir,
-						childTools: [...parentTools, createChildMessageTool(runId, scope)],
-						activeToolNames: [...execCtx.activeToolNames, SUBAGENT_MESSAGE_TOOL],
+						childTools: [
+							...parentTools,
+							createChildMessageTool(runId, params.record.name, scope),
+							createChildRosterTool(runId, scope),
+						],
+						activeToolNames: [...execCtx.activeToolNames, SUBAGENT_MESSAGE_TOOL, SUBAGENT_ROSTER_TOOL],
 						builtinExtensions: execCtx.builtinExtensions,
 						onChildSessionCreated: (session) => {
 							session.subscribe((event) => {
@@ -422,9 +481,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				});
 			},
 			stop: (id: string, stopOptions?: { owner?: string; source?: SubagentStopSource }): boolean => {
-				const run = scheduler.getRun(id);
-				if (!run) return false;
 				const expectedOwner = stopOptions?.owner ?? activeParentSessionId;
+				const run = scheduler.getRun(id) ?? scheduler.listActiveRuns(expectedOwner).find((r) => r.name === id);
+				if (!run) return false;
+				id = run.runId;
 				if (expectedOwner && run.parentSessionId !== expectedOwner) {
 					return false;
 				}
@@ -594,7 +654,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				openWorldHint: false,
 			},
 			description:
-				"Send a message to a running subagent by run ID (sub_…). It reaches the child at its next safe point without starting a new turn; the receipt says accepted, unavailable, or invalidated, never handled.",
+				"Send a message to a running subagent by name or run ID (sub_…). It reaches the child at its next safe point without starting a new turn; the receipt says accepted, unavailable, or invalidated, never handled.",
 			parameters: messageParameters,
 			execute: async (_toolCallId, params) => {
 				if (!activeParentSessionId) {
@@ -680,6 +740,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						{ additionalProperties: false, description: "Inline role used only for this run." },
 					),
 				]),
+				name: Type.Optional(
+					Type.String({
+						description:
+							'Unique name for this child among running agents, used to address it (lowercase letters, digits, "-", "_"). Defaults to "<role>-<n>".',
+					}),
+				),
 				task: Type.String({
 					description:
 						"Self-contained task instructions with explicit file paths, symbols, or diff context (max 32 KiB).",
@@ -921,6 +987,47 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 
+				const liveRuns = scheduler.listActiveRuns(parentSessionId);
+				const requestedName = params.name?.trim();
+				if (requestedName !== undefined) {
+					if (
+						!AGENT_NAME_RE.test(requestedName) ||
+						requestedName === PARENT_MESSAGE_ADDRESS ||
+						requestedName.startsWith("sub_")
+					) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Invalid subagent name "${requestedName}": use lowercase letters, digits, "-" or "_", and not "${PARENT_MESSAGE_ADDRESS}" or a "sub_" prefix.`,
+								},
+							],
+							details: undefined,
+							isError: true,
+						};
+					}
+					const holder = liveRuns.find((run) => run.name === requestedName);
+					if (holder) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: `Subagent name "${requestedName}" is already used by running agent ${holder.runId}; choose another name.`,
+								},
+							],
+							details: undefined,
+							isError: true,
+						};
+					}
+				}
+				let runName = requestedName;
+				while (!runName || liveRuns.some((run) => run.name === runName)) {
+					const key = `${parentSessionId}:${definition.name}`;
+					const next = (autoNameCounters.get(key) ?? 0) + 1;
+					autoNameCounters.set(key, next);
+					runName = `${definition.name}-${next}`;
+				}
+
 				if (signal?.aborted) {
 					return {
 						content: [{ type: "text", text: "Subagent request was aborted before admission." }],
@@ -951,6 +1058,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					parentTurnId: turnId,
 					originToolCallId: toolCallId,
 					originEntryId,
+					name: runName,
 					agentName: definition.name,
 					definitionSource: definition.source,
 					provider: modelCheck.model.provider,
@@ -995,7 +1103,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							{
 								type: "text",
 								text: [
-									`Background subagent launched: ${handle.runId}`,
+									`Background subagent launched: ${runName} (${handle.runId})`,
 									`Agent: ${definition.name} (${modelCheck.model.provider}/${modelCheck.model.id})`,
 									`Status: ${handle.record.status}`,
 									"The final report will be delivered to this session branch when complete. Use `task_stop` with this run ID to cancel.",

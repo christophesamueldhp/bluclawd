@@ -61,3 +61,38 @@ describe("Ticket #13 — Subagent message routing", () => {
 		expect(await send("parent")).toMatchObject({ status: "unavailable", reason: /cannot message itself/ });
 	});
 });
+
+describe("Ticket #16 — Agent names", () => {
+	it("routes a message sent to a name to its run and records both, and frees the name when the run ends", async () => {
+		const records: SubagentMessageRecord[] = [];
+		const bus = new SubagentMessageBus((record) => records.push(record));
+		const received: SubagentMessage[] = [];
+		const deliver = async (message: SubagentMessage) => void received.push(message);
+		bus.register("sub_a", { scope, deliver }, "backend");
+		bus.register("sub_b", { scope, deliver }, "frontend");
+
+		expect(await bus.send({ address: "sub_b", scope }, "backend", "by name")).toMatchObject({
+			status: "accepted",
+			to: "sub_a",
+			toName: "backend",
+		});
+		expect(await bus.send({ address: "sub_b", scope }, "sub_a", "by id")).toMatchObject({ status: "accepted" });
+		expect(received.map((m) => [m.from, m.fromName, m.to, m.toName, m.content])).toEqual([
+			["sub_b", "frontend", "sub_a", "backend", "by name"],
+			["sub_b", "frontend", "sub_a", "backend", "by id"],
+		]);
+		expect(records.map((r) => [r.from, r.fromName, r.to, r.toName])).toEqual([
+			["sub_b", "frontend", "sub_a", "backend"],
+			["sub_b", "frontend", "sub_a", "backend"],
+		]);
+
+		bus.unregister("sub_a", "has finished");
+		expect(await bus.send({ address: "sub_b", scope }, "backend", "late")).toMatchObject({
+			status: "unavailable",
+			reason: /No running agent "backend"/,
+		});
+		bus.register("sub_c", { scope, deliver }, "backend");
+		expect(await bus.send({ address: "sub_b", scope }, "backend", "reused")).toMatchObject({ status: "accepted" });
+		expect(received.at(-1)).toMatchObject({ to: "sub_c", toName: "backend" });
+	});
+});
