@@ -9,19 +9,12 @@ export type AllowedSubagentTool = (typeof ALLOWED_SUBAGENT_TOOLS)[number];
 export const SUPPORTED_SUBAGENT_TOOLS = Object.freeze([...ALLOWED_SUBAGENT_TOOLS, "edit", "write", "bash"] as const);
 export type SupportedSubagentTool = (typeof SUPPORTED_SUBAGENT_TOOLS)[number];
 export type SubagentWorkspaceMode = "shared" | "isolated";
-export const EXTENDED_SUBAGENTS_RELEASED = false;
 
 export function workspaceModeForTools(tools: readonly SupportedSubagentTool[]): SubagentWorkspaceMode {
 	if (!Array.isArray(tools) || tools.length === 0 || tools.some((tool) => !SUPPORTED_TOOL_SET.has(tool))) {
 		throw new Error("Invalid subagent tools: expected a non-empty supported tool list");
 	}
 	return tools.every((tool) => ALLOWED_TOOL_SET.has(tool)) ? "shared" : "isolated";
-}
-
-export function isReadOnlySubagentTools(
-	tools: readonly SupportedSubagentTool[],
-): tools is readonly AllowedSubagentTool[] {
-	return workspaceModeForTools(tools) === "shared";
 }
 
 export const SUBAGENT_THINKING_LEVELS = Object.freeze([
@@ -51,7 +44,8 @@ export type AgentDefinitionSource = "bundled" | "user" | "project" | "inline";
 export interface AgentDefinition {
 	readonly name: string;
 	readonly description: string;
-	readonly tools?: readonly SupportedSubagentTool[];
+	/** Narrows the orchestrator's tools for this role; omitted means all of them. */
+	readonly tools?: readonly string[];
 	readonly model: SubagentModelSpec;
 	readonly thinkingLevel?: ThinkingLevel;
 	readonly instructions: string;
@@ -92,6 +86,7 @@ const ALLOWED_TOOL_SET = new Set<string>(ALLOWED_SUBAGENT_TOOLS);
 const SUPPORTED_TOOL_SET = new Set<string>(SUPPORTED_SUBAGENT_TOOLS);
 const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const RESERVED_NAME_PREFIXES = ["sub_", "bg_", "mon_", "agent_", "task_"];
+const TOOL_NAME_RE = /^[A-Za-z0-9_.:-]{1,128}$/;
 const MODEL_SPEC_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._:-]+$/;
 const CONTROL_CHAR_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 
@@ -119,7 +114,7 @@ function extractHeuristicName(raw: string, filePath: string): string {
 
 function parseToolsField(rawTools: unknown): {
 	ok: boolean;
-	tools?: SupportedSubagentTool[];
+	tools?: string[];
 	error?: string;
 } {
 	if (rawTools === undefined) {
@@ -134,22 +129,18 @@ function parseToolsField(rawTools: unknown): {
 			.map((s) => s.trim())
 			.filter((s) => s.length > 0);
 	} else {
-		return { ok: false, error: 'field "tools" must be a list of supported tool names' };
+		return { ok: false, error: 'field "tools" must be a list of tool names' };
 	}
 	if (items.length === 0) {
 		return { ok: false, error: 'field "tools" must not be empty' };
 	}
-	const deduped: SupportedSubagentTool[] = [];
+	const deduped: string[] = [];
 	for (const item of items) {
-		if (typeof item !== "string" || !SUPPORTED_TOOL_SET.has(item)) {
-			return {
-				ok: false,
-				error: `forbidden or unknown tool "${String(item)}" in "tools"; allowed tools are: ${SUPPORTED_SUBAGENT_TOOLS.join(", ")}`,
-			};
+		if (typeof item !== "string" || !TOOL_NAME_RE.test(item)) {
+			return { ok: false, error: `invalid tool name "${String(item)}" in "tools"` };
 		}
-		const tool = item as SupportedSubagentTool;
-		if (!deduped.includes(tool)) {
-			deduped.push(tool);
+		if (!deduped.includes(item)) {
+			deduped.push(item);
 		}
 	}
 	return { ok: true, tools: deduped };

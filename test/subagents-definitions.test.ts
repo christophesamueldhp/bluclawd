@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-	ALLOWED_SUBAGENT_TOOLS,
 	discoverAgentDefinitions,
 	formatAgentRoutingDescriptions,
 	resolveAgentDefinition,
@@ -28,19 +27,28 @@ afterEach(() => {
 });
 
 describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
-	it("loads bundled explorer and reviewer definitions with required evidence, scope, assumption, and blocker instructions", () => {
+	it("loads bundled general-purpose, explorer and reviewer roles with responsibilities but no tool ceilings", () => {
 		const cwd = makeTempDir("cwd");
 		const agentDir = makeTempDir("agent");
 
 		const catalog = discoverAgentDefinitions({ cwd, agentDir, projectTrusted: true });
 		expect(catalog.diagnostics).toEqual([]);
-		expect(catalog.definitions.map((d) => d.name)).toEqual(["explorer", "reviewer"]);
+		expect(catalog.definitions.map((d) => d.name)).toEqual(["explorer", "general-purpose", "reviewer"]);
+		expect(catalog.definitions.every((d) => d.tools === undefined)).toBe(true);
+
+		const generalPurpose = resolveAgentDefinition(catalog, "general-purpose");
+		expect(generalPurpose.ok).toBe(true);
+		if (generalPurpose.ok) {
+			expect(generalPurpose.definition.source).toBe("bundled");
+			expect(generalPurpose.definition.instructions).toContain("subagent_message");
+			expect(generalPurpose.definition.instructions).toMatch(/never revert, stash, or reset/i);
+			expect(generalPurpose.definition.instructions).toContain("Blockers");
+		}
 
 		const explorer = resolveAgentDefinition(catalog, "explorer");
 		expect(explorer.ok).toBe(true);
 		if (explorer.ok) {
 			expect(explorer.definition.source).toBe("bundled");
-			expect(explorer.definition.tools).toEqual(ALLOWED_SUBAGENT_TOOLS);
 			expect(explorer.definition.model).toBe("inherit");
 			expect(explorer.definition.instructions).toContain("path:line");
 			expect(explorer.definition.instructions).toContain("Scope");
@@ -52,11 +60,10 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 		expect(reviewer.ok).toBe(true);
 		if (reviewer.ok) {
 			expect(reviewer.definition.source).toBe("bundled");
-			expect(reviewer.definition.tools).toEqual(ALLOWED_SUBAGENT_TOOLS);
 			expect(reviewer.definition.instructions).toContain("path:line");
 			expect(reviewer.definition.instructions).toContain("Scope");
 			expect(reviewer.definition.instructions).toContain("Blockers");
-			expect(reviewer.definition.instructions).toContain("not_run");
+			expect(reviewer.definition.instructions).toContain("Do not modify files");
 		}
 	});
 
@@ -118,7 +125,7 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 		expect(untrustedCatalog.diagnostics.some((d) => d.includes("untrusted project"))).toBe(true);
 	});
 
-	it("rejects invalid YAML, unknown capability fields, forbidden tools, unverified model aliases, obsolete maxTurns, and duplicate names without silent fallback", () => {
+	it("rejects invalid YAML, unknown capability fields, invalid tool names, unverified model aliases, obsolete maxTurns, and duplicate names without silent fallback", () => {
 		const cwd = makeTempDir("invalid-cwd");
 		const agentDir = makeTempDir("invalid-agent");
 		const userAgentsDir = join(agentDir, "agents");
@@ -144,8 +151,8 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 			[
 				"---",
 				"name: shell-worker",
-				"description: Attempts to enable bash.",
-				"tools: [read, mcp__external__write]",
+				"description: Names a tool that cannot exist.",
+				'tools: [read, "rm -rf"]',
 				"---",
 				"Body",
 			].join("\n"),
@@ -208,11 +215,11 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 			expect(explorer.error).toContain("permissionMode");
 		}
 
-		// Forbidden tool rejected
+		// Invalid tool name rejected
 		const shellWorker = resolveAgentDefinition(catalog, "shell-worker");
 		expect(shellWorker.ok).toBe(false);
 		if (!shellWorker.ok) {
-			expect(shellWorker.error).toContain("mcp__external__write");
+			expect(shellWorker.error).toContain('invalid tool name "rm -rf"');
 		}
 
 		// Duplicate name in same scope fails closed

@@ -5,6 +5,7 @@ import {
 	defineTool,
 	type ExtensionAPI,
 	type ExtensionContext,
+	type ExtensionToolContext,
 	getAgentDir,
 	type InlineExtension,
 	SettingsManager,
@@ -21,15 +22,12 @@ import {
 import * as forkSettings from "../_shared/settings.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { deliverOrHold } from "../background-bash/notification-hold.ts";
-import { createSubagentPolicySnapshot, evaluateSubagentDelegationDeny } from "../permissions/policy.ts";
+import { evaluateSubagentDelegationDeny } from "../permissions/policy.ts";
 import {
 	type AgentDefinitionCatalog,
-	ALLOWED_SUBAGENT_TOOLS,
 	createInlineAgentDefinition,
 	discoverAgentDefinitions,
-	EXTENDED_SUBAGENTS_RELEASED,
 	formatAgentRoutingDescriptions,
-	isReadOnlySubagentTools,
 	isSubagentThinkingLevel,
 	parseSubagentModelSpec,
 	resolveAgentDefinition,
@@ -47,9 +45,10 @@ import {
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
 import {
 	captureWorkspaceSnapshot,
+	createParentToolProxies,
 	describeSubagentModels,
 	resolveChildModelAndRuntime,
-	runRestrictedSubagent,
+	runSubagent,
 	sanitizeDiagnosticText,
 } from "./runner.ts";
 import {
@@ -73,6 +72,9 @@ import {
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const BACKGROUND_BATCH_WINDOW_MS = 40;
+const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent that works in this same checkout";
+/** Pi built-in extensions a child runs itself, over its own copies of the orchestrator's tools. */
+const CHILD_BUILTIN_EXTENSIONS = ["codemode", "tool_search"];
 
 export interface SubagentExtensionOptions {
 	agentDir?: string;
@@ -82,19 +84,19 @@ export interface SubagentExtensionOptions {
 function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog): string {
 	const rolesSection = catalog
 		? formatAgentRoutingDescriptions(catalog)
-		: "- `explorer`: Focused read-only codebase explorer.\n- `reviewer`: Focused read-only code reviewer.";
+		: "- `general-purpose`: Implementation work.\n- `explorer`: Codebase exploration.\n- `reviewer`: Code review.";
 	return [
-		"Delegate a focused, read-only subtask (`explorer` or `reviewer`) to an isolated child agent with a fresh context window.",
+		`${SUBAGENT_DESCRIPTION_LEAD}, with your tools and permission rules and a fresh context window. Children cannot delegate further.`,
+		"",
+		"You own the split. Give each child a distinct task over separate files or areas: there are no locks, edits are live for you and every sibling, and the last write wins. Verify the combined result yourself.",
 		"",
 		"When to delegate:",
-		"- Multi-file codebase exploration where intermediate search output does not belong in the main conversation.",
-		"- Independent code review of a supplied diff or explicit target files.",
-		"- Independent read-only investigations that can run in parallel.",
+		"- Independent pieces of work that can run in parallel.",
+		"- Exploration or review whose intermediate output does not belong in the main conversation.",
 		"",
-		"When NOT to delegate (use direct `grep`, `find`, or `read` instead):",
-		"- Single-symbol or single-file lookups where the target path is already known.",
+		"When NOT to delegate:",
+		"- Single-file lookups or edits you can do directly.",
 		"- Tightly coupled sequential steps where each step depends on the previous result.",
-		"- Tasks requiring file edits or shell execution (subagents in M1/M2 are strictly read-only).",
 		"",
 		"Available subagent roles:",
 		rolesSection,
@@ -121,6 +123,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		let activeTurnIndex = 0;
 		let catalog: AgentDefinitionCatalog | undefined;
 		let unpublishTasks: (() => void) | undefined;
+		let latestLoadout: ToolLoadout | undefined;
+		/** Runs whose launch tool result the parent has emitted; the SDK no longer attributes their nested usage. */
+		const emittedLaunchResults = new Set<string>();
 
 		// Batching queue for background completion notices per (sessionId, generation)
 		let pendingNotices: Array<{
@@ -273,7 +278,11 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			agentDir: string;
 			definition: NonNullable<ReturnType<typeof resolveAgentDefinition>["definition"]>;
 			task: string;
-			policySnapshot: NonNullable<ReturnType<typeof createSubagentPolicySnapshot>["snapshot"]>;
+			parent: ExtensionToolContext;
+			loadout: ToolLoadout;
+			proxiedToolNames: readonly string[];
+			activeToolNames: readonly string[];
+			builtinExtensions: readonly string[];
 			requestedModel: SubagentModelSpec;
 			parentModel: ExtensionContext["model"];
 			requestedThinkingLevel: string;
@@ -349,20 +358,30 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						});
 					},
 				});
+				// Nested usage is folded into the launch tool result until it is emitted; later usage is counted here.
+				const parentTools = createParentToolProxies(
+					execCtx.parent,
+					execCtx.loadout,
+					execCtx.proxiedToolNames,
+					(usage) => {
+						if (emittedLaunchResults.has(runId)) params.controller.recordUsage(usage);
+					},
+				);
 				try {
-					return await runRestrictedSubagent({
+					return await runSubagent({
 						...params,
 						agentDir: execCtx.agentDir,
 						definition: execCtx.definition,
 						task: execCtx.task,
-						policySnapshot: execCtx.policySnapshot,
 						requestedModel: execCtx.requestedModel,
 						parentModel: execCtx.parentModel,
 						requestedThinkingLevel: execCtx.requestedThinkingLevel,
 						parentModelRegistry: execCtx.parentModelRegistry,
 						projectTrusted: execCtx.projectTrusted,
 						childSessionDir: storage.runDir,
-						childTools: [createChildMessageTool(runId, scope)],
+						childTools: [...parentTools, createChildMessageTool(runId, scope)],
+						activeToolNames: [...execCtx.activeToolNames, SUBAGENT_MESSAGE_TOOL],
+						builtinExtensions: execCtx.builtinExtensions,
 						onChildSessionCreated: (session) => {
 							session.subscribe((event) => {
 								if (event.type === "agent_end") messageBus.unregister(runId, "has finished");
@@ -373,6 +392,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				} finally {
 					rejectSession(new Error("it ended before it could receive messages"));
 					messageBus.unregister(runId, "has finished");
+					emittedLaunchResults.delete(runId);
 				}
 			},
 		});
@@ -459,6 +479,25 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			notifyAgentTasksChanged();
 		};
 
+		const runLaunchedBy = (toolCallId: string) =>
+			scheduler.listActiveRuns(activeParentSessionId).find((run) => run.originToolCallId === toolCallId);
+
+		pi.on("message_start", async (event) => {
+			if (event.message.role !== "toolResult") return;
+			const run = runLaunchedBy(event.message.toolCallId);
+			if (run) emittedLaunchResults.add(run.runId);
+		});
+
+		// A child's tool calls arrive here as nested calls of the tool call that launched it.
+		pi.on("tool_call", async (event) => {
+			if (!event.parentToolCallId || event.toolName !== "task_stop") return undefined;
+			if (!runLaunchedBy(event.parentToolCallId)) return undefined;
+			const input = event.input as { task_id?: unknown; shell_id?: unknown };
+			const id = String(input.task_id ?? input.shell_id ?? "").trim();
+			if (!scheduler.getRun(id) && !id.startsWith("sub_")) return undefined;
+			return { block: true, reason: "Subagents cannot stop agent runs; message the orchestrator instead." };
+		});
+
 		pi.on("session_start", async (event, ctx) => {
 			if (activeParentSessionId) {
 				invalidateCurrentSessionRuns(`Session replaced (${event.reason})`);
@@ -487,7 +526,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			const subagentTools = allTools.filter((t) => t.name === "subagent");
 			const hasConflict =
 				subagentTools.length > 1 ||
-				subagentTools.some((t) => !t.description?.startsWith("Delegate a focused, read-only subtask"));
+				subagentTools.some((t) => !t.description?.startsWith(SUBAGENT_DESCRIPTION_LEAD));
 			if (hasConflict) {
 				ctx.ui.notify(
 					"Conflicting third-party `subagent` tool registration detected; bluclawd's subagent tool must be unique.",
@@ -604,13 +643,14 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			label: "Subagent",
 			exposure: "model-only",
 			annotations: {
-				readOnlyHint: true,
-				destructiveHint: false,
+				readOnlyHint: false,
+				destructiveHint: true,
 				idempotentHint: false,
 				openWorldHint: false,
 			},
 			description: buildBaseSubagentDescription(),
 			prepareLoadout: (loadout: ToolLoadout): ToolLoadoutChanges | undefined => {
+				latestLoadout = loadout;
 				if (!catalog) return undefined;
 				if (!loadout.declared.some((t) => t.name === "subagent")) return undefined;
 				return {
@@ -756,41 +796,34 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 				const definition = resolvedDef.definition;
-				// Omitted tools stay read-only until parent-authority dispatch replaces this runner.
-				const requestedTools = definition.tools ?? ALLOWED_SUBAGENT_TOOLS;
-				if (!isReadOnlySubagentTools(requestedTools)) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: !EXTENDED_SUBAGENTS_RELEASED
-									? "Isolated subagent execution is not released; shell/write capabilities remain disabled."
-									: "Isolated subagent execution backend is unavailable.",
-							},
-						],
-						details: undefined,
-						isError: true,
-					};
-				}
 
-				// 4. Validate child read-policy snapshot
-				const policyRes = createSubagentPolicySnapshot({
-					cwd,
-					denyRules,
-					allowedTools: requestedTools,
-				});
-				if (!policyRes.ok || !policyRes.snapshot) {
+				// 4. Give the child the orchestrator's callable tools, narrowed by the role's tool list
+				if (!toolCtx || !latestLoadout) {
+					return {
+						content: [{ type: "text", text: "Subagent dispatch needs the orchestrator's live tool context." }],
+						details: undefined,
+						isError: true,
+					};
+				}
+				const loadout = latestLoadout;
+				const declaredNames = new Set(loadout.declared.map((tool) => tool.name));
+				const callableNames = loadout.callable.map((tool) => tool.name);
+				const builtinNames = CHILD_BUILTIN_EXTENSIONS.filter((name) => declaredNames.has(name));
+				const availableNames = [...callableNames, ...builtinNames];
+				const unknownTools = definition.tools?.filter((name) => !availableNames.includes(name)) ?? [];
+				if (unknownTools.length > 0) {
 					return {
 						content: [
 							{
 								type: "text",
-								text: `Refusing to launch subagent "${agentName}": ${policyRes.error ?? "invalid policy snapshot"}`,
+								text: `Subagent role "${definition.name}" names tools the orchestrator cannot give a child: ${unknownTools.join(", ")}. Available: ${availableNames.join(", ") || "none"}.`,
 							},
 						],
 						details: undefined,
 						isError: true,
 					};
 				}
+				const selectedNames = definition.tools ?? availableNames;
 
 				// 5. Resolve spawn > role > parent model and thinking, and verify them before admission
 				const spawnModel = params.model === undefined ? undefined : parseSubagentModelSpec(params.model);
@@ -895,7 +928,11 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					agentDir,
 					definition,
 					task: taskText,
-					policySnapshot: policyRes.snapshot,
+					parent: toolCtx,
+					loadout,
+					proxiedToolNames: callableNames.filter((name) => selectedNames.includes(name)),
+					activeToolNames: selectedNames.filter((name) => declaredNames.has(name)),
+					builtinExtensions: builtinNames.filter((name) => selectedNames.includes(name)),
 					requestedModel,
 					parentModel: ctx.model,
 					requestedThinkingLevel,

@@ -81,6 +81,8 @@ export interface SubagentRunRecord {
 	complete: boolean;
 	turnCount: number;
 	toolCallCount: number;
+	/** Finished child tool executions observed by the runtime, per tool; absent on older records. */
+	toolExecutions?: Record<string, { ok: number; error: number }>;
 	usage: SubagentUsageTotals;
 	foregroundUsageAttributed: boolean;
 	backgroundDeliveryAttempted: boolean;
@@ -92,6 +94,7 @@ export interface SubagentRunController {
 	markRunning(childSessionId?: string): void;
 	recordTurn(): void;
 	recordToolCall(): void;
+	recordToolExecution(toolName: string, isError: boolean): void;
 	recordUsage(delta: Partial<SubagentUsageTotals>): void;
 	updateProgress(text: string): void;
 }
@@ -405,6 +408,14 @@ export class SubagentRunScheduler {
 			recordToolCall: () => {
 				if (isTerminalSubagentStatus(managed.record.status)) return;
 				managed.record.toolCallCount++;
+			},
+			recordToolExecution: (toolName: string, isError: boolean) => {
+				if (isTerminalSubagentStatus(managed.record.status)) return;
+				managed.record.toolExecutions ??= {};
+				managed.record.toolExecutions[toolName] ??= { ok: 0, error: 0 };
+				const counts = managed.record.toolExecutions[toolName];
+				if (isError) counts.error++;
+				else counts.ok++;
 			},
 			recordUsage: (delta: Partial<SubagentUsageTotals>) => {
 				if (isTerminalSubagentStatus(managed.record.status)) return;

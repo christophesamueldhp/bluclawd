@@ -23,6 +23,7 @@ import {
 	createAgentSession,
 	DefaultResourceLoader,
 	defineTool,
+	type ExtensionFactory,
 	ModelRuntime,
 	SessionManager,
 	SettingsManager,
@@ -53,6 +54,9 @@ async function createParentSessionWithSubagents(options: {
 	cwd: string;
 	agentDir: string;
 	extraTools?: ReturnType<typeof defineTool>[];
+	/** Pi built-in tools the parent has; none when omitted. */
+	builtinTools?: string[];
+	extensions?: ExtensionFactory[];
 }) {
 	const modelRuntime = await ModelRuntime.create({
 		authPath: join(options.agentDir, "auth.json"),
@@ -83,7 +87,7 @@ async function createParentSessionWithSubagents(options: {
 		cwd: options.cwd,
 		agentDir: options.agentDir,
 		settingsManager,
-		extensionFactories: [createSubagentsExtension({ agentDir: options.agentDir })],
+		extensionFactories: [createSubagentsExtension({ agentDir: options.agentDir }), ...(options.extensions ?? [])],
 		noExtensions: true,
 		noSkills: true,
 		noPromptTemplates: true,
@@ -99,7 +103,9 @@ async function createParentSessionWithSubagents(options: {
 		modelRuntime,
 		model: faux.getModel("faux-main"),
 		thinkingLevel: "low",
-		noTools: "builtin",
+		...(options.builtinTools
+			? { tools: [...options.builtinTools, "subagent*", ...(options.extraTools ?? []).map((tool) => tool.name)] }
+			: { noTools: "builtin" as const }),
 		customTools: options.extraTools,
 		resourceLoader,
 		sessionManager: SessionManager.inMemory(options.cwd),
@@ -226,7 +232,7 @@ describe("Task 6 (M1) — Foreground subagent tool integration", () => {
 					expect(tr.usage?.totalTokens).toBeGreaterThan(0);
 					const text = tr.content.map((c) => (c.type === "text" ? c.text : "")).join("");
 					expect(text).toContain("Execution: completed");
-					expect(text).toContain("Verification: not_run");
+					expect(text).toContain("Verification: not inferred by the runtime");
 					const runId = (tr.details as { runId: string }).runId;
 					const record = readPersistedRunRecord(agentDir, session.sessionId, runId)!;
 					expect(record.transcriptPath).toBeTypeOf("string");
@@ -247,7 +253,7 @@ describe("Task 6 (M1) — Foreground subagent tool integration", () => {
 		}
 	});
 
-	it("refuses isolated definitions before model resolution or run storage while release is blocked", async () => {
+	it("refuses a role naming tools the orchestrator lacks before model resolution or run storage", async () => {
 		const cwd = makeTempDir("isolated-cwd");
 		const agentDir = makeTempDir("isolated-agent");
 		mkdirSync(join(agentDir, "agents"));
@@ -285,7 +291,9 @@ describe("Task 6 (M1) — Foreground subagent tool integration", () => {
 			expect(result?.role === "toolResult" && result.isError).toBe(true);
 			if (result?.role === "toolResult") {
 				expect(result.content).toEqual([
-					expect.objectContaining({ text: expect.stringMatching(/isolated.*not (released|enabled)/i) }),
+					expect.objectContaining({
+						text: expect.stringContaining("names tools the orchestrator cannot give a child: read, bash"),
+					}),
 				]);
 			}
 			expect(faux.state.callCount - before).toBe(2);
@@ -473,11 +481,15 @@ describe("Ticket #7 — Uncapped saved roles", () => {
 		expect(await routedDescription(cwd, agentDir)).toContain(description);
 	});
 
-	it("runs a saved role without tools on the current read-only path", async () => {
+	it("gives a saved role without tools every tool the orchestrator can share", async () => {
 		const cwd = makeTempDir("inherit-cwd");
 		const agentDir = makeTempDir("inherit-agent");
 		writeRole(join(agentDir, "agents"), "general-purpose");
-		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd,
+			agentDir,
+			builtinTools: ["read", "edit", "write", "bash"],
+		});
 		try {
 			await session.bindExtensions({ mode: "print" });
 			faux.setResponses([
@@ -495,7 +507,7 @@ describe("Ticket #7 — Uncapped saved roles", () => {
 			expect(result?.role === "toolResult" && result.isError).toBe(false);
 			const text =
 				result?.role === "toolResult" ? result.content.map((c) => (c.type === "text" ? c.text : "")).join("") : "";
-			expect(text).toContain("Child tools: find,grep,ls,read");
+			expect(text).toContain("Child tools: bash,edit,read,subagent_message,write");
 		} finally {
 			session.dispose();
 		}
@@ -579,7 +591,7 @@ describe("Ticket #11 — Inline run-local roles", () => {
 		}
 	});
 
-	it("rejects invalid inline roles and inline tool widening before admission", async () => {
+	it("rejects invalid inline roles and tools the orchestrator lacks before admission", async () => {
 		const cwd = makeTempDir("inline-bad-cwd");
 		const agentDir = makeTempDir("inline-bad-agent");
 		const role = { name: "checker", description: "Checks.", instructions: "Check." };
@@ -592,8 +604,8 @@ describe("Ticket #11 — Inline run-local roles", () => {
 			{ id: "reserved", agent: { ...role, name: "sub_checker" }, error: /reserved task prefixes/ },
 			{ id: "control", agent: { ...role, description: "Bad\u0007desc" }, error: /control characters/ },
 			{ id: "empty_body", agent: { ...role, instructions: "   " }, error: /non-empty instructions/ },
-			{ id: "widen", agent: { ...role, tools: ["read", "bash"] }, error: /not released/ },
-			{ id: "unknown_tool", agent: { ...role, tools: ["mcp"] }, error: /forbidden or unknown tool "mcp"/ },
+			{ id: "missing_tool", agent: { ...role, tools: ["read", "bash"] }, error: /cannot give a child: read, bash/ },
+			{ id: "bad_tool", agent: { ...role, tools: ["rm -rf"] }, error: /invalid tool name "rm -rf"/ },
 		];
 		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
 		try {
@@ -1136,4 +1148,371 @@ describe("Ticket #13 — Messages between orchestrator, children and siblings", 
 			session.dispose();
 		}
 	});
+});
+
+describe("Ticket #14 — Children run with parent authority in the shared checkout", () => {
+	function recordingParentPolicy(calls: Array<{ toolName: string; parentToolCallId?: string }>): ExtensionFactory {
+		return (pi) => {
+			pi.on("tool_call", async (event) => {
+				calls.push({ toolName: event.toolName, parentToolCallId: event.parentToolCallId });
+				if (event.toolName === "write" && String((event.input as { path?: unknown }).path) === "blocked.txt") {
+					return { block: true, reason: "Denied by parent policy" };
+				}
+				return undefined;
+			});
+		};
+	}
+
+	it("writes the parent's tree through the parent's hooks, without delegation tools, and reports observed executions", async () => {
+		const cwd = makeTempDir("shared-cwd");
+		const agentDir = makeTempDir("shared-agent");
+		const calls: Array<{ toolName: string; parentToolCallId?: string }> = [];
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd,
+			agentDir,
+			builtinTools: ["read", "write", "bash"],
+			extensions: [recordingParentPolicy(calls)],
+		});
+		try {
+			await session.bindExtensions({ mode: "print" });
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("subagent", { agent: "general-purpose", task: "Write worker.ts." }, { id: "launch" }),
+				]),
+				fauxAssistantMessage([
+					fauxToolCall("write", { path: "worker.ts", content: "export const worker = 1;\n" }, { id: "w_ok" }),
+					fauxToolCall("write", { path: "blocked.txt", content: "no" }, { id: "w_denied" }),
+					fauxToolCall("bash", { command: "exit 3" }, { id: "b_fail" }),
+				]),
+				(context) => {
+					const results = context.messages.filter((m) => m.role === "toolResult");
+					const failed = (id: string) => results.find((m) => m.toolCallId === id)?.isError;
+					const tools = getCurrentTools(context.messages)
+						.map((t) => t.name)
+						.sort();
+					return fauxAssistantMessage(
+						`tools=${tools.join(",")} ok=${failed("w_ok")} denied=${failed("w_denied")} bash=${failed("b_fail")}`,
+					);
+				},
+				fauxAssistantMessage("Done."),
+			]);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+
+			const { result, text } = toolResultText(session, "launch");
+			expect(result?.isError, text).toBe(false);
+			expect(readFileSync(join(cwd, "worker.ts"), "utf8")).toBe("export const worker = 1;\n");
+			expect(existsSync(join(cwd, "blocked.txt"))).toBe(false);
+			expect(text).toContain("tools=bash,read,subagent_message,write ok=false denied=true bash=true");
+			expect(calls).toContainEqual({ toolName: "write", parentToolCallId: "launch" });
+			expect(calls).toContainEqual({ toolName: "bash", parentToolCallId: "launch" });
+			expect(text).toMatch(/Tool executions \(observed\): .*write 2 \(1 failed\)/);
+			expect(text).toMatch(/Tool executions \(observed\): .*bash 1 \(1 failed\)/);
+			expect(text).toContain("Verification: not inferred by the runtime");
+			expect(readdirSync(agentDir).some((name) => name.includes("workspace"))).toBe(false);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("applies live parent denies to direct and nested calls after a background launch returns, and rejects nested delegation", async () => {
+		const cwd = makeTempDir("live-cwd");
+		const agentDir = makeTempDir("live-agent");
+		let tightened = false;
+		const livePolicy: ExtensionFactory = (pi) => {
+			pi.on("tool_call", async (event) => {
+				if (event.toolName !== "write") return undefined;
+				if (tightened) return { block: true, reason: "Policy tightened" };
+				tightened = true;
+				return undefined;
+			});
+		};
+		const nestedWrite = defineTool({
+			name: "nested_write",
+			label: "Nested write",
+			description: "Integration that writes through the parent's write tool.",
+			parameters: Type.Object({ path: Type.String() }),
+			execute: async (_id, params, signal, _update, ctx) => {
+				const outcome = await ctx.executeTool("write", { path: params.path, content: "nested" }, { signal });
+				return { ...outcome.result, isError: outcome.isError };
+			},
+		});
+		const spawnProxy = defineTool({
+			name: "spawn_proxy",
+			label: "Spawn proxy",
+			description: "Integration that tries to delegate.",
+			parameters: Type.Object({}),
+			execute: async (_id, _params, signal, _update, ctx) => {
+				const outcome = await ctx.executeTool("subagent", { agent: "general-purpose", task: "x" }, { signal });
+				return { ...outcome.result, isError: outcome.isError };
+			},
+		});
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd,
+			agentDir,
+			builtinTools: ["write"],
+			extraTools: [nestedWrite, spawnProxy],
+			extensions: [livePolicy],
+		});
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			const childSteps = [
+				fauxAssistantMessage([fauxToolCall("write", { path: "a.txt", content: "a" }, { id: "first" })]),
+				fauxAssistantMessage([fauxToolCall("write", { path: "b.txt", content: "b" }, { id: "second" })]),
+				fauxAssistantMessage([fauxToolCall("nested_write", { path: "c.txt" }, { id: "nested" })]),
+				fauxAssistantMessage([fauxToolCall("spawn_proxy", {}, { id: "spawn" })]),
+				(context: TranscriptContext) => {
+					const failed = (id: string) => {
+						const result = context.messages.find((m) => m.role === "toolResult" && m.toolCallId === id);
+						return result?.role === "toolResult" && result.isError;
+					};
+					return fauxAssistantMessage(
+						`first=${failed("first")} second=${failed("second")} nested=${failed("nested")} spawn=${failed("spawn")}`,
+					);
+				},
+			];
+			let childStep = 0;
+			const respond = (context: TranscriptContext, _options: unknown, _state: unknown, model: { id: string }) => {
+				if (model.id !== "faux-alt") return fauxAssistantMessage("Parent ack.");
+				const step = childSteps[childStep++];
+				return typeof step === "function" ? step(context) : step;
+			};
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall(
+						"subagent",
+						{
+							agent: "general-purpose",
+							task: "Write.",
+							background: true,
+							model: "faux-tool/faux-alt",
+							thinkingLevel: "off",
+						},
+						{ id: "launch" },
+					),
+				]),
+				...Array.from({ length: 8 }, () => respond),
+			]);
+			await session.prompt("Delegate in background.", { expandPromptTemplates: false });
+			const runId = (toolResultText(session, "launch").result?.details as { runId: string }).runId;
+			for (
+				let i = 0;
+				i < 300 && readPersistedRunRecord(agentDir, session.sessionId, runId)?.status !== "completed";
+				i++
+			) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			await session.waitForIdle();
+
+			expect(readPersistedRunRecord(agentDir, session.sessionId, runId)?.summaryText).toBe(
+				"first=false second=true nested=true spawn=true",
+			);
+			expect(readFileSync(join(cwd, "a.txt"), "utf8")).toBe("a");
+			expect(existsSync(join(cwd, "b.txt"))).toBe(false);
+			expect(existsSync(join(cwd, "c.txt"))).toBe(false);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("narrows a role's tools and rejects tools the orchestrator does not have", async () => {
+		const cwd = makeTempDir("narrow-cwd");
+		const agentDir = makeTempDir("narrow-agent");
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd,
+			agentDir,
+			builtinTools: ["read", "write", "bash"],
+		});
+		try {
+			await session.bindExtensions({ mode: "print" });
+			const role = (tools: string[]) => ({
+				name: "reader",
+				description: "Reads.",
+				instructions: "Read only.",
+				tools,
+			});
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("subagent", { agent: role(["read"]), task: "Report tools." }, { id: "narrow" }),
+				]),
+				(context) =>
+					fauxAssistantMessage(
+						`tools=${getCurrentTools(context.messages)
+							.map((t) => t.name)
+							.sort()
+							.join(",")}`,
+					),
+				fauxAssistantMessage([
+					fauxToolCall("subagent", { agent: role(["read", "deploy"]), task: "Report tools." }, { id: "unknown" }),
+				]),
+				fauxAssistantMessage("Done."),
+			]);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+
+			expect(toolResultText(session, "narrow").text).toContain("tools=read,subagent_message");
+			const unknown = toolResultText(session, "unknown");
+			expect(unknown.result?.isError).toBe(true);
+			expect(unknown.text).toContain("names tools the orchestrator cannot give a child: deploy");
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("gives a child the orchestrator's MCP-named tools through the parent's hooks", async () => {
+		const cwd = makeTempDir("mcp-cwd");
+		const agentDir = makeTempDir("mcp-agent");
+		const calls: Array<{ toolName: string; parentToolCallId?: string }> = [];
+		const search = defineTool({
+			name: "mcp__docs__search",
+			label: "Docs search",
+			description: "Search the docs server.",
+			parameters: Type.Object({ query: Type.String() }),
+			execute: async (_id, params) => ({
+				content: [{ type: "text", text: `hits for ${params.query}` }],
+				details: undefined,
+			}),
+		});
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd,
+			agentDir,
+			builtinTools: ["read"],
+			extraTools: [search],
+			extensions: [recordingParentPolicy(calls)],
+		});
+		try {
+			await session.bindExtensions({ mode: "print" });
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("subagent", { agent: "general-purpose", task: "Search docs." }, { id: "launch" }),
+				]),
+				fauxAssistantMessage([fauxToolCall("mcp__docs__search", { query: "auth" }, { id: "q" })]),
+				(context) => {
+					const result = context.messages.find((m) => m.role === "toolResult" && m.toolCallId === "q");
+					const text =
+						result?.role === "toolResult"
+							? result.content.map((c) => (c.type === "text" ? c.text : "")).join("")
+							: "";
+					const tools = getCurrentTools(context.messages)
+						.map((t) => t.name)
+						.sort();
+					return fauxAssistantMessage(`tools=${tools.join(",")} result=${text}`);
+				},
+				fauxAssistantMessage("Done."),
+			]);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+
+			expect(toolResultText(session, "launch").text).toContain(
+				"tools=mcp__docs__search,read,subagent_message result=hits for auth",
+			);
+			expect(calls).toContainEqual({ toolName: "mcp__docs__search", parentToolCallId: "launch" });
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("blocks a child from stopping agent runs but not other tasks", async () => {
+		const cwd = makeTempDir("stop-cwd");
+		const agentDir = makeTempDir("stop-agent");
+		const stopped: string[] = [];
+		const taskStop = defineTool({
+			name: "task_stop",
+			label: "Stop task",
+			description: "Stop a background task.",
+			parameters: Type.Object({ task_id: Type.String() }),
+			execute: async (_id, params) => {
+				stopped.push(params.task_id);
+				return { content: [{ type: "text", text: `stopped ${params.task_id}` }], details: undefined };
+			},
+		});
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir, extraTools: [taskStop] });
+		try {
+			await session.bindExtensions({ mode: "print" });
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("subagent", { agent: "general-purpose", task: "Stop things." }, { id: "launch" }),
+				]),
+				fauxAssistantMessage([
+					fauxToolCall("task_stop", { task_id: "sub_sibling" }, { id: "s_agent" }),
+					fauxToolCall("task_stop", { task_id: "bg_shell" }, { id: "s_shell" }),
+				]),
+				(context) => {
+					const result = context.messages.find((m) => m.role === "toolResult" && m.toolCallId === "s_agent");
+					return fauxAssistantMessage(`agentStopBlocked=${result?.role === "toolResult" && result.isError}`);
+				},
+				fauxAssistantMessage("Done."),
+			]);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+
+			expect(toolResultText(session, "launch").text).toContain("agentStopBlocked=true");
+			expect(stopped).toEqual(["bg_shell"]);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it.each(["foreground", "background"] as const)(
+		"counts integration usage exactly once for a %s child",
+		async (mode) => {
+			const cwd = makeTempDir(`usage-${mode}-cwd`);
+			const agentDir = makeTempDir(`usage-${mode}-agent`);
+			const INTEGRATION_TOKENS = 1_000_000;
+			const metered = defineTool({
+				name: "metered",
+				label: "Metered",
+				description: "Reports integration usage.",
+				parameters: Type.Object({}),
+				execute: async () => ({
+					content: [{ type: "text", text: "metered" }],
+					details: undefined,
+					usage: {
+						input: INTEGRATION_TOKENS,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: INTEGRATION_TOKENS,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				}),
+			});
+			const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir, extraTools: [metered] });
+			try {
+				await session.bindExtensions({ mode: "rpc" });
+				const child = [
+					fauxAssistantMessage([fauxToolCall("metered", {}, { id: "m" })]),
+					fauxAssistantMessage("Metered."),
+				];
+				faux.setResponses([
+					fauxAssistantMessage([
+						fauxToolCall(
+							"subagent",
+							{ agent: "general-purpose", task: "Meter.", background: mode === "background" },
+							{ id: "launch" },
+						),
+					]),
+					...(mode === "foreground" ? child : [fauxAssistantMessage("Parent ack."), ...child]),
+					fauxAssistantMessage("Done."),
+				]);
+				await session.prompt("Delegate.", { expandPromptTemplates: false });
+				const runId = (toolResultText(session, "launch").result?.details as { runId: string }).runId;
+				for (
+					let i = 0;
+					i < 200 && readPersistedRunRecord(agentDir, session.sessionId, runId)?.status !== "completed";
+					i++
+				) {
+					await new Promise((resolve) => setTimeout(resolve, 10));
+				}
+				await session.waitForIdle();
+
+				const launch = session.messages.find((m) => m.role === "toolResult" && m.toolCallId === "launch");
+				const attributed = launch?.role === "toolResult" ? (launch.usage?.totalTokens ?? 0) : 0;
+				const record = readPersistedRunRecord(agentDir, session.sessionId, runId);
+				expect(record?.status).toBe("completed");
+				const runTokens = record?.usage.totalTokens ?? 0;
+				// Exactly one of the parent's launch result or the run record carries the integration usage.
+				expect(Math.floor(attributed / INTEGRATION_TOKENS) + Math.floor(runTokens / INTEGRATION_TOKENS)).toBe(1);
+				expect(runTokens >= INTEGRATION_TOKENS).toBe(mode === "background");
+			} finally {
+				session.dispose();
+			}
+		},
+	);
 });

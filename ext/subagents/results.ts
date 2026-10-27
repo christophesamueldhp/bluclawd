@@ -54,7 +54,12 @@ export function sanitizeReportText(input: string): string {
 function stripSpoofedEnvelopeLines(workerText: string): string {
 	return workerText
 		.split("\n")
-		.filter((line) => !/^\s*(Run|Execution|Complete|Snapshot|Verification|Usage|Full report)\s*:/i.test(line))
+		.filter(
+			(line) =>
+				!/^\s*(Run|Execution|Complete|Snapshot|Tool executions(?: \(observed\))?|Verification|Usage|Full report)\s*:/i.test(
+					line,
+				),
+		)
 		.join("\n");
 }
 
@@ -168,7 +173,12 @@ export function buildSubagentResultEnvelope(
 ): BuiltSubagentResultEnvelope {
 	const parsed = parseWorkerSections(record.summaryText ?? "");
 	const snapshotText = formatSnapshotSummary(record.startSnapshot, record.endSnapshot, record.snapshotDrifted);
-	const verificationText = "not_run (read-only subagent; no shell or test execution)";
+	const executions = Object.entries(record.toolExecutions ?? {}).map(
+		([name, { ok, error }]) => `${name} ${ok + error}${error > 0 ? ` (${error} failed)` : ""}`,
+	);
+	const executionsText = executions.length > 0 ? executions.join(", ") : "none";
+	const verificationText =
+		"not inferred by the runtime; any test or check results above are agent-reported (a zero shell exit is not test coverage)";
 
 	const runtimeBlockers: string[] = [];
 	if (parsed.blockers && parsed.blockers.toLowerCase() !== "none" && parsed.blockers !== "- none") {
@@ -200,6 +210,7 @@ export function buildSubagentResultEnvelope(
 			`Scope:\n${scopeField}`,
 			`Summary:\n${summaryContent}`,
 			`Evidence:\n${evidenceField}`,
+			`Tool executions (observed): ${executionsText}`,
 			`Verification: ${verificationText}`,
 			`Usage: ${record.usage.totalTokens} reported tokens; ${record.usage.hasUnknownCost ? "cost unknown (includes unpriced usage)" : `estimated cost $${record.usage.cost.total.toFixed(6)}`}`,
 			`Blockers:\n${blockersField}`,

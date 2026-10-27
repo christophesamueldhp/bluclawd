@@ -3,18 +3,21 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { type Api, getSupportedThinkingLevels, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import {
+	type Api,
+	getSupportedThinkingLevels,
+	type Model,
+	type ModelThinkingLevel,
+	type Usage,
+} from "@earendil-works/pi-ai";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
 	createAgentSession,
-	createFindToolDefinition,
-	createGrepToolDefinition,
-	createLsToolDefinition,
-	createReadToolDefinition,
 	DefaultResourceLoader,
 	type ExtensionAPI,
 	type ExtensionFactory,
+	type ExtensionToolContext,
 	getAgentDir,
 	loadProjectContextFiles,
 	type ModelRegistry,
@@ -22,19 +25,9 @@ import {
 	SessionManager,
 	SettingsManager,
 	type ToolDefinition,
-	type ToolResultEventResult,
+	type ToolLoadout,
 } from "@earendil-works/pi-coding-agent";
-import {
-	createChildPolicyExtension,
-	isValidSubagentPolicySnapshot,
-	type SubagentReadPolicySnapshot,
-} from "../permissions/policy.ts";
-import {
-	type AgentDefinition,
-	type AllowedSubagentTool,
-	isSubagentThinkingLevel,
-	type SubagentModelSpec,
-} from "./definitions.ts";
+import { type AgentDefinition, isSubagentThinkingLevel, type SubagentModelSpec } from "./definitions.ts";
 import {
 	addSubagentUsage,
 	createEmptySubagentUsage,
@@ -43,22 +36,9 @@ import {
 	type WorkspaceSnapshot,
 } from "./runs.ts";
 
-export const MAX_CHILD_TOOL_OUTPUT_BYTES = 32 * 1024;
 const VIRTUAL_MODEL_API = "pi-virtual";
 const VIRTUAL_MODEL_REASON =
 	"virtual model routers are not inspectable via public ModelRegistry APIs, so a child cannot preserve their routing";
-
-const FORBIDDEN_TOOL_PATTERNS = [
-	"bash",
-	"edit",
-	"write",
-	"powershell",
-	"monitor",
-	"subagent",
-	"codemode",
-	"tool_search",
-	"mcp__*",
-];
 
 export interface ResolveChildModelOptions {
 	agentDir?: string;
@@ -105,19 +85,22 @@ export function describeSubagentModels(registry: ModelRegistry, provider?: strin
 		});
 }
 
-export interface RunRestrictedSubagentOptions extends SubagentRunnerExecuteParams {
+export interface RunSubagentOptions extends SubagentRunnerExecuteParams {
 	agentDir?: string;
 	definition: AgentDefinition;
 	task: string;
-	policySnapshot: SubagentReadPolicySnapshot;
 	requestedModel: SubagentModelSpec;
 	parentModel: Model<Api> | undefined;
 	requestedThinkingLevel: ThinkingLevel | string | undefined;
 	parentModelRegistry: ModelRegistry;
 	projectTrusted: boolean;
 	childSessionDir?: string;
-	/** Extra runtime-bound tools for the child, such as its message tool. */
-	childTools?: readonly ToolDefinition[];
+	/** The orchestrator's tools as the child runs them, plus runtime-bound tools such as its message tool. */
+	childTools: readonly ToolDefinition[];
+	/** Tools declared to the child's model; the others stay reachable only through codemode or tool search. */
+	activeToolNames: readonly string[];
+	/** Pi built-in extensions (codemode, tool_search) the child runs over its own tools. */
+	builtinExtensions: readonly string[];
 	onChildSessionCreated?: (session: AgentSession) => void;
 }
 
@@ -252,27 +235,6 @@ export async function resolveChildModelAndRuntime(options: ResolveChildModelOpti
 	};
 }
 
-function buildApprovedReadTools(cwd: string, allowedTools: readonly AllowedSubagentTool[]): ToolDefinition[] {
-	const factories: Record<AllowedSubagentTool, () => ToolDefinition> = {
-		read: () => createReadToolDefinition(cwd),
-		grep: () => createGrepToolDefinition(cwd),
-		find: () => createFindToolDefinition(cwd),
-		ls: () => createLsToolDefinition(cwd),
-	};
-	return allowedTools.map((name) => factories[name]());
-}
-
-function capChildToolOutputText(text: string): string | undefined {
-	if (Buffer.byteLength(text, "utf8") <= MAX_CHILD_TOOL_OUTPUT_BYTES) {
-		return undefined;
-	}
-	const buf = Buffer.from(text, "utf8").subarray(0, MAX_CHILD_TOOL_OUTPUT_BYTES);
-	const sliced = buf.toString("utf8");
-	const lastNewline = sliced.lastIndexOf("\n");
-	const cleanHead = lastNewline > MAX_CHILD_TOOL_OUTPUT_BYTES / 2 ? sliced.slice(0, lastNewline) : sliced;
-	return `${cleanHead}\n\n[Child tool output capped at 32 KiB; narrow your path, pattern, or offset/limit]`;
-}
-
 function extractAssistantText(message: unknown): string {
 	if (!message || typeof message !== "object") return "";
 	const content = (message as { content?: unknown }).content;
@@ -289,17 +251,37 @@ function extractAssistantText(message: unknown): string {
 	return chunks.join("\n\n");
 }
 
-export async function runRestrictedSubagent(options: RunRestrictedSubagentOptions): Promise<SubagentRunnerOutcome> {
-	if (!isValidSubagentPolicySnapshot(options.policySnapshot)) {
-		return {
-			status: "failed",
-			complete: false,
-			summaryText: "",
-			errorMessage: "Refusing to launch subagent: policy snapshot is missing or malformed.",
-			endSnapshot: captureWorkspaceSnapshot(options.record.cwd),
-		};
-	}
+/** One child tool per named parent tool, each executed by the orchestrator's session with its hooks and rules. */
+export function createParentToolProxies(
+	parent: Pick<ExtensionToolContext, "executeTool">,
+	loadout: ToolLoadout,
+	names: readonly string[],
+	onNestedUsage: (usage: Usage) => void,
+): ToolDefinition[] {
+	return loadout.callable
+		.filter((tool) => names.includes(tool.name))
+		.map((tool) => {
+			const guidelines = loadout.getPromptGuidelines(tool.name);
+			return {
+				name: tool.name,
+				label: tool.label,
+				description: tool.description,
+				parameters: tool.parameters,
+				outputSchema: tool.outputSchema,
+				exposure: loadout.getExposure(tool.name),
+				namespace: loadout.getNamespace(tool.name),
+				promptGuidelines: guidelines.length > 0 ? [...guidelines] : undefined,
+				execute: async (_toolCallId, args, signal, onUpdate) => {
+					const outcome = await parent.executeTool(tool.name, args, { signal, onUpdate });
+					const { usage, ...result } = outcome.result;
+					if (usage) onNestedUsage(usage);
+					return { ...result, isError: outcome.isError };
+				},
+			};
+		});
+}
 
+export async function runSubagent(options: RunSubagentOptions): Promise<SubagentRunnerOutcome> {
 	const resolvedModel = await resolveChildModelAndRuntime({
 		agentDir: options.agentDir,
 		requestedModel: options.requestedModel,
@@ -338,22 +320,8 @@ export async function runRestrictedSubagent(options: RunRestrictedSubagentOption
 			return undefined;
 		});
 
-		pi.on("tool_result", async (event): Promise<ToolResultEventResult | undefined> => {
-			if (event.isError) return undefined;
-
-			let capped = false;
-			const nextContent = event.content.map((part) => {
-				if (part.type !== "text" || typeof part.text !== "string") return part;
-				const truncated = capChildToolOutputText(part.text);
-				if (truncated === undefined) return part;
-				capped = true;
-				return { ...part, text: truncated };
-			});
-			if (!capped) return undefined;
-			return {
-				content: nextContent,
-				structuredContent: undefined,
-			};
+		pi.on("tool_result", async (event) => {
+			options.controller.recordToolExecution(event.toolName, event.isError);
 		});
 	};
 
@@ -361,7 +329,7 @@ export async function runRestrictedSubagent(options: RunRestrictedSubagentOption
 		cwd,
 		agentDir,
 		settingsManager,
-		extensionFactories: [createChildPolicyExtension(options.policySnapshot), lifecycleExtension],
+		extensionFactories: [lifecycleExtension],
 		noExtensions: true,
 		noSkills: true,
 		noPromptTemplates: true,
@@ -374,7 +342,9 @@ export async function runRestrictedSubagent(options: RunRestrictedSubagentOption
 						(file) => dirname(resolve(file.path)) === resolve(agentDir),
 					),
 				}),
-		disabledBuiltinExtensions: ["mcp", "codemode", "tool_search"],
+		disabledBuiltinExtensions: ["mcp", "codemode", "tool_search"].filter(
+			(name) => !options.builtinExtensions.includes(name),
+		),
 		appendSystemPrompt: [options.definition.instructions],
 	});
 	await resourceLoader.reload();
@@ -383,7 +353,6 @@ export async function runRestrictedSubagent(options: RunRestrictedSubagentOption
 		? SessionManager.create(cwd, options.childSessionDir)
 		: SessionManager.inMemory(cwd);
 
-	const approvedTools = buildApprovedReadTools(cwd, options.policySnapshot.allowedTools);
 	const { session } = await createAgentSession({
 		cwd,
 		agentDir,
@@ -391,9 +360,8 @@ export async function runRestrictedSubagent(options: RunRestrictedSubagentOption
 		model: resolvedModel.model,
 		thinkingLevel: resolvedModel.thinkingLevel,
 		noTools: "builtin",
-		tools: [...options.policySnapshot.allowedTools, ...(options.childTools ?? []).map((tool) => tool.name)],
-		excludeTools: FORBIDDEN_TOOL_PATTERNS,
-		customTools: [...approvedTools, ...(options.childTools ?? [])],
+		tools: [...options.builtinExtensions, ...options.childTools.map((tool) => tool.name)],
+		customTools: [...options.childTools],
 		resourceLoader,
 		sessionManager,
 		settingsManager,
@@ -493,6 +461,7 @@ export async function runRestrictedSubagent(options: RunRestrictedSubagentOption
 
 	try {
 		await session.bindExtensions({});
+		session.setActiveToolsByName([...options.activeToolNames]);
 		options.controller.markRunning(session.sessionId);
 
 		if (options.signal.aborted) {
