@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
 export const ALLOWED_SUBAGENT_TOOLS = Object.freeze(["read", "grep", "find", "ls"] as const);
@@ -23,13 +24,36 @@ export function isReadOnlySubagentTools(
 	return workspaceModeForTools(tools) === "shared";
 }
 
+export const SUBAGENT_THINKING_LEVELS = Object.freeze([
+	"off",
+	"minimal",
+	"low",
+	"medium",
+	"high",
+	"xhigh",
+	"max",
+] as const satisfies readonly ThinkingLevel[]);
+
+export function isSubagentThinkingLevel(value: unknown): value is ThinkingLevel {
+	return typeof value === "string" && (SUBAGENT_THINKING_LEVELS as readonly string[]).includes(value);
+}
+
+export type SubagentModelSpec = "inherit" | `${string}/${string}`;
+
+export function parseSubagentModelSpec(value: string): SubagentModelSpec | undefined {
+	const trimmed = value.trim();
+	if (trimmed === "inherit") return "inherit";
+	return MODEL_SPEC_RE.test(trimmed) ? (trimmed as `${string}/${string}`) : undefined;
+}
+
 export type AgentDefinitionSource = "bundled" | "user" | "project" | "inline";
 
 export interface AgentDefinition {
 	readonly name: string;
 	readonly description: string;
 	readonly tools?: readonly SupportedSubagentTool[];
-	readonly model: "inherit" | `${string}/${string}`;
+	readonly model: SubagentModelSpec;
+	readonly thinkingLevel?: ThinkingLevel;
 	readonly instructions: string;
 	readonly source: AgentDefinitionSource;
 	readonly filePath?: string;
@@ -41,6 +65,7 @@ export interface InlineAgentRole {
 	readonly instructions: string;
 	readonly tools?: readonly string[];
 	readonly model?: string;
+	readonly thinkingLevel?: string;
 }
 
 export interface AgentDefinitionCatalog {
@@ -62,7 +87,7 @@ export interface ResolveAgentDefinitionResult {
 	readonly error?: string;
 }
 
-const SUPPORTED_FRONTMATTER_KEYS = new Set(["name", "description", "tools", "model"]);
+const SUPPORTED_FRONTMATTER_KEYS = new Set(["name", "description", "tools", "model", "thinkingLevel"]);
 const ALLOWED_TOOL_SET = new Set<string>(ALLOWED_SUBAGENT_TOOLS);
 const SUPPORTED_TOOL_SET = new Set<string>(SUPPORTED_SUBAGENT_TOOLS);
 const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -130,7 +155,7 @@ function parseToolsField(rawTools: unknown): {
 	return { ok: true, tools: deduped };
 }
 
-type RoleFields = Pick<AgentDefinition, "name" | "description" | "tools" | "model">;
+type RoleFields = Pick<AgentDefinition, "name" | "description" | "tools" | "model" | "thinkingLevel">;
 
 function validateRoleFields(
 	fields: Record<string, unknown>,
@@ -160,25 +185,42 @@ function validateRoleFields(
 		return { ok: false, error: `Invalid tools ${where}: ${toolsResult.error ?? "invalid tools"}` };
 	}
 
-	let model: "inherit" | `${string}/${string}` = "inherit";
+	let model: SubagentModelSpec = "inherit";
 	if (fields.model !== undefined) {
 		if (typeof fields.model !== "string") {
 			return { ok: false, error: `Invalid "model" ${where}: must be "inherit" or "provider/model"` };
 		}
-		const trimmedModel = fields.model.trim();
-		if (trimmedModel === "inherit") {
-			model = "inherit";
-		} else if (MODEL_SPEC_RE.test(trimmedModel)) {
-			model = trimmedModel as `${string}/${string}`;
-		} else {
+		const parsedModel = parseSubagentModelSpec(fields.model);
+		if (!parsedModel) {
 			return {
 				ok: false,
-				error: `Invalid "model" value "${trimmedModel}" ${where}: must be "inherit" or explicit "provider/model" (model aliases are not supported)`,
+				error: `Invalid "model" value "${fields.model.trim()}" ${where}: must be "inherit" or explicit "provider/model" (model aliases are not supported)`,
 			};
 		}
+		model = parsedModel;
 	}
 
-	return { ok: true, value: { name: rawName, description: rawDescription, tools: toolsResult.tools, model } };
+	let thinkingLevel: ThinkingLevel | undefined;
+	if (fields.thinkingLevel !== undefined) {
+		if (!isSubagentThinkingLevel(fields.thinkingLevel)) {
+			return {
+				ok: false,
+				error: `Invalid "thinkingLevel" value "${String(fields.thinkingLevel)}" ${where}: must be one of ${SUBAGENT_THINKING_LEVELS.join(", ")}`,
+			};
+		}
+		thinkingLevel = fields.thinkingLevel;
+	}
+
+	return {
+		ok: true,
+		value: {
+			name: rawName,
+			description: rawDescription,
+			tools: toolsResult.tools,
+			model,
+			thinkingLevel,
+		},
+	};
 }
 
 function parseSingleDefinitionFile(

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import { type Api, getSupportedThinkingLevels, type Model, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -29,7 +29,12 @@ import {
 	isValidSubagentPolicySnapshot,
 	type SubagentReadPolicySnapshot,
 } from "../permissions/policy.ts";
-import type { AgentDefinition, AllowedSubagentTool } from "./definitions.ts";
+import {
+	type AgentDefinition,
+	type AllowedSubagentTool,
+	isSubagentThinkingLevel,
+	type SubagentModelSpec,
+} from "./definitions.ts";
 import {
 	addSubagentUsage,
 	createEmptySubagentUsage,
@@ -40,6 +45,8 @@ import {
 
 export const MAX_CHILD_TOOL_OUTPUT_BYTES = 32 * 1024;
 const VIRTUAL_MODEL_API = "pi-virtual";
+const VIRTUAL_MODEL_REASON =
+	"virtual model routers are not inspectable via public ModelRegistry APIs, so a child cannot preserve their routing";
 
 const FORBIDDEN_TOOL_PATTERNS = [
 	"bash",
@@ -55,9 +62,9 @@ const FORBIDDEN_TOOL_PATTERNS = [
 
 export interface ResolveChildModelOptions {
 	agentDir?: string;
-	definitionModel: AgentDefinition["model"];
+	requestedModel: SubagentModelSpec;
 	parentModel: Model<Api> | undefined;
-	parentThinkingLevel: ThinkingLevel | string | undefined;
+	requestedThinkingLevel: ThinkingLevel | string | undefined;
 	parentModelRegistry: ModelRegistry;
 }
 
@@ -69,13 +76,43 @@ export interface ResolveChildModelResult {
 	readonly error?: string;
 }
 
+export interface SubagentModelInfo {
+	readonly provider: string;
+	readonly id: string;
+	readonly name: string;
+	readonly auth: "configured" | "missing" | "unknown";
+	readonly thinkingLevels: readonly ModelThinkingLevel[] | null;
+	readonly executionSupport: "supported" | "unavailable";
+	readonly reason?: string;
+}
+
+export function describeSubagentModels(registry: ModelRegistry, provider?: string): SubagentModelInfo[] {
+	return registry
+		.getAll()
+		.filter((model) => !provider || model.provider === provider)
+		.map((model) => {
+			// Native providers resolve their own auth, so an unconfigured one is not known to be missing.
+			const auth = registry.hasConfiguredAuth(model)
+				? "configured"
+				: registry.getRegisteredNativeProvider(model.provider)
+					? "unknown"
+					: "missing";
+			const identity = { provider: model.provider, id: model.id, name: model.name, auth } as const;
+			if (model.api === VIRTUAL_MODEL_API) {
+				return { ...identity, thinkingLevels: null, executionSupport: "unavailable", reason: VIRTUAL_MODEL_REASON };
+			}
+			return { ...identity, thinkingLevels: getSupportedThinkingLevels(model), executionSupport: "supported" };
+		});
+}
+
 export interface RunRestrictedSubagentOptions extends SubagentRunnerExecuteParams {
 	agentDir?: string;
 	definition: AgentDefinition;
 	task: string;
 	policySnapshot: SubagentReadPolicySnapshot;
+	requestedModel: SubagentModelSpec;
 	parentModel: Model<Api> | undefined;
-	parentThinkingLevel: ThinkingLevel | string | undefined;
+	requestedThinkingLevel: ThinkingLevel | string | undefined;
 	parentModelRegistry: ModelRegistry;
 	projectTrusted: boolean;
 	childSessionDir?: string;
@@ -115,35 +152,20 @@ export function captureWorkspaceSnapshot(cwd: string): WorkspaceSnapshot {
 	}
 }
 
-function normalizeThinkingLevel(level: ThinkingLevel | string | undefined): ThinkingLevel {
-	if (
-		level === "off" ||
-		level === "minimal" ||
-		level === "low" ||
-		level === "medium" ||
-		level === "high" ||
-		level === "xhigh"
-	) {
-		return level;
-	}
-	return "low";
-}
-
 export async function resolveChildModelAndRuntime(options: ResolveChildModelOptions): Promise<ResolveChildModelResult> {
 	const agentDir = options.agentDir ?? getAgentDir();
-	const thinkingLevel = normalizeThinkingLevel(options.parentThinkingLevel);
 
-	if (options.definitionModel === "inherit" && !options.parentModel) {
+	if (options.requestedModel === "inherit" && !options.parentModel) {
 		return {
 			ok: false,
 			error: "Cannot launch subagent: parent session has no active model selected.",
 		};
 	}
 
-	if (options.definitionModel === "inherit" && options.parentModel?.api === VIRTUAL_MODEL_API) {
+	if (options.requestedModel === "inherit" && options.parentModel?.api === VIRTUAL_MODEL_API) {
 		return {
 			ok: false,
-			error: `Virtual model "${options.parentModel.provider}/${options.parentModel.id}" cannot be inherited by a subagent because virtual model routers are not inspectable via public ModelRegistry APIs. Select a physical model before delegating.`,
+			error: `Virtual model "${options.parentModel.provider}/${options.parentModel.id}" cannot be inherited by a subagent: ${VIRTUAL_MODEL_REASON}. Select a physical model before delegating.`,
 		};
 	}
 
@@ -170,18 +192,18 @@ export async function resolveChildModelAndRuntime(options: ResolveChildModelOpti
 	await modelRuntime.getAvailable();
 
 	let targetModel: Model<Api> | undefined;
-	if (options.definitionModel === "inherit") {
+	if (options.requestedModel === "inherit") {
 		const parentModel = options.parentModel!;
 		targetModel = modelRuntime.getModel(parentModel.provider, parentModel.id) ?? parentModel;
 	} else {
-		const slashIdx = options.definitionModel.indexOf("/");
-		const providerId = options.definitionModel.slice(0, slashIdx);
-		const modelId = options.definitionModel.slice(slashIdx + 1);
+		const slashIdx = options.requestedModel.indexOf("/");
+		const providerId = options.requestedModel.slice(0, slashIdx);
+		const modelId = options.requestedModel.slice(slashIdx + 1);
 		targetModel = modelRuntime.getModel(providerId, modelId) ?? options.parentModelRegistry.find(providerId, modelId);
 		if (!targetModel) {
 			return {
 				ok: false,
-				error: `Configured subagent model "${options.definitionModel}" is not available in the model catalog.`,
+				error: `Subagent model "${options.requestedModel}" is not available in the model catalog.`,
 			};
 		}
 	}
@@ -189,7 +211,16 @@ export async function resolveChildModelAndRuntime(options: ResolveChildModelOpti
 	if (targetModel.api === VIRTUAL_MODEL_API) {
 		return {
 			ok: false,
-			error: `Virtual model "${targetModel.provider}/${targetModel.id}" cannot be used by a subagent. Configure a physical provider/model.`,
+			error: `Virtual model "${targetModel.provider}/${targetModel.id}" cannot be used by a subagent: ${VIRTUAL_MODEL_REASON}. Choose a physical provider/model.`,
+		};
+	}
+
+	const thinkingLevel = options.requestedThinkingLevel;
+	const supportedLevels = getSupportedThinkingLevels(targetModel);
+	if (!isSubagentThinkingLevel(thinkingLevel) || !supportedLevels.includes(thinkingLevel)) {
+		return {
+			ok: false,
+			error: `Thinking level "${thinkingLevel}" is not supported by subagent model "${targetModel.provider}/${targetModel.id}" (supported: ${supportedLevels.join(", ")}).`,
 		};
 	}
 
@@ -269,9 +300,9 @@ export async function runRestrictedSubagent(options: RunRestrictedSubagentOption
 
 	const resolvedModel = await resolveChildModelAndRuntime({
 		agentDir: options.agentDir,
-		definitionModel: options.definition.model,
+		requestedModel: options.requestedModel,
 		parentModel: options.parentModel,
-		parentThinkingLevel: options.parentThinkingLevel,
+		requestedThinkingLevel: options.requestedThinkingLevel,
 		parentModelRegistry: options.parentModelRegistry,
 	});
 	if (!resolvedModel.ok || !resolvedModel.modelRuntime || !resolvedModel.model) {

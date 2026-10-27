@@ -67,6 +67,7 @@ async function createParentSessionWithSubagents(options: {
 				reasoning: true,
 				cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
 			},
+			{ id: "faux-alt", reasoning: false },
 		],
 	});
 	modelRuntime.registerNativeProvider(faux.provider);
@@ -104,6 +105,14 @@ async function createParentSessionWithSubagents(options: {
 	});
 
 	return { session, faux, modelRuntime };
+}
+
+function toolResultText(session: { messages: readonly unknown[] }, id: string) {
+	const result = session.messages.find(
+		(m) => (m as { role?: string }).role === "toolResult" && (m as { toolCallId?: string }).toolCallId === id,
+	) as { isError?: boolean; content: Array<{ type: string; text?: string }>; details?: unknown } | undefined;
+	const text = result?.content.map((c) => (c.type === "text" ? c.text : "")).join("") ?? "";
+	return { result, text };
 }
 
 describe("Task 6 (M1) — Foreground subagent tool integration", () => {
@@ -515,14 +524,6 @@ describe("Ticket #7 — Uncapped saved roles", () => {
 });
 
 describe("Ticket #11 — Inline run-local roles", () => {
-	function toolResultText(session: { messages: readonly unknown[] }, id: string) {
-		const result = session.messages.find(
-			(m) => (m as { role?: string }).role === "toolResult" && (m as { toolCallId?: string }).toolCallId === id,
-		) as { isError?: boolean; content: Array<{ type: string; text?: string }>; details?: unknown } | undefined;
-		const text = result?.content.map((c) => (c.type === "text" ? c.text : "")).join("") ?? "";
-		return { result, text };
-	}
-
 	it("runs an inline role over a same-named saved role, reports its source as inline, and writes no definition file", async () => {
 		const cwd = makeTempDir("inline-cwd");
 		const agentDir = makeTempDir("inline-agent");
@@ -611,6 +612,293 @@ describe("Ticket #11 — Inline run-local roles", () => {
 			}
 			expect(faux.state.callCount - before).toBe(2);
 			expect(existsSync(join(agentDir, "bluclawd", "subagents", session.sessionId))).toBe(false);
+		} finally {
+			session.dispose();
+		}
+	});
+});
+
+describe("Ticket #10 — Per-spawn model and thinking selection", () => {
+	it("lists subagent models with auth, thinking levels and execution support, without secrets", async () => {
+		const cwd = makeTempDir("models-cwd");
+		const agentDir = makeTempDir("models-agent");
+		writeFileSync(
+			join(agentDir, "auth.json"),
+			JSON.stringify({ anthropic: { type: "api_key", key: "sk-test-secret-123" } }),
+		);
+		const { session, faux, modelRuntime } = await createParentSessionWithSubagents({ cwd, agentDir });
+		modelRuntime.registerVirtualModel({
+			provider: "virtual-router",
+			id: "auto",
+			name: "Virtual Auto Router",
+			thinkingLevels: ["low", "high"],
+			route: () => ({ model: faux.getModel("faux-main"), thinkingLevel: "low" }),
+		});
+		await modelRuntime.refresh({ allowNetwork: false });
+		try {
+			await session.bindExtensions({ mode: "print" });
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("subagent_models", {}, { id: "all" }),
+					fauxToolCall("subagent_models", { provider: "faux-tool" }, { id: "faux_only" }),
+				]),
+				fauxAssistantMessage("Listed."),
+			]);
+			await session.prompt("Which models can subagents use?", { expandPromptTemplates: false });
+
+			const all = toolResultText(session, "all");
+			expect(all.result?.isError, all.text).toBe(false);
+			expect(all.text).not.toContain("sk-test-secret-123");
+			const models = JSON.parse(all.text).models as Array<Record<string, unknown>>;
+			expect(models.find((m) => m.provider === "anthropic" && m.auth === "configured")).toBeDefined();
+			expect(models.find((m) => m.provider === "openai")).toMatchObject({
+				auth: "missing",
+				executionSupport: "supported",
+			});
+			expect(models.find((m) => m.provider === "virtual-router")).toMatchObject({
+				id: "auto",
+				thinkingLevels: null,
+				executionSupport: "unavailable",
+				reason: expect.stringMatching(/router/i),
+			});
+
+			const fauxOnly = JSON.parse(toolResultText(session, "faux_only").text).models;
+			expect(fauxOnly).toEqual([
+				{
+					provider: "faux-tool",
+					id: "faux-main",
+					name: "faux-main",
+					auth: expect.stringMatching(/^(configured|unknown)$/),
+					thinkingLevels: ["off", "minimal", "low", "medium", "high"],
+					executionSupport: "supported",
+				},
+				{
+					provider: "faux-tool",
+					id: "faux-alt",
+					name: "faux-alt",
+					auth: expect.stringMatching(/^(configured|unknown)$/),
+					thinkingLevels: ["off"],
+					executionSupport: "supported",
+				},
+			]);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	async function spawnAndObserve(cwd: string, agentDir: string, spawns: Array<Record<string, unknown>>) {
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
+		try {
+			await session.bindExtensions({ mode: "print" });
+			faux.setResponses(
+				spawns.flatMap((args, i) => [
+					fauxAssistantMessage([fauxToolCall("subagent", { task: "Report.", ...args }, { id: `spawn_${i}` })]),
+					(
+						_context: unknown,
+						options: { reasoning?: string } | undefined,
+						_state: unknown,
+						model: { id: string },
+					) => fauxAssistantMessage(`ran=${model.id}/${options?.reasoning ?? "off"}`),
+				]),
+			);
+			faux.appendResponses([fauxAssistantMessage("Done.")]);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+			return spawns.map((_, i) => {
+				const { result, text } = toolResultText(session, `spawn_${i}`);
+				const record = result?.details
+					? readPersistedRunRecord(agentDir, session.sessionId, (result.details as { runId: string }).runId)
+					: undefined;
+				return { isError: result?.isError, ran: text.match(/ran=(\S+)/)?.[1] ?? text, record };
+			});
+		} finally {
+			session.dispose();
+		}
+	}
+
+	it("runs the child with the spawn-selected model and thinking level", async () => {
+		const cwd = makeTempDir("spawn-model-cwd");
+		const agentDir = makeTempDir("spawn-model-agent");
+		const [alt, deep] = await spawnAndObserve(cwd, agentDir, [
+			{ agent: "explorer", model: "faux-tool/faux-alt", thinkingLevel: "off" },
+			{ agent: "explorer", thinkingLevel: "high" },
+		]);
+		expect(alt).toMatchObject({ isError: false, ran: "faux-alt/off" });
+		expect(alt.record).toMatchObject({ modelId: "faux-alt", thinkingLevel: "off" });
+		expect(deep).toMatchObject({ isError: false, ran: "faux-main/high" });
+		expect(deep.record).toMatchObject({ modelId: "faux-main", thinkingLevel: "high" });
+	});
+
+	it("resolves model and thinking independently with spawn over role over parent", async () => {
+		const cwd = makeTempDir("precedence-cwd");
+		const agentDir = makeTempDir("precedence-agent");
+		mkdirSync(join(agentDir, "agents"), { recursive: true });
+		writeFileSync(
+			join(agentDir, "agents", "tuned.md"),
+			"---\nname: tuned\ndescription: Alt model.\nmodel: faux-tool/faux-alt\nthinkingLevel: off\n---\nWork.\n",
+		);
+		writeFileSync(
+			join(agentDir, "agents", "deep.md"),
+			"---\nname: deep\ndescription: Deep thinking.\nthinkingLevel: high\n---\nWork.\n",
+		);
+		const runs = await spawnAndObserve(cwd, agentDir, [
+			{ agent: "tuned" },
+			{ agent: "tuned", model: "inherit", thinkingLevel: "medium" },
+			{ agent: "deep", model: "inherit" },
+			{ agent: "deep", thinkingLevel: "inherit" },
+			{ agent: { name: "inline-deep", description: "Inline.", instructions: "Work.", thinkingLevel: "minimal" } },
+		]);
+		expect(runs.map((r) => r.ran)).toEqual([
+			"faux-alt/off",
+			"faux-main/medium",
+			"faux-main/high",
+			"faux-main/low",
+			"faux-main/minimal",
+		]);
+	});
+
+	it("fails unknown models, missing auth, unsupported thinking and virtual routers with named errors before admission", async () => {
+		const cwd = makeTempDir("model-errors-cwd");
+		const agentDir = makeTempDir("model-errors-agent");
+		const savedOpenAiKey = process.env.OPENAI_API_KEY;
+		delete process.env.OPENAI_API_KEY;
+		const { session, faux, modelRuntime } = await createParentSessionWithSubagents({ cwd, agentDir });
+		modelRuntime.registerVirtualModel({
+			provider: "virtual-router",
+			id: "auto",
+			name: "Virtual Auto Router",
+			thinkingLevels: ["low", "high"],
+			route: () => ({ model: faux.getModel("faux-main"), thinkingLevel: "low" }),
+		});
+		await modelRuntime.refresh({ allowNetwork: false });
+		const cases = [
+			{ id: "unknown", args: { model: "faux-tool/missing" }, error: /"faux-tool\/missing" is not available/ },
+			{
+				id: "no_auth",
+				args: { model: "openai/gpt-4.1", thinkingLevel: "off" },
+				error: /No authentication configured.*"openai"/,
+			},
+			{
+				id: "unsupported",
+				args: { model: "faux-tool/faux-alt", thinkingLevel: "high" },
+				error: /Thinking level "high" is not supported.*faux-alt.*supported: off/,
+			},
+			{
+				id: "inherited_unsupported",
+				args: { model: "faux-tool/faux-alt" },
+				error: /Thinking level "low" is not supported/,
+			},
+			{
+				id: "virtual",
+				args: { model: "virtual-router/auto" },
+				error: /Virtual model "virtual-router\/auto" cannot be used by a subagent: virtual model routers are not inspectable/,
+			},
+			{ id: "bad_level", args: { thinkingLevel: "ultra" }, error: /Invalid subagent "thinkingLevel" value "ultra"/ },
+			{ id: "bad_model", args: { model: "sonnet" }, error: /Invalid subagent "model" value "sonnet"/ },
+		];
+		try {
+			await session.bindExtensions({ mode: "print" });
+			const before = faux.state.callCount;
+			faux.setResponses([
+				fauxAssistantMessage(
+					cases.map((c) =>
+						fauxToolCall("subagent", { agent: "explorer", task: "Report.", ...c.args }, { id: c.id }),
+					),
+				),
+				fauxAssistantMessage("Refused."),
+			]);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+			for (const c of cases) {
+				const { result, text } = toolResultText(session, c.id);
+				expect(result?.isError, c.id).toBe(true);
+				expect(text, c.id).toMatch(c.error);
+			}
+			expect(faux.state.callCount - before).toBe(2);
+			expect(existsSync(join(agentDir, "bluclawd", "subagents", session.sessionId))).toBe(false);
+		} finally {
+			session.dispose();
+			if (savedOpenAiKey !== undefined) process.env.OPENAI_API_KEY = savedOpenAiKey;
+		}
+	});
+
+	it("lists a provider registered after the first listing without a restart", async () => {
+		const cwd = makeTempDir("late-provider-cwd");
+		const agentDir = makeTempDir("late-provider-agent");
+		const { session, faux, modelRuntime } = await createParentSessionWithSubagents({ cwd, agentDir });
+		try {
+			await session.bindExtensions({ mode: "print" });
+			const listLate = async (id: string) => {
+				faux.setResponses([
+					fauxAssistantMessage([fauxToolCall("subagent_models", { provider: "faux-late" }, { id })]),
+					fauxAssistantMessage("Listed."),
+				]);
+				await session.prompt("List.", { expandPromptTemplates: false });
+				return JSON.parse(toolResultText(session, id).text).models as Array<{ id: string }>;
+			};
+
+			expect(await listLate("before")).toEqual([]);
+			modelRuntime.registerNativeProvider(
+				fauxProvider({ provider: "faux-late", models: [{ id: "late-1" }] }).provider,
+			);
+			await modelRuntime.refresh({ allowNetwork: false });
+			expect((await listLate("after")).map((m) => m.id)).toEqual(["late-1"]);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("runs a background child with the spawn-selected model and thinking level", async () => {
+		const cwd = makeTempDir("bg-model-cwd");
+		const agentDir = makeTempDir("bg-model-agent");
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			let childRan = "";
+			// The background child and the parent's next turn race for the shared faux queue.
+			const respond = (
+				_context: unknown,
+				options: { reasoning?: string } | undefined,
+				_state: unknown,
+				model: { id: string },
+			) => {
+				if (model.id !== "faux-alt") return fauxAssistantMessage("Parent ack.");
+				childRan = `${model.id}/${options?.reasoning ?? "off"}`;
+				return fauxAssistantMessage("Child done.");
+			};
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall(
+						"subagent",
+						{
+							agent: "explorer",
+							task: "Report.",
+							background: true,
+							model: "faux-tool/faux-alt",
+							thinkingLevel: "off",
+						},
+						{ id: "bg_alt" },
+					),
+				]),
+				respond,
+				respond,
+				respond,
+			]);
+			await session.prompt("Delegate in background.", { expandPromptTemplates: false });
+			const runId = (toolResultText(session, "bg_alt").result?.details as { runId: string }).runId;
+			for (
+				let i = 0;
+				i < 200 && readPersistedRunRecord(agentDir, session.sessionId, runId)?.status !== "completed";
+				i++
+			) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			await session.waitForIdle();
+
+			expect(childRan).toBe("faux-alt/off");
+			expect(readPersistedRunRecord(agentDir, session.sessionId, runId)).toMatchObject({
+				status: "completed",
+				modelId: "faux-alt",
+				thinkingLevel: "off",
+			});
 		} finally {
 			session.dispose();
 		}

@@ -21,7 +21,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	},
 	subagents: {
 		commands: [],
-		tools: ["subagent"],
+		tools: ["subagent_models", "subagent"],
 		shortcuts: 0,
 		events: 6,
 	},

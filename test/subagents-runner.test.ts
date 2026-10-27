@@ -61,9 +61,9 @@ describe("Task 4 (M1) — Restricted child runner", () => {
 		// 1. Inherited physical model succeeds
 		const inherited = await resolveChildModelAndRuntime({
 			agentDir,
-			definitionModel: "inherit",
+			requestedModel: "inherit",
 			parentModel: model,
-			parentThinkingLevel: "low",
+			requestedThinkingLevel: "low",
 			parentModelRegistry: registry,
 		});
 		expect(inherited.ok).toBe(true);
@@ -73,9 +73,9 @@ describe("Task 4 (M1) — Restricted child runner", () => {
 		// 2. Missing parent model fails before starting work
 		const missingParent = await resolveChildModelAndRuntime({
 			agentDir,
-			definitionModel: "inherit",
+			requestedModel: "inherit",
 			parentModel: undefined,
-			parentThinkingLevel: "off",
+			requestedThinkingLevel: "off",
 			parentModelRegistry: registry,
 		});
 		expect(missingParent.ok).toBe(false);
@@ -92,9 +92,9 @@ describe("Task 4 (M1) — Restricted child runner", () => {
 		const virtualModel = registry.find("faux-runner", "virtual-auto")!;
 		const virtualRes = await resolveChildModelAndRuntime({
 			agentDir,
-			definitionModel: "inherit",
+			requestedModel: "inherit",
 			parentModel: virtualModel,
-			parentThinkingLevel: "low",
+			requestedThinkingLevel: "low",
 			parentModelRegistry: registry,
 		});
 		expect(virtualRes.ok).toBe(false);
@@ -103,9 +103,9 @@ describe("Task 4 (M1) — Restricted child runner", () => {
 		// 4. Explicit unknown provider/model fails before starting work
 		const unknownExplicit = await resolveChildModelAndRuntime({
 			agentDir,
-			definitionModel: "unknown-prov/missing-model",
+			requestedModel: "unknown-prov/missing-model",
 			parentModel: model,
-			parentThinkingLevel: "low",
+			requestedThinkingLevel: "low",
 			parentModelRegistry: registry,
 		});
 		expect(unknownExplicit.ok).toBe(false);
@@ -176,10 +176,11 @@ describe("Task 4 (M1) — Restricted child runner", () => {
 						...params,
 						agentDir,
 						definition: explorer,
+						requestedModel: explorer.model,
 						task: "/not_a_command Inspect src/hello.ts",
 						policySnapshot: policy,
 						parentModel: model,
-						parentThinkingLevel: "low",
+						requestedThinkingLevel: "low",
 						parentModelRegistry: registry,
 						projectTrusted,
 						onChildSessionCreated: (session) => {
@@ -260,10 +261,11 @@ describe("Task 4 (M1) — Restricted child runner", () => {
 					...params,
 					agentDir,
 					definition: explorer,
+					requestedModel: explorer.model,
 					task: "Loop on a.ts",
 					policySnapshot: policy,
 					parentModel: model,
-					parentThinkingLevel: "off",
+					requestedThinkingLevel: "off",
 					parentModelRegistry: registry,
 					projectTrusted: true,
 				}),

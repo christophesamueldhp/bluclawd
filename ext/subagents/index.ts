@@ -27,11 +27,16 @@ import {
 	EXTENDED_SUBAGENTS_RELEASED,
 	formatAgentRoutingDescriptions,
 	isReadOnlySubagentTools,
+	isSubagentThinkingLevel,
+	parseSubagentModelSpec,
 	resolveAgentDefinition,
+	SUBAGENT_THINKING_LEVELS,
+	type SubagentModelSpec,
 } from "./definitions.ts";
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
 import {
 	captureWorkspaceSnapshot,
+	describeSubagentModels,
 	resolveChildModelAndRuntime,
 	runRestrictedSubagent,
 	sanitizeDiagnosticText,
@@ -224,8 +229,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			definition: NonNullable<ReturnType<typeof resolveAgentDefinition>["definition"]>;
 			task: string;
 			policySnapshot: NonNullable<ReturnType<typeof createSubagentPolicySnapshot>["snapshot"]>;
+			requestedModel: SubagentModelSpec;
 			parentModel: ExtensionContext["model"];
-			parentThinkingLevel: string;
+			requestedThinkingLevel: string;
 			parentModelRegistry: ExtensionContext["modelRegistry"];
 			projectTrusted: boolean;
 		}
@@ -254,8 +260,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					definition: execCtx.definition,
 					task: execCtx.task,
 					policySnapshot: execCtx.policySnapshot,
+					requestedModel: execCtx.requestedModel,
 					parentModel: execCtx.parentModel,
-					parentThinkingLevel: execCtx.parentThinkingLevel,
+					requestedThinkingLevel: execCtx.requestedThinkingLevel,
 					parentModelRegistry: execCtx.parentModelRegistry,
 					projectTrusted: execCtx.projectTrusted,
 					childSessionDir: storage.runDir,
@@ -438,6 +445,35 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		});
 
 		pi.registerTool({
+			name: "subagent_models",
+			label: "Subagent models",
+			exposure: "model-only",
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+			description:
+				"List models a subagent can run with: provider/model identity, auth status, supported thinking levels, and execution support. Pass the result's provider/id as the subagent `model`.",
+			parameters: Type.Object({
+				provider: Type.Optional(Type.String({ description: "Only list models from this provider." })),
+			}),
+			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
+				const ctx = toolCtx ?? activeCtx;
+				if (!ctx) {
+					return {
+						content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
+						details: undefined,
+						isError: true,
+					};
+				}
+				const models = describeSubagentModels(ctx.modelRegistry, params.provider);
+				return { content: [{ type: "text", text: JSON.stringify({ models }) }], details: undefined };
+			},
+		});
+
+		pi.registerTool({
 			name: "subagent",
 			label: "Subagent",
 			exposure: "model-only",
@@ -469,6 +505,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							instructions: Type.String({ description: "System instructions for the child." }),
 							tools: Type.Optional(Type.Array(Type.String())),
 							model: Type.Optional(Type.String({ description: '"inherit" or "provider/model".' })),
+							thinkingLevel: Type.Optional(
+								Type.String({ description: "Default thinking level for this role." }),
+							),
 						},
 						{ additionalProperties: false, description: "Inline role used only for this run." },
 					),
@@ -477,6 +516,17 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					description:
 						"Self-contained task instructions with explicit file paths, symbols, or diff context (max 32 KiB).",
 				}),
+				model: Type.Optional(
+					Type.String({
+						description:
+							'Model for this run: "provider/model" from subagent_models, or "inherit" for the parent model. Overrides the role.',
+					}),
+				),
+				thinkingLevel: Type.Optional(
+					Type.String({
+						description: `Thinking level for this run (${SUBAGENT_THINKING_LEVELS.join(", ")}), or "inherit" for the parent level. Overrides the role.`,
+					}),
+				),
 				background: Type.Optional(
 					Type.Boolean({
 						description:
@@ -616,16 +666,50 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 
-				// 5. Verify model and provider inheritance before admission
-				const parentThinkingLevel = pi.getThinkingLevel?.() ?? "low";
+				// 5. Resolve spawn > role > parent model and thinking, and verify them before admission
+				const spawnModel = params.model === undefined ? undefined : parseSubagentModelSpec(params.model);
+				if (params.model !== undefined && !spawnModel) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Invalid subagent "model" value "${params.model}": must be "inherit" or explicit "provider/model".`,
+							},
+						],
+						details: undefined,
+						isError: true,
+					};
+				}
+				if (
+					params.thinkingLevel !== undefined &&
+					params.thinkingLevel !== "inherit" &&
+					!isSubagentThinkingLevel(params.thinkingLevel)
+				) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Invalid subagent "thinkingLevel" value "${params.thinkingLevel}": must be "inherit" or one of ${SUBAGENT_THINKING_LEVELS.join(", ")}.`,
+							},
+						],
+						details: undefined,
+						isError: true,
+					};
+				}
+				const parentThinkingLevel = pi.getThinkingLevel();
+				const requestedModel = spawnModel ?? definition.model;
+				const requestedThinkingLevel =
+					params.thinkingLevel === "inherit"
+						? parentThinkingLevel
+						: (params.thinkingLevel ?? definition.thinkingLevel ?? parentThinkingLevel);
 				const modelCheck = await resolveChildModelAndRuntime({
 					agentDir,
-					definitionModel: definition.model,
+					requestedModel,
 					parentModel: ctx.model,
-					parentThinkingLevel,
+					requestedThinkingLevel,
 					parentModelRegistry: ctx.modelRegistry,
 				});
-				if (!modelCheck.ok || !modelCheck.model) {
+				if (!modelCheck.ok || !modelCheck.model || !modelCheck.thinkingLevel) {
 					return {
 						content: [
 							{
@@ -686,8 +770,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					definition,
 					task: taskText,
 					policySnapshot: policyRes.snapshot,
+					requestedModel,
 					parentModel: ctx.model,
-					parentThinkingLevel,
+					requestedThinkingLevel,
 					parentModelRegistry: ctx.modelRegistry,
 					projectTrusted,
 				};
@@ -702,7 +787,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					definitionSource: definition.source,
 					provider: modelCheck.model.provider,
 					modelId: modelCheck.model.id,
-					thinkingLevel: modelCheck.thinkingLevel ?? "low",
+					thinkingLevel: modelCheck.thinkingLevel,
 					cwd,
 					taskSummary: summarizeTaskLabel(taskText),
 					startSnapshot,
@@ -761,7 +846,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							deliveryMode: "background",
 							provider: modelCheck.model.provider,
 							modelId: modelCheck.model.id,
-							thinkingLevel: modelCheck.thinkingLevel ?? "low",
+							thinkingLevel: modelCheck.thinkingLevel,
 							turnCount: 0,
 							toolCallCount: 0,
 							snapshotDrifted: false,

@@ -300,6 +300,25 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 		expect(role.tools).toBeUndefined();
 	});
 
+	it("parses a role thinkingLevel and rejects one outside the thinking vocabulary", () => {
+		const cwd = makeTempDir("thinking");
+		const agentDir = makeTempDir("thinking-agent");
+		mkdirSync(join(agentDir, "agents"));
+		writeFileSync(
+			join(agentDir, "agents", "deep.md"),
+			"---\nname: deep\ndescription: Deep.\nthinkingLevel: max\n---\nThink hard.",
+		);
+		writeFileSync(
+			join(agentDir, "agents", "odd.md"),
+			"---\nname: odd\ndescription: Odd.\nthinkingLevel: ultra\n---\nThink.",
+		);
+		const catalog = discoverAgentDefinitions({ cwd, agentDir });
+		expect(resolveAgentDefinition(catalog, "deep").definition?.thinkingLevel).toBe("max");
+		expect(resolveAgentDefinition(catalog, "odd").error).toMatch(
+			/Invalid "thinkingLevel" value "ultra".*must be one of off, minimal/,
+		);
+	});
+
 	it.each([
 		{ tools: ["read", "bash"], want: "isolated" },
 		{ tools: ["write"], want: "isolated" },
