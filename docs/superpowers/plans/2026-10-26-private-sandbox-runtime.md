@@ -1,5 +1,7 @@
 # Private Sandbox Runtime Implementation Plan
 
+> **Historical scope (2026-10-27):** The user selected shared-workspace subagents with inherited parent authority, orchestrator-selected roles/models/thinking, no child-specific quotas, and two-way messaging. See the [replacement design](../specs/2026-10-27-shared-workspace-subagents-design.md), pending written-design approval and implementation. Earlier status/approval statements below describe that historical work, not current runtime requirements. All source/proof work is committed and consolidated into local `main`; failures remain failures. Do not resume this plan's superseded isolation gates.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans inline in the existing feature checkout, task-by-task. Steps use checkbox syntax. The user already selected inline execution; do not ask for an execution method again. Do not execute this plan until its review is confirmed.
 
 **Goal:** Produce a reproducible, reviewable private runtime candidate containing only the Mach-denial delta over the exact published0.0.81 baseline, without installing it into bluclawd.

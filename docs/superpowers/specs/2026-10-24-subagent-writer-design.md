@@ -1,5 +1,7 @@
 # Subagent Writer (M3) Design
 
+> **Historical scope (2026-10-27):** The user selected shared-workspace subagents with inherited parent authority, orchestrator-selected roles/models/thinking, no child-specific quotas, and two-way messaging. See the [replacement design](2026-10-27-shared-workspace-subagents-design.md), pending written-design approval and implementation. Earlier status/approval statements below describe that historical work, not current runtime requirements. All source/proof work is committed and consolidated into local `main`; failures remain failures. Do not resume this plan's superseded isolation gates.
+
 **Status:** Historical writer-role proposal, superseded by `docs/superpowers/specs/2026-10-24-configurable-subagents-design.md`. The user selected general-purpose/explorer/reviewer with capability-based hybrid workspaces; no separate writer role is planned. No new product capability is enabled.
 **Historical implementation plan:** `docs/superpowers/plans/2026-10-24-subagent-writer.md`. Its failed cleanup proof is preserved in the isolated `feat/subagent-writer` checkout and is not waived by the new scope.
 **Predecessor:** `docs/superpowers/plans/2026-10-23-subagents.md`, especially section 12.

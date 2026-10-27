@@ -1,5 +1,7 @@
 # Subagent Implementation Plan
 
+> **Historical scope (2026-10-27):** The user selected shared-workspace subagents with inherited parent authority, orchestrator-selected roles/models/thinking, no child-specific quotas, and two-way messaging. See the [replacement design](../specs/2026-10-27-shared-workspace-subagents-design.md), pending written-design approval and implementation. Earlier status/approval statements below describe that historical work, not current runtime requirements. All source/proof work is committed and consolidated into local `main`; failures remain failures. Do not resume this plan's superseded isolation gates.
+
 **Status:** M0–M2 implementation and local release checks complete, with the evaluation/manual limitations recorded below. The current follow-on is `docs/superpowers/specs/2026-10-24-configurable-subagents-design.md`: configurable general-purpose/explorer/reviewer with hybrid per-run workspaces. The separate writer-role proposal is superseded; the current implementation plan is `docs/superpowers/plans/2026-10-24-configurable-subagents.md`. Shell/write capabilities remain unimplemented and cleanup safety is unresolved.
 **Date:** 2026-10-23
 **Project:** bluclawd, a feature package for Pi Coding Agent, not a Pi fork.

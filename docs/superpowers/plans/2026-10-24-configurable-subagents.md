@@ -1,5 +1,7 @@
 # Configurable Subagents and Hybrid Workspaces Implementation Plan
 
+> **Historical scope (2026-10-27):** The user selected shared-workspace subagents with inherited parent authority, orchestrator-selected roles/models/thinking, no child-specific quotas, and two-way messaging. See the [replacement design](../specs/2026-10-27-shared-workspace-subagents-design.md), pending written-design approval and implementation. Earlier status/approval statements below describe that historical work, not current runtime requirements. All source/proof work is committed and consolidated into local `main`; failures remain failures. Do not resume this plan's superseded isolation gates.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task, natively in the current session. Use checkbox steps for tracking; obtain plan review before implementation.
 
 **Goal:** Deliver configurable general-purpose/explorer/reviewer roles with capability-based workspace isolation, real verification evidence, and safe parent integration.

@@ -298,6 +298,13 @@ reading the API:
 
 ## Read-only subagents
 
+The runtime described below is still the active implementation. The requested replacement is
+[shared-workspace subagents](docs/superpowers/specs/2026-10-27-shared-workspace-subagents-design.md):
+parent-level access without escalation, no child-specific quotas, orchestrator-selected roles/models/thinking,
+and two-way messaging. It is not implemented or activated by consolidating the development branches.
+The merged tree also preserves the historical strict-cleanup proof; the full suite currently includes
+three failing detached/double-fork cleanup assertions, not a passing isolation guarantee.
+
 Ask the parent to delegate a bounded exploration or review, supplying target paths or the diff
 in the task. The model calls `subagent` with `{ "agent": "explorer", "task": "Trace src/auth.ts" }`;
 `"background": true` returns immediately instead of waiting. There is no `/agents` command.

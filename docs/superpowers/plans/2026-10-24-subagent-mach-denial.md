@@ -1,5 +1,7 @@
 # Subagent Mach-Lookup Denial Implementation Plan
 
+> **Historical scope (2026-10-27):** The user selected shared-workspace subagents with inherited parent authority, orchestrator-selected roles/models/thinking, no child-specific quotas, and two-way messaging. See the [replacement design](../specs/2026-10-27-shared-workspace-subagents-design.md), pending written-design approval and implementation. Earlier status/approval statements below describe that historical work, not current runtime requirements. All source/proof work is committed and consolidated into local `main`; failures remain failures. Do not resume this plan's superseded isolation gates.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans inline, task-by-task. This supplements Task 2b of `2026-10-24-configurable-subagents.md`; it is not another subagent implementation track. Obtain plan review before execution and separate authorization at the source/artifact/commit gates below.
 
 **Goal:** Add and consume a public sandbox-runtime API that denies the two credential brokers in the same initial profile as existing isolated filesystem/network restrictions.

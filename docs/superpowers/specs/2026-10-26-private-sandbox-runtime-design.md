@@ -1,5 +1,7 @@
 # Private Sandbox Runtime for bluclawd
 
+> **Historical scope (2026-10-27):** The user selected shared-workspace subagents with inherited parent authority, orchestrator-selected roles/models/thinking, no child-specific quotas, and two-way messaging. See the [replacement design](2026-10-27-shared-workspace-subagents-design.md), pending written-design approval and implementation. Earlier status/approval statements below describe that historical work, not current runtime requirements. All source/proof work is committed and consolidated into local `main`; failures remain failures. Do not resume this plan's superseded isolation gates.
+
 **Status:** The user explicitly approved feature-checkout adoption of candidate SHA256 `ddf8a36fbe486a3e0465764c56d644740fb69c8ab2da464a93c669d70c2f3229` and the planned Mach consumer. The repository-carried runtime and lazy fail-closed/fixed isolated policy are implemented and verified. No commit, publication, active Pi change or feature activation is approved.
 
 ## Intent and Scope
