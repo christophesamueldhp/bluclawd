@@ -57,6 +57,7 @@ async function createParentSessionWithSubagents(options: {
 	/** Pi built-in tools the parent has; none when omitted. */
 	builtinTools?: string[];
 	extensions?: ExtensionFactory[];
+	batchWindowMs?: number;
 }) {
 	const modelRuntime = await ModelRuntime.create({
 		authPath: join(options.agentDir, "auth.json"),
@@ -87,7 +88,10 @@ async function createParentSessionWithSubagents(options: {
 		cwd: options.cwd,
 		agentDir: options.agentDir,
 		settingsManager,
-		extensionFactories: [createSubagentsExtension({ agentDir: options.agentDir }), ...(options.extensions ?? [])],
+		extensionFactories: [
+			createSubagentsExtension({ agentDir: options.agentDir, batchWindowMs: options.batchWindowMs }),
+			...(options.extensions ?? []),
+		],
 		noExtensions: true,
 		noSkills: true,
 		noPromptTemplates: true,
@@ -1713,6 +1717,162 @@ describe("Ticket #16 — Agent names and the live roster", () => {
 			expect(toolResultText(session, "reserved").text).toMatch(/Invalid subagent name "parent"/);
 			expect(toolResultText(session, "malformed").text).toMatch(/Invalid subagent name "Bad Name"/);
 		} finally {
+			session.dispose();
+		}
+	});
+});
+
+describe("Ticket #18 — One orchestrator wake-up for close child messages and completion", () => {
+	function gated(name: string) {
+		let open!: () => void;
+		const opened = new Promise<void>((resolve) => {
+			open = resolve;
+		});
+		const tool = defineTool({
+			name,
+			label: name,
+			description: "Waits until the test opens it.",
+			parameters: Type.Object({}),
+			execute: async () => {
+				await opened;
+				return { content: [{ type: "text", text: "opened" }], details: undefined };
+			},
+		});
+		return { tool, open };
+	}
+	const childScript = [
+		fauxAssistantMessage([fauxToolCall("child_gate", {}, { id: "gate" })]),
+		fauxAssistantMessage([
+			fauxToolCall("subagent_message", { to: "parent", content: "M1" }, { id: "m1" }),
+			fauxToolCall("subagent_message", { to: "parent", content: "M2" }, { id: "m2" }),
+			fauxToolCall("subagent_message", { to: "parent", content: "M3" }, { id: "m3" }),
+		]),
+		fauxAssistantMessage("Child finished."),
+	];
+	const spawn = fauxAssistantMessage([
+		fauxToolCall(
+			"subagent",
+			{
+				agent: "general-purpose",
+				task: "Report thrice.",
+				background: true,
+				model: "faux-tool/faux-alt",
+				thinkingLevel: "off",
+			},
+			{ id: "launch" },
+		),
+	]);
+	const inboxText = (session: { messages: readonly unknown[] }) =>
+		session.messages
+			.filter((m) => (m as { role?: string }).role === "custom")
+			.map((m) => JSON.stringify((m as { content?: unknown }).content));
+
+	it("wakes an idle orchestrator exactly once with three messages and the completion notice in order", async () => {
+		const cwd = makeTempDir("batch-idle-cwd");
+		const agentDir = makeTempDir("batch-idle-agent");
+		const childGate = gated("child_gate");
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd,
+			agentDir,
+			extraTools: [childGate.tool],
+			batchWindowMs: 400,
+		});
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			let parentCalls = 0;
+			let childStep = 0;
+			const main = [spawn, fauxAssistantMessage("Launched.")];
+			faux.setResponses(
+				Array.from(
+					{ length: 10 },
+					() => (_c: TranscriptContext, _o: unknown, _s: unknown, model: { id: string }) => {
+						if (model.id === "faux-alt") return childScript[childStep++];
+						return main[parentCalls++] ?? fauxAssistantMessage("Handled the batch.");
+					},
+				),
+			);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+			const callsWhenIdle = parentCalls;
+			childGate.open();
+			const runId = (toolResultText(session, "launch").result?.details as { runId: string }).runId;
+			for (
+				let i = 0;
+				i < 300 && readPersistedRunRecord(agentDir, session.sessionId, runId)?.status !== "completed";
+				i++
+			) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			for (let i = 0; i < 100 && parentCalls === callsWhenIdle; i++)
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			await session.waitForIdle();
+			await new Promise((resolve) => setTimeout(resolve, 500));
+			await session.waitForIdle();
+
+			expect(parentCalls - callsWhenIdle).toBe(1);
+			const inbox = inboxText(session);
+			expect(inbox).toHaveLength(1);
+			const text = inbox[0];
+			expect(text.indexOf("M1")).toBeLessThan(text.indexOf("M2"));
+			expect(text.indexOf("M2")).toBeLessThan(text.indexOf("M3"));
+			expect(text.indexOf("M3")).toBeLessThan(text.indexOf("Execution: completed"));
+		} finally {
+			childGate.open();
+			session.dispose();
+		}
+	});
+
+	it("steers a busy orchestrator at its next boundary without extra turns", async () => {
+		const cwd = makeTempDir("batch-busy-cwd");
+		const agentDir = makeTempDir("batch-busy-agent");
+		const childGate = gated("child_gate");
+		const parentGate = gated("parent_gate");
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd,
+			agentDir,
+			extraTools: [childGate.tool, parentGate.tool],
+			batchWindowMs: 50,
+		});
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			let parentCalls = 0;
+			let childStep = 0;
+			let sawInbox = "";
+			const main = [
+				spawn,
+				fauxAssistantMessage([fauxToolCall("parent_gate", {}, { id: "busy" })]),
+				(context: TranscriptContext) => {
+					sawInbox = JSON.stringify(context.messages);
+					return fauxAssistantMessage("Done.");
+				},
+			];
+			faux.setResponses(
+				Array.from(
+					{ length: 10 },
+					() => (context: TranscriptContext, _o: unknown, _s: unknown, model: { id: string }) => {
+						if (model.id === "faux-alt") return childScript[childStep++];
+						const step = main[parentCalls++];
+						if (!step) return fauxAssistantMessage("Extra turn.");
+						return typeof step === "function" ? step(context) : step;
+					},
+				),
+			);
+			const prompt = session.prompt("Delegate and wait.", { expandPromptTemplates: false });
+			for (let i = 0; i < 300 && parentCalls < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+			childGate.open();
+			for (let i = 0; i < 300 && !session.messages.some((m) => m.role === "custom"); i++) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			parentGate.open();
+			await prompt;
+			await session.waitForIdle();
+			await new Promise((resolve) => setTimeout(resolve, 200));
+			await session.waitForIdle();
+
+			expect(parentCalls).toBe(3);
+			for (const marker of ["M1", "M2", "M3", "Execution: completed"]) expect(sawInbox).toContain(marker);
+		} finally {
+			childGate.open();
+			parentGate.open();
 			session.dispose();
 		}
 	});

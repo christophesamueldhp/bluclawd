@@ -36,7 +36,9 @@ import {
 } from "./definitions.ts";
 import {
 	PARENT_MESSAGE_ADDRESS,
+	SUBAGENT_MESSAGE_CUSTOM_TYPE,
 	SUBAGENT_MESSAGE_TOOL,
+	type SubagentMessage,
 	SubagentMessageBus,
 	type SubagentMessageReceipt,
 	type SubagentMessageScope,
@@ -143,12 +145,16 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		const emittedLaunchResults = new Set<string>();
 		const autoNameCounters = new Map<string, number>();
 
-		// Batching queue for background completion notices per (sessionId, generation)
-		let pendingNotices: Array<{
-			record: Readonly<SubagentRunRecord>;
-			parentText: string;
-			details: SubagentResultDetails;
-		}> = [];
+		// Completion notices and child messages for the orchestrator, delivered together in arrival order.
+		let parentInbox: Array<
+			| {
+					kind: "notice";
+					record: Readonly<SubagentRunRecord>;
+					parentText: string;
+					details: SubagentResultDetails;
+			  }
+			| { kind: "message"; message: SubagentMessage; scope: SubagentMessageScope }
+		> = [];
 		let batchTimer: ReturnType<typeof setTimeout> | undefined;
 		const messageBus = new SubagentMessageBus((record, senderScope) =>
 			appendSubagentMessageRecord(resolveAgentDir(), senderScope.parentSessionId, { ...record, at: Date.now() }),
@@ -259,10 +265,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 		};
 
-		const flushPendingBackgroundNotices = () => {
+		const flushParentInbox = () => {
 			batchTimer = undefined;
-			if (pendingNotices.length === 0) return;
-			const batch = pendingNotices.splice(0);
+			if (parentInbox.length === 0) return;
+			const batch = parentInbox.splice(0);
 			const deliveringGeneration = runtimeGeneration;
 			const deliveringSessionId = activeParentSessionId;
 
@@ -270,35 +276,53 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				if (!activeCtx || runtimeGeneration !== deliveringGeneration) return;
 				if (activeParentSessionId !== deliveringSessionId) return;
 
-				const validItems = batch.filter((item) => isOwnedAndValid(item.record, true));
-				if (validItems.length === 0) return;
-
+				const items = batch.filter((item) =>
+					item.kind === "notice"
+						? isOwnedAndValid(item.record, true)
+						: item.scope.runtimeGeneration === runtimeGeneration &&
+							item.scope.parentSessionId === activeParentSessionId,
+				);
+				if (items.length === 0) return;
+				const notices = items.flatMap((item) => (item.kind === "notice" ? [item.details] : []));
+				const messages = items.flatMap((item) => (item.kind === "message" ? [item.message] : []));
+				const texts = items.map((item) =>
+					item.kind === "notice"
+						? item.parentText
+						: subagentMessagePayload(item.message, senderRole(item.message.from)).content[0].text,
+				);
 				const combinedText =
-					validItems.length === 1
-						? validItems[0].parentText
-						: [
-								`[${validItems.length} background subagents finished]`,
-								...validItems.map((item) => item.parentText),
-							].join("\n\n---\n\n");
+					items.length === 1
+						? texts[0]
+						: [notices.length > 1 ? `[${notices.length} background subagents finished]` : undefined, ...texts]
+								.filter((text) => text !== undefined)
+								.join("\n\n---\n\n");
 
+				// One message wakes an idle orchestrator once, or steers a busy one at its next boundary.
 				pi.sendMessage(
 					{
-						customType: SUBAGENT_NOTIFICATION_CUSTOM_TYPE,
+						customType: notices.length > 0 ? SUBAGENT_NOTIFICATION_CUSTOM_TYPE : SUBAGENT_MESSAGE_CUSTOM_TYPE,
 						content: [{ type: "text", text: combinedText }],
 						display: true,
-						details:
-							validItems.length === 1
-								? validItems[0].details
-								: {
-										runs: validItems.map((item) => item.details),
-									},
+						details: items.length === 1 ? (notices[0] ?? messages[0]) : { runs: notices, messages },
 					},
 					{
-						deliverAs: "followUp",
+						deliverAs: "steer",
 						triggerTurn: true,
 					},
 				);
 			});
+		};
+
+		const scheduleParentFlush = () => {
+			const windowMs = options.batchWindowMs ?? BACKGROUND_BATCH_WINDOW_MS;
+			if (windowMs <= 0) {
+				flushParentInbox();
+				return;
+			}
+			if (!batchTimer) {
+				batchTimer = setTimeout(flushParentInbox, windowMs);
+				batchTimer.unref?.();
+			}
 		};
 
 		const scheduleBackgroundDelivery = (
@@ -317,16 +341,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			if (!isOwnedAndValid(record, true)) {
 				return;
 			}
-			pendingNotices.push({ record, parentText, details });
-			const windowMs = options.batchWindowMs ?? BACKGROUND_BATCH_WINDOW_MS;
-			if (windowMs <= 0) {
-				flushPendingBackgroundNotices();
-				return;
-			}
-			if (!batchTimer) {
-				batchTimer = setTimeout(flushPendingBackgroundNotices, windowMs);
-				batchTimer.unref?.();
-			}
+			parentInbox.push({ kind: "notice", record, parentText, details });
+			scheduleParentFlush();
 		};
 
 		interface RunExecutionContext {
@@ -517,15 +533,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			messageBus.register(PARENT_MESSAGE_ADDRESS, {
 				scope,
 				deliver: async (message) => {
-					deliverOrHold(() => {
-						if (!activeCtx || runtimeGeneration !== scope.runtimeGeneration) return;
-						if (activeParentSessionId !== scope.parentSessionId) return;
-						// Like background completion notices, a child's message wakes an idle orchestrator.
-						pi.sendMessage(subagentMessagePayload(message, senderRole(message.from)), {
-							deliverAs: "steer",
-							triggerTurn: true,
-						});
-					});
+					parentInbox.push({ kind: "message", message, scope });
+					scheduleParentFlush();
 				},
 			});
 		};
@@ -538,7 +547,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				clearTimeout(batchTimer);
 				batchTimer = undefined;
 			}
-			pendingNotices = [];
+			parentInbox = [];
 			if (activeParentSessionId) {
 				scheduler.cancelRunsForSession(activeParentSessionId, "session_invalidated", reason);
 			}

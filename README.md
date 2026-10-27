@@ -358,8 +358,9 @@ Each run has a name, unique among the running agents of the session: the call's 
 the orchestrator (`parent`) and running children, addressed by name or `sub_…` run ID, including
 sibling to sibling within the same parent session. A child's task lists the agents already running,
 and its `subagent_roster` tool shows the current list. The sender is bound by the runtime, never taken from the message. A child
-receives messages at its next safe point without a new turn; a child message wakes an idle
-orchestrator. Receipts say `accepted`, `unavailable` (unknown, finished, or other session), or
+receives messages at its next safe point without a new turn. Child messages and background
+completion notices that arrive close together reach the orchestrator as one message: it wakes an
+idle orchestrator once, or steers a busy one at its next boundary. Receipts say `accepted`, `unavailable` (unknown, finished, or other session), or
 `invalidated` (session reloaded), never handled. The runtime frames each message by
 its bound sender: from the orchestrator it is task direction a child follows as a course correction,
 from a sibling it is information or a request the child weighs, and from a child it is a report. No
