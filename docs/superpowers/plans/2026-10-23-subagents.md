@@ -1,6 +1,6 @@
 # Subagent Implementation Plan
 
-**Status:** M0–M2 implementation and local release checks complete, with the evaluation/manual limitations recorded below. M3 is not implemented and remains behind its architecture/design approval gate.
+**Status:** M0–M2 implementation and local release checks complete, with the evaluation/manual limitations recorded below. The current follow-on is `docs/superpowers/specs/2026-10-24-configurable-subagents-design.md`: configurable general-purpose/explorer/reviewer with hybrid per-run workspaces. The separate writer-role proposal is superseded; the current implementation plan is `docs/superpowers/plans/2026-10-24-configurable-subagents.md`. Shell/write capabilities remain unimplemented and cleanup safety is unresolved.
 **Date:** 2026-10-23
 **Project:** bluclawd, a feature package for Pi Coding Agent, not a Pi fork.
 **Goal:** Delegate bounded coding-related tasks to independently managed child conversations without weakening permissions, leaking results across conversations, or misrepresenting task completion.
@@ -684,6 +684,8 @@ Evaluation limitations and deviations:
 
 ## 12. M3: optional write-capable worker
 
+**Historical scope:** the separate writer role is no longer requested. See `docs/superpowers/specs/2026-10-24-configurable-subagents-design.md` for the selected role catalog and hybrid workspace policy. Preserve the safety evidence below; this section does not authorize resuming the old task plan.
+
 M3 is a separately approved follow-on, not a hidden custom-definition capability. Do not simply add `bash`, `edit`, and `write` to the read-only allowlist.
 
 ### 12.1 Workspace decision
@@ -706,7 +708,7 @@ Before implementation, prove how one process-wide sandbox safely supports a diff
 
 Investigate supported per-command restriction APIs. If correct isolation cannot be achieved, stop and propose a subprocess writer or a narrower capability set. Do not claim worktree isolation alone is a security boundary.
 
-Feasibility evidence: sandbox-runtime `0.0.81` exposes a public per-call `customConfig` argument to `wrapWithSandbox`. `test/subagents-writer-sandbox.test.ts` passed two real macOS sandbox tests: a worker-only allowlist and parent deny leave a concurrent parent command/configuration unchanged; parent writes through a symlink and Git's shared worktree directory are blocked. This proves only shell filesystem restriction feasibility on the tested platform. It does not prove safe direct file tools, complete process cleanup, Linux behavior, or checkpoint integration. No writer capability has been registered. Proposed next decision: a subprocess writer with its own sandbox lifecycle, a clean-parent exact-base worktree, and patch-only return without automatic integration. Architecture approval was requested; it has not yet been received.
+Feasibility evidence: sandbox-runtime `0.0.81` exposes a public per-call `customConfig` argument to `wrapWithSandbox`. `test/subagents-writer-sandbox.test.ts` passed two real macOS sandbox tests: a worker-only allowlist and parent deny leave a concurrent parent command/configuration unchanged; parent writes through a symlink and Git's shared worktree directory are blocked. This proves only shell filesystem restriction feasibility on the tested platform. It does not prove safe direct file tools, complete process cleanup, Linux behavior, or checkpoint integration. No writer capability has been registered. Proposed next decision: a subprocess writer with its own sandbox lifecycle, a clean-parent exact-base worktree, and patch-only return without automatic integration. The user approved the subprocess direction and then the detailed design in `docs/superpowers/specs/2026-10-24-subagent-writer-design.md`. The task-level follow-on is `docs/superpowers/plans/2026-10-24-subagent-writer.md`; plan review and the real-backend safety gate precede implementation/activation.
 
 Re-anchor repository-relative restrictions to the child workspace while retaining absolute restrictions and denying writes to the parent checkout. Test paths through symlinks and Git redirect mechanisms. Shell restrictions must apply to actual processes, not only a list of suggested allowed files.
 
