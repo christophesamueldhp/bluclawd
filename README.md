@@ -390,11 +390,40 @@ once in Pi's native totals. Background child usage, and tool usage after the lau
 `/status`, the phone's status sheet, and the separate `background-usage-ledger.json` disclose it.
 Unpriced child usage is labelled unknown, not free; price-table estimates are not subscription invoices.
 
+Coordination is the orchestrator's job. It should give each child its own files or area, name who owns a
+shared file, and tell the others to ask that owner through `subagent_message` instead of editing it.
+A child that hits a failing command, a denied action or an unexpected change should report it rather than
+work around it.
+
+**Evaluation.** `test/subagents-evaluation.test.ts` runs scripted-provider scenarios on a real fixture
+checkout and grades each run by the fixture's own tests and the final tree, never by what the transcript
+claims. A run with failing tests is incorrect however confident its report is, and a helper written twice is
+counted as a duplicate even when the tests pass. The scenarios are:
+- independent tasks, single-agent versus orchestrated;
+- an overlapping utility edit resolved by an explicit handoff;
+- a failing shell run reported and repaired, with a reviewer that adds no implementation;
+- a permission denial;
+- cancellation while a child waits for a message;
+- a disposal race.
+
 `node --experimental-strip-types scripts/eval-subagents.ts` prints the opt-in live evaluation command
-without making model calls. `--live` runs synthetic baseline/delegation trials with a conservative
-US$10 estimated-cost ceiling; it retains scratch fixtures and JSON results. It is separate from the
-scripted-provider tests, and does not replace phone interaction or prove a production quality advantage.
-Write-capable workers (M3), patch integration, and automatic worktree cleanup are not enabled.
+without making model calls. `--live --max-usd <dollars>` runs the installed `pi` with this checkout's
+extensions on scratch fixtures, once single-agent and once orchestrated per scenario. It stops scheduling
+trials when the estimated spend reaches the given amount; that limit belongs to the harness, not to
+subagents. It writes correctness, test counts, duplicates, changed files, runs, agent messages, elapsed
+time, usage and its stated limitations to a JSON file.
+
+Last recorded live evidence (2026-10-28):
+- Two manual runs, not graded trials: `gpt-6.1-sol` orchestrating `gpt-6-luna` and `gpt-6.1-terra` children
+  finished with all fixture tests passing (7/7 and 6/6). The second run logged sibling handoff messages and a
+  resumed child.
+- One harness run (`--max-usd 1`, sol orchestrating luna, one trial per mode): all six trials were correct,
+  with no duplicates, for an estimated $0.19.
+  - In the overlap scenario, the children exchanged four handoff messages.
+  - One orchestrated child failed on a provider WebSocket error and was respawned by the orchestrator.
+  - A single trial per mode measures nothing about quality.
+
+Details are in issue #15.
 
 ## Permissions
 
