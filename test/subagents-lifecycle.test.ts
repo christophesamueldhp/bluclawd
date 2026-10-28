@@ -241,6 +241,61 @@ describe("Task 7 (M2) — Parent lifecycle transitions, branch ownership, and no
 		}
 	});
 
+	it.each([
+		["a session switch", { type: "session_before_switch", reason: "new" }],
+		["a reload", { type: "session_start", reason: "reload" }],
+	] as const)("cancels a running background child on %s", async (_label, event) => {
+		const cwd = makeTempDir("invalidate-cwd");
+		const agentDir = makeTempDir("invalidate-agent");
+		const { session, faux } = await createLifecycleSession(cwd, agentDir);
+		let releaseChild!: () => void;
+		const childGate = new Promise<void>((r) => {
+			releaseChild = r;
+		});
+		try {
+			let parentTurnCount = 0;
+			const step = async (context: TranscriptContext) => {
+				if (isChildContext(context)) {
+					await childGate;
+					return fauxAssistantMessage("Should be cancelled by the invalidation.");
+				}
+				parentTurnCount++;
+				return parentTurnCount === 1
+					? fauxAssistantMessage([
+							fauxToolCall(
+								"subagent",
+								{ agent: "explorer", task: "Outlive the parent session", background: true },
+								{ id: "c_invalidate" },
+							),
+						])
+					: fauxAssistantMessage("Started.");
+			};
+			faux.setResponses([step, step, step]);
+			await session.prompt("Start a background child.", { expandPromptTemplates: false });
+			const sessionId = session.sessionId;
+			const [task] = agentTasks()?.list(sessionId) ?? [];
+			await vi.waitFor(() => expect(agentTasks()?.list(sessionId)[0]?.status).toBe("running"), {
+				timeout: 3000,
+				interval: 20,
+			});
+
+			await session.extensionRunner.emit(event);
+			releaseChild();
+			await vi.waitFor(
+				() => {
+					expect(readPersistedRunRecord(agentDir, sessionId, task.id)).toMatchObject({
+						status: "cancelled",
+						stopSource: "session_invalidated",
+					});
+				},
+				{ timeout: 3000, interval: 20 },
+			);
+		} finally {
+			releaseChild();
+			session.dispose();
+		}
+	});
+
 	it("cancels background runs whose originating entry is no longer on the active branch after tree navigation", async () => {
 		const cwd = makeTempDir("tree-cwd");
 		const agentDir = makeTempDir("tree-agent");
