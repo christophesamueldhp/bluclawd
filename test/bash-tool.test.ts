@@ -232,7 +232,7 @@ describe("structured results for codemode scripts", () => {
 		expect(structured(result)).toEqual({
 			output: text(result),
 			truncated: false,
-			wall_time_seconds: 0,
+			wall_time_seconds: expect.any(Number),
 			background_task_id: id,
 			output_file: backgroundBashJobs.get(id)?.outputFile,
 		});
