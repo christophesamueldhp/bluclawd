@@ -30,6 +30,10 @@ GitHub shares one number space across issues and PRs, so a bare `#42` may be eit
 
 Create a GitHub issue.
 
+## When a design is settled in conversation
+
+Before implementing it, record the agreed decisions (from grilling, for example) as a GitHub issue: that issue is the spec. Reference it from every commit with `Refs #<n>`, so `/code-review` finds the spec through the commit messages.
+
 ## When a skill says "fetch the relevant ticket"
 
 Read it as in **Read an issue** above.
