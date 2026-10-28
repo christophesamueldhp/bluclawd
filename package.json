@@ -33,6 +33,7 @@
     "@earendil-works/pi-coding-agent": "1.0.4",
     "@earendil-works/pi-tui": "1.0.4",
     "@silvia-odwyer/photon-node": "0.3.4",
+    "knip": "6.43.0",
     "typebox": "*",
     "typescript": "^5",
     "vitest": "^4"
@@ -40,7 +41,9 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit && tsc -p daemon/remote/web",
-    "lint": "biome check ."
+    "lint": "biome check .",
+    "deadcode": "knip --production --include files",
+    "lint:fix": "biome check --write ."
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "file:vendor/sandbox-runtime/anthropic-ai-sandbox-runtime-0.0.81-bluclawd.2.tgz"
