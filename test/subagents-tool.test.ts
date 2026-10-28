@@ -1898,6 +1898,100 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 		}
 	});
 
+	it("counts a resumed generation's nested usage when a second resume of the same child is refused", async () => {
+		const cwd = makeTempDir("resume-race-cwd");
+		const agentDir = makeTempDir("resume-race-agent");
+		const INTEGRATION_TOKENS = 1_000_000;
+		let bothResumesAnswered!: () => void;
+		const answered = new Promise<void>((resolve) => {
+			bothResumesAnswered = resolve;
+		});
+		const metered = defineTool({
+			name: "metered",
+			label: "Metered",
+			description: "Reports integration usage once both resume messages are answered.",
+			parameters: Type.Object({}),
+			execute: async () => {
+				await answered;
+				return {
+					content: [{ type: "text", text: "metered" }],
+					details: undefined,
+					usage: {
+						input: INTEGRATION_TOKENS,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: INTEGRATION_TOKENS,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+				};
+			},
+		});
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd,
+			agentDir,
+			batchWindowMs: 0,
+			extraTools: [metered],
+		});
+		let messageResults = 0;
+		const off = session.subscribe((event) => {
+			if (event.type === "tool_execution_end" && event.toolName === "subagent_message" && ++messageResults === 2) {
+				bothResumesAnswered();
+			}
+		});
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			let parentStep = 0;
+			const route = (context: TranscriptContext) => {
+				const text = JSON.stringify(context.messages);
+				if (isChildContext(context)) {
+					if (text.includes('"toolName":"metered"')) return fauxAssistantMessage("v2 done.");
+					if (text.includes("Now add tests."))
+						return fauxAssistantMessage([fauxToolCall("metered", {}, { id: "m" })]);
+					return fauxAssistantMessage("v1 done.");
+				}
+				parentStep++;
+				if (parentStep === 1) {
+					return fauxAssistantMessage([
+						fauxToolCall(
+							"subagent",
+							{ agent: "general-purpose", name: "backend", task: "Build v1." },
+							{ id: "first" },
+						),
+					]);
+				}
+				if (parentStep === 2) {
+					// The child resumed by the first message is still running when the second is refused.
+					return fauxAssistantMessage([
+						fauxToolCall("subagent_message", { to: "backend", content: "Now add tests." }, { id: "resume_a" }),
+						fauxToolCall("subagent_message", { to: "backend", content: "Now add tests." }, { id: "resume_b" }),
+					]);
+				}
+				return fauxAssistantMessage("Waiting.");
+			};
+			faux.setResponses(Array.from({ length: 12 }, () => route));
+			await session.prompt("Delegate then extend twice.", { expandPromptTemplates: false });
+			const runId = (toolResultText(session, "first").result?.details as { runId: string }).runId;
+			const receipts = [toolResultText(session, "resume_a").text, toolResultText(session, "resume_b").text];
+			expect(receipts.filter((text) => text.includes("accepted: resuming"))).toHaveLength(1);
+			expect(receipts.filter((text) => text.includes("only a completed subagent can be resumed"))).toHaveLength(1);
+
+			await waitFor(() => readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "completed");
+			await waitFor(() => readPersistedRunRecord(agentDir, session.sessionId, runId)?.generation === 1);
+			const ledger = JSON.parse(
+				readFileSync(
+					join(agentDir, "bluclawd", "subagents", session.sessionId, "background-usage-ledger.json"),
+					"utf8",
+				),
+			);
+			expect(ledger.recordedRunIds).toEqual([`${runId}#1`]);
+			expect(ledger.usage.totalTokens).toBeGreaterThanOrEqual(INTEGRATION_TOKENS);
+		} finally {
+			off();
+			session.dispose();
+		}
+	});
+
 	it("refuses to resume for a sibling, a stopped child, or a run from before a reload", async () => {
 		const cwd = makeTempDir("resume-refuse-cwd");
 		const agentDir = makeTempDir("resume-refuse-agent");

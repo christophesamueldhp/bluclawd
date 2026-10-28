@@ -663,7 +663,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			parameters: messageParameters,
 			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
 				const ctx = toolCtx ?? activeCtx;
-				if (!activeParentSessionId || !ctx) {
+				if (!activeParentSessionId) {
 					return {
 						content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
 						details: undefined,
@@ -673,7 +673,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const scope = { parentSessionId: activeParentSessionId, runtimeGeneration };
 				const to = params.to.trim();
 				const finished = findFinishedRun(to);
-				if (finished) return resumeRun(finished, params.content, scope, ctx);
+				if (finished && ctx) return resumeRun(finished, params.content, scope, ctx);
 				return formatReceipt(await messageBus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, params.content));
 			},
 		});
@@ -700,12 +700,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			ctx: AdmissionContext,
 		) => {
 			let receipt: SubagentMessageReceipt | undefined;
-			// The earlier launch result is long emitted, so the SDK attributes none of this generation's nested usage.
-			emittedLaunchResults.add(run.runId);
 			const resumed = await admission.resume(
 				run,
 				() => {
 					receipt = messageBus.accept({ address: PARENT_MESSAGE_ADDRESS, scope }, run.runId, run.name);
+					// The earlier launch result is long emitted, so the SDK attributes none of this generation's nested usage.
+					emittedLaunchResults.add(run.runId);
 					return subagentMessagePayload({
 						seq: receipt.seq,
 						from: PARENT_MESSAGE_ADDRESS,
@@ -717,7 +717,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				ctx,
 			);
 			if (!resumed.ok || !resumed.handle) {
-				emittedLaunchResults.delete(run.runId);
+				// A refused resume never got past the checks, so a generation still running keeps its usage.
+				if (receipt) emittedLaunchResults.delete(run.runId);
 				return formatReceipt({
 					status: resumed.refusal ?? "unavailable",
 					seq: 0,

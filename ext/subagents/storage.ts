@@ -121,7 +121,7 @@ export function ensureRunStorageDir(
 	parentSessionId: string,
 	runId: string,
 ): { ok: boolean; runDir?: string; error?: string } {
-	if (isSafePathSegment(parentSessionId) && !isSafePathSegment(runId)) {
+	if (!isSafePathSegment(runId)) {
 		return { ok: false, error: `Invalid runId "${runId}" for subagent storage` };
 	}
 	const session = ensureSessionStorageDir(agentDir, parentSessionId);

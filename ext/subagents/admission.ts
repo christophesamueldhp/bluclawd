@@ -351,7 +351,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const unavailable = (error: string): AdmissionResult => ({ ok: false, refusal: "unavailable", error });
 			const dispatchGeneration = deps.runtimeGeneration();
 			// Checked again after the model is resolved, since another message may resume the run meanwhile.
-			const refusal = (): AdmissionResult | undefined => {
+			const checkResumable = (): { transcriptPath?: string; refused?: AdmissionResult } => {
 				const current = deps.scheduler.getRun(run.runId);
 				if (
 					!current ||
@@ -359,21 +359,24 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					deps.runtimeGeneration() !== dispatchGeneration ||
 					deps.activeParentSessionId() !== current.parentSessionId
 				) {
-					return invalidated;
+					return { refused: invalidated };
 				}
 				if (current.status !== "completed") {
-					return unavailable(`${label} is ${current.status}; only a completed subagent can be resumed.`);
+					return {
+						refused: unavailable(`${label} is ${current.status}; only a completed subagent can be resumed.`),
+					};
 				}
-				if (!current.transcriptPath) return unavailable(`${label} has no saved transcript to resume.`);
+				if (!current.transcriptPath) return { refused: unavailable(`${label} has no saved transcript to resume.`) };
 				const holder = current.name
 					? deps.scheduler.listActiveRuns(current.parentSessionId).find((r) => r.name === current.name)
 					: undefined;
-				if (holder) return unavailable(`${label} cannot resume: its name is now used by ${holder.runId}.`);
-				return undefined;
+				if (holder)
+					return { refused: unavailable(`${label} cannot resume: its name is now used by ${holder.runId}.`) };
+				return { transcriptPath: current.transcriptPath };
 			};
 
-			const early = refusal();
-			if (early) return early;
+			const beforeModel = checkResumable();
+			if (beforeModel.refused) return beforeModel.refused;
 			const previous = deps.scheduler.getContext(run.runId);
 			if (!previous) return invalidated;
 
@@ -391,15 +394,14 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			);
 			if (!childModel) return unavailable(modelError);
 
-			const late = refusal();
-			if (late) return late;
-			const current = deps.scheduler.getRun(run.runId);
+			const { transcriptPath, refused } = checkResumable();
+			if (refused) return refused;
 			const resumed = deps.scheduler.resume(run.runId, {
 				...previous,
 				...tools,
 				childModel,
 				projectTrusted: ctx.isProjectTrusted(),
-				resume: { transcriptPath: current.transcriptPath, prompt: buildPrompt() },
+				resume: { transcriptPath, prompt: buildPrompt() },
 			});
 			if (!resumed.ok || !resumed.handle) return unavailable(resumed.error ?? `${label} could not be resumed.`);
 			return { ok: true, handle: resumed.handle };
