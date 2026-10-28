@@ -17,6 +17,13 @@ import {
 	wrapExec,
 } from "../ext/sandbox/runtime.ts";
 
+// The reaper runs real processes; it has its own tests.
+const reaper = vi.hoisted(() => ({ problem: undefined as string | undefined }));
+vi.mock("../ext/sandbox/reaper.ts", () => ({
+	reapDescendants: (exec: unknown) => exec,
+	prepareReaper: async () => reaper.problem,
+}));
+
 describe("networkAsker", () => {
 	const ui = (answer: boolean) => ({ hasUI: true, ui: { confirm: vi.fn(async () => answer) } });
 
@@ -200,6 +207,7 @@ describe("the extension", () => {
 		setSandboxEngine(engine);
 	});
 	afterEach(async () => {
+		reaper.problem = undefined;
 		await stopSandbox();
 		setSandboxEngine(undefined);
 		forgetWrappedExec();
@@ -425,6 +433,27 @@ describe("the extension", () => {
 		await wrong.start();
 		expect(sandboxStatus()).toEqual({ kind: "unavailable", reason: "sandbox.enabled is not true or false" });
 		expect(wrong.notes[0]).toContain("sandbox.enabled is not true or false");
+	});
+
+	it("warns when the sandbox runs but cannot reap a command's descendants", async () => {
+		reaper.problem = "the Command Line Tools are not installed";
+		const ready = load({ sandbox: { enabled: true } });
+		await ready.start();
+		expect(sandboxStatus()).toEqual({ kind: "ready" });
+		expect(ready.notes).toHaveLength(1);
+		expect(ready.notes[0]).toContain("the Command Line Tools are not installed");
+		expect(ready.notes[0]).toContain("descendants");
+
+		await stopSandbox();
+		const off = load({});
+		await off.start();
+		expect(off.notes).toEqual([]);
+
+		engine.checkDependencies = () => ({ errors: ["socat not installed"], warnings: [] });
+		const unavailable = load({ sandbox: { enabled: true } });
+		await unavailable.start();
+		expect(unavailable.notes).toHaveLength(1);
+		expect(unavailable.notes[0]).toContain("socat not installed");
 	});
 
 	it("cannot run with a key srt does not know, so a misspelled protection never goes missing", async () => {

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readHeartbeats } from "./helpers/heartbeats.ts";
 import { createWriterFixture } from "./helpers/writer-fixture.ts";
 
 const supported =
@@ -14,7 +15,6 @@ const supported =
 	SandboxManager.checkDependencies().errors.length === 0;
 const lifetimeMs = 3000;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-type Heartbeat = { identity: string; pid: number; ppid: number; sequence: number };
 
 describe.skipIf(!supported)("macOS: stopping a sandboxed command ends its descendants (target of #29)", () => {
 	let fixture: Awaited<ReturnType<typeof createWriterFixture>>;
@@ -79,19 +79,7 @@ describe.skipIf(!supported)("macOS: stopping a sandboxed command ends its descen
 				await delay(Math.max(0, info.expiresAt - Date.now()) + 100);
 			}
 		};
-		const beats = (): Heartbeat[] => {
-			if (!existsSync(heartbeatPath)) return [];
-			return readFileSync(heartbeatPath, "utf8")
-				.split("\n")
-				.filter(Boolean)
-				.flatMap((line) => {
-					try {
-						return [JSON.parse(line) as Heartbeat];
-					} catch {
-						return [];
-					}
-				});
-		};
+		const beats = () => readHeartbeats(heartbeatPath);
 		const deadline = Date.now() + 5000;
 		while (!beats().some((beat) => beat.identity === identity && (mode !== "double-fork" || beat.ppid === 1))) {
 			if (child.exitCode !== null) throw new Error(`Probe stopped before readiness: ${stdout} ${stderr}`);
