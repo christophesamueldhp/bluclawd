@@ -4,19 +4,6 @@ import { fileURLToPath } from "node:url";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
-export const ALLOWED_SUBAGENT_TOOLS = Object.freeze(["read", "grep", "find", "ls"] as const);
-export type AllowedSubagentTool = (typeof ALLOWED_SUBAGENT_TOOLS)[number];
-export const SUPPORTED_SUBAGENT_TOOLS = Object.freeze([...ALLOWED_SUBAGENT_TOOLS, "edit", "write", "bash"] as const);
-export type SupportedSubagentTool = (typeof SUPPORTED_SUBAGENT_TOOLS)[number];
-export type SubagentWorkspaceMode = "shared" | "isolated";
-
-export function workspaceModeForTools(tools: readonly SupportedSubagentTool[]): SubagentWorkspaceMode {
-	if (!Array.isArray(tools) || tools.length === 0 || tools.some((tool) => !SUPPORTED_TOOL_SET.has(tool))) {
-		throw new Error("Invalid subagent tools: expected a non-empty supported tool list");
-	}
-	return tools.every((tool) => ALLOWED_TOOL_SET.has(tool)) ? "shared" : "isolated";
-}
-
 export const SUBAGENT_THINKING_LEVELS = Object.freeze([
 	"off",
 	"minimal",
@@ -82,8 +69,6 @@ export interface ResolveAgentDefinitionResult {
 }
 
 const SUPPORTED_FRONTMATTER_KEYS = new Set(["name", "description", "tools", "model", "thinkingLevel"]);
-const ALLOWED_TOOL_SET = new Set<string>(ALLOWED_SUBAGENT_TOOLS);
-const SUPPORTED_TOOL_SET = new Set<string>(SUPPORTED_SUBAGENT_TOOLS);
 const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const RESERVED_NAME_PREFIXES = ["sub_", "bg_", "mon_", "agent_", "task_"];
 const TOOL_NAME_RE = /^[A-Za-z0-9_.:-]{1,128}$/;

@@ -6,7 +6,6 @@ import {
 	discoverAgentDefinitions,
 	formatAgentRoutingDescriptions,
 	resolveAgentDefinition,
-	workspaceModeForTools,
 } from "../ext/subagents/definitions.ts";
 
 const tempDirs: string[] = [];
@@ -325,22 +324,6 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 			/Invalid "thinkingLevel" value "ultra".*must be one of off, minimal/,
 		);
 	});
-
-	it.each([
-		{ tools: ["read", "bash"], want: "isolated" },
-		{ tools: ["write"], want: "isolated" },
-		{ tools: ["edit"], want: "isolated" },
-		{ tools: ["read", "grep"], want: "shared" },
-	])("classifies capabilities without consulting an agent name: $tools", ({ tools, want }) => {
-		expect(workspaceModeForTools(tools as never)).toBe(want);
-	});
-
-	it.each([[], ["read", "unknown"], ["Read"], [null], "bash", undefined].map((tools) => ({ tools })))(
-		"rejects malformed capability selection $tools",
-		({ tools }) => {
-			expect(() => workspaceModeForTools(tools as never)).toThrow(/invalid subagent tools/i);
-		},
-	);
 
 	it("freezes discovered definitions so mid-run file edits do not mutate active definitions until reload", () => {
 		const cwd = makeTempDir("freeze-cwd");
