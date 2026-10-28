@@ -15,5 +15,6 @@ export default defineConfig({
 		reporters: process.env.GITHUB_ACTIONS ? ["dot", "github-actions"] : ["dot"],
 		silent: "passed-only",
 		include: ["test/**/*.test.ts"],
+		setupFiles: ["test/setup/agent-dir.ts"],
 	},
 });
