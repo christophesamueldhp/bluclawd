@@ -69,41 +69,86 @@ describe("networkAsker", () => {
 
 	describe("while subagents run commands", () => {
 		const child = (name: string) => ({ name, reportNetworkDenied: vi.fn() });
+		const api = child("api");
+		const ui1 = child("ui");
+		const running = new Map<string, ReturnType<typeof child> | undefined>([
+			["api-1", api],
+			["ui-1", ui1],
+			["api-2", api],
+			["main-1", undefined],
+		]);
+		const deniedToChild = { allow: false, reason: expect.stringMatching(/orchestrator/) };
 
-		it("denies a request no orchestrator command can have made without a dialog, reports it, and asks again later", async () => {
-			const ctx = ui(true);
-			const api = child("api");
-			const ui1 = child("ui");
-			let owners: (ReturnType<typeof child> | undefined)[] = [api, ui1, api];
-			const asker = networkAsker(
-				() => ctx as any,
-				() => owners,
-			);
-
-			const denied = await asker.ask({ host: "registry.npmjs.org", port: 443 });
-			expect(denied).toEqual({ allow: false, reason: expect.stringMatching(/orchestrator/) });
-			expect(ctx.ui.confirm).not.toHaveBeenCalled();
-			expect(api.reportNetworkDenied).toHaveBeenCalledWith("registry.npmjs.org:443", ["api", "ui"]);
-			expect(ui1.reportNetworkDenied).not.toHaveBeenCalled();
-
-			owners = [undefined, api];
-			expect(await asker.ask({ host: "registry.npmjs.org", port: 443 })).toBe(true);
-			expect(ctx.ui.confirm).toHaveBeenCalledTimes(1);
+		beforeEach(() => {
+			api.reportNetworkDenied.mockClear();
+			ui1.reportNetworkDenied.mockClear();
 		});
 
-		it("gives a child the user's earlier answer", async () => {
+		it("gives any command the user's earlier answer", async () => {
 			const ctx = ui(true);
-			let owners: (ReturnType<typeof child> | undefined)[] = [];
 			const asker = networkAsker(
 				() => ctx as any,
-				() => owners,
+				() => running,
 			);
-			expect(await asker.ask({ host: "x.com", port: 443 })).toBe(true);
-			const api = child("api");
-			owners = [api];
+			expect(await asker.ask({ host: "x.com", port: 443, commandId: "main-1" })).toBe(true);
+			expect(await asker.ask({ host: "x.com", port: 443, commandId: "api-1" })).toBe(true);
 			expect(await asker.ask({ host: "x.com", port: 443 })).toBe(true);
 			expect(ctx.ui.confirm).toHaveBeenCalledTimes(1);
 			expect(api.reportNetworkDenied).not.toHaveBeenCalled();
+		});
+
+		it("denies a child's command without a dialog, reports it naming that child only, and asks again later", async () => {
+			const ctx = ui(true);
+			const asker = networkAsker(
+				() => ctx as any,
+				() => running,
+			);
+			expect(await asker.ask({ host: "registry.npmjs.org", port: 443, commandId: "ui-1" })).toEqual(deniedToChild);
+			expect(ctx.ui.confirm).not.toHaveBeenCalled();
+			expect(ui1.reportNetworkDenied).toHaveBeenCalledWith("registry.npmjs.org:443", ["ui"]);
+			expect(api.reportNetworkDenied).not.toHaveBeenCalled();
+
+			expect(await asker.ask({ host: "registry.npmjs.org", port: 443, commandId: "main-1" })).toBe(true);
+			expect(ctx.ui.confirm).toHaveBeenCalledTimes(1);
+		});
+
+		it("asks the user for an orchestrator command while children's commands run", async () => {
+			const ctx = ui(true);
+			const asker = networkAsker(
+				() => ctx as any,
+				() => running,
+			);
+			expect(await asker.ask({ host: "x.com", port: 443, commandId: "main-1" })).toBe(true);
+			expect(ctx.ui.confirm).toHaveBeenCalledTimes(1);
+			expect(api.reportNetworkDenied).not.toHaveBeenCalled();
+			expect(ui1.reportNetworkDenied).not.toHaveBeenCalled();
+		});
+
+		it.each([
+			["no id", undefined],
+			["an id no running command has", "forged"],
+		])("denies a request with %s while any child runs, naming every running child", async (_name, commandId) => {
+			const ctx = ui(true);
+			const asker = networkAsker(
+				() => ctx as any,
+				() => running,
+			);
+			expect(await asker.ask({ host: "x.com", port: 443, commandId })).toEqual(deniedToChild);
+			expect(ctx.ui.confirm).not.toHaveBeenCalled();
+			expect(api.reportNetworkDenied).toHaveBeenCalledWith("x.com:443", ["api", "ui"]);
+		});
+
+		it.each([
+			["no id", undefined],
+			["an id no running command has", "forged"],
+		])("asks for a request with %s while no child runs", async (_name, commandId) => {
+			const ctx = ui(true);
+			const asker = networkAsker(
+				() => ctx as any,
+				() => new Map([["main-1", undefined]]),
+			);
+			expect(await asker.ask({ host: "x.com", port: 443, commandId })).toBe(true);
+			expect(ctx.ui.confirm).toHaveBeenCalledTimes(1);
 		});
 	});
 

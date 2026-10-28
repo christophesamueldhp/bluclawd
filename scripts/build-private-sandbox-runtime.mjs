@@ -7,7 +7,7 @@ import { isDeepStrictEqual, parseArgs, promisify } from "node:util";
 
 const exec = promisify(execFile);
 const name = "@anthropic-ai/sandbox-runtime";
-const version = "0.0.81-bluclawd.1";
+const version = "0.0.81-bluclawd.2";
 const sourceCommit = "c40cf14a65d025e3cd27f071f13a73c12b3b1f92";
 const sourceTree = "8b0c1f68ab58235d56bdac8db5d70ad7db6fef6d";
 const officialSRI = "sha512-bjHDu87gjIR7+Oxy9jPiK3v8CvSELCzfpXa3fjqfSKdvlZET2iF51xcXILWPayTpowB3xtZeQVf2JR916nVW/w==";
@@ -19,7 +19,8 @@ const dependencies = {
 	"node-forge": "^1.4.0",
 	zod: "^3.25.0",
 };
-const stems = ["sandbox-config", "sandbox-manager", "macos-sandbox-utils"];
+const stems = ["sandbox-config", "sandbox-manager", "macos-sandbox-utils", "sandbox-schemas"];
+const patches = { mach: "mach-denial.patch", harness: "harness.patch", commandId: "command-id-ask.patch" };
 const outputs = new Set(
 	stems.flatMap((stem) => [".js", ".js.map", ".d.ts", ".d.ts.map"].map((suffix) => `dist/sandbox/${stem}${suffix}`)),
 );
@@ -122,7 +123,7 @@ export function privateRuntimeMetadata(basePackage) {
 	Object.assign(result, {
 		version,
 		private: true,
-		description: `${result.description} (bluclawd private build: Mach-lookup denial)`,
+		description: `${result.description} (bluclawd private build: Mach-lookup denial, command id in network asks)`,
 		files: [
 			"dist",
 			"vendor/seccomp",
@@ -190,6 +191,7 @@ export async function buildPrivateSandboxRuntime(options) {
 		"candidate-lint",
 		"candidate-format",
 		"mach-green",
+		"command-id-green",
 		"official-broad",
 		"patched-broad",
 	])
@@ -257,11 +259,8 @@ export async function buildPrivateSandboxRuntime(options) {
 	}));
 	requireMatch(changes, delta.runtimeFileChanges, "Reviewed generated runtime delta changed.");
 	const proofDir = dirname(sourceDelta);
-	for (const [file, expected] of [
-		["mach-denial.patch", delta.machPatchSha256],
-		["harness.patch", delta.harnessPatchSha256],
-	])
-		requireMatch(sha(await fs.readFile(join(proofDir, file))), expected, "Reviewed patch changed.");
+	for (const [key, file] of Object.entries(patches))
+		requireMatch(sha(await fs.readFile(join(proofDir, file))), delta[`${key}PatchSha256`], "Reviewed patch changed.");
 
 	await fs.mkdir(outputDir, { mode: 0o700 });
 	const original = await unpack(baseArchive, join(outputDir, "base"));
@@ -277,7 +276,7 @@ export async function buildPrivateSandboxRuntime(options) {
 	await fs.writeFile(join(stage, "package.json"), `${JSON.stringify(metadata, null, 2)}\n`);
 	await fs.writeFile(
 		join(stage, "BLUCLAWD-NOTICE.txt"),
-		`bluclawd private sandbox runtime ${version}\nNot an Anthropic release or endorsement. Upstream copyright and Apache-2.0 license retained.\nUpstream: https://github.com/anthropics/sandbox-runtime at ${sourceCommit}\nModified source modules: ${stems.join(", ")}. Their JS/declarations/maps add explicit Mach-lookup denial.\nPackage metadata removes development dependencies/build and lifecycle scripts; production ranges/public entries are unchanged.\nSee the accompanying provenance and source patch for reproducible maintenance.\n`,
+		`bluclawd private sandbox runtime ${version}\nNot an Anthropic release or endorsement. Upstream copyright and Apache-2.0 license retained.\nUpstream: https://github.com/anthropics/sandbox-runtime at ${sourceCommit}\nModified source modules: ${stems.join(", ")}. Their JS/declarations/maps add explicit Mach-lookup denial and pass the requesting command's id to the network ask callback.\nPackage metadata removes development dependencies/build and lifecycle scripts; production ranges/public entries are unchanged.\nSee the accompanying provenance and source patch for reproducible maintenance.\n`,
 	);
 	for (const file of ["package.json", "BLUCLAWD-NOTICE.txt"]) await fs.chmod(join(stage, file), 0o644);
 	const home = join(outputDir, "npm-home");
@@ -309,7 +308,7 @@ export async function buildPrivateSandboxRuntime(options) {
 			)
 		).stdout,
 	);
-	const filename = "anthropic-ai-sandbox-runtime-0.0.81-bluclawd.1.tgz";
+	const filename = `anthropic-ai-sandbox-runtime-${version}.tgz`;
 	if (packed.length !== 1 || packed[0].filename !== filename) throw new Error("Unexpected private archive output.");
 	const tarball = join(outputDir, filename),
 		bytes = await fs.readFile(tarball);
@@ -333,7 +332,7 @@ export async function buildPrivateSandboxRuntime(options) {
 		},
 		artifact: { filename, bytes: bytes.length, sha256: sha(bytes), integrity: sri(bytes) },
 		tools: { ...delta.toolVersions, nodeSha256: nodeHash, npmCliSha256: npmHash },
-		patches: { machSha256: delta.machPatchSha256, harnessSha256: delta.harnessPatchSha256 },
+		patches: Object.fromEntries(Object.keys(patches).map((key) => [`${key}Sha256`, delta[`${key}PatchSha256`]])),
 		sourceHashes: delta.sourceHashes,
 		sourcePackageSha256: base.sourcePackageSha256,
 		sourceLockSha256: base.sourceLockSha256,
@@ -343,8 +342,7 @@ export async function buildPrivateSandboxRuntime(options) {
 		payload,
 		verification: delta.verification,
 	});
-	for (const file of ["mach-denial.patch", "harness.patch"])
-		await fs.copyFile(join(proofDir, file), join(outputDir, file));
+	for (const file of Object.values(patches)) await fs.copyFile(join(proofDir, file), join(outputDir, file));
 	return { tarball, provenance, sha256: sha(bytes), integrity: sri(bytes) };
 }
 

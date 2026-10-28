@@ -123,9 +123,13 @@ describe("private sandbox runtime preparation", () => {
 		for (const dir of [before, after]) put(dir, "dist/index.js", "same");
 		put(before, "dist/sandbox/sandbox-config.js", "old");
 		put(after, "dist/sandbox/sandbox-config.js", "new");
+		put(before, "dist/sandbox/sandbox-schemas.d.ts", "old");
+		put(after, "dist/sandbox/sandbox-schemas.d.ts", "new");
 		const changes = await inspectRuntimeDelta(before, after);
-		expect(changes).toHaveLength(1);
-		expect(changes[0].path).toBe("dist/sandbox/sandbox-config.js");
+		expect(changes.map((change) => change.path)).toEqual([
+			"dist/sandbox/sandbox-config.js",
+			"dist/sandbox/sandbox-schemas.d.ts",
+		]);
 		expect(changes[0].beforeHash).not.toBe(changes[0].afterHash);
 	});
 	it.each(["missing", "bytes", "mode"])("rejects native asset %s drift", async (kind) => {
@@ -146,7 +150,7 @@ describe("private sandbox runtime preparation", () => {
 		const result = privateRuntimeMetadata(basePackage);
 		expect(result).toMatchObject({
 			name: "@anthropic-ai/sandbox-runtime",
-			version: "0.0.81-bluclawd.1",
+			version: "0.0.81-bluclawd.2",
 			private: true,
 			author: "Anthropic PBC",
 			license: "Apache-2.0",
@@ -161,7 +165,7 @@ describe("private sandbox runtime preparation", () => {
 			"node-forge": "^1.4.0",
 			zod: "^3.25.0",
 		});
-		expect(result.description).toMatch(/bluclawd/i);
+		expect(result.description).toMatch(/bluclawd.*Mach-lookup denial.*command id in network asks/i);
 		expect(result.files).toContain("BLUCLAWD-NOTICE.txt");
 		expect(basePackage).toEqual(copy);
 	});

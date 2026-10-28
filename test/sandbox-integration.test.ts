@@ -8,8 +8,10 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { runForSubagent } from "../ext/_shared/subagent-commands.ts";
 import { runtimeConfig } from "../ext/sandbox/config.ts";
+import { networkAsker } from "../ext/sandbox/index.ts";
 import { setSandboxEngine, startSandbox, stopSandbox, wrapExec } from "../ext/sandbox/runtime.ts";
 
 const supported =
@@ -22,6 +24,7 @@ describe.skipIf(!supported)(
 	() => {
 		let dir: string;
 		const probe = join(homedir(), `.bluclawd-sandbox-probe-${process.pid}`);
+		const confirm = vi.fn(async () => false);
 		const exec = wrapExec(
 			(command, cwd, options) => createLocalBashOperations().exec(command, cwd, options),
 			() => undefined,
@@ -56,7 +59,8 @@ describe.skipIf(!supported)(
 				homedir(),
 				tmpdir(),
 			);
-			expect(await startSandbox(config, async () => false)).toEqual({ kind: "ready" });
+			const asker = networkAsker(() => ({ hasUI: true, ui: { confirm } }) as never);
+			expect(await startSandbox(config, asker.ask)).toEqual({ kind: "ready" });
 		}, 60_000);
 
 		afterAll(async () => {
@@ -95,6 +99,21 @@ describe.skipIf(!supported)(
 		it("refuses a host the user did not allow", async () => {
 			const { output } = await run("curl -sS -m 10 https://example.com -o /dev/null -w '%{http_code}'");
 			expect(output).toContain("403");
+		});
+
+		it("asks the user for the orchestrator's command and not for a subagent's, while both run", async () => {
+			confirm.mockClear();
+			const api = { name: "api", reportNetworkDenied: vi.fn() };
+			const fetch = (host: string) => `sleep 1; curl -sS -m 10 https://${host} -o /dev/null -w '%{http_code}'`;
+			const [child, parent] = await Promise.all([
+				runForSubagent(api, () => run(fetch("example.org"))),
+				run(fetch("example.net")),
+			]);
+			expect(child.output).toContain("403");
+			expect(parent.output).toContain("403");
+			expect(api.reportNetworkDenied).toHaveBeenCalledWith("example.org:443", ["api"]);
+			expect(confirm).toHaveBeenCalledTimes(1);
+			expect(confirm).toHaveBeenCalledWith("Network access", expect.stringContaining("example.net:443"));
 		});
 	},
 	120_000,
