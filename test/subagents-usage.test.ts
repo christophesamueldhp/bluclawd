@@ -11,7 +11,7 @@ const nested = { input: 1000, totalTokens: 1000 };
 
 describe("generation usage", () => {
 	it("leaves nested usage before the foreground result to the SDK and settles into the tool result", () => {
-		const usage = createGenerationUsage({ launchResult: "carries_usage" });
+		const usage = createGenerationUsage({ kind: "foreground" });
 		usage.addTurn(turn);
 		usage.addNested(nested);
 		usage.addTurn(turn);
@@ -22,7 +22,7 @@ describe("generation usage", () => {
 	});
 
 	it("settles a foreground generation into the ledger when its result was emitted first", () => {
-		const usage = createGenerationUsage({ launchResult: "carries_usage" });
+		const usage = createGenerationUsage({ kind: "foreground" });
 		usage.addTurn(turn);
 		usage.launchResultEmitted();
 		usage.addNested(nested);
@@ -32,7 +32,7 @@ describe("generation usage", () => {
 	});
 
 	it("counts a background launch's nested usage only after its started result is emitted", () => {
-		const usage = createGenerationUsage({ launchResult: "no_usage" });
+		const usage = createGenerationUsage({ kind: "background" });
 		usage.addNested(nested);
 		usage.launchResultEmitted();
 		usage.addNested(nested);
@@ -43,7 +43,7 @@ describe("generation usage", () => {
 	});
 
 	it("settles a background launch into the ledger even before its started result is emitted", () => {
-		const usage = createGenerationUsage({ launchResult: "no_usage" });
+		const usage = createGenerationUsage({ kind: "background" });
 		usage.addTurn(turn);
 
 		expect(usage.settle()).toBe("ledger");
@@ -51,7 +51,7 @@ describe("generation usage", () => {
 	});
 
 	it("counts a resumed generation's nested usage from the start", () => {
-		const usage = createGenerationUsage({ launchResult: "none" });
+		const usage = createGenerationUsage({ kind: "resume" });
 		usage.addNested(nested);
 		usage.addTurn(turn);
 
@@ -60,7 +60,7 @@ describe("generation usage", () => {
 	});
 
 	it("labels unpriced usage unknown", () => {
-		const usage = createGenerationUsage({ launchResult: "none" });
+		const usage = createGenerationUsage({ kind: "resume" });
 		usage.addTurn({ ...turn, hasUnknownCost: true });
 		usage.addTurn(turn);
 
@@ -68,7 +68,7 @@ describe("generation usage", () => {
 	});
 
 	it("hands out totals that later usage does not change", () => {
-		const usage = createGenerationUsage({ launchResult: "none" });
+		const usage = createGenerationUsage({ kind: "resume" });
 		usage.addTurn(turn);
 		const before = usage.totals;
 		usage.addTurn(turn);

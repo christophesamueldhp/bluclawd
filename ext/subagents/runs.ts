@@ -271,9 +271,7 @@ export class SubagentRunScheduler<C = unknown> {
 
 		const managed: InternalManagedRun<C> = {
 			record,
-			usage: createGenerationUsage({
-				launchResult: request.deliveryMode === "foreground" ? "carries_usage" : "no_usage",
-			}),
+			usage: createGenerationUsage({ kind: request.deliveryMode }),
 			abortController: new AbortController(),
 			callerSignal: request.signal,
 			resolveCompletion,
@@ -336,7 +334,7 @@ export class SubagentRunScheduler<C = unknown> {
 				usageAttribution: undefined,
 				backgroundDeliveryAttempted: false,
 			} satisfies SubagentRunRecord,
-			usage: createGenerationUsage({ launchResult: "none" }),
+			usage: createGenerationUsage({ kind: "resume" }),
 			abortController: new AbortController(),
 			callerSignal: undefined,
 			callerAbortListener: undefined,

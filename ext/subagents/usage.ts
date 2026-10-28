@@ -17,11 +17,10 @@ export interface SubagentUsageTotals {
 }
 
 /**
- * What a generation's launch tool result does with usage. The SDK folds nested usage into a launch
- * result until that result is emitted; only a foreground result also carries the run's own usage.
- * A resume has no launch result.
+ * How a generation started. The SDK folds nested usage into a launch tool result until that result is
+ * emitted; only a foreground result also carries the run's own usage. A resume has no launch result.
  */
-export type LaunchResultUsage = "carries_usage" | "no_usage" | "none";
+export type GenerationKind = "foreground" | "background" | "resume";
 
 /** Where a generation's usage went: pi's own totals through the tool result, or the background ledger. */
 export type UsageAttribution = "tool_result" | "ledger";
@@ -80,9 +79,9 @@ export function addSubagentUsage(target: SubagentUsageTotals, delta: Partial<Sub
 	}
 }
 
-export function createGenerationUsage(options: { launchResult: LaunchResultUsage }): GenerationUsage {
+export function createGenerationUsage(options: { kind: GenerationKind }): GenerationUsage {
 	const totals = createEmptySubagentUsage();
-	let emitted = options.launchResult === "none";
+	let emitted = options.kind === "resume";
 	return {
 		get totals() {
 			return structuredClone(totals);
@@ -94,7 +93,7 @@ export function createGenerationUsage(options: { launchResult: LaunchResultUsage
 		launchResultEmitted: () => {
 			emitted = true;
 		},
-		settle: () => (options.launchResult === "carries_usage" && !emitted ? "tool_result" : "ledger"),
+		settle: () => (options.kind === "foreground" && !emitted ? "tool_result" : "ledger"),
 	};
 }
 
