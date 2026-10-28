@@ -33,15 +33,16 @@ async function build(): Promise<Helper> {
 			() => true,
 			() => false,
 		);
-		if (!tools)
-			return { problem: "the Command Line Tools are not installed; run xcode-select --install and restart pi" };
+		if (!tools) return { problem: "the Command Line Tools are not installed (xcode-select --install)" };
 		mkdirSync(dir, { recursive: true, mode: 0o700 });
 		const built = `${path}.${process.pid}.tmp`;
 		await execFileAsync("/usr/bin/cc", ["-std=c11", "-O2", "-o", built, source], { timeout: 60_000 });
 		renameSync(built, path);
 		return { path };
 	} catch (error) {
-		return { problem: `its helper could not be built: ${error instanceof Error ? error.message : String(error)}` };
+		// The first line only: the rest is the compiler's output.
+		const reason = (error instanceof Error ? error.message : String(error)).split("\n")[0];
+		return { problem: `its helper could not be built: ${reason}` };
 	}
 }
 

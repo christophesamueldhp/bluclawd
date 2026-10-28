@@ -127,7 +127,7 @@ function factory(pi: ExtensionAPI): void {
 			const problem = status.kind === "ready" ? await prepareReaper() : undefined;
 			if (problem)
 				startCtx.ui.notify(
-					`Sandbox cannot end a command's escaped descendants with it: ${problem}. Commands still run.`,
+					`Sandbox cannot end a command's escaped descendants with it: ${problem}. Commands still run; restart pi once it is fixed.`,
 					"warning",
 				);
 		} catch (error) {
