@@ -9,6 +9,7 @@ import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { sharedRef } from "../_shared/global-state.ts";
 import { currentSubagent, type SubagentCommandOwner } from "../_shared/subagent-commands.ts";
 import { checkRuntimeConfig, type RuntimeConfig } from "./config.ts";
+import { reapDescendants } from "./reaper.ts";
 
 export type Exec = BashOperations["exec"];
 
@@ -162,12 +163,13 @@ export function stopSandbox(): Promise<void> {
 
 /**
  * `exec` run inside the sandbox while it is ready, refused while it is on but cannot run, and
- * unchanged while it is off. The wrapped command must run asynchronously: `srt`'s proxy lives on
- * this process's event loop.
+ * unchanged while it is off; on macOS its descendants are killed when it ends (`reaper.ts`). The
+ * wrapped command must run asynchronously: `srt`'s proxy lives on this process's event loop.
  */
 export function wrapExec(exec: Exec, shellPath: () => string | undefined): Exec {
 	// Recorded at load: pi's own bash, which this does not wrap, runs when no wrapped exec is ever created.
 	state.set({ ...state.get(), wrapped: true });
+	const reaped = reapDescendants(exec);
 	return async (command, cwd, options) => {
 		const { status, engine: sandbox } = state.get();
 		if (status.kind === "off") return exec(command, cwd, options);
@@ -184,7 +186,7 @@ export function wrapExec(exec: Exec, shellPath: () => string | undefined): Exec 
 				commandText: command,
 			});
 			try {
-				return await exec(wrapped, cwd, options);
+				return await reaped(wrapped, cwd, options);
 			} finally {
 				const blocked = sandbox.annotateStderrWithSandboxFailures(commandId, "").trim();
 				if (blocked) options.onData(Buffer.from(`\n${blocked}\n`));

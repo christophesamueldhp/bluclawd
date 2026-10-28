@@ -310,10 +310,8 @@ to the orchestrator, which can run the command itself so that the user is asked.
 is open to every agent. While an orchestrator command (a background shell or monitor included) also
 runs, the sandbox cannot tell whose request it is and asks the user as before
 ([#26](https://github.com/christophesamueldhp/bluclawd/issues/26)). Same-authority shell or MCP code can still start
-external processes; nothing at the OS level prevents that. On macOS the sandbox does not contain process
-lifetime: a command that detaches or double-forks a descendant leaves it running after a stop. The full
-suite keeps three failing detached/double-fork assertions for this; they are the target of
-[#29](https://github.com/christophesamueldhp/bluclawd/issues/29).
+external processes; nothing at the OS level prevents that. A sandboxed command's descendants end with
+it, on macOS only as far as the reaper reaches (see [Sandbox](#sandbox)).
 
 Ask the parent to delegate distinct pieces of work with explicit files or areas in each task.
 The model calls `subagent` with `{ "agent": "general-purpose", "task": "Add input validation to src/auth.ts" }`;
@@ -528,9 +526,20 @@ it is read when a session starts, so `/reload` after editing:
   (an in-process WebSocket that reads no files); and background jobs already running when you
   turn the sandbox on, until they are restarted. An app the model
   starts cannot read `.env` either; run it yourself with `!`.
+- Process lifetime: when a command ends (it exits, is stopped, times out, or its session ends),
+  its descendants end too, detached or double-forked ones included. On Linux the PID namespace
+  guarantees it. On macOS Seatbelt does not limit process lifetime, so a best-effort reaper
+  ([#29](https://github.com/christophesamueldhp/bluclawd/issues/29)) follows each command's processes by
+  parent unique id, which survives reparenting to launchd, and by a cookie in their environment,
+  then stops and kills them all. It does not catch a descendant that scrubs its environment and
+  whose parent lived and exited between two scans (10 ms apart), e.g. a very fast double-fork; it
+  reads the parent unique id through private SPI (`proc_pidinfo` flavor 17), which a macOS update
+  could change; and it is compiled on first use, so without the Command Line Tools
+  (`xcode-select --install`) commands run unreaped. An escaped descendant keeps the sandbox's
+  limits.
 
 | Platform | Needs |
 |---|---|
-| macOS | Nothing (Seatbelt) |
+| macOS | Nothing (Seatbelt); the Command Line Tools for the process reaper |
 | Linux, WSL2 | `bubblewrap`, `socat` and `ripgrep` (`apt install bubblewrap socat ripgrep`). On Ubuntu 24.04+, unprivileged user namespaces must be allowed by AppArmor: see [Anthropic's notes](https://code.claude.com/docs/en/sandboxing) |
 | Windows | Not supported; run pi in WSL2 |

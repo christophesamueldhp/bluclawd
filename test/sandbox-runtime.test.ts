@@ -20,6 +20,9 @@ import {
 	wrapExec,
 } from "../ext/sandbox/runtime.ts";
 
+// The reaper runs real processes; it has its own tests.
+vi.mock("../ext/sandbox/reaper.ts", () => ({ reapDescendants: (exec: Exec) => exec }));
+
 const config: RuntimeConfig = {
 	network: { allowedDomains: [], deniedDomains: [] },
 	filesystem: { denyRead: ["/proj/**/.env*"], allowWrite: ["/proj"], denyWrite: [] },

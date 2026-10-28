@@ -23,6 +23,7 @@ describe.skipIf(!supported)(
 	"the sandbox, for real",
 	() => {
 		let dir: string;
+		let agentDir: string;
 		const probe = join(homedir(), `.bluclawd-sandbox-probe-${process.pid}`);
 		const confirm = vi.fn(async () => false);
 		const exec = wrapExec(
@@ -45,6 +46,9 @@ describe.skipIf(!supported)(
 			writeFileSync(join(dir, ".env"), "SECRET=hunter2\n");
 			writeFileSync(join(dir, "app.ts"), "const SECRET = process.env.SECRET;\n");
 			process.env.BLUCLAWD_IT_TOKEN = "hunter3";
+			// The macOS reaper builds its helper into the agent directory.
+			agentDir = mkdtempSync(join(tmpdir(), "bluclawd-sandbox-it-agent-"));
+			process.env.PI_CODING_AGENT_DIR = agentDir;
 			setSandboxEngine(undefined);
 			const config = runtimeConfig(
 				{
@@ -66,6 +70,8 @@ describe.skipIf(!supported)(
 		afterAll(async () => {
 			await stopSandbox();
 			delete process.env.BLUCLAWD_IT_TOKEN;
+			delete process.env.PI_CODING_AGENT_DIR;
+			rmSync(agentDir, { recursive: true, force: true });
 			rmSync(dir, { recursive: true, force: true });
 			rmSync(probe, { force: true });
 		});
