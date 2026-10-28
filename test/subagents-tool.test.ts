@@ -48,7 +48,8 @@ afterEach(() => {
 	while (tempDirs.length > 0) {
 		const dir = tempDirs.pop();
 		if (dir) {
-			rmSync(dir, { recursive: true, force: true });
+			// A cancelled run may still be writing its final record; retry while the directory refills.
+			rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 		}
 	}
 });
