@@ -17,7 +17,7 @@ import {
 	canAutoBackground,
 	defaultTimeoutMs,
 	effectiveTimeoutMs,
-	formatClaudeDuration,
+	formatTaskDuration,
 	maxTimeoutMs,
 } from "./bash-limits.ts";
 import { type DetachReason, detachableExec, ShellDetachedError } from "./foreground-shells.ts";
@@ -68,7 +68,7 @@ interface BashDetails {
 	backgroundTaskId?: string;
 }
 
-export interface ClaudeBashOptions {
+export interface BackgroundBashOptions {
 	cwd: string;
 	shellPath?: string;
 	commandPrefix?: string;
@@ -76,7 +76,7 @@ export interface ClaudeBashOptions {
 	operations: BashOperations;
 	/** Where a job's notifications go: the session that started it. */
 	sendMessage(message: OutgoingMessage<unknown>, delivery: EventDelivery): void;
-	/** The main agent, which alone honours CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS. */
+	/** The main agent, which alone honours BLUCLAWD_AUTO_BACKGROUND_TIMEOUT_MS. */
 	isMain: boolean;
 	/** Background jobs end with this session's final response: the start text says so. */
 	endsWithFinalResponse?: boolean;
@@ -122,16 +122,16 @@ export function backgroundStartText(
 }
 
 /** pi's timeout line, with the duration respelled from the milliseconds given. */
-function claudeTimeoutError(err: unknown, timeoutMs: number): unknown {
+function timeoutError(err: unknown, timeoutMs: number): unknown {
 	if (!(err instanceof Error)) return err;
 	const respelled = err.message.replace(
 		/Command timed out after [\d.]+ seconds$/,
-		`Command timed out after ${formatClaudeDuration(timeoutMs)}`,
+		`Command timed out after ${formatTaskDuration(timeoutMs)}`,
 	);
 	return respelled === err.message ? err : new Error(respelled);
 }
 
-export function createClaudeBashTool(options: ClaudeBashOptions): ToolDefinition {
+export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDefinition {
 	const { cwd, shellPath, commandPrefix } = options;
 	const base = createBashToolDefinition(cwd, { shellPath, commandPrefix });
 	const disabled = backgroundTasksDisabled();
@@ -253,7 +253,7 @@ export function createClaudeBashTool(options: ClaudeBashOptions): ToolDefinition
 				return (await tool.execute(id, { ...rest, timeout: timeoutMs / 1000 } as never, signal, onUpdate)) as never;
 			} catch (err) {
 				if (err instanceof ShellDetachedError) return started(err.job, err.reason, err.timeout);
-				throw claudeTimeoutError(err, timeoutMs);
+				throw timeoutError(err, timeoutMs);
 			}
 		},
 	} as ToolDefinition;

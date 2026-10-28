@@ -11,7 +11,7 @@ import {
 	holdNotifications,
 } from "../ext/background-bash/notification-hold.ts";
 
-describe("updates wait while the tasks panel is open (Claude Code 2.1.278)", () => {
+describe("updates wait while the tasks panel is open", () => {
 	it("delivers at once without a hold, and on release with one", () => {
 		const sent: string[] = [];
 		deliverOrHold(() => sent.push("a"));

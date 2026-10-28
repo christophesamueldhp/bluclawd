@@ -37,7 +37,7 @@ export interface AgentRow {
 	settled?: number;
 }
 
-/** A `!` command as a row, as Claude Code's: working while it runs (its last output line the
+/** A `!` command as a row, as bluclawd's: working while it runs (its last output line the
  *  detail), then done, failed with its exit status, or stopped. */
 export function rowFromShell(info: ShellInfo): AgentRow {
 	const last = info.lastLine?.trim() || undefined;
@@ -294,7 +294,7 @@ export function queryFilter(text: string): ((row: AgentRow) => boolean) | undefi
 	};
 }
 
-/** How well a row's name matches an `n:` query, as Claude Code ranks them: exact, then contains. */
+/** How well a row's name matches an `n:` query, as bluclawd ranks them: exact, then contains. */
 export function nameScore(row: AgentRow, text: string): number {
 	const match = /^n:(.*)$/i.exec(text.trim());
 	const want = match?.[1].trim().toLowerCase();

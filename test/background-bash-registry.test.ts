@@ -265,7 +265,7 @@ describe("stall watchdog", () => {
 		return { exec, emit: (s: string) => emit(s), finish: () => finish() };
 	}
 
-	it("reads Claude Code's prompt patterns off the last line only", () => {
+	it("reads bluclawd's prompt patterns off the last line only", () => {
 		for (const prompt of [
 			"Proceed? (y/n)",
 			"Delete all [Y/n] ",
@@ -329,7 +329,7 @@ describe("stall watchdog", () => {
 	});
 });
 
-describe("output file location (Claude Code's project dir spelling)", () => {
+describe("output file location", () => {
 	it("spells every non-alphanumeric of the cwd as -, dots included, and hashes a long one", async () => {
 		const { mkdtempSync, rmSync } = await import("node:fs");
 		const { tmpdir } = await import("node:os");

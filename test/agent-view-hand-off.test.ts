@@ -39,7 +39,7 @@ describe("hand-off.ts run as the exit helper", () => {
 		server = daemon.server;
 		const gone = spawn(process.execPath, ["-e", ""]);
 		await new Promise((resolve) => gone.once("exit", resolve));
-		// `working` is what an older pi still sends; quitting mid-turn ends the turn, as in Claude Code.
+		// `working` is what an older pi still sends; quitting mid-turn ends the turn.
 		const outgoing = { cwd: "/p", sessionFile: "/p/s.jsonl", working };
 		const helper = spawn(process.execPath, [HELPER, String(gone.pid), JSON.stringify(outgoing)], {
 			env: { ...process.env, PI_SERVER_DIR: dir },

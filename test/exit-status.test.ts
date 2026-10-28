@@ -6,7 +6,7 @@ import { type BackgroundExec, BackgroundJobRegistry, jobOutcome } from "../ext/b
 import { classifyExit } from "../ext/background-bash/exit-status.ts";
 import { taskExitSummary } from "../ext/background-bash/monitor-events.ts";
 
-describe("classifyExit (Claude Code's xle/a6t)", () => {
+describe("classifyExit", () => {
 	it.each([
 		["grep foo x", 1, "completed", "No matches found"],
 		["rg foo", 1, "completed", "No matches found"],
@@ -85,7 +85,7 @@ describe("background job outcome and summary", () => {
 		expect(taskExitSummary(job)).toBe('Background command "npm test" failed with exit code 2');
 	});
 
-	it("reports a shell that died of a signal as failed, with Claude Code's code", async () => {
+	it("reports a shell that died of a signal as failed, with bluclawd's code", async () => {
 		const { job, file } = await run("server", async () => ({ exitCode: null }));
 		expect(jobOutcome(job).state).toBe("failed");
 		expect(job.exit?.noExitStatus).toBe(true);

@@ -1,6 +1,6 @@
 // @ts-check
 /**
- * What the chat shows of a tool's result and of a marker, as Claude Code's transcript does: a
+ * What the chat shows of a tool's result and of a marker, as bluclawd's transcript does: a
  * call is one line, `● Read(src/x.ts)`, and its result one more under it, `⎿ Read 120 lines`;
  * the whole output is a tap away. Pure, so the tests import it.
  */
@@ -21,7 +21,7 @@ function count(count, one, more = false) {
 }
 
 /**
- * The lines under a tool call: a summary of what it did, as Claude Code words it, or the output's
+ * The lines under a tool call: a summary of what it did, or the output's
  * first lines. `truncated`: the text is cut short, so a count of its lines is a lower bound.
  * @param {string} tool @param {{ text?: string, ok?: boolean, truncated?: boolean }} result
  * @returns {string[]}
@@ -74,7 +74,7 @@ export function diffSummary(added, removed) {
 }
 
 /**
- * How a marker shows: an interrupted turn in red, as Claude Code's "Interrupted"; the model a
+ * How a marker shows: an interrupted turn in red, as bluclawd's "Interrupted"; the model a
  * session starts with is noise, before its first prompt (a later switch shows). `hidden` ones show not at all.
  * @param {string} text @param {boolean} beforeFirstPrompt
  * @returns {"interrupted" | "hidden" | "plain"}

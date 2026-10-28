@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 /**
- * The bluclawd theme is Claude Code's dark palette, extracted from the 2.1.259
+ * The bluclawd theme is bluclawd's dark palette, extracted from the 2.1.259
  * binary (the theme object identified by `permission:"rgb(177,185,249)"` +
  * `bashBorder:"rgb(253,93,177)"`). These assertions pin the values that came
  * from there, so a future edit cannot quietly reintroduce the Catppuccin
@@ -45,7 +45,7 @@ describe("bluclawd theme", () => {
 		expect(parsed.name).toBe("bluclawd");
 	});
 
-	it("uses Claude Code's dark values for the shared semantic colours", () => {
+	it("uses bluclawd's dark values for the shared semantic colours", () => {
 		expect(color("text")).toBe("#ffffff");
 		expect(color("muted")).toBe("#999999");
 		expect(color("dim")).toBe("#505050");
@@ -104,7 +104,7 @@ describe("bluclawd theme", () => {
 });
 
 /**
- * Claude Code's other five themes, from the same palette table in the binary, mapped
+ * bluclawd's other five themes, from the same palette table in the binary, mapped
  * onto pi's tokens as bluclawd.json maps the dark one. These pin the values that set
  * each one apart.
  */
@@ -137,7 +137,7 @@ describe("bluclawd theme variants", () => {
 		expect(load("bluclawd-light-ansi").parsed.appearance).toBe("light");
 	});
 
-	// Claude Code 2.1.304's markdown renderer: inline code and plain code blocks in `permission`, link
+	// bluclawd's markdown renderer: inline code and plain code blocks in `permission`, link
 	// text in the terminal's blueBright (dark) or blue (light), and quotes, bullets and rules uncoloured.
 	it.each([
 		["bluclawd", "#b1b9f9", 12, "#ffffff"],
@@ -146,7 +146,7 @@ describe("bluclawd theme variants", () => {
 		["bluclawd-light-daltonized", "#3366ff", 4, "#000000"],
 		["bluclawd-dark-ansi", 12, 12, 15],
 		["bluclawd-light-ansi", 4, 4, 0],
-	])("%s draws markdown as Claude Code's renderer does", (name, permission, link, text) => {
+	])("%s draws markdown as bluclawd's renderer does", (name, permission, link, text) => {
 		const { color } = load(name);
 		expect(color("mdCode")).toBe(permission);
 		expect(color("mdCodeBlock")).toBe(permission);

@@ -3,7 +3,7 @@ import { PasteTokens, shouldCollapse } from "../ext/_shared/paste-tokens.ts";
 
 const lines = (n: number) => Array.from({ length: n }, (_, i) => `line ${i + 1}`).join("\n");
 
-describe("Claude Code's paste tokens", () => {
+describe("bluclawd's paste tokens", () => {
 	it("collapses a paste over 800 characters or over 2 lines", () => {
 		expect(shouldCollapse("short")).toBe(false);
 		expect(shouldCollapse(lines(2))).toBe(false);

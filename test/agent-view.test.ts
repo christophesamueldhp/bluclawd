@@ -191,7 +191,7 @@ beforeAll(() => setSharedTheme(plainTheme));
 afterEach(() => vi.unstubAllEnvs());
 
 describe("rows", () => {
-	it("maps daemon state onto Claude Code's six states", () => {
+	it("maps daemon state onto bluclawd's six states", () => {
 		const state = (inst: Partial<InstanceSummary>) =>
 			rowFromSummary({ id: "x", status: "online", cwd: HERE, ...inst }, undefined).state;
 		expect(state({ activity: "working" })).toBe("working");
@@ -342,7 +342,7 @@ describe("AgentView render", () => {
 
 	it("shows the header, the three bands and one line per session", () => {
 		const text = makeView().text();
-		expect(text[0]).toBe(""); // Claude Code pads the top of the list
+		expect(text[0]).toBe(""); // bluclawd pads the top of the list
 		expect(text[1]).toContain("bluclawd");
 		expect(text[2]).toContain("opencode-go/kimi · ~/proj/here");
 		expect(text[3]).toContain("1 awaiting input · 1 working · 2 idle");
@@ -439,7 +439,7 @@ describe("AgentView keys", () => {
 		expect((calls[0]?.[2] as string[]).at(-1)).toBe("write the menu\nthen the credits");
 	});
 
-	it("the hint line leads with the mode new sessions start in, as Claude Code's", () => {
+	it("the hint line leads with the mode new sessions start in, as bluclawd's", () => {
 		const { view, text } = makeView({ mode: "⏵⏵ always" });
 		for (const ch of "fix it") view.handleInput(ch);
 		expect(text().at(-1)).toMatch(/^ {2}⏵⏵ always · enter to create · esc to clear/);
@@ -544,7 +544,7 @@ describe("AgentView keys", () => {
 		expect((calls[0]?.[2] as string[]).at(-1)).toBe(`fix ${pasted}${"x".repeat(900)}`);
 	});
 
-	it("Ctrl+V only attaches images, as in Claude Code, and keeps the composer text", async () => {
+	it("Ctrl+V only attaches images, and keeps the composer text", async () => {
 		const { view, text, flush } = makeView({ readClipboard: async () => ({ text: " image" }) });
 		for (const ch of "describe") view.handleInput(ch);
 		view.handleInput("\x16");
@@ -1018,7 +1018,7 @@ describe("AgentView look", () => {
 			expect.stringMatching(/^🮂█████████🮂 {2}\d+ awaiting input/u),
 			expect.stringMatching(/^ {2}🮅.{5}🮅 +$/u),
 		]);
-		// Claude Code drops the mascot below 70 columns.
+		// bluclawd drops the mascot below 70 columns.
 		expect(stripAnsi(view.render(60)[1]!)).toMatch(/^bluclawd v1\.0\.0/);
 		view.handleInput("?");
 		const shown = text().join("\n");
@@ -1029,7 +1029,7 @@ describe("AgentView look", () => {
 		expect(text().at(-1)).toContain("? for shortcuts");
 	});
 
-	it("lays the ? grid out like Claude Code: three to a column, whole phrases, alt count from the focused directory", () => {
+	it("lays the ? grid out: three to a column, whole phrases, alt count from the focused directory", () => {
 		const { view } = makeView();
 		view.handleInput("?");
 		const grid = (width: number) => {
@@ -1042,14 +1042,14 @@ describe("AgentView look", () => {
 				"ctrl+r to rename",
 				"ctrl+f to find",
 				"ctrl+j for newline",
-				"ctrl+x to stop", // the focused row is in Needs input, which Claude Code stops first
+				"ctrl+x to stop", // the focused row is in Needs input, which bluclawd stops first
 				"? to close",
 			]) {
 				expect(text).toContain(item);
 			}
 			expect(text).toContain("alt+1-3 to open"); // the focused row's directory holds three sessions
 		}
-		// Wide enough for Claude Code's three rows, filled down each column, 4 apart.
+		// Wide enough for bluclawd's three rows, filled down each column, 4 apart.
 		const rows = grid(160);
 		expect(rows).toHaveLength(3);
 		expect(rows[0]).toMatch(/^ {2}ctrl\+r to rename {6,}ctrl\+s to switch views {4}/);

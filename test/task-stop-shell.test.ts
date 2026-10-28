@@ -12,8 +12,8 @@ afterEach(() => {
 	for (const job of backgroundBashJobs.list()) backgroundBashJobs.kill(job.id);
 });
 
-describe("task_stop for shells (Claude Code's TaskStop ownership)", () => {
-	it("stops the caller's own shell and answers in Claude Code's JSON", () => {
+describe("task_stop for shells", () => {
+	it("stops the caller's own shell and answers in bluclawd's JSON", () => {
 		const job = backgroundBashJobs.start({ command: "npm run dev", cwd: "/", owner: "main", exec: forever });
 		expect(JSON.parse(shellTaskStop(job.id, { owner: "main" }))).toEqual({
 			message: `Successfully stopped task: ${job.id} (npm run dev)`,

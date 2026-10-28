@@ -1,8 +1,8 @@
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
-import { formatClaudeDuration } from "../ext/background-bash/bash-limits.ts";
-import { backgroundStartText, createClaudeBashTool } from "../ext/background-bash/bash-tool.ts";
+import { formatTaskDuration } from "../ext/background-bash/bash-limits.ts";
+import { backgroundStartText, createBackgroundBashTool } from "../ext/background-bash/bash-tool.ts";
 
 /** Operations whose runs the test ends; each call is recorded with its timeout. */
 function fakeOps() {
@@ -22,9 +22,9 @@ function fakeOps() {
 	return { ops, calls };
 }
 
-function makeTool(ops: BashOperations, extra: Partial<Parameters<typeof createClaudeBashTool>[0]> = {}) {
+function makeTool(ops: BashOperations, extra: Partial<Parameters<typeof createBackgroundBashTool>[0]> = {}) {
 	const sent: unknown[] = [];
-	const tool = createClaudeBashTool({
+	const tool = createBackgroundBashTool({
 		cwd: "/work",
 		operations: ops,
 		sendMessage: (message) => sent.push(message),
@@ -42,7 +42,7 @@ afterEach(() => {
 	for (const job of backgroundBashJobs.list()) backgroundBashJobs.kill(job.id);
 });
 
-describe("schema and prompt (Claude Code 2.1.281)", () => {
+describe("schema and prompt", () => {
 	it("takes timeout in milliseconds and CC's parameter texts", () => {
 		const { tool } = makeTool(fakeOps().ops);
 		const props = (tool.parameters as { properties: Record<string, { description?: string }> }).properties;
@@ -58,7 +58,7 @@ describe("schema and prompt (Claude Code 2.1.281)", () => {
 	});
 
 	it("drops every background path when background tasks are disabled", () => {
-		vi.stubEnv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
+		vi.stubEnv("BLUCLAWD_DISABLE_BACKGROUND_TASKS", "1");
 		const { tool } = makeTool(fakeOps().ops);
 		const props = (tool.parameters as { properties: Record<string, unknown> }).properties;
 		expect(props.run_in_background).toBeUndefined();
@@ -101,7 +101,7 @@ describe("timeouts", () => {
 		expect(calls[0].aborted()).toBe(false);
 	});
 
-	it("times a leading sleep out as asked, in Claude Code's duration", async () => {
+	it("times a leading sleep out as asked, in bluclawd's duration", async () => {
 		const { ops, calls } = fakeOps();
 		const { tool } = makeTool(ops);
 		const err = await tool
@@ -131,7 +131,7 @@ describe("timeouts", () => {
 	});
 
 	it("with background tasks off, kills at the timeout instead", async () => {
-		vi.stubEnv("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "true");
+		vi.stubEnv("BLUCLAWD_DISABLE_BACKGROUND_TASKS", "true");
 		const { ops, calls } = fakeOps();
 		const { tool } = makeTool(ops);
 		const run = tool.execute("t5", { command: "npm run dev", timeout: 5000 } as never, undefined, undefined, ctx);
@@ -142,16 +142,16 @@ describe("timeouts", () => {
 		await run;
 	});
 
-	it("CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS moves the main agent's command sooner, never under 2s", async () => {
+	it("BLUCLAWD_AUTO_BACKGROUND_TIMEOUT_MS moves the main agent's command sooner, never under 2s", async () => {
 		const { autoBackgroundTimeoutMs } = await import("../ext/background-bash/bash-limits.ts");
-		vi.stubEnv("CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS", "500");
+		vi.stubEnv("BLUCLAWD_AUTO_BACKGROUND_TIMEOUT_MS", "500");
 		expect(autoBackgroundTimeoutMs(120_000, { isMain: true, canAutoBackground: true })).toBe(2000);
 		expect(autoBackgroundTimeoutMs(120_000, { isMain: false, canAutoBackground: true })).toBe(120_000);
 		expect(autoBackgroundTimeoutMs(120_000, { isMain: true, canAutoBackground: false })).toBe(120_000);
 	});
 });
 
-describe("backgroundStartText (Claude Code's xxn)", () => {
+describe("backgroundStartText", () => {
 	const job = { id: "b12345678", command: "npm run dev", outputFile: "/tmp/o/b12345678.output" } as never;
 
 	it("names the file and what comes next", () => {
@@ -187,7 +187,7 @@ describe("backgroundStartText (Claude Code's xxn)", () => {
 	});
 });
 
-describe("formatClaudeDuration (Claude Code's Qt)", () => {
+describe("formatTaskDuration", () => {
 	it.each([
 		[0, "0s"],
 		[45_000, "45s"],
@@ -196,7 +196,7 @@ describe("formatClaudeDuration (Claude Code's Qt)", () => {
 		[59_600, "59s"],
 		[119_700, "2m 0s"],
 	])("%d → %s", (ms, out) => {
-		expect(formatClaudeDuration(ms)).toBe(out);
+		expect(formatTaskDuration(ms)).toBe(out);
 	});
 });
 

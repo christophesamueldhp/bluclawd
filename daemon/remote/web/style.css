@@ -166,7 +166,7 @@ button { -webkit-user-select: none; user-select: none; }
 .u, .a, .t pre, .think pre, .marker { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
 .u { align-self: flex-end; max-width: 85%; background: var(--message); border-radius: 18px; padding: var(--s2) 14px; font-size: 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .a { font-size: 16px; line-height: 1.45; overflow-wrap: anywhere; }
-/* A tool call and its result, as Claude Code shows them: "● Bash(npm test)" and "⎿ …" under it. */
+/* A tool call and its result, as bluclawd shows them: "● Bash(npm test)" and "⎿ …" under it. */
 .t { font-size: 13px; line-height: 1.45; color: var(--secondary); overflow-wrap: anywhere; }
 .t .call { display: block; color: var(--text); }
 .t .call b { font-weight: 600; }

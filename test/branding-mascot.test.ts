@@ -204,7 +204,7 @@ describe("sequences", () => {
 		expect([Math.min(...reach), Math.max(...reach)]).toEqual([18, 22]);
 	});
 
-	it("port Claude Code's frame counts and end at rest", () => {
+	it("port bluclawd's frame counts and end at rest", () => {
 		expect(Object.fromEntries(Object.entries(SEQUENCES).map(([name, frames]) => [name, frames.length]))).toEqual({
 			jump: 12,
 			look: 11,
@@ -276,7 +276,7 @@ describe("renderMascot", () => {
 		expect(new Set(Array.from({ length: 256 }, (_, mask) => glyphFor("octant", mask))).size).toBe(256);
 	});
 
-	it("crouches a row, feet out of the box, with dust at both edges like Claude Code", () => {
+	it("crouches a row, feet out of the box, with dust at both edges", () => {
 		const [dot] = SEQUENCES.jump;
 		expect(dot?.poof).toBe("dot");
 		const lines = renderMascot(dot!, "octant", (t) => `<${t}>`);

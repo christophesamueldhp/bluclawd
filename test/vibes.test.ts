@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { pickVibe, SPINNER_VERBS } from "../ext/vibes/vibes.ts";
 
 describe("SPINNER_VERBS", () => {
-	it("holds Claude Code's single-word verbs except Clauding (186), capitalised, without duplicates or ellipses", () => {
+	it("holds bluclawd's single-word verbs except Clauding (186), capitalised, without duplicates or ellipses", () => {
 		expect(SPINNER_VERBS).toHaveLength(186);
 		expect(new Set(SPINNER_VERBS).size).toBe(186);
 		for (const verb of SPINNER_VERBS) expect(verb).toMatch(/^[A-Z][\p{L}'-]+$/u);

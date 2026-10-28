@@ -29,7 +29,7 @@ describe("background subagent usage disclosure", () => {
 });
 
 describe("status keys", () => {
-	it("sort into Claude Code's order the way pi's footer sorts them", () => {
+	it("sort into bluclawd's order the way pi's footer sorts them", () => {
 		const keys = Object.values(STATUS_KEYS);
 		const sorted = [...keys].sort((a, b) => a.localeCompare(b));
 		expect(sorted[0]).toBe(STATUS_KEYS.mode);

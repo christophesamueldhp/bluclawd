@@ -22,7 +22,7 @@ const info: WelcomeHeaderInfo = {
 };
 
 describe("welcomeLines", () => {
-	it("draws Claude Code's three lines: bold name + faint version, model · billing, cwd", () => {
+	it("draws bluclawd's three lines: bold name + faint version, model · billing, cwd", () => {
 		const lines = welcomeLines(info, 120, 12);
 		expect(lines.map(plain)).toEqual([
 			"bluclawd v0.84.3",

@@ -44,7 +44,7 @@ async function load(state: { idle?: boolean; text?: string; overlay?: boolean } 
 	};
 }
 
-describe("Esc Esc opens /rewind, as in Claude Code", () => {
+describe("Esc Esc opens /rewind", () => {
 	it("a second Esc on an empty idle prompt runs /rewind instead of pi's /tree", async () => {
 		const { press, sent } = await load();
 		expect(press(ESC)).toBeUndefined();

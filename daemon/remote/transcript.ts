@@ -29,7 +29,7 @@ export type RemoteMessage =
 			thinking?: string;
 			tools: RemoteToolCall[];
 			error?: string;
-			/** Stopped by the user (Stop, Esc): Claude Code's "Interrupted by user". Its text may be empty. */
+			/** Stopped by the user (Stop, Esc): bluclawd's "Interrupted by user". Its text may be empty. */
 			aborted?: true;
 	  }
 	| {
@@ -175,7 +175,7 @@ function imageRefs(content: unknown): { images?: RemoteImage[] } {
 	return images.length ? { images } : {};
 }
 
-/** The argument a tool call is about, as Claude Code shows it: `Bash(npm test)`. */
+/** The argument a tool call is about: `Bash(npm test)`. */
 export function toolSummary(args: unknown): string {
 	const a = (args ?? {}) as Record<string, unknown>;
 	const value = [a.command, a.path, a.pattern, a.url, a.query, a.description].find(
@@ -196,7 +196,7 @@ function noticeText({ customType, details }: Entry): string | undefined {
 
 function toRemote(entry: Entry): RemoteMessage | undefined {
 	const id = entry.id ?? "";
-	// As Claude Code's transcript: a model or thinking level change shows nowhere but the status line.
+	// As bluclawd's transcript: a model or thinking level change shows nowhere but the status line.
 	if (entry.type === "compaction") return { kind: "marker", id, text: "Conversation compacted" };
 	if (entry.type === "custom_message" && entry.display) {
 		const text = firstLine(noticeText(entry) ?? plainText(entry.content));

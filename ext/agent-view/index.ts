@@ -43,7 +43,7 @@ const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
 const TMP_ROOTS = [tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"];
 const PILL_POLL_MS = 10_000;
 const DONE_FLASH_MS = 2500;
-/** How long the first ← waits for the second, as in Claude Code. */
+/** How long the first ← waits for the second. */
 const LEFT_ARM_MS = 3000;
 /** An edit this recent makes the first ← arm instead of opening. */
 const LEFT_EDIT_MS = 2000;
@@ -72,13 +72,13 @@ export function withoutAgentViewCommand(current: AutocompleteProvider): Autocomp
 	};
 }
 
-/** An exit word or /exit alone at the prompt: Claude Code runs /exit for it, which is pi's /quit. */
+/** An exit word or /exit alone at the prompt: bluclawd runs /exit for it, which is pi's /quit. */
 export function isQuitAlias(text: string): boolean {
 	const trimmed = text.trim();
 	return trimmed === "/exit" || EXIT_WORDS.has(trimmed);
 }
 
-/** What an exit key or word does, as in Claude Code. */
+/** What an exit key or word does. */
 export type ExitAction =
 	/** Stop the turn in progress. */
 	| "abort"
@@ -92,7 +92,7 @@ export type ExitAction =
 	| "pass";
 
 /**
- * Claude Code's exit keys. A normal session (the one `claude` started in this terminal) ends on
+ * The exit keys. A normal session (the one `pi` started in this terminal) ends on
  * ctrl+c twice, ctrl+d twice, an exit word or /exit; a background session detaches on the same,
  * except that one ctrl+d detaches it. Ctrl+c while a turn runs stops the turn.
  */
@@ -179,7 +179,7 @@ export function paneArgs(argv: string[], sessionFile: string | undefined): strin
 }
 
 /**
- * A pane nothing has been asked in yet is not a session, as a Claude Code session isn't one until
+ * A pane nothing has been asked in yet is not a session, as a bluclawd session isn't one until
  * it runs: no other window lists it, and it ends when the terminal leaves it. A fork is one from
  * the start, even of the conversation before its first message, which pi writes no file for yet:
  * its row carries on the one it was forked from.
@@ -249,7 +249,7 @@ const agentView: InlineExtension = {
 		let liveDetail: string | undefined;
 
 		const blank = (ctx: ExtensionContext): boolean => isBlankPane(pane, ctx.sessionManager);
-		// A normal session, as Claude Code's: the pane `pi` started in this terminal, until ← opens
+		// A normal session, as bluclawd's: the pane `pi` started in this terminal, until ← opens
 		// agent view. Quitting ends it, and so does closing its terminal.
 		let normal = false;
 		// The pane `pi` started in this terminal, which stays so once ← moved it to the background.
@@ -271,7 +271,7 @@ const agentView: InlineExtension = {
 		let viewHost = false;
 		// The row of the session whose deletion started this pane, until that row is gone.
 		let hide: string | undefined;
-		// Agent view there has no session of this terminal's, as Claude Code's once its origin is
+		// Agent view there has no session of this terminal's, as bluclawd's once its origin is
 		// deleted: no own row, and esc quits.
 		const hosting = (ctx: ExtensionContext): boolean => viewHost && blank(ctx);
 		/** Leave this pane: tmux keeps a session running; one with nothing in it ends. */
@@ -537,7 +537,7 @@ const agentView: InlineExtension = {
 			const offKey = ctx.ui.onTerminalInput((data) => {
 				// Kitty reports a release (and a held key) as separate events; only presses count.
 				if (isKeyRelease(data) || isKeyRepeat(data)) return undefined;
-				// Claude Code's exit keys and words replace pi's own (exitAction).
+				// bluclawd's exit keys and words replace pi's own (exitAction).
 				if (!viewOpen && !tui()?.hasOverlay()) {
 					for (const key of ["ctrl+c", "ctrl+d"] as const) {
 						if (!matchesKey(data, key)) continue;
@@ -621,7 +621,7 @@ const agentView: InlineExtension = {
 			registration = undefined;
 			stopPill?.();
 			stopPill = undefined;
-			// Quitting ends the session as it ends a Claude Code session: a turn in progress dies with
+			// Quitting ends the session as it ends a bluclawd session: a turn in progress dies with
 			// the process. The session stays in agent view as a stopped row until ctrl+x deletes it.
 			// A reload is not leaving.
 			if (event.reason !== "quit" || ctx.mode !== "tui" || !pane) return;
@@ -636,11 +636,11 @@ const agentView: InlineExtension = {
 			}
 			if (viewOpen) return;
 			viewOpen = true;
-			// ← moves a normal session to the background, as in Claude Code: from here on it detaches.
+			// ← moves a normal session to the background: from here on it detaches.
 			normal = false;
 			syncEndOnDetach(ctx);
 			const model = ctx.model;
-			// A global setting, so the project's settings are not read. As Claude Code, the mode
+			// A global setting, so the project's settings are not read. As bluclawd, the mode
 			// shows only when it is not the default (pi's is "ask").
 			const trust = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: false }).getDefaultProjectTrust();
 			const sessionTitle = (): string => {

@@ -12,7 +12,7 @@
  * entry; `@earendil-works/pi-coding-agent` must be resolvable (installed
  * globally or as a devDependency here) for this to import.
  *
- * Claude Code-compatible output flags.
+ * Output flags.
  *
  * `--output-format` is a pure alias for pi's own `--mode`, so it is translated
  * here — the wrapper is the only place an extension-based layer can touch argv,

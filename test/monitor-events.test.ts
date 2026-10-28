@@ -155,7 +155,7 @@ const monitorJob: BackgroundJobInfo = {
 };
 
 describe("message builders", () => {
-	it("monitorEventMessage is Claude Code's task-notification with the event", () => {
+	it("monitorEventMessage is bluclawd's task-notification with the event", () => {
 		const msg = monitorEventMessage(monitorJob, ["E1", "E2"]);
 		expect(msg.customType).toBe("bluclawd:monitor");
 		expect(msg.content).toBe(
@@ -195,7 +195,7 @@ describe("message builders", () => {
 		expect(monitorEndSummary({ ...monitorJob, outputBytes: 0, exit: { code: 0, at: 1 } })).toBe(
 			'Monitor "errors in deploy.log" ended without producing output (exit 0)',
 		);
-		// Claude Code asks whether the script wrote anything, not whether an event went out.
+		// bluclawd asks whether the script wrote anything, not whether an event went out.
 		expect(monitorEndSummary({ ...monitorJob, events: 0, exit: { code: 0, at: 1 } })).toBe(
 			'Monitor "errors in deploy.log" stream ended',
 		);
@@ -219,7 +219,7 @@ describe("message builders", () => {
 		expect(msg.content).toContain("<event>[Monitor stopped — too much output]</event>");
 	});
 
-	it("taskExitMessage is Claude Code's notification for a finished command", () => {
+	it("taskExitMessage is bluclawd's notification for a finished command", () => {
 		const job: BackgroundJobInfo = {
 			...monitorJob,
 			id: "b0000002x",
@@ -260,7 +260,7 @@ describe("message builders", () => {
 		expect(byUser.content).not.toContain("<output-file>");
 	});
 
-	it("taskStallMessage is Claude Code's notice with the tail after the envelope and no status", () => {
+	it("taskStallMessage is bluclawd's notice with the tail after the envelope and no status", () => {
 		const job: BackgroundJobInfo = { ...monitorJob, kind: "job", description: "npm init", command: "npm init" };
 		const msg = taskStallMessage(job, "name: (x)\nIs this OK? (yes/no) ", "toolu_2");
 		expect(msg.content).toBe(
@@ -329,7 +329,7 @@ describe("shouldNotifyExit", () => {
 	});
 });
 
-describe("notification envelope (Claude Code's MGe + system-reminder)", () => {
+describe("notification envelope", () => {
 	it("prefixes and wraps the notification", () => {
 		expect(notificationContent("<task-notification>\n</task-notification>")).toBe(
 			`<system-reminder>\n${SYSTEM_NOTIFICATION_PREFIX}<task-notification>\n</task-notification>\n</system-reminder>`,

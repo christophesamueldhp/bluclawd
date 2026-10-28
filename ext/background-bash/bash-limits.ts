@@ -1,14 +1,14 @@
 /**
  * Bash timeouts and the background-task switch: the model gives `timeout` in
  * milliseconds, a command still running when it passes moves to the background
- * instead of being killed, and `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS` turns every
+ * instead of being killed, and `BLUCLAWD_DISABLE_BACKGROUND_TASKS` turns every
  * background path off.
  */
 
 /** `BASH_DEFAULT_TIMEOUT_MS` / `BASH_MAX_TIMEOUT_MS` defaults. */
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
-/** The lowest `CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS` takes effect at. */
+/** The lowest `BLUCLAWD_AUTO_BACKGROUND_TIMEOUT_MS` takes effect at. */
 const MIN_AUTO_BACKGROUND_MS = 2000;
 /** Commands that time out as asked rather than move to the background. */
 const NEVER_AUTO_BACKGROUND = ["sleep"];
@@ -26,7 +26,7 @@ function truthy(value: string | undefined): boolean {
 }
 
 export function backgroundTasksDisabled(env: Env = process.env): boolean {
-	return truthy(env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS);
+	return truthy(env.BLUCLAWD_DISABLE_BACKGROUND_TASKS);
 }
 
 export function defaultTimeoutMs(env: Env = process.env): number {
@@ -57,7 +57,7 @@ export function canAutoBackground(command: string, env: Env = process.env): bool
 }
 
 /**
- * `CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS`: the main agent only, and only a
+ * `BLUCLAWD_AUTO_BACKGROUND_TIMEOUT_MS`: the main agent only, and only a
  * command that can move to the background, moves there sooner.
  */
 export function autoBackgroundTimeoutMs(
@@ -66,12 +66,12 @@ export function autoBackgroundTimeoutMs(
 	env: Env = process.env,
 ): number {
 	if (!options.isMain || !options.canAutoBackground) return timeoutMs;
-	const early = positiveInt(env.CLAUDE_CODE_AUTO_BACKGROUND_TIMEOUT_MS);
+	const early = positiveInt(env.BLUCLAWD_AUTO_BACKGROUND_TIMEOUT_MS);
 	return early === undefined ? timeoutMs : Math.min(timeoutMs, Math.max(early, MIN_AUTO_BACKGROUND_MS));
 }
 
 /** `45s`, `2m 0s`, `1h 5m 0s`, `2d 3h 0m`. */
-export function formatClaudeDuration(ms: number): string {
+export function formatTaskDuration(ms: number): string {
 	if (ms < 60_000) {
 		if (ms === 0) return "0s";
 		if (ms < 1) return `${(ms / 1000).toFixed(1)}s`;

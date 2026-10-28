@@ -3,6 +3,8 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runForSubagent } from "../ext/_shared/subagent-commands.ts";
+import { backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
+import { createBackgroundBashTool } from "../ext/background-bash/bash-tool.ts";
 import type { RuntimeConfig } from "../ext/sandbox/config.ts";
 import {
 	type AskNetwork,
@@ -234,6 +236,43 @@ describe("wrapExec", () => {
 		});
 		await background;
 		expect(seen).toEqual([api]);
+	});
+
+	it("keeps a subagent's ownership through the model's bash, in the foreground and in the background", async () => {
+		setSandboxEngine(fakeEngine());
+		await startSandbox(config, deny, "darwin");
+		const api = { name: "api", reportNetworkDenied: vi.fn() };
+		const seen: Record<string, unknown> = {};
+		const bash = createBackgroundBashTool({
+			cwd: "/proj",
+			operations: {
+				exec: wrapExec(
+					async (command) => {
+						seen[command] = commandOwnersRunning();
+						return { exitCode: 0 };
+					},
+					() => undefined,
+				),
+			},
+			sendMessage: () => {},
+			isMain: true,
+		});
+		const ctx = { sessionManager: { getSessionId: () => "main" } } as never;
+		const run = (command: string, background = false) =>
+			bash.execute("t", { command, run_in_background: background } as never, undefined, undefined, ctx);
+		try {
+			await runForSubagent(api, () => run("child-fg"));
+			await runForSubagent(api, () => run("child-bg", true));
+			await run("parent-fg");
+			for (let i = 0; i < 200 && !("sandboxed(child-bg)" in seen); i++) await new Promise((r) => setTimeout(r, 5));
+			expect(seen).toEqual({
+				"sandboxed(child-fg)": [api],
+				"sandboxed(child-bg)": [api],
+				"sandboxed(parent-fg)": [undefined],
+			});
+		} finally {
+			for (const job of backgroundBashJobs.list()) backgroundBashJobs.kill(job.id);
+		}
 	});
 
 	it("appends what the sandbox blocked to the output", async () => {

@@ -60,7 +60,7 @@ export function findOrphanShells(
 }
 
 const SINGLE_NOTE =
-	"No completion record was found for it in the previous session. It may have been stopped (via the UI, Monitor timeout, or agent teardown — these leave no transcript marker), or it may have been running when the previous Claude Code process exited. Check the output file for partial results before assuming it completed.";
+	"No completion record was found for it in the previous session. It may have been stopped (via the UI, Monitor timeout, or agent teardown — these leave no transcript marker), or it may have been running when the previous bluclawd process exited. Check the output file for partial results before assuming it completed.";
 
 /** The notice for the orphans: one of its own for a single shell, one aggregate for more. */
 export function orphanShellMessage(
@@ -102,7 +102,7 @@ export function orphanShellMessage(
 			? `Task ids: ${listed.join(", ")}.`
 			: `First ${MAX_LISTED} task ids: ${listed.join(", ")}.`;
 	const summary = `${orphans.length} background shell command tasks didn't finish before the previous session ended`;
-	const note = `No completion record was found for them in the previous session. They may have been stopped (via the UI, Monitor timeout, or agent teardown — these leave no transcript marker), or they may have been running when the previous Claude Code process exited. They have been marked stopped. Task ids in this notification beginning with "${MARKER}" are internal scan markers, not tasks.`;
+	const note = `No completion record was found for them in the previous session. They may have been stopped (via the UI, Monitor timeout, or agent teardown — these leave no transcript marker), or they may have been running when the previous bluclawd process exited. They have been marked stopped. Task ids in this notification beginning with "${MARKER}" are internal scan markers, not tasks.`;
 	return {
 		customType: TASK_EXIT_MESSAGE_TYPE,
 		content: notificationContent(

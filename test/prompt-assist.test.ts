@@ -1,7 +1,7 @@
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ClaudePasteEditor } from "../ext/paste/index.ts";
+import { PasteEditor } from "../ext/paste/index.ts";
 import { attachSuggestions } from "../ext/prompt-assist/editor.ts";
 import promptAssist, { conversation } from "../ext/prompt-assist/index.ts";
 import {
@@ -35,7 +35,7 @@ const theme = { borderColor: (text: string) => text, selectList: {} };
 const keys = { matches: () => false, getKeys: () => [] };
 
 function makeEditor(generate = vi.fn(async (_draft: string, _signal: AbortSignal) => " tests")) {
-	const editor = new ClaudePasteEditor(tui as never, theme as never, keys as never);
+	const editor = new PasteEditor(tui as never, theme as never, keys as never);
 	editor.focused = true;
 	const assist = attachSuggestions(
 		editor,
@@ -295,7 +295,7 @@ describe("prompt suggestions", () => {
 	it("waits for the agent to become idle before requesting suggestions", async () => {
 		vi.useFakeTimers();
 		let idle = false;
-		const editor = new ClaudePasteEditor(tui as never, theme as never, keys as never);
+		const editor = new PasteEditor(tui as never, theme as never, keys as never);
 		const generate = vi.fn(async () => "Run the tests");
 		const assist = attachSuggestions(
 			editor,
@@ -418,7 +418,7 @@ describe("next-prompt display and early naming", () => {
 	});
 
 	it("shows the current name on the border, fits narrow widths, and preserves working status", () => {
-		const editor = new ClaudePasteEditor(tui as never, theme as never, keys as never);
+		const editor = new PasteEditor(tui as never, theme as never, keys as never);
 		let name = "knowledge-graph-ceiba-修正";
 		let idle = true;
 		const assist = attachSuggestions(
@@ -702,10 +702,10 @@ describe("session assistance", () => {
 	});
 
 	it("composes the existing editor factory and does not stack wrappers on session changes", () => {
-		const original = vi.fn(() => new ClaudePasteEditor(tui as never, theme as never, keys as never));
+		const original = vi.fn(() => new PasteEditor(tui as never, theme as never, keys as never));
 		const h = harness({ factory: original });
 		const factory = h.factory();
-		expect(factory(tui, theme, keys)).toBeInstanceOf(ClaudePasteEditor);
+		expect(factory(tui, theme, keys)).toBeInstanceOf(PasteEditor);
 		expect(original).toHaveBeenCalledOnce();
 		h.emit("session_start");
 		expect(h.factory()).toBe(factory);

@@ -148,7 +148,7 @@ type Mode = "list" | "peek" | "rename" | "resume" | "help" | "model";
 const FRAMES = ["·", "✢", "✳", "✶", "✻", "✽"];
 const SPINNER = [...FRAMES, ...[...FRAMES].reverse()];
 const ARM_MS = 2000;
-/** Claude Code's double ctrl+c window. */
+/** bluclawd's double ctrl+c window. */
 const CTRL_C_MS = 800;
 /** The slash commands agent view runs itself, as `/` suggests them. */
 const VIEW_COMMANDS: Array<{ name: string; arg?: string; description: string }> = [
@@ -161,7 +161,7 @@ const VIEW_COMMANDS: Array<{ name: string; arg?: string; description: string }> 
 type Completion = { value: string; label: string };
 /** How many suggestions show under the composer at once. */
 const MENU_ROWS = 8;
-/** Bare words that quit, as in Claude Code. */
+/** Bare words that quit. */
 export const EXIT_WORDS = new Set(["exit", "quit", ":q", ":q!", ":wq", ":wq!"]);
 /** How many times (150ms apart) a delete waits for the row a stopped pi saves. */
 const STOP_SAVE_POLLS = 20;
@@ -261,7 +261,7 @@ export class AgentView implements Component, Focusable {
 	private readonly composer = new Input();
 	/** Lines above the composer's current one (ctrl+j / shift+enter); Input itself is single-line. */
 	private composerLines: string[] = [];
-	/** The composer's paste tokens, as Claude Code's: `[Pasted text #N +L lines]` and `[Image #N]`. */
+	/** The composer's paste tokens, as bluclawd's: `[Pasted text #N +L lines]` and `[Image #N]`. */
 	private readonly pastes = new PasteTokens();
 	/** The `!` commands the tmux server runs or ran: rows of their own. */
 	private shells: ShellInfo[] = [];
@@ -290,7 +290,7 @@ export class AgentView implements Component, Focusable {
 	private readonly expanded = new Set<string>();
 	private armed: { key: string; timer: ReturnType<typeof setTimeout> } | undefined;
 	private ctrlCArmedAt = 0;
-	/** Shown in the footer's hint slot until the composer changes or the focus moves, as Claude Code's are. */
+	/** Shown in the footer's hint slot until the composer changes or the focus moves, as bluclawd's are. */
 	private notice: { text: string; kind: "hint" | "error" } | undefined;
 	/** The row a ctrl+x stopped on its first press: it reads "stopped · ctrl+x again to delete". */
 	private justKilled: string | undefined;
@@ -357,7 +357,7 @@ export class AgentView implements Component, Focusable {
 	}
 
 	/**
-	 * A paste into the composer, as Claude Code's: a long one is a `[Pasted text #N +L lines]` token,
+	 * A paste into the composer, as bluclawd's: a long one is a `[Pasted text #N +L lines]` token,
 	 * the same paste again right after shows what the token holds, and a short one goes in as typed.
 	 * `insert` is the Input's own paste, which puts one line at the cursor.
 	 */
@@ -472,7 +472,7 @@ export class AgentView implements Component, Focusable {
 		try {
 			const clipboard = await (this.opts.readClipboard ?? readAgentClipboard)();
 			if (this.closed || version !== this.draftVersion) return;
-			// ctrl+v attaches an image as an [Image #N] token, as in Claude Code; the same image again
+			// ctrl+v attaches an image as an [Image #N] token; the same image again
 			// shows its file. Text arrives by the terminal's own paste.
 			if (clipboard.image) {
 				const [file] = imageFiles([clipboard.image]);
@@ -614,7 +614,7 @@ export class AgentView implements Component, Focusable {
 		return (first && first.row.cwd === this.opts.cwd ? first : this.items[0])?.key;
 	}
 
-	/** Claude Code's header budget: `used` lines go to live rows and band headers; when the full
+	/** bluclawd's header budget: `used` lines go to live rows and band headers; when the full
 	 *  header leaves fewer than 3 for Idle, it shrinks to the counts line. */
 	private layoutBudget(): { compact: boolean; doneCap: number } {
 		const live = this.rows.filter((r) => stateBandOf(r) !== "idle" || r.pinned);
@@ -625,7 +625,7 @@ export class AgentView implements Component, Focusable {
 		return free(4) >= 3 ? { compact: false, doneCap: free(4) } : { compact: true, doneCap: Math.max(0, free(2)) };
 	}
 
-	/** Bands → selectable items. A long Idle band folds into `… N more`, as Claude Code's does:
+	/** Bands → selectable items. A long Idle band folds into `… N more`, as bluclawd's does:
 	 *  only when at least 3 would hide, keeping runs that finished together and the session you
 	 *  came from. */
 	private layoutItems(bands: Band[], filtering: boolean): Item[] {
@@ -709,7 +709,7 @@ export class AgentView implements Component, Focusable {
 
 	// ---- actions -------------------------------------------------------------------------
 
-	/** ↑/↓ wrap around, as Claude Code's do; paging and home/end stop at the ends. The peek moves
+	/** ↑/↓ wrap around, as bluclawd's do; paging and home/end stop at the ends. The peek moves
 	 *  over sessions only, and so does onboarding, whose headers are labels. */
 	private move(delta: number, opts: { rowsOnly?: boolean; wrap?: boolean } = {}): void {
 		const rowsOnly = opts.rowsOnly || this.onboarding;
@@ -964,7 +964,7 @@ export class AgentView implements Component, Focusable {
 		return undefined;
 	}
 
-	/** ctrl+x, as Claude Code's: a running session's pi ends on the first press and its row stays,
+	/** ctrl+x, as bluclawd's: a running session's pi ends on the first press and its row stays,
 	 *  stopped; the second press (within 2s) deletes the row. */
 	private async stopOrDelete(): Promise<void> {
 		const item = this.selected;
@@ -991,7 +991,7 @@ export class AgentView implements Component, Focusable {
 		}
 		const row = item.row;
 		if (row.shell) {
-			// As Claude Code's: the first press stops a running command, the second removes the row.
+			// As bluclawd's: the first press stops a running command, the second removes the row.
 			if (this.armed?.key === row.id) {
 				this.disarm();
 				this.opts.panes.kill(row.shell);
@@ -1190,7 +1190,7 @@ export class AgentView implements Component, Focusable {
 		this.render_();
 	}
 
-	/** Brings a past session back into the list and opens it, as Claude Code's picker does. */
+	/** Brings a past session back into the list and opens it, as bluclawd's picker does. */
 	private async resumePast(past: PastSession): Promise<void> {
 		if (this.rows.some((r) => r.sessionFile === past.sessionFile)) {
 			this.say("This session is already in the list — press enter on its row", "error");
@@ -1614,7 +1614,7 @@ export class AgentView implements Component, Focusable {
 			this.recompute();
 		} else if (this.armed) this.disarm();
 		else if (!this.opts.self?.()) {
-			// No session of this terminal's to return to: as in Claude Code, esc quits.
+			// No session of this terminal's to return to:, esc quits.
 			this.quit();
 			return;
 		} else {
@@ -1868,7 +1868,7 @@ export class AgentView implements Component, Focusable {
 			this.render_();
 			return;
 		}
-		// !command runs it in the user's shell as a row of its own, as in Claude Code.
+		// !command runs it in the user's shell as a row of its own.
 		if (trimmed.startsWith("!") && trimmed.slice(1).trim()) {
 			this.startShell(this.pastes.expandText(trimmed).slice(1).trim());
 			return;
@@ -2085,7 +2085,7 @@ export class AgentView implements Component, Focusable {
 		return { lines, focusLine };
 	}
 
-	/** Everything above the composer, scrolled as one: Claude Code's header scrolls with its list. */
+	/** Everything above the composer, scrolled as one: bluclawd's header scrolls with its list. */
 	private renderBody(width: number): { lines: string[]; focusLine: number } {
 		const lines = ["", ...this.headerLines(width), ""];
 		if (this.opts.self?.()) {
@@ -2104,7 +2104,7 @@ export class AgentView implements Component, Focusable {
 		return { lines: [...lines, ...list.lines], focusLine: lines.length + list.focusLine };
 	}
 
-	/** Inline markdown as Claude Code's peek shows a result: dim, with `code`, **bold** and ++x++ bold. */
+	/** Inline markdown as bluclawd's peek shows a result: dim, with `code`, **bold** and ++x++ bold. */
 	private dimMarkdown(text: string): string {
 		return clean(text)
 			.split(/(\*\*[^*]+\*\*|\+\+[^+]+\+\+|`[^`]+`)/)
@@ -2163,11 +2163,11 @@ export class AgentView implements Component, Focusable {
 
 	/** A finished or stopped run with no process: enter starts it again. */
 	private resumable(row: AgentRow): boolean {
-		// A shell command is never run again for you, as in Claude Code.
+		// A shell command is never run again for you.
 		return !row.shell && !row.alive && (row.state === "failed" || row.state === "stopped");
 	}
 
-	/** `/resume`: a bordered box over the composer, as Claude Code's picker. */
+	/** `/resume`: a bordered box over the composer, as bluclawd's picker. */
 	private renderResume(width: number): string[] {
 		const inner = Math.max(10, width - 4);
 		const content: string[] = [theme.bold("Resume a past session")];
@@ -2304,7 +2304,7 @@ export class AgentView implements Component, Focusable {
 		);
 	}
 
-	/** The `/` or argument suggestions under the composer, as Claude Code's; undefined when there are none. */
+	/** The `/` or argument suggestions under the composer, as bluclawd's; undefined when there are none. */
 	private renderSuggestions(width: number): string[] | undefined {
 		const menu = this.menu();
 		if (menu.length === 0) return undefined;
@@ -2387,12 +2387,12 @@ function isDirectory(path: string): boolean {
 	}
 }
 
-/** Claude Code's ctrl+x stops a session in Working or Needs input first, and deletes the rest. */
+/** bluclawd's ctrl+x stops a session in Working or Needs input first, and deletes the rest. */
 function stoppable(row: AgentRow): boolean {
 	return row.alive && (row.state === "working" || row.state === "needs" || row.state === "idle");
 }
 
-/** Claude Code's whitespace cleanup for a row's text: tags dropped, every run of space one space. */
+/** bluclawd's whitespace cleanup for a row's text: tags dropped, every run of space one space. */
 function clean(text: string): string {
 	return text
 		.replace(/<(system-reminder|task-notification)>[\s\S]*?(<\/\1>|$)/g, " ")
