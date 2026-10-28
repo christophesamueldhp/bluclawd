@@ -1,5 +1,5 @@
 /**
- * `/remote-control`: control every agent-view session from a phone, as Claude Code's Remote
+ * `/remote-control`: control every agent-view session from a phone, as bluclawd's Remote
  * Control does. The daemon serves the phone (daemon/remote/); this command turns it on and shows a
  * QR code that pairs a phone, and once it is on, a menu: pair another phone, the paired phones,
  * starting the daemon at login (autostart.ts), turning it off. In a pane,

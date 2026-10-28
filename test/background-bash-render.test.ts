@@ -50,7 +50,7 @@ const exitDetails: TaskExitDetails = {
 
 const DOT = process.platform === "darwin" ? "⏺" : "●";
 
-describe("task-exit renderer (Claude Code's one line)", () => {
+describe("task-exit renderer", () => {
 	it("draws a dot and the summary, nothing else", () => {
 		const out = render(TASK_EXIT_MESSAGE_TYPE, exitDetails) ?? "";
 		expect(out.trim()).toBe(`${DOT} Background command "make" failed with exit code 1`);

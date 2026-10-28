@@ -33,7 +33,7 @@ const shell = (extra: Partial<ShellInfo> = {}): ShellInfo => ({
 	...extra,
 });
 
-describe("a ! command's row, as Claude Code's", () => {
+describe("a ! command's row, as bluclawd's", () => {
 	it("works while it runs, its last output line the detail; then done, failed with its exit, or stopped", () => {
 		expect(rowFromShell(shell({ lastLine: "✓ 12 passed" }))).toMatchObject({
 			id: "sh-1",

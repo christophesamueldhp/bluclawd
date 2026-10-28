@@ -872,7 +872,7 @@ function outHtml(lines) {
 }
 
 /**
- * A tool call as Claude Code shows it: `● Bash(npm test)`, and what it did on a line under it
+ * A tool call: `● Bash(npm test)`, and what it did on a line under it
  * (output.js); a tap shows the whole output. An edit shows its diff at once.
  * @param {string} name @param {string} summary @param {Message | undefined} result @param {string} key @param {boolean} [running]
  */
@@ -982,7 +982,7 @@ function transcriptHtml(calls, running) {
 			}
 			if (m.error || m.aborted) flush();
 			if (m.error) parts.push(`<div class="t err">${outHtml([m.error])}</div>`);
-			// Stopped from the phone or by Esc on the Mac, as Claude Code shows it.
+			// Stopped from the phone or by Esc on the Mac.
 			if (m.aborted) parts.push(`<div class="t interrupted">${outHtml(["Interrupted"])}</div>`);
 		} else if (m.kind === "toolResult" && !(m.toolCallId && calls.has(m.toolCallId))) {
 			// A `!` line's, which pi ran rather than the model: `● Bash(ls)`.
@@ -998,7 +998,7 @@ function transcriptHtml(calls, running) {
 }
 
 /**
- * Finished tool calls folded into one line, as Claude Code does: "▸ Ran 2 commands, edited a file";
+ * Finished tool calls folded into one line: "▸ Ran 2 commands, edited a file";
  * a tap shows each call, and a tap on a call its output.
  * @param {string[]} names the calls' tools @param {string[]} blocks the calls', and the thinking between them @param {string} key
  */
@@ -1006,7 +1006,7 @@ function groupHtml(names, blocks, key) {
 	return `<details class="run" data-key="${esc(key)}"><summary>${esc(groupSummary(names))}</summary><div class="steps">${blocks.join("")}</div></details>`;
 }
 
-/** Hidden until tapped, as in Claude Code. @param {string} thinking @param {string} key */
+/** Hidden until tapped. @param {string} thinking @param {string} key */
 function thinkingBlock(thinking, key) {
 	return `<details class="think" data-key="${esc(key)}"><summary>Thinking</summary><pre>${esc(thinking)}</pre></details>`;
 }

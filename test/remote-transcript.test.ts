@@ -226,7 +226,7 @@ describe("remote transcript", () => {
 		]);
 	});
 
-	it("hides model and thinking level changes, as Claude Code's transcript does", () => {
+	it("hides model and thinking level changes, as bluclawd's transcript does", () => {
 		const text = jsonl(
 			{ type: "model_change", id: "m0", parentId: null, provider: "anthropic", modelId: "claude-opus-5-5" },
 			{ type: "thinking_level_change", id: "t0", parentId: "m0", thinkingLevel: "high" },

@@ -3,7 +3,7 @@
  * session in sections, a detail view with the tail of the output file, and stop.
  * Rows are re-read on every render, so the dialog stays live while it is open.
  *
- * Laid out as Claude Code's Background dialog: a blank line, a rule in the
+ * Laid out as bluclawd's Background dialog: a blank line, a rule in the
  * background colour, then the body two columns in, and the key hints dim and
  * italic below it. There is no bottom rule.
  */
@@ -24,7 +24,7 @@ import {
 import { stripAnsi } from "../../daemon/ansi.ts";
 import { agentTasks } from "../_shared/agent-tasks.ts";
 import { type BackgroundJobInfo, backgroundBashJobs, jobOutcome } from "./background-bash.ts";
-import { formatClaudeDuration } from "./bash-limits.ts";
+import { formatTaskDuration } from "./bash-limits.ts";
 import { FOREGROUND_TASK_AFTER_MS, type ForegroundShell, runningForegroundShells } from "./foreground-shells.ts";
 
 /** The detail view reads the file's last 8 KiB and shows its last 10 lines. */
@@ -134,7 +134,7 @@ const clean = (s: string) => stripAnsi(s).replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "
 
 /**
  * The last lines of a job's output file (its memory copy when there is no file), the
- * file's size, and how many bytes of it were read. As Claude Code counts them: the
+ * file's size, and how many bytes of it were read. As bluclawd counts them: the
  * last ten newline-separated pieces, empty ones dropped, so output that ends in a
  * newline shows nine. A foreground command has no file yet: its output so far is in memory.
  */
@@ -263,7 +263,7 @@ export function visibleRows(owner: string | undefined): TaskRow[] {
 	return SECTIONS.flatMap(([section]) => rows.filter((row) => sectionOf(row) === section));
 }
 
-/** A row's status beside its label, as Claude Code words it. */
+/** A row's status beside its label. */
 const META: Record<TaskState, string> = {
 	running: "running",
 	completed: "done",
@@ -408,7 +408,7 @@ export class TasksDialog implements Component {
 		return this.frame(width, this.renderList(rows, width - 2 * PAD), this.listHints(rows));
 	}
 
-	/** Claude Code's dialog frame: a blank line, the rule, the body two columns in, then the hints. */
+	/** bluclawd's dialog frame: a blank line, the rule, the body two columns in, then the hints. */
 	private frame(width: number, body: string[], hints: string[]): string[] {
 		const t = this.theme;
 		const pad = " ".repeat(PAD);
@@ -538,7 +538,7 @@ export class TasksDialog implements Component {
 				: t.fg(row.state === "completed" ? "success" : "error", statusText);
 		const fields: [string, string][] = [
 			["Status:", status],
-			["Runtime:", formatClaudeDuration((row.endedAt ?? Date.now()) - row.startedAt)],
+			["Runtime:", formatTaskDuration((row.endedAt ?? Date.now()) - row.startedAt)],
 		];
 		if (row.kind === "agent" && row.model) {
 			fields.push(["Model:", clean(row.model)]);

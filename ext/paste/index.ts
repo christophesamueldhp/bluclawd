@@ -1,5 +1,5 @@
 /**
- * Claude Code's paste in pi's prompt: a long paste shows as `[Pasted text #N +L lines]`, a
+ * bluclawd's paste in pi's prompt: a long paste shows as `[Pasted text #N +L lines]`, a
  * ctrl+v image as `[Image #N]` (pi's own editor inserts the image's file path), and pasting the
  * same thing again right after shows what the last token holds. Text tokens expand on send; an
  * image token stays in the text and its image goes with the prompt as an image block.
@@ -78,7 +78,7 @@ function sameBytes(a: string, b: string): boolean {
 	}
 }
 
-export class ClaudePasteEditor extends CustomEditor {
+export class PasteEditor extends CustomEditor {
 	private readonly tokens = new PasteTokens();
 	/** The images whose tokens were in the prompt just submitted, for the input event. */
 	submittedImages: string[] = [];
@@ -202,14 +202,14 @@ export function imageBlocks(paths: string[]): ImageContent[] {
 }
 
 function factory(pi: ExtensionAPI): void {
-	let editor: ClaudePasteEditor | undefined;
+	let editor: PasteEditor | undefined;
 
 	pi.on("session_start", (_event, ctx) => {
 		if (ctx.mode !== "tui" || !editorSupportsPasteTokens()) return;
 		// Another extension's editor wins: replacing it would drop its behaviour.
 		if (ctx.ui.getEditorComponent()) return;
 		ctx.ui.setEditorComponent((tui, theme, keybindings) => {
-			editor = new ClaudePasteEditor(tui, theme, keybindings);
+			editor = new PasteEditor(tui, theme, keybindings);
 			return editor;
 		});
 	});

@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ClaudePasteEditor, editorSupportsPasteTokens, imageBlocks } from "../ext/paste/index.ts";
+import { editorSupportsPasteTokens, imageBlocks, PasteEditor } from "../ext/paste/index.ts";
 
 const PASTE = (text: string) => `\x1b[200~${text}\x1b[201~`;
 const BACKSPACE = "\x7f";
@@ -12,7 +12,7 @@ function editor() {
 	const tui = { requestRender: () => {}, terminal: { rows: 40, columns: 100 } };
 	const theme = { borderColor: (s: string) => s, selectList: {} };
 	const keybindings = { matches: () => false, getKeys: () => [] };
-	const e = new ClaudePasteEditor(tui as never, theme as never, keybindings as never);
+	const e = new PasteEditor(tui as never, theme as never, keybindings as never);
 	let submitted: string | undefined;
 	e.onSubmit = (text) => {
 		submitted = text;
@@ -26,7 +26,7 @@ function clipboardImage(bytes: string): string {
 	return file;
 }
 
-describe("Claude Code's paste in pi's prompt", () => {
+describe("bluclawd's paste in pi's prompt", () => {
 	it("runs on this pi's editor", () => {
 		expect(editorSupportsPasteTokens()).toBe(true);
 	});

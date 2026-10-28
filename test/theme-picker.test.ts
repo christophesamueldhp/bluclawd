@@ -27,8 +27,8 @@ function open(current: string | undefined, installed = ["bluclawd", "bluclawd-li
 	return { picker, state, screen };
 }
 
-describe("/theme picker (Claude Code's ThemePicker)", () => {
-	it("lists Claude Code's themes in its words, then the other installed themes", () => {
+describe("/theme picker", () => {
+	it("lists bluclawd's themes in its words, then the other installed themes", () => {
 		const out = open("bluclawd").screen();
 		expect(
 			out.startsWith(
@@ -51,11 +51,11 @@ describe("/theme picker (Claude Code's ThemePicker)", () => {
 		expect(out.endsWith("\n\n  Enter to select · Esc to cancel")).toBe(true);
 	});
 
-	it("shows Claude Code's demo.js diff", () => {
+	it("shows bluclawd's demo.js diff", () => {
 		const out = open("bluclawd").screen();
 		expect(out).toContain(" 1 function greet() {");
 		expect(out).toContain('-2   console.log("Hello, World!");');
-		expect(out).toContain('+2   console.log("Hello, Claude!");');
+		expect(out).toContain('+2   console.log("Hello, bluclawd!");');
 		expect(out).toContain(" 3 }");
 	});
 

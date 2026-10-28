@@ -36,8 +36,8 @@ afterEach(() => {
 	for (const job of backgroundBashJobs.list()) backgroundBashJobs.kill(job.id);
 });
 
-describe("/tasks dialog (Claude Code's Background dialog)", () => {
-	it("lists only running tasks, in Claude Code's words", async () => {
+describe("/tasks dialog", () => {
+	it("lists only running tasks, in bluclawd's words", async () => {
 		const me = session();
 		backgroundBashJobs.start({ command: "npm run dev", cwd: "/", owner: me, exec: forever });
 		backgroundBashJobs.start({ command: "tail -f log", cwd: "/", owner: me, exec: forever });
@@ -154,7 +154,7 @@ describe("/tasks dialog (Claude Code's Background dialog)", () => {
 		backgroundBashJobs.start({ command: "gen", cwd: "/", owner: me, exec });
 		await tick();
 		const out = open(me).screen();
-		// Claude Code's count: the last ten newline pieces, the empty one after the final newline dropped.
+		// bluclawd's count: the last ten newline pieces, the empty one after the final newline dropped.
 		expect(out).toContain("  │ line 21");
 		expect(out).toContain("  │ line 29");
 		expect(out).not.toContain("line 20");

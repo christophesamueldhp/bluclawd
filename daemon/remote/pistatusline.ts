@@ -72,7 +72,7 @@ function planUsage(report: PaneReport, configPath: string): object | null {
 
 const finite = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
 
-/** pistatusline's status JSON (Claude Code's statusline input) for a pane's report. */
+/** pistatusline's status JSON for a pane's report. */
 export function statusJson(session: StatuslineSession, report: PaneReport, now: number): object {
 	const started = session.createdAt ? Date.parse(session.createdAt) : Number.NaN;
 	const { context } = report;

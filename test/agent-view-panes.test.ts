@@ -324,7 +324,7 @@ describe("agent view in pane mode", () => {
 		expect(isBlankPane(undefined, sessions(setup) as never)).toBe(false);
 	});
 
-	it("esc returns to this terminal's session, or quits once there is none, as in Claude Code", () => {
+	it("esc returns to this terminal's session, or quits once there is none", () => {
 		const own = setup([], paneRow("pi-self", { activity: "idle" }));
 		own.view.handleInput("\x1b");
 		expect(own.closed()).toBe(1);

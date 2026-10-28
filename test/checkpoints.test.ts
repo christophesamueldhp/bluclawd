@@ -464,7 +464,7 @@ describe("/rewind", () => {
 	const RESTORE_TALK = "Restore conversation";
 	const RESTORE_CODE = "Restore code";
 
-	it("lists every prompt newest first with what it changed, then offers Claude Code's options", async () => {
+	it("lists every prompt newest first with what it changed, then offers bluclawd's options", async () => {
 		const { dir, exec, write } = await makeRepo();
 		const first = await capture(dir, exec);
 		await write("a.txt", "v1\n");

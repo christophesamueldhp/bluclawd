@@ -34,7 +34,7 @@ describe("monitor tool", () => {
 		expect(args).toMatchObject({ command: "x" });
 	});
 
-	it("starts a monitor job and reports its id in Claude Code's words", async () => {
+	it("starts a monitor job and reports its id in bluclawd's words", async () => {
 		const { tool, registry, id } = harness(() => new Promise(() => {}));
 		const result = await tool.execute(
 			"c1",
@@ -245,7 +245,7 @@ describe("monitor tool", () => {
 		expect(seen).toEqual([300, 60, 1800]);
 	});
 
-	it("refuses a timeout_ms past an hour or under a second, as Claude Code's schema does", () => {
+	it("refuses a timeout_ms past an hour or under a second, as bluclawd's schema does", () => {
 		const { tool } = harness(() => new Promise(() => {}));
 		const call = (timeout_ms: number) => () =>
 			validateToolArguments(tool, {

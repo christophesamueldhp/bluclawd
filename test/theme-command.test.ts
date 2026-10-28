@@ -73,7 +73,7 @@ describe("/theme Auto (match terminal)", () => {
 	beforeEach(() => vi.unstubAllEnvs());
 	afterEach(() => vi.unstubAllEnvs());
 
-	it("follows the terminal's light/dark switches once chosen, as Claude Code's does", async () => {
+	it("follows the terminal's light/dark switches once chosen, as bluclawd's does", async () => {
 		const t = load("bluclawd");
 		await t.theme(AUTO_THEME);
 		expect(t.savedTheme()).toBe(AUTO_THEME);

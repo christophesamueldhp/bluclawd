@@ -26,7 +26,7 @@ import {
 } from "./monitor-events.ts";
 
 /**
- * Claude Code's bounded monitor: every watch expires. `timeout_ms` defaults to 5
+ * bluclawd's bounded monitor: every watch expires. `timeout_ms` defaults to 5
  * minutes, is refused past an hour, and is capped at 30 minutes.
  */
 const DEFAULT_TIMEOUT_MS = 300_000;
@@ -38,7 +38,7 @@ const DEFAULT_RATE_LIMIT = { capacity: 10, refillMs: 2000, maxSuppressMs: 30_000
 
 const minutes = (ms: number) => `${Math.round(ms / 60_000)} minutes`;
 
-/** Claude Code's Monitor prompt, with its tool names spelled as pi's (`bash`, `read`, `task_stop`). */
+/** bluclawd's Monitor prompt, with its tool names spelled as pi's (`bash`, `read`, `task_stop`). */
 const MONITOR_DESCRIPTION = `Start a background monitor that streams events from a long-running script. Each stdout line is an event — you keep working and notifications arrive in the chat. Events arrive on their own schedule and are not replies from the user, even if one lands while you're waiting for the user to answer a question.
 
 Pick by how many notifications you need:

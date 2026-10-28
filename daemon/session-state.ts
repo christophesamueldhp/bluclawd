@@ -1,7 +1,6 @@
 /**
- * What agent view shows for a session, from the session's own output — no model call (Claude
- * Code writes its row summaries with a Haiku-class model; bluclawd has to work with any provider,
- * so it uses the fallback Claude Code itself uses between summaries: the recent output).
+ * What agent view shows for a session, from the session's own output — no model call (a model-written summary would tie
+ * bluclawd to one provider, so it uses the recent output).
  *
  * A stored row's outcome comes from pi's own signals only, with nothing added to the system
  * prompt: a model error is Failed, an interrupted turn Stopped, any other finished turn Done.
@@ -36,7 +35,7 @@ export function textOf(content: unknown): string {
 		.join("");
 }
 
-/** A running tool as one line: its own description when it has one, as Claude Code's row shows. */
+/** A running tool as one line: its own description when it has one, as bluclawd's row shows. */
 export function toolActivity(toolName: string | undefined, args: unknown): string | undefined {
 	const a = (args ?? {}) as Record<string, unknown>;
 	const text = [a.description, a.command, a.path, a.pattern, a.url].find((v) => typeof v === "string" && v.trim());

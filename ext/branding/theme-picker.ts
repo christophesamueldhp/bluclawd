@@ -1,10 +1,10 @@
 /**
- * The interactive `/theme` picker, laid out as Claude Code's ThemePicker: the
+ * The interactive `/theme` picker, laid out as bluclawd's ThemePicker: the
  * title, the prompt, one row per theme with a check on the current one, and a
  * `demo.js` diff below that shows the focused theme while the cursor moves.
  *
- * Claude Code's six themes come first, under its own labels; every other theme
- * pi knows follows by name, as Claude Code lists custom themes after its own.
+ * bluclawd's six themes come first, under its own labels; every other theme
+ * pi knows follows by name, as bluclawd lists custom themes after its own.
  */
 
 import { renderDiff, type Theme } from "@earendil-works/pi-coding-agent";
@@ -13,7 +13,7 @@ import { type Component, getKeybindings, styleTextWithAnsi, truncateToWidth } fr
 /** pi's light/dark pair setting: the theme follows the terminal's appearance. */
 export const AUTO_THEME = "bluclawd-light/bluclawd";
 
-const CLAUDE_CODE_THEMES: ThemeOption[] = [
+const BUILTIN_THEME_OPTIONS: ThemeOption[] = [
 	{ label: "Auto (match terminal)", value: AUTO_THEME },
 	{ label: "Dark mode", value: "bluclawd" },
 	{ label: "Light mode", value: "bluclawd-light" },
@@ -23,11 +23,11 @@ const CLAUDE_CODE_THEMES: ThemeOption[] = [
 	{ label: "Light mode (ANSI colors only)", value: "bluclawd-light-ansi" },
 ];
 
-/** Claude Code's sample: line 2 of `greet` changes from World to Claude. */
+/** bluclawd's sample: line 2 of `greet` changes from World to bluclawd. */
 const DEMO_DIFF = [
 	" 1 function greet() {",
 	'-2   console.log("Hello, World!");',
-	'+2   console.log("Hello, Claude!");',
+	'+2   console.log("Hello, bluclawd!");',
 	" 3 }",
 ].join("\n");
 
@@ -41,11 +41,11 @@ export interface ThemeOption {
 	value: string;
 }
 
-/** Claude Code's rows, then every other installed theme by name. */
+/** bluclawd's rows, then every other installed theme by name. */
 export function themeOptions(installed: string[]): ThemeOption[] {
-	const own = new Set(CLAUDE_CODE_THEMES.map((option) => option.value));
+	const own = new Set(BUILTIN_THEME_OPTIONS.map((option) => option.value));
 	const others = installed.filter((name) => !own.has(name)).sort();
-	return [...CLAUDE_CODE_THEMES, ...others.map((name) => ({ label: name, value: name }))];
+	return [...BUILTIN_THEME_OPTIONS, ...others.map((name) => ({ label: name, value: name }))];
 }
 
 export class ThemePicker implements Component {
@@ -99,7 +99,7 @@ export class ThemePicker implements Component {
 		const pad = " ".repeat(PAD);
 		const inner = Math.max(1, width - 2 * PAD);
 		const line = (text: string) => (text === "" ? "" : truncateToWidth(`${pad}${text}`, width, "…"));
-		// mdCode is Claude Code's `permission` colour in bluclawd's themes, the one its picker is drawn in.
+		// mdCode is bluclawd's `permission` colour in bluclawd's themes, the one its picker is drawn in.
 		const rule = (char: string, color: "mdCode" | "dim") => t.fg(color, char.repeat(Math.max(0, width)));
 
 		const out = ["", rule("─", "mdCode")];

@@ -189,7 +189,7 @@ export interface PaneCommand {
 }
 
 /**
- * pi's own commands a phone may run. As Claude Code's Remote Control runs only the commands whose
+ * pi's own commands a phone may run. As bluclawd's Remote Control runs only the commands whose
  * result is the conversation itself, these open no selector or screen on the Mac that the phone
  * cannot see, and rewrite nothing already sent (a sent message is only ever stopped from the phone).
  */

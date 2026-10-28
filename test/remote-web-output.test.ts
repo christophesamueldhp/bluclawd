@@ -3,7 +3,7 @@ import { diffSummary, groupSummary, markerKind, resultSummary } from "../daemon/
 
 const numbered = (count: number) => Array.from({ length: count }, (_, i) => `line ${i + 1}`).join("\n");
 
-describe("a tool result's line under its call, as Claude Code words it", () => {
+describe("a tool result's line under its call", () => {
 	it("counts what a read read", () => {
 		expect(resultSummary("read", { text: numbered(120) })).toEqual(["Read 120 lines"]);
 		expect(resultSummary("read", { text: "one" })).toEqual(["Read 1 line"]);
@@ -91,7 +91,7 @@ describe("how a marker shows", () => {
 	});
 });
 
-describe("a run of tool calls, folded into one line as Claude Code does", () => {
+describe("a run of tool calls, folded into one line", () => {
 	it("says what the calls did, in the order they first came", () => {
 		expect(groupSummary(["bash", "bash"])).toBe("Ran 2 commands");
 		expect(groupSummary(["read", "bash", "edit", "bash"])).toBe("Read a file, ran 2 commands, edited a file");

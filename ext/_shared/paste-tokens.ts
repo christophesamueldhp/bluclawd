@@ -1,11 +1,11 @@
 /**
- * Claude Code's paste tokens: a long paste shows as `[Pasted text #N +L lines]` and a pasted image
+ * bluclawd's paste tokens: a long paste shows as `[Pasted text #N +L lines]` and a pasted image
  * as `[Image #N]`, numbered in one sequence. Text tokens expand back on send; image tokens stay in
  * the text while the image travels separately. Pasting the same content again right after shows
  * what the last token holds.
  */
 
-/** Claude Code collapses a paste longer than this many characters... */
+/** bluclawd collapses a paste longer than this many characters... */
 const COLLAPSE_CHARS = 800;
 /** ...or with more than this many lines. */
 const COLLAPSE_LINES = 2;

@@ -5,7 +5,7 @@ import { exitAction } from "../ext/agent-view/index.ts";
 const normal = { normal: true, idle: true, empty: true, sincePrevious: Number.POSITIVE_INFINITY };
 const background = { ...normal, normal: false };
 
-describe("exit keys, as Claude Code", () => {
+describe("exit keys, as bluclawd", () => {
 	it("ctrl+c while a turn runs stops the turn, in any session", () => {
 		expect(exitAction("ctrl+c", { ...normal, idle: false })).toBe("abort");
 		expect(exitAction("ctrl+c", { ...background, idle: false, sincePrevious: 100 })).toBe("abort");

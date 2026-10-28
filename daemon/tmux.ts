@@ -15,7 +15,7 @@ import { ensureServerDir, getServerDir } from "./paths.ts";
 
 /** Set in a pane's environment: the tmux session its pi runs in. */
 export const PANE_ENV = "BLUCLAWD_PANE";
-/** Set on the pane `pi` starts in a terminal: a normal session, as Claude Code's, until ← backgrounds it. */
+/** Set on the pane `pi` starts in a terminal: a normal session, as bluclawd's, until ← backgrounds it. */
 export const NORMAL_ENV = "BLUCLAWD_NORMAL";
 /** Set on a pane started only to show agent view, which it opens with {@link AGENT_VIEW_COMMAND}. */
 export const OPEN_VIEW_ENV = "BLUCLAWD_OPEN_VIEW";

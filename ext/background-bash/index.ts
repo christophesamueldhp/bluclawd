@@ -39,7 +39,7 @@ import { wrapExec } from "../sandbox/runtime.ts";
 import { isSubagentTaskId, isTerminalSubagentStatus, type SubagentRunRecord } from "../subagents/runs.ts";
 import { backgroundBashJobs, describeJobStatus, isShellTaskId, noTaskError, shellTaskStop } from "./background-bash.ts";
 import { backgroundTasksDisabled } from "./bash-limits.ts";
-import { createClaudeBashTool } from "./bash-tool.ts";
+import { createBackgroundBashTool } from "./bash-tool.ts";
 import { detachAll, runningForegroundShells, subscribeForegroundShells } from "./foreground-shells.ts";
 import { clearMainSession, mainSession, setMainSession } from "./main-session.ts";
 import {
@@ -154,7 +154,7 @@ const backgroundBash: InlineExtension = {
 
 		// Overrides the built-in bash tool with timeouts in ms and run_in_background.
 		pi.registerTool(
-			createClaudeBashTool({
+			createBackgroundBashTool({
 				cwd: localCwd,
 				operations,
 				sendMessage: (message, delivery) => deliverOrHold(() => mainSession.sendMessage(message, delivery)),

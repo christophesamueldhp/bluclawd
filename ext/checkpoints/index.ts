@@ -1,7 +1,7 @@
 /**
  * Checkpoints: a restorable git snapshot of the working tree whenever a user
  * message (a prompt, a steer or a follow-up) enters the conversation, so
- * `/rewind` can restore the files, the conversation, or both, as Claude Code's
+ * `/rewind` can restore the files, the conversation, or both, as bluclawd's
  * rewind does. The conversation is rewound with `ctx.navigateTree` to the user
  * message, which leaves the session just before it with its text in the editor.
  *
@@ -34,14 +34,14 @@
  * ── Restore is destructive and fail-closed ───────────────────────────────────
  * `git read-tree --reset -u <sha>` resets the index and working tree in one
  * step, and only runs after the user chose it: in `/rewind` the option menu is
- * the confirmation (as in Claude Code), the fork-point offer asks with a
+ * the confirmation (as in bluclawd), the fork-point offer asks with a
  * preview. The current state is captured first so the restore is undoable; if
  * that capture fails, restoring needs a separate "unrecoverable" confirmation. The index is
  * then reset to HEAD so the result reads as ordinary uncommitted work (what was
  * staged is not recorded, as with `git stash pop` without `--index`).
  *
  * ── New files: only the agent's are removed ─────────────────────────────────
- * As in Claude Code, a restore removes the files the agent created since the
+ * As in bluclawd, a restore removes the files the agent created since the
  * checkpoint and keeps the user's. A `write`/`bash`/`powershell` call lists
  * the untracked files before and after it runs; the new ones are appended as a
  * `checkpoint-created` entry. A restore diffs the checkpoint against the safety
@@ -524,7 +524,7 @@ async function diffNumstat(
 	return stats;
 }
 
-/** A prompt row's note in /rewind, worded as in Claude Code. */
+/** A prompt row's note in /rewind, worded. */
 function rowNote(stats: DiffStats | undefined): string {
 	if (!stats) return "⚠ No code restore";
 	const counts = `+${stats.insertions} -${stats.deletions}`;
@@ -533,7 +533,7 @@ function rowNote(stats: DiffStats | undefined): string {
 	return `${stats.files.length} files changed ${counts}`;
 }
 
-/** What "Restore code" would do, worded as in Claude Code. */
+/** What "Restore code" would do, worded. */
 function restoreEffect(stats: DiffStats): string {
 	const [first = "", second = ""] = stats.files.map((file) => basename(file));
 	if (!first) return "The code has not changed (nothing will be restored).";
@@ -728,7 +728,7 @@ export function factory(pi: ExtensionAPI): void {
 	});
 
 	/**
-	 * Esc twice on an empty, idle prompt opens /rewind, as it opens rewind in Claude Code; pi's own
+	 * Esc twice on an empty, idle prompt opens /rewind, as it opens rewind in bluclawd; pi's own
 	 * double Esc (its /tree) never sees the second press.
 	 */
 	let offDoubleEscape: (() => void) | undefined;
