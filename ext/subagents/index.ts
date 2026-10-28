@@ -19,7 +19,7 @@ import {
 } from "../_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { deliverOrHold } from "../background-bash/notification-hold.ts";
-import { createRunAdmission, type RunExecutionContext } from "./admission.ts";
+import { type AdmissionContext, createRunAdmission, type RunExecutionContext } from "./admission.ts";
 import {
 	type AgentDefinitionCatalog,
 	discoverAgentDefinitions,
@@ -424,10 +424,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							? execCtx.resume.prompt
 							: withRoster(execCtx.task, describeRoster(params.record.parentSessionId, runId, false)),
 						resumeSessionFile: execCtx.resume?.transcriptPath,
-						requestedModel: execCtx.requestedModel,
-						parentModel: execCtx.parentModel,
-						requestedThinkingLevel: execCtx.requestedThinkingLevel,
-						parentModelRegistry: execCtx.parentModelRegistry,
+						childModel: execCtx.childModel,
 						projectTrusted: execCtx.projectTrusted,
 						childSessionDir: storage.runDir,
 						childTools: [
@@ -664,8 +661,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			description:
 				"Send a message to a subagent by name or run ID (sub_…). A running child gets it at its next safe point without a new turn. A completed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
 			parameters: messageParameters,
-			execute: async (_toolCallId, params) => {
-				if (!activeParentSessionId) {
+			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
+				const ctx = toolCtx ?? activeCtx;
+				if (!activeParentSessionId || !ctx) {
 					return {
 						content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
 						details: undefined,
@@ -675,7 +673,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const scope = { parentSessionId: activeParentSessionId, runtimeGeneration };
 				const to = params.to.trim();
 				const finished = findFinishedRun(to);
-				if (finished) return resumeRun(finished, params.content, scope);
+				if (finished) return resumeRun(finished, params.content, scope, ctx);
 				return formatReceipt(await messageBus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, params.content));
 			},
 		});
@@ -695,45 +693,40 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			return known ?? readPersistedRunRecord(resolveAgentDir(), activeParentSessionId, target);
 		};
 
-		const resumeRun = (run: Readonly<SubagentRunRecord>, content: string, scope: SubagentMessageScope) => {
-			const label = run.name ? `"${run.name}" (${run.runId})` : `"${run.runId}"`;
-			const refuse = (status: "unavailable" | "invalidated", reason: string) =>
-				formatReceipt({ status, seq: 0, to: run.runId, toName: run.name, reason });
-			if (run.runtimeGeneration !== runtimeGeneration || !scheduler.getRun(run.runId)) {
-				return refuse(
-					"invalidated",
-					`${label} belongs to a session that was reloaded or replaced; spawn a new subagent and point it at ${run.reportPath ?? "the earlier report"}.`,
-				);
-			}
-			if (run.status !== "completed") {
-				return refuse("unavailable", `${label} is ${run.status}; only a completed subagent can be resumed.`);
-			}
-			if (!run.transcriptPath) return refuse("unavailable", `${label} has no saved transcript to resume.`);
-			const holder = run.name
-				? scheduler.listActiveRuns(scope.parentSessionId).find((r) => r.name === run.name)
-				: undefined;
-			if (holder) return refuse("unavailable", `${label} cannot resume: its name is now used by ${holder.runId}.`);
-
-			const receipt = messageBus.accept({ address: PARENT_MESSAGE_ADDRESS, scope }, run.runId, run.name);
-			const prompt = subagentMessagePayload({
-				seq: receipt.seq,
-				from: PARENT_MESSAGE_ADDRESS,
-				to: run.runId,
-				toName: run.name,
-				content,
-			}).content[0].text;
+		const resumeRun = async (
+			run: Readonly<SubagentRunRecord>,
+			content: string,
+			scope: SubagentMessageScope,
+			ctx: AdmissionContext,
+		) => {
+			let receipt: SubagentMessageReceipt | undefined;
 			// The earlier launch result is long emitted, so the SDK attributes none of this generation's nested usage.
 			emittedLaunchResults.add(run.runId);
-			const resumed = scheduler.resume(run.runId, (context) => ({
-				...context,
-				requestedModel: `${run.provider}/${run.modelId}`,
-				requestedThinkingLevel: run.thinkingLevel,
-				resume: { transcriptPath: run.transcriptPath, prompt },
-			}));
+			const resumed = await admission.resume(
+				run,
+				() => {
+					receipt = messageBus.accept({ address: PARENT_MESSAGE_ADDRESS, scope }, run.runId, run.name);
+					return subagentMessagePayload({
+						seq: receipt.seq,
+						from: PARENT_MESSAGE_ADDRESS,
+						to: run.runId,
+						toName: run.name,
+						content,
+					}).content[0].text;
+				},
+				ctx,
+			);
 			if (!resumed.ok || !resumed.handle) {
 				emittedLaunchResults.delete(run.runId);
-				return refuse("unavailable", resumed.error ?? `${label} could not be resumed.`);
+				return formatReceipt({
+					status: resumed.refusal ?? "unavailable",
+					seq: 0,
+					to: run.runId,
+					toName: run.name,
+					reason: resumed.error,
+				});
 			}
+			const label = run.name ? `"${run.name}" (${run.runId})` : `"${run.runId}"`;
 			void resumed.handle.completion.then((completedRecord) => {
 				const envelope = buildSubagentResultEnvelope(completedRecord, MAX_PARENT_REPORT_BYTES);
 				scheduleBackgroundDelivery(completedRecord, envelope.parentText, envelope.details);

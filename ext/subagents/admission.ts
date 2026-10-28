@@ -22,11 +22,12 @@ import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
 import {
 	captureWorkspaceSnapshot,
 	type ParentToolSnapshot,
+	type ResolvedChildModel,
 	resolveChildModelAndRuntime,
 	sanitizeDiagnosticText,
 	snapshotParentTools,
 } from "./runner.ts";
-import type { AdmittedSubagentHandle, SubagentRunScheduler } from "./runs.ts";
+import type { AdmittedSubagentHandle, SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
 import { ensureSessionStorageDir } from "./storage.ts";
 
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
@@ -45,12 +46,9 @@ export interface RunExecutionContext {
 	parentTools: readonly ParentToolSnapshot[];
 	activeToolNames: readonly string[];
 	builtinExtensions: readonly string[];
-	requestedModel: SubagentModelSpec;
+	childModel: ResolvedChildModel;
 	/** Set when the orchestrator resumes a completed run: its transcript and the message to continue with. */
 	resume?: { transcriptPath: string; prompt: string };
-	parentModel: ExtensionContext["model"];
-	requestedThinkingLevel: string | undefined;
-	parentModelRegistry: ExtensionContext["modelRegistry"];
 	projectTrusted: boolean;
 }
 
@@ -70,7 +68,7 @@ export interface LaunchRequest {
 	signal?: AbortSignal;
 }
 
-/** The parts of the calling tool's context admission reads. Without `executeTool` a launch is refused. */
+/** The parts of the calling tool's context admission reads. Without `executeTool` a run is refused. */
 export type AdmissionContext = Pick<
 	ExtensionContext,
 	"cwd" | "mode" | "model" | "modelRegistry" | "isProjectTrusted"
@@ -80,7 +78,10 @@ export type AdmissionContext = Pick<
 };
 
 export interface RunAdmissionDeps {
-	scheduler: Pick<SubagentRunScheduler<RunExecutionContext>, "admit" | "listActiveRuns">;
+	scheduler: Pick<
+		SubagentRunScheduler<RunExecutionContext>,
+		"admit" | "resume" | "getRun" | "getContext" | "listActiveRuns"
+	>;
 	agentDir: () => string;
 	/** Saved roles frozen at session start; discovered on demand when session start was skipped. */
 	catalog: () => AgentDefinitionCatalog | undefined;
@@ -94,11 +95,20 @@ export interface AdmissionResult {
 	readonly ok: boolean;
 	readonly handle?: AdmittedSubagentHandle;
 	readonly error?: string;
+	/** Why a resume was refused: its session is gone, or the run cannot continue now. */
+	readonly refusal?: "invalidated" | "unavailable";
 }
 
 export interface RunAdmission {
 	launch(request: LaunchRequest, ctx: AdmissionContext): Promise<AdmissionResult>;
+	/**
+	 * Admits a completed run's next generation. `buildPrompt` is called only once every check has passed,
+	 * just before the run starts again.
+	 */
+	resume(run: Readonly<SubagentRunRecord>, buildPrompt: () => string, ctx: AdmissionContext): Promise<AdmissionResult>;
 }
+
+type ChildTools = Pick<RunExecutionContext, "parent" | "parentTools" | "activeToolNames" | "builtinExtensions">;
 
 function summarizeTaskLabel(task: string): string {
 	const firstLine =
@@ -113,6 +123,72 @@ function summarizeTaskLabel(task: string): string {
 export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 	const autoNameCounters = new Map<string, number>();
 	const reject = (error: string): AdmissionResult => ({ ok: false, error });
+
+	// Parent Subagent / Subagent(agentName) deny rules, evaluated before any model activity.
+	const deniedReason = (agentName: string, ctx: AdmissionContext): string | undefined => {
+		const sm = SettingsManager.create(ctx.cwd, deps.agentDir(), { projectTrusted: ctx.isProjectTrusted() });
+		const delegationDeny = evaluateSubagentDelegationDeny(forkSettings.denyRules(sm), agentName, ctx.cwd);
+		return delegationDeny.blocked ? (delegationDeny.reason ?? "Blocked by permission rule") : undefined;
+	};
+
+	// The orchestrator's callable tools, narrowed by the role's tool list.
+	const selectChildTools = (
+		definition: AgentDefinition,
+		ctx: AdmissionContext,
+	): { tools?: ChildTools; error?: string } => {
+		const loadout = deps.loadout();
+		if (!ctx.executeTool || !loadout)
+			return { error: "Subagent dispatch needs the orchestrator's live tool context." };
+		const declaredNames = new Set(loadout.declared.map((tool) => tool.name));
+		const callableNames = loadout.callable.map((tool) => tool.name);
+		const builtinNames = CHILD_BUILTIN_EXTENSIONS.filter((name) => declaredNames.has(name));
+		const availableNames = [...callableNames, ...builtinNames];
+		const unknownTools = definition.tools?.filter((name) => !availableNames.includes(name)) ?? [];
+		if (unknownTools.length > 0) {
+			return {
+				error: `Subagent role "${definition.name}" names tools the orchestrator cannot give a child: ${unknownTools.join(", ")}. Available: ${availableNames.join(", ") || "none"}.`,
+			};
+		}
+		const selectedNames = definition.tools ?? availableNames;
+		return {
+			tools: {
+				parent: ctx as Pick<ExtensionToolContext, "executeTool">,
+				parentTools: snapshotParentTools(
+					loadout,
+					callableNames.filter((name) => selectedNames.includes(name)),
+				),
+				activeToolNames: selectedNames.filter((name) => declaredNames.has(name)),
+				builtinExtensions: builtinNames.filter((name) => selectedNames.includes(name)),
+			},
+		};
+	};
+
+	const resolveChildModel = async (
+		requestedModel: SubagentModelSpec,
+		requestedThinkingLevel: string | undefined,
+		ctx: AdmissionContext,
+		agentName: string,
+	): Promise<{ childModel?: ResolvedChildModel; error?: string }> => {
+		const resolved = await resolveChildModelAndRuntime({
+			agentDir: deps.agentDir(),
+			requestedModel,
+			parentModel: ctx.model,
+			requestedThinkingLevel,
+			parentModelRegistry: ctx.modelRegistry,
+		});
+		if (!resolved.ok || !resolved.model || !resolved.modelRuntime) {
+			return {
+				error: sanitizeDiagnosticText(resolved.error ?? `Could not resolve model for subagent "${agentName}".`),
+			};
+		}
+		return {
+			childModel: {
+				model: resolved.model,
+				modelRuntime: resolved.modelRuntime,
+				thinkingLevel: resolved.thinkingLevel,
+			},
+		};
+	};
 
 	return {
 		async launch({ toolCallId, parentTurnId, params, signal }, ctx) {
@@ -136,19 +212,17 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				);
 			}
 
-			// 1. Evaluate parent Subagent / Subagent(agentName) deny rules BEFORE admission or model activity
-			const sm = SettingsManager.create(cwd, agentDir, { projectTrusted });
-			const delegationDeny = evaluateSubagentDelegationDeny(forkSettings.denyRules(sm), agentName, cwd);
-			if (delegationDeny.blocked) return reject(delegationDeny.reason ?? "Blocked by permission rule");
+			const denied = deniedReason(agentName, ctx);
+			if (denied) return reject(denied);
 
-			// 2. Reject background mode in unsupported one-shot modes (print/json)
+			// Background runs outlive one-shot (print/json) modes, whose process exits first.
 			if (isBackground && (ctx.mode === "print" || ctx.mode === "json")) {
 				return reject(
 					`Background subagents are not supported in one-shot "${ctx.mode}" mode because the process exits before background completion. Omit background: true to run in the foreground.`,
 				);
 			}
 
-			// 3. Validate an inline role, or resolve a saved one from the frozen catalog
+			// An inline role is validated; a saved one comes from the frozen catalog.
 			const resolvedDef = inlineRole
 				? createInlineAgentDefinition(inlineRole)
 				: resolveAgentDefinition(
@@ -160,23 +234,10 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			}
 			const definition = resolvedDef.definition;
 
-			// 4. Give the child the orchestrator's callable tools, narrowed by the role's tool list
-			const loadout = deps.loadout();
-			if (!ctx.executeTool || !loadout)
-				return reject("Subagent dispatch needs the orchestrator's live tool context.");
-			const declaredNames = new Set(loadout.declared.map((tool) => tool.name));
-			const callableNames = loadout.callable.map((tool) => tool.name);
-			const builtinNames = CHILD_BUILTIN_EXTENSIONS.filter((name) => declaredNames.has(name));
-			const availableNames = [...callableNames, ...builtinNames];
-			const unknownTools = definition.tools?.filter((name) => !availableNames.includes(name)) ?? [];
-			if (unknownTools.length > 0) {
-				return reject(
-					`Subagent role "${definition.name}" names tools the orchestrator cannot give a child: ${unknownTools.join(", ")}. Available: ${availableNames.join(", ") || "none"}.`,
-				);
-			}
-			const selectedNames = definition.tools ?? availableNames;
+			const { tools, error: toolsError } = selectChildTools(definition, ctx);
+			if (!tools) return reject(toolsError);
 
-			// 5. Resolve spawn > role > parent model and thinking, and verify them before admission
+			// Spawn > role > parent for the model and thinking level, verified before admission.
 			const spawnModel = params.model === undefined ? undefined : parseSubagentModelSpec(params.model);
 			if (params.model !== undefined && !spawnModel) {
 				return reject(
@@ -201,18 +262,13 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			// A chosen model without a level gets the SDK's default for that model; an inherited one keeps the parent's.
 			const requestedThinkingLevel =
 				explicitThinkingLevel ?? (requestedModel === "inherit" ? parentThinkingLevel : undefined);
-			const modelCheck = await resolveChildModelAndRuntime({
-				agentDir,
+			const { childModel, error: modelError } = await resolveChildModel(
 				requestedModel,
-				parentModel: ctx.model,
 				requestedThinkingLevel,
-				parentModelRegistry: ctx.modelRegistry,
-			});
-			if (!modelCheck.ok || !modelCheck.model) {
-				return reject(
-					sanitizeDiagnosticText(modelCheck.error ?? `Could not resolve model for subagent "${agentName}".`),
-				);
-			}
+				ctx,
+				agentName,
+			);
+			if (!childModel) return reject(modelError);
 
 			// Everything from here to admit runs without awaiting, so the session cannot change in between.
 			const activeParentSessionId = deps.activeParentSessionId();
@@ -225,7 +281,6 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			}
 			const startSnapshot = captureWorkspaceSnapshot(cwd);
 
-			// 6. Check storage availability before launching
 			const sessionDir = ensureSessionStorageDir(agentDir, parentSessionId);
 			if (!sessionDir.ok) {
 				return reject(
@@ -262,24 +317,6 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 
 			if (signal?.aborted) return reject("Subagent request was aborted before admission.");
 
-			const context: RunExecutionContext = {
-				agentDir,
-				definition,
-				task: taskText,
-				parent: ctx as Pick<ExtensionToolContext, "executeTool">,
-				parentTools: snapshotParentTools(
-					loadout,
-					callableNames.filter((name) => selectedNames.includes(name)),
-				),
-				activeToolNames: selectedNames.filter((name) => declaredNames.has(name)),
-				builtinExtensions: builtinNames.filter((name) => selectedNames.includes(name)),
-				requestedModel,
-				parentModel: ctx.model,
-				requestedThinkingLevel,
-				parentModelRegistry: ctx.modelRegistry,
-				projectTrusted,
-			};
-
 			const admitRes = deps.scheduler.admit({
 				parentSessionId,
 				runtimeGeneration: dispatchGeneration,
@@ -289,19 +326,83 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				name: runName,
 				agentName: definition.name,
 				definitionSource: definition.source,
-				provider: modelCheck.model.provider,
-				modelId: modelCheck.model.id,
-				thinkingLevel: modelCheck.thinkingLevel ?? SDK_DEFAULT_THINKING,
+				provider: childModel.model.provider,
+				modelId: childModel.model.id,
+				thinkingLevel: childModel.thinkingLevel ?? SDK_DEFAULT_THINKING,
 				cwd,
 				taskSummary: summarizeTaskLabel(taskText),
 				startSnapshot,
 				deliveryMode: isBackground ? "background" : "foreground",
 				// Foreground runs link to the invoking tool call's signal; background runs outlive the launch tool call
 				signal: isBackground ? undefined : signal,
-				context,
+				context: { agentDir, definition, task: taskText, ...tools, childModel, projectTrusted },
 			});
 			if (!admitRes.ok || !admitRes.handle) return reject(admitRes.error ?? "Subagent admission rejected.");
 			return { ok: true, handle: admitRes.handle };
+		},
+
+		async resume(run, buildPrompt, ctx) {
+			const label = run.name ? `"${run.name}" (${run.runId})` : `"${run.runId}"`;
+			const invalidated: AdmissionResult = {
+				ok: false,
+				refusal: "invalidated",
+				error: `${label} belongs to a session that was reloaded or replaced; spawn a new subagent and point it at ${run.reportPath ?? "the earlier report"}.`,
+			};
+			const unavailable = (error: string): AdmissionResult => ({ ok: false, refusal: "unavailable", error });
+			const dispatchGeneration = deps.runtimeGeneration();
+			// Checked again after the model is resolved, since another message may resume the run meanwhile.
+			const refusal = (): AdmissionResult | undefined => {
+				const current = deps.scheduler.getRun(run.runId);
+				if (
+					!current ||
+					current.runtimeGeneration !== dispatchGeneration ||
+					deps.runtimeGeneration() !== dispatchGeneration ||
+					deps.activeParentSessionId() !== current.parentSessionId
+				) {
+					return invalidated;
+				}
+				if (current.status !== "completed") {
+					return unavailable(`${label} is ${current.status}; only a completed subagent can be resumed.`);
+				}
+				if (!current.transcriptPath) return unavailable(`${label} has no saved transcript to resume.`);
+				const holder = current.name
+					? deps.scheduler.listActiveRuns(current.parentSessionId).find((r) => r.name === current.name)
+					: undefined;
+				if (holder) return unavailable(`${label} cannot resume: its name is now used by ${holder.runId}.`);
+				return undefined;
+			};
+
+			const early = refusal();
+			if (early) return early;
+			const previous = deps.scheduler.getContext(run.runId);
+			if (!previous) return invalidated;
+
+			const denied = deniedReason(run.agentName, ctx);
+			if (denied) return unavailable(denied);
+			// The run keeps its role, inline ones included, but gets the orchestrator's tools as they are now.
+			const { tools, error: toolsError } = selectChildTools(previous.definition, ctx);
+			if (!tools) return unavailable(toolsError);
+			// The run keeps the model and level it ran with; a level the SDK chose is chosen again.
+			const { childModel, error: modelError } = await resolveChildModel(
+				`${run.provider}/${run.modelId}`,
+				run.thinkingLevel === SDK_DEFAULT_THINKING ? undefined : run.thinkingLevel,
+				ctx,
+				run.agentName,
+			);
+			if (!childModel) return unavailable(modelError);
+
+			const late = refusal();
+			if (late) return late;
+			const current = deps.scheduler.getRun(run.runId);
+			const resumed = deps.scheduler.resume(run.runId, {
+				...previous,
+				...tools,
+				childModel,
+				projectTrusted: ctx.isProjectTrusted(),
+				resume: { transcriptPath: current.transcriptPath, prompt: buildPrompt() },
+			});
+			if (!resumed.ok || !resumed.handle) return unavailable(resumed.error ?? `${label} could not be resumed.`);
+			return { ok: true, handle: resumed.handle };
 		},
 	};
 }

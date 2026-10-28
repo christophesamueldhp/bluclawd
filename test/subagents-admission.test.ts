@@ -10,8 +10,9 @@ import {
 	type LaunchParams,
 	MAX_TASK_INPUT_BYTES,
 	type RunAdmissionDeps,
+	type RunExecutionContext,
 } from "../ext/subagents/admission.ts";
-import { SubagentRunScheduler } from "../ext/subagents/runs.ts";
+import { type SubagentRunRecord, SubagentRunScheduler } from "../ext/subagents/runs.ts";
 
 const tempDirs: string[] = [];
 
@@ -45,7 +46,9 @@ function loadoutOf(names: readonly string[]): ToolLoadout {
 	};
 }
 
-async function setup(options: { mode?: AdmissionContext["mode"]; settings?: unknown } = {}) {
+async function setup(
+	options: { mode?: AdmissionContext["mode"]; settings?: unknown; firstGenerationCompletes?: boolean } = {},
+) {
 	const cwd = makeTempDir("cwd");
 	const agentDir = makeTempDir("agent");
 	if (options.settings) writeFileSync(join(agentDir, "settings.json"), JSON.stringify(options.settings));
@@ -68,13 +71,24 @@ async function setup(options: { mode?: AdmissionContext["mode"]; settings?: unkn
 	const registry = new ModelRegistry(runtime);
 	const sessionManager = SessionManager.inMemory(cwd);
 	// Admitted runs stay live, so later launches see their names.
-	const scheduler = new SubagentRunScheduler({ executeRun: () => new Promise(() => {}) });
+	const scheduler = new SubagentRunScheduler<RunExecutionContext>({
+		executeRun: ({ record }) =>
+			options.firstGenerationCompletes && !record.generation
+				? Promise.resolve({
+						status: "completed",
+						complete: true,
+						summaryText: "v1 done.",
+						transcriptPath: join(agentDir, "transcript.jsonl"),
+					})
+				: new Promise(() => {}),
+	});
+	let loadout = loadoutOf(["probe"]);
 	let generation = 0;
 	const deps: RunAdmissionDeps = {
 		scheduler,
 		agentDir: () => agentDir,
 		catalog: () => undefined,
-		loadout: () => loadoutOf(["probe"]),
+		loadout: () => loadout,
 		parentThinkingLevel: () => "low",
 		runtimeGeneration: () => generation,
 		activeParentSessionId: () => sessionManager.getSessionId(),
@@ -97,9 +111,21 @@ async function setup(options: { mode?: AdmissionContext["mode"]; settings?: unkn
 			{ toolCallId: `call_${++calls}`, parentTurnId: "turn_0", params, signal },
 			{ ...ctx, ...overrides },
 		);
+	const resume = (
+		run: Readonly<SubagentRunRecord>,
+		buildPrompt: () => string,
+		overrides: Partial<AdmissionContext> = {},
+	) => {
+		const resumeCtx = { ...ctx, ...overrides };
+		return { result: admission.resume(run, buildPrompt, resumeCtx), ctx: resumeCtx };
+	};
 	const storageDir = join(agentDir, "bluclawd", "subagents", sessionManager.getSessionId());
 	return {
 		agentDir,
+		resume,
+		setLoadout: (names: readonly string[]) => {
+			loadout = loadoutOf(names);
+		},
 		runtime,
 		faux,
 		scheduler,
@@ -319,5 +345,64 @@ describe("Run admission", () => {
 			"Subagent request was aborted before admission.",
 		);
 		expect(scheduler.listRuns()).toHaveLength(0);
+	});
+
+	it("resumes a completed run with the orchestrator's current tools and tool context, keeping its role and model", async () => {
+		const { launch, resume, scheduler, setLoadout } = await setup({ firstGenerationCompletes: true });
+		const launched = await launch({
+			agent: "explorer",
+			task: "Build v1.",
+			model: "faux-adm/faux-alt",
+			name: "backend",
+		});
+		const completed = await launched.handle!.completion;
+		expect(completed.status).toBe("completed");
+
+		setLoadout(["probe", "fresh"]);
+		const prompts: string[] = [];
+		const { result, ctx } = resume(completed, () => {
+			prompts.push("built");
+			return "Now add tests.";
+		});
+		const resumed = await result;
+		expect(resumed.error).toBeUndefined();
+		expect(resumed.handle?.record).toMatchObject({ name: "backend", modelId: "faux-alt", generation: 1 });
+		expect(prompts).toEqual(["built"]);
+		const context = scheduler.getContext(completed.runId)!;
+		expect(context.parent).toBe(ctx);
+		expect(context.parentTools.map((tool) => tool.name)).toEqual(["probe", "fresh"]);
+		expect(context.definition.name).toBe("explorer");
+		expect(context.childModel.model.id).toBe("faux-alt");
+		expect(context.resume).toEqual({ transcriptPath: completed.transcriptPath, prompt: "Now add tests." });
+	});
+
+	it("refuses to resume a run whose role is now denied, before taking a message number", async () => {
+		const { agentDir, launch, resume } = await setup({ firstGenerationCompletes: true });
+		const completed = await (await launch({ agent: "explorer", task: "Build v1." })).handle!.completion;
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ permissions: { deny: ["Subagent(explorer)"] } }));
+		let built = false;
+		const resumed = await resume(completed, () => {
+			built = true;
+			return "Continue.";
+		}).result;
+		expect(resumed).toMatchObject({ ok: false, refusal: "unavailable" });
+		expect(resumed.error).toMatch(/Subagent\(explorer\)/);
+		expect(built).toBe(false);
+	});
+
+	it("refuses to resume a run that is not completed, or whose session was replaced", async () => {
+		const live = await setup();
+		const running = (await live.launch({ agent: "explorer", task: "x" })).handle!.record;
+		const notDone = await live.resume(running, () => "x").result;
+		expect(notDone).toMatchObject({ ok: false, refusal: "unavailable" });
+		expect(notDone.error).toMatch(/only a completed subagent can be resumed/);
+
+		const { launch, resume, bumpGeneration } = await setup({ firstGenerationCompletes: true });
+
+		const completed = await (await launch({ agent: "explorer", task: "x" })).handle!.completion;
+		bumpGeneration();
+		const stale = await resume(completed, () => "x").result;
+		expect(stale).toMatchObject({ ok: false, refusal: "invalidated" });
+		expect(stale.error).toMatch(/reloaded or replaced; spawn a new subagent/);
 	});
 });

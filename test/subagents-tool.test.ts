@@ -1890,7 +1890,9 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 			// The first, foreground generation was attributed to the parent; only the resumed one is in the ledger.
 			expect(ledger.recordedRunIds).toEqual([`${runId}#1`]);
 			expect(ledger.usage.totalTokens).toBe(record?.usage.totalTokens);
-			expect(session.messages.some((m) => m.role === "custom" && JSON.stringify(m).includes("v2 done."))).toBe(true);
+			await waitFor(() =>
+				session.messages.some((m) => m.role === "custom" && JSON.stringify(m).includes("v2 done.")),
+			);
 		} finally {
 			session.dispose();
 		}

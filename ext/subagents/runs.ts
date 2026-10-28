@@ -263,6 +263,11 @@ export class SubagentRunScheduler<C = unknown> {
 		return managed ? structuredClone(managed.record) : undefined;
 	}
 
+	/** The context a run was admitted or last resumed with. */
+	getContext(runId: string): C | undefined {
+		return this.runs.get(runId)?.context;
+	}
+
 	recordMessageSent(runId: string): void {
 		const managed = this.runs.get(runId);
 		if (managed && !isTerminalSubagentStatus(managed.record.status)) managed.record.lastMessageAt = this.now();
@@ -368,7 +373,7 @@ export class SubagentRunScheduler<C = unknown> {
 	 * Runs a completed run again under the same identity, in the background. Its usage starts from zero so
 	 * the earlier generation's usage, already attributed, is never counted twice.
 	 */
-	resume(runId: string, extendContext: (context: C) => C): AdmitSubagentRunResult {
+	resume(runId: string, context: C): AdmitSubagentRunResult {
 		const managed = this.runs.get(runId);
 		if (!managed) return { ok: false, error: "Subagent run is unknown." };
 		if (managed.record.status !== "completed") {
@@ -405,7 +410,7 @@ export class SubagentRunScheduler<C = unknown> {
 			completionPromise,
 			disposed: false,
 			finalizing: false,
-			context: extendContext(managed.context),
+			context,
 		});
 		this.startManagedRun(managed);
 		return { ok: true, handle: { runId, record: structuredClone(managed.record), completion: completionPromise } };
