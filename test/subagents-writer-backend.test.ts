@@ -80,7 +80,8 @@ describe.skipIf(!supported)("macOS: stopping a sandboxed command ends its descen
 			}
 		};
 		const beats = () => readHeartbeats(heartbeatPath);
-		const deadline = Date.now() + 5000;
+		// Generous: a double fork reparents slowly while the full suite runs in parallel.
+		const deadline = Date.now() + 10_000;
 		while (!beats().some((beat) => beat.identity === identity && (mode !== "double-fork" || beat.ppid === 1))) {
 			if (child.exitCode !== null) throw new Error(`Probe stopped before readiness: ${stdout} ${stderr}`);
 			if (Date.now() > deadline) throw new Error(`Probe readiness timeout: ${stdout} ${stderr}`);
