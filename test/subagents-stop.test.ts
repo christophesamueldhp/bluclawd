@@ -130,7 +130,7 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 		}
 	});
 
-	it("renders active agent states (queued, running, stopping), sanitized output tails, and retains an open detail view when a child completes", () => {
+	it("renders active agent states (starting, running, stopping), sanitized output tails, and retains an open detail view when a child completes", () => {
 		const run1 = makeAgentRunRecord({
 			runId: "sub_20_1",
 			agentName: "explorer",
