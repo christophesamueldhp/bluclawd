@@ -374,7 +374,9 @@ message is user approval: none can approve actions or grant tools.
 
 A message from the orchestrator to a child that has **completed** resumes it in the background with
 its saved transcript, the same name, run ID, role, model and thinking level, and the message as its
-next instruction; its report arrives like a background completion. Only the orchestrator can do
+next instruction; its report arrives like a background completion. A resume is checked like a launch:
+the orchestrator's current deny rules apply, and the child gets the orchestrator's tools as they are
+now, narrowed by its role. Only the orchestrator can do
 this: a sibling's message to a finished child is refused as finished, and a stopped, failed or
 interrupted child cannot be resumed. Each resumed generation's usage is counted once in the
 background ledger. After a reload, a run from before it cannot be resumed; spawn a new child that

@@ -126,7 +126,7 @@ export interface SubagentRunnerOutcome {
 	usage?: SubagentUsageTotals;
 }
 
-export interface AdmitSubagentRunRequest {
+export interface AdmitSubagentRunRequest<C = unknown> {
 	parentSessionId: string;
 	runtimeGeneration: number;
 	parentTurnId: string;
@@ -143,7 +143,7 @@ export interface AdmitSubagentRunRequest {
 	startSnapshot?: WorkspaceSnapshot;
 	deliveryMode: SubagentDeliveryMode;
 	signal?: AbortSignal;
-	context?: unknown;
+	context?: C;
 }
 
 export interface AdmittedSubagentHandle {
@@ -158,12 +158,12 @@ export interface AdmitSubagentRunResult {
 	readonly error?: string;
 }
 
-export interface SubagentRunSchedulerOptions {
+export interface SubagentRunSchedulerOptions<C = unknown> {
 	now?: () => number;
 	onStateChange?: (record: Readonly<SubagentRunRecord>) => void;
 	/** Durably stores a settled run before it turns terminal; a throw fails the run. */
 	onFinalize?: (record: Readonly<SubagentRunRecord>) => Promise<Readonly<SubagentRunRecord>>;
-	executeRun: (params: SubagentRunnerExecuteParams & { context?: unknown }) => Promise<SubagentRunnerOutcome>;
+	executeRun: (params: SubagentRunnerExecuteParams & { context?: C }) => Promise<SubagentRunnerOutcome>;
 }
 
 const TERMINAL_STATES = new Set<SubagentLifecycleStatus>([
@@ -226,7 +226,7 @@ export function addSubagentUsage(target: SubagentUsageTotals, delta: Partial<Sub
 	}
 }
 
-interface InternalManagedRun {
+interface InternalManagedRun<C> {
 	record: SubagentRunRecord;
 	abortController: AbortController;
 	callerSignal?: AbortSignal;
@@ -238,20 +238,20 @@ interface InternalManagedRun {
 	completionPromise: Promise<Readonly<SubagentRunRecord>>;
 	disposed: boolean;
 	finalizing: boolean;
-	context?: unknown;
+	context?: C;
 }
 
-export class SubagentRunScheduler {
+export class SubagentRunScheduler<C = unknown> {
 	private readonly now: () => number;
 	private readonly onStateChange?: (record: Readonly<SubagentRunRecord>) => void;
 	private readonly onFinalize?: (record: Readonly<SubagentRunRecord>) => Promise<Readonly<SubagentRunRecord>>;
 	private readonly executeRun: (
-		params: SubagentRunnerExecuteParams & { context?: unknown },
+		params: SubagentRunnerExecuteParams & { context?: C },
 	) => Promise<SubagentRunnerOutcome>;
 
-	private readonly runs = new Map<string, InternalManagedRun>();
+	private readonly runs = new Map<string, InternalManagedRun<C>>();
 
-	constructor(options: SubagentRunSchedulerOptions) {
+	constructor(options: SubagentRunSchedulerOptions<C>) {
 		this.now = options.now ?? (() => Date.now());
 		this.onStateChange = options.onStateChange;
 		this.onFinalize = options.onFinalize;
@@ -261,6 +261,11 @@ export class SubagentRunScheduler {
 	getRun(runId: string): Readonly<SubagentRunRecord> | undefined {
 		const managed = this.runs.get(runId);
 		return managed ? structuredClone(managed.record) : undefined;
+	}
+
+	/** The context a run was admitted or last resumed with. */
+	getContext(runId: string): C | undefined {
+		return this.runs.get(runId)?.context;
 	}
 
 	recordMessageSent(runId: string): void {
@@ -283,7 +288,7 @@ export class SubagentRunScheduler {
 		return out;
 	}
 
-	admit(request: AdmitSubagentRunRequest): AdmitSubagentRunResult {
+	admit(request: AdmitSubagentRunRequest<C>): AdmitSubagentRunResult {
 		if (request.signal?.aborted) {
 			return {
 				ok: false,
@@ -331,7 +336,7 @@ export class SubagentRunScheduler {
 			resolveCompletion = res;
 		});
 
-		const managed: InternalManagedRun = {
+		const managed: InternalManagedRun<C> = {
 			record,
 			abortController: new AbortController(),
 			callerSignal: request.signal,
@@ -368,7 +373,7 @@ export class SubagentRunScheduler {
 	 * Runs a completed run again under the same identity, in the background. Its usage starts from zero so
 	 * the earlier generation's usage, already attributed, is never counted twice.
 	 */
-	resume(runId: string, extendContext: (context: unknown) => unknown): AdmitSubagentRunResult {
+	resume(runId: string, context: C): AdmitSubagentRunResult {
 		const managed = this.runs.get(runId);
 		if (!managed) return { ok: false, error: "Subagent run is unknown." };
 		if (managed.record.status !== "completed") {
@@ -405,7 +410,7 @@ export class SubagentRunScheduler {
 			completionPromise,
 			disposed: false,
 			finalizing: false,
-			context: extendContext(managed.context),
+			context,
 		});
 		this.startManagedRun(managed);
 		return { ok: true, handle: { runId, record: structuredClone(managed.record), completion: completionPromise } };
@@ -452,7 +457,7 @@ export class SubagentRunScheduler {
 		return cancelled;
 	}
 
-	private startManagedRun(managed: InternalManagedRun): void {
+	private startManagedRun(managed: InternalManagedRun<C>): void {
 		managed.record.startedAt = this.now();
 		this.emitChange(managed);
 
@@ -514,7 +519,7 @@ export class SubagentRunScheduler {
 		})();
 	}
 
-	private triggerStop(managed: InternalManagedRun, source: SubagentStopSource, reason: string): void {
+	private triggerStop(managed: InternalManagedRun<C>, source: SubagentStopSource, reason: string): void {
 		if (managed.finalizing || isTerminalSubagentStatus(managed.record.status)) {
 			return;
 		}
@@ -535,7 +540,7 @@ export class SubagentRunScheduler {
 		}
 	}
 
-	private async finalizeManagedRun(managed: InternalManagedRun, outcome: SubagentRunnerOutcome): Promise<void> {
+	private async finalizeManagedRun(managed: InternalManagedRun<C>, outcome: SubagentRunnerOutcome): Promise<void> {
 		if (managed.finalizing || isTerminalSubagentStatus(managed.record.status)) {
 			return;
 		}
@@ -609,7 +614,7 @@ export class SubagentRunScheduler {
 		await Promise.all(Array.from(this.runs.values(), (managed) => managed.completionPromise));
 	}
 
-	private disposeManagedResources(managed: InternalManagedRun): void {
+	private disposeManagedResources(managed: InternalManagedRun<C>): void {
 		if (managed.disposed) return;
 		managed.disposed = true;
 		if (managed.callerSignal && managed.callerAbortListener) {
@@ -618,7 +623,7 @@ export class SubagentRunScheduler {
 		}
 	}
 
-	private emitChange(managed: InternalManagedRun): void {
+	private emitChange(managed: InternalManagedRun<C>): void {
 		try {
 			this.onStateChange?.(structuredClone(managed.record));
 		} catch {

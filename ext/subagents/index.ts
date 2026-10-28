@@ -5,10 +5,8 @@ import {
 	defineTool,
 	type ExtensionAPI,
 	type ExtensionContext,
-	type ExtensionToolContext,
 	getAgentDir,
 	type InlineExtension,
-	SettingsManager,
 	type ToolDefinition,
 	type ToolLoadout,
 	type ToolLoadoutChanges,
@@ -19,20 +17,14 @@ import {
 	notifyAgentTasksChanged,
 	publishAgentTasks,
 } from "../_shared/agent-tasks.ts";
-import * as forkSettings from "../_shared/settings.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { deliverOrHold } from "../background-bash/notification-hold.ts";
-import { evaluateSubagentDelegationDeny } from "../permissions/policy.ts";
+import { type AdmissionContext, createRunAdmission, type RunExecutionContext } from "./admission.ts";
 import {
 	type AgentDefinitionCatalog,
-	createInlineAgentDefinition,
 	discoverAgentDefinitions,
 	formatAgentRoutingDescriptions,
-	isSubagentThinkingLevel,
-	parseSubagentModelSpec,
-	resolveAgentDefinition,
 	SUBAGENT_THINKING_LEVELS,
-	type SubagentModelSpec,
 } from "./definitions.ts";
 import {
 	PARENT_MESSAGE_ADDRESS,
@@ -45,16 +37,7 @@ import {
 	subagentMessagePayload,
 } from "./messages.ts";
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
-import {
-	captureWorkspaceSnapshot,
-	createParentToolProxies,
-	describeSubagentModels,
-	type ParentToolSnapshot,
-	resolveChildModelAndRuntime,
-	runSubagent,
-	sanitizeDiagnosticText,
-	snapshotParentTools,
-} from "./runner.ts";
+import { createParentToolProxies, describeSubagentModels, runSubagent } from "./runner.ts";
 import {
 	isTerminalSubagentStatus,
 	type SubagentRunRecord,
@@ -73,16 +56,10 @@ import {
 	writePersistedRunRecord,
 } from "./storage.ts";
 
-export const MAX_TASK_INPUT_BYTES = 32 * 1024;
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const BACKGROUND_BATCH_WINDOW_MS = 40;
-/** Recorded until the child session reports the level the SDK chose for its model. */
-const SDK_DEFAULT_THINKING = "model default";
-const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const SUBAGENT_ROSTER_TOOL = "subagent_roster";
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent that works in this same checkout";
-/** Pi built-in extensions a child runs itself, over its own copies of the orchestrator's tools. */
-const CHILD_BUILTIN_EXTENSIONS = ["codemode", "tool_search"];
 
 export interface SubagentExtensionOptions {
 	agentDir?: string;
@@ -123,16 +100,6 @@ function withRoster(task: string, roster: readonly string[]): string {
 	].join("\n");
 }
 
-function summarizeTaskLabel(task: string): string {
-	const firstLine =
-		task
-			.trim()
-			.split("\n")
-			.find((line) => line.trim().length > 0) ?? "";
-	const compact = firstLine.replace(/\s+/g, " ").trim();
-	return compact.length > 120 ? `${compact.slice(0, 119)}…` : compact;
-}
-
 export function createSubagentsExtension(options: SubagentExtensionOptions = {}): (pi: ExtensionAPI) => void {
 	return function subagentsFactory(pi: ExtensionAPI): void {
 		const resolveAgentDir = () => options.agentDir ?? getAgentDir();
@@ -146,7 +113,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		let latestLoadout: ToolLoadout | undefined;
 		/** Runs whose launch tool result the parent has emitted; the SDK no longer attributes their nested usage. */
 		const emittedLaunchResults = new Set<string>();
-		const autoNameCounters = new Map<string, number>();
 
 		// Completion notices and child messages for the orchestrator, delivered together in arrival order.
 		let parentInbox: Array<
@@ -355,24 +321,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			scheduleParentFlush();
 		};
 
-		interface RunExecutionContext {
-			agentDir: string;
-			definition: NonNullable<ReturnType<typeof resolveAgentDefinition>["definition"]>;
-			task: string;
-			parent: ExtensionToolContext;
-			parentTools: readonly ParentToolSnapshot[];
-			activeToolNames: readonly string[];
-			builtinExtensions: readonly string[];
-			requestedModel: SubagentModelSpec;
-			/** Set when the orchestrator resumes a completed run: its transcript and the message to continue with. */
-			resume?: { transcriptPath: string; prompt: string };
-			parentModel: ExtensionContext["model"];
-			requestedThinkingLevel: string | undefined;
-			parentModelRegistry: ExtensionContext["modelRegistry"];
-			projectTrusted: boolean;
-		}
-
-		const scheduler = new SubagentRunScheduler({
+		const scheduler = new SubagentRunScheduler<RunExecutionContext>({
 			onStateChange: (record) => {
 				const agentDir = resolveAgentDir();
 				writePersistedRunRecord(agentDir, record);
@@ -412,7 +361,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				return record;
 			},
 			executeRun: async (params) => {
-				const execCtx = params.context as RunExecutionContext;
+				const execCtx = params.context;
 				const storage = ensureRunStorageDir(execCtx.agentDir, params.record.parentSessionId, params.record.runId);
 				if (!storage.ok || !storage.runDir) throw new Error(storage.error ?? "Subagent storage is unavailable.");
 				const { runId } = params.record;
@@ -475,10 +424,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							? execCtx.resume.prompt
 							: withRoster(execCtx.task, describeRoster(params.record.parentSessionId, runId, false)),
 						resumeSessionFile: execCtx.resume?.transcriptPath,
-						requestedModel: execCtx.requestedModel,
-						parentModel: execCtx.parentModel,
-						requestedThinkingLevel: execCtx.requestedThinkingLevel,
-						parentModelRegistry: execCtx.parentModelRegistry,
+						childModel: execCtx.childModel,
 						projectTrusted: execCtx.projectTrusted,
 						childSessionDir: storage.runDir,
 						childTools: [
@@ -501,6 +447,16 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					emittedLaunchResults.delete(runId);
 				}
 			},
+		});
+
+		const admission = createRunAdmission({
+			scheduler,
+			agentDir: resolveAgentDir,
+			catalog: () => catalog,
+			loadout: () => latestLoadout,
+			parentThinkingLevel: () => pi.getThinkingLevel(),
+			runtimeGeneration: () => runtimeGeneration,
+			activeParentSessionId: () => activeParentSessionId,
 		});
 
 		const taskSource: AgentTaskSource = {
@@ -705,7 +661,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			description:
 				"Send a message to a subagent by name or run ID (sub_…). A running child gets it at its next safe point without a new turn. A completed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
 			parameters: messageParameters,
-			execute: async (_toolCallId, params) => {
+			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
+				const ctx = toolCtx ?? activeCtx;
 				if (!activeParentSessionId) {
 					return {
 						content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
@@ -716,7 +673,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const scope = { parentSessionId: activeParentSessionId, runtimeGeneration };
 				const to = params.to.trim();
 				const finished = findFinishedRun(to);
-				if (finished) return resumeRun(finished, params.content, scope);
+				if (finished && ctx) return resumeRun(finished, params.content, scope, ctx);
 				return formatReceipt(await messageBus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, params.content));
 			},
 		});
@@ -736,45 +693,41 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			return known ?? readPersistedRunRecord(resolveAgentDir(), activeParentSessionId, target);
 		};
 
-		const resumeRun = (run: Readonly<SubagentRunRecord>, content: string, scope: SubagentMessageScope) => {
-			const label = run.name ? `"${run.name}" (${run.runId})` : `"${run.runId}"`;
-			const refuse = (status: "unavailable" | "invalidated", reason: string) =>
-				formatReceipt({ status, seq: 0, to: run.runId, toName: run.name, reason });
-			if (run.runtimeGeneration !== runtimeGeneration || !scheduler.getRun(run.runId)) {
-				return refuse(
-					"invalidated",
-					`${label} belongs to a session that was reloaded or replaced; spawn a new subagent and point it at ${run.reportPath ?? "the earlier report"}.`,
-				);
-			}
-			if (run.status !== "completed") {
-				return refuse("unavailable", `${label} is ${run.status}; only a completed subagent can be resumed.`);
-			}
-			if (!run.transcriptPath) return refuse("unavailable", `${label} has no saved transcript to resume.`);
-			const holder = run.name
-				? scheduler.listActiveRuns(scope.parentSessionId).find((r) => r.name === run.name)
-				: undefined;
-			if (holder) return refuse("unavailable", `${label} cannot resume: its name is now used by ${holder.runId}.`);
-
-			const receipt = messageBus.accept({ address: PARENT_MESSAGE_ADDRESS, scope }, run.runId, run.name);
-			const prompt = subagentMessagePayload({
-				seq: receipt.seq,
-				from: PARENT_MESSAGE_ADDRESS,
-				to: run.runId,
-				toName: run.name,
-				content,
-			}).content[0].text;
-			// The earlier launch result is long emitted, so the SDK attributes none of this generation's nested usage.
-			emittedLaunchResults.add(run.runId);
-			const resumed = scheduler.resume(run.runId, (context) => ({
-				...(context as RunExecutionContext),
-				requestedModel: `${run.provider}/${run.modelId}`,
-				requestedThinkingLevel: run.thinkingLevel,
-				resume: { transcriptPath: run.transcriptPath, prompt },
-			}));
+		const resumeRun = async (
+			run: Readonly<SubagentRunRecord>,
+			content: string,
+			scope: SubagentMessageScope,
+			ctx: AdmissionContext,
+		) => {
+			let receipt: SubagentMessageReceipt | undefined;
+			const resumed = await admission.resume(
+				run,
+				() => {
+					receipt = messageBus.accept({ address: PARENT_MESSAGE_ADDRESS, scope }, run.runId, run.name);
+					// The earlier launch result is long emitted, so the SDK attributes none of this generation's nested usage.
+					emittedLaunchResults.add(run.runId);
+					return subagentMessagePayload({
+						seq: receipt.seq,
+						from: PARENT_MESSAGE_ADDRESS,
+						to: run.runId,
+						toName: run.name,
+						content,
+					}).content[0].text;
+				},
+				ctx,
+			);
 			if (!resumed.ok || !resumed.handle) {
-				emittedLaunchResults.delete(run.runId);
-				return refuse("unavailable", resumed.error ?? `${label} could not be resumed.`);
+				// A refused resume never got past the checks, so a generation still running keeps its usage.
+				if (receipt) emittedLaunchResults.delete(run.runId);
+				return formatReceipt({
+					status: resumed.refusal ?? "unavailable",
+					seq: 0,
+					to: run.runId,
+					toName: run.name,
+					reason: resumed.error,
+				});
 			}
+			const label = run.name ? `"${run.name}" (${run.runId})` : `"${run.runId}"`;
 			void resumed.handle.completion.then((completedRecord) => {
 				const envelope = buildSubagentResultEnvelope(completedRecord, MAX_PARENT_REPORT_BYTES);
 				scheduleBackgroundDelivery(completedRecord, envelope.parentText, envelope.details);
@@ -986,303 +939,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 
-				const dispatchGeneration = runtimeGeneration;
-				const parentSessionId = ctx.sessionManager.getSessionId();
-				const originEntryId = ctx.sessionManager.getLeafId() ?? undefined;
-				const turnId = `turn_${activeTurnIndex}`;
-				const agentDir = resolveAgentDir();
-				const cwd = ctx.cwd;
-				const projectTrusted = ctx.isProjectTrusted();
-				const inlineRole = typeof params.agent === "string" ? undefined : params.agent;
-				const agentName = (typeof params.agent === "string" ? params.agent : params.agent.name).trim();
-				const taskText = params.task ?? "";
-				const isBackground = params.background === true;
-
-				if (!agentName && !inlineRole) {
-					return {
-						content: [{ type: "text", text: "Missing required parameter: agent" }],
-						details: undefined,
-						isError: true,
-					};
-				}
-				if (!taskText.trim()) {
-					return {
-						content: [{ type: "text", text: "Missing required parameter: task" }],
-						details: undefined,
-						isError: true,
-					};
-				}
-				const taskBytes = Buffer.byteLength(taskText, "utf8");
-				if (taskBytes > MAX_TASK_INPUT_BYTES) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Delegated task exceeds the ${MAX_TASK_INPUT_BYTES}-byte limit (${taskBytes} bytes). Supply target file paths instead of pasting large file contents.`,
-							},
-						],
-						details: undefined,
-						isError: true,
-					};
-				}
-
-				// 1. Evaluate parent Subagent / Subagent(agentName) deny rules BEFORE admission or model activity
-				const sm = SettingsManager.create(cwd, agentDir, { projectTrusted });
-				const denyRules = forkSettings.denyRules(sm);
-				const delegationDeny = evaluateSubagentDelegationDeny(denyRules, agentName, cwd);
-				if (delegationDeny.blocked) {
-					return {
-						content: [{ type: "text", text: delegationDeny.reason ?? "Blocked by permission rule" }],
-						details: undefined,
-						isError: true,
-					};
-				}
-
-				// 2. Reject background mode in unsupported one-shot modes (print/json)
-				if (isBackground && (ctx.mode === "print" || ctx.mode === "json")) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Background subagents are not supported in one-shot "${ctx.mode}" mode because the process exits before background completion. Omit background: true to run in the foreground.`,
-							},
-						],
-						details: undefined,
-						isError: true,
-					};
-				}
-
-				// 3. Validate an inline role, or resolve a saved one from the frozen catalog (discovered once if session_start was skipped)
-				const resolvedDef = inlineRole
-					? createInlineAgentDefinition(inlineRole)
-					: resolveAgentDefinition(
-							catalog ??
-								discoverAgentDefinitions({
-									cwd,
-									agentDir,
-									projectTrusted,
-								}),
-							agentName,
-						);
-				if (!resolvedDef.ok || !resolvedDef.definition) {
-					return {
-						content: [{ type: "text", text: resolvedDef.error ?? `Unknown subagent "${agentName}"` }],
-						details: undefined,
-						isError: true,
-					};
-				}
-				const definition = resolvedDef.definition;
-
-				// 4. Give the child the orchestrator's callable tools, narrowed by the role's tool list
-				if (!toolCtx || !latestLoadout) {
-					return {
-						content: [{ type: "text", text: "Subagent dispatch needs the orchestrator's live tool context." }],
-						details: undefined,
-						isError: true,
-					};
-				}
-				const loadout = latestLoadout;
-				const declaredNames = new Set(loadout.declared.map((tool) => tool.name));
-				const callableNames = loadout.callable.map((tool) => tool.name);
-				const builtinNames = CHILD_BUILTIN_EXTENSIONS.filter((name) => declaredNames.has(name));
-				const availableNames = [...callableNames, ...builtinNames];
-				const unknownTools = definition.tools?.filter((name) => !availableNames.includes(name)) ?? [];
-				if (unknownTools.length > 0) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Subagent role "${definition.name}" names tools the orchestrator cannot give a child: ${unknownTools.join(", ")}. Available: ${availableNames.join(", ") || "none"}.`,
-							},
-						],
-						details: undefined,
-						isError: true,
-					};
-				}
-				const selectedNames = definition.tools ?? availableNames;
-
-				// 5. Resolve spawn > role > parent model and thinking, and verify them before admission
-				const spawnModel = params.model === undefined ? undefined : parseSubagentModelSpec(params.model);
-				if (params.model !== undefined && !spawnModel) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Invalid subagent "model" value "${params.model}": must be "inherit" or explicit "provider/model".`,
-							},
-						],
-						details: undefined,
-						isError: true,
-					};
-				}
-				if (
-					params.thinkingLevel !== undefined &&
-					params.thinkingLevel !== "inherit" &&
-					!isSubagentThinkingLevel(params.thinkingLevel)
-				) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Invalid subagent "thinkingLevel" value "${params.thinkingLevel}": must be "inherit" or one of ${SUBAGENT_THINKING_LEVELS.join(", ")}.`,
-							},
-						],
-						details: undefined,
-						isError: true,
-					};
-				}
-				const parentThinkingLevel = pi.getThinkingLevel();
-				const requestedModel = spawnModel ?? definition.model;
-				const explicitThinkingLevel =
-					params.thinkingLevel === "inherit"
-						? parentThinkingLevel
-						: (params.thinkingLevel ?? definition.thinkingLevel);
-				// A chosen model without a level gets the SDK's default for that model; an inherited one keeps the parent's.
-				const requestedThinkingLevel =
-					explicitThinkingLevel ?? (requestedModel === "inherit" ? parentThinkingLevel : undefined);
-				const modelCheck = await resolveChildModelAndRuntime({
-					agentDir,
-					requestedModel,
-					parentModel: ctx.model,
-					requestedThinkingLevel,
-					parentModelRegistry: ctx.modelRegistry,
-				});
-				if (!modelCheck.ok || !modelCheck.model) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: sanitizeDiagnosticText(
-									modelCheck.error ?? `Could not resolve model for subagent "${agentName}".`,
-								),
-							},
-						],
-						details: undefined,
-						isError: true,
-					};
-				}
-
-				if (
-					runtimeGeneration !== dispatchGeneration ||
-					(activeParentSessionId && activeParentSessionId !== parentSessionId) ||
-					(originEntryId && !ctx.sessionManager.getBranch().some((entry) => entry.id === originEntryId))
-				) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: "Parent session or branch changed before subagent admission; request cancelled.",
-							},
-						],
-						details: undefined,
-						isError: true,
-					};
-				}
-				const startSnapshot = captureWorkspaceSnapshot(cwd);
-
-				// 6. Check storage availability before launching
-				const probeDir = ensureRunStorageDir(agentDir, parentSessionId, "probe_check");
-				if (!probeDir.ok) {
-					return {
-						content: [
-							{
-								type: "text",
-								text: `Cannot launch subagent: storage is unavailable (${probeDir.error ?? "storage check failed"}).`,
-							},
-						],
-						details: undefined,
-						isError: true,
-					};
-				}
-
-				const liveRuns = scheduler.listActiveRuns(parentSessionId);
-				const requestedName = params.name?.trim();
-				if (requestedName !== undefined) {
-					if (
-						!AGENT_NAME_RE.test(requestedName) ||
-						requestedName === PARENT_MESSAGE_ADDRESS ||
-						requestedName.startsWith("sub_")
-					) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: `Invalid subagent name "${requestedName}": use lowercase letters, digits, "-" or "_", and not "${PARENT_MESSAGE_ADDRESS}" or a "sub_" prefix.`,
-								},
-							],
-							details: undefined,
-							isError: true,
-						};
-					}
-					const holder = liveRuns.find((run) => run.name === requestedName);
-					if (holder) {
-						return {
-							content: [
-								{
-									type: "text",
-									text: `Subagent name "${requestedName}" is already used by running agent ${holder.runId}; choose another name.`,
-								},
-							],
-							details: undefined,
-							isError: true,
-						};
-					}
-				}
-				let runName = requestedName;
-				while (!runName || liveRuns.some((run) => run.name === runName)) {
-					const key = `${parentSessionId}:${definition.name}`;
-					const next = (autoNameCounters.get(key) ?? 0) + 1;
-					autoNameCounters.set(key, next);
-					runName = `${definition.name}-${next}`;
-				}
-
-				if (signal?.aborted) {
-					return {
-						content: [{ type: "text", text: "Subagent request was aborted before admission." }],
-						details: undefined,
-						isError: true,
-					};
-				}
-
-				const execContext: RunExecutionContext = {
-					agentDir,
-					definition,
-					task: taskText,
-					parent: toolCtx,
-					parentTools: snapshotParentTools(
-						loadout,
-						callableNames.filter((name) => selectedNames.includes(name)),
-					),
-					activeToolNames: selectedNames.filter((name) => declaredNames.has(name)),
-					builtinExtensions: builtinNames.filter((name) => selectedNames.includes(name)),
-					requestedModel,
-					parentModel: ctx.model,
-					requestedThinkingLevel,
-					parentModelRegistry: ctx.modelRegistry,
-					projectTrusted,
-				};
-
-				const admitRes = scheduler.admit({
-					parentSessionId,
-					runtimeGeneration: dispatchGeneration,
-					parentTurnId: turnId,
-					originToolCallId: toolCallId,
-					originEntryId,
-					name: runName,
-					agentName: definition.name,
-					definitionSource: definition.source,
-					provider: modelCheck.model.provider,
-					modelId: modelCheck.model.id,
-					thinkingLevel: modelCheck.thinkingLevel ?? SDK_DEFAULT_THINKING,
-					cwd,
-					taskSummary: summarizeTaskLabel(taskText),
-					startSnapshot,
-					deliveryMode: isBackground ? "background" : "foreground",
-					// Foreground runs link to the invoking tool call's signal; background runs outlive the launch tool call
-					signal: isBackground ? undefined : signal,
-					context: execContext,
-				});
-
+				const admitRes = await admission.launch(
+					{ toolCallId, parentTurnId: `turn_${activeTurnIndex}`, params, signal },
+					ctx,
+				);
 				if (!admitRes.ok || !admitRes.handle) {
 					return {
 						content: [{ type: "text", text: admitRes.error ?? "Subagent admission rejected." }],
@@ -1292,11 +952,13 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				}
 
 				const { handle } = admitRes;
+				const agentDir = resolveAgentDir();
+				const isBackground = params.background === true;
 				writePersistedRunRecord(agentDir, handle.record);
 				writeFullSubagentReport(
 					agentDir,
 					handle.record,
-					`Run: ${handle.runId} (${definition.name})\nStatus: ${handle.record.status}\nTask: ${handle.record.taskSummary}`,
+					`Run: ${handle.runId} (${handle.record.agentName})\nStatus: ${handle.record.status}\nTask: ${handle.record.taskSummary}`,
 				);
 				appendParentRunReference(pi, handle.record);
 				refreshFooterStatus();
@@ -1313,8 +975,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							{
 								type: "text",
 								text: [
-									`Background subagent launched: ${runName} (${handle.runId})`,
-									`Agent: ${definition.name} (${modelCheck.model.provider}/${modelCheck.model.id})`,
+									`Background subagent launched: ${handle.record.name} (${handle.runId})`,
+									`Agent: ${handle.record.agentName} (${handle.record.provider}/${handle.record.modelId})`,
 									`Status: ${handle.record.status}`,
 									"The final report will be delivered to this session branch when complete. Use `task_stop` with this run ID to cancel.",
 								].join("\n"),
@@ -1322,13 +984,13 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						],
 						details: {
 							runId: handle.runId,
-							agentName: definition.name,
+							agentName: handle.record.agentName,
 							status: handle.record.status,
 							complete: false,
 							deliveryMode: "background",
-							provider: modelCheck.model.provider,
-							modelId: modelCheck.model.id,
-							thinkingLevel: modelCheck.thinkingLevel ?? SDK_DEFAULT_THINKING,
+							provider: handle.record.provider,
+							modelId: handle.record.modelId,
+							thinkingLevel: handle.record.thinkingLevel,
 							turnCount: 0,
 							toolCallCount: 0,
 							snapshotDrifted: false,

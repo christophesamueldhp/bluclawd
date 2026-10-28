@@ -1,11 +1,16 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxProvider, fauxToolCall, Type } from "@earendil-works/pi-ai";
+import { type Api, fauxAssistantMessage, fauxProvider, fauxToolCall, type Model, Type } from "@earendil-works/pi-ai";
 import { createReadToolDefinition, defineTool, ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { discoverAgentDefinitions, resolveAgentDefinition } from "../ext/subagents/definitions.ts";
-import { captureWorkspaceSnapshot, resolveChildModelAndRuntime, runSubagent } from "../ext/subagents/runner.ts";
+import {
+	captureWorkspaceSnapshot,
+	type ResolvedChildModel,
+	resolveChildModelAndRuntime,
+	runSubagent,
+} from "../ext/subagents/runner.ts";
 import { SubagentRunScheduler } from "../ext/subagents/runs.ts";
 
 const tempDirs: string[] = [];
@@ -41,6 +46,22 @@ async function createTestParentRegistry(agentDir: string) {
 	await runtime.refresh({ allowNetwork: false });
 	const registry = new ModelRegistry(runtime);
 	return { runtime, registry, faux, model: faux.getModel("faux-1")! };
+}
+
+async function inheritedChildModel(
+	agentDir: string,
+	registry: ModelRegistry,
+	model: Model<Api>,
+	requestedThinkingLevel: string,
+): Promise<ResolvedChildModel> {
+	const resolved = await resolveChildModelAndRuntime({
+		agentDir,
+		requestedModel: "inherit",
+		parentModel: model,
+		requestedThinkingLevel,
+		parentModelRegistry: registry,
+	});
+	return { model: resolved.model!, modelRuntime: resolved.modelRuntime!, thinkingLevel: resolved.thinkingLevel };
 }
 
 // The child's tools stand in for the orchestrator's proxied tools, which the tool-level tests cover.
@@ -143,17 +164,15 @@ describe("Task 4 (M1) — Child runner", () => {
 				},
 			]);
 
+			const childModel = await inheritedChildModel(agentDir, registry, model, "low");
 			const scheduler = new SubagentRunScheduler({
 				executeRun: (params) =>
 					runSubagent({
 						...params,
 						agentDir,
 						definition: explorer,
-						requestedModel: explorer.model,
 						task: "/not_a_command Inspect src/hello.ts",
-						parentModel: model,
-						requestedThinkingLevel: "low",
-						parentModelRegistry: registry,
+						childModel,
 						projectTrusted,
 						childTools: [createReadToolDefinition(cwd), deniedTool],
 						activeToolNames: ["read", "denied_action"],
@@ -221,20 +240,18 @@ describe("Task 4 (M1) — Child runner", () => {
 			},
 		]);
 
+		const childModel = await inheritedChildModel(agentDir, registry, model, "off");
 		const scheduler = new SubagentRunScheduler({
 			executeRun: (params) =>
 				runSubagent({
 					...params,
 					agentDir,
 					definition: explorer,
-					requestedModel: explorer.model,
 					task: "Loop on a.ts",
 					childTools: [createReadToolDefinition(cwd), deniedTool],
 					activeToolNames: ["read", "denied_action"],
 					builtinExtensions: [],
-					parentModel: model,
-					requestedThinkingLevel: "off",
-					parentModelRegistry: registry,
+					childModel,
 					projectTrusted: true,
 				}),
 		});

@@ -57,6 +57,13 @@ export interface ResolveChildModelResult {
 	readonly error?: string;
 }
 
+/** A child's model as admission resolved it, with the runtime that holds its providers and auth. */
+export interface ResolvedChildModel {
+	readonly model: Model<Api>;
+	readonly modelRuntime: ModelRuntime;
+	readonly thinkingLevel?: ThinkingLevel;
+}
+
 export interface SubagentModelInfo {
 	readonly provider: string;
 	readonly id: string;
@@ -90,10 +97,7 @@ export interface RunSubagentOptions extends SubagentRunnerExecuteParams {
 	agentDir?: string;
 	definition: AgentDefinition;
 	task: string;
-	requestedModel: SubagentModelSpec;
-	parentModel: Model<Api> | undefined;
-	requestedThinkingLevel: ThinkingLevel | string | undefined;
-	parentModelRegistry: ModelRegistry;
+	childModel: ResolvedChildModel;
 	projectTrusted: boolean;
 	childSessionDir?: string;
 	/** A finished child's transcript to continue instead of starting a new one. */
@@ -301,23 +305,6 @@ export function createParentToolProxies(
 }
 
 export async function runSubagent(options: RunSubagentOptions): Promise<SubagentRunnerOutcome> {
-	const resolvedModel = await resolveChildModelAndRuntime({
-		agentDir: options.agentDir,
-		requestedModel: options.requestedModel,
-		parentModel: options.parentModel,
-		requestedThinkingLevel: options.requestedThinkingLevel,
-		parentModelRegistry: options.parentModelRegistry,
-	});
-	if (!resolvedModel.ok || !resolvedModel.modelRuntime || !resolvedModel.model) {
-		return {
-			status: "failed",
-			complete: false,
-			summaryText: "",
-			errorMessage: sanitizeDiagnosticText(resolvedModel.error ?? "Failed to resolve child model."),
-			endSnapshot: captureWorkspaceSnapshot(options.record.cwd),
-		};
-	}
-
 	const cwd = options.record.cwd;
 	const agentDir = options.agentDir ?? getAgentDir();
 	// The user's thinking defaults let the SDK pick the level for a model chosen without one.
@@ -381,9 +368,9 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 	const { session } = await createAgentSession({
 		cwd,
 		agentDir,
-		modelRuntime: resolvedModel.modelRuntime,
-		model: resolvedModel.model,
-		thinkingLevel: resolvedModel.thinkingLevel,
+		modelRuntime: options.childModel.modelRuntime,
+		model: options.childModel.model,
+		thinkingLevel: options.childModel.thinkingLevel,
 		noTools: "builtin",
 		tools: [...options.builtinExtensions, ...options.childTools.map((tool) => tool.name)],
 		customTools: [...options.childTools],
