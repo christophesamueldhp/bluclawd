@@ -7,12 +7,12 @@ import { fileURLToPath } from "node:url";
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { reapDescendants } from "../ext/sandbox/reaper.ts";
+import { readHeartbeats } from "./helpers/heartbeats.ts";
 
 const lifetimeMs = 3000;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 const descendants = fileURLToPath(new URL("./fixtures/subagent-writer/descendants.mjs", import.meta.url));
 const quote = (text: string) => `'${text.replace(/'/g, "'\\''")}'`;
-type Heartbeat = { pid: number; ppid: number; sequence: number };
 
 describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => {
 	let dir: string;
@@ -37,19 +37,7 @@ describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => 
 		await rm(dir, { recursive: true, force: true });
 	});
 
-	const beats = (): Heartbeat[] =>
-		existsSync(heartbeatPath)
-			? readFileSync(heartbeatPath, "utf8")
-					.split("\n")
-					.filter(Boolean)
-					.flatMap((line) => {
-						try {
-							return [JSON.parse(line) as Heartbeat];
-						} catch {
-							return [];
-						}
-					})
-			: [];
+	const beats = () => readHeartbeats(heartbeatPath);
 
 	async function run(mode: string, stop: "abort" | "exit") {
 		const exec = reapDescendants(createLocalBashOperations({ shellPath: "/bin/bash" }).exec);

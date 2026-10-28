@@ -534,9 +534,9 @@ it is read when a session starts, so `/reload` after editing:
   then stops and kills them all. It does not catch a descendant that scrubs its environment and
   whose parent lived and exited between two scans (10 ms apart), e.g. a very fast double-fork; it
   reads the parent unique id through private SPI (`proc_pidinfo` flavor 17), which a macOS update
-  could change; and it is compiled on first use, so without the Command Line Tools
-  (`xcode-select --install`) commands run unreaped. An escaped descendant keeps the sandbox's
-  limits.
+  could change; and it is compiled when the sandbox starts, so without the Command Line Tools
+  (`xcode-select --install`) commands run unreaped, and pi warns at session start. An escaped
+  descendant keeps the sandbox's limits.
 
 | Platform | Needs |
 |---|---|

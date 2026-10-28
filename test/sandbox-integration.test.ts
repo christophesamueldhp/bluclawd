@@ -1,11 +1,13 @@
 /**
  * The real sandbox runtime around a real shell: a Read-denied .env stays unreadable to any
- * command, writes stay in the project, and an unlisted host is refused. Skipped where `srt`
- * cannot run (native Windows, Linux without bubblewrap, socat or ripgrep).
+ * command, writes stay in the project, an unlisted host is refused, and a command's descendants
+ * end with it. Skipped where `srt` cannot run (native Windows, Linux without bubblewrap, socat or
+ * ripgrep).
  */
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -13,6 +15,7 @@ import { runForSubagent } from "../ext/_shared/subagent-commands.ts";
 import { runtimeConfig } from "../ext/sandbox/config.ts";
 import { networkAsker } from "../ext/sandbox/index.ts";
 import { setSandboxEngine, startSandbox, stopSandbox, wrapExec } from "../ext/sandbox/runtime.ts";
+import { readHeartbeats } from "./helpers/heartbeats.ts";
 
 const supported =
 	process.platform !== "win32" &&
@@ -105,6 +108,27 @@ describe.skipIf(!supported)(
 		it("refuses a host the user did not allow", async () => {
 			const { output } = await run("curl -sS -m 10 https://example.com -o /dev/null -w '%{http_code}'");
 			expect(output).toContain("403");
+		});
+
+		it("ends a descendant the command detaches and leaves running when it exits", async () => {
+			const heartbeats = join(dir, "heartbeat.jsonl");
+			const descendants = fileURLToPath(new URL("./fixtures/subagent-writer/descendants.mjs", import.meta.url));
+			const quote = (text: string) => `'${text.replace(/'/g, "'\\''")}'`;
+			const lifetimeMs = 3000;
+			const command = [process.execPath, descendants, "detached", heartbeats, "sandbox-it-probe", String(lifetimeMs)]
+				.map(quote)
+				.join(" ");
+			const started = Date.now();
+			try {
+				await run(`${command} & sleep 0.5`);
+				const atSettlement = readHeartbeats(heartbeats).at(-1)?.sequence ?? 0;
+				await new Promise((resolve) => setTimeout(resolve, 150));
+				expect(atSettlement).toBeGreaterThan(0);
+				expect(readHeartbeats(heartbeats).filter((beat) => beat.sequence > atSettlement)).toEqual([]);
+			} finally {
+				// An unreaped descendant expires on its own; wait it out rather than kill by PID.
+				await new Promise((resolve) => setTimeout(resolve, Math.max(0, started + lifetimeMs + 500 - Date.now())));
+			}
 		});
 
 		it("asks the user for the orchestrator's command and not for a subagent's, while both run", async () => {

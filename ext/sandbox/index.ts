@@ -19,6 +19,7 @@ import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { denyRules } from "../_shared/settings.ts";
 import type { SubagentCommandOwner } from "../_shared/subagent-commands.ts";
 import { runtimeConfig, sandboxSetting, saveSandboxEnabled } from "./config.ts";
+import { prepareReaper } from "./reaper.ts";
 import {
 	type AskNetwork,
 	forgetWrappedExec,
@@ -123,6 +124,12 @@ function factory(pi: ExtensionAPI): void {
 							asker.ask,
 						);
 			notifyUnavailable(startCtx, status);
+			const problem = status.kind === "ready" ? await prepareReaper() : undefined;
+			if (problem)
+				startCtx.ui.notify(
+					`Sandbox cannot end a command's escaped descendants with it: ${problem}. Commands still run; restart pi once it is fixed.`,
+					"warning",
+				);
 		} catch (error) {
 			notifyUnavailable(startCtx, markSandboxUnavailable(error instanceof Error ? error.message : String(error)));
 		}
