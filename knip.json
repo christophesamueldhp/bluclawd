@@ -1,0 +1,12 @@
+{
+	"$schema": "https://unpkg.com/knip@6/schema.json",
+	"entry": [
+		"ext/*/index.ts!",
+		"bin.mjs!",
+		"daemon/cli.ts!",
+		"daemon/pi-resolve-hook*.mjs!",
+		"daemon/remote/web/*.js!",
+		"scripts/*.{ts,mjs}"
+	],
+	"project": ["ext/**/*.ts!", "daemon/**/*.{ts,mjs,js}!", "scripts/**/*.{ts,mjs}", "test/**/*.{ts,mjs}"]
+}
