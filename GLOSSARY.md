@@ -14,6 +14,10 @@ _Avoid_: job, task (for a subagent's work)
 One launch or one resume of a run. Usage is counted once per generation.
 _Avoid_: generation for the orchestrator's session being reloaded or replaced
 
+**Attribution**:
+Where a generation's usage is counted: in pi's own totals (nested usage the SDK folds into the launch tool result, or the usage a foreground tool result carries) or in the background ledger. Each token is attributed exactly once.
+_Avoid_: reconciling, double counting
+
 **Admission**:
 The checks that accept or reject a launch or a resume before a run starts: deny rules, the role's tools, the model and thinking level, the run's name, and whether the orchestrator's session and branch are still current.
 _Avoid_: validation, preflight

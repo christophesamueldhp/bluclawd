@@ -1,12 +1,12 @@
 import type { Usage } from "@earendil-works/pi-ai";
-import { sanitizeDiagnosticText } from "./runner.ts";
+import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import {
 	isTerminalSubagentStatus,
 	type SubagentLifecycleStatus,
 	type SubagentRunRecord,
-	type SubagentUsageTotals,
 	type WorkspaceSnapshot,
 } from "./runs.ts";
+import { toPiToolUsage } from "./usage.ts";
 
 export const MAX_PARENT_REPORT_BYTES = 8 * 1024;
 export const UNTRUSTED_REPORT_HEADER =
@@ -36,7 +36,8 @@ export interface BuiltSubagentResultEnvelope {
 	truncated: boolean;
 	isError: boolean;
 	details: SubagentResultDetails;
-	usage: Usage;
+	/** Present only when this tool result carries the generation's usage into pi's totals. */
+	usage?: Usage;
 }
 
 // Strip ANSI CSI/OSC/DCS sequences and C0/C1 control characters (preserving \n and \t).
@@ -150,23 +151,6 @@ function truncateUtf8Safe(text: string, maxBytes: number): { text: string; trunc
 	return { text: acc.trimEnd(), truncated: true };
 }
 
-export function toPiToolUsage(totals: SubagentUsageTotals): Usage {
-	return {
-		input: totals.input,
-		output: totals.output,
-		cacheRead: totals.cacheRead,
-		cacheWrite: totals.cacheWrite,
-		totalTokens: totals.totalTokens,
-		cost: {
-			input: totals.cost.input,
-			output: totals.cost.output,
-			cacheRead: totals.cost.cacheRead,
-			cacheWrite: totals.cost.cacheWrite,
-			total: totals.cost.total,
-		},
-	};
-}
-
 export function buildSubagentResultEnvelope(
 	record: Readonly<SubagentRunRecord>,
 	maxParentBytes = MAX_PARENT_REPORT_BYTES,
@@ -262,6 +246,6 @@ export function buildSubagentResultEnvelope(
 		truncated,
 		isError,
 		details,
-		usage: toPiToolUsage(record.usage),
+		usage: record.usageAttribution === "tool_result" ? toPiToolUsage(record.usage) : undefined,
 	};
 }

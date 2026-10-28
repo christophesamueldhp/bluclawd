@@ -7,8 +7,8 @@ import { startRemoteServer } from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import { notifyAgentTasksChanged, publishAgentTasks } from "../ext/_shared/agent-tasks.ts";
 import { applyPaneMessage, buildReport, paneTasks, watchTasks } from "../ext/remote/report.ts";
-import { createEmptySubagentUsage } from "../ext/subagents/runs.ts";
 import { recordBackgroundUsageInLedger, writeFullSubagentReport } from "../ext/subagents/storage.ts";
+import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
 
 const tempDirs: string[] = [];
 
@@ -145,7 +145,6 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 			turnCount: 1,
 			toolCallCount: 1,
 			usage: createEmptySubagentUsage(),
-			foregroundUsageAttributed: false,
 			backgroundDeliveryAttempted: false,
 		};
 		const written = writeFullSubagentReport(
@@ -297,24 +296,6 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 			recordBackgroundUsageInLedger(agentDir, {
 				runId: "sub_bg_ledger_1",
 				parentSessionId: sessionId,
-				runtimeGeneration: 1,
-				parentTurnId: "turn_1",
-				originToolCallId: "call_bg",
-				agentName: "explorer",
-				definitionSource: "bundled",
-				provider: "anthropic",
-				modelId: "claude-sonnet-4-5",
-				thinkingLevel: "low",
-				cwd: "/proj",
-				taskSummary: "bg",
-				startSnapshot: { headCommit: null, dirty: false, statusDigest: "" },
-				snapshotDrifted: false,
-				admittedAt: 1000,
-				deliveryMode: "background",
-				status: "completed",
-				complete: true,
-				turnCount: 1,
-				toolCallCount: 1,
 				usage: {
 					...createEmptySubagentUsage(),
 					hasUnknownCost,
@@ -323,8 +304,6 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 					totalTokens: 400,
 					cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
 				},
-				foregroundUsageAttributed: false,
-				backgroundDeliveryAttempted: true,
 			});
 
 			const ctx = {

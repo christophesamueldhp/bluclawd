@@ -10,15 +10,10 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import { sanitizeReportText } from "./results.ts";
-import { sanitizeDiagnosticText } from "./runner.ts";
-import {
-	addSubagentUsage,
-	createEmptySubagentUsage,
-	isTerminalSubagentStatus,
-	type SubagentRunRecord,
-	type SubagentUsageTotals,
-} from "./runs.ts";
+import { isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
+import { addSubagentUsage, createEmptySubagentUsage, type SubagentUsageTotals } from "./usage.ts";
 
 export const SUBAGENT_RUN_CUSTOM_ENTRY = "bluclawd.subagent-run";
 export const MAX_AUTHORIZED_REPORT_VIEW_BYTES = 16 * 1024;
@@ -193,6 +188,7 @@ export function readPersistedRunRecord(
 			return undefined;
 		}
 		decodeLegacyStatus(parsed);
+		decodeLegacyUsageAttribution(parsed);
 		return parsed;
 	} catch {
 		return undefined;
@@ -210,6 +206,15 @@ function decodeLegacyStatus(record: SubagentRunRecord): void {
 	// A queued run never started, so reconciliation interrupts it like any other orphan.
 	if (legacy.status === "queued") record.status = "starting";
 	if (legacy.stopSource === "deadline" || legacy.stopSource === "budget") delete record.stopSource;
+}
+
+/** Maps the flag that recorded attribution before each generation settled its own usage. */
+function decodeLegacyUsageAttribution(record: SubagentRunRecord): void {
+	const legacy = record as { foregroundUsageAttributed?: boolean };
+	if (record.usageAttribution || legacy.foregroundUsageAttributed === undefined) return;
+	record.usageAttribution =
+		legacy.foregroundUsageAttributed || record.deliveryMode === "foreground" ? "tool_result" : "ledger";
+	delete legacy.foregroundUsageAttributed;
 }
 
 export function writeFullSubagentReport(
@@ -373,15 +378,12 @@ export function readBackgroundUsageLedger(agentDir: string, parentSessionId: str
 	}
 }
 
+/** Adds one generation's usage to the ledger, at most once. */
 export function recordBackgroundUsageInLedger(
 	agentDir: string,
-	record: Readonly<SubagentRunRecord>,
+	record: Pick<SubagentRunRecord, "parentSessionId" | "runId" | "generation" | "usage">,
 ): BackgroundUsageLedger {
 	const current = readBackgroundUsageLedger(agentDir, record.parentSessionId);
-	// Never double-count foreground runs whose usage was already attributed to Pi
-	if (record.deliveryMode === "foreground" || record.foregroundUsageAttributed) {
-		return current;
-	}
 	// Each resumed generation of a run carries only its own usage.
 	const ledgerKey = record.generation ? `${record.runId}#${record.generation}` : record.runId;
 	if (current.recordedRunIds.includes(ledgerKey)) {

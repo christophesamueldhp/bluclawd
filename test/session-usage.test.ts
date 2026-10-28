@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { STATUS_KEYS } from "../ext/_shared/status-keys.ts";
 import { backgroundSubagentUsageSummary, isUsingSubscription } from "../ext/help/session-usage.ts";
-import { createEmptySubagentUsage } from "../ext/subagents/runs.ts";
+import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
 
 describe("isUsingSubscription", () => {
 	const ctxFor = (provider: string) =>
