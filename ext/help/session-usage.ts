@@ -1,4 +1,13 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { BackgroundUsageLedger } from "../subagents/storage.ts";
+
+export function backgroundSubagentUsageSummary(
+	ledger: Pick<BackgroundUsageLedger, "runCount" | "usage">,
+): string | undefined {
+	if (ledger.runCount === 0) return undefined;
+	const cost = ledger.usage.hasUnknownCost ? "cost unknown" : `estimated cost $${ledger.usage.cost.total.toFixed(6)}`;
+	return `${ledger.runCount} runs, ${ledger.usage.totalTokens} tokens, ${cost} — excluded from /session totals`;
+}
 
 /** Providers billed by subscription despite API-key auth, so pi's OAuth rule never sees them. */
 const BUILTIN_SUBSCRIPTION_PROVIDERS: readonly string[] = ["kimi-coding", "opencode-go"];

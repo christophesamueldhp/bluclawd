@@ -21,6 +21,7 @@ import {
 } from "../background-bash/foreground-shells.ts";
 import { stopTask, visibleRows } from "../background-bash/tasks-dialog.ts";
 import { projectTrust, setProjectTrust, TRUST_CYCLE } from "../permissions/index.ts";
+import { readBackgroundUsageLedger } from "../subagents/storage.ts";
 
 type ReportModel = PaneReport["models"][number];
 
@@ -61,14 +62,21 @@ export function pistatuslinePaths(
 export function paneTasks(owner: string | undefined): PaneTask[] {
 	return visibleRows(owner)
 		.slice(0, TASKS_MAX)
-		.map((row) => ({
-			id: row.id,
-			kind: row.kind,
-			label: capped(row.label, TASK_LABEL_MAX),
-			startedAt: row.startedAt,
-			...(row.foreground ? { foreground: true } : {}),
-			...(row.job?.outputFile ? { outputFile: row.job.outputFile } : {}),
-		}));
+		.map((row) => {
+			const outputFile = row.job?.outputFile ?? row.outputFile;
+			return {
+				id: row.id,
+				kind: row.kind,
+				label: capped(row.label, TASK_LABEL_MAX),
+				startedAt: row.startedAt,
+				...(row.foreground ? { foreground: true } : {}),
+				...(outputFile ? { outputFile } : {}),
+				...(row.kind === "agent" && row.statusText && row.statusText !== "running"
+					? { status: row.statusText }
+					: {}),
+				...(row.kind === "agent" && row.model ? { model: row.model } : {}),
+			};
+		});
 }
 
 /**
@@ -157,6 +165,8 @@ export function buildReport(
 		usage.cost += counted.cost.total;
 	}
 	const context = ctx.getContextUsage();
+	const sessionId = ctx.sessionManager.getSessionId();
+	const bgLedger = readBackgroundUsageLedger(getAgentDir(), sessionId);
 	return {
 		...(current ? { model: reportModel(current) } : {}),
 		models: [...models.values()].sort(
@@ -169,9 +179,21 @@ export function buildReport(
 			? { context: { tokens: context.tokens, contextWindow: context.contextWindow, percent: context.percent } }
 			: {}),
 		usage,
+		...(bgLedger.runCount > 0
+			? {
+					backgroundSubagentUsage: {
+						runCount: bgLedger.runCount,
+						input: bgLedger.usage.input,
+						output: bgLedger.usage.output,
+						cacheRead: bgLedger.usage.cacheRead,
+						cacheWrite: bgLedger.usage.cacheWrite,
+						cost: bgLedger.usage.hasUnknownCost ? null : bgLedger.usage.cost.total,
+					},
+				}
+			: {}),
 		trust: trustOf(ctx),
 		commands: paneCommands(pi),
-		tasks: paneTasks(ctx.sessionManager.getSessionId()),
+		tasks: paneTasks(sessionId),
 	};
 }
 
@@ -194,8 +216,9 @@ export function applyPaneMessage(
 		else reportAgain();
 	} else if (message.type === "stop_task") {
 		// As /tasks' `x`, whether a turn runs or not; the task list's change reports it.
-		const row = visibleRows(ctx.sessionManager.getSessionId()).find((r) => r.id === message.id);
-		if (row) stopTask(row);
+		const owner = ctx.sessionManager.getSessionId();
+		const row = visibleRows(owner).find((r) => r.id === message.id);
+		if (row) stopTask(row, owner, "remote");
 		else reportAgain();
 	} else if (message.type === "set_trust") {
 		// Reported again on TRUST_CHANGED, as Alt+M's is.

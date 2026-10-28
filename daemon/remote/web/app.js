@@ -17,6 +17,7 @@ import { diffSummary, groupSummary, markerKind, resultSummary } from "./output.j
 import { closePicker, modelGroups, openPicker } from "./picker.js";
 import { filterSessions, fold, matchCommands } from "./search.js";
 import {
+	backgroundUsageHtml,
 	barHtml,
 	compactLines,
 	contextLevel,
@@ -39,7 +40,7 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.42";
+const VERSION = "0.0.43";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 
 function loadViewMode() {
@@ -1117,7 +1118,7 @@ ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
 		return `${head}<p class="muted">${esc(errorText(why))}</p>`;
 	}
 	return `${head}${settingsHtml(report)}
-<div class="numbers">${contextHtml(report.context)}${usageHtml(report.usage)}${whereHtml(report, session && shortPath(session.cwd))}</div>`;
+<div class="numbers">${contextHtml(report.context)}${usageHtml(report.usage)}${backgroundUsageHtml(report.backgroundSubagentUsage)}${whereHtml(report, session && shortPath(session.cwd))}</div>`;
 }
 
 /** Built once each time the sheet opens, so what is typed stays while the rest refreshes. @param {Session | undefined} session */
@@ -1147,7 +1148,7 @@ function tasksHtml() {
 		const id = esc(task.id);
 		const output = state.taskOutputs.get(task.id);
 		const stopping = state.stoppingTasks.has(task.id);
-		const kind = `${TASK_KINDS[task.kind] ?? task.kind}${task.foreground ? " · foreground" : ""}`;
+		const kind = `${TASK_KINDS[task.kind] ?? task.kind}${task.foreground ? " · foreground" : ""}${task.status && task.status !== "running" ? ` · ${task.status}` : ""}${task.model ? ` · ${task.model}` : ""}`;
 		const shown = output?.lines
 			? `<pre class="task-out">${esc(output.lines.join("\n") || "(No output yet)")}</pre>`
 			: output?.error

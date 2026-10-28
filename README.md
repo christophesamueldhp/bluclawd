@@ -49,13 +49,14 @@ scripts/        probe-extensions.ts — headless report of what each extension r
 test/           vitest suites, self-contained — no monorepo, no fixture files
 ```
 
-11 extensions, no runtime dependencies (pi's own packages are peers):
+12 extensions, no runtime dependencies (pi's own packages are peers):
 
 | Extension | Registers |
 |---|---|
 | `permissions` | deny-rule gate on every tool call; Alt+M |
 | `checkpoints` | `/rewind` |
 | `background-bash` | `/tasks`; the `bash`, `monitor` and `task_stop` tools |
+| `subagents` | model-only `subagent` tool (`general-purpose`, `explorer`, `reviewer`, plus trusted `.pi/agents/*.md` and `~/.pi/agent/agents/*.md`) |
 | `branding` | `/theme`; welcome header and mascot |
 | `agent-view` | `/agent-view` (what `←` twice dispatches) |
 | `remote` | `/remote-control` |
@@ -104,7 +105,8 @@ Claude Code's names and behaviours, on top of pi's own commands:
 | Command | What it does |
 |---|---|
 | `permissions.deny`, Alt+M | deny rules block matching tool calls; the footer shows pi's `defaultProjectTrust` (`⏵⏵ always` / `⏸ ask` / `✕ never`) and Alt+M cycles it — see [Permissions](#permissions) |
-| `/tasks` | background tasks dialog: shells (`run_in_background`, Ctrl+B on the model's running bash, or a foreground command past its `timeout`), monitors, and the model's bash still running in the foreground once it has run 2s (marked `foreground`; `x` kills it; Claude Code does not list these); running tasks only; Enter shows a task's output tail, `x` stops it (the model is told without a turn starting), and updates wait while the dialog is open. The model's bash is Claude Code's: `timeout` in milliseconds (2 minutes by default), a command still running then - or on Ctrl+B after 2s, or when you send a message - moves to the background instead of being killed, and the model reads a task's output file with `read`. The footer pill counts the running shells and monitors; ↓ from an empty prompt selects it and Enter opens the dialog. A shell writes its whole output to a file named in its start result and exit notification; `task_stop` stops it. A job notifies the model once when it exits, and once more if it goes quiet for 45s on what reads as an interactive prompt (`(y/n)`, `Press Enter`, …); the `monitor` tool turns each stdout line of a long-running command, or each frame of a WebSocket (`ws`), into an event that wakes the model (Claude Code's `Monitor`; stderr goes to the output file; every monitor expires after `timeout_ms`, 5 minutes by default and at most 30, with one notice so the model can re-arm it) |
+| `/tasks` | background tasks dialog: shells (`run_in_background`, Ctrl+B on the model's running bash, or a foreground command past its `timeout`), monitors, subagents (`subagent` with `background: true`), and the model's bash still running in the foreground once it has run 2s (marked `foreground`; `x` kills it; Claude Code does not list these); running tasks only; Enter shows a task's output tail, `x` stops it (the model is told without a turn starting), and updates wait while the dialog is open. The model's bash is Claude Code's: `timeout` in milliseconds (2 minutes by default), a command still running then - or on Ctrl+B after 2s, or when you send a message - moves to the background instead of being killed, and the model reads a task's output file with `read`. The footer pill counts the running shells and monitors; ↓ from an empty prompt selects it and Enter opens the dialog. A shell writes its whole output to a file named in its start result and exit notification; `task_stop` stops shells, monitors, and background subagents (`sub_*`). A job notifies the model once when it exits, and once more if it goes quiet for 45s on what reads as an interactive prompt (`(y/n)`, `Press Enter`, …); the `monitor` tool turns each stdout line of a long-running command, or each frame of a WebSocket (`ws`), into an event that wakes the model (Claude Code's `Monitor`; stderr goes to the output file; every monitor expires after `timeout_ms`, 5 minutes by default and at most 30, with one notice so the model can re-arm it) |
+| `subagent` tool | model-only delegation (`general-purpose`, `explorer` and `reviewer` bundled, plus custom Markdown definitions in trusted `<cwd>/.pi/agents/*.md` and `~/.pi/agent/agents/*.md`). A child gets a fresh context in the same live checkout with the orchestrator's callable tools, run by the orchestrator's session through its deny rules and hooks; it cannot delegate further. It inherits the parent model and thinking level unless the role or the call picks others. The `subagent_models` tool lists the models a child can use. Every requested run starts immediately, and runs stop only on explicit stop, cancellation, or session/generation/branch invalidation, never on a turn, tool-call, token, or time limit. Foreground calls return child usage in the tool result; `background: true` delivers completion to the originating session branch and tracks background child usage in a separate ledger (`~/.pi/agent/bluclawd/subagents/<session>/background-usage-ledger.json`) |
 | `/rewind` (or Esc twice on an empty prompt, as in Claude Code) | Claude Code's rewind: a file checkpoint per message you send; lists your prompts newest first with what each changed (`a.ts +3 -1`, `No code changes`, `⚠ No code restore`), then Restore code and conversation / Restore conversation (the prompt returns to the editor) / Restore code / Never mind, with no further confirmation (the current files are checkpointed first and listed as `(before rewind)`, so `/rewind` undoes it). New files the agent created since the point (`write`, `bash`) are removed and your own are kept, as in Claude Code; unlike Claude Code it also restores files changed through bash or by hand. Checkpoints are git commits kept under `refs/bluclawd/checkpoints/<session>/`: the newest 50 per session, and another session's refs are pruned after 30 days |
 | `←` on an empty prompt (or `/agent-view`) | agent view, as Claude Code's `claude agents`: background sessions in Needs input (blocked on a prompt) / Working (a turn running) / Idle (nothing running) bands (empty ones hidden; ctrl+s: by directory, this one first, remembered), one line each — `✻`/spinner/`∙` + name, what it is doing (a working session's current tool), age. Type a task + enter to start a background session (ctrl+enter: start it and switch to it), shift+enter / alt+enter / ctrl+j adds a line, ctrl+g writes it in `$EDITOR`, ctrl+v attaches a clipboard image to the new-session composer, an unknown `/command` is sent as the task, `!<command>` runs it in your shell as a row of its own (its last output line while it runs, then done, `exit N — …` or stopped; enter shows its output, ctrl+x stops it then removes the row, and it is never run again), space peeks and replies (the reply is the session's next prompt, `/stop` stops it; a reply draft is kept per session), enter/→ switches this terminal to any session at once, including Working and Needs input (see [Session switching](#session-switching)), ↑↓ wrap, alt/ctrl+↑↓ jump between bands, alt+1-9 opens the Nth session in the focused one's directory, ctrl+x stops then deletes (this terminal's own session too: the terminal moves to agent view), ctrl+t pins, ctrl+r renames, shift+↑↓ reorders, `s:<state>` / `n:<name>` filter (ctrl+f turns the text into a name search), `/resume` brings a past session back and opens it, `/model <name>` (or `default`) sets the model for new ones, `/cd <dir>` sets the directory they start in (relative to the current one; bare `/cd` goes back), tab completes the model or directory (several matches are listed: ↑↓ and tab or enter pick one), typing `/` lists these commands (↑↓ to pick, tab or enter completes one that takes an argument, enter runs the rest), the hint line starts with the mode new ones start in (`⏵⏵ always` or `✕ never`; nothing at pi's default, `ask`), `?` shows the shortcuts, esc returns to your session, and ctrl+c twice (or `exit`, `/exit`) leaves tmux with the sessions still running, except the one `pi` started in this terminal, which ends with it while idle. The footer shows `← for agents` / `← N agents` / `← N done`, and `Press ← again to open agents` after the first press. Every session is a pi of its own in tmux, so it keeps running after its terminal leaves or closes; a local daemon (`daemon/`, a Unix socket in `~/.pi/server`) only lists them. Agent View detects both changed daemon code and a changed Pi installation, and restarts an obsolete daemon. A session that was idle when its pi quit is kept as a row with no process (it resumes when opened or replied to); every row stays until ctrl+x deletes it |
 | `/remote-control` | Claude Code's Remote Control, for every agent-view session: a phone app (a PWA the daemon serves) lists them in agent view's bands, shows a session's conversation and its reply as it streams, sends it a prompt, stops its turn, starts sessions, switches the model, and notifies you; a message once sent is never edited from the phone, only stopped. `/remote-control` turns it on and shows a QR code that pairs your phone; once on, it offers a menu: pair a new phone, the paired phones (remove one or all), start at login (macOS), turn off — see [Remote control](#remote-control) |
@@ -294,6 +296,135 @@ reading the API:
   A peek reply cannot answer a session's open dialog (enter opens it to answer), and each idle
   session is a running pi process. `tab` does not browse subagents.
 
+## Subagents
+
+The orchestrator (the parent session) splits work across child agents that run in the **same live
+checkout** with the orchestrator's authority and nothing more: a child gets the orchestrator's callable
+tools (built-in, custom and MCP), and each of its calls is executed by the orchestrator's session, so the
+same deny rules and hooks apply, also after a background launch returns. Model-only tools stay with the
+orchestrator, so children cannot spawn, list or stop agents. There are no locks or conflict detection:
+edits are live for everyone and the last write wins, so the orchestrator owns the split, handoffs and
+final verification. Children talk to the orchestrator, not the user; no bluclawd hook prompts on
+their calls, but the sandbox's network prompt is per host per session and any agent's command can
+trigger it. Same-authority shell or MCP code can still start
+external processes; nothing at the OS level prevents that. The historical strict-cleanup proof is
+preserved; the full suite includes three failing detached/double-fork cleanup assertions from it.
+
+Ask the parent to delegate distinct pieces of work with explicit files or areas in each task.
+The model calls `subagent` with `{ "agent": "general-purpose", "task": "Add input validation to src/auth.ts" }`;
+`"background": true` returns immediately instead of waiting. There is no `/agents` command.
+Background runs appear in `/tasks` (`X` stops every running agent) and the phone's task sheet;
+local, model-issued, and remote stops use the same session-owned run. The orchestrator checks
+progress with `subagent_status` (status, turns, tool calls, elapsed time, last activity and last
+message) and stops one child or `"all"` with `subagent_stop`; nothing stops a child automatically.
+Interrupting the orchestrator's turn leaves background children running. User and remote stops do not start an unsolicited parent turn.
+Print/JSON invocations support foreground delegation only; background also works in RPC mode.
+
+Custom roles are Markdown files in `~/.pi/agent/agents/` or a trusted project's `.pi/agents/`.
+A trusted project definition overrides a user definition, which overrides a bundled role.
+For example, `.pi/agents/api-review.md`:
+
+```markdown
+---
+name: api-review
+description: Review explicitly supplied API handler files for defects.
+tools: read, grep, find, ls, bash
+model: inherit
+---
+Review only the supplied targets. Do not edit files. Cite path:line evidence and report exactly which checks ran.
+```
+
+Reload after changing definitions. Only `name`, `description`, `tools`, `model`, and `thinkingLevel`
+are supported; the obsolete
+`maxTurns` field is rejected with a remove-field diagnostic. Omitting `tools` gives the child every
+tool the orchestrator can share; a `tools` list narrows that set, and naming a tool the orchestrator
+does not have fails the spawn. A role's tool list is an orchestration choice, not a security boundary.
+Explicit models use `provider/model`; virtual routers and model aliases are unsupported. Children
+get a fresh conversation and applicable trusted instructions, not the parent's history.
+
+The parent can also pass an inline role instead of a name:
+`{ "agent": { "name": "schema-check", "description": "…", "instructions": "…" }, "task": "…" }`,
+with optional `tools`, `model`, and `thinkingLevel`. An inline role is validated like a saved
+one, recorded with source `inline`, and never written to disk.
+
+A call may also set `model` (`provider/model` or `inherit`) and `thinkingLevel` (`off` … `max` or
+`inherit`). Each is chosen independently: the call's value, else the role's. With neither, an
+inherited model keeps the parent's thinking level, and a chosen model gets pi's default for it (the
+user's per-model setting, else the default thinking level, fitted to what the model supports).
+`inherit` on the call picks the parent even when the role sets a value. An unknown model, missing
+auth, a virtual router, or an explicitly requested thinking level the model does not support fails
+before the run starts; nothing is substituted. `subagent_models` lists each model's auth status, supported thinking levels,
+and whether a child can run it.
+
+Each run has a name, unique among the running agents of the session: the call's `name`, or
+`<role>-<n>`. While runs are in progress, `subagent_message({ to, content })` carries text between
+the orchestrator (`parent`) and running children, addressed by name or `sub_…` run ID, including
+sibling to sibling within the same parent session. A child's task lists the agents already running,
+and its `subagent_roster` tool shows the current list. The sender is bound by the runtime, never taken from the message. A child
+receives messages at its next safe point without a new turn. Child messages and background
+completion notices that arrive close together reach the orchestrator as one message: it wakes an
+idle orchestrator once, or steers a busy one at its next boundary. Receipts say `accepted`, `unavailable` (unknown, finished, or other session), or
+`invalidated` (session reloaded), never handled. The runtime frames each message by
+its bound sender: from the orchestrator it is task direction a child follows as a course correction,
+from a sibling it is information or a request the child weighs, and from a child it is a report. No
+message is user approval: none can approve actions or grant tools.
+
+A message from the orchestrator to a child that has **completed** resumes it in the background with
+its saved transcript, the same name, run ID, role, model and thinking level, and the message as its
+next instruction; its report arrives like a background completion. Only the orchestrator can do
+this: a sibling's message to a finished child is refused as finished, and a stopped, failed or
+interrupted child cannot be resumed. Each resumed generation's usage is counted once in the
+background ledger. After a reload, a run from before it cannot be resumed; spawn a new child that
+reads the earlier report.
+
+Reports and private child transcripts live outside the repository under
+`<getAgentDir()>/bluclawd/subagents/<parent-session>/<run>/`. The parent gets a bounded, untrusted
+report with runtime-owned execution fields. `Tool executions (observed)` counts the child's finished
+tool calls per tool; test results in the report are agent-reported, and a zero shell exit is never
+read as test coverage. `Snapshot` records HEAD and a Git-status fingerprint, not a frozen checkout:
+always recheck citations before acting on findings. Leaving the originating conversation branch or
+replacing its session invalidates delivery; a restart marks unfinished runs interrupted rather than resuming them.
+
+Foreground child usage, including usage reported by the orchestrator's tools a child ran, is included
+once in Pi's native totals. Background child usage, and tool usage after the launch result, is additional:
+`/status`, the phone's status sheet, and the separate `background-usage-ledger.json` disclose it.
+Unpriced child usage is labelled unknown, not free; price-table estimates are not subscription invoices.
+
+Coordination is the orchestrator's job. It should give each child its own files or area, name who owns a
+shared file, and tell the others to ask that owner through `subagent_message` instead of editing it.
+A child that hits a failing command, a denied action or an unexpected change should report it rather than
+work around it.
+
+**Evaluation.** `test/subagents-evaluation.test.ts` runs scripted-provider scenarios on a real fixture
+checkout and grades each run by the fixture's own tests and the final tree, never by what the transcript
+claims. A run with failing tests is incorrect however confident its report is, and a helper written twice is
+counted as a duplicate even when the tests pass. The scenarios are:
+- independent tasks, single-agent versus orchestrated;
+- an overlapping utility edit resolved by an explicit handoff;
+- a failing shell run reported and repaired, with a reviewer that adds no implementation;
+- a permission denial;
+- cancellation while a child waits for a message;
+- a disposal race.
+
+`node --experimental-strip-types scripts/eval-subagents.ts` prints the opt-in live evaluation command
+without making model calls. `--live --max-usd <dollars>` runs the installed `pi` with this checkout's
+extensions on scratch fixtures, once single-agent and once orchestrated per scenario. It stops scheduling
+trials when the estimated spend reaches the given amount; that limit belongs to the harness, not to
+subagents. It writes correctness, test counts, duplicates, changed files, runs, agent messages, elapsed
+time, usage and its stated limitations to a JSON file.
+
+Last recorded live evidence (2026-10-28):
+- Two manual runs, not graded trials: `gpt-6.1-sol` orchestrating `gpt-6-luna` and `gpt-6.1-terra` children
+  finished with all fixture tests passing (7/7 and 6/6). The second run logged sibling handoff messages and a
+  resumed child.
+- One harness run (`--max-usd 1`, sol orchestrating luna, one trial per mode): all six trials were correct,
+  with no duplicates, for an estimated $0.19.
+  - In the overlap scenario, the children exchanged four handoff messages.
+  - One orchestrated child failed on a provider WebSocket error and was respawned by the orchestrator.
+  - A single trial per mode measures nothing about quality.
+
+Details are in issue #15.
+
 ## Permissions
 
 pi asks nothing before a tool runs, and bluclawd keeps it that way: there are no
@@ -315,7 +446,7 @@ drop your global rules. Syntax: `Bash(npm test *)` is `npm test` alone or with
 arguments; `*` stays within a path segment and `**` crosses them; `Edit(...)`
 also covers write and `Read(...)` also covers grep, find and ls; `//path` is
 absolute, `~/path` is home, anything else is relative to the working directory;
-`WebFetch(domain:x.com)`, `WebSearch(...)`, and MCP tools as `mcp__server`,
+`WebFetch(domain:x.com)`, `WebSearch(...)`, `Subagent` or `Subagent(explorer)`, and MCP tools as `mcp__server`,
 `mcp__server__*`, `mcp__server__tool` or `Mcp(server:tool)` — bluclawd ships no
 web or MCP tools, so these apply to the `webfetch`/`websearch`/MCP tools another
 pi package registers; `dir/**` covers

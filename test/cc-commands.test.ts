@@ -4,6 +4,22 @@ import { formatStatus } from "../ext/help/diagnostics.ts";
 const plain = { bold: (s: string) => s, fg: (_c: string, s: string) => s };
 
 describe("/status report", () => {
+	it("shows additional background usage separately when the ledger has child runs", () => {
+		const lines = formatStatus(
+			{
+				piVersion: "1.0.4",
+				subscription: false,
+				defaultProjectTrust: "ask",
+				projectTrusted: true,
+				cwd: "/x",
+				backgroundSubagents: "2 runs, 400 tokens, cost unknown — excluded from /session totals",
+			},
+			plain,
+		);
+		expect(lines).toContain("Background subagents");
+		expect(lines).toContain("2 runs, 400 tokens, cost unknown — excluded from /session totals");
+	});
+
 	it("lists model and project facts and points at /session and /context", () => {
 		const lines = formatStatus(
 			{

@@ -10,6 +10,7 @@
       "./ext/sandbox/index.ts",
       "./ext/checkpoints/index.ts",
       "./ext/background-bash/index.ts",
+      "./ext/subagents/index.ts",
       "./ext/branding/index.ts",
       "./ext/agent-view/index.ts",
       "./ext/remote/index.ts",
@@ -42,6 +43,6 @@
     "lint": "biome check ."
   },
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "0.0.81"
+    "@anthropic-ai/sandbox-runtime": "file:vendor/sandbox-runtime/anthropic-ai-sandbox-runtime-0.0.81-bluclawd.1.tgz"
   }
 }

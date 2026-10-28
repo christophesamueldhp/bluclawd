@@ -28,6 +28,7 @@ const VERB: Record<string, string> = {
 	ls: "Ls",
 	webfetch: "WebFetch",
 	websearch: "WebSearch",
+	subagent: "Subagent",
 };
 
 function isMcpToolName(tool: string): boolean {
@@ -83,6 +84,7 @@ function subject(tool: string, input: Record<string, unknown>): string {
 		const m = /^mcp__(.+?)__(.+)$/.exec(tool);
 		return m ? `${m[1]}:${m[2]}` : "";
 	}
+	if (tool === "subagent") return String(input.agent ?? "");
 	if (tool === "websearch") return searchQueries(input)[0] ?? "";
 	return tool === "bash" ? String(input.command ?? "") : String(input.path ?? input.url ?? input.query ?? "");
 }
@@ -167,8 +169,22 @@ function globToRegExp(pat: string, pathLike = true): RegExp {
 
 /** A path rule's patterns: a relative one (`.env`, `src/**`) also names its path under the cwd. */
 function pathRulePatterns(ruleSubject: string, cwd: string): RegExp[] {
-	const patterns = [globToRegExp(ruleSubject)];
-	if (!/^[/~*]/.test(ruleSubject)) patterns.push(globToRegExp(resolveToCwd(ruleSubject, cwd)));
+	const rawCandidates = [ruleSubject];
+	if (!/^[/~*]/.test(ruleSubject)) rawCandidates.push(resolveToCwd(ruleSubject, cwd));
+	const patterns: RegExp[] = [];
+	for (const candidate of rawCandidates) {
+		patterns.push(globToRegExp(candidate));
+		const expanded = homeExpand(candidate.replace(/^\/\//, "/"));
+		if (!expanded.startsWith("/")) continue;
+		const starIdx = expanded.indexOf("*");
+		const prefix = starIdx === -1 ? expanded : expanded.slice(0, expanded.lastIndexOf("/", starIdx));
+		if (!prefix) continue;
+		const realPrefix = realpathIfSymlink(prefix);
+		if (realPrefix && realPrefix !== prefix) {
+			const suffix = starIdx === -1 ? "" : expanded.slice(prefix.length);
+			patterns.push(globToRegExp(`${realPrefix}${suffix}`));
+		}
+	}
 	return patterns;
 }
 
@@ -621,6 +637,47 @@ export function grepOutputWithoutDenied(
 	const kept = lines.filter((line) => !fromDenied(line));
 	if (kept.length === lines.length) return undefined;
 	return kept.some((line) => new RegExp(GREP_LINE.source).test(line)) ? kept.join("\n") : "No matches found";
+}
+
+/**
+ * Filter denied paths out of `find` or `ls` output for a directory search.
+ */
+export function pathListOutputWithoutDenied(
+	deny: string[],
+	tool: "find" | "ls",
+	input: Record<string, unknown>,
+	output: string,
+	cwd: string,
+): string | undefined {
+	if (deny.length === 0) return undefined;
+	const dir = resolveToCwd(String(input.path ?? "") || ".", cwd);
+	if (!isDirectory(dir)) return undefined;
+	const emptyText = tool === "find" ? "No files found matching pattern" : "(empty directory)";
+	if (output === emptyText) return undefined;
+
+	const lines = output.split("\n");
+	let changed = false;
+	const keptLines: string[] = [];
+	let keptEntries = 0;
+
+	for (const line of lines) {
+		if (line === "" || (line.startsWith("[") && line.endsWith("]"))) {
+			keptLines.push(line);
+			continue;
+		}
+		const normalizedEntry = line.endsWith("/") ? line.slice(0, -1) : line;
+		const candidatePath = join(dir, normalizedEntry);
+		if (deniedBy(deny, tool, { path: candidatePath }, cwd) !== undefined) {
+			changed = true;
+			continue;
+		}
+		keptEntries++;
+		keptLines.push(line);
+	}
+
+	if (!changed) return undefined;
+	if (keptEntries === 0) return emptyText;
+	return keptLines.join("\n").replace(/^\n+/, "");
 }
 
 function isDirectory(path: string): boolean {

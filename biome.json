@@ -25,6 +25,13 @@
 		"lineWidth": 120
 	},
 	"files": {
-		"includes": ["ext/**/*.ts", "daemon/**/*.ts", "scripts/**/*.ts", "test/**/*.ts", "daemon/remote/web/**/*.js"]
+		"includes": [
+			"ext/**/*.ts",
+			"daemon/**/*.ts",
+			"scripts/**/*.ts",
+			"test/**/*.ts",
+			"daemon/remote/web/**/*.js",
+			"!!.superpowers"
+		]
 	}
 }

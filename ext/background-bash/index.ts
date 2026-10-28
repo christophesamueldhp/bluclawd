@@ -31,11 +31,12 @@ import {
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { stripAnsi } from "../../daemon/ansi.ts";
-import { subscribeAgentTasks } from "../_shared/agent-tasks.ts";
+import { agentTasks, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { sharedRef } from "../_shared/global-state.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { wrapExec } from "../sandbox/runtime.ts";
+import { isSubagentTaskId, isTerminalSubagentStatus, type SubagentRunRecord } from "../subagents/runs.ts";
 import { backgroundBashJobs, describeJobStatus, isShellTaskId, noTaskError, shellTaskStop } from "./background-bash.ts";
 import { backgroundTasksDisabled } from "./bash-limits.ts";
 import { createClaudeBashTool } from "./bash-tool.ts";
@@ -190,8 +191,27 @@ const backgroundBash: InlineExtension = {
 				// A model fills an optional string with "": empty is absent.
 				const id = (params.task_id?.trim() || params.shell_id?.trim()) ?? "";
 				if (!id) throw new Error("Missing required parameter: task_id");
+				const callerOwner = toolCtx?.sessionManager?.getSessionId();
+				if (isSubagentTaskId(id)) {
+					const source = agentTasks();
+					const run = source?.getRun?.(id, callerOwner) as SubagentRunRecord | undefined;
+					if (!run) throw noTaskError(id);
+					if (isTerminalSubagentStatus(run.status)) {
+						throw new Error(`Task ${id} is not running (status: ${run.status})`);
+					}
+					const stopped = source?.stop(id, { owner: callerOwner, source: "model" });
+					if (!stopped) throw noTaskError(id);
+					const label = `${run.agentName}: ${run.taskSummary || run.agentName}`;
+					const text = JSON.stringify({
+						message: `Successfully stopped task: ${id} (${label})`,
+						task_id: id,
+						task_type: "local_agent",
+						command: label,
+					});
+					return { content: [{ type: "text", text }], details: undefined };
+				}
 				if (!isShellTaskId(id)) throw noTaskError(id);
-				const text = shellTaskStop(id, { owner: toolCtx?.sessionManager?.getSessionId() });
+				const text = shellTaskStop(id, { owner: callerOwner });
 				return { content: [{ type: "text", text }], details: undefined };
 			},
 		});
@@ -259,12 +279,14 @@ const backgroundBash: InlineExtension = {
 				// Runtimes and output tails move on their own.
 				const timer = setInterval(() => dialogTui.requestRender(), 1000);
 				const offJobs = backgroundBashJobs.subscribe(() => dialogTui.requestRender());
+				const offAgents = subscribeAgentTasks(() => dialogTui.requestRender());
 				const offHeld = subscribeNotificationHold(() => dialogTui.requestRender());
 				const offForeground = subscribeForegroundShells(() => dialogTui.requestRender());
 				return Object.assign(dialog as Component, {
 					dispose: () => {
 						clearInterval(timer);
 						offJobs();
+						offAgents();
 						offHeld();
 						offForeground();
 					},
