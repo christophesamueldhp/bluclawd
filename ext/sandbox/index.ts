@@ -21,9 +21,9 @@ import type { SubagentCommandOwner } from "../_shared/subagent-commands.ts";
 import { runtimeConfig, sandboxSetting, saveSandboxEnabled } from "./config.ts";
 import {
 	type AskNetwork,
-	commandOwnersRunning,
 	forgetWrappedExec,
 	markSandboxUnavailable,
+	runningCommands,
 	type SandboxStatus,
 	sandboxStatus,
 	sandboxWraps,
@@ -35,24 +35,27 @@ const SUBAGENT_NETWORK_REASON =
 	"reaching this host needs the user's approval, which only the orchestrator can ask for; the orchestrator has been told. Do not retry; continue without it or wait for the orchestrator.";
 
 /**
- * Asks the user once per host and port per session, one dialog at a time; no UI denies. A host not
- * yet answered while only subagents' commands run is denied without a dialog and reported to the
- * orchestrator, since subagents never ask the user; that denial is not remembered.
+ * Asks the user once per host and port per session, one dialog at a time; no UI denies. Subagents
+ * never ask the user, so a host not yet answered is denied without a dialog and reported to the
+ * orchestrator when a subagent's command asks, or when the asking command names no running command
+ * while any subagent's command runs: a command presents its own id, so a subagent's can drop it.
+ * That denial is not remembered.
  */
 export function networkAsker(
 	context: () => ExtensionContext | undefined,
-	owners: () => readonly (SubagentCommandOwner | undefined)[] = commandOwnersRunning,
+	commands: () => ReadonlyMap<string, SubagentCommandOwner | undefined> = runningCommands,
 ): { ask: AskNetwork; forget(): void } {
 	const answers = new Map<string, Promise<boolean>>();
 	// pi's dialog replaces an open one without settling it, so a dialog opens only after the last settled.
 	let chain: Promise<unknown> = Promise.resolve();
 	return {
-		ask: ({ host, port }) => {
+		ask: ({ host, port, commandId }) => {
 			const target = port === undefined ? host : `${host}:${port}`;
 			let answer = answers.get(target);
-			const running = owners();
-			if (!answer && running.length > 0 && running.every((owner) => owner !== undefined)) {
-				const suspects = [...new Set(running)];
+			const running = commands();
+			const owners = commandId !== undefined && running.has(commandId) ? [running.get(commandId)] : running.values();
+			const suspects = [...new Set(owners)].filter((owner) => owner !== undefined);
+			if (!answer && suspects.length > 0) {
 				suspects[0].reportNetworkDenied(
 					target,
 					suspects.map((owner) => owner.name),

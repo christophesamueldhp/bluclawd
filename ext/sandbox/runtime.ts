@@ -12,10 +12,14 @@ import { checkRuntimeConfig, type RuntimeConfig } from "./config.ts";
 
 export type Exec = BashOperations["exec"];
 
-/** Whether a sandboxed command may reach a host no rule covers; a denial may say what to do instead. */
+/**
+ * Whether a sandboxed command may reach a host no rule covers; a denial may say what to do instead.
+ * `commandId` is the id the asking connection names, which the command itself presents.
+ */
 export type AskNetwork = (request: {
 	host: string;
 	port: number | undefined;
+	commandId?: string;
 }) => Promise<boolean | { allow: false; reason: string }>;
 
 /** The part of `srt`'s `SandboxManager` bluclawd calls. */
@@ -134,9 +138,9 @@ async function start(config: RuntimeConfig, ask: AskNetwork, platform: NodeJS.Pl
 	}
 }
 
-/** Whom each sandboxed command running now runs for: a subagent, or undefined for the orchestrator. */
-export function commandOwnersRunning(): (SubagentCommandOwner | undefined)[] {
-	return [...state.get().running.values()];
+/** Sandboxed commands running now, by id: the subagent each runs for, or undefined for the orchestrator. */
+export function runningCommands(): ReadonlyMap<string, SubagentCommandOwner | undefined> {
+	return state.get().running;
 }
 
 export function sandboxWraps(): boolean {
