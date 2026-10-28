@@ -5,6 +5,9 @@
 		"enabled": true,
 		"rules": {
 			"recommended": true,
+			"nursery": {
+				"noImportCycles": "error"
+			},
 			"style": {
 				"noNonNullAssertion": "off",
 				"useConst": "error",
