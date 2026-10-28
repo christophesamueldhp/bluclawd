@@ -1,5 +1,5 @@
 import type { Usage } from "@earendil-works/pi-ai";
-import { sanitizeDiagnosticText } from "./runner.ts";
+import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import {
 	isTerminalSubagentStatus,
 	type SubagentLifecycleStatus,

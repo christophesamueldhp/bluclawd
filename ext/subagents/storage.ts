@@ -10,8 +10,8 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import { sanitizeReportText } from "./results.ts";
-import { sanitizeDiagnosticText } from "./runner.ts";
 import {
 	addSubagentUsage,
 	createEmptySubagentUsage,

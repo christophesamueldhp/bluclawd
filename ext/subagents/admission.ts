@@ -18,13 +18,13 @@ import {
 	SUBAGENT_THINKING_LEVELS,
 	type SubagentModelSpec,
 } from "./definitions.ts";
+import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
 import {
 	captureWorkspaceSnapshot,
 	type ParentToolSnapshot,
 	type ResolvedChildModel,
 	resolveChildModelAndRuntime,
-	sanitizeDiagnosticText,
 	snapshotParentTools,
 } from "./runner.ts";
 import type { AdmittedSubagentHandle, SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";

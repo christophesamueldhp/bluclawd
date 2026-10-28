@@ -29,6 +29,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { runForSubagent, type SubagentCommandOwner } from "../_shared/subagent-commands.ts";
 import { type AgentDefinition, isSubagentThinkingLevel, type SubagentModelSpec } from "./definitions.ts";
+import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import {
 	addSubagentUsage,
 	createEmptySubagentUsage,
@@ -109,13 +110,6 @@ export interface RunSubagentOptions extends SubagentRunnerExecuteParams {
 	/** Pi built-in extensions (codemode, tool_search) the child runs over its own tools. */
 	builtinExtensions: readonly string[];
 	onChildSessionCreated?: (session: AgentSession) => void;
-}
-
-export function sanitizeDiagnosticText(input: string): string {
-	return input
-		.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [REDACTED]")
-		.replace(/\b(sk-[A-Za-z0-9_-]{6,})\b/g, "[REDACTED_KEY]")
-		.replace(/\b(api[_-]?key|token|secret|password)\s*[:=]\s*["']?[^\s"',;)]+/gi, "$1=[REDACTED]");
 }
 
 export function captureWorkspaceSnapshot(cwd: string): WorkspaceSnapshot {
