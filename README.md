@@ -310,8 +310,10 @@ to the orchestrator, which can run the command itself so that the user is asked.
 is open to every agent. While an orchestrator command (a background shell or monitor included) also
 runs, the sandbox cannot tell whose request it is and asks the user as before
 ([#26](https://github.com/christophesamueldhp/bluclawd/issues/26)). Same-authority shell or MCP code can still start
-external processes; nothing at the OS level prevents that. The historical strict-cleanup proof is
-preserved; the full suite includes three failing detached/double-fork cleanup assertions from it.
+external processes; nothing at the OS level prevents that. On macOS the sandbox does not contain process
+lifetime: a command that detaches or double-forks a descendant leaves it running after a stop. The full
+suite keeps three failing detached/double-fork assertions for this; they are the target of
+[#29](https://github.com/christophesamueldhp/bluclawd/issues/29).
 
 Ask the parent to delegate distinct pieces of work with explicit files or areas in each task.
 The model calls `subagent` with `{ "agent": "general-purpose", "task": "Add input validation to src/auth.ts" }`;
