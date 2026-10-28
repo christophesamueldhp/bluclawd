@@ -2166,3 +2166,29 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 		}
 	});
 });
+
+describe("Live finding — background availability in the subagent description", () => {
+	it.each([
+		["print", true],
+		["rpc", false],
+	] as const)("tells the %s-mode orchestrator whether background runs are available", async (mode, oneShot) => {
+		const cwd = makeTempDir(`desc-${mode}-cwd`);
+		const agentDir = makeTempDir(`desc-${mode}-agent`);
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
+		try {
+			await session.bindExtensions({ mode });
+			let description = "";
+			faux.setResponses([
+				(context: TranscriptContext) => {
+					description = getCurrentTools(context.messages).find((t) => t.name === "subagent")?.description ?? "";
+					return fauxAssistantMessage("Done.");
+				},
+			]);
+			await session.prompt("Look at your tools.", { expandPromptTemplates: false });
+			expect(description).toContain("Available subagent roles:");
+			expect(description.includes("Background runs are unavailable in this one-shot mode")).toBe(oneShot);
+		} finally {
+			session.dispose();
+		}
+	});
+});

@@ -89,7 +89,7 @@ export interface SubagentExtensionOptions {
 	batchWindowMs?: number;
 }
 
-function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog): string {
+function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot = false): string {
 	const rolesSection = catalog
 		? formatAgentRoutingDescriptions(catalog)
 		: "- `general-purpose`: Implementation work.\n- `explorer`: Codebase exploration.\n- `reviewer`: Code review.";
@@ -99,13 +99,14 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog): string 
 		"You own the split. Give each child a distinct task over separate files or areas: there are no locks, edits are live for you and every sibling, and the last write wins. Verify the combined result yourself.",
 		"",
 		"When to delegate:",
-		"- Independent pieces of work that can run in parallel.",
+		"- Independent pieces of work that can run in parallel: put their subagent calls together in one message, since calls in separate messages run one after another.",
 		"- Exploration or review whose intermediate output does not belong in the main conversation.",
 		"",
 		"When NOT to delegate:",
 		"- Single-file lookups or edits you can do directly.",
 		"- Tightly coupled sequential steps where each step depends on the previous result.",
 		"",
+		...(oneShot ? ["Background runs are unavailable in this one-shot mode: omit `background`.", ""] : []),
 		"Available subagent roles:",
 		rolesSection,
 	].join("\n");
@@ -899,7 +900,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				if (!loadout.declared.some((t) => t.name === "subagent")) return undefined;
 				return {
 					descriptions: {
-						subagent: buildBaseSubagentDescription(catalog),
+						subagent: buildBaseSubagentDescription(
+							catalog,
+							activeCtx?.mode === "print" || activeCtx?.mode === "json",
+						),
 					},
 				};
 			},
