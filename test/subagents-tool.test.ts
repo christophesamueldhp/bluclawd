@@ -22,6 +22,7 @@ import {
 import { defineTool, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentTasks } from "../ext/_shared/agent-tasks.ts";
+import { applyPaneMessage } from "../ext/remote/report.ts";
 import { MAX_TASK_INPUT_BYTES } from "../ext/subagents/index.ts";
 import { readPersistedRunRecord } from "../ext/subagents/storage.ts";
 import { createParentSessionWithSubagents } from "./helpers/subagent-session.ts";
@@ -576,6 +577,10 @@ describe("Ticket #10 — Per-spawn model and thinking selection", () => {
 			thinkingLevels: ["low", "high"],
 			route: () => ({ model: faux.getModel("faux-main"), thinkingLevel: "low" }),
 		});
+		modelRuntime.registerNativeProvider({
+			...fauxProvider({ provider: "native-unconfigured" }).provider,
+			auth: { apiKey: { name: "Unconfigured", resolve: async () => undefined } },
+		});
 		await modelRuntime.refresh({ allowNetwork: false });
 		try {
 			await session.bindExtensions({ mode: "print" });
@@ -597,6 +602,8 @@ describe("Ticket #10 — Per-spawn model and thinking selection", () => {
 				auth: "missing",
 				executionSupport: "supported",
 			});
+			// A native provider without stored credentials may still resolve its own auth.
+			expect(models.find((m) => m.provider === "native-unconfigured")).toMatchObject({ auth: "unknown" });
 			expect(models.find((m) => m.provider === "virtual-router")).toMatchObject({
 				id: "auto",
 				thinkingLevels: null,
@@ -1854,6 +1861,7 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 					{ id },
 				);
 			let parentStep = 0;
+			let apiMessaged = false;
 			const main = [
 				fauxAssistantMessage([spawn("api", "spawn_api"), spawn("ui", "spawn_ui")]),
 				fauxAssistantMessage("Launched."),
@@ -1861,10 +1869,18 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 			faux.setResponses(
 				Array.from(
 					{ length: 12 },
-					() => (_c: TranscriptContext, _o: unknown, _s: unknown, model: { id: string }) =>
-						model.id === "faux-alt"
-							? fauxAssistantMessage([fauxToolCall("child_gate", {}, { id: `gate_${Math.random()}` })])
-							: (main[parentStep++] ?? fauxAssistantMessage("Parent ack.")),
+					() => (context: TranscriptContext, _o: unknown, _s: unknown, model: { id: string }) => {
+						if (model.id !== "faux-alt") return main[parentStep++] ?? fauxAssistantMessage("Parent ack.");
+						const gate = fauxToolCall("child_gate", {}, { id: `gate_${Math.random()}` });
+						if (apiMessaged || !JSON.stringify(context.messages).includes("Work as api.")) {
+							return fauxAssistantMessage([gate]);
+						}
+						apiMessaged = true;
+						return fauxAssistantMessage([
+							fauxToolCall("subagent_message", { to: "ui", content: "api started" }, { id: "api_note" }),
+							gate,
+						]);
+					},
 				),
 			);
 			await session.prompt("Delegate two.", { expandPromptTemplates: false });
@@ -1873,7 +1889,8 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 			);
 			const statusOf = () =>
 				runIds.map((id) => agentTasks()?.getRun?.(id) as { status: string; toolCallCount: number });
-			for (let i = 0; i < 2000 && statusOf().some((run) => run?.toolCallCount !== 1); i++) {
+			const settled = () => statusOf()[0]?.toolCallCount === 2 && statusOf()[1]?.toolCallCount === 1;
+			for (let i = 0; i < 2000 && !settled(); i++) {
 				await new Promise((resolve) => setTimeout(resolve, 10));
 			}
 
@@ -1890,8 +1907,13 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 
 			const status = toolResultText(session, "status").text;
 			for (const name of ["api", "ui"]) expect(status).toContain(`${name} (general-purpose, sub_`);
-			expect(status).toMatch(/turns: 1, tool calls: 1, elapsed: \d+s/);
-			expect(status).toMatch(/last activity: tool child_gate \d+s ago; last message: never/);
+			const [apiStatus, uiStatus] = ["api", "ui"].map(
+				(name) => status.split("\n\n").find((block) => block.startsWith(`${name} (`)) ?? "",
+			);
+			expect(apiStatus).toMatch(/turns: 1, tool calls: 2, elapsed: \d+s/);
+			expect(apiStatus).toMatch(/last message: \d+s ago/);
+			expect(uiStatus).toMatch(/turns: 1, tool calls: 1, elapsed: \d+s/);
+			expect(uiStatus).toMatch(/last activity: tool child_gate \d+s ago; last message: never/);
 			expect(toolResultText(session, "stop_all").text).toContain("Stopped 2 subagents.");
 			for (let i = 0; i < 2000 && agentTasks()?.list(session.sessionId).length; i++) {
 				await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1904,6 +1926,85 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 			}
 		} finally {
 			open();
+			session.dispose();
+		}
+	});
+});
+
+describe("Spec #6 story 42 — /tasks and remote controls on real runs", () => {
+	it("serves a finished child's full report and stops a running child from the phone", async () => {
+		const cwd = makeTempDir("controls-cwd");
+		const agentDir = makeTempDir("controls-agent");
+		const childGate = defineTool({
+			name: "child_gate",
+			label: "Child gate",
+			description: "Waits until aborted.",
+			parameters: Type.Object({}),
+			execute: async (_id, _params, signal) => {
+				await new Promise((resolve) => signal?.addEventListener("abort", resolve));
+				return { content: [{ type: "text", text: "aborted" }], details: undefined };
+			},
+		});
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir, extraTools: [childGate] });
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			const spawn = (name: string, id: string) =>
+				fauxToolCall(
+					"subagent",
+					{
+						agent: "general-purpose",
+						name,
+						task: `Work as ${name}.`,
+						background: true,
+						model: "faux-tool/faux-alt",
+					},
+					{ id },
+				);
+			let parentStep = 0;
+			const main = [
+				fauxAssistantMessage([spawn("done", "spawn_done"), spawn("busy", "spawn_busy")]),
+				fauxAssistantMessage("Launched."),
+			];
+			faux.setResponses(
+				Array.from(
+					{ length: 8 },
+					() => (context: TranscriptContext, _o: unknown, _s: unknown, model: { id: string }) => {
+						if (model.id !== "faux-alt") return main[parentStep++] ?? fauxAssistantMessage("Parent ack.");
+						// The task opens the child's prompt; a sibling sees it only inside its roster.
+						return /"(text|content)":"Work as done\./.test(JSON.stringify(context.messages))
+							? fauxAssistantMessage("DONE-MARK: the full report.")
+							: fauxAssistantMessage([fauxToolCall("child_gate", {}, { id: `gate_${Math.random()}` })]);
+					},
+				),
+			);
+			await session.prompt("Delegate two.", { expandPromptTemplates: false });
+			const [doneId, busyId] = ["spawn_done", "spawn_busy"].map(
+				(id) => (toolResultText(session, id).result?.details as { runId: string }).runId,
+			);
+			const runOf = (id: string) => agentTasks()?.getRun?.(id) as { status: string; toolCallCount: number };
+			const waitFor = async (condition: () => boolean) => {
+				for (let i = 0; i < 2000 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+				expect(condition()).toBe(true);
+			};
+			await waitFor(() => runOf(doneId)?.status === "completed" && runOf(busyId)?.toolCallCount === 1);
+
+			expect(agentTasks()?.getReport?.(doneId)).toContain("DONE-MARK: the full report.");
+			expect(
+				agentTasks()
+					?.list()
+					.map((task) => task.id),
+			).toEqual([busyId]);
+
+			const phone = { sessionManager: { getSessionId: () => session.sessionId } };
+			const foreign = { sessionManager: { getSessionId: () => "sess_foreign" } };
+			let reported = 0;
+			applyPaneMessage({ type: "stop_task", id: busyId }, foreign as never, {} as never, () => reported++);
+			expect(reported).toBe(1);
+			expect(runOf(busyId).status).toBe("running");
+			applyPaneMessage({ type: "stop_task", id: busyId }, phone as never, {} as never, () => reported++);
+			await waitFor(() => readPersistedRunRecord(agentDir, session.sessionId, busyId)?.status === "cancelled");
+			expect(readPersistedRunRecord(agentDir, session.sessionId, busyId)).toMatchObject({ stopSource: "remote" });
+		} finally {
 			session.dispose();
 		}
 	});
