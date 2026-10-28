@@ -27,6 +27,7 @@ import {
 	type ToolDefinition,
 	type ToolLoadout,
 } from "@earendil-works/pi-coding-agent";
+import { runForSubagent, type SubagentCommandOwner } from "../_shared/subagent-commands.ts";
 import { type AgentDefinition, isSubagentThinkingLevel, type SubagentModelSpec } from "./definitions.ts";
 import {
 	addSubagentUsage,
@@ -278,16 +279,20 @@ export function snapshotParentTools(loadout: ToolLoadout, names: readonly string
 		});
 }
 
-/** One child tool per parent tool, each executed by the orchestrator's session with its hooks and rules. */
+/**
+ * One child tool per parent tool, each executed by the orchestrator's session with its hooks and rules,
+ * on behalf of `owner` so the sandbox can tell the child's commands from the orchestrator's.
+ */
 export function createParentToolProxies(
 	parent: Pick<ExtensionToolContext, "executeTool">,
 	tools: readonly ParentToolSnapshot[],
 	onNestedUsage: (usage: Usage) => void,
+	owner: SubagentCommandOwner,
 ): ToolDefinition[] {
 	return tools.map((tool) => ({
 		...tool,
 		execute: async (_toolCallId, args, signal, onUpdate) => {
-			const outcome = await parent.executeTool(tool.name, args, { signal, onUpdate });
+			const outcome = await runForSubagent(owner, () => parent.executeTool(tool.name, args, { signal, onUpdate }));
 			const { usage, ...result } = outcome.result;
 			if (usage) onNestedUsage(usage);
 			return { ...result, isError: outcome.isError };

@@ -2,9 +2,11 @@
  * The process-wide sandbox: starting it, and running a command through it.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { runForSubagent } from "../ext/_shared/subagent-commands.ts";
 import type { RuntimeConfig } from "../ext/sandbox/config.ts";
 import {
 	type AskNetwork,
+	commandOwnersRunning,
 	type Exec,
 	markSandboxUnavailable,
 	type SandboxEngine,
@@ -193,6 +195,45 @@ describe("wrapExec", () => {
 		expect(first.slice(0, 4)).toEqual(["ls", "/bin/zsh", undefined, signal]);
 		expect(first[4].commandText).toBe("ls");
 		expect(first[4].commandId).not.toBe(second[4].commandId);
+	});
+
+	it("knows whom each running command runs for until it ends, even when it fails", async () => {
+		setSandboxEngine(fakeEngine());
+		await startSandbox(config, deny, "darwin");
+		const api = { name: "api", reportNetworkDenied: vi.fn() };
+		const seen: unknown[][] = [];
+		const exec: Exec = async (command) => {
+			seen.push(commandOwnersRunning());
+			if (command.includes("fail")) throw new Error("spawn failed");
+			return { exitCode: 0 };
+		};
+		await runForSubagent(api, () => wrapExec(exec, () => undefined)("ls", "/proj", options()));
+		await wrapExec(exec, () => undefined)("ls", "/proj", options());
+		await expect(
+			runForSubagent(api, () => wrapExec(exec, () => undefined)("fail", "/proj", options())),
+		).rejects.toThrow("spawn failed");
+		expect(seen).toEqual([[api], [undefined], [api]]);
+		expect(commandOwnersRunning()).toEqual([]);
+	});
+
+	it("keeps a subagent's ownership for a command it starts in the background", async () => {
+		setSandboxEngine(fakeEngine());
+		await startSandbox(config, deny, "darwin");
+		const api = { name: "api", reportNetworkDenied: vi.fn() };
+		let seen: unknown;
+		let background!: Promise<unknown>;
+		const exec: Exec = async () => {
+			seen = commandOwnersRunning();
+			return { exitCode: 0 };
+		};
+		// As run_in_background does: the tool call returns before the command starts.
+		runForSubagent(api, () => {
+			background = new Promise((resolve) => setTimeout(resolve, 5)).then(() =>
+				wrapExec(exec, () => undefined)("sleep 1", "/proj", options()),
+			);
+		});
+		await background;
+		expect(seen).toEqual([api]);
 	});
 
 	it("appends what the sandbox blocked to the output", async () => {

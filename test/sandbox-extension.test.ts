@@ -67,6 +67,46 @@ describe("networkAsker", () => {
 		expect(maxOpen).toBe(1);
 	});
 
+	describe("while subagents run commands", () => {
+		const child = (name: string) => ({ name, reportNetworkDenied: vi.fn() });
+
+		it("denies a request no orchestrator command can have made without a dialog, reports it, and asks again later", async () => {
+			const ctx = ui(true);
+			const api = child("api");
+			const ui1 = child("ui");
+			let owners: (ReturnType<typeof child> | undefined)[] = [api, ui1, api];
+			const asker = networkAsker(
+				() => ctx as any,
+				() => owners,
+			);
+
+			const denied = await asker.ask({ host: "registry.npmjs.org", port: 443 });
+			expect(denied).toEqual({ allow: false, reason: expect.stringMatching(/orchestrator/) });
+			expect(ctx.ui.confirm).not.toHaveBeenCalled();
+			expect(api.reportNetworkDenied).toHaveBeenCalledWith("registry.npmjs.org:443", ["api", "ui"]);
+			expect(ui1.reportNetworkDenied).not.toHaveBeenCalled();
+
+			owners = [undefined, api];
+			expect(await asker.ask({ host: "registry.npmjs.org", port: 443 })).toBe(true);
+			expect(ctx.ui.confirm).toHaveBeenCalledTimes(1);
+		});
+
+		it("gives a child the user's earlier answer", async () => {
+			const ctx = ui(true);
+			let owners: (ReturnType<typeof child> | undefined)[] = [];
+			const asker = networkAsker(
+				() => ctx as any,
+				() => owners,
+			);
+			expect(await asker.ask({ host: "x.com", port: 443 })).toBe(true);
+			const api = child("api");
+			owners = [api];
+			expect(await asker.ask({ host: "x.com", port: 443 })).toBe(true);
+			expect(ctx.ui.confirm).toHaveBeenCalledTimes(1);
+			expect(api.reportNetworkDenied).not.toHaveBeenCalled();
+		});
+	});
+
 	it("denies when reading the session throws", async () => {
 		const asker = networkAsker(() => {
 			throw new Error("stale ctx");

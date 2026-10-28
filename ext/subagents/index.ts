@@ -445,9 +445,27 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					params.record.name,
 				);
 				// Nested usage is folded into the launch tool result until it is emitted; later usage is counted here.
-				const parentTools = createParentToolProxies(execCtx.parent, execCtx.parentTools, (usage) => {
-					if (emittedLaunchResults.has(runId)) params.controller.recordUsage(usage);
-				});
+				const reportedHosts = new Set<string>();
+				const parentTools = createParentToolProxies(
+					execCtx.parent,
+					execCtx.parentTools,
+					(usage) => {
+						if (emittedLaunchResults.has(runId)) params.controller.recordUsage(usage);
+					},
+					{
+						name: params.record.name ?? runId,
+						reportNetworkDenied: (target, suspects) => {
+							if (reportedHosts.has(target)) return;
+							reportedHosts.add(target);
+							const whose = suspects.length > 1 ? `one of ${suspects.join(", ")}'s commands` : "my command";
+							void messageBus.send(
+								{ address: runId, scope },
+								PARENT_MESSAGE_ADDRESS,
+								`[sandbox] Network access to ${target} for ${whose} was denied without asking the user, because subagents cannot ask. Run the command yourself (the user will be asked), or change the task.`,
+							);
+						},
+					},
+				);
 				try {
 					return await runSubagent({
 						...params,
