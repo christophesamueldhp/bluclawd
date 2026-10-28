@@ -1,0 +1,155 @@
+diff --git a/src/sandbox/sandbox-manager.ts b/src/sandbox/sandbox-manager.ts
+index 110619d..89a978f 100644
+--- a/src/sandbox/sandbox-manager.ts
++++ b/src/sandbox/sandbox-manager.ts
+@@ -1,4 +1,5 @@
+-// Modified for bluclawd: explicit Mach-lookup denial. See BLUCLAWD-NOTICE.txt.
++// Modified for bluclawd: explicit Mach-lookup denial, and the requesting
++// command's id in network asks. See BLUCLAWD-NOTICE.txt.
+ import {
+   hasNameReading,
+   literalReadLists,
+@@ -796,9 +797,13 @@ async function filterNetworkRequest(
+   // Coming after both configured lists, it lifts the default deny for that
+   // one command and never a configured deniedDomains entry. The username is
+   // presented by the sandboxed client: see registerCommandNetworkLists.
+-  const perCommand = encodedCommand
+-    ? commandNetworkListsByKey.get(decodeSandboxedCommand(encodedCommand))
++  const commandId = encodedCommand
++    ? decodeSandboxedCommand(encodedCommand)
+     : undefined
++  const perCommand =
++    commandId === undefined
++      ? undefined
++      : commandNetworkListsByKey.get(commandId)
+   for (const allowedDomain of perCommand?.allowedDomains ?? []) {
+     if (matchesDomainPatternWithPort(canonicalHost, port, allowedDomain)) {
+       logForDebugging(`Allowed by per-command rule: ${host}:${port}`)
+@@ -814,7 +819,7 @@ async function filterNetworkRequest(
+   logForDebugging(`No matching rule, asking user: ${host}:${port}`)
+   try {
+     // Held as unknown: a JavaScript caller is not bound by the declared type.
+-    const answer: unknown = await sandboxAskCallback({ host, port })
++    const answer: unknown = await sandboxAskCallback({ host, port, commandId })
+     // Only `true` allows: an object is how a callback denies with a reason,
+     // and a truthiness test here would read every such denial as an allow.
+     if (answer === true) {
+diff --git a/src/sandbox/sandbox-schemas.ts b/src/sandbox/sandbox-schemas.ts
+index e282b60..48f82c0 100644
+--- a/src/sandbox/sandbox-schemas.ts
++++ b/src/sandbox/sandbox-schemas.ts
+@@ -1,3 +1,5 @@
++// Modified for bluclawd: the requesting command's id in network asks. See
++// BLUCLAWD-NOTICE.txt.
+ // Filesystem restriction configs (internal structures built from permission rules)
+ 
+ /**
+@@ -136,6 +138,13 @@ export interface NetworkRestrictionConfig {
+ export type NetworkHostPattern = {
+   host: string
+   port: number | undefined
++  /**
++   * The key the asking connection's proxy username names: the commandId its
++   * command was wrapped with, else that command's text; undefined when the
++   * username names none. The sandboxed client presents the username, so a
++   * command can name another command or none.
++   */
++  commandId?: string
+ }
+ 
+ /**
+diff --git a/test/sandbox/ask-command-id.test.ts b/test/sandbox/ask-command-id.test.ts
+new file mode 100644
+index 0000000..7b3662d
+--- /dev/null
++++ b/test/sandbox/ask-command-id.test.ts
+@@ -0,0 +1,89 @@
++// Added for bluclawd: the ask callback names the requesting command. See BLUCLAWD-NOTICE.txt.
++import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
++import { connect, createServer, type AddressInfo, type Server } from 'net'
++import { randomUUID } from 'node:crypto'
++import { SandboxManager, type NetworkHostPattern } from '../../src/index.js'
++import {
++  encodeSandboxedCommand,
++  proxyUsernameFor,
++} from '../../src/sandbox/sandbox-utils.js'
++
++/** The status code the proxy answers a CONNECT to `target` under `username`. */
++function connectAs(
++  proxyPort: number,
++  target: string,
++  username: string,
++): Promise<number | undefined> {
++  return new Promise(resolve => {
++    const token = SandboxManager.getProxyAuthToken()
++    const auth = Buffer.from(`${username}:${token}`).toString('base64')
++    const socket = connect(proxyPort, '127.0.0.1', () => {
++      socket.write(
++        `CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n` +
++          `Proxy-Authorization: Basic ${auth}\r\n\r\n`,
++      )
++    })
++    let data = ''
++    socket.on('data', chunk => {
++      data += chunk.toString()
++      if (data.includes('\r\n')) {
++        socket.destroy()
++        const status = data.match(/HTTP\/1\.\d (\d+)/)
++        resolve(status ? parseInt(status[1]) : undefined)
++      }
++    })
++    socket.on('error', () => resolve(undefined))
++    socket.setTimeout(2000, () => {
++      socket.destroy()
++      resolve(undefined)
++    })
++  })
++}
++
++describe('ask callback command id', () => {
++  let server: Server
++  let target: string
++  let asked: NetworkHostPattern[]
++
++  beforeEach(async () => {
++    await SandboxManager.reset()
++    server = createServer(socket => socket.on('error', () => {}))
++    await new Promise<void>(r => server.listen(0, '127.0.0.1', () => r()))
++    target = `127.0.0.1:${(server.address() as AddressInfo).port}`
++    asked = []
++    await SandboxManager.initialize(
++      {
++        network: { allowedDomains: [], deniedDomains: [] },
++        filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
++      },
++      async params => {
++        asked.push(params)
++        return false
++      },
++    )
++  })
++
++  afterEach(async () => {
++    await SandboxManager.reset()
++    server.close()
++  })
++
++  it('names the command whose proxy username asked', async () => {
++    const commandId = randomUUID()
++    const username = proxyUsernameFor(encodeSandboxedCommand(commandId))
++    expect(
++      await connectAs(SandboxManager.getProxyPort()!, target, username),
++    ).toBe(403)
++    expect(asked).toEqual([
++      { host: '127.0.0.1', port: Number(target.split(':')[1]), commandId },
++    ])
++  })
++
++  it('names no command for the bare username', async () => {
++    expect(await connectAs(SandboxManager.getProxyPort()!, target, 'srt')).toBe(
++      403,
++    )
++    expect(asked).toHaveLength(1)
++    expect(asked[0]!.commandId).toBeUndefined()
++  })
++})

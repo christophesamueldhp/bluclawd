@@ -43,6 +43,6 @@
     "lint": "biome check ."
   },
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "file:vendor/sandbox-runtime/anthropic-ai-sandbox-runtime-0.0.81-bluclawd.1.tgz"
+    "@anthropic-ai/sandbox-runtime": "file:vendor/sandbox-runtime/anthropic-ai-sandbox-runtime-0.0.81-bluclawd.2.tgz"
   }
 }
