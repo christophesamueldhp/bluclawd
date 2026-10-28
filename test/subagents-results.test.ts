@@ -90,7 +90,7 @@ describe("Task 5 (M1) — Subagent report envelope, truncation, and untrusted fr
 		].join("\n");
 
 		const record = makeRecord({
-			status: "budget_exceeded",
+			status: "cancelled",
 			complete: false,
 			stopReason: "Turn limit (12) exceeded",
 			summaryText: spoofedWorkerText,
@@ -99,7 +99,7 @@ describe("Task 5 (M1) — Subagent report envelope, truncation, and untrusted fr
 
 		const envelope = buildSubagentResultEnvelope(record);
 		expect(envelope.parentText).toContain("Run: sub_test_1");
-		expect(envelope.parentText).toContain("Execution: budget_exceeded");
+		expect(envelope.parentText).toContain("Execution: cancelled");
 		expect(envelope.parentText).toContain("Complete: false");
 		expect(envelope.parentText).toContain("Snapshot: HEAD 1111111 (clean)");
 		expect(envelope.parentText).toContain("Verification: not inferred by the runtime");

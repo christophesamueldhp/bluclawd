@@ -5,28 +5,18 @@ export const SUBAGENT_ID_PREFIX = "sub_";
 
 export type SubagentDeliveryMode = "foreground" | "background";
 
-// queued, timed_out, budget_exceeded and the deadline/budget stop sources only occur in legacy persisted records.
 export type SubagentLifecycleStatus =
-	| "queued"
 	| "starting"
 	| "running"
 	| "stopping"
 	| "completed"
 	| "failed"
 	| "cancelled"
-	| "timed_out"
-	| "budget_exceeded"
 	| "interrupted";
 
-export type SubagentTerminalStatus =
-	| "completed"
-	| "failed"
-	| "cancelled"
-	| "timed_out"
-	| "budget_exceeded"
-	| "interrupted";
+export type SubagentTerminalStatus = "completed" | "failed" | "cancelled" | "interrupted";
 
-export type SubagentStopSource = "caller" | "user" | "model" | "remote" | "deadline" | "budget" | "session_invalidated";
+export type SubagentStopSource = "caller" | "user" | "model" | "remote" | "session_invalidated";
 
 export interface WorkspaceSnapshot {
 	readonly headCommit: string | null;
@@ -166,14 +156,7 @@ export interface SubagentRunSchedulerOptions<C = unknown> {
 	executeRun: (params: SubagentRunnerExecuteParams & { context?: C }) => Promise<SubagentRunnerOutcome>;
 }
 
-const TERMINAL_STATES = new Set<SubagentLifecycleStatus>([
-	"completed",
-	"failed",
-	"cancelled",
-	"timed_out",
-	"budget_exceeded",
-	"interrupted",
-]);
+const TERMINAL_STATES = new Set<SubagentLifecycleStatus>(["completed", "failed", "cancelled", "interrupted"]);
 
 export function isTerminalSubagentStatus(status: SubagentLifecycleStatus): status is SubagentTerminalStatus {
 	return TERMINAL_STATES.has(status);
