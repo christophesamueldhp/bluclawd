@@ -20,8 +20,10 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
         with:
-          node-version: 24
+          node-version: 26
           cache: npm
+      # The native inspector trusts only the stock toolchain paths, not the runner's versioned Xcode.
+      - run: sudo xcode-select --switch /Library/Developer/CommandLineTools
       - run: npm ci
       - run: npm run lint
       - run: npm run typecheck
