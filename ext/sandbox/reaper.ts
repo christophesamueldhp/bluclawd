@@ -57,7 +57,7 @@ export async function prepareReaper(): Promise<string | undefined> {
 async function startReaper(): Promise<{ cookie: string; reap(): Promise<void> } | undefined> {
 	helper ??= build();
 	const built = await helper;
-	if (!("path" in built)) return undefined;
+	if ("problem" in built) return undefined;
 	const { path } = built;
 	const cookie = randomBytes(32).toString("hex");
 	// Its own session, so a hangup of pi's terminal leaves it to reap.
