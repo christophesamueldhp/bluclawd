@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxProvider, Type } from "@earendil-works/pi-ai";
@@ -121,7 +121,7 @@ function writeRole(agentDir: string, name: string, extra: string[] = []) {
 
 describe("Run admission", () => {
 	it("admits a saved role with the inherited model and the parent's thinking level, named after the role", async () => {
-		const { launch } = await setup();
+		const { launch, storageDir } = await setup();
 		const first = await launch({ agent: "explorer", task: "Look." });
 		const second = await launch({ agent: "explorer", task: "Look again." });
 		expect(first.error).toBeUndefined();
@@ -135,6 +135,8 @@ describe("Run admission", () => {
 			taskSummary: "Look.",
 		});
 		expect(second.handle?.record.name).toBe("explorer-2");
+		// Admission checks the session's storage without leaving a directory of its own behind.
+		expect(readdirSync(storageDir)).toEqual([]);
 	});
 
 	it("refuses missing input, oversized tasks, denied roles, unknown roles and background runs in one-shot modes", async () => {

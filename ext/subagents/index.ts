@@ -321,7 +321,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			scheduleParentFlush();
 		};
 
-		const scheduler = new SubagentRunScheduler({
+		const scheduler = new SubagentRunScheduler<RunExecutionContext>({
 			onStateChange: (record) => {
 				const agentDir = resolveAgentDir();
 				writePersistedRunRecord(agentDir, record);
@@ -361,7 +361,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				return record;
 			},
 			executeRun: async (params) => {
-				const execCtx = params.context as RunExecutionContext;
+				const execCtx = params.context;
 				const storage = ensureRunStorageDir(execCtx.agentDir, params.record.parentSessionId, params.record.runId);
 				if (!storage.ok || !storage.runDir) throw new Error(storage.error ?? "Subagent storage is unavailable.");
 				const { runId } = params.record;
@@ -725,7 +725,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			// The earlier launch result is long emitted, so the SDK attributes none of this generation's nested usage.
 			emittedLaunchResults.add(run.runId);
 			const resumed = scheduler.resume(run.runId, (context) => ({
-				...(context as RunExecutionContext),
+				...context,
 				requestedModel: `${run.provider}/${run.modelId}`,
 				requestedThinkingLevel: run.thinkingLevel,
 				resume: { transcriptPath: run.transcriptPath, prompt },

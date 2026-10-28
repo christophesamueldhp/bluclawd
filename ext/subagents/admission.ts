@@ -27,7 +27,7 @@ import {
 	snapshotParentTools,
 } from "./runner.ts";
 import type { AdmittedSubagentHandle, SubagentRunScheduler } from "./runs.ts";
-import { ensureRunStorageDir } from "./storage.ts";
+import { ensureSessionStorageDir } from "./storage.ts";
 
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
 /** Recorded until the child session reports the level the SDK chose for its model. */
@@ -80,7 +80,7 @@ export type AdmissionContext = Pick<
 };
 
 export interface RunAdmissionDeps {
-	scheduler: Pick<SubagentRunScheduler, "admit" | "listActiveRuns">;
+	scheduler: Pick<SubagentRunScheduler<RunExecutionContext>, "admit" | "listActiveRuns">;
 	agentDir: () => string;
 	/** Saved roles frozen at session start; discovered on demand when session start was skipped. */
 	catalog: () => AgentDefinitionCatalog | undefined;
@@ -226,10 +226,10 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const startSnapshot = captureWorkspaceSnapshot(cwd);
 
 			// 6. Check storage availability before launching
-			const probeDir = ensureRunStorageDir(agentDir, parentSessionId, "probe_check");
-			if (!probeDir.ok) {
+			const sessionDir = ensureSessionStorageDir(agentDir, parentSessionId);
+			if (!sessionDir.ok) {
 				return reject(
-					`Cannot launch subagent: storage is unavailable (${probeDir.error ?? "storage check failed"}).`,
+					`Cannot launch subagent: storage is unavailable (${sessionDir.error ?? "storage check failed"}).`,
 				);
 			}
 

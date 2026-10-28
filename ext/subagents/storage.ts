@@ -94,25 +94,40 @@ function writeAtomicPrivateFile(filePath: string, content: string): void {
 	}
 }
 
+/** Creates the parent session's storage directory, where each of its runs keeps a directory of its own. */
+export function ensureSessionStorageDir(
+	agentDir: string,
+	parentSessionId: string,
+): { ok: boolean; sessionDir?: string; error?: string } {
+	if (!isSafePathSegment(parentSessionId)) {
+		return { ok: false, error: `Invalid parentSessionId "${parentSessionId}" for subagent storage` };
+	}
+	const rootDir = getSubagentsRootDir(agentDir);
+	const sessionDir = join(rootDir, parentSessionId);
+	try {
+		ensurePrivateDir(rootDir);
+		ensurePrivateDir(sessionDir);
+		return { ok: true, sessionDir };
+	} catch (err) {
+		return {
+			ok: false,
+			error: `Failed to initialize subagent storage directory "${sessionDir}": ${err instanceof Error ? err.message : String(err)}`,
+		};
+	}
+}
+
 export function ensureRunStorageDir(
 	agentDir: string,
 	parentSessionId: string,
 	runId: string,
 ): { ok: boolean; runDir?: string; error?: string } {
-	if (!isSafePathSegment(parentSessionId)) {
-		return { ok: false, error: `Invalid parentSessionId "${parentSessionId}" for subagent storage` };
-	}
-	if (!isSafePathSegment(runId)) {
+	if (isSafePathSegment(parentSessionId) && !isSafePathSegment(runId)) {
 		return { ok: false, error: `Invalid runId "${runId}" for subagent storage` };
 	}
-
-	const rootDir = getSubagentsRootDir(agentDir);
-	const sessionDir = join(rootDir, parentSessionId);
-	const runDir = join(sessionDir, runId);
-
+	const session = ensureSessionStorageDir(agentDir, parentSessionId);
+	if (!session.ok || !session.sessionDir) return { ok: false, error: session.error };
+	const runDir = join(session.sessionDir, runId);
 	try {
-		ensurePrivateDir(rootDir);
-		ensurePrivateDir(sessionDir);
 		ensurePrivateDir(runDir);
 		return { ok: true, runDir };
 	} catch (err) {
