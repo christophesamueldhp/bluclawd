@@ -130,7 +130,7 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 		}
 	});
 
-	it("renders active agent states (queued, running, stopping), sanitized output tails, and retains an open detail view when a child completes", () => {
+	it("renders active agent states (starting, running, stopping), sanitized output tails, and retains an open detail view when a child completes", () => {
 		const run1 = makeAgentRunRecord({
 			runId: "sub_20_1",
 			agentName: "explorer",
@@ -142,7 +142,7 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 			runId: "sub_20_2",
 			agentName: "reviewer",
 			taskSummary: "Review diff",
-			status: "queued",
+			status: "starting",
 			startedAt: 3000,
 		});
 
@@ -190,11 +190,11 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 			);
 			const renderScreen = () => stripAnsi(dialog.render(100).join("\n"));
 
-			// List view shows both queued and running states under Local agents
+			// List view shows both starting and running states under Local agents
 			const listOut = renderScreen();
 			expect(listOut).toContain("2 active agents");
 			expect(listOut).toContain("reviewer: Review diff");
-			expect(listOut).toContain("queued");
+			expect(listOut).toContain("starting");
 			expect(listOut).toContain("explorer: Scan auth");
 			expect(listOut).toContain("running");
 

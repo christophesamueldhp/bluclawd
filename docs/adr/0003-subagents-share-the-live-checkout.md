@@ -11,6 +11,6 @@ Decided 2026-10-27 to 2026-10-28; the spec is GitHub issue #6.
 
 ## Consequences
 
-- The historical isolation code and its tests are kept, but the new dispatch never calls them.
+- The historical isolation code and its tests were removed (#46). Commit 7377594 is the last one that has them.
 - Children's model-only tools stay with the orchestrator, and virtual model routers are unavailable to children, because the SDK runs only callable tools through `ctx.executeTool`.
 - The sandbox can tell a child's network request from the orchestrator's only when no orchestrator command is running at the same time. #26 makes that exact.

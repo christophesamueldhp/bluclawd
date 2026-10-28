@@ -182,14 +182,15 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		expect(reloadedCompleted?.status).toBe("completed");
 	});
 
-	it("decodes legacy quota records and reconciles a legacy queued run as interrupted without restarting it", () => {
+	it("reads legacy quota stops as cancelled and reconciles a legacy queued run as interrupted without restarting it", () => {
 		const agentDir = makeTempDir("legacy");
 		const parentSessionId = "sess_legacy_1";
-		const writeLegacy = (runId: string, status: string, stopSource?: string) => {
+		const writeLegacy = (runId: string, status: string, stopSource?: string, stopReason?: string) => {
 			const legacy = {
 				...makeRecord({ runId, parentSessionId }),
 				status,
 				stopSource,
+				stopReason,
 				deadlineAt: 301000,
 				repeatedCallCount: 3,
 				repeatedDenialCount: 0,
@@ -203,19 +204,24 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 			writeLegacy("sub_legacy_queued", "queued"),
 			writeLegacy("sub_legacy_timeout", "timed_out", "deadline"),
 			writeLegacy("sub_legacy_budget", "budget_exceeded", "budget"),
+			writeLegacy("sub_legacy_aborted", "timed_out", "deadline", "aborted"),
 		];
 
 		const reconciled = reconcileInterruptedRuns(agentDir, parentSessionId, entries, new Set());
 
 		expect(reconciled.map((r) => [r.runId, r.status])).toEqual([["sub_legacy_queued", "interrupted"]]);
-		expect(readPersistedRunRecord(agentDir, parentSessionId, "sub_legacy_timeout")).toMatchObject({
-			status: "timed_out",
-			stopSource: "deadline",
+		const timeout = readPersistedRunRecord(agentDir, parentSessionId, "sub_legacy_timeout");
+		expect(timeout).toMatchObject({ status: "cancelled", stopReason: "Stopped by a deadline (legacy)" });
+		expect(timeout?.stopSource).toBeUndefined();
+		const budget = readPersistedRunRecord(agentDir, parentSessionId, "sub_legacy_budget");
+		expect(budget).toMatchObject({ status: "cancelled", stopReason: "Stopped by a budget (legacy)" });
+		expect(budget?.stopSource).toBeUndefined();
+		expect(readPersistedRunRecord(agentDir, parentSessionId, "sub_legacy_aborted")).toMatchObject({
+			status: "cancelled",
+			stopReason: "aborted",
 		});
-		expect(readPersistedRunRecord(agentDir, parentSessionId, "sub_legacy_budget")).toMatchObject({
-			status: "budget_exceeded",
-			stopSource: "budget",
-		});
+		const onDisk = join(getSubagentsRootDir(agentDir), parentSessionId, "sub_legacy_timeout", "record.json");
+		expect(JSON.parse(readFileSync(onDisk, "utf8"))).toMatchObject({ status: "timed_out", stopSource: "deadline" });
 	});
 
 	it("tracks background child usage separately from foreground attributed usage", () => {

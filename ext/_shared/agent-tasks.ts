@@ -22,7 +22,7 @@ export interface AgentTaskInfo {
 
 export interface AgentTaskStopOptions {
 	owner?: string;
-	source?: "caller" | "user" | "model" | "remote" | "deadline" | "budget" | "session_invalidated";
+	source?: "caller" | "user" | "model" | "remote" | "session_invalidated";
 }
 
 export interface AgentTaskSource {

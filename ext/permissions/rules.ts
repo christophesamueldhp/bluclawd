@@ -639,47 +639,6 @@ export function grepOutputWithoutDenied(
 	return kept.some((line) => new RegExp(GREP_LINE.source).test(line)) ? kept.join("\n") : "No matches found";
 }
 
-/**
- * Filter denied paths out of `find` or `ls` output for a directory search.
- */
-export function pathListOutputWithoutDenied(
-	deny: string[],
-	tool: "find" | "ls",
-	input: Record<string, unknown>,
-	output: string,
-	cwd: string,
-): string | undefined {
-	if (deny.length === 0) return undefined;
-	const dir = resolveToCwd(String(input.path ?? "") || ".", cwd);
-	if (!isDirectory(dir)) return undefined;
-	const emptyText = tool === "find" ? "No files found matching pattern" : "(empty directory)";
-	if (output === emptyText) return undefined;
-
-	const lines = output.split("\n");
-	let changed = false;
-	const keptLines: string[] = [];
-	let keptEntries = 0;
-
-	for (const line of lines) {
-		if (line === "" || (line.startsWith("[") && line.endsWith("]"))) {
-			keptLines.push(line);
-			continue;
-		}
-		const normalizedEntry = line.endsWith("/") ? line.slice(0, -1) : line;
-		const candidatePath = join(dir, normalizedEntry);
-		if (deniedBy(deny, tool, { path: candidatePath }, cwd) !== undefined) {
-			changed = true;
-			continue;
-		}
-		keptEntries++;
-		keptLines.push(line);
-	}
-
-	if (!changed) return undefined;
-	if (keptEntries === 0) return emptyText;
-	return keptLines.join("\n").replace(/^\n+/, "");
-}
-
 function isDirectory(path: string): boolean {
 	try {
 		return statSync(path).isDirectory();

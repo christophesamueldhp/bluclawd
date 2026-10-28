@@ -192,10 +192,24 @@ export function readPersistedRunRecord(
 		if (parsed.parentSessionId !== parentSessionId || parsed.runId !== runId) {
 			return undefined;
 		}
+		decodeLegacyStatus(parsed);
 		return parsed;
 	} catch {
 		return undefined;
 	}
+}
+
+/** Maps statuses and stop sources from before the queue and child quotas were removed. */
+function decodeLegacyStatus(record: SubagentRunRecord): void {
+	const legacy = record as { status: string; stopSource?: string };
+	if (legacy.status === "timed_out" || legacy.status === "budget_exceeded") {
+		record.stopReason ??=
+			legacy.status === "timed_out" ? "Stopped by a deadline (legacy)" : "Stopped by a budget (legacy)";
+		record.status = "cancelled";
+	}
+	// A queued run never started, so reconciliation interrupts it like any other orphan.
+	if (legacy.status === "queued") record.status = "starting";
+	if (legacy.stopSource === "deadline" || legacy.stopSource === "budget") delete record.stopSource;
 }
 
 export function writeFullSubagentReport(

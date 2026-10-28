@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
-import { dirname, join, normalize } from "node:path";
+import { join } from "node:path";
 import {
 	fauxAssistantMessage,
 	fauxToolCall,
@@ -506,31 +506,6 @@ describe("Ticket #15 — Single-agent and orchestrated runs on the same fixture"
 		} finally {
 			single.session.dispose();
 			orchestrated.session.dispose();
-		}
-	});
-});
-
-describe("Ticket #15 — The active subagent path does not reach the retained isolation code", () => {
-	it("imports none of the snapshot, workspace, native-inspector or isolated-policy modules", () => {
-		const seen = new Set<string>();
-		const pending = ["ext/subagents/index.ts"];
-		while (pending.length > 0) {
-			const file = pending.pop() as string;
-			if (seen.has(file)) continue;
-			seen.add(file);
-			for (const match of readFileSync(file, "utf8").matchAll(/from "(\.[^"]+)"/g)) {
-				const target = normalize(join(dirname(file), match[1]));
-				if (existsSync(target)) pending.push(target);
-			}
-		}
-		for (const retained of [
-			"ext/subagents/source-snapshot.ts",
-			"ext/subagents/workspace.ts",
-			"ext/subagents/native-inspector.ts",
-			"ext/subagents/execution-policy.ts",
-			"ext/subagents/preparation.ts",
-		]) {
-			expect(seen.has(retained), retained).toBe(false);
 		}
 	});
 });
