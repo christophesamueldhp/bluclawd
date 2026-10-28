@@ -6,7 +6,7 @@ Deny rules match the text of a call, so they cannot stop a command that reads a 
 
 - **Hand-written Seatbelt profiles**: easy to get wrong, and they would cover macOS only.
 - **Codex CLI, Cursor or gemini-cli sandboxes**: the same Seatbelt design on macOS, with the same gaps (2026-10-28 research).
-- **A VM per command** (Apple `container`, Docker, Lima): the only way to contain process lifetime on macOS, but it costs a VM boot or an always-on VM, runs only Linux binaries, and puts the live checkout behind a mount. Kept as an optional mode (#30).
+- **A VM per command** (Apple `container`, Docker, Lima): the only way to contain process lifetime on macOS, but it costs a VM boot or an always-on VM, runs only Linux binaries, and puts the live checkout behind a mount. Not planned (#30): the mounted checkout holds macOS builds of its dependencies, such as native `node_modules` binaries, which a Linux VM cannot run. Reconsider if a process is shown to escape the reaper, untrusted repositories must run unattended, or a project's toolchain is Linux.
 - **Cloud sandboxes** (E2B, Daytona): they cannot work on the user's live checkout.
 
 ## Consequences
