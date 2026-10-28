@@ -17,9 +17,11 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { denyRules } from "../_shared/settings.ts";
+import type { SubagentCommandOwner } from "../_shared/subagent-commands.ts";
 import { runtimeConfig, sandboxSetting, saveSandboxEnabled } from "./config.ts";
 import {
 	type AskNetwork,
+	commandOwnersRunning,
 	forgetWrappedExec,
 	markSandboxUnavailable,
 	type SandboxStatus,
@@ -29,8 +31,18 @@ import {
 	stopSandbox,
 } from "./runtime.ts";
 
-/** Asks the user once per host and port per session, one dialog at a time; no UI denies. */
-export function networkAsker(context: () => ExtensionContext | undefined): { ask: AskNetwork; forget(): void } {
+const SUBAGENT_NETWORK_REASON =
+	"reaching this host needs the user's approval, which only the orchestrator can ask for; the orchestrator has been told. Do not retry; continue without it or wait for the orchestrator.";
+
+/**
+ * Asks the user once per host and port per session, one dialog at a time; no UI denies. A host not
+ * yet answered while only subagents' commands run is denied without a dialog and reported to the
+ * orchestrator, since subagents never ask the user; that denial is not remembered.
+ */
+export function networkAsker(
+	context: () => ExtensionContext | undefined,
+	owners: () => readonly (SubagentCommandOwner | undefined)[] = commandOwnersRunning,
+): { ask: AskNetwork; forget(): void } {
 	const answers = new Map<string, Promise<boolean>>();
 	// pi's dialog replaces an open one without settling it, so a dialog opens only after the last settled.
 	let chain: Promise<unknown> = Promise.resolve();
@@ -38,6 +50,15 @@ export function networkAsker(context: () => ExtensionContext | undefined): { ask
 		ask: ({ host, port }) => {
 			const target = port === undefined ? host : `${host}:${port}`;
 			let answer = answers.get(target);
+			const running = owners();
+			if (!answer && running.length > 0 && running.every((owner) => owner !== undefined)) {
+				const suspects = [...new Set(running)];
+				suspects[0].reportNetworkDenied(
+					target,
+					suspects.map((owner) => owner.name),
+				);
+				return Promise.resolve({ allow: false, reason: SUBAGENT_NETWORK_REASON });
+			}
 			if (!answer) {
 				answer = chain.then(async () => {
 					// pi throws when an extension touches the ctx of a replaced session.

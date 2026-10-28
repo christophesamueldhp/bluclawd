@@ -7,12 +7,16 @@ import { randomUUID } from "node:crypto";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { sharedRef } from "../_shared/global-state.ts";
+import { currentSubagent, type SubagentCommandOwner } from "../_shared/subagent-commands.ts";
 import { checkRuntimeConfig, type RuntimeConfig } from "./config.ts";
 
 export type Exec = BashOperations["exec"];
 
-/** Whether a sandboxed command may reach a host no rule covers. */
-export type AskNetwork = (request: { host: string; port: number | undefined }) => Promise<boolean>;
+/** Whether a sandboxed command may reach a host no rule covers; a denial may say what to do instead. */
+export type AskNetwork = (request: {
+	host: string;
+	port: number | undefined;
+}) => Promise<boolean | { allow: false; reason: string }>;
 
 /** The part of `srt`'s `SandboxManager` bluclawd calls. */
 export interface SandboxEngine {
@@ -45,12 +49,15 @@ const state = sharedRef<{
 	ask: AskNetwork;
 	/** Start and stop run one at a time, in call order. */
 	queue: Promise<unknown>;
+	/** Sandboxed commands running now, by id: the subagent each runs for, or undefined for the orchestrator. */
+	running: Map<string, SubagentCommandOwner | undefined>;
 }>("sandbox", {
 	status: { kind: "off" },
 	initialized: false,
 	wrapped: false,
 	ask: async () => false,
 	queue: Promise.resolve(),
+	running: new Map(),
 });
 
 function serialized<T>(task: () => Promise<T>): Promise<T> {
@@ -127,6 +134,11 @@ async function start(config: RuntimeConfig, ask: AskNetwork, platform: NodeJS.Pl
 	}
 }
 
+/** Whom each sandboxed command running now runs for: a subagent, or undefined for the orchestrator. */
+export function commandOwnersRunning(): (SubagentCommandOwner | undefined)[] {
+	return [...state.get().running.values()];
+}
+
 export function sandboxWraps(): boolean {
 	return state.get().wrapped;
 }
@@ -160,16 +172,22 @@ export function wrapExec(exec: Exec, shellPath: () => string | undefined): Exec 
 			throw new Error(`The sandbox is on but cannot run: ${reason}`);
 		}
 		const commandId = randomUUID();
-		const wrapped = await sandbox.wrapWithSandbox(command, shellPath(), undefined, options.signal, {
-			commandId,
-			commandText: command,
-		});
+		const { running } = state.get();
+		running.set(commandId, currentSubagent());
 		try {
-			return await exec(wrapped, cwd, options);
+			const wrapped = await sandbox.wrapWithSandbox(command, shellPath(), undefined, options.signal, {
+				commandId,
+				commandText: command,
+			});
+			try {
+				return await exec(wrapped, cwd, options);
+			} finally {
+				const blocked = sandbox.annotateStderrWithSandboxFailures(commandId, "").trim();
+				if (blocked) options.onData(Buffer.from(`\n${blocked}\n`));
+				sandbox.cleanupAfterCommand();
+			}
 		} finally {
-			const blocked = sandbox.annotateStderrWithSandboxFailures(commandId, "").trim();
-			if (blocked) options.onData(Buffer.from(`\n${blocked}\n`));
-			sandbox.cleanupAfterCommand();
+			running.delete(commandId);
 		}
 	};
 }

@@ -305,8 +305,12 @@ same deny rules and hooks apply, also after a background launch returns. Model-o
 orchestrator, so children cannot spawn, list or stop agents. There are no locks or conflict detection:
 edits are live for everyone and the last write wins, so the orchestrator owns the split, handoffs and
 final verification. Children talk to the orchestrator, not the user; no bluclawd hook prompts on
-their calls, but the sandbox's network prompt is per host per session and any agent's command can
-trigger it. Same-authority shell or MCP code can still start
+their calls. When the sandbox would ask about a host not yet answered this session while only
+children's commands run, it denies the request without a dialog, tells the child why, and reports it
+to the orchestrator, which can run the command itself so that the user is asked. A host the user allowed
+is open to every agent. While an orchestrator command (a background shell or monitor included) also
+runs, the sandbox cannot tell whose request it is and asks the user as before
+([#26](https://github.com/christophesamueldhp/bluclawd/issues/26)). Same-authority shell or MCP code can still start
 external processes; nothing at the OS level prevents that. The historical strict-cleanup proof is
 preserved; the full suite includes three failing detached/double-fork cleanup assertions from it.
 

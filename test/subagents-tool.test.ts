@@ -20,9 +20,18 @@ import {
 	Type,
 } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { agentTasks } from "../ext/_shared/agent-tasks.ts";
 import { applyPaneMessage } from "../ext/remote/report.ts";
+import { networkAsker } from "../ext/sandbox/index.ts";
+import {
+	type AskNetwork,
+	forgetWrappedExec,
+	setSandboxEngine,
+	startSandbox,
+	stopSandbox,
+	wrapExec,
+} from "../ext/sandbox/runtime.ts";
 import { MAX_TASK_INPUT_BYTES } from "../ext/subagents/index.ts";
 import { readPersistedRunRecord } from "../ext/subagents/storage.ts";
 import { createParentSessionWithSubagents } from "./helpers/subagent-session.ts";
@@ -1869,13 +1878,18 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 			faux.setResponses(
 				Array.from(
 					{ length: 12 },
-					() => (context: TranscriptContext, _o: unknown, _s: unknown, model: { id: string }) => {
+					() => async (context: TranscriptContext, _o: unknown, _s: unknown, model: { id: string }) => {
 						if (model.id !== "faux-alt") return main[parentStep++] ?? fauxAssistantMessage("Parent ack.");
 						const gate = fauxToolCall("child_gate", {}, { id: `gate_${Math.random()}` });
-						if (apiMessaged || !JSON.stringify(context.messages).includes("Work as api.")) {
+						// The task opens the child's prompt; a sibling sees it only inside its roster.
+						if (apiMessaged || !/"(text|content)":"Work as api\./.test(JSON.stringify(context.messages))) {
 							return fauxAssistantMessage([gate]);
 						}
 						apiMessaged = true;
+						// A sibling spawned in the same batch is reachable only once it has started.
+						for (let i = 0; i < 500 && (agentTasks()?.list(session.sessionId).length ?? 0) < 2; i++) {
+							await new Promise((resolve) => setTimeout(resolve, 10));
+						}
 						return fauxAssistantMessage([
 							fauxToolCall("subagent_message", { to: "ui", content: "api started" }, { id: "api_note" }),
 							gate,
@@ -1888,8 +1902,14 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 				(id) => (toolResultText(session, id).result?.details as { runId: string }).runId,
 			);
 			const statusOf = () =>
-				runIds.map((id) => agentTasks()?.getRun?.(id) as { status: string; toolCallCount: number });
-			const settled = () => statusOf()[0]?.toolCallCount === 2 && statusOf()[1]?.toolCallCount === 1;
+				runIds.map(
+					(id) => agentTasks()?.getRun?.(id) as { status: string; toolCallCount: number; lastMessageAt?: number },
+				);
+			// A call counts when it starts; the message counts once the sibling has accepted it.
+			const settled = () =>
+				statusOf()[0]?.toolCallCount === 2 &&
+				statusOf()[0]?.lastMessageAt !== undefined &&
+				statusOf()[1]?.toolCallCount === 1;
 			for (let i = 0; i < 2000 && !settled(); i++) {
 				await new Promise((resolve) => setTimeout(resolve, 10));
 			}
@@ -2242,6 +2262,115 @@ describe("Live finding — background availability in the subagent description",
 			expect(description.includes("Background runs are unavailable in this one-shot mode")).toBe(oneShot);
 		} finally {
 			session.dispose();
+		}
+	});
+});
+
+describe("Ticket #25 — A subagent's unapproved network access goes to the orchestrator, not the user", () => {
+	it("denies a child's request for a new host without a dialog, tells the child why, and reports it to the orchestrator", async () => {
+		const cwd = makeTempDir("net-cwd");
+		const agentDir = makeTempDir("net-agent");
+		let engineAsk!: AskNetwork;
+		setSandboxEngine({
+			isSupportedPlatform: () => true,
+			checkDependencies: () => ({ errors: [], warnings: [] }),
+			initialize: async (_config, ask) => {
+				engineAsk = ask;
+			},
+			updateConfig: () => {},
+			wrapWithSandbox: async (command) => command,
+			annotateStderrWithSandboxFailures: (_id, stderr) => stderr,
+			cleanupAfterCommand: () => {},
+			reset: async () => {},
+		});
+		const confirm = vi.fn(async () => true);
+		const asker = networkAsker(() => ({ hasUI: true, ui: { confirm } }) as never);
+		await startSandbox(
+			{
+				network: { allowedDomains: [], deniedDomains: [] },
+				filesystem: { denyRead: [], allowWrite: [cwd], denyWrite: [] },
+			},
+			asker.ask,
+			"darwin",
+		);
+		// A sandboxed command whose process asks the proxy for a host, as `npm install` would.
+		const exec = wrapExec(
+			async (_command, _cwd, options) => {
+				const answer = await engineAsk({ host: "registry.npmjs.org", port: 443 });
+				options.onData(
+					Buffer.from(answer === true ? "fetched" : `denied: ${answer === false ? "" : answer.reason}`),
+				);
+				return { exitCode: answer === true ? 0 : 1 };
+			},
+			() => undefined,
+		);
+		const outputs: string[] = [];
+		const fetchTool = defineTool({
+			name: "fetch_deps",
+			label: "Fetch deps",
+			description: "Runs a sandboxed command that reaches the package registry.",
+			parameters: Type.Object({}),
+			execute: async (_id, _params, signal) => {
+				let output = "";
+				const { exitCode } = await exec("npm install", cwd, {
+					onData: (data) => {
+						output += String(data);
+					},
+					signal,
+				});
+				outputs.push(output);
+				return { content: [{ type: "text", text: output }], details: undefined, isError: exitCode !== 0 };
+			},
+		});
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd,
+			agentDir,
+			extraTools: [fetchTool],
+			batchWindowMs: 0,
+		});
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			let parentStep = 0;
+			const main = [
+				fauxAssistantMessage([
+					fauxToolCall(
+						"subagent",
+						{ agent: "general-purpose", name: "api", task: "Install deps.", model: "faux-tool/faux-alt" },
+						{ id: "spawn_api" },
+					),
+				]),
+				fauxAssistantMessage([fauxToolCall("fetch_deps", {}, { id: "parent_fetch" })]),
+				fauxAssistantMessage("Installed it myself."),
+			];
+			let childStep = 0;
+			faux.setResponses(
+				Array.from(
+					{ length: 8 },
+					() => (_context: TranscriptContext, _o: unknown, _s: unknown, model: { id: string }) => {
+						if (model.id !== "faux-alt") return main[parentStep++] ?? fauxAssistantMessage("Parent ack.");
+						return childStep++ === 0
+							? fauxAssistantMessage([fauxToolCall("fetch_deps", {}, { id: "child_fetch" })])
+							: fauxAssistantMessage("Blocked on the registry; reported.");
+					},
+				),
+			);
+			await session.prompt("Install deps through a subagent.", { expandPromptTemplates: false });
+
+			expect(outputs[0]).toMatch(/^denied: reaching this host needs the user's approval/);
+			const report = session.messages.find(
+				(message) => message.role === "custom" && JSON.stringify(message).includes("registry.npmjs.org:443"),
+			);
+			expect(JSON.stringify(report)).toMatch(/api/);
+			expect(JSON.stringify(report)).toMatch(/run the command yourself/i);
+
+			// The orchestrator's own command brings the user the dialog, and the answer is kept.
+			expect(outputs[1]).toBe("fetched");
+			expect(confirm).toHaveBeenCalledTimes(1);
+		} finally {
+			session.dispose();
+			await stopSandbox();
+			setSandboxEngine(undefined);
+			forgetWrappedExec();
 		}
 	});
 });
