@@ -37,9 +37,9 @@ const SUBAGENT_NETWORK_REASON =
 /**
  * Asks the user once per host and port per session, one dialog at a time; no UI denies. Subagents
  * never ask the user, so a host not yet answered is denied without a dialog and reported to the
- * orchestrator when a subagent's command asks, or when the asking command names no running command
- * while any subagent's command runs: a command presents its own id, so a subagent's can drop it.
- * That denial is not remembered.
+ * orchestrator when a subagent's command asks. So is an ask naming no running command while any
+ * subagent's command runs, since a command presents its own id and a subagent's can drop it. These
+ * denials are not remembered.
  */
 export function networkAsker(
 	context: () => ExtensionContext | undefined,
