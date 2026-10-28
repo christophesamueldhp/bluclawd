@@ -30,13 +30,7 @@ import {
 import { runForSubagent, type SubagentCommandOwner } from "../_shared/subagent-commands.ts";
 import { type AgentDefinition, isSubagentThinkingLevel, type SubagentModelSpec } from "./definitions.ts";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
-import {
-	addSubagentUsage,
-	createEmptySubagentUsage,
-	type SubagentRunnerExecuteParams,
-	type SubagentRunnerOutcome,
-	type WorkspaceSnapshot,
-} from "./runs.ts";
+import type { SubagentRunnerExecuteParams, SubagentRunnerOutcome, WorkspaceSnapshot } from "./runs.ts";
 
 const VIRTUAL_MODEL_API = "pi-virtual";
 const VIRTUAL_MODEL_REASON =
@@ -375,7 +369,6 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 
 	options.onChildSessionCreated?.(session);
 
-	const usageTotals = createEmptySubagentUsage();
 	const collectedAssistantTexts: string[] = [];
 	let finalAssistantStopReason: string | undefined;
 	let finalAssistantErrorMessage: string | undefined;
@@ -443,7 +436,6 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 					},
 					hasUnknownCost: assistantMsg.usage.cost?.total === undefined,
 				};
-				addSubagentUsage(usageTotals, delta);
 				options.controller.recordUsage(delta);
 			}
 			if (options.signal.aborted) {
@@ -478,7 +470,6 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 				childSessionId: session.sessionId,
 				transcriptPath: session.sessionFile,
 				endSnapshot: captureWorkspaceSnapshot(cwd),
-				usage: usageTotals,
 			};
 		}
 
@@ -501,7 +492,6 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 				childSessionId: session.sessionId,
 				transcriptPath: session.sessionFile,
 				endSnapshot: captureWorkspaceSnapshot(cwd),
-				usage: usageTotals,
 			};
 		}
 
@@ -515,7 +505,6 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 				childSessionId: session.sessionId,
 				transcriptPath: session.sessionFile,
 				endSnapshot: captureWorkspaceSnapshot(cwd),
-				usage: usageTotals,
 			};
 		}
 
@@ -529,7 +518,6 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 				childSessionId: session.sessionId,
 				transcriptPath: session.sessionFile,
 				endSnapshot: captureWorkspaceSnapshot(cwd),
-				usage: usageTotals,
 			};
 		}
 
@@ -543,7 +531,6 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 				childSessionId: session.sessionId,
 				transcriptPath: session.sessionFile,
 				endSnapshot: captureWorkspaceSnapshot(cwd),
-				usage: usageTotals,
 			};
 		}
 
@@ -555,7 +542,6 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 			childSessionId: session.sessionId,
 			transcriptPath: session.sessionFile,
 			endSnapshot: captureWorkspaceSnapshot(cwd),
-			usage: usageTotals,
 		};
 	} catch (err) {
 		const sanitizedErr = sanitizeDiagnosticText(err instanceof Error ? err.message : String(err));
@@ -567,7 +553,6 @@ export async function runSubagent(options: RunSubagentOptions): Promise<Subagent
 			childSessionId: session.sessionId,
 			transcriptPath: session.sessionFile,
 			endSnapshot: captureWorkspaceSnapshot(cwd),
-			usage: usageTotals,
 		};
 	} finally {
 		options.signal.removeEventListener("abort", onSignalAbort);

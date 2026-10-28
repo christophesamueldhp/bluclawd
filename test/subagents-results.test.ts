@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
-import {
-	buildSubagentResultEnvelope,
-	MAX_PARENT_REPORT_BYTES,
-	sanitizeReportText,
-	toPiToolUsage,
-} from "../ext/subagents/results.ts";
-import { createEmptySubagentUsage, type SubagentRunRecord } from "../ext/subagents/runs.ts";
+import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, sanitizeReportText } from "../ext/subagents/results.ts";
+import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
+import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
 
 function makeRecord(overrides: Partial<SubagentRunRecord> = {}): SubagentRunRecord {
 	return {
@@ -48,7 +44,6 @@ function makeRecord(overrides: Partial<SubagentRunRecord> = {}): SubagentRunReco
 			totalTokens: 520,
 			cost: { input: 0.001, output: 0.002, cacheRead: 0, cacheWrite: 0, total: 0.003 },
 		},
-		foregroundUsageAttributed: false,
 		backgroundDeliveryAttempted: false,
 		reportPath: "/tmp/pi-agent/bluclawd/subagents/sess_parent_1/sub_test_1/report.md",
 		summaryText: [
@@ -196,12 +191,5 @@ describe("Task 5 (M1) — Subagent report envelope, truncation, and untrusted fr
 		record.usage.cost.total = 0;
 		const result = buildSubagentResultEnvelope(record);
 		expect(result.parentText).toContain("cost unknown");
-	});
-
-	it("converts known child usage totals for Pi tool attribution", () => {
-		const knownRecord = makeRecord();
-		const piUsage = toPiToolUsage(knownRecord.usage);
-		expect(piUsage.totalTokens).toBe(520);
-		expect(piUsage.cost.total).toBeCloseTo(0.003, 6);
 	});
 });

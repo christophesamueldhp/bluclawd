@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createEmptySubagentUsage, type SubagentRunRecord } from "../ext/subagents/runs.ts";
+import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
 import {
 	appendParentRunReference,
 	ensureRunStorageDir,
@@ -16,6 +16,7 @@ import {
 	writeFullSubagentReport,
 	writePersistedRunRecord,
 } from "../ext/subagents/storage.ts";
+import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
 
 const tempDirs: string[] = [];
 
@@ -70,7 +71,6 @@ function makeRecord(overrides: Partial<SubagentRunRecord> = {}): SubagentRunReco
 			totalTokens: 280,
 			cost: { input: 0.001, output: 0.001, cacheRead: 0, cacheWrite: 0, total: 0.002 },
 		},
-		foregroundUsageAttributed: false,
 		backgroundDeliveryAttempted: false,
 		...overrides,
 	};
@@ -224,33 +224,36 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		expect(JSON.parse(readFileSync(onDisk, "utf8"))).toMatchObject({ status: "timed_out", stopSource: "deadline" });
 	});
 
-	it("tracks background child usage separately from foreground attributed usage", () => {
+	it("reads the legacy foreground attribution flag as where the usage went", () => {
+		const agentDir = makeTempDir("legacy-usage");
+		const parentSessionId = "sess_legacy_usage";
+		const readLegacy = (runId: string, deliveryMode: string, foregroundUsageAttributed: boolean) => {
+			const dir = join(getSubagentsRootDir(agentDir), parentSessionId, runId);
+			mkdirSync(dir, { recursive: true });
+			const legacy = { ...makeRecord({ runId, parentSessionId }), deliveryMode, foregroundUsageAttributed };
+			writeFileSync(join(dir, "record.json"), JSON.stringify(legacy));
+			return readPersistedRunRecord(agentDir, parentSessionId, runId);
+		};
+
+		const foreground = readLegacy("sub_legacy_fg", "foreground", true);
+		expect(foreground?.usageAttribution).toBe("tool_result");
+		expect(foreground).not.toHaveProperty("foregroundUsageAttributed");
+		expect(readLegacy("sub_legacy_fg_unsettled", "foreground", false)?.usageAttribution).toBe("tool_result");
+		expect(readLegacy("sub_legacy_bg", "background", false)?.usageAttribution).toBe("ledger");
+	});
+
+	it("records each generation's usage in the ledger once", () => {
 		const agentDir = makeTempDir("ledger");
 		const parentSessionId = "sess_ledger_1";
+		const launch = makeRecord({ runId: "sub_bg_1", parentSessionId, deliveryMode: "background" });
+		const resumed = { ...launch, generation: 1 };
 
-		const fgRun = makeRecord({
-			runId: "sub_fg_1",
-			parentSessionId,
-			deliveryMode: "foreground",
-			foregroundUsageAttributed: true,
-		});
-		const bgRun = makeRecord({
-			runId: "sub_bg_1",
-			parentSessionId,
-			deliveryMode: "background",
-			foregroundUsageAttributed: false,
-		});
-
-		// Foreground usage already attributed to Pi is not double-counted in background ledger
-		recordBackgroundUsageInLedger(agentDir, fgRun);
-		expect(readBackgroundUsageLedger(agentDir, parentSessionId).runCount).toBe(0);
-
-		// Background usage is recorded once per runId
-		recordBackgroundUsageInLedger(agentDir, bgRun);
-		recordBackgroundUsageInLedger(agentDir, bgRun); // idempotent on duplicate call
+		recordBackgroundUsageInLedger(agentDir, launch);
+		recordBackgroundUsageInLedger(agentDir, launch);
+		recordBackgroundUsageInLedger(agentDir, resumed);
 		const ledger = readBackgroundUsageLedger(agentDir, parentSessionId);
-		expect(ledger.runCount).toBe(1);
-		expect(ledger.usage.totalTokens).toBe(280);
-		expect(ledger.usage.cost.total).toBeCloseTo(0.002, 6);
+		expect(ledger.recordedRunIds).toEqual(["sub_bg_1", "sub_bg_1#1"]);
+		expect(ledger.usage.totalTokens).toBe(560);
+		expect(ledger.usage.cost.total).toBeCloseTo(0.004, 6);
 	});
 });

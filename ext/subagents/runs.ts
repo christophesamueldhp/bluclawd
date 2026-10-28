@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { AgentDefinitionSource } from "./definitions.ts";
+import {
+	createEmptySubagentUsage,
+	createGenerationUsage,
+	type GenerationUsage,
+	type SubagentUsageTotals,
+	type UsageAttribution,
+} from "./usage.ts";
 
 export const SUBAGENT_ID_PREFIX = "sub_";
 
@@ -22,22 +29,6 @@ export interface WorkspaceSnapshot {
 	readonly headCommit: string | null;
 	readonly dirty: boolean;
 	readonly statusDigest: string;
-}
-
-export interface SubagentUsageTotals {
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	totalTokens: number;
-	cost: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		total: number;
-	};
-	hasUnknownCost: boolean;
 }
 
 export interface SubagentRunRecord {
@@ -78,7 +69,8 @@ export interface SubagentRunRecord {
 	/** Finished child tool executions observed by the runtime, per tool; absent on older records. */
 	toolExecutions?: Record<string, { ok: number; error: number }>;
 	usage: SubagentUsageTotals;
-	foregroundUsageAttributed: boolean;
+	/** Where the generation's usage went; set when it settles. */
+	usageAttribution?: UsageAttribution;
 	backgroundDeliveryAttempted: boolean;
 	lastProgressText?: string;
 	/** The child's latest model turn or tool call; absent on older records. */
@@ -94,6 +86,8 @@ export interface SubagentRunController {
 	recordToolCall(toolName?: string): void;
 	recordToolExecution(toolName: string, isError: boolean): void;
 	recordUsage(delta: Partial<SubagentUsageTotals>): void;
+	/** Usage reported by an orchestrator tool the child ran. */
+	recordNestedUsage(delta: Partial<SubagentUsageTotals>): void;
 	updateProgress(text: string): void;
 }
 
@@ -113,7 +107,6 @@ export interface SubagentRunnerOutcome {
 	transcriptPath?: string;
 	reportPath?: string;
 	endSnapshot?: WorkspaceSnapshot;
-	usage?: SubagentUsageTotals;
 }
 
 export interface AdmitSubagentRunRequest<C = unknown> {
@@ -166,51 +159,9 @@ export function isSubagentTaskId(id: string): boolean {
 	return typeof id === "string" && /^sub_[A-Za-z0-9_-]+$/.test(id);
 }
 
-export function createEmptySubagentUsage(): SubagentUsageTotals {
-	return {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 0,
-		cost: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			total: 0,
-		},
-		hasUnknownCost: false,
-	};
-}
-
-export function addSubagentUsage(target: SubagentUsageTotals, delta: Partial<SubagentUsageTotals>): void {
-	const input = delta.input ?? 0;
-	const output = delta.output ?? 0;
-	const cacheRead = delta.cacheRead ?? 0;
-	const cacheWrite = delta.cacheWrite ?? 0;
-	const totalTokens = delta.totalTokens ?? input + output + cacheRead + cacheWrite;
-
-	target.input += input;
-	target.output += output;
-	target.cacheRead += cacheRead;
-	target.cacheWrite += cacheWrite;
-	target.totalTokens += totalTokens;
-
-	if (delta.cost) {
-		target.cost.input += delta.cost.input ?? 0;
-		target.cost.output += delta.cost.output ?? 0;
-		target.cost.cacheRead += delta.cost.cacheRead ?? 0;
-		target.cost.cacheWrite += delta.cost.cacheWrite ?? 0;
-		target.cost.total += delta.cost.total ?? 0;
-	}
-	if (delta.hasUnknownCost) {
-		target.hasUnknownCost = true;
-	}
-}
-
 interface InternalManagedRun<C> {
 	record: SubagentRunRecord;
+	usage: GenerationUsage;
 	abortController: AbortController;
 	callerSignal?: AbortSignal;
 	callerAbortListener?: () => void;
@@ -310,7 +261,6 @@ export class SubagentRunScheduler<C = unknown> {
 			turnCount: 0,
 			toolCallCount: 0,
 			usage: createEmptySubagentUsage(),
-			foregroundUsageAttributed: false,
 			backgroundDeliveryAttempted: false,
 		};
 
@@ -321,6 +271,9 @@ export class SubagentRunScheduler<C = unknown> {
 
 		const managed: InternalManagedRun<C> = {
 			record,
+			usage: createGenerationUsage({
+				launchResult: request.deliveryMode === "foreground" ? "carries_usage" : "no_usage",
+			}),
 			abortController: new AbortController(),
 			callerSignal: request.signal,
 			resolveCompletion,
@@ -380,9 +333,10 @@ export class SubagentRunScheduler<C = unknown> {
 				complete: false,
 				deliveryMode: "background",
 				usage: createEmptySubagentUsage(),
-				foregroundUsageAttributed: false,
+				usageAttribution: undefined,
 				backgroundDeliveryAttempted: false,
 			} satisfies SubagentRunRecord,
+			usage: createGenerationUsage({ launchResult: "none" }),
 			abortController: new AbortController(),
 			callerSignal: undefined,
 			callerAbortListener: undefined,
@@ -397,6 +351,11 @@ export class SubagentRunScheduler<C = unknown> {
 		});
 		this.startManagedRun(managed);
 		return { ok: true, handle: { runId, record: structuredClone(managed.record), completion: completionPromise } };
+	}
+
+	/** The tool result that launched this run reached the orchestrator's conversation. */
+	launchResultEmitted(runId: string): void {
+		this.runs.get(runId)?.usage.launchResultEmitted();
 	}
 
 	cancelRun(runId: string, source: SubagentStopSource = "user", reason = "Subagent run cancelled"): boolean {
@@ -472,7 +431,13 @@ export class SubagentRunScheduler<C = unknown> {
 			},
 			recordUsage: (delta: Partial<SubagentUsageTotals>) => {
 				if (isTerminalSubagentStatus(managed.record.status)) return;
-				addSubagentUsage(managed.record.usage, delta);
+				managed.usage.addTurn(delta);
+				managed.record.usage = managed.usage.totals;
+			},
+			recordNestedUsage: (delta: Partial<SubagentUsageTotals>) => {
+				if (isTerminalSubagentStatus(managed.record.status)) return;
+				managed.usage.addNested(delta);
+				managed.record.usage = managed.usage.totals;
 			},
 			updateProgress: (text: string) => {
 				if (isTerminalSubagentStatus(managed.record.status)) return;
@@ -548,23 +513,7 @@ export class SubagentRunScheduler<C = unknown> {
 		if (outcome.errorMessage) {
 			managed.record.errorMessage = outcome.errorMessage;
 		}
-		if (outcome.usage) {
-			addSubagentUsage(managed.record.usage, {
-				input: Math.max(0, outcome.usage.input - managed.record.usage.input),
-				output: Math.max(0, outcome.usage.output - managed.record.usage.output),
-				cacheRead: Math.max(0, outcome.usage.cacheRead - managed.record.usage.cacheRead),
-				cacheWrite: Math.max(0, outcome.usage.cacheWrite - managed.record.usage.cacheWrite),
-				totalTokens: Math.max(0, outcome.usage.totalTokens - managed.record.usage.totalTokens),
-				cost: {
-					input: Math.max(0, outcome.usage.cost.input - managed.record.usage.cost.input),
-					output: Math.max(0, outcome.usage.cost.output - managed.record.usage.cost.output),
-					cacheRead: Math.max(0, outcome.usage.cost.cacheRead - managed.record.usage.cost.cacheRead),
-					cacheWrite: Math.max(0, outcome.usage.cost.cacheWrite - managed.record.usage.cost.cacheWrite),
-					total: Math.max(0, outcome.usage.cost.total - managed.record.usage.cost.total),
-				},
-				hasUnknownCost: outcome.usage.hasUnknownCost,
-			});
-		}
+		managed.record.usageAttribution = managed.usage.settle();
 
 		let finalized: SubagentRunRecord = { ...structuredClone(managed.record), status: finalStatus };
 		if (this.onFinalize) {

@@ -111,8 +111,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		let catalog: AgentDefinitionCatalog | undefined;
 		let unpublishTasks: (() => void) | undefined;
 		let latestLoadout: ToolLoadout | undefined;
-		/** Runs whose launch tool result the parent has emitted; the SDK no longer attributes their nested usage. */
-		const emittedLaunchResults = new Set<string>();
 
 		// Completion notices and child messages for the orchestrator, delivered together in arrival order.
 		let parentInbox: Array<
@@ -347,12 +345,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					throw new Error(reportRes.error ?? "full report was not persisted");
 				}
 				record.reportPath = reportRes.reportPath;
-				if (record.deliveryMode === "foreground") {
-					record.foregroundUsageAttributed = true;
-				} else {
-					record.backgroundDeliveryAttempted = true;
-					recordBackgroundUsageInLedger(agentDir, record);
-				}
+				if (record.deliveryMode === "background") record.backgroundDeliveryAttempted = true;
+				if (record.usageAttribution === "ledger") recordBackgroundUsageInLedger(agentDir, record);
 				const recordRes = writePersistedRunRecord(agentDir, record);
 				if (!recordRes.ok) throw new Error(recordRes.error ?? "run record was not persisted");
 				if (isOwnedAndValid(record, false)) {
@@ -393,14 +387,11 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					},
 					params.record.name,
 				);
-				// Nested usage is folded into the launch tool result until it is emitted; later usage is counted here.
 				const reportedHosts = new Set<string>();
 				const parentTools = createParentToolProxies(
 					execCtx.parent,
 					execCtx.parentTools,
-					(usage) => {
-						if (emittedLaunchResults.has(runId)) params.controller.recordUsage(usage);
-					},
+					(usage) => params.controller.recordNestedUsage(usage),
 					{
 						name: params.record.name ?? runId,
 						reportNetworkDenied: (target, suspects) => {
@@ -444,7 +435,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				} finally {
 					rejectSession(new Error("it ended before it could receive messages"));
 					messageBus.unregister(runId, "has finished");
-					emittedLaunchResults.delete(runId);
 				}
 			},
 		});
@@ -552,7 +542,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		pi.on("message_start", async (event) => {
 			if (event.message.role !== "toolResult") return;
 			const run = runLaunchedBy(event.message.toolCallId);
-			if (run) emittedLaunchResults.add(run.runId);
+			if (run) scheduler.launchResultEmitted(run.runId);
 		});
 
 		// A child's tool calls arrive here as nested calls of the tool call that launched it.
@@ -704,8 +694,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				run,
 				() => {
 					receipt = messageBus.accept({ address: PARENT_MESSAGE_ADDRESS, scope }, run.runId, run.name);
-					// The earlier launch result is long emitted, so the SDK attributes none of this generation's nested usage.
-					emittedLaunchResults.add(run.runId);
 					return subagentMessagePayload({
 						seq: receipt.seq,
 						from: PARENT_MESSAGE_ADDRESS,
@@ -717,8 +705,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				ctx,
 			);
 			if (!resumed.ok || !resumed.handle) {
-				// A refused resume never got past the checks, so a generation still running keeps its usage.
-				if (receipt) emittedLaunchResults.delete(run.runId);
 				return formatReceipt({
 					status: resumed.refusal ?? "unavailable",
 					seq: 0,

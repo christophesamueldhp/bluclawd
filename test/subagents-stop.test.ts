@@ -3,7 +3,8 @@ import { stripAnsi } from "../daemon/ansi.ts";
 import { publishAgentTasks } from "../ext/_shared/agent-tasks.ts";
 import backgroundBash from "../ext/background-bash/index.ts";
 import { TasksDialog } from "../ext/background-bash/tasks-dialog.ts";
-import { createEmptySubagentUsage, type SubagentRunRecord } from "../ext/subagents/runs.ts";
+import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
+import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
 
 const theme = {
 	fg: (_c: string, t: string) => t,
@@ -53,7 +54,6 @@ function makeAgentRunRecord(overrides: Partial<SubagentRunRecord> = {}): Subagen
 		turnCount: 1,
 		toolCallCount: 2,
 		usage: createEmptySubagentUsage(),
-		foregroundUsageAttributed: false,
 		backgroundDeliveryAttempted: false,
 		...overrides,
 	};
