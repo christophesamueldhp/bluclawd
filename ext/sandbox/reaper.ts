@@ -1,17 +1,14 @@
 /**
- * The best-effort reaper for a sandboxed command's descendants on macOS, where Seatbelt limits
- * files and network but not process lifetime (#29). A native helper (`native/reaper.c`) follows
- * the command's processes while it runs, by a cookie in their environment and by parent unique
- * id, which survives reparenting to launchd. When the command ends, however it ends, the helper
- * stops and kills every one still running, as Linux's PID namespace does.
- *
- * The helper is compiled on first use with the Command Line Tools into the agent directory; without
- * them commands run unreaped.
+ * The best-effort reaper for a sandboxed command's descendants on macOS, where Seatbelt does not
+ * limit process lifetime (#29): `native/reaper.c` follows the command's processes and kills them
+ * when it ends. The helper is compiled on first use with the Command Line Tools into the agent
+ * directory, outside the sandbox's writable paths; without them commands run unreaped.
  */
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { type BashOperations, getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -19,8 +16,8 @@ import { type BashOperations, getAgentDir } from "@earendil-works/pi-coding-agen
 type Exec = BashOperations["exec"];
 
 const execFileAsync = promisify(execFile);
-const STOP_TIMEOUT_MS = 2000;
-let helper: Promise<string | undefined> | undefined;
+const REAP_WAIT_MS = 2000;
+let helperPath: Promise<string | undefined> | undefined;
 
 async function build(): Promise<string | undefined> {
 	try {
@@ -41,13 +38,14 @@ async function build(): Promise<string | undefined> {
 	}
 }
 
-/** A running helper following the processes whose environment carries its cookie; undefined if none starts. */
-async function follow(): Promise<{ cookie: string; reap(): Promise<void> } | undefined> {
-	helper ??= build();
-	const path = await helper;
+/** A helper following the processes whose environment carries its cookie; undefined if none starts. */
+async function startReaper(): Promise<{ cookie: string; reap(): Promise<void> } | undefined> {
+	helperPath ??= build();
+	const path = await helperPath;
 	if (!path) return undefined;
 	const cookie = randomBytes(32).toString("hex");
-	const child = spawn(path, [], { stdio: ["pipe", "pipe", "ignore"] });
+	// Its own session, so a hangup of pi's terminal leaves it to reap.
+	const child = spawn(path, [], { stdio: ["pipe", "pipe", "ignore"], detached: true });
 	child.on("error", () => {});
 	child.stdin.on("error", () => {});
 	const closed = new Promise<void>((resolve) => child.once("close", () => resolve()));
@@ -63,9 +61,9 @@ async function follow(): Promise<{ cookie: string; reap(): Promise<void> } | und
 		reap: () => {
 			reaped ??= (async () => {
 				child.stdin.end("stop\n");
-				const timer = setTimeout(() => child.kill("SIGKILL"), STOP_TIMEOUT_MS);
-				await closed;
-				clearTimeout(timer);
+				// Never killed: a helper cut short would leave the members it stopped frozen.
+				await Promise.race([closed, sleep(REAP_WAIT_MS, undefined, { ref: false })]);
+				child.unref();
 			})();
 			return reaped;
 		},
@@ -79,9 +77,9 @@ async function follow(): Promise<{ cookie: string; reap(): Promise<void> } | und
 export function reapDescendants(exec: Exec): Exec {
 	if (process.platform !== "darwin") return exec;
 	return async (command, cwd, options) => {
-		const reaper = await follow();
+		const reaper = await startReaper();
 		if (!reaper) return exec(command, cwd, options);
-		// Registered before `exec` registers its own, so members freeze before its group kill.
+		// Reaps from the abort on, without waiting for the shell to exit.
 		const reap = () => void reaper.reap();
 		options.signal?.addEventListener("abort", reap, { once: true });
 		try {

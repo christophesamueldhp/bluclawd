@@ -169,7 +169,7 @@ export function stopSandbox(): Promise<void> {
 export function wrapExec(exec: Exec, shellPath: () => string | undefined): Exec {
 	// Recorded at load: pi's own bash, which this does not wrap, runs when no wrapped exec is ever created.
 	state.set({ ...state.get(), wrapped: true });
-	const reaped = reapDescendants(exec);
+	const reapingExec = reapDescendants(exec);
 	return async (command, cwd, options) => {
 		const { status, engine: sandbox } = state.get();
 		if (status.kind === "off") return exec(command, cwd, options);
@@ -186,7 +186,7 @@ export function wrapExec(exec: Exec, shellPath: () => string | undefined): Exec 
 				commandText: command,
 			});
 			try {
-				return await reaped(wrapped, cwd, options);
+				return await reapingExec(wrapped, cwd, options);
 			} finally {
 				const blocked = sandbox.annotateStderrWithSandboxFailures(commandId, "").trim();
 				if (blocked) options.onData(Buffer.from(`\n${blocked}\n`));

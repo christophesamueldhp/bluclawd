@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -89,5 +90,34 @@ describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => 
 		const result = await run("detached", "exit");
 		expect(result.started).toBe(true);
 		expect(result.stillWriting).toEqual([]);
+	}, 15000);
+
+	it("kills a double-fork descendant when the process running the command dies", async () => {
+		const command = [process.execPath, descendants, "double-fork", heartbeatPath, "reaper-probe", String(lifetimeMs)]
+			.map(quote)
+			.join(" ");
+		const script = [
+			'import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";',
+			`import { reapDescendants } from ${JSON.stringify(new URL("../ext/sandbox/reaper.ts", import.meta.url).href)};`,
+			`await reapDescendants(createLocalBashOperations({ shellPath: "/bin/bash" }).exec)(${JSON.stringify(command)}, ${JSON.stringify(dir)}, { onData: () => {} });`,
+		].join("\n");
+		const owner = spawn(process.execPath, ["--input-type=module", "-e", script], {
+			cwd: fileURLToPath(new URL("..", import.meta.url)),
+			env: { ...process.env, PI_CODING_AGENT_DIR: agentDir },
+			stdio: "ignore",
+		});
+		const exited = new Promise<void>((resolve) => owner.once("exit", () => resolve()));
+		const deadline = Date.now() + 10000;
+		while (!beats().some((beat) => beat.ppid === 1)) {
+			if (Date.now() > deadline) throw new Error("descendant never started");
+			await delay(10);
+		}
+		// As when pi is killed: nothing runs its stop, and the helper sees the end of its stdin.
+		owner.kill("SIGKILL");
+		await exited;
+		await delay(200);
+		const afterReap = beats().at(-1)?.sequence ?? 0;
+		await delay(150);
+		expect(beats().filter((beat) => beat.sequence > afterReap)).toEqual([]);
 	}, 15000);
 });

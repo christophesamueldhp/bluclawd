@@ -6,8 +6,8 @@
  * member's. That id survives reparenting to launchd, so a detached or double-forked descendant
  * stays a member, even with a scrubbed environment, as long as a scan saw its parent.
  *
- * A "stop" line or the end of stdin stops every member (SIGSTOP until a scan finds no new one),
- * kills them all, scans once more, prints "reaped" and exits.
+ * A "stop" line or the end of stdin stops every member, kills them all, scans once more, prints
+ * "reaped" and exits.
  *
  * PROC_PIDUNIQIDENTIFIERINFO (flavor 17) is private SPI; the layout is xnu's.
  */
@@ -20,12 +20,16 @@
 #include <string.h>
 #include <sys/select.h>
 #include <sys/sysctl.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #define PROC_PIDUNIQIDENTIFIERINFO 17
 #define MAX_PIDS 16384
 #define MAX_MEMBERS 65536
+#define MAX_STOP_ROUNDS 100
 #define POLL_US 10000
+/* A process takes on the cookie at an exec just after its fork, so an older one is not read again. */
+#define COOKIE_AGE_US 1000000
 
 struct proc_uniqidentifierinfo {
   uint8_t p_uuid[16];
@@ -53,7 +57,6 @@ static int identify(int pid, struct proc_uniqidentifierinfo *info) {
   return proc_pidinfo(pid, PROC_PIDUNIQIDENTIFIERINFO, 0, info, sizeof(*info)) == sizeof(*info);
 }
 
-/* The index of the first member id not below `id`. */
 static int lower_bound(uint64_t id) {
   int lo = 0, hi = member_count;
   while (lo < hi) {
@@ -76,6 +79,14 @@ static void add_member(uint64_t id) {
   member_count++;
 }
 
+static int young(int pid) {
+  struct proc_bsdinfo info;
+  struct timeval now;
+  if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info) || gettimeofday(&now, NULL)) return 0;
+  int64_t age = ((int64_t)now.tv_sec - (int64_t)info.pbi_start_tvsec) * 1000000 + now.tv_usec - (int64_t)info.pbi_start_tvusec;
+  return age < COOKIE_AGE_US;
+}
+
 static int carries_cookie(int pid) {
   static char buffer[1 << 20];
   int mib[] = {CTL_KERN, KERN_PROCARGS2, pid};
@@ -84,12 +95,14 @@ static int carries_cookie(int pid) {
   int argc;
   memcpy(&argc, buffer, sizeof(argc));
   char *p = buffer + sizeof(argc), *end = buffer + size;
-  /* The executable path and argc arguments, NUL-padded, then the environment. */
+  /* The NUL-padded executable path, then argc arguments, which may be empty; process.title can
+     leave padding before the environment too. */
   for (int i = -1; i < argc && p < end; i++) {
     char *zero = memchr(p, 0, (size_t)(end - p));
     if (!zero) return 0;
     p = zero + 1;
-    while (p < end && !*p) p++;
+    if (i == -1 || i == argc - 1)
+      while (p < end && !*p) p++;
   }
   size_t length = sizeof(key) - 1 + 64;
   while (p < end && *p) {
@@ -107,7 +120,7 @@ static int by_id(const void *a, const void *b) {
   return x < y ? -1 : x > y;
 }
 
-/* Records new members and fills procs with the live ones; returns their count. */
+/* Returns the number of live members, which it puts first in procs. */
 static int scan(void) {
   int count = proc_listallpids(pids, sizeof(pids));
   int n = 0;
@@ -122,7 +135,8 @@ static int scan(void) {
   int live = 0;
   for (int i = 0; i < n; i++) {
     struct proc *p = &procs[i];
-    if (!is_member(p->id) && (is_member(p->parent) || carries_cookie(p->pid))) add_member(p->id);
+    if (!is_member(p->id) && (is_member(p->parent) || (young(p->pid) && carries_cookie(p->pid))))
+      add_member(p->id);
     if (is_member(p->id)) procs[live++] = *p;
   }
   return live;
@@ -137,7 +151,7 @@ static int signal_member(const struct proc *p, int sig) {
 
 static void reap(void) {
   /* Stopped members cannot fork, so once a scan finds no member left running, the set is complete. */
-  for (int round = 0, running = 1; running && round < 100; round++) {
+  for (int round = 0, running = 1; running && round < MAX_STOP_ROUNDS; round++) {
     running = 0;
     int live = scan();
     for (int i = 0; i < live; i++) {
@@ -157,6 +171,10 @@ static void reap(void) {
 }
 
 int main(void) {
+  /* Hanging up pi's terminal must not end the helper before it reaps. */
+  signal(SIGHUP, SIG_IGN);
+  signal(SIGINT, SIG_IGN);
+  signal(SIGPIPE, SIG_IGN);
   struct proc_uniqidentifierinfo self;
   char line[128];
   if (!identify(getpid(), &self) || !fgets(line, sizeof(line), stdin) || strlen(line) != 65 || line[64] != '\n')
