@@ -19,19 +19,12 @@ import {
 	type TranscriptContext,
 	Type,
 } from "@earendil-works/pi-ai";
-import {
-	createAgentSession,
-	DefaultResourceLoader,
-	defineTool,
-	type ExtensionFactory,
-	ModelRuntime,
-	SessionManager,
-	SettingsManager,
-} from "@earendil-works/pi-coding-agent";
+import { defineTool, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentTasks } from "../ext/_shared/agent-tasks.ts";
-import { createSubagentsExtension, MAX_TASK_INPUT_BYTES } from "../ext/subagents/index.ts";
+import { MAX_TASK_INPUT_BYTES } from "../ext/subagents/index.ts";
 import { readPersistedRunRecord } from "../ext/subagents/storage.ts";
+import { createParentSessionWithSubagents } from "./helpers/subagent-session.ts";
 
 const tempDirs: string[] = [];
 
@@ -49,75 +42,6 @@ afterEach(() => {
 		}
 	}
 });
-
-async function createParentSessionWithSubagents(options: {
-	cwd: string;
-	agentDir: string;
-	extraTools?: ReturnType<typeof defineTool>[];
-	/** Pi built-in tools the parent has; none when omitted. */
-	builtinTools?: string[];
-	extensions?: ExtensionFactory[];
-	batchWindowMs?: number;
-}) {
-	const modelRuntime = await ModelRuntime.create({
-		authPath: join(options.agentDir, "auth.json"),
-		modelsPath: join(options.agentDir, "models.json"),
-		modelsStorePath: join(options.agentDir, "models-store.json"),
-		allowModelNetwork: false,
-		refreshOnCreate: true,
-	});
-	const faux = fauxProvider({
-		provider: "faux-tool",
-		models: [
-			{
-				id: "faux-main",
-				reasoning: true,
-				cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
-			},
-			{ id: "faux-alt", reasoning: false },
-		],
-	});
-	modelRuntime.registerNativeProvider(faux.provider);
-	await modelRuntime.refresh({ allowNetwork: false });
-
-	const settingsManager = SettingsManager.inMemory({
-		compaction: { enabled: false },
-		retry: { enabled: false },
-	});
-	const resourceLoader = new DefaultResourceLoader({
-		cwd: options.cwd,
-		agentDir: options.agentDir,
-		settingsManager,
-		extensionFactories: [
-			createSubagentsExtension({ agentDir: options.agentDir, batchWindowMs: options.batchWindowMs }),
-			...(options.extensions ?? []),
-		],
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-		disabledBuiltinExtensions: ["mcp", "codemode", "tool_search"],
-	});
-	await resourceLoader.reload();
-
-	const { session } = await createAgentSession({
-		cwd: options.cwd,
-		agentDir: options.agentDir,
-		modelRuntime,
-		model: faux.getModel("faux-main"),
-		thinkingLevel: "low",
-		...(options.builtinTools
-			? { tools: [...options.builtinTools, "subagent*", ...(options.extraTools ?? []).map((tool) => tool.name)] }
-			: { noTools: "builtin" as const }),
-		customTools: options.extraTools,
-		resourceLoader,
-		sessionManager: SessionManager.inMemory(options.cwd),
-		settingsManager,
-	});
-
-	return { session, faux, modelRuntime };
-}
 
 function toolResultText(session: { messages: readonly unknown[] }, id: string) {
 	const result = session.messages.find(
@@ -1807,6 +1731,34 @@ describe("Ticket #18 — One orchestrator wake-up for close child messages and c
 		} finally {
 			childGate.open();
 			session.dispose();
+		}
+	});
+
+	it("drops a pending batch quietly when the orchestrator's session is disposed before it flushes", async () => {
+		const cwd = makeTempDir("batch-dispose-cwd");
+		const agentDir = makeTempDir("batch-dispose-agent");
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir, batchWindowMs: 100 });
+		const uncaught: unknown[] = [];
+		const onUncaught = (error: unknown) => uncaught.push(error);
+		process.on("uncaughtException", onUncaught);
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			faux.setResponses([
+				fauxAssistantMessage([
+					fauxToolCall("subagent", { agent: "general-purpose", task: "Report early." }, { id: "launch" }),
+				]),
+				fauxAssistantMessage([
+					fauxToolCall("subagent_message", { to: "parent", content: "Early." }, { id: "early" }),
+				]),
+				fauxAssistantMessage("Child done."),
+				fauxAssistantMessage("Done."),
+			]);
+			await session.prompt("Delegate.", { expandPromptTemplates: false });
+			session.dispose();
+			await new Promise((resolve) => setTimeout(resolve, 250));
+			expect(uncaught).toEqual([]);
+		} finally {
+			process.off("uncaughtException", onUncaught);
 		}
 	});
 

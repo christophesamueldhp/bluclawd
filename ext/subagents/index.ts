@@ -304,18 +304,22 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 								.join("\n\n---\n\n");
 
 				// One message wakes an idle orchestrator once, or steers a busy one at its next boundary.
-				pi.sendMessage(
-					{
-						customType: notices.length > 0 ? SUBAGENT_NOTIFICATION_CUSTOM_TYPE : SUBAGENT_MESSAGE_CUSTOM_TYPE,
-						content: [{ type: "text", text: combinedText }],
-						display: true,
-						details: items.length === 1 ? (notices[0] ?? messages[0]) : { runs: notices, messages },
-					},
-					{
-						deliverAs: "steer",
-						triggerTurn: true,
-					},
-				);
+				try {
+					pi.sendMessage(
+						{
+							customType: notices.length > 0 ? SUBAGENT_NOTIFICATION_CUSTOM_TYPE : SUBAGENT_MESSAGE_CUSTOM_TYPE,
+							content: [{ type: "text", text: combinedText }],
+							display: true,
+							details: items.length === 1 ? (notices[0] ?? messages[0]) : { runs: notices, messages },
+						},
+						{
+							deliverAs: "steer",
+							triggerTurn: true,
+						},
+					);
+				} catch {
+					// The session was disposed during the batch window without a session_shutdown; nobody is left to tell.
+				}
 			});
 		};
 
