@@ -11,5 +11,5 @@ Deny rules match the text of a call, so they cannot stop a command that reads a 
 
 ## Consequences
 
-- On macOS, Seatbelt limits files and network but not process lifetime. A command that detaches or double-forks a descendant leaves it running after a stop. The three red `subagents-writer-backend` assertions show this, and the best-effort reaper (#29) targets them. Linux's PID namespace contains it.
+- On macOS, Seatbelt limits files and network but not process lifetime: a command that detaches or double-forks a descendant would leave it running after a stop. A best-effort reaper (#29, `ext/sandbox/reaper.ts`) follows each command's processes by parent unique id and an environment cookie and kills them when the command ends. A very fast double-fork that also scrubs its environment can slip between its scans, and it relies on private SPI. Linux's PID namespace contains it.
 - srt is pre-1.0 ("Beta Research Preview") and its API still moves, so it is pinned.

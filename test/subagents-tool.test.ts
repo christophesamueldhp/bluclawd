@@ -2271,6 +2271,8 @@ describe("Ticket #25 — A subagent's unapproved network access goes to the orch
 	it("denies a child's request for a new host without a dialog, tells the child why, and reports it to the orchestrator", async () => {
 		const cwd = makeTempDir("net-cwd");
 		const agentDir = makeTempDir("net-agent");
+		// The macOS reaper builds its helper into the agent directory.
+		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
 		let engineAsk!: AskNetwork;
 		setSandboxEngine({
 			isSupportedPlatform: () => true,

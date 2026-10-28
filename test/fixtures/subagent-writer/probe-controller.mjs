@@ -2,6 +2,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
+import { reapDescendants } from "../../../ext/sandbox/reaper.ts";
 
 const [workspace, parent, sibling, mode, heartbeatPath, identity, lifetime] = process.argv.slice(2);
 const abort = new AbortController();
@@ -26,7 +27,8 @@ try {
 	const wrapped = await SandboxManager.wrapWithSandbox(command, "/bin/bash", undefined, abort.signal);
 	emit({ event: "ready" });
 	try {
-		const result = await createLocalBashOperations({ shellPath: "/bin/bash" }).exec(wrapped, workspace, {
+		const exec = reapDescendants(createLocalBashOperations({ shellPath: "/bin/bash" }).exec);
+		const result = await exec(wrapped, workspace, {
 			signal: abort.signal,
 			onData: () => {},
 			timeout: 8,
