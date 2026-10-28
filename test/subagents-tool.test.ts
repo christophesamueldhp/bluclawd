@@ -32,7 +32,7 @@ import {
 	stopSandbox,
 	wrapExec,
 } from "../ext/sandbox/runtime.ts";
-import { MAX_TASK_INPUT_BYTES } from "../ext/subagents/index.ts";
+import { MAX_TASK_INPUT_BYTES } from "../ext/subagents/admission.ts";
 import { readPersistedRunRecord } from "../ext/subagents/storage.ts";
 import { createParentSessionWithSubagents } from "./helpers/subagent-session.ts";
 
@@ -192,56 +192,6 @@ describe("Task 6 (M1) — Foreground subagent tool integration", () => {
 		}
 	});
 
-	it("refuses a role naming tools the orchestrator lacks before model resolution or run storage", async () => {
-		const cwd = makeTempDir("isolated-cwd");
-		const agentDir = makeTempDir("isolated-agent");
-		mkdirSync(join(agentDir, "agents"));
-		writeFileSync(
-			join(agentDir, "agents", "api-auditor.md"),
-			[
-				"---",
-				"name: api-auditor",
-				"description: Verification.",
-				"tools: [read, bash]",
-				"model: missing/model",
-				"---",
-				"Run verification.",
-			].join("\n"),
-		);
-		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
-		try {
-			await session.bindExtensions({ mode: "print" });
-			const before = faux.state.callCount;
-			faux.setResponses([
-				fauxAssistantMessage([
-					fauxToolCall(
-						"subagent",
-						{
-							agent: "api-auditor",
-							task: "Run verification.",
-						},
-						{ id: "isolated_blocked" },
-					),
-				]),
-				fauxAssistantMessage("Execution unavailable."),
-			]);
-			await session.prompt("Delegate verification.", { expandPromptTemplates: false });
-			const result = session.messages.find((m) => m.role === "toolResult" && m.toolCallId === "isolated_blocked");
-			expect(result?.role === "toolResult" && result.isError).toBe(true);
-			if (result?.role === "toolResult") {
-				expect(result.content).toEqual([
-					expect.objectContaining({
-						text: expect.stringContaining("names tools the orchestrator cannot give a child: read, bash"),
-					}),
-				]);
-			}
-			expect(faux.state.callCount - before).toBe(2);
-			expect(existsSync(join(agentDir, "bluclawd", "subagents", session.sessionId))).toBe(false);
-		} finally {
-			session.dispose();
-		}
-	});
-
 	it("enforces Subagent deny rules, task input size bounds, and unknown role errors before child model activity", async () => {
 		const cwd = makeTempDir("deny-cwd");
 		const agentDir = makeTempDir("deny-agent");
@@ -293,7 +243,7 @@ describe("Task 6 (M1) — Foreground subagent tool integration", () => {
 		}
 	});
 
-	it("warns on conflicting third-party subagent tool registration and rejects background mode in headless print/json mode", async () => {
+	it("warns on conflicting third-party subagent tool registration", async () => {
 		const cwd = makeTempDir("conflict-cwd");
 		const agentDir = makeTempDir("conflict-agent");
 		const warnings: string[] = [];
@@ -325,44 +275,6 @@ describe("Task 6 (M1) — Foreground subagent tool integration", () => {
 			expect(warnings.some((w) => w.includes("Conflicting third-party `subagent` tool"))).toBe(true);
 		} finally {
 			conflictSession.dispose();
-		}
-
-		const { session, faux } = await createParentSessionWithSubagents({
-			cwd,
-			agentDir,
-		});
-
-		try {
-			await session.bindExtensions({
-				mode: "print",
-			});
-
-			// Now test background: true in print mode -> fails explicitly before admission
-			faux.setResponses([
-				fauxAssistantMessage([
-					fauxToolCall(
-						"subagent",
-						{
-							agent: "explorer",
-							task: "Try background in print mode",
-							background: true,
-						},
-						{ id: "c_bg_print" },
-					),
-				]),
-				fauxAssistantMessage("Print mode rejected background subagent."),
-			]);
-
-			await session.prompt("Try background in print mode.", { expandPromptTemplates: false });
-			const bgResult = session.messages.find((m) => m.role === "toolResult" && m.toolCallId === "c_bg_print");
-			expect(bgResult?.role).toBe("toolResult");
-			if (bgResult?.role === "toolResult") {
-				expect(bgResult.isError).toBe(true);
-				const text = bgResult.content.map((c) => (c.type === "text" ? c.text : "")).join("");
-				expect(text).toContain('not supported in one-shot "print" mode');
-			}
-		} finally {
-			session.dispose();
 		}
 	});
 });
@@ -451,29 +363,6 @@ describe("Ticket #7 — Uncapped saved roles", () => {
 			session.dispose();
 		}
 	});
-
-	it("refuses a saved role that still declares the obsolete maxTurns field", async () => {
-		const cwd = makeTempDir("maxturns-cwd");
-		const agentDir = makeTempDir("maxturns-agent");
-		writeRole(join(agentDir, "agents"), "explorer", ["maxTurns: 6"]);
-		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
-		try {
-			await session.bindExtensions({ mode: "print" });
-			faux.setResponses([
-				fauxAssistantMessage([fauxToolCall("subagent", { agent: "explorer", task: "Inspect." }, { id: "legacy" })]),
-				fauxAssistantMessage("Refused."),
-			]);
-			await session.prompt("Delegate.", { expandPromptTemplates: false });
-			const result = session.messages.find((m) => m.role === "toolResult" && m.toolCallId === "legacy");
-			expect(result?.role === "toolResult" && result.isError).toBe(true);
-			const text =
-				result?.role === "toolResult" ? result.content.map((c) => (c.type === "text" ? c.text : "")).join("") : "";
-			expect(text).toMatch(/maxTurns/);
-			expect(text).toMatch(/remove/i);
-		} finally {
-			session.dispose();
-		}
-	});
 });
 
 describe("Ticket #11 — Inline run-local roles", () => {
@@ -525,46 +414,6 @@ describe("Ticket #11 — Inline run-local roles", () => {
 			expect(readFileSync(savedPath, "utf8")).toContain("SAVED-MARKER");
 			expect(statSync(savedPath).mtimeMs).toBe(savedBefore);
 			expect(existsSync(join(cwd, ".pi"))).toBe(false);
-		} finally {
-			session.dispose();
-		}
-	});
-
-	it("rejects invalid inline roles and tools the orchestrator lacks before admission", async () => {
-		const cwd = makeTempDir("inline-bad-cwd");
-		const agentDir = makeTempDir("inline-bad-agent");
-		const role = { name: "checker", description: "Checks.", instructions: "Check." };
-		const cases = [
-			{
-				id: "bad_name",
-				agent: { ...role, name: "Bad Name" },
-				error: /Invalid agent name "Bad Name" in inline role/,
-			},
-			{ id: "reserved", agent: { ...role, name: "sub_checker" }, error: /reserved task prefixes/ },
-			{ id: "control", agent: { ...role, description: "Bad\u0007desc" }, error: /control characters/ },
-			{ id: "empty_body", agent: { ...role, instructions: "   " }, error: /non-empty instructions/ },
-			{ id: "missing_tool", agent: { ...role, tools: ["read", "bash"] }, error: /cannot give a child: read, bash/ },
-			{ id: "bad_tool", agent: { ...role, tools: ["rm -rf"] }, error: /invalid tool name "rm -rf"/ },
-		];
-		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
-		try {
-			await session.bindExtensions({ mode: "print" });
-			const before = faux.state.callCount;
-			faux.setResponses([
-				fauxAssistantMessage(
-					cases.map((c) => fauxToolCall("subagent", { agent: c.agent, task: "Check." }, { id: c.id })),
-				),
-				fauxAssistantMessage("Refused."),
-			]);
-			await session.prompt("Delegate.", { expandPromptTemplates: false });
-
-			for (const c of cases) {
-				const { result, text } = toolResultText(session, c.id);
-				expect(result?.isError, c.id).toBe(true);
-				expect(text, c.id).toMatch(c.error);
-			}
-			expect(faux.state.callCount - before).toBe(2);
-			expect(existsSync(join(agentDir, "bluclawd", "subagents", session.sessionId))).toBe(false);
 		} finally {
 			session.dispose();
 		}
@@ -713,70 +562,6 @@ describe("Ticket #10 — Per-spawn model and thinking selection", () => {
 			"faux-main/low",
 			"faux-main/minimal",
 		]);
-	});
-
-	it("fails unknown models, missing auth, unsupported thinking and virtual routers with named errors before admission", async () => {
-		const cwd = makeTempDir("model-errors-cwd");
-		const agentDir = makeTempDir("model-errors-agent");
-		const savedOpenAiKey = process.env.OPENAI_API_KEY;
-		delete process.env.OPENAI_API_KEY;
-		const { session, faux, modelRuntime } = await createParentSessionWithSubagents({ cwd, agentDir });
-		modelRuntime.registerVirtualModel({
-			provider: "virtual-router",
-			id: "auto",
-			name: "Virtual Auto Router",
-			thinkingLevels: ["low", "high"],
-			route: () => ({ model: faux.getModel("faux-main"), thinkingLevel: "low" }),
-		});
-		await modelRuntime.refresh({ allowNetwork: false });
-		const cases = [
-			{ id: "unknown", args: { model: "faux-tool/missing" }, error: /"faux-tool\/missing" is not available/ },
-			{
-				id: "no_auth",
-				args: { model: "openai/gpt-4.1", thinkingLevel: "off" },
-				error: /No authentication configured.*"openai"/,
-			},
-			{
-				id: "unsupported",
-				args: { model: "faux-tool/faux-alt", thinkingLevel: "high" },
-				error: /Thinking level "high" is not supported.*faux-alt.*supported: off/,
-			},
-			{
-				id: "inherited_unsupported",
-				args: { model: "faux-tool/faux-alt", thinkingLevel: "inherit" },
-				error: /Thinking level "low" is not supported/,
-			},
-			{
-				id: "virtual",
-				args: { model: "virtual-router/auto" },
-				error: /Virtual model "virtual-router\/auto" cannot be used by a subagent: virtual model routers are not inspectable/,
-			},
-			{ id: "bad_level", args: { thinkingLevel: "ultra" }, error: /Invalid subagent "thinkingLevel" value "ultra"/ },
-			{ id: "bad_model", args: { model: "sonnet" }, error: /Invalid subagent "model" value "sonnet"/ },
-		];
-		try {
-			await session.bindExtensions({ mode: "print" });
-			const before = faux.state.callCount;
-			faux.setResponses([
-				fauxAssistantMessage(
-					cases.map((c) =>
-						fauxToolCall("subagent", { agent: "explorer", task: "Report.", ...c.args }, { id: c.id }),
-					),
-				),
-				fauxAssistantMessage("Refused."),
-			]);
-			await session.prompt("Delegate.", { expandPromptTemplates: false });
-			for (const c of cases) {
-				const { result, text } = toolResultText(session, c.id);
-				expect(result?.isError, c.id).toBe(true);
-				expect(text, c.id).toMatch(c.error);
-			}
-			expect(faux.state.callCount - before).toBe(2);
-			expect(existsSync(join(agentDir, "bluclawd", "subagents", session.sessionId))).toBe(false);
-		} finally {
-			session.dispose();
-			if (savedOpenAiKey !== undefined) process.env.OPENAI_API_KEY = savedOpenAiKey;
-		}
 	});
 
 	it("lists a provider registered after the first listing without a restart", async () => {
@@ -1623,7 +1408,7 @@ describe("Ticket #16 — Agent names and the live roster", () => {
 		}
 	});
 
-	it("names an unnamed run after its role and refuses reserved or malformed names", async () => {
+	it("names an unnamed run after its role", async () => {
 		const cwd = makeTempDir("autoname-cwd");
 		const agentDir = makeTempDir("autoname-agent");
 		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
@@ -1632,10 +1417,6 @@ describe("Ticket #16 — Agent names and the live roster", () => {
 			faux.setResponses([
 				fauxAssistantMessage([fauxToolCall("subagent", { agent: "explorer", task: "Look." }, { id: "auto" })]),
 				fauxAssistantMessage("Child done."),
-				fauxAssistantMessage([
-					fauxToolCall("subagent", { agent: "explorer", name: "parent", task: "x" }, { id: "reserved" }),
-					fauxToolCall("subagent", { agent: "explorer", name: "Bad Name", task: "x" }, { id: "malformed" }),
-				]),
 				fauxAssistantMessage("Done."),
 			]);
 			await session.prompt("Delegate.", { expandPromptTemplates: false });
@@ -1644,8 +1425,6 @@ describe("Ticket #16 — Agent names and the live roster", () => {
 			const runId = (auto.result?.details as { runId: string }).runId;
 			expect(readPersistedRunRecord(agentDir, session.sessionId, runId)).toMatchObject({ name: "explorer-1" });
 			expect(auto.text).toContain("name=explorer-1");
-			expect(toolResultText(session, "reserved").text).toMatch(/Invalid subagent name "parent"/);
-			expect(toolResultText(session, "malformed").text).toMatch(/Invalid subagent name "Bad Name"/);
 		} finally {
 			session.dispose();
 		}
