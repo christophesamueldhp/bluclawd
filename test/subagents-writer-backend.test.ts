@@ -16,7 +16,7 @@ const lifetimeMs = 3000;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 type Heartbeat = { identity: string; pid: number; ppid: number; sequence: number };
 
-describe.skipIf(!supported)("M3 macOS process-ownership release gate (not writer activation)", () => {
+describe.skipIf(!supported)("macOS: stopping a sandboxed command ends its descendants (target of #29)", () => {
 	let fixture: Awaited<ReturnType<typeof createWriterFixture>>;
 	let waitForProbe: (() => Promise<void>) | undefined;
 	beforeEach(async () => {
