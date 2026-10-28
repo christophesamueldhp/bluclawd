@@ -294,6 +294,9 @@ describe("captureCheckpoint", () => {
 		await write("new.txt", "new\n");
 		const statusBefore = await status();
 		const indexBefore = await readFile(join(dir, ".git", "index"));
+		// The temp dir is shared, so only what this capture adds counts.
+		const tempIndexes = async () => (await readdir(tmpdir())).filter((f) => f.startsWith("bluclawd-checkpoint-"));
+		const indexesBefore = await tempIndexes();
 
 		await capture(dir, exec);
 
@@ -301,8 +304,7 @@ describe("captureCheckpoint", () => {
 		expect(indexAfter.equals(indexBefore)).toBe(true);
 		expect(await status()).toEqual(statusBefore);
 		expect(statusBefore).toEqual([" M a.txt", "?? new.txt"]);
-		const leftovers = (await readdir(tmpdir())).filter((f) => f.startsWith("bluclawd-checkpoint-"));
-		expect(leftovers).toEqual([]);
+		expect(await tempIndexes()).toEqual(indexesBefore);
 	});
 
 	it("captures staged additions that match .gitignore without changing the real index", async () => {
