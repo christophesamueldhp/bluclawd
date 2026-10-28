@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues are tracked in GitHub Issues on christophesamueldhp/bluclawd via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues, and the spec for any design settled in conversation, are tracked in GitHub Issues on christophesamueldhp/bluclawd via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
