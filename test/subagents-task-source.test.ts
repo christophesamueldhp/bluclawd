@@ -157,7 +157,7 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 		expect(source.get(run.runId)).toMatchObject({ state: "stopped", status: "cancelled" });
 	});
 
-	it("says why a stop failed: an unknown or foreign id is not found, a finished run is not running", async () => {
+	it("says why a stop failed: an unknown, foreign or orphaned id is not found, a finished run is not running", async () => {
 		const { agentDir, launch, source, settle } = setup();
 		const running = launch();
 		const foreign = launch("sess_other");
@@ -165,6 +165,10 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 		settle.get(finished.runId)?.({ status: "completed", complete: true, summaryText: "done" });
 		await finished.completion;
 		writePersistedRunRecord(agentDir, persistedRecord({ runId: "sub_earlier", status: "completed" }));
+		writePersistedRunRecord(
+			agentDir,
+			persistedRecord({ runId: "sub_orphan", status: "running", endedAt: undefined }),
+		);
 
 		expect(source.stop("sub_missing")).toEqual({ ok: false, reason: "not_found" });
 		expect(source.stop(foreign.runId, { owner: "sess_main" })).toEqual({ ok: false, reason: "not_found" });
@@ -178,6 +182,9 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 			reason: "not_running",
 			task: { status: "completed" },
 		});
+
+		// A run a crashed process never ended has nothing to stop.
+		expect(source.stop("sub_orphan")).toEqual({ ok: false, reason: "not_found" });
 
 		const stopped = source.stop(running.runId, { source: "model" });
 		expect(stopped).toMatchObject({ ok: true, task: { id: running.runId } });
@@ -218,6 +225,9 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 		const live = launch();
 		controllers.get(live.runId)?.updateProgress("Scanning src/auth.ts");
 		expect(source.get(live.runId)?.output()).toBe("Scanning src/auth.ts");
+
+		writePersistedRunRecord(agentDir, persistedRecord({ runId: "sub_unreported", summaryText: "Summary only" }));
+		expect(source.get("sub_unreported")?.output()).toBe("Summary only");
 
 		const done = persistedRecord({ runId: "sub_reported" });
 		writePersistedRunRecord(agentDir, done);

@@ -12,7 +12,7 @@ import { notifyListeners, sharedRef } from "./global-state.ts";
 export const AGENT_TASK_ID_PREFIX = "sub_";
 
 export function isAgentTaskId(id: string): boolean {
-	return /^sub_[A-Za-z0-9_-]+$/.test(id);
+	return id.startsWith(AGENT_TASK_ID_PREFIX) && /^[A-Za-z0-9_-]+$/.test(id.slice(AGENT_TASK_ID_PREFIX.length));
 }
 
 /** Whether a task still runs; a run being stopped still runs. */

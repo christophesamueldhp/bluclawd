@@ -84,9 +84,7 @@ export function taskRows(owner: string | undefined): TaskRow[] {
 		endedAt: job.exit?.at,
 		job,
 	}));
-	const agents: TaskRow[] = (agentTasks()?.list(owner) ?? [])
-		.filter((task) => owner === undefined || task.owner === owner)
-		.map(agentRow);
+	const agents: TaskRow[] = (agentTasks()?.list(owner) ?? []).map(agentRow);
 	// Reversed first: the sort is stable, so tasks started in the same millisecond stay newest first.
 	return [...shells, ...agents].reverse().sort((a, b) => b.startedAt - a.startedAt);
 }
@@ -208,7 +206,7 @@ function agentRow(task: AgentTask): TaskRow {
 	};
 }
 
-function completedAgentRow(id: string, owner: string | undefined): TaskRow | undefined {
+function agentRowById(id: string, owner: string | undefined): TaskRow | undefined {
 	const task = agentTasks()?.get(id, owner);
 	return task && agentRow(task);
 }
@@ -339,7 +337,7 @@ export class TasksDialog implements Component {
 		const kb = getKeybindings();
 		const rows = visibleRows(this.owner);
 		if (this.detail !== undefined) {
-			const row = rows.find((r) => r.id === this.detail) ?? completedAgentRow(this.detail, this.owner);
+			const row = rows.find((r) => r.id === this.detail) ?? agentRowById(this.detail, this.owner);
 			if (matchesKey(data, "left")) this.leaveDetail(rows);
 			else if (kb.matches(data, "tui.select.cancel") || data === "\r" || data === " ") {
 				this.closeFromDetail();
@@ -371,7 +369,7 @@ export class TasksDialog implements Component {
 	render(width: number): string[] {
 		const rows = visibleRows(this.owner);
 		if (this.detail !== undefined) {
-			const row = rows.find((r) => r.id === this.detail) ?? completedAgentRow(this.detail, this.owner);
+			const row = rows.find((r) => r.id === this.detail) ?? agentRowById(this.detail, this.owner);
 			if (row) return this.frame(width, this.renderDetail(row, width - 2 * PAD), this.detailHints(row));
 			// The task ended while on screen: a dialog opened straight to it closes, else back to the list.
 			if (this.direct) {

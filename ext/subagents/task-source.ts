@@ -1,5 +1,10 @@
 import type { AgentTask, AgentTaskSource, AgentTaskState } from "../_shared/agent-tasks.ts";
-import type { SubagentLifecycleStatus, SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
+import {
+	isTerminalSubagentStatus,
+	type SubagentLifecycleStatus,
+	type SubagentRunRecord,
+	type SubagentRunScheduler,
+} from "./runs.ts";
 import { readBoundedSubagentReport, readPersistedRunRecord, subagentReportPath } from "./storage.ts";
 
 const TASK_OUTPUT_BYTES = 8192;
@@ -60,10 +65,13 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 		stop: (id, options) => {
 			const run = findRun(id, options?.owner);
 			if (!run) return { ok: false, reason: "not_found" };
-			if (!deps.scheduler.cancelRun(run.runId, options?.source ?? "user", `Stopped subagent ${run.runId}`)) {
-				return { ok: false, reason: "not_running", task: toTask(run) };
+			if (deps.scheduler.cancelRun(run.runId, options?.source ?? "user", `Stopped subagent ${run.runId}`)) {
+				return { ok: true, task: toTask(deps.scheduler.getRun(run.runId) ?? run) };
 			}
-			return { ok: true, task: toTask(deps.scheduler.getRun(run.runId) ?? run) };
+			// A persisted run that never ended was orphaned by a crash: there is nothing to stop.
+			return isTerminalSubagentStatus(run.status)
+				? { ok: false, reason: "not_running", task: toTask(run) }
+				: { ok: false, reason: "not_found" };
 		},
 		stopAll: (options) => {
 			const owner = options?.owner ?? deps.activeParentSessionId();

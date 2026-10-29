@@ -1687,6 +1687,7 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 			for (let i = 0; i < 2000 && gateEntries < 2; i++) {
 				await new Promise((resolve) => setTimeout(resolve, 10));
 			}
+			expect(gateEntries).toBe(2);
 
 			// Esc on the orchestrator's turn leaves background children running.
 			await session.abort();
@@ -1729,12 +1730,14 @@ describe("Spec #6 story 42 — /tasks and remote controls on real runs", () => {
 	it("serves a finished child's full report and stops a running child from the phone", async () => {
 		const cwd = makeTempDir("controls-cwd");
 		const agentDir = makeTempDir("controls-agent");
+		let gateEntries = 0;
 		const childGate = defineTool({
 			name: "child_gate",
 			label: "Child gate",
 			description: "Waits until aborted.",
 			parameters: Type.Object({}),
 			execute: async (_id, _params, signal) => {
+				gateEntries++;
 				await new Promise((resolve) => signal?.addEventListener("abort", resolve));
 				return { content: [{ type: "text", text: "aborted" }], details: undefined };
 			},
@@ -1780,7 +1783,7 @@ describe("Spec #6 story 42 — /tasks and remote controls on real runs", () => {
 				for (let i = 0; i < 2000 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
 				expect(condition()).toBe(true);
 			};
-			await waitFor(() => statusOf(doneId) === "completed" && statusOf(busyId) === "running");
+			await waitFor(() => statusOf(doneId) === "completed" && gateEntries === 1);
 
 			expect(agentTasks()?.get(doneId)?.output()).toContain("DONE-MARK: the full report.");
 			expect(
