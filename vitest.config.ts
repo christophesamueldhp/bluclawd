@@ -20,6 +20,6 @@ export default defineConfig({
 		outputFile: { json: ".vitest/last-run.json" },
 		silent: "passed-only",
 		include: ["test/**/*.test.ts"],
-		setupFiles: ["test/setup/agent-dir.ts"],
+		setupFiles: ["test/setup/agent-dir.ts", "test/setup/faux-exhaustion.ts"],
 	},
 });

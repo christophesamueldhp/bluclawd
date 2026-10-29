@@ -234,7 +234,7 @@ async function runOrchestration(options: {
 		session.dispose();
 		throw timedOut;
 	}
-	return { cwd, agentDir, session, faux, elapsedMs };
+	return { cwd, agentDir, session, elapsedMs };
 }
 
 describe("Ticket #15 — Orchestrated acceptance scenarios on a shared fixture checkout", () => {
@@ -464,14 +464,18 @@ describe("Ticket #15 — Failure, denial, cancellation and disposal scenarios", 
 	it("stops a child that is waiting for a message, and it does nothing afterwards", async () => {
 		const run = await runOrchestration({
 			files: DURATION_FILES,
-			script: scripted([background("waiter"), fauxAssistantMessage("Launched.")], waiting("waiter")),
+			script: scripted(
+				[
+					background("waiter"),
+					fauxAssistantMessage("Launched."),
+					fauxAssistantMessage([fauxToolCall("subagent_stop", { agent: "waiter" })]),
+					fauxAssistantMessage("Stopped."),
+				],
+				waiting("waiter"),
+			),
 		});
 		try {
 			await waitFor(() => ticks(run.cwd) > 0);
-			run.faux.setResponses([
-				fauxAssistantMessage([fauxToolCall("subagent_stop", { agent: "waiter" })]),
-				fauxAssistantMessage("Stopped."),
-			]);
 			await run.session.prompt("Stop it.", { expandPromptTemplates: false });
 			await waitFor(() => readSessionSummary(run.agentDir, run.session.sessionId).runs[0]?.status === "cancelled");
 			const after = ticks(run.cwd);
