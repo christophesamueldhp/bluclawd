@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LiveSnapshot } from "../daemon/orchestrator-client.ts";
 import { LiveForwarder, latestOnly } from "../ext/remote/live.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 const assistant = (...content: unknown[]) => ({ role: "assistant", content });
 
@@ -151,11 +152,11 @@ describe("latestOnly", () => {
 		forward(null);
 		expect(sent).toEqual([snapshot("a")]);
 		done.shift()?.();
-		await vi.waitFor(() => expect(sent).toEqual([snapshot("a"), null]));
+		await waitFor(() => expect(sent).toEqual([snapshot("a"), null]));
 		done.shift()?.();
 		await Promise.resolve();
 		forward(snapshot("next"));
-		await vi.waitFor(() => expect(sent).toEqual([snapshot("a"), null, snapshot("next")]));
+		await waitFor(() => expect(sent).toEqual([snapshot("a"), null, snapshot("next")]));
 	});
 
 	it("goes on after a failed send", async () => {
@@ -166,6 +167,6 @@ describe("latestOnly", () => {
 		});
 		forward({ text: "a", tools: [] });
 		forward(null);
-		await vi.waitFor(() => expect(sent).toEqual([{ text: "a", tools: [] }, null]));
+		await waitFor(() => expect(sent).toEqual([{ text: "a", tools: [] }, null]));
 	});
 });

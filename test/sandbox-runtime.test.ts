@@ -19,6 +19,7 @@ import {
 	stopSandbox,
 	wrapExec,
 } from "../ext/sandbox/runtime.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 // The reaper runs real processes; it has its own tests.
 vi.mock("../ext/sandbox/reaper.ts", () => ({ reapDescendants: (exec: Exec) => exec }));
@@ -268,7 +269,7 @@ describe("wrapExec", () => {
 			await runForSubagent(api, () => run("child-fg"));
 			await runForSubagent(api, () => run("child-bg", true));
 			await run("parent-fg");
-			for (let i = 0; i < 200 && !("sandboxed(child-bg)" in seen); i++) await new Promise((r) => setTimeout(r, 5));
+			await waitFor(() => "sandboxed(child-bg)" in seen);
 			expect(seen).toEqual({
 				"sandboxed(child-fg)": [api],
 				"sandboxed(child-bg)": [api],
@@ -327,7 +328,7 @@ describe("wrapExec", () => {
 		const deniedToChild = { allow: false, reason: expect.stringMatching(/orchestrator/) };
 		try {
 			await run("wait-then-fetch parent.example", true);
-			for (let i = 0; i < 200 && runningCommands().size === 0; i++) await new Promise((r) => setTimeout(r, 5));
+			await waitFor(() => runningCommands().size > 0);
 
 			await runForSubagent(api, () => run("fetch registry.npmjs.org"));
 			expect(answers["fetch registry.npmjs.org"]).toEqual(deniedToChild);
@@ -339,9 +340,9 @@ describe("wrapExec", () => {
 			expect(confirm).not.toHaveBeenCalled();
 
 			await runForSubagent(api, () => run("wait-then-fetch child.example", true));
-			for (let i = 0; i < 200 && runningCommands().size < 2; i++) await new Promise((r) => setTimeout(r, 5));
+			await waitFor(() => runningCommands().size >= 2);
 			release();
-			for (let i = 0; i < 200 && Object.keys(answers).length < 4; i++) await new Promise((r) => setTimeout(r, 5));
+			await waitFor(() => Object.keys(answers).length >= 4);
 			expect(answers["wait-then-fetch parent.example"]).toBe(true);
 			expect(answers["wait-then-fetch child.example"]).toEqual(deniedToChild);
 			expect(confirm).toHaveBeenCalledTimes(1);

@@ -11,6 +11,7 @@ import {
 	saveAssistEnabled,
 	saveAssistModel,
 } from "../ext/prompt-assist/prefs.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 vi.mock("../ext/prompt-assist/prefs.ts", async (importOriginal) => {
 	const actual = await importOriginal<typeof import("../ext/prompt-assist/prefs.ts")>();
@@ -385,7 +386,7 @@ describe("next-prompt display and early naming", () => {
 		expect(h.stream).toHaveBeenCalledOnce();
 		expect((h.stream.mock.calls[0][1] as any).messages[0].content).toBe("Build a login form");
 		h.response.resolve(answer("Build Login Form"));
-		await vi.waitFor(() => expect(h.pi.getSessionName()).toBe("Build Login Form"));
+		await waitFor(() => expect(h.pi.getSessionName()).toBe("Build Login Form"));
 		h.emit("before_agent_start", { messageType: "user", prompt: "Add tests too" });
 		expect(h.stream).toHaveBeenCalledOnce();
 	});
@@ -396,7 +397,7 @@ describe("next-prompt display and early naming", () => {
 		expect((h.stream.mock.calls[0][1] as any).systemPrompt).toContain("2-5 words");
 		const title = `${"Component".repeat(12)} regression`;
 		h.response.resolve(answer(title));
-		await vi.waitFor(() => expect(h.pi.getSessionName()).toBe(title));
+		await waitFor(() => expect(h.pi.getSessionName()).toBe(title));
 	});
 
 	it("does not name a session from custom messages or empty input", () => {
@@ -544,7 +545,7 @@ describe("prompt assist model selection", () => {
 		expect(h.ctx.modelRegistry.find).toHaveBeenCalledWith("custom", "vendor/fast-model");
 		expect(h.stream.mock.calls[0][2]).not.toHaveProperty("samplingParams");
 		h.response.resolve(answer("Custom model title"));
-		await vi.waitFor(() => expect(h.pi.getSessionName()).toBe("Custom model title"));
+		await waitFor(() => expect(h.pi.getSessionName()).toBe("Custom model title"));
 	});
 
 	it("uses the selected model for prompt suggestions too", async () => {
@@ -665,7 +666,7 @@ describe("session assistance", () => {
 			samplingParams: { thinking: { type: "disabled" } },
 		});
 		h.response.resolve(answer("Fix Login Validation"));
-		await vi.waitFor(() => expect(h.pi.setSessionName).toHaveBeenCalledWith("Fix Login Validation"));
+		await waitFor(() => expect(h.pi.setSessionName).toHaveBeenCalledWith("Fix Login Validation"));
 		h.pi.setSessionName("My custom title");
 		h.emit("before_agent_start");
 		expect(h.pi.getSessionName()).toBe("My custom title");

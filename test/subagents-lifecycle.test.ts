@@ -15,11 +15,12 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { agentTasks } from "../ext/_shared/agent-tasks.ts";
 import { holdNotifications } from "../ext/background-bash/notification-hold.ts";
 import { createSubagentsExtension, SUBAGENT_NOTIFICATION_CUSTOM_TYPE } from "../ext/subagents/index.ts";
 import { readPersistedRunRecord } from "../ext/subagents/storage.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 const tempDirs: string[] = [];
 
@@ -144,12 +145,9 @@ describe("Task 7 (M2) — Parent lifecycle transitions, branch ownership, and no
 
 			// Child finishes while notifications are held -> queued in notificationHold
 			finishChild();
-			await vi.waitFor(
-				() => {
-					expect(readPersistedRunRecord(agentDir, oldSessionId, runId)?.status).toBe("completed");
-				},
-				{ timeout: 3000, interval: 20 },
-			);
+			await waitFor(() => {
+				expect(readPersistedRunRecord(agentDir, oldSessionId, runId)?.status).toBe("completed");
+			});
 
 			// Now simulate session replacement (`session_before_switch`)
 			await session.extensionRunner.emit({
@@ -204,22 +202,16 @@ describe("Task 7 (M2) — Parent lifecycle transitions, branch ownership, and no
 			await session.prompt("Start a background child.", { expandPromptTemplates: false });
 			const sessionId = session.sessionId;
 			const [task] = agentTasks()?.list(sessionId) ?? [];
-			await vi.waitFor(() => expect(agentTasks()?.list(sessionId)[0]?.status).toBe("running"), {
-				timeout: 3000,
-				interval: 20,
-			});
+			await waitFor(() => expect(agentTasks()?.list(sessionId)[0]?.status).toBe("running"));
 
 			await session.extensionRunner.emit(event);
 			releaseChild();
-			await vi.waitFor(
-				() => {
-					expect(readPersistedRunRecord(agentDir, sessionId, task.id)).toMatchObject({
-						status: "cancelled",
-						stopSource: "session_invalidated",
-					});
-				},
-				{ timeout: 3000, interval: 20 },
-			);
+			await waitFor(() => {
+				expect(readPersistedRunRecord(agentDir, sessionId, task.id)).toMatchObject({
+					status: "cancelled",
+					stopSource: "session_invalidated",
+				});
+			});
 		} finally {
 			releaseChild();
 			session.dispose();
@@ -276,14 +268,11 @@ describe("Task 7 (M2) — Parent lifecycle transitions, branch ownership, and no
 
 			// Unblock child so abort settles cleanly
 			releaseChild();
-			await vi.waitFor(
-				() => {
-					const persisted = readPersistedRunRecord(agentDir, session.sessionId, runId);
-					expect(persisted?.status).toBe("cancelled");
-					expect(persisted?.stopSource).toBe("session_invalidated");
-				},
-				{ timeout: 3000, interval: 20 },
-			);
+			await waitFor(() => {
+				const persisted = readPersistedRunRecord(agentDir, session.sessionId, runId);
+				expect(persisted?.status).toBe("cancelled");
+				expect(persisted?.stopSource).toBe("session_invalidated");
+			});
 
 			// Confirm no notification was delivered to the rewound branch
 			const notices = session.messages.filter(

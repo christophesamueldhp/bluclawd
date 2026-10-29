@@ -9,6 +9,7 @@ import { startIpcServer } from "../daemon/ipc/server.ts";
 import { OrchestratorClient, type PaneMessage } from "../daemon/orchestrator-client.ts";
 import { supervisor } from "../daemon/supervisor.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 /** A real daemon socket in a temp PI_SERVER_DIR, with a pane's registration as its client. */
 describe("instant delivery to a pane", () => {
@@ -43,14 +44,14 @@ describe("instant delivery to a pane", () => {
 			"pane-wait-e2e",
 		);
 		reg.start();
-		await vi.waitFor(() =>
+		await waitFor(() =>
 			expect(supervisor.listExternalInstances().some((e) => e.record.id === "pane-wait-e2e")).toBe(true),
 		);
 		// Its wait reaches the daemon right after the first register.
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		const sent = Date.now();
 		expect(supervisor.sendExternal("pane-wait-e2e", { type: "prompt", text: "hi" })).toBe(true);
-		await vi.waitFor(() => expect(handled).toHaveLength(1), { timeout: 1000, interval: 5 });
+		await waitFor(() => expect(handled).toHaveLength(1));
 		expect(handled[0].message).toEqual({ type: "prompt", text: "hi" });
 		expect(handled[0].at - sent).toBeLessThan(500);
 		await reg.stop();

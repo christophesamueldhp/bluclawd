@@ -17,6 +17,7 @@ import {
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { SessionSpec } from "../daemon/remote/spawn.ts";
 import type { StatusLine } from "../daemon/remote/statusline.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 import { validP256dh } from "./support/push.ts";
 
 vi.mock("@earendil-works/pi-coding-agent", () => ({ SessionManager: { list: vi.fn() } }));
@@ -1456,9 +1457,9 @@ describe("remote HTTP API", () => {
 
 			watcher.controller.abort();
 			bystander.controller.abort();
-			for (let i = 0; i < 50 && server.watching().size > 0; i++) await new Promise((r) => setTimeout(r, 20));
+			await waitFor(() => server.watching().size === 0);
 			expect(server.watching()).toEqual(new Set());
-			for (let i = 0; i < 50 && server.present().size > 0; i++) await new Promise((r) => setTimeout(r, 20));
+			await waitFor(() => server.present().size === 0);
 			expect(server.present()).toEqual(new Set());
 			// Gone with its last watcher: a new one is not sent the old reply.
 			const again = await open(token, "live");

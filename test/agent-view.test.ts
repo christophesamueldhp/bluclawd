@@ -23,6 +23,7 @@ import {
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
 import { withoutAgentViewCommand } from "../ext/agent-view/index.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 
@@ -488,7 +489,7 @@ describe("AgentView keys", () => {
 			},
 		});
 		const showing = view.onShow();
-		await vi.waitFor(() => expect(answer).toBeDefined());
+		await waitFor(() => expect(answer).toBeDefined());
 		view.close();
 		invalidated = true;
 		answer([]);
@@ -667,7 +668,7 @@ describe("AgentView keys", () => {
 			{ id: "stored-w", status: "stopped", cwd: THERE, sessionFile: "/w.jsonl", outcome: "stopped" },
 		];
 		view.handleInput(CTRL_X);
-		await vi.waitFor(() => expect(calls.at(-1)).toEqual(["delete", "stored-w"]));
+		await waitFor(() => expect(calls.at(-1)).toEqual(["delete", "stored-w"]));
 	});
 
 	it("esc dismisses an armed delete instead of closing", () => {
@@ -726,7 +727,7 @@ describe("AgentView keys", () => {
 		expect(view.render(100).map(stripAnsi).join("\n")).toContain("ctrl+x again to delete");
 		view.handleInput(CTRL_X);
 		// This terminal moves to a new pane showing agent view; this one ends.
-		await vi.waitFor(() => expect(calls.at(-1)).toEqual(["kill", "pane-self"]));
+		await waitFor(() => expect(calls.at(-1)).toEqual(["kill", "pane-self"]));
 		expect(calls).toEqual([
 			["start", HERE, ["--", "/agent-view"], { BLUCLAWD_OPEN_VIEW: "1", BLUCLAWD_HIDE: "me" }],
 			["waitForView", "pane-1"],

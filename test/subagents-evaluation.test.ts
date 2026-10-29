@@ -17,6 +17,7 @@ import {
 	summarizePiEvents,
 } from "../scripts/eval-subagents.ts";
 import { createParentSessionWithSubagents } from "./helpers/subagent-session.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -375,10 +376,6 @@ describe("Ticket #15 — Failure, denial, cancellation and disposal scenarios", 
 		}
 	});
 
-	const waitFor = async (condition: () => boolean) => {
-		for (let i = 0; i < 2000 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(condition()).toBe(true);
-	};
 	const waiting = (name: string) => ({
 		[name]: () => fauxAssistantMessage([bash("echo tick >> progress.log; sleep 0.05")]),
 	});
