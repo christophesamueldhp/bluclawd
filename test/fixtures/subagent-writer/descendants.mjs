@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { readinessMs } from "../../helpers/heartbeats.ts";
 
 const [mode, heartbeatPath, identity, lifetimeText] = process.argv.slice(2);
 const lifetime = Number(lifetimeText);
@@ -42,5 +43,5 @@ if (mode === "leaf" || mode === "attached") {
 		setTimeout(() => process.exit(0), lifetime + 1000);
 	}, 25);
 	// A leaf that never starts must not keep the command alive forever.
-	setTimeout(() => process.exit(0), 60_000);
+	setTimeout(() => process.exit(0), 2 * readinessMs);
 }

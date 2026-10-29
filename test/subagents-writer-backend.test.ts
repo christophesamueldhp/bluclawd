@@ -14,6 +14,7 @@ const supported =
 	SandboxManager.isSupportedPlatform() &&
 	SandboxManager.checkDependencies().errors.length === 0;
 const lifetimeMs = 3000;
+const testTimeoutMs = 2 * readinessMs;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 describe.skipIf(!supported)("macOS: stopping a sandboxed command ends its descendants (target of #29)", () => {
@@ -48,7 +49,13 @@ describe.skipIf(!supported)("macOS: stopping a sandboxed command ends its descen
 			],
 			{
 				cwd: workspace,
-				env: { PATH: process.env.PATH, HOME: fixture.runDir, TMPDIR: workspace, LANG: "C" },
+				env: {
+					PATH: process.env.PATH,
+					HOME: fixture.runDir,
+					TMPDIR: workspace,
+					LANG: "C",
+					READINESS_MS: String(readinessMs),
+				},
 				stdio: ["pipe", "pipe", "pipe"],
 			},
 		);
@@ -83,7 +90,8 @@ describe.skipIf(!supported)("macOS: stopping a sandboxed command ends its descen
 		const deadline = Date.now() + readinessMs;
 		while (!beats().some((beat) => beat.identity === identity && (mode !== "double-fork" || beat.ppid === 1))) {
 			if (child.exitCode !== null) throw new Error(`Probe stopped before readiness: ${stdout} ${stderr}`);
-			if (Date.now() > deadline) throw new Error(`Probe readiness timeout: ${stdout} ${stderr}`);
+			if (Date.now() > deadline)
+				throw new Error(`Probe readiness timeout after ${readinessMs}ms: ${stdout} ${stderr}`);
 			await delay(10);
 		}
 		const started = beats().at(-1)!;
@@ -103,12 +111,16 @@ describe.skipIf(!supported)("macOS: stopping a sandboxed command ends its descen
 			expect(result.stdout).toContain('"event":"settled"');
 			expect(result.stillWriting.map((beat) => beat.pid)).toEqual([]);
 		},
-		60_000,
+		testTimeoutMs,
 	);
 
-	it("leaves no executing double-fork descendant after the owner pipe closes", async () => {
-		const result = await observeAfterStop("double-fork", true);
-		expect(result.started.ppid).toBe(1);
-		expect(result.stillWriting.map((beat) => beat.pid)).toEqual([]);
-	}, 60_000);
+	it(
+		"leaves no executing double-fork descendant after the owner pipe closes",
+		async () => {
+			const result = await observeAfterStop("double-fork", true);
+			expect(result.started.ppid).toBe(1);
+			expect(result.stillWriting.map((beat) => beat.pid)).toEqual([]);
+		},
+		testTimeoutMs,
+	);
 });

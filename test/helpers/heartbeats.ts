@@ -6,8 +6,11 @@ export type Heartbeat = { identity: string; pid: number; ppid: number; sequence:
 const descendants = fileURLToPath(new URL("../fixtures/subagent-writer/descendants.mjs", import.meta.url));
 const quote = (text: string) => `'${text.replace(/'/g, "'\\''")}'`;
 
-/** How long a test waits for a fixture descendant's first beat: under parallel load, its startup takes 20s and more (#76). */
-export const readinessMs = 30_000;
+/**
+ * How long a test waits for a fixture descendant's first beat: under parallel load, its startup takes 20s and more (#76).
+ * `READINESS_MS` overrides it, so widening every wait tells a slow startup from a hang.
+ */
+export const readinessMs = Number(process.env.READINESS_MS) || 30_000;
 
 /** The heartbeats `fixtures/subagent-writer/descendants.mjs` has written so far, skipping a half-written line. */
 export function readHeartbeats(path: string): Heartbeat[] {
@@ -31,7 +34,7 @@ export function descendantCommand(mode: string, path: string, identity: string, 
 
 /** `command` in the background, the shell returning once its descendant beats: leaving the descendant behind. */
 export function leavingBehind(command: string, path: string): string {
-	return `${command} & for _ in {1..${readinessMs / 10}}; do [ -s ${quote(path)} ] && break; sleep 0.01; done`;
+	return `${command} & for _ in {1..${Math.ceil(readinessMs / 10)}}; do [ -s ${quote(path)} ] && break; sleep 0.01; done`;
 }
 
 /** Whether anything had beaten into `path` by now, and the beats written over the next 150ms. */

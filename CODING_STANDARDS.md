@@ -8,7 +8,7 @@ Read during review. Biome (`npm run lint`) owns formatting and lint, and `npm ru
 
 ## Tests
 
-**Tests wait for the event they depend on.** A test that needs a process running, a file written or a message delivered polls for that condition with a deadline, never a fixed sleep sized for an idle machine: under parallel load the fixed window loses the race (#45). A fixed delay that only spaces out output, or proves nothing happens within it, is fine.
+**Tests wait for the event they depend on.** A test that needs a process running, a file written or a message delivered polls for that condition with a deadline, never a fixed sleep sized for an idle machine: under parallel load the fixed window loses the race (#45). The poll's deadline is a failure bound, not a timing estimate: size it for a loaded machine (a fixture descendant's first beat took 22s under `scripts/stress-test.sh`, #76), and every window that must not fire first (a fixture's watchdog or keep-alive, an exec timeout, the test's own timeout) derives from it or outlasts it. A fixed delay that only spaces out output, or proves nothing happens within it, is fine.
 
 ## Subagents (`ext/subagents/`)
 

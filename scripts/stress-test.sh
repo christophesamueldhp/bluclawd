@@ -3,6 +3,9 @@
 # ROUNDS times (default 3), and counts the failed runs. Arguments go to vitest, e.g.
 #   scripts/stress-test.sh test/sandbox-reaper.test.ts -t "left behind"
 # Concurrent vitest processes redden timing races that CPU load alone does not (#45).
+# Still green? Run a second `scripts/stress-test.sh test/subagents-writer-backend.test.ts` concurrently:
+# sandbox startup is the heaviest load (#76). READINESS_MS=120000 widens every fixture readiness wait:
+# green then means the failure is slow startup, not a hang.
 shopt -s nullglob
 width=${WIDTH:-16}
 rounds=${ROUNDS:-3}
