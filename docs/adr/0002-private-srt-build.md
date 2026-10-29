@@ -1,6 +1,6 @@
 # srt is a reproducible private build carried in the repository
 
-bluclawd needs srt changes that upstream has not released. The first was Mach-lookup denial, used by the historical isolated-execution policy. The second gives the network ask callback the requesting command's id (#26). Rather than wait for upstream or patch `node_modules` at install time, the repository carries `vendor/sandbox-runtime/anthropic-ai-sandbox-runtime-0.0.81-bluclawd.2.tgz`, built from the official `0.0.81` archive and source commit `c40cf14` by `scripts/build-private-sandbox-runtime.ts`.
+bluclawd needs srt changes that upstream has not released. The first was Mach-lookup denial, used by the historical isolated-execution policy. The second gives the network ask callback the requesting command's id (#26). Rather than wait for upstream or patch `node_modules` at install time, the repository carries `vendor/sandbox-runtime/anthropic-ai-sandbox-runtime-0.0.81-bluclawd.2.tgz`, built from the official `0.0.81` archive and source commit `c40cf14` by `scripts/build-private-sandbox-runtime.ts`. That build ran the script's earlier `.mjs` form, whose hash `provenance.json` records as `builderSha256`.
 
 The builder accepts only a pinned toolchain: Node 22.23.4 and npm 10.9.9 by hash, plus bun 1.4.2. It verifies:
 - the official archive's integrity;
