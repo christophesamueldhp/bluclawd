@@ -336,7 +336,7 @@ describe("Task 0 (M0) — Pi 1.0.4 public SDK compatibility and lifecycle proof"
 		parentRegistry.registerProvider(nativeFaux.provider);
 
 		// 2. Extension provider registered via ProviderConfigInput with custom streamSimple
-		let observedHeader: string | undefined;
+		let observedHeader: string | null | undefined;
 		let observedReasoning: string | undefined;
 		parentRegistry.registerProvider("config-ext", {
 			name: "Config Extension Provider",
@@ -381,7 +381,7 @@ describe("Task 0 (M0) — Pi 1.0.4 public SDK compatibility and lifecycle proof"
 			name: "Virtual Auto Router",
 			thinkingLevels: ["low", "high"],
 			route: () => ({
-				model: nativeFaux.getModel("native-1"),
+				model: nativeFaux.getModel("native-1")!,
 				thinkingLevel: "low",
 			}),
 		});

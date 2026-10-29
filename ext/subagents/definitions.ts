@@ -62,11 +62,9 @@ export interface DiscoverAgentDefinitionsOptions {
 	projectTrusted?: boolean;
 }
 
-export interface ResolveAgentDefinitionResult {
-	readonly ok: boolean;
-	readonly definition?: AgentDefinition;
-	readonly error?: string;
-}
+export type ResolveAgentDefinitionResult =
+	| { readonly ok: true; readonly definition: AgentDefinition }
+	| { readonly ok: false; readonly error: string };
 
 const SUPPORTED_FRONTMATTER_KEYS = new Set(["name", "description", "tools", "model", "thinkingLevel"]);
 const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -136,7 +134,7 @@ type RoleFields = Pick<AgentDefinition, "name" | "description" | "tools" | "mode
 function validateRoleFields(
 	fields: Record<string, unknown>,
 	where: string,
-): { ok: boolean; value?: RoleFields; error?: string } {
+): { ok: true; value: RoleFields } | { ok: false; error: string } {
 	const rawName = typeof fields.name === "string" ? fields.name.trim() : "";
 	if (!rawName) {
 		return { ok: false, error: `Missing required "name" ${where}` };
@@ -319,7 +317,7 @@ function parseSingleDefinitionFile(
 	}
 
 	const fields = validateRoleFields(fm, `in "${filePath}"`);
-	if (!fields.ok || !fields.value) {
+	if (!fields.ok) {
 		return { ok: false, candidateNames, error: fields.error };
 	}
 
@@ -482,7 +480,7 @@ export function discoverAgentDefinitions(options: DiscoverAgentDefinitionsOption
 
 export function createInlineAgentDefinition(role: InlineAgentRole): ResolveAgentDefinitionResult {
 	const fields = validateRoleFields({ ...role }, "in inline role");
-	if (!fields.ok || !fields.value) {
+	if (!fields.ok) {
 		return { ok: false, error: fields.error };
 	}
 	const instructions = role.instructions.trim();

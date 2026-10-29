@@ -134,13 +134,14 @@ export interface RunAdmissionDeps {
 	scope: ParentScopeChecks;
 }
 
-export interface AdmissionResult {
-	readonly ok: boolean;
-	readonly handle?: AdmittedSubagentHandle;
-	readonly error?: string;
-	/** Why a resume was refused: its session is gone, or the run cannot continue now. */
-	readonly refusal?: "invalidated" | "unavailable";
-}
+export type AdmissionResult =
+	| { readonly ok: true; readonly handle: AdmittedSubagentHandle }
+	| {
+			readonly ok: false;
+			readonly error: string;
+			/** Why a resume was refused: its session is gone, or the run cannot continue now. */
+			readonly refusal?: "invalidated" | "unavailable";
+	  };
 
 export interface RunAdmission {
 	launch(request: LaunchRequest, ctx: AdmissionContext): Promise<AdmissionResult>;
@@ -178,7 +179,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 	const selectChildTools = (
 		definition: AgentDefinition,
 		ctx: AdmissionContext,
-	): { tools?: ChildTools; error?: string } => {
+	): { tools: ChildTools; error?: never } | { tools?: never; error: string } => {
 		const loadout = deps.loadout();
 		if (!ctx.executeTool || !loadout)
 			return { error: "Subagent dispatch needs the orchestrator's live tool context." };
@@ -211,7 +212,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		requestedThinkingLevel: string | undefined,
 		ctx: AdmissionContext,
 		agentName: string,
-	): Promise<{ childModel?: ResolvedChildModel; error?: string }> => {
+	): Promise<{ childModel: ResolvedChildModel; error?: never } | { childModel?: never; error: string }> => {
 		const resolved = await resolveChildModelAndRuntime({
 			agentDir: deps.agentDir(),
 			requestedModel,
@@ -273,8 +274,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 						deps.catalog() ?? discoverAgentDefinitions({ cwd, agentDir, projectTrusted }),
 						agentName,
 					);
-			if (!resolvedDef.ok || !resolvedDef.definition) {
-				return reject(resolvedDef.error ?? `Unknown subagent "${agentName}"`);
+			if (!resolvedDef.ok) {
+				return reject(resolvedDef.error);
 			}
 			const definition = resolvedDef.definition;
 
@@ -398,7 +399,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				);
 			}
 			// Checked again after the model is resolved, since another message may resume the run meanwhile.
-			const checkResumable = (): { transcriptPath?: string; refused?: AdmissionResult } => {
+			const checkResumable = (): { transcriptPath: string; refused?: never } | { refused: AdmissionResult } => {
 				const current = deps.scheduler.getRun(run.runId);
 				if (!current || !deps.scope.inScope(current)) {
 					return { refused: invalidated };
@@ -436,14 +437,14 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			);
 			if (!childModel) return unavailable(modelError);
 
-			const { transcriptPath, refused } = checkResumable();
-			if (refused) return refused;
+			const resumable = checkResumable();
+			if (resumable.refused) return resumable.refused;
 			const resumed = deps.scheduler.resume(run.runId, {
 				...previous,
 				...tools,
 				childModel,
 				projectTrusted: ctx.isProjectTrusted(),
-				resume: { transcriptPath, prompt: buildPrompt() },
+				resume: { transcriptPath: resumable.transcriptPath, prompt: buildPrompt() },
 			});
 			if (!resumed.ok || !resumed.handle) return unavailable(resumed.error ?? `${label} could not be resumed.`);
 			return { ok: true, handle: resumed.handle };

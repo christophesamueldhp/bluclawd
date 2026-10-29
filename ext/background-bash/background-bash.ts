@@ -501,7 +501,8 @@ export class BackgroundJobRegistry {
 			if (dropped) state.droppedBytes += dropped.length;
 		}
 		if (!state.sinks.onLines) return;
-		const { lines, carry } = splitLines(state.carry, state.decoder.write(data));
+		// The decoder is created together with onLines.
+		const { lines, carry } = splitLines(state.carry, state.decoder!.write(data));
 		state.carry = carry;
 		if (state.carry.length > MAX_CARRY_CHARS) {
 			lines.push(...splitLines(state.carry, "\n").lines);

@@ -435,7 +435,7 @@ describe("Ticket #10 — Per-spawn model and thinking selection", () => {
 			id: "auto",
 			name: "Virtual Auto Router",
 			thinkingLevels: ["low", "high"],
-			route: () => ({ model: faux.getModel("faux-main"), thinkingLevel: "low" }),
+			route: () => ({ model: faux.getModel("faux-main")!, thinkingLevel: "low" }),
 		});
 		modelRuntime.registerNativeProvider({
 			...fauxProvider({ provider: "native-unconfigured" }).provider,
@@ -731,7 +731,7 @@ describe("Ticket #13 — Messages between orchestrator, children and siblings", 
 		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
 		const releaseA = gate();
 		const releaseB = gate();
-		const ids: { a?: string; b?: string } = {};
+		const ids = { a: "", b: "" };
 		const childTurns = { a: 0, b: 0 };
 		const childSaw: Record<string, string> = {};
 		let parentTurns = 0;
@@ -766,7 +766,11 @@ describe("Ticket #13 — Messages between orchestrator, children and siblings", 
 			}
 			if (parentTurns === 2) {
 				[ids.a, ids.b] = [toolResultText(session, "bg_a").text, toolResultText(session, "bg_b").text].map(
-					(text) => text.match(/sub_[0-9a-f-]{36}/)?.[0],
+					(text) => {
+						const id = text.match(/sub_[0-9a-f-]{36}/)?.[0];
+						if (!id) throw new Error(`No run ID in launch result: ${text}`);
+						return id;
+					},
 				);
 				return fauxAssistantMessage([
 					fauxToolCall("subagent_message", { to: ids.a, content: "PARENT-HELLO" }, { id: "down_1" }),

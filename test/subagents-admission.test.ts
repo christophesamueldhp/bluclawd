@@ -12,6 +12,7 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	type AdmissionContext,
+	type AdmissionResult,
 	createRunAdmission,
 	type LaunchParams,
 	MAX_TASK_INPUT_BYTES,
@@ -20,7 +21,17 @@ import {
 } from "../ext/subagents/admission.ts";
 import { SubagentMessageBus } from "../ext/subagents/messages.ts";
 import { createParentScope } from "../ext/subagents/parent-scope.ts";
-import { type SubagentRunRecord, SubagentRunScheduler } from "../ext/subagents/runs.ts";
+import { type AdmittedSubagentHandle, type SubagentRunRecord, SubagentRunScheduler } from "../ext/subagents/runs.ts";
+
+function handleOf(result: AdmissionResult): AdmittedSubagentHandle {
+	if (!result.ok) throw new Error(`Expected an admitted run, got: ${result.error}`);
+	return result.handle;
+}
+
+function errorOf(result: AdmissionResult): string {
+	if (result.ok) throw new Error(`Expected a refusal, got run ${result.handle.runId}`);
+	return result.error;
+}
 
 const tempDirs: string[] = [];
 
@@ -162,8 +173,7 @@ describe("Run admission", () => {
 		const { launch, storageDir } = await setup();
 		const first = await launch({ agent: "explorer", task: "Look." });
 		const second = await launch({ agent: "explorer", task: "Look again." });
-		expect(first.error).toBeUndefined();
-		expect(first.handle?.record).toMatchObject({
+		expect(handleOf(first).record).toMatchObject({
 			name: "explorer-1",
 			agentName: "explorer",
 			provider: "faux-adm",
@@ -172,25 +182,25 @@ describe("Run admission", () => {
 			deliveryMode: "foreground",
 			taskSummary: "Look.",
 		});
-		expect(second.handle?.record.name).toBe("explorer-2");
+		expect(handleOf(second).record.name).toBe("explorer-2");
 		// Admission checks the session's storage without leaving a directory of its own behind.
 		expect(readdirSync(storageDir)).toEqual([]);
 	});
 
 	it("refuses missing input, oversized tasks, denied roles, unknown roles and background runs in one-shot modes", async () => {
 		const { launch, storageDir } = await setup({ settings: { permissions: { deny: ["Subagent(explorer)"] } } });
-		expect((await launch({ agent: " ", task: "x" })).error).toBe("Missing required parameter: agent");
-		expect((await launch({ agent: "reviewer", task: "  " })).error).toBe("Missing required parameter: task");
-		expect((await launch({ agent: "reviewer", task: "x".repeat(MAX_TASK_INPUT_BYTES + 100) })).error).toMatch(
+		expect(errorOf(await launch({ agent: " ", task: "x" }))).toBe("Missing required parameter: agent");
+		expect(errorOf(await launch({ agent: "reviewer", task: "  " }))).toBe("Missing required parameter: task");
+		expect(errorOf(await launch({ agent: "reviewer", task: "x".repeat(MAX_TASK_INPUT_BYTES + 100) }))).toMatch(
 			/Delegated task exceeds the 32768-byte limit \(32868 bytes\)/,
 		);
 		expect((await launch({ agent: "explorer", task: "x" })).ok).toBe(false);
-		expect((await launch({ agent: "nonexistent-role", task: "x" })).error).toMatch(/nonexistent-role/);
+		expect(errorOf(await launch({ agent: "nonexistent-role", task: "x" }))).toMatch(/nonexistent-role/);
 		expect(existsSync(storageDir)).toBe(false);
 
 		for (const mode of ["print", "json"] as const) {
 			const oneShot = await setup({ mode });
-			expect((await oneShot.launch({ agent: "reviewer", task: "x", background: true })).error).toContain(
+			expect(errorOf(await oneShot.launch({ agent: "reviewer", task: "x", background: true }))).toContain(
 				`not supported in one-shot "${mode}" mode`,
 			);
 		}
@@ -199,7 +209,7 @@ describe("Run admission", () => {
 	it("refuses a saved role that still declares the obsolete maxTurns field", async () => {
 		const { agentDir, launch } = await setup();
 		writeRole(agentDir, "explorer", ["maxTurns: 6"]);
-		const { error } = await launch({ agent: "explorer", task: "Inspect." });
+		const error = errorOf(await launch({ agent: "explorer", task: "Inspect." }));
 		expect(error).toMatch(/maxTurns/);
 		expect(error).toMatch(/remove/i);
 	});
@@ -207,7 +217,7 @@ describe("Run admission", () => {
 	it("refuses roles naming tools the orchestrator lacks, and invalid inline roles, before model resolution or storage", async () => {
 		const { agentDir, launch, storageDir } = await setup();
 		writeRole(agentDir, "api-auditor", ["tools: [read, bash]", "model: missing/model"]);
-		expect((await launch({ agent: "api-auditor", task: "Verify." })).error).toContain(
+		expect(errorOf(await launch({ agent: "api-auditor", task: "Verify." }))).toContain(
 			'Subagent role "api-auditor" names tools the orchestrator cannot give a child: read, bash. Available: probe.',
 		);
 
@@ -221,14 +231,14 @@ describe("Run admission", () => {
 			{ agent: { ...role, tools: ["rm -rf"] }, error: /invalid tool name "rm -rf"/ },
 		];
 		for (const c of cases) {
-			expect((await launch({ agent: c.agent, task: "Check." })).error, c.agent.name).toMatch(c.error);
+			expect(errorOf(await launch({ agent: c.agent, task: "Check." })), c.agent.name).toMatch(c.error);
 		}
 		expect(existsSync(storageDir)).toBe(false);
 	});
 
 	it("refuses a launch without the orchestrator's live tool context", async () => {
 		const { launch } = await setup();
-		expect((await launch({ agent: "explorer", task: "x" }, { executeTool: undefined })).error).toBe(
+		expect(errorOf(await launch({ agent: "explorer", task: "x" }, { executeTool: undefined }))).toBe(
 			"Subagent dispatch needs the orchestrator's live tool context.",
 		);
 	});
@@ -237,11 +247,11 @@ describe("Run admission", () => {
 		const { agentDir, launch } = await setup();
 		writeRole(agentDir, "tuned", ["model: faux-adm/faux-main", "thinkingLevel: high"]);
 		const role = await launch({ agent: "tuned", task: "x" });
-		expect(role.handle?.record).toMatchObject({ modelId: "faux-main", thinkingLevel: "high" });
+		expect(handleOf(role).record).toMatchObject({ modelId: "faux-main", thinkingLevel: "high" });
 		const spawn = await launch({ agent: "tuned", task: "x", model: "faux-adm/faux-alt", thinkingLevel: "off" });
-		expect(spawn.handle?.record).toMatchObject({ modelId: "faux-alt", thinkingLevel: "off" });
+		expect(handleOf(spawn).record).toMatchObject({ modelId: "faux-alt", thinkingLevel: "off" });
 		const inherited = await launch({ agent: "tuned", task: "x", thinkingLevel: "inherit" });
-		expect(inherited.handle?.record).toMatchObject({ modelId: "faux-main", thinkingLevel: "low" });
+		expect(handleOf(inherited).record).toMatchObject({ modelId: "faux-main", thinkingLevel: "low" });
 	});
 
 	it("fails unknown models, missing auth, unsupported thinking and virtual routers with named errors before storage", async () => {
@@ -280,7 +290,7 @@ describe("Run admission", () => {
 			];
 			for (const c of cases) {
 				expect(
-					(await launch({ agent: "explorer", task: "Report.", ...c.args })).error,
+					errorOf(await launch({ agent: "explorer", task: "Report.", ...c.args })),
 					JSON.stringify(c.args),
 				).toMatch(c.error);
 			}
@@ -292,18 +302,18 @@ describe("Run admission", () => {
 
 	it("refuses reserved, malformed and live duplicate names", async () => {
 		const { launch } = await setup();
-		expect((await launch({ agent: "explorer", task: "x", name: "parent" })).error).toMatch(
+		expect(errorOf(await launch({ agent: "explorer", task: "x", name: "parent" }))).toMatch(
 			/Invalid subagent name "parent"/,
 		);
-		expect((await launch({ agent: "explorer", task: "x", name: "Bad Name" })).error).toMatch(
+		expect(errorOf(await launch({ agent: "explorer", task: "x", name: "Bad Name" }))).toMatch(
 			/Invalid subagent name "Bad Name"/,
 		);
-		expect((await launch({ agent: "explorer", task: "x", name: "sub_x" })).error).toMatch(
+		expect(errorOf(await launch({ agent: "explorer", task: "x", name: "sub_x" }))).toMatch(
 			/Invalid subagent name "sub_x"/,
 		);
 		const held = await launch({ agent: "explorer", task: "x", name: "backend" });
-		expect((await launch({ agent: "reviewer", task: "x", name: "backend" })).error).toBe(
-			`Subagent name "backend" is already used by running agent ${held.handle?.runId}; choose another name.`,
+		expect(errorOf(await launch({ agent: "reviewer", task: "x", name: "backend" }))).toBe(
+			`Subagent name "backend" is already used by running agent ${handleOf(held).runId}; choose another name.`,
 		);
 	});
 
@@ -342,7 +352,7 @@ describe("Run admission", () => {
 		await reached;
 		invalidateSession();
 		releaseAuth();
-		expect((await pending).error).toBe(
+		expect(errorOf(await pending)).toBe(
 			"Parent session or branch changed before subagent admission; request cancelled.",
 		);
 		expect(scheduler.listRuns()).toHaveLength(0);
@@ -353,7 +363,7 @@ describe("Run admission", () => {
 		const { launch, scheduler } = await setup();
 		const controller = new AbortController();
 		controller.abort();
-		expect((await launch({ agent: "explorer", task: "x" }, {}, controller.signal)).error).toBe(
+		expect(errorOf(await launch({ agent: "explorer", task: "x" }, {}, controller.signal))).toBe(
 			"Subagent request was aborted before admission.",
 		);
 		expect(scheduler.listRuns()).toHaveLength(0);
@@ -363,8 +373,7 @@ describe("Run admission", () => {
 		const { agentDir, launch, scheduler } = await setup();
 		// A file where the storage directory tree should start makes it impossible to create.
 		writeFileSync(join(agentDir, "bluclawd"), "");
-		const { ok, error } = await launch({ agent: "explorer", task: "x" });
-		expect(ok).toBe(false);
+		const error = errorOf(await launch({ agent: "explorer", task: "x" }));
 		expect(error).toMatch(/^Cannot launch subagent: storage is unavailable \(Failed to initialize subagent storage/);
 		expect(scheduler.listRuns()).toHaveLength(0);
 	});
@@ -377,7 +386,7 @@ describe("Run admission", () => {
 			model: "faux-adm/faux-alt",
 			name: "backend",
 		});
-		const completed = await launched.handle!.completion;
+		const completed = await handleOf(launched).completion;
 		expect(completed.status).toBe("completed");
 
 		setLoadout(["probe", "fresh"]);
@@ -387,8 +396,7 @@ describe("Run admission", () => {
 			return "Now add tests.";
 		});
 		const resumed = await result;
-		expect(resumed.error).toBeUndefined();
-		expect(resumed.handle?.record).toMatchObject({ name: "backend", modelId: "faux-alt", generation: 1 });
+		expect(handleOf(resumed).record).toMatchObject({ name: "backend", modelId: "faux-alt", generation: 1 });
 		expect(prompts).toEqual(["built"]);
 		const context = scheduler.getContext(completed.runId)!;
 		expect(context.parent).toBe(ctx);
@@ -400,7 +408,7 @@ describe("Run admission", () => {
 
 	it("refuses to resume a run whose role is now denied, before taking a message number", async () => {
 		const { agentDir, launch, resume } = await setup({ firstGenerationCompletes: true });
-		const completed = await (await launch({ agent: "explorer", task: "Build v1." })).handle!.completion;
+		const completed = await handleOf(await launch({ agent: "explorer", task: "Build v1." })).completion;
 		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ permissions: { deny: ["Subagent(explorer)"] } }));
 		let built = false;
 		const resumed = await resume(completed, () => {
@@ -408,21 +416,21 @@ describe("Run admission", () => {
 			return "Continue.";
 		}).result;
 		expect(resumed).toMatchObject({ ok: false, refusal: "unavailable" });
-		expect(resumed.error).toMatch(/Subagent\(explorer\)/);
+		expect(errorOf(resumed)).toMatch(/Subagent\(explorer\)/);
 		expect(built).toBe(false);
 	});
 
 	it("refuses to resume in one-shot modes, since a resume runs in the background", async () => {
 		for (const mode of ["print", "json"] as const) {
 			const { launch, resume, scheduler } = await setup({ mode, firstGenerationCompletes: true });
-			const completed = await (await launch({ agent: "explorer", task: "Build v1." })).handle!.completion;
+			const completed = await handleOf(await launch({ agent: "explorer", task: "Build v1." })).completion;
 			let built = false;
 			const resumed = await resume(completed, () => {
 				built = true;
 				return "Continue.";
 			}).result;
 			expect(resumed).toMatchObject({ ok: false, refusal: "unavailable" });
-			expect(resumed.error).toContain(`not supported in one-shot "${mode}" mode`);
+			expect(errorOf(resumed)).toContain(`not supported in one-shot "${mode}" mode`);
 			expect(built).toBe(false);
 			expect(scheduler.getRun(completed.runId)?.status).toBe("completed");
 		}
@@ -430,17 +438,17 @@ describe("Run admission", () => {
 
 	it("refuses to resume a run that is not completed, or whose session was replaced", async () => {
 		const live = await setup();
-		const running = (await live.launch({ agent: "explorer", task: "x" })).handle!.record;
+		const running = handleOf(await live.launch({ agent: "explorer", task: "x" })).record;
 		const notDone = await live.resume(running, () => "x").result;
 		expect(notDone).toMatchObject({ ok: false, refusal: "unavailable" });
-		expect(notDone.error).toMatch(/only a completed subagent can be resumed/);
+		expect(errorOf(notDone)).toMatch(/only a completed subagent can be resumed/);
 
 		const { launch, resume, invalidateSession } = await setup({ firstGenerationCompletes: true });
 
-		const completed = await (await launch({ agent: "explorer", task: "x" })).handle!.completion;
+		const completed = await handleOf(await launch({ agent: "explorer", task: "x" })).completion;
 		invalidateSession();
 		const stale = await resume(completed, () => "x").result;
 		expect(stale).toMatchObject({ ok: false, refusal: "invalidated" });
-		expect(stale.error).toMatch(/reloaded or replaced; spawn a new subagent/);
+		expect(errorOf(stale)).toMatch(/reloaded or replaced; spawn a new subagent/);
 	});
 });
