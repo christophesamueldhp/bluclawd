@@ -1,12 +1,13 @@
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createVitest } from "vitest/node";
+import { readinessMs } from "./helpers/heartbeats.ts";
 
 const fixture = fileURLToPath(new URL("./fixtures/faux-exhaustion/dry-queue.ts", import.meta.url));
 
 describe("a faux provider asked for a response it never queued", () => {
-	// A nested run under the suite's own config: setup files included, its reporters muted.
-	it("fails the test that asked, naming it", { timeout: 60_000 }, async () => {
+	it("fails the test that asked, naming it", { timeout: 2 * readinessMs }, async () => {
+		// A nested run under the suite's own config: setup files included, its reporters muted.
 		const vitest = await createVitest("test", { include: [fixture], reporters: [{}], watch: false });
 		try {
 			const { testModules } = await vitest.start([fixture]);

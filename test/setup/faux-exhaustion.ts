@@ -2,10 +2,11 @@
  * Fails a test during which a faux provider is asked for a response with an empty queue. The provider would
  * answer with an error message and the test carry on, so an assertion could hold only because a run errored (#92).
  * Watches each provider's stream instead of its queue, so `getPendingResponseCount()` reports what it always did.
+ * A request is charged to the test running when it is made: one made between tests goes unreported.
  */
 import { afterEach, beforeEach, expect, vi } from "vitest";
 
-const dry = vi.hoisted(() => new Set<string>());
+const dryTests = vi.hoisted(() => new Set<string>());
 
 vi.mock("@earendil-works/pi-ai", async (importOriginal) => {
 	const pi = await importOriginal<typeof import("@earendil-works/pi-ai")>();
@@ -17,7 +18,7 @@ vi.mock("@earendil-works/pi-ai", async (importOriginal) => {
 			// The provider takes the next response in the same tick, so an empty queue now means none for this request.
 			const noteIfDry = () => {
 				const test = expect.getState().currentTestName;
-				if (test && faux.getPendingResponseCount() === 0) dry.add(test);
+				if (test && faux.getPendingResponseCount() === 0) dryTests.add(test);
 			};
 			faux.provider.stream = (...streamArgs) => {
 				noteIfDry();
@@ -33,10 +34,10 @@ vi.mock("@earendil-works/pi-ai", async (importOriginal) => {
 });
 
 beforeEach(() => {
-	dry.clear();
+	dryTests.clear();
 });
 
 afterEach(() => {
 	const test = expect.getState().currentTestName;
-	if (test && dry.has(test)) throw new Error(`faux queue ran dry in "${test}"`);
+	if (test && dryTests.has(test)) throw new Error(`faux queue ran dry in "${test}"`);
 });
