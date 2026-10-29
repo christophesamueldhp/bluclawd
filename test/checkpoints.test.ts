@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -290,17 +290,22 @@ describe("captureCheckpoint", () => {
 		await write("new.txt", "new\n");
 		const statusBefore = await status();
 		const indexBefore = await readFile(join(dir, ".git", "index"));
-		// The temp dir is shared, so only what this capture adds counts.
-		const tempIndexes = async () => (await readdir(tmpdir())).filter((f) => f.startsWith("bluclawd-checkpoint-"));
-		const indexesBefore = await tempIndexes();
+		// The temp dir is shared with concurrent runs, so track the one temp index this capture uses.
+		const tempIndexes = new Set<string>();
+		const recording: Exec = (command, args, options) => {
+			for (const arg of args)
+				if (arg.startsWith("GIT_INDEX_FILE=")) tempIndexes.add(arg.slice("GIT_INDEX_FILE=".length));
+			return exec(command, args, options);
+		};
 
-		await capture(dir, exec);
+		await capture(dir, recording);
 
 		const indexAfter = await readFile(join(dir, ".git", "index"));
 		expect(indexAfter.equals(indexBefore)).toBe(true);
 		expect(await status()).toEqual(statusBefore);
 		expect(statusBefore).toEqual([" M a.txt", "?? new.txt"]);
-		expect(await tempIndexes()).toEqual(indexesBefore);
+		expect(tempIndexes.size).toBe(1);
+		for (const tempIndex of tempIndexes) await expect(access(tempIndex)).rejects.toMatchObject({ code: "ENOENT" });
 	});
 
 	it("captures staged additions that match .gitignore without changing the real index", async () => {
