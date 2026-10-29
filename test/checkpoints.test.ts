@@ -305,7 +305,7 @@ describe("captureCheckpoint", () => {
 		expect(await status()).toEqual(statusBefore);
 		expect(statusBefore).toEqual([" M a.txt", "?? new.txt"]);
 		expect(tempIndexes.size).toBe(1);
-		for (const tempIndex of tempIndexes) await expect(access(tempIndex)).rejects.toThrow();
+		for (const tempIndex of tempIndexes) await expect(access(tempIndex)).rejects.toMatchObject({ code: "ENOENT" });
 	});
 
 	it("captures staged additions that match .gitignore without changing the real index", async () => {
