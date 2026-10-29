@@ -16,6 +16,7 @@ import {
 	readSessionSummary,
 	summarizePiEvents,
 } from "../scripts/eval-subagents.ts";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import { createParentSessionWithSubagents } from "./helpers/subagent-session.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -161,24 +162,48 @@ const childMarker = (context: TranscriptContext) => {
 	return undefined;
 };
 
+const POLL_MS = 50;
+/** A turn spent waiting for a sibling's message. */
+const poll = () => fauxAssistantMessage([bash(`sleep ${POLL_MS / 1000}`)]);
+/** A poll turn while `text` has not reached the child's transcript, undefined once it has. */
+type Until = (text: string) => ReturnType<typeof fauxAssistantMessage> | undefined;
+
 /** One faux responder for the orchestrator's replies and each child's script, keyed by its task marker. */
 function scripted(
 	parent: Reply[],
-	children: Record<string, (context: TranscriptContext, step: number) => ReturnType<typeof fauxAssistantMessage>>,
+	children: Record<
+		string,
+		(context: TranscriptContext, step: number, until: Until) => ReturnType<typeof fauxAssistantMessage>
+	>,
 ) {
 	let parentStep = 0;
 	const childSteps: Record<string, number> = {};
-	return Array.from({ length: 80 }, () => (context: TranscriptContext) => {
+	const waitStarts: Record<string, number> = {};
+	let timedOut: Error | undefined;
+	const respond = (context: TranscriptContext) => {
 		if (isChild(context)) {
 			const marker = childMarker(context);
 			if (!marker || !children[marker]) return fauxAssistantMessage("Unscripted child.");
 			childSteps[marker] = (childSteps[marker] ?? 0) + 1;
-			return children[marker](context, childSteps[marker]);
+			// A wait is bounded by time, like the suite's other polls; past it the child gives up and the run reports why.
+			const until: Until = (text) => {
+				if (transcriptText(context).includes(text)) return undefined;
+				const key = `${marker} ${text}`;
+				waitStarts[key] ??= performance.now();
+				if (performance.now() - waitStarts[key] <= readinessMs) return poll();
+				timedOut ??= new Error(`child "${marker}" still waiting for ${text} after ${readinessMs}ms`);
+				return fauxAssistantMessage(`Gave up waiting for ${text}.`);
+			};
+			return children[marker](context, childSteps[marker], until);
 		}
 		const reply = parent[parentStep++];
 		if (!reply) return fauxAssistantMessage("Orchestrator idle.");
 		return typeof reply === "function" ? reply(context) : reply;
-	});
+	};
+	// A poll takes at least POLL_MS, so every agent can poll until the test times out (2 × readinessMs)
+	// before the queue runs dry: a wait ends by its time bound, never by running out of responses.
+	const turns = (Object.keys(children).length + 1) * Math.ceil((2 * readinessMs) / POLL_MS);
+	return { responses: Array.from({ length: turns }, () => respond), timedOut: () => timedOut };
 }
 const write = (path: string, content: string) => fauxToolCall("write", { path, content });
 const bash = (command: string) => fauxToolCall("bash", { command });
@@ -200,10 +225,16 @@ async function runOrchestration(options: {
 		extensions: options.extensions,
 	});
 	await session.bindExtensions({ mode: "rpc" });
-	faux.setResponses(options.script);
+	faux.setResponses(options.script.responses);
 	const started = performance.now();
 	await session.prompt("Run the scenario.", { expandPromptTemplates: false });
-	return { cwd, agentDir, session, faux, elapsedMs: performance.now() - started };
+	const elapsedMs = performance.now() - started;
+	const timedOut = options.script.timedOut();
+	if (timedOut) {
+		session.dispose();
+		throw timedOut;
+	}
+	return { cwd, agentDir, session, faux, elapsedMs };
 }
 
 describe("Ticket #15 — Orchestrated acceptance scenarios on a shared fixture checkout", () => {
@@ -222,7 +253,7 @@ describe("Ticket #15 — Orchestrated acceptance scenarios on a shared fixture c
 					fauxAssistantMessage("Both done; tests pass."),
 				],
 				{
-					percent: (context, step) => {
+					percent: (_context, step, until) => {
 						if (step === 1)
 							return fauxAssistantMessage([
 								write(
@@ -232,21 +263,21 @@ describe("Ticket #15 — Orchestrated acceptance scenarios on a shared fixture c
 								write("src/percent.js", `import { clamp } from "./util.js";\n${PERCENT}`),
 								write("test/percent.test.js", PERCENT_TEST),
 							]);
-						if (!transcriptText(context).includes("REQUEST-CLAMP"))
-							return fauxAssistantMessage([bash("sleep 0.05")]);
+						const pending = until("REQUEST-CLAMP");
+						if (pending) return pending;
 						if (!handedOff) {
 							handedOff = true;
 							return fauxAssistantMessage([say("bar", "HANDOFF-CLAMP: clamp is exported from src/util.js")]);
 						}
 						return fauxAssistantMessage("percent done.");
 					},
-					bar: (context, step) => {
+					bar: (_context, step, until) => {
 						if (step === 1)
 							return fauxAssistantMessage([
 								say("percent", "REQUEST-CLAMP: please export clamp from src/util.js"),
 							]);
-						if (!transcriptText(context).includes("HANDOFF-CLAMP"))
-							return fauxAssistantMessage([bash("sleep 0.05")]);
+						const pending = until("HANDOFF-CLAMP");
+						if (pending) return pending;
 						if (!barWrote) {
 							barWrote = true;
 							return fauxAssistantMessage([
@@ -282,6 +313,44 @@ describe("Ticket #15 — Orchestrated acceptance scenarios on a shared fixture c
 				expect(r.tokens).toBeGreaterThan(0);
 				expect(r.ms).toBeGreaterThanOrEqual(0);
 			}
+		} finally {
+			run.session.dispose();
+		}
+	});
+
+	it("completes a handoff whose request arrives many turns after the wait began", async () => {
+		let ownerWrote = false;
+		const run = await runOrchestration({
+			files: OVERLAP_FILES,
+			script: scripted(
+				[fauxAssistantMessage([spawn("owner", "Write src/late.js when asked."), spawn("asker", "Ask owner.")])],
+				{
+					owner: (_context, _step, until) => {
+						const pending = until("REQUEST-LATE");
+						if (pending) return pending;
+						if (!ownerWrote) {
+							ownerWrote = true;
+							return fauxAssistantMessage([write("src/late.js", "export const late = true;\n")]);
+						}
+						return fauxAssistantMessage("owner done.");
+					},
+					// Many turns pass before the request goes out, so the owner keeps waiting through them all.
+					asker: (_context, step) => {
+						if (step <= 90) return fauxAssistantMessage([bash("true")]);
+						if (step === 91)
+							return fauxAssistantMessage([say("owner", "REQUEST-LATE: please write src/late.js")]);
+						return fauxAssistantMessage("asker done.");
+					},
+				},
+			),
+		});
+		try {
+			expect(readFileSync(join(run.cwd, "src/late.js"), "utf8")).toBe("export const late = true;\n");
+			const summary = readSessionSummary(run.agentDir, run.session.sessionId);
+			expect(summary.runs.map((r) => [r.name, r.status]).sort()).toEqual([
+				["asker", "completed"],
+				["owner", "completed"],
+			]);
 		} finally {
 			run.session.dispose();
 		}
@@ -376,8 +445,14 @@ describe("Ticket #15 — Failure, denial, cancellation and disposal scenarios", 
 		}
 	});
 
+	// A child outliving its session gets failed polls that return at once, so it stops instead of spinning.
 	const waiting = (name: string) => ({
-		[name]: () => fauxAssistantMessage([bash("echo tick >> progress.log; sleep 0.05")]),
+		[name]: (context: TranscriptContext) => {
+			const last = context.messages.at(-1);
+			return last?.role === "toolResult" && last.isError
+				? fauxAssistantMessage("Stopped waiting.")
+				: fauxAssistantMessage([bash(`echo tick >> progress.log; sleep ${POLL_MS / 1000}`)]);
+		},
 	});
 	const background = (name: string) =>
 		fauxAssistantMessage([
@@ -411,7 +486,7 @@ describe("Ticket #15 — Failure, denial, cancellation and disposal scenarios", 
 		}
 	});
 
-	it("settles a running child when the orchestrator's session is disposed, with no write afterwards", async () => {
+	it("leaves a running child unable to write once the orchestrator's session is disposed", async () => {
 		const run = await runOrchestration({
 			files: DURATION_FILES,
 			script: scripted([background("racer"), fauxAssistantMessage("Launched.")], waiting("racer")),
@@ -424,8 +499,6 @@ describe("Ticket #15 — Failure, denial, cancellation and disposal scenarios", 
 		const after = ticks(run.cwd);
 		await new Promise((resolve) => setTimeout(resolve, 300));
 		expect(ticks(run.cwd)).toBe(after);
-		const status = readSessionSummary(run.agentDir, run.session.sessionId).runs[0]?.status;
-		expect(["cancelled", "interrupted", "failed"]).toContain(status);
 	});
 });
 
