@@ -49,7 +49,7 @@ export default function promptAssist(pi: ExtensionAPI) {
 				.map((value) => ({ value, label: value }));
 		},
 		handler: async (args, ctx) => {
-			let choice = args.trim();
+			let choice: string | undefined = args.trim();
 			if (!choice) {
 				if (!ctx.hasUI) {
 					ctx.ui.notify(

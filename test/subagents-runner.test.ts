@@ -148,7 +148,9 @@ describe("Task 4 (M1) — Child runner", () => {
 
 			const { registry, faux, model } = await createTestParentRegistry(agentDir);
 			const catalog = discoverAgentDefinitions({ cwd, agentDir, projectTrusted: true });
-			const explorer = resolveAgentDefinition(catalog, "explorer").definition!;
+			const resolved = resolveAgentDefinition(catalog, "explorer");
+			if (!resolved.ok) throw new Error(resolved.error);
+			const explorer = resolved.definition;
 
 			let childSystemPrompt = "";
 			faux.setResponses([
@@ -218,7 +220,9 @@ describe("Task 4 (M1) — Child runner", () => {
 
 		const { registry, faux, model } = await createTestParentRegistry(agentDir);
 		const catalog = discoverAgentDefinitions({ cwd, agentDir, projectTrusted: true });
-		const explorer = resolveAgentDefinition(catalog, "explorer").definition!;
+		const resolved = resolveAgentDefinition(catalog, "explorer");
+		if (!resolved.ok) throw new Error(resolved.error);
+		const explorer = resolved.definition;
 
 		faux.setResponses([
 			fauxAssistantMessage([fauxToolCall("read", { path: "a.ts" }, { id: "r1" })]),

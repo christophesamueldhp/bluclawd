@@ -296,6 +296,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			},
 			executeRun: async (params) => {
 				const execCtx = params.context;
+				if (!execCtx) throw new Error("Subagent run has no execution context.");
 				const storage = ensureRunStorageDir(execCtx.agentDir, params.record.parentSessionId, params.record.runId);
 				if (!storage.ok || !storage.runDir) throw new Error(storage.error ?? "Subagent storage is unavailable.");
 				const { runId } = params.record;
@@ -546,7 +547,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				},
 				ctx,
 			);
-			if (!resumed.ok || !resumed.handle) {
+			if (!resumed.ok) {
 				return formatReceipt({
 					status: resumed.refusal ?? "unavailable",
 					seq: 0,
@@ -555,6 +556,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					reason: resumed.error,
 				});
 			}
+			// A resume is admitted only after buildPrompt ran, so the receipt is set.
+			const accepted = receipt!;
 			const label = formatRunLabel(run);
 			void resumed.handle.completion.then((completedRecord) => {
 				const envelope = buildSubagentResultEnvelope(completedRecord, MAX_PARENT_REPORT_BYTES);
@@ -563,11 +566,11 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			refreshFooterStatus();
 			notifyAgentTasksChanged();
 			return {
-				...formatReceipt(receipt),
+				...formatReceipt(accepted),
 				content: [
 					{
 						type: "text" as const,
-						text: `Message ${receipt.seq} accepted: resuming ${label} in the background with its earlier context. Its report will be delivered when it finishes.`,
+						text: `Message ${accepted.seq} accepted: resuming ${label} in the background with its earlier context. Its report will be delivered when it finishes.`,
 					},
 				],
 			};
@@ -723,9 +726,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					{ toolCallId, parentTurnId: `turn_${activeTurnIndex}`, params, signal },
 					ctx,
 				);
-				if (!admitRes.ok || !admitRes.handle) {
+				if (!admitRes.ok) {
 					return {
-						content: [{ type: "text", text: admitRes.error ?? "Subagent admission rejected." }],
+						content: [{ type: "text", text: admitRes.error }],
 						details: undefined,
 						isError: true,
 					};

@@ -500,7 +500,7 @@ export class BackgroundJobRegistry {
 			const dropped = state.chunks.shift();
 			if (dropped) state.droppedBytes += dropped.length;
 		}
-		if (!state.sinks.onLines) return;
+		if (!state.sinks.onLines || !state.decoder) return;
 		const { lines, carry } = splitLines(state.carry, state.decoder.write(data));
 		state.carry = carry;
 		if (state.carry.length > MAX_CARRY_CHARS) {

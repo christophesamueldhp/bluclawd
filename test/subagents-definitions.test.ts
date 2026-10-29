@@ -291,7 +291,7 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 		);
 		const result = resolveAgentDefinition(discoverAgentDefinitions({ cwd, agentDir }), name);
 		expect(result.ok).toBe(true);
-		expect(result.definition?.tools).toEqual(tools);
+		if (result.ok) expect(result.definition.tools).toEqual(tools);
 	});
 
 	it("treats a saved role without tools as inheriting the parent's capabilities", () => {
@@ -302,8 +302,9 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 			join(agentDir, "agents", "general-purpose.md"),
 			"---\nname: general-purpose\ndescription: Any task.\n---\nDo the assigned work.",
 		);
-		const role = resolveAgentDefinition(discoverAgentDefinitions({ cwd, agentDir }), "general-purpose").definition!;
-		expect(role.tools).toBeUndefined();
+		const role = resolveAgentDefinition(discoverAgentDefinitions({ cwd, agentDir }), "general-purpose");
+		expect(role.ok).toBe(true);
+		if (role.ok) expect(role.definition.tools).toBeUndefined();
 	});
 
 	it("parses a role thinkingLevel and rejects one outside the thinking vocabulary", () => {
@@ -319,10 +320,11 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 			"---\nname: odd\ndescription: Odd.\nthinkingLevel: ultra\n---\nThink.",
 		);
 		const catalog = discoverAgentDefinitions({ cwd, agentDir });
-		expect(resolveAgentDefinition(catalog, "deep").definition?.thinkingLevel).toBe("max");
-		expect(resolveAgentDefinition(catalog, "odd").error).toMatch(
-			/Invalid "thinkingLevel" value "ultra".*must be one of off, minimal/,
-		);
+		expect(resolveAgentDefinition(catalog, "deep")).toMatchObject({ ok: true, definition: { thinkingLevel: "max" } });
+		expect(resolveAgentDefinition(catalog, "odd")).toMatchObject({
+			ok: false,
+			error: expect.stringMatching(/Invalid "thinkingLevel" value "ultra".*must be one of off, minimal/),
+		});
 	});
 
 	it("freezes discovered definitions so mid-run file edits do not mutate active definitions until reload", () => {

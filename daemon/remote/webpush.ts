@@ -55,7 +55,7 @@ export function parseSubscription(value: unknown): WebPushSubscription | undefin
 		return undefined;
 	}
 	const p256dh = decoded(keys?.p256dh, 65);
-	if (!p256dh || p256dh[0] !== 4 || !decoded(keys?.auth, 16)) return undefined;
+	if (!keys || !p256dh || p256dh[0] !== 4 || !decoded(keys?.auth, 16)) return undefined;
 	try {
 		createPublicKey({
 			key: {
