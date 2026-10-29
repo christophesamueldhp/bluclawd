@@ -359,6 +359,16 @@ describe("Run admission", () => {
 		expect(scheduler.listRuns()).toHaveLength(0);
 	});
 
+	it("refuses a launch whose session storage cannot be created", async () => {
+		const { agentDir, launch, scheduler } = await setup();
+		// A file where the storage directory tree should start makes it impossible to create.
+		writeFileSync(join(agentDir, "bluclawd"), "");
+		const { ok, error } = await launch({ agent: "explorer", task: "x" });
+		expect(ok).toBe(false);
+		expect(error).toMatch(/^Cannot launch subagent: storage is unavailable \(Failed to initialize subagent storage/);
+		expect(scheduler.listRuns()).toHaveLength(0);
+	});
+
 	it("resumes a completed run with the orchestrator's current tools and tool context, keeping its role and model", async () => {
 		const { launch, resume, scheduler, setLoadout } = await setup({ firstGenerationCompletes: true });
 		const launched = await launch({
