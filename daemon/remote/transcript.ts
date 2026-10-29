@@ -39,6 +39,7 @@ export type RemoteMessage =
 			toolName: string;
 			/** A `!` line's command, run by pi itself rather than by the model: it has no call. */
 			command?: string;
+			// biome-ignore lint/plugin: whether the tool failed, not an ok-result; both outcomes carry the same fields.
 			ok: boolean;
 			text: string;
 			truncated: boolean;
