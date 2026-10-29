@@ -65,7 +65,7 @@ function taskOf(r: SubagentRunRecord): AgentTask {
 		id: r.runId,
 		owner: r.parentSessionId,
 		agent: r.agentName,
-		task: r.taskSummary,
+		summary: r.taskSummary,
 		startedAt: r.startedAt ?? r.admittedAt,
 		endedAt: r.endedAt,
 		state: r.status in finished ? finished[r.status as keyof typeof finished] : "running",

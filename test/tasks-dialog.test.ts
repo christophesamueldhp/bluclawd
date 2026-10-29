@@ -271,7 +271,7 @@ describe("Ticket #20 — stop all agents from /tasks", () => {
 							id,
 							owner: me,
 							agent: "general-purpose",
-							task: `Build ${id}`,
+							summary: `Build ${id}`,
 							startedAt: Date.now(),
 							state: "running" as const,
 							status: "running",

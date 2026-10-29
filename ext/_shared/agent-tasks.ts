@@ -23,7 +23,8 @@ export interface AgentTask {
 	id: string;
 	owner: string;
 	agent: string;
-	task: string;
+	/** What the run was asked to do, shortened; the agent's name when it has none. */
+	summary: string;
 	startedAt: number;
 	endedAt?: number;
 	state: AgentTaskState;

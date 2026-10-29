@@ -197,7 +197,7 @@ const backgroundBash: InlineExtension = {
 						throw new Error(`Task ${id} is not running (status: ${stopped.task.status})`);
 					}
 					if (!stopped?.ok) throw noTaskError(id);
-					const label = `${stopped.task.agent}: ${stopped.task.task}`;
+					const label = `${stopped.task.agent}: ${stopped.task.summary}`;
 					const text = JSON.stringify({
 						message: `Successfully stopped task: ${id} (${label})`,
 						task_id: id,
