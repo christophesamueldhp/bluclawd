@@ -109,12 +109,12 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 			id: mine.runId,
 			owner: "sess_main",
 			agent: "explorer",
-			task: "Scan auth",
+			summary: "Scan auth",
 			state: "running",
 			status: "running",
 			model: "faux/faux-1",
 		});
-		expect(source.list("sess_other").map((task) => task.task)).toEqual(["Elsewhere"]);
+		expect(source.list("sess_other").map((task) => task.summary)).toEqual(["Elsewhere"]);
 	});
 
 	it("gets a live or a finished run as the same task, and hides another session's run", () => {

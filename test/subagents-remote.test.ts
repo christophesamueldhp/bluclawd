@@ -39,7 +39,7 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 			id: "sub_50_1",
 			owner: "sess_phone_1",
 			agent: "explorer",
-			task: "x".repeat(300),
+			summary: "x".repeat(300),
 			startedAt: 5000,
 			state: "running",
 			status: "queued",

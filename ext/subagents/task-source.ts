@@ -34,7 +34,7 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 			id: run.runId,
 			owner: run.parentSessionId,
 			agent: run.agentName,
-			task: run.taskSummary || run.agentName,
+			summary: run.taskSummary || run.agentName,
 			startedAt: run.startedAt ?? run.admittedAt,
 			endedAt: run.endedAt,
 			state: TASK_STATES[run.status],

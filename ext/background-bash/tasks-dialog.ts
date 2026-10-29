@@ -195,7 +195,7 @@ function agentRow(task: AgentTask): TaskRow {
 	return {
 		id: task.id,
 		kind: "agent",
-		label: `${task.agent}: ${task.task}`,
+		label: `${task.agent}: ${task.summary}`,
 		state: task.state === "stopped" ? "killed" : task.state,
 		statusText: task.status,
 		model: task.model,
