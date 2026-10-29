@@ -9,6 +9,7 @@ import { readinessMs } from "./heartbeats.ts";
 export function waitFor<T>(check: () => T): Promise<T> {
 	// Made here, so its stack names the caller's wait rather than vitest's timer.
 	const stillFalse = new Error(`condition still false after ${readinessMs}ms`);
+	// biome-ignore lint/plugin: the one place that sizes vi.waitFor's deadline.
 	return vi.waitFor(
 		() => {
 			const result = check();

@@ -5,7 +5,8 @@
 # Concurrent vitest processes redden timing races that CPU load alone does not (#45).
 # Still green? Run a second `scripts/stress-test.sh test/subagents-writer-backend.test.ts` concurrently:
 # sandbox startup is the heaviest load (#76). READINESS_MS=120000 widens every fixture readiness wait:
-# green then means the failure is slow startup, not a hang.
+# green then means the failure is slow startup, not a hang. If that load run is itself red on readiness, the
+# machine is saturated and neither result means anything: lower WIDTH until the load run is green.
 shopt -s nullglob
 width=${WIDTH:-16}
 rounds=${ROUNDS:-3}
@@ -18,8 +19,12 @@ for round in $(seq "$rounds"); do
 	wait
 done
 failed=("$logs"/*.failed)
-echo "${#failed[@]}/$((width * rounds)) runs failed; logs in $logs"
+# Grouped by failing test, then by first error; the count goes last, so a `tail` keeps it.
+for marker in "${failed[@]}"; do
+	grep -E "^ FAIL " "${marker%.failed}.log" | sort -u
+done | sort | uniq -c
 for marker in "${failed[@]}"; do
 	grep -m1 -E "Error" "${marker%.failed}.log"
 done | sort | uniq -c
+echo "${#failed[@]}/$((width * rounds)) runs failed; logs in $logs"
 [ ${#failed[@]} -eq 0 ]
