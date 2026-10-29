@@ -445,7 +445,7 @@ describe("Ticket #15 — Failure, denial, cancellation and disposal scenarios", 
 		}
 	});
 
-	// A child outliving its session gets failed polls that return at once, so it stops instead of spinning.
+	// Should a child outlive its session, its polls fail at once; it then stops instead of spinning.
 	const waiting = (name: string) => ({
 		[name]: (context: TranscriptContext) => {
 			const last = context.messages.at(-1);
@@ -486,16 +486,20 @@ describe("Ticket #15 — Failure, denial, cancellation and disposal scenarios", 
 		}
 	});
 
-	it("leaves a running child unable to write once the orchestrator's session is disposed", async () => {
+	it("cancels a running child when the orchestrator's session shuts down, and it writes nothing afterwards", async () => {
 		const run = await runOrchestration({
 			files: DURATION_FILES,
 			script: scripted([background("racer"), fauxAssistantMessage("Launched.")], waiting("racer")),
 		});
 		await waitFor(() => ticks(run.cwd) > 0);
-		const runId = readSessionSummary(run.agentDir, run.session.sessionId).runs[0]?.name;
-		expect(runId).toBe("racer");
+		// Pi's CLI shuts a session down this way (AgentSessionRuntime.dispose); a bare dispose() alone cancels nothing.
+		await run.session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 		run.session.dispose();
-		await new Promise((resolve) => setTimeout(resolve, 200));
+		await waitFor(() => readSessionSummary(run.agentDir, run.session.sessionId).runs[0]?.status === "cancelled");
+		expect(readSessionSummary(run.agentDir, run.session.sessionId).runs[0]).toMatchObject({
+			name: "racer",
+			status: "cancelled",
+		});
 		const after = ticks(run.cwd);
 		await new Promise((resolve) => setTimeout(resolve, 300));
 		expect(ticks(run.cwd)).toBe(after);
