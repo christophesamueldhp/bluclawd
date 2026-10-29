@@ -461,7 +461,7 @@ describe("Task 7 (M2) — Background execution, session-bound delivery, drift wa
 			const runId = tasks[0].id;
 
 			// User stops via agentTasks().stop(runId)
-			expect(agentTasks()?.stop(runId, { owner: session.sessionId, source: "user" })).toBe(true);
+			expect(agentTasks()?.stop(runId, { owner: session.sessionId, source: "user" }).ok).toBe(true);
 
 			await waitForCondition(() => {
 				const rec = readPersistedRunRecord(agentDir, session.sessionId, runId);

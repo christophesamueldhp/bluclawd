@@ -22,7 +22,7 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { stripAnsi } from "../../daemon/ansi.ts";
-import { agentTasks } from "../_shared/agent-tasks.ts";
+import { type AgentTask, agentTasks } from "../_shared/agent-tasks.ts";
 import { type BackgroundJobInfo, backgroundBashJobs, jobOutcome } from "./background-bash.ts";
 import { formatTaskDuration } from "./bash-limits.ts";
 import { FOREGROUND_TASK_AFTER_MS, type ForegroundShell, runningForegroundShells } from "./foreground-shells.ts";
@@ -84,20 +84,7 @@ export function taskRows(owner: string | undefined): TaskRow[] {
 		endedAt: job.exit?.at,
 		job,
 	}));
-	const agents: TaskRow[] = (agentTasks()?.list(owner) ?? [])
-		.filter((run) => owner === undefined || run.owner === undefined || run.owner === owner)
-		.map((run) => ({
-			id: run.id,
-			kind: "agent",
-			label: `${run.agent}: ${run.task}`,
-			state: "running",
-			statusText: run.status ?? "running",
-			model: run.model,
-			outputFile: run.outputFile,
-			agentOutput: run.output,
-			startedAt: run.startedAt,
-			endedAt: run.endedAt,
-		}));
+	const agents: TaskRow[] = (agentTasks()?.list(owner) ?? []).map(agentRow);
 	// Reversed first: the sort is stable, so tasks started in the same millisecond stay newest first.
 	return [...shells, ...agents].reverse().sort((a, b) => b.startedAt - a.startedAt);
 }
@@ -204,36 +191,24 @@ export function stopTask(row: TaskRow, owner?: string, source: "user" | "remote"
 	else backgroundBashJobs.kill(row.id, { byUser: true });
 }
 
-function completedAgentRow(id: string, owner: string | undefined): TaskRow | undefined {
-	const source = agentTasks();
-	const run = source?.getRun?.(id, owner) as
-		| {
-				runId: string;
-				agentName: string;
-				taskSummary?: string;
-				status: string;
-				provider: string;
-				modelId: string;
-				admittedAt: number;
-				startedAt?: number;
-				endedAt?: number;
-				reportPath?: string;
-		  }
-		| undefined;
-	if (!run) return undefined;
-	const state: TaskState = run.status === "completed" ? "completed" : run.status === "cancelled" ? "killed" : "failed";
+function agentRow(task: AgentTask): TaskRow {
 	return {
-		id: run.runId,
+		id: task.id,
 		kind: "agent",
-		label: `${run.agentName}: ${run.taskSummary || run.agentName}`,
-		state,
-		statusText: run.status,
-		model: `${run.provider}/${run.modelId}`,
-		outputFile: run.reportPath,
-		agentOutput: () => source?.getReport?.(id, owner) ?? "",
-		startedAt: run.startedAt ?? run.admittedAt,
-		endedAt: run.endedAt,
+		label: `${task.agent}: ${task.task}`,
+		state: task.state === "stopped" ? "killed" : task.state,
+		statusText: task.status,
+		model: task.model,
+		outputFile: task.outputFile,
+		agentOutput: task.output,
+		startedAt: task.startedAt,
+		endedAt: task.endedAt,
 	};
+}
+
+function agentRowById(id: string, owner: string | undefined): TaskRow | undefined {
+	const task = agentTasks()?.get(id, owner);
+	return task && agentRow(task);
 }
 
 /** Sections, in display order: a shell's section holds its command monitors too. */
@@ -362,7 +337,7 @@ export class TasksDialog implements Component {
 		const kb = getKeybindings();
 		const rows = visibleRows(this.owner);
 		if (this.detail !== undefined) {
-			const row = rows.find((r) => r.id === this.detail) ?? completedAgentRow(this.detail, this.owner);
+			const row = rows.find((r) => r.id === this.detail) ?? agentRowById(this.detail, this.owner);
 			if (matchesKey(data, "left")) this.leaveDetail(rows);
 			else if (kb.matches(data, "tui.select.cancel") || data === "\r" || data === " ") {
 				this.closeFromDetail();
@@ -382,7 +357,7 @@ export class TasksDialog implements Component {
 		else if (kb.matches(data, "tui.select.down")) this.focus(rows, index + 1);
 		else if (data === "\r" && hasDetail(current)) this.detail = current.id;
 		else if (data === "X" && rows.some((row) => row.kind === "agent" && row.state === "running")) {
-			agentTasks()?.stopAll?.({ owner: this.owner, source: "user" });
+			agentTasks()?.stopAll({ owner: this.owner, source: "user" });
 		} else if (data === "x") {
 			// The task under the cursor is not the one that was focused: swallow this one press.
 			if (this.focusLost) this.focusLost = false;
@@ -394,7 +369,7 @@ export class TasksDialog implements Component {
 	render(width: number): string[] {
 		const rows = visibleRows(this.owner);
 		if (this.detail !== undefined) {
-			const row = rows.find((r) => r.id === this.detail) ?? completedAgentRow(this.detail, this.owner);
+			const row = rows.find((r) => r.id === this.detail) ?? agentRowById(this.detail, this.owner);
 			if (row) return this.frame(width, this.renderDetail(row, width - 2 * PAD), this.detailHints(row));
 			// The task ended while on screen: a dialog opened straight to it closes, else back to the list.
 			if (this.direct) {

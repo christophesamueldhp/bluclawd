@@ -31,12 +31,11 @@ import {
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { stripAnsi } from "../../daemon/ansi.ts";
-import { agentTasks, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
+import { agentTasks, isAgentTaskId, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { sharedRef } from "../_shared/global-state.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { wrapExec } from "../sandbox/runtime.ts";
-import { isSubagentTaskId, isTerminalSubagentStatus, type SubagentRunRecord } from "../subagents/runs.ts";
 import { backgroundBashJobs, describeJobStatus, isShellTaskId, noTaskError, shellTaskStop } from "./background-bash.ts";
 import { backgroundTasksDisabled } from "./bash-limits.ts";
 import { createBackgroundBashTool } from "./bash-tool.ts";
@@ -192,16 +191,13 @@ const backgroundBash: InlineExtension = {
 				const id = (params.task_id?.trim() || params.shell_id?.trim()) ?? "";
 				if (!id) throw new Error("Missing required parameter: task_id");
 				const callerOwner = toolCtx?.sessionManager?.getSessionId();
-				if (isSubagentTaskId(id)) {
-					const source = agentTasks();
-					const run = source?.getRun?.(id, callerOwner) as SubagentRunRecord | undefined;
-					if (!run) throw noTaskError(id);
-					if (isTerminalSubagentStatus(run.status)) {
-						throw new Error(`Task ${id} is not running (status: ${run.status})`);
+				if (isAgentTaskId(id)) {
+					const stopped = agentTasks()?.stop(id, { owner: callerOwner, source: "model" });
+					if (stopped?.ok === false && stopped.reason === "not_running") {
+						throw new Error(`Task ${id} is not running (status: ${stopped.task.status})`);
 					}
-					const stopped = source?.stop(id, { owner: callerOwner, source: "model" });
-					if (!stopped) throw noTaskError(id);
-					const label = `${run.agentName}: ${run.taskSummary || run.agentName}`;
+					if (!stopped?.ok) throw noTaskError(id);
+					const label = `${stopped.task.agent}: ${stopped.task.task}`;
 					const text = JSON.stringify({
 						message: `Successfully stopped task: ${id} (${label})`,
 						task_id: id,

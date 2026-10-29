@@ -25,3 +25,9 @@ _Avoid_: validation, preflight
 **Resume**:
 Continuing a completed run with a new message from the orchestrator, as its next generation, with its earlier context.
 _Avoid_: restart, rerun
+
+### Tasks
+
+**Task**:
+An entry in `/tasks` and `task_stop`: a background shell, a monitor, or a run as seen from there.
+_Avoid_: task for the run itself inside `subagents`

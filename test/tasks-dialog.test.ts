@@ -273,10 +273,15 @@ describe("Ticket #20 — stop all agents from /tasks", () => {
 							agent: "general-purpose",
 							task: `Build ${id}`,
 							startedAt: Date.now(),
+							state: "running" as const,
 							status: "running",
+							model: "faux/faux-1",
+							outputFile: "",
+							output: () => "",
 						}))
 					: [],
-			stop: () => false,
+			get: () => undefined,
+			stop: () => ({ ok: false, reason: "not_found" }),
 			stopAll: (options) => {
 				calls.push({ owner: options?.owner, source: options?.source });
 				running = false;

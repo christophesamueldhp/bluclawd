@@ -54,6 +54,10 @@ export function getSubagentsRootDir(agentDir: string): string {
 	return resolve(agentDir, "bluclawd", "subagents");
 }
 
+export function subagentReportPath(agentDir: string, parentSessionId: string, runId: string): string {
+	return join(getSubagentsRootDir(agentDir), parentSessionId, runId, "report.md");
+}
+
 function ensurePrivateDir(dirPath: string): void {
 	mkdirSync(dirPath, { recursive: true, mode: 0o700 });
 	if (process.platform !== "win32") {
@@ -249,7 +253,7 @@ export function readBoundedSubagentReport(
 	if (!record) {
 		return { ok: false, error: `Subagent run "${runId}" not found for current session.` };
 	}
-	const reportPath = join(getSubagentsRootDir(agentDir), parentSessionId, runId, "report.md");
+	const reportPath = subagentReportPath(agentDir, parentSessionId, runId);
 	let raw = "";
 	if (existsSync(reportPath)) {
 		try {

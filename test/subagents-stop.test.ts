@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { stripAnsi } from "../daemon/ansi.ts";
-import { publishAgentTasks } from "../ext/_shared/agent-tasks.ts";
+import { type AgentTask, publishAgentTasks } from "../ext/_shared/agent-tasks.ts";
 import backgroundBash from "../ext/background-bash/index.ts";
 import { TasksDialog } from "../ext/background-bash/tasks-dialog.ts";
 import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
@@ -59,6 +59,23 @@ function makeAgentRunRecord(overrides: Partial<SubagentRunRecord> = {}): Subagen
 	};
 }
 
+function taskOf(r: SubagentRunRecord): AgentTask {
+	const finished = { completed: "completed", failed: "failed", interrupted: "failed", cancelled: "stopped" } as const;
+	return {
+		id: r.runId,
+		owner: r.parentSessionId,
+		agent: r.agentName,
+		task: r.taskSummary,
+		startedAt: r.startedAt ?? r.admittedAt,
+		endedAt: r.endedAt,
+		state: r.status in finished ? finished[r.status as keyof typeof finished] : "running",
+		status: r.status,
+		model: `${r.provider}/${r.modelId}`,
+		outputFile: "",
+		output: () => "",
+	};
+}
+
 describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integration", () => {
 	it("routes agent IDs through the existing task_stop tool, tracks stop source, enforces session ownership, and rejects finished runs", async () => {
 		const stopTool = getTaskStopTool();
@@ -81,26 +98,17 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 			list: (owner) =>
 				Array.from(records.values())
 					.filter((r) => (!owner || r.parentSessionId === owner) && r.status === "running")
-					.map((r) => ({
-						id: r.runId,
-						owner: r.parentSessionId,
-						agent: r.agentName,
-						task: r.taskSummary,
-						startedAt: r.startedAt ?? r.admittedAt,
-						status: r.status,
-					})),
+					.map(taskOf),
+			get: () => undefined,
 			stop: (id, opts) => {
 				const rec = records.get(id);
-				if (!rec || (opts?.owner && rec.parentSessionId !== opts.owner)) return false;
+				if (!rec || (opts?.owner && rec.parentSessionId !== opts.owner)) return { ok: false, reason: "not_found" };
+				if (rec.status === "completed") return { ok: false, reason: "not_running", task: taskOf(rec) };
 				observedStopSource = opts?.source;
 				rec.status = "stopping";
-				return true;
+				return { ok: true, task: taskOf(rec) };
 			},
-			getRun: (id, owner) => {
-				const rec = records.get(id);
-				if (!rec || (owner && rec.parentSessionId !== owner)) return undefined;
-				return rec;
-			},
+			stopAll: () => 0,
 		});
 
 		try {
@@ -157,28 +165,22 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 				Array.from(runs.values())
 					.filter((r) => (!owner || r.parentSessionId === owner) && r.status !== "completed")
 					.map((r) => ({
-						id: r.runId,
-						owner: r.parentSessionId,
-						agent: r.agentName,
-						task: r.taskSummary,
-						startedAt: r.startedAt ?? r.admittedAt,
-						status: r.status,
-						model: `${r.provider}/${r.modelId}`,
+						...taskOf(r),
 						output: () => "\x1b[31mScanning src/auth.ts:12\x1b[0m\nFound token check",
 					})),
-			stop: (id, opts) => {
-				const rec = runs.get(id);
-				if (!rec) return false;
-				stoppedByDialog = { id, source: opts?.source };
-				rec.status = "stopping";
-				return true;
-			},
-			getRun: (id, owner) => {
+			get: (id, owner) => {
 				const r = runs.get(id);
 				if (!r || (owner && r.parentSessionId !== owner)) return undefined;
-				return r;
+				return { ...taskOf(r), output: () => `Final completed report for ${id}\nEvidence: src/auth.ts:12` };
 			},
-			getReport: (id) => `Final completed report for ${id}\nEvidence: src/auth.ts:12`,
+			stop: (id, opts) => {
+				const rec = runs.get(id);
+				if (!rec) return { ok: false, reason: "not_found" };
+				stoppedByDialog = { id, source: opts?.source };
+				rec.status = "stopping";
+				return { ok: true, task: taskOf(rec) };
+			},
+			stopAll: () => 0,
 		});
 
 		try {
