@@ -1,5 +1,4 @@
 // @ts-check
-
 /**
  * Shows or hides the new task's options; hiding them drops the keyboard from the directory.
  * @param {boolean} expanded @param {(selector: string) => any} $
