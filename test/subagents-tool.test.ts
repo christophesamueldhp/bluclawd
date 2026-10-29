@@ -1619,6 +1619,7 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 	it("shows live progress, survives an orchestrator interrupt, and stops every child at once", async () => {
 		const cwd = makeTempDir("progress-cwd");
 		const agentDir = makeTempDir("progress-agent");
+		let gateEntries = 0;
 		let open!: () => void;
 		const opened = new Promise<void>((resolve) => {
 			open = resolve;
@@ -1629,6 +1630,7 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 			description: "Waits until the test opens it.",
 			parameters: Type.Object({}),
 			execute: async (_id, _params, signal) => {
+				gateEntries++;
 				await Promise.race([opened, new Promise((resolve) => signal?.addEventListener("abort", resolve))]);
 				return { content: [{ type: "text", text: "opened" }], details: undefined };
 			},
@@ -1681,22 +1683,14 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 			const runIds = ["spawn_api", "spawn_ui"].map(
 				(id) => (toolResultText(session, id).result?.details as { runId: string }).runId,
 			);
-			const statusOf = () =>
-				runIds.map(
-					(id) => agentTasks()?.getRun?.(id) as { status: string; toolCallCount: number; lastMessageAt?: number },
-				);
-			// A call counts when it starts; the message counts once the sibling has accepted it.
-			const settled = () =>
-				statusOf()[0]?.toolCallCount === 2 &&
-				statusOf()[0]?.lastMessageAt !== undefined &&
-				statusOf()[1]?.toolCallCount === 1;
-			for (let i = 0; i < 2000 && !settled(); i++) {
+			// Both children wait in their gate once every call before it has started.
+			for (let i = 0; i < 2000 && gateEntries < 2; i++) {
 				await new Promise((resolve) => setTimeout(resolve, 10));
 			}
 
 			// Esc on the orchestrator's turn leaves background children running.
 			await session.abort();
-			expect(statusOf().map((run) => run.status)).toEqual(["running", "running"]);
+			expect(runIds.map((id) => agentTasks()?.get(id)?.status)).toEqual(["running", "running"]);
 
 			faux.setResponses([
 				fauxAssistantMessage([fauxToolCall("subagent_status", {}, { id: "status" })]),
@@ -1781,14 +1775,14 @@ describe("Spec #6 story 42 — /tasks and remote controls on real runs", () => {
 			const [doneId, busyId] = ["spawn_done", "spawn_busy"].map(
 				(id) => (toolResultText(session, id).result?.details as { runId: string }).runId,
 			);
-			const runOf = (id: string) => agentTasks()?.getRun?.(id) as { status: string; toolCallCount: number };
+			const statusOf = (id: string) => agentTasks()?.get(id)?.status;
 			const waitFor = async (condition: () => boolean) => {
 				for (let i = 0; i < 2000 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
 				expect(condition()).toBe(true);
 			};
-			await waitFor(() => runOf(doneId)?.status === "completed" && runOf(busyId)?.toolCallCount === 1);
+			await waitFor(() => statusOf(doneId) === "completed" && statusOf(busyId) === "running");
 
-			expect(agentTasks()?.getReport?.(doneId)).toContain("DONE-MARK: the full report.");
+			expect(agentTasks()?.get(doneId)?.output()).toContain("DONE-MARK: the full report.");
 			expect(
 				agentTasks()
 					?.list()
@@ -1800,7 +1794,7 @@ describe("Spec #6 story 42 — /tasks and remote controls on real runs", () => {
 			let reported = 0;
 			applyPaneMessage({ type: "stop_task", id: busyId }, foreign as never, {} as never, () => reported++);
 			expect(reported).toBe(1);
-			expect(runOf(busyId).status).toBe("running");
+			expect(statusOf(busyId)).toBe("running");
 			applyPaneMessage({ type: "stop_task", id: busyId }, phone as never, {} as never, () => reported++);
 			await waitFor(() => readPersistedRunRecord(agentDir, session.sessionId, busyId)?.status === "cancelled");
 			expect(readPersistedRunRecord(agentDir, session.sessionId, busyId)).toMatchObject({ stopSource: "remote" });

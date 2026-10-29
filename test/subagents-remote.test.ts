@@ -5,7 +5,7 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startRemoteServer } from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
-import { notifyAgentTasksChanged, publishAgentTasks } from "../ext/_shared/agent-tasks.ts";
+import { type AgentTask, notifyAgentTasksChanged, publishAgentTasks } from "../ext/_shared/agent-tasks.ts";
 import { applyPaneMessage, buildReport, paneTasks, watchTasks } from "../ext/remote/report.ts";
 import { recordBackgroundUsageInLedger, writeFullSubagentReport } from "../ext/subagents/storage.ts";
 import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
@@ -35,27 +35,27 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 		writeFileSync(reportFile, "Progress line 1\nProgress line 2\n", "utf8");
 
 		let stopped: { id: string; owner?: string; source?: string } | undefined;
+		const task: AgentTask = {
+			id: "sub_50_1",
+			owner: "sess_phone_1",
+			agent: "explorer",
+			task: "x".repeat(300),
+			startedAt: 5000,
+			state: "running",
+			status: "queued",
+			model: "anthropic/claude-sonnet-4-5",
+			outputFile: reportFile,
+			output: () => "",
+		};
 		const unpublish = publishAgentTasks({
-			list: (owner) => {
-				if (owner && owner !== "sess_phone_1") return [];
-				return [
-					{
-						id: "sub_50_1",
-						owner: "sess_phone_1",
-						agent: "explorer",
-						task: "x".repeat(300),
-						startedAt: 5000,
-						status: "queued",
-						model: "anthropic/claude-sonnet-4-5",
-						outputFile: reportFile,
-					},
-				];
-			},
+			list: (owner) => (owner && owner !== "sess_phone_1" ? [] : [task]),
+			get: () => undefined,
 			stop: (id, opts) => {
-				if (opts?.owner && opts.owner !== "sess_phone_1") return false;
+				if (opts?.owner && opts.owner !== "sess_phone_1") return { ok: false, reason: "not_found" };
 				stopped = { id, owner: opts?.owner, source: opts?.source };
-				return true;
+				return { ok: true, task };
 			},
+			stopAll: () => 0,
 		});
 
 		try {

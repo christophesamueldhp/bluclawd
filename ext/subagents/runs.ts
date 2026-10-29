@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { AGENT_TASK_ID_PREFIX } from "../_shared/agent-tasks.ts";
 import type { AgentDefinitionSource } from "./definitions.ts";
 import {
 	createEmptySubagentUsage,
@@ -7,8 +8,6 @@ import {
 	type SubagentUsageTotals,
 	type UsageAttribution,
 } from "./usage.ts";
-
-export const SUBAGENT_ID_PREFIX = "sub_";
 
 export type SubagentDeliveryMode = "foreground" | "background";
 
@@ -155,10 +154,6 @@ export function isTerminalSubagentStatus(status: SubagentLifecycleStatus): statu
 	return TERMINAL_STATES.has(status);
 }
 
-export function isSubagentTaskId(id: string): boolean {
-	return typeof id === "string" && /^sub_[A-Za-z0-9_-]+$/.test(id);
-}
-
 interface InternalManagedRun<C> {
 	record: SubagentRunRecord;
 	usage: GenerationUsage;
@@ -231,7 +226,7 @@ export class SubagentRunScheduler<C = unknown> {
 		}
 
 		const admittedAt = this.now();
-		const runId = `${SUBAGENT_ID_PREFIX}${randomUUID()}`;
+		const runId = `${AGENT_TASK_ID_PREFIX}${randomUUID()}`;
 
 		const record: SubagentRunRecord = {
 			runId,

@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import {
 	type AgentSession,
@@ -11,12 +10,7 @@ import {
 	type ToolLoadout,
 	type ToolLoadoutChanges,
 } from "@earendil-works/pi-coding-agent";
-import {
-	type AgentTaskInfo,
-	type AgentTaskSource,
-	notifyAgentTasksChanged,
-	publishAgentTasks,
-} from "../_shared/agent-tasks.ts";
+import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { deliverOrHold } from "../background-bash/notification-hold.ts";
 import { type AdmissionContext, createRunAdmission, type RunExecutionContext } from "./admission.ts";
@@ -38,23 +32,18 @@ import {
 } from "./messages.ts";
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
 import { createParentToolProxies, describeSubagentModels, runSubagent } from "./runner.ts";
-import {
-	isTerminalSubagentStatus,
-	type SubagentRunRecord,
-	SubagentRunScheduler,
-	type SubagentStopSource,
-} from "./runs.ts";
+import { isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
 import {
 	appendParentRunReference,
 	appendSubagentMessageRecord,
 	ensureRunStorageDir,
-	readBoundedSubagentReport,
 	readPersistedRunRecord,
 	reconcileInterruptedRuns,
 	recordBackgroundUsageInLedger,
 	writeFullSubagentReport,
 	writePersistedRunRecord,
 } from "./storage.ts";
+import { createAgentTaskSource } from "./task-source.ts";
 
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const BACKGROUND_BATCH_WINDOW_MS = 40;
@@ -449,64 +438,11 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			activeParentSessionId: () => activeParentSessionId,
 		});
 
-		const taskSource: AgentTaskSource = {
-			list: (owner?: string): AgentTaskInfo[] => {
-				const targetOwner = owner ?? activeParentSessionId;
-				const agentDir = resolveAgentDir();
-				return scheduler.listActiveRuns(targetOwner).map((run) => {
-					const reportFile = join(agentDir, "bluclawd", "subagents", run.parentSessionId, run.runId, "report.md");
-					return {
-						id: run.runId,
-						owner: run.parentSessionId,
-						agent: run.agentName,
-						task: run.taskSummary || run.agentName,
-						startedAt: run.startedAt ?? run.admittedAt,
-						status: run.status,
-						model: `${run.provider}/${run.modelId}`,
-						outputFile: reportFile,
-						output: () => {
-							const bounded = readBoundedSubagentReport(agentDir, run.parentSessionId, run.runId, 8192);
-							return bounded.ok && bounded.content ? bounded.content : (run.lastProgressText ?? "");
-						},
-					};
-				});
-			},
-			stop: (id: string, stopOptions?: { owner?: string; source?: SubagentStopSource }): boolean => {
-				const expectedOwner = stopOptions?.owner ?? activeParentSessionId;
-				const run = scheduler.getRun(id) ?? scheduler.listActiveRuns(expectedOwner).find((r) => r.name === id);
-				if (!run) return false;
-				id = run.runId;
-				if (expectedOwner && run.parentSessionId !== expectedOwner) {
-					return false;
-				}
-				return scheduler.cancelRun(id, stopOptions?.source ?? "user", `Stopped subagent ${id}`);
-			},
-			stopAll: (stopOptions?: { owner?: string; source?: SubagentStopSource }): number => {
-				const owner = stopOptions?.owner ?? activeParentSessionId;
-				if (!owner) return 0;
-				return scheduler
-					.listActiveRuns(owner)
-					.filter((run) => scheduler.cancelRun(run.runId, stopOptions?.source ?? "user", "Stopped all subagents"))
-					.length;
-			},
-			getReport: (id: string, owner?: string): string | undefined => {
-				const targetOwner = owner ?? activeParentSessionId;
-				if (!targetOwner) return undefined;
-				const agentDir = resolveAgentDir();
-				const res = readBoundedSubagentReport(agentDir, targetOwner, id);
-				return res.ok ? res.content : undefined;
-			},
-			getRun: (id: string, owner?: string): Readonly<SubagentRunRecord> | undefined => {
-				const targetOwner = owner ?? activeParentSessionId;
-				const live = scheduler.getRun(id);
-				if (live) {
-					if (targetOwner && live.parentSessionId !== targetOwner) return undefined;
-					return live;
-				}
-				if (!targetOwner) return undefined;
-				return readPersistedRunRecord(resolveAgentDir(), targetOwner, id);
-			},
-		};
+		const taskSource = createAgentTaskSource({
+			scheduler,
+			agentDir: resolveAgentDir,
+			activeParentSessionId: () => activeParentSessionId,
+		});
 
 		const registerParentEndpoint = () => {
 			if (!activeParentSessionId) return;
@@ -551,7 +487,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			if (!runLaunchedBy(event.parentToolCallId)) return undefined;
 			const input = event.input as { task_id?: unknown; shell_id?: unknown };
 			const id = String(input.task_id ?? input.shell_id ?? "").trim();
-			if (!scheduler.getRun(id) && !id.startsWith("sub_")) return undefined;
+			if (!scheduler.getRun(id) && !isAgentTaskId(id)) return undefined;
 			return { block: true, reason: "Subagents cannot stop agent runs; message the orchestrator instead." };
 		});
 
@@ -792,14 +728,14 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			execute: async (_toolCallId, params) => {
 				const target = params.agent.trim();
 				if (target === "all") {
-					const stopped = taskSource.stopAll?.({ source: "model" }) ?? 0;
+					const stopped = taskSource.stopAll({ source: "model" });
 					return {
 						content: [{ type: "text", text: `Stopped ${stopped} subagent${stopped === 1 ? "" : "s"}.` }],
 						details: undefined,
 					};
 				}
 				const run = findOwnedRun(target);
-				const stopped = run !== undefined && taskSource.stop(run.runId, { source: "model" });
+				const stopped = run !== undefined && taskSource.stop(run.runId, { source: "model" }).ok;
 				return {
 					content: [
 						{
