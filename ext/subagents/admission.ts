@@ -273,7 +273,6 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 
 			// Everything from here to admit runs without awaiting, so the session cannot change in between.
 			if (
-				!dispatched ||
 				dispatched.parentSessionId !== parentSessionId ||
 				!deps.scope.inScope(dispatched) ||
 				!deps.scope.onBranch(originEntryId)

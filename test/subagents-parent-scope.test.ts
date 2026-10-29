@@ -96,7 +96,7 @@ describe("parent scope", () => {
 		expect(cancelled.map((c) => c.reason)).toEqual(["Session replaced (new)"]);
 	});
 
-	it("leaves nothing in scope after shutdown and closes the orchestrator's endpoint", async () => {
+	it("makes the session stale on shutdown, closes the orchestrator's endpoint, and leaves nothing in scope once detached", async () => {
 		const { scope, cancelled, runIn, childSends } = setup();
 		scope.enter(fakeSession("sess_1").ctx, "replaced");
 		const before = scope.current()!;
@@ -104,11 +104,15 @@ describe("parent scope", () => {
 
 		scope.shutdown();
 
-		expect(scope.current()).toBeUndefined();
-		expect(scope.context()).toBeUndefined();
 		expect(scope.inScope(before)).toBe(false);
 		expect(cancelled.map((c) => c.reason)).toEqual(["Parent session shutting down"]);
 		expect(await childSends(before)).toMatchObject({ status: "unavailable", reason: /has shut down/ });
+
+		const last = scope.current()!;
+		scope.detach();
+
+		expect(scope.context()).toBeUndefined();
+		expect(scope.inScope(last)).toBe(false);
 	});
 
 	it("keeps the epoch on tree navigation and cancels only runs whose originating entry left the branch", () => {

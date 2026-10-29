@@ -18,7 +18,7 @@ export type ParentInboxItem<N> =
 	| { readonly kind: "message"; readonly message: SubagentMessage; readonly scope: ParentScope };
 
 export interface ParentScopeChecks {
-	/** None before the first session starts and after shutdown. */
+	/** None before the first session starts. */
 	current(): ParentScope | undefined;
 	inScope(scope: ParentScope): boolean;
 	/** Whether the entry is on the active branch; a run without an originating entry always is. */
@@ -66,8 +66,10 @@ export function createParentScope<N>(deps: ParentScopeDeps<N>) {
 		}
 	};
 
+	const runInScope = (run: ScopedRun) => inScope(run) && onBranch(run.originEntryId);
+
 	const isDeliverable = (item: ParentInboxItem<N>) =>
-		item.kind === "notice" ? inScope(item.run) && onBranch(item.run.originEntryId) : inScope(item.scope);
+		item.kind === "notice" ? runInScope(item.run) : inScope(item.scope);
 
 	const flush = () => {
 		batchTimer = undefined;
@@ -99,8 +101,7 @@ export function createParentScope<N>(deps: ParentScopeDeps<N>) {
 		});
 	};
 
-	const cancelOutOfScope = (reason: string) =>
-		deps.cancelRuns((run) => !inScope(run) || !onBranch(run.originEntryId), reason);
+	const cancelOutOfScope = (reason: string) => deps.cancelRuns((run) => !runInScope(run), reason);
 
 	const invalidate = (reason: string) => {
 		sessionEpoch++;
@@ -139,12 +140,14 @@ export function createParentScope<N>(deps: ParentScopeDeps<N>) {
 		shutdown() {
 			invalidate("Parent session shutting down");
 			deps.bus.unregister(PARENT_MESSAGE_ADDRESS, "has shut down");
+		},
+		/** Drops the context once the runs stopped by shutdown have settled. */
+		detach() {
 			ctx = undefined;
-			sessionId = undefined;
 		},
 		/** Queues a finished run's notice for the orchestrator if the run is still in scope. */
 		notify(run: ScopedRun, notice: N) {
-			if (inScope(run) && onBranch(run.originEntryId)) push({ kind: "notice", run, notice });
+			if (runInScope(run)) push({ kind: "notice", run, notice });
 		},
 	};
 }

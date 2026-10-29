@@ -473,6 +473,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			await scheduler.waitForSettled();
 			unpublishTasks?.();
 			unpublishTasks = undefined;
+			parentScope.detach();
 		});
 
 		pi.registerTool({
@@ -695,12 +696,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				latestLoadout = loadout;
 				if (!catalog) return undefined;
 				if (!loadout.declared.some((t) => t.name === "subagent")) return undefined;
+				const mode = parentScope.context()?.mode;
 				return {
 					descriptions: {
-						subagent: buildBaseSubagentDescription(
-							catalog,
-							parentScope.context()?.mode === "print" || parentScope.context()?.mode === "json",
-						),
+						subagent: buildBaseSubagentDescription(catalog, mode === "print" || mode === "json"),
 					},
 				};
 			},
