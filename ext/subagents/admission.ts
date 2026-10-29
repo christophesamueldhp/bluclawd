@@ -53,7 +53,6 @@ export interface RunExecutionContext {
 	projectTrusted: boolean;
 }
 
-/** The `subagent` tool's parameters. */
 export const SUBAGENT_TOOL_PARAMETERS = Type.Object({
 	agent: Type.Union([
 		Type.String({
