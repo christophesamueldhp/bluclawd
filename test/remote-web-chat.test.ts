@@ -1,13 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-	addPending,
-	applyLatest,
-	applyOlder,
-	checkPending,
-	forget,
-	listed,
-	openChat,
-} from "../daemon/remote/web/chat.js";
+import { addPending, applyLatest, applyOlder, checkPending, forget, listed, openChat } from "#remote-web/chat.js";
 
 const user = (id: string, text: string) => ({ kind: "user", id, text });
 const reply = (id: string, text = "ok") => ({ kind: "assistant", id, text, tools: [] });

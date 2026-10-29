@@ -1,9 +1,23 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import type { Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, parseArgs, promisify } from "node:util";
+
+type PayloadRow = { path: string; sha256: string; mode: number };
+type RuntimeChange = { path: string; beforeHash: string; afterHash: string; mode: number };
+type PackageMetadata = Record<string, unknown>;
+type BuildOptions = {
+	baseArchive: string;
+	baselineDir: string;
+	patchedDir: string;
+	baselineManifest: string;
+	sourceDelta: string;
+	npmCli: string;
+	outputDir: string;
+};
 
 const exec = promisify(execFile);
 const name = "@anthropic-ai/sandbox-runtime";
@@ -25,14 +39,16 @@ const outputs = new Set(
 	stems.flatMap((stem) => [".js", ".js.map", ".d.ts", ".d.ts.map"].map((suffix) => `dist/sandbox/${stem}${suffix}`)),
 );
 const sourcePaths = stems.map((stem) => `sandbox/${stem}.ts`).sort();
-const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
-const sri = (bytes) => `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
-const requireMatch = (actual, expected, message) => {
+const sha = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+const sri = (bytes: Buffer) => `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
+const requireMatch = (actual: unknown, expected: unknown, message: string) => {
 	if (!isDeepStrictEqual(actual, expected)) throw new Error(message);
 };
-const json = async (path) => JSON.parse(await fs.readFile(path, "utf8"));
-const save = (path, value) => fs.writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-const project = (rows) => rows.map(({ path, sha256 }) => ({ path, sha256 }));
+const json = async (path: string) => JSON.parse(await fs.readFile(path, "utf8"));
+const save = (path: string, value: unknown) =>
+	fs.writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+const project = (rows: readonly { path: string; sha256: string }[]) =>
+	rows.map(({ path, sha256 }) => ({ path, sha256 }));
 const readonlyEnv = {
 	PATH: "/usr/bin:/bin",
 	HOME: "/var/empty",
@@ -42,15 +58,15 @@ const readonlyEnv = {
 	GIT_TERMINAL_PROMPT: "0",
 	OPENSSL_CONF: "/dev/null",
 };
-const run = (command, args, options = {}) =>
+const run = (command: string, args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) =>
 	exec(command, args, { timeout: 30000, maxBuffer: 2 * 1024 * 1024, env: readonlyEnv, ...options });
 
-export function assertArchiveIntegrity(bytes, expectedSRI) {
+export function assertArchiveIntegrity(bytes: Buffer, expectedSRI: string) {
 	if (sri(bytes) !== expectedSRI) throw new Error("Sandbox runtime archive integrity mismatch.");
 }
 
-export function assertArchiveMemberPaths(paths) {
-	const seen = new Set();
+export function assertArchiveMemberPaths(paths: readonly string[]) {
+	const seen = new Set<string>();
 	for (const path of paths) {
 		const parts = path.split("/");
 		if (
@@ -68,26 +84,26 @@ export function assertArchiveMemberPaths(paths) {
 	}
 }
 
-async function inventory(root, path = "") {
+async function inventory(root: string, path = ""): Promise<PayloadRow[]> {
 	const full = join(root, path);
-	let info;
+	let info: Stats;
 	try {
 		info = await fs.lstat(full);
 	} catch (error) {
-		if (error.code === "ENOENT" && !path) return [];
+		if ((error as NodeJS.ErrnoException).code === "ENOENT" && !path) return [];
 		throw error;
 	}
 	if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile()) || path.split("/").includes(".env"))
 		throw new Error("Unsafe sandbox runtime payload entry.");
 	if (info.isFile()) return [{ path, sha256: sha(await fs.readFile(full)), mode: info.mode & 0o777 }];
-	const rows = [];
+	const rows: PayloadRow[] = [];
 	for (const child of (await fs.readdir(full)).sort())
 		rows.push(...(await inventory(root, path ? `${path}/${child}` : child)));
 	return rows;
 }
 
-export async function inspectRuntimeDelta(baselineDir, patchedDir) {
-	const scan = async (root) =>
+export async function inspectRuntimeDelta(baselineDir: string, patchedDir: string): Promise<RuntimeChange[]> {
+	const scan = async (root: string) =>
 		(
 			await Promise.all(
 				["dist", "vendor"].map(async (dir) =>
@@ -101,7 +117,7 @@ export async function inspectRuntimeDelta(baselineDir, patchedDir) {
 		after = await scan(patchedDir);
 	const old = new Map(before.map((row) => [row.path, row]));
 	const next = new Map(after.map((row) => [row.path, row]));
-	const changes = [];
+	const changes: RuntimeChange[] = [];
 	for (const path of new Set([...old.keys(), ...next.keys()])) {
 		const a = old.get(path),
 			b = next.get(path);
@@ -112,7 +128,7 @@ export async function inspectRuntimeDelta(baselineDir, patchedDir) {
 	return changes;
 }
 
-export function privateRuntimeMetadata(basePackage) {
+export function privateRuntimeMetadata(basePackage: PackageMetadata): PackageMetadata {
 	if (
 		basePackage.name !== name ||
 		basePackage.version !== "0.0.81" ||
@@ -139,7 +155,7 @@ export function privateRuntimeMetadata(basePackage) {
 	return result;
 }
 
-async function unpack(archive, directory) {
+async function unpack(archive: string, directory: string) {
 	const names = (await run("/usr/bin/tar", ["-tzf", archive])).stdout.trimEnd().split("\n");
 	assertArchiveMemberPaths(names);
 	const listing = (await run("/usr/bin/tar", ["-tvzf", archive])).stdout.trimEnd().split("\n");
@@ -153,13 +169,13 @@ async function unpack(archive, directory) {
 	return join(directory, "package");
 }
 
-export async function buildPrivateSandboxRuntime(options) {
+export async function buildPrivateSandboxRuntime(options: BuildOptions) {
 	const { baseArchive, baselineDir, patchedDir, baselineManifest, sourceDelta, npmCli, outputDir } = options;
 	try {
 		await fs.lstat(outputDir);
 		throw new Error("Private sandbox runtime output already exists.");
 	} catch (error) {
-		if (error.code !== "ENOENT") throw error;
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
 	const originalBytes = await fs.readFile(baseArchive);
 	assertArchiveIntegrity(originalBytes, officialSRI);
@@ -252,7 +268,7 @@ export async function buildPrivateSandboxRuntime(options) {
 	);
 	const cleanDist = (await inventory(join(baselineDir, "dist"))).map((row) => ({ ...row, path: `dist/${row.path}` }));
 	requireMatch(project(cleanDist), project(base.distFiles), "Baseline build does not match published files.");
-	const originalModes = new Map(base.files.map((row) => [row.path, row.mode]));
+	const originalModes = new Map(base.files.map((row: PayloadRow) => [row.path, row.mode]));
 	const changes = (await inspectRuntimeDelta(baselineDir, patchedDir)).map((row) => ({
 		...row,
 		mode: originalModes.get(row.path),
@@ -315,7 +331,7 @@ export async function buildPrivateSandboxRuntime(options) {
 	const unpacked = await unpack(tarball, join(outputDir, "verified"));
 	const payload = await inventory(unpacked);
 	requireMatch(payload, await inventory(stage), "Packed payload differs from reviewed staging.");
-	const manifestDiff = {};
+	const manifestDiff: Record<string, { before: unknown; after: unknown }> = {};
 	for (const key of new Set([...Object.keys(basePackage), ...Object.keys(metadata)]))
 		if (!isDeepStrictEqual(basePackage[key], metadata[key]))
 			manifestDiff[key] = { before: basePackage[key] ?? null, after: metadata[key] ?? null };
@@ -353,19 +369,23 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
 			options: Object.fromEntries(keys.map((key) => [key, { type: "string" }])),
 			strict: true,
 		});
-		if (keys.some((key) => !values[key])) throw new Error("All fixed maintainer input paths are required.");
+		const input = (key: string) => {
+			const value = values[key];
+			if (!value) throw new Error("All fixed maintainer input paths are required.");
+			return resolve(value);
+		};
 		const result = await buildPrivateSandboxRuntime({
-			baseArchive: resolve(values["base-archive"]),
-			baselineDir: resolve(values.baseline),
-			patchedDir: resolve(values.patched),
-			baselineManifest: resolve(values["baseline-manifest"]),
-			sourceDelta: resolve(values["source-delta"]),
-			npmCli: resolve(values["npm-cli"]),
-			outputDir: resolve(values.output),
+			baseArchive: input("base-archive"),
+			baselineDir: input("baseline"),
+			patchedDir: input("patched"),
+			baselineManifest: input("baseline-manifest"),
+			sourceDelta: input("source-delta"),
+			npmCli: input("npm-cli"),
+			outputDir: input("output"),
 		});
 		console.log(JSON.stringify(result));
 	} catch (error) {
-		console.error(error.message);
+		console.error(error instanceof Error ? error.message : String(error));
 		process.exitCode = 1;
 	}
 }

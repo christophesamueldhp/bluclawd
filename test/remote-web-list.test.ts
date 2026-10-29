@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ageAt, STATE_WORDS, sessionGroups, statusGlyph, successor, viewMode } from "../daemon/remote/web/list.js";
+import { ageAt, STATE_WORDS, sessionGroups, statusGlyph, successor, viewMode } from "#remote-web/list.js";
 import { STATE_WORDS as TERMINAL_STATE_WORDS } from "../daemon/rows.ts";
 
 const row = (id: string, state: string, more: Record<string, unknown> = {}) => ({

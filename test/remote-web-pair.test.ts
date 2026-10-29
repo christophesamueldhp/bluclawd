@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pairLink } from "../daemon/remote/web/api.js";
+import { pairLink } from "#remote-web/api.js";
 
 describe("the phone app's pairing links", () => {
 	const secret = "Qm3xZ8vT1pLk9sWc2rYb0A";

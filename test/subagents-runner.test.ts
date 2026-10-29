@@ -180,7 +180,7 @@ describe("Task 4 (M1) — Child runner", () => {
 						task: "/not_a_command Inspect src/hello.ts",
 						childModel,
 						projectTrusted,
-						childTools: [createReadToolDefinition(cwd), deniedTool],
+						childTools: [defineTool(createReadToolDefinition(cwd)), deniedTool],
 						activeToolNames: ["read", "denied_action"],
 						builtinExtensions: [],
 						onChildSessionCreated: (session) => {
@@ -257,7 +257,7 @@ describe("Task 4 (M1) — Child runner", () => {
 					agentDir,
 					definition: explorer,
 					task: "Loop on a.ts",
-					childTools: [createReadToolDefinition(cwd), deniedTool],
+					childTools: [defineTool(createReadToolDefinition(cwd)), deniedTool],
 					activeToolNames: ["read", "denied_action"],
 					builtinExtensions: [],
 					childModel,

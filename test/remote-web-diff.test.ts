@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { diffCounts, diffHtml, lineKind } from "../daemon/remote/web/diff.js";
+import { diffCounts, diffHtml, lineKind } from "#remote-web/diff.js";
 
 // As pi's edit tool writes it: line numbers padded to one width, a gap line between hunks.
 const diff = [" 1 import a", "-2 const x = 1;", "+2 const x = 2;", "+3 const y = 3;", "   ...", " 9 export {};"].join(

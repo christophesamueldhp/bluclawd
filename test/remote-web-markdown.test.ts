@@ -2,9 +2,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { markdown } from "#remote-web/markdown.js";
 import { startRemoteServer } from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
-import { markdown } from "../daemon/remote/web/markdown.js";
 
 const WEB_DIR = join(import.meta.dirname, "../daemon/remote/web");
 

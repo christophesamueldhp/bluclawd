@@ -10,9 +10,9 @@ import {
 	buildPrivateSandboxRuntime,
 	inspectRuntimeDelta,
 	privateRuntimeMetadata,
-} from "../scripts/build-private-sandbox-runtime.mjs";
+} from "../scripts/build-private-sandbox-runtime.ts";
 
-const script = fileURLToPath(new URL("../scripts/build-private-sandbox-runtime.mjs", import.meta.url));
+const script = fileURLToPath(new URL("../scripts/build-private-sandbox-runtime.ts", import.meta.url));
 const officialSRI = "sha512-bjHDu87gjIR7+Oxy9jPiK3v8CvSELCzfpXa3fjqfSKdvlZET2iF51xcXILWPayTpowB3xtZeQVf2JR916nVW/w==";
 const basePackage = {
 	name: "@anthropic-ai/sandbox-runtime",

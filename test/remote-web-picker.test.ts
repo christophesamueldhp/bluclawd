@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { modelGroups, pickerHtml } from "../daemon/remote/web/picker.js";
+import { modelGroups, pickerHtml } from "#remote-web/picker.js";
 
 const models = [
 	{ provider: "anthropic", id: "fable", name: "Claude Fable 5.1" },
