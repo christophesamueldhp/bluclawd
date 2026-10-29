@@ -34,7 +34,10 @@ export function holdNotifications(): () => void {
 	};
 }
 
-/** Sends now, or once the hold is released. */
+/**
+ * Sends now, or once the hold is released. A hold can outlast the sender's state, so `send`
+ * checks whether the update is still valid when it runs, not before this is called.
+ */
 export function deliverOrHold(send: () => void): void {
 	if (state.holds === 0) {
 		send();
