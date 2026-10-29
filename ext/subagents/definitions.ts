@@ -95,11 +95,7 @@ function extractHeuristicName(raw: string, filePath: string): string {
 	return match?.[1]?.trim() || stem;
 }
 
-function parseToolsField(rawTools: unknown): {
-	ok: boolean;
-	tools?: string[];
-	error?: string;
-} {
+function parseToolsField(rawTools: unknown): { ok: true; tools?: string[] } | { ok: false; error: string } {
 	if (rawTools === undefined) {
 		return { ok: true };
 	}
@@ -156,7 +152,7 @@ function validateRoleFields(
 
 	const toolsResult = parseToolsField(fields.tools);
 	if (!toolsResult.ok) {
-		return { ok: false, error: `Invalid tools ${where}: ${toolsResult.error ?? "invalid tools"}` };
+		return { ok: false, error: `Invalid tools ${where}: ${toolsResult.error}` };
 	}
 
 	let model: SubagentModelSpec = "inherit";
@@ -201,12 +197,7 @@ function parseSingleDefinitionFile(
 	filePath: string,
 	scopeDirReal: string,
 	source: AgentDefinitionSource,
-): {
-	ok: boolean;
-	definition?: AgentDefinition;
-	candidateNames?: string[];
-	error?: string;
-} {
+): { ok: true; definition: AgentDefinition } | { ok: false; candidateNames: string[]; error: string } {
 	const fallbackStem = basename(filePath, ".md");
 	let stat: ReturnType<typeof lstatSync>;
 	try {
@@ -384,10 +375,10 @@ function loadScopeDirectory(dirPath: string, source: AgentDefinitionSource): Sco
 
 	for (const filePath of listed.files) {
 		const parsed = parseSingleDefinitionFile(filePath, listed.realDir, source);
-		if (!parsed.ok || !parsed.definition) {
-			const errorMsg = parsed.error ?? `Invalid agent definition "${filePath}"`;
+		if (!parsed.ok) {
+			const errorMsg = parsed.error;
 			diagnostics.push(errorMsg);
-			for (const name of parsed.candidateNames ?? []) {
+			for (const name of parsed.candidateNames) {
 				if (!invalid.has(name)) {
 					invalid.set(name, errorMsg);
 				}

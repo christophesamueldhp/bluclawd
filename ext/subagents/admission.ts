@@ -211,7 +211,6 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		requestedModel: SubagentModelSpec,
 		requestedThinkingLevel: string | undefined,
 		ctx: AdmissionContext,
-		agentName: string,
 	): Promise<{ childModel: ResolvedChildModel; error?: never } | { childModel?: never; error: string }> => {
 		const resolved = await resolveChildModelAndRuntime({
 			agentDir: deps.agentDir(),
@@ -220,11 +219,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			requestedThinkingLevel,
 			parentModelRegistry: ctx.modelRegistry,
 		});
-		if (!resolved.ok || !resolved.model || !resolved.modelRuntime) {
-			return {
-				error: sanitizeDiagnosticText(resolved.error ?? `Could not resolve model for subagent "${agentName}".`),
-			};
-		}
+		if (!resolved.ok) return { error: sanitizeDiagnosticText(resolved.error) };
 		return {
 			childModel: {
 				model: resolved.model,
@@ -307,12 +302,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			// A chosen model without a level gets the SDK's default for that model; an inherited one keeps the parent's.
 			const requestedThinkingLevel =
 				explicitThinkingLevel ?? (requestedModel === "inherit" ? parentThinkingLevel : undefined);
-			const { childModel, error: modelError } = await resolveChildModel(
-				requestedModel,
-				requestedThinkingLevel,
-				ctx,
-				agentName,
-			);
+			const { childModel, error: modelError } = await resolveChildModel(requestedModel, requestedThinkingLevel, ctx);
 			if (!childModel) return reject(modelError);
 
 			// Everything from here to admit runs without awaiting, so the session cannot change in between.
@@ -327,9 +317,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 
 			const sessionDir = ensureSessionStorageDir(agentDir, parentSessionId);
 			if (!sessionDir.ok) {
-				return reject(
-					`Cannot launch subagent: storage is unavailable (${sessionDir.error ?? "storage check failed"}).`,
-				);
+				return reject(`Cannot launch subagent: storage is unavailable (${sessionDir.error}).`);
 			}
 
 			const liveRuns = deps.scheduler.listActiveRuns(parentSessionId);
@@ -381,7 +369,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				signal: isBackground ? undefined : signal,
 				context: { agentDir, definition, task: taskText, ...tools, childModel, projectTrusted },
 			});
-			if (!admitRes.ok || !admitRes.handle) return reject(admitRes.error ?? "Subagent admission rejected.");
+			if (!admitRes.ok) return reject(admitRes.error);
 			return { ok: true, handle: admitRes.handle };
 		},
 
@@ -433,7 +421,6 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				`${run.provider}/${run.modelId}`,
 				run.thinkingLevel === SDK_DEFAULT_THINKING ? undefined : run.thinkingLevel,
 				ctx,
-				run.agentName,
 			);
 			if (!childModel) return unavailable(modelError);
 
@@ -446,7 +433,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				projectTrusted: ctx.isProjectTrusted(),
 				resume: { transcriptPath: resumable.transcriptPath, prompt: buildPrompt() },
 			});
-			if (!resumed.ok || !resumed.handle) return unavailable(resumed.error ?? `${label} could not be resumed.`);
+			if (!resumed.ok) return unavailable(resumed.error);
 			return { ok: true, handle: resumed.handle };
 		},
 	};

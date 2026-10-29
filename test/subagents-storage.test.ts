@@ -85,16 +85,16 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		});
 
 		const dirRes = ensureRunStorageDir(agentDir, record.parentSessionId, record.runId);
-		expect(dirRes.ok).toBe(true);
-		expect(existsSync(dirRes.runDir!)).toBe(true);
+		if (!dirRes.ok) throw new Error(dirRes.error);
+		expect(existsSync(dirRes.runDir)).toBe(true);
 
 		if (process.platform !== "win32") {
-			const mode = statSync(dirRes.runDir!).mode & 0o777;
+			const mode = statSync(dirRes.runDir).mode & 0o777;
 			expect(mode).toBe(0o700);
 		}
 
 		const writeRec = writePersistedRunRecord(agentDir, record);
-		expect(writeRec.ok).toBe(true);
+		if (!writeRec.ok) throw new Error(writeRec.error);
 
 		const loaded = readPersistedRunRecord(agentDir, record.parentSessionId, record.runId);
 		expect(loaded).toBeDefined();
@@ -102,16 +102,16 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		expect(loaded?.errorMessage).not.toContain("my_secret_123");
 		expect(loaded?.errorMessage).toContain("[REDACTED]");
 
-		const rawDiskJson = readFileSync(writeRec.recordPath!, "utf8");
+		const rawDiskJson = readFileSync(writeRec.recordPath, "utf8");
 		expect(rawDiskJson).not.toContain("sk-secret-token-999999");
 		expect(rawDiskJson).not.toContain("my_secret_123");
 
 		const reportRes = writeFullSubagentReport(agentDir, record, "# Full Report\n\nDetailed findings with path:line.");
-		expect(reportRes.ok).toBe(true);
-		expect(existsSync(reportRes.reportPath!)).toBe(true);
+		if (!reportRes.ok) throw new Error(reportRes.error);
+		expect(existsSync(reportRes.reportPath)).toBe(true);
 
 		const bounded = readBoundedSubagentReport(agentDir, record.parentSessionId, record.runId, 1024);
-		expect(bounded.ok).toBe(true);
+		if (!bounded.ok) throw new Error(bounded.error);
 		expect(bounded.content).toContain("Detailed findings with path:line.");
 	});
 
@@ -133,7 +133,7 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 
 		const failedReport = writeFullSubagentReport(blockedAgentDir, makeRecord(), "Report content");
 		expect(failedReport.ok).toBe(false);
-		expect(failedReport.reportPath).toBeUndefined();
+		expect(failedReport).not.toHaveProperty("reportPath");
 	});
 
 	it("records parent references via pi.appendEntry and reconciles orphaned nonterminal runs on restart as interrupted without replaying work", () => {

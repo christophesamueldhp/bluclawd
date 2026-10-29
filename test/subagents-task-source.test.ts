@@ -85,7 +85,7 @@ function setup(activeParentSessionId: string | undefined = "sess_main") {
 			taskSummary,
 			deliveryMode: "background",
 		});
-		if (!admitted.ok || !admitted.handle) throw new Error(admitted.error);
+		if (!admitted.ok) throw new Error(admitted.error);
 		return admitted.handle;
 	};
 	const source = createAgentTaskSource({

@@ -374,7 +374,7 @@ export class OrchestratorClient {
 	 * Ask the daemon to exit and wait until it is actually gone. `ok: false` carries the daemon's
 	 * reason (an older daemon still running sessions of its own; or one that predates the verb).
 	 */
-	async shutdownDaemon(): Promise<{ ok: boolean; reason?: string }> {
+	async shutdownDaemon(): Promise<{ ok: true } | { ok: false; reason: string }> {
 		try {
 			const res = await this.request({ type: "shutdown" }, 3000);
 			// A daemon from before this verb answers an unknown request with no `type` at all —

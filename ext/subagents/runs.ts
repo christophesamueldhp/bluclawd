@@ -134,11 +134,9 @@ export interface AdmittedSubagentHandle {
 	readonly completion: Promise<Readonly<SubagentRunRecord>>;
 }
 
-export interface AdmitSubagentRunResult {
-	readonly ok: boolean;
-	readonly handle?: AdmittedSubagentHandle;
-	readonly error?: string;
-}
+export type AdmitSubagentRunResult =
+	| { readonly ok: true; readonly handle: AdmittedSubagentHandle }
+	| { readonly ok: false; readonly error: string };
 
 export interface SubagentRunSchedulerOptions<C = unknown> {
 	now?: () => number;

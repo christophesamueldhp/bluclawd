@@ -152,7 +152,7 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 			record,
 			"\x1b[31mLine 1: safe report\x1b[0m\nLine 2: <script>alert(1)</script>",
 		);
-		expect(written.ok).toBe(true);
+		if (!written.ok) throw new Error(written.error);
 
 		const stopCalls: Array<{ sessionId: string; taskId: string }> = [];
 		const server = await startRemoteServer(

@@ -41,7 +41,7 @@ describe("OrchestratorClient.shutdownDaemon", () => {
 	});
 
 	/** A daemon stand-in: answers list/shutdown; on shutdown, stops listening shortly after. */
-	function fakeDaemon(socketPath: string, onShutdown: () => { ok: boolean; error?: string }) {
+	function fakeDaemon(socketPath: string, onShutdown: () => { ok: true } | { ok: false; error: string }) {
 		server = createServer((socket) => {
 			socket.on("data", (chunk) => {
 				const req = JSON.parse(chunk.toString().trim()) as { type: string };
@@ -80,9 +80,7 @@ describe("OrchestratorClient.shutdownDaemon", () => {
 		});
 		await new Promise<void>((resolve) => server?.listen(socketPath, resolve));
 		const client = new OrchestratorClient(socketPath);
-		const result = await client.shutdownDaemon();
-		expect(result.ok).toBe(false);
-		expect(result.reason).toContain("predates");
+		expect(await client.shutdownDaemon()).toMatchObject({ ok: false, reason: expect.stringContaining("predates") });
 	});
 
 	it("treats a daemon that does not know the verb as a refusal, not a crash", async () => {
