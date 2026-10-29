@@ -19,6 +19,7 @@ import {
 	submitCommand,
 	watchTasks,
 } from "../ext/remote/report.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 const model = (provider: string, id: string, name?: string, reasoning = false) => ({ provider, id, name, reasoning });
 /** The trust mode, without reading the developer's own settings. */
@@ -252,7 +253,7 @@ describe("thinking level and trust mode from the phone", () => {
 		writeFileSync(home.settings(), JSON.stringify({ defaultProjectTrust: "always" }));
 		const { ctx, pi } = fakes({ cwd: home.dir() });
 		applyPaneMessage({ type: "set_trust", trust: "never" }, ctx as never, pi as never);
-		await vi.waitFor(() => expect(pi.events.emit).toHaveBeenCalledWith(TRUST_CHANGED, "never"));
+		await waitFor(() => expect(pi.events.emit).toHaveBeenCalledWith(TRUST_CHANGED, "never"));
 		expect(JSON.parse(readFileSync(home.settings(), "utf8")).defaultProjectTrust).toBe("never");
 		expect(ctx.ui.setStatus).toHaveBeenCalledWith("1-mode", "✕ never (alt+m to cycle)");
 		expect(projectTrust(ctx as never)).toBe("never");
@@ -457,7 +458,7 @@ describe("/remote-control", () => {
 		const { ctx } = fakes({ current: model("openai", "gpt-5") });
 		handlers.get("session_start")?.({}, { ...ctx, mode: "tui" });
 		handlers.get("bluclawd:remote-want-report")?.(true);
-		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(2));
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(2));
 		expect(sent.mock.calls.map(([pane]) => pane)).toEqual(["pi-report", "pi-report"]);
 		// Nobody has the session open: a turn's end or Alt+M sends nothing, until a phone opens it.
 		handlers.get("turn_end")?.({}, { ...ctx, mode: "tui" });
@@ -465,12 +466,12 @@ describe("/remote-control", () => {
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(sent).toHaveBeenCalledTimes(2);
 		handlers.get("bluclawd:remote-watched")?.(true);
-		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(3));
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(3));
 		// Alt+M on the Mac, or the phone's picker: the phone's bar shows the new mode.
 		handlers.get(TRUST_CHANGED)?.("never");
-		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(4));
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(4));
 		handlers.get("turn_end")?.({}, { ...ctx, mode: "tui" });
-		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(5));
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(5));
 		sent.mockRestore();
 	});
 
@@ -539,7 +540,7 @@ describe("/remote-control", () => {
 			delete process.env[PANE_ENV];
 		}
 		handlers.get("session_start")?.({}, ctx);
-		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
 		handlers.get("bluclawd:pane-message")?.({ type: "command", text: "/compact" });
 		expect(prompt).toBe("/compact");
 		expect(pressed.mock.calls).toEqual([["pi-cmd", ["Enter"]]]);
@@ -547,7 +548,7 @@ describe("/remote-control", () => {
 		prompt = "";
 		ctx.isIdle = () => false;
 		handlers.get("bluclawd:pane-message")?.({ type: "command", text: "/compact" });
-		await vi.waitFor(() => expect(sent).toHaveBeenCalledTimes(2));
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(2));
 		expect(sent.mock.calls[1]![1]).toMatchObject({ notice: { text: BUSY_NOTICE } });
 		expect(pressed).toHaveBeenCalledTimes(1);
 		expect(pi.sendUserMessage).not.toHaveBeenCalled();

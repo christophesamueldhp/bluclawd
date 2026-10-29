@@ -35,6 +35,7 @@ import {
 import { MAX_TASK_INPUT_BYTES } from "../ext/subagents/admission.ts";
 import { readPersistedRunRecord } from "../ext/subagents/storage.ts";
 import { createParentSessionWithSubagents } from "./helpers/subagent-session.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 const tempDirs: string[] = [];
 
@@ -658,11 +659,6 @@ describe("Ticket #13 — Messages between orchestrator, children and siblings", 
 	const isChild = (context: Ctx) => systemText(context).includes("operating in a fresh context");
 	const contextText = (context: Ctx) => JSON.stringify(context.messages);
 
-	async function waitUntil(condition: () => boolean) {
-		for (let i = 0; i < 2000 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(condition()).toBe(true);
-	}
-
 	it("delivers a child's message to the orchestrator while the child is still running", async () => {
 		const cwd = makeTempDir("msg-up-cwd");
 		const agentDir = makeTempDir("msg-up-agent");
@@ -702,7 +698,7 @@ describe("Ticket #13 — Messages between orchestrator, children and siblings", 
 			await session.bindExtensions({ mode: "rpc" });
 			faux.setResponses(Array.from({ length: 12 }, () => step));
 			await session.prompt("Delegate.", { expandPromptTemplates: false });
-			await waitUntil(() => parentSaw && childReceipt !== "");
+			await waitFor(() => parentSaw && childReceipt !== "");
 			await session.waitForIdle();
 			expect(childReceipt).toMatch(/accepted/);
 			expect(childRunningWhenSeen).toBe(true);
@@ -783,7 +779,7 @@ describe("Ticket #13 — Messages between orchestrator, children and siblings", 
 			await session.bindExtensions({ mode: "rpc" });
 			faux.setResponses(Array.from({ length: 16 }, () => step));
 			await session.prompt("Delegate two.", { expandPromptTemplates: false });
-			await waitUntil(() => childSaw.a !== undefined && childSaw.b !== undefined);
+			await waitFor(() => childSaw.a !== undefined && childSaw.b !== undefined);
 			await session.waitForIdle();
 
 			expect(toolResultText(session, "down_1").text).toMatch(/accepted/);
@@ -854,7 +850,7 @@ describe("Ticket #13 — Messages between orchestrator, children and siblings", 
 			await session.bindExtensions({ mode: "rpc" });
 			faux.setResponses(Array.from({ length: 12 }, () => step));
 			await session.prompt("Delegate.", { expandPromptTemplates: false });
-			await waitUntil(() => readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "completed");
+			await waitFor(() => readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "completed");
 			await session.waitForIdle();
 
 			expect(toolResultText(session, "claim").text).toMatch(/accepted/);
@@ -1019,13 +1015,7 @@ describe("Ticket #14 — Children run with parent authority in the shared checko
 			]);
 			await session.prompt("Delegate in background.", { expandPromptTemplates: false });
 			const runId = (toolResultText(session, "launch").result?.details as { runId: string }).runId;
-			for (
-				let i = 0;
-				i < 2000 && readPersistedRunRecord(agentDir, session.sessionId, runId)?.status !== "completed";
-				i++
-			) {
-				await new Promise((resolve) => setTimeout(resolve, 10));
-			}
+			await waitFor(() => readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "completed");
 			await session.waitForIdle();
 
 			expect(readPersistedRunRecord(agentDir, session.sessionId, runId)?.summaryText).toBe(
@@ -1392,13 +1382,7 @@ describe("Ticket #16 — Agent names and the live roster", () => {
 
 			release();
 			const runId = (toolResultText(session, "spawn_backend").result?.details as { runId: string }).runId;
-			for (
-				let i = 0;
-				i < 2000 && readPersistedRunRecord(agentDir, session.sessionId, runId)?.status !== "completed";
-				i++
-			) {
-				await new Promise((resolve) => setTimeout(resolve, 10));
-			}
+			await waitFor(() => readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "completed");
 			await session.waitForIdle();
 			expect(readPersistedRunRecord(agentDir, session.sessionId, runId)).toMatchObject({ name: "backend" });
 			expect(backendInbox).toContain("Use REST.");
@@ -1504,15 +1488,8 @@ describe("Ticket #18 — One orchestrator wake-up for close child messages and c
 			const callsWhenIdle = parentCalls;
 			childGate.open();
 			const runId = (toolResultText(session, "launch").result?.details as { runId: string }).runId;
-			for (
-				let i = 0;
-				i < 2000 && readPersistedRunRecord(agentDir, session.sessionId, runId)?.status !== "completed";
-				i++
-			) {
-				await new Promise((resolve) => setTimeout(resolve, 10));
-			}
-			for (let i = 0; i < 100 && parentCalls === callsWhenIdle; i++)
-				await new Promise((resolve) => setTimeout(resolve, 10));
+			await waitFor(() => readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "completed");
+			await waitFor(() => parentCalls !== callsWhenIdle);
 			await session.waitForIdle();
 			await new Promise((resolve) => setTimeout(resolve, 500));
 			await session.waitForIdle();
@@ -1594,11 +1571,10 @@ describe("Ticket #18 — One orchestrator wake-up for close child messages and c
 				),
 			);
 			const prompt = session.prompt("Delegate and wait.", { expandPromptTemplates: false });
-			for (let i = 0; i < 2000 && parentCalls < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+			await waitFor(() => parentCalls >= 2);
 			childGate.open();
-			for (let i = 0; i < 2000 && !session.messages.some((m) => m.role === "custom"); i++) {
-				await new Promise((resolve) => setTimeout(resolve, 10));
-			}
+			// While the orchestrator is busy, the child's messages and completion queue for its next boundary.
+			await waitFor(() => JSON.stringify(session.agent.peekQueuedMessages()).includes("Execution: completed"));
 			parentGate.open();
 			await prompt;
 			await session.waitForIdle();
@@ -1669,9 +1645,7 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 						}
 						apiMessaged = true;
 						// A sibling spawned in the same batch is reachable only once it has started.
-						for (let i = 0; i < 500 && (agentTasks()?.list(session.sessionId).length ?? 0) < 2; i++) {
-							await new Promise((resolve) => setTimeout(resolve, 10));
-						}
+						await waitFor(() => (agentTasks()?.list(session.sessionId).length ?? 0) >= 2);
 						return fauxAssistantMessage([
 							fauxToolCall("subagent_message", { to: "ui", content: "api started" }, { id: "api_note" }),
 							gate,
@@ -1684,9 +1658,7 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 				(id) => (toolResultText(session, id).result?.details as { runId: string }).runId,
 			);
 			// Both children wait in their gate once every call before it has started.
-			for (let i = 0; i < 2000 && gateEntries < 2; i++) {
-				await new Promise((resolve) => setTimeout(resolve, 10));
-			}
+			await waitFor(() => gateEntries >= 2);
 			expect(gateEntries).toBe(2);
 
 			// Esc on the orchestrator's turn leaves background children running.
@@ -1710,9 +1682,7 @@ describe("Ticket #20 — Stop all agents and inspect child progress", () => {
 			expect(uiStatus).toMatch(/turns: 1, tool calls: 1, elapsed: \d+s/);
 			expect(uiStatus).toMatch(/last activity: tool child_gate \d+s ago; last message: never/);
 			expect(toolResultText(session, "stop_all").text).toContain("Stopped 2 subagents.");
-			for (let i = 0; i < 2000 && agentTasks()?.list(session.sessionId).length; i++) {
-				await new Promise((resolve) => setTimeout(resolve, 10));
-			}
+			await waitFor(() => !agentTasks()?.list(session.sessionId).length);
 			for (const id of runIds) {
 				expect(readPersistedRunRecord(agentDir, session.sessionId, id)).toMatchObject({
 					status: "cancelled",
@@ -1779,10 +1749,6 @@ describe("Spec #6 story 42 — /tasks and remote controls on real runs", () => {
 				(id) => (toolResultText(session, id).result?.details as { runId: string }).runId,
 			);
 			const statusOf = (id: string) => agentTasks()?.get(id)?.status;
-			const waitFor = async (condition: () => boolean) => {
-				for (let i = 0; i < 2000 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
-				expect(condition()).toBe(true);
-			};
 			await waitFor(() => statusOf(doneId) === "completed" && gateEntries === 1);
 
 			expect(agentTasks()?.get(doneId)?.output()).toContain("DONE-MARK: the full report.");
@@ -1811,10 +1777,6 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 	const isChildContext = (context: TranscriptContext) => {
 		const sys = context.messages.find((m) => m.role === "system");
 		return sys?.role === "system" && getSystemMessageText(sys).includes("operating in a fresh context");
-	};
-	const waitFor = async (condition: () => boolean) => {
-		for (let i = 0; i < 2000 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(condition()).toBe(true);
 	};
 
 	it("resumes a completed child with its transcript, keeps its identity, and counts each generation once", async () => {

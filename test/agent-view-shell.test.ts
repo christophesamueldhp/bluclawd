@@ -4,12 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 import { rowFromShell } from "../daemon/rows.ts";
 import { type ShellInfo, Tmux } from "../daemon/tmux.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 const plainTheme = {
 	fg: (_c: string, s: string) => s,
@@ -163,57 +164,46 @@ describe.skipIf(!hasTmux)("tmux runs a ! command", () => {
 		const name = tmux.startShell(tmpdir(), "/bin/sh -c 'trap \"\" TERM; sleep 30 & echo child=$!; wait'");
 		const other = tmux.startShell(tmpdir(), "sleep 30");
 		let pid = 0;
-		await vi.waitFor(
-			() => {
-				pid = Number(/child=(\d+)/.exec(tmux?.capture(name, 20).join("\n") ?? "")?.[1]);
-				expect(pid).toBeGreaterThan(1);
-			},
-			{ timeout: 5000 },
-		);
+		await waitFor(() => {
+			pid = Number(/child=(\d+)/.exec(tmux?.capture(name, 20).join("\n") ?? "")?.[1]);
+			expect(pid).toBeGreaterThan(1);
+		});
 		children.push(pid);
 
 		tmux.stopShell(name);
 
-		await vi.waitFor(
-			() => {
-				const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
-				expect(state === "" || state.startsWith("Z")).toBe(true);
-				expect(tmux?.listShells().find((s) => s.name === name)).toMatchObject({
-					stopped: true,
-					exit: expect.any(String),
-				});
-			},
-			{ timeout: 5000 },
-		);
+		await waitFor(() => {
+			const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+			expect(state === "" || state.startsWith("Z")).toBe(true);
+			expect(tmux?.listShells().find((s) => s.name === name)).toMatchObject({
+				stopped: true,
+				exit: expect.any(String),
+			});
+		});
 		expect(tmux.listShells().find((s) => s.name === other)).toMatchObject({ stopped: false, exit: undefined });
-	}, 10_000);
+	});
 
 	it("records its exit status and keeps its output; stopping marks it stopped", async () => {
 		tmux = new Tmux(mkdtempSync(join(tmpdir(), "bc-shell-")));
 		const ok = tmux.startShell(tmpdir(), "echo first; echo last-line");
 		const bad = tmux.startShell(tmpdir(), "echo oops; exit 3");
 		const slow = tmux.startShell(tmpdir(), "sleep 30");
-		await vi.waitFor(
-			() => {
-				const shells = tmux?.listShells() ?? [];
-				expect(shells.find((s) => s.name === ok)).toMatchObject({
-					exit: "0",
-					lastLine: "last-line",
-					command: "echo first; echo last-line",
-				});
-				expect(shells.find((s) => s.name === bad)).toMatchObject({ exit: "3", lastLine: "oops" });
-				expect(shells.find((s) => s.name === slow)).toMatchObject({ exit: undefined, stopped: false });
-			},
-			{ timeout: 5000 },
-		);
+		await waitFor(() => {
+			const shells = tmux?.listShells() ?? [];
+			expect(shells.find((s) => s.name === ok)).toMatchObject({
+				exit: "0",
+				lastLine: "last-line",
+				command: "echo first; echo last-line",
+			});
+			expect(shells.find((s) => s.name === bad)).toMatchObject({ exit: "3", lastLine: "oops" });
+			expect(shells.find((s) => s.name === slow)).toMatchObject({ exit: undefined, stopped: false });
+		});
 		tmux.stopShell(slow);
-		await vi.waitFor(
-			() =>
-				expect(tmux?.listShells().find((s) => s.name === slow)).toMatchObject({
-					stopped: true,
-					exit: expect.any(String),
-				}),
-			{ timeout: 5000 },
+		await waitFor(() =>
+			expect(tmux?.listShells().find((s) => s.name === slow)).toMatchObject({
+				stopped: true,
+				exit: expect.any(String),
+			}),
 		);
 		expect(tmux.capture(ok, 10)).toEqual(["first", "last-line"]);
 	});

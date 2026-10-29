@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { agentTasks, subscribeAgentTasks } from "../ext/_shared/agent-tasks.ts";
 import { createSubagentsExtension, SUBAGENT_NOTIFICATION_CUSTOM_TYPE } from "../ext/subagents/index.ts";
 import { readBackgroundUsageLedger, readPersistedRunRecord } from "../ext/subagents/storage.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 const tempDirs: string[] = [];
 
@@ -135,16 +136,6 @@ async function createTestSession(options: {
 	return { session, faux };
 }
 
-async function waitForCondition(predicate: () => boolean, timeoutMs = 4000): Promise<void> {
-	const start = Date.now();
-	while (!predicate()) {
-		if (Date.now() - start > timeoutMs) {
-			throw new Error("Timed out waiting for background condition");
-		}
-		await new Promise((r) => setTimeout(r, 15));
-	}
-}
-
 describe("Task 7 (M2) — Background execution, session-bound delivery, drift warnings, and usage ledger", () => {
 	it("admits background runs with immediate acknowledgement, survives parent turn completion, detects workspace drift when parent modifies files, and records separate background usage", async () => {
 		const cwd = makeTempDir("drift-cwd");
@@ -238,7 +229,7 @@ describe("Task 7 (M2) — Background execution, session-bound delivery, drift wa
 			resolveChildStep();
 			expect(await durableWhenUnlisted).toEqual({ status: "completed", reportWritten: true, ledgered: true });
 
-			await waitForCondition(() => {
+			await waitFor(() => {
 				return session.messages.some(
 					(m) =>
 						m.role === "custom" &&
@@ -343,7 +334,7 @@ describe("Task 7 (M2) — Background execution, session-bound delivery, drift wa
 			await bothTerminal;
 			await vi.advanceTimersByTimeAsync(40);
 
-			await waitForCondition(() => {
+			await waitFor(() => {
 				return session.messages.some(
 					(m) =>
 						m.role === "custom" &&
@@ -463,7 +454,7 @@ describe("Task 7 (M2) — Background execution, session-bound delivery, drift wa
 			// User stops via agentTasks().stop(runId)
 			expect(agentTasks()?.stop(runId, { owner: session.sessionId, source: "user" }).ok).toBe(true);
 
-			await waitForCondition(() => {
+			await waitFor(() => {
 				const rec = readPersistedRunRecord(agentDir, session.sessionId, runId);
 				return rec?.status === "cancelled";
 			});

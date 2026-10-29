@@ -19,6 +19,7 @@ import {
 	pruneCheckpointRefs,
 	restoreCheckpoint,
 } from "../ext/checkpoints/index.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 type Exec = ExtensionAPI["exec"];
 
@@ -214,11 +215,6 @@ function makeCtx(
 }
 
 const appendedSubjects = (entries: SessionEntry[]) => listCheckpoints(entries).map((c) => c.subject);
-
-async function waitFor(condition: () => boolean): Promise<void> {
-	const deadline = Date.now() + 5000;
-	while (!condition() && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
-}
 
 // ── unit: pure helpers ───────────────────────────────────────────────────────
 

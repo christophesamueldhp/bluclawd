@@ -3,7 +3,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { pairingText } from "../ext/remote/message.ts";
 import { qrMatrix, renderQr } from "../ext/remote/qr.ts";
 import {
@@ -15,6 +15,7 @@ import {
 	serve,
 	serveState,
 } from "../ext/remote/tailscale.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 const SERVE_OFF = `Serve is not enabled on your tailnet.
 To enable, visit:
@@ -148,7 +149,7 @@ describe("remote control: tailscale and pairing text", () => {
 			chmodSync(wrapper, 0o755);
 			const failed = await serve(7878, [wrapper]).catch((error: unknown) => error);
 			expect(failed).toBeInstanceOf(EnableNeeded);
-			await vi.waitFor(() => expect(running()).toBe(false), { timeout: 3000, interval: 50 });
+			await waitFor(() => expect(running()).toBe(false));
 		} finally {
 			spawnSync("pkill", ["-f", marker]);
 			rmSync(dir, { recursive: true, force: true });

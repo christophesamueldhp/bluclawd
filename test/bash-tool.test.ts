@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
 import { formatTaskDuration } from "../ext/background-bash/bash-limits.ts";
 import { backgroundStartText, createBackgroundBashTool } from "../ext/background-bash/bash-tool.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 /** Operations whose runs the test ends; each call is recorded with its timeout. */
 function fakeOps() {
@@ -77,7 +78,7 @@ describe("timeouts", () => {
 		const { ops, calls } = fakeOps();
 		const { tool } = makeTool(ops);
 		const run = tool.execute("t1", { command: "echo hi" } as never, undefined, undefined, ctx);
-		await vi.waitFor(() => expect(calls.length).toBe(1));
+		await waitFor(() => expect(calls.length).toBe(1));
 		calls[0].finish(0);
 		await run;
 		// The foreground timeout is enforced by the detachable wrapper, not handed to the exec.
@@ -135,7 +136,7 @@ describe("timeouts", () => {
 		const { ops, calls } = fakeOps();
 		const { tool } = makeTool(ops);
 		const run = tool.execute("t5", { command: "npm run dev", timeout: 5000 } as never, undefined, undefined, ctx);
-		await vi.waitFor(() => expect(calls.length).toBe(1));
+		await waitFor(() => expect(calls.length).toBe(1));
 		// Handed straight to the exec, which kills at it.
 		expect(calls[0].timeout).toBe(5);
 		calls[0].finish(0);

@@ -1,4 +1,5 @@
 import { defineConfig } from "vitest/config";
+import { readinessMs } from "./test/helpers/heartbeats.ts";
 
 /**
  * Tests run against pi's real published package (a peer dependency,
@@ -9,7 +10,9 @@ export default defineConfig({
 	test: {
 		globals: true,
 		environment: "node",
-		testTimeout: 30000,
+		// A poll waits up to readinessMs (test/helpers/wait-for.ts), so a test outlasts it and the poll reports first.
+		testTimeout: 2 * readinessMs,
+		expect: { poll: { timeout: readinessMs } },
 		env: { PI_OFFLINE: "1" },
 		unstubEnvs: true,
 		reporters: process.env.GITHUB_ACTIONS ? ["dot", "github-actions"] : ["dot", "json"],

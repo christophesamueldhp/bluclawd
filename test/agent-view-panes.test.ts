@@ -16,6 +16,7 @@ import {
 	shutdownPlan,
 } from "../ext/agent-view/index.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 const plainTheme = {
 	fg: (_c: string, s: string) => s,
@@ -199,7 +200,7 @@ describe("agent view in pane mode", () => {
 		// Its pi saves the session as a stopped row on its way out; that row is what goes.
 		rows.splice(0, 1, { id: "stored-a", status: "stopped", cwd: HERE, sessionFile: "/s/pi-a.jsonl" });
 		view.handleInput(CTRL_X);
-		await vi.waitFor(() => expect(calls.slice(1)).toEqual([["delete", "stored-a"]]));
+		await waitFor(() => expect(calls.slice(1)).toEqual([["delete", "stored-a"]]));
 	});
 
 	it("ctrl+x twice on this terminal's own session moves it to a new one in agent view, then ends it", async () => {
@@ -237,7 +238,7 @@ describe("agent view in pane mode", () => {
 		expect(calls.map((c) => c[0])).toEqual(["start", "waitForView"]);
 		expect(closed()).toBe(0);
 		drawn();
-		await vi.waitFor(() => expect(calls.at(-1)).toEqual(["kill", "pi-self"]));
+		await waitFor(() => expect(calls.at(-1)).toEqual(["kill", "pi-self"]));
 		expect(calls.map((c) => c[0])).toEqual(["start", "waitForView", "switchTo", "unlist", "delete", "kill"]);
 	});
 
@@ -278,7 +279,7 @@ describe("agent view in pane mode", () => {
 		await view.onShow();
 		const text = view.render(100).join("\n");
 		view.render(100);
-		await vi.waitFor(() => expect(drawn).toHaveBeenCalledTimes(1));
+		await waitFor(() => expect(drawn).toHaveBeenCalledTimes(1));
 		expect(text).toContain("kept one");
 		expect(text).not.toContain("deleted one");
 		view.close();

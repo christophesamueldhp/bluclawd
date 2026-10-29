@@ -1,10 +1,11 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { type BackgroundExec, BackgroundJobRegistry, jobOutcome } from "../ext/background-bash/background-bash.ts";
 import { classifyExit } from "../ext/background-bash/exit-status.ts";
 import { taskExitSummary } from "../ext/background-bash/monitor-events.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 describe("classifyExit", () => {
 	it.each([
@@ -65,7 +66,7 @@ describe("background job outcome and summary", () => {
 		if (!job?.outputFile) throw new Error("no job");
 		const outputFile = job.outputFile;
 		// The trailer is written by the stream's end, after onExit; a fixed delay lost that race under load.
-		const file = await vi.waitFor(() => {
+		const file = await waitFor(() => {
 			const text = readFileSync(outputFile, "utf-8");
 			if (!text.endsWith("]\n")) throw new Error("trailer not written yet");
 			return text;
