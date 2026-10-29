@@ -42,11 +42,12 @@ describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => 
 	async function run(mode: string, stop: "abort" | "exit") {
 		const exec = reapDescendants(createLocalBashOperations({ shellPath: "/bin/bash" }).exec);
 		const abort = new AbortController();
-		// "exit" mode: the invoking shell returns at once, leaving its descendant behind.
+		// "exit" mode: the invoking shell returns once its descendant beats, leaving it behind.
 		const command = [process.execPath, descendants, mode, heartbeatPath, "reaper-probe", String(lifetimeMs)]
 			.map(quote)
 			.join(" ");
-		const settled = exec(stop === "exit" ? `${command} & sleep 0.5` : command, dir, {
+		const awaitBeat = `for _ in {1..500}; do [ -s ${quote(heartbeatPath)} ] && break; sleep 0.01; done`;
+		const settled = exec(stop === "exit" ? `${command} & ${awaitBeat}` : command, dir, {
 			onData: () => {},
 			signal: abort.signal,
 		}).catch(() => undefined);
