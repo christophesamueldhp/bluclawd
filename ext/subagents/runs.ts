@@ -33,7 +33,7 @@ export interface WorkspaceSnapshot {
 export interface SubagentRunRecord {
 	runId: string;
 	parentSessionId: string;
-	runtimeGeneration: number;
+	sessionEpoch: number;
 	parentTurnId: string;
 	originToolCallId: string;
 	originEntryId?: string;
@@ -110,7 +110,7 @@ export interface SubagentRunnerOutcome {
 
 export interface AdmitSubagentRunRequest<C = unknown> {
 	parentSessionId: string;
-	runtimeGeneration: number;
+	sessionEpoch: number;
 	parentTurnId: string;
 	originToolCallId: string;
 	originEntryId?: string;
@@ -231,7 +231,7 @@ export class SubagentRunScheduler<C = unknown> {
 		const record: SubagentRunRecord = {
 			runId,
 			parentSessionId: request.parentSessionId,
-			runtimeGeneration: request.runtimeGeneration,
+			sessionEpoch: request.sessionEpoch,
 			parentTurnId: request.parentTurnId,
 			originToolCallId: request.originToolCallId,
 			originEntryId: request.originEntryId,
@@ -360,36 +360,13 @@ export class SubagentRunScheduler<C = unknown> {
 		return true;
 	}
 
-	cancelRunsForSession(
-		parentSessionId: string,
-		source: SubagentStopSource = "session_invalidated",
-		reason = "Parent session changed or shut down",
-	): string[] {
-		const cancelled: string[] = [];
+	/** Cancels every live run `where` selects, as invalidated by the parent session. */
+	cancelRuns(where: (record: Readonly<SubagentRunRecord>) => boolean, reason: string): void {
 		for (const managed of this.runs.values()) {
-			if (managed.record.parentSessionId === parentSessionId && !isTerminalSubagentStatus(managed.record.status)) {
-				this.triggerStop(managed, source, reason);
-				cancelled.push(managed.record.runId);
-			}
-		}
-		return cancelled;
-	}
-
-	cancelRunsNotOnBranch(
-		parentSessionId: string,
-		activeEntryIds: ReadonlySet<string>,
-		reason = "Originating branch is no longer active",
-	): string[] {
-		const cancelled: string[] = [];
-		for (const managed of this.runs.values()) {
-			if (managed.record.parentSessionId !== parentSessionId) continue;
-			if (isTerminalSubagentStatus(managed.record.status)) continue;
-			if (managed.record.originEntryId && !activeEntryIds.has(managed.record.originEntryId)) {
+			if (!isTerminalSubagentStatus(managed.record.status) && where(managed.record)) {
 				this.triggerStop(managed, "session_invalidated", reason);
-				cancelled.push(managed.record.runId);
 			}
 		}
-		return cancelled;
 	}
 
 	private startManagedRun(managed: InternalManagedRun<C>): void {

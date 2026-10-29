@@ -28,7 +28,7 @@ function persistedRecord(overrides: Partial<SubagentRunRecord>): SubagentRunReco
 	return {
 		runId: "sub_done",
 		parentSessionId: "sess_main",
-		runtimeGeneration: 1,
+		sessionEpoch: 1,
 		parentTurnId: "turn_1",
 		originToolCallId: "call_1",
 		agentName: "explorer",
@@ -73,7 +73,7 @@ function setup(activeParentSessionId: string | undefined = "sess_main") {
 	const launch = (parentSessionId = "sess_main", taskSummary = "Scan auth") => {
 		const admitted = scheduler.admit({
 			parentSessionId,
-			runtimeGeneration: 1,
+			sessionEpoch: 1,
 			parentTurnId: "turn_1",
 			originToolCallId: `call_${Math.random().toString(36).slice(2, 8)}`,
 			agentName: "explorer",
@@ -195,7 +195,7 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 		const { scheduler, source } = setup();
 		const admitted = scheduler.admit({
 			parentSessionId: "sess_main",
-			runtimeGeneration: 1,
+			sessionEpoch: 1,
 			parentTurnId: "turn_1",
 			originToolCallId: "call_named",
 			name: "api",

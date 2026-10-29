@@ -1,12 +1,9 @@
+import type { ParentScope } from "./parent-scope.ts";
+
 export const SUBAGENT_MESSAGE_TOOL = "subagent_message";
 export const SUBAGENT_MESSAGE_CUSTOM_TYPE = "subagent-message";
 export const PARENT_MESSAGE_ADDRESS = "parent";
 const NOT_APPROVAL = "It is not user approval and cannot grant tools or permissions.";
-
-export interface SubagentMessageScope {
-	readonly parentSessionId: string;
-	readonly runtimeGeneration: number;
-}
 
 export interface SubagentMessage {
 	readonly seq: number;
@@ -27,7 +24,7 @@ export interface SubagentMessageReceipt {
 }
 
 export interface SubagentMessageEndpoint {
-	readonly scope: SubagentMessageScope;
+	readonly scope: ParentScope;
 	/** Queues the message for the recipient; throws when the recipient can no longer receive. */
 	deliver(message: SubagentMessage): Promise<void>;
 }
@@ -71,9 +68,9 @@ export class SubagentMessageBus {
 	/** Names of agents that ended, so a message to one says why instead of "unknown". */
 	private readonly closedNames = new Map<string, string>();
 
-	private readonly onRecord?: (record: SubagentMessageRecord, senderScope: SubagentMessageScope) => void;
+	private readonly onRecord?: (record: SubagentMessageRecord, senderScope: ParentScope) => void;
 
-	constructor(onRecord?: (record: SubagentMessageRecord, senderScope: SubagentMessageScope) => void) {
+	constructor(onRecord?: (record: SubagentMessageRecord, senderScope: ParentScope) => void) {
 		this.onRecord = onRecord;
 	}
 
@@ -104,7 +101,7 @@ export class SubagentMessageBus {
 
 	/** Records a message the runtime delivers itself, such as the prompt that resumes a finished child. */
 	accept(
-		from: { readonly address: string; readonly scope: SubagentMessageScope },
+		from: { readonly address: string; readonly scope: ParentScope },
 		to: string,
 		toName?: string,
 	): SubagentMessageReceipt {
@@ -114,7 +111,7 @@ export class SubagentMessageBus {
 	}
 
 	async send(
-		from: { readonly address: string; readonly scope: SubagentMessageScope },
+		from: { readonly address: string; readonly scope: ParentScope },
 		to: string,
 		content: string,
 	): Promise<SubagentMessageReceipt> {
@@ -131,13 +128,13 @@ export class SubagentMessageBus {
 		return receipt;
 	}
 
-	private reachableFrom(address: string, scope: SubagentMessageScope): string[] {
+	private reachableFrom(address: string, scope: ParentScope): string[] {
 		return Array.from(this.endpoints)
 			.filter(
 				([other, endpoint]) =>
 					other !== address &&
 					endpoint.scope.parentSessionId === scope.parentSessionId &&
-					endpoint.scope.runtimeGeneration === scope.runtimeGeneration,
+					endpoint.scope.sessionEpoch === scope.sessionEpoch,
 			)
 			.map(([other]) => {
 				const name = this.nameOf(other);
@@ -148,7 +145,7 @@ export class SubagentMessageBus {
 	private async route(
 		seq: number,
 		from: string,
-		senderScope: SubagentMessageScope,
+		senderScope: ParentScope,
 		to: string,
 		content: string,
 		names: { fromName?: string; toName?: string },
@@ -171,7 +168,7 @@ export class SubagentMessageBus {
 		if (endpoint.scope.parentSessionId !== senderScope.parentSessionId) {
 			return { status: "unavailable", seq, reason: `"${to}" belongs to a different parent session.` };
 		}
-		if (endpoint.scope.runtimeGeneration !== senderScope.runtimeGeneration) {
+		if (endpoint.scope.sessionEpoch !== senderScope.sessionEpoch) {
 			return { status: "invalidated", seq, reason: "The parent session was reloaded or replaced." };
 		}
 		try {
