@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { giveUp, promptKey, refused, sentText, settle, shownText } from "../daemon/remote/web/live.js";
+import { giveUp, promptKey, refused, sentText, settle, shownText } from "#remote-web/live.js";
 
 const assistant = (id: string, text: string, thinking?: string) => ({
 	kind: "assistant",

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { ATTEMPTS, fitSize, fits, IMAGE_MAX, isImageFile, keepAsIs } from "#remote-web/image.js";
 import { IMAGES_MAX, IMAGE_MAX as SERVER_IMAGE_MAX } from "../daemon/remote/http.ts";
-import { ATTEMPTS, fitSize, fits, IMAGE_MAX, isImageFile, keepAsIs } from "../daemon/remote/web/image.js";
 
 describe("a photo made small enough to send", () => {
 	it("keeps to the daemon's own limit", () => {

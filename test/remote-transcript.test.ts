@@ -3,6 +3,8 @@ import { appendFileSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { promptKey } from "#remote-web/live.js";
+import { resultSummary } from "#remote-web/output.js";
 import {
 	activeBranch,
 	DIFF_MAX,
@@ -16,8 +18,6 @@ import {
 	toolSummary,
 	transcriptFrom,
 } from "../daemon/remote/transcript.ts";
-import { promptKey } from "../daemon/remote/web/live.js";
-import { resultSummary } from "../daemon/remote/web/output.js";
 
 const jsonl = (...entries: object[]) => entries.map((entry) => JSON.stringify(entry)).join("\n");
 const msg = (id: string, parentId: string | null, message: object) => ({

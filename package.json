@@ -21,6 +21,12 @@
     ],
     "themes": ["./themes"]
   },
+  "imports": {
+    "#remote-web/*.js": {
+      "types": "./.types/remote-web/*.d.ts",
+      "default": "./daemon/remote/web/*.js"
+    }
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
@@ -40,7 +46,7 @@
   },
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc --noEmit && tsc -p daemon/remote/web",
+    "typecheck": "tsc -p daemon/remote/web --noEmit false --declaration --emitDeclarationOnly --outDir .types/remote-web && tsc --noEmit",
     "lint": "biome check .",
     "deadcode": "knip --production --include files",
     "lint:fix": "biome check --write ."

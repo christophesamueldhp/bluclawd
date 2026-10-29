@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { diffSummary, groupSummary, markerKind, resultSummary } from "../daemon/remote/web/output.js";
+import { diffSummary, groupSummary, markerKind, resultSummary } from "#remote-web/output.js";
 
 const numbered = (count: number) => Array.from({ length: count }, (_, i) => `line ${i + 1}`).join("\n");
 

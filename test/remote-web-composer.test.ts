@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { setNewOptions } from "../daemon/remote/web/composer.js";
+import { setNewOptions } from "#remote-web/composer.js";
 
 describe("new task options", () => {
 	it("toggles the controls and accessible label without clearing the task or directory", () => {

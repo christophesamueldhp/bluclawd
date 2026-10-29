@@ -10,7 +10,7 @@ import {
 	spanStyle,
 	tokens,
 	whereHtml,
-} from "../daemon/remote/web/statusbar.js";
+} from "#remote-web/statusbar.js";
 
 const now = Date.parse("2026-10-15T10:12:00Z");
 const report = {

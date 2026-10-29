@@ -3,9 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import photon from "@silvia-odwyer/photon-node";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { GRID, loaderHtml } from "#remote-web/mascot.js";
 import { type RemoteServer, startRemoteServer } from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
-import { GRID, loaderHtml } from "../daemon/remote/web/mascot.js";
 import { BODY_COLOR, EYE_COLOR, SOURCE } from "../ext/_shared/mascot.ts";
 import { ICONS, renderIcon, WEB_DIR } from "../scripts/pwa-icons.ts";
 

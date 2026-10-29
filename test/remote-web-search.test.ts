@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterSessions, fold, matchCommands } from "../daemon/remote/web/search.js";
+import { filterSessions, fold, matchCommands } from "#remote-web/search.js";
 
 const session = (id: string, label: string, cwd: string, detail: string) => ({
 	id,
