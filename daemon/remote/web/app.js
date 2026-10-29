@@ -6,11 +6,12 @@
  * updates arrive.
  */
 import { api, clearToken, getToken, pairLink, setToken, Unauthorized } from "./api.js";
+import { addPending, applyLatest, applyOlder, checkPending, endLive, forget, listed, openChat } from "./chat.js";
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
 import { ageAt, STATE_WORDS, sessionGroups, statusGlyph, successor, viewMode } from "./list.js";
-import { giveUp, promptKey, refused, sentText, settle, shownText } from "./live.js";
+import { refused, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 import { loaderHtml } from "./mascot.js";
 import { diffSummary, groupSummary, markerKind, resultSummary } from "./output.js";
@@ -40,7 +41,7 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.43";
+const VERSION = "0.0.44";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 
 function loadViewMode() {
@@ -118,20 +119,7 @@ const ERRORS = {
 
 const state = {
 	/** @type {Session[]} */ sessions: [],
-	/** @type {string | undefined} */ open: undefined,
-	/** @type {Message[]} */ messages: [],
-	/**
-	 * Prompts sent and not yet in the transcript. `text`: as the transcript will show it (see
-	 * promptKey); `prompt`: as typed, `images`: as sent. `started`: the session was seen working since.
-	 * `last`: the transcript's last message when it was sent.
-	 * @type {{ id: number, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string }[]}
-	 */
-	pending: [],
-	/** Images for the open session's next prompt. @type {Attachment[]} */
-	attachments: [],
-	/** Picked photos still being read into `attachments`. */
-	reading: 0,
-	/** The open session's reply in progress, streamed by its pane. @type {LiveSnapshot | undefined} */ live: undefined,
+	/** The chat open, none while the list shows. @type {import("./chat.js").Chat | undefined} */ chat: undefined,
 	/** @type {string[]} */ directories: [],
 	/** What a new session can start with. @type {import("./statusbar.js").ReportModel[]} */ models: [],
 	/** The new session's model, "provider/id": pi's default when empty. */
@@ -149,30 +137,11 @@ const state = {
 	 */
 	starting: undefined,
 	loaded: false,
-	messagesLoaded: false,
-	/** Older messages are left before the first one shown. */
-	more: false,
-	/** Older messages are on their way. */
-	loadingOlder: false,
 	online: true,
 	/** A terminal on the Mac shows pi: without one, every session is read only here. */
 	terminalOpen: true,
 	/** Show "Enable notifications". */
 	offerPush: false,
-	/** The open session's status sheet. */
-	sheetOpen: false,
-	/** Its pane's report: undefined while loading, null when it has sent none. @type {Report | null | undefined} */
-	report: undefined,
-	/** Stop was asked for and the session is still mid-turn. */
-	stopping: false,
-	/** The background tasks sheet. */
-	tasksSheet: false,
-	/** Each task's output as last fetched, while shown in the sheet. @type {Map<string, { lines?: string[], size?: number, loading?: boolean, error?: string }>} */
-	taskOutputs: new Map(),
-	/** The task whose Stop asks to be confirmed. @type {string | undefined} */
-	confirmStop: undefined,
-	/** Tasks asked to stop that the report still lists. @type {Set<string>} */
-	stoppingTasks: new Set(),
 	/** Paired in Safari: the Home Screen app is the one iOS notifies. */
 	homeScreenHint: false,
 	/** A new build's service worker took over: this page still runs the old one until it reloads. */
@@ -181,10 +150,6 @@ const state = {
 	phoneSheet: false,
 	/** Its Disconnect asks to be confirmed. */
 	confirmDisconnect: false,
-	/** The open session's new name is on its way. */
-	saving: false,
-	/** Its Delete asks to be confirmed. */
-	confirmDelete: false,
 	/** @type {string | undefined} */ error: undefined,
 };
 
@@ -200,23 +165,15 @@ let watchdog;
 /** Older messages load this far (px) ahead of the log's top, so they are usually there when it is reached. */
 const OLDER_MARGIN = 400;
 const OLDER_RETRY_MS = 2000;
-let messagesRequest = 0;
-let statusRequest = 0;
 /** pistatusline draws its lines this wide, the most it is asked for, so nothing of them is cut; the
  *  room its flex separators fill is taken out again (compactLines), and the bar scrolls sideways. */
 const STATUS_COLS = 200;
 /** The status bar's width in characters its pistatusline lines were last asked for. */
 /** Each session's commands for the reply box, as last fetched: they rarely change. @type {Map<string, import("./statusbar.js").Command[]>} */
 const commandsCache = new Map();
-/** The open session's commands were asked for since it opened. */
-let commandsAsked = false;
 const darkScheme = window.matchMedia("(prefers-color-scheme: dark)");
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let startTimer;
-/** The reply on screen has ended (or may have, while the stream was down): see settle(). */
-let liveEnded = false;
-/** @type {ReturnType<typeof setTimeout> | undefined} */
-let liveClear;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let errorTimer;
 /** Which view the DOM holds: "pair", "list" or "chat:<id>". */
@@ -227,42 +184,17 @@ let prepending = false;
 let olderObserver;
 /** Fetches a message's image as it nears the screen. @type {IntersectionObserver | undefined} */
 let pictureObserver;
-/**
- * The open session's images fetched so far, as data URLs (the CSP allows no blob: URL), by
- * pictureKey; the oldest go past PICTURES_MAX, and are fetched again if shown again.
- * @type {Map<string, string>}
- */
-const pictures = new Map();
 const PICTURES_MAX = 30;
-/** @type {Set<string>} */
-const picturesLoading = new Set();
-/** Not fetched again until the session is opened again. @type {Set<string>} */
-const picturesFailed = new Set();
 /** Keeps the log where it was as images change size (see bindChat). @type {ResizeObserver | undefined} */
 let pictureSizes;
 /** The log was scrolled to its end before its last change of size. */
 let stuck = true;
-let pendingId = 0;
-/**
- * The pane a resumed session's chat moved to: the replies still pending move with it.
- * @type {string | undefined}
- */
-let followed;
-/** The open chat was opened from the list, whose history entry "‹ Sessions" goes back to. */
-let backToList = false;
 /** A finger on the status sheet's thinking slider. */
 let sliding = false;
-/** The open chat's pi session, as last listed: its row may go, and the chat follows it to its next one. @type {string | undefined} */
-let openSessionId;
 /** The last notice a pane's report carried (its `at`): each shows once. @type {number | undefined} */
 let noticeAt;
 /** A name just given, shown until the list has it (see holdRename). @type {{ id: string, name: string, until: number } | undefined} */
 let renamed;
-/**
- * The open session's tool results asked for in full, by entry id: the text, or why it is not there.
- * @type {Map<string, { text?: string, truncated?: boolean, error?: string, loading?: boolean }>}
- */
-const outputs = new Map();
 /** The count on the app's badge; none set yet. */
 let badged = -1;
 /**
@@ -270,12 +202,6 @@ let badged = -1;
  * @type {string | undefined}
  */
 let notice;
-/**
- * The open session's turn ended, as of a list asked for at this time: the next transcript fetch
- * drops the prompts sent before then that it still lacks, which pi did not write as sent.
- * @type {number | undefined}
- */
-let turnEndedAt;
 
 /** @param {unknown} text */
 function esc(text) {
@@ -370,18 +296,14 @@ function showError(text) {
 async function loadSessions() {
 	try {
 		const asked = Date.now();
-		const was = state.sessions.find((s) => s.id === state.open)?.state;
-		const listed = await api.sessions();
-		state.sessions = listed.sessions;
-		state.terminalOpen = listed.terminalOpen !== false;
+		const chat = state.chat;
+		const was = chat && state.sessions.find((s) => s.id === chat.id)?.state;
+		const list = await api.sessions();
+		state.sessions = list.sessions;
+		state.terminalOpen = list.terminalOpen !== false;
 		holdRename();
-		const now = state.sessions.find((s) => s.id === state.open)?.state;
-		if (now === "working") {
-			for (const p of state.pending) if (p.sentAt < asked) p.started = true;
-		} else if (was === "working" && now !== undefined && now !== "needs") {
-			turnEndedAt = asked;
+		if (chat && state.chat === chat && listed(chat, was, state.sessions.find((s) => s.id === chat.id)?.state, asked))
 			void loadMessages();
-		}
 		state.loaded = true;
 		badge(state.sessions.filter((s) => s.state === "needs").length);
 		if (notice) showError(notice);
@@ -391,25 +313,25 @@ async function loadSessions() {
 			state.starting = undefined;
 			clearTimeout(startTimer);
 			// A task started from the list opens, unless another screen was opened meanwhile.
-			if (!state.open) {
+			if (!state.chat) {
 				location.hash = `#s/${encodeURIComponent(starting.pane)}`;
 				return;
 			}
 		}
 		// The open session under another row id (it quit on the Mac, or was opened there again): followed,
 		// without a history entry for the old one.
-		const open = state.sessions.find((s) => s.id === state.open);
-		if (open) openSessionId = open.sessionId;
-		else if (state.open) {
-			const next = successor(state.sessions, state.open, openSessionId);
+		const open = state.chat && state.sessions.find((s) => s.id === state.chat.id);
+		if (open) state.chat.openSessionId = open.sessionId;
+		else if (state.chat) {
+			const next = successor(state.sessions, state.chat.id, state.chat.openSessionId);
 			if (next) {
-				followed = next;
+				state.chat.next = next;
 				location.replace(`#s/${encodeURIComponent(next)}`);
 				return;
 			}
 		}
 		render();
-		if (!state.open) {
+		if (!state.chat) {
 			void loadDirectories();
 			void loadModels();
 		}
@@ -463,40 +385,20 @@ function waitForPane(pane) {
 		if (state.starting !== starting) return;
 		state.starting = undefined;
 		// What was sent reached no session.
-		state.pending = [];
+		if (state.chat) state.chat.pending = [];
 		showError(errorText("start_timeout"));
 	}, START_TIMEOUT_MS);
 	void loadSessions();
 }
 
 async function loadMessages() {
-	const id = state.open;
-	if (!id) return;
-	const request = ++messagesRequest;
+	const chat = state.chat;
+	if (!chat) return;
+	const request = ++chat.messagesRequest;
 	try {
-		const page = await api.messages(id);
-		if (state.open !== id || request !== messagesRequest) return;
-		/** @type {Message[]} */
-		const latest = page.messages;
-		// Older messages loaded above stay while the latest page follows on from them (it starts
-		// among them); after the session moved (a /tree or /fork, here or on the Mac) it does not, and replaces them.
-		const at = latest.length ? state.messages.findIndex((m) => m.id === latest[0].id) : -1;
-		if (at > 0) state.messages = [...state.messages.slice(0, at), ...latest];
-		else {
-			// A pending reply's count no longer includes the copies of its text that went with them.
-			const kept = new Set(latest.map((m) => m.id));
-			const gone = state.messages.filter((m) => !kept.has(m.id));
-			for (const p of state.pending) p.before -= userCount(gone, p.text);
-			state.messages = latest;
-			state.more = page.more;
-		}
-		state.messagesLoaded = true;
-		state.live = settle(state.live, liveEnded, latest);
-		// A sent prompt is pending until the transcript has one more copy of its text than when it was sent.
-		state.pending = state.pending.filter((p) => userCount(state.messages, p.text) <= p.before);
-		const ended = turnEndedAt;
-		turnEndedAt = undefined;
-		if (ended !== undefined) state.pending = state.pending.filter((p) => p.sentAt >= ended);
+		const page = await api.messages(chat.id);
+		if (state.chat !== chat || request !== chat.messagesRequest) return;
+		applyLatest(chat, page);
 		render();
 	} catch (error) {
 		loadError(error);
@@ -505,30 +407,22 @@ async function loadMessages() {
 
 /** The page before the first message shown, put above it; again while the top stays in view. */
 async function loadOlder() {
-	const id = state.open;
-	const first = state.messages[0];
+	const chat = state.chat;
+	const first = chat?.messages[0];
 	// An old session file's messages have no ids to page by.
-	if (!id || !first?.id || !state.more || state.loadingOlder) return;
-	state.loadingOlder = true;
+	if (!chat || !first?.id || !chat.more || chat.loadingOlder) return;
+	chat.loadingOlder = true;
 	render();
 	let failed = false;
 	try {
-		const page = await api.messages(id, first.id);
-		// Not after a refresh that replaced the log meanwhile: this page would be another branch's.
-		if (state.open === id && state.messages[0]?.id === first.id) {
-			/** @type {Message[]} */
-			const older = page.messages;
-			for (const p of state.pending) p.before += userCount(older, p.text);
-			state.messages = [...older, ...state.messages];
-			state.more = page.more;
-			prepending = true;
-		}
+		const page = await api.messages(chat.id, first.id);
+		if (state.chat === chat && applyOlder(chat, first, page)) prepending = true;
 	} catch (error) {
 		failed = true;
 		loadError(error);
 	}
-	if (state.open !== id) return;
-	state.loadingOlder = false;
+	if (state.chat !== chat) return;
+	chat.loadingOlder = false;
 	render();
 	// The observer only reports a change: a short or dropped page can leave the top in view, and so
 	// can a failed one, tried again a little later so that it does not repeat as fast as it fails.
@@ -536,20 +430,20 @@ async function loadOlder() {
 		if ($("#scroll").scrollTop < OLDER_MARGIN) void loadOlder();
 	} else {
 		setTimeout(() => {
-			if (state.open === id && $("#scroll")?.scrollTop < OLDER_MARGIN) void loadOlder();
+			if (state.chat === chat && $("#scroll")?.scrollTop < OLDER_MARGIN) void loadOlder();
 		}, OLDER_RETRY_MS);
 	}
 }
 
 /** For the status bar too, so whenever a chat is open. */
 async function loadStatus() {
-	const id = state.open;
-	if (!id) return;
-	const request = ++statusRequest;
+	const chat = state.chat;
+	if (!chat) return;
+	const request = ++chat.statusRequest;
 	/** @type {Report | null} */
 	let report;
 	try {
-		report = await api.status(id, STATUS_COLS);
+		report = await api.status(chat.id, STATUS_COLS);
 	} catch (error) {
 		if (!(error instanceof Error && error.message === "no_status")) {
 			loadError(error);
@@ -557,15 +451,15 @@ async function loadStatus() {
 		}
 		report = null;
 	}
-	if (state.open !== id || request !== statusRequest) return;
-	state.report = report;
+	if (state.chat !== chat || request !== chat.statusRequest) return;
+	chat.report = report;
 	// A pane has them once it has reported.
-	if (report && !commandsAsked) {
-		commandsAsked = true;
+	if (report && !chat.commandsAsked) {
+		chat.commandsAsked = true;
 		void loadCommands();
 	}
-	for (const task of state.stoppingTasks) {
-		if (!report?.tasks?.some((t) => t.id === task)) state.stoppingTasks.delete(task);
+	for (const task of chat.stoppingTasks) {
+		if (!report?.tasks?.some((t) => t.id === task)) chat.stoppingTasks.delete(task);
 	}
 	// Why the pane did not run a slash command sent from here.
 	const skipped = report?.notice;
@@ -579,12 +473,12 @@ async function loadStatus() {
 
 /** The open session's commands, for the reply box's suggestions; none until its pane reports them. */
 async function loadCommands() {
-	const id = state.open;
-	if (!id) return;
+	const chat = state.chat;
+	if (!chat) return;
 	try {
-		const commands = await api.commands(id);
-		commandsCache.set(id, commands);
-		if (state.open === id) render();
+		const commands = await api.commands(chat.id);
+		commandsCache.set(chat.id, commands);
+		if (state.chat === chat) render();
 	} catch (error) {
 		// Only suggestions: a failure leaves the ones cached, and the next open asks again.
 		if (error instanceof Unauthorized) handleError(error);
@@ -626,19 +520,15 @@ function markStatuslineEnd(bar) {
 	bar.classList.toggle("end", bar.scrollLeft + bar.clientWidth >= bar.scrollWidth - 1);
 }
 
-/** @param {Message[]} messages @param {string} text */
-function userCount(messages, text) {
-	// Trimmed: a prompt starting with @ reaches pi with a space before it.
-	return messages.filter((m) => m.kind === "user" && sentText(m.text ?? "") === text).length;
-}
-
 /** The reply on screen stays until a transcript fetch has it, which pi may not have written yet. */
-function endLive() {
-	clearTimeout(liveClear);
-	liveEnded = true;
-	liveClear = setTimeout(() => {
-		state.live = undefined;
-		render();
+function replyEnded() {
+	const chat = state.chat;
+	if (!chat) return;
+	clearTimeout(chat.liveClear);
+	endLive(chat);
+	chat.liveClear = setTimeout(() => {
+		chat.live = undefined;
+		if (state.chat === chat) render();
 	}, LIVE_CLEAR_MS);
 }
 
@@ -665,7 +555,7 @@ function closeStream() {
 function connect() {
 	closeStream();
 	if (!getToken() || document.visibilityState === "hidden") return;
-	const current = api.events(state.open);
+	const current = api.events(state.chat?.id);
 	source = current;
 	// A sleeping Mac leaves the connection hanging without an error, so the timer starts with every stream.
 	offlineTimer = setTimeout(() => setOnline(false), OFFLINE_AFTER_MS);
@@ -683,7 +573,7 @@ function connect() {
 		setOnline(true);
 		void checkPush();
 		// Its end may have been missed while the stream was down; one still streaming is sent again at once.
-		if (state.live) endLive();
+		if (state.chat?.live) replyEnded();
 		void loadSessions();
 		void loadMessages();
 		void loadStatus();
@@ -699,20 +589,21 @@ function connect() {
 	current.addEventListener("live", (/** @type {MessageEvent} */ event) => {
 		alive();
 		const { sessionId, live } = JSON.parse(event.data);
-		if (sessionId !== state.open) return;
+		const chat = state.chat;
+		if (!chat || sessionId !== chat.id) return;
 		if (!live) {
-			endLive();
+			replyEnded();
 			void loadMessages();
 			return;
 		}
-		clearTimeout(liveClear);
-		liveEnded = false;
-		state.live = live;
+		clearTimeout(chat.liveClear);
+		chat.liveEnded = false;
+		chat.live = live;
 		render();
 	});
 	current.addEventListener("status", (/** @type {MessageEvent} */ event) => {
 		alive();
-		if (JSON.parse(event.data).sessionId !== state.open) return;
+		if (!state.chat || JSON.parse(event.data).sessionId !== state.chat.id) return;
 		void loadStatus();
 	});
 	current.addEventListener("ping", alive);
@@ -885,7 +776,7 @@ function toolHtml(name, summary, result, key, running = false) {
 		return `<div class="${kind}">${call}${outHtml([diffSummary(added, removed)])}
 ${diffHtml(result.diff, result.diffTruncated)}</div>${picturesHtml(result)}`;
 	}
-	const full = outputs.get(result.id);
+	const full = state.chat.outputs.get(result.id);
 	const text = shownText(full?.text ?? result.text ?? "", result.images);
 	const cut = full?.text !== undefined ? full.truncated : result.truncated;
 	const out = outHtml(resultSummary(name, { text, ok: result.ok, truncated: cut }));
@@ -914,9 +805,9 @@ function fullOutputHtml(result, full) {
  * @param {Session | undefined} session
  */
 function logParts(session) {
-	const calls = new Set(state.messages.flatMap((m) => (m.tools ?? []).map((t) => t.id)));
-	const running = new Set((state.live?.tools ?? []).filter((t) => t.running).map((t) => t.id));
-	const live = state.live ? liveHtml(state.live, calls) : "";
+	const calls = new Set(state.chat.messages.flatMap((m) => (m.tools ?? []).map((t) => t.id)));
+	const running = new Set((state.chat.live?.tools ?? []).filter((t) => t.running).map((t) => t.id));
+	const live = state.chat.live ? liveHtml(state.chat.live, calls) : "";
 	const pending = pendingHtml();
 	// The reply in progress replaces the working line once it shows something.
 	const streaming = live !== "" || running.size > 0;
@@ -926,7 +817,7 @@ function logParts(session) {
 			: "";
 	let msgs = transcriptHtml(calls, running);
 	if (!msgs && !live && !pending && !working) {
-		msgs = state.messagesLoaded ? `<p class="empty">Nothing in this session yet.</p>` : loaderHtml();
+		msgs = state.chat.messagesLoaded ? `<p class="empty">Nothing in this session yet.</p>` : loaderHtml();
 	}
 	return { msgs, live, pending, working };
 }
@@ -935,7 +826,7 @@ function logParts(session) {
 function transcriptHtml(calls, running) {
 	/** @type {Map<string, Message>} */
 	const results = new Map();
-	for (const m of state.messages) if (m.kind === "toolResult" && m.toolCallId) results.set(m.toolCallId, m);
+	for (const m of state.chat.messages) if (m.kind === "toolResult" && m.toolCallId) results.set(m.toolCallId, m);
 	const parts = [];
 	// Finished calls in a row, and the thinking between them, fold into one line (see groupHtml).
 	/** @type {string[]} */
@@ -950,8 +841,8 @@ function transcriptHtml(calls, running) {
 		names = [];
 	};
 	// The session's start is shown only once no older messages are left to load.
-	let prompted = state.more;
-	for (const m of state.messages) {
+	let prompted = state.chat.more;
+	for (const m of state.chat.messages) {
 		// A call's result shows in its call's block, and a hidden marker not at all: neither ends the run.
 		const ofCall = m.kind === "toolResult" && m.toolCallId && calls.has(m.toolCallId);
 		const hidden = m.kind === "marker" && markerKind(m.text ?? "", !prompted) === "hidden";
@@ -1013,7 +904,7 @@ function thinkingBlock(thinking, key) {
 
 /** Each sent prompt's images show large, from what was sent (see paintPending). */
 function pendingHtml() {
-	return state.pending
+	return state.chat.pending
 		.map(({ id, prompt, images }) => {
 			const buttons = images.map(
 				(_, index) =>
@@ -1105,7 +996,7 @@ function usageHtml(usage) {
 
 /** @param {Session | undefined} session */
 function sheetHtml(session) {
-	const report = state.report;
+	const report = state.chat.report;
 	const pinned = session?.band === "pinned";
 	const pin = session
 		? `<button class="icon-btn${pinned ? " on" : ""}" id="pin" aria-label="${pinned ? "Unpin" : "Pin to the top"}" aria-pressed="${pinned}">${pinned ? ICONS.pinned : ICONS.pin}</button>`
@@ -1131,7 +1022,7 @@ function renameHtml(session) {
 /** For a stored session (none runs it), Delete, which asks first. @param {Session | undefined} session */
 function manageHtml(session) {
 	if (!session || session.alive) return "";
-	const remove = state.confirmDelete
+	const remove = state.chat.confirmDelete
 		? `<div class="confirm-delete"><span>Delete it from the list? Its session file stays on the Mac.</span>
 <button class="unpair cancel" id="delete-cancel">Cancel</button><button class="unpair" id="delete-confirm">Delete</button></div>`
 		: `<button class="action danger" id="delete">Delete<small>Off the list; its session file stays on the Mac.</small></button>`;
@@ -1142,12 +1033,12 @@ const TASK_KINDS = { shell: "Shell", monitor: "Monitor", agent: "Agent" };
 
 /** The pane's background tasks, as /tasks lists them: each one's output a tap away, and Stop, confirmed in place. */
 function tasksHtml() {
-	const tasks = state.report?.tasks ?? [];
+	const tasks = state.chat.report?.tasks ?? [];
 	const now = Date.now();
 	const rows = tasks.map((task) => {
 		const id = esc(task.id);
-		const output = state.taskOutputs.get(task.id);
-		const stopping = state.stoppingTasks.has(task.id);
+		const output = state.chat.taskOutputs.get(task.id);
+		const stopping = state.chat.stoppingTasks.has(task.id);
 		const kind = `${TASK_KINDS[task.kind] ?? task.kind}${task.foreground ? " · foreground" : ""}${task.status && task.status !== "running" ? ` · ${task.status}` : ""}${task.model ? ` · ${task.model}` : ""}`;
 		const shown = output?.lines
 			? `<pre class="task-out">${esc(output.lines.join("\n") || "(No output yet)")}</pre>`
@@ -1158,7 +1049,7 @@ function tasksHtml() {
 			? `<button class="task-btn" data-output="${id}"${output?.loading ? " disabled" : ""}>${output?.loading ? "Loading…" : output?.lines ? "Hide output" : "Output"}</button>`
 			: "";
 		const stop =
-			state.confirmStop === task.id
+			state.chat.confirmStop === task.id
 				? `<div class="confirm-delete"><span>Stop this task?</span><button class="unpair cancel" data-stop-cancel>Cancel</button><button class="unpair" data-stop-confirm="${id}">Stop</button></div>`
 				: `<button class="task-btn danger" data-stop="${id}"${stopping ? " disabled" : ""}>${stopping ? "Stopping…" : "Stop"}</button>`;
 		return `<li class="task"><div class="task-head"><span class="task-kind">${esc(kind)}</span><span class="task-age">${esc(elapsedText(task.startedAt, now))}</span></div>
@@ -1171,7 +1062,7 @@ ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}${rows.length ? 
 // ---- render ----
 
 function render() {
-	const view = !getToken() ? "pair" : state.open ? `chat:${state.open}` : "list";
+	const view = !getToken() ? "pair" : state.chat ? `chat:${state.chat.id}` : "list";
 	if (view !== shown) {
 		shown = view;
 		closePicker();
@@ -1385,7 +1276,7 @@ function pickNewModel() {
  * @param {string} key its `data-pick`
  */
 function pickSetting(key) {
-	const report = state.report;
+	const report = state.chat.report;
 	if (!report) return;
 	if (key === "model") {
 		const current = String(
@@ -1395,7 +1286,7 @@ function pickSetting(key) {
 			{ title: "Model", groups: modelGroups(report.models, (_m, index) => String(index)), value: current },
 			(value) => {
 				if (value === current) return;
-				state.report = { ...report, model: report.models[Number(value)] };
+				state.chat.report = { ...report, model: report.models[Number(value)] };
 				render();
 				void switchModel(value);
 			},
@@ -1404,7 +1295,7 @@ function pickSetting(key) {
 		const options = TRUST.map(([value, , label]) => ({ value, label }));
 		openPicker({ title: "Trust", groups: [{ options }], value: report.trust ?? "" }, (trust) => {
 			if (trust === report.trust) return;
-			state.report = { ...report, trust };
+			state.chat.report = { ...report, trust };
 			render();
 			void switchSetting((id) => api.setTrust(id, trust));
 		});
@@ -1417,7 +1308,7 @@ function pickSetting(key) {
  * @param {number} index @param {boolean} send
  */
 function slideThinking(index, send) {
-	const report = state.report;
+	const report = state.chat.report;
 	const level = report?.thinkingLevels?.[index];
 	if (!report || level === undefined) return;
 	sliding = !send;
@@ -1434,29 +1325,29 @@ function slideThinking(index, send) {
 		render();
 		return;
 	}
-	state.report = { ...report, thinkingLevel: level };
+	state.chat.report = { ...report, thinkingLevel: level };
 	render();
 	void switchSetting((id) => api.setThinking(id, level));
 }
 
 function updateChat() {
-	const session = state.sessions.find((s) => s.id === state.open);
+	const session = state.sessions.find((s) => s.id === state.chat.id);
 	$("#title").textContent = session?.label ?? "";
 	// Mid-turn, a dialog waiting on an answer included.
 	const turn = session?.state === "working" || session?.state === "needs";
-	if (!turn) state.stopping = false;
+	if (!turn) state.chat.stopping = false;
 	const stop = $("#stop");
 	stop.hidden = !turn || !state.terminalOpen;
-	stop.disabled = state.stopping;
-	stop.classList.toggle("busy", state.stopping);
+	stop.disabled = state.chat.stopping;
+	stop.classList.toggle("busy", state.chat.stopping);
 	const bar = $("#statusbar");
-	const lines = state.report?.statusline?.lines;
+	const lines = state.chat.report?.statusline?.lines;
 	// The user's own pistatusline, as on the Mac; else the bar's own reading of the report.
 	if (lines) {
 		paintStatusline(bar, lines);
 		markStatuslineEnd(bar);
 	} else {
-		const barNow = barHtml(state.report, session && shortPath(session.cwd));
+		const barNow = barHtml(state.chat.report, session && shortPath(session.cwd));
 		if (bar.dataset.html !== barNow) {
 			bar.classList.remove("pistatusline");
 			bar.innerHTML = barNow;
@@ -1464,7 +1355,7 @@ function updateChat() {
 			bar.hidden = barNow === "";
 		}
 	}
-	const tasks = state.report?.tasks?.length ?? 0;
+	const tasks = state.chat.report?.tasks?.length ?? 0;
 	const pill = $("#tasks-pill");
 	pill.hidden = tasks === 0;
 	const pillNow = `<span>${ICONS.tasks}${tasks}</span>`;
@@ -1486,8 +1377,8 @@ function updateChat() {
 	}
 	// Its height stays the same while loading, so only what is put above moves the log.
 	const older = $("#older");
-	older.hidden = !state.more;
-	older.textContent = state.loadingOlder ? "Loading…" : "";
+	older.hidden = !state.chat.more;
+	older.textContent = state.chat.loadingOlder ? "Loading…" : "";
 	const parts = logParts(session);
 	const msgs = updatePart($("#msgs"), parts.msgs);
 	if (msgs) showPictures($("#msgs"));
@@ -1506,12 +1397,12 @@ function updateChat() {
 	updateSheet(session);
 	const text = $("#text");
 	text.disabled = closed;
-	$(".send").disabled = closed || state.reading > 0;
+	$(".send").disabled = closed || state.chat.reading > 0;
 	const attach = $("#attach");
 	const file = $("#file");
-	file.disabled = closed || state.attachments.length + state.reading >= ATTACH_MAX;
-	attach.classList.toggle("busy", state.reading > 0);
-	file.setAttribute("aria-label", state.reading ? "Reading the photos…" : "Attach photos");
+	file.disabled = closed || state.chat.attachments.length + state.chat.reading >= ATTACH_MAX;
+	attach.classList.toggle("busy", state.chat.reading > 0);
+	file.setAttribute("aria-label", state.chat.reading ? "Reading the photos…" : "Attach photos");
 	text.placeholder = !closed ? "Reply" : session?.alive ? "Read only" : "Disconnected";
 	updateThumbs();
 	updateCommands();
@@ -1520,7 +1411,7 @@ function updateChat() {
 /** The session's commands for what the reply box starts with (matchCommands), above it; none reported, none shown. */
 function updateCommands() {
 	const list = $("#commands");
-	const found = matchCommands(state.open ? commandsCache.get(state.open) : undefined, $("#text").value);
+	const found = matchCommands(commandsCache.get(state.chat.id), $("#text").value);
 	const html = found
 		.map(
 			(c) =>
@@ -1560,7 +1451,7 @@ function updatePart(part, html) {
 /** The images for the next prompt, above the composer, each with its remove button. */
 function updateThumbs() {
 	const thumbs = $("#thumbs");
-	const html = state.attachments
+	const html = state.chat.attachments
 		.map(
 			(a, i) =>
 				`<span class="thumb"><img src="${esc(a.thumb)}" alt="Image ${i + 1}"><button type="button" class="remove" data-index="${i}" aria-label="Remove image ${i + 1}">✕</button></span>`,
@@ -1575,12 +1466,12 @@ function updateThumbs() {
 /** Rebuilt only when it changes, so an open model picker is not reset under the finger. @param {Session | undefined} session */
 function updateSheet(session) {
 	const sheet = $("#sheet");
-	const open = state.sheetOpen || state.tasksSheet;
+	const open = state.chat.sheetOpen || state.chat.tasksSheet;
 	sheet.hidden = !open;
 	$("#backdrop").hidden = !open;
 	if (!open) return;
-	sheet.setAttribute("aria-label", state.tasksSheet ? "Background tasks" : "Session status");
-	if (state.tasksSheet) {
+	sheet.setAttribute("aria-label", state.chat.tasksSheet ? "Background tasks" : "Session status");
+	if (state.chat.tasksSheet) {
 		const html = tasksHtml();
 		if (sheet.dataset.html === html) return;
 		sheet.innerHTML = html;
@@ -1596,7 +1487,7 @@ function updateSheet(session) {
 	// Not under a finger on the thinking slider: a new one would drop the drag.
 	if (!sliding) updatePart($("#sheet-status"), sheetHtml(session));
 	updatePart($("#sheet-manage"), manageHtml(session));
-	$("#rename-save").disabled = state.saving;
+	$("#rename-save").disabled = state.chat.saving;
 }
 
 /** @param {{ code: string } | { secret: string } | { handoff: string }} credential */
@@ -1889,24 +1780,24 @@ function bindChat() {
 	$("#thumbs").addEventListener("click", (/** @type {Event} */ event) => {
 		const remove = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".remove"));
 		if (!remove) return;
-		state.attachments.splice(Number(remove.dataset.index), 1);
+		state.chat.attachments.splice(Number(remove.dataset.index), 1);
 		render();
 	});
 	$("#stop").addEventListener("click", async () => {
-		const id = state.open;
-		if (!id || state.stopping) return;
-		state.stopping = true;
+		const chat = state.chat;
+		if (!chat || chat.stopping) return;
+		chat.stopping = true;
 		render();
 		try {
-			await api.abort(id);
+			await api.abort(chat.id);
 		} catch (error) {
-			state.stopping = false;
+			chat.stopping = false;
 			handleError(error);
 		}
 	});
 	// Back to the list's own entry, rather than a new one after this chat's.
 	$(".back").addEventListener("click", (/** @type {Event} */ event) => {
-		if (!backToList) return;
+		if (!state.chat?.backToList) return;
 		event.preventDefault();
 		history.back();
 	});
@@ -1930,13 +1821,13 @@ function bindChat() {
 			slideThinking(Number(/** @type {HTMLElement} */ (target.closest("[data-level]")).dataset.level), true);
 		else if (target.closest("#pin")) void togglePin();
 		else if (target.closest("#delete, #delete-cancel")) {
-			state.confirmDelete = target.closest("#delete") !== null;
+			state.chat.confirmDelete = target.closest("#delete") !== null;
 			render();
 		} else if (target.closest("#delete-confirm")) void deleteSession();
 		else if (target.closest("[data-output]"))
 			void toggleTaskOutput(/** @type {HTMLElement} */ (target.closest("[data-output]")).dataset.output ?? "");
 		else if (target.closest("[data-stop], [data-stop-cancel]")) {
-			state.confirmStop = /** @type {HTMLElement | null} */ (target.closest("[data-stop]"))?.dataset.stop;
+			state.chat.confirmStop = /** @type {HTMLElement | null} */ (target.closest("[data-stop]"))?.dataset.stop;
 			render();
 		} else if (target.closest("[data-stop-confirm]"))
 			void stopTask(/** @type {HTMLElement} */ (target.closest("[data-stop-confirm]")).dataset.stopConfirm ?? "");
@@ -1966,17 +1857,17 @@ function bindChat() {
 		if (!pic) return;
 		const url = pic.dataset.pending
 			? pendingPicture(pic)
-			: pictures.get(pictureKey(pic.dataset.entry ?? "", pic.dataset.index ?? ""));
+			: state.chat.pictures.get(pictureKey(pic.dataset.entry ?? "", pic.dataset.index ?? ""));
 		if (url) openViewer(url);
 	});
 }
 
 /** The bar's report shows until the fresh one is in. */
 function openSheet() {
-	state.sheetOpen = true;
-	state.tasksSheet = false;
+	state.chat.sheetOpen = true;
+	state.chat.tasksSheet = false;
 	state.error = undefined;
-	state.confirmDelete = false;
+	state.chat.confirmDelete = false;
 	// A fresh name field, holding the name the session has now.
 	$("#sheet").dataset.html = "";
 	render();
@@ -1984,65 +1875,65 @@ function openSheet() {
 }
 
 function closeSheet() {
-	state.sheetOpen = false;
-	state.confirmDelete = false;
-	state.tasksSheet = false;
-	state.confirmStop = undefined;
-	state.taskOutputs.clear();
+	state.chat.sheetOpen = false;
+	state.chat.confirmDelete = false;
+	state.chat.tasksSheet = false;
+	state.chat.confirmStop = undefined;
+	state.chat.taskOutputs.clear();
 	render();
 }
 
 /** Its list is the report's, which the pane sends again while the chat is open. */
 function openTasks() {
-	state.tasksSheet = true;
-	state.sheetOpen = false;
+	state.chat.tasksSheet = true;
+	state.chat.sheetOpen = false;
 	state.error = undefined;
-	state.confirmStop = undefined;
-	state.taskOutputs.clear();
+	state.chat.confirmStop = undefined;
+	state.chat.taskOutputs.clear();
 	render();
 }
 
 /** A task's last lines under it, or hidden again. @param {string} taskId */
 async function toggleTaskOutput(taskId) {
-	const id = state.open;
-	if (!id || state.taskOutputs.get(taskId)?.loading) return;
-	if (state.taskOutputs.get(taskId)?.lines) {
-		state.taskOutputs.delete(taskId);
+	const chat = state.chat;
+	if (!chat || chat.taskOutputs.get(taskId)?.loading) return;
+	if (chat.taskOutputs.get(taskId)?.lines) {
+		chat.taskOutputs.delete(taskId);
 		render();
 		return;
 	}
-	state.taskOutputs.set(taskId, { loading: true });
+	chat.taskOutputs.set(taskId, { loading: true });
 	render();
 	try {
-		const { lines, size } = await api.taskOutput(id, taskId);
-		if (state.open === id && state.tasksSheet) state.taskOutputs.set(taskId, { lines, size });
+		const { lines, size } = await api.taskOutput(chat.id, taskId);
+		if (chat.tasksSheet) chat.taskOutputs.set(taskId, { lines, size });
 	} catch (error) {
 		if (error instanceof Unauthorized) return handleError(error);
 		const code = error instanceof Error ? error.message : String(error);
-		state.taskOutputs.set(taskId, { error: error instanceof TypeError ? "unreachable" : code });
+		chat.taskOutputs.set(taskId, { error: error instanceof TypeError ? "unreachable" : code });
 	}
 	render();
 }
 
 /** As /tasks' `x` does: the model is told. The task stays listed until the pane's next report. @param {string} taskId */
 async function stopTask(taskId) {
-	const id = state.open;
-	state.confirmStop = undefined;
-	if (!id) return;
-	state.stoppingTasks.add(taskId);
+	const chat = state.chat;
+	if (!chat) return;
+	chat.confirmStop = undefined;
+	chat.stoppingTasks.add(taskId);
 	render();
 	try {
-		await api.stopTask(id, taskId);
+		await api.stopTask(chat.id, taskId);
 	} catch (error) {
-		state.stoppingTasks.delete(taskId);
+		chat.stoppingTasks.delete(taskId);
 		handleError(error);
 	}
 }
 
 /** The pane reports the switch within a heartbeat, which refreshes the sheet. @param {string} value */
 async function switchModel(value) {
-	const id = state.open;
-	const model = state.report?.models[Number(value)];
+	const id = state.chat?.id;
+	const model = state.chat?.report?.models[Number(value)];
 	if (!id || !model) return;
 	try {
 		await api.setModel(id, model.provider, model.id);
@@ -2055,7 +1946,7 @@ async function switchModel(value) {
 
 /** The thinking level or trust mode, as a model switch: the pane reports the change. @param {(id: string) => Promise<unknown>} call */
 async function switchSetting(call) {
-	const id = state.open;
+	const id = state.chat?.id;
 	if (!id) return;
 	try {
 		await call(id);
@@ -2068,15 +1959,16 @@ async function switchSetting(call) {
 
 /** The name in the sheet's field, shown at once: a pane takes it on its next heartbeat (see holdRename). */
 async function rename() {
-	const id = state.open;
+	const chat = state.chat;
 	const field = $("#rename");
 	const name = field?.value.trim() ?? "";
-	if (!id || state.saving || name === state.sessions.find((s) => s.id === id)?.label) return;
+	if (!chat || chat.saving || name === state.sessions.find((s) => s.id === chat.id)?.label) return;
 	if (!name) {
 		showError(errorText("invalid_name"));
 		return;
 	}
-	state.saving = true;
+	const id = chat.id;
+	chat.saving = true;
 	render();
 	try {
 		await api.rename(id, name);
@@ -2086,13 +1978,13 @@ async function rename() {
 	} catch (error) {
 		handleError(error);
 	} finally {
-		state.saving = false;
+		chat.saving = false;
 		render();
 	}
 }
 
 async function togglePin() {
-	const id = state.open;
+	const id = state.chat?.id;
 	const session = state.sessions.find((s) => s.id === id);
 	if (!id || !session) return;
 	try {
@@ -2105,39 +1997,39 @@ async function togglePin() {
 
 /** A stored session off the list (its file stays), and back to the list. */
 async function deleteSession() {
-	const id = state.open;
-	if (!id) return;
-	state.confirmDelete = false;
+	const chat = state.chat;
+	if (!chat) return;
+	chat.confirmDelete = false;
 	try {
-		await api.deleteSession(id);
+		await api.deleteSession(chat.id);
 	} catch (error) {
 		handleError(error);
 		return;
 	}
-	if (state.open !== id) return;
+	if (state.chat !== chat) return;
 	closeSheet();
 	// As "‹ Sessions" goes: to the list's own entry when the chat was opened from it.
-	if (backToList) history.back();
+	if (chat.backToList) history.back();
 	else location.hash = "";
 }
 
 /** A cut-short tool result's whole output, into its block in place of the cut one. @param {string} entry */
 async function loadOutput(entry) {
-	const id = state.open;
-	if (!id || outputs.get(entry)?.loading) return;
-	outputs.set(entry, { loading: true });
+	const chat = state.chat;
+	if (!chat || chat.outputs.get(entry)?.loading) return;
+	chat.outputs.set(entry, { loading: true });
 	render();
 	try {
-		const { text, truncated } = await api.output(id, entry);
-		if (state.open !== id) return;
-		outputs.set(entry, { text, truncated });
+		const { text, truncated } = await api.output(chat.id, entry);
+		if (state.chat !== chat) return;
+		chat.outputs.set(entry, { text, truncated });
 	} catch (error) {
 		if (error instanceof Unauthorized) {
 			handleError(error);
 			return;
 		}
-		if (state.open !== id) return;
-		outputs.set(entry, { error: failure(error) });
+		if (state.chat !== chat) return;
+		chat.outputs.set(entry, { error: failure(error) });
 	}
 	render();
 }
@@ -2148,7 +2040,8 @@ async function loadOutput(entry) {
  * @param {File[]} files
  */
 async function attach(files) {
-	const id = state.open;
+	const chat = state.chat;
+	if (!chat) return;
 	/** @type {string[]} */
 	const problems = [];
 	const images = files.filter((file) => {
@@ -2156,43 +2049,43 @@ async function attach(files) {
 		problems.push(`“${file.name}” is not a photo: only images can be attached.`);
 		return false;
 	});
-	const room = ATTACH_MAX - state.attachments.length;
+	const room = ATTACH_MAX - chat.attachments.length;
 	if (images.length > room) problems.push(errorText("too_many_images"));
 	const picked = images.slice(0, Math.max(room, 0));
-	state.reading += picked.length;
+	chat.reading += picked.length;
 	render();
 	for (const file of picked) {
 		try {
 			const image = await readImage(file);
 			// Another pick may have filled it meanwhile.
-			if (state.open === id && state.attachments.length < ATTACH_MAX) state.attachments.push(image);
+			if (chat.attachments.length < ATTACH_MAX) chat.attachments.push(image);
 		} catch (error) {
 			const tooLarge = error instanceof Error && error.message === "image_too_large";
 			problems.push(`“${file.name}”: ${errorText(tooLarge ? "image_too_large" : "unreadable_image")}`);
 		}
-		state.reading--;
+		chat.reading--;
 		render();
 	}
-	if (state.open !== id) return;
+	if (state.chat !== chat) return;
 	if (problems.length) showError(problems.join(" "));
 	else render();
 }
 
-/** An image of the open session's, by its message's id and its position there. @param {string} entry @param {string | number} index */
+/** An image of the open chat's, by its message's id and its position there. @param {string} entry @param {string | number} index */
 function pictureKey(entry, index) {
-	return `${state.open}\n${entry}\n${index}`;
+	return `${entry}\n${index}`;
 }
 
 /** A picture button gets its image if fetched, and says so if it could not be. @param {HTMLElement} button */
 function paint(button) {
 	const key = pictureKey(button.dataset.entry ?? "", button.dataset.index ?? "");
-	const url = pictures.get(key);
+	const url = state.chat.pictures.get(key);
 	const img = /** @type {HTMLImageElement} */ (button.querySelector("img"));
 	if (url) {
 		if (img.getAttribute("src") !== url) img.src = url;
 		return true;
 	}
-	if (picturesFailed.has(key)) {
+	if (state.chat.picturesFailed.has(key)) {
 		button.classList.add("failed");
 		img.alt = "Image unavailable";
 		return true;
@@ -2222,7 +2115,7 @@ function paintPending() {
 
 /** @param {HTMLElement} button @returns {string | undefined} */
 function pendingPicture(button) {
-	const entry = state.pending.find((p) => String(p.id) === button.dataset.pending);
+	const entry = state.chat.pending.find((p) => String(p.id) === button.dataset.pending);
 	const image = entry?.images[Number(button.dataset.index)];
 	return image && `data:${image.mimeType};base64,${image.data}`;
 }
@@ -2255,15 +2148,16 @@ function keepPlace(entries) {
 
 /** @param {string} entry @param {number} index */
 async function loadPicture(entry, index) {
-	const id = state.open;
+	const chat = state.chat;
 	const key = pictureKey(entry, index);
-	if (!id || pictures.has(key) || picturesLoading.has(key) || picturesFailed.has(key)) return;
-	picturesLoading.add(key);
+	if (!chat || chat.pictures.has(key) || chat.picturesLoading.has(key) || chat.picturesFailed.has(key)) return;
+	chat.picturesLoading.add(key);
 	try {
-		const url = await dataUrl(await api.image(id, entry, index));
-		if (state.open !== id) return;
-		if (pictures.size >= PICTURES_MAX) pictures.delete(/** @type {string} */ (pictures.keys().next().value));
-		pictures.set(key, url);
+		const url = await dataUrl(await api.image(chat.id, entry, index));
+		if (state.chat !== chat) return;
+		if (chat.pictures.size >= PICTURES_MAX)
+			chat.pictures.delete(/** @type {string} */ (chat.pictures.keys().next().value));
+		chat.pictures.set(key, url);
 	} catch (error) {
 		if (error instanceof Unauthorized) {
 			handleError(error);
@@ -2271,10 +2165,10 @@ async function loadPicture(entry, index) {
 		}
 		// Offline or the Mac failing: it is fetched again once the log is next rebuilt.
 		const message = error instanceof Error ? error.message : String(error);
-		if (state.open !== id || error instanceof TypeError || /^HTTP 5\d\d$/.test(message)) return;
-		picturesFailed.add(key);
+		if (state.chat !== chat || error instanceof TypeError || /^HTTP 5\d\d$/.test(message)) return;
+		chat.picturesFailed.add(key);
 	} finally {
-		picturesLoading.delete(key);
+		chat.picturesLoading.delete(key);
 	}
 	for (const button of /** @type {NodeListOf<HTMLElement>} */ (document.querySelectorAll("#log .pic"))) {
 		if (button.dataset.entry === entry && button.dataset.index === String(index)) paint(button);
@@ -2295,68 +2189,54 @@ function closeViewer() {
 async function send() {
 	const text = $("#text");
 	const value = text.value.trim();
-	const id = state.open;
-	const session = state.sessions.find((s) => s.id === id);
+	const chat = state.chat;
+	const session = state.sessions.find((s) => s.id === chat?.id);
 	// Photos still being read go with it once they are in.
-	if (!value || !id || !canAct(session) || state.reading) return;
+	if (!value || !chat || !canAct(session) || chat.reading) return;
 	// Left in the reply box, to change. A command listed for the phone goes, and the pane runs it.
-	if (state.attachments.length === 0 && refused(value, commandsCache.get(id))) {
+	if (chat.attachments.length === 0 && refused(value, commandsCache.get(chat.id))) {
 		showError(errorText("terminal_command"));
 		return;
 	}
-	const images = state.attachments;
+	const images = chat.attachments;
 	text.value = "";
 	text.style.height = "auto";
-	state.attachments = [];
-	const key = promptKey(value, images.length);
-	const before = userCount(state.messages, key) + state.pending.filter((p) => p.text === key).length;
-	const last = state.messages.at(-1)?.id ?? "";
-	const entry = { id: ++pendingId, text: key, prompt: value, images, before, sentAt: Date.now(), last };
-	state.pending.push(entry);
-	setTimeout(() => checkPending(id, entry), PROMPT_GIVE_UP_MS);
+	chat.attachments = [];
+	const entry = addPending(chat, value, images, Date.now());
+	setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
 	render();
 	$("#scroll").scrollTop = $("#scroll").scrollHeight;
 	try {
 		await api.prompt(
-			id,
+			chat.id,
 			value,
 			images.map(({ mimeType, data }) => ({ mimeType, data })),
 		);
 	} catch (error) {
-		forget(entry);
-		putBack(id, entry);
+		forget(chat, entry);
+		putBack(chat, entry);
 		handleError(error, "Not sent: ");
 	}
 }
 
-/** @typedef {(typeof state.pending)[number]} Pending */
+/** @typedef {import("./chat.js").Chat} Chat @typedef {import("./chat.js").Pending} Pending */
 
-/** A sent prompt no longer waited for: those sent after it with the same text no longer count it. @param {Pending} entry */
-function forget(entry) {
-	const at = state.pending.indexOf(entry);
-	if (at < 0) return;
-	state.pending.splice(at, 1);
-	for (const p of state.pending.slice(at)) if (p.text === entry.text) p.before--;
-}
-
-/** A prompt that did not reach its session, back in the reply box above what was typed since, with its images. @param {string} id @param {Pending} entry */
-function putBack(id, entry) {
-	if (state.open !== id) return;
+/** A prompt that did not reach its session, back in the reply box above what was typed since, with its images. @param {Chat} chat @param {Pending} entry */
+function putBack(chat, entry) {
+	if (state.chat !== chat) return;
 	const text = $("#text");
 	text.value = text.value ? `${entry.prompt}\n${text.value}` : entry.prompt;
 	grow(text);
-	if (!state.attachments.length) state.attachments = entry.images;
+	if (!chat.attachments.length) chat.attachments = entry.images;
 }
 
-/** A sent prompt still waiting PROMPT_GIVE_UP_MS on (see giveUp). @param {string} id @param {Pending} entry */
-function checkPending(id, entry) {
-	if (state.open !== id || !state.pending.includes(entry) || state.starting) return;
-	const verdict = giveUp(entry, state.sessions.find((s) => s.id === id)?.state, state.messages.at(-1)?.id ?? "");
-	if (verdict === "wait") return;
-	forget(entry);
+/** A sent prompt still waiting PROMPT_GIVE_UP_MS on (see giveUp). @param {Chat} chat @param {Pending} entry */
+function checkSent(chat, entry) {
+	if (state.chat !== chat || !chat.pending.includes(entry) || state.starting) return;
+	const verdict = checkPending(chat, entry, state.sessions.find((s) => s.id === chat.id)?.state);
 	if (verdict === "drop") render();
-	else {
-		putBack(id, entry);
+	else if (verdict === "fail") {
+		putBack(chat, entry);
 		showError(errorText("not_delivered"));
 	}
 }
@@ -2406,43 +2286,19 @@ function claimLink() {
 
 function route() {
 	claimLink();
-	const fromList = !state.open;
+	const previous = state.chat;
 	const match = /^#s\/(.+)$/.exec(location.hash);
 	const open = match ? decodeURIComponent(match[1]) : undefined;
-	if (open !== state.open) {
-		// A resumed session's pane replaces its entry, which still follows the list's.
-		backToList = open !== undefined && (fromList || (open === followed && backToList));
-		// Following a resumed session to its pane keeps the reply on screen until pi writes it.
-		if (open === undefined || open !== followed) state.pending = [];
-		state.attachments = [];
-		pictures.clear();
-		picturesLoading.clear();
-		picturesFailed.clear();
-		outputs.clear();
-		followed = undefined;
-		openSessionId = undefined;
-		turnEndedAt = undefined;
-		state.open = open;
-		state.messages = [];
-		state.messagesLoaded = false;
-		state.more = false;
-		state.loadingOlder = false;
-		state.live = undefined;
-		liveEnded = false;
-		clearTimeout(liveClear);
+	if (open !== previous?.id) {
+		clearTimeout(previous?.liveClear);
+		// Following a resumed session to its pane keeps the replies still pending on screen until pi
+		// writes them, and its entry, which replaces the old one's, still follows the list's.
+		const follows = open !== undefined && open === previous?.next;
+		state.chat = open === undefined ? undefined : openChat(open, follows ? previous : undefined);
+		if (state.chat && !previous) state.chat.backToList = true;
 		state.error = undefined;
-		state.sheetOpen = false;
-		state.report = undefined;
-		state.stopping = false;
 		state.phoneSheet = false;
 		state.confirmDisconnect = false;
-		state.confirmDelete = false;
-		state.tasksSheet = false;
-		state.confirmStop = undefined;
-		state.taskOutputs.clear();
-		state.stoppingTasks.clear();
-		// Asked again with its first report: the cached ones show meanwhile.
-		commandsAsked = false;
 		connect();
 	}
 	render();
@@ -2534,8 +2390,8 @@ if ("serviceWorker" in navigator) {
 }
 
 claimLink();
-state.open = /^#s\/(.+)$/.exec(location.hash)?.[1];
-if (state.open) state.open = decodeURIComponent(state.open);
+const opened = /^#s\/(.+)$/.exec(location.hash)?.[1];
+if (opened) state.chat = openChat(decodeURIComponent(opened));
 render();
 connect();
 void offerHandoff();

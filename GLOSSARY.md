@@ -35,3 +35,9 @@ _Avoid_: restart, rerun
 **Task**:
 An entry in `/tasks` and `task_stop`: a background shell, a monitor, or a run as seen from there.
 _Avoid_: task for the run itself inside `subagents`
+
+### Remote control
+
+**Chat**:
+One session opened in the remote app on a phone, from when it opens until another session or the list is shown. Following its session to a new pane starts a new chat that carries the prompts still pending.
+_Avoid_: open session, conversation
