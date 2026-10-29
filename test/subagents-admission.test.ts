@@ -23,13 +23,11 @@ import { SubagentMessageBus } from "../ext/subagents/messages.ts";
 import { createParentScope } from "../ext/subagents/parent-scope.ts";
 import { type AdmittedSubagentHandle, type SubagentRunRecord, SubagentRunScheduler } from "../ext/subagents/runs.ts";
 
-/** The admitted run; fails the test with the refusal if there is none. */
 function handleOf(result: AdmissionResult): AdmittedSubagentHandle {
 	if (!result.ok) throw new Error(`Expected an admitted run, got: ${result.error}`);
 	return result.handle;
 }
 
-/** Why admission refused; fails the test if it admitted a run. */
 function errorOf(result: AdmissionResult): string {
 	if (result.ok) throw new Error(`Expected a refusal, got run ${result.handle.runId}`);
 	return result.error;
