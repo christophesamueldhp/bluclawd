@@ -118,9 +118,11 @@ describe.skipIf(!supported)(
 			const command = [process.execPath, descendants, "detached", heartbeats, "sandbox-it-probe", String(lifetimeMs)]
 				.map(quote)
 				.join(" ");
+			// The command returns once its descendant beats, leaving it behind.
+			const awaitBeat = `for _ in {1..500}; do [ -s ${quote(heartbeats)} ] && break; sleep 0.01; done`;
 			const started = Date.now();
 			try {
-				await run(`${command} & sleep 0.5`);
+				await run(`${command} & ${awaitBeat}`);
 				const atSettlement = readHeartbeats(heartbeats).at(-1)?.sequence ?? 0;
 				await new Promise((resolve) => setTimeout(resolve, 150));
 				expect(atSettlement).toBeGreaterThan(0);
