@@ -1,8 +1,5 @@
-import { readFileSync } from "node:fs";
-import { runInNewContext } from "node:vm";
 import { describe, expect, it, vi } from "vitest";
-
-const source = readFileSync(new URL("../daemon/remote/web/app.js", import.meta.url), "utf8");
+import { setNewOptions } from "../daemon/remote/web/composer.js";
 
 describe("new task options", () => {
 	it("toggles the controls and accessible label without clearing the task or directory", () => {
@@ -20,17 +17,14 @@ describe("new task options", () => {
 			"#cwd": cwd,
 			"#task": task,
 		};
-		const context = { $: (selector: string) => elements[selector] };
-		const start = source.indexOf("function setNewOptions(");
-		const end = source.indexOf("\nfunction bindList()", start);
-		const toggle = runInNewContext(`${source.slice(start, end)}\nsetNewOptions`, context);
+		const $ = (selector: string) => elements[selector];
 
-		toggle(true);
+		setNewOptions(true, $);
 		expect(classes.has("expanded")).toBe(true);
 		expect(attributes.get("aria-expanded")).toBe("true");
 		expect(attributes.get("aria-label")).toBe("Hide task options");
 
-		toggle(false);
+		setNewOptions(false, $);
 		expect(classes.has("expanded")).toBe(false);
 		expect(attributes.get("aria-expanded")).toBe("false");
 		expect(attributes.get("aria-label")).toBe("Show task options");

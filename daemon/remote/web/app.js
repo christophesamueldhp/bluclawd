@@ -7,6 +7,7 @@
  */
 import { api, clearToken, getToken, pairLink, setToken, Unauthorized } from "./api.js";
 import { addPending, applyLatest, applyOlder, checkPending, forget, listed, openChat } from "./chat.js";
+import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
@@ -41,7 +42,7 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.44";
+const VERSION = "0.0.45";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 
 function loadViewMode() {
@@ -1254,7 +1255,7 @@ function runNewCommand(name) {
 	if (name === "model") pickNewModel();
 	else if (name === "resume") pickResume();
 	else if (name === "cd") {
-		setNewOptions(true);
+		setNewOptions(true, $);
 		$("#cwd").focus();
 	}
 }
@@ -1538,15 +1539,6 @@ function grow(text) {
 	text.style.height = `${Math.min(text.scrollHeight, 140)}px`;
 }
 
-/** @param {boolean} expanded */
-function setNewOptions(expanded) {
-	$("#new-task").classList.toggle("expanded", expanded);
-	const button = $("#new-options");
-	button.setAttribute("aria-expanded", String(expanded));
-	button.setAttribute("aria-label", expanded ? "Hide task options" : "Show task options");
-	if (!expanded) $("#cwd").blur();
-}
-
 function bindList() {
 	const mode = $("#view-mode");
 	mode.value = state.viewMode;
@@ -1561,7 +1553,7 @@ function bindList() {
 	});
 	const task = $("#task");
 	$("#new-options").addEventListener("click", () => {
-		setNewOptions(!$("#new-task").classList.contains("expanded"));
+		setNewOptions(!$("#new-task").classList.contains("expanded"), $);
 	});
 	task.addEventListener("input", () => {
 		grow(task);
