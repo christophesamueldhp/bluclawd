@@ -349,6 +349,11 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				error: `${label} belongs to a session that was reloaded or replaced; spawn a new subagent and point it at ${run.reportPath ?? "the earlier report"}.`,
 			};
 			const unavailable = (error: string): AdmissionResult => ({ ok: false, refusal: "unavailable", error });
+			if (ctx.mode === "print" || ctx.mode === "json") {
+				return unavailable(
+					`Resuming ${label} is not supported in one-shot "${ctx.mode}" mode because a resume runs in the background and the process exits before it completes.`,
+				);
+			}
 			// Checked again after the model is resolved, since another message may resume the run meanwhile.
 			const checkResumable = (): { transcriptPath?: string; refused?: AdmissionResult } => {
 				const current = deps.scheduler.getRun(run.runId);
