@@ -402,6 +402,22 @@ describe("Run admission", () => {
 		expect(built).toBe(false);
 	});
 
+	it("refuses to resume in one-shot modes, since a resume runs in the background", async () => {
+		for (const mode of ["print", "json"] as const) {
+			const { launch, resume, scheduler } = await setup({ mode, firstGenerationCompletes: true });
+			const completed = await (await launch({ agent: "explorer", task: "Build v1." })).handle!.completion;
+			let built = false;
+			const resumed = await resume(completed, () => {
+				built = true;
+				return "Continue.";
+			}).result;
+			expect(resumed).toMatchObject({ ok: false, refusal: "unavailable" });
+			expect(resumed.error).toContain(`not supported in one-shot "${mode}" mode`);
+			expect(built).toBe(false);
+			expect(scheduler.getRun(completed.runId)?.status).toBe("completed");
+		}
+	});
+
 	it("refuses to resume a run that is not completed, or whose session was replaced", async () => {
 		const live = await setup();
 		const running = (await live.launch({ agent: "explorer", task: "x" })).handle!.record;

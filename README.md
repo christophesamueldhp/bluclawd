@@ -321,7 +321,7 @@ local, model-issued, and remote stops use the same session-owned run. The orches
 progress with `subagent_status` (status, turns, tool calls, elapsed time, last activity and last
 message) and stops one child or `"all"` with `subagent_stop`; nothing stops a child automatically.
 Interrupting the orchestrator's turn leaves background children running. User and remote stops do not start an unsolicited parent turn.
-Print/JSON invocations support foreground delegation only; background also works in RPC mode.
+Print/JSON invocations support foreground delegation only, so a completed subagent cannot be resumed there; background also works in RPC mode.
 
 Custom roles are Markdown files in `~/.pi/agent/agents/` or a trusted project's `.pi/agents/`.
 A trusted project definition overrides a user definition, which overrides a bundled role.
