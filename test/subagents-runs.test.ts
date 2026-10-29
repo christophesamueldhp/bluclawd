@@ -273,3 +273,59 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 		expect(changesAfterSettled).toBe(0);
 	});
 });
+
+describe("Issue #63 — A run's controller only affects its own generation", () => {
+	function exercise(controller: SubagentRunnerExecuteParams["controller"], tag: string) {
+		controller.markRunning(`child_${tag}`, `thinking_${tag}`);
+		controller.recordTurn();
+		controller.recordToolCall(`tool_${tag}`);
+		controller.recordToolExecution(`tool_${tag}`, false);
+		controller.recordUsage({ input: 10 });
+		controller.recordNestedUsage({ input: 5 });
+		controller.updateProgress(`progress_${tag}`);
+	}
+
+	it("ignores an earlier generation's controller after a resume", async () => {
+		let clock = 0;
+		const controllers: SubagentRunnerExecuteParams["controller"][] = [];
+		const gates: ReturnType<typeof deferred<SubagentRunnerOutcome>>[] = [];
+		const scheduler = new SubagentRunScheduler({
+			now: () => ++clock,
+			executeRun: ({ controller }) => {
+				controllers.push(controller);
+				const gate = deferred<SubagentRunnerOutcome>();
+				gates.push(gate);
+				return gate.promise;
+			},
+		});
+		const handle = scheduler.admit(makeRequest()).handle!;
+		gates[0].resolve({ status: "completed", complete: true, summaryText: "first" });
+		await handle.completion;
+
+		const resumed = scheduler.resume(handle.runId, undefined).handle!;
+		const before = scheduler.getRun(handle.runId);
+		exercise(controllers[0], "old");
+		expect(scheduler.getRun(handle.runId)).toEqual(before);
+
+		exercise(controllers[1], "new");
+		expect(scheduler.getRun(handle.runId)).toMatchObject({
+			generation: 1,
+			status: "running",
+			childSessionId: "child_new",
+			thinkingLevel: "thinking_new",
+			turnCount: 1,
+			toolCallCount: 1,
+			toolExecutions: { tool_new: { ok: 1, error: 0 } },
+			lastActivity: { kind: "tool", detail: "tool_new" },
+			lastProgressText: "progress_new",
+			usage: { input: 15 },
+		});
+
+		gates[1].resolve({ status: "completed", complete: true, summaryText: "second" });
+		expect(await resumed.completion).toMatchObject({
+			status: "completed",
+			usage: { input: 15 },
+			usageAttribution: "ledger",
+		});
+	});
+});

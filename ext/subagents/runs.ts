@@ -373,26 +373,30 @@ export class SubagentRunScheduler<C = unknown> {
 		managed.record.startedAt = this.now();
 		this.emitChange(managed);
 
+		// A resume reuses `managed`, so a controller from an earlier generation must not touch the new one.
+		const generation = managed.record.generation;
+		const inactive = () =>
+			managed.record.generation !== generation || isTerminalSubagentStatus(managed.record.status);
 		const controller: SubagentRunController = {
 			markRunning: (childSessionId?: string, thinkingLevel?: string) => {
-				if (isTerminalSubagentStatus(managed.record.status) || managed.record.status === "stopping") return;
+				if (inactive() || managed.record.status === "stopping") return;
 				if (childSessionId) managed.record.childSessionId = childSessionId;
 				if (thinkingLevel) managed.record.thinkingLevel = thinkingLevel;
 				managed.record.status = "running";
 				this.emitChange(managed);
 			},
 			recordTurn: () => {
-				if (isTerminalSubagentStatus(managed.record.status)) return;
+				if (inactive()) return;
 				managed.record.turnCount++;
 				managed.record.lastActivity = { kind: "turn", at: this.now() };
 			},
 			recordToolCall: (toolName?: string) => {
-				if (isTerminalSubagentStatus(managed.record.status)) return;
+				if (inactive()) return;
 				managed.record.toolCallCount++;
 				managed.record.lastActivity = { kind: "tool", detail: toolName, at: this.now() };
 			},
 			recordToolExecution: (toolName: string, isError: boolean) => {
-				if (isTerminalSubagentStatus(managed.record.status)) return;
+				if (inactive()) return;
 				managed.record.toolExecutions ??= {};
 				managed.record.toolExecutions[toolName] ??= { ok: 0, error: 0 };
 				const counts = managed.record.toolExecutions[toolName];
@@ -400,17 +404,17 @@ export class SubagentRunScheduler<C = unknown> {
 				else counts.ok++;
 			},
 			recordUsage: (delta: Partial<SubagentUsageTotals>) => {
-				if (isTerminalSubagentStatus(managed.record.status)) return;
+				if (inactive()) return;
 				managed.usage.addTurn(delta);
 				managed.record.usage = managed.usage.totals;
 			},
 			recordNestedUsage: (delta: Partial<SubagentUsageTotals>) => {
-				if (isTerminalSubagentStatus(managed.record.status)) return;
+				if (inactive()) return;
 				managed.usage.addNested(delta);
 				managed.record.usage = managed.usage.totals;
 			},
 			updateProgress: (text: string) => {
-				if (isTerminalSubagentStatus(managed.record.status)) return;
+				if (inactive()) return;
 				managed.record.lastProgressText = text;
 				this.emitChange(managed);
 			},
