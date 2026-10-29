@@ -7,12 +7,10 @@ import { fileURLToPath } from "node:url";
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { reapDescendants } from "../ext/sandbox/reaper.ts";
-import { readHeartbeats } from "./helpers/heartbeats.ts";
+import { beatsFromNow, descendantCommand, leavingBehind, readHeartbeats, readinessMs } from "./helpers/heartbeats.ts";
 
 const lifetimeMs = 3000;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-const descendants = fileURLToPath(new URL("./fixtures/subagent-writer/descendants.mjs", import.meta.url));
-const quote = (text: string) => `'${text.replace(/'/g, "'\\''")}'`;
 
 describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => {
 	let dir: string;
@@ -43,16 +41,13 @@ describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => 
 		const exec = reapDescendants(createLocalBashOperations({ shellPath: "/bin/bash" }).exec);
 		const abort = new AbortController();
 		// "exit" mode: the invoking shell returns once its descendant beats, leaving it behind.
-		const command = [process.execPath, descendants, mode, heartbeatPath, "reaper-probe", String(lifetimeMs)]
-			.map(quote)
-			.join(" ");
-		const awaitBeat = `for _ in {1..500}; do [ -s ${quote(heartbeatPath)} ] && break; sleep 0.01; done`;
-		const settled = exec(stop === "exit" ? `${command} & ${awaitBeat}` : command, dir, {
+		const command = descendantCommand(mode, heartbeatPath, "reaper-probe", lifetimeMs);
+		const settled = exec(stop === "exit" ? leavingBehind(command, heartbeatPath) : command, dir, {
 			onData: () => {},
 			signal: abort.signal,
 		}).catch(() => undefined);
 		if (stop === "abort") {
-			const deadline = Date.now() + 5000;
+			const deadline = Date.now() + readinessMs;
 			while (!beats().some((beat) => mode !== "double-fork" || beat.ppid === 1)) {
 				if (Date.now() > deadline) throw new Error("descendant never started");
 				await delay(10);
@@ -60,9 +55,7 @@ describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => 
 			abort.abort();
 		}
 		await settled;
-		const atSettlement = beats().at(-1)?.sequence ?? 0;
-		await delay(150);
-		return { started: beats().length > 0, stillWriting: beats().filter((beat) => beat.sequence > atSettlement) };
+		return beatsFromNow(heartbeatPath);
 	}
 
 	it.each(["detached", "double-fork"])(
@@ -72,19 +65,17 @@ describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => 
 			expect(result.started).toBe(true);
 			expect(result.stillWriting).toEqual([]);
 		},
-		15000,
+		60_000,
 	);
 
 	it("kills a detached descendant left behind when the command exits", async () => {
 		const result = await run("detached", "exit");
 		expect(result.started).toBe(true);
 		expect(result.stillWriting).toEqual([]);
-	}, 15000);
+	}, 60_000);
 
 	it("kills a double-fork descendant when the process running the command dies", async () => {
-		const command = [process.execPath, descendants, "double-fork", heartbeatPath, "reaper-probe", String(lifetimeMs)]
-			.map(quote)
-			.join(" ");
+		const command = descendantCommand("double-fork", heartbeatPath, "reaper-probe", lifetimeMs);
 		const script = [
 			'import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";',
 			`import { reapDescendants } from ${JSON.stringify(new URL("../ext/sandbox/reaper.ts", import.meta.url).href)};`,
@@ -96,7 +87,7 @@ describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => 
 			stdio: "ignore",
 		});
 		const exited = new Promise<void>((resolve) => owner.once("exit", () => resolve()));
-		const deadline = Date.now() + 10000;
+		const deadline = Date.now() + readinessMs;
 		while (!beats().some((beat) => beat.ppid === 1)) {
 			if (Date.now() > deadline) throw new Error("descendant never started");
 			await delay(10);
@@ -105,8 +96,6 @@ describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => 
 		owner.kill("SIGKILL");
 		await exited;
 		await delay(200);
-		const afterReap = beats().at(-1)?.sequence ?? 0;
-		await delay(150);
-		expect(beats().filter((beat) => beat.sequence > afterReap)).toEqual([]);
-	}, 15000);
+		expect((await beatsFromNow(heartbeatPath)).stillWriting).toEqual([]);
+	}, 60_000);
 });

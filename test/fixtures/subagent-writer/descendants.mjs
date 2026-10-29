@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const [mode, heartbeatPath, identity, lifetimeText] = process.argv.slice(2);
@@ -34,6 +34,13 @@ if (mode === "leaf" || mode === "attached") {
 		env: process.env,
 	});
 	child.unref();
-	// Keep the invoking command alive so cancellation, not natural exit, is the boundary.
-	setTimeout(() => process.exit(0), lifetime + 1000);
+	// Keep the invoking command alive so cancellation, not natural exit, is the boundary: counted
+	// from the leaf's first beat, since under load the leaf starts seconds late (#76).
+	const started = setInterval(() => {
+		if (!existsSync(heartbeatPath)) return;
+		clearInterval(started);
+		setTimeout(() => process.exit(0), lifetime + 1000);
+	}, 25);
+	// A leaf that never starts must not keep the command alive forever.
+	setTimeout(() => process.exit(0), 60_000);
 }
