@@ -6,7 +6,7 @@
  * updates arrive.
  */
 import { api, clearToken, getToken, pairLink, setToken, Unauthorized } from "./api.js";
-import { addPending, applyLatest, applyOlder, checkPending, endLive, forget, listed, openChat } from "./chat.js";
+import { addPending, applyLatest, applyOlder, checkPending, forget, listed, openChat } from "./chat.js";
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
@@ -321,9 +321,9 @@ async function loadSessions() {
 		// The open session under another row id (it quit on the Mac, or was opened there again): followed,
 		// without a history entry for the old one.
 		const open = state.chat && state.sessions.find((s) => s.id === state.chat.id);
-		if (open) state.chat.openSessionId = open.sessionId;
+		if (open) state.chat.sessionId = open.sessionId;
 		else if (state.chat) {
-			const next = successor(state.sessions, state.chat.id, state.chat.openSessionId);
+			const next = successor(state.sessions, state.chat.id, state.chat.sessionId);
 			if (next) {
 				state.chat.next = next;
 				location.replace(`#s/${encodeURIComponent(next)}`);
@@ -525,7 +525,7 @@ function replyEnded() {
 	const chat = state.chat;
 	if (!chat) return;
 	clearTimeout(chat.liveClear);
-	endLive(chat);
+	chat.liveEnded = true;
 	chat.liveClear = setTimeout(() => {
 		chat.live = undefined;
 		if (state.chat === chat) render();

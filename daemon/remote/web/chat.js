@@ -1,8 +1,9 @@
 // @ts-check
 /**
  * The open chat: one session as the phone shows it, from when it opens until another session or the
- * list is shown, and what changes it as the transcript, the list and sent prompts come in. No DOM,
- * no requests and no timers: app.js fetches, renders, and drops a chat no longer open.
+ * list is shown, and what changes it as the transcript, the list and sent prompts come in. No DOM
+ * and no requests: app.js fetches, renders, runs the timers it keeps here, and drops a chat no longer
+ * open.
  */
 import { giveUp, promptKey, sentText, settle } from "./live.js";
 
@@ -39,7 +40,8 @@ export function openChat(id, previous) {
 		/** The reply on screen has ended (or may have, while the stream was down): see settle(). */
 		liveEnded: false,
 		/** @type {ReturnType<typeof setTimeout> | undefined} */ liveClear: undefined,
-		/** @type {Pending[]} */ pending: previous?.pending ?? [],
+		/** Shared with a chat this one follows, so it is changed in place (see keepPending). @type {Pending[]} */
+		pending: previous?.pending ?? [],
 		/** Images for the next prompt. @type {Attachment[]} */ attachments: [],
 		/** Picked photos still being read into `attachments`. */
 		reading: 0,
@@ -72,7 +74,7 @@ export function openChat(id, previous) {
 		/** Tool results asked for in full, by entry id: the text, or why it is not there. @type {Map<string, { text?: string, truncated?: boolean, error?: string, loading?: boolean }>} */
 		outputs: new Map(),
 		/** Its pi session, as last listed: its row may go, and the next chat follows it to its next one. @type {string | undefined} */
-		openSessionId: undefined,
+		sessionId: undefined,
 		/** The pane its session moved to, which the next chat follows. @type {string | undefined} */
 		next: undefined,
 		/**
@@ -81,7 +83,7 @@ export function openChat(id, previous) {
 		 * @type {number | undefined}
 		 */
 		turnEndedAt: undefined,
-		/** Its commands were asked for. */
+		/** Its commands were asked for, with its first report: the cached ones show meanwhile. */
 		commandsAsked: false,
 		/** Opened from the list, whose history entry "‹ Sessions" goes back to. */
 		backToList: previous?.backToList ?? false,
@@ -91,6 +93,16 @@ export function openChat(id, previous) {
 }
 
 /** @typedef {ReturnType<typeof openChat>} Chat */
+
+/**
+ * Only the pending prompts `keep` holds, in the same list: one a send that failed takes out of the
+ * chat it was sent from leaves the chat that followed it too.
+ * @param {Chat} chat @param {(p: Pending) => boolean} keep
+ */
+function keepPending(chat, keep) {
+	const kept = chat.pending.filter(keep);
+	chat.pending.splice(0, chat.pending.length, ...kept);
+}
 
 /** @param {Message[]} messages @param {string} text */
 function userCount(messages, text) {
@@ -118,10 +130,10 @@ export function applyLatest(chat, page) {
 	chat.messagesLoaded = true;
 	chat.live = settle(chat.live, chat.liveEnded, latest);
 	// A sent prompt is pending until the transcript has one more copy of its text than when it was sent.
-	chat.pending = chat.pending.filter((p) => userCount(chat.messages, p.text) <= p.before);
+	keepPending(chat, (p) => userCount(chat.messages, p.text) <= p.before);
 	const ended = chat.turnEndedAt;
 	chat.turnEndedAt = undefined;
-	if (ended !== undefined) chat.pending = chat.pending.filter((p) => p.sentAt >= ended);
+	if (ended !== undefined) keepPending(chat, (p) => p.sentAt >= ended);
 }
 
 /**
@@ -185,9 +197,4 @@ export function checkPending(chat, entry, sessionState) {
 	const verdict = giveUp(entry, sessionState, chat.messages.at(-1)?.id ?? "");
 	if (verdict !== "wait") forget(chat, entry);
 	return verdict;
-}
-
-/** The reply on screen has ended: it stays until a transcript page has it, which pi may not have written yet. @param {Chat} chat */
-export function endLive(chat) {
-	chat.liveEnded = true;
 }

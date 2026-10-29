@@ -145,6 +145,15 @@ describe("following a session to its next pane", () => {
 		expect(next.report).toBeUndefined();
 	});
 
+	it("shares them with the chat it followed after a page came in", () => {
+		const chat = openChat("a");
+		const entry = addPending(chat, "go", [], 100);
+		const next = openChat("b", chat);
+		applyLatest(next, { messages: [reply("1")], more: false });
+		forget(chat, entry);
+		expect(next.pending).toEqual([]);
+	});
+
 	it("is not where a chat opened afresh starts from", () => {
 		const chat = openChat("a");
 		expect(chat.pending).toEqual([]);
