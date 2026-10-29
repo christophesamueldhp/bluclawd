@@ -267,9 +267,7 @@ export interface InstanceSummary {
 	settled?: number;
 }
 
-interface ResponseBase {
-	ok: boolean;
-	error?: string;
+interface ResponseMeta {
 	/**
 	 * Echoed on every response so a client can detect it is talking to a stale —
 	 * already-running, since-changed — daemon. `version` is the daemon's package.json
@@ -281,6 +279,10 @@ interface ResponseBase {
 	 */
 	version?: string;
 	buildId?: string;
+}
+
+interface ResponseBase extends ResponseMeta {
+	ok: true;
 }
 
 export interface ListResponse extends ResponseBase {
@@ -349,7 +351,7 @@ export interface RemoteResponse extends ResponseBase {
 	devices: RemoteDeviceInfo[];
 }
 
-export interface ErrorResponse extends ResponseBase {
+export interface ErrorResponse extends ResponseMeta {
 	type: "error";
 	ok: false;
 	error: string;

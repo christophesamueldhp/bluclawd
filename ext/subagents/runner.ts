@@ -44,13 +44,14 @@ export interface ResolveChildModelOptions {
 	parentModelRegistry: ModelRegistry;
 }
 
-export interface ResolveChildModelResult {
-	readonly ok: boolean;
-	readonly modelRuntime?: ModelRuntime;
-	readonly model?: Model<Api>;
-	readonly thinkingLevel?: ThinkingLevel;
-	readonly error?: string;
-}
+export type ResolveChildModelResult =
+	| {
+			readonly ok: true;
+			readonly modelRuntime: ModelRuntime;
+			readonly model: Model<Api>;
+			readonly thinkingLevel?: ThinkingLevel;
+	  }
+	| { readonly ok: false; readonly error: string };
 
 /** A child's model as admission resolved it, with the runtime that holds its providers and auth. */
 export interface ResolvedChildModel {

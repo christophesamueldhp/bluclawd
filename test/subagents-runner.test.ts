@@ -11,7 +11,7 @@ import {
 	resolveChildModelAndRuntime,
 	runSubagent,
 } from "../ext/subagents/runner.ts";
-import { SubagentRunScheduler } from "../ext/subagents/runs.ts";
+import { type AdmitSubagentRunResult, SubagentRunScheduler } from "../ext/subagents/runs.ts";
 
 const tempDirs: string[] = [];
 
@@ -48,6 +48,11 @@ async function createTestParentRegistry(agentDir: string) {
 	return { runtime, registry, faux, model: faux.getModel("faux-1")! };
 }
 
+function admitted(result: AdmitSubagentRunResult) {
+	if (!result.ok) throw new Error(`Expected an admitted run, got: ${result.error}`);
+	return result.handle;
+}
+
 async function inheritedChildModel(
 	agentDir: string,
 	registry: ModelRegistry,
@@ -61,7 +66,8 @@ async function inheritedChildModel(
 		requestedThinkingLevel,
 		parentModelRegistry: registry,
 	});
-	return { model: resolved.model!, modelRuntime: resolved.modelRuntime!, thinkingLevel: resolved.thinkingLevel };
+	if (!resolved.ok) throw new Error(resolved.error);
+	return { model: resolved.model, modelRuntime: resolved.modelRuntime, thinkingLevel: resolved.thinkingLevel };
 }
 
 // The child's tools stand in for the orchestrator's proxied tools, which the tool-level tests cover.
@@ -90,9 +96,7 @@ describe("Task 4 (M1) — Child runner", () => {
 			requestedThinkingLevel: "low",
 			parentModelRegistry: registry,
 		});
-		expect(inherited.ok).toBe(true);
-		expect(inherited.model?.id).toBe("faux-1");
-		expect(inherited.thinkingLevel).toBe("low");
+		expect(inherited).toMatchObject({ ok: true, model: { id: "faux-1" }, thinkingLevel: "low" });
 
 		// 2. Missing parent model fails before starting work
 		const missingParent = await resolveChildModelAndRuntime({
@@ -102,8 +106,7 @@ describe("Task 4 (M1) — Child runner", () => {
 			requestedThinkingLevel: "off",
 			parentModelRegistry: registry,
 		});
-		expect(missingParent.ok).toBe(false);
-		expect(missingParent.error).toMatch(/no active model/i);
+		expect(missingParent).toMatchObject({ ok: false, error: expect.stringMatching(/no active model/i) });
 
 		// 3. Virtual model is rejected explicitly without silent fallback
 		registry.registerVirtualModel({
@@ -121,8 +124,7 @@ describe("Task 4 (M1) — Child runner", () => {
 			requestedThinkingLevel: "low",
 			parentModelRegistry: registry,
 		});
-		expect(virtualRes.ok).toBe(false);
-		expect(virtualRes.error).toMatch(/virtual model/i);
+		expect(virtualRes).toMatchObject({ ok: false, error: expect.stringMatching(/virtual model/i) });
 
 		// 4. Explicit unknown provider/model fails before starting work
 		const unknownExplicit = await resolveChildModelAndRuntime({
@@ -132,8 +134,10 @@ describe("Task 4 (M1) — Child runner", () => {
 			requestedThinkingLevel: "low",
 			parentModelRegistry: registry,
 		});
-		expect(unknownExplicit.ok).toBe(false);
-		expect(unknownExplicit.error).toMatch(/unknown-prov\/missing-model/i);
+		expect(unknownExplicit).toMatchObject({
+			ok: false,
+			error: expect.stringMatching(/unknown-prov\/missing-model/i),
+		});
 	});
 
 	it.each([false, true])(
@@ -185,22 +189,23 @@ describe("Task 4 (M1) — Child runner", () => {
 					}),
 			});
 
-			const admitted = scheduler.admit({
-				parentSessionId: "parent_1",
-				sessionEpoch: 1,
-				parentTurnId: "turn_1",
-				originToolCallId: "call_1",
-				agentName: "explorer",
-				definitionSource: explorer.source,
-				provider: model.provider,
-				modelId: model.id,
-				thinkingLevel: "low",
-				cwd,
-				deliveryMode: "foreground",
-				startSnapshot: captureWorkspaceSnapshot(cwd),
-			});
-			expect(admitted.ok).toBe(true);
-			const finalRecord = await admitted.handle!.completion;
+			const handle = admitted(
+				scheduler.admit({
+					parentSessionId: "parent_1",
+					sessionEpoch: 1,
+					parentTurnId: "turn_1",
+					originToolCallId: "call_1",
+					agentName: "explorer",
+					definitionSource: explorer.source,
+					provider: model.provider,
+					modelId: model.id,
+					thinkingLevel: "low",
+					cwd,
+					deliveryMode: "foreground",
+					startSnapshot: captureWorkspaceSnapshot(cwd),
+				}),
+			);
+			const finalRecord = await handle.completion;
 
 			expect(finalRecord.status).toBe("completed");
 			expect(finalRecord.complete).toBe(true);
@@ -260,19 +265,21 @@ describe("Task 4 (M1) — Child runner", () => {
 				}),
 		});
 
-		const loopHandle = scheduler.admit({
-			parentSessionId: "p1",
-			sessionEpoch: 1,
-			parentTurnId: "t1",
-			originToolCallId: "c_loop",
-			agentName: "explorer",
-			definitionSource: explorer.source,
-			provider: model.provider,
-			modelId: model.id,
-			thinkingLevel: "off",
-			cwd,
-			deliveryMode: "foreground",
-		}).handle!;
+		const loopHandle = admitted(
+			scheduler.admit({
+				parentSessionId: "p1",
+				sessionEpoch: 1,
+				parentTurnId: "t1",
+				originToolCallId: "c_loop",
+				agentName: "explorer",
+				definitionSource: explorer.source,
+				provider: model.provider,
+				modelId: model.id,
+				thinkingLevel: "off",
+				cwd,
+				deliveryMode: "foreground",
+			}),
+		);
 
 		const loopResult = await loopHandle.completion;
 		expect(loopResult.status).toBe("completed");
@@ -291,19 +298,21 @@ describe("Task 4 (M1) — Child runner", () => {
 			}),
 		]);
 
-		const errHandle = scheduler.admit({
-			parentSessionId: "p1",
-			sessionEpoch: 1,
-			parentTurnId: "t1",
-			originToolCallId: "c_err",
-			agentName: "explorer",
-			definitionSource: explorer.source,
-			provider: model.provider,
-			modelId: model.id,
-			thinkingLevel: "off",
-			cwd,
-			deliveryMode: "foreground",
-		}).handle!;
+		const errHandle = admitted(
+			scheduler.admit({
+				parentSessionId: "p1",
+				sessionEpoch: 1,
+				parentTurnId: "t1",
+				originToolCallId: "c_err",
+				agentName: "explorer",
+				definitionSource: explorer.source,
+				provider: model.provider,
+				modelId: model.id,
+				thinkingLevel: "off",
+				cwd,
+				deliveryMode: "foreground",
+			}),
+		);
 
 		const errResult = await errHandle.completion;
 		expect(errResult.status).toBe("failed");

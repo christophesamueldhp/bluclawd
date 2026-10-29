@@ -97,7 +97,7 @@ function writeAtomicPrivateFile(filePath: string, content: string): void {
 export function ensureSessionStorageDir(
 	agentDir: string,
 	parentSessionId: string,
-): { ok: boolean; sessionDir?: string; error?: string } {
+): { ok: true; sessionDir: string } | { ok: false; error: string } {
 	if (!isSafePathSegment(parentSessionId)) {
 		return { ok: false, error: `Invalid parentSessionId "${parentSessionId}" for subagent storage` };
 	}
@@ -119,12 +119,12 @@ export function ensureRunStorageDir(
 	agentDir: string,
 	parentSessionId: string,
 	runId: string,
-): { ok: boolean; runDir?: string; error?: string } {
+): { ok: true; runDir: string } | { ok: false; error: string } {
 	if (!isSafePathSegment(runId)) {
 		return { ok: false, error: `Invalid runId "${runId}" for subagent storage` };
 	}
 	const session = ensureSessionStorageDir(agentDir, parentSessionId);
-	if (!session.ok || !session.sessionDir) return { ok: false, error: session.error };
+	if (!session.ok) return session;
 	const runDir = join(session.sessionDir, runId);
 	try {
 		ensurePrivateDir(runDir);
@@ -157,11 +157,9 @@ function sanitizeRecordForStorage(record: Readonly<SubagentRunRecord>): Subagent
 export function writePersistedRunRecord(
 	agentDir: string,
 	record: Readonly<SubagentRunRecord>,
-): { ok: boolean; recordPath?: string; error?: string } {
+): { ok: true; recordPath: string } | { ok: false; error: string } {
 	const dirRes = ensureRunStorageDir(agentDir, record.parentSessionId, record.runId);
-	if (!dirRes.ok || !dirRes.runDir) {
-		return { ok: false, error: dirRes.error };
-	}
+	if (!dirRes.ok) return dirRes;
 	const recordPath = join(dirRes.runDir, "record.json");
 	try {
 		const sanitized = sanitizeRecordForStorage(record);
@@ -225,11 +223,9 @@ export function writeFullSubagentReport(
 	agentDir: string,
 	record: Readonly<SubagentRunRecord>,
 	fullReportText: string,
-): { ok: boolean; reportPath?: string; error?: string } {
+): { ok: true; reportPath: string } | { ok: false; error: string } {
 	const dirRes = ensureRunStorageDir(agentDir, record.parentSessionId, record.runId);
-	if (!dirRes.ok || !dirRes.runDir) {
-		return { ok: false, error: dirRes.error };
-	}
+	if (!dirRes.ok) return dirRes;
 	const reportPath = join(dirRes.runDir, "report.md");
 	try {
 		const sanitized = sanitizeReportText(fullReportText);
@@ -248,7 +244,7 @@ export function readBoundedSubagentReport(
 	parentSessionId: string,
 	runId: string,
 	maxBytes = MAX_AUTHORIZED_REPORT_VIEW_BYTES,
-): { ok: boolean; content?: string; truncated?: boolean; error?: string } {
+): { ok: true; content: string; truncated: boolean } | { ok: false; error: string } {
 	const record = readPersistedRunRecord(agentDir, parentSessionId, runId);
 	if (!record) {
 		return { ok: false, error: `Subagent run "${runId}" not found for current session.` };

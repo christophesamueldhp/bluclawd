@@ -281,14 +281,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					record,
 					buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).fullReportText,
 				);
-				if (!reportRes.ok || !reportRes.reportPath) {
-					throw new Error(reportRes.error ?? "full report was not persisted");
-				}
+				if (!reportRes.ok) throw new Error(reportRes.error);
 				record.reportPath = reportRes.reportPath;
 				if (record.deliveryMode === "background") record.backgroundDeliveryAttempted = true;
 				if (record.usageAttribution === "ledger") recordBackgroundUsageInLedger(agentDir, record);
 				const recordRes = writePersistedRunRecord(agentDir, record);
-				if (!recordRes.ok) throw new Error(recordRes.error ?? "run record was not persisted");
+				if (!recordRes.ok) throw new Error(recordRes.error);
 				if (parentScope.inScope(record)) {
 					appendParentRunReference(pi, record);
 				}
@@ -298,7 +296,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const execCtx = params.context;
 				if (!execCtx) throw new Error("Subagent run has no execution context.");
 				const storage = ensureRunStorageDir(execCtx.agentDir, params.record.parentSessionId, params.record.runId);
-				if (!storage.ok || !storage.runDir) throw new Error(storage.error ?? "Subagent storage is unavailable.");
+				if (!storage.ok) throw new Error(storage.error);
 				const { runId } = params.record;
 				const scope = {
 					parentSessionId: params.record.parentSessionId,

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+	type AdmitSubagentRunResult,
 	type SubagentRunnerExecuteParams,
 	type SubagentRunnerOutcome,
 	SubagentRunScheduler,
@@ -13,6 +14,11 @@ function deferred<T = void>() {
 		reject = rej;
 	});
 	return { promise, resolve, reject };
+}
+
+function admitted(result: AdmitSubagentRunResult) {
+	if (!result.ok) throw new Error(`Expected an admitted run, got: ${result.error}`);
+	return result.handle;
 }
 
 function makeRequest(overrides: Partial<Parameters<SubagentRunScheduler["admit"]>[0]> = {}) {
@@ -47,9 +53,7 @@ describe("Ticket #8 — Every requested run starts immediately with no child quo
 		});
 
 		const handles = Array.from({ length: 20 }, (_, i) => {
-			const admitted = scheduler.admit(makeRequest({ originToolCallId: `call_${i}` }));
-			expect(admitted.ok, `run ${i}: ${admitted.error}`).toBe(true);
-			return admitted.handle!;
+			return admitted(scheduler.admit(makeRequest({ originToolCallId: `call_${i}` })));
 		});
 
 		expect(started).toEqual(handles.map((h) => h.runId));
@@ -81,8 +85,8 @@ describe("Ticket #8 — Every requested run starts immediately with no child quo
 				},
 			});
 
-			const handles = ["heavy_1", "heavy_2", "heavy_3"].map(
-				(id) => scheduler.admit(makeRequest({ originToolCallId: id })).handle!,
+			const handles = ["heavy_1", "heavy_2", "heavy_3"].map((id) =>
+				admitted(scheduler.admit(makeRequest({ originToolCallId: id }))),
 			);
 			vi.advanceTimersByTime(6 * 60 * 1000);
 
@@ -115,7 +119,7 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 			const scheduler = new ReloadedScheduler({
 				executeRun: async () => ({ status: "completed", complete: true, summaryText: "done" }),
 			});
-			const handle = scheduler.admit(makeRequest()).handle!;
+			const handle = admitted(scheduler.admit(makeRequest()));
 			await handle.completion;
 			ids.push(handle.runId);
 		}
@@ -138,10 +142,9 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 		const preAborted = new AbortController();
 		preAborted.abort();
 		const preRes = scheduler.admit(makeRequest({ signal: preAborted.signal }));
-		expect(preRes.ok).toBe(false);
-		expect(preRes.error).toMatch(/aborted/i);
+		expect(preRes).toMatchObject({ ok: false, error: expect.stringMatching(/aborted/i) });
 
-		const stopped = scheduler.admit(makeRequest()).handle!;
+		const stopped = admitted(scheduler.admit(makeRequest()));
 		expect(scheduler.cancelRun(stopped.runId, "remote")).toBe(true);
 		const stoppedResult = await stopped.completion;
 		expect(stoppedResult.status).toBe("cancelled");
@@ -149,7 +152,7 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 		expect(stoppedResult.summaryText).toBe("Partial before abort");
 
 		const caller = new AbortController();
-		const callerRun = scheduler.admit(makeRequest({ signal: caller.signal })).handle!;
+		const callerRun = admitted(scheduler.admit(makeRequest({ signal: caller.signal })));
 		caller.abort();
 		const callerResult = await callerRun.completion;
 		expect(callerResult.status).toBe("cancelled");
@@ -160,7 +163,7 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 		const scheduler = new SubagentRunScheduler({
 			executeRun: async () => ({ status: "completed", complete: true, summaryText: "ok" }),
 		});
-		const handle = scheduler.admit(makeRequest()).handle!;
+		const handle = admitted(scheduler.admit(makeRequest()));
 		await handle.completion;
 
 		expect(scheduler.cancelRun(handle.runId, "user")).toBe(false);
@@ -174,7 +177,7 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 			executeRun: () => stuckGate.promise,
 		});
 
-		const run = scheduler.admit(makeRequest()).handle!;
+		const run = admitted(scheduler.admit(makeRequest()));
 		scheduler.cancelRun(run.runId, "user");
 		expect(scheduler.getRun(run.runId)?.status).toBe("stopping");
 		expect(scheduler.listActiveRuns().map((r) => r.runId)).toEqual([run.runId]);
@@ -200,7 +203,7 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 				return { ...record, reportPath: "/durable/report.md" };
 			},
 		});
-		const handle = scheduler.admit(makeRequest()).handle!;
+		const handle = admitted(scheduler.admit(makeRequest()));
 		let resolved = false;
 		void handle.completion.then(() => {
 			resolved = true;
@@ -232,7 +235,7 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 			},
 			onStateChange: (record) => changes.push(record.status),
 		});
-		const done = await scheduler.admit(makeRequest()).handle!.completion;
+		const done = await admitted(scheduler.admit(makeRequest())).completion;
 		expect(done).toMatchObject({ status: "failed", complete: false });
 		expect(done.errorMessage).toMatch(/finaliz.*disk full/i);
 		expect(changes.at(-1)).toBe("failed");
@@ -257,7 +260,7 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 				if (settled) changesAfterSettled++;
 			},
 		});
-		const handle = scheduler.admit(makeRequest()).handle!;
+		const handle = admitted(scheduler.admit(makeRequest()));
 		scheduler.cancelRuns((record) => record.parentSessionId === "sess_1", "Parent session changed");
 		const drained = scheduler.waitForSettled().then(() => {
 			settled = true;
@@ -298,11 +301,11 @@ describe("Issue #63 — A run's controller only affects its own generation", () 
 				return gate.promise;
 			},
 		});
-		const handle = scheduler.admit(makeRequest()).handle!;
+		const handle = admitted(scheduler.admit(makeRequest()));
 		gates[0].resolve({ status: "completed", complete: true, summaryText: "first" });
 		await handle.completion;
 
-		const resumed = scheduler.resume(handle.runId, undefined).handle!;
+		const resumed = admitted(scheduler.resume(handle.runId, undefined));
 		const before = scheduler.getRun(handle.runId);
 		exercise(controllers[0], "old");
 		expect(scheduler.getRun(handle.runId)).toEqual(before);
