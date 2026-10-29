@@ -11,12 +11,17 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
-import { type AdmissionContext, createRunAdmission, type RunExecutionContext } from "./admission.ts";
+import {
+	type AdmissionContext,
+	createRunAdmission,
+	formatRunLabel,
+	type RunExecutionContext,
+	SUBAGENT_TOOL_PARAMETERS,
+} from "./admission.ts";
 import {
 	type AgentDefinitionCatalog,
 	discoverAgentDefinitions,
 	formatAgentRoutingDescriptions,
-	SUBAGENT_THINKING_LEVELS,
 } from "./definitions.ts";
 import {
 	PARENT_MESSAGE_ADDRESS,
@@ -550,7 +555,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					reason: resumed.error,
 				});
 			}
-			const label = run.name ? `"${run.name}" (${run.runId})` : `"${run.runId}"`;
+			const label = formatRunLabel(run);
 			void resumed.handle.completion.then((completedRecord) => {
 				const envelope = buildSubagentResultEnvelope(completedRecord, MAX_PARENT_REPORT_BYTES);
 				scheduleBackgroundDelivery(completedRecord, envelope.parentText, envelope.details);
@@ -703,53 +708,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					},
 				};
 			},
-			parameters: Type.Object({
-				agent: Type.Union([
-					Type.String({
-						description: "Saved subagent role name (for example 'explorer' or 'reviewer').",
-					}),
-					Type.Object(
-						{
-							name: Type.String({ description: "Run-local role name; never saved." }),
-							description: Type.String({ description: "One-line purpose of this role." }),
-							instructions: Type.String({ description: "System instructions for the child." }),
-							tools: Type.Optional(Type.Array(Type.String())),
-							model: Type.Optional(Type.String({ description: '"inherit" or "provider/model".' })),
-							thinkingLevel: Type.Optional(
-								Type.String({ description: "Default thinking level for this role." }),
-							),
-						},
-						{ additionalProperties: false, description: "Inline role used only for this run." },
-					),
-				]),
-				name: Type.Optional(
-					Type.String({
-						description:
-							'Unique name for this child among running agents, used to address it (lowercase letters, digits, "-", "_"). Defaults to "<role>-<n>".',
-					}),
-				),
-				task: Type.String({
-					description:
-						"Self-contained task instructions with explicit file paths, symbols, or diff context (max 32 KiB).",
-				}),
-				model: Type.Optional(
-					Type.String({
-						description:
-							'Model for this run: "provider/model" from subagent_models, or "inherit" for the parent model. Overrides the role.',
-					}),
-				),
-				thinkingLevel: Type.Optional(
-					Type.String({
-						description: `Thinking level for this run (${SUBAGENT_THINKING_LEVELS.join(", ")}), or "inherit" for the parent level. Overrides the role.`,
-					}),
-				),
-				background: Type.Optional(
-					Type.Boolean({
-						description:
-							"When true, launch in the background and deliver the completed report back to this session branch.",
-					}),
-				),
-			}),
+			parameters: SUBAGENT_TOOL_PARAMETERS,
 			execute: async (toolCallId, params, signal, _onUpdate, toolCtx) => {
 				const ctx = toolCtx ?? parentScope.context();
 				if (!ctx) {

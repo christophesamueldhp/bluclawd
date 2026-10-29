@@ -1,3 +1,4 @@
+import { type Static, Type } from "@earendil-works/pi-ai";
 import {
 	type ExtensionContext,
 	type ExtensionToolContext,
@@ -11,7 +12,6 @@ import {
 	type AgentDefinitionCatalog,
 	createInlineAgentDefinition,
 	discoverAgentDefinitions,
-	type InlineAgentRole,
 	isSubagentThinkingLevel,
 	parseSubagentModelSpec,
 	resolveAgentDefinition,
@@ -53,13 +53,56 @@ export interface RunExecutionContext {
 	projectTrusted: boolean;
 }
 
-export interface LaunchParams {
-	agent: string | InlineAgentRole;
-	task?: string;
-	name?: string;
-	model?: string;
-	thinkingLevel?: string;
-	background?: boolean;
+export const SUBAGENT_TOOL_PARAMETERS = Type.Object({
+	agent: Type.Union([
+		Type.String({
+			description: "Saved subagent role name (for example 'explorer' or 'reviewer').",
+		}),
+		Type.Object(
+			{
+				name: Type.String({ description: "Run-local role name; never saved." }),
+				description: Type.String({ description: "One-line purpose of this role." }),
+				instructions: Type.String({ description: "System instructions for the child." }),
+				tools: Type.Optional(Type.Array(Type.String())),
+				model: Type.Optional(Type.String({ description: '"inherit" or "provider/model".' })),
+				thinkingLevel: Type.Optional(Type.String({ description: "Default thinking level for this role." })),
+			},
+			{ additionalProperties: false, description: "Inline role used only for this run." },
+		),
+	]),
+	name: Type.Optional(
+		Type.String({
+			description:
+				'Unique name for this child among running agents, used to address it (lowercase letters, digits, "-", "_"). Defaults to "<role>-<n>".',
+		}),
+	),
+	task: Type.String({
+		description: "Self-contained task instructions with explicit file paths, symbols, or diff context (max 32 KiB).",
+	}),
+	model: Type.Optional(
+		Type.String({
+			description:
+				'Model for this run: "provider/model" from subagent_models, or "inherit" for the parent model. Overrides the role.',
+		}),
+	),
+	thinkingLevel: Type.Optional(
+		Type.String({
+			description: `Thinking level for this run (${SUBAGENT_THINKING_LEVELS.join(", ")}), or "inherit" for the parent level. Overrides the role.`,
+		}),
+	),
+	background: Type.Optional(
+		Type.Boolean({
+			description:
+				"When true, launch in the background and deliver the completed report back to this session branch.",
+		}),
+	),
+});
+
+export type LaunchParams = Static<typeof SUBAGENT_TOOL_PARAMETERS>;
+
+/** How a run is named in replies: its quoted name and run ID, or its quoted run ID when unnamed. */
+export function formatRunLabel(run: Pick<SubagentRunRecord, "name" | "runId">): string {
+	return run.name ? `"${run.name}" (${run.runId})` : `"${run.runId}"`;
 }
 
 export interface LaunchRequest {
@@ -201,7 +244,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const projectTrusted = ctx.isProjectTrusted();
 			const inlineRole = typeof params.agent === "string" ? undefined : params.agent;
 			const agentName = (typeof params.agent === "string" ? params.agent : params.agent.name).trim();
-			const taskText = params.task ?? "";
+			const taskText = params.task;
 			const isBackground = params.background === true;
 
 			if (!agentName && !inlineRole) return reject("Missing required parameter: agent");
@@ -342,7 +385,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		},
 
 		async resume(run, buildPrompt, ctx) {
-			const label = run.name ? `"${run.name}" (${run.runId})` : `"${run.runId}"`;
+			const label = formatRunLabel(run);
 			const invalidated: AdmissionResult = {
 				ok: false,
 				refusal: "invalidated",
