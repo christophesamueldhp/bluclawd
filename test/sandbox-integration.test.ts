@@ -7,7 +7,6 @@
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -15,7 +14,7 @@ import { runForSubagent } from "../ext/_shared/subagent-commands.ts";
 import { runtimeConfig } from "../ext/sandbox/config.ts";
 import { networkAsker } from "../ext/sandbox/index.ts";
 import { setSandboxEngine, startSandbox, stopSandbox, wrapExec } from "../ext/sandbox/runtime.ts";
-import { readHeartbeats } from "./helpers/heartbeats.ts";
+import { beatsFromNow, descendantCommand, leavingBehind } from "./helpers/heartbeats.ts";
 
 const supported =
 	process.platform !== "win32" &&
@@ -112,21 +111,14 @@ describe.skipIf(!supported)(
 
 		it("ends a descendant the command detaches and leaves running when it exits", async () => {
 			const heartbeats = join(dir, "heartbeat.jsonl");
-			const descendants = fileURLToPath(new URL("./fixtures/subagent-writer/descendants.mjs", import.meta.url));
-			const quote = (text: string) => `'${text.replace(/'/g, "'\\''")}'`;
 			const lifetimeMs = 3000;
-			const command = [process.execPath, descendants, "detached", heartbeats, "sandbox-it-probe", String(lifetimeMs)]
-				.map(quote)
-				.join(" ");
-			// The command returns once its descendant beats, leaving it behind.
-			const awaitBeat = `for _ in {1..500}; do [ -s ${quote(heartbeats)} ] && break; sleep 0.01; done`;
+			const command = descendantCommand("detached", heartbeats, "sandbox-it-probe", lifetimeMs);
 			const started = Date.now();
 			try {
-				await run(`${command} & ${awaitBeat}`);
-				const atSettlement = readHeartbeats(heartbeats).at(-1)?.sequence ?? 0;
-				await new Promise((resolve) => setTimeout(resolve, 150));
-				expect(atSettlement).toBeGreaterThan(0);
-				expect(readHeartbeats(heartbeats).filter((beat) => beat.sequence > atSettlement)).toEqual([]);
+				await run(leavingBehind(command, heartbeats));
+				const result = await beatsFromNow(heartbeats);
+				expect(result.started).toBe(true);
+				expect(result.stillWriting).toEqual([]);
 			} finally {
 				// An unreaped descendant expires on its own; wait it out rather than kill by PID.
 				await new Promise((resolve) => setTimeout(resolve, Math.max(0, started + lifetimeMs + 500 - Date.now())));

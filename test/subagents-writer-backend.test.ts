@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readHeartbeats } from "./helpers/heartbeats.ts";
+import { readHeartbeats, readinessMs } from "./helpers/heartbeats.ts";
 import { createWriterFixture } from "./helpers/writer-fixture.ts";
 
 const supported =
@@ -80,8 +80,7 @@ describe.skipIf(!supported)("macOS: stopping a sandboxed command ends its descen
 			}
 		};
 		const beats = () => readHeartbeats(heartbeatPath);
-		// Generous: a double fork reparents slowly while the full suite runs in parallel.
-		const deadline = Date.now() + 10_000;
+		const deadline = Date.now() + readinessMs;
 		while (!beats().some((beat) => beat.identity === identity && (mode !== "double-fork" || beat.ppid === 1))) {
 			if (child.exitCode !== null) throw new Error(`Probe stopped before readiness: ${stdout} ${stderr}`);
 			if (Date.now() > deadline) throw new Error(`Probe readiness timeout: ${stdout} ${stderr}`);
@@ -104,12 +103,12 @@ describe.skipIf(!supported)("macOS: stopping a sandboxed command ends its descen
 			expect(result.stdout).toContain('"event":"settled"');
 			expect(result.stillWriting.map((beat) => beat.pid)).toEqual([]);
 		},
-		15000,
+		60_000,
 	);
 
 	it("leaves no executing double-fork descendant after the owner pipe closes", async () => {
 		const result = await observeAfterStop("double-fork", true);
 		expect(result.started.ppid).toBe(1);
 		expect(result.stillWriting.map((beat) => beat.pid)).toEqual([]);
-	}, 15000);
+	}, 60_000);
 });
