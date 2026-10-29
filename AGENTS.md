@@ -15,3 +15,7 @@ Single-context: one root `GLOSSARY.md` plus `docs/adr/`. See `docs/agents/domain
 ### Remote web app
 
 To check a change to `daemon/remote/web/` in a browser, run `node scripts/remote-web-dev.ts`: the app against fake panes, with its URL and pairing code printed.
+
+### Flaky tests
+
+To reproduce a test that fails only under load, run `scripts/stress-test.sh <test file> [-t <name>]`: it runs vitest 16-wide and counts the failed runs.
