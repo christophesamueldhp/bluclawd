@@ -22,6 +22,10 @@ _Avoid_: reconciling, double counting
 The checks that accept or reject a launch or a resume before a run starts: deny rules, the role's tools, the model and thinking level, the run's name, and whether the orchestrator's session and branch are still current.
 _Avoid_: validation, preflight
 
+**Parent scope**:
+The orchestrator's session, and its session epoch, that a run or message belongs to. The session epoch changes whenever that session is switched, forked, replaced, reloaded or shut down, which makes everything of the earlier epoch stale. A run whose originating entry is no longer on the active branch is out of scope too.
+_Avoid_: generation, runtime generation
+
 **Resume**:
 Continuing a completed run with a new message from the orchestrator, as its next generation, with its earlier context.
 _Avoid_: restart, rerun

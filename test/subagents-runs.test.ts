@@ -18,7 +18,7 @@ function deferred<T = void>() {
 function makeRequest(overrides: Partial<Parameters<SubagentRunScheduler["admit"]>[0]> = {}) {
 	return {
 		parentSessionId: "sess_1",
-		runtimeGeneration: 1,
+		sessionEpoch: 1,
 		parentTurnId: "turn_1",
 		originToolCallId: `call_${Math.random().toString(36).slice(2, 8)}`,
 		originEntryId: "entry_1",
@@ -258,7 +258,7 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 			},
 		});
 		const handle = scheduler.admit(makeRequest()).handle!;
-		scheduler.cancelRunsForSession("sess_1");
+		scheduler.cancelRuns((record) => record.parentSessionId === "sess_1", "Parent session changed");
 		const drained = scheduler.waitForSettled().then(() => {
 			settled = true;
 		});

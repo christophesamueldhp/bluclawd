@@ -6,7 +6,7 @@ import {
 	subagentMessagePayload,
 } from "../ext/subagents/messages.ts";
 
-const scope = { parentSessionId: "sess_1", runtimeGeneration: 1 };
+const scope = { parentSessionId: "sess_1", sessionEpoch: 1 };
 
 describe("Ticket #13 — Subagent message routing", () => {
 	it("gives concurrent senders their bound identities and one ordering", async () => {
@@ -42,8 +42,8 @@ describe("Ticket #13 — Subagent message routing", () => {
 	it("returns explicit outcomes for foreign-scope, invalidated, disposed, finished and unknown recipients", async () => {
 		const bus = new SubagentMessageBus();
 		const deliver = async () => {};
-		bus.register("sub_foreign", { scope: { parentSessionId: "sess_2", runtimeGeneration: 1 }, deliver });
-		bus.register("sub_stale", { scope: { parentSessionId: "sess_1", runtimeGeneration: 0 }, deliver });
+		bus.register("sub_foreign", { scope: { parentSessionId: "sess_2", sessionEpoch: 1 }, deliver });
+		bus.register("sub_stale", { scope: { parentSessionId: "sess_1", sessionEpoch: 0 }, deliver });
 		bus.register("sub_disposed", {
 			scope,
 			deliver: async () => {

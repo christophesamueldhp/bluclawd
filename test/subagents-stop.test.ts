@@ -34,7 +34,7 @@ function makeAgentRunRecord(overrides: Partial<SubagentRunRecord> = {}): Subagen
 	return {
 		runId: "sub_99_1",
 		parentSessionId: "sess_main",
-		runtimeGeneration: 1,
+		sessionEpoch: 1,
 		parentTurnId: "turn_1",
 		originToolCallId: "call_1",
 		agentName: "explorer",

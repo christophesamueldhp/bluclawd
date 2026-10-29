@@ -20,6 +20,7 @@ import {
 } from "./definitions.ts";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
+import type { ParentScopeChecks } from "./parent-scope.ts";
 import {
 	captureWorkspaceSnapshot,
 	type ParentToolSnapshot,
@@ -87,8 +88,7 @@ export interface RunAdmissionDeps {
 	catalog: () => AgentDefinitionCatalog | undefined;
 	loadout: () => ToolLoadout | undefined;
 	parentThinkingLevel: () => string;
-	runtimeGeneration: () => number;
-	activeParentSessionId: () => string | undefined;
+	scope: ParentScopeChecks;
 }
 
 export interface AdmissionResult {
@@ -192,7 +192,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 
 	return {
 		async launch({ toolCallId, parentTurnId, params, signal }, ctx) {
-			const dispatchGeneration = deps.runtimeGeneration();
+			const dispatched = deps.scope.current();
+			if (!dispatched) return reject("Subagent runtime is not initialized for this session.");
 			const parentSessionId = ctx.sessionManager.getSessionId();
 			const originEntryId = ctx.sessionManager.getLeafId() ?? undefined;
 			const agentDir = deps.agentDir();
@@ -271,11 +272,11 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			if (!childModel) return reject(modelError);
 
 			// Everything from here to admit runs without awaiting, so the session cannot change in between.
-			const activeParentSessionId = deps.activeParentSessionId();
 			if (
-				deps.runtimeGeneration() !== dispatchGeneration ||
-				(activeParentSessionId && activeParentSessionId !== parentSessionId) ||
-				(originEntryId && !ctx.sessionManager.getBranch().some((entry) => entry.id === originEntryId))
+				!dispatched ||
+				dispatched.parentSessionId !== parentSessionId ||
+				!deps.scope.inScope(dispatched) ||
+				!deps.scope.onBranch(originEntryId)
 			) {
 				return reject("Parent session or branch changed before subagent admission; request cancelled.");
 			}
@@ -319,7 +320,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 
 			const admitRes = deps.scheduler.admit({
 				parentSessionId,
-				runtimeGeneration: dispatchGeneration,
+				sessionEpoch: dispatched.sessionEpoch,
 				parentTurnId,
 				originToolCallId: toolCallId,
 				originEntryId,
@@ -349,16 +350,10 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				error: `${label} belongs to a session that was reloaded or replaced; spawn a new subagent and point it at ${run.reportPath ?? "the earlier report"}.`,
 			};
 			const unavailable = (error: string): AdmissionResult => ({ ok: false, refusal: "unavailable", error });
-			const dispatchGeneration = deps.runtimeGeneration();
 			// Checked again after the model is resolved, since another message may resume the run meanwhile.
 			const checkResumable = (): { transcriptPath?: string; refused?: AdmissionResult } => {
 				const current = deps.scheduler.getRun(run.runId);
-				if (
-					!current ||
-					current.runtimeGeneration !== dispatchGeneration ||
-					deps.runtimeGeneration() !== dispatchGeneration ||
-					deps.activeParentSessionId() !== current.parentSessionId
-				) {
+				if (!current || !deps.scope.inScope(current)) {
 					return { refused: invalidated };
 				}
 				if (current.status !== "completed") {

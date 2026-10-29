@@ -185,7 +185,7 @@ describe("Task 4 (M1) — Child runner", () => {
 
 			const admitted = scheduler.admit({
 				parentSessionId: "parent_1",
-				runtimeGeneration: 1,
+				sessionEpoch: 1,
 				parentTurnId: "turn_1",
 				originToolCallId: "call_1",
 				agentName: "explorer",
@@ -258,7 +258,7 @@ describe("Task 4 (M1) — Child runner", () => {
 
 		const loopHandle = scheduler.admit({
 			parentSessionId: "p1",
-			runtimeGeneration: 1,
+			sessionEpoch: 1,
 			parentTurnId: "t1",
 			originToolCallId: "c_loop",
 			agentName: "explorer",
@@ -289,7 +289,7 @@ describe("Task 4 (M1) — Child runner", () => {
 
 		const errHandle = scheduler.admit({
 			parentSessionId: "p1",
-			runtimeGeneration: 1,
+			sessionEpoch: 1,
 			parentTurnId: "t1",
 			originToolCallId: "c_err",
 			agentName: "explorer",

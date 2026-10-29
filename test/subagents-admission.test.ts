@@ -2,7 +2,13 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxProvider, Type } from "@earendil-works/pi-ai";
-import { ModelRegistry, ModelRuntime, SessionManager, type ToolLoadout } from "@earendil-works/pi-coding-agent";
+import {
+	type ExtensionContext,
+	ModelRegistry,
+	ModelRuntime,
+	SessionManager,
+	type ToolLoadout,
+} from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	type AdmissionContext,
@@ -12,6 +18,8 @@ import {
 	type RunAdmissionDeps,
 	type RunExecutionContext,
 } from "../ext/subagents/admission.ts";
+import { SubagentMessageBus } from "../ext/subagents/messages.ts";
+import { createParentScope } from "../ext/subagents/parent-scope.ts";
 import { type SubagentRunRecord, SubagentRunScheduler } from "../ext/subagents/runs.ts";
 
 const tempDirs: string[] = [];
@@ -83,15 +91,21 @@ async function setup(
 				: new Promise(() => {}),
 	});
 	let loadout = loadoutOf(["probe"]);
-	let generation = 0;
+	const scope = createParentScope({
+		bus: new SubagentMessageBus(),
+		cancelRuns: () => {},
+		send: () => {},
+		onChange: () => {},
+		batchWindowMs: 0,
+	});
+	scope.enter({ sessionManager } as unknown as ExtensionContext, "replaced");
 	const deps: RunAdmissionDeps = {
 		scheduler,
 		agentDir: () => agentDir,
 		catalog: () => undefined,
 		loadout: () => loadout,
 		parentThinkingLevel: () => "low",
-		runtimeGeneration: () => generation,
-		activeParentSessionId: () => sessionManager.getSessionId(),
+		scope,
 	};
 	const ctx: AdmissionContext = {
 		cwd,
@@ -131,9 +145,7 @@ async function setup(
 		scheduler,
 		launch,
 		storageDir,
-		bumpGeneration: () => {
-			generation++;
-		},
+		invalidateSession: () => scope.invalidate("Parent session switching"),
 	};
 }
 
@@ -296,7 +308,7 @@ describe("Run admission", () => {
 	});
 
 	it("refuses a launch whose session was replaced while model authentication was awaited", async () => {
-		const { runtime, launch, bumpGeneration, storageDir, scheduler } = await setup();
+		const { runtime, launch, invalidateSession, storageDir, scheduler } = await setup();
 		let releaseAuth!: () => void;
 		const gate = new Promise<void>((resolve) => {
 			releaseAuth = resolve;
@@ -328,7 +340,7 @@ describe("Run admission", () => {
 		suspend = true;
 		const pending = launch({ agent: "explorer", task: "Inspect a missing target" });
 		await reached;
-		bumpGeneration();
+		invalidateSession();
 		releaseAuth();
 		expect((await pending).error).toBe(
 			"Parent session or branch changed before subagent admission; request cancelled.",
@@ -397,10 +409,10 @@ describe("Run admission", () => {
 		expect(notDone).toMatchObject({ ok: false, refusal: "unavailable" });
 		expect(notDone.error).toMatch(/only a completed subagent can be resumed/);
 
-		const { launch, resume, bumpGeneration } = await setup({ firstGenerationCompletes: true });
+		const { launch, resume, invalidateSession } = await setup({ firstGenerationCompletes: true });
 
 		const completed = await (await launch({ agent: "explorer", task: "x" })).handle!.completion;
-		bumpGeneration();
+		invalidateSession();
 		const stale = await resume(completed, () => "x").result;
 		expect(stale).toMatchObject({ ok: false, refusal: "invalidated" });
 		expect(stale.error).toMatch(/reloaded or replaced; spawn a new subagent/);

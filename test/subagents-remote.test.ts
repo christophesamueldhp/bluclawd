@@ -126,7 +126,7 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 		const record = {
 			runId: "sub_77_1",
 			parentSessionId: "sess_A",
-			runtimeGeneration: 1,
+			sessionEpoch: 1,
 			parentTurnId: "turn_1",
 			originToolCallId: "call_1",
 			agentName: "explorer",

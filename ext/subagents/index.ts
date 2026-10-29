@@ -3,7 +3,6 @@ import {
 	type AgentSession,
 	defineTool,
 	type ExtensionAPI,
-	type ExtensionContext,
 	getAgentDir,
 	type InlineExtension,
 	type ToolDefinition,
@@ -12,7 +11,6 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
-import { deliverOrHold } from "../background-bash/notification-hold.ts";
 import { type AdmissionContext, createRunAdmission, type RunExecutionContext } from "./admission.ts";
 import {
 	type AgentDefinitionCatalog,
@@ -24,12 +22,11 @@ import {
 	PARENT_MESSAGE_ADDRESS,
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
 	SUBAGENT_MESSAGE_TOOL,
-	type SubagentMessage,
 	SubagentMessageBus,
 	type SubagentMessageReceipt,
-	type SubagentMessageScope,
 	subagentMessagePayload,
 } from "./messages.ts";
+import { createParentScope, type ParentInboxItem, type ParentScope } from "./parent-scope.ts";
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
 import { createParentToolProxies, describeSubagentModels, runSubagent } from "./runner.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
@@ -49,6 +46,12 @@ export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const BACKGROUND_BATCH_WINDOW_MS = 40;
 const SUBAGENT_ROSTER_TOOL = "subagent_roster";
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent that works in this same checkout";
+
+/** A finished background run, as the orchestrator is told about it. */
+interface ParentNotice {
+	parentText: string;
+	details: SubagentResultDetails;
+}
 
 export interface SubagentExtensionOptions {
 	agentDir?: string;
@@ -93,28 +96,25 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 	return function subagentsFactory(pi: ExtensionAPI): void {
 		const resolveAgentDir = () => options.agentDir ?? getAgentDir();
 
-		let runtimeGeneration = 0;
-		let activeCtx: ExtensionContext | undefined;
-		let activeParentSessionId: string | undefined;
 		let activeTurnIndex = 0;
 		let catalog: AgentDefinitionCatalog | undefined;
 		let unpublishTasks: (() => void) | undefined;
 		let latestLoadout: ToolLoadout | undefined;
 
-		// Completion notices and child messages for the orchestrator, delivered together in arrival order.
-		let parentInbox: Array<
-			| {
-					kind: "notice";
-					record: Readonly<SubagentRunRecord>;
-					parentText: string;
-					details: SubagentResultDetails;
-			  }
-			| { kind: "message"; message: SubagentMessage; scope: SubagentMessageScope }
-		> = [];
-		let batchTimer: ReturnType<typeof setTimeout> | undefined;
 		const messageBus = new SubagentMessageBus((record, senderScope) =>
 			appendSubagentMessageRecord(resolveAgentDir(), senderScope.parentSessionId, { ...record, at: Date.now() }),
 		);
+		const parentScope = createParentScope<ParentNotice>({
+			bus: messageBus,
+			cancelRuns: (where, reason) => scheduler.cancelRuns(where, reason),
+			send: (items) => sendToParent(items),
+			onChange: () => {
+				refreshFooterStatus();
+				notifyAgentTasksChanged();
+			},
+			batchWindowMs: options.batchWindowMs ?? BACKGROUND_BATCH_WINDOW_MS,
+		});
+		const activeSessionId = () => parentScope.current()?.parentSessionId;
 
 		const messageParameters = Type.Object(
 			{
@@ -150,7 +150,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						`- ${run.name ?? run.runId} (${run.agentName}, ${run.runId}, ${run.status}): ${run.taskSummary}${run.runId === self ? " (you)" : ""}`,
 				);
 
-		const createChildRosterTool = (address: string, scope: SubagentMessageScope): ToolDefinition =>
+		const createChildRosterTool = (address: string, scope: ParentScope): ToolDefinition =>
 			defineTool({
 				name: SUBAGENT_ROSTER_TOOL,
 				label: "List agents",
@@ -171,11 +171,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				},
 			});
 
-		const createChildMessageTool = (
-			address: string,
-			name: string | undefined,
-			scope: SubagentMessageScope,
-		): ToolDefinition =>
+		const createChildMessageTool = (address: string, name: string | undefined, scope: ParentScope): ToolDefinition =>
 			defineTool({
 				name: SUBAGENT_MESSAGE_TOOL,
 				label: "Message agent",
@@ -188,103 +184,57 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				},
 			});
 
-		const isOwnedAndValid = (record: Readonly<SubagentRunRecord>, checkBranch = true): boolean => {
-			if (!activeCtx) return false;
-			if (runtimeGeneration !== record.runtimeGeneration) return false;
-			try {
-				const currentSessionId = activeCtx.sessionManager?.getSessionId?.();
-				if (!currentSessionId || currentSessionId !== record.parentSessionId) return false;
-				if (checkBranch && record.originEntryId) {
-					const branch = activeCtx.sessionManager?.getBranch?.() ?? [];
-					if (!branch.some((entry: { id?: string }) => entry.id === record.originEntryId)) return false;
-				}
-				return true;
-			} catch {
-				// SDK disposal can invalidate the context without emitting session_shutdown.
-				return false;
-			}
-		};
-
 		const refreshFooterStatus = () => {
 			try {
-				if (!activeCtx?.hasUI) return;
-				const activeRuns = scheduler.listActiveRuns(activeParentSessionId);
+				const ctx = parentScope.context();
+				if (!ctx?.hasUI) return;
+				const activeRuns = scheduler.listActiveRuns(activeSessionId());
 				if (activeRuns.length === 0) {
-					activeCtx.ui.setStatus(STATUS_KEYS.subagents, undefined);
+					ctx.ui.setStatus(STATUS_KEYS.subagents, undefined);
 				} else {
 					const runningCount = activeRuns.filter((r) => r.status === "running" || r.status === "starting").length;
 					const stoppingCount = activeRuns.filter((r) => r.status === "stopping").length;
 					const parts: string[] = [];
 					if (runningCount > 0) parts.push(`${runningCount} subagent${runningCount === 1 ? "" : "s"}`);
 					if (stoppingCount > 0) parts.push(`${stoppingCount} stopping`);
-					activeCtx.ui.setStatus(STATUS_KEYS.subagents, activeCtx.ui.theme.fg("dim", parts.join(" · ")));
+					ctx.ui.setStatus(STATUS_KEYS.subagents, ctx.ui.theme.fg("dim", parts.join(" · ")));
 				}
 			} catch {
 				// Ignore stale UI context errors
 			}
 		};
 
-		const flushParentInbox = () => {
-			batchTimer = undefined;
-			if (parentInbox.length === 0) return;
-			const batch = parentInbox.splice(0);
-			const deliveringGeneration = runtimeGeneration;
-			const deliveringSessionId = activeParentSessionId;
+		const sendToParent = (items: readonly ParentInboxItem<ParentNotice>[]) => {
+			const notices = items.flatMap((item) => (item.kind === "notice" ? [item.notice.details] : []));
+			const messages = items.flatMap((item) => (item.kind === "message" ? [item.message] : []));
+			const texts = items.map((item) =>
+				item.kind === "notice"
+					? item.notice.parentText
+					: subagentMessagePayload(item.message, senderRole(item.message.from)).content[0].text,
+			);
+			const combinedText =
+				items.length === 1
+					? texts[0]
+					: [notices.length > 1 ? `[${notices.length} background subagents finished]` : undefined, ...texts]
+							.filter((text) => text !== undefined)
+							.join("\n\n---\n\n");
 
-			deliverOrHold(() => {
-				if (!activeCtx || runtimeGeneration !== deliveringGeneration) return;
-				if (activeParentSessionId !== deliveringSessionId) return;
-
-				const items = batch.filter((item) =>
-					item.kind === "notice"
-						? isOwnedAndValid(item.record, true)
-						: item.scope.runtimeGeneration === runtimeGeneration &&
-							item.scope.parentSessionId === activeParentSessionId,
+			// One message wakes an idle orchestrator once, or steers a busy one at its next boundary.
+			try {
+				pi.sendMessage(
+					{
+						customType: notices.length > 0 ? SUBAGENT_NOTIFICATION_CUSTOM_TYPE : SUBAGENT_MESSAGE_CUSTOM_TYPE,
+						content: [{ type: "text", text: combinedText }],
+						display: true,
+						details: items.length === 1 ? (notices[0] ?? messages[0]) : { runs: notices, messages },
+					},
+					{
+						deliverAs: "steer",
+						triggerTurn: true,
+					},
 				);
-				if (items.length === 0) return;
-				const notices = items.flatMap((item) => (item.kind === "notice" ? [item.details] : []));
-				const messages = items.flatMap((item) => (item.kind === "message" ? [item.message] : []));
-				const texts = items.map((item) =>
-					item.kind === "notice"
-						? item.parentText
-						: subagentMessagePayload(item.message, senderRole(item.message.from)).content[0].text,
-				);
-				const combinedText =
-					items.length === 1
-						? texts[0]
-						: [notices.length > 1 ? `[${notices.length} background subagents finished]` : undefined, ...texts]
-								.filter((text) => text !== undefined)
-								.join("\n\n---\n\n");
-
-				// One message wakes an idle orchestrator once, or steers a busy one at its next boundary.
-				try {
-					pi.sendMessage(
-						{
-							customType: notices.length > 0 ? SUBAGENT_NOTIFICATION_CUSTOM_TYPE : SUBAGENT_MESSAGE_CUSTOM_TYPE,
-							content: [{ type: "text", text: combinedText }],
-							display: true,
-							details: items.length === 1 ? (notices[0] ?? messages[0]) : { runs: notices, messages },
-						},
-						{
-							deliverAs: "steer",
-							triggerTurn: true,
-						},
-					);
-				} catch {
-					// The session was disposed during the batch window without a session_shutdown; nobody is left to tell.
-				}
-			});
-		};
-
-		const scheduleParentFlush = () => {
-			const windowMs = options.batchWindowMs ?? BACKGROUND_BATCH_WINDOW_MS;
-			if (windowMs <= 0) {
-				flushParentInbox();
-				return;
-			}
-			if (!batchTimer) {
-				batchTimer = setTimeout(flushParentInbox, windowMs);
-				batchTimer.unref?.();
+			} catch {
+				// The session was disposed during the batch window without a session_shutdown; nobody is left to tell.
 			}
 		};
 
@@ -301,11 +251,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			) {
 				return;
 			}
-			if (!isOwnedAndValid(record, true)) {
-				return;
-			}
-			parentInbox.push({ kind: "notice", record, parentText, details });
-			scheduleParentFlush();
+			parentScope.notify(record, { parentText, details });
 		};
 
 		const scheduler = new SubagentRunScheduler<RunExecutionContext>({
@@ -338,7 +284,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				if (record.usageAttribution === "ledger") recordBackgroundUsageInLedger(agentDir, record);
 				const recordRes = writePersistedRunRecord(agentDir, record);
 				if (!recordRes.ok) throw new Error(recordRes.error ?? "run record was not persisted");
-				if (isOwnedAndValid(record, false)) {
+				if (parentScope.inScope(record)) {
 					appendParentRunReference(pi, record);
 				}
 				return record;
@@ -350,7 +296,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const { runId } = params.record;
 				const scope = {
 					parentSessionId: params.record.parentSessionId,
-					runtimeGeneration: params.record.runtimeGeneration,
+					sessionEpoch: params.record.sessionEpoch,
 				};
 				// Messages sent while the child session is still being created wait for it, or fail if it never starts.
 				let resolveSession!: (session: AgentSession) => void;
@@ -434,46 +380,17 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			catalog: () => catalog,
 			loadout: () => latestLoadout,
 			parentThinkingLevel: () => pi.getThinkingLevel(),
-			runtimeGeneration: () => runtimeGeneration,
-			activeParentSessionId: () => activeParentSessionId,
+			scope: parentScope,
 		});
 
 		const taskSource = createAgentTaskSource({
 			scheduler,
 			agentDir: resolveAgentDir,
-			activeParentSessionId: () => activeParentSessionId,
+			activeParentSessionId: activeSessionId,
 		});
 
-		const registerParentEndpoint = () => {
-			if (!activeParentSessionId) return;
-			const scope = { parentSessionId: activeParentSessionId, runtimeGeneration };
-			messageBus.register(PARENT_MESSAGE_ADDRESS, {
-				scope,
-				deliver: async (message) => {
-					parentInbox.push({ kind: "message", message, scope });
-					scheduleParentFlush();
-				},
-			});
-		};
-
-		const invalidateCurrentSessionRuns = (reason: string) => {
-			runtimeGeneration++;
-			// Children of the old generation now get "invalidated" when they message the orchestrator.
-			registerParentEndpoint();
-			if (batchTimer) {
-				clearTimeout(batchTimer);
-				batchTimer = undefined;
-			}
-			parentInbox = [];
-			if (activeParentSessionId) {
-				scheduler.cancelRunsForSession(activeParentSessionId, "session_invalidated", reason);
-			}
-			refreshFooterStatus();
-			notifyAgentTasksChanged();
-		};
-
 		const runLaunchedBy = (toolCallId: string) =>
-			scheduler.listActiveRuns(activeParentSessionId).find((run) => run.originToolCallId === toolCallId);
+			scheduler.listActiveRuns(activeSessionId()).find((run) => run.originToolCallId === toolCallId);
 
 		pi.on("message_start", async (event) => {
 			if (event.message.role !== "toolResult") return;
@@ -492,12 +409,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		});
 
 		pi.on("session_start", async (event, ctx) => {
-			if (activeParentSessionId) {
-				invalidateCurrentSessionRuns(`Session replaced (${event.reason})`);
-			}
-			runtimeGeneration++;
-			activeCtx = ctx;
-			activeParentSessionId = ctx.sessionManager.getSessionId();
+			parentScope.enter(ctx, `Session replaced (${event.reason})`);
+			const sessionId = ctx.sessionManager.getSessionId();
 			activeTurnIndex = 0;
 
 			const agentDir = resolveAgentDir();
@@ -529,12 +442,11 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 			// Reconcile orphaned runs referenced on the active branch from prior crashes
 			const branchEntries = ctx.sessionManager.getBranch();
-			const liveIds = new Set(scheduler.listActiveRuns(activeParentSessionId).map((r) => r.runId));
-			reconcileInterruptedRuns(agentDir, activeParentSessionId, branchEntries, liveIds);
+			const liveIds = new Set(scheduler.listActiveRuns(sessionId).map((r) => r.runId));
+			reconcileInterruptedRuns(agentDir, sessionId, branchEntries, liveIds);
 
 			unpublishTasks?.();
 			unpublishTasks = publishAgentTasks(taskSource);
-			registerParentEndpoint();
 			refreshFooterStatus();
 		});
 
@@ -543,35 +455,24 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		});
 
 		pi.on("session_before_switch", async () => {
-			invalidateCurrentSessionRuns("Parent session switching");
+			parentScope.invalidate("Parent session switching");
 			return undefined;
 		});
 
 		pi.on("session_before_fork", async () => {
-			invalidateCurrentSessionRuns("Parent session forking");
+			parentScope.invalidate("Parent session forking");
 			return undefined;
 		});
 
 		pi.on("session_tree", async (_event, ctx) => {
-			activeCtx = ctx;
-			const sessionId = ctx.sessionManager.getSessionId();
-			const activeEntryIds = new Set<string>(ctx.sessionManager.getBranch().map((entry) => entry.id));
-			scheduler.cancelRunsNotOnBranch(
-				sessionId,
-				activeEntryIds,
-				"Originating branch is no longer active after tree navigation",
-			);
-			refreshFooterStatus();
-			notifyAgentTasksChanged();
+			parentScope.navigate(ctx);
 		});
 
 		pi.on("session_shutdown", async () => {
-			invalidateCurrentSessionRuns("Parent session shutting down");
-			messageBus.unregister(PARENT_MESSAGE_ADDRESS, "has shut down");
+			parentScope.shutdown();
 			await scheduler.waitForSettled();
 			unpublishTasks?.();
 			unpublishTasks = undefined;
-			activeCtx = undefined;
 		});
 
 		pi.registerTool({
@@ -588,15 +489,15 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				"Send a message to a subagent by name or run ID (sub_…). A running child gets it at its next safe point without a new turn. A completed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
 			parameters: messageParameters,
 			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
-				const ctx = toolCtx ?? activeCtx;
-				if (!activeParentSessionId) {
+				const ctx = toolCtx ?? parentScope.context();
+				const scope = parentScope.current();
+				if (!scope) {
 					return {
 						content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
 						details: undefined,
 						isError: true,
 					};
 				}
-				const scope = { parentSessionId: activeParentSessionId, runtimeGeneration };
 				const to = params.to.trim();
 				const finished = findFinishedRun(to);
 				if (finished && ctx) return resumeRun(finished, params.content, scope, ctx);
@@ -606,23 +507,22 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		/** A run of this session that ended and is no longer reachable under the given name or run ID. */
 		const findFinishedRun = (target: string): Readonly<SubagentRunRecord> | undefined => {
-			if (!activeParentSessionId) return undefined;
-			const live = scheduler.listActiveRuns(activeParentSessionId);
+			const sessionId = activeSessionId();
+			if (!sessionId) return undefined;
+			const live = scheduler.listActiveRuns(sessionId);
 			if (live.some((run) => run.runId === target || run.name === target)) return undefined;
 			const known = scheduler
 				.listRuns()
-				.filter(
-					(run) => run.parentSessionId === activeParentSessionId && (run.runId === target || run.name === target),
-				)
+				.filter((run) => run.parentSessionId === sessionId && (run.runId === target || run.name === target))
 				.sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))[0];
 			// A reload replaces this extension, so a run from before it is only on disk.
-			return known ?? readPersistedRunRecord(resolveAgentDir(), activeParentSessionId, target);
+			return known ?? readPersistedRunRecord(resolveAgentDir(), sessionId, target);
 		};
 
 		const resumeRun = async (
 			run: Readonly<SubagentRunRecord>,
 			content: string,
-			scope: SubagentMessageScope,
+			scope: ParentScope,
 			ctx: AdmissionContext,
 		) => {
 			let receipt: SubagentMessageReceipt | undefined;
@@ -681,7 +581,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			].join("\n");
 		};
 		const findOwnedRun = (target: string) =>
-			scheduler.listActiveRuns(activeParentSessionId).find((run) => run.runId === target || run.name === target);
+			scheduler.listActiveRuns(activeSessionId()).find((run) => run.runId === target || run.name === target);
 
 		pi.registerTool({
 			name: "subagent_status",
@@ -699,7 +599,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const target = params.agent?.trim();
 				const runs = target
 					? [findOwnedRun(target)].filter((run) => run !== undefined)
-					: scheduler.listActiveRuns(activeParentSessionId);
+					: scheduler.listActiveRuns(activeSessionId());
 				const text =
 					runs.length > 0
 						? runs.map((run) => describeProgress(run, now)).join("\n\n")
@@ -767,7 +667,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				provider: Type.Optional(Type.String({ description: "Only list models from this provider." })),
 			}),
 			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
-				const ctx = toolCtx ?? activeCtx;
+				const ctx = toolCtx ?? parentScope.context();
 				if (!ctx) {
 					return {
 						content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
@@ -799,7 +699,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					descriptions: {
 						subagent: buildBaseSubagentDescription(
 							catalog,
-							activeCtx?.mode === "print" || activeCtx?.mode === "json",
+							parentScope.context()?.mode === "print" || parentScope.context()?.mode === "json",
 						),
 					},
 				};
@@ -852,7 +752,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				),
 			}),
 			execute: async (toolCallId, params, signal, _onUpdate, toolCtx) => {
-				const ctx = toolCtx ?? activeCtx;
+				const ctx = toolCtx ?? parentScope.context();
 				if (!ctx) {
 					return {
 						content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
