@@ -263,8 +263,8 @@ describe("Ticket #15 — Orchestrated acceptance scenarios on a shared fixture c
 								write("src/percent.js", `import { clamp } from "./util.js";\n${PERCENT}`),
 								write("test/percent.test.js", PERCENT_TEST),
 							]);
-						const waiting = until("REQUEST-CLAMP");
-						if (waiting) return waiting;
+						const pending = until("REQUEST-CLAMP");
+						if (pending) return pending;
 						if (!handedOff) {
 							handedOff = true;
 							return fauxAssistantMessage([say("bar", "HANDOFF-CLAMP: clamp is exported from src/util.js")]);
@@ -276,8 +276,8 @@ describe("Ticket #15 — Orchestrated acceptance scenarios on a shared fixture c
 							return fauxAssistantMessage([
 								say("percent", "REQUEST-CLAMP: please export clamp from src/util.js"),
 							]);
-						const waiting = until("HANDOFF-CLAMP");
-						if (waiting) return waiting;
+						const pending = until("HANDOFF-CLAMP");
+						if (pending) return pending;
 						if (!barWrote) {
 							barWrote = true;
 							return fauxAssistantMessage([
@@ -318,7 +318,7 @@ describe("Ticket #15 — Orchestrated acceptance scenarios on a shared fixture c
 		}
 	});
 
-	it("completes a handoff whose request arrives after more turns than a fixed response budget covers", async () => {
+	it("completes a handoff whose request arrives many turns after the wait began", async () => {
 		let ownerWrote = false;
 		const run = await runOrchestration({
 			files: OVERLAP_FILES,
@@ -326,15 +326,15 @@ describe("Ticket #15 — Orchestrated acceptance scenarios on a shared fixture c
 				[fauxAssistantMessage([spawn("owner", "Write src/late.js when asked."), spawn("asker", "Ask owner.")])],
 				{
 					owner: (_context, _step, until) => {
-						const waiting = until("REQUEST-LATE");
-						if (waiting) return waiting;
+						const pending = until("REQUEST-LATE");
+						if (pending) return pending;
 						if (!ownerWrote) {
 							ownerWrote = true;
 							return fauxAssistantMessage([write("src/late.js", "export const late = true;\n")]);
 						}
 						return fauxAssistantMessage("owner done.");
 					},
-					// Busy past the 80 responses every agent once shared, before its request goes out.
+					// Many turns pass before the request goes out, so the owner keeps waiting through them all.
 					asker: (_context, step) => {
 						if (step <= 90) return fauxAssistantMessage([bash("true")]);
 						if (step === 91)
@@ -451,7 +451,7 @@ describe("Ticket #15 — Failure, denial, cancellation and disposal scenarios", 
 			const last = context.messages.at(-1);
 			return last?.role === "toolResult" && last.isError
 				? fauxAssistantMessage("Stopped waiting.")
-				: fauxAssistantMessage([bash("echo tick >> progress.log; sleep 0.05")]);
+				: fauxAssistantMessage([bash(`echo tick >> progress.log; sleep ${POLL_MS / 1000}`)]);
 		},
 	});
 	const background = (name: string) =>
