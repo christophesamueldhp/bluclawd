@@ -51,4 +51,4 @@ Used by `/wayfinder`. The **map** is a single issue with **child** issues as tic
 
 ## When filing a flaky test
 
-Quote the failing assertion from `.vitest/last-run.json` (local runs keep it after the output is gone) and the command that reproduced it, e.g. `scripts/stress-test.sh <file> -t <name>` with its failure count.
+Quote the failing assertion from `.vitest/last-run.json` (local runs keep it after the output is gone) and the command that reproduced it, e.g. `scripts/stress-test.sh <file> -t <name>` with its failure count and the load it ran under (burners, a concurrent stress run).

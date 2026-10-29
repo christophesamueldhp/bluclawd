@@ -12,7 +12,7 @@ import { beatsFromNow, descendantCommand, leavingBehind, readHeartbeats, readine
 const lifetimeMs = 3000;
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => {
+describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", { timeout: 2 * readinessMs }, () => {
 	let dir: string;
 	let heartbeatPath: string;
 	let agentDir: string;
@@ -49,7 +49,7 @@ describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => 
 		if (stop === "abort") {
 			const deadline = Date.now() + readinessMs;
 			while (!beats().some((beat) => mode !== "double-fork" || beat.ppid === 1)) {
-				if (Date.now() > deadline) throw new Error("descendant never started");
+				if (Date.now() > deadline) throw new Error(`descendant never started within ${readinessMs}ms`);
 				await delay(10);
 			}
 			abort.abort();
@@ -58,21 +58,17 @@ describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => 
 		return beatsFromNow(heartbeatPath);
 	}
 
-	it.each(["detached", "double-fork"])(
-		"kills a %s descendant when the command is stopped",
-		async (mode) => {
-			const result = await run(mode, "abort");
-			expect(result.started).toBe(true);
-			expect(result.stillWriting).toEqual([]);
-		},
-		60_000,
-	);
+	it.each(["detached", "double-fork"])("kills a %s descendant when the command is stopped", async (mode) => {
+		const result = await run(mode, "abort");
+		expect(result.started).toBe(true);
+		expect(result.stillWriting).toEqual([]);
+	});
 
 	it("kills a detached descendant left behind when the command exits", async () => {
 		const result = await run("detached", "exit");
 		expect(result.started).toBe(true);
 		expect(result.stillWriting).toEqual([]);
-	}, 60_000);
+	});
 
 	it("kills a double-fork descendant when the process running the command dies", async () => {
 		const command = descendantCommand("double-fork", heartbeatPath, "reaper-probe", lifetimeMs);
@@ -89,7 +85,7 @@ describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => 
 		const exited = new Promise<void>((resolve) => owner.once("exit", () => resolve()));
 		const deadline = Date.now() + readinessMs;
 		while (!beats().some((beat) => beat.ppid === 1)) {
-			if (Date.now() > deadline) throw new Error("descendant never started");
+			if (Date.now() > deadline) throw new Error(`descendant never started within ${readinessMs}ms`);
 			await delay(10);
 		}
 		// As when pi is killed: nothing runs its stop, and the helper sees the end of its stdin.
@@ -97,5 +93,5 @@ describe.skipIf(process.platform !== "darwin")("reapDescendants (macOS)", () => 
 		await exited;
 		await delay(200);
 		expect((await beatsFromNow(heartbeatPath)).stillWriting).toEqual([]);
-	}, 60_000);
+	});
 });
