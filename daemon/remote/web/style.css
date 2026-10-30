@@ -136,6 +136,7 @@ button { -webkit-user-select: none; user-select: none; }
 .age { flex: none; align-self: flex-start; padding-top: 2px; color: var(--muted); font-size: 15px; font-variant-numeric: tabular-nums; }
 .row .glyph { flex: none; width: 20px; font-size: 20px; line-height: 1; text-align: center; color: var(--muted); }
 .glyph.needs, .glyph.stopped, .session-state.needs, .session-state.stopped { color: var(--yellow); }
+.shared-warning { color: var(--yellow); }
 .glyph.failed, .session-state.failed { color: var(--red); }
 .glyph.done, .session-state.done { color: var(--green); }
 .glyph.working, .session-state.working { color: var(--accent); }

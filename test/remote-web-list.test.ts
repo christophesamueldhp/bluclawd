@@ -1,7 +1,15 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ageAt, STATE_WORDS, sessionGroups, statusGlyph, successor, viewMode } from "#remote-web/list.js";
-import { STATE_WORDS as TERMINAL_STATE_WORDS } from "../daemon/rows.ts";
+import {
+	ageAt,
+	STATE_WORDS,
+	sessionGroups,
+	sharedWarning,
+	statusGlyph,
+	successor,
+	viewMode,
+} from "#remote-web/list.js";
+import { livePanesWarning, STATE_WORDS as TERMINAL_STATE_WORDS } from "../daemon/rows.ts";
 
 const row = (id: string, state: string, more: Record<string, unknown> = {}) => ({
 	id,
@@ -83,6 +91,11 @@ describe("session status on the phone", () => {
 			expect(statusGlyph(row("a", state))).toBe(state === "working" ? "" : "✻");
 			expect(statusGlyph(row("a", state, { alive: false }))).toBe("∙");
 		}
+	});
+
+	it("warns, as the terminal does, when several panes run one session file", () => {
+		expect(sharedWarning(row("a", "working", { livePanes: 2 }))).toBe(livePanesWarning(2));
+		expect(sharedWarning(row("a", "working"))).toBe("");
 	});
 });
 
