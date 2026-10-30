@@ -234,13 +234,92 @@ describe("rows", () => {
 		const rows = collectRows(
 			[
 				{ id: "stored", status: "stopped", cwd: HERE, sessionFile: "/a.jsonl", pinned: true },
-				{ id: "b-row", status: "stopped", cwd: HERE, sessionFile: "/b.jsonl" },
+				{ id: "b-row", status: "stopped", cwd: HERE, sessionFile: "/b.jsonl", sortOrder: 3 },
 				{ id: "b-pane", status: "online", cwd: HERE, sessionFile: "/b.jsonl", external: true, pane: "p-b" },
 			],
 			self,
 		);
 		expect(rows.map((r) => r.id)).toEqual(["me", "b-pane"]);
 		expect(rows[0].pinned).toBe(true);
+		expect(rows[1].sortOrder).toBe(3);
+		expect(rows.map((r) => r.livePanes)).toEqual([undefined, undefined]);
+	});
+
+	it("lists every live pi on one session file, each flagged, instead of hiding one", () => {
+		const rows = collectRows(
+			[
+				{ id: "p1", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p1" },
+				{ id: "p2", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p2" },
+			],
+			undefined,
+		);
+		expect(rows.map((r) => [r.id, r.livePanes])).toEqual([
+			["p1", 2],
+			["p2", 2],
+		]);
+	});
+
+	it("flags this window's own session when a pane also runs its file", () => {
+		const self: InstanceSummary = { id: "me", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true };
+		const rows = collectRows(
+			[
+				{ id: "stored", status: "stopped", cwd: HERE, sessionFile: "/a.jsonl" },
+				{ id: "pane", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p" },
+			],
+			self,
+		);
+		expect(rows.map((r) => [r.id, r.livePanes])).toEqual([
+			["me", 2],
+			["pane", 2],
+		]);
+	});
+
+	it.each(["starting", "stopping"] as const)(
+		"a %s row next to a live pi on its file is one unflagged row",
+		(status) => {
+			const rows = collectRows(
+				[
+					{ id: "other", status, cwd: HERE, sessionFile: "/a.jsonl" },
+					{ id: "pane", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p" },
+				],
+				undefined,
+			);
+			expect(rows).toHaveLength(1);
+			expect(rows[0].livePanes).toBeUndefined();
+		},
+	);
+
+	it.each(["starting", "stopping", "stopped"] as const)(
+		"a %s row listed first neither hides two live pis on its file nor counts as one",
+		(status) => {
+			const rows = collectRows(
+				[
+					{ id: "other", status, cwd: HERE, sessionFile: "/a.jsonl", pinned: true, sortOrder: 5 },
+					{ id: "p1", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p1" },
+					{ id: "p2", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p2" },
+				],
+				undefined,
+			);
+			// The session's pin and order go to its first live row.
+			expect(rows.map((r) => [r.id, r.livePanes, r.pinned, r.sortOrder])).toEqual([
+				["p1", 2, true, 5],
+				["p2", 2, false, undefined],
+			]);
+		},
+	);
+
+	it("never merges or flags live sessions without a file", () => {
+		const rows = collectRows(
+			[
+				{ id: "m1", status: "online", cwd: HERE, external: true },
+				{ id: "m2", status: "online", cwd: HERE, external: true },
+			],
+			undefined,
+		);
+		expect(rows.map((r) => [r.id, r.livePanes])).toEqual([
+			["m1", undefined],
+			["m2", undefined],
+		]);
 	});
 
 	it("ages count from creation and freeze when a run finishes", () => {
@@ -355,6 +434,25 @@ describe("AgentView render", () => {
 		expect(body).not.toContain("describe a task for a new session");
 		expect(text.at(-1)).toContain("? for shortcuts");
 		expect(text.at(-1)).not.toMatch(/space to reply|ctrl\+x|ctrl\+f/);
+	});
+
+	it("warns on each row when two panes run one session file", () => {
+		const { view, text } = makeView();
+		const twin = (id: string): InstanceSummary => ({
+			id,
+			status: "online",
+			activity: "working",
+			cwd: HERE,
+			label: `twin ${id}`,
+			detail: "editing",
+			sessionFile: "/twin.jsonl",
+			external: true,
+			pane: id,
+		});
+		view.setInstancesForTest([twin("p1"), twin("p2")]);
+		const body = text().join("\n");
+		expect(body).toMatch(/twin p1\s+⚠ 2 panes on one session · editing/);
+		expect(body).toMatch(/twin p2\s+⚠ 2 panes on one session · editing/);
 	});
 
 	it("prefixes the state word in the directory view", () => {

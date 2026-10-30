@@ -70,7 +70,16 @@ export function sentText(text) {
  */
 export function giveUp(pending, sessionState, last) {
 	if (pending.started || sessionState === "working" || sessionState === "needs") return "wait";
-	return /^\s*[/!]/.test(pending.prompt) || last !== pending.last ? "drop" : "fail";
+	return /^\s*\//.test(pending.prompt) || shellLine(pending.prompt) || last !== pending.last ? "drop" : "fail";
+}
+
+/**
+ * A `!` or `!!` line, which the pane's pi runs as its own shell; a lone `!` is text. A copy of
+ * phone-control.ts's shellLine, held to it by a shared test table.
+ * @param {string} text
+ */
+export function shellLine(text) {
+	return /^!+\s*\S/.test(text.trimStart());
 }
 
 /**
