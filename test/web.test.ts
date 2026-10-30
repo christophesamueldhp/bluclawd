@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { exaContents, exaSearch, type SearchRequest } from "../ext/web/exa.ts";
+import { exaApiKey, exaContents, exaSearch, type SearchRequest } from "../ext/web/exa.ts";
 import type { HttpDeps } from "../ext/web/http.ts";
 import { defaultCodexModel, parseOutput, responseOutput } from "../ext/web/openai.ts";
 import { loadWebPrefs, saveWebPrefs } from "../ext/web/prefs.ts";
@@ -49,9 +49,11 @@ const sse =
 
 const jwt = `x.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acct-1" } })).toString("base64url")}.y`;
 
-function registry(ids: string[] = ["gpt-6.1-luna"]): ModelRegistry {
+/** Codex models `ids`, and `exaKey` as the key /login stored for Exa (null: none). */
+function registry(ids: string[] = ["gpt-6.1-luna"], exaKey: string | null = "exa-test"): ModelRegistry {
 	return {
 		getAvailable: () => ids.map((id) => ({ provider: "openai-codex", id, name: id })),
+		getApiKeyForProvider: async (provider: string) => (provider === "exa" ? (exaKey ?? undefined) : undefined),
 		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: jwt, headers: { "x-provider": "1", "x-dropped": null } }),
 	} as unknown as ModelRegistry;
 }
@@ -100,7 +102,7 @@ const openaiReply = sse(
 let savedKey: string | undefined;
 beforeEach(() => {
 	savedKey = process.env.EXA_API_KEY;
-	process.env.EXA_API_KEY = "exa-test";
+	delete process.env.EXA_API_KEY;
 });
 afterEach(() => {
 	if (savedKey === undefined) delete process.env.EXA_API_KEY;
@@ -118,7 +120,7 @@ describe("Exa", () => {
 				warnings: [{ code: "IGNORED_FIELD", message: "ignored foo" }],
 			}),
 		]);
-		const outcome = await exaSearch(deps, request);
+		const outcome = await exaSearch(deps, registry(), request);
 		expect(deps.calls[0]).toMatchObject({
 			url: "https://api.exa.ai/search",
 			headers: { "x-api-key": "exa-test" },
@@ -154,7 +156,7 @@ describe("Exa", () => {
 			}),
 			json({ results: [{ url: "https://a.dev", highlights: ["relevant bit"] }] }),
 		]);
-		const full = await exaContents(deps, ["https://a.dev", "https://b.dev"], undefined);
+		const full = await exaContents(deps, registry(), ["https://a.dev", "https://b.dev"], undefined);
 		expect(deps.calls[0].body).toEqual({ urls: ["https://a.dev", "https://b.dev"], text: { maxCharacters: 10000 } });
 		expect(full.pages).toEqual([
 			{ url: "https://a.dev", title: "A", content: "Page A" },
@@ -162,14 +164,22 @@ describe("Exa", () => {
 		]);
 		expect(formatPages(full.pages, [])).toContain("## https://b.dev\nFailed: CRAWL_NOT_FOUND (HTTP 404)");
 
-		const focused = await exaContents(deps, ["https://a.dev"], "timers");
+		const focused = await exaContents(deps, registry(), ["https://a.dev"], "timers");
 		expect(deps.calls[1].body).toEqual({ urls: ["https://a.dev"], highlights: { query: "timers" } });
 		expect(focused.pages[0].content).toBe("relevant bit");
 	});
 
+	it("takes the key /login stored over EXA_API_KEY, and EXA_API_KEY when /login has none", async () => {
+		process.env.EXA_API_KEY = "exa-from-env";
+		expect(await exaApiKey(registry())).toBe("exa-test");
+		expect(await exaApiKey(registry([], null))).toBe("exa-from-env");
+		delete process.env.EXA_API_KEY;
+		expect(await exaApiKey(registry([], "  "))).toBeUndefined();
+	});
+
 	it("retries a rate limit once after Retry-After", async () => {
 		const deps = fakeDeps([json({ error: "slow down" }, 429, { "retry-after": "2" }), json({ results: [exaHit] })]);
-		const outcome = await exaSearch(deps, request);
+		const outcome = await exaSearch(deps, registry(), request);
 		expect(deps.slept).toEqual([2000]);
 		expect(outcome.hits).toHaveLength(1);
 	});
@@ -254,10 +264,9 @@ describe("search fallback", () => {
 	});
 
 	it("names both causes when neither provider can answer", async () => {
-		delete process.env.EXA_API_KEY;
 		const deps = fakeDeps([]);
-		await expect(search({ deps, registry: registry([]) }, "exa", request)).rejects.toThrow(
-			"Exa: EXA_API_KEY is not set; OpenAI: not signed in to ChatGPT/Codex (use /login)",
+		await expect(search({ deps, registry: registry([], null) }, "exa", request)).rejects.toThrow(
+			"Exa: no Exa API key (add one with /login → Sign in with an API key → Exa); OpenAI: not signed in to ChatGPT/Codex (use /login)",
 		);
 	});
 });

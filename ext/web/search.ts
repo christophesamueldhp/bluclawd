@@ -24,7 +24,7 @@ async function searchWith(
 	request: SearchRequest,
 	signal?: AbortSignal,
 ): Promise<SearchOutcome> {
-	if (provider === "exa") return exaSearch(env.deps, request, signal);
+	if (provider === "exa") return exaSearch(env.deps, env.registry, request, signal);
 	return openaiSearch(env.deps, await resolveCodexAuth(env.registry, env.openaiModel), request, signal);
 }
 
