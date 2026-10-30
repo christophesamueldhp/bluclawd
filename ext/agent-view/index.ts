@@ -381,7 +381,14 @@ const agentView: InlineExtension = {
 		/** Pane mode: what another window's agent view asks of this session. */
 		const onPaneMessage = (ctx: ExtensionContext, message: PaneMessage): void => {
 			if (message.type === "prompt") {
-				pi.sendUserMessage(promptContent(message), promptOptions(message, ctx.isIdle()));
+				const content = promptContent(message);
+				// Remote control (ext/remote) reports its outcome by the phone's id, knowing it by this text.
+				const text =
+					typeof content === "string"
+						? content
+						: content.map((part) => (part.type === "text" ? part.text : "")).join("");
+				if (message.id) pi.events.emit("bluclawd:prompt-sent", { id: message.id, text });
+				pi.sendUserMessage(content, promptOptions(message, ctx.isIdle()));
 			} else if (message.type === "abort") ctx.abort();
 			else if (message.type === "rename") pi.setSessionName(message.name);
 			// The rest are remote control's (ext/remote).
