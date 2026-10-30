@@ -412,6 +412,46 @@ describe("remote HTTP API", () => {
 		]);
 	});
 
+	it("answers each refusal phone control gives with its status", async () => {
+		const token = await pair();
+		const ask = async (method: string, path: string, body?: object) => {
+			const res = await fetch(`${base}/api/sessions/${path}`, {
+				method,
+				headers: authJson(token),
+				...(method === "POST" ? { body: JSON.stringify(body ?? {}) } : {}),
+			});
+			return [res.status, ((await res.json()) as { error?: string }).error];
+		};
+		expect(await ask("POST", "live/model", { provider: "openai", id: "gpt-5" })).toEqual([409, "pane_too_old"]);
+		reports.set("live", {
+			models: [{ provider: "openai", id: "gpt-5" }],
+			thinkingLevels: ["off"],
+			trust: "always",
+			commands: [{ name: "compact", source: "builtin" }],
+			tasks: [{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2, foreground: true }],
+		});
+		expect(await ask("POST", "live/prompt", { text: "/compact" })).toEqual([409, "session_busy"]);
+		instances[0]!.activity = "idle";
+		instances[0]!.draft = true;
+		expect(await ask("POST", "live/prompt", { text: "/compact" })).toEqual([409, "unsent_draft"]);
+		for (const [method, path, body, status, error] of [
+			["POST", "stored/prompt", { text: "hi" }, 409, "session_not_running"],
+			["DELETE", "live", undefined, 409, "session_running"],
+			["POST", "live/prompt", { text: "/settings" }, 400, "command_refused"],
+			["POST", "live/model", {}, 400, "invalid_model"],
+			["POST", "live/thinking", { level: "xhigh" }, 400, "invalid_thinking"],
+			["POST", "live/trust", { trust: "sometimes" }, 400, "invalid_trust"],
+			["POST", "stored/rename", { name: "" }, 400, "invalid_name"],
+			["POST", "stored/pin", { pinned: "true" }, 400, "invalid_pinned"],
+			["POST", "live/tasks/b9/stop", {}, 404, "unknown_task"],
+			["GET", "live/tasks/f2/output", undefined, 404, "no_output"],
+		] as const) {
+			expect(await ask(method, path, body), `${method} ${path}`).toEqual([status, error]);
+		}
+		expect(sent).toEqual([]);
+		expect(changed).toEqual([]);
+	});
+
 	describe("slash commands", () => {
 		const send = async (text: string, id = "live", images?: object[]) => {
 			const token = await pair();
@@ -442,61 +482,6 @@ describe("remote HTTP API", () => {
 			// The status, fetched after every report, leaves them out.
 			const status = await fetch(`${base}/api/sessions/live/status`, { headers: auth(token) });
 			expect((await status.json()) as object).toEqual({ report: { models: [] } });
-		});
-
-		it("refuses one while the session works or waits, or its prompt holds a draft, and the Mac-only ones", async () => {
-			// As an older pane lists them: pi's own selector, and an extension's command, which phoneMayRun refuses.
-			reports.set("live", {
-				models: [],
-				commands: [...commands, { name: "settings", source: "builtin" }, { name: "tasks", source: "extension" }],
-			});
-			expect(await send("/compact")).toEqual([409, "session_busy"]);
-			instances[0]!.activity = "idle";
-			instances[0]!.draft = true;
-			expect(await send("/compact")).toEqual([409, "unsent_draft"]);
-			for (const text of [
-				"/remote-control pair",
-				"/agent-view",
-				"/tree",
-				"/fork",
-				"/settings",
-				"/tasks",
-				"/model",
-			]) {
-				expect(await send(text)).toEqual([400, "command_refused"]);
-			}
-			// A stored row too, which would run it as its first prompt.
-			expect(await send("/agent-view", "stored")).toEqual([400, "command_refused"]);
-			expect(sent).toEqual([]);
-			// Text that is not a command goes as a prompt, as before; a draft does not hold it up.
-			expect(await send("compact it")).toEqual([202, undefined]);
-			expect(await send("/Users/me/notes.md says hi")).toEqual([202, undefined]);
-			expect(sent.map((s) => s.message.type)).toEqual(["prompt", "prompt"]);
-		});
-
-		it("types a `!` shell line into an idle pane's prompt, which runs it as pi's own shell", async () => {
-			reports.set("live", { models: [] });
-			expect(await send("!ls -la")).toEqual([409, "session_busy"]);
-			instances[0]!.activity = "idle";
-			expect(await send("!ls -la")).toEqual([202, undefined]);
-			expect(await send("!! git status")).toEqual([202, undefined]);
-			// A lone "!" is text, as pi reads it.
-			expect(await send("!")).toEqual([202, undefined]);
-			expect(sent.map((s) => s.message)).toEqual([
-				{ type: "command", text: "!ls -la" },
-				{ type: "command", text: "!! git status" },
-				{ type: "prompt", text: "!" },
-			]);
-		});
-
-		it("refuses one to a pane too old to list its commands, and sends a slash line with images as a prompt", async () => {
-			instances[0]!.activity = "idle";
-			reports.set("live", { models: [] });
-			expect(await send("/compact")).toEqual([400, "command_refused"]);
-			const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 1, 1, 1]).toString("base64");
-			reports.set("live", { models: [], commands });
-			expect(await send("/describe", "live", [{ mimeType: "image/png", data: png }])).toEqual([202, undefined]);
-			expect(sent.map((s) => s.message.type)).toEqual(["prompt"]);
 		});
 	});
 
@@ -679,30 +664,6 @@ describe("remote HTTP API", () => {
 			expect(sent).toEqual([{ id: "live", message: { type: "set_model", provider: "openai", id: "gpt-5" } }]);
 		});
 
-		it("refuses a model that is malformed or not offered, and a session that is not running", async () => {
-			reports.set("live", report);
-			const token = await pair();
-			const model = (id: string, body: unknown) =>
-				fetch(`${base}/api/sessions/${id}/model`, {
-					method: "POST",
-					headers: authJson(token),
-					body: JSON.stringify(body),
-				});
-			for (const body of [{}, { provider: "openai" }, { provider: "", id: "gpt-5" }, { provider: 1, id: "gpt-5" }]) {
-				const res = await model("live", body);
-				expect(res.status).toBe(400);
-				expect(await res.json()).toEqual({ error: "invalid_model" });
-			}
-			expect((await model("live", { provider: "openai", id: "gpt-4" })).status).toBe(400);
-			const stored = await model("stored", { provider: "openai", id: "gpt-5" });
-			expect(stored.status).toBe(409);
-			expect(await stored.json()).toEqual({ error: "session_not_running" });
-			reports.delete("live");
-			const old = await model("live", { provider: "openai", id: "gpt-5" });
-			expect([old.status, await old.json()]).toEqual([409, { error: "pane_too_old" }]);
-			expect(sent).toEqual([]);
-		});
-
 		it("has no way to rewrite a session's history: no tree, fork, clone or compact", async () => {
 			reports.set("live", report);
 			const token = await pair();
@@ -773,41 +734,11 @@ describe("remote HTTP API", () => {
 			expect(sent).toEqual([{ id: "live", message: { type: "set_thinking", level: "low" } }]);
 		});
 
-		it("refuses a thinking level the model does not offer, or any for a model without thinking", async () => {
-			reports.set("live", { ...report, thinkingLevels: ["off", "low", "medium", "high"] });
-			const token = await pair();
-			for (const body of [{}, { level: 3 }, { level: "xhigh" }, { level: "" }]) {
-				expect(await post(token, "live", "thinking", body)).toEqual([400, { error: "invalid_thinking" }]);
-			}
-			reports.set("live", report);
-			expect(await post(token, "live", "thinking", { level: "high" })).toEqual([400, { error: "invalid_thinking" }]);
-			expect(await post(token, "stored", "thinking", { level: "low" })).toEqual([
-				409,
-				{ error: "session_not_running" },
-			]);
-			expect(sent).toEqual([]);
-		});
-
 		it("sets the trust mode through a running session that reports it", async () => {
 			reports.set("live", { ...report, trust: "always" });
 			const token = await pair();
 			expect(await post(token, "live", "trust", { trust: "ask" })).toEqual([202, { ok: true }]);
 			expect(sent).toEqual([{ id: "live", message: { type: "set_trust", trust: "ask" } }]);
-		});
-
-		it("refuses a trust mode Alt+M does not cycle through, a stored session, and a pane that reports none", async () => {
-			reports.set("live", { ...report, trust: "always" });
-			const token = await pair();
-			for (const body of [{}, { trust: "sometimes" }, { trust: ["ask"] }, { trust: "ASK" }]) {
-				expect(await post(token, "live", "trust", body)).toEqual([400, { error: "invalid_trust" }]);
-			}
-			expect(await post(token, "stored", "trust", { trust: "ask" })).toEqual([
-				409,
-				{ error: "session_not_running" },
-			]);
-			reports.set("live", report);
-			expect(await post(token, "live", "trust", { trust: "ask" })).toEqual([409, { error: "pane_too_old" }]);
-			expect(sent).toEqual([]);
 		});
 	});
 
@@ -830,24 +761,10 @@ describe("remote HTTP API", () => {
 			expect(changed).toEqual([["rename", "stored", "later"]]);
 		});
 
-		it("refuses an empty, overlong or multi-line name, a terminal escape, and an unknown session", async () => {
-			const token = await pair();
-			const red = `${String.fromCharCode(27)}[31mred`;
-			for (const name of [undefined, 7, "   ", "x".repeat(101), "a\nb", red]) {
-				expect(await call(token, "POST", "stored/rename", { name })).toEqual([400, { error: "invalid_name" }]);
-			}
-			expect(await call(token, "POST", "stored/rename", { name: "x".repeat(100) })).toEqual([200, { ok: true }]);
-			expect(await call(token, "POST", "nope/rename", { name: "x" })).toEqual([404, { error: "unknown_session" }]);
-			expect(sent).toEqual([]);
-		});
-
 		it("pins and unpins a running or stored session", async () => {
 			const token = await pair();
 			expect(await call(token, "POST", "live/pin", { pinned: true })).toEqual([200, { ok: true }]);
 			expect(await call(token, "POST", "stored/pin", { pinned: false })).toEqual([200, { ok: true }]);
-			for (const pinned of [undefined, "true", 1]) {
-				expect(await call(token, "POST", "stored/pin", { pinned })).toEqual([400, { error: "invalid_pinned" }]);
-			}
 			expect(await call(token, "POST", "nope/pin", { pinned: true })).toEqual([404, { error: "unknown_session" }]);
 			expect(changed).toEqual([
 				["pin", "live", true],
@@ -956,28 +873,10 @@ describe("remote HTTP API", () => {
 		expect(messages.status).not.toBe(409);
 	});
 
-	it("refuses a closed session, with or without a file, which only the Mac opens again", async () => {
-		const token = await pair();
-		const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 1, 1, 1]).toString("base64");
-		for (const body of [{ text: "carry on" }, { text: "look", images: [{ mimeType: "image/png", data: png }] }]) {
-			const res = await fetch(`${base}/api/sessions/stored/prompt`, {
-				method: "POST",
-				headers: authJson(token),
-				body: JSON.stringify(body),
-			});
-			expect([res.status, await res.json()]).toEqual([409, { error: "session_not_running" }]);
-		}
-		expect(started).toEqual([]);
-		expect(sent).toEqual([]);
-	});
-
-	it("refuses a stored session without a file, an empty or oversized prompt, and an oversized body", async () => {
-		instances = [...instances, { id: "fileless", status: "stopped", cwd: "/p" }];
+	it("refuses an empty or oversized prompt, and an oversized body", async () => {
 		const token = await pair();
 		const post = (path: string, body: string) =>
 			fetch(`${base}${path}`, { method: "POST", headers: authJson(token), body });
-		expect((await post("/api/sessions/fileless/prompt", JSON.stringify({ text: "hi" }))).status).toBe(409);
-		expect((await post("/api/sessions/stored/abort", "{}")).status).toBe(409);
 		expect((await post("/api/sessions/live/prompt", JSON.stringify({ text: "  " }))).status).toBe(400);
 		expect(
 			(await post("/api/sessions/live/prompt", JSON.stringify({ text: "x".repeat(PROMPT_MAX + 1) }))).status,

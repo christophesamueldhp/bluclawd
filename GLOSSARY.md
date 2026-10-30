@@ -41,3 +41,7 @@ _Avoid_: task for the run itself inside `subagents`
 **Chat**:
 One session, identified by its session file, opened in the remote app on a phone. It stays with that session while the session's row moves between a pane and storage, and ends when another session or the list is shown.
 _Avoid_: open session, conversation
+
+**Phone control**:
+The rules that decide, for one session, whether a Chat's action is allowed and what it becomes: a message for its pane, a change the daemon makes itself (rename a stored session, pin, delete), or a refusal with an error code.
+_Avoid_: admission (a run's launch checks), validation
