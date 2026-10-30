@@ -39,5 +39,5 @@ _Avoid_: task for the run itself inside `subagents`
 ### Remote control
 
 **Chat**:
-One session opened in the remote app on a phone, from when it opens until another session or the list is shown. Following its session to a new pane starts a new chat that carries the prompts still pending.
+One session, identified by its session file, opened in the remote app on a phone. It stays with that session while the session's row moves between a pane and storage, and ends when another session or the list is shown.
 _Avoid_: open session, conversation
