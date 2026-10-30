@@ -36,6 +36,12 @@ _Avoid_: restart, rerun
 An entry in `/tasks` and `task_stop`: a background shell, a monitor, or a run as seen from there.
 _Avoid_: task for the run itself inside `subagents`
 
+### Web
+
+**Search provider**:
+The service a web search is sent to: Exa or OpenAI. It is chosen independently of the model the session chats with.
+_Avoid_: web provider, search model, provider (alone)
+
 ### Remote control
 
 **Chat**:
