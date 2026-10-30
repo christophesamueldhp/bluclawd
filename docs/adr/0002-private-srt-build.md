@@ -1,6 +1,8 @@
 # srt is a reproducible private build carried in the repository
 
-bluclawd needs srt changes that upstream has not released. The first was Mach-lookup denial, used by the historical isolated-execution policy. The second gives the network ask callback the requesting command's id (#26). Rather than wait for upstream or patch `node_modules` at install time, the repository carries `vendor/sandbox-runtime/anthropic-ai-sandbox-runtime-0.0.81-bluclawd.2.tgz`, built from the official `0.0.81` archive and source commit `c40cf14` by `scripts/build-private-sandbox-runtime.ts`. That build ran the script's earlier `.mjs` form, whose hash `provenance.json` records as `builderSha256`.
+bluclawd needs an srt change that upstream has not released: the network ask callback gets the requesting command's id (#26). Rather than wait for upstream or patch `node_modules` at install time, the repository carries `vendor/sandbox-runtime/anthropic-ai-sandbox-runtime-0.0.81-bluclawd.3.tgz`, built from the official `0.0.81` archive and source commit `c40cf14` by `scripts/build-private-sandbox-runtime.ts`, whose hash `provenance.json` records as `builderSha256`.
+
+Builds up to `0.0.81-bluclawd.2` also carried Mach-lookup denial. Its only consumer was the historical isolated-execution policy, removed in #47, so `0.0.81-bluclawd.3` drops it (#67) and leaves `sandbox-config` and `macos-sandbox-utils` as upstream ships them.
 
 The builder accepts only a pinned toolchain: Node 22.23.4 and npm 10.9.9 by hash, plus bun 1.4.2. It verifies:
 - the official archive's integrity;
@@ -8,7 +10,7 @@ The builder accepts only a pinned toolchain: Node 22.23.4 and npm 10.9.9 by hash
 - that the only runtime change is in the approved modules;
 - that official and patched broad test runs were recorded.
 
-Its output and evidence are recorded in `provenance.json`, `mach-denial.patch`, `command-id-ask.patch` and `harness.patch`.
+Its output and evidence are recorded in `provenance.json`, `command-id-ask.patch` and `harness.patch`.
 
 ## Considered Options
 
