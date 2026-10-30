@@ -1,15 +1,14 @@
 diff --git a/src/sandbox/sandbox-manager.ts b/src/sandbox/sandbox-manager.ts
-index 110619d..89a978f 100644
+index 545f5df..93b516d 100644
 --- a/src/sandbox/sandbox-manager.ts
 +++ b/src/sandbox/sandbox-manager.ts
-@@ -1,4 +1,5 @@
--// Modified for bluclawd: explicit Mach-lookup denial. See BLUCLAWD-NOTICE.txt.
-+// Modified for bluclawd: explicit Mach-lookup denial, and the requesting
-+// command's id in network asks. See BLUCLAWD-NOTICE.txt.
+@@ -1,3 +1,5 @@
++// Modified for bluclawd: the requesting command's id in network asks. See
++// BLUCLAWD-NOTICE.txt.
  import {
    hasNameReading,
    literalReadLists,
-@@ -796,9 +797,13 @@ async function filterNetworkRequest(
+@@ -794,9 +796,13 @@ async function filterNetworkRequest(
    // Coming after both configured lists, it lifts the default deny for that
    // one command and never a configured deniedDomains entry. The username is
    // presented by the sandboxed client: see registerCommandNetworkLists.
@@ -25,7 +24,7 @@ index 110619d..89a978f 100644
    for (const allowedDomain of perCommand?.allowedDomains ?? []) {
      if (matchesDomainPatternWithPort(canonicalHost, port, allowedDomain)) {
        logForDebugging(`Allowed by per-command rule: ${host}:${port}`)
-@@ -814,7 +819,7 @@ async function filterNetworkRequest(
+@@ -812,7 +818,7 @@ async function filterNetworkRequest(
    logForDebugging(`No matching rule, asking user: ${host}:${port}`)
    try {
      // Held as unknown: a JavaScript caller is not bound by the declared type.

@@ -52,6 +52,6 @@
     "lint:fix": "biome check --write ."
   },
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "file:vendor/sandbox-runtime/anthropic-ai-sandbox-runtime-0.0.81-bluclawd.2.tgz"
+    "@anthropic-ai/sandbox-runtime": "file:vendor/sandbox-runtime/anthropic-ai-sandbox-runtime-0.0.81-bluclawd.3.tgz"
   }
 }

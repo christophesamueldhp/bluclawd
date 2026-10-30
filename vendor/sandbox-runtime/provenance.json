@@ -1,6 +1,6 @@
 {
   "name": "@anthropic-ai/sandbox-runtime",
-  "version": "0.0.81-bluclawd.2",
+  "version": "0.0.81-bluclawd.3",
   "upstream": {
     "commit": "c40cf14a65d025e3cd27f071f13a73c12b3b1f92",
     "tree": "8b0c1f68ab58235d56bdac8db5d70ad7db6fef6d",
@@ -9,10 +9,10 @@
     "sha256": "0e0b8249062047f7b592c7995f8ec2f251f3bbebdc0402db1ee23af09983953f"
   },
   "artifact": {
-    "filename": "anthropic-ai-sandbox-runtime-0.0.81-bluclawd.2.tgz",
-    "bytes": 4837886,
-    "sha256": "e2fe7870fc6dc9d37516272905779170f3276f5114ed8dbc418138c41178ef5a",
-    "integrity": "sha512-Uof1NtsQ7o9JHWhzFMjwfu8EPxgGcTF0+S7JztdiBFvwTUi2fNi0dys6UQxQKib7YZjV3UK702gRt34TEuCUbg=="
+    "filename": "anthropic-ai-sandbox-runtime-0.0.81-bluclawd.3.tgz",
+    "bytes": 4836712,
+    "sha256": "a2a1d7c32b9e90d06fbb48cea647d3450b7992c2d9fdb69fb2566326ff01ff46",
+    "integrity": "sha512-Vm/+dfB/fHGP3jMu7vho8JsII7ApsewAHr0DSQKVenq+li4Xlqz+vEAr7U6i2+2Pya3K7rZOD245QhRW3EORqw=="
   },
   "tools": {
     "node": "22.23.4",
@@ -22,84 +22,33 @@
     "npmCliSha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7"
   },
   "patches": {
-    "machSha256": "b32bd460fc1f8901a80ae13b4e5fadd604318d8908fb3959059cc0b983b7fe1c",
     "harnessSha256": "b1b6e397eec612761b8ee69365a6e42bbd38d82f16e175e13bef4aa7250332a3",
-    "commandIdSha256": "894475e88456810569d811f949152d28c09da32802b0be459ae425e44a5711fb"
+    "commandIdSha256": "03f5940c35769dcbf0801aabb4574edbe83b1117cc90a33d1884203f49eab275"
   },
   "sourceHashes": {
-    "src/sandbox/macos-sandbox-utils.ts": "b095772dd5cbccd60fd7366bcaa3d2fcc0165a3d5cfd2993a2f54b3746734886",
-    "src/sandbox/sandbox-config.ts": "a24b8d34ed327cef600d3d2ea72af51e23e44607e24ee24a31cf2cefb31caaa4",
-    "src/sandbox/sandbox-manager.ts": "ee16a83c1b8b7545a89773ba047205c7a479cb42917b6729ef16e145555f0542",
+    "src/sandbox/sandbox-manager.ts": "323f14b4e274da1cc6d610cf3e503f9b0a3b68f36bd63ef8e205fad1a838f7f7",
     "src/sandbox/sandbox-schemas.ts": "b15a788842d2e984af4caeb36690ae675c54f7917da4e273c23c1c9537f4623b"
   },
   "sourcePackageSha256": "1e88127d62f06db6810703f66716ba6e5373ccc77cc3b99f1af73939814337a1",
   "sourceLockSha256": "7d53d001f660325cc368b34819287029eae9a89fcc2b1e5bc607e57bc671b4e3",
-  "builderSha256": "9efe24b63f2087cd65c99c3b5213cf03a45e4fc8e19620a6e1bd966f36d3e51f",
+  "builderSha256": "7fbace066aa1633b7e1b64d5fecf516aa48f5a941d606707044690fd6c2497c2",
   "runtimeChanges": [
-    {
-      "path": "dist/sandbox/macos-sandbox-utils.d.ts",
-      "beforeHash": "042a9977c104ba47c17fcfc8bd5afdab9b6f6656c78fd38054c4d89ec85360ef",
-      "afterHash": "2114407fc1f063bb9ced783276a726f949e8521faf70ec8dd1b3d489173722fb",
-      "mode": 420
-    },
-    {
-      "path": "dist/sandbox/macos-sandbox-utils.d.ts.map",
-      "beforeHash": "453d2e5da170a1f10f5e016e5b2a6edfea56089e60022cb15c204361404ccc7a",
-      "afterHash": "0357885ff8a09636b9e30e26f955f8dc5f9a3ab2b1b548a8cbe9e8a4598a363e",
-      "mode": 420
-    },
-    {
-      "path": "dist/sandbox/macos-sandbox-utils.js",
-      "beforeHash": "7f297d6acb08a44adc9198876a38ce49ffa59e3a7aa09692933b3e008b446a32",
-      "afterHash": "d4b54be09ba58891f667715ff2f0d455483fb3bf1092fbd7db15f48d32b4ff63",
-      "mode": 420
-    },
-    {
-      "path": "dist/sandbox/macos-sandbox-utils.js.map",
-      "beforeHash": "a7a067adac704614e18b3ae3f2432503ea251cd9d1defcb26d8ff8de703bd4d9",
-      "afterHash": "d61b58ece7b7886587ed630e44458ef73b80b75f8fc12a784e50420bb3de5230",
-      "mode": 420
-    },
-    {
-      "path": "dist/sandbox/sandbox-config.d.ts",
-      "beforeHash": "7b4be7d6a282c2ad9e77a931071f3ab53a20a864e538ba3f5a96789d5f71e86d",
-      "afterHash": "27d716ce81b77cf655c55613c01bc004a6d5a2476f51997bbc3159b165ee21d2",
-      "mode": 420
-    },
-    {
-      "path": "dist/sandbox/sandbox-config.d.ts.map",
-      "beforeHash": "1d1e2f162a6890c528821d19b0b087dc42431cad23f99f2f577e8e873f7c9c43",
-      "afterHash": "ef48abbe5a7775fb137aadfc00d29e4a7e01260826aef0c5b68597afa53e3b52",
-      "mode": 420
-    },
-    {
-      "path": "dist/sandbox/sandbox-config.js",
-      "beforeHash": "405594c97db94951d9698a19cfab71f074acbea58c559994e3ae2dab4551ca5a",
-      "afterHash": "4bd9d56b9a700a6bec70fa490c2b50e7f8261c728d8a87592a11994576495d1a",
-      "mode": 420
-    },
-    {
-      "path": "dist/sandbox/sandbox-config.js.map",
-      "beforeHash": "84cb7df2ce343291504033a37e770bf28f9c7e792251a743998e5038a3ab0ed1",
-      "afterHash": "51df5029bb5691c1062d4672960d3807650d637bc1a6c727fa2f4e4d16314811",
-      "mode": 420
-    },
     {
       "path": "dist/sandbox/sandbox-manager.d.ts.map",
       "beforeHash": "99b5219344f8b730f10d5091dcef09c535c33441cb452fef4801441992adfaca",
-      "afterHash": "309552eb022549d930eccbff27a59937520020094632cb3b3bab092075accb8b",
+      "afterHash": "6bb084292f4e44c2fb722b77583c328a23684c56bfc36434cfa2e4a9d95a36be",
       "mode": 420
     },
     {
       "path": "dist/sandbox/sandbox-manager.js",
       "beforeHash": "03bd1f22e0b7a5fa401ef8f164390b8bfe8972885856ea8dce0657fa57a31114",
-      "afterHash": "f84f9e60b6dc2899b3ebcf839804a667af8f7c0ac3f39a310d0d02f70669c299",
+      "afterHash": "801070e1405e071a42d353ad95201d4bd7b515126e2c43340120ad04c960cec3",
       "mode": 420
     },
     {
       "path": "dist/sandbox/sandbox-manager.js.map",
       "beforeHash": "32927a48f936bcd4d972c162c8fcdfa79a488b00b745a90aaa673fb6a2ef3d7d",
-      "afterHash": "d75729d4d005978cbc6268a028425a1a0a236da3c9feeafe2f91b18194bb091a",
+      "afterHash": "533bf05a3331ced5d6cffc32706d5f2c7fff0a91dad2d7034b0b5a7de7048bc0",
       "mode": 420
     },
     {
@@ -130,11 +79,11 @@
   "manifestDiff": {
     "version": {
       "before": "0.0.81",
-      "after": "0.0.81-bluclawd.2"
+      "after": "0.0.81-bluclawd.3"
     },
     "description": {
       "before": "Anthropic Sandbox Runtime (ASRT) - A general-purpose tool for wrapping security boundaries around arbitrary processes",
-      "after": "Anthropic Sandbox Runtime (ASRT) - A general-purpose tool for wrapping security boundaries around arbitrary processes (bluclawd private build: Mach-lookup denial, command id in network asks)"
+      "after": "Anthropic Sandbox Runtime (ASRT) - A general-purpose tool for wrapping security boundaries around arbitrary processes (bluclawd private build: command id in network asks)"
     },
     "scripts": {
       "before": {
@@ -204,7 +153,7 @@
   "payload": [
     {
       "path": "BLUCLAWD-NOTICE.txt",
-      "sha256": "3d81169dda47180625836b400681b4b3a4d24c09cd21e72f058c744580b957b4",
+      "sha256": "72008fa6556a0d462bf4ed7e897374ab6758f33f0cefb7beffb6f47d17caccde",
       "mode": 420
     },
     {
@@ -679,22 +628,22 @@
     },
     {
       "path": "dist/sandbox/macos-sandbox-utils.d.ts",
-      "sha256": "2114407fc1f063bb9ced783276a726f949e8521faf70ec8dd1b3d489173722fb",
+      "sha256": "042a9977c104ba47c17fcfc8bd5afdab9b6f6656c78fd38054c4d89ec85360ef",
       "mode": 420
     },
     {
       "path": "dist/sandbox/macos-sandbox-utils.d.ts.map",
-      "sha256": "0357885ff8a09636b9e30e26f955f8dc5f9a3ab2b1b548a8cbe9e8a4598a363e",
+      "sha256": "453d2e5da170a1f10f5e016e5b2a6edfea56089e60022cb15c204361404ccc7a",
       "mode": 420
     },
     {
       "path": "dist/sandbox/macos-sandbox-utils.js",
-      "sha256": "d4b54be09ba58891f667715ff2f0d455483fb3bf1092fbd7db15f48d32b4ff63",
+      "sha256": "7f297d6acb08a44adc9198876a38ce49ffa59e3a7aa09692933b3e008b446a32",
       "mode": 420
     },
     {
       "path": "dist/sandbox/macos-sandbox-utils.js.map",
-      "sha256": "d61b58ece7b7886587ed630e44458ef73b80b75f8fc12a784e50420bb3de5230",
+      "sha256": "a7a067adac704614e18b3ae3f2432503ea251cd9d1defcb26d8ff8de703bd4d9",
       "mode": 420
     },
     {
@@ -899,22 +848,22 @@
     },
     {
       "path": "dist/sandbox/sandbox-config.d.ts",
-      "sha256": "27d716ce81b77cf655c55613c01bc004a6d5a2476f51997bbc3159b165ee21d2",
+      "sha256": "7b4be7d6a282c2ad9e77a931071f3ab53a20a864e538ba3f5a96789d5f71e86d",
       "mode": 420
     },
     {
       "path": "dist/sandbox/sandbox-config.d.ts.map",
-      "sha256": "ef48abbe5a7775fb137aadfc00d29e4a7e01260826aef0c5b68597afa53e3b52",
+      "sha256": "1d1e2f162a6890c528821d19b0b087dc42431cad23f99f2f577e8e873f7c9c43",
       "mode": 420
     },
     {
       "path": "dist/sandbox/sandbox-config.js",
-      "sha256": "4bd9d56b9a700a6bec70fa490c2b50e7f8261c728d8a87592a11994576495d1a",
+      "sha256": "405594c97db94951d9698a19cfab71f074acbea58c559994e3ae2dab4551ca5a",
       "mode": 420
     },
     {
       "path": "dist/sandbox/sandbox-config.js.map",
-      "sha256": "51df5029bb5691c1062d4672960d3807650d637bc1a6c727fa2f4e4d16314811",
+      "sha256": "84cb7df2ce343291504033a37e770bf28f9c7e792251a743998e5038a3ab0ed1",
       "mode": 420
     },
     {
@@ -924,17 +873,17 @@
     },
     {
       "path": "dist/sandbox/sandbox-manager.d.ts.map",
-      "sha256": "309552eb022549d930eccbff27a59937520020094632cb3b3bab092075accb8b",
+      "sha256": "6bb084292f4e44c2fb722b77583c328a23684c56bfc36434cfa2e4a9d95a36be",
       "mode": 420
     },
     {
       "path": "dist/sandbox/sandbox-manager.js",
-      "sha256": "f84f9e60b6dc2899b3ebcf839804a667af8f7c0ac3f39a310d0d02f70669c299",
+      "sha256": "801070e1405e071a42d353ad95201d4bd7b515126e2c43340120ad04c960cec3",
       "mode": 420
     },
     {
       "path": "dist/sandbox/sandbox-manager.js.map",
-      "sha256": "d75729d4d005978cbc6268a028425a1a0a236da3c9feeafe2f91b18194bb091a",
+      "sha256": "533bf05a3331ced5d6cffc32706d5f2c7fff0a91dad2d7034b0b5a7de7048bc0",
       "mode": 420
     },
     {
@@ -1199,7 +1148,7 @@
     },
     {
       "path": "package.json",
-      "sha256": "5d79a3d4f476690a3834dc7140f9bf1d3f21ee43d19b7e1af414dcce4016e59a",
+      "sha256": "e7a46f29627599e161156cd3cdc4f1bb4fca31ea60c6cdceb9ea7ae1367d534d",
       "mode": 420
     },
     {
@@ -1252,7 +1201,6 @@
     "candidate-build": 0,
     "candidate-lint": 0,
     "candidate-format": 0,
-    "mach-green": 0,
     "command-id-green": 0,
     "official-broad": 0,
     "patched-broad": 0

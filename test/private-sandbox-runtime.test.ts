@@ -111,6 +111,15 @@ describe("private sandbox runtime preparation", () => {
 		put(after, "dist/sandbox/socks-proxy.js", "new");
 		await expect(inspectRuntimeDelta(before, after)).rejects.toThrow(/unapproved/i);
 	});
+	it.each(["sandbox-config.js", "macos-sandbox-utils.js"])(
+		"rejects a change to %s, which no patch touches",
+		async (file) => {
+			const { before, after } = fixture();
+			put(before, `dist/sandbox/${file}`, "old");
+			put(after, `dist/sandbox/${file}`, "new");
+			await expect(inspectRuntimeDelta(before, after)).rejects.toThrow(/unapproved/i);
+		},
+	);
 	it("rejects symlinked payload entries instead of following them", async () => {
 		const { before, after } = fixture();
 		put(before, "dist/index.js", "same");
@@ -121,13 +130,13 @@ describe("private sandbox runtime preparation", () => {
 	it("reports the real reviewed module delta while leaving unchanged files out", async () => {
 		const { before, after } = fixture();
 		for (const dir of [before, after]) put(dir, "dist/index.js", "same");
-		put(before, "dist/sandbox/sandbox-config.js", "old");
-		put(after, "dist/sandbox/sandbox-config.js", "new");
+		put(before, "dist/sandbox/sandbox-manager.js", "old");
+		put(after, "dist/sandbox/sandbox-manager.js", "new");
 		put(before, "dist/sandbox/sandbox-schemas.d.ts", "old");
 		put(after, "dist/sandbox/sandbox-schemas.d.ts", "new");
 		const changes = await inspectRuntimeDelta(before, after);
 		expect(changes.map((change) => change.path)).toEqual([
-			"dist/sandbox/sandbox-config.js",
+			"dist/sandbox/sandbox-manager.js",
 			"dist/sandbox/sandbox-schemas.d.ts",
 		]);
 		expect(changes[0].beforeHash).not.toBe(changes[0].afterHash);
@@ -150,7 +159,7 @@ describe("private sandbox runtime preparation", () => {
 		const result = privateRuntimeMetadata(basePackage);
 		expect(result).toMatchObject({
 			name: "@anthropic-ai/sandbox-runtime",
-			version: "0.0.81-bluclawd.2",
+			version: "0.0.81-bluclawd.3",
 			private: true,
 			author: "Anthropic PBC",
 			license: "Apache-2.0",
@@ -165,7 +174,7 @@ describe("private sandbox runtime preparation", () => {
 			"node-forge": "^1.4.0",
 			zod: "^3.25.0",
 		});
-		expect(result.description).toMatch(/bluclawd.*Mach-lookup denial.*command id in network asks/i);
+		expect(result.description).toBe("Anthropic Sandbox Runtime (bluclawd private build: command id in network asks)");
 		expect(result.files).toContain("BLUCLAWD-NOTICE.txt");
 		expect(basePackage).toEqual(copy);
 	});
