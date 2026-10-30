@@ -297,8 +297,8 @@ export class SubagentRunScheduler<C = unknown> {
 	}
 
 	/**
-	 * Runs a completed run again under the same identity, in the background. Its usage starts from zero so
-	 * the earlier generation's usage, already attributed, is never counted twice.
+	 * Runs a completed run again under the same identity, in the background. Its counts and usage start from zero:
+	 * a generation reports only its own work, and the earlier usage, already attributed, is never counted twice.
 	 */
 	resume(runId: string, context: C): AdmitSubagentRunResult {
 		const managed = this.runs.get(runId);
@@ -325,6 +325,10 @@ export class SubagentRunScheduler<C = unknown> {
 				status: "starting",
 				complete: false,
 				deliveryMode: "background",
+				turnCount: 0,
+				toolCallCount: 0,
+				toolExecutions: undefined,
+				lastActivity: undefined,
 				usage: createEmptySubagentUsage(),
 				usageAttribution: undefined,
 				backgroundDeliveryAttempted: false,
