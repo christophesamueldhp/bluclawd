@@ -89,9 +89,9 @@ async function setup(
 	await runtime.refresh({ allowNetwork: false });
 	const registry = new ModelRegistry(runtime);
 	const sessionManager = SessionManager.inMemory(cwd);
-	// Admitted runs stay live, so later launches see their names.
+	// Admitted runs stay live until stopped, so later launches see their names.
 	const scheduler = new SubagentRunScheduler<RunExecutionContext>({
-		executeRun: ({ record }) =>
+		executeRun: ({ record, signal }) =>
 			options.firstGenerationCompletes && !record.generation
 				? Promise.resolve({
 						status: "completed",
@@ -99,7 +99,11 @@ async function setup(
 						summaryText: "v1 done.",
 						transcriptPath: join(agentDir, "transcript.jsonl"),
 					})
-				: new Promise(() => {}),
+				: new Promise((resolve) =>
+						signal.addEventListener("abort", () =>
+							resolve({ status: "cancelled", complete: false, summaryText: "" }),
+						),
+					),
 	});
 	let loadout = loadoutOf(["probe"]);
 	const scope = createParentScope({
@@ -440,12 +444,18 @@ describe("Run admission", () => {
 		}
 	});
 
-	it("refuses to resume a run that is not completed, or whose session was replaced", async () => {
+	it("refuses to resume a run that is running or stopped, or whose session was replaced", async () => {
 		const live = await setup();
 		const running = handleOf(await live.launch({ agent: "explorer", task: "x" })).record;
 		const notDone = await live.resume(running, () => "x").result;
 		expect(notDone).toMatchObject({ ok: false, refusal: "unavailable" });
 		expect(errorOf(notDone)).toMatch(/only a completed subagent can be resumed/);
+
+		const stuck = handleOf(await live.launch({ agent: "explorer", name: "stuck", task: "Hold.", background: true }));
+		live.scheduler.cancelRun(stuck.runId, "model");
+		const stopped = await live.resume(await stuck.completion, () => "Go on.").result;
+		expect(stopped).toMatchObject({ ok: false, refusal: "unavailable" });
+		expect(errorOf(stopped)).toMatch(/^"stuck" \(sub_[^)]+\) is cancelled; only a completed subagent can be resumed/);
 
 		const { launch, resume, invalidateSession } = await setup({ firstGenerationCompletes: true });
 

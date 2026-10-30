@@ -329,6 +329,9 @@ describe("A resume is the run's next generation", () => {
 		expect(readPersistedRunRecord(agentDir, parentSessionId, first.runId)).toMatchObject({
 			runId: first.runId,
 			name: "backend",
+			agentName: "general-purpose",
+			modelId: "faux-1",
+			thinkingLevel: "off",
 			generation: 1,
 			status: "completed",
 			summaryText: "v2 done.",
