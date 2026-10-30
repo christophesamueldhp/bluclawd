@@ -352,6 +352,62 @@ describe("A resume is the run's next generation", () => {
 			"completed",
 		]);
 	});
+
+	it("keeps the earlier generation's final report until the resume reports its own progress", async () => {
+		const { launch, runner, generations, context, report } = setup();
+		const first = launch();
+		const v1 = await runner.child(0);
+		v1.options.controller.updateProgress("Halfway through v1.");
+		v1.finish({ summaryText: "v1 done." });
+		await first.completion;
+		const finalReport = report(first.runId);
+		expect(finalReport).toContain("Execution: completed");
+
+		const resumed = generations.scheduler.resume(first.runId, {
+			...context,
+			resume: { transcriptPath: "transcript.jsonl", prompt: "Now add tests.", toolCallId: "call_resume" },
+		});
+		if (!resumed.ok) throw new Error(resumed.error);
+		const v2 = await runner.child(1);
+		v2.options.controller.markRunning("child_2");
+		expect(report(first.runId)).toBe(finalReport);
+
+		v2.options.controller.updateProgress("Writing tests.");
+		expect(report(first.runId)).toBe(`Run: ${first.runId} (general-purpose)\nStatus: running\n\nWriting tests.\n`);
+	});
+
+	it("reports the resumed generation's own turns, tool calls and usage", async () => {
+		const { launch, runner, generations, context } = setup();
+		const first = launch();
+		const v1 = await runner.child(0);
+		for (let turn = 0; turn < 3; turn++) {
+			v1.options.controller.recordTurn();
+			v1.options.controller.recordToolCall("bash");
+			v1.options.controller.recordToolExecution("bash", false);
+		}
+		v1.options.controller.recordToolExecution("read", true);
+		v1.options.controller.recordUsage({ input: 100, totalTokens: 100 });
+		v1.finish({ summaryText: "v1 done." });
+		await first.completion;
+
+		const resumed = generations.scheduler.resume(first.runId, {
+			...context,
+			resume: { transcriptPath: "transcript.jsonl", prompt: "Now add tests.", toolCallId: "call_resume" },
+		});
+		if (!resumed.ok) throw new Error(resumed.error);
+		const delivered = generations.deliver(resumed.handle);
+		const v2 = await runner.child(1);
+		v2.options.controller.recordTurn();
+		v2.options.controller.recordToolCall("bash");
+		v2.options.controller.recordToolExecution("bash", false);
+		v2.options.controller.recordUsage({ input: 50, totalTokens: 50 });
+		v2.finish({ summaryText: "v2 done." });
+
+		const envelope = await delivered;
+		expect(envelope.details).toMatchObject({ turnCount: 1, toolCallCount: 1 });
+		expect(envelope.parentText).toContain("Tool executions (observed): bash 1\n");
+		expect(envelope.parentText).toContain("Usage: 50 reported tokens;");
+	});
 });
 
 describe("Children see each other by name", () => {
