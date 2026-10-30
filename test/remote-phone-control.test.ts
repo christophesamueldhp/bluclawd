@@ -6,6 +6,7 @@ import {
 	type PhoneOutcome,
 	type PhoneSession,
 	phoneSession,
+	type Transcript,
 } from "../daemon/remote/phone-control.ts";
 
 const opus = { provider: "anthropic", id: "claude-opus", name: "Opus" };
@@ -249,16 +250,12 @@ const rows: Row[] = [
 	[
 		"a transcript image",
 		{ type: "image", entryId: "aaaaaaaa", index: 1 },
-		...each((id, leafId) => ({
-			read: { type: "image", sessionFile: `/s/${id}.jsonl`, entryId: "aaaaaaaa", index: 1, leafId },
-		})),
+		...each((transcript) => ({ read: { type: "image", transcript, entryId: "aaaaaaaa", index: 1 } })),
 	],
 	[
 		"a tool result's whole output",
 		{ type: "message_output", entryId: "aaaaaaaa" },
-		...each((id, leafId) => ({
-			read: { type: "message_output", sessionFile: `/s/${id}.jsonl`, entryId: "aaaaaaaa", leafId },
-		})),
+		...each((transcript) => ({ read: { type: "message_output", transcript, entryId: "aaaaaaaa" } })),
 	],
 	[
 		"the status",
@@ -291,9 +288,15 @@ function all(outcome: PhoneOutcome): [PhoneOutcome, PhoneOutcome, PhoneOutcome, 
 }
 /** Read from each session's own file, at its pane's leaf (a stored row has none). */
 function each(
-	read: (id: string, leafId: string | undefined) => PhoneOutcome,
+	read: (transcript: Transcript) => PhoneOutcome,
 ): [PhoneOutcome, PhoneOutcome, PhoneOutcome, PhoneOutcome] {
-	return [read("running", "cccccccc"), read("stopped", undefined), read("old", "cccccccc"), read("bare", "cccccccc")];
+	const at = (id: string, leafId?: string): Transcript => ({ sessionFile: `/s/${id}.jsonl`, leafId });
+	return [
+		read(at("running", "cccccccc")),
+		read(at("stopped")),
+		read(at("old", "cccccccc")),
+		read(at("bare", "cccccccc")),
+	];
 }
 
 describe("phone control", () => {

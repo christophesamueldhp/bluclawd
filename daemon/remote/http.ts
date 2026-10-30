@@ -604,12 +604,13 @@ function read(res: ServerResponse, what: TranscriptRead): void {
 		json(res, tail ? 200 : 404, tail ?? { error: "no_output" });
 		return;
 	}
+	const { sessionFile, leafId } = what.transcript;
 	if (what.type === "message_output") {
-		const result = loadOutput(what.sessionFile, what.entryId, what.leafId);
+		const result = loadOutput(sessionFile, what.entryId, leafId);
 		json(res, result ? 200 : 404, result ?? { error: "unknown_entry" });
 		return;
 	}
-	const image = loadImage(what.sessionFile, what.entryId, what.index, what.leafId);
+	const image = loadImage(sessionFile, what.entryId, what.index, leafId);
 	if (!image) {
 		json(res, 404, { error: "unknown_image" });
 		return;

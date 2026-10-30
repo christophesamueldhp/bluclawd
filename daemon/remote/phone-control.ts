@@ -12,11 +12,11 @@ import {
 	phoneMayRun,
 } from "../ipc/protocol.ts";
 import type { StatusSpan } from "./pistatusline.ts";
-import { findSession } from "./sessions.ts";
+import { findSession, type ListedSession } from "./sessions.ts";
 import type { GitInfo } from "./statusline.ts";
 
 /** A listed session, as one lookup per request finds it, with its pane's latest report. */
-export type PhoneSession = NonNullable<ReturnType<typeof findSession>> & { id: string; report?: PaneReport };
+export type PhoneSession = ListedSession & { id: string; report?: PaneReport };
 
 /** What a Chat asks of a session. A body's fields are `unknown` until the rule for them checks them. */
 export type PhoneAction =
@@ -37,11 +37,14 @@ export type PhoneAction =
 /** A change to the registry's row, which needs no pane. */
 export type DaemonOperation = { type: "rename"; name: string } | { type: "pin"; pinned: boolean } | { type: "delete" };
 
-/** What to read for the phone: only the session's own transcript, at its pane's leaf. */
+/** A session's own transcript, at its pane's leaf. */
+export type Transcript = Pick<ListedSession, "sessionFile" | "leafId">;
+
+/** What to read for the phone: only the session's own files. */
 export type TranscriptRead =
 	| { type: "task_output"; file: string }
-	| { type: "image"; sessionFile?: string; entryId: string; index: number; leafId?: string }
-	| { type: "message_output"; sessionFile?: string; entryId: string; leafId?: string };
+	| { type: "image"; transcript: Transcript; entryId: string; index: number }
+	| { type: "message_output"; transcript: Transcript; entryId: string };
 
 export type PhoneError =
 	| "session_not_running"
@@ -118,7 +121,6 @@ export function shellLine(text: string): boolean {
 	return /^!+\s*\S/.test(text.trimStart());
 }
 
-/** A message for a running pane; one that is not running gets none. */
 function toPane(session: PhoneSession, message: PaneMessage): PhoneOutcome {
 	return session.running ? { message } : { error: "session_not_running" };
 }
@@ -197,24 +199,8 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 			return known.outputFile ? { read: { type: "task_output", file: known.outputFile } } : { error: "no_output" };
 		}
 		case "image":
-			return {
-				read: {
-					type: "image",
-					sessionFile: session.sessionFile,
-					entryId: action.entryId,
-					index: action.index,
-					leafId: session.leafId,
-				},
-			};
 		case "message_output":
-			return {
-				read: {
-					type: "message_output",
-					sessionFile: session.sessionFile,
-					entryId: action.entryId,
-					leafId: session.leafId,
-				},
-			};
+			return { read: { ...action, transcript: { sessionFile: session.sessionFile, leafId: session.leafId } } };
 		case "status":
 			// A stored row's last report is no longer its status.
 			return session.running && report ? { status: statusView(report) } : { error: "no_status" };
