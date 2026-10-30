@@ -100,8 +100,11 @@ A completely empty session has no topic to name yet. Rename it at any time with 
 assigned name, including one assigned while generation is still running.
 
 **Web.** `websearch` sends a search to one of two search providers: **Exa** (ranked pages with
-highlights; set `EXA_API_KEY`) or **OpenAI** (a short cited answer plus its sources), through the
-ChatGPT/Codex login pi already holds, whatever model you chat with. Each OpenAI search spends
+highlights) or **OpenAI** (a short cited answer plus its sources), through the ChatGPT/Codex
+login pi already holds, whatever model you chat with. Store the Exa key like any other pi key:
+**`/login`** → *Sign in with an API key* → **Exa** saves it in `~/.pi/agent/auth.json`, where a
+`!command` value (e.g. `"!security find-generic-password -ws exa"`) keeps it in the Keychain
+instead; `EXA_API_KEY` is the fallback. The key stays inside pi, out of the shell commands it runs. Each OpenAI search spends
 Codex quota. `webfetch` reads up to 10 known URLs through Exa. **`/web`** opens a searchable
 picker for the provider and for the Codex model OpenAI searches run on; **`/web exa`**,
 **`/web openai`** and **`/web status`** work without it. The model can pick a provider per call;

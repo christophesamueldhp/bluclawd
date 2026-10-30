@@ -14,6 +14,7 @@ Decided 2026-10-30; the spec is GitHub issue #102.
 ## Consequences
 
 - OpenAI search calls `chatgpt.com/backend-api/codex/responses`, which OpenAI does not document for third-party use, and each search spends the user's Codex quota.
-- `webfetch` needs `EXA_API_KEY` even when search uses OpenAI.
+- `webfetch` needs an Exa API key even when search uses OpenAI.
+- The Exa key lives in pi's `auth.json` like a model provider's: bluclawd registers a model-less `exa` provider so `/login` stores it and pi resolves it, which keeps it out of the environment the agent's shell commands inherit. `EXA_API_KEY` is a fallback.
 - GitHub cloning, PDF, YouTube and video extraction go away with pi-web-access; agents use `git` and `gh` from the shell instead.
 - The README's "bluclawd ships no web or MCP tools" no longer holds.

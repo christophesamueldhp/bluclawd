@@ -4,7 +4,7 @@
  */
 import { Type } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionCommandContext, getAgentDir } from "@earendil-works/pi-coding-agent";
-import { exaContents } from "./exa.ts";
+import { EXA_PROVIDER, exaApiKey, exaContents } from "./exa.ts";
 import { defaultDeps, WebError } from "./http.ts";
 import { codexModels, defaultCodexModel } from "./openai.ts";
 import { pick } from "./picker.ts";
@@ -33,14 +33,14 @@ function openaiModel(ctx: ExtensionCommandContext, prefs: WebPrefs): string | un
 	return prefs.openaiModel && ids.includes(prefs.openaiModel) ? prefs.openaiModel : defaultCodexModel(ids);
 }
 
-const exaReady = () => Boolean(process.env.EXA_API_KEY?.trim());
+const exaReady = async (ctx: ExtensionCommandContext) => (await exaApiKey(ctx.modelRegistry)) !== undefined;
 
-function statusText(ctx: ExtensionCommandContext): string {
+async function statusText(ctx: ExtensionCommandContext): Promise<string> {
 	const prefs = loadWebPrefs(getAgentDir());
 	const model = openaiModel(ctx, prefs);
 	return [
 		`Web search provider: ${NAMES[prefs.provider]}`,
-		`Exa: ${exaReady() ? "EXA_API_KEY set" : "EXA_API_KEY not set"} (webfetch always uses Exa)`,
+		`Exa: ${(await exaReady(ctx)) ? "API key set" : "no API key (/login → Sign in with an API key → Exa)"} (webfetch always uses Exa)`,
 		`OpenAI: ${model ? `ChatGPT/Codex login, model ${model}` : "not signed in to ChatGPT/Codex (/login)"}`,
 	].join("\n");
 }
@@ -65,7 +65,9 @@ async function choose(ctx: ExtensionCommandContext): Promise<void> {
 			{
 				value: "exa",
 				label: `${mark(prefs.provider === "exa")}Exa`,
-				description: exaReady() ? "API key · ranked pages with highlights" : "EXA_API_KEY not set",
+				description: (await exaReady(ctx))
+					? "API key · ranked pages with highlights"
+					: "no API key (/login → API key → Exa)",
 			},
 			{
 				value: "openai",
@@ -95,6 +97,9 @@ async function choose(ctx: ExtensionCommandContext): Promise<void> {
 }
 
 export default function web(pi: ExtensionAPI) {
+	// No models: registering the provider lists Exa under /login's API keys and lets pi resolve the key it stores.
+	pi.registerProvider(EXA_PROVIDER, { name: "Exa" });
+
 	pi.registerTool({
 		name: "websearch",
 		label: "Web search",
@@ -161,10 +166,11 @@ export default function web(pi: ExtensionAPI) {
 			},
 			{ additionalProperties: false },
 		),
-		execute: async (_toolCallId, params, signal) => {
+		execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
 			try {
 				const { pages, notices, details } = await exaContents(
 					defaultDeps,
+					ctx.modelRegistry,
 					params.urls,
 					params.query?.trim() || undefined,
 					signal,
@@ -192,7 +198,7 @@ export default function web(pi: ExtensionAPI) {
 			if (arg === "exa" || arg === "openai") {
 				save(ctx, { provider: arg }, `Web search provider: ${NAMES[arg]}`);
 			} else if (arg === "status" || (arg === "" && !ctx.hasUI)) {
-				ctx.ui.notify(statusText(ctx), "info");
+				ctx.ui.notify(await statusText(ctx), "info");
 			} else if (arg === "") {
 				await choose(ctx);
 			} else {
