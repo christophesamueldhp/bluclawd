@@ -1,6 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { RunExecutionContext } from "./admission.ts";
+import { createRunDirectory } from "./directory.ts";
 import {
 	formatMessageReceipt,
 	PARENT_MESSAGE_ADDRESS,
@@ -68,10 +69,11 @@ function withRoster(task: string, roster: readonly string[]): string {
 export function createGenerations(deps: GenerationDeps) {
 	const senderRole = (address: string) => scheduler.getRun(address)?.agentName;
 
-	/** Live agents in a parent scope, one line each, for a child's prompt or roster query. */
-	const describeRoster = (parentSessionId: string, self: string, includeSelf: boolean): string[] =>
-		scheduler
-			.listActiveRuns(parentSessionId)
+	/** The agents a child of the scope can message now, one line each, for its prompt or roster query. */
+	const describeRoster = (scope: ParentScope, self: string, includeSelf: boolean): string[] =>
+		directory
+			.reachable(scope)
+			.map((entry) => entry.record)
 			.filter((run) => includeSelf || run.runId !== self)
 			.map(
 				(run) =>
@@ -86,7 +88,7 @@ export function createGenerations(deps: GenerationDeps) {
 				'List the agents running now: the orchestrator ("parent") and every subagent with its name, role, run ID, status and task.',
 			parameters: Type.Object({}, { additionalProperties: false }),
 			execute: async () => {
-				const others = describeRoster(scope.parentSessionId, address, true);
+				const others = describeRoster(scope, address, true);
 				return {
 					content: [
 						{
@@ -176,22 +178,17 @@ export function createGenerations(deps: GenerationDeps) {
 				rejectSession = reject;
 			});
 			sessionReady.catch(() => {});
-			deps.bus.register(
-				runId,
-				{
-					scope,
-					deliver: async (message) => {
-						if (scheduler.getRun(runId)?.status === "stopping") throw new Error("it is stopping");
-						const childSession = await sessionReady;
-						// A message never starts a turn on its own; it waits for the child's next safe boundary.
-						await childSession.sendCustomMessage(subagentMessagePayload(message, senderRole(message.from)), {
-							deliverAs: "steer",
-							triggerTurn: false,
-						});
-					},
+			deps.bus.register(runId, {
+				scope,
+				deliver: async (message) => {
+					const childSession = await sessionReady;
+					// A message never starts a turn on its own; it waits for the child's next safe boundary.
+					await childSession.sendCustomMessage(subagentMessagePayload(message, senderRole(message.from)), {
+						deliverAs: "steer",
+						triggerTurn: false,
+					});
 				},
-				params.record.name,
-			);
+			});
 			const reportedHosts = new Set<string>();
 			const parentTools = createParentToolProxies(
 				execCtx.parent,
@@ -219,7 +216,7 @@ export function createGenerations(deps: GenerationDeps) {
 					definition: execCtx.definition,
 					task: execCtx.resume
 						? execCtx.resume.prompt
-						: withRoster(execCtx.task, describeRoster(params.record.parentSessionId, runId, false)),
+						: withRoster(execCtx.task, describeRoster(scope, runId, false)),
 					resumeSessionFile: execCtx.resume?.transcriptPath,
 					childModel: execCtx.childModel,
 					projectTrusted: execCtx.projectTrusted,
@@ -233,17 +230,20 @@ export function createGenerations(deps: GenerationDeps) {
 					builtinExtensions: execCtx.builtinExtensions,
 					onChildSessionCreated: (session) => {
 						session.subscribe((event) => {
-							if (event.type === "agent_end") deps.bus.unregister(runId, "has finished");
+							if (event.type === "agent_end") directory.endTurn(runId);
 						});
 						resolveSession(session);
 					},
 				});
 			} finally {
+				directory.endTurn(runId);
 				rejectSession(new Error("it ended before it could receive messages"));
 				deps.bus.unregister(runId, "has finished");
 			}
 		},
 	});
+
+	const directory = createRunDirectory({ scheduler, agentDir: deps.agentDir });
 
 	/**
 	 * Resolves with a generation's envelope once it is final. A background or resumed generation is also sent to
@@ -263,5 +263,5 @@ export function createGenerations(deps: GenerationDeps) {
 		return envelope;
 	};
 
-	return { scheduler, deliver };
+	return { scheduler, directory, deliver };
 }

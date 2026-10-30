@@ -109,6 +109,8 @@ export interface SubagentRunnerOutcome {
 }
 
 export interface AdmitSubagentRunRequest<C = unknown> {
+	/** Minted by the caller when it prepares the run's storage first. */
+	runId?: string;
 	parentSessionId: string;
 	sessionEpoch: number;
 	parentTurnId: string;
@@ -144,6 +146,10 @@ export interface SubagentRunSchedulerOptions<C = unknown> {
 	/** Durably stores a settled run before it turns terminal; a throw fails the run. */
 	onFinalize?: (record: Readonly<SubagentRunRecord>) => Promise<Readonly<SubagentRunRecord>>;
 	executeRun: (params: SubagentRunnerExecuteParams & { context?: C }) => Promise<SubagentRunnerOutcome>;
+}
+
+export function createRunId(): string {
+	return `${AGENT_TASK_ID_PREFIX}${randomUUID()}`;
 }
 
 const TERMINAL_STATES = new Set<SubagentLifecycleStatus>(["completed", "failed", "cancelled", "interrupted"]);
@@ -224,7 +230,7 @@ export class SubagentRunScheduler<C = unknown> {
 		}
 
 		const admittedAt = this.now();
-		const runId = `${AGENT_TASK_ID_PREFIX}${randomUUID()}`;
+		const runId = request.runId ?? createRunId();
 
 		const record: SubagentRunRecord = {
 			runId,

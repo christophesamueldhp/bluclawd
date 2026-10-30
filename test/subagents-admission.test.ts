@@ -9,7 +9,7 @@ import {
 	SessionManager,
 	type ToolLoadout,
 } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type AdmissionContext,
 	type AdmissionResult,
@@ -19,9 +19,17 @@ import {
 	type RunAdmissionDeps,
 	type RunExecutionContext,
 } from "../ext/subagents/admission.ts";
+import { createRunDirectory } from "../ext/subagents/directory.ts";
 import { SubagentMessageBus } from "../ext/subagents/messages.ts";
 import { createParentScope } from "../ext/subagents/parent-scope.ts";
 import { type AdmittedSubagentHandle, type SubagentRunRecord, SubagentRunScheduler } from "../ext/subagents/runs.ts";
+import { ensureRunStorageDir } from "../ext/subagents/storage.ts";
+
+// Run storage works as usual unless a test makes it fail.
+vi.mock("../ext/subagents/storage.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../ext/subagents/storage.ts")>();
+	return { ...actual, ensureRunStorageDir: vi.fn(actual.ensureRunStorageDir) };
+});
 
 function handleOf(result: AdmissionResult): AdmittedSubagentHandle {
 	if (!result.ok) throw new Error(`Expected an admitted run, got: ${result.error}`);
@@ -42,6 +50,7 @@ function makeTempDir(prefix: string): string {
 }
 
 afterEach(() => {
+	vi.mocked(ensureRunStorageDir).mockClear();
 	while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
 });
 
@@ -114,8 +123,10 @@ async function setup(
 		batchWindowMs: 0,
 	});
 	scope.enter({ sessionManager } as unknown as ExtensionContext, "replaced");
+	const directory = createRunDirectory({ scheduler, agentDir: () => agentDir });
 	const deps: RunAdmissionDeps = {
 		scheduler,
+		directory,
 		agentDir: () => agentDir,
 		catalog: () => undefined,
 		loadout: () => loadout,
@@ -160,6 +171,8 @@ async function setup(
 		scheduler,
 		launch,
 		storageDir,
+		directory,
+		scope,
 		invalidateSession: () => scope.invalidate("Parent session switching"),
 	};
 }
@@ -187,8 +200,8 @@ describe("Run admission", () => {
 			taskSummary: "Look.",
 		});
 		expect(handleOf(second).record.name).toBe("explorer-2");
-		// Admission checks the session's storage without leaving a directory of its own behind.
-		expect(readdirSync(storageDir)).toEqual([]);
+		// Admission prepares each admitted run's directory, and no other.
+		expect(readdirSync(storageDir).sort()).toEqual([handleOf(first).runId, handleOf(second).runId].sort());
 	});
 
 	it("refuses missing input, oversized tasks, denied roles, unknown roles and background runs in one-shot modes", async () => {
@@ -380,6 +393,14 @@ describe("Run admission", () => {
 		const error = errorOf(await launch({ agent: "explorer", task: "x" }));
 		expect(error).toMatch(/^Cannot launch subagent: storage is unavailable \(Failed to initialize subagent storage/);
 		expect(scheduler.listRuns()).toHaveLength(0);
+	});
+
+	it("refuses a launch whose run storage cannot be created, so the run is never listed", async () => {
+		const { launch, directory, scope } = await setup();
+		vi.mocked(ensureRunStorageDir).mockReturnValueOnce({ ok: false, error: "disk full" });
+		const error = errorOf(await launch({ agent: "explorer", task: "x" }));
+		expect(error).toBe("Cannot launch subagent: storage is unavailable (disk full).");
+		expect(directory.list(scope.current()!)).toEqual([]);
 	});
 
 	it("resumes a completed run with the orchestrator's current tools and tool context, keeping its role and model", async () => {

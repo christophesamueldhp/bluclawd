@@ -88,44 +88,46 @@ export function formatMessageReceipt(receipt: SubagentMessageReceipt) {
 	};
 }
 
+/** A run as the bus routes to it. */
+export interface MessageRecipient {
+	readonly record: { readonly runId: string; readonly name?: string };
+	/** Why a message cannot reach the run now; absent when it can. */
+	readonly unreachable?: string;
+}
+
+/** Which runs exist and can be messaged, as a sender in a parent scope sees them. */
+export interface MessageRecipients {
+	/** The run a sender means by a name or run ID. */
+	find(scope: ParentScope, to: string): MessageRecipient | undefined;
+	/** The runs a sender can message now. */
+	reachable(scope: ParentScope): readonly MessageRecipient[];
+}
+
+const NO_RECIPIENTS: MessageRecipients = { find: () => undefined, reachable: () => [] };
+
 export class SubagentMessageBus {
 	private nextSeq = 1;
 	private readonly endpoints = new Map<string, SubagentMessageEndpoint>();
 	private readonly closed = new Map<string, string>();
-	/** Live agent names and the addresses they stand for. */
-	private readonly names = new Map<string, string>();
-	/** Names of agents that ended, so a message to one says why instead of "unknown". */
-	private readonly closedNames = new Map<string, string>();
 
 	private readonly onRecord?: (record: SubagentMessageRecord, senderScope: ParentScope) => void;
+	private readonly recipients: MessageRecipients;
 
-	constructor(onRecord?: (record: SubagentMessageRecord, senderScope: ParentScope) => void) {
+	constructor(
+		onRecord?: (record: SubagentMessageRecord, senderScope: ParentScope) => void,
+		recipients: MessageRecipients = NO_RECIPIENTS,
+	) {
 		this.onRecord = onRecord;
+		this.recipients = recipients;
 	}
 
-	register(address: string, endpoint: SubagentMessageEndpoint, name?: string): void {
+	register(address: string, endpoint: SubagentMessageEndpoint): void {
 		this.closed.delete(address);
 		this.endpoints.set(address, endpoint);
-		if (name) {
-			this.names.set(name, address);
-			this.closedNames.delete(name);
-		}
 	}
 
 	unregister(address: string, reason: string): void {
 		if (this.endpoints.delete(address)) this.closed.set(address, reason);
-		for (const [name, target] of this.names) {
-			if (target !== address) continue;
-			this.names.delete(name);
-			this.closedNames.set(name, address);
-		}
-	}
-
-	private nameOf(address: string): string | undefined {
-		for (const names of [this.names, this.closedNames]) {
-			for (const [name, target] of names) if (target === address) return name;
-		}
-		return undefined;
 	}
 
 	/** Records a message the runtime delivers itself, such as the prompt that resumes a finished child. */
@@ -135,7 +137,8 @@ export class SubagentMessageBus {
 		toName?: string,
 	): SubagentMessageReceipt {
 		const receipt = { status: "accepted" as const, seq: this.nextSeq++, to, toName };
-		this.onRecord?.({ ...receipt, from: from.address, fromName: this.nameOf(from.address) }, from.scope);
+		const fromName = this.recipients.find(from.scope, from.address)?.record.name;
+		this.onRecord?.({ ...receipt, from: from.address, fromName }, from.scope);
 		return receipt;
 	}
 
@@ -146,10 +149,11 @@ export class SubagentMessageBus {
 	): Promise<SubagentMessageReceipt> {
 		// The sequence number is taken before any await so concurrent senders share one ordering.
 		const seq = this.nextSeq++;
-		const address = this.names.get(to) ?? this.closedNames.get(to) ?? to;
-		const names = { fromName: this.nameOf(from.address), toName: this.nameOf(address) };
+		const run = this.recipients.find(from.scope, to);
+		const address = run?.record.runId ?? to;
+		const names = { fromName: this.recipients.find(from.scope, from.address)?.record.name, toName: run?.record.name };
 		const receipt = {
-			...(await this.route(seq, from.address, from.scope, address, content, names)),
+			...(await this.route(seq, from.address, from.scope, address, run, content, names)),
 			to: address,
 			toName: names.toName,
 		};
@@ -158,17 +162,16 @@ export class SubagentMessageBus {
 	}
 
 	private reachableFrom(address: string, scope: ParentScope): string[] {
-		return Array.from(this.endpoints)
-			.filter(
-				([other, endpoint]) =>
-					other !== address &&
-					endpoint.scope.parentSessionId === scope.parentSessionId &&
-					endpoint.scope.sessionEpoch === scope.sessionEpoch,
-			)
-			.map(([other]) => {
-				const name = this.nameOf(other);
-				return name ? `${name} (${other})` : other;
-			});
+		const parent = this.endpoints.get(PARENT_MESSAGE_ADDRESS);
+		const parentReachable =
+			address !== PARENT_MESSAGE_ADDRESS &&
+			parent?.scope.parentSessionId === scope.parentSessionId &&
+			parent.scope.sessionEpoch === scope.sessionEpoch;
+		const runs = this.recipients
+			.reachable(scope)
+			.filter((run) => run.record.runId !== address)
+			.map(({ record }) => (record.name ? `${record.name} (${record.runId})` : record.runId));
+		return [...(parentReachable ? [PARENT_MESSAGE_ADDRESS] : []), ...runs];
 	}
 
 	private async route(
@@ -176,29 +179,29 @@ export class SubagentMessageBus {
 		from: string,
 		senderScope: ParentScope,
 		to: string,
+		run: MessageRecipient | undefined,
 		content: string,
 		names: { fromName?: string; toName?: string },
 	): Promise<SubagentMessageReceipt> {
 		if (to === from) return { status: "unavailable", seq, reason: "An agent cannot message itself." };
+		const label = names.toName ? `"${names.toName}" (${to})` : `"${to}"`;
 		const endpoint = this.endpoints.get(to);
+		if (endpoint && endpoint.scope.parentSessionId !== senderScope.parentSessionId) {
+			return { status: "unavailable", seq, reason: `"${to}" belongs to a different parent session.` };
+		}
+		if (endpoint && endpoint.scope.sessionEpoch !== senderScope.sessionEpoch) {
+			return { status: "invalidated", seq, reason: "The parent session was reloaded or replaced." };
+		}
+		if (run?.unreachable) return { status: "unavailable", seq, reason: `${label} ${run.unreachable}.` };
 		if (!endpoint) {
 			const closedReason = this.closed.get(to);
-			if (closedReason) {
-				const label = names.toName ? `"${names.toName}" (${to})` : `"${to}"`;
-				return { status: "unavailable", seq, reason: `${label} ${closedReason}.` };
-			}
+			if (closedReason) return { status: "unavailable", seq, reason: `${label} ${closedReason}.` };
 			const reachable = this.reachableFrom(from, senderScope);
 			return {
 				status: "unavailable",
 				seq,
 				reason: `No running agent "${to}" is reachable. Reachable now: ${reachable.join(", ") || "none"}.`,
 			};
-		}
-		if (endpoint.scope.parentSessionId !== senderScope.parentSessionId) {
-			return { status: "unavailable", seq, reason: `"${to}" belongs to a different parent session.` };
-		}
-		if (endpoint.scope.sessionEpoch !== senderScope.sessionEpoch) {
-			return { status: "invalidated", seq, reason: "The parent session was reloaded or replaced." };
 		}
 		try {
 			await endpoint.deliver({ seq, from, to, content, ...names });

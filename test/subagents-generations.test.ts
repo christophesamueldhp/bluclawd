@@ -109,7 +109,10 @@ function fakeRunner() {
 function setup(options: { batchWindowMs?: number } = {}) {
 	const cwd = makeTempDir("cwd");
 	const agentDir = makeTempDir("agent");
-	const bus = new SubagentMessageBus();
+	const bus = new SubagentMessageBus(undefined, {
+		find: (scope, to) => generations.directory.find(scope, to),
+		reachable: (scope) => generations.directory.reachable(scope),
+	});
 	const sent: ParentInboxItem<ParentNotice>[][] = [];
 	const scope = createParentScope<ParentNotice>({
 		bus,
