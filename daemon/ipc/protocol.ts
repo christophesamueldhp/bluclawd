@@ -131,6 +131,8 @@ export interface RemoteLiveRequest {
 	type: "remote_live";
 	instanceId: string;
 	live: LiveSnapshot | null;
+	/** With null: the transcript entry the finished reply became. Absent: where is unknown (older panes). */
+	entryId?: string;
 }
 
 /** What the phone's status sheet shows of a pane. */

@@ -63,8 +63,8 @@ export interface RemoteServer {
 	watching(): Set<string>;
 	/** The devices with an event stream open: the app is in the foreground there. */
 	present(): Set<string>;
-	/** Push a pane's reply in progress (null: finished) to the phones that have its session open. */
-	live(sessionId: string, live: LiveSnapshot | null): void;
+	/** Push a pane's reply in progress (null: finished, at entry `entryId` when known) to the phones that have its session open. */
+	live(sessionId: string, live: LiveSnapshot | null, entryId?: string): void;
 	/** Tell the phones that have this session open its report changed. */
 	status(sessionId: string): void;
 	close(): Promise<void>;
@@ -653,7 +653,7 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 				port: typeof address === "object" && address ? address.port : port,
 				watching: () => events.watching(),
 				present: () => events.present(),
-				live: (id, live) => events.live(id, live),
+				live: (id, live, entryId) => events.live(id, live, entryId),
 				status: (id) => events.status(id),
 				close: () =>
 					new Promise<void>((done) => {

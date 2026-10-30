@@ -229,7 +229,7 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 		}
 
 		case "remote_live": {
-			remoteControl?.live(request.instanceId, request.live);
+			remoteControl?.live(request.instanceId, request.live, request.entryId);
 			return { type: "ack", ok: true };
 		}
 

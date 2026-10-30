@@ -57,7 +57,7 @@ type Request =
 	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
 	| { type: "save"; cwd: string; label?: string; sessionFile: string; sessionId?: string }
 	| ({ type: "remote" } & RemoteAction)
-	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null }
+	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null; entryId?: string }
 	| { type: "remote_report"; instanceId: string; report: PaneReport };
 
 interface AnyResponse {
@@ -270,9 +270,10 @@ export class OrchestratorClient {
 		return res as unknown as RemoteResult;
 	}
 
-	/** The reply this pane is streaming, for the phones watching it; null once it is finished. */
-	async remoteLive(instanceId: string, live: LiveSnapshot | null): Promise<void> {
-		await this.request({ type: "remote_live", instanceId, live }, 1000);
+	/** The reply this pane is streaming, for the phones watching it; null once it is finished, with
+	 *  the transcript entry it became when known. */
+	async remoteLive(instanceId: string, live: LiveSnapshot | null, entryId?: string): Promise<void> {
+		await this.request({ type: "remote_live", instanceId, live, ...(entryId ? { entryId } : {}) }, 1000);
 	}
 
 	/** This pane's model, context and usage, for the phone's status sheet. */
