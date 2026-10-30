@@ -319,6 +319,8 @@ export class SubagentRunScheduler<C = unknown> {
 				stopSource: undefined,
 				errorMessage: undefined,
 				summaryText: undefined,
+				// Unset, so the earlier generation's final report stays on disk until this one reports progress.
+				lastProgressText: undefined,
 				generation: (managed.record.generation ?? 0) + 1,
 				status: "starting",
 				complete: false,

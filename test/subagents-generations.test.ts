@@ -349,6 +349,29 @@ describe("A resume is the run's next generation", () => {
 			"completed",
 		]);
 	});
+
+	it("keeps the earlier generation's final report until the resume reports its own progress", async () => {
+		const { launch, runner, generations, context, report } = setup();
+		const first = launch();
+		const v1 = await runner.child(0);
+		v1.options.controller.updateProgress("Halfway through v1.");
+		v1.finish({ summaryText: "v1 done." });
+		await first.completion;
+		const finalReport = report(first.runId);
+		expect(finalReport).toContain("Execution: completed");
+
+		const resumed = generations.scheduler.resume(first.runId, {
+			...context,
+			resume: { transcriptPath: "transcript.jsonl", prompt: "Now add tests.", toolCallId: "call_resume" },
+		});
+		if (!resumed.ok) throw new Error(resumed.error);
+		const v2 = await runner.child(1);
+		v2.options.controller.markRunning("child_2");
+		expect(report(first.runId)).toBe(finalReport);
+
+		v2.options.controller.updateProgress("Writing tests.");
+		expect(report(first.runId)).toBe(`Run: ${first.runId} (general-purpose)\nStatus: running\n\nWriting tests.\n`);
+	});
 });
 
 describe("Children see each other by name", () => {
