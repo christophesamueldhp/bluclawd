@@ -32,12 +32,26 @@ const EXTERNAL_TTL_MS = 15_000;
  *  newer wait for the same id replaced it. */
 export type WaitOutcome = "queued" | "none" | "superseded";
 
+/** Whether a pane's tmux session is still there. */
+export interface TmuxProbe {
+	hasSession(name: string): boolean;
+}
+
+export interface RegistryDeps {
+	/** Milliseconds since the epoch. */
+	now: () => number;
+	tmux: TmuxProbe;
+	/** Where instances.json lives. */
+	dir: string;
+}
+
 /**
  * Agent view's registry. Every running session is a pane's pi that registers itself with a
  * heartbeat; the daemon runs no sessions. A session whose pi quit while idle stays as a stored
  * row (instances.json), resumable from its .jsonl.
  */
 export class ServerSupervisor {
+	private readonly deps: RegistryDeps;
 	private readonly externalInstances = new Map<string, ExternalInstance>();
 	/** Each pane's pending wait, by id; kept apart from its entry, which every heartbeat replaces. */
 	private readonly waits = new Map<string, (outcome: WaitOutcome) => void>();
@@ -48,8 +62,12 @@ export class ServerSupervisor {
 	 *  file, for that pane's row. */
 	private readonly resumedMeta = new Map<string, Pick<InstanceRecord, "pinned" | "sortOrder">>();
 
+	constructor(deps: RegistryDeps) {
+		this.deps = deps;
+	}
+
 	/** Register/heartbeat a pane's pi. */
-	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = Date.now()): void {
+	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = this.deps.now()): void {
 		const previous = this.externalInstances.get(record.id);
 		const resumed = record.sessionFile ? this.resumedMeta.get(record.sessionFile) : undefined;
 		if (record.sessionFile) this.resumedMeta.delete(record.sessionFile);
@@ -131,7 +149,7 @@ export class ServerSupervisor {
 
 	/** External instances, reaping any whose last heartbeat is older than the TTL. */
 	listExternalInstances(
-		now: number = Date.now(),
+		now: number = this.deps.now(),
 	): Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> {
 		const out: Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> = [];
 		for (const [id, entry] of this.externalInstances) {
@@ -147,8 +165,8 @@ export class ServerSupervisor {
 
 	/** Rows an older daemon left running: they ended with it, and stay resumable from their .jsonl. */
 	recoverAfterRestart(): void {
-		const recoveredAt = new Date().toISOString();
-		const instances = loadInstances().map((instance) => {
+		const recoveredAt = new Date(this.deps.now()).toISOString();
+		const instances = loadInstances(this.deps.dir).map((instance) => {
 			if (instance.status !== "online" && instance.status !== "starting" && instance.status !== "stopping") {
 				return instance;
 			}
@@ -159,15 +177,15 @@ export class ServerSupervisor {
 				lastSeenAt: recoveredAt,
 			};
 		});
-		saveInstances(instances);
+		saveInstances(this.deps.dir, instances);
 	}
 
 	listInstances(): InstanceRecord[] {
-		return loadInstances().map(cloneInstance);
+		return loadInstances(this.deps.dir).map(cloneInstance);
 	}
 
 	getInstance(instanceId: string): InstanceRecord | undefined {
-		const stored = getInstance(instanceId);
+		const stored = getInstance(this.deps.dir, instanceId);
 		return stored ? cloneInstance(stored) : undefined;
 	}
 
@@ -177,8 +195,8 @@ export class ServerSupervisor {
 	 * for that file is reused, so the session keeps its id, name and pin.
 	 */
 	saveInstance(options: { cwd: string; label?: string; sessionFile: string; sessionId?: string }): InstanceRecord {
-		const now = new Date().toISOString();
-		const previous = loadInstances().find((instance) => instance.sessionFile === options.sessionFile);
+		const now = new Date(this.deps.now()).toISOString();
+		const previous = loadInstances(this.deps.dir).find((instance) => instance.sessionFile === options.sessionFile);
 		const tail = readSessionTail(options.sessionFile);
 		// Pinned or moved while its pane ran, newer than the row it may have had before. A pane that
 		// quits does not wait to unregister, so its row may still be listed.
@@ -201,7 +219,7 @@ export class ServerSupervisor {
 			turns: previous?.turns ?? tail?.turns,
 			finishedAt: now,
 		};
-		upsertInstance(record);
+		upsertInstance(this.deps.dir, record);
 		return cloneInstance(record);
 	}
 
@@ -212,7 +230,7 @@ export class ServerSupervisor {
 			this.settleWait(instanceId, "none");
 			return true;
 		}
-		const stored = getInstance(instanceId);
+		const stored = getInstance(this.deps.dir, instanceId);
 		if (!stored) return false;
 		// A pane resuming it keeps its pin and order: the phone's goes once its pane registered,
 		// agent view's before it has.
@@ -222,7 +240,7 @@ export class ServerSupervisor {
 			if (pane) pane.record = { ...pane.record, ...meta };
 			else this.resumedMeta.set(stored.sessionFile, meta);
 		}
-		removeInstance(instanceId);
+		removeInstance(this.deps.dir, instanceId);
 		return true;
 	}
 
@@ -241,12 +259,10 @@ export class ServerSupervisor {
 	}
 
 	private updateStored(instanceId: string, updates: Partial<InstanceRecord>): InstanceRecord | undefined {
-		const stored = getInstance(instanceId);
+		const stored = getInstance(this.deps.dir, instanceId);
 		if (!stored) return undefined;
 		const next = { ...stored, ...updates };
-		upsertInstance(next);
+		upsertInstance(this.deps.dir, next);
 		return next;
 	}
 }
-
-export const supervisor = new ServerSupervisor();

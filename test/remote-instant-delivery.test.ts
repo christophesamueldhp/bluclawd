@@ -7,19 +7,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleIpcRequest } from "../daemon/handler.ts";
 import { startIpcServer } from "../daemon/ipc/server.ts";
 import { OrchestratorClient, type PaneMessage } from "../daemon/orchestrator-client.ts";
-import { supervisor } from "../daemon/supervisor.ts";
+import type { ServerSupervisor } from "../daemon/supervisor.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
+import { testRegistry } from "./helpers/registry.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /** A real daemon socket in a temp PI_SERVER_DIR, with a pane's registration as its client. */
 describe("instant delivery to a pane", () => {
 	let dir: string;
 	let server: Server;
+	let supervisor: ServerSupervisor;
 
 	beforeEach(async () => {
 		dir = await mkdtemp(join(tmpdir(), "bluclawd-wait-"));
 		vi.stubEnv("PI_SERVER_DIR", dir);
-		server = await startIpcServer(handleIpcRequest);
+		supervisor = testRegistry(dir);
+		server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
 	});
 
 	afterEach(async () => {

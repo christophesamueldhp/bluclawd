@@ -8,12 +8,15 @@ import type { InstanceSummary } from "../daemon/ipc/protocol.ts";
 import { RemoteControl } from "../daemon/remote/control.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { PushResult, WebPushSubscription } from "../daemon/remote/webpush.ts";
+import type { ServerSupervisor } from "../daemon/supervisor.ts";
 import { Tmux } from "../daemon/tmux.ts";
+import { testRegistry } from "./helpers/registry.ts";
 import { validP256dh } from "./support/push.ts";
 
 describe("remote control switch", () => {
 	let dir: string;
 	let control: RemoteControl;
+	let supervisor: ServerSupervisor;
 	const make = () =>
 		new RemoteControl({
 			store: new RemoteStore(join(dir, "remote.json")),
@@ -29,6 +32,7 @@ describe("remote control switch", () => {
 		dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-control-"));
 		// The tmux it asks whether a terminal shows pi is this test's, which no server runs.
 		vi.stubEnv("PI_SERVER_DIR", dir);
+		supervisor = testRegistry(dir);
 		control = make();
 	});
 	afterEach(async () => {
@@ -103,13 +107,13 @@ describe("remote control switch", () => {
 			return [process.execPath, join(dir, name)];
 		});
 		const beat = (command: string[]) =>
-			handleIpcRequest({
+			handleIpcRequest(supervisor, {
 				type: "register",
 				instance: { id: "pane-1", cwd: "/p", leafId: "e2", launch: { command } },
 			});
 		await beat(a);
 		expect(control.launch()).toEqual({ command: a });
-		expect(listSummaries().find((i) => i.id === "pane-1")).toMatchObject({ external: true, leafId: "e2" });
+		expect(listSummaries(supervisor).find((i) => i.id === "pane-1")).toMatchObject({ external: true, leafId: "e2" });
 		// Off: nothing is written for it.
 		expect(existsSync(file)).toBe(false);
 		// On: the phone needs it at once.
@@ -146,7 +150,7 @@ describe("remote control switch", () => {
 		await beat(b);
 		expect(control.launch()).toEqual({ command: b });
 		expect(statSync(file).ino).toBe(off);
-		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
+		await handleIpcRequest(supervisor, { type: "unregister", instanceId: "pane-1" });
 	});
 
 	it("learns the launch command from /remote-control too, as a fresh pi has no heartbeat yet", async () => {
@@ -215,7 +219,10 @@ describe("remote control switch", () => {
 			return { status: res.status, body: (await res.json()) as { pane?: string; error?: string } };
 		};
 		const register = (id: string) =>
-			handleIpcRequest({ type: "register", instance: { id, cwd: dir, sessionFile: join(dir, "s.jsonl") } });
+			handleIpcRequest(supervisor, {
+				type: "register",
+				instance: { id, cwd: dir, sessionFile: join(dir, "s.jsonl") },
+			});
 		const killed = () => tmuxCalls.filter((args) => args[0] === "kill-session").map((args) => args[2]);
 
 		it("ends a pane it started that never registered", async () => {
@@ -242,20 +249,20 @@ describe("remote control switch", () => {
 			vi.advanceTimersByTime(START_TIMEOUT_MS);
 			expect(killed()).toEqual([]);
 			expect(deleted).toEqual([]);
-			await handleIpcRequest({ type: "unregister", instanceId: task.body.pane! });
+			await handleIpcRequest(supervisor, { type: "unregister", instanceId: task.body.pane! });
 		});
 	});
 
 	it("asks a heartbeat for a report while it has none for the pane, as after a daemon restart", async () => {
-		const beat = () => handleIpcRequest({ type: "register", instance: { id: "pane-1", cwd: "/p" } });
+		const beat = () => handleIpcRequest(supervisor, { type: "register", instance: { id: "pane-1", cwd: "/p" } });
 		expect(await beat()).not.toHaveProperty("wantReport");
 		setRemoteControl(control);
 		expect(await beat()).toMatchObject({ type: "register_result", wantReport: true });
-		await handleIpcRequest({ type: "remote_report", instanceId: "pane-1", report: { models: [] } });
+		await handleIpcRequest(supervisor, { type: "remote_report", instanceId: "pane-1", report: { models: [] } });
 		expect(await beat()).not.toHaveProperty("wantReport");
-		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
+		await handleIpcRequest(supervisor, { type: "unregister", instanceId: "pane-1" });
 		expect(await beat()).toMatchObject({ wantReport: true });
-		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
+		await handleIpcRequest(supervisor, { type: "unregister", instanceId: "pane-1" });
 	});
 
 	it("tells a heartbeat when a phone watches its session, and streams what the pane sends", async () => {
@@ -263,7 +270,7 @@ describe("remote control switch", () => {
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });
 		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
 		const base = `http://127.0.0.1:${on.port}`;
-		const beat = () => handleIpcRequest({ type: "register", instance: { id: "pane-1", cwd: "/p" } });
+		const beat = () => handleIpcRequest(supervisor, { type: "register", instance: { id: "pane-1", cwd: "/p" } });
 		expect(await beat()).not.toHaveProperty("watched");
 		const paired = await fetch(`${base}/api/pair`, {
 			method: "POST",
@@ -281,12 +288,12 @@ describe("remote control switch", () => {
 		await until(": connected");
 		expect(await beat()).toMatchObject({ type: "register_result", watched: true });
 		const live = { text: "Working on it", tools: [] };
-		expect(await handleIpcRequest({ type: "remote_live", instanceId: "pane-1", live })).toMatchObject({
+		expect(await handleIpcRequest(supervisor, { type: "remote_live", instanceId: "pane-1", live })).toMatchObject({
 			type: "ack",
 			ok: true,
 		});
 		await until(JSON.stringify({ sessionId: "pane-1", live }));
-		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
+		await handleIpcRequest(supervisor, { type: "unregister", instanceId: "pane-1" });
 		await until(JSON.stringify({ sessionId: "pane-1", live: null }));
 		controller.abort();
 	});
@@ -310,10 +317,12 @@ describe("remote control switch", () => {
 			usage: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, cost: 0 },
 		};
 		// Kept while remote control is off, so the phone has it once it is on.
-		expect(await handleIpcRequest({ type: "remote_report", instanceId: "pane-1", report })).toMatchObject({
-			type: "ack",
-			ok: true,
-		});
+		expect(await handleIpcRequest(supervisor, { type: "remote_report", instanceId: "pane-1", report })).toMatchObject(
+			{
+				type: "ack",
+				ok: true,
+			},
+		);
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });
 		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
 		const base = `http://127.0.0.1:${on.port}`;
@@ -336,16 +345,16 @@ describe("remote control switch", () => {
 		};
 		await until(": connected");
 		const next = { ...report, thinkingLevel: "high" };
-		await handleIpcRequest({ type: "remote_report", instanceId: "pane-1", report: next });
+		await handleIpcRequest(supervisor, { type: "remote_report", instanceId: "pane-1", report: next });
 		await until("event: status");
 		expect(await (await status()).json()).toEqual({ report: next });
 		// The same report again still signals: a compact the pane skipped or pi refused changes nothing.
 		const signals = received.split("event: status").length;
-		await handleIpcRequest({ type: "remote_report", instanceId: "pane-1", report: next });
+		await handleIpcRequest(supervisor, { type: "remote_report", instanceId: "pane-1", report: next });
 		while (received.split("event: status").length === signals) {
 			received += new TextDecoder().decode((await reader.read()).value);
 		}
-		await handleIpcRequest({ type: "unregister", instanceId: "pane-1" });
+		await handleIpcRequest(supervisor, { type: "unregister", instanceId: "pane-1" });
 		expect((await status()).status).toBe(404);
 		controller.abort();
 	});
@@ -607,17 +616,21 @@ describe("remote control switch", () => {
 
 	it("acknowledges a pane's live reply and report when remote control is unavailable", async () => {
 		expect(
-			await handleIpcRequest({ type: "remote_live", instanceId: "pane-1", live: { text: "", tools: [] } }),
+			await handleIpcRequest(supervisor, {
+				type: "remote_live",
+				instanceId: "pane-1",
+				live: { text: "", tools: [] },
+			}),
 		).toMatchObject({ type: "ack", ok: true });
 		expect(
-			await handleIpcRequest({ type: "remote_report", instanceId: "pane-1", report: { models: [] } }),
+			await handleIpcRequest(supervisor, { type: "remote_report", instanceId: "pane-1", report: { models: [] } }),
 		).toMatchObject({ type: "ack", ok: true });
 	});
 
 	it("is reached through the daemon's IPC handler", async () => {
-		expect(await handleIpcRequest({ type: "remote", action: "status" })).toMatchObject({ type: "error" });
+		expect(await handleIpcRequest(supervisor, { type: "remote", action: "status" })).toMatchObject({ type: "error" });
 		setRemoteControl(control);
-		expect(await handleIpcRequest({ type: "remote", action: "status" })).toMatchObject({
+		expect(await handleIpcRequest(supervisor, { type: "remote", action: "status" })).toMatchObject({
 			type: "remote_result",
 			enabled: false,
 		});

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { handleIpcRequest, setShutdownHook } from "../daemon/handler.ts";
 import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
+import { testRegistry } from "./helpers/registry.ts";
 
 describe("daemon `shutdown` request", () => {
 	afterEach(() => setShutdownHook(undefined));
@@ -14,7 +15,7 @@ describe("daemon `shutdown` request", () => {
 		setShutdownHook(() => {
 			called++;
 		});
-		const response = await handleIpcRequest({ type: "shutdown" });
+		const response = await handleIpcRequest(testRegistry(), { type: "shutdown" });
 		expect(response).toMatchObject({ type: "shutdown_result", ok: true });
 		expect(called).toBe(0); // deferred, so the reply is written first
 		await new Promise((r) => setTimeout(r, 150));
@@ -22,7 +23,7 @@ describe("daemon `shutdown` request", () => {
 	});
 
 	it("is an error when no shutdown hook is installed", async () => {
-		const response = await handleIpcRequest({ type: "shutdown" });
+		const response = await handleIpcRequest(testRegistry(), { type: "shutdown" });
 		expect(response.ok).toBe(false);
 	});
 });

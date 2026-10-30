@@ -28,7 +28,7 @@ import type {
 	WaitResponse,
 } from "./ipc/protocol.ts";
 import type { RemoteControl } from "./remote/control.ts";
-import { supervisor } from "./supervisor.ts";
+import type { ServerSupervisor } from "./supervisor.ts";
 import type { InstanceRecord } from "./types.ts";
 
 function toInstanceSummary(
@@ -80,7 +80,7 @@ export function setRemoteControl(control: RemoteControl | undefined): void {
 }
 
 /** Every row agent view lists: stored rows, then each pane's pi with its activity. */
-export function listSummaries(): InstanceSummary[] {
+export function listSummaries(supervisor: ServerSupervisor): InstanceSummary[] {
 	const stored = supervisor.listInstances().map((instance) => toInstanceSummary(instance));
 	const external = supervisor
 		.listExternalInstances()
@@ -97,14 +97,36 @@ function unknownInstanceError(instanceId: string): ErrorResponse {
 }
 
 // Overhead types
-export async function handleIpcRequest(request: ListRequest): Promise<ListResponse | ErrorResponse>;
-export async function handleIpcRequest(request: StatusRequest): Promise<StatusResponse | ErrorResponse>;
-export async function handleIpcRequest(request: RegisterRequest): Promise<RegisterResponse | ErrorResponse>;
-export async function handleIpcRequest(request: WaitRequest): Promise<WaitResponse | ErrorResponse>;
-export async function handleIpcRequest(request: UnregisterRequest): Promise<UnregisterResponse | ErrorResponse>;
-export async function handleIpcRequest(request: ShutdownRequest): Promise<ShutdownResponse | ErrorResponse>;
-export async function handleIpcRequest(request: RemoteRequest): Promise<RemoteResponse | ErrorResponse>;
 export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: ListRequest,
+): Promise<ListResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: StatusRequest,
+): Promise<StatusResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: RegisterRequest,
+): Promise<RegisterResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: WaitRequest,
+): Promise<WaitResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: UnregisterRequest,
+): Promise<UnregisterResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: ShutdownRequest,
+): Promise<ShutdownResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: RemoteRequest,
+): Promise<RemoteResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
 	request:
 		| DeleteRequest
 		| RenameRequest
@@ -114,11 +136,11 @@ export async function handleIpcRequest(
 		| RemoteLiveRequest
 		| RemoteReportRequest,
 ): Promise<AckResponse | ErrorResponse>;
-export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse>;
-export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse> {
+export async function handleIpcRequest(supervisor: ServerSupervisor, request: ServerRequest): Promise<ServerResponse>;
+export async function handleIpcRequest(supervisor: ServerSupervisor, request: ServerRequest): Promise<ServerResponse> {
 	switch (request.type) {
 		case "list": {
-			return { type: "list_result", ok: true, instances: listSummaries() };
+			return { type: "list_result", ok: true, instances: listSummaries(supervisor) };
 		}
 
 		case "status": {
