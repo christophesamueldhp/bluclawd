@@ -260,6 +260,26 @@ const rows: Row[] = [
 			read: { type: "message_output", sessionFile: `/s/${id}.jsonl`, entryId: "aaaaaaaa", leafId },
 		})),
 	],
+	[
+		"the status",
+		{ type: "status" },
+		{
+			// No commands, which have their own route; a task's output file stays on the Mac.
+			status: {
+				model: opus,
+				models: [opus, gpt],
+				thinkingLevels: ["off", "low", "medium", "high"],
+				trust: "always",
+				tasks: [
+					{ id: "b1", kind: "shell", label: "npm run dev", startedAt: 1, output: true },
+					{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2, foreground: true },
+				],
+			},
+		},
+		error("no_status"),
+		{ status: { model: opus, models: [opus, gpt] } },
+		error("no_status"),
+	],
 ];
 
 /** The same outcome for each running pane, `stopped` for the stored row. */
@@ -300,6 +320,18 @@ describe("phone control", () => {
 		] as const)("%s to the %s session", (text, id, expected) => {
 			expect(decide(session(id), { type: "prompt", text })).toEqual(expected);
 		});
+	});
+
+	it("shows only the status fields it declares, never a new one a pane reports", () => {
+		const newer = { ...full, pistatusline: { worker: "/w.js", config: "/c.json" }, somethingNew: 1 } as PaneReport;
+		const status = decide({ ...session("running"), report: newer }, { type: "status" });
+		expect(status).toHaveProperty("status.model", opus);
+		expect(status).not.toHaveProperty("status.somethingNew");
+		expect(status).not.toHaveProperty("status.pistatusline");
+	});
+
+	it("shows none of a stored row's last report", () => {
+		expect(decide({ ...session("stopped"), report: full }, { type: "status" })).toEqual(error("no_status"));
 	});
 
 	it("knows no session that is not listed", () => {

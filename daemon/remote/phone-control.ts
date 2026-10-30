@@ -1,16 +1,19 @@
 /**
  * Phone control: for one session, whether a Chat's action is allowed and what it becomes: a
- * message for its pane, a change the daemon makes itself, a read of its transcript, or an error.
- * No I/O: the HTTP adapter (http.ts) carries out what this decides.
+ * message for its pane, a change the daemon makes itself, a read of its transcript, its status, or
+ * an error. No I/O: the HTTP adapter (http.ts) carries out what this decides.
  */
 import {
 	type InstanceSummary,
 	type PaneImage,
 	type PaneMessage,
 	type PaneReport,
+	type PaneTask,
 	phoneMayRun,
 } from "../ipc/protocol.ts";
+import type { StatusSpan } from "./pistatusline.ts";
 import { findSession } from "./sessions.ts";
+import type { GitInfo } from "./statusline.ts";
 
 /** A listed session, as one lookup per request finds it, with its pane's latest report. */
 export type PhoneSession = NonNullable<ReturnType<typeof findSession>> & { id: string; report?: PaneReport };
@@ -28,7 +31,8 @@ export type PhoneAction =
 	| { type: "stop_task"; taskId: string }
 	| { type: "task_output"; taskId: string }
 	| { type: "image"; entryId: string; index: number }
-	| { type: "message_output"; entryId: string };
+	| { type: "message_output"; entryId: string }
+	| { type: "status" };
 
 /** A change to the registry's row, which needs no pane. */
 export type DaemonOperation = { type: "rename"; name: string } | { type: "pin"; pinned: boolean } | { type: "delete" };
@@ -52,13 +56,39 @@ export type PhoneError =
 	| "invalid_name"
 	| "invalid_pinned"
 	| "unknown_task"
-	| "no_output";
+	| "no_output"
+	| "no_status";
 
 export type PhoneOutcome =
 	| { message: PaneMessage }
 	| { operation: DaemonOperation }
 	| { read: TranscriptRead }
+	| { status: StatusView }
 	| { error: PhoneError };
+
+/** A task as the phone lists it: `output` when its tail can be fetched, its file staying on the Mac. */
+export type StatusTask = Omit<PaneTask, "outputFile"> & { output?: boolean };
+
+/**
+ * The Chat's status of a session: only these fields of its pane's report reach the phone, so a new
+ * one shows there once it is added here. The web app's status bar (web/statusbar.js) documents the
+ * same shape. `statusline` (pistatusline's own lines at the phone's width), else `git`: what the
+ * Mac adds for the session's directory, which the HTTP adapter reads.
+ */
+export interface StatusView {
+	model?: PaneReport["model"];
+	models: PaneReport["models"];
+	thinkingLevel?: string;
+	thinkingLevels?: string[];
+	trust?: PaneReport["trust"];
+	context?: PaneReport["context"];
+	usage?: PaneReport["usage"];
+	backgroundSubagentUsage?: PaneReport["backgroundSubagentUsage"];
+	notice?: PaneReport["notice"];
+	tasks?: StatusTask[];
+	git?: GitInfo;
+	statusline?: { lines: StatusSpan[][] };
+}
 
 /** pi's `defaultProjectTrust` values, as Alt+M cycles them. */
 const TRUST = ["always", "ask", "never"] as const;
@@ -185,5 +215,34 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 					leafId: session.leafId,
 				},
 			};
+		case "status":
+			// A stored row's last report is no longer its status.
+			return session.running && report ? { status: statusView(report) } : { error: "no_status" };
 	}
+}
+
+/** Fetched again after every report: the commands, which rarely change, have their own route. */
+function statusView(report: PaneReport): StatusView {
+	return {
+		model: report.model,
+		models: report.models,
+		thinkingLevel: report.thinkingLevel,
+		thinkingLevels: report.thinkingLevels,
+		trust: report.trust,
+		context: report.context,
+		usage: report.usage,
+		backgroundSubagentUsage: report.backgroundSubagentUsage,
+		notice: report.notice,
+		tasks: report.tasks?.map((task) => ({
+			id: task.id,
+			kind: task.kind,
+			label: task.label,
+			startedAt: task.startedAt,
+			foreground: task.foreground,
+			status: task.status,
+			model: task.model,
+			// The phone asks for its tail.
+			output: task.outputFile ? true : undefined,
+		})),
+	};
 }

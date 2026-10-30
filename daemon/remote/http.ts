@@ -20,6 +20,7 @@ import {
 	type PhoneError,
 	type PhoneSession,
 	phoneSession,
+	type StatusView,
 	type TranscriptRead,
 } from "./phone-control.ts";
 import type { StatuslineSession, StatusSpan } from "./pistatusline.ts";
@@ -234,6 +235,7 @@ const PHONE_STATUS: Record<PhoneError, number> = {
 	invalid_pinned: 400,
 	unknown_task: 404,
 	no_output: 404,
+	no_status: 404,
 };
 
 /** A task's output as /tasks' detail view shows it: the last lines of the file's last 8 KiB, empty
@@ -476,7 +478,7 @@ async function handle(
 	// After the body, which may have taken a while: the session as it is now.
 	const session = sessionOf(deps, sessionPath[1]!);
 	if (!session) return json(res, 404, { error: "unknown_session" });
-	if ("view" in route) return view(deps, url, res, session, route.view);
+	if ("view" in route) return view(url, res, session, route.view);
 	const outcome = decide(session, route.action(body));
 	if ("error" in outcome) return json(res, PHONE_STATUS[outcome.error], { error: outcome.error });
 	if ("message" in outcome) {
@@ -493,10 +495,11 @@ async function handle(
 					: deps.deleteInstance(session.id);
 		return done ? json(res, 200, { ok: true }) : json(res, 404, { error: "unknown_session" });
 	}
+	if ("status" in outcome) return status(deps, url, res, session, outcome.status);
 	return read(res, outcome.read);
 }
 
-type SessionView = "messages" | "status" | "commands";
+type SessionView = "messages" | "commands";
 
 type SessionRoute =
 	| { method: "GET"; view: SessionView }
@@ -518,8 +521,9 @@ function sessionRoute(rest: string, method: string | undefined): SessionRoute | 
 	// A tool result's whole output: the transcript cuts it to TEXT_MAX.
 	const output = /^\/messages\/([0-9a-f-]{8,36})\/output$/.exec(rest);
 	if (output) return { method: "GET", action: () => ({ type: "message_output", entryId: output[1]! }) };
-	const shown = /^\/(messages|status|commands)$/.exec(rest)?.[1];
+	const shown = /^\/(messages|commands)$/.exec(rest)?.[1];
 	if (shown) return { method: "GET", view: shown as SessionView };
+	if (rest === "/status") return { method: "GET", action: () => ({ type: "status" }) };
 	switch (/^\/(prompt|abort|model|thinking|trust|rename|pin)$/.exec(rest)?.[1]) {
 		case "prompt":
 			return {
@@ -559,14 +563,8 @@ function sessionOf(deps: RemoteDeps, encoded: string): PhoneSession | undefined 
 	return phoneSession(deps, id);
 }
 
-/** What the phone shows of a session: its transcript, its status, the commands it lists. */
-async function view(
-	deps: RemoteDeps,
-	url: URL,
-	res: ServerResponse,
-	session: PhoneSession,
-	shown: SessionView,
-): Promise<void> {
+/** What the phone shows of a session: its transcript, the commands it lists. */
+async function view(url: URL, res: ServerResponse, session: PhoneSession, shown: SessionView): Promise<void> {
 	if (shown === "messages") {
 		const requested = Number.parseInt(url.searchParams.get("limit") ?? "", 10) || MESSAGES_DEFAULT;
 		const limit = Math.min(Math.max(requested, 1), MESSAGES_MAX);
@@ -578,23 +576,25 @@ async function view(
 	}
 	const report = session.running ? session.report : undefined;
 	if (!report) return json(res, 404, { error: "no_status" });
-	if (shown === "commands") return json(res, 200, { commands: report.commands ?? [] });
-	// Fetched again after every report: the commands, which rarely change, have their own route.
-	const { commands: _commands, pistatusline: _paths, tasks, ...rest } = report;
-	// A task's output file stays here: the phone asks for its tail.
-	const listed = tasks?.map(({ outputFile, ...task }) => ({ ...task, ...(outputFile ? { output: true } : {}) }));
+	return json(res, 200, { commands: report.commands ?? [] });
+}
+
+/** The status phone control built, with what the Mac adds for the session's directory. */
+async function status(
+	deps: RemoteDeps,
+	url: URL,
+	res: ServerResponse,
+	session: PhoneSession,
+	view: StatusView,
+): Promise<void> {
 	// pistatusline's own lines at the phone's width, which show git (and the plan usage pistatusline keeps) themselves.
 	const cols = /^\d{1,3}$/.test(url.searchParams.get("cols") ?? "") ? Number(url.searchParams.get("cols")) : 0;
-	const pane = cols ? deps.listInstances().find((i) => i.id === session.id && i.external) : undefined;
 	const lines =
-		pane &&
-		(await deps.renderStatusline?.(
-			{ ...session, createdAt: pane.createdAt, sessionId: pane.sessionId },
-			report,
-			Math.min(Math.max(cols, COLS_MIN), COLS_MAX),
-		));
-	const extra = lines ? { statusline: { lines } } : await deps.statusLine?.(session.cwd);
-	return json(res, 200, { report: { ...rest, ...(listed ? { tasks: listed } : {}), ...extra } });
+		cols && session.report
+			? await deps.renderStatusline?.(session, session.report, Math.min(Math.max(cols, COLS_MIN), COLS_MAX))
+			: undefined;
+	const mac = lines ? { statusline: { lines } } : { git: (await deps.statusLine?.(session.cwd))?.git };
+	return json(res, 200, { report: { ...view, ...mac } });
 }
 
 /** Reads what phone control allowed, from the session's own files. */

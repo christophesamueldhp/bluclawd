@@ -60,7 +60,8 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 
 /** `running`: a pane's pi is registered as this id, so a queued message reaches it. `busy`: mid-turn,
  *  working or waiting on an answer. `pane`: the tmux session that pi registered from, if any.
- *  `draft`: its prompt held unsent text at its last heartbeat. */
+ *  `draft`: its prompt held unsent text at its last heartbeat. `createdAt` and `sessionId`: its
+ *  pane's start and pi's session id. */
 export function findSession(
 	instances: InstanceSummary[],
 	id: string,
@@ -73,6 +74,8 @@ export function findSession(
 			leafId?: string;
 			pane?: string;
 			draft?: boolean;
+			createdAt?: string;
+			sessionId?: string;
 	  }
 	| undefined {
 	const row = sessionRows(instances).find((r) => r.id === id);
@@ -86,5 +89,7 @@ export function findSession(
 		...(pane?.leafId ? { leafId: pane.leafId } : {}),
 		...(pane?.pane ? { pane: pane.pane } : {}),
 		...(pane?.draft ? { draft: true } : {}),
+		...(pane?.createdAt ? { createdAt: pane.createdAt } : {}),
+		...(pane?.sessionId ? { sessionId: pane.sessionId } : {}),
 	};
 }

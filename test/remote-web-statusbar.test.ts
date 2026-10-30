@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import {
 	backgroundUsageHtml,
 	barHtml,
@@ -6,11 +6,13 @@ import {
 	contextLevel,
 	contrast,
 	elapsedText,
+	type Report,
 	settingsHtml,
 	spanStyle,
 	tokens,
 	whereHtml,
 } from "#remote-web/statusbar.js";
+import type { StatusView } from "../daemon/remote/phone-control.ts";
 
 const now = Date.parse("2026-10-15T10:12:00Z");
 const report = {
@@ -33,6 +35,12 @@ const text = (html: string) =>
 		.trim();
 
 describe("the chat's status bar", () => {
+	// Checked by npm run typecheck: the web app cannot import the daemon's type, so it documents it by hand.
+	it("reads the status view phone control builds, field for field", () => {
+		expectTypeOf<keyof Report>().toEqualTypeOf<keyof StatusView>();
+		expectTypeOf<StatusView>().toExtend<Report>();
+	});
+
 	it("labels background usage as additional and never renders unknown pricing as zero", () => {
 		expect(backgroundUsageHtml(undefined)).toBe("");
 		const usage = { runCount: 2, input: 300, output: 100, cacheRead: 0, cacheWrite: 0, cost: 0.03 };

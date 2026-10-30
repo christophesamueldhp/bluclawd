@@ -68,13 +68,21 @@ describe("remote sessions", () => {
 
 	it("finds a session's file, whether a pane runs it and whether it is mid-turn", () => {
 		const stored: InstanceSummary = { id: "old", status: "stopped", cwd: "/p", sessionFile: "/s/old.jsonl" };
-		const list = [stored, live("b", "idle", { leafId: "e3" }), live("c", "working"), live("d", "awaiting_input")];
+		const list = [
+			stored,
+			live("b", "idle", { leafId: "e3", sessionId: "pi-b" }),
+			live("c", "working"),
+			live("d", "awaiting_input"),
+		];
+		// Its pane's start and pi's session id: what the pane's pistatusline shows of it.
 		expect(findSession(list, "b")).toEqual({
 			sessionFile: "/s/b.jsonl",
 			cwd: "/p",
 			running: true,
 			busy: false,
 			leafId: "e3",
+			createdAt: "2026-10-12T00:00:00Z",
+			sessionId: "pi-b",
 		});
 		expect(findSession(list, "c")).toMatchObject({ running: true, busy: true });
 		expect(findSession(list, "d")).toMatchObject({ running: true, busy: true });
