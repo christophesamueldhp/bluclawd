@@ -28,6 +28,8 @@ export interface RemoteSession {
 	dialog?: { kind: string; title?: string };
 	/** How many times it stopped working: the notifier's cue for a turn too quick to be seen working. */
 	settled?: number;
+	/** Set when more than one live pi writes this session's file: how many. */
+	livePanes?: number;
 }
 
 function sessionRows(instances: InstanceSummary[]): AgentRow[] {
@@ -52,6 +54,7 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 				sessionId: row.sessionId,
 				...(row.dialog ? { dialog: row.dialog } : {}),
 				...(row.settled !== undefined ? { settled: row.settled } : {}),
+				...(row.livePanes ? { livePanes: row.livePanes } : {}),
 			});
 		}
 	}
