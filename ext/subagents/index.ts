@@ -1,62 +1,40 @@
 import { Type } from "@earendil-works/pi-ai";
 import {
-	type AgentSession,
-	defineTool,
 	type ExtensionAPI,
 	getAgentDir,
 	type InlineExtension,
-	type ToolDefinition,
 	type ToolLoadout,
 	type ToolLoadoutChanges,
 } from "@earendil-works/pi-coding-agent";
 import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
-import {
-	type AdmissionContext,
-	createRunAdmission,
-	formatRunLabel,
-	type RunExecutionContext,
-	SUBAGENT_TOOL_PARAMETERS,
-} from "./admission.ts";
+import { type AdmissionContext, createRunAdmission, formatRunLabel, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
 import {
 	type AgentDefinitionCatalog,
 	discoverAgentDefinitions,
 	formatAgentRoutingDescriptions,
 } from "./definitions.ts";
+import { createGenerations, type ParentNotice } from "./generations.ts";
 import {
+	formatMessageReceipt,
 	PARENT_MESSAGE_ADDRESS,
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
+	SUBAGENT_MESSAGE_PARAMETERS,
 	SUBAGENT_MESSAGE_TOOL,
 	SubagentMessageBus,
 	type SubagentMessageReceipt,
 	subagentMessagePayload,
 } from "./messages.ts";
 import { createParentScope, type ParentInboxItem, type ParentScope } from "./parent-scope.ts";
-import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
-import { createParentToolProxies, describeSubagentModels, runSubagent } from "./runner.ts";
-import { isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
-import {
-	appendParentRunReference,
-	appendSubagentMessageRecord,
-	ensureRunStorageDir,
-	readPersistedRunRecord,
-	reconcileInterruptedRuns,
-	recordBackgroundUsageInLedger,
-	writeFullSubagentReport,
-	writePersistedRunRecord,
-} from "./storage.ts";
+import type { SubagentResultDetails } from "./results.ts";
+import { describeSubagentModels, runSubagent } from "./runner.ts";
+import type { SubagentRunRecord } from "./runs.ts";
+import { appendSubagentMessageRecord, readPersistedRunRecord, reconcileInterruptedRuns } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
 
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const BACKGROUND_BATCH_WINDOW_MS = 40;
-const SUBAGENT_ROSTER_TOOL = "subagent_roster";
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent that works in this same checkout";
-
-/** A finished background run, as the orchestrator is told about it. */
-interface ParentNotice {
-	parentText: string;
-	details: SubagentResultDetails;
-}
 
 export interface SubagentExtensionOptions {
 	agentDir?: string;
@@ -83,17 +61,6 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 		...(oneShot ? ["Background runs are unavailable in this one-shot mode: omit `background`.", ""] : []),
 		"Available subagent roles:",
 		rolesSection,
-	].join("\n");
-}
-
-function withRoster(task: string, roster: readonly string[]): string {
-	if (roster.length === 0) return task;
-	return [
-		task,
-		"",
-		"## Agents working now",
-		...roster,
-		`Coordinate with them through subagent_message; ${SUBAGENT_ROSTER_TOOL} shows the current list.`,
 	].join("\n");
 }
 
@@ -136,73 +103,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		});
 		const activeSessionId = () => parentScope.current()?.parentSessionId;
 
-		const messageParameters = Type.Object(
-			{
-				to: Type.String({
-					description: 'Recipient: an agent name, a run ID (sub_…), or "parent" for the orchestrator.',
-				}),
-				content: Type.String({ description: "Message text." }),
-			},
-			{ additionalProperties: false },
-		);
-		const formatReceipt = (receipt: SubagentMessageReceipt) => ({
-			content: [
-				{
-					type: "text" as const,
-					text:
-						receipt.status === "accepted"
-							? `Message ${receipt.seq} accepted for delivery to ${receipt.toName ? `${receipt.toName} (${receipt.to})` : receipt.to} (not yet handled).`
-							: `Message ${receipt.seq} ${receipt.status}: ${receipt.reason ?? ""}`,
-				},
-			],
-			details: receipt,
-			isError: receipt.status !== "accepted",
-		});
 		const senderRole = (address: string) => scheduler.getRun(address)?.agentName;
-
-		/** Live agents in a parent scope, one line each, for a child's prompt or roster query. */
-		const describeRoster = (parentSessionId: string, self: string, includeSelf: boolean): string[] =>
-			scheduler
-				.listActiveRuns(parentSessionId)
-				.filter((run) => includeSelf || run.runId !== self)
-				.map(
-					(run) =>
-						`- ${run.name ?? run.runId} (${run.agentName}, ${run.runId}, ${run.status}): ${run.taskSummary}${run.runId === self ? " (you)" : ""}`,
-				);
-
-		const createChildRosterTool = (address: string, scope: ParentScope): ToolDefinition =>
-			defineTool({
-				name: SUBAGENT_ROSTER_TOOL,
-				label: "List agents",
-				description:
-					'List the agents running now: the orchestrator ("parent") and every subagent with its name, role, run ID, status and task.',
-				parameters: Type.Object({}, { additionalProperties: false }),
-				execute: async () => {
-					const others = describeRoster(scope.parentSessionId, address, true);
-					return {
-						content: [
-							{
-								type: "text",
-								text: ["- parent: the orchestrator", ...others].join("\n"),
-							},
-						],
-						details: undefined,
-					};
-				},
-			});
-
-		const createChildMessageTool = (address: string, name: string | undefined, scope: ParentScope): ToolDefinition =>
-			defineTool({
-				name: SUBAGENT_MESSAGE_TOOL,
-				label: "Message agent",
-				description: `Send a short message to the orchestrator ("parent") or a sibling by name or run ID while you work. You are ${name ? `${name} (${address})` : address}. ${SUBAGENT_ROSTER_TOOL} lists who is running. Delivery is not a reply; keep working.`,
-				parameters: messageParameters,
-				execute: async (_toolCallId, params) => {
-					const receipt = await messageBus.send({ address, scope }, params.to.trim(), params.content);
-					if (receipt.status === "accepted") scheduler.recordMessageSent(address);
-					return formatReceipt(receipt);
-				},
-			});
 
 		const refreshFooterStatus = () => {
 			try {
@@ -258,139 +159,16 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 		};
 
-		const scheduleBackgroundDelivery = (
-			record: Readonly<SubagentRunRecord>,
-			parentText: string,
-			details: SubagentResultDetails,
-		) => {
-			// User-initiated, remote-initiated, or session-invalidation stops must not trigger an unsolicited new parent turn
-			if (
-				record.stopSource === "user" ||
-				record.stopSource === "remote" ||
-				record.stopSource === "session_invalidated"
-			) {
-				return;
-			}
-			parentScope.notify(record, { parentText, details });
-		};
-
-		const scheduler = new SubagentRunScheduler<RunExecutionContext>({
-			onStateChange: (record) => {
-				const agentDir = resolveAgentDir();
-				writePersistedRunRecord(agentDir, record);
-				if (record.lastProgressText && !isTerminalSubagentStatus(record.status)) {
-					writeFullSubagentReport(
-						agentDir,
-						record,
-						`Run: ${record.runId} (${record.agentName})\nStatus: ${record.status}\n\n${record.lastProgressText}`,
-					);
-				}
+		const { scheduler, deliver } = createGenerations({
+			agentDir: resolveAgentDir,
+			runner: runSubagent,
+			bus: messageBus,
+			scope: parentScope,
+			pi,
+			launchesSettled: () => launchesSettled,
+			onChange: () => {
 				refreshFooterStatus();
 				notifyAgentTasksChanged();
-			},
-			onFinalize: async (settledRecord) => {
-				const agentDir = resolveAgentDir();
-				const record: SubagentRunRecord = structuredClone(settledRecord);
-				const reportRes = writeFullSubagentReport(
-					agentDir,
-					record,
-					buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).fullReportText,
-				);
-				if (!reportRes.ok) throw new Error(reportRes.error);
-				record.reportPath = reportRes.reportPath;
-				if (record.deliveryMode === "background") record.backgroundDeliveryAttempted = true;
-				if (record.usageAttribution === "ledger") recordBackgroundUsageInLedger(agentDir, record);
-				const recordRes = writePersistedRunRecord(agentDir, record);
-				if (!recordRes.ok) throw new Error(recordRes.error);
-				if (parentScope.inScope(record)) {
-					appendParentRunReference(pi, record);
-				}
-				return record;
-			},
-			executeRun: async (params) => {
-				const execCtx = params.context;
-				if (!execCtx) throw new Error("Subagent run has no execution context.");
-				const storage = ensureRunStorageDir(execCtx.agentDir, params.record.parentSessionId, params.record.runId);
-				if (!storage.ok) throw new Error(storage.error);
-				const { runId } = params.record;
-				const scope = {
-					parentSessionId: params.record.parentSessionId,
-					sessionEpoch: params.record.sessionEpoch,
-				};
-				// Messages sent while the child session is still being created wait for it, or fail if it never starts.
-				let resolveSession!: (session: AgentSession) => void;
-				let rejectSession!: (err: Error) => void;
-				const sessionReady = new Promise<AgentSession>((resolve, reject) => {
-					resolveSession = resolve;
-					rejectSession = reject;
-				});
-				sessionReady.catch(() => {});
-				messageBus.register(
-					runId,
-					{
-						scope,
-						deliver: async (message) => {
-							if (scheduler.getRun(runId)?.status === "stopping") throw new Error("it is stopping");
-							const childSession = await sessionReady;
-							// A message never starts a turn on its own; it waits for the child's next safe boundary.
-							await childSession.sendCustomMessage(subagentMessagePayload(message, senderRole(message.from)), {
-								deliverAs: "steer",
-								triggerTurn: false,
-							});
-						},
-					},
-					params.record.name,
-				);
-				const reportedHosts = new Set<string>();
-				const parentTools = createParentToolProxies(
-					execCtx.parent,
-					execCtx.parentTools,
-					(usage) => params.controller.recordNestedUsage(usage),
-					{
-						name: params.record.name ?? runId,
-						reportNetworkDenied: (target, suspects) => {
-							if (reportedHosts.has(target)) return;
-							reportedHosts.add(target);
-							const whose = suspects.length > 1 ? `one of ${suspects.join(", ")}'s commands` : "my command";
-							void messageBus.send(
-								{ address: runId, scope },
-								PARENT_MESSAGE_ADDRESS,
-								`[sandbox] Network access to ${target} for ${whose} was denied without asking the user, because subagents cannot ask. Run the command yourself (the user will be asked), or change the task.`,
-							);
-						},
-					},
-				);
-				try {
-					await launchesSettled;
-					return await runSubagent({
-						...params,
-						agentDir: execCtx.agentDir,
-						definition: execCtx.definition,
-						task: execCtx.resume
-							? execCtx.resume.prompt
-							: withRoster(execCtx.task, describeRoster(params.record.parentSessionId, runId, false)),
-						resumeSessionFile: execCtx.resume?.transcriptPath,
-						childModel: execCtx.childModel,
-						projectTrusted: execCtx.projectTrusted,
-						childSessionDir: storage.runDir,
-						childTools: [
-							...parentTools,
-							createChildMessageTool(runId, params.record.name, scope),
-							createChildRosterTool(runId, scope),
-						],
-						activeToolNames: [...execCtx.activeToolNames, SUBAGENT_MESSAGE_TOOL, SUBAGENT_ROSTER_TOOL],
-						builtinExtensions: execCtx.builtinExtensions,
-						onChildSessionCreated: (session) => {
-							session.subscribe((event) => {
-								if (event.type === "agent_end") messageBus.unregister(runId, "has finished");
-							});
-							resolveSession(session);
-						},
-					});
-				} finally {
-					rejectSession(new Error("it ended before it could receive messages"));
-					messageBus.unregister(runId, "has finished");
-				}
 			},
 		});
 
@@ -508,7 +286,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			},
 			description:
 				"Send a message to a subagent by name or run ID (sub_…). A running child gets it at its next safe point without a new turn. A completed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
-			parameters: messageParameters,
+			parameters: SUBAGENT_MESSAGE_PARAMETERS,
 			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
 				const ctx = toolCtx ?? parentScope.context();
 				const scope = parentScope.current();
@@ -522,7 +300,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const to = params.to.trim();
 				const finished = findFinishedRun(to);
 				if (finished && ctx) return resumeRun(finished, params.content, scope, ctx);
-				return formatReceipt(await messageBus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, params.content));
+				return formatMessageReceipt(
+					await messageBus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, params.content),
+				);
 			},
 		});
 
@@ -562,7 +342,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				ctx,
 			);
 			if (!resumed.ok) {
-				return formatReceipt({
+				return formatMessageReceipt({
 					status: resumed.refusal ?? "unavailable",
 					seq: 0,
 					to: run.runId,
@@ -573,14 +353,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			// A resume is admitted only after buildPrompt ran, so the receipt is set.
 			const accepted = receipt!;
 			const label = formatRunLabel(run);
-			void resumed.handle.completion.then((completedRecord) => {
-				const envelope = buildSubagentResultEnvelope(completedRecord, MAX_PARENT_REPORT_BYTES);
-				scheduleBackgroundDelivery(completedRecord, envelope.parentText, envelope.details);
-			});
-			refreshFooterStatus();
-			notifyAgentTasksChanged();
+			void deliver(resumed.handle);
 			return {
-				...formatReceipt(accepted),
+				...formatMessageReceipt(accepted),
 				content: [
 					{
 						type: "text" as const,
@@ -749,23 +524,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				}
 
 				const { handle } = admitRes;
-				const agentDir = resolveAgentDir();
 				const isBackground = params.background === true;
-				writePersistedRunRecord(agentDir, handle.record);
-				writeFullSubagentReport(
-					agentDir,
-					handle.record,
-					`Run: ${handle.runId} (${handle.record.agentName})\nStatus: ${handle.record.status}\nTask: ${handle.record.taskSummary}`,
-				);
-				appendParentRunReference(pi, handle.record);
-				refreshFooterStatus();
-				notifyAgentTasksChanged();
 
 				if (isBackground) {
-					void handle.completion.then((completedRecord) => {
-						const envelope = buildSubagentResultEnvelope(completedRecord, MAX_PARENT_REPORT_BYTES);
-						scheduleBackgroundDelivery(completedRecord, envelope.parentText, envelope.details);
-					});
+					void deliver(handle);
 
 					return {
 						content: [
@@ -796,8 +558,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 
-				const completedRecord = await handle.completion;
-				const envelope = buildSubagentResultEnvelope(completedRecord, MAX_PARENT_REPORT_BYTES);
+				const envelope = await deliver(handle);
 
 				return {
 					content: [{ type: "text", text: envelope.parentText }],

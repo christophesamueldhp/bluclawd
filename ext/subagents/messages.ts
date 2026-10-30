@@ -1,3 +1,4 @@
+import { Type } from "@earendil-works/pi-ai";
 import type { ParentScope } from "./parent-scope.ts";
 
 export const SUBAGENT_MESSAGE_TOOL = "subagent_message";
@@ -56,6 +57,34 @@ export function subagentMessagePayload(message: SubagentMessage, senderRole?: st
 		content: [{ type: "text" as const, text: `${messageFrame(message, senderRole)}\n\n${message.content}` }],
 		display: true,
 		details: message,
+	};
+}
+
+/** The message tool's parameters, the same for the orchestrator and children. */
+export const SUBAGENT_MESSAGE_PARAMETERS = Type.Object(
+	{
+		to: Type.String({
+			description: 'Recipient: an agent name, a run ID (sub_…), or "parent" for the orchestrator.',
+		}),
+		content: Type.String({ description: "Message text." }),
+	},
+	{ additionalProperties: false },
+);
+
+/** A message receipt as the sending tool's result. */
+export function formatMessageReceipt(receipt: SubagentMessageReceipt) {
+	return {
+		content: [
+			{
+				type: "text" as const,
+				text:
+					receipt.status === "accepted"
+						? `Message ${receipt.seq} accepted for delivery to ${receipt.toName ? `${receipt.toName} (${receipt.to})` : receipt.to} (not yet handled).`
+						: `Message ${receipt.seq} ${receipt.status}: ${receipt.reason ?? ""}`,
+			},
+		],
+		details: receipt,
+		isError: receipt.status !== "accepted",
 	};
 }
 
