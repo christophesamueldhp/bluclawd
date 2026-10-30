@@ -218,8 +218,14 @@ export function readSessionSummary(agentDir: string, parentSessionId: string) {
 						to: string;
 						toName?: string;
 						status: string;
+						reason?: string;
 					};
-					return { from: record.fromName ?? record.from, to: record.toName ?? record.to, status: record.status };
+					return {
+						from: record.fromName ?? record.from,
+						to: record.toName ?? record.to,
+						status: record.status,
+						...(record.reason && { reason: record.reason }),
+					};
 				})
 		: [];
 	return {
