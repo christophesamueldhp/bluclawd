@@ -21,7 +21,7 @@ describe("agent-view stored rows", () => {
 		writeFileSync(file, `${JSON.stringify({ type: "message", message: reply })}\n`);
 		const supervisor = testRegistry(dir);
 
-		const saved = supervisor.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file });
+		const saved = supervisor.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file })!;
 		expect(loadInstances(dir)).toEqual([
 			expect.objectContaining({ id: saved.id, status: "stopped", outcome: "done", detail: "tests pass" }),
 		]);
@@ -45,19 +45,19 @@ describe("agent-view stored rows", () => {
 			pinned: true,
 			sortOrder: 2,
 		});
-		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/b.jsonl" }).pinned).toBeUndefined();
+		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/b.jsonl" })?.pinned).toBeUndefined();
 
 		// Saved before its unregister lands: a quitting pane does not wait for it.
 		supervisor.registerExternal({ ...pane, id: "pi-c", sessionFile: "/nonexistent/c.jsonl" }, "idle");
 		supervisor.setInstanceMeta("pi-c", { pinned: true });
-		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/c.jsonl" }).pinned).toBe(true);
+		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/c.jsonl" })?.pinned).toBe(true);
 	});
 
 	it("a stored row's pin carries over to the pane resuming it, deleted before it registers or not at all", () => {
 		const supervisor = testRegistry(dir);
 		const pane = { status: "online" as const, cwd: "/p", createdAt: new Date().toISOString() };
 		const pinnedRow = (file: string) => {
-			const saved = supervisor.saveInstance({ cwd: "/p", sessionFile: file });
+			const saved = supervisor.saveInstance({ cwd: "/p", sessionFile: file })!;
 			supervisor.setInstanceMeta(saved.id, { pinned: true, sortOrder: 3 });
 			return saved.id;
 		};
@@ -85,7 +85,7 @@ describe("agent-view stored rows", () => {
 
 	it("rename and delete act on a stored row; the session file stays", () => {
 		const supervisor = testRegistry(dir);
-		const saved = supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/s.jsonl" });
+		const saved = supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/s.jsonl" })!;
 		expect(supervisor.renameInstance(saved.id, "renamed")).toMatchObject({ label: "renamed" });
 		expect(supervisor.deleteInstance(saved.id)).toBe(true);
 		expect(loadInstances(dir)).toEqual([]);
@@ -183,6 +183,23 @@ describe("one row per session through quit and resume", () => {
 		expect(rows(supervisor)).toEqual([
 			expect.objectContaining({ id: "pi-a", status: "stopped", pinned: true, sortOrder: 1, createdAt }),
 		]);
+	});
+
+	it("a stopped row deleted before its hand-off saves stays deleted", () => {
+		const supervisor = testRegistry(dir);
+		supervisor.registerExternal(pane("pi-a"), "idle");
+		supervisor.unregisterExternal("pi-a", "quit");
+		expect(supervisor.deleteInstance("pi-a")).toBe(true);
+
+		expect(supervisor.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file })).toBeUndefined();
+		expect(rows(supervisor)).toEqual([]);
+		expect(loadInstances(dir)).toEqual([]);
+
+		// Quit again once resumed, its save keeps it.
+		supervisor.registerExternal(pane("pi-b"), "idle");
+		supervisor.unregisterExternal("pi-b", "quit");
+		supervisor.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file });
+		expect(rows(supervisor)).toEqual([expect.objectContaining({ id: "pi-b", status: "stopped" })]);
 	});
 
 	it("a quit before the session has a file leaves no row", () => {

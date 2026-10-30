@@ -245,7 +245,7 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 				sessionFile: request.sessionFile,
 				sessionId: request.sessionId,
 			});
-			return { type: "ack", ok: true, instance: toInstanceSummary(instance) };
+			return { type: "ack", ok: true, ...(instance ? { instance: toInstanceSummary(instance) } : {}) };
 		}
 
 		case "remote": {

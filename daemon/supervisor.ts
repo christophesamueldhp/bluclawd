@@ -63,6 +63,9 @@ export class ServerSupervisor {
 	/** Panes that unregistered without quitting (or from an older build, with no reason), by session
 	 *  file: the row, pin and order for the stored row a hand-off may save next. */
 	private readonly quitMeta = new Map<string, Pick<ExternalInstance, "record" | "rowId">>();
+	/** Rows a quit stopped whose hand-off save is still to come, by session file: whether the row
+	 *  was deleted meanwhile, so that save does not bring it back. */
+	private readonly savesDue = new Map<string, { deleted: boolean }>();
 	/** The pin and order of stored rows deleted before a pane resuming them registered, by session
 	 *  file, for that pane's row. */
 	private readonly resumedMeta = new Map<string, Pick<InstanceRecord, "pinned" | "sortOrder">>();
@@ -75,7 +78,10 @@ export class ServerSupervisor {
 	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = this.deps.now()): void {
 		const previous = this.externalInstances.get(record.id);
 		const resumed = record.sessionFile ? this.resumedMeta.get(record.sessionFile) : undefined;
-		if (record.sessionFile) this.resumedMeta.delete(record.sessionFile);
+		if (record.sessionFile) {
+			this.resumedMeta.delete(record.sessionFile);
+			this.savesDue.delete(record.sessionFile);
+		}
 		// A pane resuming a stored session goes on as its row, which stays stored behind it.
 		const stored = previous ? undefined : this.storedRowFor(record.sessionFile);
 		// A heartbeat restates what the session knows; its age and agent-view meta are kept here.
@@ -126,6 +132,7 @@ export class ServerSupervisor {
 		if (entry && file && reason === "quit" && existsSync(file)) {
 			const { cwd, label, sessionId } = entry.record;
 			this.stopRow({ cwd, label, sessionFile: file, sessionId }, [id, entry]);
+			this.savesDue.set(file, { deleted: false });
 			return;
 		}
 		if (entry && file) this.quitMeta.set(file, { record: entry.record, rowId: entry.rowId });
@@ -235,9 +242,18 @@ export class ServerSupervisor {
 	 * Keep a session that left its window (pi exited while it was idle) as a stopped row, with no
 	 * process: it resumes from its `.jsonl` when opened or replied to. A row the daemon already has
 	 * for that file is reused, so the session keeps its id, name and pin. A pane still listed on it
-	 * (a quitting pane does not wait for its unregister to land) is converted in place.
+	 * (a quitting pane does not wait for its unregister to land) is converted in place. Undefined:
+	 * its row was deleted after its quit, before this save.
 	 */
-	saveInstance(options: { cwd: string; label?: string; sessionFile: string; sessionId?: string }): InstanceRecord {
+	saveInstance(options: {
+		cwd: string;
+		label?: string;
+		sessionFile: string;
+		sessionId?: string;
+	}): InstanceRecord | undefined {
+		const due = this.savesDue.get(options.sessionFile);
+		this.savesDue.delete(options.sessionFile);
+		if (due?.deleted) return undefined;
 		const pane = [...this.externalInstances].find(([, e]) => e.record.sessionFile === options.sessionFile);
 		return this.stopRow(options, pane);
 	}
@@ -292,6 +308,8 @@ export class ServerSupervisor {
 		}
 		const stored = getInstance(this.deps.dir, instanceId);
 		if (!stored) return false;
+		const due = stored.sessionFile ? this.savesDue.get(stored.sessionFile) : undefined;
+		if (due) due.deleted = true;
 		// A pane resuming it keeps its pin and order: the phone's goes once its pane registered,
 		// agent view's before it has.
 		const meta = paneMeta(stored);
