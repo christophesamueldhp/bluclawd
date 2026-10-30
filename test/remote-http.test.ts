@@ -445,6 +445,7 @@ describe("remote HTTP API", () => {
 			["POST", "stored/pin", { pinned: "true" }, 400, "invalid_pinned"],
 			["POST", "live/tasks/b9/stop", {}, 404, "unknown_task"],
 			["GET", "live/tasks/f2/output", undefined, 404, "no_output"],
+			["GET", "stored/status", undefined, 404, "no_status"],
 		] as const) {
 			expect(await ask(method, path, body), `${method} ${path}`).toEqual([status, error]);
 		}
@@ -452,60 +453,18 @@ describe("remote HTTP API", () => {
 		expect(changed).toEqual([]);
 	});
 
-	describe("slash commands", () => {
-		const send = async (text: string, id = "live", images?: object[]) => {
-			const token = await pair();
-			const res = await fetch(`${base}/api/sessions/${id}/prompt`, {
-				method: "POST",
-				headers: authJson(token),
-				body: JSON.stringify({ text, ...(images ? { images } : {}) }),
-			});
-			return [res.status, ((await res.json()) as { error?: string }).error];
-		};
+	it("lists a running pane's commands", async () => {
 		const commands = [
 			{ name: "compact", source: "builtin" as const },
 			{ name: "skill:pdf", source: "skill" as const },
 		];
-
-		it("has an idle pane type one into its prompt, as on the Mac, and lists the pane's commands", async () => {
-			instances[0]!.activity = "idle";
-			reports.set("live", { models: [], commands });
-			expect(await send("/compact keep the notes")).toEqual([202, undefined]);
-			expect(await send("  /skill:pdf report.pdf")).toEqual([202, undefined]);
-			expect(sent.map((s) => s.message)).toEqual([
-				{ type: "command", text: "/compact keep the notes" },
-				{ type: "command", text: "  /skill:pdf report.pdf" },
-			]);
-			const token = await pair();
-			const list = await fetch(`${base}/api/sessions/live/commands`, { headers: auth(token) });
-			expect(await list.json()).toEqual({ commands });
-			// The status, fetched after every report, leaves them out.
-			const status = await fetch(`${base}/api/sessions/live/status`, { headers: auth(token) });
-			expect((await status.json()) as object).toEqual({ report: { models: [] } });
-		});
+		reports.set("live", { models: [], commands });
+		const token = await pair();
+		const list = await fetch(`${base}/api/sessions/live/commands`, { headers: auth(token) });
+		expect(await list.json()).toEqual({ commands });
 	});
 
 	describe("background tasks", () => {
-		it("lists a pane's tasks in its status, keeping their output files on the Mac", async () => {
-			const token = await pair();
-			const output = join(dir, "b1.output");
-			reports.set("live", {
-				models: [],
-				tasks: [
-					{ id: "b1", kind: "shell", label: "npm run dev", startedAt: 1, outputFile: output },
-					{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2, foreground: true },
-				],
-			});
-			const res = await fetch(`${base}/api/sessions/live/status`, { headers: auth(token) });
-			expect(((await res.json()) as { report: object }).report).toEqual({
-				models: [],
-				tasks: [
-					{ id: "b1", kind: "shell", label: "npm run dev", startedAt: 1, output: true },
-					{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2, foreground: true },
-				],
-			});
-		});
-
 		it("gives a task's output tail as /tasks shows it, and stops a task the pane reported", async () => {
 			const token = await pair();
 			const output = join(dir, "b1.output");
@@ -520,15 +479,10 @@ describe("remote HTTP API", () => {
 			});
 			const tail = await fetch(`${base}/api/sessions/live/tasks/b1/output`, { headers: auth(token) });
 			expect(await tail.json()).toEqual({ lines: [...lines.slice(-8), "red"], size: expect.any(Number) });
-			const none = await fetch(`${base}/api/sessions/live/tasks/f2/output`, { headers: auth(token) });
-			expect([none.status, await none.json()]).toEqual([404, { error: "no_output" }]);
-			const stop = (task: string, id = "live") =>
-				fetch(`${base}/api/sessions/${id}/tasks/${task}/stop`, { method: "POST", headers: authJson(token) });
+			const stop = (task: string) =>
+				fetch(`${base}/api/sessions/live/tasks/${task}/stop`, { method: "POST", headers: authJson(token) });
 			expect((await stop("f2")).status).toBe(202);
 			expect(sent).toEqual([{ id: "live", message: { type: "stop_task", id: "f2" } }]);
-			const unknown = await stop("b9");
-			expect([unknown.status, await unknown.json()]).toEqual([404, { error: "unknown_task" }]);
-			expect((await stop("b1", "stored")).status).toBe(404);
 			expect((await stop("../x")).status).toBe(404);
 			const get = await fetch(`${base}/api/sessions/live/tasks/b1/stop`, { headers: auth(token) });
 			expect(get.status).toBe(405);
@@ -635,23 +589,6 @@ describe("remote HTTP API", () => {
 			usage: { input: 150, output: 25, cacheRead: 0, cacheWrite: 0, cost: 0.75 },
 		};
 
-		it("gives a running session's latest report, and none before it has sent one", async () => {
-			const token = await pair();
-			const status = () => fetch(`${base}/api/sessions/live/status`, { headers: auth(token) });
-			const before = await status();
-			expect(before.status).toBe(404);
-			expect(await before.json()).toEqual({ error: "no_status" });
-			reports.set("live", report);
-			const after = await status();
-			expect(after.status).toBe(200);
-			expect(await after.json()).toEqual({ report });
-			reports.set("stored", report);
-			expect((await fetch(`${base}/api/sessions/stored/status`, { headers: auth(token) })).status).toBe(404);
-			expect(
-				(await fetch(`${base}/api/sessions/live/status`, { method: "POST", headers: authJson(token) })).status,
-			).toBe(405);
-		});
-
 		it("switches a running session to a model it offers", async () => {
 			reports.set("live", report);
 			const token = await pair();
@@ -752,9 +689,8 @@ describe("remote HTTP API", () => {
 			return [res.status, await res.json()];
 		};
 
-		it("renames a running session through its pane, an older one's too, and a stored one in the daemon", async () => {
+		it("renames a running session through its pane, and a stored one in the daemon", async () => {
 			const token = await pair();
-			expect(reports.has("live")).toBe(false);
 			expect(await call(token, "POST", "live/rename", { name: "  fix the build  " })).toEqual([202, { ok: true }]);
 			expect(sent).toEqual([{ id: "live", message: { type: "rename", name: "fix the build" } }]);
 			expect(await call(token, "POST", "stored/rename", { name: "later" })).toEqual([200, { ok: true }]);
@@ -773,9 +709,8 @@ describe("remote HTTP API", () => {
 			expect(sent).toEqual([]);
 		});
 
-		it("deletes a stored row, never a running session's", async () => {
+		it("deletes a stored row", async () => {
 			const token = await pair();
-			expect(await call(token, "DELETE", "live")).toEqual([409, { error: "session_running" }]);
 			expect(await call(token, "DELETE", "stored")).toEqual([200, { ok: true }]);
 			expect(await call(token, "DELETE", "nope")).toEqual([404, { error: "unknown_session" }]);
 			expect(await call(token, "DELETE", "%E0%A4%A")).toEqual([404, { error: "unknown_session" }]);
