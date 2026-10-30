@@ -214,16 +214,30 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 
 /** Fetched again after every report: the commands, which rarely change, have their own route. */
 function statusView(report: PaneReport): StatusView {
+	const { model, context, usage, backgroundSubagentUsage: background, notice } = report;
 	return {
-		model: report.model,
-		models: report.models,
+		model: model && modelView(model),
+		models: report.models.map(modelView),
 		thinkingLevel: report.thinkingLevel,
 		thinkingLevels: report.thinkingLevels,
 		trust: report.trust,
-		context: report.context,
-		usage: report.usage,
-		backgroundSubagentUsage: report.backgroundSubagentUsage,
-		notice: report.notice,
+		context: context && { tokens: context.tokens, contextWindow: context.contextWindow, percent: context.percent },
+		usage: usage && {
+			input: usage.input,
+			output: usage.output,
+			cacheRead: usage.cacheRead,
+			cacheWrite: usage.cacheWrite,
+			cost: usage.cost,
+		},
+		backgroundSubagentUsage: background && {
+			runCount: background.runCount,
+			input: background.input,
+			output: background.output,
+			cacheRead: background.cacheRead,
+			cacheWrite: background.cacheWrite,
+			cost: background.cost,
+		},
+		notice: notice && { text: notice.text, at: notice.at },
 		tasks: report.tasks?.map((task) => ({
 			id: task.id,
 			kind: task.kind,
@@ -236,4 +250,8 @@ function statusView(report: PaneReport): StatusView {
 			output: task.outputFile ? true : undefined,
 		})),
 	};
+}
+
+function modelView(model: PaneReport["models"][number]): PaneReport["models"][number] {
+	return { provider: model.provider, id: model.id, name: model.name };
 }

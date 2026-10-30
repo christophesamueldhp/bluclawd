@@ -341,6 +341,45 @@ describe("phone control", () => {
 		expect(status).not.toHaveProperty("status.pistatusline");
 	});
 
+	it.each([
+		["model", { model: { ...opus, extra: 1 } }, opus],
+		["models", { models: [{ ...gpt, extra: 1 }] }, [gpt]],
+		[
+			"context",
+			{ context: { tokens: 1, contextWindow: 2, percent: null, extra: 1 } },
+			{ tokens: 1, contextWindow: 2, percent: null },
+		],
+		[
+			"usage",
+			{ usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5, extra: 1 } },
+			{ input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5 },
+		],
+		[
+			"backgroundSubagentUsage",
+			{
+				backgroundSubagentUsage: {
+					runCount: 1,
+					input: 1,
+					output: 2,
+					cacheRead: 3,
+					cacheWrite: 4,
+					cost: null,
+					extra: 1,
+				},
+			},
+			{ runCount: 1, input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: null },
+		],
+		["notice", { notice: { text: "no model", at: 1, extra: 1 } }, { text: "no model", at: 1 }],
+		[
+			"tasks",
+			{ tasks: [{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2, extra: 1 }] },
+			[{ id: "f2", kind: "shell", label: "sleep 60", startedAt: 2 }],
+		],
+	])("shows only the fields it declares of the pane's %s", (field, fields, shown) => {
+		const report = { ...full, ...fields } as PaneReport;
+		expect(decide({ ...session("running"), report }, { type: "status" })).toHaveProperty(`status.${field}`, shown);
+	});
+
 	it("shows none of a stored row's last report", () => {
 		expect(decide({ ...session("stopped"), report: full }, { type: "status" })).toEqual(error("no_status"));
 	});
