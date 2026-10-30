@@ -220,7 +220,6 @@ function imagesIn(body: Record<string, unknown>): PaneImage[] | undefined {
 	});
 }
 
-/** The HTTP status of each refusal phone control gives. */
 const PHONE_STATUS: Record<PhoneError, number> = {
 	session_not_running: 409,
 	session_running: 409,
@@ -476,9 +475,9 @@ async function handle(
 	if (req.method !== route.method) return json(res, 405, { error: "method_not_allowed" });
 	const body = route.method === "POST" ? await readJson(req, route.bodyMax) : {};
 	// After the body, which may have taken a while: the session as it is now.
-	const session = sessionOf(deps, sessionPath[1]!);
+	const session = sessionOf(deps, sessionPath[1]);
 	if (!session) return json(res, 404, { error: "unknown_session" });
-	if ("messages" in route) return view(url, res, session);
+	if ("messages" in route) return serveMessages(url, res, session);
 	const outcome = decide(session, route.action(body));
 	if ("error" in outcome) return json(res, PHONE_STATUS[outcome.error], { error: outcome.error });
 	if ("message" in outcome) {
@@ -495,9 +494,9 @@ async function handle(
 					: deps.deleteInstance(session.id);
 		return done ? json(res, 200, { ok: true }) : json(res, 404, { error: "unknown_session" });
 	}
-	if ("status" in outcome) return status(deps, url, res, session, outcome.status);
+	if ("status" in outcome) return serveStatus(deps, url, res, session, outcome.status);
 	if ("commands" in outcome) return json(res, 200, { commands: outcome.commands });
-	return read(res, outcome.read);
+	return serveRead(res, outcome.read);
 }
 
 type SessionRoute =
@@ -508,18 +507,18 @@ type SessionRoute =
 function sessionRoute(rest: string, method: string | undefined): SessionRoute | undefined {
 	if (rest === "") return method === "DELETE" ? { method, action: () => ({ type: "delete" }) } : undefined;
 	const image = /^\/images\/([0-9a-f-]{8,36})\/(\d{1,3})$/.exec(rest);
-	if (image) return { method: "GET", action: () => ({ type: "image", entryId: image[1]!, index: Number(image[2]) }) };
+	if (image) return { method: "GET", action: () => ({ type: "image", entryId: image[1], index: Number(image[2]) }) };
 	// A background task the pane reported: the tail of its output, or stopping it as /tasks' `x` does.
 	const task = /^\/tasks\/([\w.:-]{1,64})\/(output|stop)$/.exec(rest);
 	if (task) {
-		const taskId = task[1]!;
+		const taskId = task[1];
 		return task[2] === "output"
 			? { method: "GET", action: () => ({ type: "task_output", taskId }) }
 			: { method: "POST", action: () => ({ type: "stop_task", taskId }) };
 	}
 	// A tool result's whole output: the transcript cuts it to TEXT_MAX.
 	const output = /^\/messages\/([0-9a-f-]{8,36})\/output$/.exec(rest);
-	if (output) return { method: "GET", action: () => ({ type: "message_output", entryId: output[1]! }) };
+	if (output) return { method: "GET", action: () => ({ type: "message_output", entryId: output[1] }) };
 	if (rest === "/messages") return { method: "GET", messages: true };
 	if (rest === "/status") return { method: "GET", action: () => ({ type: "status" }) };
 	if (rest === "/commands") return { method: "GET", action: () => ({ type: "commands" }) };
@@ -563,7 +562,7 @@ function sessionOf(deps: RemoteDeps, encoded: string): PhoneSession | undefined 
 }
 
 /** A page of the session's transcript, back from `before`. */
-function view(url: URL, res: ServerResponse, session: PhoneSession): void {
+function serveMessages(url: URL, res: ServerResponse, session: PhoneSession): void {
 	const requested = Number.parseInt(url.searchParams.get("limit") ?? "", 10) || MESSAGES_DEFAULT;
 	const limit = Math.min(Math.max(requested, 1), MESSAGES_MAX);
 	const before = url.searchParams.get("before") ?? undefined;
@@ -574,12 +573,12 @@ function view(url: URL, res: ServerResponse, session: PhoneSession): void {
 }
 
 /** The status phone control built, with what the Mac adds for the session's directory. */
-async function status(
+async function serveStatus(
 	deps: RemoteDeps,
 	url: URL,
 	res: ServerResponse,
 	session: PhoneSession,
-	view: StatusView,
+	statusView: StatusView,
 ): Promise<void> {
 	// pistatusline's own lines at the phone's width, which show git (and the plan usage pistatusline keeps) themselves.
 	const cols = /^\d{1,3}$/.test(url.searchParams.get("cols") ?? "") ? Number(url.searchParams.get("cols")) : 0;
@@ -587,24 +586,23 @@ async function status(
 		cols && session.report
 			? await deps.renderStatusline?.(session, session.report, Math.min(Math.max(cols, COLS_MIN), COLS_MAX))
 			: undefined;
-	const mac = lines ? { statusline: { lines } } : { git: (await deps.statusLine?.(session.cwd))?.git };
-	return json(res, 200, { report: { ...view, ...mac } });
+	const fromMac = lines ? { statusline: { lines } } : { git: (await deps.statusLine?.(session.cwd))?.git };
+	return json(res, 200, { report: { ...statusView, ...fromMac } });
 }
 
-/** Reads what phone control allowed, from the session's own files. */
-function read(res: ServerResponse, what: TranscriptRead): void {
-	if (what.type === "task_output") {
-		const tail = outputTail(what.file);
+function serveRead(res: ServerResponse, read: TranscriptRead): void {
+	if (read.type === "task_output") {
+		const tail = outputTail(read.file);
 		json(res, tail ? 200 : 404, tail ?? { error: "no_output" });
 		return;
 	}
-	const { sessionFile, leafId } = what.transcript;
-	if (what.type === "message_output") {
-		const result = loadOutput(sessionFile, what.entryId, leafId);
+	const { sessionFile, leafId } = read.transcript;
+	if (read.type === "message_output") {
+		const result = loadOutput(sessionFile, read.entryId, leafId);
 		json(res, result ? 200 : 404, result ?? { error: "unknown_entry" });
 		return;
 	}
-	const image = loadImage(sessionFile, what.entryId, what.index, leafId);
+	const image = loadImage(sessionFile, read.entryId, read.index, leafId);
 	if (!image) {
 		json(res, 404, { error: "unknown_image" });
 		return;

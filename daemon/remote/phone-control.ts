@@ -1,7 +1,7 @@
 /**
  * Phone control: for one session, whether a Chat's action is allowed and what it becomes: a
- * message for its pane, a change the daemon makes itself, a read of its transcript, its status, or
- * an error. No I/O: the HTTP adapter (http.ts) carries out what this decides.
+ * message for its pane, a change the daemon makes itself, a read of its transcript or a task's
+ * output, its status, the commands it lists, or an error. No I/O: the HTTP adapter (http.ts) carries out what this decides.
  */
 import {
 	type InstanceSummary,
