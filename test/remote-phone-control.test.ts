@@ -277,6 +277,14 @@ const rows: Row[] = [
 		{ status: { model: opus, models: [opus, gpt] } },
 		error("no_status"),
 	],
+	[
+		"the commands",
+		{ type: "commands" },
+		{ commands: full.commands ?? [] },
+		error("no_status"),
+		{ commands: [] },
+		error("no_status"),
+	],
 ];
 
 /** The same outcome for each running pane, `stopped` for the stored row. */

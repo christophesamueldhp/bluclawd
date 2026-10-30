@@ -5,6 +5,7 @@
  */
 import {
 	type InstanceSummary,
+	type PaneCommand,
 	type PaneImage,
 	type PaneMessage,
 	type PaneReport,
@@ -32,7 +33,8 @@ export type PhoneAction =
 	| { type: "task_output"; taskId: string }
 	| { type: "image"; entryId: string; index: number }
 	| { type: "message_output"; entryId: string }
-	| { type: "status" };
+	| { type: "status" }
+	| { type: "commands" };
 
 /** A change to the registry's row, which needs no pane. */
 export type DaemonOperation = { type: "rename"; name: string } | { type: "pin"; pinned: boolean } | { type: "delete" };
@@ -67,6 +69,7 @@ export type PhoneOutcome =
 	| { operation: DaemonOperation }
 	| { read: TranscriptRead }
 	| { status: StatusView }
+	| { commands: PaneCommand[] }
 	| { error: PhoneError };
 
 /** A task as the phone lists it: `output` when its tail can be fetched, its file staying on the Mac. */
@@ -202,8 +205,10 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 		case "message_output":
 			return { read: { ...action, transcript: { sessionFile: session.sessionFile, leafId: session.leafId } } };
 		case "status":
+		case "commands":
 			// A stored row's last report is no longer its status.
-			return session.running && report ? { status: statusView(report) } : { error: "no_status" };
+			if (!session.running || !report) return { error: "no_status" };
+			return action.type === "status" ? { status: statusView(report) } : { commands: report.commands ?? [] };
 	}
 }
 

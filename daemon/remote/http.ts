@@ -478,7 +478,7 @@ async function handle(
 	// After the body, which may have taken a while: the session as it is now.
 	const session = sessionOf(deps, sessionPath[1]!);
 	if (!session) return json(res, 404, { error: "unknown_session" });
-	if ("view" in route) return view(url, res, session, route.view);
+	if ("messages" in route) return view(url, res, session);
 	const outcome = decide(session, route.action(body));
 	if ("error" in outcome) return json(res, PHONE_STATUS[outcome.error], { error: outcome.error });
 	if ("message" in outcome) {
@@ -496,13 +496,12 @@ async function handle(
 		return done ? json(res, 200, { ok: true }) : json(res, 404, { error: "unknown_session" });
 	}
 	if ("status" in outcome) return status(deps, url, res, session, outcome.status);
+	if ("commands" in outcome) return json(res, 200, { commands: outcome.commands });
 	return read(res, outcome.read);
 }
 
-type SessionView = "messages" | "commands";
-
 type SessionRoute =
-	| { method: "GET"; view: SessionView }
+	| { method: "GET"; messages: true }
 	| { method: string; bodyMax?: number; action: (body: Record<string, unknown>) => PhoneAction };
 
 /** What a path under a session asks of it; none for one the phone has no route for. */
@@ -521,9 +520,9 @@ function sessionRoute(rest: string, method: string | undefined): SessionRoute | 
 	// A tool result's whole output: the transcript cuts it to TEXT_MAX.
 	const output = /^\/messages\/([0-9a-f-]{8,36})\/output$/.exec(rest);
 	if (output) return { method: "GET", action: () => ({ type: "message_output", entryId: output[1]! }) };
-	const shown = /^\/(messages|commands)$/.exec(rest)?.[1];
-	if (shown) return { method: "GET", view: shown as SessionView };
+	if (rest === "/messages") return { method: "GET", messages: true };
 	if (rest === "/status") return { method: "GET", action: () => ({ type: "status" }) };
+	if (rest === "/commands") return { method: "GET", action: () => ({ type: "commands" }) };
 	switch (/^\/(prompt|abort|model|thinking|trust|rename|pin)$/.exec(rest)?.[1]) {
 		case "prompt":
 			return {
@@ -563,20 +562,15 @@ function sessionOf(deps: RemoteDeps, encoded: string): PhoneSession | undefined 
 	return phoneSession(deps, id);
 }
 
-/** What the phone shows of a session: its transcript, the commands it lists. */
-async function view(url: URL, res: ServerResponse, session: PhoneSession, shown: SessionView): Promise<void> {
-	if (shown === "messages") {
-		const requested = Number.parseInt(url.searchParams.get("limit") ?? "", 10) || MESSAGES_DEFAULT;
-		const limit = Math.min(Math.max(requested, 1), MESSAGES_MAX);
-		const before = url.searchParams.get("before") ?? undefined;
-		if (before !== undefined && !ENTRY_PATTERN.test(before)) return json(res, 400, { error: "invalid_entry" });
-		// One past the page tells whether older messages are left.
-		const page = loadTranscript(session.sessionFile, limit + 1, session.leafId, before);
-		return json(res, 200, { messages: page.slice(-limit), more: page.length > limit });
-	}
-	const report = session.running ? session.report : undefined;
-	if (!report) return json(res, 404, { error: "no_status" });
-	return json(res, 200, { commands: report.commands ?? [] });
+/** A page of the session's transcript, back from `before`. */
+function view(url: URL, res: ServerResponse, session: PhoneSession): void {
+	const requested = Number.parseInt(url.searchParams.get("limit") ?? "", 10) || MESSAGES_DEFAULT;
+	const limit = Math.min(Math.max(requested, 1), MESSAGES_MAX);
+	const before = url.searchParams.get("before") ?? undefined;
+	if (before !== undefined && !ENTRY_PATTERN.test(before)) return json(res, 400, { error: "invalid_entry" });
+	// One past the page tells whether older messages are left.
+	const page = loadTranscript(session.sessionFile, limit + 1, session.leafId, before);
+	return json(res, 200, { messages: page.slice(-limit), more: page.length > limit });
 }
 
 /** The status phone control built, with what the Mac adds for the session's directory. */
