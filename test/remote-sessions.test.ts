@@ -1,11 +1,10 @@
 // test/remote-sessions.test.ts
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleIpcRequest, listSummaries } from "../daemon/handler.ts";
 import type { InstanceSummary } from "../daemon/ipc/protocol.ts";
 import { findSession, remoteSessions } from "../daemon/remote/sessions.ts";
+import type { ServerSupervisor } from "../daemon/supervisor.ts";
+import { testRegistry } from "./helpers/registry.ts";
 
 const live = (
 	id: string,
@@ -110,73 +109,63 @@ describe("remote sessions", () => {
 });
 
 describe("remote sessions through the daemon", () => {
-	beforeEach(() => vi.stubEnv("PI_SERVER_DIR", mkdtempSync(join(tmpdir(), "bluclawd-remote-sessions-"))));
+	let supervisor: ServerSupervisor;
+	beforeEach(() => {
+		supervisor = testRegistry();
+	});
 	afterEach(() => vi.useRealTimers());
 
 	it("keeps idle panes in the order their last turns ended, whichever heartbeat came last", async () => {
 		vi.useFakeTimers({ toFake: ["Date"] });
 		const beat = (id: string, finishedAt: string) =>
-			handleIpcRequest({
+			handleIpcRequest(supervisor, {
 				type: "register",
 				instance: { id, cwd: "/p", activity: "idle", turns: 1, sessionFile: `/s/${id}.jsonl`, finishedAt },
 			});
-		const order = () => remoteSessions(listSummaries()).map((s) => [s.id, s.finishedAt]);
-		try {
-			vi.setSystemTime(Date.parse("2026-10-15T10:00:00Z"));
-			await beat("pi-older", "2026-10-15T09:00:00.000Z");
-			vi.setSystemTime(Date.parse("2026-10-15T10:00:01Z"));
-			await beat("pi-newer", "2026-10-15T09:30:00.000Z");
-			const expected = [
-				["pi-newer", "2026-10-15T09:30:00.000Z"],
-				["pi-older", "2026-10-15T09:00:00.000Z"],
-			];
-			expect(order()).toEqual(expected);
-			// The older one's heartbeat is now the latest: its row stays where its last turn put it.
-			vi.setSystemTime(Date.parse("2026-10-15T10:00:03Z"));
-			await beat("pi-older", "2026-10-15T09:00:00.000Z");
-			expect(order()).toEqual(expected);
-		} finally {
-			await handleIpcRequest({ type: "unregister", instanceId: "pi-older" });
-			await handleIpcRequest({ type: "unregister", instanceId: "pi-newer" });
-		}
+		const order = () => remoteSessions(listSummaries(supervisor)).map((s) => [s.id, s.finishedAt]);
+		vi.setSystemTime(Date.parse("2026-10-15T10:00:00Z"));
+		await beat("pi-older", "2026-10-15T09:00:00.000Z");
+		vi.setSystemTime(Date.parse("2026-10-15T10:00:01Z"));
+		await beat("pi-newer", "2026-10-15T09:30:00.000Z");
+		const expected = [
+			["pi-newer", "2026-10-15T09:30:00.000Z"],
+			["pi-older", "2026-10-15T09:00:00.000Z"],
+		];
+		expect(order()).toEqual(expected);
+		// The older one's heartbeat is now the latest: its row stays where its last turn put it.
+		vi.setSystemTime(Date.parse("2026-10-15T10:00:03Z"));
+		await beat("pi-older", "2026-10-15T09:00:00.000Z");
+		expect(order()).toEqual(expected);
 	});
 
 	it("gives each session pi's session id, a pane's and a quit one's stored row alike", async () => {
-		await handleIpcRequest({
+		await handleIpcRequest(supervisor, {
 			type: "register",
 			instance: { id: "pi-a", cwd: "/p", sessionId: "uuid-a", sessionFile: "/s/a.jsonl" },
 		});
-		await handleIpcRequest({ type: "save", cwd: "/p", sessionFile: "/s/b.jsonl", sessionId: "uuid-b" });
-		try {
-			expect(remoteSessions(listSummaries()).map((s) => [s.alive, s.sessionId])).toEqual(
-				expect.arrayContaining([
-					[true, "uuid-a"],
-					[false, "uuid-b"],
-				]),
-			);
-		} finally {
-			await handleIpcRequest({ type: "unregister", instanceId: "pi-a" });
-		}
+		await handleIpcRequest(supervisor, { type: "save", cwd: "/p", sessionFile: "/s/b.jsonl", sessionId: "uuid-b" });
+		expect(remoteSessions(listSummaries(supervisor)).map((s) => [s.alive, s.sessionId])).toEqual(
+			expect.arrayContaining([
+				[true, "uuid-a"],
+				[false, "uuid-b"],
+			]),
+		);
 	});
 
 	it("says which dialog a session waits on, only while it needs input", async () => {
 		const dialog = { kind: "confirm", title: "Allow bash?" };
 		const beat = (activity: "awaiting_input" | "working") =>
-			handleIpcRequest({
+			handleIpcRequest(supervisor, {
 				type: "register",
 				instance: { id: "pi-d", cwd: "/p", activity, dialog, detail: "Waiting: Allow bash?" },
 			});
-		try {
-			await beat("awaiting_input");
-			expect(remoteSessions(listSummaries())[0]).toMatchObject({
-				state: "needs",
-				detail: "Waiting: Allow bash?",
-				dialog,
-			});
-			await beat("working");
-			expect(remoteSessions(listSummaries())[0]).not.toHaveProperty("dialog");
-		} finally {
-			await handleIpcRequest({ type: "unregister", instanceId: "pi-d" });
-		}
+		await beat("awaiting_input");
+		expect(remoteSessions(listSummaries(supervisor))[0]).toMatchObject({
+			state: "needs",
+			detail: "Waiting: Allow bash?",
+			dialog,
+		});
+		await beat("working");
+		expect(remoteSessions(listSummaries(supervisor))[0]).not.toHaveProperty("dialog");
 	});
 });

@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentActivity } from "./activity.ts";
 import type {
+	EndReason,
 	InstanceSummary,
 	LiveSnapshot,
 	PaneDialog,
@@ -15,7 +16,7 @@ import type {
 } from "./ipc/protocol.ts";
 import { daemonBuildId, getSocketPath } from "./paths.ts";
 
-export type { AgentActivity };
+export type { AgentActivity, EndReason };
 export type { InstanceSummary };
 
 export interface RegisterInput {
@@ -48,7 +49,7 @@ export type RemoteAction =
 type Request =
 	| { type: "list" }
 	| { type: "register"; instance: RegisterInput }
-	| { type: "unregister"; instanceId: string }
+	| { type: "unregister"; instanceId: string; reason?: EndReason }
 	| { type: "wait"; instanceId: string }
 	| { type: "send"; instanceId: string; message: PaneMessage }
 	| { type: "shutdown" }
@@ -280,8 +281,8 @@ export class OrchestratorClient {
 		await this.request({ type: "remote_report", instanceId, report }, 1000);
 	}
 
-	async unregister(instanceId: string): Promise<void> {
-		await this.request({ type: "unregister", instanceId }, 1000);
+	async unregister(instanceId: string, reason?: EndReason): Promise<void> {
+		await this.request({ type: "unregister", instanceId, ...(reason ? { reason } : {}) }, 1000);
 	}
 
 	/**
