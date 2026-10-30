@@ -9,20 +9,21 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
 import { stripAnsi } from "../ansi.ts";
-import {
-	type InstanceSummary,
-	type LiveSnapshot,
-	type PaneImage,
-	type PaneLaunch,
-	type PaneMessage,
-	type PaneReport,
-	phoneMayRun,
-} from "../ipc/protocol.ts";
+import type { InstanceSummary, LiveSnapshot, PaneImage, PaneLaunch, PaneMessage, PaneReport } from "../ipc/protocol.ts";
 import { labelFromTask } from "../rows.ts";
 import { RemoteEvents } from "./events.ts";
 import { type ClaimResult, type RemoteStore, SECRET_PATTERN } from "./pairing.ts";
+import {
+	commandName,
+	decide,
+	type PhoneAction,
+	type PhoneError,
+	type PhoneSession,
+	phoneSession,
+	type TranscriptRead,
+} from "./phone-control.ts";
 import type { StatuslineSession, StatusSpan } from "./pistatusline.ts";
-import { findSession, remoteSessions } from "./sessions.ts";
+import { remoteSessions } from "./sessions.ts";
 import { launchUsable, type SessionSpec } from "./spawn.ts";
 import type { StatusLine } from "./statusline.ts";
 import { loadImage, loadOutput, loadTranscript } from "./transcript.ts";
@@ -92,17 +93,12 @@ const MESSAGES_MAX = 200;
 const MODEL_PATTERN = /^\w[\w.-]*\/[\w.:/@+-]+$/;
 /** pi's entry ids (8 hex digits, or a whole UUID): one word on the pane's `/remote-control` line. */
 const ENTRY_PATTERN = /^[0-9a-f-]{8,36}$/;
-/** pi's `defaultProjectTrust` values, as Alt+M cycles them. */
-const TRUST = ["always", "ask", "never"] as const;
-const NAME_MAX = 100;
 /** The widths a phone may ask the status line for. */
 const COLS_MIN = 20;
 const COLS_MAX = 200;
 /** A task's output tail, as /tasks' detail view reads it. */
 const TAIL_BYTES = 8192;
 const TAIL_LINES = 10;
-/** Never in typed text or a name: a control character would be a keystroke, or a terminal escape in agent view. */
-const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 /** Against DNS rebinding: a page whose name resolves to 127.0.0.1 still sends its own name. Tailscale
  *  serve forwards the tailnet name; a loopback name is the Mac itself. */
 const HOST_PATTERN = /^(127\.0\.0\.1|localhost|\[::1\]|([a-z0-9-]+\.)+ts\.net)(:\d+)?$/i;
@@ -223,10 +219,22 @@ function imagesIn(body: Record<string, unknown>): PaneImage[] | undefined {
 	});
 }
 
-/** The command a "/" line names, as pi reads one (`/compact`, `/skill:pdf …`); none for text such as a path. */
-function commandName(text: string): string | undefined {
-	return /^\/([\w.:-]+)(?:\s|$)/.exec(text.trimStart())?.[1];
-}
+/** The HTTP status of each refusal phone control gives. */
+const PHONE_STATUS: Record<PhoneError, number> = {
+	session_not_running: 409,
+	session_running: 409,
+	pane_too_old: 409,
+	session_busy: 409,
+	unsent_draft: 409,
+	command_refused: 400,
+	invalid_model: 400,
+	invalid_thinking: 400,
+	invalid_trust: 400,
+	invalid_name: 400,
+	invalid_pinned: 400,
+	unknown_task: 404,
+	no_output: 404,
+};
 
 /** A task's output as /tasks' detail view shows it: the last lines of the file's last 8 KiB, empty
  *  ones dropped, without the escapes and control characters the command wrote for its terminal. */
@@ -445,21 +453,6 @@ async function handle(
 		);
 		return json(res, 200, { models: sorted });
 	}
-	const removingSession = /^\/api\/sessions\/([^/]+)$/.exec(path);
-	if (removingSession && req.method === "DELETE") {
-		let id: string;
-		try {
-			id = decodeURIComponent(removingSession[1]!);
-		} catch {
-			return json(res, 404, { error: "unknown_session" });
-		}
-		const session = findSession(deps.listInstances(), id);
-		if (!session) return json(res, 404, { error: "unknown_session" });
-		// A pane's row comes back with its next heartbeat: its pi has to quit first.
-		if (session.running) return json(res, 409, { error: "session_running" });
-		return deps.deleteInstance(id) ? json(res, 200, { ok: true }) : json(res, 404, { error: "unknown_session" });
-	}
-
 	if (path === "/api/push/key" && req.method === "GET") {
 		// `subscribed`: a re-paired device keeps its notification permission but has no subscription here.
 		return json(res, 200, { publicKey: deps.store.vapidKeys().publicKey, subscribed: device.push !== undefined });
@@ -475,196 +468,166 @@ async function handle(
 		return json(res, 200, { ok: true });
 	}
 
-	const picture = /^\/api\/sessions\/([^/]+)\/images\/([0-9a-f-]{8,36})\/(\d{1,3})$/.exec(path);
-	if (picture) {
-		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
-		let pictured: string;
-		try {
-			pictured = decodeURIComponent(picture[1]);
-		} catch {
-			return json(res, 404, { error: "unknown_session" });
-		}
-		const session = findSession(deps.listInstances(), pictured);
-		if (!session) return json(res, 404, { error: "unknown_session" });
-		const image = loadImage(session.sessionFile, picture[2], Number(picture[3]), session.leafId);
-		if (!image) return json(res, 404, { error: "unknown_image" });
-		// Only a type the phone shows as an image, never one a browser would run (SVG, HTML).
-		if (!Object.hasOwn(IMAGE_MAGIC, image.mimeType)) return json(res, 415, { error: "unsupported_image" });
-		const bytes = Buffer.from(image.data, "base64");
-		res.writeHead(200, {
-			"content-type": image.mimeType,
-			"content-length": bytes.length,
-			// An entry never changes: the same id and position is the same image.
-			"cache-control": `private, max-age=${IMAGE_MAX_AGE_S}`,
-			"x-content-type-options": "nosniff",
-		});
-		res.end(bytes);
-		return;
-	}
-
-	// A background task the pane reported: the tail of its output, or stopping it as /tasks' `x` does.
-	const task = /^\/api\/sessions\/([^/]+)\/tasks\/([\w.:-]{1,64})\/(output|stop)$/.exec(path);
-	if (task) {
-		const [, encoded = "", taskId = "", verb] = task;
-		if (req.method !== (verb === "output" ? "GET" : "POST")) return json(res, 405, { error: "method_not_allowed" });
-		if (verb === "stop") await readJson(req);
-		let taskOf: string;
-		try {
-			taskOf = decodeURIComponent(encoded);
-		} catch {
-			return json(res, 404, { error: "unknown_session" });
-		}
-		const session = findSession(deps.listInstances(), taskOf);
-		if (!session) return json(res, 404, { error: "unknown_session" });
-		const known = session.running ? deps.report(taskOf)?.tasks?.find((t) => t.id === taskId) : undefined;
-		if (!known) return json(res, 404, { error: "unknown_task" });
-		if (verb === "output") {
-			const tail = known.outputFile ? outputTail(known.outputFile) : undefined;
-			return tail ? json(res, 200, tail) : json(res, 404, { error: "no_output" });
-		}
-		if (!deps.send(taskOf, { type: "stop_task", id: taskId }))
-			return json(res, 409, { error: "session_not_running" });
+	const sessionPath = /^\/api\/sessions\/([^/]+)(\/.*)?$/.exec(path);
+	const route = sessionPath && sessionRoute(sessionPath[2] ?? "", req.method);
+	if (!sessionPath || !route) return json(res, 404, { error: "not_found" });
+	if (req.method !== route.method) return json(res, 405, { error: "method_not_allowed" });
+	const body = route.method === "POST" ? await readJson(req, route.bodyMax) : {};
+	// After the body, which may have taken a while: the session as it is now.
+	const session = sessionOf(deps, sessionPath[1]!);
+	if (!session) return json(res, 404, { error: "unknown_session" });
+	if ("view" in route) return view(deps, url, res, session, route.view);
+	const outcome = decide(session, route.action(body));
+	if ("error" in outcome) return json(res, PHONE_STATUS[outcome.error], { error: outcome.error });
+	if ("message" in outcome) {
+		if (!deps.send(session.id, outcome.message)) return json(res, 409, { error: "session_not_running" });
 		return json(res, 202, { ok: true });
 	}
-
-	// A tool result's whole output: the transcript cuts it to TEXT_MAX.
-	const output = /^\/api\/sessions\/([^/]+)\/messages\/([0-9a-f-]{8,36})\/output$/.exec(path);
-	if (output) {
-		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
-		let outputOf: string;
-		try {
-			outputOf = decodeURIComponent(output[1]);
-		} catch {
-			return json(res, 404, { error: "unknown_session" });
-		}
-		const session = findSession(deps.listInstances(), outputOf);
-		if (!session) return json(res, 404, { error: "unknown_session" });
-		const result = loadOutput(session.sessionFile, output[2], session.leafId);
-		return result ? json(res, 200, result) : json(res, 404, { error: "unknown_entry" });
+	if ("operation" in outcome) {
+		const { operation } = outcome;
+		const done =
+			operation.type === "rename"
+				? deps.renameInstance(session.id, operation.name)
+				: operation.type === "pin"
+					? deps.setPinned(session.id, operation.pinned)
+					: deps.deleteInstance(session.id);
+		return done ? json(res, 200, { ok: true }) : json(res, 404, { error: "unknown_session" });
 	}
+	return read(res, outcome.read);
+}
 
-	const match =
-		/^\/api\/sessions\/([^/]+)\/(messages|status|commands|prompt|abort|model|thinking|trust|rename|pin)$/.exec(path);
-	if (!match) return json(res, 404, { error: "not_found" });
+type SessionView = "messages" | "status" | "commands";
+
+type SessionRoute =
+	| { method: "GET"; view: SessionView }
+	| { method: string; bodyMax?: number; action: (body: Record<string, unknown>) => PhoneAction };
+
+/** What a path under a session asks of it; none for one the phone has no route for. */
+function sessionRoute(rest: string, method: string | undefined): SessionRoute | undefined {
+	if (rest === "") return method === "DELETE" ? { method, action: () => ({ type: "delete" }) } : undefined;
+	const image = /^\/images\/([0-9a-f-]{8,36})\/(\d{1,3})$/.exec(rest);
+	if (image) return { method: "GET", action: () => ({ type: "image", entryId: image[1]!, index: Number(image[2]) }) };
+	// A background task the pane reported: the tail of its output, or stopping it as /tasks' `x` does.
+	const task = /^\/tasks\/([\w.:-]{1,64})\/(output|stop)$/.exec(rest);
+	if (task) {
+		const taskId = task[1]!;
+		return task[2] === "output"
+			? { method: "GET", action: () => ({ type: "task_output", taskId }) }
+			: { method: "POST", action: () => ({ type: "stop_task", taskId }) };
+	}
+	// A tool result's whole output: the transcript cuts it to TEXT_MAX.
+	const output = /^\/messages\/([0-9a-f-]{8,36})\/output$/.exec(rest);
+	if (output) return { method: "GET", action: () => ({ type: "message_output", entryId: output[1]! }) };
+	const shown = /^\/(messages|status|commands)$/.exec(rest)?.[1];
+	if (shown) return { method: "GET", view: shown as SessionView };
+	switch (/^\/(prompt|abort|model|thinking|trust|rename|pin)$/.exec(rest)?.[1]) {
+		case "prompt":
+			return {
+				method: "POST",
+				bodyMax: PROMPT_BODY_MAX,
+				action: (body) => {
+					const text = promptIn(body, "text");
+					const images = imagesIn(body);
+					return images ? { type: "prompt", text, images } : { type: "prompt", text };
+				},
+			};
+		case "abort":
+			return { method: "POST", action: () => ({ type: "abort" }) };
+		case "model":
+			return { method: "POST", action: (body) => ({ type: "model", provider: body.provider, id: body.id }) };
+		case "thinking":
+			return { method: "POST", action: (body) => ({ type: "thinking", level: body.level }) };
+		case "trust":
+			return { method: "POST", action: (body) => ({ type: "trust", trust: body.trust }) };
+		case "rename":
+			return { method: "POST", action: (body) => ({ type: "rename", name: body.name }) };
+		case "pin":
+			return { method: "POST", action: (body) => ({ type: "pin", pinned: body.pinned }) };
+		default:
+			return undefined;
+	}
+}
+
+/** The session a path names, its id decoded: the one lookup a request makes. */
+function sessionOf(deps: RemoteDeps, encoded: string): PhoneSession | undefined {
 	let id: string;
 	try {
-		id = decodeURIComponent(match[1]);
+		id = decodeURIComponent(encoded);
 	} catch {
-		return json(res, 404, { error: "unknown_session" });
+		return undefined;
 	}
-	const found = findSession(deps.listInstances(), id);
-	if (!found) return json(res, 404, { error: "unknown_session" });
-	const action = match[2];
+	return phoneSession(deps, id);
+}
 
-	if (action === "messages") {
-		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
+/** What the phone shows of a session: its transcript, its status, the commands it lists. */
+async function view(
+	deps: RemoteDeps,
+	url: URL,
+	res: ServerResponse,
+	session: PhoneSession,
+	shown: SessionView,
+): Promise<void> {
+	if (shown === "messages") {
 		const requested = Number.parseInt(url.searchParams.get("limit") ?? "", 10) || MESSAGES_DEFAULT;
 		const limit = Math.min(Math.max(requested, 1), MESSAGES_MAX);
 		const before = url.searchParams.get("before") ?? undefined;
 		if (before !== undefined && !ENTRY_PATTERN.test(before)) return json(res, 400, { error: "invalid_entry" });
 		// One past the page tells whether older messages are left.
-		const page = loadTranscript(found.sessionFile, limit + 1, found.leafId, before);
+		const page = loadTranscript(session.sessionFile, limit + 1, session.leafId, before);
 		return json(res, 200, { messages: page.slice(-limit), more: page.length > limit });
 	}
-	if (action === "status") {
-		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
-		const report = found.running ? deps.report(id) : undefined;
-		if (!report) return json(res, 404, { error: "no_status" });
-		// Fetched again after every report: the commands, which rarely change, have their own route.
-		const { commands: _commands, pistatusline: _paths, tasks, ...shown } = report;
-		// A task's output file stays here: the phone asks for its tail.
-		const listed = tasks?.map(({ outputFile, ...task }) => ({ ...task, ...(outputFile ? { output: true } : {}) }));
-		// pistatusline's own lines at the phone's width, which show git (and the plan usage pistatusline keeps) themselves.
-		const cols = /^\d{1,3}$/.test(url.searchParams.get("cols") ?? "") ? Number(url.searchParams.get("cols")) : 0;
-		const pane = cols ? deps.listInstances().find((i) => i.id === id && i.external) : undefined;
-		const lines =
-			pane &&
-			(await deps.renderStatusline?.(
-				{ ...found, id, createdAt: pane.createdAt, sessionId: pane.sessionId },
-				report,
-				Math.min(Math.max(cols, COLS_MIN), COLS_MAX),
-			));
-		const extra = lines ? { statusline: { lines } } : await deps.statusLine?.(found.cwd);
-		return json(res, 200, { report: { ...shown, ...(listed ? { tasks: listed } : {}), ...extra } });
+	const report = session.running ? session.report : undefined;
+	if (!report) return json(res, 404, { error: "no_status" });
+	if (shown === "commands") return json(res, 200, { commands: report.commands ?? [] });
+	// Fetched again after every report: the commands, which rarely change, have their own route.
+	const { commands: _commands, pistatusline: _paths, tasks, ...rest } = report;
+	// A task's output file stays here: the phone asks for its tail.
+	const listed = tasks?.map(({ outputFile, ...task }) => ({ ...task, ...(outputFile ? { output: true } : {}) }));
+	// pistatusline's own lines at the phone's width, which show git (and the plan usage pistatusline keeps) themselves.
+	const cols = /^\d{1,3}$/.test(url.searchParams.get("cols") ?? "") ? Number(url.searchParams.get("cols")) : 0;
+	const pane = cols ? deps.listInstances().find((i) => i.id === session.id && i.external) : undefined;
+	const lines =
+		pane &&
+		(await deps.renderStatusline?.(
+			{ ...session, createdAt: pane.createdAt, sessionId: pane.sessionId },
+			report,
+			Math.min(Math.max(cols, COLS_MIN), COLS_MAX),
+		));
+	const extra = lines ? { statusline: { lines } } : await deps.statusLine?.(session.cwd);
+	return json(res, 200, { report: { ...rest, ...(listed ? { tasks: listed } : {}), ...extra } });
+}
+
+/** Reads what phone control allowed, from the session's own files. */
+function read(res: ServerResponse, what: TranscriptRead): void {
+	if (what.type === "task_output") {
+		const tail = outputTail(what.file);
+		json(res, tail ? 200 : 404, tail ?? { error: "no_output" });
+		return;
 	}
-	if (action === "commands") {
-		if (req.method !== "GET") return json(res, 405, { error: "method_not_allowed" });
-		const report = found.running ? deps.report(id) : undefined;
-		if (!report) return json(res, 404, { error: "no_status" });
-		return json(res, 200, { commands: report.commands ?? [] });
+	if (what.type === "message_output") {
+		const result = loadOutput(what.sessionFile, what.entryId, what.leafId);
+		json(res, result ? 200 : 404, result ?? { error: "unknown_entry" });
+		return;
 	}
-	if (req.method !== "POST") return json(res, 405, { error: "method_not_allowed" });
-	const body = await readJson(req, action === "prompt" ? PROMPT_BODY_MAX : BODY_MAX);
-	// Looked up again after the body, which may have taken a while.
-	const session = findSession(deps.listInstances(), id);
-	if (!session) return json(res, 409, { error: "session_not_running" });
-	// A pane from an older bluclawd sends no report, and would ignore what only a newer one runs.
-	const anyPane = action === "prompt" || action === "abort" || action === "rename" || action === "pin";
-	if (!anyPane && session.running && !deps.report(id)) {
-		return json(res, 409, { error: "pane_too_old" });
+	const image = loadImage(what.sessionFile, what.entryId, what.index, what.leafId);
+	if (!image) {
+		json(res, 404, { error: "unknown_image" });
+		return;
 	}
-	let message: PaneMessage;
-	if (action === "prompt") {
-		const text = promptIn(body, "text");
-		const images = imagesIn(body);
-		// A slash command, as pi reads one: typed into the pane's prompt (a phone's images never are).
-		const command = images ? undefined : commandName(text);
-		// A `!` or `!!` line is pi's own shell, which only its prompt runs: sent to the model, it is text.
-		const shell = !images && /^!+\s*\S/.test(text.trimStart());
-		if (command !== undefined || shell) {
-			// Only one the pane lists for a phone: a pane that lists none (an older one) runs none.
-			const listed = deps.report(id)?.commands?.find((c) => c.name === command);
-			if (!shell && (!listed || !phoneMayRun(listed))) return json(res, 400, { error: "command_refused" });
-			// Only into an idle, empty prompt, which the pane checks again: its heartbeat may be 3s old.
-			if (session.busy) return json(res, 409, { error: "session_busy" });
-			if (session.draft) return json(res, 409, { error: "unsent_draft" });
-			message = { type: "command", text };
-		} else message = images ? { type: "prompt", text, images } : { type: "prompt", text };
-	} else if (action === "model") {
-		const { provider, id: modelId } = body;
-		if (typeof provider !== "string" || typeof modelId !== "string" || !provider || !modelId) {
-			return json(res, 400, { error: "invalid_model" });
-		}
-		if (!session.running) return json(res, 409, { error: "session_not_running" });
-		// Only a model the pane offered: the phone picks from that list, nothing else reaches the pane.
-		const offered = deps.report(id)?.models.some((m) => m.provider === provider && m.id === modelId);
-		if (!offered) return json(res, 400, { error: "invalid_model" });
-		message = { type: "set_model", provider, id: modelId };
-	} else if (action === "thinking") {
-		if (!session.running) return json(res, 409, { error: "session_not_running" });
-		// Only a level the pane offered for its model: none when the model does not reason.
-		const { level } = body;
-		if (typeof level !== "string" || !deps.report(id)?.thinkingLevels?.includes(level)) {
-			return json(res, 400, { error: "invalid_thinking" });
-		}
-		message = { type: "set_thinking", level };
-	} else if (action === "trust") {
-		if (!session.running) return json(res, 409, { error: "session_not_running" });
-		const trust = TRUST.find((value) => value === body.trust);
-		if (!trust) return json(res, 400, { error: "invalid_trust" });
-		// A pane that reports no trust mode is too old to set one.
-		if (deps.report(id)?.trust === undefined) return json(res, 409, { error: "pane_too_old" });
-		message = { type: "set_trust", trust };
-	} else if (action === "rename") {
-		const name = typeof body.name === "string" ? body.name.trim() : "";
-		if (!name || name.length > NAME_MAX || CONTROL.test(name)) return json(res, 400, { error: "invalid_name" });
-		// A pane's pi names its session, as agent view's rename does; a stored row is the daemon's.
-		if (!session.running) {
-			return deps.renameInstance(id, name)
-				? json(res, 200, { ok: true })
-				: json(res, 404, { error: "unknown_session" });
-		}
-		message = { type: "rename", name };
-	} else if (action === "pin") {
-		if (typeof body.pinned !== "boolean") return json(res, 400, { error: "invalid_pinned" });
-		return deps.setPinned(id, body.pinned)
-			? json(res, 200, { ok: true })
-			: json(res, 404, { error: "unknown_session" });
-	} else {
-		message = { type: "abort" };
+	// Only a type the phone shows as an image, never one a browser would run (SVG, HTML).
+	if (!Object.hasOwn(IMAGE_MAGIC, image.mimeType)) {
+		json(res, 415, { error: "unsupported_image" });
+		return;
 	}
-	if (!session.running || !deps.send(id, message)) return json(res, 409, { error: "session_not_running" });
-	return json(res, 202, { ok: true });
+	const bytes = Buffer.from(image.data, "base64");
+	res.writeHead(200, {
+		"content-type": image.mimeType,
+		"content-length": bytes.length,
+		// An entry never changes: the same id and position is the same image.
+		"cache-control": `private, max-age=${IMAGE_MAX_AGE_S}`,
+		"x-content-type-options": "nosniff",
+	});
+	res.end(bytes);
 }
 
 export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.0.1"): Promise<RemoteServer> {
@@ -675,7 +638,7 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 				deps.terminalOpen(),
 				remoteSessions(deps.listInstances()).sort((a, b) => a.id.localeCompare(b.id)),
 			]),
-		session: (id) => findSession(deps.listInstances(), id),
+		session: (id) => phoneSession(deps, id),
 		listed: () => new Set(deps.listInstances().map((i) => i.id)),
 	});
 	const server: Server = createServer((req, res) => {
