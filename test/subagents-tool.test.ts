@@ -1955,6 +1955,78 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 		}
 	});
 
+	it("blocks a resumed child from stopping agent runs, the same as a first-generation one", async () => {
+		const cwd = makeTempDir("resume-stop-cwd");
+		const agentDir = makeTempDir("resume-stop-agent");
+		const stopped: string[] = [];
+		const taskStop = defineTool({
+			name: "task_stop",
+			label: "Stop task",
+			description: "Stop a background task.",
+			parameters: Type.Object({ task_id: Type.String() }),
+			execute: async (_id, params) => {
+				stopped.push(params.task_id);
+				return { content: [{ type: "text", text: `stopped ${params.task_id}` }], details: undefined };
+			},
+		});
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd,
+			agentDir,
+			batchWindowMs: 0,
+			extraTools: [taskStop],
+		});
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			let parentStep = 0;
+			const route = (context: TranscriptContext) => {
+				if (isChildContext(context)) {
+					const agentStop = context.messages.find((m) => m.role === "toolResult" && m.toolCallId === "s_agent");
+					if (agentStop?.role === "toolResult")
+						return fauxAssistantMessage(`agentStopBlocked=${agentStop.isError}`);
+					if (JSON.stringify(context.messages).includes("Now stop things.")) {
+						return fauxAssistantMessage([
+							fauxToolCall("task_stop", { task_id: "sub_sibling" }, { id: "s_agent" }),
+							fauxToolCall("task_stop", { task_id: "bg_shell" }, { id: "s_shell" }),
+						]);
+					}
+					return fauxAssistantMessage("v1 done.");
+				}
+				parentStep++;
+				if (parentStep === 1) {
+					return fauxAssistantMessage([
+						fauxToolCall(
+							"subagent",
+							{ agent: "general-purpose", name: "backend", task: "Build v1." },
+							{ id: "first" },
+						),
+					]);
+				}
+				if (parentStep === 2) {
+					return fauxAssistantMessage([
+						fauxToolCall("subagent_message", { to: "backend", content: "Now stop things." }, { id: "resume" }),
+					]);
+				}
+				return fauxAssistantMessage("Waiting.");
+			};
+			faux.setResponses(Array.from({ length: 12 }, () => route));
+			await session.prompt("Delegate then resume.", { expandPromptTemplates: false });
+			const runId = (toolResultText(session, "first").result?.details as { runId: string }).runId;
+			expect(toolResultText(session, "resume").text).toContain("accepted: resuming");
+
+			await waitFor(
+				() =>
+					readPersistedRunRecord(agentDir, session.sessionId, runId)?.generation === 1 &&
+					readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "completed",
+			);
+			await session.waitForIdle();
+
+			expect(readPersistedRunRecord(agentDir, session.sessionId, runId)?.summaryText).toBe("agentStopBlocked=true");
+			expect(stopped).toEqual(["bg_shell"]);
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("refuses to resume for a sibling, a stopped child, or a run from before a reload", async () => {
 		const cwd = makeTempDir("resume-refuse-cwd");
 		const agentDir = makeTempDir("resume-refuse-agent");

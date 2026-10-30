@@ -142,7 +142,7 @@ async function setup(
 		overrides: Partial<AdmissionContext> = {},
 	) => {
 		const resumeCtx = { ...ctx, ...overrides };
-		return { result: admission.resume(run, buildPrompt, resumeCtx), ctx: resumeCtx };
+		return { result: admission.resume(run, "message", buildPrompt, resumeCtx), ctx: resumeCtx };
 	};
 	const storageDir = join(agentDir, "bluclawd", "subagents", sessionManager.getSessionId());
 	return {
