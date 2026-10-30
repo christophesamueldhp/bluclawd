@@ -51,3 +51,7 @@ _Avoid_: open session, conversation
 **Phone control**:
 The rules that decide, for one session, whether a Chat's action is allowed and what it becomes: a message for its pane, a change the daemon makes itself (rename a stored session, pin, delete), a read of its transcript or a task's output, its status, the commands it lists, or a refusal with an error code.
 _Avoid_: admission (a run's launch checks), validation
+
+**Prompt outcome**:
+What became of a prompt a phone sent, reported back by the id the phone gave it: taken (pi started a turn with it) or queued (pi queued it behind the turn in progress). The daemon's prompt delivery keeps each one's journey, from the pane's inbox to the outcome its pane reports. A pane from an older build reports none, and the phone guesses for it.
+_Avoid_: PhoneOutcome (phone control's decision), delivered (the pane's heartbeat took it, nothing more)

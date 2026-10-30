@@ -412,6 +412,23 @@ describe("remote HTTP API", () => {
 		]);
 	});
 
+	it("passes the phone's prompt id on to the pane, and refuses one that is not a short word", async () => {
+		const token = await pair();
+		const prompt = async (body: object) => {
+			const res = await fetch(`${base}/api/sessions/live/prompt`, {
+				method: "POST",
+				headers: authJson(token),
+				body: JSON.stringify(body),
+			});
+			return [res.status, ((await res.json()) as { error?: string }).error];
+		};
+		expect(await prompt({ text: "next", id: "m3k-9f2a_1" })).toEqual([202, undefined]);
+		for (const id of [7, "", "a b", "x".repeat(65)]) {
+			expect(await prompt({ text: "next", id }), JSON.stringify(id)).toEqual([400, "invalid_prompt_id"]);
+		}
+		expect(sent).toEqual([{ id: "live", message: { type: "prompt", text: "next", id: "m3k-9f2a_1" } }]);
+	});
+
 	it("answers each refusal phone control gives with its status", async () => {
 		const token = await pair();
 		const ask = async (method: string, path: string, body?: object) => {

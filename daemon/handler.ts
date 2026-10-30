@@ -156,6 +156,7 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 			supervisor.registerExternal(record, request.instance.activity ?? "idle");
 			remoteControl?.registered(record.id);
 			const messages = supervisor.drainExternal(record.id);
+			remoteControl?.delivered(record.id, messages);
 			return {
 				type: "register_result",
 				ok: true,
