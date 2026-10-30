@@ -54,6 +54,11 @@ export function statusGlyph(session) {
 	return !session.alive ? "∙" : session.state === "working" ? "" : "✻";
 }
 
+/** Terminal agent view's warning for a session file several live panes write. @param {Session} session */
+export function sharedWarning(session) {
+	return session.livePanes ? `⚠ ${session.livePanes} panes on one session` : "";
+}
+
 /**
  * The row an open chat moves to once its own is gone from the list: the same pi session under
  * another row id (it quit on the Mac and is stored now, or it resumed in a new pane).
