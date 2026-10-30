@@ -35,6 +35,8 @@ export interface AgentRow {
 	dialog?: { kind: string; title?: string };
 	/** A pane's pi: how many times it stopped working (the daemon counts). */
 	settled?: number;
+	/** Set when more than one live pi writes this row's session file: how many. */
+	livePanes?: number;
 }
 
 /** A `!` command as a row, as bluclawd's: working while it runs (its last output line the
@@ -120,20 +122,41 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 /**
  * The rows agent view lists: the daemon's stored rows, every pane's pi, and this window's own
  * (`self`, built by the caller). One row per session file; this window's own and then a live one
- * win over a stored twin.
+ * win over a stored twin. Live pis sharing a file are all kept, flagged with `livePanes`.
  */
 export function collectRows(instances: InstanceSummary[], self: InstanceSummary | undefined): AgentRow[] {
 	const listed = instances.filter((i) => i.id !== self?.id);
 	// A pane's own pin and order are kept by the daemon, on its registration.
 	const registered = self && instances.find((i) => i.id === self.id);
 	const own = self && registered ? { ...self, pinned: registered.pinned, sortOrder: registered.sortOrder } : self;
-	const rows = (own ? [own, ...listed] : listed).map((i) => rowFromSummary(i, self?.id));
+	const summaries = own ? [own, ...listed] : listed;
+	const rows = summaries.map((i) => rowFromSummary(i, self?.id));
+	// Only a registered, running pi writes the file: `starting` and `stopping` rows are alive but not yet, or no longer.
+	const live = new Set(summaries.filter((i) => i.status === "online" && i.sessionFile).map((i) => i.id));
+	const livePanes = new Map<string, number>();
+	for (const row of rows)
+		if (row.sessionFile && live.has(row.id))
+			livePanes.set(row.sessionFile, (livePanes.get(row.sessionFile) ?? 0) + 1);
 	const rank = (row: AgentRow): number => (row.self ? 0 : row.alive ? 1 : 2);
 	const byFile = new Map<string, AgentRow>();
+	// A shared file's other rows: their pin and order go to its first live row.
+	const carried = new Map<string, Pick<AgentRow, "pinned" | "sortOrder">>();
 	const out: AgentRow[] = [];
 	for (const row of rows) {
 		if (!row.sessionFile) {
 			out.push(row);
+			continue;
+		}
+		const n = livePanes.get(row.sessionFile) ?? 0;
+		if (n > 1) {
+			if (live.has(row.id)) out.push({ ...row, livePanes: n });
+			else {
+				const was = carried.get(row.sessionFile);
+				carried.set(row.sessionFile, {
+					pinned: row.pinned || was?.pinned === true,
+					sortOrder: was?.sortOrder ?? row.sortOrder,
+				});
+			}
 			continue;
 		}
 		const seen = byFile.get(row.sessionFile);
@@ -151,6 +174,10 @@ export function collectRows(instances: InstanceSummary[], self: InstanceSummary 
 		};
 		out[out.indexOf(seen)] = merged;
 		byFile.set(row.sessionFile, merged);
+	}
+	for (const [file, twin] of carried) {
+		const i = out.findIndex((row) => row.sessionFile === file);
+		out[i] = { ...out[i], pinned: out[i].pinned || twin.pinned, sortOrder: out[i].sortOrder ?? twin.sortOrder };
 	}
 	return out;
 }
@@ -332,3 +359,8 @@ export const STATE_WORDS: Record<RowState, string> = {
 	failed: "Failed",
 	stopped: "Stopped",
 };
+
+/** A row's warning when several live pis write its session file; the phone mirrors it. */
+export function livePanesWarning(n: number): string {
+	return `⚠ ${n} panes on one session`;
+}

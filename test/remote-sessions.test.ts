@@ -42,6 +42,19 @@ describe("remote sessions", () => {
 		expect(remoteSessions([live("a", "idle", { settled: 3 })])[0].settled).toBe(3);
 	});
 
+	it("lists both panes running one session file, each saying how many share it", () => {
+		const sessions = remoteSessions([
+			live("a", "idle", { sessionFile: "/s/x.jsonl" }),
+			live("b", "idle", { sessionFile: "/s/x.jsonl" }),
+			live("c", "idle"),
+		]);
+		expect(sessions.map((s) => [s.id, s.livePanes]).sort()).toEqual([
+			["a", 2],
+			["b", 2],
+			["c", undefined],
+		]);
+	});
+
 	it("puts pinned rows in their own band, first", () => {
 		const sessions = remoteSessions([live("a", "working"), live("p", "idle", { pinned: true })]);
 		expect(sessions.map((s) => [s.id, s.band])).toEqual([

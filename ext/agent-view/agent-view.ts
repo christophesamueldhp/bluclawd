@@ -44,6 +44,7 @@ import {
 	compactAge,
 	countRows,
 	labelFromTask,
+	livePanesWarning,
 	nameScore,
 	queryFilter,
 	type RowState,
@@ -1990,10 +1991,14 @@ export class AgentView implements Component, Focusable {
 			);
 		}
 		const text = clean(row.detail);
-		if (this.viewMode !== "directory") return cc.fg("muted", text);
-		const word = STATE_WORDS[row.state];
-		const shown = cc.fg(STATE_COLOR[row.state], word);
-		return text ? `${shown}${cc.fg("muted", ` · ${text}`)}` : shown;
+		const lead = [
+			this.viewMode === "directory" ? cc.fg(STATE_COLOR[row.state], STATE_WORDS[row.state]) : "",
+			row.livePanes ? cc.fg("warning", livePanesWarning(row.livePanes)) : "",
+		]
+			.filter(Boolean)
+			.join(cc.fg("muted", " · "));
+		if (!lead) return cc.fg("muted", text);
+		return text ? `${lead}${cc.fg("muted", ` · ${text}`)}` : lead;
 	}
 
 	private renderRow(row: AgentRow, width: number, labelWidth: number, ageWidth: number, focused: boolean): string {
