@@ -118,6 +118,11 @@ describe("a sent prompt still waiting once its time is up", () => {
 		expect(giveUp({ prompt: "/reload", last: "m1" }, "idle", "m1")).toBe("drop");
 		expect(giveUp({ prompt: "/reload", last: "m1" }, "working", "m1")).toBe("wait");
 	});
+
+	it("goes quietly for a `!` line, which may write nothing, but not for a lone `!`, which is text", () => {
+		expect(giveUp({ prompt: "!ls", last: "m1" }, "idle", "m1")).toBe("drop");
+		expect(giveUp({ prompt: "!", last: "m1" }, "idle", "m1")).toBe("fail");
+	});
 });
 
 describe("the commands the phone does not send", () => {
