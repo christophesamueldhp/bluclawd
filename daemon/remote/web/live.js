@@ -3,10 +3,11 @@
 
 /**
  * What is left of the reply in progress once a transcript fetch lands. A tool goes once the
- * transcript has its result. The text and thinking go only once the reply `ended` (its pane sent
- * null) and the transcript's last assistant message starts with them: pi writes the message after
- * it tells the phone the reply ended, so a fetch can land before the message is there, and a
- * fetch mid-reply never has it.
+ * transcript has its result. The text and thinking go only once the reply `ended` (its pane sent a
+ * bare null, as an older pane does) and the transcript's last assistant message starts with them:
+ * such a pane tells the phone the reply ended before pi writes the message, so a fetch can land
+ * before the message is there, and a fetch mid-reply never has it. An end that names its entry
+ * holds them apart instead (see chat.js's replyEndedAt).
  * @param {LiveSnapshot | undefined} live @param {boolean} ended @param {Message[]} messages
  * @returns {LiveSnapshot | undefined}
  */

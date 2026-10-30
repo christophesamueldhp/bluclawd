@@ -6,7 +6,7 @@
  * updates arrive.
  */
 import { api, clearToken, getToken, pairLink, setToken, Unauthorized } from "./api.js";
-import { addPending, applyLatest, applyOlder, checkPending, forget, listed, openChat } from "./chat.js";
+import { addPending, applyLatest, applyOlder, checkPending, forget, listed, openChat, replyEndedAt } from "./chat.js";
 import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS } from "./icons.js";
@@ -589,11 +589,13 @@ function connect() {
 	});
 	current.addEventListener("live", (/** @type {MessageEvent} */ event) => {
 		alive();
-		const { sessionId, live } = JSON.parse(event.data);
+		const { sessionId, live, entryId } = JSON.parse(event.data);
 		const chat = state.chat;
 		if (!chat || sessionId !== chat.id) return;
 		if (!live) {
-			replyEnded();
+			// An older pane's end names no entry.
+			if (entryId) replyEndedAt(chat, entryId);
+			else replyEnded();
 			void loadMessages();
 			return;
 		}
@@ -816,7 +818,10 @@ function fullOutputHtml(result, full) {
 function logParts(session) {
 	const calls = new Set(state.chat.messages.flatMap((m) => (m.tools ?? []).map((t) => t.id)));
 	const running = new Set((state.chat.live?.tools ?? []).filter((t) => t.running).map((t) => t.id));
-	const live = state.chat.live ? liveHtml(state.chat.live, calls) : "";
+	// The replies that ended, held until the transcript has them, show as they did while streaming.
+	const live = [...state.chat.held.map((h) => ({ ...h, tools: [] })), ...(state.chat.live ? [state.chat.live] : [])]
+		.map((l) => liveHtml(l, calls))
+		.join("");
 	const pending = pendingHtml();
 	// The reply in progress replaces the working line once it shows something.
 	const streaming = live !== "" || running.size > 0;
