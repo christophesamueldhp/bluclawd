@@ -81,10 +81,11 @@ export function setRemoteControl(control: RemoteControl | undefined): void {
 
 /** Every row agent view lists: stored rows, then each pane's pi with its activity. */
 export function listSummaries(supervisor: ServerSupervisor): InstanceSummary[] {
-	const stored = supervisor.listInstances().map((instance) => toInstanceSummary(instance));
+	// Panes first: one reaped here shows its stored row again.
 	const external = supervisor
 		.listExternalInstances()
 		.map(({ record, activity, settled }) => toInstanceSummary(record, activity, true, settled));
+	const stored = supervisor.listInstances().map((instance) => toInstanceSummary(instance));
 	return [...stored, ...external];
 }
 
@@ -176,14 +177,16 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 			};
 			if (request.instance.launch) remoteControl?.noteLaunch(request.instance.launch);
 			supervisor.registerExternal(record, request.instance.activity ?? "idle");
+			// The phone started it by its pane's name, and knows it by its row's id.
 			remoteControl?.registered(record.id);
+			const row = supervisor.rowIdOf(record.id);
 			const messages = supervisor.drainExternal(record.id);
 			return {
 				type: "register_result",
 				ok: true,
 				...(messages.length ? { messages } : {}),
-				...(remoteControl?.watched(record.id) ? { watched: true } : {}),
-				...(remoteControl && !remoteControl.hasReport(record.id) ? { wantReport: true } : {}),
+				...(remoteControl?.watched(row) ? { watched: true } : {}),
+				...(remoteControl && !remoteControl.hasReport(row) ? { wantReport: true } : {}),
 			};
 		}
 
@@ -205,9 +208,10 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 		}
 
 		case "unregister": {
-			supervisor.unregisterExternal(request.instanceId);
-			remoteControl?.live(request.instanceId, null);
-			remoteControl?.report(request.instanceId, undefined);
+			const row = supervisor.rowIdOf(request.instanceId);
+			supervisor.unregisterExternal(request.instanceId, request.reason);
+			remoteControl?.live(row, null);
+			remoteControl?.report(row, undefined);
 			return { type: "unregister_result", ok: true };
 		}
 
@@ -251,12 +255,12 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 		}
 
 		case "remote_live": {
-			remoteControl?.live(request.instanceId, request.live);
+			remoteControl?.live(supervisor.rowIdOf(request.instanceId), request.live);
 			return { type: "ack", ok: true };
 		}
 
 		case "remote_report": {
-			remoteControl?.report(request.instanceId, request.report);
+			remoteControl?.report(supervisor.rowIdOf(request.instanceId), request.report);
 			return { type: "ack", ok: true };
 		}
 

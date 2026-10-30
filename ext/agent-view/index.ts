@@ -404,7 +404,10 @@ const agentView: InlineExtension = {
 			const tick = async (): Promise<void> => {
 				let text = theme.fg("dim", "← for agents");
 				try {
-					const rows = collectRows(await client.list(), undefined).filter((r) => r.id !== registration?.id);
+					// Its own row: a resumed session's keeps the id it had in another pane.
+					const rows = collectRows(await client.list(), undefined).filter(
+						(r) => r.id !== registration?.id && !(pane && r.pane === pane),
+					);
 					const waiting = rows.filter((r) => r.state === "needs").length;
 					const done = new Set(rows.filter((r) => r.state === "done" || r.state === "failed").map((r) => r.id));
 					const fresh = finished ? [...done].filter((id) => !finished?.has(id)).length : 0;
@@ -616,7 +619,7 @@ const agentView: InlineExtension = {
 		pi.on("ui_prompt_end", track);
 		pi.on("session_shutdown", async (event, ctx) => {
 			const plan = shutdownPlan(event, ctx.sessionManager.getSessionFile());
-			const stopping = registration?.stop({ unregister: plan.unregister });
+			const stopping = registration?.stop({ unregister: plan.unregister, reason: event.reason });
 			if (plan.await) await stopping;
 			registration = undefined;
 			stopPill?.();

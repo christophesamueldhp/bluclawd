@@ -1,5 +1,5 @@
 import { getEventListeners } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -130,6 +130,46 @@ describe("instant delivery to a pane", () => {
 		await expect(waiting).resolves.toBe(false);
 		expect(getEventListeners(signal, "abort")).toHaveLength(0);
 		await client.unregister("pane-wait-signal");
+	});
+
+	it("lists a quit and resumed session as one row with one id, and delivers to its new pane", async () => {
+		const sessionFile = join(dir, "s.jsonl");
+		await writeFile(sessionFile, "");
+		const client = new OrchestratorClient();
+		const handled: PaneMessage[] = [];
+		const paneOn = (id: string) =>
+			new SelfRegistration(
+				client,
+				() => ({ cwd: dir, sessionFile, label: "fix tests", pane: id }),
+				(message) => handled.push(message),
+				id,
+			);
+		const rows = async () => (await client.list()).filter((i) => i.sessionFile === sessionFile);
+
+		const first = paneOn("pi-a");
+		first.start();
+		await waitFor(async () =>
+			expect(await rows()).toEqual([expect.objectContaining({ id: "pi-a", external: true })]),
+		);
+		await client.setMeta("pi-a", { pinned: true });
+
+		await first.stop({ unregister: true, reason: "quit" });
+		expect(await rows()).toEqual([expect.objectContaining({ id: "pi-a", status: "stopped", pinned: true })]);
+		// The hand-off helper's save, once pi has exited.
+		await client.save({ cwd: dir, label: "fix tests", sessionFile });
+		expect(await rows()).toEqual([expect.objectContaining({ id: "pi-a", status: "stopped", pinned: true })]);
+
+		const resumed = paneOn("pi-b");
+		resumed.start();
+		await waitFor(async () =>
+			expect(await rows()).toEqual([
+				expect.objectContaining({ id: "pi-a", external: true, pane: "pi-b", pinned: true }),
+			]),
+		);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		await client.send("pi-a", { type: "prompt", text: "hi" });
+		await waitFor(() => expect(handled).toEqual([{ type: "prompt", text: "hi" }]));
+		await resumed.stop();
 	});
 
 	it("does not loop on waits when two live registrations share a pane id", async () => {

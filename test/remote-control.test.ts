@@ -359,6 +359,30 @@ describe("remote control switch", () => {
 		controller.abort();
 	});
 
+	it("keeps a resumed pane's report under its session's row id, which the phone asks by", async () => {
+		control = new RemoteControl({
+			store: new RemoteStore(join(dir, "remote.json")),
+			listInstances: () => listSummaries(supervisor),
+			send: () => true,
+			deleteInstance: () => false,
+			renameInstance: () => false,
+			setPinned: () => false,
+			webDir: dir,
+		});
+		setRemoteControl(control);
+		const sessionFile = join(dir, "s.jsonl");
+		writeFileSync(sessionFile, "");
+		const register = (id: string) =>
+			handleIpcRequest(supervisor, { type: "register", instance: { id, cwd: "/p", sessionFile } });
+		await register("pi-a");
+		await handleIpcRequest(supervisor, { type: "unregister", instanceId: "pi-a", reason: "quit" });
+
+		expect(await register("pi-b")).toMatchObject({ wantReport: true });
+		await handleIpcRequest(supervisor, { type: "remote_report", instanceId: "pi-b", report: { models: [] } });
+		expect(control.hasReport("pi-a")).toBe(true);
+		expect(await register("pi-b")).not.toHaveProperty("wantReport");
+	});
+
 	it("drops the report of a pane that went away without unregistering, but not the sender's own", async () => {
 		const pane = (id: string): InstanceSummary => ({
 			id,
