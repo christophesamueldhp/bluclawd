@@ -1289,6 +1289,13 @@ describe("remote HTTP API", () => {
 			expect(text).toContain(JSON.stringify(snapshot));
 			late.abort();
 
+			// An end naming its entry clears the reply as a bare one does.
+			server.live("live", null, "e7");
+			await watcher.until(`data: ${JSON.stringify({ sessionId: "live", live: null, entryId: "e7" })}`);
+			const after = await open(token, "live");
+			expect((await after.collect(300)).text).not.toContain("event: live");
+			after.controller.abort();
+
 			watcher.controller.abort();
 			bystander.controller.abort();
 			await waitFor(() => server.watching().size === 0);

@@ -141,8 +141,8 @@ export class RemoteControl {
 		return this.server?.watching().has(sessionId) === true;
 	}
 
-	live(sessionId: string, live: LiveSnapshot | null): void {
-		this.server?.live(sessionId, live);
+	live(sessionId: string, live: LiveSnapshot | null, entryId?: string): void {
+		this.server?.live(sessionId, live, entryId);
 	}
 
 	/** A pane's latest report; undefined once it is gone. Each one is signalled, unchanged too: the
