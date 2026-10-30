@@ -562,7 +562,7 @@ function sessionOf(deps: RemoteDeps, encoded: string): PhoneSession | undefined 
 }
 
 /** A page of the session's transcript, back from `before`. */
-function serveMessages(url: URL, res: ServerResponse, session: PhoneSession): void {
+async function serveMessages(url: URL, res: ServerResponse, session: PhoneSession): Promise<void> {
 	const requested = Number.parseInt(url.searchParams.get("limit") ?? "", 10) || MESSAGES_DEFAULT;
 	const limit = Math.min(Math.max(requested, 1), MESSAGES_MAX);
 	const before = url.searchParams.get("before") ?? undefined;
