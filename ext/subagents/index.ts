@@ -105,6 +105,21 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		let catalog: AgentDefinitionCatalog | undefined;
 		let unpublishTasks: (() => void) | undefined;
 		let latestLoadout: ToolLoadout | undefined;
+		// Subagent calls in one message start executing together; a child waits for every launch in flight to be
+		// admitted, so each sibling is registered for messages before any of them takes a turn.
+		let launchesInFlight = 0;
+		let launchesSettled = Promise.resolve();
+		let settleLaunches = () => {};
+		const beginLaunch = () => {
+			if (launchesInFlight++ === 0) {
+				launchesSettled = new Promise((resolve) => {
+					settleLaunches = resolve;
+				});
+			}
+			return () => {
+				if (--launchesInFlight === 0) settleLaunches();
+			};
+		};
 
 		const messageBus = new SubagentMessageBus((record, senderScope) =>
 			appendSubagentMessageRecord(resolveAgentDir(), senderScope.parentSessionId, { ...record, at: Date.now() }),
@@ -346,6 +361,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					},
 				);
 				try {
+					await launchesSettled;
 					return await runSubagent({
 						...params,
 						agentDir: execCtx.agentDir,
@@ -720,10 +736,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 
-				const admitRes = await admission.launch(
-					{ toolCallId, parentTurnId: `turn_${activeTurnIndex}`, params, signal },
-					ctx,
-				);
+				const endLaunch = beginLaunch();
+				const admitRes = await admission
+					.launch({ toolCallId, parentTurnId: `turn_${activeTurnIndex}`, params, signal }, ctx)
+					.finally(endLaunch);
 				if (!admitRes.ok) {
 					return {
 						content: [{ type: "text", text: admitRes.error }],

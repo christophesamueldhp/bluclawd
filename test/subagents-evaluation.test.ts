@@ -6,8 +6,8 @@ import {
 	getSystemMessageText,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
-import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it } from "vitest";
+import { type ExtensionFactory, ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	createFixture,
 	EvaluationBudget,
@@ -231,8 +231,10 @@ async function runOrchestration(options: {
 	const elapsedMs = performance.now() - started;
 	const timedOut = options.script.timedOut();
 	if (timedOut) {
+		// The message log shows which message never arrived, which may not be the one the timed-out wait named.
+		const { messages } = readSessionSummary(agentDir, session.sessionId);
 		session.dispose();
-		throw timedOut;
+		throw new Error(`${timedOut.message}; messages so far: ${JSON.stringify(messages)}`, { cause: timedOut });
 	}
 	return { cwd, agentDir, session, elapsedMs };
 }
@@ -353,6 +355,61 @@ describe("Ticket #15 — Orchestrated acceptance scenarios on a shared fixture c
 			]);
 		} finally {
 			run.session.dispose();
+		}
+	});
+
+	it("delivers a child's first message to a sibling from the same orchestrator turn whose launch is still under way", async () => {
+		// Holds the first launch at model resolution, so its sibling is admitted first. Released once the
+		// sibling has messaged it, or once the sibling has been (rightly) kept from starting for a while.
+		let armed = false;
+		let held = false;
+		let release!: () => void;
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const create = ModelRuntime.create.bind(ModelRuntime);
+		const spy = vi.spyOn(ModelRuntime, "create").mockImplementation(async (options) => {
+			if (armed) {
+				armed = false;
+				held = true;
+				setTimeout(release, readinessMs / 10);
+				await released;
+			}
+			return create(options);
+		});
+		try {
+			const run = await runOrchestration({
+				files: OVERLAP_FILES,
+				script: scripted(
+					[
+						() => {
+							armed = true;
+							return fauxAssistantMessage([
+								spawn("owner", "Wait for asker's request."),
+								spawn("asker", "Ask owner."),
+							]);
+						},
+					],
+					{
+						owner: (_context, _step, until) => until("REQUEST-EARLY") ?? fauxAssistantMessage("owner done."),
+						asker: (_context, step) => {
+							if (step === 1) return fauxAssistantMessage([say("owner", "REQUEST-EARLY: are you there?")]);
+							release();
+							return fauxAssistantMessage("asker done.");
+						},
+					},
+				),
+			});
+			try {
+				expect(held).toBe(true);
+				expect(readSessionSummary(run.agentDir, run.session.sessionId).messages).toEqual([
+					{ from: "asker", to: "owner", status: "accepted" },
+				]);
+			} finally {
+				run.session.dispose();
+			}
+		} finally {
+			spy.mockRestore();
 		}
 	});
 });
