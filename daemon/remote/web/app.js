@@ -6,7 +6,7 @@
  * updates arrive.
  */
 import { api, clearToken, getToken, pairLink, setToken, Unauthorized } from "./api.js";
-import { addPending, applyLatest, applyOlder, checkPending, forget, listed, openChat } from "./chat.js";
+import { addPending, applyLatest, applyOlder, checkPending, forget, listed, openChat, settleOutcomes } from "./chat.js";
 import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS } from "./icons.js";
@@ -454,6 +454,7 @@ async function loadStatus() {
 	}
 	if (state.chat !== chat || request !== chat.statusRequest) return;
 	chat.report = report;
+	settleOutcomes(chat, report?.outcomes);
 	// A pane has them once it has reported.
 	if (report && !chat.commandsAsked) {
 		chat.commandsAsked = true;
@@ -911,16 +912,23 @@ function thinkingBlock(thinking, key) {
 	return `<details class="think" data-key="${esc(key)}"><summary>Thinking</summary><pre>${esc(thinking)}</pre></details>`;
 }
 
+/** Under a sent prompt: what its pane reported of it, if it reports outcomes. */
+const PENDING_LABELS = {
+	sent: "sent · waiting for the session",
+	taken: "taken",
+	queued: "queued · after the current turn",
+};
+
 /** Each sent prompt's images show large, from what was sent (see paintPending). */
 function pendingHtml() {
 	return state.chat.pending
-		.map(({ id, prompt, images }) => {
+		.map(({ id, prompt, images, outcome }) => {
 			const buttons = images.map(
 				(_, index) =>
 					`<button type="button" class="pic" data-pending="${id}" data-index="${index}" aria-label="Image ${index + 1}, full screen"><img alt="Image"></button>`,
 			);
 			const pictures = buttons.length ? `<div class="pictures">${buttons.join("")}</div>` : "";
-			return `<div class="u${pictures ? " pics" : ""}">${pictures}${esc(prompt)}</div><div class="queued">sent · waiting for the session</div>`;
+			return `<div class="u${pictures ? " pics" : ""}">${pictures}${esc(prompt)}</div><div class="queued">${PENDING_LABELS[outcome ?? "sent"]}</div>`;
 		})
 		.join("");
 }
@@ -2211,6 +2219,7 @@ async function send() {
 			chat.id,
 			value,
 			images.map(({ mimeType, data }) => ({ mimeType, data })),
+			entry.id,
 		);
 	} catch (error) {
 		forget(chat, entry);
