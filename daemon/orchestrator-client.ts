@@ -4,7 +4,15 @@ import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentActivity } from "./activity.ts";
-import type { InstanceSummary } from "./ipc/protocol.ts";
+import type {
+	InstanceSummary,
+	LiveSnapshot,
+	PaneDialog,
+	PaneLaunch,
+	PaneMessage,
+	PaneReport,
+	RemoteResponse,
+} from "./ipc/protocol.ts";
 import { daemonBuildId, getSocketPath } from "./paths.ts";
 
 export type { AgentActivity };
@@ -28,102 +36,8 @@ export interface RegisterInput {
 	launch?: PaneLaunch;
 }
 
-/** Mirror of daemon/ipc/protocol.ts PaneLaunch. */
-export interface PaneLaunch {
-	command: string[];
-}
-
-/** Mirror of daemon/ipc/protocol.ts PaneDialog. */
-export interface PaneDialog {
-	kind: string;
-	title?: string;
-}
-
-/** Mirror of daemon/ipc/protocol.ts PaneImage. */
-export interface PaneImage {
-	mimeType: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
-	data: string;
-}
-
-/** Mirror of daemon/ipc/protocol.ts PaneMessage. */
-export type PaneMessage =
-	| { type: "prompt"; text: string; images?: PaneImage[] }
-	| { type: "abort" }
-	| { type: "rename"; name: string }
-	| { type: "set_model"; provider: string; id: string }
-	| { type: "set_thinking"; level: string }
-	| { type: "set_trust"; trust: "always" | "ask" | "never" }
-	| { type: "command"; text: string }
-	| { type: "stop_task"; id: string };
-
-/** Mirror of daemon/ipc/protocol.ts LiveSnapshot. */
-export interface LiveSnapshot {
-	text: string;
-	thinking?: string;
-	tools: Array<{ id: string; name: string; summary: string; running: boolean }>;
-}
-
-/** Mirror of daemon/ipc/protocol.ts PaneReport. */
-export interface PaneReport {
-	model?: { provider: string; id: string; name?: string };
-	models: Array<{ provider: string; id: string; name?: string }>;
-	thinkingLevel?: string;
-	thinkingLevels?: string[];
-	trust?: "always" | "ask" | "never";
-	context?: { tokens: number | null; contextWindow: number; percent: number | null };
-	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
-	backgroundSubagentUsage?: {
-		runCount: number;
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		cost: number | null;
-	};
-	notice?: { text: string; at: number };
-	commands?: PaneCommand[];
-	tasks?: PaneTask[];
-	pistatusline?: { worker: string; config: string };
-}
-
-/** Mirror of daemon/ipc/protocol.ts PaneTask. */
-export interface PaneTask {
-	id: string;
-	kind: "shell" | "monitor" | "agent";
-	label: string;
-	startedAt: number;
-	foreground?: boolean;
-	outputFile?: string;
-	status?: string;
-	model?: string;
-}
-
-/** Mirror of daemon/ipc/protocol.ts PaneCommand. */
-export interface PaneCommand {
-	name: string;
-	description?: string;
-	source: "builtin" | "extension" | "prompt" | "skill";
-}
-
-/** Mirror of daemon/ipc/protocol.ts RemoteDeviceInfo. */
-export interface RemoteDeviceInfo {
-	id: string;
-	name: string;
-	createdAt: string;
-	lastUsedAt?: string;
-}
-
-/** Mirror of daemon/ipc/protocol.ts RemoteResponse, without the envelope. */
-export interface RemoteResult {
-	enabled: boolean;
-	port: number;
-	listening: boolean;
-	listenError?: string;
-	code?: string;
-	secret?: string;
-	expiresAt?: number;
-	devices: RemoteDeviceInfo[];
-}
+/** A RemoteResponse without its envelope. */
+export type RemoteResult = Omit<RemoteResponse, "type" | "ok" | "version" | "buildId">;
 
 export type RemoteAction =
 	| { action: "status"; launch?: PaneLaunch }
