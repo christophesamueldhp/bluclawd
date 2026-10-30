@@ -1865,17 +1865,17 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 		const cwd = makeTempDir("resume-race-cwd");
 		const agentDir = makeTempDir("resume-race-agent");
 		const INTEGRATION_TOKENS = 1_000_000;
-		let bothResumesAnswered!: () => void;
-		const answered = new Promise<void>((resolve) => {
-			bothResumesAnswered = resolve;
+		let bothResumeResultsEmitted!: () => void;
+		const resultsEmitted = new Promise<void>((resolve) => {
+			bothResumeResultsEmitted = resolve;
 		});
 		const metered = defineTool({
 			name: "metered",
 			label: "Metered",
-			description: "Reports integration usage once both resume messages are answered.",
+			description: "Reports integration usage once both resume results are emitted.",
 			parameters: Type.Object({}),
 			execute: async () => {
-				await answered;
+				await resultsEmitted;
 				return {
 					content: [{ type: "text", text: "metered" }],
 					details: undefined,
@@ -1897,9 +1897,15 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 			extraTools: [metered],
 		});
 		let messageResults = 0;
+		// Before its message result is emitted, the SDK folds the resumed generation's nested usage into it.
 		const off = session.subscribe((event) => {
-			if (event.type === "tool_execution_end" && event.toolName === "subagent_message" && ++messageResults === 2) {
-				bothResumesAnswered();
+			if (
+				event.type === "message_start" &&
+				event.message.role === "toolResult" &&
+				event.message.toolCallId.startsWith("resume_") &&
+				++messageResults === 2
+			) {
+				bothResumeResultsEmitted();
 			}
 		});
 		try {
@@ -1949,6 +1955,115 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 			);
 			expect(ledger.recordedRunIds).toEqual([`${runId}#1`]);
 			expect(ledger.usage.totalTokens).toBeGreaterThanOrEqual(INTEGRATION_TOKENS);
+		} finally {
+			off();
+			session.dispose();
+		}
+	});
+
+	it("counts a resumed generation's nested usage once when its message result waits for a long launch", async () => {
+		const cwd = makeTempDir("resume-batch-cwd");
+		const agentDir = makeTempDir("resume-batch-agent");
+		const INTEGRATION_TOKENS = 1_000_000;
+		let meteredEnded!: () => void;
+		const metered = new Promise<void>((resolve) => {
+			meteredEnded = resolve;
+		});
+		const meteredTool = defineTool({
+			name: "metered",
+			label: "Metered",
+			description: "Reports integration usage.",
+			parameters: Type.Object({}),
+			execute: async () => ({
+				content: [{ type: "text", text: "metered" }],
+				details: undefined,
+				usage: {
+					input: INTEGRATION_TOKENS,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: INTEGRATION_TOKENS,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			}),
+		});
+		const gate = defineTool({
+			name: "gate",
+			label: "Gate",
+			description: "Waits until the metered call has ended.",
+			parameters: Type.Object({}),
+			execute: async () => {
+				await metered;
+				return { content: [{ type: "text", text: "open" }], details: undefined };
+			},
+		});
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd,
+			agentDir,
+			batchWindowMs: 0,
+			extraTools: [meteredTool, gate],
+		});
+		// The SDK has recorded the nested usage by the time the call ends.
+		const off = session.subscribe((event) => {
+			if (event.type === "tool_execution_end" && event.toolName === "metered") meteredEnded();
+		});
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			let parentStep = 0;
+			const route = (context: TranscriptContext) => {
+				const text = JSON.stringify(context.messages);
+				if (isChildContext(context)) {
+					if (text.includes("Now meter.")) {
+						if (text.includes('"toolName":"metered"')) return fauxAssistantMessage("v2 done.");
+						return fauxAssistantMessage([fauxToolCall("metered", {}, { id: "m" })]);
+					}
+					if (text.includes("Wait for the gate.")) {
+						if (text.includes('"toolName":"gate"')) return fauxAssistantMessage("Long done.");
+						return fauxAssistantMessage([fauxToolCall("gate", {}, { id: "g" })]);
+					}
+					return fauxAssistantMessage("v1 done.");
+				}
+				parentStep++;
+				if (parentStep === 1) {
+					return fauxAssistantMessage([
+						fauxToolCall(
+							"subagent",
+							{ agent: "general-purpose", name: "backend", task: "Build v1." },
+							{ id: "first" },
+						),
+					]);
+				}
+				if (parentStep === 2) {
+					// The message result is emitted only once the long foreground launch in its batch finishes.
+					return fauxAssistantMessage([
+						fauxToolCall("subagent_message", { to: "backend", content: "Now meter." }, { id: "resume" }),
+						fauxToolCall(
+							"subagent",
+							{ agent: "general-purpose", name: "long", task: "Wait for the gate." },
+							{ id: "long" },
+						),
+					]);
+				}
+				return fauxAssistantMessage("Waiting.");
+			};
+			faux.setResponses(Array.from({ length: 16 }, () => route));
+			await session.prompt("Delegate, then resume beside a long launch.", { expandPromptTemplates: false });
+			const runId = (toolResultText(session, "first").result?.details as { runId: string }).runId;
+			expect(toolResultText(session, "resume").text).toContain("accepted: resuming");
+			expect(toolResultText(session, "long").text).toContain("Long done.");
+
+			await waitFor(
+				() =>
+					readPersistedRunRecord(agentDir, session.sessionId, runId)?.generation === 1 &&
+					readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "completed",
+			);
+			await session.waitForIdle();
+
+			const resumeResult = toolResultText(session, "resume").result as { usage?: { totalTokens: number } };
+			const attributed = resumeResult.usage?.totalTokens ?? 0;
+			const runTokens = readPersistedRunRecord(agentDir, session.sessionId, runId)?.usage.totalTokens ?? 0;
+			// Exactly one of the message result or the resumed generation carries the integration usage.
+			expect(Math.floor(attributed / INTEGRATION_TOKENS) + Math.floor(runTokens / INTEGRATION_TOKENS)).toBe(1);
 		} finally {
 			off();
 			session.dispose();
