@@ -48,8 +48,11 @@ export interface RunExecutionContext {
 	activeToolNames: readonly string[];
 	builtinExtensions: readonly string[];
 	childModel: ResolvedChildModel;
-	/** Set when the orchestrator resumes a completed run: its transcript and the message to continue with. */
-	resume?: { transcriptPath: string; prompt: string };
+	/**
+	 * Set when the orchestrator resumes a completed run: its transcript, the message to continue with, and the
+	 * message tool call the resumed child runs under.
+	 */
+	resume?: { transcriptPath: string; prompt: string; toolCallId: string };
 	projectTrusted: boolean;
 }
 
@@ -149,7 +152,12 @@ export interface RunAdmission {
 	 * Admits a completed run's next generation. `buildPrompt` is called only once every check has passed,
 	 * just before the run starts again.
 	 */
-	resume(run: Readonly<SubagentRunRecord>, buildPrompt: () => string, ctx: AdmissionContext): Promise<AdmissionResult>;
+	resume(
+		run: Readonly<SubagentRunRecord>,
+		toolCallId: string,
+		buildPrompt: () => string,
+		ctx: AdmissionContext,
+	): Promise<AdmissionResult>;
 }
 
 type ChildTools = Pick<RunExecutionContext, "parent" | "parentTools" | "activeToolNames" | "builtinExtensions">;
@@ -373,7 +381,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			return { ok: true, handle: admitRes.handle };
 		},
 
-		async resume(run, buildPrompt, ctx) {
+		async resume(run, toolCallId, buildPrompt, ctx) {
 			const label = formatRunLabel(run);
 			const invalidated: AdmissionResult = {
 				ok: false,
@@ -431,7 +439,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				...tools,
 				childModel,
 				projectTrusted: ctx.isProjectTrusted(),
-				resume: { transcriptPath: resumable.transcriptPath, prompt: buildPrompt() },
+				resume: { transcriptPath: resumable.transcriptPath, prompt: buildPrompt(), toolCallId },
 			});
 			if (!resumed.ok) return unavailable(resumed.error);
 			return { ok: true, handle: resumed.handle };

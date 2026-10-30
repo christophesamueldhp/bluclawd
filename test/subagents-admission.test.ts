@@ -142,7 +142,7 @@ async function setup(
 		overrides: Partial<AdmissionContext> = {},
 	) => {
 		const resumeCtx = { ...ctx, ...overrides };
-		return { result: admission.resume(run, buildPrompt, resumeCtx), ctx: resumeCtx };
+		return { result: admission.resume(run, "message", buildPrompt, resumeCtx), ctx: resumeCtx };
 	};
 	const storageDir = join(agentDir, "bluclawd", "subagents", sessionManager.getSessionId());
 	return {
@@ -403,7 +403,11 @@ describe("Run admission", () => {
 		expect(context.parentTools.map((tool) => tool.name)).toEqual(["probe", "fresh"]);
 		expect(context.definition.name).toBe("explorer");
 		expect(context.childModel.model.id).toBe("faux-alt");
-		expect(context.resume).toEqual({ transcriptPath: completed.transcriptPath, prompt: "Now add tests." });
+		expect(context.resume).toEqual({
+			transcriptPath: completed.transcriptPath,
+			prompt: "Now add tests.",
+			toolCallId: "message",
+		});
 	});
 
 	it("refuses to resume a run whose role is now denied, before taking a message number", async () => {

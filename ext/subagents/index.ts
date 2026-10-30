@@ -187,8 +187,13 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			activeParentSessionId: activeSessionId,
 		});
 
+		// A resumed generation runs under the message call that resumed it, not the first launch.
 		const runLaunchedBy = (toolCallId: string) =>
-			scheduler.listActiveRuns(activeSessionId()).find((run) => run.originToolCallId === toolCallId);
+			scheduler
+				.listActiveRuns(activeSessionId())
+				.find(
+					(run) => (scheduler.getContext(run.runId)?.resume?.toolCallId ?? run.originToolCallId) === toolCallId,
+				);
 
 		pi.on("message_start", async (event) => {
 			if (event.message.role !== "toolResult") return;
@@ -287,7 +292,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			description:
 				"Send a message to a subagent by name or run ID (sub_…). A running child gets it at its next safe point without a new turn. A completed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
 			parameters: SUBAGENT_MESSAGE_PARAMETERS,
-			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
+			execute: async (toolCallId, params, _signal, _onUpdate, toolCtx) => {
 				const ctx = toolCtx ?? parentScope.context();
 				const scope = parentScope.current();
 				if (!scope) {
@@ -299,7 +304,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				}
 				const to = params.to.trim();
 				const finished = findFinishedRun(to);
-				if (finished && ctx) return resumeRun(finished, params.content, scope, ctx);
+				if (finished && ctx) return resumeRun(finished, toolCallId, params.content, scope, ctx);
 				return formatMessageReceipt(
 					await messageBus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, params.content),
 				);
@@ -322,6 +327,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		const resumeRun = async (
 			run: Readonly<SubagentRunRecord>,
+			toolCallId: string,
 			content: string,
 			scope: ParentScope,
 			ctx: AdmissionContext,
@@ -329,6 +335,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			let receipt: SubagentMessageReceipt | undefined;
 			const resumed = await admission.resume(
 				run,
+				toolCallId,
 				() => {
 					receipt = messageBus.accept({ address: PARENT_MESSAGE_ADDRESS, scope }, run.runId, run.name);
 					return subagentMessagePayload({

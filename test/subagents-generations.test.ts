@@ -310,7 +310,11 @@ describe("A resume is the run's next generation", () => {
 
 		const resumed = generations.scheduler.resume(first.runId, {
 			...context,
-			resume: { transcriptPath: join(agentDir, "transcript.jsonl"), prompt: "Now add tests." },
+			resume: {
+				transcriptPath: join(agentDir, "transcript.jsonl"),
+				prompt: "Now add tests.",
+				toolCallId: "call_resume",
+			},
 		});
 		if (!resumed.ok) throw new Error(resumed.error);
 		void generations.deliver(resumed.handle);
