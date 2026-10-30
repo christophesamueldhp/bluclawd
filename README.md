@@ -49,7 +49,7 @@ scripts/        probe-extensions.ts — headless report of what each extension r
 test/           vitest suites, self-contained — no monorepo, no fixture files
 ```
 
-12 extensions, no runtime dependencies (pi's own packages are peers):
+13 extensions, no runtime dependencies (pi's own packages are peers):
 
 | Extension | Registers |
 |---|---|
@@ -63,6 +63,7 @@ test/           vitest suites, self-contained — no monorepo, no fixture files
 | `help` | `/help`, `/status`, `/context` |
 | `vibes` | spinner verbs |
 | `prompt-assist` | `/prompt-assist`; prompt suggestions and automatic session titles with a selectable Pi model; manual rename stays available |
+| `web` | `/web`; the `websearch` (Exa or OpenAI) and `webfetch` (Exa) tools |
 | `paste` | bluclawd's paste in the prompt and agent view's composer: a paste over 800 characters or 2 lines shows as `[Pasted text #N +L lines]`, a ctrl+v image as `[Image #N]` (sent as an image), and pasting the same thing again right after shows the text or the image's file |
 
 Prompt assistance defaults to **OpenCode Go / MiMo-V2.6-Flash**, independently of your coding model.
@@ -97,6 +98,19 @@ separate 80-character cutoff to the returned title. The title appears on the edi
 A completely empty session has no topic to name yet. Rename it at any time with pi's
 **`/name Your title`**, or **Ctrl+R** in agent view. Automatic naming never replaces a manually
 assigned name, including one assigned while generation is still running.
+
+**Web.** `websearch` sends a search to one of two search providers: **Exa** (ranked pages with
+highlights) or **OpenAI** (a short cited answer plus its sources), through the ChatGPT/Codex
+login pi already holds, whatever model you chat with. Store the Exa key like any other pi key:
+**`/login`** → *Sign in with an API key* → **Exa** saves it in `~/.pi/agent/auth.json`, where a
+`!command` value (e.g. `"!security find-generic-password -ws exa"`) keeps it in the Keychain
+instead; `EXA_API_KEY` is the fallback. The key stays inside pi, out of the shell commands it runs. Each OpenAI search spends
+Codex quota. `webfetch` reads up to 10 known URLs through Exa. **`/web`** opens a searchable
+picker for the provider and for the Codex model OpenAI searches run on; **`/web exa`**,
+**`/web openai`** and **`/web status`** work without it. The model can pick a provider per call;
+when one cannot answer (rate limit, outage, no credits, no login), the other one does, and the
+result says so. The choice is saved in `~/.pi/agent/bluclawd/web.json`. Why bluclawd ships its own
+web tools: [ADR-0004](docs/adr/0004-bluclawd-ships-its-own-web-tools.md).
 
 ## What it adds
 
@@ -452,9 +466,9 @@ arguments; `*` stays within a path segment and `**` crosses them; `Edit(...)`
 also covers write and `Read(...)` also covers grep, find and ls; `//path` is
 absolute, `~/path` is home, anything else is relative to the working directory;
 `WebFetch(domain:x.com)`, `WebSearch(...)`, `Subagent` or `Subagent(explorer)`, and MCP tools as `mcp__server`,
-`mcp__server__*`, `mcp__server__tool` or `Mcp(server:tool)` — bluclawd ships no
-web or MCP tools, so these apply to the `webfetch`/`websearch`/MCP tools another
-pi package registers; `dir/**` covers
+`mcp__server__*`, `mcp__server__tool` or `Mcp(server:tool)` — the web rules apply
+to bluclawd's own `websearch` and `webfetch` (each of a fetch's URLs is checked), and
+bluclawd ships no MCP tools, so those rules apply to another pi package's; `dir/**` covers
 `dir` itself too. A bash rule also matches the command behind wrappers (`sudo`,
 `timeout`, `nice`, `env`, `xargs`, `sh -c '…'`, `eval`, …), shell keywords,
 quoting (`'rm'`, `\rm`), `/bin/…`, `$(…)`, and any part of a `&&`/`;`/`|` chain.
