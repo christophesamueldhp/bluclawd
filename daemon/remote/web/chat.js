@@ -116,7 +116,7 @@ function userCount(messages, text) {
 
 /**
  * The latest page of the transcript. Older messages loaded above stay while it starts among them;
- * after the session moved (a /tree or /fork, here or on the Mac) it does not, and replaces them.
+ * after the session moved (a /tree, here or on the Mac) it does not, and replaces them.
  * @param {Chat} chat @param {{ messages: Message[], more: boolean }} page
  */
 export function applyLatest(chat, page) {
