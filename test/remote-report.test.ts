@@ -51,7 +51,6 @@ function fakes(
 		sessionManager: {
 			getSessionId: () => "report-session",
 			getSessionFile: (): string | undefined => "/s/report.jsonl",
-			getHeader: (): { parentSession?: string } | undefined => undefined,
 			getEntries: () => [
 				{ type: "message", message: { role: "user", content: "hi" } },
 				{ type: "message", message: { role: "assistant", usage: usage(100, 20, 1000, 200, 0.5) } },
@@ -667,6 +666,42 @@ describe("/remote-control", () => {
 		pane.restore();
 	});
 
+	it("reports a phone's prompt with an image taken from pi's input event, or from pi starting it once queued", async () => {
+		const pane = await phonePane();
+		const image = { type: "image", mimeType: "image/png", data: "iVBORw0KGgo=" };
+		const content = [{ type: "text", text: "hi\n\n[Image #1]" }, image];
+		pane.message({
+			type: "prompt",
+			text: "hi",
+			id: "p-1",
+			images: [{ mimeType: "image/png", data: "iVBORw0KGgo=" }],
+		});
+		expect(pane.pi.sendUserMessage).toHaveBeenLastCalledWith(content, { deliverAs: "followUp" });
+		pane.on("input", { type: "input", text: "hi\n\n[Image #1]", source: "extension" });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "taken" }]));
+		pane.message({
+			type: "prompt",
+			text: "hi",
+			id: "p-2",
+			images: [{ mimeType: "image/png", data: "iVBORw0KGgo=" }],
+		});
+		pane.on("input", { type: "input", text: "hi\n\n[Image #1]", source: "extension", streamingBehavior: "followUp" });
+		await waitFor(() =>
+			expect(pane.outcomes()).toEqual([
+				{ id: "p-1", outcome: "taken" },
+				{ id: "p-2", outcome: "queued" },
+			]),
+		);
+		pane.on("message_start", { message: { role: "user", content } });
+		await waitFor(() =>
+			expect(pane.outcomes()).toEqual([
+				{ id: "p-1", outcome: "taken" },
+				{ id: "p-2", outcome: "taken" },
+			]),
+		);
+		pane.restore();
+	});
+
 	it("refuses a phone's prompt or command while pi compacts at the user's request, and not once it is done", async () => {
 		const pane = await phonePane();
 		// pi's own automatic compaction queues a prompt: refused only when pi would throw on it.
@@ -696,20 +731,22 @@ describe("/remote-control", () => {
 		pane.restore();
 	});
 
-	it("refuses a phone's prompt or command sent to another session than the pane's, and not to its fork's parent", async () => {
+	it("refuses a phone's prompt or command sent to another session than the pane's, its fork's parent too", async () => {
 		const pane = await phonePane({ parentSession: "/s/parent.jsonl" });
 		pane.message({ type: "prompt", text: "hi", id: "p-1", sessionFile: "/s/other.jsonl" });
 		pane.message({ type: "command", text: "/model", id: "c-1", sessionFile: "/s/other.jsonl" });
+		// A fork has a row of its own: what was sent to the session it was forked from is not its.
+		pane.message({ type: "prompt", text: "to the parent", id: "p-2", sessionFile: "/s/parent.jsonl" });
 		await waitFor(() =>
 			expect(pane.outcomes()).toEqual([
 				{ id: "p-1", outcome: "refused", reason: "session_changed" },
 				{ id: "c-1", outcome: "refused", reason: "session_changed" },
+				{ id: "p-2", outcome: "refused", reason: "session_changed" },
 			]),
 		);
 		expect(pane.pi.sendUserMessage).not.toHaveBeenCalled();
-		pane.message({ type: "prompt", text: "to the parent", id: "p-2", sessionFile: "/s/parent.jsonl" });
 		pane.message({ type: "prompt", text: "to this one", id: "p-3", sessionFile: "/s/a.jsonl" });
-		expect(pane.pi.sendUserMessage).toHaveBeenCalledTimes(2);
+		expect(pane.pi.sendUserMessage).toHaveBeenCalledTimes(1);
 		pane.restore();
 	});
 

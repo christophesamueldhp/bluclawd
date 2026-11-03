@@ -12,6 +12,7 @@ import { DELIVERY_KEEP_MS, PromptDelivery } from "../daemon/remote/delivery.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { ServerSupervisor } from "../daemon/supervisor.ts";
 import type { Tmux } from "../daemon/tmux.ts";
+import { shutdownPlan } from "../ext/agent-view/index.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
 import { refusal } from "../ext/remote/outcomes.ts";
 import { testRegistry } from "./helpers/registry.ts";
@@ -59,7 +60,7 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
 		control = remoteControl();
 		setRemoteControl(control);
-		supervisor.onDropped = (rowId, inbox) => control.lost(rowId, inbox);
+		supervisor.onDropped = (rowId, inbox, reason) => control.dropped(rowId, inbox, reason);
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });
 		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
 		base = `http://127.0.0.1:${on.port}`;
@@ -86,7 +87,7 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 	 * A pane that reports outcomes, as a current one does: it refuses as a pane does (refusal()), else
 	 * its first prompt starts a turn, and pi queues the ones after it behind that turn.
 	 * `reports: false`: a pane from an older build. `refuse`: what its pi state makes it refuse.
-	 * `sessionFile`, `parentSession`: its session's, its own file by default.
+	 * `sessionFile`: its session's, its own file by default.
 	 */
 	async function fakePane(
 		id: string,
@@ -94,7 +95,6 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 			reports?: boolean;
 			refuse?: RefusedReason;
 			sessionFile?: string;
-			parentSession?: string;
 			client?: OrchestratorClient;
 		} = {},
 	) {
@@ -111,9 +111,7 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 			(message) => {
 				received.push(message);
 				if (!reports || (message.type !== "prompt" && message.type !== "command") || !message.id) return;
-				const reason =
-					refusal(message, { compacting: false, sessionFile, parentSession: options.parentSession }) ??
-					options.refuse;
+				const reason = refusal(message, { compacting: false, sessionFile }) ?? options.refuse;
 				if (reason) outcomes.push({ id: message.id, outcome: "refused", reason });
 				else outcomes.push({ id: message.id, outcome: turn ? "queued" : "taken" });
 				turn = true;
@@ -251,29 +249,36 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		},
 	);
 
+	const taken: PromptOutcome = { id: "p-move", outcome: "taken" };
+	const changed: PromptOutcome = { id: "p-move", outcome: "refused", reason: "session_changed" };
+	const gone: PromptOutcome = { id: "p-move", outcome: "lost", reason: "pane_gone" };
 	it.each([
-		["a reload or /resume of the same session", "same", { id: "p-move", outcome: "taken" }],
-		["a fork of it", "fork", { id: "p-move", outcome: "taken" }],
-		["another session", "other", { id: "p-move", outcome: "refused", reason: "session_changed" }],
+		["a reload", { reason: "reload" }, "same", taken],
+		["a /resume of the same file", { reason: "resume", target: "same" }, "same", taken],
+		["a new session", { reason: "new" }, "other", changed],
+		["a /resume of another file", { reason: "resume", target: "other" }, "other", changed],
+		// A fork has a row of its own: what was sent to the session it was forked from is not its.
+		["a fork", { reason: "fork" }, "other", changed],
+		["a quit", { reason: "quit" }, undefined, gone],
 	] as const)(
-		"goes, once its pane stopped while delivering it, to the pane's next session: %s",
-		async (_, next, outcome) => {
+		"ends, once its session ended while its pane delivered it, as the pane's session_shutdown makes it: %s",
+		async (_, end, next, outcome) => {
 			const file = join(dir, "pane-move.jsonl");
+			const other = join(dir, "other.jsonl");
 			const client = new HoldingClient();
 			const { registration } = await fakePane("pane-move", { client, sessionFile: file });
 			const phone = await watch("pane-move");
 			client.hold();
 			expect(await prompt("pane-move", { text: "hi", id: "p-move" })).toBe(202);
 			await waitFor(() => expect(client.holding).toBe(true));
-			// The session ends with the prompt on its way to it: the pane's next session registers as the same pane.
-			const stopping = registration.stop({ unregister: false });
+			// The session ends with the prompt on its way to it.
+			const targetSessionFile = "target" in end ? (end.target === "same" ? file : other) : undefined;
+			const plan = shutdownPlan({ reason: end.reason, targetSessionFile }, file);
+			const stopping = registration.stop({ unregister: plan.unregister, reason: end.reason });
 			client.release();
 			await stopping;
-			const other = join(dir, "other.jsonl");
-			await fakePane("pane-move", {
-				sessionFile: next === "same" ? file : other,
-				parentSession: next === "fork" ? file : undefined,
-			});
+			// The pane's next session registers as the same pane.
+			if (next) await fakePane("pane-move", { sessionFile: next === "same" ? file : other });
 			await phone.until(outcome);
 		},
 	);
@@ -307,6 +312,30 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		// No heartbeat for longer than the registry waits: the stream's next look at the list reaps it.
 		clock += 60_000;
 		await phone.until({ id: "p-reaped", outcome: "lost", reason: "pane_gone" });
+	});
+
+	it.each([
+		["unregisters", (registration: SelfRegistration) => registration.stop({ reason: "quit" })],
+		[
+			"is reaped",
+			async (registration: SelfRegistration) => {
+				// It beats no more, as a pi that crashed: the stream's next look at the list reaps it.
+				await registration.stop({ unregister: false });
+				clock += 60_000;
+			},
+		],
+	] as const)("is lost when its pane %s with it queued in pi", async (_, ends) => {
+		const { registration } = await fakePane("pane-queued");
+		const phone = await watch("pane-queued");
+		expect(await prompt("pane-queued", { text: "first", id: "p-first" })).toBe(202);
+		expect(await prompt("pane-queued", { text: "second", id: "p-second" })).toBe(202);
+		await phone.until({ id: "p-second", outcome: "queued" });
+		await ends(registration);
+		await phone.until({ id: "p-second", outcome: "lost", reason: "pane_gone" });
+		expect(await (await watch("pane-queued")).replayed()).toEqual([
+			{ id: "p-first", outcome: "taken" },
+			{ id: "p-second", outcome: "lost", reason: "pane_gone" },
+		]);
 	});
 
 	it("shows only the outcomes of prompts the daemon delivered to that pane", async () => {

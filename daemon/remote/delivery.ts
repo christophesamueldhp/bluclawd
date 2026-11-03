@@ -1,10 +1,11 @@
 /**
  * Prompt delivery: the one record of what became of each prompt or command a phone sent with an id,
  * from the accepted request to its outcome. One is in its pane's inbox until a heartbeat takes it
- * (delivered), then settles with the outcome its pane reports, or is lost when its pane goes first.
+ * (delivered), then settles with the outcome its pane reports, or is lost when its pane goes first
+ * (refused, when the pane left its session for another).
  * Only in memory: a restarted daemon knows none of them.
  */
-import type { PaneMessage, PromptOutcome } from "../ipc/protocol.ts";
+import { type EndReason, endedForAnother, type PaneMessage, type PromptOutcome } from "../ipc/protocol.ts";
 
 /** How long a prompt is kept after its last change, so a phone that reconnects still reads it. */
 export const DELIVERY_KEEP_MS = 10 * 60_000;
@@ -51,18 +52,18 @@ export class PromptDelivery {
 	}
 
 	/** The pane listed as `sessionId` went, with `inbox` still queued for it: those never reach pi,
-	 *  and it can no longer report on what it was given. */
-	lost(sessionId: string, inbox: PaneMessage[], now: number = Date.now()): void {
+	 *  and it can no longer report on what it was given. One pi queued dies with it. `reason`: why its
+	 *  session ended, when it said; one it left for another session refuses them, as that session's
+	 *  pane would. */
+	dropped(sessionId: string, inbox: PaneMessage[], reason?: EndReason, now: number = Date.now()): void {
+		const changed = endedForAnother(reason);
 		const ids = new Set(inbox.map(phoneId));
 		for (const [id, delivery] of this.prompts) {
-			if (delivery.outcome !== "sent" || !(ids.has(id) || delivery.sessionId === sessionId)) continue;
-			this.prompts.set(id, {
-				id,
-				outcome: "lost",
-				reason: "pane_gone",
-				sessionId: delivery.sessionId,
-				changedAt: now,
-			});
+			if (settled(delivery) || !(ids.has(id) || delivery.sessionId === sessionId)) continue;
+			const outcome: PromptOutcome = changed
+				? { id, outcome: "refused", reason: "session_changed" }
+				: { id, outcome: "lost", reason: "pane_gone" };
+			this.prompts.set(id, { ...outcome, sessionId: delivery.sessionId, changedAt: now });
 		}
 	}
 
