@@ -360,9 +360,8 @@ function factory(pi: ExtensionAPI): void {
 	});
 	pi.on("session_shutdown", async (event, ctx) => {
 		// Its queue goes with the session, and every queued phone prompt with it, seen there or not: one
-		// whose input handlers still run is run by pi 1.0.4 in the disposed session (dispose sets no guard,
-		// agent-session.js:988-1007; prompt() goes on to _runAgentPrompt, :1541-1620), which no
-		// transcript shows and no pane hears of. pi awaits this, so the report lands before the pane stops.
+		// whose input handlers still run, pi 1.0.4 runs in the disposed session, which no transcript shows
+		// and no pane hears of. pi awaits this, so the report lands before the pane stops.
 		// Not at quit, which agent view does not hold up either: the daemon finds the pane gone.
 		if (event.reason !== "quit") {
 			if (outcomes.dequeued(Number.POSITIVE_INFINITY)) report(ctx);
