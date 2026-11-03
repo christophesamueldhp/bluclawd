@@ -287,6 +287,16 @@ describe("prompts sent to a pane that reports their outcomes", () => {
 		expect(settleOutcomes(chat, [{ id: refused.id, outcome: "refused", reason: "compacting" }])).toEqual([]);
 	});
 
+	it("come back once queued when pi dropped them from its queue", () => {
+		const chat = reporting();
+		const entry = addPending(chat, "go", [], 100);
+		expect(settleOutcomes(chat, [{ id: entry.id, outcome: "queued" }])).toEqual([]);
+		expect(settleOutcomes(chat, [{ id: entry.id, outcome: "lost", reason: "dequeued" }])).toEqual([
+			{ entry, reason: "dequeued" },
+		]);
+		expect(chat.pending).toEqual([]);
+	});
+
 	it("are done once taken when they are a slash command or a ! line, which the transcript may never show", () => {
 		const chat = reporting();
 		const command = addPending(chat, "/compact", [], 100);
