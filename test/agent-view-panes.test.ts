@@ -525,14 +525,14 @@ describe("paneArgs", () => {
 });
 
 describe("promptOptions", () => {
-	it("runs a phone's slash command as typed on the Mac, and queues a prompt behind a turn", () => {
-		expect(promptOptions({ text: "/skill:review the diff" }, true)).toEqual({ expandPromptTemplates: true });
-		expect(promptOptions({ text: "/fix" }, false)).toEqual({ deliverAs: "followUp", expandPromptTemplates: true });
-		expect(promptOptions({ text: "fix /tmp/a" }, true)).toEqual({});
-		expect(promptOptions({ text: " /fix" }, false)).toEqual({ deliverAs: "followUp" });
+	it("runs a phone's slash command as typed on the Mac, and always queues a prompt behind a turn pi may have started", () => {
+		const queued = { deliverAs: "followUp" };
+		expect(promptOptions({ text: "/skill:review the diff" })).toEqual({ ...queued, expandPromptTemplates: true });
+		expect(promptOptions({ text: "fix /tmp/a" })).toEqual(queued);
+		expect(promptOptions({ text: " /fix" })).toEqual(queued);
 		// pi would run an extension command with its text alone: the images go as a plain message.
-		expect(promptOptions({ text: "/fix", images: [{}] }, true)).toEqual({});
-		expect(promptOptions({ text: "/fix", images: [] }, true)).toEqual({ expandPromptTemplates: true });
+		expect(promptOptions({ text: "/fix", images: [{}] })).toEqual(queued);
+		expect(promptOptions({ text: "/fix", images: [] })).toEqual({ ...queued, expandPromptTemplates: true });
 	});
 });
 

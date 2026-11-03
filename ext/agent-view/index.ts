@@ -8,7 +8,6 @@
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename } from "node:path";
-import { contentText } from "@earendil-works/pi-ai";
 import type { ExtensionCommandContext, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SessionManager, SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import {
@@ -130,14 +129,16 @@ export function leaveViewAction(state: {
 /**
  * How another window's prompt reaches this pi: queued behind a turn in progress, and a slash
  * command run as if typed here (an extension command, a skill, a prompt template). Not with
- * images: pi runs an extension command with its text alone, and the images would be lost.
+ * images: pi runs an extension command with its text alone, and the images would be lost. Always
+ * with a delivery mode, which pi uses only while it streams: a turn may start after the pane looked
+ * and before pi does, and pi throws on a prompt with none then.
  */
-export function promptOptions(
-	message: { text: string; images?: unknown[] },
-	idle: boolean,
-): { deliverAs?: "followUp"; expandPromptTemplates?: true } {
+export function promptOptions(message: { text: string; images?: unknown[] }): {
+	deliverAs: "followUp";
+	expandPromptTemplates?: true;
+} {
 	return {
-		...(idle ? {} : { deliverAs: "followUp" as const }),
+		deliverAs: "followUp",
 		...(!message.images?.length && message.text.startsWith("/") ? { expandPromptTemplates: true as const } : {}),
 	};
 }
@@ -381,13 +382,10 @@ const agentView: InlineExtension = {
 
 		/** Pane mode: what another window's agent view asks of this session. */
 		const onPaneMessage = (ctx: ExtensionContext, message: PaneMessage): void => {
-			if (message.type === "prompt") {
-				const content = promptContent(message);
-				// Remote control (ext/remote) reports its outcome by the phone's id, knowing it by this
-				// text: joined as pi joins it for its input event.
-				if (message.id) pi.events.emit("bluclawd:prompt-sent", { id: message.id, text: contentText(content) });
-				pi.sendUserMessage(content, promptOptions(message, ctx.isIdle()));
-			} else if (message.type === "abort") ctx.abort();
+			// A phone's prompt, with an id, is remote control's (ext/remote): it reports what became of it.
+			if (message.type === "prompt" && !message.id)
+				pi.sendUserMessage(promptContent(message), promptOptions(message));
+			else if (message.type === "abort") ctx.abort();
 			else if (message.type === "rename") pi.setSessionName(message.name);
 			// The rest are remote control's (ext/remote).
 			else pi.events.emit("bluclawd:pane-message", message);

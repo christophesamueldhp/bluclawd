@@ -165,9 +165,10 @@ export class RemoteControl {
 		this.server?.status(sessionId);
 	}
 
-	/** A pane's heartbeat took these messages from its inbox. */
-	delivered(sessionId: string, messages: PaneMessage[]): void {
-		this.delivery.delivered(sessionId, messages);
+	/** The pane listed as `sessionId` went with `inbox` still queued for it. */
+	lost(sessionId: string, inbox: PaneMessage[]): void {
+		this.delivery.lost(sessionId, inbox);
+		this.server?.status(sessionId);
 	}
 
 	hasReport(sessionId: string): boolean {

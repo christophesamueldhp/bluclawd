@@ -150,18 +150,23 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 	switch (action.type) {
 		case "prompt": {
 			const { text, images, id } = action;
+			// Its outcome comes back by its id; the pane refuses it once on another session.
+			const sent = id ? { id, ...(session.sessionFile ? { sessionFile: session.sessionFile } : {}) } : {};
 			// A slash command, as pi reads one: typed into the pane's prompt (a phone's images never are).
 			const command = images ? undefined : commandName(text);
 			const shell = !images && shellLine(text);
 			if (command === undefined && !shell)
-				return toPane(session, { type: "prompt", text, ...(images ? { images } : {}), ...(id ? { id } : {}) });
+				return toPane(session, { type: "prompt", text, ...(images ? { images } : {}), ...sent });
 			// Only one the pane lists for a phone: a pane that lists none (an older one) runs none.
 			const listed = report?.commands?.find((c) => c.name === command);
 			if (!shell && (!listed || !phoneMayRun(listed))) return { error: "command_refused" };
-			// Only into an idle, empty prompt, which the pane checks again: its heartbeat may be 3s old.
-			if (session.busy) return { error: "session_busy" };
-			if (session.draft) return { error: "unsent_draft" };
-			return toPane(session, { type: "command", text });
+			// Only into an idle, empty prompt. A pane that reports outcomes checks it, with no heartbeat's
+			// lag, and reports it refused; for an older one, checked here too.
+			if (!report?.outcomes) {
+				if (session.busy) return { error: "session_busy" };
+				if (session.draft) return { error: "unsent_draft" };
+			}
+			return toPane(session, { type: "command", text, ...sent });
 		}
 		case "abort":
 			return toPane(session, { type: "abort" });
@@ -250,7 +255,7 @@ function statusView(report: PaneReport, outcomes: PromptOutcome[]): StatusView {
 			cost: background.cost,
 		},
 		notice: notice && { text: notice.text, at: notice.at },
-		outcomes: report.outcomes && outcomes.map(({ id, outcome }) => ({ id, outcome })),
+		outcomes: report.outcomes && outcomes.map((outcome) => ({ ...outcome })),
 		tasks: report.tasks?.map((task) => ({
 			id: task.id,
 			kind: task.kind,

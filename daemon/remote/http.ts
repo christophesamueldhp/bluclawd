@@ -654,6 +654,7 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 			]),
 		session: (id) => phoneSession(deps, id),
 		listed: () => new Set(deps.listInstances().map((i) => i.id)),
+		outcomes: (id) => deps.outcomes?.(id) ?? [],
 	});
 	const server: Server = createServer((req, res) => {
 		handle(deps, events, req, res).catch((error: unknown) => {

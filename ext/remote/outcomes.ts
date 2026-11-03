@@ -2,10 +2,25 @@
  * What became of the phone's prompts in this pane, by the phone's ids, for the pane's report. pi's
  * `input` event names no prompt, so a phone prompt is known by its exact text, from an extension,
  * oldest first: queued when pi delivers it as a follow-up, else taken. A queued one is taken when pi
- * starts it, which pi itself tells by its text.
+ * starts it, which pi itself tells by its text. One the pane refuses is reported refused, with why.
  */
 import { contentText } from "@earendil-works/pi-ai";
-import type { PromptOutcome } from "../../daemon/ipc/protocol.ts";
+import type { PromptOutcome, RefusedReason } from "../../daemon/ipc/protocol.ts";
+
+/**
+ * Why a pane refuses a phone's prompt or command before pi sees it, if it does: it was sent to
+ * another session than the pane's (a reload or `/resume` of the same file, or a fork of it, is
+ * that session still), or pi is compacting at the user's request, when pi throws on a prompt.
+ */
+export function refusal(
+	message: { sessionFile?: string },
+	session: { compacting: boolean; sessionFile?: string; parentSession?: string },
+): RefusedReason | undefined {
+	const sent = message.sessionFile;
+	if (sent && sent !== session.sessionFile && sent !== session.parentSession) return "session_changed";
+	if (session.compacting) return "compacting";
+	return undefined;
+}
 
 /** How many each report carries: one that went with a dropped report comes with the next. */
 const KEPT = 20;
@@ -36,8 +51,8 @@ export class PromptOutcomes {
 		if (event.streamingBehavior === "followUp") {
 			this.queued.push(prompt);
 			this.queued.splice(0, this.queued.length - KEPT);
-			this.settle(prompt.id, "queued");
-		} else this.settle(prompt.id, "taken");
+			this.settle({ id: prompt.id, outcome: "queued" });
+		} else this.settle({ id: prompt.id, outcome: "taken" });
 		return true;
 	}
 
@@ -46,18 +61,28 @@ export class PromptOutcomes {
 		if (message.role !== "user") return false;
 		const prompt = take(this.queued, contentText(message.content as Parameters<typeof contentText>[0]));
 		if (!prompt) return false;
-		this.settle(prompt.id, "taken");
+		this.settle({ id: prompt.id, outcome: "taken" });
 		return true;
 	}
 
-	list(): PromptOutcome[] {
-		return this.settled.map(({ id, outcome }) => ({ id, outcome }));
+	/** The pane did not hand it to pi, for `reason`. */
+	refused(id: string, reason: RefusedReason): void {
+		this.settle({ id, outcome: "refused", reason });
 	}
 
-	private settle(id: string, outcome: PromptOutcome["outcome"]): void {
-		const known = this.settled.find((o) => o.id === id);
-		if (known) known.outcome = outcome;
-		else this.settled.push({ id, outcome });
+	/** A slash command, which pi runs with no input event: taken once Enter is pressed for it. */
+	taken(id: string): void {
+		this.settle({ id, outcome: "taken" });
+	}
+
+	list(): PromptOutcome[] {
+		return this.settled.map((outcome) => ({ ...outcome }));
+	}
+
+	private settle(outcome: PromptOutcome): void {
+		const at = this.settled.findIndex((o) => o.id === outcome.id);
+		if (at >= 0) this.settled[at] = outcome;
+		else this.settled.push(outcome);
 		this.settled.splice(0, this.settled.length - KEPT);
 	}
 }

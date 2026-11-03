@@ -69,6 +69,8 @@ export class ServerSupervisor {
 	/** The pin and order of stored rows deleted before a pane resuming them registered, by session
 	 *  file, for that pane's row. */
 	private readonly resumedMeta = new Map<string, Pick<InstanceRecord, "pinned" | "sortOrder">>();
+	/** A pane went, reaped or unregistered, listed as `rowId` and with `inbox` still queued for it. */
+	onDropped: ((rowId: string, inbox: PaneMessage[]) => void) | undefined;
 
 	constructor(deps: RegistryDeps) {
 		this.deps = deps;
@@ -136,8 +138,14 @@ export class ServerSupervisor {
 			return;
 		}
 		if (entry && file) this.quitMeta.set(file, { record: entry.record, rowId: entry.rowId });
+		if (entry) this.drop(id, entry);
+	}
+
+	/** A pane's registration ends, and with it its inbox. */
+	private drop(id: string, entry: ExternalInstance): void {
 		this.externalInstances.delete(id);
 		this.settleWait(id, "none");
+		this.onDropped?.(entry.rowId, entry.inbox);
 	}
 
 	/** Queue a message for a self-registered session, by its pane's id or its row's; false when no
@@ -199,8 +207,7 @@ export class ServerSupervisor {
 		const out: Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> = [];
 		for (const [id, entry] of this.externalInstances) {
 			if (now - entry.lastSeenAt > EXTERNAL_TTL_MS) {
-				this.externalInstances.delete(id);
-				this.settleWait(id, "none");
+				this.drop(id, entry);
 				continue;
 			}
 			out.push({ record: { ...entry.record, id: entry.rowId }, activity: entry.activity, settled: entry.settled });
@@ -271,10 +278,7 @@ export class ServerSupervisor {
 		const ended = pane?.[1] ?? unregistered;
 		// Not an unregistered pane's id that another live pane is listed as by now.
 		const rowId = pane || (ended && !this.paneOf(ended.rowId)) ? ended?.rowId : undefined;
-		if (pane) {
-			this.externalInstances.delete(pane[0]);
-			this.settleWait(pane[0], "none");
-		}
+		if (pane) this.drop(pane[0], pane[1]);
 		const record: InstanceRecord = {
 			...previous,
 			...(ended && paneMeta(ended.record)),
@@ -301,8 +305,7 @@ export class ServerSupervisor {
 		// with the stored row it went on as.
 		const pane = this.paneOf(instanceId);
 		if (pane) {
-			this.externalInstances.delete(pane[0]);
-			this.settleWait(pane[0], "none");
+			this.drop(pane[0], pane[1]);
 			if (getInstance(this.deps.dir, pane[1].rowId)) removeInstance(this.deps.dir, pane[1].rowId);
 			return true;
 		}

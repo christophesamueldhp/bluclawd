@@ -7,6 +7,8 @@
  * model, usage, trust mode and slash commands, and runs the phone's model, thinking level and trust
  * mode switches, slash commands and task stops (report.ts).
  */
+
+import { contentText } from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -14,17 +16,26 @@ import type {
 	InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
-import type { PaneMessage, PaneReport } from "../../daemon/ipc/protocol.ts";
+import type { PaneMessage, PaneReport, RefusedReason } from "../../daemon/ipc/protocol.ts";
 import { currentDaemonBuildId, OrchestratorClient, type RemoteResult } from "../../daemon/orchestrator-client.ts";
 import { piCommand, Tmux } from "../../daemon/tmux.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
 import { remotePort } from "../_shared/settings.ts";
+import { promptContent, promptOptions } from "../agent-view/index.ts";
 import { TRUST_CHANGED } from "../permissions/index.ts";
 import { autostartDeps, autostartOn, autostartStatus, refreshAutostart, toggleAutostart } from "./autostart.ts";
 import { LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
-import { PromptOutcomes } from "./outcomes.ts";
-import { applyPaneMessage, buildReport, paneTasks, pistatuslinePaths, submitCommand, watchTasks } from "./report.ts";
+import { PromptOutcomes, refusal } from "./outcomes.ts";
+import {
+	applyPaneMessage,
+	buildReport,
+	commandNotice,
+	paneTasks,
+	pistatuslinePaths,
+	submitCommand,
+	watchTasks,
+} from "./report.ts";
 import { EnableNeeded, serve, tailscaleInfo } from "./tailscale.ts";
 
 function message(error: unknown): string {
@@ -222,6 +233,8 @@ function factory(pi: ExtensionAPI): void {
 	/** Where pistatusline is, looked up once per session. */
 	let statusline: PaneReport["pistatusline"];
 	const outcomes = new PromptOutcomes();
+	/** pi is compacting at the user's request, when it throws on a prompt. */
+	let compacting = false;
 	/** `notice`: what the pane could not do for the phone, which this report alone carries. */
 	const report = (ctx: ExtensionContext, notice?: string): void => {
 		// As agent view registers: a `pi -p` run inside the pane must not report as the pane.
@@ -258,20 +271,51 @@ function factory(pi: ExtensionAPI): void {
 	pi.on("model_select", (_event, ctx) => changed(ctx));
 	pi.on("thinking_level_select", (_event, ctx) => changed(ctx));
 	pi.on("turn_end", (_event, ctx) => changed(ctx));
-	pi.on("session_compact", (_event, ctx) => changed(ctx));
+	pi.on("session_before_compact", (event) => {
+		if (event.reason === "manual") compacting = true;
+	});
+	pi.on("session_compact", (_event, ctx) => {
+		compacting = false;
+		changed(ctx);
+	});
+	pi.on("session_compact_failed", () => {
+		compacting = false;
+	});
+	// A phone's prompt or command carries an id: what becomes of it is reported, whether or not a
+	// phone has the session open, as a phone sent it.
 	pi.events.on("bluclawd:pane-message", (data) => {
 		const ctx = session;
 		if (!ctx || !pane) return;
 		const message = data as PaneMessage;
-		if (message.type === "command") {
+		const id = message.type === "prompt" || message.type === "command" ? message.id : undefined;
+		const refuse = (id: string, reason: RefusedReason) => {
+			outcomes.refused(id, reason);
+			report(ctx);
+		};
+		if (id && (message.type === "prompt" || message.type === "command")) {
+			const reason = refusal(message, {
+				compacting,
+				sessionFile: ctx.sessionManager.getSessionFile(),
+				parentSession: ctx.sessionManager.getHeader()?.parentSession,
+			});
+			if (reason) return refuse(id, reason);
+		}
+		if (message.type === "prompt") {
+			const content = promptContent(message);
+			// Known by this text in pi's input event: joined as pi joins it.
+			if (id) outcomes.sent(id, contentText(content));
+			pi.sendUserMessage(content, promptOptions(message));
+		} else if (message.type === "command") {
 			const enter = () => commandKeys.sendKeys(pane, ["Enter"]);
-			submitCommand(message.text, ctx, tui?.(), enter, (notice) => report(ctx, notice));
+			const reason = submitCommand(message.text, ctx, tui?.(), enter);
+			if (!id) {
+				if (reason) report(ctx, commandNotice(reason));
+			} else if (reason) refuse(id, reason);
+			else {
+				outcomes.taken(id);
+				report(ctx);
+			}
 		} else applyPaneMessage(message, ctx, pi, () => report(ctx));
-	});
-	// A phone sent these, so they are reported whether or not it has the session open.
-	pi.events.on("bluclawd:prompt-sent", (data) => {
-		const { id, text } = data as { id: string; text: string };
-		outcomes.sent(id, text);
 	});
 	pi.on("input", (event, ctx) => {
 		if (outcomes.input(event)) report(ctx);

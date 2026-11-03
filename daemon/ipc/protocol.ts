@@ -54,16 +54,17 @@ export interface PaneImage {
 }
 
 /** What another window asks a pane's pi to do; delivered with its next heartbeat. A phone's
- *  prompt carries the phone's `id`, which its PromptOutcome comes back by. */
+ *  prompt or command carries the phone's `id`, which its PromptOutcome comes back by, and the
+ *  `sessionFile` of the session it was sent to: a pane on another session refuses it. */
 export type PaneMessage =
-	| { type: "prompt"; text: string; images?: PaneImage[]; id?: string }
+	| { type: "prompt"; text: string; images?: PaneImage[]; id?: string; sessionFile?: string }
 	| { type: "abort" }
 	| { type: "rename"; name: string }
 	| { type: "set_model"; provider: string; id: string }
 	| { type: "set_thinking"; level: string }
 	| { type: "set_trust"; trust: "always" | "ask" | "never" }
 	/** A text-only prompt starting with "/": typed into the pane's prompt and submitted, as on the Mac. */
-	| { type: "command"; text: string }
+	| { type: "command"; text: string; id?: string; sessionFile?: string }
 	/** Stop a background task, as /tasks' `x` does: the model is told. */
 	| { type: "stop_task"; id: string };
 
@@ -176,12 +177,22 @@ export interface PaneReport {
 	outcomes?: PromptOutcome[];
 }
 
+/** Why a pane did not hand a phone's prompt or command to pi: a turn runs, the Mac's prompt holds a
+ *  draft or a dialog has the keyboard (commands only), pi is compacting, the pane is on another
+ *  session than the one it was sent to, or tmux could not press Enter in the pane. */
+export type RefusedReason = "busy" | "draft" | "dialog" | "compacting" | "session_changed" | "unreachable";
+
+/** Why a prompt never reached a pane: its pane went (reaped or unregistered) with it still queued.
+ *  The phone adds `daemon_restarted` for an id a restarted daemon no longer knows. */
+export type LostReason = "pane_gone" | "daemon_restarted";
+
 /** What became of a prompt a phone sent, by the phone's id: pi started a turn with it (`taken`),
- *  or queued it behind the turn in progress (`queued`). */
-export interface PromptOutcome {
-	id: string;
-	outcome: "taken" | "queued";
-}
+ *  queued it behind the turn in progress (`queued`), or the pane refused it or it was lost, with
+ *  why. `sent`: the daemon has it and no outcome yet, only from the daemon to the phone. */
+export type PromptOutcome =
+	| { id: string; outcome: "sent" | "taken" | "queued" }
+	| { id: string; outcome: "refused"; reason: RefusedReason }
+	| { id: string; outcome: "lost"; reason: LostReason };
 
 /** A background task: a shell, a monitor or a subagent run, or the model's bash past 2s in the
  *  foreground (`foreground`). `outputFile`: where a shell or monitor writes its output. */

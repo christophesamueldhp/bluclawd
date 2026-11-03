@@ -14,6 +14,7 @@ import {
 	type PaneReport,
 	type PaneTask,
 	phoneMayRun,
+	type RefusedReason,
 } from "../../daemon/ipc/protocol.ts";
 import { subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
@@ -231,10 +232,25 @@ export function applyPaneMessage(
 	}
 }
 
-/** Why a slash command did not happen, for the phone to say. */
+/** Why a slash command did not happen, for the phone to say: for a command sent with no id, by a
+ *  daemon from before outcomes. */
 export const DRAFT_NOTICE = "Clear the unsent text in the session's prompt on the Mac and retry";
 export const BUSY_NOTICE = "The session is busy: send the command once it is idle";
 export const DIALOG_NOTICE = "A dialog is open in the session on the Mac: answer or close it, then retry";
+export const UNREACHABLE_NOTICE = "The session's prompt on the Mac could not be reached: retry";
+const COMMAND_NOTICES: Record<CommandRefusal, string> = {
+	busy: BUSY_NOTICE,
+	dialog: DIALOG_NOTICE,
+	draft: DRAFT_NOTICE,
+	unreachable: UNREACHABLE_NOTICE,
+};
+
+/** Why submitCommand did not run a command. */
+export type CommandRefusal = Extract<RefusedReason, "busy" | "dialog" | "draft" | "unreachable">;
+
+export function commandNotice(reason: CommandRefusal): string {
+	return COMMAND_NOTICES[reason];
+}
 
 /**
  * A phone's slash command, run as if typed in the pane's prompt on the Mac: the text goes into the
@@ -242,29 +258,27 @@ export const DIALOG_NOTICE = "A dialog is open in the session on the Mac: answer
  * (/compact, /model, …; one that opens a selector waits there for the phone's Answer). Setting the
  * text, unlike typing it, opens no autocomplete that Enter would pick from. Only into an idle,
  * empty prompt that has the keyboard: anything else would send or lose what is there, or press
- * Enter in a dialog. `refuse` tells the phone why it did not run.
+ * Enter in a dialog. Returns why it did not run, if it did not.
  */
 export function submitCommand(
 	text: string,
 	ctx: ExtensionContext,
 	tui: TUI | undefined,
 	enter: () => void,
-	refuse: (notice: string) => void,
-): void {
+): CommandRefusal | undefined {
 	// getFocusedComponent is on pi-tui's TUI class, not its TUI interface; only the prompt has getText.
 	const focused = (tui as { getFocusedComponent?: () => unknown } | undefined)?.getFocusedComponent?.();
 	const prompt = typeof (focused as { getText?: unknown } | null)?.getText === "function";
-	if (!ctx.isIdle()) refuse(BUSY_NOTICE);
-	else if (!tui || tui.hasOverlay() || !prompt) refuse(DIALOG_NOTICE);
-	else if (ctx.ui.getEditorText().trim()) refuse(DRAFT_NOTICE);
-	else {
-		ctx.ui.setEditorText(text);
-		try {
-			enter();
-		} catch {
-			// tmux is gone or hung: nothing was sent.
-			ctx.ui.setEditorText("");
-			refuse("The session's prompt on the Mac could not be reached: retry");
-		}
+	if (!ctx.isIdle()) return "busy";
+	if (!tui || tui.hasOverlay() || !prompt) return "dialog";
+	if (ctx.ui.getEditorText().trim()) return "draft";
+	ctx.ui.setEditorText(text);
+	try {
+		enter();
+	} catch {
+		// tmux is gone or hung: nothing was sent.
+		ctx.ui.setEditorText("");
+		return "unreachable";
 	}
+	return undefined;
 }

@@ -4,7 +4,9 @@
 // to another pane, as a resume does; the app follows it on its next list (reopen the stream, or
 // refresh). Alpha and Beta send no report, as panes from an older build: every status request
 // answers 404 `no_status`. Gamma reports its prompts' outcomes, as a current pane does: taken, and
-// written to its transcript, or queued while `<dir>/busy` exists (Gamma is working then).
+// written to its transcript, or queued while `<dir>/busy` exists (Gamma is working then). While
+// `<dir>/compacting` exists Gamma refuses them (compacting), and while `<dir>/gone` exists they are
+// lost, as when Gamma's pane goes before taking them.
 import { appendFileSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -60,10 +62,14 @@ const delivery = new PromptDelivery((id, message) => {
 	if (id === gamma.id && message.type === "prompt" && message.id) {
 		const promptId = message.id;
 		setTimeout(() => {
-			delivery.delivered(id, [message]);
-			const outcome = busy() ? "queued" : "taken";
-			if (outcome === "taken") append(gamma.sessionFile!, "user", message.text);
-			delivery.reported(id, [{ id: promptId, outcome }]);
+			if (existsSync(join(dir, "gone"))) delivery.lost(id, [message]);
+			else if (existsSync(join(dir, "compacting")))
+				delivery.reported(id, [{ id: promptId, outcome: "refused", reason: "compacting" }]);
+			else {
+				const outcome = busy() ? "queued" : "taken";
+				if (outcome === "taken") append(gamma.sessionFile!, "user", message.text);
+				delivery.reported(id, [{ id: promptId, outcome }]);
+			}
 			server?.status(id);
 		}, 500);
 	}

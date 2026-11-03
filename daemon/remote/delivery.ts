@@ -1,20 +1,25 @@
 /**
- * Prompt delivery: the one record of what became of each prompt a phone sent with an id, from the
- * accepted request to its outcome. A prompt is in its pane's inbox until a heartbeat takes it
- * (delivered), then settles with the outcome its pane reports. Only in memory: a restarted daemon
- * knows none of them.
+ * Prompt delivery: the one record of what became of each prompt or command a phone sent with an id,
+ * from the accepted request to its outcome. One is in its pane's inbox until a heartbeat takes it
+ * (delivered), then settles with the outcome its pane reports, or is lost when its pane goes first.
+ * Only in memory: a restarted daemon knows none of them.
  */
 import type { PaneMessage, PromptOutcome } from "../ipc/protocol.ts";
 
 /** How long a prompt is kept after its last change, so a phone that reconnects still reads it. */
 export const DELIVERY_KEEP_MS = 10 * 60_000;
 
-type Stage = "inbox" | "delivered" | PromptOutcome["outcome"];
+/** `sent`: in the pane's inbox, or delivered to the pane and not reported on yet. */
+type Delivery = PromptOutcome & { sessionId: string; changedAt: number };
 
-interface Delivery {
-	sessionId: string;
-	stage: Stage;
-	changedAt: number;
+/** The phone's id of a message, when it is one whose outcome the phone waits for. */
+function phoneId(message: PaneMessage): string | undefined {
+	return message.type === "prompt" || message.type === "command" ? message.id : undefined;
+}
+
+/** A pane reports these; a queued one is taken later, and nothing comes after the others. */
+function settled(delivery: Delivery): boolean {
+	return delivery.outcome !== "sent" && delivery.outcome !== "queued";
 }
 
 export class PromptDelivery {
@@ -27,35 +32,37 @@ export class PromptDelivery {
 		this.queue = queue;
 	}
 
-	/** Queue a message for a pane, keeping track of a prompt that carries an id. */
+	/** Queue a message for a pane, keeping track of a prompt or command that carries an id. */
 	send(sessionId: string, message: PaneMessage, now: number = Date.now()): boolean {
 		if (!this.queue(sessionId, message)) return false;
 		this.prune(now);
-		if (message.type === "prompt" && message.id) {
-			this.prompts.set(message.id, { sessionId, stage: "inbox", changedAt: now });
-		}
+		const id = phoneId(message);
+		if (id) this.prompts.set(id, { id, outcome: "sent", sessionId, changedAt: now });
 		return true;
-	}
-
-	/** A pane's heartbeat took these messages from its inbox. */
-	delivered(sessionId: string, messages: PaneMessage[], now: number = Date.now()): void {
-		for (const message of messages) {
-			if (message.type !== "prompt" || !message.id) continue;
-			const delivery = this.prompts.get(message.id);
-			if (delivery?.sessionId === sessionId && delivery.stage === "inbox") {
-				delivery.stage = "delivered";
-				delivery.changedAt = now;
-			}
-		}
 	}
 
 	/** What a pane reports of the prompts it was given; any other id is not its to report. */
 	reported(sessionId: string, outcomes: PromptOutcome[], now: number = Date.now()): void {
-		for (const { id, outcome } of outcomes) {
-			const delivery = this.prompts.get(id);
-			if (delivery?.sessionId !== sessionId || delivery.stage === outcome) continue;
-			delivery.stage = outcome;
-			delivery.changedAt = now;
+		for (const outcome of outcomes) {
+			const delivery = this.prompts.get(outcome.id);
+			if (delivery?.sessionId !== sessionId || settled(delivery) || delivery.outcome === outcome.outcome) continue;
+			this.prompts.set(outcome.id, { ...outcome, sessionId, changedAt: now });
+		}
+	}
+
+	/** The pane listed as `sessionId` went, with `inbox` still queued for it: those never reach pi,
+	 *  and it can no longer report on what it was given. */
+	lost(sessionId: string, inbox: PaneMessage[], now: number = Date.now()): void {
+		const ids = new Set(inbox.map(phoneId));
+		for (const [id, delivery] of this.prompts) {
+			if (delivery.outcome !== "sent" || !(ids.has(id) || delivery.sessionId === sessionId)) continue;
+			this.prompts.set(id, {
+				id,
+				outcome: "lost",
+				reason: "pane_gone",
+				sessionId: delivery.sessionId,
+				changedAt: now,
+			});
 		}
 	}
 
@@ -63,8 +70,8 @@ export class PromptDelivery {
 	outcomes(sessionId: string, now: number = Date.now()): PromptOutcome[] {
 		this.prune(now);
 		const out: PromptOutcome[] = [];
-		for (const [id, { sessionId: to, stage }] of this.prompts) {
-			if (to === sessionId && (stage === "taken" || stage === "queued")) out.push({ id, outcome: stage });
+		for (const { sessionId: to, changedAt: _, ...outcome } of this.prompts.values()) {
+			if (to === sessionId) out.push(outcome);
 		}
 		return out;
 	}
@@ -72,7 +79,7 @@ export class PromptDelivery {
 	private prune(now: number): void {
 		for (const [id, delivery] of this.prompts) {
 			// A queued prompt waits on the turn ahead of it, however long that runs.
-			if (delivery.stage !== "queued" && now - delivery.changedAt > DELIVERY_KEEP_MS) this.prompts.delete(id);
+			if (delivery.outcome !== "queued" && now - delivery.changedAt > DELIVERY_KEEP_MS) this.prompts.delete(id);
 		}
 	}
 }
