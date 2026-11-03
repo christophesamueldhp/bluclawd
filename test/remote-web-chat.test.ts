@@ -10,6 +10,7 @@ import {
 	forget,
 	listed,
 	openChat,
+	replyEndedAt,
 	settleOutcomes,
 } from "#remote-web/chat.js";
 import { successor } from "#remote-web/list.js";
@@ -19,6 +20,7 @@ import { testRegistry } from "./helpers/registry.ts";
 
 const user = (id: string, text: string) => ({ kind: "user", id, text });
 const reply = (id: string, text = "ok") => ({ kind: "assistant", id, text, tools: [] });
+const result = (toolCallId: string) => ({ kind: "toolResult", id: `r-${toolCallId}`, toolCallId, ok: true, text: "" });
 
 describe("the open chat's transcript", () => {
 	it("keeps the older messages a latest page follows on from", () => {
@@ -71,6 +73,75 @@ describe("the open chat's transcript", () => {
 		chat.liveEnded = true;
 		applyLatest(chat, { messages: [reply("1", "done")], more: false });
 		expect(chat.live).toBeUndefined();
+	});
+});
+
+describe("a reply its pane says ended at a transcript entry", () => {
+	const running = { id: "c1", name: "bash", summary: "ls", running: true };
+
+	it("keeps its text through a tool-only snapshot, until a page has the entry", () => {
+		const chat = openChat("a");
+		chat.live = { text: "Let me look", tools: [{ ...running, running: false }] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "", tools: [running] };
+		applyLatest(chat, { messages: [reply("1", "Earlier")], more: false });
+		expect(chat.held).toEqual([{ entryId: "x", text: "Let me look" }]);
+		expect(chat.live).toEqual({ text: "", tools: [running] });
+		applyLatest(chat, { messages: [reply("1", "Earlier"), reply("x", "Let me look")], more: false });
+		expect(chat.held).toEqual([]);
+		expect(chat.live).toEqual({ text: "", tools: [running] });
+	});
+
+	it("drops it by the entry even when the transcript's text differs, as another extension edited it", () => {
+		const chat = openChat("a");
+		chat.live = { text: "Draft", thinking: "hmm", tools: [] };
+		replyEndedAt(chat, "x");
+		expect(chat.live).toBeUndefined();
+		expect(chat.held).toEqual([{ entryId: "x", text: "Draft", thinking: "hmm" }]);
+		applyLatest(chat, { messages: [reply("x", "Edited")], more: false });
+		expect(chat.held).toEqual([]);
+	});
+
+	it("keeps it after a bare end too, which settles only what is still live", () => {
+		const chat = openChat("a");
+		chat.live = { text: "Hi", tools: [] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "", tools: [running] };
+		chat.liveEnded = true;
+		applyLatest(chat, { messages: [reply("1", "Hi"), result("c1")], more: false });
+		expect(chat.held).toEqual([{ entryId: "x", text: "Hi" }]);
+		expect(chat.live).toBeUndefined();
+	});
+
+	it("holds its thinking alone, and nothing for a reply of tools only", () => {
+		const chat = openChat("a");
+		chat.live = { text: "", thinking: "hmm", tools: [] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "", tools: [running] };
+		replyEndedAt(chat, "y");
+		expect(chat.held).toEqual([{ entryId: "x", text: "", thinking: "hmm" }]);
+		expect(chat.live).toEqual({ text: "", tools: [running] });
+	});
+
+	it("holds each of two replies until a page has its own entry", () => {
+		const chat = openChat("a");
+		chat.live = { text: "One", tools: [] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "Two", tools: [] };
+		replyEndedAt(chat, "y");
+		expect(chat.held.map((h) => h.text)).toEqual(["One", "Two"]);
+		applyLatest(chat, { messages: [reply("x", "One")], more: false });
+		expect(chat.held.map((h) => h.text)).toEqual(["Two"]);
+	});
+
+	it("drops one whose entry a page never shows once a page has a later reply's", () => {
+		const chat = openChat("a");
+		chat.live = { text: "Emptied by another extension", tools: [] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "Next", tools: [] };
+		replyEndedAt(chat, "y");
+		applyLatest(chat, { messages: [reply("1", "Earlier"), reply("y", "Next")], more: false });
+		expect(chat.held).toEqual([]);
 	});
 });
 

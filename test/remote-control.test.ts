@@ -299,6 +299,10 @@ describe("remote control switch", () => {
 			ok: true,
 		});
 		await until(JSON.stringify({ sessionId: "pane-1", live }));
+		// The end of a reply names the transcript entry it became.
+		await handleIpcRequest(supervisor, { type: "remote_live", instanceId: "pane-1", live: null, entryId: "e7" });
+		await until(JSON.stringify({ sessionId: "pane-1", live: null, entryId: "e7" }));
+		await handleIpcRequest(supervisor, { type: "remote_live", instanceId: "pane-1", live });
 		await handleIpcRequest(supervisor, { type: "unregister", instanceId: "pane-1" });
 		await until(JSON.stringify({ sessionId: "pane-1", live: null }));
 		controller.abort();

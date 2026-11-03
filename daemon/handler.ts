@@ -285,7 +285,7 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 		}
 
 		case "remote_live": {
-			remoteControl?.live(supervisor.rowIdOf(request.instanceId), request.live);
+			remoteControl?.live(supervisor.rowIdOf(request.instanceId), request.live, request.entryId);
 			return { type: "ack", ok: true };
 		}
 
