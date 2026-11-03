@@ -18,7 +18,8 @@ export interface SubagentUsageTotals {
 
 /**
  * How a generation started. The SDK folds nested usage into a launch tool result until that result is
- * emitted; only a foreground result also carries the run's own usage. A resume has no launch result.
+ * emitted; only a foreground result also carries the run's own usage. A resume's launch result is the result of
+ * the message call that resumed it.
  */
 export type GenerationKind = "foreground" | "background" | "resume";
 
@@ -81,7 +82,7 @@ export function addSubagentUsage(target: SubagentUsageTotals, delta: Partial<Sub
 
 export function createGenerationUsage(options: { kind: GenerationKind }): GenerationUsage {
 	const totals = createEmptySubagentUsage();
-	let emitted = options.kind === "resume";
+	let emitted = false;
 	return {
 		get totals() {
 			return structuredClone(totals);

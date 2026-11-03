@@ -1,10 +1,7 @@
 import type { AgentTask, AgentTaskSource, AgentTaskState } from "../_shared/agent-tasks.ts";
-import {
-	isTerminalSubagentStatus,
-	type SubagentLifecycleStatus,
-	type SubagentRunRecord,
-	type SubagentRunScheduler,
-} from "./runs.ts";
+import type { RunDirectory, RunEntry } from "./directory.ts";
+import type { ParentScope } from "./parent-scope.ts";
+import { isTerminalSubagentStatus, type SubagentLifecycleStatus, type SubagentRunScheduler } from "./runs.ts";
 import { readBoundedSubagentReport, readPersistedRunRecord, subagentReportPath } from "./storage.ts";
 
 const TASK_OUTPUT_BYTES = 8192;
@@ -20,15 +17,16 @@ const TASK_STATES: Record<SubagentLifecycleStatus, AgentTaskState> = {
 };
 
 export interface AgentTaskSourceDeps {
-	scheduler: Pick<SubagentRunScheduler, "getRun" | "listActiveRuns" | "cancelRun">;
+	directory: Pick<RunDirectory, "get" | "list">;
+	scheduler: Pick<SubagentRunScheduler, "cancelRun">;
 	agentDir: () => string;
 	/** The owner when a caller names none. */
-	activeParentSessionId: () => string | undefined;
+	activeScope: () => ParentScope | undefined;
 }
 
 /** Translates runs into the tasks `/tasks` and `task_stop` see. */
 export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSource {
-	const toTask = (run: Readonly<SubagentRunRecord>): AgentTask => {
+	const toTask = ({ record: run, state }: RunEntry): AgentTask => {
 		const agentDir = deps.agentDir();
 		return {
 			id: run.runId,
@@ -38,7 +36,7 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 			startedAt: run.startedAt ?? run.admittedAt,
 			endedAt: run.endedAt,
 			state: TASK_STATES[run.status],
-			status: run.status,
+			status: state === "finishing" ? state : run.status,
 			model: `${run.provider}/${run.modelId}`,
 			outputFile: subagentReportPath(agentDir, run.parentSessionId, run.runId),
 			output: () => {
@@ -48,16 +46,28 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 		};
 	};
 
-	/** A live run first, then a persisted one; another owner's run is not found. */
-	const findRun = (id: string, owner?: string): Readonly<SubagentRunRecord> | undefined => {
-		const targetOwner = owner ?? deps.activeParentSessionId();
-		const live = deps.scheduler.getRun(id);
-		if (live) return targetOwner && live.parentSessionId !== targetOwner ? undefined : live;
-		return targetOwner ? readPersistedRunRecord(deps.agentDir(), targetOwner, id) : undefined;
+	/** The owner's current scope; only the orchestrator's own session has one. */
+	const scopeOf = (owner?: string): ParentScope | undefined => {
+		const active = deps.activeScope();
+		return owner === undefined || owner === active?.parentSessionId ? active : undefined;
 	};
 
+	/** A run this instance knows first, then a persisted one; another owner's run is not found. */
+	const findRun = (id: string, owner?: string): RunEntry | undefined => {
+		const targetOwner = owner ?? deps.activeScope()?.parentSessionId;
+		const known = deps.directory.get(id);
+		if (known) return targetOwner && known.record.parentSessionId !== targetOwner ? undefined : known;
+		const stored = targetOwner ? readPersistedRunRecord(deps.agentDir(), targetOwner, id) : undefined;
+		return stored && { record: stored, state: "finished" };
+	};
+
+	const stoppable = (entry: RunEntry) => entry.state !== "finishing" && entry.state !== "finished";
+
 	return {
-		list: (owner) => deps.scheduler.listActiveRuns(owner ?? deps.activeParentSessionId()).map(toTask),
+		list: (owner) => {
+			const scope = scopeOf(owner);
+			return scope ? deps.directory.list(scope).map(toTask) : [];
+		},
 		get: (id, owner) => {
 			const run = findRun(id, owner);
 			return run && toTask(run);
@@ -65,21 +75,27 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 		stop: (id, options) => {
 			const run = findRun(id, options?.owner);
 			if (!run) return { ok: false, reason: "not_found" };
-			if (deps.scheduler.cancelRun(run.runId, options?.source ?? "user", `Stopped subagent ${run.runId}`)) {
-				return { ok: true, task: toTask(deps.scheduler.getRun(run.runId) ?? run) };
+			const { runId } = run.record;
+			if (
+				stoppable(run) &&
+				deps.scheduler.cancelRun(runId, options?.source ?? "user", `Stopped subagent ${runId}`)
+			) {
+				return { ok: true, task: toTask(deps.directory.get(runId) ?? run) };
 			}
 			// A persisted run that never ended was orphaned by a crash: there is nothing to stop.
-			return isTerminalSubagentStatus(run.status)
-				? { ok: false, reason: "not_running", task: toTask(run) }
-				: { ok: false, reason: "not_found" };
+			const orphaned = !deps.directory.get(runId) && !isTerminalSubagentStatus(run.record.status);
+			return orphaned ? { ok: false, reason: "not_found" } : { ok: false, reason: "not_running", task: toTask(run) };
 		},
 		stopAll: (options) => {
-			const owner = options?.owner ?? deps.activeParentSessionId();
-			if (!owner) return 0;
-			return deps.scheduler
-				.listActiveRuns(owner)
-				.filter((run) => deps.scheduler.cancelRun(run.runId, options?.source ?? "user", "Stopped all subagents"))
-				.length;
+			const scope = scopeOf(options?.owner);
+			if (!scope) return 0;
+			return deps.directory
+				.list(scope)
+				.filter(
+					(run) =>
+						stoppable(run) &&
+						deps.scheduler.cancelRun(run.record.runId, options?.source ?? "user", "Stopped all subagents"),
+				).length;
 		},
 	};
 }

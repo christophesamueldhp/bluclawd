@@ -8,6 +8,7 @@
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename } from "node:path";
+import { contentText } from "@earendil-works/pi-ai";
 import type { ExtensionCommandContext, ExtensionContext, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SessionManager, SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import {
@@ -379,7 +380,11 @@ const agentView: InlineExtension = {
 		/** Pane mode: what another window's agent view asks of this session. */
 		const onPaneMessage = (ctx: ExtensionContext, message: PaneMessage): void => {
 			if (message.type === "prompt") {
-				pi.sendUserMessage(promptContent(message), promptOptions(message, ctx.isIdle()));
+				const content = promptContent(message);
+				// Remote control (ext/remote) reports its outcome by the phone's id, knowing it by this
+				// text: joined as pi joins it for its input event.
+				if (message.id) pi.events.emit("bluclawd:prompt-sent", { id: message.id, text: contentText(content) });
+				pi.sendUserMessage(content, promptOptions(message, ctx.isIdle()));
 			} else if (message.type === "abort") ctx.abort();
 			else if (message.type === "rename") pi.setSessionName(message.name);
 			// The rest are remote control's (ext/remote).

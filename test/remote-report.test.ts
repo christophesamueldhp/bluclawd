@@ -475,6 +475,61 @@ describe("/remote-control", () => {
 		sent.mockRestore();
 	});
 
+	it("reports a phone prompt taken or queued from pi's input event, by its id, unwatched too", async () => {
+		const sent = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
+		const handlers = new Map<string, (event: unknown, ctx?: unknown) => void>();
+		const pi = {
+			on: (name: string, handler: (event: unknown, ctx: unknown) => void) => handlers.set(name, handler),
+			events: { on: (name: string, handler: (data: unknown) => void) => handlers.set(name, handler) },
+			registerCommand: () => {},
+			getThinkingLevel: () => "off",
+			getCommands: () => [],
+		};
+		process.env[PANE_ENV] = "pi-outcomes";
+		try {
+			remoteFactory(pi as never);
+		} finally {
+			delete process.env[PANE_ENV];
+		}
+		const { ctx: base } = fakes({ current: model("openai", "gpt-5") });
+		const ctx = { ...base, mode: "tui" };
+		const outcomes = () => (sent.mock.lastCall?.[1] as { outcomes?: unknown }).outcomes;
+		handlers.get("session_start")?.({}, ctx);
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
+		// Every report says the pane reports outcomes, before any prompt too.
+		expect(outcomes()).toEqual([]);
+		const input = (text: string, source: string, streamingBehavior?: string) =>
+			handlers.get("input")?.(
+				{ type: "input", text, source, ...(streamingBehavior ? { streamingBehavior } : {}) },
+				ctx,
+			);
+
+		handlers.get("bluclawd:prompt-sent")?.({ id: "p-1", text: "same" });
+		handlers.get("bluclawd:prompt-sent")?.({ id: "p-2", text: "same" });
+		// Typed on the Mac: not the phone's, though its text is the same.
+		input("same", "interactive");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(sent).toHaveBeenCalledTimes(1);
+		input("same", "extension");
+		await waitFor(() => expect(outcomes()).toEqual([{ id: "p-1", outcome: "taken" }]));
+		input("same", "extension", "followUp");
+		await waitFor(() =>
+			expect(outcomes()).toEqual([
+				{ id: "p-1", outcome: "taken" },
+				{ id: "p-2", outcome: "queued" },
+			]),
+		);
+		// pi starts the queued prompt once the turn before it is done.
+		handlers.get("message_start")?.({ message: { role: "user", content: [{ type: "text", text: "same" }] } }, ctx);
+		await waitFor(() =>
+			expect(outcomes()).toEqual([
+				{ id: "p-1", outcome: "taken" },
+				{ id: "p-2", outcome: "taken" },
+			]),
+		);
+		sent.mockRestore();
+	});
+
 	it("lets go at session end: no report from the bus, and no live snapshot left to send", async () => {
 		const reported = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
 		const live = vi.spyOn(OrchestratorClient.prototype, "remoteLive").mockResolvedValue();

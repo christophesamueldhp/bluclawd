@@ -12,15 +12,19 @@ import { giveUp, promptKey, sentText, settle } from "./live.js";
  * @typedef {import("./app.js").Attachment} Attachment @typedef {import("./app.js").Report} Report
  */
 /**
- * A prompt sent and not yet in the transcript. `text`: as the transcript will show it (see
- * promptKey); `prompt`: as typed, `images`: as sent. `before`: the transcript's copies of its text
- * when it was sent. `started`: the session was seen working since. `last`: the transcript's last
- * message when it was sent.
- * @typedef {{ id: number, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string }} Pending
+ * A prompt sent and not yet in the transcript. `id`: the one sent with it, which its outcome comes
+ * back by. `text`: as the transcript will show it (see promptKey); `prompt`: as typed, `images`: as
+ * sent. `before`: the transcript's copies of its text when it was sent. `started`: the session was
+ * seen working since. `last`: the transcript's last message when it was sent. `outcome`: what its
+ * pane reported of it, a pane that reports outcomes.
+ * @typedef {{ id: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, outcome?: import("./statusbar.js").PromptOutcome["outcome"] }} Pending
  */
 
-/** Across chats: a followed chat's pending prompts keep theirs. */
-let pendingId = 0;
+/** Unique across chats and reloads: the daemon keeps outcomes by it. */
+function promptId() {
+	const random = crypto.getRandomValues(new Uint32Array(2));
+	return [Date.now(), ...random].map((n) => n.toString(36)).join("-");
+}
 
 /**
  * A chat of the session in `id`'s pane. One that follows its session to a new pane (`previous`)
@@ -129,11 +133,39 @@ export function applyLatest(chat, page) {
 	}
 	chat.messagesLoaded = true;
 	chat.live = settle(chat.live, chat.liveEnded, latest);
-	// A sent prompt is pending until the transcript has one more copy of its text than when it was sent.
-	keepPending(chat, (p) => userCount(chat.messages, p.text) <= p.before);
+	// A pane from an older build reports no outcomes: a prompt sent to it is pending until the
+	// transcript has one more copy of its text than when it was sent.
+	const guess = !reportsOutcomes(chat);
+	keepPending(chat, (p) => (guess && !p.outcome ? userCount(chat.messages, p.text) <= p.before : !written(chat, p)));
 	const ended = chat.turnEndedAt;
 	chat.turnEndedAt = undefined;
 	if (ended !== undefined) keepPending(chat, (p) => p.sentAt >= ended);
+}
+
+/** Its pane reports what became of each prompt, as a pane from an older build does not. @param {Chat} chat */
+function reportsOutcomes(chat) {
+	return Array.isArray(chat.report?.outcomes);
+}
+
+/**
+ * A prompt pi took is in the transcript once it moved past where it was when the prompt was sent:
+ * pi writes a prompt as it starts its turn.
+ * @param {Chat} chat @param {Pending} entry
+ */
+function written(chat, entry) {
+	return entry.outcome === "taken" && (chat.messages.at(-1)?.id ?? "") !== entry.last;
+}
+
+/**
+ * What the pane reported of the prompts sent to it, from its status; none from an older pane.
+ * @param {Chat} chat @param {import("./statusbar.js").PromptOutcome[] | undefined} outcomes
+ */
+export function settleOutcomes(chat, outcomes) {
+	for (const { id, outcome } of outcomes ?? []) {
+		const entry = chat.pending.find((p) => p.id === id);
+		if (entry) entry.outcome = outcome;
+	}
+	keepPending(chat, (p) => !written(chat, p));
 }
 
 /**
@@ -175,7 +207,8 @@ export function addPending(chat, prompt, images, now) {
 	const text = promptKey(prompt, images.length);
 	const before = userCount(chat.messages, text) + chat.pending.filter((p) => p.text === text).length;
 	const last = chat.messages.at(-1)?.id ?? "";
-	const entry = { id: ++pendingId, text, prompt, images, before, sentAt: now, last };
+	/** @type {Pending} */
+	const entry = { id: promptId(), text, prompt, images, before, sentAt: now, last };
 	chat.pending.push(entry);
 	return entry;
 }
@@ -189,11 +222,13 @@ export function forget(chat, entry) {
 }
 
 /**
- * A sent prompt whose time is up (see giveUp), forgotten unless it waits on.
+ * A sent prompt whose time is up (see giveUp), forgotten unless it waits on. One its pane reported
+ * taken or queued reached pi: it waits on.
  * @param {Chat} chat @param {Pending} entry @param {string | undefined} sessionState
  * @returns {"wait" | "drop" | "fail"}
  */
 export function checkPending(chat, entry, sessionState) {
+	if (entry.outcome) return "wait";
 	const verdict = giveUp(entry, sessionState, chat.messages.at(-1)?.id ?? "");
 	if (verdict !== "wait") forget(chat, entry);
 	return verdict;

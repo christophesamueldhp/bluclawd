@@ -53,9 +53,10 @@ export interface PaneImage {
 	data: string;
 }
 
-/** What another window asks a pane's pi to do; delivered with its next heartbeat. */
+/** What another window asks a pane's pi to do; delivered with its next heartbeat. A phone's
+ *  prompt carries the phone's `id`, which its PromptOutcome comes back by. */
 export type PaneMessage =
-	| { type: "prompt"; text: string; images?: PaneImage[] }
+	| { type: "prompt"; text: string; images?: PaneImage[]; id?: string }
 	| { type: "abort" }
 	| { type: "rename"; name: string }
 	| { type: "set_model"; provider: string; id: string }
@@ -170,6 +171,16 @@ export interface PaneReport {
 	/** Where the pane's pistatusline is (its render worker and settings), when it draws pi's footer:
 	 *  the daemon renders its lines for the phone with it. */
 	pistatusline?: { worker: string; config: string };
+	/** What became of the phone's latest prompts, by their ids. On every report from a pane that
+	 *  reports them, empty too, so its absence marks an older pane. */
+	outcomes?: PromptOutcome[];
+}
+
+/** What became of a prompt a phone sent, by the phone's id: pi started a turn with it (`taken`),
+ *  or queued it behind the turn in progress (`queued`). */
+export interface PromptOutcome {
+	id: string;
+	outcome: "taken" | "queued";
 }
 
 /** A background task: a shell, a monitor or a subagent run, or the model's bash past 2s in the

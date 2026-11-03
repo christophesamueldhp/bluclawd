@@ -306,6 +306,7 @@ describe("Issue #63 — A run's controller only affects its own generation", () 
 		await handle.completion;
 
 		const resumed = admitted(scheduler.resume(handle.runId, undefined));
+		scheduler.launchResultEmitted(handle.runId);
 		const before = scheduler.getRun(handle.runId);
 		exercise(controllers[0], "old");
 		expect(scheduler.getRun(handle.runId)).toEqual(before);
