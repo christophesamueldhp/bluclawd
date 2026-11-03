@@ -8,6 +8,7 @@ import {
 	applyOlder,
 	checkPending,
 	forget,
+	KEEP_MS,
 	listed,
 	openChat,
 	replyEndedAt,
@@ -398,6 +399,10 @@ describe("prompts pending when the app reloads or the chat is left, kept on the 
 		expect(chat.pending.map((p) => p.prompt)).toEqual(["taken"]);
 		applyLatest(chat, { messages: [reply("1"), user("2", "taken")], more: false });
 		expect(chat.pending).toEqual([]);
+	});
+
+	it("are judged by how long the daemon keeps them", () => {
+		expect(KEEP_MS).toBe(DELIVERY_KEEP_MS);
 	});
 
 	it("wait for their give-up when the daemon has let them go, past how long it keeps them", () => {

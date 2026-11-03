@@ -20,12 +20,13 @@ import { giveUp, promptKey, sentText, settle, shellLine } from "./live.js";
  * outcomes.
  * @typedef {{ id: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, acceptedAt?: number, outcome?: "taken" | "queued" }} Pending
  */
-/** How long the daemon keeps a prompt after its last change: delivery.ts's DELIVERY_KEEP_MS. */
-const KEEP_MS = 10 * 60_000;
 
 /** A reply's text and thinking, held until a page has its entry. @typedef {{ entryId: string, text: string, thinking?: string }} Held */
 
 /** Why a sent prompt came back: its pane refused it, or it was lost. @typedef {{ entry: Pending, reason: string }} Failed */
+
+/** How long the daemon keeps a prompt after its last change: delivery.ts's DELIVERY_KEEP_MS. */
+export const KEEP_MS = 10 * 60_000;
 
 /** Unique across chats and reloads: the daemon keeps outcomes by it. */
 function promptId() {
