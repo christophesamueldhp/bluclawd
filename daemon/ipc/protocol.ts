@@ -217,9 +217,10 @@ export interface PaneReport {
 export type RefusedReason = "busy" | "draft" | "dialog" | "compacting" | "session_changed" | "unreachable";
 
 /** Why a prompt never reached pi's turn: its pane went (reaped or unregistered) with it still queued,
- *  in its inbox or in pi.
+ *  in its inbox or in pi, or pi dropped it from its queue (`dequeued`: a stopped turn, the dequeue key,
+ *  or its session reloading or switching).
  *  The phone adds `daemon_restarted` for an id a restarted daemon no longer knows. */
-export type LostReason = "pane_gone" | "daemon_restarted";
+export type LostReason = "pane_gone" | "daemon_restarted" | "dequeued";
 
 /** What became of a prompt a phone sent, by the phone's id: pi started a turn with it (`taken`),
  *  queued it behind the turn in progress (`queued`), or the pane refused it or it was lost, with

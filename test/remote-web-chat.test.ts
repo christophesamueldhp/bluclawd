@@ -167,6 +167,21 @@ describe("prompts sent from the chat", () => {
 		expect(chat.pending).toEqual([late]);
 	});
 
+	it("stay past the turn's end once queued by a pane that reports outcomes, which settles them", () => {
+		const chat = openChat("a");
+		chat.report = { models: [], outcomes: [] };
+		const queued = addPending(chat, "queued", [], 100);
+		addPending(chat, "sent", [], 100);
+		settleOutcomes(chat, [{ id: queued.id, outcome: "queued" }]);
+		expect(listed(chat, "working", "idle", 200)).toBe(true);
+		applyLatest(chat, { messages: [], more: false });
+		expect(chat.pending).toEqual([queued]);
+		// Then pi dropped it from its queue: it comes back.
+		expect(settleOutcomes(chat, [{ id: queued.id, outcome: "lost", reason: "dequeued" }])).toEqual([
+			{ entry: queued, reason: "dequeued" },
+		]);
+	});
+
 	it("keep waiting while a dialog is up", () => {
 		const chat = openChat("a");
 		addPending(chat, "go", [], 100);
@@ -285,6 +300,16 @@ describe("prompts sent to a pane that reports their outcomes", () => {
 		expect(kept.before).toBe(0);
 		// Each comes back once.
 		expect(settleOutcomes(chat, [{ id: refused.id, outcome: "refused", reason: "compacting" }])).toEqual([]);
+	});
+
+	it("come back once queued when pi dropped them from its queue", () => {
+		const chat = reporting();
+		const entry = addPending(chat, "go", [], 100);
+		expect(settleOutcomes(chat, [{ id: entry.id, outcome: "queued" }])).toEqual([]);
+		expect(settleOutcomes(chat, [{ id: entry.id, outcome: "lost", reason: "dequeued" }])).toEqual([
+			{ entry, reason: "dequeued" },
+		]);
+		expect(chat.pending).toEqual([]);
 	});
 
 	it("are done once taken when they are a slash command or a ! line, which the transcript may never show", () => {

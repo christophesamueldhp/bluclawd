@@ -18,7 +18,7 @@ function phoneId(message: PaneMessage): string | undefined {
 	return message.type === "prompt" || message.type === "command" ? message.id : undefined;
 }
 
-/** A pane reports these; a queued one is taken later, and nothing comes after the others. */
+/** A pane reports these; a queued one is taken later or lost (pi dropped it), and nothing comes after the others. */
 function settled(delivery: Delivery): boolean {
 	return delivery.outcome !== "sent" && delivery.outcome !== "queued";
 }

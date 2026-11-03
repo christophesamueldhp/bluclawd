@@ -123,7 +123,13 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		registration.start();
 		await waitFor(() => expect(supervisor.listExternalInstances().some((e) => e.record.id === id)).toBe(true));
 		await report();
-		return { received, registration };
+		/** pi dropped the prompts it had queued, as its pane reports once pi's run is over or its session ends. */
+		const dequeue = () => {
+			for (const [i, o] of outcomes.entries())
+				if (o.outcome === "queued") outcomes[i] = { id: o.id, outcome: "lost", reason: "dequeued" };
+			return report();
+		};
+		return { received, registration, dequeue };
 	}
 
 	/** A client whose register, once held, keeps a reply that delivers messages until released: the
@@ -335,6 +341,25 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		expect(await (await watch("pane-queued")).replayed()).toEqual([
 			{ id: "p-first", outcome: "taken" },
 			{ id: "p-second", outcome: "lost", reason: "pane_gone" },
+		]);
+	});
+
+	it("is lost when pi drops it from its queue, live and to a stream that reconnects, past the pane's next session", async () => {
+		const file = join(dir, "pane-dequeued.jsonl");
+		const { registration, dequeue } = await fakePane("pane-dequeued", { sessionFile: file });
+		const phone = await watch("pane-dequeued");
+		expect(await prompt("pane-dequeued", { text: "first", id: "p-first" })).toBe(202);
+		expect(await prompt("pane-dequeued", { text: "second", id: "p-second" })).toBe(202);
+		await phone.until({ id: "p-second", outcome: "queued" });
+		// A /resume of the same file mid-turn: agent view stops the pane's heartbeat first, keeping its row,
+		// then the pane reports it, and its next session goes on.
+		await registration.stop({ unregister: false, reason: "resume" });
+		await dequeue();
+		await phone.until({ id: "p-second", outcome: "lost", reason: "dequeued" });
+		await fakePane("pane-dequeued", { sessionFile: file });
+		expect(await (await watch("pane-dequeued")).replayed()).toEqual([
+			{ id: "p-first", outcome: "taken" },
+			{ id: "p-second", outcome: "lost", reason: "dequeued" },
 		]);
 	});
 

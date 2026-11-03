@@ -54,7 +54,7 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.49";
+const VERSION = "0.0.50";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 /** Followed by a session's row id: its pending prompts, kept for when its chat opens again (see storePending). */
 const PENDING_KEY = "bluclawd-pending:";
@@ -143,6 +143,8 @@ const RETURNED = {
 	unreachable: "Not sent: the session's prompt on the Mac could not be reached.",
 	pane_gone: "Not delivered: the session went away on the Mac before it took this.",
 	daemon_restarted: "Not delivered: bluclawd restarted on the Mac before the session took this.",
+	dequeued:
+		"Not delivered: pi dropped this from its queue when its turn was stopped or the session reloaded on the Mac, so it may be in the Mac's prompt.",
 };
 
 const state = {

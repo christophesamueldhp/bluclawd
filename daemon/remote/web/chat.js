@@ -158,7 +158,8 @@ export function applyLatest(chat, page) {
 	keepPending(chat, (p) => (guess && !p.outcome ? userCount(chat.messages, p.text) <= p.before : !written(chat, p)));
 	const ended = chat.turnEndedAt;
 	chat.turnEndedAt = undefined;
-	if (ended !== undefined) keepPending(chat, (p) => p.sentAt >= ended);
+	// One its pane reported queued waits on: the pane reports it taken, or lost once pi drops it.
+	if (ended !== undefined) keepPending(chat, (p) => p.sentAt >= ended || (!guess && p.outcome === "queued"));
 }
 
 /** Its pane reports what became of each prompt, as a pane from an older build does not. @param {Chat} chat */

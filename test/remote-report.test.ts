@@ -613,11 +613,12 @@ describe("/remote-control", () => {
 		const pressed = vi.spyOn(Tmux.prototype, "sendKeys").mockImplementation(() => {});
 		const handlers = new Map<string, (event: unknown, ctx?: unknown) => unknown>();
 		const { ctx: base, pi: fake } = fakes({ current: model("openai", "gpt-5") });
-		const state = { idle: true, editor: "" };
+		const state = { idle: true, editor: "", pending: false };
 		const ctx = {
 			...base,
 			mode: "tui",
 			isIdle: () => state.idle,
+			hasPendingMessages: () => state.pending,
 			sessionManager: {
 				...base.sessionManager,
 				getSessionFile: () => "/s/a.jsonl",
@@ -699,6 +700,99 @@ describe("/remote-control", () => {
 				{ id: "p-2", outcome: "taken" },
 			]),
 		);
+		pane.restore();
+	});
+
+	it("reports a queued phone prompt pi has not taken by the end of its run lost, as pi dropped it from its queue", async () => {
+		const pane = await phonePane();
+		const queue = (id: string, text: string) => {
+			pane.message({ type: "prompt", text, id });
+			pane.on("input", { type: "input", text, source: "extension", streamingBehavior: "followUp" });
+		};
+		queue("p-1", "first");
+		queue("p-2", "second");
+		pane.on("message_start", { message: { role: "user", content: [{ type: "text", text: "first" }] } });
+		await waitFor(() =>
+			expect(pane.outcomes()).toEqual([
+				{ id: "p-1", outcome: "taken" },
+				{ id: "p-2", outcome: "queued" },
+			]),
+		);
+		// Stopped while pi still holds it, as a session switch stops it: a later run may yet take it.
+		pane.state.pending = true;
+		pane.on("agent_settled");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(pane.outcomes()).toEqual([
+			{ id: "p-1", outcome: "taken" },
+			{ id: "p-2", outcome: "queued" },
+		]);
+		// Esc or the dequeue key emptied pi's queue into the Mac's editor.
+		pane.state.pending = false;
+		pane.on("agent_settled");
+		await waitFor(() =>
+			expect(pane.outcomes()).toEqual([
+				{ id: "p-1", outcome: "taken" },
+				{ id: "p-2", outcome: "lost", reason: "dequeued" },
+			]),
+		);
+		pane.restore();
+	});
+
+	it("does not report lost a phone prompt the run ended before pi queued it, which pi runs as a turn of its own", async () => {
+		const pane = await phonePane();
+		pane.message({ type: "prompt", text: "late", id: "p-1" });
+		pane.on("input", { type: "input", text: "late", source: "extension", streamingBehavior: "followUp" });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]));
+		// The run settles while pi still awaits its input handlers; then pi finds itself idle and starts a turn with it.
+		pane.on("agent_settled");
+		pane.state.idle = false;
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]);
+		pane.on("message_start", { message: { role: "user", content: [{ type: "text", text: "late" }] } });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "taken" }]));
+		pane.restore();
+	});
+
+	it("reports a phone prompt still queued at session end lost, and holds the session's end until the daemon has it", async () => {
+		const pane = await phonePane();
+		pane.message({ type: "prompt", text: "later", id: "p-1" });
+		pane.on("input", { type: "input", text: "later", source: "extension", streamingBehavior: "followUp" });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]));
+		let received = () => {};
+		pane.sent.mockImplementation(
+			() =>
+				new Promise<void>((resolve) => {
+					received = resolve;
+				}),
+		);
+		// A `/resume` of the same file mid-turn: pi stops the turn, its queue still full, and ends the session with it.
+		pane.state.pending = true;
+		pane.on("agent_settled");
+		let ended = false;
+		const shutdown = Promise.resolve(pane.on("session_shutdown", { reason: "resume" })).then(() => {
+			ended = true;
+		});
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "lost", reason: "dequeued" }]));
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(ended).toBe(false);
+		received();
+		await shutdown;
+		pane.restore();
+	});
+
+	it("leaves a phone prompt still queued at quit to the daemon, and holds no quit for a report", async () => {
+		const pane = await phonePane();
+		pane.message({ type: "prompt", text: "later", id: "p-1" });
+		pane.on("input", { type: "input", text: "later", source: "extension", streamingBehavior: "followUp" });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]));
+		const reports = pane.sent.mock.calls.length;
+		// A report on its way when pi quits: pi exits regardless, and the daemon finds the pane gone.
+		pane.sent.mockImplementation(() => new Promise<void>(() => {}));
+		pane.on("bluclawd:remote-want-report");
+		await pane.on("session_shutdown", { reason: "quit" });
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(pane.sent.mock.calls.length).toBe(reports + 1);
+		expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]);
 		pane.restore();
 	});
 

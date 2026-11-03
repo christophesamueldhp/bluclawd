@@ -3,6 +3,7 @@
  * `input` event names no prompt, so a phone prompt is known by its exact text, from an extension,
  * oldest first: queued when pi delivers it as a follow-up, else taken. A queued one is taken when pi
  * starts it, which pi itself tells by its text. One the pane refuses is reported refused, with why.
+ * One still queued once pi's queue is empty, or when its session ends, is lost: pi dropped it.
  */
 import { contentText } from "@earendil-works/pi-ai";
 import type { PromptOutcome, RefusedReason } from "../../daemon/ipc/protocol.ts";
@@ -63,6 +64,13 @@ export class PromptOutcomes {
 		if (!prompt) return false;
 		this.settle({ id: prompt.id, outcome: "taken" });
 		return true;
+	}
+
+	/** pi's queue no longer holds the queued phone prompts it did not start; true when there were any. */
+	dequeued(): boolean {
+		const dropped = this.queued.splice(0);
+		for (const prompt of dropped) this.settle({ id: prompt.id, outcome: "lost", reason: "dequeued" });
+		return dropped.length > 0;
 	}
 
 	/** The pane did not hand it to pi, for `reason`. */
