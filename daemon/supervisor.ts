@@ -198,8 +198,10 @@ export class ServerSupervisor {
 		return entry.inbox.splice(0);
 	}
 
-	/** External instances, each as its row, reaping any whose last heartbeat is older than the TTL: one
-	 *  whose pane tmux says is gone died unseen (a crash, a SIGKILL), so its session stays as stopped. */
+	/** External instances, each as its row, but for those whose last heartbeat is older than the TTL.
+	 *  A pane's stays registered, unlisted, until it beats again with its row as it was, or tmux says
+	 *  it is gone: it died unseen (a crash, a SIGKILL), and its session stays as stopped. Any other
+	 *  is reaped. */
 	listExternalInstances(
 		now: number = this.deps.now(),
 	): Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> {
@@ -207,11 +209,9 @@ export class ServerSupervisor {
 		for (const [id, entry] of this.externalInstances) {
 			if (now - entry.lastSeenAt > EXTERNAL_TTL_MS) {
 				const { cwd, label, sessionFile, sessionId, pane } = entry.record;
-				if (sessionFile && pane && existsSync(sessionFile)) {
-					const gone = this.paneGone(pane);
-					// Unlisted until tmux can say.
-					if (gone === undefined) continue;
-					if (gone) {
+				if (pane) {
+					if (!this.paneGone(pane)) continue;
+					if (sessionFile && existsSync(sessionFile)) {
 						// The pane runs pi itself, so its pi is gone and its writes are final.
 						this.stopRow({ cwd, label, sessionFile, sessionId }, [id, entry]);
 						continue;
@@ -226,12 +226,12 @@ export class ServerSupervisor {
 		return out;
 	}
 
-	/** Undefined when tmux could not say. */
-	private paneGone(pane: string): boolean | undefined {
+	/** Not when tmux could not say: a pane that may be up is not taken for dead. */
+	private paneGone(pane: string): boolean {
 		try {
 			return !this.deps.tmux.hasSession(pane);
 		} catch {
-			return undefined;
+			return false;
 		}
 	}
 

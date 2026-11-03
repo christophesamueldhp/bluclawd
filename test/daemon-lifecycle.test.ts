@@ -253,10 +253,12 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 	});
 	/** What every reader lists, by the fields these transitions move. */
 	const rows = (supervisor: ServerSupervisor) =>
-		listSummaries(supervisor).map(({ id, status, sessionId, pinned, pane, detail }) => ({
+		listSummaries(supervisor).map(({ id, status, sessionId, label, createdAt, pinned, pane, detail }) => ({
 			id,
 			status,
 			sessionId,
+			label,
+			createdAt,
 			pinned,
 			pane,
 			detail,
@@ -265,6 +267,9 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 		id,
 		status: "stopped",
 		sessionId,
+		// Its name and age, as its pane had them.
+		label: sessionId,
+		createdAt,
 		pinned,
 		pane: undefined,
 		detail,
@@ -273,6 +278,8 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 		id,
 		status: "online",
 		sessionId,
+		label: sessionId,
+		createdAt,
 		pinned,
 		pane,
 		detail: undefined,
@@ -316,10 +323,27 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "abort" }]);
 	});
 
+	it("after /new, the new session keeps its row id through beats its pane missed with tmux up", () => {
+		let now = Date.parse("2026-10-30T10:00:00.000Z");
+		const supervisor = testRegistry(dir, () => now);
+		supervisor.registerExternal(pane("pi-a", session("a", "a done"), "sa"), "idle");
+		supervisor.unregisterExternal("pi-a", "new");
+		const b = pane("pi-a", session("b", "b says"), "sb");
+		supervisor.registerExternal(b, "working");
+		const fresh = rows(supervisor)[1].id;
+
+		now += 20_000;
+		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "a done")]);
+		supervisor.registerExternal(b, "working");
+		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "a done"), live(fresh, "sb", "pi-a")]);
+	});
+
 	it("/resume <other>: the old session stays stopped; the other goes live as its own row, or a new one", () => {
-		const supervisor = testRegistry(dir);
+		// Saved at the age its panes give it.
+		const supervisor = testRegistry(dir, () => Date.parse(createdAt));
 		const c = session("c", "c done");
-		const stored = supervisor.saveInstance({ cwd: "/p", sessionFile: c, sessionId: "sc" })!;
+		// No delete is pending for c, so the save stores it.
+		const stored = supervisor.saveInstance({ cwd: "/p", label: "sc", sessionFile: c, sessionId: "sc" })!;
 		supervisor.setInstanceMeta(stored.id, { pinned: true });
 		supervisor.registerExternal(pane("pi-a", session("a", "a done"), "sa"), "idle");
 
