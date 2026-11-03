@@ -11,7 +11,7 @@
  */
 import { statSync } from "node:fs";
 import type { ServerResponse } from "node:http";
-import type { LiveSnapshot } from "../ipc/protocol.ts";
+import type { LiveSnapshot, PromptOutcome } from "../ipc/protocol.ts";
 
 export interface EventSources {
 	/** Changes exactly when the phone's session list would. */
@@ -20,6 +20,8 @@ export interface EventSources {
 	session(sessionId: string): { sessionFile?: string; leafId?: string } | undefined;
 	/** The ids of the sessions listed now. */
 	listed(): Set<string>;
+	/** What became of the prompts the phone sent to a session, listed or gone. */
+	outcomes(sessionId: string): PromptOutcome[];
 }
 
 interface Client {
@@ -83,6 +85,9 @@ export class RemoteEvents {
 		this.clients.add(client);
 		const live = sessionId ? this.lives.get(sessionId) : undefined;
 		if (live) send(res, "live", { sessionId, live });
+		// Every one the daemon knows: one the phone still waits for and that is not here, a
+		// restarted daemon lost.
+		if (sessionId) send(res, "outcomes", { sessionId, outcomes: this.sources.outcomes(sessionId) });
 		res.on("close", () => {
 			this.clients.delete(client);
 			if (sessionId && !this.watching().has(sessionId)) this.lives.delete(sessionId);
@@ -129,9 +134,15 @@ export class RemoteEvents {
 		}
 	}
 
-	/** The session's pane sent a new report, which the phone fetches if it shows it. */
+	/** The session's pane sent a new report, which the phone fetches if it shows it, or one of the
+	 *  phone's prompts to it has a new outcome, sent with it: the session may be gone. */
 	status(sessionId: string): void {
-		for (const client of this.clients) if (client.sessionId === sessionId) send(client.res, "status", { sessionId });
+		let outcomes: PromptOutcome[] | undefined;
+		for (const client of this.clients) {
+			if (client.sessionId !== sessionId) continue;
+			outcomes ??= this.sources.outcomes(sessionId);
+			send(client.res, "status", { sessionId, outcomes });
+		}
 	}
 
 	private drop(client: Client): void {

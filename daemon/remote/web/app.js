@@ -52,7 +52,7 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.46";
+const VERSION = "0.0.47";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 
 function loadViewMode() {
@@ -129,6 +129,18 @@ const ERRORS = {
 	no_output: "That task has no output to show.",
 };
 
+/** Why a prompt sent from here came back into the reply box: refused by its pane, or lost. */
+const RETURNED = {
+	busy: "Not sent: the session is busy. Send it again once it is done.",
+	draft: "Not sent: clear the unsent text in this session's prompt on the Mac first.",
+	dialog: "Not sent: a dialog is open in this session on the Mac. Answer or close it first.",
+	compacting: "Not sent: the session is compacting. Send it again once that is done.",
+	session_changed: "Not sent: the Mac switched to another session before this one took it.",
+	unreachable: "Not sent: the session's prompt on the Mac could not be reached.",
+	pane_gone: "Not delivered: the session went away on the Mac before it took this.",
+	daemon_restarted: "Not delivered: bluclawd restarted on the Mac before the session took this.",
+};
+
 const state = {
 	/** @type {Session[]} */ sessions: [],
 	/** The chat open, none while the list shows. @type {import("./chat.js").Chat | undefined} */ chat: undefined,
@@ -175,6 +187,8 @@ let source;
 let offlineTimer;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let watchdog;
+/** When the event stream was last asked for, by connect() or the browser's own reconnect after an error. */
+let streamFrom = 0;
 /** Older messages load this far (px) ahead of the log's top, so they are usually there when it is reached. */
 const OLDER_MARGIN = 400;
 const OLDER_RETRY_MS = 2000;
@@ -466,7 +480,7 @@ async function loadStatus() {
 	}
 	if (state.chat !== chat || request !== chat.statusRequest) return;
 	chat.report = report;
-	settleOutcomes(chat, report?.outcomes);
+	returned(chat, settleOutcomes(chat, report?.outcomes));
 	// A pane has them once it has reported.
 	if (report && !chat.commandsAsked) {
 		chat.commandsAsked = true;
@@ -569,6 +583,7 @@ function closeStream() {
 function connect() {
 	closeStream();
 	if (!getToken() || document.visibilityState === "hidden") return;
+	streamFrom = Date.now();
 	const current = api.events(state.chat?.id);
 	source = current;
 	// A sleeping Mac leaves the connection hanging without an error, so the timer starts with every stream.
@@ -620,11 +635,26 @@ function connect() {
 	});
 	current.addEventListener("status", (/** @type {MessageEvent} */ event) => {
 		alive();
-		if (!state.chat || JSON.parse(event.data).sessionId !== state.chat.id) return;
+		const { sessionId, outcomes } = JSON.parse(event.data);
+		const chat = state.chat;
+		if (!chat || sessionId !== chat.id) return;
+		// Carried here too, as the session may be gone, with no status left to fetch.
+		if (returned(chat, settleOutcomes(chat, outcomes))) render();
 		void loadStatus();
+	});
+	// Sent as the stream opens: every outcome the daemon knows for the session open.
+	current.addEventListener("outcomes", (/** @type {MessageEvent} */ event) => {
+		alive();
+		const { sessionId, outcomes } = JSON.parse(event.data);
+		const chat = state.chat;
+		if (!chat || sessionId !== chat.id) return;
+		returned(chat, settleOutcomes(chat, outcomes, streamFrom));
+		render();
 	});
 	current.addEventListener("ping", alive);
 	current.onerror = () => {
+		// The browser asks for it again on its own, unless it gave up.
+		streamFrom = Date.now();
 		offlineTimer ??= setTimeout(() => setOnline(false), OFFLINE_AFTER_MS);
 		// EventSource gives up on an HTTP error, such as a revoked token: find out which, then retry.
 		if (current.readyState === EventSource.CLOSED && source === current) {
@@ -2239,11 +2269,23 @@ async function send() {
 			images.map(({ mimeType, data }) => ({ mimeType, data })),
 			entry.id,
 		);
+		entry.acceptedAt = Date.now();
 	} catch (error) {
 		forget(chat, entry);
 		putBack(chat, entry);
 		handleError(error, "Not sent: ");
 	}
+}
+
+/**
+ * Prompts refused by their pane, or lost, back in the reply box, the reason shown.
+ * @param {Chat} chat @param {import("./chat.js").Failed[]} failed @returns {boolean} whether there were any
+ */
+function returned(chat, failed) {
+	for (const { entry } of failed) putBack(chat, entry);
+	const last = failed.at(-1);
+	if (last) showError(RETURNED[/** @type {keyof typeof RETURNED} */ (last.reason)] ?? errorText("not_delivered"));
+	return failed.length > 0;
 }
 
 /** @typedef {import("./chat.js").Chat} Chat @typedef {import("./chat.js").Pending} Pending */

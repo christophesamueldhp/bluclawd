@@ -21,7 +21,8 @@
  * its directory: pistatusline's own lines at the phone's width (`statusline`), else `git`.
  * `notice`: why the phone's last slash command did not run, until the pane's next report (`at`: epoch ms).
  * `outcomes`: what became of the prompts sent with an id, only from a pane that reports them.
- * @typedef {{ id: string, outcome: "taken" | "queued" }} PromptOutcome
+ * `sent`: the daemon has it, with no outcome yet. `reason`: why it was refused or lost.
+ * @typedef {{ id: string, outcome: "sent" | "taken" | "queued" } | { id: string, outcome: "refused", reason: "busy" | "draft" | "dialog" | "compacting" | "session_changed" | "unreachable" } | { id: string, outcome: "lost", reason: "pane_gone" | "daemon_restarted" }} PromptOutcome
  * @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, backgroundSubagentUsage?: { runCount: number, input: number, output: number, cacheRead: number, cacheWrite: number, cost: number | null }, git?: GitInfo, notice?: { text: string, at: number }, outcomes?: PromptOutcome[], statusline?: { lines: StatusSpan[][] }, tasks?: Task[] }} Report
  */
 

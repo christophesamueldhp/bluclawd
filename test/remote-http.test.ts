@@ -487,7 +487,12 @@ describe("remote HTTP API", () => {
 		for (const id of [7, "", "a b", "x".repeat(65)]) {
 			expect(await prompt({ text: "next", id }), JSON.stringify(id)).toEqual([400, "invalid_prompt_id"]);
 		}
-		expect(sent).toEqual([{ id: "live", message: { type: "prompt", text: "next", id: "m3k-9f2a_1" } }]);
+		expect(sent).toEqual([
+			{
+				id: "live",
+				message: { type: "prompt", text: "next", id: "m3k-9f2a_1", sessionFile: join(dir, "live.jsonl") },
+			},
+		]);
 	});
 
 	it("answers each refusal phone control gives with its status", async () => {
@@ -1388,14 +1393,14 @@ describe("remote HTTP API", () => {
 			again.controller.abort();
 		});
 
-		it("signals a status change to the clients that have the session open, without its content", async () => {
+		it("signals a status change to the clients that have the session open, with its prompts' outcomes and not its content", async () => {
 			const token = await pair();
 			const watcher = await open(token, "live");
 			const bystander = await open(token);
 			expect((await watcher.collect(200)).text).toContain(": connected");
 			server.status("live");
 			const text = (await watcher.collect(300)).text;
-			expect(text).toContain(`event: status\ndata: ${JSON.stringify({ sessionId: "live" })}`);
+			expect(text).toContain(`event: status\ndata: ${JSON.stringify({ sessionId: "live", outcomes: [] })}`);
 			expect((await bystander.collect(200)).text).not.toContain("event: status");
 			watcher.controller.abort();
 			bystander.controller.abort();

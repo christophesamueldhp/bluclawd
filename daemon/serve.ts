@@ -42,6 +42,7 @@ export async function serve(): Promise<void> {
 		tmux,
 	});
 	setRemoteControl(remote);
+	supervisor.onDropped = (rowId, inbox) => remote.lost(rowId, inbox);
 	await remote.apply();
 
 	let shutdownPromise: Promise<void> | undefined;

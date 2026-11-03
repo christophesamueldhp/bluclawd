@@ -258,7 +258,73 @@ describe("prompts sent to a pane that reports their outcomes", () => {
 	it("still fail at the give-up when no outcome came", () => {
 		const chat = reporting();
 		const entry = addPending(chat, "go", [], 100);
+		// The daemon has it, and the pane has said nothing of it.
+		expect(settleOutcomes(chat, [{ id: entry.id, outcome: "sent" }])).toEqual([]);
 		expect(checkPending(chat, entry, "idle")).toBe("fail");
+	});
+
+	it("come back, saying why, when their pane refused them or they were lost", () => {
+		const chat = reporting();
+		const refused = addPending(chat, "go", [], 100);
+		const lost = addPending(chat, "go", [], 200);
+		const kept = addPending(chat, "go", [], 300);
+		expect(
+			settleOutcomes(chat, [
+				{ id: refused.id, outcome: "refused", reason: "compacting" },
+				{ id: lost.id, outcome: "lost", reason: "pane_gone" },
+			]),
+		).toEqual([
+			{ entry: refused, reason: "compacting" },
+			{ entry: lost, reason: "pane_gone" },
+		]);
+		expect(chat.pending).toEqual([kept]);
+		// No longer counted: the one left is the transcript's next "go".
+		expect(kept.before).toBe(0);
+		// Each comes back once.
+		expect(settleOutcomes(chat, [{ id: refused.id, outcome: "refused", reason: "compacting" }])).toEqual([]);
+	});
+
+	it("are done once taken when they are a slash command or a ! line, which the transcript may never show", () => {
+		const chat = reporting();
+		const command = addPending(chat, "/compact", [], 100);
+		const shell = addPending(chat, "!ls", [], 200);
+		const prompt = addPending(chat, "/tmp/a is gone", [], 300);
+		settleOutcomes(
+			chat,
+			[command, shell, prompt].map(({ id }) => ({ id, outcome: "taken" as const })),
+		);
+		expect(chat.pending).toEqual([prompt]);
+	});
+
+	it("are lost when the daemon replays what it knows after a reconnect and lacks them: it restarted", () => {
+		const chat = reporting();
+		const known = addPending(chat, "a", [], 100);
+		const forgotten = addPending(chat, "b", [], 110);
+		const later = addPending(chat, "c", [], 120);
+		const unanswered = addPending(chat, "d", [], 130);
+		known.acceptedAt = 150;
+		forgotten.acceptedAt = 160;
+		// Accepted after the stream it replays on was asked for: that daemon may not have had it yet.
+		later.acceptedAt = 250;
+		// Followed from the chat of its session's pane before, it was sent to another id.
+		const followed = openChat("b", { pending: chat.pending, backToList: false });
+		const elsewhere = addPending(followed, "e", [], 140);
+		elsewhere.acceptedAt = 170;
+		expect(settleOutcomes(chat, [{ id: known.id, outcome: "sent" }], 200)).toEqual([
+			{ entry: forgotten, reason: "daemon_restarted" },
+		]);
+		expect(chat.pending).toEqual([known, later, unanswered, elsewhere]);
+		// Not on a status, which carries only what changed since the stream opened.
+		expect(settleOutcomes(chat, [], undefined)).toEqual([]);
+	});
+
+	it("are not judged lost by a replay for a pane from an older build", () => {
+		const chat = openChat("a");
+		chat.report = { models: [] };
+		const entry = addPending(chat, "a", [], 100);
+		entry.acceptedAt = 150;
+		expect(settleOutcomes(chat, [], 200)).toEqual([]);
+		expect(chat.pending).toEqual([entry]);
 	});
 });
 
