@@ -26,6 +26,7 @@ describe("remote control switch", () => {
 			renameInstance: () => false,
 			setPinned: () => false,
 			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
 			startFailed: () => {},
 			webDir: dir,
 		});
@@ -191,6 +192,7 @@ describe("remote control switch", () => {
 				renameInstance: () => false,
 				setPinned: () => false,
 				claimStart: () => ({ ok: false, refused: "running" }),
+				paneStarting: () => {},
 				startFailed: () => {},
 				deleteInstance: (id) => deleteInstance(id),
 				tmux: new Tmux(dir, (args) => {
@@ -314,6 +316,7 @@ describe("remote control switch", () => {
 			renameInstance: () => false,
 			setPinned: () => false,
 			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
 			startFailed: () => {},
 			webDir: dir,
 		});
@@ -374,6 +377,7 @@ describe("remote control switch", () => {
 			renameInstance: () => false,
 			setPinned: () => false,
 			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
 			startFailed: () => {},
 			webDir: dir,
 		});
@@ -408,6 +412,7 @@ describe("remote control switch", () => {
 			renameInstance: () => false,
 			setPinned: () => false,
 			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
 			startFailed: () => {},
 			webDir: dir,
 		});
@@ -446,6 +451,7 @@ describe("remote control switch", () => {
 			renameInstance: () => false,
 			setPinned: () => false,
 			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
 			startFailed: () => {},
 			statusLine: async (cwd) => (cwd === "/p" ? { git } : {}),
 			webDir: dir,
@@ -507,6 +513,7 @@ describe("remote control switch", () => {
 				renameInstance: () => false,
 				setPinned: () => false,
 				claimStart: () => ({ ok: false, refused: "running" }),
+				paneStarting: () => {},
 				startFailed: () => {},
 				webDir: dir,
 				sendPush: async (push, payload) => {
@@ -554,6 +561,7 @@ describe("remote control switch", () => {
 				renameInstance: () => false,
 				setPinned: () => false,
 				claimStart: () => ({ ok: false, refused: "running" }),
+				paneStarting: () => {},
 				startFailed: () => {},
 				webDir: dir,
 				sendPush: async () => "ok",

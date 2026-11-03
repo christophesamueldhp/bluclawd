@@ -95,6 +95,7 @@ describe("remote HTTP API", () => {
 					return "pi-0000000a";
 				},
 				claimStart: (options) => registry.claimStart(options),
+				paneStarting: (spec) => registry.paneStarting(spec),
 				startFailed: (id) => registry.startFailed(id),
 				terminalOpen: () => terminalOpen,
 				report: (id) => reports.get(id),
@@ -218,7 +219,7 @@ describe("remote HTTP API", () => {
 		it("is refused while agent view's resume of the same file is starting", async () => {
 			expect(registry.claimStart({ cwd: dir, sessionFile })).toMatchObject({ ok: true });
 			const res = await resume();
-			expect([res.status, await res.json()]).toEqual([409, { error: "session_running" }]);
+			expect([res.status, await res.json()]).toEqual([409, { error: "session_starting" }]);
 			expect(started).toEqual([]);
 		});
 

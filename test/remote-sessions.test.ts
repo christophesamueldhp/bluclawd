@@ -80,7 +80,7 @@ describe("remote sessions", () => {
 
 	it("says a session is starting until its pane registers", () => {
 		const supervisor = testRegistry();
-		supervisor.claimStart({ cwd: "/p", label: "new task", pane: "pi-n" });
+		supervisor.paneStarting({ cwd: "/p", label: "new task", pane: "pi-n" });
 		expect(remoteSessions(listSummaries(supervisor))).toEqual([
 			expect.objectContaining({ id: "pi-n", starting: true, detail: "starting…" }),
 		]);

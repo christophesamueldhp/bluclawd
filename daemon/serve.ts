@@ -35,6 +35,7 @@ export async function serve(): Promise<void> {
 		renameInstance: (id, name) => supervisor.renameInstance(id, name) !== undefined,
 		setPinned: (id, pinned) => supervisor.setInstanceMeta(id, { pinned }) !== undefined,
 		claimStart: (spec) => supervisor.claimStart(spec),
+		paneStarting: (spec) => supervisor.paneStarting(spec),
 		startFailed: (id) => supervisor.startFailed(id),
 		statusLine: statusLine(),
 		renderStatusline: pistatusline(),

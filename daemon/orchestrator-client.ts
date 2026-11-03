@@ -13,6 +13,7 @@ import type {
 	PaneMessage,
 	PaneReport,
 	RemoteResponse,
+	StartFailedRequest,
 	StartRequest,
 	StartSpec,
 } from "./ipc/protocol.ts";
@@ -60,7 +61,7 @@ type Request =
 	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
 	| { type: "save"; cwd: string; label?: string; sessionFile: string; sessionId?: string }
 	| StartRequest
-	| { type: "start_failed"; instanceId: string }
+	| StartFailedRequest
 	| ({ type: "remote" } & RemoteAction)
 	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null }
 	| { type: "remote_report"; instanceId: string; report: PaneReport };
@@ -232,8 +233,7 @@ export class OrchestratorClient {
 		await this.request({ type: "save", cwd, label, sessionFile, sessionId });
 	}
 
-	/** Before starting a pane on a session file, or once a new session's pane is started: the id of
-	 *  the row listed as starting until it registers. Rejects while one is starting or running there. */
+	/** The id of the row listed as starting (see StartRequest); rejects with why it was refused. */
 	async start(start: StartSpec): Promise<string> {
 		const res = await this.request({ type: "start", ...start });
 		if (res.type !== "start_result" || !res.id)

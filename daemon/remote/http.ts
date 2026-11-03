@@ -12,11 +12,12 @@ import { stripAnsi } from "../ansi.ts";
 import type {
 	InstanceSummary,
 	LiveSnapshot,
+	NewPaneSpec,
 	PaneImage,
 	PaneLaunch,
 	PaneMessage,
 	PaneReport,
-	StartSpec,
+	ResumeSpec,
 } from "../ipc/protocol.ts";
 import { labelFromTask } from "../rows.ts";
 import type { StartClaim } from "../supervisor.ts";
@@ -48,10 +49,9 @@ export interface RemoteDeps {
 	launch(): PaneLaunch | undefined;
 	/** Start a pane; returns its tmux session name, the id its row registers as. */
 	startSession(spec: SessionSpec): string;
-	/** List a row as starting: before its pane is started on a session file, refused while one is
-	 *  starting or running there; or once a new session's pane is. */
-	claimStart(spec: StartSpec): StartClaim;
-	/** The pane a start was claimed for could not be started. */
+	/** ServerSupervisor's, which lists a row as starting until its pane registers. */
+	claimStart(spec: ResumeSpec): StartClaim;
+	paneStarting(spec: NewPaneSpec): void;
 	startFailed(id: string): void;
 	/** A terminal on the Mac shows pi: without one, the phone only reads. */
 	terminalOpen(): boolean;
@@ -420,7 +420,8 @@ async function handle(
 		const spec = { cwd: saved.cwd || cwd, sessionFile: saved.path };
 		// Claimed first: agent view's resume of the same file, or another phone's, is refused meanwhile.
 		const claim = deps.claimStart({ ...spec, label: saved.name || labelFromTask(saved.firstMessage) });
-		if (!claim.ok) return json(res, 409, { error: "session_running" });
+		if (!claim.ok)
+			return json(res, 409, { error: claim.refused === "starting" ? "session_starting" : "session_running" });
 		try {
 			return json(res, 201, { pane: start(deps, { ...spec, task: "", launch }), id: claim.id });
 		} catch (error) {
@@ -452,8 +453,8 @@ async function handle(
 			...(typeof model === "string" ? { model } : {}),
 			launch,
 		});
-		const claim = deps.claimStart({ cwd, label: labelFromTask(task), pane });
-		return json(res, 201, { pane, id: claim.ok ? claim.id : pane });
+		deps.paneStarting({ cwd, label: labelFromTask(task), pane });
+		return json(res, 201, { pane, id: pane });
 	}
 	if (path === "/api/directories" && req.method === "GET") {
 		const typed = url.searchParams.get("under");

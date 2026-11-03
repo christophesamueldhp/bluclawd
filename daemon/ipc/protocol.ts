@@ -124,12 +124,24 @@ export interface SaveRequest {
 	sessionId?: string;
 }
 
-/** Before a pane is started on a session file, or once a new session's pane is: its row is listed as
- *  starting until the pane registers. Refused while a pane is starting or running on that file. */
+/** A window starting a pane: see ServerSupervisor.claimStart and paneStarting. */
 export type StartRequest = { type: "start" } & StartSpec;
 
-/** A start on a session file, claimed before its pane is started; or a new session's, once it is. */
-export type StartSpec = { cwd: string; label?: string } & ({ sessionFile: string } | { pane: string });
+export type StartSpec = ResumeSpec | NewPaneSpec;
+
+/** A pane about to be started on a session file. */
+export interface ResumeSpec {
+	cwd: string;
+	label?: string;
+	sessionFile: string;
+}
+
+/** A new session's pane, just started. */
+export interface NewPaneSpec {
+	cwd: string;
+	label?: string;
+	pane: string;
+}
 
 /** The pane a start was claimed for could not be started. */
 export interface StartFailedRequest {

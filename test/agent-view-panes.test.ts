@@ -2,7 +2,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { listSummaries } from "../daemon/handler.ts";
-import type { StartSpec } from "../daemon/ipc/protocol.ts";
+import type { ResumeSpec, StartSpec } from "../daemon/ipc/protocol.ts";
 import type { InstanceSummary, OrchestratorClient } from "../daemon/orchestrator-client.ts";
 import { collectRows } from "../daemon/rows.ts";
 import { HIDE_ENV, OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../daemon/tmux.ts";
@@ -177,7 +177,7 @@ describe("agent view in pane mode", () => {
 		const { id } = registry.saveInstance({ cwd: HERE, label: "fix tests", sessionFile: file })!;
 		const { view, calls, flush } = setup(listSummaries(registry), undefined, {
 			list: async () => listSummaries(registry),
-			start: async (spec: StartSpec) => {
+			start: async (spec: ResumeSpec) => {
 				const claim = registry.claimStart(spec);
 				if (!claim.ok) throw new Error(claim.refused);
 				return claim.id;
@@ -257,8 +257,9 @@ describe("agent view in pane mode", () => {
 			list: async () => listSummaries(registry),
 			start: async (spec: StartSpec) => {
 				calls.push(["claim", spec]);
-				const claim = registry.claimStart(spec);
-				return claim.ok ? claim.id : "";
+				if (!("pane" in spec)) throw new Error("a resume");
+				registry.paneStarting(spec);
+				return spec.pane;
 			},
 		});
 		for (const ch of "write the release notes") view.handleInput(ch);

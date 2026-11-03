@@ -108,6 +108,7 @@ const ERRORS = {
 	invalid_name: "A name is 1 to 100 characters on one line.",
 	invalid_pinned: "The Mac did not understand that pin.",
 	session_running: "This session is running. Quit it on the Mac first, then delete it here.",
+	session_starting: "This session is already starting.",
 	unknown_entry: "That output is no longer in this session.",
 	not_found: "The Mac does not know that request. It may run an older bluclawd.",
 	terminal_command: "That command runs only on the Mac, so the phone does not send it.",

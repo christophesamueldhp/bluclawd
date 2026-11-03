@@ -73,6 +73,7 @@ describe("PWA icons", () => {
 					launch: () => undefined,
 					startSession: () => "",
 					claimStart: () => ({ ok: false, refused: "running" }),
+					paneStarting: () => {},
 					startFailed: () => {},
 					terminalOpen: () => true,
 					renameInstance: () => false,

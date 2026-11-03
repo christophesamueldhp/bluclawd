@@ -2140,11 +2140,10 @@ export class AgentView implements Component, Focusable {
 		}
 		boxed.push(border("╰", "╯"));
 		const typed = !!this.reply.getValue();
-		const starting = row.starting;
 		const enter = typed ? "send" : this.resumable(row) ? "resume" : "open";
 		boxed.push(
 			this.hints(width, [
-				typed || !starting ? `enter to ${enter}` : undefined,
+				typed || !row.starting ? `enter to ${enter}` : undefined,
 				typed ? "esc to close" : "space to close",
 				`ctrl+x to ${this.armedFor(row) ? "confirm" : "delete"}`,
 			]),

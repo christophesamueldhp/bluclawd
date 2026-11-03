@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { handleIpcRequest, listSummaries } from "../daemon/handler.ts";
 import { loadInstances, saveInstances } from "../daemon/storage.ts";
-import { type ServerSupervisor, START_MS } from "../daemon/supervisor.ts";
+import { ServerSupervisor, START_MS } from "../daemon/supervisor.ts";
 import { testRegistry } from "./helpers/registry.ts";
 
 describe("agent-view stored rows", () => {
@@ -309,7 +309,7 @@ describe("a resume goes through the registry: starting, then live", () => {
 
 	it("a new session is listed as starting by its pane's id until that pane registers", () => {
 		const supervisor = testRegistry(dir);
-		expect(supervisor.claimStart({ cwd: "/p", label: "new task", pane: "pi-n" })).toEqual({ ok: true, id: "pi-n" });
+		supervisor.paneStarting({ cwd: "/p", label: "new task", pane: "pi-n" });
 		expect(listSummaries(supervisor)).toEqual([
 			expect.objectContaining({ id: "pi-n", status: "starting", label: "new task", pane: "pi-n" }),
 		]);
@@ -338,13 +338,29 @@ describe("a resume goes through the registry: starting, then live", () => {
 		});
 	});
 
-	it("deleting a starting row ends its start", () => {
+	it("deleting a resuming session's stored row does not free its file while its pane starts", () => {
 		const supervisor = testRegistry(dir);
-		const claim = supervisor.claimStart({ cwd: "/p", sessionFile: file });
-		supervisor.claimStart({ cwd: "/p", pane: "pi-n" });
-		if (!claim.ok) throw new Error("refused");
-		expect(supervisor.deleteInstance(claim.id)).toBe(true);
-		expect(supervisor.deleteInstance("pi-n")).toBe(true);
+		const { id } = supervisor.saveInstance({ cwd: "/p", sessionFile: file })!;
+		supervisor.claimStart({ cwd: "/p", sessionFile: file });
+		supervisor.deleteInstance(id);
+		expect(supervisor.claimStart({ cwd: "/p", sessionFile: file })).toEqual({ ok: false, refused: "starting" });
+		expect(rows(supervisor)).toEqual([expect.objectContaining({ id, status: "starting" })]);
+	});
+
+	it("a new session whose pane is gone before it registered stops being listed at once", () => {
+		let up = true;
+		const supervisor = new ServerSupervisor({ now: () => Date.now(), tmux: { hasSession: () => up }, dir });
+		supervisor.paneStarting({ cwd: "/p", pane: "pi-n" });
+		expect(listSummaries(supervisor)).toHaveLength(1);
+		up = false;
 		expect(listSummaries(supervisor)).toEqual([]);
+	});
+
+	it("a pane past its heartbeat's TTL does not refuse a resume", () => {
+		let now = Date.parse("2026-10-30T10:00:00.000Z");
+		const supervisor = testRegistry(dir, () => now);
+		supervisor.registerExternal(pane("pi-a"), "idle", now);
+		now += 20_000;
+		expect(supervisor.claimStart({ cwd: "/p", sessionFile: file })).toMatchObject({ ok: true });
 	});
 });

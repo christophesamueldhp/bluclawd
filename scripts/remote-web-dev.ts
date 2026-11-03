@@ -51,6 +51,7 @@ const server = await startRemoteServer(
 		launch: () => undefined,
 		startSession: () => "pi-new",
 		claimStart: () => ({ ok: true, id: "pi-new" }),
+		paneStarting: () => {},
 		startFailed: () => {},
 		terminalOpen: () => true,
 		report: () => undefined,

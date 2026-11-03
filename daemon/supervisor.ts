@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { AgentActivity } from "./activity.ts";
-import type { EndReason, PaneMessage, StartSpec } from "./ipc/protocol.ts";
+import type { EndReason, NewPaneSpec, PaneMessage, ResumeSpec } from "./ipc/protocol.ts";
 import { readSessionTail } from "./session-state.ts";
 import { getInstance, loadInstances, removeInstance, saveInstances, upsertInstance } from "./storage.ts";
 import type { InstanceRecord } from "./types.ts";
@@ -132,44 +132,52 @@ export class ServerSupervisor {
 		return taken;
 	}
 
-	/** Rows a start claimed, but for those whose time is up: their pane never registered. */
+	/** Rows listed as starting, but for those whose pane will not register: its time is up, or a
+	 *  new session's tmux session is gone (pi failed to start). */
 	private starting(): Map<string, Starting> {
 		const now = this.deps.now();
-		for (const [id, starting] of this.startingRows) if (now > starting.until) this.startingRows.delete(id);
+		for (const [id, { record, until }] of this.startingRows) {
+			if (now > until || (record.pane && !this.deps.tmux.hasSession(record.pane))) this.startingRows.delete(id);
+		}
 		return this.startingRows;
 	}
 
 	/**
 	 * Before a pane is started on a session file: its row (the file's stored one, else a new one) is
 	 * listed as starting until the pane registers, and another start on that file is refused
-	 * meanwhile, or while a pane runs it. A new session, which has no file yet, is claimed once its
-	 * pane is started, by the pane's id, which its row registers as.
+	 * meanwhile, or while a pane runs it.
 	 */
-	claimStart(options: StartSpec): StartClaim {
+	claimStart(spec: ResumeSpec): StartClaim {
 		const now = this.deps.now();
-		let id: string;
-		let stored: InstanceRecord | undefined;
-		if ("sessionFile" in options) {
-			const file = options.sessionFile;
-			if ([...this.externalInstances.values()].some((entry) => entry.record.sessionFile === file)) {
-				return { ok: false, refused: "running" };
-			}
-			if ([...this.starting().values()].some((starting) => starting.record.sessionFile === file)) {
-				return { ok: false, refused: "starting" };
-			}
-			stored = loadInstances(this.deps.dir).find((instance) => instance.sessionFile === file);
-			id = stored?.id ?? randomUUID();
-		} else id = options.pane;
-		const record: InstanceRecord = {
+		const file = spec.sessionFile;
+		const running = [...this.externalInstances.values()].some(
+			(entry) => entry.record.sessionFile === file && now - entry.lastSeenAt <= EXTERNAL_TTL_MS,
+		);
+		if (running) return { ok: false, refused: "running" };
+		if ([...this.starting().values()].some((starting) => starting.record.sessionFile === file)) {
+			return { ok: false, refused: "starting" };
+		}
+		const stored = loadInstances(this.deps.dir).find((instance) => instance.sessionFile === file);
+		const id = stored?.id ?? randomUUID();
+		this.listStarting({
 			id,
-			status: "starting",
-			cwd: stored?.cwd ?? options.cwd,
-			createdAt: stored?.createdAt ?? new Date(now).toISOString(),
-			label: stored?.label ?? options.label,
-			...("sessionFile" in options ? { sessionFile: options.sessionFile } : { pane: options.pane }),
-		};
-		this.startingRows.set(id, { record, until: now + START_MS });
+			cwd: stored?.cwd ?? spec.cwd,
+			label: stored?.label ?? spec.label,
+			createdAt: stored?.createdAt,
+			sessionFile: file,
+		});
 		return { ok: true, id };
+	}
+
+	/** A new session's pane, just started: listed as starting by its id, which its row registers as. */
+	paneStarting(spec: NewPaneSpec): void {
+		this.listStarting({ id: spec.pane, cwd: spec.cwd, label: spec.label, pane: spec.pane });
+	}
+
+	private listStarting(fields: Omit<InstanceRecord, "status" | "createdAt"> & { createdAt?: string }): void {
+		const now = this.deps.now();
+		const createdAt = fields.createdAt ?? new Date(now).toISOString();
+		this.startingRows.set(fields.id, { record: { ...fields, createdAt, status: "starting" }, until: now + START_MS });
 	}
 
 	/** Its pane could not be started: the row is listed as it was. */
@@ -381,7 +389,6 @@ export class ServerSupervisor {
 
 	/** Remove the row. The session's .jsonl stays on disk, resumable with /resume. */
 	deleteInstance(instanceId: string): boolean {
-		const starting = this.startingRows.delete(instanceId);
 		// A self-registered session's process is its pane's; its row goes until it registers again,
 		// with the stored row it went on as.
 		const pane = this.paneOf(instanceId);
@@ -392,11 +399,10 @@ export class ServerSupervisor {
 			return true;
 		}
 		const stored = getInstance(this.deps.dir, instanceId);
-		if (!stored) return starting;
+		if (!stored) return false;
 		const due = stored.sessionFile ? this.savesDue.get(stored.sessionFile) : undefined;
 		if (due) due.deleted = true;
-		// A pane resuming it keeps its pin and order: the phone's goes once its pane registered,
-		// agent view's before it has.
+		// A pane resuming it, registered or still starting, keeps its pin and order.
 		const meta = paneMeta(stored);
 		if (stored.sessionFile && meta) {
 			const pane = [...this.externalInstances.values()].find((e) => e.record.sessionFile === stored.sessionFile);

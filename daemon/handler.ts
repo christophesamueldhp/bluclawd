@@ -263,8 +263,11 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 		}
 
 		case "start": {
-			const { type: _, ...options } = request;
-			const claim = supervisor.claimStart(options);
+			if ("pane" in request) {
+				supervisor.paneStarting(request);
+				return { type: "start_result", ok: true, id: request.pane };
+			}
+			const claim = supervisor.claimStart(request);
 			if (!claim.ok) return { type: "error", ok: false, error: START_REFUSED[claim.refused] };
 			return { type: "start_result", ok: true, id: claim.id };
 		}
