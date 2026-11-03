@@ -42,7 +42,7 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.46";
+const VERSION = "0.0.47";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 
 function loadViewMode() {
