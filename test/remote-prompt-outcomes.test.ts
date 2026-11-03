@@ -359,17 +359,24 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 	 * `row-<id>`, as a pane the phone started is. `deliver`: a beat that delivers the prompts sent,
 	 * which it reports, the first taken and the ones after it queued.
 	 */
-	async function tmuxPane(id: string) {
+	async function tmuxPane(id: string, options: { started?: boolean } = {}) {
 		const client = new OrchestratorClient();
 		const sessionFile = join(dir, `${id}.jsonl`);
-		const row = `row-${id}`;
-		upsertInstance(dir, {
-			id: row,
-			status: "stopped",
-			cwd: dir,
-			createdAt: new Date(clock).toISOString(),
-			sessionFile,
-		});
+		let row = `row-${id}`;
+		if (options.started) {
+			// A start claimed its row, and pi has not written its session's file yet.
+			const claim = supervisor.claimStart({ cwd: dir, sessionFile });
+			if (!claim.ok) throw new Error("not claimed");
+			row = claim.id;
+		} else {
+			upsertInstance(dir, {
+				id: row,
+				status: "stopped",
+				cwd: dir,
+				createdAt: new Date(clock).toISOString(),
+				sessionFile,
+			});
+		}
 		const beat = () => client.register({ id, cwd: dir, sessionFile, pane: id });
 		const report = (outcomes: PromptOutcome[]) => client.remoteReport(id, { models: [], outcomes });
 		await beat();
@@ -410,6 +417,24 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		await phone.until({ id: "p-second", outcome: "taken" });
 		expect(phone.seen().filter((o) => o.outcome === "lost")).toEqual([]);
 		expect((await status(pane.row)).outcomes).toEqual(taken);
+	});
+
+	it("is never lost when a pane a start claimed a row for, its session's file not written yet, is reaped while still alive and comes back", async () => {
+		const pane = await tmuxPane("pane-started", { started: true });
+		const phone = await watch(pane.row);
+		expect(await prompt(pane.row, { text: "first", id: "p-first" })).toBe(202);
+		expect(await prompt(pane.row, { text: "second", id: "p-second" })).toBe(202);
+		await pane.deliver();
+		await phone.until({ id: "p-second", outcome: "queued" });
+		await reap("pane-started");
+		await pane.beat();
+		expect(supervisor.rowIdOf("pane-started")).toBe(pane.row);
+		await pane.report([
+			{ id: "p-first", outcome: "taken" },
+			{ id: "p-second", outcome: "taken" },
+		]);
+		await phone.until({ id: "p-second", outcome: "taken" });
+		expect(phone.seen().filter((o) => o.outcome === "lost")).toEqual([]);
 	});
 
 	it.each([

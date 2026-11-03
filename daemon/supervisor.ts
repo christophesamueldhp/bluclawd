@@ -102,9 +102,9 @@ export class ServerSupervisor {
 	 *  queued for it: its pi may only be held up (the Mac slept), so what it was given waits on it.
 	 *  onDropped follows once its tmux session is gone or it unregisters, unless it beats again. */
 	onSilent: ((rowId: string, inbox: PaneMessage[]) => void) | undefined;
-	/** Panes reaped while tmux still has their session, by pane id: the row each was listed as, and
-	 *  its tmux session. */
-	private readonly silentPanes = new Map<string, { rowId: string; pane: string }>();
+	/** Panes reaped while tmux still has their session, by pane id: the row each was listed as, its
+	 *  tmux session, and its session's file. */
+	private readonly silentPanes = new Map<string, { rowId: string; pane: string; sessionFile?: string }>();
 
 	constructor(deps: RegistryDeps) {
 		this.deps = deps;
@@ -113,7 +113,11 @@ export class ServerSupervisor {
 	/** Register/heartbeat a pane's pi. */
 	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = this.deps.now()): void {
 		const previous = this.externalInstances.get(record.id);
+		const silent = this.silentPanes.get(record.id);
 		this.silentPanes.delete(record.id);
+		// The same pane beating again on the same session goes on as the row it fell silent as, which
+		// may have no stored row yet (a row a start claimed, before pi wrote its file).
+		const back = silent?.pane === record.pane && silent?.sessionFile === record.sessionFile ? silent : undefined;
 		const resumed = record.sessionFile ? this.resumedMeta.get(record.sessionFile) : undefined;
 		if (record.sessionFile) {
 			this.resumedMeta.delete(record.sessionFile);
@@ -137,6 +141,7 @@ export class ServerSupervisor {
 			// A pane that went on to another session leaves the row stored under its id to that one.
 			rowId:
 				previous?.rowId ??
+				back?.rowId ??
 				stored?.id ??
 				claimed?.id ??
 				(getInstance(this.deps.dir, record.id) ? randomUUID() : record.id),
@@ -370,7 +375,7 @@ export class ServerSupervisor {
 				if (pane && up) {
 					this.externalInstances.delete(id);
 					this.settleWait(id, "none");
-					this.silentPanes.set(id, { rowId: entry.rowId, pane });
+					this.silentPanes.set(id, { rowId: entry.rowId, pane, sessionFile });
 					this.onSilent?.(entry.rowId, entry.inbox);
 					continue;
 				}
