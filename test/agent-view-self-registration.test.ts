@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { OrchestratorClient, PaneMessage, RegisterInput } from "../daemon/orchestrator-client.ts";
+import type { PaneMessage } from "../daemon/ipc/protocol.ts";
+import type { OrchestratorClient, RegisterInput } from "../daemon/orchestrator-client.ts";
 import { piCommand } from "../daemon/tmux.ts";
 import {
 	deriveLabel,

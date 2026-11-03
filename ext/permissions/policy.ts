@@ -35,12 +35,15 @@ export function evaluateToolCallDeny(
 ): ToolCallEventResult | undefined {
 	const deny = [...denyRules];
 	const { tool, input } = governedToolCall(toolName, rawInput);
-	const rule =
+	// A batch is judged item by item: each query of a websearch, each url of a webfetch.
+	const urls = tool === "webfetch" && Array.isArray(input.urls) ? input.urls.filter((u) => typeof u === "string") : [];
+	const calls =
 		tool === "websearch" && Array.isArray(input.queries)
-			? searchQueries(input)
-					.map((query) => deniedBy(deny, tool, { query }, cwd))
-					.find((r) => r !== undefined)
-			: deniedBy(deny, tool, input, cwd);
+			? searchQueries(input).map((query) => ({ query }))
+			: urls.length > 0
+				? urls.map((url) => ({ url }))
+				: [input];
+	const rule = calls.map((call) => deniedBy(deny, tool, call, cwd)).find((r) => r !== undefined);
 	if (rule === undefined) return undefined;
 	return { block: true, reason: `Blocked by permission rule (deny): ${displayRule(rule)}` };
 }

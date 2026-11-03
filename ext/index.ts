@@ -29,6 +29,7 @@ import remote from "./remote/index.ts";
 import sandbox from "./sandbox/index.ts";
 import subagents from "./subagents/index.ts";
 import vibes from "./vibes/index.ts";
+import web from "./web/index.ts";
 
 export function bluclawdExtensions(): InlineExtension[] {
 	return [
@@ -44,5 +45,6 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "vibes", factory: vibes },
 		{ name: "paste", factory: paste },
 		{ name: "prompt-assist", factory: promptAssist },
+		{ name: "web", factory: web },
 	];
 }

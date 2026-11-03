@@ -14,13 +14,8 @@ import type {
 	InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
-import {
-	currentDaemonBuildId,
-	OrchestratorClient,
-	type PaneMessage,
-	type PaneReport,
-	type RemoteResult,
-} from "../../daemon/orchestrator-client.ts";
+import type { PaneMessage, PaneReport } from "../../daemon/ipc/protocol.ts";
+import { currentDaemonBuildId, OrchestratorClient, type RemoteResult } from "../../daemon/orchestrator-client.ts";
 import { piCommand, Tmux } from "../../daemon/tmux.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
 import { remotePort } from "../_shared/settings.ts";

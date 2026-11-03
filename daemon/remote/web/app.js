@@ -11,7 +11,7 @@ import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
-import { ageAt, STATE_WORDS, sessionGroups, statusGlyph, successor, viewMode } from "./list.js";
+import { ageAt, STATE_WORDS, sessionGroups, sharedWarning, statusGlyph, successor, viewMode } from "./list.js";
 import { refused, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 import { loaderHtml } from "./mascot.js";
@@ -33,7 +33,7 @@ import {
 
 /**
  * `sessionId`: pi's, the same under another row id; `dialog`: the one it waits on, while it needs input.
- * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, sessionId?: string, dialog?: { kind: string, title?: string } }} Session
+ * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, sessionId?: string, dialog?: { kind: string, title?: string }, livePanes?: number }} Session
  */
 /** `aborted`: a reply its turn was stopped in, empty when stopped before it said anything. @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, aborted?: boolean, toolCallId?: string, toolName?: string, command?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
@@ -713,9 +713,17 @@ function rowHtml(s) {
 	const where = s.cwd.split("/").filter(Boolean).at(-1);
 	// What it waits on or does; its band already names its state.
 	const doing = s.dialog?.title || s.detail;
-	const detail = [where, doing].filter(Boolean).join(" · ");
+	const warning = sharedWarning(s);
+	// The warning first, so a long folder name never truncates it away.
+	const detail = [
+		warning && `<span class="shared-warning">${esc(warning)}</span>`,
+		where && esc(where),
+		doing && esc(doing),
+	]
+		.filter(Boolean)
+		.join(" · ");
 	return `<a class="row${s.alive ? "" : " closed"}" href="#s/${encodeURIComponent(s.id)}"><span class="glyph ${esc(s.state)}" aria-hidden="true">${glyph}</span>
-<span class="name">${esc(s.label)}<small><span class="session-state ${esc(s.state)}">${esc(status)}</span>${detail ? ` · ${esc(detail)}` : ""}</small></span>
+<span class="name">${esc(s.label)}<small><span class="session-state ${esc(s.state)}">${esc(status)}</span>${detail ? ` · ${detail}` : ""}</small></span>
 <span class="age">${age(ageAt(s))}</span></a>`;
 }
 

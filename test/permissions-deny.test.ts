@@ -393,6 +393,15 @@ describe("the extension", () => {
 		expect(await call("websearch", { queries: ["vitest"] })).toBeUndefined();
 	});
 
+	it("judges a webfetch batch url by url, never by its query", async () => {
+		const { handlers, ctx, call } = load({
+			permissions: { deny: ["WebFetch(domain:evil.com)", "WebFetch(*secret*)"] },
+		});
+		await handlers.session_start({}, ctx);
+		expect((await call("webfetch", { urls: ["https://ok.dev", "https://evil.com/x"] }))?.block).toBe(true);
+		expect(await call("webfetch", { urls: ["https://ok.dev"], query: "the secret" })).toBeUndefined();
+	});
+
 	it("judges powershell as bash", async () => {
 		const { handlers, ctx, call } = load({ permissions: { deny: ["Read(**/.env*)"] } });
 		writeFileSync(join(dir, ".env"), "A=1\n");

@@ -41,6 +41,19 @@ describe("remote sessions", () => {
 		expect(remoteSessions([live("a", "idle", { settled: 3 })])[0].settled).toBe(3);
 	});
 
+	it("lists both panes running one session file, each saying how many share it", () => {
+		const sessions = remoteSessions([
+			live("a", "idle", { sessionFile: "/s/x.jsonl" }),
+			live("b", "idle", { sessionFile: "/s/x.jsonl" }),
+			live("c", "idle"),
+		]);
+		expect(sessions.map((s) => [s.id, s.livePanes]).sort()).toEqual([
+			["a", 2],
+			["b", 2],
+			["c", undefined],
+		]);
+	});
+
 	it("puts pinned rows in their own band, first", () => {
 		const sessions = remoteSessions([live("a", "working"), live("p", "idle", { pinned: true })]);
 		expect(sessions.map((s) => [s.id, s.band])).toEqual([
@@ -67,13 +80,21 @@ describe("remote sessions", () => {
 
 	it("finds a session's file, whether a pane runs it and whether it is mid-turn", () => {
 		const stored: InstanceSummary = { id: "old", status: "stopped", cwd: "/p", sessionFile: "/s/old.jsonl" };
-		const list = [stored, live("b", "idle", { leafId: "e3" }), live("c", "working"), live("d", "awaiting_input")];
+		const list = [
+			stored,
+			live("b", "idle", { leafId: "e3", sessionId: "pi-b" }),
+			live("c", "working"),
+			live("d", "awaiting_input"),
+		];
+		// Its pane's start and pi's session id: what the pane's pistatusline shows of it.
 		expect(findSession(list, "b")).toEqual({
 			sessionFile: "/s/b.jsonl",
 			cwd: "/p",
 			running: true,
 			busy: false,
 			leafId: "e3",
+			createdAt: "2026-10-12T00:00:00Z",
+			sessionId: "pi-b",
 		});
 		expect(findSession(list, "c")).toMatchObject({ running: true, busy: true });
 		expect(findSession(list, "d")).toMatchObject({ running: true, busy: true });

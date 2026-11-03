@@ -17,7 +17,8 @@ import {
 	isKeyRepeat,
 	matchesKey,
 } from "@earendil-works/pi-tui";
-import { type InstanceSummary, OrchestratorClient, type PaneMessage } from "../../daemon/orchestrator-client.ts";
+import type { PaneMessage } from "../../daemon/ipc/protocol.ts";
+import { type InstanceSummary, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { collectRows, labelFromTask } from "../../daemon/rows.ts";
 import { lastLine, textOf, toolActivity } from "../../daemon/session-state.ts";
 import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, Tmux } from "../../daemon/tmux.ts";

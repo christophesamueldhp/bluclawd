@@ -4,7 +4,7 @@
  * fires per token) and cleared with null once the transcript has it.
  */
 
-import type { LiveSnapshot } from "../../daemon/orchestrator-client.ts";
+import type { LiveSnapshot } from "../../daemon/ipc/protocol.ts";
 import { clip, toolSummary } from "../../daemon/remote/transcript.ts";
 import { textOf } from "../../daemon/session-state.ts";
 

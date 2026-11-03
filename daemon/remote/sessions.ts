@@ -28,6 +28,8 @@ export interface RemoteSession {
 	dialog?: { kind: string; title?: string };
 	/** How many times it stopped working: the notifier's cue for a turn too quick to be seen working. */
 	settled?: number;
+	/** Set when more than one live pi writes this session's file: how many. */
+	livePanes?: number;
 }
 
 function sessionRows(instances: InstanceSummary[]): AgentRow[] {
@@ -52,6 +54,7 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 				sessionId: row.sessionId,
 				...(row.dialog ? { dialog: row.dialog } : {}),
 				...(row.settled !== undefined ? { settled: row.settled } : {}),
+				...(row.livePanes ? { livePanes: row.livePanes } : {}),
 			});
 		}
 	}
@@ -60,21 +63,21 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 
 /** `running`: a pane's pi is registered as this id, so a queued message reaches it. `busy`: mid-turn,
  *  working or waiting on an answer. `pane`: the tmux session that pi registered from, if any.
- *  `draft`: its prompt held unsent text at its last heartbeat. */
-export function findSession(
-	instances: InstanceSummary[],
-	id: string,
-):
-	| {
-			sessionFile?: string;
-			cwd: string;
-			running: boolean;
-			busy: boolean;
-			leafId?: string;
-			pane?: string;
-			draft?: boolean;
-	  }
-	| undefined {
+ *  `draft`: its prompt held unsent text at its last heartbeat. `createdAt` and `sessionId`: its
+ *  pane's start and pi's session id. */
+export interface ListedSession {
+	sessionFile?: string;
+	cwd: string;
+	running: boolean;
+	busy: boolean;
+	leafId?: string;
+	pane?: string;
+	draft?: boolean;
+	createdAt?: string;
+	sessionId?: string;
+}
+
+export function findSession(instances: InstanceSummary[], id: string): ListedSession | undefined {
 	const row = sessionRows(instances).find((r) => r.id === id);
 	if (!row) return undefined;
 	const pane = instances.find((i) => i.id === id && i.external === true);
@@ -86,5 +89,7 @@ export function findSession(
 		...(pane?.leafId ? { leafId: pane.leafId } : {}),
 		...(pane?.pane ? { pane: pane.pane } : {}),
 		...(pane?.draft ? { draft: true } : {}),
+		...(pane?.createdAt ? { createdAt: pane.createdAt } : {}),
+		...(pane?.sessionId ? { sessionId: pane.sessionId } : {}),
 	};
 }

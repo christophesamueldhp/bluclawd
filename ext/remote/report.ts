@@ -8,8 +8,13 @@ import { dirname, isAbsolute, join } from "node:path";
 import { getSupportedThinkingLevels, type ModelThinkingLevel, type Usage } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import { phoneMayRun } from "../../daemon/ipc/protocol.ts";
-import type { PaneCommand, PaneMessage, PaneReport, PaneTask } from "../../daemon/orchestrator-client.ts";
+import {
+	type PaneCommand,
+	type PaneMessage,
+	type PaneReport,
+	type PaneTask,
+	phoneMayRun,
+} from "../../daemon/ipc/protocol.ts";
 import { subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import type { ProjectTrust } from "../_shared/trust-badge.ts";
