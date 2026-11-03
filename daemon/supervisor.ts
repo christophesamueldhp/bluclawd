@@ -173,9 +173,18 @@ export class ServerSupervisor {
 	private starting(): Map<string, Starting> {
 		const now = this.deps.now();
 		for (const [id, { record, until }] of this.startingRows) {
-			if (now > until || (record.pane && !this.deps.tmux.hasSession(record.pane))) this.startingRows.delete(id);
+			if (now > until || (record.pane && this.paneGone(record.pane))) this.startingRows.delete(id);
 		}
 		return this.startingRows;
+	}
+
+	/** Only when tmux says so: a probe that fails says nothing, and must not fail a list. */
+	private paneGone(pane: string): boolean {
+		try {
+			return !this.deps.tmux.hasSession(pane);
+		} catch {
+			return false;
+		}
 	}
 
 	/**

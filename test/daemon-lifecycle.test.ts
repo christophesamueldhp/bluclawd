@@ -445,6 +445,17 @@ describe("a resume goes through the registry: starting, then live", () => {
 		expect(listSummaries(supervisor)).toEqual([]);
 	});
 
+	it("a tmux that cannot be asked leaves a new session starting, and the list still answers", () => {
+		const tmux = {
+			hasSession: (): boolean => {
+				throw new Error("tmux timed out");
+			},
+		};
+		const supervisor = new ServerSupervisor({ now: () => Date.now(), tmux, dir });
+		supervisor.paneStarting({ cwd: "/p", pane: "pi-n" });
+		expect(listSummaries(supervisor)).toEqual([expect.objectContaining({ id: "pi-n", status: "starting" })]);
+	});
+
 	it("a pane past its heartbeat's TTL does not refuse a resume", () => {
 		let now = Date.parse("2026-10-30T10:00:00.000Z");
 		const supervisor = testRegistry(dir, () => now);
