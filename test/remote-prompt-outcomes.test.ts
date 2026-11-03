@@ -63,7 +63,7 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
 		control = remoteControl();
 		setRemoteControl(control);
-		supervisor.onDropped = (rowId, inbox, reason) => control.dropped(rowId, inbox, reason);
+		supervisor.onDropped = (rowId, inbox, reason, pane) => control.dropped(rowId, inbox, reason, pane);
 		supervisor.onSilent = (rowId, inbox) => control.silent(rowId, inbox);
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });
 		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
@@ -479,6 +479,33 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 			{ id: "p-second", outcome: "queued" },
 			{ id: "p-third", outcome: "lost", reason: "pane_gone" },
 		]);
+	});
+
+	it("is not lost when a silent pane dies after another pane went on as its row", async () => {
+		const old = await tmuxPane("pane-old");
+		const phone = await watch(old.row);
+		expect(await prompt(old.row, { text: "first", id: "p-first" })).toBe(202);
+		expect(await prompt(old.row, { text: "second", id: "p-second" })).toBe(202);
+		await old.deliver();
+		await phone.until({ id: "p-second", outcome: "queued" });
+		await reap("pane-old");
+		// The session resumed in another pane, which goes on as its row.
+		const client = new OrchestratorClient();
+		const sessionFile = join(dir, "pane-old.jsonl");
+		await client.register({ id: "pane-new", cwd: dir, sessionFile, pane: "pane-new" });
+		expect(supervisor.rowIdOf("pane-new")).toBe(old.row);
+		expect(await prompt(old.row, { text: "third", id: "p-third" })).toBe(202);
+		await client.register({ id: "pane-new", cwd: dir, sessionFile, pane: "pane-new" });
+		await client.remoteReport("pane-new", { models: [], outcomes: [{ id: "p-third", outcome: "queued" }] });
+		await phone.until({ id: "p-third", outcome: "queued" });
+		tmuxGone.add("pane-old");
+		await phone.until({ id: "p-second", outcome: "lost", reason: "pane_gone" });
+		expect(await (await watch(old.row)).replayed()).toEqual([
+			{ id: "p-first", outcome: "taken" },
+			{ id: "p-second", outcome: "lost", reason: "pane_gone" },
+			{ id: "p-third", outcome: "queued" },
+		]);
+		await client.unregister("pane-new", "quit");
 	});
 
 	it("is lost when pi drops it from its queue, live and to a stream that reconnects, past the pane's next session", async () => {

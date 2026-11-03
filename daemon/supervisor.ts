@@ -95,9 +95,9 @@ export class ServerSupervisor {
 	private readonly resumedMeta = new Map<string, Pick<InstanceRecord, "pinned" | "sortOrder">>();
 	/** Rows a start claimed whose pane has not registered yet, by row id. */
 	private readonly startingRows = new Map<string, Starting>();
-	/** A pane went, reaped or unregistered, listed as `rowId` and with `inbox` still queued for it.
+	/** Pane `pane` went, reaped or unregistered, listed as `rowId` and with `inbox` still queued for it.
 	 *  `reason`: why its session ended, when it unregistered saying so. */
-	onDropped: ((rowId: string, inbox: PaneMessage[], reason?: EndReason) => void) | undefined;
+	onDropped: ((rowId: string, inbox: PaneMessage[], reason: EndReason | undefined, pane: string) => void) | undefined;
 	/** A pane was reaped while tmux still has its session, listed as `rowId` and with `inbox` still
 	 *  queued for it: its pi may only be held up (the Mac slept), so what it was given waits on it.
 	 *  onDropped follows once its tmux session is gone or it unregisters, unless it beats again. */
@@ -279,7 +279,7 @@ export class ServerSupervisor {
 		const silent = this.silentPanes.get(id);
 		if (silent) {
 			this.silentPanes.delete(id);
-			this.onDropped?.(silent.rowId, [], reason);
+			this.onDropped?.(silent.rowId, [], reason, id);
 		}
 		const file = entry?.record.sessionFile;
 		const stops = reason === "quit" || endedForAnother(reason);
@@ -297,7 +297,7 @@ export class ServerSupervisor {
 	private drop(id: string, entry: ExternalInstance, reason?: EndReason): void {
 		this.externalInstances.delete(id);
 		this.settleWait(id, "none");
-		this.onDropped?.(entry.rowId, entry.inbox, reason);
+		this.onDropped?.(entry.rowId, entry.inbox, reason, id);
 	}
 
 	/** Queue a message for a self-registered session, by its pane's id or its row's; false when no
@@ -363,7 +363,7 @@ export class ServerSupervisor {
 		for (const [id, { rowId, record }] of this.silentPanes) {
 			if (!record.pane || !this.paneGone(record.pane)) continue;
 			this.silentPanes.delete(id);
-			this.onDropped?.(rowId, []);
+			this.onDropped?.(rowId, [], undefined, id);
 		}
 		const out: Array<{ record: InstanceRecord; activity: AgentActivity; settled: number; silent?: true }> = [];
 		for (const [id, entry] of this.externalInstances) {
