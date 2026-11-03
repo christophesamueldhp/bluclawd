@@ -59,6 +59,15 @@ export function sharedWarning(session) {
 	return session.livePanes ? `⚠ ${session.livePanes} panes on one session` : "";
 }
 
+/**
+ * A session the phone can prompt or change: running and answering (the Mac refuses what is sent to
+ * a silent one), with a terminal on the Mac showing pi (`terminalOpen`).
+ * @param {Session | undefined} session @param {boolean} terminalOpen
+ */
+export function actable(session, terminalOpen) {
+	return session?.alive === true && !session.silent && terminalOpen;
+}
+
 /** A session started from here is up: its row is listed, no longer starting. @param {Session[]} sessions @param {string} id */
 export function paneUp(sessions, id) {
 	return sessions.some((s) => s.id === id && !s.starting);

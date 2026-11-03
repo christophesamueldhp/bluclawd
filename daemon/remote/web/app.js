@@ -22,7 +22,7 @@ import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
-import { ageAt, paneUp, STATE_WORDS, sessionGroups, sharedWarning, statusGlyph, viewMode } from "./list.js";
+import { actable, ageAt, paneUp, STATE_WORDS, sessionGroups, sharedWarning, statusGlyph, viewMode } from "./list.js";
 import { refused, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 import { loaderHtml } from "./mascot.js";
@@ -91,6 +91,7 @@ const ERRORS = {
 	pi_not_open: "pi is not open on the Mac. Open it in a terminal there to continue.",
 	session_busy: "The session is busy. Try again once it is done.",
 	no_status: "This session has not reported its status yet.",
+	session_silent: "This session is not answering on the Mac, which may be asleep or busy.",
 	pane_too_old:
 		"This session has not reported yet. Try again in a moment; if this persists, restart it (it may run an older bluclawd).",
 	invalid_cwd: "That directory does not exist on the Mac.",
@@ -1000,9 +1001,9 @@ function liveHtml(live, calls) {
 	return parts.join("");
 }
 
-/** A session the phone can prompt or change: running, with a terminal on the Mac showing pi. @param {Session | undefined} session */
+/** See actable. @param {Session | undefined} session */
 function canAct(session) {
-	return session?.alive === true && state.terminalOpen;
+	return actable(session, state.terminalOpen);
 }
 
 /** @param {Session | undefined} session */
@@ -1076,8 +1077,9 @@ function sheetHtml(session) {
 	const head = `<header class="sheet-bar"><h2>Status</h2><span class="sheet-tools">${pin}<button class="icon-btn close" id="sheet-close" aria-label="Close">${ICONS.close}</button></span></header>
 ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
 	if (report === undefined) return `${head}${loaderHtml()}`;
-	if (report === null) {
-		const why = session && !session.alive ? "session_not_running" : "no_status";
+	// A silent one's last report is not its status, and the Mac refuses its settings meanwhile.
+	if (report === null || session?.silent) {
+		const why = session && !session.alive ? "session_not_running" : session?.silent ? "session_silent" : "no_status";
 		return `${head}<p class="muted">${esc(errorText(why))}</p>`;
 	}
 	return `${head}${settingsHtml(report)}
@@ -1106,6 +1108,7 @@ const TASK_KINDS = { shell: "Shell", monitor: "Monitor", agent: "Agent" };
 /** The pane's background tasks, as /tasks lists them: each one's output a tap away, and Stop, confirmed in place. */
 function tasksHtml() {
 	const tasks = state.chat.report?.tasks ?? [];
+	const closed = !canAct(state.sessions.find((s) => s.id === state.chat.id));
 	const now = Date.now();
 	const rows = tasks.map((task) => {
 		const id = esc(task.id);
@@ -1123,7 +1126,7 @@ function tasksHtml() {
 		const stop =
 			state.chat.confirmStop === task.id
 				? `<div class="confirm-delete"><span>Stop this task?</span><button class="unpair cancel" data-stop-cancel>Cancel</button><button class="unpair" data-stop-confirm="${id}">Stop</button></div>`
-				: `<button class="task-btn danger" data-stop="${id}"${stopping ? " disabled" : ""}>${stopping ? "Stopping…" : "Stop"}</button>`;
+				: `<button class="task-btn danger" data-stop="${id}"${stopping || closed ? " disabled" : ""}>${stopping ? "Stopping…" : "Stop"}</button>`;
 		return `<li class="task"><div class="task-head"><span class="task-kind">${esc(kind)}</span><span class="task-age">${esc(elapsedText(task.startedAt, now))}</span></div>
 <div class="task-label">${esc(task.label)}</div><div class="task-actions">${outputButton}${stop}</div>${shown}</li>`;
 	});
@@ -1410,7 +1413,7 @@ function updateChat() {
 	const turn = session?.state === "working" || session?.state === "needs";
 	if (!turn) state.chat.stopping = false;
 	const stop = $("#stop");
-	stop.hidden = !turn || !state.terminalOpen;
+	stop.hidden = !turn || !canAct(session);
 	stop.disabled = state.chat.stopping;
 	stop.classList.toggle("busy", state.chat.stopping);
 	const bar = $("#statusbar");
@@ -1476,7 +1479,13 @@ function updateChat() {
 	file.disabled = closed || state.chat.attachments.length + state.chat.reading >= ATTACH_MAX;
 	attach.classList.toggle("busy", state.chat.reading > 0);
 	file.setAttribute("aria-label", state.chat.reading ? "Reading the photos…" : "Attach photos");
-	text.placeholder = !closed ? "Reply" : session?.alive ? "Read only" : "Disconnected";
+	text.placeholder = !closed
+		? "Reply"
+		: session?.silent
+			? "Not responding"
+			: session?.alive
+				? "Read only"
+				: "Disconnected";
 	updateThumbs();
 	updateCommands();
 }
@@ -2297,7 +2306,10 @@ async function send() {
 	} catch (error) {
 		forget(chat, entry);
 		putBack(chat, entry);
-		handleError(error, "Not sent: ");
+		// Listed running, yet refused as not: its pane fell silent before the list said so.
+		if (error instanceof Error && error.message === "session_not_running" && session?.alive)
+			showError(`Not sent: ${errorText("session_silent")}`);
+		else handleError(error, "Not sent: ");
 	}
 }
 

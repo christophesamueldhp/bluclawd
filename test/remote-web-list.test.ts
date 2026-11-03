@@ -1,6 +1,15 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { ageAt, paneUp, STATE_WORDS, sessionGroups, sharedWarning, statusGlyph, viewMode } from "#remote-web/list.js";
+import {
+	actable,
+	ageAt,
+	paneUp,
+	STATE_WORDS,
+	sessionGroups,
+	sharedWarning,
+	statusGlyph,
+	viewMode,
+} from "#remote-web/list.js";
 import { livePanesWarning, STATE_WORDS as TERMINAL_STATE_WORDS } from "../daemon/rows.ts";
 
 const row = (id: string, state: string, more: Record<string, unknown> = {}) => ({
@@ -83,6 +92,15 @@ describe("session status on the phone", () => {
 			expect(statusGlyph(row("a", state))).toBe(state === "working" ? "" : "✻");
 			expect(statusGlyph(row("a", state, { alive: false }))).toBe("∙");
 		}
+	});
+
+	it("takes prompts and actions from the phone only while running, answering, and shown in a terminal", () => {
+		expect(actable(row("a", "idle"), true)).toBe(true);
+		expect(actable(row("a", "idle", { alive: false }), true)).toBe(false);
+		expect(actable(row("a", "idle"), false)).toBe(false);
+		expect(actable(undefined, true)).toBe(false);
+		// Its pane stopped answering: the Mac refuses what is sent until it is back.
+		expect(actable(row("a", "working", { silent: true }), true)).toBe(false);
 	});
 
 	it("warns, as the terminal does, when several panes run one session file", () => {

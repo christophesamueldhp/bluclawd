@@ -9,7 +9,9 @@
 // lost, as when Gamma's pane goes before taking them. Creating `<dir>/dequeue` has Gamma's pi drop
 // the prompts it queued (lost, dequeued), as stopping its turn does. Creating `<dir>/quit` quits
 // Gamma's pane for good: its row stops, and what it was sent is lost (pane_gone). While `<dir>/slow`
-// exists Gamma's status answers 5 s late, so a prompt can be sent before its report is in.
+// exists Gamma's status answers 5 s late, so a prompt can be sent before its report is in. While
+// `<dir>/silent` exists Gamma's row is silent (its pi stopped beating, tmux still has it): listed
+// alive, refusing prompts (409 `session_not_running`) and answering no status; seen on the next list.
 // Creating `<dir>/reply` makes Alpha stream a reply that runs a tool (see streamReply).
 import { appendFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -67,6 +69,7 @@ let quit = false;
 /** Once its pane quit, a stored row with no pane's pi. */
 function listedGamma(): InstanceSummary {
 	if (quit) return { ...gamma, status: "stopped", external: false };
+	if (existsSync(join(dir, "silent"))) return { ...gamma, silent: true, external: false };
 	return busy() ? { ...gamma, activity: "working" } : gamma;
 }
 
