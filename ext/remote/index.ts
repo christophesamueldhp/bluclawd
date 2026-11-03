@@ -318,27 +318,33 @@ function factory(pi: ExtensionAPI): void {
 			}
 		} else applyPaneMessage(message, ctx, pi, () => report(ctx));
 	});
+	/** pi's queue, which pi tells no extension it changes (Esc and the dequeue key empty it): a phone
+	 *  prompt seen in it, gone from it unstarted while pi is idle, pi dropped. */
+	const look = (ctx: ExtensionContext): void => {
+		const pending = ctx.hasPendingMessages();
+		outcomes.looked(pending);
+		if (!pending && ctx.isIdle() && outcomes.dequeued()) report(ctx);
+	};
 	pi.on("input", (event, ctx) => {
-		if (outcomes.input(event)) report(ctx);
+		if (!outcomes.input(event)) return;
+		report(ctx);
+		// pi queues it once every input handler is done: a tick later when none awaits anything.
+		if (event.streamingBehavior) setTimeout(() => session && look(session), 0);
 	});
 	pi.on("message_start", (event, ctx) => {
 		if (outcomes.started(event.message)) report(ctx);
 	});
 	// pi's run is over, retries and queued follow-ups included. Its queue is empty unless the run was
-	// stopped without clearing it, as a session switch does: then session_shutdown settles them.
-	// Looked at a tick later: a prompt whose input event came as the run ended is then queued, or
-	// pi, finding itself idle, has started a turn with it.
-	pi.on("agent_settled", (_event, ctx) => {
-		setTimeout(() => {
-			if (session && ctx.isIdle() && !ctx.hasPendingMessages() && outcomes.dequeued()) report(ctx);
-		}, 0);
-	});
+	// stopped without clearing it, as a session switch does: then a later look, or session_shutdown, settles them.
+	pi.on("agent_settled", (_event, ctx) => look(ctx));
+	// After each of the pane's heartbeats (agent view).
 	pi.events.on("bluclawd:remote-watched", (data) => {
 		const opened = data === true && !watched;
 		watched = data === true;
 		live.setWatched(watched);
 		// A restarted daemon has no report until the next turn: a phone opening the session sends it again.
 		if (opened && session) report(session);
+		if (session) look(session);
 	});
 	pi.events.on("bluclawd:remote-want-report", () => {
 		if (session) report(session);
@@ -347,9 +353,11 @@ function factory(pi: ExtensionAPI): void {
 		if (session) changed(session);
 	});
 	pi.on("session_shutdown", async (event, ctx) => {
-		// Its queue goes with the session; pi awaits this, so the report lands before the pane stops.
+		// Its queue goes with the session, a phone prompt seen in it too; pi awaits this, so the report
+		// lands before the pane stops.
 		// Not at quit, which agent view does not hold up either: the daemon finds the pane gone.
 		if (event.reason !== "quit") {
+			outcomes.looked(ctx.hasPendingMessages());
 			if (outcomes.dequeued()) report(ctx);
 			await reports;
 		}

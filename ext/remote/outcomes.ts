@@ -3,7 +3,9 @@
  * `input` event names no prompt, so a phone prompt is known by its exact text, from an extension,
  * oldest first: queued when pi delivers it as a follow-up, else taken. A queued one is taken when pi
  * starts it, which pi itself tells by its text. One the pane refuses is reported refused, with why.
- * One still queued once pi's queue is empty, or when its session ends, is lost: pi dropped it.
+ * One seen in pi's queue, then gone from it unstarted, or there when its session ends, is lost: pi
+ * dropped it. pi tells an extension only whether its queue holds anything, and queues a prompt only
+ * after its input handlers have all run, so one never seen there may yet run as a turn of its own.
  */
 import { contentText } from "@earendil-works/pi-ai";
 import type { PromptOutcome, RefusedReason } from "../../daemon/ipc/protocol.ts";
@@ -29,12 +31,14 @@ const KEPT = 20;
 interface Sent {
 	id: string;
 	text: string;
+	/** Seen in pi's queue. */
+	seen?: boolean;
 }
 
 export class PromptOutcomes {
 	/** Sent to pi, before its input event. */
 	private readonly waiting: Sent[] = [];
-	/** Queued by pi behind the turn in progress. */
+	/** Queued by pi behind the turn in progress, or to be once its input handlers are done. */
 	private readonly queued: Sent[] = [];
 	private readonly settled: PromptOutcome[] = [];
 
@@ -66,10 +70,20 @@ export class PromptOutcomes {
 		return true;
 	}
 
-	/** pi's queue no longer holds the queued phone prompts it did not start; true when there were any. */
+	/** Whether pi's queue holds anything now. Only a lone queued phone prompt is then seen there: with
+	 *  two, the other may be what it holds, the second one seen once the first is taken. */
+	looked(pending: boolean): void {
+		const [only] = this.queued;
+		if (pending && only && this.queued.length === 1) only.seen = true;
+	}
+
+	/** pi's queue no longer holds the phone prompts seen in it that it did not start; true when there were any. */
 	dequeued(): boolean {
-		const dropped = this.queued.splice(0);
-		for (const prompt of dropped) this.settle({ id: prompt.id, outcome: "lost", reason: "dequeued" });
+		const dropped = this.queued.filter((prompt) => prompt.seen);
+		for (const prompt of dropped) {
+			this.queued.splice(this.queued.indexOf(prompt), 1);
+			this.settle({ id: prompt.id, outcome: "lost", reason: "dequeued" });
+		}
 		return dropped.length > 0;
 	}
 
