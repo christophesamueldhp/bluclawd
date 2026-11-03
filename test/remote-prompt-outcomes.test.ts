@@ -60,7 +60,7 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
 		control = remoteControl();
 		setRemoteControl(control);
-		supervisor.onDropped = (rowId, inbox, reason) => control.lost(rowId, inbox, reason);
+		supervisor.onDropped = (rowId, inbox, reason) => control.dropped(rowId, inbox, reason);
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });
 		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
 		base = `http://127.0.0.1:${on.port}`;

@@ -66,7 +66,7 @@ const delivery = new PromptDelivery((id, message) => {
 	if (id === gamma.id && message.type === "prompt" && message.id) {
 		const promptId = message.id;
 		setTimeout(() => {
-			if (existsSync(join(dir, "gone"))) delivery.lost(id, [message]);
+			if (existsSync(join(dir, "gone"))) delivery.dropped(id, [message]);
 			else if (existsSync(join(dir, "compacting")))
 				delivery.reported(id, [{ id: promptId, outcome: "refused", reason: "compacting" }]);
 			else {

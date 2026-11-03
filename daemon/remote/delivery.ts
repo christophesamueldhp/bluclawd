@@ -55,7 +55,7 @@ export class PromptDelivery {
 	 *  and it can no longer report on what it was given. One pi queued dies with it. `reason`: why its
 	 *  session ended, when it said; one it left for another session refuses them, as that session's
 	 *  pane would. */
-	lost(sessionId: string, inbox: PaneMessage[], reason?: EndReason, now: number = Date.now()): void {
+	dropped(sessionId: string, inbox: PaneMessage[], reason?: EndReason, now: number = Date.now()): void {
 		const changed = endedForAnother(reason);
 		const ids = new Set(inbox.map(phoneId));
 		for (const [id, delivery] of this.prompts) {

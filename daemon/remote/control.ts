@@ -170,8 +170,8 @@ export class RemoteControl {
 	}
 
 	/** The pane listed as `sessionId` went with `inbox` still queued for it; `reason`: why its session ended. */
-	lost(sessionId: string, inbox: PaneMessage[], reason?: EndReason): void {
-		this.delivery.lost(sessionId, inbox, reason);
+	dropped(sessionId: string, inbox: PaneMessage[], reason?: EndReason): void {
+		this.delivery.dropped(sessionId, inbox, reason);
 		this.server?.status(sessionId);
 	}
 
