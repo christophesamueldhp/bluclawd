@@ -9,15 +9,15 @@ import type { PromptOutcome, RefusedReason } from "../../daemon/ipc/protocol.ts"
 
 /**
  * Why a pane refuses a phone's prompt or command before pi sees it, if it does: it was sent to
- * another session than the pane's (a reload or `/resume` of the same file, or a fork of it, is
- * that session still), or pi is compacting at the user's request, when pi throws on a prompt.
+ * another session than the pane's (a reload or `/resume` of the same file is that session still;
+ * a fork is another), or pi is compacting at the user's request, when pi throws on a prompt.
  */
 export function refusal(
 	message: { sessionFile?: string },
-	session: { compacting: boolean; sessionFile?: string; parentSession?: string },
+	session: { compacting: boolean; sessionFile?: string },
 ): RefusedReason | undefined {
 	const sent = message.sessionFile;
-	if (sent && sent !== session.sessionFile && sent !== session.parentSession) return "session_changed";
+	if (sent && sent !== session.sessionFile) return "session_changed";
 	if (session.compacting) return "compacting";
 	return undefined;
 }

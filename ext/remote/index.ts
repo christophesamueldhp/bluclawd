@@ -298,11 +298,7 @@ function factory(pi: ExtensionAPI): void {
 			report(ctx);
 		};
 		if (id && (message.type === "prompt" || message.type === "command")) {
-			const reason = refusal(message, {
-				compacting,
-				sessionFile: ctx.sessionManager.getSessionFile(),
-				parentSession: ctx.sessionManager.getHeader()?.parentSession,
-			});
+			const reason = refusal(message, { compacting, sessionFile: ctx.sessionManager.getSessionFile() });
 			if (reason) return refuse(id, reason);
 		}
 		if (message.type === "prompt") {

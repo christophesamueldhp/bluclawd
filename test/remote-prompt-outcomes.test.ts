@@ -87,7 +87,7 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 	 * A pane that reports outcomes, as a current one does: it refuses as a pane does (refusal()), else
 	 * its first prompt starts a turn, and pi queues the ones after it behind that turn.
 	 * `reports: false`: a pane from an older build. `refuse`: what its pi state makes it refuse.
-	 * `sessionFile`, `parentSession`: its session's, its own file by default.
+	 * `sessionFile`: its session's, its own file by default.
 	 */
 	async function fakePane(
 		id: string,
@@ -95,7 +95,6 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 			reports?: boolean;
 			refuse?: RefusedReason;
 			sessionFile?: string;
-			parentSession?: string;
 			client?: OrchestratorClient;
 		} = {},
 	) {
@@ -112,9 +111,7 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 			(message) => {
 				received.push(message);
 				if (!reports || (message.type !== "prompt" && message.type !== "command") || !message.id) return;
-				const reason =
-					refusal(message, { compacting: false, sessionFile, parentSession: options.parentSession }) ??
-					options.refuse;
+				const reason = refusal(message, { compacting: false, sessionFile }) ?? options.refuse;
 				if (reason) outcomes.push({ id: message.id, outcome: "refused", reason });
 				else outcomes.push({ id: message.id, outcome: turn ? "queued" : "taken" });
 				turn = true;
@@ -261,7 +258,7 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		["a new session", { reason: "new" }, "other", changed],
 		["a /resume of another file", { reason: "resume", target: "other" }, "other", changed],
 		// A fork has a row of its own: what was sent to the session it was forked from is not its.
-		["a fork", { reason: "fork" }, "fork", changed],
+		["a fork", { reason: "fork" }, "other", changed],
 		["a quit", { reason: "quit" }, undefined, gone],
 	] as const)(
 		"ends, once its session ended while its pane delivered it, as the pane's session_shutdown makes it: %s",
@@ -281,11 +278,7 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 			client.release();
 			await stopping;
 			// The pane's next session registers as the same pane.
-			if (next)
-				await fakePane("pane-move", {
-					sessionFile: next === "same" ? file : other,
-					parentSession: next === "fork" ? file : undefined,
-				});
+			if (next) await fakePane("pane-move", { sessionFile: next === "same" ? file : other });
 			await phone.until(outcome);
 		},
 	);
