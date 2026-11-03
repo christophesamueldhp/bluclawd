@@ -3,10 +3,10 @@
  * `input` event names no prompt, so a phone prompt is known by its exact text, from an extension,
  * oldest first: queued when pi delivers it as a follow-up, else taken. A queued one is taken when pi
  * starts it, which pi itself tells by its text. One the pane refuses is reported refused, with why.
- * One seen in pi's queue, then gone from it unstarted, or there when its session ends, is lost: pi
- * dropped it. pi tells an extension only whether its queue holds anything, and queues a prompt only
- * after its input handlers have all run, so one never seen there may yet run as a turn of its own:
- * it is lost only once pi has been idle with an empty queue for QUIET_MS.
+ * One seen in pi's queue, then gone from it unstarted, is lost: pi dropped it. pi tells an extension
+ * only whether its queue holds anything, and queues a prompt only after its input handlers have all
+ * run, so one never seen there may yet run as a turn of its own: it is lost only once pi has been
+ * idle with an empty queue for QUIET_MS. Any still queued when its session ends is lost.
  */
 import { contentText } from "@earendil-works/pi-ai";
 import type { PromptOutcome, RefusedReason } from "../../daemon/ipc/protocol.ts";

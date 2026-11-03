@@ -870,6 +870,17 @@ describe("/remote-control", () => {
 		pane.restore();
 	});
 
+	it("reports lost at session end a queued phone prompt never seen in pi's queue, which no transcript will show", async () => {
+		const pane = await phonePane();
+		pane.message({ type: "prompt", text: "late", id: "p-1" });
+		pane.on("input", { type: "input", text: "late", source: "extension", streamingBehavior: "followUp" });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]));
+		// Its input handlers still run when a `/resume` ends the session.
+		await pane.on("session_shutdown", { reason: "resume" });
+		expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "lost", reason: "dequeued" }]);
+		pane.restore();
+	});
+
 	it("leaves a phone prompt still queued at quit to the daemon, and holds no quit for a report", async () => {
 		const pane = await phonePane();
 		pane.message({ type: "prompt", text: "later", id: "p-1" });
