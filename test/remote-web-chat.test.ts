@@ -167,6 +167,21 @@ describe("prompts sent from the chat", () => {
 		expect(chat.pending).toEqual([late]);
 	});
 
+	it("stay past the turn's end once queued by a pane that reports outcomes, which settles them", () => {
+		const chat = openChat("a");
+		chat.report = { models: [], outcomes: [] };
+		const queued = addPending(chat, "queued", [], 100);
+		addPending(chat, "sent", [], 100);
+		settleOutcomes(chat, [{ id: queued.id, outcome: "queued" }]);
+		expect(listed(chat, "working", "idle", 200)).toBe(true);
+		applyLatest(chat, { messages: [], more: false });
+		expect(chat.pending).toEqual([queued]);
+		// Then pi dropped it from its queue: it comes back.
+		expect(settleOutcomes(chat, [{ id: queued.id, outcome: "lost", reason: "dequeued" }])).toEqual([
+			{ entry: queued, reason: "dequeued" },
+		]);
+	});
+
 	it("keep waiting while a dialog is up", () => {
 		const chat = openChat("a");
 		addPending(chat, "go", [], 100);

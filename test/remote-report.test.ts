@@ -738,6 +738,21 @@ describe("/remote-control", () => {
 		pane.restore();
 	});
 
+	it("does not report lost a phone prompt the run ended before pi queued it, which pi runs as a turn of its own", async () => {
+		const pane = await phonePane();
+		pane.message({ type: "prompt", text: "late", id: "p-1" });
+		pane.on("input", { type: "input", text: "late", source: "extension", streamingBehavior: "followUp" });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]));
+		// The run settles while pi still awaits its input handlers; then pi finds itself idle and starts a turn with it.
+		pane.on("agent_settled");
+		pane.state.idle = false;
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]);
+		pane.on("message_start", { message: { role: "user", content: [{ type: "text", text: "late" }] } });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "taken" }]));
+		pane.restore();
+	});
+
 	it("reports a phone prompt still queued at session end lost, and holds the session's end until the daemon has it", async () => {
 		const pane = await phonePane();
 		pane.message({ type: "prompt", text: "later", id: "p-1" });
@@ -762,6 +777,22 @@ describe("/remote-control", () => {
 		expect(ended).toBe(false);
 		received();
 		await shutdown;
+		pane.restore();
+	});
+
+	it("leaves a phone prompt still queued at quit to the daemon, and holds no quit for a report", async () => {
+		const pane = await phonePane();
+		pane.message({ type: "prompt", text: "later", id: "p-1" });
+		pane.on("input", { type: "input", text: "later", source: "extension", streamingBehavior: "followUp" });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]));
+		const reports = pane.sent.mock.calls.length;
+		// A report on its way when pi quits: pi exits regardless, and the daemon finds the pane gone.
+		pane.sent.mockImplementation(() => new Promise<void>(() => {}));
+		pane.on("bluclawd:remote-want-report");
+		await pane.on("session_shutdown", { reason: "quit" });
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(pane.sent.mock.calls.length).toBe(reports + 1);
+		expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]);
 		pane.restore();
 	});
 

@@ -218,7 +218,7 @@ export type RefusedReason = "busy" | "draft" | "dialog" | "compacting" | "sessio
 
 /** Why a prompt never reached pi's turn: its pane went (reaped or unregistered) with it still queued,
  *  in its inbox or in pi, or pi dropped it from its queue (`dequeued`: a stopped turn, the dequeue key,
- *  or its session reloading or switching, as its pane says).
+ *  or its session reloading or switching).
  *  The phone adds `daemon_restarted` for an id a restarted daemon no longer knows. */
 export type LostReason = "pane_gone" | "daemon_restarted" | "dequeued";
 

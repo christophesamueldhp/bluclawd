@@ -144,7 +144,7 @@ const RETURNED = {
 	pane_gone: "Not delivered: the session went away on the Mac before it took this.",
 	daemon_restarted: "Not delivered: bluclawd restarted on the Mac before the session took this.",
 	dequeued:
-		"Not delivered: pi dropped this from its queue on the Mac (a stopped turn, a dequeue, or the session reloading), so it may be in the Mac's prompt.",
+		"Not delivered: pi dropped this from its queue when its turn was stopped or the session reloaded on the Mac, so it may be in the Mac's prompt.",
 };
 
 const state = {

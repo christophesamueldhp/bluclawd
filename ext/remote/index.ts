@@ -326,8 +326,12 @@ function factory(pi: ExtensionAPI): void {
 	});
 	// pi's run is over, retries and queued follow-ups included. Its queue is empty unless the run was
 	// stopped without clearing it, as a session switch does: then session_shutdown settles them.
+	// Looked at a tick later: a prompt whose input event came as the run ended is then queued, or
+	// pi, finding itself idle, has started a turn with it.
 	pi.on("agent_settled", (_event, ctx) => {
-		if (!ctx.hasPendingMessages() && outcomes.dequeued()) report(ctx);
+		setTimeout(() => {
+			if (session && ctx.isIdle() && !ctx.hasPendingMessages() && outcomes.dequeued()) report(ctx);
+		}, 0);
 	});
 	pi.events.on("bluclawd:remote-watched", (data) => {
 		const opened = data === true && !watched;
@@ -342,10 +346,13 @@ function factory(pi: ExtensionAPI): void {
 	pi.events.on(TRUST_CHANGED, () => {
 		if (session) changed(session);
 	});
-	pi.on("session_shutdown", async (_event, ctx) => {
+	pi.on("session_shutdown", async (event, ctx) => {
 		// Its queue goes with the session; pi awaits this, so the report lands before the pane stops.
-		if (outcomes.dequeued()) report(ctx);
-		await reports;
+		// Not at quit, which agent view does not hold up either: the daemon finds the pane gone.
+		if (event.reason !== "quit") {
+			if (outcomes.dequeued()) report(ctx);
+			await reports;
+		}
 		// As a turn's end: no timer left to send, and the phone's snapshot of ours cleared.
 		live.onAgentEnd();
 		unwatchTasks?.();
