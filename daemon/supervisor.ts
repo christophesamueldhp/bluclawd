@@ -114,10 +114,13 @@ export class ServerSupervisor {
 		return [...this.externalInstances].find(([, entry]) => entry.rowId === rowId);
 	}
 
-	/** The pane `id` addresses: a pane's own id, or the row a pane is listed as. */
+	/** The pane `id` addresses: the row a pane is listed as, or a pane's own id, unless that is the
+	 *  stopped row of a session the pane switched away from. */
 	private paneOf(id: string): [string, ExternalInstance] | undefined {
+		const listed = this.paneListedAs(id);
+		if (listed) return listed;
 		const own = this.externalInstances.get(id);
-		return own ? [id, own] : this.paneListedAs(id);
+		return own && !getInstance(this.deps.dir, id) ? [id, own] : undefined;
 	}
 
 	/** The row a pane is listed as; its own id when it is not registered. */
@@ -203,11 +206,16 @@ export class ServerSupervisor {
 		const out: Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> = [];
 		for (const [id, entry] of this.externalInstances) {
 			if (now - entry.lastSeenAt > EXTERNAL_TTL_MS) {
-				const { cwd, label, sessionFile, sessionId } = entry.record;
-				if (sessionFile && existsSync(sessionFile) && this.paneGone(id)) {
-					// Its pi is gone, so its writes are final.
-					this.stopRow({ cwd, label, sessionFile, sessionId }, [id, entry]);
-					continue;
+				const { cwd, label, sessionFile, sessionId, pane } = entry.record;
+				if (sessionFile && pane && existsSync(sessionFile)) {
+					const gone = this.paneGone(pane);
+					// Unlisted until tmux can say.
+					if (gone === undefined) continue;
+					if (gone) {
+						// The pane runs pi itself, so its pi is gone and its writes are final.
+						this.stopRow({ cwd, label, sessionFile, sessionId }, [id, entry]);
+						continue;
+					}
 				}
 				this.externalInstances.delete(id);
 				this.settleWait(id, "none");
@@ -218,12 +226,12 @@ export class ServerSupervisor {
 		return out;
 	}
 
-	/** Not when tmux could not say: a pane that may be up is not taken for dead. */
-	private paneGone(paneId: string): boolean {
+	/** Undefined when tmux could not say. */
+	private paneGone(pane: string): boolean | undefined {
 		try {
-			return !this.deps.tmux.hasSession(paneId);
+			return !this.deps.tmux.hasSession(pane);
 		} catch {
-			return false;
+			return undefined;
 		}
 	}
 

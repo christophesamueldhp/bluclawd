@@ -2,10 +2,10 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { listSummaries } from "../daemon/handler.ts";
-import { findSession, remoteSessions } from "../daemon/remote/sessions.ts";
 import { addPending, applyLatest, applyOlder, checkPending, forget, listed, openChat } from "#remote-web/chat.js";
 import { successor } from "#remote-web/list.js";
+import { listSummaries } from "../daemon/handler.ts";
+import { findSession, remoteSessions } from "../daemon/remote/sessions.ts";
 import { testRegistry } from "./helpers/registry.ts";
 
 const user = (id: string, text: string) => ({ kind: "user", id, text });

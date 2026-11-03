@@ -298,6 +298,24 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 		expect(listed[1].id).not.toBe("pi-a");
 	});
 
+	it("after /new, the old session's row id addresses that stopped row, not the pane's new session", () => {
+		const supervisor = testRegistry(dir);
+		supervisor.registerExternal(pane("pi-a", session("a", "a done"), "sa"), "idle");
+		supervisor.unregisterExternal("pi-a", "new");
+		supervisor.registerExternal(pane("pi-a", session("b", "b says"), "sb"), "working");
+		const fresh = rows(supervisor)[1].id;
+
+		supervisor.setInstanceMeta("pi-a", { pinned: true });
+		expect(supervisor.sendExternal("pi-a", { type: "abort" })).toBe(false);
+		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "a done", true), live(fresh, "sb", "pi-a")]);
+
+		expect(supervisor.deleteInstance("pi-a")).toBe(true);
+		expect(rows(supervisor)).toEqual([live(fresh, "sb", "pi-a")]);
+		// The pane's own id still reaches the pane once no row is listed as it.
+		expect(supervisor.sendExternal("pi-a", { type: "abort" })).toBe(true);
+		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "abort" }]);
+	});
+
 	it("/resume <other>: the old session stays stopped; the other goes live as its own row, or a new one", () => {
 		const supervisor = testRegistry(dir);
 		const c = session("c", "c done");
@@ -329,11 +347,19 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 
 		supervisor.unregisterExternal("pi-a", "fork");
 		// Listed before its first message: pi writes no file for it yet.
-		supervisor.registerExternal({ ...pane("pi-a", join(sessions, "fork.jsonl"), "sf"), createdAt: "2026-10-30T11:00:00.000Z" }, "idle");
+		supervisor.registerExternal(
+			{ ...pane("pi-a", join(sessions, "fork.jsonl"), "sf"), createdAt: "2026-10-30T11:00:00.000Z" },
+			"idle",
+		);
 		const listed = listSummaries(supervisor);
 		expect(listed).toEqual([
 			expect.objectContaining({ id: "pi-a", status: "stopped", sessionId: "sa", pinned: true, sortOrder: 2 }),
-			expect.objectContaining({ status: "online", sessionId: "sf", pane: "pi-a", createdAt: "2026-10-30T11:00:00.000Z" }),
+			expect.objectContaining({
+				status: "online",
+				sessionId: "sf",
+				pane: "pi-a",
+				createdAt: "2026-10-30T11:00:00.000Z",
+			}),
 		]);
 		expect(listed[1]).toMatchObject({ pinned: undefined, sortOrder: undefined });
 		expect(listed[1].id).not.toBe("pi-a");
@@ -342,12 +368,15 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 	it("crash: once the TTL lapses and tmux says its pane is gone, the session is stopped with its pin", () => {
 		let now = Date.parse("2026-10-30T10:00:00.000Z");
 		const gone = new Set(["pi-a"]);
+		const unsure = new Set(["pi-c"]);
+		const asked: string[] = [];
 		const supervisor = new ServerSupervisor({
 			now: () => now,
 			dir,
 			tmux: {
 				hasSession: (name) => {
-					if (name === "pi-c") throw new Error("ETIMEDOUT");
+					asked.push(name);
+					if (unsure.has(name)) throw new Error("ETIMEDOUT");
 					return !gone.has(name);
 				},
 			},
@@ -357,17 +386,24 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 		supervisor.setInstanceMeta("pi-a", { pinned: true });
 		supervisor.registerExternal(pane("pi-b", session("b", "b done"), "sb"), "idle");
 		supervisor.registerExternal(pane("pi-c", session("c", "c done"), "sc"), "idle");
+		// A pi in a terminal of its own: no tmux session to ask about.
+		supervisor.registerExternal({ ...pane("d-1", session("d", "d done"), "sd"), pane: undefined }, "idle");
 		// Written after its last heartbeat, before it died.
 		const last = { role: "assistant", content: [{ type: "text", text: "last words" }], stopReason: "stop" };
 		writeFileSync(a, `${JSON.stringify({ type: "message", message: last })}\n`, { flag: "a" });
 
 		now += 10_000;
-		expect(rows(supervisor).map((r) => r.status)).toEqual(["online", "online", "online"]);
+		expect(rows(supervisor).map((r) => r.status)).toEqual(["online", "online", "online", "online"]);
 		now += 10_000;
-		// pi-b missed its beats with its pane up, and tmux could not say for pi-c: dropped as before,
-		// listed again on their next beat.
+		// pi-b missed its beats with its pane up, and d-1 has no pane: dropped as before, listed again
+		// on their next beat. tmux could not say for pi-c: unlisted, and asked about again.
 		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "last words", true)]);
 		expect(rows(testRegistry(dir))).toEqual([stopped("pi-a", "sa", "last words", true)]);
+		expect(asked).not.toContain("d-1");
+
+		unsure.delete("pi-c");
+		gone.add("pi-c");
+		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "last words", true), stopped("pi-c", "sc", "c done")]);
 	});
 
 	it("kill + delete: the row goes and stays gone once its pane's TTL lapses", () => {
