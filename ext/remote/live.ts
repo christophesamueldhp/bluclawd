@@ -62,11 +62,17 @@ export function latestOnly(send: (live: LiveSnapshot | null, entryId?: string) =
 	};
 }
 
-/** A LiveForwarder fed pi's events, reading the session's leaf from the latest one's context. */
+/** What the forwarder reads of the session: its leaf, and the entries behind it. */
+export type SessionReader = Pick<ExtensionContext["sessionManager"], "getLeafId" | "getEntry">;
+
+/** A LiveForwarder fed pi's events, reading the session from the latest one's context. */
 export function forwardLive(pi: ExtensionAPI, send: LiveSend): LiveForwarder {
-	let session: ExtensionContext["sessionManager"] | undefined;
-	const live = new LiveForwarder(send, () => session?.getLeafId() ?? null);
-	const at = (ctx: ExtensionContext) => {
+	let session: SessionReader | undefined;
+	const live = new LiveForwarder(send, {
+		getLeafId: () => session?.getLeafId() ?? null,
+		getEntry: (id) => session?.getEntry(id),
+	});
+	const at = (ctx: { sessionManager: SessionReader }) => {
 		session = ctx.sessionManager;
 	};
 	pi.on("message_start", (event, ctx) => {
@@ -93,8 +99,8 @@ export function forwardLive(pi: ExtensionAPI, send: LiveSend): LiveForwarder {
 
 export class LiveForwarder {
 	private readonly send: LiveSend;
-	/** The session's leaf entry id, which moves when pi writes a message. */
-	private readonly leafId: () => string | null;
+	/** The session, whose leaf moves when pi or an extension writes an entry. */
+	private readonly session: SessionReader;
 	private readonly now: () => number;
 	/** The assistant message being streamed; reduced only when sent, not per token. */
 	private message: MessageLike | undefined;
@@ -110,15 +116,15 @@ export class LiveForwarder {
 	private lastSent = Number.NEGATIVE_INFINITY;
 	private timer: ReturnType<typeof setTimeout> | undefined;
 
-	constructor(send: LiveSend, leafId: () => string | null, now: () => number = Date.now) {
+	constructor(send: LiveSend, session: SessionReader, now: () => number = Date.now) {
 		this.send = send;
-		this.leafId = leafId;
+		this.session = session;
 		this.now = now;
 	}
 
 	onMessageStart(message: MessageLike): void {
 		this.settle();
-		if (message.role === "assistant") this.startLeaf = this.leafId();
+		if (message.role === "assistant") this.startLeaf = this.session.getLeafId();
 	}
 
 	onMessageUpdate(message: MessageLike): void {
@@ -144,7 +150,7 @@ export class LiveForwarder {
 	onMessageEnd(message: MessageLike): void {
 		this.message = undefined;
 		for (const [id, tool] of this.tools) if (!tool.running) this.tools.delete(id);
-		const after = this.startLeaf === undefined ? this.leafId() : this.startLeaf;
+		const after = this.startLeaf === undefined ? this.session.getLeafId() : this.startLeaf;
 		this.startLeaf = undefined;
 		if (message.role !== "assistant" || !this.shown) {
 			if (this.tools.size > 0) this.changed();
@@ -202,12 +208,27 @@ export class LiveForwarder {
 	/** Sends a pending end once pi has written its entry, then what waited behind it. */
 	private settle(entryId?: string): void {
 		if (!this.ending) return;
-		const written = entryId ?? this.leafId();
-		if (written === null || written === this.ending.after) return;
+		const written = entryId ?? this.written(this.ending.after);
+		if (!written) return;
 		this.ending = undefined;
 		this.shown = false;
 		this.send(null, written);
 		if (this.dirty && this.watched) this.schedule();
+	}
+
+	/**
+	 * The assistant entry pi wrote after `after`. Other extensions write entries too, so the leaf can
+	 * be one of theirs; one not reached from `after` would be stale.
+	 */
+	private written(after: string | null): string | undefined {
+		let found: string | undefined;
+		for (let id = this.session.getLeafId(); id !== after; ) {
+			const entry = id === null ? undefined : this.session.getEntry(id);
+			if (!entry) return undefined;
+			if (entry.type === "message" && entry.message.role === "assistant") found = entry.id;
+			id = entry.parentId;
+		}
+		return found;
 	}
 
 	private flush(): void {

@@ -126,4 +126,19 @@ describe("the end of a live reply in a real pi session", () => {
 		expect(log.indexOf(`end:${first}`)).toBeLessThan(log.indexOf("tool"));
 		expect(log.at(-1)).toBe(`end:${second}`);
 	});
+
+	it("names the assistant's entry, not one another extension wrote meanwhile", async () => {
+		// As checkpoints and background-bash do: an entry written while the reply is not yet.
+		const noting: ExtensionFactory = (pi) => {
+			pi.on("message_end", async (event) => {
+				if (event.message.role !== "assistant") return;
+				pi.appendEntry("note", {});
+				await new Promise<void>((resolve) => setTimeout(resolve, 50));
+			});
+		};
+		const { log, assistantEntries } = await run([noting]);
+		expect(assistantEntries).toHaveLength(2);
+		const [first, second] = assistantEntries;
+		expect(log.filter((item) => item.startsWith("end:"))).toEqual([`end:${first}`, `end:${second}`]);
+	});
 });

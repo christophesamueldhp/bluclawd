@@ -1,3 +1,4 @@
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LiveSnapshot } from "../daemon/ipc/protocol.ts";
 import { LiveForwarder, latestOnly } from "../ext/remote/live.ts";
@@ -9,18 +10,30 @@ const toolResult = { role: "toolResult", content: [] };
 describe("LiveForwarder", () => {
 	/** A snapshot, a bare null, or an end naming its entry. */
 	let sent: Array<LiveSnapshot | null | { ended: string }>;
-	/** The session's leaf entry, which pi moves when it writes a message. */
+	/** The session: pi writes its messages to it, other extensions their own entries. */
+	let entries: Map<string, SessionEntry>;
 	let leaf: string | null;
+	/** Writes an entry after the leaf: a message of `role`, or another extension's without one. */
+	const write = (id: string, role?: string) => {
+		const base = { id, parentId: leaf, timestamp: "" };
+		const entry = role
+			? { ...base, type: "message", message: { role } }
+			: { ...base, type: "custom", customType: "note" };
+		entries.set(id, entry as SessionEntry);
+		leaf = id;
+	};
 	let live: LiveForwarder;
 
 	beforeEach(() => {
 		vi.useFakeTimers();
 		sent = [];
-		leaf = "u1";
-		live = new LiveForwarder(
-			(snapshot, entryId) => sent.push(entryId ? { ended: entryId } : snapshot),
-			() => leaf,
-		);
+		entries = new Map();
+		leaf = null;
+		write("u1", "user");
+		live = new LiveForwarder((snapshot, entryId) => sent.push(entryId ? { ended: entryId } : snapshot), {
+			getLeafId: () => leaf,
+			getEntry: (id) => entries.get(id),
+		});
 	});
 	afterEach(() => vi.useRealTimers());
 
@@ -29,7 +42,7 @@ describe("LiveForwarder", () => {
 		live.onMessageStart(message);
 		live.onMessageUpdate(message);
 		live.onMessageEnd(message);
-		leaf = "a1";
+		write("a1", "assistant");
 		vi.advanceTimersByTime(1000);
 		expect(sent).toEqual([]);
 	});
@@ -42,7 +55,7 @@ describe("LiveForwarder", () => {
 		live.onMessageEnd(message);
 		expect(sent).toEqual([{ text: "Hi", tools: [] }]);
 		// pi writes the message after every extension's message_end handler.
-		leaf = "a1";
+		write("a1", "assistant");
 		vi.advanceTimersByTime(0);
 		expect(sent).toEqual([{ text: "Hi", tools: [] }, { ended: "a1" }]);
 		live.onTurnEnd("a1");
@@ -60,13 +73,28 @@ describe("LiveForwarder", () => {
 		// Another extension's message_end handler still holds pi up.
 		vi.advanceTimersByTime(1000);
 		expect(sent).toHaveLength(1);
-		leaf = "a1";
+		write("a1", "assistant");
 		live.onToolStart("c1", "bash", { command: "ls" });
 		vi.advanceTimersByTime(300);
 		expect(sent.slice(1)).toEqual([
 			{ ended: "a1" },
 			{ text: "", tools: [{ id: "c1", name: "bash", summary: "ls", running: true }] },
 		]);
+	});
+
+	it("ends a reply naming the entry pi wrote, not one another extension wrote around it", () => {
+		live.setWatched(true);
+		const message = assistant({ type: "text", text: "Hi" });
+		live.onMessageStart(message);
+		live.onMessageUpdate(message);
+		write("n1");
+		live.onMessageEnd(message);
+		vi.advanceTimersByTime(0);
+		expect(sent).toEqual([{ text: "Hi", tools: [] }]);
+		write("a1", "assistant");
+		write("n2");
+		live.onToolStart("c1", "bash", { command: "ls" });
+		expect(sent.slice(1, 2)).toEqual([{ ended: "a1" }]);
 	});
 
 	it("ends a reply pi wrote late at the turn's end, with the turn's entry", () => {
@@ -134,7 +162,7 @@ describe("LiveForwarder", () => {
 		live.onMessageStart(message);
 		live.onMessageUpdate(message);
 		live.onMessageEnd(message);
-		leaf = "a1";
+		write("a1", "assistant");
 		vi.advanceTimersByTime(0);
 		expect(sent.at(-1)).toEqual({ ended: "a1" });
 		live.onToolStart("c1", "bash", { command: "ls" });
@@ -168,7 +196,7 @@ describe("LiveForwarder", () => {
 		live.onMessageUpdate(assistant({ type: "text", text: "ab" }));
 		live.onAgentEnd();
 		live.onMessageEnd(assistant({ type: "text", text: "ab" }));
-		leaf = "a1";
+		write("a1", "assistant");
 		vi.advanceTimersByTime(1000);
 		expect(sent).toEqual([{ text: "a", tools: [] }, null]);
 	});
@@ -195,7 +223,7 @@ describe("LiveForwarder", () => {
 		live.onMessageStart(message);
 		live.onMessageUpdate(message);
 		live.onMessageEnd(message);
-		leaf = "a1";
+		write("a1", "assistant");
 		live.onToolStart("c1", "bash", { command: "sleep 60" });
 		vi.advanceTimersByTime(300);
 		live.onToolEnd("c1");
@@ -204,7 +232,7 @@ describe("LiveForwarder", () => {
 		const aborted = assistant();
 		live.onMessageStart(aborted);
 		live.onMessageEnd(aborted);
-		leaf = "a2";
+		write("a2", "assistant");
 		live.onAgentEnd();
 		vi.advanceTimersByTime(1000);
 		expect(sent.slice(before)).toEqual([{ ended: "a2" }]);
