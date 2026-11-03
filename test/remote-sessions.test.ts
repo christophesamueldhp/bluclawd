@@ -184,9 +184,10 @@ function silentRegistry() {
 			{ id, status: "online", cwd: dir, createdAt: "2026-10-12T00:00:00Z", sessionFile, pane: id, label: "task" },
 			"working",
 		);
-	/** No heartbeat for longer than the registry waits. */
+	/** No heartbeat for longer than the registry waits, and a look at the list reaps it. */
 	const reap = () => {
 		clock.now += 20_000;
+		listSummaries(supervisor);
 	};
 	return { dir, supervisor, gone, beat, reap, list: () => remoteSessions(listSummaries(supervisor)) };
 }
@@ -215,6 +216,43 @@ describe("a pane reaped while tmux still has it (a silent pane)", () => {
 		expect(list()).toEqual([expect.objectContaining({ id: "pi-s", alive: false, state: "stopped" })]);
 		expect(list()[0].finishedAt).toBeDefined();
 		expect(list()[0]).not.toHaveProperty("silent");
+	});
+
+	it.each([
+		["a stored row", true],
+		["a row a start claimed, its file not written yet", false],
+	])("shows a pin and order given while silent at once, and keeps them as it beats again: %s", (_, written) => {
+		const { dir, supervisor, beat, reap } = silentRegistry();
+		const file = join(dir, "s.jsonl");
+		let row = "pi-s";
+		if (written) writeFileSync(file, "");
+		else {
+			const claim = supervisor.claimStart({ cwd: dir, sessionFile: file });
+			if (!claim.ok) throw new Error("not claimed");
+			row = claim.id;
+		}
+		beat("pi-s", file);
+		reap();
+		expect(supervisor.setInstanceMeta(row, { pinned: true, sortOrder: 2 })).toMatchObject({ id: row, pinned: true });
+		const listed = () => listSummaries(supervisor).find((i) => i.id === row);
+		expect(listed()).toMatchObject({ silent: true, pinned: true, sortOrder: 2 });
+		beat("pi-s", file);
+		expect(listed()).toMatchObject({ pinned: true, sortOrder: 2 });
+		expect(listed()).not.toHaveProperty("silent");
+	});
+
+	it("refreshes its row as a pane's does when it unregisters for another session", () => {
+		const { dir, supervisor, beat, reap } = silentRegistry();
+		const file = join(dir, "s.jsonl");
+		writeFileSync(file, "");
+		beat("pi-s", file);
+		reap();
+		const last = { role: "assistant", content: [{ type: "text", text: "last words" }], stopReason: "stop" };
+		writeFileSync(file, `${JSON.stringify({ type: "message", message: last })}\n`);
+		supervisor.unregisterExternal("pi-s", "new");
+		const row = listSummaries(supervisor).find((i) => i.id === "pi-s");
+		expect(row).toMatchObject({ status: "stopped", detail: "last words" });
+		expect(row?.finishedAt).toBeDefined();
 	});
 
 	it("stays listed when a start claimed its row and pi has not written its file yet", () => {

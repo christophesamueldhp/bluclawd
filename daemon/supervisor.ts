@@ -132,11 +132,14 @@ export class ServerSupervisor {
 		const started = this.takeStarting(record);
 		const claimed = previous ? undefined : started;
 		// A heartbeat restates what the session knows; its age and agent-view meta are kept here.
-		const kept = previous
+		// A pane back from silence keeps what it was given meanwhile, which a row a start claimed
+		// has stored nowhere else.
+		const last = previous ?? back;
+		const kept = last
 			? {
-					createdAt: previous.record.createdAt,
-					pinned: previous.record.pinned,
-					sortOrder: previous.record.sortOrder,
+					createdAt: last.record.createdAt,
+					pinned: last.record.pinned,
+					sortOrder: last.record.sortOrder,
 				}
 			: stored && paneMeta(stored);
 		const label = nameOf(previous?.record ?? stored, record.label);
@@ -282,7 +285,9 @@ export class ServerSupervisor {
 		const silent = this.silentPanes.get(id);
 		if (silent) {
 			this.silentPanes.delete(id);
-			this.onDropped?.(silent.rowId, [], reason, id);
+			// Its session ended for another, so its file is final; a quit's hand-off saves its row.
+			if (endedForAnother(reason)) this.paneEnded(id, silent, reason);
+			else this.onDropped?.(silent.rowId, [], reason, id);
 		}
 		const file = entry?.record.sessionFile;
 		const stops = reason === "quit" || endedForAnother(reason);
@@ -550,7 +555,9 @@ export class ServerSupervisor {
 
 	/** Agent-view-only fields: pin and manual order. */
 	setInstanceMeta(instanceId: string, meta: { pinned?: boolean; sortOrder?: number }): InstanceRecord | undefined {
-		const external = this.paneOf(instanceId)?.[1];
+		// A silent pane's too: it is listed as it last beat.
+		const external =
+			this.paneOf(instanceId)?.[1] ?? [...this.silentPanes.values()].find((entry) => entry.rowId === instanceId);
 		if (external) {
 			external.record = { ...external.record, ...meta };
 			// The stored row behind it shows again if its pane dies unseen.
