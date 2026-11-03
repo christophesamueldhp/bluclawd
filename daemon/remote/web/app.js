@@ -2016,13 +2016,13 @@ async function deleteSession() {
 }
 
 /** @type {import("./chat.js").Chat | undefined} */
-let left;
+let leftChat;
 
 /** Back to the list, once per chat: as "‹ Sessions" goes, to the list's own entry when the chat was
  *  opened from it. @param {import("./chat.js").Chat} chat */
 function leaveChat(chat) {
-	if (left === chat) return;
-	left = chat;
+	if (leftChat === chat) return;
+	leftChat = chat;
 	if (chat.backToList) history.back();
 	else location.hash = "";
 }

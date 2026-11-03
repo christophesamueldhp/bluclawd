@@ -300,7 +300,7 @@ describe("rows", () => {
 		]);
 	});
 
-	it("never merges or flags live sessions without a file", () => {
+	it("never flags live sessions without a file", () => {
 		const rows = collectRows(
 			[
 				{ id: "m1", status: "online", cwd: HERE, external: true },
