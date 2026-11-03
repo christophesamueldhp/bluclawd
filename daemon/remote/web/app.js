@@ -44,8 +44,9 @@ import {
 } from "./statusbar.js";
 
 /**
- * `dialog`: the one it waits on, while it needs input.
- * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, dialog?: { kind: string, title?: string }, livePanes?: number, starting?: true }} Session
+ * `dialog`: the one it waits on, while it needs input. `silent`: its pane stopped answering the
+ * Mac, which still has it (asleep or blocked), and may come back.
+ * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, dialog?: { kind: string, title?: string }, livePanes?: number, starting?: true, silent?: true }} Session
  */
 /** `aborted`: a reply its turn was stopped in, empty when stopped before it said anything. @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, aborted?: boolean, toolCallId?: string, toolName?: string, command?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
@@ -54,9 +55,9 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.51";
+const VERSION = "0.0.52";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
-/** Each chat's pending prompts, kept for when it opens again. */
+/** Each chat's pending prompts and unsent text, kept for when it opens again. */
 const keptPending = pendingStore(() => localStorage);
 
 function loadViewMode() {
@@ -359,7 +360,6 @@ async function loadSessions() {
 			leaveChat(state.chat);
 			return;
 		}
-		if (state.chat) returned(state.chat, restore(state.chat));
 		render();
 		if (!state.chat) {
 			void loadDirectories();
@@ -1022,6 +1022,9 @@ function bannerHtml(session) {
 	}
 	if (session && !session.alive) {
 		return `${error}<div class="banner closed">Disconnected: this session was closed on the Mac. It reconnects here once it is opened there again.</div>`;
+	}
+	if (session?.silent) {
+		return `${error}<div class="banner closed">Not responding: this session stopped answering on the Mac, which may be asleep or busy. Waiting for it…</div>`;
 	}
 	if (error) return error;
 	if (!session && state.homeScreenHint) {
@@ -1812,9 +1815,12 @@ function bindChat() {
 	);
 	$("#viewer").addEventListener("click", closeViewer);
 	const text = $("#text");
+	text.value = keptPending.draft(state.chat.id);
+	grow(text);
 	text.addEventListener("input", () => {
 		grow(text);
 		updateCommands();
+		keptPending.saveDraft(state.chat.id, text.value);
 	});
 	$("#composer").addEventListener("submit", (/** @type {Event} */ event) => {
 		event.preventDefault();
@@ -1827,6 +1833,7 @@ function bindChat() {
 		const command = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".command"));
 		if (!command) return;
 		text.value = `/${command.dataset.command} `;
+		keptPending.saveDraft(state.chat.id, text.value);
 		grow(text);
 		text.focus();
 		text.setSelectionRange(text.value.length, text.value.length);
@@ -2271,6 +2278,7 @@ async function send() {
 	}
 	const images = chat.attachments;
 	text.value = "";
+	keptPending.saveDraft(chat.id, "");
 	text.style.height = "auto";
 	chat.attachments = [];
 	const entry = addPending(chat, value, images, Date.now());
@@ -2311,19 +2319,21 @@ function putBack(chat, entry) {
 	if (state.chat !== chat) return;
 	const text = $("#text");
 	text.value = text.value ? `${entry.prompt}\n${text.value}` : entry.prompt;
+	// Kept as typed text is: its pending prompt is no longer kept.
+	keptPending.saveDraft(chat.id, text.value);
 	grow(text);
 	if (!chat.attachments.length) chat.attachments = entry.images;
 }
 
 /**
- * The prompts the phone kept of the chat, back in once the daemon's replay, its pane's report and,
- * with no report, its row are (see restorePending).
+ * The prompts the phone kept of the chat, back in once the daemon's replay and its pane's report
+ * are (see restorePending).
  * @param {Chat} chat @param {import("./chat.js").Replay} [replay]
  * @returns {import("./chat.js").Failed[]} those refused or lost
  */
 function restore(chat, replay) {
 	const kept = chat.kept;
-	const failed = restorePending(chat, replay, state.sessions.find((s) => s.id === chat.id)?.alive);
+	const failed = restorePending(chat, replay);
 	// Their give-up timers went with the page or the chat that sent them.
 	if (chat.restored) for (const entry of kept) setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
 	return failed;
@@ -2332,8 +2342,11 @@ function restore(chat, replay) {
 /** A sent prompt still waiting PROMPT_GIVE_UP_MS on (see giveUp). @param {Chat} chat @param {Pending} entry */
 function checkSent(chat, entry) {
 	if (state.chat !== chat || !chat.pending.includes(entry) || state.starting) return;
-	const verdict = checkPending(chat, entry, state.sessions.find((s) => s.id === chat.id)?.state);
-	if (verdict === "drop") render();
+	const session = state.sessions.find((s) => s.id === chat.id);
+	const verdict = checkPending(chat, entry, session?.state, session?.silent);
+	// Its pane may come back and never report it (another extension took it): asked again then.
+	if (verdict === "wait" && session?.silent) setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
+	else if (verdict === "drop") render();
 	else if (verdict === "fail") {
 		putBack(chat, entry);
 		showError(errorText("not_delivered"));
