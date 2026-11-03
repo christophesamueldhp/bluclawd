@@ -313,6 +313,19 @@ describe("prompts sent to a pane that reports their outcomes", () => {
 		expect(settleOutcomes(chat, [], undefined)).toEqual([]);
 	});
 
+	it("are not put back by a restarted daemon's replay once pi has them, taken or queued", () => {
+		const chat = reporting();
+		const taken = addPending(chat, "a", [], 100);
+		const queued = addPending(chat, "b", [], 110);
+		settleOutcomes(chat, [
+			{ id: taken.id, outcome: "taken" },
+			{ id: queued.id, outcome: "queued" },
+		]);
+		taken.acceptedAt = queued.acceptedAt = 150;
+		expect(settleOutcomes(chat, [], 200)).toEqual([]);
+		expect(chat.pending).toEqual([taken, queued]);
+	});
+
 	it("are not judged lost by a replay for a pane from an older build", () => {
 		const chat = openChat("a");
 		chat.report = { models: [] };

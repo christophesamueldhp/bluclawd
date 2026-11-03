@@ -177,7 +177,8 @@ function written(chat, entry) {
  * What became of the prompts sent to the session: from its status, or the event stream's. The
  * refused and lost ones are taken out, and returned to go back into the reply box. `since`: an
  * event stream asked for then replays every outcome its daemon knows, so a prompt it had accepted
- * before then and does not list, a restarted daemon lost; only for a pane that reports outcomes,
+ * before then and does not list, a restarted daemon lost, unless its pane had reported it taken or
+ * queued; only for a pane that reports outcomes,
  * as the others' prompts may have reached pi.
  * @param {Chat} chat @param {import("./statusbar.js").PromptOutcome[] | undefined} outcomes
  * @param {number} [since]
@@ -195,7 +196,8 @@ export function settleOutcomes(chat, outcomes, since) {
 	if (since !== undefined && reportsOutcomes(chat)) {
 		const known = new Set((outcomes ?? []).map((o) => o.id));
 		for (const entry of chat.pending) {
-			if (entry.acceptedAt === undefined || entry.acceptedAt >= since) continue;
+			// One pi took or queued is not sent again.
+			if (entry.outcome || entry.acceptedAt === undefined || entry.acceptedAt >= since) continue;
 			if (!known.has(entry.id)) failed.push({ entry, reason: "daemon_restarted" });
 		}
 	}
