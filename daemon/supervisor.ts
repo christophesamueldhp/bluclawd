@@ -271,6 +271,11 @@ export class ServerSupervisor {
 		return own && !getInstance(this.deps.dir, id) ? [id, own] : undefined;
 	}
 
+	/** The pane listed as row `id`, a silent one too: it is listed as it last beat. */
+	private listedPane(id: string): [string, ExternalInstance] | undefined {
+		return this.paneOf(id) ?? [...this.silentPanes].find(([, entry]) => entry.rowId === id);
+	}
+
 	/** The row a pane is listed as, or was as it fell silent; its own id when it is not registered. */
 	rowIdOf(paneId: string): string {
 		return this.externalInstances.get(paneId)?.rowId ?? this.silentPanes.get(paneId)?.rowId ?? paneId;
@@ -525,8 +530,9 @@ export class ServerSupervisor {
 	deleteInstance(instanceId: string): boolean {
 		// A self-registered session's process is its pane's; its row goes until it registers again,
 		// with the stored row it went on as.
-		const pane = this.paneOf(instanceId);
+		const pane = this.listedPane(instanceId);
 		if (pane) {
+			this.silentPanes.delete(pane[0]);
 			this.drop(pane[0], pane[1]);
 			if (getInstance(this.deps.dir, pane[1].rowId)) removeInstance(this.deps.dir, pane[1].rowId);
 			// Its pi may be quitting already: that quit's hand-off save does not bring it back.
@@ -555,9 +561,7 @@ export class ServerSupervisor {
 
 	/** Agent-view-only fields: pin and manual order. */
 	setInstanceMeta(instanceId: string, meta: { pinned?: boolean; sortOrder?: number }): InstanceRecord | undefined {
-		// A silent pane's too: it is listed as it last beat.
-		const external =
-			this.paneOf(instanceId)?.[1] ?? [...this.silentPanes.values()].find((entry) => entry.rowId === instanceId);
+		const external = this.listedPane(instanceId)?.[1];
 		if (external) {
 			external.record = { ...external.record, ...meta };
 			// The stored row behind it shows again if its pane dies unseen.

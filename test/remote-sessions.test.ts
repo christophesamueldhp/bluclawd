@@ -205,6 +205,20 @@ describe("a pane reaped while tmux still has it (a silent pane)", () => {
 		expect(supervisor.claimStart({ cwd: dir, sessionFile: file })).toEqual({ ok: false, refused: "running" });
 	});
 
+	it("stays deleted once its row is deleted, past its tmux session's end and its pi's hand-off save", () => {
+		const { dir, supervisor, gone, beat, reap, list } = silentRegistry();
+		const file = join(dir, "s.jsonl");
+		writeFileSync(file, "");
+		beat("pi-s", file);
+		reap();
+		expect(supervisor.deleteInstance("pi-s")).toBe(true);
+		expect(list()).toEqual([]);
+		gone.add("pi-s");
+		expect(list()).toEqual([]);
+		expect(supervisor.saveInstance({ cwd: dir, label: "task", sessionFile: file })).toBeUndefined();
+		expect(list()).toEqual([]);
+	});
+
 	it("is stopped, with its finish time, once tmux no longer has it", () => {
 		const { dir, gone, beat, reap, list } = silentRegistry();
 		const file = join(dir, "s.jsonl");
