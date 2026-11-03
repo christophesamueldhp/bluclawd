@@ -20,6 +20,9 @@ import { giveUp, promptKey, sentText, settle, shellLine } from "./live.js";
  * outcomes.
  * @typedef {{ id: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, acceptedAt?: number, outcome?: "taken" | "queued" }} Pending
  */
+/** How long the daemon keeps a prompt after its last change: delivery.ts's DELIVERY_KEEP_MS. */
+const KEEP_MS = 10 * 60_000;
+
 /** A reply's text and thinking, held until a page has its entry. @typedef {{ entryId: string, text: string, thinking?: string }} Held */
 
 /** Why a sent prompt came back: its pane refused it, or it was lost. @typedef {{ entry: Pending, reason: string }} Failed */
@@ -51,6 +54,8 @@ export function openChat(id) {
 		/** Replies their pane said ended at a transcript entry, shown until a page has it: see replyEndedAt(). @type {Held[]} */
 		held: [],
 		/** @type {Pending[]} */ pending: [],
+		/** Those the phone kept of it were put back in (see restorePending): it keeps them again from then on. */
+		restored: false,
 		/** Images for the next prompt. @type {Attachment[]} */ attachments: [],
 		/** Picked photos still being read into `attachments`. */
 		reading: 0,
@@ -163,39 +168,81 @@ function reportsOutcomes(chat) {
 /**
  * A prompt pi took is in the transcript once it moved past where it was when the prompt was sent:
  * pi writes a prompt as it starts its turn. A slash command or a `!` line, which may write nothing,
- * is done once taken.
+ * is done once taken. Not before the transcript has loaded, for one restored as the chat opens.
  * @param {Chat} chat @param {Pending} entry
  */
 function written(chat, entry) {
 	if (entry.outcome !== "taken") return false;
 	const command =
 		!entry.images.length && (/^\/[\w.:-]+(?:\s|$)/.test(entry.prompt.trimStart()) || shellLine(entry.prompt));
-	return command || (chat.messages.at(-1)?.id ?? "") !== entry.last;
+	return command || (chat.messagesLoaded && (chat.messages.at(-1)?.id ?? "") !== entry.last);
 }
 
 /**
  * What became of the prompts sent to the session: from its status, or the event stream's. The
  * refused and lost ones are taken out, and returned to go back into the reply box. `since`: an
  * event stream asked for then replays every outcome its daemon knows, so a prompt it had accepted
- * before then and does not list, a restarted daemon lost; only for a pane that reports outcomes,
- * as the others' prompts may have reached pi.
+ * before then, less than KEEP_MS before, and does not list, a restarted daemon lost, unless its
+ * pane had reported it taken or queued; only for a pane that reports outcomes, as the others'
+ * prompts may have reached pi.
  * @param {Chat} chat @param {import("./statusbar.js").PromptOutcome[] | undefined} outcomes
  * @param {number} [since]
  * @returns {Failed[]}
  */
 export function settleOutcomes(chat, outcomes, since) {
+	return settleSent(chat, outcomes ?? [], since, reportsOutcomes(chat) ? chat.pending : []);
+}
+
+/**
+ * The prompts the phone kept of the chat (see storedPending), back in as it opens again, and
+ * settled by the outcomes the daemon replays to an event stream asked for at `since`, as
+ * settleOutcomes does: they were kept from a pane that reports outcomes, so one the replay lacks
+ * was lost, whatever the chat's report says yet.
+ * @param {Chat} chat @param {Pending[]} stored @param {import("./statusbar.js").PromptOutcome[]} outcomes
+ * @param {number} since
+ * @returns {Failed[]}
+ */
+export function restorePending(chat, stored, outcomes, since) {
+	chat.restored = true;
+	const restored = stored.filter((s) => !chat.pending.some((p) => p.id === s.id));
+	chat.pending = [...restored, ...chat.pending];
+	return settleSent(chat, outcomes, since, restored);
+}
+
+/**
+ * The pending prompts to keep on the phone, for restorePending: none for a pane from an older
+ * build, which reports no outcomes to settle them by, and undefined, so as not to write over
+ * those kept before, until they are back in and its pane's report is.
+ * @param {Chat} chat
+ * @returns {Pending[] | undefined}
+ */
+export function storedPending(chat) {
+	if (!chat.restored || chat.report === undefined) return undefined;
+	return reportsOutcomes(chat) ? chat.pending : [];
+}
+
+/**
+ * See settleOutcomes. `judged`: the pending prompts a replay that lacks them finds lost.
+ * @param {Chat} chat @param {import("./statusbar.js").PromptOutcome[]} outcomes
+ * @param {number | undefined} since @param {Pending[]} judged
+ * @returns {Failed[]}
+ */
+function settleSent(chat, outcomes, since, judged) {
 	/** @type {Failed[]} */
 	const failed = [];
-	for (const outcome of outcomes ?? []) {
+	for (const outcome of outcomes) {
 		const entry = chat.pending.find((p) => p.id === outcome.id);
 		if (!entry) continue;
 		if (outcome.outcome === "refused" || outcome.outcome === "lost") failed.push({ entry, reason: outcome.reason });
 		else if (outcome.outcome !== "sent") entry.outcome = outcome.outcome;
 	}
-	if (since !== undefined && reportsOutcomes(chat)) {
-		const known = new Set((outcomes ?? []).map((o) => o.id));
-		for (const entry of chat.pending) {
-			if (entry.acceptedAt === undefined || entry.acceptedAt >= since) continue;
+	if (since !== undefined) {
+		const known = new Set(outcomes.map((o) => o.id));
+		for (const entry of judged) {
+			// One pi took or queued is not sent again.
+			if (entry.outcome || entry.acceptedAt === undefined || entry.acceptedAt >= since) continue;
+			// The daemon lets one go once it is that old: its silence then says nothing.
+			if (since - entry.acceptedAt > KEEP_MS) continue;
 			if (!known.has(entry.id)) failed.push({ entry, reason: "daemon_restarted" });
 		}
 	}

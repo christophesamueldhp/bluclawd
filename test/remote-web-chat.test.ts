@@ -11,9 +11,12 @@ import {
 	listed,
 	openChat,
 	replyEndedAt,
+	restorePending,
 	settleOutcomes,
+	storedPending,
 } from "#remote-web/chat.js";
 import { listSummaries } from "../daemon/handler.ts";
+import { DELIVERY_KEEP_MS } from "../daemon/remote/delivery.ts";
 import { findSession, remoteSessions } from "../daemon/remote/sessions.ts";
 import { testRegistry } from "./helpers/registry.ts";
 
@@ -313,6 +316,19 @@ describe("prompts sent to a pane that reports their outcomes", () => {
 		expect(settleOutcomes(chat, [], undefined)).toEqual([]);
 	});
 
+	it("are not put back by a restarted daemon's replay once pi has them, taken or queued", () => {
+		const chat = reporting();
+		const taken = addPending(chat, "a", [], 100);
+		const queued = addPending(chat, "b", [], 110);
+		settleOutcomes(chat, [
+			{ id: taken.id, outcome: "taken" },
+			{ id: queued.id, outcome: "queued" },
+		]);
+		taken.acceptedAt = queued.acceptedAt = 150;
+		expect(settleOutcomes(chat, [], 200)).toEqual([]);
+		expect(chat.pending).toEqual([taken, queued]);
+	});
+
 	it("are not judged lost by a replay for a pane from an older build", () => {
 		const chat = openChat("a");
 		chat.report = { models: [] };
@@ -320,6 +336,99 @@ describe("prompts sent to a pane that reports their outcomes", () => {
 		entry.acceptedAt = 150;
 		expect(settleOutcomes(chat, [], 200)).toEqual([]);
 		expect(chat.pending).toEqual([entry]);
+	});
+});
+
+describe("prompts pending when the app reloads or the chat is left, kept on the phone", () => {
+	const reporting = () => {
+		const chat = openChat("a");
+		chat.report = { models: [], outcomes: [] };
+		chat.messages = [reply("1")];
+		return chat;
+	};
+	/** What the phone kept of the chat, as browser storage gives it back. */
+	const kept = (chat: ReturnType<typeof openChat>) => JSON.parse(JSON.stringify(storedPending(chat) ?? []));
+
+	it("are settled by id from the daemon's replay when the chat opens again, and put back when refused or lost", () => {
+		const before = reporting();
+		restorePending(before, [], [], 0);
+		const refused = addPending(before, "refused", [], 100);
+		const lost = addPending(before, "lost", [], 110);
+		const queued = addPending(before, "queued", [], 120);
+		const sent = addPending(before, "sent", [], 130);
+		for (const entry of before.pending) entry.acceptedAt = 150;
+		const stored = kept(before);
+
+		const chat = openChat("a");
+		const failed = restorePending(
+			chat,
+			stored,
+			[
+				{ id: refused.id, outcome: "refused", reason: "session_changed" },
+				{ id: lost.id, outcome: "lost", reason: "pane_gone" },
+				{ id: queued.id, outcome: "queued" },
+				{ id: sent.id, outcome: "sent" },
+			],
+			200,
+		);
+		expect(failed.map(({ entry, reason }) => [entry.prompt, reason])).toEqual([
+			["refused", "session_changed"],
+			["lost", "pane_gone"],
+		]);
+		expect(chat.pending.map((p) => [p.prompt, p.outcome])).toEqual([
+			["queued", "queued"],
+			["sent", undefined],
+		]);
+	});
+
+	it("are put back when a restarted daemon's replay lacks them, unless pi has them, before the pane's report is in", () => {
+		const before = reporting();
+		restorePending(before, [], [], 0);
+		addPending(before, "forgotten", [], 100);
+		const taken = addPending(before, "taken", [], 110);
+		settleOutcomes(before, [{ id: taken.id, outcome: "taken" }]);
+		for (const entry of before.pending) entry.acceptedAt = 150;
+		const stored = kept(before);
+
+		const chat = openChat("a");
+		expect(restorePending(chat, stored, [], 200).map(({ entry, reason }) => [entry.prompt, reason])).toEqual([
+			["forgotten", "daemon_restarted"],
+		]);
+		// The transcript has yet to load: the one taken waits for it to move past where it was.
+		expect(chat.pending.map((p) => p.prompt)).toEqual(["taken"]);
+		applyLatest(chat, { messages: [reply("1"), user("2", "taken")], more: false });
+		expect(chat.pending).toEqual([]);
+	});
+
+	it("wait for their give-up when the daemon has let them go, past how long it keeps them", () => {
+		const before = reporting();
+		restorePending(before, [], [], 0);
+		const entry = addPending(before, "old", [], 100);
+		entry.acceptedAt = 150;
+
+		const chat = openChat("a");
+		expect(restorePending(chat, kept(before), [], 150 + DELIVERY_KEEP_MS + 1)).toEqual([]);
+		expect(chat.pending.map((p) => p.prompt)).toEqual(["old"]);
+		applyLatest(chat, { messages: [reply("1")], more: false });
+		expect(checkPending(chat, chat.pending[0], "idle")).toBe("fail");
+	});
+
+	it("are kept only once those kept before are back in, and only for a pane that reports outcomes", () => {
+		const chat = openChat("a");
+		addPending(chat, "early", [], 100);
+		// Nothing written over what an earlier chat kept, before it is back in, or before its pane's
+		// report says what kind of pane it is.
+		expect(storedPending(chat)).toBeUndefined();
+		restorePending(chat, [], [], 200);
+		expect(storedPending(chat)).toBeUndefined();
+		chat.report = { models: [], outcomes: [] };
+		expect(storedPending(chat)?.map((p) => p.prompt)).toEqual(["early"]);
+		// A pane that sends no report, or one without outcomes, is from an older build: its prompts
+		// are matched by the transcript's text, which a reload can't pick up from.
+		for (const report of [null, { models: [] }]) {
+			chat.report = report;
+			expect(storedPending(chat)).toEqual([]);
+		}
 	});
 });
 
