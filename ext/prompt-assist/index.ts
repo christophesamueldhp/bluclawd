@@ -1,5 +1,6 @@
 import { CustomEditor, type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { Editor } from "@earendil-works/pi-tui";
+import { pick } from "../web/picker.ts";
 import { attachSuggestions } from "./editor.ts";
 import { DEFAULT_MODEL, loadAssistEnabled, loadAssistModel, saveAssistEnabled, saveAssistModel } from "./prefs.ts";
 
@@ -70,7 +71,13 @@ export default function promptAssist(pi: ExtensionAPI) {
 						.getAvailable()
 						.map((model) => `${model.provider}/${model.id}`)
 						.sort();
-					choice = await ctx.ui.select(`Choose prompt assist model (current: ${selectedModel})`, models);
+					// pi's ui.select draws every option, so a long list runs off the screen.
+					choice = await pick(
+						ctx,
+						`Choose prompt assist model (current: ${selectedModel})`,
+						models.map((value) => ({ value, label: value })),
+						selectedModel,
+					);
 					if (!choice) return;
 				}
 			}
