@@ -10,18 +10,20 @@ import {
 	type PaneMessage,
 	type PaneReport,
 	type PaneTask,
+	type PromptOutcome,
 	phoneMayRun,
 } from "../ipc/protocol.ts";
 import type { StatusSpan } from "./pistatusline.ts";
 import { findSession, type ListedSession } from "./sessions.ts";
 import type { GitInfo } from "./statusline.ts";
 
-/** A listed session, as one lookup per request finds it, with its pane's latest report. */
-export type PhoneSession = ListedSession & { id: string; report?: PaneReport };
+/** A listed session, as one lookup per request finds it, with its pane's latest report and the
+ *  outcomes of the prompts sent to it, as the daemon's delivery module has them. */
+export type PhoneSession = ListedSession & { id: string; report?: PaneReport; outcomes?: PromptOutcome[] };
 
 /** What a Chat asks of a session. A body's fields are `unknown` until the rule for them checks them. */
 export type PhoneAction =
-	| { type: "prompt"; text: string; images?: PaneImage[] }
+	| { type: "prompt"; text: string; images?: PaneImage[]; id?: string }
 	| { type: "abort" }
 	| { type: "model"; provider: unknown; id: unknown }
 	| { type: "thinking"; level: unknown }
@@ -91,6 +93,8 @@ export interface StatusView {
 	usage?: PaneReport["usage"];
 	backgroundSubagentUsage?: PaneReport["backgroundSubagentUsage"];
 	notice?: PaneReport["notice"];
+	/** Only for a pane that reports them, so the phone tells it from an older one. */
+	outcomes?: PromptOutcome[];
 	tasks?: StatusTask[];
 	git?: GitInfo;
 	statusline?: { lines: StatusSpan[][] };
@@ -104,13 +108,18 @@ const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 
 /** The one session lookup a request makes, and the event stream's session source. */
 export function phoneSession(
-	deps: { listInstances(): InstanceSummary[]; report(sessionId: string): PaneReport | undefined },
+	deps: {
+		listInstances(): InstanceSummary[];
+		report(sessionId: string): PaneReport | undefined;
+		outcomes?(sessionId: string): PromptOutcome[];
+	},
 	id: string,
 ): PhoneSession | undefined {
 	const found = findSession(deps.listInstances(), id);
 	if (!found) return undefined;
 	const report = deps.report(id);
-	return { ...found, id, ...(report ? { report } : {}) };
+	const outcomes = deps.outcomes?.(id);
+	return { ...found, id, ...(report ? { report } : {}), ...(outcomes ? { outcomes } : {}) };
 }
 
 /** The command a "/" line names, as pi reads one (`/compact`, `/skill:pdf …`); none for text such as a path. */
@@ -140,12 +149,12 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 	}
 	switch (action.type) {
 		case "prompt": {
-			const { text, images } = action;
+			const { text, images, id } = action;
 			// A slash command, as pi reads one: typed into the pane's prompt (a phone's images never are).
 			const command = images ? undefined : commandName(text);
 			const shell = !images && shellLine(text);
 			if (command === undefined && !shell)
-				return toPane(session, images ? { type: "prompt", text, images } : { type: "prompt", text });
+				return toPane(session, { type: "prompt", text, ...(images ? { images } : {}), ...(id ? { id } : {}) });
 			// Only one the pane lists for a phone: a pane that lists none (an older one) runs none.
 			const listed = report?.commands?.find((c) => c.name === command);
 			if (!shell && (!listed || !phoneMayRun(listed))) return { error: "command_refused" };
@@ -208,12 +217,15 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 		case "commands":
 			// A stored row's last report is no longer its status.
 			if (!session.running || !report) return { error: "no_status" };
-			return action.type === "status" ? { status: statusView(report) } : { commands: report.commands ?? [] };
+			return action.type === "status"
+				? { status: statusView(report, session.outcomes ?? []) }
+				: { commands: report.commands ?? [] };
 	}
 }
 
-/** Fetched again after every report: the commands, which rarely change, have their own route. */
-function statusView(report: PaneReport): StatusView {
+/** Fetched again after every report: the commands, which rarely change, have their own route.
+ *  `outcomes`: the delivery module's, shown only when the pane's report says it reports them. */
+function statusView(report: PaneReport, outcomes: PromptOutcome[]): StatusView {
 	const { model, context, usage, backgroundSubagentUsage: background, notice } = report;
 	return {
 		model: model && modelView(model),
@@ -238,6 +250,7 @@ function statusView(report: PaneReport): StatusView {
 			cost: background.cost,
 		},
 		notice: notice && { text: notice.text, at: notice.at },
+		outcomes: report.outcomes && outcomes.map(({ id, outcome }) => ({ id, outcome })),
 		tasks: report.tasks?.map((task) => ({
 			id: task.id,
 			kind: task.kind,
