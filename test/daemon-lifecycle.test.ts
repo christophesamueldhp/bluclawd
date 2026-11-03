@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { listSummaries } from "../daemon/handler.ts";
 import { loadInstances, saveInstances } from "../daemon/storage.ts";
-import type { ServerSupervisor } from "../daemon/supervisor.ts";
+import { ServerSupervisor } from "../daemon/supervisor.ts";
 import { testRegistry } from "./helpers/registry.ts";
 
 describe("agent-view stored rows", () => {
@@ -227,5 +227,188 @@ describe("one row per session through quit and resume", () => {
 		expect(supervisor.deleteInstance("pi-a")).toBe(true);
 		expect(rows(supervisor)).toEqual([]);
 		expect(loadInstances(dir)).toEqual([]);
+	});
+});
+
+describe("a session switch, fork or crash in a pane keeps the session it left as a stopped row", () => {
+	let dir: string;
+	let sessions: string;
+	const createdAt = "2026-10-30T09:00:00.000Z";
+	/** A session file whose last reply is `text`. */
+	const session = (name: string, text: string): string => {
+		const file = join(sessions, `${name}.jsonl`);
+		const reply = { role: "assistant", content: [{ type: "text", text }], stopReason: "stop" };
+		writeFileSync(file, `${JSON.stringify({ type: "message", message: reply })}\n`);
+		return file;
+	};
+	const pane = (id: string, sessionFile: string, sessionId: string) => ({
+		id,
+		status: "online" as const,
+		cwd: "/p",
+		createdAt,
+		label: sessionId,
+		sessionId,
+		sessionFile,
+		pane: id,
+	});
+	/** What every reader lists, by the fields these transitions move. */
+	const rows = (supervisor: ServerSupervisor) =>
+		listSummaries(supervisor).map(({ id, status, sessionId, pinned, pane, detail }) => ({
+			id,
+			status,
+			sessionId,
+			pinned,
+			pane,
+			detail,
+		}));
+	const stopped = (id: string, sessionId: string, detail: string, pinned?: boolean) => ({
+		id,
+		status: "stopped",
+		sessionId,
+		pinned,
+		pane: undefined,
+		detail,
+	});
+	const live = (id: unknown, sessionId: string, pane: string, pinned?: boolean) => ({
+		id,
+		status: "online",
+		sessionId,
+		pinned,
+		pane,
+		detail: undefined,
+	});
+
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "bluclawd-switch-"));
+		sessions = mkdtempSync(join(tmpdir(), "bluclawd-switch-sessions-"));
+	});
+
+	it("/new: the old session stays stopped under the pane's id, with its pin; the new one gets a row of its own", () => {
+		const supervisor = testRegistry(dir);
+		supervisor.registerExternal(pane("pi-a", session("a", "a done"), "sa"), "idle");
+		supervisor.setInstanceMeta("pi-a", { pinned: true });
+
+		supervisor.unregisterExternal("pi-a", "new");
+		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "a done", true)]);
+
+		// The new session registers in the same pane once it has a first message.
+		supervisor.registerExternal(pane("pi-a", session("b", "b says"), "sb"), "working");
+		const listed = rows(supervisor);
+		expect(listed).toEqual([stopped("pi-a", "sa", "a done", true), live(expect.any(String), "sb", "pi-a")]);
+		expect(listed[1].id).not.toBe("pi-a");
+	});
+
+	it("/resume <other>: the old session stays stopped; the other goes live as its own row, or a new one", () => {
+		const supervisor = testRegistry(dir);
+		const c = session("c", "c done");
+		const stored = supervisor.saveInstance({ cwd: "/p", sessionFile: c, sessionId: "sc" })!;
+		supervisor.setInstanceMeta(stored.id, { pinned: true });
+		supervisor.registerExternal(pane("pi-a", session("a", "a done"), "sa"), "idle");
+
+		// Onto a stopped session: it goes on as that row, with its pin.
+		supervisor.unregisterExternal("pi-a", "resume");
+		supervisor.registerExternal(pane("pi-a", c, "sc"), "idle");
+		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "a done"), live(stored.id, "sc", "pi-a", true)]);
+
+		// Onto a session with no row: a new one, and c is stopped again under its own id.
+		supervisor.unregisterExternal("pi-a", "resume");
+		supervisor.registerExternal(pane("pi-a", session("d", "d says"), "sd"), "idle");
+		const listed = rows(supervisor);
+		expect(listed).toEqual([
+			stopped(stored.id, "sc", "c done", true),
+			stopped("pi-a", "sa", "a done"),
+			live(expect.any(String), "sd", "pi-a"),
+		]);
+		expect(new Set(listed.map((r) => r.id)).size).toBe(3);
+	});
+
+	it("fork: the parent stays stopped with the pin and order; the fork is listed as a new row", () => {
+		const supervisor = testRegistry(dir);
+		supervisor.registerExternal(pane("pi-a", session("a", "a done"), "sa"), "idle");
+		supervisor.setInstanceMeta("pi-a", { pinned: true, sortOrder: 2 });
+
+		supervisor.unregisterExternal("pi-a", "fork");
+		// Listed before its first message: pi writes no file for it yet.
+		supervisor.registerExternal({ ...pane("pi-a", join(sessions, "fork.jsonl"), "sf"), createdAt: "2026-10-30T11:00:00.000Z" }, "idle");
+		const listed = listSummaries(supervisor);
+		expect(listed).toEqual([
+			expect.objectContaining({ id: "pi-a", status: "stopped", sessionId: "sa", pinned: true, sortOrder: 2 }),
+			expect.objectContaining({ status: "online", sessionId: "sf", pane: "pi-a", createdAt: "2026-10-30T11:00:00.000Z" }),
+		]);
+		expect(listed[1]).toMatchObject({ pinned: undefined, sortOrder: undefined });
+		expect(listed[1].id).not.toBe("pi-a");
+	});
+
+	it("crash: once the TTL lapses and tmux says its pane is gone, the session is stopped with its pin", () => {
+		let now = Date.parse("2026-10-30T10:00:00.000Z");
+		const gone = new Set(["pi-a"]);
+		const supervisor = new ServerSupervisor({
+			now: () => now,
+			dir,
+			tmux: {
+				hasSession: (name) => {
+					if (name === "pi-c") throw new Error("ETIMEDOUT");
+					return !gone.has(name);
+				},
+			},
+		});
+		const a = session("a", "working on it");
+		supervisor.registerExternal(pane("pi-a", a, "sa"), "working");
+		supervisor.setInstanceMeta("pi-a", { pinned: true });
+		supervisor.registerExternal(pane("pi-b", session("b", "b done"), "sb"), "idle");
+		supervisor.registerExternal(pane("pi-c", session("c", "c done"), "sc"), "idle");
+		// Written after its last heartbeat, before it died.
+		const last = { role: "assistant", content: [{ type: "text", text: "last words" }], stopReason: "stop" };
+		writeFileSync(a, `${JSON.stringify({ type: "message", message: last })}\n`, { flag: "a" });
+
+		now += 10_000;
+		expect(rows(supervisor).map((r) => r.status)).toEqual(["online", "online", "online"]);
+		now += 10_000;
+		// pi-b missed its beats with its pane up, and tmux could not say for pi-c: dropped as before,
+		// listed again on their next beat.
+		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "last words", true)]);
+		expect(rows(testRegistry(dir))).toEqual([stopped("pi-a", "sa", "last words", true)]);
+	});
+
+	it("kill + delete: the row goes and stays gone once its pane's TTL lapses", () => {
+		let now = Date.parse("2026-10-30T10:00:00.000Z");
+		const supervisor = new ServerSupervisor({ now: () => now, dir, tmux: { hasSession: () => false } });
+		supervisor.registerExternal(pane("pi-a", session("a", "a done"), "sa"), "idle");
+		supervisor.setInstanceMeta("pi-a", { pinned: true });
+
+		// Agent view's bulk delete: tmux kill, then delete.
+		expect(supervisor.deleteInstance("pi-a")).toBe(true);
+		now += 20_000;
+		expect(rows(supervisor)).toEqual([]);
+		expect(loadInstances(dir)).toEqual([]);
+	});
+
+	it("reads the session it left as pi left it at the switch: pi settles the turn before ending it", () => {
+		const supervisor = testRegistry(dir);
+		const a = session("a", "working on it");
+		supervisor.registerExternal(pane("pi-a", a, "sa"), "working");
+		// The aborted turn pi persists before its session_shutdown.
+		const aborted = { role: "assistant", content: [{ type: "text", text: "half way" }], stopReason: "aborted" };
+		writeFileSync(a, `${JSON.stringify({ type: "message", message: aborted })}\n`, { flag: "a" });
+
+		supervisor.unregisterExternal("pi-a", "new");
+		expect(listSummaries(supervisor)).toEqual([
+			expect.objectContaining({ id: "pi-a", status: "stopped", detail: "half way", outcome: "stopped" }),
+		]);
+	});
+
+	it("a quit's stopped row ends with what the file holds once pi is gone: its hand-off's save reads it", () => {
+		const supervisor = testRegistry(dir);
+		const a = session("a", "working on it");
+		supervisor.registerExternal(pane("pi-a", a, "sa"), "working");
+		// pi does not settle the turn before a quit's session_shutdown; it may still write after it.
+		supervisor.unregisterExternal("pi-a", "quit");
+		const failed = { role: "assistant", content: [], stopReason: "error", errorMessage: "overloaded" };
+		writeFileSync(a, `${JSON.stringify({ type: "message", message: failed })}\n`, { flag: "a" });
+
+		supervisor.saveInstance({ cwd: "/p", label: "sa", sessionFile: a, sessionId: "sa" });
+		expect(listSummaries(supervisor)).toEqual([
+			expect.objectContaining({ id: "pi-a", status: "stopped", detail: "overloaded", outcome: "failed" }),
+		]);
 	});
 });

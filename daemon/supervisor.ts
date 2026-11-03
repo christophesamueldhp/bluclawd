@@ -94,7 +94,8 @@ export class ServerSupervisor {
 			: stored && paneMeta(stored);
 		this.externalInstances.set(record.id, {
 			record: cloneInstance({ ...record, ...kept, ...resumed }),
-			rowId: previous?.rowId ?? stored?.id ?? record.id,
+			// A pane's id is its first session's row: a session it switched to later needs one of its own.
+			rowId: previous?.rowId ?? stored?.id ?? (getInstance(this.deps.dir, record.id) ? randomUUID() : record.id),
 			activity,
 			lastSeenAt: now,
 			inbox: previous?.inbox ?? [],
@@ -124,15 +125,17 @@ export class ServerSupervisor {
 		return this.externalInstances.get(paneId)?.rowId ?? paneId;
 	}
 
-	/** A quit leaves its row, stopped, saved again by its hand-off once pi's writes are final. Any
-	 *  other end, or none given, drops the row as before. */
+	/** A quit leaves its row, stopped, saved again by its hand-off once pi's writes are final. A switch
+	 *  to another session or a fork leaves it stopped too: pi settled its turn before ending it, so
+	 *  its file is final already. No reason (an older pane), or a reload, drops the row as before. */
 	unregisterExternal(id: string, reason?: EndReason): void {
 		const entry = this.externalInstances.get(id);
 		const file = entry?.record.sessionFile;
-		if (entry && file && reason === "quit" && existsSync(file)) {
+		const stops = reason === "quit" || reason === "new" || reason === "resume" || reason === "fork";
+		if (entry && file && stops && existsSync(file)) {
 			const { cwd, label, sessionId } = entry.record;
 			this.stopRow({ cwd, label, sessionFile: file, sessionId }, [id, entry]);
-			this.savesDue.set(file, { deleted: false });
+			if (reason === "quit") this.savesDue.set(file, { deleted: false });
 			return;
 		}
 		if (entry && file) this.quitMeta.set(file, { record: entry.record, rowId: entry.rowId });
@@ -192,13 +195,20 @@ export class ServerSupervisor {
 		return entry.inbox.splice(0);
 	}
 
-	/** External instances, each as its row, reaping any whose last heartbeat is older than the TTL. */
+	/** External instances, each as its row, reaping any whose last heartbeat is older than the TTL: one
+	 *  whose pane tmux says is gone died unseen (a crash, a SIGKILL), so its session stays as stopped. */
 	listExternalInstances(
 		now: number = this.deps.now(),
 	): Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> {
 		const out: Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> = [];
 		for (const [id, entry] of this.externalInstances) {
 			if (now - entry.lastSeenAt > EXTERNAL_TTL_MS) {
+				const { cwd, label, sessionFile, sessionId } = entry.record;
+				if (sessionFile && existsSync(sessionFile) && this.paneGone(id)) {
+					// Its pi is gone, so its writes are final.
+					this.stopRow({ cwd, label, sessionFile, sessionId }, [id, entry]);
+					continue;
+				}
 				this.externalInstances.delete(id);
 				this.settleWait(id, "none");
 				continue;
@@ -206,6 +216,15 @@ export class ServerSupervisor {
 			out.push({ record: { ...entry.record, id: entry.rowId }, activity: entry.activity, settled: entry.settled });
 		}
 		return out;
+	}
+
+	/** Not when tmux could not say: a pane that may be up is not taken for dead. */
+	private paneGone(paneId: string): boolean {
+		try {
+			return !this.deps.tmux.hasSession(paneId);
+		} catch {
+			return false;
+		}
 	}
 
 	/** Rows an older daemon left running: they ended with it, and stay resumable from their .jsonl. */

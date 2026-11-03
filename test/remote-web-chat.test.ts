@@ -1,5 +1,12 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { listSummaries } from "../daemon/handler.ts";
+import { findSession, remoteSessions } from "../daemon/remote/sessions.ts";
 import { addPending, applyLatest, applyOlder, checkPending, forget, listed, openChat } from "#remote-web/chat.js";
+import { successor } from "#remote-web/list.js";
+import { testRegistry } from "./helpers/registry.ts";
 
 const user = (id: string, text: string) => ({ kind: "user", id, text });
 const reply = (id: string, text = "ok") => ({ kind: "assistant", id, text, tools: [] });
@@ -150,5 +157,42 @@ describe("following a session to its next pane", () => {
 		const chat = openChat("a");
 		expect(chat.pending).toEqual([]);
 		expect(chat.backToList).toBe(false);
+	});
+});
+
+describe("a chat open on a pane whose user types /new", () => {
+	it("stays on the session it was showing, now stopped, and moves to no other row", () => {
+		const sessions = mkdtempSync(join(tmpdir(), "bluclawd-chat-new-"));
+		const fileOf = (name: string) => {
+			const file = join(sessions, `${name}.jsonl`);
+			const message = { role: "assistant", content: [{ type: "text", text: name }], stopReason: "stop" };
+			writeFileSync(file, `${JSON.stringify({ type: "message", message })}\n`);
+			return file;
+		};
+		const pane = (sessionFile: string, sessionId: string) => ({
+			id: "pi-a",
+			status: "online" as const,
+			cwd: "/p",
+			createdAt: new Date().toISOString(),
+			sessionId,
+			sessionFile,
+			pane: "pi-a",
+		});
+		const registry = testRegistry();
+		const old = fileOf("old");
+		registry.registerExternal(pane(old, "s-old"), "idle");
+		const chat = openChat("pi-a");
+		const sessionId = remoteSessions(listSummaries(registry)).find((s) => s.id === chat.id)?.sessionId;
+		expect(sessionId).toBe("s-old");
+
+		registry.unregisterExternal("pi-a", "new");
+		registry.registerExternal(pane(fileOf("new"), "s-new"), "working");
+
+		const listed = remoteSessions(listSummaries(registry));
+		expect(listed.find((s) => s.id === chat.id)).toMatchObject({ sessionId: "s-old", alive: false });
+		expect(listed.find((s) => s.sessionId === "s-new")?.id).not.toBe(chat.id);
+		expect(successor(listed, chat.id, sessionId)).toBeUndefined();
+		// What its transcript is read from.
+		expect(findSession(listSummaries(registry), chat.id)).toMatchObject({ sessionFile: old, running: false });
 	});
 });
