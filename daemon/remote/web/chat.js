@@ -177,6 +177,15 @@ function reportsOutcomes(chat) {
 }
 
 /**
+ * Its pane's report shows an older build's, without outcomes. No report says nothing of the build:
+ * a pane yet to send its first, one gone silent, or any after its daemon restarted.
+ * @param {Chat} chat
+ */
+function olderBuild(chat) {
+	return chat.report != null && !Array.isArray(chat.report.outcomes);
+}
+
+/**
  * A prompt pi took is in the transcript once it moved past where it was when the prompt was sent:
  * pi writes a prompt as it starts its turn. A slash command or a `!` line, which may write nothing,
  * is done once taken. Not before the transcript has loaded, for one restored as the chat opens.
@@ -206,26 +215,24 @@ export function settleOutcomes(chat, outcomes, since) {
 
 /**
  * The prompts the phone kept of the chat (see storedPending), back in as it opens again once both
- * the daemon's `replay` and its pane's report are in, in either order, and settled by the replay
- * as settleOutcomes does: one the replay lacks was lost. For a pane from an older build, which
+ * the daemon's `replay` and its pane's report (or its answer that there is none) are in, in either
+ * order, and settled by the replay as settleOutcomes does: one the replay lacks was lost, judged
+ * only for a pane that reports outcomes. For a pane whose report shows an older build, which
  * reports no outcomes to settle them by, only those the replay says refused or lost come back
- * (the daemon's word on each, whatever the pane's build), and the others are discarded. With no
- * report at all, `running` tells the two apart: its row in the session list, undefined until
- * listed. A row not running had its pane quit, and the replay settles what it was sent; one
- * running is an older build's.
- * @param {Chat} chat @param {Replay} [replay] @param {boolean} [running]
+ * (the daemon's word on each, whatever the pane's build), and the others are discarded.
+ * @param {Chat} chat @param {Replay} [replay]
  * @returns {Failed[]}
  */
-export function restorePending(chat, replay, running) {
+export function restorePending(chat, replay) {
 	if (chat.restored) return [];
 	chat.replay = replay ?? chat.replay;
-	if (!chat.replay || chat.report === undefined || (chat.report === null && running === undefined)) return [];
+	if (!chat.replay || chat.report === undefined) return [];
 	const { outcomes, since } = chat.replay;
 	const kept = chat.kept;
 	chat.restored = true;
 	chat.replay = undefined;
 	chat.kept = [];
-	if (chat.report ? !reportsOutcomes(chat) : running) {
+	if (olderBuild(chat)) {
 		/** @type {Failed[]} */
 		const failed = [];
 		for (const outcome of outcomes) {
@@ -237,18 +244,18 @@ export function restorePending(chat, replay, running) {
 	}
 	const restored = kept.filter((s) => !chat.pending.some((p) => p.id === s.id));
 	chat.pending = [...restored, ...chat.pending];
-	return settleSent(chat, outcomes, since, restored);
+	return settleSent(chat, outcomes, since, reportsOutcomes(chat) ? restored : []);
 }
 
 /**
  * The pending prompts to keep on the phone, for restorePending: from the moment they are sent,
- * with those kept before that are not back in yet; none sent to a pane its report shows reports no
- * outcomes to settle them by (an older build's, or none, as its pane quit).
+ * with those kept before that are not back in yet; none sent to a pane whose report shows an older
+ * build, which reports no outcomes to settle them by.
  * @param {Chat} chat
  * @returns {Pending[]}
  */
 export function storedPending(chat) {
-	if (chat.report !== undefined && !reportsOutcomes(chat)) return chat.kept;
+	if (olderBuild(chat)) return chat.kept;
 	return [...chat.kept, ...chat.pending];
 }
 
@@ -337,12 +344,14 @@ export function forget(chat, entry) {
 
 /**
  * A sent prompt whose time is up (see giveUp), forgotten unless it waits on. One its pane reported
- * taken or queued reached pi: it waits on.
- * @param {Chat} chat @param {Pending} entry @param {string | undefined} sessionState
+ * taken or queued reached pi: it waits on. So does one whose row is `silent` (its pane stopped
+ * answering, and may come back), unless its pane is an older build's: the daemon reports it once
+ * the pane is back, or lost once the pane is gone.
+ * @param {Chat} chat @param {Pending} entry @param {string | undefined} sessionState @param {boolean} [silent]
  * @returns {"wait" | "drop" | "fail"}
  */
-export function checkPending(chat, entry, sessionState) {
-	if (entry.outcome) return "wait";
+export function checkPending(chat, entry, sessionState, silent) {
+	if (entry.outcome || (silent && !olderBuild(chat))) return "wait";
 	const verdict = giveUp(entry, sessionState, chat.messages.at(-1)?.id ?? "");
 	if (verdict !== "wait") forget(chat, entry);
 	return verdict;

@@ -57,7 +57,7 @@ describe("pending prompts kept on the phone", () => {
 		expect(storage.length).toBe(1);
 	});
 
-	it("are let go for the rows the session list no longer has, and kept for those it has", () => {
+	it("are let go for the rows the session list no longer has, and kept for those it has, with their drafts", () => {
 		const storage = memoryStorage();
 		storage.setItem("bluclawd-view-mode", "list");
 		const store = pendingStore(() => storage);
@@ -65,9 +65,11 @@ describe("pending prompts kept on the phone", () => {
 			const chat = openChat(id);
 			addPending(chat, `for ${id}`, [], 100);
 			store.save(chat);
+			store.saveDraft(id, `draft ${id}`);
 		}
 		store.prune(["b"]);
 		expect(["a", "b", "c"].map((id) => store.load(id).length)).toEqual([0, 1, 0]);
+		expect(["a", "b", "c"].map((id) => store.draft(id))).toEqual(["", "draft b", ""]);
 		expect(storage.getItem("bluclawd-view-mode")).toBe("list");
 	});
 
@@ -82,6 +84,8 @@ describe("pending prompts kept on the phone", () => {
 			addPending(chat, "hi", [], 100);
 			expect(() => store.save(chat)).not.toThrow();
 			expect(store.load("a")).toEqual([]);
+			expect(() => store.saveDraft("a", "hi")).not.toThrow();
+			expect(store.draft("a")).toBe("");
 			expect(() => store.prune([])).not.toThrow();
 		}
 	});
@@ -98,5 +102,18 @@ describe("pending prompts kept on the phone", () => {
 		addPending(chat, "second", [], 110);
 		store.save(chat);
 		expect(store.load("a")).toEqual([]);
+	});
+
+	it("survive a reload when put back in the reply box, as its unsent draft", () => {
+		const storage = memoryStorage();
+		pendingStore(() => storage).saveDraft("a", "lost prompt\ntyped since");
+		pendingStore(() => storage).saveDraft("b", "other row");
+		const store = pendingStore(() => storage);
+		expect(store.draft("a")).toBe("lost prompt\ntyped since");
+		// Sent, or emptied: none kept.
+		store.saveDraft("a", "");
+		expect(store.draft("a")).toBe("");
+		expect(storage.getItem("bluclawd-draft:a")).toBeNull();
+		expect(store.draft("b")).toBe("other row");
 	});
 });

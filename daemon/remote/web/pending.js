@@ -1,7 +1,8 @@
 // @ts-check
 /**
  * Each chat's pending prompts, kept in browser storage so that a reload, or a return to the chat,
- * still settles them (see restorePending), until its row leaves the session list.
+ * still settles them (see restorePending), and the text in its reply box not sent yet, a prompt put
+ * back there too, until its row leaves the session list.
  */
 import { storedPending } from "./chat.js";
 
@@ -9,6 +10,8 @@ import { storedPending } from "./chat.js";
 
 /** Followed by a session's row id: its pending prompts. */
 const KEY = "bluclawd-pending:";
+/** Followed by a session's row id: its reply box's unsent text. */
+const DRAFT_KEY = "bluclawd-draft:";
 
 /**
  * `storage`: asked for at each use, as merely reading `localStorage` throws where it is blocked.
@@ -44,13 +47,30 @@ export function pendingStore(storage) {
 				} catch {}
 			}
 		},
+		/** @param {string} id a session's row id */
+		draft(id) {
+			try {
+				return storage().getItem(DRAFT_KEY + id) ?? "";
+			} catch {
+				return "";
+			}
+		},
+		/** None kept once it is empty. @param {string} id a session's row id @param {string} text */
+		saveDraft(id, text) {
+			try {
+				if (text) storage().setItem(DRAFT_KEY + id, text);
+				else storage().removeItem(DRAFT_KEY + id);
+			} catch {}
+		},
 		/** Only those of the rows listed: the others were deleted. @param {string[]} ids */
 		prune(ids) {
 			try {
-				const listed = new Set(ids.map((id) => KEY + id));
+				const listed = new Set(ids.flatMap((id) => [KEY + id, DRAFT_KEY + id]));
 				const keys = [];
 				for (let i = 0; i < storage().length; i++) keys.push(storage().key(i));
-				for (const key of keys) if (key?.startsWith(KEY) && !listed.has(key)) storage().removeItem(key);
+				for (const key of keys) {
+					if ((key?.startsWith(KEY) || key?.startsWith(DRAFT_KEY)) && !listed.has(key)) storage().removeItem(key);
+				}
 			} catch {}
 		},
 	};
