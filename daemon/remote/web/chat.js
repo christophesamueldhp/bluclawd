@@ -13,12 +13,12 @@ import { giveUp, promptKey, sentText, settle, shellLine } from "./live.js";
  */
 /**
  * A prompt sent and not yet in the transcript. `id`: the one sent with it, which its outcome comes
- * back by. `to`: the session it was sent to. `text`: as the transcript will show it (see
- * promptKey); `prompt`: as typed, `images`: as sent. `before`: the transcript's copies of its text
- * when it was sent. `started`: the session was seen working since. `last`: the transcript's last
- * message when it was sent. `acceptedAt`: when the daemon answered that it has it. `outcome`: what
- * its pane reported of it, a pane that reports outcomes.
- * @typedef {{ id: string, to: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, acceptedAt?: number, outcome?: "taken" | "queued" }} Pending
+ * back by. `text`: as the transcript will show it (see promptKey); `prompt`: as typed, `images`:
+ * as sent. `before`: the transcript's copies of its text when it was sent. `started`: the session
+ * was seen working since. `last`: the transcript's last message when it was sent. `acceptedAt`: when
+ * the daemon answered that it has it. `outcome`: what its pane reported of it, a pane that reports
+ * outcomes.
+ * @typedef {{ id: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, acceptedAt?: number, outcome?: "taken" | "queued" }} Pending
  */
 /** A reply's text and thinking, held until a page has its entry. @typedef {{ entryId: string, text: string, thinking?: string }} Held */
 
@@ -31,11 +31,11 @@ function promptId() {
 }
 
 /**
- * A chat of the session in `id`'s pane. One that follows its session to a new pane (`previous`)
- * carries the prompts still pending, and the way back to the list.
- * @param {string} id @param {{ pending: Pending[], backToList: boolean }} [previous]
+ * A chat of the session whose row is `id`: the row keeps its id while the session moves between a
+ * pane and storage.
+ * @param {string} id
  */
-export function openChat(id, previous) {
+export function openChat(id) {
 	return {
 		id,
 		/** @type {Message[]} */ messages: [],
@@ -50,8 +50,7 @@ export function openChat(id, previous) {
 		/** @type {ReturnType<typeof setTimeout> | undefined} */ liveClear: undefined,
 		/** Replies their pane said ended at a transcript entry, shown until a page has it: see replyEndedAt(). @type {Held[]} */
 		held: [],
-		/** Shared with a chat this one follows, so it is changed in place (see keepPending). @type {Pending[]} */
-		pending: previous?.pending ?? [],
+		/** @type {Pending[]} */ pending: [],
 		/** Images for the next prompt. @type {Attachment[]} */ attachments: [],
 		/** Picked photos still being read into `attachments`. */
 		reading: 0,
@@ -83,10 +82,6 @@ export function openChat(id, previous) {
 		/** Not fetched again in this chat. @type {Set<string>} */ picturesFailed: new Set(),
 		/** Tool results asked for in full, by entry id: the text, or why it is not there. @type {Map<string, { text?: string, truncated?: boolean, error?: string, loading?: boolean }>} */
 		outputs: new Map(),
-		/** Its pi session, as last listed: its row may go, and the next chat follows it to its next one. @type {string | undefined} */
-		sessionId: undefined,
-		/** The pane its session moved to, which the next chat follows. @type {string | undefined} */
-		next: undefined,
 		/**
 		 * Its turn ended, as of a list asked for at this time: the next transcript page drops the
 		 * prompts sent before then that it still lacks, which pi did not write as sent.
@@ -96,7 +91,7 @@ export function openChat(id, previous) {
 		/** Its commands were asked for, with its first report: the cached ones show meanwhile. */
 		commandsAsked: false,
 		/** Opened from the list, whose history entry "‹ Sessions" goes back to. */
-		backToList: previous?.backToList ?? false,
+		backToList: false,
 		messagesRequest: 0,
 		statusRequest: 0,
 	};
@@ -116,14 +111,9 @@ export function replyEndedAt(chat, entryId) {
 	chat.live = live?.tools.length ? { text: "", tools: live.tools } : undefined;
 }
 
-/**
- * Only the pending prompts `keep` holds, in the same list: one a send that failed takes out of the
- * chat it was sent from leaves the chat that followed it too.
- * @param {Chat} chat @param {(p: Pending) => boolean} keep
- */
+/** Only the pending prompts `keep` holds. @param {Chat} chat @param {(p: Pending) => boolean} keep */
 function keepPending(chat, keep) {
-	const kept = chat.pending.filter(keep);
-	chat.pending.splice(0, chat.pending.length, ...kept);
+	chat.pending = chat.pending.filter(keep);
 }
 
 /** @param {Message[]} messages @param {string} text */
@@ -205,7 +195,7 @@ export function settleOutcomes(chat, outcomes, since) {
 	if (since !== undefined && reportsOutcomes(chat)) {
 		const known = new Set((outcomes ?? []).map((o) => o.id));
 		for (const entry of chat.pending) {
-			if (entry.to !== chat.id || entry.acceptedAt === undefined || entry.acceptedAt >= since) continue;
+			if (entry.acceptedAt === undefined || entry.acceptedAt >= since) continue;
 			if (!known.has(entry.id)) failed.push({ entry, reason: "daemon_restarted" });
 		}
 	}
@@ -254,7 +244,7 @@ export function addPending(chat, prompt, images, now) {
 	const before = userCount(chat.messages, text) + chat.pending.filter((p) => p.text === text).length;
 	const last = chat.messages.at(-1)?.id ?? "";
 	/** @type {Pending} */
-	const entry = { id: promptId(), to: chat.id, text, prompt, images, before, sentAt: now, last };
+	const entry = { id: promptId(), text, prompt, images, before, sentAt: now, last };
 	chat.pending.push(entry);
 	return entry;
 }

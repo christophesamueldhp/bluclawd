@@ -458,6 +458,9 @@ export class ServerSupervisor {
 		if (pane) {
 			this.drop(pane[0], pane[1]);
 			if (getInstance(this.deps.dir, pane[1].rowId)) removeInstance(this.deps.dir, pane[1].rowId);
+			// Its pi may be quitting already: that quit's hand-off save does not bring it back.
+			const file = pane[1].record.sessionFile;
+			if (file) this.savesDue.set(file, { deleted: true });
 			return true;
 		}
 		const stored = getInstance(this.deps.dir, instanceId);

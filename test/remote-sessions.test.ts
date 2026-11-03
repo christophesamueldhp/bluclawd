@@ -62,7 +62,7 @@ describe("remote sessions", () => {
 		]);
 	});
 
-	it("lists a stored row as not alive, and its live twin instead when both exist", () => {
+	it("lists a stored row as not alive", () => {
 		const stored: InstanceSummary = {
 			id: "old",
 			status: "stopped",
@@ -73,9 +73,6 @@ describe("remote sessions", () => {
 		expect(remoteSessions([stored])[0]).toMatchObject({ id: "old", alive: false, band: "idle" });
 		const { sessionFile: _, ...fileless } = stored;
 		expect(remoteSessions([fileless])[0]).toMatchObject({ id: "old", alive: false });
-		expect(remoteSessions([stored, live("new", "idle", { sessionFile: "/s/x.jsonl" })]).map((s) => s.id)).toEqual([
-			"new",
-		]);
 	});
 
 	it("says a session is starting until its pane registers", () => {
@@ -149,20 +146,6 @@ describe("remote sessions through the daemon", () => {
 		vi.setSystemTime(Date.parse("2026-10-15T10:00:03Z"));
 		await beat("pi-older", "2026-10-15T09:00:00.000Z");
 		expect(order()).toEqual(expected);
-	});
-
-	it("gives each session pi's session id, a pane's and a quit one's stored row alike", async () => {
-		await handleIpcRequest(supervisor, {
-			type: "register",
-			instance: { id: "pi-a", cwd: "/p", sessionId: "uuid-a", sessionFile: "/s/a.jsonl" },
-		});
-		await handleIpcRequest(supervisor, { type: "save", cwd: "/p", sessionFile: "/s/b.jsonl", sessionId: "uuid-b" });
-		expect(remoteSessions(listSummaries(supervisor)).map((s) => [s.alive, s.sessionId])).toEqual(
-			expect.arrayContaining([
-				[true, "uuid-a"],
-				[false, "uuid-b"],
-			]),
-		);
 	});
 
 	it("says which dialog a session waits on, only while it needs input", async () => {

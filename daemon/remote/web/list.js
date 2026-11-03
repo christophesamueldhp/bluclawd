@@ -63,14 +63,3 @@ export function sharedWarning(session) {
 export function paneUp(sessions, id) {
 	return sessions.some((s) => s.id === id && !s.starting);
 }
-
-/**
- * The row an open chat moves to once its own is gone from the list: the same pi session under
- * another row id (it quit on the Mac and is stored now, or it resumed in a new pane).
- * @param {Session[]} sessions @param {string} open its row id @param {string | undefined} sessionId pi's id, as last listed
- * @returns {string | undefined}
- */
-export function successor(sessions, open, sessionId) {
-	if (!sessionId || sessions.some((s) => s.id === open)) return undefined;
-	return sessions.find((s) => s.sessionId === sessionId)?.id;
-}

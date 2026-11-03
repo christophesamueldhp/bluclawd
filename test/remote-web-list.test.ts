@@ -1,15 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import {
-	ageAt,
-	paneUp,
-	STATE_WORDS,
-	sessionGroups,
-	sharedWarning,
-	statusGlyph,
-	successor,
-	viewMode,
-} from "#remote-web/list.js";
+import { ageAt, paneUp, STATE_WORDS, sessionGroups, sharedWarning, statusGlyph, viewMode } from "#remote-web/list.js";
 import { livePanesWarning, STATE_WORDS as TERMINAL_STATE_WORDS } from "../daemon/rows.ts";
 
 const row = (id: string, state: string, more: Record<string, unknown> = {}) => ({
@@ -117,24 +108,6 @@ describe("a row's age on the phone", () => {
 	it("falls back on its start, and on nothing", () => {
 		expect(ageAt(row("a", "idle", { createdAt }))).toBe(createdAt);
 		expect(ageAt(row("a", "idle"))).toBeUndefined();
-	});
-});
-
-describe("an open chat whose row is gone", () => {
-	const sessions = [row("pi-2", "idle", { sessionId: "s1" }), row("pi-3", "idle", { sessionId: "s2" })];
-
-	it("moves to the row with the same pi session", () => {
-		expect(successor(sessions, "pi-1", "s1")).toBe("pi-2");
-	});
-
-	it("stays while its own row is listed", () => {
-		expect(successor([...sessions, row("pi-1", "idle", { sessionId: "s1" })], "pi-1", "s1")).toBeUndefined();
-	});
-
-	it("stays when no row has its session, or its session is not known", () => {
-		expect(successor(sessions, "pi-1", "s9")).toBeUndefined();
-		expect(successor(sessions, "pi-1", undefined)).toBeUndefined();
-		expect(successor([row("pi-4", "idle")], "pi-1", undefined)).toBeUndefined();
 	});
 });
 

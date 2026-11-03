@@ -29,8 +29,6 @@ export interface AgentRow {
 	/** A `!` command's tmux session: the row is the command, not a pi session. */
 	shell?: string;
 	updatedAt?: string;
-	/** pi's session id. */
-	sessionId?: string;
 	/** Needs input: the dialog it waits on, when its pane says. */
 	dialog?: { kind: string; title?: string };
 	/** A pane's pi: how many times it stopped working (the daemon counts). */
@@ -115,7 +113,6 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 		self,
 		pane: inst.pane,
 		updatedAt: inst.lastSeenAt,
-		sessionId: inst.sessionId,
 		...(state === "needs" && inst.dialog ? { dialog: inst.dialog } : {}),
 		...(inst.settled !== undefined ? { settled: inst.settled } : {}),
 		...(inst.status === "starting" ? { starting: true } : {}),
@@ -123,14 +120,16 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 }
 
 /**
- * The rows agent view lists: the daemon's stored rows, every pane's pi, and this window's own
- * (`self`, built by the caller). One row per session file; this window's own and then a live one
- * win over a stored twin. Live pis sharing a file are all kept, flagged with `livePanes`.
+ * The rows agent view lists: the daemon's, one per session, and this window's own (`self`, built by
+ * the caller) in place of the row its pane is listed as. Live pis sharing a file are flagged with
+ * `livePanes`.
  */
 export function collectRows(instances: InstanceSummary[], self: InstanceSummary | undefined): AgentRow[] {
-	const listed = instances.filter((i) => i.id !== self?.id);
+	// Its pane is listed under its id, or under the row of the session it resumed.
+	const ownRow = (i: InstanceSummary) => i.id === self?.id || (self?.pane !== undefined && i.pane === self.pane);
+	const listed = instances.filter((i) => !ownRow(i));
 	// A pane's own pin and order are kept by the daemon, on its registration.
-	const registered = self && instances.find((i) => i.id === self.id);
+	const registered = instances.find(ownRow);
 	const own = self && registered ? { ...self, pinned: registered.pinned, sortOrder: registered.sortOrder } : self;
 	const summaries = own ? [own, ...listed] : listed;
 	const rows = summaries.map((i) => rowFromSummary(i, self?.id));
@@ -140,49 +139,10 @@ export function collectRows(instances: InstanceSummary[], self: InstanceSummary 
 	for (const row of rows)
 		if (row.sessionFile && live.has(row.id))
 			livePanes.set(row.sessionFile, (livePanes.get(row.sessionFile) ?? 0) + 1);
-	const rank = (row: AgentRow): number => (row.self ? 0 : row.alive ? 1 : 2);
-	const byFile = new Map<string, AgentRow>();
-	// A shared file's other rows: their pin and order go to its first live row.
-	const carried = new Map<string, Pick<AgentRow, "pinned" | "sortOrder">>();
-	const out: AgentRow[] = [];
-	for (const row of rows) {
-		if (!row.sessionFile) {
-			out.push(row);
-			continue;
-		}
-		const n = livePanes.get(row.sessionFile) ?? 0;
-		if (n > 1) {
-			if (live.has(row.id)) out.push({ ...row, livePanes: n });
-			else {
-				const was = carried.get(row.sessionFile);
-				carried.set(row.sessionFile, {
-					pinned: row.pinned || was?.pinned === true,
-					sortOrder: was?.sortOrder ?? row.sortOrder,
-				});
-			}
-			continue;
-		}
-		const seen = byFile.get(row.sessionFile);
-		if (!seen) {
-			byFile.set(row.sessionFile, row);
-			out.push(row);
-			continue;
-		}
-		// The pin and manual order belong to the session, whichever twin is shown.
-		const keep = rank(row) < rank(seen) ? row : seen;
-		const merged = {
-			...keep,
-			pinned: row.pinned || seen.pinned,
-			sortOrder: keep.sortOrder ?? (keep === row ? seen : row).sortOrder,
-		};
-		out[out.indexOf(seen)] = merged;
-		byFile.set(row.sessionFile, merged);
-	}
-	for (const [file, twin] of carried) {
-		const i = out.findIndex((row) => row.sessionFile === file);
-		out[i] = { ...out[i], pinned: out[i].pinned || twin.pinned, sortOrder: out[i].sortOrder ?? twin.sortOrder };
-	}
-	return out;
+	return rows.map((row) => {
+		const n = row.sessionFile && live.has(row.id) ? (livePanes.get(row.sessionFile) ?? 0) : 0;
+		return n > 1 ? { ...row, livePanes: n } : row;
+	});
 }
 
 export type ViewMode = "state" | "directory";

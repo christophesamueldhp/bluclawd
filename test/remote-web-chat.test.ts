@@ -13,7 +13,6 @@ import {
 	replyEndedAt,
 	settleOutcomes,
 } from "#remote-web/chat.js";
-import { successor } from "#remote-web/list.js";
 import { listSummaries } from "../daemon/handler.ts";
 import { findSession, remoteSessions } from "../daemon/remote/sessions.ts";
 import { testRegistry } from "./helpers/registry.ts";
@@ -306,14 +305,10 @@ describe("prompts sent to a pane that reports their outcomes", () => {
 		forgotten.acceptedAt = 160;
 		// Accepted after the stream it replays on was asked for: that daemon may not have had it yet.
 		later.acceptedAt = 250;
-		// Followed from the chat of its session's pane before, it was sent to another id.
-		const followed = openChat("b", { pending: chat.pending, backToList: false });
-		const elsewhere = addPending(followed, "e", [], 140);
-		elsewhere.acceptedAt = 170;
 		expect(settleOutcomes(chat, [{ id: known.id, outcome: "sent" }], 200)).toEqual([
 			{ entry: forgotten, reason: "daemon_restarted" },
 		]);
-		expect(chat.pending).toEqual([known, later, unanswered, elsewhere]);
+		expect(chat.pending).toEqual([known, later, unanswered]);
 		// Not on a status, which carries only what changed since the stream opened.
 		expect(settleOutcomes(chat, [], undefined)).toEqual([]);
 	});
@@ -345,38 +340,46 @@ describe("prompts sent to a pane from an older build, which reports no outcomes"
 	});
 });
 
-describe("following a session to its next pane", () => {
-	it("starts a chat that carries only the pending prompts and the way back to the list", () => {
-		const chat = openChat("a");
-		chat.backToList = true;
-		chat.messages = [reply("1")];
-		chat.attachments = [{ mimeType: "image/png", data: "", thumb: "" }];
-		chat.report = null;
-		const entry = addPending(chat, "go", [], 100);
-		const next = openChat("b", chat);
-		expect(next.id).toBe("b");
-		expect(next.pending).toEqual([entry]);
-		// The same list: a prompt that fails to send after the move is taken out of the one on screen.
-		expect(next.pending).toBe(chat.pending);
-		expect(next.backToList).toBe(true);
-		expect(next.messages).toEqual([]);
-		expect(next.attachments).toEqual([]);
-		expect(next.report).toBeUndefined();
-	});
+describe("a chat open on a session that quits on the Mac and resumes", () => {
+	it("stays on its row id, whose transcript is the session's file throughout", () => {
+		const file = join(mkdtempSync(join(tmpdir(), "bluclawd-chat-resume-")), "s.jsonl");
+		const message = { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop" };
+		writeFileSync(file, `${JSON.stringify({ type: "message", message })}\n`);
+		const pane = (id: string) => ({
+			id,
+			status: "online" as const,
+			cwd: "/p",
+			createdAt: new Date().toISOString(),
+			sessionFile: file,
+			pane: id,
+		});
+		const registry = testRegistry();
+		registry.registerExternal(pane("pi-a"), "idle");
+		const chat = openChat("pi-a");
+		const shown = () => ({
+			rows: remoteSessions(listSummaries(registry)).map((s) => [s.id, s.alive, s.starting]),
+			read: findSession(listSummaries(registry), chat.id),
+		});
+		expect(shown()).toEqual({
+			rows: [["pi-a", true, undefined]],
+			read: expect.objectContaining({ sessionFile: file, running: true }),
+		});
 
-	it("shares them with the chat it followed after a page came in", () => {
-		const chat = openChat("a");
-		const entry = addPending(chat, "go", [], 100);
-		const next = openChat("b", chat);
-		applyLatest(next, { messages: [reply("1")], more: false });
-		forget(chat, entry);
-		expect(next.pending).toEqual([]);
-	});
+		registry.unregisterExternal("pi-a", "quit");
+		registry.saveInstance({ cwd: "/p", sessionFile: file });
+		expect(shown()).toEqual({
+			rows: [["pi-a", false, undefined]],
+			read: expect.objectContaining({ sessionFile: file, running: false }),
+		});
 
-	it("is not where a chat opened afresh starts from", () => {
-		const chat = openChat("a");
-		expect(chat.pending).toEqual([]);
-		expect(chat.backToList).toBe(false);
+		expect(registry.claimStart({ cwd: "/p", sessionFile: file })).toEqual({ ok: true, id: chat.id });
+		expect(shown().rows).toEqual([["pi-a", true, true]]);
+
+		registry.registerExternal(pane("pi-b"), "working");
+		expect(shown()).toEqual({
+			rows: [["pi-a", true, undefined]],
+			read: expect.objectContaining({ sessionFile: file, running: true, pane: "pi-b" }),
+		});
 	});
 });
 
@@ -389,29 +392,30 @@ describe("a chat open on a pane whose user types /new", () => {
 			writeFileSync(file, `${JSON.stringify({ type: "message", message })}\n`);
 			return file;
 		};
-		const pane = (sessionFile: string, sessionId: string) => ({
+		const pane = (sessionFile: string) => ({
 			id: "pi-a",
 			status: "online" as const,
 			cwd: "/p",
 			createdAt: new Date().toISOString(),
-			sessionId,
 			sessionFile,
 			pane: "pi-a",
 		});
 		const registry = testRegistry();
 		const old = fileOf("old");
-		registry.registerExternal(pane(old, "s-old"), "idle");
+		registry.registerExternal(pane(old), "idle");
 		const chat = openChat("pi-a");
-		const sessionId = remoteSessions(listSummaries(registry)).find((s) => s.id === chat.id)?.sessionId;
-		expect(sessionId).toBe("s-old");
 
 		registry.unregisterExternal("pi-a", "new");
-		registry.registerExternal(pane(fileOf("new"), "s-new"), "working");
+		const fresh = fileOf("new");
+		registry.registerExternal(pane(fresh), "working");
 
 		const listed = remoteSessions(listSummaries(registry));
-		expect(listed.find((s) => s.id === chat.id)).toMatchObject({ sessionId: "s-old", alive: false });
-		expect(listed.find((s) => s.sessionId === "s-new")?.id).not.toBe(chat.id);
-		expect(successor(listed, chat.id, sessionId)).toBeUndefined();
+		expect(listed.find((s) => s.id === chat.id)).toMatchObject({ alive: false });
+		const other = listed.find((s) => s.id !== chat.id);
+		expect(findSession(listSummaries(registry), other?.id ?? "")).toMatchObject({
+			sessionFile: fresh,
+			running: true,
+		});
 		// What its transcript is read from.
 		expect(findSession(listSummaries(registry), chat.id)).toMatchObject({ sessionFile: old, running: false });
 	});
