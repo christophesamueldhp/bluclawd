@@ -84,6 +84,12 @@ export interface WaitRequest {
 /** Why a pane's session ended, as pi's session_shutdown says. */
 export type EndReason = "quit" | "reload" | "new" | "resume" | "fork";
 
+/** The session ended for another one: a new session, a `/resume` of another file (a pane
+ *  unregisters on that one only) or a fork. */
+export function endedForAnother(reason: EndReason | undefined): boolean {
+	return reason === "new" || reason === "resume" || reason === "fork";
+}
+
 export interface UnregisterRequest {
 	type: "unregister";
 	instanceId: string;

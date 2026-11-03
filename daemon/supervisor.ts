@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { AgentActivity } from "./activity.ts";
-import type { EndReason, NewPaneSpec, PaneMessage, ResumeSpec } from "./ipc/protocol.ts";
+import {
+	type EndReason,
+	endedForAnother,
+	type NewPaneSpec,
+	type PaneMessage,
+	type ResumeSpec,
+} from "./ipc/protocol.ts";
 import { readSessionTail } from "./session-state.ts";
 import { getInstance, loadInstances, removeInstance, saveInstances, upsertInstance } from "./storage.ts";
 import type { InstanceRecord } from "./types.ts";
@@ -256,7 +262,7 @@ export class ServerSupervisor {
 	unregisterExternal(id: string, reason?: EndReason): void {
 		const entry = this.externalInstances.get(id);
 		const file = entry?.record.sessionFile;
-		const stops = reason === "quit" || reason === "new" || reason === "resume" || reason === "fork";
+		const stops = reason === "quit" || endedForAnother(reason);
 		if (entry && file && stops && existsSync(file)) {
 			const { cwd, paneLabel, sessionId } = entry.record;
 			this.stopRow({ cwd, label: paneLabel, sessionFile: file, sessionId }, [id, entry], reason);
