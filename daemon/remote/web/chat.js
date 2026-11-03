@@ -207,10 +207,12 @@ export function settleOutcomes(chat, outcomes, since) {
 /**
  * The prompts the phone kept of the chat (see storedPending), back in as it opens again once both
  * the daemon's `replay` and its pane's report are in, in either order, and settled by the replay
- * as settleOutcomes does: one the replay lacks was lost. Discarded instead for a pane from an
- * older build, which reports no outcomes to settle them by. With no report at all, `running`
- * tells the two apart: its row in the session list, undefined until listed. A row not running
- * had its pane quit, and the replay settles what it was sent; one running is an older build's.
+ * as settleOutcomes does: one the replay lacks was lost. For a pane from an older build, which
+ * reports no outcomes to settle them by, only those the replay says refused or lost come back
+ * (the daemon's word on each, whatever the pane's build), and the others are discarded. With no
+ * report at all, `running` tells the two apart: its row in the session list, undefined until
+ * listed. A row not running had its pane quit, and the replay settles what it was sent; one
+ * running is an older build's.
  * @param {Chat} chat @param {Replay} [replay] @param {boolean} [running]
  * @returns {Failed[]}
  */
@@ -223,7 +225,16 @@ export function restorePending(chat, replay, running) {
 	chat.restored = true;
 	chat.replay = undefined;
 	chat.kept = [];
-	if (chat.report ? !reportsOutcomes(chat) : running) return [];
+	if (chat.report ? !reportsOutcomes(chat) : running) {
+		/** @type {Failed[]} */
+		const failed = [];
+		for (const outcome of outcomes) {
+			const entry = kept.find((k) => k.id === outcome.id);
+			if (entry && (outcome.outcome === "refused" || outcome.outcome === "lost"))
+				failed.push({ entry, reason: outcome.reason });
+		}
+		return failed;
+	}
 	const restored = kept.filter((s) => !chat.pending.some((p) => p.id === s.id));
 	chat.pending = [...restored, ...chat.pending];
 	return settleSent(chat, outcomes, since, restored);

@@ -454,7 +454,7 @@ describe("prompts pending when the app reloads or the chat is left, kept on the 
 		}
 	});
 
-	it("are discarded, not back in, when the pane turns out to be from an older build", () => {
+	it("are discarded when the pane turns out to be from an older build, but those the replay says lost", () => {
 		// One with no report at all is told from one that quit by its row, running.
 		for (const report of [null, { models: [] }]) {
 			const before = openChat("a");
@@ -468,7 +468,9 @@ describe("prompts pending when the app reloads or the chat is left, kept on the 
 			).toEqual([]);
 			chat.report = report;
 			expect(storedPending(chat).map((p) => p.prompt)).toEqual(["lost", "sent"]);
-			expect(restorePending(chat, undefined, true)).toEqual([]);
+			expect(restorePending(chat, undefined, true).map(({ entry, reason }) => [entry.prompt, reason])).toEqual([
+				["lost", "pane_gone"],
+			]);
 			expect(chat.pending).toEqual([typed]);
 			expect(storedPending(chat)).toEqual([]);
 		}
@@ -494,6 +496,23 @@ describe("prompts pending when the app reloads or the chat is left, kept on the 
 		expect(restorePending(chat, undefined, false).map(({ entry, reason }) => [entry.prompt, reason])).toEqual([
 			["lost", "pane_gone"],
 			["refused", "session_changed"],
+		]);
+		expect(chat.pending).toEqual([]);
+		expect(storedPending(chat)).toEqual([]);
+	});
+
+	it("are put back when the replay says lost, while the list still shows their quitting pane's row running", () => {
+		const before = reporting();
+		const lost = addPending(before, "lost", [], 100);
+
+		const chat = openChat("a", kept(before));
+		chat.report = null;
+		const replay = {
+			outcomes: [{ id: lost.id, outcome: "lost" as const, reason: "pane_gone" as const }],
+			since: 200,
+		};
+		expect(restorePending(chat, replay, true).map(({ entry, reason }) => [entry.prompt, reason])).toEqual([
+			["lost", "pane_gone"],
 		]);
 		expect(chat.pending).toEqual([]);
 		expect(storedPending(chat)).toEqual([]);
