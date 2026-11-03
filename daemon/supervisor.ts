@@ -178,15 +178,6 @@ export class ServerSupervisor {
 		return this.startingRows;
 	}
 
-	/** Only when tmux says so: a probe that fails says nothing, and must not fail a list. */
-	private paneGone(pane: string): boolean {
-		try {
-			return !this.deps.tmux.hasSession(pane);
-		} catch {
-			return false;
-		}
-	}
-
 	/**
 	 * Before a pane is started on a session file: its row (the file's stored one, else a new one) is
 	 * listed as starting until the pane registers, and another start on that file is refused
@@ -241,10 +232,13 @@ export class ServerSupervisor {
 		return [...this.externalInstances].find(([, entry]) => entry.rowId === rowId);
 	}
 
-	/** The pane `id` addresses: a pane's own id, or the row a pane is listed as. */
+	/** The pane `id` addresses: the row a pane is listed as, or a pane's own id, unless that is the
+	 *  stopped row of a session the pane switched away from. */
 	private paneOf(id: string): [string, ExternalInstance] | undefined {
+		const listed = this.paneListedAs(id);
+		if (listed) return listed;
 		const own = this.externalInstances.get(id);
-		return own ? [id, own] : this.paneListedAs(id);
+		return own && !getInstance(this.deps.dir, id) ? [id, own] : undefined;
 	}
 
 	/** The row a pane is listed as; its own id when it is not registered. */
@@ -253,15 +247,17 @@ export class ServerSupervisor {
 	}
 
 	/** A quit leaves its row, stopped, saved again by its hand-off once pi's writes are final. A
-	 *  switch to another session (a reload or fork never unregisters) drops a row first seen in this
-	 *  pane. With no reason given (an older pane, which may still quit and save), its stored row stays. */
+	 *  switch to another session or a fork leaves it stopped too: pi settled its turn before ending
+	 *  it, so its file is final already (a reload never unregisters). With no reason given (an older
+	 *  pane, which may still quit and save), its stored row stays. */
 	unregisterExternal(id: string, reason?: EndReason): void {
 		const entry = this.externalInstances.get(id);
 		const file = entry?.record.sessionFile;
-		if (entry && file && reason === "quit" && existsSync(file)) {
+		const stops = reason === "quit" || reason === "new" || reason === "resume" || reason === "fork";
+		if (entry && file && stops && existsSync(file)) {
 			const { cwd, paneLabel, sessionId } = entry.record;
 			this.stopRow({ cwd, label: paneLabel, sessionFile: file, sessionId }, [id, entry]);
-			this.savesDue.set(file, { deleted: false });
+			if (reason === "quit") this.savesDue.set(file, { deleted: false });
 			return;
 		}
 		if (entry?.rowId === id && reason) removeInstance(this.deps.dir, id);
@@ -321,13 +317,21 @@ export class ServerSupervisor {
 		return entry.inbox.splice(0);
 	}
 
-	/** External instances, each as its row, reaping any whose last heartbeat is older than the TTL. */
+	/** External instances, each as its row, reaping any whose last heartbeat is older than the TTL: its
+	 *  stored row shows until it beats again. One whose pane tmux says is gone died unseen (a crash, a
+	 *  SIGKILL), so its row is stopped with what its file holds last. */
 	listExternalInstances(
 		now: number = this.deps.now(),
 	): Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> {
 		const out: Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> = [];
 		for (const [id, entry] of this.externalInstances) {
 			if (now - entry.lastSeenAt > EXTERNAL_TTL_MS) {
+				const { cwd, paneLabel, sessionFile, sessionId, pane } = entry.record;
+				if (pane && sessionFile && existsSync(sessionFile) && this.paneGone(pane)) {
+					// The pane runs pi itself, so its pi is gone and its writes are final.
+					this.stopRow({ cwd, label: paneLabel, sessionFile, sessionId }, [id, entry]);
+					continue;
+				}
 				this.externalInstances.delete(id);
 				this.settleWait(id, "none");
 				continue;
@@ -335,6 +339,15 @@ export class ServerSupervisor {
 			out.push({ record: { ...entry.record, id: entry.rowId }, activity: entry.activity, settled: entry.settled });
 		}
 		return out;
+	}
+
+	/** Not when tmux could not say: a pane that may be up is not taken for dead. */
+	private paneGone(pane: string): boolean {
+		try {
+			return !this.deps.tmux.hasSession(pane);
+		} catch {
+			return false;
+		}
 	}
 
 	/** Rows an older daemon left running: they ended with it, and stay resumable from their .jsonl. */

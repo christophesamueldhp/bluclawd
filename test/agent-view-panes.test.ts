@@ -647,7 +647,8 @@ describe("shutdownPlan", () => {
 	it("keeps the row for the pane's next session only when it carries on this one", () => {
 		const keep = { await: true, unregister: false };
 		const drop = { await: true, unregister: true };
-		expect(shutdownPlan({ reason: "fork", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(keep);
+		// A fork is a session of its own; the one it came from is left stopped.
+		expect(shutdownPlan({ reason: "fork", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(drop);
 		expect(shutdownPlan({ reason: "reload" }, "/s/a.jsonl")).toEqual(keep);
 		expect(shutdownPlan({ reason: "resume", targetSessionFile: "/s/a.jsonl" }, "/s/a.jsonl")).toEqual(keep);
 		expect(shutdownPlan({ reason: "resume" }, undefined)).toEqual(keep);
