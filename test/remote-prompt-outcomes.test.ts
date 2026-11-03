@@ -167,6 +167,17 @@ describe("prompt delivery", () => {
 		expect(delivery.outcomes("pane-1", 1001 + DELIVERY_KEEP_MS)).toEqual([]);
 	});
 
+	it("keeps a queued prompt for as long as the turn ahead of it runs", () => {
+		const delivery = new PromptDelivery(() => true);
+		delivery.send("pane-1", { type: "prompt", text: "hi", id: "p-1" }, 0);
+		delivery.delivered("pane-1", [{ type: "prompt", text: "hi", id: "p-1" }], 10);
+		delivery.reported("pane-1", [{ id: "p-1", outcome: "queued" }], 20);
+		const later = 20 + 3 * DELIVERY_KEEP_MS;
+		expect(delivery.outcomes("pane-1", later)).toEqual([{ id: "p-1", outcome: "queued" }]);
+		delivery.reported("pane-1", [{ id: "p-1", outcome: "taken" }], later);
+		expect(delivery.outcomes("pane-1", later)).toEqual([{ id: "p-1", outcome: "taken" }]);
+	});
+
 	it("tracks nothing a pane was not sent", () => {
 		const delivery = new PromptDelivery(() => false);
 		expect(delivery.send("gone", { type: "prompt", text: "hi", id: "p-1" })).toBe(false);

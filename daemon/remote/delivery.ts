@@ -71,7 +71,8 @@ export class PromptDelivery {
 
 	private prune(now: number): void {
 		for (const [id, delivery] of this.prompts) {
-			if (now - delivery.changedAt > DELIVERY_KEEP_MS) this.prompts.delete(id);
+			// A queued prompt waits on the turn ahead of it, however long that runs.
+			if (delivery.stage !== "queued" && now - delivery.changedAt > DELIVERY_KEEP_MS) this.prompts.delete(id);
 		}
 	}
 }
