@@ -10,9 +10,10 @@ import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 import { RemoteControl } from "../daemon/remote/control.ts";
 import { DELIVERY_KEEP_MS, PromptDelivery } from "../daemon/remote/delivery.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
-import { supervisor } from "../daemon/supervisor.ts";
+import type { ServerSupervisor } from "../daemon/supervisor.ts";
 import type { Tmux } from "../daemon/tmux.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
+import { testRegistry } from "./helpers/registry.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /**
@@ -22,6 +23,7 @@ import { waitFor } from "./helpers/wait-for.ts";
 describe("a prompt's outcome, back to the phone by its id", () => {
 	let dir: string;
 	let server: Server;
+	let supervisor: ServerSupervisor;
 	let control: RemoteControl;
 	let base: string;
 	let token: string;
@@ -30,10 +32,11 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 	beforeEach(async () => {
 		dir = await mkdtemp(join(tmpdir(), "bluclawd-outcomes-"));
 		vi.stubEnv("PI_SERVER_DIR", dir);
-		server = await startIpcServer(handleIpcRequest);
+		supervisor = testRegistry(dir);
+		server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
 		control = new RemoteControl({
 			store: new RemoteStore(join(dir, "remote.json")),
-			listInstances: listSummaries,
+			listInstances: () => listSummaries(supervisor),
 			send: (id, message) => supervisor.sendExternal(id, message),
 			deleteInstance: () => false,
 			renameInstance: () => false,
