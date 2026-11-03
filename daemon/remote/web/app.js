@@ -11,7 +11,7 @@ import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
-import { ageAt, STATE_WORDS, sessionGroups, sharedWarning, statusGlyph, successor, viewMode } from "./list.js";
+import { ageAt, paneUp, STATE_WORDS, sessionGroups, sharedWarning, statusGlyph, successor, viewMode } from "./list.js";
 import { refused, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 import { loaderHtml } from "./mascot.js";
@@ -33,7 +33,7 @@ import {
 
 /**
  * `sessionId`: pi's, the same under another row id; `dialog`: the one it waits on, while it needs input.
- * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, sessionId?: string, dialog?: { kind: string, title?: string }, livePanes?: number }} Session
+ * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, sessionId?: string, dialog?: { kind: string, title?: string }, livePanes?: number, starting?: true }} Session
  */
 /** `aborted`: a reply its turn was stopped in, empty when stopped before it said anything. @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, aborted?: boolean, toolCallId?: string, toolName?: string, command?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
@@ -133,8 +133,9 @@ const state = {
 	query: "",
 	viewMode: loadViewMode(),
 	/**
-	 * A pane started from here, until its row is listed (`pane` is unset while the request is out).
-	 * @type {{ pane?: string } | undefined}
+	 * A pane started from here, until its row is listed and no longer starting (`id`, its row's, is
+	 * unset while the request is out).
+	 * @type {{ id?: string } | undefined}
 	 */
 	starting: undefined,
 	loaded: false,
@@ -310,12 +311,12 @@ async function loadSessions() {
 		if (notice) showError(notice);
 		notice = undefined;
 		const starting = state.starting;
-		if (starting?.pane && state.sessions.some((s) => s.id === starting.pane)) {
+		if (starting?.id && paneUp(state.sessions, starting.id)) {
 			state.starting = undefined;
 			clearTimeout(startTimer);
 			// A task started from the list opens, unless another screen was opened meanwhile.
 			if (!state.chat) {
-				location.hash = `#s/${encodeURIComponent(starting.pane)}`;
+				location.hash = `#s/${encodeURIComponent(starting.id)}`;
 				return;
 			}
 		}
@@ -377,9 +378,9 @@ async function loadDirectories() {
 	}
 }
 
-/** @param {string} pane */
-function waitForPane(pane) {
-	const starting = { pane };
+/** @param {string} id the row its pane registers as */
+function waitForPane(id) {
+	const starting = { id };
 	state.starting = starting;
 	clearTimeout(startTimer);
 	startTimer = setTimeout(() => {
@@ -1227,8 +1228,8 @@ async function resumePast(cwd, sessionFile) {
 	state.starting = {};
 	render();
 	try {
-		const { pane } = await api.resume(cwd, sessionFile);
-		waitForPane(pane);
+		const { id } = await api.resume(cwd, sessionFile);
+		waitForPane(id);
 	} catch (error) {
 		state.starting = undefined;
 		handleError(error);
@@ -1702,10 +1703,10 @@ async function startTask() {
 	state.starting = {};
 	render();
 	try {
-		const { pane } = await api.start(cwd, value, state.newModel || undefined);
+		const { id } = await api.start(cwd, value, state.newModel || undefined);
 		task.value = "";
 		grow(task);
-		waitForPane(pane);
+		waitForPane(id);
 	} catch (error) {
 		state.starting = undefined;
 		handleError(error);

@@ -14,6 +14,7 @@ import type {
 	RemoteRequest,
 	RemoteResponse,
 } from "../ipc/protocol.ts";
+import { START_MS } from "../supervisor.ts";
 import { Tmux } from "../tmux.ts";
 import { type RemoteDeps, type RemoteServer, startRemoteServer } from "./http.ts";
 import { Notifier } from "./notifier.ts";
@@ -28,8 +29,9 @@ const PUSH_SUBJECT = "https://github.com/christophesamueldhp/bluclawd";
 /** Each tmux command is a quick round-trip to the server: a hung one must not hold up the daemon. */
 export const TMUX_TIMEOUT_MS = 2000;
 /** A pane the phone started that has not registered by then never will: it is ended, not left
- *  running unseen. Past the phone's own wait (START_TIMEOUT_MS in web/app.js). */
-const START_TIMEOUT_MS = 90_000;
+ *  running unseen. Past the phone's own wait (START_TIMEOUT_MS in web/app.js); its row stops being
+ *  listed as starting then too. */
+const START_TIMEOUT_MS = START_MS;
 /** How long whether a terminal shows pi is taken as known. */
 const TERMINAL_CHECK_MS = 1500;
 
@@ -38,6 +40,8 @@ export interface RemoteControlDeps {
 	send(sessionId: string, message: PaneMessage): boolean;
 	deleteInstance(sessionId: string): boolean;
 	renameInstance: RemoteDeps["renameInstance"];
+	claimStart: RemoteDeps["claimStart"];
+	startFailed: RemoteDeps["startFailed"];
 	setPinned: RemoteDeps["setPinned"];
 	statusLine?: RemoteDeps["statusLine"];
 	renderStatusline?: RemoteDeps["renderStatusline"];
@@ -195,6 +199,8 @@ export class RemoteControl {
 					send: this.deps.send,
 					launch: () => this.launch(),
 					startSession: (spec) => this.startSession(spec),
+					claimStart: this.deps.claimStart,
+					startFailed: this.deps.startFailed,
 					report: (id) => this.reports.get(id),
 					terminalOpen: () => this.terminalOpen(),
 					renameInstance: this.deps.renameInstance,

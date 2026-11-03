@@ -85,14 +85,14 @@ export const api = {
 	sessions: () => call("GET", "/api/sessions"),
 	/** Saved conversations for the new task's directory. @param {string} cwd @returns {Promise<{ id?: string, sessionFile: string, cwd: string, label: string }[]>} */
 	pastSessions: async (cwd) => (await call("GET", `/api/sessions/past?cwd=${encodeURIComponent(cwd)}`)).sessions,
-	/** @param {string} cwd @param {string} sessionFile @returns {Promise<{ pane: string }>} */
+	/** @param {string} cwd @param {string} sessionFile @returns {Promise<{ pane: string, id: string }>} */
 	resume: (cwd, sessionFile) => call("POST", "/api/sessions/resume", { cwd, sessionFile }),
 	/** @returns {Promise<string[]>} */
 	directories: async () => (await call("GET", "/api/directories")).directories,
 	/** The folders a typed path may go on to, as a shell's Tab offers them. @param {string} path @returns {Promise<string[]>} */
 	completeDirectory: async (path) =>
 		(await call("GET", `/api/directories?under=${encodeURIComponent(path)}`)).directories,
-	/** `model`: "provider/id", else pi's default. @param {string} cwd @param {string} task @param {string} [model] @returns {Promise<{ pane: string }>} */
+	/** `model`: "provider/id", else pi's default. @param {string} cwd @param {string} task @param {string} [model] @returns {Promise<{ pane: string, id: string }>} */
 	start: (cwd, task, model) => call("POST", "/api/sessions", model ? { cwd, task, model } : { cwd, task }),
 	/** What a new session can start with: the running panes' models. @returns {Promise<import("./statusbar.js").ReportModel[]>} */
 	models: async () => (await call("GET", "/api/models")).models,

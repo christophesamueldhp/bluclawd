@@ -124,6 +124,19 @@ export interface SaveRequest {
 	sessionId?: string;
 }
 
+/** Before a pane is started on a session file, or once a new session's pane is: its row is listed as
+ *  starting until the pane registers. Refused while a pane is starting or running on that file. */
+export type StartRequest = { type: "start" } & StartSpec;
+
+/** A start on a session file, claimed before its pane is started; or a new session's, once it is. */
+export type StartSpec = { cwd: string; label?: string } & ({ sessionFile: string } | { pane: string });
+
+/** The pane a start was claimed for could not be started. */
+export interface StartFailedRequest {
+	type: "start_failed";
+	instanceId: string;
+}
+
 /** The reply a pane is streaming, while a phone has its session open. */
 export interface LiveSnapshot {
 	text: string;
@@ -238,6 +251,8 @@ interface RequestMap {
 	rename: RenameRequest;
 	meta: MetaRequest;
 	save: SaveRequest;
+	start: StartRequest;
+	start_failed: StartFailedRequest;
 	remote: RemoteRequest;
 	remote_live: RemoteLiveRequest;
 	remote_report: RemoteReportRequest;
@@ -323,11 +338,17 @@ export interface UnregisterResponse extends ResponseBase {
 	type: "unregister_result";
 }
 
+/** The id of the row listed as starting. */
+export interface StartResponse extends ResponseBase {
+	type: "start_result";
+	id: string;
+}
+
 export interface ShutdownResponse extends ResponseBase {
 	type: "shutdown_result";
 }
 
-/** Reply to send / delete / rename / meta / save / remote_live / remote_report. */
+/** Reply to send / delete / rename / meta / save / start_failed / remote_live / remote_report. */
 export interface AckResponse extends ResponseBase {
 	type: "ack";
 	instance?: InstanceSummary;
@@ -374,6 +395,8 @@ interface ResponseMap {
 	rename: AckResponse;
 	meta: AckResponse;
 	save: AckResponse;
+	start: StartResponse;
+	start_failed: AckResponse;
 	remote: RemoteResponse;
 	remote_live: AckResponse;
 	remote_report: AckResponse;

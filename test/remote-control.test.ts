@@ -25,6 +25,8 @@ describe("remote control switch", () => {
 			deleteInstance: () => false,
 			renameInstance: () => false,
 			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			startFailed: () => {},
 			webDir: dir,
 		});
 
@@ -188,6 +190,8 @@ describe("remote control switch", () => {
 				send: () => true,
 				renameInstance: () => false,
 				setPinned: () => false,
+				claimStart: () => ({ ok: false, refused: "running" }),
+				startFailed: () => {},
 				deleteInstance: (id) => deleteInstance(id),
 				tmux: new Tmux(dir, (args) => {
 					tmuxCalls.push(args);
@@ -309,6 +313,8 @@ describe("remote control switch", () => {
 			deleteInstance: () => false,
 			renameInstance: () => false,
 			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			startFailed: () => {},
 			webDir: dir,
 		});
 		setRemoteControl(control);
@@ -367,6 +373,8 @@ describe("remote control switch", () => {
 			deleteInstance: () => false,
 			renameInstance: () => false,
 			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			startFailed: () => {},
 			webDir: dir,
 		});
 		setRemoteControl(control);
@@ -399,6 +407,8 @@ describe("remote control switch", () => {
 			deleteInstance: () => false,
 			renameInstance: () => false,
 			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			startFailed: () => {},
 			webDir: dir,
 		});
 		const report = { models: [] };
@@ -435,6 +445,8 @@ describe("remote control switch", () => {
 			deleteInstance: () => false,
 			renameInstance: () => false,
 			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			startFailed: () => {},
 			statusLine: async (cwd) => (cwd === "/p" ? { git } : {}),
 			webDir: dir,
 		});
@@ -494,6 +506,8 @@ describe("remote control switch", () => {
 				deleteInstance: () => false,
 				renameInstance: () => false,
 				setPinned: () => false,
+				claimStart: () => ({ ok: false, refused: "running" }),
+				startFailed: () => {},
 				webDir: dir,
 				sendPush: async (push, payload) => {
 					pushes.push({ endpoint: push.endpoint, payload: JSON.parse(payload) });
@@ -539,6 +553,8 @@ describe("remote control switch", () => {
 				deleteInstance: () => false,
 				renameInstance: () => false,
 				setPinned: () => false,
+				claimStart: () => ({ ok: false, refused: "running" }),
+				startFailed: () => {},
 				webDir: dir,
 				sendPush: async () => "ok",
 			});

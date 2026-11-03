@@ -78,6 +78,19 @@ describe("remote sessions", () => {
 		]);
 	});
 
+	it("says a session is starting until its pane registers", () => {
+		const supervisor = testRegistry();
+		supervisor.claimStart({ cwd: "/p", label: "new task", pane: "pi-n" });
+		expect(remoteSessions(listSummaries(supervisor))).toEqual([
+			expect.objectContaining({ id: "pi-n", starting: true, detail: "starting…" }),
+		]);
+		supervisor.registerExternal(
+			{ id: "pi-n", status: "online", cwd: "/p", createdAt: "2026-10-12T00:00:00Z" },
+			"idle",
+		);
+		expect(remoteSessions(listSummaries(supervisor))[0]).not.toHaveProperty("starting");
+	});
+
 	it("finds a session's file, whether a pane runs it and whether it is mid-turn", () => {
 		const stored: InstanceSummary = { id: "old", status: "stopped", cwd: "/p", sessionFile: "/s/old.jsonl" };
 		const list = [

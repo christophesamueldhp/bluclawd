@@ -166,8 +166,6 @@ const MENU_ROWS = 8;
 export const EXIT_WORDS = new Set(["exit", "quit", ":q", ":q!", ":wq", ":wq!"]);
 /** How many times (150ms apart) a delete waits for the row a stopped pi saves. */
 const STOP_SAVE_POLLS = 20;
-/** How long a new pane's row shows as starting before it should have registered. */
-const PANE_START_MS = 15_000;
 /** A pane heartbeats every 3s (self-registration.ts), so a restarted daemon has them all back by this. */
 const RESTART_GRACE_MS = 5000;
 
@@ -281,7 +279,6 @@ export class AgentView implements Component, Focusable {
 	/** Every listed session, before the composer's filter: what the counts and title report. */
 	private allRows: AgentRow[] = [];
 	private onboarding = false;
-	private pending: AgentRow[] = [];
 	private items: Item[] = [];
 	private selectedKey: string | undefined;
 	private mode: Mode = "list";
@@ -564,15 +561,8 @@ export class AgentView implements Component, Focusable {
 
 	private recompute(): void {
 		this.allRows = [...collectRows(this.instances, this.opts.self?.()), ...this.shells.map(rowFromShell)];
-		// A new pane's placeholder gives way to its row once it registers, keeping the focus.
-		for (const placeholder of this.pending.filter((p) => p.pane)) {
-			const row = this.allRows.find((r) => r.pane === placeholder.pane);
-			if (!row) continue;
-			this.pending = this.pending.filter((p) => p !== placeholder);
-			if (this.selectedKey === placeholder.id) this.selectedKey = row.id;
-		}
 		this.followStopping();
-		const all = [...this.allRows, ...this.pending, ...(this.stopping ? [this.stopping.row] : [])];
+		const all = [...this.allRows, ...(this.stopping ? [this.stopping.row] : [])];
 		const text = this.composerText();
 		const filter = queryFilter(text);
 		this.rows = filter ? all.filter(filter) : all;
@@ -774,19 +764,19 @@ export class AgentView implements Component, Focusable {
 		}
 		const cwd = this.dispatchCwd();
 		const model = this.dispatchModel;
-		this.startPane(open, draft, task, images, cwd, model);
+		await this.startPane(open, draft, task, images, cwd, model);
 	}
 
 	/** Pane mode: a new session is a pi of its own, started with the task as its first prompt.
-	 *  Its row is a placeholder until the pane registers. */
-	private startPane(
+	 *  The daemon lists its row as starting until the pane registers. */
+	private async startPane(
 		open: boolean,
 		draft: string,
 		task: string,
 		images: string[],
 		cwd: string,
 		model: { provider: string; id: string } | undefined,
-	): void {
+	): Promise<void> {
 		const panes = this.opts.panes;
 		let pane: string;
 		try {
@@ -802,32 +792,31 @@ export class AgentView implements Component, Focusable {
 			this.say(`Couldn't start it — ${Tmux.reason(error)}`, "error");
 			return;
 		}
+		// Its row is the pane's id, which the pane registers as.
+		const claimed = this.opts.client
+			.start({ cwd, label: labelFromTask(task || "Image task"), pane })
+			.catch(() => undefined);
 		if (open) {
 			this.leaveFor(pane);
 			return;
 		}
-		const placeholder: AgentRow = {
-			id: `pending:${pane}`,
-			label: labelFromTask(task || "Image task"),
-			cwd,
-			state: "working",
-			alive: true,
-			detail: "starting…",
-			pinned: false,
-			self: false,
-			pane,
-			createdAt: new Date().toISOString(),
-		};
-		this.pending.push(placeholder);
-		this.selectedKey = placeholder.id;
+		this.selectedKey = pane;
 		this.userMoved = true;
-		this.recompute();
-		this.render_();
-		// A pi that never registers (it failed to start) stops being shown as starting.
-		setTimeout(() => {
-			this.pending = this.pending.filter((p) => p !== placeholder);
-			if (!this.closed) void this.refresh();
-		}, PANE_START_MS);
+		await claimed;
+		if (!this.closed) await this.refresh();
+	}
+
+	/** Pane mode: a pi on a stored or past session, in a pane of its own. The daemon claims the
+	 *  session first, refusing it while another window's pane starts or runs it, and lists its row as
+	 *  starting until the pane registers. */
+	private async resumeIn(cwd: string, sessionFile: string, args: string[], label?: string): Promise<string> {
+		const id = await this.opts.client.start({ cwd, sessionFile, ...(label ? { label } : {}) });
+		try {
+			return this.opts.panes.start(cwd, ["--session", sessionFile, ...args]);
+		} catch (error) {
+			await this.opts.client.startFailed(id).catch(() => undefined);
+			throw error;
+		}
 	}
 
 	/** Pane mode: show `pane` in this terminal; this view closes so its session shows on return. */
@@ -845,7 +834,7 @@ export class AgentView implements Component, Focusable {
 	}
 
 	/** Pane mode: open a row. A pane is switched to; a session with no pane gets one. */
-	private async openPane(row: AgentRow, panes: PaneOps, sessionFile: string): Promise<void> {
+	private async openPane(row: AgentRow, sessionFile: string): Promise<void> {
 		if (row.pane) {
 			this.leaveFor(row.pane);
 			return;
@@ -854,14 +843,12 @@ export class AgentView implements Component, Focusable {
 		this.render_();
 		let pane: string;
 		try {
-			pane = panes.start(row.cwd, ["--session", sessionFile]);
+			pane = await this.resumeIn(row.cwd, sessionFile, []);
 		} catch (error) {
 			this.opening = undefined;
 			this.say(`Couldn't open — ${Tmux.reason(error)}`, "error");
 			return;
 		}
-		// The pane's own row replaces the stored one.
-		await this.opts.client.delete(row.id).catch(() => undefined);
 		if (this.closed || this.opening !== row.id) {
 			if (!this.closed) await this.refresh();
 			return; // cancelled: it runs on in the background
@@ -899,7 +886,7 @@ export class AgentView implements Component, Focusable {
 			this.close();
 			return;
 		}
-		if (row.id.startsWith("pending:") || !row.sessionFile) {
+		if (row.starting || !row.sessionFile) {
 			this.say(
 				!row.alive && !row.sessionFile
 					? "No session file recorded — use /resume to reopen its saved conversation"
@@ -907,7 +894,7 @@ export class AgentView implements Component, Focusable {
 			);
 			return;
 		}
-		await this.openPane(row, this.opts.panes, row.sessionFile);
+		await this.openPane(row, row.sessionFile);
 	}
 
 	private disarm(): void {
@@ -971,7 +958,7 @@ export class AgentView implements Component, Focusable {
 		const item = this.selected;
 		if (!item || item.kind === "more") return;
 		if (item.kind === "header") {
-			const targets = item.band.rows.filter((r) => !r.self && !r.id.startsWith("pending:"));
+			const targets = item.band.rows.filter((r) => !r.self && !r.starting);
 			if (targets.length === 0 || this.composing()) return;
 			if (this.armed?.key === item.key) {
 				this.disarm();
@@ -1026,7 +1013,7 @@ export class AgentView implements Component, Focusable {
 			}
 			return;
 		}
-		if (row.id.startsWith("pending:")) return;
+		if (row.starting) return;
 		if (this.armed?.key === row.id) {
 			this.disarm();
 			const stopping = this.stopping?.row.id === row.id ? this.stopping.row : undefined;
@@ -1099,7 +1086,7 @@ export class AgentView implements Component, Focusable {
 
 	private async togglePin(): Promise<void> {
 		const row = this.selectedRow;
-		if (!row || row.id.startsWith("pending:")) return;
+		if (!row || row.starting) return;
 		if (row.shell) {
 			this.say("A shell command can't be pinned");
 			return;
@@ -1118,7 +1105,7 @@ export class AgentView implements Component, Focusable {
 	private async reorder(delta: number): Promise<void> {
 		const item = this.selected;
 		if (item?.kind !== "row" || item.row.self) return;
-		const rows = item.band.rows.filter((r) => !r.self && !r.id.startsWith("pending:"));
+		const rows = item.band.rows.filter((r) => !r.self && !r.starting);
 		const at = rows.findIndex((r) => r.id === item.row.id);
 		const to = at + delta;
 		if (at === -1 || to < 0 || to >= rows.length) return;
@@ -1133,7 +1120,7 @@ export class AgentView implements Component, Focusable {
 
 	private startRename(): void {
 		const row = this.selectedRow;
-		if (!row || row.id.startsWith("pending:")) return;
+		if (!row || row.starting) return;
 		if (row.shell) {
 			this.say("A shell command can't be renamed");
 			return;
@@ -1199,7 +1186,7 @@ export class AgentView implements Component, Focusable {
 		}
 		this.mode = "list";
 		try {
-			this.leaveFor(this.opts.panes.start(past.cwd, ["--session", past.sessionFile]));
+			this.leaveFor(await this.resumeIn(past.cwd, past.sessionFile, [], past.label));
 		} catch (error) {
 			this.say(`Couldn't resume — ${error instanceof Error ? error.message : String(error)}`, "error");
 		}
@@ -1480,14 +1467,14 @@ export class AgentView implements Component, Focusable {
 		// A second enter before this reply is sent would send it again: for a stored row, a second pane.
 		if (this.replying) return;
 		this.replying = true;
-		await this.replyToPane(row, text, this.opts.panes).finally(() => {
+		await this.replyToPane(row, text).finally(() => {
 			this.replying = false;
 		});
 	}
 
 	/** Pane mode: a reply is the session's next prompt (queued behind a turn in progress). A
 	 *  session with no pane gets one, with the reply as its first prompt. */
-	private async replyToPane(row: AgentRow, text: string, panes: PaneOps): Promise<void> {
+	private async replyToPane(row: AgentRow, text: string): Promise<void> {
 		try {
 			if (row.pane) {
 				if (row.state === "needs") {
@@ -1497,8 +1484,7 @@ export class AgentView implements Component, Focusable {
 				}
 				await this.opts.client.send(row.id, { type: "prompt", text });
 			} else if (row.sessionFile && !row.alive) {
-				panes.start(row.cwd, ["--session", row.sessionFile, "--", text]);
-				await this.opts.client.delete(row.id).catch(() => undefined);
+				await this.resumeIn(row.cwd, row.sessionFile, ["--", text]);
 			} else {
 				this.replyError = "enter opens it";
 				this.render_();
@@ -1827,7 +1813,7 @@ export class AgentView implements Component, Focusable {
 							? item.band.key.slice(4)
 							: this.opts.cwd;
 				const row = this.items.flatMap((i) =>
-					i.kind === "row" && i.row.cwd === cwd && !i.row.id.startsWith("pending:") ? [i.row] : [],
+					i.kind === "row" && i.row.cwd === cwd && !i.row.starting ? [i.row] : [],
 				)[n - 1];
 				if (row) void this.open(row);
 				return;
@@ -2154,11 +2140,11 @@ export class AgentView implements Component, Focusable {
 		}
 		boxed.push(border("╰", "╯"));
 		const typed = !!this.reply.getValue();
-		const pending = row.id.startsWith("pending:");
+		const starting = row.starting;
 		const enter = typed ? "send" : this.resumable(row) ? "resume" : "open";
 		boxed.push(
 			this.hints(width, [
-				typed || !pending ? `enter to ${enter}` : undefined,
+				typed || !starting ? `enter to ${enter}` : undefined,
 				typed ? "esc to close" : "space to close",
 				`ctrl+x to ${this.armedFor(row) ? "confirm" : "delete"}`,
 			]),
@@ -2216,11 +2202,11 @@ export class AgentView implements Component, Focusable {
 	/** `?`: the shortcut grid, under the composer in place of the hint line. */
 	private renderHelp(width: number): string[] {
 		const item = this.selected;
-		const row = item?.kind === "row" && !item.row.id.startsWith("pending:") ? item.row : undefined;
+		const row = item?.kind === "row" && !item.row.starting ? item.row : undefined;
 		const cwd = item?.kind === "row" ? item.row.cwd : this.opts.cwd;
 		const alt = Math.min(
 			9,
-			this.items.filter((i) => i.kind === "row" && i.row.cwd === cwd && !i.row.id.startsWith("pending:")).length,
+			this.items.filter((i) => i.kind === "row" && i.row.cwd === cwd && !i.row.starting).length,
 		);
 		const opt = process.platform === "darwin" ? "opt" : "alt";
 		const items = [
@@ -2291,7 +2277,7 @@ export class AgentView implements Component, Focusable {
 		const text = this.composerText();
 		const item = this.selected;
 		const composing = this.composing();
-		const row = item?.kind === "row" && !item.row.id.startsWith("pending:") ? item.row : undefined;
+		const row = item?.kind === "row" && !item.row.starting ? item.row : undefined;
 		let enter: string | undefined;
 		if (composing) enter = "enter to create";
 		else if (row) enter = `enter to ${row.self ? "return" : this.resumable(row) ? "resume" : "open"}`;

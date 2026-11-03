@@ -34,6 +34,8 @@ export async function serve(): Promise<void> {
 		deleteInstance: (id) => supervisor.deleteInstance(id),
 		renameInstance: (id, name) => supervisor.renameInstance(id, name) !== undefined,
 		setPinned: (id, pinned) => supervisor.setInstanceMeta(id, { pinned }) !== undefined,
+		claimStart: (spec) => supervisor.claimStart(spec),
+		startFailed: (id) => supervisor.startFailed(id),
 		statusLine: statusLine(),
 		renderStatusline: pistatusline(),
 		tmux,

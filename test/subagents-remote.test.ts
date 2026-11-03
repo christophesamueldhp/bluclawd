@@ -162,6 +162,8 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 				terminalOpen: () => true,
 				launch: () => undefined,
 				startSession: () => "pane-1",
+				claimStart: () => ({ ok: false, refused: "running" }),
+				startFailed: () => {},
 				renameInstance: () => false,
 				setPinned: () => false,
 				deleteInstance: () => false,

@@ -2,9 +2,9 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { listSummaries } from "../daemon/handler.ts";
+import { handleIpcRequest, listSummaries } from "../daemon/handler.ts";
 import { loadInstances, saveInstances } from "../daemon/storage.ts";
-import type { ServerSupervisor } from "../daemon/supervisor.ts";
+import { type ServerSupervisor, START_MS } from "../daemon/supervisor.ts";
 import { testRegistry } from "./helpers/registry.ts";
 
 describe("agent-view stored rows", () => {
@@ -227,5 +227,124 @@ describe("one row per session through quit and resume", () => {
 		expect(supervisor.deleteInstance("pi-a")).toBe(true);
 		expect(rows(supervisor)).toEqual([]);
 		expect(loadInstances(dir)).toEqual([]);
+	});
+});
+
+describe("a resume goes through the registry: starting, then live", () => {
+	let dir: string;
+	let file: string;
+	const createdAt = "2026-10-30T09:00:00.000Z";
+	const pane = (id: string) => ({
+		id,
+		status: "online" as const,
+		cwd: "/p",
+		createdAt,
+		label: "fix tests",
+		sessionFile: file,
+		pane: id,
+	});
+	const rows = (supervisor: ServerSupervisor) => listSummaries(supervisor).filter((i) => i.sessionFile === file);
+
+	beforeEach(() => {
+		dir = mkdtempSync(join(tmpdir(), "bluclawd-resume-"));
+		file = join(mkdtempSync(join(tmpdir(), "bluclawd-resume-session-")), "s.jsonl");
+		writeFileSync(file, "");
+	});
+
+	it("a stopped row resumed is listed as starting, with its id and pin, until its pane registers", () => {
+		const supervisor = testRegistry(dir);
+		const saved = supervisor.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file })!;
+		supervisor.setInstanceMeta(saved.id, { pinned: true });
+
+		expect(supervisor.claimStart({ cwd: "/p", sessionFile: file })).toEqual({ ok: true, id: saved.id });
+		expect(rows(supervisor)).toEqual([expect.objectContaining({ id: saved.id, status: "starting", pinned: true })]);
+
+		supervisor.registerExternal(pane("pi-b"), "idle");
+		expect(rows(supervisor)).toEqual([
+			expect.objectContaining({ id: saved.id, status: "online", external: true, pinned: true, pane: "pi-b" }),
+		]);
+	});
+
+	it("a second resume of a starting row is refused; so is a resume of a live row", () => {
+		const supervisor = testRegistry(dir);
+		supervisor.saveInstance({ cwd: "/p", sessionFile: file });
+
+		expect(supervisor.claimStart({ cwd: "/p", sessionFile: file })).toMatchObject({ ok: true });
+		expect(supervisor.claimStart({ cwd: "/p", sessionFile: file })).toEqual({ ok: false, refused: "starting" });
+
+		supervisor.registerExternal(pane("pi-b"), "idle");
+		expect(supervisor.claimStart({ cwd: "/p", sessionFile: file })).toEqual({ ok: false, refused: "running" });
+		expect(rows(supervisor)).toHaveLength(1);
+	});
+
+	it("a start whose pane never registers ends: the row is stopped again, and can be resumed", () => {
+		let now = Date.parse("2026-10-30T10:00:00.000Z");
+		const supervisor = testRegistry(dir, () => now);
+		const saved = supervisor.saveInstance({ cwd: "/p", sessionFile: file })!;
+		supervisor.claimStart({ cwd: "/p", sessionFile: file });
+
+		now += START_MS + 1;
+		expect(rows(supervisor)).toEqual([expect.objectContaining({ id: saved.id, status: "stopped" })]);
+		expect(supervisor.claimStart({ cwd: "/p", sessionFile: file })).toEqual({ ok: true, id: saved.id });
+	});
+
+	it("a pane that could not be started leaves the row as it was at once", () => {
+		const supervisor = testRegistry(dir);
+		const saved = supervisor.saveInstance({ cwd: "/p", sessionFile: file })!;
+		supervisor.claimStart({ cwd: "/p", sessionFile: file });
+		supervisor.startFailed(saved.id);
+		expect(rows(supervisor)).toEqual([expect.objectContaining({ id: saved.id, status: "stopped" })]);
+	});
+
+	it("a file with no row is listed as starting under a new id, which its pane goes on as", () => {
+		const supervisor = testRegistry(dir);
+		const claim = supervisor.claimStart({ cwd: "/p", label: "past", sessionFile: file });
+		if (!claim.ok) throw new Error("refused");
+		expect(rows(supervisor)).toEqual([
+			expect.objectContaining({ id: claim.id, status: "starting", label: "past", cwd: "/p" }),
+		]);
+		supervisor.registerExternal(pane("pi-b"), "idle");
+		expect(rows(supervisor)).toEqual([expect.objectContaining({ id: claim.id, status: "online", pane: "pi-b" })]);
+	});
+
+	it("a new session is listed as starting by its pane's id until that pane registers", () => {
+		const supervisor = testRegistry(dir);
+		expect(supervisor.claimStart({ cwd: "/p", label: "new task", pane: "pi-n" })).toEqual({ ok: true, id: "pi-n" });
+		expect(listSummaries(supervisor)).toEqual([
+			expect.objectContaining({ id: "pi-n", status: "starting", label: "new task", pane: "pi-n" }),
+		]);
+		supervisor.registerExternal({ ...pane("pi-n"), sessionFile: join(dir, "new.jsonl") }, "working");
+		expect(listSummaries(supervisor)).toEqual([expect.objectContaining({ id: "pi-n", status: "online" })]);
+	});
+
+	it("windows claim a start over IPC: a refusal says why, and a failed start gives the claim back", async () => {
+		const supervisor = testRegistry(dir);
+		const start = { type: "start" as const, cwd: "/p", sessionFile: file };
+		const first = await handleIpcRequest(supervisor, start);
+		expect(first).toMatchObject({ type: "start_result", ok: true, id: expect.any(String) });
+		expect(await handleIpcRequest(supervisor, start)).toMatchObject({
+			ok: false,
+			error: "it is already starting — try again in a moment",
+		});
+		if (first.type !== "start_result") throw new Error("refused");
+		expect(await handleIpcRequest(supervisor, { type: "start_failed", instanceId: first.id })).toMatchObject({
+			ok: true,
+		});
+		expect(await handleIpcRequest(supervisor, start)).toMatchObject({ type: "start_result", ok: true });
+		supervisor.registerExternal(pane("pi-b"), "idle");
+		expect(await handleIpcRequest(supervisor, start)).toMatchObject({
+			ok: false,
+			error: "it is already open in a pane",
+		});
+	});
+
+	it("deleting a starting row ends its start", () => {
+		const supervisor = testRegistry(dir);
+		const claim = supervisor.claimStart({ cwd: "/p", sessionFile: file });
+		supervisor.claimStart({ cwd: "/p", pane: "pi-n" });
+		if (!claim.ok) throw new Error("refused");
+		expect(supervisor.deleteInstance(claim.id)).toBe(true);
+		expect(supervisor.deleteInstance("pi-n")).toBe(true);
+		expect(listSummaries(supervisor)).toEqual([]);
 	});
 });

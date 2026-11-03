@@ -9,8 +9,17 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { homedir } from "node:os";
 import { extname, isAbsolute, join } from "node:path";
 import { stripAnsi } from "../ansi.ts";
-import type { InstanceSummary, LiveSnapshot, PaneImage, PaneLaunch, PaneMessage, PaneReport } from "../ipc/protocol.ts";
+import type {
+	InstanceSummary,
+	LiveSnapshot,
+	PaneImage,
+	PaneLaunch,
+	PaneMessage,
+	PaneReport,
+	StartSpec,
+} from "../ipc/protocol.ts";
 import { labelFromTask } from "../rows.ts";
+import type { StartClaim } from "../supervisor.ts";
 import { RemoteEvents } from "./events.ts";
 import { type ClaimResult, type RemoteStore, SECRET_PATTERN } from "./pairing.ts";
 import {
@@ -39,6 +48,11 @@ export interface RemoteDeps {
 	launch(): PaneLaunch | undefined;
 	/** Start a pane; returns its tmux session name, the id its row registers as. */
 	startSession(spec: SessionSpec): string;
+	/** List a row as starting: before its pane is started on a session file, refused while one is
+	 *  starting or running there; or once a new session's pane is. */
+	claimStart(spec: StartSpec): StartClaim;
+	/** The pane a start was claimed for could not be started. */
+	startFailed(id: string): void;
 	/** A terminal on the Mac shows pi: without one, the phone only reads. */
 	terminalOpen(): boolean;
 	/** A running pane's latest report. */
@@ -401,12 +415,18 @@ async function handle(
 		const { SessionManager } = await import("@earendil-works/pi-coding-agent");
 		const saved = (await SessionManager.list(cwd)).find((s) => s.path === body.sessionFile && s.messageCount > 0);
 		if (!saved) return json(res, 404, { error: "unknown_session" });
-		if (deps.listInstances().some((i) => i.external && i.sessionFile === saved.path))
-			return json(res, 409, { error: "session_running" });
 		const launch = launchOf(deps);
 		if (!launch) return json(res, 503, { error: "no_launch" });
-		const pane = start(deps, { cwd: saved.cwd || cwd, sessionFile: saved.path, task: "", launch });
-		return json(res, 201, { pane });
+		const spec = { cwd: saved.cwd || cwd, sessionFile: saved.path };
+		// Claimed first: agent view's resume of the same file, or another phone's, is refused meanwhile.
+		const claim = deps.claimStart({ ...spec, label: saved.name || labelFromTask(saved.firstMessage) });
+		if (!claim.ok) return json(res, 409, { error: "session_running" });
+		try {
+			return json(res, 201, { pane: start(deps, { ...spec, task: "", launch }), id: claim.id });
+		} catch (error) {
+			deps.startFailed(claim.id);
+			throw error;
+		}
 	}
 	if (path === "/api/sessions" && req.method === "GET") {
 		return json(res, 200, { sessions: remoteSessions(deps.listInstances()), terminalOpen: deps.terminalOpen() });
@@ -432,7 +452,8 @@ async function handle(
 			...(typeof model === "string" ? { model } : {}),
 			launch,
 		});
-		return json(res, 201, { pane });
+		const claim = deps.claimStart({ cwd, label: labelFromTask(task), pane });
+		return json(res, 201, { pane, id: claim.ok ? claim.id : pane });
 	}
 	if (path === "/api/directories" && req.method === "GET") {
 		const typed = url.searchParams.get("under");

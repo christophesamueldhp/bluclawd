@@ -30,10 +30,12 @@ export interface RemoteSession {
 	settled?: number;
 	/** Set when more than one live pi writes this session's file: how many. */
 	livePanes?: number;
+	/** A pane is being started on it and has not registered yet. */
+	starting?: true;
 }
 
 function sessionRows(instances: InstanceSummary[]): AgentRow[] {
-	return collectRows(instances, undefined).filter((row) => !row.shell && !row.id.startsWith("pending:"));
+	return collectRows(instances, undefined).filter((row) => !row.shell);
 }
 
 /** In display order: agent view's state bands, each sorted as agent view sorts it. */
@@ -55,6 +57,7 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 				...(row.dialog ? { dialog: row.dialog } : {}),
 				...(row.settled !== undefined ? { settled: row.settled } : {}),
 				...(row.livePanes ? { livePanes: row.livePanes } : {}),
+				...(row.starting ? { starting: true } : {}),
 			});
 		}
 	}
