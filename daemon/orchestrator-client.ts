@@ -13,6 +13,9 @@ import type {
 	PaneMessage,
 	PaneReport,
 	RemoteResponse,
+	StartFailedRequest,
+	StartRequest,
+	StartSpec,
 } from "./ipc/protocol.ts";
 import { daemonBuildId, getSocketPath } from "./paths.ts";
 
@@ -57,6 +60,8 @@ type Request =
 	| { type: "rename"; instanceId: string; name: string }
 	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
 	| { type: "save"; cwd: string; label?: string; sessionFile: string; sessionId?: string }
+	| StartRequest
+	| StartFailedRequest
 	| ({ type: "remote" } & RemoteAction)
 	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null }
 	| { type: "remote_report"; instanceId: string; report: PaneReport };
@@ -74,6 +79,7 @@ interface AnyResponse {
 	wantReport?: boolean;
 	queued?: boolean;
 	superseded?: boolean;
+	id?: string;
 }
 
 /** Path to the daemon's CLI entry, for the ensureDaemon() auto-start. */
@@ -225,6 +231,19 @@ export class OrchestratorClient {
 	async save(session: { cwd: string; label?: string; sessionFile: string; sessionId?: string }): Promise<void> {
 		const { cwd, label, sessionFile, sessionId } = session;
 		await this.request({ type: "save", cwd, label, sessionFile, sessionId });
+	}
+
+	/** The id of the row listed as starting (see StartRequest); rejects with why it was refused. */
+	async start(start: StartSpec): Promise<string> {
+		const res = await this.request({ type: "start", ...start });
+		if (res.type !== "start_result" || !res.id)
+			throw new Error("The agent daemon is out of date — restart pi to update it");
+		return res.id;
+	}
+
+	/** The pane `start` was claimed for could not be started. */
+	async startFailed(instanceId: string): Promise<void> {
+		await this.request({ type: "start_failed", instanceId });
 	}
 
 	async delete(instanceId: string): Promise<void> {

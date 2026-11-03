@@ -59,6 +59,11 @@ export function sharedWarning(session) {
 	return session.livePanes ? `⚠ ${session.livePanes} panes on one session` : "";
 }
 
+/** A session started from here is up: its row is listed, no longer starting. @param {Session[]} sessions @param {string} id */
+export function paneUp(sessions, id) {
+	return sessions.some((s) => s.id === id && !s.starting);
+}
+
 /**
  * The row an open chat moves to once its own is gone from the list: the same pi session under
  * another row id (it quit on the Mac and is stored now, or it resumed in a new pane).

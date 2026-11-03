@@ -125,6 +125,31 @@ export interface SaveRequest {
 	sessionId?: string;
 }
 
+/** A window starting a pane: see ServerSupervisor.claimStart and paneStarting. */
+export type StartRequest = { type: "start" } & StartSpec;
+
+export type StartSpec = ResumeSpec | NewPaneSpec;
+
+/** A pane about to be started on a session file. */
+export interface ResumeSpec {
+	cwd: string;
+	label?: string;
+	sessionFile: string;
+}
+
+/** A new session's pane, just started. */
+export interface NewPaneSpec {
+	cwd: string;
+	label?: string;
+	pane: string;
+}
+
+/** The pane a start was claimed for could not be started. */
+export interface StartFailedRequest {
+	type: "start_failed";
+	instanceId: string;
+}
+
 /** The reply a pane is streaming, while a phone has its session open. */
 export interface LiveSnapshot {
 	text: string;
@@ -249,6 +274,8 @@ interface RequestMap {
 	rename: RenameRequest;
 	meta: MetaRequest;
 	save: SaveRequest;
+	start: StartRequest;
+	start_failed: StartFailedRequest;
 	remote: RemoteRequest;
 	remote_live: RemoteLiveRequest;
 	remote_report: RemoteReportRequest;
@@ -334,11 +361,17 @@ export interface UnregisterResponse extends ResponseBase {
 	type: "unregister_result";
 }
 
+/** The id of the row listed as starting. */
+export interface StartResponse extends ResponseBase {
+	type: "start_result";
+	id: string;
+}
+
 export interface ShutdownResponse extends ResponseBase {
 	type: "shutdown_result";
 }
 
-/** Reply to send / delete / rename / meta / save / remote_live / remote_report. */
+/** Reply to send / delete / rename / meta / save / start_failed / remote_live / remote_report. */
 export interface AckResponse extends ResponseBase {
 	type: "ack";
 	instance?: InstanceSummary;
@@ -385,6 +418,8 @@ interface ResponseMap {
 	rename: AckResponse;
 	meta: AckResponse;
 	save: AckResponse;
+	start: StartResponse;
+	start_failed: AckResponse;
 	remote: RemoteResponse;
 	remote_live: AckResponse;
 	remote_report: AckResponse;

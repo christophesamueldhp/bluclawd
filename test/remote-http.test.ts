@@ -17,6 +17,8 @@ import {
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { SessionSpec } from "../daemon/remote/spawn.ts";
 import type { StatusLine } from "../daemon/remote/statusline.ts";
+import type { ServerSupervisor } from "../daemon/supervisor.ts";
+import { testRegistry } from "./helpers/registry.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 import { validP256dh } from "./support/push.ts";
 
@@ -41,6 +43,8 @@ describe("remote HTTP API", () => {
 	let statusCwds: string[];
 	let renders: Array<{ id: string; cwd: string; cols: number }>;
 	let changed: unknown[][];
+	/** Where starts are claimed: agent view's go here too. */
+	let registry: ServerSupervisor;
 
 	beforeEach(async () => {
 		vi.mocked(SessionManager.list).mockReset().mockResolvedValue([]);
@@ -73,6 +77,7 @@ describe("remote HTTP API", () => {
 		statusCwds = [];
 		renders = [];
 		changed = [];
+		registry = testRegistry(join(dir, "registry"));
 		store = new RemoteStore(join(dir, "remote.json"));
 		server = await startRemoteServer(
 			{
@@ -89,6 +94,9 @@ describe("remote HTTP API", () => {
 					started.push(spec);
 					return "pi-0000000a";
 				},
+				claimStart: (options) => registry.claimStart(options),
+				paneStarting: (spec) => registry.paneStarting(spec),
+				startFailed: (id) => registry.startFailed(id),
 				terminalOpen: () => terminalOpen,
 				report: (id) => reports.get(id),
 				renameInstance: (id, name) => {
@@ -190,6 +198,59 @@ describe("remote HTTP API", () => {
 		terminalOpen = false;
 		expect((await resume(sessionFile)).status).toBe(409);
 		expect(started).toHaveLength(1);
+	});
+
+	describe("a past session's resume is claimed in the registry, as agent view's is", () => {
+		let sessionFile: string;
+		let resume: () => Promise<Response>;
+
+		beforeEach(async () => {
+			const token = await pair();
+			sessionFile = join(dir, "past.jsonl");
+			vi.mocked(SessionManager.list).mockResolvedValue([saved(sessionFile)]);
+			resume = () =>
+				fetch(`${base}/api/sessions/resume`, {
+					method: "POST",
+					headers: authJson(token),
+					body: JSON.stringify({ cwd: dir, sessionFile }),
+				});
+		});
+
+		it("is refused while agent view's resume of the same file is starting", async () => {
+			expect(registry.claimStart({ cwd: dir, sessionFile })).toMatchObject({ ok: true });
+			const res = await resume();
+			expect([res.status, await res.json()]).toEqual([409, { error: "session_starting" }]);
+			expect(started).toEqual([]);
+		});
+
+		it("refuses agent view's resume while its own is starting, and names the row it is listed as", async () => {
+			const res = await resume();
+			const { id, pane } = await res.json();
+			expect([res.status, pane]).toEqual([201, "pi-0000000a"]);
+			expect(registry.listInstances()).toEqual([expect.objectContaining({ id, status: "starting", sessionFile })]);
+			expect(registry.claimStart({ cwd: dir, sessionFile })).toEqual({ ok: false, refused: "starting" });
+			expect(started).toHaveLength(1);
+		});
+
+		it("a pane that could not be started leaves the file free to resume", async () => {
+			startFails = true;
+			expect((await resume()).status).toBe(500);
+			expect(registry.listInstances()).toEqual([]);
+			expect(registry.claimStart({ cwd: dir, sessionFile })).toMatchObject({ ok: true });
+		});
+	});
+
+	it("a new session from the phone is listed as starting, by its pane's id, until its pane registers", async () => {
+		const token = await pair();
+		const res = await fetch(`${base}/api/sessions`, {
+			method: "POST",
+			headers: authJson(token),
+			body: JSON.stringify({ cwd: dir, task: "fix the flaky tests" }),
+		});
+		expect([res.status, await res.json()]).toEqual([201, { pane: "pi-0000000a", id: "pi-0000000a" }]);
+		expect(registry.listInstances()).toEqual([
+			expect.objectContaining({ id: "pi-0000000a", status: "starting", label: "fix the flaky…", cwd: dir }),
+		]);
 	});
 
 	it("serves the PWA without a token, and nothing outside its directory", async () => {
@@ -844,7 +905,7 @@ describe("remote HTTP API", () => {
 			fetch(`${base}/api/sessions`, { method: "POST", headers: authJson(token), body: JSON.stringify(body) });
 		const res = await start({ cwd: dir, task: "  fix the build ", model: "anthropic/claude-opus-5-5" });
 		expect(res.status).toBe(201);
-		expect(await res.json()).toEqual({ pane: "pi-0000000a" });
+		expect(await res.json()).toEqual({ pane: "pi-0000000a", id: "pi-0000000a" });
 		expect((await start({ cwd: dir, task: "go" })).status).toBe(201);
 		// No pane lists its commands yet: a new session starts with none.
 		const command = await start({ cwd: dir, task: "/settings" });

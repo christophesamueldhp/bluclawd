@@ -41,6 +41,9 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 			deleteInstance: () => false,
 			renameInstance: () => false,
 			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
+			startFailed: () => {},
 			// A terminal shows pi, so the phone may prompt.
 			tmux: { attached: () => true } as unknown as Tmux,
 			webDir: dir,
