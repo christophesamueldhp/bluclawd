@@ -124,9 +124,10 @@ async function fauxModelRegistry(agentDir: string) {
 	return { registry: new ModelRegistry(runtime), model: faux.getModel("faux-1") };
 }
 
-function setup() {
-	const cwd = makeTempDir("cwd");
-	const agentDir = makeTempDir("agent");
+/** An orchestrator's subagents; given an earlier one's, a reload of it: the same parent session and agent dir. */
+function setup(earlier?: { cwd: string; agentDir: string; session: ExtensionContext }) {
+	const cwd = earlier?.cwd ?? makeTempDir("cwd");
+	const agentDir = earlier?.agentDir ?? makeTempDir("agent");
 	const bus = new SubagentMessageBus(undefined, {
 		find: (scope, to) => generations.directory.find(scope, to),
 		reachable: (scope) => generations.directory.reachable(scope),
@@ -138,7 +139,7 @@ function setup() {
 		onChange: () => {},
 		batchWindowMs: 0,
 	});
-	const session = fakeSessionContext(cwd);
+	const session = earlier?.session ?? fakeSessionContext(cwd);
 	scope.enter(session, "replaced");
 	const runner = fakeRunner();
 	const generations = createGenerations({
@@ -242,7 +243,7 @@ function setup() {
 			return result.content.map((part) => part.text).join("");
 		};
 	};
-	return { cwd, scope, generations, directory, tasks, runner, launch, orchestrator };
+	return { cwd, agentDir, session, scope, generations, directory, tasks, runner, launch, orchestrator };
 }
 
 describe("The run directory", () => {
@@ -315,6 +316,19 @@ describe("The run directory", () => {
 			);
 		},
 	);
+
+	it("after a reload, answers a parent message to a finished run by name as it does by run ID", async () => {
+		const before = setup();
+		const backend = before.launch("backend", "Build the API.");
+		(await before.runner.child(0)).finish({ summaryText: "API built.", transcriptPath: "transcript.jsonl" });
+		const { reportPath } = await backend.completion;
+
+		const messageFromParent = await setup(before).orchestrator();
+
+		const refusal = `Message 0 invalidated: "backend" (${backend.runId}) belongs to a session that was reloaded or replaced; spawn a new subagent and point it at ${reportPath}.`;
+		expect(await messageFromParent(backend.runId, "Now add pagination.")).toBe(refusal);
+		expect(await messageFromParent("backend", "Now add pagination.")).toBe(refusal);
+	});
 
 	it("offers a name for reuse as soon as its run is final", async () => {
 		const { runner, launch } = setup();

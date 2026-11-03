@@ -1,7 +1,7 @@
 import { isAgentTaskId } from "../_shared/agent-tasks.ts";
 import type { ParentScope } from "./parent-scope.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord, type SubagentRunScheduler } from "./runs.ts";
-import { readPersistedRunRecord } from "./storage.ts";
+import { listPersistedRunRecords, readPersistedRunRecord } from "./storage.ts";
 
 /**
  * Where a run is in its life. A starting run's session is still being created; messages to it wait for it (#99).
@@ -46,6 +46,8 @@ export function createRunDirectory(deps: RunDirectoryDeps) {
 	};
 	const named = (target: string) => (record: Readonly<SubagentRunRecord>) =>
 		record.runId === target || record.name === target;
+	const latestEnded = (records: readonly Readonly<SubagentRunRecord>[]) =>
+		[...records].sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))[0];
 
 	/** Runs of the scope that are not final yet, in admission order. */
 	const list = (scope: ParentScope): RunEntry[] =>
@@ -88,19 +90,25 @@ export function createRunDirectory(deps: RunDirectoryDeps) {
 		find(scope: ParentScope, target: string): RunEntry | undefined {
 			const open = list(scope).find((entry) => named(target)(entry.record));
 			if (open) return open;
-			const finished = deps.scheduler
-				.listRuns()
-				.filter(
-					(record) =>
-						record.parentSessionId === scope.parentSessionId &&
-						isTerminalSubagentStatus(record.status) &&
-						named(target)(record),
-				)
-				.sort((a, b) => (b.endedAt ?? 0) - (a.endedAt ?? 0))[0];
+			const finished = latestEnded(
+				deps.scheduler
+					.listRuns()
+					.filter(
+						(record) =>
+							record.parentSessionId === scope.parentSessionId &&
+							isTerminalSubagentStatus(record.status) &&
+							named(target)(record),
+					),
+			);
 			if (finished) return entryOf(finished);
-			// A reload replaces this extension, so a run from before it is only on disk, found by its run ID.
-			if (!isAgentTaskId(target)) return undefined;
-			const stored = readPersistedRunRecord(deps.agentDir(), scope.parentSessionId, target);
+			// A reload replaces this extension, so a run from before it is only on disk, and unknown to this instance.
+			const stored = isAgentTaskId(target)
+				? readPersistedRunRecord(deps.agentDir(), scope.parentSessionId, target)
+				: latestEnded(
+						listPersistedRunRecords(deps.agentDir(), scope.parentSessionId).filter(
+							(record) => record.name === target && !deps.scheduler.getRun(record.runId),
+						),
+					);
 			return stored && { record: stored, state: "finished", unreachable: UNREACHABLE.finished };
 		},
 	};
