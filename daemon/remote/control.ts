@@ -169,9 +169,21 @@ export class RemoteControl {
 		this.server?.status(sessionId);
 	}
 
-	/** The pane listed as `sessionId` went with `inbox` still queued for it; `reason`: why its session ended. */
-	dropped(sessionId: string, inbox: PaneMessage[], reason?: EndReason): void {
-		this.delivery.dropped(sessionId, inbox, reason);
+	/** Pane `pane`'s heartbeat took `messages`. */
+	delivered(pane: string, messages: PaneMessage[]): void {
+		this.delivery.delivered(pane, messages);
+	}
+
+	/** Pane `pane`, listed as `sessionId`, went with `inbox` still queued for it; `reason`: why its
+	 *  session ended. */
+	dropped(sessionId: string, inbox: PaneMessage[], reason: EndReason | undefined, pane: string): void {
+		this.delivery.dropped(sessionId, inbox, reason, pane);
+		this.server?.status(sessionId);
+	}
+
+	/** The pane listed as `sessionId`, which may still be alive, was reaped with `inbox` still queued for it. */
+	silent(sessionId: string, inbox: PaneMessage[]): void {
+		this.delivery.silent(inbox);
 		this.server?.status(sessionId);
 	}
 

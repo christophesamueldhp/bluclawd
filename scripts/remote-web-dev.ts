@@ -6,8 +6,13 @@
 // answers 404 `no_status`. Gamma reports its prompts' outcomes, as a current pane does: taken, and
 // written to its transcript, or queued while `<dir>/busy` exists (Gamma is working then). While
 // `<dir>/compacting` exists Gamma refuses them (compacting), and while `<dir>/gone` exists they are
-// lost, as when Gamma's pane goes before taking them. Creating `<dir>/reply` makes Alpha stream a
-// reply that runs a tool (see streamReply).
+// lost, as when Gamma's pane goes before taking them. Creating `<dir>/dequeue` has Gamma's pi drop
+// the prompts it queued (lost, dequeued), as stopping its turn does. Creating `<dir>/quit` quits
+// Gamma's pane for good: its row stops, and what it was sent is lost (pane_gone). While `<dir>/slow`
+// exists Gamma's status answers 5 s late, so a prompt can be sent before its report is in. While
+// `<dir>/silent` exists Gamma's row is silent (its pi stopped beating, tmux still has it): listed
+// alive, refusing prompts (409 `session_not_running`) and answering no status; seen on the next list.
+// Creating `<dir>/reply` makes Alpha stream a reply that runs a tool (see streamReply).
 import { appendFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -58,6 +63,15 @@ const panes = [
 ];
 const gamma = panes[2]!;
 const busy = () => existsSync(join(dir, "busy"));
+/** The ids of the prompts Gamma's pi queued. */
+const queued: string[] = [];
+let quit = false;
+/** Once its pane quit, a stored row with no pane's pi. */
+function listedGamma(): InstanceSummary {
+	if (quit) return { ...gamma, status: "stopped", external: false };
+	if (existsSync(join(dir, "silent"))) return { ...gamma, silent: true, external: false };
+	return busy() ? { ...gamma, activity: "working" } : gamma;
+}
 
 let server: RemoteServer | undefined;
 /** Gamma's heartbeat takes the prompt a moment later, and its pi takes it or queues it. */
@@ -72,6 +86,7 @@ const delivery = new PromptDelivery((id, message) => {
 			else {
 				const outcome = busy() ? "queued" : "taken";
 				if (outcome === "taken") append(gamma.sessionFile!, "user", message.text);
+				else queued.push(promptId);
 				delivery.reported(id, [{ id: promptId, outcome }]);
 			}
 			server?.status(id);
@@ -86,7 +101,7 @@ server = await startRemoteServer(
 		store,
 		webDir: join(import.meta.dirname, "../daemon/remote/web"),
 		listInstances: () => {
-			const listed = panes.map((p) => (p === gamma && busy() ? { ...p, activity: "working" as const } : p));
+			const listed = panes.map((p) => (p === gamma ? listedGamma() : p));
 			return existsSync(join(dir, "moved"))
 				? listed.map((p) => (p.id === "pi-alpha" ? { ...p, id: "pi-alpha-2", pane: "pi-alpha-2" } : p))
 				: listed;
@@ -98,7 +113,11 @@ server = await startRemoteServer(
 		paneStarting: () => {},
 		startFailed: () => {},
 		terminalOpen: () => true,
-		report: (id) => (id === gamma.id ? { models: [], outcomes: [] } : undefined),
+		report: (id) => (id === gamma.id && !quit ? { models: [], outcomes: [] } : undefined),
+		statusLine: async () => {
+			if (existsSync(join(dir, "slow"))) await sleep(5000);
+			return {};
+		},
 		outcomes: (id) => delivery.outcomes(id),
 		renameInstance: () => true,
 		setPinned: () => true,
@@ -144,4 +163,21 @@ setInterval(() => {
 	if (!existsSync(trigger)) return;
 	rmSync(trigger);
 	void streamReply();
+}, 500);
+
+setInterval(() => {
+	const dequeue = join(dir, "dequeue");
+	if (existsSync(dequeue)) {
+		rmSync(dequeue);
+		delivery.reported(
+			gamma.id,
+			queued.splice(0).map((id) => ({ id, outcome: "lost", reason: "dequeued" })),
+		);
+		server?.status(gamma.id);
+	}
+	if (!quit && existsSync(join(dir, "quit"))) {
+		quit = true;
+		delivery.dropped(gamma.id, [], "quit");
+		server?.status(gamma.id);
+	}
 }, 500);

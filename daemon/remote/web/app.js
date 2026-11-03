@@ -17,17 +17,17 @@ import {
 	replyEndedAt,
 	restorePending,
 	settleOutcomes,
-	storedPending,
 } from "./chat.js";
 import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
-import { ageAt, paneUp, STATE_WORDS, sessionGroups, sharedWarning, statusGlyph, viewMode } from "./list.js";
+import { actable, ageAt, paneUp, STATE_WORDS, sessionGroups, sharedWarning, statusGlyph, viewMode } from "./list.js";
 import { refused, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 import { loaderHtml } from "./mascot.js";
 import { diffSummary, groupSummary, markerKind, resultSummary } from "./output.js";
+import { pendingStore } from "./pending.js";
 import { closePicker, modelGroups, openPicker } from "./picker.js";
 import { filterSessions, fold, matchCommands } from "./search.js";
 import {
@@ -44,8 +44,9 @@ import {
 } from "./statusbar.js";
 
 /**
- * `dialog`: the one it waits on, while it needs input.
- * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, dialog?: { kind: string, title?: string }, livePanes?: number, starting?: true }} Session
+ * `dialog`: the one it waits on, while it needs input. `silent`: its pane stopped answering the
+ * Mac, which still has it (asleep or blocked), and may come back.
+ * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, dialog?: { kind: string, title?: string }, livePanes?: number, starting?: true, silent?: true }} Session
  */
 /** `aborted`: a reply its turn was stopped in, empty when stopped before it said anything. @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, aborted?: boolean, toolCallId?: string, toolName?: string, command?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
@@ -54,10 +55,10 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.50";
+const VERSION = "0.0.52";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
-/** Followed by a session's row id: its pending prompts, kept for when its chat opens again (see storePending). */
-const PENDING_KEY = "bluclawd-pending:";
+/** Each chat's pending prompts and unsent text, kept for when it opens again. */
+const keptPending = pendingStore(() => localStorage);
 
 function loadViewMode() {
 	try {
@@ -90,6 +91,7 @@ const ERRORS = {
 	pi_not_open: "pi is not open on the Mac. Open it in a terminal there to continue.",
 	session_busy: "The session is busy. Try again once it is done.",
 	no_status: "This session has not reported its status yet.",
+	session_silent: "This session is not answering on the Mac, which may be asleep or busy.",
 	pane_too_old:
 		"This session has not reported yet. Try again in a moment; if this persists, restart it (it may run an older bluclawd).",
 	invalid_cwd: "That directory does not exist on the Mac.",
@@ -334,6 +336,8 @@ async function loadSessions() {
 		const list = await api.sessions();
 		state.sessions = list.sessions;
 		state.terminalOpen = list.terminalOpen !== false;
+		// A row keeps its id until it is deleted: a queued prompt can wait any time.
+		keptPending.prune(state.sessions.map((s) => s.id));
 		holdRename();
 		if (chat && state.chat === chat && listed(chat, was, state.sessions.find((s) => s.id === chat.id)?.state, asked))
 			void loadMessages();
@@ -480,7 +484,7 @@ async function loadStatus() {
 	}
 	if (state.chat !== chat || request !== chat.statusRequest) return;
 	chat.report = report;
-	returned(chat, settleOutcomes(chat, report?.outcomes));
+	returned(chat, [...restore(chat), ...settleOutcomes(chat, report?.outcomes)]);
 	// A pane has them once it has reported.
 	if (report && !chat.commandsAsked) {
 		chat.commandsAsked = true;
@@ -648,14 +652,7 @@ function connect() {
 		const { sessionId, outcomes } = JSON.parse(event.data);
 		const chat = state.chat;
 		if (!chat || sessionId !== chat.id) return;
-		/** @type {import("./chat.js").Failed[]} */
-		let failed = [];
-		if (!chat.restored) {
-			const stored = loadPending(chat.id);
-			failed = restorePending(chat, stored, outcomes, streamFrom);
-			// Their give-up timers went with the page or the chat that sent them.
-			for (const entry of stored) setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
-		}
+		const failed = restore(chat, { outcomes, since: streamFrom });
 		returned(chat, [...failed, ...settleOutcomes(chat, outcomes, streamFrom)]);
 		render();
 	});
@@ -1004,9 +1001,9 @@ function liveHtml(live, calls) {
 	return parts.join("");
 }
 
-/** A session the phone can prompt or change: running, with a terminal on the Mac showing pi. @param {Session | undefined} session */
+/** See actable. @param {Session | undefined} session */
 function canAct(session) {
-	return session?.alive === true && state.terminalOpen;
+	return actable(session, state.terminalOpen);
 }
 
 /** @param {Session | undefined} session */
@@ -1026,6 +1023,9 @@ function bannerHtml(session) {
 	}
 	if (session && !session.alive) {
 		return `${error}<div class="banner closed">Disconnected: this session was closed on the Mac. It reconnects here once it is opened there again.</div>`;
+	}
+	if (session?.silent) {
+		return `${error}<div class="banner closed">Not responding: this session stopped answering on the Mac, which may be asleep or busy. Waiting for it…</div>`;
 	}
 	if (error) return error;
 	if (!session && state.homeScreenHint) {
@@ -1077,8 +1077,9 @@ function sheetHtml(session) {
 	const head = `<header class="sheet-bar"><h2>Status</h2><span class="sheet-tools">${pin}<button class="icon-btn close" id="sheet-close" aria-label="Close">${ICONS.close}</button></span></header>
 ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
 	if (report === undefined) return `${head}${loaderHtml()}`;
-	if (report === null) {
-		const why = session && !session.alive ? "session_not_running" : "no_status";
+	// A silent one's last report is not its status, and the Mac refuses its settings meanwhile.
+	if (report === null || session?.silent) {
+		const why = session && !session.alive ? "session_not_running" : session?.silent ? "session_silent" : "no_status";
 		return `${head}<p class="muted">${esc(errorText(why))}</p>`;
 	}
 	return `${head}${settingsHtml(report)}
@@ -1107,6 +1108,7 @@ const TASK_KINDS = { shell: "Shell", monitor: "Monitor", agent: "Agent" };
 /** The pane's background tasks, as /tasks lists them: each one's output a tap away, and Stop, confirmed in place. */
 function tasksHtml() {
 	const tasks = state.chat.report?.tasks ?? [];
+	const closed = !canAct(state.sessions.find((s) => s.id === state.chat.id));
 	const now = Date.now();
 	const rows = tasks.map((task) => {
 		const id = esc(task.id);
@@ -1124,7 +1126,7 @@ function tasksHtml() {
 		const stop =
 			state.chat.confirmStop === task.id
 				? `<div class="confirm-delete"><span>Stop this task?</span><button class="unpair cancel" data-stop-cancel>Cancel</button><button class="unpair" data-stop-confirm="${id}">Stop</button></div>`
-				: `<button class="task-btn danger" data-stop="${id}"${stopping ? " disabled" : ""}>${stopping ? "Stopping…" : "Stop"}</button>`;
+				: `<button class="task-btn danger" data-stop="${id}"${stopping || closed ? " disabled" : ""}>${stopping ? "Stopping…" : "Stop"}</button>`;
 		return `<li class="task"><div class="task-head"><span class="task-kind">${esc(kind)}</span><span class="task-age">${esc(elapsedText(task.startedAt, now))}</span></div>
 <div class="task-label">${esc(task.label)}</div><div class="task-actions">${outputButton}${stop}</div>${shown}</li>`;
 	});
@@ -1146,7 +1148,7 @@ function render() {
 	}
 	if (view === "list") updateList();
 	else if (view !== "pair") updateChat();
-	storePending(state.chat);
+	if (state.chat) keptPending.save(state.chat);
 }
 
 function updateList() {
@@ -1411,7 +1413,7 @@ function updateChat() {
 	const turn = session?.state === "working" || session?.state === "needs";
 	if (!turn) state.chat.stopping = false;
 	const stop = $("#stop");
-	stop.hidden = !turn || !state.terminalOpen;
+	stop.hidden = !turn || !canAct(session);
 	stop.disabled = state.chat.stopping;
 	stop.classList.toggle("busy", state.chat.stopping);
 	const bar = $("#statusbar");
@@ -1477,7 +1479,13 @@ function updateChat() {
 	file.disabled = closed || state.chat.attachments.length + state.chat.reading >= ATTACH_MAX;
 	attach.classList.toggle("busy", state.chat.reading > 0);
 	file.setAttribute("aria-label", state.chat.reading ? "Reading the photos…" : "Attach photos");
-	text.placeholder = !closed ? "Reply" : session?.alive ? "Read only" : "Disconnected";
+	text.placeholder = !closed
+		? "Reply"
+		: session?.silent
+			? "Not responding"
+			: session?.alive
+				? "Read only"
+				: "Disconnected";
 	updateThumbs();
 	updateCommands();
 }
@@ -1816,9 +1824,12 @@ function bindChat() {
 	);
 	$("#viewer").addEventListener("click", closeViewer);
 	const text = $("#text");
+	text.value = keptPending.draft(state.chat.id);
+	grow(text);
 	text.addEventListener("input", () => {
 		grow(text);
 		updateCommands();
+		keptPending.saveDraft(state.chat.id, text.value);
 	});
 	$("#composer").addEventListener("submit", (/** @type {Event} */ event) => {
 		event.preventDefault();
@@ -1831,6 +1842,7 @@ function bindChat() {
 		const command = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".command"));
 		if (!command) return;
 		text.value = `/${command.dataset.command} `;
+		keptPending.saveDraft(state.chat.id, text.value);
 		grow(text);
 		text.focus();
 		text.setSelectionRange(text.value.length, text.value.length);
@@ -2275,6 +2287,7 @@ async function send() {
 	}
 	const images = chat.attachments;
 	text.value = "";
+	keptPending.saveDraft(chat.id, "");
 	text.style.height = "auto";
 	chat.attachments = [];
 	const entry = addPending(chat, value, images, Date.now());
@@ -2289,11 +2302,14 @@ async function send() {
 			entry.id,
 		);
 		entry.acceptedAt = Date.now();
-		if (state.chat === chat) storePending(chat);
+		if (state.chat === chat) keptPending.save(chat);
 	} catch (error) {
 		forget(chat, entry);
 		putBack(chat, entry);
-		handleError(error, "Not sent: ");
+		// Listed running, yet refused as not: its pane fell silent before the list said so.
+		if (error instanceof Error && error.message === "session_not_running" && session?.alive)
+			showError(`Not sent: ${errorText("session_silent")}`);
+		else handleError(error, "Not sent: ");
 	}
 }
 
@@ -2315,51 +2331,34 @@ function putBack(chat, entry) {
 	if (state.chat !== chat) return;
 	const text = $("#text");
 	text.value = text.value ? `${entry.prompt}\n${text.value}` : entry.prompt;
+	// Kept as typed text is: its pending prompt is no longer kept.
+	keptPending.saveDraft(chat.id, text.value);
 	grow(text);
 	if (!chat.attachments.length) chat.attachments = entry.images;
 }
 
-/** @param {string} id a session's row id @returns {Pending[]} its prompts kept by storePending */
-function loadPending(id) {
-	try {
-		const stored = JSON.parse(localStorage.getItem(PENDING_KEY + id) ?? "[]");
-		return Array.isArray(stored) ? stored : [];
-	} catch {
-		return [];
-	}
-}
-
-/** What storePending last wrote, but the images: it writes again only when that changes. */
-let pendingKept = "";
-
 /**
- * The open chat's pending prompts, kept on the phone so that a reload, or a return to the chat,
- * still settles them, and puts back the ones refused or lost (see restorePending).
- * @param {Chat | undefined} chat
+ * The prompts the phone kept of the chat, back in once the daemon's replay and its pane's report
+ * are (see restorePending).
+ * @param {Chat} chat @param {import("./chat.js").Replay} [replay]
+ * @returns {import("./chat.js").Failed[]} those refused or lost
  */
-function storePending(chat) {
-	const pending = chat && storedPending(chat);
-	if (!chat || !pending) return;
-	const kept = `${chat.id}\n${JSON.stringify(pending.map(({ images: _, ...entry }) => entry))}`;
-	if (kept === pendingKept) return;
-	pendingKept = kept;
-	try {
-		if (pending.length) localStorage.setItem(PENDING_KEY + chat.id, JSON.stringify(pending));
-		else localStorage.removeItem(PENDING_KEY + chat.id);
-	} catch {
-		// Full, with images most likely: better none kept than an older list, which would put back
-		// prompts again.
-		try {
-			localStorage.removeItem(PENDING_KEY + chat.id);
-		} catch {}
-	}
+function restore(chat, replay) {
+	const kept = chat.kept;
+	const failed = restorePending(chat, replay);
+	// Their give-up timers went with the page or the chat that sent them.
+	if (chat.restored) for (const entry of kept) setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
+	return failed;
 }
 
 /** A sent prompt still waiting PROMPT_GIVE_UP_MS on (see giveUp). @param {Chat} chat @param {Pending} entry */
 function checkSent(chat, entry) {
 	if (state.chat !== chat || !chat.pending.includes(entry) || state.starting) return;
-	const verdict = checkPending(chat, entry, state.sessions.find((s) => s.id === chat.id)?.state);
-	if (verdict === "drop") render();
+	const session = state.sessions.find((s) => s.id === chat.id);
+	const verdict = checkPending(chat, entry, session?.state, session?.silent);
+	// Its pane may come back and never report it (another extension took it): asked again then.
+	if (verdict === "wait" && session?.silent) setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
+	else if (verdict === "drop") render();
 	else if (verdict === "fail") {
 		putBack(chat, entry);
 		showError(errorText("not_delivered"));
@@ -2416,7 +2415,7 @@ function route() {
 	const open = match ? decodeURIComponent(match[1]) : undefined;
 	if (open !== previous?.id) {
 		clearTimeout(previous?.liveClear);
-		state.chat = open === undefined ? undefined : openChat(open);
+		state.chat = open === undefined ? undefined : openChat(open, keptPending.load(open));
 		if (state.chat && !previous) state.chat.backToList = true;
 		state.error = undefined;
 		state.phoneSheet = false;
@@ -2513,7 +2512,10 @@ if ("serviceWorker" in navigator) {
 
 claimLink();
 const opened = /^#s\/(.+)$/.exec(location.hash)?.[1];
-if (opened) state.chat = openChat(decodeURIComponent(opened));
+if (opened) {
+	const id = decodeURIComponent(opened);
+	state.chat = openChat(id, keptPending.load(id));
+}
 render();
 connect();
 void offerHandoff();

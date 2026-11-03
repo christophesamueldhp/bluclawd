@@ -10,8 +10,9 @@ import { type EndReason, endedForAnother, type PaneMessage, type PromptOutcome }
 /** How long a prompt is kept after its last change, so a phone that reconnects still reads it. */
 export const DELIVERY_KEEP_MS = 10 * 60_000;
 
-/** `sent`: in the pane's inbox, or delivered to the pane and not reported on yet. */
-type Delivery = PromptOutcome & { sessionId: string; changedAt: number };
+/** `sent`: in the pane's inbox, or delivered to the pane and not reported on yet. `pane`: the pane
+ *  whose heartbeat took it, once one did. */
+type Delivery = PromptOutcome & { sessionId: string; changedAt: number; pane?: string };
 
 /** The phone's id of a message, when it is one whose outcome the phone waits for. */
 function phoneId(message: PaneMessage): string | undefined {
@@ -47,19 +48,44 @@ export class PromptDelivery {
 		for (const outcome of outcomes) {
 			const delivery = this.prompts.get(outcome.id);
 			if (delivery?.sessionId !== sessionId || settled(delivery) || delivery.outcome === outcome.outcome) continue;
-			this.prompts.set(outcome.id, { ...outcome, sessionId, changedAt: now });
+			this.prompts.set(outcome.id, { ...outcome, sessionId, pane: delivery.pane, changedAt: now });
+		}
+	}
+
+	/** Pane `pane`'s heartbeat took `messages`. */
+	delivered(pane: string, messages: PaneMessage[]): void {
+		for (const message of messages) {
+			const delivery = this.prompts.get(phoneId(message) ?? "");
+			if (delivery) delivery.pane = pane;
 		}
 	}
 
 	/** The pane listed as `sessionId` went, with `inbox` still queued for it: those never reach pi,
 	 *  and it can no longer report on what it was given. One pi queued dies with it. `reason`: why its
 	 *  session ended, when it said; one it left for another session refuses them, as that session's
-	 *  pane would. */
-	dropped(sessionId: string, inbox: PaneMessage[], reason?: EndReason, now: number = Date.now()): void {
+	 *  pane would. `pane`: that pane, so what another pane listed as the same row was given stays its
+	 *  own; when not given, any pane's. */
+	dropped(sessionId: string, inbox: PaneMessage[], reason?: EndReason, pane?: string, now: number = Date.now()): void {
+		this.settle(inbox, (d) => d.sessionId === sessionId && (pane === undefined || d.pane === pane), reason, now);
+	}
+
+	/** A pane that may still be alive was reaped with `inbox` queued for it: those never reach pi, and
+	 *  what it was given waits on its report. */
+	silent(inbox: PaneMessage[], now: number = Date.now()): void {
+		this.settle(inbox, () => false, undefined, now);
+	}
+
+	/** What is in `inbox` and what was `given` to its pane, as its pane's going leaves them. */
+	private settle(
+		inbox: PaneMessage[],
+		given: (delivery: Delivery) => boolean,
+		reason: EndReason | undefined,
+		now: number,
+	): void {
 		const changed = endedForAnother(reason);
 		const ids = new Set(inbox.map(phoneId));
 		for (const [id, delivery] of this.prompts) {
-			if (settled(delivery) || !(ids.has(id) || delivery.sessionId === sessionId)) continue;
+			if (settled(delivery) || !(ids.has(id) || given(delivery))) continue;
 			const outcome: PromptOutcome = changed
 				? { id, outcome: "refused", reason: "session_changed" }
 				: { id, outcome: "lost", reason: "pane_gone" };
@@ -71,7 +97,7 @@ export class PromptDelivery {
 	outcomes(sessionId: string, now: number = Date.now()): PromptOutcome[] {
 		this.prune(now);
 		const out: PromptOutcome[] = [];
-		for (const { sessionId: to, changedAt: _, ...outcome } of this.prompts.values()) {
+		for (const { sessionId: to, changedAt: _, pane: __, ...outcome } of this.prompts.values()) {
 			if (to === sessionId) out.push(outcome);
 		}
 		return out;

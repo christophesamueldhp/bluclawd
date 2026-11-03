@@ -112,7 +112,7 @@ export function dialogDetail(activity: ForegroundActivity): string | undefined {
  * Tuned here rather than in the daemon, where a TTL change only applies once every running daemon
  * restarts.
  */
-const HEARTBEAT_MS = 3000;
+export const HEARTBEAT_MS = 3000;
 
 /**
  * Registers the foreground interactive session with the orchestrator daemon as an

@@ -1,7 +1,16 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { contentText, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
+import {
+	createAgentSession,
+	DefaultResourceLoader,
+	type ExtensionFactory,
+	getAgentDir,
+	ModelRuntime,
+	SessionManager,
+	SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 import { PANE_ENV, Tmux } from "../daemon/tmux.ts";
@@ -9,6 +18,7 @@ import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/
 import { detachableExec, runningForegroundShells } from "../ext/background-bash/foreground-shells.ts";
 import { projectTrust, TRUST_CHANGED } from "../ext/permissions/index.ts";
 import remoteFactory, { USAGE } from "../ext/remote/index.ts";
+import { QUIET_LOOKS } from "../ext/remote/outcomes.ts";
 import {
 	applyPaneMessage,
 	BUSY_NOTICE,
@@ -66,6 +76,7 @@ function fakes(
 			],
 		},
 		isIdle: () => options.idle ?? true,
+		hasPendingMessages: () => false,
 		compact: vi.fn(),
 		cwd: options.cwd ?? "/proj",
 		isProjectTrusted: () => true,
@@ -703,7 +714,7 @@ describe("/remote-control", () => {
 		pane.restore();
 	});
 
-	it("reports a queued phone prompt pi has not taken by the end of its run lost, as pi dropped it from its queue", async () => {
+	it("reports lost a phone prompt seen in pi's queue that pi drops from it unstarted, while idle too", async () => {
 		const pane = await phonePane();
 		const queue = (id: string, text: string) => {
 			pane.message({ type: "prompt", text, id });
@@ -726,9 +737,10 @@ describe("/remote-control", () => {
 			{ id: "p-1", outcome: "taken" },
 			{ id: "p-2", outcome: "queued" },
 		]);
-		// Esc or the dequeue key emptied pi's queue into the Mac's editor.
+		// The dequeue key emptied pi's queue into the Mac's editor while pi is idle: no event says so,
+		// the pane's next heartbeat finds it.
 		pane.state.pending = false;
-		pane.on("agent_settled");
+		pane.on("bluclawd:remote-watched", false);
 		await waitFor(() =>
 			expect(pane.outcomes()).toEqual([
 				{ id: "p-1", outcome: "taken" },
@@ -743,13 +755,142 @@ describe("/remote-control", () => {
 		pane.message({ type: "prompt", text: "late", id: "p-1" });
 		pane.on("input", { type: "input", text: "late", source: "extension", streamingBehavior: "followUp" });
 		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]));
-		// The run settles while pi still awaits its input handlers; then pi finds itself idle and starts a turn with it.
+		// The run settles while pi still awaits its input handlers: pi is idle, its queue empty, for a while.
 		pane.on("agent_settled");
-		pane.state.idle = false;
+		pane.on("bluclawd:remote-watched", false);
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]);
+		// Then pi finds itself idle and starts a turn with it.
+		pane.state.idle = false;
 		pane.on("message_start", { message: { role: "user", content: [{ type: "text", text: "late" }] } });
 		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "taken" }]));
+		pane.restore();
+	});
+
+	it("reports dequeued a phone prompt never seen in pi's queue once pi has been idle with it empty for QUIET_LOOKS heartbeats, not before", async () => {
+		let now = 1_000_000;
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		const pane = await phonePane();
+		const queue = (id: string, text: string) => {
+			pane.message({ type: "prompt", text, id });
+			pane.on("input", { type: "input", text, source: "extension", streamingBehavior: "followUp" });
+		};
+		const heartbeats = (count: number) => {
+			for (let i = 0; i < count; i++) pane.on("bluclawd:remote-watched", false);
+		};
+		queue("p-1", "first");
+		pane.on("agent_settled");
+		// The Mac slept an hour: its first heartbeat on waking is one quiet look, not an hour of quiet.
+		now += 3_600_000;
+		heartbeats(1);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]);
+		heartbeats(QUIET_LOOKS - 2);
+		// A run started and ended between two heartbeats: the quiet starts over.
+		pane.on("agent_settled");
+		heartbeats(QUIET_LOOKS - 1);
+		// So does a heartbeat that finds pi busy.
+		pane.state.idle = false;
+		heartbeats(1);
+		pane.state.idle = true;
+		heartbeats(QUIET_LOOKS - 1);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]);
+		heartbeats(1);
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "lost", reason: "dequeued" }]));
+
+		// pi starts one within the window: taken, and the window passing after changes nothing.
+		queue("p-2", "second");
+		pane.on("agent_settled");
+		heartbeats(QUIET_LOOKS - 1);
+		pane.state.idle = false;
+		pane.on("message_start", { message: { role: "user", content: [{ type: "text", text: "second" }] } });
+		pane.state.idle = true;
+		pane.on("agent_settled");
+		heartbeats(QUIET_LOOKS);
+		await waitFor(() =>
+			expect(pane.outcomes()).toEqual([
+				{ id: "p-1", outcome: "lost", reason: "dequeued" },
+				{ id: "p-2", outcome: "taken" },
+			]),
+		);
+		clock.mockRestore();
+		pane.restore();
+	});
+
+	it("sees neither of two queued phone prompts in pi's queue, as either may be all it holds, until pi takes one", async () => {
+		const pane = await phonePane();
+		for (const [id, text] of [
+			["p-1", "first"],
+			["p-2", "second"],
+		] as const) {
+			pane.message({ type: "prompt", text, id });
+			pane.on("input", { type: "input", text, source: "extension", streamingBehavior: "followUp" });
+		}
+		// pi's queue holds p-1, say, while p-2's input handlers still run; Esc then empties it.
+		pane.state.pending = true;
+		pane.on("bluclawd:remote-watched", false);
+		pane.state.pending = false;
+		pane.on("agent_settled");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(pane.outcomes()).toEqual([
+			{ id: "p-1", outcome: "queued" },
+			{ id: "p-2", outcome: "queued" },
+		]);
+		// pi runs p-2 as a turn of its own: reported dequeued, the phone would have sent it twice.
+		pane.state.idle = false;
+		pane.on("message_start", { message: { role: "user", content: [{ type: "text", text: "second" }] } });
+		await waitFor(() =>
+			expect(pane.outcomes()).toEqual([
+				{ id: "p-1", outcome: "queued" },
+				{ id: "p-2", outcome: "taken" },
+			]),
+		);
+		pane.restore();
+	});
+
+	it("sees no phone prompt in pi's queue that a Mac follow-up may be all it holds, until pi starts that or is idle with it empty", async () => {
+		const pane = await phonePane();
+		const heartbeat = (state: { idle: boolean; pending: boolean }) => {
+			Object.assign(pane.state, state);
+			pane.on("bluclawd:remote-watched", false);
+		};
+		const queue = (id: string, text: string) => {
+			pane.message({ type: "prompt", text, id });
+			pane.on("input", { type: "input", text, source: "extension", streamingBehavior: "followUp" });
+		};
+		const started = (text: string) =>
+			pane.on("message_start", { message: { role: "user", content: [{ type: "text", text } as const] } });
+		pane.state.idle = false;
+		// Typed on the Mac while pi streams: an empty queue does not rule it out, its input handlers may still run.
+		pane.on("input", { type: "input", text: "mac", source: "interactive", streamingBehavior: "followUp" });
+		heartbeat({ idle: false, pending: false });
+		queue("p-1", "first");
+		heartbeat({ idle: false, pending: true });
+		pane.state.pending = false;
+		pane.state.idle = true;
+		pane.on("agent_settled");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]);
+		// pi ran it as a turn of its own; the Mac's follow-up, never started while pi was idle with its queue empty, is gone.
+		started("first");
+		queue("p-2", "second");
+		heartbeat({ idle: false, pending: true });
+		heartbeat({ idle: true, pending: false });
+		await waitFor(() =>
+			expect(pane.outcomes()).toEqual([
+				{ id: "p-1", outcome: "taken" },
+				{ id: "p-2", outcome: "lost", reason: "dequeued" },
+			]),
+		);
+		// pi starts the Mac's follow-up: what its queue holds then is the phone's.
+		pane.state.idle = false;
+		pane.on("input", { type: "input", text: "mac", source: "interactive", streamingBehavior: "steer" });
+		queue("p-3", "third");
+		started("mac");
+		heartbeat({ idle: false, pending: true });
+		heartbeat({ idle: true, pending: false });
+		await waitFor(() => expect(pane.outcomes()).toContainEqual({ id: "p-3", outcome: "lost", reason: "dequeued" }));
 		pane.restore();
 	});
 
@@ -777,6 +918,17 @@ describe("/remote-control", () => {
 		expect(ended).toBe(false);
 		received();
 		await shutdown;
+		pane.restore();
+	});
+
+	it("reports lost at session end a queued phone prompt never seen in pi's queue, which no transcript will show", async () => {
+		const pane = await phonePane();
+		pane.message({ type: "prompt", text: "late", id: "p-1" });
+		pane.on("input", { type: "input", text: "late", source: "extension", streamingBehavior: "followUp" });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]));
+		// Its input handlers still run when a `/resume` ends the session.
+		await pane.on("session_shutdown", { reason: "resume" });
+		expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "lost", reason: "dequeued" }]);
 		pane.restore();
 	});
 
@@ -865,5 +1017,165 @@ describe("/remote-control", () => {
 		expect(pane.sent.mock.calls.some(([, report]) => "notice" in report)).toBe(false);
 		expect(pane.pressed).toHaveBeenCalledTimes(1);
 		pane.restore();
+	});
+});
+
+describe("a phone prompt in a real pi session", () => {
+	const home = tempHome();
+
+	/** pi with the remote extension in pane `pi-real`, and `others` after it, on a faux model. */
+	async function realPane(others: ExtensionFactory[]) {
+		const sent = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
+		const cwd = home.dir();
+		const modelRuntime = await ModelRuntime.create({
+			authPath: join(cwd, "auth.json"),
+			modelsPath: join(cwd, "models.json"),
+			modelsStorePath: join(cwd, "models-store.json"),
+			allowModelNetwork: false,
+			refreshOnCreate: true,
+		});
+		const faux = fauxProvider({ provider: "faux-remote", models: [{ id: "faux-model", reasoning: false }] });
+		modelRuntime.registerNativeProvider(faux.provider);
+		await modelRuntime.refresh({ allowNetwork: false });
+		const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+		vi.stubEnv(PANE_ENV, "pi-real");
+		const resourceLoader = new DefaultResourceLoader({
+			cwd,
+			agentDir: cwd,
+			settingsManager,
+			extensionFactories: [remoteFactory, ...others],
+			noExtensions: true,
+			noSkills: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			noContextFiles: true,
+			disabledBuiltinExtensions: ["mcp", "codemode", "tool_search"],
+		});
+		await resourceLoader.reload();
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir: cwd,
+			modelRuntime,
+			model: faux.getModel("faux-model"),
+			noTools: "builtin",
+			resourceLoader,
+			sessionManager: SessionManager.inMemory(cwd),
+			settingsManager,
+		});
+		await session.bindExtensions({ mode: "tui" });
+		/** Every outcome the reports carried for `id`, in order. */
+		const outcomesOf = (id: string) =>
+			sent.mock.calls.flatMap(([, report]) =>
+				(report.outcomes ?? []).filter((o) => o.id === id).map((o) => o.outcome),
+			);
+		const restore = () => {
+			session.dispose();
+			sent.mockRestore();
+		};
+		return { session, faux, outcomesOf, restore };
+	}
+
+	it("reports taken, never dequeued, a phone prompt pi runs as a turn of its own once input handlers outlast the run", async () => {
+		let release = () => {};
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let bus: { emit: (name: string, data: unknown) => void } | undefined;
+		// Another extension's input handler awaits I/O that finishes only after the run has settled.
+		const slow: ExtensionFactory = (pi) => {
+			bus = pi.events;
+			pi.on("input", async (event) => {
+				if (event.text === "late") await held;
+			});
+			pi.on("agent_settled", () => {
+				setTimeout(release, 100);
+			});
+		};
+		const pane = await realPane([slow]);
+		try {
+			pane.faux.setResponses([
+				() => {
+					// Sent while pi streams: pi tells its input handlers it would queue it as a follow-up.
+					bus?.emit("bluclawd:pane-message", { type: "prompt", id: "p-1", text: "late" });
+					return fauxAssistantMessage("First.");
+				},
+				fauxAssistantMessage("Late."),
+			]);
+			await pane.session.prompt("First.", { expandPromptTemplates: false });
+			await waitFor(() => expect(pane.outcomesOf("p-1").at(-1)).toBe("taken"));
+			await waitFor(() => expect(pane.session.isIdle).toBe(true));
+			expect(pane.outcomesOf("p-1")).not.toContain("lost");
+			const users = pane.session.messages.filter((m) => m.role === "user");
+			expect(users.map((m) => contentText(m.content as never))).toEqual(["First.", "late"]);
+		} finally {
+			pane.restore();
+		}
+	});
+
+	it("reports taken, never dequeued, a phone prompt whose input handlers outlast the run while a Mac follow-up is queued", async () => {
+		let release = () => {};
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let bus: { emit: (name: string, data: unknown) => void } | undefined;
+		const slow: ExtensionFactory = (pi) => {
+			bus = pi.events;
+			pi.on("input", async (event) => {
+				if (event.text === "late") await held;
+			});
+			pi.on("agent_settled", () => {
+				setTimeout(release, 100);
+			});
+		};
+		const pane = await realPane([slow]);
+		try {
+			pane.faux.setResponses([
+				async () => {
+					// Typed on the Mac while pi streams: pi's queue holds it, and the phone prompt is not there yet.
+					await pane.session.followUp("mac");
+					bus?.emit("bluclawd:pane-message", { type: "prompt", id: "p-1", text: "late" });
+					// A heartbeat looks meanwhile: pi's queue holds something, the Mac's follow-up.
+					bus?.emit("bluclawd:remote-watched", false);
+					return fauxAssistantMessage("First.");
+				},
+				fauxAssistantMessage("Mac."),
+				fauxAssistantMessage("Late."),
+			]);
+			await pane.session.prompt("First.", { expandPromptTemplates: false });
+			await waitFor(() => expect(pane.outcomesOf("p-1").at(-1)).toBe("taken"));
+			await waitFor(() => expect(pane.session.isIdle).toBe(true));
+			expect(pane.outcomesOf("p-1")).not.toContain("lost");
+			const users = pane.session.messages.filter((m) => m.role === "user");
+			expect(users.map((m) => contentText(m.content as never))).toEqual(["First.", "mac", "late"]);
+		} finally {
+			pane.restore();
+		}
+	});
+
+	it("reports dequeued a phone prompt pi queued, then emptied its queue of mid-run, as Esc does", async () => {
+		let bus: { emit: (name: string, data: unknown) => void } | undefined;
+		const pane = await realPane([
+			(pi) => {
+				bus = pi.events;
+			},
+		]);
+		try {
+			pane.faux.setResponses([
+				async () => {
+					bus?.emit("bluclawd:pane-message", { type: "prompt", id: "p-1", text: "later" });
+					await waitFor(() => expect(pane.session.getFollowUpMessages()).toEqual(["later"]));
+					// The pane's heartbeat finds it there before Esc puts pi's queue in the Mac's editor,
+					// which no extension event tells.
+					bus?.emit("bluclawd:remote-watched", false);
+					pane.session.clearQueue();
+					return fauxAssistantMessage("First.");
+				},
+			]);
+			await pane.session.prompt("First.", { expandPromptTemplates: false });
+			await waitFor(() => expect(pane.outcomesOf("p-1").at(-1)).toBe("lost"));
+			expect(pane.outcomesOf("p-1")).not.toContain("taken");
+		} finally {
+			pane.restore();
+		}
 	});
 });
