@@ -318,34 +318,31 @@ function factory(pi: ExtensionAPI): void {
 			}
 		} else applyPaneMessage(message, ctx, pi, () => report(ctx));
 	});
-	/** Since when pi has been idle with an empty queue, by the looks: a run between two looks ends in
-	 *  agent_settled, which starts it over. */
-	let quietSince: number | undefined;
+	/** How many heartbeats in a row have found pi idle with an empty queue: a run between two of them
+	 *  ends in agent_settled, which starts the count over. */
+	let quietLooks = 0;
 	/** pi's queue, which pi tells no extension it changes (Esc and the dequeue key empty it): a phone
-	 *  prompt seen in it, gone from it unstarted while pi is idle, pi dropped. `settled`: a run just ended. */
-	const look = (ctx: ExtensionContext, settled = false): void => {
+	 *  prompt seen in it, gone from it unstarted while pi is idle, pi dropped. `by`: what looks. */
+	const look = (ctx: ExtensionContext, by: "input" | "settled" | "heartbeat"): void => {
 		const pending = ctx.hasPendingMessages();
+		const quiet = !pending && ctx.isIdle();
 		outcomes.looked(pending, ctx.isIdle());
-		if (pending || !ctx.isIdle()) {
-			quietSince = undefined;
-			return;
-		}
-		const now = Date.now();
-		if (settled || quietSince === undefined) quietSince = now;
-		if (outcomes.dequeued(now - quietSince)) report(ctx);
+		if (!quiet || by === "settled") quietLooks = 0;
+		else if (by === "heartbeat") quietLooks++;
+		if (quiet && outcomes.dequeued(quietLooks)) report(ctx);
 	};
 	pi.on("input", (event, ctx) => {
 		if (!outcomes.input(event)) return;
 		report(ctx);
 		// pi queues it once every input handler is done: a tick later when none awaits anything.
-		if (event.streamingBehavior) setTimeout(() => session && look(session), 0);
+		if (event.streamingBehavior) setTimeout(() => session && look(session, "input"), 0);
 	});
 	pi.on("message_start", (event, ctx) => {
 		if (outcomes.started(event.message)) report(ctx);
 	});
 	// pi's run is over, retries and queued follow-ups included. Its queue is empty unless the run was
 	// stopped without clearing it, as a session switch does: then a later look, or session_shutdown, settles them.
-	pi.on("agent_settled", (_event, ctx) => look(ctx, true));
+	pi.on("agent_settled", (_event, ctx) => look(ctx, "settled"));
 	// After each of the pane's heartbeats (agent view).
 	pi.events.on("bluclawd:remote-watched", (data) => {
 		const opened = data === true && !watched;
@@ -353,7 +350,7 @@ function factory(pi: ExtensionAPI): void {
 		live.setWatched(watched);
 		// A restarted daemon has no report until the next turn: a phone opening the session sends it again.
 		if (opened && session) report(session);
-		if (session) look(session);
+		if (session) look(session, "heartbeat");
 	});
 	pi.events.on("bluclawd:remote-want-report", () => {
 		if (session) report(session);

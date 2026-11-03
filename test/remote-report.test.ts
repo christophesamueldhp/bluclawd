@@ -18,7 +18,7 @@ import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/
 import { detachableExec, runningForegroundShells } from "../ext/background-bash/foreground-shells.ts";
 import { projectTrust, TRUST_CHANGED } from "../ext/permissions/index.ts";
 import remoteFactory, { USAGE } from "../ext/remote/index.ts";
-import { QUIET_MS } from "../ext/remote/outcomes.ts";
+import { QUIET_LOOKS } from "../ext/remote/outcomes.ts";
 import {
 	applyPaneMessage,
 	BUSY_NOTICE,
@@ -767,7 +767,7 @@ describe("/remote-control", () => {
 		pane.restore();
 	});
 
-	it("reports dequeued a phone prompt never seen in pi's queue once pi has been idle with it empty for 30s, not before", async () => {
+	it("reports dequeued a phone prompt never seen in pi's queue once pi has been idle with it empty for QUIET_LOOKS heartbeats, not before", async () => {
 		let now = 1_000_000;
 		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
 		const pane = await phonePane();
@@ -775,33 +775,39 @@ describe("/remote-control", () => {
 			pane.message({ type: "prompt", text, id });
 			pane.on("input", { type: "input", text, source: "extension", streamingBehavior: "followUp" });
 		};
-		const heartbeat = () => pane.on("bluclawd:remote-watched", false);
+		const heartbeats = (count: number) => {
+			for (let i = 0; i < count; i++) pane.on("bluclawd:remote-watched", false);
+		};
 		queue("p-1", "first");
 		pane.on("agent_settled");
-		now += QUIET_MS - 1;
-		// A run started and ended between two heartbeats: the quiet starts over.
-		pane.on("agent_settled");
-		now += 1;
-		heartbeat();
-		now += QUIET_MS - 2;
-		heartbeat();
+		// The Mac slept an hour: its first heartbeat on waking is one quiet look, not an hour of quiet.
+		now += 3_600_000;
+		heartbeats(1);
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]);
-		now += 1;
-		heartbeat();
+		heartbeats(QUIET_LOOKS - 2);
+		// A run started and ended between two heartbeats: the quiet starts over.
+		pane.on("agent_settled");
+		heartbeats(QUIET_LOOKS - 1);
+		// So does a heartbeat that finds pi busy.
+		pane.state.idle = false;
+		heartbeats(1);
+		pane.state.idle = true;
+		heartbeats(QUIET_LOOKS - 1);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]);
+		heartbeats(1);
 		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "lost", reason: "dequeued" }]));
 
 		// pi starts one within the window: taken, and the window passing after changes nothing.
 		queue("p-2", "second");
 		pane.on("agent_settled");
-		now += QUIET_MS - 1;
-		heartbeat();
+		heartbeats(QUIET_LOOKS - 1);
 		pane.state.idle = false;
 		pane.on("message_start", { message: { role: "user", content: [{ type: "text", text: "second" }] } });
 		pane.state.idle = true;
 		pane.on("agent_settled");
-		now += QUIET_MS;
-		heartbeat();
+		heartbeats(QUIET_LOOKS);
 		await waitFor(() =>
 			expect(pane.outcomes()).toEqual([
 				{ id: "p-1", outcome: "lost", reason: "dequeued" },
