@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
 	ageAt,
+	paneUp,
 	STATE_WORDS,
 	sessionGroups,
 	sharedWarning,
@@ -134,5 +135,14 @@ describe("an open chat whose row is gone", () => {
 		expect(successor(sessions, "pi-1", "s9")).toBeUndefined();
 		expect(successor(sessions, "pi-1", undefined)).toBeUndefined();
 		expect(successor([row("pi-4", "idle")], "pi-1", undefined)).toBeUndefined();
+	});
+});
+
+describe("a session started from the phone", () => {
+	it("is up once its row is listed and no longer starting", () => {
+		expect(paneUp([], "r1")).toBe(false);
+		expect(paneUp([row("r1", "working", { starting: true })], "r1")).toBe(false);
+		expect(paneUp([row("r2", "working")], "r1")).toBe(false);
+		expect(paneUp([row("r1", "working")], "r1")).toBe(true);
 	});
 });

@@ -20,6 +20,9 @@ import type {
 	ServerResponse,
 	ShutdownRequest,
 	ShutdownResponse,
+	StartFailedRequest,
+	StartRequest,
+	StartResponse,
 	StatusRequest,
 	StatusResponse,
 	UnregisterRequest,
@@ -89,6 +92,12 @@ export function listSummaries(supervisor: ServerSupervisor): InstanceSummary[] {
 	return [...stored, ...external];
 }
 
+/** Why a start was refused, as the window that asked shows it. */
+const START_REFUSED = {
+	starting: "it is already starting — try again in a moment",
+	running: "it is already open in a pane",
+} as const;
+
 function unknownInstanceError(instanceId: string): ErrorResponse {
 	return {
 		type: "error",
@@ -128,12 +137,17 @@ export async function handleIpcRequest(
 ): Promise<RemoteResponse | ErrorResponse>;
 export async function handleIpcRequest(
 	supervisor: ServerSupervisor,
+	request: StartRequest,
+): Promise<StartResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
 	request:
 		| DeleteRequest
 		| RenameRequest
 		| MetaRequest
 		| SaveRequest
 		| SendRequest
+		| StartFailedRequest
 		| RemoteLiveRequest
 		| RemoteReportRequest,
 ): Promise<AckResponse | ErrorResponse>;
@@ -248,6 +262,21 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 			return { type: "ack", ok: true, ...(instance ? { instance: toInstanceSummary(instance) } : {}) };
 		}
 
+		case "start": {
+			if ("pane" in request) {
+				supervisor.paneStarting(request);
+				return { type: "start_result", ok: true, id: request.pane };
+			}
+			const claim = supervisor.claimStart(request);
+			if (!claim.ok) return { type: "error", ok: false, error: START_REFUSED[claim.refused] };
+			return { type: "start_result", ok: true, id: claim.id };
+		}
+
+		case "start_failed": {
+			supervisor.startFailed(request.instanceId);
+			return { type: "ack", ok: true };
+		}
+
 		case "remote": {
 			if (!remoteControl)
 				return { type: "error", ok: false, error: "remote control is not available in this process" };
@@ -255,7 +284,7 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 		}
 
 		case "remote_live": {
-			remoteControl?.live(supervisor.rowIdOf(request.instanceId), request.live);
+			remoteControl?.live(supervisor.rowIdOf(request.instanceId), request.live, request.entryId);
 			return { type: "ack", ok: true };
 		}
 

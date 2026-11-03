@@ -14,6 +14,7 @@ import type {
 	RemoteRequest,
 	RemoteResponse,
 } from "../ipc/protocol.ts";
+import { START_MS } from "../supervisor.ts";
 import { Tmux } from "../tmux.ts";
 import { PromptDelivery } from "./delivery.ts";
 import { type RemoteDeps, type RemoteServer, startRemoteServer } from "./http.ts";
@@ -28,9 +29,6 @@ const NOTIFY_INTERVAL_MS = 1000;
 const PUSH_SUBJECT = "https://github.com/christophesamueldhp/bluclawd";
 /** Each tmux command is a quick round-trip to the server: a hung one must not hold up the daemon. */
 export const TMUX_TIMEOUT_MS = 2000;
-/** A pane the phone started that has not registered by then never will: it is ended, not left
- *  running unseen. Past the phone's own wait (START_TIMEOUT_MS in web/app.js). */
-const START_TIMEOUT_MS = 90_000;
 /** How long whether a terminal shows pi is taken as known. */
 const TERMINAL_CHECK_MS = 1500;
 
@@ -39,6 +37,9 @@ export interface RemoteControlDeps {
 	send(sessionId: string, message: PaneMessage): boolean;
 	deleteInstance(sessionId: string): boolean;
 	renameInstance: RemoteDeps["renameInstance"];
+	claimStart: RemoteDeps["claimStart"];
+	paneStarting: RemoteDeps["paneStarting"];
+	startFailed: RemoteDeps["startFailed"];
 	setPinned: RemoteDeps["setPinned"];
 	statusLine?: RemoteDeps["statusLine"];
 	renderStatusline?: RemoteDeps["renderStatusline"];
@@ -127,6 +128,8 @@ export class RemoteControl {
 
 	private startSession(spec: SessionSpec): string {
 		const pane = startSession({ ...spec, tmux: this.tmux });
+		// A pane the phone started that has not registered by START_MS never will (its row is no longer
+		// listed as starting, past the phone's own wait): it is ended, not left running unseen.
 		const timer = setTimeout(() => {
 			if (!this.starting.delete(pane)) return;
 			try {
@@ -134,7 +137,7 @@ export class RemoteControl {
 			} catch {
 				// it ended already; a throw from a timer would shut the daemon down
 			}
-		}, START_TIMEOUT_MS);
+		}, START_MS);
 		timer.unref();
 		this.starting.set(pane, timer);
 		return pane;
@@ -145,8 +148,8 @@ export class RemoteControl {
 		return this.server?.watching().has(sessionId) === true;
 	}
 
-	live(sessionId: string, live: LiveSnapshot | null): void {
-		this.server?.live(sessionId, live);
+	live(sessionId: string, live: LiveSnapshot | null, entryId?: string): void {
+		this.server?.live(sessionId, live, entryId);
 	}
 
 	/** A pane's latest report; undefined once it is gone. Each one is signalled, unchanged too: the
@@ -206,6 +209,9 @@ export class RemoteControl {
 					send: (id, message) => this.delivery.send(id, message),
 					launch: () => this.launch(),
 					startSession: (spec) => this.startSession(spec),
+					claimStart: this.deps.claimStart,
+					paneStarting: this.deps.paneStarting,
+					startFailed: this.deps.startFailed,
 					report: (id) => this.reports.get(id),
 					outcomes: (id) => this.delivery.outcomes(id),
 					terminalOpen: () => this.terminalOpen(),

@@ -185,7 +185,7 @@ export function paneArgs(argv: string[], sessionFile: string | undefined): strin
  * A pane nothing has been asked in yet is not a session, as a bluclawd session isn't one until
  * it runs: no other window lists it, and it ends when the terminal leaves it. A fork is one from
  * the start, even of the conversation before its first message, which pi writes no file for yet:
- * its row carries on the one it was forked from.
+ * it is listed as a row of its own beside the one it was forked from.
  */
 export function isBlankPane(
 	pane: string | undefined,
@@ -195,11 +195,11 @@ export function isBlankPane(
 }
 
 /**
- * What `session_shutdown` does with this pane's registration. A fork, reload, or resume of the
- * same file goes on in this pane, whose next session registers under the same id: its row (pin,
- * order, age) and the messages queued for it stay. Resuming another session starts that one's own
- * row, as a new session does. pi awaits the handler, so the stop is awaited where a session follows,
- * and no late heartbeat of this one lands after the next one's.
+ * What `session_shutdown` does with this pane's registration. A reload, or resume of the same file,
+ * goes on in this pane, whose next session registers under the same id: its row (pin, order, age)
+ * and the messages queued for it stay. A new session, resuming another one, or a fork leaves this
+ * one stopped, and the next one gets its own row. pi awaits the handler, so the stop is awaited
+ * where a session follows, and no late heartbeat of this one lands after the next one's.
  */
 export function shutdownPlan(
 	event: { reason: string; targetSessionFile?: string },
@@ -207,9 +207,7 @@ export function shutdownPlan(
 ): { await: boolean; unregister: boolean } {
 	if (event.reason === "quit") return { await: false, unregister: true };
 	const carriesOn =
-		event.reason === "fork" ||
-		event.reason === "reload" ||
-		(event.reason === "resume" && event.targetSessionFile === currentFile);
+		event.reason === "reload" || (event.reason === "resume" && event.targetSessionFile === currentFile);
 	return { await: true, unregister: !carriesOn };
 }
 

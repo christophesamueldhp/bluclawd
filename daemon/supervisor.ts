@@ -1,13 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import type { AgentActivity } from "./activity.ts";
-import type { EndReason, PaneMessage } from "./ipc/protocol.ts";
+import type { EndReason, NewPaneSpec, PaneMessage, ResumeSpec } from "./ipc/protocol.ts";
 import { readSessionTail } from "./session-state.ts";
 import { getInstance, loadInstances, removeInstance, saveInstances, upsertInstance } from "./storage.ts";
 import type { InstanceRecord } from "./types.ts";
 
 function cloneInstance(record: InstanceRecord): InstanceRecord {
 	return { ...record };
+}
+
+/** The name a row keeps: its own, unless its pane's changed since the row last heard it. */
+function nameOf(row: InstanceRecord | undefined, paneLabel: string | undefined): string | undefined {
+	const keeps = row?.label !== undefined && (row.paneLabel === undefined || row.paneLabel === paneLabel);
+	return keeps ? row?.label : (paneLabel ?? row?.label);
 }
 
 /** A row's agent-view meta, once it has any. */
@@ -28,10 +34,25 @@ interface ExternalInstance {
 	inbox: PaneMessage[];
 	/** How many times it stopped working: a turn too quick for a poll to see still counts. */
 	settled: number;
+	/** Its row as last stored, so a heartbeat that changes none of it writes nothing. */
+	persisted?: string;
 }
 
 /** External (self-registered) instances expire this long after their last heartbeat. */
 const EXTERNAL_TTL_MS = 15_000;
+
+/** How long a row a start claimed is listed as starting: no pane registers later than this (the
+ *  phone's are ended then, see remote/control.ts), so a resume is refused no longer. */
+export const START_MS = 90_000;
+
+/** A pane being started on a row: refused while one is starting or live on its session file. */
+export type StartClaim = { ok: true; id: string } | { ok: false; refused: "starting" | "running" };
+
+/** A row listed as starting: its record, and when it stops being listed so. */
+interface Starting {
+	record: InstanceRecord;
+	until: number;
+}
 
 /** How a pane's wait ends: a message is queued for it; none came (time up, or its row went); or a
  *  newer wait for the same id replaced it. */
@@ -60,15 +81,14 @@ export class ServerSupervisor {
 	private readonly externalInstances = new Map<string, ExternalInstance>();
 	/** Each pane's pending wait, by id; kept apart from its entry, which every heartbeat replaces. */
 	private readonly waits = new Map<string, (outcome: WaitOutcome) => void>();
-	/** Panes that unregistered without quitting (or from an older build, with no reason), by session
-	 *  file: the row, pin and order for the stored row a hand-off may save next. */
-	private readonly quitMeta = new Map<string, Pick<ExternalInstance, "record" | "rowId">>();
 	/** Rows a quit stopped whose hand-off save is still to come, by session file: whether the row
 	 *  was deleted meanwhile, so that save does not bring it back. */
 	private readonly savesDue = new Map<string, { deleted: boolean }>();
 	/** The pin and order of stored rows deleted before a pane resuming them registered, by session
 	 *  file, for that pane's row. */
 	private readonly resumedMeta = new Map<string, Pick<InstanceRecord, "pinned" | "sortOrder">>();
+	/** Rows a start claimed whose pane has not registered yet, by row id. */
+	private readonly startingRows = new Map<string, Starting>();
 	/** A pane went, reaped or unregistered, listed as `rowId` and with `inbox` still queued for it. */
 	onDropped: ((rowId: string, inbox: PaneMessage[]) => void) | undefined;
 
@@ -86,6 +106,8 @@ export class ServerSupervisor {
 		}
 		// A pane resuming a stored session goes on as its row, which stays stored behind it.
 		const stored = previous ? undefined : this.storedRowFor(record.sessionFile);
+		const started = this.takeStarting(record);
+		const claimed = previous ? undefined : started;
 		// A heartbeat restates what the session knows; its age and agent-view meta are kept here.
 		const kept = previous
 			? {
@@ -94,14 +116,111 @@ export class ServerSupervisor {
 					sortOrder: previous.record.sortOrder,
 				}
 			: stored && paneMeta(stored);
-		this.externalInstances.set(record.id, {
-			record: cloneInstance({ ...record, ...kept, ...resumed }),
-			rowId: previous?.rowId ?? stored?.id ?? record.id,
+		const label = nameOf(previous?.record ?? stored, record.label);
+		const entry: ExternalInstance = {
+			record: cloneInstance({ ...record, ...kept, ...resumed, label, paneLabel: record.label }),
+			// A pane that went on to another session leaves the row stored under its id to that one.
+			rowId:
+				previous?.rowId ??
+				stored?.id ??
+				claimed?.id ??
+				(getInstance(this.deps.dir, record.id) ? randomUUID() : record.id),
 			activity,
 			lastSeenAt: now,
 			inbox: previous?.inbox ?? [],
 			settled: (previous?.settled ?? 0) + (previous?.activity === "working" && activity !== "working" ? 1 : 0),
+			persisted: previous?.persisted,
+		};
+		this.externalInstances.set(record.id, entry);
+		this.persistRow(entry);
+	}
+
+	/** Store a pane's row as it shows without its pane, stopped, once its session has a file to resume
+	 *  from: its pin, order, name and age survive a daemon restart, and its pane's next heartbeat goes
+	 *  on as it. */
+	private persistRow(entry: ExternalInstance): void {
+		const { cwd, createdAt, label, paneLabel, sessionId, sessionFile, pinned, sortOrder } = entry.record;
+		const row = {
+			id: entry.rowId,
+			status: "stopped" as const,
+			outcome: "stopped" as const,
+			cwd,
+			createdAt,
+			label,
+			paneLabel,
+			sessionId,
+			sessionFile,
+		};
+		const persisted = JSON.stringify({ ...row, pinned, sortOrder });
+		if (persisted === entry.persisted || !sessionFile || !existsSync(sessionFile)) return;
+		upsertInstance(this.deps.dir, { ...getInstance(this.deps.dir, entry.rowId), ...row, pinned, sortOrder });
+		entry.persisted = persisted;
+	}
+
+	/** A pane registering as `record` ends the start of its session file's row, or of its own id's,
+	 *  which it goes on as. */
+	private takeStarting(record: InstanceRecord): InstanceRecord | undefined {
+		let taken: InstanceRecord | undefined;
+		for (const [id, starting] of this.startingRows) {
+			if (id === record.id || (record.sessionFile && starting.record.sessionFile === record.sessionFile)) {
+				this.startingRows.delete(id);
+				taken ??= starting.record;
+			}
+		}
+		return taken;
+	}
+
+	/** Rows listed as starting, but for those whose pane will not register: its time is up, or a
+	 *  new session's tmux session is gone (pi failed to start). */
+	private starting(): Map<string, Starting> {
+		const now = this.deps.now();
+		for (const [id, { record, until }] of this.startingRows) {
+			if (now > until || (record.pane && this.paneGone(record.pane))) this.startingRows.delete(id);
+		}
+		return this.startingRows;
+	}
+
+	/**
+	 * Before a pane is started on a session file: its row (the file's stored one, else a new one) is
+	 * listed as starting until the pane registers, and another start on that file is refused
+	 * meanwhile, or while a pane runs it.
+	 */
+	claimStart(spec: ResumeSpec): StartClaim {
+		const now = this.deps.now();
+		const file = spec.sessionFile;
+		const running = [...this.externalInstances.values()].some(
+			(entry) => entry.record.sessionFile === file && now - entry.lastSeenAt <= EXTERNAL_TTL_MS,
+		);
+		if (running) return { ok: false, refused: "running" };
+		if ([...this.starting().values()].some((starting) => starting.record.sessionFile === file)) {
+			return { ok: false, refused: "starting" };
+		}
+		const stored = loadInstances(this.deps.dir).find((instance) => instance.sessionFile === file);
+		const id = stored?.id ?? randomUUID();
+		this.listStarting({
+			id,
+			cwd: stored?.cwd ?? spec.cwd,
+			label: stored?.label ?? spec.label,
+			createdAt: stored?.createdAt,
+			sessionFile: file,
 		});
+		return { ok: true, id };
+	}
+
+	/** A new session's pane, just started: listed as starting by its id, which its row registers as. */
+	paneStarting(spec: NewPaneSpec): void {
+		this.listStarting({ id: spec.pane, cwd: spec.cwd, label: spec.label, pane: spec.pane });
+	}
+
+	private listStarting(fields: Omit<InstanceRecord, "status" | "createdAt"> & { createdAt?: string }): void {
+		const now = this.deps.now();
+		const createdAt = fields.createdAt ?? new Date(now).toISOString();
+		this.startingRows.set(fields.id, { record: { ...fields, createdAt, status: "starting" }, until: now + START_MS });
+	}
+
+	/** Its pane could not be started: the row is listed as it was. */
+	startFailed(id: string): void {
+		this.startingRows.delete(id);
 	}
 
 	/** The stored row of `file`, unless a live pane already goes on as it. */
@@ -115,10 +234,13 @@ export class ServerSupervisor {
 		return [...this.externalInstances].find(([, entry]) => entry.rowId === rowId);
 	}
 
-	/** The pane `id` addresses: a pane's own id, or the row a pane is listed as. */
+	/** The pane `id` addresses: the row a pane is listed as, or a pane's own id, unless that is the
+	 *  stopped row of a session the pane switched away from. */
 	private paneOf(id: string): [string, ExternalInstance] | undefined {
+		const listed = this.paneListedAs(id);
+		if (listed) return listed;
 		const own = this.externalInstances.get(id);
-		return own ? [id, own] : this.paneListedAs(id);
+		return own && !getInstance(this.deps.dir, id) ? [id, own] : undefined;
 	}
 
 	/** The row a pane is listed as; its own id when it is not registered. */
@@ -126,18 +248,21 @@ export class ServerSupervisor {
 		return this.externalInstances.get(paneId)?.rowId ?? paneId;
 	}
 
-	/** A quit leaves its row, stopped, saved again by its hand-off once pi's writes are final. Any
-	 *  other end, or none given, drops the row as before. */
+	/** A quit leaves its row, stopped, saved again by its hand-off once pi's writes are final. A
+	 *  switch to another session or a fork leaves it stopped too: pi settled its turn before ending
+	 *  it, so its file is final already (a reload never unregisters). With no reason given (an older
+	 *  pane, which may still quit and save), its stored row stays. */
 	unregisterExternal(id: string, reason?: EndReason): void {
 		const entry = this.externalInstances.get(id);
 		const file = entry?.record.sessionFile;
-		if (entry && file && reason === "quit" && existsSync(file)) {
-			const { cwd, label, sessionId } = entry.record;
-			this.stopRow({ cwd, label, sessionFile: file, sessionId }, [id, entry]);
-			this.savesDue.set(file, { deleted: false });
+		const stops = reason === "quit" || reason === "new" || reason === "resume" || reason === "fork";
+		if (entry && file && stops && existsSync(file)) {
+			const { cwd, paneLabel, sessionId } = entry.record;
+			this.stopRow({ cwd, label: paneLabel, sessionFile: file, sessionId }, [id, entry]);
+			if (reason === "quit") this.savesDue.set(file, { deleted: false });
 			return;
 		}
-		if (entry && file) this.quitMeta.set(file, { record: entry.record, rowId: entry.rowId });
+		if (entry?.rowId === id && reason) removeInstance(this.deps.dir, id);
 		if (entry) this.drop(id, entry);
 	}
 
@@ -200,19 +325,36 @@ export class ServerSupervisor {
 		return entry.inbox.splice(0);
 	}
 
-	/** External instances, each as its row, reaping any whose last heartbeat is older than the TTL. */
+	/** External instances, each as its row, reaping any whose last heartbeat is older than the TTL: its
+	 *  stored row shows until it beats again. One whose pane tmux says is gone died unseen (a crash, a
+	 *  SIGKILL), so its row is stopped with what its file holds last. */
 	listExternalInstances(
 		now: number = this.deps.now(),
 	): Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> {
 		const out: Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> = [];
 		for (const [id, entry] of this.externalInstances) {
 			if (now - entry.lastSeenAt > EXTERNAL_TTL_MS) {
+				const { cwd, paneLabel, sessionFile, sessionId, pane } = entry.record;
+				if (pane && sessionFile && existsSync(sessionFile) && this.paneGone(pane)) {
+					// The pane runs pi itself, so its pi is gone and its writes are final.
+					this.stopRow({ cwd, label: paneLabel, sessionFile, sessionId }, [id, entry]);
+					continue;
+				}
 				this.drop(id, entry);
 				continue;
 			}
 			out.push({ record: { ...entry.record, id: entry.rowId }, activity: entry.activity, settled: entry.settled });
 		}
 		return out;
+	}
+
+	/** Not when tmux could not say: a pane that may be up is not taken for dead. */
+	private paneGone(pane: string): boolean {
+		try {
+			return !this.deps.tmux.hasSession(pane);
+		} catch {
+			return false;
+		}
 	}
 
 	/** Rows an older daemon left running: they ended with it, and stay resumable from their .jsonl. */
@@ -235,9 +377,18 @@ export class ServerSupervisor {
 	/** Stored rows, but for those a live pane goes on as: that pane lists them. */
 	listInstances(): InstanceRecord[] {
 		const live = new Set([...this.externalInstances.values()].map((entry) => entry.rowId));
-		return loadInstances(this.deps.dir)
-			.filter((instance) => !live.has(instance.id))
-			.map(cloneInstance);
+		const starting = this.starting();
+		const stored = loadInstances(this.deps.dir).filter((instance) => !live.has(instance.id));
+		// A row a start claimed shows as starting, in its stored row's place if it has one.
+		const unstored = [...starting.values()]
+			.map((s) => s.record)
+			.filter((record) => !live.has(record.id) && !stored.some((instance) => instance.id === record.id));
+		return [
+			...stored.map((instance) =>
+				starting.has(instance.id) ? { ...instance, status: "starting" as const } : cloneInstance(instance),
+			),
+			...unstored.map(cloneInstance),
+		];
 	}
 
 	getInstance(instanceId: string): InstanceRecord | undefined {
@@ -272,22 +423,22 @@ export class ServerSupervisor {
 		const now = new Date(this.deps.now()).toISOString();
 		const previous = loadInstances(this.deps.dir).find((instance) => instance.sessionFile === options.sessionFile);
 		const tail = readSessionTail(options.sessionFile);
-		const unregistered = this.quitMeta.get(options.sessionFile);
-		this.quitMeta.delete(options.sessionFile);
-		// The pane it ran in, newer than the row it may have had before: its pin, order and age.
-		const ended = pane?.[1] ?? unregistered;
-		// Not an unregistered pane's id that another live pane is listed as by now.
-		const rowId = pane || (ended && !this.paneOf(ended.rowId)) ? ended?.rowId : undefined;
+		// The pane it ran in, newer than the row it may have had before: its pin, order, name and age
+		// (its session header's time).
+		const ended = pane?.[1];
+		const last = ended?.record ?? previous;
 		if (pane) this.drop(pane[0], pane[1]);
 		const record: InstanceRecord = {
 			...previous,
 			...(ended && paneMeta(ended.record)),
-			id: previous?.id ?? rowId ?? randomUUID(),
+			id: previous?.id ?? ended?.rowId ?? randomUUID(),
 			status: "stopped",
 			cwd: previous?.cwd ?? options.cwd,
-			createdAt: previous?.createdAt ?? ended?.record.createdAt ?? now,
+			createdAt: ended?.record.createdAt ?? previous?.createdAt ?? now,
 			lastSeenAt: now,
-			label: previous?.label ?? options.label,
+			// `options.label` is its pane's name as it quit.
+			label: nameOf(last, options.label),
+			paneLabel: options.label ?? last?.paneLabel,
 			sessionId: options.sessionId ?? previous?.sessionId,
 			sessionFile: options.sessionFile,
 			detail: tail?.detail ?? previous?.detail,
@@ -313,8 +464,7 @@ export class ServerSupervisor {
 		if (!stored) return false;
 		const due = stored.sessionFile ? this.savesDue.get(stored.sessionFile) : undefined;
 		if (due) due.deleted = true;
-		// A pane resuming it keeps its pin and order: the phone's goes once its pane registered,
-		// agent view's before it has.
+		// A pane resuming it, registered or still starting, keeps its pin and order.
 		const meta = paneMeta(stored);
 		if (stored.sessionFile && meta) {
 			const pane = [...this.externalInstances.values()].find((e) => e.record.sessionFile === stored.sessionFile);

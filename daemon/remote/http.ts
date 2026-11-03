@@ -12,13 +12,16 @@ import { stripAnsi } from "../ansi.ts";
 import type {
 	InstanceSummary,
 	LiveSnapshot,
+	NewPaneSpec,
 	PaneImage,
 	PaneLaunch,
 	PaneMessage,
 	PaneReport,
 	PromptOutcome,
+	ResumeSpec,
 } from "../ipc/protocol.ts";
 import { labelFromTask } from "../rows.ts";
+import type { StartClaim } from "../supervisor.ts";
 import { RemoteEvents } from "./events.ts";
 import { type ClaimResult, type RemoteStore, SECRET_PATTERN } from "./pairing.ts";
 import {
@@ -47,6 +50,10 @@ export interface RemoteDeps {
 	launch(): PaneLaunch | undefined;
 	/** Start a pane; returns its tmux session name, the id its row registers as. */
 	startSession(spec: SessionSpec): string;
+	/** ServerSupervisor's, which lists a row as starting until its pane registers. */
+	claimStart(spec: ResumeSpec): StartClaim;
+	paneStarting(spec: NewPaneSpec): void;
+	startFailed(id: string): void;
 	/** A terminal on the Mac shows pi: without one, the phone only reads. */
 	terminalOpen(): boolean;
 	/** A running pane's latest report. */
@@ -73,8 +80,8 @@ export interface RemoteServer {
 	watching(): Set<string>;
 	/** The devices with an event stream open: the app is in the foreground there. */
 	present(): Set<string>;
-	/** Push a pane's reply in progress (null: finished) to the phones that have its session open. */
-	live(sessionId: string, live: LiveSnapshot | null): void;
+	/** Push a pane's reply in progress (null: finished, at entry `entryId` when known) to the phones that have its session open. */
+	live(sessionId: string, live: LiveSnapshot | null, entryId?: string): void;
 	/** Tell the phones that have this session open its report changed. */
 	status(sessionId: string): void;
 	close(): Promise<void>;
@@ -421,12 +428,19 @@ async function handle(
 		const { SessionManager } = await import("@earendil-works/pi-coding-agent");
 		const saved = (await SessionManager.list(cwd)).find((s) => s.path === body.sessionFile && s.messageCount > 0);
 		if (!saved) return json(res, 404, { error: "unknown_session" });
-		if (deps.listInstances().some((i) => i.external && i.sessionFile === saved.path))
-			return json(res, 409, { error: "session_running" });
 		const launch = launchOf(deps);
 		if (!launch) return json(res, 503, { error: "no_launch" });
-		const pane = start(deps, { cwd: saved.cwd || cwd, sessionFile: saved.path, task: "", launch });
-		return json(res, 201, { pane });
+		const spec = { cwd: saved.cwd || cwd, sessionFile: saved.path };
+		// Claimed first: agent view's resume of the same file, or another phone's, is refused meanwhile.
+		const claim = deps.claimStart({ ...spec, label: saved.name || labelFromTask(saved.firstMessage) });
+		if (!claim.ok)
+			return json(res, 409, { error: claim.refused === "starting" ? "session_starting" : "session_running" });
+		try {
+			return json(res, 201, { pane: start(deps, { ...spec, task: "", launch }), id: claim.id });
+		} catch (error) {
+			deps.startFailed(claim.id);
+			throw error;
+		}
 	}
 	if (path === "/api/sessions" && req.method === "GET") {
 		return json(res, 200, { sessions: remoteSessions(deps.listInstances()), terminalOpen: deps.terminalOpen() });
@@ -452,7 +466,8 @@ async function handle(
 			...(typeof model === "string" ? { model } : {}),
 			launch,
 		});
-		return json(res, 201, { pane });
+		deps.paneStarting({ cwd, label: labelFromTask(task), pane });
+		return json(res, 201, { pane, id: pane });
 	}
 	if (path === "/api/directories" && req.method === "GET") {
 		const typed = url.searchParams.get("under");
@@ -675,7 +690,7 @@ export function startRemoteServer(deps: RemoteDeps, port: number, host = "127.0.
 				port: typeof address === "object" && address ? address.port : port,
 				watching: () => events.watching(),
 				present: () => events.present(),
-				live: (id, live) => events.live(id, live),
+				live: (id, live, entryId) => events.live(id, live, entryId),
 				status: (id) => events.status(id),
 				close: () =>
 					new Promise<void>((done) => {

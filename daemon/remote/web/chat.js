@@ -20,6 +20,7 @@ import { giveUp, promptKey, sentText, settle, shellLine } from "./live.js";
  * its pane reported of it, a pane that reports outcomes.
  * @typedef {{ id: string, to: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, acceptedAt?: number, outcome?: "taken" | "queued" }} Pending
  */
+/** A reply's text and thinking, held until a page has its entry. @typedef {{ entryId: string, text: string, thinking?: string }} Held */
 
 /** Why a sent prompt came back: its pane refused it, or it was lost. @typedef {{ entry: Pending, reason: string }} Failed */
 
@@ -47,6 +48,8 @@ export function openChat(id, previous) {
 		/** The reply on screen has ended (or may have, while the stream was down): see settle(). */
 		liveEnded: false,
 		/** @type {ReturnType<typeof setTimeout> | undefined} */ liveClear: undefined,
+		/** Replies their pane said ended at a transcript entry, shown until a page has it: see replyEndedAt(). @type {Held[]} */
+		held: [],
 		/** Shared with a chat this one follows, so it is changed in place (see keepPending). @type {Pending[]} */
 		pending: previous?.pending ?? [],
 		/** Images for the next prompt. @type {Attachment[]} */ attachments: [],
@@ -102,6 +105,18 @@ export function openChat(id, previous) {
 /** @typedef {ReturnType<typeof openChat>} Chat */
 
 /**
+ * The reply on screen ended at transcript entry `entryId`: its text and thinking are held until a
+ * page has that entry, whatever text later snapshots show (none while its tools run). Its tools
+ * stay live, and go as their results land.
+ * @param {Chat} chat @param {string} entryId
+ */
+export function replyEndedAt(chat, entryId) {
+	const live = chat.live;
+	if (live?.text || live?.thinking) chat.held.push({ entryId, text: live.text, thinking: live.thinking });
+	chat.live = live?.tools.length ? { text: "", tools: live.tools } : undefined;
+}
+
+/**
  * Only the pending prompts `keep` holds, in the same list: one a send that failed takes out of the
  * chat it was sent from leaves the chat that followed it too.
  * @param {Chat} chat @param {(p: Pending) => boolean} keep
@@ -119,7 +134,7 @@ function userCount(messages, text) {
 
 /**
  * The latest page of the transcript. Older messages loaded above stay while it starts among them;
- * after the session moved (a /tree or /fork, here or on the Mac) it does not, and replaces them.
+ * after the session moved (a /tree, here or on the Mac) it does not, and replaces them.
  * @param {Chat} chat @param {{ messages: Message[], more: boolean }} page
  */
 export function applyLatest(chat, page) {
@@ -136,6 +151,11 @@ export function applyLatest(chat, page) {
 	}
 	chat.messagesLoaded = true;
 	chat.live = settle(chat.live, chat.liveEnded, latest);
+	// pi writes the replies in the order they ended: one whose entry is not there by a later reply's
+	// never will be (another extension emptied it, or the session moved to another branch).
+	const ids = new Set(latest.map((m) => m.id));
+	const last = chat.held.map((h) => ids.has(h.entryId)).lastIndexOf(true);
+	chat.held = chat.held.slice(last + 1);
 	// A pane from an older build reports no outcomes: a prompt sent to it is pending until the
 	// transcript has one more copy of its text than when it was sent.
 	const guess = !reportsOutcomes(chat);

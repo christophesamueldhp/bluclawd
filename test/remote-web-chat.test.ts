@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
 	addPending,
@@ -7,11 +10,17 @@ import {
 	forget,
 	listed,
 	openChat,
+	replyEndedAt,
 	settleOutcomes,
 } from "#remote-web/chat.js";
+import { successor } from "#remote-web/list.js";
+import { listSummaries } from "../daemon/handler.ts";
+import { findSession, remoteSessions } from "../daemon/remote/sessions.ts";
+import { testRegistry } from "./helpers/registry.ts";
 
 const user = (id: string, text: string) => ({ kind: "user", id, text });
 const reply = (id: string, text = "ok") => ({ kind: "assistant", id, text, tools: [] });
+const result = (toolCallId: string) => ({ kind: "toolResult", id: `r-${toolCallId}`, toolCallId, ok: true, text: "" });
 
 describe("the open chat's transcript", () => {
 	it("keeps the older messages a latest page follows on from", () => {
@@ -64,6 +73,75 @@ describe("the open chat's transcript", () => {
 		chat.liveEnded = true;
 		applyLatest(chat, { messages: [reply("1", "done")], more: false });
 		expect(chat.live).toBeUndefined();
+	});
+});
+
+describe("a reply its pane says ended at a transcript entry", () => {
+	const running = { id: "c1", name: "bash", summary: "ls", running: true };
+
+	it("keeps its text through a tool-only snapshot, until a page has the entry", () => {
+		const chat = openChat("a");
+		chat.live = { text: "Let me look", tools: [{ ...running, running: false }] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "", tools: [running] };
+		applyLatest(chat, { messages: [reply("1", "Earlier")], more: false });
+		expect(chat.held).toEqual([{ entryId: "x", text: "Let me look" }]);
+		expect(chat.live).toEqual({ text: "", tools: [running] });
+		applyLatest(chat, { messages: [reply("1", "Earlier"), reply("x", "Let me look")], more: false });
+		expect(chat.held).toEqual([]);
+		expect(chat.live).toEqual({ text: "", tools: [running] });
+	});
+
+	it("drops it by the entry even when the transcript's text differs, as another extension edited it", () => {
+		const chat = openChat("a");
+		chat.live = { text: "Draft", thinking: "hmm", tools: [] };
+		replyEndedAt(chat, "x");
+		expect(chat.live).toBeUndefined();
+		expect(chat.held).toEqual([{ entryId: "x", text: "Draft", thinking: "hmm" }]);
+		applyLatest(chat, { messages: [reply("x", "Edited")], more: false });
+		expect(chat.held).toEqual([]);
+	});
+
+	it("keeps it after a bare end too, which settles only what is still live", () => {
+		const chat = openChat("a");
+		chat.live = { text: "Hi", tools: [] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "", tools: [running] };
+		chat.liveEnded = true;
+		applyLatest(chat, { messages: [reply("1", "Hi"), result("c1")], more: false });
+		expect(chat.held).toEqual([{ entryId: "x", text: "Hi" }]);
+		expect(chat.live).toBeUndefined();
+	});
+
+	it("holds its thinking alone, and nothing for a reply of tools only", () => {
+		const chat = openChat("a");
+		chat.live = { text: "", thinking: "hmm", tools: [] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "", tools: [running] };
+		replyEndedAt(chat, "y");
+		expect(chat.held).toEqual([{ entryId: "x", text: "", thinking: "hmm" }]);
+		expect(chat.live).toEqual({ text: "", tools: [running] });
+	});
+
+	it("holds each of two replies until a page has its own entry", () => {
+		const chat = openChat("a");
+		chat.live = { text: "One", tools: [] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "Two", tools: [] };
+		replyEndedAt(chat, "y");
+		expect(chat.held.map((h) => h.text)).toEqual(["One", "Two"]);
+		applyLatest(chat, { messages: [reply("x", "One")], more: false });
+		expect(chat.held.map((h) => h.text)).toEqual(["Two"]);
+	});
+
+	it("drops one whose entry a page never shows once a page has a later reply's", () => {
+		const chat = openChat("a");
+		chat.live = { text: "Emptied by another extension", tools: [] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "Next", tools: [] };
+		replyEndedAt(chat, "y");
+		applyLatest(chat, { messages: [reply("1", "Earlier"), reply("y", "Next")], more: false });
+		expect(chat.held).toEqual([]);
 	});
 });
 
@@ -299,5 +377,42 @@ describe("following a session to its next pane", () => {
 		const chat = openChat("a");
 		expect(chat.pending).toEqual([]);
 		expect(chat.backToList).toBe(false);
+	});
+});
+
+describe("a chat open on a pane whose user types /new", () => {
+	it("stays on the session it was showing, now stopped, and moves to no other row", () => {
+		const sessions = mkdtempSync(join(tmpdir(), "bluclawd-chat-new-"));
+		const fileOf = (name: string) => {
+			const file = join(sessions, `${name}.jsonl`);
+			const message = { role: "assistant", content: [{ type: "text", text: name }], stopReason: "stop" };
+			writeFileSync(file, `${JSON.stringify({ type: "message", message })}\n`);
+			return file;
+		};
+		const pane = (sessionFile: string, sessionId: string) => ({
+			id: "pi-a",
+			status: "online" as const,
+			cwd: "/p",
+			createdAt: new Date().toISOString(),
+			sessionId,
+			sessionFile,
+			pane: "pi-a",
+		});
+		const registry = testRegistry();
+		const old = fileOf("old");
+		registry.registerExternal(pane(old, "s-old"), "idle");
+		const chat = openChat("pi-a");
+		const sessionId = remoteSessions(listSummaries(registry)).find((s) => s.id === chat.id)?.sessionId;
+		expect(sessionId).toBe("s-old");
+
+		registry.unregisterExternal("pi-a", "new");
+		registry.registerExternal(pane(fileOf("new"), "s-new"), "working");
+
+		const listed = remoteSessions(listSummaries(registry));
+		expect(listed.find((s) => s.id === chat.id)).toMatchObject({ sessionId: "s-old", alive: false });
+		expect(listed.find((s) => s.sessionId === "s-new")?.id).not.toBe(chat.id);
+		expect(successor(listed, chat.id, sessionId)).toBeUndefined();
+		// What its transcript is read from.
+		expect(findSession(listSummaries(registry), chat.id)).toMatchObject({ sessionFile: old, running: false });
 	});
 });

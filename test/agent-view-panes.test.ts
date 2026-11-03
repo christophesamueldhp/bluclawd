@@ -1,6 +1,8 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { listSummaries } from "../daemon/handler.ts";
+import type { ResumeSpec, StartSpec } from "../daemon/ipc/protocol.ts";
 import type { InstanceSummary, OrchestratorClient } from "../daemon/orchestrator-client.ts";
 import { collectRows } from "../daemon/rows.ts";
 import { HIDE_ENV, OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../daemon/tmux.ts";
@@ -33,7 +35,7 @@ beforeAll(() => setSharedTheme(plainTheme));
 
 type Calls = unknown[][];
 
-function setup(instances: InstanceSummary[], self?: InstanceSummary) {
+function setup(instances: InstanceSummary[], self?: InstanceSummary, overrides: Partial<OrchestratorClient> = {}) {
 	const calls: Calls = [];
 	const record =
 		(name: string) =>
@@ -47,6 +49,12 @@ function setup(instances: InstanceSummary[], self?: InstanceSummary) {
 		send: record("send"),
 		delete: record("delete"),
 		setMeta: record("setMeta"),
+		start: async (spec: StartSpec) => {
+			calls.push(["claim", spec]);
+			return "pane" in spec ? spec.pane : "claimed";
+		},
+		startFailed: record("startFailed"),
+		...overrides,
 	} as unknown as OrchestratorClient;
 	let started = 0;
 	const panes: PaneOps = {
@@ -155,11 +163,75 @@ describe("agent view in pane mode", () => {
 		const { view, calls, flush } = setup([stored]);
 		view.handleInput(ENTER);
 		await flush();
+		// Claimed first, so a phone's resume of the same file is refused; the stored row stays as its row.
 		expect(calls).toEqual([
+			["claim", { cwd: HERE, sessionFile: "/s/s.jsonl" }],
 			["start", HERE, ["--session", "/s/s.jsonl"], undefined],
-			["delete", "s"],
 			["switchTo", "pi-new1"],
 		]);
+	});
+
+	it("a stored session resumed by a reply stays listed as starting, with its id and focus, until its pane registers", async () => {
+		const registry = testRegistry();
+		const file = "/nonexistent/s.jsonl";
+		const { id } = registry.saveInstance({ cwd: HERE, label: "fix tests", sessionFile: file })!;
+		const { view, calls, flush } = setup(listSummaries(registry), undefined, {
+			list: async () => listSummaries(registry),
+			start: async (spec: ResumeSpec) => {
+				const claim = registry.claimStart(spec);
+				if (!claim.ok) throw new Error(claim.refused);
+				return claim.id;
+			},
+		});
+		view.handleInput(" ");
+		for (const ch of "carry on") view.handleInput(ch);
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls).toEqual([["start", HERE, ["--session", file, "--", "carry on"], undefined]]);
+		const shown = () => view.render(100).join("\n");
+		expect(listSummaries(registry)).toEqual([expect.objectContaining({ id, status: "starting" })]);
+		expect(shown()).toContain("starting…");
+		expect(view.selectedKeyForTest()).toBe(id);
+
+		registry.registerExternal(
+			{
+				id: "pi-new1",
+				status: "online",
+				cwd: HERE,
+				createdAt: new Date().toISOString(),
+				sessionFile: file,
+				pane: "pi-new1",
+			},
+			"working",
+		);
+		view.setInstancesForTest(listSummaries(registry));
+		expect(listSummaries(registry)).toEqual([expect.objectContaining({ id, status: "online", pane: "pi-new1" })]);
+		expect(view.selectedKeyForTest()).toBe(id);
+	});
+
+	it("a resume the daemon refuses starts no pane, and says why", async () => {
+		const stored: InstanceSummary = { id: "s", status: "stopped", cwd: HERE, sessionFile: "/s/s.jsonl" };
+		const { view, calls, flush, closed } = setup([stored], undefined, {
+			start: async () => {
+				throw new Error("it is already starting — try again in a moment");
+			},
+		});
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls).toEqual([]);
+		expect(view.render(100).join("\n")).toContain("Couldn't open — it is already starting");
+		expect(closed()).toBe(0);
+	});
+
+	it("a pane that cannot be started gives its claim back", async () => {
+		const stored: InstanceSummary = { id: "s", status: "stopped", cwd: HERE, sessionFile: "/s/s.jsonl" };
+		const { view, calls, flush, panes } = setup([stored]);
+		panes.start = () => {
+			throw tmuxFailure("no server running\n");
+		};
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls.slice(1)).toEqual([["startFailed", "claimed"]]);
 	});
 
 	it("enter twice on a stored session's reply starts one pane", async () => {
@@ -179,15 +251,28 @@ describe("agent view in pane mode", () => {
 		expect(calls.filter(([name]) => name === "start")).toHaveLength(1);
 	});
 
-	it("a task starts a new pane with it as the first prompt; its row replaces the placeholder", async () => {
-		const instances: InstanceSummary[] = [];
-		const { view, calls, flush } = setup(instances);
+	it("a task starts a new pane with it as the first prompt, listed as starting by the daemon under its pane's id", async () => {
+		const registry = testRegistry();
+		const { view, calls, flush } = setup([], undefined, {
+			list: async () => listSummaries(registry),
+			start: async (spec: StartSpec) => {
+				calls.push(["claim", spec]);
+				if (!("pane" in spec)) throw new Error("a resume");
+				registry.paneStarting(spec);
+				return spec.pane;
+			},
+		});
 		for (const ch of "write the release notes") view.handleInput(ch);
 		view.handleInput(ENTER);
-		expect(calls).toEqual([["start", HERE, ["--", "write the release notes"], undefined]]);
-		expect(view.selectedKeyForTest()).toBe("pending:pi-new1");
-		view.setInstancesForTest([paneRow("pi-new1")]);
 		await flush();
+		expect(calls).toEqual([
+			["start", HERE, ["--", "write the release notes"], undefined],
+			["claim", { cwd: HERE, label: "write the release…", pane: "pi-new1" }],
+		]);
+		expect(view.render(100).join("\n")).toContain("starting…");
+		expect(view.selectedKeyForTest()).toBe("pi-new1");
+		registry.registerExternal({ ...paneRow("pi-new1"), status: "online" } as never, "working");
+		view.setInstancesForTest(listSummaries(registry));
 		expect(view.selectedKeyForTest()).toBe("pi-new1");
 	});
 
@@ -562,7 +647,8 @@ describe("shutdownPlan", () => {
 	it("keeps the row for the pane's next session only when it carries on this one", () => {
 		const keep = { await: true, unregister: false };
 		const drop = { await: true, unregister: true };
-		expect(shutdownPlan({ reason: "fork", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(keep);
+		// A fork is a session of its own; the one it came from is left stopped.
+		expect(shutdownPlan({ reason: "fork", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(drop);
 		expect(shutdownPlan({ reason: "reload" }, "/s/a.jsonl")).toEqual(keep);
 		expect(shutdownPlan({ reason: "resume", targetSessionFile: "/s/a.jsonl" }, "/s/a.jsonl")).toEqual(keep);
 		expect(shutdownPlan({ reason: "resume" }, undefined)).toEqual(keep);

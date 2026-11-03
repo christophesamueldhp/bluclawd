@@ -13,6 +13,9 @@ import type {
 	PaneMessage,
 	PaneReport,
 	RemoteResponse,
+	StartFailedRequest,
+	StartRequest,
+	StartSpec,
 } from "./ipc/protocol.ts";
 import { daemonBuildId, getSocketPath } from "./paths.ts";
 
@@ -57,8 +60,10 @@ type Request =
 	| { type: "rename"; instanceId: string; name: string }
 	| { type: "meta"; instanceId: string; pinned?: boolean; sortOrder?: number }
 	| { type: "save"; cwd: string; label?: string; sessionFile: string; sessionId?: string }
+	| StartRequest
+	| StartFailedRequest
 	| ({ type: "remote" } & RemoteAction)
-	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null }
+	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null; entryId?: string }
 	| { type: "remote_report"; instanceId: string; report: PaneReport };
 
 interface AnyResponse {
@@ -74,6 +79,7 @@ interface AnyResponse {
 	wantReport?: boolean;
 	queued?: boolean;
 	superseded?: boolean;
+	id?: string;
 }
 
 /** Path to the daemon's CLI entry, for the ensureDaemon() auto-start. */
@@ -227,6 +233,19 @@ export class OrchestratorClient {
 		await this.request({ type: "save", cwd, label, sessionFile, sessionId });
 	}
 
+	/** The id of the row listed as starting (see StartRequest); rejects with why it was refused. */
+	async start(start: StartSpec): Promise<string> {
+		const res = await this.request({ type: "start", ...start });
+		if (res.type !== "start_result" || !res.id)
+			throw new Error("The agent daemon is out of date — restart pi to update it");
+		return res.id;
+	}
+
+	/** The pane `start` was claimed for could not be started. */
+	async startFailed(instanceId: string): Promise<void> {
+		await this.request({ type: "start_failed", instanceId });
+	}
+
 	async delete(instanceId: string): Promise<void> {
 		await this.request({ type: "delete", instanceId }, 10_000);
 	}
@@ -271,9 +290,10 @@ export class OrchestratorClient {
 		return res as unknown as RemoteResult;
 	}
 
-	/** The reply this pane is streaming, for the phones watching it; null once it is finished. */
-	async remoteLive(instanceId: string, live: LiveSnapshot | null): Promise<void> {
-		await this.request({ type: "remote_live", instanceId, live }, 1000);
+	/** The reply this pane is streaming, for the phones watching it; null once it is finished, with
+	 *  the transcript entry it became when known. */
+	async remoteLive(instanceId: string, live: LiveSnapshot | null, entryId?: string): Promise<void> {
+		await this.request({ type: "remote_live", instanceId, live, ...(entryId ? { entryId } : {}) }, 1000);
 	}
 
 	/** This pane's model, context and usage, for the phone's status sheet. */

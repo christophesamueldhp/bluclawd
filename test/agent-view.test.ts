@@ -114,6 +114,8 @@ function fakeClient(calls: Calls, list: () => InstanceSummary[] = () => sessions
 		rename: record("rename"),
 		setMeta: record("setMeta"),
 		send: record("send"),
+		start: async (spec: { pane?: string }) => spec.pane ?? "claimed",
+		startFailed: record("startFailed"),
 	} as unknown as OrchestratorClient;
 }
 
@@ -522,7 +524,8 @@ describe("AgentView keys", () => {
 		view.handleInput(ENTER);
 		await flush();
 		expect(calls[0]).toEqual(["start", HERE, ["--model", "opencode-go/kimi", "--", "fix the flaky test"]]);
-		expect(text().join("\n")).toContain("fix the flaky…");
+		// Its row, starting, is the daemon's to list (agent-view-panes.test.ts); the composer is cleared.
+		expect(text().join("\n")).not.toContain("❯ fix the flaky test");
 	});
 
 	it("ctrl+j and shift+enter add lines to the task; backspace on an empty line joins them back", async () => {
@@ -848,10 +851,9 @@ describe("AgentView keys", () => {
 		expect(view.selectedKeyForTest()).toBe("gone");
 		view.handleInput(ENTER);
 		await flush();
-		// Not running: it starts in a pane of its own, which replaces the stored row.
+		// Not running: it starts in a pane of its own, which goes on as the stored row.
 		expect(calls).toEqual([
 			["start", HERE, ["--session", "/gone.jsonl"]],
-			["delete", "gone"],
 			["switchTo", "pane-1"],
 		]);
 	});
@@ -1233,9 +1235,11 @@ describe("AgentView look", () => {
 			});
 			const text = () => view.render(100).map(stripAnsi).join("\n");
 			const refresh = () => (view as unknown as { refresh(): Promise<void> }).refresh();
-			// The restarted daemon has not heard from the pane yet.
+			// The restarted daemon has not heard from the pane yet: it lists the row stored behind it.
+			listed = [{ id: "pi-a", status: "stopped", cwd: HERE, label: "stored behind it" }];
 			await view.onShow();
 			expect(text()).toContain("carried on");
+			expect(text()).not.toContain("stored behind it");
 			listed = [{ ...pane, label: "re-registered" }];
 			await refresh();
 			expect(text()).toContain("re-registered");

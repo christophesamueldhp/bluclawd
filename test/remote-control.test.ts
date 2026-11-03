@@ -25,6 +25,9 @@ describe("remote control switch", () => {
 			deleteInstance: () => false,
 			renameInstance: () => false,
 			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
+			startFailed: () => {},
 			webDir: dir,
 		});
 
@@ -188,6 +191,9 @@ describe("remote control switch", () => {
 				send: () => true,
 				renameInstance: () => false,
 				setPinned: () => false,
+				claimStart: () => ({ ok: false, refused: "running" }),
+				paneStarting: () => {},
+				startFailed: () => {},
 				deleteInstance: (id) => deleteInstance(id),
 				tmux: new Tmux(dir, (args) => {
 					tmuxCalls.push(args);
@@ -293,6 +299,10 @@ describe("remote control switch", () => {
 			ok: true,
 		});
 		await until(JSON.stringify({ sessionId: "pane-1", live }));
+		// The end of a reply names the transcript entry it became.
+		await handleIpcRequest(supervisor, { type: "remote_live", instanceId: "pane-1", live: null, entryId: "e7" });
+		await until(JSON.stringify({ sessionId: "pane-1", live: null, entryId: "e7" }));
+		await handleIpcRequest(supervisor, { type: "remote_live", instanceId: "pane-1", live });
 		await handleIpcRequest(supervisor, { type: "unregister", instanceId: "pane-1" });
 		await until(JSON.stringify({ sessionId: "pane-1", live: null }));
 		controller.abort();
@@ -309,6 +319,9 @@ describe("remote control switch", () => {
 			deleteInstance: () => false,
 			renameInstance: () => false,
 			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
+			startFailed: () => {},
 			webDir: dir,
 		});
 		setRemoteControl(control);
@@ -367,6 +380,9 @@ describe("remote control switch", () => {
 			deleteInstance: () => false,
 			renameInstance: () => false,
 			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
+			startFailed: () => {},
 			webDir: dir,
 		});
 		setRemoteControl(control);
@@ -399,6 +415,9 @@ describe("remote control switch", () => {
 			deleteInstance: () => false,
 			renameInstance: () => false,
 			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
+			startFailed: () => {},
 			webDir: dir,
 		});
 		const report = { models: [] };
@@ -435,6 +454,9 @@ describe("remote control switch", () => {
 			deleteInstance: () => false,
 			renameInstance: () => false,
 			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
+			startFailed: () => {},
 			statusLine: async (cwd) => (cwd === "/p" ? { git } : {}),
 			webDir: dir,
 		});
@@ -494,6 +516,9 @@ describe("remote control switch", () => {
 				deleteInstance: () => false,
 				renameInstance: () => false,
 				setPinned: () => false,
+				claimStart: () => ({ ok: false, refused: "running" }),
+				paneStarting: () => {},
+				startFailed: () => {},
 				webDir: dir,
 				sendPush: async (push, payload) => {
 					pushes.push({ endpoint: push.endpoint, payload: JSON.parse(payload) });
@@ -539,6 +564,9 @@ describe("remote control switch", () => {
 				deleteInstance: () => false,
 				renameInstance: () => false,
 				setPinned: () => false,
+				claimStart: () => ({ ok: false, refused: "running" }),
+				paneStarting: () => {},
+				startFailed: () => {},
 				webDir: dir,
 				sendPush: async () => "ok",
 			});

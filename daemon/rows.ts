@@ -37,6 +37,8 @@ export interface AgentRow {
 	settled?: number;
 	/** Set when more than one live pi writes this row's session file: how many. */
 	livePanes?: number;
+	/** A pane is being started on it and has not registered yet. */
+	starting?: true;
 }
 
 /** A `!` command as a row, as bluclawd's: working while it runs (its last output line the
@@ -116,6 +118,7 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 		sessionId: inst.sessionId,
 		...(state === "needs" && inst.dialog ? { dialog: inst.dialog } : {}),
 		...(inst.settled !== undefined ? { settled: inst.settled } : {}),
+		...(inst.status === "starting" ? { starting: true } : {}),
 	};
 }
 
@@ -277,7 +280,7 @@ export interface AgentCounts {
 
 export function countRows(rows: AgentRow[]): AgentCounts {
 	const counts = { needs: 0, working: 0, idle: 0 };
-	for (const row of rows) if (!row.id.startsWith("pending:")) counts[stateBandOf(row)]++;
+	for (const row of rows) if (!row.starting) counts[stateBandOf(row)]++;
 	return counts;
 }
 

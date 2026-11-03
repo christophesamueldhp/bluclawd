@@ -33,23 +33,31 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 	const registrations: SelfRegistration[] = [];
 	const streams: AbortController[] = [];
 
-	beforeEach(async () => {
-		dir = await mkdtemp(join(tmpdir(), "bluclawd-outcomes-"));
-		vi.stubEnv("PI_SERVER_DIR", dir);
-		clock = Date.now();
-		supervisor = testRegistry(dir, () => clock);
-		server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
-		control = new RemoteControl({
+	/** The daemon's remote control on the test's registry, with its pairing in the test's dir. */
+	function remoteControl(): RemoteControl {
+		return new RemoteControl({
 			store: new RemoteStore(join(dir, "remote.json")),
 			listInstances: () => listSummaries(supervisor),
 			send: (id, message) => supervisor.sendExternal(id, message),
 			deleteInstance: () => false,
 			renameInstance: () => false,
 			setPinned: () => false,
+			claimStart: () => ({ ok: false, refused: "running" }),
+			paneStarting: () => {},
+			startFailed: () => {},
 			// A terminal shows pi, so the phone may prompt.
 			tmux: { attached: () => true } as unknown as Tmux,
 			webDir: dir,
 		});
+	}
+
+	beforeEach(async () => {
+		dir = await mkdtemp(join(tmpdir(), "bluclawd-outcomes-"));
+		vi.stubEnv("PI_SERVER_DIR", dir);
+		clock = Date.now();
+		supervisor = testRegistry(dir, () => clock);
+		server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
+		control = remoteControl();
 		setRemoteControl(control);
 		supervisor.onDropped = (rowId, inbox) => control.lost(rowId, inbox);
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });
@@ -276,16 +284,7 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		expect(await (await watch("pane-restart")).replayed()).toEqual([{ id: "p-restart", outcome: "sent" }]);
 		// A new daemon: remote control starts afresh, with the same pairing.
 		await control.stop();
-		control = new RemoteControl({
-			store: new RemoteStore(join(dir, "remote.json")),
-			listInstances: () => listSummaries(supervisor),
-			send: (id, message) => supervisor.sendExternal(id, message),
-			deleteInstance: () => false,
-			renameInstance: () => false,
-			setPinned: () => false,
-			tmux: { attached: () => true } as unknown as Tmux,
-			webDir: dir,
-		});
+		control = remoteControl();
 		setRemoteControl(control);
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });
 		if (on.type !== "remote_result") throw new Error("not listening");
