@@ -109,6 +109,8 @@ export interface SubagentRunnerOutcome {
 }
 
 export interface AdmitSubagentRunRequest<C = unknown> {
+	/** Minted by the caller when it prepares the run's storage first. */
+	runId?: string;
 	parentSessionId: string;
 	sessionEpoch: number;
 	parentTurnId: string;
@@ -144,6 +146,10 @@ export interface SubagentRunSchedulerOptions<C = unknown> {
 	/** Durably stores a settled run before it turns terminal; a throw fails the run. */
 	onFinalize?: (record: Readonly<SubagentRunRecord>) => Promise<Readonly<SubagentRunRecord>>;
 	executeRun: (params: SubagentRunnerExecuteParams & { context?: C }) => Promise<SubagentRunnerOutcome>;
+}
+
+export function createRunId(): string {
+	return `${AGENT_TASK_ID_PREFIX}${randomUUID()}`;
 }
 
 const TERMINAL_STATES = new Set<SubagentLifecycleStatus>(["completed", "failed", "cancelled", "interrupted"]);
@@ -195,6 +201,11 @@ export class SubagentRunScheduler<C = unknown> {
 		return this.runs.get(runId)?.context;
 	}
 
+	/** Settles with the run's record once its current generation is final and stored. */
+	whenFinal(runId: string): Promise<Readonly<SubagentRunRecord>> | undefined {
+		return this.runs.get(runId)?.completionPromise;
+	}
+
 	recordMessageSent(runId: string): void {
 		const managed = this.runs.get(runId);
 		if (managed && !isTerminalSubagentStatus(managed.record.status)) managed.record.lastMessageAt = this.now();
@@ -224,7 +235,7 @@ export class SubagentRunScheduler<C = unknown> {
 		}
 
 		const admittedAt = this.now();
-		const runId = `${AGENT_TASK_ID_PREFIX}${randomUUID()}`;
+		const runId = request.runId ?? createRunId();
 
 		const record: SubagentRunRecord = {
 			runId,
@@ -297,8 +308,8 @@ export class SubagentRunScheduler<C = unknown> {
 	}
 
 	/**
-	 * Runs a completed run again under the same identity, in the background. Its usage starts from zero so
-	 * the earlier generation's usage, already attributed, is never counted twice.
+	 * Runs a completed run again under the same identity, in the background. Its counts and usage start from zero:
+	 * a generation reports only its own work, and the earlier usage, already attributed, is never counted twice.
 	 */
 	resume(runId: string, context: C): AdmitSubagentRunResult {
 		const managed = this.runs.get(runId);
@@ -319,10 +330,16 @@ export class SubagentRunScheduler<C = unknown> {
 				stopSource: undefined,
 				errorMessage: undefined,
 				summaryText: undefined,
+				// Unset, so the earlier generation's final report stays on disk until this one reports progress.
+				lastProgressText: undefined,
 				generation: (managed.record.generation ?? 0) + 1,
 				status: "starting",
 				complete: false,
 				deliveryMode: "background",
+				turnCount: 0,
+				toolCallCount: 0,
+				toolExecutions: undefined,
+				lastActivity: undefined,
 				usage: createEmptySubagentUsage(),
 				usageAttribution: undefined,
 				backgroundDeliveryAttempted: false,

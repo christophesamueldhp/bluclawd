@@ -20,7 +20,9 @@
  * it, field for field: the fields of its pane's report the phone sees, with what the Mac adds for
  * its directory: pistatusline's own lines at the phone's width (`statusline`), else `git`.
  * `notice`: why the phone's last slash command did not run, until the pane's next report (`at`: epoch ms).
- * @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, backgroundSubagentUsage?: { runCount: number, input: number, output: number, cacheRead: number, cacheWrite: number, cost: number | null }, git?: GitInfo, notice?: { text: string, at: number }, statusline?: { lines: StatusSpan[][] }, tasks?: Task[] }} Report
+ * `outcomes`: what became of the prompts sent with an id, only from a pane that reports them.
+ * @typedef {{ id: string, outcome: "taken" | "queued" }} PromptOutcome
+ * @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, backgroundSubagentUsage?: { runCount: number, input: number, output: number, cacheRead: number, cacheWrite: number, cost: number | null }, git?: GitInfo, notice?: { text: string, at: number }, outcomes?: PromptOutcome[], statusline?: { lines: StatusSpan[][] }, tasks?: Task[] }} Report
  */
 
 /**

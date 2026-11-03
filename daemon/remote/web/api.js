@@ -110,11 +110,13 @@ export const api = {
 		call("GET", `${session(id)}/messages?limit=100${before ? `&before=${encodeURIComponent(before)}` : ""}`),
 	/**
 	 * A stored session resumes in a new pane, named in the reply; only a running one takes images.
-	 * @param {string} id @param {string} text @param {{ mimeType: string, data: string }[]} [images] base64
+	 * `promptId`: what its outcome comes back by, in the session's status.
+	 * @param {string} id @param {string} text @param {{ mimeType: string, data: string }[]} images base64
+	 * @param {string} promptId
 	 * @returns {Promise<{ pane?: string }>}
 	 */
-	prompt: (id, text, images = []) =>
-		call("POST", `${session(id)}/prompt`, images.length ? { text, images } : { text }),
+	prompt: (id, text, images, promptId) =>
+		call("POST", `${session(id)}/prompt`, { text, ...(images.length ? { images } : {}), id: promptId }),
 	/**
 	 * An image in a message, by the message's id and its position there: an `<img>` cannot send the token.
 	 * @param {string} id @param {string} entryId @param {number} index @returns {Promise<Blob>}

@@ -87,6 +87,11 @@ const tooOld = error("pane_too_old");
 const rows: Row[] = [
 	["a prompt", { type: "prompt", text: "next" }, ...four(message({ type: "prompt", text: "next" }), notRunning)],
 	[
+		"a prompt with the phone's id, which its outcome comes back by",
+		{ type: "prompt", text: "next", id: "p-1" },
+		...four(message({ type: "prompt", text: "next", id: "p-1" }), notRunning),
+	],
+	[
 		"a prompt with images",
 		{ type: "prompt", text: "look", images: [png] },
 		...four(message({ type: "prompt", text: "look", images: [png] }), notRunning),
@@ -331,6 +336,21 @@ describe("phone control", () => {
 		] as const)("%s to the %s session", (text, id, expected) => {
 			expect(decide(session(id), { type: "prompt", text })).toEqual(expected);
 		});
+	});
+
+	it("shows the prompt outcomes the daemon recorded, only for a pane that reports outcomes", () => {
+		const recorded = [{ id: "p-1", outcome: "taken" as const }];
+		const outcomes = (id: string) => (id === "running" ? recorded : []);
+		const reporting = { ...full, outcomes: [{ id: "p-other", outcome: "queued" as const }] };
+		const shown = (id: string, report: PaneReport) => {
+			const decided = decide(phoneSession({ ...deps, report: () => report, outcomes }, id)!, { type: "status" });
+			return "status" in decided ? decided.status.outcomes : decided;
+		};
+		// The delivery module's, never the pane's own list.
+		expect(shown("running", reporting)).toEqual(recorded);
+		// An older pane reports none: the phone keeps guessing for it.
+		expect(shown("running", full)).toBeUndefined();
+		expect(shown("old", { ...full, outcomes: [] })).toEqual([]);
 	});
 
 	it("shows only the status fields it declares, never a new one a pane reports", () => {

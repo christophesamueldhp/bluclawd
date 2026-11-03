@@ -23,6 +23,7 @@ import { TRUST_CHANGED } from "../permissions/index.ts";
 import { autostartDeps, autostartOn, autostartStatus, refreshAutostart, toggleAutostart } from "./autostart.ts";
 import { LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
+import { PromptOutcomes } from "./outcomes.ts";
 import { applyPaneMessage, buildReport, paneTasks, pistatuslinePaths, submitCommand, watchTasks } from "./report.ts";
 import { EnableNeeded, serve, tailscaleInfo } from "./tailscale.ts";
 
@@ -220,6 +221,7 @@ function factory(pi: ExtensionAPI): void {
 	let unwatchTasks: (() => void) | undefined;
 	/** Where pistatusline is, looked up once per session. */
 	let statusline: PaneReport["pistatusline"];
+	const outcomes = new PromptOutcomes();
 	/** `notice`: what the pane could not do for the phone, which this report alone carries. */
 	const report = (ctx: ExtensionContext, notice?: string): void => {
 		// As agent view registers: a `pi -p` run inside the pane must not report as the pane.
@@ -229,6 +231,7 @@ function factory(pi: ExtensionAPI): void {
 			...buildReport(ctx, pi),
 			...(statusline ? { pistatusline: statusline } : {}),
 			...(notice ? { notice: { text: notice, at: Date.now() } } : {}),
+			outcomes: outcomes.list(),
 		};
 		reportedTasks = JSON.stringify(next.tasks);
 		reports = reports.then(() => client.remoteReport(pane, next)).catch(() => {});
@@ -264,6 +267,17 @@ function factory(pi: ExtensionAPI): void {
 			const enter = () => commandKeys.sendKeys(pane, ["Enter"]);
 			submitCommand(message.text, ctx, tui?.(), enter, (notice) => report(ctx, notice));
 		} else applyPaneMessage(message, ctx, pi, () => report(ctx));
+	});
+	// A phone sent these, so they are reported whether or not it has the session open.
+	pi.events.on("bluclawd:prompt-sent", (data) => {
+		const { id, text } = data as { id: string; text: string };
+		outcomes.sent(id, text);
+	});
+	pi.on("input", (event, ctx) => {
+		if (outcomes.input(event)) report(ctx);
+	});
+	pi.on("message_start", (event, ctx) => {
+		if (outcomes.started(event.message)) report(ctx);
 	});
 	pi.events.on("bluclawd:remote-watched", (data) => {
 		const opened = data === true && !watched;

@@ -17,6 +17,7 @@ import type {
 	PaneLaunch,
 	PaneMessage,
 	PaneReport,
+	PromptOutcome,
 	ResumeSpec,
 } from "../ipc/protocol.ts";
 import { labelFromTask } from "../rows.ts";
@@ -57,6 +58,8 @@ export interface RemoteDeps {
 	terminalOpen(): boolean;
 	/** A running pane's latest report. */
 	report(sessionId: string): PaneReport | undefined;
+	/** What became of the prompts sent to a session with an id (delivery.ts). */
+	outcomes?(sessionId: string): PromptOutcome[];
 	/** Name a stored row; false when there is none by that id. A pane's pi names its own. */
 	renameInstance(sessionId: string, name: string): boolean;
 	/** Pin or unpin a row, a pane's or a stored one; false when there is none by that id. */
@@ -108,6 +111,8 @@ const MESSAGES_MAX = 200;
 const MODEL_PATTERN = /^\w[\w.-]*\/[\w.:/@+-]+$/;
 /** pi's entry ids (8 hex digits, or a whole UUID): one word on the pane's `/remote-control` line. */
 const ENTRY_PATTERN = /^[0-9a-f-]{8,36}$/;
+/** A prompt's id, which the phone makes up. */
+const PROMPT_ID_PATTERN = /^[\w-]{1,64}$/;
 /** The widths a phone may ask the status line for. */
 const COLS_MIN = 20;
 const COLS_MAX = 200;
@@ -213,6 +218,14 @@ function promptIn(body: Record<string, unknown>, key: string): string {
 	if (!text.trim()) throw new HttpError(400, "empty_prompt");
 	if (text.length > PROMPT_MAX) throw new HttpError(413, "prompt_too_large");
 	return text;
+}
+
+/** The id the phone gave its prompt, if it gave one: its outcome comes back by it. */
+function promptIdIn(body: Record<string, unknown>): string | undefined {
+	const { id } = body;
+	if (id === undefined) return undefined;
+	if (typeof id !== "string" || !PROMPT_ID_PATTERN.test(id)) throw new HttpError(400, "invalid_prompt_id");
+	return id;
 }
 
 /** A prompt's images, if it has any: each base64 of the type it says it is. */
@@ -552,7 +565,8 @@ function sessionRoute(rest: string, method: string | undefined): SessionRoute | 
 				action: (body) => {
 					const text = promptIn(body, "text");
 					const images = imagesIn(body);
-					return images ? { type: "prompt", text, images } : { type: "prompt", text };
+					const id = promptIdIn(body);
+					return { type: "prompt", text, ...(images ? { images } : {}), ...(id ? { id } : {}) };
 				},
 			};
 		case "abort":

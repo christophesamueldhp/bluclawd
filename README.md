@@ -392,9 +392,11 @@ next instruction; its report arrives like a background completion. A resume is c
 the orchestrator's current deny rules apply, and the child gets the orchestrator's tools as they are
 now, narrowed by its role. Only the orchestrator can do
 this: a sibling's message to a finished child is refused as finished, and a stopped, failed or
-interrupted child cannot be resumed. Each resumed generation's usage is counted once in the
-background ledger. After a reload, a run from before it cannot be resumed; spawn a new child that
-reads the earlier report.
+interrupted child cannot be resumed. A resumed child reports the turns, tool calls and usage of that
+generation alone, and its earlier report stays in `/tasks` until the resume reports progress. Its
+usage is counted once, like a background child's: tool usage before the resuming message's result is
+sent goes in that result, the rest in the background ledger. After a reload, a run from before it
+cannot be resumed; spawn a new child that reads the earlier report.
 
 Reports and private child transcripts live outside the repository under
 `<getAgentDir()>/bluclawd/subagents/<parent-session>/<run>/`. The parent gets a bounded, untrusted

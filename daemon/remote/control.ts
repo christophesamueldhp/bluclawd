@@ -16,6 +16,7 @@ import type {
 } from "../ipc/protocol.ts";
 import { START_MS } from "../supervisor.ts";
 import { Tmux } from "../tmux.ts";
+import { PromptDelivery } from "./delivery.ts";
 import { type RemoteDeps, type RemoteServer, startRemoteServer } from "./http.ts";
 import { Notifier } from "./notifier.ts";
 import { RemoteStore } from "./pairing.ts";
@@ -75,9 +76,12 @@ export class RemoteControl {
 	private readonly sendPush: (subscription: WebPushSubscription, payload: string) => Promise<PushResult>;
 	/** Each pane's latest report, kept while the listener is off so the phone has it once it is on. */
 	private readonly reports = new Map<string, PaneReport>();
+	/** What became of each prompt the phone sent with an id. */
+	private readonly delivery: PromptDelivery;
 
 	constructor(deps: RemoteControlDeps) {
 		this.deps = deps;
+		this.delivery = new PromptDelivery(deps.send);
 		this.store = deps.store ?? new RemoteStore();
 		this.tmux = deps.tmux ?? new Tmux(undefined, undefined, { timeoutMs: TMUX_TIMEOUT_MS });
 		this.sendPush =
@@ -155,12 +159,18 @@ export class RemoteControl {
 			this.reports.delete(sessionId);
 			return;
 		}
+		if (report.outcomes) this.delivery.reported(sessionId, report.outcomes);
 		// A pane that dies without unregistering is only reaped from the list; its first report may
 		// arrive before it is listed, so the sender's own is kept.
 		const live = new Set(this.deps.listInstances().flatMap((i) => (i.external ? [i.id] : [])));
 		for (const id of this.reports.keys()) if (id !== sessionId && !live.has(id)) this.reports.delete(id);
 		this.reports.set(sessionId, report);
 		this.server?.status(sessionId);
+	}
+
+	/** A pane's heartbeat took these messages from its inbox. */
+	delivered(sessionId: string, messages: PaneMessage[]): void {
+		this.delivery.delivered(sessionId, messages);
 	}
 
 	hasReport(sessionId: string): boolean {
@@ -195,13 +205,14 @@ export class RemoteControl {
 				{
 					store: this.store,
 					listInstances: this.deps.listInstances,
-					send: this.deps.send,
+					send: (id, message) => this.delivery.send(id, message),
 					launch: () => this.launch(),
 					startSession: (spec) => this.startSession(spec),
 					claimStart: this.deps.claimStart,
 					paneStarting: this.deps.paneStarting,
 					startFailed: this.deps.startFailed,
 					report: (id) => this.reports.get(id),
+					outcomes: (id) => this.delivery.outcomes(id),
 					terminalOpen: () => this.terminalOpen(),
 					renameInstance: this.deps.renameInstance,
 					setPinned: this.deps.setPinned,

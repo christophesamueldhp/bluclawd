@@ -9,7 +9,7 @@ import {
 	SessionManager,
 	type ToolLoadout,
 } from "@earendil-works/pi-coding-agent";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type AdmissionContext,
 	type AdmissionResult,
@@ -19,9 +19,17 @@ import {
 	type RunAdmissionDeps,
 	type RunExecutionContext,
 } from "../ext/subagents/admission.ts";
+import { createRunDirectory } from "../ext/subagents/directory.ts";
 import { SubagentMessageBus } from "../ext/subagents/messages.ts";
 import { createParentScope } from "../ext/subagents/parent-scope.ts";
 import { type AdmittedSubagentHandle, type SubagentRunRecord, SubagentRunScheduler } from "../ext/subagents/runs.ts";
+import { ensureRunStorageDir } from "../ext/subagents/storage.ts";
+
+// Run storage works as usual unless a test makes it fail.
+vi.mock("../ext/subagents/storage.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../ext/subagents/storage.ts")>();
+	return { ...actual, ensureRunStorageDir: vi.fn(actual.ensureRunStorageDir) };
+});
 
 function handleOf(result: AdmissionResult): AdmittedSubagentHandle {
 	if (!result.ok) throw new Error(`Expected an admitted run, got: ${result.error}`);
@@ -42,6 +50,7 @@ function makeTempDir(prefix: string): string {
 }
 
 afterEach(() => {
+	vi.mocked(ensureRunStorageDir).mockClear();
 	while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
 });
 
@@ -89,9 +98,9 @@ async function setup(
 	await runtime.refresh({ allowNetwork: false });
 	const registry = new ModelRegistry(runtime);
 	const sessionManager = SessionManager.inMemory(cwd);
-	// Admitted runs stay live, so later launches see their names.
+	// Admitted runs stay live until stopped, so later launches see their names.
 	const scheduler = new SubagentRunScheduler<RunExecutionContext>({
-		executeRun: ({ record }) =>
+		executeRun: ({ record, signal }) =>
 			options.firstGenerationCompletes && !record.generation
 				? Promise.resolve({
 						status: "completed",
@@ -99,7 +108,11 @@ async function setup(
 						summaryText: "v1 done.",
 						transcriptPath: join(agentDir, "transcript.jsonl"),
 					})
-				: new Promise(() => {}),
+				: new Promise((resolve) =>
+						signal.addEventListener("abort", () =>
+							resolve({ status: "cancelled", complete: false, summaryText: "" }),
+						),
+					),
 	});
 	let loadout = loadoutOf(["probe"]);
 	const scope = createParentScope({
@@ -110,8 +123,10 @@ async function setup(
 		batchWindowMs: 0,
 	});
 	scope.enter({ sessionManager } as unknown as ExtensionContext, "replaced");
+	const directory = createRunDirectory({ scheduler, agentDir: () => agentDir });
 	const deps: RunAdmissionDeps = {
 		scheduler,
+		directory,
 		agentDir: () => agentDir,
 		catalog: () => undefined,
 		loadout: () => loadout,
@@ -142,7 +157,7 @@ async function setup(
 		overrides: Partial<AdmissionContext> = {},
 	) => {
 		const resumeCtx = { ...ctx, ...overrides };
-		return { result: admission.resume(run, buildPrompt, resumeCtx), ctx: resumeCtx };
+		return { result: admission.resume(run, "message", buildPrompt, resumeCtx), ctx: resumeCtx };
 	};
 	const storageDir = join(agentDir, "bluclawd", "subagents", sessionManager.getSessionId());
 	return {
@@ -156,6 +171,8 @@ async function setup(
 		scheduler,
 		launch,
 		storageDir,
+		directory,
+		scope,
 		invalidateSession: () => scope.invalidate("Parent session switching"),
 	};
 }
@@ -183,8 +200,8 @@ describe("Run admission", () => {
 			taskSummary: "Look.",
 		});
 		expect(handleOf(second).record.name).toBe("explorer-2");
-		// Admission checks the session's storage without leaving a directory of its own behind.
-		expect(readdirSync(storageDir)).toEqual([]);
+		// Admission prepares each admitted run's directory, and no other.
+		expect(readdirSync(storageDir).sort()).toEqual([handleOf(first).runId, handleOf(second).runId].sort());
 	});
 
 	it("refuses missing input, oversized tasks, denied roles, unknown roles and background runs in one-shot modes", async () => {
@@ -378,6 +395,14 @@ describe("Run admission", () => {
 		expect(scheduler.listRuns()).toHaveLength(0);
 	});
 
+	it("refuses a launch whose run storage cannot be created, so the run is never listed", async () => {
+		const { launch, directory, scope } = await setup();
+		vi.mocked(ensureRunStorageDir).mockReturnValueOnce({ ok: false, error: "disk full" });
+		const error = errorOf(await launch({ agent: "explorer", task: "x" }));
+		expect(error).toBe("Cannot launch subagent: storage is unavailable (disk full).");
+		expect(directory.list(scope.current()!)).toEqual([]);
+	});
+
 	it("resumes a completed run with the orchestrator's current tools and tool context, keeping its role and model", async () => {
 		const { launch, resume, scheduler, setLoadout } = await setup({ firstGenerationCompletes: true });
 		const launched = await launch({
@@ -403,7 +428,11 @@ describe("Run admission", () => {
 		expect(context.parentTools.map((tool) => tool.name)).toEqual(["probe", "fresh"]);
 		expect(context.definition.name).toBe("explorer");
 		expect(context.childModel.model.id).toBe("faux-alt");
-		expect(context.resume).toEqual({ transcriptPath: completed.transcriptPath, prompt: "Now add tests." });
+		expect(context.resume).toEqual({
+			transcriptPath: completed.transcriptPath,
+			prompt: "Now add tests.",
+			toolCallId: "message",
+		});
 	});
 
 	it("refuses to resume a run whose role is now denied, before taking a message number", async () => {
@@ -436,12 +465,18 @@ describe("Run admission", () => {
 		}
 	});
 
-	it("refuses to resume a run that is not completed, or whose session was replaced", async () => {
+	it("refuses to resume a run that is running or stopped, or whose session was replaced", async () => {
 		const live = await setup();
 		const running = handleOf(await live.launch({ agent: "explorer", task: "x" })).record;
 		const notDone = await live.resume(running, () => "x").result;
 		expect(notDone).toMatchObject({ ok: false, refusal: "unavailable" });
 		expect(errorOf(notDone)).toMatch(/only a completed subagent can be resumed/);
+
+		const stuck = handleOf(await live.launch({ agent: "explorer", name: "stuck", task: "Hold.", background: true }));
+		live.scheduler.cancelRun(stuck.runId, "model");
+		const stopped = await live.resume(await stuck.completion, () => "Go on.").result;
+		expect(stopped).toMatchObject({ ok: false, refusal: "unavailable" });
+		expect(errorOf(stopped)).toMatch(/^"stuck" \(sub_[^)]+\) is cancelled; only a completed subagent can be resumed/);
 
 		const { launch, resume, invalidateSession } = await setup({ firstGenerationCompletes: true });
 
