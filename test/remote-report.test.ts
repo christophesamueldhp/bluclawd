@@ -1164,8 +1164,9 @@ describe("a phone prompt in a real pi session", () => {
 				async () => {
 					bus?.emit("bluclawd:pane-message", { type: "prompt", id: "p-1", text: "later" });
 					await waitFor(() => expect(pane.session.getFollowUpMessages()).toEqual(["later"]));
-					// No extension event says so: pi's queue is in the Mac's editor now.
-					await new Promise((resolve) => setTimeout(resolve, 20));
+					// The pane's heartbeat finds it there before Esc puts pi's queue in the Mac's editor,
+					// which no extension event tells.
+					bus?.emit("bluclawd:remote-watched", false);
 					pane.session.clearQueue();
 					return fauxAssistantMessage("First.");
 				},
