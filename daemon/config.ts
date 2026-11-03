@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { daemonBuildId, getServerDir } from "./paths.ts";
+import { daemonBuildId } from "./paths.ts";
 
 export { getServerDir, getSocketPath } from "./paths.ts";
 
@@ -42,6 +42,6 @@ export const VERSION: string = pkg.version || "0.0.0";
  */
 export const BUILD_ID: string = daemonBuildId(__dirname, process.env.PI_PACKAGE_ROOT);
 
-export function getInstancesPath(): string {
-	return join(getServerDir(), "instances.json");
+export function getInstancesPath(dir: string): string {
+	return join(dir, "instances.json");
 }

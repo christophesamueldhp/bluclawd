@@ -104,8 +104,11 @@ export interface RunSubagentOptions extends SubagentRunnerExecuteParams {
 	activeToolNames: readonly string[];
 	/** Pi built-in extensions (codemode, tool_search) the child runs over its own tools. */
 	builtinExtensions: readonly string[];
-	onChildSessionCreated?: (session: AgentSession) => void;
+	onChildSessionCreated?: (session: ChildSession) => void;
 }
+
+/** What a run sees of its child session: when its last turn ends, and a way to steer messages in. */
+export type ChildSession = Pick<AgentSession, "subscribe" | "sendCustomMessage">;
 
 export function captureWorkspaceSnapshot(cwd: string): WorkspaceSnapshot {
 	try {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { PaneDialog, PaneMessage } from "../../daemon/ipc/protocol.ts";
+import type { EndReason, PaneDialog, PaneMessage } from "../../daemon/ipc/protocol.ts";
 import type { AgentActivity, OrchestratorClient, RegisterInput } from "../../daemon/orchestrator-client.ts";
 import { piCommand } from "../../daemon/tmux.ts";
 
@@ -265,8 +265,9 @@ export class SelfRegistration {
 		}, done);
 	}
 
-	/** `unregister: false`: the pane's next session carries on its row, under the same id. */
-	async stop(options: { unregister?: boolean } = {}): Promise<void> {
+	/** `unregister: false`: the pane's next session carries on its row, under the same id.
+	 *  `reason`: why the session ended; a quit keeps its row, stopped. */
+	async stop(options: { unregister?: boolean; reason?: EndReason } = {}): Promise<void> {
 		this.stopped = true;
 		if (this.timer) {
 			clearInterval(this.timer);
@@ -279,7 +280,7 @@ export class SelfRegistration {
 		await Promise.allSettled([...this.inflight]);
 		if (options.unregister === false) return;
 		try {
-			await this.client.unregister(this.id);
+			await this.client.unregister(this.id, options.reason);
 		} catch {
 			// ignore
 		}

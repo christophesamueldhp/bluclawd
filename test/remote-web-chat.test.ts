@@ -8,6 +8,7 @@ import {
 	listed,
 	openChat,
 	replyEndedAt,
+	settleOutcomes,
 } from "#remote-web/chat.js";
 
 const user = (id: string, text: string) => ({ kind: "user", id, text });
@@ -184,6 +185,80 @@ describe("prompts sent from the chat", () => {
 		const entry = addPending(chat, "go", [], 100);
 		expect(checkPending(chat, entry, "working")).toBe("wait");
 		expect(chat.pending).toEqual([entry]);
+	});
+});
+
+describe("prompts sent to a pane that reports their outcomes", () => {
+	/** A pane from this build: its report carries outcomes, none yet. */
+	const reporting = () => {
+		const chat = openChat("a");
+		chat.report = { models: [], outcomes: [] };
+		chat.messages = [reply("1")];
+		return chat;
+	};
+
+	it("each get an id of their own, the same text too", () => {
+		const chat = reporting();
+		const first = addPending(chat, "again", [], 100);
+		const second = addPending(chat, "again", [], 200);
+		expect(first.id).toMatch(/^[\w-]{1,64}$/);
+		expect(second.id).not.toBe(first.id);
+	});
+
+	it("are settled by their own id, not by the transcript's text", () => {
+		const chat = reporting();
+		const first = addPending(chat, "again", [], 100);
+		const second = addPending(chat, "again", [], 200);
+		// The transcript has the text, with a note pi added to it: still waiting on the pane's word.
+		applyLatest(chat, { messages: [reply("1"), user("2", "again")], more: false });
+		expect(chat.pending).toEqual([first, second]);
+		settleOutcomes(chat, [{ id: second.id, outcome: "queued" }]);
+		expect(second.outcome).toBe("queued");
+		// Taken, and the transcript moved past it: it is there, not pending.
+		settleOutcomes(chat, [
+			{ id: first.id, outcome: "taken" },
+			{ id: second.id, outcome: "queued" },
+		]);
+		expect(chat.pending).toEqual([second]);
+		// A queued one waits for pi to start it, never failing meanwhile.
+		expect(checkPending(chat, second, "idle")).toBe("wait");
+		applyLatest(chat, { messages: [reply("1"), user("2", "again"), reply("3")], more: false });
+		expect(chat.pending).toEqual([second]);
+		settleOutcomes(chat, [{ id: second.id, outcome: "taken" }]);
+		expect(chat.pending).toEqual([]);
+	});
+
+	it("show taken until the transcript has them", () => {
+		const chat = reporting();
+		const entry = addPending(chat, "go", [], 100);
+		settleOutcomes(chat, [{ id: entry.id, outcome: "taken" }]);
+		expect(chat.pending).toEqual([entry]);
+		expect(entry.outcome).toBe("taken");
+		applyLatest(chat, { messages: [reply("1"), user("2", "go")], more: false });
+		expect(chat.pending).toEqual([]);
+	});
+
+	it("still fail at the give-up when no outcome came", () => {
+		const chat = reporting();
+		const entry = addPending(chat, "go", [], 100);
+		expect(checkPending(chat, entry, "idle")).toBe("fail");
+	});
+});
+
+describe("prompts sent to a pane from an older build, which reports no outcomes", () => {
+	it("are matched by the transcript's text, as before", () => {
+		const chat = openChat("a");
+		// It sent no report, or one without outcomes.
+		for (const report of [null, { models: [] }]) {
+			chat.report = report;
+			chat.messages = [reply("1")];
+			const entry = addPending(chat, "hi", [], 100);
+			settleOutcomes(chat, report && "outcomes" in report ? [] : undefined);
+			applyLatest(chat, { messages: [reply("1")], more: false });
+			expect(chat.pending).toEqual([entry]);
+			applyLatest(chat, { messages: [reply("1"), user("2", "hi")], more: false });
+			expect(chat.pending).toEqual([]);
+		}
 	});
 });
 

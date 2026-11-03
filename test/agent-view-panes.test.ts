@@ -3,7 +3,6 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { InstanceSummary, OrchestratorClient } from "../daemon/orchestrator-client.ts";
 import { collectRows } from "../daemon/rows.ts";
-import { ServerSupervisor } from "../daemon/supervisor.ts";
 import { HIDE_ENV, OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../daemon/tmux.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
@@ -16,6 +15,7 @@ import {
 	shutdownPlan,
 } from "../ext/agent-view/index.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
+import { testRegistry } from "./helpers/registry.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 const plainTheme = {
@@ -406,6 +406,18 @@ describe("tmux", () => {
 		expect(() => tmux.newSession({ cwd: HERE, args: [] })).toThrow("ETIMEDOUT");
 	});
 
+	it("tells a pane that is gone from one tmux could not be asked about", () => {
+		const gone = Object.assign(new Error("tmux failed"), { stderr: "can't find session: =pi-b\n" });
+		const tmux = new Tmux("/srv", (args) => {
+			if (args.at(-1) === "=pi-b") throw gone;
+			if (args.at(-1) === "=pi-c") throw new Error("ETIMEDOUT");
+			return "";
+		});
+		expect(tmux.hasSession("pi-a")).toBe(true);
+		expect(tmux.hasSession("pi-b")).toBe(false);
+		expect(() => tmux.hasSession("pi-c")).toThrow("ETIMEDOUT");
+	});
+
 	it("targets sessions by exact name", () => {
 		const runs: string[][] = [];
 		const tmux = new Tmux("/srv", (args) => {
@@ -564,7 +576,7 @@ describe("daemon: pane registrations", () => {
 	const rec = (id: string, createdAt: string) => ({ id, status: "online" as const, cwd: HERE, createdAt, pane: id });
 
 	it("keeps a pane's age and pin across heartbeats, delivers queued messages once, and deletes it", async () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("pi-a", "2026-01-01T00:00:00Z"), "idle", 1000);
 		supervisor.setInstanceMeta("pi-a", { pinned: true });
 		expect(supervisor.sendExternal("pi-a", { type: "abort" })).toBe(true);
@@ -579,7 +591,7 @@ describe("daemon: pane registrations", () => {
 	});
 
 	it("delivers everything queued, in order, in one drain", () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("pi-a", "2026-01-01T00:00:00Z"), "idle");
 		supervisor.sendExternal("pi-a", { type: "rename", name: "x" });
 		supervisor.sendExternal("pi-a", { type: "prompt", text: "first" });

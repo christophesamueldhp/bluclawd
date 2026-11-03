@@ -12,6 +12,9 @@ export interface InstanceRecord {
 	createdAt: string;
 	lastSeenAt?: string;
 	label?: string;
+	/** The name its pane last gave it. A pane's name replaces the row's only once it changes, so a
+	 *  name given to the stopped row survives a resume. */
+	paneLabel?: string;
 	sessionId?: string;
 	sessionFile?: string;
 	/** Agent-view row state (daemon/session-state.ts), persisted so a row survives a restart. */

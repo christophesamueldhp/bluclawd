@@ -3,6 +3,7 @@ import {
 	chmodSync,
 	existsSync,
 	mkdirSync,
+	readdirSync,
 	readFileSync,
 	renameSync,
 	rmSync,
@@ -195,6 +196,18 @@ export function readPersistedRunRecord(
 	} catch {
 		return undefined;
 	}
+}
+
+/** Every run stored for the parent session. */
+export function listPersistedRunRecords(agentDir: string, parentSessionId: string): SubagentRunRecord[] {
+	if (!isSafePathSegment(parentSessionId)) return [];
+	let runIds: string[];
+	try {
+		runIds = readdirSync(join(getSubagentsRootDir(agentDir), parentSessionId));
+	} catch {
+		return [];
+	}
+	return runIds.flatMap((runId) => readPersistedRunRecord(agentDir, parentSessionId, runId) ?? []);
 }
 
 /** Maps statuses and stop sources from before the queue and child quotas were removed. */
