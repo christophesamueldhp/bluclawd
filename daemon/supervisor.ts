@@ -89,8 +89,9 @@ export class ServerSupervisor {
 	private readonly resumedMeta = new Map<string, Pick<InstanceRecord, "pinned" | "sortOrder">>();
 	/** Rows a start claimed whose pane has not registered yet, by row id. */
 	private readonly startingRows = new Map<string, Starting>();
-	/** A pane went, reaped or unregistered, listed as `rowId` and with `inbox` still queued for it. */
-	onDropped: ((rowId: string, inbox: PaneMessage[]) => void) | undefined;
+	/** A pane went, reaped or unregistered, listed as `rowId` and with `inbox` still queued for it.
+	 *  `reason`: why its session ended, when it unregistered saying so. */
+	onDropped: ((rowId: string, inbox: PaneMessage[], reason?: EndReason) => void) | undefined;
 
 	constructor(deps: RegistryDeps) {
 		this.deps = deps;
@@ -258,19 +259,19 @@ export class ServerSupervisor {
 		const stops = reason === "quit" || reason === "new" || reason === "resume" || reason === "fork";
 		if (entry && file && stops && existsSync(file)) {
 			const { cwd, paneLabel, sessionId } = entry.record;
-			this.stopRow({ cwd, label: paneLabel, sessionFile: file, sessionId }, [id, entry]);
+			this.stopRow({ cwd, label: paneLabel, sessionFile: file, sessionId }, [id, entry], reason);
 			if (reason === "quit") this.savesDue.set(file, { deleted: false });
 			return;
 		}
 		if (entry?.rowId === id && reason) removeInstance(this.deps.dir, id);
-		if (entry) this.drop(id, entry);
+		if (entry) this.drop(id, entry, reason);
 	}
 
 	/** A pane's registration ends, and with it its inbox. */
-	private drop(id: string, entry: ExternalInstance): void {
+	private drop(id: string, entry: ExternalInstance, reason?: EndReason): void {
 		this.externalInstances.delete(id);
 		this.settleWait(id, "none");
-		this.onDropped?.(entry.rowId, entry.inbox);
+		this.onDropped?.(entry.rowId, entry.inbox, reason);
 	}
 
 	/** Queue a message for a self-registered session, by its pane's id or its row's; false when no
@@ -419,6 +420,7 @@ export class ServerSupervisor {
 	private stopRow(
 		options: { cwd: string; label?: string; sessionFile: string; sessionId?: string },
 		pane: [string, ExternalInstance] | undefined,
+		reason?: EndReason,
 	): InstanceRecord {
 		const now = new Date(this.deps.now()).toISOString();
 		const previous = loadInstances(this.deps.dir).find((instance) => instance.sessionFile === options.sessionFile);
@@ -427,7 +429,7 @@ export class ServerSupervisor {
 		// (its session header's time).
 		const ended = pane?.[1];
 		const last = ended?.record ?? previous;
-		if (pane) this.drop(pane[0], pane[1]);
+		if (pane) this.drop(pane[0], pane[1], reason);
 		const record: InstanceRecord = {
 			...previous,
 			...(ended && paneMeta(ended.record)),

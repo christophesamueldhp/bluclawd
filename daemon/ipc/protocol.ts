@@ -206,10 +206,12 @@ export interface PaneReport {
 
 /** Why a pane did not hand a phone's prompt or command to pi: a turn runs, the Mac's prompt holds a
  *  draft or a dialog has the keyboard (commands only), pi is compacting, the pane is on another
- *  session than the one it was sent to, or tmux could not press Enter in the pane. */
+ *  session than the one it was sent to (or left it for another before pi took it, as the daemon
+ *  says), or tmux could not press Enter in the pane. */
 export type RefusedReason = "busy" | "draft" | "dialog" | "compacting" | "session_changed" | "unreachable";
 
-/** Why a prompt never reached a pane: its pane went (reaped or unregistered) with it still queued.
+/** Why a prompt never reached pi's turn: its pane went (reaped or unregistered) with it still queued,
+ *  in its inbox or in pi.
  *  The phone adds `daemon_restarted` for an id a restarted daemon no longer knows. */
 export type LostReason = "pane_gone" | "daemon_restarted";
 

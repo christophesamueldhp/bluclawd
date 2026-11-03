@@ -5,6 +5,7 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
+	EndReason,
 	ErrorResponse,
 	InstanceSummary,
 	LiveSnapshot,
@@ -168,9 +169,9 @@ export class RemoteControl {
 		this.server?.status(sessionId);
 	}
 
-	/** The pane listed as `sessionId` went with `inbox` still queued for it. */
-	lost(sessionId: string, inbox: PaneMessage[]): void {
-		this.delivery.lost(sessionId, inbox);
+	/** The pane listed as `sessionId` went with `inbox` still queued for it; `reason`: why its session ended. */
+	lost(sessionId: string, inbox: PaneMessage[], reason?: EndReason): void {
+		this.delivery.lost(sessionId, inbox, reason);
 		this.server?.status(sessionId);
 	}
 
