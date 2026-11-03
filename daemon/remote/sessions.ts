@@ -30,6 +30,9 @@ export interface RemoteSession {
 	livePanes?: number;
 	/** A pane is being started on it and has not registered yet. */
 	starting?: true;
+	/** Its pane's pi stopped beating while tmux still has its pane (the Mac slept, pi is held up):
+	 *  shown as it last beat, alive. */
+	silent?: true;
 }
 
 function sessionRows(instances: InstanceSummary[]): AgentRow[] {
@@ -55,6 +58,7 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 				...(row.settled !== undefined ? { settled: row.settled } : {}),
 				...(row.livePanes ? { livePanes: row.livePanes } : {}),
 				...(row.starting ? { starting: true } : {}),
+				...(row.silent ? { silent: true } : {}),
 			});
 		}
 	}

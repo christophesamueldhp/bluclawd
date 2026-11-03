@@ -1,9 +1,12 @@
 // test/remote-sessions.test.ts
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleIpcRequest, listSummaries } from "../daemon/handler.ts";
 import type { InstanceSummary } from "../daemon/ipc/protocol.ts";
 import { findSession, remoteSessions } from "../daemon/remote/sessions.ts";
-import type { ServerSupervisor } from "../daemon/supervisor.ts";
+import { ServerSupervisor } from "../daemon/supervisor.ts";
 import { testRegistry } from "./helpers/registry.ts";
 
 const live = (
@@ -163,5 +166,52 @@ describe("remote sessions through the daemon", () => {
 		});
 		await beat("working");
 		expect(remoteSessions(listSummaries(supervisor))[0]).not.toHaveProperty("dialog");
+	});
+});
+
+/** A registry on its own dir and clock, whose tmux has every pane but those in `gone`. */
+function silentRegistry() {
+	const dir = mkdtempSync(join(tmpdir(), "bluclawd-silent-"));
+	const clock = { now: 1_000_000 };
+	const gone = new Set<string>();
+	const supervisor = new ServerSupervisor({
+		now: () => clock.now,
+		tmux: { hasSession: (name) => !gone.has(name) },
+		dir,
+	});
+	const beat = (id: string, sessionFile: string) =>
+		supervisor.registerExternal(
+			{ id, status: "online", cwd: dir, createdAt: "2026-10-12T00:00:00Z", sessionFile, pane: id, label: "task" },
+			"working",
+		);
+	/** No heartbeat for longer than the registry waits. */
+	const reap = () => {
+		clock.now += 20_000;
+	};
+	return { dir, supervisor, gone, beat, reap, list: () => remoteSessions(listSummaries(supervisor)) };
+}
+
+describe("a pane reaped while tmux still has it (a silent pane)", () => {
+	it("stays listed as its row, alive and said to be silent, and its file is not started again", () => {
+		const { dir, supervisor, beat, reap, list } = silentRegistry();
+		const file = join(dir, "s.jsonl");
+		writeFileSync(file, "");
+		beat("pi-s", file);
+		expect(list()).toEqual([expect.objectContaining({ id: "pi-s", alive: true })]);
+		expect(list()[0]).not.toHaveProperty("silent");
+		reap();
+		expect(list()).toEqual([expect.objectContaining({ id: "pi-s", alive: true, silent: true, state: "working" })]);
+		expect(supervisor.claimStart({ cwd: dir, sessionFile: file })).toEqual({ ok: false, refused: "running" });
+	});
+
+	it("stays listed when a start claimed its row and pi has not written its file yet", () => {
+		const { dir, supervisor, beat, reap, list } = silentRegistry();
+		const file = join(dir, "new.jsonl");
+		const claim = supervisor.claimStart({ cwd: dir, sessionFile: file });
+		if (!claim.ok) throw new Error("not claimed");
+		beat("pi-c", file);
+		reap();
+		expect(list()).toEqual([expect.objectContaining({ id: claim.id, alive: true, silent: true })]);
+		expect(supervisor.claimStart({ cwd: dir, sessionFile: file })).toEqual({ ok: false, refused: "running" });
 	});
 });

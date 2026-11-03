@@ -37,6 +37,8 @@ export interface AgentRow {
 	livePanes?: number;
 	/** A pane is being started on it and has not registered yet. */
 	starting?: true;
+	/** Its pane's pi stopped beating while tmux still has its pane: shown as it last beat. */
+	silent?: true;
 }
 
 /** A `!` command as a row, as bluclawd's: working while it runs (its last output line the
@@ -116,6 +118,7 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 		...(state === "needs" && inst.dialog ? { dialog: inst.dialog } : {}),
 		...(inst.settled !== undefined ? { settled: inst.settled } : {}),
 		...(inst.status === "starting" ? { starting: true } : {}),
+		...(inst.silent ? { silent: true } : {}),
 	};
 }
 

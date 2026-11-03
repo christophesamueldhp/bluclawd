@@ -330,6 +330,8 @@ export interface InstanceSummary {
 	draft?: boolean;
 	/** A pane's pi: how many times it stopped working, which a turn too quick for a poll still adds to. */
 	settled?: number;
+	/** A pane's pi that stopped beating while tmux still has its pane: listed as it last beat. */
+	silent?: true;
 }
 
 interface ResponseMeta {

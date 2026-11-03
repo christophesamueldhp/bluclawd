@@ -389,10 +389,13 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		return { row, beat, report, deliver, unregister: (reason: EndReason) => client.unregister(id, reason) };
 	}
 
-	/** No heartbeat from pane `id` for longer than the registry waits: the next look at the list reaps it. */
+	/** No heartbeat from pane `id` for longer than the registry waits: the next look at the list reaps it,
+	 *  and one tmux still has is listed silent. */
 	async function reap(id: string) {
 		clock += 20_000;
-		await waitFor(() => expect(supervisor.listExternalInstances().some((e) => e.record.pane === id)).toBe(false));
+		await waitFor(() =>
+			expect(supervisor.listExternalInstances().some((e) => e.record.pane === id && !e.silent)).toBe(false),
+		);
 	}
 
 	it.each([

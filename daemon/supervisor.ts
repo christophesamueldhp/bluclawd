@@ -102,9 +102,9 @@ export class ServerSupervisor {
 	 *  queued for it: its pi may only be held up (the Mac slept), so what it was given waits on it.
 	 *  onDropped follows once its tmux session is gone or it unregisters, unless it beats again. */
 	onSilent: ((rowId: string, inbox: PaneMessage[]) => void) | undefined;
-	/** Panes reaped while tmux still has their session, by pane id: the row each was listed as, its
-	 *  tmux session, and its session's file. */
-	private readonly silentPanes = new Map<string, { rowId: string; pane: string; sessionFile?: string }>();
+	/** Panes reaped while tmux still has their session, by pane id, each as it last beat: still listed
+	 *  as its row, alive. */
+	private readonly silentPanes = new Map<string, ExternalInstance>();
 
 	constructor(deps: RegistryDeps) {
 		this.deps = deps;
@@ -117,7 +117,8 @@ export class ServerSupervisor {
 		this.silentPanes.delete(record.id);
 		// The same pane beating again on the same session goes on as the row it fell silent as, which
 		// may have no stored row yet (a row a start claimed, before pi wrote its file).
-		const back = silent?.pane === record.pane && silent?.sessionFile === record.sessionFile ? silent : undefined;
+		const back =
+			silent?.record.pane === record.pane && silent?.record.sessionFile === record.sessionFile ? silent : undefined;
 		const resumed = record.sessionFile ? this.resumedMeta.get(record.sessionFile) : undefined;
 		if (record.sessionFile) {
 			this.resumedMeta.delete(record.sessionFile);
@@ -208,9 +209,10 @@ export class ServerSupervisor {
 	claimStart(spec: ResumeSpec): StartClaim {
 		const now = this.deps.now();
 		const file = spec.sessionFile;
-		const running = [...this.externalInstances.values()].some(
-			(entry) => entry.record.sessionFile === file && now - entry.lastSeenAt <= EXTERNAL_TTL_MS,
-		);
+		const running =
+			[...this.externalInstances.values()].some(
+				(entry) => entry.record.sessionFile === file && now - entry.lastSeenAt <= EXTERNAL_TTL_MS,
+			) || [...this.silentPanes.values()].some((entry) => entry.record.sessionFile === file);
 		if (running) return { ok: false, refused: "running" };
 		if ([...this.starting().values()].some((starting) => starting.record.sessionFile === file)) {
 			return { ok: false, refused: "starting" };
@@ -353,16 +355,17 @@ export class ServerSupervisor {
 	/** External instances, each as its row, reaping any whose last heartbeat is older than the TTL: its
 	 *  stored row shows until it beats again. One whose pane tmux says is gone died unseen (a crash, a
 	 *  SIGKILL), so its row is stopped with what its file holds last; one whose pane tmux still has
-	 *  falls silent (see onSilent). */
+	 *  falls silent (see onSilent), and is listed as it last beat, `silent`, unless another pane goes
+	 *  on as its row. */
 	listExternalInstances(
 		now: number = this.deps.now(),
-	): Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> {
-		for (const [id, { rowId, pane }] of this.silentPanes) {
-			if (!this.paneGone(pane)) continue;
+	): Array<{ record: InstanceRecord; activity: AgentActivity; settled: number; silent?: true }> {
+		for (const [id, { rowId, record }] of this.silentPanes) {
+			if (!record.pane || !this.paneGone(record.pane)) continue;
 			this.silentPanes.delete(id);
 			this.onDropped?.(rowId, []);
 		}
-		const out: Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> = [];
+		const out: Array<{ record: InstanceRecord; activity: AgentActivity; settled: number; silent?: true }> = [];
 		for (const [id, entry] of this.externalInstances) {
 			if (now - entry.lastSeenAt > EXTERNAL_TTL_MS) {
 				const { cwd, paneLabel, sessionFile, sessionId, pane } = entry.record;
@@ -375,7 +378,7 @@ export class ServerSupervisor {
 				if (pane && up) {
 					this.externalInstances.delete(id);
 					this.settleWait(id, "none");
-					this.silentPanes.set(id, { rowId: entry.rowId, pane, sessionFile });
+					this.silentPanes.set(id, entry);
 					this.onSilent?.(entry.rowId, entry.inbox);
 					continue;
 				}
@@ -383,6 +386,11 @@ export class ServerSupervisor {
 				continue;
 			}
 			out.push({ record: { ...entry.record, id: entry.rowId }, activity: entry.activity, settled: entry.settled });
+		}
+		for (const entry of this.silentPanes.values()) {
+			if (out.some((listed) => listed.record.id === entry.rowId)) continue;
+			const { record, activity, settled } = entry;
+			out.push({ record: { ...record, id: entry.rowId }, activity, settled, silent: true });
 		}
 		return out;
 	}
@@ -418,9 +426,9 @@ export class ServerSupervisor {
 		saveInstances(this.deps.dir, instances);
 	}
 
-	/** Stored rows, but for those a live pane goes on as: that pane lists them. */
+	/** Stored rows, but for those a live or silent pane goes on as: that pane lists them. */
 	listInstances(): InstanceRecord[] {
-		const live = new Set([...this.externalInstances.values()].map((entry) => entry.rowId));
+		const live = new Set([...this.externalInstances.values(), ...this.silentPanes.values()].map((e) => e.rowId));
 		const starting = this.starting();
 		const stored = loadInstances(this.deps.dir).filter((instance) => !live.has(instance.id));
 		// A row a start claimed shows as starting, in its stored row's place if it has one.
