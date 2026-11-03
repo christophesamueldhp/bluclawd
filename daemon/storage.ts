@@ -3,8 +3,8 @@ import { getInstancesPath } from "./config.ts";
 import { ensureServerDir } from "./paths.ts";
 import type { InstanceRecord } from "./types.ts";
 
-export function loadInstances(): InstanceRecord[] {
-	const instancesPath = getInstancesPath();
+export function loadInstances(dir: string): InstanceRecord[] {
+	const instancesPath = getInstancesPath(dir);
 	if (!existsSync(instancesPath)) {
 		return [];
 	}
@@ -20,33 +20,33 @@ export function loadInstances(): InstanceRecord[] {
 	}
 }
 
-export function saveInstances(instances: InstanceRecord[]): void {
-	ensureServerDir();
+export function saveInstances(dir: string, instances: InstanceRecord[]): void {
+	ensureServerDir(dir);
 	// Write-then-rename so a crash mid-write can't leave a half-written instances.json behind.
-	const instancesPath = getInstancesPath();
+	const instancesPath = getInstancesPath(dir);
 	const tmpPath = `${instancesPath}.tmp`;
 	writeFileSync(tmpPath, JSON.stringify(instances, null, 2));
 	renameSync(tmpPath, instancesPath);
 }
 
-export function getInstance(instanceId: string): InstanceRecord | undefined {
-	return loadInstances().find((instance) => instance.id === instanceId);
+export function getInstance(dir: string, instanceId: string): InstanceRecord | undefined {
+	return loadInstances(dir).find((instance) => instance.id === instanceId);
 }
 
-export function upsertInstance(instance: InstanceRecord): void {
-	const instances = loadInstances();
+export function upsertInstance(dir: string, instance: InstanceRecord): void {
+	const instances = loadInstances(dir);
 	const index = instances.findIndex((existing) => existing.id === instance.id);
 	if (index === -1) {
 		instances.push(instance);
-		saveInstances(instances);
+		saveInstances(dir, instances);
 		return;
 	}
 
 	instances[index] = instance;
-	saveInstances(instances);
+	saveInstances(dir, instances);
 }
 
-export function removeInstance(instanceId: string): void {
-	const instances = loadInstances().filter((instance) => instance.id !== instanceId);
-	saveInstances(instances);
+export function removeInstance(dir: string, instanceId: string): void {
+	const instances = loadInstances(dir).filter((instance) => instance.id !== instanceId);
+	saveInstances(dir, instances);
 }

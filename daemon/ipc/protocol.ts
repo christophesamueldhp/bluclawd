@@ -79,9 +79,14 @@ export interface WaitRequest {
 	instanceId: string;
 }
 
+/** Why a pane's session ended, as pi's session_shutdown says. */
+export type EndReason = "quit" | "reload" | "new" | "resume" | "fork";
+
 export interface UnregisterRequest {
 	type: "unregister";
 	instanceId: string;
+	/** Absent from a pane of an older build. */
+	reason?: EndReason;
 }
 
 /** Ask the daemon to exit so a client can start a fresh one (a stale build). */

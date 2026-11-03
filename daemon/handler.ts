@@ -28,7 +28,7 @@ import type {
 	WaitResponse,
 } from "./ipc/protocol.ts";
 import type { RemoteControl } from "./remote/control.ts";
-import { supervisor } from "./supervisor.ts";
+import type { ServerSupervisor } from "./supervisor.ts";
 import type { InstanceRecord } from "./types.ts";
 
 function toInstanceSummary(
@@ -80,11 +80,12 @@ export function setRemoteControl(control: RemoteControl | undefined): void {
 }
 
 /** Every row agent view lists: stored rows, then each pane's pi with its activity. */
-export function listSummaries(): InstanceSummary[] {
-	const stored = supervisor.listInstances().map((instance) => toInstanceSummary(instance));
+export function listSummaries(supervisor: ServerSupervisor): InstanceSummary[] {
+	// Panes first: one reaped here shows its stored row again.
 	const external = supervisor
 		.listExternalInstances()
 		.map(({ record, activity, settled }) => toInstanceSummary(record, activity, true, settled));
+	const stored = supervisor.listInstances().map((instance) => toInstanceSummary(instance));
 	return [...stored, ...external];
 }
 
@@ -97,14 +98,36 @@ function unknownInstanceError(instanceId: string): ErrorResponse {
 }
 
 // Overhead types
-export async function handleIpcRequest(request: ListRequest): Promise<ListResponse | ErrorResponse>;
-export async function handleIpcRequest(request: StatusRequest): Promise<StatusResponse | ErrorResponse>;
-export async function handleIpcRequest(request: RegisterRequest): Promise<RegisterResponse | ErrorResponse>;
-export async function handleIpcRequest(request: WaitRequest): Promise<WaitResponse | ErrorResponse>;
-export async function handleIpcRequest(request: UnregisterRequest): Promise<UnregisterResponse | ErrorResponse>;
-export async function handleIpcRequest(request: ShutdownRequest): Promise<ShutdownResponse | ErrorResponse>;
-export async function handleIpcRequest(request: RemoteRequest): Promise<RemoteResponse | ErrorResponse>;
 export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: ListRequest,
+): Promise<ListResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: StatusRequest,
+): Promise<StatusResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: RegisterRequest,
+): Promise<RegisterResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: WaitRequest,
+): Promise<WaitResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: UnregisterRequest,
+): Promise<UnregisterResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: ShutdownRequest,
+): Promise<ShutdownResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: RemoteRequest,
+): Promise<RemoteResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
 	request:
 		| DeleteRequest
 		| RenameRequest
@@ -114,11 +137,11 @@ export async function handleIpcRequest(
 		| RemoteLiveRequest
 		| RemoteReportRequest,
 ): Promise<AckResponse | ErrorResponse>;
-export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse>;
-export async function handleIpcRequest(request: ServerRequest): Promise<ServerResponse> {
+export async function handleIpcRequest(supervisor: ServerSupervisor, request: ServerRequest): Promise<ServerResponse>;
+export async function handleIpcRequest(supervisor: ServerSupervisor, request: ServerRequest): Promise<ServerResponse> {
 	switch (request.type) {
 		case "list": {
-			return { type: "list_result", ok: true, instances: listSummaries() };
+			return { type: "list_result", ok: true, instances: listSummaries(supervisor) };
 		}
 
 		case "status": {
@@ -154,14 +177,16 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 			};
 			if (request.instance.launch) remoteControl?.noteLaunch(request.instance.launch);
 			supervisor.registerExternal(record, request.instance.activity ?? "idle");
+			// The phone started it by its pane's name, and knows it by its row's id.
 			remoteControl?.registered(record.id);
+			const row = supervisor.rowIdOf(record.id);
 			const messages = supervisor.drainExternal(record.id);
 			return {
 				type: "register_result",
 				ok: true,
 				...(messages.length ? { messages } : {}),
-				...(remoteControl?.watched(record.id) ? { watched: true } : {}),
-				...(remoteControl && !remoteControl.hasReport(record.id) ? { wantReport: true } : {}),
+				...(remoteControl?.watched(row) ? { watched: true } : {}),
+				...(remoteControl && !remoteControl.hasReport(row) ? { wantReport: true } : {}),
 			};
 		}
 
@@ -183,9 +208,10 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 		}
 
 		case "unregister": {
-			supervisor.unregisterExternal(request.instanceId);
-			remoteControl?.live(request.instanceId, null);
-			remoteControl?.report(request.instanceId, undefined);
+			const row = supervisor.rowIdOf(request.instanceId);
+			supervisor.unregisterExternal(request.instanceId, request.reason);
+			remoteControl?.live(row, null);
+			remoteControl?.report(row, undefined);
 			return { type: "unregister_result", ok: true };
 		}
 
@@ -219,7 +245,7 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 				sessionFile: request.sessionFile,
 				sessionId: request.sessionId,
 			});
-			return { type: "ack", ok: true, instance: toInstanceSummary(instance) };
+			return { type: "ack", ok: true, ...(instance ? { instance: toInstanceSummary(instance) } : {}) };
 		}
 
 		case "remote": {
@@ -229,12 +255,12 @@ export async function handleIpcRequest(request: ServerRequest): Promise<ServerRe
 		}
 
 		case "remote_live": {
-			remoteControl?.live(request.instanceId, request.live);
+			remoteControl?.live(supervisor.rowIdOf(request.instanceId), request.live);
 			return { type: "ack", ok: true };
 		}
 
 		case "remote_report": {
-			remoteControl?.report(request.instanceId, request.report);
+			remoteControl?.report(supervisor.rowIdOf(request.instanceId), request.report);
 			return { type: "ack", ok: true };
 		}
 

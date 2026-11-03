@@ -26,7 +26,7 @@ const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), "web");
 const NOTIFY_INTERVAL_MS = 1000;
 const PUSH_SUBJECT = "https://github.com/christophesamueldhp/bluclawd";
 /** Each tmux command is a quick round-trip to the server: a hung one must not hold up the daemon. */
-const TMUX_TIMEOUT_MS = 2000;
+export const TMUX_TIMEOUT_MS = 2000;
 /** A pane the phone started that has not registered by then never will: it is ended, not left
  *  running unseen. Past the phone's own wait (START_TIMEOUT_MS in web/app.js). */
 const START_TIMEOUT_MS = 90_000;

@@ -292,6 +292,17 @@ export class Tmux {
 		return this.run(["display-message", "-p", "-t", `=${name}:`, "#{@bluclawd_view_ready}"]).trim() === "1";
 	}
 
+	/** Whether session `name` is still there; throws when tmux could not say. */
+	hasSession(name: string): boolean {
+		try {
+			this.run(["has-session", "-t", `=${name}`]);
+			return true;
+		} catch (error) {
+			if (Tmux.gone(error)) return false;
+			throw error;
+		}
+	}
+
 	/** Whether a terminal shows one of this server's sessions; no server, none does. */
 	attached(): boolean {
 		try {
