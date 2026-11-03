@@ -18,6 +18,7 @@ import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/
 import { detachableExec, runningForegroundShells } from "../ext/background-bash/foreground-shells.ts";
 import { projectTrust, TRUST_CHANGED } from "../ext/permissions/index.ts";
 import remoteFactory, { USAGE } from "../ext/remote/index.ts";
+import { QUIET_MS } from "../ext/remote/outcomes.ts";
 import {
 	applyPaneMessage,
 	BUSY_NOTICE,
@@ -763,6 +764,51 @@ describe("/remote-control", () => {
 		pane.state.idle = false;
 		pane.on("message_start", { message: { role: "user", content: [{ type: "text", text: "late" }] } });
 		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "taken" }]));
+		pane.restore();
+	});
+
+	it("reports dequeued a phone prompt never seen in pi's queue once pi has been idle with it empty for 30s, not before", async () => {
+		let now = 1_000_000;
+		const clock = vi.spyOn(Date, "now").mockImplementation(() => now);
+		const pane = await phonePane();
+		const queue = (id: string, text: string) => {
+			pane.message({ type: "prompt", text, id });
+			pane.on("input", { type: "input", text, source: "extension", streamingBehavior: "followUp" });
+		};
+		const heartbeat = () => pane.on("bluclawd:remote-watched", false);
+		queue("p-1", "first");
+		pane.on("agent_settled");
+		now += QUIET_MS - 1;
+		// A run started and ended between two heartbeats: the quiet starts over.
+		pane.on("agent_settled");
+		now += 1;
+		heartbeat();
+		now += QUIET_MS - 2;
+		heartbeat();
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "queued" }]);
+		now += 1;
+		heartbeat();
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "lost", reason: "dequeued" }]));
+
+		// pi starts one within the window: taken, and the window passing after changes nothing.
+		queue("p-2", "second");
+		pane.on("agent_settled");
+		now += QUIET_MS - 1;
+		heartbeat();
+		pane.state.idle = false;
+		pane.on("message_start", { message: { role: "user", content: [{ type: "text", text: "second" }] } });
+		pane.state.idle = true;
+		pane.on("agent_settled");
+		now += QUIET_MS;
+		heartbeat();
+		await waitFor(() =>
+			expect(pane.outcomes()).toEqual([
+				{ id: "p-1", outcome: "lost", reason: "dequeued" },
+				{ id: "p-2", outcome: "taken" },
+			]),
+		);
+		clock.mockRestore();
 		pane.restore();
 	});
 

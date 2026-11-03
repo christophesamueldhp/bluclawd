@@ -318,12 +318,21 @@ function factory(pi: ExtensionAPI): void {
 			}
 		} else applyPaneMessage(message, ctx, pi, () => report(ctx));
 	});
+	/** Since when pi has been idle with an empty queue, by the looks: a run between two looks ends in
+	 *  agent_settled, which starts it over. */
+	let quietSince: number | undefined;
 	/** pi's queue, which pi tells no extension it changes (Esc and the dequeue key empty it): a phone
-	 *  prompt seen in it, gone from it unstarted while pi is idle, pi dropped. */
-	const look = (ctx: ExtensionContext): void => {
+	 *  prompt seen in it, gone from it unstarted while pi is idle, pi dropped. `settled`: a run just ended. */
+	const look = (ctx: ExtensionContext, settled = false): void => {
 		const pending = ctx.hasPendingMessages();
 		outcomes.looked(pending);
-		if (!pending && ctx.isIdle() && outcomes.dequeued()) report(ctx);
+		if (pending || !ctx.isIdle()) {
+			quietSince = undefined;
+			return;
+		}
+		const now = Date.now();
+		if (settled || quietSince === undefined) quietSince = now;
+		if (outcomes.dequeued(now - quietSince)) report(ctx);
 	};
 	pi.on("input", (event, ctx) => {
 		if (!outcomes.input(event)) return;
@@ -336,7 +345,7 @@ function factory(pi: ExtensionAPI): void {
 	});
 	// pi's run is over, retries and queued follow-ups included. Its queue is empty unless the run was
 	// stopped without clearing it, as a session switch does: then a later look, or session_shutdown, settles them.
-	pi.on("agent_settled", (_event, ctx) => look(ctx));
+	pi.on("agent_settled", (_event, ctx) => look(ctx, true));
 	// After each of the pane's heartbeats (agent view).
 	pi.events.on("bluclawd:remote-watched", (data) => {
 		const opened = data === true && !watched;

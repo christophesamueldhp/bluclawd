@@ -5,7 +5,8 @@
  * starts it, which pi itself tells by its text. One the pane refuses is reported refused, with why.
  * One seen in pi's queue, then gone from it unstarted, or there when its session ends, is lost: pi
  * dropped it. pi tells an extension only whether its queue holds anything, and queues a prompt only
- * after its input handlers have all run, so one never seen there may yet run as a turn of its own.
+ * after its input handlers have all run, so one never seen there may yet run as a turn of its own:
+ * it is lost only once pi has been idle with an empty queue for QUIET_MS.
  */
 import { contentText } from "@earendil-works/pi-ai";
 import type { PromptOutcome, RefusedReason } from "../../daemon/ipc/protocol.ts";
@@ -27,6 +28,10 @@ export function refusal(
 
 /** How many each report carries: one that went with a dropped report comes with the next. */
 const KEPT = 20;
+
+/** How long pi stays idle with an empty queue before a queued phone prompt never seen in it is taken
+ *  as dropped: input handlers that await that long are not expected. */
+export const QUIET_MS = 30_000;
 
 interface Sent {
 	id: string;
@@ -77,9 +82,10 @@ export class PromptOutcomes {
 		if (pending && only && this.queued.length === 1) only.seen = true;
 	}
 
-	/** pi's queue no longer holds the phone prompts seen in it that it did not start; true when there were any. */
-	dequeued(): boolean {
-		const dropped = this.queued.filter((prompt) => prompt.seen);
+	/** pi's queue no longer holds the phone prompts seen in it that it did not start, nor, once pi has
+	 *  been idle with it empty for `quietMs` as long as QUIET_MS, any other; true when there were any. */
+	dequeued(quietMs = 0): boolean {
+		const dropped = this.queued.filter((prompt) => prompt.seen || quietMs >= QUIET_MS);
 		for (const prompt of dropped) {
 			this.queued.splice(this.queued.indexOf(prompt), 1);
 			this.settle({ id: prompt.id, outcome: "lost", reason: "dequeued" });
