@@ -15,7 +15,9 @@ import {
 	listed,
 	openChat,
 	replyEndedAt,
+	restorePending,
 	settleOutcomes,
+	storedPending,
 } from "./chat.js";
 import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
@@ -52,8 +54,10 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.48";
+const VERSION = "0.0.49";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
+/** Followed by a session's row id: its pending prompts, kept for when its chat opens again (see storePending). */
+const PENDING_KEY = "bluclawd-pending:";
 
 function loadViewMode() {
 	try {
@@ -642,7 +646,15 @@ function connect() {
 		const { sessionId, outcomes } = JSON.parse(event.data);
 		const chat = state.chat;
 		if (!chat || sessionId !== chat.id) return;
-		returned(chat, settleOutcomes(chat, outcomes, streamFrom));
+		/** @type {import("./chat.js").Failed[]} */
+		let failed = [];
+		if (!chat.restored) {
+			const stored = loadPending(chat.id);
+			failed = restorePending(chat, stored, outcomes, streamFrom);
+			// Their give-up timers went with the page or the chat that sent them.
+			for (const entry of stored) setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
+		}
+		returned(chat, [...failed, ...settleOutcomes(chat, outcomes, streamFrom)]);
 		render();
 	});
 	current.addEventListener("ping", alive);
@@ -1132,6 +1144,7 @@ function render() {
 	}
 	if (view === "list") updateList();
 	else if (view !== "pair") updateChat();
+	storePending(state.chat);
 }
 
 function updateList() {
@@ -2274,6 +2287,7 @@ async function send() {
 			entry.id,
 		);
 		entry.acceptedAt = Date.now();
+		if (state.chat === chat) storePending(chat);
 	} catch (error) {
 		forget(chat, entry);
 		putBack(chat, entry);
@@ -2301,6 +2315,42 @@ function putBack(chat, entry) {
 	text.value = text.value ? `${entry.prompt}\n${text.value}` : entry.prompt;
 	grow(text);
 	if (!chat.attachments.length) chat.attachments = entry.images;
+}
+
+/** @param {string} id a session's row id @returns {Pending[]} its prompts kept by storePending */
+function loadPending(id) {
+	try {
+		const stored = JSON.parse(localStorage.getItem(PENDING_KEY + id) ?? "[]");
+		return Array.isArray(stored) ? stored : [];
+	} catch {
+		return [];
+	}
+}
+
+/** What storePending last wrote, but the images: it writes again only when that changes. */
+let pendingKept = "";
+
+/**
+ * The open chat's pending prompts, kept on the phone so that a reload, or a return to the chat,
+ * still settles them, and puts back the ones refused or lost (see restorePending).
+ * @param {Chat | undefined} chat
+ */
+function storePending(chat) {
+	const pending = chat && storedPending(chat);
+	if (!chat || !pending) return;
+	const kept = `${chat.id}\n${JSON.stringify(pending.map(({ images: _, ...entry }) => entry))}`;
+	if (kept === pendingKept) return;
+	pendingKept = kept;
+	try {
+		if (pending.length) localStorage.setItem(PENDING_KEY + chat.id, JSON.stringify(pending));
+		else localStorage.removeItem(PENDING_KEY + chat.id);
+	} catch {
+		// Full, with images most likely: better none kept than an older list, which would put back
+		// prompts again.
+		try {
+			localStorage.removeItem(PENDING_KEY + chat.id);
+		} catch {}
+	}
 }
 
 /** A sent prompt still waiting PROMPT_GIVE_UP_MS on (see giveUp). @param {Chat} chat @param {Pending} entry */
