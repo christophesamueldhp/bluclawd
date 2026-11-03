@@ -119,6 +119,9 @@ export class ServerSupervisor {
 		// may have no stored row yet (a row a start claimed, before pi wrote its file).
 		const back =
 			silent?.record.pane === record.pane && silent?.record.sessionFile === record.sessionFile ? silent : undefined;
+		// Otherwise it went on to another session while silent (a new one or a /resume, which its beat
+		// does not say): it ended the one it was listed as for that one.
+		if (silent && !back) this.paneEnded(record.id, silent, "resume");
 		const resumed = record.sessionFile ? this.resumedMeta.get(record.sessionFile) : undefined;
 		if (record.sessionFile) {
 			this.resumedMeta.delete(record.sessionFile);
@@ -368,11 +371,11 @@ export class ServerSupervisor {
 		const out: Array<{ record: InstanceRecord; activity: AgentActivity; settled: number; silent?: true }> = [];
 		for (const [id, entry] of this.externalInstances) {
 			if (now - entry.lastSeenAt > EXTERNAL_TTL_MS) {
-				const { cwd, paneLabel, sessionFile, sessionId, pane } = entry.record;
+				const { pane } = entry.record;
 				const up = pane ? this.paneUp(pane) : undefined;
-				if (up === false && sessionFile && existsSync(sessionFile)) {
-					// The pane runs pi itself, so its pi is gone and its writes are final.
-					this.stopRow({ cwd, label: paneLabel, sessionFile, sessionId }, [id, entry]);
+				if (up === false) {
+					// The pane runs pi itself, so its pi is gone.
+					this.paneEnded(id, entry);
 					continue;
 				}
 				if (pane && up) {
@@ -393,6 +396,16 @@ export class ServerSupervisor {
 			out.push({ record: { ...record, id: entry.rowId }, activity, settled, silent: true });
 		}
 		return out;
+	}
+
+	/** A pane's pi ended, so its session's writes are final: its row is stopped with what its file
+	 *  holds last, unless another pane goes on as it. */
+	private paneEnded(id: string, entry: ExternalInstance, reason?: EndReason): void {
+		const { cwd, paneLabel, sessionFile, sessionId } = entry.record;
+		const taken = [...this.externalInstances].some(([other, e]) => other !== id && e.rowId === entry.rowId);
+		if (sessionFile && existsSync(sessionFile) && !taken) {
+			this.stopRow({ cwd, label: paneLabel, sessionFile, sessionId }, [id, entry], reason);
+		} else this.drop(id, entry, reason);
 	}
 
 	/** Not when tmux could not say: a pane that may be up is not taken for dead. */

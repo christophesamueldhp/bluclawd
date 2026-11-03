@@ -481,6 +481,29 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		]);
 	});
 
+	it("is refused when its silent pane comes back on another session", async () => {
+		const pane = await tmuxPane("pane-switched");
+		const phone = await watch(pane.row);
+		expect(await prompt(pane.row, { text: "first", id: "p-first" })).toBe(202);
+		expect(await prompt(pane.row, { text: "second", id: "p-second" })).toBe(202);
+		await pane.deliver();
+		await phone.until({ id: "p-second", outcome: "queued" });
+		await reap("pane-switched");
+		// It went on to a new session while it was silent.
+		const other = join(dir, "other.jsonl");
+		await new OrchestratorClient().register({
+			id: "pane-switched",
+			cwd: dir,
+			sessionFile: other,
+			pane: "pane-switched",
+		});
+		await phone.until({ id: "p-second", outcome: "refused", reason: "session_changed" });
+		expect(await (await watch(pane.row)).replayed()).toEqual([
+			{ id: "p-first", outcome: "taken" },
+			{ id: "p-second", outcome: "refused", reason: "session_changed" },
+		]);
+	});
+
 	it("is not lost when a silent pane dies after another pane went on as its row", async () => {
 		const old = await tmuxPane("pane-old");
 		const phone = await watch(old.row);
