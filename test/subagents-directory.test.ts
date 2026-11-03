@@ -1,10 +1,11 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fauxProvider } from "@earendil-works/pi-ai";
 import type { AgentSessionEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { ModelRegistry, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
-import type { RunExecutionContext } from "../ext/subagents/admission.ts";
+import { type AdmissionContext, createRunAdmission, type RunExecutionContext } from "../ext/subagents/admission.ts";
 import { createGenerations, type ParentNotice } from "../ext/subagents/generations.ts";
 import { SubagentMessageBus } from "../ext/subagents/messages.ts";
 import { createParentScope } from "../ext/subagents/parent-scope.ts";
@@ -108,6 +109,21 @@ function fakeSessionContext(cwd: string) {
 	return { sessionManager: SessionManager.inMemory(cwd) } as unknown as ExtensionContext;
 }
 
+/** The orchestrator's model registry, holding the one model the test runs launch with. */
+async function fauxModelRegistry(agentDir: string) {
+	const runtime = await ModelRuntime.create({
+		authPath: join(agentDir, "auth.json"),
+		modelsPath: join(agentDir, "models.json"),
+		modelsStorePath: join(agentDir, "models-store.json"),
+		allowModelNetwork: false,
+		refreshOnCreate: true,
+	});
+	const faux = fauxProvider({ provider: "faux", models: [{ id: "faux-1", reasoning: false }] });
+	runtime.registerNativeProvider(faux.provider);
+	await runtime.refresh({ allowNetwork: false });
+	return { registry: new ModelRegistry(runtime), model: faux.getModel("faux-1") };
+}
+
 function setup() {
 	const cwd = makeTempDir("cwd");
 	const agentDir = makeTempDir("agent");
@@ -122,7 +138,8 @@ function setup() {
 		onChange: () => {},
 		batchWindowMs: 0,
 	});
-	scope.enter(fakeSessionContext(cwd), "replaced");
+	const session = fakeSessionContext(cwd);
+	scope.enter(session, "replaced");
 	const runner = fakeRunner();
 	const generations = createGenerations({
 		agentDir: () => agentDir,
@@ -180,7 +197,52 @@ function setup() {
 		void generations.deliver(admitted.handle);
 		return admitted.handle;
 	};
-	return { cwd, scope, generations, directory, tasks, runner, launch };
+	const admission = createRunAdmission({
+		scheduler: generations.scheduler,
+		directory,
+		agentDir: () => agentDir,
+		catalog: () => undefined,
+		loadout: () => ({
+			declared: [],
+			callable: [],
+			registered: [],
+			getExposure: () => "direct",
+			getNamespace: () => undefined,
+			getPromptGuidelines: () => [],
+		}),
+		parentThinkingLevel: () => "off",
+		scope,
+	});
+	/**
+	 * The orchestrator, once its models are loaded: sends a message as its subagent_message tool does, and returns
+	 * the receipt text.
+	 */
+	const orchestrator = async () => {
+		const { registry, model } = await fauxModelRegistry(agentDir);
+		const ctx: AdmissionContext = {
+			cwd,
+			mode: "tui",
+			model,
+			modelRegistry: registry,
+			isProjectTrusted: () => false,
+			sessionManager: session.sessionManager,
+			executeTool: async () => {
+				throw new Error("the fake children never run the orchestrator's tools");
+			},
+		};
+		return async (to: string, content: string) => {
+			const result = await generations.messageFromParent(
+				scope.current()!,
+				to,
+				content,
+				`call_message_${++calls}`,
+				admission,
+				ctx,
+			);
+			return result.content.map((part) => part.text).join("");
+		};
+	};
+	return { cwd, scope, generations, directory, tasks, runner, launch, orchestrator };
 }
 
 describe("The run directory", () => {
@@ -207,6 +269,52 @@ describe("The run directory", () => {
 		expect(directory.find(scope.current()!, "backend")).toMatchObject({ state: "finished" });
 		expect(directory.nameHolder(scope.current()!, "backend")).toBeUndefined();
 	});
+
+	it("lets a parent message to a finishing run wait until it is final, then resumes it", async () => {
+		const { runner, launch, orchestrator } = setup();
+		const messageFromParent = await orchestrator();
+		const backend = launch("backend", "Build the API.");
+		const b = await runner.child(0);
+		launch("frontend", "Build the UI.");
+		const f = await runner.child(1);
+		b.endTurn();
+
+		let receipt: string | undefined;
+		const sent = messageFromParent("backend", "Now add pagination.").then((text) => {
+			receipt = text;
+		});
+		expect(await f.call("subagent_message", { to: "backend", content: "Use REST." })).toBe(
+			`Message 1 unavailable: "backend" (${backend.runId}) has finished.`,
+		);
+		expect(receipt).toBeUndefined();
+
+		b.finish({ summaryText: "API built.", transcriptPath: "transcript.jsonl" });
+		await sent;
+		expect(receipt).toBe(
+			`Message 2 accepted: resuming "backend" (${backend.runId}) in the background with its earlier context. Its report will be delivered when it finishes.`,
+		);
+		const resumed = await runner.child(2);
+		expect(resumed.options.resumeSessionFile).toBe("transcript.jsonl");
+		expect(resumed.options.task).toContain("Now add pagination.");
+	});
+
+	it.each(["failed", "cancelled"] as const)(
+		"tells a parent message to a finishing run that ends %s why it cannot resume",
+		async (status) => {
+			const { runner, launch, orchestrator } = setup();
+			const messageFromParent = await orchestrator();
+			const backend = launch("backend", "Build the API.");
+			const b = await runner.child(0);
+			b.endTurn();
+
+			const receipt = messageFromParent("backend", "Now add pagination.");
+			b.finish({ status, complete: false, transcriptPath: "transcript.jsonl" });
+
+			expect(await receipt).toBe(
+				`Message 0 unavailable: "backend" (${backend.runId}) is ${status}; only a completed subagent can be resumed.`,
+			);
+		},
+	);
 
 	it("offers a name for reuse as soon as its run is final", async () => {
 		const { runner, launch } = setup();

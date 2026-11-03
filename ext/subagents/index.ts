@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
-import { type AdmissionContext, createRunAdmission, formatRunLabel, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
+import { createRunAdmission, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
 import {
 	type AgentDefinitionCatalog,
 	discoverAgentDefinitions,
@@ -17,19 +17,15 @@ import {
 import type { RunEntry } from "./directory.ts";
 import { createGenerations, type ParentNotice } from "./generations.ts";
 import {
-	formatMessageReceipt,
-	PARENT_MESSAGE_ADDRESS,
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
 	SUBAGENT_MESSAGE_PARAMETERS,
 	SUBAGENT_MESSAGE_TOOL,
 	SubagentMessageBus,
-	type SubagentMessageReceipt,
 	subagentMessagePayload,
 } from "./messages.ts";
-import { createParentScope, type ParentInboxItem, type ParentScope } from "./parent-scope.ts";
+import { createParentScope, type ParentInboxItem } from "./parent-scope.ts";
 import type { SubagentResultDetails } from "./results.ts";
 import { describeSubagentModels, runSubagent } from "./runner.ts";
-import type { SubagentRunRecord } from "./runs.ts";
 import { appendSubagentMessageRecord, reconcileInterruptedRuns } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
 
@@ -166,7 +162,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 		};
 
-		const { scheduler, directory, deliver } = createGenerations({
+		const { scheduler, directory, deliver, messageFromParent } = createGenerations({
 			agentDir: resolveAgentDir,
 			runner: runSubagent,
 			bus: messageBus,
@@ -311,62 +307,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						isError: true,
 					};
 				}
-				const to = params.to.trim();
-				const found = directory.find(scope, to);
-				if (found?.state === "finished" && ctx)
-					return resumeRun(found.record, toolCallId, params.content, scope, ctx);
-				return formatMessageReceipt(
-					await messageBus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, params.content),
-				);
+				return messageFromParent(scope, params.to.trim(), params.content, toolCallId, admission, ctx);
 			},
 		});
-
-		const resumeRun = async (
-			run: Readonly<SubagentRunRecord>,
-			toolCallId: string,
-			content: string,
-			scope: ParentScope,
-			ctx: AdmissionContext,
-		) => {
-			let receipt: SubagentMessageReceipt | undefined;
-			const resumed = await admission.resume(
-				run,
-				toolCallId,
-				() => {
-					receipt = messageBus.accept({ address: PARENT_MESSAGE_ADDRESS, scope }, run.runId, run.name);
-					return subagentMessagePayload({
-						seq: receipt.seq,
-						from: PARENT_MESSAGE_ADDRESS,
-						to: run.runId,
-						toName: run.name,
-						content,
-					}).content[0].text;
-				},
-				ctx,
-			);
-			if (!resumed.ok) {
-				return formatMessageReceipt({
-					status: resumed.refusal ?? "unavailable",
-					seq: 0,
-					to: run.runId,
-					toName: run.name,
-					reason: resumed.error,
-				});
-			}
-			// A resume is admitted only after buildPrompt ran, so the receipt is set.
-			const accepted = receipt!;
-			const label = formatRunLabel(run);
-			void deliver(resumed.handle);
-			return {
-				...formatMessageReceipt(accepted),
-				content: [
-					{
-						type: "text" as const,
-						text: `Message ${accepted.seq} accepted: resuming ${label} in the background with its earlier context. Its report will be delivered when it finishes.`,
-					},
-				],
-			};
-		};
 
 		const ago = (at: number | undefined, now: number) =>
 			at === undefined ? "never" : `${Math.round((now - at) / 1000)}s ago`;

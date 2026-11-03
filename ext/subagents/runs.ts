@@ -201,6 +201,11 @@ export class SubagentRunScheduler<C = unknown> {
 		return this.runs.get(runId)?.context;
 	}
 
+	/** Settles with the run's record once its current generation is final and stored. */
+	whenFinal(runId: string): Promise<Readonly<SubagentRunRecord>> | undefined {
+		return this.runs.get(runId)?.completionPromise;
+	}
+
 	recordMessageSent(runId: string): void {
 		const managed = this.runs.get(runId);
 		if (managed && !isTerminalSubagentStatus(managed.record.status)) managed.record.lastMessageAt = this.now();
