@@ -481,6 +481,26 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		]);
 	});
 
+	it("is in its pane's status while that pane is silent", async () => {
+		const pane = await tmuxPane("pane-quiet");
+		const phone = await watch(pane.row);
+		expect(await prompt(pane.row, { text: "first", id: "p-first" })).toBe(202);
+		expect(await prompt(pane.row, { text: "second", id: "p-second" })).toBe(202);
+		await pane.deliver();
+		await phone.until({ id: "p-second", outcome: "queued" });
+		await reap("pane-quiet");
+		// Another pane's report does not take the silent one's.
+		await fakePane("pane-other");
+		const res = await fetch(`${base}/api/sessions/${pane.row}/status`, {
+			headers: { authorization: `Bearer ${token}` },
+		});
+		expect(res.status).toBe(200);
+		expect((await status(pane.row)).outcomes).toEqual([
+			{ id: "p-first", outcome: "taken" },
+			{ id: "p-second", outcome: "queued" },
+		]);
+	});
+
 	it("is refused when its silent pane comes back on another session", async () => {
 		const pane = await tmuxPane("pane-switched");
 		const phone = await watch(pane.row);
