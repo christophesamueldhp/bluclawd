@@ -66,32 +66,30 @@ export class PromptDelivery {
 	 *  pane would. `pane`: that pane, so what another pane listed as the same row was given stays its
 	 *  own; when not given, any pane's. */
 	dropped(sessionId: string, inbox: PaneMessage[], reason?: EndReason, pane?: string, now: number = Date.now()): void {
+		this.settle(inbox, (d) => d.sessionId === sessionId && (pane === undefined || d.pane === pane), reason, now);
+	}
+
+	/** A pane that may still be alive was reaped with `inbox` queued for it: those never reach pi, and
+	 *  what it was given waits on its report. */
+	silent(inbox: PaneMessage[], now: number = Date.now()): void {
+		this.settle(inbox, () => false, undefined, now);
+	}
+
+	/** What is in `inbox` and what was `given` to its pane, as its pane's going leaves them. */
+	private settle(
+		inbox: PaneMessage[],
+		given: (delivery: Delivery) => boolean,
+		reason: EndReason | undefined,
+		now: number,
+	): void {
 		const changed = endedForAnother(reason);
 		const ids = new Set(inbox.map(phoneId));
-		const given = (delivery: Delivery) =>
-			delivery.sessionId === sessionId && (pane === undefined || delivery.pane === pane);
 		for (const [id, delivery] of this.prompts) {
 			if (settled(delivery) || !(ids.has(id) || given(delivery))) continue;
 			const outcome: PromptOutcome = changed
 				? { id, outcome: "refused", reason: "session_changed" }
 				: { id, outcome: "lost", reason: "pane_gone" };
 			this.prompts.set(id, { ...outcome, sessionId: delivery.sessionId, changedAt: now });
-		}
-	}
-
-	/** A pane that may still be alive was reaped with `inbox` queued for it: those never reach pi, and
-	 *  what it was given waits on its report. */
-	silent(inbox: PaneMessage[], now: number = Date.now()): void {
-		const ids = new Set(inbox.map(phoneId));
-		for (const [id, delivery] of this.prompts) {
-			if (settled(delivery) || !ids.has(id)) continue;
-			this.prompts.set(id, {
-				id,
-				outcome: "lost",
-				reason: "pane_gone",
-				sessionId: delivery.sessionId,
-				changedAt: now,
-			});
 		}
 	}
 
