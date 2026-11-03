@@ -420,9 +420,11 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 		const fresh = rows(supervisor)[1].id;
 
 		now += 20_000;
-		// Its stored row shows, stopped, until its next beat goes on as it.
-		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "a done"), stopped(fresh, "sb", undefined)]);
+		// A silent pane: it stays listed as its row, alive, until its next beat goes on as it.
+		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "a done"), live(fresh, "sb", "pi-a")]);
+		expect(listSummaries(supervisor)[1]).toMatchObject({ id: fresh, silent: true });
 		supervisor.registerExternal(b, "working");
+		expect(listSummaries(supervisor)[1]).not.toHaveProperty("silent");
 		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "a done"), live(fresh, "sb", "pi-a")]);
 	});
 
@@ -507,16 +509,21 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 		now += 10_000;
 		expect(rows(supervisor).map((r) => r.status)).toEqual(["online", "online", "online", "online"]);
 		now += 10_000;
-		// pi-b missed its beats with its pane up, tmux could not say for pi-c, and d-1 has no pane:
-		// their stored rows show until their next beat, and no file of a pi that may be up is read.
-		const after = [
+		// pi-b missed its beats with its pane up, and stays listed as it last beat (a silent pane); tmux
+		// could not say for pi-c, and d-1 has no pane: their stored rows show until their next beat. No
+		// file of a pi that may be up is read.
+		expect(rows(supervisor)).toEqual([
+			stopped("pi-a", "sa", "last words", true),
+			stopped("pi-c", "sc", undefined),
+			stopped("d-1", "sd", undefined),
+			live("pi-b", "sb", "pi-b"),
+		]);
+		expect(rows(testRegistry(dir))).toEqual([
 			stopped("pi-a", "sa", "last words", true),
 			stopped("pi-b", "sb", undefined),
 			stopped("pi-c", "sc", undefined),
 			stopped("d-1", "sd", undefined),
-		];
-		expect(rows(supervisor)).toEqual(after);
-		expect(rows(testRegistry(dir))).toEqual(after);
+		]);
 		expect(asked).not.toContain("d-1");
 	});
 
