@@ -231,20 +231,47 @@ describe("rows", () => {
 		expect(bands.map((b) => b.title)).toEqual(["Pinned", "~/proj/here", "~/proj/there"]);
 	});
 
-	it("keeps one row per session file: this window's, then a live one, over a stored twin", () => {
-		const self: InstanceSummary = { id: "me", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true };
+	it("lists every row the daemon lists, merging none by its session file", () => {
 		const rows = collectRows(
 			[
-				{ id: "stored", status: "stopped", cwd: HERE, sessionFile: "/a.jsonl", pinned: true },
-				{ id: "b-row", status: "stopped", cwd: HERE, sessionFile: "/b.jsonl", sortOrder: 3 },
-				{ id: "b-pane", status: "online", cwd: HERE, sessionFile: "/b.jsonl", external: true, pane: "p-b" },
+				{ id: "stopped", status: "stopped", cwd: HERE, sessionFile: "/a.jsonl", pinned: true },
+				{ id: "live", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p" },
+			],
+			undefined,
+		);
+		expect(rows.map((r) => [r.id, r.alive, r.pinned])).toEqual([
+			["stopped", false, true],
+			["live", true, false],
+		]);
+	});
+
+	it("lists this window's session once, as its own, when the daemon lists its pane under the row it resumed", () => {
+		const self: InstanceSummary = {
+			id: "me",
+			status: "online",
+			cwd: HERE,
+			sessionFile: "/a.jsonl",
+			external: true,
+			pane: "p-me",
+		};
+		const rows = collectRows(
+			[
+				{
+					id: "row",
+					status: "online",
+					cwd: HERE,
+					sessionFile: "/a.jsonl",
+					external: true,
+					pane: "p-me",
+					pinned: true,
+					sortOrder: 2,
+				},
 			],
 			self,
 		);
-		expect(rows.map((r) => r.id)).toEqual(["me", "b-pane"]);
-		expect(rows[0].pinned).toBe(true);
-		expect(rows[1].sortOrder).toBe(3);
-		expect(rows.map((r) => r.livePanes)).toEqual([undefined, undefined]);
+		expect(rows.map((r) => [r.id, r.self, r.pinned, r.sortOrder, r.livePanes])).toEqual([
+			["me", true, true, 2, undefined],
+		]);
 	});
 
 	it("lists every live pi on one session file, each flagged, instead of hiding one", () => {
@@ -264,10 +291,7 @@ describe("rows", () => {
 	it("flags this window's own session when a pane also runs its file", () => {
 		const self: InstanceSummary = { id: "me", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true };
 		const rows = collectRows(
-			[
-				{ id: "stored", status: "stopped", cwd: HERE, sessionFile: "/a.jsonl" },
-				{ id: "pane", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p" },
-			],
+			[{ id: "pane", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p" }],
 			self,
 		);
 		expect(rows.map((r) => [r.id, r.livePanes])).toEqual([
@@ -275,40 +299,6 @@ describe("rows", () => {
 			["pane", 2],
 		]);
 	});
-
-	it.each(["starting", "stopping"] as const)(
-		"a %s row next to a live pi on its file is one unflagged row",
-		(status) => {
-			const rows = collectRows(
-				[
-					{ id: "other", status, cwd: HERE, sessionFile: "/a.jsonl" },
-					{ id: "pane", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p" },
-				],
-				undefined,
-			);
-			expect(rows).toHaveLength(1);
-			expect(rows[0].livePanes).toBeUndefined();
-		},
-	);
-
-	it.each(["starting", "stopping", "stopped"] as const)(
-		"a %s row listed first neither hides two live pis on its file nor counts as one",
-		(status) => {
-			const rows = collectRows(
-				[
-					{ id: "other", status, cwd: HERE, sessionFile: "/a.jsonl", pinned: true, sortOrder: 5 },
-					{ id: "p1", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p1" },
-					{ id: "p2", status: "online", cwd: HERE, sessionFile: "/a.jsonl", external: true, pane: "p2" },
-				],
-				undefined,
-			);
-			// The session's pin and order go to its first live row.
-			expect(rows.map((r) => [r.id, r.livePanes, r.pinned, r.sortOrder])).toEqual([
-				["p1", 2, true, 5],
-				["p2", 2, false, undefined],
-			]);
-		},
-	);
 
 	it("never merges or flags live sessions without a file", () => {
 		const rows = collectRows(
@@ -752,7 +742,7 @@ describe("AgentView keys", () => {
 		expect(calls[0]).toEqual(["send", "done", { type: "prompt", text: "now add sound" }]);
 	});
 
-	it("ctrl+x ends a running session's pi, which leaves a stopped row; a second press deletes that row", async () => {
+	it("ctrl+x ends a running session's pi, whose row stays, stopped; a second press deletes that row", async () => {
 		const work = { ...sessions[1], sessionFile: "/w.jsonl" };
 		let instances: InstanceSummary[] = [sessions[0], work];
 		const { view, calls, text, flush } = makeView({ list: () => instances });
@@ -763,13 +753,13 @@ describe("AgentView keys", () => {
 		await flush();
 		expect(calls).toEqual([["end", "p-work"]]);
 		expect(text().join("\n")).toContain("stopped · ctrl+x again to delete");
-		// Its pi saved it as a stopped row on its way out.
+		// The daemon stops its row in place as its pi quits.
 		instances = [
 			sessions[0],
-			{ id: "stored-w", status: "stopped", cwd: THERE, sessionFile: "/w.jsonl", outcome: "stopped" },
+			{ id: work.id, status: "stopped", cwd: THERE, sessionFile: "/w.jsonl", outcome: "stopped" },
 		];
 		view.handleInput(CTRL_X);
-		await waitFor(() => expect(calls.at(-1)).toEqual(["delete", "stored-w"]));
+		await waitFor(() => expect(calls.at(-1)).toEqual(["delete", work.id]));
 	});
 
 	it("esc dismisses an armed delete instead of closing", () => {

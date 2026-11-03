@@ -42,7 +42,7 @@ describe("agent-view stored rows", () => {
 		};
 		const listed = (id: string) => supervisor.listExternalInstances().find((e) => e.record.id === id)?.record;
 
-		// Agent view: the stored row goes as soon as its pane starts, before that pane registers.
+		// The stored row is deleted while a pane resuming it starts, before that pane registers.
 		supervisor.deleteInstance(pinnedRow("/nonexistent/mac.jsonl"));
 		supervisor.registerExternal({ ...pane, id: "pi-other", sessionFile: "/nonexistent/other.jsonl" }, "idle");
 		supervisor.registerExternal({ ...pane, id: "pi-mac", sessionFile: "/nonexistent/mac.jsonl" }, "idle");
@@ -178,6 +178,18 @@ describe("one row per session through quit and resume", () => {
 		supervisor.unregisterExternal("pi-b", "quit");
 		supervisor.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file });
 		expect(rows(supervisor)).toEqual([expect.objectContaining({ id: "pi-b", status: "stopped" })]);
+	});
+
+	it("a live row deleted before its quit lands stays deleted once hand-off saves", () => {
+		const supervisor = testRegistry(dir);
+		supervisor.registerExternal(pane("pi-a"), "idle");
+		// Agent view's second ctrl+x, sooner than the quit its first one asked for.
+		expect(supervisor.deleteInstance("pi-a")).toBe(true);
+		supervisor.unregisterExternal("pi-a", "quit");
+
+		expect(supervisor.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file })).toBeUndefined();
+		expect(rows(supervisor)).toEqual([]);
+		expect(loadInstances(dir)).toEqual([]);
 	});
 
 	it("a name set in the pane wins over the stored row's older one, through quit and save", () => {

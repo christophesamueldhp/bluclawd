@@ -22,8 +22,6 @@ export interface RemoteSession {
 	detail: string;
 	createdAt?: string;
 	finishedAt?: string;
-	/** pi's session id: the same session under another row id, once it quits on the Mac or resumes. */
-	sessionId?: string;
 	/** While it needs input: the dialog it waits on. */
 	dialog?: { kind: string; title?: string };
 	/** How many times it stopped working: the notifier's cue for a turn too quick to be seen working. */
@@ -53,7 +51,6 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 				detail: row.detail,
 				createdAt: row.createdAt,
 				finishedAt: row.finishedAt,
-				sessionId: row.sessionId,
 				...(row.dialog ? { dialog: row.dialog } : {}),
 				...(row.settled !== undefined ? { settled: row.settled } : {}),
 				...(row.livePanes ? { livePanes: row.livePanes } : {}),

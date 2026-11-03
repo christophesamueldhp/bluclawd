@@ -276,16 +276,44 @@ describe("agent view in pane mode", () => {
 		expect(view.selectedKeyForTest()).toBe("pi-new1");
 	});
 
-	it("ctrl+x ends a pane's pi, as quitting does, then removes its row", async () => {
-		const rows = [paneRow("pi-a")];
-		const { view, calls, flush } = setup(rows);
+	it("ctrl+x ends a pane's pi, as quitting does; its row stays, stopped and focused, and ctrl+x again deletes it at once", async () => {
+		const rows = [paneRow("pi-a"), paneRow("pi-b")];
+		const listing = async () => {
+			calls.push(["list"]);
+			return rows;
+		};
+		const { view, calls, flush } = setup(rows, undefined, { list: listing });
 		view.handleInput(CTRL_X);
 		await flush();
-		expect(calls).toEqual([["end", "pi-a"]]);
-		// Its pi saves the session as a stopped row on its way out; that row is what goes.
-		rows.splice(0, 1, { id: "stored-a", status: "stopped", cwd: HERE, sessionFile: "/s/pi-a.jsonl" });
+		expect(calls).toEqual([["end", "pi-a"], ["list"]]);
+		// The daemon stops the row in place: the same id, with no pane.
+		rows.splice(0, 1, { id: "pi-a", status: "stopped", cwd: HERE, sessionFile: "/s/pi-a.jsonl" });
+		view.setInstancesForTest(rows);
+		expect(view.selectedKeyForTest()).toBe("pi-a");
+		expect(view.render(100).join("\n")).toContain("stopped · ctrl+x again to delete");
+
+		calls.length = 0;
 		view.handleInput(CTRL_X);
-		await waitFor(() => expect(calls.slice(1)).toEqual([["delete", "stored-a"]]));
+		await waitFor(() => expect(calls[0]).toEqual(["delete", "pi-a"]));
+	});
+
+	it("ctrl+x again before the quit lands kills the pane and deletes its row at once", async () => {
+		const rows = [paneRow("pi-a")];
+		const listing = async () => {
+			calls.push(["list"]);
+			return rows;
+		};
+		const { view, calls, flush } = setup(rows, undefined, { list: listing });
+		view.handleInput(CTRL_X);
+		await flush();
+		calls.length = 0;
+		view.handleInput(CTRL_X);
+		await waitFor(() =>
+			expect(calls.slice(0, 2)).toEqual([
+				["kill", "pi-a"],
+				["delete", "pi-a"],
+			]),
+		);
 	});
 
 	it("ctrl+x twice on this terminal's own session moves it to a new one in agent view, then ends it", async () => {

@@ -164,8 +164,6 @@ type Completion = { value: string; label: string };
 const MENU_ROWS = 8;
 /** Bare words that quit. */
 export const EXIT_WORDS = new Set(["exit", "quit", ":q", ":q!", ":wq", ":wq!"]);
-/** How many times (150ms apart) a delete waits for the row a stopped pi saves. */
-const STOP_SAVE_POLLS = 20;
 /** A pane heartbeats every 3s (self-registration.ts), so a restarted daemon has them all back by this. */
 const RESTART_GRACE_MS = 5000;
 
@@ -292,8 +290,6 @@ export class AgentView implements Component, Focusable {
 	private notice: { text: string; kind: "hint" | "error" } | undefined;
 	/** The row a ctrl+x stopped on its first press: it reads "stopped · ctrl+x again to delete". */
 	private justKilled: string | undefined;
-	/** A row whose pi that ctrl+x ended, shown stopped until the row its pi saves arrives. */
-	private stopping: { row: AgentRow; until: number } | undefined;
 	/** Peek reply drafts by row, kept across navigation. */
 	private readonly replyDrafts = new Map<string, string>();
 	/** The peek's own send/answer error, shown inside the box. */
@@ -562,11 +558,9 @@ export class AgentView implements Component, Focusable {
 
 	private recompute(): void {
 		this.allRows = [...collectRows(this.instances, this.opts.self?.()), ...this.shells.map(rowFromShell)];
-		this.followStopping();
-		const all = [...this.allRows, ...(this.stopping ? [this.stopping.row] : [])];
 		const text = this.composerText();
 		const filter = queryFilter(text);
-		this.rows = filter ? all.filter(filter) : all;
+		this.rows = filter ? this.allRows.filter(filter) : this.allRows;
 		this.onboarding =
 			this.viewMode === "state" && !text && this.allRows.every((r) => r.self) && !this.allRows[0]?.pinned;
 		const bands = buildBands(this.rows, this.viewMode, (p) => this.shorten(p), {
@@ -916,43 +910,6 @@ export class AgentView implements Component, Focusable {
 		this.render_();
 	}
 
-	/**
-	 * The row ctrl+x stopped keeps the focus and the armed delete: it stands in until its pi has
-	 * saved it as a stopped row, which then takes its place.
-	 */
-	private followStopping(): void {
-		const stopping = this.stopping;
-		if (!stopping) return;
-		const file = stopping.row.sessionFile;
-		const live = this.allRows.find((r) => r.id === stopping.row.id && r.alive);
-		const saved = file ? this.allRows.find((r) => r.sessionFile === file && !r.alive) : undefined;
-		if (saved) {
-			this.stopping = undefined;
-			if (this.selectedKey === stopping.row.id) this.selectedKey = saved.id;
-			if (this.armed?.key === stopping.row.id) this.armed.key = saved.id;
-			if (this.justKilled === stopping.row.id) this.justKilled = saved.id;
-			return;
-		}
-		if (live) {
-			// Still on its way out: the live row shows until it goes.
-			this.allRows = this.allRows.filter((r) => r !== live);
-			return;
-		}
-		if (Date.now() > stopping.until) this.stopping = undefined;
-	}
-
-	/** The stored row a stopped pi saved for `file`, waiting a moment for it to arrive. */
-	private async savedRowFor(file: string): Promise<string | undefined> {
-		for (let i = 0; i < STOP_SAVE_POLLS; i++) {
-			const saved = (await this.opts.client.list().catch(() => [])).find(
-				(inst) => !inst.external && inst.sessionFile === file,
-			);
-			if (saved) return saved.id;
-			await new Promise((resolve) => setTimeout(resolve, 150));
-		}
-		return undefined;
-	}
-
 	/** ctrl+x, as bluclawd's: a running session's pi ends on the first press and its row stays,
 	 *  stopped; the second press (within 2s) deletes the row. */
 	private async stopOrDelete(): Promise<void> {
@@ -1017,13 +974,9 @@ export class AgentView implements Component, Focusable {
 		if (row.starting) return;
 		if (this.armed?.key === row.id) {
 			this.disarm();
-			const stopping = this.stopping?.row.id === row.id ? this.stopping.row : undefined;
-			this.stopping = undefined;
 			try {
 				if (row.pane && row.alive) this.opts.panes.kill(row.pane);
-				// Its pi may still be saving the row it leaves behind: that is the one to delete.
-				const id = stopping?.sessionFile ? ((await this.savedRowFor(stopping.sessionFile)) ?? row.id) : row.id;
-				await this.opts.client.delete(id);
+				await this.opts.client.delete(row.id);
 				if (this.mode === "peek") this.mode = "list";
 			} catch (error) {
 				this.say(`Couldn't delete — ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -1034,14 +987,9 @@ export class AgentView implements Component, Focusable {
 		this.arm(row.id);
 		if (row.pane && stoppable(row)) {
 			this.justKilled = row.id;
-			this.stopping = {
-				row: { ...row, alive: false, state: "stopped", pane: undefined },
-				until: Date.now() + STOP_SAVE_POLLS * 150,
-			};
 			try {
 				this.opts.panes.end(row.pane);
 			} catch (error) {
-				this.stopping = undefined;
 				this.say(`Couldn't stop — ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 			await this.refresh();

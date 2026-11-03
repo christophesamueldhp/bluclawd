@@ -11,7 +11,7 @@ import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
-import { ageAt, paneUp, STATE_WORDS, sessionGroups, sharedWarning, statusGlyph, successor, viewMode } from "./list.js";
+import { ageAt, paneUp, STATE_WORDS, sessionGroups, sharedWarning, statusGlyph, viewMode } from "./list.js";
 import { refused, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 import { loaderHtml } from "./mascot.js";
@@ -32,8 +32,8 @@ import {
 } from "./statusbar.js";
 
 /**
- * `sessionId`: pi's, the same under another row id; `dialog`: the one it waits on, while it needs input.
- * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, sessionId?: string, dialog?: { kind: string, title?: string }, livePanes?: number, starting?: true }} Session
+ * `dialog`: the one it waits on, while it needs input.
+ * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, dialog?: { kind: string, title?: string }, livePanes?: number, starting?: true }} Session
  */
 /** `aborted`: a reply its turn was stopped in, empty when stopped before it said anything. @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, aborted?: boolean, toolCallId?: string, toolName?: string, command?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
@@ -321,17 +321,11 @@ async function loadSessions() {
 				return;
 			}
 		}
-		// The open session under another row id (it quit on the Mac, or was opened there again): followed,
-		// without a history entry for the old one.
-		const open = state.chat && state.sessions.find((s) => s.id === state.chat.id);
-		if (open) state.chat.sessionId = open.sessionId;
-		else if (state.chat) {
-			const next = successor(state.sessions, state.chat.id, state.chat.sessionId);
-			if (next) {
-				state.chat.next = next;
-				location.replace(`#s/${encodeURIComponent(next)}`);
-				return;
-			}
+		// A row keeps its id while its session moves between a pane and storage, so a chat whose row is
+		// not listed was deleted, or is a notification's for a row that is gone.
+		if (state.chat && !state.sessions.some((s) => s.id === state.chat?.id)) {
+			leaveChat(state.chat);
+			return;
 		}
 		render();
 		if (!state.chat) {
@@ -2018,7 +2012,17 @@ async function deleteSession() {
 	}
 	if (state.chat !== chat) return;
 	closeSheet();
-	// As "‹ Sessions" goes: to the list's own entry when the chat was opened from it.
+	leaveChat(chat);
+}
+
+/** @type {import("./chat.js").Chat | undefined} */
+let left;
+
+/** Back to the list, once per chat: as "‹ Sessions" goes, to the list's own entry when the chat was
+ *  opened from it. @param {import("./chat.js").Chat} chat */
+function leaveChat(chat) {
+	if (left === chat) return;
+	left = chat;
 	if (chat.backToList) history.back();
 	else location.hash = "";
 }
@@ -2302,10 +2306,7 @@ function route() {
 	const open = match ? decodeURIComponent(match[1]) : undefined;
 	if (open !== previous?.id) {
 		clearTimeout(previous?.liveClear);
-		// Following a resumed session to its pane keeps the replies still pending on screen until pi
-		// writes them, and its entry, which replaces the old one's, still follows the list's.
-		const follows = open !== undefined && open === previous?.next;
-		state.chat = open === undefined ? undefined : openChat(open, follows ? previous : undefined);
+		state.chat = open === undefined ? undefined : openChat(open);
 		if (state.chat && !previous) state.chat.backToList = true;
 		state.error = undefined;
 		state.phoneSheet = false;
