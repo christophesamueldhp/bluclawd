@@ -10,6 +10,12 @@ function cloneInstance(record: InstanceRecord): InstanceRecord {
 	return { ...record };
 }
 
+/** The name a row keeps: its own, unless its pane's changed since the row last heard it. */
+function nameOf(row: InstanceRecord | undefined, paneLabel: string | undefined): string | undefined {
+	const keeps = row?.label !== undefined && (row.paneLabel === undefined || row.paneLabel === paneLabel);
+	return keeps ? row?.label : (paneLabel ?? row?.label);
+}
+
 /** A row's agent-view meta, once it has any. */
 function paneMeta({ pinned, sortOrder }: InstanceRecord): Pick<InstanceRecord, "pinned" | "sortOrder"> | undefined {
 	if (pinned === undefined && sortOrder === undefined) return undefined;
@@ -91,9 +97,11 @@ export class ServerSupervisor {
 					sortOrder: previous.record.sortOrder,
 				}
 			: stored && paneMeta(stored);
+		const label = nameOf(previous?.record ?? stored, record.label);
 		const entry: ExternalInstance = {
-			record: cloneInstance({ ...record, ...kept, ...resumed }),
-			rowId: previous?.rowId ?? stored?.id ?? record.id,
+			record: cloneInstance({ ...record, ...kept, ...resumed, label, paneLabel: record.label }),
+			// A pane that went on to another session leaves the row stored under its id to that one.
+			rowId: previous?.rowId ?? stored?.id ?? (getInstance(this.deps.dir, record.id) ? randomUUID() : record.id),
 			activity,
 			lastSeenAt: now,
 			inbox: previous?.inbox ?? [],
@@ -108,8 +116,18 @@ export class ServerSupervisor {
 	 *  from: its pin, order, name and age survive a daemon restart, and its pane's next heartbeat goes
 	 *  on as it. */
 	private persistRow(entry: ExternalInstance): void {
-		const { cwd, createdAt, label, sessionId, sessionFile, pinned, sortOrder } = entry.record;
-		const row = { id: entry.rowId, status: "stopped" as const, cwd, createdAt, label, sessionId, sessionFile };
+		const { cwd, createdAt, label, paneLabel, sessionId, sessionFile, pinned, sortOrder } = entry.record;
+		const row = {
+			id: entry.rowId,
+			status: "stopped" as const,
+			outcome: "stopped" as const,
+			cwd,
+			createdAt,
+			label,
+			paneLabel,
+			sessionId,
+			sessionFile,
+		};
 		const persisted = JSON.stringify({ ...row, pinned, sortOrder });
 		if (persisted === entry.persisted || !sessionFile || !existsSync(sessionFile)) return;
 		upsertInstance(this.deps.dir, { ...getInstance(this.deps.dir, entry.rowId), ...row, pinned, sortOrder });
@@ -139,14 +157,14 @@ export class ServerSupervisor {
 	}
 
 	/** A quit leaves its row, stopped, saved again by its hand-off once pi's writes are final. A
-	 *  switch to another session drops a row first seen in this pane, as before. With no reason given
-	 *  (an older pane, which may still quit and save), its stored row stays. */
+	 *  switch to another session (a reload or fork never unregisters) drops a row first seen in this
+	 *  pane. With no reason given (an older pane, which may still quit and save), its stored row stays. */
 	unregisterExternal(id: string, reason?: EndReason): void {
 		const entry = this.externalInstances.get(id);
 		const file = entry?.record.sessionFile;
 		if (entry && file && reason === "quit" && existsSync(file)) {
-			const { cwd, label, sessionId } = entry.record;
-			this.stopRow({ cwd, label, sessionFile: file, sessionId }, [id, entry]);
+			const { cwd, paneLabel, sessionId } = entry.record;
+			this.stopRow({ cwd, label: paneLabel, sessionFile: file, sessionId }, [id, entry]);
 			this.savesDue.set(file, { deleted: false });
 			return;
 		}
@@ -280,9 +298,10 @@ export class ServerSupervisor {
 		const now = new Date(this.deps.now()).toISOString();
 		const previous = loadInstances(this.deps.dir).find((instance) => instance.sessionFile === options.sessionFile);
 		const tail = readSessionTail(options.sessionFile);
-		// The pane it ran in, newer than the row it may have had before: its pin and order. Its age,
-		// the session header's, is already in that row, stored by its heartbeats.
+		// The pane it ran in, newer than the row it may have had before: its pin, order, name and age
+		// (its session header's time).
 		const ended = pane?.[1];
+		const last = ended?.record ?? previous;
 		if (pane) {
 			this.externalInstances.delete(pane[0]);
 			this.settleWait(pane[0], "none");
@@ -293,10 +312,11 @@ export class ServerSupervisor {
 			id: previous?.id ?? ended?.rowId ?? randomUUID(),
 			status: "stopped",
 			cwd: previous?.cwd ?? options.cwd,
-			createdAt: previous?.createdAt ?? ended?.record.createdAt ?? now,
+			createdAt: ended?.record.createdAt ?? previous?.createdAt ?? now,
 			lastSeenAt: now,
-			// The pane's, as it quit: newer than the name stored before.
-			label: options.label ?? previous?.label,
+			// `options.label` is its pane's name as it quit.
+			label: nameOf(last, options.label),
+			paneLabel: options.label ?? last?.paneLabel,
 			sessionId: options.sessionId ?? previous?.sessionId,
 			sessionFile: options.sessionFile,
 			detail: tail?.detail ?? previous?.detail,
