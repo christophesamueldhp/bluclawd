@@ -359,6 +359,7 @@ async function loadSessions() {
 			leaveChat(state.chat);
 			return;
 		}
+		if (state.chat) returned(state.chat, restore(state.chat));
 		render();
 		if (!state.chat) {
 			void loadDirectories();
@@ -2315,14 +2316,14 @@ function putBack(chat, entry) {
 }
 
 /**
- * The prompts the phone kept of the chat, back in once the daemon's replay and its pane's report
- * are (see restorePending).
+ * The prompts the phone kept of the chat, back in once the daemon's replay, its pane's report and,
+ * with no report, its row are (see restorePending).
  * @param {Chat} chat @param {import("./chat.js").Replay} [replay]
  * @returns {import("./chat.js").Failed[]} those refused or lost
  */
 function restore(chat, replay) {
 	const kept = chat.kept;
-	const failed = restorePending(chat, replay);
+	const failed = restorePending(chat, replay, state.sessions.find((s) => s.id === chat.id)?.alive);
 	// Their give-up timers went with the page or the chat that sent them.
 	if (chat.restored) for (const entry of kept) setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
 	return failed;

@@ -208,20 +208,22 @@ export function settleOutcomes(chat, outcomes, since) {
  * The prompts the phone kept of the chat (see storedPending), back in as it opens again once both
  * the daemon's `replay` and its pane's report are in, in either order, and settled by the replay
  * as settleOutcomes does: one the replay lacks was lost. Discarded instead for a pane from an
- * older build, which reports no outcomes to settle them by.
- * @param {Chat} chat @param {Replay} [replay]
+ * older build, which reports no outcomes to settle them by. With no report at all, `running`
+ * tells the two apart: its row in the session list, undefined until listed. A row not running
+ * had its pane quit, and the replay settles what it was sent; one running is an older build's.
+ * @param {Chat} chat @param {Replay} [replay] @param {boolean} [running]
  * @returns {Failed[]}
  */
-export function restorePending(chat, replay) {
+export function restorePending(chat, replay, running) {
 	if (chat.restored) return [];
 	chat.replay = replay ?? chat.replay;
-	if (!chat.replay || chat.report === undefined) return [];
+	if (!chat.replay || chat.report === undefined || (chat.report === null && running === undefined)) return [];
 	const { outcomes, since } = chat.replay;
 	const kept = chat.kept;
 	chat.restored = true;
 	chat.replay = undefined;
 	chat.kept = [];
-	if (!reportsOutcomes(chat)) return [];
+	if (chat.report ? !reportsOutcomes(chat) : running) return [];
 	const restored = kept.filter((s) => !chat.pending.some((p) => p.id === s.id));
 	chat.pending = [...restored, ...chat.pending];
 	return settleSent(chat, outcomes, since, restored);
@@ -229,13 +231,13 @@ export function restorePending(chat, replay) {
 
 /**
  * The pending prompts to keep on the phone, for restorePending: from the moment they are sent,
- * with those kept before that are not back in yet; none once its pane's report shows a pane from
- * an older build, which reports no outcomes to settle them by.
+ * with those kept before that are not back in yet; none sent to a pane its report shows reports no
+ * outcomes to settle them by (an older build's, or none, as its pane quit).
  * @param {Chat} chat
  * @returns {Pending[]}
  */
 export function storedPending(chat) {
-	if (chat.report !== undefined && !reportsOutcomes(chat)) return [];
+	if (chat.report !== undefined && !reportsOutcomes(chat)) return chat.kept;
 	return [...chat.kept, ...chat.pending];
 }
 
