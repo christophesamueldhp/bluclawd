@@ -1135,9 +1135,11 @@ describe("AgentView look", () => {
 			});
 			const text = () => view.render(100).map(stripAnsi).join("\n");
 			const refresh = () => (view as unknown as { refresh(): Promise<void> }).refresh();
-			// The restarted daemon has not heard from the pane yet.
+			// The restarted daemon has not heard from the pane yet: it lists the row stored behind it.
+			listed = [{ id: "pi-a", status: "stopped", cwd: HERE, label: "stored behind it" }];
 			await view.onShow();
 			expect(text()).toContain("carried on");
+			expect(text()).not.toContain("stored behind it");
 			listed = [{ ...pane, label: "re-registered" }];
 			await refresh();
 			expect(text()).toContain("re-registered");

@@ -539,12 +539,13 @@ export class AgentView implements Component, Focusable {
 		this.refreshing = true;
 		try {
 			const listed = (await this.opts.client.list()).filter((inst) => inst.id !== this.opts.hide);
-			// A restarted daemon knows a pane only from its next heartbeat: until then its row stays as it was.
+			// A restarted daemon knows a pane only from its next heartbeat: until then its row stays as it
+			// was, over the stopped row the daemon stored for it.
 			const carried =
 				Date.now() - this.restartedAt < RESTART_GRACE_MS
-					? this.instances.filter((inst) => inst.pane && !listed.some((l) => l.id === inst.id))
+					? this.instances.filter((inst) => inst.pane && !listed.some((l) => l.id === inst.id && l.external))
 					: [];
-			this.instances = [...listed, ...carried];
+			this.instances = [...listed.filter((l) => !carried.some((c) => c.id === l.id)), ...carried];
 			this.connectionLost = false;
 		} catch {
 			this.connectionLost = true;
