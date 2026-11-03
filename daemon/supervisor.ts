@@ -363,10 +363,10 @@ export class ServerSupervisor {
 	listExternalInstances(
 		now: number = this.deps.now(),
 	): Array<{ record: InstanceRecord; activity: AgentActivity; settled: number; silent?: true }> {
-		for (const [id, { rowId, record }] of this.silentPanes) {
-			if (!record.pane || !this.paneGone(record.pane)) continue;
+		for (const [id, entry] of this.silentPanes) {
+			if (!entry.record.pane || !this.paneGone(entry.record.pane)) continue;
 			this.silentPanes.delete(id);
-			this.onDropped?.(rowId, [], undefined, id);
+			this.paneEnded(id, entry);
 		}
 		const out: Array<{ record: InstanceRecord; activity: AgentActivity; settled: number; silent?: true }> = [];
 		for (const [id, entry] of this.externalInstances) {
