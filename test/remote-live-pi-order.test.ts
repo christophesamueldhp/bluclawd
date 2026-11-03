@@ -1,6 +1,6 @@
 /**
  * The live forwarder names the entry pi wrote an assistant message to, which rests on pi's order:
- * extensions' message_end handlers first, then the entry. These tests fail if a pi version changes it.
+ * extensions' message_end handlers first, then the entry. These tests fail if a pi version writes it later.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

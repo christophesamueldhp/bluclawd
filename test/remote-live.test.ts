@@ -97,6 +97,19 @@ describe("LiveForwarder", () => {
 		expect(sent.slice(1, 2)).toEqual([{ ended: "a1" }]);
 	});
 
+	it("ends a reply pi wrote late at the next message's start", () => {
+		live.setWatched(true);
+		const message = assistant({ type: "text", text: "Hi" });
+		live.onMessageStart(message);
+		live.onMessageUpdate(message);
+		live.onMessageEnd(message);
+		vi.advanceTimersByTime(0);
+		expect(sent).toHaveLength(1);
+		write("a1", "assistant");
+		live.onMessageStart(toolResult);
+		expect(sent).toEqual([{ text: "Hi", tools: [] }, { ended: "a1" }]);
+	});
+
 	it("ends a reply pi wrote late at the turn's end, with the turn's entry", () => {
 		live.setWatched(true);
 		const message = assistant({ type: "text", text: "Hi" });
@@ -217,7 +230,7 @@ describe("LiveForwarder", () => {
 		expect(sent).toHaveLength(3);
 	});
 
-	it("clears a turn stopped during a tool, as pi ends it: the tool, the aborted message, the run", () => {
+	it("ends a turn stopped during a tool, as pi ends it: the tool, the aborted message, the run", () => {
 		live.setWatched(true);
 		const message = assistant({ type: "toolCall", id: "c1", name: "bash", arguments: { command: "sleep 60" } });
 		live.onMessageStart(message);
