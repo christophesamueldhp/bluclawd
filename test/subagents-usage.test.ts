@@ -50,8 +50,10 @@ describe("generation usage", () => {
 		expect(usage.totals.totalTokens).toBe(15);
 	});
 
-	it("counts a resumed generation's nested usage from the start", () => {
+	it("counts a resumed generation's nested usage only after its message result is emitted", () => {
 		const usage = createGenerationUsage({ kind: "resume" });
+		usage.addNested(nested);
+		usage.launchResultEmitted();
 		usage.addNested(nested);
 		usage.addTurn(turn);
 

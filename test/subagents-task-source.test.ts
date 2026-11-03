@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { createRunDirectory } from "../ext/subagents/directory.ts";
 import {
 	type SubagentRunController,
 	type SubagentRunnerOutcome,
@@ -89,15 +90,17 @@ function setup(activeParentSessionId: string | undefined = "sess_main") {
 		return admitted.handle;
 	};
 	const source = createAgentTaskSource({
+		directory: createRunDirectory({ scheduler, agentDir: () => agentDir }),
 		scheduler,
 		agentDir: () => agentDir,
-		activeParentSessionId: () => activeParentSessionId,
+		activeScope: () =>
+			activeParentSessionId === undefined ? undefined : { parentSessionId: activeParentSessionId, sessionEpoch: 1 },
 	});
 	return { agentDir, scheduler, controllers, settle, launch, source };
 }
 
 describe("Spec #52 — the run-to-task translation behind the agent-task seam", () => {
-	it("lists the owner's live runs as running tasks, defaulting to the orchestrator's session", () => {
+	it("lists the live runs of the orchestrator's scope as running tasks", () => {
 		const { launch, source, controllers } = setup();
 		const mine = launch("sess_main", "Scan auth");
 		launch("sess_other", "Elsewhere");
@@ -114,7 +117,8 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 			status: "running",
 			model: "faux/faux-1",
 		});
-		expect(source.list("sess_other").map((task) => task.summary)).toEqual(["Elsewhere"]);
+		// Only the orchestrator's current scope has live tasks; another session's runs are of an earlier one.
+		expect(source.list("sess_other")).toEqual([]);
 	});
 
 	it("gets a live or a finished run as the same task, and hides another session's run", () => {

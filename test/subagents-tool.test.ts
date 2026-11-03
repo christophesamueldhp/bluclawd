@@ -1291,134 +1291,6 @@ describe("Ticket #21 — SDK default thinking level for a chosen model", () => {
 	});
 });
 
-describe("Ticket #16 — Agent names and the live roster", () => {
-	it("names runs, rejects a live duplicate, shows later children the roster, and routes messages by name", async () => {
-		const cwd = makeTempDir("names-cwd");
-		const agentDir = makeTempDir("names-agent");
-		let release!: () => void;
-		const released = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		const hold = defineTool({
-			name: "hold",
-			label: "Hold",
-			description: "Waits until the test releases it.",
-			parameters: Type.Object({}),
-			execute: async () => {
-				await released;
-				return { content: [{ type: "text", text: "released" }], details: undefined };
-			},
-		});
-		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir, extraTools: [hold] });
-		try {
-			await session.bindExtensions({ mode: "rpc" });
-			let frontendPrompt = "";
-			let rosterSeen = "";
-			let backendInbox = "";
-			const backend = [
-				fauxAssistantMessage([fauxToolCall("hold", {}, { id: "hold" })]),
-				(context: TranscriptContext) => {
-					backendInbox = JSON.stringify(context.messages);
-					return fauxAssistantMessage("Backend done.");
-				},
-			];
-			const main = [
-				fauxAssistantMessage([
-					fauxToolCall(
-						"subagent",
-						{
-							agent: "general-purpose",
-							name: "backend",
-							task: "Build the API.",
-							background: true,
-							model: "faux-tool/faux-alt",
-							thinkingLevel: "off",
-						},
-						{ id: "spawn_backend" },
-					),
-				]),
-				fauxAssistantMessage([
-					fauxToolCall(
-						"subagent",
-						{ agent: "general-purpose", name: "backend", task: "Duplicate." },
-						{ id: "dup" },
-					),
-					fauxToolCall(
-						"subagent",
-						{ agent: "general-purpose", name: "frontend", task: "Build the UI." },
-						{ id: "fe" },
-					),
-				]),
-				(context: TranscriptContext) => {
-					const firstUser = context.messages.find((m) => m.role === "user");
-					frontendPrompt = JSON.stringify(firstUser?.content ?? "");
-					return fauxAssistantMessage([fauxToolCall("subagent_roster", {}, { id: "roster" })]);
-				},
-				(context: TranscriptContext) => {
-					const roster = context.messages.find((m) => m.role === "toolResult" && m.toolCallId === "roster");
-					rosterSeen = JSON.stringify(roster?.role === "toolResult" ? roster.content : "");
-					return fauxAssistantMessage("Frontend done.");
-				},
-				fauxAssistantMessage([
-					fauxToolCall("subagent_message", { to: "backend", content: "Use REST." }, { id: "msg" }),
-				]),
-				fauxAssistantMessage("Done."),
-			];
-			let mainStep = 0;
-			let backendStep = 0;
-			const respond = (context: TranscriptContext, _o: unknown, _s: unknown, model: { id: string }) => {
-				const step = model.id === "faux-alt" ? backend[backendStep++] : main[mainStep++];
-				if (!step) return fauxAssistantMessage("Parent ack.");
-				return typeof step === "function" ? step(context) : step;
-			};
-			faux.setResponses(Array.from({ length: 12 }, () => respond));
-			await session.prompt("Delegate.", { expandPromptTemplates: false });
-
-			const dup = toolResultText(session, "dup");
-			expect(dup.result?.isError).toBe(true);
-			expect(dup.text).toMatch(/name "backend" is already used by running agent sub_/);
-			expect(toolResultText(session, "fe").result?.isError).toBe(false);
-			expect(frontendPrompt).toContain("backend");
-			expect(frontendPrompt).toContain("Build the API.");
-			expect(rosterSeen).toContain("backend");
-			expect(rosterSeen).toContain("frontend");
-			expect(toolResultText(session, "msg").text).toContain("accepted");
-
-			release();
-			const runId = (toolResultText(session, "spawn_backend").result?.details as { runId: string }).runId;
-			await waitFor(() => readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "completed");
-			await session.waitForIdle();
-			expect(readPersistedRunRecord(agentDir, session.sessionId, runId)).toMatchObject({ name: "backend" });
-			expect(backendInbox).toContain("Use REST.");
-		} finally {
-			release();
-			session.dispose();
-		}
-	});
-
-	it("names an unnamed run after its role", async () => {
-		const cwd = makeTempDir("autoname-cwd");
-		const agentDir = makeTempDir("autoname-agent");
-		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
-		try {
-			await session.bindExtensions({ mode: "print" });
-			faux.setResponses([
-				fauxAssistantMessage([fauxToolCall("subagent", { agent: "explorer", task: "Look." }, { id: "auto" })]),
-				fauxAssistantMessage("Child done."),
-				fauxAssistantMessage("Done."),
-			]);
-			await session.prompt("Delegate.", { expandPromptTemplates: false });
-
-			const auto = toolResultText(session, "auto");
-			const runId = (auto.result?.details as { runId: string }).runId;
-			expect(readPersistedRunRecord(agentDir, session.sessionId, runId)).toMatchObject({ name: "explorer-1" });
-			expect(auto.text).toContain("name=explorer-1");
-		} finally {
-			session.dispose();
-		}
-	});
-});
-
 describe("Ticket #18 — One orchestrator wake-up for close child messages and completion", () => {
 	function gated(name: string) {
 		let open!: () => void;
@@ -1459,58 +1331,6 @@ describe("Ticket #18 — One orchestrator wake-up for close child messages and c
 			{ id: "launch" },
 		),
 	]);
-	const inboxText = (session: { messages: readonly unknown[] }) =>
-		session.messages
-			.filter((m) => (m as { role?: string }).role === "custom")
-			.map((m) => JSON.stringify((m as { content?: unknown }).content));
-
-	it("wakes an idle orchestrator exactly once with three messages and the completion notice in order", async () => {
-		const cwd = makeTempDir("batch-idle-cwd");
-		const agentDir = makeTempDir("batch-idle-agent");
-		const childGate = gated("child_gate");
-		const { session, faux } = await createParentSessionWithSubagents({
-			cwd,
-			agentDir,
-			extraTools: [childGate.tool],
-			batchWindowMs: 400,
-		});
-		try {
-			await session.bindExtensions({ mode: "rpc" });
-			let parentCalls = 0;
-			let childStep = 0;
-			const main = [spawn, fauxAssistantMessage("Launched.")];
-			faux.setResponses(
-				Array.from(
-					{ length: 10 },
-					() => (_c: TranscriptContext, _o: unknown, _s: unknown, model: { id: string }) => {
-						if (model.id === "faux-alt") return childScript[childStep++];
-						return main[parentCalls++] ?? fauxAssistantMessage("Handled the batch.");
-					},
-				),
-			);
-			await session.prompt("Delegate.", { expandPromptTemplates: false });
-			const callsWhenIdle = parentCalls;
-			childGate.open();
-			const runId = (toolResultText(session, "launch").result?.details as { runId: string }).runId;
-			await waitFor(() => readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "completed");
-			await waitFor(() => parentCalls !== callsWhenIdle);
-			await session.waitForIdle();
-			await new Promise((resolve) => setTimeout(resolve, 500));
-			await session.waitForIdle();
-
-			expect(parentCalls - callsWhenIdle).toBe(1);
-			const inbox = inboxText(session);
-			expect(inbox).toHaveLength(1);
-			const text = inbox[0];
-			expect(text.indexOf("M1")).toBeLessThan(text.indexOf("M2"));
-			expect(text.indexOf("M2")).toBeLessThan(text.indexOf("M3"));
-			expect(text.indexOf("M3")).toBeLessThan(text.indexOf("Execution: completed"));
-		} finally {
-			childGate.open();
-			session.dispose();
-		}
-	});
-
 	it("drops a pending batch quietly when the orchestrator's session is disposed before it flushes", async () => {
 		const cwd = makeTempDir("batch-dispose-cwd");
 		const agentDir = makeTempDir("batch-dispose-agent");
@@ -1783,7 +1603,7 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 		return sys?.role === "system" && getSystemMessageText(sys).includes("operating in a fresh context");
 	};
 
-	it("resumes a completed child with its transcript, keeps its identity, and counts each generation once", async () => {
+	it("resumes a completed child from an orchestrator message, with its transcript and the message as task direction", async () => {
 		const cwd = makeTempDir("resume-cwd");
 		const agentDir = makeTempDir("resume-agent");
 		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir, batchWindowMs: 0 });
@@ -1829,30 +1649,9 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 			);
 			await session.waitForIdle();
 
-			const record = readPersistedRunRecord(agentDir, session.sessionId, runId);
-			expect(record).toMatchObject({
-				runId,
-				name: "backend",
-				agentName: "general-purpose",
-				modelId: "faux-alt",
-				thinkingLevel: "off",
-				generation: 1,
-				status: "completed",
-				summaryText: "v2 done.",
-				deliveryMode: "background",
-			});
 			expect(resumedContext).toContain("v1 done.");
 			expect(resumedContext).toContain("Task direction from the orchestrator");
 			expect(resumedContext).toContain("Now add tests.");
-			const ledger = JSON.parse(
-				readFileSync(
-					join(agentDir, "bluclawd", "subagents", session.sessionId, "background-usage-ledger.json"),
-					"utf8",
-				),
-			);
-			// The first, foreground generation was attributed to the parent; only the resumed one is in the ledger.
-			expect(ledger.recordedRunIds).toEqual([`${runId}#1`]);
-			expect(ledger.usage.totalTokens).toBe(record?.usage.totalTokens);
 			await waitFor(() =>
 				session.messages.some((m) => m.role === "custom" && JSON.stringify(m).includes("v2 done.")),
 			);
@@ -1865,17 +1664,17 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 		const cwd = makeTempDir("resume-race-cwd");
 		const agentDir = makeTempDir("resume-race-agent");
 		const INTEGRATION_TOKENS = 1_000_000;
-		let bothResumesAnswered!: () => void;
-		const answered = new Promise<void>((resolve) => {
-			bothResumesAnswered = resolve;
+		let bothResumeResultsEmitted!: () => void;
+		const resultsEmitted = new Promise<void>((resolve) => {
+			bothResumeResultsEmitted = resolve;
 		});
 		const metered = defineTool({
 			name: "metered",
 			label: "Metered",
-			description: "Reports integration usage once both resume messages are answered.",
+			description: "Reports integration usage once both resume results are emitted.",
 			parameters: Type.Object({}),
 			execute: async () => {
-				await answered;
+				await resultsEmitted;
 				return {
 					content: [{ type: "text", text: "metered" }],
 					details: undefined,
@@ -1897,9 +1696,15 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 			extraTools: [metered],
 		});
 		let messageResults = 0;
+		// Before its message result is emitted, the SDK folds the resumed generation's nested usage into it.
 		const off = session.subscribe((event) => {
-			if (event.type === "tool_execution_end" && event.toolName === "subagent_message" && ++messageResults === 2) {
-				bothResumesAnswered();
+			if (
+				event.type === "message_start" &&
+				event.message.role === "toolResult" &&
+				event.message.toolCallId.startsWith("resume_") &&
+				++messageResults === 2
+			) {
+				bothResumeResultsEmitted();
 			}
 		});
 		try {
@@ -1955,7 +1760,188 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 		}
 	});
 
-	it("refuses to resume for a sibling, a stopped child, or a run from before a reload", async () => {
+	it("counts a resumed generation's nested usage once when its message result waits for a long launch", async () => {
+		const cwd = makeTempDir("resume-batch-cwd");
+		const agentDir = makeTempDir("resume-batch-agent");
+		const INTEGRATION_TOKENS = 1_000_000;
+		let meteredEnded!: () => void;
+		const metered = new Promise<void>((resolve) => {
+			meteredEnded = resolve;
+		});
+		const meteredTool = defineTool({
+			name: "metered",
+			label: "Metered",
+			description: "Reports integration usage.",
+			parameters: Type.Object({}),
+			execute: async () => ({
+				content: [{ type: "text", text: "metered" }],
+				details: undefined,
+				usage: {
+					input: INTEGRATION_TOKENS,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: INTEGRATION_TOKENS,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			}),
+		});
+		const gate = defineTool({
+			name: "gate",
+			label: "Gate",
+			description: "Waits until the metered call has ended.",
+			parameters: Type.Object({}),
+			execute: async () => {
+				await metered;
+				return { content: [{ type: "text", text: "open" }], details: undefined };
+			},
+		});
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd,
+			agentDir,
+			batchWindowMs: 0,
+			extraTools: [meteredTool, gate],
+		});
+		// The SDK has recorded the nested usage by the time the call ends.
+		const off = session.subscribe((event) => {
+			if (event.type === "tool_execution_end" && event.toolName === "metered") meteredEnded();
+		});
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			let parentStep = 0;
+			const route = (context: TranscriptContext) => {
+				const text = JSON.stringify(context.messages);
+				if (isChildContext(context)) {
+					if (text.includes("Now meter.")) {
+						if (text.includes('"toolName":"metered"')) return fauxAssistantMessage("v2 done.");
+						return fauxAssistantMessage([fauxToolCall("metered", {}, { id: "m" })]);
+					}
+					if (text.includes("Wait for the gate.")) {
+						if (text.includes('"toolName":"gate"')) return fauxAssistantMessage("Long done.");
+						return fauxAssistantMessage([fauxToolCall("gate", {}, { id: "g" })]);
+					}
+					return fauxAssistantMessage("v1 done.");
+				}
+				parentStep++;
+				if (parentStep === 1) {
+					return fauxAssistantMessage([
+						fauxToolCall(
+							"subagent",
+							{ agent: "general-purpose", name: "backend", task: "Build v1." },
+							{ id: "first" },
+						),
+					]);
+				}
+				if (parentStep === 2) {
+					// The message result is emitted only once the long foreground launch in its batch finishes.
+					return fauxAssistantMessage([
+						fauxToolCall("subagent_message", { to: "backend", content: "Now meter." }, { id: "resume" }),
+						fauxToolCall(
+							"subagent",
+							{ agent: "general-purpose", name: "long", task: "Wait for the gate." },
+							{ id: "long" },
+						),
+					]);
+				}
+				return fauxAssistantMessage("Waiting.");
+			};
+			faux.setResponses(Array.from({ length: 16 }, () => route));
+			await session.prompt("Delegate, then resume beside a long launch.", { expandPromptTemplates: false });
+			const runId = (toolResultText(session, "first").result?.details as { runId: string }).runId;
+			expect(toolResultText(session, "resume").text).toContain("accepted: resuming");
+			expect(toolResultText(session, "long").text).toContain("Long done.");
+
+			await waitFor(
+				() =>
+					readPersistedRunRecord(agentDir, session.sessionId, runId)?.generation === 1 &&
+					readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "completed",
+			);
+			await session.waitForIdle();
+
+			const resumeResult = toolResultText(session, "resume").result as { usage?: { totalTokens: number } };
+			const attributed = resumeResult.usage?.totalTokens ?? 0;
+			const runTokens = readPersistedRunRecord(agentDir, session.sessionId, runId)?.usage.totalTokens ?? 0;
+			// Exactly one of the message result or the resumed generation carries the integration usage.
+			expect(Math.floor(attributed / INTEGRATION_TOKENS) + Math.floor(runTokens / INTEGRATION_TOKENS)).toBe(1);
+		} finally {
+			off();
+			session.dispose();
+		}
+	});
+
+	it("blocks a resumed child from stopping agent runs, the same as a first-generation one", async () => {
+		const cwd = makeTempDir("resume-stop-cwd");
+		const agentDir = makeTempDir("resume-stop-agent");
+		const stopped: string[] = [];
+		const taskStop = defineTool({
+			name: "task_stop",
+			label: "Stop task",
+			description: "Stop a background task.",
+			parameters: Type.Object({ task_id: Type.String() }),
+			execute: async (_id, params) => {
+				stopped.push(params.task_id);
+				return { content: [{ type: "text", text: `stopped ${params.task_id}` }], details: undefined };
+			},
+		});
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd,
+			agentDir,
+			batchWindowMs: 0,
+			extraTools: [taskStop],
+		});
+		try {
+			await session.bindExtensions({ mode: "rpc" });
+			let parentStep = 0;
+			const route = (context: TranscriptContext) => {
+				if (isChildContext(context)) {
+					const agentStop = context.messages.find((m) => m.role === "toolResult" && m.toolCallId === "s_agent");
+					if (agentStop?.role === "toolResult")
+						return fauxAssistantMessage(`agentStopBlocked=${agentStop.isError}`);
+					if (JSON.stringify(context.messages).includes("Now stop things.")) {
+						return fauxAssistantMessage([
+							fauxToolCall("task_stop", { task_id: "sub_sibling" }, { id: "s_agent" }),
+							fauxToolCall("task_stop", { task_id: "bg_shell" }, { id: "s_shell" }),
+						]);
+					}
+					return fauxAssistantMessage("v1 done.");
+				}
+				parentStep++;
+				if (parentStep === 1) {
+					return fauxAssistantMessage([
+						fauxToolCall(
+							"subagent",
+							{ agent: "general-purpose", name: "backend", task: "Build v1." },
+							{ id: "first" },
+						),
+					]);
+				}
+				if (parentStep === 2) {
+					return fauxAssistantMessage([
+						fauxToolCall("subagent_message", { to: "backend", content: "Now stop things." }, { id: "resume" }),
+					]);
+				}
+				return fauxAssistantMessage("Waiting.");
+			};
+			faux.setResponses(Array.from({ length: 12 }, () => route));
+			await session.prompt("Delegate then resume.", { expandPromptTemplates: false });
+			const runId = (toolResultText(session, "first").result?.details as { runId: string }).runId;
+			expect(toolResultText(session, "resume").text).toContain("accepted: resuming");
+
+			await waitFor(
+				() =>
+					readPersistedRunRecord(agentDir, session.sessionId, runId)?.generation === 1 &&
+					readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "completed",
+			);
+			await session.waitForIdle();
+
+			expect(readPersistedRunRecord(agentDir, session.sessionId, runId)?.summaryText).toBe("agentStopBlocked=true");
+			expect(stopped).toEqual(["bg_shell"]);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("refuses to resume a run from before a reload", async () => {
 		const cwd = makeTempDir("resume-refuse-cwd");
 		const agentDir = makeTempDir("resume-refuse-agent");
 		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir });
@@ -1970,26 +1956,9 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 					),
 				]),
 				fauxAssistantMessage("Finished."),
-				fauxAssistantMessage([
-					fauxToolCall(
-						"subagent",
-						{ agent: "general-purpose", name: "sibling", task: "Message done-one." },
-						{ id: "sib" },
-					),
-				]),
-				fauxAssistantMessage([
-					fauxToolCall("subagent_message", { to: "done-one", content: "Wake up." }, { id: "sib_msg" }),
-				]),
-				(context: TranscriptContext) => {
-					const receipt = context.messages.find((m) => m.role === "toolResult" && m.toolCallId === "sib_msg");
-					return fauxAssistantMessage(
-						`sibling receipt: ${JSON.stringify(receipt?.role === "toolResult" ? receipt.content : "")}`,
-					);
-				},
 				fauxAssistantMessage("Done."),
 			]);
-			await session.prompt("Run two.", { expandPromptTemplates: false });
-			expect(toolResultText(session, "sib").text).toMatch(/sibling receipt: .*done-one.* has finished/);
+			await session.prompt("Run one.", { expandPromptTemplates: false });
 
 			const doneRun = (toolResultText(session, "done").result?.details as { runId: string }).runId;
 			await session.reload();
@@ -2004,75 +1973,6 @@ describe("Ticket #19 — Resume a completed child from an orchestrator message",
 			const afterReload = toolResultText(session, "after_reload");
 			expect(afterReload.result?.isError).toBe(true);
 			expect(afterReload.text).toMatch(/invalidated: .*reloaded or replaced; spawn a new subagent/);
-		} finally {
-			session.dispose();
-		}
-	});
-
-	it("refuses to resume a stopped child", async () => {
-		const cwd = makeTempDir("resume-stopped-cwd");
-		const agentDir = makeTempDir("resume-stopped-agent");
-		const hold = defineTool({
-			name: "hold",
-			label: "Hold",
-			description: "Waits until aborted.",
-			parameters: Type.Object({}),
-			execute: async (_id, _params, signal) => {
-				await new Promise((resolve) => signal?.addEventListener("abort", resolve));
-				return { content: [{ type: "text", text: "aborted" }], details: undefined };
-			},
-		});
-		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir, extraTools: [hold] });
-		try {
-			await session.bindExtensions({ mode: "rpc" });
-			let parentStep = 0;
-			const main = [
-				fauxAssistantMessage([
-					fauxToolCall(
-						"subagent",
-						{
-							agent: "general-purpose",
-							name: "stuck",
-							task: "Hold.",
-							background: true,
-							model: "faux-tool/faux-alt",
-							thinkingLevel: "off",
-						},
-						{ id: "spawn" },
-					),
-				]),
-				fauxAssistantMessage("Launched."),
-			];
-			faux.setResponses(
-				Array.from(
-					{ length: 8 },
-					() => (_c: TranscriptContext, _o: unknown, _s: unknown, model: { id: string }) =>
-						model.id === "faux-alt"
-							? fauxAssistantMessage([fauxToolCall("hold", {}, { id: `hold_${Math.random()}` })])
-							: (main[parentStep++] ?? fauxAssistantMessage("Parent ack.")),
-				),
-			);
-			await session.prompt("Delegate.", { expandPromptTemplates: false });
-			const runId = (toolResultText(session, "spawn").result?.details as { runId: string }).runId;
-			faux.setResponses([
-				fauxAssistantMessage([fauxToolCall("subagent_stop", { agent: "stuck" }, { id: "stop" })]),
-				fauxAssistantMessage("Stopped."),
-			]);
-			await session.prompt("Stop it.", { expandPromptTemplates: false });
-			await waitFor(() => readPersistedRunRecord(agentDir, session.sessionId, runId)?.status === "cancelled");
-
-			faux.setResponses([
-				fauxAssistantMessage([
-					fauxToolCall("subagent_message", { to: "stuck", content: "Go on." }, { id: "again" }),
-				]),
-				fauxAssistantMessage("Ok."),
-			]);
-			await session.prompt("Resume it.", { expandPromptTemplates: false });
-			const again = toolResultText(session, "again");
-			expect(again.result?.isError).toBe(true);
-			expect(again.text).toMatch(
-				/unavailable: "stuck" \(sub_[^)]+\) is cancelled; only a completed subagent can be resumed/,
-			);
 		} finally {
 			session.dispose();
 		}

@@ -1,7 +1,15 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Api, fauxAssistantMessage, fauxProvider, fauxToolCall, type Model, Type } from "@earendil-works/pi-ai";
+import {
+	type Api,
+	fauxAssistantMessage,
+	fauxProvider,
+	fauxToolCall,
+	getSystemMessageText,
+	type Model,
+	Type,
+} from "@earendil-works/pi-ai";
 import { createReadToolDefinition, defineTool, ModelRegistry, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { discoverAgentDefinitions, resolveAgentDefinition } from "../ext/subagents/definitions.ts";
@@ -158,10 +166,14 @@ describe("Task 4 (M1) — Child runner", () => {
 
 			let childSystemPrompt = "";
 			faux.setResponses([
-				fauxAssistantMessage([
-					fauxToolCall("read", { path: "src/hello.ts" }, { id: "c_read_ok" }),
-					fauxToolCall("denied_action", {}, { id: "c_denied" }),
-				]),
+				(context) => {
+					const system = context.messages.find((m) => m.role === "system");
+					childSystemPrompt = system?.role === "system" ? getSystemMessageText(system) : "";
+					return fauxAssistantMessage([
+						fauxToolCall("read", { path: "src/hello.ts" }, { id: "c_read_ok" }),
+						fauxToolCall("denied_action", {}, { id: "c_denied" }),
+					]);
+				},
 				(context) => {
 					const denied = context.messages.find((m) => m.role === "toolResult" && m.toolCallId === "c_denied");
 					return fauxAssistantMessage(
@@ -183,9 +195,6 @@ describe("Task 4 (M1) — Child runner", () => {
 						childTools: [defineTool(createReadToolDefinition(cwd)), deniedTool],
 						activeToolNames: ["read", "denied_action"],
 						builtinExtensions: [],
-						onChildSessionCreated: (session) => {
-							childSystemPrompt = session.systemPrompt;
-						},
 					}),
 			});
 

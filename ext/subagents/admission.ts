@@ -19,6 +19,7 @@ import {
 	type SubagentModelSpec,
 } from "./definitions.ts";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
+import type { RunDirectory } from "./directory.ts";
 import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
 import {
@@ -28,8 +29,8 @@ import {
 	resolveChildModelAndRuntime,
 	snapshotParentTools,
 } from "./runner.ts";
-import type { AdmittedSubagentHandle, SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
-import { ensureSessionStorageDir } from "./storage.ts";
+import { type AdmittedSubagentHandle, createRunId, type SubagentRunRecord, type SubagentRunScheduler } from "./runs.ts";
+import { ensureRunStorageDir } from "./storage.ts";
 
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
 /** Recorded until the child session reports the level the SDK chose for its model. */
@@ -48,8 +49,11 @@ export interface RunExecutionContext {
 	activeToolNames: readonly string[];
 	builtinExtensions: readonly string[];
 	childModel: ResolvedChildModel;
-	/** Set when the orchestrator resumes a completed run: its transcript and the message to continue with. */
-	resume?: { transcriptPath: string; prompt: string };
+	/**
+	 * Set when the orchestrator resumes a completed run: its transcript, the message to continue with, and the
+	 * message tool call the resumed child runs under.
+	 */
+	resume?: { transcriptPath: string; prompt: string; toolCallId: string };
 	projectTrusted: boolean;
 }
 
@@ -122,10 +126,9 @@ export type AdmissionContext = Pick<
 };
 
 export interface RunAdmissionDeps {
-	scheduler: Pick<
-		SubagentRunScheduler<RunExecutionContext>,
-		"admit" | "resume" | "getRun" | "getContext" | "listActiveRuns"
-	>;
+	scheduler: Pick<SubagentRunScheduler<RunExecutionContext>, "admit" | "resume" | "getRun" | "getContext">;
+	/** Which names the runs of a parent scope hold. */
+	directory: Pick<RunDirectory, "nameHolder">;
 	agentDir: () => string;
 	/** Saved roles frozen at session start; discovered on demand when session start was skipped. */
 	catalog: () => AgentDefinitionCatalog | undefined;
@@ -149,7 +152,12 @@ export interface RunAdmission {
 	 * Admits a completed run's next generation. `buildPrompt` is called only once every check has passed,
 	 * just before the run starts again.
 	 */
-	resume(run: Readonly<SubagentRunRecord>, buildPrompt: () => string, ctx: AdmissionContext): Promise<AdmissionResult>;
+	resume(
+		run: Readonly<SubagentRunRecord>,
+		toolCallId: string,
+		buildPrompt: () => string,
+		ctx: AdmissionContext,
+	): Promise<AdmissionResult>;
 }
 
 type ChildTools = Pick<RunExecutionContext, "parent" | "parentTools" | "activeToolNames" | "builtinExtensions">;
@@ -315,12 +323,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			}
 			const startSnapshot = captureWorkspaceSnapshot(cwd);
 
-			const sessionDir = ensureSessionStorageDir(agentDir, parentSessionId);
-			if (!sessionDir.ok) {
-				return reject(`Cannot launch subagent: storage is unavailable (${sessionDir.error}).`);
-			}
-
-			const liveRuns = deps.scheduler.listActiveRuns(parentSessionId);
+			const holderOf = (name: string) => deps.directory.nameHolder(dispatched, name)?.record;
 			const requestedName = params.name?.trim();
 			if (requestedName !== undefined) {
 				if (
@@ -332,7 +335,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 						`Invalid subagent name "${requestedName}": use lowercase letters, digits, "-" or "_", and not "${PARENT_MESSAGE_ADDRESS}" or a "sub_" prefix.`,
 					);
 				}
-				const holder = liveRuns.find((run) => run.name === requestedName);
+				const holder = holderOf(requestedName);
 				if (holder) {
 					return reject(
 						`Subagent name "${requestedName}" is already used by running agent ${holder.runId}; choose another name.`,
@@ -340,7 +343,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				}
 			}
 			let runName = requestedName;
-			while (!runName || liveRuns.some((run) => run.name === runName)) {
+			while (!runName || holderOf(runName)) {
 				const key = `${parentSessionId}:${definition.name}`;
 				const next = (autoNameCounters.get(key) ?? 0) + 1;
 				autoNameCounters.set(key, next);
@@ -349,7 +352,15 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 
 			if (signal?.aborted) return reject("Subagent request was aborted before admission.");
 
+			// Prepared before admission, so a run that cannot store anything is never listed.
+			const runId = createRunId();
+			const storage = ensureRunStorageDir(agentDir, parentSessionId, runId);
+			if (!storage.ok) {
+				return reject(`Cannot launch subagent: storage is unavailable (${storage.error}).`);
+			}
+
 			const admitRes = deps.scheduler.admit({
+				runId,
 				parentSessionId,
 				sessionEpoch: dispatched.sessionEpoch,
 				parentTurnId,
@@ -373,7 +384,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			return { ok: true, handle: admitRes.handle };
 		},
 
-		async resume(run, buildPrompt, ctx) {
+		async resume(run, toolCallId, buildPrompt, ctx) {
 			const label = formatRunLabel(run);
 			const invalidated: AdmissionResult = {
 				ok: false,
@@ -398,9 +409,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					};
 				}
 				if (!current.transcriptPath) return { refused: unavailable(`${label} has no saved transcript to resume.`) };
-				const holder = current.name
-					? deps.scheduler.listActiveRuns(current.parentSessionId).find((r) => r.name === current.name)
-					: undefined;
+				const holder = current.name ? deps.directory.nameHolder(current, current.name)?.record : undefined;
 				if (holder)
 					return { refused: unavailable(`${label} cannot resume: its name is now used by ${holder.runId}.`) };
 				return { transcriptPath: current.transcriptPath };
@@ -431,7 +440,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				...tools,
 				childModel,
 				projectTrusted: ctx.isProjectTrusted(),
-				resume: { transcriptPath: resumable.transcriptPath, prompt: buildPrompt() },
+				resume: { transcriptPath: resumable.transcriptPath, prompt: buildPrompt(), toolCallId },
 			});
 			if (!resumed.ok) return unavailable(resumed.error);
 			return { ok: true, handle: resumed.handle };

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+	type MessageRecipient,
+	type MessageRecipients,
 	type SubagentMessage,
 	SubagentMessageBus,
 	type SubagentMessageRecord,
@@ -7,6 +9,14 @@ import {
 } from "../ext/subagents/messages.ts";
 
 const scope = { parentSessionId: "sess_1", sessionEpoch: 1 };
+
+/** Runs as the run directory would answer for them: by name or run ID, reachable unless a reason says otherwise. */
+function recipients(runs: MessageRecipient[]): MessageRecipients {
+	return {
+		find: (_scope, to) => runs.find(({ record }) => record.runId === to || record.name === to),
+		reachable: () => runs.filter((run) => !run.unreachable),
+	};
+}
 
 describe("Ticket #13 — Subagent message routing", () => {
 	it("gives concurrent senders their bound identities and one ordering", async () => {
@@ -58,23 +68,27 @@ describe("Ticket #13 — Subagent message routing", () => {
 		expect(await send("sub_stale")).toMatchObject({ status: "invalidated", reason: /reloaded or replaced/ });
 		expect(await send("sub_disposed")).toMatchObject({ status: "unavailable", reason: /session disposed/ });
 		expect(await send("sub_done")).toMatchObject({ status: "unavailable", reason: '"sub_done" has finished.' });
-		bus.register("sub_sibling", { scope, deliver });
 		expect(await send("sub_unknown")).toMatchObject({
 			status: "unavailable",
-			reason: /No running agent "sub_unknown" is reachable\. Reachable now: sub_disposed, sub_sibling\./,
+			reason: 'No running agent "sub_unknown" is reachable. Reachable now: none.',
 		});
 		expect(await send("parent")).toMatchObject({ status: "unavailable", reason: /cannot message itself/ });
 	});
 });
 
 describe("Ticket #16 — Agent names", () => {
-	it("routes a message sent to a name to its run and records both, and frees the name when the run ends", async () => {
+	it("routes a message sent to a name to its run, records both names, and says why a run cannot receive", async () => {
 		const records: SubagentMessageRecord[] = [];
-		const bus = new SubagentMessageBus((record) => records.push(record));
+		const runs: MessageRecipient[] = [
+			{ record: { runId: "sub_a", name: "backend" } },
+			{ record: { runId: "sub_b", name: "frontend" } },
+			{ record: { runId: "sub_c", name: "ops" }, unreachable: "is stopping" },
+		];
+		const bus = new SubagentMessageBus((record) => records.push(record), recipients(runs));
 		const received: SubagentMessage[] = [];
 		const deliver = async (message: SubagentMessage) => void received.push(message);
-		bus.register("sub_a", { scope, deliver }, "backend");
-		bus.register("sub_b", { scope, deliver }, "frontend");
+		for (const { record } of runs) bus.register(record.runId, { scope, deliver });
+		bus.register("parent", { scope, deliver });
 
 		expect(await bus.send({ address: "sub_b", scope }, "backend", "by name")).toMatchObject({
 			status: "accepted",
@@ -91,14 +105,15 @@ describe("Ticket #16 — Agent names", () => {
 			["sub_b", "frontend", "sub_a", "backend"],
 		]);
 
-		bus.unregister("sub_a", "has finished");
-		expect(await bus.send({ address: "sub_b", scope }, "backend", "late")).toMatchObject({
+		expect(await bus.send({ address: "sub_b", scope }, "ops", "late")).toMatchObject({
 			status: "unavailable",
-			reason: '"backend" (sub_a) has finished.',
+			reason: '"ops" (sub_c) is stopping.',
 		});
-		bus.register("sub_c", { scope, deliver }, "backend");
-		expect(await bus.send({ address: "sub_b", scope }, "backend", "reused")).toMatchObject({ status: "accepted" });
-		expect(received.at(-1)).toMatchObject({ to: "sub_c", toName: "backend" });
+		expect(await bus.send({ address: "sub_b", scope }, "nobody", "?")).toMatchObject({
+			status: "unavailable",
+			reason: 'No running agent "nobody" is reachable. Reachable now: parent, backend (sub_a).',
+		});
+		expect(received).toHaveLength(2);
 	});
 });
 
