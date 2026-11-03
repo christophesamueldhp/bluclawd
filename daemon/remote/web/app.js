@@ -17,7 +17,6 @@ import {
 	replyEndedAt,
 	restorePending,
 	settleOutcomes,
-	storedPending,
 } from "./chat.js";
 import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
@@ -28,6 +27,7 @@ import { refused, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 import { loaderHtml } from "./mascot.js";
 import { diffSummary, groupSummary, markerKind, resultSummary } from "./output.js";
+import { pendingStore } from "./pending.js";
 import { closePicker, modelGroups, openPicker } from "./picker.js";
 import { filterSessions, fold, matchCommands } from "./search.js";
 import {
@@ -54,10 +54,10 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.50";
+const VERSION = "0.0.51";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
-/** Followed by a session's row id: its pending prompts, kept for when its chat opens again (see storePending). */
-const PENDING_KEY = "bluclawd-pending:";
+/** Each chat's pending prompts, kept for when it opens again. */
+const keptPending = pendingStore(() => localStorage);
 
 function loadViewMode() {
 	try {
@@ -334,6 +334,8 @@ async function loadSessions() {
 		const list = await api.sessions();
 		state.sessions = list.sessions;
 		state.terminalOpen = list.terminalOpen !== false;
+		// A row keeps its id until it is deleted: a queued prompt can wait any time.
+		keptPending.prune(state.sessions.map((s) => s.id));
 		holdRename();
 		if (chat && state.chat === chat && listed(chat, was, state.sessions.find((s) => s.id === chat.id)?.state, asked))
 			void loadMessages();
@@ -357,6 +359,7 @@ async function loadSessions() {
 			leaveChat(state.chat);
 			return;
 		}
+		if (state.chat) returned(state.chat, restore(state.chat));
 		render();
 		if (!state.chat) {
 			void loadDirectories();
@@ -480,7 +483,7 @@ async function loadStatus() {
 	}
 	if (state.chat !== chat || request !== chat.statusRequest) return;
 	chat.report = report;
-	returned(chat, settleOutcomes(chat, report?.outcomes));
+	returned(chat, [...restore(chat), ...settleOutcomes(chat, report?.outcomes)]);
 	// A pane has them once it has reported.
 	if (report && !chat.commandsAsked) {
 		chat.commandsAsked = true;
@@ -648,14 +651,7 @@ function connect() {
 		const { sessionId, outcomes } = JSON.parse(event.data);
 		const chat = state.chat;
 		if (!chat || sessionId !== chat.id) return;
-		/** @type {import("./chat.js").Failed[]} */
-		let failed = [];
-		if (!chat.restored) {
-			const stored = loadPending(chat.id);
-			failed = restorePending(chat, stored, outcomes, streamFrom);
-			// Their give-up timers went with the page or the chat that sent them.
-			for (const entry of stored) setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
-		}
+		const failed = restore(chat, { outcomes, since: streamFrom });
 		returned(chat, [...failed, ...settleOutcomes(chat, outcomes, streamFrom)]);
 		render();
 	});
@@ -1146,7 +1142,7 @@ function render() {
 	}
 	if (view === "list") updateList();
 	else if (view !== "pair") updateChat();
-	storePending(state.chat);
+	if (state.chat) keptPending.save(state.chat);
 }
 
 function updateList() {
@@ -2289,7 +2285,7 @@ async function send() {
 			entry.id,
 		);
 		entry.acceptedAt = Date.now();
-		if (state.chat === chat) storePending(chat);
+		if (state.chat === chat) keptPending.save(chat);
 	} catch (error) {
 		forget(chat, entry);
 		putBack(chat, entry);
@@ -2319,40 +2315,18 @@ function putBack(chat, entry) {
 	if (!chat.attachments.length) chat.attachments = entry.images;
 }
 
-/** @param {string} id a session's row id @returns {Pending[]} its prompts kept by storePending */
-function loadPending(id) {
-	try {
-		const stored = JSON.parse(localStorage.getItem(PENDING_KEY + id) ?? "[]");
-		return Array.isArray(stored) ? stored : [];
-	} catch {
-		return [];
-	}
-}
-
-/** What storePending last wrote, but the images: it writes again only when that changes. */
-let pendingKept = "";
-
 /**
- * The open chat's pending prompts, kept on the phone so that a reload, or a return to the chat,
- * still settles them, and puts back the ones refused or lost (see restorePending).
- * @param {Chat | undefined} chat
+ * The prompts the phone kept of the chat, back in once the daemon's replay, its pane's report and,
+ * with no report, its row are (see restorePending).
+ * @param {Chat} chat @param {import("./chat.js").Replay} [replay]
+ * @returns {import("./chat.js").Failed[]} those refused or lost
  */
-function storePending(chat) {
-	const pending = chat && storedPending(chat);
-	if (!chat || !pending) return;
-	const kept = `${chat.id}\n${JSON.stringify(pending.map(({ images: _, ...entry }) => entry))}`;
-	if (kept === pendingKept) return;
-	pendingKept = kept;
-	try {
-		if (pending.length) localStorage.setItem(PENDING_KEY + chat.id, JSON.stringify(pending));
-		else localStorage.removeItem(PENDING_KEY + chat.id);
-	} catch {
-		// Full, with images most likely: better none kept than an older list, which would put back
-		// prompts again.
-		try {
-			localStorage.removeItem(PENDING_KEY + chat.id);
-		} catch {}
-	}
+function restore(chat, replay) {
+	const kept = chat.kept;
+	const failed = restorePending(chat, replay, state.sessions.find((s) => s.id === chat.id)?.alive);
+	// Their give-up timers went with the page or the chat that sent them.
+	if (chat.restored) for (const entry of kept) setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
+	return failed;
 }
 
 /** A sent prompt still waiting PROMPT_GIVE_UP_MS on (see giveUp). @param {Chat} chat @param {Pending} entry */
@@ -2416,7 +2390,7 @@ function route() {
 	const open = match ? decodeURIComponent(match[1]) : undefined;
 	if (open !== previous?.id) {
 		clearTimeout(previous?.liveClear);
-		state.chat = open === undefined ? undefined : openChat(open);
+		state.chat = open === undefined ? undefined : openChat(open, keptPending.load(open));
 		if (state.chat && !previous) state.chat.backToList = true;
 		state.error = undefined;
 		state.phoneSheet = false;
@@ -2513,7 +2487,10 @@ if ("serviceWorker" in navigator) {
 
 claimLink();
 const opened = /^#s\/(.+)$/.exec(location.hash)?.[1];
-if (opened) state.chat = openChat(decodeURIComponent(opened));
+if (opened) {
+	const id = decodeURIComponent(opened);
+	state.chat = openChat(id, keptPending.load(id));
+}
 render();
 connect();
 void offerHandoff();

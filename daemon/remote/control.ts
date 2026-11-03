@@ -175,6 +175,12 @@ export class RemoteControl {
 		this.server?.status(sessionId);
 	}
 
+	/** The pane listed as `sessionId`, which may still be alive, was reaped with `inbox` still queued for it. */
+	silent(sessionId: string, inbox: PaneMessage[]): void {
+		this.delivery.silent(inbox);
+		this.server?.status(sessionId);
+	}
+
 	hasReport(sessionId: string): boolean {
 		return this.reports.has(sessionId);
 	}

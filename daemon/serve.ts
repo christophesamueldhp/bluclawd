@@ -43,6 +43,7 @@ export async function serve(): Promise<void> {
 	});
 	setRemoteControl(remote);
 	supervisor.onDropped = (rowId, inbox, reason) => remote.dropped(rowId, inbox, reason);
+	supervisor.onSilent = (rowId, inbox) => remote.silent(rowId, inbox);
 	await remote.apply();
 
 	let shutdownPromise: Promise<void> | undefined;

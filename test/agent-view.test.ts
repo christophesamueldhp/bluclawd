@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type AutocompleteProvider, parseColor, styleText, type TUI } from "@earendil-works/pi-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -1060,8 +1061,10 @@ describe("AgentView keys", () => {
 
 describe("piPackageRoot", () => {
 	it("finds the running pi's package root from its entry script, or nothing outside pi", () => {
-		const piRoot = resolve("node_modules/@earendil-works/pi-coding-agent");
-		expect(piPackageRoot(join(piRoot, "dist", "bundle", "cli.js"))).toBe(piRoot);
+		// Resolved as node does, so a worktree finds it through a symlinked or ancestor node_modules.
+		const piRoot = dirname(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))));
+		// The entry is realpath'd to follow pi's bin symlink, so the root comes back real.
+		expect(piPackageRoot(join(piRoot, "dist", "bundle", "cli.js"))).toBe(realpathSync(piRoot));
 		expect(piPackageRoot(resolve("bin.mjs"))).toBeUndefined();
 		expect(piPackageRoot(undefined)).toBeUndefined();
 		expect(piPackageRoot("/nonexistent/pi")).toBeUndefined();
