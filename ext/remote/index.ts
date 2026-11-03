@@ -325,7 +325,7 @@ function factory(pi: ExtensionAPI): void {
 	 *  prompt seen in it, gone from it unstarted while pi is idle, pi dropped. `settled`: a run just ended. */
 	const look = (ctx: ExtensionContext, settled = false): void => {
 		const pending = ctx.hasPendingMessages();
-		outcomes.looked(pending);
+		outcomes.looked(pending, ctx.isIdle());
 		if (pending || !ctx.isIdle()) {
 			quietSince = undefined;
 			return;
