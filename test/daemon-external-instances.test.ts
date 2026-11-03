@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ServerSupervisor } from "../daemon/supervisor.ts";
 import type { InstanceRecord } from "../daemon/types.ts";
+import { testRegistry } from "./helpers/registry.ts";
 
 function rec(id: string): InstanceRecord {
 	return { id, status: "online", cwd: "/p", createdAt: "2026-01-01T00:00:00Z" };
@@ -8,7 +8,7 @@ function rec(id: string): InstanceRecord {
 
 describe("external (self-registered) instances", () => {
 	it("registers and lists an external instance with its activity", () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "working", 1000);
 		const list = supervisor.listExternalInstances(1000);
 		expect(list.length).toBe(1);
@@ -17,7 +17,7 @@ describe("external (self-registered) instances", () => {
 	});
 
 	it("heartbeat (re-register) updates activity and keeps it alive", () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "working", 1000);
 		supervisor.registerExternal(rec("ext-1"), "idle", 10_000);
 		expect(supervisor.listExternalInstances(10_000)[0].activity).toBe("idle");
@@ -25,7 +25,7 @@ describe("external (self-registered) instances", () => {
 	});
 
 	it("counts each time a session stops working, however briefly it worked", () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "idle", 1000);
 		supervisor.registerExternal(rec("ext-1"), "working", 1100);
 		supervisor.registerExternal(rec("ext-1"), "working", 1200);
@@ -38,19 +38,29 @@ describe("external (self-registered) instances", () => {
 	});
 
 	it("reaps an external instance whose heartbeat is past the TTL", () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "working", 1000);
 		expect(supervisor.listExternalInstances(1000 + 20_000)).toEqual([]);
 	});
 
+	it("reaps by its own clock when no time is given", () => {
+		let now = 1000;
+		const supervisor = testRegistry(undefined, () => now);
+		supervisor.registerExternal(rec("ext-1"), "working");
+		now += 14_000;
+		expect(supervisor.listExternalInstances()).toHaveLength(1);
+		now += 2_000;
+		expect(supervisor.listExternalInstances()).toEqual([]);
+	});
+
 	it("keeps an external instance just within the TTL", () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "idle", 1000);
 		expect(supervisor.listExternalInstances(1000 + 14_000).length).toBe(1);
 	});
 
 	it("unregister removes it", () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "working", 1000);
 		supervisor.unregisterExternal("ext-1");
 		expect(supervisor.listExternalInstances(1000)).toEqual([]);
@@ -67,7 +77,7 @@ describe("external instance TTL vs the client's heartbeat cadence", () => {
 	const HEARTBEAT_MS = 3000; // must match self-registration.ts's current HEARTBEAT_MS
 
 	it("the pre-fix 5000ms cadence gave exactly zero margin: 3 misses land ON the TTL boundary", () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "working", 0);
 		// misses at t=5000,10000,15000 — a query landing exactly at the 3rd miss's own tick.
 		expect(supervisor.listExternalInstances(3 * OLD_HEARTBEAT_MS).length).toBe(1);
@@ -77,13 +87,13 @@ describe("external instance TTL vs the client's heartbeat cadence", () => {
 	});
 
 	it("at the current 3000ms cadence, 4 consecutive misses are still safely inside the TTL", () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "working", 0);
 		expect(supervisor.listExternalInstances(4 * HEARTBEAT_MS).length).toBe(1); // 12000 < 15000
 	});
 
 	it("reaping now needs a 5th consecutive miss, not a 3rd", () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "working", 0);
 		expect(supervisor.listExternalInstances(5 * HEARTBEAT_MS + 1)).toEqual([]); // past the 15000ms boundary
 	});
@@ -95,7 +105,7 @@ describe("waiting for a pane's next message", () => {
 	});
 
 	it("wakes when a message is queued, leaving it for the pane's next register to drain", async () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "idle");
 		const waiting = supervisor.waitExternal("ext-1", 25_000);
 		supervisor.sendExternal("ext-1", { type: "prompt", text: "hi" });
@@ -104,19 +114,19 @@ describe("waiting for a pane's next message", () => {
 	});
 
 	it("wakes at once when something is already queued", async () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "idle");
 		supervisor.sendExternal("ext-1", { type: "abort" });
 		await expect(supervisor.waitExternal("ext-1", 25_000)).resolves.toBe("queued");
 	});
 
 	it("is refused for a pane that is not registered", () => {
-		expect(new ServerSupervisor().waitExternal("ext-1", 25_000)).toBeUndefined();
+		expect(testRegistry().waitExternal("ext-1", 25_000)).toBeUndefined();
 	});
 
 	it("answers none once the time is up with nothing queued", async () => {
 		vi.useFakeTimers();
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "idle");
 		let result: string | undefined;
 		void supervisor.waitExternal("ext-1", 25_000)?.then((queued) => {
@@ -132,7 +142,7 @@ describe("waiting for a pane's next message", () => {
 	});
 
 	it("keeps one wait per pane: a newer one settles the older, as across a pane's reload", async () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "idle");
 		const older = supervisor.waitExternal("ext-1", 25_000);
 		const newer = supervisor.waitExternal("ext-1", 25_000);
@@ -142,7 +152,7 @@ describe("waiting for a pane's next message", () => {
 	});
 
 	it("settles a pane's wait when it unregisters or its row is deleted", async () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "idle");
 		supervisor.registerExternal(rec("ext-2"), "idle");
 		const one = supervisor.waitExternal("ext-1", 25_000);
@@ -154,7 +164,7 @@ describe("waiting for a pane's next message", () => {
 	});
 
 	it("settles a pane's wait when its row is reaped", async () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "idle", 0);
 		let result: string | undefined;
 		void supervisor.waitExternal("ext-1", 25_000)?.then((outcome) => {
@@ -166,7 +176,7 @@ describe("waiting for a pane's next message", () => {
 	});
 
 	it("settles every wait at shutdown", async () => {
-		const supervisor = new ServerSupervisor();
+		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("ext-1"), "idle");
 		supervisor.registerExternal(rec("ext-2"), "idle");
 		const waits = [supervisor.waitExternal("ext-1", 25_000), supervisor.waitExternal("ext-2", 25_000)];
