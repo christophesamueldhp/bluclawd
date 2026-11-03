@@ -5,7 +5,7 @@
  * and no requests: app.js fetches, renders, runs the timers it keeps here, and drops a chat no longer
  * open.
  */
-import { giveUp, promptKey, sentText, settle } from "./live.js";
+import { giveUp, promptKey, sentText, settle, shellLine } from "./live.js";
 
 /**
  * @typedef {import("./app.js").Message} Message @typedef {import("./app.js").LiveSnapshot} LiveSnapshot
@@ -13,12 +13,16 @@ import { giveUp, promptKey, sentText, settle } from "./live.js";
  */
 /**
  * A prompt sent and not yet in the transcript. `id`: the one sent with it, which its outcome comes
- * back by. `text`: as the transcript will show it (see promptKey); `prompt`: as typed, `images`: as
- * sent. `before`: the transcript's copies of its text when it was sent. `started`: the session was
- * seen working since. `last`: the transcript's last message when it was sent. `outcome`: what its
- * pane reported of it, a pane that reports outcomes.
- * @typedef {{ id: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, outcome?: import("./statusbar.js").PromptOutcome["outcome"] }} Pending
+ * back by. `text`: as the transcript will show it (see promptKey); `prompt`: as typed, `images`:
+ * as sent. `before`: the transcript's copies of its text when it was sent. `started`: the session
+ * was seen working since. `last`: the transcript's last message when it was sent. `acceptedAt`: when
+ * the daemon answered that it has it. `outcome`: what its pane reported of it, a pane that reports
+ * outcomes.
+ * @typedef {{ id: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, acceptedAt?: number, outcome?: "taken" | "queued" }} Pending
  */
+/** A reply's text and thinking, held until a page has its entry. @typedef {{ entryId: string, text: string, thinking?: string }} Held */
+
+/** Why a sent prompt came back: its pane refused it, or it was lost. @typedef {{ entry: Pending, reason: string }} Failed */
 
 /** Unique across chats and reloads: the daemon keeps outcomes by it. */
 function promptId() {
@@ -44,6 +48,8 @@ export function openChat(id) {
 		/** The reply on screen has ended (or may have, while the stream was down): see settle(). */
 		liveEnded: false,
 		/** @type {ReturnType<typeof setTimeout> | undefined} */ liveClear: undefined,
+		/** Replies their pane said ended at a transcript entry, shown until a page has it: see replyEndedAt(). @type {Held[]} */
+		held: [],
 		/** @type {Pending[]} */ pending: [],
 		/** Images for the next prompt. @type {Attachment[]} */ attachments: [],
 		/** Picked photos still being read into `attachments`. */
@@ -93,6 +99,18 @@ export function openChat(id) {
 
 /** @typedef {ReturnType<typeof openChat>} Chat */
 
+/**
+ * The reply on screen ended at transcript entry `entryId`: its text and thinking are held until a
+ * page has that entry, whatever text later snapshots show (none while its tools run). Its tools
+ * stay live, and go as their results land.
+ * @param {Chat} chat @param {string} entryId
+ */
+export function replyEndedAt(chat, entryId) {
+	const live = chat.live;
+	if (live?.text || live?.thinking) chat.held.push({ entryId, text: live.text, thinking: live.thinking });
+	chat.live = live?.tools.length ? { text: "", tools: live.tools } : undefined;
+}
+
 /** Only the pending prompts `keep` holds. @param {Chat} chat @param {(p: Pending) => boolean} keep */
 function keepPending(chat, keep) {
 	chat.pending = chat.pending.filter(keep);
@@ -123,6 +141,11 @@ export function applyLatest(chat, page) {
 	}
 	chat.messagesLoaded = true;
 	chat.live = settle(chat.live, chat.liveEnded, latest);
+	// pi writes the replies in the order they ended: one whose entry is not there by a later reply's
+	// never will be (another extension emptied it, or the session moved to another branch).
+	const ids = new Set(latest.map((m) => m.id));
+	const last = chat.held.map((h) => ids.has(h.entryId)).lastIndexOf(true);
+	chat.held = chat.held.slice(last + 1);
 	// A pane from an older build reports no outcomes: a prompt sent to it is pending until the
 	// transcript has one more copy of its text than when it was sent.
 	const guess = !reportsOutcomes(chat);
@@ -139,23 +162,46 @@ function reportsOutcomes(chat) {
 
 /**
  * A prompt pi took is in the transcript once it moved past where it was when the prompt was sent:
- * pi writes a prompt as it starts its turn.
+ * pi writes a prompt as it starts its turn. A slash command or a `!` line, which may write nothing,
+ * is done once taken.
  * @param {Chat} chat @param {Pending} entry
  */
 function written(chat, entry) {
-	return entry.outcome === "taken" && (chat.messages.at(-1)?.id ?? "") !== entry.last;
+	if (entry.outcome !== "taken") return false;
+	const command =
+		!entry.images.length && (/^\/[\w.:-]+(?:\s|$)/.test(entry.prompt.trimStart()) || shellLine(entry.prompt));
+	return command || (chat.messages.at(-1)?.id ?? "") !== entry.last;
 }
 
 /**
- * What the pane reported of the prompts sent to it, from its status; none from an older pane.
+ * What became of the prompts sent to the session: from its status, or the event stream's. The
+ * refused and lost ones are taken out, and returned to go back into the reply box. `since`: an
+ * event stream asked for then replays every outcome its daemon knows, so a prompt it had accepted
+ * before then and does not list, a restarted daemon lost; only for a pane that reports outcomes,
+ * as the others' prompts may have reached pi.
  * @param {Chat} chat @param {import("./statusbar.js").PromptOutcome[] | undefined} outcomes
+ * @param {number} [since]
+ * @returns {Failed[]}
  */
-export function settleOutcomes(chat, outcomes) {
-	for (const { id, outcome } of outcomes ?? []) {
-		const entry = chat.pending.find((p) => p.id === id);
-		if (entry) entry.outcome = outcome;
+export function settleOutcomes(chat, outcomes, since) {
+	/** @type {Failed[]} */
+	const failed = [];
+	for (const outcome of outcomes ?? []) {
+		const entry = chat.pending.find((p) => p.id === outcome.id);
+		if (!entry) continue;
+		if (outcome.outcome === "refused" || outcome.outcome === "lost") failed.push({ entry, reason: outcome.reason });
+		else if (outcome.outcome !== "sent") entry.outcome = outcome.outcome;
 	}
+	if (since !== undefined && reportsOutcomes(chat)) {
+		const known = new Set((outcomes ?? []).map((o) => o.id));
+		for (const entry of chat.pending) {
+			if (entry.acceptedAt === undefined || entry.acceptedAt >= since) continue;
+			if (!known.has(entry.id)) failed.push({ entry, reason: "daemon_restarted" });
+		}
+	}
+	for (const { entry } of failed) forget(chat, entry);
 	keepPending(chat, (p) => !written(chat, p));
+	return failed;
 }
 
 /**

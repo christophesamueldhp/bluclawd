@@ -13,8 +13,6 @@ import {
 	applyPaneMessage,
 	BUSY_NOTICE,
 	buildReport,
-	DIALOG_NOTICE,
-	DRAFT_NOTICE,
 	paneTasks,
 	submitCommand,
 	watchTasks,
@@ -52,6 +50,8 @@ function fakes(
 		getContextUsage: () => ({ tokens: 12_000, contextWindow: 200_000, percent: 6 }),
 		sessionManager: {
 			getSessionId: () => "report-session",
+			getSessionFile: (): string | undefined => "/s/report.jsonl",
+			getHeader: (): { parentSession?: string } | undefined => undefined,
 			getEntries: () => [
 				{ type: "message", message: { role: "user", content: "hi" } },
 				{ type: "message", message: { role: "assistant", usage: usage(100, 20, 1000, 200, 0.5) } },
@@ -290,46 +290,42 @@ describe("slash commands from the phone", () => {
 			hasOverlay: () => options.overlay ?? false,
 			getFocusedComponent: () => ("focused" in options ? options.focused : { getText: () => editor.text }),
 		};
-		return { ctx, tui, editor, enter: vi.fn(), refuse: vi.fn() };
+		return { ctx, tui, editor, enter: vi.fn() };
 	};
 
 	it("puts the command in the empty prompt and presses Enter there, as typed on the Mac", () => {
-		const { ctx, tui, editor, enter, refuse } = setup();
-		submitCommand("/compact keep the API notes", ctx as never, tui as never, enter, refuse);
+		const { ctx, tui, editor, enter } = setup();
+		expect(submitCommand("/compact keep the API notes", ctx as never, tui as never, enter)).toBeUndefined();
 		expect(editor.text).toBe("/compact keep the API notes");
 		expect(enter).toHaveBeenCalledTimes(1);
-		expect(refuse).not.toHaveBeenCalled();
 	});
 
 	it("refuses, saying why, while a turn runs, a dialog has the keyboard, or the prompt holds a draft", () => {
 		const cases: Array<[Parameters<typeof setup>[0], string]> = [
-			[{ idle: false }, BUSY_NOTICE],
-			[{ overlay: true }, DIALOG_NOTICE],
+			[{ idle: false }, "busy"],
+			[{ overlay: true }, "dialog"],
 			// A selector pi shows in the prompt's place, such as /model's.
-			[{ focused: { handleInput: () => {} } }, DIALOG_NOTICE],
-			[{ draft: "half a thought" }, DRAFT_NOTICE],
+			[{ focused: { handleInput: () => {} } }, "dialog"],
+			[{ draft: "half a thought" }, "draft"],
 		];
-		for (const [options, notice] of cases) {
-			const { ctx, tui, editor, enter, refuse } = setup(options);
+		for (const [options, reason] of cases) {
+			const { ctx, tui, editor, enter } = setup(options);
 			const before = editor.text;
-			submitCommand("/model", ctx as never, tui as never, enter, refuse);
-			expect(refuse).toHaveBeenCalledWith(notice);
+			expect(submitCommand("/model", ctx as never, tui as never, enter)).toBe(reason);
 			expect(enter).not.toHaveBeenCalled();
 			expect(editor.text).toBe(before);
 		}
-		const { ctx, enter, refuse } = setup();
-		submitCommand("/model", ctx as never, undefined, enter, refuse);
-		expect(refuse).toHaveBeenCalledWith(DIALOG_NOTICE);
+		const { ctx, enter } = setup();
+		expect(submitCommand("/model", ctx as never, undefined, enter)).toBe("dialog");
 	});
 
 	it("takes the command back out of the prompt when Enter cannot be pressed", () => {
-		const { ctx, tui, editor, refuse } = setup();
+		const { ctx, tui, editor } = setup();
 		const enter = vi.fn(() => {
 			throw new Error("tmux: no server running");
 		});
-		submitCommand("/new", ctx as never, tui as never, enter, refuse);
+		expect(submitCommand("/new", ctx as never, tui as never, enter)).toBe("unreachable");
 		expect(editor.text).toBe("");
-		expect(refuse).toHaveBeenCalledTimes(1);
 	});
 });
 
@@ -484,6 +480,7 @@ describe("/remote-control", () => {
 			registerCommand: () => {},
 			getThinkingLevel: () => "off",
 			getCommands: () => [],
+			sendUserMessage: vi.fn(),
 		};
 		process.env[PANE_ENV] = "pi-outcomes";
 		try {
@@ -504,8 +501,8 @@ describe("/remote-control", () => {
 				ctx,
 			);
 
-		handlers.get("bluclawd:prompt-sent")?.({ id: "p-1", text: "same" });
-		handlers.get("bluclawd:prompt-sent")?.({ id: "p-2", text: "same" });
+		handlers.get("bluclawd:pane-message")?.({ type: "prompt", id: "p-1", text: "same" });
+		handlers.get("bluclawd:pane-message")?.({ type: "prompt", id: "p-2", text: "same" });
 		// Typed on the Mac: not the phone's, though its text is the same.
 		input("same", "interactive");
 		await new Promise((resolve) => setTimeout(resolve, 20));
@@ -609,5 +606,133 @@ describe("/remote-control", () => {
 		expect(pi.sendUserMessage).not.toHaveBeenCalled();
 		pressed.mockRestore();
 		sent.mockRestore();
+	});
+
+	/** The remote extension in pane `pi-phone`, on a session in /s/a.jsonl, reporting into `sent`. */
+	async function phonePane(options: { parentSession?: string } = {}) {
+		const sent = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
+		const pressed = vi.spyOn(Tmux.prototype, "sendKeys").mockImplementation(() => {});
+		const handlers = new Map<string, (event: unknown, ctx?: unknown) => unknown>();
+		const { ctx: base, pi: fake } = fakes({ current: model("openai", "gpt-5") });
+		const state = { idle: true, editor: "" };
+		const ctx = {
+			...base,
+			mode: "tui",
+			isIdle: () => state.idle,
+			sessionManager: {
+				...base.sessionManager,
+				getSessionFile: () => "/s/a.jsonl",
+				getHeader: () => ({ type: "session", id: "a", timestamp: "", cwd: "/", ...options }),
+			},
+			ui: {
+				...base.ui,
+				getEditorText: () => state.editor,
+				setEditorText: (text: string) => {
+					state.editor = text;
+				},
+			},
+		};
+		const pi = {
+			...fake,
+			on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, handler),
+			events: { on: (name: string, handler: (data: unknown) => void) => handlers.set(name, handler) },
+			registerCommand: () => {},
+		};
+		process.env[PANE_ENV] = "pi-phone";
+		try {
+			remoteFactory(pi as never);
+		} finally {
+			delete process.env[PANE_ENV];
+		}
+		handlers.get("session_start")?.({}, ctx);
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(1));
+		const outcomes = () => (sent.mock.lastCall?.[1] as { outcomes?: unknown }).outcomes;
+		const message = (data: unknown) => handlers.get("bluclawd:pane-message")?.(data);
+		const on = (name: string, event: unknown = {}) => handlers.get(name)?.(event, ctx);
+		const restore = () => {
+			sent.mockRestore();
+			pressed.mockRestore();
+		};
+		return { pi, ctx, state, sent, pressed, outcomes, message, on, restore };
+	}
+
+	it("hands a phone's prompt to pi with a delivery mode, so pi queues it if a turn started meanwhile", async () => {
+		const pane = await phonePane();
+		// The pane sees pi idle, yet a turn may start before pi looks: pi then queues it, as it does not throw.
+		pane.message({ type: "prompt", text: "hi", id: "p-1", sessionFile: "/s/a.jsonl" });
+		expect(pane.pi.sendUserMessage).toHaveBeenCalledWith("hi", { deliverAs: "followUp" });
+		// pi tells its input handlers a delivery mode only while it streams: idle, pi took it.
+		pane.on("input", { type: "input", text: "hi", source: "extension" });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "p-1", outcome: "taken" }]));
+		pane.restore();
+	});
+
+	it("refuses a phone's prompt or command while pi compacts at the user's request, and not once it is done", async () => {
+		const pane = await phonePane();
+		// pi's own automatic compaction queues a prompt: refused only when pi would throw on it.
+		expect(pane.on("session_before_compact", { reason: "threshold" })).toBeUndefined();
+		pane.message({ type: "prompt", text: "during auto", id: "p-0" });
+		expect(pane.pi.sendUserMessage).toHaveBeenCalledTimes(1);
+		pane.on("session_compact", { reason: "threshold" });
+		expect(pane.on("session_before_compact", { reason: "manual" })).toBeUndefined();
+		pane.message({ type: "prompt", text: "hi", id: "p-1" });
+		pane.message({ type: "command", text: "/model", id: "c-1" });
+		await waitFor(() =>
+			expect(pane.outcomes()).toEqual([
+				{ id: "p-1", outcome: "refused", reason: "compacting" },
+				{ id: "c-1", outcome: "refused", reason: "compacting" },
+			]),
+		);
+		expect(pane.pi.sendUserMessage).toHaveBeenCalledTimes(1);
+		expect(pane.pressed).not.toHaveBeenCalled();
+		// Failed or cancelled, pi says so with session_compact_failed: prompts go to pi again.
+		pane.on("session_compact_failed", { reason: "manual" });
+		pane.message({ type: "prompt", text: "after", id: "p-2" });
+		expect(pane.pi.sendUserMessage).toHaveBeenCalledTimes(2);
+		pane.on("session_before_compact", { reason: "manual" });
+		pane.on("session_compact", { reason: "manual" });
+		pane.message({ type: "prompt", text: "done", id: "p-3" });
+		expect(pane.pi.sendUserMessage).toHaveBeenCalledTimes(3);
+		pane.restore();
+	});
+
+	it("refuses a phone's prompt or command sent to another session than the pane's, and not to its fork's parent", async () => {
+		const pane = await phonePane({ parentSession: "/s/parent.jsonl" });
+		pane.message({ type: "prompt", text: "hi", id: "p-1", sessionFile: "/s/other.jsonl" });
+		pane.message({ type: "command", text: "/model", id: "c-1", sessionFile: "/s/other.jsonl" });
+		await waitFor(() =>
+			expect(pane.outcomes()).toEqual([
+				{ id: "p-1", outcome: "refused", reason: "session_changed" },
+				{ id: "c-1", outcome: "refused", reason: "session_changed" },
+			]),
+		);
+		expect(pane.pi.sendUserMessage).not.toHaveBeenCalled();
+		pane.message({ type: "prompt", text: "to the parent", id: "p-2", sessionFile: "/s/parent.jsonl" });
+		pane.message({ type: "prompt", text: "to this one", id: "p-3", sessionFile: "/s/a.jsonl" });
+		expect(pane.pi.sendUserMessage).toHaveBeenCalledTimes(2);
+		pane.restore();
+	});
+
+	it("reports a phone's command taken once Enter is pressed for it, or refused with why, and no notice", async () => {
+		const pane = await phonePane();
+		pane.message({ type: "command", text: "/compact", id: "c-1", sessionFile: "/s/a.jsonl" });
+		await waitFor(() => expect(pane.outcomes()).toEqual([{ id: "c-1", outcome: "taken" }]));
+		expect(pane.pressed).toHaveBeenCalledTimes(1);
+		pane.state.editor = "";
+		pane.state.idle = false;
+		pane.message({ type: "command", text: "/compact", id: "c-2" });
+		pane.state.idle = true;
+		pane.state.editor = "half a thought";
+		pane.message({ type: "command", text: "/compact", id: "c-3" });
+		await waitFor(() =>
+			expect(pane.outcomes()).toEqual([
+				{ id: "c-1", outcome: "taken" },
+				{ id: "c-2", outcome: "refused", reason: "busy" },
+				{ id: "c-3", outcome: "refused", reason: "draft" },
+			]),
+		);
+		expect(pane.sent.mock.calls.some(([, report]) => "notice" in report)).toBe(false);
+		expect(pane.pressed).toHaveBeenCalledTimes(1);
+		pane.restore();
 	});
 });

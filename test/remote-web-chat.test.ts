@@ -10,6 +10,7 @@ import {
 	forget,
 	listed,
 	openChat,
+	replyEndedAt,
 	settleOutcomes,
 } from "#remote-web/chat.js";
 import { listSummaries } from "../daemon/handler.ts";
@@ -18,6 +19,7 @@ import { testRegistry } from "./helpers/registry.ts";
 
 const user = (id: string, text: string) => ({ kind: "user", id, text });
 const reply = (id: string, text = "ok") => ({ kind: "assistant", id, text, tools: [] });
+const result = (toolCallId: string) => ({ kind: "toolResult", id: `r-${toolCallId}`, toolCallId, ok: true, text: "" });
 
 describe("the open chat's transcript", () => {
 	it("keeps the older messages a latest page follows on from", () => {
@@ -70,6 +72,75 @@ describe("the open chat's transcript", () => {
 		chat.liveEnded = true;
 		applyLatest(chat, { messages: [reply("1", "done")], more: false });
 		expect(chat.live).toBeUndefined();
+	});
+});
+
+describe("a reply its pane says ended at a transcript entry", () => {
+	const running = { id: "c1", name: "bash", summary: "ls", running: true };
+
+	it("keeps its text through a tool-only snapshot, until a page has the entry", () => {
+		const chat = openChat("a");
+		chat.live = { text: "Let me look", tools: [{ ...running, running: false }] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "", tools: [running] };
+		applyLatest(chat, { messages: [reply("1", "Earlier")], more: false });
+		expect(chat.held).toEqual([{ entryId: "x", text: "Let me look" }]);
+		expect(chat.live).toEqual({ text: "", tools: [running] });
+		applyLatest(chat, { messages: [reply("1", "Earlier"), reply("x", "Let me look")], more: false });
+		expect(chat.held).toEqual([]);
+		expect(chat.live).toEqual({ text: "", tools: [running] });
+	});
+
+	it("drops it by the entry even when the transcript's text differs, as another extension edited it", () => {
+		const chat = openChat("a");
+		chat.live = { text: "Draft", thinking: "hmm", tools: [] };
+		replyEndedAt(chat, "x");
+		expect(chat.live).toBeUndefined();
+		expect(chat.held).toEqual([{ entryId: "x", text: "Draft", thinking: "hmm" }]);
+		applyLatest(chat, { messages: [reply("x", "Edited")], more: false });
+		expect(chat.held).toEqual([]);
+	});
+
+	it("keeps it after a bare end too, which settles only what is still live", () => {
+		const chat = openChat("a");
+		chat.live = { text: "Hi", tools: [] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "", tools: [running] };
+		chat.liveEnded = true;
+		applyLatest(chat, { messages: [reply("1", "Hi"), result("c1")], more: false });
+		expect(chat.held).toEqual([{ entryId: "x", text: "Hi" }]);
+		expect(chat.live).toBeUndefined();
+	});
+
+	it("holds its thinking alone, and nothing for a reply of tools only", () => {
+		const chat = openChat("a");
+		chat.live = { text: "", thinking: "hmm", tools: [] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "", tools: [running] };
+		replyEndedAt(chat, "y");
+		expect(chat.held).toEqual([{ entryId: "x", text: "", thinking: "hmm" }]);
+		expect(chat.live).toEqual({ text: "", tools: [running] });
+	});
+
+	it("holds each of two replies until a page has its own entry", () => {
+		const chat = openChat("a");
+		chat.live = { text: "One", tools: [] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "Two", tools: [] };
+		replyEndedAt(chat, "y");
+		expect(chat.held.map((h) => h.text)).toEqual(["One", "Two"]);
+		applyLatest(chat, { messages: [reply("x", "One")], more: false });
+		expect(chat.held.map((h) => h.text)).toEqual(["Two"]);
+	});
+
+	it("drops one whose entry a page never shows once a page has a later reply's", () => {
+		const chat = openChat("a");
+		chat.live = { text: "Emptied by another extension", tools: [] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "Next", tools: [] };
+		replyEndedAt(chat, "y");
+		applyLatest(chat, { messages: [reply("1", "Earlier"), reply("y", "Next")], more: false });
+		expect(chat.held).toEqual([]);
 	});
 });
 
@@ -186,7 +257,69 @@ describe("prompts sent to a pane that reports their outcomes", () => {
 	it("still fail at the give-up when no outcome came", () => {
 		const chat = reporting();
 		const entry = addPending(chat, "go", [], 100);
+		// The daemon has it, and the pane has said nothing of it.
+		expect(settleOutcomes(chat, [{ id: entry.id, outcome: "sent" }])).toEqual([]);
 		expect(checkPending(chat, entry, "idle")).toBe("fail");
+	});
+
+	it("come back, saying why, when their pane refused them or they were lost", () => {
+		const chat = reporting();
+		const refused = addPending(chat, "go", [], 100);
+		const lost = addPending(chat, "go", [], 200);
+		const kept = addPending(chat, "go", [], 300);
+		expect(
+			settleOutcomes(chat, [
+				{ id: refused.id, outcome: "refused", reason: "compacting" },
+				{ id: lost.id, outcome: "lost", reason: "pane_gone" },
+			]),
+		).toEqual([
+			{ entry: refused, reason: "compacting" },
+			{ entry: lost, reason: "pane_gone" },
+		]);
+		expect(chat.pending).toEqual([kept]);
+		// No longer counted: the one left is the transcript's next "go".
+		expect(kept.before).toBe(0);
+		// Each comes back once.
+		expect(settleOutcomes(chat, [{ id: refused.id, outcome: "refused", reason: "compacting" }])).toEqual([]);
+	});
+
+	it("are done once taken when they are a slash command or a ! line, which the transcript may never show", () => {
+		const chat = reporting();
+		const command = addPending(chat, "/compact", [], 100);
+		const shell = addPending(chat, "!ls", [], 200);
+		const prompt = addPending(chat, "/tmp/a is gone", [], 300);
+		settleOutcomes(
+			chat,
+			[command, shell, prompt].map(({ id }) => ({ id, outcome: "taken" as const })),
+		);
+		expect(chat.pending).toEqual([prompt]);
+	});
+
+	it("are lost when the daemon replays what it knows after a reconnect and lacks them: it restarted", () => {
+		const chat = reporting();
+		const known = addPending(chat, "a", [], 100);
+		const forgotten = addPending(chat, "b", [], 110);
+		const later = addPending(chat, "c", [], 120);
+		const unanswered = addPending(chat, "d", [], 130);
+		known.acceptedAt = 150;
+		forgotten.acceptedAt = 160;
+		// Accepted after the stream it replays on was asked for: that daemon may not have had it yet.
+		later.acceptedAt = 250;
+		expect(settleOutcomes(chat, [{ id: known.id, outcome: "sent" }], 200)).toEqual([
+			{ entry: forgotten, reason: "daemon_restarted" },
+		]);
+		expect(chat.pending).toEqual([known, later, unanswered]);
+		// Not on a status, which carries only what changed since the stream opened.
+		expect(settleOutcomes(chat, [], undefined)).toEqual([]);
+	});
+
+	it("are not judged lost by a replay for a pane from an older build", () => {
+		const chat = openChat("a");
+		chat.report = { models: [] };
+		const entry = addPending(chat, "a", [], 100);
+		entry.acceptedAt = 150;
+		expect(settleOutcomes(chat, [], 200)).toEqual([]);
+		expect(chat.pending).toEqual([entry]);
 	});
 });
 

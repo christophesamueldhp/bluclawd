@@ -148,8 +148,8 @@ export class RemoteControl {
 		return this.server?.watching().has(sessionId) === true;
 	}
 
-	live(sessionId: string, live: LiveSnapshot | null): void {
-		this.server?.live(sessionId, live);
+	live(sessionId: string, live: LiveSnapshot | null, entryId?: string): void {
+		this.server?.live(sessionId, live, entryId);
 	}
 
 	/** A pane's latest report; undefined once it is gone. Each one is signalled, unchanged too: the
@@ -168,9 +168,10 @@ export class RemoteControl {
 		this.server?.status(sessionId);
 	}
 
-	/** A pane's heartbeat took these messages from its inbox. */
-	delivered(sessionId: string, messages: PaneMessage[]): void {
-		this.delivery.delivered(sessionId, messages);
+	/** The pane listed as `sessionId` went with `inbox` still queued for it. */
+	lost(sessionId: string, inbox: PaneMessage[]): void {
+		this.delivery.lost(sessionId, inbox);
+		this.server?.status(sessionId);
 	}
 
 	hasReport(sessionId: string): boolean {

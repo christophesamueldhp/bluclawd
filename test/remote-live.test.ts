@@ -1,26 +1,135 @@
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LiveSnapshot } from "../daemon/ipc/protocol.ts";
 import { LiveForwarder, latestOnly } from "../ext/remote/live.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 const assistant = (...content: unknown[]) => ({ role: "assistant", content });
+const toolResult = { role: "toolResult", content: [] };
 
 describe("LiveForwarder", () => {
-	let sent: Array<LiveSnapshot | null>;
+	/** A snapshot, a bare null, or an end naming its entry. */
+	let sent: Array<LiveSnapshot | null | { ended: string }>;
+	/** The session: pi writes its messages to it, other extensions their own entries. */
+	let entries: Map<string, SessionEntry>;
+	let leaf: string | null;
+	/** Writes an entry after the leaf: a message of `role`, or another extension's without one. */
+	const write = (id: string, role?: string) => {
+		const base = { id, parentId: leaf, timestamp: "" };
+		const entry = role
+			? { ...base, type: "message", message: { role } }
+			: { ...base, type: "custom", customType: "note" };
+		entries.set(id, entry as SessionEntry);
+		leaf = id;
+	};
 	let live: LiveForwarder;
 
 	beforeEach(() => {
 		vi.useFakeTimers();
 		sent = [];
-		live = new LiveForwarder((snapshot) => sent.push(snapshot));
+		entries = new Map();
+		leaf = null;
+		write("u1", "user");
+		live = new LiveForwarder((snapshot, entryId) => sent.push(entryId ? { ended: entryId } : snapshot), {
+			getLeafId: () => leaf,
+			getEntry: (id) => entries.get(id),
+		});
 	});
 	afterEach(() => vi.useRealTimers());
 
 	it("sends nothing while no phone watches", () => {
-		live.onMessageUpdate(assistant({ type: "text", text: "Hi" }));
-		live.onMessageEnd();
+		const message = assistant({ type: "text", text: "Hi" });
+		live.onMessageStart(message);
+		live.onMessageUpdate(message);
+		live.onMessageEnd(message);
+		write("a1", "assistant");
 		vi.advanceTimersByTime(1000);
 		expect(sent).toEqual([]);
+	});
+
+	it("ends a reply naming the entry pi wrote it to, once pi has written it", () => {
+		live.setWatched(true);
+		const message = assistant({ type: "text", text: "Hi" });
+		live.onMessageStart(message);
+		live.onMessageUpdate(message);
+		live.onMessageEnd(message);
+		expect(sent).toEqual([{ text: "Hi", tools: [] }]);
+		// pi writes the message after every extension's message_end handler.
+		write("a1", "assistant");
+		vi.advanceTimersByTime(0);
+		expect(sent).toEqual([{ text: "Hi", tools: [] }, { ended: "a1" }]);
+		live.onTurnEnd("a1");
+		live.onAgentEnd();
+		vi.advanceTimersByTime(1000);
+		expect(sent).toHaveLength(2);
+	});
+
+	it("ends a reply pi wrote late at the next event, before that event's snapshot, never with a stale id", () => {
+		live.setWatched(true);
+		const message = assistant({ type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } });
+		live.onMessageStart(message);
+		live.onMessageUpdate(message);
+		live.onMessageEnd(message);
+		// Another extension's message_end handler still holds pi up.
+		vi.advanceTimersByTime(1000);
+		expect(sent).toHaveLength(1);
+		write("a1", "assistant");
+		live.onToolStart("c1", "bash", { command: "ls" });
+		vi.advanceTimersByTime(300);
+		expect(sent.slice(1)).toEqual([
+			{ ended: "a1" },
+			{ text: "", tools: [{ id: "c1", name: "bash", summary: "ls", running: true }] },
+		]);
+	});
+
+	it("ends a reply naming the entry pi wrote, not one another extension wrote around it", () => {
+		live.setWatched(true);
+		const message = assistant({ type: "text", text: "Hi" });
+		live.onMessageStart(message);
+		live.onMessageUpdate(message);
+		write("n1");
+		live.onMessageEnd(message);
+		vi.advanceTimersByTime(0);
+		expect(sent).toEqual([{ text: "Hi", tools: [] }]);
+		write("a1", "assistant");
+		write("n2");
+		live.onToolStart("c1", "bash", { command: "ls" });
+		expect(sent.slice(1, 2)).toEqual([{ ended: "a1" }]);
+	});
+
+	it("ends a reply pi wrote late at the next message's start", () => {
+		live.setWatched(true);
+		const message = assistant({ type: "text", text: "Hi" });
+		live.onMessageStart(message);
+		live.onMessageUpdate(message);
+		live.onMessageEnd(message);
+		vi.advanceTimersByTime(0);
+		expect(sent).toHaveLength(1);
+		write("a1", "assistant");
+		live.onMessageStart(toolResult);
+		expect(sent).toEqual([{ text: "Hi", tools: [] }, { ended: "a1" }]);
+	});
+
+	it("ends a reply pi wrote late at the turn's end, with the turn's entry", () => {
+		live.setWatched(true);
+		const message = assistant({ type: "text", text: "Hi" });
+		live.onMessageStart(message);
+		live.onMessageUpdate(message);
+		live.onMessageEnd(message);
+		vi.advanceTimersByTime(0);
+		live.onTurnEnd("a1");
+		expect(sent).toEqual([{ text: "Hi", tools: [] }, { ended: "a1" }]);
+	});
+
+	it("ends a reply pi never wrote with a bare null at the run's end", () => {
+		live.setWatched(true);
+		const message = assistant({ type: "text", text: "Hi" });
+		live.onMessageStart(message);
+		live.onMessageUpdate(message);
+		live.onMessageEnd(message);
+		vi.advanceTimersByTime(0);
+		live.onAgentEnd();
+		expect(sent).toEqual([{ text: "Hi", tools: [] }, null]);
 	});
 
 	it("sends the reply in progress at most every 300 ms, and its last state", () => {
@@ -60,19 +169,23 @@ describe("LiveForwarder", () => {
 		]);
 	});
 
-	it("clears the reply at its end, then shows the tools it runs until their results land", () => {
+	it("ends the reply, then shows the tools it runs until their results land", () => {
 		live.setWatched(true);
-		live.onMessageUpdate(assistant({ type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } }));
-		live.onMessageEnd();
-		expect(sent.at(-1)).toBeNull();
+		const message = assistant({ type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } });
+		live.onMessageStart(message);
+		live.onMessageUpdate(message);
+		live.onMessageEnd(message);
+		write("a1", "assistant");
+		vi.advanceTimersByTime(0);
+		expect(sent.at(-1)).toEqual({ ended: "a1" });
 		live.onToolStart("c1", "bash", { command: "ls" });
 		vi.advanceTimersByTime(300);
 		expect(sent.at(-1)).toEqual({ text: "", tools: [{ id: "c1", name: "bash", summary: "ls", running: true }] });
 		vi.advanceTimersByTime(300);
 		live.onToolEnd("c1");
 		expect(sent.at(-1)).toEqual({ text: "", tools: [{ id: "c1", name: "bash", summary: "ls", running: false }] });
-		// The tool result message.
-		live.onMessageEnd();
+		live.onMessageStart(toolResult);
+		live.onMessageEnd(toolResult);
 		expect(sent.at(-1)).toBeNull();
 		expect(sent).toHaveLength(5);
 	});
@@ -84,7 +197,8 @@ describe("LiveForwarder", () => {
 		vi.advanceTimersByTime(300);
 		live.onToolEnd("c2");
 		vi.advanceTimersByTime(300);
-		live.onMessageEnd();
+		live.onMessageStart(toolResult);
+		live.onMessageEnd(toolResult);
 		vi.advanceTimersByTime(300);
 		expect(sent.at(-1)).toEqual({ text: "", tools: [{ id: "c1", name: "bash", summary: "sleep 9", running: true }] });
 	});
@@ -94,7 +208,8 @@ describe("LiveForwarder", () => {
 		live.onMessageUpdate(assistant({ type: "text", text: "a" }));
 		live.onMessageUpdate(assistant({ type: "text", text: "ab" }));
 		live.onAgentEnd();
-		live.onMessageEnd();
+		live.onMessageEnd(assistant({ type: "text", text: "ab" }));
+		write("a1", "assistant");
 		vi.advanceTimersByTime(1000);
 		expect(sent).toEqual([{ text: "a", tools: [] }, null]);
 	});
@@ -115,25 +230,31 @@ describe("LiveForwarder", () => {
 		expect(sent).toHaveLength(3);
 	});
 
-	it("clears a turn stopped during a tool, as pi ends it: the tool, the aborted message, the run", () => {
+	it("ends a turn stopped during a tool, as pi ends it: the tool, the aborted message, the run", () => {
 		live.setWatched(true);
-		live.onMessageUpdate(assistant({ type: "toolCall", id: "c1", name: "bash", arguments: { command: "sleep 60" } }));
-		live.onMessageEnd();
+		const message = assistant({ type: "toolCall", id: "c1", name: "bash", arguments: { command: "sleep 60" } });
+		live.onMessageStart(message);
+		live.onMessageUpdate(message);
+		live.onMessageEnd(message);
+		write("a1", "assistant");
 		live.onToolStart("c1", "bash", { command: "sleep 60" });
 		vi.advanceTimersByTime(300);
 		live.onToolEnd("c1");
 		// pi's empty aborted assistant message has a message_end but no update.
 		const before = sent.length;
-		live.onMessageEnd();
+		const aborted = assistant();
+		live.onMessageStart(aborted);
+		live.onMessageEnd(aborted);
+		write("a2", "assistant");
 		live.onAgentEnd();
 		vi.advanceTimersByTime(1000);
-		expect(sent.slice(before)).toEqual([null]);
+		expect(sent.slice(before)).toEqual([{ ended: "a2" }]);
 	});
 
 	it("cuts long thinking as the transcript does", () => {
 		live.setWatched(true);
 		live.onMessageUpdate(assistant({ type: "thinking", thinking: "x".repeat(5000) }));
-		expect(sent[0]?.thinking).toHaveLength(2049);
+		expect(sent[0]).toMatchObject({ thinking: expect.stringMatching(/^x{2048}…$/) });
 	});
 });
 
@@ -168,5 +289,50 @@ describe("latestOnly", () => {
 		forward({ text: "a", tools: [] });
 		forward(null);
 		await waitFor(() => expect(sent).toEqual([{ text: "a", tools: [] }, null]));
+	});
+
+	it("keeps an end queued behind a send, in order, when a later snapshot follows it", async () => {
+		const sent: Array<[LiveSnapshot | null, string | undefined]> = [];
+		const done: Array<() => void> = [];
+		const forward = latestOnly((live, entryId) => {
+			sent.push([live, entryId]);
+			return new Promise<void>((resolve) => done.push(resolve));
+		});
+		const snapshot = (text: string): LiveSnapshot => ({ text, tools: [] });
+		forward(snapshot("a"));
+		forward(null, "e1");
+		forward(snapshot("tools"));
+		forward(snapshot("tools 2"));
+		done.shift()?.();
+		await waitFor(() => expect(sent).toHaveLength(2));
+		done.shift()?.();
+		await waitFor(() => expect(sent).toHaveLength(3));
+		done.shift()?.();
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(sent).toEqual([
+			[snapshot("a"), undefined],
+			[null, "e1"],
+			[snapshot("tools 2"), undefined],
+		]);
+	});
+
+	it("retries a failed end with the next send, before it", async () => {
+		const sent: Array<[LiveSnapshot | null, string | undefined]> = [];
+		let down = true;
+		const forward = latestOnly(async (live, entryId) => {
+			sent.push([live, entryId]);
+			if (down) throw new Error("daemon down");
+		});
+		forward(null, "e1");
+		await waitFor(() => expect(sent).toEqual([[null, "e1"]]));
+		down = false;
+		forward({ text: "next", tools: [] });
+		await waitFor(() =>
+			expect(sent).toEqual([
+				[null, "e1"],
+				[null, "e1"],
+				[{ text: "next", tools: [] }, undefined],
+			]),
+		);
 	});
 });

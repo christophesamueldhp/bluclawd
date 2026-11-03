@@ -22,7 +22,12 @@ describe("remote event stream", () => {
 		let leaf = "a";
 		const session = vi.fn((_id: string) => ({ leafId: leaf }));
 		const sessionsSignature = vi.fn(() => "same");
-		const events = new RemoteEvents({ sessionsSignature, session, listed: () => new Set(["s1", "s2"]) });
+		const events = new RemoteEvents({
+			sessionsSignature,
+			session,
+			listed: () => new Set(["s1", "s2"]),
+			outcomes: () => [],
+		});
 		const clients = [response(), response(), response(), response()];
 		for (const [i, { res }] of clients.entries()) events.add(res, i < 3 ? "s1" : "s2");
 		session.mockClear();
@@ -33,8 +38,11 @@ describe("remote event stream", () => {
 		leaf = "b";
 		vi.advanceTimersByTime(1000);
 		for (const [i, client] of clients.entries()) {
+			const sessionId = i < 3 ? "s1" : "s2";
 			expect(client.events(), `client ${i}`).toEqual([
-				`event: messages\ndata: ${JSON.stringify({ sessionId: i < 3 ? "s1" : "s2" })}\n\n`,
+				// Sent as it opened: what the daemon knows of the phone's prompts to it.
+				`event: outcomes\ndata: ${JSON.stringify({ sessionId, outcomes: [] })}\n\n`,
+				`event: messages\ndata: ${JSON.stringify({ sessionId })}\n\n`,
 			]);
 		}
 		events.close();

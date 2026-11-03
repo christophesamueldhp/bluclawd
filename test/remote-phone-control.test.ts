@@ -89,7 +89,12 @@ const rows: Row[] = [
 	[
 		"a prompt with the phone's id, which its outcome comes back by",
 		{ type: "prompt", text: "next", id: "p-1" },
-		...four(message({ type: "prompt", text: "next", id: "p-1" }), notRunning),
+		// With the session it was sent to, so a pane on another refuses it.
+		...(["running", "stopped", "old", "bare"].map((id) =>
+			id === "stopped"
+				? notRunning
+				: message({ type: "prompt", text: "next", id: "p-1", sessionFile: `/s/${id}.jsonl` }),
+		) as [PhoneOutcome, PhoneOutcome, PhoneOutcome, PhoneOutcome]),
 	],
 	[
 		"a prompt with images",
@@ -335,6 +340,36 @@ describe("phone control", () => {
 			["compact it", "drafting", message({ type: "prompt", text: "compact it" })],
 		] as const)("%s to the %s session", (text, id, expected) => {
 			expect(decide(session(id), { type: "prompt", text })).toEqual(expected);
+		});
+	});
+
+	describe("sent with an id, as the phone sends each", () => {
+		/** The pane in `id` reports outcomes. */
+		const reporting = (id: string) => ({ ...session(id), report: { ...full, outcomes: [] } });
+
+		it("goes with the id and the session file it was sent to, so its pane refuses it on another session", () => {
+			for (const text of ["hi", "/compact", "!ls"]) {
+				expect(decide(reporting("running"), { type: "prompt", text, id: "p-1" })).toEqual(
+					message({
+						type: text === "hi" ? "prompt" : "command",
+						text,
+						id: "p-1",
+						sessionFile: "/s/running.jsonl",
+					}),
+				);
+			}
+		});
+
+		it("is a command a pane that reports outcomes checks for a turn or a draft, with no heartbeat's lag", () => {
+			for (const id of ["busy", "drafting"]) {
+				expect(decide(reporting(id), { type: "prompt", text: "/compact", id: "c-1" })).toEqual(
+					message({ type: "command", text: "/compact", id: "c-1", sessionFile: `/s/${id}.jsonl` }),
+				);
+			}
+			// An older pane says nothing back: checked here, as before.
+			expect(decide(session("busy"), { type: "prompt", text: "/compact", id: "c-1" })).toEqual(
+				error("session_busy"),
+			);
 		});
 	});
 

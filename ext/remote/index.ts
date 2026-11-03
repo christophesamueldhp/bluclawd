@@ -7,6 +7,8 @@
  * model, usage, trust mode and slash commands, and runs the phone's model, thinking level and trust
  * mode switches, slash commands and task stops (report.ts).
  */
+
+import { contentText } from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -14,17 +16,26 @@ import type {
 	InlineExtension,
 } from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
-import type { PaneMessage, PaneReport } from "../../daemon/ipc/protocol.ts";
+import type { PaneMessage, PaneReport, RefusedReason } from "../../daemon/ipc/protocol.ts";
 import { currentDaemonBuildId, OrchestratorClient, type RemoteResult } from "../../daemon/orchestrator-client.ts";
 import { piCommand, Tmux } from "../../daemon/tmux.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
 import { remotePort } from "../_shared/settings.ts";
+import { promptContent, promptOptions } from "../agent-view/index.ts";
 import { TRUST_CHANGED } from "../permissions/index.ts";
 import { autostartDeps, autostartOn, autostartStatus, refreshAutostart, toggleAutostart } from "./autostart.ts";
-import { LiveForwarder, latestOnly } from "./live.ts";
+import { forwardLive, type LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
-import { PromptOutcomes } from "./outcomes.ts";
-import { applyPaneMessage, buildReport, paneTasks, pistatuslinePaths, submitCommand, watchTasks } from "./report.ts";
+import { PromptOutcomes, refusal } from "./outcomes.ts";
+import {
+	applyPaneMessage,
+	buildReport,
+	commandNotice,
+	paneTasks,
+	pistatuslinePaths,
+	submitCommand,
+	watchTasks,
+} from "./report.ts";
 import { EnableNeeded, serve, tailscaleInfo } from "./tailscale.ts";
 
 function message(error: unknown): string {
@@ -198,15 +209,20 @@ async function menu(client: OrchestratorClient, status: RemoteResult, ctx: Exten
 	else if (picked === startAtLogin) await toggleStartAtLogin(ctx);
 }
 
-function liveForwarder(pane: string): LiveForwarder {
+/** Outside a pane nothing watches, so it sends nothing, but registers as a pane does. */
+function liveForwarder(pi: ExtensionAPI, pane: string | undefined): LiveForwarder {
+	if (!pane) return forwardLive(pi, () => {});
 	const client = new OrchestratorClient();
-	return new LiveForwarder(latestOnly((snapshot) => client.remoteLive(pane, snapshot)));
+	return forwardLive(
+		pi,
+		latestOnly((snapshot, entryId) => client.remoteLive(pane, snapshot, entryId)),
+	);
 }
 
 function factory(pi: ExtensionAPI): void {
 	// Only a pane registers (agent view), so only a pane can be watched.
 	const pane = Tmux.currentPane();
-	const live = pane ? liveForwarder(pane) : undefined;
+	const live = liveForwarder(pi, pane);
 	/** Presses Enter in this pane for a phone's slash command; a hung tmux must not hold up pi. */
 	const commandKeys = new Tmux(undefined, undefined, { timeoutMs: 2000 });
 	const client = new OrchestratorClient();
@@ -222,6 +238,8 @@ function factory(pi: ExtensionAPI): void {
 	/** Where pistatusline is, looked up once per session. */
 	let statusline: PaneReport["pistatusline"];
 	const outcomes = new PromptOutcomes();
+	/** pi is compacting at the user's request, when it throws on a prompt. */
+	let compacting = false;
 	/** `notice`: what the pane could not do for the phone, which this report alone carries. */
 	const report = (ctx: ExtensionContext, notice?: string): void => {
 		// As agent view registers: a `pi -p` run inside the pane must not report as the pane.
@@ -258,20 +276,51 @@ function factory(pi: ExtensionAPI): void {
 	pi.on("model_select", (_event, ctx) => changed(ctx));
 	pi.on("thinking_level_select", (_event, ctx) => changed(ctx));
 	pi.on("turn_end", (_event, ctx) => changed(ctx));
-	pi.on("session_compact", (_event, ctx) => changed(ctx));
+	pi.on("session_before_compact", (event) => {
+		if (event.reason === "manual") compacting = true;
+	});
+	pi.on("session_compact", (_event, ctx) => {
+		compacting = false;
+		changed(ctx);
+	});
+	pi.on("session_compact_failed", () => {
+		compacting = false;
+	});
+	// A phone's prompt or command carries an id: what becomes of it is reported, whether or not a
+	// phone has the session open, as a phone sent it.
 	pi.events.on("bluclawd:pane-message", (data) => {
 		const ctx = session;
 		if (!ctx || !pane) return;
 		const message = data as PaneMessage;
-		if (message.type === "command") {
+		const id = message.type === "prompt" || message.type === "command" ? message.id : undefined;
+		const refuse = (id: string, reason: RefusedReason) => {
+			outcomes.refused(id, reason);
+			report(ctx);
+		};
+		if (id && (message.type === "prompt" || message.type === "command")) {
+			const reason = refusal(message, {
+				compacting,
+				sessionFile: ctx.sessionManager.getSessionFile(),
+				parentSession: ctx.sessionManager.getHeader()?.parentSession,
+			});
+			if (reason) return refuse(id, reason);
+		}
+		if (message.type === "prompt") {
+			const content = promptContent(message);
+			// Known by this text in pi's input event: joined as pi joins it.
+			if (id) outcomes.sent(id, contentText(content));
+			pi.sendUserMessage(content, promptOptions(message));
+		} else if (message.type === "command") {
 			const enter = () => commandKeys.sendKeys(pane, ["Enter"]);
-			submitCommand(message.text, ctx, tui?.(), enter, (notice) => report(ctx, notice));
+			const reason = submitCommand(message.text, ctx, tui?.(), enter);
+			if (!id) {
+				if (reason) report(ctx, commandNotice(reason));
+			} else if (reason) refuse(id, reason);
+			else {
+				outcomes.taken(id);
+				report(ctx);
+			}
 		} else applyPaneMessage(message, ctx, pi, () => report(ctx));
-	});
-	// A phone sent these, so they are reported whether or not it has the session open.
-	pi.events.on("bluclawd:prompt-sent", (data) => {
-		const { id, text } = data as { id: string; text: string };
-		outcomes.sent(id, text);
 	});
 	pi.on("input", (event, ctx) => {
 		if (outcomes.input(event)) report(ctx);
@@ -282,7 +331,7 @@ function factory(pi: ExtensionAPI): void {
 	pi.events.on("bluclawd:remote-watched", (data) => {
 		const opened = data === true && !watched;
 		watched = data === true;
-		live?.setWatched(watched);
+		live.setWatched(watched);
 		// A restarted daemon has no report until the next turn: a phone opening the session sends it again.
 		if (opened && session) report(session);
 	});
@@ -292,14 +341,9 @@ function factory(pi: ExtensionAPI): void {
 	pi.events.on(TRUST_CHANGED, () => {
 		if (session) changed(session);
 	});
-	pi.on("message_update", (event) => live?.onMessageUpdate(event.message));
-	pi.on("tool_execution_start", (event) => live?.onToolStart(event.toolCallId, event.toolName, event.args));
-	pi.on("tool_execution_end", (event) => live?.onToolEnd(event.toolCallId));
-	pi.on("message_end", () => live?.onMessageEnd());
-	pi.on("agent_end", () => live?.onAgentEnd());
 	pi.on("session_shutdown", () => {
 		// As a turn's end: no timer left to send, and the phone's snapshot of ours cleared.
-		live?.onAgentEnd();
+		live.onAgentEnd();
 		unwatchTasks?.();
 		unwatchTasks = undefined;
 		session = undefined;

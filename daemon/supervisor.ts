@@ -89,6 +89,8 @@ export class ServerSupervisor {
 	private readonly resumedMeta = new Map<string, Pick<InstanceRecord, "pinned" | "sortOrder">>();
 	/** Rows a start claimed whose pane has not registered yet, by row id. */
 	private readonly startingRows = new Map<string, Starting>();
+	/** A pane went, reaped or unregistered, listed as `rowId` and with `inbox` still queued for it. */
+	onDropped: ((rowId: string, inbox: PaneMessage[]) => void) | undefined;
 
 	constructor(deps: RegistryDeps) {
 		this.deps = deps;
@@ -261,8 +263,14 @@ export class ServerSupervisor {
 			return;
 		}
 		if (entry?.rowId === id && reason) removeInstance(this.deps.dir, id);
+		if (entry) this.drop(id, entry);
+	}
+
+	/** A pane's registration ends, and with it its inbox. */
+	private drop(id: string, entry: ExternalInstance): void {
 		this.externalInstances.delete(id);
 		this.settleWait(id, "none");
+		this.onDropped?.(entry.rowId, entry.inbox);
 	}
 
 	/** Queue a message for a self-registered session, by its pane's id or its row's; false when no
@@ -332,8 +340,7 @@ export class ServerSupervisor {
 					this.stopRow({ cwd, label: paneLabel, sessionFile, sessionId }, [id, entry]);
 					continue;
 				}
-				this.externalInstances.delete(id);
-				this.settleWait(id, "none");
+				this.drop(id, entry);
 				continue;
 			}
 			out.push({ record: { ...entry.record, id: entry.rowId }, activity: entry.activity, settled: entry.settled });
@@ -420,10 +427,7 @@ export class ServerSupervisor {
 		// (its session header's time).
 		const ended = pane?.[1];
 		const last = ended?.record ?? previous;
-		if (pane) {
-			this.externalInstances.delete(pane[0]);
-			this.settleWait(pane[0], "none");
-		}
+		if (pane) this.drop(pane[0], pane[1]);
 		const record: InstanceRecord = {
 			...previous,
 			...(ended && paneMeta(ended.record)),
@@ -452,8 +456,7 @@ export class ServerSupervisor {
 		// with the stored row it went on as.
 		const pane = this.paneOf(instanceId);
 		if (pane) {
-			this.externalInstances.delete(pane[0]);
-			this.settleWait(pane[0], "none");
+			this.drop(pane[0], pane[1]);
 			if (getInstance(this.deps.dir, pane[1].rowId)) removeInstance(this.deps.dir, pane[1].rowId);
 			// Its pi may be quitting already: that quit's hand-off save does not bring it back.
 			const file = pane[1].record.sessionFile;
