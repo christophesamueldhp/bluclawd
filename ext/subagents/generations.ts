@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionAPI, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { RunExecutionContext } from "./admission.ts";
+import { type AdmissionContext, formatRunLabel, type RunAdmission, type RunExecutionContext } from "./admission.ts";
 import { createRunDirectory } from "./directory.ts";
 import {
 	formatMessageReceipt,
@@ -8,6 +8,7 @@ import {
 	SUBAGENT_MESSAGE_PARAMETERS,
 	SUBAGENT_MESSAGE_TOOL,
 	type SubagentMessageBus,
+	type SubagentMessageReceipt,
 	subagentMessagePayload,
 } from "./messages.ts";
 import type { ParentScope, ParentScopeChecks, ScopedRun } from "./parent-scope.ts";
@@ -263,5 +264,75 @@ export function createGenerations(deps: GenerationDeps) {
 		return envelope;
 	};
 
-	return { scheduler, directory, deliver };
+	const resumeRun = async (
+		run: Readonly<SubagentRunRecord>,
+		toolCallId: string,
+		content: string,
+		scope: ParentScope,
+		admission: Pick<RunAdmission, "resume">,
+		ctx: AdmissionContext,
+	) => {
+		let receipt: SubagentMessageReceipt | undefined;
+		const resumed = await admission.resume(
+			run,
+			toolCallId,
+			() => {
+				receipt = deps.bus.accept({ address: PARENT_MESSAGE_ADDRESS, scope }, run.runId, run.name);
+				return subagentMessagePayload({
+					seq: receipt.seq,
+					from: PARENT_MESSAGE_ADDRESS,
+					to: run.runId,
+					toName: run.name,
+					content,
+				}).content[0].text;
+			},
+			ctx,
+		);
+		if (!resumed.ok) {
+			return formatMessageReceipt({
+				status: resumed.refusal ?? "unavailable",
+				seq: 0,
+				to: run.runId,
+				toName: run.name,
+				reason: resumed.error,
+			});
+		}
+		// A resume is admitted only after buildPrompt ran, so the receipt is set.
+		const accepted = receipt!;
+		const label = formatRunLabel(run);
+		void deliver(resumed.handle);
+		return {
+			...formatMessageReceipt(accepted),
+			content: [
+				{
+					type: "text" as const,
+					text: `Message ${accepted.seq} accepted: resuming ${label} in the background with its earlier context. Its report will be delivered when it finishes.`,
+				},
+			],
+		};
+	};
+
+	/**
+	 * A message from the orchestrator. A final run resumes, or is refused with the reason it cannot; a finishing
+	 * one is waited for until it is final first. A message to any other run goes through the bus.
+	 */
+	const messageFromParent = async (
+		scope: ParentScope,
+		to: string,
+		content: string,
+		toolCallId: string,
+		admission: Pick<RunAdmission, "resume">,
+		ctx: AdmissionContext | undefined,
+	) => {
+		let found = directory.find(scope, to);
+		if (found?.state === "finishing") {
+			await scheduler.whenFinal(found.record.runId);
+			found = directory.get(found.record.runId);
+		}
+		if (found?.state === "finished" && ctx)
+			return resumeRun(found.record, toolCallId, content, scope, admission, ctx);
+		return formatMessageReceipt(await deps.bus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, content));
+	};
+
+	return { scheduler, directory, deliver, messageFromParent };
 }
