@@ -21,7 +21,7 @@ import { holdTui } from "../_shared/hold-tui.ts";
 import { remotePort } from "../_shared/settings.ts";
 import { TRUST_CHANGED } from "../permissions/index.ts";
 import { autostartDeps, autostartOn, autostartStatus, refreshAutostart, toggleAutostart } from "./autostart.ts";
-import { LiveForwarder, latestOnly } from "./live.ts";
+import { forwardLive, type LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
 import { applyPaneMessage, buildReport, paneTasks, pistatuslinePaths, submitCommand, watchTasks } from "./report.ts";
 import { EnableNeeded, serve, tailscaleInfo } from "./tailscale.ts";
@@ -197,15 +197,20 @@ async function menu(client: OrchestratorClient, status: RemoteResult, ctx: Exten
 	else if (picked === startAtLogin) await toggleStartAtLogin(ctx);
 }
 
-function liveForwarder(pane: string): LiveForwarder {
+/** Outside a pane nothing watches, so it sends nothing, but registers as a pane does. */
+function liveForwarder(pi: ExtensionAPI, pane: string | undefined): LiveForwarder {
+	if (!pane) return forwardLive(pi, () => {});
 	const client = new OrchestratorClient();
-	return new LiveForwarder(latestOnly((snapshot) => client.remoteLive(pane, snapshot)));
+	return forwardLive(
+		pi,
+		latestOnly((snapshot, entryId) => client.remoteLive(pane, snapshot, entryId)),
+	);
 }
 
 function factory(pi: ExtensionAPI): void {
 	// Only a pane registers (agent view), so only a pane can be watched.
 	const pane = Tmux.currentPane();
-	const live = pane ? liveForwarder(pane) : undefined;
+	const live = liveForwarder(pi, pane);
 	/** Presses Enter in this pane for a phone's slash command; a hung tmux must not hold up pi. */
 	const commandKeys = new Tmux(undefined, undefined, { timeoutMs: 2000 });
 	const client = new OrchestratorClient();
@@ -268,7 +273,7 @@ function factory(pi: ExtensionAPI): void {
 	pi.events.on("bluclawd:remote-watched", (data) => {
 		const opened = data === true && !watched;
 		watched = data === true;
-		live?.setWatched(watched);
+		live.setWatched(watched);
 		// A restarted daemon has no report until the next turn: a phone opening the session sends it again.
 		if (opened && session) report(session);
 	});
@@ -278,14 +283,9 @@ function factory(pi: ExtensionAPI): void {
 	pi.events.on(TRUST_CHANGED, () => {
 		if (session) changed(session);
 	});
-	pi.on("message_update", (event) => live?.onMessageUpdate(event.message));
-	pi.on("tool_execution_start", (event) => live?.onToolStart(event.toolCallId, event.toolName, event.args));
-	pi.on("tool_execution_end", (event) => live?.onToolEnd(event.toolCallId));
-	pi.on("message_end", () => live?.onMessageEnd());
-	pi.on("agent_end", () => live?.onAgentEnd());
 	pi.on("session_shutdown", () => {
 		// As a turn's end: no timer left to send, and the phone's snapshot of ours cleared.
-		live?.onAgentEnd();
+		live.onAgentEnd();
 		unwatchTasks?.();
 		unwatchTasks = undefined;
 		session = undefined;
