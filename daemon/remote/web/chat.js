@@ -148,8 +148,11 @@ export function applyLatest(chat, page) {
 	}
 	chat.messagesLoaded = true;
 	chat.live = settle(chat.live, chat.liveEnded, latest);
+	// pi writes the replies in the order they ended: one whose entry is not there by a later reply's
+	// never will be (another extension emptied it, or the session moved to another branch).
 	const ids = new Set(latest.map((m) => m.id));
-	chat.held = chat.held.filter((h) => !ids.has(h.entryId));
+	const last = chat.held.map((h) => ids.has(h.entryId)).lastIndexOf(true);
+	chat.held = chat.held.slice(last + 1);
 	// A pane from an older build reports no outcomes: a prompt sent to it is pending until the
 	// transcript has one more copy of its text than when it was sent.
 	const guess = !reportsOutcomes(chat);

@@ -254,7 +254,7 @@ describe("LiveForwarder", () => {
 	it("cuts long thinking as the transcript does", () => {
 		live.setWatched(true);
 		live.onMessageUpdate(assistant({ type: "thinking", thinking: "x".repeat(5000) }));
-		expect((sent[0] as LiveSnapshot).thinking).toHaveLength(2049);
+		expect(sent[0]).toMatchObject({ thinking: expect.stringMatching(/^x{2048}…$/) });
 	});
 });
 

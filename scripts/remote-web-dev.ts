@@ -105,7 +105,7 @@ console.log(`http://127.0.0.1:${server.port}/  pairing code ${store.createCode()
  * text is seen held until the transcript has it; then the tool's result, and the turn's bare end.
  */
 async function streamReply(): Promise<void> {
-	const path = panes[0]!.sessionFile ?? "";
+	const path = panes[0]!.sessionFile!;
 	const text = "Let me look at the files in this directory first.";
 	const call = { id: `call-${entries}`, name: "bash", summary: "ls" };
 	const words = text.split(" ");

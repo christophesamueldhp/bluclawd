@@ -604,7 +604,8 @@ function connect() {
 		const chat = state.chat;
 		if (!chat || sessionId !== chat.id) return;
 		if (!live) {
-			// An older pane's end names no entry.
+			// An end that names no entry: an older pane's, or one with no reply text to place (a tool
+			// result's, a pane no longer watched).
 			if (entryId) replyEndedAt(chat, entryId);
 			else replyEnded();
 			void loadMessages();

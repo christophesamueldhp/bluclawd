@@ -126,6 +126,16 @@ describe("a reply its pane says ended at a transcript entry", () => {
 		applyLatest(chat, { messages: [reply("x", "One")], more: false });
 		expect(chat.held.map((h) => h.text)).toEqual(["Two"]);
 	});
+
+	it("drops one whose entry a page never shows once a page has a later reply's", () => {
+		const chat = openChat("a");
+		chat.live = { text: "Emptied by another extension", tools: [] };
+		replyEndedAt(chat, "x");
+		chat.live = { text: "Next", tools: [] };
+		replyEndedAt(chat, "y");
+		applyLatest(chat, { messages: [reply("1", "Earlier"), reply("y", "Next")], more: false });
+		expect(chat.held).toEqual([]);
+	});
 });
 
 describe("prompts sent from the chat", () => {
