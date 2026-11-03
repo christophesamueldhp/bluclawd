@@ -98,6 +98,13 @@ export class ServerSupervisor {
 	/** A pane went, reaped or unregistered, listed as `rowId` and with `inbox` still queued for it.
 	 *  `reason`: why its session ended, when it unregistered saying so. */
 	onDropped: ((rowId: string, inbox: PaneMessage[], reason?: EndReason) => void) | undefined;
+	/** A pane was reaped while tmux still has its session, listed as `rowId` and with `inbox` still
+	 *  queued for it: its pi may only be held up (the Mac slept), so what it was given waits on it.
+	 *  onDropped follows once its tmux session is gone or it unregisters, unless it beats again. */
+	onSilent: ((rowId: string, inbox: PaneMessage[]) => void) | undefined;
+	/** Panes reaped while tmux still has their session, by pane id: the row each was listed as, and
+	 *  its tmux session. */
+	private readonly silentPanes = new Map<string, { rowId: string; pane: string }>();
 
 	constructor(deps: RegistryDeps) {
 		this.deps = deps;
@@ -106,6 +113,7 @@ export class ServerSupervisor {
 	/** Register/heartbeat a pane's pi. */
 	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = this.deps.now()): void {
 		const previous = this.externalInstances.get(record.id);
+		this.silentPanes.delete(record.id);
 		const resumed = record.sessionFile ? this.resumedMeta.get(record.sessionFile) : undefined;
 		if (record.sessionFile) {
 			this.resumedMeta.delete(record.sessionFile);
@@ -250,9 +258,9 @@ export class ServerSupervisor {
 		return own && !getInstance(this.deps.dir, id) ? [id, own] : undefined;
 	}
 
-	/** The row a pane is listed as; its own id when it is not registered. */
+	/** The row a pane is listed as, or was as it fell silent; its own id when it is not registered. */
 	rowIdOf(paneId: string): string {
-		return this.externalInstances.get(paneId)?.rowId ?? paneId;
+		return this.externalInstances.get(paneId)?.rowId ?? this.silentPanes.get(paneId)?.rowId ?? paneId;
 	}
 
 	/** A quit leaves its row, stopped, saved again by its hand-off once pi's writes are final. A
@@ -261,6 +269,11 @@ export class ServerSupervisor {
 	 *  pane, which may still quit and save), its stored row stays. */
 	unregisterExternal(id: string, reason?: EndReason): void {
 		const entry = this.externalInstances.get(id);
+		const silent = this.silentPanes.get(id);
+		if (silent) {
+			this.silentPanes.delete(id);
+			this.onDropped?.(silent.rowId, [], reason);
+		}
 		const file = entry?.record.sessionFile;
 		const stops = reason === "quit" || endedForAnother(reason);
 		if (entry && file && stops && existsSync(file)) {
@@ -334,17 +347,31 @@ export class ServerSupervisor {
 
 	/** External instances, each as its row, reaping any whose last heartbeat is older than the TTL: its
 	 *  stored row shows until it beats again. One whose pane tmux says is gone died unseen (a crash, a
-	 *  SIGKILL), so its row is stopped with what its file holds last. */
+	 *  SIGKILL), so its row is stopped with what its file holds last; one whose pane tmux still has
+	 *  falls silent (see onSilent). */
 	listExternalInstances(
 		now: number = this.deps.now(),
 	): Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> {
+		for (const [id, { rowId, pane }] of this.silentPanes) {
+			if (!this.paneGone(pane)) continue;
+			this.silentPanes.delete(id);
+			this.onDropped?.(rowId, []);
+		}
 		const out: Array<{ record: InstanceRecord; activity: AgentActivity; settled: number }> = [];
 		for (const [id, entry] of this.externalInstances) {
 			if (now - entry.lastSeenAt > EXTERNAL_TTL_MS) {
 				const { cwd, paneLabel, sessionFile, sessionId, pane } = entry.record;
-				if (pane && sessionFile && existsSync(sessionFile) && this.paneGone(pane)) {
+				const up = pane ? this.paneUp(pane) : undefined;
+				if (up === false && sessionFile && existsSync(sessionFile)) {
 					// The pane runs pi itself, so its pi is gone and its writes are final.
 					this.stopRow({ cwd, label: paneLabel, sessionFile, sessionId }, [id, entry]);
+					continue;
+				}
+				if (pane && up) {
+					this.externalInstances.delete(id);
+					this.settleWait(id, "none");
+					this.silentPanes.set(id, { rowId: entry.rowId, pane });
+					this.onSilent?.(entry.rowId, entry.inbox);
 					continue;
 				}
 				this.drop(id, entry);
@@ -357,10 +384,15 @@ export class ServerSupervisor {
 
 	/** Not when tmux could not say: a pane that may be up is not taken for dead. */
 	private paneGone(pane: string): boolean {
+		return this.paneUp(pane) === false;
+	}
+
+	/** Whether tmux has a pane's session; undefined when it could not say. */
+	private paneUp(pane: string): boolean | undefined {
 		try {
-			return !this.deps.tmux.hasSession(pane);
+			return this.deps.tmux.hasSession(pane);
 		} catch {
-			return false;
+			return undefined;
 		}
 	}
 

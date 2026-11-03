@@ -67,6 +67,22 @@ export class PromptDelivery {
 		}
 	}
 
+	/** A pane that may still be alive was reaped with `inbox` queued for it: those never reach pi, and
+	 *  what it was given waits on its report. */
+	silent(inbox: PaneMessage[], now: number = Date.now()): void {
+		const ids = new Set(inbox.map(phoneId));
+		for (const [id, delivery] of this.prompts) {
+			if (settled(delivery) || !ids.has(id)) continue;
+			this.prompts.set(id, {
+				id,
+				outcome: "lost",
+				reason: "pane_gone",
+				sessionId: delivery.sessionId,
+				changedAt: now,
+			});
+		}
+	}
+
 	/** The outcomes of the prompts sent to a session, in the order sent. */
 	outcomes(sessionId: string, now: number = Date.now()): PromptOutcome[] {
 		this.prune(now);
