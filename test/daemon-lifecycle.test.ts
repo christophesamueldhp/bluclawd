@@ -1,6 +1,6 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { listSummaries } from "../daemon/handler.ts";
 import { loadInstances, saveInstances } from "../daemon/storage.ts";
@@ -28,29 +28,8 @@ describe("agent-view stored rows", () => {
 
 		supervisor.setInstanceMeta(saved.id, { pinned: true });
 		const again = supervisor.saveInstance({ cwd: "/p", label: "other", sessionFile: file });
-		expect(again).toMatchObject({ id: saved.id, label: "fix tests", pinned: true });
+		expect(again).toMatchObject({ id: saved.id, label: "other", pinned: true });
 		expect(loadInstances(dir)).toHaveLength(1);
-	});
-
-	it("a pane's pin carries over to its stored row once its pi quits", () => {
-		const supervisor = testRegistry(dir);
-		const pane = { status: "online" as const, cwd: "/p", createdAt: new Date().toISOString() };
-		supervisor.registerExternal({ ...pane, id: "pi-a", sessionFile: "/nonexistent/a.jsonl" }, "idle");
-		supervisor.setInstanceMeta("pi-a", { pinned: true, sortOrder: 2 });
-		supervisor.registerExternal({ ...pane, id: "pi-b", sessionFile: "/nonexistent/b.jsonl" }, "idle");
-		supervisor.unregisterExternal("pi-a");
-		supervisor.unregisterExternal("pi-b");
-
-		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/a.jsonl" })).toMatchObject({
-			pinned: true,
-			sortOrder: 2,
-		});
-		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/b.jsonl" })?.pinned).toBeUndefined();
-
-		// Saved before its unregister lands: a quitting pane does not wait for it.
-		supervisor.registerExternal({ ...pane, id: "pi-c", sessionFile: "/nonexistent/c.jsonl" }, "idle");
-		supervisor.setInstanceMeta("pi-c", { pinned: true });
-		expect(supervisor.saveInstance({ cwd: "/p", sessionFile: "/nonexistent/c.jsonl" })?.pinned).toBe(true);
 	});
 
 	it("a stored row's pin carries over to the pane resuming it, deleted before it registers or not at all", () => {
@@ -172,17 +151,16 @@ describe("one row per session through quit and resume", () => {
 		expect(rows(supervisor)).toEqual([stopped]);
 	});
 
-	it("a pane of an older build, with no reason, drops its row as before; its hand-off save brings it back", () => {
+	it("a pane of an older build, with no reason, leaves its stored row; its hand-off save keeps it", () => {
 		const supervisor = testRegistry(dir);
 		supervisor.registerExternal(pane("pi-a"), "idle");
 		supervisor.setInstanceMeta("pi-a", { pinned: true, sortOrder: 1 });
+		const stopped = { id: "pi-a", status: "stopped", pinned: true, sortOrder: 1, createdAt };
 
 		supervisor.unregisterExternal("pi-a");
-		expect(rows(supervisor)).toEqual([]);
+		expect(rows(supervisor)).toEqual([expect.objectContaining(stopped)]);
 		supervisor.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file });
-		expect(rows(supervisor)).toEqual([
-			expect.objectContaining({ id: "pi-a", status: "stopped", pinned: true, sortOrder: 1, createdAt }),
-		]);
+		expect(rows(supervisor)).toEqual([expect.objectContaining({ ...stopped, outcome: "done" })]);
 	});
 
 	it("a stopped row deleted before its hand-off saves stays deleted", () => {
@@ -200,6 +178,103 @@ describe("one row per session through quit and resume", () => {
 		supervisor.unregisterExternal("pi-b", "quit");
 		supervisor.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file });
 		expect(rows(supervisor)).toEqual([expect.objectContaining({ id: "pi-b", status: "stopped" })]);
+	});
+
+	it("a name set in the pane wins over the stored row's older one, through quit and save", () => {
+		const supervisor = testRegistry(dir);
+		supervisor.registerExternal(pane("pi-a"), "idle");
+		supervisor.unregisterExternal("pi-a", "quit");
+		supervisor.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file });
+
+		supervisor.registerExternal(pane("pi-b"), "idle");
+		supervisor.registerExternal({ ...pane("pi-b"), label: "renamed" }, "idle");
+		supervisor.unregisterExternal("pi-b", "quit");
+		expect(rows(supervisor)).toEqual([expect.objectContaining({ id: "pi-a", label: "renamed" })]);
+		supervisor.saveInstance({ cwd: "/p", label: "renamed", sessionFile: file });
+		expect(rows(supervisor)).toEqual([expect.objectContaining({ id: "pi-a", label: "renamed" })]);
+
+		// Renamed after its last heartbeat: its hand-off carries the name.
+		supervisor.registerExternal({ ...pane("pi-c"), label: "renamed" }, "idle");
+		supervisor.unregisterExternal("pi-c", "quit");
+		supervisor.saveInstance({ cwd: "/p", label: "renamed again", sessionFile: file });
+		expect(rows(supervisor)).toEqual([expect.objectContaining({ id: "pi-a", label: "renamed again" })]);
+	});
+
+	it("a name given to the stopped row survives a resume, a restart and a quit whose pane never renamed it", () => {
+		const supervisor = testRegistry(dir);
+		supervisor.registerExternal(pane("pi-a"), "idle");
+		supervisor.unregisterExternal("pi-a", "quit");
+		supervisor.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file });
+		supervisor.renameInstance("pi-a", "my name");
+
+		// Its pane restates the name pi derives from the first prompt.
+		supervisor.registerExternal(pane("pi-b"), "idle");
+		supervisor.registerExternal(pane("pi-b"), "idle");
+		expect(rows(supervisor)).toEqual([expect.objectContaining({ id: "pi-a", label: "my name" })]);
+
+		const after = testRegistry(dir);
+		after.registerExternal(pane("pi-b"), "idle");
+		expect(rows(after)).toEqual([expect.objectContaining({ id: "pi-a", label: "my name" })]);
+		after.unregisterExternal("pi-b", "quit");
+		after.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file });
+		expect(rows(after)).toEqual([expect.objectContaining({ id: "pi-a", label: "my name" })]);
+	});
+
+	it("a pane that goes on to another session gets its own row, never the stored row of the one it left", () => {
+		const supervisor = testRegistry(dir);
+		supervisor.registerExternal(pane("pi-a"), "idle");
+		supervisor.setInstanceMeta("pi-a", { pinned: true });
+		// An older build: /new unregisters with no reason, and the pane registers again under its id.
+		supervisor.unregisterExternal("pi-a");
+		const next = join(dirname(file), "next.jsonl");
+		writeFileSync(next, "");
+		supervisor.registerExternal({ ...pane("pi-a"), label: "next", sessionFile: next }, "idle");
+
+		expect(rows(supervisor)).toEqual([
+			expect.objectContaining({ id: "pi-a", status: "stopped", label: "fix tests", pinned: true }),
+		]);
+		const listed = listSummaries(supervisor).find((i) => i.sessionFile === next);
+		expect(listed).toMatchObject({ external: true, label: "next" });
+		expect(listed?.id).not.toBe("pi-a");
+		expect(listed?.pinned).toBeUndefined();
+	});
+
+	it("after a restart, a resumed session shows stopped, not how it ended before", () => {
+		const before = testRegistry(dir);
+		before.registerExternal(pane("pi-a"), "idle");
+		before.unregisterExternal("pi-a", "quit");
+		before.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file });
+		before.registerExternal(pane("pi-b"), "working");
+
+		const after = testRegistry(dir);
+		after.recoverAfterRestart();
+		expect(rows(after)).toEqual([expect.objectContaining({ id: "pi-a", status: "stopped", outcome: "stopped" })]);
+	});
+
+	it("a session's age is its header time, not when a stored row was first saved", () => {
+		saveInstances(dir, [
+			{ id: "old", status: "stopped", cwd: "/p", sessionFile: file, createdAt: "2026-10-30T11:00:00.000Z" },
+		]);
+		const supervisor = testRegistry(dir);
+		supervisor.registerExternal(pane("pi-a"), "idle");
+		supervisor.unregisterExternal("pi-a", "quit");
+		supervisor.saveInstance({ cwd: "/p", label: "fix tests", sessionFile: file });
+		expect(rows(supervisor)).toEqual([expect.objectContaining({ id: "old", createdAt })]);
+	});
+
+	it("a live row's pin and order survive a daemon restart, shown stopped until its pane's next heartbeat", () => {
+		const before = testRegistry(dir);
+		before.registerExternal(pane("pi-a"), "idle");
+		before.setInstanceMeta("pi-a", { pinned: true, sortOrder: 5 });
+		before.setInstanceMeta("pi-a", { sortOrder: 6 });
+
+		const after = testRegistry(dir);
+		after.recoverAfterRestart();
+		const kept = { id: "pi-a", label: "fix tests", createdAt, pinned: true, sortOrder: 6 };
+		expect(rows(after)).toEqual([expect.objectContaining({ ...kept, status: "stopped", external: undefined })]);
+
+		after.registerExternal(pane("pi-a"), "working");
+		expect(rows(after)).toEqual([expect.objectContaining({ ...kept, external: true, activity: "working" })]);
 	});
 
 	it("a quit before the session has a file leaves no row", () => {
@@ -263,7 +338,7 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 			pane,
 			detail,
 		}));
-	const stopped = (id: string, sessionId: string, detail: string, pinned?: boolean) => ({
+	const stopped = (id: string, sessionId: string, detail: string | undefined, pinned?: boolean) => ({
 		id,
 		status: "stopped",
 		sessionId,
@@ -333,7 +408,8 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 		const fresh = rows(supervisor)[1].id;
 
 		now += 20_000;
-		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "a done")]);
+		// Its stored row shows, stopped, until its next beat goes on as it.
+		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "a done"), stopped(fresh, "sb", undefined)]);
 		supervisor.registerExternal(b, "working");
 		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "a done"), live(fresh, "sb", "pi-a")]);
 	});
@@ -419,15 +495,17 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 		now += 10_000;
 		expect(rows(supervisor).map((r) => r.status)).toEqual(["online", "online", "online", "online"]);
 		now += 10_000;
-		// pi-b missed its beats with its pane up, and d-1 has no pane: dropped as before, listed again
-		// on their next beat. tmux could not say for pi-c: unlisted, and asked about again.
-		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "last words", true)]);
-		expect(rows(testRegistry(dir))).toEqual([stopped("pi-a", "sa", "last words", true)]);
+		// pi-b missed its beats with its pane up, tmux could not say for pi-c, and d-1 has no pane:
+		// their stored rows show until their next beat, and no file of a pi that may be up is read.
+		const after = [
+			stopped("pi-a", "sa", "last words", true),
+			stopped("pi-b", "sb", undefined),
+			stopped("pi-c", "sc", undefined),
+			stopped("d-1", "sd", undefined),
+		];
+		expect(rows(supervisor)).toEqual(after);
+		expect(rows(testRegistry(dir))).toEqual(after);
 		expect(asked).not.toContain("d-1");
-
-		unsure.delete("pi-c");
-		gone.add("pi-c");
-		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "last words", true), stopped("pi-c", "sc", "c done")]);
 	});
 
 	it("kill + delete: the row goes and stays gone once its pane's TTL lapses", () => {
