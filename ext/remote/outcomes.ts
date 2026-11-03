@@ -44,7 +44,7 @@ export class PromptOutcomes {
 	/** pi starts a user message; true when it is a queued phone prompt, taken now. */
 	started(message: { role: string; content?: unknown }): boolean {
 		if (message.role !== "user") return false;
-		const prompt = take(this.queued, contentText(message.content as Parameters<typeof contentText>[0], ""));
+		const prompt = take(this.queued, contentText(message.content as Parameters<typeof contentText>[0]));
 		if (!prompt) return false;
 		this.settle(prompt.id, "taken");
 		return true;
