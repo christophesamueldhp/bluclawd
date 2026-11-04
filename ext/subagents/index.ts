@@ -230,7 +230,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		});
 
 		const { openTranscript } = createTranscriptActions({
-			pi,
 			scope: parentScope,
 			scheduler,
 			transcripts,
