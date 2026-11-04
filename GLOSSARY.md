@@ -27,8 +27,12 @@ The orchestrator's session, and its session epoch, that a run or message belongs
 _Avoid_: generation, runtime generation
 
 **Resume**:
-Continuing a completed run with a new message from the orchestrator, as its next generation, with its earlier context.
+Continuing a completed run with a new message from the orchestrator or the user, as its next generation, with its earlier context.
 _Avoid_: restart, rerun
+
+**Waiting**:
+The orchestrator between turns while background runs it launched are still active: it leaves their work to them and goes on when their reports arrive.
+_Avoid_: idle, stopped, done (while runs are active)
 
 ### Tasks
 
