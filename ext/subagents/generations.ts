@@ -33,6 +33,7 @@ import {
 	writeFullSubagentReport,
 	writePersistedRunRecord,
 } from "./storage.ts";
+import { createRunTranscripts } from "./transcripts.ts";
 
 export const SUBAGENT_ROSTER_TOOL = "subagent_roster";
 
@@ -69,6 +70,7 @@ function withRoster(task: string, roster: readonly string[]): string {
 /** Persists and delivers each generation of a run; the scheduler it owns decides the transitions. */
 export function createGenerations(deps: GenerationDeps) {
 	const senderRole = (address: string) => scheduler.getRun(address)?.agentName;
+	const transcripts = createRunTranscripts();
 
 	/** The agents a child of the scope can message now, one line each, for its prompt or roster query. */
 	const describeRoster = (scope: ParentScope, self: string, includeSelf: boolean): string[] =>
@@ -139,6 +141,7 @@ export function createGenerations(deps: GenerationDeps) {
 					);
 				}
 			}
+			transcripts.changed(record.runId);
 			deps.onChange();
 		},
 		onFinalize: async (settledRecord) => {
@@ -233,10 +236,12 @@ export function createGenerations(deps: GenerationDeps) {
 						session.subscribe((event) => {
 							if (event.type === "agent_end") directory.endTurn(runId);
 						});
+						transcripts.attach(runId, session);
 						resolveSession(session);
 					},
 				});
 			} finally {
+				transcripts.detach(runId);
 				directory.endTurn(runId);
 				rejectSession(new Error("it ended before it could receive messages"));
 				deps.bus.unregister(runId, "has finished");
@@ -334,5 +339,5 @@ export function createGenerations(deps: GenerationDeps) {
 		return formatMessageReceipt(await deps.bus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, content));
 	};
 
-	return { scheduler, directory, deliver, messageFromParent };
+	return { scheduler, directory, deliver, messageFromParent, transcripts };
 }

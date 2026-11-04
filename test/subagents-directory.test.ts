@@ -48,6 +48,8 @@ function fakeRunner() {
 			const inbox: string[] = [];
 			let holdingStop = false;
 			const session: ChildSession = {
+				messages: [],
+				sessionFile: undefined,
 				subscribe: (listener) => {
 					listeners.add(listener);
 					return () => listeners.delete(listener);

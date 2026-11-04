@@ -62,7 +62,7 @@ export interface PanelActions {
 	stop(run: RunEntry): void;
 	/** `x` on a run that has ended. */
 	dismiss(run: RunEntry): void;
-	/** Enter on a row; nothing until the run transcript view exists. */
+	/** Enter on a row. */
 	open?(run: RunEntry): void;
 }
 

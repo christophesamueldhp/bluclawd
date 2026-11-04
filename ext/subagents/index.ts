@@ -30,6 +30,7 @@ import type { SubagentResultDetails } from "./results.ts";
 import { describeSubagentModels, runSubagent } from "./runner.ts";
 import { appendSubagentMessageRecord, reconcileInterruptedRuns } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
+import { createTranscriptView } from "./transcript-view.ts";
 
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const SUBAGENT_REMINDER_CUSTOM_TYPE = "subagent-reminder";
@@ -216,7 +217,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 		};
 
-		const { scheduler, directory, deliver, messageFromParent } = createGenerations({
+		const { scheduler, directory, deliver, messageFromParent, transcripts } = createGenerations({
 			agentDir: resolveAgentDir,
 			runner: runSubagent,
 			bus: messageBus,
@@ -247,6 +248,44 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			agentDir: resolveAgentDir,
 			activeScope: () => parentScope.current(),
 		});
+
+		/**
+		 * Opens a run's transcript over the orchestrator's screen and resolves once it closes. Only a run of the
+		 * current parent scope opens; any other is refused with a notice and undefined.
+		 */
+		const openTranscript = (runId: string, owner?: string): Promise<void> | undefined => {
+			const ctx = parentScope.context();
+			if (ctx?.mode !== "tui") return undefined;
+			const scope = parentScope.current();
+			const run = scheduler.getRun(runId);
+			if (
+				!scope ||
+				!run ||
+				run.parentSessionId !== scope.parentSessionId ||
+				run.sessionEpoch !== scope.sessionEpoch ||
+				(owner !== undefined && owner !== run.parentSessionId)
+			) {
+				ctx.ui.notify("That run belongs to an earlier session and can no longer be opened.", "warning");
+				return undefined;
+			}
+			return ctx.ui.custom<void>(
+				(tui, theme, _keybindings, done) =>
+					createTranscriptView({
+						tui,
+						theme,
+						cwd: ctx.cwd,
+						title: () => {
+							const current = scheduler.getRun(runId) ?? run;
+							const state = directory.get(runId)?.state === "finishing" ? "finishing" : current.status;
+							return `${current.name ?? runId} · ${current.agentName} · ${current.provider}/${current.modelId} · ${state}`;
+						},
+						source: transcripts.source(runId),
+						expanded: ctx.ui.getToolsExpanded(),
+						close: () => done(),
+					}),
+				{ overlay: true, overlayOptions: { width: "100%", maxHeight: "100%" } },
+			);
+		};
 
 		// A resumed generation runs under the message call that resumed it, not the first launch.
 		const runLaunchedBy = (toolCallId: string) =>
@@ -313,6 +352,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			unpublishTasks = publishAgentTasks({
 				...taskSource,
 				panelHasRows: () => panel !== undefined && panelRuns().length > 0,
+				open: openTranscript,
 			});
 			refreshFooterStatus();
 			if (ctx.mode === "tui") {
@@ -332,6 +372,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 								stop: ({ record }) =>
 									taskSource.stop(record.runId, { owner: record.parentSessionId, source: "user" }),
 								dismiss: ({ record }) => dismissed.add(record.runId),
+								open: ({ record }) => void openTranscript(record.runId),
 							},
 						});
 						panel = shown;
