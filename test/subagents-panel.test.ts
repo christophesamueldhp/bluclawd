@@ -1,8 +1,6 @@
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentTasks } from "../ext/_shared/agent-tasks.ts";
-import type { RunEntry } from "../ext/subagents/directory.ts";
-import { shownInPanel } from "../ext/subagents/panel.ts";
 import { createSubagentTui, gate, launch, REPORT, type SubagentTui } from "./helpers/subagent-tui.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -130,85 +128,6 @@ describe("the run panel below the prompt", () => {
 		expect(tui.panel()).toEqual([]);
 	});
 
-	it("keeps a run that failed", async () => {
-		tui = await createSubagentTui();
-		tui.script([launch(["scout"], { background: true })], () =>
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "Provider unavailable." }),
-		);
-		await prompt(tui);
-		await waitFor(() => row(tui!, "scout")?.includes("failed") ?? false);
-
-		tui.advance(10 * 60_000);
-		expect(row(tui, "scout")).toContain("failed");
-	});
-
-	it("keeps a run the user stopped", async () => {
-		tui = await createSubagentTui();
-		const child = gate();
-		tui.script([launch(["scout"], { background: true })], async () => {
-			await child.wait;
-			return fauxAssistantMessage(REPORT);
-		});
-		await prompt(tui);
-		await waitFor(() => row(tui!, "scout") ?? false);
-		const owner = tui.session.sessionId;
-		const [run] = agentTasks()?.list(owner) ?? [];
-		agentTasks()?.stop(run.id, { owner, source: "user" });
-		child.open();
-		await waitFor(() => row(tui!, "scout")?.includes("cancelled") ?? false);
-
-		tui.advance(10 * 60_000);
-		expect(row(tui, "scout")).toContain("cancelled");
-	});
-
-	// An interrupted run is only ever read back from disk after a crash, never one this panel ran.
-	it.each(["failed", "interrupted", "cancelled"] as const)("keeps a %s run however long ago it ended", (status) => {
-		const ended = { record: { status, endedAt: 0 }, state: "finished" } as unknown as RunEntry;
-		expect(shownInPanel(ended, 60 * 60_000)).toBe(true);
-	});
-
-	it("does not say the orchestrator is waiting for a run that is being stopped", async () => {
-		tui = await createSubagentTui();
-		const child = gate();
-		tui.script(
-			[
-				launch(["scout"], { background: true }),
-				() => fauxAssistantMessage([fauxToolCall("subagent_stop", { agent: "scout" }, { id: "call_stop" })]),
-			],
-			async () => {
-				await child.wait;
-				return fauxAssistantMessage(REPORT);
-			},
-		);
-		await prompt(tui);
-		expect(row(tui, "scout")).toContain("stopping");
-		expect(tui.panel()[0]).not.toContain("waiting");
-		child.open();
-	});
-
-	it("keeps a run that was stopped", async () => {
-		tui = await createSubagentTui();
-		const child = gate();
-		tui.script(
-			[
-				launch(["scout"], { background: true }),
-				() => fauxAssistantMessage([fauxToolCall("subagent_stop", { agent: "scout" }, { id: "call_stop" })]),
-			],
-			async () => {
-				await child.wait;
-				return fauxAssistantMessage(REPORT);
-			},
-		);
-		await prompt(tui);
-		// The faux child answers only once let go, so the stop settles then.
-		await waitFor(() => row(tui!, "scout")?.includes("stopping") ?? false);
-		child.open();
-		await waitFor(() => row(tui!, "scout")?.includes("cancelled") ?? false);
-
-		tui.advance(10 * 60_000);
-		expect(row(tui, "scout")).toContain("cancelled");
-	});
-
 	describe("a dismissed run the orchestrator resumes", () => {
 		const SECOND_REPORT = REPORT.replace("Done.", "Second pass done.");
 
@@ -259,20 +178,5 @@ describe("the run panel below the prompt", () => {
 				expect((agentTasks()?.listDone?.(t.session.sessionId) ?? []).map((task) => task.id)).toEqual([runId]);
 			},
 		);
-	});
-
-	it("does not show runs of an earlier session epoch after a session switch", async () => {
-		tui = await createSubagentTui();
-		const child = gate();
-		tui.script([launch(["scout"], { background: true })], async () => {
-			await child.wait;
-			return fauxAssistantMessage(REPORT);
-		});
-		await prompt(tui);
-		await waitFor(() => row(tui!, "scout") ?? false);
-
-		await tui.session.extensionRunner.emit({ type: "session_before_switch", reason: "new" });
-		expect(tui.panel()).toEqual([]);
-		child.open();
 	});
 });

@@ -12,6 +12,7 @@ import {
 import { writeFullSubagentReport, writePersistedRunRecord } from "../ext/subagents/storage.ts";
 import { createAgentTaskSource } from "../ext/subagents/task-source.ts";
 import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
+import { createParentScopeViews } from "../ext/subagents/views.ts";
 
 const tempDirs: string[] = [];
 
@@ -61,7 +62,7 @@ function setup(activeParentSessionId: string | undefined = "sess_main") {
 	const agentDir = makeAgentDir();
 	const controllers = new Map<string, SubagentRunController>();
 	const settle = new Map<string, (outcome: SubagentRunnerOutcome) => void>();
-	const scheduler = new SubagentRunScheduler({
+	const scheduler = new SubagentRunScheduler<{ resume?: { toolCallId: string } }>({
 		executeRun: ({ record, controller, signal }) => {
 			controllers.set(record.runId, controller);
 			return new Promise<SubagentRunnerOutcome>((resolve) => {
@@ -90,13 +91,25 @@ function setup(activeParentSessionId: string | undefined = "sess_main") {
 		if (!admitted.ok) throw new Error(admitted.error);
 		return admitted.handle;
 	};
+	const directory = createRunDirectory({ scheduler, agentDir: () => agentDir });
+	const dismissed = new Map<string, number>();
 	const source = createAgentTaskSource({
-		directory: createRunDirectory({ scheduler, agentDir: () => agentDir }),
+		views: createParentScopeViews({
+			scheduler,
+			directory,
+			agentDir: () => agentDir,
+			scope: () =>
+				activeParentSessionId === undefined
+					? undefined
+					: { parentSessionId: activeParentSessionId, sessionEpoch: 1 },
+			idle: () => true,
+			now: Date.now,
+			dismissed: { panel: new Map(), tasks: dismissed },
+		}),
+		directory,
 		scheduler,
 		agentDir: () => agentDir,
-		activeScope: () =>
-			activeParentSessionId === undefined ? undefined : { parentSessionId: activeParentSessionId, sessionEpoch: 1 },
-		dismissed: new Map(),
+		dismissed,
 	});
 	return { agentDir, scheduler, controllers, settle, launch, source };
 }
@@ -138,7 +151,8 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 
 		expect(source.get(live.runId)).toMatchObject({ id: live.runId, state: "running", status: "starting" });
 		expect(source.get(foreign.runId)).toBeUndefined();
-		expect(source.get(foreign.runId, "sess_other")?.id).toBe(foreign.runId);
+		// Only the orchestrator's current Parent scope is looked up in memory.
+		expect(source.get(foreign.runId, "sess_other")).toBeUndefined();
 		expect(
 			["sub_completed", "sub_failed", "sub_interrupted", "sub_cancelled"].map((id) => {
 				const task = source.get(id);
