@@ -14,6 +14,8 @@ export type SubagentDeliveryMode = "foreground" | "background";
 export type SubagentLifecycleStatus =
 	| "starting"
 	| "running"
+	/** The child's last turn of this generation ended; the run is not final yet. */
+	| "finishing"
 	| "stopping"
 	| "completed"
 	| "failed"
@@ -81,6 +83,8 @@ export interface SubagentRunRecord {
 
 export interface SubagentRunController {
 	markRunning(childSessionId?: string, thinkingLevel?: string): void;
+	/** The child's last turn ended, one pi will not retry. */
+	markFinishing(): void;
 	recordTurn(): void;
 	recordToolCall(toolName?: string): void;
 	recordToolExecution(toolName: string, isError: boolean): void;
@@ -398,6 +402,12 @@ export class SubagentRunScheduler<C = unknown> {
 				if (childSessionId) managed.record.childSessionId = childSessionId;
 				if (thinkingLevel) managed.record.thinkingLevel = thinkingLevel;
 				managed.record.status = "running";
+				this.emitChange(managed);
+			},
+			markFinishing: () => {
+				const { status } = managed.record;
+				if (inactive() || status === "stopping" || status === "finishing") return;
+				managed.record.status = "finishing";
 				this.emitChange(managed);
 			},
 			recordTurn: () => {

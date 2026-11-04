@@ -9,6 +9,7 @@ const TASK_OUTPUT_BYTES = 8192;
 const TASK_STATES: Record<SubagentLifecycleStatus, AgentTaskState> = {
 	starting: "running",
 	running: "running",
+	finishing: "running",
 	stopping: "running",
 	completed: "completed",
 	failed: "failed",
@@ -28,7 +29,7 @@ export interface AgentTaskSourceDeps {
 
 /** Translates runs into the tasks `/tasks` and `task_stop` see. */
 export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSource {
-	const toTask = ({ record: run, state }: RunEntry): AgentTask => {
+	const toTask = ({ record: run }: RunEntry): AgentTask => {
 		const agentDir = deps.agentDir();
 		return {
 			id: run.runId,
@@ -38,7 +39,7 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 			startedAt: run.startedAt ?? run.admittedAt,
 			endedAt: run.endedAt,
 			state: TASK_STATES[run.status],
-			status: state === "finishing" ? state : run.status,
+			status: run.status,
 			model: `${run.provider}/${run.modelId}`,
 			outputFile: subagentReportPath(agentDir, run.parentSessionId, run.runId),
 			output: () => {
