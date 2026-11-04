@@ -37,8 +37,8 @@ export function renderPanel(options: {
 		waitingFor > 0
 			? `Subagents · ${theme.fg("warning", `waiting for ${waitingFor} subagent${waitingFor === 1 ? "" : "s"}`)}`
 			: "Subagents";
-	const rows = runs.slice(0, MAX_ROWS).map(({ record: run, state }, index) => {
-		const status = state === "finishing" ? state : run.status;
+	const rows = runs.slice(0, MAX_ROWS).map(({ record: run }, index) => {
+		const { status } = run;
 		const progress = run.lastProgressText?.replace(/\s+/g, " ").trim();
 		return [
 			`${index === selected ? theme.fg("accent", "❯") : " "} ${theme.bold(run.name ?? run.runId)}`,

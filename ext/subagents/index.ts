@@ -256,7 +256,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			pi,
 			scope: parentScope,
 			scheduler,
-			directory,
 			transcripts,
 			messageFromUser,
 			admission,
@@ -470,12 +469,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		const ago = (at: number | undefined, now: number) =>
 			at === undefined ? "never" : `${Math.round((now - at) / 1000)}s ago`;
-		const describeProgress = ({ record: run, state }: RunEntry, now: number) => {
+		const describeProgress = ({ record: run }: RunEntry, now: number) => {
 			const activity = run.lastActivity
 				? `${run.lastActivity.kind === "tool" ? `tool ${run.lastActivity.detail ?? "?"}` : "model turn"} ${ago(run.lastActivity.at, now)}`
 				: "none yet";
 			return [
-				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${state === "finishing" ? state : run.status}`,
+				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${run.status}`,
 				`  task: ${run.taskSummary}`,
 				`  turns: ${run.turnCount}, tool calls: ${run.toolCallCount}, elapsed: ${formatRunElapsed(run, now)}`,
 				`  last activity: ${activity}; last message: ${ago(run.lastMessageAt, now)}`,
