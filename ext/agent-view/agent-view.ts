@@ -819,7 +819,7 @@ export class AgentView implements Component, Focusable {
 
 	private async open(row: AgentRow): Promise<void> {
 		if (this.closed || this.opening) return;
-		// Set while a pane starts for it: esc calls the open off.
+		// Set for every open until it ends: the row shows it opening, and esc calls it off.
 		this.opening = row.id;
 		this.render_();
 		const outcome = await this.actions.open(row, () => this.closed || this.opening !== row.id);
