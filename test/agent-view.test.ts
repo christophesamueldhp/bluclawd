@@ -24,6 +24,7 @@ import {
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
 import { withoutAgentViewCommand } from "../ext/agent-view/index.ts";
+import { focusedLine } from "./helpers/agent-view-focus.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -157,10 +158,11 @@ function makeView(
 		readClipboard?: () => Promise<{ image?: { type: "image"; data: string; mimeType: string }; text?: string }>;
 		mode?: string;
 		listModels?: () => Array<{ provider: string; id: string }>;
+		instances?: InstanceSummary[];
 	} = {},
 ) {
 	const calls: Calls = [];
-	let instances = sessions;
+	const instances = opts.instances ?? sessions;
 	const opened: string[] = [];
 	const resumed: boolean[] = [];
 	let closed = 0;
@@ -180,13 +182,8 @@ function makeView(
 		isKnownCommand: (name) => name === "compact",
 		mode: opts.mode,
 		listModels: opts.listModels,
+		instances,
 	});
-	const setInstances = view.setInstancesForTest.bind(view);
-	view.setInstancesForTest = (rows) => {
-		instances = rows;
-		setInstances(rows);
-	};
-	view.setInstancesForTest(sessions);
 	const flush = () => new Promise((r) => setTimeout(r, 0));
 	return { view, calls, opened, resumed, closed: () => closed, text: () => view.render(100).map(stripAnsi), flush };
 }
@@ -388,8 +385,7 @@ describe("AgentView render", () => {
 					fg,
 					getBgAnsi: () => (light ? "\x1b[48;2;255;255;255m" : ""),
 				} as unknown as Theme);
-				const { view } = makeView();
-				view.setInstancesForTest([instance]);
+				const { view } = makeView({ instances: [instance] });
 				const glyph = status.state === "working" ? "·" : "✻";
 				const colored = (text: string) => styleText(text, { fg: parseColor(status.hex) }, "truecolor");
 				for (const directory of [false, true]) {
@@ -430,7 +426,6 @@ describe("AgentView render", () => {
 	});
 
 	it("warns on each row when two panes run one session file", () => {
-		const { view, text } = makeView();
 		const twin = (id: string): InstanceSummary => ({
 			id,
 			status: "online",
@@ -442,7 +437,7 @@ describe("AgentView render", () => {
 			external: true,
 			pane: id,
 		});
-		view.setInstancesForTest([twin("p1"), twin("p2")]);
+		const { text } = makeView({ instances: [twin("p1"), twin("p2")] });
 		const body = text().join("\n");
 		expect(body).toMatch(/twin p1\s+⚠ 2 panes on one session · editing/);
 		expect(body).toMatch(/twin p2\s+⚠ 2 panes on one session · editing/);
@@ -459,8 +454,7 @@ describe("AgentView render", () => {
 	});
 
 	it("with nothing running, shows the bands without onboarding explanations", () => {
-		const { view, text } = makeView();
-		view.setInstancesForTest([]);
+		const { text } = makeView({ instances: [] });
 		const shown = text().join("\n");
 		for (const band of ["Needs input", "Working", "Idle"]) expect(shown).toContain(band);
 		expect(shown).not.toContain("Sessions that");
@@ -474,18 +468,18 @@ describe("AgentView render", () => {
 		{ outcome: "failed", label: "Failed" },
 		{ outcome: "stopped", label: "Stopped" },
 	] as const)("shows $label in directory view while keeping the session in the Idle band", ({ outcome, label }) => {
-		const { view, text } = makeView();
-		view.setInstancesForTest([
-			{ id: "ended", status: "stopped", cwd: HERE, label: "ended session", outcome, detail: "last result" },
-		]);
+		const { view, text } = makeView({
+			instances: [
+				{ id: "ended", status: "stopped", cwd: HERE, label: "ended session", outcome, detail: "last result" },
+			],
+		});
 		expect(text().join("\n")).toMatch(/Idle\n.*ended session/);
 		view.handleInput(CTRL_S);
 		expect(text().join("\n")).toMatch(new RegExp(`ended session\\s+${label} · last result`));
 	});
 
 	it("hides an empty band once anything is listed", () => {
-		const { view, text } = makeView();
-		view.setInstancesForTest(sessions.filter((s) => s.id !== "ask"));
+		const { text } = makeView({ instances: sessions.filter((s) => s.id !== "ask") });
 		expect(text().join("\n")).not.toContain("Needs input");
 	});
 
@@ -498,13 +492,11 @@ describe("AgentView render", () => {
 			outcome: "done" as const,
 			finishedAt: ago(i * 2 + 1),
 		}));
-		const { view, text } = makeView({ rows: 24 });
-		view.setInstancesForTest(many);
 		// 24 rows leave 12 for Completed (24 - 8 - 4).
-		expect(text().join("\n")).toContain("… 18 more");
+		expect(makeView({ rows: 24, instances: many }).text().join("\n")).toContain("… 18 more");
 		// Finished within a minute of each other, the whole run stays together.
-		view.setInstancesForTest(many.map((s, i) => ({ ...s, finishedAt: new Date(NOW - i * 30_000).toISOString() })));
-		expect(text().join("\n")).not.toContain("more");
+		const together = many.map((s, i) => ({ ...s, finishedAt: new Date(NOW - i * 30_000).toISOString() }));
+		expect(makeView({ rows: 24, instances: together }).text().join("\n")).not.toContain("more");
 	});
 });
 
@@ -546,13 +538,19 @@ describe("AgentView keys", () => {
 	});
 
 	it("alt+N opens the Nth session in the focused session's directory", async () => {
-		const { view, calls, flush } = makeView();
-		view.setInstancesForTest([
-			{ id: "a", status: "stopped", cwd: HERE, sessionFile: "/a.jsonl", outcome: "done", finishedAt: ago(1) },
-			{ id: "b", status: "stopped", cwd: THERE, sessionFile: "/b.jsonl", outcome: "done", finishedAt: ago(2) },
-			{ id: "c", status: "stopped", cwd: HERE, sessionFile: "/c.jsonl", outcome: "done", finishedAt: ago(3) },
-		]);
-		expect(view.selectedKeyForTest()).toBe("a");
+		const done = (id: string, cwd: string, minutes: number): InstanceSummary => ({
+			id,
+			status: "stopped",
+			cwd,
+			label: `session ${id}`,
+			sessionFile: `/${id}.jsonl`,
+			outcome: "done",
+			finishedAt: ago(minutes),
+		});
+		const { view, calls, flush } = makeView({
+			instances: [done("a", HERE, 1), done("b", THERE, 2), done("c", HERE, 3)],
+		});
+		expect(focusedLine(view)).toContain("session a");
 		view.handleInput("\x1b2"); // alt+2
 		for (let i = 0; i < 5; i++) await flush();
 		expect(calls).toContainEqual(["start", HERE, ["--session", "/c.jsonl"]]);
@@ -588,10 +586,12 @@ describe("AgentView keys", () => {
 		await expect(showing).resolves.toBeUndefined();
 	});
 
-	it("explains how to recover a legacy Failed row that never recorded its file", () => {
-		const { view, text, opened } = makeView();
-		view.setInstancesForTest([{ id: "legacy", status: "stopped", outcome: "failed", cwd: HERE }]);
+	it("explains how to recover a legacy Failed row that never recorded its file", async () => {
+		const { view, text, opened, flush } = makeView({
+			instances: [{ id: "legacy", status: "stopped", outcome: "failed", cwd: HERE }],
+		});
 		view.handleInput(ENTER);
+		await flush();
 		expect(opened).toEqual([]);
 		expect(text().join("\n")).toContain("/resume");
 	});
@@ -708,7 +708,7 @@ describe("AgentView keys", () => {
 		const { view } = makeView();
 		view.handleInput("\x1b[H"); // home: the first band header
 		view.handleInput("\x1b[A");
-		expect(view.selectedKeyForTest()).toBe("gone");
+		expect(focusedLine(view)).toContain("sound effects");
 	});
 
 	it("ctrl+r renames inline in the row, with the footer saying how to finish", async () => {
@@ -735,7 +735,7 @@ describe("AgentView keys", () => {
 		const { view, calls, flush } = makeView();
 		// Band headers are focusable too: ask → Working → work → Idle → title screen.
 		for (let i = 0; i < 4; i++) view.handleInput(DOWN);
-		expect(view.selectedKeyForTest()).toBe("done");
+		expect(focusedLine(view)).toContain("title screen");
 		view.handleInput(" ");
 		for (const ch of "now add sound") view.handleInput(ch);
 		view.handleInput(ENTER);
@@ -746,8 +746,7 @@ describe("AgentView keys", () => {
 	it("ctrl+x ends a running session's pi, whose row stays, stopped; a second press deletes that row", async () => {
 		const work = { ...sessions[1], sessionFile: "/w.jsonl" };
 		let instances: InstanceSummary[] = [sessions[0], work];
-		const { view, calls, text, flush } = makeView({ list: () => instances });
-		view.setInstancesForTest(instances);
+		const { view, calls, text, flush } = makeView({ list: () => instances, instances });
 		view.handleInput(DOWN);
 		view.handleInput(DOWN); // Working header → collision detection
 		view.handleInput(CTRL_X);
@@ -785,7 +784,7 @@ describe("AgentView keys", () => {
 			pane: "pane-self",
 		};
 		const { view, calls, flush } = makeView({ self });
-		expect(view.selectedKeyForTest()).toBe("me");
+		expect(focusedLine(view)).toContain("current");
 		view.handleInput(CTRL_T);
 		await flush();
 		expect(calls).toEqual([["setMeta", "me", { pinned: true }]]);
@@ -812,34 +811,28 @@ describe("AgentView keys", () => {
 			onClose: () => {},
 			panes: fakePanes(calls),
 			onStopSelf: () => stopped++,
+			instances: [],
 		});
-		view.setInstancesForTest([]);
 		view.handleInput(CTRL_X);
 		expect(stopped).toBe(1);
 		expect(view.render(100).map(stripAnsi).join("\n")).toContain("ctrl+x again to delete");
 		view.handleInput(CTRL_X);
-		// This terminal moves to a new pane showing agent view; this one ends.
+		// This terminal moves to a new pane showing agent view (agent-view-panes.test.ts); this one ends.
 		await waitFor(() => expect(calls.at(-1)).toEqual(["kill", "pane-self"]));
-		expect(calls).toEqual([
-			["start", HERE, ["--", "/agent-view"], { BLUCLAWD_OPEN_VIEW: "1", BLUCLAWD_HIDE: "me" }],
-			["waitForView", "pane-1"],
-			["switchTo", "pane-1"],
-			["unlist"],
-			["delete", "me"],
-			["kill", "pane-self"],
-		]);
 	});
 
 	it("enter on your own session returns to it; on another it opens there", async () => {
 		const self: InstanceSummary = { id: "me", status: "online", cwd: HERE, turns: 1, external: true };
 		const withSelf = makeView({ self });
 		withSelf.view.handleInput(ENTER);
+		await withSelf.flush();
 		expect(withSelf.closed()).toBe(1);
 
-		const { view, calls, flush } = makeView();
-		view.setInstancesForTest(sessions.map((s) => (s.id === "gone" ? { ...s, sessionFile: "/gone.jsonl" } : s)));
+		const { view, calls, flush } = makeView({
+			instances: sessions.map((s) => (s.id === "gone" ? { ...s, sessionFile: "/gone.jsonl" } : s)),
+		});
 		for (let i = 0; i < 5; i++) view.handleInput(DOWN);
-		expect(view.selectedKeyForTest()).toBe("gone");
+		expect(focusedLine(view)).toContain("sound effects");
 		view.handleInput(ENTER);
 		await flush();
 		// Not running: it starts in a pane of its own, which goes on as the stored row.
@@ -1152,8 +1145,7 @@ describe("AgentView look", () => {
 
 	it("with only this session listed, omits the intro and idle prompting hints", () => {
 		const self: InstanceSummary = { id: "me", status: "online", cwd: HERE, label: "current session", external: true };
-		const { view, text } = makeView({ self });
-		view.setInstancesForTest([]);
+		const { text } = makeView({ self, instances: [] });
 		const shown = text().join("\n");
 		expect(shown).toContain("current session");
 		expect(shown).not.toContain("different way");
