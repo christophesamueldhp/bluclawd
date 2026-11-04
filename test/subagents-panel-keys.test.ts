@@ -1,6 +1,9 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stripAnsi } from "../daemon/ansi.ts";
+import { STATUS_KEYS } from "../ext/_shared/status-keys.ts";
+import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
+import backgroundBash from "../ext/background-bash/index.ts";
 import paste from "../ext/paste/index.ts";
 import promptAssist from "../ext/prompt-assist/index.ts";
 import { SUBAGENT_NOTIFICATION_CUSTOM_TYPE } from "../ext/subagents/index.ts";
@@ -64,6 +67,16 @@ describe("reaching the panel from the keyboard", () => {
 		child.open();
 	});
 
+	it("leaves ↓ alone while an overlay is shown", async () => {
+		const { t, child } = await withRunningRuns(["scout"]);
+
+		t.setOverlay(true);
+		t.press(DOWN);
+		expect(t.editorFocused()).toBe(true);
+		expect(selected(t)).toBeUndefined();
+		child.open();
+	});
+
 	it("does nothing on ↓ while there are no runs to show", async () => {
 		tui = await createSubagentTui();
 		tui.script([() => fauxAssistantMessage("Nothing to delegate.")]);
@@ -96,6 +109,49 @@ describe("reaching the panel from the keyboard", () => {
 	});
 });
 
+describe("↓ with background shells running", () => {
+	/** An exec that runs until it is aborted. */
+	const forever: BackgroundExec = (_c, _w, { signal }) =>
+		new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+
+	afterEach(() => {
+		for (const job of backgroundBashJobs.list()) backgroundBashJobs.kill(job.id);
+	});
+
+	/** A session with background-bash loaded first, as package.json loads it, and one running shell. */
+	async function withShell() {
+		const t = await createSubagentTui({ extensionsBefore: [backgroundBash] });
+		tui = t;
+		backgroundBashJobs.start({ command: "npm run dev", cwd: t.cwd, owner: t.session.sessionId, exec: forever });
+		await waitFor(() => t.status(STATUS_KEYS.tasks)?.includes("1 shell"));
+		return t;
+	}
+
+	it("goes to the panel while it shows rows", async () => {
+		const t = await withShell();
+		const child = gate();
+		t.script([launch(["scout"], { background: true })], async () => {
+			await child.wait;
+			return fauxAssistantMessage(REPORT);
+		});
+		await prompt(t);
+		await waitFor(() => row(t, "scout"));
+
+		t.press(DOWN);
+		expect(selected(t)).toMatch(/^❯ scout /);
+		expect(t.status(STATUS_KEYS.tasks)).not.toContain("Enter to view tasks");
+		child.open();
+	});
+
+	it("still selects the tasks pill while the panel is empty", async () => {
+		const t = await withShell();
+
+		t.press(DOWN);
+		expect(t.editorFocused()).toBe(true);
+		expect(t.status(STATUS_KEYS.tasks)).toContain("Enter to view tasks");
+	});
+});
+
 describe("a focused panel", () => {
 	it("moves between rows with ↑/↓, staying within them", async () => {
 		const { t, child } = await withRunningRuns(["scout", "mapper", "fixer"]);
@@ -113,6 +169,55 @@ describe("a focused panel", () => {
 		t.press(UP, UP, UP);
 		expect(selected(t)).toMatch(new RegExp(`^❯ ${first} `));
 		child.open();
+	});
+
+	/** Three running runs, each finishing when its own gate opens; names in panel order. */
+	async function withSeparateRuns() {
+		const t = await createSubagentTui();
+		tui = t;
+		const gates = new Map(["scout", "mapper", "fixer"].map((name) => [name, gate()]));
+		t.script([launch([...gates.keys()], { background: true })], async (context) => {
+			// The child's task leads its first message; the roster after it names the siblings' tasks too.
+			const task = JSON.stringify(context.messages.find((m) => m.role === "user"));
+			await [...gates].find(([name]) => task.includes(`"text":"Task for ${name}\\n`))?.[1].wait;
+			return fauxAssistantMessage(REPORT);
+		});
+		await prompt(t);
+		await waitFor(() => [...gates.keys()].every((name) => row(t, name)));
+		const names = t
+			.panel()
+			.slice(1, 4)
+			.map((line) => line.trim().split(" ")[0]);
+		/** Lets `name` finish and waits until it has left the panel. */
+		const finish = async (name: string) => {
+			gates.get(name)?.open();
+			await waitFor(() => row(t, name)?.includes("completed") ?? false);
+			t.advance(31_000);
+			await waitFor(() => !row(t, name));
+		};
+		const openAll = () => {
+			for (const g of gates.values()) g.open();
+		};
+		return { t, names, finish, openAll };
+	}
+
+	it("stays on the same run when a row above it leaves", async () => {
+		const { t, names, finish, openAll } = await withSeparateRuns();
+
+		t.press(DOWN, DOWN);
+		expect(selected(t)).toMatch(new RegExp(`^❯ ${names[1]} `));
+		await finish(names[0]);
+		expect(selected(t)).toMatch(new RegExp(`^❯ ${names[1]} `));
+		openAll();
+	});
+
+	it("moves to the nearest row when the selected run leaves", async () => {
+		const { t, names, finish, openAll } = await withSeparateRuns();
+
+		t.press(DOWN, DOWN);
+		await finish(names[1]);
+		expect(selected(t)).toMatch(new RegExp(`^❯ ${names[2]} `));
+		openAll();
 	});
 
 	it("says which keys it takes", async () => {

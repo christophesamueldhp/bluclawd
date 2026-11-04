@@ -55,6 +55,8 @@ export interface AgentTaskSource {
 	stop(id: string, options?: AgentTaskStopOptions): AgentTaskStopResult;
 	/** Stops every running task the owner has; returns how many were stopped. */
 	stopAll(options?: AgentTaskStopOptions): number;
+	/** Whether the subagent panel below the prompt shows rows; it then takes ↓ from an empty prompt. */
+	panelHasRows?(): boolean;
 }
 
 const state = sharedRef("agentTasks", {

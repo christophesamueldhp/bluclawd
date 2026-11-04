@@ -79,9 +79,22 @@ export function createPanel(options: {
 	actions: PanelActions;
 }) {
 	const { tui, theme, actions } = options;
-	let selected = 0;
+	// The selection follows its run; `at` is where it last was, for the nearest row once that run leaves.
+	let selectedId: string | undefined;
+	let at = 0;
 	let returnTo: Component | null = null;
 	const rows = () => options.runs().slice(0, MAX_ROWS);
+	/** The selected row's index in `shown`, moved to the nearest row when the selected run has left. */
+	const selectedIn = (shown: readonly RunEntry[]) => {
+		const index = shown.findIndex((run) => run.record.runId === selectedId);
+		at = index >= 0 ? index : Math.max(0, Math.min(at, shown.length - 1));
+		selectedId = shown[at]?.record.runId;
+		return at;
+	};
+	const select = (shown: readonly RunEntry[], index: number) => {
+		at = index;
+		selectedId = shown[index]?.record.runId;
+	};
 	const release = () => {
 		if (panel.focused) tui.setFocus(returnTo);
 	};
@@ -94,10 +107,11 @@ export function createPanel(options: {
 		} = {
 		focused: false,
 		focus() {
-			if (rows().length === 0) return false;
+			const shown = rows();
+			if (shown.length === 0) return false;
 			// getFocusedComponent is on pi-tui's TUI class, not its TUI interface.
 			returnTo = (tui as { getFocusedComponent?: () => Component | null }).getFocusedComponent?.() ?? null;
-			selected = 0;
+			select(shown, 0);
 			tui.setFocus(panel);
 			tui.requestRender();
 			return true;
@@ -107,13 +121,13 @@ export function createPanel(options: {
 		},
 		handleInput(data) {
 			const shown = rows();
-			selected = Math.min(selected, shown.length - 1);
+			const selected = selectedIn(shown);
 			const run = shown[selected];
 			if (!run) {
 				release();
 				returnTo?.handleInput?.(data);
-			} else if (matchesKey(data, "up")) selected = Math.max(0, selected - 1);
-			else if (matchesKey(data, "down")) selected = Math.min(shown.length - 1, selected + 1);
+			} else if (matchesKey(data, "up")) select(shown, Math.max(0, selected - 1));
+			else if (matchesKey(data, "down")) select(shown, Math.min(shown.length - 1, selected + 1));
 			else if (matchesKey(data, "escape")) release();
 			else if (matchesKey(data, "enter")) actions.open?.(run);
 			else if (data === "x") {
@@ -134,7 +148,7 @@ export function createPanel(options: {
 				now: options.now(),
 				width,
 				theme,
-				selected: panel.focused ? Math.min(selected, MAX_ROWS - 1, runs.length - 1) : undefined,
+				selected: panel.focused ? selectedIn(runs.slice(0, MAX_ROWS)) : undefined,
 			});
 		},
 		invalidate: () => {},

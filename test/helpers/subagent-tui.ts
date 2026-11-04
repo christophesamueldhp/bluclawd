@@ -73,7 +73,14 @@ export function gate(): { wait: Promise<void>; open: () => void } {
  * context that records what the extension shows: below/above-editor widgets, `ui.custom` views, statuses and
  * notifications. Keys go where the TUI would send them, and time can be moved on without fake timers.
  */
-export async function createSubagentTui(options: { extensions?: ExtensionFactory[]; batchWindowMs?: number } = {}) {
+export async function createSubagentTui(
+	options: {
+		extensions?: ExtensionFactory[];
+		/** Extensions loaded before subagents, whose key listeners see each key first. */
+		extensionsBefore?: ExtensionFactory[];
+		batchWindowMs?: number;
+	} = {},
+) {
 	initTheme("dark");
 	const dirs = [mkdtempSync(join(tmpdir(), "bluclawd-tui-cwd-")), mkdtempSync(join(tmpdir(), "bluclawd-tui-agent-"))];
 	const [cwd, agentDir] = dirs;
@@ -86,6 +93,7 @@ export async function createSubagentTui(options: { extensions?: ExtensionFactory
 	let view: Rendered | undefined;
 	/** The component that has the keyboard when no view is open; the editor when unset. */
 	let focus: Rendered | undefined;
+	let overlayShown = false;
 	let editorText = "";
 	let editorFactory: ((...args: unknown[]) => typeof editor) | undefined;
 	let editor: Rendered & { getText(): string; setText(text: string): void } = {
@@ -103,7 +111,7 @@ export async function createSubagentTui(options: { extensions?: ExtensionFactory
 
 	const tui = {
 		requestRender: () => {},
-		hasOverlay: () => false,
+		hasOverlay: () => overlayShown,
 		getFocusedComponent: () => view ?? focus ?? editor,
 		setFocus: (component: Rendered | null) => {
 			const previous = focus ?? editor;
@@ -181,6 +189,7 @@ export async function createSubagentTui(options: { extensions?: ExtensionFactory
 		cwd,
 		agentDir,
 		extensions: options.extensions,
+		extensionsBefore: options.extensionsBefore,
 		batchWindowMs: options.batchWindowMs ?? 15,
 		now: () => Date.now() + offset,
 	});
@@ -228,6 +237,10 @@ export async function createSubagentTui(options: { extensions?: ExtensionFactory
 		editorText: () => editor.getText(),
 		/** The prompt editor as mounted, after any editor wrappers. */
 		editor: () => editor,
+		/** Shows or hides an overlay that leaves the keyboard where it is. */
+		setOverlay(shown: boolean) {
+			overlayShown = shown;
+		},
 		/** Whether the prompt editor has the keyboard. */
 		editorFocused: () => !view && !focus,
 		/** Feeds each key to the open view, else to the terminal input listeners and then the focused component. */

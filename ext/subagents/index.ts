@@ -90,7 +90,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		let unpublishTasks: (() => void) | undefined;
 		let latestLoadout: ToolLoadout | undefined;
 		const now = options.now ?? Date.now;
-		let panelTui: Pick<TUI, "requestRender"> | undefined;
+		let panelTui: Pick<TUI, "requestRender" | "hasOverlay"> | undefined;
 		let panel: ReturnType<typeof createPanel> | undefined;
 		let offPanelKeys: (() => void) | undefined;
 		/** Final runs the user dismissed from the panel. */
@@ -310,7 +310,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			reconcileInterruptedRuns(agentDir, sessionId, branchEntries, liveIds);
 
 			unpublishTasks?.();
-			unpublishTasks = publishAgentTasks(taskSource);
+			unpublishTasks = publishAgentTasks({
+				...taskSource,
+				panelHasRows: () => panel !== undefined && panelRuns().length > 0,
+			});
 			refreshFooterStatus();
 			if (ctx.mode === "tui") {
 				// Always mounted: it renders nothing while there are no runs to show.
@@ -356,6 +359,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						panelTui as { getFocusedComponent?: () => unknown } | undefined
 					)?.getFocusedComponent?.();
 					if (typeof (focused as { getText?: unknown } | null)?.getText !== "function") return undefined;
+					if (panelTui?.hasOverlay()) return undefined;
 					return panel?.focus() ? { consume: true } : undefined;
 				});
 			}
