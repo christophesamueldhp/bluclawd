@@ -84,12 +84,11 @@ export function setRemoteControl(control: RemoteControl | undefined): void {
 
 /** Every row agent view lists: stored rows, then each pane's pi with its activity. */
 export function listSummaries(supervisor: ServerSupervisor): InstanceSummary[] {
-	// Panes first: one reaped here shows its stored row again.
+	const stored = supervisor.listInstances().map((instance) => toInstanceSummary(instance));
 	const external = supervisor.listExternalInstances().map(({ record, activity, settled, silent }) => ({
 		...toInstanceSummary(record, activity, true, settled),
 		...(silent ? { silent } : {}),
 	}));
-	const stored = supervisor.listInstances().map((instance) => toInstanceSummary(instance));
 	return [...stored, ...external];
 }
 
