@@ -206,6 +206,19 @@ describe("a row's state by event, as every reader lists it", () => {
 		expect(f.outcomes()).toEqual(held("sent", "sent"));
 	});
 
+	it("a pane a start claimed the row for, past its live pane's TTL, takes that row's inbox", () => {
+		const f = fixture();
+		states.live(f);
+		f.pass(20_000);
+		f.supervisor.claimStart({ cwd: f.dir, sessionFile: f.file });
+		f.supervisor.registerExternal(
+			{ id: "pi-b", status: "online", cwd: f.dir, createdAt, sessionFile: f.file, pane: "pi-b" },
+			"idle",
+		);
+		expect(f.supervisor.drainExternal("pi-b")).toEqual([{ type: "prompt", text: "inbox", id: "p-inbox" }]);
+		expect(f.outcomes()).toEqual(held("sent", "sent"));
+	});
+
 	it("a row deleted while silent stays deleted once its pane ends and its hand-off saves", () => {
 		const f = fixture();
 		states.silent(f);
