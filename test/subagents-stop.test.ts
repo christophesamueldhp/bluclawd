@@ -37,6 +37,7 @@ function makeAgentRunRecord(overrides: Partial<SubagentRunRecord> = {}): Subagen
 		sessionEpoch: 1,
 		parentTurnId: "turn_1",
 		originToolCallId: "call_1",
+		generation: 0,
 		agentName: "explorer",
 		definitionSource: "bundled",
 		provider: "anthropic",

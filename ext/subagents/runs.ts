@@ -41,8 +41,8 @@ export interface SubagentRunRecord {
 	originEntryId?: string;
 	/** Unique among the parent's live runs; absent on older records. */
 	name?: string;
-	/** How many times the orchestrator resumed this run after it completed; absent before the first resume. */
-	generation?: number;
+	/** How many times the orchestrator resumed this run after it completed: 0 for the launch. */
+	generation: number;
 	childSessionId?: string;
 	transcriptPath?: string;
 	reportPath?: string;
@@ -249,6 +249,7 @@ export class SubagentRunScheduler<C = unknown> {
 			originToolCallId: request.originToolCallId,
 			originEntryId: request.originEntryId,
 			name: request.name,
+			generation: 0,
 			agentName: request.agentName,
 			definitionSource: request.definitionSource,
 			provider: request.provider,
@@ -336,7 +337,7 @@ export class SubagentRunScheduler<C = unknown> {
 				summaryText: undefined,
 				// Unset, so the earlier generation's final report stays on disk until this one reports progress.
 				lastProgressText: undefined,
-				generation: (managed.record.generation ?? 0) + 1,
+				generation: managed.record.generation + 1,
 				status: "starting",
 				complete: false,
 				deliveryMode: "background",
