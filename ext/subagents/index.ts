@@ -32,8 +32,17 @@ import { appendSubagentMessageRecord, reconcileInterruptedRuns } from "./storage
 import { createAgentTaskSource } from "./task-source.ts";
 
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
+const SUBAGENT_REMINDER_CUSTOM_TYPE = "subagent-reminder";
 const BACKGROUND_BATCH_WINDOW_MS = 40;
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent that works in this same checkout";
+// Wording follows Codex's "After you delegate" block and Claude Code's harness text (docs/research/subagents-ux-and-waiting.md).
+const AFTER_YOU_DELEGATE = [
+	"After you delegate:",
+	"- Do not redo or touch delegated work, including the files in a run's scope; work only on what does not overlap.",
+	"- Do not poll `subagent_status` by reflex; check it only when a run seems stuck.",
+	"- With no independent work left, end your turn and say you are waiting: the report will wake you.",
+	"- Never predict or invent a pending run's result; if the user asks, say it is still running.",
+];
 
 export interface SubagentExtensionOptions {
 	agentDir?: string;
@@ -59,7 +68,14 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 		"- Single-file lookups or edits you can do directly.",
 		"- Tightly coupled sequential steps where each step depends on the previous result.",
 		"",
-		...(oneShot ? ["Background runs are unavailable in this one-shot mode: omit `background`.", ""] : []),
+		...(oneShot
+			? ["Background runs are unavailable in this one-shot mode: omit `background`.", ""]
+			: [
+					"Run in the foreground (the default) when your next step needs the result. Set `background: true` only when you have independent work to do meanwhile.",
+					"",
+					...AFTER_YOU_DELEGATE,
+					"",
+				]),
 		"Available subagent roles:",
 		rolesSection,
 	].join("\n");
@@ -312,6 +328,33 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			activeTurnIndex++;
 		});
 
+		// Added to each request rather than stored, so a compaction cannot drop it.
+		pi.on("context", async (event) => {
+			const runs = openRuns();
+			if (runs.length === 0) return undefined;
+			const now = Date.now();
+			const lines = runs.map(
+				({ record: run }) =>
+					`- ${run.name ?? run.runId}: ${run.deliveryMode}, ${ago(run.startedAt ?? run.admittedAt, now).replace(" ago", "")} elapsed`,
+			);
+			const text = [
+				"Subagents still active; their reports arrive on their own, so do not redo their work or poll for them:",
+				...lines,
+			].join("\n");
+			return {
+				messages: [
+					...event.messages,
+					{
+						role: "custom",
+						customType: SUBAGENT_REMINDER_CUSTOM_TYPE,
+						content: [{ type: "text", text }],
+						display: false,
+						timestamp: now,
+					},
+				],
+			};
+		});
+
 		pi.on("session_before_switch", async () => {
 			parentScope.invalidate("Parent session switching");
 			return undefined;
@@ -544,6 +587,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 									`Agent: ${handle.record.agentName} (${handle.record.provider}/${handle.record.modelId})`,
 									`Status: ${handle.record.status}`,
 									"The final report will be delivered to this session branch when complete. Use `task_stop` with this run ID to cancel.",
+									`While ${handle.record.name} runs, do not redo or touch its work, including the files in its scope, and do not poll \`subagent_status\` by reflex. With no independent work left, end your turn and say you are waiting for ${handle.record.name}: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.`,
 								].join("\n"),
 							},
 						],
