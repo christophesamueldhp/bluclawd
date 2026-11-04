@@ -137,6 +137,7 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 			cwd: dir,
 			taskSummary: "Inspect HTTP",
 			startSnapshot: { headCommit: null, dirty: false, statusDigest: "" },
+			generation: 0,
 			snapshotDrifted: false,
 			admittedAt: 1000,
 			deliveryMode: "background" as const,
@@ -299,6 +300,7 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 			recordBackgroundUsageInLedger(agentDir, {
 				runId: "sub_bg_ledger_1",
 				parentSessionId: sessionId,
+				generation: 0,
 				usage: {
 					...createEmptySubagentUsage(),
 					hasUnknownCost,

@@ -76,7 +76,7 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 				(run) =>
 					inParentScope(run, scope) &&
 					isTerminalSubagentStatus(run.status) &&
-					deps.dismissed.get(run.runId) !== (run.generation ?? 0),
+					deps.dismissed.get(run.runId) !== run.generation,
 			)
 			.flatMap((run) => deps.directory.get(run.runId) ?? []);
 	};
@@ -119,7 +119,7 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 		dismiss: (id, owner) => {
 			const run = doneRuns(owner).find((entry) => entry.record.runId === id);
 			if (!run) return false;
-			deps.dismissed.set(id, run.record.generation ?? 0);
+			deps.dismissed.set(id, run.record.generation);
 			return true;
 		},
 	};

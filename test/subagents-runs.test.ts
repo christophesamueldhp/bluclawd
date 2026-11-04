@@ -126,6 +126,18 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 		expect(ids[0]).not.toBe(ids[1]);
 	});
 
+	it("numbers a launch as generation 0 and its resume as generation 1", async () => {
+		const scheduler = new SubagentRunScheduler({
+			executeRun: async () => ({ status: "completed", complete: true, summaryText: "done" }),
+		});
+		const launch = admitted(scheduler.admit(makeRequest()));
+		expect(launch.record.generation).toBe(0);
+		await launch.completion;
+
+		const resumed = admitted(scheduler.resume(launch.runId, undefined));
+		expect(resumed.record.generation).toBe(1);
+	});
+
 	it("handles cancellation before admission, by explicit stop while running, and by the caller signal", async () => {
 		const scheduler = new SubagentRunScheduler({
 			executeRun: (params) => {

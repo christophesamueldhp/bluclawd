@@ -174,8 +174,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				.filter(
 					(run) =>
 						inParentScope(run, scope) &&
-						dismissedFromPanel.get(run.runId) !== (run.generation ?? 0) &&
-						dismissedFromTasks.get(run.runId) !== (run.generation ?? 0),
+						dismissedFromPanel.get(run.runId) !== run.generation &&
+						dismissedFromTasks.get(run.runId) !== run.generation,
 				)
 				.flatMap((run) => directory.get(run.runId) ?? [])
 				.filter((entry) => shownInPanel(entry, at));
@@ -346,7 +346,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 								stop: ({ record }) =>
 									taskSource.stop(record.runId, { owner: record.parentSessionId, source: "user" }),
 								dismiss: ({ record }) => {
-									dismissedFromPanel.set(record.runId, record.generation ?? 0);
+									dismissedFromPanel.set(record.runId, record.generation);
 									runsChanged();
 								},
 								open: ({ record }) => void openTranscript(record.runId),

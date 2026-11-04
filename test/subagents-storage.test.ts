@@ -47,6 +47,7 @@ function makeRecord(overrides: Partial<SubagentRunRecord> = {}): SubagentRunReco
 		sessionEpoch: 1,
 		parentTurnId: "turn_1",
 		originToolCallId: "call_1",
+		generation: 0,
 		originEntryId: "entry_origin_1",
 		agentName: "explorer",
 		definitionSource: "bundled",
@@ -240,6 +241,17 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		expect(foreground).not.toHaveProperty("foregroundUsageAttributed");
 		expect(readLegacy("sub_legacy_fg_unsettled", "foreground", false)?.usageAttribution).toBe("tool_result");
 		expect(readLegacy("sub_legacy_bg", "background", false)?.usageAttribution).toBe("ledger");
+	});
+
+	it("reads a record stored before generations were always recorded as the launch's generation", () => {
+		const agentDir = makeTempDir("legacy-generation");
+		const parentSessionId = "sess_legacy_generation";
+		const { generation: _, ...legacy } = makeRecord({ runId: "sub_legacy_gen", parentSessionId });
+		const dir = join(getSubagentsRootDir(agentDir), parentSessionId, "sub_legacy_gen");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "record.json"), JSON.stringify(legacy));
+
+		expect(readPersistedRunRecord(agentDir, parentSessionId, "sub_legacy_gen")?.generation).toBe(0);
 	});
 
 	it("records each generation's usage in the ledger once", () => {
