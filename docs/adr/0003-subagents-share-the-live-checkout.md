@@ -1,6 +1,6 @@
 # Subagents share the live checkout with the orchestrator's authority
 
-An orchestrator delegates to child agents. They work in the same live checkout with the orchestrator's callable tools, under the user's own deny rules, and nothing more. There are no per-agent workspaces, locks, quotas or child-only permission ceilings. Edits are live for everyone and the last write wins, so the orchestrator owns decomposition, handoffs and final verification. Delegation is one level deep. Children talk to the orchestrator, never to the user: an action that would need the user's approval is denied and reported to the orchestrator, which can do it itself.
+An orchestrator delegates to child agents. They work in the same live checkout with the orchestrator's callable tools, under the user's own deny rules, and nothing more. There are no per-agent workspaces, locks, quotas or child-only permission ceilings. Edits are live for everyone and the last write wins, so the orchestrator owns decomposition, handoffs and final verification. Delegation is one level deep. Children talk to the orchestrator, never to the user (amended by ADR-0005: the user may message a run directly): an action that would need the user's approval is denied and reported to the orchestrator, which can do it itself.
 
 Decided 2026-10-27 to 2026-10-28; the spec is GitHub issue #6.
 
