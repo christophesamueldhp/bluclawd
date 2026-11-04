@@ -1,6 +1,7 @@
-import { CustomEditor } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, initTheme } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { stripAnsi } from "../daemon/ansi.ts";
 import { PasteEditor } from "../ext/paste/index.ts";
 import { attachSuggestions } from "../ext/prompt-assist/editor.ts";
 import promptAssist, { conversation } from "../ext/prompt-assist/index.ts";
@@ -31,7 +32,31 @@ beforeEach(() => {
 	vi.mocked(saveAssistEnabled).mockReset();
 });
 
+beforeAll(() => initTheme("dark"));
+
 const tui = { requestRender: vi.fn(), terminal: { rows: 40, columns: 100 } };
+const DOWN = "\x1b[B";
+
+/** Answers ui.custom by pressing `keys` in the picker, recording what it last rendered. */
+function drivePicker(keys: string[]) {
+	const shown: { title: string; lines: string[] } = { title: "", lines: [] };
+	const custom = vi.fn(
+		(factory: any) =>
+			new Promise<string | undefined>((done) => {
+				const picker = factory(
+					{ requestRender: () => {} },
+					{ fg: (_color: string, text: string) => text, bold: (text: string) => text },
+					undefined,
+					done,
+				);
+				for (const key of keys) {
+					shown.lines = picker.render(80).map(stripAnsi);
+					picker.handleInput(key);
+				}
+			}),
+	);
+	return { custom, shown };
+}
 const theme = { borderColor: (text: string) => text, selectList: {} };
 const keys = { matches: () => false, getKeys: () => [] };
 
@@ -83,6 +108,7 @@ function harness(
 			},
 			notify: vi.fn(),
 			select: vi.fn(async (_title: string, _choices: string[]) => undefined as string | undefined),
+			custom: drivePicker(["\x1b"]).custom as (factory: any) => Promise<string | undefined>,
 			theme: { fg: (_color: string, text: string) => text },
 		},
 		modelRegistry: {
@@ -575,18 +601,30 @@ describe("prompt assist model selection", () => {
 
 	it("opens a picker and supports argument completion", async () => {
 		const h = harness();
-		h.ctx.ui.select.mockResolvedValueOnce("Choose model").mockResolvedValueOnce("custom/vendor/fast-model");
+		h.ctx.ui.select.mockResolvedValueOnce("Choose model");
+		const picker = drivePicker(["\x1b[A", "\r"]);
+		h.ctx.ui.custom = picker.custom;
 		await h.command();
-		expect(h.ctx.ui.select).toHaveBeenNthCalledWith(1, expect.stringContaining(DEFAULT_MODEL), [
+		expect(h.ctx.ui.select).toHaveBeenCalledWith(expect.stringContaining(DEFAULT_MODEL), [
 			"Turn off prompt assistance",
 			"Choose model",
 		]);
-		expect(h.ctx.ui.select).toHaveBeenNthCalledWith(2, expect.stringContaining(DEFAULT_MODEL), [
-			"custom/vendor/fast-model",
-			DEFAULT_MODEL,
-		]);
+		expect(picker.shown.lines.join("\n")).toContain(`current: ${DEFAULT_MODEL}`);
 		expect(saveAssistModel).toHaveBeenCalledWith(expect.any(String), "custom/vendor/fast-model");
 		expect(h.completions("FAST")).toEqual([{ value: "custom/vendor/fast-model", label: "custom/vendor/fast-model" }]);
+	});
+
+	it("scrolls the model list so a model below the visible rows can be chosen", async () => {
+		const h = harness();
+		const models = Array.from({ length: 30 }, (_, i) => ({ provider: "p", id: `m${String(i).padStart(2, "0")}` }));
+		h.ctx.modelRegistry.getAvailable.mockReturnValue(models);
+		h.ctx.ui.select.mockResolvedValueOnce("Choose model");
+		const picker = drivePicker([...Array(25).fill(DOWN), "\r"]);
+		h.ctx.ui.custom = picker.custom;
+		await h.command();
+		expect(picker.shown.lines.some((line) => line.includes("p/m00"))).toBe(false);
+		expect(picker.shown.lines.find((line) => line.includes("p/m25"))).toMatch(/→/);
+		expect(saveAssistModel).toHaveBeenCalledWith(expect.any(String), "p/m25");
 	});
 
 	it.each([true, false])(
@@ -614,9 +652,9 @@ describe("prompt assist model selection", () => {
 
 	it("does not change preferences when the model submenu is cancelled", async () => {
 		const h = harness();
-		h.ctx.ui.select.mockResolvedValueOnce("Choose model").mockResolvedValueOnce(undefined);
+		h.ctx.ui.select.mockResolvedValueOnce("Choose model");
 		await h.command();
-		expect(h.ctx.ui.select).toHaveBeenCalledTimes(2);
+		expect(h.ctx.ui.select).toHaveBeenCalledTimes(1);
 		expect(saveAssistEnabled).not.toHaveBeenCalled();
 		expect(saveAssistModel).not.toHaveBeenCalled();
 	});
