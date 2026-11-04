@@ -1,0 +1,112 @@
+import type { RunDirectory, RunEntry } from "./directory.ts";
+import { inParentScope, type ParentScope } from "./parent-scope.ts";
+import { isTerminalSubagentStatus, type SubagentRunScheduler } from "./runs.ts";
+import { readPersistedRunRecord } from "./storage.ts";
+
+/** How long a Run that succeeded stays in the panel after it ends. */
+const SUCCEEDED_RUN_LINGER_MS = 30_000;
+
+/** Whether a stop can reach the Run: not once its last turn ended. */
+export const canStop = (entry: RunEntry) => entry.state !== "finishing" && entry.state !== "finished";
+
+export interface ParentScopeViewsDeps {
+	scheduler: Pick<SubagentRunScheduler<{ resume?: { toolCallId: string } }>, "listRuns" | "getContext">;
+	directory: Pick<RunDirectory, "get" | "list">;
+	agentDir: () => string;
+	/** The orchestrator's current Parent scope; none before the first session starts. */
+	scope: () => ParentScope | undefined;
+	/** Whether the orchestrator is between turns. */
+	idle: () => boolean;
+	now: () => number;
+	/** The Generation of each final Run the user dismissed, from the panel and from `/tasks`. */
+	dismissed: { panel: ReadonlyMap<string, number>; tasks: ReadonlyMap<string, number> };
+}
+
+export type ParentScopeViews = ReturnType<typeof createParentScopeViews>;
+
+/** Every view of the current Parent scope's Runs, so the panel, `/tasks`, the footer and the reminder agree. */
+export function createParentScopeViews(deps: ParentScopeViewsDeps) {
+	/** The owner's current scope: only the orchestrator's own session, the owner when a caller names none, has one. */
+	const scopeOf = (owner?: string): ParentScope | undefined => {
+		const active = deps.scope();
+		return owner === undefined || owner === active?.parentSessionId ? active : undefined;
+	};
+	/** The Runs of the owner's current scope that are not final yet, in admission order. */
+	const open = (owner?: string): RunEntry[] => {
+		const scope = scopeOf(owner);
+		return scope ? deps.directory.list(scope) : [];
+	};
+	/** The open Runs whose work the orchestrator still waits on: a Run being stopped is not. */
+	const awaited = () => open().filter((entry) => entry.state !== "stopping");
+	/** Whether the panel still shows a Run: one that succeeded leaves after a while, any other final Run stays. */
+	const lingers = ({ record }: RunEntry, now: number) =>
+		record.status !== "completed" || now - (record.endedAt ?? now) < SUCCEEDED_RUN_LINGER_MS;
+
+	return {
+		open,
+		awaited,
+		/** The background Runs the orchestrator is Waiting for: none while its turn runs. */
+		waitingFor: () =>
+			deps.idle() ? awaited().filter((entry) => entry.record.deliveryMode === "background").length : 0,
+		/** How many open Runs the footer counts as running, and as stopping. */
+		footer: () => {
+			const runs = open();
+			const stopping = runs.filter((entry) => entry.state === "stopping").length;
+			return { running: runs.length - stopping, stopping };
+		},
+		/** The Runs of the current scope the panel shows, in admission order: a dismissed Generation is not. */
+		panel: (): RunEntry[] => {
+			const scope = deps.scope();
+			if (!scope) return [];
+			const now = deps.now();
+			return deps.scheduler
+				.listRuns()
+				.filter(
+					(run) =>
+						inParentScope(run, scope) &&
+						deps.dismissed.panel.get(run.runId) !== run.generation &&
+						deps.dismissed.tasks.get(run.runId) !== run.generation,
+				)
+				.flatMap((run) => deps.directory.get(run.runId) ?? [])
+				.filter((entry) => lingers(entry, now));
+		},
+		/** The scope's final Runs this instance ran, as Done in `/tasks`: none of an earlier epoch or known only from disk. */
+		done: (owner?: string): RunEntry[] => {
+			const scope = scopeOf(owner);
+			if (!scope) return [];
+			return deps.scheduler
+				.listRuns()
+				.filter(
+					(run) =>
+						inParentScope(run, scope) &&
+						isTerminalSubagentStatus(run.status) &&
+						deps.dismissed.tasks.get(run.runId) !== run.generation,
+				)
+				.flatMap((run) => deps.directory.get(run.runId) ?? []);
+		},
+		/** A Run of the owner's current scope this instance knows, else one an earlier instance stored for the owner. */
+		lookup: (id: string, owner?: string): RunEntry | undefined => {
+			const known = deps.directory.get(id);
+			if (known) {
+				const scope = scopeOf(owner);
+				return scope && inParentScope(known.record, scope) ? known : undefined;
+			}
+			const targetOwner = owner ?? deps.scope()?.parentSessionId;
+			const stored = targetOwner ? readPersistedRunRecord(deps.agentDir(), targetOwner, id) : undefined;
+			return stored && { record: stored, state: "finished" };
+		},
+		/** The open Runs of the owner's scope that a stop, one or all, can reach. */
+		stoppable: (owner?: string): RunEntry[] => open(owner).filter(canStop),
+		/** An open Run by name or run ID. */
+		findOpen: (target: string): RunEntry | undefined =>
+			open().find(({ record }) => record.runId === target || record.name === target),
+		/** The open Run a tool call launched; a resumed Generation runs under the message call that resumed it. */
+		launchedBy: (toolCallId: string) =>
+			open()
+				.map((entry) => entry.record)
+				.find(
+					(run) =>
+						(deps.scheduler.getContext(run.runId)?.resume?.toolCallId ?? run.originToolCallId) === toolCallId,
+				),
+	};
+}

@@ -1,5 +1,5 @@
 /**
- * Agent view's row actions: what open, reply, stop, delete and pin do to each kind of row (a
+ * Agent view's row actions: what open, reply, stop, delete, pin and start do to each kind of row (a
  * band, a `!` command, this window's own session, a starting one, a pane, a stored one), and in
  * which order they call the daemon and tmux. Every row is a pi in private tmux that the view
  * switches to; nothing here waits on a pane over RPC. The view maps keys to these, keeps its arm,
@@ -7,7 +7,8 @@
  */
 
 import type { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
-import type { AgentRow } from "../../daemon/rows.ts";
+import { resumePane, startNewPane } from "../../daemon/pane-start.ts";
+import { type AgentRow, labelFromTask } from "../../daemon/rows.ts";
 import { AGENT_VIEW_COMMAND, HIDE_ENV, OPEN_VIEW_ENV, type ShellInfo, Tmux } from "../../daemon/tmux.ts";
 
 /** What agent view needs from tmux in pane mode. */
@@ -259,12 +260,33 @@ export class RowActions {
 	 *  refusing it while another window's pane starts or runs it, and lists its row as starting until
 	 *  the pane registers. */
 	async resume(cwd: string, sessionFile: string, args: string[], label?: string): Promise<string> {
-		const id = await this.opts.client.start({ cwd, sessionFile, ...(label ? { label } : {}) });
+		const spec = { cwd, sessionFile, ...(label ? { label } : {}) };
+		const { pane } = await resumePane(this.opts.client, spec, () =>
+			this.opts.panes.start(cwd, ["--session", sessionFile, ...args]),
+		);
+		return pane;
+	}
+
+	/** A new session: a pi of its own, with the task and images as its first prompt. The daemon lists
+	 *  its row as starting under the pane's name once `claimed` settles. */
+	start(
+		cwd: string,
+		task: string,
+		images: string[],
+		model?: { provider: string; id: string },
+	): { kind: "started"; pane: string; claimed: Promise<void> } | { kind: "failed"; text: string } {
 		try {
-			return this.opts.panes.start(cwd, ["--session", sessionFile, ...args]);
+			const started = startNewPane(this.opts.client, { cwd, label: labelFromTask(task || "Image task") }, () =>
+				this.opts.panes.start(cwd, [
+					...(model ? ["--model", `${model.provider}/${model.id}`] : []),
+					"--",
+					...images.map((file) => `@${file}`),
+					...(task ? [task] : []),
+				]),
+			);
+			return { kind: "started", ...started };
 		} catch (error) {
-			await this.opts.client.startFailed(id).catch(() => undefined);
-			throw error;
+			return { kind: "failed", text: `Couldn't start it — ${Tmux.reason(error)}` };
 		}
 	}
 }

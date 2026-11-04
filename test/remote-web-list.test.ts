@@ -1,15 +1,16 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
-	actable,
 	ageAt,
 	paneUp,
+	replyBox,
 	STATE_WORDS,
 	sessionGroups,
 	sharedWarning,
 	statusGlyph,
 	viewMode,
 } from "#remote-web/list.js";
+import type { ChatVerdict } from "../daemon/remote/sessions.ts";
 import { livePanesWarning, STATE_WORDS as TERMINAL_STATE_WORDS } from "../daemon/rows.ts";
 
 const row = (id: string, state: string, more: Record<string, unknown> = {}) => ({
@@ -21,6 +22,7 @@ const row = (id: string, state: string, more: Record<string, unknown> = {}) => (
 	alive: true,
 	resumable: false,
 	detail: "",
+	verdict: { act: true } as ChatVerdict,
 	...more,
 });
 const createdAt = "2026-10-15T10:00:00.000Z";
@@ -94,14 +96,20 @@ describe("session status on the phone", () => {
 		}
 	});
 
-	it("takes prompts and actions from the phone only while running, answering, and shown in a terminal", () => {
-		expect(actable(row("a", "idle"), true)).toBe(true);
-		expect(actable(row("a", "idle", { alive: false }), true)).toBe(false);
-		expect(actable(row("a", "idle"), false)).toBe(false);
-		expect(actable(undefined, true)).toBe(false);
-		// Its pane stopped answering: the Mac refuses what is sent until it is back.
-		expect(actable(row("a", "working", { silent: true }), true)).toBe(false);
-	});
+	it.each([
+		[{ act: true }, true, { open: true, placeholder: "Reply" }],
+		// No terminal on the Mac shows pi: read only, whatever the row.
+		[{ act: true }, false, { open: false, placeholder: "Read only" }],
+		[{ act: false, reason: "silent" }, true, { open: false, placeholder: "Not responding" }],
+		[{ act: false, reason: "silent" }, false, { open: false, placeholder: "Not responding" }],
+		[{ act: false, reason: "not_running" }, true, { open: false, placeholder: "Disconnected" }],
+		[{ act: false, reason: "starting" }, true, { open: false, placeholder: "Starting…" }],
+	])(
+		"takes prompts and actions only as the daemon's verdict %j says, with a terminal open: %s",
+		(verdict, terminalOpen, shown) => {
+			expect(replyBox(row("a", "idle", { verdict }), terminalOpen)).toEqual(shown);
+		},
+	);
 
 	it("warns, as the terminal does, when several panes run one session file", () => {
 		expect(sharedWarning(row("a", "working", { livePanes: 2 }))).toBe(livePanesWarning(2));

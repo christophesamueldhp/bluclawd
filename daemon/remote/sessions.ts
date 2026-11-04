@@ -33,10 +33,27 @@ export interface RemoteSession {
 	/** Its pane's pi stopped beating while tmux still has its pane (the Mac slept, pi is held up):
 	 *  shown as it last beat, alive. */
 	silent?: true;
+	verdict: ChatVerdict;
 }
+
+/** Whether a Chat may act on a row (its pane's pi takes a message), and why not: only a live pane's
+ *  row may. A Silent pane's takes nothing until it answers. */
+export type ChatVerdict = { act: true } | { act: false; reason: "silent" | "starting" | "not_running" };
 
 function sessionRows(instances: InstanceSummary[]): AgentRow[] {
 	return collectRows(instances, undefined).filter((row) => !row.shell);
+}
+
+/** The pane's pi listed as row `id`, live or silent. */
+function paneOf(instances: InstanceSummary[], id: string): InstanceSummary | undefined {
+	return instances.find((i) => i.id === id && i.external === true);
+}
+
+/** Computed from the row's state, so phone control and the phone's list cannot disagree. */
+function verdictOf(row: AgentRow, pane: InstanceSummary | undefined): ChatVerdict {
+	if (row.silent) return { act: false, reason: "silent" };
+	if (pane) return { act: true };
+	return { act: false, reason: row.starting ? "starting" : "not_running" };
 }
 
 /** In display order: agent view's state bands, each sorted as agent view sorts it. */
@@ -59,20 +76,22 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 				...(row.livePanes ? { livePanes: row.livePanes } : {}),
 				...(row.starting ? { starting: true } : {}),
 				...(row.silent ? { silent: true } : {}),
+				verdict: verdictOf(row, paneOf(instances, row.id)),
 			});
 		}
 	}
 	return sessions;
 }
 
-/** `running`: a pane's pi is registered as this id, so a queued message reaches it. `busy`: mid-turn,
- *  working or waiting on an answer. `pane`: the tmux session that pi registered from, if any.
- *  `draft`: its prompt held unsent text at its last heartbeat. `createdAt` and `sessionId`: its
- *  pane's start and pi's session id. */
+/** `running`: a pane's pi is registered as this id, live or silent, so the row is no stored one.
+ *  `verdict`: whether a message for its pi is taken. `busy`: mid-turn, working or waiting on an
+ *  answer. `pane`: the tmux session that pi registered from, if any. `draft`: its prompt held unsent
+ *  text at its last heartbeat. `createdAt` and `sessionId`: its pane's start and pi's session id. */
 export interface ListedSession {
 	sessionFile?: string;
 	cwd: string;
 	running: boolean;
+	verdict: ChatVerdict;
 	busy: boolean;
 	leafId?: string;
 	pane?: string;
@@ -84,11 +103,12 @@ export interface ListedSession {
 export function findSession(instances: InstanceSummary[], id: string): ListedSession | undefined {
 	const row = sessionRows(instances).find((r) => r.id === id);
 	if (!row) return undefined;
-	const pane = instances.find((i) => i.id === id && i.external === true);
+	const pane = paneOf(instances, id);
 	return {
 		sessionFile: row.sessionFile,
 		cwd: row.cwd,
 		running: pane !== undefined,
+		verdict: verdictOf(row, pane),
 		busy: row.state === "working" || row.state === "needs",
 		...(pane?.leafId ? { leafId: pane.leafId } : {}),
 		...(pane?.pane ? { pane: pane.pane } : {}),
