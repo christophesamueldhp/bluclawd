@@ -215,7 +215,7 @@ describe("the Parent scope's views", () => {
 		expect(views.done("sess_other")).toEqual([]);
 	});
 
-	it("looks a Run up for /tasks in the owner's current scope, or on disk when this instance never ran it", async () => {
+	it("looks a Run up for /tasks by its owner, whatever its epoch, or on disk when this instance never ran it", async () => {
 		const { agentDir, launch, finish, views, scheduler } = setup();
 		const mine = launch();
 		const earlierEpoch = launch({ sessionEpoch: 0 });
@@ -227,9 +227,10 @@ describe("the Parent scope's views", () => {
 
 		expect(views.lookup(mine.runId)?.record.runId).toBe(mine.runId);
 		expect(views.lookup(mine.runId, "sess_main")?.record.runId).toBe(mine.runId);
-		expect(views.lookup(earlierEpoch.runId)).toBeUndefined();
+		// An earlier epoch's Run is found as it is after a restart, from disk: only the owner is checked.
+		expect(views.lookup(earlierEpoch.runId)?.record.runId).toBe(earlierEpoch.runId);
 		expect(views.lookup(otherSession.runId)).toBeUndefined();
-		expect(views.lookup(otherSession.runId, "sess_other")).toBeUndefined();
+		expect(views.lookup(otherSession.runId, "sess_other")?.record.runId).toBe(otherSession.runId);
 		expect(views.lookup("sub_from_disk")).toMatchObject({ record: { runId: "sub_from_disk" }, state: "finished" });
 		expect(views.lookup("sub_from_disk", "sess_other")).toBeUndefined();
 		expect(views.lookup("sub_missing")).toBeUndefined();

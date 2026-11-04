@@ -101,14 +101,14 @@ export function createParentScopeViews(deps: ParentScopeViewsDeps) {
 			const stopping = runs.filter((entry) => entry.state === "stopping").length;
 			return { running: runs.length - stopping, stopping };
 		},
-		/** A Run of the owner's current scope this instance knows, else one an earlier instance stored for the owner. */
+		/**
+		 * The owner's Run this instance knows, else one an earlier instance stored for the owner. Only the owner is
+		 * checked, not the epoch, so an earlier epoch's Run is found before a restart as it is after one.
+		 */
 		lookup: (id: string, owner?: string): RunEntry | undefined => {
-			const known = deps.directory.get(id);
-			if (known) {
-				const scope = scopeOf(owner);
-				return scope && inParentScope(known.record, scope) ? known : undefined;
-			}
 			const targetOwner = owner ?? deps.scope()?.parentSessionId;
+			const known = deps.directory.get(id);
+			if (known) return targetOwner && known.record.parentSessionId !== targetOwner ? undefined : known;
 			const stored = targetOwner ? readPersistedRunRecord(deps.agentDir(), targetOwner, id) : undefined;
 			return stored && { record: stored, state: "finished" };
 		},
