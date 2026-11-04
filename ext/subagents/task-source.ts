@@ -18,12 +18,10 @@ const TASK_STATES: Record<SubagentLifecycleStatus, AgentTaskState> = {
 };
 
 export interface AgentTaskSourceDeps {
-	views: Pick<ParentScopeViews, "open" | "done" | "lookup" | "stoppable">;
+	views: Pick<ParentScopeViews, "open" | "done" | "lookup" | "stoppable" | "dismiss">;
 	directory: Pick<RunDirectory, "get">;
 	scheduler: Pick<SubagentRunScheduler, "cancelRun">;
 	agentDir: () => string;
-	/** The generation of each finished run the user dismissed from `/tasks`. */
-	dismissed: Map<string, number>;
 }
 
 /** Translates runs into the tasks `/tasks` and `task_stop` see. */
@@ -73,11 +71,6 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 					deps.scheduler.cancelRun(run.record.runId, options?.source ?? "user", "Stopped all subagents"),
 				).length,
 		listDone: (owner) => views.done(owner).map(toTask),
-		dismiss: (id, owner) => {
-			const run = views.done(owner).find((entry) => entry.record.runId === id);
-			if (!run) return false;
-			deps.dismissed.set(id, run.record.generation);
-			return true;
-		},
+		dismiss: (id, owner) => views.dismiss("tasks", id, owner),
 	};
 }

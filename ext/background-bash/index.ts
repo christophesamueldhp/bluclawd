@@ -35,6 +35,7 @@ import { agentTasks, isAgentTaskId, subscribeAgentTasks } from "../_shared/agent
 import { commandBlock } from "../_shared/command-block.ts";
 import { sharedRef } from "../_shared/global-state.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
+import { subagentPanelHasRows } from "../_shared/subagent-panel.ts";
 import { wrapExec } from "../sandbox/runtime.ts";
 import { backgroundBashJobs, describeJobStatus, isShellTaskId, noTaskError, shellTaskStop } from "./background-bash.ts";
 import { backgroundTasksDisabled } from "./bash-limits.ts";
@@ -235,7 +236,7 @@ const backgroundBash: InlineExtension = {
 			// The subagent panel takes ↓ while it shows rows.
 			const hint = pillSelected
 				? "Enter to view tasks"
-				: agentTasks()?.panelHasRows?.()
+				: subagentPanelHasRows()
 					? "/tasks to manage"
 					: "↓ to manage";
 			const pill = pillSelected ? INVERSE(PILL(label ?? "")) : PILL(label ?? "");
@@ -372,7 +373,7 @@ const backgroundBash: InlineExtension = {
 						if (
 							matchesKey(data, "down") &&
 							ui.getEditorText() === "" &&
-							!agentTasks()?.panelHasRows?.() &&
+							!subagentPanelHasRows() &&
 							tasksPillLabel(taskRows(owner()))
 						) {
 							pillSelected = true;
