@@ -131,7 +131,7 @@ function setup(options: { batchWindowMs?: number } = {}) {
 		runner: runner.run,
 		bus,
 		scope,
-		pi: { appendEntry: (customType, data) => entries.push({ customType, data }) },
+		pi: { appendEntry: (customType, data) => entries.push({ customType, data }), sendMessage: () => {} },
 		launchesSettled: () => Promise.resolve(),
 		onChange: () => {},
 	});
