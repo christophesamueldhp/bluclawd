@@ -20,6 +20,7 @@ export async function createParentSessionWithSubagents(options: {
 	builtinTools?: string[];
 	extensions?: ExtensionFactory[];
 	batchWindowMs?: number;
+	now?: () => number;
 }) {
 	const modelRuntime = await ModelRuntime.create({
 		authPath: join(options.agentDir, "auth.json"),
@@ -51,7 +52,11 @@ export async function createParentSessionWithSubagents(options: {
 		agentDir: options.agentDir,
 		settingsManager,
 		extensionFactories: [
-			createSubagentsExtension({ agentDir: options.agentDir, batchWindowMs: options.batchWindowMs }),
+			createSubagentsExtension({
+				agentDir: options.agentDir,
+				batchWindowMs: options.batchWindowMs,
+				now: options.now,
+			}),
 			...(options.extensions ?? []),
 		],
 		noExtensions: true,
