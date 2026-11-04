@@ -33,8 +33,8 @@ interface FakeChild {
 	readonly inbox: string[];
 	/** Runs one of the child's tools as its model would, and returns the result text. */
 	call(toolName: string, params: object): Promise<string>;
-	/** Ends the child's last turn; the run is final only once `finish` returns its outcome. */
-	endTurn(): void;
+	/** Ends the child's turn, its last unless pi will retry it; the run is final only once `finish` returns its outcome. */
+	endTurn(willRetry?: boolean): void;
 	/** Keeps the child running when it is stopped, until `finish`. */
 	holdStop(): void;
 	finish(outcome?: Partial<SubagentRunnerOutcome>): void;
@@ -71,8 +71,8 @@ function fakeRunner() {
 				},
 				{ once: true },
 			);
-			const endTurn = () => {
-				for (const listener of listeners) listener({ type: "agent_end", messages: [], willRetry: false });
+			const endTurn = (willRetry = false) => {
+				for (const listener of listeners) listener({ type: "agent_end", messages: [], willRetry });
 			};
 			children.push({
 				options,
@@ -89,7 +89,7 @@ function fakeRunner() {
 					);
 					return result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
 				},
-				endTurn,
+				endTurn: (willRetry) => endTurn(willRetry),
 				holdStop: () => {
 					holdingStop = true;
 				},
@@ -272,6 +272,24 @@ describe("The run directory", () => {
 		expect(await backend.completion).toMatchObject({ status: "completed" });
 		expect(directory.find(scope.current()!, "backend")).toMatchObject({ state: "finished" });
 		expect(directory.nameHolder(scope.current()!, "backend")).toBeUndefined();
+	});
+
+	it("keeps a run whose turn pi will retry reachable by a message and stoppable", async () => {
+		const { tasks, runner, launch } = setup();
+		const backend = launch("backend", "Build the API.");
+		const b = await runner.child(0);
+		b.holdStop();
+		launch("frontend", "Build the UI.");
+		const f = await runner.child(1);
+
+		b.endTurn(true);
+
+		expect(await f.call("subagent_roster", {})).toContain("backend");
+		expect(await f.call("subagent_message", { to: "backend", content: "Use REST." })).toBe(
+			`Message 1 accepted for delivery to backend (${backend.runId}) (not yet handled).`,
+		);
+		expect(b.inbox).toHaveLength(1);
+		expect(tasks.stop(backend.runId)).toMatchObject({ ok: true, task: { status: "stopping" } });
 	});
 
 	it("lets a parent message to a finishing run wait until it is final, then resumes it", async () => {
