@@ -7,9 +7,11 @@
  * only whether its queue holds anything, and queues a prompt only after its input handlers have all
  * run, so one never seen there may yet run as a turn of its own: it is lost only once pi has been
  * idle with an empty queue for QUIET_LOOKS heartbeats in a row. Any still queued when its session
- * ends is lost.
+ * ends other than by a quit is lost. The tracker follows pi's events and the pane's heartbeats
+ * itself, and hands its caller each report it needs sent.
  */
 import { contentText } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { PromptOutcome, RefusedReason } from "../../daemon/ipc/protocol.ts";
 import { HEARTBEAT_MS } from "../agent-view/self-registration.ts";
 
@@ -52,15 +54,79 @@ export class PromptOutcomes {
 	 *  follow-ups and steers, other extensions' prompts. */
 	private readonly others: string[] = [];
 	private readonly settled: PromptOutcome[] = [];
+	/** The session's context, for the heartbeat, which carries none; gone once the session ends. */
+	private ctx: ExtensionContext | undefined;
+	/** How many heartbeats in a row have found pi idle with an empty queue: a run between two of them
+	 *  ends in agent_settled, which starts the count over. */
+	private quietLooks = 0;
+	/** pi is compacting at the user's request, when it throws on a prompt. */
+	private compacting = false;
+	private readonly report: (ctx: ExtensionContext) => Promise<void>;
 
-	/** The pane hands pi a phone prompt with this text. */
-	sent(id: string, text: string): void {
-		this.waiting.push({ id, text });
+	/** `heartbeat`: calls its argument after each of the pane's heartbeats, which come whether or not
+	 *  the daemon answers. `report`: sends what the tracker settled from pi's events, resolving once
+	 *  the daemon has it. */
+	constructor(
+		pi: Pick<ExtensionAPI, "on">,
+		heartbeat: (look: () => void) => void,
+		report: (ctx: ExtensionContext) => Promise<void>,
+	) {
+		this.report = report;
+		pi.on("session_start", (_event, ctx) => {
+			this.ctx = ctx;
+		});
+		// pi throws on a prompt only while the user's compaction runs; its own automatic one queues it.
+		pi.on("session_before_compact", (event) => {
+			if (event.reason === "manual") this.compacting = true;
+		});
+		pi.on("session_compact", () => {
+			this.compacting = false;
+		});
+		pi.on("session_compact_failed", () => {
+			this.compacting = false;
+		});
+		pi.on("input", (event, ctx) => {
+			if (!this.input(event)) return;
+			void this.report(ctx);
+			// pi queues it once every input handler is done, and tells no extension: a tick later when
+			// none awaits anything.
+			if (event.streamingBehavior) setTimeout(() => this.ctx && this.look(this.ctx, "input"), 0);
+		});
+		pi.on("message_start", (event, ctx) => {
+			if (this.started(event.message)) void this.report(ctx);
+		});
+		// pi's run is over, retries and queued follow-ups included. Its queue is empty unless the run was
+		// stopped without clearing it, as a session switch does: then a later look, or session_shutdown, settles them.
+		pi.on("agent_settled", (_event, ctx) => this.look(ctx, "settled"));
+		heartbeat(() => {
+			if (this.ctx) this.look(this.ctx, "heartbeat");
+		});
+		pi.on("session_shutdown", async (event, ctx) => {
+			// Its context is stale once the session is replaced: no look after this one.
+			this.ctx = undefined;
+			// Its queue goes with the session, and every queued phone prompt with it, seen there or not:
+			// one whose input handlers still run, pi 1.0.4 runs in the disposed session, which no
+			// transcript shows and no pane hears of. pi awaits this, so the report lands before the pane
+			// stops. Not at quit, which agent view does not hold up either: the daemon finds the pane gone.
+			if (event.reason !== "quit" && this.dequeued(Number.POSITIVE_INFINITY)) await this.report(ctx);
+		});
+	}
+
+	/** Why the pane refuses a phone's prompt or command before pi sees it, if it does, in a session on
+	 *  `sessionFile`. */
+	refusal(message: { sessionFile?: string }, sessionFile: string | undefined): RefusedReason | undefined {
+		return refusal(message, { compacting: this.compacting, sessionFile });
+	}
+
+	/** The pane hands pi a phone prompt with this content, known in pi's input event by its text joined
+	 *  as pi joins it. */
+	sent(id: string, content: Parameters<typeof contentText>[0]): void {
+		this.waiting.push({ id, text: contentText(content) });
 		this.waiting.splice(0, this.waiting.length - KEPT);
 	}
 
 	/** pi's input event; true when it settles a phone prompt. */
-	input(event: { text: string; source: string; streamingBehavior?: string }): boolean {
+	private input(event: { text: string; source: string; streamingBehavior?: string }): boolean {
 		const prompt = event.source === "extension" ? take(this.waiting, event.text) : undefined;
 		if (!prompt) {
 			if (event.streamingBehavior) {
@@ -78,7 +144,7 @@ export class PromptOutcomes {
 	}
 
 	/** pi starts a user message; true when it is a queued phone prompt, taken now. */
-	started(message: { role: string; content?: unknown }): boolean {
+	private started(message: { role: string; content?: unknown }): boolean {
 		if (message.role !== "user") return false;
 		const text = contentText(message.content as Parameters<typeof contentText>[0]);
 		const prompt = take(this.queued, text);
@@ -91,21 +157,28 @@ export class PromptOutcomes {
 		return true;
 	}
 
-	/** Whether pi's queue holds anything now, and whether pi is idle. Only a lone queued phone prompt,
-	 *  no other entrant queued, is then seen there: with two, the other may be what it holds, the
-	 *  second one seen once the first is taken. An entrant still in its input handlers is queued later
-	 *  if pi still streams then, so entrants are forgotten only once pi is idle with its queue empty:
-	 *  one not started by then pi dropped, or runs as a turn of its own. */
-	looked(pending: boolean, idle: boolean): void {
+	/** pi's queue, which pi tells no extension it changes (Esc and the dequeue key empty it): a phone
+	 *  prompt seen in it, gone from it unstarted while pi is idle, pi dropped. `by`: what looks.
+	 *  Only a lone queued phone prompt, no other entrant queued, is seen there: with two, the other
+	 *  may be what it holds, the second one seen once the first is taken. An entrant still in its input
+	 *  handlers is queued later if pi still streams then, so entrants are forgotten only once pi is idle
+	 *  with its queue empty: one not started by then pi dropped, or runs as a turn of its own. */
+	private look(ctx: ExtensionContext, by: "input" | "settled" | "heartbeat"): void {
+		const pending = ctx.hasPendingMessages();
+		const idle = ctx.isIdle();
+		const quiet = !pending && idle;
 		const [only] = this.queued;
 		if (pending && only && this.queued.length === 1 && this.others.length === 0) only.seen = true;
-		if (!pending && idle) this.others.length = 0;
+		if (quiet) this.others.length = 0;
+		if (!quiet || by === "settled") this.quietLooks = 0;
+		else if (by === "heartbeat") this.quietLooks++;
+		if (quiet && this.dequeued(this.quietLooks)) void this.report(ctx);
 	}
 
 	/** pi's queue no longer holds the phone prompts seen in it that it did not start, nor, once pi has
 	 *  been idle with it empty for `quietLooks` heartbeats as many as QUIET_LOOKS, any other; true when
 	 *  there were any. */
-	dequeued(quietLooks = 0): boolean {
+	private dequeued(quietLooks: number): boolean {
 		const dropped = this.queued.filter((prompt) => prompt.seen || quietLooks >= QUIET_LOOKS);
 		for (const prompt of dropped) {
 			this.queued.splice(this.queued.indexOf(prompt), 1);

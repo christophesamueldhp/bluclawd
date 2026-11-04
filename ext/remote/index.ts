@@ -8,7 +8,6 @@
  * mode switches, slash commands and task stops (report.ts).
  */
 
-import { contentText } from "@earendil-works/pi-ai";
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -26,7 +25,7 @@ import { TRUST_CHANGED } from "../permissions/index.ts";
 import { autostartDeps, autostartOn, autostartStatus, refreshAutostart, toggleAutostart } from "./autostart.ts";
 import { forwardLive, type LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
-import { PromptOutcomes, refusal } from "./outcomes.ts";
+import { PromptOutcomes } from "./outcomes.ts";
 import {
 	applyPaneMessage,
 	buildReport,
@@ -237,9 +236,6 @@ function factory(pi: ExtensionAPI): void {
 	let unwatchTasks: (() => void) | undefined;
 	/** Where pistatusline is, looked up once per session. */
 	let statusline: PaneReport["pistatusline"];
-	const outcomes = new PromptOutcomes();
-	/** pi is compacting at the user's request, when it throws on a prompt. */
-	let compacting = false;
 	/** `notice`: what the pane could not do for the phone, which this report alone carries. */
 	const report = (ctx: ExtensionContext, notice?: string): void => {
 		// As agent view registers: a `pi -p` run inside the pane must not report as the pane.
@@ -254,6 +250,15 @@ function factory(pi: ExtensionAPI): void {
 		reportedTasks = JSON.stringify(next.tasks);
 		reports = reports.then(() => client.remoteReport(pane, next)).catch(() => {});
 	};
+	// What became of the phone's prompts, looked at after each of the pane's heartbeats (agent view).
+	const outcomes = new PromptOutcomes(
+		pi,
+		(look) => pi.events.on("bluclawd:remote-watched", look),
+		(ctx) => {
+			report(ctx);
+			return reports;
+		},
+	);
 	/** A change the phone shows, reported only while a phone has the session open: opening it sends
 	 *  a fresh report, so a session nobody watches sends one per session, not one per turn. */
 	const changed = (ctx: ExtensionContext): void => {
@@ -276,16 +281,7 @@ function factory(pi: ExtensionAPI): void {
 	pi.on("model_select", (_event, ctx) => changed(ctx));
 	pi.on("thinking_level_select", (_event, ctx) => changed(ctx));
 	pi.on("turn_end", (_event, ctx) => changed(ctx));
-	pi.on("session_before_compact", (event) => {
-		if (event.reason === "manual") compacting = true;
-	});
-	pi.on("session_compact", (_event, ctx) => {
-		compacting = false;
-		changed(ctx);
-	});
-	pi.on("session_compact_failed", () => {
-		compacting = false;
-	});
+	pi.on("session_compact", (_event, ctx) => changed(ctx));
 	// A phone's prompt or command carries an id: what becomes of it is reported, whether or not a
 	// phone has the session open, as a phone sent it.
 	pi.events.on("bluclawd:pane-message", (data) => {
@@ -298,13 +294,12 @@ function factory(pi: ExtensionAPI): void {
 			report(ctx);
 		};
 		if (id && (message.type === "prompt" || message.type === "command")) {
-			const reason = refusal(message, { compacting, sessionFile: ctx.sessionManager.getSessionFile() });
+			const reason = outcomes.refusal(message, ctx.sessionManager.getSessionFile());
 			if (reason) return refuse(id, reason);
 		}
 		if (message.type === "prompt") {
 			const content = promptContent(message);
-			// Known by this text in pi's input event: joined as pi joins it.
-			if (id) outcomes.sent(id, contentText(content));
+			if (id) outcomes.sent(id, content);
 			pi.sendUserMessage(content, promptOptions(message));
 		} else if (message.type === "command") {
 			const enter = () => commandKeys.sendKeys(pane, ["Enter"]);
@@ -318,31 +313,6 @@ function factory(pi: ExtensionAPI): void {
 			}
 		} else applyPaneMessage(message, ctx, pi, () => report(ctx));
 	});
-	/** How many heartbeats in a row have found pi idle with an empty queue: a run between two of them
-	 *  ends in agent_settled, which starts the count over. */
-	let quietLooks = 0;
-	/** pi's queue, which pi tells no extension it changes (Esc and the dequeue key empty it): a phone
-	 *  prompt seen in it, gone from it unstarted while pi is idle, pi dropped. `by`: what looks. */
-	const look = (ctx: ExtensionContext, by: "input" | "settled" | "heartbeat"): void => {
-		const pending = ctx.hasPendingMessages();
-		const quiet = !pending && ctx.isIdle();
-		outcomes.looked(pending, ctx.isIdle());
-		if (!quiet || by === "settled") quietLooks = 0;
-		else if (by === "heartbeat") quietLooks++;
-		if (quiet && outcomes.dequeued(quietLooks)) report(ctx);
-	};
-	pi.on("input", (event, ctx) => {
-		if (!outcomes.input(event)) return;
-		report(ctx);
-		// pi queues it once every input handler is done: a tick later when none awaits anything.
-		if (event.streamingBehavior) setTimeout(() => session && look(session, "input"), 0);
-	});
-	pi.on("message_start", (event, ctx) => {
-		if (outcomes.started(event.message)) report(ctx);
-	});
-	// pi's run is over, retries and queued follow-ups included. Its queue is empty unless the run was
-	// stopped without clearing it, as a session switch does: then a later look, or session_shutdown, settles them.
-	pi.on("agent_settled", (_event, ctx) => look(ctx, "settled"));
 	// After each of the pane's heartbeats (agent view).
 	pi.events.on("bluclawd:remote-watched", (data) => {
 		const opened = data === true && !watched;
@@ -350,7 +320,6 @@ function factory(pi: ExtensionAPI): void {
 		live.setWatched(watched);
 		// A restarted daemon has no report until the next turn: a phone opening the session sends it again.
 		if (opened && session) report(session);
-		if (session) look(session, "heartbeat");
 	});
 	pi.events.on("bluclawd:remote-want-report", () => {
 		if (session) report(session);
@@ -358,15 +327,7 @@ function factory(pi: ExtensionAPI): void {
 	pi.events.on(TRUST_CHANGED, () => {
 		if (session) changed(session);
 	});
-	pi.on("session_shutdown", async (event, ctx) => {
-		// Its queue goes with the session, and every queued phone prompt with it, seen there or not: one
-		// whose input handlers still run, pi 1.0.4 runs in the disposed session, which no transcript shows
-		// and no pane hears of. pi awaits this, so the report lands before the pane stops.
-		// Not at quit, which agent view does not hold up either: the daemon finds the pane gone.
-		if (event.reason !== "quit") {
-			if (outcomes.dequeued(Number.POSITIVE_INFINITY)) report(ctx);
-			await reports;
-		}
+	pi.on("session_shutdown", () => {
 		// As a turn's end: no timer left to send, and the phone's snapshot of ours cleared.
 		live.onAgentEnd();
 		unwatchTasks?.();
