@@ -10,6 +10,7 @@ import {
 	type SubagentMessageBus,
 	type SubagentMessageReceipt,
 	subagentMessagePayload,
+	USER_MESSAGE_ADDRESS,
 } from "./messages.ts";
 import type { ParentScope, ParentScopeChecks, ScopedRun } from "./parent-scope.ts";
 import {
@@ -339,5 +340,32 @@ export function createGenerations(deps: GenerationDeps) {
 		return formatMessageReceipt(await deps.bus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, content));
 	};
 
-	return { scheduler, directory, deliver, messageFromParent, transcripts };
+	/**
+	 * A message the user typed in a run's transcript. A running run takes it at its next safe point, through the
+	 * bus like the orchestrator's; a final run is refused with the reason, once a finishing one is final.
+	 */
+	const messageFromUser = async (
+		scope: ParentScope,
+		runId: string,
+		content: string,
+	): Promise<SubagentMessageReceipt> => {
+		let found = directory.get(runId);
+		if (found?.state === "finishing") {
+			await scheduler.whenFinal(runId);
+			found = directory.get(runId);
+		}
+		if (found?.state !== "finished") return deps.bus.send({ address: USER_MESSAGE_ADDRESS, scope }, runId, content);
+		const { record } = found;
+		const label = record.name ?? record.runId;
+		// Resuming a completed run from its transcript (#160) belongs here.
+		const reason =
+			record.status === "completed"
+				? `${label} has finished; resuming it from its transcript is not available yet.`
+				: record.status === "cancelled"
+					? `${label} was stopped and cannot take messages.`
+					: `${label} ${record.status === "failed" ? "failed" : "was interrupted"} and cannot take messages.`;
+		return { status: "unavailable", seq: 0, to: runId, toName: record.name, reason };
+	};
+
+	return { scheduler, directory, deliver, messageFromParent, messageFromUser, transcripts };
 }
