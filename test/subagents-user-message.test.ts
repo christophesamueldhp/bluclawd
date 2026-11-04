@@ -4,6 +4,7 @@ import { fauxAssistantMessage, fauxToolCall, type TranscriptContext, Type } from
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentTasks } from "../ext/_shared/agent-tasks.ts";
+import { currentSubagent } from "../ext/_shared/subagent-commands.ts";
 import { SUBAGENT_NOTIFICATION_CUSTOM_TYPE } from "../ext/subagents/index.ts";
 import { readBackgroundUsageLedger } from "../ext/subagents/storage.ts";
 import { createSubagentTui, gate, launch, REPORT, type SubagentTui } from "./helpers/subagent-tui.ts";
@@ -201,6 +202,86 @@ describe("messaging a running run from its transcript", () => {
 		expect(resultAt).toBeGreaterThan(-1);
 		expect(noteAt).toBeGreaterThan(resultAt);
 		expect(seen(child.contexts[1])).toContain("Keep the old API.");
+	});
+});
+
+describe("what a run does for the user's message", () => {
+	/**
+	 * Stands in for the sandbox's network ask: the user is asked for the orchestrator's own command, while a
+	 * subagent's is denied and reported to the orchestrator, as ext/sandbox does.
+	 */
+	function networkTool() {
+		const asks: string[] = [];
+		const tool = defineTool({
+			name: "fetch_site",
+			label: "Fetch site",
+			description: "Fetches example.org.",
+			parameters: Type.Object({}),
+			execute: async () => {
+				const owner = currentSubagent();
+				if (!owner) {
+					asks.push("example.org:443");
+					return { content: [{ type: "text", text: "The user was asked." }], details: undefined };
+				}
+				owner.reportNetworkDenied("example.org:443", [owner.name]);
+				return {
+					content: [{ type: "text", text: "Network access to example.org:443 was denied." }],
+					details: undefined,
+					isError: true,
+				};
+			},
+		});
+		return { tool, asks };
+	}
+
+	/** A child that fetches once the user's "Fetch example.org." reaches it, and reports after the fetch. */
+	function fetchingChild(firstTurn?: Promise<void>) {
+		return async (context: TranscriptContext) => {
+			const text = seen(context);
+			if (text.includes('"toolName":"fetch_site"')) return fauxAssistantMessage(REPORT);
+			if (text.includes("Fetch example.org."))
+				return fauxAssistantMessage([fauxToolCall("fetch_site", {}, { id: "call_fetch" })]);
+			if (!firstTurn) return fauxAssistantMessage(REPORT);
+			await firstTurn;
+			return fauxAssistantMessage([fauxToolCall("subagent_roster", {}, { id: "call_roster" })]);
+		};
+	}
+
+	const sandboxNote = (t: SubagentTui) =>
+		t.session.messages.find(
+			(m) =>
+				m.role === "custom" && JSON.stringify(m.content).includes("[sandbox] Network access to example.org:443"),
+		) ?? false;
+
+	it("denies, without asking the user, what a running run would need approval for, and tells the orchestrator", async () => {
+		const network = networkTool();
+		tui = await createSubagentTui({ extraTools: [network.tool] });
+		const first = gate();
+		tui.script([launch(["scout"], { background: true, agent: "general-purpose" })], fetchingChild(first.wait));
+		await prompt(tui);
+		await openFromPanel(tui);
+
+		tui.press("Fetch example.org.", ENTER);
+		await waitFor(() => screen(tui!).includes("Queued for scout"));
+		first.open();
+		const note = await waitFor(() => sandboxNote(tui!));
+		expect(JSON.stringify(note)).toContain("denied without asking the user");
+		expect(network.asks).toEqual([]);
+	});
+
+	it("denies, without asking the user, what a run resumed by the user would need approval for, and tells the orchestrator", async () => {
+		const network = networkTool();
+		tui = await createSubagentTui({ extraTools: [network.tool] });
+		tui.script([launch(["scout"], { background: true, agent: "general-purpose" })], fetchingChild());
+		await prompt(tui);
+		await waitFor(() => (row(tui!, "scout")?.includes("completed") && !tui!.session.isStreaming) ?? false);
+		await openFromPanel(tui);
+
+		tui.press("Fetch example.org.", ENTER);
+		await waitFor(() => screen(tui!).includes("Resuming scout"));
+		const note = await waitFor(() => sandboxNote(tui!));
+		expect(JSON.stringify(note)).toContain("denied without asking the user");
+		expect(network.asks).toEqual([]);
 	});
 });
 

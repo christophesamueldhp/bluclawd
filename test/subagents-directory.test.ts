@@ -159,7 +159,7 @@ function setup(earlier?: { cwd: string; agentDir: string; session: ExtensionCont
 		scheduler: generations.scheduler,
 		agentDir: () => agentDir,
 		activeScope: () => scope.current(),
-		dismissed: new Set(),
+		dismissed: new Map(),
 	});
 	const context = {
 		agentDir,
