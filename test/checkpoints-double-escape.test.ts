@@ -4,7 +4,7 @@ import checkpoints from "../ext/checkpoints/index.ts";
 const ESC = "\x1b";
 
 /** checkpoints' session_start with a fake TUI; returns a key feeder and what it ran. */
-async function load(state: { idle?: boolean; text?: string; overlay?: boolean } = {}) {
+async function load(state: { idle?: boolean; text?: string; overlay?: boolean; elsewhere?: boolean } = {}) {
 	const handlers: Record<string, (event: unknown, ctx: unknown) => unknown> = {};
 	const sent: string[] = [];
 	checkpoints({
@@ -16,7 +16,11 @@ async function load(state: { idle?: boolean; text?: string; overlay?: boolean } 
 	} as never);
 	let onKey: ((data: string) => { consume?: boolean } | undefined) | undefined;
 	const released = { listener: false, widget: false };
-	const tui = { hasOverlay: () => !!state.overlay, getFocusedComponent: () => ({ getText: () => "" }) };
+	const tui = {
+		hasOverlay: () => !!state.overlay,
+		// Only the prompt editor has getText.
+		getFocusedComponent: () => (state.elsewhere ? {} : { getText: () => "" }),
+	};
 	const ctx = {
 		mode: "tui",
 		hasUI: true,
@@ -52,8 +56,8 @@ describe("Esc Esc opens /rewind", () => {
 		expect(sent).toEqual(["/rewind"]);
 	});
 
-	it("leaves Esc to pi while a turn runs, with text in the prompt, or over a dialog", async () => {
-		for (const state of [{ idle: false }, { text: "draft" }, { overlay: true }]) {
+	it("leaves Esc to pi while a turn runs, with text in the prompt, over a dialog, or with the keyboard elsewhere", async () => {
+		for (const state of [{ idle: false }, { text: "draft" }, { overlay: true }, { elsewhere: true }]) {
 			const { press, sent } = await load(state);
 			press(ESC);
 			expect(press(ESC)).toBeUndefined();

@@ -734,8 +734,15 @@ export function factory(pi: ExtensionAPI): void {
 	let offDoubleEscape: (() => void) | undefined;
 	const listenForDoubleEscape = (ctx: ExtensionContext): void => {
 		offDoubleEscape?.();
-		// The TUI, to see whether a dialog has the keys.
+		// The TUI, to see whether a dialog or another component (the subagent panel) has the keys.
 		const tui = holdTui(ctx, "checkpoints:tui");
+		// getFocusedComponent is on pi-tui's TUI class; only the prompt editor has getText.
+		const elsewhere = () => {
+			const focused = (
+				tui() as { getFocusedComponent?: () => { getText?: unknown } | null } | undefined
+			)?.getFocusedComponent?.();
+			return focused !== undefined && typeof focused?.getText !== "function";
+		};
 		let escapeAt = 0;
 		offDoubleEscape = ctx.ui.onTerminalInput((data) => {
 			if (isKeyRelease(data) || isKeyRepeat(data)) return undefined;
@@ -743,7 +750,7 @@ export function factory(pi: ExtensionAPI): void {
 				escapeAt = 0;
 				return undefined;
 			}
-			if (!ctx.isIdle() || ctx.ui.getEditorText() !== "" || tui()?.hasOverlay()) {
+			if (!ctx.isIdle() || ctx.ui.getEditorText() !== "" || tui()?.hasOverlay() || elsewhere()) {
 				escapeAt = 0;
 				return undefined;
 			}
