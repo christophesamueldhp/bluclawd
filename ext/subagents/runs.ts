@@ -83,7 +83,7 @@ export interface SubagentRunRecord {
 
 export interface SubagentRunController {
 	markRunning(childSessionId?: string, thinkingLevel?: string): void;
-	/** The child's last turn ended, one pi will not retry. */
+	/** The child's turn ended and pi will not retry it: the generation's last turn. */
 	markFinishing(): void;
 	recordTurn(): void;
 	recordToolCall(toolName?: string): void;
