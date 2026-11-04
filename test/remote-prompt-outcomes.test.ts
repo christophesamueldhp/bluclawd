@@ -1,21 +1,23 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import type { Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleIpcRequest, listSummaries, setRemoteControl } from "../daemon/handler.ts";
-import type { EndReason, PaneMessage, PromptOutcome, RefusedReason } from "../daemon/ipc/protocol.ts";
+import type { PaneMessage, PromptOutcome, RefusedReason } from "../daemon/ipc/protocol.ts";
 import { startIpcServer } from "../daemon/ipc/server.ts";
 import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 import { RemoteControl } from "../daemon/remote/control.ts";
 import { DELIVERY_KEEP_MS, PromptDelivery } from "../daemon/remote/delivery.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
-import { upsertInstance } from "../daemon/storage.ts";
+import { saveInstances, upsertInstance } from "../daemon/storage.ts";
 import { ServerSupervisor } from "../daemon/supervisor.ts";
 import type { Tmux } from "../daemon/tmux.ts";
 import { shutdownPlan } from "../ext/agent-view/index.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
 import { refusal } from "../ext/remote/outcomes.ts";
+import { paneUp, testRegistry } from "./helpers/registry.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /**
@@ -31,8 +33,6 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 	let token: string;
 	/** The registry's clock: moved on to reap a pane. */
 	let clock: number;
-	/** The tmux sessions tmux no longer has: a pane's pi there is gone. */
-	let tmuxGone: Set<string>;
 	const registrations: SelfRegistration[] = [];
 	const streams: AbortController[] = [];
 
@@ -48,6 +48,7 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 			claimStart: () => ({ ok: false, refused: "running" }),
 			paneStarting: () => {},
 			startFailed: () => {},
+			delivery: supervisor.delivery,
 			// A terminal shows pi, so the phone may prompt.
 			tmux: { attached: () => true } as unknown as Tmux,
 			webDir: dir,
@@ -58,13 +59,10 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		dir = await mkdtemp(join(tmpdir(), "bluclawd-outcomes-"));
 		vi.stubEnv("PI_SERVER_DIR", dir);
 		clock = Date.now();
-		tmuxGone = new Set();
-		supervisor = new ServerSupervisor({ now: () => clock, tmux: { hasSession: (name) => !tmuxGone.has(name) }, dir });
+		supervisor = new ServerSupervisor({ now: () => clock, tmux: paneUp, dir });
 		server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
 		control = remoteControl();
 		setRemoteControl(control);
-		supervisor.onDropped = (rowId, inbox, reason, pane) => control.dropped(rowId, inbox, reason, pane);
-		supervisor.onSilent = (rowId, inbox) => control.silent(rowId, inbox);
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });
 		if (on.type !== "remote_result" || !on.code) throw new Error("not listening");
 		base = `http://127.0.0.1:${on.port}`;
@@ -303,8 +301,9 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		await stillPane("pane-restart");
 		expect(await prompt("pane-restart", { text: "hi", id: "p-restart" })).toBe(202);
 		expect(await (await watch("pane-restart")).replayed()).toEqual([{ id: "p-restart", outcome: "sent" }]);
-		// A new daemon: remote control starts afresh, with the same pairing.
+		// A new daemon: its registry and remote control start afresh, with the same pairing.
 		await control.stop();
+		supervisor = new ServerSupervisor({ now: () => clock, tmux: paneUp, dir });
 		control = remoteControl();
 		setRemoteControl(control);
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });
@@ -328,30 +327,6 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		// No heartbeat for longer than the registry waits: the stream's next look at the list reaps it.
 		clock += 60_000;
 		await phone.until({ id: "p-reaped", outcome: "lost", reason: "pane_gone" });
-	});
-
-	it.each([
-		["unregisters", (registration: SelfRegistration) => registration.stop({ reason: "quit" })],
-		[
-			"is reaped",
-			async (registration: SelfRegistration) => {
-				// It beats no more, as a pi that crashed: the stream's next look at the list reaps it.
-				await registration.stop({ unregister: false });
-				clock += 60_000;
-			},
-		],
-	] as const)("is lost when its pane %s with it queued in pi", async (_, ends) => {
-		const { registration } = await fakePane("pane-queued");
-		const phone = await watch("pane-queued");
-		expect(await prompt("pane-queued", { text: "first", id: "p-first" })).toBe(202);
-		expect(await prompt("pane-queued", { text: "second", id: "p-second" })).toBe(202);
-		await phone.until({ id: "p-second", outcome: "queued" });
-		await ends(registration);
-		await phone.until({ id: "p-second", outcome: "lost", reason: "pane_gone" });
-		expect(await (await watch("pane-queued")).replayed()).toEqual([
-			{ id: "p-first", outcome: "taken" },
-			{ id: "p-second", outcome: "lost", reason: "pane_gone" },
-		]);
 	});
 
 	/**
@@ -386,7 +361,7 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 			const ids = messages.flatMap((m) => (m.type === "prompt" && m.id ? [m.id] : []));
 			await report(ids.map((id, i) => ({ id, outcome: i ? "queued" : "taken" })));
 		};
-		return { row, beat, report, deliver, unregister: (reason: EndReason) => client.unregister(id, reason) };
+		return { row, beat, report, deliver };
 	}
 
 	/** No heartbeat from pane `id` for longer than the registry waits: the next look at the list reaps it,
@@ -440,47 +415,6 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		expect(phone.seen().filter((o) => o.outcome === "lost")).toEqual([]);
 	});
 
-	it.each([
-		["its tmux session is gone when it is reaped", { goneAtReap: true, quits: false }],
-		["its tmux session goes later", { goneAtReap: false, quits: false }],
-		["it quits after it was reaped", { goneAtReap: false, quits: true }],
-	])("is lost when its pane is reaped and never beats again: %s", async (_, end) => {
-		const pane = await tmuxPane("pane-dead");
-		const phone = await watch(pane.row);
-		expect(await prompt(pane.row, { text: "first", id: "p-first" })).toBe(202);
-		expect(await prompt(pane.row, { text: "second", id: "p-second" })).toBe(202);
-		await pane.deliver();
-		await phone.until({ id: "p-second", outcome: "queued" });
-		if (end.goneAtReap) tmuxGone.add("pane-dead");
-		await reap("pane-dead");
-		if (!end.goneAtReap) {
-			expect(await (await watch(pane.row)).replayed()).toContainEqual({ id: "p-second", outcome: "queued" });
-			if (end.quits) await pane.unregister("quit");
-			else tmuxGone.add("pane-dead");
-		}
-		await phone.until({ id: "p-second", outcome: "lost", reason: "pane_gone" });
-		expect(await (await watch(pane.row)).replayed()).toEqual([
-			{ id: "p-first", outcome: "taken" },
-			{ id: "p-second", outcome: "lost", reason: "pane_gone" },
-		]);
-	});
-
-	it("is lost at once when its pane is reaped, though still alive, before it was delivered", async () => {
-		const pane = await tmuxPane("pane-inbox");
-		const phone = await watch(pane.row);
-		expect(await prompt(pane.row, { text: "first", id: "p-first" })).toBe(202);
-		expect(await prompt(pane.row, { text: "second", id: "p-second" })).toBe(202);
-		await pane.deliver();
-		expect(await prompt(pane.row, { text: "third", id: "p-third" })).toBe(202);
-		await reap("pane-inbox");
-		await phone.until({ id: "p-third", outcome: "lost", reason: "pane_gone" });
-		expect(await (await watch(pane.row)).replayed()).toEqual([
-			{ id: "p-first", outcome: "taken" },
-			{ id: "p-second", outcome: "queued" },
-			{ id: "p-third", outcome: "lost", reason: "pane_gone" },
-		]);
-	});
-
 	it("is in its pane's status while that pane is silent", async () => {
 		const pane = await tmuxPane("pane-quiet");
 		const phone = await watch(pane.row);
@@ -499,56 +433,6 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 			{ id: "p-first", outcome: "taken" },
 			{ id: "p-second", outcome: "queued" },
 		]);
-	});
-
-	it("is refused when its silent pane comes back on another session", async () => {
-		const pane = await tmuxPane("pane-switched");
-		const phone = await watch(pane.row);
-		expect(await prompt(pane.row, { text: "first", id: "p-first" })).toBe(202);
-		expect(await prompt(pane.row, { text: "second", id: "p-second" })).toBe(202);
-		await pane.deliver();
-		await phone.until({ id: "p-second", outcome: "queued" });
-		await reap("pane-switched");
-		// It went on to a new session while it was silent.
-		const other = join(dir, "other.jsonl");
-		await new OrchestratorClient().register({
-			id: "pane-switched",
-			cwd: dir,
-			sessionFile: other,
-			pane: "pane-switched",
-		});
-		await phone.until({ id: "p-second", outcome: "refused", reason: "session_changed" });
-		expect(await (await watch(pane.row)).replayed()).toEqual([
-			{ id: "p-first", outcome: "taken" },
-			{ id: "p-second", outcome: "refused", reason: "session_changed" },
-		]);
-	});
-
-	it("is not lost when a silent pane dies after another pane went on as its row", async () => {
-		const old = await tmuxPane("pane-old");
-		const phone = await watch(old.row);
-		expect(await prompt(old.row, { text: "first", id: "p-first" })).toBe(202);
-		expect(await prompt(old.row, { text: "second", id: "p-second" })).toBe(202);
-		await old.deliver();
-		await phone.until({ id: "p-second", outcome: "queued" });
-		await reap("pane-old");
-		// The session resumed in another pane, which goes on as its row.
-		const client = new OrchestratorClient();
-		const sessionFile = join(dir, "pane-old.jsonl");
-		await client.register({ id: "pane-new", cwd: dir, sessionFile, pane: "pane-new" });
-		expect(supervisor.rowIdOf("pane-new")).toBe(old.row);
-		expect(await prompt(old.row, { text: "third", id: "p-third" })).toBe(202);
-		await client.register({ id: "pane-new", cwd: dir, sessionFile, pane: "pane-new" });
-		await client.remoteReport("pane-new", { models: [], outcomes: [{ id: "p-third", outcome: "queued" }] });
-		await phone.until({ id: "p-third", outcome: "queued" });
-		tmuxGone.add("pane-old");
-		await phone.until({ id: "p-second", outcome: "lost", reason: "pane_gone" });
-		expect(await (await watch(old.row)).replayed()).toEqual([
-			{ id: "p-first", outcome: "taken" },
-			{ id: "p-second", outcome: "lost", reason: "pane_gone" },
-			{ id: "p-third", outcome: "queued" },
-		]);
-		await client.unregister("pane-new", "quit");
 	});
 
 	it("is lost when pi drops it from its queue, live and to a stream that reconnects, past the pane's next session", async () => {
@@ -581,32 +465,200 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 	});
 });
 
-describe("prompt delivery", () => {
+/**
+ * One session's row `row-s`, stored, on a clock and a tmux of its own: pane `pi-a` resumes it. Each
+ * prompt goes through the supervisor as the daemon's requests send it, and its outcome is read from
+ * the supervisor's prompt delivery, with no socket.
+ */
+function deliveryFixture() {
+	const dir = mkdtempSync(join(tmpdir(), "bluclawd-delivery-"));
+	const clock = { now: Date.parse("2026-11-04T10:00:00.000Z") };
+	const tmux = new Map<string, "up" | "gone">();
+	const supervisor = testRegistry(dir, () => clock.now, { hasSession: (name) => tmux.get(name) !== "gone" });
+	const file = join(dir, "s.jsonl");
+	const other = join(dir, "other.jsonl");
+	writeFileSync(file, "");
+	writeFileSync(other, "");
+	saveInstances(dir, [
+		{ id: ROW, status: "stopped", cwd: dir, createdAt: new Date(clock.now).toISOString(), sessionFile: file },
+	]);
+	const beat = (pane = "pi-a", sessionFile = file) =>
+		supervisor.registerExternal(
+			{ id: pane, status: "online", cwd: dir, createdAt: new Date(clock.now).toISOString(), sessionFile, pane },
+			"idle",
+		);
+	const send = (id: string) => supervisor.sendExternal(ROW, { type: "prompt", text: id, id });
+	/** Past the heartbeat's TTL, with tmux then saying `said` of pane `pi-a`, and a look at the list. */
+	const lapse = (said: "up" | "gone" = "up") => {
+		tmux.set("pi-a", said);
+		clock.now += 20_000;
+		supervisor.listExternalInstances();
+	};
+	const outcomes = () => supervisor.delivery.outcomes(ROW);
+	return { supervisor, tmux, other, beat, send, lapse, outcomes };
+}
+
+const ROW = "row-s";
+const given = (outcome: PromptOutcome["outcome"], reason?: string) =>
+	({ id: "p-given", outcome, ...(reason ? { reason } : {}) }) as PromptOutcome;
+const inbox = (outcome: PromptOutcome["outcome"], reason?: string) =>
+	({ id: "p-inbox", outcome, ...(reason ? { reason } : {}) }) as PromptOutcome;
+
+describe("prompt delivery, fed by the row table", () => {
+	/** `p-given` taken by pane pi-a's heartbeat, and `p-inbox` still in its row's inbox. */
+	function delivering() {
+		const f = deliveryFixture();
+		f.beat();
+		f.send("p-given");
+		f.supervisor.drainExternal("pi-a");
+		f.send("p-inbox");
+		return f;
+	}
+
+	it("keeps a prompt in its row's inbox until its pane's heartbeat takes it, in the order sent", () => {
+		const f = deliveryFixture();
+		f.beat();
+		expect(f.send("p-1")).toBe(true);
+		expect(f.supervisor.sendExternal(ROW, { type: "abort" })).toBe(true);
+		expect(f.outcomes()).toEqual([{ id: "p-1", outcome: "sent" }]);
+		expect(f.supervisor.drainExternal("pi-a")).toEqual([
+			{ type: "prompt", text: "p-1", id: "p-1" },
+			{ type: "abort" },
+		]);
+		expect(f.supervisor.drainExternal("pi-a")).toEqual([]);
+		expect(f.outcomes()).toEqual([{ id: "p-1", outcome: "sent" }]);
+	});
+
+	it("tracks nothing for a row no live pane takes", () => {
+		const f = deliveryFixture();
+		expect(f.send("p-1")).toBe(false);
+		expect(f.outcomes()).toEqual([]);
+	});
+
+	it("settles what its pane reports of the prompts its row was given, and nothing else", () => {
+		const f = delivering();
+		f.supervisor.delivery.reported(ROW, [
+			{ id: "p-given", outcome: "taken" },
+			{ id: "p-never-sent", outcome: "taken" },
+		]);
+		f.supervisor.delivery.reported("row-other", [{ id: "p-inbox", outcome: "taken" }]);
+		expect(f.outcomes()).toEqual([given("taken"), inbox("sent")]);
+	});
+
+	it.each<[string, (f: ReturnType<typeof delivering>) => void, PromptOutcome[]]>([
+		[
+			"it quits",
+			(f) => f.supervisor.unregisterExternal("pi-a", "quit"),
+			[given("lost", "pane_gone"), inbox("lost", "pane_gone")],
+		],
+		[
+			"it unregisters with no reason (an older pane)",
+			(f) => f.supervisor.unregisterExternal("pi-a"),
+			[given("lost", "pane_gone"), inbox("lost", "pane_gone")],
+		],
+		[
+			"its session ends for a new one",
+			(f) => f.supervisor.unregisterExternal("pi-a", "new"),
+			[given("refused", "session_changed"), inbox("refused", "session_changed")],
+		],
+		[
+			"its session ends for a fork",
+			(f) => f.supervisor.unregisterExternal("pi-a", "fork"),
+			[given("refused", "session_changed"), inbox("refused", "session_changed")],
+		],
+		["it is reaped with tmux gone", (f) => f.lapse("gone"), [given("lost", "pane_gone"), inbox("lost", "pane_gone")]],
+		[
+			"its row is deleted",
+			(f) => f.supervisor.deleteInstance(ROW),
+			[given("lost", "pane_gone"), inbox("lost", "pane_gone")],
+		],
+	])("ends what its row's inbox and its pane hold when its pane ends: %s", (_, ends, outcomes) => {
+		const f = delivering();
+		ends(f);
+		expect(f.outcomes()).toEqual(outcomes);
+	});
+
+	it("loses a Silent pane's inbox at once, while what it was given waits on its report", () => {
+		const f = delivering();
+		f.lapse();
+		expect(f.outcomes()).toEqual([given("sent"), inbox("lost", "pane_gone")]);
+		f.beat();
+		f.supervisor.delivery.reported(ROW, [{ id: "p-given", outcome: "taken" }]);
+		expect(f.outcomes()).toEqual([given("taken"), inbox("lost", "pane_gone")]);
+	});
+
+	it("loses what a Silent pane was given once tmux no longer has it", () => {
+		const f = delivering();
+		f.lapse();
+		f.tmux.set("pi-a", "gone");
+		f.supervisor.listExternalInstances();
+		expect(f.outcomes()).toEqual([given("lost", "pane_gone"), inbox("lost", "pane_gone")]);
+	});
+
+	it("refuses what a Silent pane was given once it comes back on another session", () => {
+		const f = delivering();
+		f.lapse();
+		f.beat("pi-a", f.other);
+		expect(f.outcomes()).toEqual([given("refused", "session_changed"), inbox("lost", "pane_gone")]);
+	});
+
+	it("leaves the row's inbox to the pane that went on as its row when a Silent pane it held ends", () => {
+		const f = delivering();
+		f.lapse();
+		f.beat("pi-b");
+		f.send("p-next");
+		f.tmux.set("pi-a", "gone");
+		f.supervisor.listExternalInstances();
+		expect(f.outcomes()).toEqual([
+			given("lost", "pane_gone"),
+			inbox("lost", "pane_gone"),
+			{ id: "p-next", outcome: "sent" },
+		]);
+		expect(f.supervisor.drainExternal("pi-b")).toEqual([{ type: "prompt", text: "p-next", id: "p-next" }]);
+	});
+
+	it("tells its listener of each row whose pane ended or fell silent", () => {
+		const f = delivering();
+		const changed: string[] = [];
+		f.supervisor.delivery.changed = (row) => changed.push(row);
+		f.lapse();
+		f.tmux.set("pi-a", "gone");
+		f.supervisor.listExternalInstances();
+		expect(changed).toEqual([ROW, ROW]);
+	});
+});
+
+describe("prompt delivery's retention", () => {
+	/** A prompt `p-1` given to row `row-1`'s pane at 0. */
+	function given1() {
+		const clock = { now: 0 };
+		const delivery = new PromptDelivery(() => clock.now);
+		delivery.queue("row-1", { type: "prompt", text: "hi", id: "p-1" });
+		delivery.take("row-1", "pi-a");
+		return { clock, delivery };
+	}
+
 	it("keeps an outcome for a phone that reconnects within the window, then lets it go", () => {
-		const delivery = new PromptDelivery(() => true);
-		delivery.send("pane-1", { type: "prompt", text: "hi", id: "p-1" }, 0);
-		delivery.reported("pane-1", [{ id: "p-1", outcome: "queued" }], 20);
+		const { clock, delivery } = given1();
+		clock.now = 20;
+		delivery.reported("row-1", [{ id: "p-1", outcome: "queued" }]);
 		// Taken later, as pi starts the queued prompt: the window runs from then.
-		delivery.reported("pane-1", [{ id: "p-1", outcome: "taken" }], 1000);
-		expect(delivery.outcomes("pane-1", 1000 + DELIVERY_KEEP_MS)).toEqual([{ id: "p-1", outcome: "taken" }]);
-		expect(delivery.outcomes("pane-2", 1000 + DELIVERY_KEEP_MS)).toEqual([]);
-		expect(delivery.outcomes("pane-1", 1001 + DELIVERY_KEEP_MS)).toEqual([]);
+		clock.now = 1000;
+		delivery.reported("row-1", [{ id: "p-1", outcome: "taken" }]);
+		clock.now = 1000 + DELIVERY_KEEP_MS;
+		expect(delivery.outcomes("row-1")).toEqual([{ id: "p-1", outcome: "taken" }]);
+		expect(delivery.outcomes("row-2")).toEqual([]);
+		clock.now = 1001 + DELIVERY_KEEP_MS;
+		expect(delivery.outcomes("row-1")).toEqual([]);
 	});
 
 	it("keeps a queued prompt for as long as the turn ahead of it runs", () => {
-		const delivery = new PromptDelivery(() => true);
-		delivery.send("pane-1", { type: "prompt", text: "hi", id: "p-1" }, 0);
-		delivery.reported("pane-1", [{ id: "p-1", outcome: "queued" }], 20);
-		const later = 20 + 3 * DELIVERY_KEEP_MS;
-		expect(delivery.outcomes("pane-1", later)).toEqual([{ id: "p-1", outcome: "queued" }]);
-		delivery.reported("pane-1", [{ id: "p-1", outcome: "taken" }], later);
-		expect(delivery.outcomes("pane-1", later)).toEqual([{ id: "p-1", outcome: "taken" }]);
-	});
-
-	it("tracks nothing a pane was not sent", () => {
-		const delivery = new PromptDelivery(() => false);
-		expect(delivery.send("gone", { type: "prompt", text: "hi", id: "p-1" })).toBe(false);
-		delivery.reported("gone", [{ id: "p-1", outcome: "taken" }]);
-		expect(delivery.outcomes("gone")).toEqual([]);
+		const { clock, delivery } = given1();
+		clock.now = 20;
+		delivery.reported("row-1", [{ id: "p-1", outcome: "queued" }]);
+		clock.now = 20 + 3 * DELIVERY_KEEP_MS;
+		expect(delivery.outcomes("row-1")).toEqual([{ id: "p-1", outcome: "queued" }]);
+		delivery.reported("row-1", [{ id: "p-1", outcome: "taken" }]);
+		expect(delivery.outcomes("row-1")).toEqual([{ id: "p-1", outcome: "taken" }]);
 	});
 });

@@ -195,7 +195,6 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 			remoteControl?.registered(record.id);
 			const row = supervisor.rowIdOf(record.id);
 			const messages = supervisor.drainExternal(record.id);
-			remoteControl?.delivered(record.id, messages);
 			return {
 				type: "register_result",
 				ok: true,

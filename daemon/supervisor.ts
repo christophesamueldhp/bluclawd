@@ -8,6 +8,7 @@ import {
 	type PaneMessage,
 	type ResumeSpec,
 } from "./ipc/protocol.ts";
+import { PromptDelivery } from "./remote/delivery.ts";
 import { readSessionTail } from "./session-state.ts";
 import { getInstance, loadInstances, removeInstance, saveInstances, upsertInstance } from "./storage.ts";
 import type { InstanceRecord } from "./types.ts";
@@ -56,8 +57,6 @@ interface Row {
 	/** Silent panes another pane went on as this row since: listed no more, each ends as a Silent
 	 *  pane does. The first goes on as the row, silent, when its pane goes. */
 	held: Pane[];
-	/** Messages for its live pane's pi, drained by its next heartbeat. */
-	inbox: PaneMessage[];
 	/** A start claimed it: its record as listed, and when it stops being listed so. It is starting
 	 *  once no pane holds it: a pane past its TTL, not reaped yet, may still. */
 	start?: Starting;
@@ -124,16 +123,12 @@ export class ServerSupervisor {
 	private readonly rows = new Map<string, Row>();
 	/** Each pane's pending wait, by id; kept apart from its row, which every heartbeat replaces. */
 	private readonly waits = new Map<string, (outcome: WaitOutcome) => void>();
-	/** Pane `pane` went, reaped or unregistered, listed as `rowId` and with `inbox` still queued for it.
-	 *  `reason`: why its session ended, when it unregistered saying so. */
-	onDropped: ((rowId: string, inbox: PaneMessage[], reason: EndReason | undefined, pane: string) => void) | undefined;
-	/** A pane was reaped while tmux still has its session, listed as `rowId` and with `inbox` still
-	 *  queued for it: its pi may only be held up (the Mac slept), so what it was given waits on it.
-	 *  onDropped follows once its tmux session is gone or it unregisters, unless it beats again. */
-	onSilent: ((rowId: string, inbox: PaneMessage[]) => void) | undefined;
+	/** Each row's inbox and the phone's prompts in it, fed every pane's end and silence. */
+	readonly delivery: PromptDelivery;
 
 	constructor(deps: RegistryDeps) {
 		this.deps = deps;
+		this.delivery = new PromptDelivery(deps.now);
 	}
 
 	/** Register/heartbeat a pane's pi. */
@@ -193,7 +188,6 @@ export class ServerSupervisor {
 			// A silent pane another pane goes on as its row is held until it ends.
 			if (row.pane && row.pane !== back?.pane) row.held.push(row.pane);
 			row.pane = pane;
-			row.inbox = [];
 			row.start = undefined;
 			this.enter(rowId, row, "live");
 		}
@@ -363,24 +357,22 @@ export class ServerSupervisor {
 	 *  it holds, or as its stored row. */
 	private drop(at: PaneRow, reason?: EndReason): void {
 		const { id, row, pane } = at;
-		let inbox: PaneMessage[] = [];
-		if (row.pane === pane) {
-			inbox = row.inbox.splice(0);
+		const listed = row.pane === pane;
+		if (listed) {
 			row.pane = row.held.shift();
 			if (row.pane) this.enter(id, row, "silent");
 			else row.state = row.start ? "starting" : "stored";
 		} else row.held.splice(row.held.indexOf(pane), 1);
 		this.tidy(id);
 		this.settleWait(pane.record.id, "none");
-		this.onDropped?.(id, inbox, reason, pane.record.id);
+		this.delivery.ended(id, pane.record.id, reason, listed);
 	}
 
 	/** Its pane missed its heartbeats while tmux still has it: it may only be held up. */
 	private silence({ id, row, pane }: PaneRow): void {
-		const inbox = row.inbox.splice(0);
 		this.enter(id, row, "silent");
 		this.settleWait(pane.record.id, "none");
-		this.onSilent?.(id, inbox);
+		this.delivery.silent(id);
 	}
 
 	/** Queue a message for a self-registered session, by its pane's id or its row's; false when no
@@ -388,7 +380,7 @@ export class ServerSupervisor {
 	sendExternal(id: string, message: PaneMessage): boolean {
 		const at = this.addressed(id);
 		if (!at || !this.isLive(at)) return false;
-		at.row.inbox.push(message);
+		this.delivery.queue(at.id, message);
 		this.settleWait(at.pane.record.id, "queued");
 		return true;
 	}
@@ -406,7 +398,7 @@ export class ServerSupervisor {
 		const at = this.paneRow(id);
 		if (!at || !this.isLive(at)) return undefined;
 		this.settleWait(id, "superseded");
-		if (at.row.inbox.length > 0) return Promise.resolve("queued");
+		if (this.delivery.pending(at.id)) return Promise.resolve("queued");
 		return new Promise((resolve) => {
 			const timer = setTimeout(() => this.settleWait(id, "none"), timeoutMs);
 			this.waits.set(id, (outcome) => {
@@ -428,11 +420,11 @@ export class ServerSupervisor {
 		settle(outcome);
 	}
 
-	/** The messages queued for a self-registered session, now delivered. */
+	/** Pane `id`'s heartbeat takes the messages queued for its row, when it is the row's live pane. */
 	drainExternal(id: string): PaneMessage[] {
 		const at = this.paneRow(id);
 		if (!at || !this.isLive(at)) return [];
-		return at.row.inbox.splice(0);
+		return this.delivery.take(at.id, id);
 	}
 
 	/** External instances, each as its row, after reaping: live ones, then silent ones, each `silent`. */
@@ -453,7 +445,7 @@ export class ServerSupervisor {
 	 * Time passing, as of `now`. A start whose pane will not register ends. A Silent pane tmux no
 	 * longer has ends. A pane whose last heartbeat is older than the TTL is reaped: if tmux says its
 	 * pane is gone, its pi died unseen (a crash, a SIGKILL) and its row is stopped with what its file
-	 * holds last; if tmux still has it, it falls silent (see onSilent); if tmux could not say, or it
+	 * holds last; if tmux still has it, it falls silent; if tmux could not say, or it
 	 * has no pane to ask about, it is dropped and its stored row shows until it beats again.
 	 */
 	private reap(now: number): void {
@@ -497,7 +489,7 @@ export class ServerSupervisor {
 	private entry(id: string): Row {
 		let row = this.rows.get(id);
 		if (!row) {
-			row = { state: "stored", held: [], inbox: [] };
+			row = { state: "stored", held: [] };
 			this.rows.set(id, row);
 		}
 		return row;
