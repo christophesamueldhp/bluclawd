@@ -55,6 +55,14 @@ export interface AgentTaskSource {
 	stop(id: string, options?: AgentTaskStopOptions): AgentTaskStopResult;
 	/** Stops every running task the owner has; returns how many were stopped. */
 	stopAll(options?: AgentTaskStopOptions): number;
+	/** Whether the subagent panel below the prompt shows rows; it then takes ↓ from an empty prompt. */
+	panelHasRows?(): boolean;
+	/** Opens a run's transcript and resolves once it closes; undefined when the run is not of the current session. */
+	open?(id: string, owner?: string): Promise<void> | undefined;
+	/** The owner's finished runs of its current session epoch that were not dismissed; none known only from disk. */
+	listDone?(owner?: string): AgentTask[];
+	/** Takes a finished run off `listDone`; its record and report stay on disk. */
+	dismiss?(id: string, owner?: string): boolean;
 }
 
 const state = sharedRef("agentTasks", {

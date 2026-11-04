@@ -1,6 +1,6 @@
 import type { AgentTask, AgentTaskSource, AgentTaskState } from "../_shared/agent-tasks.ts";
 import type { RunDirectory, RunEntry } from "./directory.ts";
-import type { ParentScope } from "./parent-scope.ts";
+import { inParentScope, type ParentScope } from "./parent-scope.ts";
 import { isTerminalSubagentStatus, type SubagentLifecycleStatus, type SubagentRunScheduler } from "./runs.ts";
 import { readBoundedSubagentReport, readPersistedRunRecord, subagentReportPath } from "./storage.ts";
 
@@ -18,10 +18,12 @@ const TASK_STATES: Record<SubagentLifecycleStatus, AgentTaskState> = {
 
 export interface AgentTaskSourceDeps {
 	directory: Pick<RunDirectory, "get" | "list">;
-	scheduler: Pick<SubagentRunScheduler, "cancelRun">;
+	scheduler: Pick<SubagentRunScheduler, "cancelRun" | "listRuns">;
 	agentDir: () => string;
 	/** The owner when a caller names none. */
 	activeScope: () => ParentScope | undefined;
+	/** The generation of each finished run the user dismissed from `/tasks`. */
+	dismissed: Map<string, number>;
 }
 
 /** Translates runs into the tasks `/tasks` and `task_stop` see. */
@@ -63,6 +65,21 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 
 	const stoppable = (entry: RunEntry) => entry.state !== "finishing" && entry.state !== "finished";
 
+	/** The scope's finished runs this instance ran, so none of an earlier epoch or known only from disk. */
+	const doneRuns = (owner?: string): RunEntry[] => {
+		const scope = scopeOf(owner);
+		if (!scope) return [];
+		return deps.scheduler
+			.listRuns()
+			.filter(
+				(run) =>
+					inParentScope(run, scope) &&
+					isTerminalSubagentStatus(run.status) &&
+					deps.dismissed.get(run.runId) !== (run.generation ?? 0),
+			)
+			.flatMap((run) => deps.directory.get(run.runId) ?? []);
+	};
+
 	return {
 		list: (owner) => {
 			const scope = scopeOf(owner);
@@ -96,6 +113,13 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 						stoppable(run) &&
 						deps.scheduler.cancelRun(run.record.runId, options?.source ?? "user", "Stopped all subagents"),
 				).length;
+		},
+		listDone: (owner) => doneRuns(owner).map(toTask),
+		dismiss: (id, owner) => {
+			const run = doneRuns(owner).find((entry) => entry.record.runId === id);
+			if (!run) return false;
+			deps.dismissed.set(id, run.record.generation ?? 0);
+			return true;
 		},
 	};
 }

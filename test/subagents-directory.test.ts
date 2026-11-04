@@ -48,6 +48,8 @@ function fakeRunner() {
 			const inbox: string[] = [];
 			let holdingStop = false;
 			const session: ChildSession = {
+				messages: [],
+				sessionFile: undefined,
 				subscribe: (listener) => {
 					listeners.add(listener);
 					return () => listeners.delete(listener);
@@ -157,6 +159,7 @@ function setup(earlier?: { cwd: string; agentDir: string; session: ExtensionCont
 		scheduler: generations.scheduler,
 		agentDir: () => agentDir,
 		activeScope: () => scope.current(),
+		dismissed: new Map(),
 	});
 	const context = {
 		agentDir,

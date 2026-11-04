@@ -97,7 +97,7 @@ export const SUBAGENT_TOOL_PARAMETERS = Type.Object({
 	background: Type.Optional(
 		Type.Boolean({
 			description:
-				"When true, launch in the background and deliver the completed report back to this session branch.",
+				"When true, launch in the background and deliver the completed report back to this session branch. Only when you have independent work to do meanwhile.",
 		}),
 	),
 });

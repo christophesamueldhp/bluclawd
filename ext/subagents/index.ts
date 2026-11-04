@@ -6,7 +6,9 @@ import {
 	type ToolLoadout,
 	type ToolLoadoutChanges,
 } from "@earendil-works/pi-coding-agent";
+import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
+import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { createRunAdmission, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
 import {
@@ -23,19 +25,32 @@ import {
 	SubagentMessageBus,
 	subagentMessagePayload,
 } from "./messages.ts";
-import { createParentScope, type ParentInboxItem } from "./parent-scope.ts";
+import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET, shownInPanel } from "./panel.ts";
+import { createParentScope, inParentScope, type ParentInboxItem } from "./parent-scope.ts";
 import type { SubagentResultDetails } from "./results.ts";
 import { describeSubagentModels, runSubagent } from "./runner.ts";
 import { appendSubagentMessageRecord, reconcileInterruptedRuns } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
+import { createTranscriptActions } from "./transcript-actions.ts";
 
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
+const SUBAGENT_REMINDER_CUSTOM_TYPE = "subagent-reminder";
 const BACKGROUND_BATCH_WINDOW_MS = 40;
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent that works in this same checkout";
+// Wording follows Codex's "After you delegate" block and Claude Code's harness text (docs/research/subagents-ux-and-waiting.md).
+const AFTER_YOU_DELEGATE = [
+	"After you delegate:",
+	"- Do not redo or touch delegated work, including the files in a run's scope; work only on what does not overlap.",
+	"- Do not poll `subagent_status` by reflex; check it only when a run seems stuck.",
+	"- With no independent work left, end your turn and say you are waiting: the report will wake you.",
+	"- Never predict or invent a pending run's result; if the user asks, say it is still running.",
+];
 
 export interface SubagentExtensionOptions {
 	agentDir?: string;
 	batchWindowMs?: number;
+	/** The clock of the panel and the active-run reminder; Date.now when omitted. */
+	now?: () => number;
 }
 
 function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot = false): string {
@@ -55,7 +70,14 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 		"- Single-file lookups or edits you can do directly.",
 		"- Tightly coupled sequential steps where each step depends on the previous result.",
 		"",
-		...(oneShot ? ["Background runs are unavailable in this one-shot mode: omit `background`.", ""] : []),
+		...(oneShot
+			? ["Background runs are unavailable in this one-shot mode: omit `background`.", ""]
+			: [
+					"Run in the foreground (the default) when your next step needs the result. Set `background: true` only when you have independent work to do meanwhile.",
+					"",
+					...AFTER_YOU_DELEGATE,
+					"",
+				]),
 		"Available subagent roles:",
 		rolesSection,
 	].join("\n");
@@ -69,6 +91,14 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		let catalog: AgentDefinitionCatalog | undefined;
 		let unpublishTasks: (() => void) | undefined;
 		let latestLoadout: ToolLoadout | undefined;
+		const now = options.now ?? Date.now;
+		let panelTui: Pick<TUI, "requestRender" | "hasOverlay"> | undefined;
+		let panel: ReturnType<typeof createPanel> | undefined;
+		let offPanelKeys: (() => void) | undefined;
+		/** The generation of each final run the user dismissed from the panel; a resumed run shows again. */
+		const dismissedFromPanel = new Map<string, number>();
+		/** The same for /tasks, whose dismissals leave the panel too. */
+		const dismissedFromTasks = new Map<string, number>();
 		// Subagent calls in one message start executing together; a child waits for every launch in flight to be
 		// admitted, so each sibling is registered for messages before any of them takes a turn.
 		let launchesInFlight = 0;
@@ -90,14 +120,18 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				appendSubagentMessageRecord(resolveAgentDir(), senderScope.parentSessionId, { ...record, at: Date.now() }),
 			{ find: (scope, to) => directory.find(scope, to), reachable: (scope) => directory.reachable(scope) },
 		);
+		/** Redraws what shows the runs after any of them changed. */
+		const runsChanged = () => {
+			refreshFooterStatus();
+			panel?.sync();
+			panelTui?.requestRender();
+			notifyAgentTasksChanged();
+		};
 		const parentScope = createParentScope<ParentNotice>({
 			bus: messageBus,
 			cancelRuns: (where, reason) => scheduler.cancelRuns(where, reason),
 			send: (items) => sendToParent(items),
-			onChange: () => {
-				refreshFooterStatus();
-				notifyAgentTasksChanged();
-			},
+			onChange: runsChanged,
 			batchWindowMs: options.batchWindowMs ?? BACKGROUND_BATCH_WINDOW_MS,
 		});
 		/** The runs of the orchestrator's current scope that are not final yet. */
@@ -105,6 +139,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			const scope = parentScope.current();
 			return scope ? directory.list(scope) : [];
 		};
+		/** The open runs whose work the orchestrator still waits on: a run being stopped is not. */
+		const awaitedRuns = () => openRuns().filter((entry) => entry.state !== "stopping");
 
 		const senderRole = (address: string) => scheduler.getRun(address)?.agentName;
 
@@ -126,6 +162,32 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			} catch {
 				// Ignore stale UI context errors
 			}
+		};
+
+		/** The runs of the current scope the panel shows, in admission order. */
+		const panelRuns = () => {
+			const scope = parentScope.current();
+			if (!scope) return [];
+			const at = now();
+			return scheduler
+				.listRuns()
+				.filter(
+					(run) =>
+						inParentScope(run, scope) &&
+						dismissedFromPanel.get(run.runId) !== (run.generation ?? 0) &&
+						dismissedFromTasks.get(run.runId) !== (run.generation ?? 0),
+				)
+				.flatMap((run) => directory.get(run.runId) ?? [])
+				.filter((entry) => shownInPanel(entry, at));
+		};
+		/** The background runs the orchestrator is Waiting for: none while its turn runs. */
+		const waitingFor = () => {
+			try {
+				if (!parentScope.context()?.isIdle()) return 0;
+			} catch {
+				return 0;
+			}
+			return awaitedRuns().filter((entry) => entry.record.deliveryMode === "background").length;
 		};
 
 		const sendToParent = (items: readonly ParentInboxItem<ParentNotice>[]) => {
@@ -162,17 +224,14 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 		};
 
-		const { scheduler, directory, deliver, messageFromParent } = createGenerations({
+		const { scheduler, directory, deliver, messageFromParent, messageFromUser, transcripts } = createGenerations({
 			agentDir: resolveAgentDir,
 			runner: runSubagent,
 			bus: messageBus,
 			scope: parentScope,
 			pi,
 			launchesSettled: () => launchesSettled,
-			onChange: () => {
-				refreshFooterStatus();
-				notifyAgentTasksChanged();
-			},
+			onChange: runsChanged,
 		});
 
 		const admission = createRunAdmission({
@@ -190,6 +249,17 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			scheduler,
 			agentDir: resolveAgentDir,
 			activeScope: () => parentScope.current(),
+			dismissed: dismissedFromTasks,
+		});
+
+		const { openTranscript } = createTranscriptActions({
+			pi,
+			scope: parentScope,
+			scheduler,
+			directory,
+			transcripts,
+			messageFromUser,
+			admission,
 		});
 
 		// A resumed generation runs under the message call that resumed it, not the first launch.
@@ -254,12 +324,91 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			reconcileInterruptedRuns(agentDir, sessionId, branchEntries, liveIds);
 
 			unpublishTasks?.();
-			unpublishTasks = publishAgentTasks(taskSource);
+			unpublishTasks = publishAgentTasks({
+				...taskSource,
+				panelHasRows: () => panel !== undefined && panelRuns().length > 0,
+				open: openTranscript,
+			});
 			refreshFooterStatus();
+			if (ctx.mode === "tui") {
+				// Always mounted: it renders nothing while there are no runs to show.
+				ctx.ui.setWidget(
+					SUBAGENT_PANEL_WIDGET,
+					(tui, theme) => {
+						panelTui = tui;
+						const shown = createPanel({
+							tui,
+							theme,
+							runs: panelRuns,
+							waitingFor,
+							now,
+							actions: {
+								// The same stop as /tasks', so no report wakes the orchestrator.
+								stop: ({ record }) =>
+									taskSource.stop(record.runId, { owner: record.parentSessionId, source: "user" }),
+								dismiss: ({ record }) => {
+									dismissedFromPanel.set(record.runId, record.generation ?? 0);
+									runsChanged();
+								},
+								open: ({ record }) => void openTranscript(record.runId),
+							},
+						});
+						panel = shown;
+						// Elapsed times move on between run changes, and a succeeded run leaves.
+						const ticker = setInterval(() => {
+							shown.sync();
+							if (panelRuns().length > 0) tui.requestRender();
+						}, 1000);
+						ticker.unref?.();
+						return Object.assign(shown, {
+							dispose: () => {
+								clearInterval(ticker);
+								if (panel === shown) panel = undefined;
+							},
+						});
+					},
+					{ placement: "belowEditor" },
+				);
+				offPanelKeys?.();
+				offPanelKeys = ctx.ui.onTerminalInput((data) => {
+					// ↓ on an empty prompt; a prompt browsing history is never empty, so history keeps its ↓.
+					if (isKeyRelease(data) || !matchesKey(data, "down") || ctx.ui.getEditorText() !== "") return undefined;
+					if (!isPromptEditor(focusedComponent(panelTui))) return undefined;
+					if (panelTui?.hasOverlay()) return undefined;
+					return panel?.focus() ? { consume: true } : undefined;
+				});
+			}
 		});
 
 		pi.on("turn_start", async () => {
 			activeTurnIndex++;
+		});
+
+		// Added to each request rather than stored, so a compaction cannot drop it.
+		pi.on("context", async (event) => {
+			const runs = awaitedRuns();
+			if (runs.length === 0) return undefined;
+			const at = now();
+			const lines = runs.map(
+				({ record: run }) =>
+					`- ${run.name ?? run.runId}: ${run.deliveryMode}, ${formatRunElapsed(run, at)} elapsed`,
+			);
+			const text = [
+				"Subagents still active; their reports arrive on their own, so do not redo their work or poll for them:",
+				...lines,
+			].join("\n");
+			return {
+				messages: [
+					...event.messages,
+					{
+						role: "custom",
+						customType: SUBAGENT_REMINDER_CUSTOM_TYPE,
+						content: [{ type: "text", text }],
+						display: false,
+						timestamp: at,
+					},
+				],
+			};
 		});
 
 		pi.on("session_before_switch", async () => {
@@ -281,6 +430,14 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			await scheduler.waitForSettled();
 			unpublishTasks?.();
 			unpublishTasks = undefined;
+			offPanelKeys?.();
+			offPanelKeys = undefined;
+			try {
+				parentScope.context()?.ui.setWidget(SUBAGENT_PANEL_WIDGET, undefined);
+			} catch {
+				// Ignore stale UI context errors
+			}
+			panelTui = undefined;
 			parentScope.detach();
 		});
 
@@ -320,7 +477,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			return [
 				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${state === "finishing" ? state : run.status}`,
 				`  task: ${run.taskSummary}`,
-				`  turns: ${run.turnCount}, tool calls: ${run.toolCallCount}, elapsed: ${ago(run.startedAt ?? run.admittedAt, now).replace(" ago", "")}`,
+				`  turns: ${run.turnCount}, tool calls: ${run.toolCallCount}, elapsed: ${formatRunElapsed(run, now)}`,
 				`  last activity: ${activity}; last message: ${ago(run.lastMessageAt, now)}`,
 			].join("\n");
 		};
@@ -488,6 +645,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 									`Agent: ${handle.record.agentName} (${handle.record.provider}/${handle.record.modelId})`,
 									`Status: ${handle.record.status}`,
 									"The final report will be delivered to this session branch when complete. Use `task_stop` with this run ID to cancel.",
+									`While ${handle.record.name} runs, do not redo or touch its work, including the files in its scope, and do not poll \`subagent_status\` by reflex. With no independent work left, end your turn and say you are waiting for ${handle.record.name}: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.`,
 								].join("\n"),
 							},
 						],
