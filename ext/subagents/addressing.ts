@@ -38,7 +38,10 @@ export interface UserMessageOutcome {
 	readonly status: string;
 }
 
-const EARLIER_SESSION = "That run belongs to an earlier session and can no longer take messages.";
+const EARLIER_SESSION: UserMessageOutcome = {
+	queued: false,
+	status: "That run belongs to an earlier session and can no longer take messages.",
+};
 
 /**
  * Takes a message for a run from the orchestrator or the user, from lookup to outcome: it waits out finishing,
@@ -48,6 +51,12 @@ const EARLIER_SESSION = "That run belongs to an earlier session and can no longe
  */
 export function createRunAddressing(deps: RunAddressingDeps) {
 	const { scheduler, bus } = deps;
+
+	/** Epoch only: whether the orchestrator's current scope is still `scope`. */
+	const stillIn = (scope: ParentScope) => {
+		const current = deps.scope.current();
+		return current !== undefined && inParentScope(scope, current);
+	};
 
 	/** Read again once a finishing run is final; finishing ends with the terminal record. */
 	const settled = async (run: Readonly<SubagentRunRecord>) => {
@@ -143,18 +152,20 @@ export function createRunAddressing(deps: RunAddressingDeps) {
 		if (!found)
 			return { queued: false, status: `No run ${runId} is known to this session, so it cannot take messages.` };
 		// Epoch only.
-		if (!scope || !ctx || !inParentScope(found, scope)) return { queued: false, status: EARLIER_SESSION };
+		if (!scope || !ctx || !inParentScope(found, scope)) return EARLIER_SESSION;
 		const run = await settled(found);
 		// Epoch only: the session can change while a finishing run is waited for.
-		const afterWait = deps.scope.current();
-		if (!afterWait || !inParentScope(scope, afterWait)) return { queued: false, status: EARLIER_SESSION };
+		if (!stillIn(scope)) return EARLIER_SESSION;
 		let receipt: SubagentMessageReceipt;
 		const resuming = isTerminalSubagentStatus(run.status);
 		if (resuming) {
 			// No tool call of the orchestrator's carries the user's resume, so the child's tools keep running through
 			// the call its earlier generation ran under, whose id still identifies the run for nested-call checks.
 			const previous = scheduler.getContext(runId);
-			const toolCtx: AdmissionContext = Object.create(ctx, { executeTool: { value: previous?.parent.executeTool } });
+			// Without that context admission refuses the resume, before it reads any tool.
+			const toolCtx: AdmissionContext = previous
+				? Object.assign(Object.create(ctx) as AdmissionContext, { executeTool: previous.parent.executeTool })
+				: ctx;
 			const toolCallId = previous?.resume?.toolCallId ?? run.originToolCallId;
 			receipt = await resume(run, USER_MESSAGE_ADDRESS, toolCallId, content, scope, admission, toolCtx);
 		} else {
@@ -162,8 +173,7 @@ export function createRunAddressing(deps: RunAddressingDeps) {
 		}
 		if (receipt.status !== "accepted") return { queued: false, status: receipt.reason ?? receipt.status };
 		// Epoch only, after the last await: the note belongs to the session the user wrote in.
-		const current = deps.scope.current();
-		if (!current || !inParentScope(scope, current)) return { queued: false, status: EARLIER_SESSION };
+		if (!stillIn(scope)) return EARLIER_SESSION;
 		// The orchestrator still owns the work, so it is told, but not woken: the note is in its next turn's context.
 		try {
 			deps.pi.sendMessage(
