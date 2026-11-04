@@ -212,20 +212,27 @@ function agentRowById(id: string, owner: string | undefined): TaskRow | undefine
 }
 
 /** Sections, in display order: a shell's section holds its command monitors too. */
-type Section = "shells" | "monitors" | "agents";
+type Section = "shells" | "monitors" | "agents" | "done";
 const SECTIONS: [Section, string][] = [
 	["shells", "Shells"],
 	["monitors", "Monitors"],
 	["agents", "Local agents"],
+	["done", "Done"],
 ];
 
 function sectionOf(row: TaskRow): Section {
-	if (row.kind === "agent") return "agents";
+	if (row.kind === "agent") return row.state === "running" ? "agents" : "done";
 	return row.id.startsWith("s") ? "monitors" : "shells";
 }
 
 /** A WebSocket monitor has no detail view. */
 const hasDetail = (row: TaskRow) => sectionOf(row) !== "monitors";
+
+/** A run opens to its transcript, in place of the detail view, when the source can show one. */
+const opensTranscript = (row: TaskRow) => row.kind === "agent" && agentTasks()?.open !== undefined;
+
+/** A run that moves to Done is another row, so an `x` meant to stop it does not dismiss it. */
+const rowKey = (row: TaskRow) => `${sectionOf(row)}:${row.id}`;
 
 /**
  * The tasks the dialog lists: running ones only, the model's foreground bash among them, in
@@ -238,6 +245,12 @@ export function visibleRows(owner: string | undefined): TaskRow[] {
 	return SECTIONS.flatMap(([section]) => rows.filter((row) => sectionOf(row) === section));
 }
 
+/** What the dialog lists: the running tasks, then the finished runs, which the phone's list leaves out. */
+function dialogRows(owner: string | undefined): TaskRow[] {
+	const done = (agentTasks()?.listDone?.(owner) ?? []).map(agentRow).sort((a, b) => b.startedAt - a.startedAt);
+	return [...visibleRows(owner), ...done];
+}
+
 /** A row's status beside its label. */
 const META: Record<TaskState, string> = {
 	running: "running",
@@ -247,8 +260,11 @@ const META: Record<TaskState, string> = {
 };
 
 /** A foreground command is told apart from the background ones it sits among. */
-const metaOf = (row: TaskRow) =>
-	row.foreground ? "foreground" : row.kind === "agent" && row.statusText ? row.statusText : META[row.state];
+const metaOf = (row: TaskRow) => {
+	if (row.foreground) return "foreground";
+	if (row.kind !== "agent") return META[row.state];
+	return [row.model, row.statusText ?? META[row.state]].filter(Boolean).join(" · ");
+};
 
 type ListLine = { kind: "gap" } | { kind: "heading"; text: string } | { kind: "row"; row: TaskRow; index: number };
 
@@ -260,7 +276,7 @@ export interface TasksDialogOptions {
 }
 
 export class TasksDialog implements Component {
-	/** The focused task, by id so it stays put as others start and end; its index is the fallback. */
+	/** The focused task, by row key so it stays put as others start and end; its index is the fallback. */
 	private focusId: string | undefined;
 	private focusIndex = 0;
 	/** The focused task ended since it was focused: the next `x` would stop whatever slid under the cursor. */
@@ -292,8 +308,8 @@ export class TasksDialog implements Component {
 		this.held = options.held ?? (() => undefined);
 		this.terminalRows = options.rows;
 		// With one task to show, open straight to it.
-		const rows = visibleRows(owner);
-		if (rows.length === 1 && hasDetail(rows[0])) {
+		const rows = dialogRows(owner);
+		if (rows.length === 1 && hasDetail(rows[0]) && !opensTranscript(rows[0])) {
 			this.detail = rows[0].id;
 			this.direct = true;
 		}
@@ -304,20 +320,21 @@ export class TasksDialog implements Component {
 	/** The focused row's index, following its id; notes when that task is gone. */
 	private cursor(rows: TaskRow[]): number {
 		if (rows.length === 0) return 0;
-		const byId = this.focusId === undefined ? -1 : rows.findIndex((r) => r.id === this.focusId);
+		const byId = this.focusId === undefined ? -1 : rows.findIndex((r) => rowKey(r) === this.focusId);
 		if (byId >= 0) {
 			this.focusIndex = byId;
 			return byId;
 		}
 		if (this.focusId !== undefined) this.focusLost = true;
 		this.focusIndex = Math.min(this.focusIndex, rows.length - 1);
-		this.focusId = rows[this.focusIndex].id;
+		this.focusId = rowKey(rows[this.focusIndex]);
 		return this.focusIndex;
 	}
 
 	private focus(rows: TaskRow[], index: number): void {
 		this.focusIndex = Math.max(0, Math.min(rows.length - 1, index));
-		this.focusId = rows[this.focusIndex]?.id;
+		const row = rows[this.focusIndex];
+		this.focusId = row && rowKey(row);
 		this.focusLost = false;
 	}
 
@@ -335,7 +352,7 @@ export class TasksDialog implements Component {
 
 	handleInput(data: string): void {
 		const kb = getKeybindings();
-		const rows = visibleRows(this.owner);
+		const rows = dialogRows(this.owner);
 		if (this.detail !== undefined) {
 			const row = rows.find((r) => r.id === this.detail) ?? agentRowById(this.detail, this.owner);
 			if (matchesKey(data, "left")) this.leaveDetail(rows);
@@ -355,19 +372,25 @@ export class TasksDialog implements Component {
 		const current = rows[index];
 		if (kb.matches(data, "tui.select.up")) this.focus(rows, index - 1);
 		else if (kb.matches(data, "tui.select.down")) this.focus(rows, index + 1);
-		else if (data === "\r" && hasDetail(current)) this.detail = current.id;
+		else if (data === "\r" && opensTranscript(current)) {
+			// The dialog closes first: the transcript is an overlay of its own.
+			this.done();
+			void agentTasks()?.open?.(current.id, this.owner);
+			return;
+		} else if (data === "\r" && hasDetail(current)) this.detail = current.id;
 		else if (data === "X" && rows.some((row) => row.kind === "agent" && row.state === "running")) {
 			agentTasks()?.stopAll({ owner: this.owner, source: "user" });
 		} else if (data === "x") {
 			// The task under the cursor is not the one that was focused: swallow this one press.
 			if (this.focusLost) this.focusLost = false;
+			else if (sectionOf(current) === "done") agentTasks()?.dismiss?.(current.id, this.owner);
 			else stopTask(current, this.owner);
 		}
 		this.requestRender();
 	}
 
 	render(width: number): string[] {
-		const rows = visibleRows(this.owner);
+		const rows = dialogRows(this.owner);
 		if (this.detail !== undefined) {
 			const row = rows.find((r) => r.id === this.detail) ?? agentRowById(this.detail, this.owner);
 			if (row) return this.frame(width, this.renderDetail(row, width - 2 * PAD), this.detailHints(row));
@@ -411,7 +434,7 @@ export class TasksDialog implements Component {
 		return [
 			"↑/↓ to select",
 			...(!current || hasDetail(current) ? ["Enter to view"] : []),
-			...(current ? ["x to stop"] : []),
+			...(current ? [sectionOf(current) === "done" ? "x to dismiss" : "x to stop"] : []),
 			...(rows.some((row) => row.kind === "agent" && row.state === "running") ? ["X to stop all agents"] : []),
 			"Esc to close",
 		];
@@ -443,7 +466,7 @@ export class TasksDialog implements Component {
 			if (items.length === 0) continue;
 			if (lines.length > 0) lines.push({ kind: "gap" });
 			// The Shells header only when the list holds agents too.
-			if (section !== "shells" || agents > 0) {
+			if (section !== "shells" || agents + count("done") > 0) {
 				lines.push({ kind: "heading", text: `${t.bold(title)}${t.fg("dim", ` (${items.length})`)}` });
 			}
 			for (const row of items) lines.push({ kind: "row", row, index: index++ });

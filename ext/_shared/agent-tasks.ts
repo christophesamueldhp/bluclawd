@@ -59,6 +59,10 @@ export interface AgentTaskSource {
 	panelHasRows?(): boolean;
 	/** Opens a run's transcript and resolves once it closes; undefined when the run is not of the current session. */
 	open?(id: string, owner?: string): Promise<void> | undefined;
+	/** The owner's finished runs of its current session epoch that were not dismissed; none known only from disk. */
+	listDone?(owner?: string): AgentTask[];
+	/** Takes a finished run off `listDone`; its record and report stay on disk. */
+	dismiss?(id: string, owner?: string): boolean;
 }
 
 const state = sharedRef("agentTasks", {
