@@ -176,6 +176,39 @@ describe("The orchestrator's Waiting", () => {
 		}
 	});
 
+	it("leaves a run that is being stopped out of the reminder", async () => {
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd: makeTempDir("stopping-cwd"),
+			agentDir: makeTempDir("stopping-agent"),
+		});
+		const child = gate();
+		const reminders: (string | undefined)[] = [];
+		try {
+			await session.bindExtensions({ mode: "tui" });
+			faux.setResponses(
+				script(child, [
+					() => fauxAssistantMessage([launchCall("Inspect the repo.")]),
+					(context) => {
+						reminders.push(reminderIn(context));
+						return fauxAssistantMessage([fauxToolCall("subagent_stop", { agent: "explorer-1" }, { id: "stop" })]);
+					},
+					(context) => {
+						reminders.push(reminderIn(context));
+						return fauxAssistantMessage("Stopped explorer-1.");
+					},
+				]),
+			);
+			await session.prompt("Inspect the repo in the background, then stop it.", { expandPromptTemplates: false });
+
+			const [beforeStop, afterStop] = reminders;
+			expect(beforeStop).toMatch(/explorer-1: background/);
+			expect(afterStop).toBeUndefined();
+		} finally {
+			child.open();
+			session.dispose();
+		}
+	});
+
 	it("leaves the runs of an earlier session epoch out of the reminder", async () => {
 		const { session, faux } = await createParentSessionWithSubagents({
 			cwd: makeTempDir("epoch-cwd"),

@@ -232,7 +232,12 @@ const backgroundBash: InlineExtension = {
 			if (!ctx?.hasUI) return;
 			const label = tasksPillLabel(taskRows(owner()));
 			if (!label) pillSelected = false;
-			const hint = pillSelected ? "Enter to view tasks" : "↓ to manage";
+			// The subagent panel takes ↓ while it shows rows.
+			const hint = pillSelected
+				? "Enter to view tasks"
+				: agentTasks()?.panelHasRows?.()
+					? "/tasks to manage"
+					: "↓ to manage";
 			const pill = pillSelected ? INVERSE(PILL(label ?? "")) : PILL(label ?? "");
 			ctx.ui.setStatus(STATUS_KEYS.tasks, label ? `${pill}${ctx.ui.theme.fg("dim", ` · ${hint}`)}` : undefined);
 			tui?.requestRender();

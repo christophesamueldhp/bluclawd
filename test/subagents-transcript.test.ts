@@ -182,4 +182,11 @@ describe("a run's transcript", () => {
 		expect(tui.notifications.at(-1)).toContain("earlier session");
 		child.open();
 	});
+
+	it("says a run it does not know is unknown, not of an earlier session", async () => {
+		tui = await createSubagentTui();
+		expect(agentTasks()?.open?.("sub_unknown", tui.session.sessionId)).toBeUndefined();
+		expect(tui.view()).toBeUndefined();
+		expect(tui.notifications.at(-1)).toBe("No run sub_unknown is known to this session, so it cannot be opened.");
+	});
 });

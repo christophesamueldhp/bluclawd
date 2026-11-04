@@ -1,5 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, type Focusable, matchesKey, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import { focusedComponent } from "../_shared/focus.ts";
 import { formatTaskDuration } from "../background-bash/bash-limits.ts";
 import type { RunEntry } from "./directory.ts";
 import { isTerminalSubagentStatus } from "./runs.ts";
@@ -12,6 +13,11 @@ export const SUCCEEDED_RUN_LINGER_MS = 30_000;
 /** Whether the panel still shows a run: one that succeeded leaves after a while, any other final run stays. */
 export function shownInPanel({ record }: RunEntry, now: number): boolean {
 	return record.status !== "completed" || now - (record.endedAt ?? now) < SUCCEEDED_RUN_LINGER_MS;
+}
+
+/** How long a run has been going, or went on for once it ended. */
+export function formatRunElapsed(run: RunEntry["record"], now: number): string {
+	return formatTaskDuration(Math.max(0, (run.endedAt ?? now) - (run.startedAt ?? run.admittedAt)));
 }
 
 /** The panel's lines: a title, then one row per run up to five, then how many more `/tasks` has. */
@@ -39,7 +45,7 @@ export function renderPanel(options: {
 			run.agentName,
 			theme.fg("dim", `${run.provider}/${run.modelId}`),
 			theme.fg(statusColor(status), status),
-			formatTaskDuration(Math.max(0, (run.endedAt ?? now) - (run.startedAt ?? run.admittedAt))),
+			formatRunElapsed(run, now),
 			...(progress ? [theme.fg("dim", progress)] : []),
 		].join("  ");
 	});
@@ -109,8 +115,7 @@ export function createPanel(options: {
 		focus() {
 			const shown = rows();
 			if (shown.length === 0) return false;
-			// getFocusedComponent is on pi-tui's TUI class, not its TUI interface.
-			returnTo = (tui as { getFocusedComponent?: () => Component | null }).getFocusedComponent?.() ?? null;
+			returnTo = focusedComponent(tui) ?? null;
 			select(shown, 0);
 			tui.setFocus(panel);
 			tui.requestRender();

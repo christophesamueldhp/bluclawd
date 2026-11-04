@@ -1,6 +1,6 @@
 import type { AgentTask, AgentTaskSource, AgentTaskState } from "../_shared/agent-tasks.ts";
 import type { RunDirectory, RunEntry } from "./directory.ts";
-import type { ParentScope } from "./parent-scope.ts";
+import { inParentScope, type ParentScope } from "./parent-scope.ts";
 import { isTerminalSubagentStatus, type SubagentLifecycleStatus, type SubagentRunScheduler } from "./runs.ts";
 import { readBoundedSubagentReport, readPersistedRunRecord, subagentReportPath } from "./storage.ts";
 
@@ -22,8 +22,8 @@ export interface AgentTaskSourceDeps {
 	agentDir: () => string;
 	/** The owner when a caller names none. */
 	activeScope: () => ParentScope | undefined;
-	/** Finished runs the user dismissed from `/tasks`. */
-	dismissed: Set<string>;
+	/** The generation of each finished run the user dismissed from `/tasks`. */
+	dismissed: Map<string, number>;
 }
 
 /** Translates runs into the tasks `/tasks` and `task_stop` see. */
@@ -73,10 +73,9 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 			.listRuns()
 			.filter(
 				(run) =>
-					run.parentSessionId === scope.parentSessionId &&
-					run.sessionEpoch === scope.sessionEpoch &&
+					inParentScope(run, scope) &&
 					isTerminalSubagentStatus(run.status) &&
-					!deps.dismissed.has(run.runId),
+					deps.dismissed.get(run.runId) !== (run.generation ?? 0),
 			)
 			.flatMap((run) => deps.directory.get(run.runId) ?? []);
 	};
@@ -117,8 +116,9 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 		},
 		listDone: (owner) => doneRuns(owner).map(toTask),
 		dismiss: (id, owner) => {
-			if (!doneRuns(owner).some((run) => run.record.runId === id)) return false;
-			deps.dismissed.add(id);
+			const run = doneRuns(owner).find((entry) => entry.record.runId === id);
+			if (!run) return false;
+			deps.dismissed.set(id, run.record.generation ?? 0);
 			return true;
 		},
 	};

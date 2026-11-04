@@ -95,7 +95,7 @@ function setup(activeParentSessionId: string | undefined = "sess_main") {
 		agentDir: () => agentDir,
 		activeScope: () =>
 			activeParentSessionId === undefined ? undefined : { parentSessionId: activeParentSessionId, sessionEpoch: 1 },
-		dismissed: new Set(),
+		dismissed: new Map(),
 	});
 	return { agentDir, scheduler, controllers, settle, launch, source };
 }

@@ -1,5 +1,5 @@
 import { isAgentTaskId } from "../_shared/agent-tasks.ts";
-import type { ParentScope } from "./parent-scope.ts";
+import { inParentScope, type ParentScope } from "./parent-scope.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord, type SubagentRunScheduler } from "./runs.ts";
 import { listPersistedRunRecords, readPersistedRunRecord } from "./storage.ts";
 
@@ -53,12 +53,7 @@ export function createRunDirectory(deps: RunDirectoryDeps) {
 	const list = (scope: ParentScope): RunEntry[] =>
 		deps.scheduler
 			.listRuns()
-			.filter(
-				(record) =>
-					record.parentSessionId === scope.parentSessionId &&
-					record.sessionEpoch === scope.sessionEpoch &&
-					!isTerminalSubagentStatus(record.status),
-			)
+			.filter((record) => inParentScope(record, scope) && !isTerminalSubagentStatus(record.status))
 			.map(entryOf);
 
 	return {

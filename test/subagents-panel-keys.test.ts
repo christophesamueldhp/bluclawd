@@ -143,6 +143,26 @@ describe("↓ with background shells running", () => {
 		child.open();
 	});
 
+	it("has the pill offer /tasks instead of ↓ while the panel shows rows", async () => {
+		const t = await withShell();
+		expect(t.status(STATUS_KEYS.tasks)).toContain("↓ to manage");
+		const child = gate();
+		t.script([launch(["scout"], { background: true })], async () => {
+			await child.wait;
+			return fauxAssistantMessage(REPORT);
+		});
+		await prompt(t);
+		await waitFor(() => row(t, "scout"));
+		expect(t.status(STATUS_KEYS.tasks)).not.toContain("↓");
+		expect(t.status(STATUS_KEYS.tasks)).toContain("/tasks to manage");
+
+		child.open();
+		await waitFor(() => row(t, "scout")?.includes("completed") ?? false);
+		t.press(DOWN, "x");
+		expect(t.panel()).toEqual([]);
+		expect(t.status(STATUS_KEYS.tasks)).toContain("↓ to manage");
+	});
+
 	it("still selects the tasks pill while the panel is empty", async () => {
 		const t = await withShell();
 

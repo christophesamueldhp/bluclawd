@@ -67,6 +67,7 @@ import type {
 	SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
+import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
 
 const CHECKPOINT_CUSTOM_TYPE = "checkpoint";
@@ -736,12 +737,9 @@ export function factory(pi: ExtensionAPI): void {
 		offDoubleEscape?.();
 		// The TUI, to see whether a dialog or another component (the subagent panel) has the keys.
 		const tui = holdTui(ctx, "checkpoints:tui");
-		// getFocusedComponent is on pi-tui's TUI class; only the prompt editor has getText.
 		const elsewhere = () => {
-			const focused = (
-				tui() as { getFocusedComponent?: () => { getText?: unknown } | null } | undefined
-			)?.getFocusedComponent?.();
-			return focused !== undefined && typeof focused?.getText !== "function";
+			const focused = focusedComponent(tui());
+			return focused !== undefined && !isPromptEditor(focused);
 		};
 		let escapeAt = 0;
 		offDoubleEscape = ctx.ui.onTerminalInput((data) => {

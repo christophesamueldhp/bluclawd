@@ -8,6 +8,11 @@ export interface ParentScope {
 	readonly sessionEpoch: number;
 }
 
+/** Whether `run` belongs to `scope`: the same orchestrator session, in the same session epoch. */
+export function inParentScope(run: ParentScope, scope: ParentScope): boolean {
+	return run.parentSessionId === scope.parentSessionId && run.sessionEpoch === scope.sessionEpoch;
+}
+
 /** A run as its parent scope sees it. */
 export interface ScopedRun extends ParentScope {
 	readonly originEntryId?: string;
