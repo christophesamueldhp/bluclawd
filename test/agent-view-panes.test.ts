@@ -479,6 +479,33 @@ describe("row actions: pin", () => {
 	});
 });
 
+describe("row actions: start", () => {
+	it("starts a new session's pane with the task as its first prompt, then has the daemon list it as starting", async () => {
+		const { actions: a, calls } = actions();
+		const started = a.start(HERE, "write the release notes", ["/tmp/shot.png"], {
+			provider: "anthropic",
+			id: "opus",
+		});
+		expect(started).toMatchObject({ kind: "started", pane: "pi-new1" });
+		expect(calls).toEqual([
+			["start", HERE, ["--model", "anthropic/opus", "--", "@/tmp/shot.png", "write the release notes"], undefined],
+			["claim", { cwd: HERE, label: "write the release…", pane: "pi-new1" }],
+		]);
+	});
+
+	it("a pane that cannot be started is claimed nowhere, and says tmux's reason", () => {
+		const { actions: a, calls, panes } = actions();
+		panes.start = () => {
+			throw tmuxFailure("no server running\n");
+		};
+		expect(a.start(HERE, "", ["/tmp/shot.png"])).toEqual({
+			kind: "failed",
+			text: "Couldn't start it — no server running",
+		});
+		expect(calls).toEqual([]);
+	});
+});
+
 describe("agent view in pane mode", () => {
 	it("enter on a working session switches the terminal to its pane at once", async () => {
 		const { view, calls, closed, flush } = setup([paneRow("pi-a")]);
@@ -574,10 +601,7 @@ describe("agent view in pane mode", () => {
 		for (const ch of "write the release notes") view.handleInput(ch);
 		view.handleInput(ENTER);
 		await flush();
-		expect(calls).toEqual([
-			["start", HERE, ["--", "write the release notes"], undefined],
-			["claim", { cwd: HERE, label: "write the release…", pane: "pi-new1" }],
-		]);
+		expect(calls[0]).toEqual(["start", HERE, ["--", "write the release notes"], undefined]);
 		expect(focusedLine(view)).toMatch(/write the release….*starting…/);
 		registry.registerExternal(
 			{ ...paneRow("pi-new1"), label: "release notes", status: "online" } as never,

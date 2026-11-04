@@ -20,6 +20,7 @@ import type {
 	PromptOutcome,
 	ResumeSpec,
 } from "../ipc/protocol.ts";
+import { resumePane, type StartClaims, startNewPane } from "../pane-start.ts";
 import { labelFromTask } from "../rows.ts";
 import type { StartClaim } from "../supervisor.ts";
 import { RemoteEvents } from "./events.ts";
@@ -297,6 +298,22 @@ function launchOf(deps: RemoteDeps): PaneLaunch | undefined {
 	return launchUsable(launch) ? launch : undefined;
 }
 
+/** The daemon's half of a phone's start: the supervisor, asked directly; a refusal is a 409. */
+function startClaims(deps: RemoteDeps): StartClaims {
+	return {
+		start: (spec) => {
+			if ("pane" in spec) {
+				deps.paneStarting(spec);
+				return spec.pane;
+			}
+			const claim = deps.claimStart(spec);
+			if (!claim.ok) throw new HttpError(409, claim.refused === "starting" ? "session_starting" : "session_running");
+			return claim.id;
+		},
+		startFailed: (id) => deps.startFailed(id),
+	};
+}
+
 function start(deps: RemoteDeps, spec: SessionSpec): string {
 	try {
 		return deps.startSession(spec);
@@ -433,15 +450,12 @@ async function handle(
 		if (!launch) return json(res, 503, { error: "no_launch" });
 		const spec = { cwd: saved.cwd || cwd, sessionFile: saved.path };
 		// Claimed first: agent view's resume of the same file, or another phone's, is refused meanwhile.
-		const claim = deps.claimStart({ ...spec, label: saved.name || labelFromTask(saved.firstMessage) });
-		if (!claim.ok)
-			return json(res, 409, { error: claim.refused === "starting" ? "session_starting" : "session_running" });
-		try {
-			return json(res, 201, { pane: start(deps, { ...spec, task: "", launch }), id: claim.id });
-		} catch (error) {
-			deps.startFailed(claim.id);
-			throw error;
-		}
+		const { pane, id } = await resumePane(
+			startClaims(deps),
+			{ ...spec, label: saved.name || labelFromTask(saved.firstMessage) },
+			() => start(deps, { ...spec, task: "", launch }),
+		);
+		return json(res, 201, { pane, id });
 	}
 	if (path === "/api/sessions" && req.method === "GET") {
 		return json(res, 200, { sessions: remoteSessions(deps.listInstances()), terminalOpen: deps.terminalOpen() });
@@ -461,13 +475,14 @@ async function handle(
 		}
 		const launch = launchOf(deps);
 		if (!launch) return json(res, 503, { error: "no_launch" });
-		const pane = start(deps, {
-			cwd,
-			task: task.trim(),
-			...(typeof model === "string" ? { model } : {}),
-			launch,
-		});
-		deps.paneStarting({ cwd, label: labelFromTask(task), pane });
+		const { pane } = startNewPane(startClaims(deps), { cwd, label: labelFromTask(task) }, () =>
+			start(deps, {
+				cwd,
+				task: task.trim(),
+				...(typeof model === "string" ? { model } : {}),
+				launch,
+			}),
+		);
 		return json(res, 201, { pane, id: pane });
 	}
 	if (path === "/api/directories" && req.method === "GET") {

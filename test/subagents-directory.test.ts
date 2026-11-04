@@ -12,6 +12,7 @@ import { createParentScope } from "../ext/subagents/parent-scope.ts";
 import type { ChildSession, RunSubagentOptions } from "../ext/subagents/runner.ts";
 import type { AdmitSubagentRunRequest, AdmittedSubagentHandle, SubagentRunnerOutcome } from "../ext/subagents/runs.ts";
 import { createAgentTaskSource } from "../ext/subagents/task-source.ts";
+import { createParentScopeViews } from "../ext/subagents/views.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 const tempDirs: string[] = [];
@@ -154,12 +155,21 @@ function setup(earlier?: { cwd: string; agentDir: string; session: ExtensionCont
 		onChange: () => {},
 	});
 	const { directory } = generations;
+	const dismissed = new Map<string, number>();
 	const tasks = createAgentTaskSource({
+		views: createParentScopeViews({
+			scheduler: generations.scheduler,
+			directory,
+			agentDir: () => agentDir,
+			scope: () => scope.current(),
+			idle: () => true,
+			now: Date.now,
+			dismissed: { panel: new Map(), tasks: dismissed },
+		}),
 		directory,
 		scheduler: generations.scheduler,
 		agentDir: () => agentDir,
-		activeScope: () => scope.current(),
-		dismissed: new Map(),
+		dismissed,
 	});
 	const context = {
 		agentDir,
