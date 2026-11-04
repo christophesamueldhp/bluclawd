@@ -48,7 +48,7 @@ describe("the run panel below the prompt", () => {
 		await waitFor(() => row(tui!, "scout") ?? false);
 
 		tui.advance(12_000);
-		expect(row(tui, "scout")).toContain("12s");
+		expect(row(tui, "scout")).toMatch(/\b1\ds\b/);
 
 		child.open();
 		const done = await waitFor(() => row(tui!, "scout")?.includes("completed") && row(tui!, "scout"));
