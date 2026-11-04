@@ -52,6 +52,7 @@ export type TranscriptRead =
 
 export type PhoneError =
 	| "session_not_running"
+	| "session_silent"
 	| "session_running"
 	| "pane_too_old"
 	| "session_busy"
@@ -133,8 +134,14 @@ export function shellLine(text: string): boolean {
 	return /^!+\s*\S/.test(text.trimStart());
 }
 
+/** Why the row's verdict refuses its pi a message: a Silent pane's takes nothing until it answers. */
+function refusal({ verdict }: PhoneSession): PhoneOutcome | undefined {
+	if (verdict.act) return undefined;
+	return { error: verdict.reason === "silent" ? "session_silent" : "session_not_running" };
+}
+
 function toPane(session: PhoneSession, message: PaneMessage): PhoneOutcome {
-	return session.running ? { message } : { error: "session_not_running" };
+	return refusal(session) ?? { message };
 }
 
 export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome {
@@ -142,7 +149,7 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 	// A pane from an older bluclawd sends no report, and would ignore what only a newer one runs.
 	if (
 		(action.type === "model" || action.type === "thinking" || action.type === "trust") &&
-		session.running &&
+		session.verdict.act &&
 		!report
 	) {
 		return { error: "pane_too_old" };
@@ -174,13 +181,15 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 			const { provider, id } = action;
 			if (typeof provider !== "string" || typeof id !== "string" || !provider || !id)
 				return { error: "invalid_model" };
-			if (!session.running) return { error: "session_not_running" };
+			const refused = refusal(session);
+			if (refused) return refused;
 			// Only a model the pane offered: the phone picks from that list, nothing else reaches the pane.
 			if (!report?.models.some((m) => m.provider === provider && m.id === id)) return { error: "invalid_model" };
 			return { message: { type: "set_model", provider, id } };
 		}
 		case "thinking": {
-			if (!session.running) return { error: "session_not_running" };
+			const refused = refusal(session);
+			if (refused) return refused;
 			// Only a level the pane offered for its model: none when the model does not reason.
 			const { level } = action;
 			if (typeof level !== "string" || !report?.thinkingLevels?.includes(level))
@@ -188,7 +197,8 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 			return { message: { type: "set_thinking", level } };
 		}
 		case "trust": {
-			if (!session.running) return { error: "session_not_running" };
+			const refused = refusal(session);
+			if (refused) return refused;
 			const trust = TRUST.find((value) => value === action.trust);
 			if (!trust) return { error: "invalid_trust" };
 			// A pane that reports no trust mode is too old to set one.
@@ -199,7 +209,7 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 			const name = typeof action.name === "string" ? action.name.trim() : "";
 			if (!name || name.length > NAME_MAX || CONTROL.test(name)) return { error: "invalid_name" };
 			// A pane's pi names its session, as agent view's rename does; a stored row is the daemon's.
-			return session.running ? { message: { type: "rename", name } } : { operation: { type: "rename", name } };
+			return session.running ? toPane(session, { type: "rename", name }) : { operation: { type: "rename", name } };
 		}
 		case "pin":
 			if (typeof action.pinned !== "boolean") return { error: "invalid_pinned" };
@@ -212,7 +222,7 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 			// Only a task the pane reported: stopping it as /tasks' `x` does, or the tail of its output.
 			const known = session.running ? report?.tasks?.find((t) => t.id === action.taskId) : undefined;
 			if (!known) return { error: "unknown_task" };
-			if (action.type === "stop_task") return { message: { type: "stop_task", id: known.id } };
+			if (action.type === "stop_task") return toPane(session, { type: "stop_task", id: known.id });
 			return known.outputFile ? { read: { type: "task_output", file: known.outputFile } } : { error: "no_output" };
 		}
 		case "image":

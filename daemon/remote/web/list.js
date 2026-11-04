@@ -59,13 +59,18 @@ export function sharedWarning(session) {
 	return session.livePanes ? `⚠ ${session.livePanes} panes on one session` : "";
 }
 
+/** The reply box's placeholder for a row the daemon's verdict says a Chat may not act on, by why. */
+const CLOSED = { silent: "Not responding", starting: "Starting…", not_running: "Disconnected" };
+
 /**
- * A session the phone can prompt or change: running and answering (the Mac refuses what is sent to
- * a silent one), with a terminal on the Mac showing pi (`terminalOpen`).
- * @param {Session | undefined} session @param {boolean} terminalOpen
+ * Whether the phone may prompt or change a session, and what its reply box says: as the daemon's
+ * verdict on its row says, while a terminal on the Mac shows pi (`terminalOpen`).
+ * @param {Session} session @param {boolean} terminalOpen @returns {{ open: boolean, placeholder: string }}
  */
-export function actable(session, terminalOpen) {
-	return session?.alive === true && !session.silent && terminalOpen;
+export function replyBox(session, terminalOpen) {
+	const { verdict } = session;
+	if (verdict.act === false) return { open: false, placeholder: CLOSED[verdict.reason] };
+	return terminalOpen ? { open: true, placeholder: "Reply" } : { open: false, placeholder: "Read only" };
 }
 
 /** A session started from here is up: its row is listed, no longer starting. @param {Session[]} sessions @param {string} id */

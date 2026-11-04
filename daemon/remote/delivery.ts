@@ -1,8 +1,9 @@
 /**
- * Prompt delivery: the one record of what became of each prompt or command a phone sent with an id,
- * from the accepted request to its outcome. One is in its pane's inbox until a heartbeat takes it
- * (delivered), then settles with the outcome its pane reports, or is lost when its pane goes first
- * (refused, when the pane left its session for another).
+ * Prompt delivery: each row's inbox, and the one record of what became of each prompt or command a
+ * phone sent with an id, from the accepted request to its outcome. One waits in its row's inbox
+ * until its pane's heartbeat takes it, then settles with the outcome its pane reports, or is lost
+ * when its pane goes first (refused, when the pane left its session for another). The row table
+ * tells it when a pane ends or falls silent.
  * Only in memory: a restarted daemon knows none of them.
  */
 import { type EndReason, endedForAnother, type PaneMessage, type PromptOutcome } from "../ipc/protocol.ts";
@@ -10,9 +11,9 @@ import { type EndReason, endedForAnother, type PaneMessage, type PromptOutcome }
 /** How long a prompt is kept after its last change, so a phone that reconnects still reads it. */
 export const DELIVERY_KEEP_MS = 10 * 60_000;
 
-/** `sent`: in the pane's inbox, or delivered to the pane and not reported on yet. `pane`: the pane
- *  whose heartbeat took it, once one did. */
-type Delivery = PromptOutcome & { sessionId: string; changedAt: number; pane?: string };
+/** `sent`: in its row's inbox, or taken by its pane and not reported on yet. `pane`: the pane whose
+ *  heartbeat took it, once one did. */
+type Delivery = PromptOutcome & { rowId: string; changedAt: number; pane?: string };
 
 /** The phone's id of a message, when it is one whose outcome the phone waits for. */
 function phoneId(message: PaneMessage): string | undefined {
@@ -25,80 +26,98 @@ function settled(delivery: Delivery): boolean {
 }
 
 export class PromptDelivery {
+	/** Row `rowId`'s outcomes changed as its pane ended or fell silent. */
+	changed: ((rowId: string) => void) | undefined;
+	private readonly now: () => number;
 	/** By the phone's id, in the order sent. */
 	private readonly prompts = new Map<string, Delivery>();
-	private readonly queue: (sessionId: string, message: PaneMessage) => boolean;
+	/** Messages for each row's live pane's pi, by row id, taken by its next heartbeat. */
+	private readonly inboxes = new Map<string, PaneMessage[]>();
 
-	/** `queue`: puts a message in its pane's inbox; false when no pane is registered as that id. */
-	constructor(queue: (sessionId: string, message: PaneMessage) => boolean) {
-		this.queue = queue;
+	constructor(now: () => number = Date.now) {
+		this.now = now;
 	}
 
-	/** Queue a message for a pane, keeping track of a prompt or command that carries an id. */
-	send(sessionId: string, message: PaneMessage, now: number = Date.now()): boolean {
-		if (!this.queue(sessionId, message)) return false;
+	/** Into row `rowId`'s inbox, keeping track of a prompt or command that carries an id. The row
+	 *  table queues only for a row whose pane is live. */
+	queue(rowId: string, message: PaneMessage): void {
+		const now = this.now();
 		this.prune(now);
+		this.inboxes.set(rowId, [...(this.inboxes.get(rowId) ?? []), message]);
 		const id = phoneId(message);
-		if (id) this.prompts.set(id, { id, outcome: "sent", sessionId, changedAt: now });
-		return true;
+		if (id) this.prompts.set(id, { id, outcome: "sent", rowId, changedAt: now });
 	}
 
-	/** What a pane reports of the prompts it was given; any other id is not its to report. */
-	reported(sessionId: string, outcomes: PromptOutcome[], now: number = Date.now()): void {
-		for (const outcome of outcomes) {
-			const delivery = this.prompts.get(outcome.id);
-			if (delivery?.sessionId !== sessionId || settled(delivery) || delivery.outcome === outcome.outcome) continue;
-			this.prompts.set(outcome.id, { ...outcome, sessionId, pane: delivery.pane, changedAt: now });
-		}
+	/** Whether anything waits in row `rowId`'s inbox. */
+	pending(rowId: string): boolean {
+		return this.inboxes.has(rowId);
 	}
 
-	/** Pane `pane`'s heartbeat took `messages`. */
-	delivered(pane: string, messages: PaneMessage[]): void {
+	/** Pane `pane`'s heartbeat takes what waits in row `rowId`'s inbox. */
+	take(rowId: string, pane: string): PaneMessage[] {
+		const messages = this.inboxes.get(rowId) ?? [];
+		this.inboxes.delete(rowId);
 		for (const message of messages) {
 			const delivery = this.prompts.get(phoneId(message) ?? "");
 			if (delivery) delivery.pane = pane;
 		}
+		return messages;
 	}
 
-	/** The pane listed as `sessionId` went, with `inbox` still queued for it: those never reach pi,
-	 *  and it can no longer report on what it was given. One pi queued dies with it. `reason`: why its
-	 *  session ended, when it said; one it left for another session refuses them, as that session's
-	 *  pane would. `pane`: that pane, so what another pane listed as the same row was given stays its
-	 *  own; when not given, any pane's. */
-	dropped(sessionId: string, inbox: PaneMessage[], reason?: EndReason, pane?: string, now: number = Date.now()): void {
-		this.settle(inbox, (d) => d.sessionId === sessionId && (pane === undefined || d.pane === pane), reason, now);
-	}
-
-	/** A pane that may still be alive was reaped with `inbox` queued for it: those never reach pi, and
-	 *  what it was given waits on its report. */
-	silent(inbox: PaneMessage[], now: number = Date.now()): void {
-		this.settle(inbox, () => false, undefined, now);
-	}
-
-	/** What is in `inbox` and what was `given` to its pane, as its pane's going leaves them. */
-	private settle(
-		inbox: PaneMessage[],
-		given: (delivery: Delivery) => boolean,
-		reason: EndReason | undefined,
-		now: number,
-	): void {
-		const changed = endedForAnother(reason);
-		const ids = new Set(inbox.map(phoneId));
-		for (const [id, delivery] of this.prompts) {
-			if (settled(delivery) || !(ids.has(id) || given(delivery))) continue;
-			const outcome: PromptOutcome = changed
-				? { id, outcome: "refused", reason: "session_changed" }
-				: { id, outcome: "lost", reason: "pane_gone" };
-			this.prompts.set(id, { ...outcome, sessionId: delivery.sessionId, changedAt: now });
+	/** What row `rowId`'s pane reports of the prompts it was given; any other id is not its to report. */
+	reported(rowId: string, outcomes: PromptOutcome[]): void {
+		for (const outcome of outcomes) {
+			const delivery = this.prompts.get(outcome.id);
+			if (delivery?.rowId !== rowId || settled(delivery) || delivery.outcome === outcome.outcome) continue;
+			this.prompts.set(outcome.id, { ...outcome, rowId, pane: delivery.pane, changedAt: this.now() });
 		}
 	}
 
-	/** The outcomes of the prompts sent to a session, in the order sent. */
-	outcomes(sessionId: string, now: number = Date.now()): PromptOutcome[] {
-		this.prune(now);
+	/** Pane `pane`, listed as row `rowId` or held by it, ended: it can no longer report on what it
+	 *  was given, and one pi queued dies with it. `inbox`: it was the row's pane, so what its inbox
+	 *  holds never reaches pi either; a pane the row held has none. `reason`: why its session ended,
+	 *  when it said; one it left for another session refuses them, as that session's pane would. */
+	ended(rowId: string, pane: string, reason: EndReason | undefined, inbox: boolean): void {
+		const queued = inbox ? this.takeInbox(rowId) : new Set<string>();
+		this.settle(rowId, (id, d) => queued.has(id) || d.pane === pane, reason);
+	}
+
+	/** Row `rowId`'s pane, which may still be alive, fell silent: what its inbox holds never reaches
+	 *  pi, and what it was given waits on its report. */
+	silent(rowId: string): void {
+		const queued = this.takeInbox(rowId);
+		this.settle(rowId, (id) => queued.has(id), undefined);
+	}
+
+	/** The phone's ids of what row `rowId`'s inbox held, now emptied. */
+	private takeInbox(rowId: string): Set<string> {
+		const messages = this.inboxes.get(rowId) ?? [];
+		this.inboxes.delete(rowId);
+		return new Set(messages.flatMap((message) => phoneId(message) ?? []));
+	}
+
+	/** The unsettled prompts of row `rowId` that `ends`, as their pane's going leaves them. */
+	private settle(
+		rowId: string,
+		ends: (id: string, delivery: Delivery) => boolean,
+		reason: EndReason | undefined,
+	): void {
+		const outcome = endedForAnother(reason)
+			? ({ outcome: "refused", reason: "session_changed" } as const)
+			: ({ outcome: "lost", reason: "pane_gone" } as const);
+		for (const [id, delivery] of this.prompts) {
+			if (delivery.rowId !== rowId || settled(delivery) || !ends(id, delivery)) continue;
+			this.prompts.set(id, { id, ...outcome, rowId, changedAt: this.now() });
+		}
+		this.changed?.(rowId);
+	}
+
+	/** The outcomes of the prompts sent to row `rowId`, in the order sent. */
+	outcomes(rowId: string): PromptOutcome[] {
+		this.prune(this.now());
 		const out: PromptOutcome[] = [];
-		for (const { sessionId: to, changedAt: _, pane: __, ...outcome } of this.prompts.values()) {
-			if (to === sessionId) out.push(outcome);
+		for (const { rowId: to, changedAt: _, pane: __, ...outcome } of this.prompts.values()) {
+			if (to === rowId) out.push(outcome);
 		}
 		return out;
 	}

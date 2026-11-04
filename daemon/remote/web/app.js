@@ -22,7 +22,7 @@ import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
-import { actable, ageAt, paneUp, STATE_WORDS, sessionGroups, sharedWarning, statusGlyph, viewMode } from "./list.js";
+import { ageAt, paneUp, replyBox, STATE_WORDS, sessionGroups, sharedWarning, statusGlyph, viewMode } from "./list.js";
 import { refused, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 import { loaderHtml } from "./mascot.js";
@@ -45,8 +45,10 @@ import {
 
 /**
  * `dialog`: the one it waits on, while it needs input. `silent`: its pane stopped answering the
- * Mac, which still has it (asleep or blocked), and may come back.
- * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, dialog?: { kind: string, title?: string }, livePanes?: number, starting?: true, silent?: true }} Session
+ * Mac, which still has it (asleep or blocked), and may come back. `verdict`: the daemon's, on
+ * whether a Chat may act on it, and why not.
+ * @typedef {{ act: true } | { act: false, reason: "silent" | "starting" | "not_running" }} Verdict
+ * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, dialog?: { kind: string, title?: string }, livePanes?: number, starting?: true, silent?: true, verdict: Verdict }} Session
  */
 /** `aborted`: a reply its turn was stopped in, empty when stopped before it said anything. @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, aborted?: boolean, toolCallId?: string, toolName?: string, command?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
@@ -55,7 +57,7 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.52";
+const VERSION = "0.0.53";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 /** Each chat's pending prompts and unsent text, kept for when it opens again. */
 const keptPending = pendingStore(() => localStorage);
@@ -1001,9 +1003,9 @@ function liveHtml(live, calls) {
 	return parts.join("");
 }
 
-/** See actable. @param {Session | undefined} session */
+/** See replyBox. @param {Session | undefined} session */
 function canAct(session) {
-	return actable(session, state.terminalOpen);
+	return session !== undefined && replyBox(session, state.terminalOpen).open;
 }
 
 /** @param {Session | undefined} session */
@@ -1468,8 +1470,9 @@ function updateChat() {
 	// Also when the page loaded was empty and only "#older" went.
 	if (prepending) scroll.scrollTop += scroll.scrollHeight - height;
 	prepending = false;
-	// Closed on the Mac, or no terminal there shows pi: read only here.
-	const closed = session !== undefined && !canAct(session);
+	// As the daemon's verdict on its row says, and read only while no terminal on the Mac shows pi.
+	const box = session ? replyBox(session, state.terminalOpen) : { open: true, placeholder: "Reply" };
+	const closed = !box.open;
 	updateSheet(session);
 	const text = $("#text");
 	text.disabled = closed;
@@ -1479,13 +1482,7 @@ function updateChat() {
 	file.disabled = closed || state.chat.attachments.length + state.chat.reading >= ATTACH_MAX;
 	attach.classList.toggle("busy", state.chat.reading > 0);
 	file.setAttribute("aria-label", state.chat.reading ? "Reading the photos…" : "Attach photos");
-	text.placeholder = !closed
-		? "Reply"
-		: session?.silent
-			? "Not responding"
-			: session?.alive
-				? "Read only"
-				: "Disconnected";
+	text.placeholder = box.placeholder;
 	updateThumbs();
 	updateCommands();
 }
@@ -2306,10 +2303,7 @@ async function send() {
 	} catch (error) {
 		forget(chat, entry);
 		putBack(chat, entry);
-		// Listed running, yet refused as not: its pane fell silent before the list said so.
-		if (error instanceof Error && error.message === "session_not_running" && session?.alive)
-			showError(`Not sent: ${errorText("session_silent")}`);
-		else handleError(error, "Not sent: ");
+		handleError(error, "Not sent: ");
 	}
 }
 
