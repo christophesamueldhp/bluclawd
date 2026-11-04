@@ -8,10 +8,10 @@ import type {
 	EndReason,
 	InstanceSummary,
 	LiveSnapshot,
-	PaneDialog,
 	PaneLaunch,
 	PaneMessage,
 	PaneReport,
+	RegisterRequest,
 	RemoteResponse,
 	StartFailedRequest,
 	StartRequest,
@@ -21,24 +21,6 @@ import { daemonBuildId, getSocketPath } from "./paths.ts";
 
 export type { AgentActivity, EndReason };
 export type { InstanceSummary };
-
-export interface RegisterInput {
-	id: string;
-	cwd: string;
-	sessionId?: string;
-	sessionFile?: string;
-	label?: string;
-	activity?: AgentActivity;
-	pane?: string;
-	detail?: string;
-	turns?: number;
-	createdAt?: string;
-	finishedAt?: string;
-	leafId?: string;
-	dialog?: PaneDialog;
-	draft?: boolean;
-	launch?: PaneLaunch;
-}
 
 /** A RemoteResponse without its envelope. */
 export type RemoteResult = Omit<RemoteResponse, "type" | "ok" | "version" | "buildId">;
@@ -51,7 +33,7 @@ export type RemoteAction =
 
 type Request =
 	| { type: "list" }
-	| { type: "register"; instance: RegisterInput }
+	| RegisterRequest
 	| { type: "unregister"; instanceId: string; reason?: EndReason }
 	| { type: "wait"; instanceId: string }
 	| { type: "send"; instanceId: string; message: PaneMessage }
@@ -261,7 +243,7 @@ export class OrchestratorClient {
 	/** Register/heartbeat a pane's pi. Its timeout is long: the messages a response drains are lost
 	 *  if the pane, busy for a moment, reads it too late. */
 	async register(
-		instance: RegisterInput,
+		instance: RegisterRequest["instance"],
 	): Promise<{ messages: PaneMessage[]; watched: boolean; wantReport: boolean }> {
 		const res = await this.request({ type: "register", instance }, 3000);
 		return { messages: res.messages ?? [], watched: res.watched === true, wantReport: res.wantReport === true };

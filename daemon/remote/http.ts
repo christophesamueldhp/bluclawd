@@ -20,8 +20,10 @@ import type {
 	PromptOutcome,
 	ResumeSpec,
 } from "../ipc/protocol.ts";
+import { resumePane, type StartClaims, startNewPane } from "../pane-start.ts";
 import { labelFromTask } from "../rows.ts";
 import type { StartClaim } from "../supervisor.ts";
+import type { Waiting } from "./delivery.ts";
 import { RemoteEvents } from "./events.ts";
 import { type ClaimResult, type RemoteStore, SECRET_PATTERN } from "./pairing.ts";
 import {
@@ -60,6 +62,10 @@ export interface RemoteDeps {
 	report(sessionId: string): PaneReport | undefined;
 	/** What became of the prompts sent to a session with an id (delivery.ts). */
 	outcomes?(sessionId: string): PromptOutcome[];
+	/** The daemon's lifetime, which a prompt it accepts is asked about by (delivery.ts). */
+	lifetime?(): string;
+	/** The daemon's answer about the prompts a phone still waits on from a session (delivery.ts). */
+	answer?(sessionId: string, waiting: Waiting[]): PromptOutcome[];
 	/** Name a stored row; false when there is none by that id. A pane's pi names its own. */
 	renameInstance(sessionId: string, name: string): boolean;
 	/** Pin or unpin a row, a pane's or a stored one; false when there is none by that id. */
@@ -228,6 +234,17 @@ function promptIdIn(body: Record<string, unknown>): string | undefined {
 	return id;
 }
 
+/** The prompts a phone asks about, each `prompt=<id>@<lifetime>`, or `prompt=<id>` for one an older
+ *  phone kept with no lifetime; one in another form is not asked. */
+function waitingIn(url: URL): Waiting[] {
+	return url.searchParams.getAll("prompt").flatMap((asked) => {
+		const at = asked.indexOf("@");
+		if (at < 0) return PROMPT_ID_PATTERN.test(asked) ? [{ id: asked }] : [];
+		const id = asked.slice(0, at);
+		return at > 0 && PROMPT_ID_PATTERN.test(id) ? [{ id, lifetime: asked.slice(at + 1) }] : [];
+	});
+}
+
 /** A prompt's images, if it has any: each base64 of the type it says it is. */
 function imagesIn(body: Record<string, unknown>): PaneImage[] | undefined {
 	const { images } = body;
@@ -249,6 +266,7 @@ function imagesIn(body: Record<string, unknown>): PaneImage[] | undefined {
 
 const PHONE_STATUS: Record<PhoneError, number> = {
 	session_not_running: 409,
+	session_silent: 409,
 	session_running: 409,
 	pane_too_old: 409,
 	session_busy: 409,
@@ -294,6 +312,22 @@ function outputTail(file: string): { lines: string[]; size: number } | undefined
 function launchOf(deps: RemoteDeps): PaneLaunch | undefined {
 	const launch = deps.launch();
 	return launchUsable(launch) ? launch : undefined;
+}
+
+/** The daemon's half of a phone's start: the supervisor, asked directly; a refusal is a 409. */
+function startClaims(deps: RemoteDeps): StartClaims {
+	return {
+		start: (spec) => {
+			if ("pane" in spec) {
+				deps.paneStarting(spec);
+				return spec.pane;
+			}
+			const claim = deps.claimStart(spec);
+			if (!claim.ok) throw new HttpError(409, claim.refused === "starting" ? "session_starting" : "session_running");
+			return claim.id;
+		},
+		startFailed: (id) => deps.startFailed(id),
+	};
 }
 
 function start(deps: RemoteDeps, spec: SessionSpec): string {
@@ -432,15 +466,12 @@ async function handle(
 		if (!launch) return json(res, 503, { error: "no_launch" });
 		const spec = { cwd: saved.cwd || cwd, sessionFile: saved.path };
 		// Claimed first: agent view's resume of the same file, or another phone's, is refused meanwhile.
-		const claim = deps.claimStart({ ...spec, label: saved.name || labelFromTask(saved.firstMessage) });
-		if (!claim.ok)
-			return json(res, 409, { error: claim.refused === "starting" ? "session_starting" : "session_running" });
-		try {
-			return json(res, 201, { pane: start(deps, { ...spec, task: "", launch }), id: claim.id });
-		} catch (error) {
-			deps.startFailed(claim.id);
-			throw error;
-		}
+		const { pane, id } = await resumePane(
+			startClaims(deps),
+			{ ...spec, label: saved.name || labelFromTask(saved.firstMessage) },
+			() => start(deps, { ...spec, task: "", launch }),
+		);
+		return json(res, 201, { pane, id });
 	}
 	if (path === "/api/sessions" && req.method === "GET") {
 		return json(res, 200, { sessions: remoteSessions(deps.listInstances()), terminalOpen: deps.terminalOpen() });
@@ -460,13 +491,14 @@ async function handle(
 		}
 		const launch = launchOf(deps);
 		if (!launch) return json(res, 503, { error: "no_launch" });
-		const pane = start(deps, {
-			cwd,
-			task: task.trim(),
-			...(typeof model === "string" ? { model } : {}),
-			launch,
-		});
-		deps.paneStarting({ cwd, label: labelFromTask(task), pane });
+		const { pane } = startNewPane(startClaims(deps), { cwd, label: labelFromTask(task) }, () =>
+			start(deps, {
+				cwd,
+				task: task.trim(),
+				...(typeof model === "string" ? { model } : {}),
+				launch,
+			}),
+		);
 		return json(res, 201, { pane, id: pane });
 	}
 	if (path === "/api/directories" && req.method === "GET") {
@@ -504,6 +536,17 @@ async function handle(
 		return json(res, 200, { ok: true });
 	}
 
+	// Answered for a session that is gone too, as a status event carries its outcomes.
+	const asking = /^\/api\/sessions\/([^/]+)\/outcomes$/.exec(path);
+	if (asking && req.method === "GET") {
+		let id: string;
+		try {
+			id = decodeURIComponent(asking[1]!);
+		} catch {
+			return json(res, 404, { error: "unknown_session" });
+		}
+		return json(res, 200, { outcomes: deps.answer?.(id, waitingIn(url)) ?? [] });
+	}
 	const sessionPath = /^\/api\/sessions\/([^/]+)(\/.*)?$/.exec(path);
 	const route = sessionPath && sessionRoute(sessionPath[2] ?? "", req.method);
 	if (!sessionPath || !route) return json(res, 404, { error: "not_found" });
@@ -517,7 +560,8 @@ async function handle(
 	if ("error" in outcome) return json(res, PHONE_STATUS[outcome.error], { error: outcome.error });
 	if ("message" in outcome) {
 		if (!deps.send(session.id, outcome.message)) return json(res, 409, { error: "session_not_running" });
-		return json(res, 202, { ok: true });
+		const lifetime = deps.lifetime?.();
+		return json(res, 202, { ok: true, ...(lifetime ? { lifetime } : {}) });
 	}
 	if ("operation" in outcome) {
 		const { operation } = outcome;

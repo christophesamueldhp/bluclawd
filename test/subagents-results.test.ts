@@ -10,6 +10,7 @@ function makeRecord(overrides: Partial<SubagentRunRecord> = {}): SubagentRunReco
 		sessionEpoch: 1,
 		parentTurnId: "turn_1",
 		originToolCallId: "call_1",
+		generation: 0,
 		originEntryId: "entry_1",
 		agentName: "explorer",
 		definitionSource: "bundled",

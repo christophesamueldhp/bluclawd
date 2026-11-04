@@ -10,31 +10,59 @@ export interface StatusRequest {
 	instanceId: string;
 }
 
-/** Register/heartbeat a pane's pi. */
+/**
+ * What a pane's pi says of its session with every heartbeat, carried whole into its row's record
+ * and listed summary. Every field but `cwd` is optional: a pane from an older build sends fewer.
+ * (The phone's status sheet is another report: PaneReport.)
+ */
+export interface PaneHeartbeat {
+	cwd: string;
+	sessionId?: string;
+	sessionFile?: string;
+	label?: string;
+	/** The tmux session its pi runs in. */
+	pane?: string;
+	detail?: string;
+	turns?: number;
+	createdAt?: string;
+	/** When its session's last entry was written: once idle, when its last turn ended. */
+	finishedAt?: string;
+	/** The entry pi appends to next, when it is not the file's last entry (after a /tree). */
+	leafId?: string;
+	/** The dialog it waits on, while it does. */
+	dialog?: PaneDialog;
+	/** Its prompt holds unsent text. */
+	draft?: boolean;
+}
+
+/** Every PaneHeartbeat key: a field added to the type without one here fails the typecheck. */
+const PANE_HEARTBEAT_KEYS = Object.keys({
+	cwd: true,
+	sessionId: true,
+	sessionFile: true,
+	label: true,
+	pane: true,
+	detail: true,
+	turns: true,
+	createdAt: true,
+	finishedAt: true,
+	leafId: true,
+	dialog: true,
+	draft: true,
+} satisfies Record<keyof PaneHeartbeat, true>) as (keyof PaneHeartbeat)[];
+
+/** Only the heartbeat of a wider value (a register request's instance, a stored record): any other key is left. */
+export function pickPaneHeartbeat(from: PaneHeartbeat): PaneHeartbeat {
+	const picked: Partial<Record<keyof PaneHeartbeat, unknown>> = {};
+	for (const key of PANE_HEARTBEAT_KEYS) if (from[key] !== undefined) picked[key] = from[key];
+	return picked as PaneHeartbeat;
+}
+
+/** Register/heartbeat a pane's pi. `launch`: how to start another pi like this one, so the daemon
+ *  can start panes. */
 export interface RegisterRequest {
 	type: "register";
-	instance: {
-		id: string;
-		cwd: string;
-		sessionId?: string;
-		sessionFile?: string;
-		label?: string;
-		activity?: AgentActivity;
-		pane?: string;
-		detail?: string;
-		turns?: number;
-		createdAt?: string;
-		/** When its session's last entry was written: once idle, when its last turn ended. */
-		finishedAt?: string;
-		/** The entry pi appends to next, when it is not the file's last entry (after a /tree). */
-		leafId?: string;
-		/** The dialog it waits on, while it does. */
-		dialog?: PaneDialog;
-		/** Its prompt holds unsent text. */
-		draft?: boolean;
-		/** How to start another pi like this one, so the daemon can start panes. */
-		launch?: PaneLaunch;
-	};
+	instance: PaneHeartbeat & { id: string; activity?: AgentActivity; launch?: PaneLaunch };
 }
 
 export interface PaneLaunch {
@@ -219,7 +247,8 @@ export type RefusedReason = "busy" | "draft" | "dialog" | "compacting" | "sessio
 /** Why a prompt never reached pi's turn: its pane went (reaped or unregistered) with it still queued,
  *  in its inbox or in pi, or pi dropped it from its queue (`dequeued`: a stopped turn, the dequeue key,
  *  or its session reloading or switching).
- *  The phone adds `daemon_restarted` for an id a restarted daemon no longer knows. */
+ *  `daemon_restarted`: a daemon before a restart accepted it, as the daemon answers a phone that
+ *  asks about it (delivery.ts) and an older phone judges from the daemon's replay. */
 export type LostReason = "pane_gone" | "daemon_restarted" | "dequeued";
 
 /** What became of a prompt a phone sent, by the phone's id: pi started a turn with it (`taken`),
@@ -305,29 +334,17 @@ interface RequestMap {
 
 export type ServerRequest = RequestMap[keyof RequestMap];
 
-export interface InstanceSummary {
+/** A listed row: a pane's as of its last heartbeat, or a stored one's. */
+export interface InstanceSummary extends PaneHeartbeat {
 	id: string;
 	status: InstanceStatus;
-	cwd: string;
-	label?: string;
-	sessionId?: string;
-	sessionFile?: string;
 	activity?: AgentActivity;
 	/** True for a pane's pi; a stored row has no process. */
 	external?: boolean;
-	createdAt?: string;
 	lastSeenAt?: string;
-	detail?: string;
 	outcome?: "done" | "failed" | "stopped";
-	turns?: number;
-	finishedAt?: string;
 	pinned?: boolean;
 	sortOrder?: number;
-	pane?: string;
-	leafId?: string;
-	dialog?: PaneDialog;
-	/** A pane's prompt holds unsent text, as of its last heartbeat. */
-	draft?: boolean;
 	/** A pane's pi: how many times it stopped working, which a turn too quick for a poll still adds to. */
 	settled?: number;
 	/** A pane's pi that stopped beating while tmux still has its pane: listed as it last beat. */

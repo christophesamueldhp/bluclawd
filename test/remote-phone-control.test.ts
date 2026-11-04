@@ -329,6 +329,67 @@ describe("phone control", () => {
 		});
 	});
 
+	describe("by the listed row's verdict on whether a Chat may act on it", () => {
+		const rowsByState: InstanceSummary[] = [
+			pane("live"),
+			pane("silent", { silent: true }),
+			{ id: "stored", status: "stopped", cwd: "/p", sessionFile: "/s/stored.jsonl" },
+			{ id: "starting", status: "starting", cwd: "/p", sessionFile: "/s/starting.jsonl" },
+		];
+		const at = (id: string) => {
+			const found = phoneSession({ listInstances: () => rowsByState, report: () => full }, id);
+			if (!found) throw new Error(`no session ${id}`);
+			return found;
+		};
+
+		it.each([
+			["live", { act: true }],
+			["silent", { act: false, reason: "silent" }],
+			["stored", { act: false, reason: "not_running" }],
+			["starting", { act: false, reason: "starting" }],
+		] as const)("a %s row's", (id, verdict) => {
+			expect(at(id).verdict).toEqual(verdict);
+		});
+
+		it.each<[string, PhoneAction, PhoneOutcome]>([
+			["a prompt", { type: "prompt", text: "next", id: "p-1" }, error("session_silent")],
+			["a listed command", { type: "prompt", text: "/compact" }, error("session_silent")],
+			["an abort", { type: "abort" }, error("session_silent")],
+			["an offered model", { type: "model", provider: "openai", id: "gpt-5" }, error("session_silent")],
+			["an offered thinking level", { type: "thinking", level: "low" }, error("session_silent")],
+			["a trust mode", { type: "trust", trust: "ask" }, error("session_silent")],
+			["a rename", { type: "rename", name: "later" }, error("session_silent")],
+			["stopping a reported task", { type: "stop_task", taskId: "f2" }, error("session_silent")],
+			// The daemon's own changes go on as for a live pane's row.
+			["a pin", { type: "pin", pinned: true }, operation({ type: "pin", pinned: true })],
+			["a delete", { type: "delete" }, error("session_running")],
+			[
+				"a task's output",
+				{ type: "task_output", taskId: "b1" },
+				{ read: { type: "task_output", file: "/tmp/b1.output" } },
+			],
+		])("refuses a Silent pane's row anything for its pi up front: %s", (_, action, expected) => {
+			expect(decide(at("silent"), action)).toEqual(expected);
+		});
+
+		it("refuses a starting row's messages as not running, as before", () => {
+			expect(decide(at("starting"), { type: "prompt", text: "next" })).toEqual(notRunning);
+			expect(decide(at("starting"), { type: "abort" })).toEqual(notRunning);
+		});
+
+		it.each<[string, PhoneAction, PhoneOutcome]>([
+			["a rename", { type: "rename", name: "later" }, operation({ type: "rename", name: "later" })],
+			["a delete", { type: "delete" }, operation({ type: "delete" })],
+			["stopping a task", { type: "stop_task", taskId: "f2" }, error("unknown_task")],
+			["a task's output", { type: "task_output", taskId: "b1" }, error("unknown_task")],
+			["its status", { type: "status" }, error("no_status")],
+			["its commands", { type: "commands" }, error("no_status")],
+		])("answers a starting row as a stored one, which has no pane: %s", (_, action, expected) => {
+			expect(decide(at("starting"), action)).toEqual(expected);
+			expect(decide(at("stored"), action)).toEqual(expected);
+		});
+	});
+
 	describe("a command or `!` line, which goes only into an idle, empty prompt", () => {
 		it.each([
 			["/compact", "busy", error("session_busy")],

@@ -14,6 +14,8 @@ export type SubagentDeliveryMode = "foreground" | "background";
 export type SubagentLifecycleStatus =
 	| "starting"
 	| "running"
+	/** The child's last turn of this generation ended; the run is not final yet. */
+	| "finishing"
 	| "stopping"
 	| "completed"
 	| "failed"
@@ -39,8 +41,8 @@ export interface SubagentRunRecord {
 	originEntryId?: string;
 	/** Unique among the parent's live runs; absent on older records. */
 	name?: string;
-	/** How many times the orchestrator resumed this run after it completed; absent before the first resume. */
-	generation?: number;
+	/** How many times the orchestrator resumed this run after it completed: 0 for the launch. */
+	generation: number;
 	childSessionId?: string;
 	transcriptPath?: string;
 	reportPath?: string;
@@ -81,6 +83,8 @@ export interface SubagentRunRecord {
 
 export interface SubagentRunController {
 	markRunning(childSessionId?: string, thinkingLevel?: string): void;
+	/** The child's turn ended and pi will not retry it: the generation's last turn. */
+	markFinishing(): void;
 	recordTurn(): void;
 	recordToolCall(toolName?: string): void;
 	recordToolExecution(toolName: string, isError: boolean): void;
@@ -245,6 +249,7 @@ export class SubagentRunScheduler<C = unknown> {
 			originToolCallId: request.originToolCallId,
 			originEntryId: request.originEntryId,
 			name: request.name,
+			generation: 0,
 			agentName: request.agentName,
 			definitionSource: request.definitionSource,
 			provider: request.provider,
@@ -332,7 +337,7 @@ export class SubagentRunScheduler<C = unknown> {
 				summaryText: undefined,
 				// Unset, so the earlier generation's final report stays on disk until this one reports progress.
 				lastProgressText: undefined,
-				generation: (managed.record.generation ?? 0) + 1,
+				generation: managed.record.generation + 1,
 				status: "starting",
 				complete: false,
 				deliveryMode: "background",
@@ -398,6 +403,12 @@ export class SubagentRunScheduler<C = unknown> {
 				if (childSessionId) managed.record.childSessionId = childSessionId;
 				if (thinkingLevel) managed.record.thinkingLevel = thinkingLevel;
 				managed.record.status = "running";
+				this.emitChange(managed);
+			},
+			markFinishing: () => {
+				const { status } = managed.record;
+				if (inactive() || status === "stopping" || status === "finishing") return;
+				managed.record.status = "finishing";
 				this.emitChange(managed);
 			},
 			recordTurn: () => {

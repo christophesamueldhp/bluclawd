@@ -11,8 +11,11 @@
 // Gamma's pane for good: its row stops, and what it was sent is lost (pane_gone). While `<dir>/slow`
 // exists Gamma's status answers 5 s late, so a prompt can be sent before its report is in. While
 // `<dir>/silent` exists Gamma's row is silent (its pi stopped beating, tmux still has it): listed
-// alive, refusing prompts (409 `session_not_running`) and answering no status; seen on the next list.
-// Creating `<dir>/reply` makes Alpha stream a reply that runs a tool (see streamReply).
+// alive, refusing prompts (409 `session_silent`) and answering no status; seen on the next list.
+// Creating `<dir>/reply` makes Alpha stream a reply that runs a tool (see streamReply). While
+// `<dir>/held` exists Gamma's heartbeat takes nothing, and creating `<dir>/restart` then starts
+// prompt delivery afresh, as a daemon restart does: the app, asking about the prompts it still
+// waits on, is answered lost (daemon_restarted).
 import { appendFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -74,14 +77,22 @@ function listedGamma(): InstanceSummary {
 }
 
 let server: RemoteServer | undefined;
+let delivery = new PromptDelivery();
+delivery.changed = (id) => server?.status(id);
 /** Gamma's heartbeat takes the prompt a moment later, and its pi takes it or queues it. */
-const delivery = new PromptDelivery((id, message) => {
+function send(id: string, message: PaneMessage): boolean {
 	console.log("sent", id, JSON.stringify(message));
+	delivery.queue(id, message);
 	if (id === gamma.id && message.type === "prompt" && message.id) {
 		const promptId = message.id;
 		setTimeout(() => {
-			if (existsSync(join(dir, "gone"))) delivery.dropped(id, [message]);
-			else if (existsSync(join(dir, "compacting")))
+			if (existsSync(join(dir, "held"))) return;
+			if (existsSync(join(dir, "gone"))) {
+				delivery.ended(id, gamma.id, undefined, true);
+				return;
+			}
+			delivery.take(id, gamma.id);
+			if (existsSync(join(dir, "compacting")))
 				delivery.reported(id, [{ id: promptId, outcome: "refused", reason: "compacting" }]);
 			else {
 				const outcome = busy() ? "queued" : "taken";
@@ -93,7 +104,7 @@ const delivery = new PromptDelivery((id, message) => {
 		}, 500);
 	}
 	return true;
-});
+}
 
 const store = new RemoteStore(join(dir, "remote.json"));
 server = await startRemoteServer(
@@ -106,7 +117,7 @@ server = await startRemoteServer(
 				? listed.map((p) => (p.id === "pi-alpha" ? { ...p, id: "pi-alpha-2", pane: "pi-alpha-2" } : p))
 				: listed;
 		},
-		send: (id: string, message: PaneMessage) => delivery.send(id, message),
+		send,
 		launch: () => undefined,
 		startSession: () => "pi-new",
 		claimStart: () => ({ ok: true, id: "pi-new" }),
@@ -119,6 +130,8 @@ server = await startRemoteServer(
 			return {};
 		},
 		outcomes: (id) => delivery.outcomes(id),
+		lifetime: () => delivery.lifetime,
+		answer: (id, waiting) => delivery.answer(id, waiting, id === gamma.id && !quit),
 		renameInstance: () => true,
 		setPinned: () => true,
 		deleteInstance: () => true,
@@ -175,9 +188,16 @@ setInterval(() => {
 		);
 		server?.status(gamma.id);
 	}
+	const restart = join(dir, "restart");
+	if (existsSync(restart)) {
+		rmSync(restart);
+		delivery = new PromptDelivery();
+		delivery.changed = (id) => server?.status(id);
+		// Gamma reports to the new daemon.
+		server?.status(gamma.id);
+	}
 	if (!quit && existsSync(join(dir, "quit"))) {
 		quit = true;
-		delivery.dropped(gamma.id, [], "quit");
-		server?.status(gamma.id);
+		delivery.ended(gamma.id, gamma.id, "quit", true);
 	}
 }, 500);

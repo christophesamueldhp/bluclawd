@@ -10,6 +10,7 @@ import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
+import { publishSubagentPanel } from "../_shared/subagent-panel.ts";
 import { createRunAdmission, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
 import {
 	type AgentDefinitionCatalog,
@@ -25,13 +26,14 @@ import {
 	SubagentMessageBus,
 	subagentMessagePayload,
 } from "./messages.ts";
-import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET, shownInPanel } from "./panel.ts";
-import { createParentScope, inParentScope, type ParentInboxItem } from "./parent-scope.ts";
+import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET } from "./panel.ts";
+import { createParentScope, type ParentInboxItem } from "./parent-scope.ts";
 import type { SubagentResultDetails } from "./results.ts";
 import { describeSubagentModels, runSubagent } from "./runner.ts";
 import { appendSubagentMessageRecord, reconcileInterruptedRuns } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
 import { createTranscriptActions } from "./transcript-actions.ts";
+import { createParentScopeViews } from "./views.ts";
 
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const SUBAGENT_REMINDER_CUSTOM_TYPE = "subagent-reminder";
@@ -89,16 +91,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		let activeTurnIndex = 0;
 		let catalog: AgentDefinitionCatalog | undefined;
-		let unpublishTasks: (() => void) | undefined;
+		let unpublish: (() => void) | undefined;
 		let latestLoadout: ToolLoadout | undefined;
 		const now = options.now ?? Date.now;
 		let panelTui: Pick<TUI, "requestRender" | "hasOverlay"> | undefined;
 		let panel: ReturnType<typeof createPanel> | undefined;
 		let offPanelKeys: (() => void) | undefined;
-		/** The generation of each final run the user dismissed from the panel; a resumed run shows again. */
-		const dismissedFromPanel = new Map<string, number>();
-		/** The same for /tasks, whose dismissals leave the panel too. */
-		const dismissedFromTasks = new Map<string, number>();
 		// Subagent calls in one message start executing together; a child waits for every launch in flight to be
 		// admitted, so each sibling is registered for messages before any of them takes a turn.
 		let launchesInFlight = 0;
@@ -134,26 +132,16 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			onChange: runsChanged,
 			batchWindowMs: options.batchWindowMs ?? BACKGROUND_BATCH_WINDOW_MS,
 		});
-		/** The runs of the orchestrator's current scope that are not final yet. */
-		const openRuns = () => {
-			const scope = parentScope.current();
-			return scope ? directory.list(scope) : [];
-		};
-		/** The open runs whose work the orchestrator still waits on: a run being stopped is not. */
-		const awaitedRuns = () => openRuns().filter((entry) => entry.state !== "stopping");
-
 		const senderRole = (address: string) => scheduler.getRun(address)?.agentName;
 
 		const refreshFooterStatus = () => {
 			try {
 				const ctx = parentScope.context();
 				if (!ctx?.hasUI) return;
-				const activeRuns = openRuns();
-				if (activeRuns.length === 0) {
+				const { running: runningCount, stopping: stoppingCount } = views.footer();
+				if (runningCount + stoppingCount === 0) {
 					ctx.ui.setStatus(STATUS_KEYS.subagents, undefined);
 				} else {
-					const stoppingCount = activeRuns.filter((r) => r.state === "stopping").length;
-					const runningCount = activeRuns.length - stoppingCount;
 					const parts: string[] = [];
 					if (runningCount > 0) parts.push(`${runningCount} subagent${runningCount === 1 ? "" : "s"}`);
 					if (stoppingCount > 0) parts.push(`${stoppingCount} stopping`);
@@ -162,32 +150,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			} catch {
 				// Ignore stale UI context errors
 			}
-		};
-
-		/** The runs of the current scope the panel shows, in admission order. */
-		const panelRuns = () => {
-			const scope = parentScope.current();
-			if (!scope) return [];
-			const at = now();
-			return scheduler
-				.listRuns()
-				.filter(
-					(run) =>
-						inParentScope(run, scope) &&
-						dismissedFromPanel.get(run.runId) !== (run.generation ?? 0) &&
-						dismissedFromTasks.get(run.runId) !== (run.generation ?? 0),
-				)
-				.flatMap((run) => directory.get(run.runId) ?? [])
-				.filter((entry) => shownInPanel(entry, at));
-		};
-		/** The background runs the orchestrator is Waiting for: none while its turn runs. */
-		const waitingFor = () => {
-			try {
-				if (!parentScope.context()?.isIdle()) return 0;
-			} catch {
-				return 0;
-			}
-			return awaitedRuns().filter((entry) => entry.record.deliveryMode === "background").length;
 		};
 
 		const sendToParent = (items: readonly ParentInboxItem<ParentNotice>[]) => {
@@ -244,42 +206,47 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			scope: parentScope,
 		});
 
+		const views = createParentScopeViews({
+			scheduler,
+			directory,
+			agentDir: resolveAgentDir,
+			scope: () => parentScope.current(),
+			idle: () => {
+				try {
+					return parentScope.context()?.isIdle() ?? false;
+				} catch {
+					return false;
+				}
+			},
+			now,
+			onChange: runsChanged,
+		});
+
 		const taskSource = createAgentTaskSource({
+			views,
 			directory,
 			scheduler,
 			agentDir: resolveAgentDir,
-			activeScope: () => parentScope.current(),
-			dismissed: dismissedFromTasks,
 		});
 
 		const { openTranscript } = createTranscriptActions({
-			pi,
 			scope: parentScope,
 			scheduler,
-			directory,
 			transcripts,
 			messageFromUser,
 			admission,
 		});
 
-		// A resumed generation runs under the message call that resumed it, not the first launch.
-		const runLaunchedBy = (toolCallId: string) =>
-			openRuns()
-				.map((entry) => entry.record)
-				.find(
-					(run) => (scheduler.getContext(run.runId)?.resume?.toolCallId ?? run.originToolCallId) === toolCallId,
-				);
-
 		pi.on("message_start", async (event) => {
 			if (event.message.role !== "toolResult") return;
-			const run = runLaunchedBy(event.message.toolCallId);
+			const run = views.launchedBy(event.message.toolCallId);
 			if (run) scheduler.launchResultEmitted(run.runId);
 		});
 
 		// A child's tool calls arrive here as nested calls of the tool call that launched it.
 		pi.on("tool_call", async (event) => {
 			if (!event.parentToolCallId || event.toolName !== "task_stop") return undefined;
-			if (!runLaunchedBy(event.parentToolCallId)) return undefined;
+			if (!views.launchedBy(event.parentToolCallId)) return undefined;
 			const input = event.input as { task_id?: unknown; shell_id?: unknown };
 			const id = String(input.task_id ?? input.shell_id ?? "").trim();
 			if (!scheduler.getRun(id) && !isAgentTaskId(id)) return undefined;
@@ -323,12 +290,14 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			const liveIds = new Set(scheduler.listActiveRuns(sessionId).map((r) => r.runId));
 			reconcileInterruptedRuns(agentDir, sessionId, branchEntries, liveIds);
 
-			unpublishTasks?.();
-			unpublishTasks = publishAgentTasks({
-				...taskSource,
-				panelHasRows: () => panel !== undefined && panelRuns().length > 0,
-				open: openTranscript,
-			});
+			unpublish?.();
+			// The panel first: publishing the tasks signals a change, and the tasks pill then reads the panel.
+			const unpublishPanel = publishSubagentPanel(() => panel !== undefined && views.panel().length > 0);
+			const unpublishTasks = publishAgentTasks({ ...taskSource, open: openTranscript });
+			unpublish = () => {
+				unpublishTasks();
+				unpublishPanel();
+			};
 			refreshFooterStatus();
 			if (ctx.mode === "tui") {
 				// Always mounted: it renders nothing while there are no runs to show.
@@ -339,17 +308,14 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						const shown = createPanel({
 							tui,
 							theme,
-							runs: panelRuns,
-							waitingFor,
+							runs: views.panel,
+							waitingFor: views.waitingFor,
 							now,
 							actions: {
 								// The same stop as /tasks', so no report wakes the orchestrator.
 								stop: ({ record }) =>
 									taskSource.stop(record.runId, { owner: record.parentSessionId, source: "user" }),
-								dismiss: ({ record }) => {
-									dismissedFromPanel.set(record.runId, record.generation ?? 0);
-									runsChanged();
-								},
+								dismiss: ({ record }) => views.dismiss("panel", record.runId),
 								open: ({ record }) => void openTranscript(record.runId),
 							},
 						});
@@ -357,7 +323,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						// Elapsed times move on between run changes, and a succeeded run leaves.
 						const ticker = setInterval(() => {
 							shown.sync();
-							if (panelRuns().length > 0) tui.requestRender();
+							if (views.panel().length > 0) tui.requestRender();
 						}, 1000);
 						ticker.unref?.();
 						return Object.assign(shown, {
@@ -386,7 +352,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		// Added to each request rather than stored, so a compaction cannot drop it.
 		pi.on("context", async (event) => {
-			const runs = awaitedRuns();
+			const runs = views.awaited();
 			if (runs.length === 0) return undefined;
 			const at = now();
 			const lines = runs.map(
@@ -428,8 +394,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		pi.on("session_shutdown", async () => {
 			parentScope.shutdown();
 			await scheduler.waitForSettled();
-			unpublishTasks?.();
-			unpublishTasks = undefined;
+			unpublish?.();
+			unpublish = undefined;
 			offPanelKeys?.();
 			offPanelKeys = undefined;
 			try {
@@ -470,24 +436,17 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		const ago = (at: number | undefined, now: number) =>
 			at === undefined ? "never" : `${Math.round((now - at) / 1000)}s ago`;
-		const describeProgress = ({ record: run, state }: RunEntry, now: number) => {
+		const describeProgress = ({ record: run }: RunEntry, now: number) => {
 			const activity = run.lastActivity
 				? `${run.lastActivity.kind === "tool" ? `tool ${run.lastActivity.detail ?? "?"}` : "model turn"} ${ago(run.lastActivity.at, now)}`
 				: "none yet";
 			return [
-				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${state === "finishing" ? state : run.status}`,
+				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${run.status}`,
 				`  task: ${run.taskSummary}`,
 				`  turns: ${run.turnCount}, tool calls: ${run.toolCallCount}, elapsed: ${formatRunElapsed(run, now)}`,
 				`  last activity: ${activity}; last message: ${ago(run.lastMessageAt, now)}`,
 			].join("\n");
 		};
-		/** A run of the current scope, by name or run ID, that is not final yet. */
-		const findOwnedRun = (target: string) => {
-			const scope = parentScope.current();
-			const found = scope && directory.find(scope, target);
-			return found?.state === "finished" ? undefined : found;
-		};
-
 		pi.registerTool({
 			name: "subagent_status",
 			label: "Subagent status",
@@ -502,7 +461,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			execute: async (_toolCallId, params) => {
 				const now = Date.now();
 				const target = params.agent?.trim();
-				const runs = target ? [findOwnedRun(target)].filter((run) => run !== undefined) : openRuns();
+				const runs = target ? [views.findOpen(target)].filter((run) => run !== undefined) : views.open();
 				const text =
 					runs.length > 0
 						? runs.map((run) => describeProgress(run, now)).join("\n\n")
@@ -537,7 +496,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						details: undefined,
 					};
 				}
-				const run = findOwnedRun(target)?.record;
+				const run = views.findOpen(target)?.record;
 				const stopped = run !== undefined && taskSource.stop(run.runId, { source: "model" }).ok;
 				return {
 					content: [

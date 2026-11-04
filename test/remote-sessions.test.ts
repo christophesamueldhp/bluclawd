@@ -4,9 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleIpcRequest, listSummaries } from "../daemon/handler.ts";
-import type { InstanceSummary } from "../daemon/ipc/protocol.ts";
+import type { InstanceSummary, PaneHeartbeat } from "../daemon/ipc/protocol.ts";
 import { findSession, remoteSessions } from "../daemon/remote/sessions.ts";
+import { collectRows } from "../daemon/rows.ts";
+import { saveInstances } from "../daemon/storage.ts";
 import { ServerSupervisor } from "../daemon/supervisor.ts";
+import type { InstanceRecord } from "../daemon/types.ts";
 import { testRegistry } from "./helpers/registry.ts";
 
 const live = (
@@ -103,18 +106,18 @@ describe("remote sessions", () => {
 		expect(findSession(list, "b")).toEqual({
 			sessionFile: "/s/b.jsonl",
 			cwd: "/p",
-			running: true,
+			verdict: { act: true },
 			busy: false,
 			leafId: "e3",
 			createdAt: "2026-10-12T00:00:00Z",
 			sessionId: "pi-b",
 		});
-		expect(findSession(list, "c")).toMatchObject({ running: true, busy: true });
-		expect(findSession(list, "d")).toMatchObject({ running: true, busy: true });
+		expect(findSession(list, "c")).toMatchObject({ verdict: { act: true }, busy: true });
+		expect(findSession(list, "d")).toMatchObject({ verdict: { act: true }, busy: true });
 		expect(findSession(list, "old")).toEqual({
 			sessionFile: "/s/old.jsonl",
 			cwd: "/p",
-			running: false,
+			verdict: { act: false, reason: "not_running" },
 			busy: false,
 		});
 		expect(findSession(list, "zzz")).toBeUndefined();
@@ -166,6 +169,146 @@ describe("remote sessions through the daemon", () => {
 		});
 		await beat("working");
 		expect(remoteSessions(listSummaries(supervisor))[0]).not.toHaveProperty("dialog");
+	});
+});
+
+describe("a pane's heartbeat, from its register request to agent view's row and the phone's session", () => {
+	// Every field the type has: a field added to it without a value here fails the typecheck.
+	const heartbeat = {
+		cwd: "/p",
+		sessionId: "pi-h",
+		sessionFile: "/s/h.jsonl",
+		label: "deploy",
+		pane: "bluclawd-h",
+		detail: "Waiting: Allow bash?",
+		turns: 2,
+		createdAt: "2026-10-12T00:00:00.000Z",
+		finishedAt: "2026-10-12T00:05:00.000Z",
+		leafId: "e7",
+		dialog: { kind: "confirm", title: "Allow bash?" },
+		draft: true,
+	} satisfies Required<PaneHeartbeat>;
+
+	it("carries every field to the listed summary, and each the row and the phone show", async () => {
+		const supervisor = testRegistry();
+		await handleIpcRequest(supervisor, {
+			type: "register",
+			instance: { ...heartbeat, id: "pi-h", activity: "awaiting_input", launch: { command: ["pi"] } },
+		});
+		const summaries = listSummaries(supervisor);
+		expect(summaries).toHaveLength(1);
+		expect(summaries[0]).toMatchObject({
+			...heartbeat,
+			id: "pi-h",
+			status: "online",
+			activity: "awaiting_input",
+			external: true,
+		});
+		expect(summaries[0]).not.toHaveProperty("launch");
+		expect(collectRows(summaries, undefined)[0]).toMatchObject({
+			id: "pi-h",
+			label: "deploy",
+			cwd: "/p",
+			sessionFile: "/s/h.jsonl",
+			state: "needs",
+			alive: true,
+			detail: "Waiting: Allow bash?",
+			createdAt: "2026-10-12T00:00:00.000Z",
+			finishedAt: "2026-10-12T00:05:00.000Z",
+			pane: "bluclawd-h",
+			dialog: heartbeat.dialog,
+		});
+		expect(remoteSessions(summaries)).toEqual([
+			{
+				id: "pi-h",
+				label: "deploy",
+				cwd: "/p",
+				band: "needs",
+				state: "needs",
+				alive: true,
+				detail: "Waiting: Allow bash?",
+				createdAt: "2026-10-12T00:00:00.000Z",
+				finishedAt: "2026-10-12T00:05:00.000Z",
+				dialog: heartbeat.dialog,
+				settled: 0,
+				verdict: { act: true },
+			},
+		]);
+		expect(findSession(summaries, "pi-h")).toEqual({
+			sessionFile: "/s/h.jsonl",
+			cwd: "/p",
+			verdict: { act: true },
+			busy: true,
+			leafId: "e7",
+			pane: "bluclawd-h",
+			draft: true,
+			createdAt: "2026-10-12T00:00:00.000Z",
+			sessionId: "pi-h",
+		});
+	});
+
+	it("takes only the heartbeat from a register request: a pane cannot pin or order its row", async () => {
+		const supervisor = testRegistry();
+		const wire = { ...heartbeat, id: "pi-h", pinned: true, sortOrder: 1, outcome: "failed" };
+		await handleIpcRequest(supervisor, { type: "register", instance: wire });
+		const [summary] = listSummaries(supervisor);
+		expect(summary).toMatchObject({ ...heartbeat, id: "pi-h", status: "online" });
+		expect(summary.pinned).toBeUndefined();
+		expect(summary.sortOrder).toBeUndefined();
+		expect(summary.outcome).toBeUndefined();
+	});
+
+	it("lists a stored row without the keys instances.json kept that no row has", () => {
+		const dir = mkdtempSync(join(tmpdir(), "bluclawd-stale-keys-"));
+		const stale = { id: "row-s", status: "stopped", cwd: "/p", createdAt: "2026-10-12T00:00:00.000Z", running: true };
+		saveInstances(dir, [stale as InstanceRecord]);
+		const [summary] = listSummaries(testRegistry(dir));
+		expect(summary).toMatchObject({ id: "row-s", status: "stopped", cwd: "/p" });
+		expect(summary).not.toHaveProperty("running");
+	});
+
+	it("takes an older pane's flat request, which has none of the fields added since", async () => {
+		const supervisor = testRegistry();
+		// The register request's shape before a pane said its leaf, dialog, draft or launch command.
+		await handleIpcRequest(supervisor, {
+			type: "register",
+			instance: {
+				id: "pi-old",
+				cwd: "/p",
+				sessionId: "pi-o",
+				sessionFile: "/s/old.jsonl",
+				label: "older",
+				activity: "working",
+				pane: "bluclawd-old",
+				detail: "running tests",
+				turns: 1,
+				createdAt: "2026-10-12T00:00:00.000Z",
+			},
+		});
+		expect(remoteSessions(listSummaries(supervisor))).toEqual([
+			{
+				id: "pi-old",
+				label: "older",
+				cwd: "/p",
+				band: "working",
+				state: "working",
+				alive: true,
+				detail: "running tests",
+				createdAt: "2026-10-12T00:00:00.000Z",
+				finishedAt: undefined,
+				settled: 0,
+				verdict: { act: true },
+			},
+		]);
+		expect(findSession(listSummaries(supervisor), "pi-old")).toEqual({
+			sessionFile: "/s/old.jsonl",
+			cwd: "/p",
+			verdict: { act: true },
+			busy: true,
+			pane: "bluclawd-old",
+			createdAt: "2026-10-12T00:00:00.000Z",
+			sessionId: "pi-o",
+		});
 	});
 });
 
@@ -278,5 +421,31 @@ describe("a pane reaped while tmux still has it (a silent pane)", () => {
 		reap();
 		expect(list()).toEqual([expect.objectContaining({ id: claim.id, alive: true, silent: true })]);
 		expect(supervisor.claimStart({ cwd: dir, sessionFile: file })).toEqual({ ok: false, refused: "running" });
+	});
+});
+
+describe("each listed row's verdict on whether a Chat may act on it", () => {
+	it("lets a Chat act on a live pane's row only: not a silent one's, a starting one's or a stored one's", () => {
+		const { dir, supervisor, beat, reap, list } = silentRegistry();
+		const [live, silent, stored, starting] = ["live", "silent", "stored", "starting"].map((name) => {
+			const file = join(dir, `${name}.jsonl`);
+			writeFileSync(file, "");
+			return file;
+		});
+		beat("pi-silent", silent);
+		beat("pi-stored", stored);
+		supervisor.unregisterExternal("pi-stored", "quit");
+		reap();
+		beat("pi-live", live);
+		const claim = supervisor.claimStart({ cwd: dir, sessionFile: starting });
+		if (!claim.ok) throw new Error("not claimed");
+		expect(Object.fromEntries(list().map((s) => [s.id, s.verdict]))).toEqual({
+			"pi-live": { act: true },
+			"pi-silent": { act: false, reason: "silent" },
+			"pi-stored": { act: false, reason: "not_running" },
+			[claim.id]: { act: false, reason: "starting" },
+		});
+		// Still its pane's row, alive.
+		expect(list().find((s) => s.id === "pi-silent")).toMatchObject({ alive: true, silent: true });
 	});
 });

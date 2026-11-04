@@ -517,8 +517,11 @@ describe("remote HTTP API", () => {
 		instances[0]!.activity = "idle";
 		instances[0]!.draft = true;
 		expect(await ask("POST", "live/prompt", { text: "/compact" })).toEqual([409, "unsent_draft"]);
+		// A Silent pane's row: refused up front, never admitted for the supervisor to refuse.
+		instances.push({ id: "silent", status: "online", cwd: "/p", external: true, silent: true, pane: "pi-silent" });
 		for (const [method, path, body, status, error] of [
 			["POST", "stored/prompt", { text: "hi" }, 409, "session_not_running"],
+			["POST", "silent/prompt", { text: "hi" }, 409, "session_silent"],
 			["DELETE", "live", undefined, 409, "session_running"],
 			["POST", "live/prompt", { text: "/settings" }, 400, "command_refused"],
 			["POST", "live/model", {}, 400, "invalid_model"],

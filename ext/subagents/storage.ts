@@ -192,6 +192,8 @@ export function readPersistedRunRecord(
 		}
 		decodeLegacyStatus(parsed);
 		decodeLegacyUsageAttribution(parsed);
+		// Records stored before every generation was numbered lack it on the launch.
+		parsed.generation ??= 0;
 		return parsed;
 	} catch {
 		return undefined;

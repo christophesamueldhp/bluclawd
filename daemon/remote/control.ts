@@ -5,7 +5,6 @@
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type {
-	EndReason,
 	ErrorResponse,
 	InstanceSummary,
 	LiveSnapshot,
@@ -17,7 +16,7 @@ import type {
 } from "../ipc/protocol.ts";
 import { START_MS } from "../supervisor.ts";
 import { Tmux } from "../tmux.ts";
-import { PromptDelivery } from "./delivery.ts";
+import type { PromptDelivery } from "./delivery.ts";
 import { type RemoteDeps, type RemoteServer, startRemoteServer } from "./http.ts";
 import { Notifier } from "./notifier.ts";
 import { RemoteStore } from "./pairing.ts";
@@ -42,6 +41,8 @@ export interface RemoteControlDeps {
 	paneStarting: RemoteDeps["paneStarting"];
 	startFailed: RemoteDeps["startFailed"];
 	setPinned: RemoteDeps["setPinned"];
+	/** The supervisor's: where the phone's prompts are tracked, and what their panes report settles. */
+	delivery: PromptDelivery;
 	statusLine?: RemoteDeps["statusLine"];
 	renderStatusline?: RemoteDeps["renderStatusline"];
 	store?: RemoteStore;
@@ -82,7 +83,9 @@ export class RemoteControl {
 
 	constructor(deps: RemoteControlDeps) {
 		this.deps = deps;
-		this.delivery = new PromptDelivery(deps.send);
+		this.delivery = deps.delivery;
+		// A pane that ended or fell silent settled some: a phone watching its session is told.
+		this.delivery.changed = (rowId) => this.server?.status(rowId);
 		this.store = deps.store ?? new RemoteStore();
 		this.tmux = deps.tmux ?? new Tmux(undefined, undefined, { timeoutMs: TMUX_TIMEOUT_MS });
 		this.sendPush =
@@ -169,24 +172,6 @@ export class RemoteControl {
 		this.server?.status(sessionId);
 	}
 
-	/** Pane `pane`'s heartbeat took `messages`. */
-	delivered(pane: string, messages: PaneMessage[]): void {
-		this.delivery.delivered(pane, messages);
-	}
-
-	/** Pane `pane`, listed as `sessionId`, went with `inbox` still queued for it; `reason`: why its
-	 *  session ended. */
-	dropped(sessionId: string, inbox: PaneMessage[], reason: EndReason | undefined, pane: string): void {
-		this.delivery.dropped(sessionId, inbox, reason, pane);
-		this.server?.status(sessionId);
-	}
-
-	/** The pane listed as `sessionId`, which may still be alive, was reaped with `inbox` still queued for it. */
-	silent(sessionId: string, inbox: PaneMessage[]): void {
-		this.delivery.silent(inbox);
-		this.server?.status(sessionId);
-	}
-
 	hasReport(sessionId: string): boolean {
 		return this.reports.has(sessionId);
 	}
@@ -219,7 +204,7 @@ export class RemoteControl {
 				{
 					store: this.store,
 					listInstances: this.deps.listInstances,
-					send: (id, message) => this.delivery.send(id, message),
+					send: this.deps.send,
 					launch: () => this.launch(),
 					startSession: (spec) => this.startSession(spec),
 					claimStart: this.deps.claimStart,
@@ -227,6 +212,10 @@ export class RemoteControl {
 					startFailed: this.deps.startFailed,
 					report: (id) => this.reports.get(id),
 					outcomes: (id) => this.delivery.outcomes(id),
+					lifetime: () => this.delivery.lifetime,
+					// Whether its pane reports outcomes, as one from an older build does not, is in its latest report.
+					answer: (id, waiting) =>
+						this.delivery.answer(id, waiting, Array.isArray(this.reports.get(id)?.outcomes)),
 					terminalOpen: () => this.terminalOpen(),
 					renameInstance: this.deps.renameInstance,
 					setPinned: this.deps.setPinned,

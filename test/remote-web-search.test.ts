@@ -10,6 +10,7 @@ const session = (id: string, label: string, cwd: string, detail: string) => ({
 	state: "idle",
 	alive: true,
 	resumable: false,
+	verdict: { act: true } as const,
 });
 const sessions = [
 	session("a", "Fix the parser", "/Users/christophesamueldhp/Projects/bluclawd", "ready"),

@@ -131,7 +131,7 @@ function setup(options: { batchWindowMs?: number } = {}) {
 		runner: runner.run,
 		bus,
 		scope,
-		pi: { appendEntry: (customType, data) => entries.push({ customType, data }) },
+		pi: { appendEntry: (customType, data) => entries.push({ customType, data }), sendMessage: () => {} },
 		launchesSettled: () => Promise.resolve(),
 		onChange: () => {},
 	});
@@ -214,7 +214,7 @@ describe("Generations persist each transition once", () => {
 
 		child.finish({ summaryText: "API built." });
 		await handle.completion;
-		expect(recordWrites(runId)).toEqual(["starting", "running", "running", "completed"]);
+		expect(recordWrites(runId)).toEqual(["starting", "running", "running", "finishing", "completed"]);
 		expect(report(runId)).toContain("API built.");
 		expect(entries.map((entry) => (entry.data as { status: string }).status)).toEqual(["starting", "completed"]);
 	});
@@ -250,7 +250,7 @@ describe("Generations are delivered per kind", () => {
 		expect(notices()[0]).toContain("Execution: completed");
 		expect(notices()[0]).toContain("API built in the background.");
 		expect(ledger()).toMatchObject({ recordedRunIds: [handle.runId], usage: { totalTokens: 70 } });
-		expect(recordWrites(handle.runId)).toEqual(["starting", "completed"]);
+		expect(recordWrites(handle.runId)).toEqual(["starting", "finishing", "completed"]);
 	});
 
 	it.each(["user", "remote"] as const)("sends no notice when the %s stops a background generation", async (source) => {
@@ -346,7 +346,14 @@ describe("A resume is the run's next generation", () => {
 		expect(ledger()).toMatchObject({ recordedRunIds: [`${first.runId}#1`], usage: { totalTokens: 50 } });
 		await waitFor(() => notices().length === 1);
 		expect(notices()[0]).toContain("v2 done.");
-		expect(recordWrites(first.runId)).toEqual(["starting", "completed", "starting", "completed"]);
+		expect(recordWrites(first.runId)).toEqual([
+			"starting",
+			"finishing",
+			"completed",
+			"starting",
+			"finishing",
+			"completed",
+		]);
 		const references = entries.filter((entry) => (entry.data as { runId: string }).runId === first.runId);
 		expect(references.map((entry) => (entry.data as { status: string }).status)).toEqual([
 			"starting",

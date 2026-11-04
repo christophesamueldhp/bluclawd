@@ -30,6 +30,7 @@ import type {
 	WaitRequest,
 	WaitResponse,
 } from "./ipc/protocol.ts";
+import { pickPaneHeartbeat } from "./ipc/protocol.ts";
 import type { RemoteControl } from "./remote/control.ts";
 import type { ServerSupervisor } from "./supervisor.ts";
 import type { InstanceRecord } from "./types.ts";
@@ -40,27 +41,18 @@ function toInstanceSummary(
 	external?: boolean,
 	settled?: number,
 ): InstanceSummary {
+	const { id, status, createdAt, lastSeenAt, outcome, pinned, sortOrder } = instance;
 	return {
-		createdAt: instance.createdAt,
-		lastSeenAt: instance.lastSeenAt,
-		detail: instance.detail,
-		outcome: instance.outcome,
-		turns: instance.turns,
-		finishedAt: instance.finishedAt,
-		pinned: instance.pinned,
-		sortOrder: instance.sortOrder,
-		id: instance.id,
-		status: instance.status,
-		cwd: instance.cwd,
-		label: instance.label,
-		sessionId: instance.sessionId,
-		sessionFile: instance.sessionFile,
+		...pickPaneHeartbeat(instance),
+		id,
+		status,
+		createdAt,
+		lastSeenAt,
+		outcome,
+		pinned,
+		sortOrder,
 		activity,
 		external,
-		pane: instance.pane,
-		leafId: instance.leafId,
-		dialog: instance.dialog,
-		...(instance.draft ? { draft: true } : {}),
 		settled,
 	};
 }
@@ -84,12 +76,11 @@ export function setRemoteControl(control: RemoteControl | undefined): void {
 
 /** Every row agent view lists: stored rows, then each pane's pi with its activity. */
 export function listSummaries(supervisor: ServerSupervisor): InstanceSummary[] {
-	// Panes first: one reaped here shows its stored row again.
+	const stored = supervisor.listInstances().map((instance) => toInstanceSummary(instance));
 	const external = supervisor.listExternalInstances().map(({ record, activity, settled, silent }) => ({
 		...toInstanceSummary(record, activity, true, settled),
 		...(silent ? { silent } : {}),
 	}));
-	const stored = supervisor.listInstances().map((instance) => toInstanceSummary(instance));
 	return [...stored, ...external];
 }
 
@@ -173,30 +164,21 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 
 		case "register": {
 			const now = new Date().toISOString();
+			const { id, activity, launch } = request.instance;
+			const heartbeat = pickPaneHeartbeat(request.instance);
 			const record: InstanceRecord = {
-				id: request.instance.id,
+				...heartbeat,
+				id,
 				status: "online",
-				cwd: request.instance.cwd,
-				createdAt: request.instance.createdAt ?? now,
+				createdAt: heartbeat.createdAt ?? now,
 				lastSeenAt: now,
-				label: request.instance.label,
-				sessionId: request.instance.sessionId,
-				sessionFile: request.instance.sessionFile,
-				pane: request.instance.pane,
-				detail: request.instance.detail,
-				turns: request.instance.turns,
-				finishedAt: request.instance.finishedAt,
-				leafId: request.instance.leafId,
-				dialog: request.instance.dialog,
-				...(request.instance.draft === true ? { draft: true } : {}),
 			};
-			if (request.instance.launch) remoteControl?.noteLaunch(request.instance.launch);
-			supervisor.registerExternal(record, request.instance.activity ?? "idle");
+			if (launch) remoteControl?.noteLaunch(launch);
+			supervisor.registerExternal(record, activity ?? "idle");
 			// The phone started it by its pane's name, and knows it by its row's id.
 			remoteControl?.registered(record.id);
 			const row = supervisor.rowIdOf(record.id);
 			const messages = supervisor.drainExternal(record.id);
-			remoteControl?.delivered(record.id, messages);
 			return {
 				type: "register_result",
 				ok: true,

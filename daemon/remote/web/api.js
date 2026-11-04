@@ -110,13 +110,26 @@ export const api = {
 		call("GET", `${session(id)}/messages?limit=100${before ? `&before=${encodeURIComponent(before)}` : ""}`),
 	/**
 	 * A stored session resumes in a new pane, named in the reply; only a running one takes images.
-	 * `promptId`: what its outcome comes back by, in the session's status.
+	 * `promptId`: what its outcome comes back by, in the session's status. `lifetime`: the daemon's,
+	 * which it is asked about the prompt by.
 	 * @param {string} id @param {string} text @param {{ mimeType: string, data: string }[]} images base64
 	 * @param {string} promptId
-	 * @returns {Promise<{ pane?: string }>}
+	 * @returns {Promise<{ pane?: string, lifetime?: string }>}
 	 */
 	prompt: (id, text, images, promptId) =>
 		call("POST", `${session(id)}/prompt`, { text, ...(images.length ? { images } : {}), id: promptId }),
+	/**
+	 * What became of the prompts the phone still waits on, by the lifetime of the daemon that accepted each
+	 * when the phone kept it.
+	 * @param {string} id @param {{ id: string, lifetime?: string }[]} waiting
+	 * @returns {Promise<import("./statusbar.js").PromptOutcome[]>}
+	 */
+	outcomes: async (id, waiting) => {
+		const query = waiting
+			.map((w) => `prompt=${encodeURIComponent(w.lifetime ? `${w.id}@${w.lifetime}` : w.id)}`)
+			.join("&");
+		return (await call("GET", `${session(id)}/outcomes?${query}`)).outcomes;
+	},
 	/**
 	 * An image in a message, by the message's id and its position there: an `<img>` cannot send the token.
 	 * @param {string} id @param {string} entryId @param {number} index @returns {Promise<Blob>}

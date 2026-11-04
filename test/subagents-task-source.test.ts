@@ -12,6 +12,7 @@ import {
 import { writeFullSubagentReport, writePersistedRunRecord } from "../ext/subagents/storage.ts";
 import { createAgentTaskSource } from "../ext/subagents/task-source.ts";
 import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
+import { createParentScopeViews } from "../ext/subagents/views.ts";
 
 const tempDirs: string[] = [];
 
@@ -32,6 +33,7 @@ function persistedRecord(overrides: Partial<SubagentRunRecord>): SubagentRunReco
 		sessionEpoch: 1,
 		parentTurnId: "turn_1",
 		originToolCallId: "call_1",
+		generation: 0,
 		agentName: "explorer",
 		definitionSource: "bundled",
 		provider: "faux",
@@ -60,7 +62,7 @@ function setup(activeParentSessionId: string | undefined = "sess_main") {
 	const agentDir = makeAgentDir();
 	const controllers = new Map<string, SubagentRunController>();
 	const settle = new Map<string, (outcome: SubagentRunnerOutcome) => void>();
-	const scheduler = new SubagentRunScheduler({
+	const scheduler = new SubagentRunScheduler<{ resume?: { toolCallId: string } }>({
 		executeRun: ({ record, controller, signal }) => {
 			controllers.set(record.runId, controller);
 			return new Promise<SubagentRunnerOutcome>((resolve) => {
@@ -71,10 +73,10 @@ function setup(activeParentSessionId: string | undefined = "sess_main") {
 			});
 		},
 	});
-	const launch = (parentSessionId = "sess_main", taskSummary = "Scan auth") => {
+	const launch = (parentSessionId = "sess_main", taskSummary = "Scan auth", sessionEpoch = 1) => {
 		const admitted = scheduler.admit({
 			parentSessionId,
-			sessionEpoch: 1,
+			sessionEpoch,
 			parentTurnId: "turn_1",
 			originToolCallId: `call_${Math.random().toString(36).slice(2, 8)}`,
 			agentName: "explorer",
@@ -89,13 +91,23 @@ function setup(activeParentSessionId: string | undefined = "sess_main") {
 		if (!admitted.ok) throw new Error(admitted.error);
 		return admitted.handle;
 	};
+	const directory = createRunDirectory({ scheduler, agentDir: () => agentDir });
 	const source = createAgentTaskSource({
-		directory: createRunDirectory({ scheduler, agentDir: () => agentDir }),
+		views: createParentScopeViews({
+			scheduler,
+			directory,
+			agentDir: () => agentDir,
+			scope: () =>
+				activeParentSessionId === undefined
+					? undefined
+					: { parentSessionId: activeParentSessionId, sessionEpoch: 1 },
+			idle: () => true,
+			now: Date.now,
+			onChange: () => {},
+		}),
+		directory,
 		scheduler,
 		agentDir: () => agentDir,
-		activeScope: () =>
-			activeParentSessionId === undefined ? undefined : { parentSessionId: activeParentSessionId, sessionEpoch: 1 },
-		dismissed: new Map(),
 	});
 	return { agentDir, scheduler, controllers, settle, launch, source };
 }
@@ -167,8 +179,11 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 		const running = launch();
 		const foreign = launch("sess_other");
 		const finished = launch();
-		settle.get(finished.runId)?.({ status: "completed", complete: true, summaryText: "done" });
-		await finished.completion;
+		const earlierEpoch = launch("sess_main", "Scan auth", 0);
+		for (const run of [finished, earlierEpoch]) {
+			settle.get(run.runId)?.({ status: "completed", complete: true, summaryText: "done" });
+			await run.completion;
+		}
 		writePersistedRunRecord(agentDir, persistedRecord({ runId: "sub_earlier", status: "completed" }));
 		writePersistedRunRecord(
 			agentDir,
@@ -181,6 +196,12 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 			ok: false,
 			reason: "not_running",
 			task: { id: finished.runId, status: "completed" },
+		});
+		// The same answer before a restart as after one, when the record is read from disk.
+		expect(source.stop(earlierEpoch.runId)).toMatchObject({
+			ok: false,
+			reason: "not_running",
+			task: { id: earlierEpoch.runId, status: "completed" },
 		});
 		expect(source.stop("sub_earlier")).toMatchObject({
 			ok: false,

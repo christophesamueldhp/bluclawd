@@ -15,23 +15,18 @@ import { giveUp, promptKey, sentText, settle, shellLine } from "./live.js";
  * A prompt sent and not yet in the transcript. `id`: the one sent with it, which its outcome comes
  * back by. `text`: as the transcript will show it (see promptKey); `prompt`: as typed, `images`:
  * as sent. `before`: the transcript's copies of its text when it was sent. `started`: the session
- * was seen working since. `last`: the transcript's last message when it was sent. `acceptedAt`: when
- * the daemon answered that it has it. `outcome`: what its pane reported of it, a pane that reports
- * outcomes.
- * @typedef {{ id: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, acceptedAt?: number, outcome?: "taken" | "queued" }} Pending
+ * was seen working since. `last`: the transcript's last message when it was sent. `lifetime`: the
+ * daemon's, as it answered that it has it, which the daemon is asked about it by. `acceptedAt`: set
+ * instead by an older phone (0.0.52), which kept no lifetime, once the daemon had it. `outcome`: what its
+ * pane reported of it, a pane that reports outcomes.
+ * @typedef {{ id: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, lifetime?: string, acceptedAt?: number, outcome?: "taken" | "queued" }} Pending
  */
 
 /** A reply's text and thinking, held until a page has its entry. @typedef {{ entryId: string, text: string, thinking?: string }} Held */
 
 /** Why a sent prompt came back: its pane refused it, or it was lost. @typedef {{ entry: Pending, reason: string }} Failed */
 
-/**
- * Every outcome the daemon knows for the session, as it replays them to an event stream asked for at `since`.
- * @typedef {{ outcomes: import("./statusbar.js").PromptOutcome[], since: number }} Replay
- */
-
-/** How long the daemon keeps a prompt after its last change: delivery.ts's DELIVERY_KEEP_MS. */
-export const KEEP_MS = 10 * 60_000;
+/** @typedef {import("./statusbar.js").PromptOutcome} PromptOutcome */
 
 /** Unique across chats and reloads: the daemon keeps outcomes by it. */
 function promptId() {
@@ -64,7 +59,7 @@ export function openChat(id, kept = []) {
 		kept,
 		/** Those the phone kept of it were put back in or discarded (see restorePending). */
 		restored: false,
-		/** The daemon's last replay of its outcomes, until those kept are restored. @type {Replay | undefined} */
+		/** The outcomes the daemon replayed, every one it knows for the session, until those kept are restored. @type {PromptOutcome[] | undefined} */
 		replay: undefined,
 		/** Images for the next prompt. @type {Attachment[]} */ attachments: [],
 		/** Picked photos still being read into `attachments`. */
@@ -199,35 +194,56 @@ function written(chat, entry) {
 }
 
 /**
- * What became of the prompts sent to the session: from its status, or the event stream's. The
- * refused and lost ones are taken out, and returned to go back into the reply box. `since`: an
- * event stream asked for then replays every outcome its daemon knows, so a prompt it had accepted
- * before then, less than KEEP_MS before, and does not list, a restarted daemon lost, unless its
- * pane had reported it taken or queued; only for a pane that reports outcomes, as the others'
- * prompts may have reached pi.
- * @param {Chat} chat @param {import("./statusbar.js").PromptOutcome[] | undefined} outcomes
- * @param {number} [since]
+ * What became of the prompts sent to the session: from its status, the event stream's, or the
+ * daemon's answer about those it still waits on (see waitingOn). The refused and lost ones are
+ * taken out, and returned to go back into the reply box.
+ * @param {Chat} chat @param {PromptOutcome[] | undefined} outcomes
  * @returns {Failed[]}
  */
-export function settleOutcomes(chat, outcomes, since) {
-	return settleSent(chat, outcomes ?? [], since, reportsOutcomes(chat) ? chat.pending : []);
+export function settleOutcomes(chat, outcomes) {
+	/** @type {Failed[]} */
+	const failed = [];
+	for (const outcome of outcomes ?? []) {
+		const entry = chat.pending.find((p) => p.id === outcome.id);
+		if (!entry) continue;
+		if (outcome.outcome === "refused" || outcome.outcome === "lost") failed.push({ entry, reason: outcome.reason });
+		else if (outcome.outcome !== "sent") entry.outcome = outcome.outcome;
+	}
+	for (const { entry } of failed) forget(chat, entry);
+	keepPending(chat, (p) => !written(chat, p));
+	return failed;
+}
+
+/**
+ * The prompts the daemon is asked about: those it accepted that their pane has said nothing of.
+ * It answers each with its outcome, or lost when a daemon before a restart accepted it, as only it
+ * can tell; one pi took or queued is not sent again. One an older phone kept with no lifetime is
+ * asked about with none, which the daemon answers only while it knows the id.
+ * @param {Chat} chat
+ * @returns {{ id: string, lifetime?: string }[]}
+ */
+export function waitingOn(chat) {
+	return chat.pending.flatMap(({ id, lifetime, acceptedAt, outcome }) => {
+		if (outcome) return [];
+		if (lifetime) return [{ id, lifetime }];
+		return acceptedAt === undefined ? [] : [{ id }];
+	});
 }
 
 /**
  * The prompts the phone kept of the chat (see storedPending), back in as it opens again once both
  * the daemon's `replay` and its pane's report (or its answer that there is none) are in, in either
- * order, and settled by the replay as settleOutcomes does: one the replay lacks was lost, judged
- * only for a pane that reports outcomes. For a pane whose report shows an older build, which
- * reports no outcomes to settle them by, only those the replay says refused or lost come back
- * (the daemon's word on each, whatever the pane's build), and the others are discarded.
- * @param {Chat} chat @param {Replay} [replay]
+ * order, and settled by the replay as settleOutcomes does. For a pane whose report shows an older
+ * build, which reports no outcomes to settle them by, only those the replay says refused or lost
+ * come back (the daemon's word on each, whatever the pane's build), and the others are discarded.
+ * @param {Chat} chat @param {PromptOutcome[]} [replay]
  * @returns {Failed[]}
  */
 export function restorePending(chat, replay) {
 	if (chat.restored) return [];
 	chat.replay = replay ?? chat.replay;
 	if (!chat.replay || chat.report === undefined) return [];
-	const { outcomes, since } = chat.replay;
+	const outcomes = chat.replay;
 	const kept = chat.kept;
 	chat.restored = true;
 	chat.replay = undefined;
@@ -244,7 +260,7 @@ export function restorePending(chat, replay) {
 	}
 	const restored = kept.filter((s) => !chat.pending.some((p) => p.id === s.id));
 	chat.pending = [...restored, ...chat.pending];
-	return settleSent(chat, outcomes, since, reportsOutcomes(chat) ? restored : []);
+	return settleOutcomes(chat, outcomes);
 }
 
 /**
@@ -257,36 +273,6 @@ export function restorePending(chat, replay) {
 export function storedPending(chat) {
 	if (olderBuild(chat)) return chat.kept;
 	return [...chat.kept, ...chat.pending];
-}
-
-/**
- * See settleOutcomes. `judged`: the pending prompts a replay that lacks them finds lost.
- * @param {Chat} chat @param {import("./statusbar.js").PromptOutcome[]} outcomes
- * @param {number | undefined} since @param {Pending[]} judged
- * @returns {Failed[]}
- */
-function settleSent(chat, outcomes, since, judged) {
-	/** @type {Failed[]} */
-	const failed = [];
-	for (const outcome of outcomes) {
-		const entry = chat.pending.find((p) => p.id === outcome.id);
-		if (!entry) continue;
-		if (outcome.outcome === "refused" || outcome.outcome === "lost") failed.push({ entry, reason: outcome.reason });
-		else if (outcome.outcome !== "sent") entry.outcome = outcome.outcome;
-	}
-	if (since !== undefined) {
-		const known = new Set(outcomes.map((o) => o.id));
-		for (const entry of judged) {
-			// One pi took or queued is not sent again.
-			if (entry.outcome || entry.acceptedAt === undefined || entry.acceptedAt >= since) continue;
-			// The daemon lets one go once it is that old: its silence then says nothing.
-			if (since - entry.acceptedAt > KEEP_MS) continue;
-			if (!known.has(entry.id)) failed.push({ entry, reason: "daemon_restarted" });
-		}
-	}
-	for (const { entry } of failed) forget(chat, entry);
-	keepPending(chat, (p) => !written(chat, p));
-	return failed;
 }
 
 /**

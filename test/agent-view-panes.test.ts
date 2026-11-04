@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { listSummaries } from "../daemon/handler.ts";
 import type { ResumeSpec, StartSpec } from "../daemon/ipc/protocol.ts";
 import type { InstanceSummary, OrchestratorClient } from "../daemon/orchestrator-client.ts";
-import { collectRows } from "../daemon/rows.ts";
+import { type AgentRow, collectRows, rowFromShell } from "../daemon/rows.ts";
 import { HIDE_ENV, OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../daemon/tmux.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
@@ -16,7 +16,9 @@ import {
 	promptOptions,
 	shutdownPlan,
 } from "../ext/agent-view/index.ts";
+import { bandTargets, deletable, RowActions, type RowClient } from "../ext/agent-view/row-actions.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
+import { focusedLine } from "./helpers/agent-view-focus.ts";
 import { testRegistry } from "./helpers/registry.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -35,17 +37,15 @@ beforeAll(() => setSharedTheme(plainTheme));
 
 type Calls = unknown[][];
 
-function setup(instances: InstanceSummary[], self?: InstanceSummary, overrides: Partial<OrchestratorClient> = {}) {
+/** The fake daemon client and tmux, every call recorded in order into one list. */
+function recorder(overrides: Partial<RowClient> = {}) {
 	const calls: Calls = [];
 	const record =
 		(name: string) =>
 		async (...args: unknown[]) => {
 			calls.push([name, ...args]);
 		};
-	const client = {
-		list: async () => instances,
-		ensureDaemon: async () => true,
-		getDaemonInfo: async () => ({ running: false }),
+	const client: RowClient = {
 		send: record("send"),
 		delete: record("delete"),
 		setMeta: record("setMeta"),
@@ -55,7 +55,7 @@ function setup(instances: InstanceSummary[], self?: InstanceSummary, overrides: 
 		},
 		startFailed: record("startFailed"),
 		...overrides,
-	} as unknown as OrchestratorClient;
+	};
 	let started = 0;
 	const panes: PaneOps = {
 		current: "pi-self",
@@ -75,21 +75,32 @@ function setup(instances: InstanceSummary[], self?: InstanceSummary, overrides: 
 		detach: () => calls.push(["detach"]),
 		startShell: () => "sh-new",
 		listShells: () => [],
-		stopShell: () => {},
+		stopShell: (name) => calls.push(["stopShell", name]),
 		capture: () => [],
 	};
+	return { calls, client, panes };
+}
+
+function setup(instances: InstanceSummary[], self?: InstanceSummary, overrides: Partial<OrchestratorClient> = {}) {
+	const { calls, client, panes } = recorder();
 	let closed = 0;
 	const view = new AgentView({
 		ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
-		client,
+		client: {
+			list: async () => instances,
+			ensureDaemon: async () => true,
+			getDaemonInfo: async () => ({ running: false }),
+			...client,
+			...overrides,
+		} as unknown as OrchestratorClient,
 		appName: "bluclawd",
 		cwd: HERE,
 		home: "/home/me",
 		self: () => self,
 		onClose: () => closed++,
 		panes,
+		instances,
 	});
-	view.setInstancesForTest(instances);
 	const flush = async () => {
 		for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
 	};
@@ -117,6 +128,384 @@ const paneRow = (id: string, extra: Partial<InstanceSummary> = {}): InstanceSumm
 	...extra,
 });
 
+/** Row actions over the recorder, and its calls. */
+function actions(overrides: Partial<RowClient> = {}) {
+	const rec = recorder(overrides);
+	let stoppedSelf = 0;
+	const rowActions = new RowActions({
+		client: rec.client,
+		panes: rec.panes,
+		cwd: HERE,
+		onStopSelf: () => stoppedSelf++,
+	});
+	return { ...rec, actions: rowActions, stoppedSelf: () => stoppedSelf };
+}
+
+/** A listed session as agent view shows it. */
+const rowOf = (inst: InstanceSummary, self?: InstanceSummary): AgentRow => {
+	const row = collectRows([inst], self).find((r) => r.id === inst.id);
+	if (!row) throw new Error(`no row for ${inst.id}`);
+	return row;
+};
+
+const storedRow = (id: string, extra: Partial<InstanceSummary> = {}): AgentRow =>
+	rowOf({ id, status: "stopped", cwd: HERE, sessionFile: `/s/${id}.jsonl`, outcome: "done", ...extra });
+
+const notCancelled = () => false;
+
+/** The view's side of a hand-off, its steps recorded among the calls when given them. */
+const handOff = (calls?: Calls) => ({
+	leaving: () => calls?.push(["leaving"]),
+	left: () => calls?.push(["left"]),
+});
+
+describe("row actions: open", () => {
+	it("switches to a pane at once, waiting on nothing", async () => {
+		const { actions: a, calls } = actions();
+		const opening = a.open(rowOf(paneRow("pi-a")), notCancelled);
+		expect(calls).toEqual([["switchTo", "pi-a"]]);
+		expect(await opening).toEqual({ kind: "left" });
+	});
+
+	it("gives a stored session a pane of its own, claimed first, then switches to it", async () => {
+		const { actions: a, calls } = actions();
+		expect(await a.open(storedRow("s"), notCancelled)).toEqual({ kind: "left" });
+		// Claimed first, so a phone's resume of the same file is refused; the stored row stays as its row.
+		expect(calls).toEqual([
+			["claim", { cwd: HERE, sessionFile: "/s/s.jsonl" }],
+			["start", HERE, ["--session", "/s/s.jsonl"], undefined],
+			["switchTo", "pi-new1"],
+		]);
+	});
+
+	it("claim refused, so no spawn, and it says why", async () => {
+		const { actions: a, calls } = actions({
+			start: async () => {
+				throw new Error("it is already starting — try again in a moment");
+			},
+		});
+		expect(await a.open(storedRow("s"), notCancelled)).toEqual({
+			kind: "failed",
+			text: "Couldn't open — it is already starting — try again in a moment",
+		});
+		expect(calls).toEqual([]);
+	});
+
+	it("a pane that cannot be started gives its claim back", async () => {
+		const { actions: a, calls, panes } = actions();
+		panes.start = () => {
+			throw tmuxFailure("no server running\n");
+		};
+		expect(await a.open(storedRow("s"), notCancelled)).toEqual({
+			kind: "failed",
+			text: "Couldn't open — no server running",
+		});
+		expect(calls).toEqual([
+			["claim", { cwd: HERE, sessionFile: "/s/s.jsonl" }],
+			["startFailed", "claimed"],
+		]);
+	});
+
+	it("an open called off while its pane starts leaves it running in the background", async () => {
+		const { actions: a, calls } = actions();
+		expect(await a.open(storedRow("s"), () => true)).toEqual({ kind: "cancelled" });
+		expect(calls.map((c) => c[0])).toEqual(["claim", "start"]);
+	});
+
+	it("a pane that is gone says so rather than tmux's command line; any other failure in tmux's own words", async () => {
+		const { actions: a, panes } = actions();
+		let stderr = "can't find session: pi-a\n";
+		panes.switchTo = () => {
+			throw tmuxFailure(stderr);
+		};
+		expect(await a.open(rowOf(paneRow("pi-a")), notCancelled)).toEqual({
+			kind: "failed",
+			text: "Couldn't open — that session's pane is gone",
+		});
+		stderr = "no current client\n";
+		expect(await a.open(rowOf(paneRow("pi-a")), notCancelled)).toEqual({
+			kind: "failed",
+			text: "Couldn't open — no current client",
+		});
+	});
+
+	it("a starting row, or one with no session file, is refused with what to do", async () => {
+		const { actions: a, calls } = actions();
+		const starting = rowOf({ id: "s", status: "starting", cwd: HERE, sessionFile: "/s/s.jsonl" });
+		expect(await a.open(starting, notCancelled)).toEqual({
+			kind: "refused",
+			text: "Still starting — try again in a moment",
+		});
+		const legacy = rowOf({ id: "legacy", status: "stopped", outcome: "failed", cwd: HERE });
+		expect(await a.open(legacy, notCancelled)).toEqual({
+			kind: "refused",
+			text: "No session file recorded — use /resume to reopen its saved conversation",
+		});
+		expect(calls).toEqual([]);
+	});
+
+	it("this window's own session is left to, and a ! command opens on its output", async () => {
+		const self = paneRow("pi-self", { activity: "idle" });
+		const { actions: a, calls } = actions();
+		expect(await a.open(rowOf(self, self), notCancelled)).toEqual({ kind: "left" });
+		const shell = rowFromShell({ name: "sh-1", command: "ls", cwd: HERE, createdAt: "", stopped: false });
+		expect(await a.open(shell, notCancelled)).toEqual({ kind: "peek" });
+		expect(calls).toEqual([]);
+	});
+});
+
+describe("row actions: stop and delete", () => {
+	const shellRow = (stopped: boolean) =>
+		rowFromShell({
+			name: "sh-1",
+			command: "sleep 9",
+			cwd: HERE,
+			createdAt: "",
+			stopped,
+			exit: stopped ? "143" : undefined,
+		});
+
+	it("stop ends a pane's pi, as quitting does; delete kills the pane, then deletes the row", async () => {
+		const { actions: a, calls } = actions();
+		const row = rowOf(paneRow("pi-a"));
+		expect(await a.stop(row)).toEqual({ kind: "done" });
+		expect(calls).toEqual([["end", "pi-a"]]);
+		calls.length = 0;
+		expect(await a.delete(row, handOff())).toEqual({ kind: "done" });
+		expect(calls).toEqual([
+			["kill", "pi-a"],
+			["delete", "pi-a"],
+		]);
+	});
+
+	it("a stored row has nothing to stop, and delete only deletes the row", async () => {
+		const { actions: a, calls } = actions();
+		expect(await a.stop(storedRow("s"))).toEqual({ kind: "refused" });
+		expect(await a.delete(storedRow("s"), handOff())).toEqual({ kind: "done" });
+		expect(calls).toEqual([["delete", "s"]]);
+	});
+
+	it("says why a stop or a delete failed", async () => {
+		const { actions: a, panes } = actions({
+			delete: async () => {
+				throw new Error("daemon away");
+			},
+		});
+		panes.end = () => {
+			throw new Error("tmux away");
+		};
+		expect(await a.stop(rowOf(paneRow("pi-a")))).toEqual({ kind: "failed", text: "Couldn't stop — tmux away" });
+		expect(await a.delete(storedRow("s"), handOff())).toEqual({
+			kind: "failed",
+			text: "Couldn't delete — daemon away",
+		});
+	});
+
+	it("a starting row is neither stopped nor deleted", () => {
+		expect(deletable(rowOf({ id: "s", status: "starting", cwd: HERE }))).toBe(false);
+		expect(deletable(storedRow("s"))).toBe(true);
+	});
+
+	it("a ! command stops while it runs and keeps its row; delete removes it", async () => {
+		const { actions: a, calls } = actions();
+		expect(await a.stop(shellRow(false))).toEqual({ kind: "done" });
+		expect(await a.stop(shellRow(true))).toEqual({ kind: "refused" });
+		expect(await a.delete(shellRow(true), handOff())).toEqual({ kind: "done" });
+		expect(calls).toEqual([
+			["stopShell", "sh-1"],
+			["kill", "sh-1"],
+		]);
+	});
+
+	it("this window's own session stops its turn, and is never ended from here", async () => {
+		const { actions: a, calls, stoppedSelf } = actions();
+		const self = paneRow("pi-self", { activity: "working" });
+		expect(await a.stop(rowOf(self, self))).toEqual({ kind: "done" });
+		expect(stoppedSelf()).toBe(1);
+		expect(calls).toEqual([]);
+	});
+
+	it("a band deletes each of its rows but this window's own and starting ones, a pane killed before its row is deleted", async () => {
+		const { actions: a, calls } = actions();
+		const self = paneRow("pi-self");
+		const rows = [rowOf(paneRow("pi-a")), storedRow("s"), shellRow(true)];
+		const band = [rowOf(self, self), ...rows, rowOf({ id: "n", status: "starting", cwd: HERE })];
+		expect(bandTargets(band)).toEqual(rows);
+		await a.deleteAll(bandTargets(band));
+		expect(calls).toEqual([
+			["kill", "pi-a"],
+			["delete", "pi-a"],
+			["delete", "s"],
+			["kill", "sh-1"],
+		]);
+	});
+});
+
+describe("row actions: deleting this terminal's own session", () => {
+	const self = paneRow("pi-self", { activity: "idle" });
+
+	it("starts a pane in agent view, waits for it to draw, switches to it, then unlists, deletes and ends this one", async () => {
+		const { actions: a, calls } = actions();
+		expect(await a.delete(rowOf(self, self), handOff(calls))).toEqual({ kind: "left" });
+		expect(calls).toEqual([
+			["leaving"],
+			["start", HERE, ["--", "/agent-view"], { [OPEN_VIEW_ENV]: "1", [HIDE_ENV]: "pi-self" }],
+			["waitForView", "pi-new1"],
+			["switchTo", "pi-new1"],
+			["left"],
+			["unlist"],
+			["delete", "pi-self"],
+			["kill", "pi-self"],
+		]);
+	});
+
+	it("is called off, killing the new pane, if it ends before drawing", async () => {
+		const { actions: a, calls, panes } = actions();
+		panes.waitForView = async () => {
+			throw new Error("can't find session");
+		};
+		expect(await a.delete(rowOf(self, self), handOff(calls))).toEqual({
+			kind: "failed",
+			text: "Couldn't delete — can't find session",
+		});
+		expect(calls).toEqual([
+			["leaving"],
+			["start", HERE, ["--", "/agent-view"], { [OPEN_VIEW_ENV]: "1", [HIDE_ENV]: "pi-self" }],
+			["kill", "pi-new1"],
+		]);
+	});
+});
+
+describe("row actions: reply", () => {
+	it("is a pane's next prompt", async () => {
+		const { actions: a, calls } = actions();
+		expect(await a.reply(rowOf(paneRow("pi-a", { activity: "idle" })), "and the changelog")).toEqual({
+			kind: "done",
+		});
+		expect(calls).toEqual([["send", "pi-a", { type: "prompt", text: "and the changelog" }]]);
+	});
+
+	it("starts a stored session in a pane of its own, claimed first, with the reply as its first prompt", async () => {
+		const { actions: a, calls } = actions();
+		expect(await a.reply(storedRow("s"), "carry on")).toEqual({ kind: "done" });
+		expect(calls).toEqual([
+			["claim", { cwd: HERE, sessionFile: "/s/s.jsonl" }],
+			["start", HERE, ["--session", "/s/s.jsonl", "--", "carry on"], undefined],
+		]);
+	});
+
+	it("is refused while a pane waits on a question, and for a row with no pane to start", async () => {
+		const { actions: a, calls } = actions();
+		expect(await a.reply(rowOf(paneRow("pi-a", { activity: "awaiting_input" })), "yes")).toEqual({
+			kind: "refused",
+			text: "it's waiting on a question — enter opens it to answer",
+		});
+		expect(await a.reply(rowOf({ id: "s", status: "starting", cwd: HERE }), "yes")).toEqual({
+			kind: "refused",
+			text: "enter opens it",
+		});
+		expect(calls).toEqual([]);
+	});
+
+	it("says why it could not be sent", async () => {
+		const { actions: a } = actions({
+			send: async () => {
+				throw new Error("daemon away");
+			},
+		});
+		expect(await a.reply(rowOf(paneRow("pi-a", { activity: "idle" })), "go")).toEqual({
+			kind: "failed",
+			text: "Couldn't send — daemon away",
+		});
+	});
+
+	it("/stop aborts a working session's turn; this window's own stops its own", async () => {
+		const { actions: a, calls, stoppedSelf } = actions();
+		expect(await a.reply(rowOf(paneRow("pi-a")), "/stop")).toEqual({ kind: "done" });
+		expect(calls).toEqual([["send", "pi-a", { type: "abort" }]]);
+		const self = paneRow("pi-self");
+		expect(await a.reply(rowOf(self, self), "/stop")).toEqual({ kind: "done" });
+		expect(stoppedSelf()).toBe(1);
+	});
+
+	it("to this window's own session is left for it to send; with nothing typed, the row opens", async () => {
+		const { actions: a, calls } = actions();
+		const self = paneRow("pi-self", { activity: "idle" });
+		expect(await a.reply(rowOf(self, self), "next")).toEqual({ kind: "self" });
+		expect(await a.reply(rowOf(paneRow("pi-a")), "")).toEqual({ kind: "open" });
+		expect(calls).toEqual([]);
+	});
+
+	it("a ! command takes only /stop", async () => {
+		const { actions: a, calls } = actions();
+		const shell = rowFromShell({ name: "sh-1", command: "sleep 9", cwd: HERE, createdAt: "", stopped: false });
+		expect(await a.reply(shell, "hello")).toEqual({
+			kind: "refused",
+			text: "a shell command takes no reply — ctrl+x stops it",
+		});
+		expect(await a.reply(shell, "")).toEqual({ kind: "refused" });
+		expect(await a.reply(shell, "/stop")).toEqual({ kind: "done" });
+		expect(calls).toEqual([["stopShell", "sh-1"]]);
+	});
+});
+
+describe("row actions: pin", () => {
+	it("pins or unpins a row, this window's own too", async () => {
+		const { actions: a, calls } = actions();
+		const self = paneRow("pi-self");
+		expect(await a.pin(rowOf(self, self))).toEqual({ kind: "done" });
+		expect(await a.pin(rowOf(paneRow("pi-a", { pinned: true })))).toEqual({ kind: "done" });
+		expect(calls).toEqual([
+			["setMeta", "pi-self", { pinned: true }],
+			["setMeta", "pi-a", { pinned: false }],
+		]);
+	});
+
+	it("leaves a starting row and a ! command unpinned, and says why it could not", async () => {
+		const { actions: a, calls } = actions();
+		expect(await a.pin(rowOf({ id: "s", status: "starting", cwd: HERE }))).toEqual({ kind: "refused" });
+		const shell = rowFromShell({ name: "sh-1", command: "ls", cwd: HERE, createdAt: "", stopped: false });
+		expect(await a.pin(shell)).toEqual({ kind: "refused", text: "A shell command can't be pinned" });
+		expect(calls).toEqual([]);
+		const failing = actions({
+			setMeta: async () => {
+				throw new Error("daemon away");
+			},
+		});
+		expect(await failing.actions.pin(storedRow("s", { pinned: true }))).toEqual({
+			kind: "failed",
+			text: "Couldn't unpin — daemon away",
+		});
+	});
+});
+
+describe("row actions: start", () => {
+	it("starts a new session's pane with the task as its first prompt, then has the daemon list it as starting", async () => {
+		const { actions: a, calls } = actions();
+		const started = a.start(HERE, "write the release notes", ["/tmp/shot.png"], {
+			provider: "anthropic",
+			id: "opus",
+		});
+		expect(started).toMatchObject({ kind: "started", pane: "pi-new1" });
+		expect(calls).toEqual([
+			["start", HERE, ["--model", "anthropic/opus", "--", "@/tmp/shot.png", "write the release notes"], undefined],
+			["claim", { cwd: HERE, label: "write the release…", pane: "pi-new1" }],
+		]);
+	});
+
+	it("a pane that cannot be started is claimed nowhere, and says tmux's reason", () => {
+		const { actions: a, calls, panes } = actions();
+		panes.start = () => {
+			throw tmuxFailure("no server running\n");
+		};
+		expect(a.start(HERE, "", ["/tmp/shot.png"])).toEqual({
+			kind: "failed",
+			text: "Couldn't start it — no server running",
+		});
+		expect(calls).toEqual([]);
+	});
+});
+
 describe("agent view in pane mode", () => {
 	it("enter on a working session switches the terminal to its pane at once", async () => {
 		const { view, calls, closed, flush } = setup([paneRow("pi-a")]);
@@ -142,35 +531,6 @@ describe("agent view in pane mode", () => {
 		expect(closed()).toBe(0);
 	});
 
-	it("any other tmux failure to open shows tmux's own words", async () => {
-		const { view, flush, panes } = setup([paneRow("pi-a")]);
-		panes.switchTo = () => {
-			throw tmuxFailure("no current client\n");
-		};
-		view.handleInput(ENTER);
-		await flush();
-		expect(view.render(100).join("\n")).toContain("Couldn't open — no current client");
-	});
-
-	it("a stored session gets a pane of its own, then the terminal switches to it", async () => {
-		const stored: InstanceSummary = {
-			id: "s",
-			status: "stopped",
-			cwd: HERE,
-			sessionFile: "/s/s.jsonl",
-			outcome: "done",
-		};
-		const { view, calls, flush } = setup([stored]);
-		view.handleInput(ENTER);
-		await flush();
-		// Claimed first, so a phone's resume of the same file is refused; the stored row stays as its row.
-		expect(calls).toEqual([
-			["claim", { cwd: HERE, sessionFile: "/s/s.jsonl" }],
-			["start", HERE, ["--session", "/s/s.jsonl"], undefined],
-			["switchTo", "pi-new1"],
-		]);
-	});
-
 	it("a stored session resumed by a reply stays listed as starting, with its id and focus, until its pane registers", async () => {
 		const registry = testRegistry();
 		const file = "/nonexistent/s.jsonl";
@@ -183,15 +543,14 @@ describe("agent view in pane mode", () => {
 				return claim.id;
 			},
 		});
+		await view.onShow();
 		view.handleInput(" ");
 		for (const ch of "carry on") view.handleInput(ch);
 		view.handleInput(ENTER);
 		await flush();
 		expect(calls).toEqual([["start", HERE, ["--session", file, "--", "carry on"], undefined]]);
-		const shown = () => view.render(100).join("\n");
 		expect(listSummaries(registry)).toEqual([expect.objectContaining({ id, status: "starting" })]);
-		expect(shown()).toContain("starting…");
-		expect(view.selectedKeyForTest()).toBe(id);
+		expect(focusedLine(view)).toMatch(/fix tests.*starting…/);
 
 		registry.registerExternal(
 			{
@@ -204,34 +563,10 @@ describe("agent view in pane mode", () => {
 			},
 			"working",
 		);
-		view.setInstancesForTest(listSummaries(registry));
 		expect(listSummaries(registry)).toEqual([expect.objectContaining({ id, status: "online", pane: "pi-new1" })]);
-		expect(view.selectedKeyForTest()).toBe(id);
-	});
-
-	it("a resume the daemon refuses starts no pane, and says why", async () => {
-		const stored: InstanceSummary = { id: "s", status: "stopped", cwd: HERE, sessionFile: "/s/s.jsonl" };
-		const { view, calls, flush, closed } = setup([stored], undefined, {
-			start: async () => {
-				throw new Error("it is already starting — try again in a moment");
-			},
-		});
-		view.handleInput(ENTER);
-		await flush();
-		expect(calls).toEqual([]);
-		expect(view.render(100).join("\n")).toContain("Couldn't open — it is already starting");
-		expect(closed()).toBe(0);
-	});
-
-	it("a pane that cannot be started gives its claim back", async () => {
-		const stored: InstanceSummary = { id: "s", status: "stopped", cwd: HERE, sessionFile: "/s/s.jsonl" };
-		const { view, calls, flush, panes } = setup([stored]);
-		panes.start = () => {
-			throw tmuxFailure("no server running\n");
-		};
-		view.handleInput(ENTER);
-		await flush();
-		expect(calls.slice(1)).toEqual([["startFailed", "claimed"]]);
+		await waitFor(() => expect(view.render(100).join("\n")).not.toContain("starting…"));
+		expect(focusedLine(view)).toContain("fix tests");
+		view.close();
 	});
 
 	it("enter twice on a stored session's reply starts one pane", async () => {
@@ -262,74 +597,36 @@ describe("agent view in pane mode", () => {
 				return spec.pane;
 			},
 		});
+		await view.onShow();
 		for (const ch of "write the release notes") view.handleInput(ch);
 		view.handleInput(ENTER);
 		await flush();
-		expect(calls).toEqual([
-			["start", HERE, ["--", "write the release notes"], undefined],
-			["claim", { cwd: HERE, label: "write the release…", pane: "pi-new1" }],
-		]);
-		expect(view.render(100).join("\n")).toContain("starting…");
-		expect(view.selectedKeyForTest()).toBe("pi-new1");
-		registry.registerExternal({ ...paneRow("pi-new1"), status: "online" } as never, "working");
-		view.setInstancesForTest(listSummaries(registry));
-		expect(view.selectedKeyForTest()).toBe("pi-new1");
-	});
-
-	it("ctrl+x ends a pane's pi, as quitting does; its row stays, stopped and focused, and ctrl+x again deletes it at once", async () => {
-		const rows = [paneRow("pi-a"), paneRow("pi-b")];
-		const listing = async () => {
-			calls.push(["list"]);
-			return rows;
-		};
-		const { view, calls, flush } = setup(rows, undefined, { list: listing });
-		view.handleInput(CTRL_X);
-		await flush();
-		expect(calls).toEqual([["end", "pi-a"], ["list"]]);
-		// The daemon stops the row in place: the same id, with no pane.
-		rows.splice(0, 1, { id: "pi-a", status: "stopped", cwd: HERE, sessionFile: "/s/pi-a.jsonl" });
-		view.setInstancesForTest(rows);
-		expect(view.selectedKeyForTest()).toBe("pi-a");
-		expect(view.render(100).join("\n")).toContain("stopped · ctrl+x again to delete");
-
-		calls.length = 0;
-		view.handleInput(CTRL_X);
-		await waitFor(() => expect(calls[0]).toEqual(["delete", "pi-a"]));
-	});
-
-	it("ctrl+x again before the quit lands kills the pane and deletes its row at once", async () => {
-		const rows = [paneRow("pi-a")];
-		const listing = async () => {
-			calls.push(["list"]);
-			return rows;
-		};
-		const { view, calls, flush } = setup(rows, undefined, { list: listing });
-		view.handleInput(CTRL_X);
-		await flush();
-		calls.length = 0;
-		view.handleInput(CTRL_X);
-		await waitFor(() =>
-			expect(calls.slice(0, 2)).toEqual([
-				["kill", "pi-a"],
-				["delete", "pi-a"],
-			]),
+		expect(calls[0]).toEqual(["start", HERE, ["--", "write the release notes"], undefined]);
+		expect(focusedLine(view)).toMatch(/write the release….*starting…/);
+		registry.registerExternal(
+			{ ...paneRow("pi-new1"), label: "release notes", status: "online" } as never,
+			"working",
 		);
+		await waitFor(() => expect(focusedLine(view)).toContain("release notes"));
+		view.close();
 	});
 
-	it("ctrl+x twice on this terminal's own session moves it to a new one in agent view, then ends it", async () => {
-		const self = paneRow("pi-self", { activity: "idle" });
-		const { view, calls, flush } = setup([], self);
-		view.handleInput(CTRL_X);
+	it("ctrl+x stops a pane, whose row stays, stopped and focused; ctrl+x again deletes it", async () => {
+		const rows = [paneRow("pi-a", { label: "first" }), paneRow("pi-b")];
+		const { view, calls, flush, panes } = setup(rows, undefined, { list: async () => rows });
+		panes.end = (name) => {
+			calls.push(["end", name]);
+			// The daemon stops the row in place: the same id, with no pane.
+			rows.splice(0, 1, { id: "pi-a", status: "stopped", cwd: HERE, label: "first", sessionFile: "/s/pi-a.jsonl" });
+		};
 		view.handleInput(CTRL_X);
 		await flush();
-		expect(calls).toEqual([
-			["start", HERE, ["--", "/agent-view"], { [OPEN_VIEW_ENV]: "1", [HIDE_ENV]: "pi-self" }],
-			["waitForView", "pi-new1"],
-			["switchTo", "pi-new1"],
-			["unlist"],
-			["delete", "pi-self"],
-			["kill", "pi-self"],
-		]);
+		expect(calls).toEqual([["end", "pi-a"]]);
+		expect(focusedLine(view)).toMatch(/first.*stopped · ctrl\+x again to delete/);
+
+		calls.length = 0;
+		view.handleInput(CTRL_X);
+		await waitFor(() => expect(calls).toEqual([["delete", "pi-a"]]));
 	});
 
 	it("deleting this terminal's session keeps this view up, keys ignored, until the new one has drawn", async () => {
@@ -355,20 +652,19 @@ describe("agent view in pane mode", () => {
 		expect(calls.map((c) => c[0])).toEqual(["start", "waitForView", "switchTo", "unlist", "delete", "kill"]);
 	});
 
-	it("if the new pane ends before drawing, deleting this terminal's session is called off", async () => {
+	it("a delete of this terminal's session called off says why, and keys work again", async () => {
 		const self = paneRow("pi-self", { activity: "idle" });
-		const { view, calls, flush, panes } = setup([], self);
+		const { view, closed, flush, panes } = setup([], self);
 		panes.waitForView = async () => {
 			throw new Error("can't find session");
 		};
 		view.handleInput(CTRL_X);
 		view.handleInput(CTRL_X);
 		await flush();
-		expect(calls).toEqual([
-			["start", HERE, ["--", "/agent-view"], { [OPEN_VIEW_ENV]: "1", [HIDE_ENV]: "pi-self" }],
-			["kill", "pi-new1"],
-		]);
 		expect(view.render(100).join("\n")).toContain("Couldn't delete — can't find session");
+		view.handleInput(ENTER);
+		await flush();
+		expect(closed()).toBe(1);
 	});
 
 	it("a view opened by a delete leaves that row out, and reports its first loaded frame once", async () => {

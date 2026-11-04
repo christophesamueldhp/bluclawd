@@ -1,6 +1,12 @@
 import { Type } from "@earendil-works/pi-ai";
-import { defineTool, type ExtensionAPI, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { type AdmissionContext, formatRunLabel, type RunAdmission, type RunExecutionContext } from "./admission.ts";
+import {
+	defineTool,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import { createRunAddressing } from "./addressing.ts";
+import type { RunExecutionContext } from "./admission.ts";
 import { createRunDirectory } from "./directory.ts";
 import {
 	formatMessageReceipt,
@@ -8,9 +14,7 @@ import {
 	SUBAGENT_MESSAGE_PARAMETERS,
 	SUBAGENT_MESSAGE_TOOL,
 	type SubagentMessageBus,
-	type SubagentMessageReceipt,
 	subagentMessagePayload,
-	USER_MESSAGE_ADDRESS,
 } from "./messages.ts";
 import type { ParentScope, ParentScopeChecks, ScopedRun } from "./parent-scope.ts";
 import {
@@ -49,8 +53,12 @@ export interface GenerationDeps {
 	/** Runs one generation's child session; `runSubagent` outside tests. */
 	runner: (options: RunSubagentOptions) => Promise<SubagentRunnerOutcome>;
 	bus: SubagentMessageBus;
-	scope: ParentScopeChecks & { notify(run: ScopedRun, notice: ParentNotice): void };
-	pi: Pick<ExtensionAPI, "appendEntry">;
+	scope: ParentScopeChecks & {
+		context(): ExtensionContext | undefined;
+		notify(run: ScopedRun, notice: ParentNotice): void;
+	};
+	/** `sendMessage` notes a user's message to the orchestrator. */
+	pi: Pick<ExtensionAPI, "appendEntry" | "sendMessage">;
 	/** Settles once every launch in flight has been admitted (#99). */
 	launchesSettled: () => Promise<void>;
 	/** A run changed state. */
@@ -235,7 +243,7 @@ export function createGenerations(deps: GenerationDeps) {
 					builtinExtensions: execCtx.builtinExtensions,
 					onChildSessionCreated: (session) => {
 						session.subscribe((event) => {
-							if (event.type === "agent_end") directory.endTurn(runId);
+							if (event.type === "agent_end" && !event.willRetry) params.controller.markFinishing();
 						});
 						transcripts.attach(runId, session);
 						resolveSession(session);
@@ -243,7 +251,7 @@ export function createGenerations(deps: GenerationDeps) {
 				});
 			} finally {
 				transcripts.detach(runId);
-				directory.endTurn(runId);
+				params.controller.markFinishing();
 				rejectSession(new Error("it ended before it could receive messages"));
 				deps.bus.unregister(runId, "has finished");
 			}
@@ -275,123 +283,14 @@ export function createGenerations(deps: GenerationDeps) {
 		}
 		return envelope;
 	};
-
-	/**
-	 * Admits a completed run's next generation with `content` from `from` as its prompt, and delivers its report
-	 * once it is final. Resolves with the receipt, or the refusal and its reason.
-	 */
-	const resumeRun = async (
-		run: Readonly<SubagentRunRecord>,
-		from: typeof PARENT_MESSAGE_ADDRESS | typeof USER_MESSAGE_ADDRESS,
-		toolCallId: string,
-		content: string,
-		scope: ParentScope,
-		admission: Pick<RunAdmission, "resume">,
-		ctx: AdmissionContext,
-	): Promise<SubagentMessageReceipt> => {
-		let receipt: SubagentMessageReceipt | undefined;
-		const resumed = await admission.resume(
-			run,
-			toolCallId,
-			() => {
-				receipt = deps.bus.accept({ address: from, scope }, run.runId, run.name);
-				return subagentMessagePayload({ seq: receipt.seq, from, to: run.runId, toName: run.name, content })
-					.content[0].text;
-			},
-			ctx,
-		);
-		if (!resumed.ok) {
-			return {
-				status: resumed.refusal ?? "unavailable",
-				seq: 0,
-				to: run.runId,
-				toName: run.name,
-				reason: resumed.error,
-			};
-		}
-		// No tool result carries a user resume to the orchestrator, so its nested usage counts from the start.
-		if (from === USER_MESSAGE_ADDRESS) scheduler.launchResultEmitted(run.runId);
-		void deliver(resumed.handle, from === USER_MESSAGE_ADDRESS);
-		// A resume is admitted only after buildPrompt ran, so the receipt is set.
-		return receipt!;
-	};
-
-	/**
-	 * A message from the orchestrator. A final run resumes, or is refused with the reason it cannot; a finishing
-	 * one is waited for until it is final first. A message to any other run goes through the bus.
-	 */
-	const messageFromParent = async (
-		scope: ParentScope,
-		to: string,
-		content: string,
-		toolCallId: string,
-		admission: Pick<RunAdmission, "resume">,
-		ctx: AdmissionContext | undefined,
-	) => {
-		let found = directory.find(scope, to);
-		if (found?.state === "finishing") {
-			await scheduler.whenFinal(found.record.runId);
-			found = directory.get(found.record.runId);
-		}
-		if (found?.state === "finished" && ctx) {
-			const receipt = await resumeRun(
-				found.record,
-				PARENT_MESSAGE_ADDRESS,
-				toolCallId,
-				content,
-				scope,
-				admission,
-				ctx,
-			);
-			if (receipt.status !== "accepted") return formatMessageReceipt(receipt);
-			return {
-				...formatMessageReceipt(receipt),
-				content: [
-					{
-						type: "text" as const,
-						text: `Message ${receipt.seq} accepted: resuming ${formatRunLabel(found.record)} in the background with its earlier context. Its report will be delivered when it finishes.`,
-					},
-				],
-			};
-		}
-		return formatMessageReceipt(await deps.bus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, content));
-	};
-
-	/**
-	 * A message the user typed in a run's transcript. A running run takes it at its next safe point, through the
-	 * bus like the orchestrator's; a completed run resumes through the same admission as the orchestrator's
-	 * resume, once a finishing one is final; any other final run is refused with the reason.
-	 */
-	const messageFromUser = async (
-		scope: ParentScope,
-		runId: string,
-		content: string,
-		admission: Pick<RunAdmission, "resume">,
-		ctx: Omit<AdmissionContext, "executeTool">,
-	): Promise<SubagentMessageReceipt & { resumed?: true }> => {
-		let found = directory.get(runId);
-		if (found?.state === "finishing") {
-			await scheduler.whenFinal(runId);
-			found = directory.get(runId);
-		}
-		if (found?.state !== "finished") return deps.bus.send({ address: USER_MESSAGE_ADDRESS, scope }, runId, content);
-		const { record } = found;
-		if (record.status === "completed") {
-			// No tool call of the orchestrator's carries the user's resume, so the child's tools keep running through
-			// the call its earlier generation ran under, whose id still identifies the run for nested-call checks.
-			const previous = scheduler.getContext(runId);
-			const toolCtx: AdmissionContext = Object.create(ctx, { executeTool: { value: previous?.parent.executeTool } });
-			const toolCallId = previous?.resume?.toolCallId ?? record.originToolCallId;
-			const receipt = await resumeRun(record, USER_MESSAGE_ADDRESS, toolCallId, content, scope, admission, toolCtx);
-			return receipt.status === "accepted" ? { ...receipt, resumed: true } : receipt;
-		}
-		const label = record.name ?? record.runId;
-		const reason =
-			record.status === "cancelled"
-				? `${label} was stopped and cannot take messages.`
-				: `${label} ${record.status === "failed" ? "failed" : "was interrupted"} and cannot take messages.`;
-		return { status: "unavailable", seq: 0, to: runId, toName: record.name, reason };
-	};
+	const { messageFromParent, messageFromUser } = createRunAddressing({
+		scheduler,
+		directory,
+		bus: deps.bus,
+		scope: deps.scope,
+		pi: deps.pi,
+		deliver,
+	});
 
 	return { scheduler, directory, deliver, messageFromParent, messageFromUser, transcripts };
 }
