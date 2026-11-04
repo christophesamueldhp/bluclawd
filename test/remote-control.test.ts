@@ -20,6 +20,7 @@ describe("remote control switch", () => {
 	const make = () =>
 		new RemoteControl({
 			store: new RemoteStore(join(dir, "remote.json")),
+			delivery: supervisor.delivery,
 			listInstances: () => [],
 			send: () => true,
 			deleteInstance: () => false,
@@ -187,6 +188,7 @@ describe("remote control switch", () => {
 			clients = "/dev/ttys001\n";
 			control = new RemoteControl({
 				store: new RemoteStore(join(dir, "remote.json")),
+				delivery: supervisor.delivery,
 				listInstances: () => instances,
 				send: () => true,
 				renameInstance: () => false,
@@ -314,6 +316,7 @@ describe("remote control switch", () => {
 		];
 		control = new RemoteControl({
 			store: new RemoteStore(join(dir, "remote.json")),
+			delivery: supervisor.delivery,
 			listInstances: () => instances,
 			send: () => true,
 			deleteInstance: () => false,
@@ -375,6 +378,7 @@ describe("remote control switch", () => {
 	it("keeps a resumed pane's report under its session's row id, which the phone asks by", async () => {
 		control = new RemoteControl({
 			store: new RemoteStore(join(dir, "remote.json")),
+			delivery: supervisor.delivery,
 			listInstances: () => listSummaries(supervisor),
 			send: () => true,
 			deleteInstance: () => false,
@@ -410,6 +414,7 @@ describe("remote control switch", () => {
 		let instances: InstanceSummary[] = [pane("pane-1"), pane("pane-2")];
 		control = new RemoteControl({
 			store: new RemoteStore(join(dir, "remote.json")),
+			delivery: supervisor.delivery,
 			listInstances: () => instances,
 			send: () => true,
 			deleteInstance: () => false,
@@ -449,6 +454,7 @@ describe("remote control switch", () => {
 		const git = { branch: "main", added: 1, removed: 2 };
 		control = new RemoteControl({
 			store: new RemoteStore(join(dir, "remote.json")),
+			delivery: supervisor.delivery,
 			listInstances: () => [{ id: "pane-1", status: "online", cwd: "/p", external: true, activity: "idle" }],
 			send: () => true,
 			deleteInstance: () => false,
@@ -511,6 +517,7 @@ describe("remote control switch", () => {
 			duringPush = undefined;
 			control = new RemoteControl({
 				store: new RemoteStore(join(dir, "remote.json")),
+				delivery: supervisor.delivery,
 				listInstances: () => instances,
 				send: () => true,
 				deleteInstance: () => false,
@@ -559,6 +566,7 @@ describe("remote control switch", () => {
 			const listed = vi.fn(() => instances);
 			control = new RemoteControl({
 				store: new RemoteStore(join(dir, "remote.json")),
+				delivery: supervisor.delivery,
 				listInstances: listed,
 				send: () => true,
 				deleteInstance: () => false,
