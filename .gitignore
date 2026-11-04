@@ -5,3 +5,4 @@ dist/
 .worktrees/
 .vitest/
 .types/
+.playwright-mcp/
