@@ -43,7 +43,6 @@ import {
 	collectRows,
 	compactAge,
 	countRows,
-	labelFromTask,
 	livePanesWarning,
 	nameScore,
 	queryFilter,
@@ -54,7 +53,7 @@ import {
 	stateBandOf,
 	type ViewMode,
 } from "../../daemon/rows.ts";
-import { type ShellInfo, Tmux } from "../../daemon/tmux.ts";
+import type { ShellInfo } from "../../daemon/tmux.ts";
 import { mascotGlyphs, REST, renderMascot } from "../_shared/mascot.ts";
 import { PasteTokens, shouldCollapse } from "../_shared/paste-tokens.ts";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
@@ -755,25 +754,14 @@ export class AgentView implements Component, Focusable {
 		cwd: string,
 		model: { provider: string; id: string } | undefined,
 	): Promise<void> {
-		const panes = this.opts.panes;
-		let pane: string;
-		try {
-			pane = panes.start(cwd, [
-				...(model ? ["--model", `${model.provider}/${model.id}`] : []),
-				"--",
-				...images.map((file) => `@${file}`),
-				...(task ? [task] : []),
-			]);
-			this.clearDraft();
-		} catch (error) {
+		const started = this.actions.start(cwd, task, images, model);
+		if (started.kind === "failed") {
 			this.setComposer(draft);
-			this.say(`Couldn't start it — ${Tmux.reason(error)}`, "error");
+			this.say(started.text, "error");
 			return;
 		}
-		// Its row is the pane's id, which the pane registers as.
-		const claimed = this.opts.client
-			.start({ cwd, label: labelFromTask(task || "Image task"), pane })
-			.catch(() => undefined);
+		this.clearDraft();
+		const { pane, claimed } = started;
 		if (open) {
 			this.leaveFor(pane);
 			return;
