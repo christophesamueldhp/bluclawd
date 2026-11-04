@@ -104,6 +104,7 @@ describe("remote sessions", () => {
 			sessionFile: "/s/b.jsonl",
 			cwd: "/p",
 			running: true,
+			verdict: { act: true },
 			busy: false,
 			leafId: "e3",
 			createdAt: "2026-10-12T00:00:00Z",
@@ -115,6 +116,7 @@ describe("remote sessions", () => {
 			sessionFile: "/s/old.jsonl",
 			cwd: "/p",
 			running: false,
+			verdict: { act: false, reason: "not_running" },
 			busy: false,
 		});
 		expect(findSession(list, "zzz")).toBeUndefined();
@@ -278,5 +280,31 @@ describe("a pane reaped while tmux still has it (a silent pane)", () => {
 		reap();
 		expect(list()).toEqual([expect.objectContaining({ id: claim.id, alive: true, silent: true })]);
 		expect(supervisor.claimStart({ cwd: dir, sessionFile: file })).toEqual({ ok: false, refused: "running" });
+	});
+});
+
+describe("each listed row's verdict on whether a Chat may act on it", () => {
+	it("lets a Chat act on a live pane's row only: not a silent one's, a starting one's or a stored one's", () => {
+		const { dir, supervisor, beat, reap, list } = silentRegistry();
+		const [live, silent, stored, starting] = ["live", "silent", "stored", "starting"].map((name) => {
+			const file = join(dir, `${name}.jsonl`);
+			writeFileSync(file, "");
+			return file;
+		});
+		beat("pi-silent", silent);
+		beat("pi-stored", stored);
+		supervisor.unregisterExternal("pi-stored", "quit");
+		reap();
+		beat("pi-live", live);
+		const claim = supervisor.claimStart({ cwd: dir, sessionFile: starting });
+		if (!claim.ok) throw new Error("not claimed");
+		expect(Object.fromEntries(list().map((s) => [s.id, s.verdict]))).toEqual({
+			"pi-live": { act: true },
+			"pi-silent": { act: false, reason: "silent" },
+			"pi-stored": { act: false, reason: "not_running" },
+			[claim.id]: { act: false, reason: "starting" },
+		});
+		// Still its pane's row, alive.
+		expect(list().find((s) => s.id === "pi-silent")).toMatchObject({ alive: true, silent: true });
 	});
 });

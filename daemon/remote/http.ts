@@ -249,6 +249,7 @@ function imagesIn(body: Record<string, unknown>): PaneImage[] | undefined {
 
 const PHONE_STATUS: Record<PhoneError, number> = {
 	session_not_running: 409,
+	session_silent: 409,
 	session_running: 409,
 	pane_too_old: 409,
 	session_busy: 409,
