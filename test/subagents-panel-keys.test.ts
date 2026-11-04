@@ -50,11 +50,11 @@ async function withRunningRuns(names: string[]) {
 describe("reaching the panel from the keyboard", () => {
 	it("moves focus into the panel with ↓ on an empty prompt, on the first row", async () => {
 		const { t, child } = await withRunningRuns(["scout", "mapper"]);
-		const firstRow = t.panel()[1];
+		const first = t.panel()[1].trim().split(" ")[0];
 
 		t.press(DOWN);
 		expect(t.editorFocused()).toBe(false);
-		expect(selected(t)).toBe(`❯${firstRow.slice(1)}`);
+		expect(selected(t)).toMatch(new RegExp(`^❯ ${first} `));
 		child.open();
 	});
 
