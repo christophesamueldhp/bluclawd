@@ -6,6 +6,7 @@ import {
 	type ToolLoadout,
 	type ToolLoadoutChanges,
 } from "@earendil-works/pi-coding-agent";
+import type { TUI } from "@earendil-works/pi-tui";
 import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { createRunAdmission, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
@@ -23,6 +24,7 @@ import {
 	SubagentMessageBus,
 	subagentMessagePayload,
 } from "./messages.ts";
+import { renderPanel, SUBAGENT_PANEL_WIDGET, shownInPanel } from "./panel.ts";
 import { createParentScope, type ParentInboxItem } from "./parent-scope.ts";
 import type { SubagentResultDetails } from "./results.ts";
 import { describeSubagentModels, runSubagent } from "./runner.ts";
@@ -45,6 +47,8 @@ const AFTER_YOU_DELEGATE = [
 export interface SubagentExtensionOptions {
 	agentDir?: string;
 	batchWindowMs?: number;
+	/** The panel's clock; Date.now when omitted. */
+	now?: () => number;
 }
 
 function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot = false): string {
@@ -85,6 +89,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		let catalog: AgentDefinitionCatalog | undefined;
 		let unpublishTasks: (() => void) | undefined;
 		let latestLoadout: ToolLoadout | undefined;
+		const now = options.now ?? Date.now;
+		let panelTui: Pick<TUI, "requestRender"> | undefined;
 		// Subagent calls in one message start executing together; a child waits for every launch in flight to be
 		// admitted, so each sibling is registered for messages before any of them takes a turn.
 		let launchesInFlight = 0;
@@ -112,6 +118,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			send: (items) => sendToParent(items),
 			onChange: () => {
 				refreshFooterStatus();
+				panelTui?.requestRender();
 				notifyAgentTasksChanged();
 			},
 			batchWindowMs: options.batchWindowMs ?? BACKGROUND_BATCH_WINDOW_MS,
@@ -142,6 +149,27 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			} catch {
 				// Ignore stale UI context errors
 			}
+		};
+
+		/** The runs of the current scope the panel shows, in admission order. */
+		const panelRuns = () => {
+			const scope = parentScope.current();
+			if (!scope) return [];
+			const at = now();
+			return scheduler
+				.listRuns()
+				.filter((run) => run.parentSessionId === scope.parentSessionId && run.sessionEpoch === scope.sessionEpoch)
+				.flatMap((run) => directory.get(run.runId) ?? [])
+				.filter((entry) => shownInPanel(entry, at));
+		};
+		/** The background runs the orchestrator is Waiting for: none while its turn runs. */
+		const waitingFor = () => {
+			try {
+				if (!parentScope.context()?.isIdle()) return 0;
+			} catch {
+				return 0;
+			}
+			return openRuns().filter((entry) => entry.record.deliveryMode === "background").length;
 		};
 
 		const sendToParent = (items: readonly ParentInboxItem<ParentNotice>[]) => {
@@ -187,6 +215,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			launchesSettled: () => launchesSettled,
 			onChange: () => {
 				refreshFooterStatus();
+				panelTui?.requestRender();
 				notifyAgentTasksChanged();
 			},
 		});
@@ -272,6 +301,27 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			unpublishTasks?.();
 			unpublishTasks = publishAgentTasks(taskSource);
 			refreshFooterStatus();
+			if (ctx.mode === "tui") {
+				// Always mounted: it renders nothing while there are no runs to show.
+				ctx.ui.setWidget(
+					SUBAGENT_PANEL_WIDGET,
+					(tui, theme) => {
+						panelTui = tui;
+						// Elapsed times move on between run changes.
+						const ticker = setInterval(() => {
+							if (panelRuns().length > 0) tui.requestRender();
+						}, 1000);
+						ticker.unref?.();
+						return {
+							render: (width) =>
+								renderPanel({ runs: panelRuns(), waitingFor: waitingFor(), now: now(), width, theme }),
+							invalidate: () => {},
+							dispose: () => clearInterval(ticker),
+						};
+					},
+					{ placement: "belowEditor" },
+				);
+			}
 		});
 
 		pi.on("turn_start", async () => {
@@ -324,6 +374,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			await scheduler.waitForSettled();
 			unpublishTasks?.();
 			unpublishTasks = undefined;
+			try {
+				parentScope.context()?.ui.setWidget(SUBAGENT_PANEL_WIDGET, undefined);
+			} catch {
+				// Ignore stale UI context errors
+			}
+			panelTui = undefined;
 			parentScope.detach();
 		});
 
