@@ -57,6 +57,8 @@ export interface AgentTaskSource {
 	stopAll(options?: AgentTaskStopOptions): number;
 	/** Whether the subagent panel below the prompt shows rows; it then takes ↓ from an empty prompt. */
 	panelHasRows?(): boolean;
+	/** Opens a run's transcript and resolves once it closes; undefined when the run is not of the current session. */
+	open?(id: string, owner?: string): Promise<void> | undefined;
 }
 
 const state = sharedRef("agentTasks", {

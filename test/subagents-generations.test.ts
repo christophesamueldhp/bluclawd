@@ -59,6 +59,8 @@ function fakeRunner() {
 			const listeners = new Set<(event: AgentSessionEvent) => void>();
 			const inbox: string[] = [];
 			const session: ChildSession = {
+				messages: [],
+				sessionFile: undefined,
 				subscribe: (listener) => {
 					listeners.add(listener);
 					return () => listeners.delete(listener);

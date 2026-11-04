@@ -94,6 +94,7 @@ export async function createSubagentTui(
 	/** The component that has the keyboard when no view is open; the editor when unset. */
 	let focus: Rendered | undefined;
 	let overlayShown = false;
+	let viewIsOverlay = false;
 	let editorText = "";
 	let editorFactory: ((...args: unknown[]) => typeof editor) | undefined;
 	let editor: Rendered & { getText(): string; setText(text: string): void } = {
@@ -111,7 +112,7 @@ export async function createSubagentTui(
 
 	const tui = {
 		requestRender: () => {},
-		hasOverlay: () => overlayShown,
+		hasOverlay: () => overlayShown || viewIsOverlay,
 		getFocusedComponent: () => view ?? focus ?? editor,
 		setFocus: (component: Rendered | null) => {
 			const previous = focus ?? editor;
@@ -153,15 +154,28 @@ export async function createSubagentTui(
 		setFooter: () => {},
 		setHeader: () => {},
 		setTitle: () => {},
-		custom: (factory: (...args: unknown[]) => Rendered | Promise<Rendered>) =>
+		// As in pi: an overlay hands the keyboard back to whoever had it, any other view to the prompt.
+		custom: (factory: (...args: unknown[]) => Rendered | Promise<Rendered>, customOptions?: { overlay?: boolean }) =>
 			new Promise((resolve) => {
+				const overlay = customOptions?.overlay ?? false;
+				let closed = false;
 				const done = (result: unknown) => {
+					if (closed) return;
+					closed = true;
+					if (view) view.focused = false;
 					view?.dispose?.();
 					view = undefined;
+					viewIsOverlay = false;
+					if (!overlay) tui.setFocus(editor);
+					(focus ?? editor).focused = true;
 					resolve(result);
 				};
 				void Promise.resolve(factory(tui, plainTheme, keybindings, done)).then((component) => {
+					if (closed) return;
+					(focus ?? editor).focused = false;
+					component.focused = true;
 					view = component;
+					viewIsOverlay = overlay;
 				});
 			}),
 		pasteToEditor: (text: string) => editor.handleInput?.(text),
@@ -243,13 +257,9 @@ export async function createSubagentTui(
 		},
 		/** Whether the prompt editor has the keyboard. */
 		editorFocused: () => !view && !focus,
-		/** Feeds each key to the open view, else to the terminal input listeners and then the focused component. */
+		/** Feeds each key to the terminal input listeners, then to the open view or else the focused component. */
 		press(...keys: string[]) {
 			for (const key of keys) {
-				if (view) {
-					view.handleInput?.(key);
-					continue;
-				}
 				let data: string | undefined = key;
 				for (const handler of inputHandlers) {
 					const result = handler(data);
@@ -259,7 +269,7 @@ export async function createSubagentTui(
 					}
 					if (result?.data !== undefined) data = result.data;
 				}
-				if (data !== undefined) (focus ?? editor).handleInput?.(data);
+				if (data !== undefined) (view ?? focus ?? editor).handleInput?.(data);
 			}
 		},
 		/** Moves the extension's clock on by `ms`. */

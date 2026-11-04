@@ -107,8 +107,8 @@ export interface RunSubagentOptions extends SubagentRunnerExecuteParams {
 	onChildSessionCreated?: (session: ChildSession) => void;
 }
 
-/** What a run sees of its child session: when its last turn ends, and a way to steer messages in. */
-export type ChildSession = Pick<AgentSession, "subscribe" | "sendCustomMessage">;
+/** What a run sees of its child session: its events and transcript, and a way to steer messages in. */
+export type ChildSession = Pick<AgentSession, "subscribe" | "sendCustomMessage" | "messages" | "sessionFile">;
 
 export function captureWorkspaceSnapshot(cwd: string): WorkspaceSnapshot {
 	try {
