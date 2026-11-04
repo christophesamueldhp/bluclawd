@@ -94,7 +94,7 @@ describe("a run's transcript", () => {
 
 		const atStart = tui.view()!;
 		tui.press(DOWN);
-		expect(tui.view()?.slice(1, -1)).toEqual([...atStart.slice(2, -1), expect.any(String)]);
+		expect(tui.view()?.slice(1, -2)).toEqual([...atStart.slice(2, -2), expect.any(String)]);
 		tui.press(...Array(10).fill(PAGE_DOWN));
 		expect(screen(tui)).toContain("finding 80");
 	});

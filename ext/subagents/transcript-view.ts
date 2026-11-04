@@ -14,11 +14,21 @@ import {
 	ToolExecutionComponent,
 	UserMessageComponent,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, Container, matchesKey, Spacer, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import {
+	type Component,
+	Container,
+	type Focusable,
+	Input,
+	matchesKey,
+	Spacer,
+	type TUI,
+	truncateToWidth,
+} from "@earendil-works/pi-tui";
 import type { TranscriptMessage, TranscriptSource } from "./transcripts.ts";
 
-/** The header naming the run and the hint line under the transcript. */
-const CHROME_LINES = 2;
+/** The header naming the run, and the message input and hint line under the transcript. */
+const CHROME_LINES = 3;
+const HINT = "↑/↓ PgUp/PgDn to scroll · Esc to go back";
 
 /**
  * A run's transcript in pi's own message components, kept in step with its source: finished messages are only
@@ -105,7 +115,7 @@ function createTranscriptBody(options: { tui: TUI; cwd: string; expanded: boolea
 
 /**
  * A run's transcript over the whole screen: a header naming the run, the transcript in a viewport that follows
- * its end until scrolled up, and a hint line. Esc closes it.
+ * its end until scrolled up, an input whose text goes to the run, and a hint line. Esc closes it.
  */
 export function createTranscriptView(options: {
 	tui: TUI;
@@ -116,8 +126,10 @@ export function createTranscriptView(options: {
 	source: TranscriptSource;
 	/** Whether tool output starts expanded, as in the orchestrator's chat. */
 	expanded: boolean;
+	/** Sends typed text to the run; `status` says whether it was queued, or why not. */
+	send: (text: string) => Promise<{ queued: boolean; status: string }>;
 	close: () => void;
-}): Component & { dispose(): void } {
+}): Component & Focusable & { dispose(): void } {
 	const { tui, theme, source } = options;
 	const body = createTranscriptBody(options);
 	let dirty = true;
@@ -134,8 +146,31 @@ export function createTranscriptView(options: {
 		follow = top >= maxTop;
 		tui.requestRender();
 	};
+	let status: string | undefined;
+	const input = new Input({ placeholder: "Message this run" });
+	input.onSubmit = (value) => {
+		const text = value.trim();
+		if (!text) return;
+		// A command typed here would otherwise reach the run as text, or be mistaken for the orchestrator's.
+		if (text.startsWith("/") || text.startsWith("!")) {
+			status = "Commands do not run in a run's transcript; press Esc to go back to the orchestrator's prompt.";
+			tui.requestRender();
+			return;
+		}
+		void options.send(text).then((result) => {
+			if (result.queued) input.setValue("");
+			status = result.status;
+			tui.requestRender();
+		});
+	};
 
 	return {
+		get focused() {
+			return input.focused;
+		},
+		set focused(focused: boolean) {
+			input.focused = focused;
+		},
 		render(width) {
 			if (dirty) {
 				body.sync(source.read());
@@ -150,7 +185,8 @@ export function createTranscriptView(options: {
 				truncateToWidth(theme.bold(options.title()), width),
 				...shown,
 				...Array.from({ length: height - shown.length }, () => ""),
-				truncateToWidth(theme.fg("dim", "↑/↓ PgUp/PgDn to scroll · Esc to go back"), width),
+				...input.render(width),
+				truncateToWidth(theme.fg("dim", status ?? HINT), width),
 			];
 		},
 		handleInput(data) {
@@ -159,6 +195,11 @@ export function createTranscriptView(options: {
 			else if (matchesKey(data, "down")) scroll(1);
 			else if (matchesKey(data, "pageUp")) scroll(-height);
 			else if (matchesKey(data, "pageDown")) scroll(height);
+			else {
+				status = undefined;
+				input.handleInput(data);
+				tui.requestRender();
+			}
 		},
 		invalidate() {
 			body.container.invalidate();

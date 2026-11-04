@@ -9,7 +9,7 @@ import {
 import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
-import { createRunAdmission, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
+import { createRunAdmission, formatRunLabel, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
 import {
 	type AgentDefinitionCatalog,
 	discoverAgentDefinitions,
@@ -21,8 +21,10 @@ import {
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
 	SUBAGENT_MESSAGE_PARAMETERS,
 	SUBAGENT_MESSAGE_TOOL,
+	type SubagentMessage,
 	SubagentMessageBus,
 	subagentMessagePayload,
+	USER_MESSAGE_ADDRESS,
 } from "./messages.ts";
 import { createPanel, SUBAGENT_PANEL_WIDGET, shownInPanel } from "./panel.ts";
 import { createParentScope, type ParentInboxItem } from "./parent-scope.ts";
@@ -217,7 +219,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 		};
 
-		const { scheduler, directory, deliver, messageFromParent, transcripts } = createGenerations({
+		const { scheduler, directory, deliver, messageFromParent, messageFromUser, transcripts } = createGenerations({
 			agentDir: resolveAgentDir,
 			runner: runSubagent,
 			bus: messageBus,
@@ -248,6 +250,43 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			agentDir: resolveAgentDir,
 			activeScope: () => parentScope.current(),
 		});
+
+		/** Sends what the user typed in a run's transcript to the run, as the orchestrator's `subagent_message` would. */
+		const messageRunAsUser = async (runId: string, text: string) => {
+			const scope = parentScope.current();
+			const run = scheduler.getRun(runId);
+			if (
+				!scope ||
+				!run ||
+				run.parentSessionId !== scope.parentSessionId ||
+				run.sessionEpoch !== scope.sessionEpoch
+			) {
+				return { queued: false, status: "That run belongs to an earlier session and can no longer take messages." };
+			}
+			const receipt = await messageFromUser(scope, runId, text);
+			if (receipt.status !== "accepted") return { queued: false, status: receipt.reason ?? receipt.status };
+			// The orchestrator still owns the work, so it is told, but not woken: the note is in its next turn's context.
+			try {
+				pi.sendMessage(
+					{
+						customType: SUBAGENT_MESSAGE_CUSTOM_TYPE,
+						content: [{ type: "text", text: `The user messaged run ${formatRunLabel(run)}: ${text}` }],
+						display: true,
+						details: {
+							seq: receipt.seq,
+							from: USER_MESSAGE_ADDRESS,
+							to: runId,
+							toName: run.name,
+							content: text,
+						} satisfies SubagentMessage,
+					},
+					{ deliverAs: "steer", triggerTurn: false },
+				);
+			} catch {
+				// The session was disposed; nobody is left to tell.
+			}
+			return { queued: true, status: `Queued for ${run.name ?? runId}: it reads your message at its next step.` };
+		};
 
 		/**
 		 * Opens a run's transcript over the orchestrator's screen and resolves once it closes. Only a run of the
@@ -281,6 +320,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						},
 						source: transcripts.source(runId),
 						expanded: ctx.ui.getToolsExpanded(),
+						send: (text) => messageRunAsUser(runId, text),
 						close: () => done(),
 					}),
 				{ overlay: true, overlayOptions: { width: "100%", maxHeight: "100%" } },
