@@ -83,14 +83,13 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 	return sessions;
 }
 
-/** `running`: a pane's pi is registered as this id, live or silent, so the row is no stored one.
- *  `verdict`: whether a message for its pi is taken. `busy`: mid-turn, working or waiting on an
+/** `verdict`: whether a message for its pi is taken, and why not (a silent pane's row has a pane
+ *  all the same; a stored or starting one has none). `busy`: mid-turn, working or waiting on an
  *  answer. `pane`: the tmux session that pi registered from, if any. `draft`: its prompt held unsent
  *  text at its last heartbeat. `createdAt` and `sessionId`: its pane's start and pi's session id. */
 export interface ListedSession {
 	sessionFile?: string;
 	cwd: string;
-	running: boolean;
 	verdict: ChatVerdict;
 	busy: boolean;
 	leafId?: string;
@@ -107,7 +106,6 @@ export function findSession(instances: InstanceSummary[], id: string): ListedSes
 	return {
 		sessionFile: row.sessionFile,
 		cwd: row.cwd,
-		running: pane !== undefined,
 		verdict: verdictOf(row, pane),
 		busy: row.state === "working" || row.state === "needs",
 		...(pane?.leafId ? { leafId: pane.leafId } : {}),

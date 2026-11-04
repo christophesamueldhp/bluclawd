@@ -609,14 +609,14 @@ describe("a chat open on a session that quits on the Mac and resumes", () => {
 		});
 		expect(shown()).toEqual({
 			rows: [["pi-a", true, undefined]],
-			read: expect.objectContaining({ sessionFile: file, running: true }),
+			read: expect.objectContaining({ sessionFile: file, verdict: { act: true } }),
 		});
 
 		registry.unregisterExternal("pi-a", "quit");
 		registry.saveInstance({ cwd: "/p", sessionFile: file });
 		expect(shown()).toEqual({
 			rows: [["pi-a", false, undefined]],
-			read: expect.objectContaining({ sessionFile: file, running: false }),
+			read: expect.objectContaining({ sessionFile: file, verdict: { act: false, reason: "not_running" } }),
 		});
 
 		expect(registry.claimStart({ cwd: "/p", sessionFile: file })).toEqual({ ok: true, id: chat.id });
@@ -625,7 +625,7 @@ describe("a chat open on a session that quits on the Mac and resumes", () => {
 		registry.registerExternal(pane("pi-b"), "working");
 		expect(shown()).toEqual({
 			rows: [["pi-a", true, undefined]],
-			read: expect.objectContaining({ sessionFile: file, running: true, pane: "pi-b" }),
+			read: expect.objectContaining({ sessionFile: file, verdict: { act: true }, pane: "pi-b" }),
 		});
 	});
 });
@@ -661,9 +661,12 @@ describe("a chat open on a pane whose user types /new", () => {
 		const other = listed.find((s) => s.id !== chat.id);
 		expect(findSession(listSummaries(registry), other?.id ?? "")).toMatchObject({
 			sessionFile: fresh,
-			running: true,
+			verdict: { act: true },
 		});
 		// What its transcript is read from.
-		expect(findSession(listSummaries(registry), chat.id)).toMatchObject({ sessionFile: old, running: false });
+		expect(findSession(listSummaries(registry), chat.id)).toMatchObject({
+			sessionFile: old,
+			verdict: { act: false, reason: "not_running" },
+		});
 	});
 });

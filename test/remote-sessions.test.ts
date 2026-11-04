@@ -106,19 +106,17 @@ describe("remote sessions", () => {
 		expect(findSession(list, "b")).toEqual({
 			sessionFile: "/s/b.jsonl",
 			cwd: "/p",
-			running: true,
 			verdict: { act: true },
 			busy: false,
 			leafId: "e3",
 			createdAt: "2026-10-12T00:00:00Z",
 			sessionId: "pi-b",
 		});
-		expect(findSession(list, "c")).toMatchObject({ running: true, busy: true });
-		expect(findSession(list, "d")).toMatchObject({ running: true, busy: true });
+		expect(findSession(list, "c")).toMatchObject({ verdict: { act: true }, busy: true });
+		expect(findSession(list, "d")).toMatchObject({ verdict: { act: true }, busy: true });
 		expect(findSession(list, "old")).toEqual({
 			sessionFile: "/s/old.jsonl",
 			cwd: "/p",
-			running: false,
 			verdict: { act: false, reason: "not_running" },
 			busy: false,
 		});
@@ -239,7 +237,6 @@ describe("a pane's heartbeat, from its register request to agent view's row and 
 		expect(findSession(summaries, "pi-h")).toEqual({
 			sessionFile: "/s/h.jsonl",
 			cwd: "/p",
-			running: true,
 			verdict: { act: true },
 			busy: true,
 			leafId: "e7",
@@ -306,7 +303,6 @@ describe("a pane's heartbeat, from its register request to agent view's row and 
 		expect(findSession(listSummaries(supervisor), "pi-old")).toEqual({
 			sessionFile: "/s/old.jsonl",
 			cwd: "/p",
-			running: true,
 			verdict: { act: true },
 			busy: true,
 			pane: "bluclawd-old",
