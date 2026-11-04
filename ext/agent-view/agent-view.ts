@@ -60,7 +60,9 @@ import { PasteTokens, shouldCollapse } from "../_shared/paste-tokens.ts";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
 import { theme } from "../_shared/theme.ts";
 import { type AgentClipboard, readAgentClipboard } from "./clipboard.ts";
-import { bandTargets, deletable, type OpenOutcome, RowActions, stoppable } from "./row-actions.ts";
+import { bandTargets, deletable, type OpenOutcome, type PaneOps, RowActions, stoppable } from "./row-actions.ts";
+
+export type { PaneOps } from "./row-actions.ts";
 
 export interface PastSession {
 	sessionFile: string;
@@ -111,33 +113,6 @@ export interface AgentViewOptions {
 	onDrawn?: () => void;
 	/** The roster as listed just before the view opened, so its first frame is the whole of it. */
 	instances?: InstanceSummary[];
-}
-
-/** What agent view needs from tmux in pane mode. */
-export interface PaneOps {
-	/** This pi's own tmux session. */
-	current: string;
-	switchTo(pane: string): void;
-	/** Start pi with `args` in a new tmux session; returns its name. */
-	start(cwd: string, args: string[], env?: Record<string, string>): string;
-	/** Resolves once a pane started to show agent view has drawn it, or after a few seconds; rejects
-	 *  if the pane ends first. */
-	waitForView(pane: string): Promise<void>;
-	/** End a pane's pi as quitting does: it saves its session as a stopped row. */
-	end(pane: string): void;
-	/** End a pane's pi at once, leaving no row behind. */
-	kill(pane: string): void;
-	/** Stop listing this pi's session anywhere; resolves once no heartbeat can list it again. */
-	unlist(): Promise<void>;
-	/** Leave tmux; every session keeps running. */
-	detach(): void;
-	/** Run a `!` command in a session of its own; returns its name. */
-	startShell(cwd: string, command: string): string;
-	listShells(): ShellInfo[];
-	/** Stop a running `!` command; its row stays, stopped. */
-	stopShell(name: string): void;
-	/** A session's last `lines` lines of output. */
-	capture(name: string, lines: number): string[];
 }
 
 type Item =

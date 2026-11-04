@@ -8,8 +8,34 @@
 
 import type { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import type { AgentRow } from "../../daemon/rows.ts";
-import { AGENT_VIEW_COMMAND, HIDE_ENV, OPEN_VIEW_ENV, Tmux } from "../../daemon/tmux.ts";
-import type { PaneOps } from "./agent-view.ts";
+import { AGENT_VIEW_COMMAND, HIDE_ENV, OPEN_VIEW_ENV, type ShellInfo, Tmux } from "../../daemon/tmux.ts";
+
+/** What agent view needs from tmux in pane mode. */
+export interface PaneOps {
+	/** This pi's own tmux session. */
+	current: string;
+	switchTo(pane: string): void;
+	/** Start pi with `args` in a new tmux session; returns its name. */
+	start(cwd: string, args: string[], env?: Record<string, string>): string;
+	/** Resolves once a pane started to show agent view has drawn it, or after a few seconds; rejects
+	 *  if the pane ends first. */
+	waitForView(pane: string): Promise<void>;
+	/** End a pane's pi as quitting does: it saves its session as a stopped row. */
+	end(pane: string): void;
+	/** End a pane's pi at once, leaving no row behind. */
+	kill(pane: string): void;
+	/** Stop listing this pi's session anywhere; resolves once no heartbeat can list it again. */
+	unlist(): Promise<void>;
+	/** Leave tmux; every session keeps running. */
+	detach(): void;
+	/** Run a `!` command in a session of its own; returns its name. */
+	startShell(cwd: string, command: string): string;
+	listShells(): ShellInfo[];
+	/** Stop a running `!` command; its row stays, stopped. */
+	stopShell(name: string): void;
+	/** A session's last `lines` lines of output. */
+	capture(name: string, lines: number): string[];
+}
 
 /** What row actions need of the daemon. */
 export type RowClient = Pick<OrchestratorClient, "start" | "startFailed" | "send" | "delete" | "setMeta">;
