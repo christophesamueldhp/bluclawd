@@ -31,13 +31,9 @@ export type RunDirectory = ReturnType<typeof createRunDirectory>;
 
 /** The one answer to which runs exist in a parent scope, whether each can be messaged, and which names are taken. */
 export function createRunDirectory(deps: RunDirectoryDeps) {
-	/** The generation whose last turn ended, per run. */
-	const endedTurns = new Map<string, number>();
-
 	const stateOf = (record: Readonly<SubagentRunRecord>): RunState => {
 		if (isTerminalSubagentStatus(record.status)) return "finished";
-		if (record.status === "stopping") return "stopping";
-		if (endedTurns.get(record.runId) === (record.generation ?? 0)) return "finishing";
+		if (record.status === "stopping" || record.status === "finishing") return record.status;
 		return record.status === "starting" ? "starting" : "live";
 	};
 	const entryOf = (record: Readonly<SubagentRunRecord>): RunEntry => {
@@ -57,12 +53,6 @@ export function createRunDirectory(deps: RunDirectoryDeps) {
 			.map(entryOf);
 
 	return {
-		/** The child's last turn of its current generation ended. */
-		endTurn(runId: string): void {
-			const record = deps.scheduler.getRun(runId);
-			if (record) endedTurns.set(runId, record.generation ?? 0);
-		},
-
 		/** A run this instance knows, in any scope. */
 		get(runId: string): RunEntry | undefined {
 			const record = deps.scheduler.getRun(runId);

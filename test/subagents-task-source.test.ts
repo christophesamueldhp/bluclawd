@@ -32,6 +32,7 @@ function persistedRecord(overrides: Partial<SubagentRunRecord>): SubagentRunReco
 		sessionEpoch: 1,
 		parentTurnId: "turn_1",
 		originToolCallId: "call_1",
+		generation: 0,
 		agentName: "explorer",
 		definitionSource: "bundled",
 		provider: "faux",

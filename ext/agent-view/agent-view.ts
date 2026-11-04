@@ -54,12 +54,15 @@ import {
 	stateBandOf,
 	type ViewMode,
 } from "../../daemon/rows.ts";
-import { AGENT_VIEW_COMMAND, HIDE_ENV, OPEN_VIEW_ENV, type ShellInfo, Tmux } from "../../daemon/tmux.ts";
+import { type ShellInfo, Tmux } from "../../daemon/tmux.ts";
 import { mascotGlyphs, REST, renderMascot } from "../_shared/mascot.ts";
 import { PasteTokens, shouldCollapse } from "../_shared/paste-tokens.ts";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
 import { theme } from "../_shared/theme.ts";
 import { type AgentClipboard, readAgentClipboard } from "./clipboard.ts";
+import { bandTargets, deletable, type OpenOutcome, type PaneOps, RowActions, stoppable } from "./row-actions.ts";
+
+export type { PaneOps } from "./row-actions.ts";
 
 export interface PastSession {
 	sessionFile: string;
@@ -110,33 +113,6 @@ export interface AgentViewOptions {
 	onDrawn?: () => void;
 	/** The roster as listed just before the view opened, so its first frame is the whole of it. */
 	instances?: InstanceSummary[];
-}
-
-/** What agent view needs from tmux in pane mode. */
-export interface PaneOps {
-	/** This pi's own tmux session. */
-	current: string;
-	switchTo(pane: string): void;
-	/** Start pi with `args` in a new tmux session; returns its name. */
-	start(cwd: string, args: string[], env?: Record<string, string>): string;
-	/** Resolves once a pane started to show agent view has drawn it, or after a few seconds; rejects
-	 *  if the pane ends first. */
-	waitForView(pane: string): Promise<void>;
-	/** End a pane's pi as quitting does: it saves its session as a stopped row. */
-	end(pane: string): void;
-	/** End a pane's pi at once, leaving no row behind. */
-	kill(pane: string): void;
-	/** Stop listing this pi's session anywhere; resolves once no heartbeat can list it again. */
-	unlist(): Promise<void>;
-	/** Leave tmux; every session keeps running. */
-	detach(): void;
-	/** Run a `!` command in a session of its own; returns its name. */
-	startShell(cwd: string, command: string): string;
-	listShells(): ShellInfo[];
-	/** Stop a running `!` command; its row stays, stopped. */
-	stopShell(name: string): void;
-	/** A session's last `lines` lines of output. */
-	capture(name: string, lines: number): string[];
 }
 
 type Item =
@@ -255,6 +231,7 @@ export class AgentView implements Component, Focusable {
 	focused = false;
 
 	private readonly opts: AgentViewOptions;
+	private readonly actions: RowActions;
 	private readonly composer = new Input();
 	/** Lines above the composer's current one (ctrl+j / shift+enter); Input itself is single-line. */
 	private composerLines: string[] = [];
@@ -332,6 +309,12 @@ export class AgentView implements Component, Focusable {
 
 	constructor(opts: AgentViewOptions) {
 		this.opts = opts;
+		this.actions = new RowActions({
+			client: opts.client,
+			panes: opts.panes,
+			cwd: opts.cwd,
+			onStopSelf: opts.onStopSelf,
+		});
 		this.viewMode = opts.loadViewMode?.() ?? "state";
 		this.dispatchModel = opts.model;
 		const composer = this.composer as unknown as { handlePaste(text: string): void };
@@ -801,55 +784,33 @@ export class AgentView implements Component, Focusable {
 		if (!this.closed) await this.refresh();
 	}
 
-	/** Pane mode: a pi on a stored or past session, in a pane of its own. The daemon claims the
-	 *  session first, refusing it while another window's pane starts or runs it, and lists its row as
-	 *  starting until the pane registers. */
-	private async resumeIn(cwd: string, sessionFile: string, args: string[], label?: string): Promise<string> {
-		const id = await this.opts.client.start({ cwd, sessionFile, ...(label ? { label } : {}) });
-		try {
-			return this.opts.panes.start(cwd, ["--session", sessionFile, ...args]);
-		} catch (error) {
-			await this.opts.client.startFailed(id).catch(() => undefined);
-			throw error;
-		}
-	}
-
 	/** Pane mode: show `pane` in this terminal; this view closes so its session shows on return. */
 	private leaveFor(pane: string): void {
-		try {
-			this.opts.panes.switchTo(pane);
-		} catch (error) {
-			if (Tmux.gone(error)) {
-				this.say("Couldn't open — that session's pane is gone", "error");
-				void this.refresh();
-			} else this.say(`Couldn't open — ${Tmux.reason(error)}`, "error");
-			return;
-		}
-		this.close();
+		void this.opened(this.actions.switchTo(pane));
 	}
 
-	/** Pane mode: open a row. A pane is switched to; a session with no pane gets one. */
-	private async openPane(row: AgentRow, sessionFile: string): Promise<void> {
-		if (row.pane) {
-			this.leaveFor(row.pane);
-			return;
+	/** What an open came to: this view closes once this terminal shows another pane. */
+	private async opened(outcome: OpenOutcome): Promise<void> {
+		switch (outcome.kind) {
+			case "left":
+				this.close();
+				return;
+			case "peek":
+				this.mode = "peek";
+				this.reply.setValue("");
+				this.render_();
+				return;
+			case "refused":
+				if (outcome.text) this.say(outcome.text);
+				return;
+			case "failed":
+				this.say(outcome.text, "error");
+				await this.refresh();
+				return;
+			case "cancelled":
+			case "done":
+				await this.refresh();
 		}
-		this.opening = row.id;
-		this.render_();
-		let pane: string;
-		try {
-			pane = await this.resumeIn(row.cwd, sessionFile, []);
-		} catch (error) {
-			this.opening = undefined;
-			this.say(`Couldn't open — ${Tmux.reason(error)}`, "error");
-			return;
-		}
-		if (this.closed || this.opening !== row.id) {
-			if (!this.closed) await this.refresh();
-			return; // cancelled: it runs on in the background
-		}
-		this.opening = undefined;
-		this.leaveFor(pane);
 	}
 
 	/** Enter / →: show the session in this terminal; the one here keeps running in its own pane. */
@@ -870,26 +831,12 @@ export class AgentView implements Component, Focusable {
 
 	private async open(row: AgentRow): Promise<void> {
 		if (this.closed || this.opening) return;
-		// A `!` command opens on its output.
-		if (row.shell) {
-			this.mode = "peek";
-			this.reply.setValue("");
-			this.render_();
-			return;
-		}
-		if (row.self) {
-			this.close();
-			return;
-		}
-		if (row.starting || !row.sessionFile) {
-			this.say(
-				!row.alive && !row.sessionFile
-					? "No session file recorded — use /resume to reopen its saved conversation"
-					: "Still starting — try again in a moment",
-			);
-			return;
-		}
-		await this.openPane(row, row.sessionFile);
+		// Set while a pane starts for it: esc calls the open off.
+		this.opening = row.id;
+		this.render_();
+		const outcome = await this.actions.open(row, () => this.closed || this.opening !== row.id);
+		if (this.opening === row.id) this.opening = undefined;
+		await this.opened(outcome);
 	}
 
 	private disarm(): void {
@@ -910,25 +857,17 @@ export class AgentView implements Component, Focusable {
 		this.render_();
 	}
 
-	/** ctrl+x, as bluclawd's: a running session's pi ends on the first press and its row stays,
-	 *  stopped; the second press (within 2s) deletes the row. */
+	/** ctrl+x, as bluclawd's: the first press stops (see RowActions.stop) and arms; the second
+	 *  press (within 2s) deletes. */
 	private async stopOrDelete(): Promise<void> {
 		const item = this.selected;
 		if (!item || item.kind === "more") return;
 		if (item.kind === "header") {
-			const targets = item.band.rows.filter((r) => !r.self && !r.starting);
+			const targets = bandTargets(item.band.rows);
 			if (targets.length === 0 || this.composing()) return;
 			if (this.armed?.key === item.key) {
 				this.disarm();
-				await Promise.all(
-					targets
-						.map(async (r) => {
-							if (r.shell) return this.opts.panes.kill(r.shell);
-							if (r.pane) this.opts.panes.kill(r.pane);
-							await this.opts.client.delete(r.id);
-						})
-						.map((p) => p.catch(() => undefined)),
-				);
+				await this.actions.deleteAll(targets);
 				await this.refresh();
 				return;
 			}
@@ -936,117 +875,41 @@ export class AgentView implements Component, Focusable {
 			return;
 		}
 		const row = item.row;
-		if (row.shell) {
-			// As bluclawd's: the first press stops a running command, the second removes the row.
-			if (this.armed?.key === row.id) {
-				this.disarm();
-				this.opts.panes.kill(row.shell);
-				if (this.mode === "peek") this.mode = "list";
-				await this.refresh();
-				return;
-			}
-			this.arm(row.id);
-			if (row.alive) {
-				this.justKilled = row.id;
-				try {
-					this.opts.panes.stopShell(row.shell);
-				} catch (error) {
-					this.say(`Couldn't stop — ${error instanceof Error ? error.message : String(error)}`, "error");
-				}
-				await this.refresh();
-			}
-			return;
-		}
-		if (row.self) {
-			if (this.armed?.key === row.id) {
-				this.disarm();
-				await this.deleteOwnPane(row, this.opts.panes);
-				return;
-			}
-			this.arm(row.id);
-			if (stoppable(row)) {
-				this.justKilled = row.id;
-				this.opts.onStopSelf?.();
-				await this.refresh();
-			}
-			return;
-		}
-		if (row.starting) return;
+		if (!deletable(row)) return;
 		if (this.armed?.key === row.id) {
 			this.disarm();
-			try {
-				if (row.pane && row.alive) this.opts.panes.kill(row.pane);
-				await this.opts.client.delete(row.id);
-				if (this.mode === "peek") this.mode = "list";
-			} catch (error) {
-				this.say(`Couldn't delete — ${error instanceof Error ? error.message : String(error)}`, "error");
-			}
+			const outcome = await this.actions.delete(row, {
+				leaving: () => {
+					this.leaving = true;
+					this.say("Deleting…");
+				},
+				left: () => this.teardown(),
+			});
+			if (outcome.kind === "left") return;
+			this.leaving = false;
+			if (outcome.kind === "failed") this.say(outcome.text, "error");
+			else if (this.mode === "peek") this.mode = "list";
 			await this.refresh();
 			return;
 		}
 		this.arm(row.id);
-		if (row.pane && stoppable(row)) {
-			this.justKilled = row.id;
-			try {
-				this.opts.panes.end(row.pane);
-			} catch (error) {
-				this.say(`Couldn't stop — ${error instanceof Error ? error.message : String(error)}`, "error");
-			}
-			await this.refresh();
-		}
-	}
-
-	/** Pane mode: this terminal moves to a new session, in agent view, and this pane ends. */
-	private async deleteOwnPane(row: AgentRow, panes: PaneOps): Promise<void> {
-		let next: string | undefined;
-		this.leaving = true;
-		this.say("Deleting…");
-		try {
-			// Its first prompt, not its session_start: an extension starting after this one (paste's
-			// editor) would take the keyboard from a view opened there.
-			next = panes.start(this.opts.cwd, ["--", `/${AGENT_VIEW_COMMAND}`], {
-				[OPEN_VIEW_ENV]: "1",
-				[HIDE_ENV]: row.id,
-			});
-			// Switching at once would show the new pi starting up, then its prompt, then its agent view.
-			await panes.waitForView(next);
-			panes.switchTo(next);
-		} catch (error) {
-			this.leaving = false;
-			if (next) {
-				try {
-					panes.kill(next);
-				} catch {
-					// it ended already
-				}
-			}
-			this.say(`Couldn't delete — ${error instanceof Error ? error.message : String(error)}`, "error");
-			return;
-		}
-		this.teardown();
-		await panes.unlist();
-		await this.opts.client.delete(row.id).catch(() => undefined);
-		try {
-			panes.kill(panes.current);
-		} catch {
-			// This pi stays, in the background; its row is back with its next heartbeat.
-		}
+		const outcome = await this.actions.stop(row);
+		if (outcome.kind === "refused") return;
+		this.justKilled = row.id;
+		if (outcome.kind === "failed") this.say(outcome.text, "error");
+		await this.refresh();
 	}
 
 	private async togglePin(): Promise<void> {
 		const row = this.selectedRow;
-		if (!row || row.starting) return;
-		if (row.shell) {
-			this.say("A shell command can't be pinned");
+		if (!row) return;
+		const outcome = await this.actions.pin(row);
+		if (outcome.kind === "refused") {
+			if (outcome.text) this.say(outcome.text);
 			return;
 		}
-		const verb = row.pinned ? "unpin" : "pin";
-		try {
-			await this.opts.client.setMeta(row.id, { pinned: !row.pinned });
-			this.collapsed.delete("pinned");
-		} catch (error) {
-			this.say(`Couldn't ${verb} — ${error instanceof Error ? error.message : String(error)}`, "error");
-		}
+		if (outcome.kind === "failed") this.say(outcome.text, "error");
+		else this.collapsed.delete("pinned");
 		await this.refresh();
 	}
 
@@ -1135,7 +998,7 @@ export class AgentView implements Component, Focusable {
 		}
 		this.mode = "list";
 		try {
-			this.leaveFor(await this.resumeIn(past.cwd, past.sessionFile, [], past.label));
+			this.leaveFor(await this.actions.resume(past.cwd, past.sessionFile, [], past.label));
 		} catch (error) {
 			this.say(`Couldn't resume — ${error instanceof Error ? error.message : String(error)}`, "error");
 		}
@@ -1376,73 +1239,33 @@ export class AgentView implements Component, Focusable {
 	}
 
 	private async sendReply(row: AgentRow): Promise<void> {
-		const text = this.reply.getValue().trim();
-		if (!text && !row.shell) {
-			void this.open(row);
-			return;
-		}
-		this.replyError = undefined;
-		if (row.shell) {
-			if (text === "/stop" && row.alive) {
-				this.reply.setValue("");
-				this.opts.panes.stopShell(row.shell);
-				await this.refresh();
-				return;
-			}
-			if (text) this.replyError = "a shell command takes no reply — ctrl+x stops it";
-			this.render_();
-			return;
-		}
-		if (text === "/stop" && row.alive && row.state === "working") {
-			this.reply.setValue("");
-			this.replyDrafts.delete(row.id);
-			if (row.self) {
-				this.opts.onStopSelf?.();
-				await this.refresh();
-				return;
-			}
-			await this.opts.client.send(row.id, { type: "abort" }).catch((error) => {
-				this.replyError = `Couldn't stop — ${error instanceof Error ? error.message : String(error)}`;
-			});
-			await this.refresh();
-			return;
-		}
-		if (row.self) {
-			this.teardown();
-			this.opts.onSelfReply?.(text);
-			this.opts.onClose();
-			return;
-		}
 		// A second enter before this reply is sent would send it again: for a stored row, a second pane.
 		if (this.replying) return;
+		const text = this.reply.getValue().trim();
 		this.replying = true;
-		await this.replyToPane(row, text).finally(() => {
+		const outcome = await this.actions.reply(row, text).finally(() => {
 			this.replying = false;
 		});
-	}
-
-	/** Pane mode: a reply is the session's next prompt (queued behind a turn in progress). A
-	 *  session with no pane gets one, with the reply as its first prompt. */
-	private async replyToPane(row: AgentRow, text: string): Promise<void> {
-		try {
-			if (row.pane) {
-				if (row.state === "needs") {
-					this.replyError = "it's waiting on a question — enter opens it to answer";
-					this.render_();
-					return;
-				}
-				await this.opts.client.send(row.id, { type: "prompt", text });
-			} else if (row.sessionFile && !row.alive) {
-				await this.resumeIn(row.cwd, row.sessionFile, ["--", text]);
-			} else {
-				this.replyError = "enter opens it";
+		switch (outcome.kind) {
+			case "open":
+				void this.open(row);
+				return;
+			case "self":
+				this.teardown();
+				this.opts.onSelfReply?.(text);
+				this.opts.onClose();
+				return;
+			case "refused":
+				this.replyError = outcome.text;
 				this.render_();
 				return;
-			}
-			this.reply.setValue("");
-			this.replyDrafts.delete(row.id);
-		} catch (error) {
-			this.replyError = `Couldn't send — ${error instanceof Error ? error.message : String(error)}`;
+			case "failed":
+				this.replyError = outcome.text;
+				break;
+			case "done":
+				this.replyError = undefined;
+				this.reply.setValue("");
+				this.replyDrafts.delete(row.id);
 		}
 		await this.refresh();
 	}
@@ -1853,17 +1676,6 @@ export class AgentView implements Component, Focusable {
 	}
 
 	invalidate(): void {}
-
-	// ---- test seams ----------------------------------------------------------------------
-
-	setInstancesForTest(instances: InstanceSummary[]): void {
-		this.instances = instances;
-		this.recompute();
-	}
-
-	selectedKeyForTest(): string | undefined {
-		return this.selectedKey;
-	}
 
 	// ---- render --------------------------------------------------------------------------
 
@@ -2324,11 +2136,6 @@ function isDirectory(path: string): boolean {
 	} catch {
 		return false;
 	}
-}
-
-/** bluclawd's ctrl+x stops a session in Working or Needs input first, and deletes the rest. */
-function stoppable(row: AgentRow): boolean {
-	return row.alive && (row.state === "working" || row.state === "needs" || row.state === "idle");
 }
 
 /** bluclawd's whitespace cleanup for a row's text: tags dropped, every run of space one space. */
