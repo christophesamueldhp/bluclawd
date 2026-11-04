@@ -28,13 +28,10 @@ describe("pending prompts kept on the phone", () => {
 		const store = pendingStore(() => storage);
 		const chat = openChat("a", store.load("a"));
 		chat.report = { models: [], outcomes: [] };
-		const failed = restorePending(chat, {
-			outcomes: [
-				{ id: queued.id, outcome: "queued" },
-				{ id: refused.id, outcome: "refused", reason: "busy" },
-			],
-			since: 200,
-		});
+		const failed = restorePending(chat, [
+			{ id: queued.id, outcome: "queued" },
+			{ id: refused.id, outcome: "refused", reason: "busy" },
+		]);
 		expect(failed.map(({ entry, reason }) => [entry.prompt, reason])).toEqual([["refused", "busy"]]);
 		expect(chat.pending.map((p) => [p.prompt, p.outcome])).toEqual([["queued", "queued"]]);
 		store.save(chat);

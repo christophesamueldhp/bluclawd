@@ -85,8 +85,8 @@ export class RemoteEvents {
 		this.clients.add(client);
 		const live = sessionId ? this.lives.get(sessionId) : undefined;
 		if (live) send(res, "live", { sessionId, live });
-		// Every one the daemon knows: one the phone still waits for and that is not here, a
-		// restarted daemon lost.
+		// Every one the daemon knows: an older phone judges one it still waits for and that is not
+		// here lost to a restart; a newer one asks the daemon about it.
 		if (sessionId) send(res, "outcomes", { sessionId, outcomes: this.sources.outcomes(sessionId) });
 		res.on("close", () => {
 			this.clients.delete(client);

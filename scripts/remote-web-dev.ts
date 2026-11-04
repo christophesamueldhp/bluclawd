@@ -12,7 +12,10 @@
 // exists Gamma's status answers 5 s late, so a prompt can be sent before its report is in. While
 // `<dir>/silent` exists Gamma's row is silent (its pi stopped beating, tmux still has it): listed
 // alive, refusing prompts (409 `session_silent`) and answering no status; seen on the next list.
-// Creating `<dir>/reply` makes Alpha stream a reply that runs a tool (see streamReply).
+// Creating `<dir>/reply` makes Alpha stream a reply that runs a tool (see streamReply). While
+// `<dir>/held` exists Gamma's heartbeat takes nothing, and creating `<dir>/restart` then starts
+// prompt delivery afresh, as a daemon restart does: the app, asking about the prompts it still
+// waits on, is answered lost (daemon_restarted).
 import { appendFileSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -74,7 +77,7 @@ function listedGamma(): InstanceSummary {
 }
 
 let server: RemoteServer | undefined;
-const delivery = new PromptDelivery();
+let delivery = new PromptDelivery();
 delivery.changed = (id) => server?.status(id);
 /** Gamma's heartbeat takes the prompt a moment later, and its pi takes it or queues it. */
 function send(id: string, message: PaneMessage): boolean {
@@ -83,6 +86,7 @@ function send(id: string, message: PaneMessage): boolean {
 	if (id === gamma.id && message.type === "prompt" && message.id) {
 		const promptId = message.id;
 		setTimeout(() => {
+			if (existsSync(join(dir, "held"))) return;
 			if (existsSync(join(dir, "gone"))) {
 				delivery.ended(id, gamma.id, undefined, true);
 				return;
@@ -126,6 +130,8 @@ server = await startRemoteServer(
 			return {};
 		},
 		outcomes: (id) => delivery.outcomes(id),
+		lifetime: () => delivery.lifetime,
+		answer: (id, waiting) => delivery.answer(id, waiting, id === gamma.id && !quit),
 		renameInstance: () => true,
 		setPinned: () => true,
 		deleteInstance: () => true,
@@ -180,6 +186,14 @@ setInterval(() => {
 			gamma.id,
 			queued.splice(0).map((id) => ({ id, outcome: "lost", reason: "dequeued" })),
 		);
+		server?.status(gamma.id);
+	}
+	const restart = join(dir, "restart");
+	if (existsSync(restart)) {
+		rmSync(restart);
+		delivery = new PromptDelivery();
+		delivery.changed = (id) => server?.status(id);
+		// Gamma reports to the new daemon.
 		server?.status(gamma.id);
 	}
 	if (!quit && existsSync(join(dir, "quit"))) {

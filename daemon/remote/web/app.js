@@ -17,6 +17,7 @@ import {
 	replyEndedAt,
 	restorePending,
 	settleOutcomes,
+	waitingOn,
 } from "./chat.js";
 import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
@@ -57,7 +58,7 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.53";
+const VERSION = "0.0.54";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 /** Each chat's pending prompts and unsent text, kept for when it opens again. */
 const keptPending = pendingStore(() => localStorage);
@@ -197,8 +198,6 @@ let source;
 let offlineTimer;
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let watchdog;
-/** When the event stream was last asked for, by connect() or the browser's own reconnect after an error. */
-let streamFrom = 0;
 /** Older messages load this far (px) ahead of the log's top, so they are usually there when it is reached. */
 const OLDER_MARGIN = 400;
 const OLDER_RETRY_MS = 2000;
@@ -487,6 +486,8 @@ async function loadStatus() {
 	if (state.chat !== chat || request !== chat.statusRequest) return;
 	chat.report = report;
 	returned(chat, [...restore(chat), ...settleOutcomes(chat, report?.outcomes)]);
+	// Its pane's report is what the daemon answers for a restart by.
+	void askWaiting(chat);
 	// A pane has them once it has reported.
 	if (report && !chat.commandsAsked) {
 		chat.commandsAsked = true;
@@ -589,7 +590,6 @@ function closeStream() {
 function connect() {
 	closeStream();
 	if (!getToken() || document.visibilityState === "hidden") return;
-	streamFrom = Date.now();
 	const current = api.events(state.chat?.id);
 	source = current;
 	// A sleeping Mac leaves the connection hanging without an error, so the timer starts with every stream.
@@ -654,14 +654,14 @@ function connect() {
 		const { sessionId, outcomes } = JSON.parse(event.data);
 		const chat = state.chat;
 		if (!chat || sessionId !== chat.id) return;
-		const failed = restore(chat, { outcomes, since: streamFrom });
-		returned(chat, [...failed, ...settleOutcomes(chat, outcomes, streamFrom)]);
+		const failed = restore(chat, outcomes);
+		returned(chat, [...failed, ...settleOutcomes(chat, outcomes)]);
 		render();
+		void askWaiting(chat);
 	});
 	current.addEventListener("ping", alive);
 	current.onerror = () => {
 		// The browser asks for it again on its own, unless it gave up.
-		streamFrom = Date.now();
 		offlineTimer ??= setTimeout(() => setOnline(false), OFFLINE_AFTER_MS);
 		// EventSource gives up on an HTTP error, such as a revoked token: find out which, then retry.
 		if (current.readyState === EventSource.CLOSED && source === current) {
@@ -2292,13 +2292,13 @@ async function send() {
 	render();
 	$("#scroll").scrollTop = $("#scroll").scrollHeight;
 	try {
-		await api.prompt(
+		const { lifetime } = await api.prompt(
 			chat.id,
 			value,
 			images.map(({ mimeType, data }) => ({ mimeType, data })),
 			entry.id,
 		);
-		entry.acceptedAt = Date.now();
+		entry.lifetime = lifetime;
 		if (state.chat === chat) keptPending.save(chat);
 	} catch (error) {
 		forget(chat, entry);
@@ -2334,7 +2334,7 @@ function putBack(chat, entry) {
 /**
  * The prompts the phone kept of the chat, back in once the daemon's replay and its pane's report
  * are (see restorePending).
- * @param {Chat} chat @param {import("./chat.js").Replay} [replay]
+ * @param {Chat} chat @param {import("./chat.js").PromptOutcome[]} [replay]
  * @returns {import("./chat.js").Failed[]} those refused or lost
  */
 function restore(chat, replay) {
@@ -2343,6 +2343,26 @@ function restore(chat, replay) {
 	// Their give-up timers went with the page or the chat that sent them.
 	if (chat.restored) for (const entry of kept) setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
 	return failed;
+}
+
+/**
+ * Asks the daemon about the prompts the chat still waits on (see waitingOn), and puts back those it
+ * answers refused or lost. One it cannot answer yet waits for its give-up, or the next ask.
+ * @param {Chat} chat
+ */
+async function askWaiting(chat) {
+	const waiting = waitingOn(chat);
+	if (!waiting.length) return;
+	/** @type {import("./chat.js").PromptOutcome[]} */
+	let outcomes;
+	try {
+		outcomes = await api.outcomes(chat.id, waiting);
+	} catch (error) {
+		// The next status or stream asks again.
+		if (error instanceof Unauthorized) handleError(error);
+		return;
+	}
+	if (state.chat === chat && returned(chat, settleOutcomes(chat, outcomes))) render();
 }
 
 /** A sent prompt still waiting PROMPT_GIVE_UP_MS on (see giveUp). @param {Chat} chat @param {Pending} entry */

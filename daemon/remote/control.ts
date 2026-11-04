@@ -212,6 +212,10 @@ export class RemoteControl {
 					startFailed: this.deps.startFailed,
 					report: (id) => this.reports.get(id),
 					outcomes: (id) => this.delivery.outcomes(id),
+					lifetime: () => this.delivery.lifetime,
+					// Whether its pane reports outcomes, as one from an older build does not, is in its latest report.
+					answer: (id, waiting) =>
+						this.delivery.answer(id, waiting, Array.isArray(this.reports.get(id)?.outcomes)),
 					terminalOpen: () => this.terminalOpen(),
 					renameInstance: this.deps.renameInstance,
 					setPinned: this.deps.setPinned,
