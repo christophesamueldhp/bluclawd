@@ -1,6 +1,7 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stripAnsi } from "../daemon/ansi.ts";
+import { agentTasks } from "../ext/_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../ext/_shared/status-keys.ts";
 import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
 import backgroundBash from "../ext/background-bash/index.ts";
@@ -161,6 +162,19 @@ describe("↓ with background shells running", () => {
 		t.press(DOWN, "x");
 		expect(t.panel()).toEqual([]);
 		expect(t.status(STATUS_KEYS.tasks)).toContain("↓ to manage");
+	});
+
+	it("has the pill offer ↓ again as soon as /tasks dismisses the panel's last row", async () => {
+		const t = await withShell();
+		t.script([launch(["scout"], { background: true })]);
+		await prompt(t);
+		await waitFor(() => row(t, "scout")?.includes("completed") ?? false);
+		expect(t.status(STATUS_KEYS.tasks)).toContain("/tasks to manage");
+
+		const [done] = agentTasks()?.listDone?.(t.session.sessionId) ?? [];
+		expect(agentTasks()?.dismiss?.(done.id, t.session.sessionId)).toBe(true);
+		expect(t.status(STATUS_KEYS.tasks)).toContain("↓ to manage");
+		expect(t.panel()).toEqual([]);
 	});
 
 	it("still selects the tasks pill while the panel is empty", async () => {

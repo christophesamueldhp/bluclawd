@@ -1,6 +1,5 @@
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { agentTasks } from "../ext/_shared/agent-tasks.ts";
 import { createSubagentTui, gate, launch, REPORT, type SubagentTui } from "./helpers/subagent-tui.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -126,57 +125,5 @@ describe("the run panel below the prompt", () => {
 		expect(row(tui, "scout")).toBeDefined();
 		tui.advance(6_000);
 		expect(tui.panel()).toEqual([]);
-	});
-
-	describe("a dismissed run the orchestrator resumes", () => {
-		const SECOND_REPORT = REPORT.replace("Done.", "Second pass done.");
-
-		/** "scout" has reported and is dismissed by `dismiss`; its resumed generation waits for `second`. */
-		async function resumeDismissed(dismiss: (t: SubagentTui, runId: string) => void) {
-			const t = await createSubagentTui();
-			tui = t;
-			const second = gate();
-			t.script(
-				[
-					launch(["scout"], { background: true }),
-					() => fauxAssistantMessage("Waiting for scout."),
-					() => fauxAssistantMessage("Got scout's report."),
-					() =>
-						fauxAssistantMessage([
-							fauxToolCall("subagent_message", { to: "scout", content: "One more thing." }, { id: "call_more" }),
-						]),
-					() => fauxAssistantMessage("Waiting for scout again."),
-				],
-				async (context) => {
-					if (!JSON.stringify(context.messages).includes("One more thing.")) return fauxAssistantMessage(REPORT);
-					await second.wait;
-					return fauxAssistantMessage(SECOND_REPORT);
-				},
-			);
-			await prompt(t);
-			await waitFor(() => (row(t, "scout")?.includes("completed") && !t.session.isStreaming) ?? false);
-			const [done] = agentTasks()?.listDone?.(t.session.sessionId) ?? [];
-			dismiss(t, done.id);
-			expect(t.panel()).toEqual([]);
-
-			await prompt(t, "Ask scout for one more thing.");
-			return { t, second, runId: done.id };
-		}
-
-		it.each([
-			["the panel", (t: SubagentTui) => t.press("\x1b[B", "x")],
-			["/tasks", (t: SubagentTui, runId: string) => agentTasks()?.dismiss?.(runId, t.session.sessionId)],
-		])(
-			"shows it again while it runs, waits for it, and lists its second finish, dismissed from %s",
-			async (_from, dismiss) => {
-				const { t, second, runId } = await resumeDismissed(dismiss);
-				await waitFor(() => /running|starting/.test(row(t, "scout") ?? ""));
-				expect(t.panel()[0]).toContain("waiting for 1 subagent");
-
-				second.open();
-				await waitFor(() => row(t, "scout")?.includes("completed") ?? false);
-				expect((agentTasks()?.listDone?.(t.session.sessionId) ?? []).map((task) => task.id)).toEqual([runId]);
-			},
-		);
 	});
 });

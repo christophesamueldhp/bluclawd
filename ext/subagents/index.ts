@@ -10,6 +10,7 @@ import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
+import { publishSubagentPanel } from "../_shared/subagent-panel.ts";
 import { createRunAdmission, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
 import {
 	type AgentDefinitionCatalog,
@@ -90,16 +91,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		let activeTurnIndex = 0;
 		let catalog: AgentDefinitionCatalog | undefined;
-		let unpublishTasks: (() => void) | undefined;
+		let unpublish: (() => void) | undefined;
 		let latestLoadout: ToolLoadout | undefined;
 		const now = options.now ?? Date.now;
 		let panelTui: Pick<TUI, "requestRender" | "hasOverlay"> | undefined;
 		let panel: ReturnType<typeof createPanel> | undefined;
 		let offPanelKeys: (() => void) | undefined;
-		/** The generation of each final run the user dismissed from the panel; a resumed run shows again. */
-		const dismissedFromPanel = new Map<string, number>();
-		/** The same for /tasks, whose dismissals leave the panel too. */
-		const dismissedFromTasks = new Map<string, number>();
 		// Subagent calls in one message start executing together; a child waits for every launch in flight to be
 		// admitted, so each sibling is registered for messages before any of them takes a turn.
 		let launchesInFlight = 0;
@@ -222,7 +219,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				}
 			},
 			now,
-			dismissed: { panel: dismissedFromPanel, tasks: dismissedFromTasks },
+			onChange: runsChanged,
 		});
 
 		const taskSource = createAgentTaskSource({
@@ -230,7 +227,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			directory,
 			scheduler,
 			agentDir: resolveAgentDir,
-			dismissed: dismissedFromTasks,
 		});
 
 		const { openTranscript } = createTranscriptActions({
@@ -295,12 +291,14 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			const liveIds = new Set(scheduler.listActiveRuns(sessionId).map((r) => r.runId));
 			reconcileInterruptedRuns(agentDir, sessionId, branchEntries, liveIds);
 
-			unpublishTasks?.();
-			unpublishTasks = publishAgentTasks({
-				...taskSource,
-				panelHasRows: () => panel !== undefined && views.panel().length > 0,
-				open: openTranscript,
-			});
+			unpublish?.();
+			// The panel first: publishing the tasks signals a change, and the tasks pill then reads the panel.
+			const unpublishPanel = publishSubagentPanel(() => panel !== undefined && views.panel().length > 0);
+			const unpublishTasks = publishAgentTasks({ ...taskSource, open: openTranscript });
+			unpublish = () => {
+				unpublishTasks();
+				unpublishPanel();
+			};
 			refreshFooterStatus();
 			if (ctx.mode === "tui") {
 				// Always mounted: it renders nothing while there are no runs to show.
@@ -318,10 +316,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 								// The same stop as /tasks', so no report wakes the orchestrator.
 								stop: ({ record }) =>
 									taskSource.stop(record.runId, { owner: record.parentSessionId, source: "user" }),
-								dismiss: ({ record }) => {
-									dismissedFromPanel.set(record.runId, record.generation);
-									runsChanged();
-								},
+								dismiss: ({ record }) => views.dismiss("panel", record.runId),
 								open: ({ record }) => void openTranscript(record.runId),
 							},
 						});
@@ -400,8 +395,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		pi.on("session_shutdown", async () => {
 			parentScope.shutdown();
 			await scheduler.waitForSettled();
-			unpublishTasks?.();
-			unpublishTasks = undefined;
+			unpublish?.();
+			unpublish = undefined;
 			offPanelKeys?.();
 			offPanelKeys = undefined;
 			try {

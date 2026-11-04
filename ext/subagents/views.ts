@@ -18,14 +18,16 @@ export interface ParentScopeViewsDeps {
 	/** Whether the orchestrator is between turns. */
 	idle: () => boolean;
 	now: () => number;
-	/** The Generation of each final Run the user dismissed, from the panel and from `/tasks`. */
-	dismissed: { panel: ReadonlyMap<string, number>; tasks: ReadonlyMap<string, number> };
+	/** Called whenever what the views answer changes without a scheduler change: a dismissal. */
+	onChange: () => void;
 }
 
 export type ParentScopeViews = ReturnType<typeof createParentScopeViews>;
 
 /** Every view of the current Parent scope's Runs, so the panel, `/tasks`, the footer and the reminder agree. */
 export function createParentScopeViews(deps: ParentScopeViewsDeps) {
+	/** The Generation of each final Run the user dismissed, by surface; a `/tasks` dismissal leaves the panel too. */
+	const dismissed = { panel: new Map<string, number>(), tasks: new Map<string, number>() };
 	/** The owner's current scope: only the orchestrator's own session, the owner when a caller names none, has one. */
 	const scopeOf = (owner?: string): ParentScope | undefined => {
 		const active = deps.scope();
@@ -42,9 +44,54 @@ export function createParentScopeViews(deps: ParentScopeViewsDeps) {
 	const lingers = ({ record }: RunEntry, now: number) =>
 		record.status !== "completed" || now - (record.endedAt ?? now) < SUCCEEDED_RUN_LINGER_MS;
 
+	/** The Runs of the current scope the panel shows, in admission order: a dismissed Generation is not. */
+	const panel = (): RunEntry[] => {
+		const scope = deps.scope();
+		if (!scope) return [];
+		const now = deps.now();
+		return deps.scheduler
+			.listRuns()
+			.filter(
+				(run) =>
+					inParentScope(run, scope) &&
+					dismissed.panel.get(run.runId) !== run.generation &&
+					dismissed.tasks.get(run.runId) !== run.generation,
+			)
+			.flatMap((run) => deps.directory.get(run.runId) ?? [])
+			.filter((entry) => lingers(entry, now));
+	};
+	/** The scope's final Runs this instance ran, as Done in `/tasks`: none of an earlier epoch or known only from disk. */
+	const done = (owner?: string): RunEntry[] => {
+		const scope = scopeOf(owner);
+		if (!scope) return [];
+		return deps.scheduler
+			.listRuns()
+			.filter(
+				(run) =>
+					inParentScope(run, scope) &&
+					isTerminalSubagentStatus(run.status) &&
+					dismissed.tasks.get(run.runId) !== run.generation,
+			)
+			.flatMap((run) => deps.directory.get(run.runId) ?? []);
+	};
+
 	return {
 		open,
 		awaited,
+		panel,
+		done,
+		/**
+		 * Takes a final Run off the surface that shows it until a Resume starts its next Generation; false when that
+		 * surface does not show it as final. Each dismissal sends the change signal.
+		 */
+		dismiss: (from: "panel" | "tasks", id: string, owner?: string): boolean => {
+			const shown = from === "panel" ? panel() : done(owner);
+			const run = shown.find(({ record }) => record.runId === id && isTerminalSubagentStatus(record.status));
+			if (!run) return false;
+			dismissed[from].set(id, run.record.generation);
+			deps.onChange();
+			return true;
+		},
 		/** The background Runs the orchestrator is Waiting for: none while its turn runs. */
 		waitingFor: () =>
 			deps.idle() ? awaited().filter((entry) => entry.record.deliveryMode === "background").length : 0,
@@ -53,36 +100,6 @@ export function createParentScopeViews(deps: ParentScopeViewsDeps) {
 			const runs = open();
 			const stopping = runs.filter((entry) => entry.state === "stopping").length;
 			return { running: runs.length - stopping, stopping };
-		},
-		/** The Runs of the current scope the panel shows, in admission order: a dismissed Generation is not. */
-		panel: (): RunEntry[] => {
-			const scope = deps.scope();
-			if (!scope) return [];
-			const now = deps.now();
-			return deps.scheduler
-				.listRuns()
-				.filter(
-					(run) =>
-						inParentScope(run, scope) &&
-						deps.dismissed.panel.get(run.runId) !== run.generation &&
-						deps.dismissed.tasks.get(run.runId) !== run.generation,
-				)
-				.flatMap((run) => deps.directory.get(run.runId) ?? [])
-				.filter((entry) => lingers(entry, now));
-		},
-		/** The scope's final Runs this instance ran, as Done in `/tasks`: none of an earlier epoch or known only from disk. */
-		done: (owner?: string): RunEntry[] => {
-			const scope = scopeOf(owner);
-			if (!scope) return [];
-			return deps.scheduler
-				.listRuns()
-				.filter(
-					(run) =>
-						inParentScope(run, scope) &&
-						isTerminalSubagentStatus(run.status) &&
-						deps.dismissed.tasks.get(run.runId) !== run.generation,
-				)
-				.flatMap((run) => deps.directory.get(run.runId) ?? []);
 		},
 		/** A Run of the owner's current scope this instance knows, else one an earlier instance stored for the owner. */
 		lookup: (id: string, owner?: string): RunEntry | undefined => {

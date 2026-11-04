@@ -35,8 +35,7 @@ function setup() {
 		scope: { parentSessionId: "sess_main", sessionEpoch: 1 } as ParentScope | undefined,
 		idle: true,
 		now: 0,
-		dismissedFromPanel: new Map<string, number>(),
-		dismissedFromTasks: new Map<string, number>(),
+		changes: 0,
 	};
 	const launch = (
 		options: {
@@ -77,7 +76,9 @@ function setup() {
 		scope: () => world.scope,
 		idle: () => world.idle,
 		now: () => world.now,
-		dismissed: { panel: world.dismissedFromPanel, tasks: world.dismissedFromTasks },
+		onChange: () => {
+			world.changes++;
+		},
 	});
 	return { agentDir, scheduler, controllers, world, launch, finish, views };
 }
@@ -137,21 +138,63 @@ describe("the Parent scope's views", () => {
 	});
 
 	it.each(["panel", "tasks"] as const)(
-		"hides a Run dismissed from the %s until it is resumed, then shows its new Generation",
+		"hides a Run dismissed from the %s until it is resumed, then shows its new Generation and lists its second finish",
 		async (from) => {
-			const { launch, finish, views, world, scheduler } = setup();
+			const { launch, finish, views, scheduler } = setup();
 			const run = launch();
 			await finish(run.runId);
-			(from === "panel" ? world.dismissedFromPanel : world.dismissedFromTasks).set(run.runId, 0);
+			expect(views.dismiss(from, run.runId)).toBe(true);
 			expect(views.panel()).toEqual([]);
 
 			scheduler.resume(run.runId, {});
 			expect(ids(views.panel())).toEqual([run.runId]);
+			expect(views.waitingFor()).toBe(1);
+
+			await finish(run.runId);
+			expect(ids(views.panel())).toEqual([run.runId]);
+			expect(ids(views.done())).toEqual([run.runId]);
 		},
 	);
 
+	it("hides a Run dismissed from /tasks from the panel too, and one dismissed from the panel only there", async () => {
+		const { launch, finish, views } = setup();
+		const fromTasks = launch();
+		const fromPanel = launch();
+		await finish(fromTasks.runId);
+		await finish(fromPanel.runId);
+
+		views.dismiss("tasks", fromTasks.runId);
+		views.dismiss("panel", fromPanel.runId);
+		expect(views.panel()).toEqual([]);
+		expect(ids(views.done())).toEqual([fromPanel.runId]);
+	});
+
+	it("dismisses only a final Run the surface shows, and signals each dismissal at once", async () => {
+		const { launch, finish, views, world } = setup();
+		const live = launch();
+		const done = launch();
+		const otherSession = launch({ parentSessionId: "sess_other" });
+		await finish(done.runId);
+		await finish(otherSession.runId);
+
+		expect(views.dismiss("panel", live.runId)).toBe(false);
+		expect(views.dismiss("tasks", live.runId)).toBe(false);
+		expect(views.dismiss("tasks", otherSession.runId)).toBe(false);
+		expect(views.dismiss("tasks", otherSession.runId, "sess_other")).toBe(false);
+		expect(views.dismiss("tasks", "sub_missing")).toBe(false);
+		expect(world.changes).toBe(0);
+
+		expect(views.dismiss("panel", done.runId)).toBe(true);
+		expect(world.changes).toBe(1);
+		expect(views.dismiss("panel", done.runId)).toBe(false);
+		expect(views.dismiss("tasks", done.runId, "sess_main")).toBe(true);
+		expect(world.changes).toBe(2);
+		expect(views.dismiss("tasks", done.runId)).toBe(false);
+		expect(world.changes).toBe(2);
+	});
+
 	it("lists as Done the final Runs this instance ran in the current scope that /tasks did not dismiss", async () => {
-		const { agentDir, launch, finish, views, world, scheduler } = setup();
+		const { agentDir, launch, finish, views, scheduler } = setup();
 		launch();
 		const kept = launch();
 		const dismissedFromTasks = launch();
@@ -164,8 +207,8 @@ describe("the Parent scope's views", () => {
 		const stored = scheduler.getRun(kept.runId);
 		if (!stored) throw new Error("no record");
 		writePersistedRunRecord(agentDir, { ...stored, runId: "sub_from_disk" });
-		world.dismissedFromTasks.set(dismissedFromTasks.runId, 0);
-		world.dismissedFromPanel.set(dismissedFromPanel.runId, 0);
+		views.dismiss("tasks", dismissedFromTasks.runId);
+		views.dismiss("panel", dismissedFromPanel.runId);
 
 		expect(ids(views.done())).toEqual([kept.runId, dismissedFromPanel.runId]);
 		expect(ids(views.done("sess_main"))).toEqual([kept.runId, dismissedFromPanel.runId]);
