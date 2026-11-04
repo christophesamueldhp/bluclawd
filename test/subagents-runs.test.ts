@@ -277,6 +277,86 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 	});
 });
 
+describe("A run finishes between its child's last turn and its terminal record", () => {
+	it("enters finishing with a change, and leaves it with the terminal record once the finalizer is done", async () => {
+		const runnerGate = deferred<SubagentRunnerOutcome>();
+		const finalizerGate = deferred();
+		const changes: string[] = [];
+		let controller!: SubagentRunnerExecuteParams["controller"];
+		const scheduler = new SubagentRunScheduler({
+			executeRun: (params) => {
+				controller = params.controller;
+				return runnerGate.promise;
+			},
+			onFinalize: async (record) => {
+				await finalizerGate.promise;
+				return record;
+			},
+			onStateChange: (record) => changes.push(record.status),
+		});
+		const handle = admitted(scheduler.admit(makeRequest()));
+		controller.markRunning("child_1");
+		changes.length = 0;
+
+		controller.markFinishing();
+		controller.markFinishing();
+		expect(scheduler.getRun(handle.runId)?.status).toBe("finishing");
+		expect(changes).toEqual(["finishing"]);
+
+		runnerGate.resolve({ status: "completed", complete: true, summaryText: "done" });
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		expect(scheduler.getRun(handle.runId)?.status).toBe("finishing");
+
+		finalizerGate.resolve();
+		expect(await handle.completion).toMatchObject({ status: "completed" });
+		expect(changes).toEqual(["finishing", "completed"]);
+	});
+
+	it("clears finishing on a resume, and ignores the earlier generation's end of turn", async () => {
+		const controllers: SubagentRunnerExecuteParams["controller"][] = [];
+		const gates: ReturnType<typeof deferred<SubagentRunnerOutcome>>[] = [];
+		const scheduler = new SubagentRunScheduler({
+			executeRun: ({ controller }) => {
+				controllers.push(controller);
+				const gate = deferred<SubagentRunnerOutcome>();
+				gates.push(gate);
+				return gate.promise;
+			},
+		});
+		const handle = admitted(scheduler.admit(makeRequest()));
+		controllers[0].markFinishing();
+		gates[0].resolve({ status: "completed", complete: true, summaryText: "first" });
+		await handle.completion;
+
+		admitted(scheduler.resume(handle.runId, undefined));
+		expect(scheduler.getRun(handle.runId)).toMatchObject({ generation: 1, status: "starting" });
+		controllers[0].markFinishing();
+		expect(scheduler.getRun(handle.runId)?.status).toBe("starting");
+
+		controllers[1].markFinishing();
+		expect(scheduler.getRun(handle.runId)?.status).toBe("finishing");
+	});
+
+	it("keeps a stop over finishing, either way round", async () => {
+		const controllers: SubagentRunnerExecuteParams["controller"][] = [];
+		const scheduler = new SubagentRunScheduler({
+			executeRun: ({ controller }) => {
+				controllers.push(controller);
+				return new Promise<SubagentRunnerOutcome>(() => {});
+			},
+		});
+		const stoppedFirst = admitted(scheduler.admit(makeRequest()));
+		scheduler.cancelRun(stoppedFirst.runId, "user");
+		controllers[0].markFinishing();
+		expect(scheduler.getRun(stoppedFirst.runId)?.status).toBe("stopping");
+
+		const finishingFirst = admitted(scheduler.admit(makeRequest()));
+		controllers[1].markFinishing();
+		expect(scheduler.cancelRun(finishingFirst.runId, "session_invalidated")).toBe(true);
+		expect(scheduler.getRun(finishingFirst.runId)?.status).toBe("stopping");
+	});
+});
+
 describe("Issue #63 — A run's controller only affects its own generation", () => {
 	function exercise(controller: SubagentRunnerExecuteParams["controller"], tag: string) {
 		controller.markRunning(`child_${tag}`, `thinking_${tag}`);

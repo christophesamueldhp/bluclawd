@@ -1,6 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { formatRunLabel, type RunAdmission } from "./admission.ts";
-import type { RunDirectory } from "./directory.ts";
 import type { createGenerations } from "./generations.ts";
 import { SUBAGENT_MESSAGE_CUSTOM_TYPE, type SubagentMessage, USER_MESSAGE_ADDRESS } from "./messages.ts";
 import { inParentScope, type ParentScope } from "./parent-scope.ts";
@@ -12,7 +11,6 @@ export interface TranscriptActionDeps {
 	pi: Pick<ExtensionAPI, "sendMessage">;
 	scope: { current(): ParentScope | undefined; context(): ExtensionContext | undefined };
 	scheduler: Pick<SubagentRunScheduler, "getRun">;
-	directory: Pick<RunDirectory, "get">;
 	transcripts: { source(runId: string): TranscriptSource };
 	messageFromUser: ReturnType<typeof createGenerations>["messageFromUser"];
 	admission: Pick<RunAdmission, "resume">;
@@ -20,7 +18,7 @@ export interface TranscriptActionDeps {
 
 /** Opening a run's transcript, and sending what the user types there to the run. */
 export function createTranscriptActions(deps: TranscriptActionDeps) {
-	const { pi, scope: parentScope, scheduler, directory, transcripts, messageFromUser, admission } = deps;
+	const { pi, scope: parentScope, scheduler, transcripts, messageFromUser, admission } = deps;
 
 	/** Sends what the user typed in a run's transcript to the run, as the orchestrator's `subagent_message` would. */
 	const messageRunAsUser = async (runId: string, text: string) => {
@@ -93,8 +91,7 @@ export function createTranscriptActions(deps: TranscriptActionDeps) {
 					cwd: ctx.cwd,
 					title: () => {
 						const current = scheduler.getRun(runId) ?? run;
-						const state = directory.get(runId)?.state === "finishing" ? "finishing" : current.status;
-						return `${current.name ?? runId} · ${current.agentName} · ${current.provider}/${current.modelId} · ${state}`;
+						return `${current.name ?? runId} · ${current.agentName} · ${current.provider}/${current.modelId} · ${current.status}`;
 					},
 					source: transcripts.source(runId),
 					expanded: ctx.ui.getToolsExpanded(),

@@ -235,7 +235,7 @@ export function createGenerations(deps: GenerationDeps) {
 					builtinExtensions: execCtx.builtinExtensions,
 					onChildSessionCreated: (session) => {
 						session.subscribe((event) => {
-							if (event.type === "agent_end") directory.endTurn(runId);
+							if (event.type === "agent_end" && !event.willRetry) params.controller.markFinishing();
 						});
 						transcripts.attach(runId, session);
 						resolveSession(session);
@@ -243,7 +243,7 @@ export function createGenerations(deps: GenerationDeps) {
 				});
 			} finally {
 				transcripts.detach(runId);
-				directory.endTurn(runId);
+				params.controller.markFinishing();
 				rejectSession(new Error("it ended before it could receive messages"));
 				deps.bus.unregister(runId, "has finished");
 			}
