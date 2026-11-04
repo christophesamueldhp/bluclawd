@@ -14,7 +14,7 @@ import { stripAnsi } from "../../daemon/ansi.ts";
 import { SUBAGENT_PANEL_WIDGET } from "../../ext/subagents/panel.ts";
 import { createParentSessionWithSubagents } from "./subagent-session.ts";
 
-type Rendered = Component & { dispose?(): void };
+type Rendered = Component & { dispose?(): void; focused?: boolean };
 type InputHandler = Parameters<ExtensionUIContext["onTerminalInput"]>[0];
 
 /** Every style is a no-op, so rendered lines are plain text. */
@@ -51,6 +51,14 @@ export function isChildContext(context: TranscriptContext): boolean {
 	return (sys?.role === "system" ? getSystemMessageText(sys) : "").includes("subagent operating in a fresh context");
 }
 
+/** Whether a faux-provider request is prompt assistance's, for a suggestion or a session name. */
+function isSideContext(context: TranscriptContext): boolean {
+	const sys = context.messages.find((m) => m.role === "system");
+	return /^(Predict the next short message|Name this coding session)/.test(
+		sys?.role === "system" ? getSystemMessageText(sys) : "",
+	);
+}
+
 /** A gate a scripted faux turn awaits; `open()` lets it go on. */
 export function gate(): { wait: Promise<void>; open: () => void } {
 	let open!: () => void;
@@ -65,7 +73,14 @@ export function gate(): { wait: Promise<void>; open: () => void } {
  * context that records what the extension shows: below/above-editor widgets, `ui.custom` views, statuses and
  * notifications. Keys go where the TUI would send them, and time can be moved on without fake timers.
  */
-export async function createSubagentTui(options: { extensions?: ExtensionFactory[]; batchWindowMs?: number } = {}) {
+export async function createSubagentTui(
+	options: {
+		extensions?: ExtensionFactory[];
+		/** Extensions loaded before subagents, whose key listeners see each key first. */
+		extensionsBefore?: ExtensionFactory[];
+		batchWindowMs?: number;
+	} = {},
+) {
 	initTheme("dark");
 	const dirs = [mkdtempSync(join(tmpdir(), "bluclawd-tui-cwd-")), mkdtempSync(join(tmpdir(), "bluclawd-tui-agent-"))];
 	const [cwd, agentDir] = dirs;
@@ -76,9 +91,13 @@ export async function createSubagentTui(options: { extensions?: ExtensionFactory
 	const notifications: string[] = [];
 	const inputHandlers = new Set<InputHandler>();
 	let view: Rendered | undefined;
+	/** The component that has the keyboard when no view is open; the editor when unset. */
+	let focus: Rendered | undefined;
+	let overlayShown = false;
 	let editorText = "";
 	let editorFactory: ((...args: unknown[]) => typeof editor) | undefined;
 	let editor: Rendered & { getText(): string; setText(text: string): void } = {
+		focused: true,
 		getText: () => editorText,
 		setText: (text) => {
 			editorText = text;
@@ -92,8 +111,14 @@ export async function createSubagentTui(options: { extensions?: ExtensionFactory
 
 	const tui = {
 		requestRender: () => {},
-		hasOverlay: () => false,
-		getFocusedComponent: () => view ?? editor,
+		hasOverlay: () => overlayShown,
+		getFocusedComponent: () => view ?? focus ?? editor,
+		setFocus: (component: Rendered | null) => {
+			const previous = focus ?? editor;
+			if (previous !== component) previous.focused = false;
+			focus = component === editor || component === null ? undefined : component;
+			(focus ?? editor).focused = true;
+		},
 		terminal: { rows: 40, columns: 100 },
 	};
 	const keybindings = { matches: () => false, getKeys: () => [] };
@@ -149,6 +174,7 @@ export async function createSubagentTui(options: { extensions?: ExtensionFactory
 			const text = editor.getText();
 			editor = factory?.(tui, { borderColor: (t: string) => t, selectList: {} }, keybindings) ?? editor;
 			editor.setText(text);
+			editor.focused = !focus;
 		},
 		getEditorComponent: () => editorFactory,
 		theme: plainTheme,
@@ -163,6 +189,7 @@ export async function createSubagentTui(options: { extensions?: ExtensionFactory
 		cwd,
 		agentDir,
 		extensions: options.extensions,
+		extensionsBefore: options.extensionsBefore,
 		batchWindowMs: options.batchWindowMs ?? 15,
 		now: () => Date.now() + offset,
 	});
@@ -180,14 +207,20 @@ export async function createSubagentTui(options: { extensions?: ExtensionFactory
 		agentDir,
 		/**
 		 * Scripts the faux provider: the orchestrator's turns answer with `parent` in order, then "Done."; every
-		 * child turn answers with `child`, by default a finished report.
+		 * child turn answers with `child`, by default a finished report. Prompt assistance's suggestion and session
+		 * name requests answer with `side`, by default nothing.
 		 */
-		script(parent: Turn[], child: Turn = () => fauxAssistantMessage(REPORT)) {
+		script(
+			parent: Turn[],
+			child: Turn = () => fauxAssistantMessage(REPORT),
+			side: Turn = () => fauxAssistantMessage(""),
+		) {
 			let turn = 0;
-			const next = (context: TranscriptContext) =>
-				isChildContext(context)
-					? child(context)
-					: (parent[turn++] ?? (() => fauxAssistantMessage("Done.")))(context);
+			const next = (context: TranscriptContext) => {
+				if (isSideContext(context)) return side(context);
+				if (isChildContext(context)) return child(context);
+				return (parent[turn++] ?? (() => fauxAssistantMessage("Done.")))(context);
+			};
 			faux.setResponses(Array.from({ length: 50 }, () => next));
 		},
 		/** The subagent panel below the prompt as plain lines; empty when it shows nothing. */
@@ -202,7 +235,15 @@ export async function createSubagentTui(options: { extensions?: ExtensionFactory
 		status: (key: string) => statuses.get(key),
 		notifications,
 		editorText: () => editor.getText(),
-		/** Feeds each key to the open view, else to the terminal input listeners and then the editor. */
+		/** The prompt editor as mounted, after any editor wrappers. */
+		editor: () => editor,
+		/** Shows or hides an overlay that leaves the keyboard where it is. */
+		setOverlay(shown: boolean) {
+			overlayShown = shown;
+		},
+		/** Whether the prompt editor has the keyboard. */
+		editorFocused: () => !view && !focus,
+		/** Feeds each key to the open view, else to the terminal input listeners and then the focused component. */
 		press(...keys: string[]) {
 			for (const key of keys) {
 				if (view) {
@@ -218,7 +259,7 @@ export async function createSubagentTui(options: { extensions?: ExtensionFactory
 					}
 					if (result?.data !== undefined) data = result.data;
 				}
-				if (data !== undefined) editor.handleInput?.(data);
+				if (data !== undefined) (focus ?? editor).handleInput?.(data);
 			}
 		},
 		/** Moves the extension's clock on by `ms`. */

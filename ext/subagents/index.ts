@@ -6,7 +6,7 @@ import {
 	type ToolLoadout,
 	type ToolLoadoutChanges,
 } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
+import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { createRunAdmission, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
@@ -24,7 +24,7 @@ import {
 	SubagentMessageBus,
 	subagentMessagePayload,
 } from "./messages.ts";
-import { renderPanel, SUBAGENT_PANEL_WIDGET, shownInPanel } from "./panel.ts";
+import { createPanel, SUBAGENT_PANEL_WIDGET, shownInPanel } from "./panel.ts";
 import { createParentScope, type ParentInboxItem } from "./parent-scope.ts";
 import type { SubagentResultDetails } from "./results.ts";
 import { describeSubagentModels, runSubagent } from "./runner.ts";
@@ -90,7 +90,11 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		let unpublishTasks: (() => void) | undefined;
 		let latestLoadout: ToolLoadout | undefined;
 		const now = options.now ?? Date.now;
-		let panelTui: Pick<TUI, "requestRender"> | undefined;
+		let panelTui: Pick<TUI, "requestRender" | "hasOverlay"> | undefined;
+		let panel: ReturnType<typeof createPanel> | undefined;
+		let offPanelKeys: (() => void) | undefined;
+		/** Final runs the user dismissed from the panel. */
+		const dismissed = new Set<string>();
 		// Subagent calls in one message start executing together; a child waits for every launch in flight to be
 		// admitted, so each sibling is registered for messages before any of them takes a turn.
 		let launchesInFlight = 0;
@@ -118,6 +122,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			send: (items) => sendToParent(items),
 			onChange: () => {
 				refreshFooterStatus();
+				panel?.sync();
 				panelTui?.requestRender();
 				notifyAgentTasksChanged();
 			},
@@ -158,7 +163,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			const at = now();
 			return scheduler
 				.listRuns()
-				.filter((run) => run.parentSessionId === scope.parentSessionId && run.sessionEpoch === scope.sessionEpoch)
+				.filter(
+					(run) =>
+						run.parentSessionId === scope.parentSessionId &&
+						run.sessionEpoch === scope.sessionEpoch &&
+						!dismissed.has(run.runId),
+				)
 				.flatMap((run) => directory.get(run.runId) ?? [])
 				.filter((entry) => shownInPanel(entry, at));
 		};
@@ -215,6 +225,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			launchesSettled: () => launchesSettled,
 			onChange: () => {
 				refreshFooterStatus();
+				panel?.sync();
 				panelTui?.requestRender();
 				notifyAgentTasksChanged();
 			},
@@ -299,7 +310,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			reconcileInterruptedRuns(agentDir, sessionId, branchEntries, liveIds);
 
 			unpublishTasks?.();
-			unpublishTasks = publishAgentTasks(taskSource);
+			unpublishTasks = publishAgentTasks({
+				...taskSource,
+				panelHasRows: () => panel !== undefined && panelRuns().length > 0,
+			});
 			refreshFooterStatus();
 			if (ctx.mode === "tui") {
 				// Always mounted: it renders nothing while there are no runs to show.
@@ -307,20 +321,47 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					SUBAGENT_PANEL_WIDGET,
 					(tui, theme) => {
 						panelTui = tui;
-						// Elapsed times move on between run changes.
+						const shown = createPanel({
+							tui,
+							theme,
+							runs: panelRuns,
+							waitingFor,
+							now,
+							actions: {
+								// The same stop as /tasks', so no report wakes the orchestrator.
+								stop: ({ record }) =>
+									taskSource.stop(record.runId, { owner: record.parentSessionId, source: "user" }),
+								dismiss: ({ record }) => dismissed.add(record.runId),
+							},
+						});
+						panel = shown;
+						// Elapsed times move on between run changes, and a succeeded run leaves.
 						const ticker = setInterval(() => {
+							shown.sync();
 							if (panelRuns().length > 0) tui.requestRender();
 						}, 1000);
 						ticker.unref?.();
-						return {
-							render: (width) =>
-								renderPanel({ runs: panelRuns(), waitingFor: waitingFor(), now: now(), width, theme }),
-							invalidate: () => {},
-							dispose: () => clearInterval(ticker),
-						};
+						return Object.assign(shown, {
+							dispose: () => {
+								clearInterval(ticker);
+								if (panel === shown) panel = undefined;
+							},
+						});
 					},
 					{ placement: "belowEditor" },
 				);
+				offPanelKeys?.();
+				offPanelKeys = ctx.ui.onTerminalInput((data) => {
+					// ↓ on an empty prompt; a prompt browsing history is never empty, so history keeps its ↓.
+					if (isKeyRelease(data) || !matchesKey(data, "down") || ctx.ui.getEditorText() !== "") return undefined;
+					// getFocusedComponent is on pi-tui's TUI class; only the prompt editor has getText.
+					const focused = (
+						panelTui as { getFocusedComponent?: () => unknown } | undefined
+					)?.getFocusedComponent?.();
+					if (typeof (focused as { getText?: unknown } | null)?.getText !== "function") return undefined;
+					if (panelTui?.hasOverlay()) return undefined;
+					return panel?.focus() ? { consume: true } : undefined;
+				});
 			}
 		});
 
@@ -374,6 +415,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			await scheduler.waitForSettled();
 			unpublishTasks?.();
 			unpublishTasks = undefined;
+			offPanelKeys?.();
+			offPanelKeys = undefined;
 			try {
 				parentScope.context()?.ui.setWidget(SUBAGENT_PANEL_WIDGET, undefined);
 			} catch {

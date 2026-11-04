@@ -19,6 +19,8 @@ export async function createParentSessionWithSubagents(options: {
 	/** Pi built-in tools the parent has; none when omitted. */
 	builtinTools?: string[];
 	extensions?: ExtensionFactory[];
+	/** Extensions loaded before subagents, as package.json loads permissions through background-bash. */
+	extensionsBefore?: ExtensionFactory[];
 	batchWindowMs?: number;
 	now?: () => number;
 }) {
@@ -52,6 +54,7 @@ export async function createParentSessionWithSubagents(options: {
 		agentDir: options.agentDir,
 		settingsManager,
 		extensionFactories: [
+			...(options.extensionsBefore ?? []),
 			createSubagentsExtension({
 				agentDir: options.agentDir,
 				batchWindowMs: options.batchWindowMs,

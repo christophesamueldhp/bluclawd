@@ -363,7 +363,13 @@ const backgroundBash: InlineExtension = {
 							deselect();
 							return undefined;
 						}
-						if (matchesKey(data, "down") && ui.getEditorText() === "" && tasksPillLabel(taskRows(owner()))) {
+						// The subagent panel sits between the prompt and the pill, so it takes ↓ first while it shows rows.
+						if (
+							matchesKey(data, "down") &&
+							ui.getEditorText() === "" &&
+							!agentTasks()?.panelHasRows?.() &&
+							tasksPillLabel(taskRows(owner()))
+						) {
 							pillSelected = true;
 							refresh();
 							return { consume: true };
