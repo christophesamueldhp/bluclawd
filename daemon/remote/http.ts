@@ -23,6 +23,7 @@ import type {
 import { resumePane, type StartClaims, startNewPane } from "../pane-start.ts";
 import { labelFromTask } from "../rows.ts";
 import type { StartClaim } from "../supervisor.ts";
+import type { Waiting } from "./delivery.ts";
 import { RemoteEvents } from "./events.ts";
 import { type ClaimResult, type RemoteStore, SECRET_PATTERN } from "./pairing.ts";
 import {
@@ -61,6 +62,10 @@ export interface RemoteDeps {
 	report(sessionId: string): PaneReport | undefined;
 	/** What became of the prompts sent to a session with an id (delivery.ts). */
 	outcomes?(sessionId: string): PromptOutcome[];
+	/** The daemon's lifetime, which a prompt it accepts is asked about by (delivery.ts). */
+	lifetime?(): string;
+	/** The daemon's answer about the prompts a phone still waits on from a session (delivery.ts). */
+	answer?(sessionId: string, waiting: Waiting[]): PromptOutcome[];
 	/** Name a stored row; false when there is none by that id. A pane's pi names its own. */
 	renameInstance(sessionId: string, name: string): boolean;
 	/** Pin or unpin a row, a pane's or a stored one; false when there is none by that id. */
@@ -227,6 +232,15 @@ function promptIdIn(body: Record<string, unknown>): string | undefined {
 	if (id === undefined) return undefined;
 	if (typeof id !== "string" || !PROMPT_ID_PATTERN.test(id)) throw new HttpError(400, "invalid_prompt_id");
 	return id;
+}
+
+/** The prompts a phone asks about, each `prompt=<id>@<lifetime>`; one in another form is not asked. */
+function waitingIn(url: URL): Waiting[] {
+	return url.searchParams.getAll("prompt").flatMap((asked) => {
+		const at = asked.indexOf("@");
+		const id = asked.slice(0, at);
+		return at > 0 && PROMPT_ID_PATTERN.test(id) ? [{ id, lifetime: asked.slice(at + 1) }] : [];
+	});
 }
 
 /** A prompt's images, if it has any: each base64 of the type it says it is. */
@@ -520,6 +534,17 @@ async function handle(
 		return json(res, 200, { ok: true });
 	}
 
+	// Answered for a session that is gone too, as a status event carries its outcomes.
+	const asking = /^\/api\/sessions\/([^/]+)\/outcomes$/.exec(path);
+	if (asking && req.method === "GET") {
+		let id: string;
+		try {
+			id = decodeURIComponent(asking[1]!);
+		} catch {
+			return json(res, 404, { error: "unknown_session" });
+		}
+		return json(res, 200, { outcomes: deps.answer?.(id, waitingIn(url)) ?? [] });
+	}
 	const sessionPath = /^\/api\/sessions\/([^/]+)(\/.*)?$/.exec(path);
 	const route = sessionPath && sessionRoute(sessionPath[2] ?? "", req.method);
 	if (!sessionPath || !route) return json(res, 404, { error: "not_found" });
@@ -533,7 +558,8 @@ async function handle(
 	if ("error" in outcome) return json(res, PHONE_STATUS[outcome.error], { error: outcome.error });
 	if ("message" in outcome) {
 		if (!deps.send(session.id, outcome.message)) return json(res, 409, { error: "session_not_running" });
-		return json(res, 202, { ok: true });
+		const lifetime = deps.lifetime?.();
+		return json(res, 202, { ok: true, ...(lifetime ? { lifetime } : {}) });
 	}
 	if ("operation" in outcome) {
 		const { operation } = outcome;

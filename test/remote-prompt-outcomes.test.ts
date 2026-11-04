@@ -158,12 +158,17 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		}
 	}
 
-	/** A pane that registered once and beats no more, so what is sent to it stays in its inbox. */
+	/** A pane that registered once and beats no more, so what is sent to it stays in its inbox.
+	 *  `report`: it reports again, with outcomes or, as a pane from an older build, without. */
 	async function stillPane(id: string) {
 		const client = new OrchestratorClient();
 		await client.register({ id, cwd: dir, sessionFile: join(dir, `${id}.jsonl`) });
 		await client.remoteReport(id, { models: [], outcomes: [] });
-		return { unregister: () => client.unregister(id) };
+		return {
+			unregister: () => client.unregister(id),
+			report: (outcomes: boolean) =>
+				client.remoteReport(id, outcomes ? { models: [], outcomes: [] } : { models: [] }),
+		};
 	}
 
 	/** The phone's event stream with `session` open: `until` resolves once an outcome came on it. */
@@ -297,11 +302,18 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		},
 	);
 
-	it("is known to a stream that reconnects, and to none a restarted daemon serves: the phone judges it lost", async () => {
-		await stillPane("pane-restart");
-		expect(await prompt("pane-restart", { text: "hi", id: "p-restart" })).toBe(202);
-		expect(await (await watch("pane-restart")).replayed()).toEqual([{ id: "p-restart", outcome: "sent" }]);
-		// A new daemon: its registry and remote control start afresh, with the same pairing.
+	/** The daemon's answer about the prompts a phone still waits on from `session`. */
+	async function ask(session: string, waiting: { id: string; lifetime: string }[]): Promise<PromptOutcome[]> {
+		const query = waiting.map(({ id, lifetime }) => `prompt=${encodeURIComponent(`${id}@${lifetime}`)}`).join("&");
+		const res = await fetch(`${base}/api/sessions/${session}/outcomes?${query}`, {
+			headers: { authorization: `Bearer ${token}` },
+		});
+		expect(res.status).toBe(200);
+		return ((await res.json()) as { outcomes: PromptOutcome[] }).outcomes;
+	}
+
+	/** A new daemon: its registry and remote control start afresh, with the same pairing. */
+	async function restart() {
 		await control.stop();
 		supervisor = new ServerSupervisor({ now: () => clock, tmux: paneUp, dir });
 		control = remoteControl();
@@ -309,8 +321,34 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		const on = await control.handle({ type: "remote", action: "on", port: 0 });
 		if (on.type !== "remote_result") throw new Error("not listening");
 		base = `http://127.0.0.1:${on.port}`;
-		expect(await (await watch("pane-restart")).replayed()).toEqual([]);
-	});
+	}
+
+	it.each([
+		["reports outcomes", true, [{ id: "p-restart", outcome: "lost", reason: "daemon_restarted" }]],
+		["is from an older build", false, []],
+	] as const)(
+		"is answered by a restarted daemon, which replays none, from what its pane's report says: it %s",
+		async (_, reports, answer) => {
+			const pane = await stillPane("pane-restart");
+			const res = await fetch(`${base}/api/sessions/pane-restart/prompt`, {
+				method: "POST",
+				headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+				body: JSON.stringify({ text: "hi", id: "p-restart" }),
+			});
+			expect(res.status).toBe(202);
+			const { lifetime } = (await res.json()) as { lifetime: string };
+			const waiting = [{ id: "p-restart", lifetime }];
+			expect(await (await watch("pane-restart")).replayed()).toEqual([{ id: "p-restart", outcome: "sent" }]);
+			expect(await ask("pane-restart", waiting)).toEqual([{ id: "p-restart", outcome: "sent" }]);
+			await restart();
+			// An older phone still judges by the plain replay.
+			expect(await (await watch("pane-restart")).replayed()).toEqual([]);
+			// Until its pane reports again, the daemon cannot tell whether pi has it.
+			expect(await ask("pane-restart", waiting)).toEqual([]);
+			await pane.report(reports);
+			expect(await ask("pane-restart", waiting)).toEqual(answer);
+		},
+	);
 
 	it("is lost when its pane unregisters with it still queued", async () => {
 		const pane = await stillPane("pane-quit");
@@ -660,5 +698,49 @@ describe("prompt delivery's retention", () => {
 		expect(delivery.outcomes("row-1")).toEqual([{ id: "p-1", outcome: "queued" }]);
 		delivery.reported("row-1", [{ id: "p-1", outcome: "taken" }]);
 		expect(delivery.outcomes("row-1")).toEqual([{ id: "p-1", outcome: "taken" }]);
+	});
+});
+
+describe("prompt delivery's answer to a phone about the prompts it still waits on", () => {
+	/** Row `row-1`'s prompts `p-taken`, taken, and `p-sent`, given to its pane and not reported on. */
+	function delivering() {
+		const delivery = new PromptDelivery(() => 0);
+		delivery.queue("row-1", { type: "prompt", text: "a", id: "p-taken" });
+		delivery.queue("row-1", { type: "prompt", text: "b", id: "p-sent" });
+		delivery.take("row-1", "pi-a");
+		delivery.reported("row-1", [{ id: "p-taken", outcome: "taken" }]);
+		return delivery;
+	}
+	const asked = (lifetime: string, ...ids: string[]) => ids.map((id) => ({ id, lifetime }));
+
+	it("answers each id it knows with its outcome", () => {
+		const delivery = delivering();
+		expect(delivery.answer("row-1", asked(delivery.lifetime, "p-taken", "p-sent"), true)).toEqual([
+			{ id: "p-taken", outcome: "taken" },
+			{ id: "p-sent", outcome: "sent" },
+		]);
+	});
+
+	it("says nothing of one this lifetime accepted and let go: the phone's give-up decides", () => {
+		const clock = { now: 0 };
+		const delivery = new PromptDelivery(() => clock.now);
+		delivery.queue("row-1", { type: "prompt", text: "a", id: "p-old" });
+		clock.now = DELIVERY_KEEP_MS + 1;
+		expect(delivery.answer("row-1", asked(delivery.lifetime, "p-old", "p-never"), true)).toEqual([]);
+	});
+
+	it("answers lost as daemon restarted for one an earlier lifetime accepted, when the row's pane reports outcomes", () => {
+		const before = delivering();
+		const restarted = new PromptDelivery(() => 0);
+		expect(restarted.lifetime).not.toBe(before.lifetime);
+		expect(restarted.answer("row-1", asked(before.lifetime, "p-sent"), true)).toEqual([
+			{ id: "p-sent", outcome: "lost", reason: "daemon_restarted" },
+		]);
+	});
+
+	it("says nothing of one an earlier lifetime accepted for a pane from an older build, or one yet to report: pi may have it", () => {
+		const before = delivering();
+		const restarted = new PromptDelivery(() => 0);
+		expect(restarted.answer("row-1", asked(before.lifetime, "p-sent"), false)).toEqual([]);
 	});
 });

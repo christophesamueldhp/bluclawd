@@ -4,12 +4,19 @@
  * until its pane's heartbeat takes it, then settles with the outcome its pane reports, or is lost
  * when its pane goes first (refused, when the pane left its session for another). The row table
  * tells it when a pane ends or falls silent.
- * Only in memory: a restarted daemon knows none of them.
+ * Only in memory: a restarted daemon knows none of them, and answers for them by its lifetime.
  */
+import { randomUUID } from "node:crypto";
 import { type EndReason, endedForAnother, type PaneMessage, type PromptOutcome } from "../ipc/protocol.ts";
 
 /** How long a prompt is kept after its last change, so a phone that reconnects still reads it. */
 export const DELIVERY_KEEP_MS = 10 * 60_000;
+
+/** A prompt a phone still waits on: its id, and the lifetime of the delivery that accepted it. */
+export interface Waiting {
+	id: string;
+	lifetime: string;
+}
 
 /** `sent`: in its row's inbox, or taken by its pane and not reported on yet. `pane`: the pane whose
  *  heartbeat took it, once one did. */
@@ -28,6 +35,8 @@ function settled(delivery: Delivery): boolean {
 export class PromptDelivery {
 	/** Row `rowId`'s outcomes changed as its pane ended or fell silent. */
 	changed: ((rowId: string) => void) | undefined;
+	/** This delivery's, and so its daemon's, lifetime: the phone keeps it with each prompt accepted. */
+	readonly lifetime = randomUUID();
 	private readonly now: () => number;
 	/** By the phone's id, in the order sent. */
 	private readonly prompts = new Map<string, Delivery>();
@@ -120,6 +129,21 @@ export class PromptDelivery {
 			if (to === rowId) out.push(outcome);
 		}
 		return out;
+	}
+
+	/** What became of the prompts a phone still waits on from row `rowId`: each known one's outcome,
+	 *  and lost as daemon restarted for one an earlier lifetime accepted, when `reportsOutcomes` (the
+	 *  row's pane reports them, so its report would have said pi had it). Nothing for a pane from an
+	 *  older build or one yet to report, which pi may have, nor for one this lifetime let go. */
+	answer(rowId: string, waiting: Waiting[], reportsOutcomes: boolean): PromptOutcome[] {
+		const known = new Map(this.outcomes(rowId).map((outcome) => [outcome.id, outcome]));
+		return waiting.flatMap(({ id, lifetime }): PromptOutcome[] => {
+			const outcome = known.get(id);
+			if (outcome) return [outcome];
+			if (lifetime !== this.lifetime && reportsOutcomes)
+				return [{ id, outcome: "lost", reason: "daemon_restarted" }];
+			return [];
+		});
 	}
 
 	private prune(now: number): void {
