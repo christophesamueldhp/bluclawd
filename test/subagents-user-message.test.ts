@@ -1,6 +1,11 @@
-import { fauxAssistantMessage, fauxToolCall, type TranscriptContext } from "@earendil-works/pi-ai";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fauxAssistantMessage, fauxToolCall, type TranscriptContext, Type } from "@earendil-works/pi-ai";
+import { defineTool } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentTasks } from "../ext/_shared/agent-tasks.ts";
+import { SUBAGENT_NOTIFICATION_CUSTOM_TYPE } from "../ext/subagents/index.ts";
+import { readBackgroundUsageLedger } from "../ext/subagents/storage.ts";
 import { createSubagentTui, gate, launch, REPORT, type SubagentTui } from "./helpers/subagent-tui.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -150,18 +155,6 @@ describe("messaging a running run from its transcript", () => {
 		expect(JSON.stringify(tui.session.messages)).not.toContain("The user messaged run");
 	});
 
-	it("refuses a message to a completed run for now", async () => {
-		tui = await createSubagentTui();
-		tui.script([launch(["scout"], { background: true })]);
-		await prompt(tui);
-		await waitFor(() => row(tui!, "scout")?.includes("completed") ?? false);
-		await openFromPanel(tui);
-
-		tui.press("One more thing.", ENTER);
-		await waitFor(() => tui!.view()?.at(-1)?.includes("not available yet"));
-		expect(JSON.stringify(tui.session.messages)).not.toContain("The user messaged run");
-	});
-
 	it("refuses a message once the orchestrator's session has changed", async () => {
 		tui = await createSubagentTui();
 		const child = twoTurnChild();
@@ -208,5 +201,146 @@ describe("messaging a running run from its transcript", () => {
 		expect(resultAt).toBeGreaterThan(-1);
 		expect(noteAt).toBeGreaterThan(resultAt);
 		expect(seen(child.contexts[1])).toContain("Keep the old API.");
+	});
+});
+
+describe("resuming a finished run from its transcript", () => {
+	const SECOND_REPORT = REPORT.replace("Done.", "Second pass done.");
+
+	/** A run that reports at once, and answers the user's "One more thing." with a second report. */
+	function resumableChild() {
+		const contexts: TranscriptContext[] = [];
+		const turn = (context: TranscriptContext) => {
+			contexts.push(context);
+			return fauxAssistantMessage(seen(context).includes("One more thing.") ? SECOND_REPORT : REPORT);
+		};
+		return { turn, contexts };
+	}
+	const notices = (t: SubagentTui) =>
+		t.session.messages.flatMap((m) =>
+			m.role === "custom" && m.customType === SUBAGENT_NOTIFICATION_CUSTOM_TYPE ? [m] : [],
+		);
+
+	it("resumes a completed run with its earlier context, and its report wakes the orchestrator marked as the user's", async () => {
+		tui = await createSubagentTui();
+		const child = resumableChild();
+		const parent: TranscriptContext[] = [];
+		const answer = (text: string) => (context: TranscriptContext) => {
+			parent.push(context);
+			return fauxAssistantMessage(text);
+		};
+		tui.script(
+			[
+				launch(["scout"], { background: true }),
+				answer("Waiting for scout."),
+				answer("Got scout's report."),
+				answer("Got scout's second report."),
+			],
+			child.turn,
+		);
+		await prompt(tui);
+		await waitFor(() => parent.length === 2 && !tui!.session.isStreaming);
+		await openFromPanel(tui);
+
+		tui.press("One more thing.", ENTER);
+		await waitFor(() => screen(tui!).includes("Resuming scout"));
+		await waitFor(() => parent.length === 3);
+		await waitFor(() => !tui!.session.isStreaming);
+
+		expect(child.contexts).toHaveLength(2);
+		expect(seen(child.contexts[1])).toContain("### Summary\\nDone.");
+		expect(seen(child.contexts[1])).toContain("Message from the user");
+		expect(seen(child.contexts[1])).toContain("One more thing.");
+		expect(JSON.stringify(tui.session.messages)).toMatch(
+			/The user messaged run \\"scout\\" \(sub_[0-9a-f-]+\): One more thing\./,
+		);
+		expect(notices(tui)).toHaveLength(2);
+		expect(JSON.stringify(notices(tui)[1])).toContain("Second pass done.");
+		expect(JSON.stringify(notices(tui)[1])).toContain("Resumed by the user");
+		expect(JSON.stringify(notices(tui)[0])).not.toContain("Resumed by the user");
+		expect(seen(parent[2])).toContain("Second pass done.");
+	});
+
+	it("follows the new generation live in the open view", async () => {
+		tui = await createSubagentTui();
+		const second = gate();
+		let turns = 0;
+		tui.script([launch(["scout"], { background: true })], async () => {
+			if (turns++ === 0) return fauxAssistantMessage(REPORT);
+			await second.wait;
+			return fauxAssistantMessage(SECOND_REPORT);
+		});
+		await prompt(tui);
+		await waitFor(() => notices(tui!).length === 1 && !tui!.session.isStreaming);
+		await openFromPanel(tui);
+		expect(screen(tui)).not.toContain("Message from the user");
+
+		tui.press("One more thing.", ENTER);
+		await waitFor(() => screen(tui!).includes("Message from the user"));
+		expect(tui.view()?.[0]).toContain("running");
+		expect(screen(tui)).not.toContain("Second pass done.");
+
+		second.open();
+		await waitFor(() => screen(tui!).includes("Second pass done."));
+		await waitFor(() => tui!.view()?.[0]?.includes("completed"));
+	});
+
+	it("goes through the orchestrator's admission, and shows a refusal in the view", async () => {
+		tui = await createSubagentTui();
+		const child = resumableChild();
+		tui.script([launch(["scout"], { background: true })], child.turn);
+		await prompt(tui);
+		await waitFor(() => notices(tui!).length === 1 && !tui!.session.isStreaming);
+		writeFileSync(
+			join(tui.agentDir, "settings.json"),
+			JSON.stringify({ permissions: { deny: ["Subagent(explorer)"] } }),
+		);
+		await openFromPanel(tui);
+
+		tui.press("One more thing.", ENTER);
+		await waitFor(() => tui!.view()?.at(-1)?.includes("Blocked by permission rule (deny): Subagent(explorer)"));
+		expect(screen(tui)).toContain("One more thing.");
+		await new Promise((resolve) => setTimeout(resolve, 80));
+		expect(child.contexts).toHaveLength(1);
+		expect(JSON.stringify(tui.session.messages)).not.toContain("The user messaged run");
+	});
+
+	it("counts the resumed generation's usage, its tools' included, as a background generation", async () => {
+		const TOOL_TOKENS = 1_000_000;
+		const metered = defineTool({
+			name: "metered",
+			label: "Metered",
+			description: "Reports integration usage.",
+			parameters: Type.Object({}),
+			execute: async () => ({
+				content: [{ type: "text", text: "metered" }],
+				details: undefined,
+				usage: {
+					input: TOOL_TOKENS,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: TOOL_TOKENS,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			}),
+		});
+		tui = await createSubagentTui({ extraTools: [metered] });
+		tui.script([launch(["scout"], { background: true, agent: "general-purpose" })], (context) => {
+			const text = seen(context);
+			if (!text.includes("One more thing.")) return fauxAssistantMessage(REPORT);
+			if (text.includes('"toolName":"metered"')) return fauxAssistantMessage(SECOND_REPORT);
+			return fauxAssistantMessage([fauxToolCall("metered", {}, { id: "call_metered" })]);
+		});
+		await prompt(tui);
+		await waitFor(() => notices(tui!).length === 1 && !tui!.session.isStreaming);
+		const { runId } = notices(tui)[0].details as { runId: string };
+		await openFromPanel(tui);
+
+		tui.press("One more thing.", ENTER);
+		await waitFor(() => notices(tui!).length === 2);
+		const ledger = readBackgroundUsageLedger(tui.agentDir, tui.session.sessionId);
+		expect(ledger.recordedRunIds).toEqual([runId, `${runId}#1`]);
+		expect(ledger.usage.totalTokens).toBeGreaterThanOrEqual(TOOL_TOKENS);
 	});
 });
