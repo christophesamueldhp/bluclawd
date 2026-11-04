@@ -58,7 +58,8 @@ interface Row {
 	held: Pane[];
 	/** Messages for its live pane's pi, drained by its next heartbeat. */
 	inbox: PaneMessage[];
-	/** Starting: its record as listed, and when it stops being listed so. */
+	/** A start claimed it: its record as listed, and when it stops being listed so. It is starting
+	 *  once no pane holds it: a pane past its TTL, not reaped yet, may still. */
 	start?: Starting;
 	/** The session file its marks below are for, which they outlive its stored row by. */
 	file?: string;
@@ -226,7 +227,7 @@ export class ServerSupervisor {
 	private takeStarting(record: InstanceRecord): InstanceRecord | undefined {
 		let taken: InstanceRecord | undefined;
 		for (const [id, row] of [...this.rows]) {
-			const start = row.state === "starting" ? row.start : undefined;
+			const { start } = row;
 			if (start && (id === record.id || (record.sessionFile && start.record.sessionFile === record.sessionFile))) {
 				this.leaveStart(id, row);
 				taken ??= start.record;
@@ -239,7 +240,7 @@ export class ServerSupervisor {
 	 *  new session's tmux session is gone (pi failed to start). */
 	private expireStarts(now: number): void {
 		for (const [id, row] of [...this.rows]) {
-			const start = row.state === "starting" ? row.start : undefined;
+			const { start } = row;
 			if (start && (now > start.until || (start.record.pane && this.tmuxSays(start.record.pane) === "gone"))) {
 				this.leaveStart(id, row);
 			}
@@ -248,6 +249,7 @@ export class ServerSupervisor {
 
 	private leaveStart(id: string, row: Row): void {
 		row.start = undefined;
+		if (row.pane) return;
 		row.state = "stored";
 		this.tidy(id);
 	}
@@ -266,7 +268,7 @@ export class ServerSupervisor {
 		);
 		if (running) return { ok: false, refused: "running" };
 		this.expireStarts(now);
-		if ([...this.rows.values()].some((row) => row.state === "starting" && row.start?.record.sessionFile === file)) {
+		if ([...this.rows.values()].some((row) => row.start?.record.sessionFile === file)) {
 			return { ok: false, refused: "starting" };
 		}
 		const stored = loadInstances(this.deps.dir).find((instance) => instance.sessionFile === file);
@@ -291,13 +293,14 @@ export class ServerSupervisor {
 		const createdAt = fields.createdAt ?? new Date(now).toISOString();
 		const row = this.entry(fields.id);
 		row.start = { record: { ...fields, createdAt, status: "starting" }, until: now + START_MS };
-		this.enter(fields.id, row, "starting");
+		// A pane past its TTL, not reaped yet, keeps the row until it is.
+		if (!row.pane) this.enter(fields.id, row, "starting");
 	}
 
 	/** Its pane could not be started: the row is listed as it was. */
 	startFailed(id: string): void {
 		const row = this.rows.get(id);
-		if (row?.state === "starting") this.leaveStart(id, row);
+		if (row?.start) this.leaveStart(id, row);
 	}
 
 	/** Every pane, each with the row it is listed as or was as it fell silent. */
@@ -365,7 +368,7 @@ export class ServerSupervisor {
 			inbox = row.inbox.splice(0);
 			row.pane = row.held.shift();
 			if (row.pane) this.enter(id, row, "silent");
-			else row.state = "stored";
+			else row.state = row.start ? "starting" : "stored";
 		} else row.held.splice(row.held.indexOf(pane), 1);
 		this.tidy(id);
 		this.settleWait(pane.record.id, "none");
@@ -562,7 +565,7 @@ export class ServerSupervisor {
 		this.reap(this.deps.now());
 		const paned = new Set([...this.rows].flatMap(([id, row]) => (row.pane ? [id] : [])));
 		const starting = new Map(
-			[...this.rows].flatMap(([id, row]) => (row.state === "starting" && row.start ? [[id, row.start.record]] : [])),
+			[...this.rows].flatMap(([id, row]) => (!row.pane && row.start ? [[id, row.start.record]] : [])),
 		);
 		const stored = loadInstances(this.deps.dir).filter((instance) => !paned.has(instance.id));
 		// A row a start claimed shows as starting, in its stored row's place if it has one.

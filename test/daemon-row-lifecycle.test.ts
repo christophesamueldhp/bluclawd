@@ -187,6 +187,18 @@ describe("a row's state by event, as every reader lists it", () => {
 		expect(f.supervisor.drainExternal("pi-b")).toEqual([{ type: "abort" }]);
 	});
 
+	it("a start claimed past a live pane's TTL, before any list, leaves that pane its row and its inbox", () => {
+		const f = fixture();
+		states.live(f);
+		f.supervisor.sendExternal(ROW, { type: "abort" });
+		f.pass(20_000);
+		expect(f.supervisor.claimStart({ cwd: f.dir, sessionFile: f.file })).toMatchObject({ ok: true });
+		expect(f.supervisor.drainExternal("pi-a")).toEqual([{ type: "abort" }]);
+		f.pass(START_MS + 1);
+		expect(f.listed()).toEqual([silent]);
+		expect(f.events).toEqual(["silent row-s"]);
+	});
+
 	it("a row deleted while silent stays deleted once its pane ends and its hand-off saves", () => {
 		const f = fixture();
 		states.silent(f);
