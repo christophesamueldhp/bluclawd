@@ -7,7 +7,9 @@ import { handleIpcRequest, listSummaries } from "../daemon/handler.ts";
 import type { InstanceSummary, PaneHeartbeat } from "../daemon/ipc/protocol.ts";
 import { findSession, remoteSessions } from "../daemon/remote/sessions.ts";
 import { collectRows } from "../daemon/rows.ts";
+import { saveInstances } from "../daemon/storage.ts";
 import { ServerSupervisor } from "../daemon/supervisor.ts";
+import type { InstanceRecord } from "../daemon/types.ts";
 import { testRegistry } from "./helpers/registry.ts";
 
 const live = (
@@ -246,6 +248,26 @@ describe("a pane's heartbeat, from its register request to agent view's row and 
 			createdAt: "2026-10-12T00:00:00.000Z",
 			sessionId: "pi-h",
 		});
+	});
+
+	it("takes only the heartbeat from a register request: a pane cannot pin or order its row", async () => {
+		const supervisor = testRegistry();
+		const wire = { ...heartbeat, id: "pi-h", pinned: true, sortOrder: 1, outcome: "failed" };
+		await handleIpcRequest(supervisor, { type: "register", instance: wire });
+		const [summary] = listSummaries(supervisor);
+		expect(summary).toMatchObject({ ...heartbeat, id: "pi-h", status: "online" });
+		expect(summary.pinned).toBeUndefined();
+		expect(summary.sortOrder).toBeUndefined();
+		expect(summary.outcome).toBeUndefined();
+	});
+
+	it("lists a stored row without the keys instances.json kept that no row has", () => {
+		const dir = mkdtempSync(join(tmpdir(), "bluclawd-stale-keys-"));
+		const stale = { id: "row-s", status: "stopped", cwd: "/p", createdAt: "2026-10-12T00:00:00.000Z", running: true };
+		saveInstances(dir, [stale as InstanceRecord]);
+		const [summary] = listSummaries(testRegistry(dir));
+		expect(summary).toMatchObject({ id: "row-s", status: "stopped", cwd: "/p" });
+		expect(summary).not.toHaveProperty("running");
 	});
 
 	it("takes an older pane's flat request, which has none of the fields added since", async () => {
