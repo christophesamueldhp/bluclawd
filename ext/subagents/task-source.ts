@@ -18,10 +18,12 @@ const TASK_STATES: Record<SubagentLifecycleStatus, AgentTaskState> = {
 
 export interface AgentTaskSourceDeps {
 	directory: Pick<RunDirectory, "get" | "list">;
-	scheduler: Pick<SubagentRunScheduler, "cancelRun">;
+	scheduler: Pick<SubagentRunScheduler, "cancelRun" | "listRuns">;
 	agentDir: () => string;
 	/** The owner when a caller names none. */
 	activeScope: () => ParentScope | undefined;
+	/** Finished runs the user dismissed from `/tasks`. */
+	dismissed: Set<string>;
 }
 
 /** Translates runs into the tasks `/tasks` and `task_stop` see. */
@@ -63,6 +65,22 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 
 	const stoppable = (entry: RunEntry) => entry.state !== "finishing" && entry.state !== "finished";
 
+	/** The scope's finished runs this instance ran, so none of an earlier epoch or known only from disk. */
+	const doneRuns = (owner?: string): RunEntry[] => {
+		const scope = scopeOf(owner);
+		if (!scope) return [];
+		return deps.scheduler
+			.listRuns()
+			.filter(
+				(run) =>
+					run.parentSessionId === scope.parentSessionId &&
+					run.sessionEpoch === scope.sessionEpoch &&
+					isTerminalSubagentStatus(run.status) &&
+					!deps.dismissed.has(run.runId),
+			)
+			.flatMap((run) => deps.directory.get(run.runId) ?? []);
+	};
+
 	return {
 		list: (owner) => {
 			const scope = scopeOf(owner);
@@ -96,6 +114,12 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 						stoppable(run) &&
 						deps.scheduler.cancelRun(run.record.runId, options?.source ?? "user", "Stopped all subagents"),
 				).length;
+		},
+		listDone: (owner) => doneRuns(owner).map(toTask),
+		dismiss: (id, owner) => {
+			if (!doneRuns(owner).some((run) => run.record.runId === id)) return false;
+			deps.dismissed.add(id);
+			return true;
 		},
 	};
 }

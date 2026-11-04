@@ -98,6 +98,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		let offPanelKeys: (() => void) | undefined;
 		/** Final runs the user dismissed from the panel. */
 		const dismissed = new Set<string>();
+		/** Finished runs the user dismissed from /tasks, which leave the panel too. */
+		const dismissedFromTasks = new Set<string>();
 		// Subagent calls in one message start executing together; a child waits for every launch in flight to be
 		// admitted, so each sibling is registered for messages before any of them takes a turn.
 		let launchesInFlight = 0;
@@ -170,7 +172,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					(run) =>
 						run.parentSessionId === scope.parentSessionId &&
 						run.sessionEpoch === scope.sessionEpoch &&
-						!dismissed.has(run.runId),
+						!dismissed.has(run.runId) &&
+						!dismissedFromTasks.has(run.runId),
 				)
 				.flatMap((run) => directory.get(run.runId) ?? [])
 				.filter((entry) => shownInPanel(entry, at));
@@ -249,6 +252,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			scheduler,
 			agentDir: resolveAgentDir,
 			activeScope: () => parentScope.current(),
+			dismissed: dismissedFromTasks,
 		});
 
 		/** Sends what the user typed in a run's transcript to the run, as the orchestrator's `subagent_message` would. */

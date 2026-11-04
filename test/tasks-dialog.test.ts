@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stripAnsi } from "../daemon/ansi.ts";
+import { type AgentTask, publishAgentTasks } from "../ext/_shared/agent-tasks.ts";
 import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
 import { detachableExec, runningForegroundShells } from "../ext/background-bash/foreground-shells.ts";
-import { TasksDialog } from "../ext/background-bash/tasks-dialog.ts";
+import { TasksDialog, visibleRows } from "../ext/background-bash/tasks-dialog.ts";
 
 const theme = { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => t, bold: (t: string) => t } as any;
 
@@ -297,5 +298,151 @@ describe("Ticket #20 — stop all agents from /tasks", () => {
 		} finally {
 			unpublish();
 		}
+	});
+});
+
+describe("/tasks dialog: finished runs", () => {
+	function agentTask(me: string, id: string, state: AgentTask["state"]): AgentTask {
+		return {
+			id,
+			owner: me,
+			agent: "explorer",
+			summary: `Task for ${id}`,
+			startedAt: Date.now(),
+			endedAt: state === "running" ? undefined : Date.now(),
+			state,
+			status: state,
+			model: "faux/faux-1",
+			outputFile: "",
+			output: () => "",
+		};
+	}
+
+	/** A source with one running run and two finished ones, recording what the dialog asks of it. */
+	function source(me: string) {
+		const calls = { opened: [] as string[][], dismissed: [] as string[][] };
+		// Newest first: sub_done started last.
+		const done = [
+			{ ...agentTask(me, "sub_done", "completed"), startedAt: 2000 },
+			{ ...agentTask(me, "sub_failed", "failed"), startedAt: 1000 },
+		];
+		unpublish = publishAgentTasks({
+			list: (listOwner) => (listOwner === me ? [agentTask(me, "sub_live", "running")] : []),
+			listDone: (listOwner) => (listOwner === me ? [...done] : []),
+			get: () => undefined,
+			stop: () => ({ ok: false, reason: "not_found" }),
+			stopAll: () => 0,
+			dismiss: (id, dismissOwner) => {
+				calls.dismissed.push([id, String(dismissOwner)]);
+				done.splice(
+					done.findIndex((task) => task.id === id),
+					1,
+				);
+				return true;
+			},
+			open: (id, openOwner) => {
+				calls.opened.push([id, String(openOwner)]);
+				return Promise.resolve();
+			},
+		});
+		return calls;
+	}
+
+	let unpublish: (() => void) | undefined;
+	afterEach(() => {
+		unpublish?.();
+		unpublish = undefined;
+	});
+
+	it("lists them in a Done section, each with its model and status, and keeps them off the running list", () => {
+		const me = session();
+		source(me);
+		const out = open(me).screen();
+		expect(out).toContain("  1 active agent\n");
+		expect(out).toContain("    Local agents (1)\n");
+		expect(out).toMatch(/explorer: Task for sub_live +faux\/faux-1 · running/);
+		expect(out).toContain("\n\n    Done (2)\n");
+		expect(out).toMatch(/explorer: Task for sub_done +faux\/faux-1 · completed/);
+		expect(out).toMatch(/explorer: Task for sub_failed +faux\/faux-1 · failed/);
+		// The phone's task list is the running one.
+		expect(visibleRows(me).map((row) => row.id)).toEqual(["sub_live"]);
+	});
+
+	it("opens a running or a finished run's transcript with Enter, closing the dialog", () => {
+		const me = session();
+		const calls = source(me);
+		const live = open(me);
+		live.dialog.handleInput("\r");
+		expect(calls.opened).toEqual([["sub_live", me]]);
+		expect(live.state.closed).toBe(true);
+
+		const done = open(me);
+		expect(done.screen()).toContain("Enter to view");
+		done.dialog.handleInput("\x1b[B");
+		done.dialog.handleInput("\r");
+		expect(calls.opened.at(-1)).toEqual(["sub_done", me]);
+		expect(done.state.closed).toBe(true);
+	});
+
+	it("dismisses a finished run with x, and stops nothing", () => {
+		const me = session();
+		const calls = source(me);
+		const { dialog, screen } = open(me);
+		dialog.handleInput("\x1b[B");
+		expect(screen()).toContain("x to dismiss");
+		dialog.handleInput("x");
+		expect(calls.dismissed).toEqual([["sub_done", me]]);
+		const out = screen();
+		expect(out).toContain("    Done (1)\n");
+		expect(out).not.toContain("sub_done");
+		expect(out).toContain("sub_live");
+	});
+
+	it("does not dismiss a run that finished under the cursor with the x meant to stop it", () => {
+		const me = session();
+		const dismissed: string[] = [];
+		const stopped: string[] = [];
+		let finished = false;
+		unpublish = publishAgentTasks({
+			list: () => (finished ? [] : [agentTask(me, "sub_live", "running")]),
+			listDone: () => (finished ? [agentTask(me, "sub_live", "completed")] : []),
+			get: () => undefined,
+			stop: (id) => {
+				stopped.push(id);
+				return { ok: false, reason: "not_found" };
+			},
+			stopAll: () => 0,
+			dismiss: (id) => dismissed.push(id) > 0,
+			open: () => Promise.resolve(),
+		});
+		const { dialog, screen } = open(me);
+		screen();
+		finished = true;
+		dialog.handleInput("x");
+		expect(dismissed).toEqual([]);
+		expect(stopped).toEqual([]);
+		dialog.handleInput("x");
+		expect(dismissed).toEqual(["sub_live"]);
+	});
+
+	it("does not open straight to the only run: Enter on it opens its transcript", () => {
+		const me = session();
+		const calls = source(me);
+		unpublish?.();
+		unpublish = publishAgentTasks({
+			list: () => [],
+			listDone: (listOwner) => (listOwner === me ? [agentTask(me, "sub_done", "completed")] : []),
+			get: () => undefined,
+			stop: () => ({ ok: false, reason: "not_found" }),
+			stopAll: () => 0,
+			open: (id, openOwner) => {
+				calls.opened.push([id, String(openOwner)]);
+				return Promise.resolve();
+			},
+		});
+		const { dialog, screen } = open(me);
+		expect(screen()).toContain("    Done (1)\n");
+		dialog.handleInput("\r");
+		expect(calls.opened).toEqual([["sub_done", me]]);
 	});
 });
