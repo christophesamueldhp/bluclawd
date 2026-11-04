@@ -10,6 +10,7 @@ const session = (id: string, state: RemoteSession["state"], detail = ""): Remote
 	state,
 	alive: true,
 	detail,
+	verdict: { act: true },
 });
 
 describe("notifier", () => {
