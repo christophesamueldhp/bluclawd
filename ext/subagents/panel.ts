@@ -4,16 +4,10 @@ import { focusedComponent } from "../_shared/focus.ts";
 import { formatTaskDuration } from "../background-bash/bash-limits.ts";
 import type { RunEntry } from "./directory.ts";
 import { isTerminalSubagentStatus } from "./runs.ts";
+import { canStop } from "./views.ts";
 
 export const SUBAGENT_PANEL_WIDGET = "subagents:panel";
 const MAX_ROWS = 5;
-/** How long a run that succeeded stays in the panel after it ends. */
-export const SUCCEEDED_RUN_LINGER_MS = 30_000;
-
-/** Whether the panel still shows a run: one that succeeded leaves after a while, any other final run stays. */
-export function shownInPanel({ record }: RunEntry, now: number): boolean {
-	return record.status !== "completed" || now - (record.endedAt ?? now) < SUCCEEDED_RUN_LINGER_MS;
-}
 
 /** How long a run has been going, or went on for once it ended. */
 export function formatRunElapsed(run: RunEntry["record"], now: number): string {
@@ -137,7 +131,7 @@ export function createPanel(options: {
 			else if (matchesKey(data, "enter")) actions.open?.(run);
 			else if (data === "x") {
 				if (isTerminalSubagentStatus(run.record.status)) actions.dismiss(run);
-				else if (run.state !== "finishing") actions.stop(run);
+				else if (canStop(run)) actions.stop(run);
 				panel.sync();
 			} else {
 				release();

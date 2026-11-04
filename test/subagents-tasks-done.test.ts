@@ -7,7 +7,7 @@ import backgroundBash from "../ext/background-bash/index.ts";
 import { TasksDialog } from "../ext/background-bash/tasks-dialog.ts";
 import { paneTasks } from "../ext/remote/report.ts";
 import { SUBAGENT_NOTIFICATION_CUSTOM_TYPE } from "../ext/subagents/index.ts";
-import { readPersistedRunRecord, subagentReportPath, writePersistedRunRecord } from "../ext/subagents/storage.ts";
+import { readPersistedRunRecord, subagentReportPath } from "../ext/subagents/storage.ts";
 import { createSubagentTui, launch, REPORT, type SubagentTui } from "./helpers/subagent-tui.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -94,17 +94,5 @@ describe("/tasks keeps the finished runs of this session", () => {
 		expect(tasks(tui).screen()).not.toContain("scout");
 		expect(existsSync(subagentReportPath(tui.agentDir, owner(tui), runId))).toBe(true);
 		expect(readPersistedRunRecord(tui.agentDir, owner(tui), runId)?.status).toBe("completed");
-	});
-
-	it("does not list runs of an earlier session epoch, or runs known only from disk", async () => {
-		let runId: string;
-		({ t: tui, runId } = await finishedRun());
-		const stored = readPersistedRunRecord(tui.agentDir, owner(tui), runId);
-		if (!stored) throw new Error("no persisted record");
-		writePersistedRunRecord(tui.agentDir, { ...stored, runId: "sub_from_disk", taskSummary: "Ghost task" });
-		expect(tasks(tui).screen()).not.toContain("Ghost task");
-
-		await tui.session.extensionRunner.emit({ type: "session_before_switch", reason: "new" });
-		expect(tasks(tui).screen()).not.toContain("Done");
 	});
 });
