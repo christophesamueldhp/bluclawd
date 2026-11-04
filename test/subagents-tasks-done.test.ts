@@ -1,7 +1,9 @@
 import { existsSync } from "node:fs";
 import { fauxAssistantMessage, type TranscriptContext } from "@earendil-works/pi-ai";
+import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { stripAnsi } from "../daemon/ansi.ts";
+import backgroundBash from "../ext/background-bash/index.ts";
 import { TasksDialog } from "../ext/background-bash/tasks-dialog.ts";
 import { paneTasks } from "../ext/remote/report.ts";
 import { SUBAGENT_NOTIFICATION_CUSTOM_TYPE } from "../ext/subagents/index.ts";
@@ -38,8 +40,8 @@ function tasks(t: SubagentTui) {
 }
 
 /** A session whose background run "scout" has reported, and answers "One more thing." with a second report. */
-async function finishedRun() {
-	const t = await createSubagentTui();
+async function finishedRun(extensions?: ExtensionFactory[]) {
+	const t = await createSubagentTui({ extensions });
 	t.script([launch(["scout"], { background: true })], (context: TranscriptContext) =>
 		fauxAssistantMessage(JSON.stringify(context.messages).includes("One more thing.") ? SECOND_REPORT : REPORT),
 	);
@@ -66,13 +68,13 @@ describe("/tasks keeps the finished runs of this session", () => {
 		expect(paneTasks(owner(tui))).toEqual([]);
 	});
 
-	it("opens a finished run's transcript with Enter, where typing resumes it", async () => {
-		({ t: tui } = await finishedRun());
-		const dialog = tasks(tui);
-		dialog.dialog.handleInput(ENTER);
-		expect(dialog.state.closed).toBe(true);
-		await waitFor(() => tui!.view() !== undefined);
-		expect(tui.view()?.[0]).toContain("scout");
+	it("opens a finished run's transcript with Enter in /tasks, where typing resumes it", async () => {
+		({ t: tui } = await finishedRun([backgroundBash]));
+		void tui.session.prompt("/tasks");
+		await waitFor(() => tui!.view()?.join("\n").includes("Done (1)") ?? false);
+		tui.press(ENTER);
+		// The transcript's header names the run; the dialog's first line is blank.
+		await waitFor(() => tui!.view()?.[0]?.includes("scout") ?? false);
 
 		tui.press("One more thing.", ENTER);
 		await waitFor(() => tui!.view()?.join("\n").includes("Resuming scout") ?? false);
