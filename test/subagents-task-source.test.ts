@@ -92,7 +92,6 @@ function setup(activeParentSessionId: string | undefined = "sess_main") {
 		return admitted.handle;
 	};
 	const directory = createRunDirectory({ scheduler, agentDir: () => agentDir });
-	const dismissed = new Map<string, number>();
 	const source = createAgentTaskSource({
 		views: createParentScopeViews({
 			scheduler,
@@ -104,12 +103,11 @@ function setup(activeParentSessionId: string | undefined = "sess_main") {
 					: { parentSessionId: activeParentSessionId, sessionEpoch: 1 },
 			idle: () => true,
 			now: Date.now,
-			dismissed: { panel: new Map(), tasks: dismissed },
+			onChange: () => {},
 		}),
 		directory,
 		scheduler,
 		agentDir: () => agentDir,
-		dismissed,
 	});
 	return { agentDir, scheduler, controllers, settle, launch, source };
 }

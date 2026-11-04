@@ -155,7 +155,6 @@ function setup(earlier?: { cwd: string; agentDir: string; session: ExtensionCont
 		onChange: () => {},
 	});
 	const { directory } = generations;
-	const dismissed = new Map<string, number>();
 	const tasks = createAgentTaskSource({
 		views: createParentScopeViews({
 			scheduler: generations.scheduler,
@@ -164,12 +163,11 @@ function setup(earlier?: { cwd: string; agentDir: string; session: ExtensionCont
 			scope: () => scope.current(),
 			idle: () => true,
 			now: Date.now,
-			dismissed: { panel: new Map(), tasks: dismissed },
+			onChange: () => {},
 		}),
 		directory,
 		scheduler: generations.scheduler,
 		agentDir: () => agentDir,
-		dismissed,
 	});
 	const context = {
 		agentDir,
