@@ -74,14 +74,21 @@ function listedGamma(): InstanceSummary {
 }
 
 let server: RemoteServer | undefined;
+const delivery = new PromptDelivery();
+delivery.changed = (id) => server?.status(id);
 /** Gamma's heartbeat takes the prompt a moment later, and its pi takes it or queues it. */
-const delivery = new PromptDelivery((id, message) => {
+function send(id: string, message: PaneMessage): boolean {
 	console.log("sent", id, JSON.stringify(message));
+	delivery.queue(id, message);
 	if (id === gamma.id && message.type === "prompt" && message.id) {
 		const promptId = message.id;
 		setTimeout(() => {
-			if (existsSync(join(dir, "gone"))) delivery.dropped(id, [message]);
-			else if (existsSync(join(dir, "compacting")))
+			if (existsSync(join(dir, "gone"))) {
+				delivery.ended(id, gamma.id, undefined, true);
+				return;
+			}
+			delivery.take(id, gamma.id);
+			if (existsSync(join(dir, "compacting")))
 				delivery.reported(id, [{ id: promptId, outcome: "refused", reason: "compacting" }]);
 			else {
 				const outcome = busy() ? "queued" : "taken";
@@ -93,7 +100,7 @@ const delivery = new PromptDelivery((id, message) => {
 		}, 500);
 	}
 	return true;
-});
+}
 
 const store = new RemoteStore(join(dir, "remote.json"));
 server = await startRemoteServer(
@@ -106,7 +113,7 @@ server = await startRemoteServer(
 				? listed.map((p) => (p.id === "pi-alpha" ? { ...p, id: "pi-alpha-2", pane: "pi-alpha-2" } : p))
 				: listed;
 		},
-		send: (id: string, message: PaneMessage) => delivery.send(id, message),
+		send,
 		launch: () => undefined,
 		startSession: () => "pi-new",
 		claimStart: () => ({ ok: true, id: "pi-new" }),
@@ -177,7 +184,6 @@ setInterval(() => {
 	}
 	if (!quit && existsSync(join(dir, "quit"))) {
 		quit = true;
-		delivery.dropped(gamma.id, [], "quit");
-		server?.status(gamma.id);
+		delivery.ended(gamma.id, gamma.id, "quit", true);
 	}
 }, 500);

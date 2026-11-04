@@ -37,13 +37,12 @@ export async function serve(): Promise<void> {
 		claimStart: (spec) => supervisor.claimStart(spec),
 		paneStarting: (spec) => supervisor.paneStarting(spec),
 		startFailed: (id) => supervisor.startFailed(id),
+		delivery: supervisor.delivery,
 		statusLine: statusLine(),
 		renderStatusline: pistatusline(),
 		tmux,
 	});
 	setRemoteControl(remote);
-	supervisor.onDropped = (rowId, inbox, reason, pane) => remote.dropped(rowId, inbox, reason, pane);
-	supervisor.onSilent = (rowId, inbox) => remote.silent(rowId, inbox);
 	await remote.apply();
 
 	let shutdownPromise: Promise<void> | undefined;

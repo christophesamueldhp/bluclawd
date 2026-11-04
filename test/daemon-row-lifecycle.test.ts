@@ -30,9 +30,6 @@ function fixture() {
 	writeFileSync(file, "");
 	writeFileSync(other, "");
 	saveInstances(dir, [{ id: ROW, status: "stopped", cwd: dir, createdAt, sessionFile: file }]);
-	const events: string[] = [];
-	supervisor.onSilent = (row) => events.push(`silent ${row}`);
-	supervisor.onDropped = (row, _inbox, reason, pane) => events.push(`dropped ${row} ${pane} ${reason ?? "-"}`);
 	const beat = (sessionFile = file) =>
 		supervisor.registerExternal(
 			{ id: "pi-a", status: "online", cwd: dir, createdAt, sessionFile, pane: "pi-a" },
@@ -59,7 +56,9 @@ function fixture() {
 				...(silent ? { silent } : {}),
 				...(pinned ? { pinned } : {}),
 			}));
-	return { dir, tmux, supervisor, file, other, events, pass, beat, lapse, listed };
+	/** What became of the prompts sent to this session's row. */
+	const outcomes = () => supervisor.delivery.outcomes(ROW);
+	return { dir, tmux, supervisor, file, other, pass, beat, lapse, listed, outcomes };
 }
 
 type Fixture = ReturnType<typeof fixture>;
@@ -69,9 +68,15 @@ const states: Record<string, (f: Fixture) => void> = {
 	starting: (f) => {
 		f.supervisor.claimStart({ cwd: f.dir, sessionFile: f.file });
 	},
-	live: (f) => f.beat(),
-	silent: (f) => {
+	/** `p-given` taken by its pane's heartbeat, and `p-inbox` still in its inbox. */
+	live: (f) => {
 		f.beat();
+		f.supervisor.sendExternal(ROW, { type: "prompt", text: "given", id: "p-given" });
+		f.supervisor.drainExternal("pi-a");
+		f.supervisor.sendExternal(ROW, { type: "prompt", text: "inbox", id: "p-inbox" });
+	},
+	silent: (f) => {
+		states.live(f);
 		f.lapse();
 	},
 };
@@ -81,8 +86,19 @@ const starting = { id: ROW, status: "starting" };
 const live = { id: ROW, status: "online", external: true };
 const silent = { ...live, silent: true };
 
+const verdicts = {
+	sent: { outcome: "sent" },
+	lost: { outcome: "lost", reason: "pane_gone" },
+	refused: { outcome: "refused", reason: "session_changed" },
+} as const;
+/** What became of the live state's `p-given` and `p-inbox`. */
+const held = (given: keyof typeof verdicts, inbox: keyof typeof verdicts) => [
+	{ id: "p-given", ...verdicts[given] },
+	{ id: "p-inbox", ...verdicts[inbox] },
+];
+
 describe("a row's state by event, as every reader lists it", () => {
-	it.each<[string, string, (f: Fixture) => void, object[], string[]?]>([
+	it.each<[string, string, (f: Fixture) => void, object[], object[]?]>([
 		["stored", "a start claimed", (f) => f.supervisor.claimStart({ cwd: f.dir, sessionFile: f.file }), [starting]],
 		["stored", "a pane beats on its file", (f) => f.beat(), [live]],
 		["stored", "deleted", (f) => f.supervisor.deleteInstance(ROW), []],
@@ -91,52 +107,40 @@ describe("a row's state by event, as every reader lists it", () => {
 		["starting", "its start failed", (f) => f.supervisor.startFailed(ROW), [stored]],
 		["starting", "its start expired", (f) => f.pass(START_MS + 1), [stored]],
 
-		["live", "a beat on the same session", (f) => f.beat(), [live]],
-		["live", "TTL lapse, tmux up", (f) => f.lapse(), [silent], ["silent row-s"]],
-		["live", "TTL lapse, tmux gone", (f) => f.lapse("gone"), [stored], ["dropped row-s pi-a -"]],
-		["live", "TTL lapse, tmux could not answer", (f) => f.lapse("unknown"), [stored], ["dropped row-s pi-a -"]],
-		["live", "a quit", (f) => f.supervisor.unregisterExternal("pi-a", "quit"), [stored], ["dropped row-s pi-a quit"]],
-		["live", "a /new", (f) => f.supervisor.unregisterExternal("pi-a", "new"), [stored], ["dropped row-s pi-a new"]],
+		["live", "a beat on the same session", (f) => f.beat(), [live], held("sent", "sent")],
+		["live", "TTL lapse, tmux up", (f) => f.lapse(), [silent], held("sent", "lost")],
+		["live", "TTL lapse, tmux gone", (f) => f.lapse("gone"), [stored], held("lost", "lost")],
+		["live", "TTL lapse, tmux could not answer", (f) => f.lapse("unknown"), [stored], held("lost", "lost")],
+		["live", "a quit", (f) => f.supervisor.unregisterExternal("pi-a", "quit"), [stored], held("lost", "lost")],
+		["live", "a /new", (f) => f.supervisor.unregisterExternal("pi-a", "new"), [stored], held("refused", "refused")],
 		[
 			"live",
 			"an unregister with no reason (an older pane)",
 			(f) => f.supervisor.unregisterExternal("pi-a"),
 			[stored],
-			["dropped row-s pi-a -"],
+			held("lost", "lost"),
 		],
-		["live", "deleted", (f) => f.supervisor.deleteInstance(ROW), [], ["dropped row-s pi-a -"]],
+		["live", "deleted", (f) => f.supervisor.deleteInstance(ROW), [], held("lost", "lost")],
 
-		["silent", "a beat on the same session", (f) => f.beat(), [live], ["silent row-s"]],
-		[
-			"silent",
-			"a beat on another session",
-			(f) => f.beat(f.other),
-			[stored],
-			["silent row-s", "dropped row-s pi-a resume"],
-		],
-		["silent", "tmux no longer has it", (f) => f.pass(0, "gone"), [stored], ["silent row-s", "dropped row-s pi-a -"]],
-		["silent", "tmux could not answer", (f) => f.pass(0, "unknown"), [silent], ["silent row-s"]],
-		[
-			"silent",
-			"a quit",
-			(f) => f.supervisor.unregisterExternal("pi-a", "quit"),
-			[stored],
-			["silent row-s", "dropped row-s pi-a quit"],
-		],
-		["silent", "deleted", (f) => f.supervisor.deleteInstance(ROW), [], ["silent row-s", "dropped row-s pi-a -"]],
+		["silent", "a beat on the same session", (f) => f.beat(), [live], held("sent", "lost")],
+		["silent", "a beat on another session", (f) => f.beat(f.other), [stored], held("refused", "lost")],
+		["silent", "tmux no longer has it", (f) => f.pass(0, "gone"), [stored], held("lost", "lost")],
+		["silent", "tmux could not answer", (f) => f.pass(0, "unknown"), [silent], held("sent", "lost")],
+		["silent", "a quit", (f) => f.supervisor.unregisterExternal("pi-a", "quit"), [stored], held("lost", "lost")],
+		["silent", "deleted", (f) => f.supervisor.deleteInstance(ROW), [], held("lost", "lost")],
 		[
 			"silent",
 			"pinned",
 			(f) => f.supervisor.setInstanceMeta(ROW, { pinned: true }),
 			[{ ...silent, pinned: true }],
-			["silent row-s"],
+			held("sent", "lost"),
 		],
-	])("%s, then %s", (from, _, event, rows, events = []) => {
+	])("%s, then %s", (from, _, event, rows, outcomes = []) => {
 		const f = fixture();
 		states[from](f);
 		event(f);
 		expect(f.listed()).toEqual(rows);
-		expect(f.events).toEqual(events);
+		expect(f.outcomes()).toEqual(outcomes);
 	});
 
 	it.each(["live", "silent"])("a %s row takes a message only while live", (from) => {
@@ -182,7 +186,7 @@ describe("a row's state by event, as every reader lists it", () => {
 		expect(f.supervisor.rowIdOf("pi-a")).toBe(ROW);
 		f.tmux.set("pi-a", "gone");
 		expect(f.listed()).toEqual([live]);
-		expect(f.events).toEqual(["silent row-s", "dropped row-s pi-a -"]);
+		expect(f.outcomes()).toEqual(held("lost", "lost"));
 		expect(f.supervisor.sendExternal(ROW, { type: "abort" })).toBe(true);
 		expect(f.supervisor.drainExternal("pi-b")).toEqual([{ type: "abort" }]);
 	});
@@ -193,10 +197,26 @@ describe("a row's state by event, as every reader lists it", () => {
 		f.supervisor.sendExternal(ROW, { type: "abort" });
 		f.pass(20_000);
 		expect(f.supervisor.claimStart({ cwd: f.dir, sessionFile: f.file })).toMatchObject({ ok: true });
-		expect(f.supervisor.drainExternal("pi-a")).toEqual([{ type: "abort" }]);
+		expect(f.supervisor.drainExternal("pi-a")).toEqual([
+			{ type: "prompt", text: "inbox", id: "p-inbox" },
+			{ type: "abort" },
+		]);
 		f.pass(START_MS + 1);
 		expect(f.listed()).toEqual([silent]);
-		expect(f.events).toEqual(["silent row-s"]);
+		expect(f.outcomes()).toEqual(held("sent", "sent"));
+	});
+
+	it("a pane a start claimed the row for, past its live pane's TTL, takes that row's inbox", () => {
+		const f = fixture();
+		states.live(f);
+		f.pass(20_000);
+		f.supervisor.claimStart({ cwd: f.dir, sessionFile: f.file });
+		f.supervisor.registerExternal(
+			{ id: "pi-b", status: "online", cwd: f.dir, createdAt, sessionFile: f.file, pane: "pi-b" },
+			"idle",
+		);
+		expect(f.supervisor.drainExternal("pi-b")).toEqual([{ type: "prompt", text: "inbox", id: "p-inbox" }]);
+		expect(f.outcomes()).toEqual(held("sent", "sent"));
 	});
 
 	it("a row deleted while silent stays deleted once its pane ends and its hand-off saves", () => {
