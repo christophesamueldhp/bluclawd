@@ -58,7 +58,7 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.54";
+const VERSION = "0.0.55";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 /** Each chat's pending prompts and unsent text, kept for when it opens again. */
 const keptPending = pendingStore(() => localStorage);

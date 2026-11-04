@@ -412,6 +412,36 @@ describe("prompts pending when the app reloads or the chat is left, kept on the 
 		expect(waitingOn(chat)).toEqual([{ id: sent.id, lifetime: "lifetime-1" }]);
 	});
 
+	it("kept by a 0.0.52 phone, accepted with no lifetime, are asked about with none and settled by the daemon's answer", () => {
+		const daemon = new PromptDelivery();
+		daemon.queue("a", { type: "prompt", text: "lost", id: "p-lost" });
+		daemon.queue("a", { type: "prompt", text: "taken", id: "p-taken" });
+		daemon.take("a", "pi-a");
+		daemon.reported("a", [{ id: "p-taken", outcome: "taken" }]);
+		daemon.ended("a", "pi-a", undefined, true);
+		const before = reporting();
+		const lost = addPending(before, "lost", [], 100);
+		const taken = addPending(before, "taken", [], 110);
+		const unaccepted = addPending(before, "unaccepted", [], 120);
+		lost.id = "p-lost";
+		taken.id = "p-taken";
+		// What 0.0.52 stored of a prompt the daemon accepted: when, and no lifetime.
+		const stored = kept(before).map((entry: Record<string, unknown>) =>
+			entry.id === unaccepted.id ? entry : { ...entry, acceptedAt: 1000 },
+		);
+
+		const chat = reopened(stored);
+		expect(restorePending(chat, [])).toEqual([]);
+		expect(waitingOn(chat)).toEqual([{ id: "p-lost" }, { id: "p-taken" }]);
+		const failed = settleOutcomes(chat, daemon.answer("a", waitingOn(chat), true));
+		expect(failed.map(({ entry, reason }) => [entry.prompt, reason])).toEqual([["lost", "pane_gone"]]);
+		expect(chat.pending.map((p) => [p.prompt, p.outcome])).toEqual([
+			["taken", "taken"],
+			["unaccepted", undefined],
+		]);
+		expect(waitingOn(chat)).toEqual([]);
+	});
+
 	it("are back in once both the daemon's replay and the pane's report are in, whichever comes first, and settled by id", () => {
 		for (const reportFirst of [false, true]) {
 			// Sent, and the page reloaded, before its pane's first report.

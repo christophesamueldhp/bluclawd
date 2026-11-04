@@ -303,8 +303,10 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 	);
 
 	/** The daemon's answer about the prompts a phone still waits on from `session`. */
-	async function ask(session: string, waiting: { id: string; lifetime: string }[]): Promise<PromptOutcome[]> {
-		const query = waiting.map(({ id, lifetime }) => `prompt=${encodeURIComponent(`${id}@${lifetime}`)}`).join("&");
+	async function ask(session: string, waiting: { id: string; lifetime?: string }[]): Promise<PromptOutcome[]> {
+		const query = waiting
+			.map(({ id, lifetime }) => `prompt=${encodeURIComponent(lifetime ? `${id}@${lifetime}` : id)}`)
+			.join("&");
 		const res = await fetch(`${base}/api/sessions/${session}/outcomes?${query}`, {
 			headers: { authorization: `Bearer ${token}` },
 		});
@@ -349,6 +351,17 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 			expect(await ask("pane-restart", waiting)).toEqual(answer);
 		},
 	);
+
+	it("is answered when asked about with no lifetime (one an older phone kept) only while the daemon knows it", async () => {
+		const pane = await stillPane("pane-unaged");
+		expect(await prompt("pane-unaged", { text: "hi", id: "p-unaged" })).toBe(202);
+		await pane.report(true);
+		expect(await ask("pane-unaged", [{ id: "p-unaged" }])).toEqual([{ id: "p-unaged", outcome: "sent" }]);
+		await restart();
+		await pane.report(true);
+		// No lifetime says which daemon accepted it, so a restart is not inferred.
+		expect(await ask("pane-unaged", [{ id: "p-unaged" }])).toEqual([]);
+	});
 
 	it("is lost when its pane unregisters with it still queued", async () => {
 		const pane = await stillPane("pane-quit");
@@ -742,5 +755,12 @@ describe("prompt delivery's answer to a phone about the prompts it still waits o
 		const before = delivering();
 		const restarted = new PromptDelivery(() => 0);
 		expect(restarted.answer("row-1", asked(before.lifetime, "p-sent"), false)).toEqual([]);
+	});
+
+	it("answers one asked about with no lifetime only when it knows it: no lifetime says which daemon accepted it", () => {
+		const before = delivering();
+		const restarted = new PromptDelivery(() => 0);
+		expect(before.answer("row-1", [{ id: "p-sent" }], true)).toEqual([{ id: "p-sent", outcome: "sent" }]);
+		expect(restarted.answer("row-1", [{ id: "p-sent" }], true)).toEqual([]);
 	});
 });

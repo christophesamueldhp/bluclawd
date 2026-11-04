@@ -119,12 +119,15 @@ export const api = {
 	prompt: (id, text, images, promptId) =>
 		call("POST", `${session(id)}/prompt`, { text, ...(images.length ? { images } : {}), id: promptId }),
 	/**
-	 * What became of the prompts the phone still waits on, by the lifetime of the daemon that accepted each.
-	 * @param {string} id @param {{ id: string, lifetime: string }[]} waiting
+	 * What became of the prompts the phone still waits on, by the lifetime of the daemon that accepted each
+	 * when the phone kept it.
+	 * @param {string} id @param {{ id: string, lifetime?: string }[]} waiting
 	 * @returns {Promise<import("./statusbar.js").PromptOutcome[]>}
 	 */
 	outcomes: async (id, waiting) => {
-		const query = waiting.map((w) => `prompt=${encodeURIComponent(`${w.id}@${w.lifetime}`)}`).join("&");
+		const query = waiting
+			.map((w) => `prompt=${encodeURIComponent(w.lifetime ? `${w.id}@${w.lifetime}` : w.id)}`)
+			.join("&");
 		return (await call("GET", `${session(id)}/outcomes?${query}`)).outcomes;
 	},
 	/**

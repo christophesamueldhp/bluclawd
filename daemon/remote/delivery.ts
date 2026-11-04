@@ -12,10 +12,11 @@ import { type EndReason, endedForAnother, type PaneMessage, type PromptOutcome }
 /** How long a prompt is kept after its last change, so a phone that reconnects still reads it. */
 export const DELIVERY_KEEP_MS = 10 * 60_000;
 
-/** A prompt a phone still waits on: its id, and the lifetime of the delivery that accepted it. */
+/** A prompt a phone still waits on: its id, and the lifetime of the delivery that accepted it, which
+ *  an older phone did not keep. */
 export interface Waiting {
 	id: string;
-	lifetime: string;
+	lifetime?: string;
 }
 
 /** `sent`: in its row's inbox, or taken by its pane and not reported on yet. `pane`: the pane whose
@@ -134,13 +135,14 @@ export class PromptDelivery {
 	/** What became of the prompts a phone still waits on from row `rowId`: each known one's outcome,
 	 *  and lost as daemon restarted for one an earlier lifetime accepted, when `reportsOutcomes` (the
 	 *  row's pane reports them, so its report would have said pi had it). Nothing for a pane from an
-	 *  older build or one yet to report, which pi may have, nor for one this lifetime let go. */
+	 *  older build or one yet to report, which pi may have, nor for one this lifetime let go, nor for
+	 *  one asked about with no lifetime, which may be either. */
 	answer(rowId: string, waiting: Waiting[], reportsOutcomes: boolean): PromptOutcome[] {
 		const known = new Map(this.outcomes(rowId).map((outcome) => [outcome.id, outcome]));
 		return waiting.flatMap(({ id, lifetime }): PromptOutcome[] => {
 			const outcome = known.get(id);
 			if (outcome) return [outcome];
-			if (lifetime !== this.lifetime && reportsOutcomes)
+			if (lifetime !== undefined && lifetime !== this.lifetime && reportsOutcomes)
 				return [{ id, outcome: "lost", reason: "daemon_restarted" }];
 			return [];
 		});
