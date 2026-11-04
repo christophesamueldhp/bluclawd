@@ -17,7 +17,7 @@ import {
 	isKeyRepeat,
 	matchesKey,
 } from "@earendil-works/pi-tui";
-import type { PaneMessage } from "../../daemon/ipc/protocol.ts";
+import type { PaneHeartbeat, PaneMessage } from "../../daemon/ipc/protocol.ts";
 import { type InstanceSummary, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { collectRows, labelFromTask } from "../../daemon/rows.ts";
 import { lastLine, textOf, toolActivity } from "../../daemon/session-state.ts";
@@ -30,13 +30,7 @@ import { trustBadge } from "../_shared/trust-badge.ts";
 import { AgentView, EXIT_WORDS, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, handOffAfterExit } from "./hand-off.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
-import {
-	deriveLabel,
-	dialogDetail,
-	ForegroundActivity,
-	SelfRegistration,
-	type SelfSessionInfo,
-} from "./self-registration.ts";
+import { deriveLabel, dialogDetail, ForegroundActivity, SelfRegistration } from "./self-registration.ts";
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
@@ -281,44 +275,26 @@ const agentView: InlineExtension = {
 			else panes.detach();
 		};
 
-		const selfInfo = (ctx: ExtensionContext): SelfSessionInfo | undefined => {
-			if (blank(ctx)) return undefined;
-			const row = selfRow(ctx);
-			const leafId = ctx.sessionManager.getLeafId() ?? undefined;
-			return {
-				cwd: ctx.sessionManager.getCwd(),
-				sessionId: ctx.sessionManager.getSessionId(),
-				sessionFile: ctx.sessionManager.getSessionFile(),
-				label: row.label,
-				pane,
-				detail: row.detail,
-				turns: row.turns,
-				createdAt: row.createdAt,
-				finishedAt: row.finishedAt,
-				// Only once it differs: a heartbeat lags the file, whose last entry is otherwise the leaf.
-				leafId: leafId !== ctx.sessionManager.getEntries().at(-1)?.id ? leafId : undefined,
-				dialog: activity.current === "awaiting_input" ? activity.dialog : undefined,
-				draft: ctx.ui.getEditorText().trim() !== "",
-			};
+		/** This window's session's name, else the first words of its first prompt. */
+		const selfLabel = (ctx: ExtensionContext): string | undefined => {
+			const firstUser = deriveLabel(undefined, ctx.sessionManager.getEntries());
+			return ctx.sessionManager.getSessionName()?.trim() || (firstUser ? labelFromTask(firstUser) : undefined);
 		};
 
-		/** This window's session as an agent-view row. */
-		const selfRow = (ctx: ExtensionContext): InstanceSummary => {
+		/** What this window's session is, as its heartbeat says and its own row shows. */
+		const selfHeartbeat = (ctx: ExtensionContext): PaneHeartbeat => {
 			const entries = ctx.sessionManager.getEntries();
 			const messages = entries.filter((e) => e.type === "message") as Array<{
 				message: { role?: string; content?: unknown };
 			}>;
 			const lastAssistant = [...messages].reverse().find((e) => e.message.role === "assistant");
-			const name = ctx.sessionManager.getSessionName();
-			const firstUser = deriveLabel(undefined, entries);
+			const leafId = ctx.sessionManager.getLeafId() ?? undefined;
 			return {
-				id: registration?.id ?? `self:${ctx.sessionManager.getSessionId()}`,
-				status: "online",
-				activity: activity.current,
 				cwd: ctx.sessionManager.getCwd(),
 				sessionId: ctx.sessionManager.getSessionId(),
 				sessionFile: ctx.sessionManager.getSessionFile(),
-				label: name?.trim() || (firstUser ? labelFromTask(firstUser) : undefined),
+				label: selfLabel(ctx),
+				pane,
 				detail:
 					dialogDetail(activity) ??
 					(activity.current === "working" && liveDetail
@@ -330,10 +306,21 @@ const agentView: InlineExtension = {
 				createdAt: ctx.sessionManager.getHeader()?.timestamp,
 				// Its last entry's: once idle, when its last turn ended. Every heartbeat restates its lastSeenAt.
 				finishedAt: entries.at(-1)?.timestamp,
-				external: true,
-				pane,
+				// Only once it differs: a heartbeat lags the file, whose last entry is otherwise the leaf.
+				leafId: leafId !== entries.at(-1)?.id ? leafId : undefined,
+				dialog: activity.current === "awaiting_input" ? activity.dialog : undefined,
+				...(ctx.ui.getEditorText().trim() !== "" ? { draft: true } : {}),
 			};
 		};
+
+		/** This window's session as an agent-view row. */
+		const selfRow = (ctx: ExtensionContext): InstanceSummary => ({
+			...selfHeartbeat(ctx),
+			id: registration?.id ?? `self:${ctx.sessionManager.getSessionId()}`,
+			status: "online",
+			activity: activity.current,
+			external: true,
+		});
 
 		/** The current session as a stored row, or undefined while it has no file to resume from. */
 		const captureOutgoing = (ctx: ExtensionContext): BackgroundableSession | undefined => {
@@ -341,7 +328,7 @@ const agentView: InlineExtension = {
 			if (!sessionFile || !existsSync(sessionFile)) return undefined;
 			return {
 				cwd: ctx.sessionManager.getCwd(),
-				label: ctx.sessionManager.getSessionName() ?? selfRow(ctx).label,
+				label: ctx.sessionManager.getSessionName() ?? selfLabel(ctx),
 				sessionFile,
 				sessionId: ctx.sessionManager.getSessionId(),
 			};
@@ -468,7 +455,7 @@ const agentView: InlineExtension = {
 			activity = new ForegroundActivity();
 			registration = new SelfRegistration(
 				new OrchestratorClient(),
-				() => selfInfo(ctx),
+				() => (blank(ctx) ? undefined : selfHeartbeat(ctx)),
 				(message) => onPaneMessage(ctx, message),
 				pane,
 				(watched) => pi.events.emit("bluclawd:remote-watched", watched),

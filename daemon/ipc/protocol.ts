@@ -10,31 +10,36 @@ export interface StatusRequest {
 	instanceId: string;
 }
 
-/** Register/heartbeat a pane's pi. */
+/**
+ * What a pane's pi says of its session with every heartbeat, carried whole into its row's record
+ * and listed summary. Every field but `cwd` is optional: a pane from an older build sends fewer.
+ * (The phone's status sheet is another report: PaneReport.)
+ */
+export interface PaneHeartbeat {
+	cwd: string;
+	sessionId?: string;
+	sessionFile?: string;
+	label?: string;
+	/** The tmux session its pi runs in. */
+	pane?: string;
+	detail?: string;
+	turns?: number;
+	createdAt?: string;
+	/** When its session's last entry was written: once idle, when its last turn ended. */
+	finishedAt?: string;
+	/** The entry pi appends to next, when it is not the file's last entry (after a /tree). */
+	leafId?: string;
+	/** The dialog it waits on, while it does. */
+	dialog?: PaneDialog;
+	/** Its prompt holds unsent text. */
+	draft?: boolean;
+}
+
+/** Register/heartbeat a pane's pi. `launch`: how to start another pi like this one, so the daemon
+ *  can start panes. */
 export interface RegisterRequest {
 	type: "register";
-	instance: {
-		id: string;
-		cwd: string;
-		sessionId?: string;
-		sessionFile?: string;
-		label?: string;
-		activity?: AgentActivity;
-		pane?: string;
-		detail?: string;
-		turns?: number;
-		createdAt?: string;
-		/** When its session's last entry was written: once idle, when its last turn ended. */
-		finishedAt?: string;
-		/** The entry pi appends to next, when it is not the file's last entry (after a /tree). */
-		leafId?: string;
-		/** The dialog it waits on, while it does. */
-		dialog?: PaneDialog;
-		/** Its prompt holds unsent text. */
-		draft?: boolean;
-		/** How to start another pi like this one, so the daemon can start panes. */
-		launch?: PaneLaunch;
-	};
+	instance: PaneHeartbeat & { id: string; activity?: AgentActivity; launch?: PaneLaunch };
 }
 
 export interface PaneLaunch {
@@ -306,29 +311,17 @@ interface RequestMap {
 
 export type ServerRequest = RequestMap[keyof RequestMap];
 
-export interface InstanceSummary {
+/** A listed row: a pane's as of its last heartbeat, or a stored one's. */
+export interface InstanceSummary extends PaneHeartbeat {
 	id: string;
 	status: InstanceStatus;
-	cwd: string;
-	label?: string;
-	sessionId?: string;
-	sessionFile?: string;
 	activity?: AgentActivity;
 	/** True for a pane's pi; a stored row has no process. */
 	external?: boolean;
-	createdAt?: string;
 	lastSeenAt?: string;
-	detail?: string;
 	outcome?: "done" | "failed" | "stopped";
-	turns?: number;
-	finishedAt?: string;
 	pinned?: boolean;
 	sortOrder?: number;
-	pane?: string;
-	leafId?: string;
-	dialog?: PaneDialog;
-	/** A pane's prompt holds unsent text, as of its last heartbeat. */
-	draft?: boolean;
 	/** A pane's pi: how many times it stopped working, which a turn too quick for a poll still adds to. */
 	settled?: number;
 	/** A pane's pi that stopped beating while tmux still has its pane: listed as it last beat. */

@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { handleIpcRequest, listSummaries } from "../daemon/handler.ts";
-import type { InstanceSummary } from "../daemon/ipc/protocol.ts";
+import type { InstanceSummary, PaneHeartbeat } from "../daemon/ipc/protocol.ts";
 import { findSession, remoteSessions } from "../daemon/remote/sessions.ts";
+import { collectRows } from "../daemon/rows.ts";
 import { ServerSupervisor } from "../daemon/supervisor.ts";
 import { testRegistry } from "./helpers/registry.ts";
 
@@ -168,6 +169,128 @@ describe("remote sessions through the daemon", () => {
 		});
 		await beat("working");
 		expect(remoteSessions(listSummaries(supervisor))[0]).not.toHaveProperty("dialog");
+	});
+});
+
+describe("a pane's heartbeat, from its register request to agent view's row and the phone's session", () => {
+	// Every field the type has: a field added to it without a value here fails the typecheck.
+	const heartbeat = {
+		cwd: "/p",
+		sessionId: "pi-h",
+		sessionFile: "/s/h.jsonl",
+		label: "deploy",
+		pane: "bluclawd-h",
+		detail: "Waiting: Allow bash?",
+		turns: 2,
+		createdAt: "2026-10-12T00:00:00.000Z",
+		finishedAt: "2026-10-12T00:05:00.000Z",
+		leafId: "e7",
+		dialog: { kind: "confirm", title: "Allow bash?" },
+		draft: true,
+	} satisfies Required<PaneHeartbeat>;
+
+	it("carries every field to the listed summary, and each the row and the phone show", async () => {
+		const supervisor = testRegistry();
+		await handleIpcRequest(supervisor, {
+			type: "register",
+			instance: { ...heartbeat, id: "pi-h", activity: "awaiting_input", launch: { command: ["pi"] } },
+		});
+		const summaries = listSummaries(supervisor);
+		expect(summaries).toHaveLength(1);
+		expect(summaries[0]).toMatchObject({
+			...heartbeat,
+			id: "pi-h",
+			status: "online",
+			activity: "awaiting_input",
+			external: true,
+		});
+		expect(summaries[0]).not.toHaveProperty("launch");
+		expect(collectRows(summaries, undefined)[0]).toMatchObject({
+			id: "pi-h",
+			label: "deploy",
+			cwd: "/p",
+			sessionFile: "/s/h.jsonl",
+			state: "needs",
+			alive: true,
+			detail: "Waiting: Allow bash?",
+			createdAt: "2026-10-12T00:00:00.000Z",
+			finishedAt: "2026-10-12T00:05:00.000Z",
+			pane: "bluclawd-h",
+			dialog: heartbeat.dialog,
+		});
+		expect(remoteSessions(summaries)).toEqual([
+			{
+				id: "pi-h",
+				label: "deploy",
+				cwd: "/p",
+				band: "needs",
+				state: "needs",
+				alive: true,
+				detail: "Waiting: Allow bash?",
+				createdAt: "2026-10-12T00:00:00.000Z",
+				finishedAt: "2026-10-12T00:05:00.000Z",
+				dialog: heartbeat.dialog,
+				settled: 0,
+				verdict: { act: true },
+			},
+		]);
+		expect(findSession(summaries, "pi-h")).toEqual({
+			sessionFile: "/s/h.jsonl",
+			cwd: "/p",
+			running: true,
+			verdict: { act: true },
+			busy: true,
+			leafId: "e7",
+			pane: "bluclawd-h",
+			draft: true,
+			createdAt: "2026-10-12T00:00:00.000Z",
+			sessionId: "pi-h",
+		});
+	});
+
+	it("takes an older pane's flat request, which has none of the fields added since", async () => {
+		const supervisor = testRegistry();
+		// The register request's shape before a pane said its leaf, dialog, draft or launch command.
+		await handleIpcRequest(supervisor, {
+			type: "register",
+			instance: {
+				id: "pi-old",
+				cwd: "/p",
+				sessionId: "pi-o",
+				sessionFile: "/s/old.jsonl",
+				label: "older",
+				activity: "working",
+				pane: "bluclawd-old",
+				detail: "running tests",
+				turns: 1,
+				createdAt: "2026-10-12T00:00:00.000Z",
+			},
+		});
+		expect(remoteSessions(listSummaries(supervisor))).toEqual([
+			{
+				id: "pi-old",
+				label: "older",
+				cwd: "/p",
+				band: "working",
+				state: "working",
+				alive: true,
+				detail: "running tests",
+				createdAt: "2026-10-12T00:00:00.000Z",
+				finishedAt: undefined,
+				settled: 0,
+				verdict: { act: true },
+			},
+		]);
+		expect(findSession(listSummaries(supervisor), "pi-old")).toEqual({
+			sessionFile: "/s/old.jsonl",
+			cwd: "/p",
+			running: true,
+			verdict: { act: true },
+			busy: true,
+			pane: "bluclawd-old",
+			createdAt: "2026-10-12T00:00:00.000Z",
+			sessionId: "pi-o",
+		});
 	});
 });
 

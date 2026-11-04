@@ -475,7 +475,7 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 				createdAt: "2026-10-30T11:00:00.000Z",
 			}),
 		]);
-		expect(listed[1]).toMatchObject({ pinned: undefined, sortOrder: undefined });
+		expect([listed[1].pinned, listed[1].sortOrder]).toEqual([undefined, undefined]);
 		expect(listed[1].id).not.toBe("pi-a");
 	});
 

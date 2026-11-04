@@ -40,29 +40,8 @@ function toInstanceSummary(
 	external?: boolean,
 	settled?: number,
 ): InstanceSummary {
-	return {
-		createdAt: instance.createdAt,
-		lastSeenAt: instance.lastSeenAt,
-		detail: instance.detail,
-		outcome: instance.outcome,
-		turns: instance.turns,
-		finishedAt: instance.finishedAt,
-		pinned: instance.pinned,
-		sortOrder: instance.sortOrder,
-		id: instance.id,
-		status: instance.status,
-		cwd: instance.cwd,
-		label: instance.label,
-		sessionId: instance.sessionId,
-		sessionFile: instance.sessionFile,
-		activity,
-		external,
-		pane: instance.pane,
-		leafId: instance.leafId,
-		dialog: instance.dialog,
-		...(instance.draft ? { draft: true } : {}),
-		settled,
-	};
+	const { paneLabel: _, ...listed } = instance;
+	return { ...listed, activity, external, settled };
 }
 
 /** Below the pane's 30 s request timeout, so a wait is answered rather than given up on. */
@@ -172,25 +151,15 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 
 		case "register": {
 			const now = new Date().toISOString();
+			const { activity, launch, ...heartbeat } = request.instance;
 			const record: InstanceRecord = {
-				id: request.instance.id,
+				...heartbeat,
 				status: "online",
-				cwd: request.instance.cwd,
-				createdAt: request.instance.createdAt ?? now,
+				createdAt: heartbeat.createdAt ?? now,
 				lastSeenAt: now,
-				label: request.instance.label,
-				sessionId: request.instance.sessionId,
-				sessionFile: request.instance.sessionFile,
-				pane: request.instance.pane,
-				detail: request.instance.detail,
-				turns: request.instance.turns,
-				finishedAt: request.instance.finishedAt,
-				leafId: request.instance.leafId,
-				dialog: request.instance.dialog,
-				...(request.instance.draft === true ? { draft: true } : {}),
 			};
-			if (request.instance.launch) remoteControl?.noteLaunch(request.instance.launch);
-			supervisor.registerExternal(record, request.instance.activity ?? "idle");
+			if (launch) remoteControl?.noteLaunch(launch);
+			supervisor.registerExternal(record, activity ?? "idle");
 			// The phone started it by its pane's name, and knows it by its row's id.
 			remoteControl?.registered(record.id);
 			const row = supervisor.rowIdOf(record.id);

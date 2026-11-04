@@ -1,24 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { EndReason, PaneDialog, PaneMessage } from "../../daemon/ipc/protocol.ts";
-import type { AgentActivity, OrchestratorClient, RegisterInput } from "../../daemon/orchestrator-client.ts";
+import type { EndReason, PaneDialog, PaneHeartbeat, PaneMessage } from "../../daemon/ipc/protocol.ts";
+import type { AgentActivity, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { piCommand } from "../../daemon/tmux.ts";
-
-export interface SelfSessionInfo {
-	cwd: string;
-	sessionId?: string;
-	sessionFile?: string;
-	label?: string;
-	/** Pane mode: the tmux session this pi runs in, and what its row shows. */
-	pane?: string;
-	detail?: string;
-	turns?: number;
-	createdAt?: string;
-	finishedAt?: string;
-	leafId?: string;
-	dialog?: PaneDialog;
-	/** Its prompt holds unsent text: the phone's slash commands wait for it to be sent or cleared. */
-	draft?: boolean;
-}
 
 /** The subset of a session entry needed to derive a title — structural, so pi's SessionEntry fits. */
 interface EntryLike {
@@ -55,15 +38,15 @@ export function deriveLabel(name: string | undefined, entries: EntryLike[]): str
 	return undefined;
 }
 
-/** Blocking prompt kinds, as the daemon's activity reducer sees them: a `custom` overlay
- *  (agent view itself, /diff, …) is a view, not a question waiting on the user. */
+/** Blocking prompt kinds: a `custom` overlay (agent view itself, /diff, …) is a view, not a
+ *  question waiting on the user. */
 const BLOCKING_PROMPT_KINDS: ReadonlySet<string> = new Set(["select", "confirm", "input", "editor"]);
 
 /**
- * Derives the foreground session's activity from pi's extension events, mirroring what the
- * daemon derives for its children from their RPC stream (daemon/activity.ts): a run is
- * "working" from agent_start until agent_settled; a blocking UI prompt is "awaiting_input"
- * until answered, then back to whatever the run state was. `dialog`: the prompt waited on.
+ * Derives the foreground session's activity (daemon/activity.ts), which its heartbeat reports,
+ * from pi's extension events: a run is "working" from agent_start until agent_settled; a blocking
+ * UI prompt is "awaiting_input" until answered, then back to whatever the run state was.
+ * `dialog`: the prompt waited on.
  */
 export class ForegroundActivity {
 	current: AgentActivity = "idle";
@@ -122,7 +105,7 @@ export const HEARTBEAT_MS = 3000;
 export class SelfRegistration {
 	readonly id: string;
 	private readonly client: OrchestratorClient;
-	private readonly getInfo: () => SelfSessionInfo | undefined;
+	private readonly getInfo: () => PaneHeartbeat | undefined;
 	private readonly onMessage: (message: PaneMessage) => void;
 	private readonly onWatched: (watched: boolean) => void;
 	private readonly onWantReport: () => void;
@@ -145,7 +128,7 @@ export class SelfRegistration {
 	 *  `onWantReport`: the daemon has no report from this pane, as after it restarted. */
 	constructor(
 		client: OrchestratorClient,
-		getInfo: () => SelfSessionInfo | undefined,
+		getInfo: () => PaneHeartbeat | undefined,
 		onMessage: (message: PaneMessage) => void = () => {},
 		id: string = randomUUID(),
 		onWatched: (watched: boolean) => void = () => {},
@@ -197,23 +180,7 @@ export class SelfRegistration {
 		const info = this.getInfo();
 		if (!info) return;
 		this.listed = true;
-		const instance: RegisterInput = {
-			id: this.id,
-			cwd: info.cwd,
-			sessionId: info.sessionId,
-			sessionFile: info.sessionFile,
-			label: info.label,
-			activity: this.activity,
-			pane: info.pane,
-			detail: info.detail,
-			turns: info.turns,
-			createdAt: info.createdAt,
-			finishedAt: info.finishedAt,
-			leafId: info.leafId,
-			dialog: info.dialog,
-			...(info.draft ? { draft: true } : {}),
-			launch: { command: piCommand() },
-		};
+		const instance = { ...info, id: this.id, activity: this.activity, launch: { command: piCommand() } };
 		let watched = false;
 		let wantReport = false;
 		try {
