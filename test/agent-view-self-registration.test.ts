@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { PaneMessage } from "../daemon/ipc/protocol.ts";
-import type { OrchestratorClient, RegisterInput } from "../daemon/orchestrator-client.ts";
+import type { PaneMessage, RegisterRequest } from "../daemon/ipc/protocol.ts";
+import type { OrchestratorClient } from "../daemon/orchestrator-client.ts";
 import { piCommand } from "../daemon/tmux.ts";
 import {
 	deriveLabel,
@@ -94,9 +94,9 @@ describe("deriveLabel (roster title for the foreground session)", () => {
 
 describe("SelfRegistration heartbeats", () => {
 	function fakeClient() {
-		const calls: RegisterInput[] = [];
+		const calls: RegisterRequest["instance"][] = [];
 		const client = {
-			register: async (input: RegisterInput) => {
+			register: async (input: RegisterRequest["instance"]) => {
 				calls.push(input);
 			},
 			unregister: async () => {},
@@ -132,30 +132,18 @@ describe("SelfRegistration heartbeats", () => {
 		expect(calls.length).toBe(1);
 	});
 
-	it("tells the daemon its leaf and how to start another pi like it", async () => {
+	it("sends its session's heartbeat whole, with its id, its activity and how to start another pi like it", async () => {
 		const { client, calls } = fakeClient();
-		const reg = new SelfRegistration(client, () => ({ cwd: "/p", leafId: "e7" }));
+		const heartbeat = {
+			cwd: "/p",
+			leafId: "e7",
+			finishedAt: "2026-10-15T10:00:00.000Z",
+			dialog: { kind: "select", title: "Pick a model" },
+			draft: true,
+		};
+		const reg = new SelfRegistration(client, () => heartbeat, undefined, "pane-1");
 		await reg.refresh();
-		expect(calls.at(-1)).toMatchObject({ leafId: "e7", launch: { command: piCommand() } });
-	});
-
-	it("tells the daemon when its last turn ended and the dialog it waits on", async () => {
-		const { client, calls } = fakeClient();
-		const dialog = { kind: "select", title: "Pick a model" };
-		const reg = new SelfRegistration(client, () => ({ cwd: "/p", finishedAt: "2026-10-15T10:00:00.000Z", dialog }));
-		await reg.refresh();
-		expect(calls.at(-1)).toMatchObject({ finishedAt: "2026-10-15T10:00:00.000Z", dialog });
-	});
-
-	it("tells the daemon while its prompt holds unsent text, which a phone's slash command waits for", async () => {
-		const { client, calls } = fakeClient();
-		let draft = true;
-		const reg = new SelfRegistration(client, () => ({ cwd: "/p", draft }));
-		await reg.refresh();
-		expect(calls.at(-1)).toMatchObject({ draft: true });
-		draft = false;
-		await reg.refresh();
-		expect(calls.at(-1)).not.toHaveProperty("draft");
+		expect(calls.at(-1)).toEqual({ ...heartbeat, id: "pane-1", activity: "idle", launch: { command: piCommand() } });
 	});
 });
 

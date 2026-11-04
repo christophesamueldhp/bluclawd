@@ -3,33 +3,21 @@
  *
  * Self-contained: nothing here extends or depends on a pi type.
  */
+import type { PaneHeartbeat } from "./ipc/protocol.ts";
+
 export type InstanceStatus = "starting" | "online" | "stopping" | "stopped" | "error";
 
-export interface InstanceRecord {
+/** A row: its pane's last heartbeat, or what storage keeps of it (its leaf, dialog and draft are
+ *  never stored), and what the daemon adds. */
+export interface InstanceRecord extends PaneHeartbeat {
 	id: string;
 	status: InstanceStatus;
-	cwd: string;
 	createdAt: string;
 	lastSeenAt?: string;
-	label?: string;
 	/** The name its pane last gave it. A pane's name replaces the row's only once it changes, so a
 	 *  name given to the stopped row survives a resume. */
 	paneLabel?: string;
-	sessionId?: string;
-	sessionFile?: string;
-	/** Agent-view row state (daemon/session-state.ts), persisted so a row survives a restart. */
-	detail?: string;
 	outcome?: "done" | "failed" | "stopped";
-	turns?: number;
-	finishedAt?: string;
 	pinned?: boolean;
 	sortOrder?: number;
-	/** The tmux session an interactive pi runs this session in (agent view's pane mode). */
-	pane?: string;
-	/** A pane's leaf, when it is not its file's last entry; never stored. */
-	leafId?: string;
-	/** The dialog a pane waits on; never stored. */
-	dialog?: { kind: string; title?: string };
-	/** A pane's prompt holds unsent text; never stored. */
-	draft?: boolean;
 }
