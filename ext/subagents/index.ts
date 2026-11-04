@@ -10,7 +10,7 @@ import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
-import { createRunAdmission, formatRunLabel, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
+import { createRunAdmission, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
 import {
 	type AgentDefinitionCatalog,
 	discoverAgentDefinitions,
@@ -22,10 +22,8 @@ import {
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
 	SUBAGENT_MESSAGE_PARAMETERS,
 	SUBAGENT_MESSAGE_TOOL,
-	type SubagentMessage,
 	SubagentMessageBus,
 	subagentMessagePayload,
-	USER_MESSAGE_ADDRESS,
 } from "./messages.ts";
 import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET, shownInPanel } from "./panel.ts";
 import { createParentScope, inParentScope, type ParentInboxItem } from "./parent-scope.ts";
@@ -33,7 +31,7 @@ import type { SubagentResultDetails } from "./results.ts";
 import { describeSubagentModels, runSubagent } from "./runner.ts";
 import { appendSubagentMessageRecord, reconcileInterruptedRuns } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
-import { createTranscriptView } from "./transcript-view.ts";
+import { createTranscriptActions } from "./transcript-actions.ts";
 
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const SUBAGENT_REMINDER_CUSTOM_TYPE = "subagent-reminder";
@@ -254,88 +252,15 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			dismissed: dismissedFromTasks,
 		});
 
-		/** Sends what the user typed in a run's transcript to the run, as the orchestrator's `subagent_message` would. */
-		const messageRunAsUser = async (runId: string, text: string) => {
-			const scope = parentScope.current();
-			const ctx = parentScope.context();
-			const run = scheduler.getRun(runId);
-			const earlier = {
-				queued: false,
-				status: "That run belongs to an earlier session and can no longer take messages.",
-			};
-			if (!run) {
-				return { queued: false, status: `No run ${runId} is known to this session, so it cannot take messages.` };
-			}
-			if (!scope || !ctx || !inParentScope(run, scope)) return earlier;
-			const receipt = await messageFromUser(scope, runId, text, admission, ctx);
-			if (receipt.status !== "accepted") return { queued: false, status: receipt.reason ?? receipt.status };
-			// The session can change while a finishing run is waited for; the note belongs to the one the user wrote in.
-			const after = parentScope.current();
-			if (!after || !inParentScope(scope, after)) return earlier;
-			// The orchestrator still owns the work, so it is told, but not woken: the note is in its next turn's context.
-			try {
-				pi.sendMessage(
-					{
-						customType: SUBAGENT_MESSAGE_CUSTOM_TYPE,
-						content: [{ type: "text", text: `The user messaged run ${formatRunLabel(run)}: ${text}` }],
-						display: true,
-						details: {
-							seq: receipt.seq,
-							from: USER_MESSAGE_ADDRESS,
-							to: runId,
-							toName: run.name,
-							content: text,
-						} satisfies SubagentMessage,
-					},
-					{ deliverAs: "steer", triggerTurn: false },
-				);
-			} catch {
-				// The session was disposed; nobody is left to tell.
-			}
-			return {
-				queued: true,
-				status: receipt.resumed
-					? `Resuming ${run.name ?? runId} with its earlier context; its report goes to the orchestrator.`
-					: `Queued for ${run.name ?? runId}: it reads your message at its next step.`,
-			};
-		};
-
-		/**
-		 * Opens a run's transcript over the orchestrator's screen and resolves once it closes. Only a run of the
-		 * current parent scope opens; any other is refused with a notice and undefined.
-		 */
-		const openTranscript = (runId: string, owner?: string): Promise<void> | undefined => {
-			const ctx = parentScope.context();
-			if (ctx?.mode !== "tui") return undefined;
-			const scope = parentScope.current();
-			const run = scheduler.getRun(runId);
-			if (!run) {
-				ctx.ui.notify(`No run ${runId} is known to this session, so it cannot be opened.`, "warning");
-				return undefined;
-			}
-			if (!scope || !inParentScope(run, scope) || (owner !== undefined && owner !== run.parentSessionId)) {
-				ctx.ui.notify("That run belongs to an earlier session and can no longer be opened.", "warning");
-				return undefined;
-			}
-			return ctx.ui.custom<void>(
-				(tui, theme, _keybindings, done) =>
-					createTranscriptView({
-						tui,
-						theme,
-						cwd: ctx.cwd,
-						title: () => {
-							const current = scheduler.getRun(runId) ?? run;
-							const state = directory.get(runId)?.state === "finishing" ? "finishing" : current.status;
-							return `${current.name ?? runId} · ${current.agentName} · ${current.provider}/${current.modelId} · ${state}`;
-						},
-						source: transcripts.source(runId),
-						expanded: ctx.ui.getToolsExpanded(),
-						send: (text) => messageRunAsUser(runId, text),
-						close: () => done(),
-					}),
-				{ overlay: true, overlayOptions: { width: "100%", maxHeight: "100%" } },
-			);
-		};
+		const { openTranscript } = createTranscriptActions({
+			pi,
+			scope: parentScope,
+			scheduler,
+			directory,
+			transcripts,
+			messageFromUser,
+			admission,
+		});
 
 		// A resumed generation runs under the message call that resumed it, not the first launch.
 		const runLaunchedBy = (toolCallId: string) =>
