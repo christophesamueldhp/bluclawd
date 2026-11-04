@@ -256,11 +256,9 @@ export class ServerSupervisor {
 	claimStart(spec: ResumeSpec): StartClaim {
 		const now = this.deps.now();
 		const file = spec.sessionFile;
-		const running = this.panes().some(
-			(at) =>
-				at.pane.record.sessionFile === file && (!this.isLive(at) || now - at.pane.lastSeenAt <= EXTERNAL_TTL_MS),
-		);
-		if (running) return { ok: false, refused: "running" };
+		// A live pane past its TTL is not reaped here, so when prompts settle does not change, but it is
+		// no longer taken to run the file.
+		if (this.panesOn(file).some((at) => !this.lapsed(at, now))) return { ok: false, refused: "running" };
 		this.expireStarts(now);
 		if ([...this.rows.values()].some((row) => row.start?.record.sessionFile === file)) {
 			return { ok: false, refused: "starting" };
@@ -309,9 +307,24 @@ export class ServerSupervisor {
 		return this.panes().find((at) => at.pane.record.id === paneId);
 	}
 
+	/** The panes on session file `file`, live or silent. */
+	private panesOn(file: string): PaneRow[] {
+		return this.panes().filter((at) => at.pane.record.sessionFile === file);
+	}
+
+	/** The live pane on session file `file`, if any. */
+	private livePaneOn(file: string): PaneRow | undefined {
+		return this.panesOn(file).find((at) => this.isLive(at));
+	}
+
 	/** Whether a pane is its row's live one: the only pane a message is queued for. */
 	private isLive({ row, pane }: PaneRow): boolean {
 		return row.state === "live" && row.pane === pane;
+	}
+
+	/** Whether a live pane's last heartbeat is older than the TTL, so reaping takes it as of `now`. */
+	private lapsed(at: PaneRow, now: number): boolean {
+		return this.isLive(at) && now - at.pane.lastSeenAt > EXTERNAL_TTL_MS;
 	}
 
 	/** The pane `id` addresses: the row's pane, live or silent, or a live pane's own id, unless that
@@ -455,7 +468,7 @@ export class ServerSupervisor {
 			if (!this.isLive(at) && pane && this.tmuxSays(pane) === "gone") this.paneEnded(at);
 		}
 		for (const at of this.panes()) {
-			if (!this.isLive(at) || now - at.pane.lastSeenAt <= EXTERNAL_TTL_MS) continue;
+			if (!this.lapsed(at, now)) continue;
 			const { pane } = at.pane.record;
 			const said = pane ? this.tmuxSays(pane) : "unknown";
 			// The pane runs pi itself, so its pi is gone.
@@ -596,8 +609,7 @@ export class ServerSupervisor {
 			this.tidy(due[0]);
 		}
 		if (deleted) return undefined;
-		const pane = this.panes().find((at) => this.isLive(at) && at.pane.record.sessionFile === options.sessionFile);
-		return this.stopRow(options, pane);
+		return this.stopRow(options, this.livePaneOn(options.sessionFile));
 	}
 
 	private stopRow(
@@ -655,10 +667,9 @@ export class ServerSupervisor {
 		// A pane resuming it, registered or still starting, keeps its pin and order.
 		const meta = paneMeta(stored);
 		if (stored.sessionFile && meta) {
-			const file = stored.sessionFile;
-			const live = this.panes().find((at) => this.isLive(at) && at.pane.record.sessionFile === file);
+			const live = this.livePaneOn(stored.sessionFile);
 			if (live) live.pane.record = { ...live.pane.record, ...meta };
-			else this.mark(stored.id, file, { resumedMeta: meta });
+			else this.mark(stored.id, stored.sessionFile, { resumedMeta: meta });
 		}
 		removeInstance(this.deps.dir, instanceId);
 		return true;
