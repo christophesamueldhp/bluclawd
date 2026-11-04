@@ -234,10 +234,12 @@ function promptIdIn(body: Record<string, unknown>): string | undefined {
 	return id;
 }
 
-/** The prompts a phone asks about, each `prompt=<id>@<lifetime>`; one in another form is not asked. */
+/** The prompts a phone asks about, each `prompt=<id>@<lifetime>`, or `prompt=<id>` for one an older
+ *  phone kept with no lifetime; one in another form is not asked. */
 function waitingIn(url: URL): Waiting[] {
 	return url.searchParams.getAll("prompt").flatMap((asked) => {
 		const at = asked.indexOf("@");
+		if (at < 0) return PROMPT_ID_PATTERN.test(asked) ? [{ id: asked }] : [];
 		const id = asked.slice(0, at);
 		return at > 0 && PROMPT_ID_PATTERN.test(id) ? [{ id, lifetime: asked.slice(at + 1) }] : [];
 	});

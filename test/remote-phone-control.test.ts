@@ -376,6 +376,18 @@ describe("phone control", () => {
 			expect(decide(at("starting"), { type: "prompt", text: "next" })).toEqual(notRunning);
 			expect(decide(at("starting"), { type: "abort" })).toEqual(notRunning);
 		});
+
+		it.each<[string, PhoneAction, PhoneOutcome]>([
+			["a rename", { type: "rename", name: "later" }, operation({ type: "rename", name: "later" })],
+			["a delete", { type: "delete" }, operation({ type: "delete" })],
+			["stopping a task", { type: "stop_task", taskId: "f2" }, error("unknown_task")],
+			["a task's output", { type: "task_output", taskId: "b1" }, error("unknown_task")],
+			["its status", { type: "status" }, error("no_status")],
+			["its commands", { type: "commands" }, error("no_status")],
+		])("answers a starting row as a stored one, which has no pane: %s", (_, action, expected) => {
+			expect(decide(at("starting"), action)).toEqual(expected);
+			expect(decide(at("stored"), action)).toEqual(expected);
+		});
 	});
 
 	describe("a command or `!` line, which goes only into an idle, empty prompt", () => {

@@ -73,10 +73,10 @@ function setup(activeParentSessionId: string | undefined = "sess_main") {
 			});
 		},
 	});
-	const launch = (parentSessionId = "sess_main", taskSummary = "Scan auth") => {
+	const launch = (parentSessionId = "sess_main", taskSummary = "Scan auth", sessionEpoch = 1) => {
 		const admitted = scheduler.admit({
 			parentSessionId,
-			sessionEpoch: 1,
+			sessionEpoch,
 			parentTurnId: "turn_1",
 			originToolCallId: `call_${Math.random().toString(36).slice(2, 8)}`,
 			agentName: "explorer",
@@ -149,8 +149,7 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 
 		expect(source.get(live.runId)).toMatchObject({ id: live.runId, state: "running", status: "starting" });
 		expect(source.get(foreign.runId)).toBeUndefined();
-		// Only the orchestrator's current Parent scope is looked up in memory.
-		expect(source.get(foreign.runId, "sess_other")).toBeUndefined();
+		expect(source.get(foreign.runId, "sess_other")?.id).toBe(foreign.runId);
 		expect(
 			["sub_completed", "sub_failed", "sub_interrupted", "sub_cancelled"].map((id) => {
 				const task = source.get(id);
@@ -180,8 +179,11 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 		const running = launch();
 		const foreign = launch("sess_other");
 		const finished = launch();
-		settle.get(finished.runId)?.({ status: "completed", complete: true, summaryText: "done" });
-		await finished.completion;
+		const earlierEpoch = launch("sess_main", "Scan auth", 0);
+		for (const run of [finished, earlierEpoch]) {
+			settle.get(run.runId)?.({ status: "completed", complete: true, summaryText: "done" });
+			await run.completion;
+		}
 		writePersistedRunRecord(agentDir, persistedRecord({ runId: "sub_earlier", status: "completed" }));
 		writePersistedRunRecord(
 			agentDir,
@@ -194,6 +196,12 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 			ok: false,
 			reason: "not_running",
 			task: { id: finished.runId, status: "completed" },
+		});
+		// The same answer before a restart as after one, when the record is read from disk.
+		expect(source.stop(earlierEpoch.runId)).toMatchObject({
+			ok: false,
+			reason: "not_running",
+			task: { id: earlierEpoch.runId, status: "completed" },
 		});
 		expect(source.stop("sub_earlier")).toMatchObject({
 			ok: false,

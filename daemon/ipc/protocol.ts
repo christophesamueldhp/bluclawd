@@ -35,6 +35,29 @@ export interface PaneHeartbeat {
 	draft?: boolean;
 }
 
+/** Every PaneHeartbeat key: a field added to the type without one here fails the typecheck. */
+const PANE_HEARTBEAT_KEYS = Object.keys({
+	cwd: true,
+	sessionId: true,
+	sessionFile: true,
+	label: true,
+	pane: true,
+	detail: true,
+	turns: true,
+	createdAt: true,
+	finishedAt: true,
+	leafId: true,
+	dialog: true,
+	draft: true,
+} satisfies Record<keyof PaneHeartbeat, true>) as (keyof PaneHeartbeat)[];
+
+/** Only the heartbeat of a wider value (a register request's instance, a stored record): any other key is left. */
+export function pickPaneHeartbeat(from: PaneHeartbeat): PaneHeartbeat {
+	const picked: Partial<Record<keyof PaneHeartbeat, unknown>> = {};
+	for (const key of PANE_HEARTBEAT_KEYS) if (from[key] !== undefined) picked[key] = from[key];
+	return picked as PaneHeartbeat;
+}
+
 /** Register/heartbeat a pane's pi. `launch`: how to start another pi like this one, so the daemon
  *  can start panes. */
 export interface RegisterRequest {

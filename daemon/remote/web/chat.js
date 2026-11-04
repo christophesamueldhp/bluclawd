@@ -16,9 +16,10 @@ import { giveUp, promptKey, sentText, settle, shellLine } from "./live.js";
  * back by. `text`: as the transcript will show it (see promptKey); `prompt`: as typed, `images`:
  * as sent. `before`: the transcript's copies of its text when it was sent. `started`: the session
  * was seen working since. `last`: the transcript's last message when it was sent. `lifetime`: the
- * daemon's, as it answered that it has it, which the daemon is asked about it by. `outcome`: what
- * its pane reported of it, a pane that reports outcomes.
- * @typedef {{ id: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, lifetime?: string, outcome?: "taken" | "queued" }} Pending
+ * daemon's, as it answered that it has it, which the daemon is asked about it by. `acceptedAt`: set
+ * instead by an older phone (0.0.52), which kept no lifetime, once the daemon had it. `outcome`: what its
+ * pane reported of it, a pane that reports outcomes.
+ * @typedef {{ id: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, lifetime?: string, acceptedAt?: number, outcome?: "taken" | "queued" }} Pending
  */
 
 /** A reply's text and thinking, held until a page has its entry. @typedef {{ entryId: string, text: string, thinking?: string }} Held */
@@ -216,12 +217,17 @@ export function settleOutcomes(chat, outcomes) {
 /**
  * The prompts the daemon is asked about: those it accepted that their pane has said nothing of.
  * It answers each with its outcome, or lost when a daemon before a restart accepted it, as only it
- * can tell; one pi took or queued is not sent again.
+ * can tell; one pi took or queued is not sent again. One an older phone kept with no lifetime is
+ * asked about with none, which the daemon answers only while it knows the id.
  * @param {Chat} chat
- * @returns {{ id: string, lifetime: string }[]}
+ * @returns {{ id: string, lifetime?: string }[]}
  */
 export function waitingOn(chat) {
-	return chat.pending.flatMap(({ id, lifetime, outcome }) => (lifetime && !outcome ? [{ id, lifetime }] : []));
+	return chat.pending.flatMap(({ id, lifetime, acceptedAt, outcome }) => {
+		if (outcome) return [];
+		if (lifetime) return [{ id, lifetime }];
+		return acceptedAt === undefined ? [] : [{ id }];
+	});
 }
 
 /**

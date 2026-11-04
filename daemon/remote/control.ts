@@ -16,7 +16,7 @@ import type {
 } from "../ipc/protocol.ts";
 import { START_MS } from "../supervisor.ts";
 import { Tmux } from "../tmux.ts";
-import { PromptDelivery } from "./delivery.ts";
+import type { PromptDelivery } from "./delivery.ts";
 import { type RemoteDeps, type RemoteServer, startRemoteServer } from "./http.ts";
 import { Notifier } from "./notifier.ts";
 import { RemoteStore } from "./pairing.ts";
@@ -42,7 +42,7 @@ export interface RemoteControlDeps {
 	startFailed: RemoteDeps["startFailed"];
 	setPinned: RemoteDeps["setPinned"];
 	/** The supervisor's: where the phone's prompts are tracked, and what their panes report settles. */
-	delivery?: PromptDelivery;
+	delivery: PromptDelivery;
 	statusLine?: RemoteDeps["statusLine"];
 	renderStatusline?: RemoteDeps["renderStatusline"];
 	store?: RemoteStore;
@@ -83,7 +83,7 @@ export class RemoteControl {
 
 	constructor(deps: RemoteControlDeps) {
 		this.deps = deps;
-		this.delivery = deps.delivery ?? new PromptDelivery();
+		this.delivery = deps.delivery;
 		// A pane that ended or fell silent settled some: a phone watching its session is told.
 		this.delivery.changed = (rowId) => this.server?.status(rowId);
 		this.store = deps.store ?? new RemoteStore();

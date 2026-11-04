@@ -30,6 +30,7 @@ import type {
 	WaitRequest,
 	WaitResponse,
 } from "./ipc/protocol.ts";
+import { pickPaneHeartbeat } from "./ipc/protocol.ts";
 import type { RemoteControl } from "./remote/control.ts";
 import type { ServerSupervisor } from "./supervisor.ts";
 import type { InstanceRecord } from "./types.ts";
@@ -40,8 +41,20 @@ function toInstanceSummary(
 	external?: boolean,
 	settled?: number,
 ): InstanceSummary {
-	const { paneLabel: _, ...listed } = instance;
-	return { ...listed, activity, external, settled };
+	const { id, status, createdAt, lastSeenAt, outcome, pinned, sortOrder } = instance;
+	return {
+		...pickPaneHeartbeat(instance),
+		id,
+		status,
+		createdAt,
+		lastSeenAt,
+		outcome,
+		pinned,
+		sortOrder,
+		activity,
+		external,
+		settled,
+	};
 }
 
 /** Below the pane's 30 s request timeout, so a wait is answered rather than given up on. */
@@ -151,9 +164,11 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 
 		case "register": {
 			const now = new Date().toISOString();
-			const { activity, launch, ...heartbeat } = request.instance;
+			const { id, activity, launch } = request.instance;
+			const heartbeat = pickPaneHeartbeat(request.instance);
 			const record: InstanceRecord = {
 				...heartbeat,
+				id,
 				status: "online",
 				createdAt: heartbeat.createdAt ?? now,
 				lastSeenAt: now,

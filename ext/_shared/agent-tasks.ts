@@ -49,7 +49,7 @@ export type AgentTaskStopResult =
 export interface AgentTaskSource {
 	/** The owner's running tasks. */
 	list(owner?: string): AgentTask[];
-	/** A running or finished task; undefined for an unknown id, another owner's, or one of an earlier Parent scope. */
+	/** A running or finished task; undefined for an unknown id or another owner's. */
 	get(id: string, owner?: string): AgentTask | undefined;
 	/** Stops an owned task through `/tasks` or `task_stop`; another owner's task is not found. */
 	stop(id: string, options?: AgentTaskStopOptions): AgentTaskStopResult;

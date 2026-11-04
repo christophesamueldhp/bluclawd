@@ -14,6 +14,10 @@ _Avoid_: job, task (for a subagent's work)
 One launch or one resume of a run. Usage is counted once per generation.
 _Avoid_: generation for the orchestrator's session being reloaded or replaced
 
+**Finishing**:
+A run's status from the child's last turn of a generation, one pi will not retry, until its final record: the work is done but the run is not final yet. It can no longer be stopped, and a message to it waits for it to be final and then resumes it. It ends with the generation's final record.
+_Avoid_: done, ended (before the final record)
+
 **Attribution**:
 Where a generation's usage is counted: in pi's own totals (nested usage the SDK folds into the launch tool result, or the usage a foreground tool result carries) or in the background ledger. Each token is attributed exactly once.
 _Avoid_: reconciling, double counting
@@ -55,6 +59,14 @@ _Avoid_: open session, conversation
 **Phone control**:
 The rules that decide, for one session, whether a Chat's action is allowed and what it becomes: a message for its pane, a change the daemon makes itself (rename a stored session, pin, delete), a read of its transcript or a task's output, its status, the commands it lists, or a refusal with an error code.
 _Avoid_: admission (a run's launch checks), validation
+
+**Chat verdict**:
+Whether a Chat may act on a listed row, and why not, as the daemon lists it with each row: only a live pane's row takes a message for its pi; a Silent pane's, a starting one's or a stored one's does not. Phone control and the phone's list both read it, so the phone never offers what the daemon would refuse.
+_Avoid_: running, alive (a row's pane, not what it takes)
+
+**Daemon lifetime**:
+The marker of one daemon process, given to the phone with each prompt it accepts. Asked about a prompt it has no record of, under an earlier lifetime, the daemon answers lost because it restarted, when the row's pane reports outcomes.
+_Avoid_: build id, version, generation
 
 **Prompt outcome**:
 What became of a prompt or slash command a phone sent, reported back by the id the phone gave it: taken (pi started a turn with it, or Enter was pressed for the command), queued (pi queued it behind the turn in progress), refused with a reason (the pane did not hand it to pi: busy, draft or dialog for a command; compacting; session changed), or lost with a reason (its pane went with it still queued, in its inbox or in pi; pi dropped it from its queue, as a stopped turn, the dequeue key or its session reloading or switching does, or it was queued and never seen in pi's queue by the time pi fell quiet, or its session ended other than by a quit with it queued; or the daemon restarted). A Silent pane loses what is still in its inbox at once, while what pi holds waits on its report. The daemon's prompt delivery keeps each one's journey, from the pane's inbox to the outcome its pane reports, and the phone puts a refused or lost one back in its composer. A pane from an older build reports none, and the phone guesses for it.
