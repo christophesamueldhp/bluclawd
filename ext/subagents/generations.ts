@@ -256,7 +256,10 @@ export function createGenerations(deps: GenerationDeps) {
 	 * Resolves with a generation's envelope once it is final. A background or resumed generation is also sent to
 	 * the orchestrator as a notice, unless the user, the phone or a session change stopped it.
 	 */
-	const deliver = async (handle: AdmittedSubagentHandle): Promise<BuiltSubagentResultEnvelope> => {
+	const deliver = async (
+		handle: AdmittedSubagentHandle,
+		resumedByUser = false,
+	): Promise<BuiltSubagentResultEnvelope> => {
 		const record = await handle.completion;
 		const envelope = buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES);
 		if (
@@ -265,57 +268,52 @@ export function createGenerations(deps: GenerationDeps) {
 			record.stopSource !== "remote" &&
 			record.stopSource !== "session_invalidated"
 		) {
-			deps.scope.notify(record, { parentText: envelope.parentText, details: envelope.details });
+			const parentText = resumedByUser
+				? `[Resumed by the user from its transcript; this generation answers the user's message.]\n\n${envelope.parentText}`
+				: envelope.parentText;
+			deps.scope.notify(record, { parentText, details: envelope.details });
 		}
 		return envelope;
 	};
 
+	/**
+	 * Admits a completed run's next generation with `content` from `from` as its prompt, and delivers its report
+	 * once it is final. Resolves with the receipt, or the refusal and its reason.
+	 */
 	const resumeRun = async (
 		run: Readonly<SubagentRunRecord>,
+		from: typeof PARENT_MESSAGE_ADDRESS | typeof USER_MESSAGE_ADDRESS,
 		toolCallId: string,
 		content: string,
 		scope: ParentScope,
 		admission: Pick<RunAdmission, "resume">,
 		ctx: AdmissionContext,
-	) => {
+	): Promise<SubagentMessageReceipt> => {
 		let receipt: SubagentMessageReceipt | undefined;
 		const resumed = await admission.resume(
 			run,
 			toolCallId,
 			() => {
-				receipt = deps.bus.accept({ address: PARENT_MESSAGE_ADDRESS, scope }, run.runId, run.name);
-				return subagentMessagePayload({
-					seq: receipt.seq,
-					from: PARENT_MESSAGE_ADDRESS,
-					to: run.runId,
-					toName: run.name,
-					content,
-				}).content[0].text;
+				receipt = deps.bus.accept({ address: from, scope }, run.runId, run.name);
+				return subagentMessagePayload({ seq: receipt.seq, from, to: run.runId, toName: run.name, content })
+					.content[0].text;
 			},
 			ctx,
 		);
 		if (!resumed.ok) {
-			return formatMessageReceipt({
+			return {
 				status: resumed.refusal ?? "unavailable",
 				seq: 0,
 				to: run.runId,
 				toName: run.name,
 				reason: resumed.error,
-			});
+			};
 		}
+		// No tool result carries a user resume to the orchestrator, so its nested usage counts from the start.
+		if (from === USER_MESSAGE_ADDRESS) scheduler.launchResultEmitted(run.runId);
+		void deliver(resumed.handle, from === USER_MESSAGE_ADDRESS);
 		// A resume is admitted only after buildPrompt ran, so the receipt is set.
-		const accepted = receipt!;
-		const label = formatRunLabel(run);
-		void deliver(resumed.handle);
-		return {
-			...formatMessageReceipt(accepted),
-			content: [
-				{
-					type: "text" as const,
-					text: `Message ${accepted.seq} accepted: resuming ${label} in the background with its earlier context. Its report will be delivered when it finishes.`,
-				},
-			],
-		};
+		return receipt!;
 	};
 
 	/**
@@ -335,20 +333,42 @@ export function createGenerations(deps: GenerationDeps) {
 			await scheduler.whenFinal(found.record.runId);
 			found = directory.get(found.record.runId);
 		}
-		if (found?.state === "finished" && ctx)
-			return resumeRun(found.record, toolCallId, content, scope, admission, ctx);
+		if (found?.state === "finished" && ctx) {
+			const receipt = await resumeRun(
+				found.record,
+				PARENT_MESSAGE_ADDRESS,
+				toolCallId,
+				content,
+				scope,
+				admission,
+				ctx,
+			);
+			if (receipt.status !== "accepted") return formatMessageReceipt(receipt);
+			return {
+				...formatMessageReceipt(receipt),
+				content: [
+					{
+						type: "text" as const,
+						text: `Message ${receipt.seq} accepted: resuming ${formatRunLabel(found.record)} in the background with its earlier context. Its report will be delivered when it finishes.`,
+					},
+				],
+			};
+		}
 		return formatMessageReceipt(await deps.bus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, content));
 	};
 
 	/**
 	 * A message the user typed in a run's transcript. A running run takes it at its next safe point, through the
-	 * bus like the orchestrator's; a final run is refused with the reason, once a finishing one is final.
+	 * bus like the orchestrator's; a completed run resumes through the same admission as the orchestrator's
+	 * resume, once a finishing one is final; any other final run is refused with the reason.
 	 */
 	const messageFromUser = async (
 		scope: ParentScope,
 		runId: string,
 		content: string,
-	): Promise<SubagentMessageReceipt> => {
+		admission: Pick<RunAdmission, "resume">,
+		ctx: Omit<AdmissionContext, "executeTool">,
+	): Promise<SubagentMessageReceipt & { resumed?: true }> => {
 		let found = directory.get(runId);
 		if (found?.state === "finishing") {
 			await scheduler.whenFinal(runId);
@@ -356,14 +376,20 @@ export function createGenerations(deps: GenerationDeps) {
 		}
 		if (found?.state !== "finished") return deps.bus.send({ address: USER_MESSAGE_ADDRESS, scope }, runId, content);
 		const { record } = found;
+		if (record.status === "completed") {
+			// No tool call of the orchestrator's carries the user's resume, so the child's tools keep running through
+			// the call its earlier generation ran under, whose id still identifies the run for nested-call checks.
+			const previous = scheduler.getContext(runId);
+			const toolCtx: AdmissionContext = Object.create(ctx, { executeTool: { value: previous?.parent.executeTool } });
+			const toolCallId = previous?.resume?.toolCallId ?? record.originToolCallId;
+			const receipt = await resumeRun(record, USER_MESSAGE_ADDRESS, toolCallId, content, scope, admission, toolCtx);
+			return receipt.status === "accepted" ? { ...receipt, resumed: true } : receipt;
+		}
 		const label = record.name ?? record.runId;
-		// Resuming a completed run from its transcript (#160) belongs here.
 		const reason =
-			record.status === "completed"
-				? `${label} has finished; resuming it from its transcript is not available yet.`
-				: record.status === "cancelled"
-					? `${label} was stopped and cannot take messages.`
-					: `${label} ${record.status === "failed" ? "failed" : "was interrupted"} and cannot take messages.`;
+			record.status === "cancelled"
+				? `${label} was stopped and cannot take messages.`
+				: `${label} ${record.status === "failed" ? "failed" : "was interrupted"} and cannot take messages.`;
 		return { status: "unavailable", seq: 0, to: runId, toName: record.name, reason };
 	};
 

@@ -254,16 +254,18 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		/** Sends what the user typed in a run's transcript to the run, as the orchestrator's `subagent_message` would. */
 		const messageRunAsUser = async (runId: string, text: string) => {
 			const scope = parentScope.current();
+			const ctx = parentScope.context();
 			const run = scheduler.getRun(runId);
 			if (
 				!scope ||
+				!ctx ||
 				!run ||
 				run.parentSessionId !== scope.parentSessionId ||
 				run.sessionEpoch !== scope.sessionEpoch
 			) {
 				return { queued: false, status: "That run belongs to an earlier session and can no longer take messages." };
 			}
-			const receipt = await messageFromUser(scope, runId, text);
+			const receipt = await messageFromUser(scope, runId, text, admission, ctx);
 			if (receipt.status !== "accepted") return { queued: false, status: receipt.reason ?? receipt.status };
 			// The orchestrator still owns the work, so it is told, but not woken: the note is in its next turn's context.
 			try {
@@ -285,7 +287,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			} catch {
 				// The session was disposed; nobody is left to tell.
 			}
-			return { queued: true, status: `Queued for ${run.name ?? runId}: it reads your message at its next step.` };
+			return {
+				queued: true,
+				status: receipt.resumed
+					? `Resuming ${run.name ?? runId} with its earlier context; its report goes to the orchestrator.`
+					: `Queued for ${run.name ?? runId}: it reads your message at its next step.`,
+			};
 		};
 
 		/**

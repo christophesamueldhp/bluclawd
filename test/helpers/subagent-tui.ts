@@ -78,6 +78,8 @@ export async function createSubagentTui(
 		extensions?: ExtensionFactory[];
 		/** Extensions loaded before subagents, whose key listeners see each key first. */
 		extensionsBefore?: ExtensionFactory[];
+		/** Tools the orchestrator has besides the subagent tools, and can give its runs. */
+		extraTools?: Parameters<typeof createParentSessionWithSubagents>[0]["extraTools"];
 		batchWindowMs?: number;
 	} = {},
 ) {
@@ -204,6 +206,7 @@ export async function createSubagentTui(
 		agentDir,
 		extensions: options.extensions,
 		extensionsBefore: options.extensionsBefore,
+		extraTools: options.extraTools,
 		batchWindowMs: options.batchWindowMs ?? 15,
 		now: () => Date.now() + offset,
 	});
