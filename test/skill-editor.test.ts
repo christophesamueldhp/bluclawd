@@ -5,8 +5,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CombinedAutocompleteProvider, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { PasteEditor } from "../ext/paste/index.ts";
-import { attachSkills } from "../ext/skills/editor.ts";
 import { attachSuggestions } from "../ext/prompt-assist/editor.ts";
+import { attachSkills } from "../ext/skills/editor.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 const skill: ReturnType<ExtensionAPI["getCommands"]>[number] = {
@@ -82,6 +82,21 @@ describe("terminal skill selection", () => {
 		expect(rendered(editor, 240)).toContain("/skill:review");
 		editor.handleInput("\r");
 		expect(editor.getText()).toBe("please [Skill #1: review]");
+	});
+
+	it("keeps Tab completion for an inline absolute directory path", async () => {
+		const { editor } = composer();
+		const directory = `/${tmpdir().split("/")[1]}/`;
+		const draft = `read ${directory.slice(0, -1)}`;
+		editor.setText(draft);
+		editor.handleInput("\t");
+		await waitFor(() => expect(editor.getText() !== draft || editor.isShowingAutocomplete()).toBe(true));
+		if (editor.isShowingAutocomplete()) {
+			expect(rendered(editor, 240)).toContain(directory);
+			editor.handleInput("\t");
+		}
+		expect(editor.getText()).toBe(`read ${directory}`);
+		expect(rendered(editor)).not.toContain("Selected skill");
 	});
 
 	it("selects in a later line without replacing surrounding text and shows discovered provenance", async () => {
