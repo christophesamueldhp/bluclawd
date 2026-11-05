@@ -45,19 +45,21 @@ function harness(choices: (string | undefined)[] = []) {
 	} as unknown as ExtensionAPI);
 	const ctx = {
 		hasUI: true,
-		mode: "tui",
+		mode: "tui" as "tui" | "rpc",
 		cwd: "/test",
 		isIdle: vi.fn(() => true),
 		ui: {
 			select: vi.fn(async () => choices.shift()),
 			input: vi.fn(async () => "New account"),
 			confirm: vi.fn(async () => true),
+			custom: vi.fn(async () => undefined),
 			notify: vi.fn(),
 		},
 		modelRegistry: {
 			getAll: () => [{ provider: "example" }],
 			getRegisteredProviderIds: () => ["example"],
 			getProvider: (id: string) => (id === "example" ? provider : undefined),
+			getAvailable: () => [],
 			refresh: vi.fn(async () => ({ errors: new Map(), aborted: false })),
 		},
 	};
@@ -79,8 +81,9 @@ beforeEach(() => {
 });
 
 describe("/accounts", () => {
-	it("lists extension providers and opens the selected provider", async () => {
+	it("lists extension providers and opens the selected provider in RPC", async () => {
 		const { ctx, run } = harness(["Example (example)", "Back"]);
+		ctx.mode = "rpc";
 		await run("");
 		expect(ctx.ui.select.mock.calls[0]).toEqual(["Accounts — choose a provider", ["Example (example)"]]);
 		expect(mocks.list).toHaveBeenCalledWith("example");
