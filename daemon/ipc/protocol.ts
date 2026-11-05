@@ -111,6 +111,19 @@ export interface SessionMessage {
 	from: string;
 	name?: string;
 	text: string;
+	/** On a report: the run's session usage so far, as pi totals it. Each report repeats the whole total. */
+	usage?: SessionUsage;
+}
+
+/** A session's tokens and cost. */
+export interface SessionUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	totalTokens: number;
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+	hasUnknownCost: boolean;
 }
 
 /** Queue a message for a self-registered session. */

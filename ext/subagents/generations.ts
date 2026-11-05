@@ -37,6 +37,7 @@ import {
 	appendParentRunReference,
 	ensureRunStorageDir,
 	recordBackgroundUsageInLedger,
+	recordRunSessionUsage,
 	writeFullSubagentReport,
 	writePersistedRunRecord,
 } from "./storage.ts";
@@ -169,7 +170,9 @@ export function createGenerations(deps: GenerationDeps) {
 			if (!reportRes.ok) throw new Error(reportRes.error);
 			record.reportPath = reportRes.reportPath;
 			if (record.deliveryMode === "background") record.backgroundDeliveryAttempted = true;
-			if (record.usageAttribution === "ledger") recordBackgroundUsageInLedger(agentDir, record);
+			// A run in tmux counts its usage in its own session, which its Reports carry to the ledger.
+			if (record.usageAttribution === "ledger" && scheduler.getContext(record.runId)?.runtime !== "tmux")
+				recordBackgroundUsageInLedger(agentDir, record);
 			const recordRes = writePersistedRunRecord(agentDir, record);
 			if (!recordRes.ok) throw new Error(recordRes.error);
 			if (deps.scope.inScope(record)) {
@@ -213,6 +216,7 @@ export function createGenerations(deps: GenerationDeps) {
 								details: buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).details,
 							});
 						},
+						usage: (totals) => recordRunSessionUsage(deps.agentDir(), params.record, totals),
 					});
 				} finally {
 					deps.bus.unregister(runId, "has been stopped");

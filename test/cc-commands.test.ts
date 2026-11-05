@@ -16,7 +16,7 @@ describe("/status report", () => {
 			},
 			plain,
 		);
-		expect(lines).toContain("Background subagents");
+		expect(lines).toContain("Subagents");
 		expect(lines).toContain("2 runs, 400 tokens, cost unknown — excluded from /session totals");
 	});
 
