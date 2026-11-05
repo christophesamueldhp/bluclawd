@@ -132,6 +132,15 @@ describe("! in agent view's composer", () => {
 		expect(text()).toContain("a shell command takes no reply");
 	});
 
+	it("? leaves shift+↑↓ out of the grid, as a command keeps no order", async () => {
+		const { view, text, flush } = setup([shell()]);
+		await view.onShow();
+		await flush();
+		view.handleInput("?");
+		expect(text()).toContain("? to close");
+		expect(text()).not.toContain("shift+↑↓");
+	});
+
 	it("ctrl+x stops a running command and keeps its row; a second press removes it", async () => {
 		const { view, calls, flush } = setup([shell()]);
 		await view.onShow();

@@ -2063,7 +2063,7 @@ export class AgentView implements Component, Focusable {
 		);
 		const opt = process.platform === "darwin" ? "opt" : "alt";
 		const items = [
-			...(row && (this.viewMode === "directory" || row.pinned) ? ["shift+↑↓ to reorder"] : []),
+			...(row && !row.shell ? ["shift+↑↓ to reorder"] : []),
 			...(row ? ["ctrl+r to rename"] : []),
 			"ctrl+f to find",
 			`${opt}+↑/↓ to jump groups`,
