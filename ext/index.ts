@@ -17,16 +17,19 @@
  * it — keep it first — and sandbox, which comes right after it.
  */
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import accounts from "./accounts/index.ts";
 import agentView from "./agent-view/index.ts";
 import backgroundBash from "./background-bash/index.ts";
 import branding from "./branding/index.ts";
 import checkpoints from "./checkpoints/index.ts";
 import help from "./help/index.ts";
+import memory from "./memory/index.ts";
 import paste from "./paste/index.ts";
 import permissions from "./permissions/index.ts";
 import promptAssist from "./prompt-assist/index.ts";
 import remote from "./remote/index.ts";
 import sandbox from "./sandbox/index.ts";
+import skills from "./skills/index.ts";
 import subagents from "./subagents/index.ts";
 import vibes from "./vibes/index.ts";
 import web from "./web/index.ts";
@@ -44,7 +47,10 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "help", factory: help },
 		{ name: "vibes", factory: vibes },
 		{ name: "paste", factory: paste },
+		{ name: "skills", factory: skills },
 		{ name: "prompt-assist", factory: promptAssist },
 		{ name: "web", factory: web },
+		{ name: "memory", factory: memory },
+		{ name: "accounts", factory: accounts },
 	];
 }
