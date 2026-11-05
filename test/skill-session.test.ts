@@ -210,6 +210,63 @@ describe("explicit terminal skills in a real session", () => {
 		);
 	});
 
+	it("loads several multiline selections in selection order rather than prompt or alphabetical order", async () => {
+		const c = await composer();
+		c.editor.handleInput("Discuss /skill:plan; ");
+		await choose(c.editor, "review");
+		c.editor.handleInput(" at the end");
+		c.editor.handleInput("\x01");
+		await choose(c.editor, "plan");
+		c.editor.handleInput(" first, ");
+		c.editor.handleInput("\x05");
+		c.editor.handleInput("\n");
+		c.editor.handleInput("Then ");
+		await choose(c.editor, "review");
+		c.editor.handleInput(" alongside ");
+		await choose(c.editor, "plan");
+		c.editor.handleInput("\x1b[200~ and literal /skill:review.\x1b[201~");
+		await c.submit();
+		expect(c.lastText()).toBe(
+			`${block("review", c.paths.review)}\n\n${block("plan", c.paths.plan)}\n\n/skill:plan first, Discuss /skill:plan; /skill:review at the end\nThen /skill:review alongside /skill:plan and literal /skill:review.`,
+		);
+		expect(c.requests).toHaveLength(1);
+		expect(c.requests[0].messages.filter((message) => message.role === "user")).toHaveLength(1);
+	});
+
+	it.each(["last duplicate", "all duplicates"])(
+		"loads only remaining selections after removing %s from a mixed multiline draft",
+		async (removed) => {
+			const c = await composer();
+			c.editor.handleInput("/skill:plan is literal; ");
+			await choose(c.editor, "plan");
+			c.editor.handleInput(" with ");
+			await choose(c.editor, "review");
+			c.editor.handleInput("\n");
+			c.editor.handleInput("repeat ");
+			await choose(c.editor, "plan");
+			c.editor.handleInput("\x7f");
+			if (removed === "all duplicates") {
+				c.editor.handleInput("\x01");
+				c.editor.handleInput("\x1b[D");
+				c.editor.handleInput("\x1b[D");
+				for (let i = 0; i < 6; i++) c.editor.handleInput("\x1b[D");
+				c.editor.handleInput("\x7f");
+			}
+			c.editor.handleInput("edited");
+			await c.submit();
+			const instructions =
+				removed === "all duplicates"
+					? block("review", c.paths.review)
+					: `${block("plan", c.paths.plan)}\n\n${block("review", c.paths.review)}`;
+			const request =
+				removed === "all duplicates"
+					? "/skill:plan is literal; edited with /skill:review\nrepeat"
+					: "/skill:plan is literal; /skill:plan with /skill:review\nrepeat edited";
+			expect(c.lastText()).toBe(`${instructions}\n\n${request}`);
+			expect(c.requests).toHaveLength(1);
+		},
+	);
+
 	it("keeps the selection when inserting text before and after it", async () => {
 		const c = await composer();
 		await choose(c.editor);
