@@ -7,7 +7,7 @@ An extension pack for the pi coding agent: a sandboxed shell, background session
 ### Subagents
 
 **Run**:
-One delegated piece of work by a subagent: a pi session of its own that the orchestrator which launched it starts, messages, stops and closes, with its own identity, transcript and reports. A run lives through one or more generations. It is reached from its orchestrator, not listed in agent view or on the phone.
+One delegated piece of work by a subagent: a pi session of its own that the orchestrator which launched it starts, messages, stops and closes, with its own identity, transcript and reports. A run lives through one or more generations. It is reached from its orchestrator: in agent view its row is folded under the orchestrator's, and goes when that row is deleted; the phone does not list it.
 _Avoid_: job, task (for a subagent's work), teammate
 
 **Report**:

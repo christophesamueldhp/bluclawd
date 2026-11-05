@@ -1,4 +1,8 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { loadInstances, saveInstances } from "../daemon/storage.ts";
 import type { InstanceRecord } from "../daemon/types.ts";
 import { testRegistry } from "./helpers/registry.ts";
 
@@ -240,5 +244,66 @@ describe("a run whose orchestrator's pane is gone", () => {
 		});
 		supervisor.registerExternal({ ...rec("pi-r"), pane: "pi-r", parent: "pi-o" }, "idle");
 		expect(ended).toEqual([]);
+	});
+});
+
+describe("a run's row", () => {
+	/** The orchestrator's pane `pi-o` and its open run `pi-r`, with a run it closed stored, on a tmux
+	 *  that has every pane in `up`. */
+	function fixture() {
+		const dir = mkdtempSync(join(tmpdir(), "bluclawd-runs-"));
+		const up = new Set(["pi-o", "pi-r"]);
+		const ended: string[] = [];
+		const supervisor = testRegistry(dir, undefined, {
+			hasSession: (name) => up.has(name),
+			end: (name) => {
+				ended.push(name);
+				up.delete(name);
+			},
+		});
+		const runFile = join(dir, "run.jsonl");
+		writeFileSync(runFile, "");
+		saveInstances(dir, [
+			{ id: "closed", status: "stopped", cwd: "/p", createdAt: "2026-01-01T00:00:00Z", parent: "pi-o" },
+		]);
+		supervisor.registerExternal({ ...rec("pi-o"), pane: "pi-o" }, "idle");
+		supervisor.registerExternal({ ...rec("pi-r"), pane: "pi-r", parent: "pi-o", sessionFile: runFile }, "idle");
+		const ids = () => [
+			...supervisor.listExternalInstances().map(({ record }) => record.id),
+			...supervisor.listInstances().map((i) => i.id),
+		];
+		return { dir, up, ended, supervisor, ids, runFile };
+	}
+
+	it("goes with its orchestrator's row, and its pi ends", () => {
+		const { ended, supervisor, ids } = fixture();
+		expect(ids().sort()).toEqual(["closed", "pi-o", "pi-r"]);
+		expect(supervisor.deleteInstance("pi-o")).toBe(true);
+		expect(ended).toEqual(["pi-r"]);
+		expect(ids()).toEqual([]);
+	});
+
+	it("is not saved again by its pi's quit once deleted with its orchestrator", () => {
+		const { supervisor, ids, runFile } = fixture();
+		supervisor.deleteInstance("pi-o");
+		supervisor.saveInstance({ cwd: "/p", sessionFile: runFile, parent: "pi-o" });
+		expect(ids()).toEqual([]);
+	});
+
+	it("stored, goes once tmux no longer has its orchestrator's pane", () => {
+		const { dir, up, supervisor } = fixture();
+		saveInstances(dir, [
+			...loadInstances(dir),
+			{ id: "orphan", status: "stopped", cwd: "/p", createdAt: "2026-01-01T00:00:00Z", parent: "pi-gone" },
+		]);
+		expect(supervisor.listInstances().map((i) => i.id)).toEqual(["closed"]);
+		expect(loadInstances(dir).map((i) => i.id)).not.toContain("orphan");
+		// A Silent orchestrator's tmux still has its pane: the rows of its runs stay.
+		up.add("pi-silent");
+		saveInstances(dir, [
+			...loadInstances(dir),
+			{ id: "held", status: "stopped", cwd: "/p", createdAt: "2026-01-01T00:00:00Z", parent: "pi-silent" },
+		]);
+		expect(supervisor.listInstances().map((i) => i.id)).toEqual(["closed", "held"]);
 	});
 });

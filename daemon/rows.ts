@@ -163,6 +163,19 @@ export function collectRows(instances: InstanceSummary[], self: InstanceSummary 
 	});
 }
 
+/** Agent view's open runs, by the id of their orchestrator's row in `rows`: a run whose
+ *  orchestrator is not listed there, or whose pi is closed, is left out. */
+export function collectRuns(instances: InstanceSummary[], rows: AgentRow[]): Map<string, AgentRow[]> {
+	const owners = new Map(rows.flatMap((row) => (row.pane && row.alive ? [[row.pane, row.id]] : [])));
+	const runs = new Map<string, AgentRow[]>();
+	for (const instance of instances) {
+		const owner = instance.parent && owners.get(instance.parent);
+		const run = owner ? rowFromSummary(instance, undefined) : undefined;
+		if (owner && run?.alive) runs.set(owner, [...(runs.get(owner) ?? []), run]);
+	}
+	return runs;
+}
+
 export type ViewMode = "state" | "directory";
 
 export interface Band {

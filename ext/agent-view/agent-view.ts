@@ -41,6 +41,7 @@ import {
 	type Band,
 	buildBands,
 	collectRows,
+	collectRuns,
 	compactAge,
 	countRows,
 	livePanesWarning,
@@ -116,8 +117,10 @@ export interface AgentViewOptions {
 
 type Item =
 	| { kind: "header"; key: string; band: Band }
-	| { kind: "row"; key: string; band: Band; row: AgentRow }
-	| { kind: "more"; key: string; band: Band; hidden: number };
+	| { kind: "row"; key: string; band: Band; row: AgentRow; run?: true }
+	| { kind: "more"; key: string; band: Band; hidden: number }
+	/** The line under an orchestrator's row that shows or hides its runs. */
+	| { kind: "runs"; key: string; band: Band; row: AgentRow; count: number };
 
 type Mode = "list" | "peek" | "rename" | "resume" | "help" | "model";
 
@@ -260,6 +263,9 @@ export class AgentView implements Component, Focusable {
 	private viewMode: ViewMode;
 	private readonly collapsed = new Set<string>();
 	private readonly expanded = new Set<string>();
+	/** Each orchestrator's open runs, by its row's id; they show only under the rows in `openRuns`. */
+	private runs = new Map<string, AgentRow[]>();
+	private readonly openRuns = new Set<string>();
 	private armed: { key: string; timer: ReturnType<typeof setTimeout> } | undefined;
 	private ctrlCArmedAt = 0;
 	/** Shown in the footer's hint slot until the composer changes or the focus moves, as bluclawd's are. */
@@ -573,6 +579,7 @@ export class AgentView implements Component, Focusable {
 			? this.instances.map((i) => (order.has(i.id) ? { ...i, sortOrder: order.get(i.id) } : i))
 			: this.instances;
 		this.allRows = [...collectRows(instances, this.opts.self?.()), ...this.shells.map(rowFromShell)];
+		this.runs = collectRuns(instances, this.allRows);
 		const text = this.composerText();
 		const filter = queryFilter(text);
 		this.rows = filter ? this.allRows.filter(filter) : this.allRows;
@@ -647,14 +654,24 @@ export class AgentView implements Component, Focusable {
 			if (band.key === "idle" && !this.expanded.has(band.key)) {
 				const shown = this.foldAt(rows, doneCap);
 				if (shown < rows.length) {
-					for (const row of rows.slice(0, shown)) items.push({ kind: "row", key: row.id, band, row });
+					for (const row of rows.slice(0, shown)) this.pushRow(items, band, row);
 					items.push({ kind: "more", key: `more:${band.key}`, band, hidden: rows.length - shown });
 					continue;
 				}
 			}
-			for (const row of rows) items.push({ kind: "row", key: row.id, band, row });
+			for (const row of rows) this.pushRow(items, band, row);
 		}
 		return items;
+	}
+
+	/** A row, then the line of its runs if it has any, and the runs once that line is opened. */
+	private pushRow(items: Item[], band: Band, row: AgentRow): void {
+		items.push({ kind: "row", key: row.id, band, row });
+		const runs = this.runs.get(row.id);
+		if (!runs) return;
+		items.push({ kind: "runs", key: `runs:${row.id}`, band, row, count: runs.length });
+		if (this.openRuns.has(row.id))
+			for (const run of runs) items.push({ kind: "row", key: run.id, band, row: run, run: true });
 	}
 
 	/** How many Idle rows show before the fold; all of them when it would not fold. */
@@ -671,7 +688,9 @@ export class AgentView implements Component, Focusable {
 	}
 
 	private syncSpinner(): void {
-		const spinning = !!this.opening || this.rows.some((row) => row.state === "working" && row.alive);
+		const spinning =
+			!!this.opening ||
+			[...this.rows, ...[...this.runs.values()].flat()].some((row) => row.state === "working" && row.alive);
 		if (spinning && !this.spinTimer && !this.closed) {
 			this.spinTimer = setInterval(() => {
 				this.frame = (this.frame + 1) % SPINNER.length;
@@ -890,7 +909,7 @@ export class AgentView implements Component, Focusable {
 	 *  press (within 2s) deletes. */
 	private async stopOrDelete(): Promise<void> {
 		const item = this.selected;
-		if (!item || item.kind === "more") return;
+		if (!item || item.kind === "more" || item.kind === "runs") return;
 		if (item.kind === "header") {
 			const targets = bandTargets(item.band.rows);
 			if (targets.length === 0 || this.composing()) return;
@@ -1700,6 +1719,9 @@ export class AgentView implements Component, Focusable {
 		if (item.kind === "more") {
 			this.expanded.add(item.band.key);
 			this.recompute();
+		} else if (item.kind === "runs") {
+			if (!this.openRuns.delete(item.row.id)) this.openRuns.add(item.row.id);
+			this.recompute();
 		} else if (item.kind === "header") {
 			if (this.onboarding || queryFilter(text)) return;
 			if (this.collapsed.has(item.band.key)) this.collapsed.delete(item.band.key);
@@ -1807,8 +1829,17 @@ export class AgentView implements Component, Focusable {
 		return text ? `${lead}${cc.fg("muted", ` · ${text}`)}` : lead;
 	}
 
-	private renderRow(row: AgentRow, width: number, labelWidth: number, ageWidth: number, focused: boolean): string {
-		const pad = width >= 120 ? " " : "";
+	private renderRow(
+		row: AgentRow,
+		width: number,
+		rowLabelWidth: number,
+		ageWidth: number,
+		focused: boolean,
+		run?: true,
+	): string {
+		// A run is indented under its orchestrator, its columns still in line.
+		const pad = `${width >= 120 ? " " : ""}${run ? "  " : ""}`;
+		const labelWidth = run ? Math.max(1, rowLabelWidth - 2) : rowLabelWidth;
 		let name = truncateToWidth(clean(row.label), labelWidth, "…");
 		if (this.mode === "rename" && focused) {
 			const line = (this.renameInput.render(labelWidth + 2)[0] ?? "").replace(/^> /, "");
@@ -1884,14 +1915,17 @@ export class AgentView implements Component, Focusable {
 			}
 			first = false;
 			if (focused) focusLine = lines.length;
-			if (item.kind === "more") {
-				const text = `${width >= 120 ? " " : ""}… ${item.hidden} more`;
+			if (item.kind === "more" || item.kind === "runs") {
+				const text =
+					item.kind === "more"
+						? `${width >= 120 ? " " : ""}… ${item.hidden} more`
+						: `${width >= 120 ? " " : ""}  ${this.openRuns.has(item.row.id) ? "▾" : "▸"} ${item.count} subagent${item.count === 1 ? "" : "s"}`;
 				lines.push(
 					focused && !this.composing()
 						? cc.bg("userMessageBg", cc.fg("text", text.padEnd(width)))
 						: cc.fg("muted", text),
 				);
-			} else lines.push(this.renderRow(item.row, width, labelWidth, ageWidth, focused));
+			} else lines.push(this.renderRow(item.row, width, labelWidth, ageWidth, focused, item.run));
 		}
 		return { lines, focusLine };
 	}
@@ -2108,6 +2142,9 @@ export class AgentView implements Component, Focusable {
 					? `enter to ${this.collapsed.has(item.band.key) ? "expand" : "collapse"}`
 					: undefined,
 				item?.kind === "more" && !text ? "enter to show all" : undefined,
+				item?.kind === "runs" && !text
+					? `enter to ${this.openRuns.has(item.row.id) ? "hide" : "show"} subagents`
+					: undefined,
 				text ? "esc to clear" : "? for shortcuts",
 			],
 			this.opts.mode,
