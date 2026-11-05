@@ -7,7 +7,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, vi } from "vitest";
 import { type InstanceSummary, OrchestratorClient, piPackageRoot } from "../../daemon/orchestrator-client.ts";
@@ -41,6 +41,25 @@ export interface FauxRequest {
 	model: string;
 	reasoning?: string;
 	messages: FauxMessage[];
+}
+
+/** Kills each process, if it still runs. */
+function killAll(pids: number[]): void {
+	for (const pid of pids) {
+		try {
+			process.kill(pid, "SIGKILL");
+		} catch {
+			// gone already
+		}
+	}
+}
+
+/** The pis' hand-offs of sessions kept under `base` that still run. */
+function handOffs(base: string): number[] {
+	return spawnSync("ps", ["-ax", "-o", "pid=,command="], { encoding: "utf8" })
+		.stdout.split("\n")
+		.filter((line) => line.includes("hand-off.ts") && line.includes(basename(base)))
+		.map((line) => Number.parseInt(line, 10));
 }
 
 function textOf(content: FauxMessage["content"]): string {
@@ -184,10 +203,20 @@ export async function startRealPi(options: { extensions?: string[] } = {}): Prom
 				.stdout.split("\n")
 				.find(Boolean),
 		stop: async () => {
-			await client.shutdownDaemon();
+			const pis = spawnSync("tmux", ["-S", tmux.socket, "list-panes", "-a", "-F", "#{pane_pid}"], {
+				encoding: "utf8",
+			})
+				.stdout.split("\n")
+				.filter(Boolean)
+				.map(Number);
+			// A hung-up pi hands its session to the daemon once it has exited (hand-off.ts), starting a daemon if
+			// none runs, which would outlive the test. Killed outright, a pi hands nothing off; a hand-off from a
+			// run closed earlier is killed before the daemon goes.
+			killAll(pis);
 			spawnSync("tmux", ["-S", tmux.socket, "kill-server"]);
 			spawnSync("tmux", ["-S", terminal, "kill-server"]);
-			// A pi hung up by the kill may still be writing its last records.
+			killAll(handOffs(base));
+			await client.shutdownDaemon();
 			rmSync(base, { recursive: true, force: true, maxRetries: 10 });
 		},
 	};
