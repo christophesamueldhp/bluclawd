@@ -935,6 +935,8 @@ export class AgentView implements Component, Focusable {
 		const row = item.row;
 		if (!deletable(row)) return;
 		if (this.armed?.key === row.id) {
+			// A run is closed, never deleted: its row goes with its orchestrator's.
+			if (item.run) return;
 			this.disarm();
 			const outcome = await this.actions.delete(row, {
 				leaving: () => {
@@ -1811,7 +1813,7 @@ export class AgentView implements Component, Focusable {
 		);
 	}
 
-	private rowDetail(row: AgentRow): string {
+	private rowDetail(row: AgentRow, run?: true): string {
 		if (this.opening === row.id)
 			return cc.fg(
 				"muted",
@@ -1820,6 +1822,7 @@ export class AgentView implements Component, Focusable {
 					: "opening… · esc to cancel",
 			);
 		if (this.armedFor(row)) {
+			if (run) return cc.fg("muted", "closing…");
 			return cc.fg(
 				"error",
 				this.justKilled === row.id ? "stopped · ctrl+x again to delete" : "ctrl+x again to delete",
@@ -1856,7 +1859,7 @@ export class AgentView implements Component, Focusable {
 		const age = rowAge(row, Date.now()).padStart(ageWidth);
 		const fixed = visibleWidth(pad) + 2 + labelWidth + 2 + 2 + ageWidth;
 		const detailWidth = Math.max(0, width - fixed);
-		const detail = truncateToWidth(this.rowDetail(row), detailWidth, "…");
+		const detail = truncateToWidth(this.rowDetail(row, run), detailWidth, "…");
 		const line =
 			`${pad}${this.icon(row)} ${name}${" ".repeat(Math.max(0, labelWidth - visibleWidth(name)))}  ` +
 			`${detail}${" ".repeat(Math.max(0, detailWidth - visibleWidth(detail)))}  ${cc.fg("muted", age)}`;

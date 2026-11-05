@@ -932,10 +932,32 @@ describe("AgentView keys", () => {
 		// A closed run leaves the fold.
 		instances = instances.map((i) => (i.id === "r1" ? { ...i, status: "stopped" as const } : i));
 		view.handleInput(CTRL_X);
-		await flush();
+		await waitFor(() => expect(focusedLine(view)).toContain("probe r2"));
+		expect(calls).toEqual([["end", "p-r1"]]);
+		view.handleInput(CTRL_X);
 		await flush();
 		expect(calls).toEqual([["end", "p-r1"]]);
-		expect(focusedLine(view)).toContain("probe r2");
+	});
+
+	it("ctrl+x never deletes a run: one still listed after its first press reads closing", async () => {
+		const run: InstanceSummary = {
+			id: "r1",
+			status: "online",
+			external: true,
+			pane: "p-r1",
+			parent: "p-work",
+			activity: "idle",
+			turns: 1,
+			cwd: THERE,
+			label: "probe r1",
+		};
+		const { view, calls, flush } = makeView({ instances: [...sessions, run] });
+		for (let i = 0; i < 10 && !focusedLine(view)?.includes("1 subagent"); i++) view.handleInput(DOWN);
+		view.handleInput(ENTER);
+		view.handleInput(DOWN);
+		view.handleInput(CTRL_X);
+		await flush();
+		expect(focusedLine(view)).toContain("closing…");
 		view.handleInput(CTRL_X);
 		await flush();
 		expect(calls).toEqual([["end", "p-r1"]]);
