@@ -102,14 +102,12 @@ export type PaneMessage =
 
 /** A message from another session (a run, its orchestrator), never from the user: the receiving
  *  session takes it as one. `from`: the sender's tmux session; `name`: its session's name.
- *  `report`: a run's last message of a turn, to its orchestrator. */
-export interface SessionMessage {
-	type: "session_message";
-	kind: "report";
-	from: string;
-	name?: string;
-	text: string;
-}
+ *  `report`: a run's last message of a turn, to its orchestrator. `activity`: what a run is doing
+ *  now, to its orchestrator, each time that changes; `dialog`: the title of the prompt it waits on. */
+export type SessionMessage = { type: "session_message"; from: string; name?: string } & (
+	| { kind: "report"; text: string }
+	| { kind: "activity"; activity: AgentActivity; dialog?: string }
+);
 
 /** Queue a message for a self-registered session. */
 export interface SendRequest {

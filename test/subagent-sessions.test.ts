@@ -153,12 +153,12 @@ describe.skipIf(!hasTmux)("a background run, as a pi session of its own", () => 
 		const result = lastToolResult(launched)?.text;
 		expect(result).toMatch(/^Background subagent launched: probe-run \(sub_[0-9a-f-]+\)/);
 		expect(result).toContain("It stays open, and its report arrives here each time it finishes a turn.");
+		expect(said(launched).at(-1)).toMatch(/^Subagents still active.*\n- probe-run: background, /s);
 		await waitFor(() => expect(real.tmux.capture(orchestrator, 50).join("\n")).toContain("waiting for 1 subagent"));
 
 		const first = (await real.waitForRequests("main", 3))[2];
 		const firstReport = said(first).find((text) => text.includes("First look."));
 		expect(firstReport).toContain('[Report from subagent "probe-run", from another session, not from the user.');
-		expect(said(first).at(-1)).toMatch(/^Subagents still active.*\n- probe-run: background, /s);
 
 		const run = (await real.rows()).find((row) => row.label === "probe-run");
 		real.tmux.sendKeys(run?.pane ?? "", ["Look again.", "Enter"]);
@@ -173,19 +173,19 @@ describe.skipIf(!hasTmux)("a background run, as a pi session of its own", () => 
 		real.script("main", [
 			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around.", background: true } },
 			{ text: "waiting for probe-run" },
-			{ text: "read the report" },
 			{ text: "a new session" },
 		]);
-		real.script("probe-run", [{ text: "First look." }]);
+		// Still working when the session is replaced: an idle run is not waited for.
+		real.script("probe-run", [{ tool: "bash", args: { command: "sleep 30" } }]);
 		const orchestrator = real.start(["--", "delegate the look"]);
-		await real.waitForRequests("main", 3);
+		await real.waitForRequests("main", 2);
 		const screen = () => real.tmux.capture(orchestrator, 50).join("\n");
 		await waitFor(() => expect(screen()).toContain("waiting for 1 subagent"));
 
 		real.tmux.sendKeys(orchestrator, ["/new", "Enter"]);
 		await waitFor(() => expect(screen()).not.toContain("waiting for"));
 		real.tmux.sendKeys(orchestrator, ["hello", "Enter"]);
-		const fresh = (await real.waitForRequests("main", 4))[3];
+		const fresh = (await real.waitForRequests("main", 3))[2];
 		expect(said(fresh)).toEqual(["hello"]);
 	});
 });

@@ -41,8 +41,12 @@ export function createParentScopeViews(deps: ParentScopeViewsDeps) {
 		const scope = scopeOf(owner);
 		return scope ? deps.directory.list(scope) : [];
 	};
-	/** The open Runs whose work the orchestrator still waits on: a Run being stopped is not. */
-	const awaited = () => open().filter((entry) => entry.state !== "stopping");
+	/**
+	 * The open Runs whose work the orchestrator still waits on: those working. A Run being stopped is not, nor one
+	 * idle or waiting on a prompt in its own session. A Run that has not said yet has only just started.
+	 */
+	const awaited = () =>
+		open().filter((entry) => entry.state !== "stopping" && (entry.record.activity ?? "working") === "working");
 	/** Whether the panel still shows a Run: one that succeeded leaves after a while, any other final Run stays. */
 	const lingers = ({ record }: RunEntry, now: number) =>
 		record.status !== "completed" || now - (record.endedAt ?? now) < SUCCEEDED_RUN_LINGER_MS;
@@ -95,9 +99,8 @@ export function createParentScopeViews(deps: ParentScopeViewsDeps) {
 			deps.onChange();
 			return true;
 		},
-		/** The background Runs the orchestrator is Waiting for: none while its turn runs. */
-		waitingFor: () =>
-			deps.idle() ? awaited().filter((entry) => entry.record.deliveryMode === "background").length : 0,
+		/** The working Runs the orchestrator is Waiting for: none while its turn runs. */
+		waitingFor: () => (deps.idle() ? awaited().length : 0),
 		/** How many open Runs the footer counts as running, and as stopping. */
 		footer: () => {
 			const runs = open();

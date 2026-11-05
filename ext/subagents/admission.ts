@@ -419,6 +419,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 									cwd,
 									runDir: storage.runDir,
 									parent: parentPane,
+									projectTrusted,
 								},
 							}
 						: { agentDir, definition, task: taskText, ...tools!, childModel, projectTrusted },
