@@ -22,6 +22,7 @@ import { type InstanceSummary, OrchestratorClient } from "../../daemon/orchestra
 import { collectRows, labelFromTask } from "../../daemon/rows.ts";
 import { lastLine, textOf, toolActivity } from "../../daemon/session-state.ts";
 import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, PARENT_ENV, Tmux } from "../../daemon/tmux.ts";
+import { agentTasks, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
@@ -30,7 +31,7 @@ import { trustBadge } from "../_shared/trust-badge.ts";
 import { AgentView, EXIT_WORDS, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, handOffAfterExit } from "./hand-off.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
-import { deriveLabel, dialogDetail, ForegroundActivity, SelfRegistration } from "./self-registration.ts";
+import { deriveLabel, dialogDetail, ForegroundActivity, SelfRegistration, waitingDetail } from "./self-registration.ts";
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
@@ -230,6 +231,7 @@ const agentView: InlineExtension = {
 		let registration: SelfRegistration | undefined;
 		// What this window is doing: its own agent-view row, and what other windows see.
 		let activity = new ForegroundActivity();
+		let offSubagents: (() => void) | undefined;
 		let stopPill: (() => void) | undefined;
 		let viewOpen = false;
 		// The first ← swaps the footer pill for this hint; the second opens agent view.
@@ -299,6 +301,7 @@ const agentView: InlineExtension = {
 				pane,
 				detail:
 					dialogDetail(activity) ??
+					waitingDetail(activity) ??
 					(activity.current === "working" && liveDetail
 						? liveDetail
 						: lastAssistant
@@ -471,6 +474,12 @@ const agentView: InlineExtension = {
 			hide ??= process.env[HIDE_ENV];
 			delete process.env[HIDE_ENV];
 			activity = new ForegroundActivity();
+			// Its background subagents keep it working between turns, as the orchestrator waits on them.
+			const subagentsChanged = () =>
+				track({
+					type: "subagents_waiting",
+					count: (agentTasks()?.list() ?? []).filter((task) => task.state === "running").length,
+				});
 			registration = new SelfRegistration(
 				new OrchestratorClient(),
 				// A run registers at once, listed nowhere, so its orchestrator reaches it from its first turn on.
@@ -481,6 +490,9 @@ const agentView: InlineExtension = {
 				() => pi.events.emit("bluclawd:remote-want-report", true),
 			);
 			registration.start();
+			offSubagents?.();
+			offSubagents = subscribeAgentTasks(subagentsChanged);
+			subagentsChanged();
 			if (process.env[NORMAL_ENV]) normal = startedHere = true;
 			delete process.env[NORMAL_ENV];
 			syncEndOnDetach(ctx);
@@ -610,7 +622,7 @@ const agentView: InlineExtension = {
 			};
 		});
 
-		const track = (event: { type: string; kind?: string; title?: string }): void => {
+		const track = (event: Parameters<ForegroundActivity["apply"]>[0]): void => {
 			const current = activity.apply(event);
 			registration?.setActivity(current);
 		};
@@ -638,6 +650,8 @@ const agentView: InlineExtension = {
 			if (plan.await) await stopping;
 			registration = undefined;
 			stopPill?.();
+			offSubagents?.();
+			offSubagents = undefined;
 			stopPill = undefined;
 			// Quitting ends the session as it ends a bluclawd session: a turn in progress dies with
 			// the process. The session stays in agent view as a stopped row until ctrl+x deletes it.
