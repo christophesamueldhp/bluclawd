@@ -2,6 +2,7 @@ import type { AuthType, Provider } from "@earendil-works/pi-ai";
 import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { type ExtensionAPI, type ExtensionCommandContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { agentTasks } from "../_shared/agent-tasks.ts";
+import { type ChooserView, chooseAccountOrModel } from "./chooser.ts";
 import { loginAccount } from "./login.ts";
 import { AccountStore } from "./store.ts";
 
@@ -36,6 +37,21 @@ async function refresh(ctx: ExtensionCommandContext, provider: string): Promise<
 	try {
 		const result = await ctx.modelRegistry.refresh({ providers: [provider], allowNetwork: true, force: true });
 		if (result.aborted || result.errors.size > 0) throw new Error("Model refresh failed");
+		const available = ctx.modelRegistry.getAvailable();
+		const hasAccess = (model: { provider: string; id: string }) =>
+			available.some((item) => item.provider === model.provider && item.id === model.id);
+		if (ctx.model && !hasAccess(ctx.model)) {
+			ctx.ui.notify(
+				"The Active model is now unavailable. Choose a replacement in Models; the selection was kept.",
+				"warning",
+			);
+		}
+		if (ctx.scopedModels?.length && !ctx.scopedModels.some(({ model }) => hasAccess(model))) {
+			ctx.ui.notify(
+				"Every Scoped model is now unavailable. Scope was kept; use Show all to choose a model explicitly.",
+				"warning",
+			);
+		}
 	} catch {
 		ctx.ui.notify(
 			"Account saved, but model availability could not refresh. Run /reload before continuing.",
@@ -44,7 +60,11 @@ async function refresh(ctx: ExtensionCommandContext, provider: string): Promise<
 	}
 }
 
-async function chooseAccount(ctx: ExtensionCommandContext, provider: Provider, store: AccountStore): Promise<void> {
+async function chooseAccount(
+	ctx: ExtensionCommandContext,
+	provider: Provider,
+	store: AccountStore,
+): Promise<"login" | undefined> {
 	while (true) {
 		const accounts = await store.list(provider.id);
 		const labels = accounts.map(
@@ -134,7 +154,7 @@ async function chooseAccount(ctx: ExtensionCommandContext, provider: Provider, s
 			await store.switchTo(account.id);
 			await refresh(ctx, provider.id);
 			ctx.ui.notify(`Active account for ${provider.name}: ${name}. Your previous login was preserved.`, "info");
-			return;
+			return "login";
 		}
 	}
 }
@@ -142,7 +162,7 @@ async function chooseAccount(ctx: ExtensionCommandContext, provider: Provider, s
 export default function accounts(pi: ExtensionAPI) {
 	let open = false;
 	pi.registerCommand("accounts", {
-		description: "Add, save, and switch named OAuth or API-key accounts for any provider",
+		description: "Manage named provider accounts and choose the Active model",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("Use /accounts in interactive Pi to manage provider accounts.", "warning");
@@ -153,14 +173,52 @@ export default function accounts(pi: ExtensionAPI) {
 			try {
 				const all = providers(ctx);
 				const id = args.trim();
-				const labels = all.map((provider) => `${provider.name} (${provider.id})`);
-				const choice = id ? undefined : await ctx.ui.select("Accounts — choose a provider", labels);
-				const provider = id ? all.find((provider) => provider.id === id) : all[labels.indexOf(choice ?? "")];
-				if (!provider) {
-					if (id) ctx.ui.notify("Unknown provider. Run /accounts to choose one.", "warning");
+				const store = new AccountStore(getAgentDir());
+				if (ctx.mode !== "tui") {
+					const labels = all.map((provider) => `${provider.name} (${provider.id})`);
+					const choice = id ? undefined : await ctx.ui.select("Accounts — choose a provider", labels);
+					const provider = id ? all.find((provider) => provider.id === id) : all[labels.indexOf(choice ?? "")];
+					if (provider) await chooseAccount(ctx, provider, store);
+					else if (id) ctx.ui.notify("Unknown provider. Run /accounts to choose one.", "warning");
 					return;
 				}
-				await chooseAccount(ctx, provider, new AccountStore(getAgentDir()));
+				const view: ChooserView = { section: "Accounts", scoped: false, query: "" };
+				let provider = id ? all.find((item) => item.id === id) : undefined;
+				if (id && !provider) {
+					ctx.ui.notify("Unknown provider. Run /accounts to choose one.", "warning");
+					return;
+				}
+				while (true) {
+					if (provider) {
+						const outcome = await chooseAccount(ctx, provider, store);
+						if (outcome === "login") {
+							view.section = "Models";
+							view.provider = provider.id;
+							view.scoped = false;
+							view.query = "";
+						}
+						provider = undefined;
+					}
+					const choice = await chooseAccountOrModel(ctx, all, await store.list(), view);
+					if (!choice) return;
+					if ("provider" in choice) {
+						provider = choice.provider;
+						continue;
+					}
+					if (!requireIdle(ctx)) return;
+					const model = ctx.modelRegistry
+						.getAvailable()
+						.find((item) => item.provider === choice.model.provider && item.id === choice.model.id);
+					try {
+						if (model && (await pi.setModel(model))) return;
+					} catch {
+						// Provider errors may contain credentials; show only the safe recovery message below.
+					}
+					ctx.ui.notify(
+						"Could not use this model. Check provider access and choose an available model.",
+						"warning",
+					);
+				}
 			} catch {
 				ctx.ui.notify(
 					"Could not update accounts. Check that a current login exists and account storage is readable and writable.",
