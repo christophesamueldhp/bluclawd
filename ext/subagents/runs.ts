@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { AgentActivity } from "../../daemon/activity.ts";
 import { AGENT_TASK_ID_PREFIX } from "../_shared/agent-tasks.ts";
 import type { AgentDefinitionSource } from "./definitions.ts";
 import {
@@ -48,6 +49,8 @@ export interface SubagentRunRecord {
 	childSessionId?: string;
 	/** The tmux session of a run that is a pi of its own (ADR-0006); absent on in-process runs. */
 	pane?: string;
+	/** What a run in its own pi is doing, as it last said; absent until it says, and on in-process runs. */
+	activity?: AgentActivity;
 	transcriptPath?: string;
 	reportPath?: string;
 	agentName: string;
@@ -89,6 +92,8 @@ export interface SubagentRunController {
 	markRunning(childSessionId?: string, thinkingLevel?: string): void;
 	/** The run's pi started in this tmux session. */
 	recordPane(pane: string): void;
+	/** What the run's pi says it is doing now. */
+	updateActivity(activity: AgentActivity): void;
 	/** The child's turn ended and pi will not retry it: the generation's last turn. */
 	markFinishing(): void;
 	recordTurn(): void;
@@ -367,6 +372,7 @@ export class SubagentRunScheduler<C = unknown> {
 				toolCallCount: 0,
 				toolExecutions: undefined,
 				lastActivity: undefined,
+				activity: undefined,
 				usage: createEmptySubagentUsage(),
 				usageAttribution: undefined,
 				backgroundDeliveryAttempted: false,
@@ -444,6 +450,11 @@ export class SubagentRunScheduler<C = unknown> {
 			recordPane: (pane: string) => {
 				if (inactive()) return;
 				managed.record.pane = pane;
+				this.emitChange(managed);
+			},
+			updateActivity: (activity: AgentActivity) => {
+				if (inactive()) return;
+				managed.record.activity = activity;
 				this.emitChange(managed);
 			},
 			markFinishing: () => {

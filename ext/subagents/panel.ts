@@ -1,5 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, type Focusable, matchesKey, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
+import type { AgentActivity } from "../../daemon/activity.ts";
 import { focusedComponent } from "../_shared/focus.ts";
 import { formatTaskDuration } from "../background-bash/bash-limits.ts";
 import type { RunEntry } from "./directory.ts";
@@ -32,7 +33,8 @@ export function renderPanel(options: {
 			? `Subagents · ${theme.fg("warning", `waiting for ${waitingFor} subagent${waitingFor === 1 ? "" : "s"}`)}`
 			: "Subagents";
 	const rows = runs.slice(0, MAX_ROWS).map(({ record: run }, index) => {
-		const { status } = run;
+		// A run in a pi of its own says what it is doing while it is open.
+		const status = run.pane && run.status === "running" ? ACTIVITY_LABEL[run.activity ?? "working"] : run.status;
 		const progress = run.lastProgressText?.replace(/\s+/g, " ").trim();
 		return [
 			`${index === selected ? theme.fg("accent", "❯") : " "} ${theme.bold(run.name ?? run.runId)}`,
@@ -164,8 +166,15 @@ export function createPanel(options: {
 	return panel;
 }
 
+const ACTIVITY_LABEL: Record<AgentActivity, string> = {
+	working: "working",
+	idle: "idle",
+	awaiting_input: "needs input",
+};
+
 function statusColor(status: string) {
 	if (status === "completed") return "success";
+	if (status === "needs input") return "warning";
 	if (status === "failed" || status === "interrupted" || status === "cancelled") return "error";
 	return "muted";
 }

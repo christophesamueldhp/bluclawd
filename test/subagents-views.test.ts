@@ -99,19 +99,24 @@ describe("the Parent scope's views", () => {
 		expect(views.open()).toEqual([]);
 	});
 
-	it("awaits every open Run but a stopping one, and is Waiting only for the background ones between turns", () => {
+	it("awaits every open Run that is working, and is Waiting for them between turns", () => {
 		const { launch, views, world, scheduler, controllers } = setup();
 		const live = launch();
 		const finishing = launch();
 		const foreground = launch({ deliveryMode: "foreground" });
 		const stopping = launch();
+		const idle = launch();
+		const asking = launch();
 		controllers.get(live.runId)?.markRunning();
 		controllers.get(finishing.runId)?.markFinishing();
+		controllers.get(foreground.runId)?.updateActivity("working");
 		scheduler.cancelRun(stopping.runId, "user");
+		controllers.get(idle.runId)?.updateActivity("idle");
+		controllers.get(asking.runId)?.updateActivity("awaiting_input");
 
 		expect(ids(views.awaited())).toEqual([live.runId, finishing.runId, foreground.runId]);
-		expect(views.waitingFor()).toBe(2);
-		expect(views.footer()).toEqual({ running: 3, stopping: 1 });
+		expect(views.waitingFor()).toBe(3);
+		expect(views.footer()).toEqual({ running: 5, stopping: 1 });
 		world.idle = false;
 		expect(views.waitingFor()).toBe(0);
 	});

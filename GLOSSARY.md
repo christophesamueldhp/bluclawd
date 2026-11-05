@@ -47,8 +47,8 @@ Continuing a closed run with a new message from the orchestrator or the user, as
 _Avoid_: restart, rerun
 
 **Waiting**:
-The orchestrator between turns while background runs it launched are still active: it leaves their work to them and goes on when their reports arrive.
-_Avoid_: idle, stopped, done (while runs are active)
+The orchestrator between turns while runs it launched are still working: it leaves their work to them and goes on when their reports arrive. A run that is idle, or waits on the user in its own session, is not waited for.
+_Avoid_: idle, stopped, done (while runs are working)
 
 ### Tasks
 

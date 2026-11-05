@@ -313,6 +313,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					runDir: storage.runDir,
 					sessionFile,
 					parent: parentPane,
+					projectTrusted: ctx.isProjectTrusted(),
 				},
 			},
 			known ? undefined : { ...current, sessionEpoch: scope.sessionEpoch },
@@ -506,6 +507,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 									cwd,
 									runDir: storage.runDir,
 									parent: parentPane,
+									projectTrusted,
 								},
 							}
 						: { agentDir, definition, task: taskText, ...tools!, childModel, projectTrusted },

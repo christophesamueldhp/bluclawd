@@ -219,6 +219,21 @@ export function createGenerations(deps: GenerationDeps) {
 							});
 						},
 						usage: (totals) => recordRunSessionUsage(deps.agentDir(), params.record, totals),
+						// For the user, not the model: the prompt is answered in the run's own session.
+						needsInput: (dialog) => {
+							const record = scheduler.getRun(runId);
+							if (!record || !deps.scope.inScope(record)) return;
+							try {
+								deps.scope
+									.context()
+									?.ui.notify(
+										`Subagent ${record.name ?? runId} needs input${dialog ? `: ${dialog}` : ""}. Open it to answer.`,
+										"warning",
+									);
+							} catch {
+								// The orchestrator's session was replaced meanwhile.
+							}
+						},
 					});
 				} finally {
 					deps.bus.unregister(runId, "has been closed");

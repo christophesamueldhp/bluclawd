@@ -103,7 +103,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		const reports = new RunReports();
 		pi.events.on("bluclawd:session-message", (data) => {
 			const message = data as SessionMessage;
-			if (message.kind === "report") reports.receive(message);
+			if (message.kind === "report" || message.kind === "activity") reports.receive(message);
 			else fromRun(message);
 		});
 
@@ -157,7 +157,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		const senderRole = (address: string) => scheduler.getRun(address)?.agentName;
 
 		/** A message or a note of what the user typed, from one of this session's open runs; another sender's is dropped. */
-		const fromRun = (message: SessionMessage) => {
+		const fromRun = (message: Extract<SessionMessage, { kind: "message" | "typed" }>) => {
 			const scope = parentScope.current();
 			const run = scope && directory.list(scope).find(({ record }) => record.pane === message.from)?.record;
 			if (!scope || !run) return;

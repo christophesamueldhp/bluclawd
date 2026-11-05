@@ -104,16 +104,18 @@ export type PaneMessage =
  *  as its own user's input or approval. `from`: the sender's tmux session; `name`: its session's name.
  *  `report`: a run's last message of a turn, to its orchestrator. `message`: what one session
  *  sends another with subagent_message. `typed`: what the user typed in a run, as a note for its
- *  orchestrator. */
-export interface SessionMessage {
-	type: "session_message";
-	kind: "report" | "message" | "typed";
-	from: string;
-	name?: string;
-	text: string;
-	/** On a report: the run's session usage so far, as pi totals it. Each report repeats the whole total. */
-	usage?: SessionUsage;
-}
+ *  orchestrator. `activity`: what a run is doing now, to its orchestrator, each time that changes;
+ *  `dialog`: the title of the prompt it waits on. */
+export type SessionMessage = { type: "session_message"; from: string; name?: string } & (
+	| {
+			kind: "report";
+			text: string;
+			/** The run's session usage so far, as pi totals it. Each report repeats the whole total. */
+			usage?: SessionUsage;
+	  }
+	| { kind: "message" | "typed"; text: string }
+	| { kind: "activity"; activity: AgentActivity; dialog?: string }
+);
 
 /** A session's tokens and cost. */
 export interface SessionUsage {

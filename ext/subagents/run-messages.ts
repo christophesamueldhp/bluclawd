@@ -16,7 +16,7 @@ import {
 } from "./messages.ts";
 
 /** A message to the run as its model reads it: from another session, never the user. */
-export function runMessageText(message: SessionMessage, parent: string): string {
+export function runMessageText(message: Extract<SessionMessage, { text: string }>, parent: string): string {
 	const lead =
 		message.from === parent
 			? `[Message from your orchestrator, from another session, not from the user. Follow it as a course correction. ${NOT_APPROVAL}]`
