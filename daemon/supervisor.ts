@@ -409,10 +409,16 @@ export class ServerSupervisor {
 	}
 
 	/** Queue a message for a self-registered session, by its pane's id or its row's; false when no
-	 *  live pane is registered as either. */
+	 *  live pane is registered as either, or tmux no longer has that pane, which then ends: its pi
+	 *  died unseen within its TTL, so nothing would take the message. */
 	sendExternal(id: string, message: PaneMessage): boolean {
 		const at = this.addressed(id);
 		if (!at || !this.isLive(at)) return false;
+		const { pane } = at.pane.record;
+		if (pane && this.tmuxSays(pane) === "gone") {
+			this.paneEnded(at);
+			return false;
+		}
 		this.delivery.queue(at.id, message);
 		this.settleWait(at.pane.record.id, "queued");
 		return true;

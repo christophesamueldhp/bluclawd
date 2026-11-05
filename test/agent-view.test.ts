@@ -1239,6 +1239,7 @@ describe("AgentView look", () => {
 		for (const width of [100, 120, 160]) {
 			const text = grid(width).join("\n");
 			for (const item of [
+				"shift+↑↓ to reorder", // every band of every view
 				"ctrl+r to rename",
 				"ctrl+f to find",
 				"ctrl+j for newline",
@@ -1252,8 +1253,38 @@ describe("AgentView look", () => {
 		// Wide enough for bluclawd's three rows, filled down each column, 4 apart.
 		const rows = grid(160);
 		expect(rows).toHaveLength(3);
-		expect(rows[0]).toMatch(/^ {2}ctrl\+r to rename {6,}ctrl\+s to switch views {4}/);
-		expect(rows[1]).toMatch(/^ {2}ctrl\+f to find {8,}ctrl\+j for newline {8}/);
+		expect(rows[0]).toMatch(/^ {2}shift\+↑↓ to reorder {4}(opt|alt)\+↑\/↓ to jump groups {4}/);
+		expect(rows[1]).toMatch(/^ {2}ctrl\+r to rename {7}ctrl\+s to switch views {4}/);
+		expect(rows[2]).toMatch(/^ {2}ctrl\+f to find {9}ctrl\+j for newline {8}/);
+	});
+
+	it("? leaves shift+↑↓ out for a row it can't move: this window before its first prompt, or a run", () => {
+		const blank: InstanceSummary = { id: "me", status: "online", cwd: HERE, label: "current session", pane: "p-me" };
+		const run: InstanceSummary = {
+			id: "r1",
+			status: "online",
+			external: true,
+			pane: "p-r1",
+			parent: "p-work",
+			activity: "working",
+			cwd: THERE,
+			label: "probe r1",
+			createdAt: ago(1),
+		};
+		const { view, text } = makeView({ self: blank, instances: [...sessions, run] });
+		const screen = () => text().join("\n");
+		expect(focusedLine(view)).toContain("current session");
+		view.handleInput("?");
+		expect(screen()).toContain("? to close");
+		expect(screen()).not.toContain("shift+↑↓");
+		view.handleInput("?");
+		for (let i = 0; i < 10 && !focusedLine(view)?.includes("subagent"); i++) view.handleInput(DOWN);
+		view.handleInput(ENTER);
+		view.handleInput(DOWN);
+		expect(focusedLine(view)).toContain("probe r1");
+		view.handleInput("?");
+		expect(screen()).toContain("? to close");
+		expect(screen()).not.toContain("shift+↑↓");
 	});
 
 	it("with only this session listed, omits the intro and idle prompting hints", () => {
