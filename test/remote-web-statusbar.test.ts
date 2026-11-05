@@ -41,11 +41,12 @@ describe("the chat's status bar", () => {
 		expectTypeOf<StatusView>().toExtend<Report>();
 	});
 
-	it("labels background usage as additional and never renders unknown pricing as zero", () => {
+	it("labels the runs' usage as additional and never renders unknown pricing as zero", () => {
 		expect(backgroundUsageHtml(undefined)).toBe("");
 		const usage = { runCount: 2, input: 300, output: 100, cacheRead: 0, cacheWrite: 0, cost: 0.03 };
 		const known = text(backgroundUsageHtml(usage));
-		expect(known).toContain("Background subagents (2)");
+		expect(known).toContain("Subagents (2): 400 tokens");
+		expect(known).not.toContain("Background");
 		expect(known).toContain("$0.030");
 		expect(known).toContain("excluded from session totals");
 		const unknown = text(backgroundUsageHtml({ ...usage, cost: null }));

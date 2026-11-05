@@ -48,13 +48,13 @@ export function tokens(count) {
 	return String(count);
 }
 
-/** Additional child usage is not included in Pi's native session totals. @param {Report["backgroundSubagentUsage"]} usage */
+/** The runs' usage, counted in their own sessions and so not in this session's totals. @param {Report["backgroundSubagentUsage"]} usage */
 export function backgroundUsageHtml(usage) {
 	if (!usage || usage.runCount === 0) return "";
 	const total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 	const cost =
 		typeof usage.cost === "number" && Number.isFinite(usage.cost) ? `$${usage.cost.toFixed(3)}` : "cost unknown";
-	return `<p>Background subagents (${esc(usage.runCount)}): ${esc(tokens(total))} tokens · ${esc(cost)} — excluded from session totals</p>`;
+	return `<p>Subagents (${esc(usage.runCount)}): ${esc(tokens(total))} tokens · ${esc(cost)} — excluded from session totals</p>`;
 }
 
 /** pi's footer warns above 70% and reports an error above 90%. @param {number} percent */
