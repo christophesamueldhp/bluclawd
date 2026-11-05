@@ -981,7 +981,7 @@ export class AgentView implements Component, Focusable {
 	private reorder(delta: number): void {
 		const item = this.selected;
 		if (item?.kind !== "row") return;
-		const rows = item.band.rows.filter((r) => !r.starting && !r.shell && !r.unlisted);
+		const rows = orderedRows(item.band);
 		const at = rows.findIndex((r) => r.id === item.row.id);
 		const to = at + delta;
 		if (at === -1 || to < 0 || to >= rows.length) return;
@@ -2063,7 +2063,7 @@ export class AgentView implements Component, Focusable {
 		);
 		const opt = process.platform === "darwin" ? "opt" : "alt";
 		const items = [
-			...(row && !row.shell ? ["shift+↑↓ to reorder"] : []),
+			...(row && item?.kind === "row" && orderedRows(item.band).includes(row) ? ["shift+↑↓ to reorder"] : []),
 			...(row ? ["ctrl+r to rename"] : []),
 			"ctrl+f to find",
 			`${opt}+↑/↓ to jump groups`,
@@ -2224,6 +2224,11 @@ export class AgentView implements Component, Focusable {
 			.map((line) => truncateToWidth(line, width));
 		return [...windowed, ...Array(Math.max(0, budget - windowed.length)).fill(""), ...footer];
 	}
+}
+
+/** The rows of a band shift+↑/↓ moves; a run is reached from its orchestrator, not a band. */
+function orderedRows(band: Band): AgentRow[] {
+	return band.rows.filter((r) => !r.starting && !r.shell && !r.unlisted);
 }
 
 function isDirectory(path: string): boolean {
