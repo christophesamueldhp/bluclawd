@@ -328,14 +328,21 @@ export class SubagentRunScheduler<C = unknown> {
 	}
 
 	/**
-	 * Runs a completed run again under the same identity, in the background. Its counts and usage start from zero:
-	 * a generation reports only its own work, and the earlier usage, already attributed, is never counted twice.
+	 * Runs a completed or closed run again under the same identity, in the background. Its counts and usage start
+	 * from zero: a generation reports only its own work, and the earlier usage, already attributed, is never counted
+	 * twice. A run this scheduler does not know is taken over from `stored`, its record as kept on disk.
 	 */
-	resume(runId: string, context: C): AdmitSubagentRunResult {
+	resume(runId: string, context: C, stored?: Readonly<SubagentRunRecord>): AdmitSubagentRunResult {
+		if (!this.runs.has(runId) && stored?.runId === runId && isResumableSubagentStatus(stored.status)) {
+			this.adopt(stored);
+		}
 		const managed = this.runs.get(runId);
 		if (!managed) return { ok: false, error: "Subagent run is unknown." };
-		if (managed.record.status !== "completed") {
-			return { ok: false, error: `Subagent run is ${managed.record.status}; only a completed run can be resumed.` };
+		if (!isResumableSubagentStatus(managed.record.status)) {
+			return {
+				ok: false,
+				error: `Subagent run is ${managed.record.status}; only a completed or closed run can be resumed.`,
+			};
 		}
 		let resolveCompletion!: (rec: Readonly<SubagentRunRecord>) => void;
 		const completionPromise = new Promise<Readonly<SubagentRunRecord>>((res) => {
@@ -379,6 +386,20 @@ export class SubagentRunScheduler<C = unknown> {
 		});
 		this.startManagedRun(managed);
 		return { ok: true, handle: { runId, record: structuredClone(managed.record), completion: completionPromise } };
+	}
+
+	/** Takes over a final run another instance ran, as it is stored, so it can be resumed. */
+	private adopt(stored: Readonly<SubagentRunRecord>): void {
+		const record = structuredClone(stored) as SubagentRunRecord;
+		this.runs.set(record.runId, {
+			record,
+			usage: createGenerationUsage({ kind: "resume" }),
+			abortController: new AbortController(),
+			resolveCompletion: () => {},
+			completionPromise: Promise.resolve(structuredClone(record)),
+			disposed: true,
+			finalizing: false,
+		});
 	}
 
 	/** The tool result that launched this run reached the orchestrator's conversation. */

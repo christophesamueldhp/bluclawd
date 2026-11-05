@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { type Static, Type } from "@earendil-works/pi-ai";
 import {
 	type ExtensionContext,
@@ -29,7 +30,13 @@ import {
 	resolveChildModelAndRuntime,
 	snapshotParentTools,
 } from "./runner.ts";
-import { type AdmittedSubagentHandle, createRunId, type SubagentRunRecord, type SubagentRunScheduler } from "./runs.ts";
+import {
+	type AdmittedSubagentHandle,
+	createRunId,
+	isResumableSubagentStatus,
+	type SubagentRunRecord,
+	type SubagentRunScheduler,
+} from "./runs.ts";
 import { ensureRunStorageDir } from "./storage.ts";
 import type { RunLaunch } from "./tmux-runs.ts";
 
@@ -162,13 +169,13 @@ export type AdmissionResult =
 export interface RunAdmission {
 	launch(request: LaunchRequest, ctx: AdmissionContext): Promise<AdmissionResult>;
 	/**
-	 * Admits a completed run's next generation. `buildPrompt` is called only once every check has passed,
-	 * just before the run starts again.
+	 * Admits a completed or closed run's next generation. `buildPrompt` is called only once every check has
+	 * passed, just before the run starts again. A run in tmux may resume without one, for the user to type in.
 	 */
 	resume(
 		run: Readonly<SubagentRunRecord>,
 		toolCallId: string,
-		buildPrompt: () => string,
+		buildPrompt: (() => string) | undefined,
 		ctx: AdmissionContext,
 	): Promise<AdmissionResult>;
 }
@@ -255,6 +262,78 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				modelRuntime: resolved.modelRuntime,
 				thinkingLevel: resolved.thinkingLevel,
 			},
+		};
+	};
+
+	/**
+	 * A closed run, or a run known only from disk (an earlier instance's, or one from before runs were pis of their
+	 * own), reopens its session as a pi in tmux, as its next generation in the current scope.
+	 */
+	const resumeInTmux = (
+		run: Readonly<SubagentRunRecord>,
+		parentPane: string,
+		buildPrompt: (() => string) | undefined,
+		ctx: AdmissionContext,
+		refuse: { invalidated: AdmissionResult; unavailable: (error: string) => AdmissionResult },
+	): AdmissionResult => {
+		const label = formatRunLabel(run);
+		const scope = deps.scope.current();
+		const known = deps.scheduler.getRun(run.runId);
+		if (!scope || !deps.scope.inScope(scope) || run.parentSessionId !== scope.parentSessionId) {
+			return refuse.invalidated;
+		}
+		if (known && !deps.scope.inScope(known)) return refuse.invalidated;
+		const current = known ?? run;
+		if (!isResumableSubagentStatus(current.status)) {
+			return refuse.unavailable(`${label} is ${current.status}; only a completed or closed subagent can be resumed.`);
+		}
+		const sessionFile = current.transcriptPath;
+		if (!sessionFile || !existsSync(sessionFile)) return refuse.unavailable(`${label} has no saved session to resume.`);
+		const holder = current.name ? deps.directory.nameHolder(scope, current.name)?.record : undefined;
+		if (holder) return refuse.unavailable(`${label} cannot resume: its name is now used by ${holder.runId}.`);
+		const denied = deniedReason(current.agentName, ctx);
+		if (denied) return refuse.unavailable(denied);
+		const storage = ensureRunStorageDir(deps.agentDir(), current.parentSessionId, current.runId);
+		if (!storage.ok) return refuse.unavailable(`Cannot resume ${label}: storage is unavailable (${storage.error}).`);
+		const previous = deps.scheduler.getContext(current.runId);
+		const resumed = deps.scheduler.resume(
+			current.runId,
+			{
+				runtime: "tmux",
+				launch: {
+					name: current.name ?? current.runId,
+					definition: previous?.runtime === "tmux" ? previous.launch.definition : roleOf(current, ctx),
+					model: `${current.provider}/${current.modelId}`,
+					thinkingLevel: current.thinkingLevel === SDK_DEFAULT_THINKING ? undefined : current.thinkingLevel,
+					task: buildPrompt?.(),
+					cwd: current.cwd,
+					runDir: storage.runDir,
+					sessionFile,
+					parent: parentPane,
+				},
+			},
+			known ? undefined : { ...current, sessionEpoch: scope.sessionEpoch },
+		);
+		if (!resumed.ok) return refuse.unavailable(resumed.error);
+		return { ok: true, handle: resumed.handle };
+	};
+
+	/**
+	 * The role a run known only from disk resumes with: its saved role as it is now. An inline role is not kept,
+	 * so such a run resumes with no instructions of its own and every tool.
+	 */
+	const roleOf = (run: Readonly<SubagentRunRecord>, ctx: AdmissionContext): AgentDefinition => {
+		const saved = resolveAgentDefinition(
+			deps.catalog() ?? discoverAgentDefinitions({ cwd: ctx.cwd, agentDir: deps.agentDir(), projectTrusted: ctx.isProjectTrusted() }),
+			run.agentName,
+		);
+		if (saved.ok) return saved.definition;
+		return {
+			name: run.agentName,
+			description: "",
+			model: "inherit",
+			instructions: "",
+			source: run.definitionSource,
 		};
 	};
 
@@ -440,6 +519,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					`Resuming ${label} is not supported in one-shot "${ctx.mode}" mode because a resume runs in the background and the process exits before it completes.`,
 				);
 			}
+			const parentPane = deps.pane?.();
+			if (parentPane !== undefined) return resumeInTmux(run, parentPane, buildPrompt, ctx, { invalidated, unavailable });
+			if (!buildPrompt) return unavailable(`${label} needs a message to resume with.`);
 			// Checked again after the model is resolved, since another message may resume the run meanwhile.
 			const checkResumable = (): { transcriptPath: string; refused?: never } | { refused: AdmissionResult } => {
 				const current = deps.scheduler.getRun(run.runId);

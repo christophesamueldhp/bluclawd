@@ -100,7 +100,8 @@ export function createRunAddressing(deps: RunAddressingDeps) {
 		}
 		// No tool result carries a user resume to the orchestrator, so its nested usage counts from the start.
 		if (from === USER_MESSAGE_ADDRESS) scheduler.launchResultEmitted(run.runId);
-		void deps.deliver(resumed.handle, from === USER_MESSAGE_ADDRESS);
+		// A run in tmux sends its own Reports; closing it is no news.
+		if (scheduler.getContext(run.runId)?.runtime !== "tmux") void deps.deliver(resumed.handle, from === USER_MESSAGE_ADDRESS);
 		// A resume is admitted only after buildPrompt ran, so the receipt is set.
 		return receipt!;
 	};

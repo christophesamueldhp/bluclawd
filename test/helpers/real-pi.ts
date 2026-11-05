@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, vi } from "vitest";
-import { type InstanceSummary, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
+import { type InstanceSummary, OrchestratorClient, piPackageRoot } from "../../daemon/orchestrator-client.ts";
 import { Tmux } from "../../daemon/tmux.ts";
 import { type FauxStep, fauxDir } from "../fixtures/real-pi/faux.ts";
 import { waitFor } from "./wait-for.ts";
@@ -110,6 +110,10 @@ export async function startRealPi(options: { extensions?: string[] } = {}): Prom
 	vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
 	vi.stubEnv("HOME", home);
 	vi.stubEnv("PI_OFFLINE", "1");
+	// The daemon's build is told by pi's package as well: one started from here without it is taken for stale
+	// by a quitting pane's hand-off, which restarts it and drops every registration meanwhile.
+	const piRoot = piPackageRoot(PI_CLI);
+	if (piRoot) vi.stubEnv("PI_PACKAGE_ROOT", piRoot);
 	const extensions = (options.extensions ?? DEFAULT_EXTENSIONS).map((name) => join(root, "ext", name, "index.ts"));
 	writeFileSync(
 		join(agentDir, "settings.json"),
