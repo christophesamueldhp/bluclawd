@@ -190,10 +190,10 @@ export function isBlankPane(
 }
 
 /**
- * What `session_shutdown` does with this pane's registration. A reload, or resume of the same file,
- * goes on in this pane, whose next session registers under the same id: its row (pin, order, age)
- * and the messages queued for it stay. A new session, resuming another one, or a fork leaves this
- * one stopped, and the next one gets its own row. pi awaits the handler, so the stop is awaited
+ * What `session_shutdown` does with this pane's registration. A reload, a new session, or resume of
+ * the same file goes on in this pane, whose next session registers under the same id: its row (pin,
+ * order) and the messages queued for it stay. Resuming another session or a fork leaves this one
+ * stopped, and the next one gets its own row. pi awaits the handler, so the stop is awaited
  * where a session follows, and no late heartbeat of this one lands after the next one's.
  */
 export function shutdownPlan(
@@ -201,8 +201,11 @@ export function shutdownPlan(
 	currentFile: string | undefined,
 ): { await: boolean; unregister: boolean } {
 	if (event.reason === "quit") return { await: false, unregister: true };
+	// A new session carries the row on, as /clear does in Claude Code: the old one stays on disk only.
 	const carriesOn =
-		event.reason === "reload" || (event.reason === "resume" && event.targetSessionFile === currentFile);
+		event.reason === "reload" ||
+		event.reason === "new" ||
+		(event.reason === "resume" && event.targetSessionFile === currentFile);
 	return { await: true, unregister: !carriesOn };
 }
 
@@ -451,7 +454,7 @@ const agentView: InlineExtension = {
 			};
 		};
 
-		pi.on("session_start", (_event, ctx) => {
+		pi.on("session_start", (event, ctx) => {
 			// pi's package loader gives each top-level extension file its own module
 			// instance, so agent view populates its own copy of the shared theme.
 			setSharedTheme(ctx.ui.theme);
@@ -484,8 +487,9 @@ const agentView: InlineExtension = {
 			};
 			registration = new SelfRegistration(
 				new OrchestratorClient(),
-				// A run registers at once, listed nowhere, so its orchestrator reaches it from its first turn on.
-				() => (blank(ctx) && !parent ? undefined : selfHeartbeat(ctx)),
+				// A blank session waits for its first prompt to be listed, unless it is a run (its orchestrator
+				// reaches it from its first turn on) or carries a row on (/new).
+				() => (blank(ctx) && !parent && event.reason !== "new" ? undefined : selfHeartbeat(ctx)),
 				(message) => onPaneMessage(ctx, message),
 				pane,
 				(watched) => pi.events.emit("bluclawd:remote-watched", watched),

@@ -176,6 +176,46 @@ describe("a row's state by event, as every reader lists it", () => {
 		expect(meta()).toEqual([{ ...kept[0], sortOrder: 4 }]);
 	});
 
+	it("a pane gone on to a new session (/new) carries on as its row, which lists the old session no more", () => {
+		const f = fixture();
+		f.supervisor.registerExternal(
+			{ id: "pi-a", status: "online", cwd: f.dir, createdAt, sessionFile: f.file, pane: "pi-a", label: "old task" },
+			"idle",
+		);
+		f.supervisor.setInstanceMeta(ROW, { pinned: true, sortOrder: 3 });
+		// Its first prompt is not in yet, so pi has not written the new file.
+		const fresh = join(f.dir, "new.jsonl");
+		const now = "2026-11-04T10:00:00.000Z";
+		f.supervisor.registerExternal(
+			{ id: "pi-a", status: "online", cwd: f.dir, createdAt: now, sessionFile: fresh, pane: "pi-a" },
+			"idle",
+		);
+		const rows = () =>
+			listSummaries(f.supervisor).map(({ id, status, sessionFile, label, pinned, sortOrder, createdAt }) => ({
+				id,
+				status,
+				sessionFile,
+				label,
+				pinned,
+				sortOrder,
+				createdAt,
+			}));
+		expect(rows()).toEqual([
+			{
+				id: ROW,
+				status: "online",
+				sessionFile: fresh,
+				label: undefined,
+				pinned: true,
+				sortOrder: 3,
+				createdAt: now,
+			},
+		]);
+		// Ending before its first prompt leaves nothing of the old session listed.
+		f.supervisor.unregisterExternal("pi-a", "quit");
+		expect(rows().filter((r) => r.sessionFile === f.file)).toEqual([]);
+	});
+
 	it("a Silent pane another pane went on as its row is listed no more, and ends without stopping that row", () => {
 		const f = fixture();
 		states.silent(f);

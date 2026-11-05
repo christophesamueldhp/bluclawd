@@ -1115,7 +1115,8 @@ describe("shutdownPlan", () => {
 		expect(shutdownPlan({ reason: "resume", targetSessionFile: "/s/a.jsonl" }, "/s/a.jsonl")).toEqual(keep);
 		expect(shutdownPlan({ reason: "resume" }, undefined)).toEqual(keep);
 		expect(shutdownPlan({ reason: "resume", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(drop);
-		expect(shutdownPlan({ reason: "new", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(drop);
+		// /new carries the row on, as /clear does in Claude Code: the old session is left on disk only.
+		expect(shutdownPlan({ reason: "new", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(keep);
 		expect(shutdownPlan({ reason: "quit" }, "/s/a.jsonl")).toEqual({ await: false, unregister: true });
 	});
 });
