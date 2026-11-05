@@ -112,9 +112,9 @@ export class RunReports {
 		return waiter !== undefined;
 	}
 
-	/** A message from another session; false when it is from no open run. */
+	/** A Report or state from another session; false when it is neither, or from no open run. */
 	receive(message: SessionMessage): boolean {
-		const run = this.runs.get(message.from);
+		const run = message.kind === "report" || message.kind === "activity" ? this.runs.get(message.from) : undefined;
 		run?.(message);
 		return run !== undefined;
 	}
@@ -227,9 +227,12 @@ async function send(parent: string, message: SessionMessage, ctx: ExtensionConte
 	try {
 		await new OrchestratorClient().send(parent, message);
 	} catch (error) {
-		ctx.ui.notify(
-			`${message.kind === "report" ? "Report" : "State"} not sent to the orchestrator: ${error instanceof Error ? error.message : String(error)}`,
-			"warning",
-		);
+		// A replaced session's ctx throws, which must not break the chain of later sends.
+		try {
+			ctx.ui.notify(
+				`${message.kind === "report" ? "Report" : "State"} not sent to the orchestrator: ${error instanceof Error ? error.message : String(error)}`,
+				"warning",
+			);
+		} catch {}
 	}
 }
