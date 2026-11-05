@@ -1,14 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-	fauxAssistantMessage,
-	fauxProvider,
-	fauxToolCall,
-	getSystemMessageText,
-	type Provider,
-	type TranscriptContext,
-} from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall, type Provider } from "@earendil-works/pi-ai";
 import {
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
@@ -19,6 +12,8 @@ import {
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { OrchestratorClient } from "../daemon/orchestrator-client.ts";
+import { PANE_ENV, Tmux } from "../daemon/tmux.ts";
 import { agentTasks } from "../ext/_shared/agent-tasks.ts";
 import accounts from "../ext/accounts/index.ts";
 import { AccountStore } from "../ext/accounts/store.ts";
@@ -397,29 +392,21 @@ describe("interactive /accounts", () => {
 	);
 
 	it(
-		"refuses account changes while a real background subagent is running after the parent becomes idle",
+		"refuses account changes while a subagent run is open after the parent becomes idle",
 		async () => {
+			// The orchestrator runs in a pane, and its run is a pane that never runs a pi.
+			vi.stubEnv(PANE_ENV, "pi-orchestrator");
+			vi.spyOn(Tmux.prototype, "newSession").mockReturnValue("pi-run1");
+			vi.spyOn(Tmux.prototype, "end").mockImplementation(() => {});
+			vi.spyOn(Tmux.prototype, "hasSession").mockReturnValue(true);
+			vi.spyOn(OrchestratorClient.prototype, "send").mockResolvedValue(undefined);
+			cleanups.push(async () => {
+				vi.restoreAllMocks();
+			});
 			const h = await fixture({ background: true });
 			const accountsBefore = await h.store.list();
-			let release: (() => void) | undefined;
-			const gate = new Promise<void>((resolve) => {
-				release = resolve;
-			});
-			cleanups.push(async () => {
-				release?.();
-			});
 			let parentTurns = 0;
-			const reply = async (context: TranscriptContext) => {
-				if (
-					context.messages.some(
-						(message) =>
-							message.role === "system" &&
-							getSystemMessageText(message).includes("subagent operating in a fresh context"),
-					)
-				) {
-					await gate;
-					return fauxAssistantMessage("Fixture background work finished.");
-				}
+			const reply = async () => {
 				if (parentTurns++ === 0)
 					return fauxAssistantMessage([
 						fauxToolCall(
@@ -430,7 +417,7 @@ describe("interactive /accounts", () => {
 					]);
 				return fauxAssistantMessage("Fixture parent is idle.");
 			};
-			h.alpha.setResponses([reply, reply, reply, reply]);
+			h.alpha.setResponses([reply, reply]);
 			h.command("Start fixture background task");
 			await h.shown("Fixture parent is idle.");
 			await waitFor(() => {
@@ -443,7 +430,7 @@ describe("interactive /accounts", () => {
 			await h.shown("Wait for the agent and background subagents to finish");
 			expect(await h.store.list()).toEqual(accountsBefore);
 			expect(h.runtime.session.model?.id).toBe("alpha-main");
-			release?.();
+			agentTasks()?.stopAll({ owner: h.runtime.session.sessionId });
 			await waitFor(() =>
 				expect(
 					agentTasks()
