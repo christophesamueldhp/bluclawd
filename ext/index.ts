@@ -29,6 +29,7 @@ import permissions from "./permissions/index.ts";
 import promptAssist from "./prompt-assist/index.ts";
 import remote from "./remote/index.ts";
 import sandbox from "./sandbox/index.ts";
+import skills from "./skills/index.ts";
 import subagents from "./subagents/index.ts";
 import vibes from "./vibes/index.ts";
 import web from "./web/index.ts";
@@ -46,6 +47,7 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "help", factory: help },
 		{ name: "vibes", factory: vibes },
 		{ name: "paste", factory: paste },
+		{ name: "skills", factory: skills },
 		{ name: "prompt-assist", factory: promptAssist },
 		{ name: "web", factory: web },
 		{ name: "memory", factory: memory },

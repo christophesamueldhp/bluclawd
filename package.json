@@ -17,6 +17,7 @@
       "./ext/help/index.ts",
       "./ext/vibes/index.ts",
       "./ext/paste/index.ts",
+      "./ext/skills/index.ts",
       "./ext/prompt-assist/index.ts",
       "./ext/web/index.ts",
       "./ext/memory/index.ts",
