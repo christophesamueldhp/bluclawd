@@ -664,7 +664,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						{
 							type: "text",
 							text: closed
-								? `Closed ${label}. Its session is kept: a message resumes it.`
+								? `Closed ${label}.${run.pane ? " Its session is kept: a message resumes it." : ""}`
 								: run
 									? `${label} is ending already.`
 									: `No open subagent "${target}".`,
