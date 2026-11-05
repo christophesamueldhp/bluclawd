@@ -594,6 +594,7 @@ export class ServerSupervisor {
 	/** Stored rows after reaping, but for those a live or silent pane goes on as: that pane lists them. */
 	listInstances(): InstanceRecord[] {
 		this.reap(this.deps.now());
+		this.removeOrphanedRuns();
 		const paned = new Set([...this.rows].flatMap(([id, row]) => (row.pane ? [id] : [])));
 		const starting = new Map(
 			[...this.rows].flatMap(([id, row]) => (!row.pane && row.start ? [[id, row.start.record]] : [])),
@@ -677,8 +678,37 @@ export class ServerSupervisor {
 		return cloneInstance(record);
 	}
 
-	/** Remove the row. The session's .jsonl stays on disk, resumable with /resume. */
+	/** A closed run's stored row goes once tmux no longer has its orchestrator's pane, as an open
+	 *  run's pi does (closeOrphanedRun); a registered orchestrator costs no tmux call. */
+	private removeOrphanedRuns(): void {
+		const registered = new Set(this.panes().flatMap((at) => (at.pane.record.pane ? [at.pane.record.pane] : [])));
+		const gone = new Map<string, boolean>();
+		for (const { id, parent } of loadInstances(this.deps.dir)) {
+			if (!parent || registered.has(parent)) continue;
+			if (!gone.has(parent)) gone.set(parent, this.tmuxSays(parent) === "gone");
+			if (gone.get(parent)) removeInstance(this.deps.dir, id);
+		}
+	}
+
+	/** Remove the row, and the rows of the runs it orchestrates, whose pis end. The sessions' .jsonl
+	 *  stay on disk, resumable with /resume. */
 	deleteInstance(instanceId: string): boolean {
+		const at = this.addressed(instanceId);
+		const pane = at ? at.pane.record.pane : getInstance(this.deps.dir, instanceId)?.pane;
+		if (!this.deleteRow(instanceId)) return false;
+		if (pane) this.deleteRuns(pane);
+		return true;
+	}
+
+	private deleteRuns(parent: string): void {
+		const open = this.panes().filter((at) => at.pane.record.parent === parent);
+		for (const at of open) if (at.pane.record.pane) endPane(this.deps.tmux, at.pane.record.pane);
+		const stored = loadInstances(this.deps.dir).filter((instance) => instance.parent === parent);
+		for (const id of new Set([...open.map((at) => at.id), ...stored.map((instance) => instance.id)]))
+			this.deleteRow(id);
+	}
+
+	private deleteRow(instanceId: string): boolean {
 		// A self-registered session's process is its pane's; its row goes until it registers again,
 		// with the stored row it went on as. A Silent pane's too.
 		const at = this.addressed(instanceId);

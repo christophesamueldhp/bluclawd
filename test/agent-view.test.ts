@@ -14,6 +14,7 @@ import {
 import {
 	buildBands,
 	collectRows,
+	collectRuns,
 	compactAge,
 	labelFromTask,
 	queryFilter,
@@ -353,6 +354,34 @@ describe("rows", () => {
 		expect(rows.filter(queryFilter(`s:${filter}`) ?? (() => false)).map((r) => r.id)).toEqual(expected);
 	});
 
+	it("lists each open run under its orchestrator's row, this window's own too, and never as a row", () => {
+		const self: InstanceSummary = { id: "me", status: "online", pane: "p-me", cwd: HERE, activity: "idle" };
+		const run = (id: string, parent: string, status: "online" | "stopped" = "online"): InstanceSummary => ({
+			id,
+			status,
+			external: status === "online",
+			pane: `p-${id}`,
+			parent,
+			cwd: HERE,
+			label: id,
+			activity: "working",
+		});
+		const instances = [
+			...sessions,
+			run("r1", "p-work"),
+			run("r2", "p-me"),
+			run("r3", "p-gone"),
+			run("r4", "p-work", "stopped"),
+		];
+		const rows = collectRows(instances, self);
+		expect(rows.map((r) => r.id)).toEqual(["self:p-me", "ask", "work", "done", "gone"]);
+		const runs = collectRuns(instances, rows);
+		expect([...runs].map(([id, list]) => [id, list.map((r) => r.id)])).toEqual([
+			["work", ["r1"]],
+			["self:p-me", ["r2"]],
+		]);
+	});
+
 	it("s:<state> filters; plain text is a task, not a filter", () => {
 		const rows = collectRows(sessions, undefined);
 		expect(rows.filter(queryFilter("s:blocked") ?? (() => false)).map((r) => r.id)).toEqual(["ask"]);
@@ -535,6 +564,36 @@ describe("AgentView keys", () => {
 		const { view, text } = makeView();
 		for (const ch of "s:blocked") view.handleInput(ch);
 		expect(text().at(-1)).toContain("esc to clear");
+	});
+
+	it("folds an orchestrator's runs into a line under its row, which enter opens and closes", async () => {
+		const run = (id: string): InstanceSummary => ({
+			id,
+			status: "online",
+			external: true,
+			pane: `p-${id}`,
+			parent: "p-work",
+			activity: "working",
+			cwd: THERE,
+			label: `probe ${id}`,
+			createdAt: ago(1),
+		});
+		const { view, text } = makeView({ instances: [...sessions, run("r1"), run("r2")] });
+		const screen = () => text().join("\n");
+		expect(screen()).not.toContain("probe r1");
+		for (let i = 0; i < 10 && !focusedLine(view)?.includes("subagents"); i++) view.handleInput(DOWN);
+		expect(focusedLine(view)).toContain("▸ 2 subagents");
+		expect(text().at(-1)).toContain("enter to show subagents");
+		view.handleInput(ENTER);
+		expect(focusedLine(view)).toContain("▾ 2 subagents");
+		expect(screen()).toMatch(
+			/collision detection[^\n]*\n[^\n]*▾ 2 subagents[^\n]*\n[^\n]*probe r1[^\n]*\n[^\n]*probe r2/,
+		);
+		view.handleInput(DOWN);
+		expect(focusedLine(view)).toContain("probe r1");
+		view.handleInput("\x1b[A");
+		view.handleInput(ENTER);
+		expect(screen()).not.toContain("probe r1");
 	});
 
 	it("alt+N opens the Nth session in the focused session's directory", async () => {
