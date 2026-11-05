@@ -151,7 +151,7 @@ export class RowActions {
 		return this.tried(row.pinned ? "unpin" : "pin", () => this.opts.client.setMeta(row.id, { pinned: !row.pinned }));
 	}
 
-	/** ctrl+x's first press, as bluclawd's: a running session's pi ends and its row stays, stopped;
+	/** ctrl+x's first press, as bluclawd's: a live session's pi ends and its row stays, stopped;
 	 *  a running `!` command stops and keeps its row; this window's own session stops its turn. */
 	async stop(row: AgentRow): Promise<Outcome> {
 		const { shell, pane } = row;

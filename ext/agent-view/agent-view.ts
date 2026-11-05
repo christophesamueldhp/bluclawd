@@ -908,6 +908,13 @@ export class AgentView implements Component, Focusable {
 	/** ctrl+x, as bluclawd's: the first press stops (see RowActions.stop) and arms; the second
 	 *  press (within 2s) deletes. */
 	private async stopOrDelete(): Promise<void> {
+		// The armed row went (a closed run leaves its fold): this press meant it, not the row that took its focus.
+		const armed = this.armed?.key;
+		if (armed && !this.items.some((i) => i.key === armed)) {
+			this.disarm();
+			this.render_();
+			return;
+		}
 		const item = this.selected;
 		if (!item || item.kind === "more" || item.kind === "runs") return;
 		if (item.kind === "header") {
