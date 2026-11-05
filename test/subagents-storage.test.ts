@@ -12,6 +12,7 @@ import {
 	readPersistedRunRecord,
 	reconcileInterruptedRuns,
 	recordBackgroundUsageInLedger,
+	recordRunSessionUsage,
 	SUBAGENT_RUN_CUSTOM_ENTRY,
 	writeFullSubagentReport,
 	writePersistedRunRecord,
@@ -267,5 +268,28 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		expect(ledger.recordedRunIds).toEqual(["sub_bg_1", "sub_bg_1#1"]);
 		expect(ledger.usage.totalTokens).toBe(560);
 		expect(ledger.usage.cost.total).toBeCloseTo(0.004, 6);
+	});
+
+	it("keeps a run's own session total, which a resumed generation of that session carries on", () => {
+		const agentDir = makeTempDir("ledger");
+		const parentSessionId = "sess_ledger_2";
+		const tokens = (totalTokens: number, cost: number) => ({
+			...createEmptySubagentUsage(),
+			totalTokens,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
+		});
+		recordBackgroundUsageInLedger(
+			agentDir,
+			makeRecord({ runId: "sub_in_process", parentSessionId, deliveryMode: "background" }),
+		);
+		recordRunSessionUsage(agentDir, { parentSessionId, runId: "sub_tmux_1" }, tokens(100, 0.01));
+		recordRunSessionUsage(agentDir, { parentSessionId, runId: "sub_tmux_2" }, tokens(50, 0.005));
+		// Resumed into the same session file, the run's next Report holds its first generation's 100 tokens too.
+		recordRunSessionUsage(agentDir, { parentSessionId, runId: "sub_tmux_1" }, tokens(160, 0.016));
+
+		const ledger = readBackgroundUsageLedger(agentDir, parentSessionId);
+		expect(ledger.runCount).toBe(3);
+		expect(ledger.usage.totalTokens).toBe(280 + 160 + 50);
+		expect(ledger.usage.cost.total).toBeCloseTo(0.002 + 0.016 + 0.005, 6);
 	});
 });

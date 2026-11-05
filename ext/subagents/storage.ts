@@ -39,6 +39,8 @@ export interface BackgroundUsageLedger {
 	runCount: number;
 	recordedRunIds: string[];
 	usage: SubagentUsageTotals;
+	/** Each run that is a pi session of its own, by run ID: that session's usage so far, as it last reported it. */
+	sessions?: Record<string, SubagentUsageTotals>;
 }
 
 function isSafePathSegment(segment: string): boolean {
@@ -375,7 +377,16 @@ function getBackgroundLedgerPath(agentDir: string, parentSessionId: string): str
 	return join(getSubagentsRootDir(agentDir), parentSessionId, "background-usage-ledger.json");
 }
 
+/** Every run's usage the orchestrator does not count in its own totals: its runs' sessions included. */
 export function readBackgroundUsageLedger(agentDir: string, parentSessionId: string): BackgroundUsageLedger {
+	const ledger = readLedgerFile(agentDir, parentSessionId);
+	const sessions = Object.values(ledger.sessions ?? {});
+	const usage = structuredClone(ledger.usage);
+	for (const session of sessions) addSubagentUsage(usage, session);
+	return { ...ledger, runCount: ledger.runCount + sessions.length, usage };
+}
+
+function readLedgerFile(agentDir: string, parentSessionId: string): BackgroundUsageLedger {
 	const empty: BackgroundUsageLedger = {
 		parentSessionId,
 		runCount: 0,
@@ -398,7 +409,7 @@ export function recordBackgroundUsageInLedger(
 	agentDir: string,
 	record: Pick<SubagentRunRecord, "parentSessionId" | "runId" | "generation" | "usage">,
 ): BackgroundUsageLedger {
-	const current = readBackgroundUsageLedger(agentDir, record.parentSessionId);
+	const current = readLedgerFile(agentDir, record.parentSessionId);
 	// Each resumed generation of a run carries only its own usage.
 	const ledgerKey = record.generation ? `${record.runId}#${record.generation}` : record.runId;
 	if (current.recordedRunIds.includes(ledgerKey)) {
@@ -408,14 +419,30 @@ export function recordBackgroundUsageInLedger(
 	current.recordedRunIds.push(ledgerKey);
 	current.runCount = current.recordedRunIds.length;
 	addSubagentUsage(current.usage, record.usage);
-
-	const ledgerPath = getBackgroundLedgerPath(agentDir, record.parentSessionId);
-	if (ledgerPath) {
-		try {
-			writeAtomicPrivateFile(ledgerPath, `${JSON.stringify(current, null, 2)}\n`);
-		} catch {
-			// Keep in-memory ledger if disk write fails
-		}
-	}
+	writeLedgerFile(agentDir, current);
 	return current;
+}
+
+/**
+ * Keeps the usage a run's own session reported last. The session's total already holds every earlier turn and
+ * generation, so it replaces the run's previous one: each token is counted once.
+ */
+export function recordRunSessionUsage(
+	agentDir: string,
+	record: Pick<SubagentRunRecord, "parentSessionId" | "runId">,
+	usage: SubagentUsageTotals,
+): void {
+	const current = readLedgerFile(agentDir, record.parentSessionId);
+	current.sessions = { ...current.sessions, [record.runId]: usage };
+	writeLedgerFile(agentDir, current);
+}
+
+function writeLedgerFile(agentDir: string, ledger: BackgroundUsageLedger): void {
+	const ledgerPath = getBackgroundLedgerPath(agentDir, ledger.parentSessionId);
+	if (!ledgerPath) return;
+	try {
+		writeAtomicPrivateFile(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);
+	} catch {
+		// Keep in-memory ledger if disk write fails
+	}
 }
