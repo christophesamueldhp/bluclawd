@@ -848,3 +848,21 @@ describe("a phone prompt in a real pi session", () => {
 		}
 	});
 });
+
+it("reports a discovered skill's selection identity, scope, instruction path and package provenance", () => {
+	const { ctx, pi } = fakes();
+	const sourceInfo = {
+		path: "/fixture/package/review/SKILL.md",
+		scope: "project",
+		origin: "package",
+		source: "npm:fixture-skills",
+	};
+	const command = { name: "skill:review", source: "skill", description: "Review", sourceInfo };
+	const report = buildReport(ctx as never, { ...pi, getCommands: () => [command] } as never, ask);
+	expect(report.commands?.find((c) => c.name === "skill:review")).toEqual({
+		name: "skill:review",
+		source: "skill",
+		description: "Review",
+		skill: { ...sourceInfo, id: expect.stringMatching(/^[a-f0-9]{64}$/) },
+	});
+});

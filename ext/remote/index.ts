@@ -22,6 +22,7 @@ import { holdTui } from "../_shared/hold-tui.ts";
 import { remotePort } from "../_shared/settings.ts";
 import { promptContent, promptOptions } from "../agent-view/index.ts";
 import { TRUST_CHANGED } from "../permissions/index.ts";
+import { remoteSkillPrompt } from "../skills/prompt.ts";
 import { autostartDeps, autostartOn, autostartStatus, refreshAutostart, toggleAutostart } from "./autostart.ts";
 import { forwardLive, type LiveForwarder, latestOnly } from "./live.ts";
 import { pairingText } from "./message.ts";
@@ -298,9 +299,18 @@ function factory(pi: ExtensionAPI): void {
 			if (reason) return refuse(id, reason);
 		}
 		if (message.type === "prompt") {
-			const content = promptContent(message);
+			let text: string;
+			try {
+				text = remoteSkillPrompt(message.text, message.skills ?? [], pi.getCommands());
+			} catch {
+				if (id) refuse(id, "invalid_skills");
+				else report(ctx, "Selected skills are unavailable. Select them again.");
+				return;
+			}
+			const prepared = { ...message, text };
+			const content = promptContent(prepared);
 			if (id) outcomes.sent(id, content);
-			pi.sendUserMessage(content, promptOptions(message));
+			pi.sendUserMessage(content, promptOptions(prepared));
 		} else if (message.type === "command") {
 			const enter = () => commandKeys.sendKeys(pane, ["Enter"]);
 			const reason = submitCommand(message.text, ctx, tui?.(), enter);

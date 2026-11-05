@@ -88,7 +88,7 @@ export interface PaneImage {
  *  prompt or command carries the phone's `id`, which its PromptOutcome comes back by, and the
  *  `sessionFile` of the session it was sent to: a pane on another session refuses it. */
 export type PaneMessage =
-	| { type: "prompt"; text: string; images?: PaneImage[]; id?: string; sessionFile?: string }
+	| { type: "prompt"; text: string; images?: PaneImage[]; skills?: string[]; id?: string; sessionFile?: string }
 	| { type: "abort" }
 	| { type: "rename"; name: string }
 	| { type: "set_model"; provider: string; id: string }
@@ -279,8 +279,15 @@ export interface PaneReport {
 /** Why a pane did not hand a phone's prompt or command to pi: a turn runs, the Mac's prompt holds a
  *  draft or a dialog has the keyboard (commands only), pi is compacting, the pane is on another
  *  session than the one it was sent to (or left it for another before pi took it, as the daemon
- *  says), or tmux could not press Enter in the pane. */
-export type RefusedReason = "busy" | "draft" | "dialog" | "compacting" | "session_changed" | "unreachable";
+ *  says), tmux could not press Enter in the pane, or selected skills no longer load. */
+export type RefusedReason =
+	| "busy"
+	| "draft"
+	| "dialog"
+	| "compacting"
+	| "session_changed"
+	| "unreachable"
+	| "invalid_skills";
 
 /** Why a prompt never reached pi's turn: its pane went (reaped or unregistered) with it still queued,
  *  in its inbox or in pi, or pi dropped it from its queue (`dequeued`: a stopped turn, the dequeue key,
@@ -311,11 +318,21 @@ export interface PaneTask {
 	model?: string;
 }
 
+/** Discovery provenance and the identity a phone may select. */
+export interface SkillOrigin {
+	id: string;
+	scope: string;
+	path: string;
+	origin: string;
+	source: string;
+}
+
 /** A slash command, without its "/". */
 export interface PaneCommand {
 	name: string;
 	description?: string;
 	source: "builtin" | "extension" | "prompt" | "skill";
+	skill?: SkillOrigin;
 }
 
 /**

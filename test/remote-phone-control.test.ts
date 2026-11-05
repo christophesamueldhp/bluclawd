@@ -110,12 +110,9 @@ const rows: Row[] = [
 		error("command_refused"),
 	],
 	[
-		"a listed skill",
+		"a literal skill reference",
 		{ type: "prompt", text: "  /skill:pdf report.pdf" },
-		message({ type: "command", text: "  /skill:pdf report.pdf" }),
-		error("command_refused"),
-		error("command_refused"),
-		error("command_refused"),
+		...four(message({ type: "prompt", text: "  /skill:pdf report.pdf" }), notRunning),
 	],
 	...["/settings", "/tasks", "/remote-control pair", "/agent-view", "/tree", "/fork", "/model"].map(
 		(text): Row => [`the Mac-only ${text}`, { type: "prompt", text }, ...all(error("command_refused"))],
@@ -502,5 +499,55 @@ describe("phone control", () => {
 
 	it("knows no session that is not listed", () => {
 		expect(phoneSession(deps, "nope")).toBeUndefined();
+	});
+});
+
+it("keeps explicit skill identities with their prompt and intended session while refusing undiscovered choices", () => {
+	const id = "a".repeat(64);
+	const target = {
+		...session("running"),
+		report: {
+			...full,
+			commands: [
+				{
+					name: "skill:pdf",
+					source: "skill" as const,
+					skill: { id, path: "/fixture/pdf/SKILL.md", scope: "project", origin: "local", source: "local" },
+				},
+			],
+		},
+	};
+	expect(decide(target, { type: "prompt", text: "Look\n/skill:pdf", skills: [id], id: "p-1" })).toEqual({
+		message: { type: "prompt", text: "Look\n/skill:pdf", skills: [id], id: "p-1", sessionFile: "/s/running.jsonl" },
+	});
+	expect(decide(target, { type: "prompt", text: "hello", skills: ["b".repeat(64)] })).toEqual({
+		error: "invalid_skills",
+	});
+	expect(decide(session("bare"), { type: "prompt", text: "hello", skills: [id] })).toEqual({
+		error: "invalid_skills",
+	});
+});
+
+it("preserves non-skill command decisions when a draft also contains selections", () => {
+	const id = "a".repeat(64);
+	const target = {
+		...session("running"),
+		report: {
+			...full,
+			commands: [
+				...(full.commands ?? []),
+				{
+					name: "skill:review",
+					source: "skill" as const,
+					skill: { id, path: "/fixture/SKILL.md", scope: "project", origin: "local", source: "local" },
+				},
+			],
+		},
+	};
+	expect(decide(target, { type: "prompt", text: "/compact notes /skill:review", skills: [id] })).toEqual({
+		message: { type: "command", text: "/compact notes /skill:review" },
+	});
+	expect(decide(target, { type: "prompt", text: "/tasks /skill:review", skills: [id] })).toEqual({
+		error: "command_refused",
 	});
 });

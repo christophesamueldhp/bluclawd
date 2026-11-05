@@ -27,6 +27,7 @@ import {
 } from "../background-bash/foreground-shells.ts";
 import { stopTask, visibleRows } from "../background-bash/tasks-dialog.ts";
 import { projectTrust, setProjectTrust, TRUST_CYCLE } from "../permissions/index.ts";
+import { skillId } from "../skills/prompt.ts";
 import { readRunUsageLedger } from "../subagents/storage.ts";
 
 type ReportModel = PaneReport["models"][number];
@@ -123,14 +124,26 @@ export function watchTasks(check: () => void): () => void {
 export function paneCommands(pi: Pick<ExtensionAPI, "getCommands">): PaneCommand[] {
 	const commands: PaneCommand[] = [
 		...BUILTIN_SLASH_COMMANDS.map(({ name, description }) => ({ name, description, source: "builtin" as const })),
-		...pi.getCommands().map(({ name, description, source }) => ({ name, description, source })),
+		...pi.getCommands().map((command) => ({
+			name: command.name,
+			description: command.description,
+			source: command.source,
+			...(command.source === "skill" && command.sourceInfo
+				? { skill: { id: skillId(command), ...command.sourceInfo } }
+				: {}),
+		})),
 	];
 	return commands
 		.filter(phoneMayRun)
 		.slice(0, COMMANDS_MAX)
-		.map(({ name, description, source }) => {
+		.map(({ name, description, source, skill }) => {
 			const text = description?.trim();
-			return text ? { name, description: capped(text, DESCRIPTION_MAX), source } : { name, source };
+			return {
+				name,
+				source,
+				...(text ? { description: capped(text, DESCRIPTION_MAX) } : {}),
+				...(skill ? { skill } : {}),
+			};
 		});
 }
 

@@ -12,6 +12,7 @@ import { storedPending } from "./chat.js";
 const KEY = "bluclawd-pending:";
 /** Followed by a session's row id: its reply box's unsent text. */
 const DRAFT_KEY = "bluclawd-draft:";
+const SKILLS_KEY = "bluclawd-draft-skills:";
 
 /**
  * `storage`: asked for at each use, as merely reading `localStorage` throws where it is blocked.
@@ -55,9 +56,20 @@ export function pendingStore(storage) {
 				return "";
 			}
 		},
-		/** None kept once it is empty. @param {string} id a session's row id @param {string} text */
-		saveDraft(id, text) {
+		/** @param {string} id @returns {import("./skills.js").Selection[]} */
+		draftSkills(id) {
 			try {
+				const stored = JSON.parse(storage().getItem(SKILLS_KEY + id) ?? "[]");
+				return Array.isArray(stored) ? stored : [];
+			} catch {
+				return [];
+			}
+		},
+		/** None kept once it is empty. @param {string} id a session's row id @param {string} text @param {import("./skills.js").Selection[]} [selections] */
+		saveDraft(id, text, selections = []) {
+			try {
+				if (selections.length) storage().setItem(SKILLS_KEY + id, JSON.stringify(selections));
+				else storage().removeItem(SKILLS_KEY + id);
 				if (text) storage().setItem(DRAFT_KEY + id, text);
 				else storage().removeItem(DRAFT_KEY + id);
 			} catch {}
@@ -65,11 +77,15 @@ export function pendingStore(storage) {
 		/** Only those of the rows listed: the others were deleted. @param {string[]} ids */
 		prune(ids) {
 			try {
-				const listed = new Set(ids.flatMap((id) => [KEY + id, DRAFT_KEY + id]));
+				const listed = new Set(ids.flatMap((id) => [KEY + id, DRAFT_KEY + id, SKILLS_KEY + id]));
 				const keys = [];
 				for (let i = 0; i < storage().length; i++) keys.push(storage().key(i));
 				for (const key of keys) {
-					if ((key?.startsWith(KEY) || key?.startsWith(DRAFT_KEY)) && !listed.has(key)) storage().removeItem(key);
+					if (
+						(key?.startsWith(KEY) || key?.startsWith(DRAFT_KEY) || key?.startsWith(SKILLS_KEY)) &&
+						!listed.has(key)
+					)
+						storage().removeItem(key);
 				}
 			} catch {}
 		},

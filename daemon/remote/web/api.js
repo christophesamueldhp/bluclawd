@@ -113,11 +113,16 @@ export const api = {
 	 * `promptId`: what its outcome comes back by, in the session's status. `lifetime`: the daemon's,
 	 * which it is asked about the prompt by.
 	 * @param {string} id @param {string} text @param {{ mimeType: string, data: string }[]} images base64
-	 * @param {string} promptId
+	 * @param {string} promptId @param {string[]} [skills]
 	 * @returns {Promise<{ pane?: string, lifetime?: string }>}
 	 */
-	prompt: (id, text, images, promptId) =>
-		call("POST", `${session(id)}/prompt`, { text, ...(images.length ? { images } : {}), id: promptId }),
+	prompt: (id, text, images, promptId, skills) =>
+		call("POST", `${session(id)}/prompt`, {
+			text,
+			...(images.length ? { images } : {}),
+			id: promptId,
+			...(skills?.length ? { skills } : {}),
+		}),
 	/**
 	 * What became of the prompts the phone still waits on, by the lifetime of the daemon that accepted each
 	 * when the phone kept it.

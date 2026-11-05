@@ -5,7 +5,9 @@
  * and no requests: app.js fetches, renders, runs the timers it keeps here, and drops a chat no longer
  * open.
  */
+
 import { giveUp, promptKey, sentText, settle, shellLine } from "./live.js";
+import { createSkillDraft } from "./skills.js";
 
 /**
  * @typedef {import("./app.js").Message} Message @typedef {import("./app.js").LiveSnapshot} LiveSnapshot
@@ -19,7 +21,7 @@ import { giveUp, promptKey, sentText, settle, shellLine } from "./live.js";
  * daemon's, as it answered that it has it, which the daemon is asked about it by. `acceptedAt`: set
  * instead by an older phone (0.0.52), which kept no lifetime, once the daemon had it. `outcome`: what its
  * pane reported of it, a pane that reports outcomes.
- * @typedef {{ id: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, lifetime?: string, acceptedAt?: number, outcome?: "taken" | "queued" }} Pending
+ * @typedef {{ id: string, text: string, prompt: string, images: Attachment[], before: number, sentAt: number, started?: boolean, last: string, lifetime?: string, acceptedAt?: number, outcome?: "taken" | "queued", skillDraft?: import("./skills.js").SkillDraft }} Pending
  */
 
 /** A reply's text and thinking, held until a page has its entry. @typedef {{ entryId: string, text: string, thinking?: string }} Held */
@@ -42,6 +44,7 @@ function promptId() {
 export function openChat(id, kept = []) {
 	return {
 		id,
+		skillDraft: createSkillDraft(),
 		/** @type {Message[]} */ messages: [],
 		messagesLoaded: false,
 		/** Older messages are left before the first one shown. */
@@ -188,8 +191,12 @@ function olderBuild(chat) {
  */
 function written(chat, entry) {
 	if (entry.outcome !== "taken") return false;
+	const name = /^\/(?!skill:)([\w.:-]+)(?:\s|$)/.exec(entry.prompt.trimStart())?.[1];
+	// Built-ins still use the pane's command route even when the draft contains selected skills.
+	const builtin = name !== undefined && ["compact", "new", "reload"].includes(name);
 	const command =
-		!entry.images.length && (/^\/[\w.:-]+(?:\s|$)/.test(entry.prompt.trimStart()) || shellLine(entry.prompt));
+		!entry.images.length &&
+		(shellLine(entry.prompt) || (name !== undefined && (builtin || !entry.skillDraft?.selections.length)));
 	return command || (chat.messagesLoaded && (chat.messages.at(-1)?.id ?? "") !== entry.last);
 }
 
