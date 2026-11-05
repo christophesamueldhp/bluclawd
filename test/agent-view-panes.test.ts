@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { listSummaries } from "../daemon/handler.ts";
 import type { ResumeSpec, StartSpec } from "../daemon/ipc/protocol.ts";
 import type { InstanceSummary, OrchestratorClient } from "../daemon/orchestrator-client.ts";
-import { type AgentRow, collectRows, rowFromShell } from "../daemon/rows.ts";
+import { type AgentRow, collectRows, otherRows, rowFromShell } from "../daemon/rows.ts";
 import { HIDE_ENV, OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../daemon/tmux.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
@@ -875,6 +875,23 @@ describe("agent view in pane mode", () => {
 			["pi-self", false, false],
 		]);
 		expect(rows[0].sortOrder).toBe(2);
+	});
+
+	it("counts the session a pane left in its footer, leaving out only the row the pane is registered as", () => {
+		// Pane pi-self went on with /new as row q; the session it left is stored under the pane's name.
+		const left: InstanceSummary = {
+			id: "pi-self",
+			status: "stopped",
+			outcome: "done",
+			cwd: HERE,
+			sessionFile: "/s/a.jsonl",
+		};
+		const own = paneRow("q", { pane: "pi-self" });
+		const rows = otherRows([left, own, paneRow("pi-a")], "pi-self");
+		expect(rows.map((r) => [r.id, r.state])).toEqual([
+			["pi-self", "done"],
+			["pi-a", "working"],
+		]);
 	});
 
 	it("lists a pane not registered yet (blank after /new) as unlisted, never as the stored row under its name", () => {

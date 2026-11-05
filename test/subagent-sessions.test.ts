@@ -260,6 +260,21 @@ describe.skipIf(!hasTmux)("opening a run and going back to its orchestrator", ()
 		real.tmux.sendKeys(run, ["Left"]);
 		await waitFor(() => expect(real.shown()).toBe(orchestrator));
 	});
+
+	it("opened from agent view, ← on its empty prompt goes back to agent view, the run focused under its orchestrator", async () => {
+		const { real, orchestrator, run } = await reported();
+		const screen = (pane: string) => real.tmux.capture(pane, 50).join("\n");
+		real.tmux.sendKeys(orchestrator, ["Left"]);
+		await waitFor(() => expect(screen(orchestrator)).toContain("▸ 1 subagent"));
+		real.tmux.sendKeys(orchestrator, ["Down", "Enter"]);
+		await waitFor(() => expect(screen(orchestrator)).toContain("▾ 1 subagent"));
+		real.tmux.sendKeys(orchestrator, ["Down", "Enter"]);
+		await waitFor(() => expect(real.shown()).toBe(run));
+
+		real.tmux.sendKeys(run, ["Left"]);
+		await waitFor(() => expect(screen(run)).toMatch(/▾ 1 subagent[^\n]*\n[^\n]*probe-run/));
+		expect(real.shown()).toBe(run);
+	});
 });
 
 describe.skipIf(!hasTmux)("messages between sessions", () => {

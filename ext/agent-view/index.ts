@@ -19,7 +19,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { PaneHeartbeat, PaneMessage } from "../../daemon/ipc/protocol.ts";
 import { type InstanceSummary, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
-import { collectRows, labelFromTask } from "../../daemon/rows.ts";
+import { labelFromTask, otherRows } from "../../daemon/rows.ts";
 import { lastLine, textOf, toolActivity } from "../../daemon/session-state.ts";
 import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, PARENT_ENV, Tmux } from "../../daemon/tmux.ts";
 import { agentTasks, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
@@ -244,8 +244,15 @@ const agentView: InlineExtension = {
 		// Pane mode: this pi runs in a tmux session of agent view's own (tmux.ts).
 		const pane = Tmux.currentPane();
 		const panes = new Tmux();
-		// A run's orchestrator (ADR-0006): ← goes back to it, as runs are not in agent view.
+		// A run's orchestrator (ADR-0006): ← goes back to it, or to agent view when the run was opened there.
 		const parent = process.env[PARENT_ENV] || undefined;
+		const backToView = (): boolean => {
+			try {
+				return !!pane && panes.openedFromView(pane);
+			} catch {
+				return false;
+			}
+		};
 		let launched = false;
 		// What the turn in progress is doing, for this session's row in other windows.
 		let liveDetail: string | undefined;
@@ -390,7 +397,7 @@ const agentView: InlineExtension = {
 
 		/** The `← for agents` footer hint: `← N agents` while sessions wait on you, `← N done`
 		 *  briefly when some finish. Only reads — it never starts the daemon. */
-		const startPill = (ctx: ExtensionContext): (() => void) => {
+		const startPill = (ctx: ExtensionContext, pane: string): (() => void) => {
 			const client = new OrchestratorClient();
 			let finished: Set<string> | undefined;
 			let flashUntil = 0;
@@ -417,10 +424,7 @@ const agentView: InlineExtension = {
 				}
 				let text = theme.fg("dim", "← for agents");
 				try {
-					// Its own row: a resumed session's keeps the id it had in another pane.
-					const rows = collectRows(await client.list(), undefined).filter(
-						(r) => r.id !== registration?.id && !(pane && r.pane === pane),
-					);
+					const rows = otherRows(await client.list(), pane);
 					const waiting = rows.filter((r) => r.state === "needs").length;
 					const done = new Set(rows.filter((r) => r.state === "done" || r.state === "failed").map((r) => r.id));
 					const fresh = finished ? [...done].filter((id) => !finished?.has(id)).length : 0;
@@ -503,7 +507,7 @@ const agentView: InlineExtension = {
 			delete process.env[NORMAL_ENV];
 			syncEndOnDetach(ctx);
 			stopPill?.();
-			const offPill = startPill(ctx);
+			const offPill = startPill(ctx, pane);
 			if (!autocompleteAdded) {
 				autocompleteAdded = true;
 				ctx.ui.addAutocompleteProvider(withoutAgentViewCommand);
@@ -602,7 +606,8 @@ const agentView: InlineExtension = {
 				}
 				if (Date.now() - editedAt >= LEFT_EDIT_MS || (armedAt && Date.now() - armedAt < LEFT_ARM_MS)) {
 					disarm();
-					if (!parent) pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
+					if (!parent || backToView())
+						pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
 					else {
 						try {
 							panes.switchTo(parent);
@@ -614,7 +619,10 @@ const agentView: InlineExtension = {
 				}
 				const at = Date.now();
 				armedAt = at;
-				leftHint = theme.fg("dim", parent ? "Press ← again to go back" : "Press ← again to open agents");
+				leftHint = theme.fg(
+					"dim",
+					parent && !backToView() ? "Press ← again to go back" : "Press ← again to open agents",
+				);
 				paintPill?.();
 				setTimeout(() => {
 					if (armedAt === at) disarm();
@@ -712,6 +720,11 @@ const agentView: InlineExtension = {
 								current: pane,
 								switchTo: (name) => {
 									const ending = blank(ctx);
+									try {
+										panes.setOpenedFromView(name, true);
+									} catch {
+										// Its ← then goes to its orchestrator, if it is a run.
+									}
 									panes.switchTo(name);
 									if (ending) panes.kill(pane);
 								},

@@ -300,6 +300,23 @@ export class Tmux {
 		this.run(["set-option", "-t", `=${name}:`, "@bluclawd_view_ready", "1"]);
 	}
 
+	/** Whether a run in `name` was last opened from agent view, so its ← goes back there rather than to
+	 *  its orchestrator. */
+	setOpenedFromView(name: string, fromView: boolean): void {
+		this.run([
+			"set-option",
+			...(fromView ? [] : ["-u"]),
+			"-t",
+			`=${name}:`,
+			"@bluclawd_back",
+			...(fromView ? ["view"] : []),
+		]);
+	}
+
+	openedFromView(name: string): boolean {
+		return this.run(["display-message", "-p", "-t", `=${name}:`, "#{@bluclawd_back}"]).trim() === "view";
+	}
+
 	/** Whether `name`'s agent view has drawn; throws once the session is gone. */
 	viewReady(name: string): boolean {
 		return this.run(["display-message", "-p", "-t", `=${name}:`, "#{@bluclawd_view_ready}"]).trim() === "1";

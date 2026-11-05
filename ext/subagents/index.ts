@@ -291,6 +291,17 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			agentDir: resolveAgentDir,
 		});
 
+		/** Switches this terminal to a run's pane; opened from here, its ← comes back here, not to agent view. */
+		const showRun = (name: string): void => {
+			const tmux = new Tmux();
+			try {
+				tmux.setOpenedFromView(name, false);
+			} catch {
+				// Its ← may then go to agent view.
+			}
+			tmux.switchTo(name);
+		};
+
 		/**
 		 * Switches this terminal to a run of the current parent scope, its own pi session (ADR-0006); any other run is
 		 * refused with a notice.
@@ -313,7 +324,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				return undefined;
 			}
 			try {
-				new Tmux().switchTo(run.pane);
+				showRun(run.pane);
 			} catch (error) {
 				ctx.ui.notify(`Could not open ${run.name ?? runId}: ${Tmux.reason(error)}`, "warning");
 			}
@@ -335,7 +346,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const reopened = scheduler.getRun(runId)?.pane;
 				try {
 					// The user's own key asked for it, so the terminal moves to the run.
-					if (reopened) new Tmux().switchTo(reopened);
+					if (reopened) showRun(reopened);
 				} catch {
 					// No terminal shows this pane.
 				}

@@ -393,7 +393,7 @@ and wakes it when it is waiting. There is no `/agents` command.
 Open runs show in the panel below the status line (name, role, model, working / idle / needs input,
 elapsed time, last report), and in `/tasks` with the closed runs of the session. ↓ on an empty prompt
 moves into the panel; Enter on a run, there or in `/tasks`, switches your terminal to it, and ← on its
-empty prompt switches back to the orchestrator. Only your keys switch the terminal. What you type in a
+empty prompt switches back to the orchestrator (to agent view for a run opened from there). Only your keys switch the terminal. What you type in a
 run is noted to the orchestrator without starting its turn.
 
 The orchestrator's tools:

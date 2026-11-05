@@ -382,6 +382,23 @@ describe("rows", () => {
 		]);
 	});
 
+	it("lists a run's own window under its orchestrator, as this window's row", () => {
+		const run: InstanceSummary = {
+			id: "r1",
+			status: "online",
+			external: true,
+			pane: "p-r1",
+			parent: "p-work",
+			cwd: HERE,
+			label: "probe",
+			activity: "idle",
+		};
+		const self: InstanceSummary = { ...run, external: undefined };
+		const rows = collectRows([...sessions, run], self);
+		expect(rows.map((r) => r.id)).toEqual(["ask", "work", "done", "gone"]);
+		expect(collectRuns([...sessions, run], rows, self).get("work")).toMatchObject([{ id: "r1", self: true }]);
+	});
+
 	it("s:<state> filters; plain text is a task, not a filter", () => {
 		const rows = collectRows(sessions, undefined);
 		expect(rows.filter(queryFilter("s:blocked") ?? (() => false)).map((r) => r.id)).toEqual(["ask"]);
@@ -594,6 +611,43 @@ describe("AgentView keys", () => {
 		view.handleInput("\x1b[A");
 		view.handleInput(ENTER);
 		expect(screen()).not.toContain("probe r1");
+	});
+
+	it("reaches its own runs' line when this window's session is the only one listed", () => {
+		const self: InstanceSummary = { id: "me", status: "online", pane: "p-me", cwd: HERE, activity: "working" };
+		const run: InstanceSummary = {
+			id: "r1",
+			status: "online",
+			external: true,
+			pane: "p-r1",
+			parent: "p-me",
+			activity: "idle",
+			cwd: HERE,
+			label: "probe r1",
+		};
+		const { view } = makeView({ self, instances: [run] });
+		view.handleInput(DOWN);
+		expect(focusedLine(view)).toContain("▸ 1 subagent");
+		view.handleInput(ENTER);
+		view.handleInput(DOWN);
+		expect(focusedLine(view)).toContain("probe r1");
+	});
+
+	it("opened in a run, shows its orchestrator's runs with the run focused", () => {
+		const run: InstanceSummary = {
+			id: "r1",
+			status: "online",
+			external: true,
+			pane: "p-r1",
+			parent: "p-work",
+			activity: "idle",
+			cwd: THERE,
+			label: "probe r1",
+			createdAt: ago(1),
+		};
+		const { view, text } = makeView({ self: { ...run, external: undefined }, instances: [...sessions, run] });
+		expect(focusedLine(view)).toContain("probe r1");
+		expect(text().join("\n")).toMatch(/collision detection[^\n]*\n[^\n]*▾ 1 subagent[^\n]*\n[^\n]*probe r1/);
 	});
 
 	it("alt+N opens the Nth session in the focused session's directory", async () => {
