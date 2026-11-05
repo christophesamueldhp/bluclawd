@@ -69,6 +69,8 @@ export interface PanelActions {
 /**
  * The panel as a TUI component that can take the keyboard from the prompt: ↑/↓ pick a row, `x` stops or
  * dismisses it, Enter opens it, Esc gives the keyboard back. Any other key goes back to the prompt with it.
+ * Under pistatusline it renders nothing itself: its `lines` go out as a status, which pistatusline draws below
+ * the status line, and `changed` republishes them whenever the selection or the focus moves.
  */
 export function createPanel(options: {
 	tui: TUI;
@@ -77,6 +79,10 @@ export function createPanel(options: {
 	waitingFor: () => number;
 	now: () => number;
 	actions: PanelActions;
+	/** Whether the panel draws its lines below the prompt itself, as under pi's own footer. */
+	belowPrompt: boolean;
+	/** Called after the selection or the focus moved. */
+	changed: () => void;
 }) {
 	const { tui, theme, actions } = options;
 	// The selection follows its run; `at` is where it last was, for the nearest row once that run leaves.
@@ -104,6 +110,8 @@ export function createPanel(options: {
 			focus(): boolean;
 			/** Gives the keyboard back once the panel has no rows left. */
 			sync(): void;
+			/** What the panel shows, the focused row marked; none while it has no rows. */
+			lines(width: number): string[];
 		} = {
 		focused: false,
 		focus() {
@@ -112,7 +120,7 @@ export function createPanel(options: {
 			returnTo = focusedComponent(tui) ?? null;
 			select(shown, 0);
 			tui.setFocus(panel);
-			tui.requestRender();
+			options.changed();
 			return true;
 		},
 		sync() {
@@ -137,9 +145,10 @@ export function createPanel(options: {
 				release();
 				returnTo?.handleInput?.(data);
 			}
-			tui.requestRender();
+			options.changed();
 		},
-		render: (width) => {
+		render: (width) => (options.belowPrompt ? panel.lines(width) : []),
+		lines: (width) => {
 			const runs = options.runs();
 			return renderPanel({
 				runs,

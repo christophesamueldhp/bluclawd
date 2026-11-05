@@ -1,5 +1,6 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
+import { STATUS_KEYS } from "../ext/_shared/status-keys.ts";
 import { createSubagentTui, gate, launch, REPORT, type SubagentTui } from "./helpers/subagent-tui.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -12,15 +13,15 @@ afterEach(() => {
 const row = (t: SubagentTui, name: string) => t.panel().find((line) => line.trim().startsWith(`${name} `));
 const prompt = (t: SubagentTui, text = "Delegate.") => t.session.prompt(text, { expandPromptTemplates: false });
 
-describe("the run panel below the prompt", () => {
+describe("the run panel below the status line", () => {
 	it("shows nothing when there are no runs", async () => {
 		tui = await createSubagentTui();
 		tui.script([() => fauxAssistantMessage("Nothing to delegate.")]);
 		await prompt(tui, "Hello.");
-		expect(tui.panel()).toEqual([]);
+		expect(tui.status(STATUS_KEYS.subagents)).toBeUndefined();
 	});
 
-	it("shows a background run below the prompt with its name, agent, model and status", async () => {
+	it("shows a background run below the status line with its name, agent, model and status", async () => {
 		tui = await createSubagentTui();
 		const child = gate();
 		tui.script([launch(["scout"], { background: true })], async () => {
@@ -29,11 +30,31 @@ describe("the run panel below the prompt", () => {
 		});
 		await prompt(tui);
 
-		expect(tui.widget("subagents:panel")?.placement).toBe("belowEditor");
 		const scout = await waitFor(() => row(tui!, "scout") ?? false);
 		expect(scout).toContain("explorer");
 		expect(scout).toContain("faux-tool/faux-main");
 		expect(scout).toMatch(/running|starting/);
+		// Nothing sits between the prompt and the status line.
+		expect(tui.widget("subagents:panel")?.lines ?? []).toEqual([]);
+		child.open();
+	});
+
+	it("stays below the prompt, with a one-line count in the footer, under pi's own footer", async () => {
+		tui = await createSubagentTui({ pistatusline: false });
+		const child = gate();
+		tui.script([launch(["scout"], { background: true })], async () => {
+			await child.wait;
+			return fauxAssistantMessage(REPORT);
+		});
+		await prompt(tui);
+
+		const scout = await waitFor(() =>
+			tui!.widget("subagents:panel")?.lines.find((line) => line.trim().startsWith("scout ")),
+		);
+		expect(scout).toContain("explorer");
+		expect(tui.widget("subagents:panel")?.placement).toBe("belowEditor");
+		expect(tui.status(STATUS_KEYS.subagents)).toBe("1 subagent");
+		expect(tui.panel()).toEqual([]);
 		child.open();
 	});
 
@@ -48,7 +69,7 @@ describe("the run panel below the prompt", () => {
 		await waitFor(() => row(tui!, "scout") ?? false);
 
 		tui.advance(12_000);
-		expect(row(tui, "scout")).toMatch(/\b1\ds\b/);
+		await waitFor(() => /\b1\ds\b/.test(row(tui!, "scout") ?? ""));
 
 		child.open();
 		const done = await waitFor(() => row(tui!, "scout")?.includes("completed") && row(tui!, "scout"));
@@ -124,6 +145,7 @@ describe("the run panel below the prompt", () => {
 		tui.advance(25_000);
 		expect(row(tui, "scout")).toBeDefined();
 		tui.advance(6_000);
-		expect(tui.panel()).toEqual([]);
+		await waitFor(() => tui!.panel().length === 0);
+		expect(tui.status(STATUS_KEYS.subagents)).toBeUndefined();
 	});
 });

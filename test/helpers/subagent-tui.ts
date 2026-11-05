@@ -11,7 +11,7 @@ import {
 import { type ExtensionFactory, type ExtensionUIContext, initTheme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { stripAnsi } from "../../daemon/ansi.ts";
-import { SUBAGENT_PANEL_WIDGET } from "../../ext/subagents/panel.ts";
+import { STATUS_KEYS } from "../../ext/_shared/status-keys.ts";
 import { createParentSessionWithSubagents } from "./subagent-session.ts";
 
 type Rendered = Component & { dispose?(): void; focused?: boolean };
@@ -22,6 +22,11 @@ const plainTheme = new Proxy(
 	{},
 	{ get: (_target, prop) => (prop === "then" ? undefined : (...args: unknown[]) => args.at(-1)) },
 ) as ExtensionUIContext["theme"];
+
+/** Stands in for pistatusline, which draws the footer and each multi-line status as a block below its chips. */
+const pistatusline: ExtensionFactory = (pi) => {
+	pi.registerCommand("pistatusline", { description: "pistatusline", handler: async () => {} });
+};
 
 /** A child's report in the shape its contract asks for. */
 export const REPORT = "### Scope\n- `a.ts`\n### Summary\nDone.\n### Evidence\n- `a.ts:1`\n### Blockers\n- none";
@@ -81,6 +86,8 @@ export async function createSubagentTui(
 		/** Tools the orchestrator has besides the subagent tools, and can give its runs. */
 		extraTools?: Parameters<typeof createParentSessionWithSubagents>[0]["extraTools"];
 		batchWindowMs?: number;
+		/** Whether pistatusline draws the footer; on by default. */
+		pistatusline?: boolean;
 	} = {},
 ) {
 	initTheme("dark");
@@ -204,7 +211,7 @@ export async function createSubagentTui(
 	const { session, faux } = await createParentSessionWithSubagents({
 		cwd,
 		agentDir,
-		extensions: options.extensions,
+		extensions: [...(options.pistatusline === false ? [] : [pistatusline]), ...(options.extensions ?? [])],
 		extensionsBefore: options.extensionsBefore,
 		extraTools: options.extraTools,
 		batchWindowMs: options.batchWindowMs ?? 15,
@@ -240,8 +247,15 @@ export async function createSubagentTui(
 			};
 			faux.setResponses(Array.from({ length: 50 }, () => next));
 		},
-		/** The subagent panel below the prompt as plain lines; empty when it shows nothing. */
-		panel: (width = 100) => lines(widgets.get(SUBAGENT_PANEL_WIDGET)?.component, width) ?? [],
+		/** The subagent panel, the multi-line status pistatusline draws below its chips, as plain lines; empty when none. */
+		panel: () => {
+			const text = statuses.get(STATUS_KEYS.subagents);
+			return text?.includes("\n")
+				? stripAnsi(text)
+						.split("\n")
+						.filter((line) => line !== "")
+				: [];
+		},
 		/** A widget's plain lines and placement, if one is mounted under `key`. */
 		widget: (key: string, width = 100) => {
 			const mounted = widgets.get(key);
