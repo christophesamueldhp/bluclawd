@@ -4,6 +4,7 @@ import { remoteSessions } from "../daemon/remote/sessions.ts";
 import { collectRows } from "../daemon/rows.ts";
 import {
 	conversation,
+	DEFAULT_EXTENSIONS,
 	type FauxRequest,
 	hasTmux,
 	type RealPi,
@@ -187,5 +188,59 @@ describe.skipIf(!hasTmux)("a background run, as a pi session of its own", () => 
 		real.tmux.sendKeys(orchestrator, ["hello", "Enter"]);
 		const fresh = (await real.waitForRequests("main", 3))[2];
 		expect(said(fresh)).toEqual(["hello"]);
+	});
+});
+
+describe.skipIf(!hasTmux)("opening a run and going back to its orchestrator", () => {
+	let pi: RealPi | undefined;
+	afterEach(async () => {
+		await pi?.stop();
+		pi = undefined;
+	});
+
+	/** An orchestrator pane, shown in a terminal, whose background run `probe-run` has reported. */
+	async function reported(extensions?: string[]) {
+		const real = await startRealPi({ extensions });
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around.", background: true } },
+			{ text: "waiting for probe-run" },
+			{ text: "read the report" },
+		]);
+		real.script("probe-run", [{ text: "First look." }]);
+		const orchestrator = real.start(["--", "delegate the look"]);
+		real.attach(orchestrator);
+		await real.waitForRequests("main", 3);
+		const run = (await real.rows()).find((row) => row.label === "probe-run")?.pane ?? "";
+		await waitFor(() => expect(real.tmux.capture(orchestrator, 50).join("\n")).toContain("read the report"));
+		return { real, orchestrator, run };
+	}
+
+	it("Enter on the panel's row switches the terminal to the run, which nothing else does", async () => {
+		const { real, orchestrator, run } = await reported();
+		expect(real.shown()).toBe(orchestrator);
+
+		real.tmux.sendKeys(orchestrator, ["Down", "Enter"]);
+		await waitFor(() => expect(real.shown()).toBe(run));
+	});
+
+	it("Enter on the run in /tasks switches the terminal to it", async () => {
+		// /tasks is background-bash's.
+		const { real, orchestrator, run } = await reported([...DEFAULT_EXTENSIONS, "background-bash"]);
+
+		real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
+		await waitFor(() => expect(real.tmux.capture(orchestrator, 50).join("\n")).toContain("Local agents"));
+		real.tmux.sendKeys(orchestrator, ["Enter"]);
+		await waitFor(() => expect(real.shown()).toBe(run));
+	});
+
+	it("says it is a subagent of its orchestrator, and ← on its empty prompt switches back there", async () => {
+		const { real, orchestrator, run } = await reported();
+		await waitFor(() => expect(real.tmux.capture(run, 50).join("\n")).toContain("subagent of delegate the look"));
+		real.tmux.sendKeys(orchestrator, ["Down", "Enter"]);
+		await waitFor(() => expect(real.shown()).toBe(run));
+
+		real.tmux.sendKeys(run, ["Left"]);
+		await waitFor(() => expect(real.shown()).toBe(orchestrator));
 	});
 });

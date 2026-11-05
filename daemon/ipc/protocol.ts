@@ -105,9 +105,25 @@ export type PaneMessage =
  *  `report`: a run's last message of a turn, to its orchestrator. `activity`: what a run is doing
  *  now, to its orchestrator, each time that changes; `dialog`: the title of the prompt it waits on. */
 export type SessionMessage = { type: "session_message"; from: string; name?: string } & (
-	| { kind: "report"; text: string }
+	| {
+			kind: "report";
+			text: string;
+			/** The run's session usage so far, as pi totals it. Each report repeats the whole total. */
+			usage?: SessionUsage;
+	  }
 	| { kind: "activity"; activity: AgentActivity; dialog?: string }
 );
+
+/** A session's tokens and cost. */
+export interface SessionUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	totalTokens: number;
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+	hasUnknownCost: boolean;
+}
 
 /** Queue a message for a self-registered session. */
 export interface SendRequest {

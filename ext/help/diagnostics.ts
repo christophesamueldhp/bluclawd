@@ -50,7 +50,7 @@ export function formatStatus(
 	lines.push(`${dim("Working directory:")} ${data.cwd}`);
 	lines.push(`${dim("Project trust:")} ${data.projectTrusted ? "trusted" : "not trusted"} ${dim("(/trust)")}`);
 	lines.push(`${dim("Trust default:")} ${data.defaultProjectTrust} ${dim("(alt+m)")}`);
-	if (data.backgroundSubagents) lines.push("", theme.bold("Background subagents"), data.backgroundSubagents);
+	if (data.backgroundSubagents) lines.push("", theme.bold("Subagents"), data.backgroundSubagents);
 	lines.push("", dim("Session file, messages, tokens and cost: /session · context window usage: /context"));
 	return lines;
 }

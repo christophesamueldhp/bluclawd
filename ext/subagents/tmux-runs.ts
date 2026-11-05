@@ -18,6 +18,7 @@ import { ForegroundActivity } from "../agent-view/self-registration.ts";
 import type { AgentDefinition } from "./definitions.ts";
 import { NOT_APPROVAL } from "./messages.ts";
 import type { SubagentRunnerExecuteParams, SubagentRunnerOutcome } from "./runs.ts";
+import { type SubagentUsageTotals, sessionUsage } from "./usage.ts";
 
 /** What a run is started as: its role and choices, resolved. */
 export interface RunLaunch {
@@ -126,6 +127,8 @@ export interface TmuxRunDeps {
 	notify(report: RunReport): void;
 	/** The run started waiting on a prompt in its own session: the user is told in the orchestrator's. */
 	needsInput(dialog: string | undefined): void;
+	/** The run's session usage so far, from its latest Report. */
+	usage(totals: SubagentUsageTotals): void;
 }
 
 /**
@@ -148,6 +151,7 @@ export async function executeTmuxRun(
 			return;
 		}
 		last = message.text;
+		if (message.usage) deps.usage(message.usage);
 		controller.updateProgress(message.text);
 		if (!deps.reports.take(record.runId, message)) deps.notify(message);
 	});
@@ -212,6 +216,7 @@ export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefi
 			from: pane,
 			name: pi.getSessionName(),
 			text,
+			usage: sessionUsage(ctx.sessionManager.getEntries()),
 		};
 		sending = sending.then(() => send(parent, report, ctx));
 		await sending;
