@@ -332,6 +332,7 @@ const agentView: InlineExtension = {
 				label: ctx.sessionManager.getSessionName() ?? selfLabel(ctx),
 				sessionFile,
 				sessionId: ctx.sessionManager.getSessionId(),
+				...(process.env[PARENT_ENV] ? { parent: process.env[PARENT_ENV] } : {}),
 			};
 		};
 

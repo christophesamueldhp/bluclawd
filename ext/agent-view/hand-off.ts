@@ -17,6 +17,8 @@ export interface BackgroundableSession {
 	label?: string;
 	sessionFile: string;
 	sessionId?: string;
+	/** A run's orchestrator pane. */
+	parent?: string;
 }
 
 /** How long the helper waits for pi to exit; past this it gives up rather than add a second writer. */

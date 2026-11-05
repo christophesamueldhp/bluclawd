@@ -20,9 +20,11 @@ export type SubagentLifecycleStatus =
 	| "completed"
 	| "failed"
 	| "cancelled"
-	| "interrupted";
+	| "interrupted"
+	/** Its pi was ended and its session kept: it can be resumed (a run in tmux). */
+	| "closed";
 
-export type SubagentTerminalStatus = "completed" | "failed" | "cancelled" | "interrupted";
+export type SubagentTerminalStatus = "completed" | "failed" | "cancelled" | "interrupted" | "closed";
 
 export type SubagentStopSource = "caller" | "user" | "model" | "remote" | "session_invalidated";
 
@@ -154,13 +156,20 @@ export interface SubagentRunSchedulerOptions<C = unknown> {
 	/** Durably stores a settled run before it turns terminal; a throw fails the run. */
 	onFinalize?: (record: Readonly<SubagentRunRecord>) => Promise<Readonly<SubagentRunRecord>>;
 	executeRun: (params: SubagentRunnerExecuteParams & { context?: C }) => Promise<SubagentRunnerOutcome>;
+	/** What a stopped run ends as; `cancelled` when omitted. */
+	stoppedAs?: (context: C | undefined) => SubagentTerminalStatus;
 }
 
 export function createRunId(): string {
 	return `${AGENT_TASK_ID_PREFIX}${randomUUID()}`;
 }
 
-const TERMINAL_STATES = new Set<SubagentLifecycleStatus>(["completed", "failed", "cancelled", "interrupted"]);
+const TERMINAL_STATES = new Set<SubagentLifecycleStatus>(["completed", "failed", "cancelled", "interrupted", "closed"]);
+
+/** Whether a final run can take a next generation. */
+export function isResumableSubagentStatus(status: SubagentLifecycleStatus): boolean {
+	return status === "completed" || status === "closed";
+}
 
 export function isTerminalSubagentStatus(status: SubagentLifecycleStatus): status is SubagentTerminalStatus {
 	return TERMINAL_STATES.has(status);
@@ -189,6 +198,7 @@ export class SubagentRunScheduler<C = unknown> {
 	private readonly executeRun: (
 		params: SubagentRunnerExecuteParams & { context?: C },
 	) => Promise<SubagentRunnerOutcome>;
+	private readonly stoppedAs: (context: C | undefined) => SubagentTerminalStatus;
 
 	private readonly runs = new Map<string, InternalManagedRun<C>>();
 
@@ -197,6 +207,7 @@ export class SubagentRunScheduler<C = unknown> {
 		this.onStateChange = options.onStateChange;
 		this.onFinalize = options.onFinalize;
 		this.executeRun = options.executeRun;
+		this.stoppedAs = options.stoppedAs ?? (() => "cancelled");
 	}
 
 	getRun(runId: string): Readonly<SubagentRunRecord> | undefined {
@@ -481,7 +492,7 @@ export class SubagentRunScheduler<C = unknown> {
 			return;
 		}
 		if (!managed.pendingTerminalStatus) {
-			managed.pendingTerminalStatus = "cancelled";
+			managed.pendingTerminalStatus = this.stoppedAs(managed.context);
 			managed.pendingStopSource = source;
 			managed.pendingStopReason = reason;
 			managed.record.stopSource = source;

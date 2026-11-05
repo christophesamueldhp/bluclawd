@@ -49,7 +49,7 @@ export function renderPanel(options: {
 		? [
 				theme.fg(
 					"dim",
-					`  ↑/↓ to select · x to ${isTerminalSubagentStatus(current.record.status) ? "dismiss" : "stop"} · Esc to go back`,
+					`  ↑/↓ to select · x to ${isTerminalSubagentStatus(current.record.status) ? "dismiss" : current.record.pane ? "close" : "stop"} · Esc to go back`,
 				),
 			]
 		: [];

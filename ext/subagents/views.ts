@@ -43,9 +43,13 @@ export function createParentScopeViews(deps: ParentScopeViewsDeps) {
 	};
 	/** The open Runs whose work the orchestrator still waits on: a Run being stopped is not. */
 	const awaited = () => open().filter((entry) => entry.state !== "stopping");
-	/** Whether the panel still shows a Run: one that succeeded leaves after a while, any other final Run stays. */
+	/**
+	 * Whether the panel still shows a Run: a closed one leaves at once, one that succeeded after a while, and any
+	 * other final Run stays.
+	 */
 	const lingers = ({ record }: RunEntry, now: number) =>
-		record.status !== "completed" || now - (record.endedAt ?? now) < SUCCEEDED_RUN_LINGER_MS;
+		record.status !== "closed" &&
+		(record.status !== "completed" || now - (record.endedAt ?? now) < SUCCEEDED_RUN_LINGER_MS);
 
 	/** The Runs of the current scope the panel shows, in admission order: a dismissed Generation is not. */
 	const panel = (): RunEntry[] => {

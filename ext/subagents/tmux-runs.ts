@@ -6,7 +6,7 @@
  * and every other Report goes to the orchestrator as a notice that wakes it.
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
@@ -24,10 +24,13 @@ export interface RunLaunch {
 	/** `provider/id`. */
 	model: string;
 	thinkingLevel?: string;
-	task: string;
+	/** Its first prompt; none for a Resume the user starts, who types in the run. */
+	task?: string;
 	cwd: string;
 	/** Where its session, task and instructions are kept. */
 	runDir: string;
+	/** The session a Resume reopens; a launch starts a new one in `runDir`. */
+	sessionFile?: string;
 	/** The orchestrator's tmux session. */
 	parent: string;
 }
@@ -44,8 +47,7 @@ export function runLaunchArgs(run: RunLaunch, instructionsFile: string): string[
 		...(tools ? (tools.length > 0 ? ["--tools", tools.join(",")] : ["--no-tools"]) : []),
 		"--append-system-prompt",
 		instructionsFile,
-		"--session-dir",
-		run.runDir,
+		...(run.sessionFile ? ["--session", run.sessionFile] : ["--session-dir", run.runDir]),
 	];
 }
 
@@ -54,12 +56,25 @@ export function startRun(tmux: Pick<Tmux, "newSession">, run: RunLaunch): string
 	const instructions = join(run.runDir, "instructions.md");
 	const task = join(run.runDir, "task.md");
 	writeFileSync(instructions, run.definition.instructions);
-	writeFileSync(task, run.task);
+	if (run.task !== undefined) writeFileSync(task, run.task);
 	return tmux.newSession({
 		cwd: run.cwd,
 		args: runLaunchArgs(run, instructions),
-		env: { [PARENT_ENV]: run.parent, [RUN_TASK_ENV]: task },
+		env: { [PARENT_ENV]: run.parent, ...(run.task !== undefined ? { [RUN_TASK_ENV]: task } : {}) },
 	});
+}
+
+/** The run's session file: the one a Resume reopened, else the newest pi wrote in its directory. */
+export function runSessionFile(run: Pick<RunLaunch, "runDir" | "sessionFile">): string | undefined {
+	if (run.sessionFile) return run.sessionFile;
+	try {
+		return readdirSync(run.runDir)
+			.filter((file) => file.endsWith(".jsonl"))
+			.map((file) => join(run.runDir, file))
+			.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
+	} catch {
+		return undefined;
+	}
 }
 
 /** A Report as the orchestrator's model reads it: from another session, never the user. */
@@ -113,7 +128,7 @@ export class RunReports {
 }
 
 export interface TmuxRunDeps {
-	tmux: Pick<Tmux, "newSession">;
+	tmux: Pick<Tmux, "newSession" | "end">;
 	reports: RunReports;
 	/** A Report no foreground launch took: it goes to the orchestrator. */
 	notify(report: SessionMessage): void;
@@ -121,7 +136,8 @@ export interface TmuxRunDeps {
 
 /**
  * A run's life in its own pi, as the scheduler sees it: it starts the pi, then routes each Report until the
- * run is stopped. It stays open between Reports, so only a stop ends it.
+ * run is closed. It stays open between Reports, so only a Close ends it: its pi is hung up, as quitting does,
+ * without asking it, and its session is kept for a Resume.
  */
 export async function executeTmuxRun(
 	{ record, signal, controller }: SubagentRunnerExecuteParams,
@@ -145,7 +161,12 @@ export async function executeTmuxRun(
 	} finally {
 		unlisten();
 	}
-	return { status: "cancelled", complete: false, summaryText: last };
+	try {
+		deps.tmux.end(pane);
+	} catch {
+		// Its pi has quit already.
+	}
+	return { status: "closed", complete: false, summaryText: last, transcriptPath: runSessionFile(launch) };
 }
 
 /**

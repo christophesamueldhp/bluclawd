@@ -173,6 +173,8 @@ export interface SaveRequest {
 	sessionFile: string;
 	/** pi's session id, so the phone can follow the session to this row. */
 	sessionId?: string;
+	/** A run's orchestrator pane: its row stays out of agent view and the phone. */
+	parent?: string;
 }
 
 /** A window starting a pane: see ServerSupervisor.claimStart and paneStarting. */

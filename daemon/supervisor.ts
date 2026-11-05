@@ -198,7 +198,7 @@ export class ServerSupervisor {
 	 *  from: its pin, order, name and age survive a daemon restart, and its pane's next heartbeat goes
 	 *  on as it. */
 	private persistRow(rowId: string, pane: Pane): void {
-		const { cwd, createdAt, label, paneLabel, sessionId, sessionFile, pinned, sortOrder } = pane.record;
+		const { cwd, createdAt, label, paneLabel, sessionId, sessionFile, pinned, sortOrder, parent } = pane.record;
 		const row = {
 			id: rowId,
 			status: "stopped" as const,
@@ -209,6 +209,7 @@ export class ServerSupervisor {
 			paneLabel,
 			sessionId,
 			sessionFile,
+			...(parent ? { parent } : {}),
 		};
 		const persisted = JSON.stringify({ ...row, pinned, sortOrder });
 		if (persisted === pane.persisted || !sessionFile || !existsSync(sessionFile)) return;
@@ -600,6 +601,7 @@ export class ServerSupervisor {
 		label?: string;
 		sessionFile: string;
 		sessionId?: string;
+		parent?: string;
 	}): InstanceRecord | undefined {
 		const due = this.marked(options.sessionFile);
 		const deleted = due?.[1].saveDue === true && due[1].deleted === true;
@@ -613,7 +615,7 @@ export class ServerSupervisor {
 	}
 
 	private stopRow(
-		options: { cwd: string; label?: string; sessionFile: string; sessionId?: string },
+		options: { cwd: string; label?: string; sessionFile: string; sessionId?: string; parent?: string },
 		at: PaneRow | undefined,
 		reason?: EndReason,
 	): InstanceRecord {
@@ -625,9 +627,12 @@ export class ServerSupervisor {
 		const ended = at?.pane;
 		const last = ended?.record ?? previous;
 		if (at) this.drop(at, reason);
+		// A run's row keeps its orchestrator, so agent view and the phone leave it out.
+		const parent = ended?.record.parent ?? options.parent ?? previous?.parent;
 		const record: InstanceRecord = {
 			...previous,
 			...(ended && paneMeta(ended.record)),
+			...(parent ? { parent } : {}),
 			id: previous?.id ?? at?.id ?? randomUUID(),
 			status: "stopped",
 			cwd: previous?.cwd ?? options.cwd,

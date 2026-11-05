@@ -556,6 +556,39 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		});
 
 		pi.registerTool({
+			name: "subagent_close",
+			label: "Close subagent",
+			exposure: "model-only",
+			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+			description:
+				"Close an open subagent by name or run ID: its pi ends at once, without asking it, and its session is kept. Close a run once its work is done; subagent_message resumes a closed run with its earlier context.",
+			parameters: Type.Object(
+				{ agent: Type.String({ description: "A subagent name or run ID." }) },
+				{ additionalProperties: false },
+			),
+			execute: async (_toolCallId, params) => {
+				const target = params.agent.trim();
+				const run = views.findOpen(target)?.record;
+				const closed = run !== undefined && taskSource.stop(run.runId, { source: "model" }).ok;
+				const label = run && `${run.name ?? run.runId} (${run.runId})`;
+				return {
+					content: [
+						{
+							type: "text",
+							text: closed
+								? `Closed ${label}. Its session is kept: a message resumes it.`
+								: run
+									? `${label} is ending already.`
+									: `No open subagent "${target}".`,
+						},
+					],
+					details: undefined,
+					isError: !closed,
+				};
+			},
+		});
+
+		pi.registerTool({
 			name: "subagent_models",
 			label: "Subagent models",
 			exposure: "model-only",

@@ -141,6 +141,8 @@ export function createGenerations(deps: GenerationDeps) {
 	};
 
 	const scheduler = new SubagentRunScheduler<RunExecutionContext>({
+		// A run in tmux is never cancelled: ending it closes its pi and keeps its session.
+		stoppedAs: (context) => (context?.runtime === "tmux" ? "closed" : "cancelled"),
 		onStateChange: (record) => {
 			// The finalizer already stored a terminal record durably.
 			if (!isTerminalSubagentStatus(record.status)) {

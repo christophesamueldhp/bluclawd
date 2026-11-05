@@ -122,7 +122,8 @@ export async function startRealPi(options: { extensions?: string[] } = {}): Prom
 	);
 	const tmux = new Tmux(serverDir);
 	const client = new OrchestratorClient();
-	if (!(await client.ensureDaemon())) throw new Error("the test daemon did not start");
+	// ensureDaemon waits 3s, too short under parallel load; calling it again would spawn a second daemon.
+	if (!(await client.ensureDaemon())) await waitFor(async () => expect(await client.isRunning()).toBe(true));
 
 	const requests = (session: string): FauxRequest[] => {
 		const log = join(fauxDir(agentDir), `${session}.requests.jsonl`);
