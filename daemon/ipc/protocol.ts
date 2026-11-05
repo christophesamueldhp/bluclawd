@@ -33,6 +33,8 @@ export interface PaneHeartbeat {
 	dialog?: PaneDialog;
 	/** Its prompt holds unsent text. */
 	draft?: boolean;
+	/** A run's: the tmux session of the orchestrator that launched it. Agent view and the phone leave it out. */
+	parent?: string;
 }
 
 /** Every PaneHeartbeat key: a field added to the type without one here fails the typecheck. */
@@ -49,6 +51,7 @@ const PANE_HEARTBEAT_KEYS = Object.keys({
 	leafId: true,
 	dialog: true,
 	draft: true,
+	parent: true,
 } satisfies Record<keyof PaneHeartbeat, true>) as (keyof PaneHeartbeat)[];
 
 /** Only the heartbeat of a wider value (a register request's instance, a stored record): any other key is left. */
@@ -94,7 +97,40 @@ export type PaneMessage =
 	/** A text-only prompt starting with "/": typed into the pane's prompt and submitted, as on the Mac. */
 	| { type: "command"; text: string; id?: string; sessionFile?: string }
 	/** Stop a background task, as /tasks' `x` does: the model is told. */
-	| { type: "stop_task"; id: string };
+	| { type: "stop_task"; id: string }
+	| SessionMessage;
+
+/** A message from another session (a run, its orchestrator): the receiving session never takes it
+ *  as its own user's input or approval. `from`: the sender's tmux session; `name`: its session's name.
+ *  `report`: a run's last message of a turn, to its orchestrator. `message`: what one session
+ *  sends another with subagent_message. `typed`: what the user typed in a run, as a note for its
+ *  orchestrator. `activity`: what a run is doing now, to its orchestrator, each time that changes;
+ *  `dialog`: the title of the prompt it waits on. `stop`: the orchestrator ends its run's turn in
+ *  progress, as Esc does. */
+export type SessionMessage = { type: "session_message"; from: string; name?: string } & (
+	| {
+			kind: "report";
+			text: string;
+			/** The run's session usage so far, as pi totals it. Each report repeats the whole total. */
+			usage?: SessionUsage;
+			/** The session `usage` is of: a `/new` in the run starts another. */
+			sessionId?: string;
+	  }
+	| { kind: "message" | "typed"; text: string }
+	| { kind: "activity"; activity: AgentActivity; dialog?: string }
+	| { kind: "stop" }
+);
+
+/** A session's tokens and cost. */
+export interface SessionUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	totalTokens: number;
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+	hasUnknownCost: boolean;
+}
 
 /** Queue a message for a self-registered session. */
 export interface SendRequest {
@@ -158,6 +194,8 @@ export interface SaveRequest {
 	sessionFile: string;
 	/** pi's session id, so the phone can follow the session to this row. */
 	sessionId?: string;
+	/** A run's orchestrator pane: its row stays out of agent view and the phone. */
+	parent?: string;
 }
 
 /** A window starting a pane: see ServerSupervisor.claimStart and paneStarting. */
@@ -213,8 +251,8 @@ export interface PaneReport {
 	trust?: "always" | "ask" | "never";
 	context?: { tokens: number | null; contextWindow: number; percent: number | null };
 	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
-	/** Separate usage ledger for background subagent runs not included in foreground toolResult entries. */
-	backgroundSubagentUsage?: {
+	/** The usage of the session's subagent runs, counted in their own sessions and so not in `usage`. */
+	subagentUsage?: {
 		runCount: number;
 		input: number;
 		output: number;

@@ -21,7 +21,7 @@ import type { PaneHeartbeat, PaneMessage } from "../../daemon/ipc/protocol.ts";
 import { type InstanceSummary, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { collectRows, labelFromTask } from "../../daemon/rows.ts";
 import { lastLine, textOf, toolActivity } from "../../daemon/session-state.ts";
-import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, Tmux } from "../../daemon/tmux.ts";
+import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, PARENT_ENV, Tmux } from "../../daemon/tmux.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
@@ -239,6 +239,8 @@ const agentView: InlineExtension = {
 		// Pane mode: this pi runs in a tmux session of agent view's own (tmux.ts).
 		const pane = Tmux.currentPane();
 		const panes = new Tmux();
+		// A run's orchestrator (ADR-0006): ← goes back to it, as runs are not in agent view.
+		const parent = process.env[PARENT_ENV] || undefined;
 		let launched = false;
 		// What the turn in progress is doing, for this session's row in other windows.
 		let liveDetail: string | undefined;
@@ -310,6 +312,7 @@ const agentView: InlineExtension = {
 				leafId: leafId !== entries.at(-1)?.id ? leafId : undefined,
 				dialog: activity.current === "awaiting_input" ? activity.dialog : undefined,
 				...(ctx.ui.getEditorText().trim() !== "" ? { draft: true } : {}),
+				...(parent ? { parent } : {}),
 			};
 		};
 
@@ -331,6 +334,7 @@ const agentView: InlineExtension = {
 				label: ctx.sessionManager.getSessionName() ?? selfLabel(ctx),
 				sessionFile,
 				sessionId: ctx.sessionManager.getSessionId(),
+				...(parent ? { parent } : {}),
 			};
 		};
 
@@ -372,6 +376,8 @@ const agentView: InlineExtension = {
 				pi.sendUserMessage(promptContent(message), promptOptions(message));
 			else if (message.type === "abort") ctx.abort();
 			else if (message.type === "rename") pi.setSessionName(message.name);
+			// Another session's (ext/subagents).
+			else if (message.type === "session_message") pi.events.emit("bluclawd:session-message", message);
 			// The rest are remote control's (ext/remote).
 			else pi.events.emit("bluclawd:pane-message", message);
 		};
@@ -385,12 +391,24 @@ const agentView: InlineExtension = {
 			let flashCount = 0;
 			let flashTimer: ReturnType<typeof setTimeout> | undefined;
 			let stopped = false;
-			let last = theme.fg("dim", "← for agents");
+			let parentLabel = parent;
+			const runHint = (): string => theme.fg("dim", `← subagent of ${parentLabel}`);
+			let last = parent ? runHint() : theme.fg("dim", "← for agents");
 			const paint = (): void => {
 				if (!stopped) ctx.ui.setStatus(STATUS_KEY, leftHint ?? last);
 			};
 			paintPill = paint;
 			const tick = async (): Promise<void> => {
+				if (parent) {
+					try {
+						parentLabel = (await client.list()).find((r) => r.pane === parent)?.label ?? parentLabel;
+					} catch {
+						// no daemon: the pane's name
+					}
+					last = runHint();
+					paint();
+					return;
+				}
 				let text = theme.fg("dim", "← for agents");
 				try {
 					// Its own row: a resumed session's keeps the id it had in another pane.
@@ -455,7 +473,8 @@ const agentView: InlineExtension = {
 			activity = new ForegroundActivity();
 			registration = new SelfRegistration(
 				new OrchestratorClient(),
-				() => (blank(ctx) ? undefined : selfHeartbeat(ctx)),
+				// A run registers at once, listed nowhere, so its orchestrator reaches it from its first turn on.
+				() => (blank(ctx) && !parent ? undefined : selfHeartbeat(ctx)),
 				(message) => onPaneMessage(ctx, message),
 				pane,
 				(watched) => pi.events.emit("bluclawd:remote-watched", watched),
@@ -565,12 +584,19 @@ const agentView: InlineExtension = {
 				}
 				if (Date.now() - editedAt >= LEFT_EDIT_MS || (armedAt && Date.now() - armedAt < LEFT_ARM_MS)) {
 					disarm();
-					pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
+					if (!parent) pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
+					else {
+						try {
+							panes.switchTo(parent);
+						} catch (error) {
+							ctx.ui.notify(`Could not go back to the orchestrator: ${Tmux.reason(error)}`, "warning");
+						}
+					}
 					return { consume: true };
 				}
 				const at = Date.now();
 				armedAt = at;
-				leftHint = theme.fg("dim", "Press ← again to open agents");
+				leftHint = theme.fg("dim", parent ? "Press ← again to go back" : "Press ← again to open agents");
 				paintPill?.();
 				setTimeout(() => {
 					if (armedAt === at) disarm();

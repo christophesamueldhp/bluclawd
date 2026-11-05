@@ -7,7 +7,7 @@ import { startRemoteServer } from "../daemon/remote/http.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import { type AgentTask, notifyAgentTasksChanged, publishAgentTasks } from "../ext/_shared/agent-tasks.ts";
 import { applyPaneMessage, buildReport, paneTasks, watchTasks } from "../ext/remote/report.ts";
-import { recordBackgroundUsageInLedger, writeFullSubagentReport } from "../ext/subagents/storage.ts";
+import { recordRunSessionUsage, writeFullSubagentReport } from "../ext/subagents/storage.ts";
 import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
 
 const tempDirs: string[] = [];
@@ -50,12 +50,12 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 		const unpublish = publishAgentTasks({
 			list: (owner) => (owner && owner !== "sess_phone_1" ? [] : [task]),
 			get: () => undefined,
-			stop: (id, opts) => {
+			close: (id, opts) => {
 				if (opts?.owner && opts.owner !== "sess_phone_1") return { ok: false, reason: "not_found" };
 				stopped = { id, owner: opts?.owner, source: opts?.source };
 				return { ok: true, task };
 			},
-			stopAll: () => 0,
+			closeAll: () => 0,
 		});
 
 		try {
@@ -297,18 +297,13 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 			mkdirSync(agentDir, { recursive: true });
 
 			const sessionId = "sess_usage_parity";
-			recordBackgroundUsageInLedger(agentDir, {
-				runId: "sub_bg_ledger_1",
-				parentSessionId: sessionId,
-				generation: 0,
-				usage: {
-					...createEmptySubagentUsage(),
-					hasUnknownCost,
-					input: 300,
-					output: 100,
-					totalTokens: 400,
-					cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
-				},
+			recordRunSessionUsage(agentDir, { runId: "sub_run_1", parentSessionId: sessionId }, "session_1", {
+				...createEmptySubagentUsage(),
+				hasUnknownCost,
+				input: 300,
+				output: 100,
+				totalTokens: 400,
+				cost: { input: 0.01, output: 0.02, cacheRead: 0, cacheWrite: 0, total: 0.03 },
 			});
 
 			const ctx = {
@@ -345,8 +340,8 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 				cacheWrite: 0,
 				cost: 0.005,
 			});
-			// Background subagent usage is reported separately in `report.backgroundSubagentUsage`
-			expect(report.backgroundSubagentUsage).toEqual({
+			// Background subagent usage is reported separately in `report.subagentUsage`
+			expect(report.subagentUsage).toEqual({
 				runCount: 1,
 				input: 300,
 				output: 100,

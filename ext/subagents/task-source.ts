@@ -2,23 +2,23 @@ import type { AgentTask, AgentTaskSource, AgentTaskState } from "../_shared/agen
 import type { RunDirectory, RunEntry } from "./directory.ts";
 import { isTerminalSubagentStatus, type SubagentLifecycleStatus, type SubagentRunScheduler } from "./runs.ts";
 import { readBoundedSubagentReport, subagentReportPath } from "./storage.ts";
-import { canStop, type ParentScopeViews } from "./views.ts";
+import { canClose, type ParentScopeViews, runStatus } from "./views.ts";
 
 const TASK_OUTPUT_BYTES = 8192;
 
 const TASK_STATES: Record<SubagentLifecycleStatus, AgentTaskState> = {
 	starting: "running",
 	running: "running",
-	finishing: "running",
 	stopping: "running",
 	completed: "completed",
 	failed: "failed",
 	interrupted: "failed",
 	cancelled: "stopped",
+	closed: "completed",
 };
 
 export interface AgentTaskSourceDeps {
-	views: Pick<ParentScopeViews, "open" | "done" | "lookup" | "stoppable" | "dismiss">;
+	views: Pick<ParentScopeViews, "open" | "done" | "lookup" | "closable" | "dismiss">;
 	directory: Pick<RunDirectory, "get">;
 	scheduler: Pick<SubagentRunScheduler, "cancelRun">;
 	agentDir: () => string;
@@ -36,7 +36,7 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 			startedAt: run.startedAt ?? run.admittedAt,
 			endedAt: run.endedAt,
 			state: TASK_STATES[run.status],
-			status: run.status,
+			status: runStatus(run),
 			model: `${run.provider}/${run.modelId}`,
 			outputFile: subagentReportPath(agentDir, run.parentSessionId, run.runId),
 			output: () => {
@@ -53,24 +53,24 @@ export function createAgentTaskSource(deps: AgentTaskSourceDeps): AgentTaskSourc
 			const run = views.lookup(id, owner);
 			return run && toTask(run);
 		},
-		stop: (id, options) => {
+		close: (id, options) => {
 			const run = views.lookup(id, options?.owner);
 			if (!run) return { ok: false, reason: "not_found" };
 			const { runId } = run.record;
-			if (canStop(run) && deps.scheduler.cancelRun(runId, options?.source ?? "user", `Stopped subagent ${runId}`)) {
+			if (canClose(run) && deps.scheduler.cancelRun(runId, options?.source ?? "user", `Closed subagent ${runId}`)) {
 				return { ok: true, task: toTask(deps.directory.get(runId) ?? run) };
 			}
-			// A persisted run that never ended was orphaned by a crash: there is nothing to stop.
+			// A persisted run that never ended was orphaned by a crash: there is nothing to close.
 			const orphaned = !deps.directory.get(runId) && !isTerminalSubagentStatus(run.record.status);
 			return orphaned ? { ok: false, reason: "not_found" } : { ok: false, reason: "not_running", task: toTask(run) };
 		},
-		stopAll: (options) =>
+		closeAll: (options) =>
 			views
-				.stoppable(options?.owner)
+				.closable(options?.owner)
 				.filter((run) =>
-					deps.scheduler.cancelRun(run.record.runId, options?.source ?? "user", "Stopped all subagents"),
+					deps.scheduler.cancelRun(run.record.runId, options?.source ?? "user", "Closed all subagents"),
 				).length,
 		listDone: (owner) => views.done(owner).map(toTask),
-		dismiss: (id, owner) => views.dismiss("tasks", id, owner),
+		dismiss: (id, owner) => views.dismiss(id, owner),
 	};
 }

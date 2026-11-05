@@ -471,9 +471,9 @@ describe("phone control", () => {
 			{ input: 1, output: 2, cacheRead: 3, cacheWrite: 4, cost: 0.5 },
 		],
 		[
-			"backgroundSubagentUsage",
+			"subagentUsage",
 			{
-				backgroundSubagentUsage: {
+				subagentUsage: {
 					runCount: 1,
 					input: 1,
 					output: 2,

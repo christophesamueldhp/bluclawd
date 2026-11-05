@@ -14,8 +14,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getAgentDir, SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import { commandBlock } from "../_shared/command-block.ts";
-import { readBackgroundUsageLedger } from "../subagents/storage.ts";
-import { backgroundSubagentUsageSummary, isUsingSubscription } from "./session-usage.ts";
+import { readRunUsageLedger } from "../subagents/storage.ts";
+import { isUsingSubscription, subagentUsageSummary } from "./session-usage.ts";
 
 /** Snapshot rendered by `/status`. Plain data so it survives in the session file. */
 export interface StatusData {
@@ -28,7 +28,7 @@ export interface StatusData {
 	defaultProjectTrust: string;
 	projectTrusted: boolean;
 	cwd: string;
-	backgroundSubagents?: string;
+	subagents?: string;
 }
 
 /** Exported pure for tests; `theme` is the only styling dependency. */
@@ -50,7 +50,7 @@ export function formatStatus(
 	lines.push(`${dim("Working directory:")} ${data.cwd}`);
 	lines.push(`${dim("Project trust:")} ${data.projectTrusted ? "trusted" : "not trusted"} ${dim("(/trust)")}`);
 	lines.push(`${dim("Trust default:")} ${data.defaultProjectTrust} ${dim("(alt+m)")}`);
-	if (data.backgroundSubagents) lines.push("", theme.bold("Background subagents"), data.backgroundSubagents);
+	if (data.subagents) lines.push("", theme.bold("Subagents"), data.subagents);
 	lines.push("", dim("Session file, messages, tokens and cost: /session · context window usage: /context"));
 	return lines;
 }
@@ -135,9 +135,7 @@ export function registerDiagnostics(pi: ExtensionAPI): void {
 				}).getDefaultProjectTrust(),
 				projectTrusted: ctx.isProjectTrusted(),
 				cwd: ctx.cwd,
-				backgroundSubagents: backgroundSubagentUsageSummary(
-					readBackgroundUsageLedger(getAgentDir(), ctx.sessionManager.getSessionId()),
-				),
+				subagents: subagentUsageSummary(readRunUsageLedger(getAgentDir(), ctx.sessionManager.getSessionId())),
 			});
 		},
 	});

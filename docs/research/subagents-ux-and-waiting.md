@@ -1,5 +1,7 @@
 # Subagent UX and waiting: Claude Code and Codex CLI
 
+Superseded in part by ADR-0006: runs are now pi sessions of their own, not in-process SDK sessions.
+
 How two reference agents show running subagents, let the user open and talk to them, relate them to the task list, and keep the main agent waiting for them rather than ending its turn or redoing the work. It ends with how bluclawd's `subagents` extension compares.
 
 ## Sources and conventions

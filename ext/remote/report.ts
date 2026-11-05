@@ -27,7 +27,7 @@ import {
 } from "../background-bash/foreground-shells.ts";
 import { stopTask, visibleRows } from "../background-bash/tasks-dialog.ts";
 import { projectTrust, setProjectTrust, TRUST_CYCLE } from "../permissions/index.ts";
-import { readBackgroundUsageLedger } from "../subagents/storage.ts";
+import { readRunUsageLedger } from "../subagents/storage.ts";
 
 type ReportModel = PaneReport["models"][number];
 
@@ -172,7 +172,7 @@ export function buildReport(
 	}
 	const context = ctx.getContextUsage();
 	const sessionId = ctx.sessionManager.getSessionId();
-	const bgLedger = readBackgroundUsageLedger(getAgentDir(), sessionId);
+	const runLedger = readRunUsageLedger(getAgentDir(), sessionId);
 	return {
 		...(current ? { model: reportModel(current) } : {}),
 		models: [...models.values()].sort(
@@ -185,15 +185,15 @@ export function buildReport(
 			? { context: { tokens: context.tokens, contextWindow: context.contextWindow, percent: context.percent } }
 			: {}),
 		usage,
-		...(bgLedger.runCount > 0
+		...(runLedger.runCount > 0
 			? {
-					backgroundSubagentUsage: {
-						runCount: bgLedger.runCount,
-						input: bgLedger.usage.input,
-						output: bgLedger.usage.output,
-						cacheRead: bgLedger.usage.cacheRead,
-						cacheWrite: bgLedger.usage.cacheWrite,
-						cost: bgLedger.usage.hasUnknownCost ? null : bgLedger.usage.cost.total,
+					subagentUsage: {
+						runCount: runLedger.runCount,
+						input: runLedger.usage.input,
+						output: runLedger.usage.output,
+						cacheRead: runLedger.usage.cacheRead,
+						cacheWrite: runLedger.usage.cacheWrite,
+						cost: runLedger.usage.hasUnknownCost ? null : runLedger.usage.cost.total,
 					},
 				}
 			: {}),

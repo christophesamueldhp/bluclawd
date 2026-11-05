@@ -23,7 +23,7 @@
  * `outcomes`: what became of the prompts sent with an id, only from a pane that reports them.
  * `sent`: the daemon has it, with no outcome yet. `reason`: why it was refused or lost.
  * @typedef {{ id: string, outcome: "sent" | "taken" | "queued" } | { id: string, outcome: "refused", reason: "busy" | "draft" | "dialog" | "compacting" | "session_changed" | "unreachable" } | { id: string, outcome: "lost", reason: "pane_gone" | "daemon_restarted" | "dequeued" }} PromptOutcome
- * @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, backgroundSubagentUsage?: { runCount: number, input: number, output: number, cacheRead: number, cacheWrite: number, cost: number | null }, git?: GitInfo, notice?: { text: string, at: number }, outcomes?: PromptOutcome[], statusline?: { lines: StatusSpan[][] }, tasks?: Task[] }} Report
+ * @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, subagentUsage?: { runCount: number, input: number, output: number, cacheRead: number, cacheWrite: number, cost: number | null }, git?: GitInfo, notice?: { text: string, at: number }, outcomes?: PromptOutcome[], statusline?: { lines: StatusSpan[][] }, tasks?: Task[] }} Report
  */
 
 /**
@@ -48,13 +48,13 @@ export function tokens(count) {
 	return String(count);
 }
 
-/** Additional child usage is not included in Pi's native session totals. @param {Report["backgroundSubagentUsage"]} usage */
-export function backgroundUsageHtml(usage) {
+/** The runs' usage, counted in their own sessions and so not in this session's totals. @param {Report["subagentUsage"]} usage */
+export function runUsageHtml(usage) {
 	if (!usage || usage.runCount === 0) return "";
 	const total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 	const cost =
 		typeof usage.cost === "number" && Number.isFinite(usage.cost) ? `$${usage.cost.toFixed(3)}` : "cost unknown";
-	return `<p>Background subagents (${esc(usage.runCount)}): ${esc(tokens(total))} tokens · ${esc(cost)} — excluded from session totals</p>`;
+	return `<p>Subagents (${esc(usage.runCount)}): ${esc(tokens(total))} tokens · ${esc(cost)} — excluded from session totals</p>`;
 }
 
 /** pi's footer warns above 70% and reports an error above 90%. @param {number} percent */

@@ -4,6 +4,7 @@ import {
 	createAgentSession,
 	DefaultResourceLoader,
 	type defineTool,
+	type EventBus,
 	type ExtensionFactory,
 	ModelRuntime,
 	SessionManager,
@@ -23,6 +24,8 @@ export async function createParentSessionWithSubagents(options: {
 	extensionsBefore?: ExtensionFactory[];
 	batchWindowMs?: number;
 	now?: () => number;
+	/** The bus the extensions share, where a test can deliver what another session sends. */
+	eventBus?: EventBus;
 }) {
 	const modelRuntime = await ModelRuntime.create({
 		authPath: join(options.agentDir, "auth.json"),
@@ -53,6 +56,7 @@ export async function createParentSessionWithSubagents(options: {
 		cwd: options.cwd,
 		agentDir: options.agentDir,
 		settingsManager,
+		eventBus: options.eventBus,
 		extensionFactories: [
 			...(options.extensionsBefore ?? []),
 			createSubagentsExtension({

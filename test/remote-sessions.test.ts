@@ -173,7 +173,8 @@ describe("remote sessions through the daemon", () => {
 });
 
 describe("a pane's heartbeat, from its register request to agent view's row and the phone's session", () => {
-	// Every field the type has: a field added to it without a value here fails the typecheck.
+	// Every field the type has: a field added to it without a value here fails the typecheck. A run's
+	// parent leaves its row out of both lists, so it has a test of its own.
 	const heartbeat = {
 		cwd: "/p",
 		sessionId: "pi-h",
@@ -187,7 +188,7 @@ describe("a pane's heartbeat, from its register request to agent view's row and 
 		leafId: "e7",
 		dialog: { kind: "confirm", title: "Allow bash?" },
 		draft: true,
-	} satisfies Required<PaneHeartbeat>;
+	} satisfies Required<Omit<PaneHeartbeat, "parent">>;
 
 	it("carries every field to the listed summary, and each the row and the phone show", async () => {
 		const supervisor = testRegistry();
@@ -258,6 +259,29 @@ describe("a pane's heartbeat, from its register request to agent view's row and 
 		expect(summary.outcome).toBeUndefined();
 	});
 
+	it("carries a run's parent to its summary; neither agent view nor the phone lists the run", async () => {
+		const supervisor = testRegistry();
+		await handleIpcRequest(supervisor, {
+			type: "register",
+			instance: { ...heartbeat, id: "pi-orch", pane: "pi-orch", sessionFile: "/s/orch.jsonl", activity: "idle" },
+		});
+		await handleIpcRequest(supervisor, {
+			type: "register",
+			instance: {
+				...heartbeat,
+				id: "pi-run",
+				pane: "pi-run",
+				sessionFile: "/s/run.jsonl",
+				parent: "pi-orch",
+				activity: "working",
+			},
+		});
+		const summaries = listSummaries(supervisor);
+		expect(summaries.find((s) => s.id === "pi-run")).toMatchObject({ parent: "pi-orch" });
+		expect(collectRows(summaries, undefined).map((row) => row.id)).toEqual(["pi-orch"]);
+		expect(remoteSessions(summaries).map((session) => session.id)).toEqual(["pi-orch"]);
+	});
+
 	it("lists a stored row without the keys instances.json kept that no row has", () => {
 		const dir = mkdtempSync(join(tmpdir(), "bluclawd-stale-keys-"));
 		const stale = { id: "row-s", status: "stopped", cwd: "/p", createdAt: "2026-10-12T00:00:00.000Z", running: true };
@@ -319,7 +343,7 @@ function silentRegistry() {
 	const gone = new Set<string>();
 	const supervisor = new ServerSupervisor({
 		now: () => clock.now,
-		tmux: { hasSession: (name) => !gone.has(name) },
+		tmux: { hasSession: (name) => !gone.has(name), end: () => {} },
 		dir,
 	});
 	const beat = (id: string, sessionFile: string) =>

@@ -1,43 +1,8 @@
 import type { Usage } from "@earendil-works/pi-ai";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { SessionUsage } from "../../daemon/ipc/protocol.ts";
 
-export interface SubagentUsageTotals {
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	totalTokens: number;
-	cost: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		total: number;
-	};
-	hasUnknownCost: boolean;
-}
-
-/**
- * How a generation started. The SDK folds nested usage into a launch tool result until that result is
- * emitted; only a foreground result also carries the run's own usage. A resume's launch result is the result of
- * the message call that resumed it.
- */
-export type GenerationKind = "foreground" | "background" | "resume";
-
-/** Where a generation's usage went: pi's own totals through the tool result, or the background ledger. */
-export type UsageAttribution = "tool_result" | "ledger";
-
-/** Counts one generation's usage so that each token is attributed exactly once. */
-export interface GenerationUsage {
-	/** A copy of the usage this generation must attribute. */
-	readonly totals: SubagentUsageTotals;
-	addTurn(delta: Partial<SubagentUsageTotals>): void;
-	/** Usage reported by an orchestrator tool the child ran. */
-	addNested(delta: Partial<SubagentUsageTotals>): void;
-	launchResultEmitted(): void;
-	settle(): UsageAttribution;
-}
-
-export function createEmptySubagentUsage(): SubagentUsageTotals {
+export function createEmptySubagentUsage(): SessionUsage {
 	return {
 		input: 0,
 		output: 0,
@@ -55,7 +20,7 @@ export function createEmptySubagentUsage(): SubagentUsageTotals {
 	};
 }
 
-export function addSubagentUsage(target: SubagentUsageTotals, delta: Partial<SubagentUsageTotals>): void {
+export function addSubagentUsage(target: SessionUsage, delta: Partial<SessionUsage>): void {
 	const input = delta.input ?? 0;
 	const output = delta.output ?? 0;
 	const cacheRead = delta.cacheRead ?? 0;
@@ -80,37 +45,16 @@ export function addSubagentUsage(target: SubagentUsageTotals, delta: Partial<Sub
 	}
 }
 
-export function createGenerationUsage(options: { kind: GenerationKind }): GenerationUsage {
+/** A session's usage so far, as pi's own totals count it: every entry of the session, not only its branch. */
+export function sessionUsage(entries: readonly SessionEntry[]): SessionUsage {
 	const totals = createEmptySubagentUsage();
-	let emitted = false;
-	return {
-		get totals() {
-			return structuredClone(totals);
-		},
-		addTurn: (delta) => addSubagentUsage(totals, delta),
-		addNested: (delta) => {
-			if (emitted) addSubagentUsage(totals, delta);
-		},
-		launchResultEmitted: () => {
-			emitted = true;
-		},
-		settle: () => (options.kind === "foreground" && !emitted ? "tool_result" : "ledger"),
-	};
-}
-
-export function toPiToolUsage(totals: SubagentUsageTotals): Usage {
-	return {
-		input: totals.input,
-		output: totals.output,
-		cacheRead: totals.cacheRead,
-		cacheWrite: totals.cacheWrite,
-		totalTokens: totals.totalTokens,
-		cost: {
-			input: totals.cost.input,
-			output: totals.cost.output,
-			cacheRead: totals.cost.cacheRead,
-			cacheWrite: totals.cost.cacheWrite,
-			total: totals.cost.total,
-		},
-	};
+	for (const entry of entries) {
+		let counted: Usage | undefined;
+		if (entry.type === "usage") counted = entry.usage;
+		else if (entry.type === "message" && (entry.message.role === "assistant" || entry.message.role === "toolResult"))
+			counted = entry.message.usage;
+		else if (entry.type === "branch_summary" || entry.type === "compaction") counted = entry.usage;
+		if (counted) addSubagentUsage(totals, counted);
+	}
+	return totals;
 }

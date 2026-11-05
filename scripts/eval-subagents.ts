@@ -235,7 +235,6 @@ export function readSessionSummary(agentDir: string, parentSessionId: string) {
 			model: `${run.provider}/${run.modelId}`,
 			status: run.status,
 			generation: run.generation ?? 0,
-			toolExecutions: run.toolExecutions ?? {},
 			tokens: run.usage.totalTokens,
 			ms: run.endedAt && run.startedAt ? run.endedAt - run.startedAt : null,
 		})),

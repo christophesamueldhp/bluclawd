@@ -1,14 +1,8 @@
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxProvider, Type } from "@earendil-works/pi-ai";
-import {
-	type ExtensionContext,
-	ModelRegistry,
-	ModelRuntime,
-	SessionManager,
-	type ToolLoadout,
-} from "@earendil-works/pi-coding-agent";
+import { fauxProvider } from "@earendil-works/pi-ai";
+import { type ExtensionContext, ModelRegistry, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type AdmissionContext,
@@ -16,6 +10,7 @@ import {
 	createRunAdmission,
 	type LaunchParams,
 	MAX_TASK_INPUT_BYTES,
+	NEEDS_TMUX,
 	type RunAdmissionDeps,
 	type RunExecutionContext,
 } from "../ext/subagents/admission.ts";
@@ -54,32 +49,20 @@ afterEach(() => {
 	while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
 });
 
-type LoadoutTool = ToolLoadout["callable"][number];
-
-function loadoutOf(names: readonly string[]): ToolLoadout {
-	const tools: LoadoutTool[] = names.map((name) => ({
-		name,
-		label: name,
-		description: `The ${name} tool.`,
-		parameters: Type.Object({}),
-		execute: async () => ({ content: [], details: undefined }),
-	}));
-	return {
-		declared: tools,
-		callable: tools,
-		registered: tools,
-		getExposure: () => "direct",
-		getNamespace: () => undefined,
-		getPromptGuidelines: () => [],
-	};
-}
-
 async function setup(
-	options: { mode?: AdmissionContext["mode"]; settings?: unknown; firstGenerationCompletes?: boolean } = {},
+	options: {
+		mode?: AdmissionContext["mode"];
+		settings?: unknown;
+		firstGenerationCompletes?: boolean;
+		// The orchestrator's tmux session, where runs start as pis of their own; null for a pi outside tmux.
+		pane?: string | null;
+	} = {},
 ) {
 	const cwd = makeTempDir("cwd");
 	const agentDir = makeTempDir("agent");
 	if (options.settings) writeFileSync(join(agentDir, "settings.json"), JSON.stringify(options.settings));
+	// The session a first generation that completes leaves, which a resume reopens.
+	if (options.firstGenerationCompletes) writeFileSync(join(agentDir, "transcript.jsonl"), "");
 	const runtime = await ModelRuntime.create({
 		authPath: join(agentDir, "auth.json"),
 		modelsPath: join(agentDir, "models.json"),
@@ -114,7 +97,6 @@ async function setup(
 						),
 					),
 	});
-	let loadout = loadoutOf(["probe"]);
 	const scope = createParentScope({
 		bus: new SubagentMessageBus(),
 		cancelRuns: () => {},
@@ -129,9 +111,10 @@ async function setup(
 		directory,
 		agentDir: () => agentDir,
 		catalog: () => undefined,
-		loadout: () => loadout,
 		parentThinkingLevel: () => "low",
 		scope,
+		pane: () => (options.pane === null ? undefined : (options.pane ?? "pi-orchestrator")),
+		tools: () => [],
 	};
 	const ctx: AdmissionContext = {
 		cwd,
@@ -140,9 +123,6 @@ async function setup(
 		modelRegistry: registry,
 		isProjectTrusted: () => false,
 		sessionManager,
-		executeTool: async () => {
-			throw new Error("admission never runs tools");
-		},
 	};
 	const admission = createRunAdmission(deps);
 	let calls = 0;
@@ -157,15 +137,12 @@ async function setup(
 		overrides: Partial<AdmissionContext> = {},
 	) => {
 		const resumeCtx = { ...ctx, ...overrides };
-		return { result: admission.resume(run, "message", buildPrompt, resumeCtx), ctx: resumeCtx };
+		return { result: admission.resume(run, buildPrompt, resumeCtx), ctx: resumeCtx };
 	};
 	const storageDir = join(agentDir, "bluclawd", "subagents", sessionManager.getSessionId());
 	return {
 		agentDir,
 		resume,
-		setLoadout: (names: readonly string[]) => {
-			loadout = loadoutOf(names);
-		},
 		runtime,
 		faux,
 		scheduler,
@@ -231,20 +208,14 @@ describe("Run admission", () => {
 		expect(error).toMatch(/remove/i);
 	});
 
-	it("refuses roles naming tools the orchestrator lacks, and invalid inline roles, before model resolution or storage", async () => {
-		const { agentDir, launch, storageDir } = await setup();
-		writeRole(agentDir, "api-auditor", ["tools: [read, bash]", "model: missing/model"]);
-		expect(errorOf(await launch({ agent: "api-auditor", task: "Verify." }))).toContain(
-			'Subagent role "api-auditor" names tools the orchestrator cannot give a child: read, bash. Available: probe.',
-		);
-
+	it("refuses invalid inline roles before model resolution or storage", async () => {
+		const { launch, storageDir } = await setup();
 		const role = { name: "checker", description: "Checks.", instructions: "Check." };
 		const cases = [
 			{ agent: { ...role, name: "Bad Name" }, error: /Invalid agent name "Bad Name" in inline role/ },
 			{ agent: { ...role, name: "sub_checker" }, error: /reserved task prefixes/ },
 			{ agent: { ...role, description: "Bad\u0007desc" }, error: /control characters/ },
 			{ agent: { ...role, instructions: "   " }, error: /non-empty instructions/ },
-			{ agent: { ...role, tools: ["read", "bash"] }, error: /cannot give a child: read, bash/ },
 			{ agent: { ...role, tools: ["rm -rf"] }, error: /invalid tool name "rm -rf"/ },
 		];
 		for (const c of cases) {
@@ -253,11 +224,15 @@ describe("Run admission", () => {
 		expect(existsSync(storageDir)).toBe(false);
 	});
 
-	it("refuses a launch without the orchestrator's live tool context", async () => {
-		const { launch } = await setup();
-		expect(errorOf(await launch({ agent: "explorer", task: "x" }, { executeTool: undefined }))).toBe(
-			"Subagent dispatch needs the orchestrator's live tool context.",
-		);
+	it("refuses a launch or a resume outside tmux, where no run can be a pi session of its own", async () => {
+		const { launch, resume } = await setup({ pane: null });
+		expect(errorOf(await launch({ agent: "explorer", task: "x" }))).toBe(NEEDS_TMUX);
+		const run = { name: "old" } as SubagentRunRecord;
+		expect(await resume(run, () => "Go on.").result).toMatchObject({
+			ok: false,
+			refusal: "unavailable",
+			error: NEEDS_TMUX,
+		});
 	});
 
 	it("resolves spawn over role over parent for model and thinking", async () => {
@@ -403,8 +378,8 @@ describe("Run admission", () => {
 		expect(directory.list(scope.current()!)).toEqual([]);
 	});
 
-	it("resumes a completed run with the orchestrator's current tools and tool context, keeping its role and model", async () => {
-		const { launch, resume, scheduler, setLoadout } = await setup({ firstGenerationCompletes: true });
+	it("resumes a completed run as a pi on its session, keeping its role and model", async () => {
+		const { launch, resume, scheduler } = await setup({ firstGenerationCompletes: true });
 		const launched = await launch({
 			agent: "explorer",
 			task: "Build v1.",
@@ -414,24 +389,21 @@ describe("Run admission", () => {
 		const completed = await handleOf(launched).completion;
 		expect(completed.status).toBe("completed");
 
-		setLoadout(["probe", "fresh"]);
 		const prompts: string[] = [];
-		const { result, ctx } = resume(completed, () => {
+		const { result } = resume(completed, () => {
 			prompts.push("built");
 			return "Now add tests.";
 		});
 		const resumed = await result;
 		expect(handleOf(resumed).record).toMatchObject({ name: "backend", modelId: "faux-alt", generation: 1 });
 		expect(prompts).toEqual(["built"]);
-		const context = scheduler.getContext(completed.runId)!;
-		expect(context.parent).toBe(ctx);
-		expect(context.parentTools.map((tool) => tool.name)).toEqual(["probe", "fresh"]);
-		expect(context.definition.name).toBe("explorer");
-		expect(context.childModel.model.id).toBe("faux-alt");
-		expect(context.resume).toEqual({
-			transcriptPath: completed.transcriptPath,
-			prompt: "Now add tests.",
-			toolCallId: "message",
+		expect(scheduler.getContext(completed.runId)?.launch).toMatchObject({
+			name: "backend",
+			definition: { name: "explorer" },
+			model: "faux-adm/faux-alt",
+			task: "Now add tests.",
+			sessionFile: completed.transcriptPath,
+			parent: "pi-orchestrator",
 		});
 	});
 
@@ -470,13 +442,15 @@ describe("Run admission", () => {
 		const running = handleOf(await live.launch({ agent: "explorer", task: "x" })).record;
 		const notDone = await live.resume(running, () => "x").result;
 		expect(notDone).toMatchObject({ ok: false, refusal: "unavailable" });
-		expect(errorOf(notDone)).toMatch(/only a completed subagent can be resumed/);
+		expect(errorOf(notDone)).toMatch(/only a completed or closed subagent can be resumed/);
 
 		const stuck = handleOf(await live.launch({ agent: "explorer", name: "stuck", task: "Hold.", background: true }));
 		live.scheduler.cancelRun(stuck.runId, "model");
 		const stopped = await live.resume(await stuck.completion, () => "Go on.").result;
 		expect(stopped).toMatchObject({ ok: false, refusal: "unavailable" });
-		expect(errorOf(stopped)).toMatch(/^"stuck" \(sub_[^)]+\) is cancelled; only a completed subagent can be resumed/);
+		expect(errorOf(stopped)).toMatch(
+			/^"stuck" \(sub_[^)]+\) is cancelled; only a completed or closed subagent can be resumed/,
+		);
 
 		const { launch, resume, invalidateSession } = await setup({ firstGenerationCompletes: true });
 
@@ -484,6 +458,30 @@ describe("Run admission", () => {
 		invalidateSession();
 		const stale = await resume(completed, () => "x").result;
 		expect(stale).toMatchObject({ ok: false, refusal: "invalidated" });
-		expect(errorOf(stale)).toMatch(/reloaded or replaced; spawn a new subagent/);
+		expect(errorOf(stale)).toMatch(/was replaced; spawn a new subagent/);
+	});
+
+	it("holds at most 8 open runs per orchestrator: a ninth launch or a resume is refused until one closes", async () => {
+		const { agentDir, launch, resume, scheduler } = await setup();
+		// Launched in one message, so every launch is past model resolution before the first is admitted.
+		const launched = await Promise.all(
+			Array.from({ length: 9 }, (_, i) => launch({ agent: "explorer", name: `run-${i}`, task: "Look." })),
+		);
+		expect(launched.filter((result) => result.ok)).toHaveLength(8);
+		const refusal =
+			"An orchestrator holds at most 8 open subagents. Close one whose work is done with subagent_close, then try again.";
+		expect(launched.filter((result) => !result.ok).map(errorOf)).toEqual([refusal]);
+
+		// A closed run's Resume opens a run too.
+		const transcriptPath = join(agentDir, "closed.jsonl");
+		writeFileSync(transcriptPath, "");
+		const first = handleOf(launched.find((result) => result.ok)!);
+		const open = first.record;
+		const closed = { ...open, runId: "sub_closed", name: "closed-run", status: "closed" as const, transcriptPath };
+		expect(errorOf(await resume(closed, () => "Go on.").result)).toBe(refusal);
+
+		scheduler.cancelRun(open.runId, "model");
+		await first.completion;
+		expect((await launch({ agent: "explorer", name: "run-9", task: "Look." })).ok).toBe(true);
 	});
 });

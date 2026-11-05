@@ -3,11 +3,8 @@ import { inParentScope, type ParentScope } from "./parent-scope.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord, type SubagentRunScheduler } from "./runs.ts";
 import { listPersistedRunRecords, readPersistedRunRecord } from "./storage.ts";
 
-/**
- * Where a run is in its life. A starting run's session is still being created; messages to it wait for it (#99).
- * A finishing run has ended its last turn but is not final yet.
- */
-export type RunState = "starting" | "live" | "finishing" | "stopping" | "finished";
+/** Where a run is in its life. A starting run's pi is still being started. */
+export type RunState = "starting" | "live" | "stopping" | "finished";
 
 export interface RunEntry {
 	readonly record: Readonly<SubagentRunRecord>;
@@ -17,7 +14,6 @@ export interface RunEntry {
 }
 
 const UNREACHABLE: Partial<Record<RunState, string>> = {
-	finishing: "has finished",
 	stopping: "is stopping",
 	finished: "has finished",
 };
@@ -33,7 +29,7 @@ export type RunDirectory = ReturnType<typeof createRunDirectory>;
 export function createRunDirectory(deps: RunDirectoryDeps) {
 	const stateOf = (record: Readonly<SubagentRunRecord>): RunState => {
 		if (isTerminalSubagentStatus(record.status)) return "finished";
-		if (record.status === "stopping" || record.status === "finishing") return record.status;
+		if (record.status === "stopping") return record.status;
 		return record.status === "starting" ? "starting" : "live";
 	};
 	const entryOf = (record: Readonly<SubagentRunRecord>): RunEntry => {

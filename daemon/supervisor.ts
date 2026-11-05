@@ -11,6 +11,7 @@ import {
 import { PromptDelivery } from "./remote/delivery.ts";
 import { readSessionTail } from "./session-state.ts";
 import { getInstance, loadInstances, removeInstance, saveInstances, upsertInstance } from "./storage.ts";
+import { endPane } from "./tmux.ts";
 import type { InstanceRecord } from "./types.ts";
 
 function cloneInstance(record: InstanceRecord): InstanceRecord {
@@ -98,9 +99,11 @@ interface Starting {
  *  newer wait for the same id replaced it. */
 export type WaitOutcome = "queued" | "none" | "superseded";
 
-/** Whether a pane's tmux session is still there. */
+/** What the registry asks of tmux: whether a pane's session is still there, and ending a run's pane. */
 export interface TmuxProbe {
 	hasSession(name: string): boolean;
+	/** Ends a pane's pi as quitting does: its session is kept. */
+	end(name: string): void;
 }
 
 export interface RegistryDeps {
@@ -192,13 +195,24 @@ export class ServerSupervisor {
 			this.enter(rowId, row, "live");
 		}
 		this.persistRow(rowId, pane);
+		this.closeOrphanedRun(record);
+	}
+
+	/**
+	 * A run lives as long as its orchestrator: once tmux no longer has the orchestrator's pane, its pi
+	 * is gone for good (a Silent pane's tmux still has it), and the run's next heartbeat closes it.
+	 */
+	private closeOrphanedRun({ pane, parent }: InstanceRecord): void {
+		if (!pane || !parent || this.tmuxSays(parent) !== "gone") return;
+		// Should tmux not answer, the run's next heartbeat tries again.
+		endPane(this.deps.tmux, pane);
 	}
 
 	/** Store a pane's row as it shows without its pane, stopped, once its session has a file to resume
 	 *  from: its pin, order, name and age survive a daemon restart, and its pane's next heartbeat goes
 	 *  on as it. */
 	private persistRow(rowId: string, pane: Pane): void {
-		const { cwd, createdAt, label, paneLabel, sessionId, sessionFile, pinned, sortOrder } = pane.record;
+		const { cwd, createdAt, label, paneLabel, sessionId, sessionFile, pinned, sortOrder, parent } = pane.record;
 		const row = {
 			id: rowId,
 			status: "stopped" as const,
@@ -209,6 +223,7 @@ export class ServerSupervisor {
 			paneLabel,
 			sessionId,
 			sessionFile,
+			...(parent ? { parent } : {}),
 		};
 		const persisted = JSON.stringify({ ...row, pinned, sortOrder });
 		if (persisted === pane.persisted || !sessionFile || !existsSync(sessionFile)) return;
@@ -600,6 +615,7 @@ export class ServerSupervisor {
 		label?: string;
 		sessionFile: string;
 		sessionId?: string;
+		parent?: string;
 	}): InstanceRecord | undefined {
 		const due = this.marked(options.sessionFile);
 		const deleted = due?.[1].saveDue === true && due[1].deleted === true;
@@ -613,7 +629,7 @@ export class ServerSupervisor {
 	}
 
 	private stopRow(
-		options: { cwd: string; label?: string; sessionFile: string; sessionId?: string },
+		options: { cwd: string; label?: string; sessionFile: string; sessionId?: string; parent?: string },
 		at: PaneRow | undefined,
 		reason?: EndReason,
 	): InstanceRecord {
@@ -625,9 +641,12 @@ export class ServerSupervisor {
 		const ended = at?.pane;
 		const last = ended?.record ?? previous;
 		if (at) this.drop(at, reason);
+		// A run's row keeps its orchestrator, so agent view and the phone leave it out.
+		const parent = ended?.record.parent ?? options.parent ?? previous?.parent;
 		const record: InstanceRecord = {
 			...previous,
 			...(ended && paneMeta(ended.record)),
+			...(parent ? { parent } : {}),
 			id: previous?.id ?? at?.id ?? randomUUID(),
 			status: "stopped",
 			cwd: previous?.cwd ?? options.cwd,

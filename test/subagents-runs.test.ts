@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
 	type AdmitSubagentRunResult,
-	type SubagentRunnerExecuteParams,
-	type SubagentRunnerOutcome,
+	type SubagentRunExecuteParams,
+	type SubagentRunOutcome,
 	SubagentRunScheduler,
 } from "../ext/subagents/runs.ts";
+import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
 
 function deferred<T = void>() {
 	let resolve!: (value: T | PromiseLike<T>) => void;
@@ -41,12 +42,12 @@ function makeRequest(overrides: Partial<Parameters<SubagentRunScheduler["admit"]
 
 describe("Ticket #8 — Every requested run starts immediately with no child quotas", () => {
 	it("starts 20 runs admitted in one parent turn before any of them finishes", async () => {
-		const gates: ReturnType<typeof deferred<SubagentRunnerOutcome>>[] = [];
+		const gates: ReturnType<typeof deferred<SubagentRunOutcome>>[] = [];
 		const started: string[] = [];
 		const scheduler = new SubagentRunScheduler({
 			executeRun: (params) => {
 				started.push(params.record.runId);
-				const gate = deferred<SubagentRunnerOutcome>();
+				const gate = deferred<SubagentRunOutcome>();
 				gates.push(gate);
 				return gate.promise;
 			},
@@ -72,15 +73,13 @@ describe("Ticket #8 — Every requested run starts immediately with no child quo
 	it("does not auto-stop a run past former turn, tool-call, token, repetition and time limits", async () => {
 		vi.useFakeTimers();
 		try {
-			const gates = new Map<string, ReturnType<typeof deferred<SubagentRunnerOutcome>>>();
+			const gates = new Map<string, ReturnType<typeof deferred<SubagentRunOutcome>>>();
 			const scheduler = new SubagentRunScheduler({
-				executeRun: (params: SubagentRunnerExecuteParams) => {
-					const gate = deferred<SubagentRunnerOutcome>();
+				executeRun: (params: SubagentRunExecuteParams) => {
+					const gate = deferred<SubagentRunOutcome>();
 					gates.set(params.record.originToolCallId, gate);
 					params.controller.markRunning();
-					for (let i = 0; i < 13; i++) params.controller.recordTurn();
-					for (let i = 0; i < 41; i++) params.controller.recordToolCall();
-					params.controller.recordUsage({ input: 100_001, totalTokens: 100_001 });
+					params.controller.updateUsage({ ...createEmptySubagentUsage(), input: 100_001, totalTokens: 100_001 });
 					return gate.promise;
 				},
 			});
@@ -93,8 +92,6 @@ describe("Ticket #8 — Every requested run starts immediately with no child quo
 			for (const handle of handles) {
 				const live = scheduler.getRun(handle.runId)!;
 				expect(live.status).toBe("running");
-				expect(live.turnCount).toBe(13);
-				expect(live.toolCallCount).toBe(41);
 				expect(live.usage.totalTokens).toBe(100_001);
 			}
 
@@ -141,7 +138,7 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 	it("handles cancellation before admission, by explicit stop while running, and by the caller signal", async () => {
 		const scheduler = new SubagentRunScheduler({
 			executeRun: (params) => {
-				const gate = deferred<SubagentRunnerOutcome>();
+				const gate = deferred<SubagentRunOutcome>();
 				params.signal.addEventListener(
 					"abort",
 					() => gate.resolve({ status: "cancelled", complete: false, summaryText: "Partial before abort" }),
@@ -183,7 +180,7 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 	});
 
 	it("keeps a stopping run active until a non-cooperating runner actually returns", async () => {
-		const stuckGate = deferred<SubagentRunnerOutcome>();
+		const stuckGate = deferred<SubagentRunOutcome>();
 		const scheduler = new SubagentRunScheduler({
 			// Intentionally ignores the abort signal until stuckGate resolves
 			executeRun: () => stuckGate.promise,
@@ -257,7 +254,7 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 	});
 
 	it("waits for runners and finalizers to settle and writes nothing afterwards", async () => {
-		const runnerGate = deferred<SubagentRunnerOutcome>();
+		const runnerGate = deferred<SubagentRunOutcome>();
 		const finalizerGate = deferred();
 		let changesAfterSettled = 0;
 		let settled = false;
@@ -289,106 +286,24 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 	});
 });
 
-describe("A run finishes between its child's last turn and its terminal record", () => {
-	it("enters finishing with a change, and leaves it with the terminal record once the finalizer is done", async () => {
-		const runnerGate = deferred<SubagentRunnerOutcome>();
-		const finalizerGate = deferred();
-		const changes: string[] = [];
-		let controller!: SubagentRunnerExecuteParams["controller"];
-		const scheduler = new SubagentRunScheduler({
-			executeRun: (params) => {
-				controller = params.controller;
-				return runnerGate.promise;
-			},
-			onFinalize: async (record) => {
-				await finalizerGate.promise;
-				return record;
-			},
-			onStateChange: (record) => changes.push(record.status),
-		});
-		const handle = admitted(scheduler.admit(makeRequest()));
-		controller.markRunning("child_1");
-		changes.length = 0;
-
-		controller.markFinishing();
-		controller.markFinishing();
-		expect(scheduler.getRun(handle.runId)?.status).toBe("finishing");
-		expect(changes).toEqual(["finishing"]);
-
-		runnerGate.resolve({ status: "completed", complete: true, summaryText: "done" });
-		await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(scheduler.getRun(handle.runId)?.status).toBe("finishing");
-
-		finalizerGate.resolve();
-		expect(await handle.completion).toMatchObject({ status: "completed" });
-		expect(changes).toEqual(["finishing", "completed"]);
-	});
-
-	it("clears finishing on a resume, and ignores the earlier generation's end of turn", async () => {
-		const controllers: SubagentRunnerExecuteParams["controller"][] = [];
-		const gates: ReturnType<typeof deferred<SubagentRunnerOutcome>>[] = [];
-		const scheduler = new SubagentRunScheduler({
-			executeRun: ({ controller }) => {
-				controllers.push(controller);
-				const gate = deferred<SubagentRunnerOutcome>();
-				gates.push(gate);
-				return gate.promise;
-			},
-		});
-		const handle = admitted(scheduler.admit(makeRequest()));
-		controllers[0].markFinishing();
-		gates[0].resolve({ status: "completed", complete: true, summaryText: "first" });
-		await handle.completion;
-
-		admitted(scheduler.resume(handle.runId, undefined));
-		expect(scheduler.getRun(handle.runId)).toMatchObject({ generation: 1, status: "starting" });
-		controllers[0].markFinishing();
-		expect(scheduler.getRun(handle.runId)?.status).toBe("starting");
-
-		controllers[1].markFinishing();
-		expect(scheduler.getRun(handle.runId)?.status).toBe("finishing");
-	});
-
-	it("keeps a stop over finishing, either way round", async () => {
-		const controllers: SubagentRunnerExecuteParams["controller"][] = [];
-		const scheduler = new SubagentRunScheduler({
-			executeRun: ({ controller }) => {
-				controllers.push(controller);
-				return new Promise<SubagentRunnerOutcome>(() => {});
-			},
-		});
-		const stoppedFirst = admitted(scheduler.admit(makeRequest()));
-		scheduler.cancelRun(stoppedFirst.runId, "user");
-		controllers[0].markFinishing();
-		expect(scheduler.getRun(stoppedFirst.runId)?.status).toBe("stopping");
-
-		const finishingFirst = admitted(scheduler.admit(makeRequest()));
-		controllers[1].markFinishing();
-		expect(scheduler.cancelRun(finishingFirst.runId, "session_invalidated")).toBe(true);
-		expect(scheduler.getRun(finishingFirst.runId)?.status).toBe("stopping");
-	});
-});
-
 describe("Issue #63 — A run's controller only affects its own generation", () => {
-	function exercise(controller: SubagentRunnerExecuteParams["controller"], tag: string) {
-		controller.markRunning(`child_${tag}`, `thinking_${tag}`);
-		controller.recordTurn();
-		controller.recordToolCall(`tool_${tag}`);
-		controller.recordToolExecution(`tool_${tag}`, false);
-		controller.recordUsage({ input: 10 });
-		controller.recordNestedUsage({ input: 5 });
+	function exercise(controller: SubagentRunExecuteParams["controller"], tag: string) {
+		controller.markRunning();
+		controller.recordPane(`pi-${tag}`);
+		controller.updateActivity("idle");
+		controller.updateUsage({ ...createEmptySubagentUsage(), input: tag === "new" ? 15 : 10 });
 		controller.updateProgress(`progress_${tag}`);
 	}
 
 	it("ignores an earlier generation's controller after a resume", async () => {
 		let clock = 0;
-		const controllers: SubagentRunnerExecuteParams["controller"][] = [];
-		const gates: ReturnType<typeof deferred<SubagentRunnerOutcome>>[] = [];
+		const controllers: SubagentRunExecuteParams["controller"][] = [];
+		const gates: ReturnType<typeof deferred<SubagentRunOutcome>>[] = [];
 		const scheduler = new SubagentRunScheduler({
 			now: () => ++clock,
 			executeRun: ({ controller }) => {
 				controllers.push(controller);
-				const gate = deferred<SubagentRunnerOutcome>();
+				const gate = deferred<SubagentRunOutcome>();
 				gates.push(gate);
 				return gate.promise;
 			},
@@ -398,7 +313,6 @@ describe("Issue #63 — A run's controller only affects its own generation", () 
 		await handle.completion;
 
 		const resumed = admitted(scheduler.resume(handle.runId, undefined));
-		scheduler.launchResultEmitted(handle.runId);
 		const before = scheduler.getRun(handle.runId);
 		exercise(controllers[0], "old");
 		expect(scheduler.getRun(handle.runId)).toEqual(before);
@@ -407,21 +321,13 @@ describe("Issue #63 — A run's controller only affects its own generation", () 
 		expect(scheduler.getRun(handle.runId)).toMatchObject({
 			generation: 1,
 			status: "running",
-			childSessionId: "child_new",
-			thinkingLevel: "thinking_new",
-			turnCount: 1,
-			toolCallCount: 1,
-			toolExecutions: { tool_new: { ok: 1, error: 0 } },
-			lastActivity: { kind: "tool", detail: "tool_new" },
+			pane: "pi-new",
+			activity: "idle",
 			lastProgressText: "progress_new",
 			usage: { input: 15 },
 		});
 
 		gates[1].resolve({ status: "completed", complete: true, summaryText: "second" });
-		expect(await resumed.completion).toMatchObject({
-			status: "completed",
-			usage: { input: 15 },
-			usageAttribution: "ledger",
-		});
+		expect(await resumed.completion).toMatchObject({ status: "completed", usage: { input: 15 } });
 	});
 });

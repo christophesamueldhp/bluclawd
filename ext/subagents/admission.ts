@@ -1,10 +1,8 @@
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { type Static, Type } from "@earendil-works/pi-ai";
-import {
-	type ExtensionContext,
-	type ExtensionToolContext,
-	SettingsManager,
-	type ToolLoadout,
-} from "@earendil-works/pi-coding-agent";
+import { type ExtensionContext, SettingsManager, type ToolLoadout } from "@earendil-works/pi-coding-agent";
 import * as forkSettings from "../_shared/settings.ts";
 import { evaluateSubagentDelegationDeny } from "../permissions/policy.ts";
 import {
@@ -12,6 +10,7 @@ import {
 	type AgentDefinitionCatalog,
 	createInlineAgentDefinition,
 	discoverAgentDefinitions,
+	type InlineAgentRole,
 	isSubagentThinkingLevel,
 	parseSubagentModelSpec,
 	resolveAgentDefinition,
@@ -21,40 +20,66 @@ import {
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import type { RunDirectory } from "./directory.ts";
 import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
+import { resolveChildModelAndRuntime } from "./models.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
 import {
-	captureWorkspaceSnapshot,
-	type ParentToolSnapshot,
-	type ResolvedChildModel,
-	resolveChildModelAndRuntime,
-	snapshotParentTools,
-} from "./runner.ts";
-import { type AdmittedSubagentHandle, createRunId, type SubagentRunRecord, type SubagentRunScheduler } from "./runs.ts";
-import { ensureRunStorageDir } from "./storage.ts";
+	type AdmittedSubagentHandle,
+	createRunId,
+	isResumableSubagentStatus,
+	type SubagentRunRecord,
+	type SubagentRunScheduler,
+	type WorkspaceSnapshot,
+} from "./runs.ts";
+import { ensureRunStorageDir, recordCountedSessionUsage } from "./storage.ts";
+import type { RunLaunch } from "./tmux-runs.ts";
 
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
-/** Recorded until the child session reports the level the SDK chose for its model. */
-const SDK_DEFAULT_THINKING = "model default";
-const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-/** Pi built-in extensions a child runs itself, over its own copies of the orchestrator's tools. */
-const CHILD_BUILTIN_EXTENSIONS = ["codemode", "tool_search"];
+/** Recorded when no level is chosen: the run's pi picks its model's default. */
+const MODEL_DEFAULT_THINKING = "model default";
+/** How many runs an orchestrator holds open at once: each is a full pi. */
+export const MAX_OPEN_RUNS = 8;
+const TOO_MANY_OPEN = `An orchestrator holds at most ${MAX_OPEN_RUNS} open subagents. Close one whose work is done with subagent_close, then try again.`;
+/** Pi built-in extensions a run can be given like tools, when the orchestrator declares them. */
+const BUILTIN_EXTENSIONS = ["codemode", "tool_search"];
+export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+export const NEEDS_TMUX =
+	"Subagents need tmux: each run is a pi session of its own in agent view's tmux server, and this pi does not run there. Install tmux if it is missing (brew install tmux), then start pi again in a terminal.";
 
-/** What a run needs from its admission to execute. */
+/** The tools a role may name: those the orchestrator can call, and the built-in extensions it declares. */
+export function orchestratorTools(loadout: ToolLoadout): string[] {
+	const declared = new Set(loadout.declared.map((tool) => tool.name));
+	return [...loadout.callable.map((tool) => tool.name), ...BUILTIN_EXTENSIONS.filter((name) => declared.has(name))];
+}
+
+/** What a run needs from its admission to execute: it starts as a pi of its own in tmux (ADR-0006), its role as its launch flags. */
 export interface RunExecutionContext {
-	agentDir: string;
-	definition: AgentDefinition;
-	task: string;
-	parent: Pick<ExtensionToolContext, "executeTool">;
-	parentTools: readonly ParentToolSnapshot[];
-	activeToolNames: readonly string[];
-	builtinExtensions: readonly string[];
-	childModel: ResolvedChildModel;
-	/**
-	 * Set when the orchestrator resumes a completed run: its transcript, the message to continue with, and the
-	 * message tool call the resumed child runs under.
-	 */
-	resume?: { transcriptPath: string; prompt: string; toolCallId: string };
-	projectTrusted: boolean;
+	launch: RunLaunch;
+}
+
+export function captureWorkspaceSnapshot(cwd: string): WorkspaceSnapshot {
+	try {
+		const headRes = spawnSync("git", ["rev-parse", "--verify", "HEAD"], {
+			cwd,
+			encoding: "utf8",
+			timeout: 2000,
+		});
+		const headCommit = headRes.status === 0 ? headRes.stdout.trim() || null : null;
+
+		const statusRes = spawnSync("git", ["status", "--porcelain=v1", "-uall"], {
+			cwd,
+			encoding: "utf8",
+			timeout: 2000,
+		});
+		if (statusRes.status !== 0) {
+			return { headCommit, dirty: false, statusDigest: "" };
+		}
+		const rawStatus = statusRes.stdout ?? "";
+		const dirty = rawStatus.trim().length > 0;
+		const statusDigest = dirty ? createHash("sha256").update(rawStatus).digest("hex").slice(0, 16) : "";
+		return { headCommit, dirty, statusDigest };
+	} catch {
+		return { headCommit: null, dirty: false, statusDigest: "" };
+	}
 }
 
 export const SUBAGENT_TOOL_PARAMETERS = Type.Object({
@@ -116,25 +141,30 @@ export interface LaunchRequest {
 	signal?: AbortSignal;
 }
 
-/** The parts of the calling tool's context admission reads. Without `executeTool` a run is refused. */
+/** The parts of the calling tool's context admission reads. */
 export type AdmissionContext = Pick<
 	ExtensionContext,
 	"cwd" | "mode" | "model" | "modelRegistry" | "isProjectTrusted"
 > & {
 	sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId" | "getLeafId" | "getBranch">;
-	executeTool?: ExtensionToolContext["executeTool"];
 };
 
 export interface RunAdmissionDeps {
-	scheduler: Pick<SubagentRunScheduler<RunExecutionContext>, "admit" | "resume" | "getRun" | "getContext">;
+	scheduler: Pick<
+		SubagentRunScheduler<RunExecutionContext>,
+		"admit" | "resume" | "takeOver" | "getRun" | "getContext"
+	>;
 	/** Which names the runs of a parent scope hold. */
-	directory: Pick<RunDirectory, "nameHolder">;
+	directory: Pick<RunDirectory, "nameHolder" | "list">;
 	agentDir: () => string;
 	/** Saved roles frozen at session start; discovered on demand when session start was skipped. */
 	catalog: () => AgentDefinitionCatalog | undefined;
-	loadout: () => ToolLoadout | undefined;
 	parentThinkingLevel: () => string;
 	scope: ParentScopeChecks;
+	/** The orchestrator's tmux session, where its runs start as pis of their own; without one, none starts. */
+	pane: () => string | undefined;
+	/** The tools the orchestrator has, which a role may name. */
+	tools: () => readonly string[];
 }
 
 export type AdmissionResult =
@@ -149,18 +179,20 @@ export type AdmissionResult =
 export interface RunAdmission {
 	launch(request: LaunchRequest, ctx: AdmissionContext): Promise<AdmissionResult>;
 	/**
-	 * Admits a completed run's next generation. `buildPrompt` is called only once every check has passed,
-	 * just before the run starts again.
+	 * Admits a completed or closed run's next generation. `buildPrompt` is called only once every check has
+	 * passed, just before the run starts again. Without one, the run resumes for the user to type in.
 	 */
 	resume(
 		run: Readonly<SubagentRunRecord>,
-		toolCallId: string,
-		buildPrompt: () => string,
+		buildPrompt: (() => string) | undefined,
 		ctx: AdmissionContext,
 	): Promise<AdmissionResult>;
+	/**
+	 * Takes over an open run this orchestrator's session started before a reload, its pi still running in its pane,
+	 * into the current scope.
+	 */
+	adopt(run: Readonly<SubagentRunRecord>, ctx: AdmissionContext): void;
 }
-
-type ChildTools = Pick<RunExecutionContext, "parent" | "parentTools" | "activeToolNames" | "builtinExtensions">;
 
 function summarizeTaskLabel(task: string): string {
 	const firstLine =
@@ -172,54 +204,44 @@ function summarizeTaskLabel(task: string): string {
 	return compact.length > 120 ? `${compact.slice(0, 119)}…` : compact;
 }
 
+/** The inline role of the subagent call `toolCallId` on the orchestrator's branch. */
+function launchedRole(toolCallId: string, ctx: AdmissionContext): AgentDefinition | undefined {
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		const call = entry.message.content.find((part) => part.type === "toolCall" && part.id === toolCallId);
+		const agent = call?.type === "toolCall" ? call.arguments.agent : undefined;
+		if (agent === undefined) continue;
+		if (typeof agent !== "object" || agent === null || Array.isArray(agent)) return undefined;
+		const role = createInlineAgentDefinition(agent as unknown as InlineAgentRole);
+		return role.ok ? role.definition : undefined;
+	}
+	return undefined;
+}
+
+/** Why the parent's Subagent / Subagent(agentName) deny rules refuse a run, evaluated before any model activity. */
+export function delegationDenied(
+	agentName: string,
+	cwd: string,
+	agentDir: string,
+	projectTrusted: boolean,
+): string | undefined {
+	const sm = SettingsManager.create(cwd, agentDir, { projectTrusted });
+	const delegationDeny = evaluateSubagentDelegationDeny(forkSettings.denyRules(sm), agentName, cwd);
+	return delegationDeny.blocked ? (delegationDeny.reason ?? "Blocked by permission rule") : undefined;
+}
+
 export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 	const autoNameCounters = new Map<string, number>();
 	const reject = (error: string): AdmissionResult => ({ ok: false, error });
 
-	// Parent Subagent / Subagent(agentName) deny rules, evaluated before any model activity.
-	const deniedReason = (agentName: string, ctx: AdmissionContext): string | undefined => {
-		const sm = SettingsManager.create(ctx.cwd, deps.agentDir(), { projectTrusted: ctx.isProjectTrusted() });
-		const delegationDeny = evaluateSubagentDelegationDeny(forkSettings.denyRules(sm), agentName, ctx.cwd);
-		return delegationDeny.blocked ? (delegationDeny.reason ?? "Blocked by permission rule") : undefined;
-	};
-
-	// The orchestrator's callable tools, narrowed by the role's tool list.
-	const selectChildTools = (
-		definition: AgentDefinition,
-		ctx: AdmissionContext,
-	): { tools: ChildTools; error?: never } | { tools?: never; error: string } => {
-		const loadout = deps.loadout();
-		if (!ctx.executeTool || !loadout)
-			return { error: "Subagent dispatch needs the orchestrator's live tool context." };
-		const declaredNames = new Set(loadout.declared.map((tool) => tool.name));
-		const callableNames = loadout.callable.map((tool) => tool.name);
-		const builtinNames = CHILD_BUILTIN_EXTENSIONS.filter((name) => declaredNames.has(name));
-		const availableNames = [...callableNames, ...builtinNames];
-		const unknownTools = definition.tools?.filter((name) => !availableNames.includes(name)) ?? [];
-		if (unknownTools.length > 0) {
-			return {
-				error: `Subagent role "${definition.name}" names tools the orchestrator cannot give a child: ${unknownTools.join(", ")}. Available: ${availableNames.join(", ") || "none"}.`,
-			};
-		}
-		const selectedNames = definition.tools ?? availableNames;
-		return {
-			tools: {
-				parent: ctx as Pick<ExtensionToolContext, "executeTool">,
-				parentTools: snapshotParentTools(
-					loadout,
-					callableNames.filter((name) => selectedNames.includes(name)),
-				),
-				activeToolNames: selectedNames.filter((name) => declaredNames.has(name)),
-				builtinExtensions: builtinNames.filter((name) => selectedNames.includes(name)),
-			},
-		};
-	};
+	const deniedReason = (agentName: string, ctx: AdmissionContext): string | undefined =>
+		delegationDenied(agentName, ctx.cwd, deps.agentDir(), ctx.isProjectTrusted());
 
 	const resolveChildModel = async (
 		requestedModel: SubagentModelSpec,
 		requestedThinkingLevel: string | undefined,
 		ctx: AdmissionContext,
-	): Promise<{ childModel: ResolvedChildModel; error?: never } | { childModel?: never; error: string }> => {
+	) => {
 		const resolved = await resolveChildModelAndRuntime({
 			agentDir: deps.agentDir(),
 			requestedModel,
@@ -227,18 +249,106 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			requestedThinkingLevel,
 			parentModelRegistry: ctx.modelRegistry,
 		});
-		if (!resolved.ok) return { error: sanitizeDiagnosticText(resolved.error) };
+		return resolved.ok ? resolved : { ...resolved, error: sanitizeDiagnosticText(resolved.error) };
+	};
+
+	/**
+	 * A closed run, or a run known only from disk (an earlier instance's, or one from before runs were pis of their
+	 * own), reopens its session as a pi in tmux, as its next generation in the current scope.
+	 */
+	const resumeInTmux = (
+		run: Readonly<SubagentRunRecord>,
+		parentPane: string,
+		buildPrompt: (() => string) | undefined,
+		ctx: AdmissionContext,
+		refuse: { invalidated: AdmissionResult; unavailable: (error: string) => AdmissionResult },
+	): AdmissionResult => {
+		const label = formatRunLabel(run);
+		const scope = deps.scope.current();
+		const known = deps.scheduler.getRun(run.runId);
+		if (!scope || !deps.scope.inScope(scope) || run.parentSessionId !== scope.parentSessionId) {
+			return refuse.invalidated;
+		}
+		if (known && !deps.scope.inScope(known)) return refuse.invalidated;
+		const current = known ?? run;
+		if (!isResumableSubagentStatus(current.status)) {
+			return refuse.unavailable(
+				`${label} is ${current.status}; only a completed or closed subagent can be resumed.`,
+			);
+		}
+		if (deps.directory.list(scope).length >= MAX_OPEN_RUNS) return refuse.unavailable(TOO_MANY_OPEN);
+		const sessionFile = current.transcriptPath;
+		if (!sessionFile || !existsSync(sessionFile))
+			return refuse.unavailable(`${label} has no saved session to resume.`);
+		const holder = current.name ? deps.directory.nameHolder(scope, current.name)?.record : undefined;
+		if (holder) return refuse.unavailable(`${label} cannot resume: its name is now used by ${holder.runId}.`);
+		const denied = deniedReason(current.agentName, ctx);
+		if (denied) return refuse.unavailable(denied);
+		const storage = ensureRunStorageDir(deps.agentDir(), current.parentSessionId, current.runId);
+		if (!storage.ok) return refuse.unavailable(`Cannot resume ${label}: storage is unavailable (${storage.error}).`);
+		// A run from before runs were pis of their own had its session's usage counted by its orchestrator already.
+		if (!current.pane) recordCountedSessionUsage(deps.agentDir(), current.parentSessionId, sessionFile);
+		const resumed = deps.scheduler.resume(
+			current.runId,
+			{ launch: { ...launchOf(current, storage.runDir, parentPane, ctx), task: buildPrompt?.() } },
+			known ? undefined : { ...current, sessionEpoch: scope.sessionEpoch },
+		);
+		if (!resumed.ok) return refuse.unavailable(resumed.error);
+		return { ok: true, handle: resumed.handle };
+	};
+
+	/** How the run is started again, as its record and its role say. */
+	const launchOf = (
+		run: Readonly<SubagentRunRecord>,
+		runDir: string,
+		parentPane: string,
+		ctx: AdmissionContext,
+	): RunLaunch => {
+		const previous = deps.scheduler.getContext(run.runId);
 		return {
-			childModel: {
-				model: resolved.model,
-				modelRuntime: resolved.modelRuntime,
-				thinkingLevel: resolved.thinkingLevel,
-			},
+			name: run.name ?? run.runId,
+			definition: previous ? previous.launch.definition : roleOf(run, ctx),
+			model: `${run.provider}/${run.modelId}`,
+			thinkingLevel: run.thinkingLevel === MODEL_DEFAULT_THINKING ? undefined : run.thinkingLevel,
+			cwd: run.cwd,
+			runDir,
+			sessionFile: run.transcriptPath,
+			parent: parentPane,
+			projectTrusted: ctx.isProjectTrusted(),
+		};
+	};
+
+	/**
+	 * The role a run known only from disk resumes with: an inline role as the call that launched it gave it, a saved
+	 * role as it is now. One found in neither resumes with no instructions of its own and every tool.
+	 */
+	const roleOf = (run: Readonly<SubagentRunRecord>, ctx: AdmissionContext): AgentDefinition => {
+		const inline = run.definitionSource === "inline" ? launchedRole(run.originToolCallId, ctx) : undefined;
+		if (inline) return inline;
+		const saved = resolveAgentDefinition(
+			deps.catalog() ??
+				discoverAgentDefinitions({
+					cwd: ctx.cwd,
+					agentDir: deps.agentDir(),
+					projectTrusted: ctx.isProjectTrusted(),
+				}),
+			run.agentName,
+		);
+		if (saved.ok) return saved.definition;
+		return {
+			name: run.agentName,
+			description: "",
+			model: "inherit",
+			instructions: "",
+			source: run.definitionSource,
 		};
 	};
 
 	return {
 		async launch({ toolCallId, parentTurnId, params, signal }, ctx) {
+			// A run is a pi of its own in tmux (ADR-0006): there is no other way to run one.
+			const parentPane = deps.pane();
+			if (parentPane === undefined) return reject(NEEDS_TMUX);
 			const dispatched = deps.scope.current();
 			if (!dispatched) return reject("Subagent runtime is not initialized for this session.");
 			const parentSessionId = ctx.sessionManager.getSessionId();
@@ -281,9 +391,13 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				return reject(resolvedDef.error);
 			}
 			const definition = resolvedDef.definition;
-
-			const { tools, error: toolsError } = selectChildTools(definition, ctx);
-			if (!tools) return reject(toolsError);
+			const available = deps.tools();
+			const unknownTools = definition.tools?.filter((name) => !available.includes(name)) ?? [];
+			if (unknownTools.length > 0) {
+				return reject(
+					`Subagent role "${definition.name}" names tools the orchestrator cannot give a child: ${unknownTools.join(", ")}. Available: ${available.join(", ") || "none"}.`,
+				);
+			}
 
 			// Spawn > role > parent for the model and thinking level, verified before admission.
 			const spawnModel = params.model === undefined ? undefined : parseSubagentModelSpec(params.model);
@@ -310,8 +424,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			// A chosen model without a level gets the SDK's default for that model; an inherited one keeps the parent's.
 			const requestedThinkingLevel =
 				explicitThinkingLevel ?? (requestedModel === "inherit" ? parentThinkingLevel : undefined);
-			const { childModel, error: modelError } = await resolveChildModel(requestedModel, requestedThinkingLevel, ctx);
-			if (!childModel) return reject(modelError);
+			const childModel = await resolveChildModel(requestedModel, requestedThinkingLevel, ctx);
+			if (!childModel.ok) return reject(childModel.error);
 
 			// Everything from here to admit runs without awaiting, so the session cannot change in between.
 			if (
@@ -321,6 +435,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			) {
 				return reject("Parent session or branch changed before subagent admission; request cancelled.");
 			}
+			if (deps.directory.list(dispatched).length >= MAX_OPEN_RUNS) return reject(TOO_MANY_OPEN);
 			const startSnapshot = captureWorkspaceSnapshot(cwd);
 
 			const holderOf = (name: string) => deps.directory.nameHolder(dispatched, name)?.record;
@@ -371,25 +486,47 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				definitionSource: definition.source,
 				provider: childModel.model.provider,
 				modelId: childModel.model.id,
-				thinkingLevel: childModel.thinkingLevel ?? SDK_DEFAULT_THINKING,
+				thinkingLevel: childModel.thinkingLevel ?? MODEL_DEFAULT_THINKING,
 				cwd,
 				taskSummary: summarizeTaskLabel(taskText),
 				startSnapshot,
 				deliveryMode: isBackground ? "background" : "foreground",
-				// Foreground runs link to the invoking tool call's signal; background runs outlive the launch tool call
-				signal: isBackground ? undefined : signal,
-				context: { agentDir, definition, task: taskText, ...tools, childModel, projectTrusted },
+				// Not linked to the call's signal: an aborted foreground call only stops waiting for the run's Report.
+				context: {
+					launch: {
+						name: runName,
+						definition,
+						model: `${childModel.model.provider}/${childModel.model.id}`,
+						thinkingLevel: childModel.thinkingLevel,
+						task: taskText,
+						cwd,
+						runDir: storage.runDir,
+						parent: parentPane,
+						projectTrusted,
+					},
+				},
 			});
 			if (!admitRes.ok) return reject(admitRes.error);
 			return { ok: true, handle: admitRes.handle };
 		},
 
-		async resume(run, toolCallId, buildPrompt, ctx) {
+		adopt(run, ctx) {
+			const parentPane = deps.pane();
+			const scope = deps.scope.current();
+			const storage = ensureRunStorageDir(deps.agentDir(), run.parentSessionId, run.runId);
+			if (!parentPane || !scope || !run.pane || !storage.ok) return;
+			deps.scheduler.takeOver(
+				{ ...run, sessionEpoch: scope.sessionEpoch },
+				{ launch: { ...launchOf(run, storage.runDir, parentPane, ctx), pane: run.pane } },
+			);
+		},
+
+		async resume(run, buildPrompt, ctx) {
 			const label = formatRunLabel(run);
 			const invalidated: AdmissionResult = {
 				ok: false,
 				refusal: "invalidated",
-				error: `${label} belongs to a session that was reloaded or replaced; spawn a new subagent and point it at ${run.reportPath ?? "the earlier report"}.`,
+				error: `${label} belongs to a session that was replaced; spawn a new subagent and point it at ${run.reportPath ?? "the earlier report"}.`,
 			};
 			const unavailable = (error: string): AdmissionResult => ({ ok: false, refusal: "unavailable", error });
 			if (ctx.mode === "print" || ctx.mode === "json") {
@@ -397,53 +534,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					`Resuming ${label} is not supported in one-shot "${ctx.mode}" mode because a resume runs in the background and the process exits before it completes.`,
 				);
 			}
-			// Checked again after the model is resolved, since another message may resume the run meanwhile.
-			const checkResumable = (): { transcriptPath: string; refused?: never } | { refused: AdmissionResult } => {
-				const current = deps.scheduler.getRun(run.runId);
-				if (!current || !deps.scope.inScope(current)) {
-					return { refused: invalidated };
-				}
-				if (current.status !== "completed") {
-					return {
-						refused: unavailable(`${label} is ${current.status}; only a completed subagent can be resumed.`),
-					};
-				}
-				if (!current.transcriptPath) return { refused: unavailable(`${label} has no saved transcript to resume.`) };
-				const holder = current.name ? deps.directory.nameHolder(current, current.name)?.record : undefined;
-				if (holder)
-					return { refused: unavailable(`${label} cannot resume: its name is now used by ${holder.runId}.`) };
-				return { transcriptPath: current.transcriptPath };
-			};
-
-			const beforeModel = checkResumable();
-			if (beforeModel.refused) return beforeModel.refused;
-			const previous = deps.scheduler.getContext(run.runId);
-			if (!previous) return invalidated;
-
-			const denied = deniedReason(run.agentName, ctx);
-			if (denied) return unavailable(denied);
-			// The run keeps its role, inline ones included, but gets the orchestrator's tools as they are now.
-			const { tools, error: toolsError } = selectChildTools(previous.definition, ctx);
-			if (!tools) return unavailable(toolsError);
-			// The run keeps the model and level it ran with; a level the SDK chose is chosen again.
-			const { childModel, error: modelError } = await resolveChildModel(
-				`${run.provider}/${run.modelId}`,
-				run.thinkingLevel === SDK_DEFAULT_THINKING ? undefined : run.thinkingLevel,
-				ctx,
-			);
-			if (!childModel) return unavailable(modelError);
-
-			const resumable = checkResumable();
-			if (resumable.refused) return resumable.refused;
-			const resumed = deps.scheduler.resume(run.runId, {
-				...previous,
-				...tools,
-				childModel,
-				projectTrusted: ctx.isProjectTrusted(),
-				resume: { transcriptPath: resumable.transcriptPath, prompt: buildPrompt(), toolCallId },
-			});
-			if (!resumed.ok) return unavailable(resumed.error);
-			return { ok: true, handle: resumed.handle };
+			const parentPane = deps.pane();
+			if (parentPane === undefined) return unavailable(NEEDS_TMUX);
+			return resumeInTmux(run, parentPane, buildPrompt, ctx, { invalidated, unavailable });
 		},
 	};
 }

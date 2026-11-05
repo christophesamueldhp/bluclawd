@@ -92,7 +92,7 @@ export interface StatusView {
 	trust?: PaneReport["trust"];
 	context?: PaneReport["context"];
 	usage?: PaneReport["usage"];
-	backgroundSubagentUsage?: PaneReport["backgroundSubagentUsage"];
+	subagentUsage?: PaneReport["subagentUsage"];
 	notice?: PaneReport["notice"];
 	/** Only for a pane that reports them, so the phone tells it from an older one. */
 	outcomes?: PromptOutcome[];
@@ -246,7 +246,7 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 /** Fetched again after every report: the commands, which rarely change, have their own route.
  *  `outcomes`: the delivery module's, shown only when the pane's report says it reports them. */
 function statusView(report: PaneReport, outcomes: PromptOutcome[]): StatusView {
-	const { model, context, usage, backgroundSubagentUsage: background, notice } = report;
+	const { model, context, usage, subagentUsage: runs, notice } = report;
 	return {
 		model: model && modelView(model),
 		models: report.models.map(modelView),
@@ -261,13 +261,13 @@ function statusView(report: PaneReport, outcomes: PromptOutcome[]): StatusView {
 			cacheWrite: usage.cacheWrite,
 			cost: usage.cost,
 		},
-		backgroundSubagentUsage: background && {
-			runCount: background.runCount,
-			input: background.input,
-			output: background.output,
-			cacheRead: background.cacheRead,
-			cacheWrite: background.cacheWrite,
-			cost: background.cost,
+		subagentUsage: runs && {
+			runCount: runs.runCount,
+			input: runs.input,
+			output: runs.output,
+			cacheRead: runs.cacheRead,
+			cacheWrite: runs.cacheWrite,
+			cost: runs.cost,
 		},
 		notice: notice && { text: notice.text, at: notice.at },
 		outcomes: report.outcomes && outcomes.map((outcome) => ({ ...outcome })),

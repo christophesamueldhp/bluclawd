@@ -242,6 +242,7 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 				label: request.label,
 				sessionFile: request.sessionFile,
 				sessionId: request.sessionId,
+				parent: request.parent,
 			});
 			return { type: "ack", ok: true, ...(instance ? { instance: toInstanceSummary(instance) } : {}) };
 		}

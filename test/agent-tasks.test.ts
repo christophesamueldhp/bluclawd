@@ -30,8 +30,8 @@ describe("Task 8 (M2) — AgentTaskSource publication and change notifications",
 				},
 			],
 			get: () => undefined,
-			stop: () => ({ ok: false, reason: "not_found" }),
-			stopAll: () => 0,
+			close: () => ({ ok: false, reason: "not_found" }),
+			closeAll: () => 0,
 		};
 
 		const source2: AgentTaskSource = {
@@ -50,8 +50,8 @@ describe("Task 8 (M2) — AgentTaskSource publication and change notifications",
 				},
 			],
 			get: () => undefined,
-			stop: () => ({ ok: false, reason: "not_found" }),
-			stopAll: () => 0,
+			close: () => ({ ok: false, reason: "not_found" }),
+			closeAll: () => 0,
 		};
 
 		try {

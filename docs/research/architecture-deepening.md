@@ -1,5 +1,7 @@
 # Architecture deepening: validating the 8 candidates
 
+Superseded in part by ADR-0006: runs are now pi sessions of their own, not in-process SDK sessions.
+
 This note checks the 2026-11-04 architecture review (`main @ edaa709`) against the code, the git history, the tests and pi 1.0.4 in `node_modules/@earendil-works/pi-coding-agent`. For each of the review's 8 deepening candidates it gives a verdict, lists the review's errors, and adds the constraints a spec must respect. No source was changed.
 
 Conventions:

@@ -7,19 +7,27 @@ An extension pack for the pi coding agent: a sandboxed shell, background session
 ### Subagents
 
 **Run**:
-One delegated piece of work by a subagent, with its own identity, transcript and report. A run lives through one or more generations.
-_Avoid_: job, task (for a subagent's work)
+One delegated piece of work by a subagent: a pi session of its own that the orchestrator which launched it starts, messages, stops and closes, with its own identity, transcript and reports. A run lives through one or more generations. It is reached from its orchestrator, not listed in agent view or on the phone.
+_Avoid_: job, task (for a subagent's work), teammate
+
+**Report**:
+A run's last message of a turn, given to its orchestrator each time the run falls idle. A run that stays open reports again after every later turn.
+_Avoid_: result (as if it came once), final answer
+
+**Stop**:
+Ending a run's turn in progress. Its pi stays open and still takes messages.
+_Avoid_: close, kill
+
+**Close**:
+Ending a run's pi. Its session is kept and the run can be resumed. The orchestrator closes a run without asking it, and the end of the orchestrator's session closes all of its runs. So does the daemon once the orchestrator's pane is gone, though not while it is a Silent pane.
+_Avoid_: stop, delete, shutdown request
 
 **Generation**:
-One launch or one resume of a run. Usage is counted once per generation.
+One launch or one resume of a run.
 _Avoid_: generation for the orchestrator's session being reloaded or replaced
 
-**Finishing**:
-A run's status from the child's last turn of a generation, one pi will not retry, until its final record: the work is done but the run is not final yet. It can no longer be stopped, and a message to it waits for it to be final and then resumes it. It ends with the generation's final record.
-_Avoid_: done, ended (before the final record)
-
 **Attribution**:
-Where a generation's usage is counted: in pi's own totals (nested usage the SDK folds into the launch tool result, or the usage a foreground tool result carries) or in the background ledger. Each token is attributed exactly once.
+Where a run's usage is counted: in the run's own sessions, like any session's, never in the orchestrator's. The orchestrator shows the total of its runs apart from its own usage. Each token is counted once, however often a run reports, resumes or starts a new session.
 _Avoid_: reconciling, double counting
 
 **Admission**:
@@ -27,16 +35,16 @@ The checks that accept or reject a launch or a resume before a run starts: deny 
 _Avoid_: validation, preflight
 
 **Parent scope**:
-The orchestrator's session, and its session epoch, that a run or message belongs to. The session epoch changes whenever that session is switched, forked, replaced, reloaded or shut down, which makes everything of the earlier epoch stale. A run whose originating entry is no longer on the active branch is out of scope too.
+The orchestrator's session, and its session epoch, that a run or message belongs to. The session epoch changes whenever that session is switched, forked, replaced or shut down, which makes everything of the earlier epoch stale. A reload keeps the session, and its open runs. A run whose originating entry is no longer on the active branch is out of scope too.
 _Avoid_: generation, runtime generation
 
 **Resume**:
-Continuing a completed run with a new message from the orchestrator or the user, as its next generation, with its earlier context.
+Continuing a closed run with a new message from the orchestrator or the user, as its next generation, with its earlier context.
 _Avoid_: restart, rerun
 
 **Waiting**:
-The orchestrator between turns while background runs it launched are still active: it leaves their work to them and goes on when their reports arrive.
-_Avoid_: idle, stopped, done (while runs are active)
+The orchestrator between turns while runs it launched are still working: it leaves their work to them and goes on when their reports arrive. A run that is idle, or waits on the user in its own session, is not waited for.
+_Avoid_: idle, stopped, done (while runs are working)
 
 ### Tasks
 

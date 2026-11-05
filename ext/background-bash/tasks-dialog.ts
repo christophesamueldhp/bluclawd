@@ -184,9 +184,12 @@ function outputTail(row: TaskRow): { lines: string[]; size: number; read: number
 	return { lines, size, read: Buffer.byteLength(text) };
 }
 
-/** Stops a task as the user; the model is told. */
+/** What `x` does to a running task: a shell is stopped, a run is closed. */
+const stopVerb = (row: TaskRow) => (row.kind === "agent" ? "close" : "stop");
+
+/** Stops a shell, or closes a run, as the user; the model is told. */
 export function stopTask(row: TaskRow, owner?: string, source: "user" | "remote" = "user"): void {
-	if (row.kind === "agent") agentTasks()?.stop(row.id, { owner, source });
+	if (row.kind === "agent") agentTasks()?.close(row.id, { owner, source });
 	else if (row.foreground) row.foreground.stop();
 	else backgroundBashJobs.kill(row.id, { byUser: true });
 }
@@ -228,8 +231,8 @@ function sectionOf(row: TaskRow): Section {
 /** A WebSocket monitor has no detail view. */
 const hasDetail = (row: TaskRow) => sectionOf(row) !== "monitors";
 
-/** A run opens to its transcript, in place of the detail view, when the source can show one. */
-const opensTranscript = (row: TaskRow) => row.kind === "agent" && agentTasks()?.open !== undefined;
+/** A run opens to its own session, in place of the detail view, when the source can open one. */
+const opensRun = (row: TaskRow) => row.kind === "agent" && agentTasks()?.open !== undefined;
 
 /** A run that moves to Done is another row, so an `x` meant to stop it does not dismiss it. */
 const rowKey = (row: TaskRow) => `${sectionOf(row)}:${row.id}`;
@@ -309,7 +312,7 @@ export class TasksDialog implements Component {
 		this.terminalRows = options.rows;
 		// With one task to show, open straight to it.
 		const rows = dialogRows(owner);
-		if (rows.length === 1 && hasDetail(rows[0]) && !opensTranscript(rows[0])) {
+		if (rows.length === 1 && hasDetail(rows[0]) && !opensRun(rows[0])) {
 			this.detail = rows[0].id;
 			this.direct = true;
 		}
@@ -372,14 +375,14 @@ export class TasksDialog implements Component {
 		const current = rows[index];
 		if (kb.matches(data, "tui.select.up")) this.focus(rows, index - 1);
 		else if (kb.matches(data, "tui.select.down")) this.focus(rows, index + 1);
-		else if (data === "\r" && opensTranscript(current)) {
-			// The dialog closes first: the transcript is an overlay of its own.
+		else if (data === "\r" && opensRun(current)) {
+			// The dialog closes first: the terminal switches to the run.
 			this.done();
 			void agentTasks()?.open?.(current.id, this.owner);
 			return;
 		} else if (data === "\r" && hasDetail(current)) this.detail = current.id;
 		else if (data === "X" && rows.some((row) => row.kind === "agent" && row.state === "running")) {
-			agentTasks()?.stopAll({ owner: this.owner, source: "user" });
+			agentTasks()?.closeAll({ owner: this.owner, source: "user" });
 		} else if (data === "x") {
 			// The task under the cursor is not the one that was focused: swallow this one press.
 			if (this.focusLost) this.focusLost = false;
@@ -434,14 +437,18 @@ export class TasksDialog implements Component {
 		return [
 			"↑/↓ to select",
 			...(!current || hasDetail(current) ? ["Enter to view"] : []),
-			...(current ? [sectionOf(current) === "done" ? "x to dismiss" : "x to stop"] : []),
-			...(rows.some((row) => row.kind === "agent" && row.state === "running") ? ["X to stop all agents"] : []),
+			...(current ? [sectionOf(current) === "done" ? "x to dismiss" : `x to ${stopVerb(current)}`] : []),
+			...(rows.some((row) => row.kind === "agent" && row.state === "running") ? ["X to close all agents"] : []),
 			"Esc to close",
 		];
 	}
 
 	private detailHints(row: TaskRow): string[] {
-		return ["← to go back", "Esc/Enter/Space to close", ...(row.state === "running" ? ["x to stop"] : [])];
+		return [
+			"← to go back",
+			"Esc/Enter/Space to close",
+			...(row.state === "running" ? [`x to ${stopVerb(row)}`] : []),
+		];
 	}
 
 	private renderList(rows: TaskRow[], width: number): string[] {

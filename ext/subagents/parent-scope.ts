@@ -146,6 +146,13 @@ export function createParentScope<N>(deps: ParentScopeDeps<N>) {
 			invalidate("Parent session shutting down");
 			deps.bus.unregister(PARENT_MESSAGE_ADDRESS, "has shut down");
 		},
+		/** A reload: the session goes on in the next instance, which takes over its open runs, so none is closed. */
+		release() {
+			if (batchTimer) clearTimeout(batchTimer);
+			batchTimer = undefined;
+			inbox = [];
+			deps.bus.unregister(PARENT_MESSAGE_ADDRESS, "has reloaded");
+		},
 		/** Drops the context once the runs stopped by shutdown have settled. */
 		detach() {
 			ctx = undefined;
