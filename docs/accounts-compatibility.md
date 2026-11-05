@@ -116,6 +116,11 @@ with no skips. The initial restricted full-suite run encountered failures and wa
 interrupted; rerunning with OS process/socket access completed successfully.
 Standards and specification reviews found no actionable issues.
 
+Revalidated for delivery on current-main base `624a48c`: lint, dead-code checking,
+typechecking, all 71 focused Accounts tests, and **2,051 tests in 138 files** passed
+with no skipped tests. The normal Git-package/terminal probe also passed again.
+The different full-suite count reflects the intervening merged subagent changes.
+
 The package probe passed on the consistent published 1.0.4 set described above.
 A separate real-PTY stock bundled-CLI smoke, loading only the Accounts extension with
 `-e` and temporary agent storage, opened `/accounts --models`, switched to Scoped with
