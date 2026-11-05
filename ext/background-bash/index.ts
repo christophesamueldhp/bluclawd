@@ -193,14 +193,14 @@ const backgroundBash: InlineExtension = {
 				if (!id) throw new Error("Missing required parameter: task_id");
 				const callerOwner = toolCtx?.sessionManager?.getSessionId();
 				if (isAgentTaskId(id)) {
-					const stopped = agentTasks()?.stop(id, { owner: callerOwner, source: "model" });
-					if (stopped?.ok === false && stopped.reason === "not_running") {
-						throw new Error(`Task ${id} is not running (status: ${stopped.task.status})`);
+					const closed = agentTasks()?.close(id, { owner: callerOwner, source: "model" });
+					if (closed?.ok === false && closed.reason === "not_running") {
+						throw new Error(`Task ${id} is not running (status: ${closed.task.status})`);
 					}
-					if (!stopped?.ok) throw noTaskError(id);
-					const label = `${stopped.task.agent}: ${stopped.task.summary}`;
+					if (!closed?.ok) throw noTaskError(id);
+					const label = `${closed.task.agent}: ${closed.task.summary}`;
 					const text = JSON.stringify({
-						message: `Successfully stopped task: ${id} (${label})`,
+						message: `Successfully closed task: ${id} (${label}); its session is kept`,
 						task_id: id,
 						task_type: "local_agent",
 						command: label,

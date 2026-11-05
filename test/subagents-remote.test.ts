@@ -50,12 +50,12 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 		const unpublish = publishAgentTasks({
 			list: (owner) => (owner && owner !== "sess_phone_1" ? [] : [task]),
 			get: () => undefined,
-			stop: (id, opts) => {
+			close: (id, opts) => {
 				if (opts?.owner && opts.owner !== "sess_phone_1") return { ok: false, reason: "not_found" };
 				stopped = { id, owner: opts?.owner, source: opts?.source };
 				return { ok: true, task };
 			},
-			stopAll: () => 0,
+			closeAll: () => 0,
 		});
 
 		try {
@@ -340,8 +340,8 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 				cacheWrite: 0,
 				cost: 0.005,
 			});
-			// Background subagent usage is reported separately in `report.backgroundSubagentUsage`
-			expect(report.backgroundSubagentUsage).toEqual({
+			// Background subagent usage is reported separately in `report.subagentUsage`
+			expect(report.subagentUsage).toEqual({
 				runCount: 1,
 				input: 300,
 				output: 100,

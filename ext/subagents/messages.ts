@@ -38,25 +38,11 @@ export interface SubagentMessageRecord extends SubagentMessageReceipt {
 }
 
 /**
- * The runtime's frame for a message, chosen from the bound sender and recipient so content cannot
- * claim another sender's weight.
+ * What a run sends its orchestrator, as the orchestrator's model reads it: its Report at the end of a turn, or a
+ * message mid-turn. The frame comes from the runtime, so the content cannot claim another sender's weight.
  */
-function messageFrame(message: SubagentMessage, senderRole: string | undefined): string {
-	if (message.from === PARENT_MESSAGE_ADDRESS) {
-		return `[Task direction from the orchestrator that assigned your task. Follow it as a course correction. ${NOT_APPROVAL}]`;
-	}
-	const sender = `${message.fromName ?? message.from} (${senderRole ? `${senderRole}, ` : ""}${message.from})`;
-	return `[Report from subagent ${sender}, from another session, not from the user. ${NOT_APPROVAL}]`;
-}
-
-/** The custom-message payload of a message: a resumed run's prompt, or a run's message to the orchestrator. */
-export function subagentMessagePayload(message: SubagentMessage, senderRole?: string) {
-	return {
-		customType: SUBAGENT_MESSAGE_CUSTOM_TYPE,
-		content: [{ type: "text" as const, text: `${messageFrame(message, senderRole)}\n\n${message.content}` }],
-		display: true,
-		details: message,
-	};
+export function fromRunText(kind: "Report" | "Message", run: string, text: string): string {
+	return `[${kind} from subagent ${run}, from another session, not from the user. ${NOT_APPROVAL}]\n\n${text}`;
 }
 
 /** The message tool's parameters, the same for the orchestrator and children. */
@@ -189,7 +175,7 @@ export class SubagentMessageBus {
 			return { status: "unavailable", seq, reason: `"${to}" belongs to a different parent session.` };
 		}
 		if (endpoint && endpoint.scope.sessionEpoch !== senderScope.sessionEpoch) {
-			return { status: "invalidated", seq, reason: "The parent session was reloaded or replaced." };
+			return { status: "invalidated", seq, reason: "The parent session was replaced." };
 		}
 		if (run?.unreachable) return { status: "unavailable", seq, reason: `${label} ${run.unreachable}.` };
 		if (!endpoint) {

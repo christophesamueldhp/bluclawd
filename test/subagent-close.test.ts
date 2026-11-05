@@ -15,6 +15,7 @@ import {
 	hasTmux,
 	type RealPi,
 	startRealPi,
+	systemPrompt,
 } from "./helpers/real-pi.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -27,13 +28,17 @@ const lastToolResult = (request: FauxRequest) =>
 /** The tmux sessions running. */
 const panes = (real: RealPi) => [...real.screens().matchAll(/^--- (\S+) ---$/gm)].map((match) => match[1]);
 
-/** The session files kept in a run's directories, wherever the orchestrator's session keeps them. */
-function sessionFiles(agentDir: string, runId: string): string[] {
+/** The run's directory, wherever the orchestrator's session keeps it. */
+function sessionDir(agentDir: string, runId: string): string {
 	const root = join(agentDir, "bluclawd", "subagents");
-	return readdirSync(root).flatMap((session) => {
-		const dir = join(root, session, runId);
-		return existsSync(dir) ? readdirSync(dir).filter((file) => file.endsWith(".jsonl")) : [];
-	});
+	const session = readdirSync(root).find((dir) => existsSync(join(root, dir, runId)));
+	return join(root, session ?? "", runId);
+}
+
+/** The session files kept in a run's directory. */
+function sessionFiles(agentDir: string, runId: string): string[] {
+	const dir = sessionDir(agentDir, runId);
+	return existsSync(dir) ? readdirSync(dir).filter((file) => file.endsWith(".jsonl")) : [];
 }
 
 describe.skipIf(!hasTmux)("closing a run", () => {
@@ -59,7 +64,7 @@ describe.skipIf(!hasTmux)("closing a run", () => {
 		const close = lastToolResult(requests[2]);
 		expect(close).toMatchObject({ role: "toolResult", toolName: "subagent_close" });
 		expect(close?.text).toMatch(
-			/^Closed probe-run \(sub_[0-9a-f-]+\)\. Its session is kept: a message resumes it\.$/,
+			/^Closed "probe-run" \(sub_[0-9a-f-]+\)\. Its session is kept: a message resumes it\.$/,
 		);
 		const runId = close?.text.match(/sub_[0-9a-f-]+/)?.[0] ?? "";
 		expect(lastToolResult(requests[3])?.text).toBe("No subagents are running.");
@@ -148,7 +153,7 @@ describe.skipIf(!hasTmux)("stopping a run", () => {
 		const stop = lastToolResult(requests[3]);
 		expect(stop).toMatchObject({ role: "toolResult", toolName: "subagent_stop" });
 		expect(stop?.text).toMatch(/^Stopped probe-run's turn \(sub_[0-9a-f-]+\)\. It stays open and takes messages\.$/);
-		expect(lastToolResult(requests[4])?.text).toMatch(/^probe-run \(explorer, sub_[0-9a-f-]+\): running/);
+		expect(lastToolResult(requests[4])?.text).toMatch(/^probe-run \(explorer, sub_[0-9a-f-]+\): (working|idle)$/m);
 
 		// Its pane is the one beside the orchestrator's.
 		const [run] = panes(real).filter((pane) => pane !== orchestrator);
@@ -156,7 +161,7 @@ describe.skipIf(!hasTmux)("stopping a run", () => {
 		real.tmux.sendKeys(run, ["Go on.", "Enter"]);
 		const [, next] = await real.waitForRequests("probe-run", 2);
 		expect(conversation(next).filter((message) => message.role === "user")).toEqual([
-			{ role: "user", text: "Look around." },
+			{ role: "user", text: expect.stringMatching(/\n\nLook around\.$/) },
 			{ role: "user", text: "Go on." },
 		]);
 	});
@@ -187,12 +192,25 @@ describe.skipIf(!hasTmux)("resuming a closed run", () => {
 		);
 
 		const [, resumed] = await real.waitForRequests("probe-run", 2);
+		expect(systemPrompt(resumed)).toContain("You are `explorer`");
 		const said = conversation(resumed);
 		expect(said.slice(0, 2)).toEqual([
-			{ role: "user", text: "Look around." },
+			{ role: "user", text: expect.stringMatching(/^\[Task from your orchestrator.*\n\nLook around\.$/s) },
 			{ role: "assistant", text: "First look." },
 		]);
-		expect(said.at(-1)).toMatchObject({ role: "user", text: expect.stringContaining("Look again.") });
+		expect(said.at(-1)).toMatchObject({
+			role: "user",
+			text: expect.stringMatching(
+				/^\[Message from your orchestrator, from another session, not from the user\..*\]\n\nLook again\.$/s,
+			),
+		});
+		// It is kept in the run's session as a message from another session, not as the user's input.
+		const runId = lastToolResult(requests[3])?.text.match(/sub_[0-9a-f-]+/)?.[0] ?? "";
+		const [file] = sessionFiles(real.agentDir, runId);
+		const entries = SessionManager.open(join(sessionDir(real.agentDir, runId), file)).getEntries();
+		expect(entries.filter((entry) => entry.type === "custom_message").map((entry) => JSON.stringify(entry))).toEqual([
+			expect.stringContaining("Look again."),
+		]);
 		const woken = (await real.waitForRequests("main", 5))[4];
 		expect(conversation(woken).some((message) => message.text.includes("Second look."))).toBe(true);
 	});
@@ -288,7 +306,7 @@ describe.skipIf(!hasTmux)("resuming a closed run", () => {
 		real.tmux.sendKeys(run, ["Anything else?", "Enter"]);
 		const [, resumed] = await real.waitForRequests("probe-run", 2);
 		expect(conversation(resumed)).toEqual([
-			{ role: "user", text: "Look around." },
+			{ role: "user", text: expect.stringMatching(/\n\nLook around\.$/) },
 			{ role: "assistant", text: "First look." },
 			{ role: "user", text: "Anything else?" },
 		]);

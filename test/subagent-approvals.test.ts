@@ -77,7 +77,12 @@ describe.skipIf(!hasTmux || !sandboxRuns)("an approval a run needs", () => {
 
 		await waitFor(() => expect(real.tmux.capture(runPane, 50).join("\n")).toContain("Network access"));
 		await waitFor(() => expect(rowStatus(screen(), "probe-run")).toBe("needs input"));
-		expect(screen()).toContain("Subagent probe-run needs input: Network access");
+		// Kept in its session as a message, which may wrap.
+		await waitFor(() =>
+			expect(screen().replace(/\s+/g, " ")).toMatch(
+				/Subagent "probe-run" \(sub_[0-9a-f-]+\) needs input: Network access\. Open it to answer\./,
+			),
+		);
 		expect(screen()).not.toContain("Allow the model's commands");
 		expect(screen()).not.toContain("waiting for 1 subagent");
 

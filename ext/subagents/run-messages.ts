@@ -24,6 +24,19 @@ export function runMessageText(message: Extract<SessionMessage, { text: string }
 	return `${lead}\n\n${message.text}`;
 }
 
+/** The run's task, or the message a Resume starts with, as its model reads it: from its orchestrator, never the user. */
+export function runTaskText(text: string, resumed: boolean): string {
+	const lead = resumed
+		? `[Message from your orchestrator, from another session, not from the user. Follow it as a course correction. ${NOT_APPROVAL}]`
+		: `[Task from your orchestrator, from another session, not from the user. ${NOT_APPROVAL}]`;
+	return `${lead}\n\n${text}`;
+}
+
+/** Who sends what this run sends another session: its pane, and its session's name. */
+export function fromRun(pi: Pick<ExtensionAPI, "getSessionName">, pane: string) {
+	return { type: "session_message" as const, from: pane, name: pi.getSessionName() };
+}
+
 /** The run sending, as the daemon lists it. */
 export interface RunSelf {
 	pane: string;
@@ -32,30 +45,44 @@ export interface RunSelf {
 	name?: string;
 }
 
+type Row = Pick<InstanceSummary, "pane" | "label" | "parent">;
+
+/** The other runs of the run's orchestrator, from the daemon's rows. */
+const siblingsOf = (rows: readonly Row[], self: RunSelf) =>
+	rows.filter((row) => row.parent === self.parent && row.pane && row.pane !== self.pane);
+
+/** The names a run can message: its orchestrator ("parent"), then its siblings. */
+export function runRoster(rows: readonly Row[], self: RunSelf): string[] {
+	return [PARENT_MESSAGE_ADDRESS, ...siblingsOf(rows, self).flatMap((row) => (row.label ? [row.label] : []))];
+}
+
 /**
  * Where a run's message to `to` goes, from the daemon's rows: its orchestrator ("parent") or a sibling of the same
  * orchestrator by name; otherwise why it is refused.
  */
 export function messageTarget(
-	rows: readonly Pick<InstanceSummary, "pane" | "label" | "parent">[],
+	rows: readonly Row[],
 	self: RunSelf,
 	to: string,
 ): { pane: string; name: string } | { refused: string } {
 	if (to === PARENT_MESSAGE_ADDRESS) return { pane: self.parent, name: "your orchestrator" };
 	if (to === self.name) return { refused: "A run cannot message itself." };
-	const siblings = rows.filter((row) => row.parent === self.parent && row.pane && row.pane !== self.pane);
-	const sibling = siblings.find((row) => row.label === to);
+	const sibling = siblingsOf(rows, self).find((row) => row.label === to);
 	if (sibling?.pane) return { pane: sibling.pane, name: `"${to}"` };
 	if (rows.some((row) => row.label === to && row.parent && row.parent !== self.parent)) {
 		return {
 			refused: `"${to}" is a run of another orchestrator; you can message only your orchestrator ("parent") and its runs.`,
 		};
 	}
-	const reachable = [PARENT_MESSAGE_ADDRESS, ...siblings.flatMap((row) => (row.label ? [row.label] : []))];
-	return { refused: `No run "${to}" among your orchestrator's runs. Reachable now: ${reachable.join(", ")}.` };
+	return {
+		refused: `No run "${to}" among your orchestrator's runs. Reachable now: ${runRoster(rows, self).join(", ")}.`,
+	};
 }
 
-/** A run's side of messaging: its subagent_message, what it receives, and the notes of what the user types in it. */
+/**
+ * A run's side of messaging: its subagent_message and subagent_roster, what it receives, and the notes of what the
+ * user types in it.
+ */
 export function messageAsRun(pi: ExtensionAPI, parent: string, pane: string): void {
 	pi.events.on("bluclawd:session-message", (data) => {
 		const message = data as SessionMessage;
@@ -75,10 +102,8 @@ export function messageAsRun(pi: ExtensionAPI, parent: string, pane: string): vo
 	pi.on("input", (event) => {
 		if (event.source === "interactive") {
 			const note: SessionMessage = {
-				type: "session_message",
+				...fromRun(pi, pane),
 				kind: "typed",
-				from: pane,
-				name: pi.getSessionName(),
 				text: event.text,
 			};
 			// The orchestrator only reads it; the run's answer reaches it as a Report.
@@ -102,9 +127,9 @@ export function messageAsRun(pi: ExtensionAPI, parent: string, pane: string): vo
 			{ additionalProperties: false },
 		),
 		execute: async (_toolCallId, params) => {
-			const name = pi.getSessionName();
+			const sender = fromRun(pi, pane);
 			const client = new OrchestratorClient();
-			const target = messageTarget(await client.list(), { pane, parent, name }, params.to.trim());
+			const target = messageTarget(await client.list(), { pane, parent, name: sender.name }, params.to.trim());
 			if ("refused" in target) {
 				return {
 					content: [{ type: "text", text: `Message not sent: ${target.refused}` }],
@@ -113,16 +138,29 @@ export function messageAsRun(pi: ExtensionAPI, parent: string, pane: string): vo
 				};
 			}
 			await client.send(target.pane, {
-				type: "session_message",
+				...sender,
 				kind: "message",
-				from: pane,
-				name,
 				text: params.content,
 			});
 			return {
 				content: [{ type: "text", text: `Message sent to ${target.name} (not yet handled).` }],
 				details: undefined,
 			};
+		},
+	});
+
+	pi.registerTool({
+		name: "subagent_roster",
+		label: "Subagent roster",
+		exposure: "model-only",
+		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+		description:
+			'List who you can message with subagent_message: your orchestrator ("parent") and its other open runs, by name.',
+		parameters: Type.Object({}, { additionalProperties: false }),
+		execute: async () => {
+			const names = runRoster(await new OrchestratorClient().list(), { pane, parent, name: pi.getSessionName() });
+			const text = names.map((name) => (name === PARENT_MESSAGE_ADDRESS ? `${name} (your orchestrator)` : name));
+			return { content: [{ type: "text", text: `You can message: ${text.join(", ")}.` }], details: undefined };
 		},
 	});
 }

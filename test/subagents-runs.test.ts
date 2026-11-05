@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
 	type AdmitSubagentRunResult,
-	type SubagentRunnerExecuteParams,
-	type SubagentRunnerOutcome,
+	type SubagentRunExecuteParams,
+	type SubagentRunOutcome,
 	SubagentRunScheduler,
 } from "../ext/subagents/runs.ts";
 import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
@@ -42,12 +42,12 @@ function makeRequest(overrides: Partial<Parameters<SubagentRunScheduler["admit"]
 
 describe("Ticket #8 — Every requested run starts immediately with no child quotas", () => {
 	it("starts 20 runs admitted in one parent turn before any of them finishes", async () => {
-		const gates: ReturnType<typeof deferred<SubagentRunnerOutcome>>[] = [];
+		const gates: ReturnType<typeof deferred<SubagentRunOutcome>>[] = [];
 		const started: string[] = [];
 		const scheduler = new SubagentRunScheduler({
 			executeRun: (params) => {
 				started.push(params.record.runId);
-				const gate = deferred<SubagentRunnerOutcome>();
+				const gate = deferred<SubagentRunOutcome>();
 				gates.push(gate);
 				return gate.promise;
 			},
@@ -73,10 +73,10 @@ describe("Ticket #8 — Every requested run starts immediately with no child quo
 	it("does not auto-stop a run past former turn, tool-call, token, repetition and time limits", async () => {
 		vi.useFakeTimers();
 		try {
-			const gates = new Map<string, ReturnType<typeof deferred<SubagentRunnerOutcome>>>();
+			const gates = new Map<string, ReturnType<typeof deferred<SubagentRunOutcome>>>();
 			const scheduler = new SubagentRunScheduler({
-				executeRun: (params: SubagentRunnerExecuteParams) => {
-					const gate = deferred<SubagentRunnerOutcome>();
+				executeRun: (params: SubagentRunExecuteParams) => {
+					const gate = deferred<SubagentRunOutcome>();
 					gates.set(params.record.originToolCallId, gate);
 					params.controller.markRunning();
 					params.controller.updateUsage({ ...createEmptySubagentUsage(), input: 100_001, totalTokens: 100_001 });
@@ -138,7 +138,7 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 	it("handles cancellation before admission, by explicit stop while running, and by the caller signal", async () => {
 		const scheduler = new SubagentRunScheduler({
 			executeRun: (params) => {
-				const gate = deferred<SubagentRunnerOutcome>();
+				const gate = deferred<SubagentRunOutcome>();
 				params.signal.addEventListener(
 					"abort",
 					() => gate.resolve({ status: "cancelled", complete: false, summaryText: "Partial before abort" }),
@@ -180,7 +180,7 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 	});
 
 	it("keeps a stopping run active until a non-cooperating runner actually returns", async () => {
-		const stuckGate = deferred<SubagentRunnerOutcome>();
+		const stuckGate = deferred<SubagentRunOutcome>();
 		const scheduler = new SubagentRunScheduler({
 			// Intentionally ignores the abort signal until stuckGate resolves
 			executeRun: () => stuckGate.promise,
@@ -254,7 +254,7 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 	});
 
 	it("waits for runners and finalizers to settle and writes nothing afterwards", async () => {
-		const runnerGate = deferred<SubagentRunnerOutcome>();
+		const runnerGate = deferred<SubagentRunOutcome>();
 		const finalizerGate = deferred();
 		let changesAfterSettled = 0;
 		let settled = false;
@@ -287,7 +287,7 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 });
 
 describe("Issue #63 — A run's controller only affects its own generation", () => {
-	function exercise(controller: SubagentRunnerExecuteParams["controller"], tag: string) {
+	function exercise(controller: SubagentRunExecuteParams["controller"], tag: string) {
 		controller.markRunning();
 		controller.recordPane(`pi-${tag}`);
 		controller.updateActivity("idle");
@@ -297,13 +297,13 @@ describe("Issue #63 — A run's controller only affects its own generation", () 
 
 	it("ignores an earlier generation's controller after a resume", async () => {
 		let clock = 0;
-		const controllers: SubagentRunnerExecuteParams["controller"][] = [];
-		const gates: ReturnType<typeof deferred<SubagentRunnerOutcome>>[] = [];
+		const controllers: SubagentRunExecuteParams["controller"][] = [];
+		const gates: ReturnType<typeof deferred<SubagentRunOutcome>>[] = [];
 		const scheduler = new SubagentRunScheduler({
 			now: () => ++clock,
 			executeRun: ({ controller }) => {
 				controllers.push(controller);
-				const gate = deferred<SubagentRunnerOutcome>();
+				const gate = deferred<SubagentRunOutcome>();
 				gates.push(gate);
 				return gate.promise;
 			},

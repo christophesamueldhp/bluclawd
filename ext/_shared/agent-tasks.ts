@@ -15,7 +15,7 @@ export function isAgentTaskId(id: string): boolean {
 	return id.startsWith(AGENT_TASK_ID_PREFIX) && /^[A-Za-z0-9_-]+$/.test(id.slice(AGENT_TASK_ID_PREFIX.length));
 }
 
-/** Whether a task still runs; a run being stopped still runs. */
+/** Whether a task still runs; a run being closed still runs. */
 export type AgentTaskState = "running" | "completed" | "failed" | "stopped";
 
 /** A run as `/tasks` and `task_stop` see it, live or finished. */
@@ -36,12 +36,12 @@ export interface AgentTask {
 	output: () => string;
 }
 
-export interface AgentTaskStopOptions {
+export interface AgentTaskCloseOptions {
 	owner?: string;
 	source?: "caller" | "user" | "model" | "remote" | "session_invalidated";
 }
 
-export type AgentTaskStopResult =
+export type AgentTaskCloseResult =
 	| { ok: true; task: AgentTask }
 	| { ok: false; reason: "not_found" }
 	| { ok: false; reason: "not_running"; task: AgentTask };
@@ -51,10 +51,13 @@ export interface AgentTaskSource {
 	list(owner?: string): AgentTask[];
 	/** A running or finished task; undefined for an unknown id or another owner's. */
 	get(id: string, owner?: string): AgentTask | undefined;
-	/** Stops an owned task through `/tasks` or `task_stop`; another owner's task is not found. */
-	stop(id: string, options?: AgentTaskStopOptions): AgentTaskStopResult;
-	/** Stops every running task the owner has; returns how many were stopped. */
-	stopAll(options?: AgentTaskStopOptions): number;
+	/**
+	 * Closes an owned run through `/tasks` or `task_stop`: its pi ends and its session is kept. Another owner's
+	 * task is not found.
+	 */
+	close(id: string, options?: AgentTaskCloseOptions): AgentTaskCloseResult;
+	/** Closes every open run the owner has; returns how many were closed. */
+	closeAll(options?: AgentTaskCloseOptions): number;
 	/**
 	 * Opens a run: switches the terminal to its pi session, reopening a closed run's session first. Undefined when
 	 * the run is not of the current session.

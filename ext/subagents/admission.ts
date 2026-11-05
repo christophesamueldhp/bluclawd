@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { type Static, Type } from "@earendil-works/pi-ai";
-import { type ExtensionContext, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { type ExtensionContext, SettingsManager, type ToolLoadout } from "@earendil-works/pi-coding-agent";
 import * as forkSettings from "../_shared/settings.ts";
 import { evaluateSubagentDelegationDeny } from "../permissions/policy.ts";
 import {
@@ -10,6 +10,7 @@ import {
 	type AgentDefinitionCatalog,
 	createInlineAgentDefinition,
 	discoverAgentDefinitions,
+	type InlineAgentRole,
 	isSubagentThinkingLevel,
 	parseSubagentModelSpec,
 	resolveAgentDefinition,
@@ -34,13 +35,21 @@ import type { RunLaunch } from "./tmux-runs.ts";
 
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
 /** Recorded when no level is chosen: the run's pi picks its model's default. */
-const SDK_DEFAULT_THINKING = "model default";
+const MODEL_DEFAULT_THINKING = "model default";
 /** How many runs an orchestrator holds open at once: each is a full pi. */
 export const MAX_OPEN_RUNS = 8;
 const TOO_MANY_OPEN = `An orchestrator holds at most ${MAX_OPEN_RUNS} open subagents. Close one whose work is done with subagent_close, then try again.`;
+/** Pi built-in extensions a run can be given like tools, when the orchestrator declares them. */
+const BUILTIN_EXTENSIONS = ["codemode", "tool_search"];
 export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 export const NEEDS_TMUX =
 	"Subagents need tmux: each run is a pi session of its own in agent view's tmux server, and this pi does not run there. Install tmux if it is missing (brew install tmux), then start pi again in a terminal.";
+
+/** The tools a role may name: those the orchestrator can call, and the built-in extensions it declares. */
+export function orchestratorTools(loadout: ToolLoadout): string[] {
+	const declared = new Set(loadout.declared.map((tool) => tool.name));
+	return [...loadout.callable.map((tool) => tool.name), ...BUILTIN_EXTENSIONS.filter((name) => declared.has(name))];
+}
 
 /** What a run needs from its admission to execute: it starts as a pi of its own in tmux (ADR-0006), its role as its launch flags. */
 export interface RunExecutionContext {
@@ -141,7 +150,10 @@ export type AdmissionContext = Pick<
 };
 
 export interface RunAdmissionDeps {
-	scheduler: Pick<SubagentRunScheduler<RunExecutionContext>, "admit" | "resume" | "getRun" | "getContext">;
+	scheduler: Pick<
+		SubagentRunScheduler<RunExecutionContext>,
+		"admit" | "resume" | "takeOver" | "getRun" | "getContext"
+	>;
 	/** Which names the runs of a parent scope hold. */
 	directory: Pick<RunDirectory, "nameHolder" | "list">;
 	agentDir: () => string;
@@ -151,6 +163,8 @@ export interface RunAdmissionDeps {
 	scope: ParentScopeChecks;
 	/** The orchestrator's tmux session, where its runs start as pis of their own; without one, none starts. */
 	pane: () => string | undefined;
+	/** The tools the orchestrator has, which a role may name. */
+	tools: () => readonly string[];
 }
 
 export type AdmissionResult =
@@ -173,6 +187,11 @@ export interface RunAdmission {
 		buildPrompt: (() => string) | undefined,
 		ctx: AdmissionContext,
 	): Promise<AdmissionResult>;
+	/**
+	 * Takes over an open run this orchestrator's session started before a reload, its pi still running in its pane,
+	 * into the current scope.
+	 */
+	adopt(run: Readonly<SubagentRunRecord>, ctx: AdmissionContext): void;
 }
 
 function summarizeTaskLabel(task: string): string {
@@ -183,6 +202,20 @@ function summarizeTaskLabel(task: string): string {
 			.find((line) => line.trim().length > 0) ?? "";
 	const compact = firstLine.replace(/\s+/g, " ").trim();
 	return compact.length > 120 ? `${compact.slice(0, 119)}…` : compact;
+}
+
+/** The inline role of the subagent call `toolCallId` on the orchestrator's branch. */
+function launchedRole(toolCallId: string, ctx: AdmissionContext): AgentDefinition | undefined {
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		const call = entry.message.content.find((part) => part.type === "toolCall" && part.id === toolCallId);
+		const agent = call?.type === "toolCall" ? call.arguments.agent : undefined;
+		if (agent === undefined) continue;
+		if (typeof agent !== "object" || agent === null || Array.isArray(agent)) return undefined;
+		const role = createInlineAgentDefinition(agent as unknown as InlineAgentRole);
+		return role.ok ? role.definition : undefined;
+	}
+	return undefined;
 }
 
 /** Why the parent's Subagent / Subagent(agentName) deny rules refuse a run, evaluated before any model activity. */
@@ -255,34 +288,43 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		if (!storage.ok) return refuse.unavailable(`Cannot resume ${label}: storage is unavailable (${storage.error}).`);
 		// A run from before runs were pis of their own had its session's usage counted by its orchestrator already.
 		if (!current.pane) recordCountedSessionUsage(deps.agentDir(), current.parentSessionId, sessionFile);
-		const previous = deps.scheduler.getContext(current.runId);
 		const resumed = deps.scheduler.resume(
 			current.runId,
-			{
-				launch: {
-					name: current.name ?? current.runId,
-					definition: previous ? previous.launch.definition : roleOf(current, ctx),
-					model: `${current.provider}/${current.modelId}`,
-					thinkingLevel: current.thinkingLevel === SDK_DEFAULT_THINKING ? undefined : current.thinkingLevel,
-					task: buildPrompt?.(),
-					cwd: current.cwd,
-					runDir: storage.runDir,
-					sessionFile,
-					parent: parentPane,
-					projectTrusted: ctx.isProjectTrusted(),
-				},
-			},
+			{ launch: { ...launchOf(current, storage.runDir, parentPane, ctx), task: buildPrompt?.() } },
 			known ? undefined : { ...current, sessionEpoch: scope.sessionEpoch },
 		);
 		if (!resumed.ok) return refuse.unavailable(resumed.error);
 		return { ok: true, handle: resumed.handle };
 	};
 
+	/** How the run is started again, as its record and its role say. */
+	const launchOf = (
+		run: Readonly<SubagentRunRecord>,
+		runDir: string,
+		parentPane: string,
+		ctx: AdmissionContext,
+	): RunLaunch => {
+		const previous = deps.scheduler.getContext(run.runId);
+		return {
+			name: run.name ?? run.runId,
+			definition: previous ? previous.launch.definition : roleOf(run, ctx),
+			model: `${run.provider}/${run.modelId}`,
+			thinkingLevel: run.thinkingLevel === MODEL_DEFAULT_THINKING ? undefined : run.thinkingLevel,
+			cwd: run.cwd,
+			runDir,
+			sessionFile: run.transcriptPath,
+			parent: parentPane,
+			projectTrusted: ctx.isProjectTrusted(),
+		};
+	};
+
 	/**
-	 * The role a run known only from disk resumes with: its saved role as it is now. An inline role is not kept,
-	 * so such a run resumes with no instructions of its own and every tool.
+	 * The role a run known only from disk resumes with: an inline role as the call that launched it gave it, a saved
+	 * role as it is now. One found in neither resumes with no instructions of its own and every tool.
 	 */
 	const roleOf = (run: Readonly<SubagentRunRecord>, ctx: AdmissionContext): AgentDefinition => {
+		const inline = run.definitionSource === "inline" ? launchedRole(run.originToolCallId, ctx) : undefined;
+		if (inline) return inline;
 		const saved = resolveAgentDefinition(
 			deps.catalog() ??
 				discoverAgentDefinitions({
@@ -349,6 +391,13 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				return reject(resolvedDef.error);
 			}
 			const definition = resolvedDef.definition;
+			const available = deps.tools();
+			const unknownTools = definition.tools?.filter((name) => !available.includes(name)) ?? [];
+			if (unknownTools.length > 0) {
+				return reject(
+					`Subagent role "${definition.name}" names tools the orchestrator cannot give a child: ${unknownTools.join(", ")}. Available: ${available.join(", ") || "none"}.`,
+				);
+			}
 
 			// Spawn > role > parent for the model and thinking level, verified before admission.
 			const spawnModel = params.model === undefined ? undefined : parseSubagentModelSpec(params.model);
@@ -437,7 +486,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				definitionSource: definition.source,
 				provider: childModel.model.provider,
 				modelId: childModel.model.id,
-				thinkingLevel: childModel.thinkingLevel ?? SDK_DEFAULT_THINKING,
+				thinkingLevel: childModel.thinkingLevel ?? MODEL_DEFAULT_THINKING,
 				cwd,
 				taskSummary: summarizeTaskLabel(taskText),
 				startSnapshot,
@@ -461,12 +510,23 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			return { ok: true, handle: admitRes.handle };
 		},
 
+		adopt(run, ctx) {
+			const parentPane = deps.pane();
+			const scope = deps.scope.current();
+			const storage = ensureRunStorageDir(deps.agentDir(), run.parentSessionId, run.runId);
+			if (!parentPane || !scope || !run.pane || !storage.ok) return;
+			deps.scheduler.takeOver(
+				{ ...run, sessionEpoch: scope.sessionEpoch },
+				{ launch: { ...launchOf(run, storage.runDir, parentPane, ctx), pane: run.pane } },
+			);
+		},
+
 		async resume(run, buildPrompt, ctx) {
 			const label = formatRunLabel(run);
 			const invalidated: AdmissionResult = {
 				ok: false,
 				refusal: "invalidated",
-				error: `${label} belongs to a session that was reloaded or replaced; spawn a new subagent and point it at ${run.reportPath ?? "the earlier report"}.`,
+				error: `${label} belongs to a session that was replaced; spawn a new subagent and point it at ${run.reportPath ?? "the earlier report"}.`,
 			};
 			const unavailable = (error: string): AdmissionResult => ({ ok: false, refusal: "unavailable", error });
 			if (ctx.mode === "print" || ctx.mode === "json") {

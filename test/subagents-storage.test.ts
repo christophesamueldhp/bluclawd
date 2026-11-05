@@ -19,9 +19,9 @@ import {
 	appendParentRunReference,
 	ensureRunStorageDir,
 	getSubagentsRootDir,
-	readBackgroundUsageLedger,
 	readBoundedSubagentReport,
 	readPersistedRunRecord,
+	readRunUsageLedger,
 	reconcileInterruptedRuns,
 	recordCountedSessionUsage,
 	recordRunSessionUsage,
@@ -298,7 +298,7 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		// Resumed into the same session file, the run's next Report holds its first generation's 100 tokens too.
 		recordRunSessionUsage(agentDir, { parentSessionId, runId: "sub_tmux_1" }, "session_1", tokens(160, 0.016));
 
-		const ledger = readBackgroundUsageLedger(agentDir, parentSessionId);
+		const ledger = readRunUsageLedger(agentDir, parentSessionId);
 		expect(ledger.runCount).toBe(3);
 		expect(ledger.usage.totalTokens).toBe(280 + 160 + 50);
 		expect(ledger.usage.cost.total).toBeCloseTo(0.002 + 0.016 + 0.005, 6);
@@ -313,7 +313,7 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		recordRunSessionUsage(agentDir, run, "session_2", tokens(20, 0.002));
 		recordRunSessionUsage(agentDir, run, "session_2", tokens(30, 0.003));
 
-		const ledger = readBackgroundUsageLedger(agentDir, parentSessionId);
+		const ledger = readRunUsageLedger(agentDir, parentSessionId);
 		expect(ledger.runCount).toBe(1);
 		expect(ledger.usage.totalTokens).toBe(130);
 		expect(ledger.usage.cost.total).toBeCloseTo(0.013, 6);
@@ -339,7 +339,7 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 			tokens(330, 0.005),
 		);
 
-		const ledger = readBackgroundUsageLedger(agentDir, parentSessionId);
+		const ledger = readRunUsageLedger(agentDir, parentSessionId);
 		expect(ledger.runCount).toBe(1);
 		expect(ledger.usage.totalTokens).toBe(330);
 		expect(ledger.usage.cost.total).toBeCloseTo(0.005, 6);

@@ -430,7 +430,7 @@ describe("interactive /accounts", () => {
 			await h.shown("Wait for the agent and background subagents to finish");
 			expect(await h.store.list()).toEqual(accountsBefore);
 			expect(h.runtime.session.model?.id).toBe("alpha-main");
-			agentTasks()?.stopAll({ owner: h.runtime.session.sessionId });
+			agentTasks()?.closeAll({ owner: h.runtime.session.sessionId });
 			await waitFor(() =>
 				expect(
 					agentTasks()

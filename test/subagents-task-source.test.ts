@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createRunDirectory } from "../ext/subagents/directory.ts";
 import {
 	type SubagentRunController,
-	type SubagentRunnerOutcome,
+	type SubagentRunOutcome,
 	type SubagentRunRecord,
 	SubagentRunScheduler,
 } from "../ext/subagents/runs.ts";
@@ -59,11 +59,11 @@ function persistedRecord(overrides: Partial<SubagentRunRecord>): SubagentRunReco
 function setup(activeParentSessionId: string | undefined = "sess_main") {
 	const agentDir = makeAgentDir();
 	const controllers = new Map<string, SubagentRunController>();
-	const settle = new Map<string, (outcome: SubagentRunnerOutcome) => void>();
+	const settle = new Map<string, (outcome: SubagentRunOutcome) => void>();
 	const scheduler = new SubagentRunScheduler<{ resume?: { toolCallId: string } }>({
 		executeRun: ({ record, controller, signal }) => {
 			controllers.set(record.runId, controller);
-			return new Promise<SubagentRunnerOutcome>((resolve) => {
+			return new Promise<SubagentRunOutcome>((resolve) => {
 				settle.set(record.runId, resolve);
 				signal.addEventListener("abort", () =>
 					resolve({ status: "cancelled", complete: false, summaryText: "stopped" }),
@@ -100,7 +100,6 @@ function setup(activeParentSessionId: string | undefined = "sess_main") {
 					? undefined
 					: { parentSessionId: activeParentSessionId, sessionEpoch: 1 },
 			idle: () => true,
-			now: Date.now,
 			onChange: () => {},
 		}),
 		directory,
@@ -188,29 +187,29 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 			persistedRecord({ runId: "sub_orphan", status: "running", endedAt: undefined }),
 		);
 
-		expect(source.stop("sub_missing")).toEqual({ ok: false, reason: "not_found" });
-		expect(source.stop(foreign.runId, { owner: "sess_main" })).toEqual({ ok: false, reason: "not_found" });
-		expect(source.stop(finished.runId)).toMatchObject({
+		expect(source.close("sub_missing")).toEqual({ ok: false, reason: "not_found" });
+		expect(source.close(foreign.runId, { owner: "sess_main" })).toEqual({ ok: false, reason: "not_found" });
+		expect(source.close(finished.runId)).toMatchObject({
 			ok: false,
 			reason: "not_running",
 			task: { id: finished.runId, status: "completed" },
 		});
 		// The same answer before a restart as after one, when the record is read from disk.
-		expect(source.stop(earlierEpoch.runId)).toMatchObject({
+		expect(source.close(earlierEpoch.runId)).toMatchObject({
 			ok: false,
 			reason: "not_running",
 			task: { id: earlierEpoch.runId, status: "completed" },
 		});
-		expect(source.stop("sub_earlier")).toMatchObject({
+		expect(source.close("sub_earlier")).toMatchObject({
 			ok: false,
 			reason: "not_running",
 			task: { status: "completed" },
 		});
 
 		// A run a crashed process never ended has nothing to stop.
-		expect(source.stop("sub_orphan")).toEqual({ ok: false, reason: "not_found" });
+		expect(source.close("sub_orphan")).toEqual({ ok: false, reason: "not_found" });
 
-		const stopped = source.stop(running.runId, { source: "model" });
+		const stopped = source.close(running.runId, { source: "model" });
 		expect(stopped).toMatchObject({ ok: true, task: { id: running.runId } });
 		expect(await running.completion).toMatchObject({ status: "cancelled", stopSource: "model" });
 	});
@@ -232,7 +231,7 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 			deliveryMode: "background",
 		});
 		expect(admitted.ok).toBe(true);
-		expect(source.stop("api")).toEqual({ ok: false, reason: "not_found" });
+		expect(source.close("api")).toEqual({ ok: false, reason: "not_found" });
 	});
 
 	it("stops every running run of the owner", () => {
@@ -240,8 +239,8 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 		launch();
 		launch();
 		launch("sess_other");
-		expect(source.stopAll({ source: "user" })).toBe(2);
-		expect(setup(undefined).source.stopAll()).toBe(0);
+		expect(source.closeAll({ source: "user" })).toBe(2);
+		expect(setup(undefined).source.closeAll()).toBe(0);
 	});
 
 	it("reads the bounded report as output, falling back to the latest progress", () => {

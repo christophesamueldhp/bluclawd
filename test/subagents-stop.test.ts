@@ -99,7 +99,7 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 					.filter((r) => (!owner || r.parentSessionId === owner) && r.status === "running")
 					.map(taskOf),
 			get: () => undefined,
-			stop: (id, opts) => {
+			close: (id, opts) => {
 				const rec = records.get(id);
 				if (!rec || (opts?.owner && rec.parentSessionId !== opts.owner)) return { ok: false, reason: "not_found" };
 				if (rec.status === "completed") return { ok: false, reason: "not_running", task: taskOf(rec) };
@@ -107,7 +107,7 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 				rec.status = "stopping";
 				return { ok: true, task: taskOf(rec) };
 			},
-			stopAll: () => 0,
+			closeAll: () => 0,
 		});
 
 		try {
@@ -115,7 +115,7 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 			const res = await stopTool({ task_id: "sub_10_1" }, "sess_main");
 			const parsed = JSON.parse(res.content[0].text);
 			expect(parsed).toEqual({
-				message: "Successfully stopped task: sub_10_1 (explorer: Inspect architecture)",
+				message: "Successfully closed task: sub_10_1 (explorer: Inspect architecture); its session is kept",
 				task_id: "sub_10_1",
 				task_type: "local_agent",
 				command: "explorer: Inspect architecture",
@@ -172,14 +172,14 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 				if (!r || (owner && r.parentSessionId !== owner)) return undefined;
 				return { ...taskOf(r), output: () => `Final completed report for ${id}\nEvidence: src/auth.ts:12` };
 			},
-			stop: (id, opts) => {
+			close: (id, opts) => {
 				const rec = runs.get(id);
 				if (!rec) return { ok: false, reason: "not_found" };
 				stoppedByDialog = { id, source: opts?.source };
 				rec.status = "stopping";
 				return { ok: true, task: taskOf(rec) };
 			},
-			stopAll: () => 0,
+			closeAll: () => 0,
 		});
 
 		try {

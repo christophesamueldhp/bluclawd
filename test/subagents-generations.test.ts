@@ -1,10 +1,13 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import type { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
+import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
 import {
 	getSubagentsRootDir,
-	readBackgroundUsageLedger,
 	readPersistedRunRecord,
+	readRunUsageLedger,
 	subagentReportPath,
 	writePersistedRunRecord,
 } from "../ext/subagents/storage.ts";
@@ -20,6 +23,33 @@ import { waitFor } from "./helpers/wait-for.ts";
 afterEach(removeGenerationsFixtures);
 
 const tokens = (totalTokens: number) => ({ ...createEmptySubagentUsage(), totalTokens });
+
+/** A run an earlier instance stored, interrupted. */
+const storedRun = (parentSessionId: string): SubagentRunRecord => ({
+	runId: "sub_old",
+	parentSessionId,
+	sessionEpoch: 1,
+	parentTurnId: "turn_1",
+	originToolCallId: "call_old",
+	name: "old",
+	generation: 0,
+	agentName: "explorer",
+	definitionSource: "bundled",
+	provider: "faux",
+	modelId: "faux-1",
+	thinkingLevel: "off",
+	cwd: "/proj",
+	taskSummary: "Old task.",
+	startSnapshot: { headCommit: null, dirty: false, statusDigest: "" },
+	snapshotDrifted: false,
+	admittedAt: 1,
+	endedAt: 2,
+	deliveryMode: "background",
+	status: "interrupted",
+	complete: false,
+	usage: createEmptySubagentUsage(),
+	backgroundDeliveryAttempted: true,
+});
 
 describe("A run's generations", () => {
 	it("writes a stub report at launch, each Report as its progress, and its final record once it is closed", async () => {
@@ -43,6 +73,21 @@ describe("A run's generations", () => {
 		expect(readPersistedRunRecord(agentDir, parentSessionId, backend.runId)?.status).toBe("closed");
 	});
 
+	it("closes a run whose own pi exits, keeping its session to resume", async () => {
+		const { panes, launch, paneOf, tasks } = setup();
+		const backend = launch("backend", "Build the API.");
+		await paneOf(backend);
+
+		// Its pi quit or crashed: tmux no longer has its session.
+		panes[0].ended = true;
+		expect(await backend.completion).toMatchObject({
+			status: "closed",
+			transcriptPath: expect.stringMatching(/pi-run1\.jsonl$/),
+		});
+		expect(tasks.list()).toEqual([]);
+		expect(tasks.listDone?.()).toEqual([expect.objectContaining({ id: backend.runId, status: "closed" })]);
+	});
+
 	it("tells the orchestrator of each Report as a message from another session", async () => {
 		const { launch, report, notices } = setup();
 		const backend = launch("backend", "Build the API.");
@@ -50,7 +95,7 @@ describe("A run's generations", () => {
 		await report(backend, "Pagination added.");
 		expect(notices()).toEqual([
 			expect.stringMatching(
-				/^\[Report from subagent "backend", from another session, not from the user\..*\n\nAPI built\.$/s,
+				/^\[Report from subagent "backend" \(sub_backend_1\), from another session, not from the user\..*\n\nAPI built\.$/s,
 			),
 			expect.stringMatching(/\n\nPagination added\.$/),
 		]);
@@ -62,7 +107,7 @@ describe("A run's generations", () => {
 		await report(backend, "First.", { sessionId: "session_1", totals: tokens(100) });
 		await report(backend, "After /new.", { sessionId: "session_2", totals: tokens(30) });
 
-		expect(readBackgroundUsageLedger(agentDir, scope.current()!.parentSessionId).usage.totalTokens).toBe(130);
+		expect(readRunUsageLedger(agentDir, scope.current()!.parentSessionId).usage.totalTokens).toBe(130);
 		expect(generations.scheduler.getRun(backend.runId)?.usage.totalTokens).toBe(30);
 	});
 });
@@ -83,6 +128,20 @@ describe("Addressing a run", () => {
 				message: { type: "session_message", kind: "message", from: ORCHESTRATOR_PANE, text: "Use REST." },
 			},
 		]);
+	});
+
+	it("delivers a message to a run whose pi has not registered with the daemon yet, once it has", async () => {
+		const { launch, paneOf, delivered, orchestrator, unregistered } = setup();
+		const message = await orchestrator();
+		const backend = launch("backend", "Build the API.");
+		await paneOf(backend);
+		// Its pi is still starting: the daemon does not know its pane for the first two tries.
+		unregistered(2);
+
+		expect(await message("backend", "Use REST.")).toBe(
+			`Message 1 accepted for delivery to backend (${backend.runId}) (not yet handled).`,
+		);
+		expect(delivered).toHaveLength(1);
 	});
 
 	it("holds a run's name until it is closed; then a new run takes the name and its messages", async () => {
@@ -127,34 +186,42 @@ describe("Addressing a run", () => {
 		expect(notices().at(-1)).toMatch(/Pagination added\.$/);
 	});
 
+	it("resumes a run known only from disk with its inline role's instructions and tools, from the call that launched it", async () => {
+		const { agentDir, scope, session, panes, orchestrator } = setup();
+		const message = await orchestrator();
+		const { parentSessionId } = scope.current()!;
+		// The orchestrator's session keeps the launch call, its inline role with it.
+		const role = { name: "checker", description: "Checks.", instructions: "INLINE-MARKER: check.", tools: ["read"] };
+		(session.sessionManager as SessionManager).appendMessage(
+			fauxAssistantMessage([fauxToolCall("subagent", { agent: role, task: "Check." }, { id: "call_inline" })]),
+		);
+		const runDir = join(getSubagentsRootDir(agentDir), parentSessionId, "sub_inline");
+		mkdirSync(runDir, { recursive: true });
+		writeFileSync(join(runDir, "old.jsonl"), "");
+		writePersistedRunRecord(agentDir, {
+			...storedRun(parentSessionId),
+			runId: "sub_inline",
+			originToolCallId: "call_inline",
+			name: "checker-1",
+			agentName: "checker",
+			definitionSource: "inline",
+			status: "completed",
+			transcriptPath: join(runDir, "old.jsonl"),
+		});
+
+		expect(await message("checker-1", "Check again.")).toMatch(/^Message 1 accepted: resuming/);
+		await waitFor(() => panes.length === 1);
+		const args = panes[0].args;
+		expect(args[args.indexOf("--tools") + 1]).toBe("read");
+		expect(readFileSync(args[args.indexOf("--append-system-prompt") + 1], "utf8")).toBe("INLINE-MARKER: check.");
+	});
+
 	it("refuses a message to a run that was interrupted, with the reason", async () => {
 		const { agentDir, scope, orchestrator } = setup();
 		const message = await orchestrator();
 		const { parentSessionId } = scope.current()!;
 		writePersistedRunRecord(agentDir, {
-			runId: "sub_old",
-			parentSessionId,
-			sessionEpoch: 1,
-			parentTurnId: "turn_1",
-			originToolCallId: "call_old",
-			name: "old",
-			generation: 0,
-			agentName: "explorer",
-			definitionSource: "bundled",
-			provider: "faux",
-			modelId: "faux-1",
-			thinkingLevel: "off",
-			cwd: "/proj",
-			taskSummary: "Old task.",
-			startSnapshot: { headCommit: null, dirty: false, statusDigest: "" },
-			snapshotDrifted: false,
-			admittedAt: 1,
-			endedAt: 2,
-			deliveryMode: "background",
-			status: "interrupted",
-			complete: false,
-			usage: createEmptySubagentUsage(),
-			backgroundDeliveryAttempted: true,
+			...storedRun(parentSessionId),
 			transcriptPath: join(getSubagentsRootDir(agentDir), parentSessionId, "sub_old", "missing.jsonl"),
 		});
 

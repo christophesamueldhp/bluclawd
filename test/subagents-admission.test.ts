@@ -114,6 +114,7 @@ async function setup(
 		parentThinkingLevel: () => "low",
 		scope,
 		pane: () => (options.pane === null ? undefined : (options.pane ?? "pi-orchestrator")),
+		tools: () => [],
 	};
 	const ctx: AdmissionContext = {
 		cwd,
@@ -457,7 +458,7 @@ describe("Run admission", () => {
 		invalidateSession();
 		const stale = await resume(completed, () => "x").result;
 		expect(stale).toMatchObject({ ok: false, refusal: "invalidated" });
-		expect(errorOf(stale)).toMatch(/reloaded or replaced; spawn a new subagent/);
+		expect(errorOf(stale)).toMatch(/was replaced; spawn a new subagent/);
 	});
 
 	it("holds at most 8 open runs per orchestrator: a ninth launch or a resume is refused until one closes", async () => {

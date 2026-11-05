@@ -259,8 +259,8 @@ describe("/tasks dialog: the model's foreground bash", () => {
 	});
 });
 
-describe("Ticket #20 — stop all agents from /tasks", () => {
-	it("stops every running agent of this session with X and shows the hint only while agents run", async () => {
+describe("Ticket #20 — close all agents from /tasks", () => {
+	it("closes every open agent of this session with X and shows the hints only while agents run", async () => {
 		const { publishAgentTasks } = await import("../ext/_shared/agent-tasks.ts");
 		const me = session();
 		const calls: Array<{ owner?: string; source?: string }> = [];
@@ -282,8 +282,8 @@ describe("Ticket #20 — stop all agents from /tasks", () => {
 						}))
 					: [],
 			get: () => undefined,
-			stop: () => ({ ok: false, reason: "not_found" }),
-			stopAll: (options) => {
+			close: () => ({ ok: false, reason: "not_found" }),
+			closeAll: (options) => {
 				calls.push({ owner: options?.owner, source: options?.source });
 				running = false;
 				return 1;
@@ -291,10 +291,10 @@ describe("Ticket #20 — stop all agents from /tasks", () => {
 		});
 		try {
 			const { dialog, screen } = open(me);
-			expect(screen()).toContain("X to stop all agents");
+			expect(screen()).toContain("x to close · X to close all agents");
 			dialog.handleInput("X");
 			expect(calls).toEqual([{ owner: me, source: "user" }]);
-			expect(screen()).not.toContain("X to stop all agents");
+			expect(screen()).not.toContain("X to close all agents");
 		} finally {
 			unpublish();
 		}
@@ -330,8 +330,8 @@ describe("/tasks dialog: finished runs", () => {
 			list: (listOwner) => (listOwner === me ? [agentTask(me, "sub_live", "running")] : []),
 			listDone: (listOwner) => (listOwner === me ? [...done] : []),
 			get: () => undefined,
-			stop: () => ({ ok: false, reason: "not_found" }),
-			stopAll: () => 0,
+			close: () => ({ ok: false, reason: "not_found" }),
+			closeAll: () => 0,
 			dismiss: (id, dismissOwner) => {
 				calls.dismissed.push([id, String(dismissOwner)]);
 				done.splice(
@@ -407,11 +407,11 @@ describe("/tasks dialog: finished runs", () => {
 			list: () => (finished ? [] : [agentTask(me, "sub_live", "running")]),
 			listDone: () => (finished ? [agentTask(me, "sub_live", "completed")] : []),
 			get: () => undefined,
-			stop: (id) => {
+			close: (id) => {
 				stopped.push(id);
 				return { ok: false, reason: "not_found" };
 			},
-			stopAll: () => 0,
+			closeAll: () => 0,
 			dismiss: (id) => dismissed.push(id) > 0,
 			open: () => Promise.resolve(),
 		});
@@ -433,8 +433,8 @@ describe("/tasks dialog: finished runs", () => {
 			list: () => [],
 			listDone: (listOwner) => (listOwner === me ? [agentTask(me, "sub_done", "completed")] : []),
 			get: () => undefined,
-			stop: () => ({ ok: false, reason: "not_found" }),
-			stopAll: () => 0,
+			close: () => ({ ok: false, reason: "not_found" }),
+			closeAll: () => 0,
 			open: (id, openOwner) => {
 				calls.opened.push([id, String(openOwner)]);
 				return Promise.resolve();

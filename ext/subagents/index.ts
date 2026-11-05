@@ -9,13 +9,19 @@ import {
 import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
-import { PARENT_ENV, Tmux } from "../../daemon/tmux.ts";
+import { endPane, PARENT_ENV, Tmux } from "../../daemon/tmux.ts";
 import { notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { pistatuslineDrawsFooter } from "../_shared/pistatusline.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { publishSubagentPanel } from "../_shared/subagent-panel.ts";
-import { createRunAdmission, formatRunLabel, MAX_OPEN_RUNS, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
+import {
+	createRunAdmission,
+	formatRunLabel,
+	MAX_OPEN_RUNS,
+	orchestratorTools,
+	SUBAGENT_TOOL_PARAMETERS,
+} from "./admission.ts";
 import {
 	type AgentDefinitionCatalog,
 	discoverAgentDefinitions,
@@ -24,12 +30,12 @@ import {
 import type { RunEntry } from "./directory.ts";
 import { createGenerations, type ParentNotice } from "./generations.ts";
 import {
+	fromRunText,
 	PARENT_MESSAGE_ADDRESS,
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
 	SUBAGENT_MESSAGE_PARAMETERS,
 	SUBAGENT_MESSAGE_TOOL,
 	SubagentMessageBus,
-	subagentMessagePayload,
 } from "./messages.ts";
 import { describeSubagentModels } from "./models.ts";
 import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET } from "./panel.ts";
@@ -44,8 +50,8 @@ import {
 	reconcileInterruptedRuns,
 } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
-import { actAsRun, RunReports, reportText, stopTurn } from "./tmux-runs.ts";
-import { createParentScopeViews } from "./views.ts";
+import { actAsRun, paneUp, RunReports, stopTurn } from "./tmux-runs.ts";
+import { createParentScopeViews, runStatus } from "./views.ts";
 
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const SUBAGENT_REMINDER_CUSTOM_TYPE = "subagent-reminder";
@@ -107,6 +113,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		if (runParent) actAsRun(pi, runParent, pane);
 		if (runParent && pane) messageAsRun(pi, runParent, pane);
 		const reports = new RunReports();
+		/** Aborted on a reload, which hands this instance's open runs to the next one. */
+		const handOff = new AbortController();
 		pi.events.on("bluclawd:session-message", (data) => {
 			const message = data as SessionMessage;
 			if (message.kind === "report" || message.kind === "activity") reports.receive(message);
@@ -125,6 +133,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		/** The subagents status last set, so the panel's clock republishes only what changed. */
 		let publishedStatus: string | undefined;
 		let offPanelKeys: (() => void) | undefined;
+		/** The orchestrator's tools as its latest request declared them. */
+		let latestLoadout: ToolLoadout | undefined;
 
 		const messageBus = new SubagentMessageBus(
 			(record, senderScope) =>
@@ -145,7 +155,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			onChange: runsChanged,
 			batchWindowMs: options.batchWindowMs ?? BACKGROUND_BATCH_WINDOW_MS,
 		});
-		const senderRole = (address: string) => scheduler.getRun(address)?.agentName;
 
 		/** A message or a note of what the user typed, from one of this session's open runs; another sender's is dropped. */
 		const fromRun = (message: Extract<SessionMessage, { kind: "message" | "typed" }>) => {
@@ -185,13 +194,13 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const lines = panelInStatus && panel && panelTui ? panel.lines(panelTui.terminal.columns) : [];
 				// The line break makes it a block of its own, below the chips.
 				if (lines.length > 0) return publish(`${lines.join("\n")}\n`);
-				const { running: runningCount, stopping: stoppingCount } = views.footer();
-				if (runningCount + stoppingCount === 0) {
+				const { running: runningCount, closing: closingCount } = views.footer();
+				if (runningCount + closingCount === 0) {
 					publish(undefined);
 				} else {
 					const parts: string[] = [];
 					if (runningCount > 0) parts.push(`${runningCount} subagent${runningCount === 1 ? "" : "s"}`);
-					if (stoppingCount > 0) parts.push(`${stoppingCount} stopping`);
+					if (closingCount > 0) parts.push(`${closingCount} closing`);
 					publish(ctx.ui.theme.fg("dim", parts.join(" · ")));
 				}
 			} catch {
@@ -205,12 +214,16 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			const texts = items.map((item) =>
 				item.kind === "notice"
 					? item.notice.parentText
-					: subagentMessagePayload(item.message, senderRole(item.message.from)).content[0].text,
+					: fromRunText(
+							"Message",
+							formatRunLabel({ name: item.message.fromName, runId: item.message.from }),
+							item.message.content,
+						),
 			);
 			const combinedText =
 				items.length === 1
 					? texts[0]
-					: [notices.length > 1 ? `[${notices.length} background subagents finished]` : undefined, ...texts]
+					: [notices.length > 1 ? `[${notices.length} subagent reports]` : undefined, ...texts]
 							.filter((text) => text !== undefined)
 							.join("\n\n---\n\n");
 
@@ -242,6 +255,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			reports,
 			tmux: () => new Tmux(),
 			send: (to, message) => new OrchestratorClient().send(to, message),
+			handOff: handOff.signal,
 		});
 
 		const admission = createRunAdmission({
@@ -252,6 +266,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			parentThinkingLevel: () => pi.getThinkingLevel(),
 			scope: parentScope,
 			pane: () => pane,
+			tools: () => (latestLoadout ? orchestratorTools(latestLoadout) : []),
 		});
 
 		const views = createParentScopeViews({
@@ -266,7 +281,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					return false;
 				}
 			},
-			now,
 			onChange: runsChanged,
 		});
 
@@ -360,17 +374,21 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				);
 			}
 
-			// Reconcile orphaned runs referenced on the active branch from prior crashes
 			const branchEntries = ctx.sessionManager.getBranch();
+			// A reload keeps the session, and so its open runs, whose pis still run: this instance takes them over.
+			if (event.reason === "reload" && pane) {
+				for (const runId of extractReferencedRunIdsFromBranch(branchEntries)) {
+					const run = readPersistedRunRecord(agentDir, sessionId, runId);
+					if (run?.pane && !isTerminalSubagentStatus(run.status) && paneUp(new Tmux(), run.pane))
+						admission.adopt(run, ctx);
+				}
+			}
+			// Reconcile orphaned runs referenced on the active branch from prior crashes
 			const liveIds = new Set(scheduler.listActiveRuns(sessionId).map((r) => r.runId));
 			for (const run of reconcileInterruptedRuns(agentDir, sessionId, branchEntries, liveIds)) {
 				if (run.status !== "closed" || !run.pane) continue;
 				// Left open by an orchestrator that is gone: the daemon closes it too, at its next heartbeat.
-				try {
-					new Tmux().end(run.pane);
-				} catch {
-					// Its pi is gone already.
-				}
+				endPane(new Tmux(), run.pane);
 			}
 			// Reopening the session lists its closed runs, which can be resumed.
 			const reopened = parentScope.current();
@@ -383,7 +401,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 			unpublish?.();
 			// The panel first: publishing the tasks signals a change, and the tasks pill then reads the panel.
-			const unpublishPanel = publishSubagentPanel(() => panel !== undefined && views.panel().length > 0);
+			const unpublishPanel = publishSubagentPanel(() => panel !== undefined && views.open().length > 0);
 			const unpublishTasks = publishAgentTasks({
 				...taskSource,
 				open: (id, owner) => resumeClosed(id, owner) ?? openRun(id, owner),
@@ -406,7 +424,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						const shown = createPanel({
 							tui,
 							theme,
-							runs: views.panel,
+							runs: () => views.open(),
 							waitingFor: views.waitingFor,
 							now,
 							belowPrompt: !panelInStatus,
@@ -415,10 +433,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 								tui.requestRender();
 							},
 							actions: {
-								// The same stop as /tasks', so no report wakes the orchestrator.
-								stop: ({ record }) =>
-									taskSource.stop(record.runId, { owner: record.parentSessionId, source: "user" }),
-								dismiss: ({ record }) => views.dismiss("panel", record.runId),
+								// The same close as /tasks'.
+								close: ({ record }) =>
+									taskSource.close(record.runId, { owner: record.parentSessionId, source: "user" }),
 								open: ({ record }) => void openRun(record.runId),
 							},
 						});
@@ -427,7 +444,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						const ticker = setInterval(() => {
 							shown.sync();
 							refreshFooterStatus();
-							if (views.panel().length > 0) tui.requestRender();
+							if (views.open().length > 0) tui.requestRender();
 						}, 1000);
 						ticker.unref?.();
 						return Object.assign(shown, {
@@ -499,9 +516,15 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			parentScope.navigate(ctx);
 		});
 
-		pi.on("session_shutdown", async () => {
-			parentScope.shutdown();
-			await scheduler.waitForSettled();
+		pi.on("session_shutdown", async (event) => {
+			if (event.reason === "reload") {
+				// The next instance of this session takes the open runs over.
+				parentScope.release();
+				handOff.abort();
+			} else {
+				parentScope.shutdown();
+				await scheduler.waitForSettled();
+			}
 			unpublish?.();
 			unpublish = undefined;
 			offPanelKeys?.();
@@ -515,7 +538,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			parentScope.detach();
 		});
 
-		// The orchestrator's only: a run messages through the daemon (messageAsRun), and launches nothing.
+		// The orchestrator's only: a run messages through the daemon (messageAsRun), and manages no runs.
 		const registerOrchestratorTool: typeof pi.registerTool = (tool) => {
 			if (!runParent) pi.registerTool(tool);
 		};
@@ -548,11 +571,11 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		const describeProgress = ({ record: run }: RunEntry, now: number) =>
 			[
-				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${run.status}${run.activity ? ` (${run.activity})` : ""}`,
+				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${runStatus(run)}`,
 				`  task: ${run.taskSummary}`,
 				`  elapsed: ${formatRunElapsed(run, now)}`,
 			].join("\n");
-		pi.registerTool({
+		registerOrchestratorTool({
 			name: "subagent_status",
 			label: "Subagent status",
 			exposure: "model-only",
@@ -581,7 +604,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			},
 		});
 
-		pi.registerTool({
+		registerOrchestratorTool({
 			name: "subagent_stop",
 			label: "Stop subagent",
 			exposure: "model-only",
@@ -631,7 +654,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			},
 		});
 
-		pi.registerTool({
+		registerOrchestratorTool({
 			name: "subagent_close",
 			label: "Close subagent",
 			exposure: "model-only",
@@ -645,8 +668,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			execute: async (_toolCallId, params) => {
 				const target = params.agent.trim();
 				const run = views.findOpen(target)?.record;
-				const closed = run !== undefined && taskSource.stop(run.runId, { source: "model" }).ok;
-				const label = run && `${run.name ?? run.runId} (${run.runId})`;
+				const closed = run !== undefined && taskSource.close(run.runId, { source: "model" }).ok;
+				const label = run && formatRunLabel(run);
 				return {
 					content: [
 						{
@@ -664,7 +687,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			},
 		});
 
-		pi.registerTool({
+		registerOrchestratorTool({
 			name: "subagent_models",
 			label: "Subagent models",
 			exposure: "model-only",
@@ -706,6 +729,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			},
 			description: buildBaseSubagentDescription(),
 			prepareLoadout: (loadout: ToolLoadout): ToolLoadoutChanges | undefined => {
+				latestLoadout = loadout;
 				if (!catalog) return undefined;
 				if (!loadout.declared.some((t) => t.name === "subagent")) return undefined;
 				const mode = parentScope.context()?.mode;
@@ -764,7 +788,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							details,
 							isError: true,
 						};
-					return { content: [{ type: "text", text: reportText(name, report.text) }], details };
+					return {
+						content: [{ type: "text", text: fromRunText("Report", formatRunLabel(handle.record), report.text) }],
+						details,
+					};
 				}
 
 				// A run delivers its own Reports, after each of its turns.

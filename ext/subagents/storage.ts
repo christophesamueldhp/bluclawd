@@ -12,10 +12,11 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { type ExtensionAPI, parseSessionEntries, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import { sanitizeReportText } from "./results.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
-import { addSubagentUsage, createEmptySubagentUsage, type SubagentUsageTotals, sessionUsage } from "./usage.ts";
+import { addSubagentUsage, createEmptySubagentUsage, sessionUsage } from "./usage.ts";
 
 export const SUBAGENT_RUN_CUSTOM_ENTRY = "bluclawd.subagent-run";
 export const MAX_AUTHORIZED_REPORT_VIEW_BYTES = 16 * 1024;
@@ -35,20 +36,20 @@ export interface SubagentRunReferenceEntryData {
 	endedAt?: number;
 }
 
-export interface BackgroundUsageLedger {
+export interface RunUsageLedger {
 	parentSessionId: string;
 	/** How many runs the usage comes from. */
 	runCount: number;
 	/** The generations, `<runId>[#<generation>]`, whose usage `usage` holds: runs from before runs were pis of their own. */
 	recordedRunIds: string[];
-	usage: SubagentUsageTotals;
+	usage: SessionUsage;
 	/** Each run's sessions, by run ID and then session ID: each session's usage so far, as the run last reported it. */
-	sessions?: Record<string, Record<string, SubagentUsageTotals>>;
+	sessions?: Record<string, Record<string, SessionUsage>>;
 	/**
 	 * By session ID: what a session from before runs were pis of their own had counted already, in `usage` or the
 	 * orchestrator's own totals, when a run resumed it.
 	 */
-	counted?: Record<string, SubagentUsageTotals>;
+	counted?: Record<string, SessionUsage>;
 }
 
 function isSafePathSegment(segment: string): boolean {
@@ -391,13 +392,13 @@ export function appendSubagentMessageRecord(agentDir: string, parentSessionId: s
 	}
 }
 
-function getBackgroundLedgerPath(agentDir: string, parentSessionId: string): string | undefined {
+function getRunUsageLedgerPath(agentDir: string, parentSessionId: string): string | undefined {
 	if (!isSafePathSegment(parentSessionId)) return undefined;
 	return join(getSubagentsRootDir(agentDir), parentSessionId, "background-usage-ledger.json");
 }
 
 /** Every run's usage the orchestrator does not count in its own totals: its runs' sessions included. */
-export function readBackgroundUsageLedger(agentDir: string, parentSessionId: string): BackgroundUsageLedger {
+export function readRunUsageLedger(agentDir: string, parentSessionId: string): RunUsageLedger {
 	const ledger = readLedgerFile(agentDir, parentSessionId);
 	const usage = structuredClone(ledger.usage);
 	const runs = new Set(ledger.recordedRunIds.map((key) => key.split("#")[0]));
@@ -411,7 +412,7 @@ export function readBackgroundUsageLedger(agentDir: string, parentSessionId: str
 }
 
 /** What `total` holds beyond what was `counted` already. */
-function beyond(total: SubagentUsageTotals, counted: SubagentUsageTotals | undefined): SubagentUsageTotals {
+function beyond(total: SessionUsage, counted: SessionUsage | undefined): SessionUsage {
 	if (!counted) return total;
 	const less = (a: number, b: number) => Math.max(0, a - b);
 	return {
@@ -431,17 +432,17 @@ function beyond(total: SubagentUsageTotals, counted: SubagentUsageTotals | undef
 	};
 }
 
-function readLedgerFile(agentDir: string, parentSessionId: string): BackgroundUsageLedger {
-	const empty: BackgroundUsageLedger = {
+function readLedgerFile(agentDir: string, parentSessionId: string): RunUsageLedger {
+	const empty: RunUsageLedger = {
 		parentSessionId,
 		runCount: 0,
 		recordedRunIds: [],
 		usage: createEmptySubagentUsage(),
 	};
-	const ledgerPath = getBackgroundLedgerPath(agentDir, parentSessionId);
+	const ledgerPath = getRunUsageLedgerPath(agentDir, parentSessionId);
 	if (!ledgerPath || !existsSync(ledgerPath)) return empty;
 	try {
-		const parsed = JSON.parse(readFileSync(ledgerPath, "utf8")) as BackgroundUsageLedger;
+		const parsed = JSON.parse(readFileSync(ledgerPath, "utf8")) as RunUsageLedger;
 		if (parsed.parentSessionId !== parentSessionId) return empty;
 		return parsed;
 	} catch {
@@ -458,7 +459,7 @@ export function recordRunSessionUsage(
 	agentDir: string,
 	record: Pick<SubagentRunRecord, "parentSessionId" | "runId">,
 	sessionId: string,
-	usage: SubagentUsageTotals,
+	usage: SessionUsage,
 ): void {
 	const current = readLedgerFile(agentDir, record.parentSessionId);
 	current.sessions = {
@@ -487,8 +488,8 @@ export function recordCountedSessionUsage(agentDir: string, parentSessionId: str
 	writeLedgerFile(agentDir, current);
 }
 
-function writeLedgerFile(agentDir: string, ledger: BackgroundUsageLedger): void {
-	const ledgerPath = getBackgroundLedgerPath(agentDir, ledger.parentSessionId);
+function writeLedgerFile(agentDir: string, ledger: RunUsageLedger): void {
+	const ledgerPath = getRunUsageLedgerPath(agentDir, ledger.parentSessionId);
 	if (!ledgerPath) return;
 	try {
 		writeAtomicPrivateFile(ledgerPath, `${JSON.stringify(ledger, null, 2)}\n`);

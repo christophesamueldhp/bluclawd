@@ -1,5 +1,7 @@
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Tmux } from "../daemon/tmux.ts";
+import { agentTasks } from "../ext/_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../ext/_shared/status-keys.ts";
 import { createSubagentTui, gate, launch, type SubagentTui } from "./helpers/subagent-tui.ts";
 import { waitFor } from "./helpers/wait-for.ts";
@@ -95,6 +97,47 @@ describe("the run panel below the status line", () => {
 		await waitFor(() => !tui!.panel()[0]?.includes("waiting"));
 	});
 
+	it("marks a run waiting on a prompt in its own session, and keeps a notice of it in the orchestrator's session", async () => {
+		tui = await createSubagentTui();
+		tui.script([launch(["scout"], { background: true })]);
+		await prompt(tui);
+
+		tui.activity("scout", "awaiting_input", "Network access");
+		await waitFor(() => row(tui!, "scout")?.includes("needs input") ?? false);
+		const entries = () => tui!.session.sessionManager.getEntries();
+		const notice = await waitFor(
+			() =>
+				entries().find(
+					(entry) => entry.type === "custom_message" && JSON.stringify(entry.content).includes("needs input"),
+				) ?? false,
+		);
+		expect(notice).toMatchObject({ display: true });
+		expect(JSON.stringify(notice)).toContain('Subagent \\"scout\\"');
+		// For the user, who answers in the run's session: it starts no turn of the orchestrator.
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(tui.session.isStreaming).toBe(false);
+		expect(entries().at(-1)).toBe(notice);
+	});
+
+	it("says what an open run is doing in /tasks and subagent_status, not just that it runs", async () => {
+		tui = await createSubagentTui();
+		tui.script([
+			launch(["scout"], { background: true }),
+			() => fauxAssistantMessage("Waiting for scout."),
+			() => fauxAssistantMessage([fauxToolCall("subagent_status", { agent: "scout" }, { id: "call_status" })]),
+		]);
+		await prompt(tui);
+		tui.activity("scout", "idle");
+		await waitFor(() => row(tui!, "scout")?.includes("idle") ?? false);
+
+		expect(agentTasks()?.list()).toEqual([expect.objectContaining({ state: "running", status: "idle" })]);
+		await prompt(tui, "How is scout?");
+		const status = JSON.stringify(
+			tui.session.messages.find((message) => message.role === "toolResult" && message.toolCallId === "call_status"),
+		);
+		expect(status).toMatch(/scout \(explorer, sub_[0-9a-f-]+\): idle/);
+	});
+
 	it("shows at most five rows, then how many more /tasks has", async () => {
 		tui = await createSubagentTui();
 		const names = ["one", "two", "three", "four", "five", "six", "seven"];
@@ -104,6 +147,23 @@ describe("the run panel below the status line", () => {
 
 		expect(names.filter((name) => row(tui!, name))).toHaveLength(5);
 		expect(tui.panel().at(-1)?.trim()).toBe("+2 more · /tasks");
+	});
+
+	it("shows only open runs: one whose pi failed to start is not in it, and is Done in /tasks", async () => {
+		tui = await createSubagentTui();
+		vi.mocked(Tmux.prototype.newSession).mockImplementationOnce(() => {
+			throw new Error("tmux refused");
+		});
+		tui.script([launch(["scout"], { background: true })]);
+		await prompt(tui);
+
+		await waitFor(
+			() =>
+				agentTasks()
+					?.listDone?.()
+					.some((task) => task.state === "failed") ?? false,
+		);
+		expect(tui.panel()).toEqual([]);
 	});
 
 	it("drops a run as soon as it is closed", async () => {
@@ -117,5 +177,26 @@ describe("the run panel below the status line", () => {
 		await waitFor(() => tui!.panel().length === 0);
 		expect(tui.status(STATUS_KEYS.subagents)).toBeUndefined();
 		expect(tui.runs[0]).toMatchObject({ name: "scout", ended: true });
+	});
+});
+
+describe("a reload of the orchestrator", () => {
+	it("keeps its open runs: they stay in the panel, and their Reports still wake it", async () => {
+		tui = await createSubagentTui();
+		tui.script([launch(["scout"], { background: true }), () => fauxAssistantMessage("Waiting for scout.")]);
+		await prompt(tui);
+		await waitFor(() => row(tui!, "scout") ?? false);
+
+		await tui.session.reload();
+		expect(tui.runs).toEqual([expect.objectContaining({ name: "scout", ended: false })]);
+		await waitFor(() => row(tui!, "scout") ?? false);
+
+		tui.report("scout", "Found the module.");
+		await waitFor(() =>
+			tui!.session.messages.some(
+				(message) => message.role === "assistant" && JSON.stringify(message.content).includes("Done."),
+			),
+		);
+		expect(JSON.stringify(tui.session.messages)).toContain("Found the module.");
 	});
 });

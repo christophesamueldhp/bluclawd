@@ -11,6 +11,7 @@ import {
 import { PromptDelivery } from "./remote/delivery.ts";
 import { readSessionTail } from "./session-state.ts";
 import { getInstance, loadInstances, removeInstance, saveInstances, upsertInstance } from "./storage.ts";
+import { endPane } from "./tmux.ts";
 import type { InstanceRecord } from "./types.ts";
 
 function cloneInstance(record: InstanceRecord): InstanceRecord {
@@ -203,11 +204,8 @@ export class ServerSupervisor {
 	 */
 	private closeOrphanedRun({ pane, parent }: InstanceRecord): void {
 		if (!pane || !parent || this.tmuxSays(parent) !== "gone") return;
-		try {
-			this.deps.tmux.end(pane);
-		} catch {
-			// Its pi has quit already, or tmux did not answer: its next heartbeat tries again.
-		}
+		// Should tmux not answer, the run's next heartbeat tries again.
+		endPane(this.deps.tmux, pane);
 	}
 
 	/** Store a pane's row as it shows without its pane, stopped, once its session has a file to resume

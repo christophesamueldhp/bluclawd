@@ -1,23 +1,8 @@
 import type { Usage } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { SessionUsage } from "../../daemon/ipc/protocol.ts";
 
-export interface SubagentUsageTotals {
-	input: number;
-	output: number;
-	cacheRead: number;
-	cacheWrite: number;
-	totalTokens: number;
-	cost: {
-		input: number;
-		output: number;
-		cacheRead: number;
-		cacheWrite: number;
-		total: number;
-	};
-	hasUnknownCost: boolean;
-}
-
-export function createEmptySubagentUsage(): SubagentUsageTotals {
+export function createEmptySubagentUsage(): SessionUsage {
 	return {
 		input: 0,
 		output: 0,
@@ -35,7 +20,7 @@ export function createEmptySubagentUsage(): SubagentUsageTotals {
 	};
 }
 
-export function addSubagentUsage(target: SubagentUsageTotals, delta: Partial<SubagentUsageTotals>): void {
+export function addSubagentUsage(target: SessionUsage, delta: Partial<SessionUsage>): void {
 	const input = delta.input ?? 0;
 	const output = delta.output ?? 0;
 	const cacheRead = delta.cacheRead ?? 0;
@@ -61,7 +46,7 @@ export function addSubagentUsage(target: SubagentUsageTotals, delta: Partial<Sub
 }
 
 /** A session's usage so far, as pi's own totals count it: every entry of the session, not only its branch. */
-export function sessionUsage(entries: readonly SessionEntry[]): SubagentUsageTotals {
+export function sessionUsage(entries: readonly SessionEntry[]): SessionUsage {
 	const totals = createEmptySubagentUsage();
 	for (const entry of entries) {
 		let counted: Usage | undefined;

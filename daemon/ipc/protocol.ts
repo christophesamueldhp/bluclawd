@@ -251,8 +251,8 @@ export interface PaneReport {
 	trust?: "always" | "ask" | "never";
 	context?: { tokens: number | null; contextWindow: number; percent: number | null };
 	usage?: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number };
-	/** Separate usage ledger for background subagent runs not included in foreground toolResult entries. */
-	backgroundSubagentUsage?: {
+	/** The usage of the session's subagent runs, counted in their own sessions and so not in `usage`. */
+	subagentUsage?: {
 		runCount: number;
 		input: number;
 		output: number;

@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { AgentActivity } from "../../daemon/activity.ts";
+import type { SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { AGENT_TASK_ID_PREFIX } from "../_shared/agent-tasks.ts";
 import type { AgentDefinitionSource } from "./definitions.ts";
-import { createEmptySubagentUsage, type SubagentUsageTotals } from "./usage.ts";
+import { createEmptySubagentUsage } from "./usage.ts";
 
 export type SubagentDeliveryMode = "foreground" | "background";
 
@@ -64,7 +65,7 @@ export interface SubagentRunRecord {
 	errorMessage?: string;
 	complete: boolean;
 	/** The usage of the run's session so far, as its latest Report gave it. */
-	usage: SubagentUsageTotals;
+	usage: SessionUsage;
 	backgroundDeliveryAttempted: boolean;
 	lastProgressText?: string;
 	summaryText?: string;
@@ -77,17 +78,17 @@ export interface SubagentRunController {
 	/** What the run's pi says it is doing now. */
 	updateActivity(activity: AgentActivity): void;
 	/** The usage of the run's session so far. */
-	updateUsage(totals: SubagentUsageTotals): void;
+	updateUsage(totals: SessionUsage): void;
 	updateProgress(text: string): void;
 }
 
-export interface SubagentRunnerExecuteParams {
+export interface SubagentRunExecuteParams {
 	readonly record: Readonly<SubagentRunRecord>;
 	readonly signal: AbortSignal;
 	readonly controller: SubagentRunController;
 }
 
-export interface SubagentRunnerOutcome {
+export interface SubagentRunOutcome {
 	status: SubagentTerminalStatus;
 	complete: boolean;
 	summaryText: string;
@@ -135,9 +136,9 @@ export interface SubagentRunSchedulerOptions<C = unknown> {
 	onStateChange?: (record: Readonly<SubagentRunRecord>) => void;
 	/** Durably stores a settled run before it turns terminal; a throw fails the run. */
 	onFinalize?: (record: Readonly<SubagentRunRecord>) => Promise<Readonly<SubagentRunRecord>>;
-	executeRun: (params: SubagentRunnerExecuteParams & { context?: C }) => Promise<SubagentRunnerOutcome>;
+	executeRun: (params: SubagentRunExecuteParams & { context?: C }) => Promise<SubagentRunOutcome>;
 	/** What a stopped run ends as; `cancelled` when omitted. */
-	stoppedAs?: (context: C | undefined) => SubagentTerminalStatus;
+	stoppedAs?: SubagentTerminalStatus;
 }
 
 export function createRunId(): string {
@@ -174,10 +175,8 @@ export class SubagentRunScheduler<C = unknown> {
 	private readonly now: () => number;
 	private readonly onStateChange?: (record: Readonly<SubagentRunRecord>) => void;
 	private readonly onFinalize?: (record: Readonly<SubagentRunRecord>) => Promise<Readonly<SubagentRunRecord>>;
-	private readonly executeRun: (
-		params: SubagentRunnerExecuteParams & { context?: C },
-	) => Promise<SubagentRunnerOutcome>;
-	private readonly stoppedAs: (context: C | undefined) => SubagentTerminalStatus;
+	private readonly executeRun: (params: SubagentRunExecuteParams & { context?: C }) => Promise<SubagentRunOutcome>;
+	private readonly stoppedAs: SubagentTerminalStatus;
 
 	private readonly runs = new Map<string, InternalManagedRun<C>>();
 
@@ -186,7 +185,7 @@ export class SubagentRunScheduler<C = unknown> {
 		this.onStateChange = options.onStateChange;
 		this.onFinalize = options.onFinalize;
 		this.executeRun = options.executeRun;
-		this.stoppedAs = options.stoppedAs ?? (() => "cancelled");
+		this.stoppedAs = options.stoppedAs ?? "cancelled";
 	}
 
 	getRun(runId: string): Readonly<SubagentRunRecord> | undefined {
@@ -321,6 +320,7 @@ export class SubagentRunScheduler<C = unknown> {
 		Object.assign(managed, {
 			record: {
 				...managed.record,
+				startedAt: undefined,
 				endedAt: undefined,
 				endSnapshot: undefined,
 				stopReason: undefined,
@@ -350,6 +350,29 @@ export class SubagentRunScheduler<C = unknown> {
 		});
 		this.startManagedRun(managed);
 		return { ok: true, handle: { runId, record: structuredClone(managed.record), completion: completionPromise } };
+	}
+
+	/**
+	 * Takes over an open run, its pi still running, that an earlier instance of the orchestrator's session started
+	 * (a reload), as it is stored.
+	 */
+	takeOver(stored: Readonly<SubagentRunRecord>, context: C): void {
+		if (this.runs.has(stored.runId)) return;
+		let resolveCompletion!: (rec: Readonly<SubagentRunRecord>) => void;
+		const completionPromise = new Promise<Readonly<SubagentRunRecord>>((res) => {
+			resolveCompletion = res;
+		});
+		const managed: InternalManagedRun<C> = {
+			record: structuredClone(stored) as SubagentRunRecord,
+			abortController: new AbortController(),
+			resolveCompletion,
+			completionPromise,
+			disposed: false,
+			finalizing: false,
+			context,
+		};
+		this.runs.set(stored.runId, managed);
+		this.startManagedRun(managed);
 	}
 
 	/**
@@ -395,7 +418,8 @@ export class SubagentRunScheduler<C = unknown> {
 	}
 
 	private startManagedRun(managed: InternalManagedRun<C>): void {
-		managed.record.startedAt = this.now();
+		// A run taken over keeps when it started.
+		managed.record.startedAt ??= this.now();
 		this.emitChange(managed);
 
 		// A resume reuses `managed`, so a controller from an earlier generation must not touch the new one.
@@ -418,7 +442,7 @@ export class SubagentRunScheduler<C = unknown> {
 				managed.record.activity = activity;
 				this.emitChange(managed);
 			},
-			updateUsage: (totals: SubagentUsageTotals) => {
+			updateUsage: (totals: SessionUsage) => {
 				if (inactive()) return;
 				managed.record.usage = structuredClone(totals);
 			},
@@ -455,7 +479,7 @@ export class SubagentRunScheduler<C = unknown> {
 			return;
 		}
 		if (!managed.pendingTerminalStatus) {
-			managed.pendingTerminalStatus = this.stoppedAs(managed.context);
+			managed.pendingTerminalStatus = this.stoppedAs;
 			managed.pendingStopSource = source;
 			managed.pendingStopReason = reason;
 			managed.record.stopSource = source;
@@ -471,7 +495,7 @@ export class SubagentRunScheduler<C = unknown> {
 		}
 	}
 
-	private async finalizeManagedRun(managed: InternalManagedRun<C>, outcome: SubagentRunnerOutcome): Promise<void> {
+	private async finalizeManagedRun(managed: InternalManagedRun<C>, outcome: SubagentRunOutcome): Promise<void> {
 		if (managed.finalizing || isTerminalSubagentStatus(managed.record.status)) {
 			return;
 		}

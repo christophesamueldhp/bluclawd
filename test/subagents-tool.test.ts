@@ -59,7 +59,7 @@ function launchOf(t: SubagentTui, name: string) {
 
 describe("A run's role, as its launch flags", () => {
 	it("runs an inline role over a same-named saved role, records its source as inline, and writes no definition file", async () => {
-		const t = await createSubagentTui();
+		const t = await createSubagentTui({ builtinTools: ["read"] });
 		tui = t;
 		const savedPath = join(t.agentDir, "agents", "schema-checker.md");
 		mkdirSync(dirname(savedPath), { recursive: true });
@@ -101,6 +101,36 @@ describe("A run's role, as its launch flags", () => {
 		expect(readFileSync(savedPath, "utf8")).toContain("SAVED-MARKER");
 		expect(statSync(savedPath).mtimeMs).toBe(savedBefore);
 		expect(existsSync(join(t.cwd, ".pi"))).toBe(false);
+	});
+
+	it("refuses a role that names a tool the orchestrator does not have", async () => {
+		const t = await createSubagentTui({ builtinTools: ["read"] });
+		tui = t;
+		t.script([
+			() =>
+				fauxAssistantMessage([
+					fauxToolCall(
+						"subagent",
+						{
+							agent: {
+								name: "deployer",
+								description: "Deploys.",
+								instructions: "Deploy.",
+								tools: ["read", "deploy"],
+							},
+							task: "Deploy it.",
+							background: true,
+						},
+						{ id: "unknown_tool" },
+					),
+				]),
+		]);
+		await t.session.prompt("Delegate.", { expandPromptTemplates: false });
+
+		const { result, text } = toolResultText(t.session, "unknown_tool");
+		expect(result?.isError).toBe(true);
+		expect(text).toContain('Subagent role "deployer" names tools the orchestrator cannot give a child: deploy.');
+		expect(t.runs).toEqual([]);
 	});
 
 	it("starts a run on the spawn-selected model and thinking level", async () => {

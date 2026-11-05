@@ -10,16 +10,17 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentActivity } from "../../daemon/activity.ts";
-import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
+import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { textOf } from "../../daemon/session-state.ts";
-import { PARENT_ENV, RUN_TASK_ENV, type Tmux } from "../../daemon/tmux.ts";
+import { endPane, PARENT_ENV, RUN_TASK_ENV, type Tmux } from "../../daemon/tmux.ts";
 import { ForegroundActivity } from "../agent-view/self-registration.ts";
 import type { AgentDefinition } from "./definitions.ts";
-import { NOT_APPROVAL } from "./messages.ts";
-import type { SubagentRunnerExecuteParams, SubagentRunnerOutcome } from "./runs.ts";
+import { SUBAGENT_MESSAGE_CUSTOM_TYPE } from "./messages.ts";
+import { fromRun, runTaskText } from "./run-messages.ts";
+import type { SubagentRunExecuteParams, SubagentRunOutcome } from "./runs.ts";
 import { newestRunSession } from "./storage.ts";
-import { type SubagentUsageTotals, sessionUsage } from "./usage.ts";
+import { sessionUsage } from "./usage.ts";
 
 /** What a run is started as: its role and choices, resolved. */
 export interface RunLaunch {
@@ -39,6 +40,8 @@ export interface RunLaunch {
 	parent: string;
 	/** Whether the orchestrator trusts the project: the run starts in its trust, never asking. */
 	projectTrusted: boolean;
+	/** A pi already running as the run, which its orchestrator takes over after a reload: none is started. */
+	pane?: string;
 }
 
 /** The run's role as pi's launch flags. */
@@ -83,27 +86,55 @@ export function runSessionFile(run: Pick<RunLaunch, "runDir" | "sessionFile">): 
  */
 export async function stopTurn(pane: string, from: string, signal?: AbortSignal): Promise<boolean> {
 	const client = new OrchestratorClient();
+	try {
+		await sendToRun(
+			(to, message) => client.send(to, message),
+			pane,
+			{ type: "session_message", kind: "stop", from },
+			signal,
+		);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Sends a run's pi a message through the daemon. A run just launched registers with the daemon a moment after its
+ * pi starts, so a pane the daemon does not know yet is tried again for a while.
+ */
+export async function sendToRun(
+	send: (pane: string, message: SessionMessage) => Promise<void>,
+	pane: string,
+	message: SessionMessage,
+	signal?: AbortSignal,
+): Promise<void> {
 	const deadline = Date.now() + REGISTER_WAIT_MS;
 	for (;;) {
 		try {
-			await client.send(pane, { type: "session_message", kind: "stop", from });
-			return true;
+			return await send(pane, message);
 		} catch (error) {
-			// A run just launched registers with the daemon a moment after its first turn starts.
 			const starting = String(error).includes("Unknown instance") && Date.now() < deadline && !signal?.aborted;
-			if (!starting) return false;
+			if (!starting) throw error;
 			await new Promise((resolve) => setTimeout(resolve, 200));
 		}
 	}
 }
 
-/** How long a Stop waits for a run's pi to register: past one heartbeat that timed out, and the next. */
-const REGISTER_WAIT_MS = 10_000;
+/** How often an open run's pane is checked for a pi that exited by itself. */
+const PANE_CHECK_MS = 2000;
 
-/** A Report as the orchestrator's model reads it: from another session, never the user. */
-export function reportText(name: string, text: string): string {
-	return `[Report from subagent "${name}", from another session, not from the user. ${NOT_APPROVAL}]\n\n${text}`;
+/** Whether the run's pane is still there; when tmux cannot say, it is taken to be. */
+export function paneUp(tmux: Pick<Tmux, "hasSession">, pane: string): boolean {
+	try {
+		return tmux.hasSession(pane);
+	} catch {
+		return true;
+	}
 }
+
+/** How long a send waits for a run's pi to register: past one heartbeat that timed out, and the next. */
+const REGISTER_WAIT_MS = 10_000;
 
 type RunReport = Extract<SessionMessage, { kind: "report" }>;
 
@@ -153,14 +184,16 @@ export class RunReports {
 }
 
 export interface TmuxRunDeps {
-	tmux: Pick<Tmux, "newSession" | "end">;
+	tmux: Pick<Tmux, "newSession" | "end" | "hasSession">;
 	reports: RunReports;
 	/** A Report no foreground launch took: it goes to the orchestrator. */
 	notify(report: RunReport): void;
 	/** The run started waiting on a prompt in its own session: the user is told in the orchestrator's. */
 	needsInput(dialog: string | undefined): void;
 	/** The usage so far of the run's session `sessionId`, from its latest Report. */
-	usage(sessionId: string, totals: SubagentUsageTotals): void;
+	usage(sessionId: string, totals: SessionUsage): void;
+	/** Aborted when this orchestrator hands its open runs over to the next instance of its session (a reload). */
+	handOff: AbortSignal;
 }
 
 /**
@@ -169,11 +202,11 @@ export interface TmuxRunDeps {
  * without asking it, and its session is kept for a Resume.
  */
 export async function executeTmuxRun(
-	{ record, signal, controller }: SubagentRunnerExecuteParams,
+	{ record, signal, controller }: SubagentRunExecuteParams,
 	launch: RunLaunch,
 	deps: TmuxRunDeps,
-): Promise<SubagentRunnerOutcome> {
-	const pane = startRun(deps.tmux, launch);
+): Promise<SubagentRunOutcome> {
+	const pane = launch.pane ?? startRun(deps.tmux, launch);
 	controller.recordPane(pane);
 	controller.markRunning();
 	let last = "";
@@ -192,19 +225,33 @@ export async function executeTmuxRun(
 		controller.updateProgress(message.text);
 		if (!deps.reports.take(record.runId, message)) deps.notify(message);
 	});
+	// Closed by its orchestrator, or its own pi exited (quit, crash): its session is kept either way.
+	let watch: ReturnType<typeof setInterval> | undefined;
+	let handedOff = false;
+	let handOff = () => {};
 	try {
 		await new Promise<void>((resolve) => {
 			if (signal.aborted) return resolve();
 			signal.addEventListener("abort", () => resolve(), { once: true });
+			handOff = () => {
+				handedOff = true;
+				resolve();
+			};
+			deps.handOff.addEventListener("abort", handOff, { once: true });
+			watch = setInterval(() => {
+				if (!paneUp(deps.tmux, pane)) resolve();
+			}, PANE_CHECK_MS);
+			watch.unref?.();
 		});
 	} finally {
+		clearInterval(watch);
+		deps.handOff.removeEventListener("abort", handOff);
 		unlisten();
 	}
-	try {
-		deps.tmux.end(pane);
-	} catch {
-		// Its pi has quit already.
-	}
+	// The next instance of the orchestrator's session goes on with the run, from its stored record: this one never
+	// settles it, so it stores nothing more.
+	if (handedOff && !signal.aborted) return new Promise<never>(() => {});
+	endPane(deps.tmux, pane);
 	return { status: "closed", complete: false, summaryText: last, transcriptPath: runSessionFile(launch) };
 }
 
@@ -223,10 +270,8 @@ export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefi
 		if (!pane || now === told) return sending;
 		told = now;
 		const message: SessionMessage = {
-			type: "session_message",
+			...fromRun(pi, pane),
 			kind: "activity",
-			from: pane,
-			name: pi.getSessionName(),
 			activity: now,
 			...(now === "awaiting_input" && activity.dialog?.title ? { dialog: activity.dialog.title } : {}),
 		};
@@ -245,7 +290,23 @@ export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefi
 		const taskFile = process.env[RUN_TASK_ENV];
 		// Read once: a reload or a later session of this pi must not send it again.
 		delete process.env[RUN_TASK_ENV];
-		if (taskFile) pi.sendUserMessage(readFileSync(taskFile, "utf8"));
+		if (!taskFile) return;
+		const task = readFileSync(taskFile, "utf8");
+		// A session with messages already is a Resume: its task comes as a message from its orchestrator.
+		if (ctx.sessionManager.getBranch().some((entry) => entry.type === "message")) {
+			pi.sendMessage(
+				{
+					customType: SUBAGENT_MESSAGE_CUSTOM_TYPE,
+					content: [{ type: "text", text: runTaskText(task, true) }],
+					display: true,
+				},
+				{ deliverAs: "steer", triggerTurn: true },
+			);
+			return;
+		}
+		// A new session's first turn must be a prompt: pi builds the system prompt only there, and a custom
+		// message that starts the turn goes without it. The frame still says it is not from the user.
+		pi.sendUserMessage(runTaskText(task, false));
 	});
 	pi.on("agent_start", (event, ctx) => void tell(event, ctx));
 	pi.on("turn_start", (event, ctx) => void tell(event, ctx));
@@ -260,10 +321,8 @@ export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefi
 			.find((entry) => entry.type === "message" && entry.message.role === "assistant");
 		const text = last?.type === "message" && "content" in last.message ? textOf(last.message.content) : "";
 		const report: SessionMessage = {
-			type: "session_message",
+			...fromRun(pi, pane),
 			kind: "report",
-			from: pane,
-			name: pi.getSessionName(),
 			text,
 			usage: sessionUsage(ctx.sessionManager.getEntries()),
 			sessionId: ctx.sessionManager.getSessionId(),

@@ -1,11 +1,9 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, type Focusable, matchesKey, type TUI, truncateToWidth } from "@earendil-works/pi-tui";
-import type { AgentActivity } from "../../daemon/activity.ts";
 import { focusedComponent } from "../_shared/focus.ts";
 import { formatTaskDuration } from "../background-bash/bash-limits.ts";
 import type { RunEntry } from "./directory.ts";
-import { isTerminalSubagentStatus } from "./runs.ts";
-import { canStop } from "./views.ts";
+import { canClose, runStatus } from "./views.ts";
 
 export const SUBAGENT_PANEL_WIDGET = "subagents:panel";
 const MAX_ROWS = 5;
@@ -33,8 +31,7 @@ export function renderPanel(options: {
 			? `Subagents · ${theme.fg("warning", `waiting for ${waitingFor} subagent${waitingFor === 1 ? "" : "s"}`)}`
 			: "Subagents";
 	const rows = runs.slice(0, MAX_ROWS).map(({ record: run }, index) => {
-		// A run in a pi of its own says what it is doing while it is open.
-		const status = run.pane && run.status === "running" ? ACTIVITY_LABEL[run.activity ?? "working"] : run.status;
+		const status = runStatus(run);
 		const progress = run.lastProgressText?.replace(/\s+/g, " ").trim();
 		return [
 			`${index === selected ? theme.fg("accent", "❯") : " "} ${theme.bold(run.name ?? run.runId)}`,
@@ -46,31 +43,21 @@ export function renderPanel(options: {
 		].join("  ");
 	});
 	const more = runs.length > MAX_ROWS ? [theme.fg("dim", `  +${runs.length - MAX_ROWS} more · /tasks`)] : [];
-	const current = selected === undefined ? undefined : runs[selected];
-	const hint = current
-		? [
-				theme.fg(
-					"dim",
-					`  ↑/↓ to select · x to ${isTerminalSubagentStatus(current.record.status) ? "dismiss" : "close"} · Esc to go back`,
-				),
-			]
-		: [];
+	const hint = selected === undefined ? [] : [theme.fg("dim", "  ↑/↓ to select · x to close · Esc to go back")];
 	return [theme.fg("accent", title), ...rows, ...more, ...hint].map((line) => truncateToWidth(line, width));
 }
 
 /** What the keys on a focused panel row do. */
 export interface PanelActions {
-	/** `x` on a run that has not ended. */
-	stop(run: RunEntry): void;
-	/** `x` on a run that has ended. */
-	dismiss(run: RunEntry): void;
+	/** `x` on a run. */
+	close(run: RunEntry): void;
 	/** Enter on a row. */
 	open?(run: RunEntry): void;
 }
 
 /**
- * The panel as a TUI component that can take the keyboard from the prompt: ↑/↓ pick a row, `x` closes or
- * dismisses it, Enter opens it, Esc gives the keyboard back. Any other key goes back to the prompt with it.
+ * The panel as a TUI component that can take the keyboard from the prompt: ↑/↓ pick a row, `x` closes it,
+ * Enter opens it, Esc gives the keyboard back. Any other key goes back to the prompt with it.
  * Under pistatusline it renders nothing itself: its `lines` go out as a status, which pistatusline draws below
  * the status line, and `changed` republishes them whenever the selection or the focus moves.
  */
@@ -140,8 +127,7 @@ export function createPanel(options: {
 			else if (matchesKey(data, "escape")) release();
 			else if (matchesKey(data, "enter")) actions.open?.(run);
 			else if (data === "x") {
-				if (isTerminalSubagentStatus(run.record.status)) actions.dismiss(run);
-				else if (canStop(run)) actions.stop(run);
+				if (canClose(run)) actions.close(run);
 				panel.sync();
 			} else {
 				release();
@@ -166,15 +152,6 @@ export function createPanel(options: {
 	return panel;
 }
 
-const ACTIVITY_LABEL: Record<AgentActivity, string> = {
-	working: "working",
-	idle: "idle",
-	awaiting_input: "needs input",
-};
-
 function statusColor(status: string) {
-	if (status === "completed") return "success";
-	if (status === "needs input") return "warning";
-	if (status === "failed" || status === "interrupted" || status === "cancelled") return "error";
-	return "muted";
+	return status === "needs input" ? "warning" : "muted";
 }

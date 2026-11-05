@@ -12,7 +12,7 @@ describe("/status report", () => {
 				defaultProjectTrust: "ask",
 				projectTrusted: true,
 				cwd: "/x",
-				backgroundSubagents: "2 runs, 400 tokens, cost unknown — excluded from /session totals",
+				subagents: "2 runs, 400 tokens, cost unknown — excluded from /session totals",
 			},
 			plain,
 		);

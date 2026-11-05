@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { createParentSessionWithSubagents } from "./helpers/subagent-session.ts";
-import { createSubagentTui, type SubagentTui } from "./helpers/subagent-tui.ts";
+import { createSubagentTui, launch, type SubagentTui } from "./helpers/subagent-tui.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 const tempDirs: string[] = [];
@@ -142,6 +142,24 @@ describe("The orchestrator's Waiting", () => {
 		expect(seen && toolResultText(seen, "launch")).toBe("");
 		expect(userTexts.some((text) => text.includes("Is it done yet?"))).toBe(true);
 		expect(seen && reminderIn(seen)).toMatch(/explorer-1: background, \d+s elapsed/);
+	});
+
+	it("wakes the orchestrator once for Reports that arrive together, under one header for them", async () => {
+		const t = await createSubagentTui({ batchWindowMs: 200 });
+		tui = t;
+		t.script([launch(["scout", "mapper"], { background: true }), () => fauxAssistantMessage("Waiting for both.")]);
+		await prompt(t, "Map the repo with two runs.");
+
+		t.report("scout", "Scouted.");
+		t.report("mapper", "Mapped.");
+		const woke = await waitFor(
+			() =>
+				t.session.messages.find(
+					(message) => message.role === "custom" && JSON.stringify(message.content).includes("Mapped."),
+				) ?? false,
+		);
+		const [text] = (woke as { content: { text: string }[] }).content;
+		expect(text.text).toMatch(/^\[2 subagent reports\]\n\n---\n\n\[Report from subagent "scout"/);
 	});
 
 	it("leaves a closed run out of the reminder", async () => {

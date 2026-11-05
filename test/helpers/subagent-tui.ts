@@ -34,7 +34,7 @@ interface FakeRun {
 	/** Its session name, from its launch flags. */
 	readonly name: string;
 	readonly args: readonly string[];
-	/** Whether its pane was ended, as a close does. */
+	/** Whether its pane is gone: ended by a close, or its pi exited. */
 	ended: boolean;
 }
 
@@ -106,6 +106,8 @@ export async function createSubagentTui(
 		extensionsBefore?: ExtensionFactory[];
 		/** Tools the orchestrator has besides the subagent tools, and can give its runs. */
 		extraTools?: Parameters<typeof createParentSessionWithSubagents>[0]["extraTools"];
+		/** Pi built-in tools the orchestrator has, and can give its runs; none when omitted. */
+		builtinTools?: string[];
 		batchWindowMs?: number;
 		/** Whether pistatusline draws the footer; on by default. */
 		pistatusline?: boolean;
@@ -247,6 +249,9 @@ export async function createSubagentTui(
 		vi.spyOn(Tmux.prototype, "end").mockImplementation((pane) => {
 			for (const run of runs) if (run.pane === pane) run.ended = true;
 		}),
+		vi
+			.spyOn(Tmux.prototype, "hasSession")
+			.mockImplementation((pane) => runs.some((run) => run.pane === pane && !run.ended)),
 		vi.spyOn(Tmux.prototype, "switchTo").mockImplementation((pane) => {
 			switched.push(pane);
 		}),
@@ -275,6 +280,7 @@ export async function createSubagentTui(
 		extensions: [...(options.pistatusline === false ? [] : [pistatusline]), ...(options.extensions ?? [])],
 		extensionsBefore: options.extensionsBefore,
 		extraTools: options.extraTools,
+		builtinTools: options.builtinTools,
 		batchWindowMs: options.batchWindowMs ?? 15,
 		now: () => Date.now() + offset,
 		eventBus,

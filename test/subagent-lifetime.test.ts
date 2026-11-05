@@ -3,7 +3,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readinessMs } from "./helpers/heartbeats.ts";
-import { DEFAULT_EXTENSIONS, hasTmux, PI_CLI, type RealPi, startRealPi } from "./helpers/real-pi.ts";
+import { conversation, DEFAULT_EXTENSIONS, hasTmux, PI_CLI, type RealPi, startRealPi } from "./helpers/real-pi.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /** Each test's tmux session that keeps its server up. */
@@ -88,6 +88,41 @@ describe.skipIf(!hasTmux)("a run's lifetime", () => {
 		expect(runSessionFiles(real.agentDir)).toHaveLength(1);
 
 		await reopenListsClosedRun(real, sessionFile);
+	});
+
+	it("outlives a reload of its orchestrator, which still messages it and is woken by its Report", async () => {
+		const real = await startKept();
+		pi = real;
+		const { orchestrator, run } = await orchestratorWithRun(real);
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around.", background: true } },
+			{ text: "waiting for probe-run" },
+			{ text: "read the report" },
+			{ tool: "subagent_message", args: { to: "probe-run", content: "Look again." } },
+			{ text: "waiting for probe-run again" },
+			{ text: "read the second report" },
+		]);
+		real.script("probe-run", [{ text: "Looked." }, { text: "Looked again." }]);
+
+		real.tmux.sendKeys(orchestrator, ["/reload", "Enter"]);
+		await waitFor(() => expect(real.tmux.capture(orchestrator, 50).join("\n")).toMatch(/Reloaded/i));
+		real.tmux.sendKeys(orchestrator, ["ask it again", "Enter"]);
+		const requests = await real.waitForRequests("main", 6);
+		expect(conversation(requests[4]).at(-1)?.text).toMatch(/^Message \d+ accepted for delivery to probe-run/);
+		expect(conversation(requests[5]).some((message) => message.text.includes("Looked again."))).toBe(true);
+		expect(panes(real)).toEqual([orchestrator, run].sort());
+	});
+
+	it("closes a run whose own pi quits: /tasks lists it as closed", async () => {
+		const real = await startKept();
+		pi = real;
+		const { orchestrator, run } = await orchestratorWithRun(real);
+
+		real.tmux.sendKeys(run, ["/quit", "Enter"]);
+		await waitFor(() => expect(panes(real)).toEqual([orchestrator]));
+		const screen = () => real.tmux.capture(orchestrator, 50).join("\n");
+		real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
+		await waitFor(() => expect(screen()).toMatch(/Done \(1\)\n.*explorer: Look around\..*closed/));
 	});
 
 	it(

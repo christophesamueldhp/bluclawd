@@ -35,7 +35,7 @@ The checks that accept or reject a launch or a resume before a run starts: deny 
 _Avoid_: validation, preflight
 
 **Parent scope**:
-The orchestrator's session, and its session epoch, that a run or message belongs to. The session epoch changes whenever that session is switched, forked, replaced, reloaded or shut down, which makes everything of the earlier epoch stale. A run whose originating entry is no longer on the active branch is out of scope too.
+The orchestrator's session, and its session epoch, that a run or message belongs to. The session epoch changes whenever that session is switched, forked, replaced or shut down, which makes everything of the earlier epoch stale. A reload keeps the session, and its open runs. A run whose originating entry is no longer on the active branch is out of scope too.
 _Avoid_: generation, runtime generation
 
 **Resume**:

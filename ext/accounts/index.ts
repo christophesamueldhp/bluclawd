@@ -2,7 +2,7 @@ import type { AuthType, Provider } from "@earendil-works/pi-ai";
 import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { type ExtensionAPI, type ExtensionCommandContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { agentTasks } from "../_shared/agent-tasks.ts";
-import { chooseAccountOrModel, type ChooserView } from "./chooser.ts";
+import { type ChooserView, chooseAccountOrModel } from "./chooser.ts";
 import { loginAccount } from "./login.ts";
 import { AccountStore } from "./store.ts";
 

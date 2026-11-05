@@ -2,7 +2,7 @@ import type { JsonObject } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { remoteSessions } from "../daemon/remote/sessions.ts";
 import { collectRows } from "../daemon/rows.ts";
-import { messageTarget } from "../ext/subagents/run-messages.ts";
+import { messageTarget, runRoster } from "../ext/subagents/run-messages.ts";
 import {
 	conversation,
 	DEFAULT_EXTENSIONS,
@@ -77,7 +77,15 @@ describe.skipIf(!hasTmux)("a foreground run, as a pi session of its own", () => 
 		expect(asked).toMatchObject({ model: "faux-2", reasoning: "high" });
 		expect(systemPrompt(asked)).toContain("You are the probe role: say what you find.");
 		expect(toolNames(asked)).toEqual(["read"]);
-		expect(conversation(asked)).toEqual([{ role: "user", text: "Look around the checkout." }]);
+		// Its task comes from the orchestrator, framed as from another session, never as the user's input.
+		expect(conversation(asked)).toEqual([
+			{
+				role: "user",
+				text: expect.stringMatching(
+					/^\[Task from your orchestrator, from another session, not from the user\..*\]\n\nLook around the checkout\.$/s,
+				),
+			},
+		]);
 
 		const result = lastToolResult(real.requests("main")[1]);
 		expect(result).toMatchObject({ role: "toolResult", toolName: "subagent" });
@@ -107,7 +115,7 @@ describe.skipIf(!hasTmux)("a foreground run, as a pi session of its own", () => 
 
 		const status = lastToolResult(requests[2]);
 		expect(status).toMatchObject({ role: "toolResult", toolName: "subagent_status" });
-		expect(status?.text).toMatch(/^probe-run \(explorer, sub_[0-9a-f-]+\): running/);
+		expect(status?.text).toMatch(/^probe-run \(explorer, sub_[0-9a-f-]+\): idle$/m);
 		const runId = status?.text.match(/sub_[0-9a-f-]+/)?.[0];
 		// Found by its name, and accepted for the run's session.
 		const message = lastToolResult(requests[3]);
@@ -118,12 +126,14 @@ describe.skipIf(!hasTmux)("a foreground run, as a pi session of its own", () => 
 		expect(stop?.text).toBe(`Stopped probe-run's turn (${runId}). It stays open and takes messages.`);
 	});
 
-	it("cannot launch runs of its own, and stays open after its Report", async () => {
+	it("cannot launch, stop, close or list runs of its own, and stays open after its Report", async () => {
 		const role = { name: "helper", description: "Helps.", instructions: "Help out." };
 		const { real } = await launch(role, "Helped.");
 
-		expect(toolNames(real.requests("main")[0])).toContain("subagent");
-		expect(toolNames(real.requests("probe-run")[0])).not.toContain("subagent");
+		const orchestratorTools = ["subagent", "subagent_status", "subagent_stop", "subagent_close", "subagent_models"];
+		expect(toolNames(real.requests("main")[0])).toEqual(expect.arrayContaining(orchestratorTools));
+		const runTools = toolNames(real.requests("probe-run")[0]);
+		for (const tool of orchestratorTools) expect(runTools).not.toContain(tool);
 		const run = (await real.rows()).find((row) => row.label === "probe-run");
 		expect(run?.pane && real.tmux.hasSession(run.pane)).toBe(true);
 	});
@@ -162,7 +172,9 @@ describe.skipIf(!hasTmux)("a background run, as a pi session of its own", () => 
 		// The rest follows without a pause, so it is read once the second Report has come.
 		const [, , first, , second] = await real.waitForRequests("main", 5);
 		const firstReport = said(first).find((text) => text.includes("First look."));
-		expect(firstReport).toContain('[Report from subagent "probe-run", from another session, not from the user.');
+		expect(firstReport).toMatch(
+			/\[Report from subagent "probe-run" \(sub_[0-9a-f-]+\), from another session, not from the user\./,
+		);
 
 		// The orchestrator's message reaches the run's pi, which answers it in a turn and reports again.
 		const [, asked] = real.requests("probe-run");
@@ -271,6 +283,7 @@ describe.skipIf(!hasTmux)("messages between sessions", () => {
 		]);
 		real.script("beta", [{ text: "Beta is ready." }, { text: "Beta got it." }]);
 		real.script("alpha", [
+			{ tool: "subagent_roster", args: {} },
 			{ tool: "subagent_message", args: { to: "beta", content: "Beta, take the tests." } },
 			{ tool: "subagent_message", args: { to: "parent", content: "Alpha is halfway." } },
 			{ text: "Alpha is done." },
@@ -281,7 +294,8 @@ describe.skipIf(!hasTmux)("messages between sessions", () => {
 		const sibling = conversation(asked).at(-1)?.text;
 		expect(sibling).toMatch(/^\[Message from sibling run "alpha", from another session, not from the user/);
 		expect(sibling).toContain("Beta, take the tests.");
-		const [, toBeta, toParent] = await real.waitForRequests("alpha", 3);
+		const [, roster, toBeta, toParent] = await real.waitForRequests("alpha", 4);
+		expect(lastToolResult(roster)?.text).toBe("You can message: parent (your orchestrator), beta.");
 		expect(lastToolResult(toBeta)?.text).toBe('Message sent to "beta" (not yet handled).');
 		expect(lastToolResult(toParent)?.text).toBe("Message sent to your orchestrator (not yet handled).");
 
@@ -291,7 +305,7 @@ describe.skipIf(!hasTmux)("messages between sessions", () => {
 		// It may come in one message with the runs' Reports.
 		const up = everything(real, "main").find((text) => text.includes("Alpha is halfway."));
 		expect(up).toMatch(
-			/^\[Report from subagent alpha \(explorer, sub_[0-9a-f-]+\), from another session, not from the user\. .*\]\n\nAlpha is halfway\.$/m,
+			/^\[Message from subagent "alpha" \(sub_[0-9a-f-]+\), from another session, not from the user\. .*\]\n\nAlpha is halfway\.$/m,
 		);
 	});
 
@@ -373,6 +387,10 @@ describe("a run's message target", () => {
 	it("is its orchestrator for parent, and a sibling of the same orchestrator by name", () => {
 		expect(messageTarget(rows, self, "parent")).toEqual({ pane: "pi-main", name: "your orchestrator" });
 		expect(messageTarget(rows, self, "beta")).toEqual({ pane: "pi-b", name: '"beta"' });
+	});
+
+	it("lists its orchestrator and its siblings, the names it can message", () => {
+		expect(runRoster(rows, self)).toEqual(["parent", "beta"]);
 	});
 
 	it("refuses itself, a run of another orchestrator, and an unknown name, with the reason", () => {

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fauxProvider } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ModelRegistry, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
-import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
+import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { createRunAdmission, type RunExecutionContext } from "../../ext/subagents/admission.ts";
 import { createGenerations, type ParentNotice } from "../../ext/subagents/generations.ts";
 import { SubagentMessageBus } from "../../ext/subagents/messages.ts";
@@ -13,7 +13,6 @@ import type { AdmitSubagentRunRequest, AdmittedSubagentHandle } from "../../ext/
 import { ensureRunStorageDir } from "../../ext/subagents/storage.ts";
 import { createAgentTaskSource } from "../../ext/subagents/task-source.ts";
 import { RunReports } from "../../ext/subagents/tmux-runs.ts";
-import type { SubagentUsageTotals } from "../../ext/subagents/usage.ts";
 import { createParentScopeViews } from "../../ext/subagents/views.ts";
 import { waitFor } from "./wait-for.ts";
 
@@ -37,6 +36,7 @@ export function removeGenerationsFixtures(): void {
 export interface FakePane {
 	readonly name: string;
 	readonly args: readonly string[];
+	/** Whether its session is gone: ended by a close, or its pi exited. */
 	ended: boolean;
 }
 
@@ -74,12 +74,14 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 	const panes: FakePane[] = [];
 	/** What the orchestrator sent other sessions through the daemon. */
 	const delivered: { to: string; message: SessionMessage }[] = [];
+	/** How many more sends the daemon refuses, as it does for a pane whose pi has not registered yet. */
+	let refusals = 0;
 	const reports = new RunReports();
 	const generations = createGenerations({
 		agentDir: () => agentDir,
 		bus,
 		scope,
-		pi: { appendEntry: () => {} },
+		pi: { appendEntry: () => {}, sendMessage: () => {} },
 		onChange: () => {},
 		reports,
 		tmux: () => ({
@@ -94,8 +96,14 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 			end: (name) => {
 				for (const pane of panes) if (pane.name === name) pane.ended = true;
 			},
+			hasSession: (name) => panes.some((pane) => pane.name === name && !pane.ended),
 		}),
+		handOff: new AbortController().signal,
 		send: async (to, message) => {
+			if (refusals > 0) {
+				refusals--;
+				throw new Error(`Unknown instance ${to}`);
+			}
 			delivered.push({ to, message });
 		},
 	});
@@ -107,7 +115,6 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 			agentDir: () => agentDir,
 			scope: () => scope.current(),
 			idle: () => true,
-			now: Date.now,
 			onChange: () => {},
 		}),
 		directory,
@@ -169,7 +176,7 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 	const report = async (
 		handle: AdmittedSubagentHandle,
 		text: string,
-		usage?: { sessionId: string; totals: SubagentUsageTotals },
+		usage?: { sessionId: string; totals: SessionUsage },
 	) =>
 		reports.receive({
 			type: "session_message",
@@ -186,6 +193,7 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		parentThinkingLevel: () => "off",
 		scope,
 		pane: () => ORCHESTRATOR_PANE,
+		tools: () => [],
 	});
 	/** Gives the orchestrator's session the one model the test runs launch with. */
 	const loadModels = async () => {
@@ -228,5 +236,9 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		paneOf,
 		report,
 		orchestrator,
+		/** The daemon refuses the next `count` sends: their recipient has not registered yet. */
+		unregistered: (count: number) => {
+			refusals = count;
+		},
 	};
 }

@@ -312,7 +312,7 @@ const agentView: InlineExtension = {
 				leafId: leafId !== entries.at(-1)?.id ? leafId : undefined,
 				dialog: activity.current === "awaiting_input" ? activity.dialog : undefined,
 				...(ctx.ui.getEditorText().trim() !== "" ? { draft: true } : {}),
-				...(process.env[PARENT_ENV] ? { parent: process.env[PARENT_ENV] } : {}),
+				...(parent ? { parent } : {}),
 			};
 		};
 
@@ -334,7 +334,7 @@ const agentView: InlineExtension = {
 				label: ctx.sessionManager.getSessionName() ?? selfLabel(ctx),
 				sessionFile,
 				sessionId: ctx.sessionManager.getSessionId(),
-				...(process.env[PARENT_ENV] ? { parent: process.env[PARENT_ENV] } : {}),
+				...(parent ? { parent } : {}),
 			};
 		};
 

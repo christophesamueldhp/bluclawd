@@ -19,7 +19,6 @@ export interface ResolveChildModelOptions {
 export type ResolveChildModelResult =
 	| {
 			readonly ok: true;
-			readonly modelRuntime: ModelRuntime;
 			readonly model: Model<Api>;
 			readonly thinkingLevel?: ThinkingLevel;
 	  }
@@ -150,7 +149,6 @@ export async function resolveChildModelAndRuntime(options: ResolveChildModelOpti
 
 	return {
 		ok: true,
-		modelRuntime,
 		model: targetModel,
 		thinkingLevel,
 	};

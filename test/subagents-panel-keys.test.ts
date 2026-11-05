@@ -41,7 +41,7 @@ const close = (t: SubagentTui, name: string) => {
 		?.list(owner)
 		.find((candidate) => candidate.summary === `Task for ${name}`);
 	if (!task) throw new Error(`No open run ${name}.`);
-	expect(agentTasks()?.stop(task.id, { owner })).toMatchObject({ ok: true });
+	expect(agentTasks()?.close(task.id, { owner })).toMatchObject({ ok: true });
 };
 
 /** A session with open background runs `names`. */

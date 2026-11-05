@@ -1,9 +1,14 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { createRunAddressing } from "./addressing.ts";
-import type { RunExecutionContext } from "./admission.ts";
+import { formatRunLabel, type RunExecutionContext } from "./admission.ts";
 import { createRunDirectory } from "./directory.ts";
-import { PARENT_MESSAGE_ADDRESS, type SubagentMessageBus } from "./messages.ts";
+import {
+	fromRunText,
+	PARENT_MESSAGE_ADDRESS,
+	SUBAGENT_MESSAGE_CUSTOM_TYPE,
+	type SubagentMessageBus,
+} from "./messages.ts";
 import type { ParentScopeChecks, ScopedRun } from "./parent-scope.ts";
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
@@ -13,7 +18,7 @@ import {
 	writeFullSubagentReport,
 	writePersistedRunRecord,
 } from "./storage.ts";
-import { executeTmuxRun, type RunReports, reportText, type TmuxRunDeps } from "./tmux-runs.ts";
+import { executeTmuxRun, type RunReports, sendToRun, type TmuxRunDeps } from "./tmux-runs.ts";
 
 /** A Report no foreground launch took, as the orchestrator is told about it. */
 export interface ParentNotice {
@@ -28,7 +33,7 @@ export interface GenerationDeps {
 		context(): ExtensionContext | undefined;
 		notify(run: ScopedRun, notice: ParentNotice): void;
 	};
-	pi: Pick<ExtensionAPI, "appendEntry">;
+	pi: Pick<ExtensionAPI, "appendEntry" | "sendMessage">;
 	/** A run changed state. */
 	onChange: () => void;
 	/** Where the Reports of runs arrive. */
@@ -37,6 +42,8 @@ export interface GenerationDeps {
 	tmux: () => TmuxRunDeps["tmux"];
 	/** Sends a message to another session through the daemon. */
 	send: (pane: string, message: SessionMessage) => Promise<void>;
+	/** Aborted when this orchestrator hands its open runs over to the next instance of its session (a reload). */
+	handOff: AbortSignal;
 }
 
 /** Persists each generation of a run and routes its messages; the scheduler it owns decides the transitions. */
@@ -53,7 +60,7 @@ export function createGenerations(deps: GenerationDeps) {
 
 	const scheduler = new SubagentRunScheduler<RunExecutionContext>({
 		// A run is never cancelled: ending it closes its pi and keeps its session.
-		stoppedAs: () => "closed",
+		stoppedAs: "closed",
 		onStateChange: (record) => {
 			// The finalizer already stored a terminal record durably.
 			if (!isTerminalSubagentStatus(record.status)) {
@@ -88,9 +95,10 @@ export function createGenerations(deps: GenerationDeps) {
 			return record;
 		},
 		executeRun: async (params) => {
-			if (!params.record.generation) recordLaunch(params.record);
 			const execCtx = params.context;
 			if (!execCtx) throw new Error("Subagent run has no execution context.");
+			// A run taken over after a reload was recorded when it launched.
+			if (!params.record.generation && !execCtx.launch.pane) recordLaunch(params.record);
 			const { runId } = params.record;
 			const { parent } = execCtx.launch;
 			// The orchestrator's messages reach the run's pi through the daemon, as a message from another session.
@@ -100,7 +108,7 @@ export function createGenerations(deps: GenerationDeps) {
 					if (message.from !== PARENT_MESSAGE_ADDRESS) throw new Error("type to it in its own session");
 					const pane = scheduler.getRun(runId)?.pane;
 					if (!pane) throw new Error("its pi has not started");
-					await deps.send(pane, {
+					await sendToRun(deps.send, pane, {
 						type: "session_message",
 						kind: "message",
 						from: parent,
@@ -113,26 +121,26 @@ export function createGenerations(deps: GenerationDeps) {
 				return await executeTmuxRun(params, execCtx.launch, {
 					tmux: deps.tmux(),
 					reports: deps.reports,
+					handOff: deps.handOff,
 					notify: (report) => {
 						const record = scheduler.getRun(runId);
 						if (!record) return;
 						deps.scope.notify(record, {
-							parentText: reportText(record.name ?? runId, report.text),
+							parentText: fromRunText("Report", formatRunLabel(record), report.text),
 							details: buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).details,
 						});
 					},
 					usage: (sessionId, totals) => recordRunSessionUsage(deps.agentDir(), params.record, sessionId, totals),
-					// For the user, not the model: the prompt is answered in the run's own session.
+					// Kept in the orchestrator's session for the user, who answers in the run's own: it starts no turn.
 					needsInput: (dialog) => {
 						const record = scheduler.getRun(runId);
 						if (!record || !deps.scope.inScope(record)) return;
+						const text = `Subagent ${formatRunLabel(record)} needs input${dialog ? `: ${dialog}` : ""}. Open it to answer.`;
 						try {
-							deps.scope
-								.context()
-								?.ui.notify(
-									`Subagent ${record.name ?? runId} needs input${dialog ? `: ${dialog}` : ""}. Open it to answer.`,
-									"warning",
-								);
+							deps.pi.sendMessage(
+								{ customType: SUBAGENT_MESSAGE_CUSTOM_TYPE, content: [{ type: "text", text }], display: true },
+								{ deliverAs: "steer", triggerTurn: false },
+							);
 						} catch {
 							// The orchestrator's session was replaced meanwhile.
 						}

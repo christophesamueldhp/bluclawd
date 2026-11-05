@@ -5,7 +5,6 @@ import {
 	PARENT_MESSAGE_ADDRESS,
 	type SubagentMessageBus,
 	type SubagentMessageReceipt,
-	subagentMessagePayload,
 } from "./messages.ts";
 import type { ParentScope } from "./parent-scope.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
@@ -35,13 +34,8 @@ export function createRunAddressing(deps: RunAddressingDeps) {
 			run,
 			() => {
 				receipt = bus.accept({ address: PARENT_MESSAGE_ADDRESS, scope }, run.runId, run.name);
-				return subagentMessagePayload({
-					seq: receipt.seq,
-					from: PARENT_MESSAGE_ADDRESS,
-					to: run.runId,
-					toName: run.name,
-					content,
-				}).content[0].text;
+				// The run frames it as from its orchestrator.
+				return content;
 			},
 			ctx,
 		);

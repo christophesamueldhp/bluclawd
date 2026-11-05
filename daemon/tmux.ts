@@ -107,6 +107,15 @@ function screenLines(out: string): string[] {
 
 type Run = (args: string[], options?: { inherit?: boolean; outsideTmux?: boolean }) => string;
 
+/** Ends session `name`, as a hang-up; one already gone, or that tmux cannot reach now, is left as it is. */
+export function endPane(tmux: Pick<Tmux, "end">, name: string): void {
+	try {
+		tmux.end(name);
+	} catch {
+		// Its pi has quit already, or tmux did not answer.
+	}
+}
+
 export class Tmux {
 	readonly dir: string;
 	private readonly run: Run;

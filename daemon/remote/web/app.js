@@ -32,11 +32,11 @@ import { pendingStore } from "./pending.js";
 import { closePicker, modelGroups, openPicker } from "./picker.js";
 import { filterSessions, fold, matchCommands } from "./search.js";
 import {
-	backgroundUsageHtml,
 	barHtml,
 	compactLines,
 	contextLevel,
 	elapsedText,
+	runUsageHtml,
 	settingsHtml,
 	spanStyle,
 	TRUST,
@@ -1085,7 +1085,7 @@ ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}`;
 		return `${head}<p class="muted">${esc(errorText(why))}</p>`;
 	}
 	return `${head}${settingsHtml(report)}
-<div class="numbers">${contextHtml(report.context)}${usageHtml(report.usage)}${backgroundUsageHtml(report.backgroundSubagentUsage)}${whereHtml(report, session && shortPath(session.cwd))}</div>`;
+<div class="numbers">${contextHtml(report.context)}${usageHtml(report.usage)}${runUsageHtml(report.subagentUsage)}${whereHtml(report, session && shortPath(session.cwd))}</div>`;
 }
 
 /** Built once each time the sheet opens, so what is typed stays while the rest refreshes. @param {Session | undefined} session */
