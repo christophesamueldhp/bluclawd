@@ -80,6 +80,10 @@ _Avoid_: build id, version, generation
 What became of a prompt or slash command a phone sent, reported back by the id the phone gave it: taken (pi started a turn with it, or Enter was pressed for the command), queued (pi queued it behind the turn in progress), refused with a reason (the pane did not hand it to pi: busy, draft or dialog for a command; compacting; session changed), or lost with a reason (its pane went with it still queued, in its inbox or in pi; pi dropped it from its queue, as a stopped turn, the dequeue key or its session reloading or switching does, or it was queued and never seen in pi's queue by the time pi fell quiet, or its session ended other than by a quit with it queued; or the daemon restarted). A Silent pane loses what is still in its inbox at once, while what pi holds waits on its report. The daemon's prompt delivery keeps each one's journey, from the pane's inbox to the outcome its pane reports, and the phone puts a refused or lost one back in its composer. A pane from an older build reports none, and the phone guesses for it.
 _Avoid_: PhoneOutcome (phone control's decision), delivered (the pane's heartbeat took it, nothing more)
 
+**Delete**:
+Removing a session's row from agent view and the phone's list. Its pi ends if it still runs, its session file stays on the Mac, resumable with `/resume`, and the row does not come back by itself: not with a late heartbeat, a quit's save or a daemon restart. A `/resume` from another window lists it again, as a new row.
+_Avoid_: close, stop, forget
+
 **Silent pane**:
 A pane the daemon reaped for missing its heartbeat while tmux still has its session: its pi may only be held up (the Mac slept). It stays listed as its row, alive, and its session is not started again elsewhere; it goes on as that row when it beats again, and ends as any pane does once tmux no longer has it, it unregisters, or it beats on another session.
 _Avoid_: dead pane, stale pane

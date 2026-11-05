@@ -18,14 +18,21 @@ function fixture() {
 	const dir = mkdtempSync(join(tmpdir(), "bluclawd-row-lifecycle-"));
 	const clock = { now: Date.parse("2026-11-04T10:00:00.000Z") };
 	const tmux = new Map<string, "up" | "gone" | "unknown">();
-	const supervisor = testRegistry(dir, () => clock.now, {
-		hasSession: (name) => {
-			const said = tmux.get(name) ?? "up";
-			if (said === "unknown") throw new Error("tmux timed out");
-			return said === "up";
-		},
-		end: () => {},
-	});
+	/** The panes the daemon ended, in order. */
+	const ended: string[] = [];
+	const start = () =>
+		testRegistry(dir, () => clock.now, {
+			hasSession: (name) => {
+				const said = tmux.get(name) ?? "up";
+				if (said === "unknown") throw new Error("tmux timed out");
+				return said === "up";
+			},
+			end: (name) => {
+				ended.push(name);
+				if (tmux.get(name) === "unknown") throw new Error("tmux timed out");
+			},
+		});
+	let supervisor = start();
 	const file = join(dir, "s.jsonl");
 	const other = join(dir, "other.jsonl");
 	writeFileSync(file, "");
@@ -59,7 +66,25 @@ function fixture() {
 			}));
 	/** What became of the prompts sent to this session's row. */
 	const outcomes = () => supervisor.delivery.outcomes(ROW);
-	return { dir, tmux, supervisor, file, other, pass, beat, lapse, listed, outcomes };
+	return {
+		dir,
+		tmux,
+		ended,
+		get supervisor() {
+			return supervisor;
+		},
+		/** The daemon restarts on the same storage dir. */
+		restart: () => {
+			supervisor = start();
+		},
+		file,
+		other,
+		pass,
+		beat,
+		lapse,
+		listed,
+		outcomes,
+	};
 }
 
 type Fixture = ReturnType<typeof fixture>;
@@ -288,6 +313,99 @@ describe("a row's state by event, as every reader lists it", () => {
 		f.tmux.set("pi-a", "gone");
 		expect(f.supervisor.saveInstance({ cwd: f.dir, sessionFile: f.file })).toBeUndefined();
 		expect(f.listed()).toEqual([]);
+	});
+});
+
+describe("a deleted row does not come back by itself", () => {
+	it("a pane dropped while tmux could not answer, then deleted, is ended at its next heartbeat and not listed", () => {
+		const f = fixture();
+		states.live(f);
+		f.lapse("unknown");
+		f.supervisor.deleteInstance(ROW);
+		f.beat();
+		expect(f.listed()).toEqual([]);
+		expect(f.ended).toEqual(["pi-a"]);
+		// tmux still cannot answer: each heartbeat tries again, and the row stays gone.
+		f.pass(5_000, "unknown");
+		f.beat();
+		expect(f.listed()).toEqual([]);
+		expect(f.ended).toEqual(["pi-a", "pi-a"]);
+	});
+
+	it("a pane dropped while tmux could not answer, gone on to a new session, is not ended when its old row is deleted", () => {
+		const f = fixture();
+		states.live(f);
+		f.lapse("unknown");
+		f.beat(f.other);
+		f.supervisor.deleteInstance(ROW);
+		f.beat(f.other);
+		expect(f.ended).toEqual([]);
+		expect(f.supervisor.listExternalInstances().map(({ record }) => record.sessionFile)).toEqual([f.other]);
+	});
+
+	it("a deleted pane gone on to a new session before it heard is ended, and its hand-off save lists nothing", () => {
+		const f = fixture();
+		states.live(f);
+		f.supervisor.deleteInstance(ROW);
+		f.beat(f.other);
+		expect(f.ended).toEqual(["pi-a"]);
+		expect(f.supervisor.saveInstance({ cwd: f.dir, sessionFile: f.other })).toBeUndefined();
+		expect(listSummaries(f.supervisor)).toEqual([]);
+	});
+
+	it("a row deleted before its quit's hand-off saves stays deleted across a daemon restart", () => {
+		const f = fixture();
+		states.live(f);
+		f.supervisor.unregisterExternal("pi-a", "quit");
+		f.supervisor.deleteInstance(ROW);
+		f.restart();
+		expect(f.supervisor.saveInstance({ cwd: f.dir, sessionFile: f.file })).toBeUndefined();
+		expect(f.listed()).toEqual([]);
+	});
+
+	it("another pane resuming a deleted row's file lists it again as a new row, unpinned, which its quit saves", () => {
+		const f = fixture();
+		f.supervisor.setInstanceMeta(ROW, { pinned: true, sortOrder: 3 });
+		f.supervisor.deleteInstance(ROW);
+		f.supervisor.registerExternal(
+			{ id: "pi-b", status: "online", cwd: f.dir, createdAt, sessionFile: f.file, pane: "pi-b" },
+			"idle",
+		);
+		expect(f.listed()).toEqual([{ id: "pi-b", status: "online", external: true }]);
+		f.supervisor.unregisterExternal("pi-b", "quit");
+		expect(f.supervisor.saveInstance({ cwd: f.dir, sessionFile: f.file })).toMatchObject({ sessionFile: f.file });
+		expect(f.listed()).toEqual([{ id: "pi-b", status: "stopped" }]);
+		expect(f.ended).toEqual([]);
+	});
+
+	it("a deleted pane beating after a daemon restart is still ended, not listed", () => {
+		const f = fixture();
+		states.live(f);
+		f.supervisor.deleteInstance(ROW);
+		f.restart();
+		f.beat();
+		expect(f.listed()).toEqual([]);
+		expect(f.ended).toEqual(["pi-a"]);
+	});
+
+	it("a deleted row is kept so while tmux may have its pane, then for a late hand-off save", () => {
+		/** Deleted, its pane then gone from tmux, `ms` later its hand-off saves. */
+		const saveAfter = (ms: number) => {
+			const f = fixture();
+			states.live(f);
+			f.supervisor.deleteInstance(ROW);
+			f.lapse("unknown");
+			f.pass(3_600_000, "up");
+			f.beat();
+			expect(f.ended).toEqual(["pi-a"]);
+			f.lapse("gone");
+			f.pass(ms, "gone");
+			listSummaries(f.supervisor);
+			return f.supervisor.saveInstance({ cwd: f.dir, sessionFile: f.file });
+		};
+		expect(saveAfter(START_MS - 25_000)).toBeUndefined();
+		// Its record has gone by then: a save so late is a new session's.
+		expect(saveAfter(START_MS + 1)).toMatchObject({ status: "stopped" });
 	});
 });
 

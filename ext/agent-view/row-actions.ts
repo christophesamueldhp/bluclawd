@@ -236,7 +236,7 @@ export class RowActions {
 		try {
 			panes.kill(panes.current);
 		} catch {
-			// This pi stays, in the background; its row is back with its next heartbeat.
+			// The daemon ends this pi at its next heartbeat: its row was deleted.
 		}
 		return { kind: "left" };
 	}

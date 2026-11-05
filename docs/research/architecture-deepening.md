@@ -69,7 +69,7 @@ Conventions:
 - The clock and tmux fakes already exist. They stay valid because the supervisor's interface keeps its shape.
 - New: one state × event table at that same interface, which also covers "list in any order".
 
-**Risk.** It sits on the busiest fix path. Pin, delete and order handling across a hand-off (`savesDue`, `resumedMeta`) must come out unchanged, so land it behind the existing tests first.
+**Risk.** It sits on the busiest fix path. Pin, delete and order handling across a hand-off must come out unchanged, so land it behind the existing tests first.
 
 ## 2. One owner for a Prompt outcome's journey
 

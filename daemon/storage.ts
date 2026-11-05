@@ -1,7 +1,24 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { getInstancesPath } from "./config.ts";
+import { getDeletedPath, getInstancesPath } from "./config.ts";
 import { ensureServerDir } from "./paths.ts";
 import type { InstanceRecord } from "./types.ts";
+
+/** A deleted row, kept so it does not come back by itself. `paneId`: the pane it was listed as (its
+ *  registration id, its tmux session's name), ended should it beat again. `sessionFile`: a session of
+ *  it, which a quit's hand-off save lists nothing of. `goneAt`: when tmux was first seen without that
+ *  pane (at once, with none). */
+export interface DeletedRow {
+	paneId?: string;
+	sessionFile?: string;
+	goneAt?: number;
+}
+
+/** Write-then-rename, so a crash mid-write cannot leave a half-written file behind. */
+function writeJson(path: string, value: unknown): void {
+	const tmpPath = `${path}.tmp`;
+	writeFileSync(tmpPath, JSON.stringify(value, null, 2));
+	renameSync(tmpPath, path);
+}
 
 export function loadInstances(dir: string): InstanceRecord[] {
 	const instancesPath = getInstancesPath(dir);
@@ -22,11 +39,21 @@ export function loadInstances(dir: string): InstanceRecord[] {
 
 export function saveInstances(dir: string, instances: InstanceRecord[]): void {
 	ensureServerDir(dir);
-	// Write-then-rename so a crash mid-write can't leave a half-written instances.json behind.
-	const instancesPath = getInstancesPath(dir);
-	const tmpPath = `${instancesPath}.tmp`;
-	writeFileSync(tmpPath, JSON.stringify(instances, null, 2));
-	renameSync(tmpPath, instancesPath);
+	writeJson(getInstancesPath(dir), instances);
+}
+
+export function loadDeleted(dir: string): DeletedRow[] {
+	try {
+		const parsed = JSON.parse(readFileSync(getDeletedPath(dir), "utf-8")) as DeletedRow[];
+		return Array.isArray(parsed) ? parsed : [];
+	} catch {
+		return [];
+	}
+}
+
+export function saveDeleted(dir: string, deleted: DeletedRow[]): void {
+	ensureServerDir(dir);
+	writeJson(getDeletedPath(dir), deleted);
 }
 
 export function getInstance(dir: string, instanceId: string): InstanceRecord | undefined {
