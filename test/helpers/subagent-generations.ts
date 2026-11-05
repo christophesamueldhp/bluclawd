@@ -1,27 +1,24 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxProvider } from "@earendil-works/pi-ai";
-import type { AgentSessionEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ModelRegistry, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
-import {
-	createRunAdmission,
-	type InProcessRunContext,
-	type RunExecutionContext,
-} from "../../ext/subagents/admission.ts";
+import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
+import { createRunAdmission, type RunExecutionContext } from "../../ext/subagents/admission.ts";
 import { createGenerations, type ParentNotice } from "../../ext/subagents/generations.ts";
 import { SubagentMessageBus } from "../../ext/subagents/messages.ts";
 import { createParentScope, type ParentInboxItem } from "../../ext/subagents/parent-scope.ts";
-import type { ChildSession, RunSubagentOptions } from "../../ext/subagents/runner.ts";
-import type {
-	AdmitSubagentRunRequest,
-	AdmittedSubagentHandle,
-	SubagentRunnerOutcome,
-} from "../../ext/subagents/runs.ts";
+import type { AdmitSubagentRunRequest, AdmittedSubagentHandle } from "../../ext/subagents/runs.ts";
+import { ensureRunStorageDir } from "../../ext/subagents/storage.ts";
 import { createAgentTaskSource } from "../../ext/subagents/task-source.ts";
 import { RunReports } from "../../ext/subagents/tmux-runs.ts";
+import type { SubagentUsageTotals } from "../../ext/subagents/usage.ts";
 import { createParentScopeViews } from "../../ext/subagents/views.ts";
 import { waitFor } from "./wait-for.ts";
+
+/** The orchestrator's own tmux session in these tests. */
+export const ORCHESTRATOR_PANE = "pi-orchestrator";
 
 const tempDirs: string[] = [];
 
@@ -36,85 +33,11 @@ export function removeGenerationsFixtures(): void {
 	while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
 }
 
-/** A child as the fake runner started it, held until the test ends it. */
-export interface FakeChild {
-	readonly options: RunSubagentOptions;
-	/** Messages steered into the child, as text. */
-	readonly inbox: string[];
-	/** Runs one of the child's tools as its model would, and returns the result text. */
-	call(toolName: string, params: object): Promise<string>;
-	/** Ends the child's turn, its last unless pi will retry it; the run is final only once `finish` returns its outcome. */
-	endTurn(willRetry?: boolean): void;
-	/** Keeps the child running when it is stopped, until `finish`. */
-	holdStop(): void;
-	finish(outcome?: Partial<SubagentRunnerOutcome>): void;
-}
-
-function fakeRunner() {
-	const children: FakeChild[] = [];
-	const run = (options: RunSubagentOptions) =>
-		new Promise<SubagentRunnerOutcome>((resolve) => {
-			const listeners = new Set<(event: AgentSessionEvent) => void>();
-			const inbox: string[] = [];
-			let holdingStop = false;
-			const session: ChildSession = {
-				messages: [],
-				sessionFile: undefined,
-				subscribe: (listener) => {
-					listeners.add(listener);
-					return () => listeners.delete(listener);
-				},
-				sendCustomMessage: async (message) => {
-					inbox.push(
-						typeof message.content === "string"
-							? message.content
-							: message.content.map((part) => (part.type === "text" ? part.text : "")).join(""),
-					);
-				},
-			};
-			options.onChildSessionCreated?.(session);
-			options.signal.addEventListener(
-				"abort",
-				() => {
-					if (!holdingStop)
-						resolve({ status: "cancelled", complete: false, summaryText: "", stopReason: "aborted" });
-				},
-				{ once: true },
-			);
-			const endTurn = (willRetry = false) => {
-				for (const listener of listeners) listener({ type: "agent_end", messages: [], willRetry });
-			};
-			children.push({
-				options,
-				inbox,
-				call: async (toolName, params) => {
-					const tool = options.childTools.find((candidate) => candidate.name === toolName);
-					if (!tool) throw new Error(`The child has no ${toolName} tool.`);
-					const result = await tool.execute(
-						`call_${toolName}`,
-						params as never,
-						undefined,
-						undefined,
-						{} as never,
-					);
-					return result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
-				},
-				endTurn: (willRetry) => endTurn(willRetry),
-				holdStop: () => {
-					holdingStop = true;
-				},
-				finish: (outcome = {}) => {
-					endTurn();
-					resolve({ status: "completed", complete: true, summaryText: "", ...outcome });
-				},
-			});
-		});
-	/** The child the runner started `index`-th, once it has started. */
-	const child = async (index: number) => {
-		await waitFor(() => children.length > index);
-		return children[index];
-	};
-	return { run, child };
+/** A run's pi as the fake tmux started it: a pane that never runs anything. */
+export interface FakePane {
+	readonly name: string;
+	readonly args: readonly string[];
+	ended: boolean;
 }
 
 /** An orchestrator's session as admission reads it; its models are set by `loadModels`. */
@@ -127,15 +50,9 @@ export function fakeSessionContext(cwd: string) {
 	} as unknown as ExtensionContext;
 }
 
-/** A note the generations sent to the orchestrator through `pi.sendMessage`. */
-export interface SentNote {
-	readonly text: string;
-	readonly options: unknown;
-}
-
 /**
- * An orchestrator's subagents over the generations factory and a fake runner; given an earlier one's, a reload of
- * it: the same parent session and agent dir.
+ * An orchestrator's subagents over the generations factory, a fake tmux server and a fake daemon; given an earlier
+ * one's, a reload of it: the same parent session and agent dir.
  */
 export function createGenerationsFixture(earlier?: { cwd: string; agentDir: string; session: ExtensionContext }) {
 	const cwd = earlier?.cwd ?? makeTempDir("cwd");
@@ -154,28 +71,33 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 	});
 	const session = earlier?.session ?? fakeSessionContext(cwd);
 	scope.enter(session, "replaced");
-	const runner = fakeRunner();
-	const notes: SentNote[] = [];
-	const pi = {
-		appendEntry: () => {},
-		sendMessage: (message, options) => {
-			const text = message.content;
-			notes.push({
-				text:
-					typeof text === "string" ? text : text.map((part) => (part.type === "text" ? part.text : "")).join(""),
-				options,
-			});
-		},
-	} satisfies Pick<ExtensionAPI, "appendEntry" | "sendMessage">;
+	const panes: FakePane[] = [];
+	/** What the orchestrator sent other sessions through the daemon. */
+	const delivered: { to: string; message: SessionMessage }[] = [];
+	const reports = new RunReports();
 	const generations = createGenerations({
 		agentDir: () => agentDir,
-		runner: runner.run,
 		bus,
 		scope,
-		pi,
-		launchesSettled: () => Promise.resolve(),
+		pi: { appendEntry: () => {} },
 		onChange: () => {},
-		reports: new RunReports(),
+		reports,
+		tmux: () => ({
+			newSession: (spec) => {
+				const name = `pi-run${panes.length + 1}`;
+				panes.push({ name, args: spec.args, ended: false });
+				// As pi does, it keeps a session in its session directory, which a resume reopens.
+				const sessionDir = spec.args.indexOf("--session-dir");
+				if (sessionDir >= 0) writeFileSync(join(spec.args[sessionDir + 1], `${name}.jsonl`), "");
+				return name;
+			},
+			end: (name) => {
+				for (const pane of panes) if (pane.name === name) pane.ended = true;
+			},
+		}),
+		send: async (to, message) => {
+			delivered.push({ to, message });
+		},
 	});
 	const { directory } = generations;
 	const tasks = createAgentTaskSource({
@@ -192,17 +114,6 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		scheduler: generations.scheduler,
 		agentDir: () => agentDir,
 	});
-	const context = {
-		agentDir,
-		definition: { name: "general-purpose" },
-		task: "Build the API.",
-		parent: { executeTool: async () => ({ content: [], details: undefined }) },
-		parentTools: [],
-		activeToolNames: [],
-		builtinExtensions: [],
-		childModel: {},
-		projectTrusted: false,
-	} as unknown as InProcessRunContext;
 	let calls = 0;
 	/** Launches a background run in the current parent scope, named and tasked as given. */
 	const launch = (
@@ -211,11 +122,14 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		overrides: Partial<AdmitSubagentRunRequest<RunExecutionContext>> = {},
 	): AdmittedSubagentHandle => {
 		const current = scope.current()!;
+		const storage = ensureRunStorageDir(agentDir, current.parentSessionId, `sub_${name}_${++calls}`);
+		if (!storage.ok) throw new Error(storage.error);
 		const admitted = generations.scheduler.admit({
+			runId: `sub_${name}_${calls}`,
 			parentSessionId: current.parentSessionId,
 			sessionEpoch: current.sessionEpoch,
 			parentTurnId: "turn_1",
-			originToolCallId: `call_${++calls}`,
+			originToolCallId: `call_${calls}`,
 			name,
 			agentName: "general-purpose",
 			definitionSource: "bundled",
@@ -225,30 +139,55 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 			cwd,
 			taskSummary: task,
 			deliveryMode: "background",
-			context: { ...context, task },
+			context: {
+				launch: {
+					name,
+					definition: {
+						name: "general-purpose",
+						description: "",
+						model: "inherit",
+						instructions: "Work.",
+						source: "bundled",
+					},
+					model: "faux/faux-1",
+					task,
+					cwd,
+					runDir: storage.runDir,
+					parent: ORCHESTRATOR_PANE,
+					projectTrusted: false,
+				},
+			},
 			...overrides,
 		});
 		if (!admitted.ok) throw new Error(admitted.error);
-		void generations.deliver(admitted.handle);
 		return admitted.handle;
 	};
+	/** The pane of the run, once its pi started. */
+	const paneOf = async (handle: AdmittedSubagentHandle): Promise<string> =>
+		(await waitFor(() => generations.scheduler.getRun(handle.runId)?.pane ?? false)) || "";
+	/** The run reports `text` to its orchestrator, with its session's usage, as its pi does when it settles. */
+	const report = async (
+		handle: AdmittedSubagentHandle,
+		text: string,
+		usage?: { sessionId: string; totals: SubagentUsageTotals },
+	) =>
+		reports.receive({
+			type: "session_message",
+			kind: "report",
+			from: await paneOf(handle),
+			text,
+			...(usage ? { usage: usage.totals, sessionId: usage.sessionId } : {}),
+		});
 	const admission = createRunAdmission({
 		scheduler: generations.scheduler,
 		directory,
 		agentDir: () => agentDir,
 		catalog: () => undefined,
-		loadout: () => ({
-			declared: [],
-			callable: [],
-			registered: [],
-			getExposure: () => "direct",
-			getNamespace: () => undefined,
-			getPromptGuidelines: () => [],
-		}),
 		parentThinkingLevel: () => "off",
 		scope,
+		pane: () => ORCHESTRATOR_PANE,
 	});
-	/** Gives the orchestrator's session the one model the test runs launch with, as a resume needs it. */
+	/** Gives the orchestrator's session the one model the test runs launch with. */
 	const loadModels = async () => {
 		const runtime = await ModelRuntime.create({
 			authPath: join(agentDir, "auth.json"),
@@ -268,27 +207,10 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 	 */
 	const orchestrator = async () => {
 		await loadModels();
-		const ctx = Object.assign(Object.create(session), {
-			executeTool: async () => {
-				throw new Error("the fake children never run the orchestrator's tools");
-			},
-		});
 		return async (to: string, content: string) => {
-			const result = await generations.messageFromParent(
-				scope.current()!,
-				to,
-				content,
-				`call_message_${++calls}`,
-				admission,
-				ctx,
-			);
+			const result = await generations.messageFromParent(scope.current()!, to, content, admission, session);
 			return result.content.map((part) => part.text).join("");
 		};
-	};
-	/** The user, once the orchestrator's models are loaded: types a message in a run's transcript. */
-	const user = async () => {
-		await loadModels();
-		return (runId: string, content: string) => generations.messageFromUser(runId, content, admission);
 	};
 	const notices = () => sent.flat().flatMap((item) => (item.kind === "notice" ? [item.notice.parentText] : []));
 	return {
@@ -299,11 +221,12 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		generations,
 		directory,
 		tasks,
-		runner,
-		notes,
+		panes,
+		delivered,
 		notices,
 		launch,
+		paneOf,
+		report,
 		orchestrator,
-		user,
 	};
 }

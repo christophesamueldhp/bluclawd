@@ -36,8 +36,6 @@ function makeRecord(overrides: Partial<SubagentRunRecord> = {}): SubagentRunReco
 		deliveryMode: "foreground",
 		status: "completed",
 		complete: true,
-		turnCount: 2,
-		toolCallCount: 3,
 		usage: {
 			...createEmptySubagentUsage(),
 			input: 400,
@@ -90,7 +88,6 @@ describe("Task 5 (M1) — Subagent report envelope, truncation, and untrusted fr
 			complete: false,
 			stopReason: "Turn limit (12) exceeded",
 			summaryText: spoofedWorkerText,
-			toolExecutions: { bash: { ok: 1, error: 1 }, read: { ok: 2, error: 0 } },
 		});
 
 		const envelope = buildSubagentResultEnvelope(record);
@@ -100,7 +97,6 @@ describe("Task 5 (M1) — Subagent report envelope, truncation, and untrusted fr
 		expect(envelope.parentText).toContain("Snapshot: HEAD 1111111 (clean)");
 		expect(envelope.parentText).toContain("Verification: not inferred by the runtime");
 		expect(envelope.parentText).not.toContain("Verification: npm test passed");
-		expect(envelope.parentText).toContain("Tool executions (observed): bash 2 (1 failed), read 2");
 		expect(envelope.parentText).not.toContain("bash 9");
 		expect(envelope.parentText).toContain("Turn limit (12) exceeded");
 		expect(envelope.isError).toBe(true);

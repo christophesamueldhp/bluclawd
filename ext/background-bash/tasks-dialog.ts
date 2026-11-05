@@ -228,8 +228,8 @@ function sectionOf(row: TaskRow): Section {
 /** A WebSocket monitor has no detail view. */
 const hasDetail = (row: TaskRow) => sectionOf(row) !== "monitors";
 
-/** A run opens to its transcript, in place of the detail view, when the source can show one. */
-const opensTranscript = (row: TaskRow) => row.kind === "agent" && agentTasks()?.open !== undefined;
+/** A run opens to its own session, in place of the detail view, when the source can open one. */
+const opensRun = (row: TaskRow) => row.kind === "agent" && agentTasks()?.open !== undefined;
 
 /** A run that moves to Done is another row, so an `x` meant to stop it does not dismiss it. */
 const rowKey = (row: TaskRow) => `${sectionOf(row)}:${row.id}`;
@@ -309,7 +309,7 @@ export class TasksDialog implements Component {
 		this.terminalRows = options.rows;
 		// With one task to show, open straight to it.
 		const rows = dialogRows(owner);
-		if (rows.length === 1 && hasDetail(rows[0]) && !opensTranscript(rows[0])) {
+		if (rows.length === 1 && hasDetail(rows[0]) && !opensRun(rows[0])) {
 			this.detail = rows[0].id;
 			this.direct = true;
 		}
@@ -372,8 +372,8 @@ export class TasksDialog implements Component {
 		const current = rows[index];
 		if (kb.matches(data, "tui.select.up")) this.focus(rows, index - 1);
 		else if (kb.matches(data, "tui.select.down")) this.focus(rows, index + 1);
-		else if (data === "\r" && opensTranscript(current)) {
-			// The dialog closes first: the transcript is an overlay of its own.
+		else if (data === "\r" && opensRun(current)) {
+			// The dialog closes first: the terminal switches to the run.
 			this.done();
 			void agentTasks()?.open?.(current.id, this.owner);
 			return;

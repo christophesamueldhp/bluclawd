@@ -159,8 +159,8 @@ export interface TmuxRunDeps {
 	notify(report: RunReport): void;
 	/** The run started waiting on a prompt in its own session: the user is told in the orchestrator's. */
 	needsInput(dialog: string | undefined): void;
-	/** The run's session usage so far, from its latest Report. */
-	usage(totals: SubagentUsageTotals): void;
+	/** The usage so far of the run's session `sessionId`, from its latest Report. */
+	usage(sessionId: string, totals: SubagentUsageTotals): void;
 }
 
 /**
@@ -185,7 +185,10 @@ export async function executeTmuxRun(
 		}
 		if (message.kind !== "report") return;
 		last = message.text;
-		if (message.usage) deps.usage(message.usage);
+		if (message.usage) {
+			controller.updateUsage(message.usage);
+			deps.usage(message.sessionId ?? record.runId, message.usage);
+		}
 		controller.updateProgress(message.text);
 		if (!deps.reports.take(record.runId, message)) deps.notify(message);
 	});
@@ -263,6 +266,7 @@ export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefi
 			name: pi.getSessionName(),
 			text,
 			usage: sessionUsage(ctx.sessionManager.getEntries()),
+			sessionId: ctx.sessionManager.getSessionId(),
 		};
 		sending = sending.then(() => send(parent, report, ctx));
 		await sending;

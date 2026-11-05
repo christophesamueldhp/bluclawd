@@ -11,6 +11,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
 import {
@@ -21,7 +23,7 @@ import {
 	readBoundedSubagentReport,
 	readPersistedRunRecord,
 	reconcileInterruptedRuns,
-	recordBackgroundUsageInLedger,
+	recordCountedSessionUsage,
 	recordRunSessionUsage,
 	SUBAGENT_RUN_CUSTOM_ENTRY,
 	writeFullSubagentReport,
@@ -74,8 +76,6 @@ function makeRecord(overrides: Partial<SubagentRunRecord> = {}): SubagentRunReco
 		deliveryMode: "foreground",
 		status: "running",
 		complete: false,
-		turnCount: 1,
-		toolCallCount: 2,
 		usage: {
 			...createEmptySubagentUsage(),
 			input: 200,
@@ -257,24 +257,6 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		expect(JSON.parse(readFileSync(onDisk, "utf8"))).toMatchObject({ status: "timed_out", stopSource: "deadline" });
 	});
 
-	it("reads the legacy foreground attribution flag as where the usage went", () => {
-		const agentDir = makeTempDir("legacy-usage");
-		const parentSessionId = "sess_legacy_usage";
-		const readLegacy = (runId: string, deliveryMode: string, foregroundUsageAttributed: boolean) => {
-			const dir = join(getSubagentsRootDir(agentDir), parentSessionId, runId);
-			mkdirSync(dir, { recursive: true });
-			const legacy = { ...makeRecord({ runId, parentSessionId }), deliveryMode, foregroundUsageAttributed };
-			writeFileSync(join(dir, "record.json"), JSON.stringify(legacy));
-			return readPersistedRunRecord(agentDir, parentSessionId, runId);
-		};
-
-		const foreground = readLegacy("sub_legacy_fg", "foreground", true);
-		expect(foreground?.usageAttribution).toBe("tool_result");
-		expect(foreground).not.toHaveProperty("foregroundUsageAttributed");
-		expect(readLegacy("sub_legacy_fg_unsettled", "foreground", false)?.usageAttribution).toBe("tool_result");
-		expect(readLegacy("sub_legacy_bg", "background", false)?.usageAttribution).toBe("ledger");
-	});
-
 	it("reads a record stored before generations were always recorded as the launch's generation", () => {
 		const agentDir = makeTempDir("legacy-generation");
 		const parentSessionId = "sess_legacy_generation";
@@ -286,41 +268,80 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		expect(readPersistedRunRecord(agentDir, parentSessionId, "sub_legacy_gen")?.generation).toBe(0);
 	});
 
-	it("records each generation's usage in the ledger once", () => {
-		const agentDir = makeTempDir("ledger");
-		const parentSessionId = "sess_ledger_1";
-		const launch = makeRecord({ runId: "sub_bg_1", parentSessionId, deliveryMode: "background" });
-		const resumed = { ...launch, generation: 1 };
-
-		recordBackgroundUsageInLedger(agentDir, launch);
-		recordBackgroundUsageInLedger(agentDir, launch);
-		recordBackgroundUsageInLedger(agentDir, resumed);
-		const ledger = readBackgroundUsageLedger(agentDir, parentSessionId);
-		expect(ledger.recordedRunIds).toEqual(["sub_bg_1", "sub_bg_1#1"]);
-		expect(ledger.usage.totalTokens).toBe(560);
-		expect(ledger.usage.cost.total).toBeCloseTo(0.004, 6);
+	const tokens = (totalTokens: number, cost: number) => ({
+		...createEmptySubagentUsage(),
+		totalTokens,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
 	});
+
+	/** The ledger as runs from before runs were pis of their own left it: their usage, already added up. */
+	const writeEarlierLedger = (agentDir: string, parentSessionId: string) => {
+		const dir = join(getSubagentsRootDir(agentDir), parentSessionId);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(
+			join(dir, "background-usage-ledger.json"),
+			JSON.stringify({
+				parentSessionId,
+				runCount: 2,
+				recordedRunIds: ["sub_in_process", "sub_in_process#1"],
+				usage: tokens(280, 0.002),
+			}),
+		);
+	};
 
 	it("keeps a run's own session total, which a resumed generation of that session carries on", () => {
 		const agentDir = makeTempDir("ledger");
 		const parentSessionId = "sess_ledger_2";
-		const tokens = (totalTokens: number, cost: number) => ({
-			...createEmptySubagentUsage(),
-			totalTokens,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: cost },
-		});
-		recordBackgroundUsageInLedger(
-			agentDir,
-			makeRecord({ runId: "sub_in_process", parentSessionId, deliveryMode: "background" }),
-		);
-		recordRunSessionUsage(agentDir, { parentSessionId, runId: "sub_tmux_1" }, tokens(100, 0.01));
-		recordRunSessionUsage(agentDir, { parentSessionId, runId: "sub_tmux_2" }, tokens(50, 0.005));
+		writeEarlierLedger(agentDir, parentSessionId);
+		recordRunSessionUsage(agentDir, { parentSessionId, runId: "sub_tmux_1" }, "session_1", tokens(100, 0.01));
+		recordRunSessionUsage(agentDir, { parentSessionId, runId: "sub_tmux_2" }, "session_2", tokens(50, 0.005));
 		// Resumed into the same session file, the run's next Report holds its first generation's 100 tokens too.
-		recordRunSessionUsage(agentDir, { parentSessionId, runId: "sub_tmux_1" }, tokens(160, 0.016));
+		recordRunSessionUsage(agentDir, { parentSessionId, runId: "sub_tmux_1" }, "session_1", tokens(160, 0.016));
 
 		const ledger = readBackgroundUsageLedger(agentDir, parentSessionId);
 		expect(ledger.runCount).toBe(3);
 		expect(ledger.usage.totalTokens).toBe(280 + 160 + 50);
 		expect(ledger.usage.cost.total).toBeCloseTo(0.002 + 0.016 + 0.005, 6);
+	});
+
+	it("keeps each session a run has had, so a new session inside the run never shrinks what it counted", () => {
+		const agentDir = makeTempDir("ledger");
+		const parentSessionId = "sess_ledger_3";
+		const run = { parentSessionId, runId: "sub_tmux_1" };
+		recordRunSessionUsage(agentDir, run, "session_1", tokens(100, 0.01));
+		// `/new` inside the run: its next Report carries the new session's total only.
+		recordRunSessionUsage(agentDir, run, "session_2", tokens(20, 0.002));
+		recordRunSessionUsage(agentDir, run, "session_2", tokens(30, 0.003));
+
+		const ledger = readBackgroundUsageLedger(agentDir, parentSessionId);
+		expect(ledger.runCount).toBe(1);
+		expect(ledger.usage.totalTokens).toBe(130);
+		expect(ledger.usage.cost.total).toBeCloseTo(0.013, 6);
+	});
+
+	it("leaves out what a session from before runs were pis of their own had counted already, when a run resumes it", () => {
+		const agentDir = makeTempDir("ledger");
+		const parentSessionId = "sess_ledger_4";
+		writeEarlierLedger(agentDir, parentSessionId);
+		const session = SessionManager.create("/proj", makeTempDir("old-run"));
+		session.appendMessage({ role: "user", content: "Old task.", timestamp: Date.now() });
+		session.appendMessage({ ...fauxAssistantMessage("Old answer."), usage: { ...tokens(280, 0.002), input: 280 } });
+		const sessionFile = session.getSessionFile()!;
+
+		recordCountedSessionUsage(agentDir, parentSessionId, sessionFile);
+		// A second resume of the same old run must not count it twice either.
+		recordCountedSessionUsage(agentDir, parentSessionId, sessionFile);
+		// Its Report holds the old turns as well as the new ones.
+		recordRunSessionUsage(
+			agentDir,
+			{ parentSessionId, runId: "sub_in_process" },
+			session.getSessionId(),
+			tokens(330, 0.005),
+		);
+
+		const ledger = readBackgroundUsageLedger(agentDir, parentSessionId);
+		expect(ledger.runCount).toBe(1);
+		expect(ledger.usage.totalTokens).toBe(330);
+		expect(ledger.usage.cost.total).toBeCloseTo(0.005, 6);
 	});
 });

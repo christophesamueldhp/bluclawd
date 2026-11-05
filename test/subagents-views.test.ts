@@ -102,21 +102,19 @@ describe("the Parent scope's views", () => {
 	it("awaits every open Run that is working, and is Waiting for them between turns", () => {
 		const { launch, views, world, scheduler, controllers } = setup();
 		const live = launch();
-		const finishing = launch();
 		const foreground = launch({ deliveryMode: "foreground" });
 		const stopping = launch();
 		const idle = launch();
 		const asking = launch();
 		controllers.get(live.runId)?.markRunning();
-		controllers.get(finishing.runId)?.markFinishing();
 		controllers.get(foreground.runId)?.updateActivity("working");
 		scheduler.cancelRun(stopping.runId, "user");
 		controllers.get(idle.runId)?.updateActivity("idle");
 		controllers.get(asking.runId)?.updateActivity("awaiting_input");
 
-		expect(ids(views.awaited())).toEqual([live.runId, finishing.runId, foreground.runId]);
-		expect(views.waitingFor()).toBe(3);
-		expect(views.footer()).toEqual({ running: 5, stopping: 1 });
+		expect(ids(views.awaited())).toEqual([live.runId, foreground.runId]);
+		expect(views.waitingFor()).toBe(2);
+		expect(views.footer()).toEqual({ running: 4, stopping: 1 });
 		world.idle = false;
 		expect(views.waitingFor()).toBe(0);
 	});
@@ -241,40 +239,29 @@ describe("the Parent scope's views", () => {
 		expect(views.lookup("sub_missing")).toBeUndefined();
 	});
 
-	it("lets stop all reach every open Run of the owner's scope but a finishing one", () => {
+	it("lets stop all reach every open Run of the owner's scope", () => {
 		const { launch, views, scheduler, controllers } = setup();
 		const starting = launch();
 		const live = launch();
-		const finishing = launch();
 		const stopping = launch();
 		launch({ sessionEpoch: 0 });
 		controllers.get(live.runId)?.markRunning();
-		controllers.get(finishing.runId)?.markFinishing();
 		scheduler.cancelRun(stopping.runId, "user");
 
 		expect(ids(views.stoppable())).toEqual([starting.runId, live.runId, stopping.runId]);
 		expect(views.stoppable("sess_other")).toEqual([]);
 	});
 
-	it("finds an open Run by name or run id, and the open Run a tool call launched or resumed", async () => {
-		const { launch, finish, views, scheduler } = setup();
-		const scout = launch({ name: "scout", toolCallId: "call_scout" });
-		const resumed = launch({ name: "mapper", toolCallId: "call_mapper" });
-		const done = launch({ name: "done", toolCallId: "call_done" });
-		launch({ name: "old", toolCallId: "call_old", sessionEpoch: 0 });
-		await finish(resumed.runId);
+	it("finds an open Run by name or run id", async () => {
+		const { launch, finish, views } = setup();
+		const scout = launch({ name: "scout" });
+		const done = launch({ name: "done" });
+		launch({ name: "old", sessionEpoch: 0 });
 		await finish(done.runId);
-		scheduler.resume(resumed.runId, { resume: { toolCallId: "call_more" } });
 
 		expect(views.findOpen("scout")?.record.runId).toBe(scout.runId);
 		expect(views.findOpen(scout.runId)?.record.runId).toBe(scout.runId);
 		expect(views.findOpen("done")).toBeUndefined();
 		expect(views.findOpen("old")).toBeUndefined();
-
-		expect(views.launchedBy("call_scout")?.runId).toBe(scout.runId);
-		expect(views.launchedBy("call_more")?.runId).toBe(resumed.runId);
-		expect(views.launchedBy("call_mapper")).toBeUndefined();
-		expect(views.launchedBy("call_done")).toBeUndefined();
-		expect(views.launchedBy("call_old")).toBeUndefined();
 	});
 });

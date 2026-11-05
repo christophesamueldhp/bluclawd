@@ -1,6 +1,11 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
+import { writePersistedRunRecord } from "../ext/subagents/storage.ts";
+import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
 import { DEFAULT_EXTENSIONS, hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -80,6 +85,94 @@ describe.skipIf(!hasTmux)("a run's usage, in its own session", () => {
 		await real.waitForRequests("main", 4);
 		const both = runTokens(real);
 		expect(both).toBeGreaterThan(first);
+		await statusShows(real, orchestrator, new RegExp(`Subagents\\s+1 runs, ${both} tokens`));
+	});
+
+	it("counts the earlier turns of a run from before runs were pis of their own once, when it resumes", async () => {
+		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "help"] });
+		pi = real;
+		real.script("main", [
+			{ text: "hello" },
+			{ tool: "subagent_message", args: { to: "old-run", content: "Pick up where you left off." } },
+			{ text: "waiting for old-run" },
+			{ text: "read its report" },
+		]);
+		real.script("old-run", [{ text: "Picked it up." }]);
+		const orchestrator = real.start(["--", "hello"]);
+		await real.waitForRequests("main", 1);
+		const sessionId = await waitFor(async () => {
+			const id = (await real.rows()).find((row) => row.pane === orchestrator)?.sessionId;
+			expect(id).toBeDefined();
+			return id ?? "";
+		});
+
+		// An old run: an SDK session in its run directory, its completed record, and its usage in the ledger.
+		const runId = `sub_${randomUUID()}`;
+		const sessionDir = join(real.agentDir, "bluclawd", "subagents", sessionId);
+		const session = SessionManager.create(real.cwd, join(sessionDir, runId));
+		const oldUsage = { ...createEmptySubagentUsage(), input: 5000, totalTokens: 5000 };
+		session.appendMessage({ role: "user", content: "Old task.", timestamp: Date.now() });
+		session.appendMessage({ ...fauxAssistantMessage("Old answer."), usage: oldUsage });
+		writeFileSync(
+			join(sessionDir, "background-usage-ledger.json"),
+			JSON.stringify({ parentSessionId: sessionId, runCount: 1, recordedRunIds: [runId], usage: oldUsage }),
+		);
+		writePersistedRunRecord(real.agentDir, {
+			runId,
+			parentSessionId: sessionId,
+			sessionEpoch: 1,
+			parentTurnId: "turn_1",
+			originToolCallId: "call_old",
+			name: "old-run",
+			generation: 0,
+			transcriptPath: session.getSessionFile(),
+			agentName: "explorer",
+			definitionSource: "bundled",
+			provider: "faux",
+			modelId: "faux-1",
+			thinkingLevel: "off",
+			cwd: real.cwd,
+			taskSummary: "Old task.",
+			startSnapshot: { headCommit: null, dirty: false, statusDigest: "" },
+			snapshotDrifted: false,
+			admittedAt: Date.now(),
+			endedAt: Date.now(),
+			deliveryMode: "background",
+			status: "completed",
+			complete: true,
+			usage: oldUsage,
+			backgroundDeliveryAttempted: true,
+		});
+
+		real.tmux.sendKeys(orchestrator, ["go on with the old run", "Enter"]);
+		await real.waitForRequests("main", 4);
+		// The old turns' 5000 tokens are in the run's session file once, and counted once.
+		const tokens = runTokens(real);
+		expect(tokens).toBeGreaterThan(5000);
+		await statusShows(real, orchestrator, new RegExp(`Subagents\\s+1 runs, ${tokens} tokens`));
+	});
+
+	it("keeps the tokens of a run's earlier session when the user starts a new one in it", async () => {
+		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "help"] });
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around.", background: true } },
+			{ text: "waiting for probe-run" },
+			{ text: "read the first report" },
+			// The run's new session has no name of its own, so the faux model answers it from this script.
+			{ text: "A fresh look at the checkout, from a new session." },
+			{ text: "read the second report" },
+		]);
+		real.script("probe-run", [{ text: "First look at the checkout." }]);
+		const orchestrator = real.start(["--", "delegate the look"]);
+		await real.waitForRequests("main", 3);
+
+		const run = (await real.rows()).find((row) => row.label === "probe-run");
+		real.tmux.sendKeys(run?.pane ?? "", ["/new", "Enter"]);
+		await waitFor(() => expect(real.tmux.capture(run?.pane ?? "", 50).join("\n")).toMatch(/new session/i));
+		real.tmux.sendKeys(run?.pane ?? "", ["Look again.", "Enter"]);
+		await real.waitForRequests("main", 5);
+		const both = runTokens(real);
 		await statusShows(real, orchestrator, new RegExp(`Subagents\\s+1 runs, ${both} tokens`));
 	});
 });

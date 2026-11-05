@@ -1,4 +1,3 @@
-import type { Usage } from "@earendil-works/pi-ai";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import {
 	isTerminalSubagentStatus,
@@ -6,7 +5,6 @@ import {
 	type SubagentRunRecord,
 	type WorkspaceSnapshot,
 } from "./runs.ts";
-import { toPiToolUsage } from "./usage.ts";
 
 export const MAX_PARENT_REPORT_BYTES = 8 * 1024;
 export const UNTRUSTED_REPORT_HEADER =
@@ -21,8 +19,6 @@ export interface SubagentResultDetails {
 	provider: string;
 	modelId: string;
 	thinkingLevel: string;
-	turnCount: number;
-	toolCallCount: number;
 	snapshotDrifted: boolean;
 	reportPath?: string;
 	stopReason?: string;
@@ -36,8 +32,6 @@ export interface BuiltSubagentResultEnvelope {
 	truncated: boolean;
 	isError: boolean;
 	details: SubagentResultDetails;
-	/** Present only when this tool result carries the generation's usage into pi's totals. */
-	usage?: Usage;
 }
 
 // Strip ANSI CSI/OSC/DCS sequences and C0/C1 control characters (preserving \n and \t).
@@ -157,10 +151,6 @@ export function buildSubagentResultEnvelope(
 ): BuiltSubagentResultEnvelope {
 	const parsed = parseWorkerSections(record.summaryText ?? "");
 	const snapshotText = formatSnapshotSummary(record.startSnapshot, record.endSnapshot, record.snapshotDrifted);
-	const executions = Object.entries(record.toolExecutions ?? {}).map(
-		([name, { ok, error }]) => `${name} ${ok + error}${error > 0 ? ` (${error} failed)` : ""}`,
-	);
-	const executionsText = executions.length > 0 ? executions.join(", ") : "none";
 	const verificationText =
 		"not inferred by the runtime; any test or check results above are agent-reported (a zero shell exit is not test coverage)";
 
@@ -194,7 +184,6 @@ export function buildSubagentResultEnvelope(
 			`Scope:\n${scopeField}`,
 			`Summary:\n${summaryContent}`,
 			`Evidence:\n${evidenceField}`,
-			`Tool executions (observed): ${executionsText}`,
 			`Verification: ${verificationText}`,
 			`Usage: ${record.usage.totalTokens} reported tokens; ${record.usage.hasUnknownCost ? "cost unknown (includes unpriced usage)" : `estimated cost $${record.usage.cost.total.toFixed(6)}`}`,
 			`Blockers:\n${blockersField}`,
@@ -231,8 +220,6 @@ export function buildSubagentResultEnvelope(
 		provider: record.provider,
 		modelId: record.modelId,
 		thinkingLevel: record.thinkingLevel,
-		turnCount: record.turnCount,
-		toolCallCount: record.toolCallCount,
 		snapshotDrifted: record.snapshotDrifted,
 		reportPath: record.reportPath,
 		stopReason: record.stopReason ? sanitizeReportText(record.stopReason) : undefined,
@@ -246,6 +233,5 @@ export function buildSubagentResultEnvelope(
 		truncated,
 		isError,
 		details,
-		usage: record.usageAttribution === "tool_result" ? toPiToolUsage(record.usage) : undefined,
 	};
 }

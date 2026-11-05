@@ -11,11 +11,11 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, parseSessionEntries, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import { sanitizeReportText } from "./results.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
-import { addSubagentUsage, createEmptySubagentUsage, type SubagentUsageTotals } from "./usage.ts";
+import { addSubagentUsage, createEmptySubagentUsage, type SubagentUsageTotals, sessionUsage } from "./usage.ts";
 
 export const SUBAGENT_RUN_CUSTOM_ENTRY = "bluclawd.subagent-run";
 export const MAX_AUTHORIZED_REPORT_VIEW_BYTES = 16 * 1024;
@@ -37,11 +37,18 @@ export interface SubagentRunReferenceEntryData {
 
 export interface BackgroundUsageLedger {
 	parentSessionId: string;
+	/** How many runs the usage comes from. */
 	runCount: number;
+	/** The generations, `<runId>[#<generation>]`, whose usage `usage` holds: runs from before runs were pis of their own. */
 	recordedRunIds: string[];
 	usage: SubagentUsageTotals;
-	/** Each run that is a pi session of its own, by run ID: that session's usage so far, as it last reported it. */
-	sessions?: Record<string, SubagentUsageTotals>;
+	/** Each run's sessions, by run ID and then session ID: each session's usage so far, as the run last reported it. */
+	sessions?: Record<string, Record<string, SubagentUsageTotals>>;
+	/**
+	 * By session ID: what a session from before runs were pis of their own had counted already, in `usage` or the
+	 * orchestrator's own totals, when a run resumed it.
+	 */
+	counted?: Record<string, SubagentUsageTotals>;
 }
 
 function isSafePathSegment(segment: string): boolean {
@@ -206,7 +213,6 @@ export function readPersistedRunRecord(
 			return undefined;
 		}
 		decodeLegacyStatus(parsed);
-		decodeLegacyUsageAttribution(parsed);
 		// Records stored before every generation was numbered lack it on the launch.
 		parsed.generation ??= 0;
 		return parsed;
@@ -237,16 +243,9 @@ function decodeLegacyStatus(record: SubagentRunRecord): void {
 	}
 	// A queued run never started, so reconciliation interrupts it like any other orphan.
 	if (legacy.status === "queued") record.status = "starting";
+	// A run from before runs were pis of their own, whose last turn had ended: an orphan, if it was never final.
+	if (legacy.status === "finishing") record.status = "running";
 	if (legacy.stopSource === "deadline" || legacy.stopSource === "budget") delete record.stopSource;
-}
-
-/** Maps the flag that recorded attribution before each generation settled its own usage. */
-function decodeLegacyUsageAttribution(record: SubagentRunRecord): void {
-	const legacy = record as { foregroundUsageAttributed?: boolean };
-	if (record.usageAttribution || legacy.foregroundUsageAttributed === undefined) return;
-	record.usageAttribution =
-		legacy.foregroundUsageAttributed || record.deliveryMode === "foreground" ? "tool_result" : "ledger";
-	delete legacy.foregroundUsageAttributed;
 }
 
 export function writeFullSubagentReport(
@@ -400,10 +399,36 @@ function getBackgroundLedgerPath(agentDir: string, parentSessionId: string): str
 /** Every run's usage the orchestrator does not count in its own totals: its runs' sessions included. */
 export function readBackgroundUsageLedger(agentDir: string, parentSessionId: string): BackgroundUsageLedger {
 	const ledger = readLedgerFile(agentDir, parentSessionId);
-	const sessions = Object.values(ledger.sessions ?? {});
 	const usage = structuredClone(ledger.usage);
-	for (const session of sessions) addSubagentUsage(usage, session);
-	return { ...ledger, runCount: ledger.runCount + sessions.length, usage };
+	const runs = new Set(ledger.recordedRunIds.map((key) => key.split("#")[0]));
+	for (const [runId, sessions] of Object.entries(ledger.sessions ?? {})) {
+		runs.add(runId);
+		for (const [sessionId, total] of Object.entries(sessions)) {
+			addSubagentUsage(usage, beyond(total, ledger.counted?.[sessionId]));
+		}
+	}
+	return { ...ledger, runCount: runs.size, usage };
+}
+
+/** What `total` holds beyond what was `counted` already. */
+function beyond(total: SubagentUsageTotals, counted: SubagentUsageTotals | undefined): SubagentUsageTotals {
+	if (!counted) return total;
+	const less = (a: number, b: number) => Math.max(0, a - b);
+	return {
+		input: less(total.input, counted.input),
+		output: less(total.output, counted.output),
+		cacheRead: less(total.cacheRead, counted.cacheRead),
+		cacheWrite: less(total.cacheWrite, counted.cacheWrite),
+		totalTokens: less(total.totalTokens, counted.totalTokens),
+		cost: {
+			input: less(total.cost.input, counted.cost.input),
+			output: less(total.cost.output, counted.cost.output),
+			cacheRead: less(total.cost.cacheRead, counted.cost.cacheRead),
+			cacheWrite: less(total.cost.cacheWrite, counted.cost.cacheWrite),
+			total: less(total.cost.total, counted.cost.total),
+		},
+		hasUnknownCost: total.hasUnknownCost,
+	};
 }
 
 function readLedgerFile(agentDir: string, parentSessionId: string): BackgroundUsageLedger {
@@ -424,36 +449,41 @@ function readLedgerFile(agentDir: string, parentSessionId: string): BackgroundUs
 	}
 }
 
-/** Adds one generation's usage to the ledger, at most once. */
-export function recordBackgroundUsageInLedger(
-	agentDir: string,
-	record: Pick<SubagentRunRecord, "parentSessionId" | "runId" | "generation" | "usage">,
-): BackgroundUsageLedger {
-	const current = readLedgerFile(agentDir, record.parentSessionId);
-	// Each resumed generation of a run carries only its own usage.
-	const ledgerKey = record.generation ? `${record.runId}#${record.generation}` : record.runId;
-	if (current.recordedRunIds.includes(ledgerKey)) {
-		return current;
-	}
-
-	current.recordedRunIds.push(ledgerKey);
-	current.runCount = current.recordedRunIds.length;
-	addSubagentUsage(current.usage, record.usage);
-	writeLedgerFile(agentDir, current);
-	return current;
-}
-
 /**
- * Keeps the usage a run's own session reported last. The session's total already holds every earlier turn and
- * generation, so it replaces the run's previous one: each token is counted once.
+ * Keeps the usage a run's session reported last. The session's total already holds every earlier turn and
+ * generation in it, so it replaces that session's previous one: each token is counted once. A run's other
+ * sessions, such as the one it had before a `/new` in it, keep theirs.
  */
 export function recordRunSessionUsage(
 	agentDir: string,
 	record: Pick<SubagentRunRecord, "parentSessionId" | "runId">,
+	sessionId: string,
 	usage: SubagentUsageTotals,
 ): void {
 	const current = readLedgerFile(agentDir, record.parentSessionId);
-	current.sessions = { ...current.sessions, [record.runId]: usage };
+	current.sessions = {
+		...current.sessions,
+		[record.runId]: { ...current.sessions?.[record.runId], [sessionId]: usage },
+	};
+	writeLedgerFile(agentDir, current);
+}
+
+/**
+ * Notes what a session from before runs were pis of their own had counted already, once, before a run resumes it:
+ * the run's Reports carry that session's whole total, earlier turns included.
+ */
+export function recordCountedSessionUsage(agentDir: string, parentSessionId: string, sessionFile: string): void {
+	let entries: ReturnType<typeof parseSessionEntries>;
+	try {
+		entries = parseSessionEntries(readFileSync(sessionFile, "utf8"));
+	} catch {
+		return;
+	}
+	const header = entries.find((entry) => entry.type === "session");
+	const current = readLedgerFile(agentDir, parentSessionId);
+	if (!header || current.counted?.[header.id]) return;
+	const counted = sessionUsage(entries.filter((entry): entry is SessionEntry => entry.type !== "session"));
+	current.counted = { ...current.counted, [header.id]: counted };
 	writeLedgerFile(agentDir, current);
 }
 

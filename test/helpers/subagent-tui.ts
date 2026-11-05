@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,11 +8,41 @@ import {
 	getSystemMessageText,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
-import { type ExtensionFactory, type ExtensionUIContext, initTheme } from "@earendil-works/pi-coding-agent";
+import {
+	createEventBus,
+	type ExtensionFactory,
+	type ExtensionUIContext,
+	initTheme,
+} from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
+import { vi } from "vitest";
+import type { AgentActivity } from "../../daemon/activity.ts";
 import { stripAnsi } from "../../daemon/ansi.ts";
+import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
+import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
+import { PANE_ENV, Tmux } from "../../daemon/tmux.ts";
 import { STATUS_KEYS } from "../../ext/_shared/status-keys.ts";
 import { createParentSessionWithSubagents } from "./subagent-session.ts";
+import { waitFor } from "./wait-for.ts";
+
+/** The orchestrator's own tmux session in these tests. */
+const ORCHESTRATOR_PANE = "pi-orchestrator";
+
+/** A run the orchestrator started, as a pane that never runs a pi. */
+interface FakeRun {
+	readonly pane: string;
+	/** Its session name, from its launch flags. */
+	readonly name: string;
+	readonly args: readonly string[];
+	/** Whether its pane was ended, as a close does. */
+	ended: boolean;
+}
+
+type SessionMessageBody = SessionMessage extends infer M
+	? M extends SessionMessage
+		? Omit<M, "type" | "from" | "name">
+		: never
+	: never;
 
 type Rendered = Component & { dispose?(): void; focused?: boolean };
 type InputHandler = Parameters<ExtensionUIContext["onTerminalInput"]>[0];
@@ -27,9 +57,6 @@ const plainTheme = new Proxy(
 const pistatusline: ExtensionFactory = (pi) => {
 	pi.registerCommand("pistatusline", { description: "pistatusline", handler: async () => {} });
 };
-
-/** A child's report in the shape its contract asks for. */
-export const REPORT = "### Scope\n- `a.ts`\n### Summary\nDone.\n### Evidence\n- `a.ts:1`\n### Blockers\n- none";
 
 /** An orchestrator turn that launches one run per `name`, all in one message. */
 export function launch(names: string[], options: { background?: boolean; agent?: string } = {}) {
@@ -48,12 +75,6 @@ export function launch(names: string[], options: { background?: boolean; agent?:
 				),
 			),
 		);
-}
-
-/** Whether a faux-provider request comes from a child run rather than the orchestrator. */
-export function isChildContext(context: TranscriptContext): boolean {
-	const sys = context.messages.find((m) => m.role === "system");
-	return (sys?.role === "system" ? getSystemMessageText(sys) : "").includes("subagent operating in a fresh context");
 }
 
 /** Whether a faux-provider request is prompt assistance's, for a suggestion or a session name. */
@@ -208,6 +229,46 @@ export async function createSubagentTui(
 		setToolsExpanded: () => {},
 	};
 
+	// The orchestrator runs in a pane of its own, and each run it starts is a fake pane: the test speaks for it.
+	const previousPane = process.env[PANE_ENV];
+	process.env[PANE_ENV] = ORCHESTRATOR_PANE;
+	const runs: FakeRun[] = [];
+	const sent: { to: string; message: SessionMessage }[] = [];
+	const switched: string[] = [];
+	const spies = [
+		vi.spyOn(Tmux.prototype, "newSession").mockImplementation((spec) => {
+			const pane = `pi-run${runs.length + 1}`;
+			runs.push({ pane, name: spec.args[spec.args.indexOf("--name") + 1], args: spec.args, ended: false });
+			// As pi does, it keeps a session in its session directory, which a resume reopens.
+			const sessionDir = spec.args.indexOf("--session-dir");
+			if (sessionDir >= 0) writeFileSync(join(spec.args[sessionDir + 1], `${pane}.jsonl`), "");
+			return pane;
+		}),
+		vi.spyOn(Tmux.prototype, "end").mockImplementation((pane) => {
+			for (const run of runs) if (run.pane === pane) run.ended = true;
+		}),
+		vi.spyOn(Tmux.prototype, "switchTo").mockImplementation((pane) => {
+			switched.push(pane);
+		}),
+		vi.spyOn(OrchestratorClient.prototype, "send").mockImplementation(async (to, message) => {
+			if (message.type === "session_message") sent.push({ to, message });
+		}),
+	];
+	const eventBus = createEventBus();
+	const runNamed = (name: string) => {
+		const run = [...runs].reverse().find((candidate) => candidate.name === name);
+		if (!run) throw new Error(`No run named ${name} has started.`);
+		return run;
+	};
+	/** What the run's pi sends its orchestrator, through the daemon. */
+	const fromRun = (name: string, message: SessionMessageBody) =>
+		eventBus.emit("bluclawd:session-message", {
+			type: "session_message",
+			from: runNamed(name).pane,
+			name,
+			...message,
+		} satisfies SessionMessage);
+
 	const { session, faux } = await createParentSessionWithSubagents({
 		cwd,
 		agentDir,
@@ -216,6 +277,7 @@ export async function createSubagentTui(
 		extraTools: options.extraTools,
 		batchWindowMs: options.batchWindowMs ?? 15,
 		now: () => Date.now() + offset,
+		eventBus,
 	});
 	await session.bindExtensions({ mode: "tui", uiContext: uiContext as unknown as ExtensionUIContext });
 
@@ -230,23 +292,31 @@ export async function createSubagentTui(
 		cwd,
 		agentDir,
 		/**
-		 * Scripts the faux provider: the orchestrator's turns answer with `parent` in order, then "Done."; every
-		 * child turn answers with `child`, by default a finished report. Prompt assistance's suggestion and session
-		 * name requests answer with `side`, by default nothing.
+		 * Scripts the faux provider: the orchestrator's turns answer with `parent` in order, then "Done.". Prompt
+		 * assistance's suggestion and session name requests answer with `side`, by default nothing.
 		 */
-		script(
-			parent: Turn[],
-			child: Turn = () => fauxAssistantMessage(REPORT),
-			side: Turn = () => fauxAssistantMessage(""),
-		) {
+		script(parent: Turn[], side: Turn = () => fauxAssistantMessage("")) {
 			let turn = 0;
 			const next = (context: TranscriptContext) => {
 				if (isSideContext(context)) return side(context);
-				if (isChildContext(context)) return child(context);
 				return (parent[turn++] ?? (() => fauxAssistantMessage("Done.")))(context);
 			};
 			faux.setResponses(Array.from({ length: 50 }, () => next));
 		},
+		/** The runs started so far, as fake panes, oldest first. */
+		runs,
+		/** Resolves once a run of that name has started. */
+		started: (name: string) => waitFor(() => runs.some((run) => run.name === name)),
+		/** What the orchestrator sent other sessions through the daemon. */
+		sent,
+		/** The panes the terminal was switched to. */
+		switched,
+		/** The run reports `text` to its orchestrator, as its pi does when it settles. */
+		report: (name: string, text: string) => fromRun(name, { kind: "report", text }),
+		/** The run tells its orchestrator what it is doing now. */
+		activity: (name: string, activity: AgentActivity, dialog?: string) =>
+			fromRun(name, { kind: "activity", activity, ...(dialog ? { dialog } : {}) }),
+		fromRun,
 		/** The subagent panel, the multi-line status pistatusline draws below its chips, as plain lines; empty when none. */
 		panel: () => {
 			const text = statuses.get(STATUS_KEYS.subagents);
@@ -295,6 +365,9 @@ export async function createSubagentTui(
 		},
 		dispose() {
 			session.dispose();
+			for (const spy of spies) spy.mockRestore();
+			if (previousPane === undefined) delete process.env[PANE_ENV];
+			else process.env[PANE_ENV] = previousPane;
 			for (const dir of dirs) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 20 });
 		},
 	};

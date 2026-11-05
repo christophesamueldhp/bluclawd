@@ -2,21 +2,13 @@ import { randomUUID } from "node:crypto";
 import type { AgentActivity } from "../../daemon/activity.ts";
 import { AGENT_TASK_ID_PREFIX } from "../_shared/agent-tasks.ts";
 import type { AgentDefinitionSource } from "./definitions.ts";
-import {
-	createEmptySubagentUsage,
-	createGenerationUsage,
-	type GenerationUsage,
-	type SubagentUsageTotals,
-	type UsageAttribution,
-} from "./usage.ts";
+import { createEmptySubagentUsage, type SubagentUsageTotals } from "./usage.ts";
 
 export type SubagentDeliveryMode = "foreground" | "background";
 
 export type SubagentLifecycleStatus =
 	| "starting"
 	| "running"
-	/** The child's last turn of this generation ended; the run is not final yet. */
-	| "finishing"
 	| "stopping"
 	| "completed"
 	| "failed"
@@ -46,10 +38,9 @@ export interface SubagentRunRecord {
 	name?: string;
 	/** How many times the orchestrator resumed this run after it completed: 0 for the launch. */
 	generation: number;
-	childSessionId?: string;
-	/** The tmux session of a run that is a pi of its own (ADR-0006); absent on in-process runs. */
+	/** The tmux session of the run's pi (ADR-0006); absent on runs from before runs were pis of their own. */
 	pane?: string;
-	/** What a run in its own pi is doing, as it last said; absent until it says, and on in-process runs. */
+	/** What the run's pi is doing, as it last said; absent until it says. */
 	activity?: AgentActivity;
 	transcriptPath?: string;
 	reportPath?: string;
@@ -72,36 +63,21 @@ export interface SubagentRunRecord {
 	stopSource?: SubagentStopSource;
 	errorMessage?: string;
 	complete: boolean;
-	turnCount: number;
-	toolCallCount: number;
-	/** Finished child tool executions observed by the runtime, per tool; absent on older records. */
-	toolExecutions?: Record<string, { ok: number; error: number }>;
+	/** The usage of the run's session so far, as its latest Report gave it. */
 	usage: SubagentUsageTotals;
-	/** Where the generation's usage went; set when it settles. */
-	usageAttribution?: UsageAttribution;
 	backgroundDeliveryAttempted: boolean;
 	lastProgressText?: string;
-	/** The child's latest model turn or tool call; absent on older records. */
-	lastActivity?: { kind: "turn" | "tool"; detail?: string; at: number };
-	/** When the child last sent an agent message. */
-	lastMessageAt?: number;
 	summaryText?: string;
 }
 
 export interface SubagentRunController {
-	markRunning(childSessionId?: string, thinkingLevel?: string): void;
+	markRunning(): void;
 	/** The run's pi started in this tmux session. */
 	recordPane(pane: string): void;
 	/** What the run's pi says it is doing now. */
 	updateActivity(activity: AgentActivity): void;
-	/** The child's turn ended and pi will not retry it: the generation's last turn. */
-	markFinishing(): void;
-	recordTurn(): void;
-	recordToolCall(toolName?: string): void;
-	recordToolExecution(toolName: string, isError: boolean): void;
-	recordUsage(delta: Partial<SubagentUsageTotals>): void;
-	/** Usage reported by an orchestrator tool the child ran. */
-	recordNestedUsage(delta: Partial<SubagentUsageTotals>): void;
+	/** The usage of the run's session so far. */
+	updateUsage(totals: SubagentUsageTotals): void;
 	updateProgress(text: string): void;
 }
 
@@ -117,7 +93,6 @@ export interface SubagentRunnerOutcome {
 	summaryText: string;
 	stopReason?: string;
 	errorMessage?: string;
-	childSessionId?: string;
 	transcriptPath?: string;
 	reportPath?: string;
 	endSnapshot?: WorkspaceSnapshot;
@@ -182,7 +157,6 @@ export function isTerminalSubagentStatus(status: SubagentLifecycleStatus): statu
 
 interface InternalManagedRun<C> {
 	record: SubagentRunRecord;
-	usage: GenerationUsage;
 	abortController: AbortController;
 	callerSignal?: AbortSignal;
 	callerAbortListener?: () => void;
@@ -228,11 +202,6 @@ export class SubagentRunScheduler<C = unknown> {
 	/** Settles with the run's record once its current generation is final and stored. */
 	whenFinal(runId: string): Promise<Readonly<SubagentRunRecord>> | undefined {
 		return this.runs.get(runId)?.completionPromise;
-	}
-
-	recordMessageSent(runId: string): void {
-		const managed = this.runs.get(runId);
-		if (managed && !isTerminalSubagentStatus(managed.record.status)) managed.record.lastMessageAt = this.now();
 	}
 
 	listRuns(): Readonly<SubagentRunRecord>[] {
@@ -287,8 +256,6 @@ export class SubagentRunScheduler<C = unknown> {
 			deliveryMode: request.deliveryMode,
 			status: "starting",
 			complete: false,
-			turnCount: 0,
-			toolCallCount: 0,
 			usage: createEmptySubagentUsage(),
 			backgroundDeliveryAttempted: false,
 		};
@@ -300,7 +267,6 @@ export class SubagentRunScheduler<C = unknown> {
 
 		const managed: InternalManagedRun<C> = {
 			record,
-			usage: createGenerationUsage({ kind: request.deliveryMode }),
 			abortController: new AbortController(),
 			callerSignal: request.signal,
 			resolveCompletion,
@@ -333,9 +299,8 @@ export class SubagentRunScheduler<C = unknown> {
 	}
 
 	/**
-	 * Runs a completed or closed run again under the same identity, in the background. Its counts and usage start
-	 * from zero: a generation reports only its own work, and the earlier usage, already attributed, is never counted
-	 * twice. A run this scheduler does not know is taken over from `stored`, its record as kept on disk.
+	 * Runs a completed or closed run again under the same identity, in the background. A run this scheduler does not
+	 * know is taken over from `stored`, its record as kept on disk.
 	 */
 	resume(runId: string, context: C, stored?: Readonly<SubagentRunRecord>): AdmitSubagentRunResult {
 		if (!this.runs.has(runId) && stored?.runId === runId && isResumableSubagentStatus(stored.status)) {
@@ -368,16 +333,9 @@ export class SubagentRunScheduler<C = unknown> {
 				status: "starting",
 				complete: false,
 				deliveryMode: "background",
-				turnCount: 0,
-				toolCallCount: 0,
-				toolExecutions: undefined,
-				lastActivity: undefined,
 				activity: undefined,
-				usage: createEmptySubagentUsage(),
-				usageAttribution: undefined,
 				backgroundDeliveryAttempted: false,
 			} satisfies SubagentRunRecord,
-			usage: createGenerationUsage({ kind: "resume" }),
 			abortController: new AbortController(),
 			callerSignal: undefined,
 			callerAbortListener: undefined,
@@ -410,18 +368,12 @@ export class SubagentRunScheduler<C = unknown> {
 		const record = structuredClone(stored) as SubagentRunRecord;
 		this.runs.set(record.runId, {
 			record,
-			usage: createGenerationUsage({ kind: "resume" }),
 			abortController: new AbortController(),
 			resolveCompletion: () => {},
 			completionPromise: Promise.resolve(structuredClone(record)),
 			disposed: true,
 			finalizing: false,
 		});
-	}
-
-	/** The tool result that launched this run reached the orchestrator's conversation. */
-	launchResultEmitted(runId: string): void {
-		this.runs.get(runId)?.usage.launchResultEmitted();
 	}
 
 	cancelRun(runId: string, source: SubagentStopSource = "user", reason = "Subagent run cancelled"): boolean {
@@ -451,10 +403,8 @@ export class SubagentRunScheduler<C = unknown> {
 		const inactive = () =>
 			managed.record.generation !== generation || isTerminalSubagentStatus(managed.record.status);
 		const controller: SubagentRunController = {
-			markRunning: (childSessionId?: string, thinkingLevel?: string) => {
+			markRunning: () => {
 				if (inactive() || managed.record.status === "stopping") return;
-				if (childSessionId) managed.record.childSessionId = childSessionId;
-				if (thinkingLevel) managed.record.thinkingLevel = thinkingLevel;
 				managed.record.status = "running";
 				this.emitChange(managed);
 			},
@@ -468,39 +418,9 @@ export class SubagentRunScheduler<C = unknown> {
 				managed.record.activity = activity;
 				this.emitChange(managed);
 			},
-			markFinishing: () => {
-				const { status } = managed.record;
-				if (inactive() || status === "stopping" || status === "finishing") return;
-				managed.record.status = "finishing";
-				this.emitChange(managed);
-			},
-			recordTurn: () => {
+			updateUsage: (totals: SubagentUsageTotals) => {
 				if (inactive()) return;
-				managed.record.turnCount++;
-				managed.record.lastActivity = { kind: "turn", at: this.now() };
-			},
-			recordToolCall: (toolName?: string) => {
-				if (inactive()) return;
-				managed.record.toolCallCount++;
-				managed.record.lastActivity = { kind: "tool", detail: toolName, at: this.now() };
-			},
-			recordToolExecution: (toolName: string, isError: boolean) => {
-				if (inactive()) return;
-				managed.record.toolExecutions ??= {};
-				managed.record.toolExecutions[toolName] ??= { ok: 0, error: 0 };
-				const counts = managed.record.toolExecutions[toolName];
-				if (isError) counts.error++;
-				else counts.ok++;
-			},
-			recordUsage: (delta: Partial<SubagentUsageTotals>) => {
-				if (inactive()) return;
-				managed.usage.addTurn(delta);
-				managed.record.usage = managed.usage.totals;
-			},
-			recordNestedUsage: (delta: Partial<SubagentUsageTotals>) => {
-				if (inactive()) return;
-				managed.usage.addNested(delta);
-				managed.record.usage = managed.usage.totals;
+				managed.record.usage = structuredClone(totals);
 			},
 			updateProgress: (text: string) => {
 				if (inactive()) return;
@@ -561,7 +481,6 @@ export class SubagentRunScheduler<C = unknown> {
 		managed.record.endedAt = this.now();
 		managed.record.complete = finalStatus === "completed" ? outcome.complete : false;
 		managed.record.summaryText = outcome.summaryText;
-		if (outcome.childSessionId) managed.record.childSessionId = outcome.childSessionId;
 		if (outcome.transcriptPath) managed.record.transcriptPath = outcome.transcriptPath;
 		if (outcome.reportPath) managed.record.reportPath = outcome.reportPath;
 		if (outcome.endSnapshot) {
@@ -576,7 +495,6 @@ export class SubagentRunScheduler<C = unknown> {
 		if (outcome.errorMessage) {
 			managed.record.errorMessage = outcome.errorMessage;
 		}
-		managed.record.usageAttribution = managed.usage.settle();
 
 		let finalized: SubagentRunRecord = { ...structuredClone(managed.record), status: finalStatus };
 		if (this.onFinalize) {

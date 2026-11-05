@@ -244,8 +244,6 @@ describe.skipIf(!hasTmux)("resuming a closed run", () => {
 			deliveryMode: "background",
 			status: "completed",
 			complete: true,
-			turnCount: 1,
-			toolCallCount: 0,
 			usage: createEmptySubagentUsage(),
 			backgroundDeliveryAttempted: true,
 		});

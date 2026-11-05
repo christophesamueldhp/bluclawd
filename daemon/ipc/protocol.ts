@@ -113,6 +113,8 @@ export type SessionMessage = { type: "session_message"; from: string; name?: str
 			text: string;
 			/** The run's session usage so far, as pi totals it. Each report repeats the whole total. */
 			usage?: SessionUsage;
+			/** The session `usage` is of: a `/new` in the run starts another. */
+			sessionId?: string;
 	  }
 	| { kind: "message" | "typed"; text: string }
 	| { kind: "activity"; activity: AgentActivity; dialog?: string }

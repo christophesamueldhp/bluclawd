@@ -17,27 +17,6 @@ export interface SubagentUsageTotals {
 	hasUnknownCost: boolean;
 }
 
-/**
- * How a generation started. The SDK folds nested usage into a launch tool result until that result is
- * emitted; only a foreground result also carries the run's own usage. A resume's launch result is the result of
- * the message call that resumed it.
- */
-export type GenerationKind = "foreground" | "background" | "resume";
-
-/** Where a generation's usage went: pi's own totals through the tool result, or the background ledger. */
-export type UsageAttribution = "tool_result" | "ledger";
-
-/** Counts one generation's usage so that each token is attributed exactly once. */
-export interface GenerationUsage {
-	/** A copy of the usage this generation must attribute. */
-	readonly totals: SubagentUsageTotals;
-	addTurn(delta: Partial<SubagentUsageTotals>): void;
-	/** Usage reported by an orchestrator tool the child ran. */
-	addNested(delta: Partial<SubagentUsageTotals>): void;
-	launchResultEmitted(): void;
-	settle(): UsageAttribution;
-}
-
 export function createEmptySubagentUsage(): SubagentUsageTotals {
 	return {
 		input: 0,
@@ -93,39 +72,4 @@ export function sessionUsage(entries: readonly SessionEntry[]): SubagentUsageTot
 		if (counted) addSubagentUsage(totals, counted);
 	}
 	return totals;
-}
-
-export function createGenerationUsage(options: { kind: GenerationKind }): GenerationUsage {
-	const totals = createEmptySubagentUsage();
-	let emitted = false;
-	return {
-		get totals() {
-			return structuredClone(totals);
-		},
-		addTurn: (delta) => addSubagentUsage(totals, delta),
-		addNested: (delta) => {
-			if (emitted) addSubagentUsage(totals, delta);
-		},
-		launchResultEmitted: () => {
-			emitted = true;
-		},
-		settle: () => (options.kind === "foreground" && !emitted ? "tool_result" : "ledger"),
-	};
-}
-
-export function toPiToolUsage(totals: SubagentUsageTotals): Usage {
-	return {
-		input: totals.input,
-		output: totals.output,
-		cacheRead: totals.cacheRead,
-		cacheWrite: totals.cacheWrite,
-		totalTokens: totals.totalTokens,
-		cost: {
-			input: totals.cost.input,
-			output: totals.cost.output,
-			cacheRead: totals.cost.cacheRead,
-			cacheWrite: totals.cost.cacheWrite,
-			total: totals.cost.total,
-		},
-	};
 }

@@ -55,7 +55,10 @@ export interface AgentTaskSource {
 	stop(id: string, options?: AgentTaskStopOptions): AgentTaskStopResult;
 	/** Stops every running task the owner has; returns how many were stopped. */
 	stopAll(options?: AgentTaskStopOptions): number;
-	/** Opens a run's transcript and resolves once it closes; undefined when the run is not of the current session. */
+	/**
+	 * Opens a run: switches the terminal to its pi session, reopening a closed run's session first. Undefined when
+	 * the run is not of the current session.
+	 */
 	open?(id: string, owner?: string): Promise<void> | undefined;
 	/** The owner's finished runs of its current session epoch that were not dismissed; none known only from disk. */
 	listDone?(owner?: string): AgentTask[];

@@ -51,7 +51,7 @@ export function renderPanel(options: {
 		? [
 				theme.fg(
 					"dim",
-					`  ↑/↓ to select · x to ${isTerminalSubagentStatus(current.record.status) ? "dismiss" : current.record.pane ? "close" : "stop"} · Esc to go back`,
+					`  ↑/↓ to select · x to ${isTerminalSubagentStatus(current.record.status) ? "dismiss" : "close"} · Esc to go back`,
 				),
 			]
 		: [];
@@ -69,7 +69,7 @@ export interface PanelActions {
 }
 
 /**
- * The panel as a TUI component that can take the keyboard from the prompt: ↑/↓ pick a row, `x` stops or
+ * The panel as a TUI component that can take the keyboard from the prompt: ↑/↓ pick a row, `x` closes or
  * dismisses it, Enter opens it, Esc gives the keyboard back. Any other key goes back to the prompt with it.
  * Under pistatusline it renders nothing itself: its `lines` go out as a status, which pistatusline draws below
  * the status line, and `changed` republishes them whenever the selection or the focus moves.

@@ -6,14 +6,11 @@ import { readPersistedRunRecord } from "./storage.ts";
 /** How long a Run that succeeded stays in the panel after it ends. */
 const SUCCEEDED_RUN_LINGER_MS = 30_000;
 
-/** Whether a stop can reach the Run: not once its last turn ended. */
-export const canStop = (entry: RunEntry) => entry.state !== "finishing" && entry.state !== "finished";
+/** Whether a close can reach the Run: not once it is final. */
+export const canStop = (entry: RunEntry) => entry.state !== "finished";
 
 export interface ParentScopeViewsDeps {
-	scheduler: Pick<
-		SubagentRunScheduler<{ runtime?: string; resume?: { toolCallId: string } }>,
-		"listRuns" | "getContext"
-	>;
+	scheduler: Pick<SubagentRunScheduler, "listRuns">;
 	directory: Pick<RunDirectory, "get" | "list">;
 	agentDir: () => string;
 	/** The orchestrator's current Parent scope; none before the first session starts. */
@@ -127,13 +124,5 @@ export function createParentScopeViews(deps: ParentScopeViewsDeps) {
 		/** An open Run by name or run ID. */
 		findOpen: (target: string): RunEntry | undefined =>
 			open().find(({ record }) => record.runId === target || record.name === target),
-		/** The open Run a tool call launched; a resumed Generation runs under the message call that resumed it. */
-		launchedBy: (toolCallId: string) =>
-			open()
-				.map((entry) => entry.record)
-				.find(
-					(run) =>
-						(deps.scheduler.getContext(run.runId)?.resume?.toolCallId ?? run.originToolCallId) === toolCallId,
-				),
 	};
 }

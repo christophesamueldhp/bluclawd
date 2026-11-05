@@ -1,11 +1,8 @@
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { type Static, Type } from "@earendil-works/pi-ai";
-import {
-	type ExtensionContext,
-	type ExtensionToolContext,
-	SettingsManager,
-	type ToolLoadout,
-} from "@earendil-works/pi-coding-agent";
+import { type ExtensionContext, SettingsManager } from "@earendil-works/pi-coding-agent";
 import * as forkSettings from "../_shared/settings.ts";
 import { evaluateSubagentDelegationDeny } from "../permissions/policy.ts";
 import {
@@ -22,60 +19,58 @@ import {
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import type { RunDirectory } from "./directory.ts";
 import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
+import { resolveChildModelAndRuntime } from "./models.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
-import {
-	captureWorkspaceSnapshot,
-	type ParentToolSnapshot,
-	type ResolvedChildModel,
-	resolveChildModelAndRuntime,
-	snapshotParentTools,
-} from "./runner.ts";
 import {
 	type AdmittedSubagentHandle,
 	createRunId,
 	isResumableSubagentStatus,
 	type SubagentRunRecord,
 	type SubagentRunScheduler,
+	type WorkspaceSnapshot,
 } from "./runs.ts";
-import { ensureRunStorageDir } from "./storage.ts";
+import { ensureRunStorageDir, recordCountedSessionUsage } from "./storage.ts";
 import type { RunLaunch } from "./tmux-runs.ts";
 
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
-/** Recorded until the child session reports the level the SDK chose for its model. */
+/** Recorded when no level is chosen: the run's pi picks its model's default. */
 const SDK_DEFAULT_THINKING = "model default";
 /** How many runs an orchestrator holds open at once: each is a full pi. */
 export const MAX_OPEN_RUNS = 8;
 const TOO_MANY_OPEN = `An orchestrator holds at most ${MAX_OPEN_RUNS} open subagents. Close one whose work is done with subagent_close, then try again.`;
 export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-/** Pi built-in extensions a child runs itself, over its own copies of the orchestrator's tools. */
-const CHILD_BUILTIN_EXTENSIONS = ["codemode", "tool_search"];
+export const NEEDS_TMUX =
+	"Subagents need tmux: each run is a pi session of its own in agent view's tmux server, and this pi does not run there. Install tmux if it is missing (brew install tmux), then start pi again in a terminal.";
 
-/** What a run needs from its admission to execute: in the orchestrator's process, or as a pi of its own. */
-export type RunExecutionContext = InProcessRunContext | TmuxRunContext;
-
-/** A run started as a pi of its own in tmux (ADR-0006): its role goes out as its launch flags. */
-export interface TmuxRunContext {
-	runtime: "tmux";
+/** What a run needs from its admission to execute: it starts as a pi of its own in tmux (ADR-0006), its role as its launch flags. */
+export interface RunExecutionContext {
 	launch: RunLaunch;
 }
 
-/** A run inside the orchestrator's process, whose tools run through the orchestrator's. */
-export interface InProcessRunContext {
-	runtime?: "in-process";
-	agentDir: string;
-	definition: AgentDefinition;
-	task: string;
-	parent: Pick<ExtensionToolContext, "executeTool">;
-	parentTools: readonly ParentToolSnapshot[];
-	activeToolNames: readonly string[];
-	builtinExtensions: readonly string[];
-	childModel: ResolvedChildModel;
-	/**
-	 * Set when the orchestrator resumes a completed run: its transcript, the message to continue with, and the
-	 * message tool call the resumed child runs under.
-	 */
-	resume?: { transcriptPath: string; prompt: string; toolCallId: string };
-	projectTrusted: boolean;
+export function captureWorkspaceSnapshot(cwd: string): WorkspaceSnapshot {
+	try {
+		const headRes = spawnSync("git", ["rev-parse", "--verify", "HEAD"], {
+			cwd,
+			encoding: "utf8",
+			timeout: 2000,
+		});
+		const headCommit = headRes.status === 0 ? headRes.stdout.trim() || null : null;
+
+		const statusRes = spawnSync("git", ["status", "--porcelain=v1", "-uall"], {
+			cwd,
+			encoding: "utf8",
+			timeout: 2000,
+		});
+		if (statusRes.status !== 0) {
+			return { headCommit, dirty: false, statusDigest: "" };
+		}
+		const rawStatus = statusRes.stdout ?? "";
+		const dirty = rawStatus.trim().length > 0;
+		const statusDigest = dirty ? createHash("sha256").update(rawStatus).digest("hex").slice(0, 16) : "";
+		return { headCommit, dirty, statusDigest };
+	} catch {
+		return { headCommit: null, dirty: false, statusDigest: "" };
+	}
 }
 
 export const SUBAGENT_TOOL_PARAMETERS = Type.Object({
@@ -137,13 +132,12 @@ export interface LaunchRequest {
 	signal?: AbortSignal;
 }
 
-/** The parts of the calling tool's context admission reads. Without `executeTool` a run is refused. */
+/** The parts of the calling tool's context admission reads. */
 export type AdmissionContext = Pick<
 	ExtensionContext,
 	"cwd" | "mode" | "model" | "modelRegistry" | "isProjectTrusted"
 > & {
 	sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId" | "getLeafId" | "getBranch">;
-	executeTool?: ExtensionToolContext["executeTool"];
 };
 
 export interface RunAdmissionDeps {
@@ -153,11 +147,10 @@ export interface RunAdmissionDeps {
 	agentDir: () => string;
 	/** Saved roles frozen at session start; discovered on demand when session start was skipped. */
 	catalog: () => AgentDefinitionCatalog | undefined;
-	loadout: () => ToolLoadout | undefined;
 	parentThinkingLevel: () => string;
 	scope: ParentScopeChecks;
-	/** The orchestrator's tmux session: while it has one, a run starts as a pi of its own there (ADR-0006). */
-	pane?: () => string | undefined;
+	/** The orchestrator's tmux session, where its runs start as pis of their own; without one, none starts. */
+	pane: () => string | undefined;
 }
 
 export type AdmissionResult =
@@ -173,17 +166,14 @@ export interface RunAdmission {
 	launch(request: LaunchRequest, ctx: AdmissionContext): Promise<AdmissionResult>;
 	/**
 	 * Admits a completed or closed run's next generation. `buildPrompt` is called only once every check has
-	 * passed, just before the run starts again. A run in tmux may resume without one, for the user to type in.
+	 * passed, just before the run starts again. Without one, the run resumes for the user to type in.
 	 */
 	resume(
 		run: Readonly<SubagentRunRecord>,
-		toolCallId: string,
 		buildPrompt: (() => string) | undefined,
 		ctx: AdmissionContext,
 	): Promise<AdmissionResult>;
 }
-
-type ChildTools = Pick<InProcessRunContext, "parent" | "parentTools" | "activeToolNames" | "builtinExtensions">;
 
 function summarizeTaskLabel(task: string): string {
 	const firstLine =
@@ -214,43 +204,11 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 	const deniedReason = (agentName: string, ctx: AdmissionContext): string | undefined =>
 		delegationDenied(agentName, ctx.cwd, deps.agentDir(), ctx.isProjectTrusted());
 
-	// The orchestrator's callable tools, narrowed by the role's tool list.
-	const selectChildTools = (
-		definition: AgentDefinition,
-		ctx: AdmissionContext,
-	): { tools: ChildTools; error?: never } | { tools?: never; error: string } => {
-		const loadout = deps.loadout();
-		if (!ctx.executeTool || !loadout)
-			return { error: "Subagent dispatch needs the orchestrator's live tool context." };
-		const declaredNames = new Set(loadout.declared.map((tool) => tool.name));
-		const callableNames = loadout.callable.map((tool) => tool.name);
-		const builtinNames = CHILD_BUILTIN_EXTENSIONS.filter((name) => declaredNames.has(name));
-		const availableNames = [...callableNames, ...builtinNames];
-		const unknownTools = definition.tools?.filter((name) => !availableNames.includes(name)) ?? [];
-		if (unknownTools.length > 0) {
-			return {
-				error: `Subagent role "${definition.name}" names tools the orchestrator cannot give a child: ${unknownTools.join(", ")}. Available: ${availableNames.join(", ") || "none"}.`,
-			};
-		}
-		const selectedNames = definition.tools ?? availableNames;
-		return {
-			tools: {
-				parent: ctx as Pick<ExtensionToolContext, "executeTool">,
-				parentTools: snapshotParentTools(
-					loadout,
-					callableNames.filter((name) => selectedNames.includes(name)),
-				),
-				activeToolNames: selectedNames.filter((name) => declaredNames.has(name)),
-				builtinExtensions: builtinNames.filter((name) => selectedNames.includes(name)),
-			},
-		};
-	};
-
 	const resolveChildModel = async (
 		requestedModel: SubagentModelSpec,
 		requestedThinkingLevel: string | undefined,
 		ctx: AdmissionContext,
-	): Promise<{ childModel: ResolvedChildModel; error?: never } | { childModel?: never; error: string }> => {
+	) => {
 		const resolved = await resolveChildModelAndRuntime({
 			agentDir: deps.agentDir(),
 			requestedModel,
@@ -258,14 +216,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			requestedThinkingLevel,
 			parentModelRegistry: ctx.modelRegistry,
 		});
-		if (!resolved.ok) return { error: sanitizeDiagnosticText(resolved.error) };
-		return {
-			childModel: {
-				model: resolved.model,
-				modelRuntime: resolved.modelRuntime,
-				thinkingLevel: resolved.thinkingLevel,
-			},
-		};
+		return resolved.ok ? resolved : { ...resolved, error: sanitizeDiagnosticText(resolved.error) };
 	};
 
 	/**
@@ -302,14 +253,15 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		if (denied) return refuse.unavailable(denied);
 		const storage = ensureRunStorageDir(deps.agentDir(), current.parentSessionId, current.runId);
 		if (!storage.ok) return refuse.unavailable(`Cannot resume ${label}: storage is unavailable (${storage.error}).`);
+		// A run from before runs were pis of their own had its session's usage counted by its orchestrator already.
+		if (!current.pane) recordCountedSessionUsage(deps.agentDir(), current.parentSessionId, sessionFile);
 		const previous = deps.scheduler.getContext(current.runId);
 		const resumed = deps.scheduler.resume(
 			current.runId,
 			{
-				runtime: "tmux",
 				launch: {
 					name: current.name ?? current.runId,
-					definition: previous?.runtime === "tmux" ? previous.launch.definition : roleOf(current, ctx),
+					definition: previous ? previous.launch.definition : roleOf(current, ctx),
 					model: `${current.provider}/${current.modelId}`,
 					thinkingLevel: current.thinkingLevel === SDK_DEFAULT_THINKING ? undefined : current.thinkingLevel,
 					task: buildPrompt?.(),
@@ -352,6 +304,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 
 	return {
 		async launch({ toolCallId, parentTurnId, params, signal }, ctx) {
+			// A run is a pi of its own in tmux (ADR-0006): there is no other way to run one.
+			const parentPane = deps.pane();
+			if (parentPane === undefined) return reject(NEEDS_TMUX);
 			const dispatched = deps.scope.current();
 			if (!dispatched) return reject("Subagent runtime is not initialized for this session.");
 			const parentSessionId = ctx.sessionManager.getSessionId();
@@ -395,15 +350,6 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			}
 			const definition = resolvedDef.definition;
 
-			// A run in tmux takes the role's tools as its own; a run in process gets the orchestrator's.
-			const parentPane = deps.pane?.();
-			let tools: ChildTools | undefined;
-			if (parentPane === undefined) {
-				const selected = selectChildTools(definition, ctx);
-				if (!selected.tools) return reject(selected.error);
-				tools = selected.tools;
-			}
-
 			// Spawn > role > parent for the model and thinking level, verified before admission.
 			const spawnModel = params.model === undefined ? undefined : parseSubagentModelSpec(params.model);
 			if (params.model !== undefined && !spawnModel) {
@@ -429,8 +375,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			// A chosen model without a level gets the SDK's default for that model; an inherited one keeps the parent's.
 			const requestedThinkingLevel =
 				explicitThinkingLevel ?? (requestedModel === "inherit" ? parentThinkingLevel : undefined);
-			const { childModel, error: modelError } = await resolveChildModel(requestedModel, requestedThinkingLevel, ctx);
-			if (!childModel) return reject(modelError);
+			const childModel = await resolveChildModel(requestedModel, requestedThinkingLevel, ctx);
+			if (!childModel.ok) return reject(childModel.error);
 
 			// Everything from here to admit runs without awaiting, so the session cannot change in between.
 			if (
@@ -496,32 +442,26 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				taskSummary: summarizeTaskLabel(taskText),
 				startSnapshot,
 				deliveryMode: isBackground ? "background" : "foreground",
-				// Foreground runs link to the invoking tool call's signal; background runs outlive the launch tool call,
-				// and so does a run in tmux, whose foreground call only stops waiting for its Report.
-				signal: isBackground || parentPane !== undefined ? undefined : signal,
-				context:
-					parentPane !== undefined
-						? {
-								runtime: "tmux",
-								launch: {
-									name: runName,
-									definition,
-									model: `${childModel.model.provider}/${childModel.model.id}`,
-									thinkingLevel: childModel.thinkingLevel,
-									task: taskText,
-									cwd,
-									runDir: storage.runDir,
-									parent: parentPane,
-									projectTrusted,
-								},
-							}
-						: { agentDir, definition, task: taskText, ...tools!, childModel, projectTrusted },
+				// Not linked to the call's signal: an aborted foreground call only stops waiting for the run's Report.
+				context: {
+					launch: {
+						name: runName,
+						definition,
+						model: `${childModel.model.provider}/${childModel.model.id}`,
+						thinkingLevel: childModel.thinkingLevel,
+						task: taskText,
+						cwd,
+						runDir: storage.runDir,
+						parent: parentPane,
+						projectTrusted,
+					},
+				},
 			});
 			if (!admitRes.ok) return reject(admitRes.error);
 			return { ok: true, handle: admitRes.handle };
 		},
 
-		async resume(run, toolCallId, buildPrompt, ctx) {
+		async resume(run, buildPrompt, ctx) {
 			const label = formatRunLabel(run);
 			const invalidated: AdmissionResult = {
 				ok: false,
@@ -534,59 +474,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					`Resuming ${label} is not supported in one-shot "${ctx.mode}" mode because a resume runs in the background and the process exits before it completes.`,
 				);
 			}
-			const parentPane = deps.pane?.();
-			if (parentPane !== undefined)
-				return resumeInTmux(run, parentPane, buildPrompt, ctx, { invalidated, unavailable });
-			if (!buildPrompt) return unavailable(`${label} needs a message to resume with.`);
-			// Checked again after the model is resolved, since another message may resume the run meanwhile.
-			const checkResumable = (): { transcriptPath: string; refused?: never } | { refused: AdmissionResult } => {
-				const current = deps.scheduler.getRun(run.runId);
-				if (!current || !deps.scope.inScope(current)) {
-					return { refused: invalidated };
-				}
-				if (current.status !== "completed") {
-					return {
-						refused: unavailable(`${label} is ${current.status}; only a completed subagent can be resumed.`),
-					};
-				}
-				if (!current.transcriptPath) return { refused: unavailable(`${label} has no saved transcript to resume.`) };
-				const holder = current.name ? deps.directory.nameHolder(current, current.name)?.record : undefined;
-				if (holder)
-					return { refused: unavailable(`${label} cannot resume: its name is now used by ${holder.runId}.`) };
-				return { transcriptPath: current.transcriptPath };
-			};
-
-			const beforeModel = checkResumable();
-			if (beforeModel.refused) return beforeModel.refused;
-			const previous = deps.scheduler.getContext(run.runId);
-			if (!previous) return invalidated;
-			// A run in tmux never completes: it stays open until it is stopped.
-			if (previous.runtime === "tmux") return unavailable(`${label} runs in a session of its own.`);
-
-			const denied = deniedReason(run.agentName, ctx);
-			if (denied) return unavailable(denied);
-			// The run keeps its role, inline ones included, but gets the orchestrator's tools as they are now.
-			const { tools, error: toolsError } = selectChildTools(previous.definition, ctx);
-			if (!tools) return unavailable(toolsError);
-			// The run keeps the model and level it ran with; a level the SDK chose is chosen again.
-			const { childModel, error: modelError } = await resolveChildModel(
-				`${run.provider}/${run.modelId}`,
-				run.thinkingLevel === SDK_DEFAULT_THINKING ? undefined : run.thinkingLevel,
-				ctx,
-			);
-			if (!childModel) return unavailable(modelError);
-
-			const resumable = checkResumable();
-			if (resumable.refused) return resumable.refused;
-			const resumed = deps.scheduler.resume(run.runId, {
-				...previous,
-				...tools,
-				childModel,
-				projectTrusted: ctx.isProjectTrusted(),
-				resume: { transcriptPath: resumable.transcriptPath, prompt: buildPrompt(), toolCallId },
-			});
-			if (!resumed.ok) return unavailable(resumed.error);
-			return { ok: true, handle: resumed.handle };
+			const parentPane = deps.pane();
+			if (parentPane === undefined) return unavailable(NEEDS_TMUX);
+			return resumeInTmux(run, parentPane, buildPrompt, ctx, { invalidated, unavailable });
 		},
 	};
 }

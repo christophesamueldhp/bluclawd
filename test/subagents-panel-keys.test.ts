@@ -9,7 +9,7 @@ import paste from "../ext/paste/index.ts";
 import promptAssist from "../ext/prompt-assist/index.ts";
 import { SUBAGENT_NOTIFICATION_CUSTOM_TYPE } from "../ext/subagents/index.ts";
 import { readPersistedRunRecord } from "../ext/subagents/storage.ts";
-import { createSubagentTui, gate, launch, REPORT, type SubagentTui } from "./helpers/subagent-tui.ts";
+import { createSubagentTui, launch, type SubagentTui } from "./helpers/subagent-tui.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 // Prompt assistance reads its preferences from the real agent dir; point it at the faux provider.
@@ -34,48 +34,51 @@ const selected = (t: SubagentTui) => t.panel().find((line) => line.startsWith("�
 const prompt = (t: SubagentTui, text = "Delegate.") => t.session.prompt(text, { expandPromptTemplates: false });
 const readRecord = (t: SubagentTui, runId: string) => readPersistedRunRecord(t.agentDir, t.session.sessionId, runId);
 
-/** A session with background runs `names` that keep running until `child.open()`. */
-async function withRunningRuns(names: string[]) {
+/** Closes the run launched as `name`, as `/tasks` does. */
+const close = (t: SubagentTui, name: string) => {
+	const owner = t.session.sessionId;
+	const task = agentTasks()
+		?.list(owner)
+		.find((candidate) => candidate.summary === `Task for ${name}`);
+	if (!task) throw new Error(`No open run ${name}.`);
+	expect(agentTasks()?.stop(task.id, { owner })).toMatchObject({ ok: true });
+};
+
+/** A session with open background runs `names`. */
+async function withOpenRuns(names: string[]) {
 	const t = await createSubagentTui();
 	tui = t;
-	const child = gate();
-	t.script([launch(names, { background: true })], async () => {
-		await child.wait;
-		return fauxAssistantMessage(REPORT);
-	});
+	t.script([launch(names, { background: true })]);
 	await prompt(t);
 	await waitFor(() => names.every((name) => row(t, name)));
-	return { t, child };
+	return t;
 }
 
 describe("reaching the panel from the keyboard", () => {
 	it("moves focus into the panel with ↓ on an empty prompt, on the first row", async () => {
-		const { t, child } = await withRunningRuns(["scout", "mapper"]);
+		const t = await withOpenRuns(["scout", "mapper"]);
 		const first = t.panel()[1].trim().split(" ")[0];
 
 		t.press(DOWN);
 		expect(t.editorFocused()).toBe(false);
 		expect(selected(t)).toMatch(new RegExp(`^❯ ${first} `));
-		child.open();
 	});
 
 	it("leaves ↓ to the prompt while it has a draft", async () => {
-		const { t, child } = await withRunningRuns(["scout"]);
+		const t = await withOpenRuns(["scout"]);
 
 		t.press("h", "i", DOWN);
 		expect(t.editorFocused()).toBe(true);
 		expect(selected(t)).toBeUndefined();
-		child.open();
 	});
 
 	it("leaves ↓ alone while an overlay is shown", async () => {
-		const { t, child } = await withRunningRuns(["scout"]);
+		const t = await withOpenRuns(["scout"]);
 
 		t.setOverlay(true);
 		t.press(DOWN);
 		expect(t.editorFocused()).toBe(true);
 		expect(selected(t)).toBeUndefined();
-		child.open();
 	});
 
 	it("does nothing on ↓ while there are no runs to show", async () => {
@@ -90,11 +93,7 @@ describe("reaching the panel from the keyboard", () => {
 	it("keeps ↓ for prompt history while browsing it, then moves into the panel", async () => {
 		const t = await createSubagentTui({ extensions: [paste] });
 		tui = t;
-		const child = gate();
-		t.script([launch(["scout"], { background: true })], async () => {
-			await child.wait;
-			return fauxAssistantMessage(REPORT);
-		});
+		t.script([launch(["scout"], { background: true })]);
 		await prompt(t);
 		await waitFor(() => row(t, "scout"));
 		(t.editor() as unknown as { addToHistory(text: string): void }).addToHistory("Earlier prompt");
@@ -106,7 +105,6 @@ describe("reaching the panel from the keyboard", () => {
 		expect(t.editorFocused()).toBe(true);
 		t.press(DOWN);
 		expect(t.editorFocused()).toBe(false);
-		child.open();
 	});
 });
 
@@ -130,51 +128,27 @@ describe("↓ with background shells running", () => {
 
 	it("goes to the panel while it shows rows", async () => {
 		const t = await withShell();
-		const child = gate();
-		t.script([launch(["scout"], { background: true })], async () => {
-			await child.wait;
-			return fauxAssistantMessage(REPORT);
-		});
+		t.script([launch(["scout"], { background: true })]);
 		await prompt(t);
 		await waitFor(() => row(t, "scout"));
 
 		t.press(DOWN);
 		expect(selected(t)).toMatch(/^❯ scout /);
 		expect(t.status(STATUS_KEYS.tasks)).not.toContain("Enter to view tasks");
-		child.open();
 	});
 
-	it("has the pill offer /tasks instead of ↓ while the panel shows rows", async () => {
+	it("has the pill offer /tasks instead of ↓ while the panel shows rows, and ↓ again once they leave", async () => {
 		const t = await withShell();
 		expect(t.status(STATUS_KEYS.tasks)).toContain("↓ to manage");
-		const child = gate();
-		t.script([launch(["scout"], { background: true })], async () => {
-			await child.wait;
-			return fauxAssistantMessage(REPORT);
-		});
+		t.script([launch(["scout"], { background: true })]);
 		await prompt(t);
 		await waitFor(() => row(t, "scout"));
 		expect(t.status(STATUS_KEYS.tasks)).not.toContain("↓");
 		expect(t.status(STATUS_KEYS.tasks)).toContain("/tasks to manage");
 
-		child.open();
-		await waitFor(() => row(t, "scout")?.includes("completed") ?? false);
 		t.press(DOWN, "x");
-		expect(t.panel()).toEqual([]);
+		await waitFor(() => t.panel().length === 0);
 		expect(t.status(STATUS_KEYS.tasks)).toContain("↓ to manage");
-	});
-
-	it("has the pill offer ↓ again as soon as /tasks dismisses the panel's last row", async () => {
-		const t = await withShell();
-		t.script([launch(["scout"], { background: true })]);
-		await prompt(t);
-		await waitFor(() => row(t, "scout")?.includes("completed") ?? false);
-		expect(t.status(STATUS_KEYS.tasks)).toContain("/tasks to manage");
-
-		const [done] = agentTasks()?.listDone?.(t.session.sessionId) ?? [];
-		expect(agentTasks()?.dismiss?.(done.id, t.session.sessionId)).toBe(true);
-		expect(t.status(STATUS_KEYS.tasks)).toContain("↓ to manage");
-		expect(t.panel()).toEqual([]);
 	});
 
 	it("still selects the tasks pill while the panel is empty", async () => {
@@ -188,7 +162,7 @@ describe("↓ with background shells running", () => {
 
 describe("a focused panel", () => {
 	it("moves between rows with ↑/↓, staying within them", async () => {
-		const { t, child } = await withRunningRuns(["scout", "mapper", "fixer"]);
+		const t = await withOpenRuns(["scout", "mapper", "fixer"]);
 
 		// Sibling launches are admitted in no set order.
 		const [first, , last] = t
@@ -202,96 +176,69 @@ describe("a focused panel", () => {
 		expect(selected(t)).toMatch(new RegExp(`^❯ ${last} `));
 		t.press(UP, UP, UP);
 		expect(selected(t)).toMatch(new RegExp(`^❯ ${first} `));
-		child.open();
 	});
 
-	/** Three running runs, each finishing when its own gate opens; names in panel order. */
-	async function withSeparateRuns() {
-		const t = await createSubagentTui();
-		tui = t;
-		const gates = new Map(["scout", "mapper", "fixer"].map((name) => [name, gate()]));
-		t.script([launch([...gates.keys()], { background: true })], async (context) => {
-			// The child's task leads its first message; the roster after it names the siblings' tasks too.
-			const task = JSON.stringify(context.messages.find((m) => m.role === "user"));
-			await [...gates].find(([name]) => task.includes(`"text":"Task for ${name}\\n`))?.[1].wait;
-			return fauxAssistantMessage(REPORT);
-		});
-		await prompt(t);
-		await waitFor(() => [...gates.keys()].every((name) => row(t, name)));
+	/** Three open runs; names in panel order. */
+	async function withThreeRuns() {
+		const t = await withOpenRuns(["scout", "mapper", "fixer"]);
 		const names = t
 			.panel()
 			.slice(1, 4)
 			.map((line) => line.trim().split(" ")[0]);
-		/** Lets `name` finish and waits until it has left the panel. */
-		const finish = async (name: string) => {
-			gates.get(name)?.open();
-			await waitFor(() => row(t, name)?.includes("completed") ?? false);
-			t.advance(31_000);
-			await waitFor(() => !row(t, name));
-		};
-		const openAll = () => {
-			for (const g of gates.values()) g.open();
-		};
-		return { t, names, finish, openAll };
+		return { t, names };
 	}
 
 	it("stays on the same run when a row above it leaves", async () => {
-		const { t, names, finish, openAll } = await withSeparateRuns();
+		const { t, names } = await withThreeRuns();
 
 		t.press(DOWN, DOWN);
 		expect(selected(t)).toMatch(new RegExp(`^❯ ${names[1]} `));
-		await finish(names[0]);
+		close(t, names[0]);
+		await waitFor(() => !row(t, names[0]));
 		expect(selected(t)).toMatch(new RegExp(`^❯ ${names[1]} `));
-		openAll();
 	});
 
 	it("moves to the nearest row when the selected run leaves", async () => {
-		const { t, names, finish, openAll } = await withSeparateRuns();
+		const { t, names } = await withThreeRuns();
 
 		t.press(DOWN, DOWN);
-		await finish(names[1]);
+		close(t, names[1]);
+		await waitFor(() => !row(t, names[1]));
 		expect(selected(t)).toMatch(new RegExp(`^❯ ${names[2]} `));
-		openAll();
 	});
 
 	it("says which keys it takes", async () => {
-		const { t, child } = await withRunningRuns(["scout"]);
+		const t = await withOpenRuns(["scout"]);
 
 		t.press(DOWN);
-		expect(t.panel().at(-1)).toBe("  ↑/↓ to select · x to stop · Esc to go back");
-		child.open();
+		expect(t.panel().at(-1)).toBe("  ↑/↓ to select · x to close · Esc to go back");
 	});
 
 	it("gives the keyboard back to the prompt on Esc", async () => {
-		const { t, child } = await withRunningRuns(["scout"]);
+		const t = await withOpenRuns(["scout"]);
 
 		t.press(DOWN, ESC, "o", "k");
 		expect(t.editorFocused()).toBe(true);
 		expect(selected(t)).toBeUndefined();
 		expect(t.editorText()).toBe("ok");
-		child.open();
 	});
 
 	it("hands a typed character back to the prompt with the keyboard", async () => {
-		const { t, child } = await withRunningRuns(["scout"]);
+		const t = await withOpenRuns(["scout"]);
 
 		t.press(DOWN, "h");
 		expect(t.editorFocused()).toBe(true);
 		expect(t.editorText()).toBe("h");
-		child.open();
 	});
 
 	it("gives the keyboard back once its last run has left", async () => {
-		tui = await createSubagentTui();
-		tui.script([launch(["scout"], { background: true })]);
-		await prompt(tui);
-		await waitFor(() => row(tui!, "scout")?.includes("completed") ?? false);
+		const t = await withOpenRuns(["scout"]);
 
-		tui.press(DOWN);
-		expect(tui.editorFocused()).toBe(false);
-		tui.advance(31_000);
-		await waitFor(() => tui!.editorFocused());
-		expect(tui.panel()).toEqual([]);
+		t.press(DOWN);
+		expect(t.editorFocused()).toBe(false);
+		close(t, "scout");
+		await waitFor(() => t.editorFocused());
+		expect(t.panel()).toEqual([]);
 	});
 });
 
@@ -299,17 +246,8 @@ describe("the prompt's editor wrappers with the panel present", () => {
 	it("keeps prompt-assistance suggestions and collapsed pastes working", async () => {
 		const t = await createSubagentTui({ extensions: [paste, promptAssist] });
 		tui = t;
-		const child = gate();
-		t.script(
-			[launch(["scout"], { background: true })],
-			async () => {
-				await child.wait;
-				return fauxAssistantMessage(REPORT);
-			},
-			(context) =>
-				fauxAssistantMessage(
-					JSON.stringify(context.messages).includes("Predict the next") ? "Check the report" : "",
-				),
+		t.script([launch(["scout"], { background: true })], (context) =>
+			fauxAssistantMessage(JSON.stringify(context.messages).includes("Predict the next") ? "Check the report" : ""),
 		);
 		await prompt(t);
 		await waitFor(() => row(t, "scout"));
@@ -327,45 +265,37 @@ describe("the prompt's editor wrappers with the panel present", () => {
 		t.press(DOWN, `\x1b[200~${pasted}\x1b[201~`);
 		expect(t.editorFocused()).toBe(true);
 		expect(t.editorText()).toMatch(/^\[Pasted text #1/);
-		child.open();
 	});
 });
 
 describe("x on a row", () => {
-	it("stops a running run the way a /tasks stop does, without waking the orchestrator", async () => {
+	it("closes the run the way a /tasks stop does, ending its pi without waking the orchestrator", async () => {
 		const t = await createSubagentTui();
 		tui = t;
-		const child = gate();
 		let parentTurns = 0;
-		t.script(
-			[
-				() => {
-					parentTurns++;
-					return launch(["scout"], { background: true })();
-				},
-				() => {
-					parentTurns++;
-					return fauxAssistantMessage("Launched; waiting.");
-				},
-				() => {
-					parentTurns++;
-					return fauxAssistantMessage("Woken.");
-				},
-			],
-			async () => {
-				await child.wait;
-				return fauxAssistantMessage(REPORT);
+		t.script([
+			() => {
+				parentTurns++;
+				return launch(["scout"], { background: true })();
 			},
-		);
+			() => {
+				parentTurns++;
+				return fauxAssistantMessage("Launched; waiting.");
+			},
+			() => {
+				parentTurns++;
+				return fauxAssistantMessage("Woken.");
+			},
+		]);
 		await prompt(t);
 		await waitFor(() => row(t, "scout"));
 
 		t.press(DOWN, "x");
-		await waitFor(() => row(t, "scout")?.includes("stopping") ?? false);
-		child.open();
-		await waitFor(() => row(t, "scout")?.includes("cancelled") ?? false);
+		await waitFor(() => !row(t, "scout"));
 		const runId = t.session.messages.flatMap((m) => JSON.stringify(m).match(/sub_[0-9a-f-]{36}/) ?? [])[0];
-		expect(readRecord(t, runId)).toMatchObject({ status: "cancelled", stopSource: "user" });
+		await waitFor(() => readRecord(t, runId)?.status === "closed");
+		expect(readRecord(t, runId)).toMatchObject({ status: "closed", stopSource: "user" });
+		expect(t.runs[0]).toMatchObject({ name: "scout", ended: true });
 
 		await new Promise((resolve) => setTimeout(resolve, 80));
 		expect(parentTurns).toBe(2);
@@ -374,24 +304,18 @@ describe("x on a row", () => {
 		).toEqual([]);
 	});
 
-	it("dismisses a run that has ended, and a second x stops nothing else", async () => {
-		const { t, child } = await withRunningRuns(["scout", "mapper"]);
-		const [stopped, other] = t
+	it("moves the selection to the next row, and closing the last gives the keyboard back", async () => {
+		const t = await withOpenRuns(["scout", "mapper"]);
+		const [closed, other] = t
 			.panel()
 			.slice(1, 3)
 			.map((line) => line.trim().split(" ")[0]);
 
 		t.press(DOWN, "x");
-		await waitFor(() => row(t, stopped)?.includes("stopping") ?? false);
-		child.open();
-		await waitFor(() => row(t, stopped)?.includes("cancelled") && row(t, other)?.includes("completed"));
-		expect(t.panel().at(-1)).toBe("  ↑/↓ to select · x to dismiss · Esc to go back");
-
-		t.press("x");
-		expect(row(t, stopped)).toBeUndefined();
+		await waitFor(() => !row(t, closed));
 		expect(selected(t)).toMatch(new RegExp(`^❯ ${other} `));
 		t.press("x");
-		expect(t.panel()).toEqual([]);
+		await waitFor(() => t.panel().length === 0);
 		expect(t.editorFocused()).toBe(true);
 	});
 });

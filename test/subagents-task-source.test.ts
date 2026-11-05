@@ -49,8 +49,6 @@ function persistedRecord(overrides: Partial<SubagentRunRecord>): SubagentRunReco
 		deliveryMode: "background",
 		status: "completed",
 		complete: true,
-		turnCount: 1,
-		toolCallCount: 0,
 		usage: createEmptySubagentUsage(),
 		backgroundDeliveryAttempted: true,
 		...overrides,

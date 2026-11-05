@@ -9,7 +9,6 @@ const TASK_OUTPUT_BYTES = 8192;
 const TASK_STATES: Record<SubagentLifecycleStatus, AgentTaskState> = {
 	starting: "running",
 	running: "running",
-	finishing: "running",
 	stopping: "running",
 	completed: "completed",
 	failed: "failed",

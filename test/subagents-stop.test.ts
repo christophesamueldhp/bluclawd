@@ -52,8 +52,6 @@ function makeAgentRunRecord(overrides: Partial<SubagentRunRecord> = {}): Subagen
 		deliveryMode: "background",
 		status: "running",
 		complete: false,
-		turnCount: 1,
-		toolCallCount: 2,
 		usage: createEmptySubagentUsage(),
 		backgroundDeliveryAttempted: false,
 		...overrides,

@@ -8,8 +8,9 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
+import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { PARENT_ENV, Tmux } from "../../daemon/tmux.ts";
-import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
+import { notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { pistatuslineDrawsFooter } from "../_shared/pistatusline.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
@@ -30,11 +31,11 @@ import {
 	SubagentMessageBus,
 	subagentMessagePayload,
 } from "./messages.ts";
+import { describeSubagentModels } from "./models.ts";
 import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET } from "./panel.ts";
-import { createParentScope, type ParentInboxItem } from "./parent-scope.ts";
+import { createParentScope, inParentScope, type ParentInboxItem } from "./parent-scope.ts";
 import type { SubagentResultDetails } from "./results.ts";
 import { messageAsRun } from "./run-messages.ts";
-import { describeSubagentModels, runSubagent } from "./runner.ts";
 import { isTerminalSubagentStatus } from "./runs.ts";
 import {
 	appendSubagentMessageRecord,
@@ -44,7 +45,6 @@ import {
 } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
 import { actAsRun, RunReports, reportText, stopTurn } from "./tmux-runs.ts";
-import { createTranscriptActions } from "./transcript-actions.ts";
 import { createParentScopeViews } from "./views.ts";
 
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
@@ -66,15 +66,7 @@ export interface SubagentExtensionOptions {
 	batchWindowMs?: number;
 	/** The clock of the panel and the active-run reminder; Date.now when omitted. */
 	now?: () => number;
-	/**
-	 * Whether a launch outside tmux runs in the orchestrator's process rather than being refused. Only the tests of
-	 * the in-process runner set it, until that runner goes (#190).
-	 */
-	inProcessRuns?: boolean;
 }
-
-const NEEDS_TMUX =
-	"Subagents need tmux: each run is a pi session of its own in agent view's tmux server, and this pi does not run there. Install tmux if it is missing (brew install tmux), then start pi again in a terminal.";
 
 function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot = false): string {
 	const rolesSection = catalog
@@ -125,7 +117,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		let activeTurnIndex = 0;
 		let catalog: AgentDefinitionCatalog | undefined;
 		let unpublish: (() => void) | undefined;
-		let latestLoadout: ToolLoadout | undefined;
 		const now = options.now ?? Date.now;
 		let panelTui: Pick<TUI, "requestRender" | "hasOverlay" | "terminal"> | undefined;
 		let panel: ReturnType<typeof createPanel> | undefined;
@@ -134,21 +125,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		/** The subagents status last set, so the panel's clock republishes only what changed. */
 		let publishedStatus: string | undefined;
 		let offPanelKeys: (() => void) | undefined;
-		// Subagent calls in one message start executing together; a child waits for every launch in flight to be
-		// admitted, so each sibling is registered for messages before any of them takes a turn.
-		let launchesInFlight = 0;
-		let launchesSettled = Promise.resolve();
-		let settleLaunches = () => {};
-		const beginLaunch = () => {
-			if (launchesInFlight++ === 0) {
-				launchesSettled = new Promise((resolve) => {
-					settleLaunches = resolve;
-				});
-			}
-			return () => {
-				if (--launchesInFlight === 0) settleLaunches();
-			};
-		};
 
 		const messageBus = new SubagentMessageBus(
 			(record, senderScope) =>
@@ -257,15 +233,15 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 		};
 
-		const { scheduler, directory, deliver, messageFromParent, messageFromUser, transcripts } = createGenerations({
+		const { scheduler, directory, messageFromParent } = createGenerations({
 			agentDir: resolveAgentDir,
-			runner: runSubagent,
 			bus: messageBus,
 			scope: parentScope,
 			pi,
-			launchesSettled: () => launchesSettled,
 			onChange: runsChanged,
 			reports,
+			tmux: () => new Tmux(),
+			send: (to, message) => new OrchestratorClient().send(to, message),
 		});
 
 		const admission = createRunAdmission({
@@ -273,10 +249,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			directory,
 			agentDir: resolveAgentDir,
 			catalog: () => catalog,
-			loadout: () => latestLoadout,
 			parentThinkingLevel: () => pi.getThinkingLevel(),
 			scope: parentScope,
-			// The in-process runner still runs any launch outside tmux.
 			pane: () => pane,
 		});
 
@@ -303,13 +277,34 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			agentDir: resolveAgentDir,
 		});
 
-		const { openTranscript } = createTranscriptActions({
-			scope: parentScope,
-			scheduler,
-			transcripts,
-			messageFromUser,
-			admission,
-		});
+		/**
+		 * Switches this terminal to a run of the current parent scope, its own pi session (ADR-0006); any other run is
+		 * refused with a notice.
+		 */
+		const openRun = (runId: string, owner?: string): Promise<void> | undefined => {
+			const ctx = parentScope.context();
+			if (ctx?.mode !== "tui") return undefined;
+			const scope = parentScope.current();
+			const run = scheduler.getRun(runId);
+			if (!run) {
+				ctx.ui.notify(`No run ${runId} is known to this session, so it cannot be opened.`, "warning");
+				return undefined;
+			}
+			if (!scope || !inParentScope(run, scope) || (owner !== undefined && owner !== run.parentSessionId)) {
+				ctx.ui.notify("That run belongs to an earlier session and can no longer be opened.", "warning");
+				return undefined;
+			}
+			if (!run.pane) {
+				ctx.ui.notify(`${run.name ?? runId} has no session of its own to open.`, "warning");
+				return undefined;
+			}
+			try {
+				new Tmux().switchTo(run.pane);
+			} catch (error) {
+				ctx.ui.notify(`Could not open ${run.name ?? runId}: ${Tmux.reason(error)}`, "warning");
+			}
+			return Promise.resolve();
+		};
 
 		/**
 		 * Opening a closed run of this scope, from `/tasks`, resumes it with no message: its pi reopens on its session
@@ -321,7 +316,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			if (!pane || !ctx || run?.status !== "closed" || (owner !== undefined && owner !== run.parentSessionId)) {
 				return undefined;
 			}
-			return admission.resume(run, run.originToolCallId, undefined, ctx).then((resumed) => {
+			return admission.resume(run, undefined, ctx).then((resumed) => {
 				if (!resumed.ok) return ctx.ui.notify(resumed.error, "warning");
 				const reopened = scheduler.getRun(runId)?.pane;
 				try {
@@ -332,22 +327,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				}
 			});
 		};
-
-		pi.on("message_start", async (event) => {
-			if (event.message.role !== "toolResult") return;
-			const run = views.launchedBy(event.message.toolCallId);
-			if (run) scheduler.launchResultEmitted(run.runId);
-		});
-
-		// A child's tool calls arrive here as nested calls of the tool call that launched it.
-		pi.on("tool_call", async (event) => {
-			if (!event.parentToolCallId || event.toolName !== "task_stop") return undefined;
-			if (!views.launchedBy(event.parentToolCallId)) return undefined;
-			const input = event.input as { task_id?: unknown; shell_id?: unknown };
-			const id = String(input.task_id ?? input.shell_id ?? "").trim();
-			if (!scheduler.getRun(id) && !isAgentTaskId(id)) return undefined;
-			return { block: true, reason: "Subagents cannot stop agent runs; message the orchestrator instead." };
-		});
 
 		pi.on("session_start", async (event, ctx) => {
 			parentScope.enter(ctx, `Session replaced (${event.reason})`);
@@ -407,7 +386,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			const unpublishPanel = publishSubagentPanel(() => panel !== undefined && views.panel().length > 0);
 			const unpublishTasks = publishAgentTasks({
 				...taskSource,
-				open: (id, owner) => resumeClosed(id, owner) ?? openTranscript(id, owner),
+				open: (id, owner) => resumeClosed(id, owner) ?? openRun(id, owner),
 			});
 			unpublish = () => {
 				unpublishTasks();
@@ -440,7 +419,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 								stop: ({ record }) =>
 									taskSource.stop(record.runId, { owner: record.parentSessionId, source: "user" }),
 								dismiss: ({ record }) => views.dismiss("panel", record.runId),
-								open: ({ record }) => void openTranscript(record.runId),
+								open: ({ record }) => void openRun(record.runId),
 							},
 						});
 						panel = shown;
@@ -553,7 +532,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			description:
 				"Send a message to a subagent by name or run ID (sub_…). A working child gets it at its next safe point; an idle one that is still open takes a turn on it. A completed or closed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
 			parameters: SUBAGENT_MESSAGE_PARAMETERS,
-			execute: async (toolCallId, params, _signal, _onUpdate, toolCtx) => {
+			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
 				const ctx = toolCtx ?? parentScope.context();
 				const scope = parentScope.current();
 				if (!scope) {
@@ -563,30 +542,23 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						isError: true,
 					};
 				}
-				return messageFromParent(scope, params.to.trim(), params.content, toolCallId, admission, ctx);
+				return messageFromParent(scope, params.to.trim(), params.content, admission, ctx);
 			},
 		});
 
-		const ago = (at: number | undefined, now: number) =>
-			at === undefined ? "never" : `${Math.round((now - at) / 1000)}s ago`;
-		const describeProgress = ({ record: run }: RunEntry, now: number) => {
-			const activity = run.lastActivity
-				? `${run.lastActivity.kind === "tool" ? `tool ${run.lastActivity.detail ?? "?"}` : "model turn"} ${ago(run.lastActivity.at, now)}`
-				: "none yet";
-			return [
-				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${run.status}`,
+		const describeProgress = ({ record: run }: RunEntry, now: number) =>
+			[
+				`${run.name ?? run.runId} (${run.agentName}, ${run.runId}): ${run.status}${run.activity ? ` (${run.activity})` : ""}`,
 				`  task: ${run.taskSummary}`,
-				`  turns: ${run.turnCount}, tool calls: ${run.toolCallCount}, elapsed: ${formatRunElapsed(run, now)}`,
-				`  last activity: ${activity}; last message: ${ago(run.lastMessageAt, now)}`,
+				`  elapsed: ${formatRunElapsed(run, now)}`,
 			].join("\n");
-		};
 		pi.registerTool({
 			name: "subagent_status",
 			label: "Subagent status",
 			exposure: "model-only",
 			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 			description:
-				"Show the progress of your running subagents: status, turns, tool calls, elapsed time, last activity and last message. Use it to judge whether a child is still productive; stop one with subagent_stop.",
+				"Show your open subagents: status, whether each is working or idle, task and elapsed time. Use it to judge whether a child is stuck; stop its turn with subagent_stop.",
 			parameters: Type.Object(
 				{ agent: Type.Optional(Type.String({ description: "A subagent name or run ID; omit for all." })) },
 				{ additionalProperties: false },
@@ -622,10 +594,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			),
 			execute: async (_toolCallId, params, signal) => {
 				const target = params.agent.trim();
-				// A run in tmux has its turn stopped; one in process is cancelled.
-				if (target === "all" && pane) {
+				if (target === "all") {
 					const asked = await Promise.all(
-						views.open().map(({ record }) => (record.pane ? stopTurn(record.pane, pane, signal) : false)),
+						views.open().map(({ record }) => (record.pane && pane ? stopTurn(record.pane, pane, signal) : false)),
 					);
 					const stopped = asked.filter(Boolean).length;
 					return {
@@ -635,40 +606,23 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						details: undefined,
 					};
 				}
-				if (target === "all") {
-					const stopped = taskSource.stopAll({ source: "model" });
-					return {
-						content: [{ type: "text", text: `Stopped ${stopped} subagent${stopped === 1 ? "" : "s"}.` }],
-						details: undefined,
-					};
-				}
 				const run = views.findOpen(target)?.record;
-				if (run?.pane) {
-					const label = `${run.name ?? run.runId}'s turn (${run.runId})`;
-					const stopped = pane !== undefined && (await stopTurn(run.pane, pane, signal));
+				if (!run) {
 					return {
-						content: [
-							{
-								type: "text",
-								text: stopped
-									? `Stopped ${label}. It stays open and takes messages.`
-									: `Could not stop ${label}: its pi cannot be reached.`,
-							},
-						],
+						content: [{ type: "text", text: `No running subagent "${target}".` }],
 						details: undefined,
-						isError: !stopped,
+						isError: true,
 					};
 				}
-				const stopped = run !== undefined && taskSource.stop(run.runId, { source: "model" }).ok;
+				const label = `${run.name ?? run.runId}'s turn (${run.runId})`;
+				const stopped = run.pane !== undefined && pane !== undefined && (await stopTurn(run.pane, pane, signal));
 				return {
 					content: [
 						{
 							type: "text",
 							text: stopped
-								? `Stopping ${run.name ?? run.runId} (${run.runId}).`
-								: run
-									? `${run.name ?? run.runId} (${run.runId}) has finished its last turn; there is nothing to stop.`
-									: `No running subagent "${target}".`,
+								? `Stopped ${label}. It stays open and takes messages.`
+								: `Could not stop ${label}: its pi cannot be reached.`,
 						},
 					],
 					details: undefined,
@@ -752,7 +706,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			},
 			description: buildBaseSubagentDescription(),
 			prepareLoadout: (loadout: ToolLoadout): ToolLoadoutChanges | undefined => {
-				latestLoadout = loadout;
 				if (!catalog) return undefined;
 				if (!loadout.declared.some((t) => t.name === "subagent")) return undefined;
 				const mode = parentScope.context()?.mode;
@@ -772,15 +725,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						isError: true,
 					};
 				}
-				// A run is a pi of its own in tmux (ADR-0006): there is no other way to run one.
-				if (!pane && !options.inProcessRuns) {
-					return { content: [{ type: "text", text: NEEDS_TMUX }], details: undefined, isError: true };
-				}
-
-				const endLaunch = beginLaunch();
-				const admitRes = await admission
-					.launch({ toolCallId, parentTurnId: `turn_${activeTurnIndex}`, params, signal }, ctx)
-					.finally(endLaunch);
+				const admitRes = await admission.launch(
+					{ toolCallId, parentTurnId: `turn_${activeTurnIndex}`, params, signal },
+					ctx,
+				);
 				if (!admitRes.ok) {
 					return {
 						content: [{ type: "text", text: admitRes.error }],
@@ -790,9 +738,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				}
 
 				const { handle } = admitRes;
-				const isBackground = params.background === true;
 
-				if (pane && !isBackground) {
+				if (params.background !== true) {
 					const name = handle.record.name ?? handle.runId;
 					// Waits until the run reports, the call is aborted, or the run ends first.
 					const ended = new AbortController();
@@ -820,49 +767,32 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					return { content: [{ type: "text", text: reportText(name, report.text) }], details };
 				}
 
-				if (isBackground) {
-					// A run in tmux delivers its own Reports, after each of its turns.
-					if (!pane) void deliver(handle);
-
-					return {
-						content: [
-							{
-								type: "text",
-								text: [
-									`Background subagent launched: ${handle.record.name} (${handle.runId})`,
-									`Agent: ${handle.record.agentName} (${handle.record.provider}/${handle.record.modelId})`,
-									`Status: ${handle.record.status}`,
-									pane
-										? "It stays open, and its report arrives here each time it finishes a turn."
-										: "The final report will be delivered to this session branch when complete. Use `task_stop` with this run ID to cancel.",
-									`While ${handle.record.name} runs, do not redo or touch its work, including the files in its scope, and do not poll \`subagent_status\` by reflex. With no independent work left, end your turn and say you are waiting for ${handle.record.name}: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.`,
-								].join("\n"),
-							},
-						],
-						details: {
-							runId: handle.runId,
-							agentName: handle.record.agentName,
-							status: handle.record.status,
-							complete: false,
-							deliveryMode: "background",
-							provider: handle.record.provider,
-							modelId: handle.record.modelId,
-							thinkingLevel: handle.record.thinkingLevel,
-							turnCount: 0,
-							toolCallCount: 0,
-							snapshotDrifted: false,
-							truncated: false,
-						} satisfies SubagentResultDetails,
-					};
-				}
-
-				const envelope = await deliver(handle);
-
+				// A run delivers its own Reports, after each of its turns.
 				return {
-					content: [{ type: "text", text: envelope.parentText }],
-					details: envelope.details,
-					usage: envelope.usage,
-					isError: envelope.isError,
+					content: [
+						{
+							type: "text",
+							text: [
+								`Background subagent launched: ${handle.record.name} (${handle.runId})`,
+								`Agent: ${handle.record.agentName} (${handle.record.provider}/${handle.record.modelId})`,
+								`Status: ${handle.record.status}`,
+								"It stays open, and its report arrives here each time it finishes a turn.",
+								`While ${handle.record.name} runs, do not redo or touch its work, including the files in its scope, and do not poll \`subagent_status\` by reflex. With no independent work left, end your turn and say you are waiting for ${handle.record.name}: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.`,
+							].join("\n"),
+						},
+					],
+					details: {
+						runId: handle.runId,
+						agentName: handle.record.agentName,
+						status: handle.record.status,
+						complete: false,
+						deliveryMode: "background",
+						provider: handle.record.provider,
+						modelId: handle.record.modelId,
+						thinkingLevel: handle.record.thinkingLevel,
+						snapshotDrifted: false,
+						truncated: false,
+					} satisfies SubagentResultDetails,
 				};
 			},
 		});
