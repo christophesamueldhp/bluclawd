@@ -22,6 +22,7 @@ import { type InstanceSummary, OrchestratorClient } from "../../daemon/orchestra
 import { collectRows, labelFromTask } from "../../daemon/rows.ts";
 import { lastLine, textOf, toolActivity } from "../../daemon/session-state.ts";
 import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, PARENT_ENV, Tmux } from "../../daemon/tmux.ts";
+import { agentTasks, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
@@ -30,7 +31,7 @@ import { trustBadge } from "../_shared/trust-badge.ts";
 import { AgentView, EXIT_WORDS, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, handOffAfterExit } from "./hand-off.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
-import { deriveLabel, dialogDetail, ForegroundActivity, SelfRegistration } from "./self-registration.ts";
+import { deriveLabel, dialogDetail, ForegroundActivity, SelfRegistration, waitingDetail } from "./self-registration.ts";
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
@@ -189,10 +190,10 @@ export function isBlankPane(
 }
 
 /**
- * What `session_shutdown` does with this pane's registration. A reload, or resume of the same file,
- * goes on in this pane, whose next session registers under the same id: its row (pin, order, age)
- * and the messages queued for it stay. A new session, resuming another one, or a fork leaves this
- * one stopped, and the next one gets its own row. pi awaits the handler, so the stop is awaited
+ * What `session_shutdown` does with this pane's registration. A reload, a new session, or resume of
+ * the same file goes on in this pane, whose next session registers under the same id: its row (pin,
+ * order) and the messages queued for it stay. Resuming another session or a fork leaves this one
+ * stopped, and the next one gets its own row. pi awaits the handler, so the stop is awaited
  * where a session follows, and no late heartbeat of this one lands after the next one's.
  */
 export function shutdownPlan(
@@ -200,8 +201,11 @@ export function shutdownPlan(
 	currentFile: string | undefined,
 ): { await: boolean; unregister: boolean } {
 	if (event.reason === "quit") return { await: false, unregister: true };
+	// A new session carries the row on, as /clear does in Claude Code: the old one stays on disk only.
 	const carriesOn =
-		event.reason === "reload" || (event.reason === "resume" && event.targetSessionFile === currentFile);
+		event.reason === "reload" ||
+		event.reason === "new" ||
+		(event.reason === "resume" && event.targetSessionFile === currentFile);
 	return { await: true, unregister: !carriesOn };
 }
 
@@ -230,6 +234,7 @@ const agentView: InlineExtension = {
 		let registration: SelfRegistration | undefined;
 		// What this window is doing: its own agent-view row, and what other windows see.
 		let activity = new ForegroundActivity();
+		let offSubagents: (() => void) | undefined;
 		let stopPill: (() => void) | undefined;
 		let viewOpen = false;
 		// The first ← swaps the footer pill for this hint; the second opens agent view.
@@ -299,6 +304,7 @@ const agentView: InlineExtension = {
 				pane,
 				detail:
 					dialogDetail(activity) ??
+					waitingDetail(activity) ??
 					(activity.current === "working" && liveDetail
 						? liveDetail
 						: lastAssistant
@@ -448,7 +454,7 @@ const agentView: InlineExtension = {
 			};
 		};
 
-		pi.on("session_start", (_event, ctx) => {
+		pi.on("session_start", (event, ctx) => {
 			// pi's package loader gives each top-level extension file its own module
 			// instance, so agent view populates its own copy of the shared theme.
 			setSharedTheme(ctx.ui.theme);
@@ -471,16 +477,28 @@ const agentView: InlineExtension = {
 			hide ??= process.env[HIDE_ENV];
 			delete process.env[HIDE_ENV];
 			activity = new ForegroundActivity();
+			// Its background subagents keep it working between turns, as the orchestrator waits on them.
+			const subagentsChanged = () => {
+				const line = waitingDetail(activity);
+				const running = (agentTasks()?.list() ?? []).filter((task) => task.state === "running").length;
+				registration?.setActivity(activity.setWaitingOn(running));
+				// A new count is a new line on the row, which only a heartbeat carries.
+				if (waitingDetail(activity) !== line) void registration?.refresh();
+			};
 			registration = new SelfRegistration(
 				new OrchestratorClient(),
-				// A run registers at once, listed nowhere, so its orchestrator reaches it from its first turn on.
-				() => (blank(ctx) && !parent ? undefined : selfHeartbeat(ctx)),
+				// A blank session waits for its first prompt to be listed, unless it is a run (its orchestrator
+				// reaches it from its first turn on) or carries a row on (/new).
+				() => (blank(ctx) && !parent && event.reason !== "new" ? undefined : selfHeartbeat(ctx)),
 				(message) => onPaneMessage(ctx, message),
 				pane,
 				(watched) => pi.events.emit("bluclawd:remote-watched", watched),
 				() => pi.events.emit("bluclawd:remote-want-report", true),
 			);
 			registration.start();
+			offSubagents?.();
+			offSubagents = subscribeAgentTasks(subagentsChanged);
+			subagentsChanged();
 			if (process.env[NORMAL_ENV]) normal = startedHere = true;
 			delete process.env[NORMAL_ENV];
 			syncEndOnDetach(ctx);
@@ -638,6 +656,8 @@ const agentView: InlineExtension = {
 			if (plan.await) await stopping;
 			registration = undefined;
 			stopPill?.();
+			offSubagents?.();
+			offSubagents = undefined;
 			stopPill = undefined;
 			// Quitting ends the session as it ends a bluclawd session: a turn in progress dies with
 			// the process. The session stays in agent view as a stopped row until ctrl+x deletes it.

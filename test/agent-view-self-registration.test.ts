@@ -7,6 +7,7 @@ import {
 	dialogDetail,
 	ForegroundActivity,
 	SelfRegistration,
+	waitingDetail,
 } from "../ext/agent-view/self-registration.ts";
 
 describe("ForegroundActivity (what the roster shows for THIS window)", () => {
@@ -36,6 +37,28 @@ describe("ForegroundActivity (what the roster shows for THIS window)", () => {
 		fg.apply({ type: "agent_start" });
 		expect(fg.apply({ type: "ui_prompt_start", kind: "custom" })).toBe("working");
 		expect(fg.apply({ type: "ui_prompt_end", kind: "custom" })).toBe("working");
+	});
+
+	it("stays working while the session waits on its background subagents, idle once they end", () => {
+		const fg = new ForegroundActivity();
+		fg.apply({ type: "agent_start" });
+		fg.setWaitingOn(2);
+		expect(fg.apply({ type: "agent_settled" })).toBe("working");
+		expect(waitingDetail(fg)).toBe("Waiting for 2 subagents");
+		expect(fg.apply({ type: "ui_prompt_start", kind: "confirm" })).toBe("awaiting_input");
+		expect(fg.apply({ type: "ui_prompt_end", kind: "confirm" })).toBe("working");
+		expect(fg.setWaitingOn(1)).toBe("working");
+		expect(waitingDetail(fg)).toBe("Waiting for 1 subagent");
+		expect(fg.setWaitingOn(0)).toBe("idle");
+		expect(waitingDetail(fg)).toBeUndefined();
+	});
+
+	it("a turn in progress is not waiting, even with subagents running", () => {
+		const fg = new ForegroundActivity();
+		fg.setWaitingOn(1);
+		fg.apply({ type: "agent_start" });
+		expect(waitingDetail(fg)).toBeUndefined();
+		expect(fg.setWaitingOn(0)).toBe("working");
 	});
 
 	it("ignores unrelated events", () => {

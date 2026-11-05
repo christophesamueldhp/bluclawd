@@ -46,12 +46,14 @@ const BLOCKING_PROMPT_KINDS: ReadonlySet<string> = new Set(["select", "confirm",
  * Derives the foreground session's activity (daemon/activity.ts), which its heartbeat reports,
  * from pi's extension events: a run is "working" from agent_start until agent_settled; a blocking
  * UI prompt is "awaiting_input" until answered, then back to whatever the run state was.
+ * Waiting on its background subagent runs (`setWaitingOn`) counts as working too.
  * `dialog`: the prompt waited on.
  */
 export class ForegroundActivity {
 	current: AgentActivity = "idle";
 	dialog: PaneDialog | undefined;
 	private running = false;
+	private waitingOn = 0;
 
 	apply(event: { type: string; kind?: string; title?: string }): AgentActivity {
 		switch (event.type) {
@@ -62,7 +64,7 @@ export class ForegroundActivity {
 				break;
 			case "agent_settled":
 				this.running = false;
-				this.current = "idle";
+				this.current = this.busy();
 				this.dialog = undefined;
 				break;
 			case "ui_prompt_start":
@@ -73,13 +75,37 @@ export class ForegroundActivity {
 				break;
 			case "ui_prompt_end":
 				if (event.kind && BLOCKING_PROMPT_KINDS.has(event.kind)) {
-					this.current = this.running ? "working" : "idle";
+					this.current = this.busy();
 					this.dialog = undefined;
 				}
 				break;
 		}
 		return this.current;
 	}
+
+	/** Not waiting on a prompt: working while a turn runs or its subagents do. */
+	private busy(): AgentActivity {
+		return this.running || this.waitingOn > 0 ? "working" : "idle";
+	}
+
+	/** How many background subagent runs are still going. */
+	setWaitingOn(count: number): AgentActivity {
+		this.waitingOn = count;
+		if (this.current !== "awaiting_input") this.current = this.busy();
+		return this.current;
+	}
+
+	/** The background subagent runs it waits on between turns: none while a turn runs. */
+	get waitingFor(): number {
+		return this.running ? 0 : this.waitingOn;
+	}
+}
+
+/** A row's line while the session waits on its background subagents. */
+export function waitingDetail(activity: ForegroundActivity): string | undefined {
+	const n = activity.waitingFor;
+	if (n === 0) return undefined;
+	return `Waiting for ${n} subagent${n === 1 ? "" : "s"}`;
 }
 
 /** A row's line while it waits on a dialog with a title. */

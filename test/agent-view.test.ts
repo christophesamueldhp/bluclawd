@@ -268,7 +268,7 @@ describe("rows", () => {
 			self,
 		);
 		expect(rows.map((r) => [r.id, r.self, r.pinned, r.sortOrder, r.livePanes])).toEqual([
-			["me", true, true, 2, undefined],
+			["row", true, true, 2, undefined],
 		]);
 	});
 
@@ -783,7 +783,7 @@ describe("AgentView keys", () => {
 			external: true,
 			pane: "pane-self",
 		};
-		const { view, calls, flush } = makeView({ self });
+		const { view, calls, flush } = makeView({ self, instances: [...sessions, self] });
 		expect(focusedLine(view)).toContain("current");
 		view.handleInput(CTRL_T);
 		await flush();

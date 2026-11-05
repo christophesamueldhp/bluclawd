@@ -352,8 +352,10 @@ export class Tmux {
 		let pid: number;
 		try {
 			pid = Number(this.run(["display-message", "-p", "-t", `=${name}:`, "#{pane_pid}"]).trim());
-		} catch {
-			return; // already gone
+		} catch (error) {
+			if (Tmux.gone(error)) return;
+			// Taken for gone, its pi would beat on and bring back the row deleted after this.
+			throw new Error(`couldn't end ${name} — ${Tmux.reason(error)}`);
 		}
 		// Without the pid, ending the session would hang its pi up instead.
 		if (!(pid > 0)) throw new Error(`couldn't find the pi running in ${name}`);

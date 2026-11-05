@@ -147,6 +147,7 @@ export class RowActions {
 	async pin(row: AgentRow): Promise<Outcome> {
 		if (row.starting) return { kind: "refused" };
 		if (row.shell) return { kind: "refused", text: "A shell command can't be pinned" };
+		if (row.unlisted) return { kind: "refused", text: "It is listed once it has a prompt" };
 		return this.tried(row.pinned ? "unpin" : "pin", () => this.opts.client.setMeta(row.id, { pinned: !row.pinned }));
 	}
 
@@ -183,17 +184,25 @@ export class RowActions {
 		});
 	}
 
-	/** A band's second ctrl+x: every one of `rows` goes, whatever becomes of the others. */
-	async deleteAll(rows: AgentRow[]): Promise<void> {
-		await Promise.all(
-			rows
-				.map(async (r) => {
-					if (r.shell) return this.opts.panes.kill(r.shell);
-					if (r.pane) this.opts.panes.kill(r.pane);
-					await this.opts.client.delete(r.id);
-				})
-				.map((p) => p.catch(() => undefined)),
+	/** A band's second ctrl+x: every one of `rows` goes, whatever becomes of the others. Returns
+	 *  the ids that went. */
+	async deleteAll(rows: AgentRow[]): Promise<string[]> {
+		const gone = await Promise.all(
+			rows.map(async (r) => {
+				try {
+					if (r.shell) this.opts.panes.kill(r.shell);
+					else {
+						// A stopped row's pane may run another pi by now.
+						if (r.pane && r.alive) this.opts.panes.kill(r.pane);
+						await this.opts.client.delete(r.id);
+					}
+					return [r.id];
+				} catch {
+					return [];
+				}
+			}),
 		);
+		return gone.flat();
 	}
 
 	/** This terminal moves to a new session, in agent view, and this pane ends. */
@@ -223,7 +232,7 @@ export class RowActions {
 		}
 		handOff.left();
 		await panes.unlist();
-		await client.delete(row.id).catch(() => undefined);
+		if (!row.unlisted) await client.delete(row.id).catch(() => undefined);
 		try {
 			panes.kill(panes.current);
 		} catch {

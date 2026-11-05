@@ -294,7 +294,15 @@ export class AgentView implements Component, Focusable {
 	private frame = 0;
 	private spinTimer: ReturnType<typeof setInterval> | undefined;
 	private pollTimer: ReturnType<typeof setInterval> | undefined;
-	private refreshing = false;
+	private refreshing: Promise<void> | undefined;
+	private refreshAgain: Promise<void> | undefined;
+	/** shift+↑/↓'s order: shown at once, and over any list read before its writes landed. */
+	private pendingOrder = new Map<string, number>();
+	private ordering: Promise<void> = Promise.resolve();
+	/** Rows this view deleted, and when the delete landed. */
+	private deleted = new Map<string, number>();
+	/** The `n:` search the focus last jumped to the best match of. */
+	private searchedFor: string | undefined;
 	private closed = false;
 	/** Set once the first roster is in; the next frame drawn is reported to onDrawn. */
 	private loaded = false;
@@ -510,16 +518,38 @@ export class AgentView implements Component, Focusable {
 
 	// ---- data ----------------------------------------------------------------------------
 
-	private async refresh(): Promise<void> {
-		if (this.refreshing || this.closed) return;
-		this.refreshing = true;
+	/** A refresh asked for while one is in flight runs again once that one lands: its list may
+	 *  predate what was just done. */
+	private refresh(): Promise<void> {
+		if (this.closed) return Promise.resolve();
+		if (this.refreshing) {
+			this.refreshAgain ??= this.refreshing.then(() => {
+				this.refreshAgain = undefined;
+				return this.refresh();
+			});
+			return this.refreshAgain;
+		}
+		this.refreshing = this.load().finally(() => {
+			this.refreshing = undefined;
+		});
+		return this.refreshing;
+	}
+
+	private async load(): Promise<void> {
+		const askedAt = Date.now();
 		try {
-			const listed = (await this.opts.client.list()).filter((inst) => inst.id !== this.opts.hide);
+			// A list asked for before a delete landed still has its row.
+			const listed = (await this.opts.client.list()).filter(
+				(inst) => inst.id !== this.opts.hide && !((this.deleted.get(inst.id) ?? -1) >= askedAt),
+			);
 			// A restarted daemon knows a pane only from its next heartbeat: until then its row stays as it
 			// was, over the stopped row the daemon stored for it.
 			const carried =
 				Date.now() - this.restartedAt < RESTART_GRACE_MS
-					? this.instances.filter((inst) => inst.pane && !listed.some((l) => l.id === inst.id && l.external))
+					? this.instances.filter(
+							(inst) =>
+								inst.pane && !this.deleted.has(inst.id) && !listed.some((l) => l.id === inst.id && l.external),
+						)
 					: [];
 			this.instances = [...listed.filter((l) => !carried.some((c) => c.id === l.id)), ...carried];
 			this.connectionLost = false;
@@ -531,7 +561,6 @@ export class AgentView implements Component, Focusable {
 			} catch {
 				this.shells = [];
 			}
-			this.refreshing = false;
 		}
 		if (this.closed) return; // Its self callback may already belong to a disposed session.
 		this.recompute();
@@ -539,7 +568,11 @@ export class AgentView implements Component, Focusable {
 	}
 
 	private recompute(): void {
-		this.allRows = [...collectRows(this.instances, this.opts.self?.()), ...this.shells.map(rowFromShell)];
+		const order = this.pendingOrder;
+		const instances = order.size
+			? this.instances.map((i) => (order.has(i.id) ? { ...i, sortOrder: order.get(i.id) } : i))
+			: this.instances;
+		this.allRows = [...collectRows(instances, this.opts.self?.()), ...this.shells.map(rowFromShell)];
 		const text = this.composerText();
 		const filter = queryFilter(text);
 		this.rows = filter ? this.allRows.filter(filter) : this.allRows;
@@ -551,8 +584,11 @@ export class AgentView implements Component, Focusable {
 		});
 		this.items = this.layoutItems(bands, !!filter);
 		const at = this.items.findIndex((item) => item.key === this.selectedKey);
-		if (filter && /^n:\S/i.test(text.trim())) {
-			// A name search focuses its best match.
+		const searching = !!filter && /^n:\S/i.test(text.trim());
+		const searchChanged = searching && text !== this.searchedFor;
+		this.searchedFor = searching ? text : undefined;
+		if (searchChanged) {
+			// A name search focuses its best match as it is typed; a refresh leaves the focus be.
 			const best = this.items
 				.filter((i): i is Extract<Item, { kind: "row" }> => i.kind === "row")
 				.reduce<Extract<Item, { kind: "row" }> | undefined>(
@@ -567,6 +603,11 @@ export class AgentView implements Component, Focusable {
 		else {
 			// The focused row went away (deleted, filtered out, folded): its neighbour takes over.
 			this.selectedKey = this.items[Math.min(this.lastIndex, this.items.length - 1)]?.key;
+		}
+		// A peek or rename was of a row that went away: it must not go on with whichever took the focus.
+		if (at === -1 && (this.mode === "peek" || this.mode === "rename")) {
+			this.mode = "list";
+			this.say("That session is no longer listed");
 		}
 		this.syncSpinner();
 		this.syncTitle();
@@ -855,7 +896,10 @@ export class AgentView implements Component, Focusable {
 			if (targets.length === 0 || this.composing()) return;
 			if (this.armed?.key === item.key) {
 				this.disarm();
-				await this.actions.deleteAll(targets);
+				const gone = await this.actions.deleteAll(targets);
+				this.forget(gone);
+				const left = targets.length - gone.length;
+				if (left > 0) this.say(`Couldn't delete ${left} of ${targets.length} sessions`, "error");
 				await this.refresh();
 				return;
 			}
@@ -876,7 +920,10 @@ export class AgentView implements Component, Focusable {
 			if (outcome.kind === "left") return;
 			this.leaving = false;
 			if (outcome.kind === "failed") this.say(outcome.text, "error");
-			else if (this.mode === "peek") this.mode = "list";
+			else {
+				if (this.mode === "peek") this.mode = "list";
+				this.forget([row.id]);
+			}
 			await this.refresh();
 			return;
 		}
@@ -886,6 +933,14 @@ export class AgentView implements Component, Focusable {
 		this.justKilled = row.id;
 		if (outcome.kind === "failed") this.say(outcome.text, "error");
 		await this.refresh();
+	}
+
+	/** Deleted rows leave the list at once: a refresh just after a daemon restart would carry them. */
+	private forget(ids: string[]): void {
+		for (const id of ids) this.deleted.set(id, Date.now());
+		this.instances = this.instances.filter((i) => !ids.includes(i.id));
+		this.recompute();
+		this.render_();
 	}
 
 	private async togglePin(): Promise<void> {
@@ -901,21 +956,37 @@ export class AgentView implements Component, Focusable {
 		await this.refresh();
 	}
 
-	/** shift+↑/↓ within a band: renumber the band and persist the new order. */
-	private async reorder(delta: number): Promise<void> {
+	/** shift+↑/↓ within a band: renumber the band, show it at once, and persist it. Each press's
+	 *  writes wait for the last one's, so a quick second press builds on the first. A `!` command
+	 *  has no stored order, and a row still starting no row to keep one on. */
+	private reorder(delta: number): void {
 		const item = this.selected;
-		if (item?.kind !== "row" || item.row.self) return;
-		const rows = item.band.rows.filter((r) => !r.self && !r.starting);
+		if (item?.kind !== "row") return;
+		const rows = item.band.rows.filter((r) => !r.starting && !r.shell && !r.unlisted);
 		const at = rows.findIndex((r) => r.id === item.row.id);
 		const to = at + delta;
 		if (at === -1 || to < 0 || to >= rows.length) return;
 		[rows[at], rows[to]] = [rows[to], rows[at]];
-		try {
-			await Promise.all(rows.map((r, i) => this.opts.client.setMeta(r.id, { sortOrder: i })));
-		} catch (error) {
-			this.say(`Couldn't save order — ${error instanceof Error ? error.message : String(error)}`, "error");
-		}
-		await this.refresh();
+		for (const [i, r] of rows.entries()) this.pendingOrder.set(r.id, i);
+		this.recompute();
+		this.render_();
+		const writes = rows.map((r, i) => [r.id, i] as const);
+		const saved = this.ordering.then(async () => {
+			try {
+				await Promise.all(writes.map(([id, sortOrder]) => this.opts.client.setMeta(id, { sortOrder })));
+			} catch (error) {
+				this.say(`Couldn't save order — ${error instanceof Error ? error.message : String(error)}`, "error");
+			}
+			await this.refresh();
+		});
+		this.ordering = saved;
+		void saved.then(() => {
+			// The last press's list is in: the daemon's order is what shows from here.
+			if (this.ordering !== saved) return;
+			this.pendingOrder.clear();
+			this.recompute();
+			this.render_();
+		});
 	}
 
 	private startRename(): void {
@@ -1409,7 +1480,7 @@ export class AgentView implements Component, Focusable {
 			return true;
 		}
 		if (!peek && (matchesKey(data, "shift+up") || matchesKey(data, "shift+down"))) {
-			void this.reorder(matchesKey(data, "shift+up") ? -1 : 1);
+			this.reorder(matchesKey(data, "shift+up") ? -1 : 1);
 			return true;
 		}
 		if (

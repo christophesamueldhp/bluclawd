@@ -162,14 +162,17 @@ export class ServerSupervisor {
 		// A pane back from silence keeps what it was given meanwhile, which a row a start claimed
 		// has stored nowhere else.
 		const last = previous ?? back;
+		// A live pane beating a new file went on to a new session (/new): its row carries on with it,
+		// keeping its pin and order but not the old session's age or name.
+		const renewed = previous !== undefined && previous.pane.record.sessionFile !== record.sessionFile;
 		const kept = last
 			? {
-					createdAt: last.pane.record.createdAt,
+					...(renewed ? {} : { createdAt: last.pane.record.createdAt }),
 					pinned: last.pane.record.pinned,
 					sortOrder: last.pane.record.sortOrder,
 				}
 			: stored && paneMeta(stored);
-		const label = nameOf(previous?.pane.record ?? stored, record.label);
+		const label = renewed ? record.label : nameOf(previous?.pane.record ?? stored, record.label);
 		const pane: Pane = {
 			record: cloneInstance({ ...record, ...kept, ...resumed, label, paneLabel: record.label }),
 			activity,
@@ -194,6 +197,8 @@ export class ServerSupervisor {
 			row.start = undefined;
 			this.enter(rowId, row, "live");
 		}
+		// Until the new session has a file, the row stored for the old one must not show for it.
+		if (renewed && !(record.sessionFile && existsSync(record.sessionFile))) removeInstance(this.deps.dir, rowId);
 		this.persistRow(rowId, pane);
 		this.closeOrphanedRun(record);
 	}

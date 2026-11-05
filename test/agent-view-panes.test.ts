@@ -339,6 +339,13 @@ describe("row actions: stop and delete", () => {
 			["kill", "sh-1"],
 		]);
 	});
+
+	it("a band delete kills only live panes: a stopped row may still name a pane another pi now runs in", async () => {
+		const { actions: a, calls } = actions();
+		const left = rowOf({ id: "a", status: "stopped", cwd: HERE, sessionFile: "/s/a.jsonl", pane: "pi-self" });
+		await a.deleteAll([left]);
+		expect(calls).toEqual([["delete", "a"]]);
+	});
 });
 
 describe("row actions: deleting this terminal's own session", () => {
@@ -357,6 +364,17 @@ describe("row actions: deleting this terminal's own session", () => {
 			["delete", "pi-self"],
 			["kill", "pi-self"],
 		]);
+	});
+
+	it("deletes and hides the row its pane goes on as, not the pane's name", async () => {
+		const { actions: a, calls } = actions();
+		const resumed = paneRow("q", { pane: "pi-self", activity: "idle" });
+		const row = collectRows([resumed], self).find((r) => r.self);
+		if (!row) throw new Error("no own row");
+		await a.delete(row, handOff(calls));
+		expect(calls).toContainEqual(["start", HERE, ["--", "/agent-view"], { [OPEN_VIEW_ENV]: "1", [HIDE_ENV]: "q" }]);
+		expect(calls).toContainEqual(["delete", "q"]);
+		expect(calls).not.toContainEqual(["delete", "pi-self"]);
 	});
 
 	it("is called off, killing the new pane, if it ends before drawing", async () => {
@@ -569,6 +587,66 @@ describe("agent view in pane mode", () => {
 		view.close();
 	});
 
+	it("a peek whose session goes away ends, rather than sending its reply to the next row", async () => {
+		const listed = [paneRow("pi-x", { label: "x" }), paneRow("pi-y", { label: "y" })];
+		const { view, calls, flush } = setup(listed);
+		const internals = view as unknown as { selectedKey?: string; refresh(): Promise<void> };
+		await view.onShow();
+		const peeked = internals.selectedKey;
+		view.handleInput(" ");
+		for (const ch of "deploy") view.handleInput(ch);
+		listed.splice(
+			listed.findIndex((i) => i.id === peeked),
+			1,
+		);
+		await internals.refresh();
+		view.handleInput(ENTER);
+		await flush();
+		expect(calls.filter(([name]) => name === "send")).toEqual([]);
+		view.close();
+	});
+
+	it("a row deleted just after a daemon restart is not carried back by the restart's grace", async () => {
+		const listed = [paneRow("pi-x", { label: "doomed" }), paneRow("pi-y", { label: "kept" })];
+		const { view, flush } = setup(listed);
+		const internals = view as unknown as {
+			selectedKey?: string;
+			restartedAt: number;
+			refresh(): Promise<void>;
+		};
+		await internals.refresh();
+		for (let i = 0; i < 4 && !focusedLine(view)?.includes("doomed"); i++) view.handleInput("\x1b[B");
+		expect(focusedLine(view)).toContain("doomed");
+		// A restarted daemon lists no pane until it beats again; their rows are carried meanwhile.
+		internals.restartedAt = Date.now();
+		const before = [...listed];
+		view.handleInput(CTRL_X);
+		view.handleInput(CTRL_X);
+		await flush();
+		// A poll read before the delete landed answers with the row still in it.
+		listed.splice(0, listed.length, ...before);
+		await internals.refresh();
+		listed.splice(0, listed.length, before[1]);
+		await internals.refresh();
+		expect(view.render(100).join("\n")).not.toContain("doomed");
+		view.close();
+	});
+
+	it("a name search focuses its best match as it is typed, then keeps the focus the user moves to", async () => {
+		const listed = [paneRow("pi-a1", { label: "alpha one" }), paneRow("pi-a2", { label: "alpha two" })];
+		const { view } = setup(listed);
+		const internals = view as unknown as { selectedKey?: string; refresh(): Promise<void> };
+		await view.onShow();
+		for (const ch of "n:alpha") view.handleInput(ch);
+		const best = internals.selectedKey;
+		view.handleInput("\x1b[B");
+		const moved = internals.selectedKey;
+		expect(moved).not.toBe(best);
+		await internals.refresh();
+		expect(internals.selectedKey).toBe(moved);
+		view.close();
+	});
+
 	it("enter twice on a stored session's reply starts one pane", async () => {
 		const stored: InstanceSummary = {
 			id: "s",
@@ -631,7 +709,7 @@ describe("agent view in pane mode", () => {
 
 	it("deleting this terminal's session keeps this view up, keys ignored, until the new one has drawn", async () => {
 		const self = paneRow("pi-self", { activity: "idle" });
-		const { view, calls, closed, flush, panes } = setup([], self);
+		const { view, calls, closed, flush, panes } = setup([self], self);
 		let drawn: () => void = () => {};
 		panes.waitForView = (name) => {
 			calls.push(["waitForView", name]);
@@ -778,6 +856,58 @@ describe("agent view in pane mode", () => {
 		]);
 		expect(rows[0].pinned).toBe(true);
 	});
+
+	it("lists this terminal's own row under the row its pane goes on as, and the session it left as its own row", () => {
+		// Pane pi-self resumed stored row q; the session it ran before stays stored under the pane's name.
+		const self = paneRow("pi-self");
+		// Stored rows are listed first, and may still name the pane they last ran in.
+		const left: InstanceSummary = {
+			id: "pi-self",
+			status: "stopped",
+			cwd: HERE,
+			sessionFile: "/s/a.jsonl",
+			pane: "pi-self",
+		};
+		const own = paneRow("q", { pane: "pi-self", sortOrder: 2 });
+		const rows = collectRows([left, own], self);
+		expect(rows.map((r) => [r.id, r.self, r.alive])).toEqual([
+			["q", true, true],
+			["pi-self", false, false],
+		]);
+		expect(rows[0].sortOrder).toBe(2);
+	});
+
+	it("lists a pane not registered yet (blank after /new) as unlisted, never as the stored row under its name", () => {
+		const self = paneRow("pi-self");
+		const left: InstanceSummary = { id: "pi-self", status: "stopped", cwd: HERE, sessionFile: "/s/a.jsonl" };
+		const rows = collectRows([left], self);
+		expect(rows.map((r) => [r.id, r.self, r.unlisted])).toEqual([
+			["self:pi-self", true, true],
+			["pi-self", false, undefined],
+		]);
+	});
+});
+
+describe("row actions: an own row not registered yet", () => {
+	const self = paneRow("pi-self");
+	const own = () => {
+		const row = collectRows([], self).find((r) => r.self);
+		if (!row) throw new Error("no own row");
+		return row;
+	};
+
+	it("hands this terminal off without deleting any stored row", async () => {
+		const { actions: a, calls } = actions();
+		await a.delete(own(), handOff(calls));
+		expect(calls.filter(([name]) => name === "delete")).toEqual([]);
+		expect(calls.at(-1)).toEqual(["kill", "pi-self"]);
+	});
+
+	it("can't be pinned until it is listed", async () => {
+		const { actions: a, calls } = actions();
+		expect(await a.pin(own())).toEqual({ kind: "refused", text: "It is listed once it has a prompt" });
+		expect(calls).toEqual([]);
+	});
 });
 
 describe("tmux", () => {
@@ -831,7 +961,8 @@ describe("tmux", () => {
 		const runs: string[][] = [];
 		const tmux = new Tmux("/srv", (args) => {
 			runs.push(args);
-			if (args[0] === "display-message") throw new Error("gone");
+			if (args[0] === "display-message")
+				throw Object.assign(new Error("gone"), { stderr: "can't find session: pi-b" });
 			return "";
 		});
 		tmux.switchTo("pi-a");
@@ -912,6 +1043,13 @@ describe("tmux", () => {
 		expect(() => tmux.kill("pi-b")).toThrow("couldn't find");
 		expect(runs.map((r) => r[0])).toEqual(["display-message"]);
 	});
+
+	it("fails a kill tmux could not look up, rather than taking the pi for gone", () => {
+		const tmux = new Tmux("/srv", () => {
+			throw Object.assign(new Error("Command failed"), { stderr: "spawnSync tmux ETIMEDOUT" });
+		});
+		expect(() => tmux.kill("pi-b")).toThrow("ETIMEDOUT");
+	});
 });
 
 describe("paneArgs", () => {
@@ -977,7 +1115,8 @@ describe("shutdownPlan", () => {
 		expect(shutdownPlan({ reason: "resume", targetSessionFile: "/s/a.jsonl" }, "/s/a.jsonl")).toEqual(keep);
 		expect(shutdownPlan({ reason: "resume" }, undefined)).toEqual(keep);
 		expect(shutdownPlan({ reason: "resume", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(drop);
-		expect(shutdownPlan({ reason: "new", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(drop);
+		// /new carries the row on, as /clear does in Claude Code: the old session is left on disk only.
+		expect(shutdownPlan({ reason: "new", targetSessionFile: "/s/b.jsonl" }, "/s/a.jsonl")).toEqual(keep);
 		expect(shutdownPlan({ reason: "quit" }, "/s/a.jsonl")).toEqual({ await: false, unregister: true });
 	});
 });
