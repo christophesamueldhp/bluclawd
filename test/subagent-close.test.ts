@@ -89,3 +89,43 @@ describe.skipIf(!hasTmux)("closing a run", () => {
 		await waitFor(() => expect(screen()).not.toMatch(panelRow));
 	});
 });
+
+describe.skipIf(!hasTmux)("stopping a run", () => {
+	let pi: RealPi | undefined;
+	afterEach(async () => {
+		await pi?.stop();
+		pi = undefined;
+	});
+
+	it("ends its turn in progress, as Esc does, and leaves its pi open to take messages", async () => {
+		const real = await startRealPi();
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around.", background: true } },
+			{ text: "waiting for probe-run" },
+			{ tool: "subagent_stop", args: { agent: "probe-run" } },
+			{ tool: "subagent_status", args: { agent: "probe-run" } },
+			{ text: "stopped its turn" },
+		]);
+		real.script("probe-run", [{ text: "Still looking.", stallMs: 120_000 }, { text: "Went on." }]);
+		const orchestrator = real.start(["--", "delegate the look"]);
+		await real.waitForRequests("main", 2);
+		await real.waitForRequests("probe-run", 1);
+
+		real.tmux.sendKeys(orchestrator, ["stop the probe's turn", "Enter"]);
+		const requests = await real.waitForRequests("main", 5);
+		const stop = lastToolResult(requests[3]);
+		expect(stop).toMatchObject({ role: "toolResult", toolName: "subagent_stop" });
+		expect(stop?.text).toMatch(/^Stopped probe-run's turn \(sub_[0-9a-f-]+\)\. It stays open and takes messages\.$/);
+		expect(lastToolResult(requests[4])?.text).toMatch(/^probe-run \(explorer, sub_[0-9a-f-]+\): running/);
+
+		const run = (await real.rows()).find((row) => row.label === "probe-run");
+		expect(run?.pane && real.tmux.hasSession(run.pane)).toBe(true);
+		real.tmux.sendKeys(run?.pane ?? "", ["Go on.", "Enter"]);
+		const [, next] = await real.waitForRequests("probe-run", 2);
+		expect(conversation(next).filter((message) => message.role === "user")).toEqual([
+			{ role: "user", text: "Look around." },
+			{ role: "user", text: "Go on." },
+		]);
+	});
+});

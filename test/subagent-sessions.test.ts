@@ -113,7 +113,7 @@ describe.skipIf(!hasTmux)("a foreground run, as a pi session of its own", () => 
 		expect(message?.text).toContain(runId);
 		const stop = lastToolResult(requests[4]);
 		expect(stop).toMatchObject({ role: "toolResult", toolName: "subagent_stop" });
-		expect(stop?.text).toBe(`Stopping probe-run (${runId}).`);
+		expect(stop?.text).toBe(`Stopped probe-run's turn (${runId}). It stays open and takes messages.`);
 	});
 
 	it("cannot launch runs of its own, and stays open after its Report", async () => {

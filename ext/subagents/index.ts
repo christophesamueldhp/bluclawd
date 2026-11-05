@@ -36,7 +36,7 @@ import { describeSubagentModels, runSubagent } from "./runner.ts";
 import { isTerminalSubagentStatus } from "./runs.ts";
 import { appendSubagentMessageRecord, reconcileInterruptedRuns } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
-import { actAsRun, RunReports, reportText } from "./tmux-runs.ts";
+import { actAsRun, RunReports, reportText, stopTurn } from "./tmux-runs.ts";
 import { createTranscriptActions } from "./transcript-actions.ts";
 import { createParentScopeViews } from "./views.ts";
 
@@ -522,13 +522,21 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			exposure: "model-only",
 			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
 			description:
-				'Stop a running subagent by name or run ID, or every running subagent with "all". A stopped child cannot be resumed.',
+				'Stop the turn in progress of a subagent by name or run ID, or of every subagent with "all", as Esc does: the run stays open and takes messages. To end a run, use subagent_close.',
 			parameters: Type.Object(
 				{ agent: Type.String({ description: 'A subagent name or run ID, or "all".' }) },
 				{ additionalProperties: false },
 			),
 			execute: async (_toolCallId, params) => {
 				const target = params.agent.trim();
+				// A run in tmux has its turn stopped; one in process is cancelled.
+				if (target === "all" && pane) {
+					const stopped = views.open().filter(({ record }) => record.pane && stopTurn(record.pane)).length;
+					return {
+						content: [{ type: "text", text: `Stopped the turn of ${stopped} subagent${stopped === 1 ? "" : "s"}.` }],
+						details: undefined,
+					};
+				}
 				if (target === "all") {
 					const stopped = taskSource.stopAll({ source: "model" });
 					return {
@@ -537,6 +545,22 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 				const run = views.findOpen(target)?.record;
+				if (run?.pane) {
+					const label = `${run.name ?? run.runId}'s turn (${run.runId})`;
+					const stopped = stopTurn(run.pane);
+					return {
+						content: [
+							{
+								type: "text",
+								text: stopped
+									? `Stopped ${label}. It stays open and takes messages.`
+									: `Could not stop ${label}: its pi is gone.`,
+							},
+						],
+						details: undefined,
+						isError: !stopped,
+					};
+				}
 				const stopped = run !== undefined && taskSource.stop(run.runId, { source: "model" }).ok;
 				return {
 					content: [

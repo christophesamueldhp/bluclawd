@@ -16,7 +16,8 @@ import {
 } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
 
-export type FauxStep = { text: string } | { tool: string; args: JsonObject };
+/** `stallMs`: the answer takes that long, unless the request is aborted first (as Esc does). */
+export type FauxStep = { text: string; stallMs?: number } | { tool: string; args: JsonObject };
 
 export const FAUX_MODELS = [
 	{ id: "faux-1", reasoning: false },
@@ -29,7 +30,7 @@ export function fauxDir(agentDir: string): string {
 
 export default function fauxPi(pi: ExtensionAPI): void {
 	const faux = fauxProvider({ provider: "faux", models: FAUX_MODELS });
-	const respond: FauxResponseFactory = (context, options, _state, model) => {
+	const respond: FauxResponseFactory = async (context, options, _state, model) => {
 		faux.appendResponses([respond]);
 		const dir = fauxDir(getAgentDir());
 		mkdirSync(dir, { recursive: true });
@@ -43,6 +44,16 @@ export default function fauxPi(pi: ExtensionAPI): void {
 		const script = join(dir, `${key}.json`);
 		const step = (existsSync(script) ? (JSON.parse(readFileSync(script, "utf8")) as FauxStep[]) : [])[asked];
 		if (!step) return fauxAssistantMessage(`faux script for ${key} ran dry`);
+		if ("stallMs" in step && step.stallMs) {
+			const { signal } = options ?? {};
+			await new Promise<void>((resolve) => {
+				const timer = setTimeout(resolve, step.stallMs);
+				signal?.addEventListener("abort", () => {
+					clearTimeout(timer);
+					resolve();
+				});
+			});
+		}
 		return fauxAssistantMessage(
 			"tool" in step ? fauxToolCall(step.tool, step.args) : fauxText(step.text),
 			"tool" in step ? { stopReason: "toolUse" } : undefined,

@@ -12,7 +12,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { textOf } from "../../daemon/session-state.ts";
-import { PARENT_ENV, RUN_TASK_ENV, type Tmux } from "../../daemon/tmux.ts";
+import { PARENT_ENV, RUN_TASK_ENV, Tmux } from "../../daemon/tmux.ts";
 import type { AgentDefinition } from "./definitions.ts";
 import { NOT_APPROVAL } from "./messages.ts";
 import type { SubagentRunnerExecuteParams, SubagentRunnerOutcome } from "./runs.ts";
@@ -74,6 +74,16 @@ export function runSessionFile(run: Pick<RunLaunch, "runDir" | "sessionFile">): 
 			.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
 	} catch {
 		return undefined;
+	}
+}
+
+/** Stops the run's turn in progress, as Esc does; its pi stays open. False when its pane is gone. */
+export function stopTurn(pane: string, tmux: Pick<Tmux, "sendKeys"> = new Tmux()): boolean {
+	try {
+		tmux.sendKeys(pane, ["Escape"]);
+		return true;
+	} catch {
+		return false;
 	}
 }
 
