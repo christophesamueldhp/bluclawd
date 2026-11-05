@@ -49,7 +49,7 @@ scripts/        probe-extensions.ts — headless report of what each extension r
 test/           vitest suites, self-contained — no monorepo, no fixture files
 ```
 
-13 extensions, no runtime dependencies (pi's own packages are peers):
+15 extensions, no runtime dependencies (pi's own packages are peers):
 
 | Extension | Registers |
 |---|---|
@@ -64,6 +64,7 @@ test/           vitest suites, self-contained — no monorepo, no fixture files
 | `vibes` | spinner verbs |
 | `prompt-assist` | `/prompt-assist`; prompt suggestions and automatic session titles with a selectable Pi model; manual rename stays available |
 | `web` | `/web`; the `websearch` (Exa or OpenAI) and `webfetch` (Exa) tools |
+| `accounts` | `/accounts`; named OAuth and API-key accounts, with interactive sign-in and switching |
 | `paste` | bluclawd's paste in the prompt and agent view's composer: a paste over 800 characters or 2 lines shows as `[Pasted text #N +L lines]`, a ctrl+v image as `[Image #N]` (sent as an image), and pasting the same thing again right after shows the text or the image's file |
 
 Prompt assistance defaults to **OpenCode Go / MiMo-V2.6-Flash**, independently of your coding model.
@@ -111,6 +112,34 @@ picker for the provider and for the Codex model OpenAI searches run on; **`/web 
 when one cannot answer (rate limit, outage, no credits, no login), the other one does, and the
 result says so. The choice is saved in `~/.pi/agent/bluclawd/web.json`. Why bluclawd ships its own
 web tools: [ADR-0004](docs/adr/0004-bluclawd-ships-its-own-web-tools.md).
+
+## Provider accounts
+
+Run **`/accounts`**, choose a provider, then **Add account…** to sign in with OAuth or an API key.
+Give each account a name such as Personal or Work. A successful sign-in activates that account;
+the previous login is preserved automatically. **Save current login…** names the login already
+stored by Pi without signing in again; if already saved, this renames the active account rather
+than duplicating its OAuth grant. Select a saved account to switch; `✓` marks the active one.
+**`/accounts provider-id`** opens that provider directly, for example `/accounts openai-codex`.
+Removing an inactive saved account requires confirmation; the active account cannot be removed.
+
+Accounts are per provider: switching OpenAI does not change Anthropic, Exa, or another provider.
+The model, conversation, settings, and extensions stay unchanged. Changes apply to the shared Pi
+credentials, including other sessions and future background requests; wait for other Pi sessions
+to finish requests before switching. The command refuses changes while this session or its
+background subagents are running. Use `/accounts` rather than `/login` to add another account;
+`/login` replaces the currently active login. Environment variables and provider configuration
+can override stored API keys; accounts manage stored logins, not ambient AWS profiles or other
+external credential sources. Providers without interactive sign-in can only save an existing
+stored login. Adding accounts requires the terminal UI; saved-account switching also supports RPC UI.
+
+Saved credentials and account names are stored in `~/.pi/agent/bluclawd/accounts.json`, with
+owner-only file permissions, alongside Pi’s active credentials in `auth.json`. Both follow
+`PI_CODING_AGENT_DIR`. These are local plaintext credential files, not an encrypted keychain;
+do not share them or commit them. Entered keys and authorization codes are masked and are not
+sent into the conversation. OAuth sign-in shows the provider’s URL or device code; open it in
+the browser account you want to add. Token refresh remains Pi’s responsibility; switching away
+saves the latest refreshed credential for reuse.
 
 ## What it adds
 

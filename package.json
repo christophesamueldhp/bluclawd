@@ -19,7 +19,8 @@
       "./ext/paste/index.ts",
       "./ext/prompt-assist/index.ts",
       "./ext/web/index.ts",
-      "./ext/memory/index.ts"
+      "./ext/memory/index.ts",
+      "./ext/accounts/index.ts"
     ],
     "themes": ["./themes"]
   },

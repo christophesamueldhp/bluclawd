@@ -17,6 +17,7 @@
  * it — keep it first — and sandbox, which comes right after it.
  */
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
+import accounts from "./accounts/index.ts";
 import agentView from "./agent-view/index.ts";
 import backgroundBash from "./background-bash/index.ts";
 import branding from "./branding/index.ts";
@@ -48,5 +49,6 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "prompt-assist", factory: promptAssist },
 		{ name: "web", factory: web },
 		{ name: "memory", factory: memory },
+		{ name: "accounts", factory: accounts },
 	];
 }
