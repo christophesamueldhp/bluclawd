@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall, type Provider } from "@earendil-works/pi-ai";
@@ -106,14 +106,20 @@ async function fixture(
 		modelRuntime.registerNativeProvider(provider);
 	}
 	await modelRuntime.refresh({ allowNetwork: false });
-	const settingsManager = SettingsManager.inMemory({
-		compaction: { enabled: false },
-		retry: { enabled: false },
-		quietStartup: true,
-		defaultProvider: "fixture-alpha",
-		defaultModel: "alpha-main",
-		enabledModels: ["fixture-alpha/alpha-main"],
-	});
+	await writeFile(
+		join(directory, "settings.json"),
+		JSON.stringify({
+			compaction: { enabled: false },
+			retry: { enabled: false },
+			quietStartup: true,
+			defaultProvider: "fixture-alpha",
+			defaultModel: "alpha-main",
+			enabledModels: ["fixture-alpha/alpha-main"],
+		}),
+	);
+	await mkdir(join(directory, ".pi"));
+	await writeFile(join(directory, ".pi/settings.json"), JSON.stringify({ theme: "dark" }));
+	const settingsManager = SettingsManager.create(directory, directory, { projectTrusted: true });
 	const runtime = await createAgentSessionRuntime(
 		async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
@@ -150,7 +156,11 @@ async function fixture(
 				diagnostics: services.diagnostics,
 			};
 		},
-		{ cwd: directory, agentDir: directory, sessionManager: SessionManager.inMemory(directory) },
+		{
+			cwd: directory,
+			agentDir: directory,
+			sessionManager: SessionManager.create(directory, join(directory, "sessions")),
+		},
 	);
 	const terminal = new AccountsTerminal();
 	const mode = new InteractiveMode(runtime, { terminal, tuiMode: "regular", initialThemeSetting: "dark" });
@@ -173,7 +183,7 @@ async function fixture(
 		terminal.send(text);
 		terminal.send("\r");
 	};
-	return { terminal, runtime, settingsManager, store, alpha, beta, shown, command };
+	return { directory, terminal, runtime, settingsManager, store, alpha, beta, shown, command };
 }
 
 async function startAlphaLogin(h: Awaited<ReturnType<typeof fixture>>, name: string) {
@@ -187,6 +197,33 @@ async function startAlphaLogin(h: Awaited<ReturnType<typeof fixture>>, name: str
 }
 
 describe("interactive /accounts", () => {
+	it("preserves native global and project settings on disk across all entry routes and explicit selection", async () => {
+		const h = await fixture();
+		const paths = [join(h.directory, "settings.json"), join(h.directory, ".pi/settings.json")];
+		const before = await Promise.all(paths.map((path) => readFile(path, "utf8")));
+		const sessionFile = h.runtime.session.sessionFile;
+		expect(sessionFile).toEqual(expect.any(String));
+		const scope = [...h.runtime.session.scopedModels];
+		for (const [route, title] of [
+			["/accounts", "[Accounts]"],
+			["/accounts --scoped", "View: Scoped"],
+		]) {
+			h.command(route);
+			await h.shown(title);
+			h.terminal.send("\x1b");
+			await waitFor(() => expect(h.terminal.screen).not.toContain(title));
+		}
+		h.command("/accounts --models");
+		await h.shown("View: All");
+		h.terminal.send("beta-main");
+		await h.shown("› Beta Main");
+		h.terminal.send("\r");
+		await waitFor(() => expect(h.runtime.session.model?.id).toBe("beta-main"));
+		expect(h.runtime.session.sessionFile).toBe(sessionFile);
+		expect(h.runtime.session.scopedModels).toEqual(scope);
+		expect(await Promise.all(paths.map((path) => readFile(path, "utf8")))).toEqual(before);
+	});
+
 	it(
 		"opens Models directly across connected providers and selects the Active model",
 		async () => {
