@@ -525,7 +525,10 @@ function deliveryFixture() {
 	const dir = mkdtempSync(join(tmpdir(), "bluclawd-delivery-"));
 	const clock = { now: Date.parse("2026-11-04T10:00:00.000Z") };
 	const tmux = new Map<string, "up" | "gone">();
-	const supervisor = testRegistry(dir, () => clock.now, { hasSession: (name) => tmux.get(name) !== "gone" });
+	const supervisor = testRegistry(dir, () => clock.now, {
+		hasSession: (name) => tmux.get(name) !== "gone",
+		end: () => {},
+	});
 	const file = join(dir, "s.jsonl");
 	const other = join(dir, "other.jsonl");
 	writeFileSync(file, "");

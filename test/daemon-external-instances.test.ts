@@ -184,3 +184,61 @@ describe("waiting for a pane's next message", () => {
 		await expect(Promise.all(waits)).resolves.toEqual(["none", "none"]);
 	});
 });
+
+describe("a run whose orchestrator's pane is gone", () => {
+	/** Registers the orchestrator's pane `pi-o` and its run `pi-r`, on a tmux that has every pane in `up`. */
+	function fixture() {
+		const up = new Set(["pi-o", "pi-r"]);
+		const ended: string[] = [];
+		let now = 1000;
+		const supervisor = testRegistry(undefined, () => now, {
+			hasSession: (name) => up.has(name),
+			end: (name) => {
+				ended.push(name);
+				up.delete(name);
+			},
+		});
+		const orchestrator = { ...rec("pi-o"), pane: "pi-o" };
+		const run = { ...rec("pi-r"), pane: "pi-r", parent: "pi-o" };
+		supervisor.registerExternal(orchestrator, "idle");
+		supervisor.registerExternal(run, "idle");
+		/** Time passes with the run beating and the orchestrator not, and a look at the list. */
+		const pass = (ms: number) => {
+			now += ms;
+			supervisor.registerExternal(run, "idle");
+			return supervisor.listExternalInstances().map(({ record, silent }) => ({ id: record.id, silent }));
+		};
+		return { up, ended, pass };
+	}
+
+	it("is closed by the daemon at its next heartbeat once tmux no longer has the orchestrator's pane", () => {
+		const { up, ended, pass } = fixture();
+		expect(pass(1000)).toHaveLength(2);
+		expect(ended).toEqual([]);
+		// The orchestrator's pi crashed, and its pane went with it.
+		up.delete("pi-o");
+		pass(3000);
+		expect(ended).toEqual(["pi-r"]);
+	});
+
+	it("stays open while the orchestrator's pane is Silent", () => {
+		const { ended, pass } = fixture();
+		// Past the TTL the orchestrator is reaped as Silent: tmux still has its pane.
+		for (let beat = 0; beat < 10; beat++) pass(3000);
+		expect(pass(3000)).toContainEqual({ id: "pi-o", silent: true });
+		expect(ended).toEqual([]);
+	});
+
+	it("is left open when tmux cannot say whether the orchestrator's pane is there", () => {
+		const ended: string[] = [];
+		const supervisor = testRegistry(undefined, undefined, {
+			hasSession: (name) => {
+				if (name === "pi-o") throw new Error("tmux timed out");
+				return true;
+			},
+			end: (name) => ended.push(name),
+		});
+		supervisor.registerExternal({ ...rec("pi-r"), pane: "pi-r", parent: "pi-o" }, "idle");
+		expect(ended).toEqual([]);
+	});
+});

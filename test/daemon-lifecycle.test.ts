@@ -493,6 +493,7 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 					if (unsure.has(name)) throw new Error("ETIMEDOUT");
 					return !gone.has(name);
 				},
+				end: () => {},
 			},
 		});
 		const a = session("a", "working on it");
@@ -529,7 +530,11 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 
 	it("kill + delete: the row goes and stays gone once its pane's TTL lapses", () => {
 		let now = Date.parse("2026-10-30T10:00:00.000Z");
-		const supervisor = new ServerSupervisor({ now: () => now, dir, tmux: { hasSession: () => false } });
+		const supervisor = new ServerSupervisor({
+			now: () => now,
+			dir,
+			tmux: { hasSession: () => false, end: () => {} },
+		});
 		supervisor.registerExternal(pane("pi-a", session("a", "a done"), "sa"), "idle");
 		supervisor.setInstanceMeta("pi-a", { pinned: true });
 
@@ -689,7 +694,11 @@ describe("a resume goes through the registry: starting, then live", () => {
 
 	it("a new session whose pane is gone before it registered stops being listed at once", () => {
 		let up = true;
-		const supervisor = new ServerSupervisor({ now: () => Date.now(), tmux: { hasSession: () => up }, dir });
+		const supervisor = new ServerSupervisor({
+			now: () => Date.now(),
+			tmux: { hasSession: () => up, end: () => {} },
+			dir,
+		});
 		supervisor.paneStarting({ cwd: "/p", pane: "pi-n" });
 		expect(listSummaries(supervisor)).toHaveLength(1);
 		up = false;
@@ -701,6 +710,7 @@ describe("a resume goes through the registry: starting, then live", () => {
 			hasSession: (): boolean => {
 				throw new Error("tmux timed out");
 			},
+			end: () => {},
 		};
 		const supervisor = new ServerSupervisor({ now: () => Date.now(), tmux, dir });
 		supervisor.paneStarting({ cwd: "/p", pane: "pi-n" });

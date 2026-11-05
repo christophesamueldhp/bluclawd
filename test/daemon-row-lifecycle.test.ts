@@ -24,6 +24,7 @@ function fixture() {
 			if (said === "unknown") throw new Error("tmux timed out");
 			return said === "up";
 		},
+		end: () => {},
 	});
 	const file = join(dir, "s.jsonl");
 	const other = join(dir, "other.jsonl");

@@ -98,9 +98,11 @@ interface Starting {
  *  newer wait for the same id replaced it. */
 export type WaitOutcome = "queued" | "none" | "superseded";
 
-/** Whether a pane's tmux session is still there. */
+/** What the registry asks of tmux: whether a pane's session is still there, and ending a run's pane. */
 export interface TmuxProbe {
 	hasSession(name: string): boolean;
+	/** Ends a pane's pi as quitting does: its session is kept. */
+	end(name: string): void;
 }
 
 export interface RegistryDeps {
@@ -192,6 +194,20 @@ export class ServerSupervisor {
 			this.enter(rowId, row, "live");
 		}
 		this.persistRow(rowId, pane);
+		this.closeOrphanedRun(record);
+	}
+
+	/**
+	 * A run lives as long as its orchestrator: once tmux no longer has the orchestrator's pane, its pi
+	 * is gone for good (a Silent pane's tmux still has it), and the run's next heartbeat closes it.
+	 */
+	private closeOrphanedRun({ pane, parent }: InstanceRecord): void {
+		if (!pane || !parent || this.tmuxSays(parent) !== "gone") return;
+		try {
+			this.deps.tmux.end(pane);
+		} catch {
+			// Its pi has quit already, or tmux did not answer: its next heartbeat tries again.
+		}
 	}
 
 	/** Store a pane's row as it shows without its pane, stopped, once its session has a file to resume

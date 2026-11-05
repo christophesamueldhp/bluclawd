@@ -19,7 +19,7 @@ Ending a run's turn in progress. Its pi stays open and still takes messages.
 _Avoid_: close, kill
 
 **Close**:
-Ending a run's pi. Its session is kept and the run can be resumed. The orchestrator closes a run without asking it, and the end of the orchestrator's session closes all of its runs.
+Ending a run's pi. Its session is kept and the run can be resumed. The orchestrator closes a run without asking it, and the end of the orchestrator's session closes all of its runs. So does the daemon once the orchestrator's pane is gone, though not while it is a Silent pane.
 _Avoid_: stop, delete, shutdown request
 
 **Generation**:

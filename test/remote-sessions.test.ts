@@ -343,7 +343,7 @@ function silentRegistry() {
 	const gone = new Set<string>();
 	const supervisor = new ServerSupervisor({
 		now: () => clock.now,
-		tmux: { hasSession: (name) => !gone.has(name) },
+		tmux: { hasSession: (name) => !gone.has(name), end: () => {} },
 		dir,
 	});
 	const beat = (id: string, sessionFile: string) =>
