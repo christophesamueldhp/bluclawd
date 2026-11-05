@@ -266,6 +266,7 @@ export class AgentView implements Component, Focusable {
 	/** Each orchestrator's open runs, by its row's id; they show only under the rows in `openRuns`. */
 	private runs = new Map<string, AgentRow[]>();
 	private readonly openRuns = new Set<string>();
+	private ownRunShown = false;
 	private armed: { key: string; timer: ReturnType<typeof setTimeout> } | undefined;
 	private ctrlCArmedAt = 0;
 	/** Shown in the footer's hint slot until the composer changes or the focus moves, as bluclawd's are. */
@@ -579,7 +580,14 @@ export class AgentView implements Component, Focusable {
 			? this.instances.map((i) => (order.has(i.id) ? { ...i, sortOrder: order.get(i.id) } : i))
 			: this.instances;
 		this.allRows = [...collectRows(instances, this.opts.self?.()), ...this.shells.map(rowFromShell)];
-		this.runs = collectRuns(instances, this.allRows);
+		this.runs = collectRuns(instances, this.allRows, this.opts.self?.());
+		// Opened in a run, its orchestrator's runs show at first, with it among them.
+		if (!this.ownRunShown)
+			for (const [owner, runs] of this.runs)
+				if (runs.some((run) => run.self)) {
+					this.openRuns.add(owner);
+					this.ownRunShown = true;
+				}
 		const text = this.composerText();
 		const filter = queryFilter(text);
 		this.rows = filter ? this.allRows.filter(filter) : this.allRows;
@@ -740,8 +748,12 @@ export class AgentView implements Component, Focusable {
 	/** ↑/↓ wrap around, as bluclawd's do; paging and home/end stop at the ends. The peek moves
 	 *  over sessions only, and so does onboarding, whose headers are labels. */
 	private move(delta: number, opts: { rowsOnly?: boolean; wrap?: boolean } = {}): void {
-		const rowsOnly = opts.rowsOnly || this.onboarding;
-		const candidates = rowsOnly ? this.items.filter((i) => i.kind === "row") : this.items;
+		// Onboarding's bands are not focused; a runs' line still is.
+		const candidates = opts.rowsOnly
+			? this.items.filter((i) => i.kind === "row")
+			: this.onboarding
+				? this.items.filter((i) => i.kind !== "header")
+				: this.items;
 		if (candidates.length === 0) return;
 		const at = candidates.findIndex((i) => i.key === this.selectedKey);
 		const from = at === -1 ? 0 : at;

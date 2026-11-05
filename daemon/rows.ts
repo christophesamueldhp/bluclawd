@@ -148,9 +148,10 @@ export function collectRows(instances: InstanceSummary[], self: InstanceSummary 
 			: self?.pane !== undefined
 				? { ...self, id: `self:${self.pane}` }
 				: self;
-	const summaries = own ? [own, ...listed] : listed;
+	// A run's own window lists it under its orchestrator (collectRuns).
+	const summaries = own && !own.parent ? [own, ...listed] : listed;
 	const rows = summaries.map((i) => rowFromSummary(i, own?.id));
-	if (own && own !== self && !registered) rows[0] = { ...rows[0], unlisted: true };
+	if (own && !own.parent && own !== self && !registered) rows[0] = { ...rows[0], unlisted: true };
 	// Only a registered, running pi writes the file: `starting` and `stopping` rows are alive but not yet, or no longer.
 	const live = new Set(summaries.filter((i) => i.status === "online" && i.sessionFile).map((i) => i.id));
 	const livePanes = new Map<string, number>();
@@ -164,13 +165,19 @@ export function collectRows(instances: InstanceSummary[], self: InstanceSummary 
 }
 
 /** Agent view's open runs, by the id of their orchestrator's row in `rows`: a run whose
- *  orchestrator is not listed there, or whose pi is closed, is left out. */
-export function collectRuns(instances: InstanceSummary[], rows: AgentRow[]): Map<string, AgentRow[]> {
+ *  orchestrator is not listed there, or whose pi is closed, is left out. In a run's own window
+ *  (`self`), its row is this window's. */
+export function collectRuns(
+	instances: InstanceSummary[],
+	rows: AgentRow[],
+	self?: InstanceSummary,
+): Map<string, AgentRow[]> {
 	const owners = new Map(rows.flatMap((row) => (row.pane && row.alive ? [[row.pane, row.id]] : [])));
 	const runs = new Map<string, AgentRow[]>();
 	for (const instance of instances) {
 		const owner = instance.parent && owners.get(instance.parent);
-		const run = owner ? rowFromSummary(instance, undefined) : undefined;
+		const own = self?.pane !== undefined && instance.external && instance.pane === self.pane;
+		const run = owner ? rowFromSummary(instance, own ? instance.id : undefined) : undefined;
 		if (owner && run?.alive) runs.set(owner, [...(runs.get(owner) ?? []), run]);
 	}
 	return runs;

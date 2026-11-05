@@ -244,8 +244,15 @@ const agentView: InlineExtension = {
 		// Pane mode: this pi runs in a tmux session of agent view's own (tmux.ts).
 		const pane = Tmux.currentPane();
 		const panes = new Tmux();
-		// A run's orchestrator (ADR-0006): ← goes back to it, as runs are not in agent view.
+		// A run's orchestrator (ADR-0006): ← goes back to it, or to agent view when the run was opened there.
 		const parent = process.env[PARENT_ENV] || undefined;
+		const backToView = (): boolean => {
+			try {
+				return !!pane && panes.openedFromView(pane);
+			} catch {
+				return false;
+			}
+		};
 		let launched = false;
 		// What the turn in progress is doing, for this session's row in other windows.
 		let liveDetail: string | undefined;
@@ -602,7 +609,8 @@ const agentView: InlineExtension = {
 				}
 				if (Date.now() - editedAt >= LEFT_EDIT_MS || (armedAt && Date.now() - armedAt < LEFT_ARM_MS)) {
 					disarm();
-					if (!parent) pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
+					if (!parent || backToView())
+						pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
 					else {
 						try {
 							panes.switchTo(parent);
@@ -614,7 +622,10 @@ const agentView: InlineExtension = {
 				}
 				const at = Date.now();
 				armedAt = at;
-				leftHint = theme.fg("dim", parent ? "Press ← again to go back" : "Press ← again to open agents");
+				leftHint = theme.fg(
+					"dim",
+					parent && !backToView() ? "Press ← again to go back" : "Press ← again to open agents",
+				);
 				paintPill?.();
 				setTimeout(() => {
 					if (armedAt === at) disarm();
@@ -712,6 +723,11 @@ const agentView: InlineExtension = {
 								current: pane,
 								switchTo: (name) => {
 									const ending = blank(ctx);
+									try {
+										panes.setOpenedFromView(name, true);
+									} catch {
+										// Its ← then goes to its orchestrator, if it is a run.
+									}
 									panes.switchTo(name);
 									if (ending) panes.kill(pane);
 								},
