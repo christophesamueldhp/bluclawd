@@ -18,7 +18,8 @@
       "./ext/vibes/index.ts",
       "./ext/paste/index.ts",
       "./ext/prompt-assist/index.ts",
-      "./ext/web/index.ts"
+      "./ext/web/index.ts",
+      "./ext/memory/index.ts"
     ],
     "themes": ["./themes"]
   },
