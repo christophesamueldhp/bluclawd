@@ -239,6 +239,8 @@ const agentView: InlineExtension = {
 		// Pane mode: this pi runs in a tmux session of agent view's own (tmux.ts).
 		const pane = Tmux.currentPane();
 		const panes = new Tmux();
+		// A run's orchestrator (ADR-0006): ← goes back to it, as runs are not in agent view.
+		const parent = process.env[PARENT_ENV] || undefined;
 		let launched = false;
 		// What the turn in progress is doing, for this session's row in other windows.
 		let liveDetail: string | undefined;
@@ -388,12 +390,24 @@ const agentView: InlineExtension = {
 			let flashCount = 0;
 			let flashTimer: ReturnType<typeof setTimeout> | undefined;
 			let stopped = false;
-			let last = theme.fg("dim", "← for agents");
+			let parentLabel = parent;
+			const runHint = (): string => theme.fg("dim", `← subagent of ${parentLabel}`);
+			let last = parent ? runHint() : theme.fg("dim", "← for agents");
 			const paint = (): void => {
 				if (!stopped) ctx.ui.setStatus(STATUS_KEY, leftHint ?? last);
 			};
 			paintPill = paint;
 			const tick = async (): Promise<void> => {
+				if (parent) {
+					try {
+						parentLabel = (await client.list()).find((r) => r.pane === parent)?.label ?? parentLabel;
+					} catch {
+						// no daemon: the pane's name
+					}
+					last = runHint();
+					paint();
+					return;
+				}
 				let text = theme.fg("dim", "← for agents");
 				try {
 					// Its own row: a resumed session's keeps the id it had in another pane.
@@ -568,12 +582,19 @@ const agentView: InlineExtension = {
 				}
 				if (Date.now() - editedAt >= LEFT_EDIT_MS || (armedAt && Date.now() - armedAt < LEFT_ARM_MS)) {
 					disarm();
-					pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
+					if (!parent) pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
+					else {
+						try {
+							panes.switchTo(parent);
+						} catch (error) {
+							ctx.ui.notify(`Could not go back to the orchestrator: ${Tmux.reason(error)}`, "warning");
+						}
+					}
 					return { consume: true };
 				}
 				const at = Date.now();
 				armedAt = at;
-				leftHint = theme.fg("dim", "Press ← again to open agents");
+				leftHint = theme.fg("dim", parent ? "Press ← again to go back" : "Press ← again to open agents");
 				paintPill?.();
 				setTimeout(() => {
 					if (armedAt === at) disarm();
