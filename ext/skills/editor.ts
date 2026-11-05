@@ -159,6 +159,12 @@ export function attachSkills(
 
 	const baseSet = editor.setText.bind(editor);
 	editor.setText = (text) => {
+		// Dequeued text is plain draft text, not its withdrawn submission's selections.
+		if (text.trim()) {
+			for (let i = submitted.length - 1; i >= 0; i--) {
+				if (text.includes(submitted[i].text)) submitted.splice(i, 1);
+			}
+		}
 		selections = [];
 		pending = undefined;
 		editCursor = undefined;
@@ -191,6 +197,8 @@ export function attachSkills(
 			async getSuggestions(lines, line, col, options) {
 				const before = lines[line].slice(0, col);
 				const match = before.match(/(?:^|\s)(\/[^\s/]*)$/);
+				if (options.force && !match?.[1].startsWith("/skill:"))
+					return current.getSuggestions(lines, line, col, options);
 				const inline = line > 0 || (match && before.slice(0, before.length - match[1].length).trim().length > 0);
 				const commands = getCommands().filter((command) => command.source === "skill");
 				const decorate = (item: AutocompleteItem, command: Command) => {

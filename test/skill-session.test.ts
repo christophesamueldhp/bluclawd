@@ -323,6 +323,27 @@ describe("explicit terminal skills in a real session", () => {
 		});
 	});
 
+	it("does not reactivate a withdrawn queued selection when its plain text is restored and resubmitted", async () => {
+		const c = await composer();
+		const submit = c.editor.onSubmit;
+		let queued = "";
+		c.editor.onSubmit = (text) => {
+			queued = text;
+			// The TUI queues raw text during compaction, before session input hooks run.
+			c.editor.setText("");
+		};
+		await choose(c.editor);
+		c.editor.handleInput(" inspect");
+		c.editor.handleInput("\r");
+		expect(queued).toBe("/skill:review inspect");
+		// Dequeue restores the queued text, not the original selected marker.
+		c.editor.setText(queued);
+		expect(c.editor.render(120).join("\n")).not.toContain("Selected skill");
+		c.editor.onSubmit = submit;
+		await c.submit();
+		expect(c.lastText()?.trimStart()).toBe("/skill:review inspect");
+	});
+
 	it("keeps identities when several terminal submissions wait before session delivery", async () => {
 		const c = await composer();
 		const queued: string[] = [];
