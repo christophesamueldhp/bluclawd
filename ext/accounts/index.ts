@@ -7,6 +7,7 @@ import { loginAccount } from "./login.ts";
 import { AccountStore } from "./store.ts";
 
 const authLabel = (type: AuthType) => (type === "oauth" ? "OAuth" : "API key");
+const usage = "Usage: /accounts [provider-id] | /accounts --models | /accounts --scoped";
 
 function requireIdle(ctx: ExtensionCommandContext): boolean {
 	if (
@@ -162,7 +163,7 @@ async function chooseAccount(
 export default function accounts(pi: ExtensionAPI) {
 	let open = false;
 	pi.registerCommand("accounts", {
-		description: "Manage named provider accounts and choose the Active model",
+		description: "Manage accounts; --models browses all models, --scoped browses Scoped models",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("Use /accounts in interactive Pi to manage provider accounts.", "warning");
@@ -172,22 +173,32 @@ export default function accounts(pi: ExtensionAPI) {
 			open = true;
 			try {
 				const all = providers(ctx);
-				const id = args.trim();
-				const store = new AccountStore(getAgentDir());
-				if (ctx.mode !== "tui") {
-					const labels = all.map((provider) => `${provider.name} (${provider.id})`);
-					const choice = id ? undefined : await ctx.ui.select("Accounts — choose a provider", labels);
-					const provider = id ? all.find((provider) => provider.id === id) : all[labels.indexOf(choice ?? "")];
-					if (provider) await chooseAccount(ctx, provider, store);
-					else if (id) ctx.ui.notify("Unknown provider. Run /accounts to choose one.", "warning");
+				const argument = args.trim();
+				const scoped = argument === "--scoped";
+				const models = argument === "--models" || scoped;
+				if (/\s/.test(argument) || (argument.startsWith("-") && !models)) {
+					ctx.ui.notify(usage, "warning");
 					return;
 				}
-				const view: ChooserView = { section: "Accounts", scoped: false, query: "" };
+				const id = models ? "" : argument;
 				let provider = id ? all.find((item) => item.id === id) : undefined;
 				if (id && !provider) {
-					ctx.ui.notify("Unknown provider. Run /accounts to choose one.", "warning");
+					ctx.ui.notify(`Unknown provider. ${usage}`, "warning");
 					return;
 				}
+				const store = new AccountStore(getAgentDir());
+				if (ctx.mode !== "tui") {
+					if (models) {
+						ctx.ui.notify("Models browsing requires Pi's terminal UI.", "warning");
+						return;
+					}
+					const labels = all.map((provider) => `${provider.name} (${provider.id})`);
+					const choice = id ? undefined : await ctx.ui.select("Accounts — choose a provider", labels);
+					provider ??= all[labels.indexOf(choice ?? "")];
+					if (provider) await chooseAccount(ctx, provider, store);
+					return;
+				}
+				const view: ChooserView = { section: models ? "Models" : "Accounts", scoped, query: "" };
 				while (true) {
 					if (provider) {
 						const outcome = await chooseAccount(ctx, provider, store);

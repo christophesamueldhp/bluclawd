@@ -126,6 +126,12 @@ than duplicating its OAuth grant. Select a saved account to switch; `✓` marks 
 **`/accounts provider-id`** opens that provider directly, for example `/accounts openai-codex`.
 Removing an inactive saved account requires confirmation; the active account cannot be removed.
 
+Open **Models** directly with **`/accounts --models`** to browse across connected providers, or
+**`/accounts --scoped`** to start in the read-only native Scoped view (not Edit scope).
+These routes use the same Accounts/Models chooser and require the terminal UI. Use one route flag
+alone, or a provider ID alone; unknown flags, providers, and combined arguments show usage guidance
+without changing accounts.
+
 **Models** groups the catalog by provider and shows each active account. Type to search, use
 **Ctrl+P** to cycle provider filters, **Ctrl+S** for All/Scoped, and **Enter** to use an available
 model. **Active model**, **Scoped**, and **Unavailable** are separate labels. **Ctrl+A (Show all)**
@@ -133,8 +139,9 @@ reveals models outside scope without changing scope. Successful sign-in opens th
 Models; choosing a model is optional, and closing the chooser keeps the login. Model selection
 changes only the current session's Active model, not scope or defaults. Account switches refresh
 availability and warn about lost access without substituting a model or changing scope.
-The built-in `/login`, `/model`, and `/scoped-models` commands remain host-owned and unchanged;
-this chooser does not edit scope or defaults.
+The built-in `/login`, `/model`, and `/scoped-models` commands and native model-selection shortcuts
+remain host-owned and unchanged. The `/accounts` routes are bluclawd entry points, not overrides
+of those commands; this chooser does not edit scope or defaults.
 
 Accounts are per provider: switching OpenAI does not change Anthropic, Exa, or another provider.
 The model, conversation, settings, and extensions stay unchanged. Changes apply to the shared Pi

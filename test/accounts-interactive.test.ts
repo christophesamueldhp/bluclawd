@@ -186,6 +186,164 @@ async function startAlphaLogin(h: Awaited<ReturnType<typeof fixture>>, name: str
 
 describe("interactive /accounts", () => {
 	it(
+		"opens Models directly across connected providers and selects the Active model",
+		async () => {
+			const h = await fixture();
+			const scope = [...h.runtime.session.scopedModels];
+			const defaults = h.settingsManager.getGlobalSettings();
+			h.command("/accounts --models");
+			await h.shown("Accounts  [Models]");
+			expect(h.terminal.screen).toContain("View: All · Provider: All providers");
+			expect(h.terminal.screen).toContain("Alpha Extra (alpha-extra)");
+			expect(h.terminal.screen).toContain("Beta Main (beta-main)");
+			expect(h.terminal.screen).not.toContain("Gamma Main (gamma-main)");
+			h.terminal.send("beta-main");
+			await h.shown("› Beta Main");
+			h.terminal.send("\r");
+			await waitFor(() => expect(h.runtime.session.model?.id).toBe("beta-main"));
+			expect(h.runtime.session.scopedModels).toEqual(scope);
+			expect(h.settingsManager.getGlobalSettings()).toEqual(defaults);
+		},
+		readinessMs * 2,
+	);
+
+	it(
+		"opens native Scoped membership read-only and navigates back to All and Accounts",
+		async () => {
+			const h = await fixture({ unavailableBeta: true });
+			const scope = [...h.runtime.session.scopedModels];
+			const defaults = h.settingsManager.getGlobalSettings();
+			const savedAccounts = await h.store.list();
+			h.command("/accounts --scoped");
+			await h.shown("Accounts  [Models]");
+			expect(h.terminal.screen).toContain("View: Scoped · Provider: All providers");
+			expect(h.terminal.screen).toContain("Alpha Main (alpha-main) · Active model · Scoped");
+			expect(h.terminal.screen).toContain("Beta Main (beta-main) · Scoped · Unavailable");
+			expect(h.terminal.screen).not.toContain("Alpha Extra (alpha-extra)");
+			expect(h.terminal.screen).not.toContain("Edit scope");
+			h.terminal.send("\x13");
+			await h.shown("View: All");
+			expect(h.terminal.screen).toContain("Alpha Extra (alpha-extra)");
+			h.terminal.send("\t");
+			await h.shown("[Accounts]");
+			h.terminal.send("\x1b");
+			await waitFor(() => expect(h.terminal.screen).not.toContain("[Accounts]"));
+			expect(h.runtime.session.model?.id).toBe("alpha-main");
+			expect(h.runtime.session.scopedModels).toEqual(scope);
+			expect(h.settingsManager.getGlobalSettings()).toEqual(defaults);
+			expect(await h.store.list()).toEqual(savedAccounts);
+		},
+		readinessMs * 2,
+	);
+
+	it.each([
+		"--unknown",
+		"--models --scoped",
+		"--models --models",
+		"--scoped --scoped",
+		"--models fixture-alpha",
+		"fixture-alpha --models",
+		"--scoped fixture-alpha",
+		"fixture-alpha --scoped",
+		"--models=true",
+		"fixture-alpha fixture-beta",
+		"unknown-provider",
+	])(
+		"rejects %s with usage guidance without changing accounts, model, or scope",
+		async (args) => {
+			const h = await fixture();
+			const savedAccounts = await h.store.list();
+			const scope = [...h.runtime.session.scopedModels];
+			const defaults = h.settingsManager.getGlobalSettings();
+			h.command(`/accounts ${args}`);
+			await h.shown("Usage: /accounts [provider-id] | /accounts --models | /accounts --scoped");
+			expect(h.terminal.screen).not.toContain("[Accounts]");
+			expect(h.terminal.screen).not.toContain("[Models]");
+			expect(h.terminal.screen).not.toContain("Fixture Alpha accounts");
+			expect(await h.store.list()).toEqual(savedAccounts);
+			expect(h.runtime.session.model?.id).toBe("alpha-main");
+			expect(h.runtime.session.scopedModels).toEqual(scope);
+			expect(h.settingsManager.getGlobalSettings()).toEqual(defaults);
+		},
+		readinessMs * 2,
+	);
+
+	it(
+		"keeps native /login on pi's authentication flow",
+		async () => {
+			const h = await fixture();
+			const savedAccounts = await h.store.list();
+			h.command("/login");
+			await h.shown("Select authentication method:");
+			expect(h.terminal.screen).not.toContain("[Accounts]");
+			h.terminal.send("\x1b[B");
+			h.terminal.send("\r");
+			await h.shown("Select provider to configure:");
+			h.terminal.send("fixture-gamma");
+			await h.shown("Fixture Gamma");
+			expect(h.terminal.screen).toContain("not configured");
+			h.terminal.send("\x1b");
+			await h.shown("Select authentication method:");
+			h.terminal.send("\x1b");
+			await waitFor(() => expect(h.terminal.screen).not.toContain("Select authentication method:"));
+			expect(await h.store.list()).toEqual(savedAccounts);
+		},
+		readinessMs * 2,
+	);
+
+	it.each(["/model", "Ctrl+L"])(
+		"keeps %s on pi's native model selector",
+		async (entry) => {
+			const h = await fixture();
+			const scope = [...h.runtime.session.scopedModels];
+			const defaults = h.settingsManager.getGlobalSettings();
+			if (entry === "/model") h.command(entry);
+			else h.terminal.send("\x0c");
+			await h.shown("Scope: all | scoped");
+			expect(h.terminal.screen).not.toContain("[Models]");
+			expect(h.terminal.screen).toContain("alpha-main");
+			expect(h.terminal.screen).not.toContain("alpha-extra");
+			expect(h.terminal.screen).not.toContain("beta-main");
+			h.terminal.send("\t");
+			await h.shown("alpha-extra");
+			h.terminal.send("beta-main");
+			await h.shown("beta-main");
+			h.terminal.send("\r");
+			await waitFor(() => expect(h.runtime.session.model?.id).toBe("beta-main"));
+			expect(h.runtime.session.scopedModels).toEqual(scope);
+			expect(h.settingsManager.getGlobalSettings()).toEqual(defaults);
+		},
+		readinessMs * 2,
+	);
+
+	it(
+		"keeps native model cycling and /scoped-models scope editing",
+		async () => {
+			const h = await fixture();
+			const defaults = h.settingsManager.getGlobalSettings();
+			h.terminal.send("\x10");
+			await h.shown("Only one model in scope");
+			expect(h.runtime.session.model?.id).toBe("alpha-main");
+			h.command("/scoped-models");
+			await h.shown("Model Configuration");
+			expect(h.terminal.screen).toContain("Session-only.");
+			expect(h.terminal.screen).not.toContain("[Models]");
+			h.terminal.send("beta-main");
+			await h.shown("beta-main");
+			h.terminal.send("\r");
+			await waitFor(() =>
+				expect(h.runtime.session.scopedModels.map(({ model }) => model.id)).toEqual(["alpha-main", "beta-main"]),
+			);
+			h.terminal.send("\x1b");
+			await waitFor(() => expect(h.terminal.screen).not.toContain("Model Configuration"));
+			expect(h.settingsManager.getGlobalSettings()).toEqual(defaults);
+			h.terminal.send("\x10");
+			await waitFor(() => expect(h.runtime.session.model?.id).toBe("beta-main"));
+		},
+		readinessMs * 2,
+	);
+
+	it(
 		"opens Models from Accounts with provider groups and credential-aware availability",
 		async () => {
 			const h = await fixture();
