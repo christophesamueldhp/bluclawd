@@ -34,7 +34,13 @@ afterEach(async () => {
 });
 
 async function fixture(
-	options: { unavailableBeta?: boolean; oauth?: boolean; refreshFails?: boolean; background?: boolean } = {},
+	options: {
+		unavailableAlpha?: boolean;
+		unavailableBeta?: boolean;
+		oauth?: boolean;
+		refreshFails?: boolean;
+		background?: boolean;
+	} = {},
 ) {
 	const directory = await mkdtemp(join(tmpdir(), "accounts-interactive-"));
 	cleanups.push(() => rm(directory, { recursive: true, force: true }));
@@ -72,6 +78,7 @@ async function fixture(
 				if (allowNetwork && options.refreshFails) throw new Error("Fixture refresh failed");
 			},
 			filterModels: (models, credential) =>
+				(options.unavailableAlpha && faux === alpha) ||
 				(options.unavailableBeta && faux === beta) ||
 				(credential?.type === "api_key" && credential.key === "fixture-limited")
 					? []
@@ -288,6 +295,126 @@ describe("interactive /accounts", () => {
 			await h.shown("[Accounts]");
 			expect(h.runtime.session.model?.id).toBe("alpha-main");
 			expect(h.runtime.session.scopedModels.map(({ model }) => model.id)).toEqual(["alpha-main", "beta-main"]);
+		},
+		readinessMs * 2,
+	);
+
+	it(
+		"treats an empty host scope as unrestricted without reconstructing saved restrictions",
+		async () => {
+			const h = await fixture();
+			h.runtime.session.setScopedModels([]);
+			const defaults = h.settingsManager.getGlobalSettings();
+			h.command();
+			await h.shown("[Accounts]");
+			h.terminal.send("\t");
+			await h.shown("View: All");
+			expect(h.terminal.screen).toContain("Alpha Main (alpha-main) · Active model · Scoped");
+			expect(h.terminal.screen).toContain("Alpha Extra (alpha-extra) · Scoped");
+			expect(h.terminal.screen).toContain("Beta Main (beta-main) · Scoped");
+			h.terminal.send("\x13");
+			await h.shown("View: Scoped");
+			expect(h.terminal.screen).toContain("Alpha Extra (alpha-extra) · Scoped");
+			expect(h.terminal.screen).toContain("Beta Main (beta-main) · Scoped");
+			expect(h.terminal.screen).not.toContain("outside scope");
+			expect(h.terminal.screen).not.toContain("Gamma Main (gamma-main)");
+			expect(h.runtime.session.scopedModels).toEqual([]);
+			expect(h.settingsManager.getGlobalSettings()).toEqual(defaults);
+		},
+		readinessMs * 2,
+	);
+
+	it(
+		"reopens with fresh native scope membership instead of the previous chooser snapshot",
+		async () => {
+			const h = await fixture();
+			h.command();
+			await h.shown("[Accounts]");
+			h.terminal.send("\t");
+			await h.shown("Alpha Main (alpha-main) · Active model · Scoped");
+			h.terminal.send("\x1b");
+			await waitFor(() => expect(h.terminal.screen).not.toContain("Accounts  [Models]"));
+			h.command("/scoped-models");
+			await h.shown("Model Configuration");
+			h.terminal.send("beta-main");
+			await h.shown("Model Name: Beta Main");
+			h.terminal.send("\r");
+			await waitFor(() =>
+				expect(h.runtime.session.scopedModels.map(({ model }) => model.id)).toEqual(["alpha-main", "beta-main"]),
+			);
+			h.terminal.send("\x1b");
+			await waitFor(() => expect(h.terminal.screen).not.toContain("Model Configuration"));
+			const scope = [...h.runtime.session.scopedModels];
+			const defaults = h.settingsManager.getGlobalSettings();
+			h.command();
+			await h.shown("[Accounts]");
+			h.terminal.send("\t");
+			await h.shown("Beta Main (beta-main) · Scoped");
+			h.terminal.send("\x13");
+			await h.shown("View: Scoped");
+			expect(h.terminal.screen).toContain("Alpha Main (alpha-main) · Active model · Scoped");
+			expect(h.terminal.screen).not.toContain("Alpha Extra (alpha-extra)");
+			expect(h.runtime.session.scopedModels).toEqual(scope);
+			expect(h.settingsManager.getGlobalSettings()).toEqual(defaults);
+		},
+		readinessMs * 2,
+	);
+
+	it.each(["/reload", "/new"])(
+		"reads a fresh command context after native %s",
+		async (lifecycleCommand) => {
+			const h = await fixture();
+			h.runtime.session.setScopedModels([{ model: h.beta.getModel() }]);
+			h.command();
+			await h.shown("[Accounts]");
+			h.terminal.send("\t");
+			await h.shown("Beta Main (beta-main) · Scoped");
+			h.terminal.send("\x1b");
+			await waitFor(() => expect(h.terminal.screen).not.toContain("Accounts  [Models]"));
+			const previousSession = h.runtime.session;
+			h.command(lifecycleCommand);
+			await h.shown(lifecycleCommand === "/reload" ? "Reloaded keybindings" : "New session started");
+			if (lifecycleCommand === "/new") expect(h.runtime.session).not.toBe(previousSession);
+			h.runtime.session.setScopedModels([{ model: h.alpha.getModel() }]);
+			const scope = [...h.runtime.session.scopedModels];
+			const defaults = h.settingsManager.getGlobalSettings();
+			const projectSettings = h.settingsManager.getProjectSettings();
+			h.command();
+			await h.shown("[Accounts]");
+			h.terminal.send("\t");
+			await h.shown("Alpha Main (alpha-main) · Active model · Scoped");
+			expect(h.terminal.screen).not.toContain("Beta Main (beta-main) · Scoped");
+			h.terminal.send("\x13");
+			await h.shown("View: Scoped");
+			expect(h.terminal.screen).not.toContain("Beta Main (beta-main)");
+			expect(h.runtime.session.scopedModels).toEqual(scope);
+			expect(h.settingsManager.getGlobalSettings()).toEqual(defaults);
+			expect(h.settingsManager.getProjectSettings()).toEqual(projectSettings);
+		},
+		readinessMs * 2,
+	);
+
+	it(
+		"explains when no restricted members are available without treating other models as Scoped",
+		async () => {
+			const h = await fixture({ unavailableAlpha: true });
+			const scope = [...h.runtime.session.scopedModels];
+			h.command();
+			await h.shown("[Accounts]");
+			h.terminal.send("\t");
+			await h.shown("View: All");
+			h.terminal.send("\x13");
+			await h.shown("View: Scoped");
+			await h.shown("No available Scoped models. Show all: Ctrl+A (scope unchanged).");
+			expect(h.terminal.screen).toContain("Alpha Main (alpha-main) · Active model · Scoped · Unavailable");
+			expect(h.terminal.screen).not.toContain("Beta Main (beta-main)");
+			h.terminal.send("\r");
+			h.terminal.send("\x01");
+			await h.shown("View: All");
+			expect(h.terminal.screen).toContain("Beta Main (beta-main)");
+			expect(h.terminal.screen).not.toContain("Beta Main (beta-main) · Scoped");
+			expect(h.runtime.session.model?.id).toBe("alpha-main");
+			expect(h.runtime.session.scopedModels).toEqual(scope);
 		},
 		readinessMs * 2,
 	);
