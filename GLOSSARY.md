@@ -7,8 +7,20 @@ An extension pack for the pi coding agent: a sandboxed shell, background session
 ### Subagents
 
 **Run**:
-One delegated piece of work by a subagent, with its own identity, transcript and report. A run lives through one or more generations.
-_Avoid_: job, task (for a subagent's work)
+One delegated piece of work by a subagent: a pi session of its own that the orchestrator which launched it starts, messages, stops and closes, with its own identity, transcript and reports. A run lives through one or more generations. It is reached from its orchestrator, not listed in agent view or on the phone.
+_Avoid_: job, task (for a subagent's work), teammate
+
+**Report**:
+A run's last message of a turn, given to its orchestrator each time the run falls idle. A run that stays open reports again after every later turn.
+_Avoid_: result (as if it came once), final answer
+
+**Stop**:
+Ending a run's turn in progress. Its pi stays open and still takes messages.
+_Avoid_: close, kill
+
+**Close**:
+Ending a run's pi. Its session is kept and the run can be resumed. The orchestrator closes a run without asking it, and the end of the orchestrator's session closes all of its runs.
+_Avoid_: stop, delete, shutdown request
 
 **Generation**:
 One launch or one resume of a run. Usage is counted once per generation.
@@ -31,7 +43,7 @@ The orchestrator's session, and its session epoch, that a run or message belongs
 _Avoid_: generation, runtime generation
 
 **Resume**:
-Continuing a completed run with a new message from the orchestrator or the user, as its next generation, with its earlier context.
+Continuing a closed run with a new message from the orchestrator or the user, as its next generation, with its earlier context.
 _Avoid_: restart, rerun
 
 **Waiting**:
