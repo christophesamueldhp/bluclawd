@@ -56,6 +56,9 @@ describe("The orchestrator's Waiting", () => {
 			expect(description).toContain(
 				"Never predict or invent a pending run's result; if the user asks, say it is still running",
 			);
+			expect(description).toContain(
+				"A run stays open after it reports, and nothing closes it for you: once its work is done, close it with `subagent_close`. At most 8 runs stay open; `subagent_message` resumes a closed one.",
+			);
 		} finally {
 			session.dispose();
 		}

@@ -7,6 +7,7 @@ import {
 	readFileSync,
 	renameSync,
 	rmSync,
+	statSync,
 	writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -137,6 +138,18 @@ export function ensureRunStorageDir(
 			ok: false,
 			error: `Failed to initialize subagent storage directory "${runDir}": ${err instanceof Error ? err.message : String(err)}`,
 		};
+	}
+}
+
+/** The session a run in tmux keeps in its directory: the newest its pi wrote there. */
+export function newestRunSession(runDir: string): string | undefined {
+	try {
+		return readdirSync(runDir)
+			.filter((file) => file.endsWith(".jsonl"))
+			.map((file) => join(runDir, file))
+			.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
+	} catch {
+		return undefined;
 	}
 }
 
@@ -334,6 +347,10 @@ export function extractReferencedRunIdsFromBranch(branchEntries: readonly unknow
 	return Array.from(ids);
 }
 
+/**
+ * Settles the runs on the active branch that an earlier instance left open: a run in tmux as closed, any other as
+ * interrupted. Returns the records it changed.
+ */
 export function reconcileInterruptedRuns(
 	agentDir: string,
 	parentSessionId: string,
@@ -348,7 +365,10 @@ export function reconcileInterruptedRuns(
 		const persisted = readPersistedRunRecord(agentDir, parentSessionId, runId);
 		if (!persisted) continue;
 		if (!isTerminalSubagentStatus(persisted.status)) {
-			persisted.status = "interrupted";
+			// A run in tmux ends with its orchestrator, its pi closed and its session kept, so it can be resumed.
+			const runDir = join(getSubagentsRootDir(agentDir), parentSessionId, runId);
+			persisted.status = persisted.pane ? "closed" : "interrupted";
+			if (persisted.pane) persisted.transcriptPath ??= newestRunSession(runDir);
 			persisted.complete = false;
 			persisted.endedAt = Date.now();
 			persisted.stopReason = "orphaned_on_restart";

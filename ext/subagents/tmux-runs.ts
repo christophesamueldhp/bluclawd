@@ -6,7 +6,7 @@
  * and every other Report goes to the orchestrator as a notice that wakes it.
  */
 
-import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentActivity } from "../../daemon/activity.ts";
@@ -18,6 +18,7 @@ import { ForegroundActivity } from "../agent-view/self-registration.ts";
 import type { AgentDefinition } from "./definitions.ts";
 import { NOT_APPROVAL } from "./messages.ts";
 import type { SubagentRunnerExecuteParams, SubagentRunnerOutcome } from "./runs.ts";
+import { newestRunSession } from "./storage.ts";
 import { type SubagentUsageTotals, sessionUsage } from "./usage.ts";
 
 /** What a run is started as: its role and choices, resolved. */
@@ -72,15 +73,7 @@ export function startRun(tmux: Pick<Tmux, "newSession">, run: RunLaunch): string
 
 /** The run's session file: the one a Resume reopened, else the newest pi wrote in its directory. */
 export function runSessionFile(run: Pick<RunLaunch, "runDir" | "sessionFile">): string | undefined {
-	if (run.sessionFile) return run.sessionFile;
-	try {
-		return readdirSync(run.runDir)
-			.filter((file) => file.endsWith(".jsonl"))
-			.map((file) => join(run.runDir, file))
-			.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0];
-	} catch {
-		return undefined;
-	}
+	return run.sessionFile ?? newestRunSession(run.runDir);
 }
 
 /**

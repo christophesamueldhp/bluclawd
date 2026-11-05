@@ -73,6 +73,7 @@ async function createLifecycleSession(cwd: string, agentDir: string) {
 			createSubagentsExtension({
 				agentDir,
 				batchWindowMs: 0,
+				inProcessRuns: true,
 			}),
 		],
 		noExtensions: true,

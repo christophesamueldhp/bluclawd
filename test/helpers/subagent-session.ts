@@ -23,6 +23,8 @@ export async function createParentSessionWithSubagents(options: {
 	extensionsBefore?: ExtensionFactory[];
 	batchWindowMs?: number;
 	now?: () => number;
+	/** Whether a launch outside tmux runs in process, as the tests of the in-process runner need; true when omitted. */
+	inProcessRuns?: boolean;
 }) {
 	const modelRuntime = await ModelRuntime.create({
 		authPath: join(options.agentDir, "auth.json"),
@@ -58,6 +60,7 @@ export async function createParentSessionWithSubagents(options: {
 			createSubagentsExtension({
 				agentDir: options.agentDir,
 				batchWindowMs: options.batchWindowMs,
+				inProcessRuns: options.inProcessRuns ?? true,
 				now: options.now,
 			}),
 			...(options.extensions ?? []),

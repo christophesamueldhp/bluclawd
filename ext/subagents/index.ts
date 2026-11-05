@@ -14,7 +14,7 @@ import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { pistatuslineDrawsFooter } from "../_shared/pistatusline.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { publishSubagentPanel } from "../_shared/subagent-panel.ts";
-import { createRunAdmission, formatRunLabel, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
+import { createRunAdmission, formatRunLabel, MAX_OPEN_RUNS, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
 import {
 	type AgentDefinitionCatalog,
 	discoverAgentDefinitions,
@@ -36,7 +36,12 @@ import type { SubagentResultDetails } from "./results.ts";
 import { messageAsRun } from "./run-messages.ts";
 import { describeSubagentModels, runSubagent } from "./runner.ts";
 import { isTerminalSubagentStatus } from "./runs.ts";
-import { appendSubagentMessageRecord, reconcileInterruptedRuns } from "./storage.ts";
+import {
+	appendSubagentMessageRecord,
+	extractReferencedRunIdsFromBranch,
+	readPersistedRunRecord,
+	reconcileInterruptedRuns,
+} from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
 import { actAsRun, RunReports, reportText, stopTurn } from "./tmux-runs.ts";
 import { createTranscriptActions } from "./transcript-actions.ts";
@@ -53,6 +58,7 @@ const AFTER_YOU_DELEGATE = [
 	"- Do not poll `subagent_status` by reflex; check it only when a run seems stuck.",
 	"- With no independent work left, end your turn and say you are waiting: the report will wake you.",
 	"- Never predict or invent a pending run's result; if the user asks, say it is still running.",
+	`- A run stays open after it reports, and nothing closes it for you: once its work is done, close it with \`subagent_close\`. At most ${MAX_OPEN_RUNS} runs stay open; \`subagent_message\` resumes a closed one.`,
 ];
 
 export interface SubagentExtensionOptions {
@@ -60,7 +66,15 @@ export interface SubagentExtensionOptions {
 	batchWindowMs?: number;
 	/** The clock of the panel and the active-run reminder; Date.now when omitted. */
 	now?: () => number;
+	/**
+	 * Whether a launch outside tmux runs in the orchestrator's process rather than being refused. Only the tests of
+	 * the in-process runner set it, until that runner goes (#190).
+	 */
+	inProcessRuns?: boolean;
 }
+
+const NEEDS_TMUX =
+	"Subagents need tmux: each run is a pi session of its own in agent view's tmux server, and this pi does not run there. Install tmux if it is missing (brew install tmux), then start pi again in a terminal.";
 
 function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot = false): string {
 	const rolesSection = catalog
@@ -370,7 +384,23 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			// Reconcile orphaned runs referenced on the active branch from prior crashes
 			const branchEntries = ctx.sessionManager.getBranch();
 			const liveIds = new Set(scheduler.listActiveRuns(sessionId).map((r) => r.runId));
-			reconcileInterruptedRuns(agentDir, sessionId, branchEntries, liveIds);
+			for (const run of reconcileInterruptedRuns(agentDir, sessionId, branchEntries, liveIds)) {
+				if (run.status !== "closed" || !run.pane) continue;
+				// Left open by an orchestrator that is gone: the daemon closes it too, at its next heartbeat.
+				try {
+					new Tmux().end(run.pane);
+				} catch {
+					// Its pi is gone already.
+				}
+			}
+			// Reopening the session lists its closed runs, which can be resumed.
+			const reopened = parentScope.current();
+			if (reopened) {
+				for (const runId of extractReferencedRunIdsFromBranch(branchEntries)) {
+					const run = scheduler.getRun(runId) ?? readPersistedRunRecord(agentDir, sessionId, runId);
+					if (run?.status === "closed") scheduler.reopen(run, reopened.sessionEpoch);
+				}
+			}
 
 			unpublish?.();
 			// The panel first: publishing the tasks signals a change, and the tasks pill then reads the panel.
@@ -741,6 +771,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						details: undefined,
 						isError: true,
 					};
+				}
+				// A run is a pi of its own in tmux (ADR-0006): there is no other way to run one.
+				if (!pane && !options.inProcessRuns) {
+					return { content: [{ type: "text", text: NEEDS_TMUX }], details: undefined, isError: true };
 				}
 
 				const endLaunch = beginLaunch();

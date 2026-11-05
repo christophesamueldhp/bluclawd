@@ -21,6 +21,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { defineTool, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { PANE_ENV } from "../daemon/tmux.ts";
 import { agentTasks } from "../ext/_shared/agent-tasks.ts";
 import { applyPaneMessage } from "../ext/remote/report.ts";
 import { networkAsker } from "../ext/sandbox/index.ts";
@@ -239,6 +240,30 @@ describe("Task 6 (M1) — Foreground subagent tool integration", () => {
 					expect(tr.isError).toBe(true);
 				}
 			}
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("refuses a launch outside tmux, where no run can be a pi session of its own", async () => {
+		vi.stubEnv(PANE_ENV, "");
+		const cwd = makeTempDir("no-tmux-cwd");
+		const agentDir = makeTempDir("no-tmux-agent");
+		const { session, faux } = await createParentSessionWithSubagents({ cwd, agentDir, inProcessRuns: false });
+		try {
+			await session.bindExtensions({});
+			faux.setResponses([
+				fauxAssistantMessage([fauxToolCall("subagent", { agent: "explorer", task: "Look." }, { id: "c_no_tmux" })]),
+				fauxAssistantMessage("Did it myself."),
+			]);
+			await session.prompt("Delegate the look.", { expandPromptTemplates: false });
+
+			const { result, text } = toolResultText(session, "c_no_tmux");
+			expect(result?.isError).toBe(true);
+			expect(text).toBe(
+				"Subagents need tmux: each run is a pi session of its own in agent view's tmux server, and this pi does not run there. Install tmux if it is missing (brew install tmux), then start pi again in a terminal.",
+			);
+			expect(existsSync(join(agentDir, "bluclawd", "subagents"))).toBe(false);
 		} finally {
 			session.dispose();
 		}

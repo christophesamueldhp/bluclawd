@@ -106,6 +106,7 @@ async function createTestSession(options: {
 			createSubagentsExtension({
 				agentDir: options.agentDir,
 				batchWindowMs: options.batchWindowMs ?? 15,
+				inProcessRuns: true,
 			}),
 		],
 		noExtensions: true,

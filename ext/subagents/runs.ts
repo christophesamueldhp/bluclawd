@@ -394,6 +394,17 @@ export class SubagentRunScheduler<C = unknown> {
 		return { ok: true, handle: { runId, record: structuredClone(managed.record), completion: completionPromise } };
 	}
 
+	/**
+	 * A final run of the session the orchestrator reopens joins the session's new epoch, so it is listed and can be
+	 * resumed; one this scheduler does not know is taken over as it is stored.
+	 */
+	reopen(run: Readonly<SubagentRunRecord>, sessionEpoch: number): void {
+		const managed = this.runs.get(run.runId);
+		if (managed && !isTerminalSubagentStatus(managed.record.status)) return;
+		if (managed) managed.record.sessionEpoch = sessionEpoch;
+		else this.adopt({ ...run, sessionEpoch });
+	}
+
 	/** Takes over a final run another instance ran, as it is stored, so it can be resumed. */
 	private adopt(stored: Readonly<SubagentRunRecord>): void {
 		const record = structuredClone(stored) as SubagentRunRecord;

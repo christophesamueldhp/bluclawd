@@ -1,4 +1,14 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	utimesSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -182,6 +192,27 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 
 		const reloadedCompleted = readPersistedRunRecord(agentDir, completedRec.parentSessionId, "sub_done_2");
 		expect(reloadedCompleted?.status).toBe("completed");
+	});
+
+	it("reconciles a run in tmux its orchestrator never closed as closed, resumable from the session it kept", () => {
+		const agentDir = makeTempDir("reconcile-tmux");
+		const run = makeRecord({ runId: "sub_tmux_1", status: "running", pane: "pi-run" });
+		writePersistedRunRecord(agentDir, run);
+		const runDir = join(getSubagentsRootDir(agentDir), run.parentSessionId, run.runId);
+		writeFileSync(join(runDir, "a.jsonl"), "");
+		utimesSync(join(runDir, "a.jsonl"), 1, 1);
+		writeFileSync(join(runDir, "b.jsonl"), "");
+		const entries = [{ type: "custom", customType: SUBAGENT_RUN_CUSTOM_ENTRY, data: { runId: run.runId } }];
+
+		const reconciled = reconcileInterruptedRuns(agentDir, run.parentSessionId, entries, new Set());
+
+		expect(reconciled).toEqual([
+			expect.objectContaining({ runId: run.runId, status: "closed", transcriptPath: join(runDir, "b.jsonl") }),
+		]);
+		expect(readPersistedRunRecord(agentDir, run.parentSessionId, run.runId)).toMatchObject({
+			status: "closed",
+			transcriptPath: join(runDir, "b.jsonl"),
+		});
 	});
 
 	it("reads legacy quota stops as cancelled and reconciles a legacy queued run as interrupted without restarting it", () => {

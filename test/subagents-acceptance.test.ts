@@ -296,7 +296,7 @@ describe("Task 10 (M1/M2) — Deterministic acceptance checks (not model quality
 				cwd,
 				agentDir,
 				settingsManager,
-				extensionFactories: [createSubagentsExtension({ agentDir })],
+				extensionFactories: [createSubagentsExtension({ agentDir, inProcessRuns: true })],
 				noExtensions: true,
 				noSkills: true,
 				noPromptTemplates: true,

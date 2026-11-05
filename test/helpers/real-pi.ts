@@ -20,7 +20,10 @@ export type { FauxStep };
 export const hasTmux = Tmux.available();
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
-const PI_CLI = join(dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))), "bundle/cli.js");
+export const PI_CLI = join(
+	dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"))),
+	"bundle/cli.js",
+);
 const FAUX = fileURLToPath(new URL("../fixtures/real-pi/faux.ts", import.meta.url));
 /** bluclawd's extensions a pane loads by default. */
 export const DEFAULT_EXTENSIONS = ["agent-view", "subagents"];
