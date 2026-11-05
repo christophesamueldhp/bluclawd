@@ -11,7 +11,9 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { Credential } from "@earendil-works/pi-ai";
+import { getPackageDir } from "@earendil-works/pi-coding-agent";
 
 export interface AccountMetadata {
 	id: string;
@@ -37,9 +39,9 @@ interface AuthBackend {
 	withLockAsync<T>(fn: (current: string | undefined) => Promise<{ result: T }>): Promise<T>;
 }
 
-// Pi does not expose its file backend through the package's public exports.
+// Resolve from the host: Git-installed extensions have no local copy of Pi to resolve.
 const { FileAuthStorageBackend } = (await import(
-	new URL("core/auth-storage.js", import.meta.resolve("@earendil-works/pi-coding-agent")).href
+	pathToFileURL(join(getPackageDir(), "dist/core/auth-storage.js")).href
 )) as { FileAuthStorageBackend: new (path: string) => AuthBackend };
 
 function isObject(value: unknown): value is Record<string, unknown> {
