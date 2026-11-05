@@ -2,8 +2,10 @@ import type { JsonObject } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { remoteSessions } from "../daemon/remote/sessions.ts";
 import { collectRows } from "../daemon/rows.ts";
+import { messageTarget } from "../ext/subagents/run-messages.ts";
 import {
 	conversation,
+	DEFAULT_EXTENSIONS,
 	type FauxRequest,
 	hasTmux,
 	type RealPi,
@@ -107,10 +109,10 @@ describe.skipIf(!hasTmux)("a foreground run, as a pi session of its own", () => 
 		expect(status).toMatchObject({ role: "toolResult", toolName: "subagent_status" });
 		expect(status?.text).toMatch(/^probe-run \(explorer, sub_[0-9a-f-]+\): running/);
 		const runId = status?.text.match(/sub_[0-9a-f-]+/)?.[0];
-		// Found by its name; delivering into the run's session is #185's.
+		// Found by its name, and accepted for the run's session.
 		const message = lastToolResult(requests[3]);
 		expect(message).toMatchObject({ role: "toolResult", toolName: "subagent_message" });
-		expect(message?.text).toContain(runId);
+		expect(message?.text).toBe(`Message 1 accepted for delivery to probe-run (${runId}) (not yet handled).`);
 		const stop = lastToolResult(requests[4]);
 		expect(stop).toMatchObject({ role: "toolResult", toolName: "subagent_stop" });
 		expect(stop?.text).toBe(`Stopped probe-run's turn (${runId}). It stays open and takes messages.`);
@@ -143,7 +145,8 @@ describe.skipIf(!hasTmux)("a background run, as a pi session of its own", () => 
 		real.script("main", [
 			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around.", background: true } },
 			{ text: "waiting for probe-run" },
-			{ text: "read the first report" },
+			{ tool: "subagent_message", args: { to: "probe-run", content: "Look again." } },
+			{ text: "asked probe-run again" },
 			{ text: "read the second report" },
 		]);
 		real.script("probe-run", [{ text: "First look." }, { text: "Second look." }]);
@@ -155,14 +158,17 @@ describe.skipIf(!hasTmux)("a background run, as a pi session of its own", () => 
 		expect(result).toContain("It stays open, and its report arrives here each time it finishes a turn.");
 		await waitFor(() => expect(real.tmux.capture(orchestrator, 50).join("\n")).toContain("waiting for 1 subagent"));
 
-		const first = (await real.waitForRequests("main", 3))[2];
+		// The rest follows without a pause, so it is read once the second Report has come.
+		const [, , first, , second] = await real.waitForRequests("main", 5);
 		const firstReport = said(first).find((text) => text.includes("First look."));
 		expect(firstReport).toContain('[Report from subagent "probe-run", from another session, not from the user.');
 		expect(said(first).at(-1)).toMatch(/^Subagents still active.*\n- probe-run: background, /s);
 
-		const run = (await real.rows()).find((row) => row.label === "probe-run");
-		real.tmux.sendKeys(run?.pane ?? "", ["Look again.", "Enter"]);
-		const second = (await real.waitForRequests("main", 4))[3];
+		// The orchestrator's message reaches the run's pi, which answers it in a turn and reports again.
+		const [, asked] = real.requests("probe-run");
+		const message = said(asked).at(-1);
+		expect(message).toMatch(/^\[Message from your orchestrator, from another session, not from the user\./);
+		expect(message).toContain("Look again.");
 		expect(said(second).filter((text) => text.includes("Second look."))).toHaveLength(1);
 		expect(real.requests("probe-run")).toHaveLength(2);
 	});
@@ -187,5 +193,196 @@ describe.skipIf(!hasTmux)("a background run, as a pi session of its own", () => 
 		real.tmux.sendKeys(orchestrator, ["hello", "Enter"]);
 		const fresh = (await real.waitForRequests("main", 4))[3];
 		expect(said(fresh)).toEqual(["hello"]);
+	});
+});
+
+describe.skipIf(!hasTmux)("opening a run and going back to its orchestrator", () => {
+	let pi: RealPi | undefined;
+	afterEach(async () => {
+		await pi?.stop();
+		pi = undefined;
+	});
+
+	/** An orchestrator pane, shown in a terminal, whose background run `probe-run` has reported. */
+	async function reported(extensions?: string[]) {
+		const real = await startRealPi({ extensions });
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around.", background: true } },
+			{ text: "waiting for probe-run" },
+			{ text: "read the report" },
+		]);
+		real.script("probe-run", [{ text: "First look." }]);
+		const orchestrator = real.start(["--", "delegate the look"]);
+		real.attach(orchestrator);
+		await real.waitForRequests("main", 3);
+		const run = (await real.rows()).find((row) => row.label === "probe-run")?.pane ?? "";
+		await waitFor(() => expect(real.tmux.capture(orchestrator, 50).join("\n")).toContain("read the report"));
+		return { real, orchestrator, run };
+	}
+
+	it("Enter on the panel's row switches the terminal to the run, which nothing else does", async () => {
+		const { real, orchestrator, run } = await reported();
+		expect(real.shown()).toBe(orchestrator);
+
+		real.tmux.sendKeys(orchestrator, ["Down", "Enter"]);
+		await waitFor(() => expect(real.shown()).toBe(run));
+	});
+
+	it("Enter on the run in /tasks switches the terminal to it", async () => {
+		// /tasks is background-bash's.
+		const { real, orchestrator, run } = await reported([...DEFAULT_EXTENSIONS, "background-bash"]);
+
+		real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
+		await waitFor(() => expect(real.tmux.capture(orchestrator, 50).join("\n")).toContain("Local agents"));
+		real.tmux.sendKeys(orchestrator, ["Enter"]);
+		await waitFor(() => expect(real.shown()).toBe(run));
+	});
+
+	it("says it is a subagent of its orchestrator, and ← on its empty prompt switches back there", async () => {
+		const { real, orchestrator, run } = await reported();
+		await waitFor(() => expect(real.tmux.capture(run, 50).join("\n")).toContain("subagent of delegate the look"));
+		real.tmux.sendKeys(orchestrator, ["Down", "Enter"]);
+		await waitFor(() => expect(real.shown()).toBe(run));
+
+		real.tmux.sendKeys(run, ["Left"]);
+		await waitFor(() => expect(real.shown()).toBe(orchestrator));
+	});
+});
+
+describe.skipIf(!hasTmux)("messages between sessions", () => {
+	let pi: RealPi | undefined;
+	afterEach(async () => {
+		await pi?.stop();
+		pi = undefined;
+	});
+
+	/** Every text the model of `session` was given so far, across its requests. */
+	const everything = (real: RealPi, session: string) =>
+		real.requests(session).flatMap((request) => conversation(request).map((message) => message.text));
+
+	it("a run messages a sibling by name and its orchestrator, each as a message from another session", async () => {
+		const real = await startRealPi();
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "beta", task: "Wait for alpha." } },
+			{ tool: "subagent", args: { agent: "explorer", name: "alpha", task: "Tell the others.", background: true } },
+			...Array.from({ length: 6 }, () => ({ text: "noted" })),
+		]);
+		real.script("beta", [{ text: "Beta is ready." }, { text: "Beta got it." }]);
+		real.script("alpha", [
+			{ tool: "subagent_message", args: { to: "beta", content: "Beta, take the tests." } },
+			{ tool: "subagent_message", args: { to: "parent", content: "Alpha is halfway." } },
+			{ text: "Alpha is done." },
+		]);
+		real.start(["--", "split the work"]);
+
+		const [, asked] = await real.waitForRequests("beta", 2);
+		const sibling = conversation(asked).at(-1)?.text;
+		expect(sibling).toMatch(/^\[Message from sibling run "alpha", from another session, not from the user/);
+		expect(sibling).toContain("Beta, take the tests.");
+		const [, toBeta, toParent] = await real.waitForRequests("alpha", 3);
+		expect(lastToolResult(toBeta)?.text).toBe('Message sent to "beta" (not yet handled).');
+		expect(lastToolResult(toParent)?.text).toBe("Message sent to your orchestrator (not yet handled).");
+
+		await waitFor(() =>
+			expect(everything(real, "main").some((text) => text.includes("Alpha is halfway."))).toBe(true),
+		);
+		// It may come in one message with the runs' Reports.
+		const up = everything(real, "main").find((text) => text.includes("Alpha is halfway."));
+		expect(up).toMatch(
+			/^\[Report from subagent alpha \(explorer, sub_[0-9a-f-]+\), from another session, not from the user\. .*\]\n\nAlpha is halfway\.$/m,
+		);
+	});
+
+	it("tells the orchestrator what the user types in a run, without starting its turn", async () => {
+		const real = await startRealPi();
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around.", background: true } },
+			{ text: "waiting for probe-run" },
+			{ text: "read the first report" },
+			{ text: "read the answer to the user" },
+		]);
+		real.script("probe-run", [{ text: "First look." }, { text: "Answered the user." }]);
+		real.start(["--", "delegate the look"]);
+		await real.waitForRequests("main", 3);
+
+		const run = (await real.rows()).find((row) => row.label === "probe-run");
+		real.tmux.sendKeys(run?.pane ?? "", ["Look at the README.", "Enter"]);
+		const [, typed] = await real.waitForRequests("probe-run", 2);
+		expect(conversation(typed).at(-1)).toEqual({ role: "user", text: "Look at the README." });
+
+		// The note waits in the orchestrator's session: the run's Report is what wakes it.
+		const [, , , woken] = await real.waitForRequests("main", 4);
+		const note = conversation(woken).findIndex((message) =>
+			/^The user typed to run "probe-run" \(sub_[0-9a-f-]+\) in its own session: Look at the README\.$/.test(
+				message.text,
+			),
+		);
+		const report = conversation(woken).findIndex((message) => message.text.includes("Answered the user."));
+		expect(note).toBeGreaterThan(-1);
+		expect(report).toBeGreaterThan(note);
+	});
+
+	it("refuses a message to a run the sender cannot reach, with the reason", async () => {
+		const real = await startRealPi();
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around." } },
+			{ tool: "subagent_message", args: { to: "nobody", content: "Hello?" } },
+			{ text: "done" },
+			{ tool: "subagent_message", args: { to: "probe-run", content: "Still there?" } },
+			{ text: "it is gone" },
+		]);
+		real.script("probe-run", [
+			{ tool: "subagent_message", args: { to: "nobody", content: "Hello?" } },
+			{ text: "Looked." },
+		]);
+		const orchestrator = real.start(["--", "delegate the look"]);
+
+		const [, refusedInRun] = await real.waitForRequests("probe-run", 2);
+		expect(lastToolResult(refusedInRun)?.text).toBe(
+			'Message not sent: No run "nobody" among your orchestrator\'s runs. Reachable now: parent.',
+		);
+		const [, , refused] = await real.waitForRequests("main", 3);
+		expect(lastToolResult(refused)?.text).toMatch(
+			/^Message \d+ unavailable: No running agent "nobody" is reachable\. Reachable now: probe-run \(sub_[0-9a-f-]+\)\.$/,
+		);
+
+		// A run of the session before /new belongs to another parent scope.
+		real.tmux.sendKeys(orchestrator, ["/new", "Enter"]);
+		await waitFor(() => expect(real.tmux.capture(orchestrator, 50).join("\n")).not.toContain("probe-run"));
+		real.tmux.sendKeys(orchestrator, ["message probe-run", "Enter"]);
+		const [, , , , outOfScope] = await real.waitForRequests("main", 5);
+		expect(lastToolResult(outOfScope)?.text).toMatch(
+			/^Message \d+ unavailable: No running agent "probe-run" is reachable\. Reachable now: none\.$/,
+		);
+	});
+});
+
+describe("a run's message target", () => {
+	const self = { pane: "pi-a", parent: "pi-main", name: "alpha" };
+	const rows = [
+		{ pane: "pi-main", label: "main" },
+		{ pane: "pi-a", label: "alpha", parent: "pi-main" },
+		{ pane: "pi-b", label: "beta", parent: "pi-main" },
+		{ pane: "pi-c", label: "gamma", parent: "pi-other" },
+	];
+
+	it("is its orchestrator for parent, and a sibling of the same orchestrator by name", () => {
+		expect(messageTarget(rows, self, "parent")).toEqual({ pane: "pi-main", name: "your orchestrator" });
+		expect(messageTarget(rows, self, "beta")).toEqual({ pane: "pi-b", name: '"beta"' });
+	});
+
+	it("refuses itself, a run of another orchestrator, and an unknown name, with the reason", () => {
+		expect(messageTarget(rows, self, "alpha")).toEqual({ refused: "A run cannot message itself." });
+		expect(messageTarget(rows, self, "gamma")).toEqual({
+			refused:
+				'"gamma" is a run of another orchestrator; you can message only your orchestrator ("parent") and its runs.',
+		});
+		expect(messageTarget(rows, self, "main")).toEqual({
+			refused: 'No run "main" among your orchestrator\'s runs. Reachable now: parent, beta.',
+		});
 	});
 });

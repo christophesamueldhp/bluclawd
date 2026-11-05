@@ -16,6 +16,7 @@ import { PARENT_ENV, RUN_TASK_ENV, Tmux } from "../../daemon/tmux.ts";
 import type { AgentDefinition } from "./definitions.ts";
 import { NOT_APPROVAL } from "./messages.ts";
 import type { SubagentRunnerExecuteParams, SubagentRunnerOutcome } from "./runs.ts";
+import { type SubagentUsageTotals, sessionUsage } from "./usage.ts";
 
 /** What a run is started as: its role and choices, resolved. */
 export interface RunLaunch {
@@ -142,6 +143,8 @@ export interface TmuxRunDeps {
 	reports: RunReports;
 	/** A Report no foreground launch took: it goes to the orchestrator. */
 	notify(report: SessionMessage): void;
+	/** The run's session usage so far, from its latest Report. */
+	usage(totals: SubagentUsageTotals): void;
 }
 
 /**
@@ -160,6 +163,7 @@ export async function executeTmuxRun(
 	let last = "";
 	const unlisten = deps.reports.listen(pane, (report) => {
 		last = report.text;
+		if (report.usage) deps.usage(report.usage);
 		controller.updateProgress(report.text);
 		if (!deps.reports.take(record.runId, report)) deps.notify(report);
 	});
@@ -202,6 +206,7 @@ export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefi
 			from: pane,
 			name: pi.getSessionName(),
 			text,
+			usage: sessionUsage(ctx.sessionManager.getEntries()),
 		};
 		try {
 			await new OrchestratorClient().send(parent, report);

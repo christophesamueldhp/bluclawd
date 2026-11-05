@@ -90,6 +90,10 @@ export interface RealPi {
 	rows(): Promise<InstanceSummary[]>;
 	/** Every pane's screen, scrollback included: for a failing test to show. */
 	screens(): string;
+	/** Shows `pane` in a terminal of its own (a client of the private server), as `pi` in a terminal does. */
+	attach(pane: string): void;
+	/** The pane that terminal shows now. */
+	shown(): string | undefined;
 	/** Ends the daemon and every pane, and removes their directories. */
 	stop(): Promise<void>;
 }
@@ -125,6 +129,7 @@ export async function startRealPi(options: { extensions?: string[] } = {}): Prom
 		}),
 	);
 	const tmux = new Tmux(serverDir);
+	const terminal = join(base, "t.sock");
 	const client = new OrchestratorClient();
 	// ensureDaemon waits 3s, too short under parallel load; calling it again would spawn a second daemon.
 	if (!(await client.ensureDaemon())) await waitFor(async () => expect(await client.isRunning()).toBe(true));
@@ -169,9 +174,19 @@ export async function startRealPi(options: { extensions?: string[] } = {}): Prom
 			tmux.newSession({ cwd, args: ["--model", "faux/faux-1", ...args], command: [process.execPath, PI_CLI] }),
 		rows: () => client.list(),
 		screens,
+		// The terminal is a pane of another tmux server, running a client of the private one.
+		attach: (pane) => {
+			const attach = `env -u TMUX tmux -S '${tmux.socket}' attach-session -t '=${pane}'`;
+			spawnSync("tmux", ["-S", terminal, "-f", "/dev/null", "new-session", "-d", "-x", "120", "-y", "40", attach]);
+		},
+		shown: () =>
+			spawnSync("tmux", ["-S", tmux.socket, "list-clients", "-F", "#{client_session}"], { encoding: "utf8" })
+				.stdout.split("\n")
+				.find(Boolean),
 		stop: async () => {
 			await client.shutdownDaemon();
 			spawnSync("tmux", ["-S", tmux.socket, "kill-server"]);
+			spawnSync("tmux", ["-S", terminal, "kill-server"]);
 			// A pi hung up by the kill may still be writing its last records.
 			rmSync(base, { recursive: true, force: true, maxRetries: 10 });
 		},

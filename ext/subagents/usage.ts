@@ -1,4 +1,5 @@
 import type { Usage } from "@earendil-works/pi-ai";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 export interface SubagentUsageTotals {
 	input: number;
@@ -78,6 +79,20 @@ export function addSubagentUsage(target: SubagentUsageTotals, delta: Partial<Sub
 	if (delta.hasUnknownCost) {
 		target.hasUnknownCost = true;
 	}
+}
+
+/** A session's usage so far, as pi's own totals count it: every entry of the session, not only its branch. */
+export function sessionUsage(entries: readonly SessionEntry[]): SubagentUsageTotals {
+	const totals = createEmptySubagentUsage();
+	for (const entry of entries) {
+		let counted: Usage | undefined;
+		if (entry.type === "usage") counted = entry.usage;
+		else if (entry.type === "message" && (entry.message.role === "assistant" || entry.message.role === "toolResult"))
+			counted = entry.message.usage;
+		else if (entry.type === "branch_summary" || entry.type === "compaction") counted = entry.usage;
+		if (counted) addSubagentUsage(totals, counted);
+	}
+	return totals;
 }
 
 export function createGenerationUsage(options: { kind: GenerationKind }): GenerationUsage {
