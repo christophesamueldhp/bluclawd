@@ -1,0 +1,33 @@
+#!/bin/sh
+# Gate pushes on `npm run check`, run against a clean checkout of each pushed
+# commit so uncommitted work can't make the result green or red.
+set -eu
+
+root=$(git rev-parse --show-toplevel)
+# Linked worktrees often have no install of their own; borrow the main checkout's.
+modules="$root/node_modules"
+[ -d "$modules" ] || modules="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")/node_modules"
+dir=""
+cleanup() {
+	if [ -n "$dir" ]; then git -C "$root" worktree remove --force "$dir"; fi
+	dir=""
+}
+trap cleanup EXIT INT TERM
+
+# stdin lines: <local ref> <local sha> <remote ref> <remote sha>; an all-zero local sha is a branch deletion.
+shas=$(awk '$2 !~ /^0+$/ { print $2 }' | sort -u)
+
+for sha in $shas; do
+	dir=$(mktemp -d)
+	git worktree add --quiet --detach "$dir" "$sha"
+	ln -s "$modules" "$dir/node_modules"
+	echo "pre-push: checking $(git log -1 --format='%h %s' "$sha")"
+	# The steps of `npm run check`, spelled out so commits predating that script are checked too.
+	# Unset GIT_DIR and friends: git exports them to hooks, and tests that make their own repos would hit this one.
+	# shellcheck disable=SC2046
+	if ! (cd "$dir" && unset $(git rev-parse --local-env-vars) && npm run lint && npm run deadcode && npm run typecheck && npm test); then
+		echo "pre-push: checks failed, push aborted (bypass with git push --no-verify)" >&2
+		exit 1
+	fi
+	cleanup
+done

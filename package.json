@@ -53,7 +53,8 @@
     "typecheck": "tsc -p daemon/remote/web --noEmit false --declaration --emitDeclarationOnly --outDir .types/remote-web && tsc --noEmit",
     "lint": "biome check .",
     "deadcode": "knip --production --include files",
-    "lint:fix": "biome check --write ."
+    "lint:fix": "biome check --write .",
+    "check": "npm run lint && npm run deadcode && npm run typecheck && npm test"
   },
   "dependencies": {
     "@anthropic-ai/sandbox-runtime": "file:vendor/sandbox-runtime/anthropic-ai-sandbox-runtime-0.0.81-bluclawd.3.tgz"
