@@ -150,7 +150,7 @@ describe.skipIf(!hasTmux)("stopping a run", () => {
 		expect(stop?.text).toMatch(/^Stopped probe-run's turn \(sub_[0-9a-f-]+\)\. It stays open and takes messages\.$/);
 		expect(lastToolResult(requests[4])?.text).toMatch(/^probe-run \(explorer, sub_[0-9a-f-]+\): running/);
 
-		// Not listed before its first answer: its pane is the one beside the orchestrator's.
+		// Its pane is the one beside the orchestrator's.
 		const [run] = panes(real).filter((pane) => pane !== orchestrator);
 		expect(run).toBeDefined();
 		real.tmux.sendKeys(run, ["Go on.", "Enter"]);

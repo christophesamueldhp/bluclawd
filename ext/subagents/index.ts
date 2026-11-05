@@ -104,7 +104,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		pi.events.on("bluclawd:session-message", (data) => {
 			const message = data as SessionMessage;
 			if (message.kind === "report" || message.kind === "activity") reports.receive(message);
-			else fromRun(message);
+			// A stop is for a run (actAsRun), never for its orchestrator.
+			else if (message.kind !== "stop") fromRun(message);
 		});
 
 		let activeTurnIndex = 0;
@@ -589,11 +590,14 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				{ agent: Type.String({ description: 'A subagent name or run ID, or "all".' }) },
 				{ additionalProperties: false },
 			),
-			execute: async (_toolCallId, params) => {
+			execute: async (_toolCallId, params, signal) => {
 				const target = params.agent.trim();
 				// A run in tmux has its turn stopped; one in process is cancelled.
 				if (target === "all" && pane) {
-					const stopped = views.open().filter(({ record }) => record.pane && stopTurn(record.pane)).length;
+					const asked = await Promise.all(
+						views.open().map(({ record }) => (record.pane ? stopTurn(record.pane, pane, signal) : false)),
+					);
+					const stopped = asked.filter(Boolean).length;
 					return {
 						content: [
 							{ type: "text", text: `Stopped the turn of ${stopped} subagent${stopped === 1 ? "" : "s"}.` },
@@ -611,14 +615,14 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const run = views.findOpen(target)?.record;
 				if (run?.pane) {
 					const label = `${run.name ?? run.runId}'s turn (${run.runId})`;
-					const stopped = stopTurn(run.pane);
+					const stopped = pane !== undefined && (await stopTurn(run.pane, pane, signal));
 					return {
 						content: [
 							{
 								type: "text",
 								text: stopped
 									? `Stopped ${label}. It stays open and takes messages.`
-									: `Could not stop ${label}: its pi is gone.`,
+									: `Could not stop ${label}: its pi cannot be reached.`,
 							},
 						],
 						details: undefined,

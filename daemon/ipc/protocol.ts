@@ -105,7 +105,8 @@ export type PaneMessage =
  *  `report`: a run's last message of a turn, to its orchestrator. `message`: what one session
  *  sends another with subagent_message. `typed`: what the user typed in a run, as a note for its
  *  orchestrator. `activity`: what a run is doing now, to its orchestrator, each time that changes;
- *  `dialog`: the title of the prompt it waits on. */
+ *  `dialog`: the title of the prompt it waits on. `stop`: the orchestrator ends its run's turn in
+ *  progress, as Esc does. */
 export type SessionMessage = { type: "session_message"; from: string; name?: string } & (
 	| {
 			kind: "report";
@@ -115,6 +116,7 @@ export type SessionMessage = { type: "session_message"; from: string; name?: str
 	  }
 	| { kind: "message" | "typed"; text: string }
 	| { kind: "activity"; activity: AgentActivity; dialog?: string }
+	| { kind: "stop" }
 );
 
 /** A session's tokens and cost. */

@@ -473,7 +473,8 @@ const agentView: InlineExtension = {
 			activity = new ForegroundActivity();
 			registration = new SelfRegistration(
 				new OrchestratorClient(),
-				() => (blank(ctx) ? undefined : selfHeartbeat(ctx)),
+				// A run registers at once, listed nowhere, so its orchestrator reaches it from its first turn on.
+				() => (blank(ctx) && !parent ? undefined : selfHeartbeat(ctx)),
 				(message) => onPaneMessage(ctx, message),
 				pane,
 				(watched) => pi.events.emit("bluclawd:remote-watched", watched),

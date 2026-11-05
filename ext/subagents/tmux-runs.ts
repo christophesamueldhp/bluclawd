@@ -13,7 +13,7 @@ import type { AgentActivity } from "../../daemon/activity.ts";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { textOf } from "../../daemon/session-state.ts";
-import { PARENT_ENV, RUN_TASK_ENV, Tmux } from "../../daemon/tmux.ts";
+import { PARENT_ENV, RUN_TASK_ENV, type Tmux } from "../../daemon/tmux.ts";
 import { ForegroundActivity } from "../agent-view/self-registration.ts";
 import type { AgentDefinition } from "./definitions.ts";
 import { NOT_APPROVAL } from "./messages.ts";
@@ -83,15 +83,29 @@ export function runSessionFile(run: Pick<RunLaunch, "runDir" | "sessionFile">): 
 	}
 }
 
-/** Stops the run's turn in progress, as Esc does; its pi stays open. False when its pane is gone. */
-export function stopTurn(pane: string, tmux: Pick<Tmux, "sendKeys"> = new Tmux()): boolean {
-	try {
-		tmux.sendKeys(pane, ["Escape"]);
-		return true;
-	} catch {
-		return false;
+/**
+ * Stops the run's turn in progress, as Esc does; its pi stays open. Asked through the daemon, not by pressing
+ * Esc in its pane: a busy pi may read a lone Esc together with the next keys typed there. False when the run
+ * cannot be reached.
+ */
+export async function stopTurn(pane: string, from: string, signal?: AbortSignal): Promise<boolean> {
+	const client = new OrchestratorClient();
+	const deadline = Date.now() + REGISTER_WAIT_MS;
+	for (;;) {
+		try {
+			await client.send(pane, { type: "session_message", kind: "stop", from });
+			return true;
+		} catch (error) {
+			// A run just launched registers with the daemon a moment after its first turn starts.
+			const starting = String(error).includes("Unknown instance") && Date.now() < deadline && !signal?.aborted;
+			if (!starting) return false;
+			await new Promise((resolve) => setTimeout(resolve, 200));
+		}
 	}
 }
+
+/** How long a Stop waits for a run's pi to register: past one heartbeat that timed out, and the next. */
+const REGISTER_WAIT_MS = 10_000;
 
 /** A Report as the orchestrator's model reads it: from another session, never the user. */
 export function reportText(name: string, text: string): string {
@@ -224,7 +238,14 @@ export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefi
 		return sending;
 	};
 
-	pi.on("session_start", () => {
+	let current: ExtensionContext | undefined;
+	pi.events.on("bluclawd:session-message", (data) => {
+		const message = data as SessionMessage;
+		// Only its orchestrator stops its turn.
+		if (message.kind === "stop" && message.from === parent) current?.abort();
+	});
+	pi.on("session_start", (_event, ctx) => {
+		current = ctx;
 		const taskFile = process.env[RUN_TASK_ENV];
 		// Read once: a reload or a later session of this pi must not send it again.
 		delete process.env[RUN_TASK_ENV];
