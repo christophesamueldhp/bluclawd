@@ -78,3 +78,17 @@ _Avoid_: dead pane, stale pane
 
 **Session changed**:
 Why a phone's prompt is refused when it was sent to another session than its pane's: the pane is on another one now and refuses it, or its session ended for a new one, a `/resume` of another file or a fork before pi took it, and the daemon refuses it. A reload or a `/resume` of the same file is still the session it was sent to; a fork has a row of its own.
+
+### Memory
+
+**Memory**:
+One fact the agent keeps for one Project across sessions: who the user is, guidance they gave, the state of ongoing work, or where to look something up. The orchestrator keeps it; a run does not.
+_Avoid_: note, entry, context file (`AGENTS.md`, `CLAUDE.md`)
+
+**Memory index**:
+One line per Memory of the Project, given to the agent when its session starts. A Memory saved during the session is not added to it until the next session.
+_Avoid_: MEMORY.md (its file, not the concept)
+
+**Project**:
+Whose Memory a session sees: the git repository the session's directory belongs to, shared by all its worktrees, or the directory itself outside git.
+_Avoid_: workspace, repo (alone), cwd

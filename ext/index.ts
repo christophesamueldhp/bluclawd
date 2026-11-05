@@ -22,6 +22,7 @@ import backgroundBash from "./background-bash/index.ts";
 import branding from "./branding/index.ts";
 import checkpoints from "./checkpoints/index.ts";
 import help from "./help/index.ts";
+import memory from "./memory/index.ts";
 import paste from "./paste/index.ts";
 import permissions from "./permissions/index.ts";
 import promptAssist from "./prompt-assist/index.ts";
@@ -46,5 +47,6 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "paste", factory: paste },
 		{ name: "prompt-assist", factory: promptAssist },
 		{ name: "web", factory: web },
+		{ name: "memory", factory: memory },
 	];
 }
