@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FauxResponseStep, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
@@ -282,6 +282,78 @@ describe("memory", () => {
 		const later = await startSession(repo, agentDir);
 		await later.prompt([fauxAssistantMessage("Hi.")]);
 		expect(later.seen[0]).not.toContain("editor");
+		later.session.dispose();
+	});
+	it("keeps a description exactly as written, YAML-special characters included", async () => {
+		const repo = gitRepo();
+		const agentDir = makeTempDir("agent");
+		const descriptions = [
+			"Note: user prefers tabs",
+			"[WIP] deploy freeze",
+			"Uses tabs # not spaces",
+			"123",
+			"- dash first",
+		];
+		const first = await startSession(repo, agentDir);
+		await first.prompt([
+			...descriptions.map((description, i) => save({ name: `m-${i}`, description, type: "user", body: "x" })),
+			fauxAssistantMessage("Saved."),
+		]);
+		expect(first.toolResults.every((result) => result.startsWith("Saved Memory"))).toBe(true);
+		first.session.dispose();
+
+		const later = await startSession(repo, agentDir);
+		await later.prompt([fauxAssistantMessage("Hi.")]);
+		for (const [i, description] of descriptions.entries()) {
+			expect(later.seen[0]).toContain(`[m-${i}](m-${i}.md) — ${description}\\n`);
+		}
+		later.session.dispose();
+	});
+
+	it("goes on working past a hand-edited Memory with broken frontmatter, and ignores files not named as Memories", async () => {
+		const repo = gitRepo();
+		const agentDir = makeTempDir("agent");
+		const dir = join(agentDir, "bluclawd", "memory", repo.replaceAll("/", "-"));
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "broken.md"), "---\ndescription: Note: [unclosed\n---\n\nBody.\n");
+		writeFileSync(join(dir, "Foo Bar.md"), "Not a Memory.\n");
+
+		const first = await startSession(repo, agentDir);
+		await first.prompt([
+			save({ name: "tabs", description: "The user prefers tabs", type: "feedback", body: "Tabs." }),
+			fauxAssistantMessage("Saved."),
+		]);
+		expect(first.toolResults.at(-1)).toContain('Saved Memory "tabs"');
+		first.session.dispose();
+
+		const later = await startSession(repo, agentDir);
+		await later.prompt([fauxAssistantMessage("Hi.")]);
+		expect(later.seen[0]).toContain("[tabs](tabs.md)");
+		expect(later.seen[0]).toContain("[broken](broken.md)");
+		expect(later.seen[0]).not.toContain("Foo Bar");
+		later.session.dispose();
+	});
+
+	it("shares one Project across the worktrees of a bare repository", async () => {
+		const bare = join(makeTempDir("bare"), "b.git");
+		execFileSync("git", ["clone", "-q", "--bare", gitRepo(), bare]);
+		const parent = makeTempDir("wts");
+		const [one, two] = [join(parent, "one"), join(parent, "two")];
+		execFileSync("git", ["worktree", "add", "-q", "-b", "one", one], { cwd: bare });
+		execFileSync("git", ["worktree", "add", "-q", "-b", "two", two], { cwd: bare });
+		mkdirSync(join(two, "src"));
+		const agentDir = makeTempDir("agent");
+
+		const first = await startSession(one, agentDir);
+		await first.prompt([
+			save({ name: "deploy-freeze", description: "Merge freeze", type: "project", body: "Freeze." }),
+			fauxAssistantMessage("Saved."),
+		]);
+		first.session.dispose();
+
+		const later = await startSession(join(two, "src"), agentDir);
+		await later.prompt([fauxAssistantMessage("Hi.")]);
+		expect(later.seen[0]).toContain("[deploy-freeze](deploy-freeze.md)");
 		later.session.dispose();
 	});
 });

@@ -3,22 +3,30 @@
  * `MEMORY.md`, the Memory index, rebuilt from those files on every change.
  * The layout matches Claude Code's auto memory, so files copy across by hand.
  */
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseFrontmatter } from "@earendil-works/pi-coding-agent";
 
 export const MEMORY_TYPES = ["user", "feedback", "project", "reference"] as const;
-export type MemoryType = (typeof MEMORY_TYPES)[number];
 
 export interface Memory {
 	name: string;
 	description: string;
-	type: MemoryType;
+	type: (typeof MEMORY_TYPES)[number];
 	body: string;
+}
+
+/** A Memory as its file says now: a hand edit may have left any type, or frontmatter pi can't read. */
+export interface MemorySummary {
+	name: string;
+	type: string;
+	description: string;
 }
 
 const INDEX_FILE = "MEMORY.md";
 const NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const INDEX_MAX_LINES = 200;
+const INDEX_MAX_BYTES = 25 * 1024;
 
 /** The directory holding a Project's Memories: the Project's path with `/` turned into `-`. */
 export function memoryDir(agentDir: string, project: string): string {
@@ -33,41 +41,54 @@ export function invalidMemory(memory: Memory): string | undefined {
 	return undefined;
 }
 
+/** Writes through a temporary file, so a pane reading at the same moment never sees half of it. */
+function writeAtomically(path: string, content: string): void {
+	const temporary = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+	writeFileSync(temporary, content, "utf8");
+	renameSync(temporary, path);
+}
+
 export function saveMemory(dir: string, memory: Memory): void {
 	mkdirSync(dir, { recursive: true });
 	const file = [
 		"---",
 		`name: ${memory.name}`,
-		`description: ${memory.description.trim()}`,
+		// JSON is valid YAML, so any description reads back exactly as written.
+		`description: ${JSON.stringify(memory.description.trim())}`,
 		`type: ${memory.type}`,
 		"---",
 		"",
 		memory.body.trim(),
 		"",
 	].join("\n");
-	writeFileSync(join(dir, `${memory.name}.md`), file, "utf8");
+	writeAtomically(join(dir, `${memory.name}.md`), file);
 	rebuildIndex(dir);
 }
 
-/** The Project's Memories by name, as their files say now (hand edits included). */
-export function listMemories(dir: string): Array<{ name: string; type: string; description: string }> {
+export function listMemories(dir: string): MemorySummary[] {
 	return memoryFiles(dir).map((file) => {
-		const { frontmatter } = parseFrontmatter<Record<string, unknown>>(readFileSync(join(dir, file), "utf8"));
-		const field = (key: string) => (typeof frontmatter[key] === "string" ? frontmatter[key] : "");
-		return { name: file.slice(0, -".md".length), type: field("type"), description: field("description") };
+		const name = file.slice(0, -".md".length);
+		try {
+			const { frontmatter } = parseFrontmatter<Record<string, unknown>>(readFileSync(join(dir, file), "utf8"));
+			const field = (key: string) => (frontmatter[key] === undefined ? "" : String(frontmatter[key]));
+			return { name, type: field("type"), description: field("description") };
+		} catch {
+			return { name, type: "", description: "(unreadable frontmatter: fix or delete this file)" };
+		}
 	});
 }
 
 /** Rewrites `MEMORY.md` from the Memory files, so concurrent writers can't leave it out of step. */
 function rebuildIndex(dir: string): void {
 	const lines = listMemories(dir).map(({ name, description }) => `- [${name}](${name}.md) — ${description}`);
-	writeFileSync(join(dir, INDEX_FILE), lines.length > 0 ? `${lines.join("\n")}\n` : "", "utf8");
+	writeAtomically(join(dir, INDEX_FILE), lines.length > 0 ? `${lines.join("\n")}\n` : "");
 }
 
+/** The files named as Memories; anything else in the directory is not one. */
 function memoryFiles(dir: string): string[] {
 	try {
 		return readdirSync(dir)
-			.filter((file) => file.endsWith(".md") && file !== INDEX_FILE)
+			.filter((file) => file.endsWith(".md") && NAME.test(file.slice(0, -".md".length)))
 			.sort();
 	} catch {
 		return [];
@@ -101,11 +122,8 @@ export function deleteMemory(dir: string, name: string): boolean {
 	return true;
 }
 
-export const INDEX_MAX_LINES = 200;
-export const INDEX_MAX_BYTES = 25 * 1024;
-
-/** The Memory index cut to its first 200 lines or 25KB, whichever comes first, cutting only between lines. */
-export function capIndex(index: string): { text: string; dropped: number } {
+/** The Memory index cut to its line and byte caps, whichever comes first, cutting only between lines. */
+export function capIndex(index: string): { kept: string; dropped: number } {
 	const lines = index.split("\n").filter((line) => line.trim());
 	const kept: string[] = [];
 	let bytes = 0;
@@ -114,5 +132,5 @@ export function capIndex(index: string): { text: string; dropped: number } {
 		if (bytes > INDEX_MAX_BYTES) break;
 		kept.push(line);
 	}
-	return { text: kept.join("\n"), dropped: lines.length - kept.length };
+	return { kept: kept.join("\n"), dropped: lines.length - kept.length };
 }
