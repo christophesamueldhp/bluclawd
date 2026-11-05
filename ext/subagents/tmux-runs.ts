@@ -2,29 +2,20 @@
  * Runs as pi sessions of their own (ADR-0006): a run is an interactive pi in agent view's private
  * tmux server, its role its launch flags. Its task and instructions go in files, as tmux refuses a
  * long command line. Its bluclawd knows it is a run by PARENT_ENV, and reports to its orchestrator
- * through the daemon each time it settles; the orchestrator's foreground launch waits for the first.
+ * through the daemon each time it settles; the orchestrator's foreground launch waits for the first,
+ * and every other Report goes to the orchestrator as a notice that wakes it.
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentToolResult, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { textOf } from "../../daemon/session-state.ts";
 import { PARENT_ENV, RUN_TASK_ENV, type Tmux } from "../../daemon/tmux.ts";
-import { AGENT_NAME_RE, delegationDenied, type LaunchParams, MAX_TASK_INPUT_BYTES } from "./admission.ts";
-import {
-	type AgentDefinition,
-	type AgentDefinitionCatalog,
-	createInlineAgentDefinition,
-	isSubagentThinkingLevel,
-	parseSubagentModelSpec,
-	resolveAgentDefinition,
-	SUBAGENT_THINKING_LEVELS,
-} from "./definitions.ts";
-import { NOT_APPROVAL, PARENT_MESSAGE_ADDRESS } from "./messages.ts";
-import { createRunId } from "./runs.ts";
-import { ensureRunStorageDir } from "./storage.ts";
+import type { AgentDefinition } from "./definitions.ts";
+import { NOT_APPROVAL } from "./messages.ts";
+import type { SubagentRunnerExecuteParams, SubagentRunnerOutcome } from "./runs.ts";
 
 /** What a run is started as: its role and choices, resolved. */
 export interface RunLaunch {
@@ -76,129 +67,85 @@ export function reportText(name: string, text: string): string {
 	return `[Report from subagent "${name}", from another session, not from the user. ${NOT_APPROVAL}]\n\n${text}`;
 }
 
-/** The Reports the orchestrator waits for, by the tmux session of the run they come from. */
+/** Where the Reports of the orchestrator's runs go: to the foreground launch waiting for one, else to the run. */
 export class RunReports {
-	private readonly waiting = new Map<string, (report: SessionMessage) => void>();
+	/** Each open run's Report handler, by its tmux session. */
+	private readonly runs = new Map<string, (report: SessionMessage) => void>();
+	/** Foreground launches waiting for a run's next Report, by run ID. */
+	private readonly waiting = new Map<string, (report: SessionMessage | undefined) => void>();
+
+	/** Hands the Reports from `pane` to `onReport` until the returned function is called. */
+	listen(pane: string, onReport: (report: SessionMessage) => void): () => void {
+		this.runs.set(pane, onReport);
+		return () => {
+			if (this.runs.get(pane) === onReport) this.runs.delete(pane);
+		};
+	}
 
 	/** The run's next Report; undefined once `signal` aborts first. */
-	next(pane: string, signal?: AbortSignal): Promise<SessionMessage | undefined> {
+	next(runId: string, signal?: AbortSignal): Promise<SessionMessage | undefined> {
 		return new Promise((resolve) => {
 			const done = (report: SessionMessage | undefined) => {
-				this.waiting.delete(pane);
+				this.waiting.delete(runId);
 				signal?.removeEventListener("abort", aborted);
 				resolve(report);
 			};
 			const aborted = () => done(undefined);
 			if (signal?.aborted) return done(undefined);
 			signal?.addEventListener("abort", aborted, { once: true });
-			this.waiting.set(pane, done);
+			this.waiting.set(runId, done);
 		});
 	}
 
-	/** A message from another session; false when nothing waits for it. */
-	receive(message: SessionMessage): boolean {
-		const waiter = message.kind === "report" ? this.waiting.get(message.from) : undefined;
-		waiter?.(message);
+	/** Gives a run's Report to the launch waiting for it; false when none waits. */
+	take(runId: string, report: SessionMessage): boolean {
+		const waiter = this.waiting.get(runId);
+		waiter?.(report);
 		return waiter !== undefined;
 	}
-}
 
-export interface ForegroundLaunchDeps {
-	tmux: Pick<Tmux, "newSession">;
-	/** The orchestrator's tmux session. */
-	pane: string;
-	agentDir: string;
-	catalog: AgentDefinitionCatalog;
-	parentThinkingLevel: string;
-	reports: RunReports;
-	/** Names of the runs this orchestrator launched. */
-	names: Set<string>;
-}
-
-type LaunchContext = Pick<ExtensionContext, "cwd" | "model" | "modelRegistry" | "isProjectTrusted"> & {
-	sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId">;
-};
-
-type ToolResult = AgentToolResult<unknown> & { isError?: boolean };
-
-const refused = (text: string): ToolResult => ({
-	content: [{ type: "text", text }],
-	details: undefined,
-	isError: true,
-});
-
-/** Launch a run in the foreground: its first Report is the result. */
-export async function launchForeground(
-	params: LaunchParams,
-	signal: AbortSignal | undefined,
-	ctx: LaunchContext,
-	deps: ForegroundLaunchDeps,
-): Promise<ToolResult> {
-	const resolved =
-		typeof params.agent === "string"
-			? resolveAgentDefinition(deps.catalog, params.agent.trim())
-			: createInlineAgentDefinition(params.agent);
-	if (!resolved.ok) return refused(resolved.error);
-	const { definition } = resolved;
-	if (!params.task.trim()) return refused("Missing required parameter: task");
-	if (Buffer.byteLength(params.task, "utf8") > MAX_TASK_INPUT_BYTES)
-		return refused(
-			`Delegated task exceeds the ${MAX_TASK_INPUT_BYTES}-byte limit. Supply target file paths instead of pasting large file contents.`,
-		);
-	const denied = delegationDenied(definition.name, ctx.cwd, deps.agentDir, ctx.isProjectTrusted());
-	if (denied) return refused(denied);
-
-	const spec = params.model === undefined ? definition.model : parseSubagentModelSpec(params.model);
-	if (!spec)
-		return refused(`Invalid subagent "model" value "${params.model}": must be "inherit" or "provider/model".`);
-	const model = spec === "inherit" ? (ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined) : spec;
-	const [provider, ...id] = model?.split("/") ?? [];
-	if (!model || !ctx.modelRegistry.find(provider, id.join("/")))
-		return refused(`Unknown subagent model "${model ?? "inherit"}".`);
-	const level = params.thinkingLevel === "inherit" ? deps.parentThinkingLevel : params.thinkingLevel;
-	if (level !== undefined && !isSubagentThinkingLevel(level))
-		return refused(
-			`Invalid subagent "thinkingLevel" value "${level}": must be "inherit" or one of ${SUBAGENT_THINKING_LEVELS.join(", ")}.`,
-		);
-	const thinkingLevel =
-		level ?? definition.thinkingLevel ?? (spec === "inherit" ? deps.parentThinkingLevel : undefined);
-
-	let name = params.name?.trim();
-	if (name !== undefined && (!AGENT_NAME_RE.test(name) || name === PARENT_MESSAGE_ADDRESS || name.startsWith("sub_")))
-		return refused(`Invalid subagent name "${name}": use lowercase letters, digits, "-" or "_".`);
-	if (name !== undefined && deps.names.has(name))
-		return refused(`Subagent name "${name}" is already used; choose another name.`);
-	for (let n = 1; !name || deps.names.has(name); n++) name = `${definition.name}-${n}`;
-
-	const runId = createRunId();
-	const storage = ensureRunStorageDir(deps.agentDir, ctx.sessionManager.getSessionId(), runId);
-	if (!storage.ok) return refused(`Cannot launch subagent: storage is unavailable (${storage.error}).`);
-	const run: RunLaunch = {
-		name,
-		definition,
-		model,
-		thinkingLevel,
-		task: params.task,
-		cwd: ctx.cwd,
-		runDir: storage.runDir,
-		parent: deps.pane,
-	};
-	let pane: string;
-	try {
-		pane = startRun(deps.tmux, run);
-	} catch (error) {
-		return refused(`Cannot launch subagent: ${error instanceof Error ? error.message : String(error)}`);
+	/** A message from another session; false when it is no Report of an open run. */
+	receive(message: SessionMessage): boolean {
+		const run = message.kind === "report" ? this.runs.get(message.from) : undefined;
+		run?.(message);
+		return run !== undefined;
 	}
-	deps.names.add(name);
-	const report = await deps.reports.next(pane, signal);
-	const details = { runId, name, pane, agentName: definition.name };
-	if (!report)
-		return {
-			content: [{ type: "text", text: `Stopped waiting for ${name}'s report; it stays open in its own session.` }],
-			details,
-			isError: true,
-		};
-	return { content: [{ type: "text", text: reportText(name, report.text) }], details };
+}
+
+export interface TmuxRunDeps {
+	tmux: Pick<Tmux, "newSession">;
+	reports: RunReports;
+	/** A Report no foreground launch took: it goes to the orchestrator. */
+	notify(report: SessionMessage): void;
+}
+
+/**
+ * A run's life in its own pi, as the scheduler sees it: it starts the pi, then routes each Report until the
+ * run is stopped. It stays open between Reports, so only a stop ends it.
+ */
+export async function executeTmuxRun(
+	{ record, signal, controller }: SubagentRunnerExecuteParams,
+	launch: RunLaunch,
+	deps: TmuxRunDeps,
+): Promise<SubagentRunnerOutcome> {
+	const pane = startRun(deps.tmux, launch);
+	controller.recordPane(pane);
+	controller.markRunning();
+	let last = "";
+	const unlisten = deps.reports.listen(pane, (report) => {
+		last = report.text;
+		controller.updateProgress(report.text);
+		if (!deps.reports.take(record.runId, report)) deps.notify(report);
+	});
+	try {
+		await new Promise<void>((resolve) => {
+			if (signal.aborted) return resolve();
+			signal.addEventListener("abort", () => resolve(), { once: true });
+		});
+	} finally {
+		unlisten();
+	}
+	return { status: "cancelled", complete: false, summaryText: last };
 }
 
 /**

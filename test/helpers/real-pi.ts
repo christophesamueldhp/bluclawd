@@ -167,7 +167,8 @@ export async function startRealPi(options: { extensions?: string[] } = {}): Prom
 		stop: async () => {
 			await client.shutdownDaemon();
 			spawnSync("tmux", ["-S", tmux.socket, "kill-server"]);
-			rmSync(base, { recursive: true, force: true });
+			// A pi hung up by the kill may still be writing its last records.
+			rmSync(base, { recursive: true, force: true, maxRetries: 10 });
 		},
 	};
 }

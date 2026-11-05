@@ -4,7 +4,11 @@ import { join } from "node:path";
 import { fauxProvider } from "@earendil-works/pi-ai";
 import type { AgentSessionEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { ModelRegistry, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
-import { createRunAdmission, type RunExecutionContext } from "../../ext/subagents/admission.ts";
+import {
+	createRunAdmission,
+	type InProcessRunContext,
+	type RunExecutionContext,
+} from "../../ext/subagents/admission.ts";
 import { createGenerations, type ParentNotice } from "../../ext/subagents/generations.ts";
 import { SubagentMessageBus } from "../../ext/subagents/messages.ts";
 import { createParentScope, type ParentInboxItem } from "../../ext/subagents/parent-scope.ts";
@@ -15,6 +19,7 @@ import type {
 	SubagentRunnerOutcome,
 } from "../../ext/subagents/runs.ts";
 import { createAgentTaskSource } from "../../ext/subagents/task-source.ts";
+import { RunReports } from "../../ext/subagents/tmux-runs.ts";
 import { createParentScopeViews } from "../../ext/subagents/views.ts";
 import { waitFor } from "./wait-for.ts";
 
@@ -170,6 +175,7 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		pi,
 		launchesSettled: () => Promise.resolve(),
 		onChange: () => {},
+		reports: new RunReports(),
 	});
 	const { directory } = generations;
 	const tasks = createAgentTaskSource({
@@ -196,7 +202,7 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		builtinExtensions: [],
 		childModel: {},
 		projectTrusted: false,
-	} as unknown as RunExecutionContext;
+	} as unknown as InProcessRunContext;
 	let calls = 0;
 	/** Launches a background run in the current parent scope, named and tasked as given. */
 	const launch = (

@@ -161,7 +161,8 @@ export function createRunAddressing(deps: RunAddressingDeps) {
 		if (resuming) {
 			// No tool call of the orchestrator's carries the user's resume, so the child's tools keep running through
 			// the call its earlier generation ran under, whose id still identifies the run for nested-call checks.
-			const previous = scheduler.getContext(runId);
+			const context = scheduler.getContext(runId);
+			const previous = context?.runtime === "tmux" ? undefined : context;
 			// Without that context admission refuses the resume, before it reads any tool.
 			const toolCtx: AdmissionContext = previous
 				? Object.assign(Object.create(ctx) as AdmissionContext, { executeTool: previous.parent.executeTool })

@@ -31,6 +31,7 @@ import {
 } from "./runner.ts";
 import { type AdmittedSubagentHandle, createRunId, type SubagentRunRecord, type SubagentRunScheduler } from "./runs.ts";
 import { ensureRunStorageDir } from "./storage.ts";
+import type { RunLaunch } from "./tmux-runs.ts";
 
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
 /** Recorded until the child session reports the level the SDK chose for its model. */
@@ -39,8 +40,18 @@ export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 /** Pi built-in extensions a child runs itself, over its own copies of the orchestrator's tools. */
 const CHILD_BUILTIN_EXTENSIONS = ["codemode", "tool_search"];
 
-/** What a run needs from its admission to execute. */
-export interface RunExecutionContext {
+/** What a run needs from its admission to execute: in the orchestrator's process, or as a pi of its own. */
+export type RunExecutionContext = InProcessRunContext | TmuxRunContext;
+
+/** A run started as a pi of its own in tmux (ADR-0006): its role goes out as its launch flags. */
+export interface TmuxRunContext {
+	runtime: "tmux";
+	launch: RunLaunch;
+}
+
+/** A run inside the orchestrator's process, whose tools run through the orchestrator's. */
+export interface InProcessRunContext {
+	runtime?: "in-process";
 	agentDir: string;
 	definition: AgentDefinition;
 	task: string;
@@ -135,6 +146,8 @@ export interface RunAdmissionDeps {
 	loadout: () => ToolLoadout | undefined;
 	parentThinkingLevel: () => string;
 	scope: ParentScopeChecks;
+	/** The orchestrator's tmux session: while it has one, a run starts as a pi of its own there (ADR-0006). */
+	pane?: () => string | undefined;
 }
 
 export type AdmissionResult =
@@ -160,7 +173,7 @@ export interface RunAdmission {
 	): Promise<AdmissionResult>;
 }
 
-type ChildTools = Pick<RunExecutionContext, "parent" | "parentTools" | "activeToolNames" | "builtinExtensions">;
+type ChildTools = Pick<InProcessRunContext, "parent" | "parentTools" | "activeToolNames" | "builtinExtensions">;
 
 function summarizeTaskLabel(task: string): string {
 	const firstLine =
@@ -290,8 +303,14 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			}
 			const definition = resolvedDef.definition;
 
-			const { tools, error: toolsError } = selectChildTools(definition, ctx);
-			if (!tools) return reject(toolsError);
+			// A run in tmux takes the role's tools as its own; a run in process gets the orchestrator's.
+			const parentPane = deps.pane?.();
+			let tools: ChildTools | undefined;
+			if (parentPane === undefined) {
+				const selected = selectChildTools(definition, ctx);
+				if (!selected.tools) return reject(selected.error);
+				tools = selected.tools;
+			}
 
 			// Spawn > role > parent for the model and thinking level, verified before admission.
 			const spawnModel = params.model === undefined ? undefined : parseSubagentModelSpec(params.model);
@@ -384,9 +403,25 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				taskSummary: summarizeTaskLabel(taskText),
 				startSnapshot,
 				deliveryMode: isBackground ? "background" : "foreground",
-				// Foreground runs link to the invoking tool call's signal; background runs outlive the launch tool call
-				signal: isBackground ? undefined : signal,
-				context: { agentDir, definition, task: taskText, ...tools, childModel, projectTrusted },
+				// Foreground runs link to the invoking tool call's signal; background runs outlive the launch tool call,
+				// and so does a run in tmux, whose foreground call only stops waiting for its Report.
+				signal: isBackground || parentPane !== undefined ? undefined : signal,
+				context:
+					parentPane !== undefined
+						? {
+								runtime: "tmux",
+								launch: {
+									name: runName,
+									definition,
+									model: `${childModel.model.provider}/${childModel.model.id}`,
+									thinkingLevel: childModel.thinkingLevel,
+									task: taskText,
+									cwd,
+									runDir: storage.runDir,
+									parent: parentPane,
+								},
+							}
+						: { agentDir, definition, task: taskText, ...tools!, childModel, projectTrusted },
 			});
 			if (!admitRes.ok) return reject(admitRes.error);
 			return { ok: true, handle: admitRes.handle };
@@ -427,6 +462,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			if (beforeModel.refused) return beforeModel.refused;
 			const previous = deps.scheduler.getContext(run.runId);
 			if (!previous) return invalidated;
+			// A run in tmux never completes: it stays open until it is stopped.
+			if (previous.runtime === "tmux") return unavailable(`${label} runs in a session of its own.`);
 
 			const denied = deniedReason(run.agentName, ctx);
 			if (denied) return unavailable(denied);

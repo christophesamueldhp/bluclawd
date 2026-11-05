@@ -44,6 +44,8 @@ export interface SubagentRunRecord {
 	/** How many times the orchestrator resumed this run after it completed: 0 for the launch. */
 	generation: number;
 	childSessionId?: string;
+	/** The tmux session of a run that is a pi of its own (ADR-0006); absent on in-process runs. */
+	pane?: string;
 	transcriptPath?: string;
 	reportPath?: string;
 	agentName: string;
@@ -83,6 +85,8 @@ export interface SubagentRunRecord {
 
 export interface SubagentRunController {
 	markRunning(childSessionId?: string, thinkingLevel?: string): void;
+	/** The run's pi started in this tmux session. */
+	recordPane(pane: string): void;
 	/** The child's turn ended and pi will not retry it: the generation's last turn. */
 	markFinishing(): void;
 	recordTurn(): void;
@@ -403,6 +407,11 @@ export class SubagentRunScheduler<C = unknown> {
 				if (childSessionId) managed.record.childSessionId = childSessionId;
 				if (thinkingLevel) managed.record.thinkingLevel = thinkingLevel;
 				managed.record.status = "running";
+				this.emitChange(managed);
+			},
+			recordPane: (pane: string) => {
+				if (inactive()) return;
+				managed.record.pane = pane;
 				this.emitChange(managed);
 			},
 			markFinishing: () => {

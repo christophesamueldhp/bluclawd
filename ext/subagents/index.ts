@@ -33,9 +33,10 @@ import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET } from "./panel.ts
 import { createParentScope, type ParentInboxItem } from "./parent-scope.ts";
 import type { SubagentResultDetails } from "./results.ts";
 import { describeSubagentModels, runSubagent } from "./runner.ts";
+import { isTerminalSubagentStatus } from "./runs.ts";
 import { appendSubagentMessageRecord, reconcileInterruptedRuns } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
-import { actAsRun, launchForeground, RunReports } from "./tmux-runs.ts";
+import { actAsRun, RunReports, reportText } from "./tmux-runs.ts";
 import { createTranscriptActions } from "./transcript-actions.ts";
 import { createParentScopeViews } from "./views.ts";
 
@@ -97,7 +98,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		const runParent = process.env[PARENT_ENV];
 		if (runParent) actAsRun(pi, runParent, pane);
 		const reports = new RunReports();
-		const runNames = new Set<string>();
 		pi.events.on("bluclawd:session-message", (data) => reports.receive(data as SessionMessage));
 
 		let activeTurnIndex = 0;
@@ -217,6 +217,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			pi,
 			launchesSettled: () => launchesSettled,
 			onChange: runsChanged,
+			reports,
 		});
 
 		const admission = createRunAdmission({
@@ -227,6 +228,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			loadout: () => latestLoadout,
 			parentThinkingLevel: () => pi.getThinkingLevel(),
 			scope: parentScope,
+			// The in-process runner still runs any launch outside tmux.
+			pane: () => pane,
 		});
 
 		const views = createParentScopeViews({
@@ -618,25 +621,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 
-				// The in-process runner still runs background launches, and any launch outside tmux.
-				if (pane && params.background !== true) {
-					return launchForeground(params, signal, ctx, {
-						tmux: new Tmux(),
-						pane,
-						agentDir: resolveAgentDir(),
-						catalog:
-							catalog ??
-							discoverAgentDefinitions({
-								cwd: ctx.cwd,
-								agentDir: resolveAgentDir(),
-								projectTrusted: ctx.isProjectTrusted(),
-							}),
-						parentThinkingLevel: pi.getThinkingLevel(),
-						reports,
-						names: runNames,
-					});
-				}
-
 				const endLaunch = beginLaunch();
 				const admitRes = await admission
 					.launch({ toolCallId, parentTurnId: `turn_${activeTurnIndex}`, params, signal }, ctx)
@@ -652,8 +636,37 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				const { handle } = admitRes;
 				const isBackground = params.background === true;
 
+				if (pane && !isBackground) {
+					const name = handle.record.name ?? handle.runId;
+					// Waits until the run reports, the call is aborted, or the run ends first.
+					const ended = new AbortController();
+					void scheduler.whenFinal(handle.runId)?.then(() => ended.abort());
+					const report = await reports.next(
+						handle.runId,
+						signal ? AbortSignal.any([signal, ended.signal]) : ended.signal,
+					);
+					const run = scheduler.getRun(handle.runId);
+					const details = { runId: handle.runId, name, pane: run?.pane, agentName: handle.record.agentName };
+					if (!report)
+						return {
+							content: [
+								{
+									type: "text",
+									text:
+										run && isTerminalSubagentStatus(run.status)
+											? `${name} ended before it reported: ${run.errorMessage ?? run.stopReason ?? run.status}.`
+											: `Stopped waiting for ${name}'s report; it stays open in its own session.`,
+								},
+							],
+							details,
+							isError: true,
+						};
+					return { content: [{ type: "text", text: reportText(name, report.text) }], details };
+				}
+
 				if (isBackground) {
-					void deliver(handle);
+					// A run in tmux delivers its own Reports, after each of its turns.
+					if (!pane) void deliver(handle);
 
 					return {
 						content: [
@@ -663,7 +676,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 									`Background subagent launched: ${handle.record.name} (${handle.runId})`,
 									`Agent: ${handle.record.agentName} (${handle.record.provider}/${handle.record.modelId})`,
 									`Status: ${handle.record.status}`,
-									"The final report will be delivered to this session branch when complete. Use `task_stop` with this run ID to cancel.",
+									pane
+										? "It stays open, and its report arrives here each time it finishes a turn."
+										: "The final report will be delivered to this session branch when complete. Use `task_stop` with this run ID to cancel.",
 									`While ${handle.record.name} runs, do not redo or touch its work, including the files in its scope, and do not poll \`subagent_status\` by reflex. With no independent work left, end your turn and say you are waiting for ${handle.record.name}: its report will wake you. Never predict or invent its result; if the user asks, say it is still running.`,
 								].join("\n"),
 							},

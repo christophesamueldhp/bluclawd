@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { AgentSessionEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RunExecutionContext } from "../ext/subagents/admission.ts";
+import type { InProcessRunContext, RunExecutionContext } from "../ext/subagents/admission.ts";
 import { createGenerations, type ParentNotice } from "../ext/subagents/generations.ts";
 import { SubagentMessageBus } from "../ext/subagents/messages.ts";
 import { createParentScope, type ParentInboxItem } from "../ext/subagents/parent-scope.ts";
@@ -17,6 +17,7 @@ import {
 	subagentReportPath,
 	writePersistedRunRecord,
 } from "../ext/subagents/storage.ts";
+import { RunReports } from "../ext/subagents/tmux-runs.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 // Record writes go to disk as usual; the spy only counts them.
@@ -134,6 +135,7 @@ function setup(options: { batchWindowMs?: number } = {}) {
 		pi: { appendEntry: (customType, data) => entries.push({ customType, data }), sendMessage: () => {} },
 		launchesSettled: () => Promise.resolve(),
 		onChange: () => {},
+		reports: new RunReports(),
 	});
 	const parentSessionId = scope.current()!.parentSessionId;
 	const context = {
@@ -146,7 +148,7 @@ function setup(options: { batchWindowMs?: number } = {}) {
 		builtinExtensions: [],
 		childModel: {},
 		projectTrusted: false,
-	} as unknown as RunExecutionContext;
+	} as unknown as InProcessRunContext;
 	let calls = 0;
 	const launch = (overrides: Partial<AdmitSubagentRunRequest<RunExecutionContext>> = {}): AdmittedSubagentHandle => {
 		const admitted = generations.scheduler.admit({

@@ -5,6 +5,7 @@ import {
 	type ExtensionContext,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { Tmux } from "../../daemon/tmux.ts";
 import { createRunAddressing } from "./addressing.ts";
 import type { RunExecutionContext } from "./admission.ts";
 import { createRunDirectory } from "./directory.ts";
@@ -38,6 +39,7 @@ import {
 	writeFullSubagentReport,
 	writePersistedRunRecord,
 } from "./storage.ts";
+import { executeTmuxRun, type RunReports, reportText } from "./tmux-runs.ts";
 import { createRunTranscripts } from "./transcripts.ts";
 
 export const SUBAGENT_ROSTER_TOOL = "subagent_roster";
@@ -63,6 +65,8 @@ export interface GenerationDeps {
 	launchesSettled: () => Promise<void>;
 	/** A run changed state. */
 	onChange: () => void;
+	/** Where the Reports of runs in tmux arrive. */
+	reports: RunReports;
 }
 
 function withRoster(task: string, roster: readonly string[]): string {
@@ -176,6 +180,21 @@ export function createGenerations(deps: GenerationDeps) {
 			if (!params.record.generation) recordLaunch(params.record);
 			const execCtx = params.context;
 			if (!execCtx) throw new Error("Subagent run has no execution context.");
+			if (execCtx.runtime === "tmux") {
+				const { runId } = params.record;
+				return executeTmuxRun(params, execCtx.launch, {
+					tmux: new Tmux(),
+					reports: deps.reports,
+					notify: (report) => {
+						const record = scheduler.getRun(runId);
+						if (!record) return;
+						deps.scope.notify(record, {
+							parentText: reportText(record.name ?? runId, report.text),
+							details: buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).details,
+						});
+					},
+				});
+			}
 			const storage = ensureRunStorageDir(execCtx.agentDir, params.record.parentSessionId, params.record.runId);
 			if (!storage.ok) throw new Error(storage.error);
 			const { runId } = params.record;

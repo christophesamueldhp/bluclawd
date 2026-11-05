@@ -10,7 +10,10 @@ const SUCCEEDED_RUN_LINGER_MS = 30_000;
 export const canStop = (entry: RunEntry) => entry.state !== "finishing" && entry.state !== "finished";
 
 export interface ParentScopeViewsDeps {
-	scheduler: Pick<SubagentRunScheduler<{ resume?: { toolCallId: string } }>, "listRuns" | "getContext">;
+	scheduler: Pick<
+		SubagentRunScheduler<{ runtime?: string; resume?: { toolCallId: string } }>,
+		"listRuns" | "getContext"
+	>;
 	directory: Pick<RunDirectory, "get" | "list">;
 	agentDir: () => string;
 	/** The orchestrator's current Parent scope; none before the first session starts. */

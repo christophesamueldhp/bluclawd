@@ -14,6 +14,7 @@ import {
 	type AdmissionContext,
 	type AdmissionResult,
 	createRunAdmission,
+	type InProcessRunContext,
 	type LaunchParams,
 	MAX_TASK_INPUT_BYTES,
 	type RunAdmissionDeps,
@@ -423,7 +424,7 @@ describe("Run admission", () => {
 		const resumed = await result;
 		expect(handleOf(resumed).record).toMatchObject({ name: "backend", modelId: "faux-alt", generation: 1 });
 		expect(prompts).toEqual(["built"]);
-		const context = scheduler.getContext(completed.runId)!;
+		const context = scheduler.getContext(completed.runId) as InProcessRunContext;
 		expect(context.parent).toBe(ctx);
 		expect(context.parentTools.map((tool) => tool.name)).toEqual(["probe", "fresh"]);
 		expect(context.definition.name).toBe("explorer");
