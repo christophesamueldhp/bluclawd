@@ -52,12 +52,11 @@ export class AccountsTerminal implements Terminal {
 					if (values[0] === 2) this.clearLine();
 					else this.clearFromCursor();
 				}
-			} else if (token.startsWith("\x1b")) {
 			} else if (token === "\r") this.column = 0;
 			else if (token === "\n") this.row++;
-			else if (token >= " ") {
-				this.lines[this.row] ??= [];
-				const line = this.lines[this.row];
+			else if (!token.startsWith("\x1b") && token >= " ") {
+				const line = this.lines[this.row] ?? [];
+				this.lines[this.row] = line;
 				while (line.length < this.column) line.push(" ");
 				line[this.column++] = token;
 			}
