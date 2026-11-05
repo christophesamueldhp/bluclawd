@@ -263,6 +263,28 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			admission,
 		});
 
+		/**
+		 * Opening a closed run of this scope, from `/tasks`, resumes it with no message: its pi reopens on its session
+		 * for the user to type in. Undefined for any other run.
+		 */
+		const resumeClosed = (runId: string, owner?: string): Promise<void> | undefined => {
+			const run = scheduler.getRun(runId);
+			const ctx = parentScope.context();
+			if (!pane || !ctx || run?.status !== "closed" || (owner !== undefined && owner !== run.parentSessionId)) {
+				return undefined;
+			}
+			return admission.resume(run, run.originToolCallId, undefined, ctx).then((resumed) => {
+				if (!resumed.ok) return ctx.ui.notify(resumed.error, "warning");
+				const reopened = scheduler.getRun(runId)?.pane;
+				try {
+					// The user's own key asked for it, so the terminal moves to the run.
+					if (reopened) new Tmux().switchTo(reopened);
+				} catch {
+					// No terminal shows this pane.
+				}
+			});
+		};
+
 		pi.on("message_start", async (event) => {
 			if (event.message.role !== "toolResult") return;
 			const run = views.launchedBy(event.message.toolCallId);
@@ -319,7 +341,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			unpublish?.();
 			// The panel first: publishing the tasks signals a change, and the tasks pill then reads the panel.
 			const unpublishPanel = publishSubagentPanel(() => panel !== undefined && views.panel().length > 0);
-			const unpublishTasks = publishAgentTasks({ ...taskSource, open: openTranscript });
+			const unpublishTasks = publishAgentTasks({
+				...taskSource,
+				open: (id, owner) => resumeClosed(id, owner) ?? openTranscript(id, owner),
+			});
 			unpublish = () => {
 				unpublishTasks();
 				unpublishPanel();

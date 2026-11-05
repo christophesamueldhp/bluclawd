@@ -3,7 +3,14 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { remoteSessions } from "../daemon/remote/sessions.ts";
 import { collectRows } from "../daemon/rows.ts";
-import { conversation, type FauxRequest, hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
+import {
+	conversation,
+	DEFAULT_EXTENSIONS,
+	type FauxRequest,
+	hasTmux,
+	type RealPi,
+	startRealPi,
+} from "./helpers/real-pi.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 /** The last tool result the model was given: the active-run reminder may follow it. */
@@ -164,5 +171,37 @@ describe.skipIf(!hasTmux)("resuming a closed run", () => {
 		expect(said.at(-1)).toMatchObject({ role: "user", text: expect.stringContaining("Look again.") });
 		const woken = (await real.waitForRequests("main", 5))[4];
 		expect(conversation(woken).some((message) => message.text.includes("Second look."))).toBe(true);
+	});
+
+	it("is listed in /tasks, where Enter reopens its session for the user to type in", async () => {
+		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around." } },
+			{ tool: "subagent_close", args: { agent: "probe-run" } },
+			{ text: "closed it" },
+		]);
+		real.script("probe-run", [{ text: "First look." }, { text: "Second look." }]);
+		const orchestrator = real.start(["--", "delegate the look"]);
+		await real.waitForRequests("main", 3);
+		await waitFor(() => expect(panes(real)).toEqual([orchestrator]));
+
+		real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
+		const screen = () => real.tmux.capture(orchestrator, 50).join("\n");
+		await waitFor(() => expect(screen()).toMatch(/Done \(1\)\n.*explorer: Look around\..*closed/));
+		real.tmux.sendKeys(orchestrator, ["Enter"]);
+		await waitFor(() => expect(panes(real)).toHaveLength(2));
+		const [run] = panes(real).filter((pane) => pane !== orchestrator);
+		expect(real.requests("probe-run")).toHaveLength(1);
+
+		// Its pi shows its session once it has loaded it, and only then takes keys.
+		await waitFor(() => expect(real.tmux.capture(run, 50).join("\n")).toContain("First look."));
+		real.tmux.sendKeys(run, ["Anything else?", "Enter"]);
+		const [, resumed] = await real.waitForRequests("probe-run", 2);
+		expect(conversation(resumed)).toEqual([
+			{ role: "user", text: "Look around." },
+			{ role: "assistant", text: "First look." },
+			{ role: "user", text: "Anything else?" },
+		]);
 	});
 });
