@@ -14,7 +14,7 @@ import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { pistatuslineDrawsFooter } from "../_shared/pistatusline.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { publishSubagentPanel } from "../_shared/subagent-panel.ts";
-import { createRunAdmission, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
+import { createRunAdmission, formatRunLabel, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
 import {
 	type AgentDefinitionCatalog,
 	discoverAgentDefinitions,
@@ -23,6 +23,7 @@ import {
 import type { RunEntry } from "./directory.ts";
 import { createGenerations, type ParentNotice } from "./generations.ts";
 import {
+	PARENT_MESSAGE_ADDRESS,
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
 	SUBAGENT_MESSAGE_PARAMETERS,
 	SUBAGENT_MESSAGE_TOOL,
@@ -32,6 +33,7 @@ import {
 import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET } from "./panel.ts";
 import { createParentScope, type ParentInboxItem } from "./parent-scope.ts";
 import type { SubagentResultDetails } from "./results.ts";
+import { messageAsRun } from "./run-messages.ts";
 import { describeSubagentModels, runSubagent } from "./runner.ts";
 import { isTerminalSubagentStatus } from "./runs.ts";
 import { appendSubagentMessageRecord, reconcileInterruptedRuns } from "./storage.ts";
@@ -97,8 +99,13 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		const pane = Tmux.currentPane();
 		const runParent = process.env[PARENT_ENV];
 		if (runParent) actAsRun(pi, runParent, pane);
+		if (runParent && pane) messageAsRun(pi, runParent, pane);
 		const reports = new RunReports();
-		pi.events.on("bluclawd:session-message", (data) => reports.receive(data as SessionMessage));
+		pi.events.on("bluclawd:session-message", (data) => {
+			const message = data as SessionMessage;
+			if (message.kind === "report" || message.kind === "activity") reports.receive(message);
+			else fromRun(message);
+		});
 
 		let activeTurnIndex = 0;
 		let catalog: AgentDefinitionCatalog | undefined;
@@ -148,6 +155,32 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			batchWindowMs: options.batchWindowMs ?? BACKGROUND_BATCH_WINDOW_MS,
 		});
 		const senderRole = (address: string) => scheduler.getRun(address)?.agentName;
+
+		/** A message or a note of what the user typed, from one of this session's open runs; another sender's is dropped. */
+		const fromRun = (message: Extract<SessionMessage, { kind: "message" | "typed" }>) => {
+			const scope = parentScope.current();
+			const run = scope && directory.list(scope).find(({ record }) => record.pane === message.from)?.record;
+			if (!scope || !run) return;
+			if (message.kind === "message") {
+				void messageBus.send({ address: run.runId, scope }, PARENT_MESSAGE_ADDRESS, message.text);
+				return;
+			}
+			// The orchestrator still owns the work, so it is told, but not woken (ADR-0005).
+			pi.sendMessage(
+				{
+					customType: SUBAGENT_MESSAGE_CUSTOM_TYPE,
+					content: [
+						{
+							type: "text",
+							text: `The user typed to run ${formatRunLabel(run)} in its own session: ${message.text}`,
+						},
+					],
+					display: true,
+					details: message,
+				},
+				{ deliverAs: "steer", triggerTurn: false },
+			);
+		};
 
 		const refreshFooterStatus = () => {
 			try {
@@ -447,7 +480,11 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			parentScope.detach();
 		});
 
-		pi.registerTool({
+		// The orchestrator's only: a run messages through the daemon (messageAsRun), and launches nothing.
+		const registerOrchestratorTool: typeof pi.registerTool = (tool) => {
+			if (!runParent) pi.registerTool(tool);
+		};
+		registerOrchestratorTool({
 			name: SUBAGENT_MESSAGE_TOOL,
 			label: "Message agent",
 			exposure: "model-only",
@@ -458,7 +495,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				openWorldHint: false,
 			},
 			description:
-				"Send a message to a subagent by name or run ID (sub_…). A running child gets it at its next safe point without a new turn. A completed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
+				"Send a message to a subagent by name or run ID (sub_…). A working child gets it at its next safe point; an idle one that is still open takes a turn on it. A completed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
 			parameters: SUBAGENT_MESSAGE_PARAMETERS,
 			execute: async (toolCallId, params, _signal, _onUpdate, toolCtx) => {
 				const ctx = toolCtx ?? parentScope.context();
@@ -585,10 +622,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		});
 
 		// A run cannot launch runs of its own: delegation stays one level deep.
-		const registerLaunchTool: typeof pi.registerTool = (tool) => {
-			if (!runParent) pi.registerTool(tool);
-		};
-		registerLaunchTool({
+		registerOrchestratorTool({
 			name: "subagent",
 			label: "Subagent",
 			exposure: "model-only",

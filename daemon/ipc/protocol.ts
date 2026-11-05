@@ -100,10 +100,12 @@ export type PaneMessage =
 	| { type: "stop_task"; id: string }
 	| SessionMessage;
 
-/** A message from another session (a run, its orchestrator), never from the user: the receiving
- *  session takes it as one. `from`: the sender's tmux session; `name`: its session's name.
- *  `report`: a run's last message of a turn, to its orchestrator. `activity`: what a run is doing
- *  now, to its orchestrator, each time that changes; `dialog`: the title of the prompt it waits on. */
+/** A message from another session (a run, its orchestrator): the receiving session never takes it
+ *  as its own user's input or approval. `from`: the sender's tmux session; `name`: its session's name.
+ *  `report`: a run's last message of a turn, to its orchestrator. `message`: what one session
+ *  sends another with subagent_message. `typed`: what the user typed in a run, as a note for its
+ *  orchestrator. `activity`: what a run is doing now, to its orchestrator, each time that changes;
+ *  `dialog`: the title of the prompt it waits on. */
 export type SessionMessage = { type: "session_message"; from: string; name?: string } & (
 	| {
 			kind: "report";
@@ -111,6 +113,7 @@ export type SessionMessage = { type: "session_message"; from: string; name?: str
 			/** The run's session usage so far, as pi totals it. Each report repeats the whole total. */
 			usage?: SessionUsage;
 	  }
+	| { kind: "message" | "typed"; text: string }
 	| { kind: "activity"; activity: AgentActivity; dialog?: string }
 );
 

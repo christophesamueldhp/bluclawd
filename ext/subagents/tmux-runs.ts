@@ -150,6 +150,7 @@ export async function executeTmuxRun(
 			if (message.activity === "awaiting_input") deps.needsInput(message.dialog);
 			return;
 		}
+		if (message.kind !== "report") return;
 		last = message.text;
 		if (message.usage) deps.usage(message.usage);
 		controller.updateProgress(message.text);

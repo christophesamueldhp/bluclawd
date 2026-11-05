@@ -5,6 +5,7 @@ import {
 	type ExtensionContext,
 	type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { Tmux } from "../../daemon/tmux.ts";
 import { createRunAddressing } from "./addressing.ts";
 import type { RunExecutionContext } from "./admission.ts";
@@ -185,34 +186,56 @@ export function createGenerations(deps: GenerationDeps) {
 			if (!execCtx) throw new Error("Subagent run has no execution context.");
 			if (execCtx.runtime === "tmux") {
 				const { runId } = params.record;
-				return executeTmuxRun(params, execCtx.launch, {
-					tmux: new Tmux(),
-					reports: deps.reports,
-					notify: (report) => {
-						const record = scheduler.getRun(runId);
-						if (!record) return;
-						deps.scope.notify(record, {
-							parentText: reportText(record.name ?? runId, report.text),
-							details: buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).details,
+				const { parent } = execCtx.launch;
+				// The orchestrator's messages reach the run's pi through the daemon, as a message from another session.
+				deps.bus.register(runId, {
+					scope: { parentSessionId: params.record.parentSessionId, sessionEpoch: params.record.sessionEpoch },
+					deliver: async (message) => {
+						// The user types to a run in its own session, which tells the orchestrator itself.
+						if (message.from !== PARENT_MESSAGE_ADDRESS) throw new Error("type to it in its own session");
+						const pane = scheduler.getRun(runId)?.pane;
+						if (!pane) throw new Error("its pi has not started");
+						await new OrchestratorClient().send(pane, {
+							type: "session_message",
+							kind: "message",
+							from: parent,
+							name: deps.scope.context()?.sessionManager.getSessionName(),
+							text: message.content,
 						});
 					},
-					usage: (totals) => recordRunSessionUsage(deps.agentDir(), params.record, totals),
-					// For the user, not the model: the prompt is answered in the run's own session.
-					needsInput: (dialog) => {
-						const record = scheduler.getRun(runId);
-						if (!record || !deps.scope.inScope(record)) return;
-						try {
-							deps.scope
-								.context()
-								?.ui.notify(
-									`Subagent ${record.name ?? runId} needs input${dialog ? `: ${dialog}` : ""}. Open it to answer.`,
-									"warning",
-								);
-						} catch {
-							// The orchestrator's session was replaced meanwhile.
-						}
-					},
 				});
+				try {
+					return await executeTmuxRun(params, execCtx.launch, {
+						tmux: new Tmux(),
+						reports: deps.reports,
+						notify: (report) => {
+							const record = scheduler.getRun(runId);
+							if (!record) return;
+							deps.scope.notify(record, {
+								parentText: reportText(record.name ?? runId, report.text),
+								details: buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).details,
+							});
+						},
+						usage: (totals) => recordRunSessionUsage(deps.agentDir(), params.record, totals),
+						// For the user, not the model: the prompt is answered in the run's own session.
+						needsInput: (dialog) => {
+							const record = scheduler.getRun(runId);
+							if (!record || !deps.scope.inScope(record)) return;
+							try {
+								deps.scope
+									.context()
+									?.ui.notify(
+										`Subagent ${record.name ?? runId} needs input${dialog ? `: ${dialog}` : ""}. Open it to answer.`,
+										"warning",
+									);
+							} catch {
+								// The orchestrator's session was replaced meanwhile.
+							}
+						},
+					});
+				} finally {
+					deps.bus.unregister(runId, "has been stopped");
+				}
 			}
 			const storage = ensureRunStorageDir(execCtx.agentDir, params.record.parentSessionId, params.record.runId);
 			if (!storage.ok) throw new Error(storage.error);
