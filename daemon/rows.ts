@@ -130,7 +130,8 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 export function collectRows(instances: InstanceSummary[], self: InstanceSummary | undefined): AgentRow[] {
 	// Its pane is listed under its id, or under the row of the session it resumed.
 	const ownRow = (i: InstanceSummary) => i.id === self?.id || (self?.pane !== undefined && i.pane === self.pane);
-	const listed = instances.filter((i) => !ownRow(i));
+	// A run is reached from its orchestrator, never listed.
+	const listed = instances.filter((i) => !ownRow(i) && !i.parent);
 	// A pane's own pin and order are kept by the daemon, on its registration.
 	const registered = instances.find(ownRow);
 	const own = self && registered ? { ...self, pinned: registered.pinned, sortOrder: registered.sortOrder } : self;

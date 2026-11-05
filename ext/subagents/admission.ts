@@ -35,7 +35,7 @@ import { ensureRunStorageDir } from "./storage.ts";
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
 /** Recorded until the child session reports the level the SDK chose for its model. */
 const SDK_DEFAULT_THINKING = "model default";
-const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 /** Pi built-in extensions a child runs itself, over its own copies of the orchestrator's tools. */
 const CHILD_BUILTIN_EXTENSIONS = ["codemode", "tool_search"];
 
@@ -172,16 +172,24 @@ function summarizeTaskLabel(task: string): string {
 	return compact.length > 120 ? `${compact.slice(0, 119)}…` : compact;
 }
 
+/** Why the parent's Subagent / Subagent(agentName) deny rules refuse a run, evaluated before any model activity. */
+export function delegationDenied(
+	agentName: string,
+	cwd: string,
+	agentDir: string,
+	projectTrusted: boolean,
+): string | undefined {
+	const sm = SettingsManager.create(cwd, agentDir, { projectTrusted });
+	const delegationDeny = evaluateSubagentDelegationDeny(forkSettings.denyRules(sm), agentName, cwd);
+	return delegationDeny.blocked ? (delegationDeny.reason ?? "Blocked by permission rule") : undefined;
+}
+
 export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 	const autoNameCounters = new Map<string, number>();
 	const reject = (error: string): AdmissionResult => ({ ok: false, error });
 
-	// Parent Subagent / Subagent(agentName) deny rules, evaluated before any model activity.
-	const deniedReason = (agentName: string, ctx: AdmissionContext): string | undefined => {
-		const sm = SettingsManager.create(ctx.cwd, deps.agentDir(), { projectTrusted: ctx.isProjectTrusted() });
-		const delegationDeny = evaluateSubagentDelegationDeny(forkSettings.denyRules(sm), agentName, ctx.cwd);
-		return delegationDeny.blocked ? (delegationDeny.reason ?? "Blocked by permission rule") : undefined;
-	};
+	const deniedReason = (agentName: string, ctx: AdmissionContext): string | undefined =>
+		delegationDenied(agentName, ctx.cwd, deps.agentDir(), ctx.isProjectTrusted());
 
 	// The orchestrator's callable tools, narrowed by the role's tool list.
 	const selectChildTools = (

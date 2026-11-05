@@ -21,6 +21,10 @@ export const NORMAL_ENV = "BLUCLAWD_NORMAL";
 export const OPEN_VIEW_ENV = "BLUCLAWD_OPEN_VIEW";
 /** Set with {@link OPEN_VIEW_ENV}: the row of the session being deleted, which that view leaves out. */
 export const HIDE_ENV = "BLUCLAWD_HIDE";
+/** Set on a run's pane: the tmux session of the orchestrator that launched it (ADR-0006). */
+export const PARENT_ENV = "BLUCLAWD_PARENT";
+/** Set with {@link PARENT_ENV} on a run's first start: the file holding its task, its first prompt. */
+export const RUN_TASK_ENV = "BLUCLAWD_RUN_TASK";
 /** The command ←← dispatches; not meant to be typed. */
 export const AGENT_VIEW_COMMAND = "agent-view";
 

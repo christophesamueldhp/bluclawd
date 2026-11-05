@@ -33,6 +33,8 @@ export interface PaneHeartbeat {
 	dialog?: PaneDialog;
 	/** Its prompt holds unsent text. */
 	draft?: boolean;
+	/** A run's: the tmux session of the orchestrator that launched it. Agent view and the phone leave it out. */
+	parent?: string;
 }
 
 /** Every PaneHeartbeat key: a field added to the type without one here fails the typecheck. */
@@ -49,6 +51,7 @@ const PANE_HEARTBEAT_KEYS = Object.keys({
 	leafId: true,
 	dialog: true,
 	draft: true,
+	parent: true,
 } satisfies Record<keyof PaneHeartbeat, true>) as (keyof PaneHeartbeat)[];
 
 /** Only the heartbeat of a wider value (a register request's instance, a stored record): any other key is left. */
@@ -94,7 +97,19 @@ export type PaneMessage =
 	/** A text-only prompt starting with "/": typed into the pane's prompt and submitted, as on the Mac. */
 	| { type: "command"; text: string; id?: string; sessionFile?: string }
 	/** Stop a background task, as /tasks' `x` does: the model is told. */
-	| { type: "stop_task"; id: string };
+	| { type: "stop_task"; id: string }
+	| SessionMessage;
+
+/** A message from another session (a run, its orchestrator), never from the user: the receiving
+ *  session takes it as one. `from`: the sender's tmux session; `name`: its session's name.
+ *  `report`: a run's last message of a turn, to its orchestrator. */
+export interface SessionMessage {
+	type: "session_message";
+	kind: "report";
+	from: string;
+	name?: string;
+	text: string;
+}
 
 /** Queue a message for a self-registered session. */
 export interface SendRequest {

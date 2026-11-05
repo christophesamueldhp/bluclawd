@@ -21,7 +21,7 @@ import type { PaneHeartbeat, PaneMessage } from "../../daemon/ipc/protocol.ts";
 import { type InstanceSummary, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { collectRows, labelFromTask } from "../../daemon/rows.ts";
 import { lastLine, textOf, toolActivity } from "../../daemon/session-state.ts";
-import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, Tmux } from "../../daemon/tmux.ts";
+import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, PARENT_ENV, Tmux } from "../../daemon/tmux.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
@@ -310,6 +310,7 @@ const agentView: InlineExtension = {
 				leafId: leafId !== entries.at(-1)?.id ? leafId : undefined,
 				dialog: activity.current === "awaiting_input" ? activity.dialog : undefined,
 				...(ctx.ui.getEditorText().trim() !== "" ? { draft: true } : {}),
+				...(process.env[PARENT_ENV] ? { parent: process.env[PARENT_ENV] } : {}),
 			};
 		};
 
@@ -372,6 +373,8 @@ const agentView: InlineExtension = {
 				pi.sendUserMessage(promptContent(message), promptOptions(message));
 			else if (message.type === "abort") ctx.abort();
 			else if (message.type === "rename") pi.setSessionName(message.name);
+			// Another session's (ext/subagents).
+			else if (message.type === "session_message") pi.events.emit("bluclawd:session-message", message);
 			// The rest are remote control's (ext/remote).
 			else pi.events.emit("bluclawd:pane-message", message);
 		};

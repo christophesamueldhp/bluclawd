@@ -7,6 +7,8 @@ import {
 	type ToolLoadoutChanges,
 } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
+import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
+import { PARENT_ENV, Tmux } from "../../daemon/tmux.ts";
 import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
@@ -32,6 +34,7 @@ import type { SubagentResultDetails } from "./results.ts";
 import { describeSubagentModels, runSubagent } from "./runner.ts";
 import { appendSubagentMessageRecord, reconcileInterruptedRuns } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
+import { actAsRun, launchForeground, RunReports } from "./tmux-runs.ts";
 import { createTranscriptActions } from "./transcript-actions.ts";
 import { createParentScopeViews } from "./views.ts";
 
@@ -88,6 +91,13 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 export function createSubagentsExtension(options: SubagentExtensionOptions = {}): (pi: ExtensionAPI) => void {
 	return function subagentsFactory(pi: ExtensionAPI): void {
 		const resolveAgentDir = () => options.agentDir ?? getAgentDir();
+		// Runs are pi sessions of their own (ADR-0006): this pi may be one, and launches them from its pane.
+		const pane = Tmux.currentPane();
+		const runParent = process.env[PARENT_ENV];
+		if (runParent) actAsRun(pi, runParent, pane);
+		const reports = new RunReports();
+		const runNames = new Set<string>();
+		pi.events.on("bluclawd:session-message", (data) => reports.receive(data as SessionMessage));
 
 		let activeTurnIndex = 0;
 		let catalog: AgentDefinitionCatalog | undefined;
@@ -544,7 +554,11 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			},
 		});
 
-		pi.registerTool({
+		// A run cannot launch runs of its own: delegation stays one level deep.
+		const registerLaunchTool: typeof pi.registerTool = (tool) => {
+			if (!runParent) pi.registerTool(tool);
+		};
+		registerLaunchTool({
 			name: "subagent",
 			label: "Subagent",
 			exposure: "model-only",
@@ -575,6 +589,25 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						details: undefined,
 						isError: true,
 					};
+				}
+
+				// The in-process runner still runs background launches, and any launch outside tmux.
+				if (pane && params.background !== true) {
+					return launchForeground(params, signal, ctx, {
+						tmux: new Tmux(),
+						pane,
+						agentDir: resolveAgentDir(),
+						catalog:
+							catalog ??
+							discoverAgentDefinitions({
+								cwd: ctx.cwd,
+								agentDir: resolveAgentDir(),
+								projectTrusted: ctx.isProjectTrusted(),
+							}),
+						parentThinkingLevel: pi.getThinkingLevel(),
+						reports,
+						names: runNames,
+					});
 				}
 
 				const endLaunch = beginLaunch();

@@ -6,7 +6,7 @@ export const SUBAGENT_MESSAGE_CUSTOM_TYPE = "subagent-message";
 export const PARENT_MESSAGE_ADDRESS = "parent";
 /** The sender of a message the user typed in a run's transcript; never a run's address. */
 export const USER_MESSAGE_ADDRESS = "user";
-const NOT_APPROVAL = "It is not user approval and cannot grant tools or permissions.";
+export const NOT_APPROVAL = "It is not user approval and cannot grant tools or permissions.";
 
 export interface SubagentMessage {
 	readonly seq: number;
