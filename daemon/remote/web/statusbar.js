@@ -8,7 +8,7 @@
 /** @typedef {{ provider: string, id: string, name?: string }} ReportModel */
 /**
  * A command the session runs for a prompt that starts with "/" and its name; `builtin` ones are pi's own.
- * @typedef {{ name: string, description?: string, source?: "builtin" | "extension" | "prompt" | "skill" }} Command
+ * @typedef {{ name: string, description?: string, source?: "builtin" | "extension" | "prompt" | "skill", skill?: {id: string, scope: string, path: string, origin: string, source: string} }} Command
  */
 /** A run of pistatusline's text in one style; colours are `#rrggbb`. @typedef {{ text: string, fg?: string, bg?: string, bold?: boolean, dim?: boolean, italic?: boolean, underline?: boolean }} StatusSpan */
 /**
@@ -22,7 +22,7 @@
  * `notice`: why the phone's last slash command did not run, until the pane's next report (`at`: epoch ms).
  * `outcomes`: what became of the prompts sent with an id, only from a pane that reports them.
  * `sent`: the daemon has it, with no outcome yet. `reason`: why it was refused or lost.
- * @typedef {{ id: string, outcome: "sent" | "taken" | "queued" } | { id: string, outcome: "refused", reason: "busy" | "draft" | "dialog" | "compacting" | "session_changed" | "unreachable" } | { id: string, outcome: "lost", reason: "pane_gone" | "daemon_restarted" | "dequeued" }} PromptOutcome
+ * @typedef {{ id: string, outcome: "sent" | "taken" | "queued" } | { id: string, outcome: "refused", reason: "busy" | "draft" | "dialog" | "compacting" | "session_changed" | "unreachable" | "invalid_skills" } | { id: string, outcome: "lost", reason: "pane_gone" | "daemon_restarted" | "dequeued" }} PromptOutcome
  * @typedef {{ model?: ReportModel, models: ReportModel[], thinkingLevel?: string, thinkingLevels?: string[], trust?: string, context?: { tokens: number | null, contextWindow: number, percent: number | null }, usage?: { input: number, output: number, cacheRead: number, cacheWrite: number, cost: number }, subagentUsage?: { runCount: number, input: number, output: number, cacheRead: number, cacheWrite: number, cost: number | null }, git?: GitInfo, notice?: { text: string, at: number }, outcomes?: PromptOutcome[], statusline?: { lines: StatusSpan[][] }, tasks?: Task[] }} Report
  */
 

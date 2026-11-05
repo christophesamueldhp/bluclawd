@@ -124,7 +124,40 @@ server = await startRemoteServer(
 		paneStarting: () => {},
 		startFailed: () => {},
 		terminalOpen: () => true,
-		report: (id) => (id === gamma.id && !quit ? { models: [], outcomes: [] } : undefined),
+		report: (id) =>
+			id === gamma.id && !quit
+				? {
+						models: [],
+						outcomes: [],
+						commands: [
+							{ name: "compact", source: "builtin" },
+							{
+								name: "skill:review",
+								source: "skill",
+								description: "Review the current changes",
+								skill: {
+									id: "a".repeat(64),
+									scope: "project",
+									origin: "local",
+									source: "local",
+									path: "/fixture/project/.pi/skills/review/SKILL.md",
+								},
+							},
+							{
+								name: "skill:plan",
+								source: "skill",
+								description: "Plan implementation",
+								skill: {
+									id: "b".repeat(64),
+									scope: "user",
+									origin: "package",
+									source: "npm:fixture-skills",
+									path: "/fixture/packages/skills/plan/SKILL.md",
+								},
+							},
+						],
+					}
+				: undefined,
 		statusLine: async () => {
 			if (existsSync(join(dir, "slow"))) await sleep(5000);
 			return {};

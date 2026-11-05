@@ -31,6 +31,7 @@ import { diffSummary, groupSummary, markerKind, resultSummary } from "./output.j
 import { pendingStore } from "./pending.js";
 import { closePicker, modelGroups, openPicker } from "./picker.js";
 import { filterSessions, fold, matchCommands } from "./search.js";
+import { createSkillDraft, skillProvenance } from "./skills.js";
 import {
 	barHtml,
 	compactLines,
@@ -58,7 +59,7 @@ import {
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.55";
+const VERSION = "0.0.56";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 /** Each chat's pending prompts and unsent text, kept for when it opens again. */
 const keptPending = pendingStore(() => localStorage);
@@ -98,6 +99,7 @@ const ERRORS = {
 	pane_too_old:
 		"This session has not reported yet. Try again in a moment; if this persists, restart it (it may run an older bluclawd).",
 	invalid_cwd: "That directory does not exist on the Mac.",
+	invalid_skills: "Selected skills are unavailable. Remove them and select them again.",
 	invalid_model: "That model name is not valid.",
 	invalid_thinking: "The model does not offer that thinking level.",
 	invalid_trust: "That trust mode is not one of always, ask or never.",
@@ -140,6 +142,7 @@ const ERRORS = {
 
 /** Why a prompt sent from here came back into the reply box: refused by its pane, or lost. */
 const RETURNED = {
+	invalid_skills: "Selected skills could not be loaded. Select them again before retrying.",
 	busy: "Not sent: the session is busy. Send it again once it is done.",
 	draft: "Not sent: clear the unsent text in this session's prompt on the Mac first.",
 	dialog: "Not sent: a dialog is open in this session on the Mac. Answer or close it first.",
@@ -796,7 +799,7 @@ function chatShell() {
 <div class="statusbar" id="statusbar" role="button" tabindex="0" aria-haspopup="dialog" aria-label="Status" hidden></div>
 <section class="scroll" id="scroll"><div class="older" id="older"></div><div class="log" id="log">
 <div class="part" id="msgs"></div><div class="part" id="live"></div><div class="part" id="pending"></div><div class="part" id="working"></div></div></section>
-<div id="banner"></div><div class="commands" id="commands" role="listbox" aria-label="Commands" hidden></div><div class="thumbs" id="thumbs" hidden></div>
+<div id="banner"></div><div class="commands" id="commands" role="listbox" aria-label="Commands" hidden></div><div id="selected-skills"></div><div class="thumbs" id="thumbs" hidden></div>
 <form class="composer" id="composer"><label class="attach" id="attach">${ICONS.attach}
 <input type="file" id="file" accept="image/*" multiple aria-label="Attach photos"></label>
 <textarea id="text" rows="1" placeholder="Reply" aria-label="Reply" maxlength="32768"></textarea>
@@ -980,7 +983,7 @@ function pendingHtml() {
 		.map(({ id, prompt, images, outcome }) => {
 			const buttons = images.map(
 				(_, index) =>
-					`<button type="button" class="pic" data-pending="${id}" data-index="${index}" aria-label="Image ${index + 1}, full screen"><img alt="Image"></button>`,
+					`<button type="button" class="pic" data-pending="${id}" aria-label="Image ${index + 1}, full screen"><img alt="Image"></button>`,
 			);
 			const pictures = buttons.length ? `<div class="pictures">${buttons.join("")}</div>` : "";
 			return `<div class="u${pictures ? " pics" : ""}">${pictures}${esc(prompt)}</div><div class="queued">${PENDING_LABELS[outcome ?? "sent"]}</div>`;
@@ -1487,14 +1490,17 @@ function updateChat() {
 	updateCommands();
 }
 
-/** The session's commands for what the reply box starts with (matchCommands), above it; none reported, none shown. */
+/** Commands at the caret; inline suggestions offer skills with discovery provenance. */
 function updateCommands() {
 	const list = $("#commands");
-	const found = matchCommands(commandsCache.get(state.chat.id), $("#text").value);
+	const chat = state.chat;
+	if (!chat) return;
+	const found = chat.skillDraft.suggestions(commandsCache.get(chat.id) ?? [], $("#text").selectionStart);
+	$("#selected-skills").innerHTML = chat.skillDraft.selectedHtml();
 	const html = found
 		.map(
-			(c) =>
-				`<button type="button" class="command" role="option" data-command="${esc(c.name.replace(/^\//, ""))}"><b>/${esc(c.name.replace(/^\//, ""))}</b>${c.description ? `<small>${esc(c.description)}</small>` : ""}</button>`,
+			({ command: c, start, end }) =>
+				`<button type="button" class="command" role="option" data-command="${esc(c.name)}" data-start="${start}" data-end="${end}"><b>/${esc(c.name)}</b>${c.skill ? `<small>${esc(skillProvenance(c))}</small>` : ""}${c.description ? `<small>${esc(c.description)}</small>` : ""}</button>`,
 		)
 		.join("");
 	if (list.dataset.html === html) return;
@@ -1821,12 +1827,25 @@ function bindChat() {
 	);
 	$("#viewer").addEventListener("click", closeViewer);
 	const text = $("#text");
-	text.value = keptPending.draft(state.chat.id);
+	state.chat.skillDraft = createSkillDraft({
+		text: keptPending.draft(state.chat.id),
+		selections: keptPending.draftSkills(state.chat.id),
+	});
+	text.value = state.chat.skillDraft.text;
+	/** @type {number | undefined} */
+	let beforeEdit;
+	text.addEventListener("beforeinput", () => {
+		beforeEdit = text.selectionStart;
+	});
+	text.addEventListener("click", updateCommands);
+	text.addEventListener("keyup", updateCommands);
 	grow(text);
 	text.addEventListener("input", () => {
+		state.chat.skillDraft.edit(text.value, beforeEdit, text.selectionStart);
+		beforeEdit = undefined;
 		grow(text);
 		updateCommands();
-		keptPending.saveDraft(state.chat.id, text.value);
+		keptPending.saveDraft(state.chat.id, text.value, state.chat.skillDraft.snapshot().selections);
 	});
 	$("#composer").addEventListener("submit", (/** @type {Event} */ event) => {
 		event.preventDefault();
@@ -1838,11 +1857,36 @@ function bindChat() {
 	commands.addEventListener("click", (/** @type {Event} */ event) => {
 		const command = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest(".command"));
 		if (!command) return;
-		text.value = `/${command.dataset.command} `;
-		keptPending.saveDraft(state.chat.id, text.value);
+		const start = Number(command.dataset.start),
+			end = Number(command.dataset.end);
+		const choice = commandsCache.get(state.chat.id)?.find((c) => c.name === command.dataset.command);
+		if (!choice) return;
+		const draft = state.chat.skillDraft;
+		if (choice.source === "skill") draft.choose(choice, start, end);
+		else
+			draft.edit(
+				`${text.value.slice(0, start)}/${choice.name} ${text.value.slice(end)}`,
+				end,
+				start + choice.name.length + 2,
+			);
+		text.value = draft.text;
+		keptPending.saveDraft(state.chat.id, text.value, draft.snapshot().selections);
 		grow(text);
 		text.focus();
-		text.setSelectionRange(text.value.length, text.value.length);
+		const inserted =
+			choice.source === "skill" ? (draft.snapshot().selections.at(-1)?.marker.length ?? 0) : choice.name.length + 2;
+		text.setSelectionRange(start + inserted, start + inserted);
+		updateCommands();
+	});
+	$("#selected-skills").addEventListener("click", (/** @type {Event} */ event) => {
+		const button = /** @type {HTMLElement | null} */ (
+			/** @type {Element} */ (event.target).closest("[data-remove-skill]")
+		);
+		if (!button) return;
+		state.chat.skillDraft.remove(Number(button.dataset.removeSkill));
+		text.value = state.chat.skillDraft.text;
+		keptPending.saveDraft(state.chat.id, text.value, state.chat.skillDraft.snapshot().selections);
+		grow(text);
 		updateCommands();
 	});
 	const file = $("#file");
@@ -2272,22 +2316,26 @@ function closeViewer() {
 
 async function send() {
 	const text = $("#text");
-	const value = text.value.trim();
 	const chat = state.chat;
+	const submission = chat?.skillDraft.submit();
+	const value = submission?.text ?? text.value.trim();
 	const session = state.sessions.find((s) => s.id === chat?.id);
 	// Photos still being read go with it once they are in.
 	if (!value || !chat || !canAct(session) || chat.reading) return;
 	// Left in the reply box, to change. A command listed for the phone goes, and the pane runs it.
-	if (chat.attachments.length === 0 && refused(value, commandsCache.get(chat.id))) {
+	if (!submission?.skills.length && chat.attachments.length === 0 && refused(value, commandsCache.get(chat.id))) {
 		showError(errorText("terminal_command"));
 		return;
 	}
 	const images = chat.attachments;
+	const skillDraft = chat.skillDraft.snapshot();
+	chat.skillDraft = createSkillDraft();
 	text.value = "";
 	keptPending.saveDraft(chat.id, "");
 	text.style.height = "auto";
 	chat.attachments = [];
 	const entry = addPending(chat, value, images, Date.now());
+	entry.skillDraft = skillDraft;
 	setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
 	render();
 	$("#scroll").scrollTop = $("#scroll").scrollHeight;
@@ -2297,6 +2345,7 @@ async function send() {
 			value,
 			images.map(({ mimeType, data }) => ({ mimeType, data })),
 			entry.id,
+			submission?.skills,
 		);
 		entry.lifetime = lifetime;
 		if (state.chat === chat) keptPending.save(chat);
@@ -2324,9 +2373,19 @@ function returned(chat, failed) {
 function putBack(chat, entry) {
 	if (state.chat !== chat) return;
 	const text = $("#text");
-	text.value = text.value ? `${entry.prompt}\n${text.value}` : entry.prompt;
-	// Kept as typed text is: its pending prompt is no longer kept.
-	keptPending.saveDraft(chat.id, text.value);
+	const previous = chat.skillDraft.snapshot();
+	const restored = entry.skillDraft ?? { text: entry.prompt, selections: [] };
+	const prefix = restored.text + (previous.text ? "\n" : "");
+	chat.skillDraft = createSkillDraft({
+		text: prefix + previous.text,
+		selections: [
+			...restored.selections,
+			...previous.selections.map((s) => ({ ...s, start: s.start + prefix.length })),
+		],
+	});
+	text.value = chat.skillDraft.text;
+	keptPending.saveDraft(chat.id, text.value, chat.skillDraft.snapshot().selections);
+	updateCommands();
 	grow(text);
 	if (!chat.attachments.length) chat.attachments = entry.images;
 }

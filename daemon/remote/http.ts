@@ -245,6 +245,19 @@ function waitingIn(url: URL): Waiting[] {
 	});
 }
 
+/** Selection ids only: paths and instruction contents never come from the phone. */
+function skillsIn(body: Record<string, unknown>): string[] | undefined {
+	const ids = body.skills;
+	if (ids === undefined) return undefined;
+	if (
+		!Array.isArray(ids) ||
+		ids.length > 200 ||
+		ids.some((id) => typeof id !== "string" || !/^[a-f0-9]{64}$/.test(id))
+	)
+		throw new HttpError(400, "invalid_skills");
+	return ids;
+}
+
 /** A prompt's images, if it has any: each base64 of the type it says it is. */
 function imagesIn(body: Record<string, unknown>): PaneImage[] | undefined {
 	const { images } = body;
@@ -273,6 +286,7 @@ const PHONE_STATUS: Record<PhoneError, number> = {
 	unsent_draft: 409,
 	command_refused: 400,
 	invalid_model: 400,
+	invalid_skills: 400,
 	invalid_thinking: 400,
 	invalid_trust: 400,
 	invalid_name: 400,
@@ -610,7 +624,14 @@ function sessionRoute(rest: string, method: string | undefined): SessionRoute | 
 					const text = promptIn(body, "text");
 					const images = imagesIn(body);
 					const id = promptIdIn(body);
-					return { type: "prompt", text, ...(images ? { images } : {}), ...(id ? { id } : {}) };
+					const skills = skillsIn(body);
+					return {
+						type: "prompt",
+						text,
+						...(images ? { images } : {}),
+						...(skills ? { skills } : {}),
+						...(id ? { id } : {}),
+					};
 				},
 			};
 		case "abort":

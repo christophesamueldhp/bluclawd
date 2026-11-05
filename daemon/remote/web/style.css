@@ -412,3 +412,8 @@ button.setting:active, .option:active { background: var(--message); }
 .viewer { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); background: rgb(0 0 0 / .92); }
 .viewer[hidden] { display: none; }
 .viewer img { max-width: 100%; max-height: 100%; object-fit: contain; }
+
+.selected-skill { position: relative; border: 1px solid var(--accent); border-radius: 8px; padding: 8px 36px 8px 10px; margin: 4px 12px; }
+.selected-skill small { display: block; overflow-wrap: anywhere; opacity: .75; }
+.selected-skill button { position: absolute; right: 4px; top: 4px; background: transparent; color: inherit; border: 0; font-size: 22px; }
+.command small { overflow-wrap: anywhere; white-space: normal; }

@@ -91,5 +91,10 @@ export function shellLine(text) {
  */
 export function refused(text, commands) {
 	const name = /^\/([\w.:-]+)(?:\s|$)/.exec(text.trimStart())?.[1];
-	return name !== undefined && commands !== undefined && !commands.some((c) => c.name === name);
+	return (
+		name !== undefined &&
+		!name.startsWith("skill:") &&
+		commands !== undefined &&
+		!commands.some((c) => c.name === name)
+	);
 }

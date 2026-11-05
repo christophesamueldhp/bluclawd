@@ -23,7 +23,7 @@ export type PhoneSession = ListedSession & { id: string; report?: PaneReport; ou
 
 /** What a Chat asks of a session. A body's fields are `unknown` until the rule for them checks them. */
 export type PhoneAction =
-	| { type: "prompt"; text: string; images?: PaneImage[]; id?: string }
+	| { type: "prompt"; text: string; images?: PaneImage[]; skills?: string[]; id?: string }
 	| { type: "abort" }
 	| { type: "model"; provider: unknown; id: unknown }
 	| { type: "thinking"; level: unknown }
@@ -58,6 +58,7 @@ export type PhoneError =
 	| "session_busy"
 	| "unsent_draft"
 	| "command_refused"
+	| "invalid_skills"
 	| "invalid_model"
 	| "invalid_thinking"
 	| "invalid_trust"
@@ -161,16 +162,28 @@ export function decide(session: PhoneSession, action: PhoneAction): PhoneOutcome
 	}
 	switch (action.type) {
 		case "prompt": {
-			const { text, images, id } = action;
+			const { text, images, id, skills } = action;
+			if (skills?.some((id) => !report?.commands?.some((c) => c.source === "skill" && c.skill?.id === id)))
+				return { error: "invalid_skills" };
 			// Its outcome comes back by its id; the pane refuses it once on another session.
 			const sent = id ? { id, ...(session.sessionFile ? { sessionFile: session.sessionFile } : {}) } : {};
 			// A slash command, as pi reads one: typed into the pane's prompt (a phone's images never are).
-			const command = images ? undefined : commandName(text);
+			const name = commandName(text);
+			const listed = report?.commands?.find((c) => c.name === name);
+			// Selected instructions accompany model prompts; built-ins and shell lines keep their own route.
+			const command =
+				images || name?.startsWith("skill:") || (skills?.length && listed?.source === "prompt") ? undefined : name;
 			const shell = !images && shellLine(text);
 			if (command === undefined && !shell)
-				return toPane(session, { type: "prompt", text, ...(images ? { images } : {}), ...sent });
+				return toPane(session, {
+					type: "prompt",
+					text,
+					...(images ? { images } : {}),
+					...(skills ? { skills } : {}),
+					...sent,
+				});
 			// Only one the pane lists for a phone: a pane that lists none (an older one) runs none.
-			const listed = report?.commands?.find((c) => c.name === command);
+
 			if (!shell && (!listed || !phoneMayRun(listed))) return { error: "command_refused" };
 			// Only into an idle, empty prompt. A pane that reports outcomes checks it, with no heartbeat's
 			// lag, and reports it refused; for an older one, checked here too.
