@@ -23,15 +23,11 @@ Ending a run's pi. Its session is kept and the run can be resumed. The orchestra
 _Avoid_: stop, delete, shutdown request
 
 **Generation**:
-One launch or one resume of a run. Usage is counted once per generation.
+One launch or one resume of a run.
 _Avoid_: generation for the orchestrator's session being reloaded or replaced
 
-**Finishing**:
-A run's status from the child's last turn of a generation, one pi will not retry, until its final record: the work is done but the run is not final yet. It can no longer be stopped, and a message to it waits for it to be final and then resumes it. It ends with the generation's final record.
-_Avoid_: done, ended (before the final record)
-
 **Attribution**:
-Where a generation's usage is counted: in pi's own totals (nested usage the SDK folds into the launch tool result, or the usage a foreground tool result carries) or in the background ledger. Each token is attributed exactly once.
+Where a run's usage is counted: in the run's own sessions, like any session's, never in the orchestrator's. The orchestrator shows the total of its runs apart from its own usage. Each token is counted once, however often a run reports, resumes or starts a new session.
 _Avoid_: reconciling, double counting
 
 **Admission**:
