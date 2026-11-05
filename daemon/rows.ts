@@ -134,10 +134,7 @@ export function collectRows(instances: InstanceSummary[], self: InstanceSummary 
 	// /new), else under its own id. A stored row under the pane's name is then the session it left.
 	// Only a registered pane counts: a stored row may still name the pane it last ran in, or be
 	// listed under its name.
-	const registered =
-		self?.pane !== undefined
-			? instances.find((i) => i.external && i.pane === self.pane)
-			: instances.find((i) => i.id === self?.id);
+	const registered = registeredRow(instances, self);
 	// A run is reached from its orchestrator, never listed.
 	const listed = instances.filter((i) => i !== registered && !i.parent);
 	// The row is the daemon's: deleting, pinning and ordering it address that id. Its pin and order
@@ -162,6 +159,22 @@ export function collectRows(instances: InstanceSummary[], self: InstanceSummary 
 		const n = row.sessionFile && live.has(row.id) ? (livePanes.get(row.sessionFile) ?? 0) : 0;
 		return n > 1 ? { ...row, livePanes: n } : row;
 	});
+}
+
+/** The row a window's pane is registered as, else the one under its own id. */
+function registeredRow(
+	instances: InstanceSummary[],
+	self: { id?: string; pane?: string } | undefined,
+): InstanceSummary | undefined {
+	return self?.pane !== undefined
+		? instances.find((i) => i.external && i.pane === self.pane)
+		: instances.find((i) => i.id === self?.id);
+}
+
+/** Every row but a window's own, the session it left included: what its footer counts. */
+export function otherRows(instances: InstanceSummary[], pane: string): AgentRow[] {
+	const own = registeredRow(instances, { pane });
+	return collectRows(instances, undefined).filter((r) => r.id !== own?.id);
 }
 
 /** Agent view's open runs, by the id of their orchestrator's row in `rows`: a run whose

@@ -19,7 +19,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { PaneHeartbeat, PaneMessage } from "../../daemon/ipc/protocol.ts";
 import { type InstanceSummary, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
-import { collectRows, labelFromTask } from "../../daemon/rows.ts";
+import { labelFromTask, otherRows } from "../../daemon/rows.ts";
 import { lastLine, textOf, toolActivity } from "../../daemon/session-state.ts";
 import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, PARENT_ENV, Tmux } from "../../daemon/tmux.ts";
 import { agentTasks, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
@@ -397,7 +397,7 @@ const agentView: InlineExtension = {
 
 		/** The `← for agents` footer hint: `← N agents` while sessions wait on you, `← N done`
 		 *  briefly when some finish. Only reads — it never starts the daemon. */
-		const startPill = (ctx: ExtensionContext): (() => void) => {
+		const startPill = (ctx: ExtensionContext, pane: string): (() => void) => {
 			const client = new OrchestratorClient();
 			let finished: Set<string> | undefined;
 			let flashUntil = 0;
@@ -424,10 +424,7 @@ const agentView: InlineExtension = {
 				}
 				let text = theme.fg("dim", "← for agents");
 				try {
-					// Its own row: a resumed session's keeps the id it had in another pane.
-					const rows = collectRows(await client.list(), undefined).filter(
-						(r) => r.id !== registration?.id && !(pane && r.pane === pane),
-					);
+					const rows = otherRows(await client.list(), pane);
 					const waiting = rows.filter((r) => r.state === "needs").length;
 					const done = new Set(rows.filter((r) => r.state === "done" || r.state === "failed").map((r) => r.id));
 					const fresh = finished ? [...done].filter((id) => !finished?.has(id)).length : 0;
@@ -510,7 +507,7 @@ const agentView: InlineExtension = {
 			delete process.env[NORMAL_ENV];
 			syncEndOnDetach(ctx);
 			stopPill?.();
-			const offPill = startPill(ctx);
+			const offPill = startPill(ctx, pane);
 			if (!autocompleteAdded) {
 				autocompleteAdded = true;
 				ctx.ui.addAutocompleteProvider(withoutAgentViewCommand);
