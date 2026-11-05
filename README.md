@@ -49,7 +49,7 @@ scripts/        probe-extensions.ts — headless report of what each extension r
 test/           vitest suites, self-contained — no monorepo, no fixture files
 ```
 
-15 extensions, no runtime dependencies (pi's own packages are peers):
+16 extensions, no runtime dependencies (pi's own packages are peers):
 
 | Extension | Registers |
 |---|---|
@@ -62,6 +62,7 @@ test/           vitest suites, self-contained — no monorepo, no fixture files
 | `remote` | `/remote-control` |
 | `help` | `/help`, `/status`, `/context` |
 | `vibes` | spinner verbs |
+| `skills` | choose `/skill:name` from autocomplete anywhere in a terminal draft; selected markers show scope, package provenance, and instruction-file location, and delete as one unit. Typed or pasted references remain ordinary text, including at the beginning. |
 | `prompt-assist` | `/prompt-assist`; prompt suggestions and automatic session titles with a selectable Pi model; manual rename stays available |
 | `web` | `/web`; the `websearch` (Exa or OpenAI) and `webfetch` (Exa) tools |
 | `accounts` | `/accounts`; named OAuth and API-key accounts, with interactive sign-in and switching |
