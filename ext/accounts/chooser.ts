@@ -101,6 +101,8 @@ export function chooseAccountOrModel(
 					lines.push(`View: ${view.scoped ? "Scoped" : "All"} · Provider: ${view.provider ?? "All providers"}`);
 					if (outsideScope)
 						lines.push(theme.fg("warning", "Active model is outside scope. Show all: Ctrl+A (scope unchanged)."));
+					if (restricted && !scope.some((model) => availableKeys.has(modelKey(model))))
+						lines.push(theme.fg("warning", "No available Scoped models. Show all: Ctrl+A (scope unchanged)."));
 				}
 				lines.push(...search.render(width));
 				// Keep groups together in a bounded window, repeating the heading when scrolling into a group.

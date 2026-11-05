@@ -136,6 +136,15 @@ availability and warn about lost access without substituting a model or changing
 The built-in `/login`, `/model`, and `/scoped-models` commands remain host-owned and unchanged;
 this chooser does not edit scope or defaults.
 
+Scope display is verified on unmodified stock pi **1.0.4** using the public
+`ExtensionCommandContext.scopedModels` and `modelRegistry.getAll()` / `getAvailable()` contracts;
+explicit selection uses `ExtensionAPI.setModel()`. An empty host scope means unrestricted
+available models. A nonempty scope keeps its membership even when every member is unavailable:
+those present in the host snapshot stay visible but cannot be selected. References absent from
+that snapshot cannot be reconstructed. Reopening reads the current command context, including
+after native scope changes, `/reload`, or session replacement. Native cycling, startup precedence,
+and scope/default persistence remain pi-owned; the chooser does not infer startup intent.
+
 Accounts are per provider: switching OpenAI does not change Anthropic, Exa, or another provider.
 The model, conversation, settings, and extensions stay unchanged. Changes apply to the shared Pi
 credentials, including other sessions and future background requests; wait for other Pi sessions
