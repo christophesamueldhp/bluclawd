@@ -43,6 +43,9 @@ import type { RunLaunch } from "./tmux-runs.ts";
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
 /** Recorded until the child session reports the level the SDK chose for its model. */
 const SDK_DEFAULT_THINKING = "model default";
+/** How many runs an orchestrator holds open at once: each is a full pi. */
+export const MAX_OPEN_RUNS = 8;
+const TOO_MANY_OPEN = `An orchestrator holds at most ${MAX_OPEN_RUNS} open subagents. Close one whose work is done with subagent_close, then try again.`;
 export const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 /** Pi built-in extensions a child runs itself, over its own copies of the orchestrator's tools. */
 const CHILD_BUILTIN_EXTENSIONS = ["codemode", "tool_search"];
@@ -146,7 +149,7 @@ export type AdmissionContext = Pick<
 export interface RunAdmissionDeps {
 	scheduler: Pick<SubagentRunScheduler<RunExecutionContext>, "admit" | "resume" | "getRun" | "getContext">;
 	/** Which names the runs of a parent scope hold. */
-	directory: Pick<RunDirectory, "nameHolder">;
+	directory: Pick<RunDirectory, "nameHolder" | "list">;
 	agentDir: () => string;
 	/** Saved roles frozen at session start; discovered on demand when session start was skipped. */
 	catalog: () => AgentDefinitionCatalog | undefined;
@@ -289,6 +292,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				`${label} is ${current.status}; only a completed or closed subagent can be resumed.`,
 			);
 		}
+		if (deps.directory.list(scope).length >= MAX_OPEN_RUNS) return refuse.unavailable(TOO_MANY_OPEN);
 		const sessionFile = current.transcriptPath;
 		if (!sessionFile || !existsSync(sessionFile))
 			return refuse.unavailable(`${label} has no saved session to resume.`);
@@ -436,6 +440,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			) {
 				return reject("Parent session or branch changed before subagent admission; request cancelled.");
 			}
+			if (deps.directory.list(dispatched).length >= MAX_OPEN_RUNS) return reject(TOO_MANY_OPEN);
 			const startSnapshot = captureWorkspaceSnapshot(cwd);
 
 			const holderOf = (name: string) => deps.directory.nameHolder(dispatched, name)?.record;

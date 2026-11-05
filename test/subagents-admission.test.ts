@@ -76,7 +76,13 @@ function loadoutOf(names: readonly string[]): ToolLoadout {
 }
 
 async function setup(
-	options: { mode?: AdmissionContext["mode"]; settings?: unknown; firstGenerationCompletes?: boolean } = {},
+	options: {
+		mode?: AdmissionContext["mode"];
+		settings?: unknown;
+		firstGenerationCompletes?: boolean;
+		// The orchestrator's tmux session: with one, runs start as pis of their own.
+		pane?: string;
+	} = {},
 ) {
 	const cwd = makeTempDir("cwd");
 	const agentDir = makeTempDir("agent");
@@ -133,6 +139,7 @@ async function setup(
 		loadout: () => loadout,
 		parentThinkingLevel: () => "low",
 		scope,
+		...(options.pane ? { pane: () => options.pane } : {}),
 	};
 	const ctx: AdmissionContext = {
 		cwd,
@@ -486,5 +493,29 @@ describe("Run admission", () => {
 		const stale = await resume(completed, () => "x").result;
 		expect(stale).toMatchObject({ ok: false, refusal: "invalidated" });
 		expect(errorOf(stale)).toMatch(/reloaded or replaced; spawn a new subagent/);
+	});
+
+	it("holds at most 8 open runs per orchestrator: a ninth launch or a resume is refused until one closes", async () => {
+		const { agentDir, launch, resume, scheduler } = await setup({ pane: "pi-orchestrator" });
+		// Launched in one message, so every launch is past model resolution before the first is admitted.
+		const launched = await Promise.all(
+			Array.from({ length: 9 }, (_, i) => launch({ agent: "explorer", name: `run-${i}`, task: "Look." })),
+		);
+		expect(launched.filter((result) => result.ok)).toHaveLength(8);
+		const refusal =
+			"An orchestrator holds at most 8 open subagents. Close one whose work is done with subagent_close, then try again.";
+		expect(launched.filter((result) => !result.ok).map(errorOf)).toEqual([refusal]);
+
+		// A closed run's Resume opens a run too.
+		const transcriptPath = join(agentDir, "closed.jsonl");
+		writeFileSync(transcriptPath, "");
+		const first = handleOf(launched.find((result) => result.ok)!);
+		const open = first.record;
+		const closed = { ...open, runId: "sub_closed", name: "closed-run", status: "closed" as const, transcriptPath };
+		expect(errorOf(await resume(closed, () => "Go on.").result)).toBe(refusal);
+
+		scheduler.cancelRun(open.runId, "model");
+		await first.completion;
+		expect((await launch({ agent: "explorer", name: "run-9", task: "Look." })).ok).toBe(true);
 	});
 });
