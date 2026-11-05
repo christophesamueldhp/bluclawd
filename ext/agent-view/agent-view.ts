@@ -299,6 +299,8 @@ export class AgentView implements Component, Focusable {
 	/** shift+↑/↓'s order: shown at once, and over any list read before its writes landed. */
 	private pendingOrder = new Map<string, number>();
 	private ordering: Promise<void> = Promise.resolve();
+	/** Rows this view deleted, and when the delete landed. */
+	private deleted = new Map<string, number>();
 	/** The `n:` search the focus last jumped to the best match of. */
 	private searchedFor: string | undefined;
 	private closed = false;
@@ -534,13 +536,20 @@ export class AgentView implements Component, Focusable {
 	}
 
 	private async load(): Promise<void> {
+		const askedAt = Date.now();
 		try {
-			const listed = (await this.opts.client.list()).filter((inst) => inst.id !== this.opts.hide);
+			// A list asked for before a delete landed still has its row.
+			const listed = (await this.opts.client.list()).filter(
+				(inst) => inst.id !== this.opts.hide && !((this.deleted.get(inst.id) ?? -1) >= askedAt),
+			);
 			// A restarted daemon knows a pane only from its next heartbeat: until then its row stays as it
 			// was, over the stopped row the daemon stored for it.
 			const carried =
 				Date.now() - this.restartedAt < RESTART_GRACE_MS
-					? this.instances.filter((inst) => inst.pane && !listed.some((l) => l.id === inst.id && l.external))
+					? this.instances.filter(
+							(inst) =>
+								inst.pane && !this.deleted.has(inst.id) && !listed.some((l) => l.id === inst.id && l.external),
+						)
 					: [];
 			this.instances = [...listed.filter((l) => !carried.some((c) => c.id === l.id)), ...carried];
 			this.connectionLost = false;
@@ -576,9 +585,9 @@ export class AgentView implements Component, Focusable {
 		this.items = this.layoutItems(bands, !!filter);
 		const at = this.items.findIndex((item) => item.key === this.selectedKey);
 		const searching = !!filter && /^n:\S/i.test(text.trim());
-		const typed = searching && text !== this.searchedFor;
+		const searchChanged = searching && text !== this.searchedFor;
 		this.searchedFor = searching ? text : undefined;
-		if (typed) {
+		if (searchChanged) {
 			// A name search focuses its best match as it is typed; a refresh leaves the focus be.
 			const best = this.items
 				.filter((i): i is Extract<Item, { kind: "row" }> => i.kind === "row")
@@ -928,6 +937,7 @@ export class AgentView implements Component, Focusable {
 
 	/** Deleted rows leave the list at once: a refresh just after a daemon restart would carry them. */
 	private forget(ids: string[]): void {
+		for (const id of ids) this.deleted.set(id, Date.now());
 		this.instances = this.instances.filter((i) => !ids.includes(i.id));
 		this.recompute();
 		this.render_();
@@ -952,7 +962,7 @@ export class AgentView implements Component, Focusable {
 	private reorder(delta: number): void {
 		const item = this.selected;
 		if (item?.kind !== "row") return;
-		const rows = item.band.rows.filter((r) => !r.starting && !r.shell);
+		const rows = item.band.rows.filter((r) => !r.starting && !r.shell && !r.unlisted);
 		const at = rows.findIndex((r) => r.id === item.row.id);
 		const to = at + delta;
 		if (at === -1 || to < 0 || to >= rows.length) return;

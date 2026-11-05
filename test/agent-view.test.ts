@@ -783,7 +783,7 @@ describe("AgentView keys", () => {
 			external: true,
 			pane: "pane-self",
 		};
-		const { view, calls, flush } = makeView({ self });
+		const { view, calls, flush } = makeView({ self, instances: [...sessions, self] });
 		expect(focusedLine(view)).toContain("current");
 		view.handleInput(CTRL_T);
 		await flush();

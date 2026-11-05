@@ -147,6 +147,7 @@ export class RowActions {
 	async pin(row: AgentRow): Promise<Outcome> {
 		if (row.starting) return { kind: "refused" };
 		if (row.shell) return { kind: "refused", text: "A shell command can't be pinned" };
+		if (row.unlisted) return { kind: "refused", text: "It is listed once it has a prompt" };
 		return this.tried(row.pinned ? "unpin" : "pin", () => this.opts.client.setMeta(row.id, { pinned: !row.pinned }));
 	}
 
@@ -191,7 +192,8 @@ export class RowActions {
 				try {
 					if (r.shell) this.opts.panes.kill(r.shell);
 					else {
-						if (r.pane) this.opts.panes.kill(r.pane);
+						// A stopped row's pane may run another pi by now.
+						if (r.pane && r.alive) this.opts.panes.kill(r.pane);
 						await this.opts.client.delete(r.id);
 					}
 					return [r.id];
@@ -230,7 +232,7 @@ export class RowActions {
 		}
 		handOff.left();
 		await panes.unlist();
-		await client.delete(row.id).catch(() => undefined);
+		if (!row.unlisted) await client.delete(row.id).catch(() => undefined);
 		try {
 			panes.kill(panes.current);
 		} catch {

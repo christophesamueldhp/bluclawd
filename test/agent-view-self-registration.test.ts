@@ -42,23 +42,23 @@ describe("ForegroundActivity (what the roster shows for THIS window)", () => {
 	it("stays working while the session waits on its background subagents, idle once they end", () => {
 		const fg = new ForegroundActivity();
 		fg.apply({ type: "agent_start" });
-		fg.apply({ type: "subagents_waiting", count: 2 });
+		fg.setWaitingOn(2);
 		expect(fg.apply({ type: "agent_settled" })).toBe("working");
 		expect(waitingDetail(fg)).toBe("Waiting for 2 subagents");
 		expect(fg.apply({ type: "ui_prompt_start", kind: "confirm" })).toBe("awaiting_input");
 		expect(fg.apply({ type: "ui_prompt_end", kind: "confirm" })).toBe("working");
-		expect(fg.apply({ type: "subagents_waiting", count: 1 })).toBe("working");
+		expect(fg.setWaitingOn(1)).toBe("working");
 		expect(waitingDetail(fg)).toBe("Waiting for 1 subagent");
-		expect(fg.apply({ type: "subagents_waiting", count: 0 })).toBe("idle");
+		expect(fg.setWaitingOn(0)).toBe("idle");
 		expect(waitingDetail(fg)).toBeUndefined();
 	});
 
 	it("a turn in progress is not waiting, even with subagents running", () => {
 		const fg = new ForegroundActivity();
-		fg.apply({ type: "subagents_waiting", count: 1 });
+		fg.setWaitingOn(1);
 		fg.apply({ type: "agent_start" });
 		expect(waitingDetail(fg)).toBeUndefined();
-		expect(fg.apply({ type: "subagents_waiting", count: 0 })).toBe("working");
+		expect(fg.setWaitingOn(0)).toBe("working");
 	});
 
 	it("ignores unrelated events", () => {

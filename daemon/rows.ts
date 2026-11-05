@@ -39,6 +39,8 @@ export interface AgentRow {
 	starting?: true;
 	/** Its pane's pi stopped beating while tmux still has its pane: shown as it last beat. */
 	silent?: true;
+	/** This window's own pane, not registered with the daemon yet: no row there to delete, pin or order. */
+	unlisted?: true;
 }
 
 /** A `!` command as a row, as bluclawd's: working while it runs (its last output line the
@@ -130,20 +132,25 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 export function collectRows(instances: InstanceSummary[], self: InstanceSummary | undefined): AgentRow[] {
 	// Its pane is listed under the row it goes on as (the session it resumed, or a new one after
 	// /new), else under its own id. A stored row under the pane's name is then the session it left.
-	// Only a registered pane counts: a stored row may still name the pane it last ran in.
+	// Only a registered pane counts: a stored row may still name the pane it last ran in, or be
+	// listed under its name.
 	const registered =
-		(self?.pane !== undefined ? instances.find((i) => i.external && i.pane === self.pane) : undefined) ??
-		instances.find((i) => i.id === self?.id);
+		self?.pane !== undefined
+			? instances.find((i) => i.external && i.pane === self.pane)
+			: instances.find((i) => i.id === self?.id);
 	// A run is reached from its orchestrator, never listed.
 	const listed = instances.filter((i) => i !== registered && !i.parent);
 	// The row is the daemon's: deleting, pinning and ordering it address that id. Its pin and order
-	// are kept there too.
+	// are kept there too. A pane not registered yet (blank until its first prompt) has no row there.
 	const own =
 		self && registered
 			? { ...self, id: registered.id, pinned: registered.pinned, sortOrder: registered.sortOrder }
-			: self;
+			: self?.pane !== undefined
+				? { ...self, id: `self:${self.pane}` }
+				: self;
 	const summaries = own ? [own, ...listed] : listed;
 	const rows = summaries.map((i) => rowFromSummary(i, own?.id));
+	if (own && own !== self && !registered) rows[0] = { ...rows[0], unlisted: true };
 	// Only a registered, running pi writes the file: `starting` and `stopping` rows are alive but not yet, or no longer.
 	const live = new Set(summaries.filter((i) => i.status === "online" && i.sessionFile).map((i) => i.id));
 	const livePanes = new Map<string, number>();

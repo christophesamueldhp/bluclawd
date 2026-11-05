@@ -46,17 +46,16 @@ const BLOCKING_PROMPT_KINDS: ReadonlySet<string> = new Set(["select", "confirm",
  * Derives the foreground session's activity (daemon/activity.ts), which its heartbeat reports,
  * from pi's extension events: a run is "working" from agent_start until agent_settled; a blocking
  * UI prompt is "awaiting_input" until answered, then back to whatever the run state was.
- * Waiting on its background subagents (`subagents_waiting`) counts as working too.
+ * Waiting on its background subagent runs (`setWaitingOn`) counts as working too.
  * `dialog`: the prompt waited on.
  */
 export class ForegroundActivity {
 	current: AgentActivity = "idle";
 	dialog: PaneDialog | undefined;
 	private running = false;
-	/** The background subagent runs it waits on. */
-	waitingOn = 0;
+	private waitingOn = 0;
 
-	apply(event: { type: string; kind?: string; title?: string; count?: number }): AgentActivity {
+	apply(event: { type: string; kind?: string; title?: string }): AgentActivity {
 		switch (event.type) {
 			case "agent_start":
 			case "turn_start":
@@ -67,10 +66,6 @@ export class ForegroundActivity {
 				this.running = false;
 				this.current = this.busy();
 				this.dialog = undefined;
-				break;
-			case "subagents_waiting":
-				this.waitingOn = event.count ?? 0;
-				if (this.current !== "awaiting_input") this.current = this.busy();
 				break;
 			case "ui_prompt_start":
 				if (event.kind && BLOCKING_PROMPT_KINDS.has(event.kind)) {
@@ -93,16 +88,23 @@ export class ForegroundActivity {
 		return this.running || this.waitingOn > 0 ? "working" : "idle";
 	}
 
-	/** Between turns, its background subagents still running. */
-	get waiting(): boolean {
-		return !this.running && this.waitingOn > 0;
+	/** How many background subagent runs are still going. */
+	setWaitingOn(count: number): AgentActivity {
+		this.waitingOn = count;
+		if (this.current !== "awaiting_input") this.current = this.busy();
+		return this.current;
+	}
+
+	/** The background subagent runs it waits on between turns: none while a turn runs. */
+	get waitingFor(): number {
+		return this.running ? 0 : this.waitingOn;
 	}
 }
 
 /** A row's line while the session waits on its background subagents. */
 export function waitingDetail(activity: ForegroundActivity): string | undefined {
-	if (!activity.waiting) return undefined;
-	const n = activity.waitingOn;
+	const n = activity.waitingFor;
+	if (n === 0) return undefined;
 	return `Waiting for ${n} subagent${n === 1 ? "" : "s"}`;
 }
 

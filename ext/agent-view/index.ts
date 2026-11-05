@@ -475,11 +475,13 @@ const agentView: InlineExtension = {
 			delete process.env[HIDE_ENV];
 			activity = new ForegroundActivity();
 			// Its background subagents keep it working between turns, as the orchestrator waits on them.
-			const subagentsChanged = () =>
-				track({
-					type: "subagents_waiting",
-					count: (agentTasks()?.list() ?? []).filter((task) => task.state === "running").length,
-				});
+			const subagentsChanged = () => {
+				const line = waitingDetail(activity);
+				const running = (agentTasks()?.list() ?? []).filter((task) => task.state === "running").length;
+				registration?.setActivity(activity.setWaitingOn(running));
+				// A new count is a new line on the row, which only a heartbeat carries.
+				if (waitingDetail(activity) !== line) void registration?.refresh();
+			};
 			registration = new SelfRegistration(
 				new OrchestratorClient(),
 				// A run registers at once, listed nowhere, so its orchestrator reaches it from its first turn on.
@@ -622,7 +624,7 @@ const agentView: InlineExtension = {
 			};
 		});
 
-		const track = (event: Parameters<ForegroundActivity["apply"]>[0]): void => {
+		const track = (event: { type: string; kind?: string; title?: string }): void => {
 			const current = activity.apply(event);
 			registration?.setActivity(current);
 		};

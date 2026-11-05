@@ -11,6 +11,7 @@ import { ServerSupervisor } from "../daemon/supervisor.ts";
 import type { ShellInfo } from "../daemon/tmux.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
+import { waitFor } from "./helpers/wait-for.ts";
 
 const SHIFT_DOWN = "\x1b[1;2B";
 const plain = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
@@ -98,6 +99,10 @@ function view(w: ReturnType<typeof world>, extra: { self?: () => InstanceSummary
 	return v;
 }
 
+/** Every press's writes landed and the daemon's order is what shows. */
+const saved = (v: AgentView) =>
+	waitFor(() => (v as unknown as { pendingOrder: Map<string, number> }).pendingOrder.size === 0);
+
 const NAMES = /\b(pa|pb|pc|me|!ls)\b/;
 const order = (v: AgentView) =>
 	v
@@ -118,8 +123,9 @@ describe("agent view: shift+↑/↓", () => {
 		expect(order(v)).toEqual(["pb", "pa", "pc"]);
 		v.handleInput(SHIFT_DOWN);
 		expect(order(v)).toEqual(["pb", "pc", "pa"]);
-		await wait(100);
+		await saved(v);
 		expect(order(v)).toEqual(["pb", "pc", "pa"]);
+		expect(listSummaries(w.sup).find((i) => i.id === "pa")?.sortOrder).toBe(2);
 	});
 
 	it("moves this window's own row, which is focused when the view opens", async () => {
@@ -142,7 +148,7 @@ describe("agent view: shift+↑/↓", () => {
 		await v.onShow();
 		expect(order(v)).toEqual(["me", "pa"]);
 		v.handleInput(SHIFT_DOWN);
-		await wait(100);
+		await saved(v);
 		expect(order(v)).toEqual(["pa", "me"]);
 		expect(w.metaCalls).toContain("self");
 	});
@@ -164,8 +170,8 @@ describe("agent view: shift+↑/↓", () => {
 		const v = view(w, { shells });
 		await v.onShow();
 		v.handleInput(SHIFT_DOWN);
-		await wait(100);
-		expect(w.metaCalls).not.toContain("sh-1");
+		await saved(v);
+		expect(w.metaCalls.sort()).toEqual(["pa", "pb"]);
 		expect(v.render(100).map(plain).join("\n")).not.toContain("Couldn't save order");
 	});
 });
