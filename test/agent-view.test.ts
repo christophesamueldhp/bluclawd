@@ -1185,7 +1185,6 @@ describe("AgentView look", () => {
 		for (const width of [100, 120, 160]) {
 			const text = grid(width).join("\n");
 			for (const item of [
-				"shift+↑↓ to reorder", // every band of every view
 				"ctrl+r to rename",
 				"ctrl+f to find",
 				"ctrl+j for newline",
@@ -1195,13 +1194,14 @@ describe("AgentView look", () => {
 				expect(text).toContain(item);
 			}
 			expect(text).toContain("alt+1-3 to open"); // the focused row's directory holds three sessions
+			expect(text).not.toContain("shift+↑↓ to reorder"); // Needs input lists by recency
 		}
 		// Wide enough for bluclawd's three rows, filled down each column, 4 apart.
 		const rows = grid(160);
 		expect(rows).toHaveLength(3);
-		expect(rows[0]).toMatch(/^ {2}shift\+↑↓ to reorder {4}(opt|alt)\+↑\/↓ to jump groups {4}/);
-		expect(rows[1]).toMatch(/^ {2}ctrl\+r to rename {7}ctrl\+s to switch views {4}/);
-		expect(rows[2]).toMatch(/^ {2}ctrl\+f to find {9}ctrl\+j for newline {8}/);
+		expect(rows[0]).toMatch(/^ {2}ctrl\+r to rename {10}ctrl\+s to switch views {4}/);
+		expect(rows[1]).toMatch(/^ {2}ctrl\+f to find {12}ctrl\+j for newline {8}/);
+		expect(rows[2]).toMatch(/^ {2}(opt|alt)\+↑\/↓ to jump groups {4}ctrl\+t to pin to top/);
 	});
 
 	it("? leaves shift+↑↓ out for a row it can't move: this window before its first prompt, or a run", () => {

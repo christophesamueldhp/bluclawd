@@ -740,8 +740,19 @@ export class ServerSupervisor {
 	}
 
 	/** Agent-view-only fields: pin and manual order. A Silent pane's row takes them as a live one's. */
-	setInstanceMeta(instanceId: string, meta: { pinned?: boolean; sortOrder?: number }): InstanceRecord | undefined {
+	setInstanceMeta(
+		instanceId: string,
+		{ pinned, sortOrder }: Pick<InstanceRecord, "pinned" | "sortOrder">,
+	): InstanceRecord | undefined {
 		const at = this.addressed(instanceId);
+		const wasPinned = at ? at.pane.record.pinned : getInstance(this.deps.dir, instanceId)?.pinned;
+		// A field left out stays as it is: a reorder does not unpin. Pinning or unpinning moves the
+		// row to another band, so its old order is dropped unless one is given.
+		const meta: Pick<InstanceRecord, "pinned" | "sortOrder"> = {
+			...(pinned !== undefined ? { pinned } : {}),
+			...(pinned !== undefined && pinned !== !!wasPinned ? { sortOrder: undefined } : {}),
+			...(sortOrder !== undefined ? { sortOrder } : {}),
+		};
 		if (at) {
 			at.pane.record = { ...at.pane.record, ...meta };
 			// The stored row behind it shows again if its pane dies unseen.

@@ -975,17 +975,27 @@ export class AgentView implements Component, Focusable {
 		await this.refresh();
 	}
 
-	/** shift+↑/↓ within a band: renumber the band, show it at once, and persist it. Each press's
-	 *  writes wait for the last one's, so a quick second press builds on the first. A `!` command
-	 *  has no stored order, and a row still starting no row to keep one on. */
+	/** shift+↑/↓ within a band: swap with the next row shown, renumber the whole band, show it at
+	 *  once, and persist it. A filter's hidden rows keep their places. Each press's writes wait for
+	 *  the last one's, so a quick second press builds on the first. A `!` command has no stored
+	 *  order, and a row still starting no row to keep one on. */
 	private reorder(delta: number): void {
 		const item = this.selected;
 		if (item?.kind !== "row") return;
-		const rows = orderedRows(item.band);
-		const at = rows.findIndex((r) => r.id === item.row.id);
-		const to = at + delta;
-		if (at === -1 || to < 0 || to >= rows.length) return;
-		[rows[at], rows[to]] = [rows[to], rows[at]];
+		const shown = orderedRows(item.band);
+		const at = shown.findIndex((r) => r.id === item.row.id);
+		if (at === -1) return;
+		if (!manuallyOrdered(item.band)) {
+			this.say("Reorder in directory view (ctrl+s), or pin it");
+			return;
+		}
+		const other = shown[at + delta];
+		// The band again without the filter, whose hidden rows keep their places.
+		const band = buildBands(this.allRows, this.viewMode, (p) => p).find((b) => b.key === item.band.key);
+		if (!other || !band) return;
+		const rows = orderedRows(band);
+		const [from, to] = [item.row, other].map((row) => rows.findIndex((r) => r.id === row.id));
+		[rows[from], rows[to]] = [rows[to], rows[from]];
 		for (const [i, r] of rows.entries()) this.pendingOrder.set(r.id, i);
 		this.recompute();
 		this.render_();
@@ -2063,7 +2073,9 @@ export class AgentView implements Component, Focusable {
 		);
 		const opt = process.platform === "darwin" ? "opt" : "alt";
 		const items = [
-			...(row && item?.kind === "row" && orderedRows(item.band).includes(row) ? ["shift+↑↓ to reorder"] : []),
+			...(row && item?.kind === "row" && manuallyOrdered(item.band) && orderedRows(item.band).includes(row)
+				? ["shift+↑↓ to reorder"]
+				: []),
 			...(row ? ["ctrl+r to rename"] : []),
 			"ctrl+f to find",
 			`${opt}+↑/↓ to jump groups`,
@@ -2229,6 +2241,11 @@ export class AgentView implements Component, Focusable {
 /** The rows of a band shift+↑/↓ moves; a run is reached from its orchestrator, not a band. */
 function orderedRows(band: Band): AgentRow[] {
 	return band.rows.filter((r) => !r.starting && !r.shell && !r.unlisted);
+}
+
+/** Bands with a manual order: Needs input, Working and Idle list by recency. */
+function manuallyOrdered(band: Band): boolean {
+	return band.key === "pinned" || band.key.startsWith("dir:");
 }
 
 function isDirectory(path: string): boolean {

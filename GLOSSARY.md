@@ -52,6 +52,12 @@ _Avoid_: idle, stopped, done (while runs are working)
 An entry in `/tasks` and `task_stop`: a background shell, a monitor, or a run as seen from there.
 _Avoid_: task for the run itself inside `subagents`
 
+### Agent view
+
+**Manual order**:
+The place the user gives a row in its band in agent view, in the Pinned band or a directory's band. Needs input, Working and Idle always list by recency. Pinning or unpinning a row clears it, and a filter hides rows without moving them.
+_Avoid_: sort order, position
+
 ### Web
 
 **Search provider**:

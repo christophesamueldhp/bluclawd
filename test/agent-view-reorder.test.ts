@@ -31,7 +31,7 @@ beforeAll(() =>
 function world() {
 	const dir = mkdtempSync(join(tmpdir(), "reorder-"));
 	const sup = new ServerSupervisor({ now: () => Date.now(), tmux: { hasSession: () => true }, dir } as never);
-	const beat = (id: string, activity: "idle" | "working", minutesAgo: number, pane = id) => {
+	const beat = (id: string, activity: "idle" | "working", minutesAgo: number, pane = id, label = id) => {
 		const file = join(dir, `${id}.jsonl`);
 		writeFileSync(file, "");
 		const at = new Date(Date.now() - minutesAgo * 60_000).toISOString();
@@ -44,7 +44,7 @@ function world() {
 				finishedAt: at,
 				sessionFile: file,
 				pane,
-				label: id,
+				label,
 				turns: 1,
 			},
 			activity,
@@ -70,7 +70,10 @@ afterEach(() => {
 	for (const v of views.splice(0)) (v as unknown as { teardown(): void }).teardown();
 });
 
-function view(w: ReturnType<typeof world>, extra: { self?: () => InstanceSummary; shells?: ShellInfo[] } = {}) {
+function view(
+	w: ReturnType<typeof world>,
+	extra: { self?: () => InstanceSummary; shells?: ShellInfo[]; mode?: "state" | "directory" } = {},
+) {
 	const panes = {
 		current: "self",
 		listShells: () => extra.shells ?? [],
@@ -93,6 +96,7 @@ function view(w: ReturnType<typeof world>, extra: { self?: () => InstanceSummary
 		cwd: w.dir,
 		home: "/nohome",
 		onClose: () => {},
+		loadViewMode: () => extra.mode ?? "directory",
 		...(extra.self ? { self: extra.self } : {}),
 	});
 	views.push(v);
@@ -113,12 +117,15 @@ const order = (v: AgentView) =>
 describe("agent view: shift+↑/↓", () => {
 	it("moves a row one step per press, however fast the presses come", async () => {
 		const w = world();
-		w.beat("pa", "idle", 1);
+		w.beat("pa", "idle", 3);
 		w.beat("pb", "idle", 2);
-		w.beat("pc", "idle", 3);
+		w.beat("pc", "idle", 1);
 		const v = view(w);
 		await v.onShow();
 		expect(order(v)).toEqual(["pa", "pb", "pc"]);
+		v.handleInput("?");
+		expect(v.render(100).map(plain).join("\n")).toContain("shift+↑↓ to reorder");
+		v.handleInput("?");
 		v.handleInput(SHIFT_DOWN);
 		expect(order(v)).toEqual(["pb", "pa", "pc"]);
 		v.handleInput(SHIFT_DOWN);
@@ -130,8 +137,9 @@ describe("agent view: shift+↑/↓", () => {
 
 	it("moves this window's own row, which is focused when the view opens", async () => {
 		const w = world();
-		w.beat("me", "idle", 0, "self");
+		w.beat("me", "idle", 2, "self");
 		w.beat("pa", "idle", 1);
+		const at = new Date(Date.now() - 2 * 60_000).toISOString();
 		const self: InstanceSummary = {
 			id: "self",
 			status: "online",
@@ -141,8 +149,8 @@ describe("agent view: shift+↑/↓", () => {
 			turns: 1,
 			external: true,
 			pane: "self",
-			createdAt: new Date().toISOString(),
-			finishedAt: new Date().toISOString(),
+			createdAt: at,
+			finishedAt: at,
 		};
 		const v = view(w, { self: () => self });
 		await v.onShow();
@@ -151,6 +159,52 @@ describe("agent view: shift+↑/↓", () => {
 		await saved(v);
 		expect(order(v)).toEqual(["pa", "me"]);
 		expect(w.metaCalls).toContain("self");
+	});
+
+	it("with a filter, swaps with the next row shown and leaves the hidden ones in place", async () => {
+		const w = world();
+		w.beat("pa", "idle", 3, "pa", "pa x");
+		w.beat("pb", "idle", 2);
+		w.beat("pc", "idle", 1, "pc", "pc x");
+		const v = view(w);
+		await v.onShow();
+		for (const ch of "n:x") v.handleInput(ch);
+		expect(order(v)).toEqual(["pa", "pc"]);
+		v.handleInput(SHIFT_DOWN);
+		await saved(v);
+		for (let i = 0; i < 3; i++) v.handleInput("\x7f");
+		expect(order(v)).toEqual(["pc", "pb", "pa"]);
+	});
+
+	it("moves a row in the Pinned band and keeps the band pinned", async () => {
+		const w = world();
+		w.beat("pa", "idle", 2);
+		w.beat("pb", "idle", 1);
+		for (const id of ["pa", "pb"]) await w.client.setMeta(id, { pinned: true });
+		const v = view(w, { mode: "state" });
+		await v.onShow();
+		expect(order(v)).toEqual(["pa", "pb"]);
+		v.handleInput(SHIFT_DOWN);
+		await saved(v);
+		expect(order(v)).toEqual(["pb", "pa"]);
+		expect(
+			listSummaries(w.sup)
+				.filter((i) => i.pinned)
+				.map((i) => i.id),
+		).toEqual(["pa", "pb"]);
+	});
+
+	it("says where to reorder instead of moving a row in Needs input, Working or Idle", async () => {
+		const w = world();
+		w.beat("pa", "idle", 1);
+		w.beat("pb", "idle", 2);
+		const v = view(w, { mode: "state" });
+		await v.onShow();
+		v.handleInput(SHIFT_DOWN);
+		expect(order(v)).toEqual(["pa", "pb"]);
+		expect(v.render(100).map(plain).join("\n")).toContain("Reorder in directory view (ctrl+s), or pin it");
+		await wait(20);
+		expect(w.metaCalls).toEqual([]);
 	});
 
 	it("leaves a `!` command out of the order instead of failing to save it", async () => {
@@ -189,6 +243,20 @@ describe("manual order", () => {
 		...extra,
 	});
 
+	it("is cleared when a row is pinned or unpinned, and kept when its pin stays", async () => {
+		const w = world();
+		w.beat("pa", "idle", 1);
+		const sortOrder = () => listSummaries(w.sup).find((i) => i.id === "pa")?.sortOrder;
+		await w.client.setMeta("pa", { sortOrder: 3 });
+		await w.client.setMeta("pa", { pinned: true });
+		expect(sortOrder()).toBeUndefined();
+		await w.client.setMeta("pa", { sortOrder: 1 });
+		await w.client.setMeta("pa", { pinned: true });
+		expect(sortOrder()).toBe(1);
+		await w.client.setMeta("pa", { pinned: false });
+		expect(sortOrder()).toBeUndefined();
+	});
+
 	it("puts ordered rows first in the directory view, the rest oldest first", () => {
 		const rows = [
 			row("old", { createdAt: "2026-01-01T00:00:00Z" }),
@@ -200,12 +268,13 @@ describe("manual order", () => {
 		expect(band.rows.map((r) => r.id)).toEqual(["first", "second", "old", "new"]);
 	});
 
-	it("breaks a tie in the state view by recency, so rows never swap at random", () => {
+	it("lists Needs input, Working and Idle by recency, whatever the manual order", () => {
 		const rows = [
 			row("older", { sortOrder: 0, updatedAt: "2026-01-01T00:00:00Z" }),
-			row("newer", { sortOrder: 0, updatedAt: "2026-01-02T00:00:00Z" }),
+			row("newest", { updatedAt: "2026-01-03T00:00:00Z" }),
+			row("newer", { sortOrder: 1, updatedAt: "2026-01-02T00:00:00Z" }),
 		];
 		const idle = buildBands(rows, "state", (p) => p).find((b) => b.key === "idle");
-		expect(idle?.rows.map((r) => r.id)).toEqual(["newer", "older"]);
+		expect(idle?.rows.map((r) => r.id)).toEqual(["newest", "newer", "older"]);
 	});
 });
