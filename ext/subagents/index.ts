@@ -483,7 +483,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				openWorldHint: false,
 			},
 			description:
-				"Send a message to a subagent by name or run ID (sub_…). A running child gets it at its next safe point without a new turn. A completed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
+				"Send a message to a subagent by name or run ID (sub_…). A running child gets it at its next safe point without a new turn. A completed or closed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
 			parameters: SUBAGENT_MESSAGE_PARAMETERS,
 			execute: async (toolCallId, params, _signal, _onUpdate, toolCtx) => {
 				const ctx = toolCtx ?? parentScope.context();
@@ -558,7 +558,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				if (target === "all" && pane) {
 					const stopped = views.open().filter(({ record }) => record.pane && stopTurn(record.pane)).length;
 					return {
-						content: [{ type: "text", text: `Stopped the turn of ${stopped} subagent${stopped === 1 ? "" : "s"}.` }],
+						content: [
+							{ type: "text", text: `Stopped the turn of ${stopped} subagent${stopped === 1 ? "" : "s"}.` },
+						],
 						details: undefined,
 					};
 				}

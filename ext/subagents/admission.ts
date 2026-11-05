@@ -285,10 +285,13 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		if (known && !deps.scope.inScope(known)) return refuse.invalidated;
 		const current = known ?? run;
 		if (!isResumableSubagentStatus(current.status)) {
-			return refuse.unavailable(`${label} is ${current.status}; only a completed or closed subagent can be resumed.`);
+			return refuse.unavailable(
+				`${label} is ${current.status}; only a completed or closed subagent can be resumed.`,
+			);
 		}
 		const sessionFile = current.transcriptPath;
-		if (!sessionFile || !existsSync(sessionFile)) return refuse.unavailable(`${label} has no saved session to resume.`);
+		if (!sessionFile || !existsSync(sessionFile))
+			return refuse.unavailable(`${label} has no saved session to resume.`);
 		const holder = current.name ? deps.directory.nameHolder(scope, current.name)?.record : undefined;
 		if (holder) return refuse.unavailable(`${label} cannot resume: its name is now used by ${holder.runId}.`);
 		const denied = deniedReason(current.agentName, ctx);
@@ -324,7 +327,12 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 	 */
 	const roleOf = (run: Readonly<SubagentRunRecord>, ctx: AdmissionContext): AgentDefinition => {
 		const saved = resolveAgentDefinition(
-			deps.catalog() ?? discoverAgentDefinitions({ cwd: ctx.cwd, agentDir: deps.agentDir(), projectTrusted: ctx.isProjectTrusted() }),
+			deps.catalog() ??
+				discoverAgentDefinitions({
+					cwd: ctx.cwd,
+					agentDir: deps.agentDir(),
+					projectTrusted: ctx.isProjectTrusted(),
+				}),
 			run.agentName,
 		);
 		if (saved.ok) return saved.definition;
@@ -520,7 +528,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				);
 			}
 			const parentPane = deps.pane?.();
-			if (parentPane !== undefined) return resumeInTmux(run, parentPane, buildPrompt, ctx, { invalidated, unavailable });
+			if (parentPane !== undefined)
+				return resumeInTmux(run, parentPane, buildPrompt, ctx, { invalidated, unavailable });
 			if (!buildPrompt) return unavailable(`${label} needs a message to resume with.`);
 			// Checked again after the model is resolved, since another message may resume the run meanwhile.
 			const checkResumable = (): { transcriptPath: string; refused?: never } | { refused: AdmissionResult } => {

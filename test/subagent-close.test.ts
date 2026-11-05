@@ -1,8 +1,13 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { remoteSessions } from "../daemon/remote/sessions.ts";
 import { collectRows } from "../daemon/rows.ts";
+import { writePersistedRunRecord } from "../ext/subagents/storage.ts";
+import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
 import {
 	conversation,
 	DEFAULT_EXTENSIONS,
@@ -53,7 +58,9 @@ describe.skipIf(!hasTmux)("closing a run", () => {
 
 		const close = lastToolResult(requests[2]);
 		expect(close).toMatchObject({ role: "toolResult", toolName: "subagent_close" });
-		expect(close?.text).toMatch(/^Closed probe-run \(sub_[0-9a-f-]+\)\. Its session is kept: a message resumes it\.$/);
+		expect(close?.text).toMatch(
+			/^Closed probe-run \(sub_[0-9a-f-]+\)\. Its session is kept: a message resumes it\.$/,
+		);
 		const runId = close?.text.match(/sub_[0-9a-f-]+/)?.[0] ?? "";
 		expect(lastToolResult(requests[3])?.text).toBe("No subagents are running.");
 
@@ -94,6 +101,23 @@ describe.skipIf(!hasTmux)("closing a run", () => {
 		real.tmux.sendKeys(orchestrator, ["x"]);
 		await waitFor(() => expect(panes(real)).toEqual([orchestrator]));
 		await waitFor(() => expect(screen()).not.toMatch(panelRow));
+	});
+
+	it("is what ending the orchestrator's session does to its runs", async () => {
+		const real = await startRealPi();
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around.", background: true } },
+			{ text: "waiting for probe-run" },
+			{ text: "read the report" },
+		]);
+		real.script("probe-run", [{ text: "Looked." }]);
+		const orchestrator = real.start(["--", "delegate the look"]);
+		await real.waitForRequests("main", 3);
+		expect(panes(real)).toHaveLength(2);
+
+		real.tmux.sendKeys(orchestrator, ["/new", "Enter"]);
+		await waitFor(() => expect(panes(real)).toEqual([orchestrator]));
 	});
 });
 
@@ -171,6 +195,73 @@ describe.skipIf(!hasTmux)("resuming a closed run", () => {
 		expect(said.at(-1)).toMatchObject({ role: "user", text: expect.stringContaining("Look again.") });
 		const woken = (await real.waitForRequests("main", 5))[4];
 		expect(conversation(woken).some((message) => message.text.includes("Second look."))).toBe(true);
+	});
+
+	it("of an old in-process run, its session file reopens as a full pi when the orchestrator messages it", async () => {
+		const real = await startRealPi();
+		pi = real;
+		real.script("main", [
+			{ text: "hello" },
+			{ tool: "subagent_message", args: { to: "old-run", content: "Pick up where you left off." } },
+			{ text: "waiting for old-run" },
+			{ text: "read its report" },
+		]);
+		real.script("old-run", [{ text: "Picked it up." }]);
+		const orchestrator = real.start(["--", "hello"]);
+		await real.waitForRequests("main", 1);
+		const sessionId = await waitFor(async () => {
+			const id = (await real.rows()).find((row) => row.pane === orchestrator)?.sessionId;
+			expect(id).toBeDefined();
+			return id ?? "";
+		});
+
+		// An old run: an SDK session in its run directory, and its record, completed.
+		const runId = `sub_${randomUUID()}`;
+		const runDir = join(real.agentDir, "bluclawd", "subagents", sessionId, runId);
+		const session = SessionManager.create(real.cwd, runDir);
+		session.appendMessage({ role: "user", content: "Old task.", timestamp: Date.now() });
+		session.appendMessage(fauxAssistantMessage("Old answer."));
+		writePersistedRunRecord(real.agentDir, {
+			runId,
+			parentSessionId: sessionId,
+			sessionEpoch: 1,
+			parentTurnId: "turn_1",
+			originToolCallId: "call_old",
+			name: "old-run",
+			generation: 0,
+			transcriptPath: session.getSessionFile(),
+			agentName: "explorer",
+			definitionSource: "bundled",
+			provider: "faux",
+			modelId: "faux-1",
+			thinkingLevel: "off",
+			cwd: real.cwd,
+			taskSummary: "Old task.",
+			startSnapshot: { headCommit: null, dirty: false, statusDigest: "" },
+			snapshotDrifted: false,
+			admittedAt: Date.now(),
+			endedAt: Date.now(),
+			deliveryMode: "background",
+			status: "completed",
+			complete: true,
+			turnCount: 1,
+			toolCallCount: 0,
+			usage: createEmptySubagentUsage(),
+			backgroundDeliveryAttempted: true,
+		});
+
+		real.tmux.sendKeys(orchestrator, ["go on with the old run", "Enter"]);
+		const requests = await real.waitForRequests("main", 3);
+		expect(lastToolResult(requests[2])?.text).toMatch(/^Message \d+ accepted: resuming "old-run"/);
+		const [resumed] = await real.waitForRequests("old-run", 1);
+		const said = conversation(resumed);
+		expect(said.slice(0, 2)).toEqual([
+			{ role: "user", text: "Old task." },
+			{ role: "assistant", text: "Old answer." },
+		]);
+		expect(said.at(-1)).toMatchObject({ role: "user", text: expect.stringContaining("Pick up where you left off.") });
+		const woken = (await real.waitForRequests("main", 4))[3];
+		expect(conversation(woken).some((message) => message.text.includes("Picked it up."))).toBe(true);
 	});
 
 	it("is listed in /tasks, where Enter reopens its session for the user to type in", async () => {
