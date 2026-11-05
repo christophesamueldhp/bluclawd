@@ -229,18 +229,12 @@ function stamp(iso: string | undefined): number {
 	return iso ? Date.parse(iso) || 0 : 0;
 }
 
-/** The state view: manual order (shift+↑/↓) first, then the most recently active. A finished
- *  run counts from when it finished, anything else from its last activity. */
+/** Needs input, Working and Idle: the most recently active first, never a manual order, as rows
+ *  move between them. A finished run counts from when it finished, anything else from its last
+ *  activity. */
 function byRecency(rows: AgentRow[]): AgentRow[] {
 	const at = (r: AgentRow) => stamp(stateBandOf(r) === "idle" ? (r.finishedAt ?? r.updatedAt) : r.updatedAt);
-	return [...rows].sort((a, b) => {
-		if (a.sortOrder !== undefined || b.sortOrder !== undefined) {
-			const manual = (a.sortOrder ?? Number.MAX_SAFE_INTEGER) - (b.sortOrder ?? Number.MAX_SAFE_INTEGER);
-			// A row ordered in another band keeps its number here: ties go by recency.
-			if (manual) return manual;
-		}
-		return at(b) - at(a) || stamp(b.createdAt) - stamp(a.createdAt);
-	});
+	return [...rows].sort((a, b) => at(b) - at(a) || stamp(b.createdAt) - stamp(a.createdAt));
 }
 
 /** The directory view and the Pinned band: manual order, else oldest first. */
