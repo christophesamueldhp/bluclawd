@@ -983,7 +983,7 @@ function pendingHtml() {
 		.map(({ id, prompt, images, outcome }) => {
 			const buttons = images.map(
 				(_, index) =>
-					`<button type="button" class="pic" data-pending="${id}" aria-label="Image ${index + 1}, full screen"><img alt="Image"></button>`,
+					`<button type="button" class="pic" data-pending="${id}" data-index="${index}" aria-label="Image ${index + 1}, full screen"><img alt="Image"></button>`,
 			);
 			const pictures = buttons.length ? `<div class="pictures">${buttons.join("")}</div>` : "";
 			return `<div class="u${pictures ? " pics" : ""}">${pictures}${esc(prompt)}</div><div class="queued">${PENDING_LABELS[outcome ?? "sent"]}</div>`;

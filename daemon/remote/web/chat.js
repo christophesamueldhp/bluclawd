@@ -191,10 +191,12 @@ function olderBuild(chat) {
  */
 function written(chat, entry) {
 	if (entry.outcome !== "taken") return false;
+	const name = /^\/(?!skill:)([\w.:-]+)(?:\s|$)/.exec(entry.prompt.trimStart())?.[1];
+	// Built-ins still use the pane's command route even when the draft contains selected skills.
+	const builtin = name !== undefined && ["compact", "new", "reload"].includes(name);
 	const command =
 		!entry.images.length &&
-		((/^\/(?!skill:)[\w.:-]+(?:\s|$)/.test(entry.prompt.trimStart()) && !entry.skillDraft?.selections.length) ||
-			shellLine(entry.prompt));
+		(shellLine(entry.prompt) || (name !== undefined && (builtin || !entry.skillDraft?.selections.length)));
 	return command || (chat.messagesLoaded && (chat.messages.at(-1)?.id ?? "") !== entry.last);
 }
 

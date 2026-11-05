@@ -670,3 +670,30 @@ describe("a chat open on a pane whose user types /new", () => {
 		});
 	});
 });
+
+it.each(["compact", "reload", "new"])("settles /%s on taken even when the draft includes selected skills", (name) => {
+	const chat = openChat("a");
+	const entry = addPending(chat, `/${name} /skill:review`, [], 100);
+	entry.skillDraft = {
+		text: `/${name} [Skill #1: review]`,
+		selections: [
+			{
+				start: name.length + 2,
+				marker: "[Skill #1: review]",
+				command: {
+					name: "skill:review",
+					source: "skill",
+					skill: {
+						id: "a".repeat(64),
+						scope: "project",
+						path: "/fixture/SKILL.md",
+						origin: "local",
+						source: "local",
+					},
+				},
+			},
+		],
+	};
+	settleOutcomes(chat, [{ id: entry.id, outcome: "taken" }]);
+	expect(chat.pending).toEqual([]);
+});
