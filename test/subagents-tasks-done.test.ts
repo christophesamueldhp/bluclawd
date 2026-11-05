@@ -60,7 +60,7 @@ describe("/tasks keeps the finished runs of this session", () => {
 		({ t: tui } = await finishedRun());
 		// Gone from the panel, which drops a succeeded run after 30s.
 		tui.advance(31_000);
-		expect(tui.panel()).toEqual([]);
+		await waitFor(() => tui!.panel().length === 0);
 
 		const out = tasks(tui).screen();
 		expect(out).toContain("    Done (1)\n");

@@ -23,7 +23,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 		commands: [],
 		tools: ["subagent_message", "subagent_models", "subagent_status", "subagent_stop", "subagent"],
 		shortcuts: 0,
-		events: 9,
+		events: 11,
 	},
 	branding: { commands: ["theme"], tools: [], shortcuts: 0, events: 2 },
 	"agent-view": {

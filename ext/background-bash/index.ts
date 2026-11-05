@@ -369,7 +369,7 @@ const backgroundBash: InlineExtension = {
 							deselect();
 							return undefined;
 						}
-						// The subagent panel sits between the prompt and the pill, so it takes ↓ first while it shows rows.
+						// The subagent panel takes ↓ first while it shows rows.
 						if (
 							matchesKey(data, "down") &&
 							ui.getEditorText() === "" &&

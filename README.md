@@ -134,7 +134,8 @@ bluclawd draws no footer of its own. Its footer items go through pi's `setStatus
 sort in this order: `⏵⏵ always (alt+m to cycle)`, then the background-task pill,
 then `← for agents`. pi's own footer shows them on one line. For the ccstatusline
 status line, install [pistatusline](https://github.com/christophesamueldhp/pistatusline): it draws
-the same items under its lines.
+the same items under its lines, and the subagent panel as a block below them. Under pi's own footer,
+which flattens every status onto one line, the panel stays below the prompt.
 
 While the agent works, "Working..." becomes one of bluclawd's 186 spinner verbs
 ("Pondering...", "Clauding..."), a new one each turn, none repeated until all have shown.

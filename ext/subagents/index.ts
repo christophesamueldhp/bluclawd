@@ -9,6 +9,7 @@ import {
 import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import { isAgentTaskId, notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
+import { pistatuslineDrawsFooter } from "../_shared/pistatusline.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { publishSubagentPanel } from "../_shared/subagent-panel.ts";
 import { createRunAdmission, SUBAGENT_TOOL_PARAMETERS } from "./admission.ts";
@@ -94,8 +95,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		let unpublish: (() => void) | undefined;
 		let latestLoadout: ToolLoadout | undefined;
 		const now = options.now ?? Date.now;
-		let panelTui: Pick<TUI, "requestRender" | "hasOverlay"> | undefined;
+		let panelTui: Pick<TUI, "requestRender" | "hasOverlay" | "terminal"> | undefined;
 		let panel: ReturnType<typeof createPanel> | undefined;
+		/** Whether the panel goes out as a status for pistatusline to draw below the status line; set per session. */
+		let panelInStatus = false;
+		/** The subagents status last set, so the panel's clock republishes only what changed. */
+		let publishedStatus: string | undefined;
 		let offPanelKeys: (() => void) | undefined;
 		// Subagent calls in one message start executing together; a child waits for every launch in flight to be
 		// admitted, so each sibling is registered for messages before any of them takes a turn.
@@ -120,8 +125,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		);
 		/** Redraws what shows the runs after any of them changed. */
 		const runsChanged = () => {
-			refreshFooterStatus();
 			panel?.sync();
+			refreshFooterStatus();
 			panelTui?.requestRender();
 			notifyAgentTasksChanged();
 		};
@@ -138,14 +143,22 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			try {
 				const ctx = parentScope.context();
 				if (!ctx?.hasUI) return;
+				const publish = (text: string | undefined) => {
+					if (text === publishedStatus) return;
+					publishedStatus = text;
+					ctx.ui.setStatus(STATUS_KEYS.subagents, text);
+				};
+				const lines = panelInStatus && panel && panelTui ? panel.lines(panelTui.terminal.columns) : [];
+				// The line break makes it a block of its own, below the chips.
+				if (lines.length > 0) return publish(`${lines.join("\n")}\n`);
 				const { running: runningCount, stopping: stoppingCount } = views.footer();
 				if (runningCount + stoppingCount === 0) {
-					ctx.ui.setStatus(STATUS_KEYS.subagents, undefined);
+					publish(undefined);
 				} else {
 					const parts: string[] = [];
 					if (runningCount > 0) parts.push(`${runningCount} subagent${runningCount === 1 ? "" : "s"}`);
 					if (stoppingCount > 0) parts.push(`${stoppingCount} stopping`);
-					ctx.ui.setStatus(STATUS_KEYS.subagents, ctx.ui.theme.fg("dim", parts.join(" · ")));
+					publish(ctx.ui.theme.fg("dim", parts.join(" · ")));
 				}
 			} catch {
 				// Ignore stale UI context errors
@@ -298,9 +311,13 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				unpublishTasks();
 				unpublishPanel();
 			};
+			// pi clears the statuses for a new session; pistatusline is looked up once per session.
+			publishedStatus = undefined;
+			panelInStatus = ctx.mode === "tui" && pistatuslineDrawsFooter(pi, agentDir);
 			refreshFooterStatus();
 			if (ctx.mode === "tui") {
-				// Always mounted: it renders nothing while there are no runs to show.
+				// Always mounted, as the panel's hold on the TUI and its focus. It renders nothing while there are no
+				// runs to show, nor under pistatusline, which draws the panel from the status below the status line.
 				ctx.ui.setWidget(
 					SUBAGENT_PANEL_WIDGET,
 					(tui, theme) => {
@@ -311,6 +328,11 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							runs: views.panel,
 							waitingFor: views.waitingFor,
 							now,
+							belowPrompt: !panelInStatus,
+							changed: () => {
+								refreshFooterStatus();
+								tui.requestRender();
+							},
 							actions: {
 								// The same stop as /tasks', so no report wakes the orchestrator.
 								stop: ({ record }) =>
@@ -323,6 +345,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						// Elapsed times move on between run changes, and a succeeded run leaves.
 						const ticker = setInterval(() => {
 							shown.sync();
+							refreshFooterStatus();
 							if (views.panel().length > 0) tui.requestRender();
 						}, 1000);
 						ticker.unref?.();
@@ -349,6 +372,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		pi.on("turn_start", async () => {
 			activeTurnIndex++;
 		});
+
+		// The panel's title says whether the orchestrator is Waiting, which turns on whether it is idle.
+		pi.on("agent_start", () => refreshFooterStatus());
+		pi.on("agent_settled", () => refreshFooterStatus());
 
 		// Added to each request rather than stored, so a compaction cannot drop it.
 		pi.on("context", async (event) => {
