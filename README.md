@@ -15,9 +15,10 @@ pi install /path/to/this/repo                                     # this layer
 pi                                                                 # run it
 ```
 
-For updates from Git, install with `pi install git:github.com/christophesamueldhp/bluclawd`.
-Then `pi update --all` updates Pi and installed packages, including newly published bluclawd
-features. Restart Pi or run `/reload` in an existing session to load the updated extensions.
+For a Git installation, use `pi install git:github.com/christophesamueldhp/bluclawd`;
+pi installs the package's production dependencies automatically. To update this package, use
+`pi update git:github.com/christophesamueldhp/bluclawd`. Choose host upgrades separately;
+`pi update --all` also updates pi itself. Restart pi or run `/reload` to load updated extensions.
 Prompt assistance is included and enabled by default; no separate extension installation is needed.
 
 Identity is plain pi — `~/.pi/agent`, the `pi` binary. The name "bluclawd"
@@ -49,7 +50,7 @@ scripts/        probe-extensions.ts — headless report of what each extension r
 test/           vitest suites, self-contained — no monorepo, no fixture files
 ```
 
-16 extensions, no runtime dependencies (pi's own packages are peers):
+16 extensions. Pi's own packages are peers; the vendored sandbox runtime is a production dependency.
 
 | Extension | Registers |
 |---|---|
@@ -65,7 +66,7 @@ test/           vitest suites, self-contained — no monorepo, no fixture files
 | `skills` | choose `/skill:name` from autocomplete anywhere in a terminal draft; selected markers show scope, package provenance, and instruction-file location, and delete as one unit. Typed or pasted references remain ordinary text, including at the beginning. |
 | `prompt-assist` | `/prompt-assist`; prompt suggestions and automatic session titles with a selectable Pi model; manual rename stays available |
 | `web` | `/web`; the `websearch` (Exa or OpenAI) and `webfetch` (Exa) tools |
-| `accounts` | `/accounts`; named OAuth and API-key accounts, with interactive sign-in and switching |
+| `accounts` | `/accounts`, `--models`, `--scoped`; named OAuth/API-key accounts and Active model selection in one chooser |
 | `paste` | bluclawd's paste in the prompt and agent view's composer: a paste over 800 characters or 2 lines shows as `[Pasted text #N +L lines]`, a ctrl+v image as `[Image #N]` (sent as an image), and pasting the same thing again right after shows the text or the image's file |
 
 Prompt assistance defaults to **OpenCode Go / MiMo-V2.6-Flash**, independently of your coding model.
@@ -151,6 +152,8 @@ those present in the host snapshot stay visible but cannot be selected. Referenc
 that snapshot cannot be reconstructed. Reopening reads the current command context, including
 after native scope changes, `/reload`, or session replacement. Native cycling, startup precedence,
 and scope/default persistence remain pi-owned; the chooser does not infer startup intent.
+See [Accounts compatibility and verification](docs/accounts-compatibility.md) for the exact
+published package set checked, extension contracts, reproducible checks, and installation limits.
 
 Accounts are per provider: switching OpenAI does not change Anthropic, Exa, or another provider.
 The model, conversation, settings, and extensions stay unchanged. Changes apply to the shared Pi
