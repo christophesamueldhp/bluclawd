@@ -150,6 +150,26 @@ describe("a row's state by event, as every reader lists it", () => {
 		expect(f.supervisor.sendExternal(ROW, { type: "abort" })).toBe(from === "live");
 	});
 
+	it("a live row whose pane died within its TTL does not take a message, and is stopped", () => {
+		const f = fixture();
+		states.live(f);
+		f.pass(0, "gone");
+		expect(f.supervisor.sendExternal(ROW, { type: "prompt", text: "new", id: "p-new" })).toBe(false);
+		expect(f.listed()).toEqual([stored]);
+		expect(f.outcomes()).toEqual(held("lost", "lost"));
+	});
+
+	it("a live row takes a message while tmux could not say whether its pane is up", () => {
+		const f = fixture();
+		states.live(f);
+		f.pass(0, "unknown");
+		expect(f.supervisor.sendExternal(ROW, { type: "abort" })).toBe(true);
+		expect(f.supervisor.drainExternal("pi-a")).toEqual([
+			{ type: "prompt", text: "inbox", id: "p-inbox" },
+			{ type: "abort" },
+		]);
+	});
+
 	it.each([
 		["starting", "starting"],
 		["live", "running"],
