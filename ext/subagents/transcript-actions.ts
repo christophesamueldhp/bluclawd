@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Tmux } from "../../daemon/tmux.ts";
 import type { RunAdmission } from "./admission.ts";
 import type { createGenerations } from "./generations.ts";
 import { inParentScope, type ParentScope } from "./parent-scope.ts";
@@ -34,6 +35,15 @@ export function createTranscriptActions(deps: TranscriptActionDeps) {
 		if (!scope || !inParentScope(run, scope) || (owner !== undefined && owner !== run.parentSessionId)) {
 			ctx.ui.notify("That run belongs to an earlier session and can no longer be opened.", "warning");
 			return undefined;
+		}
+		// A run in tmux is a pi session of its own: this terminal switches to it (ADR-0006).
+		if (run.pane) {
+			try {
+				new Tmux().switchTo(run.pane);
+			} catch (error) {
+				ctx.ui.notify(`Could not open ${run.name ?? runId}: ${Tmux.reason(error)}`, "warning");
+			}
+			return Promise.resolve();
 		}
 		return ctx.ui.custom<void>(
 			(tui, theme, _keybindings, done) =>
