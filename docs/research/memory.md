@@ -1,5 +1,7 @@
 # Memory: how Claude Code does it, and what pi offers to build it
 
+Superseded in part by ADR-0006: runs are now pi sessions of their own, not in-process SDK sessions.
+
 Researched 2026-11-04. Claude Code facts come from the official docs at code.claude.com (fetched that day). pi facts come from the installed `@earendil-works/pi-coding-agent` **1.0.4** (`node_modules/@earendil-works/pi-coding-agent/package.json`). Its `dist/` line numbers are compiled output and will drift on upgrade.
 
 Every claim is labelled with one of:
