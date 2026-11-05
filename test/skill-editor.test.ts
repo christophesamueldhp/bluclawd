@@ -21,7 +21,7 @@ const skill: ReturnType<ExtensionAPI["getCommands"]>[number] = {
 	},
 };
 
-function composer() {
+function composer(commands = [skill]) {
 	const tui = { requestRender() {}, terminal: { rows: 40, columns: 120 } };
 	const theme = {
 		borderColor: (s: string) => s,
@@ -37,11 +37,11 @@ function composer() {
 	const editor = new PasteEditor(tui as never, theme as never, keys as never);
 	attachSkills(
 		editor,
-		() => [skill],
+		() => commands,
 		(s) => s,
 	);
 	editor.setAutocompleteProvider(
-		new CombinedAutocompleteProvider([{ name: "skill:review" }, { name: "help" }], "/project"),
+		new CombinedAutocompleteProvider([...commands.map(({ name }) => ({ name })), { name: "help" }], "/project"),
 	);
 	let submitted = "";
 	editor.onSubmit = (text) => {
@@ -114,6 +114,33 @@ describe("terminal skill selection", () => {
 		expect(rendered(editor, 240)).toContain(skill.sourceInfo.path);
 		for (const width of [12, 40, 120])
 			expect(editor.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
+	});
+
+	it("shows each selection's discovered origin and removes only the deleted selection's provenance", async () => {
+		const plan: typeof skill = {
+			...skill,
+			name: "skill:plan",
+			sourceInfo: { path: "/user/skills/plan/SKILL.md", source: "local", scope: "user", origin: "top-level" },
+		};
+		const { editor, submitted } = composer([skill, plan]);
+		await choose(editor);
+		editor.handleInput("\n");
+		editor.handleInput("then /skill:pla");
+		await waitFor(() => expect(editor.isShowingAutocomplete()).toBe(true));
+		expect(rendered(editor, 240)).toContain(`User · ${plan.sourceInfo.path}`);
+		editor.handleInput("\t");
+		const display = rendered(editor, 240);
+		expect(display).toContain(`[Skill #1: review]`);
+		expect(display).toContain(`[Skill #2: plan]`);
+		expect(display).toContain(`Selected skill #1: review · Project · npm:review-pack · ${skill.sourceInfo.path}`);
+		expect(display).toContain(`Selected skill #2: plan · User · ${plan.sourceInfo.path}`);
+		for (const width of [12, 40, 120])
+			expect(editor.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
+		editor.handleInput("\x7f");
+		expect(rendered(editor, 240)).toContain(skill.sourceInfo.path);
+		expect(rendered(editor, 240)).not.toContain(plan.sourceInfo.path);
+		editor.handleInput("\r");
+		expect(submitted()).toBe("/skill:review\nthen");
 	});
 
 	it("preserves a selection while editing surrounding text, but deletion and pasted marker spelling cannot reactivate it", async () => {
