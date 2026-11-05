@@ -128,15 +128,22 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
  * `livePanes`.
  */
 export function collectRows(instances: InstanceSummary[], self: InstanceSummary | undefined): AgentRow[] {
-	// Its pane is listed under its id, or under the row of the session it resumed.
-	const ownRow = (i: InstanceSummary) => i.id === self?.id || (self?.pane !== undefined && i.pane === self.pane);
+	// Its pane is listed under the row it goes on as (the session it resumed, or a new one after
+	// /new), else under its own id. A stored row under the pane's name is then the session it left.
+	// Only a registered pane counts: a stored row may still name the pane it last ran in.
+	const registered =
+		(self?.pane !== undefined ? instances.find((i) => i.external && i.pane === self.pane) : undefined) ??
+		instances.find((i) => i.id === self?.id);
 	// A run is reached from its orchestrator, never listed.
-	const listed = instances.filter((i) => !ownRow(i) && !i.parent);
-	// A pane's own pin and order are kept by the daemon, on its registration.
-	const registered = instances.find(ownRow);
-	const own = self && registered ? { ...self, pinned: registered.pinned, sortOrder: registered.sortOrder } : self;
+	const listed = instances.filter((i) => i !== registered && !i.parent);
+	// The row is the daemon's: deleting, pinning and ordering it address that id. Its pin and order
+	// are kept there too.
+	const own =
+		self && registered
+			? { ...self, id: registered.id, pinned: registered.pinned, sortOrder: registered.sortOrder }
+			: self;
 	const summaries = own ? [own, ...listed] : listed;
-	const rows = summaries.map((i) => rowFromSummary(i, self?.id));
+	const rows = summaries.map((i) => rowFromSummary(i, own?.id));
 	// Only a registered, running pi writes the file: `starting` and `stopping` rows are alive but not yet, or no longer.
 	const live = new Set(summaries.filter((i) => i.status === "online" && i.sessionFile).map((i) => i.id));
 	const livePanes = new Map<string, number>();
@@ -188,7 +195,9 @@ function byRecency(rows: AgentRow[]): AgentRow[] {
 	const at = (r: AgentRow) => stamp(stateBandOf(r) === "idle" ? (r.finishedAt ?? r.updatedAt) : r.updatedAt);
 	return [...rows].sort((a, b) => {
 		if (a.sortOrder !== undefined || b.sortOrder !== undefined) {
-			return (a.sortOrder ?? Number.MAX_SAFE_INTEGER) - (b.sortOrder ?? Number.MAX_SAFE_INTEGER);
+			const manual = (a.sortOrder ?? Number.MAX_SAFE_INTEGER) - (b.sortOrder ?? Number.MAX_SAFE_INTEGER);
+			// A row ordered in another band keeps its number here: ties go by recency.
+			if (manual) return manual;
 		}
 		return at(b) - at(a) || stamp(b.createdAt) - stamp(a.createdAt);
 	});

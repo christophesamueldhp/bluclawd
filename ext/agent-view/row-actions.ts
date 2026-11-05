@@ -183,17 +183,24 @@ export class RowActions {
 		});
 	}
 
-	/** A band's second ctrl+x: every one of `rows` goes, whatever becomes of the others. */
-	async deleteAll(rows: AgentRow[]): Promise<void> {
-		await Promise.all(
-			rows
-				.map(async (r) => {
-					if (r.shell) return this.opts.panes.kill(r.shell);
-					if (r.pane) this.opts.panes.kill(r.pane);
-					await this.opts.client.delete(r.id);
-				})
-				.map((p) => p.catch(() => undefined)),
+	/** A band's second ctrl+x: every one of `rows` goes, whatever becomes of the others. Returns
+	 *  the ids that went. */
+	async deleteAll(rows: AgentRow[]): Promise<string[]> {
+		const gone = await Promise.all(
+			rows.map(async (r) => {
+				try {
+					if (r.shell) this.opts.panes.kill(r.shell);
+					else {
+						if (r.pane) this.opts.panes.kill(r.pane);
+						await this.opts.client.delete(r.id);
+					}
+					return [r.id];
+				} catch {
+					return [];
+				}
+			}),
 		);
+		return gone.flat();
 	}
 
 	/** This terminal moves to a new session, in agent view, and this pane ends. */

@@ -268,7 +268,7 @@ describe("rows", () => {
 			self,
 		);
 		expect(rows.map((r) => [r.id, r.self, r.pinned, r.sortOrder, r.livePanes])).toEqual([
-			["me", true, true, 2, undefined],
+			["row", true, true, 2, undefined],
 		]);
 	});
 
