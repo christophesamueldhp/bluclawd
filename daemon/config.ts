@@ -45,3 +45,7 @@ export const BUILD_ID: string = daemonBuildId(__dirname, process.env.PI_PACKAGE_
 export function getInstancesPath(dir: string): string {
 	return join(dir, "instances.json");
 }
+
+export function getDeletedPath(dir: string): string {
+	return join(dir, "deleted.json");
+}

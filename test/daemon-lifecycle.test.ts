@@ -32,7 +32,7 @@ describe("agent-view stored rows", () => {
 		expect(loadInstances(dir)).toHaveLength(1);
 	});
 
-	it("a stored row's pin carries over to the pane resuming it, deleted before it registers or not at all", () => {
+	it("a stored row's pin carries over to the pane resuming it", () => {
 		const supervisor = testRegistry(dir);
 		const pane = { status: "online" as const, cwd: "/p", createdAt: new Date().toISOString() };
 		const pinnedRow = (file: string) => {
@@ -42,19 +42,7 @@ describe("agent-view stored rows", () => {
 		};
 		const listed = (id: string) => supervisor.listExternalInstances().find((e) => e.record.id === id)?.record;
 
-		// The stored row is deleted while a pane resuming it starts, before that pane registers.
-		supervisor.deleteInstance(pinnedRow("/nonexistent/mac.jsonl"));
-		supervisor.registerExternal({ ...pane, id: "pi-other", sessionFile: "/nonexistent/other.jsonl" }, "idle");
-		supervisor.registerExternal({ ...pane, id: "pi-mac", sessionFile: "/nonexistent/mac.jsonl" }, "idle");
-		supervisor.registerExternal({ ...pane, id: "pi-mac", sessionFile: "/nonexistent/mac.jsonl" }, "idle");
-		expect(listed("pi-mac")).toMatchObject({ pinned: true, sortOrder: 3 });
-		expect(listed("pi-other")?.pinned).toBeUndefined();
-		// Carried once: a later pane on that file is not pinned again.
-		supervisor.unregisterExternal("pi-mac");
-		supervisor.registerExternal({ ...pane, id: "pi-mac-2", sessionFile: "/nonexistent/mac.jsonl" }, "idle");
-		expect(listed("pi-mac-2")?.pinned).toBeUndefined();
-
-		// The phone deletes nothing: its pane goes on as the stored row, which is not listed beside it.
+		// Its pane goes on as the stored row, which is not listed beside it.
 		const phoneRow = pinnedRow("/nonexistent/phone.jsonl");
 		supervisor.registerExternal({ ...pane, id: "pi-phone", sessionFile: "/nonexistent/phone.jsonl" }, "idle");
 		supervisor.registerExternal({ ...pane, id: "pi-phone", sessionFile: "/nonexistent/phone.jsonl" }, "idle");

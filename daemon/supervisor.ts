@@ -10,7 +10,15 @@ import {
 } from "./ipc/protocol.ts";
 import { PromptDelivery } from "./remote/delivery.ts";
 import { readSessionTail } from "./session-state.ts";
-import { getInstance, loadInstances, removeInstance, saveInstances, upsertInstance } from "./storage.ts";
+import {
+	getInstance,
+	loadDeleted,
+	loadInstances,
+	removeInstance,
+	saveDeleted,
+	saveInstances,
+	upsertInstance,
+} from "./storage.ts";
 import { endPane } from "./tmux.ts";
 import type { InstanceRecord } from "./types.ts";
 
@@ -61,15 +69,6 @@ interface Row {
 	/** A start claimed it: its record as listed, and when it stops being listed so. It is starting
 	 *  once no pane holds it: a pane past its TTL, not reaped yet, may still. */
 	start?: Starting;
-	/** The session file its marks below are for, which they outlive its stored row by. */
-	file?: string;
-	/** A quit's hand-off save is still to come. */
-	saveDue?: boolean;
-	/** It was deleted since: that save does not bring it back. */
-	deleted?: boolean;
-	/** The pin and order of its stored row, deleted before a pane resuming its file registered: for
-	 *  that pane's row. */
-	resumedMeta?: Pick<InstanceRecord, "pinned" | "sortOrder">;
 }
 
 /** A pane and the row it is listed as, or was as it fell silent. */
@@ -128,6 +127,9 @@ export class ServerSupervisor {
 	private readonly waits = new Map<string, (outcome: WaitOutcome) => void>();
 	/** Each row's inbox and the phone's prompts in it, fed every pane's end and silence. */
 	readonly delivery: PromptDelivery;
+	/** By session file, the pane on it that reaping dropped, tmux unable to say whether it is up, and
+	 *  that has not registered since: deleting the file's stored row ends that pane should it beat again. */
+	private readonly droppedPaneOn = new Map<string, string>();
 
 	constructor(deps: RegistryDeps) {
 		this.deps = deps;
@@ -136,6 +138,12 @@ export class ServerSupervisor {
 
 	/** Register/heartbeat a pane's pi. */
 	registerExternal(record: InstanceRecord, activity: AgentActivity, now: number = this.deps.now()): void {
+		if (this.endIfDeleted(record)) return;
+		for (const [file, paneId] of this.droppedPaneOn) {
+			if (paneId === record.id || file === record.sessionFile) this.droppedPaneOn.delete(file);
+		}
+		// Another pane on a deleted row's session file resumes it, as a new row.
+		if (record.sessionFile) this.forgetDeletedSession(record.sessionFile);
 		const found = this.paneRow(record.id);
 		const previous = found && this.isLive(found) ? found : undefined;
 		const silent = found && !previous ? found : undefined;
@@ -149,7 +157,6 @@ export class ServerSupervisor {
 		// Otherwise it went on to another session while silent (a new one or a /resume, which its beat
 		// does not say): it ended the one it was listed as for that one.
 		if (silent && !back) this.paneEnded(silent, sameSession ? undefined : "resume");
-		const resumed = record.sessionFile ? this.clearMarks(record.sessionFile) : undefined;
 		// A pane resuming a stored session goes on as its row, which stays stored behind it, unless a live
 		// pane already goes on as it.
 		const file = record.sessionFile;
@@ -174,7 +181,7 @@ export class ServerSupervisor {
 			: stored && paneMeta(stored);
 		const label = renewed ? record.label : nameOf(previous?.pane.record ?? stored, record.label);
 		const pane: Pane = {
-			record: cloneInstance({ ...record, ...kept, ...resumed, label, paneLabel: record.label }),
+			record: cloneInstance({ ...record, ...kept, label, paneLabel: record.label }),
 			activity,
 			lastSeenAt: now,
 			settled:
@@ -201,6 +208,51 @@ export class ServerSupervisor {
 		if (renewed && !(record.sessionFile && existsSync(record.sessionFile))) removeInstance(this.deps.dir, rowId);
 		this.persistRow(rowId, pane);
 		this.closeOrphanedRun(record);
+	}
+
+	/** A pane whose row was deleted is not listed again: its pi ends, as a quit does, and the save its
+	 *  quit hands off lists nothing, whatever session it went on to before it heard. Should tmux not
+	 *  answer, its next heartbeat tries again. */
+	private endIfDeleted({ id, pane, sessionFile }: InstanceRecord): boolean {
+		const deleted = loadDeleted(this.deps.dir);
+		if (!deleted.some((row) => row.paneId === id)) return false;
+		if (sessionFile && !deleted.some((row) => row.sessionFile === sessionFile)) this.recordDeleted(id, sessionFile);
+		if (pane) endPane(this.deps.tmux, pane);
+		return true;
+	}
+
+	/** Keeps a row deleted past a daemon restart: pane `paneId`, and session `sessionFile` through a
+	 *  quit's hand-off save. */
+	private recordDeleted(paneId: string | undefined, sessionFile: string | undefined): void {
+		if (!paneId && !sessionFile) return;
+		const row = { paneId, sessionFile, ...(paneId ? {} : { goneAt: this.deps.now() }) };
+		saveDeleted(this.deps.dir, [...loadDeleted(this.deps.dir), row]);
+	}
+
+	/** Whether `file` was a deleted row's session, which it is no longer: a save of it is the last that
+	 *  row hears of, and another pane on it is a new row. */
+	private forgetDeletedSession(file: string): boolean {
+		const deleted = loadDeleted(this.deps.dir);
+		if (!deleted.some((row) => row.sessionFile === file)) return false;
+		const kept = deleted.flatMap(({ sessionFile, ...rest }) =>
+			sessionFile !== file ? [{ ...rest, sessionFile }] : rest.paneId ? [rest] : [],
+		);
+		saveDeleted(this.deps.dir, kept);
+		return true;
+	}
+
+	/** A deleted row is kept while tmux may still have its pane, then as long as a start may take
+	 *  (`START_MS`) for its quit's hand-off save to land. */
+	private expireDeleted(now: number): void {
+		const deleted = loadDeleted(this.deps.dir);
+		let changed = false;
+		const kept = deleted.flatMap((row) => {
+			const goneAt = row.goneAt ?? (row.paneId && this.tmuxSays(row.paneId) === "gone" ? now : undefined);
+			if (goneAt === undefined) return [row];
+			changed ||= goneAt !== row.goneAt || now - goneAt > START_MS;
+			return now - goneAt > START_MS ? [] : [{ ...row, goneAt }];
+		});
+		if (changed) saveDeleted(this.deps.dir, kept);
 	}
 
 	/**
@@ -378,8 +430,7 @@ export class ServerSupervisor {
 		const stops = reason === "quit" || endedForAnother(reason);
 		if (file && stops && existsSync(file)) {
 			const { cwd, paneLabel, sessionId } = at.pane.record;
-			const row = this.stopRow({ cwd, label: paneLabel, sessionFile: file, sessionId }, at, reason);
-			if (reason === "quit") this.mark(row.id, file, { saveDue: true, deleted: false });
+			this.stopRow({ cwd, label: paneLabel, sessionFile: file, sessionId }, at, reason);
 			return;
 		}
 		if (at.id === id && reason) removeInstance(this.deps.dir, id);
@@ -489,6 +540,7 @@ export class ServerSupervisor {
 	 */
 	private reap(now: number): void {
 		this.expireStarts(now);
+		this.expireDeleted(now);
 		for (const at of this.panes()) {
 			const { pane } = at.pane.record;
 			if (!this.isLive(at) && pane && this.tmuxSays(pane) === "gone") this.paneEnded(at);
@@ -500,7 +552,11 @@ export class ServerSupervisor {
 			// The pane runs pi itself, so its pi is gone.
 			if (said === "gone") this.paneEnded(at);
 			else if (said === "up") this.silence(at);
-			else this.drop(at);
+			else {
+				const { id, sessionFile } = at.pane.record;
+				if (sessionFile) this.droppedPaneOn.set(sessionFile, id);
+				this.drop(at);
+			}
 		}
 	}
 
@@ -541,37 +597,9 @@ export class ServerSupervisor {
 		this.rows.set(id, row);
 	}
 
-	/** A stored row's entry goes once it holds no marks. */
+	/** A stored row's entry goes. */
 	private tidy(id: string): void {
-		const row = this.rows.get(id);
-		if (row?.state === "stored" && !row.saveDue && !row.resumedMeta) this.rows.delete(id);
-	}
-
-	/** The entry holding marks for session file `file`, by its row id. */
-	private marked(file: string): [string, Row] | undefined {
-		return [...this.rows].find(([, row]) => row.file === file);
-	}
-
-	/** Marks for session file `file`, on the entry holding its marks, else on row `id`'s. */
-	private mark(id: string, file: string, marks: Pick<Row, "saveDue" | "deleted" | "resumedMeta">): void {
-		const row = this.marked(file)?.[1] ?? this.entry(id);
-		row.file = file;
-		Object.assign(row, marks);
-	}
-
-	/** A pane registered on `file`: its marks go, and the pin and order a deletion left for it are its. */
-	private clearMarks(file: string): Row["resumedMeta"] {
-		let resumed: Row["resumedMeta"];
-		for (const [id, row] of [...this.rows]) {
-			if (row.file !== file) continue;
-			resumed ??= row.resumedMeta;
-			row.file = undefined;
-			row.saveDue = undefined;
-			row.deleted = undefined;
-			row.resumedMeta = undefined;
-			this.tidy(id);
-		}
-		return resumed;
+		if (this.rows.get(id)?.state === "stored") this.rows.delete(id);
 	}
 
 	/** Rows an older daemon left running: they ended with it, and stay resumable from their .jsonl. */
@@ -629,14 +657,7 @@ export class ServerSupervisor {
 		sessionId?: string;
 		parent?: string;
 	}): InstanceRecord | undefined {
-		const due = this.marked(options.sessionFile);
-		const deleted = due?.[1].saveDue === true && due[1].deleted === true;
-		if (due) {
-			due[1].saveDue = undefined;
-			due[1].deleted = undefined;
-			this.tidy(due[0]);
-		}
-		if (deleted) return undefined;
+		if (this.forgetDeletedSession(options.sessionFile)) return undefined;
 		return this.stopRow(options, this.livePaneOn(options.sessionFile));
 	}
 
@@ -709,28 +730,19 @@ export class ServerSupervisor {
 	}
 
 	private deleteRow(instanceId: string): boolean {
-		// A self-registered session's process is its pane's; its row goes until it registers again,
-		// with the stored row it went on as. A Silent pane's too.
+		// A self-registered session's process is its pane's, a Silent pane's too: its row goes with
+		// the stored row it went on as, and its pane is ended should it beat again.
 		const at = this.addressed(instanceId);
 		if (at) {
 			this.drop(at);
 			if (getInstance(this.deps.dir, at.id)) removeInstance(this.deps.dir, at.id);
 			// Its pi may be quitting already: that quit's hand-off save does not bring it back.
-			const file = at.pane.record.sessionFile;
-			if (file) this.mark(at.id, file, { saveDue: true, deleted: true });
+			this.recordDeleted(at.pane.record.id, at.pane.record.sessionFile);
 			return true;
 		}
 		const stored = getInstance(this.deps.dir, instanceId);
 		if (!stored) return false;
-		const due = stored.sessionFile ? this.marked(stored.sessionFile)?.[1] : undefined;
-		if (due?.saveDue) due.deleted = true;
-		// A pane resuming it, registered or still starting, keeps its pin and order.
-		const meta = paneMeta(stored);
-		if (stored.sessionFile && meta) {
-			const live = this.livePaneOn(stored.sessionFile);
-			if (live) live.pane.record = { ...live.pane.record, ...meta };
-			else this.mark(stored.id, stored.sessionFile, { resumedMeta: meta });
-		}
+		this.recordDeleted(stored.sessionFile && this.droppedPaneOn.get(stored.sessionFile), stored.sessionFile);
 		removeInstance(this.deps.dir, instanceId);
 		return true;
 	}
