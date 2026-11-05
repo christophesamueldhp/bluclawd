@@ -116,13 +116,25 @@ web tools: [ADR-0004](docs/adr/0004-bluclawd-ships-its-own-web-tools.md).
 
 ## Provider accounts
 
-Run **`/accounts`**, choose a provider, then **Add account…** to sign in with OAuth or an API key.
+Run **`/accounts`** to open the unified **Accounts/Models** chooser. Type to search providers and
+see connection status and active-account names; press **Tab** to move between sections. Choose a
+provider, then **Add account…** to sign in with OAuth or an API key.
 Give each account a name such as Personal or Work. A successful sign-in activates that account;
 the previous login is preserved automatically. **Save current login…** names the login already
 stored by Pi without signing in again; if already saved, this renames the active account rather
 than duplicating its OAuth grant. Select a saved account to switch; `✓` marks the active one.
 **`/accounts provider-id`** opens that provider directly, for example `/accounts openai-codex`.
 Removing an inactive saved account requires confirmation; the active account cannot be removed.
+
+**Models** groups the catalog by provider and shows each active account. Type to search, use
+**Ctrl+P** to cycle provider filters, **Ctrl+S** for All/Scoped, and **Enter** to use an available
+model. **Active model**, **Scoped**, and **Unavailable** are separate labels. **Ctrl+A (Show all)**
+reveals models outside scope without changing scope. Successful sign-in opens that provider's
+Models; choosing a model is optional, and closing the chooser keeps the login. Model selection
+changes only the current session's Active model, not scope or defaults. Account switches refresh
+availability and warn about lost access without substituting a model or changing scope.
+The built-in `/login`, `/model`, and `/scoped-models` commands remain host-owned and unchanged;
+this chooser does not edit scope or defaults.
 
 Accounts are per provider: switching OpenAI does not change Anthropic, Exa, or another provider.
 The model, conversation, settings, and extensions stay unchanged. Changes apply to the shared Pi
