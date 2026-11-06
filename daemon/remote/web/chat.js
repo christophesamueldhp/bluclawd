@@ -73,6 +73,8 @@ export function openChat(id, kept = []) {
 		report: undefined,
 		/** Stop was asked for and the session is still mid-turn. */
 		stopping: false,
+		/** When a prompt was last sent from here (epoch ms). @type {number | undefined} */
+		sentAt: undefined,
 		/** The status sheet. */
 		sheetOpen: false,
 		/** The background tasks sheet. */

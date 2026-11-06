@@ -12,6 +12,32 @@ export function ageAt(session) {
 	return (quiet ? session.finishedAt : undefined) ?? session.createdAt;
 }
 
+/** `just now`, `5m`, `3h`, `2d`. @param {string | undefined} iso @param {number} now */
+export function ageText(iso, now) {
+	const ms = iso ? now - Date.parse(iso) : Number.NaN;
+	if (!Number.isFinite(ms)) return "";
+	const minutes = Math.floor(ms / 60_000);
+	if (minutes < 1) return "just now";
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+}
+
+/**
+ * When this phone last had each session's Chat open, and when it began keeping track (`since`),
+ * which stands in for a Chat never opened here.
+ * @typedef {{ since: string, at: Record<string, string> }} Seen
+ */
+
+/**
+ * Whether a session is Unseen: it finished a turn since its Chat was last opened on this phone.
+ * @param {Session} session @param {Seen} seen
+ */
+export function isUnseen(session, seen) {
+	if (session.state === "working" || session.state === "needs" || !session.finishedAt) return false;
+	return Date.parse(session.finishedAt) > Date.parse(seen.at[session.id] ?? seen.since);
+}
+
 export const STATE_WORDS = {
 	working: "Working",
 	needs: "Needs input",

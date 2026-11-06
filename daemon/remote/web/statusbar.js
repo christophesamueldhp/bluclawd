@@ -62,21 +62,6 @@ export function contextLevel(percent) {
 	return percent > 90 ? "full" : percent > 70 ? "high" : "normal";
 }
 
-/** A class per 10%: the CSP allows no inline style for a width. @param {number} value @param {string} label @param {string} [kind] */
-function gauge(value, label, kind = "") {
-	const percent = Math.min(100, Math.max(0, value));
-	const step = Math.ceil(percent / 10) * 10;
-	const level = contextLevel(percent);
-	const color = level === "normal" ? "" : ` ${level}`;
-	return `<span class="gauge${kind}" role="meter" aria-label="${esc(label)}" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${esc(Math.round(percent))}"><span class="p${step}${color}"></span></span>`;
-}
-
-/** @param {string | undefined} trust */
-function trustHtml(trust) {
-	const badge = TRUST.find(([value]) => value === trust)?.[1];
-	return badge ? `<span class="trust ${esc(trust)}">${esc(badge)}</span>` : "";
-}
-
 /** @param {GitInfo} git */
 function changesHtml(git) {
 	const parts = [];
@@ -86,44 +71,29 @@ function changesHtml(git) {
 }
 
 /**
- * Two lines: the session (model • thinking, context, tokens and cost, trust mode), then where it is
- * (directory, git branch and changes).
+ * One line: model • thinking · context used · git branch, or the directory without one. The rest
+ * is in the status sheet, a tap away.
  * @param {Report | null | undefined} report @param {string | undefined} cwd as shown, `~` for home
  */
 export function barHtml(report, cwd) {
-	const first = [];
-	const second = [];
+	const items = [];
 	const model = report?.model;
 	if (model) {
 		const thinking = report.thinkingLevel
 			? ` • <span class="thinking-level" data-thinking="${esc(report.thinkingLevel)}">${esc(report.thinkingLevel)}</span>`
 			: "";
-		first.push(`<span class="model grow">${esc(model.name ?? model.id)}${thinking}</span>`);
+		items.push(`<span class="model grow">${esc(model.name ?? model.id)}${thinking}</span>`);
 	}
 	const context = report?.context;
 	if (context && context.percent !== null) {
-		first.push(
-			`<span class="context-used ${contextLevel(context.percent)}">${gauge(context.percent, "Context used", " mini")} ${esc(Math.round(context.percent))}%</span>`,
+		items.push(
+			`<span class="context-used ${contextLevel(context.percent)}">ctx ${esc(Math.round(context.percent))}%</span>`,
 		);
 	}
-	const usage = report?.usage;
-	if (usage) {
-		const total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-		first.push(`<span>${esc(tokens(total))} · $${esc(usage.cost.toFixed(2))}</span>`);
-	}
-	const trust = trustHtml(report?.trust);
-	if (trust) first.push(trust);
-	if (cwd) second.push(`<span class="grow cwd"><bdi>${esc(cwd)}</bdi></span>`);
-	const git = report?.git;
-	if (git) {
-		const changes = changesHtml(git);
-		second.push(`<span class="grow branch">${esc(git.branch)}</span>`);
-		if (changes) second.push(`<span>${changes}</span>`);
-	}
-	return [first, second]
-		.filter((line) => line.length)
-		.map((line) => `<span class="line">${line.join("")}</span>`)
-		.join("");
+	const branch = report?.git?.branch;
+	if (branch) items.push(`<span class="grow branch">${esc(branch)}</span>`);
+	else if (cwd) items.push(`<span class="grow cwd"><bdi>${esc(cwd)}</bdi></span>`);
+	return items.length ? `<span class="line">${items.join('<span aria-hidden="true">·</span>')}</span>` : "";
 }
 
 /**

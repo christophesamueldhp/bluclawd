@@ -78,6 +78,10 @@ _Avoid_: admission (a run's launch checks), validation
 Whether a Chat may act on a listed row, and why not, as the daemon lists it with each row: only a live pane's row takes a message for its pi; a Silent pane's, a starting one's or a stored one's does not. Phone control and the phone's list both read it, so the phone never offers what the daemon would refuse.
 _Avoid_: running, alive (a row's pane, not what it takes)
 
+**Unseen**:
+A session whose pi finished a turn since its Chat was last opened on this phone. Each phone keeps its own, and opening the Chat clears it; it is not a state, so a Done, Failed or Stopped row may be Unseen or not.
+_Avoid_: unread, new
+
 **Daemon lifetime**:
 The marker of one daemon process, given to the phone with each prompt it accepts. Asked about a prompt it has no record of, under an earlier lifetime, the daemon answers lost because it restarted, when the row's pane reports outcomes.
 _Avoid_: build id, version, generation

@@ -32,7 +32,7 @@ const leaves = new Map<string, string>();
 /** The line of `path`'s next entry; written by the caller, now or later. */
 function entry(path: string, message: Record<string, unknown>): string {
 	const id = (++entries).toString(16).padStart(8, "0");
-	const line = `${JSON.stringify({ type: "message", id, parentId: leaves.get(path) ?? null, message })}\n`;
+	const line = `${JSON.stringify({ type: "message", id, parentId: leaves.get(path) ?? null, timestamp: new Date().toISOString(), message })}\n`;
 	leaves.set(path, id);
 	return line;
 }
@@ -69,11 +69,17 @@ const busy = () => existsSync(join(dir, "busy"));
 /** The ids of the prompts Gamma's pi queued. */
 const queued: string[] = [];
 let quit = false;
+/** When Gamma last fell quiet, as a pane reports its last entry's time (the phone's Unseen reads it). */
+let quietAt = new Date().toISOString();
+let wasBusy = false;
 /** Once its pane quit, a stored row with no pane's pi. */
 function listedGamma(): InstanceSummary {
 	if (quit) return { ...gamma, status: "stopped", external: false };
 	if (existsSync(join(dir, "silent"))) return { ...gamma, silent: true, external: false };
-	return busy() ? { ...gamma, activity: "working" } : gamma;
+	const working = busy();
+	if (wasBusy && !working) quietAt = new Date().toISOString();
+	wasBusy = working;
+	return working ? { ...gamma, activity: "working" } : { ...gamma, finishedAt: quietAt };
 }
 
 let server: RemoteServer | undefined;

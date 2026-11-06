@@ -50,6 +50,9 @@ export type RemoteMessage =
 	  }
 	| { kind: "marker"; id: string; text: string };
 
+/** A message as the phone gets it: with when pi wrote it, which times a turn. */
+export type TimedMessage = RemoteMessage & { at?: string };
+
 /** A tool result or a thinking block is cut to this many characters. */
 export const TEXT_MAX = 2048;
 /** A diff, and a tool result's whole output when the phone asks for it, are cut to these. */
@@ -267,14 +270,16 @@ function toRemote(entry: Entry): RemoteMessage | undefined {
 
 /** The last `limit` messages of the active branch, or the last ones before the message `before`:
  *  none when it is not on the branch. */
-export function transcriptFrom(text: string, limit: number, leafId?: string, before?: string): RemoteMessage[] {
+export function transcriptFrom(text: string, limit: number, leafId?: string, before?: string): TimedMessage[] {
 	return messagesOf(parseEntries(text), limit, leafId, before);
 }
 
-function messagesOf(entries: Entry[], limit: number, leafId?: string, before?: string): RemoteMessage[] {
-	let messages = activeBranch(entries, leafId)
-		.map(toRemote)
-		.filter((message): message is RemoteMessage => message !== undefined);
+function messagesOf(entries: Entry[], limit: number, leafId?: string, before?: string): TimedMessage[] {
+	let messages = activeBranch(entries, leafId).flatMap((entry): TimedMessage[] => {
+		const message = toRemote(entry);
+		if (!message) return [];
+		return [entry.timestamp ? { ...message, at: entry.timestamp } : message];
+	});
 	if (before !== undefined)
 		messages = messages.slice(
 			0,
@@ -353,7 +358,7 @@ export function loadTranscript(
 	limit: number,
 	leafId?: string,
 	before?: string,
-): RemoteMessage[] {
+): TimedMessage[] {
 	if (!sessionFile) return [];
 	try {
 		return messagesOf(entriesOf(sessionFile), limit, leafId, before);
