@@ -13,3 +13,4 @@ Decided 2026-11-06, while grilling a Claude Code–style terminal look.
 
 - What the API cannot reach stays pi's: spacing between transcript items, the user and assistant message components, and the editor's border shape (only `protected` methods would allow it).
 - The footer belongs to the separate pistatusline package, not to bluclawd.
+- bluclawd's own tools (`subagent`, `websearch`, `memory`, …) have no pi renderer to wrap, and pi does not export its generic fallback, so bluclawd draws their expanded view too: the call line over the tool's whole output.
