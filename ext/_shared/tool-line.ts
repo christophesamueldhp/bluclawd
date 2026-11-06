@@ -24,7 +24,7 @@ export interface CompactLook {
 	 * The lines under `⎿`, while the call streams and once it succeeded. A look
 	 * without one keeps pi's body (a diff, a file) under the call line, and pi's result.
 	 */
-	summary?(result: ToolResult, theme: Theme): string | string[];
+	summary?(result: ToolResult, theme: Theme, args: Record<string, unknown>): string | string[];
 }
 
 /** The `⎿` lines, each cut to the width rather than wrapped, so one long line cannot fill the screen. */
@@ -34,6 +34,12 @@ class Summary implements Component {
 		return this.lines.map((line) => truncateToWidth(line, width));
 	}
 	invalidate() {}
+}
+
+/** A look's summary as the lines under the call: `⎿` on the first, the rest indented to match. */
+function summaryLines(summary: string | string[], theme: Theme): string[] {
+	const [first, ...rest] = typeof summary === "string" ? [summary] : summary;
+	return first === undefined ? [] : [`  ${theme.fg("dim", "⎿")}  ${first}`, ...rest.map((line) => `     ${line}`)];
 }
 
 const isBlank = (line: string) => stripAnsi(line).trim() === "";
@@ -124,11 +130,51 @@ export function compactTool(pi: PiRenderers, look: CompactLook): ToolRenderers {
 			if (options.expanded || !look.summary) return pi.renderResult(result, options, theme, forPi(context));
 			// Likewise pi's result, which also stops what it started while expanded (bash's redraw every second).
 			pi.renderResult(result, options, theme, forPi(context));
-			const summary = look.summary(result, theme);
-			const [first, ...rest] = typeof summary === "string" ? [summary] : summary;
 			const component = own(context.lastComponent, Summary, () => new Summary());
-			component.lines =
-				first === undefined ? [] : [`  ${theme.fg("dim", "⎿")}  ${first}`, ...rest.map((line) => `     ${line}`)];
+			component.lines = summaryLines(
+				look.summary(result, theme, (context.args ?? {}) as Record<string, unknown>),
+				theme,
+			);
+			return component;
+		},
+	};
+}
+
+/** A result's text, every line, as pi's own fallback shows it: no colour codes or carriage returns. */
+function fullOutput(result: ToolResult, theme: Theme): string {
+	const text = result.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
+	return stripAnsi(text)
+		.replace(/\r/g, "")
+		.trim()
+		.split("\n")
+		.map((line) => theme.fg("toolOutput", line))
+		.join("\n");
+}
+
+/**
+ * The look of a bluclawd tool, which pi has no renderer for: the same `⏺ Name(arg)`
+ * line, and its whole output, wrapped, when expanded or failed.
+ */
+export function ownTool(look: CompactLook & Required<Pick<CompactLook, "summary">>): ToolRenderers {
+	return {
+		renderCall(args, theme, context) {
+			const dot = context.isPartial ? "dim" : context.isError ? "error" : "accent";
+			const arg = look.arg((args ?? {}) as Record<string, unknown>, context.cwd);
+			const call = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
+			call.setText(`${theme.fg(dot, DOT)} ${theme.fg("toolTitle", theme.bold(look.title))}(${arg})`);
+			return call;
+		},
+		renderResult(result, options, theme, context) {
+			if (options.expanded || context.isError) {
+				const output = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
+				output.setText(fullOutput(result, theme));
+				return output;
+			}
+			const component = context.lastComponent instanceof Summary ? context.lastComponent : new Summary();
+			component.lines = summaryLines(
+				look.summary(result, theme, (context.args ?? {}) as Record<string, unknown>),
+				theme,
+			);
 			return component;
 		},
 	};

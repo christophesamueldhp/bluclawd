@@ -144,7 +144,12 @@ export default function web(pi: ExtensionAPI) {
 				);
 				return {
 					content: [{ type: "text", text: formatSearch(result) }],
-					details: { provider: result.provider, fallbackReason: result.fallbackReason, ...result.details },
+					details: {
+						provider: result.provider,
+						fallbackReason: result.fallbackReason,
+						results: result.hits.length,
+						...result.details,
+					},
 				};
 			} catch (error) {
 				if (error instanceof WebError) return failed("Web search", error);
@@ -177,7 +182,11 @@ export default function web(pi: ExtensionAPI) {
 				);
 				return {
 					content: [{ type: "text", text: formatPages(pages, notices) }],
-					details,
+					details: {
+						...details,
+						pages: pages.length,
+						failed: pages.filter((page) => page.error !== undefined).length,
+					},
 					isError: pages.every((page) => page.error !== undefined),
 				};
 			} catch (error) {

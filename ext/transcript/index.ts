@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { BashToolDetails, ExtensionAPI, ReadToolDetails } from "@earendil-works/pi-coding-agent";
 import { stripAnsi } from "../../daemon/ansi.ts";
-import { type CompactLook, compactTool, hasPiRenderers } from "../_shared/tool-line.ts";
+import { type CompactLook, compactTool, hasPiRenderers, ownTool } from "../_shared/tool-line.ts";
 import { RUNNING_IN_BACKGROUND, wentToBackground } from "../background-bash/bash-tool.ts";
 
 /** A path as the user would type it: relative inside the working directory, `~` for home. */
@@ -115,10 +115,125 @@ const write: CompactLook = { title: "Write", arg: fileArg };
 
 const LOOKS: Record<string, CompactLook> = { read, bash, grep, find, ls, edit, write };
 
+/** A bluclawd tool's look; pi has no renderer of its own for these. */
+type OwnLook = CompactLook & Required<Pick<CompactLook, "summary">>;
+
+const str = (value: unknown) => (typeof value === "string" ? value : "");
+const quoted = (value: unknown) => JSON.stringify(str(value));
+const detail = (result: { details?: unknown }, key: string): unknown =>
+	(result.details as Record<string, unknown> | undefined)?.[key];
+
+const websearch: OwnLook = {
+	title: "WebSearch",
+	arg: (args) => quoted(args.query),
+	summary: (result) => count(Number(detail(result, "results") ?? 0), "result", "results"),
+};
+
+const webfetch: OwnLook = {
+	title: "WebFetch",
+	arg: (args) => {
+		const urls = Array.isArray(args.urls) ? args.urls.map(str) : [];
+		return urls.length > 1 ? `${urls[0]} +${urls.length - 1}` : (urls[0] ?? "");
+	},
+	summary(result) {
+		const pages = Number(detail(result, "pages") ?? 0);
+		const fetched = pages - Number(detail(result, "failed") ?? 0);
+		return `Fetched ${fetched === pages ? count(pages, "page", "pages") : `${fetched} of ${count(pages, "page", "pages")}`}`;
+	},
+};
+
+/** The first line of a result: a tool that answers in one sentence says it there. */
+const firstLine = (result: TextResult) => outputOf(result).split("\n")[0];
+
+/** A result that answers in JSON, parsed; undefined when it is not JSON. */
+function parsed(result: TextResult): Record<string, unknown> | undefined {
+	try {
+		return JSON.parse(outputOf(result));
+	} catch {
+		return undefined;
+	}
+}
+
+const memory: OwnLook = {
+	title: "Memory",
+	arg: (args) => `${str(args.action)} ${str(args.name)}`.trim(),
+	summary: (result, _theme, args) =>
+		args.action === "read" ? `Read ${lines(outputOf(result).split("\n").length)}` : firstLine(result),
+};
+
+const monitor: OwnLook = {
+	title: "Monitor",
+	arg: (args) => str(args.description),
+	summary(result) {
+		const task = /\(task (\S+?),/.exec(outputOf(result))?.[1];
+		return task ? `Started task ${task}` : firstLine(result);
+	},
+};
+
+const task_stop: OwnLook = {
+	title: "TaskStop",
+	arg: (args) => str(args.task_id) || str(args.shell_id),
+	summary: (result) => str(parsed(result)?.message) || firstLine(result),
+};
+
+const subagent: OwnLook = {
+	title: "Subagent",
+	arg: (args) => str(args.name) || str(args.agent) || str((args.agent as { name?: unknown } | undefined)?.name),
+	summary(result, theme) {
+		if (detail(result, "deliveryMode") === "background") return theme.fg("dim", "Running in the background");
+		// A report starts with `[Report from subagent …]`, which says who sent it, not what it says.
+		const report = outputOf(result).replace(/^\[Report from subagent [^\n]*\]\n\n/, "");
+		return `Reported (${lines(report === "" ? 0 : report.split("\n").length)})`;
+	},
+};
+
+/** A subagent tool that answers in one sentence: its target, then that sentence. */
+const answers = (title: string, key?: string): OwnLook => ({
+	title,
+	arg: (args) => (key ? str(args[key]) : ""),
+	summary: firstLine,
+});
+
+const subagent_status: OwnLook = {
+	...answers("SubagentStatus", "agent"),
+	// Each run it lists is a block with its task and elapsed time under it; no run is one sentence.
+	summary: (result) => {
+		const output = outputOf(result);
+		return output.includes("\n  task: ")
+			? count(output.split("\n\n").length, "subagent", "subagents")
+			: firstLine(result);
+	},
+};
+
+const subagent_models: OwnLook = {
+	...answers("SubagentModels", "provider"),
+	summary(result) {
+		const models = parsed(result)?.models;
+		return Array.isArray(models) ? count(models.length, "model", "models") : firstLine(result);
+	},
+};
+
+const OWN_LOOKS: Record<string, OwnLook> = {
+	websearch,
+	webfetch,
+	memory,
+	monitor,
+	task_stop,
+	subagent,
+	subagent_message: answers("SubagentMessage", "to"),
+	subagent_stop: answers("SubagentStop", "agent"),
+	subagent_close: answers("SubagentClose", "agent"),
+	subagent_roster: answers("SubagentRoster"),
+	subagent_status,
+	subagent_models,
+};
+
 export default function transcript(pi: ExtensionAPI) {
 	pi.registerToolRenderer((toolName, next) => {
-		const look = LOOKS[toolName];
 		const base = next();
+		const own = OWN_LOOKS[toolName];
+		if (own && !hasPiRenderers(base)) return ownTool(own);
+		const look = LOOKS[toolName];
 		return look && hasPiRenderers(base) ? compactTool(base, look) : base;
 	});
 }
