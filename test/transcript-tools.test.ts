@@ -9,7 +9,7 @@ import {
 	createLsToolDefinition,
 	createWriteToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createBackgroundBashTool } from "../ext/background-bash/bash-tool.ts";
 import { contextFor, DOT, draw, plain, type Row, restyled, text, theme } from "./helpers/tool-render.ts";
 
@@ -67,9 +67,53 @@ describe("collapsed bash", () => {
 });
 
 describe("expanded bash", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
 	it("renders exactly as pi renders it", () => {
 		const row: Row = { args: { command: "npm test" }, result: text(numbered(10)), expanded: true };
 		expect(draw(bash(), row)).toBe(draw(piBash as never, row));
+	});
+
+	/** One bash row drawn over time, as pi's tool row does: same state, each render handed its last components. */
+	function liveRow() {
+		const renderers = bash();
+		const args = { command: "npm test" };
+		const context = contextFor({ args, isPartial: true });
+		context.invalidate = vi.fn();
+		let call: any;
+		let result: any;
+		return {
+			context,
+			draw(expanded: boolean, isPartial: boolean) {
+				Object.assign(context, { expanded, isPartial });
+				call = renderers.renderCall?.(args, theme, { ...context, lastComponent: call });
+				result = renderers.renderResult?.(text("a") as never, { expanded, isPartial }, theme, {
+					...context,
+					lastComponent: result,
+				});
+				return plain([...call.render(120), ...result.render(120)].join("\n"));
+			},
+		};
+	}
+
+	it("times the command from its start, though it was collapsed then", () => {
+		vi.useFakeTimers();
+		const row = liveRow();
+		row.draw(false, true);
+		vi.advanceTimersByTime(5000);
+		expect(row.draw(true, true)).toContain("Elapsed 5.0s");
+	});
+
+	it("stops redrawing once the command ends, though it was collapsed when it did", () => {
+		vi.useFakeTimers();
+		const row = liveRow();
+		row.draw(true, true);
+		row.draw(false, false);
+		vi.mocked(row.context.invalidate).mockClear();
+		vi.advanceTimersByTime(5000);
+		expect(row.context.invalidate).not.toHaveBeenCalled();
 	});
 });
 

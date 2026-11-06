@@ -41,12 +41,12 @@ const isBlank = (line: string) => stripAnsi(line).trim() === "";
 /** pi's call component with its header line swapped for the `⏺ Name(arg)` line. */
 class WithPiBody implements Component {
 	readonly head = new Text("", 0, 0);
-	pi: Component | undefined;
-	constructor(pi: Component | undefined) {
-		this.pi = pi;
+	piCall: Component | undefined;
+	constructor(piCall: Component | undefined) {
+		this.piCall = piCall;
 	}
 	render(width: number): string[] {
-		const body = this.pi?.render(width) ?? [];
+		const body = this.piCall?.render(width) ?? [];
 		// pi's header is the first block of non-blank lines; its padding and spacing are blank.
 		let start = 0;
 		while (start < body.length && isBlank(body[start])) start++;
@@ -60,7 +60,7 @@ class WithPiBody implements Component {
 	}
 	invalidate() {
 		this.head.invalidate();
-		this.pi?.invalidate();
+		this.piCall?.invalidate();
 	}
 }
 
@@ -81,7 +81,7 @@ function own<T extends Component>(
 function forPi(context: ToolRenderContext): ToolRenderContext {
 	const last = context.lastComponent;
 	if (!last || !drawnHere.has(last)) return context;
-	return { ...context, lastComponent: last instanceof WithPiBody ? last.pi : undefined };
+	return { ...context, lastComponent: last instanceof WithPiBody ? last.piCall : undefined };
 }
 
 export function compactTool(pi: PiRenderers, look: CompactLook): ToolRenderers {
@@ -95,10 +95,12 @@ export function compactTool(pi: PiRenderers, look: CompactLook): ToolRenderers {
 			if (!look.summary) {
 				const last = context.lastComponent;
 				const call = own(last, WithPiBody, () => new WithPiBody(last && !drawnHere.has(last) ? last : undefined));
-				call.pi = pi.renderCall(args, theme, { ...context, lastComponent: call.pi });
+				call.piCall = pi.renderCall(args, theme, { ...context, lastComponent: call.piCall });
 				call.head.setText(line);
 				return call;
 			}
+			// pi's call still runs, unseen, so the state it keeps (bash's start time) is right when the row expands.
+			pi.renderCall(args, theme, forPi(context));
 			const call = own(context.lastComponent, Text, () => new Text("", 0, 0));
 			call.setText(line);
 			return call;
@@ -111,6 +113,8 @@ export function compactTool(pi: PiRenderers, look: CompactLook): ToolRenderers {
 					expanded: true,
 				});
 			if (options.expanded || !look.summary) return pi.renderResult(result, options, theme, forPi(context));
+			// Likewise pi's result, which also stops what it started while expanded (bash's redraw every second).
+			pi.renderResult(result, options, theme, forPi(context));
 			const summary = look.summary(result, theme);
 			const [first, ...rest] = typeof summary === "string" ? [summary] : summary;
 			const component = own(context.lastComponent, Summary, () => new Summary());

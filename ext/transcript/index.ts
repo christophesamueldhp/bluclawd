@@ -21,12 +21,14 @@ function displayPath(raw: unknown, cwd: string): string {
 	return absolute === home || absolute.startsWith(`${home}/`) ? `~${absolute.slice(home.length)}` : absolute;
 }
 
+const fileArg = (args: Record<string, unknown>, cwd: string) => displayPath(args.path ?? args.file_path, cwd);
+
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 const lines = (n: number) => count(n, "line", "lines");
 
 const read: CompactLook = {
 	title: "Read",
-	arg: (args, cwd) => displayPath(args.path ?? args.file_path, cwd),
+	arg: fileArg,
 	summary(result) {
 		if (result.content.some((block) => block.type === "image")) return "Read image";
 		const truncation = (result.details as ReadToolDetails | undefined)?.truncation;
@@ -41,7 +43,9 @@ const read: CompactLook = {
 };
 
 /** A result's text as the terminal shows it: no colour codes or carriage returns, no surrounding blank lines. */
-function outputOf(result: { content: { type: string; text?: string }[] }): string {
+type TextResult = { content: { type: string; text?: string }[] };
+
+function outputOf(result: TextResult): string {
 	const text = result.content.map((block) => (block.type === "text" ? (block.text ?? "") : "")).join("\n");
 	return stripAnsi(text).replace(/\r/g, "").trim();
 }
@@ -66,7 +70,7 @@ const bash: CompactLook = {
 };
 
 /** A search's result lines, without pi's trailing `[… limit reached]` notice or its empty-result sentence. */
-function resultLines(result: { content: { type: string; text?: string }[] }, empty: string): string[] {
+function resultLines(result: TextResult, empty: string): string[] {
 	const output = outputOf(result).replace(/\n\n\[[^\n]*\]$/, "");
 	return output === "" || output === empty ? [] : output.split("\n");
 }
@@ -80,19 +84,23 @@ const where = (path: unknown, cwd: string) => {
 	return shown ? ` in ${shown}` : "";
 };
 
+/** A search's pattern, then the path it searched when that is not the working directory. */
+const patternArg = (args: Record<string, unknown>, cwd: string) =>
+	`${typeof args.pattern === "string" ? args.pattern : ""}${where(args.path, cwd)}`;
+
 /** A match is `path:N: text`; a context line around it is `path-N- text`. */
 const isMatch = (line: string) => /^.*?([:-])\d+\1 /.exec(line)?.[1] === ":";
 
 const grep: CompactLook = {
 	title: "Grep",
-	arg: (args, cwd) => `${typeof args.pattern === "string" ? args.pattern : ""}${where(args.path, cwd)}`,
+	arg: patternArg,
 	summary: (result) =>
 		`Found ${count(resultLines(result, "No matches found").filter(isMatch).length, "match", "matches")}`,
 };
 
 const find: CompactLook = {
 	title: "Find",
-	arg: (args, cwd) => `${typeof args.pattern === "string" ? args.pattern : ""}${where(args.path, cwd)}`,
+	arg: patternArg,
 	summary: (result) => count(resultLines(result, "No files found matching pattern").length, "file", "files"),
 };
 
@@ -102,9 +110,8 @@ const ls: CompactLook = {
 	summary: (result) => count(resultLines(result, "(empty directory)").length, "entry", "entries"),
 };
 
-// No summary: pi's diff, or the file written, stays under the call line.
-const edit: CompactLook = { title: "Edit", arg: (args, cwd) => displayPath(args.path ?? args.file_path, cwd) };
-const write: CompactLook = { title: "Write", arg: (args, cwd) => displayPath(args.path ?? args.file_path, cwd) };
+const edit: CompactLook = { title: "Edit", arg: fileArg };
+const write: CompactLook = { title: "Write", arg: fileArg };
 
 const LOOKS: Record<string, CompactLook> = { read, bash, grep, find, ls, edit, write };
 
