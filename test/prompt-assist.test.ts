@@ -752,7 +752,9 @@ describe("session assistance", () => {
 
 	it("uses the stock custom editor when no paste editor is installed, and leaves non-TUI modes alone", () => {
 		const h = harness();
-		expect(h.factory()(tui, theme, keys)).toBeInstanceOf(CustomEditor);
+		const editor = h.factory()(tui, theme, keys);
+		expect(editor).toBeInstanceOf(CustomEditor);
+		expect(editor.embedWorkingStatus).toBe(true);
 		expect(harness({ mode: "json" }).factory()).toBeUndefined();
 	});
 

@@ -81,4 +81,13 @@ describe("bluclawd's paste in pi's prompt", () => {
 		e.insertTextAtCursor("x".repeat(900));
 		expect(e.getText()).toBe("[Pasted text #1]");
 	});
+
+	it("shows pi's working spinner in its top border, as pi's own editor does", () => {
+		const { e } = editor();
+		e.setWorkingStatusIndicator({
+			renderInBorder: () => "⠋ Pondering…",
+			renderSpinnerInBorder: () => "⠋",
+		} as never);
+		expect(e.render(40)[0]).toBe(`── ⠋ Pondering… ${"─".repeat(24)}`);
+	});
 });

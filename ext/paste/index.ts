@@ -84,7 +84,7 @@ export class PasteEditor extends CustomEditor {
 	submittedImages: string[] = [];
 
 	constructor(tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) {
-		super(tui, theme, keybindings);
+		super(tui, theme, keybindings, { embedWorkingStatus: true });
 		const self = this as unknown as EditorInternals;
 		const baseSegment = self.segment.bind(this);
 		const baseExpand = self.expandPasteMarkers.bind(this);

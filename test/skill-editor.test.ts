@@ -1,12 +1,13 @@
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { CustomEditor, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { CombinedAutocompleteProvider, stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import { PasteEditor } from "../ext/paste/index.ts";
 import { attachSuggestions } from "../ext/prompt-assist/editor.ts";
 import { attachSkills } from "../ext/skills/editor.ts";
+import skills from "../ext/skills/index.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
 const skill: ReturnType<ExtensionAPI["getCommands"]>[number] = {
@@ -184,5 +185,29 @@ describe("terminal skill selection", () => {
 		expect(editor.submittedImages).toEqual([image]);
 		expect(rendered(editor)).not.toContain("Selected skill");
 		assist.clear();
+	});
+});
+
+describe("the skills extension's editor", () => {
+	it("falls back to pi's editor with the working spinner in its top border", () => {
+		const handlers = new Map<string, (...args: any[]) => unknown>();
+		skills({ on: (event: string, handler: any) => handlers.set(event, handler) } as never);
+		let factory: any;
+		handlers.get("session_start")?.(
+			{},
+			{
+				mode: "tui",
+				ui: {
+					getEditorComponent: () => undefined,
+					setEditorComponent: (f: unknown) => {
+						factory = f;
+					},
+				},
+			},
+		);
+		const tui = { requestRender() {}, terminal: { rows: 40, columns: 120 } };
+		const editor = factory(tui, { borderColor: (s: string) => s, selectList: {} }, { matches: () => false });
+		expect(editor).toBeInstanceOf(CustomEditor);
+		expect(editor.embedWorkingStatus).toBe(true);
 	});
 });
