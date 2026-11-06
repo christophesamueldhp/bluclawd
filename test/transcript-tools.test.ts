@@ -218,6 +218,16 @@ describe("collapsed edit and write", () => {
 		expect(plain(draw(restyled("write", piWrite), row))).toBe(`${DOT} Write(notes.md)\n\none\ntwo`);
 	});
 
+	it("keeps pi's whole view when pi's first lines are not the header it expects", () => {
+		// A future pi that draws edit differently: nothing of its body may be cut.
+		const piLater = {
+			renderCall: () => ({ render: () => ["", "-1 const a = 1;", "+1 const a = 2;", ""], invalidate: () => {} }),
+			renderResult: () => ({ render: () => [], invalidate: () => {} }),
+		};
+		const row: Row = { args: editArgs, result: editDone };
+		expect(draw(restyled("edit", piLater), row)).toBe(draw(piLater as never, row));
+	});
+
 	it("expanded, each renders exactly as pi renders it", () => {
 		const editRow: Row = { args: editArgs, result: editDone, argsComplete: false, expanded: true };
 		expect(draw(restyled("edit", piEdit), editRow)).toBe(draw(piEdit as never, editRow));

@@ -42,8 +42,11 @@ const isBlank = (line: string) => stripAnsi(line).trim() === "";
 class WithPiBody implements Component {
 	readonly head = new Text("", 0, 0);
 	piCall: Component | undefined;
-	constructor(piCall: Component | undefined) {
+	/** The word pi's header starts with, as `edit` in `edit src/x.ts`. */
+	readonly piTitle: string;
+	constructor(piCall: Component | undefined, piTitle: string) {
 		this.piCall = piCall;
+		this.piTitle = piTitle;
 	}
 	render(width: number): string[] {
 		const body = this.piCall?.render(width) ?? [];
@@ -52,6 +55,8 @@ class WithPiBody implements Component {
 		while (start < body.length && isBlank(body[start])) start++;
 		// A tool that pads itself (edit) indents its header; the swapped line keeps that indent.
 		const indent = start < body.length ? (/^ */.exec(stripAnsi(body[start]))?.[0].length ?? 0) : 0;
+		// A pi that draws its header differently gets its whole view back rather than lose part of its body.
+		if (start < body.length && !new RegExp(`\\b${this.piTitle}\\b`).test(stripAnsi(body[start]))) return body;
 		while (start < body.length && !isBlank(body[start])) start++;
 		let end = body.length;
 		while (end > start && isBlank(body[end - 1])) end--;
@@ -94,7 +99,11 @@ export function compactTool(pi: PiRenderers, look: CompactLook): ToolRenderers {
 			const line = `${theme.fg(dot, DOT)} ${theme.fg("toolTitle", theme.bold(look.title))}(${arg})`;
 			if (!look.summary) {
 				const last = context.lastComponent;
-				const call = own(last, WithPiBody, () => new WithPiBody(last && !drawnHere.has(last) ? last : undefined));
+				const call = own(
+					last,
+					WithPiBody,
+					() => new WithPiBody(last && !drawnHere.has(last) ? last : undefined, look.title.toLowerCase()),
+				);
 				call.piCall = pi.renderCall(args, theme, { ...context, lastComponent: call.piCall });
 				call.head.setText(line);
 				return call;
