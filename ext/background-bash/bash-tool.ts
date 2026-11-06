@@ -68,6 +68,11 @@ interface BashDetails {
 	backgroundTaskId?: string;
 }
 
+/** What a command sent to the background shows in the transcript in place of its output. */
+export const RUNNING_IN_BACKGROUND = "Running in the background (↓ to manage)";
+
+export const wentToBackground = (details: unknown) => Boolean((details as BashDetails | undefined)?.backgroundTaskId);
+
 export interface BackgroundBashOptions {
 	cwd: string;
 	shellPath?: string;
@@ -172,9 +177,7 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 			return base.renderCall?.(shown as never, theme, context as never) as never;
 		},
 		renderResult(result, renderOptions, theme, context) {
-			if ((result.details as BashDetails | undefined)?.backgroundTaskId) {
-				return new Text(theme.fg("dim", "Running in the background (↓ to manage)"), 0, 0);
-			}
+			if (wentToBackground(result.details)) return new Text(theme.fg("dim", RUNNING_IN_BACKGROUND), 0, 0);
 			return base.renderResult?.(result as never, renderOptions, theme, context as never) as never;
 		},
 		async execute(id, rawParams, signal, onUpdate, ctx) {

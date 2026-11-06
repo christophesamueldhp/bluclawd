@@ -1,72 +1,13 @@
 import {
-	createLsToolDefinition,
+	createPowerShellToolDefinition,
 	createReadToolDefinition,
-	type ToolRendererResolver,
 	type ToolRenderers,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import transcript from "../ext/transcript/index.ts";
-
-const DOT = process.platform === "darwin" ? "⏺" : "●";
-
-/** Tags each colour so a test can see which token drew what; the same theme renders both sides of a comparison. */
-const theme = {
-	fg: (c: string, t: string) => `<${c}>${t}</${c}>`,
-	bg: (_c: string, t: string) => t,
-	bold: (t: string) => `<b>${t}</b>`,
-	italic: (t: string) => t,
-	underline: (t: string) => t,
-} as any;
-const plain = (s: string) => s.replace(/<\/?[a-zA-Z]+>/g, "");
-
-/** The resolver the extension registers with a fake pi. */
-function resolver(): ToolRendererResolver {
-	let registered: ToolRendererResolver | undefined;
-	transcript({
-		registerToolRenderer: (r: ToolRendererResolver) => {
-			registered = r;
-		},
-	} as any);
-	if (!registered) throw new Error("no tool renderer registered");
-	return registered;
-}
+import { DOT, draw, plain, type Row, resolver, restyled, text } from "./helpers/tool-render.ts";
 
 const piRead = createReadToolDefinition("/work");
-const readRenderers = (): ToolRenderers => resolver()("read", () => piRead as never) as ToolRenderers;
-
-interface Row {
-	args: Record<string, unknown>;
-	result?: { content: { type: "text"; text: string }[]; details?: unknown };
-	expanded?: boolean;
-	isPartial?: boolean;
-	isError?: boolean;
-}
-
-/** Draws one tool row as pi's ToolExecutionComponent would: the call, then the result once there is one. */
-function draw(renderers: ToolRenderers, row: Row): string {
-	const context = {
-		args: row.args,
-		toolCallId: "call-1",
-		invalidate: () => {},
-		lastComponent: undefined,
-		state: {},
-		cwd: "/work",
-		executionStarted: true,
-		argsComplete: true,
-		isPartial: row.isPartial ?? false,
-		expanded: row.expanded ?? false,
-		showImages: false,
-		isError: row.isError ?? false,
-	} as any;
-	const lines = renderers.renderCall?.(row.args, theme, context).render(120) ?? [];
-	if (row.result) {
-		const options = { expanded: context.expanded, isPartial: context.isPartial };
-		lines.push(...(renderers.renderResult?.(row.result as never, options, theme, context).render(120) ?? []));
-	}
-	return lines.map((line) => line.trimEnd()).join("\n");
-}
-
-const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
+const readRenderers = () => restyled("read", piRead);
 
 describe("collapsed read", () => {
 	it("is one call line and a line count", () => {
@@ -133,11 +74,11 @@ describe("a tool bluclawd does not restyle", () => {
 	});
 
 	it("renders exactly as pi renders it, collapsed and expanded", () => {
-		const piLs = createLsToolDefinition("/work") as never;
-		const ls = resolver()("ls", () => piLs) as ToolRenderers;
+		const piPowerShell = createPowerShellToolDefinition("/work") as never;
+		const powershell = restyled("powershell", piPowerShell);
 		for (const expanded of [false, true]) {
-			const row: Row = { args: { path: "src" }, result: text("a.ts\nb.ts"), expanded };
-			expect(draw(ls, row)).toBe(draw(piLs, row));
+			const row: Row = { args: { command: "Get-ChildItem" }, result: text("a.ts\nb.ts"), expanded };
+			expect(draw(powershell, row)).toBe(draw(piPowerShell, row));
 		}
 	});
 });

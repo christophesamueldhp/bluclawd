@@ -5,8 +5,10 @@
  */
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
-import type { ExtensionAPI, ReadToolDetails } from "@earendil-works/pi-coding-agent";
+import type { BashToolDetails, ExtensionAPI, ReadToolDetails } from "@earendil-works/pi-coding-agent";
+import { stripAnsi } from "../../daemon/ansi.ts";
 import { type CompactLook, compactTool, hasPiRenderers } from "../_shared/tool-line.ts";
+import { RUNNING_IN_BACKGROUND, wentToBackground } from "../background-bash/bash-tool.ts";
 
 /** A path as the user would type it: relative inside the working directory, `~` for home. */
 function displayPath(raw: unknown, cwd: string): string {
@@ -19,11 +21,14 @@ function displayPath(raw: unknown, cwd: string): string {
 	return absolute === home || absolute.startsWith(`${home}/`) ? `~${absolute.slice(home.length)}` : absolute;
 }
 
-const lines = (n: number) => `${n} ${n === 1 ? "line" : "lines"}`;
+const fileArg = (args: Record<string, unknown>, cwd: string) => displayPath(args.path ?? args.file_path, cwd);
+
+const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+const lines = (n: number) => count(n, "line", "lines");
 
 const read: CompactLook = {
 	title: "Read",
-	arg: (args, cwd) => displayPath(args.path ?? args.file_path, cwd),
+	arg: fileArg,
 	summary(result) {
 		if (result.content.some((block) => block.type === "image")) return "Read image";
 		const truncation = (result.details as ReadToolDetails | undefined)?.truncation;
@@ -37,7 +42,78 @@ const read: CompactLook = {
 	},
 };
 
-const LOOKS: Record<string, CompactLook> = { read };
+/** A result's text as the terminal shows it: no colour codes or carriage returns, no surrounding blank lines. */
+type TextResult = { content: { type: string; text?: string }[] };
+
+function outputOf(result: TextResult): string {
+	const text = result.content.map((block) => (block.type === "text" ? (block.text ?? "") : "")).join("\n");
+	return stripAnsi(text).replace(/\r/g, "").trim();
+}
+
+const BASH_TAIL = 3;
+
+const bash: CompactLook = {
+	title: "Bash",
+	arg: (args) => (typeof args.command === "string" ? args.command : ""),
+	summary(result, theme) {
+		if (wentToBackground(result.details)) return theme.fg("dim", RUNNING_IN_BACKGROUND);
+		const details = result.details as BashToolDetails | undefined;
+		let output = outputOf(result);
+		// A truncated output ends in pi's `[Showing lines … Full output: <path>]`, not command output.
+		if (details?.fullOutputPath) output = output.replace(/\n\n\[[^\n]*Full output: [^\n]*\]$/, "");
+		const all = output === "" ? [] : output.split("\n");
+		const tail = all.slice(-BASH_TAIL);
+		const hidden = (details?.truncation?.truncated ? details.truncation.totalLines : all.length) - tail.length;
+		const shown = tail.map((line) => theme.fg("toolOutput", line));
+		return hidden > 0 ? [...shown, theme.fg("muted", `… +${lines(hidden)}`)] : shown;
+	},
+};
+
+/** A search's result lines, without pi's trailing `[… limit reached]` notice or its empty-result sentence. */
+function resultLines(result: TextResult, empty: string): string[] {
+	const output = outputOf(result).replace(/\n\n\[[^\n]*\]$/, "");
+	return output === "" || output === empty ? [] : output.split("\n");
+}
+
+/** A path argument as displayPath shows it, or "" for the working directory itself. */
+const belowCwd = (path: unknown, cwd: string) =>
+	typeof path === "string" && resolve(cwd, path) !== resolve(cwd) ? displayPath(path, cwd) : "";
+
+const where = (path: unknown, cwd: string) => {
+	const shown = belowCwd(path, cwd);
+	return shown ? ` in ${shown}` : "";
+};
+
+/** A search's pattern, then the path it searched when that is not the working directory. */
+const patternArg = (args: Record<string, unknown>, cwd: string) =>
+	`${typeof args.pattern === "string" ? args.pattern : ""}${where(args.path, cwd)}`;
+
+/** A match is `path:N: text`; a context line around it is `path-N- text`. */
+const isMatch = (line: string) => /^.*?([:-])\d+\1 /.exec(line)?.[1] === ":";
+
+const grep: CompactLook = {
+	title: "Grep",
+	arg: patternArg,
+	summary: (result) =>
+		`Found ${count(resultLines(result, "No matches found").filter(isMatch).length, "match", "matches")}`,
+};
+
+const find: CompactLook = {
+	title: "Find",
+	arg: patternArg,
+	summary: (result) => count(resultLines(result, "No files found matching pattern").length, "file", "files"),
+};
+
+const ls: CompactLook = {
+	title: "Ls",
+	arg: (args, cwd) => belowCwd(args.path, cwd) || ".",
+	summary: (result) => count(resultLines(result, "(empty directory)").length, "entry", "entries"),
+};
+
+const edit: CompactLook = { title: "Edit", arg: fileArg };
+const write: CompactLook = { title: "Write", arg: fileArg };
+
+const LOOKS: Record<string, CompactLook> = { read, bash, grep, find, ls, edit, write };
 
 export default function transcript(pi: ExtensionAPI) {
 	pi.registerToolRenderer((toolName, next) => {
