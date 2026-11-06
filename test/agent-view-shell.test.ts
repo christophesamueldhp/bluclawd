@@ -64,7 +64,12 @@ describe("a ! command's row, as bluclawd's", () => {
 function setup(shells: ShellInfo[]) {
 	const calls: unknown[][] = [];
 	/** Every tmux read the view made, and the output its captures return. */
-	const tmux = { reads: 0, output: ["$ npm test", "", "✓ 12 passed"], outputOf: {} as Record<string, string[]> };
+	const tmux = {
+		reads: 0,
+		output: ["$ npm test", "", "✓ 12 passed"],
+		outputOf: {} as Record<string, string[]>,
+		gates: {} as Record<string, Promise<void>>,
+	};
 	const client = {
 		list: async () => [],
 		ensureDaemon: async () => true,
@@ -97,6 +102,7 @@ function setup(shells: ShellInfo[]) {
 		stopShell: (name) => calls.push(["stopShell", name]),
 		captureAsync: async (name) => {
 			tmux.reads++;
+			await tmux.gates[name];
 			return tmux.outputOf[name] ?? tmux.output;
 		},
 	};
@@ -160,7 +166,10 @@ describe("! in agent view's composer", () => {
 	});
 
 	it("↓ in a peek moves it to the next command, whose output shows at once", async () => {
-		const { view, text, flush, tmux } = setup([shell(), shell({ name: "sh-2", command: "ls" })]);
+		const { view, text, flush, tmux } = setup([
+			shell({ createdAt: "2026-01-01T00:00:02.000Z" }),
+			shell({ name: "sh-2", command: "ls", createdAt: "2026-01-01T00:00:01.000Z" }),
+		]);
 		tmux.outputOf["sh-2"] = ["$ ls", "file-b"];
 		await view.onShow();
 		await flush();
@@ -171,6 +180,28 @@ describe("! in agent view's composer", () => {
 		await flush();
 		expect(text()).toContain("file-b");
 		expect(text()).not.toContain("✓ 12 passed");
+		view.close();
+	});
+
+	it("a peek moved on before the last command's output came keeps the new command's", async () => {
+		const { view, text, flush, tmux } = setup([
+			shell({ createdAt: "2026-01-01T00:00:02.000Z" }),
+			shell({ name: "sh-2", command: "ls", createdAt: "2026-01-01T00:00:01.000Z" }),
+		]);
+		tmux.outputOf["sh-2"] = ["$ ls", "file-b"];
+		let land = () => {};
+		tmux.gates["sh-1"] = new Promise((resolve) => {
+			land = resolve;
+		});
+		await view.onShow();
+		await flush();
+		view.handleInput(" ");
+		view.handleInput("\x1b[B");
+		await flush();
+		expect(text()).toContain("file-b");
+		land();
+		await flush();
+		expect(text()).toContain("file-b");
 		view.close();
 	});
 

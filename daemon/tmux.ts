@@ -459,6 +459,7 @@ export class Tmux {
 		return (await execFileAsync("tmux", argv, { encoding: "utf8", env, timeout: this.timeoutMs })).stdout;
 	}
 
+	/** tmux's argv and environment for `args`; the first call writes tmux.conf. */
 	private prepare(args: string[], outsideTmux?: boolean): { argv: string[]; env: NodeJS.ProcessEnv } {
 		const config = join(this.dir, "tmux.conf");
 		if (!this.configured) {

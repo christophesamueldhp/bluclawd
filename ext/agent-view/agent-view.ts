@@ -579,7 +579,8 @@ export class AgentView implements Component, Focusable {
 
 	/** Reads the peeked `!` command's output, if a peek at one is open. */
 	private async loadPeek(): Promise<void> {
-		const shell = this.mode === "peek" ? this.selectedRow?.shell : undefined;
+		const peeked = () => (this.mode === "peek" ? this.selectedRow?.shell : undefined);
+		const shell = peeked();
 		if (!shell) return;
 		let lines: string[] = [];
 		try {
@@ -587,11 +588,12 @@ export class AgentView implements Component, Focusable {
 		} catch {
 			// its session is gone
 		}
-		this.peekOutput = { shell, lines };
+		// The peek moved on meanwhile: this output must not replace that of the command it shows now.
+		if (peeked() === shell) this.peekOutput = { shell, lines };
 	}
 
 	/** A peek just opened on a `!` command, or moved to one: its output now, not at the next refresh. */
-	private syncPeek(): void {
+	private refreshPeek(): void {
 		if (this.mode === "peek" && this.selectedRow?.shell) void this.loadPeek().then(() => this.render_());
 	}
 
@@ -790,7 +792,7 @@ export class AgentView implements Component, Focusable {
 		if (key !== this.selectedKey) this.disarm();
 		this.saveReplyDraft();
 		this.selectedKey = key;
-		this.syncPeek();
+		this.refreshPeek();
 		this.lastIndex = Math.max(
 			0,
 			this.items.findIndex((i) => i.key === key),
@@ -882,7 +884,7 @@ export class AgentView implements Component, Focusable {
 			case "peek":
 				this.mode = "peek";
 				this.reply.setValue("");
-				this.syncPeek();
+				this.refreshPeek();
 				this.render_();
 				return;
 			case "refused":
@@ -1742,7 +1744,7 @@ export class AgentView implements Component, Focusable {
 					this.mode = "peek";
 					this.reply.setValue(this.replyDrafts.get(item.key) ?? "");
 					this.reply.handleInput("\x05");
-					this.syncPeek();
+					this.refreshPeek();
 					this.render_();
 				}
 				return;
