@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
 	saveCurrent: vi.fn(),
 	switchTo: vi.fn(),
 	remove: vi.fn(),
+	rename: vi.fn(),
+	replaceCredential: vi.fn(),
 	login: vi.fn(),
 	tasks: vi.fn(),
 }));
@@ -18,6 +20,8 @@ vi.mock("../ext/accounts/store.ts", () => ({
 		saveCurrent = mocks.saveCurrent;
 		switchTo = mocks.switchTo;
 		remove = mocks.remove;
+		rename = mocks.rename;
+		replaceCredential = mocks.replaceCredential;
 	},
 }));
 vi.mock("../ext/accounts/login.ts", () => ({ loginAccount: mocks.login }));
@@ -143,6 +147,86 @@ describe("/accounts", () => {
 		ctx.ui.confirm.mockResolvedValue(false);
 		await run();
 		expect(mocks.remove).not.toHaveBeenCalled();
+	});
+
+	it("renames a saved account, allowing it to keep its own name but not take another", async () => {
+		const { ctx, run } = harness([
+			"Edit saved account…",
+			"Work",
+			"Rename…",
+			"Edit saved account…",
+			"Work",
+			"Rename…",
+			"Back",
+		]);
+		ctx.ui.input.mockResolvedValueOnce(" Office ").mockResolvedValueOnce("Personal");
+		await run();
+		expect(ctx.ui.select.mock.calls[1]).toEqual(["Edit which saved account?", ["Personal", "Work"]]);
+		expect(mocks.rename).toHaveBeenCalledTimes(1);
+		expect(mocks.rename).toHaveBeenCalledWith("two", "Office");
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("unique account name"), "warning");
+	});
+
+	it("signs an inactive account in again without switching or refreshing", async () => {
+		const { ctx, run } = harness(["Edit saved account…", "Work", "Sign in again…", "Sign in with OAuth", "Back"]);
+		await run();
+		expect(mocks.login).toHaveBeenCalledWith(expect.anything(), provider, "oauth", expect.any(String));
+		expect(mocks.replaceCredential).toHaveBeenCalledWith("two", { type: "api_key", key: "fixture-key" });
+		expect(mocks.switchTo).not.toHaveBeenCalled();
+		expect(ctx.modelRegistry.refresh).not.toHaveBeenCalled();
+	});
+
+	it("refreshes models after signing the active account in again", async () => {
+		const { ctx, run } = harness([
+			"Edit saved account…",
+			"Personal",
+			"Sign in again…",
+			"Sign in with an API key",
+			"Back",
+		]);
+		await run();
+		expect(mocks.replaceCredential).toHaveBeenCalledWith("one", { type: "api_key", key: "fixture-key" });
+		expect(ctx.modelRegistry.refresh).toHaveBeenCalledWith({
+			providers: ["example"],
+			allowNetwork: true,
+			force: true,
+		});
+	});
+
+	it("keeps the saved login when signing in again is cancelled or outside the terminal UI", async () => {
+		mocks.login.mockResolvedValue(undefined);
+		const { ctx, run } = harness(["Edit saved account…", "Work", "Sign in again…", "Sign in with OAuth", "Back"]);
+		await run();
+		const rpc = harness(["Edit saved account…", "Work", "Sign in again…", "Back"]);
+		rpc.ctx.mode = "rpc";
+		await rpc.run();
+		expect(mocks.login).toHaveBeenCalledTimes(1);
+		expect(mocks.replaceCredential).not.toHaveBeenCalled();
+		expect(ctx.ui.notify).not.toHaveBeenCalled();
+		expect(rpc.ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("terminal UI"), "warning");
+	});
+
+	it("labels accounts with their email and flags a live login changed outside /accounts", async () => {
+		mocks.list.mockResolvedValue([
+			{ ...personal, type: "oauth", email: "me@example.com", changed: true },
+			{ ...work, type: "oauth", email: "work@example.com" },
+		]);
+		const { ctx, run } = harness(["Back"]);
+		await run();
+		expect(ctx.ui.select.mock.calls[0]).toEqual([
+			"Example accounts",
+			expect.arrayContaining([
+				"✓ Personal · OAuth · me@example.com · login changed outside /accounts",
+				"Work · OAuth · work@example.com",
+			]),
+		]);
+	});
+
+	it("does not offer editing when no account is saved", async () => {
+		mocks.list.mockResolvedValue([]);
+		const { ctx, run } = harness(["Back"]);
+		await run();
+		expect(JSON.stringify(ctx.ui.select.mock.calls)).not.toContain("Edit saved account");
 	});
 
 	it("rejects changes while the parent or a background subagent is running", async () => {
