@@ -1,8 +1,8 @@
 /**
  * The phone's HTTP API and the PWA's static files, on 127.0.0.1 only: the phone reaches it
- * through `tailscale serve`, never directly. Every /api route except pairing (POST /api/pair and
- * /api/pair/handoff) needs a paired device's token: a bearer header, or `?token=` on the SSE
- * stream, which EventSource cannot give headers.
+ * through `tailscale serve`, never directly. Every /api route except pairing (POST /api/pair)
+ * needs a paired device's token: a bearer header, or `?token=` on the SSE stream, which
+ * EventSource cannot give headers.
  */
 import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -25,7 +25,7 @@ import { labelFromTask } from "../rows.ts";
 import type { StartClaim } from "../supervisor.ts";
 import type { Waiting } from "./delivery.ts";
 import { RemoteEvents } from "./events.ts";
-import { type ClaimResult, type RemoteStore, SECRET_PATTERN } from "./pairing.ts";
+import type { ClaimResult, RemoteStore } from "./pairing.ts";
 import {
 	commandName,
 	decide,
@@ -367,19 +367,15 @@ function serveStatic(webDir: string, url: URL, req: IncomingMessage, res: Server
 		res.end("not found");
 		return;
 	}
-	// The Home Screen app Safari adds opens at its manifest's start_url: the page asks for this one
-	// with its device's handoff, which pairs that app (web/app.js). Only its shape is checked here.
-	const handoff = url.searchParams.get("handoff") ?? "";
-	const start = name === "manifest.webmanifest" && SECRET_PATTERN.test(handoff) ? `/#handoff=${handoff}` : undefined;
 	res.writeHead(200, {
 		"content-type": type,
-		"cache-control": start ? "no-store" : "no-cache",
+		"cache-control": "no-cache",
 		"x-content-type-options": "nosniff",
 		"content-security-policy": CSP,
 	});
 	const body = readFileSync(join(webDir, name));
 	if (req.method === "HEAD") res.end();
-	else res.end(start ? JSON.stringify({ ...JSON.parse(body.toString("utf8")), start_url: start }) : body);
+	else res.end(body);
 }
 
 function claimed(res: ServerResponse, result: ClaimResult): void {
@@ -408,10 +404,6 @@ async function handle(
 		if (typeof body.secret === "string") return claimed(res, deps.store.claimSecret(body.secret, name));
 		return claimed(res, deps.store.claim(String(body.code ?? ""), name));
 	}
-	if (path === "/api/pair/handoff" && req.method === "POST") {
-		const body = await readJson(req);
-		return claimed(res, deps.store.exchangeHandoff(String(body.handoff ?? ""), String(body.deviceName ?? "")));
-	}
 
 	const token = path === "/api/events" ? (url.searchParams.get("token") ?? "") : bearer(req);
 	const device = deps.store.authenticate(token);
@@ -421,9 +413,6 @@ async function handle(
 		const session = url.searchParams.get("session") ?? undefined;
 		events.add(res, session, () => deps.store.authenticate(token) !== undefined, device.id);
 		return;
-	}
-	if (path === "/api/handoff" && req.method === "POST") {
-		return json(res, 200, { handoff: deps.store.issueHandoff(device.id) });
 	}
 	if (path === "/api/devices" && req.method === "GET") {
 		const devices = deps.store.load().devices.map(({ id, name, createdAt, lastUsedAt }) => ({

@@ -2,8 +2,7 @@
  * Who may use remote control: paired devices, each holding a random token of which only the
  * SHA-256 hash is kept, in remote.json next to the daemon's socket (owner-only). A device pairs
  * with the secret in the link of the QR code `/remote-control` shows, or the 6-digit code under
- * it; a paired browser hands its pairing to the Home Screen app it adds with a handoff secret.
- * Secrets and codes live only in the daemon's memory.
+ * it. Secrets and codes live only in the daemon's memory.
  */
 import { createHash, randomBytes, randomInt, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
@@ -15,9 +14,6 @@ import { generateVapidKeys, parseSubscription, type VapidKeys, type WebPushSubsc
 export const DEFAULT_PORT = 7878;
 const PAIRING_TTL_MS = 10 * 60_000;
 const CODE_ATTEMPTS = 5;
-const HANDOFF_TTL_MS = 30 * 60_000;
-/** A pairing or handoff secret: 128 random bits, base64url. */
-export const SECRET_PATTERN = /^[\w-]{22}$/;
 /** `lastUsedAt` is rewritten at most this often, not on every request. */
 const LAST_USED_RESOLUTION_MS = 60_000;
 
@@ -41,9 +37,7 @@ export interface RemoteState {
 	vapid?: VapidKeys;
 }
 
-export type ClaimResult =
-	| { token: string; deviceId: string }
-	| { error: "invalid_code" | "expired_code" | "invalid_handoff" };
+export type ClaimResult = { token: string; deviceId: string } | { error: "invalid_code" | "expired_code" };
 
 function getRemotePath(): string {
 	return join(getServerDir(), "remote.json");
@@ -76,8 +70,6 @@ export class RemoteStore {
 	private readonly path: string;
 	/** The QR code's secret and the code under it, both for one device. `code` goes once guessed too often. */
 	private pairing: { secret: string; code?: string; expiresAt: number; attempts: number } | undefined;
-	/** Each paired device's latest handoff. */
-	private readonly handoffs = new Map<string, { secret: string; expiresAt: number }>();
 	/** The file as last parsed, by its size and mtime: the daemon reads it every second while a phone
 	 *  is connected, and it rarely changes. A write by anyone else changes the key. */
 	private cached: { key: string; state: RemoteState; byToken?: Map<string, RemoteDevice> } | undefined;
@@ -213,27 +205,6 @@ export class RemoteStore {
 		return this.addDevice(deviceName, now);
 	}
 
-	/** For the Home Screen app this device's browser adds, which may not share its storage. The same
-	 *  one until it expires or is used: iOS keeps the one it read when the app was added. */
-	issueHandoff(deviceId: string, now: number = Date.now()): string {
-		const current = this.handoffs.get(deviceId);
-		if (current && now <= current.expiresAt) return current.secret;
-		const secret = newSecret();
-		this.handoffs.set(deviceId, { secret, expiresAt: now + HANDOFF_TTL_MS });
-		return secret;
-	}
-
-	/** A device of its own, so the browser that handed over stays paired. */
-	exchangeHandoff(handoff: string, deviceName: string, now: number = Date.now()): ClaimResult {
-		for (const [deviceId, entry] of this.handoffs) {
-			if (!same(handoff, entry.secret)) continue;
-			this.handoffs.delete(deviceId);
-			if (now > entry.expiresAt || !this.load().devices.some((d) => d.id === deviceId)) break;
-			return this.addDevice(deviceName, now);
-		}
-		return { error: "invalid_handoff" };
-	}
-
 	private addDevice(deviceName: string, now: number): ClaimResult {
 		const token = randomBytes(32).toString("base64url");
 		const device: RemoteDevice = {
@@ -267,7 +238,6 @@ export class RemoteStore {
 	}
 
 	revoke(deviceId: string): boolean {
-		this.handoffs.delete(deviceId);
 		const state = this.load();
 		const devices = state.devices.filter((device) => device.id !== deviceId);
 		if (devices.length === state.devices.length) return false;

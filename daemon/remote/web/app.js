@@ -73,7 +73,7 @@ import { composerAction, duration, STOP_GUARD_MS, turnSince, turnTimes } from ".
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.57";
+const VERSION = "0.0.58";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 /** Each chat's pending prompts and unsent text, kept for when it opens again. */
 const keptPending = pendingStore(() => localStorage);
@@ -150,7 +150,7 @@ const ERRORS = {
 	invalid_trust: "That trust mode is not one of always, ask or never.",
 	invalid_entry: "That message is no longer in this session.",
 	not_delivered: "Not delivered — check the session on the Mac.",
-	unreachable: "Could not reach the Mac.",
+	unreachable: "Could not reach the Mac: check that Tailscale is on in this phone and the Mac is awake.",
 	no_launch: "Run /remote-control in a pi on the Mac once, so the phone knows how to start pi.",
 	start_failed: "The Mac could not start the session.",
 	start_timeout: "The session did not start. Try again.",
@@ -158,8 +158,6 @@ const ERRORS = {
 	unknown_device: "That phone was removed already.",
 	invalid_code: "That code is wrong or was already used. Run /remote-control on the Mac for a new one.",
 	expired_code: "That code expired. Run /remote-control on the Mac for a new one.",
-	invalid_handoff:
-		"This app's pairing from Safari was used or expired. Type the code /remote-control shows on the Mac.",
 	empty_prompt: "Type a message first.",
 	prompt_too_large: "That message is too long.",
 	body_too_large: "That message is too long.",
@@ -228,6 +226,10 @@ const state = {
 	offerPush: false,
 	/** Paired in Safari: the Home Screen app is the one iOS notifies. */
 	homeScreenHint: false,
+	/** An iOS tab asked to pair here rather than in the Home Screen app (see installView). */
+	stayInBrowser: false,
+	/** The QR code's secret, kept while an iOS tab shows how to add the app: unused, its code still pairs that app. */
+	pendingSecret: /** @type {string | undefined} */ (undefined),
 	/** A new build's service worker took over: this page still runs the old one until it reloads. */
 	updateReady: false,
 	/** The list's ⋯ sheet, with "Disconnect this phone". */
@@ -332,6 +334,11 @@ function shortPath(path) {
 
 function standalone() {
 	return matchMedia("(display-mode: standalone)").matches || /** @type {any} */ (navigator).standalone === true;
+}
+
+/** A browser tab on iOS, whose Home Screen app keeps storage of its own: pairing here does not pair that app. */
+function iosTab() {
+	return /** @type {any} */ (navigator).standalone === false;
 }
 
 // ---- data ----
@@ -774,11 +781,23 @@ function bytes(base64url) {
 // ---- views ----
 
 function pairView() {
+	const how = standalone()
+		? "On the Mac, run <code>/remote-control</code> and type the 6-digit code shown under the QR code."
+		: "On the Mac, run <code>/remote-control</code> and scan the QR code with your phone's camera. Can't scan? Type the 6-digit code shown under it.";
 	return `<form class="pair" id="pair">
 <img class="logo" src="mascot.svg" alt=""><h1>bluclawd</h1>
-<p class="muted">On the Mac, run <code>/remote-control</code> and scan the QR code with your phone's camera. Can't scan? Type the 6-digit code shown under it.</p>
+<p class="muted">${how}</p>
 <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" placeholder="000000" aria-label="Pairing code">
 <button>Pair</button><div class="error" id="pair-error"></div></form>`;
+}
+
+/** Pairing on iOS happens in the Home Screen app, once: it keeps its token, and only it gets notifications. */
+function installView() {
+	return `<div class="pair install">
+<img class="logo" src="mascot.svg" alt=""><h1>bluclawd</h1>
+<ol><li>Tap Share, then <b>Add to Home Screen</b>.</li><li>Open bluclawd from the Home Screen.</li><li>Type the 6-digit code shown on the Mac under the QR code.</li></ol>
+<p class="muted">It stays paired from then on, and can notify you.</p>
+<button type="button" class="link" id="stay">Use in Safari instead</button></div>`;
 }
 
 function listShell() {
@@ -1077,7 +1096,7 @@ function bannerHtml(session) {
 	if (!state.online) {
 		// A Chat says so in its status pill (see updateFloat).
 		if (state.chat) return "";
-		return `<div class="banner off">Mac unreachable — it may be asleep, offline, or remote control is off. Retrying…</div>`;
+		return `<div class="banner off">Mac unreachable: check that Tailscale is on in this phone and the Mac is awake, with remote control on. Retrying…</div>`;
 	}
 	const error = state.error ? `<div class="banner off">${esc(state.error)}</div>` : "";
 	if (state.loaded && !state.terminalOpen) {
@@ -1097,7 +1116,7 @@ function bannerHtml(session) {
 	}
 	if (error) return error;
 	if (!session && state.homeScreenHint) {
-		return `<div class="banner hint"><span>Now Share → Add to Home Screen. The app opens already paired.</span>
+		return `<div class="banner hint"><span>Now add it to the Home Screen: the app opens already paired.</span>
 <button class="dismiss" id="dismiss-hint" aria-label="Dismiss">×</button></div>`;
 	}
 	return "";
@@ -1205,17 +1224,26 @@ ${state.error ? `<p class="error">${esc(state.error)}</p>` : ""}${rows.length ? 
 // ---- render ----
 
 function render() {
-	const view = !getToken() ? "pair" : state.chat ? `chat:${state.chat.id}` : "list";
+	const unpaired = iosTab() && !state.stayInBrowser ? "install" : "pair";
+	const view = !getToken() ? unpaired : state.chat ? `chat:${state.chat.id}` : "list";
 	if (view !== shown) {
 		shown = view;
 		closePicker();
-		app.innerHTML = view === "pair" ? pairView() : view === "list" ? listShell() : chatShell();
-		if (view === "pair") bindPair();
+		app.innerHTML =
+			view === "install"
+				? installView()
+				: view === "pair"
+					? pairView()
+					: view === "list"
+						? listShell()
+						: chatShell();
+		if (view === "install") bindInstall();
+		else if (view === "pair") bindPair();
 		else if (view === "list") bindList();
 		else bindChat();
 	}
 	if (view === "list") updateList();
-	else if (view !== "pair") updateChat();
+	else if (view !== "pair" && view !== "install") updateChat();
 	if (state.chat) keptPending.save(state.chat);
 }
 
@@ -1717,7 +1745,7 @@ function updateSheet(session) {
 	$("#rename-save").disabled = state.chat.saving;
 }
 
-/** @param {{ code: string } | { secret: string } | { handoff: string }} credential */
+/** @param {{ code: string } | { secret: string }} credential */
 async function pair(credential) {
 	try {
 		const token = await api.pair(credential, deviceName());
@@ -1727,29 +1755,23 @@ async function pair(credential) {
 			$("#pair-error").textContent = "This browser blocks storage; remote control needs it";
 			return;
 		}
-		state.homeScreenHint = !standalone();
+		// Elsewhere the installed app shares this browser's storage; on iOS it does not.
+		state.homeScreenHint = !standalone() && !iosTab();
 		render();
 		connect();
-		void offerHandoff();
 	} catch (error) {
-		$("#pair-error").textContent = errorText(error instanceof Error ? error.message : String(error));
+		$("#pair-error").textContent = failure(error);
 	}
 }
 
-/**
- * A browser's pairing, carried into the Home Screen app added from it, which may not share its
- * storage: iOS opens that app at the manifest's start_url, which the daemon sets to this device's
- * handoff (once, 30 minutes) when the manifest is asked for with it.
- */
-async function offerHandoff() {
-	if (standalone() || !getToken()) return;
-	try {
-		const handoff = await api.handoff();
-		$('link[rel="manifest"]').href = `manifest.webmanifest?handoff=${encodeURIComponent(handoff)}`;
-	} catch (error) {
-		// Otherwise the Home Screen app asks for a code.
-		if (error instanceof Unauthorized) handleError(error);
-	}
+function bindInstall() {
+	$("#stay").addEventListener("click", () => {
+		state.stayInBrowser = true;
+		render();
+		const secret = state.pendingSecret;
+		state.pendingSecret = undefined;
+		if (secret) void pair({ secret });
+	});
 }
 
 function bindPair() {
@@ -2611,15 +2633,17 @@ async function disconnect() {
 // ---- routing ----
 
 /**
- * The QR code's link, or the Home Screen app's start_url, pairs this app unless it is paired
- * already: the app opens at its start_url every time. The secret leaves the address at once, so it
- * is in no bookmark or history; pairing renders once its answer is in.
+ * The QR code's link pairs this app unless it is paired already, or is an iOS tab, which keeps the
+ * secret for "Use in Safari instead" (see installView). The secret leaves the address at once, so
+ * it is in no bookmark or history; pairing renders once its answer is in.
  */
 function claimLink() {
 	const link = pairLink(location.hash);
 	if (!link) return;
 	history.replaceState(null, "", location.pathname + location.search);
-	if (!getToken()) void pair(link);
+	if (getToken()) return;
+	if (iosTab() && !state.stayInBrowser) state.pendingSecret = link.secret;
+	else void pair(link);
 }
 
 function route() {
@@ -2685,8 +2709,6 @@ fitViewport();
 document.addEventListener("visibilitychange", () => {
 	if (document.visibilityState === "visible") {
 		connect();
-		// A fresh one: Safari may sit in the background longer than a handoff lasts.
-		void offerHandoff();
 	} else {
 		if (state.chat) markSeen(state.chat.id);
 		closeStream();
@@ -2741,4 +2763,3 @@ if (opened) {
 }
 render();
 connect();
-void offerHandoff();

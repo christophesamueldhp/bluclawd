@@ -25,14 +25,12 @@ export function clearToken() {
 }
 
 /**
- * What pairs this app in its address: the secret in the link /remote-control's QR code opens
- * (`#pair=`), or the handoff the Home Screen app opens with (`#handoff=`, its manifest's start_url).
- * @param {string} hash @returns {{ secret: string } | { handoff: string } | undefined}
+ * What pairs this app in its address: the secret in the link /remote-control's QR code opens.
+ * @param {string} hash @returns {{ secret: string } | undefined}
  */
 export function pairLink(hash) {
-	const match = /^#(pair|handoff)=([\w-]{22})$/.exec(hash);
-	if (!match) return undefined;
-	return match[1] === "pair" ? { secret: match[2] } : { handoff: match[2] };
+	const match = /^#pair=([\w-]{22})$/.exec(hash);
+	return match ? { secret: match[1] } : undefined;
 }
 
 /** The token was revoked (or never valid): the app goes back to pairing. */
@@ -63,11 +61,11 @@ const session = (id) => `/api/sessions/${encodeURIComponent(id)}`;
 
 export const api = {
 	/**
-	 * @param {{ code: string } | { secret: string } | { handoff: string }} credential
+	 * @param {{ code: string } | { secret: string }} credential
 	 * @param {string} deviceName @returns {Promise<string>}
 	 */
 	async pair(credential, deviceName) {
-		const res = await fetch("handoff" in credential ? "/api/pair/handoff" : "/api/pair", {
+		const res = await fetch("/api/pair", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ ...credential, deviceName }),
@@ -76,8 +74,6 @@ export const api = {
 		if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
 		return data.token;
 	},
-	/** Pairs the Home Screen app this browser adds, once. @returns {Promise<string>} */
-	handoff: async () => (await call("POST", "/api/handoff", {})).handoff,
 	/** The paired phones the Mac lists to this one, `current` among them. @returns {Promise<import("./app.js").Device[]>} */
 	devices: async () => (await call("GET", "/api/devices")).devices,
 	/** Only ever this phone's own id: the Mac removes any other. @param {string} id */

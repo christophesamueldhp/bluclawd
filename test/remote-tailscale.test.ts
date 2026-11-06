@@ -162,7 +162,7 @@ describe("remote control: tailscale and pairing text", () => {
 		expect(text).toContain("https://mac.tail1234.ts.net");
 		expect(text).toContain(renderQr(qrMatrix(`https://mac.tail1234.ts.net/#pair=${secret}`)));
 		expect(text).toContain("(valid 10 minutes, once)");
-		expect(text).toContain("Type 482 913 in the app");
+		expect(text).toContain("type 482 913 in the app");
 		expect(text).not.toContain("482913");
 		expect(pairingText("https://mac.tail1234.ts.net", secret, "482913", 60_000, 0)).toContain(
 			"(valid 1 minute, once)",

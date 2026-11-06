@@ -273,14 +273,24 @@ The daemon serves a phone app on `127.0.0.1` only (port 7878, or `"remote": { "p
 settings); the phone reaches it over [Tailscale](https://tailscale.com), never the LAN or the
 internet. Once, on the Mac: install Tailscale and log in, then run `/remote-control` in any pi
 session. It offers to run `tailscale serve --bg 7878`, which gives this Mac an HTTPS address on
-your tailnet, and shows that address and a QR code (10 minutes, single use), drawn in the
-terminal's own colours. On the phone, also on your tailnet, scan it with the camera: Safari opens
-the address and pairs at once, as the link carries a one-time secret; there is nothing to type.
-For notifications, then add it to the Home Screen (Share → Add to Home Screen), as Safari then
-says: the Home Screen app opens already paired, as a phone of its own ("iPhone (Home Screen)"),
-even where iOS does not share Safari's storage with it. Can't scan? The dimmed 6-digit code under
-the QR code pairs too, typed into the app (run `/remote-control` again for a new one). The phone
-keeps a token; the daemon keeps only its hash, in `~/.pi/server/remote.json`. If your tailnet has Serve
+your tailnet, and shows that address, a QR code and a 6-digit code under it (10 minutes, single
+use), drawn in the terminal's own colours. On the phone, also on your tailnet, scan it with the
+camera.
+
+On an iPhone, Safari then shows how to add the app to the Home Screen (Share → Add to Home
+Screen): open it from there and type the 6-digit code, once. iOS gives a Home Screen app storage of
+its own, apart from Safari's, so it is the app that pairs, and only it gets notifications. "Use in
+Safari instead" pairs Safari itself with the QR code's secret, unless the app paired first. On
+Android or a computer, the link pairs the browser at once, as it carries a one-time secret, and the
+app added to the Home Screen from it opens already paired. Can't scan? Type the 6-digit code into
+the app. Either code expired? Run `/remote-control` again for a new one.
+
+On the iPhone, turn on VPN On Demand in the Tailscale app, so the phone is on your tailnet whenever
+you open bluclawd, and keep the Mac awake on power (System Settings → Battery → Options → Prevent
+automatic sleeping when the display is off). If the app cannot reach the Mac, it says so and keeps
+retrying; it stays paired.
+
+The phone keeps a token; the daemon keeps only its hash, in `~/.pi/server/remote.json`. If your tailnet has Serve
 or HTTPS certificates turned off, `/remote-control` shows the link that turns them on, once for
 the tailnet. For more than one Mac, add one Home Screen app per Mac: each has its own ts.net
 address and pairs on its own.

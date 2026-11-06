@@ -4,9 +4,8 @@ import { pairLink } from "#remote-web/api.js";
 describe("the phone app's pairing links", () => {
 	const secret = "Qm3xZ8vT1pLk9sWc2rYb0A";
 
-	it("takes the QR code's secret from #pair= and the Home Screen app's handoff from #handoff=", () => {
+	it("takes the QR code's secret from #pair=", () => {
 		expect(pairLink(`#pair=${secret}`)).toEqual({ secret });
-		expect(pairLink("#handoff=Zx9-_aBcDeFgHiJkLmNoPq")).toEqual({ handoff: "Zx9-_aBcDeFgHiJkLmNoPq" });
 	});
 
 	it("takes nothing else", () => {
@@ -18,7 +17,7 @@ describe("the phone app's pairing links", () => {
 			`#pair=${secret}A`,
 			`#pair=${secret}&x`,
 			`#pair=${secret.slice(1)}+`,
-			`#handoff=${secret.slice(1)}`,
+			`#handoff=${secret}`,
 			`#other=${secret}`,
 			"#s/pane-1",
 		]) {

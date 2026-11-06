@@ -1,7 +1,7 @@
 // Caches the app shell so the app opens, and says the Mac is unreachable, when the Mac is not.
 // The API is never cached.
 /** 0.0.N, one more for every change to the app: a changed sw.js is what makes the phone update. */
-const VERSION = "0.0.57";
+const VERSION = "0.0.58";
 const CACHE = `bluclawd-shell-${VERSION}`;
 const SHELL = [
 	"/",
@@ -111,13 +111,7 @@ self.addEventListener("notificationclick", (event) => {
 
 self.addEventListener("fetch", (event) => {
 	const url = new URL(event.request.url);
-	// A query carries a secret (the manifest's handoff), which must not land in the cache.
-	if (
-		event.request.method !== "GET" ||
-		url.origin !== self.location.origin ||
-		url.pathname.startsWith("/api/") ||
-		url.search
-	)
+	if (event.request.method !== "GET" || url.origin !== self.location.origin || url.pathname.startsWith("/api/"))
 		return;
 	// A new build shows from the open after the one that fetched it.
 	event.respondWith(shellResponse(event));

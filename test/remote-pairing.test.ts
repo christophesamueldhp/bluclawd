@@ -93,37 +93,6 @@ describe("remote pairing", () => {
 		expect("token" in store.claimSecret(secret, "iPhone", 1)).toBe(true);
 	});
 
-	it("hands a paired device's pairing to its Home Screen app once, as a device of its own, within 30 minutes", () => {
-		const token = pairDevice("iPhone");
-		const device = store.authenticate(token, 2)!;
-		const handoff = store.issueHandoff(device.id, 0);
-		expect(handoff).toMatch(/^[\w-]{22}$/);
-		expect(store.exchangeHandoff("x".repeat(22), "iPhone (Home Screen)", 1)).toEqual({ error: "invalid_handoff" });
-		const result = store.exchangeHandoff(handoff, "iPhone (Home Screen)", 1);
-		if (!("token" in result)) throw new Error(result.error);
-		expect(store.authenticate(result.token, 2)?.name).toBe("iPhone (Home Screen)");
-		expect(store.authenticate(token, 2)?.id).toBe(device.id);
-		expect(store.exchangeHandoff(handoff, "iPhone (Home Screen)", 2)).toEqual({ error: "invalid_handoff" });
-		expect(readFileSync(path, "utf8")).not.toContain(handoff);
-		const late = store.issueHandoff(device.id, 0);
-		expect(store.exchangeHandoff(late, "x", 30 * 60_000 + 1)).toEqual({ error: "invalid_handoff" });
-	});
-
-	it("gives a device the same handoff until it is used or expires, and none once the device is removed", () => {
-		const device = store.authenticate(pairDevice("iPhone"), 2)!;
-		const first = store.issueHandoff(device.id, 0);
-		expect(store.issueHandoff(device.id, 30 * 60_000)).toBe(first);
-		const fresh = store.issueHandoff(device.id, 30 * 60_000 + 1);
-		expect(fresh).not.toBe(first);
-		expect(store.exchangeHandoff(first, "x", 30 * 60_000 + 2)).toEqual({ error: "invalid_handoff" });
-		expect("token" in store.exchangeHandoff(fresh, "x", 30 * 60_000 + 2)).toBe(true);
-		const next = store.issueHandoff(device.id, 30 * 60_000 + 3);
-		expect(next).not.toBe(fresh);
-		store.revoke(device.id);
-		expect(store.exchangeHandoff(next, "x", 30 * 60_000 + 4)).toEqual({ error: "invalid_handoff" });
-		expect(store.load().devices.map((d) => d.name)).toEqual(["x"]);
-	});
-
 	it("invalidates a code after five wrong attempts", () => {
 		const { code } = store.createCode(0);
 		const wrong = code === "000000" ? "111111" : "000000";
