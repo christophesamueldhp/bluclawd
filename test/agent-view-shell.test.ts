@@ -63,6 +63,13 @@ describe("a ! command's row, as bluclawd's", () => {
 
 function setup(shells: ShellInfo[]) {
 	const calls: unknown[][] = [];
+	/** Every tmux read the view made, and the output its captures return. */
+	const tmux = {
+		reads: 0,
+		output: ["$ npm test", "", "✓ 12 passed"],
+		outputOf: {} as Record<string, string[]>,
+		gates: {} as Record<string, Promise<void>>,
+	};
 	const client = {
 		list: async () => [],
 		ensureDaemon: async () => true,
@@ -84,9 +91,20 @@ function setup(shells: ShellInfo[]) {
 			calls.push(["startShell", cwd, command]);
 			return "sh-new";
 		},
-		listShells: () => shells,
+		listShells: () => {
+			tmux.reads++;
+			return shells;
+		},
+		listShellsAsync: async () => {
+			tmux.reads++;
+			return shells;
+		},
 		stopShell: (name) => calls.push(["stopShell", name]),
-		capture: () => ["$ npm test", "", "✓ 12 passed"],
+		captureAsync: async (name) => {
+			tmux.reads++;
+			await tmux.gates[name];
+			return tmux.outputOf[name] ?? tmux.output;
+		},
 	};
 	const view = new AgentView({
 		ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
@@ -105,7 +123,7 @@ function setup(shells: ShellInfo[]) {
 			.render(120)
 			.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""))
 			.join("\n");
-	return { view, calls, flush, text };
+	return { view, calls, flush, text, tmux };
 }
 
 describe("! in agent view's composer", () => {
@@ -130,6 +148,61 @@ describe("! in agent view's composer", () => {
 		view.handleInput(ENTER);
 		await flush();
 		expect(text()).toContain("a shell command takes no reply");
+	});
+
+	it("a peek at a command reads no tmux while it draws; each refresh brings its newer output", async () => {
+		const { view, text, flush, tmux } = setup([shell()]);
+		await view.onShow();
+		await flush();
+		view.handleInput(" ");
+		await flush();
+		expect(text()).toContain("✓ 12 passed");
+		const reads = tmux.reads;
+		for (let i = 0; i < 10; i++) text();
+		expect(tmux.reads).toBe(reads);
+		tmux.output = ["$ npm test", "", "✓ 13 passed"];
+		await waitFor(() => expect(text()).toContain("✓ 13 passed"));
+		view.close();
+	});
+
+	it("↓ in a peek moves it to the next command, whose output shows at once", async () => {
+		const { view, text, flush, tmux } = setup([
+			shell({ createdAt: "2026-01-01T00:00:02.000Z" }),
+			shell({ name: "sh-2", command: "ls", createdAt: "2026-01-01T00:00:01.000Z" }),
+		]);
+		tmux.outputOf["sh-2"] = ["$ ls", "file-b"];
+		await view.onShow();
+		await flush();
+		view.handleInput(" ");
+		await flush();
+		expect(text()).toContain("✓ 12 passed");
+		view.handleInput("\x1b[B");
+		await flush();
+		expect(text()).toContain("file-b");
+		expect(text()).not.toContain("✓ 12 passed");
+		view.close();
+	});
+
+	it("a peek moved on before the last command's output came keeps the new command's", async () => {
+		const { view, text, flush, tmux } = setup([
+			shell({ createdAt: "2026-01-01T00:00:02.000Z" }),
+			shell({ name: "sh-2", command: "ls", createdAt: "2026-01-01T00:00:01.000Z" }),
+		]);
+		tmux.outputOf["sh-2"] = ["$ ls", "file-b"];
+		let land = () => {};
+		tmux.gates["sh-1"] = new Promise((resolve) => {
+			land = resolve;
+		});
+		await view.onShow();
+		await flush();
+		view.handleInput(" ");
+		view.handleInput("\x1b[B");
+		await flush();
+		expect(text()).toContain("file-b");
+		land();
+		await flush();
+		expect(text()).toContain("file-b");
+		view.close();
 	});
 
 	it("? leaves shift+↑↓ out of the grid, as a command keeps no order", async () => {
@@ -215,5 +288,18 @@ describe.skipIf(!hasTmux)("tmux runs a ! command", () => {
 			}),
 		);
 		expect(tmux.capture(ok, 10)).toEqual(["first", "last-line"]);
+	});
+
+	it("lists commands and reads output without blocking, as the sync calls do", async () => {
+		tmux = new Tmux(mkdtempSync(join(tmpdir(), "bc-shell-async-")));
+		expect(await tmux.listShellsAsync()).toEqual([]);
+		const ok = tmux.startShell(tmpdir(), "echo first; echo last-line");
+		const bad = tmux.startShell(tmpdir(), "echo oops; exit 3");
+		await waitFor(() => expect(tmux?.listShells().find((s) => s.name === bad)?.exit).toBe("3"));
+		const shells = await tmux.listShellsAsync();
+		expect(shells.find((s) => s.name === ok)).toMatchObject({ exit: "0", lastLine: "last-line" });
+		expect(shells).toEqual(tmux.listShells());
+		expect(await tmux.captureAsync(ok, 10)).toEqual(["first", "last-line"]);
+		await expect(tmux.captureAsync("sh-gone", 10)).rejects.toThrow();
 	});
 });

@@ -7,10 +7,11 @@
  * turns tmux into a transparent host: no prefix key, no status line, keys passed through.
  */
 
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { ensureServerDir, getServerDir } from "./paths.ts";
 
 /** Set in a pane's environment: the tmux session its pi runs in. */
@@ -107,6 +108,32 @@ function screenLines(out: string): string[] {
 
 type Run = (args: string[], options?: { inherit?: boolean; outsideTmux?: boolean }) => string;
 
+const execFileAsync = promisify(execFile);
+
+const LIST_SHELLS = [
+	"list-sessions",
+	"-F",
+	"#{session_name}\t#{session_created}\t#{@bluclawd_exit}\t#{@bluclawd_stopped}\t#{@bluclawd_cwd}\t#{@bluclawd_command}",
+];
+
+/** The `!` commands in `list-sessions` output, without their last line. */
+function parseShells(out: string): Omit<ShellInfo, "lastLine">[] {
+	const shells: Omit<ShellInfo, "lastLine">[] = [];
+	for (const line of out.split("\n")) {
+		const [name, created, exit, stopped, cwd, ...command] = line.split("\t");
+		if (!name?.startsWith(SHELL_PREFIX)) continue;
+		shells.push({
+			name,
+			command: command.join("\t"),
+			cwd: cwd ?? "",
+			createdAt: new Date(Number(created) * 1000).toISOString(),
+			exit: exit || undefined,
+			stopped: stopped === "1",
+		});
+	}
+	return shells;
+}
+
 /** Ends session `name`, as a hang-up; one already gone, or that tmux cannot reach now, is left as it is. */
 export function endPane(tmux: Pick<Tmux, "end">, name: string): void {
 	try {
@@ -119,6 +146,7 @@ export function endPane(tmux: Pick<Tmux, "end">, name: string): void {
 export class Tmux {
 	readonly dir: string;
 	private readonly run: Run;
+	private readonly runAsync: (args: string[]) => Promise<string>;
 	private readonly timeoutMs: number | undefined;
 	/** tmux.conf is written by this instance's first command, not by each: the daemon runs several a second. */
 	private configured = false;
@@ -128,6 +156,7 @@ export class Tmux {
 	constructor(dir: string = getServerDir(), run?: Run, options: { timeoutMs?: number } = {}) {
 		this.dir = dir;
 		this.run = run ?? ((args, options) => this.exec(args, options));
+		this.runAsync = run ? async (args) => run(args) : (args) => this.execAsync(args);
 		this.timeoutMs = options.timeoutMs;
 	}
 
@@ -220,35 +249,39 @@ export class Tmux {
 	listShells(): ShellInfo[] {
 		let out: string;
 		try {
-			out = this.run([
-				"list-sessions",
-				"-F",
-				"#{session_name}\t#{session_created}\t#{@bluclawd_exit}\t#{@bluclawd_stopped}\t#{@bluclawd_cwd}\t#{@bluclawd_command}",
-			]);
+			out = this.run(LIST_SHELLS);
 		} catch {
 			return []; // no server yet
 		}
-		const shells: ShellInfo[] = [];
-		for (const line of out.split("\n")) {
-			const [name, created, exit, stopped, cwd, ...command] = line.split("\t");
-			if (!name?.startsWith(SHELL_PREFIX)) continue;
+		return parseShells(out).map((shell) => {
 			let lastLine: string | undefined;
 			try {
-				lastLine = this.capture(name, 50).at(-1);
+				lastLine = this.capture(shell.name, 50).at(-1);
 			} catch {
 				// it ended meanwhile
 			}
-			shells.push({
-				name,
-				command: command.join("\t"),
-				cwd: cwd ?? "",
-				createdAt: new Date(Number(created) * 1000).toISOString(),
-				exit: exit || undefined,
-				stopped: stopped === "1",
-				lastLine,
-			});
+			return { ...shell, lastLine };
+		});
+	}
+
+	/** {@link listShells} without blocking: tmux runs off the main thread, the captures at once. */
+	async listShellsAsync(): Promise<ShellInfo[]> {
+		let out: string;
+		try {
+			out = await this.runAsync(LIST_SHELLS);
+		} catch {
+			return []; // no server yet
 		}
-		return shells;
+		return Promise.all(
+			parseShells(out).map(async (shell) => ({
+				...shell,
+				// undefined: it ended meanwhile
+				lastLine: await this.captureAsync(shell.name, 50).then(
+					(lines) => lines.at(-1),
+					() => undefined,
+				),
+			})),
+		);
 	}
 
 	/** Stop a running `!` command; its row stays, stopped. */
@@ -278,6 +311,11 @@ export class Tmux {
 	/** The last `lines` lines of a session's output, trailing blank lines dropped. */
 	capture(name: string, lines: number): string[] {
 		return screenLines(this.run(["capture-pane", "-p", "-t", `=${name}:`, "-S", `-${lines}`]));
+	}
+
+	/** {@link capture} without blocking. */
+	async captureAsync(name: string, lines: number): Promise<string[]> {
+		return screenLines(await this.runAsync(["capture-pane", "-p", "-t", `=${name}:`, "-S", `-${lines}`]));
 	}
 
 	/** Press keys in a session's pane, by tmux key name (`Up`, `Enter`, …). */
@@ -403,16 +441,7 @@ export class Tmux {
 	}
 
 	private exec(args: string[], options: { inherit?: boolean; outsideTmux?: boolean } = {}): string {
-		const config = join(this.dir, "tmux.conf");
-		if (!this.configured) {
-			ensureServerDir(this.dir);
-			writeFileSync(config, CONFIG);
-			this.configured = true;
-		}
-		const env = { ...process.env };
-		// Attaching from inside another tmux is refused unless TMUX is unset.
-		if (options.outsideTmux) delete env.TMUX;
-		const argv = ["-S", this.socket, "-f", config, ...args];
+		const { argv, env } = this.prepare(args, options.outsideTmux);
 		if (options.inherit) {
 			spawnSync("tmux", argv, { stdio: "inherit", env });
 			return "";
@@ -423,5 +452,24 @@ export class Tmux {
 			stdio: ["ignore", "pipe", "pipe"],
 			timeout: this.timeoutMs,
 		});
+	}
+
+	private async execAsync(args: string[]): Promise<string> {
+		const { argv, env } = this.prepare(args);
+		return (await execFileAsync("tmux", argv, { encoding: "utf8", env, timeout: this.timeoutMs })).stdout;
+	}
+
+	/** tmux's argv and environment for `args`; the first call writes tmux.conf. */
+	private prepare(args: string[], outsideTmux?: boolean): { argv: string[]; env: NodeJS.ProcessEnv } {
+		const config = join(this.dir, "tmux.conf");
+		if (!this.configured) {
+			ensureServerDir(this.dir);
+			writeFileSync(config, CONFIG);
+			this.configured = true;
+		}
+		const env = { ...process.env };
+		// Attaching from inside another tmux is refused unless TMUX is unset.
+		if (outsideTmux) delete env.TMUX;
+		return { argv: ["-S", this.socket, "-f", config, ...args], env };
 	}
 }

@@ -75,8 +75,9 @@ function recorder(overrides: Partial<RowClient> = {}) {
 		detach: () => calls.push(["detach"]),
 		startShell: () => "sh-new",
 		listShells: () => [],
+		listShellsAsync: async () => [],
 		stopShell: (name) => calls.push(["stopShell", name]),
-		capture: () => [],
+		captureAsync: async () => [],
 	};
 	return { calls, client, panes };
 }
@@ -803,7 +804,7 @@ describe("agent view in pane mode", () => {
 			appName: "bluclawd",
 			cwd: HERE,
 			home: "/home/me",
-			panes: { listShells: () => [] } as unknown as PaneOps,
+			panes: { listShells: () => [], listShellsAsync: async () => [] } as unknown as PaneOps,
 			onClose: () => {},
 			hide: "pi-gone",
 			onDrawn: drawn,

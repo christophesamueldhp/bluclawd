@@ -31,11 +31,13 @@ export interface PaneOps {
 	detach(): void;
 	/** Run a `!` command in a session of its own; returns its name. */
 	startShell(cwd: string, command: string): string;
+	/** For the first frame only: it blocks on tmux. */
 	listShells(): ShellInfo[];
+	listShellsAsync(): Promise<ShellInfo[]>;
 	/** Stop a running `!` command; its row stays, stopped. */
 	stopShell(name: string): void;
 	/** A session's last `lines` lines of output. */
-	capture(name: string, lines: number): string[];
+	captureAsync(name: string, lines: number): Promise<string[]>;
 }
 
 /** What row actions need of the daemon. */
