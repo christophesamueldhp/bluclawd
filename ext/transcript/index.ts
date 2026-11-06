@@ -1,13 +1,21 @@
 /**
  * The transcript's tool look: a collapsed tool call is one `⏺ Name(arg)` line
- * with a short `⎿` summary. Expanded views, and every tool without a look here,
- * are pi's own rendering (ADR 0007).
+ * with a short `⎿` summary. Expanded views of pi's tools, and every tool without
+ * a look here, are pi's own rendering (ADR 0007); bluclawd's own tools, which pi
+ * has no renderer for, show their whole output expanded.
  */
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
 import type { BashToolDetails, ExtensionAPI, ReadToolDetails } from "@earendil-works/pi-coding-agent";
-import { stripAnsi } from "../../daemon/ansi.ts";
-import { type CompactLook, compactTool, hasPiRenderers, ownTool } from "../_shared/tool-line.ts";
+import {
+	type CompactLook,
+	compactTool,
+	hasPiRenderers,
+	type OwnLook,
+	outputOf,
+	ownTool,
+	type TextResult,
+} from "../_shared/tool-line.ts";
 import { RUNNING_IN_BACKGROUND, wentToBackground } from "../background-bash/bash-tool.ts";
 
 /** A path as the user would type it: relative inside the working directory, `~` for home. */
@@ -25,6 +33,7 @@ const fileArg = (args: Record<string, unknown>, cwd: string) => displayPath(args
 
 const count = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 const lines = (n: number) => count(n, "line", "lines");
+const lineCount = (text: string) => (text === "" ? 0 : text.split("\n").length);
 
 const read: CompactLook = {
 	title: "Read",
@@ -38,17 +47,9 @@ const read: CompactLook = {
 		const body = text
 			.replace(/\n\n\[\d+ more lines in file\. Use offset=\d+ to continue\.\]$/, "")
 			.replace(/\n$/, "");
-		return `Read ${lines(body === "" ? 0 : body.split("\n").length)}`;
+		return `Read ${lines(lineCount(body))}`;
 	},
 };
-
-/** A result's text as the terminal shows it: no colour codes or carriage returns, no surrounding blank lines. */
-type TextResult = { content: { type: string; text?: string }[] };
-
-function outputOf(result: TextResult): string {
-	const text = result.content.map((block) => (block.type === "text" ? (block.text ?? "") : "")).join("\n");
-	return stripAnsi(text).replace(/\r/g, "").trim();
-}
 
 const BASH_TAIL = 3;
 
@@ -115,9 +116,6 @@ const write: CompactLook = { title: "Write", arg: fileArg };
 
 const LOOKS: Record<string, CompactLook> = { read, bash, grep, find, ls, edit, write };
 
-/** A bluclawd tool's look; pi has no renderer of its own for these. */
-type OwnLook = CompactLook & Required<Pick<CompactLook, "summary">>;
-
 const str = (value: unknown) => (typeof value === "string" ? value : "");
 const quoted = (value: unknown) => JSON.stringify(str(value));
 const detail = (result: { details?: unknown }, key: string): unknown =>
@@ -126,7 +124,10 @@ const detail = (result: { details?: unknown }, key: string): unknown =>
 const websearch: OwnLook = {
 	title: "WebSearch",
 	arg: (args) => quoted(args.query),
-	summary: (result) => count(Number(detail(result, "results") ?? 0), "result", "results"),
+	summary(result) {
+		const results = count(Number(detail(result, "results") ?? 0), "result", "results");
+		return detail(result, "answered") ? `Answered, ${results}` : results;
+	},
 };
 
 const webfetch: OwnLook = {
@@ -158,7 +159,7 @@ const memory: OwnLook = {
 	title: "Memory",
 	arg: (args) => `${str(args.action)} ${str(args.name)}`.trim(),
 	summary: (result, _theme, args) =>
-		args.action === "read" ? `Read ${lines(outputOf(result).split("\n").length)}` : firstLine(result),
+		args.action === "read" ? `Read ${lines(lineCount(outputOf(result)))}` : firstLine(result),
 };
 
 const monitor: OwnLook = {
@@ -182,8 +183,8 @@ const subagent: OwnLook = {
 	summary(result, theme) {
 		if (detail(result, "deliveryMode") === "background") return theme.fg("dim", "Running in the background");
 		// A report starts with `[Report from subagent …]`, which says who sent it, not what it says.
-		const report = outputOf(result).replace(/^\[Report from subagent [^\n]*\]\n\n/, "");
-		return `Reported (${lines(report === "" ? 0 : report.split("\n").length)})`;
+		const report = outputOf(result).replace(/^\[Report from subagent [^\n]*\]\n*/, "");
+		return `Reported (${lines(lineCount(report))})`;
 	},
 };
 
@@ -199,9 +200,7 @@ const subagent_status: OwnLook = {
 	// Each run it lists is a block with its task and elapsed time under it; no run is one sentence.
 	summary: (result) => {
 		const output = outputOf(result);
-		return output.includes("\n  task: ")
-			? count(output.split("\n\n").length, "subagent", "subagents")
-			: firstLine(result);
+		return output.includes("\n  task: ") ? count(output.split("\n\n").length, "run", "runs") : firstLine(result);
 	},
 };
 

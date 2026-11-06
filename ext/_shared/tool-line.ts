@@ -2,7 +2,8 @@
  * The collapsed look of a tool call in the transcript: `⏺ Name(arg)`, with `⎿ summary` under it.
  *
  * It wraps pi's own renderers (ADR 0007): the expanded view and an error's result
- * are pi's, unchanged.
+ * are pi's, unchanged. bluclawd's own tools, which pi has no renderer for, get the
+ * same line over their whole output instead.
  */
 import type { Theme, ToolRenderers } from "@earendil-works/pi-coding-agent";
 import { type Component, Text, truncateToWidth } from "@earendil-works/pi-tui";
@@ -41,6 +42,23 @@ function summaryLines(summary: string | string[], theme: Theme): string[] {
 	const [first, ...rest] = typeof summary === "string" ? [summary] : summary;
 	return first === undefined ? [] : [`  ${theme.fg("dim", "⎿")}  ${first}`, ...rest.map((line) => `     ${line}`)];
 }
+
+/** A result's text as the terminal shows it: no colour codes or carriage returns, no surrounding blank lines. */
+export type TextResult = { content: { type: string; text?: string }[] };
+
+export function outputOf(result: TextResult): string {
+	const text = result.content.map((block) => (block.type === "text" ? (block.text ?? "") : "")).join("\n");
+	return stripAnsi(text).replace(/\r/g, "").trim();
+}
+
+/** The `⏺ Name(arg)` line; the dot is dim while the call runs, red once it failed. */
+function callLine(look: CompactLook, args: unknown, theme: Theme, context: ToolRenderContext): string {
+	const dot = context.isPartial ? "dim" : context.isError ? "error" : "accent";
+	const arg = look.arg((args ?? {}) as Record<string, unknown>, context.cwd);
+	return `${theme.fg(dot, DOT)} ${theme.fg("toolTitle", theme.bold(look.title))}(${arg})`;
+}
+
+const argsOf = (context: ToolRenderContext) => (context.args ?? {}) as Record<string, unknown>;
 
 const isBlank = (line: string) => stripAnsi(line).trim() === "";
 
@@ -100,9 +118,7 @@ export function compactTool(pi: PiRenderers, look: CompactLook): ToolRenderers {
 		renderShell: pi.renderShell,
 		renderCall(args, theme, context) {
 			if (context.expanded) return pi.renderCall(args, theme, forPi(context));
-			const dot = context.isPartial ? "dim" : context.isError ? "error" : "accent";
-			const arg = look.arg((args ?? {}) as Record<string, unknown>, context.cwd);
-			const line = `${theme.fg(dot, DOT)} ${theme.fg("toolTitle", theme.bold(look.title))}(${arg})`;
+			const line = callLine(look, args, theme, context);
 			if (!look.summary) {
 				const last = context.lastComponent;
 				const call = own(
@@ -131,50 +147,35 @@ export function compactTool(pi: PiRenderers, look: CompactLook): ToolRenderers {
 			// Likewise pi's result, which also stops what it started while expanded (bash's redraw every second).
 			pi.renderResult(result, options, theme, forPi(context));
 			const component = own(context.lastComponent, Summary, () => new Summary());
-			component.lines = summaryLines(
-				look.summary(result, theme, (context.args ?? {}) as Record<string, unknown>),
-				theme,
-			);
+			component.lines = summaryLines(look.summary(result, theme, argsOf(context)), theme);
 			return component;
 		},
 	};
 }
 
-/** A result's text, every line, as pi's own fallback shows it: no colour codes or carriage returns. */
-function fullOutput(result: ToolResult, theme: Theme): string {
-	const text = result.content.map((block) => (block.type === "text" ? block.text : "")).join("\n");
-	return stripAnsi(text)
-		.replace(/\r/g, "")
-		.trim()
-		.split("\n")
-		.map((line) => theme.fg("toolOutput", line))
-		.join("\n");
-}
+/** A look for a bluclawd tool: it always has a summary, since pi has no body to show under the call. */
+export type OwnLook = CompactLook & Required<Pick<CompactLook, "summary">>;
 
 /**
  * The look of a bluclawd tool, which pi has no renderer for: the same `⏺ Name(arg)`
  * line, and its whole output, wrapped, when expanded or failed.
  */
-export function ownTool(look: CompactLook & Required<Pick<CompactLook, "summary">>): ToolRenderers {
+export function ownTool(look: OwnLook): ToolRenderers {
 	return {
 		renderCall(args, theme, context) {
-			const dot = context.isPartial ? "dim" : context.isError ? "error" : "accent";
-			const arg = look.arg((args ?? {}) as Record<string, unknown>, context.cwd);
 			const call = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
-			call.setText(`${theme.fg(dot, DOT)} ${theme.fg("toolTitle", theme.bold(look.title))}(${arg})`);
+			call.setText(callLine(look, args, theme, context));
 			return call;
 		},
 		renderResult(result, options, theme, context) {
 			if (options.expanded || context.isError) {
 				const output = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
-				output.setText(fullOutput(result, theme));
+				const all = outputOf(result).split("\n");
+				output.setText(all.map((line) => theme.fg("toolOutput", line)).join("\n"));
 				return output;
 			}
 			const component = context.lastComponent instanceof Summary ? context.lastComponent : new Summary();
-			component.lines = summaryLines(
-				look.summary(result, theme, (context.args ?? {}) as Record<string, unknown>),
-				theme,
-			);
+			component.lines = summaryLines(look.summary(result, theme, argsOf(context)), theme);
 			return component;
 		},
 	};

@@ -12,6 +12,14 @@ describe("websearch", () => {
 		});
 		expect(out).toBe(`${DOT} WebSearch("pi tui")\n  ⎿  8 results`);
 	});
+
+	it("says it got an answer when the provider gave one", () => {
+		const out = row("websearch", {
+			args: { query: "what is pi" },
+			result: text("Pi is a coding agent.\n\nvia openai", { provider: "openai", results: 0, answered: true }),
+		});
+		expect(out).toBe(`${DOT} WebSearch("what is pi")\n  ⎿  Answered, 0 results`);
+	});
 });
 
 describe("webfetch", () => {
@@ -89,6 +97,16 @@ describe("subagent", () => {
 	});
 });
 
+describe("a subagent report", () => {
+	it("counts no lines when the run reported nothing", () => {
+		const out = row("subagent", {
+			args: { agent: "explorer", task: "t" },
+			result: text('[Report from subagent "explorer-1" (sub_1), from another session.]\n\n'),
+		});
+		expect(out).toBe(`${DOT} Subagent(explorer)\n  ⎿  Reported (0 lines)`);
+	});
+});
+
 describe("the subagent tools", () => {
 	it.each([
 		["subagent_message", { to: "auth-scan", content: "hi" }, "Message 2 accepted.", "SubagentMessage(auth-scan)"],
@@ -100,10 +118,10 @@ describe("the subagent tools", () => {
 		expect(row(tool, { args, result: text(answer) })).toBe(`${DOT} ${call}\n  ⎿  ${answer}`);
 	});
 
-	it("subagent_status counts the runs it lists", () => {
+	it("subagent_status counts the Runs it lists", () => {
 		const run = (name: string) => `${name} (explorer, sub_1): working\n  task: t\n  elapsed: 1m`;
 		const out = row("subagent_status", { args: {}, result: text(`${run("a")}\n\n${run("b")}`) });
-		expect(out).toBe(`${DOT} SubagentStatus()\n  ⎿  2 subagents`);
+		expect(out).toBe(`${DOT} SubagentStatus()\n  ⎿  2 runs`);
 	});
 
 	it("subagent_models counts the models it lists", () => {

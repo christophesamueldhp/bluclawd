@@ -147,8 +147,9 @@ export default function web(pi: ExtensionAPI) {
 					details: {
 						provider: result.provider,
 						fallbackReason: result.fallbackReason,
-						results: result.hits.length,
 						...result.details,
+						results: result.hits.length,
+						answered: Boolean(result.answer),
 					},
 				};
 			} catch (error) {
