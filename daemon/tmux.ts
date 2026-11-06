@@ -254,7 +254,7 @@ export class Tmux {
 	/** Stop a running `!` command; its row stays, stopped. */
 	stopShell(name: string): void {
 		this.run(["set-option", "-t", `=${name}:`, "@bluclawd_stopped", "1"]);
-		const pid = Number(this.run(["display-message", "-p", "-t", `=${name}:`, "#{pane_pid}"]).trim());
+		const pid = Number(this.display(name, "#{pane_pid}").trim());
 		if (!(pid > 1)) throw new Error(`couldn't find the shell running in ${name}`);
 		// Snapshot before killing parents: otherwise their children are reparented and lost.
 		const processes = execFileSync("ps", ["-axo", "pid=,ppid="], { encoding: "utf8" })
@@ -314,12 +314,12 @@ export class Tmux {
 	}
 
 	openedFromView(name: string): boolean {
-		return this.run(["display-message", "-p", "-t", `=${name}:`, "#{@bluclawd_back}"]).trim() === "view";
+		return this.display(name, "#{@bluclawd_back}").trim() === "view";
 	}
 
 	/** Whether `name`'s agent view has drawn; throws once the session is gone. */
 	viewReady(name: string): boolean {
-		return this.run(["display-message", "-p", "-t", `=${name}:`, "#{@bluclawd_view_ready}"]).trim() === "1";
+		return this.display(name, "#{@bluclawd_view_ready}").trim() === "1";
 	}
 
 	/** Whether session `name` is still there; throws when tmux could not say. */
@@ -368,7 +368,7 @@ export class Tmux {
 	kill(name: string): void {
 		let pid: number;
 		try {
-			pid = Number(this.run(["display-message", "-p", "-t", `=${name}:`, "#{pane_pid}"]).trim());
+			pid = Number(this.display(name, "#{pane_pid}").trim());
 		} catch (error) {
 			if (Tmux.gone(error)) return;
 			// Taken for gone, its pi would beat on and bring back the row deleted after this.
@@ -386,6 +386,20 @@ export class Tmux {
 		} catch {
 			// the session ended with its process
 		}
+	}
+
+	/**
+	 * `format` expanded for session `name`. For a session that is not there, tmux prints nothing
+	 * and succeeds; that is thrown as tmux's "can't find session", which `Tmux.gone` knows.
+	 */
+	private display(name: string, format: string): string {
+		const out = this.run(["display-message", "-p", "-t", `=${name}:`, `#{session_id} ${format}`]);
+		const space = out.indexOf(" ");
+		if (!out.startsWith("$") || space < 0) {
+			const stderr = `can't find session: ${name}\n`;
+			throw Object.assign(new Error(stderr.trim()), { stderr });
+		}
+		return out.slice(space + 1);
 	}
 
 	private exec(args: string[], options: { inherit?: boolean; outsideTmux?: boolean } = {}): string {

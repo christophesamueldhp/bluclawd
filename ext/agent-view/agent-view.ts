@@ -308,6 +308,8 @@ export class AgentView implements Component, Focusable {
 	private ordering: Promise<void> = Promise.resolve();
 	/** Rows this view deleted, and when the delete landed. */
 	private deleted = new Map<string, number>();
+	/** Rows whose delete is under way: out of the list until it lands, back if it fails. */
+	private deleting = new Set<string>();
 	/** The `n:` search the focus last jumped to the best match of. */
 	private searchedFor: string | undefined;
 	private closed = false;
@@ -579,7 +581,9 @@ export class AgentView implements Component, Focusable {
 		const instances = order.size
 			? this.instances.map((i) => (order.has(i.id) ? { ...i, sortOrder: order.get(i.id) } : i))
 			: this.instances;
-		this.allRows = [...collectRows(instances, this.opts.self?.()), ...this.shells.map(rowFromShell)];
+		this.allRows = [...collectRows(instances, this.opts.self?.()), ...this.shells.map(rowFromShell)].filter(
+			(r) => !this.deleting.has(r.id),
+		);
 		this.runs = collectRuns(instances, this.allRows, this.opts.self?.());
 		// Opened in a run, its orchestrator's runs show at first, with it among them.
 		if (!this.ownRunShown)
@@ -950,13 +954,18 @@ export class AgentView implements Component, Focusable {
 			// A run is closed, never deleted: its row goes with its orchestrator's.
 			if (item.run) return;
 			this.disarm();
-			const outcome = await this.actions.delete(row, {
-				leaving: () => {
-					this.leaving = true;
-					this.say("Deleting…");
-				},
-				left: () => this.teardown(),
-			});
+			this.deleting.add(row.id);
+			this.recompute();
+			this.render_();
+			const outcome = await this.actions
+				.delete(row, {
+					leaving: () => {
+						this.leaving = true;
+						this.say("Deleting…");
+					},
+					left: () => this.teardown(),
+				})
+				.finally(() => this.deleting.delete(row.id));
 			if (outcome.kind === "left") return;
 			this.leaving = false;
 			if (outcome.kind === "failed") this.say(outcome.text, "error");
