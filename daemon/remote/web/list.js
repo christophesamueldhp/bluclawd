@@ -18,11 +18,12 @@ export function rowTone(session) {
 /**
  * When a row's age counts from. A live row's `finishedAt` is its last entry's time, which says
  * when it went quiet only once it has: a row that is working or waits on an answer counts from
- * when it started. Pure, so the tests import it.
+ * when its turn started, or from when it started for a pane that does not say. Pure, so the tests
+ * import it.
  * @param {Session} session @returns {string | undefined}
  */
 export function ageAt(session) {
-	return (midTurn(session) ? undefined : session.finishedAt) ?? session.createdAt;
+	return (midTurn(session) ? session.turnStartedAt : session.finishedAt) ?? session.createdAt;
 }
 
 /** `just now`, `5m`, `3h`, `2d`. @param {string | undefined} iso @param {number} now */

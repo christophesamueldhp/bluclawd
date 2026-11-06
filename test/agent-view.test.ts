@@ -334,6 +334,33 @@ describe("rows", () => {
 		expect(compactAge(3 * 3_600_000)).toBe("3h");
 	});
 
+	it("a live row mid-turn counts from its turn's start, when its pane reports one", () => {
+		const turnStartedAt = new Date(NOW - 20_000).toISOString();
+		const row = (activity: "working" | "awaiting_input") =>
+			rowFromSummary(
+				{ id: "w", status: "online", cwd: HERE, activity, createdAt: ago(180), turnStartedAt },
+				undefined,
+			);
+		expect(rowAge(row("working"), NOW)).toBe("20s");
+		expect(rowAge(row("awaiting_input"), NOW)).toBe("20s");
+		for (const outcome of ["done", "failed"] as const) {
+			const ended = rowFromSummary(
+				{
+					id: "d",
+					status: "online",
+					cwd: HERE,
+					outcome,
+					createdAt: ago(9),
+					finishedAt: ago(3),
+					turnStartedAt: ago(5),
+				},
+				undefined,
+			);
+			expect(ended.state).toBe(outcome);
+			expect(rowAge(ended, NOW), outcome).toBe("6m");
+		}
+	});
+
 	it.each([
 		["working", ["work"]],
 		["active", ["work"]],

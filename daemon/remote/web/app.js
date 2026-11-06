@@ -64,7 +64,7 @@ import { composerAction, duration, STOP_GUARD_MS, turnSince, turnTimes } from ".
  * Mac, which still has it (asleep or blocked), and may come back. `verdict`: the daemon's, on
  * whether a Chat may act on it, and why not.
  * @typedef {{ act: true } | { act: false, reason: "silent" | "starting" | "not_running" }} Verdict
- * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, dialog?: { kind: string, title?: string }, livePanes?: number, starting?: true, silent?: true, verdict: Verdict }} Session
+ * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, turnStartedAt?: string, dialog?: { kind: string, title?: string }, livePanes?: number, starting?: true, silent?: true, verdict: Verdict }} Session
  */
 /** `aborted`: a reply its turn was stopped in, empty when stopped before it said anything. `at`: when pi wrote it. @typedef {{ kind: string, id: string, at?: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, aborted?: boolean, toolCallId?: string, toolName?: string, command?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */

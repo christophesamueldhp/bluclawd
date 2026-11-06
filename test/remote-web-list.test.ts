@@ -135,6 +135,13 @@ describe("a row's age on the phone", () => {
 		expect(ageAt(row("a", "needs", { createdAt, finishedAt }))).toBe(createdAt);
 	});
 
+	it("counts from its turn's start while it works or waits on an answer, when its pane reports one", () => {
+		const turnStartedAt = "2026-10-15T10:59:40.000Z";
+		expect(ageAt(row("a", "working", { createdAt, finishedAt, turnStartedAt }))).toBe(turnStartedAt);
+		expect(ageAt(row("a", "needs", { createdAt, finishedAt, turnStartedAt }))).toBe(turnStartedAt);
+		expect(ageAt(row("a", "idle", { createdAt, finishedAt, turnStartedAt }))).toBe(finishedAt);
+	});
+
 	it("falls back on its start, and on nothing", () => {
 		expect(ageAt(row("a", "idle", { createdAt }))).toBe(createdAt);
 		expect(ageAt(row("a", "idle"))).toBeUndefined();

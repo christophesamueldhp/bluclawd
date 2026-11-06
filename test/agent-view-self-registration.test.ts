@@ -7,6 +7,7 @@ import {
 	dialogDetail,
 	ForegroundActivity,
 	SelfRegistration,
+	turnStartedAt,
 	waitingDetail,
 } from "../ext/agent-view/self-registration.ts";
 
@@ -112,6 +113,26 @@ describe("deriveLabel (roster title for the foreground session)", () => {
 	it("is undefined for an empty session, so the roster shows the id", () => {
 		expect(deriveLabel(undefined, [])).toBeUndefined();
 		expect(deriveLabel("", [assistant("hi")])).toBeUndefined();
+	});
+});
+
+describe("turnStartedAt (when the turn a row is in began)", () => {
+	const entry = (role: string, timestamp: string) => ({ type: "message", timestamp, message: { role, content: "x" } });
+
+	it("is the latest prompt's time, so a prompt taken from the queue mid-run starts the time again", () => {
+		const entries = [
+			entry("user", "2026-10-15T10:00:00.000Z"),
+			entry("assistant", "2026-10-15T10:00:05.000Z"),
+			entry("user", "2026-10-15T10:01:00.000Z"),
+			entry("toolResult", "2026-10-15T10:01:30.000Z"),
+			{ type: "custom", timestamp: "2026-10-15T10:02:00.000Z" },
+		];
+		expect(turnStartedAt(entries)).toBe("2026-10-15T10:01:00.000Z");
+	});
+
+	it("is undefined before the session has a prompt", () => {
+		expect(turnStartedAt([])).toBeUndefined();
+		expect(turnStartedAt([entry("assistant", "2026-10-15T10:00:05.000Z")])).toBeUndefined();
 	});
 });
 
