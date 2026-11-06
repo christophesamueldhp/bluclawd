@@ -2,8 +2,12 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
 	ageAt,
+	ageText,
+	isUnseen,
+	midTurn,
 	paneUp,
 	replyBox,
+	rowTone,
 	STATE_WORDS,
 	sessionGroups,
 	sharedWarning,
@@ -143,5 +147,57 @@ describe("a session started from the phone", () => {
 		expect(paneUp([row("r1", "working", { starting: true })], "r1")).toBe(false);
 		expect(paneUp([row("r2", "working")], "r1")).toBe(false);
 		expect(paneUp([row("r1", "working")], "r1")).toBe(true);
+	});
+});
+
+describe("a row's age as the phone writes it", () => {
+	const now = Date.parse(finishedAt);
+	const ago = (ms: number) => new Date(now - ms).toISOString();
+
+	it("reads just now, then minutes, hours and days", () => {
+		expect(ageText(ago(20_000), now)).toBe("just now");
+		expect(ageText(ago(5 * 60_000), now)).toBe("5m");
+		expect(ageText(ago(3 * 3_600_000), now)).toBe("3h");
+		expect(ageText(ago(2 * 86_400_000), now)).toBe("2d");
+		expect(ageText(undefined, now)).toBe("");
+	});
+});
+
+describe("an Unseen session on the phone", () => {
+	const since = createdAt;
+
+	it("finished a turn since its Chat was last opened here", () => {
+		const seen = { since, at: { a: "2026-10-15T10:30:00.000Z" } };
+		expect(isUnseen(row("a", "done", { finishedAt }), seen)).toBe(true);
+		expect(isUnseen(row("a", "done", { finishedAt }), { since, at: { a: finishedAt } })).toBe(false);
+	});
+
+	it("counts from when this phone began keeping track for a Chat never opened here", () => {
+		expect(isUnseen(row("a", "failed", { finishedAt }), { since, at: {} })).toBe(true);
+		expect(isUnseen(row("a", "stopped", { finishedAt }), { since: finishedAt, at: {} })).toBe(false);
+	});
+
+	it("is never a session that works, waits on an answer, or has not finished a turn", () => {
+		const seen = { since, at: {} };
+		expect(isUnseen(row("a", "working", { finishedAt }), seen)).toBe(false);
+		expect(isUnseen(row("a", "needs", { finishedAt }), seen)).toBe(false);
+		expect(isUnseen(row("a", "idle"), seen)).toBe(false);
+	});
+});
+
+describe("a row's turn and tone on the phone", () => {
+	it("is mid-turn while it works or waits on an answer", () => {
+		expect(midTurn(row("a", "working"))).toBe(true);
+		expect(midTurn(row("a", "needs"))).toBe(true);
+		for (const state of ["idle", "done", "failed", "stopped"]) expect(midTurn(row("a", state)), state).toBe(false);
+		expect(midTurn(undefined)).toBe(false);
+	});
+
+	it("is grey once stopped, disconnected or not responding, else its state's colour", () => {
+		expect(rowTone(row("a", "done"))).toBe("done");
+		expect(rowTone(row("a", "working"))).toBe("working");
+		expect(rowTone(row("a", "stopped"))).toBe("off");
+		expect(rowTone(row("a", "done", { alive: false }))).toBe("off");
+		expect(rowTone(row("a", "working", { silent: true }))).toBe("off");
 	});
 });

@@ -23,7 +23,20 @@ import { setNewOptions } from "./composer.js";
 import { diffCounts, diffHtml } from "./diff.js";
 import { ICONS } from "./icons.js";
 import { dataUrl, isImageFile, readImage } from "./image.js";
-import { ageAt, paneUp, replyBox, STATE_WORDS, sessionGroups, sharedWarning, statusGlyph, viewMode } from "./list.js";
+import {
+	ageAt,
+	ageText,
+	isUnseen,
+	midTurn,
+	paneUp,
+	replyBox,
+	rowTone,
+	STATE_WORDS,
+	sessionGroups,
+	sharedWarning,
+	statusGlyph,
+	viewMode,
+} from "./list.js";
 import { refused, shownText } from "./live.js";
 import { markdown } from "./markdown.js";
 import { loaderHtml } from "./mascot.js";
@@ -44,6 +57,7 @@ import {
 	tokens,
 	whereHtml,
 } from "./statusbar.js";
+import { composerAction, duration, STOP_GUARD_MS, turnSince, turnTimes } from "./turn.js";
 
 /**
  * `dialog`: the one it waits on, while it needs input. `silent`: its pane stopped answering the
@@ -52,17 +66,48 @@ import {
  * @typedef {{ act: true } | { act: false, reason: "silent" | "starting" | "not_running" }} Verdict
  * @typedef {{ id: string, label: string, cwd: string, band: string, state: string, alive: boolean, detail: string, createdAt?: string, finishedAt?: string, dialog?: { kind: string, title?: string }, livePanes?: number, starting?: true, silent?: true, verdict: Verdict }} Session
  */
-/** `aborted`: a reply its turn was stopped in, empty when stopped before it said anything. @typedef {{ kind: string, id: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, aborted?: boolean, toolCallId?: string, toolName?: string, command?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
+/** `aborted`: a reply its turn was stopped in, empty when stopped before it said anything. `at`: when pi wrote it. @typedef {{ kind: string, id: string, at?: string, text?: string, thinking?: string, tools?: {id: string, name: string, summary: string}[], error?: string, aborted?: boolean, toolCallId?: string, toolName?: string, command?: string, ok?: boolean, truncated?: boolean, diff?: string, diffTruncated?: boolean, images?: {index: number, mimeType: string}[] }} Message */
 /** @typedef {{ text: string, thinking?: string, tools: {id: string, name: string, summary: string, running: boolean}[] }} LiveSnapshot */
 /** @typedef {{ id: string, name: string, createdAt: string, lastUsedAt?: string, current: boolean }} Device `current`: this one */
 /** @typedef {import("./image.js").Attachment} Attachment */
 /** @typedef {import("./statusbar.js").Report} Report */
 
 /** This build's version, as sw.js caches it (a test keeps the two the same). */
-const VERSION = "0.0.56";
+const VERSION = "0.0.57";
 const VIEW_MODE_KEY = "bluclawd-view-mode";
 /** Each chat's pending prompts and unsent text, kept for when it opens again. */
 const keptPending = pendingStore(() => localStorage);
+
+const SEEN_KEY = "bluclawd-seen";
+/** When this phone last had each Chat open (see isUnseen). */
+const seen = loadSeen();
+
+/** @returns {import("./list.js").Seen} */
+function loadSeen() {
+	try {
+		const kept = JSON.parse(localStorage.getItem(SEEN_KEY) ?? "null");
+		if (typeof kept?.since === "string" && kept.at && typeof kept.at === "object") return kept;
+	} catch {}
+	// From now on: a phone that kept nothing shows none of what finished before as Unseen.
+	const fresh = { since: new Date().toISOString(), at: {} };
+	try {
+		localStorage.setItem(SEEN_KEY, JSON.stringify(fresh));
+	} catch {}
+	return fresh;
+}
+
+/** The Chat of `id` is seen now; sessions no longer listed are forgotten. @param {string} id */
+function markSeen(id) {
+	seen.at[id] = new Date().toISOString();
+	if (state.loaded) {
+		for (const key of Object.keys(seen.at)) {
+			if (key !== id && !state.sessions.some((s) => s.id === key)) delete seen.at[key];
+		}
+	}
+	try {
+		localStorage.setItem(SEEN_KEY, JSON.stringify(seen));
+	} catch {}
+}
 
 function loadViewMode() {
 	try {
@@ -270,13 +315,7 @@ function errorText(code) {
 
 /** @param {string | undefined} iso */
 function age(iso) {
-	const ms = iso ? Date.now() - Date.parse(iso) : Number.NaN;
-	if (!Number.isFinite(ms)) return "";
-	const minutes = Math.floor(ms / 60_000);
-	if (minutes < 1) return "now";
-	if (minutes < 60) return `${minutes}m`;
-	const hours = Math.floor(minutes / 60);
-	return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+	return ageText(iso, Date.now());
 }
 
 function deviceName() {
@@ -763,8 +802,17 @@ function listShell() {
 
 /** @param {Session} s */
 function rowHtml(s) {
-	const glyph = s.alive && s.state === "working" ? '<span class="session-spinner"></span>' : statusGlyph(s);
-	const status = STATE_WORDS[/** @type {keyof typeof STATE_WORDS} */ (s.state)] ?? s.state;
+	// A pane that stopped answering is not shown working, whatever it last reported.
+	const glyph =
+		s.alive && !s.silent && s.state === "working"
+			? '<span class="session-spinner"></span>'
+			: s.silent
+				? "✻"
+				: statusGlyph(s);
+	const status = s.silent
+		? "Not responding"
+		: (STATE_WORDS[/** @type {keyof typeof STATE_WORDS} */ (s.state)] ?? s.state);
+	const tone = rowTone(s);
 	// The project's folder, which the search matches too.
 	const where = s.cwd.split("/").filter(Boolean).at(-1);
 	// What it waits on or does; its band already names its state.
@@ -778,8 +826,10 @@ function rowHtml(s) {
 	]
 		.filter(Boolean)
 		.join(" · ");
-	return `<a class="row${s.alive ? "" : " closed"}" href="#s/${encodeURIComponent(s.id)}"><span class="glyph ${esc(s.state)}" aria-hidden="true">${glyph}</span>
-<span class="name">${esc(s.label)}<small><span class="session-state ${esc(s.state)}">${esc(status)}</span>${detail ? ` · ${detail}` : ""}</small></span>
+	const unseen = isUnseen(s, seen);
+	const mark = unseen ? '<span class="unseen-dot" role="img" aria-label="Unseen"></span>' : "";
+	return `<a class="row${s.alive ? "" : " closed"}${unseen ? " unseen" : ""}" href="#s/${encodeURIComponent(s.id)}"><span class="glyph ${esc(tone)}" aria-hidden="true">${glyph}</span>
+<span class="name">${mark}${esc(s.label)}<small><span class="session-state ${esc(tone)}">${esc(status)}</span>${detail ? ` · ${detail}` : ""}</small></span>
 <span class="age">${age(ageAt(s))}</span></a>`;
 }
 
@@ -795,10 +845,11 @@ function rowsHtml() {
 
 function chatShell() {
 	return `<header class="bar"><a class="back icon-btn" href="#" aria-label="Sessions">${ICONS.back}</a><button class="title" id="title" aria-haspopup="dialog"></button>
-<button class="tasks-pill" id="tasks-pill" aria-haspopup="dialog" hidden></button><button class="icon-btn stop" id="stop" aria-label="Stop" hidden>${ICONS.stop}</button></header>
+</header>
 <div class="statusbar" id="statusbar" role="button" tabindex="0" aria-haspopup="dialog" aria-label="Status" hidden></div>
 <section class="scroll" id="scroll"><div class="older" id="older"></div><div class="log" id="log">
-<div class="part" id="msgs"></div><div class="part" id="live"></div><div class="part" id="pending"></div><div class="part" id="working"></div></div></section>
+<div class="part" id="msgs"></div><div class="part" id="live"></div><div class="part" id="pending"></div><div class="part" id="working"></div></div>
+<div class="float" id="float" hidden></div></section>
 <div id="banner"></div><div class="commands" id="commands" role="listbox" aria-label="Commands" hidden></div><div id="selected-skills"></div><div class="thumbs" id="thumbs" hidden></div>
 <form class="composer" id="composer"><label class="attach" id="attach">${ICONS.attach}
 <input type="file" id="file" accept="image/*" multiple aria-label="Attach photos"></label>
@@ -883,15 +934,20 @@ function logParts(session) {
 		session?.state === "working" && !streaming
 			? `<div class="working">✻ ${esc(session.detail || "Working…")}</div>`
 			: "";
-	let msgs = transcriptHtml(calls, running);
+	let msgs = transcriptHtml(calls, running, midTurn(session));
 	if (!msgs && !live && !pending && !working) {
 		msgs = state.chat.messagesLoaded ? `<p class="empty">Nothing in this session yet.</p>` : loaderHtml();
 	}
 	return { msgs, live, pending, working };
 }
 
-/** @param {Set<string>} calls the transcript's tool calls @param {Set<string>} running those the reply in progress runs */
-function transcriptHtml(calls, running) {
+/**
+ * @param {Set<string>} calls the transcript's tool calls @param {Set<string>} running those the reply in progress runs
+ * @param {boolean} midTurn the session's last turn has not ended
+ */
+function transcriptHtml(calls, running, midTurn) {
+	// Each ended turn says how long it took, after its last message.
+	const times = turnTimes(state.chat.messages, midTurn);
 	/** @type {Map<string, Message>} */
 	const results = new Map();
 	for (const m of state.chat.messages) if (m.kind === "toolResult" && m.toolCallId) results.set(m.toolCallId, m);
@@ -950,6 +1006,11 @@ function transcriptHtml(calls, running) {
 			const kind = markerKind(m.text ?? "", !prompted);
 			if (kind === "interrupted") parts.push(`<div class="t interrupted">${outHtml([m.text ?? ""])}</div>`);
 			else if (kind === "plain") parts.push(`<div class="marker">${esc(m.text)}</div>`);
+		}
+		const took = times.get(m.id);
+		if (took !== undefined && took >= 1000) {
+			flush();
+			parts.push(`<div class="turn-time">Worked for ${esc(duration(took))}</div>`);
 		}
 	}
 	flush();
@@ -1014,6 +1075,8 @@ function canAct(session) {
 /** @param {Session | undefined} session */
 function bannerHtml(session) {
 	if (!state.online) {
+		// A Chat says so in its status pill (see updateFloat).
+		if (state.chat) return "";
 		return `<div class="banner off">Mac unreachable — it may be asleep, offline, or remote control is off. Retrying…</div>`;
 	}
 	const error = state.error ? `<div class="banner off">${esc(state.error)}</div>` : "";
@@ -1415,12 +1478,7 @@ function updateChat() {
 	const session = state.sessions.find((s) => s.id === state.chat.id);
 	$("#title").textContent = session?.label ?? "";
 	// Mid-turn, a dialog waiting on an answer included.
-	const turn = session?.state === "working" || session?.state === "needs";
-	if (!turn) state.chat.stopping = false;
-	const stop = $("#stop");
-	stop.hidden = !turn || !canAct(session);
-	stop.disabled = state.chat.stopping;
-	stop.classList.toggle("busy", state.chat.stopping);
+	if (!midTurn(session)) state.chat.stopping = false;
 	const bar = $("#statusbar");
 	const lines = state.chat.report?.statusline?.lines;
 	// The user's own pistatusline, as on the Mac; else the bar's own reading of the report.
@@ -1436,15 +1494,6 @@ function updateChat() {
 			bar.hidden = barNow === "";
 		}
 	}
-	const tasks = state.chat.report?.tasks?.length ?? 0;
-	const pill = $("#tasks-pill");
-	pill.hidden = tasks === 0;
-	const pillNow = `<span>${ICONS.tasks}${tasks}</span>`;
-	if (pill.dataset.html !== pillNow) {
-		pill.innerHTML = pillNow;
-		pill.dataset.html = pillNow;
-	}
-	pill.setAttribute("aria-label", `${tasks} background task${tasks === 1 ? "" : "s"}`);
 	const scroll = $("#scroll");
 	const atBottom = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
 	const height = scroll.scrollHeight;
@@ -1467,8 +1516,9 @@ function updateChat() {
 	if (pending) paintPending();
 	const live = updatePart($("#live"), parts.live);
 	const working = updatePart($("#working"), parts.working);
+	const float = updateFloat(session);
 	// The banner sits under the log, so the log's end stays in view above it.
-	if ((msgs || pending || live || working || bannerChanged) && atBottom && !prepending)
+	if ((msgs || pending || live || working || float || bannerChanged) && atBottom && !prepending)
 		scroll.scrollTop = scroll.scrollHeight;
 	// Also when the page loaded was empty and only "#older" went.
 	if (prepending) scroll.scrollTop += scroll.scrollHeight - height;
@@ -1479,7 +1529,7 @@ function updateChat() {
 	updateSheet(session);
 	const text = $("#text");
 	text.disabled = closed;
-	$(".send").disabled = closed || state.chat.reading > 0;
+	updateSend(session);
 	const attach = $("#attach");
 	const file = $("#file");
 	file.disabled = closed || state.chat.attachments.length + state.chat.reading >= ATTACH_MAX;
@@ -1488,6 +1538,98 @@ function updateChat() {
 	text.placeholder = box.placeholder;
 	updateThumbs();
 	updateCommands();
+}
+
+/**
+ * The status pill over the log's end, shown while it has something to say: how long the turn has
+ * run, the prompts queued behind it, the background tasks, the link to the Mac, and a way back to
+ * the end. Its timer ticks in place (tickElapsed), so the pill is rebuilt only when it changes.
+ * @param {Session | undefined} session @returns {boolean} whether it changed
+ */
+function updateFloat(session) {
+	const chat = state.chat;
+	const items = [];
+	if (!state.online) items.push(`<span class="pill-item off">Reconnecting to the Mac…</span>`);
+	if (session?.state === "working") {
+		const since = turnSince(chat.messages, chat.pending);
+		const time = since ? ` for <span class="elapsed" data-since="${esc(since)}"></span>` : "…";
+		items.push(
+			`<span class="pill-item"><span class="session-spinner" aria-hidden="true"></span>Working${time}</span>`,
+		);
+	}
+	const queued = chat.pending.filter((p) => p.outcome === "queued").length;
+	if (queued) items.push(`<span class="pill-item">${queued} queued</span>`);
+	const tasks = chat.report?.tasks?.length ?? 0;
+	if (tasks) {
+		items.push(
+			`<button type="button" class="pill-item" data-float="tasks" aria-haspopup="dialog" aria-label="${tasks} background task${tasks === 1 ? "" : "s"}">${ICONS.tasks}${tasks}</button>`,
+		);
+	}
+	if (!stuck)
+		items.push(`<button type="button" class="pill-item end" data-float="end" aria-label="To the end">↓</button>`);
+	const float = $("#float");
+	const html = items.join("");
+	if (float.dataset.html === html) return false;
+	float.innerHTML = html;
+	float.dataset.html = html;
+	float.hidden = html === "";
+	tickElapsed();
+	return true;
+}
+
+/** Each running timer's text, from when it began. */
+function tickElapsed() {
+	for (const el of document.querySelectorAll(".elapsed[data-since]")) {
+		el.textContent = duration(Date.now() - Date.parse(/** @type {HTMLElement} */ (el).dataset.since ?? ""));
+	}
+}
+
+/**
+ * The composer's round button: Send, Queue mid-turn, or Stop when nothing is typed (composerAction).
+ * @param {Session | undefined} session
+ */
+function updateSend(session) {
+	const chat = state.chat;
+	const button = $(".send");
+	const action = sendAction(session);
+	const stop = action === "stop";
+	button.dataset.action = action;
+	button.classList.toggle("stop", stop);
+	button.classList.toggle("queue", action === "queue");
+	button.classList.toggle("busy", stop && chat.stopping);
+	button.disabled = action === "off" || (stop ? chat.stopping : chat.reading > 0);
+	button.setAttribute("aria-label", stop ? "Stop" : action === "queue" ? "Queue" : "Send");
+	const icon = stop ? ICONS.stop : ICONS.send;
+	if (button.dataset.html !== icon) {
+		button.innerHTML = icon;
+		button.dataset.html = icon;
+	}
+}
+
+/** What the round button does now (composerAction). @param {Session | undefined} session */
+function sendAction(session) {
+	return composerAction({
+		content: $("#text").value.trim() !== "",
+		turn: midTurn(session),
+		// As the reply box: a session not listed yet takes a prompt.
+		open: session ? canAct(session) : true,
+		sentAt: state.chat.sentAt,
+		now: Date.now(),
+	});
+}
+
+/** Stops the turn in progress, as Esc on the Mac does. */
+async function stopTurn() {
+	const chat = state.chat;
+	if (!chat || chat.stopping) return;
+	chat.stopping = true;
+	render();
+	try {
+		await api.abort(chat.id);
+	} catch (error) {
+		chat.stopping = false;
+		handleError(error);
+	}
 }
 
 /** Commands at the caret; inline suggestions offer skills with discovery provenance. */
@@ -1814,7 +1956,9 @@ function bindChat() {
 	stuck = true;
 	const scroll = $("#scroll");
 	scroll.addEventListener("scroll", () => {
+		const was = stuck;
 		stuck = scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
+		if (stuck !== was) updateFloat(state.sessions.find((s) => s.id === state.chat?.id));
 	});
 	// A picture keeps its placeholder's height until its image is in (load does not bubble).
 	$("#log").addEventListener(
@@ -1845,11 +1989,13 @@ function bindChat() {
 		beforeEdit = undefined;
 		grow(text);
 		updateCommands();
+		updateSend(state.sessions.find((s) => s.id === state.chat.id));
 		keptPending.saveDraft(state.chat.id, text.value, state.chat.skillDraft.snapshot().selections);
 	});
 	$("#composer").addEventListener("submit", (/** @type {Event} */ event) => {
 		event.preventDefault();
-		void send();
+		if (sendAction(state.sessions.find((s) => s.id === state.chat.id)) === "stop") void stopTurn();
+		else void send();
 	});
 	const commands = $("#commands");
 	// The reply box keeps its focus, and iOS its keyboard, while a suggestion is tapped.
@@ -1901,18 +2047,6 @@ function bindChat() {
 		state.chat.attachments.splice(Number(remove.dataset.index), 1);
 		render();
 	});
-	$("#stop").addEventListener("click", async () => {
-		const chat = state.chat;
-		if (!chat || chat.stopping) return;
-		chat.stopping = true;
-		render();
-		try {
-			await api.abort(chat.id);
-		} catch (error) {
-			chat.stopping = false;
-			handleError(error);
-		}
-	});
 	// Back to the list's own entry, rather than a new one after this chat's.
 	$(".back").addEventListener("click", (/** @type {Event} */ event) => {
 		if (!state.chat?.backToList) return;
@@ -1927,7 +2061,11 @@ function bindChat() {
 		event.preventDefault();
 		openSheet();
 	});
-	$("#tasks-pill").addEventListener("click", openTasks);
+	$("#float").addEventListener("click", (/** @type {Event} */ event) => {
+		const button = /** @type {HTMLElement | null} */ (/** @type {Element} */ (event.target).closest("[data-float]"));
+		if (button?.dataset.float === "tasks") openTasks();
+		else if (button?.dataset.float === "end") $("#scroll").scrollTop = $("#scroll").scrollHeight;
+	});
 	$("#backdrop").addEventListener("click", closeSheet);
 	const sheet = $("#sheet");
 	sheet.addEventListener("click", (/** @type {Event} */ event) => {
@@ -2336,6 +2474,9 @@ async function send() {
 	chat.attachments = [];
 	const entry = addPending(chat, value, images, Date.now());
 	entry.skillDraft = skillDraft;
+	// The round button may become Stop only after a moment: see composerAction.
+	chat.sentAt = Date.now();
+	setTimeout(render, STOP_GUARD_MS);
 	setTimeout(() => checkSent(chat, entry), PROMPT_GIVE_UP_MS);
 	render();
 	$("#scroll").scrollTop = $("#scroll").scrollHeight;
@@ -2488,6 +2629,9 @@ function route() {
 	const open = match ? decodeURIComponent(match[1]) : undefined;
 	if (open !== previous?.id) {
 		clearTimeout(previous?.liveClear);
+		// Seen until it is left: what finished while it was open is not Unseen.
+		if (previous) markSeen(previous.id);
+		if (open !== undefined) markSeen(open);
 		state.chat = open === undefined ? undefined : openChat(open, keptPending.load(open));
 		if (state.chat && !previous) state.chat.backToList = true;
 		state.error = undefined;
@@ -2543,13 +2687,18 @@ document.addEventListener("visibilitychange", () => {
 		connect();
 		// A fresh one: Safari may sit in the background longer than a handoff lasts.
 		void offerHandoff();
-	} else closeStream();
+	} else {
+		if (state.chat) markSeen(state.chat.id);
+		closeStream();
+	}
 });
 window.addEventListener("pagehide", closeStream);
 // Back from the page cache, which keeps no stream.
 window.addEventListener("pageshow", (/** @type {PageTransitionEvent} */ event) => {
 	if (event.persisted && document.visibilityState === "visible") connect();
 });
+// A turn's running time, each second.
+setInterval(tickElapsed, 1000);
 // The list's ages, and the running time of each background task.
 setInterval(() => {
 	if (shown === "list") updateList();
@@ -2588,6 +2737,7 @@ const opened = /^#s\/(.+)$/.exec(location.hash)?.[1];
 if (opened) {
 	const id = decodeURIComponent(opened);
 	state.chat = openChat(id, keptPending.load(id));
+	markSeen(id);
 }
 render();
 connect();

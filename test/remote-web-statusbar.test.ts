@@ -54,18 +54,24 @@ describe("the chat's status bar", () => {
 		expect(unknown).not.toContain("$0.000");
 	});
 
-	it("shows the session, then where it is, as pistatusline does", () => {
-		const html = barHtml(report, "~/Projects/bluclawd");
-		expect(html.match(/class="line"/g)).toHaveLength(2);
-		expect(text(html)).toBe("Opus • high 34% 1.2M · $3.21 ⏵︎⏵︎ always\n~/Projects/bluclawd main +12 −3");
-		// Every badge glyph as text: iOS draws a bare ⏸ as a colour emoji.
-		for (const trust of ["always", "ask", "never"]) {
-			const badge = text(barHtml({ models: [], trust }, undefined));
-			expect(badge.replace(/[a-z ]/g, "").replace(/(.)︎/gu, ""), trust).toBe("");
-		}
-		// The context gauge's width is a class: the CSP allows no inline style.
-		expect(html).toContain('class="p40"');
+	it("shows the model, context used and branch on one line, the rest left to the sheet", () => {
+		const asks = { ...report, trust: "ask" };
+		const html = barHtml(asks, "~/Projects/bluclawd");
+		expect(html.match(/class="line"/g)).toHaveLength(1);
+		expect(text(html)).toBe("Opus • high · ctx 34% · main");
+		// Without git, where it is.
+		expect(text(barHtml({ ...asks, git: undefined }, "~/Projects/bluclawd"))).toBe(
+			"Opus • high · ctx 34% · ~/Projects/bluclawd",
+		);
 		expect(html).not.toContain("style=");
+	});
+
+	it("warns, at the end of the line, only that pi trusts every project", () => {
+		expect(text(barHtml({ ...report, trust: "always" }, undefined))).toBe("Opus • high · ctx 34% · main · ⏵︎⏵︎ always");
+		expect(barHtml({ ...report, trust: "always" }, undefined)).toContain('class="trust always"');
+		for (const trust of ["ask", "never", undefined]) {
+			expect(text(barHtml({ ...report, trust }, undefined)), String(trust)).toBe("Opus • high · ctx 34% · main");
+		}
 	});
 
 	it.each([
@@ -109,7 +115,7 @@ describe("the chat's status bar", () => {
 	it("escapes what it shows", () => {
 		const html = barHtml({ models: [], git: { branch: "<b>x</b>", added: 0, removed: 0 } }, '~/"a"&b');
 		expect(html).toContain("&#60;b&#62;x&#60;/b&#62;");
-		expect(html).toContain("~/&#34;a&#34;&#38;b");
+		expect(barHtml({ models: [] }, '~/"a"&b')).toContain("~/&#34;a&#34;&#38;b");
 	});
 
 	it("shortens token counts", () => {

@@ -1,19 +1,22 @@
-/* bluclawd's palettes (themes/bluclawd.json, bluclawd-light.json), following the phone's appearance,
-   on iOS's own greys. `--accent` fills; `--link` is the accent as text, dark enough to read on white. */
+/* bluclawd's palettes (themes/bluclawd.json, bluclawd-light.json), following the phone's appearance:
+   its panel and message greys on a plain page, parts set apart by hairlines rather than fills.
+   `--accent` fills; `--link` is the accent as text, dark enough to read on white. */
 :root {
 	--bg: #ffffff;
-	--panel: #f2f2f7;
-	--message: #e9e9ee;
+	--panel: #f5f5f5;
+	--message: #f0f0f0;
 	--text: #000000;
-	--secondary: #545458;
-	--muted: #7c7c82;
-	--dim: #aeaeb2;
-	--line: #dcdce0;
+	--secondary: #505050;
+	--muted: #666666;
+	--dim: #afafaf;
+	--line: #e4e4e4;
 	--accent: #00c0e8;
 	--link: #007c99;
-	--red: #c4243c;
+	/* Inline code, as pi's mdCode. */
+	--code: #5769f7;
+	--red: #ab2b3f;
 	--green: #2c7a39;
-	--yellow: #a06f00;
+	--yellow: #966c1e;
 	--shadow: rgb(0 0 0 / .18);
 	--thinking-minimal: #466fa5;
 	--thinking-low: #467a36;
@@ -34,15 +37,16 @@
 }
 @media (prefers-color-scheme: dark) {
 	:root {
-		--bg: #141414;
-		--panel: #1f1f21;
-		--message: #2e2e31;
+		--bg: #000000;
+		--panel: #262626;
+		--message: #373737;
 		--text: #ffffff;
-		--secondary: #c7c7cc;
-		--muted: #98989f;
-		--dim: #5a5a5f;
-		--line: #2c2c2e;
+		--secondary: #c7c7c7;
+		--muted: #999999;
+		--dim: #505050;
+		--line: #2a2a2a;
 		--link: #33cdee;
+		--code: #b1b9f9;
 		--red: #ff6b80;
 		--green: #4eba65;
 		--yellow: #ffc107;
@@ -56,7 +60,7 @@
 	}
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 17px/1.4 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; -webkit-text-size-adjust: 100%; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font: 16px/1.4 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; -webkit-text-size-adjust: 100%; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
 #app { height: var(--app-h, 100dvh); display: flex; flex-direction: column; background: var(--bg); padding: calc(env(safe-area-inset-top) + var(--s2)) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
 /* The keyboard covers the home indicator's inset. */
 .keyboard #app { padding-bottom: 0; }
@@ -78,15 +82,10 @@ button { -webkit-user-select: none; user-select: none; }
 .title { flex: 1; min-width: 0; min-height: 44px; padding: 0; border: 0; background: none; color: inherit; font: inherit; font-weight: 600; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .title::after { content: " ›"; color: var(--muted); font-weight: 400; }
 .bar .back { margin-left: calc(-1 * var(--s3)); }
-.icon-btn.stop { color: var(--red); }
-/* How many background tasks the session runs: a tap lists them. */
-.tasks-pill { flex: none; min-height: 44px; padding: 0; border: 0; background: none; color: var(--link); font: 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-weight: 600; font-variant-numeric: tabular-nums; }
-.tasks-pill span { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 12px; background: var(--panel); white-space: nowrap; }
-.tasks-pill .icon { width: 14px; height: 14px; }
-.tasks-pill[hidden] { display: none; }
 .muted { color: var(--muted); font-size: 15px; }
-/* pistatusline's two lines under pi, each cut short rather than wrapped; the branch, then the directory, give way first. */
-.statusbar { position: relative; z-index: 1; flex: none; display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 6px var(--s4); border: 0; border-bottom: 1px solid var(--line); background: var(--bg); color: var(--secondary); font: 13px/1.35 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-variant-numeric: tabular-nums; text-align: left; }
+/* One small grey line (statusbar.js's barHtml), cut short rather than wrapped; the branch, or the directory, gives way first.
+   A tap opens the status sheet. */
+.statusbar { position: relative; z-index: 1; flex: none; display: flex; flex-direction: column; gap: 2px; width: 100%; padding: 4px var(--s4); border: 0; border-bottom: 1px solid var(--line); background: var(--bg); color: var(--muted); font: 12px/1.35 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-variant-numeric: tabular-nums; text-align: left; }
 .statusbar[hidden] { display: none; }
 .statusbar .line { display: flex; align-items: center; gap: var(--s2); min-width: 0; overflow: hidden; white-space: nowrap; }
 .statusbar .line > span { flex: none; }
@@ -94,7 +93,7 @@ button { -webkit-user-select: none; user-select: none; }
 .statusbar .line > .branch { flex-shrink: 4; min-width: 3.5em; }
 /* Cut from the left, so the project's own name stays. */
 .statusbar .line > .cwd { direction: rtl; min-width: 4.5em; }
-.statusbar .model { color: var(--text); font-weight: 600; }
+.statusbar .model { color: var(--secondary); font-weight: 600; }
 /* The user's own pistatusline, as the Mac draws it: its lines at the bar's width in characters,
    each span's colours set by app.js. */
 .statusbar.pistatusline { gap: 0; font: var(--status-font); color: var(--text); font-variant-numeric: normal; }
@@ -108,17 +107,14 @@ button { -webkit-user-select: none; user-select: none; }
 .sl .d { opacity: .6; }
 .sl .i { font-style: italic; }
 .sl .u { text-decoration: underline; }
-/* Fixed, so its width never makes the page scroll sideways. */
-.gauge.mini { display: inline-block; width: 32px; height: 6px; vertical-align: middle; background: var(--message); }
 .added { color: var(--green); }
 .removed { color: var(--red); }
 .trust.always { color: var(--yellow); }
-.trust.never { color: var(--red); }
 .scroll { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; overflow-anchor: none; }
 /* The list's search, as iOS's: its own clear button, and Cancel while it has the focus. */
 .search { flex: none; display: flex; align-items: center; gap: var(--s2); margin: 0; padding: var(--s2) var(--s4); }
 .search .field { position: relative; flex: 1; min-width: 0; }
-.search input { display: block; width: 100%; height: 36px; border: 0; border-radius: 10px; padding: 0 36px 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; -webkit-appearance: none; appearance: none; }
+.search input { display: block; width: 100%; height: 36px; border: 1px solid var(--line); border-radius: 10px; padding: 0 36px 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; -webkit-appearance: none; appearance: none; }
 .search input::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
 .clear { position: absolute; top: 0; right: 0; width: 36px; height: 36px; padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 20px; line-height: 36px; }
 .clear[hidden], .cancel[hidden] { display: none; }
@@ -135,7 +131,10 @@ button { -webkit-user-select: none; user-select: none; }
 .row small { display: block; color: var(--muted); font-size: 15px; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .age { flex: none; align-self: flex-start; padding-top: 2px; color: var(--muted); font-size: 15px; font-variant-numeric: tabular-nums; }
 .row .glyph { flex: none; width: 20px; font-size: 20px; line-height: 1; text-align: center; color: var(--muted); }
-.glyph.needs, .glyph.stopped, .session-state.needs, .session-state.stopped { color: var(--yellow); }
+/* Unseen: it finished a turn since its Chat was last open here. */
+.row.unseen .name { font-weight: 700; }
+.unseen-dot { display: inline-block; width: 8px; height: 8px; margin: 0 6px 2px 0; border-radius: 50%; background: var(--accent); vertical-align: middle; }
+.glyph.needs, .session-state.needs { color: var(--yellow); }
 .shared-warning { color: var(--yellow); }
 .glyph.failed, .session-state.failed { color: var(--red); }
 .glyph.done, .session-state.done { color: var(--green); }
@@ -176,6 +175,10 @@ button { -webkit-user-select: none; user-select: none; }
 .t.ok .bullet { color: var(--green); }
 .t.err .bullet { color: var(--red); }
 .t.running .bullet { animation: pulse 1.2s ease-in-out infinite; }
+/* A running tool's name: a light sweeping across it, in steps so it costs little. */
+.t.running .call b { background: linear-gradient(90deg, var(--text) 40%, var(--accent) 50%, var(--text) 60%) 0 0 / 300% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shine 2.2s steps(30) infinite; }
+@keyframes shine { from { background-position: 100% 0; } to { background-position: 0 0; } }
+@media (prefers-reduced-motion: reduce) { .t.running .call b { animation: none; color: var(--text); } }
 .out { display: flex; gap: var(--s2); padding-left: 2px; }
 .hook { flex: none; color: var(--muted); }
 .lines { min-width: 0; white-space: pre-wrap; }
@@ -184,7 +187,9 @@ button { -webkit-user-select: none; user-select: none; }
 .t + .t.interrupted, .a + .t.interrupted { margin-top: calc(-1 * var(--s2)); }
 .t summary, .think summary { list-style: none; cursor: pointer; }
 .t summary::-webkit-details-marker, .think summary::-webkit-details-marker { display: none; }
-.t pre, .think pre { white-space: pre-wrap; margin: 6px 0 0; padding: var(--s2) 10px; border-radius: 8px; background: var(--panel); color: var(--text); font: inherit; }
+.t pre, .think pre { white-space: pre-wrap; margin: 6px 0 0; padding: var(--s2) 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); font: inherit; }
+/* A long output scrolls in its own box, so the log around it stays in reach. */
+.t pre { max-height: 24rem; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-y: contain; }
 .think pre { font: 14px/1.45 -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-style: italic; color: var(--secondary); }
 /* An edit's diff (diff.js): its lines as pi shows them, scrolled sideways rather than wrapped. */
 .t pre.diff { white-space: pre; overflow-x: auto; -webkit-overflow-scrolling: touch; overflow-wrap: normal; color: var(--muted); }
@@ -209,16 +214,35 @@ button { -webkit-user-select: none; user-select: none; }
 .marker { align-self: center; max-width: 85%; font-size: 13px; color: var(--muted); text-align: center; }
 .queued { align-self: flex-end; font-size: 12px; color: var(--muted); margin-top: calc(-1 * var(--s2)); }
 .working { color: var(--link); font-size: 15px; }
+/* After an ended turn: how long it took. */
+.turn-time { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* The status pill (app.js's updateFloat): over the log's end, out of the way of what is under it.
+   The log fills the room left, so the pill sits right above the reply box however short the log is. */
+#scroll { display: flex; flex-direction: column; }
+#scroll > .log { flex: 1 0 auto; }
+.float { position: sticky; bottom: var(--s2); z-index: 1; display: flex; justify-content: center; flex-wrap: wrap; gap: var(--s1); padding: 0 var(--s4); pointer-events: none; }
+.float[hidden] { display: none; }
+.pill-item { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 var(--s3); border: 1px solid var(--line); border-radius: 16px; background: var(--panel); color: var(--secondary); font: 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; box-shadow: 0 2px 8px var(--shadow); }
+button.pill-item { position: relative; color: var(--link); }
+/* Drawn 32 px tall, tapped as 44: the hit area reaches past its edge. */
+button.pill-item::after { content: ""; position: absolute; inset: -6px; }
+.pill-item.off { color: var(--red); }
+.pill-item .icon { width: 14px; height: 14px; }
+.pill-item .session-spinner { width: 14px; height: 14px; line-height: 14px; color: var(--accent); text-align: center; }
+.pill-item.end { min-width: 32px; justify-content: center; padding: 0; font-size: 16px; }
 .banner { flex: none; margin: var(--s2) var(--s4) 0; padding: 10px var(--s3); border-radius: 10px; font-size: 15px; background: color-mix(in srgb, var(--yellow) 18%, var(--bg)); }
 .banner.off { background: color-mix(in srgb, var(--red) 16%, var(--bg)); }
 .banner.closed { background: var(--panel); color: var(--muted); }
 /* In a chat, under the log and above the reply box, where the thumb answers. */
 .scroll + #banner .banner { margin: var(--s2) var(--s4); }
 .composer { flex: none; display: flex; gap: var(--s2); align-items: flex-end; padding: var(--s2) var(--s3); background: var(--bg); }
-.composer textarea { flex: 1; min-height: 44px; resize: none; border: 0; border-radius: 22px; padding: 11px var(--s4); background: var(--panel); color: var(--text); font: 16px/22px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-height: 140px; }
+.composer textarea { flex: 1; min-height: 44px; resize: none; border: 1px solid var(--line); border-radius: 22px; padding: 10px var(--s4); background: var(--panel); color: var(--text); font: 16px/22px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; max-height: 140px; }
 /* Round icon buttons: the accent one sends or starts, the grey one attaches. */
 .send, .start, .save, .attach { flex: none; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 50%; background: var(--accent); color: #000; }
 .attach { position: relative; background: var(--panel); color: var(--link); }
+/* The send button mid-turn: Queue with something typed, Stop with nothing. */
+.send.queue { background: var(--panel); color: var(--link); border: 1px solid var(--accent); }
+.send.stop { background: var(--red); color: #fff; }
 /* Safari anchors its native photo menu to the file input, so keep it over the plus button. */
 .attach input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
 .attach:has(input:focus-visible) { outline: 2px solid var(--link); outline-offset: 2px; }
@@ -243,7 +267,7 @@ button { -webkit-user-select: none; user-select: none; }
 /* Keep task options together, including after a picker dismisses the keyboard. */
 .composer.new:not(.expanded) :is(.pick, .where, .dirs) { display: none; }
 .where { display: flex; gap: var(--s2); align-items: center; }
-.where input { flex: 1; min-width: 0; height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; }
+.where input { flex: 1; min-width: 0; height: 44px; border: 1px solid var(--line); border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; }
 .empty { color: var(--muted); text-align: center; margin: 40px var(--s4); }
 /* The mascot (mascot.js) rolls its eyes around its head while something loads: one 4 px square per pixel. */
 .loader { display: flex; justify-content: center; margin: 40px var(--s4); }
@@ -281,7 +305,7 @@ button { -webkit-user-select: none; user-select: none; }
 .sheet-tools { display: flex; align-items: center; }
 .version { margin: var(--s4) 0 0; color: var(--muted); font-size: 13px; text-align: center; }
 /* The status sheet: its settings as one grouped list, as iOS's Settings, then its numbers in grey. */
-.settings, .options { border-radius: 12px; background: var(--panel); overflow: hidden; }
+.settings, .options { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); overflow: hidden; }
 .setting, .option { position: relative; display: flex; align-items: center; gap: var(--s3); width: 100%; min-height: 48px; padding: 0 var(--s4); border: 0; background: none; color: var(--text); font: inherit; text-align: left; }
 .setting + .setting::before, .option + .option::before { content: ""; position: absolute; top: 0; left: var(--s4); right: 0; border-top: 1px solid var(--line); }
 button.setting:active, .option:active { background: var(--message); }
@@ -334,13 +358,13 @@ button.setting:active, .option:active { background: var(--message); }
 /* The status sheet's session part: its name, pin and delete. */
 .rename { display: flex; align-items: center; gap: var(--s2); margin: 20px 0 0; padding-top: var(--s4); border-top: 1px solid var(--line); }
 .rename label { color: var(--muted); font-size: 15px; }
-.rename input { flex: 1; min-width: 0; height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; }
+.rename input { flex: 1; min-width: 0; height: 44px; border: 1px solid var(--line); border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; }
 #sheet-manage .actions { margin-top: var(--s3); }
 .confirm-delete { display: flex; align-items: center; gap: var(--s1); padding: 6px var(--s1) 6px 14px; border-radius: 12px; background: var(--panel); font-size: 15px; }
 .confirm-delete span { flex: 1; min-width: 0; }
 /* The background tasks sheet: each task's kind and running time, its label, Output and Stop. */
 .tasks { list-style: none; margin: var(--s2) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--s2); }
-.task { padding: 10px 14px; border-radius: 12px; background: var(--panel); }
+.task { padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
 .task-head { display: flex; justify-content: space-between; gap: var(--s2); color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
 .task-label { margin-top: 2px; font: 14px/1.4 var(--mono); overflow-wrap: anywhere; }
 .task-actions { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s1); }
@@ -351,7 +375,7 @@ button.setting:active, .option:active { background: var(--message); }
 .task-out { margin: var(--s1) 0 0; padding: var(--s2) 10px; max-height: 40vh; overflow: auto; -webkit-overflow-scrolling: touch; border-radius: 8px; background: var(--bg); font: 11px/1.4 var(--mono); white-space: pre; -webkit-user-select: text; user-select: text; }
 .task .error { margin: var(--s1) 0 0; font-size: 13px; min-height: 0; }
 /* The new session's model, on its own line: its names are long. */
-.pick { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--s2); height: 44px; border: 0; border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; text-align: left; }
+.pick { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--s2); height: 44px; border: 1px solid var(--line); border-radius: 12px; padding: 0 var(--s3); background: var(--panel); color: var(--text); font: inherit; font-size: 16px; text-align: left; }
 .pick[hidden] { display: none; }
 .pick span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pick .icon { width: 18px; height: 18px; color: var(--muted); }
@@ -383,11 +407,11 @@ button.setting:active, .option:active { background: var(--message); }
 .a li.task { list-style: none; }
 .a li.task input { margin: 0 2px 0 -20px; vertical-align: -2px; }
 .a blockquote { padding-left: 10px; margin-left: 0; margin-right: 0; border-left: 3px solid var(--line); color: var(--muted); }
-.a code { font: 14px var(--mono); background: var(--panel); border-radius: 4px; padding: 1px 4px; }
+.a code { font: 14px var(--mono); color: var(--code); background: var(--panel); border-radius: 4px; padding: 1px 4px; }
 .a .code { background: var(--panel); border-radius: 8px; }
 .a .lang { padding: 6px 10px 0; color: var(--muted); font: 11px var(--mono); }
 .a pre { margin: 0; padding: var(--s2) 10px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-.a pre code { padding: 0; background: none; font-size: 13px; line-height: 1.45; }
+.a pre code { padding: 0; color: inherit; background: none; font-size: 13px; line-height: 1.45; }
 .a hr { border: 0; border-top: 1px solid var(--line); margin: var(--s3) 0; }
 .a .table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .a table { border-collapse: collapse; font-size: 14px; }

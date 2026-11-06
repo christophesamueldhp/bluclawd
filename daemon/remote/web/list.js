@@ -1,6 +1,20 @@
 // @ts-check
 /** @typedef {import("./app.js").Session} Session */
 
+/** Mid-turn: it works, or waits on an answer to a dialog. @param {Session | undefined} session */
+export function midTurn(session) {
+	return session?.state === "working" || session?.state === "needs";
+}
+
+/**
+ * The colour a row's glyph and state word take: grey once it stopped, its pane is gone
+ * (Disconnected) or it stopped answering (Not responding), else its state's.
+ * @param {Session} session
+ */
+export function rowTone(session) {
+	return session.state === "stopped" || !session.alive || session.silent ? "off" : session.state;
+}
+
 /**
  * When a row's age counts from. A live row's `finishedAt` is its last entry's time, which says
  * when it went quiet only once it has: a row that is working or waits on an answer counts from
@@ -8,8 +22,33 @@
  * @param {Session} session @returns {string | undefined}
  */
 export function ageAt(session) {
-	const quiet = session.state !== "working" && session.state !== "needs";
-	return (quiet ? session.finishedAt : undefined) ?? session.createdAt;
+	return (midTurn(session) ? undefined : session.finishedAt) ?? session.createdAt;
+}
+
+/** `just now`, `5m`, `3h`, `2d`. @param {string | undefined} iso @param {number} now */
+export function ageText(iso, now) {
+	const ms = iso ? now - Date.parse(iso) : Number.NaN;
+	if (!Number.isFinite(ms)) return "";
+	const minutes = Math.floor(ms / 60_000);
+	if (minutes < 1) return "just now";
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
+}
+
+/**
+ * When this phone last had each session's Chat open, and when it began keeping track (`since`),
+ * which stands in for a Chat never opened here.
+ * @typedef {{ since: string, at: Record<string, string> }} Seen
+ */
+
+/**
+ * Whether a session is Unseen: it finished a turn since its Chat was last opened on this phone.
+ * @param {Session} session @param {Seen} seen
+ */
+export function isUnseen(session, seen) {
+	if (midTurn(session) || !session.finishedAt) return false;
+	return Date.parse(session.finishedAt) > Date.parse(seen.at[session.id] ?? seen.since);
 }
 
 export const STATE_WORDS = {

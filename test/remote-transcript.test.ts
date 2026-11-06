@@ -19,12 +19,13 @@ import {
 	transcriptFrom,
 } from "../daemon/remote/transcript.ts";
 
+const T = "2026-10-12T00:00:00Z";
 const jsonl = (...entries: object[]) => entries.map((entry) => JSON.stringify(entry)).join("\n");
 const msg = (id: string, parentId: string | null, message: object) => ({
 	type: "message",
 	id,
 	parentId,
-	timestamp: "2026-10-12T00:00:00Z",
+	timestamp: T,
 	message,
 });
 
@@ -72,13 +73,20 @@ describe("remote transcript", () => {
 			{ type: "compaction", id: "k1", parentId: "b1", summary: "…" },
 		);
 		expect(transcriptFrom(text, 50)).toEqual([
-			{ kind: "user", id: "u1", text: "run the tests\n[Image]", images: [{ index: 0, mimeType: "image/png" }] },
+			{
+				kind: "user",
+				id: "u1",
+				text: "run the tests\n[Image]",
+				images: [{ index: 0, mimeType: "image/png" }],
+				at: T,
+			},
 			{
 				kind: "assistant",
 				id: "a1",
 				text: "Running.",
 				thinking: "plan",
 				tools: [{ id: "c1", name: "bash", summary: "npm test" }],
+				at: T,
 			},
 			{
 				kind: "toolResult",
@@ -88,9 +96,19 @@ describe("remote transcript", () => {
 				ok: false,
 				text: "1 failed",
 				truncated: false,
+				at: T,
 			},
 			{ kind: "marker", id: "x1", text: "Task done" },
-			{ kind: "toolResult", id: "b1", toolName: "bash", command: "ls", ok: true, text: "a.txt\n", truncated: false },
+			{
+				kind: "toolResult",
+				id: "b1",
+				toolName: "bash",
+				command: "ls",
+				ok: true,
+				text: "a.txt\n",
+				truncated: false,
+				at: T,
+			},
 			{ kind: "marker", id: "k1", text: "Conversation compacted" },
 		]);
 	});
@@ -178,13 +196,23 @@ describe("remote transcript", () => {
 		expect(resultSummary("read", result!)).toEqual(["Read 382 lines"]);
 	});
 
+	it("gives each message the time pi wrote it, which times a turn", () => {
+		const text = jsonl(msg("u1", null, { role: "user", content: "hi" }), {
+			type: "compaction",
+			id: "k1",
+			parentId: "u1",
+			summary: "…",
+		});
+		expect(transcriptFrom(text, 50).map((m) => m.at)).toEqual([T, undefined]);
+	});
+
 	it("keeps a failed model request and drops an empty assistant message", () => {
 		const text = jsonl(
 			msg("a1", null, { role: "assistant", content: [], stopReason: "error", errorMessage: "rate limited" }),
 			msg("a2", "a1", { role: "assistant", content: [], stopReason: "stop" }),
 		);
 		expect(transcriptFrom(text, 50)).toEqual([
-			{ kind: "assistant", id: "a1", text: "", tools: [], error: "rate limited" },
+			{ kind: "assistant", id: "a1", text: "", tools: [], error: "rate limited", at: T },
 		]);
 	});
 
@@ -219,10 +247,10 @@ describe("remote transcript", () => {
 			aborted("a4", "r1", []),
 		);
 		expect(transcriptFrom(text, 50).filter((m) => m.kind === "assistant")).toEqual([
-			{ kind: "assistant", id: "a1", text: "", tools: [], aborted: true },
-			{ kind: "assistant", id: "a2", text: "Half a repl", tools: [], aborted: true },
-			{ kind: "assistant", id: "a3", text: "", tools: [{ id: "c1", name: "bash", summary: "sleep 60" }] },
-			{ kind: "assistant", id: "a4", text: "", tools: [], aborted: true },
+			{ kind: "assistant", id: "a1", text: "", tools: [], aborted: true, at: T },
+			{ kind: "assistant", id: "a2", text: "Half a repl", tools: [], aborted: true, at: T },
+			{ kind: "assistant", id: "a3", text: "", tools: [{ id: "c1", name: "bash", summary: "sleep 60" }], at: T },
+			{ kind: "assistant", id: "a4", text: "", tools: [], aborted: true, at: T },
 		]);
 	});
 
@@ -234,7 +262,7 @@ describe("remote transcript", () => {
 			{ type: "model_change", id: "m1", parentId: "u1", provider: "openai", modelId: "gpt-5" },
 			{ type: "session_info", id: "n1", parentId: "m1", name: "renamed" },
 		);
-		expect(transcriptFrom(text, 50)).toEqual([{ kind: "user", id: "u1", text: "hi" }]);
+		expect(transcriptFrom(text, 50)).toEqual([{ kind: "user", id: "u1", text: "hi", at: T }]);
 	});
 
 	it("summarises a tool call by its main argument", () => {
@@ -288,6 +316,7 @@ describe("remote transcript", () => {
 					{ index: 0, mimeType: "image/png" },
 					{ index: 1, mimeType: "image/jpeg" },
 				],
+				at: T,
 			});
 			expect(messages.find((m) => m.id === "r1")).toMatchObject({
 				text: "Read image file [image/png]\n[Image]",
@@ -295,7 +324,7 @@ describe("remote transcript", () => {
 			});
 			// What the phone matches its pending prompt by.
 			expect(messages.find((m) => m.id === "u1")?.text).toBe(promptKey("look", 2));
-			expect(messages.find((m) => m.id === "u2")).toEqual({ kind: "user", id: "u2", text: "no picture" });
+			expect(messages.find((m) => m.id === "u2")).toEqual({ kind: "user", id: "u2", text: "no picture", at: T });
 			expect(JSON.stringify(messages)).not.toContain("iVBORw0KGgo");
 		});
 
