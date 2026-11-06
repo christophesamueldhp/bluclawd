@@ -31,6 +31,7 @@ import remote from "./remote/index.ts";
 import sandbox from "./sandbox/index.ts";
 import skills from "./skills/index.ts";
 import subagents from "./subagents/index.ts";
+import transcript from "./transcript/index.ts";
 import vibes from "./vibes/index.ts";
 import web from "./web/index.ts";
 
@@ -42,6 +43,7 @@ export function bluclawdExtensions(): InlineExtension[] {
 		{ name: "background-bash", factory: backgroundBash },
 		{ name: "subagents", factory: subagents },
 		{ name: "branding", factory: branding },
+		{ name: "transcript", factory: transcript },
 		{ name: "agent-view", factory: agentView },
 		{ name: "remote", factory: remote },
 		{ name: "help", factory: help },
