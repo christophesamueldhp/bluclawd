@@ -102,7 +102,7 @@ describe("/remote-control", () => {
 
 	const pairing = (pairSecret: string) => renderQr(qrMatrix(`https://${HOST}/#pair=${pairSecret}`));
 
-	it("when off, turns on and shows the address, a QR code of the pairing link, and the code dimmed under it", async () => {
+	it("when off, turns on and shows the address, a QR code of the pairing link, and the code under it", async () => {
 		const { ui, done } = run("");
 		await done;
 		expect(actions.map((a) => a.action)).toEqual(["status", "on"]);
@@ -112,11 +112,11 @@ describe("/remote-control", () => {
 		expect(type).toBe("info");
 		const lines = text.split("\n");
 		expect(lines[0]).toBe(`Remote control is on: https://${HOST}`);
-		expect(lines[1]).toBe("Scan with your phone's camera to pair it (valid 10 minutes, once):");
+		expect(lines[1]).toBe("Scan with your phone's camera to open the app (valid 10 minutes, once):");
 		expect(text).toContain(`\n${pairing(secret)}\n`);
 		const after = text.slice(text.indexOf(pairing(secret)) + pairing(secret).length).split("\n");
 		expect(after.slice(1)).toEqual([
-			"\x1b[2mCan't scan? Type 482 913 in the app\x1b[22m",
+			"On iPhone, or if you can't scan: type 482 913 in the app",
 			"Starts at login: off (turn it on from /remote-control)",
 		]);
 	});
@@ -144,7 +144,7 @@ describe("/remote-control", () => {
 		await done;
 		expect(actions.map((a) => a.action)).toEqual(["status", "pair"]);
 		expect(ui.notify.mock.calls[0]![0]).toContain(pairing(secret));
-		expect(ui.notify.mock.calls[0]![0]).toContain("Type 105 377 in the app");
+		expect(ui.notify.mock.calls[0]![0]).toContain("type 105 377 in the app");
 	});
 
 	it("says why it cannot pair while on but not listening, as with its port in use", async () => {

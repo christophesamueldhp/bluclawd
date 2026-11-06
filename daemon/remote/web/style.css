@@ -291,6 +291,8 @@ button.pill-item::after { content: ""; position: absolute; inset: -6px; }
 .pair .logo { display: block; width: 120px; height: 90px; }
 .pair input { font: 28px var(--mono); letter-spacing: .3em; text-align: center; width: 11ch; padding: 10px; border-radius: 10px; border: 1px solid var(--dim); background: var(--panel); color: var(--text); }
 .pair button { min-height: 44px; background: var(--accent); color: #000; border: 0; border-radius: 12px; padding: 12px 40px; font: inherit; font-weight: 600; }
+.pair ol { margin: 0; padding-left: 1.4em; text-align: left; line-height: 1.6; }
+.pair button.link { background: none; color: var(--accent); font-weight: 400; padding: 12px; }
 .error { color: var(--red); font-size: 15px; min-height: 1.4em; }
 .backdrop { position: fixed; inset: 0; z-index: 10; background: rgb(0 0 0 / .35); }
 .sheet { position: fixed; left: 0; right: 0; bottom: var(--keyboard, 0px); z-index: 11; max-height: calc(var(--app-h, 100dvh) * .85); overflow-y: auto; background: var(--bg); border-radius: 14px 14px 0 0; box-shadow: 0 -4px 24px var(--shadow); padding: var(--s1) max(var(--s4), env(safe-area-inset-right)) calc(var(--s4) + env(safe-area-inset-bottom)) max(var(--s4), env(safe-area-inset-left)); }

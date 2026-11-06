@@ -177,7 +177,8 @@ server = await startRemoteServer(
 	},
 	0,
 );
-console.log(`http://127.0.0.1:${server.port}/  pairing code ${store.createCode().code}  dir ${dir}`);
+const { code, secret } = store.createCode();
+console.log(`http://127.0.0.1:${server.port}/  pairing code ${code}  QR link /#pair=${secret}  dir ${dir}`);
 
 /**
  * Alpha's reply, as a pane streams it: its text, then its end naming the entry, then a tool-only

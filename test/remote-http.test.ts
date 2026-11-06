@@ -327,58 +327,22 @@ describe("remote HTTP API", () => {
 		expect(await again.json()).toEqual({ error: "invalid_code" });
 	});
 
-	describe("handing a browser's pairing to its Home Screen app", () => {
-		beforeEach(() => {
-			writeFileSync(join(dir, "web", "manifest.webmanifest"), JSON.stringify({ name: "bluclawd", start_url: "/" }));
+	it("hands no pairing to a Home Screen app: no handoff route, and the manifest is always the file", async () => {
+		writeFileSync(join(dir, "web", "manifest.webmanifest"), JSON.stringify({ name: "bluclawd", start_url: "/" }));
+		const token = await pair();
+		expect(
+			(await fetch(`${base}/api/handoff`, { method: "POST", headers: authJson(token), body: "{}" })).status,
+		).toBe(404);
+		const exchange = await fetch(`${base}/api/pair/handoff`, {
+			method: "POST",
+			headers: authJson(token),
+			body: JSON.stringify({ handoff: "Qm3xZ8vT1pLk9sWc2rYb0A", deviceName: "iPhone (Home Screen)" }),
 		});
-		const handoffFor = async (token: string) => {
-			const res = await fetch(`${base}/api/handoff`, { method: "POST", headers: authJson(token), body: "{}" });
-			expect(res.status).toBe(200);
-			return ((await res.json()) as { handoff: string }).handoff;
-		};
-		const exchange = (handoff: string) =>
-			fetch(`${base}/api/pair/handoff`, {
-				method: "POST",
-				headers: json,
-				body: JSON.stringify({ handoff, deviceName: "iPhone (Home Screen)" }),
-			});
-
-		it("gives a paired device a handoff, which pairs another device once", async () => {
-			expect((await fetch(`${base}/api/handoff`, { method: "POST", headers: json, body: "{}" })).status).toBe(401);
-			const token = await pair();
-			const handoff = await handoffFor(token);
-			const res = await exchange(handoff);
-			expect(res.status).toBe(200);
-			const { token: app } = (await res.json()) as { token: string };
-			expect(app).not.toBe(token);
-			for (const t of [token, app])
-				expect((await fetch(`${base}/api/sessions`, { headers: auth(t) })).status).toBe(200);
-			expect(store.load().devices.map((d) => d.name)).toEqual(["iPhone", "iPhone (Home Screen)"]);
-			const again = await exchange(handoff);
-			expect(again.status).toBe(400);
-			expect(await again.json()).toEqual({ error: "invalid_handoff" });
-		});
-
-		it("refuses the handoff of a device removed since", async () => {
-			const token = await pair();
-			const handoff = await handoffFor(token);
-			store.revoke(store.load().devices[0]!.id);
-			expect((await exchange(handoff)).status).toBe(400);
-		});
-
-		it("serves the manifest with the handoff as its start_url, uncached; any other query gets the plain one", async () => {
-			const handoff = await handoffFor(await pair());
-			const res = await fetch(`${base}/manifest.webmanifest?handoff=${handoff}`);
-			expect(res.status).toBe(200);
-			expect(res.headers.get("content-type")).toBe("application/manifest+json");
-			expect(res.headers.get("cache-control")).toBe("no-store");
-			expect(await res.json()).toEqual({ name: "bluclawd", start_url: `/#handoff=${handoff}` });
-			for (const query of ["", "?handoff=", "?handoff=short", `?handoff=${handoff}%22`, "?other=1"]) {
-				const plain = await fetch(`${base}/manifest.webmanifest${query}`);
-				expect(plain.headers.get("cache-control"), query).toBe("no-cache");
-				expect(await plain.json(), query).toEqual({ name: "bluclawd", start_url: "/" });
-			}
-		});
+		expect(exchange.status).toBe(404);
+		const manifest = await fetch(`${base}/manifest.webmanifest?handoff=Qm3xZ8vT1pLk9sWc2rYb0A`);
+		expect(manifest.headers.get("cache-control")).toBe("no-cache");
+		expect(await manifest.json()).toEqual({ name: "bluclawd", start_url: "/" });
+		expect(store.load().devices.map((d) => d.name)).toEqual(["iPhone"]);
 	});
 
 	describe("paired devices", () => {
