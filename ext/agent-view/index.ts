@@ -31,7 +31,14 @@ import { trustBadge } from "../_shared/trust-badge.ts";
 import { AgentView, EXIT_WORDS, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, handOffAfterExit } from "./hand-off.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
-import { deriveLabel, dialogDetail, ForegroundActivity, SelfRegistration, waitingDetail } from "./self-registration.ts";
+import {
+	deriveLabel,
+	dialogDetail,
+	ForegroundActivity,
+	SelfRegistration,
+	turnStartedAt,
+	waitingDetail,
+} from "./self-registration.ts";
 
 /** At anything less than the whole terminal, the conversation behind shows through the margins. */
 const FULL_SCREEN = { width: "100%", maxHeight: "100%" } as const;
@@ -321,6 +328,7 @@ const agentView: InlineExtension = {
 				createdAt: ctx.sessionManager.getHeader()?.timestamp,
 				// Its last entry's: once idle, when its last turn ended. Every heartbeat restates its lastSeenAt.
 				finishedAt: entries.at(-1)?.timestamp,
+				turnStartedAt: turnStartedAt(entries),
 				// Only once it differs: a heartbeat lags the file, whose last entry is otherwise the leaf.
 				leafId: leafId !== entries.at(-1)?.id ? leafId : undefined,
 				dialog: activity.current === "awaiting_input" ? activity.dialog : undefined,

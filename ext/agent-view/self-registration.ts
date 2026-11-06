@@ -6,6 +6,7 @@ import { piCommand } from "../../daemon/tmux.ts";
 /** The subset of a session entry needed to derive a title — structural, so pi's SessionEntry fits. */
 interface EntryLike {
 	type: string;
+	timestamp?: string;
 	message?: { role?: string; content?: unknown };
 }
 
@@ -36,6 +37,12 @@ export function deriveLabel(name: string | undefined, entries: EntryLike[]): str
 		if (firstLine) return firstLine.slice(0, LABEL_MAX);
 	}
 	return undefined;
+}
+
+/** When the session's latest prompt was written: while it works, when its turn began, as a Chat
+ *  times it. A prompt pi takes from its queue mid-run is written then, and starts the time again. */
+export function turnStartedAt(entries: EntryLike[]): string | undefined {
+	return [...entries].reverse().find((e) => e.type === "message" && e.message?.role === "user")?.timestamp;
 }
 
 /** Blocking prompt kinds: a `custom` overlay (agent view itself, /diff, …) is a view, not a

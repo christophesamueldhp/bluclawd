@@ -185,6 +185,7 @@ describe("a pane's heartbeat, from its register request to agent view's row and 
 		turns: 2,
 		createdAt: "2026-10-12T00:00:00.000Z",
 		finishedAt: "2026-10-12T00:05:00.000Z",
+		turnStartedAt: "2026-10-12T00:04:30.000Z",
 		leafId: "e7",
 		dialog: { kind: "confirm", title: "Allow bash?" },
 		draft: true,
@@ -216,6 +217,7 @@ describe("a pane's heartbeat, from its register request to agent view's row and 
 			detail: "Waiting: Allow bash?",
 			createdAt: "2026-10-12T00:00:00.000Z",
 			finishedAt: "2026-10-12T00:05:00.000Z",
+			turnStartedAt: "2026-10-12T00:04:30.000Z",
 			pane: "bluclawd-h",
 			dialog: heartbeat.dialog,
 		});
@@ -230,6 +232,7 @@ describe("a pane's heartbeat, from its register request to agent view's row and 
 				detail: "Waiting: Allow bash?",
 				createdAt: "2026-10-12T00:00:00.000Z",
 				finishedAt: "2026-10-12T00:05:00.000Z",
+				turnStartedAt: "2026-10-12T00:04:30.000Z",
 				dialog: heartbeat.dialog,
 				settled: 0,
 				verdict: { act: true },

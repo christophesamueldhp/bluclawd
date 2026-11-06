@@ -20,6 +20,8 @@ export interface AgentRow {
 	detail: string;
 	createdAt?: string;
 	finishedAt?: string;
+	/** When its latest prompt was written, when its pane says. */
+	turnStartedAt?: string;
 	pinned: boolean;
 	sortOrder?: number;
 	/** The foreground session this view was opened from — returned to, never stopped. */
@@ -112,6 +114,7 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 		detail,
 		createdAt: inst.createdAt,
 		finishedAt: inst.finishedAt,
+		turnStartedAt: inst.turnStartedAt,
 		pinned: inst.pinned === true,
 		sortOrder: inst.sortOrder,
 		self,
@@ -353,9 +356,11 @@ export function compactAge(ms: number): string {
 	return `${Math.floor(hours / 24)}d`;
 }
 
-/** Age counts from creation; a finished run's age freezes at how long it took. */
+/** Age counts from creation, or from its turn's start while a live row is mid-turn; a finished
+ *  run's age freezes at how long it took. */
 export function rowAge(row: AgentRow, nowMs: number): string {
-	const created = stamp(row.createdAt);
+	const midTurn = row.alive && (row.state === "working" || row.state === "needs");
+	const created = (midTurn && stamp(row.turnStartedAt)) || stamp(row.createdAt);
 	if (!created) return "";
 	const end = !row.alive || row.state === "done" || row.state === "failed" ? stamp(row.finishedAt) || nowMs : nowMs;
 	return compactAge(end - created);

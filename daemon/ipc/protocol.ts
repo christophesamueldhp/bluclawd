@@ -27,6 +27,8 @@ export interface PaneHeartbeat {
 	createdAt?: string;
 	/** When its session's last entry was written: once idle, when its last turn ended. */
 	finishedAt?: string;
+	/** When its latest prompt was written: while it works, when its turn began. */
+	turnStartedAt?: string;
 	/** The entry pi appends to next, when it is not the file's last entry (after a /tree). */
 	leafId?: string;
 	/** The dialog it waits on, while it does. */
@@ -48,6 +50,7 @@ const PANE_HEARTBEAT_KEYS = Object.keys({
 	turns: true,
 	createdAt: true,
 	finishedAt: true,
+	turnStartedAt: true,
 	leafId: true,
 	dialog: true,
 	draft: true,

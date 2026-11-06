@@ -22,6 +22,8 @@ export interface RemoteSession {
 	detail: string;
 	createdAt?: string;
 	finishedAt?: string;
+	/** When its latest prompt was written, when its pane says: mid-turn, when its turn began. */
+	turnStartedAt?: string;
 	/** While it needs input: the dialog it waits on. */
 	dialog?: { kind: string; title?: string };
 	/** How many times it stopped working: the notifier's cue for a turn too quick to be seen working. */
@@ -71,6 +73,7 @@ export function remoteSessions(instances: InstanceSummary[]): RemoteSession[] {
 				detail: row.detail,
 				createdAt: row.createdAt,
 				finishedAt: row.finishedAt,
+				turnStartedAt: row.turnStartedAt,
 				...(row.dialog ? { dialog: row.dialog } : {}),
 				...(row.settled !== undefined ? { settled: row.settled } : {}),
 				...(row.livePanes ? { livePanes: row.livePanes } : {}),
