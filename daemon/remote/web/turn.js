@@ -20,7 +20,9 @@ export function duration(ms) {
 
 /**
  * Each ended turn's length, by the id of its last message: from its prompt to the last message
- * before the next one. The last turn has not ended while its session works.
+ * before the next one. The last turn has not ended while its session works. A prompt pi takes
+ * from its queue mid-run is written then, and starts a turn of its own: each prompt is timed for
+ * the work done for it.
  * @param {Timed[]} messages @param {boolean} working @returns {Map<string, number>}
  */
 export function turnTimes(messages, working) {

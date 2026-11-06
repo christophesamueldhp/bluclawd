@@ -94,7 +94,8 @@ export function barHtml(report, cwd) {
 	if (branch) items.push(`<span class="grow branch">${esc(branch)}</span>`);
 	else if (cwd) items.push(`<span class="grow cwd"><bdi>${esc(cwd)}</bdi></span>`);
 	// Running without asking is worth seeing at a glance; ask and never are in the sheet.
-	if (report?.trust === "always") items.push(`<span class="trust always">${esc(TRUST[0][1])}</span>`);
+	const always = TRUST.find(([value]) => value === "always")?.[1];
+	if (report?.trust === "always" && always) items.push(`<span class="trust always">${esc(always)}</span>`);
 	return items.length ? `<span class="line">${items.join('<span aria-hidden="true">·</span>')}</span>` : "";
 }
 

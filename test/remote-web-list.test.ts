@@ -4,8 +4,10 @@ import {
 	ageAt,
 	ageText,
 	isUnseen,
+	midTurn,
 	paneUp,
 	replyBox,
+	rowTone,
 	STATE_WORDS,
 	sessionGroups,
 	sharedWarning,
@@ -180,5 +182,22 @@ describe("an Unseen session on the phone", () => {
 		expect(isUnseen(row("a", "working", { finishedAt }), seen)).toBe(false);
 		expect(isUnseen(row("a", "needs", { finishedAt }), seen)).toBe(false);
 		expect(isUnseen(row("a", "idle"), seen)).toBe(false);
+	});
+});
+
+describe("a row's turn and tone on the phone", () => {
+	it("is mid-turn while it works or waits on an answer", () => {
+		expect(midTurn(row("a", "working"))).toBe(true);
+		expect(midTurn(row("a", "needs"))).toBe(true);
+		for (const state of ["idle", "done", "failed", "stopped"]) expect(midTurn(row("a", state)), state).toBe(false);
+		expect(midTurn(undefined)).toBe(false);
+	});
+
+	it("is grey once stopped, disconnected or not responding, else its state's colour", () => {
+		expect(rowTone(row("a", "done"))).toBe("done");
+		expect(rowTone(row("a", "working"))).toBe("working");
+		expect(rowTone(row("a", "stopped"))).toBe("off");
+		expect(rowTone(row("a", "done", { alive: false }))).toBe("off");
+		expect(rowTone(row("a", "working", { silent: true }))).toBe("off");
 	});
 });

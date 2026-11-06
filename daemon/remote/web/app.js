@@ -27,8 +27,10 @@ import {
 	ageAt,
 	ageText,
 	isUnseen,
+	midTurn,
 	paneUp,
 	replyBox,
+	rowTone,
 	STATE_WORDS,
 	sessionGroups,
 	sharedWarning,
@@ -800,8 +802,17 @@ function listShell() {
 
 /** @param {Session} s */
 function rowHtml(s) {
-	const glyph = s.alive && s.state === "working" ? '<span class="session-spinner"></span>' : statusGlyph(s);
-	const status = STATE_WORDS[/** @type {keyof typeof STATE_WORDS} */ (s.state)] ?? s.state;
+	// A pane that stopped answering is not shown working, whatever it last reported.
+	const glyph =
+		s.alive && !s.silent && s.state === "working"
+			? '<span class="session-spinner"></span>'
+			: s.silent
+				? "✻"
+				: statusGlyph(s);
+	const status = s.silent
+		? "Not responding"
+		: (STATE_WORDS[/** @type {keyof typeof STATE_WORDS} */ (s.state)] ?? s.state);
+	const tone = rowTone(s);
 	// The project's folder, which the search matches too.
 	const where = s.cwd.split("/").filter(Boolean).at(-1);
 	// What it waits on or does; its band already names its state.
@@ -817,8 +828,8 @@ function rowHtml(s) {
 		.join(" · ");
 	const unseen = isUnseen(s, seen);
 	const mark = unseen ? '<span class="unseen-dot" role="img" aria-label="Unseen"></span>' : "";
-	return `<a class="row${s.alive ? "" : " closed"}${unseen ? " unseen" : ""}" href="#s/${encodeURIComponent(s.id)}"><span class="glyph ${esc(s.state)}" aria-hidden="true">${glyph}</span>
-<span class="name">${mark}${esc(s.label)}<small><span class="session-state ${esc(s.state)}">${esc(status)}</span>${detail ? ` · ${detail}` : ""}</small></span>
+	return `<a class="row${s.alive ? "" : " closed"}${unseen ? " unseen" : ""}" href="#s/${encodeURIComponent(s.id)}"><span class="glyph ${esc(tone)}" aria-hidden="true">${glyph}</span>
+<span class="name">${mark}${esc(s.label)}<small><span class="session-state ${esc(tone)}">${esc(status)}</span>${detail ? ` · ${detail}` : ""}</small></span>
 <span class="age">${age(ageAt(s))}</span></a>`;
 }
 
@@ -923,7 +934,7 @@ function logParts(session) {
 		session?.state === "working" && !streaming
 			? `<div class="working">✻ ${esc(session.detail || "Working…")}</div>`
 			: "";
-	let msgs = transcriptHtml(calls, running, session?.state === "working" || session?.state === "needs");
+	let msgs = transcriptHtml(calls, running, midTurn(session));
 	if (!msgs && !live && !pending && !working) {
 		msgs = state.chat.messagesLoaded ? `<p class="empty">Nothing in this session yet.</p>` : loaderHtml();
 	}
@@ -1064,7 +1075,7 @@ function canAct(session) {
 /** @param {Session | undefined} session */
 function bannerHtml(session) {
 	if (!state.online) {
-		// A Chat says so in its status pill (see floatHtml).
+		// A Chat says so in its status pill (see updateFloat).
 		if (state.chat) return "";
 		return `<div class="banner off">Mac unreachable — it may be asleep, offline, or remote control is off. Retrying…</div>`;
 	}
@@ -1467,8 +1478,7 @@ function updateChat() {
 	const session = state.sessions.find((s) => s.id === state.chat.id);
 	$("#title").textContent = session?.label ?? "";
 	// Mid-turn, a dialog waiting on an answer included.
-	const turn = session?.state === "working" || session?.state === "needs";
-	if (!turn) state.chat.stopping = false;
+	if (!midTurn(session)) state.chat.stopping = false;
 	const bar = $("#statusbar");
 	const lines = state.chat.report?.statusline?.lines;
 	// The user's own pistatusline, as on the Mac; else the bar's own reading of the report.
@@ -1581,14 +1591,7 @@ function tickElapsed() {
 function updateSend(session) {
 	const chat = state.chat;
 	const button = $(".send");
-	const action = composerAction({
-		content: $("#text").value.trim() !== "",
-		turn: session?.state === "working" || session?.state === "needs",
-		// As the reply box: a session not listed yet takes a prompt.
-		open: session ? canAct(session) : true,
-		sentAt: chat.sentAt,
-		now: Date.now(),
-	});
+	const action = sendAction(session);
 	const stop = action === "stop";
 	button.dataset.action = action;
 	button.classList.toggle("stop", stop);
@@ -1601,6 +1604,18 @@ function updateSend(session) {
 		button.innerHTML = icon;
 		button.dataset.html = icon;
 	}
+}
+
+/** What the round button does now (composerAction). @param {Session | undefined} session */
+function sendAction(session) {
+	return composerAction({
+		content: $("#text").value.trim() !== "",
+		turn: midTurn(session),
+		// As the reply box: a session not listed yet takes a prompt.
+		open: session ? canAct(session) : true,
+		sentAt: state.chat.sentAt,
+		now: Date.now(),
+	});
 }
 
 /** Stops the turn in progress, as Esc on the Mac does. */
@@ -1979,7 +1994,7 @@ function bindChat() {
 	});
 	$("#composer").addEventListener("submit", (/** @type {Event} */ event) => {
 		event.preventDefault();
-		if ($(".send").dataset.action === "stop") void stopTurn();
+		if (sendAction(state.sessions.find((s) => s.id === state.chat.id)) === "stop") void stopTurn();
 		else void send();
 	});
 	const commands = $("#commands");

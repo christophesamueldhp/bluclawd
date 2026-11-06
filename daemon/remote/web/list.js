@@ -1,6 +1,20 @@
 // @ts-check
 /** @typedef {import("./app.js").Session} Session */
 
+/** Mid-turn: it works, or waits on an answer to a dialog. @param {Session | undefined} session */
+export function midTurn(session) {
+	return session?.state === "working" || session?.state === "needs";
+}
+
+/**
+ * The colour a row's glyph and state word take: grey once it stopped, its pane is gone
+ * (Disconnected) or it stopped answering (Not responding), else its state's.
+ * @param {Session} session
+ */
+export function rowTone(session) {
+	return session.state === "stopped" || !session.alive || session.silent ? "off" : session.state;
+}
+
 /**
  * When a row's age counts from. A live row's `finishedAt` is its last entry's time, which says
  * when it went quiet only once it has: a row that is working or waits on an answer counts from
@@ -8,8 +22,7 @@
  * @param {Session} session @returns {string | undefined}
  */
 export function ageAt(session) {
-	const quiet = session.state !== "working" && session.state !== "needs";
-	return (quiet ? session.finishedAt : undefined) ?? session.createdAt;
+	return (midTurn(session) ? undefined : session.finishedAt) ?? session.createdAt;
 }
 
 /** `just now`, `5m`, `3h`, `2d`. @param {string | undefined} iso @param {number} now */
@@ -34,7 +47,7 @@ export function ageText(iso, now) {
  * @param {Session} session @param {Seen} seen
  */
 export function isUnseen(session, seen) {
-	if (session.state === "working" || session.state === "needs" || !session.finishedAt) return false;
+	if (midTurn(session) || !session.finishedAt) return false;
 	return Date.parse(session.finishedAt) > Date.parse(seen.at[session.id] ?? seen.since);
 }
 

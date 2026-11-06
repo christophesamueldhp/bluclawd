@@ -12,6 +12,8 @@
 	--line: #e4e4e4;
 	--accent: #00c0e8;
 	--link: #007c99;
+	/* Inline code, as pi's mdCode. */
+	--code: #5769f7;
 	--red: #ab2b3f;
 	--green: #2c7a39;
 	--yellow: #966c1e;
@@ -44,6 +46,7 @@
 		--dim: #505050;
 		--line: #2a2a2a;
 		--link: #33cdee;
+		--code: #b1b9f9;
 		--red: #ff6b80;
 		--green: #4eba65;
 		--yellow: #ffc107;
@@ -404,11 +407,11 @@ button.setting:active, .option:active { background: var(--message); }
 .a li.task { list-style: none; }
 .a li.task input { margin: 0 2px 0 -20px; vertical-align: -2px; }
 .a blockquote { padding-left: 10px; margin-left: 0; margin-right: 0; border-left: 3px solid var(--line); color: var(--muted); }
-.a code { font: 14px var(--mono); background: var(--panel); border-radius: 4px; padding: 1px 4px; }
+.a code { font: 14px var(--mono); color: var(--code); background: var(--panel); border-radius: 4px; padding: 1px 4px; }
 .a .code { background: var(--panel); border-radius: 8px; }
 .a .lang { padding: 6px 10px 0; color: var(--muted); font: 11px var(--mono); }
 .a pre { margin: 0; padding: var(--s2) 10px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-.a pre code { padding: 0; background: none; font-size: 13px; line-height: 1.45; }
+.a pre code { padding: 0; color: inherit; background: none; font-size: 13px; line-height: 1.45; }
 .a hr { border: 0; border-top: 1px solid var(--line); margin: var(--s3) 0; }
 .a .table { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .a table { border-collapse: collapse; font-size: 14px; }
