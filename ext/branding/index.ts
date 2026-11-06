@@ -15,6 +15,7 @@ import { SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { mascotGlyphs } from "../_shared/mascot.ts";
 import { prefersReducedMotion } from "../_shared/settings.ts";
+import { timed } from "../_shared/timing.ts";
 import { AUTO_THEME, ThemePicker, themeOptions } from "./theme-picker.ts";
 import { MascotPlayer, pickEntrance, WelcomeHeader, type WelcomeHeaderInfo } from "./welcome-header.ts";
 
@@ -188,4 +189,4 @@ const branding: InlineExtension = {
 	},
 };
 
-export default branding.factory;
+export default timed("branding", branding.factory);

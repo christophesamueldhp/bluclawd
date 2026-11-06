@@ -69,6 +69,7 @@ import type {
 import { isKeyRelease, isKeyRepeat, matchesKey } from "@earendil-works/pi-tui";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
+import { timed } from "../_shared/timing.ts";
 
 const CHECKPOINT_CUSTOM_TYPE = "checkpoint";
 const CHECKPOINT_REF_PREFIX = "refs/bluclawd/checkpoints/";
@@ -934,4 +935,4 @@ export function factory(pi: ExtensionAPI): void {
 const DOUBLE_ESCAPE_MS = 500;
 
 const checkpointsExtension: InlineExtension = { name: "checkpoints", factory };
-export default checkpointsExtension.factory;
+export default timed("checkpoints", checkpointsExtension.factory);

@@ -18,6 +18,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Editor, type EditorTheme, type TUI } from "@earendil-works/pi-tui";
 import { PasteTokens, shouldCollapse } from "../_shared/paste-tokens.ts";
+import { timed } from "../_shared/timing.ts";
 
 interface Segment {
 	segment: string;
@@ -225,4 +226,4 @@ function factory(pi: ExtensionAPI): void {
 }
 
 const pasteExtension: InlineExtension = { name: "paste", factory };
-export default pasteExtension.factory;
+export default timed("paste", pasteExtension.factory);

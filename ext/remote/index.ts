@@ -20,6 +20,7 @@ import { currentDaemonBuildId, OrchestratorClient, type RemoteResult } from "../
 import { piCommand, Tmux } from "../../daemon/tmux.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
 import { remotePort } from "../_shared/settings.ts";
+import { timed } from "../_shared/timing.ts";
 import { promptContent, promptOptions } from "../agent-view/index.ts";
 import { TRUST_CHANGED } from "../permissions/index.ts";
 import { remoteSkillPrompt } from "../skills/prompt.ts";
@@ -389,4 +390,4 @@ function factory(pi: ExtensionAPI): void {
 }
 
 const remoteExtension: InlineExtension = { name: "remote", factory };
-export default remoteExtension.factory;
+export default timed("remote", remoteExtension.factory);

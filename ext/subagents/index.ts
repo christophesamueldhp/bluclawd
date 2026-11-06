@@ -15,6 +15,7 @@ import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { pistatuslineDrawsFooter } from "../_shared/pistatusline.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { publishSubagentPanel } from "../_shared/subagent-panel.ts";
+import { timed } from "../_shared/timing.ts";
 import {
 	createRunAdmission,
 	formatRunLabel,
@@ -841,4 +842,4 @@ const subagentsExtension: InlineExtension = {
 	name: "subagents",
 	factory: createSubagentsExtension(),
 };
-export default subagentsExtension.factory;
+export default timed("subagents", subagentsExtension.factory);
