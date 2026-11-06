@@ -328,7 +328,8 @@ const agentView: InlineExtension = {
 				createdAt: ctx.sessionManager.getHeader()?.timestamp,
 				// Its last entry's: once idle, when its last turn ended. Every heartbeat restates its lastSeenAt.
 				finishedAt: entries.at(-1)?.timestamp,
-				turnStartedAt: turnStartedAt(entries),
+				// The active branch's, as a Chat times it: after a /tree, not a prompt on the branch left.
+				turnStartedAt: turnStartedAt(ctx.sessionManager.getBranch()),
 				// Only once it differs: a heartbeat lags the file, whose last entry is otherwise the leaf.
 				leafId: leafId !== entries.at(-1)?.id ? leafId : undefined,
 				dialog: activity.current === "awaiting_input" ? activity.dialog : undefined,

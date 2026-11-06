@@ -22,7 +22,6 @@ export interface RemoteSession {
 	detail: string;
 	createdAt?: string;
 	finishedAt?: string;
-	/** When its latest prompt was written, when its pane says: mid-turn, when its turn began. */
 	turnStartedAt?: string;
 	/** While it needs input: the dialog it waits on. */
 	dialog?: { kind: string; title?: string };

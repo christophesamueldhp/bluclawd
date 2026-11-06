@@ -20,7 +20,6 @@ export interface AgentRow {
 	detail: string;
 	createdAt?: string;
 	finishedAt?: string;
-	/** When its latest prompt was written, when its pane says. */
 	turnStartedAt?: string;
 	pinned: boolean;
 	sortOrder?: number;
@@ -360,10 +359,10 @@ export function compactAge(ms: number): string {
  *  run's age freezes at how long it took. */
 export function rowAge(row: AgentRow, nowMs: number): string {
 	const midTurn = row.alive && (row.state === "working" || row.state === "needs");
-	const created = (midTurn && stamp(row.turnStartedAt)) || stamp(row.createdAt);
-	if (!created) return "";
+	const since = (midTurn && stamp(row.turnStartedAt)) || stamp(row.createdAt);
+	if (!since) return "";
 	const end = !row.alive || row.state === "done" || row.state === "failed" ? stamp(row.finishedAt) || nowMs : nowMs;
-	return compactAge(end - created);
+	return compactAge(end - since);
 }
 
 export const STATE_WORDS: Record<RowState, string> = {

@@ -343,19 +343,22 @@ describe("rows", () => {
 			);
 		expect(rowAge(row("working"), NOW)).toBe("20s");
 		expect(rowAge(row("awaiting_input"), NOW)).toBe("20s");
-		const done = rowFromSummary(
-			{
-				id: "d",
-				status: "online",
-				cwd: HERE,
-				turns: 1,
-				createdAt: ago(9),
-				finishedAt: ago(3),
-				turnStartedAt: ago(5),
-			},
-			undefined,
-		);
-		expect(rowAge(done, NOW)).toBe("6m");
+		for (const outcome of ["done", "failed"] as const) {
+			const ended = rowFromSummary(
+				{
+					id: "d",
+					status: "online",
+					cwd: HERE,
+					outcome,
+					createdAt: ago(9),
+					finishedAt: ago(3),
+					turnStartedAt: ago(5),
+				},
+				undefined,
+			);
+			expect(ended.state).toBe(outcome);
+			expect(rowAge(ended, NOW), outcome).toBe("6m");
+		}
 	});
 
 	it.each([
