@@ -4,6 +4,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { timed } from "../ext/_shared/timing.ts";
 
+// test/setup/agent-dir.ts gives every test file its own agent dir.
 const log = () => join(process.env.PI_CODING_AGENT_DIR as string, "bluclawd", "timing.jsonl");
 const records = () =>
 	readFileSync(log(), "utf8")
@@ -29,7 +30,6 @@ function stubPi() {
 
 afterEach(() => {
 	vi.unstubAllEnvs();
-	vi.useRealTimers();
 	rmSync(log(), { force: true });
 });
 
@@ -58,8 +58,8 @@ describe("timed", () => {
 			expect(handlers.get("tool_call")?.({ toolName: "read" }, {})).toEqual({ block: true, reason: "read" });
 
 			const [record] = records();
-			expect(Object.keys(record).sort()).toEqual(["event", "ext", "ms", "sinceProcessStart"]);
-			expect(record).toMatchObject({ ext: "perms", event: "tool_call" });
+			expect(Object.keys(record).sort()).toEqual(["event", "ext", "ms", "pid", "sinceProcessStart"]);
+			expect(record).toMatchObject({ pid: process.pid, ext: "perms", event: "tool_call" });
 			expect(record.ms).toBeGreaterThanOrEqual(0);
 			expect(record.sinceProcessStart).toBeGreaterThanOrEqual(before);
 		});

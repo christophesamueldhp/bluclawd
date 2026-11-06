@@ -1,8 +1,8 @@
 /**
  * Opt-in handler timing. pi awaits extension handlers one after another, so a slow one delays
  * every handler after it; with `BLUCLAWD_TIMING=1`, `timed` records each handler call of an
- * extension as a JSONL line `{ext, event, ms, sinceProcessStart}` in
- * `<agentDir>/bluclawd/timing.jsonl`. Without it the extension is returned as is.
+ * extension as a JSONL line `{pid, ext, event, ms, sinceProcessStart}` in
+ * `<agentDir>/bluclawd/timing.jsonl`, which every timed pi shares. Without it the extension is returned as is.
  */
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -12,17 +12,18 @@ type Handler = (...args: unknown[]) => unknown;
 
 export function timed(ext: string, factory: ExtensionFactory): ExtensionFactory {
 	if (process.env.BLUCLAWD_TIMING !== "1") return factory;
-	let log: string | undefined;
+	let logPath: string | undefined;
 
 	const record = (event: string, start: number) => {
 		const end = performance.now();
 		try {
-			if (!log) {
+			if (!logPath) {
 				const dir = join(getAgentDir(), "bluclawd");
 				mkdirSync(dir, { recursive: true });
-				log = join(dir, "timing.jsonl");
+				logPath = join(dir, "timing.jsonl");
 			}
-			appendFileSync(log, `${JSON.stringify({ ext, event, ms: end - start, sinceProcessStart: end })}\n`);
+			const line = { pid: process.pid, ext, event, ms: end - start, sinceProcessStart: end };
+			appendFileSync(logPath, `${JSON.stringify(line)}\n`);
 		} catch {
 			// Timing must never change what the handler does.
 		}
