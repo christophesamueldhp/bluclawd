@@ -46,10 +46,21 @@ export function turnTimes(messages, working) {
 	return times;
 }
 
-/** When the turn in progress began: its prompt's time. @param {Timed[]} messages */
-export function turnSince(messages) {
-	for (let i = messages.length - 1; i >= 0; i--) if (messages[i].kind === "user") return messages[i].at;
-	return undefined;
+/**
+ * When the turn in progress began: the latest prompt that started one, the transcript's or one sent
+ * from here that pi took before the transcript has it.
+ * @param {Timed[]} messages @param {{ sentAt: number, outcome?: string }[]} [pending]
+ */
+export function turnSince(messages, pending = []) {
+	let latest = Number.NEGATIVE_INFINITY;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (messages[i].kind !== "user") continue;
+		const at = messages[i].at;
+		if (at) latest = Date.parse(at);
+		break;
+	}
+	for (const p of pending) if (p.outcome === "taken") latest = Math.max(latest, p.sentAt);
+	return Number.isFinite(latest) ? new Date(latest).toISOString() : undefined;
 }
 
 /**

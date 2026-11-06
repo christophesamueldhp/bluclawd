@@ -219,7 +219,9 @@ button { -webkit-user-select: none; user-select: none; }
 .float { position: sticky; bottom: var(--s2); z-index: 1; display: flex; justify-content: center; flex-wrap: wrap; gap: var(--s1); padding: 0 var(--s4); pointer-events: none; }
 .float[hidden] { display: none; }
 .pill-item { pointer-events: auto; display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 var(--s3); border: 1px solid var(--line); border-radius: 16px; background: var(--panel); color: var(--secondary); font: 13px -apple-system, BlinkMacSystemFont, system-ui, sans-serif; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; box-shadow: 0 2px 8px var(--shadow); }
-button.pill-item { color: var(--link); }
+button.pill-item { position: relative; color: var(--link); }
+/* Drawn 32 px tall, tapped as 44: the hit area reaches past its edge. */
+button.pill-item::after { content: ""; position: absolute; inset: -6px; }
 .pill-item.off { color: var(--red); }
 .pill-item .icon { width: 14px; height: 14px; }
 .pill-item .session-spinner { width: 14px; height: 14px; line-height: 14px; color: var(--accent); text-align: center; }

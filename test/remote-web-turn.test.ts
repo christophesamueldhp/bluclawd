@@ -42,6 +42,16 @@ describe("a turn's time on the phone", () => {
 		expect(turnSince([user("u1", 0), reply("a1", 1), user("u2", 5), reply("a2", 6)])).toBe(at(5));
 		expect(turnSince([reply("a1", 1)])).toBeUndefined();
 	});
+
+	it("runs from a prompt sent from here that pi took, before the transcript has it", () => {
+		const messages = [user("u1", 0), reply("a1", 1)];
+		const sentAt = Date.parse(at(9));
+		expect(turnSince(messages, [{ sentAt, outcome: "taken" }])).toBe(at(9));
+		// Still on its way, or queued behind the turn: not what started it.
+		expect(turnSince(messages, [{ sentAt }, { sentAt, outcome: "queued" }])).toBe(at(0));
+		// Once the transcript has it, its own time.
+		expect(turnSince([...messages, user("u2", 10)], [{ sentAt, outcome: "taken" }])).toBe(at(10));
+	});
 });
 
 describe("the composer's round button", () => {

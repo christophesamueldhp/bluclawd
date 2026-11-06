@@ -1541,7 +1541,7 @@ function updateFloat(session) {
 	const items = [];
 	if (!state.online) items.push(`<span class="pill-item off">Reconnecting to the Mac…</span>`);
 	if (session?.state === "working") {
-		const since = turnSince(chat.messages);
+		const since = turnSince(chat.messages, chat.pending);
 		const time = since ? ` for <span class="elapsed" data-since="${esc(since)}"></span>` : "…";
 		items.push(
 			`<span class="pill-item"><span class="session-spinner" aria-hidden="true"></span>Working${time}</span>`,
