@@ -12,7 +12,9 @@ export default function skills(pi: ExtensionAPI) {
 		const previous = ctx.ui.getEditorComponent();
 		if (installed && previous === installed) return;
 		const factory: NonNullable<typeof previous> = (tui, theme, keybindings) => {
-			const component = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
+			const component =
+				previous?.(tui, theme, keybindings) ??
+				new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
 			if (!("getCursor" in component) || !("isShowingAutocomplete" in component)) return component;
 			editor = attachSkills(
 				component as Editor,

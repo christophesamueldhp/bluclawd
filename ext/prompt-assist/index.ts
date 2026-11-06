@@ -240,7 +240,9 @@ export default function promptAssist(pi: ExtensionAPI) {
 		}
 		installed = (tui, theme, keybindings) => {
 			editor?.clear();
-			const component = previous?.(tui, theme, keybindings) ?? new CustomEditor(tui, theme, keybindings);
+			const component =
+				previous?.(tui, theme, keybindings) ??
+				new CustomEditor(tui, theme, keybindings, { embedWorkingStatus: true });
 			// Compose with the paste editor instead of replacing its behavior.
 			if (!("getCursor" in component) || !("isShowingAutocomplete" in component)) return component;
 			// Pi restores history on startup/resume, but only copies draft text when replacing editors on reload.

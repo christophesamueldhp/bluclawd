@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import vibes from "../ext/vibes/index.ts";
 import { pickVibe, SPINNER_VERBS } from "../ext/vibes/vibes.ts";
 
 describe("SPINNER_VERBS", () => {
@@ -19,5 +20,33 @@ describe("pickVibe", () => {
 		expect([...firstRound].sort()).toEqual(vibes);
 		expect(pickVibe(vibes, 4, 42)).toBe(firstRound[0]);
 		expect([0, 1, 2, 3].map((index) => pickVibe(vibes, index, 42))).toEqual(firstRound);
+	});
+});
+
+describe("the working message", () => {
+	it("counts the turn's elapsed seconds after its verb, ends with the interrupt hint, and stops with the turn", () => {
+		vi.useFakeTimers();
+		try {
+			const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+			vibes({ on: (event: string, handler: any) => handlers.set(event, handler) } as never);
+			const setWorkingMessage = vi.fn();
+			const ctx = { hasUI: true, ui: { setWorkingMessage } };
+
+			handlers.get("before_agent_start")?.({}, ctx);
+			const first: string = setWorkingMessage.mock.lastCall?.[0];
+			const verb = first.match(/^([A-Z][\p{L}'-]+)… \(0s · esc to interrupt\)$/u)?.[1];
+			expect(SPINNER_VERBS).toContain(verb);
+
+			vi.advanceTimersByTime(12_000);
+			expect(setWorkingMessage).toHaveBeenLastCalledWith(`${verb}… (12s · esc to interrupt)`);
+
+			handlers.get("agent_end")?.({}, ctx);
+			expect(setWorkingMessage).toHaveBeenLastCalledWith();
+			const calls = setWorkingMessage.mock.calls.length;
+			vi.advanceTimersByTime(5_000);
+			expect(setWorkingMessage).toHaveBeenCalledTimes(calls);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

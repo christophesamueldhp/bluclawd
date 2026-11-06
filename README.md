@@ -198,13 +198,20 @@ status line, install [pistatusline](https://github.com/christophesamueldhp/pista
 the same items under its lines, and the subagent panel as a block below them. Under pi's own footer,
 which flattens every status onto one line, the panel stays below the prompt.
 
-While the agent works, "Working..." becomes one of bluclawd's 186 spinner verbs
-("Pondering...", "Clauding..."), a new one each turn, none repeated until all have shown.
+While the agent works, "Working..." becomes one of bluclawd's 186 spinner verbs, a new one
+each turn, none repeated until all have shown, with the turn's elapsed time and the interrupt
+key: `Pondering… (12s · esc to interrupt)`, counted every second. bluclawd's prompt editors keep
+the spinner in the prompt's top border, as pi's own editor does.
 
 The welcome header is bluclawd's: the mascot beside name, model and cwd. In the
 fullscreen renderer the mascot plays an entrance animation each time pi is launched,
 picked at random from bluclawd's four (skip, jump, look, spin) and bluclawd's own
 hand wave; `"prefersReducedMotion": true` in settings turns it off.
+
+For a quieter start, set `"quietStartup": "header"` in `~/.pi/agent/settings.json`. It hides
+pi's startup details (the `Model scope` line and the `[Context]`, `[Skills]` and `[Extensions]`
+blocks) and keeps bluclawd's welcome header; `true` would hide the header too. bluclawd does not
+change your settings itself.
 
 
 ## Updating
