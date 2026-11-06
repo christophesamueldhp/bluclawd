@@ -26,6 +26,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 		events: 9,
 	},
 	branding: { commands: ["theme"], tools: [], shortcuts: 0, events: 2 },
+	transcript: { commands: [], tools: [], shortcuts: 0, events: 0 },
 	"agent-view": {
 		commands: ["agent-view"],
 		tools: [],

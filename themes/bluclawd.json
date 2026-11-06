@@ -20,8 +20,6 @@
 
 		"diffAddedWord": "#38a660",
 		"diffRemovedWord": "#b3596b",
-		"diffAddedBg": "#225c2b",
-		"diffRemovedBg": "#7a2936",
 
 		"bgMessage": "#373737",
 		"bgSlate": "#374146",
@@ -60,9 +58,9 @@
 		"customMessageBg": "bgSlate",
 		"customMessageText": "white",
 		"customMessageLabel": "lavender",
-		"toolPendingBg": "bgPanel",
-		"toolSuccessBg": "diffAddedBg",
-		"toolErrorBg": "diffRemovedBg",
+		"toolPendingBg": "",
+		"toolSuccessBg": "",
+		"toolErrorBg": "",
 		"toolTitle": "white",
 		"toolOutput": "gray",
 		"mdHeading": "white",

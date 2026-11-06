@@ -27,7 +27,7 @@ function load(name: string) {
 	const parsed = JSON.parse(raw) as ThemeFile;
 	/** Follow `vars` references until a literal `#rrggbb` or palette index falls out, as pi does. */
 	const resolve = (value: string | number, seen = new Set<string>()): string | number => {
-		if (typeof value === "number" || value.startsWith("#")) return value;
+		if (typeof value === "number" || value === "" || value.startsWith("#")) return value;
 		if (seen.has(value)) throw new Error(`cyclic var reference: ${value}`);
 		seen.add(value);
 		const next = parsed.vars[value];
@@ -91,9 +91,6 @@ describe("bluclawd theme", () => {
 		expect(color("selectedBg")).toBe("#264f78");
 		expect(color("userMessageBg")).toBe("#373737");
 		expect(color("customMessageBg")).toBe("#374146");
-		expect(color("toolPendingBg")).toBe("#262626");
-		expect(color("toolSuccessBg")).toBe("#225c2b");
-		expect(color("toolErrorBg")).toBe("#7a2936");
 	});
 
 	it("has no Catppuccin values left anywhere in the file", () => {
@@ -126,6 +123,11 @@ describe("bluclawd theme variants", () => {
 		expect(Object.keys(variant.parsed.export).sort()).toEqual(exportKeys);
 		for (const token of tokens) expect(() => variant.color(token)).not.toThrow();
 		for (const key of exportKeys) expect(() => variant.resolve(variant.parsed.export[key])).not.toThrow();
+	});
+
+	it.each(["bluclawd", ...variants])("%s draws tool calls on the terminal's background, not a panel", (name) => {
+		const { color } = load(name);
+		for (const token of ["toolPendingBg", "toolSuccessBg", "toolErrorBg"]) expect(color(token), token).toBe("");
 	});
 
 	it("declares each theme's appearance, so the Auto pair resolves", () => {
@@ -172,18 +174,18 @@ describe("bluclawd theme variants", () => {
 		expect(dark("success")).toBe("#3399ff");
 		expect(dark("error")).toBe("#ff6666");
 		expect(dark("toolDiffAdded")).toBe("#0077b3");
-		expect(dark("toolSuccessBg")).toBe("#004466");
 		const light = load("bluclawd-light-daltonized").color;
 		expect(light("success")).toBe("#006699");
 		expect(light("error")).toBe("#cc0000");
 		expect(light("toolDiffAdded")).toBe("#3366cc");
 	});
 
-	it("ANSI modes use only the terminal's 16 palette colours", () => {
+	it("ANSI modes use only the terminal's 16 palette colours or its default", () => {
 		for (const name of ["bluclawd-dark-ansi", "bluclawd-light-ansi"]) {
 			const variant = load(name);
 			for (const token of tokens) {
 				const value = variant.color(token);
+				if (value === "") continue;
 				expect(typeof value, `${name} ${token}`).toBe("number");
 				expect(value as number).toBeLessThan(16);
 			}
