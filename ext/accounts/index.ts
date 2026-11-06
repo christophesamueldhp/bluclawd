@@ -1,10 +1,10 @@
-import type { AuthType, Provider } from "@earendil-works/pi-ai";
+import type { AuthType, Credential, Provider } from "@earendil-works/pi-ai";
 import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { type ExtensionAPI, type ExtensionCommandContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import { agentTasks } from "../_shared/agent-tasks.ts";
 import { type ChooserView, chooseAccountOrModel } from "./chooser.ts";
 import { loginAccount } from "./login.ts";
-import { AccountStore } from "./store.ts";
+import { type AccountMetadata, AccountStore } from "./store.ts";
 
 const authLabel = (type: AuthType) => (type === "oauth" ? "OAuth" : "API key");
 const usage = "Usage: /accounts [provider-id] | /accounts --models | /accounts --scoped";
@@ -61,6 +61,85 @@ async function refresh(ctx: ExtensionCommandContext, provider: string): Promise<
 	}
 }
 
+/** Asks for a unique account name; the account being renamed may keep its own name. */
+async function askName(
+	ctx: ExtensionCommandContext,
+	accounts: AccountMetadata[],
+	title: string,
+	exceptId?: string,
+): Promise<string | undefined> {
+	const name = (await ctx.ui.input(title, "For example: Personal or Work"))?.trim();
+	if (!name) return;
+	if (
+		name.length > 80 ||
+		/[\u0000-\u001f\u007f]/.test(name) ||
+		accounts.some((account) => account.id !== exceptId && account.name === name)
+	) {
+		ctx.ui.notify("Use a unique account name of 1–80 characters, without control characters.", "warning");
+		return;
+	}
+	return name;
+}
+
+/** Runs the provider's own sign-in in the terminal UI; undefined when unavailable or cancelled. */
+async function signIn(
+	ctx: ExtensionCommandContext,
+	provider: Provider,
+	action: string,
+): Promise<Credential | undefined> {
+	if (ctx.mode !== "tui") {
+		ctx.ui.notify(`${action} requires Pi's terminal UI. Switching saved accounts works here.`, "warning");
+		return;
+	}
+	const methods: { type: AuthType; label: string }[] = [];
+	if (provider.auth.oauth)
+		methods.push({ type: "oauth", label: provider.auth.oauth.loginLabel ?? "Sign in with OAuth" });
+	if (provider.auth.apiKey?.login) methods.push({ type: "api_key", label: "Sign in with an API key" });
+	const methodLabel =
+		methods.length === 1
+			? methods[0]?.label
+			: await ctx.ui.select(
+					"Sign-in method",
+					methods.map((m) => m.label),
+				);
+	const method = methods.find((item) => item.label === methodLabel);
+	if (!method) {
+		if (methods.length === 0)
+			ctx.ui.notify("This provider uses ambient credentials. Save a stored login instead.", "warning");
+		return;
+	}
+	return loginAccount(ctx, provider, method.type, getAgentDir());
+}
+
+async function editAccount(
+	ctx: ExtensionCommandContext,
+	provider: Provider,
+	store: AccountStore,
+	accounts: AccountMetadata[],
+): Promise<void> {
+	const name = await ctx.ui.select(
+		"Edit which saved account?",
+		accounts.map((account) => account.name),
+	);
+	const account = accounts.find((item) => item.name === name);
+	if (!account) return;
+	const rename = "Rename…";
+	const relogin = "Sign in again…";
+	const action = await ctx.ui.select(`Edit ${account.name}`, [rename, relogin, "Back"]);
+	if (action === rename) {
+		const next = await askName(ctx, accounts, `New name for ${account.name}`, account.id);
+		if (!next || !requireIdle(ctx)) return;
+		await store.rename(account.id, next);
+		ctx.ui.notify(`Renamed ${account.name} to ${next}.`, "info");
+	} else if (action === relogin) {
+		const credential = await signIn(ctx, provider, "Signing in again");
+		if (!credential || !requireIdle(ctx)) return;
+		await store.replaceCredential(account.id, credential);
+		if (account.active) await refresh(ctx, provider.id);
+		ctx.ui.notify(`Login for ${account.name} replaced.`, "info");
+	}
+}
+
 async function chooseAccount(
 	ctx: ExtensionCommandContext,
 	provider: Provider,
@@ -68,16 +147,31 @@ async function chooseAccount(
 ): Promise<"login" | undefined> {
 	while (true) {
 		const accounts = await store.list(provider.id);
-		const labels = accounts.map(
-			(account) => `${account.active ? "✓ " : ""}${account.name} · ${authLabel(account.type)}`,
+		const labels = accounts.map((account) =>
+			[
+				`${account.active ? "✓ " : ""}${account.name}`,
+				authLabel(account.type),
+				account.email,
+				account.changed ? "login changed outside /accounts" : undefined,
+			]
+				.filter(Boolean)
+				.join(" · "),
 		);
 		const add = "Add account…";
+		const edit = "Edit saved account…";
 		const save = "Save current login…";
 		const remove = "Remove saved account…";
 		const back = "Back";
 		const choice = await ctx.ui.select(
 			`${provider.name} accounts${accounts.length === 0 ? " (no saved accounts)" : ""}`,
-			[...labels, add, save, ...(accounts.some((account) => !account.active) ? [remove] : []), back],
+			[
+				...labels,
+				add,
+				...(accounts.length ? [edit] : []),
+				save,
+				...(accounts.some((account) => !account.active) ? [remove] : []),
+				back,
+			],
 		);
 		if (!choice || choice === back) return;
 		if (!requireIdle(ctx)) return;
@@ -90,6 +184,10 @@ async function chooseAccount(
 				"info",
 			);
 			return;
+		}
+		if (choice === edit) {
+			await editAccount(ctx, provider, store, accounts);
+			continue;
 		}
 		if (choice === remove) {
 			const inactive = accounts.filter((account) => !account.active);
@@ -108,47 +206,15 @@ async function chooseAccount(
 			continue;
 		}
 		if (choice === add || choice === save) {
-			const name = (await ctx.ui.input("Account name", "For example: Personal or Work"))?.trim();
+			const name = await askName(ctx, accounts, "Account name");
 			if (!name) continue;
-			if (
-				name.length > 80 ||
-				/[\u0000-\u001f\u007f]/.test(name) ||
-				accounts.some((account) => account.name === name)
-			) {
-				ctx.ui.notify("Use a unique account name of 1–80 characters, without control characters.", "warning");
-				continue;
-			}
 			if (choice === save) {
 				if (!requireIdle(ctx)) return;
 				await store.saveCurrent(provider.id, name);
 				ctx.ui.notify(`Current ${provider.name} login saved as ${name}.`, "info");
 				continue;
 			}
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify(
-					"Adding an account requires Pi's terminal UI. Switching saved accounts works here.",
-					"warning",
-				);
-				continue;
-			}
-			const methods: { type: AuthType; label: string }[] = [];
-			if (provider.auth.oauth)
-				methods.push({ type: "oauth", label: provider.auth.oauth.loginLabel ?? "Sign in with OAuth" });
-			if (provider.auth.apiKey?.login) methods.push({ type: "api_key", label: "Sign in with an API key" });
-			const methodLabel =
-				methods.length === 1
-					? methods[0]?.label
-					: await ctx.ui.select(
-							"Sign-in method",
-							methods.map((m) => m.label),
-						);
-			const method = methods.find((item) => item.label === methodLabel);
-			if (!method) {
-				if (methods.length === 0)
-					ctx.ui.notify("This provider uses ambient credentials. Save a stored login instead.", "warning");
-				continue;
-			}
-			const credential = await loginAccount(ctx, provider, method.type, getAgentDir());
+			const credential = await signIn(ctx, provider, "Adding an account");
 			if (!credential) continue;
 			if (!requireIdle(ctx)) return;
 			const account = await store.add(provider.id, name, credential);

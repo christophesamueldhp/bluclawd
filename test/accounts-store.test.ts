@@ -35,6 +35,17 @@ const oauth = (value: string): Credential => ({
 	accountId: "fake-account",
 });
 
+const jwt = (claims: Record<string, unknown>) =>
+	`fake-header.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.fake-signature`;
+/** An OAuth login whose access token names a user, as ChatGPT's does. */
+const login = (user: string, refresh = "first"): Credential => ({
+	type: "oauth",
+	access: jwt({ sub: `user-${user}`, "https://api.openai.com/profile": { email: `${user}@example.com` } }),
+	refresh: `fake-refresh-${refresh}`,
+	expires: 1_900_000_000_000,
+	accountId: `account-${user}`,
+});
+
 let agentDir: string;
 let store: AccountStore;
 const authPath = () => join(agentDir, "auth.json");
@@ -185,6 +196,104 @@ describe("named provider accounts", () => {
 		const other = await store.add("example", "Other", key("other"));
 		await expect(store.saveCurrent("example", "Other")).rejects.toThrow("already exists");
 		expect(await store.list()).toEqual([current, other]);
+	});
+
+	it("renames an account in place, keeping it active, without taking another account's name", async () => {
+		const work = await store.add("example", "Work", key("fake-work"));
+		const other = await store.add("example", "Other", key("fake-other"));
+		await store.switchTo(work.id);
+		expect(await store.rename(work.id, " Office ")).toEqual({ ...work, name: "Office", active: true });
+		expect(await store.rename(work.id, "Office")).toMatchObject({ name: "Office" });
+		await expect(store.rename(work.id, "Other")).rejects.toThrow("already exists");
+		await expect(store.rename(work.id, "bad\nname")).rejects.toThrow("name");
+		await expect(store.rename("missing", "Any")).rejects.toThrow("not found");
+		expect(await store.list()).toEqual([{ ...work, name: "Office", active: true }, other]);
+		expect(readAuth()).toEqual({ example: key("fake-work") });
+	});
+
+	it("shows the login's email and flags a live login changed outside /accounts", async () => {
+		const work = await store.add("example", "Work", login("work"));
+		await store.switchTo(work.id);
+		expect(await store.list()).toEqual([{ ...work, active: true, email: "work@example.com" }]);
+		seedAuth({ example: login("work", "rotated") });
+		expect((await store.list())[0]?.changed).toBeUndefined();
+		seedAuth({ example: login("home") });
+		expect((await store.list())[0]?.changed).toBe(true);
+	});
+
+	it("lists saved accounts even when live auth is unreadable", async () => {
+		const work = await store.add("example", "Work", login("work"));
+		writeFileSync(authPath(), "not json");
+		expect(await store.list()).toEqual([{ ...work, email: "work@example.com" }]);
+	});
+
+	it("saves a login changed outside /accounts as a new account, keeping the active one", async () => {
+		const work = await store.add("example", "Work", login("work"));
+		await store.switchTo(work.id);
+		seedAuth({ example: login("home") });
+		const home = await store.saveCurrent("example", "Home");
+		expect(home).toMatchObject({ name: "Home", active: true, email: "home@example.com" });
+		expect(home.id).not.toBe(work.id);
+		await store.switchTo(work.id);
+		expect(readAuth().example).toEqual(login("work"));
+	});
+
+	it("still renames the tracked login when only its tokens rotated", async () => {
+		const work = await store.add("example", "Work", login("work"));
+		await store.switchTo(work.id);
+		seedAuth({ example: login("work", "rotated") });
+		const renamed = await store.saveCurrent("example", "Office");
+		expect(renamed.id).toBe(work.id);
+		expect(await store.list()).toHaveLength(1);
+	});
+
+	it("imports a login changed outside /accounts when switching away, instead of overwriting", async () => {
+		const work = await store.add("example", "Work", login("work"));
+		const other = await store.add("example", "Other", key("fake-other"));
+		await store.switchTo(work.id);
+		seedAuth({ example: login("home") });
+		await store.switchTo(other.id);
+		const original = (await store.list()).find((account) => account.name === "Original login");
+		expect(original).toMatchObject({ email: "home@example.com", active: false });
+		await store.switchTo(work.id);
+		expect(readAuth().example).toEqual(login("work"));
+		if (!original) throw new Error("Expected imported login");
+		await store.switchTo(original.id);
+		expect(readAuth().example).toEqual(login("home"));
+	});
+
+	it("replaces an inactive account's credential without touching live auth", async () => {
+		const live = await store.add("example", "Live", key("fake-live"));
+		const other = await store.add("example", "Other", key("fake-old"));
+		await store.switchTo(live.id);
+		expect(await store.replaceCredential(other.id, oauth("new"))).toEqual({ ...other, type: "oauth" });
+		expect(readAuth()).toEqual({ example: key("fake-live") });
+		await store.switchTo(other.id);
+		expect(readAuth()).toEqual({ example: oauth("new") });
+	});
+
+	it("replaces the active account's credential in live auth as well", async () => {
+		seedAuth({ untouched: key("fake-untouched") });
+		const active = await store.add("example", "Active", key("fake-old"));
+		await store.switchTo(active.id);
+		await store.replaceCredential(active.id, key("fake-new"));
+		expect(readAuth()).toEqual({ untouched: key("fake-untouched"), example: key("fake-new") });
+		const other = await store.add("example", "Other", key("fake-other"));
+		await store.switchTo(other.id);
+		await store.switchTo(active.id);
+		expect(readAuth().example).toEqual(key("fake-new"));
+	});
+
+	it("rolls live auth back if the replaced active credential cannot be saved", async () => {
+		const active = await store.add("example", "Active", key("fake-old"));
+		await store.switchTo(active.id);
+		const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
+		vi.mocked(renameSync).mockImplementation((source, destination) => {
+			if (destination === vaultPath()) throw new Error("Fake vault write failure");
+			actual.renameSync(source, destination);
+		});
+		await expect(store.replaceCredential(active.id, key("fake-new"))).rejects.toThrow("Fake vault write failure");
+		expect(readAuth()).toEqual({ example: key("fake-old") });
 	});
 
 	it("rejects duplicate and invalid names without changing stored state", async () => {

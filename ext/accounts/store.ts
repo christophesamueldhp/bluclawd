@@ -21,6 +21,10 @@ export interface AccountMetadata {
 	provider: string;
 	type: Credential["type"];
 	active: boolean;
+	/** From the OAuth access token's claims, when it carries one. */
+	email?: string;
+	/** Active account whose live login is now a different login, e.g. after native /login. */
+	changed?: true;
 }
 
 interface Account {
@@ -74,13 +78,50 @@ function normalizeName(name: string): string {
 	return trimmed;
 }
 
-function metadata(account: Account, vault: Vault): AccountMetadata {
+function claims(credential: Credential): Record<string, unknown> | undefined {
+	if (credential.type !== "oauth") return;
+	try {
+		const payload: unknown = JSON.parse(Buffer.from(credential.access.split(".")[1] ?? "", "base64url").toString());
+		return isObject(payload) ? payload : undefined;
+	} catch {
+		return;
+	}
+}
+
+function emailOf(credential: Credential): string | undefined {
+	const payload = claims(credential);
+	if (!payload) return;
+	for (const value of [payload, ...Object.values(payload)]) {
+		if (isObject(value) && typeof value.email === "string") return value.email;
+	}
+}
+
+/** Who a credential signs in as; undefined when the provider exposes no identity. */
+function identity(credential: Credential): string | undefined {
+	if (credential.type === "api_key") return JSON.stringify([credential.key, credential.env]);
+	const subject = claims(credential)?.sub;
+	const accountId = credential.accountId;
+	if (typeof subject !== "string" && typeof accountId !== "string") return;
+	return JSON.stringify([subject, accountId]);
+}
+
+/** Rotated tokens of one login stay the same login; unknown identities are assumed to match. */
+function otherLogin(a: Credential, b: Credential): boolean {
+	const [first, second] = [identity(a), identity(b)];
+	return first !== undefined && second !== undefined && first !== second;
+}
+
+function metadata(account: Account, vault: Vault, live?: Credential): AccountMetadata {
+	const active = vault.active[account.provider] === account.id;
+	const email = emailOf(account.credential);
 	return {
 		id: account.id,
 		name: account.name,
 		provider: account.provider,
 		type: account.credential.type,
-		active: vault.active[account.provider] === account.id,
+		active,
+		...(email ? { email } : {}),
+		...(active && live && otherLogin(account.credential, live) ? { changed: true as const } : {}),
 	};
 }
 
@@ -168,6 +209,15 @@ export class AccountStore {
 		return credential;
 	}
 
+	/** For display only: an unreadable live login must not hide the saved accounts. */
+	private liveCredential(current: string | undefined, provider: string): Credential | undefined {
+		try {
+			return this.currentCredential(current, provider);
+		} catch {
+			return;
+		}
+	}
+
 	private create(vault: Vault, provider: string, name: string, credential: Credential): Account {
 		if (!provider.trim()) throw new Error("Provider must not be empty");
 		const normalized = normalizeName(name);
@@ -181,12 +231,12 @@ export class AccountStore {
 	}
 
 	async list(provider?: string): Promise<AccountMetadata[]> {
-		return this.backend.withLockAsync(async () => {
+		return this.backend.withLockAsync(async (current) => {
 			const vault = this.readVault();
 			return {
 				result: vault.accounts
 					.filter((account) => provider === undefined || account.provider === provider)
-					.map((account) => metadata(account, vault)),
+					.map((account) => metadata(account, vault, this.liveCredential(current, account.provider))),
 			};
 		});
 	}
@@ -207,7 +257,7 @@ export class AccountStore {
 			const credential = this.currentCredential(current, provider);
 			if (!credential) throw new Error("No stored login for this provider");
 			const previous = vault.accounts.find((account) => account.id === vault.active[provider]);
-			if (previous) {
+			if (previous && !otherLogin(previous.credential, credential)) {
 				const normalized = normalizeName(name);
 				if (
 					vault.accounts.some(
@@ -236,7 +286,9 @@ export class AccountStore {
 			const target = vault.accounts.find((account) => account.id === id);
 			if (!target) throw new Error("Account not found");
 			const credential = this.currentCredential(current, target.provider);
-			const previous = vault.accounts.find((account) => account.id === vault.active[target.provider]);
+			const tracked = vault.accounts.find((account) => account.id === vault.active[target.provider]);
+			// A different live login (e.g. native /login) is kept as its own account, never written over this one.
+			const previous = tracked && credential && otherLogin(tracked.credential, credential) ? undefined : tracked;
 			if (previous && credential) previous.credential = credential;
 			if (!previous && credential) {
 				let name = "Original login";
@@ -263,6 +315,53 @@ export class AccountStore {
 				throw error;
 			}
 			return { result: metadata(target, vault) };
+		});
+	}
+
+	async rename(id: string, name: string): Promise<AccountMetadata> {
+		return this.backend.withLockAsync(async () => {
+			const vault = this.readVault();
+			const account = vault.accounts.find((entry) => entry.id === id);
+			if (!account) throw new Error("Account not found");
+			const normalized = normalizeName(name);
+			if (
+				vault.accounts.some(
+					(entry) => entry.provider === account.provider && entry.id !== id && entry.name === normalized,
+				)
+			) {
+				throw new Error("An account with this name already exists for this provider");
+			}
+			account.name = normalized;
+			this.writeVault(vault);
+			return { result: metadata(account, vault) };
+		});
+	}
+
+	async replaceCredential(id: string, credential: Credential): Promise<AccountMetadata> {
+		const snapshot = structuredClone(credential);
+		if (!isCredential(snapshot)) throw new Error("Invalid account credential");
+		return this.backend.withLockAsync(async (current) => {
+			const vault = this.readVault();
+			const account = vault.accounts.find((entry) => entry.id === id);
+			if (!account) throw new Error("Account not found");
+			account.credential = snapshot;
+			if (vault.active[account.provider] !== id) {
+				this.writeVault(vault);
+				return { result: metadata(account, vault) };
+			}
+			const auth = { ...JSON.parse((current ?? "{}").replace(/^﻿/, "")), [account.provider]: snapshot };
+			replaceFile(this.authPath, JSON.stringify(auth, null, 2));
+			try {
+				this.writeVault(vault);
+			} catch (error) {
+				try {
+					replaceFile(this.authPath, current ?? "{}");
+				} catch (rollbackError) {
+					throw new AggregateError([error, rollbackError], "Credential replacement and auth rollback failed");
+				}
+				throw error;
+			}
+			return { result: metadata(account, vault) };
 		});
 	}
 

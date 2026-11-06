@@ -8,6 +8,8 @@ export interface ChooserView {
 	provider?: string;
 	scoped: boolean;
 	query: string;
+	/** Disconnected providers are listed in Accounts; search always finds them. */
+	expanded?: boolean;
 }
 
 type Choice = { provider: Provider } | { model: Model<Api> };
@@ -36,20 +38,40 @@ export function chooseAccountOrModel(
 				model,
 			]),
 		);
-		const activeAccount = (id: string) => accounts.find((account) => account.provider === id && account.active)?.name;
-		const accountLabel = (id: string) => `Active account: ${activeAccount(id) ?? "No named account"}`;
+		const accountLabel = (id: string) => {
+			const active = accounts.find((account) => account.provider === id && account.active);
+			if (!active) return "Active account: No named account";
+			return `Active account: ${active.name}${active.changed ? " (login changed outside /accounts)" : ""}`;
+		};
 		const outsideScope = ctx.model && restricted && !scopeKeys.has(modelKey(ctx.model));
 
-		function rows(): { choice: Choice; label: string; group?: string; available?: boolean }[] {
+		function rows(): {
+			choice?: Choice;
+			label: string;
+			group?: string;
+			available?: boolean;
+			connected?: boolean;
+			toggle?: true;
+		}[] {
 			const query = search.getValue().toLowerCase();
 			if (view.section === "Accounts") {
-				return providers.flatMap((provider) => {
+				const entries = providers.flatMap((provider) => {
 					const status = ctx.modelRegistry.getProviderAuthStatus(provider.id);
 					const connection = status.configured ? "Connected" : "Disconnected";
 					const external = status.source && status.source !== "stored" ? " · external/configured credentials" : "";
 					const label = `${provider.name} (${provider.id}) · ${connection} · ${accountLabel(provider.id)}${external}`;
-					return label.toLowerCase().includes(query) ? [{ choice: { provider }, label }] : [];
+					return label.toLowerCase().includes(query)
+						? [{ choice: { provider }, label, connected: status.configured }]
+						: [];
 				});
+				const connected = entries.filter((entry) => entry.connected);
+				const disconnected = entries.filter((entry) => !entry.connected);
+				if (query || !disconnected.length) return [...connected, ...disconnected];
+				const count = disconnected.length;
+				const label = view.expanded
+					? "▾ Hide disconnected providers"
+					: `▸ Show ${count} disconnected provider${count === 1 ? "" : "s"}`;
+				return [...connected, { label, toggle: true }, ...(view.expanded ? disconnected : [])];
 			}
 			return providers.flatMap((provider) => {
 				if (view.provider && provider.id !== view.provider) return [];
@@ -116,8 +138,13 @@ export function chooseAccountOrModel(
 						group = item.group;
 						lines.push(theme.fg("accent", group));
 					}
-					const label = `${i === selected ? "› " : "  "}${item.label}`;
-					lines.push(i === selected ? theme.fg("accent", label) : label);
+					const pointer = i === selected ? "› " : "  ";
+					// Same marks as pi's /login selector: ✓ configured, • not configured.
+					const mark = item.connected === undefined ? "" : item.connected ? "✓ " : "• ";
+					if (i === selected) lines.push(theme.fg("accent", `${pointer}${mark}${item.label}`));
+					else if (item.connected === undefined && !item.toggle) lines.push(`${pointer}${item.label}`);
+					else if (item.connected) lines.push(`${pointer}${theme.fg("success", mark)}${item.label}`);
+					else lines.push(theme.fg("muted", `${pointer}${mark}${item.label}`));
 				}
 				if (!items.length) lines.push("No matches.");
 				else lines.push(theme.fg("dim", `${selected + 1}/${items.length}`));
@@ -165,7 +192,8 @@ export function chooseAccountOrModel(
 				else if (keys.matches(data, "tui.select.down")) selected = Math.min(rows().length - 1, selected + 1);
 				else if (keys.matches(data, "tui.select.confirm")) {
 					const item = rows()[selected];
-					if (item && item.available !== false) return done(item.choice);
+					if (item?.toggle) view.expanded = !view.expanded;
+					else if (item?.choice && item.available !== false) return done(item.choice);
 				} else {
 					const before = search.getValue();
 					search.handleInput(data);
