@@ -97,6 +97,22 @@ _Avoid_: dead pane, stale pane
 **Session changed**:
 Why a phone's prompt is refused when it was sent to another session than its pane's: the pane is on another one now and refuses it, or its session ended for a new one, a `/resume` of another file or a fork before pi took it, and the daemon refuses it. A reload or a `/resume` of the same file is still the session it was sent to; a fork has a row of its own.
 
+### Models
+
+**Active model**:
+The model selected to answer in a session. Selecting it is separate from choosing which models belong to Scoped models.
+_Avoid_: scoped model (when referring to the selected model)
+
+**Scoped models**:
+The chosen set of models offered for scoped selection and quick cycling, identified by provider and model independently of the active account. Membership does not make a model the Active model.
+_Avoid_: active models
+
+**Session model scope**:
+The Scoped models belonging to one session, retained when it is reopened and inherited as an independent copy by a fork. Changing it does not change the Default model scope or another open session's choices.
+
+**Default model scope**:
+The globally saved baseline of Scoped models for new sessions, unless a project-specific choice takes precedence. Saving it also applies the selection to the current session, without changing other open sessions.
+
 ### Memory
 
 **Memory**:
