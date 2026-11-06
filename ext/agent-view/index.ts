@@ -757,8 +757,9 @@ const agentView: InlineExtension = {
 								},
 								startShell: (cwd, command) => panes.startShell(cwd, command),
 								listShells: () => panes.listShells(),
+								listShellsAsync: () => panes.listShellsAsync(),
 								stopShell: (name) => panes.stopShell(name),
-								capture: (name, lines) => panes.capture(name, lines),
+								captureAsync: (name, lines) => panes.captureAsync(name, lines),
 							},
 							listModels: () =>
 								ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id })),

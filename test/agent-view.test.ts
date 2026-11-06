@@ -146,8 +146,9 @@ function fakePanes(calls: Calls): PaneOps {
 			return "sh-new";
 		},
 		listShells: () => [],
+		listShellsAsync: async () => [],
 		stopShell: () => {},
-		capture: () => [],
+		captureAsync: async () => [],
 	};
 }
 

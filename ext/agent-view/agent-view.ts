@@ -129,6 +129,8 @@ const SPINNER = [...FRAMES, ...[...FRAMES].reverse()];
 const ARM_MS = 2000;
 /** bluclawd's double ctrl+c window. */
 const CTRL_C_MS = 800;
+/** Lines of a `!` command's output read for its peek: more than any terminal shows. */
+const PEEK_LINES = 500;
 /** The slash commands agent view runs itself, as `/` suggests them. */
 const VIEW_COMMANDS: Array<{ name: string; arg?: string; description: string }> = [
 	{ name: "cd", arg: "<dir>", description: "Set the directory new sessions start in" },
@@ -303,6 +305,8 @@ export class AgentView implements Component, Focusable {
 	private pollTimer: ReturnType<typeof setInterval> | undefined;
 	private refreshing: Promise<void> | undefined;
 	private refreshAgain: Promise<void> | undefined;
+	/** The peeked `!` command's output, read outside render(), which runs no tmux. */
+	private peekOutput: { shell: string; lines: string[] } | undefined;
 	/** shift+↑/↓'s order: shown at once, and over any list read before its writes landed. */
 	private pendingOrder = new Map<string, number>();
 	private ordering: Promise<void> = Promise.resolve();
@@ -565,15 +569,30 @@ export class AgentView implements Component, Focusable {
 		} catch {
 			this.connectionLost = true;
 		} finally {
-			try {
-				this.shells = this.opts.panes.listShells();
-			} catch {
-				this.shells = [];
-			}
+			const [shells] = await Promise.all([this.opts.panes.listShellsAsync().catch(() => []), this.loadPeek()]);
+			this.shells = shells;
 		}
 		if (this.closed) return; // Its self callback may already belong to a disposed session.
 		this.recompute();
 		this.render_();
+	}
+
+	/** Reads the peeked `!` command's output, if a peek at one is open. */
+	private async loadPeek(): Promise<void> {
+		const shell = this.mode === "peek" ? this.selectedRow?.shell : undefined;
+		if (!shell) return;
+		let lines: string[] = [];
+		try {
+			lines = await this.opts.panes.captureAsync(shell, PEEK_LINES);
+		} catch {
+			// its session is gone
+		}
+		this.peekOutput = { shell, lines };
+	}
+
+	/** A peek just opened on a `!` command, or moved to one: its output now, not at the next refresh. */
+	private syncPeek(): void {
+		if (this.mode === "peek" && this.selectedRow?.shell) void this.loadPeek().then(() => this.render_());
 	}
 
 	private recompute(): void {
@@ -771,6 +790,7 @@ export class AgentView implements Component, Focusable {
 		if (key !== this.selectedKey) this.disarm();
 		this.saveReplyDraft();
 		this.selectedKey = key;
+		this.syncPeek();
 		this.lastIndex = Math.max(
 			0,
 			this.items.findIndex((i) => i.key === key),
@@ -862,6 +882,7 @@ export class AgentView implements Component, Focusable {
 			case "peek":
 				this.mode = "peek";
 				this.reply.setValue("");
+				this.syncPeek();
 				this.render_();
 				return;
 			case "refused":
@@ -1721,6 +1742,7 @@ export class AgentView implements Component, Focusable {
 					this.mode = "peek";
 					this.reply.setValue(this.replyDrafts.get(item.key) ?? "");
 					this.reply.handleInput("\x05");
+					this.syncPeek();
 					this.render_();
 				}
 				return;
@@ -2010,12 +2032,7 @@ export class AgentView implements Component, Focusable {
 		const cap = Math.max(5, this.opts.ui.terminal.rows - 8 - 6);
 		if (row.shell) {
 			// A `!` command's peek is its output, as much of the end as fits.
-			let output: string[] = [];
-			try {
-				output = this.opts.panes.capture(row.shell, cap);
-			} catch {
-				// its session is gone
-			}
+			const output = this.peekOutput?.shell === row.shell ? this.peekOutput.lines : [];
 			for (const line of output.slice(-cap)) body.push(truncateToWidth(clean(line), inner, "…"));
 		} else if (text) body.push(...wrapTextWithAnsi(shown, inner).slice(0, cap));
 		const since = row.state === "needs" ? row.finishedAt : undefined;

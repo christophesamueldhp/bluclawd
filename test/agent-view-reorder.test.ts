@@ -77,6 +77,7 @@ function view(
 	const panes = {
 		current: "self",
 		listShells: () => extra.shells ?? [],
+		listShellsAsync: async () => extra.shells ?? [],
 		switchTo() {},
 		start: () => "x",
 		waitForView: async () => {},
@@ -86,7 +87,7 @@ function view(
 		detach() {},
 		startShell: () => "x",
 		stopShell() {},
-		capture: () => [],
+		captureAsync: async () => [],
 	} as unknown as PaneOps;
 	const v = new AgentView({
 		ui: { terminal: { rows: 60 }, requestRender: () => {} } as unknown as TUI,
