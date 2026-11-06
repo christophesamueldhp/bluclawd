@@ -126,6 +126,22 @@ describe("MascotPlayer", () => {
 		expect(pending.size).toBe(0);
 		expect(player.playing).toBe(false);
 	});
+
+	it("calls onEnd once, when the sequence ends or is disposed before", () => {
+		const { clock, tick } = fakeClock();
+		let ended = 0;
+		const end = () => ended++;
+		const finished = new MascotPlayer("look", () => {}, clock, end);
+		while (tick()) expect(ended).toBe(finished.playing ? 0 : 1);
+		finished.dispose();
+		expect(ended).toBe(1);
+		const cut = new MascotPlayer("look", () => {}, clock, end);
+		cut.dispose();
+		cut.dispose();
+		expect(ended).toBe(2);
+		new MascotPlayer(undefined, () => {}, clock, end).dispose();
+		expect(ended).toBe(2);
+	});
 });
 
 describe("WelcomeHeader", () => {

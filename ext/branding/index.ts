@@ -159,7 +159,16 @@ const branding: InlineExtension = {
 					reducedMotion,
 					startup: event.reason === "startup",
 				});
-				const player = new MascotPlayer(entrance, () => tui.requestRender());
+				// Each frame redraws the header, taking the terminal's cursor up there and back; the
+				// editor draws its own cursor meanwhile.
+				const hideCursor = entrance !== undefined && tui.getShowHardwareCursor();
+				if (hideCursor) tui.setShowHardwareCursor(false);
+				const player = new MascotPlayer(
+					entrance,
+					() => tui.requestRender(),
+					undefined,
+					hideCursor ? () => tui.setShowHardwareCursor(true) : undefined,
+				);
 				const info = (): WelcomeHeaderInfo => {
 					const model = ctx.model;
 					const level = pi.getThinkingLevel();

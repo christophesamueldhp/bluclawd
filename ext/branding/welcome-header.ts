@@ -114,12 +114,15 @@ export class MascotPlayer {
 	private readonly frames: MascotFrame[];
 	private readonly onFrame: () => void;
 	private readonly clock: Clock;
+	private readonly onEnd: (() => void) | undefined;
 	private index = 0;
 	private timer: unknown;
 
-	constructor(sequence: SequenceName | undefined, onFrame: () => void, clock: Clock = realClock) {
+	/** `onEnd`: called once the sequence stops, played through or disposed before. */
+	constructor(sequence: SequenceName | undefined, onFrame: () => void, clock: Clock = realClock, onEnd?: () => void) {
 		this.onFrame = onFrame;
 		this.clock = clock;
+		this.onEnd = onEnd;
 		// 100 ms of rest before the entrance starts.
 		this.frames = sequence ? withHold(SEQUENCES[sequence], 100) : [];
 		if (this.frames.length > 0) this.schedule();
@@ -137,14 +140,19 @@ export class MascotPlayer {
 		this.timer = this.clock.setTimeout(() => {
 			this.index++;
 			if (this.index < this.frames.length - 1) this.schedule();
-			else this.timer = undefined;
+			else {
+				this.timer = undefined;
+				this.onEnd?.();
+			}
 			this.onFrame();
 		}, FRAME_MS);
 	}
 
 	dispose(): void {
-		if (this.timer !== undefined) this.clock.clearTimeout(this.timer);
+		if (this.timer === undefined) return;
+		this.clock.clearTimeout(this.timer);
 		this.timer = undefined;
+		this.onEnd?.();
 	}
 }
 

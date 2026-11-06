@@ -301,6 +301,14 @@ describe("row actions: stop and delete", () => {
 		});
 	});
 
+	it("a pane whose tmux session is already gone counts as stopped", async () => {
+		const { actions: a, panes } = actions();
+		panes.end = () => {
+			throw tmuxFailure("can't find session: pi-a\n");
+		};
+		expect(await a.stop(rowOf(paneRow("pi-a")))).toEqual({ kind: "done" });
+	});
+
 	it("a starting row is neither stopped nor deleted", () => {
 		expect(deletable(rowOf({ id: "s", status: "starting", cwd: HERE }))).toBe(false);
 		expect(deletable(storedRow("s"))).toBe(true);
@@ -707,6 +715,44 @@ describe("agent view in pane mode", () => {
 		await waitFor(() => expect(calls).toEqual([["delete", "pi-a"]]));
 	});
 
+	it("ctrl+x again takes the row out at once, while its delete runs; one that fails comes back", async () => {
+		const rows = [paneRow("pi-a", { label: "first", activity: "idle", turns: 1 }), paneRow("pi-b")];
+		let fail: (error: Error) => void = () => {};
+		const { view, flush } = setup(rows, undefined, {
+			list: async () => rows,
+			delete: () =>
+				new Promise<void>((_, reject) => {
+					fail = reject;
+				}),
+		});
+		await view.onShow();
+		for (let i = 0; i < 4 && !focusedLine(view)?.includes("first"); i++) view.handleInput("\x1b[B");
+		expect(focusedLine(view)).toContain("first");
+		view.handleInput(CTRL_X);
+		await flush();
+		view.handleInput(CTRL_X);
+		await flush();
+		expect(view.render(100).join("\n")).not.toContain("first");
+		fail(new Error("daemon away"));
+		await flush();
+		const screen = view.render(100).join("\n");
+		expect(screen).toContain("first");
+		expect(screen).toContain("Couldn't delete — daemon away");
+		view.close();
+	});
+
+	it("this terminal's own row leaves the list at once while its new pane starts", async () => {
+		const self = paneRow("pi-self", { label: "mine", activity: "idle", turns: 1 });
+		const { view, flush, panes } = setup([self], self);
+		panes.waitForView = () => new Promise(() => {});
+		view.handleInput(CTRL_X);
+		view.handleInput(CTRL_X);
+		await flush();
+		const screen = view.render(100).join("\n");
+		expect(screen).not.toContain("mine");
+		expect(screen).toContain("Deleting…");
+	});
+
 	it("deleting this terminal's session keeps this view up, keys ignored, until the new one has drawn", async () => {
 		const self = paneRow("pi-self", { activity: "idle" });
 		const { view, calls, closed, flush, panes } = setup([self], self);
@@ -986,7 +1032,7 @@ describe("tmux", () => {
 		tmux.kill("pi-b");
 		expect(runs).toEqual([
 			["switch-client", "-t", "=pi-a"],
-			["display-message", "-p", "-t", "=pi-b:", "#{pane_pid}"],
+			["display-message", "-p", "-t", "=pi-b:", "#{session_id} #{pane_pid}"],
 		]);
 	});
 
@@ -994,13 +1040,13 @@ describe("tmux", () => {
 		const runs: string[][] = [];
 		const tmux = new Tmux("/srv", (args) => {
 			runs.push(args);
-			return "1\n";
+			return "$1 1\n";
 		});
 		tmux.markViewReady("pi-a");
 		expect(tmux.viewReady("pi-a")).toBe(true);
 		expect(runs).toEqual([
 			["set-option", "-t", "=pi-a:", "@bluclawd_view_ready", "1"],
-			["display-message", "-p", "-t", "=pi-a:", "#{@bluclawd_view_ready}"],
+			["display-message", "-p", "-t", "=pi-a:", "#{session_id} #{@bluclawd_view_ready}"],
 		]);
 	});
 
@@ -1055,10 +1101,27 @@ describe("tmux", () => {
 		const runs: string[][] = [];
 		const tmux = new Tmux("/srv", (args) => {
 			runs.push(args);
-			return "\n";
+			return "$1 \n";
 		});
 		expect(() => tmux.kill("pi-b")).toThrow("couldn't find");
 		expect(runs.map((r) => r[0])).toEqual(["display-message"]);
+	});
+
+	it("takes a session tmux prints nothing for as gone: display-message does not fail for it", () => {
+		const runs: string[][] = [];
+		const tmux = new Tmux("/srv", (args) => {
+			runs.push(args);
+			return " \n";
+		});
+		tmux.kill("pi-b");
+		expect(runs.map((r) => r[0])).toEqual(["display-message"]);
+		let error: unknown;
+		try {
+			tmux.viewReady("pi-b");
+		} catch (e) {
+			error = e;
+		}
+		expect(Tmux.gone(error)).toBe(true);
 	});
 
 	it("fails a kill tmux could not look up, rather than taking the pi for gone", () => {

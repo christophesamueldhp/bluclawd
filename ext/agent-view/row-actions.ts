@@ -165,7 +165,14 @@ export class RowActions {
 			return { kind: "done" };
 		}
 		if (!pane || !stoppable(row)) return { kind: "refused" };
-		return this.tried("stop", () => this.opts.panes.end(pane));
+		return this.tried("stop", () => {
+			try {
+				this.opts.panes.end(pane);
+			} catch (error) {
+				// Its pi has ended already: the stop is done.
+				if (!Tmux.gone(error)) throw error;
+			}
+		});
 	}
 
 	/** ctrl+x's second press: the row goes. A pane still running is killed first; this window's own
