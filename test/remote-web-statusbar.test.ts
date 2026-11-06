@@ -55,14 +55,23 @@ describe("the chat's status bar", () => {
 	});
 
 	it("shows the model, context used and branch on one line, the rest left to the sheet", () => {
-		const html = barHtml(report, "~/Projects/bluclawd");
+		const asks = { ...report, trust: "ask" };
+		const html = barHtml(asks, "~/Projects/bluclawd");
 		expect(html.match(/class="line"/g)).toHaveLength(1);
 		expect(text(html)).toBe("Opus • high · ctx 34% · main");
 		// Without git, where it is.
-		expect(text(barHtml({ ...report, git: undefined }, "~/Projects/bluclawd"))).toBe(
+		expect(text(barHtml({ ...asks, git: undefined }, "~/Projects/bluclawd"))).toBe(
 			"Opus • high · ctx 34% · ~/Projects/bluclawd",
 		);
 		expect(html).not.toContain("style=");
+	});
+
+	it("warns, at the end of the line, only that pi trusts every project", () => {
+		expect(text(barHtml({ ...report, trust: "always" }, undefined))).toBe("Opus • high · ctx 34% · main · ⏵︎⏵︎ always");
+		expect(barHtml({ ...report, trust: "always" }, undefined)).toContain('class="trust always"');
+		for (const trust of ["ask", "never", undefined]) {
+			expect(text(barHtml({ ...report, trust }, undefined)), String(trust)).toBe("Opus • high · ctx 34% · main");
+		}
 	});
 
 	it.each([

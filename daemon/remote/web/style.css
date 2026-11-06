@@ -106,6 +106,7 @@ button { -webkit-user-select: none; user-select: none; }
 .sl .u { text-decoration: underline; }
 .added { color: var(--green); }
 .removed { color: var(--red); }
+.trust.always { color: var(--yellow); }
 .scroll { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; overflow-anchor: none; }
 /* The list's search, as iOS's: its own clear button, and Cancel while it has the focus. */
 .search { flex: none; display: flex; align-items: center; gap: var(--s2); margin: 0; padding: var(--s2) var(--s4); }

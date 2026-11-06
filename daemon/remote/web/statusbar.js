@@ -71,8 +71,8 @@ function changesHtml(git) {
 }
 
 /**
- * One line: model • thinking · context used · git branch, or the directory without one. The rest
- * is in the status sheet, a tap away.
+ * One line: model • thinking · context used · git branch, or the directory without one, and the
+ * trust badge when pi trusts every project. The rest is in the status sheet, a tap away.
  * @param {Report | null | undefined} report @param {string | undefined} cwd as shown, `~` for home
  */
 export function barHtml(report, cwd) {
@@ -93,6 +93,8 @@ export function barHtml(report, cwd) {
 	const branch = report?.git?.branch;
 	if (branch) items.push(`<span class="grow branch">${esc(branch)}</span>`);
 	else if (cwd) items.push(`<span class="grow cwd"><bdi>${esc(cwd)}</bdi></span>`);
+	// Running without asking is worth seeing at a glance; ask and never are in the sheet.
+	if (report?.trust === "always") items.push(`<span class="trust always">${esc(TRUST[0][1])}</span>`);
 	return items.length ? `<span class="line">${items.join('<span aria-hidden="true">·</span>')}</span>` : "";
 }
 
