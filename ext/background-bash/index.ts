@@ -36,6 +36,7 @@ import { commandBlock } from "../_shared/command-block.ts";
 import { sharedRef } from "../_shared/global-state.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { subagentPanelHasRows } from "../_shared/subagent-panel.ts";
+import { timed } from "../_shared/timing.ts";
 import { wrapExec } from "../sandbox/runtime.ts";
 import { backgroundBashJobs, describeJobStatus, isShellTaskId, noTaskError, shellTaskStop } from "./background-bash.ts";
 import { backgroundTasksDisabled } from "./bash-limits.ts";
@@ -478,4 +479,4 @@ const backgroundBash: InlineExtension = {
 	},
 };
 
-export default backgroundBash.factory;
+export default timed("background-bash", backgroundBash.factory);

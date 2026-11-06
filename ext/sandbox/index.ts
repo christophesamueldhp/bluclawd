@@ -17,6 +17,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { denyRules } from "../_shared/settings.ts";
+import { timed } from "../_shared/timing.ts";
 import { runtimeConfig, sandboxSetting, saveSandboxEnabled } from "./config.ts";
 import { prepareReaper } from "./reaper.ts";
 import {
@@ -177,4 +178,4 @@ function factory(pi: ExtensionAPI): void {
 }
 
 const sandboxExtension: InlineExtension = { name: "sandbox", factory };
-export default sandboxExtension.factory;
+export default timed("sandbox", sandboxExtension.factory);

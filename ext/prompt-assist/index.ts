@@ -1,5 +1,6 @@
 import { CustomEditor, type ExtensionAPI, type ExtensionContext, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { Editor } from "@earendil-works/pi-tui";
+import { timed } from "../_shared/timing.ts";
 import { pick } from "../web/picker.ts";
 import { attachSuggestions } from "./editor.ts";
 import { DEFAULT_MODEL, loadAssistEnabled, loadAssistModel, saveAssistEnabled, saveAssistModel } from "./prefs.ts";
@@ -25,7 +26,7 @@ export function conversation(ctx: ExtensionContext): string {
 		.join("\n");
 }
 
-export default function promptAssist(pi: ExtensionAPI) {
+function promptAssist(pi: ExtensionAPI) {
 	let current: ExtensionContext;
 	let editor: ReturnType<typeof attachSuggestions> | undefined;
 	let installed: ReturnType<ExtensionContext["ui"]["getEditorComponent"]>;
@@ -307,3 +308,5 @@ export default function promptAssist(pi: ExtensionAPI) {
 		naming?.abort();
 	});
 }
+
+export default timed("prompt-assist", promptAssist);

@@ -19,6 +19,7 @@ import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 import * as forkSettings from "../_shared/settings.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
+import { timed } from "../_shared/timing.ts";
 import { type ProjectTrust, trustBadge } from "../_shared/trust-badge.ts";
 import { evaluateToolCallDeny, filterDeniedGrepToolResult } from "./policy.ts";
 
@@ -110,4 +111,4 @@ function factory(pi: ExtensionAPI): void {
 }
 
 const permissionsExtension: InlineExtension = { name: "permissions", factory };
-export default permissionsExtension.factory;
+export default timed("permissions", permissionsExtension.factory);

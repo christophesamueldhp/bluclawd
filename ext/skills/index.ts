@@ -1,9 +1,10 @@
 import { CustomEditor, type ExtensionAPI, type ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { Editor } from "@earendil-works/pi-tui";
+import { timed } from "../_shared/timing.ts";
 import { attachSkills } from "./editor.ts";
 import { skillPrompt } from "./prompt.ts";
 
-export default function skills(pi: ExtensionAPI) {
+function skills(pi: ExtensionAPI) {
 	let editor: ReturnType<typeof attachSkills> | undefined;
 	let installed: ReturnType<ExtensionUIContext["getEditorComponent"]>;
 
@@ -41,3 +42,5 @@ export default function skills(pi: ExtensionAPI) {
 		}
 	});
 }
+
+export default timed("skills", skills);

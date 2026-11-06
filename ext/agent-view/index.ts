@@ -27,6 +27,7 @@ import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
+import { timed } from "../_shared/timing.ts";
 import { trustBadge } from "../_shared/trust-badge.ts";
 import { AgentView, EXIT_WORDS, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, handOffAfterExit } from "./hand-off.ts";
@@ -802,4 +803,4 @@ const agentView: InlineExtension = {
 	},
 };
 
-export default agentView.factory;
+export default timed("agent-view", agentView.factory);

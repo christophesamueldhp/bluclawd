@@ -4,6 +4,7 @@
  * nothing to configure, no model calls.
  */
 import { type ExtensionAPI, type InlineExtension, keyText } from "@earendil-works/pi-coding-agent";
+import { timed } from "../_shared/timing.ts";
 import { pickVibe, SPINNER_VERBS } from "./vibes.ts";
 
 function factory(pi: ExtensionAPI): void {
@@ -35,4 +36,4 @@ function factory(pi: ExtensionAPI): void {
 }
 
 const vibesExtension: InlineExtension = { name: "vibes", factory };
-export default vibesExtension.factory;
+export default timed("vibes", vibesExtension.factory);

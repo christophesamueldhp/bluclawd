@@ -7,6 +7,7 @@
 import { basename, dirname, resolve } from "node:path";
 import { type Static, Type } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionFactory, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { timed } from "../_shared/timing.ts";
 import { loadMemoryEnabled, saveMemoryEnabled } from "./prefs.ts";
 import {
 	capIndex,
@@ -166,4 +167,4 @@ export function createMemoryExtension(options: { agentDir?: string } = {}): Exte
 	};
 }
 
-export default createMemoryExtension();
+export default timed("memory", createMemoryExtension());
