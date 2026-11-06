@@ -24,15 +24,20 @@ describe("pickVibe", () => {
 });
 
 describe("the working message", () => {
-	it("counts the turn's elapsed seconds after its verb, ends with the interrupt hint, and stops with the turn", () => {
+	function started() {
+		const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
+		vibes({ on: (event: string, handler: any) => handlers.set(event, handler) } as never);
+		const setWorkingMessage = vi.fn();
+		const ctx = { hasUI: true, ui: { setWorkingMessage } };
+		const emit = (event: string) => handlers.get(event)?.({}, ctx);
+		emit("before_agent_start");
+		return { emit, setWorkingMessage };
+	}
+
+	it("counts the run's elapsed seconds after its verb and ends with the interrupt hint, through each of pi's passes", () => {
 		vi.useFakeTimers();
 		try {
-			const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
-			vibes({ on: (event: string, handler: any) => handlers.set(event, handler) } as never);
-			const setWorkingMessage = vi.fn();
-			const ctx = { hasUI: true, ui: { setWorkingMessage } };
-
-			handlers.get("before_agent_start")?.({}, ctx);
+			const { emit, setWorkingMessage } = started();
 			const first: string = setWorkingMessage.mock.lastCall?.[0];
 			const verb = first.match(/^([A-Z][\p{L}'-]+)… \(0s · esc to interrupt\)$/u)?.[1];
 			expect(SPINNER_VERBS).toContain(verb);
@@ -40,8 +45,21 @@ describe("the working message", () => {
 			vi.advanceTimersByTime(12_000);
 			expect(setWorkingMessage).toHaveBeenLastCalledWith(`${verb}… (12s · esc to interrupt)`);
 
-			handlers.get("agent_end")?.({}, ctx);
-			expect(setWorkingMessage).toHaveBeenLastCalledWith();
+			// A retry or a queued follow-up ends one pass and starts another within the same run.
+			emit("agent_end");
+			vi.advanceTimersByTime(1_000);
+			expect(setWorkingMessage).toHaveBeenLastCalledWith(`${verb}… (13s · esc to interrupt)`);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it.each(["agent_settled", "session_shutdown"])("stops on %s", (event) => {
+		vi.useFakeTimers();
+		try {
+			const { emit, setWorkingMessage } = started();
+			emit(event);
+			if (event === "agent_settled") expect(setWorkingMessage).toHaveBeenLastCalledWith();
 			const calls = setWorkingMessage.mock.calls.length;
 			vi.advanceTimersByTime(5_000);
 			expect(setWorkingMessage).toHaveBeenCalledTimes(calls);

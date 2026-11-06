@@ -25,10 +25,13 @@ function factory(pi: ExtensionAPI): void {
 		timer.unref?.();
 	});
 
-	pi.on("agent_end", (_event, ctx) => {
+	// A run can end several agent passes (retries, queued follow-ups); it settles once.
+	pi.on("agent_settled", (_event, ctx) => {
 		clearInterval(timer);
 		if (ctx.hasUI) ctx.ui.setWorkingMessage();
 	});
+
+	pi.on("session_shutdown", () => clearInterval(timer));
 }
 
 const vibesExtension: InlineExtension = { name: "vibes", factory };

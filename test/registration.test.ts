@@ -35,7 +35,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	},
 	remote: { commands: ["remote-control"], tools: [], shortcuts: 0, events: 21 },
 	help: { commands: ["help", "context", "status"], tools: [], shortcuts: 0, events: 0 },
-	vibes: { commands: [], tools: [], shortcuts: 0, events: 2 },
+	vibes: { commands: [], tools: [], shortcuts: 0, events: 3 },
 	paste: { commands: [], tools: [], shortcuts: 0, events: 2 },
 	skills: { commands: [], tools: [], shortcuts: 0, events: 2 },
 	"prompt-assist": { commands: ["prompt-assist"], tools: [], shortcuts: 0, events: 6 },
