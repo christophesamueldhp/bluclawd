@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { getKeybindings, KeybindingsManager, setKeybindings } from "@earendil-works/pi-tui";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import vibes from "../ext/vibes/index.ts";
 import { pickVibe, SPINNER_VERBS } from "../ext/vibes/vibes.ts";
 
@@ -24,6 +25,11 @@ describe("pickVibe", () => {
 });
 
 describe("the working message", () => {
+	const piKeybindings = getKeybindings();
+	const bindInterrupt = (keys: string) =>
+		setKeybindings(new KeybindingsManager({ "app.interrupt": { defaultKeys: keys, description: "" } } as never));
+	afterEach(() => setKeybindings(piKeybindings));
+
 	function started() {
 		const handlers = new Map<string, (event: unknown, ctx: unknown) => void>();
 		vibes({ on: (event: string, handler: any) => handlers.set(event, handler) } as never);
@@ -37,21 +43,29 @@ describe("the working message", () => {
 	it("counts the run's elapsed seconds after its verb and ends with the interrupt hint, through each of pi's passes", () => {
 		vi.useFakeTimers();
 		try {
+			bindInterrupt("escape");
 			const { emit, setWorkingMessage } = started();
 			const first: string = setWorkingMessage.mock.lastCall?.[0];
-			const verb = first.match(/^([A-Z][\p{L}'-]+)… \(0s · esc to interrupt\)$/u)?.[1];
+			const verb = first.match(/^([A-Z][\p{L}'-]+)… \(0s · escape to interrupt\)$/u)?.[1];
 			expect(SPINNER_VERBS).toContain(verb);
 
 			vi.advanceTimersByTime(12_000);
-			expect(setWorkingMessage).toHaveBeenLastCalledWith(`${verb}… (12s · esc to interrupt)`);
+			expect(setWorkingMessage).toHaveBeenLastCalledWith(`${verb}… (12s · escape to interrupt)`);
 
 			// A retry or a queued follow-up ends one pass and starts another within the same run.
 			emit("agent_end");
 			vi.advanceTimersByTime(1_000);
-			expect(setWorkingMessage).toHaveBeenLastCalledWith(`${verb}… (13s · esc to interrupt)`);
+			expect(setWorkingMessage).toHaveBeenLastCalledWith(`${verb}… (13s · escape to interrupt)`);
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it("names the interrupt key the user bound", () => {
+		bindInterrupt("ctrl+g");
+		const { emit, setWorkingMessage } = started();
+		expect(setWorkingMessage.mock.lastCall?.[0]).toMatch(/… \(0s · ctrl\+g to interrupt\)$/);
+		emit("agent_settled");
 	});
 
 	it.each(["agent_settled", "session_shutdown"])("stops on %s", (event) => {

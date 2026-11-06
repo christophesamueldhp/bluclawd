@@ -1,9 +1,9 @@
 /**
  * Vibes extension: each agent turn shows a spinner verb and its elapsed time
- * ("Pondering… (12s · esc to interrupt)") in place of "Working...". Always on,
+ * ("Pondering… (12s · escape to interrupt)") in place of "Working...". Always on,
  * nothing to configure, no model calls.
  */
-import type { ExtensionAPI, InlineExtension } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type InlineExtension, keyText } from "@earendil-works/pi-coding-agent";
 import { pickVibe, SPINNER_VERBS } from "./vibes.ts";
 
 function factory(pi: ExtensionAPI): void {
@@ -18,7 +18,7 @@ function factory(pi: ExtensionAPI): void {
 		const startedAt = Date.now();
 		const show = () => {
 			const seconds = Math.floor((Date.now() - startedAt) / 1000);
-			ctx.ui.setWorkingMessage(`${verb}… (${seconds}s · esc to interrupt)`);
+			ctx.ui.setWorkingMessage(`${verb}… (${seconds}s · ${keyText("app.interrupt")} to interrupt)`);
 		};
 		show();
 		timer = setInterval(show, 1000);

@@ -200,7 +200,7 @@ which flattens every status onto one line, the panel stays below the prompt.
 
 While the agent works, "Working..." becomes one of bluclawd's 186 spinner verbs, a new one
 each turn, none repeated until all have shown, with the turn's elapsed time and the interrupt
-key: `Pondering… (12s · esc to interrupt)`, counted every second. bluclawd's prompt editors keep
+key as you bound it: `Pondering… (12s · escape to interrupt)`, counted every second. bluclawd's prompt editors keep
 the spinner in the prompt's top border, as pi's own editor does.
 
 The welcome header is bluclawd's: the mascot beside name, model and cwd. In the
