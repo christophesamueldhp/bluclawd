@@ -166,6 +166,7 @@ function makeView(
 	const instances = opts.instances ?? sessions;
 	const opened: string[] = [];
 	const resumed: boolean[] = [];
+	let stopped = 0;
 	let closed = 0;
 	const ui = { terminal: { rows: opts.rows ?? 40 }, requestRender: () => {} } as unknown as TUI;
 	const view = new AgentView({
@@ -179,6 +180,7 @@ function makeView(
 		home: HOME,
 		self: opts.self ? () => opts.self : undefined,
 		onClose: () => closed++,
+		onStopSelf: () => stopped++,
 		readClipboard: opts.readClipboard,
 		isKnownCommand: (name) => name === "compact",
 		mode: opts.mode,
@@ -186,7 +188,16 @@ function makeView(
 		instances,
 	});
 	const flush = () => new Promise((r) => setTimeout(r, 0));
-	return { view, calls, opened, resumed, closed: () => closed, text: () => view.render(100).map(stripAnsi), flush };
+	return {
+		view,
+		calls,
+		opened,
+		resumed,
+		closed: () => closed,
+		stopped: () => stopped,
+		text: () => view.render(100).map(stripAnsi),
+		flush,
+	};
 }
 
 beforeAll(() => setSharedTheme(plainTheme));
@@ -912,26 +923,114 @@ describe("AgentView keys", () => {
 			external: true,
 			pane: "pane-self",
 		};
-		const calls: Calls = [];
-		let stopped = 0;
-		const view = new AgentView({
-			ui: { terminal: { rows: 40 }, requestRender: () => {} } as unknown as TUI,
-			client: fakeClient(calls, () => []),
-			appName: "bluclawd",
-			cwd: HERE,
-			home: HOME,
-			self: () => self,
-			onClose: () => {},
-			panes: fakePanes(calls),
-			onStopSelf: () => stopped++,
-			instances: [],
-		});
+		const { view, calls, text, stopped } = makeView({ self, instances: [] });
 		view.handleInput(CTRL_X);
-		expect(stopped).toBe(1);
-		expect(view.render(100).map(stripAnsi).join("\n")).toContain("ctrl+x again to delete");
+		expect(stopped()).toBe(1);
+		expect(text().join("\n")).toContain("ctrl+x again to delete");
 		view.handleInput(CTRL_X);
 		// This terminal moves to a new pane showing agent view (agent-view-panes.test.ts); this one ends.
 		await waitFor(() => expect(calls.at(-1)).toEqual(["kill", "pane-self"]));
+	});
+
+	it("ctrl+x ends the pi of a live session that finished a turn, whose row stays, stopped", async () => {
+		const { view, calls, text, flush } = makeView();
+		for (let i = 0; i < 10 && !focusedLine(view)?.includes("title screen"); i++) view.handleInput(DOWN);
+		view.handleInput("?");
+		expect(text().join("\n")).toContain("ctrl+x to stop");
+		view.handleInput("?");
+		view.handleInput(CTRL_X);
+		await flush();
+		expect(calls).toEqual([["end", "p-done"]]);
+		expect(text().join("\n")).toContain("stopped · ctrl+x again to delete");
+	});
+
+	it("ctrl+x ends the pi of a live session whose last turn failed or was stopped", async () => {
+		for (const outcome of ["failed", "stopped"] as const) {
+			const live: InstanceSummary = {
+				id: "x",
+				status: "online",
+				external: true,
+				pane: "p-x",
+				activity: "idle",
+				outcome,
+				turns: 1,
+				cwd: HERE,
+				label: "live one",
+			};
+			const { view, calls, flush } = makeView({ instances: [live] });
+			for (let i = 0; i < 5 && !focusedLine(view)?.includes("live one"); i++) view.handleInput(DOWN);
+			view.handleInput(CTRL_X);
+			await flush();
+			expect(calls).toEqual([["end", "p-x"]]);
+		}
+	});
+
+	it("ctrl+x closes a run that has reported; a quick second press does not reach the row after it", async () => {
+		const run = (id: string, activity: "idle" | "working"): InstanceSummary => ({
+			id,
+			status: "online",
+			external: true,
+			pane: `p-${id}`,
+			parent: "p-work",
+			activity,
+			turns: 1,
+			cwd: THERE,
+			label: `probe ${id}`,
+		});
+		let instances = [...sessions, run("r1", "idle"), run("r2", "working")];
+		const { view, calls, flush } = makeView({ list: () => instances, instances });
+		for (let i = 0; i < 10 && !focusedLine(view)?.includes("2 subagents"); i++) view.handleInput(DOWN);
+		view.handleInput(ENTER);
+		view.handleInput(DOWN);
+		expect(focusedLine(view)).toContain("probe r1");
+		// A closed run leaves the fold.
+		instances = instances.map((i) => (i.id === "r1" ? { ...i, status: "stopped" as const } : i));
+		view.handleInput(CTRL_X);
+		await waitFor(() => expect(focusedLine(view)).toContain("probe r2"));
+		expect(calls).toEqual([["end", "p-r1"]]);
+		view.handleInput(CTRL_X);
+		await flush();
+		expect(calls).toEqual([["end", "p-r1"]]);
+	});
+
+	it("ctrl+x never deletes a run: one still listed after its first press reads closing", async () => {
+		const run: InstanceSummary = {
+			id: "r1",
+			status: "online",
+			external: true,
+			pane: "p-r1",
+			parent: "p-work",
+			activity: "idle",
+			turns: 1,
+			cwd: THERE,
+			label: "probe r1",
+		};
+		const { view, calls, flush } = makeView({ instances: [...sessions, run] });
+		for (let i = 0; i < 10 && !focusedLine(view)?.includes("1 subagent"); i++) view.handleInput(DOWN);
+		view.handleInput(ENTER);
+		view.handleInput(DOWN);
+		view.handleInput(CTRL_X);
+		await flush();
+		expect(focusedLine(view)).toContain("closing…");
+		view.handleInput(CTRL_X);
+		await flush();
+		expect(calls).toEqual([["end", "p-r1"]]);
+	});
+
+	it("ctrl+x on your own session with no turn running only arms the delete", async () => {
+		for (const self of [
+			{ id: "me", status: "online", activity: "idle", cwd: HERE, external: true, pane: "pane-self" },
+			{ id: "me", status: "online", activity: "idle", turns: 1, cwd: HERE, external: true, pane: "pane-self" },
+		] satisfies InstanceSummary[]) {
+			const { view, text, stopped } = makeView({ self, instances: [...sessions, self] });
+			view.handleInput("?");
+			expect(text().join("\n")).toContain("ctrl+x to delete");
+			view.handleInput("?");
+			view.handleInput(CTRL_X);
+			expect(stopped()).toBe(0);
+			expect(text().join("\n")).toContain("ctrl+x again to delete");
+			expect(text().join("\n")).not.toContain("stopped ·");
+		}
 	});
 
 	it("enter on your own session returns to it; on another it opens there", async () => {

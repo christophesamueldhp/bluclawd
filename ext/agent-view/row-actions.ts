@@ -151,7 +151,7 @@ export class RowActions {
 		return this.tried(row.pinned ? "unpin" : "pin", () => this.opts.client.setMeta(row.id, { pinned: !row.pinned }));
 	}
 
-	/** ctrl+x's first press, as bluclawd's: a running session's pi ends and its row stays, stopped;
+	/** ctrl+x's first press, as bluclawd's: a live session's pi ends and its row stays, stopped;
 	 *  a running `!` command stops and keeps its row; this window's own session stops its turn. */
 	async stop(row: AgentRow): Promise<Outcome> {
 		const { shell, pane } = row;
@@ -300,9 +300,11 @@ export class RowActions {
 	}
 }
 
-/** bluclawd's ctrl+x stops a session in Working or Needs input first, and deletes the rest. */
+/** bluclawd's ctrl+x ends a live session's pi first, and deletes the rest. This window's own pi
+ *  cannot be ended from inside it, so only its turn in progress is stopped. */
 export function stoppable(row: AgentRow): boolean {
-	return row.alive && (row.state === "working" || row.state === "needs" || row.state === "idle");
+	if (row.self) return row.state === "working" || row.state === "needs";
+	return row.alive;
 }
 
 /** A row ctrl+x arms for: one still starting is left alone. */
