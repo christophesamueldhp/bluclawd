@@ -28,7 +28,8 @@
  * `message_end` handlers are awaited inline, so the capture runs detached and
  * its entry is appended once the sha resolves. `turnEntryId`/`subject` are read
  * at THAT point: extensions see a message's message_end before pi persists it.
- * Tool calls wait for the pending capture before executing. An overlapping
+ * Tool calls wait for the pending capture before executing, except read-only
+ * ones (pi's read/grep/find/ls, or `readOnlyHint: true`). An overlapping
  * message skips capture; the safety-net capture before a restore bypasses it.
  *
  * ── Restore is destructive and fail-closed ───────────────────────────────────
@@ -650,6 +651,8 @@ async function restoreOverSafetyNet(
 const CREATED_CUSTOM_TYPE = "checkpoint-created";
 /** The tools whose new files a restore removes. */
 const CREATING_TOOLS = new Set(["write", "bash", "powershell"]);
+/** pi's built-in tools that cannot change the working tree, so they need not wait for the capture. */
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 
 /** Untracked, not ignored files in the whole repository, by path from its root; undefined outside one. */
 async function untrackedFiles(cwd: string, exec: ExtensionAPI["exec"]): Promise<Set<string> | undefined> {
@@ -768,12 +771,19 @@ export function factory(pi: ExtensionAPI): void {
 		if (event.message.role === "user") checkpointUserMessage(ctx, event.message);
 	});
 
+	// Looked up per call: tools register after this factory runs.
+	const isReadOnly = (toolName: string): boolean =>
+		READ_ONLY_TOOLS.has(toolName) ||
+		pi.getAllTools().some((tool) => tool.name === toolName && tool.annotations?.readOnlyHint === true);
+
 	// Untracked files before each creating tool call, by toolCallId.
 	const untrackedBefore = new Map<string, Set<string>>();
 	pi.on("tool_call", async (event, ctx) => {
+		if (isReadOnly(event.toolName)) return;
+		// The capture works in a separate index, so the scan can run alongside it.
+		const scan = CREATING_TOOLS.has(event.toolName) ? untrackedFiles(ctx.cwd, pi.exec) : undefined;
 		await pendingCapture;
-		if (!CREATING_TOOLS.has(event.toolName)) return;
-		const before = await untrackedFiles(ctx.cwd, pi.exec);
+		const before = await scan;
 		if (before) untrackedBefore.set(event.toolCallId, before);
 	});
 	pi.on("tool_result", async (event, ctx) => {

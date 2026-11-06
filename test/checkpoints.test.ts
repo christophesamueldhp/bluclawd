@@ -143,11 +143,12 @@ function checkpointEntry(sha: string, turnEntryId: string, subject: string, id =
 }
 
 /** Drive `factory(pi)` with a recording stub; `appendEntry` lands on the same `entries` array `getBranch` returns. */
-function loadFactory(exec: Exec, entries: SessionEntry[]) {
+function loadFactory(exec: Exec, entries: SessionEntry[], tools: unknown[] = []) {
 	const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<unknown>>();
 	const commands = new Map<string, (args: string, ctx: ExtensionContext) => Promise<void>>();
 	const pi = {
 		exec,
+		getAllTools: () => tools,
 		on: (event: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<unknown>) =>
 			handlers.set(event, handler),
 		registerCommand: (name: string, def: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) =>
@@ -757,6 +758,95 @@ describe("message_end capture", () => {
 		}
 		const [checkpoint] = listCheckpoints(entries);
 		expect(await git("show", `${checkpoint.sha}:a.txt`)).toBe("base\n");
+	});
+
+	/** A prompt whose checkpoint capture is stuck at `git add` until `finishCapture()`; `execs` lists every git call. */
+	async function promptWithStuckCapture(tools: unknown[] = []) {
+		const { dir, exec, write } = await makeRepo();
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let capturing = false;
+		const execs: string[][] = [];
+		const delayed: Exec = async (command, args, options) => {
+			execs.push(args);
+			if (args.includes("add")) {
+				capturing = true;
+				await gate;
+			}
+			return exec(command, args, options);
+		};
+		const entries: SessionEntry[] = [];
+		const { handlers } = loadFactory(delayed, entries, tools);
+		const { ctx } = makeCtx(dir, entries);
+		const prompt = userEntry("u1", "look around");
+		await handlers.get("message_end")?.({ message: (prompt as SessionMessageEntry).message }, ctx);
+		entries.push(prompt);
+		await waitFor(() => capturing);
+		const toolCall = (toolName: string) => {
+			const call = { started: false, done: Promise.resolve() };
+			call.done = Promise.resolve(
+				handlers.get("tool_call")?.({ type: "tool_call", toolName, toolCallId: toolName, input: {} }, ctx),
+			).then(() => {
+				call.started = true;
+			});
+			return call;
+		};
+		// Releases the stuck capture and waits for its checkpoint.
+		const finishCapture = async () => {
+			release();
+			await waitFor(() => listCheckpoints(entries).length > 0);
+		};
+		return { ctx, handlers, entries, execs, write, toolCall, finishCapture };
+	}
+
+	it.each(["read", "websearch"])(
+		"lets a read-only tool (%s) run while the prompt's checkpoint is still capturing",
+		async (toolName) => {
+			const { toolCall, finishCapture } = await promptWithStuckCapture([
+				{ name: "websearch", annotations: { readOnlyHint: true } },
+			]);
+			try {
+				const call = toolCall(toolName);
+				await waitFor(() => call.started);
+			} finally {
+				await finishCapture();
+			}
+		},
+	);
+
+	it("holds edit, unknown tools and tools not marked read-only until the capture is done", async () => {
+		const { toolCall, finishCapture } = await promptWithStuckCapture([
+			{ name: "deploy", annotations: { readOnlyHint: false } },
+		]);
+		const calls = ["edit", "mystery", "deploy"].map(toolCall);
+		try {
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			expect(calls.map((call) => call.started)).toEqual([false, false, false]);
+		} finally {
+			await finishCapture();
+		}
+		await Promise.all(calls.map((call) => call.done));
+	});
+
+	it("lists a creating tool's untracked files while the capture is pending, holds the tool, and records what it creates", async () => {
+		const { ctx, handlers, entries, execs, write, toolCall, finishCapture } = await promptWithStuckCapture();
+		await write("before.txt", "x\n");
+		const bash = toolCall("bash");
+		try {
+			await waitFor(() => execs.some((args) => args.includes("ls-files") && args.includes("--others")));
+			expect(bash.started).toBe(false);
+		} finally {
+			await finishCapture();
+		}
+		await bash.done;
+		await write("created.txt", "x\n");
+		await handlers.get("tool_result")?.(
+			{ type: "tool_result", toolName: "bash", toolCallId: "bash", input: {}, content: [], isError: false },
+			ctx,
+		);
+		expect([...agentCreatedFiles(entries)]).toEqual(["created.txt"]);
 	});
 
 	it("releases tool calls and warns when checkpoint capture fails", async () => {
