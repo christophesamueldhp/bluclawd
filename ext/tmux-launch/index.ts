@@ -1,7 +1,7 @@
 /**
  * Outside tmux, `pi` run in a terminal starts its session as an agent-view pane and only attaches
- * to it (ext/agent-view/launch.ts). First of all extensions, so the terminal's pi, which the
- * pane's repeats, does not start the others before it gets there. Without tmux, agent view says so.
+ * to it (ext/agent-view/launch.ts). First of all extensions, so the others don't run their startup
+ * in a process that is about to become a tmux client. Without tmux, agent view says so.
  */
 
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";

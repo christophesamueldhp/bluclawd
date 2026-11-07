@@ -1,7 +1,8 @@
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Tmux } from "../daemon/tmux.ts";
 import agentView from "../ext/agent-view/index.ts";
 import { launchInTmux } from "../ext/agent-view/launch.ts";
 import { bluclawdExtensions } from "../ext/index.ts";
@@ -10,11 +11,11 @@ import tmuxLaunch from "../ext/tmux-launch/index.ts";
 // The real one attaches tmux and exits the process.
 vi.mock("../ext/agent-view/launch.ts", () => ({ launchInTmux: vi.fn(() => true) }));
 
-/** A PATH holding only a `tmux` that answers `-V`, or nothing at all. */
+/** A PATH holding only a `tmux` that answers `-V` and records every call in `calls`, or nothing at all. */
 function pathWith(tmux: boolean): string {
 	const dir = mkdtempSync(join(tmpdir(), "bluclawd-path-"));
 	if (tmux) {
-		writeFileSync(join(dir, "tmux"), "#!/bin/sh\necho 'tmux 3.5'\n");
+		writeFileSync(join(dir, "tmux"), `#!/bin/sh\necho "$*" >> '${join(dir, "calls")}'\necho 'tmux 3.5'\n`);
 		chmodSync(join(dir, "tmux"), 0o755);
 	}
 	return dir;
@@ -58,7 +59,7 @@ afterEach(() => vi.unstubAllEnvs());
 
 describe("launching into tmux before the other extensions start", () => {
 	it("comes first, ahead of permissions, sandbox and the rest in their order, agent view still 8th among them", () => {
-		expect(bluclawdExtensions().map((e) => (typeof e === "function" ? e.name : e.name))).toEqual([
+		expect(bluclawdExtensions().map((e) => e.name)).toEqual([
 			"tmux-launch",
 			"permissions",
 			"sandbox",
@@ -103,10 +104,23 @@ describe("launching into tmux before the other extensions start", () => {
 	});
 
 	it("agent view, outside a pane with tmux, neither launches again nor warns", async () => {
+		const path = pathWith(true);
+		vi.stubEnv("PATH", path);
 		const handlers = load(agentView);
 		const { ctx, notes } = tuiCtx();
 		await handlers.session_start({}, ctx);
-		expect(launchInTmux).not.toHaveBeenCalled();
+		expect(readFileSync(join(path, "calls"), "utf8").trim().split("\n")).toEqual(["-V"]);
 		expect(notes).toEqual([]);
+	});
+
+	it("a tmux that cannot start the pane says why once, and the terminal's pi goes on", async () => {
+		const { launchInTmux: realLaunch } =
+			await vi.importActual<typeof import("../ext/agent-view/launch.ts")>("../ext/agent-view/launch.ts");
+		const { ctx, notes } = tuiCtx();
+		const failing = new Tmux("/nonexistent", () => {
+			throw new Error("no server running");
+		});
+		expect(realLaunch({ ...ctx, sessionManager: { getSessionFile: () => undefined } } as never, failing)).toBe(false);
+		expect(notes).toEqual(["Agent view is off — tmux couldn't start: no server running"]);
 	});
 });
