@@ -6,6 +6,7 @@
   "keywords": ["pi-package"],
   "pi": {
     "extensions": [
+      "./ext/tmux-launch/index.ts",
       "./ext/permissions/index.ts",
       "./ext/sandbox/index.ts",
       "./ext/checkpoints/index.ts",
