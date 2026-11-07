@@ -8,14 +8,8 @@ import { type AgentRow, collectRows, otherRows, rowFromShell } from "../daemon/r
 import { HIDE_ENV, OPEN_VIEW_ENV, PANE_ENV, Tmux } from "../daemon/tmux.ts";
 import { setSharedTheme } from "../ext/_shared/theme.ts";
 import { AgentView, type PaneOps } from "../ext/agent-view/agent-view.ts";
-import {
-	isBlankPane,
-	leaveViewAction,
-	paneArgs,
-	promptContent,
-	promptOptions,
-	shutdownPlan,
-} from "../ext/agent-view/index.ts";
+import { isBlankPane, leaveViewAction, promptContent, promptOptions, shutdownPlan } from "../ext/agent-view/index.ts";
+import { paneArgs } from "../ext/agent-view/launch.ts";
 import { bandTargets, deletable, RowActions, type RowClient } from "../ext/agent-view/row-actions.ts";
 import { SelfRegistration } from "../ext/agent-view/self-registration.ts";
 import { focusedLine } from "./helpers/agent-view-focus.ts";

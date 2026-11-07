@@ -12,9 +12,11 @@
  * testing without a separate pi install) and `scripts/probe-extensions.ts` /
  * the test suite, both of which want each factory paired back up with its
  * name. `package.json`'s `pi.extensions` array is the source of truth for
- * ordering — keep this list in sync with it. Order matters only for
- * permissions, which must see `tool_call` before anything that might answer
- * it — keep it first — and sandbox, which comes right after it.
+ * ordering — keep this list in sync with it. Order matters for tmux-launch,
+ * which outside tmux moves the session into a pane before any other
+ * extension starts — keep it first; for permissions, which must see
+ * `tool_call` before anything that might answer it — keep it first of the
+ * rest; and for sandbox, which comes right after it.
  */
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
 import accounts from "./accounts/index.ts";
@@ -31,12 +33,14 @@ import remote from "./remote/index.ts";
 import sandbox from "./sandbox/index.ts";
 import skills from "./skills/index.ts";
 import subagents from "./subagents/index.ts";
+import tmuxLaunch from "./tmux-launch/index.ts";
 import transcript from "./transcript/index.ts";
 import vibes from "./vibes/index.ts";
 import web from "./web/index.ts";
 
 export function bluclawdExtensions(): InlineExtension[] {
 	return [
+		{ name: "tmux-launch", factory: tmuxLaunch },
 		{ name: "permissions", factory: permissions },
 		{ name: "sandbox", factory: sandbox },
 		{ name: "checkpoints", factory: checkpoints },
