@@ -606,8 +606,9 @@ export class ServerSupervisor {
 		for (const { start } of this.rows.values()) {
 			if (start?.record.pane && now <= start.until) names.add(start.record.pane);
 		}
-		for (const { paneId, goneAt } of loadDeleted(this.deps.dir))
+		for (const { paneId, goneAt } of loadDeleted(this.deps.dir)) {
 			if (paneId && goneAt === undefined) names.add(paneId);
+		}
 		const registered = new Set<string>();
 		for (const at of this.panes()) {
 			const { pane } = at.pane.record;
@@ -615,7 +616,9 @@ export class ServerSupervisor {
 			registered.add(pane);
 			if (!this.isLive(at) || this.lapsed(at, now)) names.add(pane);
 		}
-		for (const { parent } of loadInstances(this.deps.dir)) if (parent && !registered.has(parent)) names.add(parent);
+		for (const { parent } of loadInstances(this.deps.dir)) {
+			if (parent && !registered.has(parent)) names.add(parent);
+		}
 		const { tmux } = this.deps;
 		const answers = await Promise.all(
 			[...names].map(async (name): Promise<[string, TmuxAnswer]> => {

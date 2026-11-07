@@ -89,27 +89,32 @@ describe("a silent pane", () => {
 });
 
 describe("listing with async probes", () => {
+	/** Both fixtures' `pi-gone` session, so their stored rows can be compared. */
+	const file = join(mkdtempSync(join(tmpdir(), "bluclawd-probes-")), "gone.jsonl");
+	writeFileSync(file, "");
+
 	/**
 	 * A registry in every state reaping asks tmux about, on its own dir: lapsed panes tmux has
 	 * (`pi-up`), has not (`pi-gone`, which has a session file) and cannot say about (`pi-unk`); a
 	 * silent pane since gone (`pi-was`); a live one (`pi-live`); a deleted row's pane since gone
 	 * (`pi-del`); a start whose pane is gone (`pi-new`); and a stored run whose orchestrator is gone.
+	 * `blocking` records the panes asked about with blocking calls once it is set up.
 	 */
-	/** Both fixtures' `pi-gone` session, so their stored rows can be compared. */
-	const file = join(mkdtempSync(join(tmpdir(), "bluclawd-probes-")), "gone.jsonl");
-	writeFileSync(file, "");
-
 	function fixture(withAsync: boolean) {
 		const dir = mkdtempSync(join(tmpdir(), "bluclawd-probes-"));
 		const up = new Set(["pi-up", "pi-gone", "pi-was", "pi-live", "pi-del"]);
-		const hasSession = (name: string) => {
+		const blocking: string[] = [];
+		const answer = (name: string) => {
 			if (name === "pi-unk") throw new Error("tmux timed out");
 			return up.has(name);
 		};
 		let now = 1000;
 		const supervisor = testRegistry(dir, () => now, {
-			hasSession,
-			...(withAsync ? { hasSessionAsync: async (name: string) => hasSession(name) } : {}),
+			hasSession: (name) => {
+				blocking.push(name);
+				return answer(name);
+			},
+			...(withAsync ? { hasSessionAsync: async (name: string) => answer(name) } : {}),
 			end: () => {},
 		});
 		saveInstances(dir, [
@@ -129,7 +134,8 @@ describe("listing with async probes", () => {
 		supervisor.paneStarting({ pane: "pi-new", cwd: "/p" });
 		now += 16_000;
 		beat("pi-live");
-		return { dir, supervisor };
+		blocking.length = 0;
+		return { dir, supervisor, blocking };
 	}
 
 	function rec(id: string): InstanceRecord {
@@ -142,6 +148,9 @@ describe("listing with async probes", () => {
 		const before = listSummaries(blocking.supervisor);
 		const after = instancesOf(await handleIpcRequest(probed.supervisor, { type: "list" }));
 		expect(after).toEqual(before);
+		// Every answer came from the probe: none was asked the blocking way.
+		expect(probed.blocking).toEqual([]);
+		expect(blocking.blocking).not.toEqual([]);
 		expect(before.map(({ id, status, silent }) => ({ id, status, silent }))).toEqual([
 			{ id: "pi-gone", status: "stopped", silent: undefined },
 			{ id: "pi-live", status: "online", silent: undefined },
