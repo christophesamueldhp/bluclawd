@@ -57,6 +57,9 @@ import { createParentScopeViews, runStatus } from "./views.ts";
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const SUBAGENT_REMINDER_CUSTOM_TYPE = "subagent-reminder";
 const BACKGROUND_BATCH_WINDOW_MS = 40;
+
+/** As remote and the daemon do, so a hung tmux server cannot hold up pi. */
+const timedTmux = (): Tmux => new Tmux(undefined, undefined, { timeoutMs: 2000 });
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent that works in this same checkout";
 // Wording follows Codex's "After you delegate" block and Claude Code's harness text (docs/research/subagents-ux-and-waiting.md).
 const AFTER_YOU_DELEGATE = [
@@ -254,7 +257,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			pi,
 			onChange: runsChanged,
 			reports,
-			tmux: () => new Tmux(),
+			tmux: timedTmux,
 			send: (to, message) => new OrchestratorClient().send(to, message),
 			handOff: handOff.signal,
 		});
@@ -294,7 +297,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		/** Switches this terminal to a run's pane; opened from here, its ← comes back here, not to agent view. */
 		const showRun = (name: string): void => {
-			const tmux = new Tmux();
+			const tmux = timedTmux();
 			try {
 				tmux.setOpenedFromView(name, false);
 			} catch {
@@ -391,7 +394,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			if (event.reason === "reload" && pane) {
 				for (const runId of extractReferencedRunIdsFromBranch(branchEntries)) {
 					const run = readPersistedRunRecord(agentDir, sessionId, runId);
-					if (run?.pane && !isTerminalSubagentStatus(run.status) && paneUp(new Tmux(), run.pane))
+					if (run?.pane && !isTerminalSubagentStatus(run.status) && paneUp(timedTmux(), run.pane))
 						admission.adopt(run, ctx);
 				}
 			}
@@ -400,7 +403,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			for (const run of reconcileInterruptedRuns(agentDir, sessionId, branchEntries, liveIds)) {
 				if (run.status !== "closed" || !run.pane) continue;
 				// Left open by an orchestrator that is gone: the daemon closes it too, at its next heartbeat.
-				endPane(new Tmux(), run.pane);
+				endPane(timedTmux(), run.pane);
 			}
 			// Reopening the session lists its closed runs, which can be resumed.
 			const reopened = parentScope.current();
