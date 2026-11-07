@@ -58,7 +58,7 @@ export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const SUBAGENT_REMINDER_CUSTOM_TYPE = "subagent-reminder";
 const BACKGROUND_BATCH_WINDOW_MS = 40;
 
-/** Runs' tmux, which gives up after 2 s, as remote and the daemon do: a hung server cannot hold up pi. */
+/** As remote and the daemon do, so a hung tmux server cannot hold up pi. */
 const timedTmux = (): Tmux => new Tmux(undefined, undefined, { timeoutMs: 2000 });
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent that works in this same checkout";
 // Wording follows Codex's "After you delegate" block and Claude Code's harness text (docs/research/subagents-ux-and-waiting.md).

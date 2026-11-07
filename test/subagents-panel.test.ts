@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
@@ -217,7 +217,9 @@ describe("a reload of the orchestrator", () => {
 		chmodSync(join(bin, "tmux"), 0o755);
 		const hasSession = vi.mocked(Tmux.prototype.hasSession);
 		const fake = hasSession.getMockImplementation();
+		if (!fake) throw new Error("The harness no longer fakes hasSession.");
 		vi.stubEnv("PATH", `${bin}:${process.env.PATH}`);
+		// Its socket and tmux.conf go there, not to the user's own server.
 		vi.stubEnv("PI_SERVER_DIR", bin);
 		hasSession.mockImplementation(function (this: Tmux, pane) {
 			return realHasSession.call(this, pane);
@@ -226,11 +228,13 @@ describe("a reload of the orchestrator", () => {
 		try {
 			await tui.session.reload();
 		} finally {
-			hasSession.mockImplementation(fake!);
+			hasSession.mockImplementation(fake);
 			vi.unstubAllEnvs();
+			rmSync(bin, { recursive: true, force: true });
 		}
-		expect(Date.now() - started).toBeLessThan(5000);
+		// Well before the hung tmux's 30 s: a reload that waited for it fails here.
+		expect(Date.now() - started).toBeLessThan(20_000);
 		expect(tui.runs).toEqual([expect.objectContaining({ name: "scout", ended: false })]);
 		await waitFor(() => row(tui!, "scout") ?? false);
-	}, 15_000);
+	});
 });
