@@ -302,4 +302,14 @@ describe.skipIf(!hasTmux)("tmux runs a ! command", () => {
 		expect(await tmux.captureAsync(ok, 10)).toEqual(["first", "last-line"]);
 		await expect(tmux.captureAsync("sh-gone", 10)).rejects.toThrow();
 	});
+
+	it("says whether a session is there without blocking, as hasSession does", async () => {
+		tmux = new Tmux(mkdtempSync(join(tmpdir(), "bc-has-async-")));
+		// No server yet: every session is gone.
+		expect(await tmux.hasSessionAsync("sh-none")).toBe(false);
+		const name = tmux.startShell(tmpdir(), "sleep 30");
+		expect(await tmux.hasSessionAsync(name)).toBe(true);
+		expect(await tmux.hasSessionAsync("sh-gone")).toBe(false);
+		expect(tmux.hasSession("sh-gone")).toBe(false);
+	});
 });

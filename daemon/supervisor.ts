@@ -101,8 +101,19 @@ export type WaitOutcome = "queued" | "none" | "superseded";
 /** What the registry asks of tmux: whether a pane's session is still there, and ending a run's pane. */
 export interface TmuxProbe {
 	hasSession(name: string): boolean;
+	/** {@link hasSession} without blocking; `hasSession` stands in when absent. */
+	hasSessionAsync?(name: string): Promise<boolean>;
 	/** Ends a pane's pi as quitting does: its session is kept. */
 	end(name: string): void;
+}
+
+/** Whether tmux has a pane's session; "unknown" when it could not say. */
+type TmuxAnswer = "up" | "gone" | "unknown";
+
+/** What tmux said of each pane a list asks about, by pane, and the time the list reaps as of. */
+export interface ListProbe {
+	now: number;
+	said: ReadonlyMap<string, TmuxAnswer>;
 }
 
 export interface RegistryDeps {
@@ -243,11 +254,11 @@ export class ServerSupervisor {
 
 	/** A deleted row is kept while tmux may still have its pane, then as long as a start may take
 	 *  (`START_MS`) for its quit's hand-off save to land. */
-	private expireDeleted(now: number): void {
+	private expireDeleted(now: number, said?: ListProbe["said"]): void {
 		const deleted = loadDeleted(this.deps.dir);
 		let changed = false;
 		const kept = deleted.flatMap((row) => {
-			const goneAt = row.goneAt ?? (row.paneId && this.tmuxSays(row.paneId) === "gone" ? now : undefined);
+			const goneAt = row.goneAt ?? (row.paneId && this.tmuxSays(row.paneId, said) === "gone" ? now : undefined);
 			if (goneAt === undefined) return [row];
 			changed ||= goneAt !== row.goneAt || now - goneAt > START_MS;
 			return now - goneAt > START_MS ? [] : [{ ...row, goneAt }];
@@ -304,10 +315,10 @@ export class ServerSupervisor {
 
 	/** Rows listed as starting stop being so once their pane will not register: its time is up, or a
 	 *  new session's tmux session is gone (pi failed to start). */
-	private expireStarts(now: number): void {
+	private expireStarts(now: number, said?: ListProbe["said"]): void {
 		for (const [id, row] of [...this.rows]) {
 			const { start } = row;
-			if (start && (now > start.until || (start.record.pane && this.tmuxSays(start.record.pane) === "gone"))) {
+			if (start && (now > start.until || (start.record.pane && this.tmuxSays(start.record.pane, said) === "gone"))) {
 				this.leaveStart(id, row);
 			}
 		}
@@ -520,8 +531,9 @@ export class ServerSupervisor {
 	/** External instances, each as its row, after reaping: live ones, then silent ones, each `silent`. */
 	listExternalInstances(
 		now: number = this.deps.now(),
+		said?: ListProbe["said"],
 	): Array<{ record: InstanceRecord; activity: AgentActivity; settled: number; silent?: true }> {
-		this.reap(now);
+		this.reap(now, said);
 		const listed = (state: RowState) =>
 			[...this.rows].flatMap(([id, row]) =>
 				row.state === state && row.pane
@@ -538,20 +550,20 @@ export class ServerSupervisor {
 	 * holds last; if tmux still has it, it falls silent; if tmux could not say, or it
 	 * has no pane to ask about, it is dropped and its stored row shows until it beats again.
 	 */
-	private reap(now: number): void {
-		this.expireStarts(now);
-		this.expireDeleted(now);
+	private reap(now: number, said?: ListProbe["said"]): void {
+		this.expireStarts(now, said);
+		this.expireDeleted(now, said);
 		for (const at of this.panes()) {
 			const { pane } = at.pane.record;
-			if (!this.isLive(at) && pane && this.tmuxSays(pane) === "gone") this.paneEnded(at);
+			if (!this.isLive(at) && pane && this.tmuxSays(pane, said) === "gone") this.paneEnded(at);
 		}
 		for (const at of this.panes()) {
 			if (!this.lapsed(at, now)) continue;
 			const { pane } = at.pane.record;
-			const said = pane ? this.tmuxSays(pane) : "unknown";
+			const answer = pane ? this.tmuxSays(pane, said) : "unknown";
 			// The pane runs pi itself, so its pi is gone.
-			if (said === "gone") this.paneEnded(at);
-			else if (said === "up") this.silence(at);
+			if (answer === "gone") this.paneEnded(at);
+			else if (answer === "up") this.silence(at);
 			else {
 				const { id, sessionFile } = at.pane.record;
 				if (sessionFile) this.droppedPaneOn.set(sessionFile, id);
@@ -571,13 +583,51 @@ export class ServerSupervisor {
 	}
 
 	/** Whether tmux has a pane's session; "unknown" when it could not say, so a pane that may be up is
-	 *  not taken for dead. */
-	private tmuxSays(pane: string): "up" | "gone" | "unknown" {
+	 *  not taken for dead. A pane a list's probe did not ask about (it came up during the probe) is
+	 *  asked now, so the list reaps as it would have. */
+	private tmuxSays(pane: string, said?: ListProbe["said"]): TmuxAnswer {
+		const answer = said?.get(pane);
+		if (answer) return answer;
 		try {
 			return this.deps.tmux.hasSession(pane) ? "up" : "gone";
 		} catch {
 			return "unknown";
 		}
+	}
+
+	/**
+	 * What a list as of now asks tmux, asked of it at once and without blocking, so other requests are
+	 * answered meanwhile: the panes and deleted rows reaping asks about, and the orchestrators of stored
+	 * runs. Each is asked once, for both of a list's halves.
+	 */
+	async probeForList(): Promise<ListProbe> {
+		const now = this.deps.now();
+		const names = new Set<string>();
+		for (const { start } of this.rows.values()) {
+			if (start?.record.pane && now <= start.until) names.add(start.record.pane);
+		}
+		for (const { paneId, goneAt } of loadDeleted(this.deps.dir))
+			if (paneId && goneAt === undefined) names.add(paneId);
+		const registered = new Set<string>();
+		for (const at of this.panes()) {
+			const { pane } = at.pane.record;
+			if (!pane) continue;
+			registered.add(pane);
+			if (!this.isLive(at) || this.lapsed(at, now)) names.add(pane);
+		}
+		for (const { parent } of loadInstances(this.deps.dir)) if (parent && !registered.has(parent)) names.add(parent);
+		const { tmux } = this.deps;
+		const answers = await Promise.all(
+			[...names].map(async (name): Promise<[string, TmuxAnswer]> => {
+				try {
+					const up = tmux.hasSessionAsync ? await tmux.hasSessionAsync(name) : tmux.hasSession(name);
+					return [name, up ? "up" : "gone"];
+				} catch {
+					return [name, "unknown"];
+				}
+			}),
+		);
+		return { now, said: new Map(answers) };
 	}
 
 	/** Row `id`'s entry, a stored one if it had none. */
@@ -620,9 +670,9 @@ export class ServerSupervisor {
 	}
 
 	/** Stored rows after reaping, but for those a live or silent pane goes on as: that pane lists them. */
-	listInstances(): InstanceRecord[] {
-		this.reap(this.deps.now());
-		this.removeOrphanedRuns();
+	listInstances(now: number = this.deps.now(), said?: ListProbe["said"]): InstanceRecord[] {
+		this.reap(now, said);
+		this.removeOrphanedRuns(said);
 		const paned = new Set([...this.rows].flatMap(([id, row]) => (row.pane ? [id] : [])));
 		const starting = new Map(
 			[...this.rows].flatMap(([id, row]) => (!row.pane && row.start ? [[id, row.start.record]] : [])),
@@ -701,12 +751,12 @@ export class ServerSupervisor {
 
 	/** A closed run's stored row goes once tmux no longer has its orchestrator's pane, as an open
 	 *  run's pi does (closeOrphanedRun); a registered orchestrator costs no tmux call. */
-	private removeOrphanedRuns(): void {
+	private removeOrphanedRuns(said?: ListProbe["said"]): void {
 		const registered = new Set(this.panes().flatMap((at) => (at.pane.record.pane ? [at.pane.record.pane] : [])));
 		const gone = new Map<string, boolean>();
 		for (const { id, parent } of loadInstances(this.deps.dir)) {
 			if (!parent || registered.has(parent)) continue;
-			if (!gone.has(parent)) gone.set(parent, this.tmuxSays(parent) === "gone");
+			if (!gone.has(parent)) gone.set(parent, this.tmuxSays(parent, said) === "gone");
 			if (gone.get(parent)) removeInstance(this.deps.dir, id);
 		}
 	}
