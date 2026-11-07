@@ -1,3 +1,6 @@
+import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Tmux } from "../daemon/tmux.ts";
@@ -5,6 +8,9 @@ import { agentTasks } from "../ext/_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../ext/_shared/status-keys.ts";
 import { createSubagentTui, gate, launch, type SubagentTui } from "./helpers/subagent-tui.ts";
 import { waitFor } from "./helpers/wait-for.ts";
+
+// The harness fakes it; a test that needs tmux's own answer calls this one.
+const realHasSession = Tmux.prototype.hasSession;
 
 let tui: SubagentTui | undefined;
 afterEach(() => {
@@ -199,4 +205,32 @@ describe("a reload of the orchestrator", () => {
 		);
 		expect(JSON.stringify(tui.session.messages)).toContain("Found the module.");
 	});
+
+	it("goes on past a tmux that never answers, after its timeout, and keeps the run", async () => {
+		tui = await createSubagentTui();
+		tui.script([launch(["scout"], { background: true }), () => fauxAssistantMessage("Waiting for scout.")]);
+		await prompt(tui);
+		await waitFor(() => row(tui!, "scout") ?? false);
+
+		const bin = mkdtempSync(join(tmpdir(), "bluclawd-hung-tmux-"));
+		writeFileSync(join(bin, "tmux"), "#!/bin/sh\nexec sleep 30\n");
+		chmodSync(join(bin, "tmux"), 0o755);
+		const hasSession = vi.mocked(Tmux.prototype.hasSession);
+		const fake = hasSession.getMockImplementation();
+		vi.stubEnv("PATH", `${bin}:${process.env.PATH}`);
+		vi.stubEnv("PI_SERVER_DIR", bin);
+		hasSession.mockImplementation(function (this: Tmux, pane) {
+			return realHasSession.call(this, pane);
+		});
+		const started = Date.now();
+		try {
+			await tui.session.reload();
+		} finally {
+			hasSession.mockImplementation(fake!);
+			vi.unstubAllEnvs();
+		}
+		expect(Date.now() - started).toBeLessThan(5000);
+		expect(tui.runs).toEqual([expect.objectContaining({ name: "scout", ended: false })]);
+		await waitFor(() => row(tui!, "scout") ?? false);
+	}, 15_000);
 });
