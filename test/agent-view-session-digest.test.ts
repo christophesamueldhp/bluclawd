@@ -17,6 +17,7 @@ function derived(sm: SessionManager) {
 		name: sm.getSessionName(),
 		firstPrompt: deriveLabel(undefined, entries),
 		lastAnswer: lastAssistant ? lastLine(textOf(lastAssistant.message.content)) : undefined,
+		messaged: entries.some((e) => e.type === "message"),
 		answered: messages.some((e) => e.message.role === "assistant"),
 		lastEntry: entries.at(-1) && { id: entries.at(-1)?.id, timestamp: entries.at(-1)?.timestamp },
 		turnStartedAt: turnStartedAt(sm.getBranch()),
@@ -74,6 +75,9 @@ describe("SessionDigest (what a heartbeat reads off its session)", () => {
 		};
 
 		check("blank");
+		sm.appendModelChange("faux", "faux-1");
+		sm.appendThinkingLevelChange("off");
+		check("what pi starts a session with, before anything is asked");
 		const first = prompt(sm, "  \n");
 		check("a blank prompt");
 		prompt(sm, "Fix the build\nthen the tests");

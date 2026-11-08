@@ -841,16 +841,11 @@ describe("agent view in pane mode", () => {
 	});
 
 	it("a fork is a session before its first message, so its row stays listed", () => {
-		const sessions = (entries: Array<{ type: string }>, parentSession?: string) => ({
-			getEntries: () => entries,
-			getHeader: () => ({ type: "session" as const, id: "s", timestamp: "", cwd: HERE, parentSession }),
-		});
-		// pi starts a session with these, before anything is asked.
-		const setup = [{ type: "model_change" }, { type: "thinking_level_change" }];
-		expect(isBlankPane("pi-self", sessions(setup) as never)).toBe(true);
-		expect(isBlankPane("pi-self", sessions(setup, "/s/old.jsonl") as never)).toBe(false);
-		expect(isBlankPane("pi-self", sessions([...setup, { type: "message" }]) as never)).toBe(false);
-		expect(isBlankPane(undefined, sessions(setup) as never)).toBe(false);
+		const header = (parentSession?: string) => ({ parentSession });
+		expect(isBlankPane("pi-self", header(), false)).toBe(true);
+		expect(isBlankPane("pi-self", header("/s/old.jsonl"), false)).toBe(false);
+		expect(isBlankPane("pi-self", header(), true)).toBe(false);
+		expect(isBlankPane(undefined, header(), false)).toBe(false);
 	});
 
 	it("esc returns to this terminal's session, or quits once there is none", () => {

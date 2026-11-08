@@ -166,9 +166,10 @@ export function promptContent(message: { text: string; images?: Array<{ mimeType
  */
 export function isBlankPane(
 	pane: string | undefined,
-	sessions: Pick<ExtensionContext["sessionManager"], "getEntries" | "getHeader">,
+	header: { parentSession?: string } | null,
+	messaged: boolean,
 ): boolean {
-	return !!pane && !sessions.getHeader()?.parentSession && !sessions.getEntries().some((e) => e.type === "message");
+	return !!pane && !header?.parentSession && !messaged;
 }
 
 /**
@@ -239,7 +240,11 @@ const agentView: InlineExtension = {
 		// What the turn in progress is doing, for this session's row in other windows.
 		let liveDetail: string | undefined;
 
-		const blank = (ctx: ExtensionContext): boolean => isBlankPane(pane, ctx.sessionManager);
+		// A heartbeat every few seconds reads the session again only once it has changed.
+		const digest = new SessionDigest();
+
+		const blank = (ctx: ExtensionContext): boolean =>
+			isBlankPane(pane, ctx.sessionManager.getHeader(), digest.read(ctx.sessionManager).messaged);
 		// A normal session, as bluclawd's: the pane `pi` started in this terminal, until ← opens
 		// agent view. Quitting ends it, and so does closing its terminal.
 		let normal = false;
@@ -270,9 +275,6 @@ const agentView: InlineExtension = {
 			if (ending && pane) panes.kill(pane);
 			else panes.detach();
 		};
-
-		// A heartbeat every few seconds reads the session again only once it has changed.
-		const digest = new SessionDigest();
 
 		/** This window's session's name, else the first words of its first prompt. */
 		const selfLabel = (ctx: ExtensionContext): string | undefined => {

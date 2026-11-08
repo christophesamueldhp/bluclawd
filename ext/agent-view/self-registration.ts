@@ -54,6 +54,8 @@ export interface SessionReading {
 	firstPrompt: string | undefined;
 	/** The last line of the last answer, on any branch. */
 	lastAnswer: string | undefined;
+	/** A message is in the session: something has been asked. */
+	messaged: boolean;
 	answered: boolean;
 	lastEntry: { id: string | undefined; timestamp: string | undefined } | undefined;
 	turnStartedAt: string | undefined;
@@ -95,6 +97,7 @@ function readSession(source: SessionSource): SessionReading {
 		name: source.getSessionName(),
 		firstPrompt: deriveLabel(undefined, entries),
 		lastAnswer: lastAssistant ? lastLine(textOf(lastAssistant.message?.content)) : undefined,
+		messaged: messages.length > 0,
 		answered: messages.some((e) => e.message?.role === "assistant"),
 		lastEntry: last && { id: last.id, timestamp: last.timestamp },
 		turnStartedAt: turnStartedAt(source.getBranch()),
