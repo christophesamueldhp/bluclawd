@@ -27,7 +27,7 @@ import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
-import { timed } from "../_shared/timing.ts";
+import { timed, timedCall } from "../_shared/timing.ts";
 import { trustBadge } from "../_shared/trust-badge.ts";
 import { AgentView, EXIT_WORDS, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, handOffAfterExit } from "./hand-off.ts";
@@ -444,7 +444,10 @@ const agentView: InlineExtension = {
 				new OrchestratorClient(),
 				// A blank session waits for its first prompt to be listed, unless it is a run (its orchestrator
 				// reaches it from its first turn on) or carries a row on (/new).
-				() => (blank(ctx) && !parent && event.reason !== "new" ? undefined : selfHeartbeat(ctx)),
+				() =>
+					timedCall("agent-view", "heartbeat", () =>
+						blank(ctx) && !parent && event.reason !== "new" ? undefined : selfHeartbeat(ctx),
+					),
 				(message) => onPaneMessage(ctx, message),
 				pane,
 				(watched) => pi.events.emit("bluclawd:remote-watched", watched),

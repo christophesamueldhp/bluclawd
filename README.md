@@ -241,7 +241,7 @@ node --experimental-strip-types scripts/probe-extensions.ts   # what each extens
 ```
 
 To see how long each extension's handlers take, start pi with `BLUCLAWD_TIMING=1`: every handler call
-is appended to `~/.pi/agent/bluclawd/timing.jsonl` (under `$PI_CODING_AGENT_DIR` when set) as
+(and each agent-view pane `heartbeat`, which a timer runs) is appended to `~/.pi/agent/bluclawd/timing.jsonl` (under `$PI_CODING_AGENT_DIR` when set) as
 `{pid, ext, event, ms, sinceProcessStart}`; a pi's prompt is ready at the end of its last `session_start`.
 A pi in agent view's tmux takes the variable from the pi that started that tmux server.
 Without it nothing is wrapped or written. Summarise the log per extension and event, slowest first:

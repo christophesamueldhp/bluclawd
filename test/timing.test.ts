@@ -2,7 +2,7 @@ import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { timed } from "../ext/_shared/timing.ts";
+import { timed, timedCall } from "../ext/_shared/timing.ts";
 
 // test/setup/agent-dir.ts gives every test file its own agent dir.
 const log = () => join(process.env.PI_CODING_AGENT_DIR as string, "bluclawd", "timing.jsonl");
@@ -39,6 +39,7 @@ describe("timed", () => {
 		expect(timed("x", factory)).toBe(factory);
 		vi.stubEnv("BLUCLAWD_TIMING", "0");
 		expect(timed("x", factory)).toBe(factory);
+		expect(timedCall("x", "y", () => 1)).toBe(1);
 		expect(existsSync(log())).toBe(false);
 	});
 
@@ -99,6 +100,12 @@ describe("timed", () => {
 			expect(() => handlers.get("tool_call")?.({}, {})).toThrow(boom);
 			await expect(handlers.get("tool_result")?.({}, {})).rejects.toBe(boom);
 			expect(records().map((r) => r.event)).toEqual(["tool_call", "tool_result"]);
+		});
+
+		it("records a call no handler makes, as a timer's, and passes its result through", () => {
+			vi.stubEnv("BLUCLAWD_TIMING", "1");
+			expect(timedCall("agent-view", "heartbeat", () => 42)).toBe(42);
+			expect(records()).toEqual([expect.objectContaining({ ext: "agent-view", event: "heartbeat" })]);
 		});
 
 		it("is wired into an extension's default export", async () => {
