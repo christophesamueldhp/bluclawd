@@ -27,7 +27,7 @@ const record = (ext: string, event: string, start: number) => {
 	}
 };
 
-/** `fn`'s result, its call recorded as `event` the same way: for work no handler runs, as a timer's. */
+/** Times `fn` as a handler is timed, for work no handler runs (a timer's). */
 export function timedCall<T>(ext: string, event: string, fn: () => T): T {
 	if (process.env.BLUCLAWD_TIMING !== "1") return fn();
 	const start = performance.now();

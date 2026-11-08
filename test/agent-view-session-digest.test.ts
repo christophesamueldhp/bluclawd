@@ -17,7 +17,7 @@ function derived(sm: SessionManager) {
 		name: sm.getSessionName(),
 		firstPrompt: deriveLabel(undefined, entries),
 		lastAnswer: lastAssistant ? lastLine(textOf(lastAssistant.message.content)) : undefined,
-		messaged: entries.some((e) => e.type === "message"),
+		asked: entries.some((e) => e.type === "message"),
 		answered: messages.some((e) => e.message.role === "assistant"),
 		lastEntry: entries.at(-1) && { id: entries.at(-1)?.id, timestamp: entries.at(-1)?.timestamp },
 		turnStartedAt: turnStartedAt(sm.getBranch()),
@@ -114,7 +114,8 @@ describe("SessionDigest (what a heartbeat reads off its session)", () => {
 		sm.appendCompaction("summary", first, 10);
 		check("a compaction");
 
-		const file = sm.getSessionFile() as string;
+		const file = sm.getSessionFile();
+		if (!file) throw new Error("a created session has a file");
 		const reopened = SessionManager.open(file, dir);
 		expect(digest.read(reopened), "/reload: the same session, another manager").toEqual(derived(reopened));
 		sm.setSessionFile(file);

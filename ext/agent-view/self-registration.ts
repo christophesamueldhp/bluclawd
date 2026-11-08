@@ -4,7 +4,7 @@ import type { AgentActivity, OrchestratorClient } from "../../daemon/orchestrato
 import { lastLine, textOf } from "../../daemon/session-state.ts";
 import { piCommand } from "../../daemon/tmux.ts";
 
-/** The subset of a session entry needed to derive a title — structural, so pi's SessionEntry fits. */
+/** The subset of a session entry a heartbeat reads — structural, so pi's SessionEntry fits. */
 interface EntryLike {
 	id?: string;
 	type: string;
@@ -55,7 +55,8 @@ export interface SessionReading {
 	/** The last line of the last answer, on any branch. */
 	lastAnswer: string | undefined;
 	/** A message is in the session: something has been asked. */
-	messaged: boolean;
+	asked: boolean;
+	/** An answer is in the session. */
 	answered: boolean;
 	lastEntry: { id: string | undefined; timestamp: string | undefined } | undefined;
 	turnStartedAt: string | undefined;
@@ -67,6 +68,8 @@ interface SessionSource {
 	getEntries(): EntryLike[];
 	getBranch(): EntryLike[];
 	getSessionName(): string | undefined;
+	/** pi's session manager has it, outside its read-only type; without it every read walks the entries. */
+	getEntryCount?(): number;
 }
 
 /**
@@ -77,8 +80,7 @@ export class SessionDigest {
 	private last: { source: SessionSource; leafId: string | null; count: number; reading: SessionReading } | undefined;
 
 	read(source: SessionSource): SessionReading {
-		// pi's session manager counts its entries without copying them, outside its read-only type.
-		const count = (source as { getEntryCount?: () => number }).getEntryCount?.();
+		const count = source.getEntryCount?.();
 		const leafId = source.getLeafId();
 		const last = this.last;
 		if (last?.source === source && last.leafId === leafId && last.count === count) return last.reading;
@@ -97,7 +99,7 @@ function readSession(source: SessionSource): SessionReading {
 		name: source.getSessionName(),
 		firstPrompt: deriveLabel(undefined, entries),
 		lastAnswer: lastAssistant ? lastLine(textOf(lastAssistant.message?.content)) : undefined,
-		messaged: messages.length > 0,
+		asked: messages.length > 0,
 		answered: messages.some((e) => e.message?.role === "assistant"),
 		lastEntry: last && { id: last.id, timestamp: last.timestamp },
 		turnStartedAt: turnStartedAt(source.getBranch()),

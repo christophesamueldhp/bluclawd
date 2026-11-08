@@ -244,7 +244,7 @@ const agentView: InlineExtension = {
 		const digest = new SessionDigest();
 
 		const blank = (ctx: ExtensionContext): boolean =>
-			isBlankPane(pane, ctx.sessionManager.getHeader(), digest.read(ctx.sessionManager).messaged);
+			isBlankPane(pane, ctx.sessionManager.getHeader(), digest.read(ctx.sessionManager).asked);
 		// A normal session, as bluclawd's: the pane `pi` started in this terminal, until ← opens
 		// agent view. Quitting ends it, and so does closing its terminal.
 		let normal = false;
