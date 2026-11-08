@@ -32,7 +32,7 @@ import type {
 } from "./ipc/protocol.ts";
 import { pickPaneHeartbeat } from "./ipc/protocol.ts";
 import type { RemoteControl } from "./remote/control.ts";
-import type { ServerSupervisor } from "./supervisor.ts";
+import type { ListProbe, ServerSupervisor } from "./supervisor.ts";
 import type { InstanceRecord } from "./types.ts";
 
 function toInstanceSummary(
@@ -74,13 +74,16 @@ export function setRemoteControl(control: RemoteControl | undefined): void {
 	remoteControl = control;
 }
 
-/** Every row agent view lists: stored rows, then each pane's pi with its activity. */
-export function listSummaries(supervisor: ServerSupervisor): InstanceSummary[] {
-	const stored = supervisor.listInstances().map((instance) => toInstanceSummary(instance));
-	const external = supervisor.listExternalInstances().map(({ record, activity, settled, silent }) => ({
-		...toInstanceSummary(record, activity, true, settled),
-		...(silent ? { silent } : {}),
-	}));
+/** Every row agent view lists: stored rows, then each pane's pi with its activity. With `probe`,
+ *  tmux's answers come from it rather than from blocking calls. */
+export function listSummaries(supervisor: ServerSupervisor, probe?: ListProbe): InstanceSummary[] {
+	const stored = supervisor.listInstances(probe?.now, probe?.said).map((instance) => toInstanceSummary(instance));
+	const external = supervisor
+		.listExternalInstances(probe?.now, probe?.said)
+		.map(({ record, activity, settled, silent }) => ({
+			...toInstanceSummary(record, activity, true, settled),
+			...(silent ? { silent } : {}),
+		}));
 	return [...stored, ...external];
 }
 
@@ -147,7 +150,9 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 export async function handleIpcRequest(supervisor: ServerSupervisor, request: ServerRequest): Promise<ServerResponse> {
 	switch (request.type) {
 		case "list": {
-			return { type: "list_result", ok: true, instances: listSummaries(supervisor) };
+			// tmux is asked first, without blocking: a heartbeat is not held up behind the list's probes.
+			const probe = await supervisor.probeForList();
+			return { type: "list_result", ok: true, instances: listSummaries(supervisor, probe) };
 		}
 
 		case "status": {

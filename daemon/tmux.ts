@@ -371,6 +371,17 @@ export class Tmux {
 		}
 	}
 
+	/** {@link hasSession} without blocking. */
+	async hasSessionAsync(name: string): Promise<boolean> {
+		try {
+			await this.runAsync(["has-session", "-t", `=${name}`]);
+			return true;
+		} catch (error) {
+			if (Tmux.gone(error)) return false;
+			throw error;
+		}
+	}
+
 	/** Whether a terminal shows one of this server's sessions; no server, none does. */
 	attached(): boolean {
 		try {
