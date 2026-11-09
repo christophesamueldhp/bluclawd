@@ -318,12 +318,12 @@ export async function createSubagentTui(
 		sent,
 		/** The panes the terminal was switched to. */
 		switched,
-		/** The run reports `text` to its orchestrator, as its pi does when it settles. */
-		report: (name: string, text: string) => fromRun(name, { kind: "report", text }),
+		/** The run reports `text` to its orchestrator, as its pi does when it settles; `seq` once it stored it. */
+		report: (name: string, text: string, seq?: number) => fromRun(name, { kind: "report", text, seq }),
 		/** The run stores its Report `text`, as its pi does before sending it, and the send never gets through. */
 		storeReport: (name: string, text: string) => {
 			const { args } = runNamed(name);
-			storeRunReport(args[args.indexOf("--session-dir") + 1], { text });
+			return storeRunReport(args[args.indexOf("--session-dir") + 1], { text });
 		},
 		/** The orchestrator's pane reaches the daemon again after a heartbeat that could not. */
 		reconnect: () => eventBus.emit("bluclawd:daemon-reconnected", true),

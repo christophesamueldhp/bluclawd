@@ -179,9 +179,14 @@ const runReportsDir = (runDir: string) => join(runDir, "reports");
 export function storeRunReport(runDir: string, report: Omit<StoredRunReport, "seq">): number {
 	// By the files' names: a torn one keeps its number.
 	const seq = Math.max(0, ...storedSeqs(runDir)) + 1;
+	// Its text first, readable as it is: a cut Report's pointer names it, and the JSON numbers it.
+	writeAtomicPrivateFile(storedRunReportTextPath(runDir, seq), `${sanitizeReportText(report.text)}\n`);
 	writeAtomicPrivateFile(join(runReportsDir(runDir), `${seq}.json`), JSON.stringify({ ...report, seq }));
 	return seq;
 }
+
+/** Where a run keeps the full text of its Report `seq`. */
+export const storedRunReportTextPath = (runDir: string, seq: number) => join(runReportsDir(runDir), `${seq}.md`);
 
 /** The numbers of the Reports a run stored, by their files' names. */
 function storedSeqs(runDir: string): number[] {

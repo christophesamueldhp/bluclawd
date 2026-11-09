@@ -21,7 +21,7 @@ import {
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PANE_ENV } from "../daemon/tmux.ts";
-import { readPersistedRunRecord, subagentReportPath } from "../ext/subagents/storage.ts";
+import { readPersistedRunRecord } from "../ext/subagents/storage.ts";
 import { createParentSessionWithSubagents } from "./helpers/subagent-session.ts";
 import { createSubagentTui, launch, type SubagentTui } from "./helpers/subagent-tui.ts";
 
@@ -176,27 +176,37 @@ function toolResultText(session: { messages: readonly unknown[] }, id: string) {
 }
 
 describe("The subagent tool", () => {
-	it("gives a foreground call only the end of a Report over 2000 lines, and where its full text is", async () => {
+	it("gives a foreground call only the end of a Report over either limit, and the file that holds its full text", async () => {
 		const t = await createSubagentTui();
 		tui = t;
-		t.script([launch(["scout", "mapper"])]);
-		const turn = t.session.prompt("Scout and map.", { expandPromptTemplates: false });
-		await t.started("scout");
-		await t.started("mapper");
-		t.report("scout", Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`).join("\n"));
-		t.report("mapper", "Mapped.");
+		t.script([launch(["scout", "mapper", "checker"])]);
+		const turn = t.session.prompt("Scout, map and check.", { expandPromptTemplates: false });
+		const reports = {
+			scout: Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`).join("\n"),
+			mapper: Array.from({ length: 100 }, (_, i) => `${i + 1} ${"x".repeat(1000)}`).join("\n"),
+			checker: "Checked.",
+		};
+		for (const [name, text] of Object.entries(reports)) {
+			await t.started(name);
+			t.report(name, text, t.storeReport(name, text));
+		}
 		await turn;
 
+		const pointer = /\n\n\[Report truncated, full text: ([^\]]+)\]$/;
 		const scout = toolResultText(t.session, "call_scout");
-		const { runId } = scout.result?.details as { runId: string };
-		const reportFile = subagentReportPath(t.agentDir, t.session.sessionId, runId);
 		expect(scout.text).toMatch(/\n\nline 501\n/);
 		expect(scout.text).not.toMatch(/\nline 500\n/);
-		expect(scout.text.endsWith(`\nline 2500\n\n[Report truncated, full text: ${reportFile}]`)).toBe(true);
+		expect(scout.text).toMatch(/\nline 2500\n\n\[Report truncated, full text: [^\]]+\]$/);
+		expect(readFileSync(pointer.exec(scout.text)?.[1] ?? "", "utf8")).toBe(`${reports.scout}\n`);
 		expect(scout.result?.details).toMatchObject({ truncated: true });
 		const mapper = toolResultText(t.session, "call_mapper");
-		expect(mapper.text).toMatch(/\n\nMapped\.$/);
-		expect(mapper.result?.details).toMatchObject({ truncated: false });
+		expect(mapper.text).not.toContain("\n\n1 x");
+		expect(Buffer.byteLength(mapper.text)).toBeLessThan(52 * 1024);
+		expect(readFileSync(pointer.exec(mapper.text)?.[1] ?? "", "utf8")).toBe(`${reports.mapper}\n`);
+		expect(mapper.result?.details).toMatchObject({ truncated: true });
+		const checker = toolResultText(t.session, "call_checker");
+		expect(checker.text).toMatch(/\n\nChecked\.$/);
+		expect(checker.result?.details).toMatchObject({ truncated: false });
 	});
 
 	it("refuses a launch outside tmux, where no run can be a pi session of its own", async () => {
