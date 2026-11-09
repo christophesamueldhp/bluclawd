@@ -23,6 +23,9 @@ import { waitFor } from "./helpers/wait-for.ts";
 
 afterEach(removeGenerationsFixtures);
 
+/** The file a cut Report's pointer names. */
+const fullTextFile = (notice: string) => /\[Report truncated, full text: ([^\]]+)\]$/.exec(notice)?.[1] ?? "";
+
 const tokens = (totalTokens: number) => ({ ...createEmptySubagentUsage(), totalTokens });
 
 /** A run an earlier instance stored, interrupted. */
@@ -102,6 +105,35 @@ describe("A run's generations", () => {
 		]);
 	});
 
+	it("tells the orchestrator only the end of a Report over 2000 lines, and the file that holds its full text", async () => {
+		const { launch, storeReport, sendReport, notices, noticeDetails } = setup();
+		const backend = launch("backend", "Build the API.");
+		const long = Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`).join("\n");
+		await sendReport(backend, storeReport(backend, long), long);
+		await sendReport(backend, storeReport(backend, "Pagination added."), "Pagination added.");
+
+		const [cut, short] = notices();
+		expect(cut).toMatch(/\n\nline 501\n/);
+		expect(cut).not.toMatch(/\nline 500\n/);
+		expect(cut).toMatch(/\nline 2500\n\n\[Report truncated, full text: [^\]]+\]$/);
+		expect(readFileSync(fullTextFile(cut), "utf8")).toBe(`${long}\n`);
+		expect(short).toMatch(/\n\nPagination added\.$/);
+		expect(noticeDetails().map((details) => details.truncated)).toEqual([true, false]);
+	});
+
+	it("tells the orchestrator only the end of a Report over 50 KB, and the file that holds its full text", async () => {
+		const { launch, storeReport, sendReport, notices } = setup();
+		const backend = launch("backend", "Build the API.");
+		const long = Array.from({ length: 100 }, (_, i) => `${i + 1} ${"x".repeat(1000)}`).join("\n");
+		await sendReport(backend, storeReport(backend, long), long);
+
+		const [cut] = notices();
+		expect(cut).not.toContain("\n\n1 x");
+		expect(cut).toMatch(/\n100 x+\n\n\[Report truncated, full text: [^\]]+\]$/);
+		expect(Buffer.byteLength(cut)).toBeLessThan(52 * 1024);
+		expect(readFileSync(fullTextFile(cut), "utf8")).toBe(`${long}\n`);
+	});
+
 	it("keeps each session's usage the run reported, its latest on the run", async () => {
 		const { agentDir, scope, generations, launch, report } = setup();
 		const backend = launch("backend", "Build the API.");
@@ -174,6 +206,28 @@ describe("Delivering a run's Reports", () => {
 		next.generations.pullReports(scope);
 		expect(next.notices()).toEqual([expect.stringMatching(/\n\nPagination added\.$/)]);
 		expect(readPersistedRunRecord(first.agentDir, scope.parentSessionId, backend.runId)?.lastDeliveredSeq).toBe(2);
+	});
+
+	it("tells the orchestrator's session, reopened, of a long Report its closed run stored, and the file that holds it", async () => {
+		const first = setup();
+		const backend = first.launch("backend", "Build the API.");
+		const long = Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`).join("\n");
+		first.storeReport(backend, long);
+		first.storeReport(backend, "Pagination added.");
+		first.generations.scheduler.cancelRun(backend.runId, "model", "Done with it.");
+		await backend.completion;
+
+		const next = setup(first);
+		const scope = next.scope.current()!;
+		next.generations.scheduler.reopen(
+			readPersistedRunRecord(first.agentDir, scope.parentSessionId, backend.runId)!,
+			scope.sessionEpoch,
+		);
+		next.generations.pullReports(scope);
+		const [cut, short] = next.notices();
+		expect(cut).toMatch(/\nline 2500\n\n\[Report truncated, full text: [^\]]+\]$/);
+		expect(readFileSync(fullTextFile(cut), "utf8")).toBe(`${long}\n`);
+		expect(short).toMatch(/\n\nPagination added\.$/);
 	});
 
 	it("reads the Reports that never came from disk, in order, before a later one that did", async () => {

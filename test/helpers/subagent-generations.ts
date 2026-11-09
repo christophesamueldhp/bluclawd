@@ -227,6 +227,7 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		};
 	};
 	const notices = () => sent.flat().flatMap((item) => (item.kind === "notice" ? [item.notice.parentText] : []));
+	const noticeDetails = () => sent.flat().flatMap((item) => (item.kind === "notice" ? [item.notice.details] : []));
 	return {
 		cwd,
 		agentDir,
@@ -238,6 +239,7 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		panes,
 		delivered,
 		notices,
+		noticeDetails,
 		launch,
 		paneOf,
 		report,

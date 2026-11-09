@@ -1,9 +1,11 @@
+import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { createRunAddressing } from "./addressing.ts";
 import { formatRunLabel, type RunExecutionContext } from "./admission.ts";
 import { createRunDirectory } from "./directory.ts";
 import {
+	capReport,
 	fromRunText,
 	PARENT_MESSAGE_ADDRESS,
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
@@ -16,6 +18,8 @@ import {
 	appendParentRunReference,
 	readRunReports,
 	recordRunSessionUsage,
+	storedRunReportTextPath,
+	subagentReportPath,
 	subagentRunDir,
 	writeFullSubagentReport,
 	writePersistedRunRecord,
@@ -48,11 +52,33 @@ export interface GenerationDeps {
 	handOff: AbortSignal;
 }
 
+/** A run's Report as the orchestrator's model is given it, capped, as a tool result or a notice. */
+export function reportToParent(
+	agentDir: string,
+	record: Readonly<SubagentRunRecord>,
+	report: { text: string; seq?: number },
+): { parentText: string; truncated: boolean } {
+	const capped = capReport(report.text, () => {
+		const runDir = subagentRunDir(agentDir, record.parentSessionId, record.runId);
+		const stored = report.seq === undefined ? undefined : storedRunReportTextPath(runDir, report.seq);
+		// An older run stored no text file, and keeps only its latest Report in report.md.
+		return stored && existsSync(stored) ? stored : subagentReportPath(agentDir, record.parentSessionId, record.runId);
+	});
+	return { parentText: fromRunText("Report", formatRunLabel(record), capped.text), truncated: capped.truncated };
+}
+
 /** A run's Report as the orchestrator is told of it. */
-const noticeOf = (record: Readonly<SubagentRunRecord>, text: string): ParentNotice => ({
-	parentText: fromRunText("Report", formatRunLabel(record), text),
-	details: buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).details,
-});
+const noticeOf = (
+	agentDir: string,
+	record: Readonly<SubagentRunRecord>,
+	report: { text: string; seq?: number },
+): ParentNotice => {
+	const { parentText, truncated } = reportToParent(agentDir, record, report);
+	return {
+		parentText,
+		details: { ...buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).details, truncated },
+	};
+};
 
 /** Persists each generation of a run and routes its messages; the scheduler it owns decides the transitions. */
 export function createGenerations(deps: GenerationDeps) {
@@ -133,7 +159,7 @@ export function createGenerations(deps: GenerationDeps) {
 					notify: (report) => {
 						const record = scheduler.getRun(runId);
 						if (!record) return;
-						deps.scope.notify(record, noticeOf(record, report.text));
+						deps.scope.notify(record, noticeOf(deps.agentDir(), record, report));
 					},
 					usage: (sessionId, totals) => recordRunSessionUsage(deps.agentDir(), params.record, sessionId, totals),
 					// Kept in the orchestrator's session for the user, who answers in the run's own: it starts no turn.
@@ -179,7 +205,7 @@ export function createGenerations(deps: GenerationDeps) {
 			const lastDeliveredSeq = stored[stored.length - 1].seq;
 			scheduler.markDelivered(run.runId, lastDeliveredSeq);
 			writePersistedRunRecord(agentDir, { ...run, lastDeliveredSeq });
-			for (const report of stored) deps.scope.notify(run, noticeOf(run, report.text));
+			for (const report of stored) deps.scope.notify(run, noticeOf(agentDir, run, report));
 		}
 	};
 

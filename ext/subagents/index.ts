@@ -29,7 +29,7 @@ import {
 	formatAgentRoutingDescriptions,
 } from "./definitions.ts";
 import type { RunEntry } from "./directory.ts";
-import { createGenerations, type ParentNotice } from "./generations.ts";
+import { createGenerations, type ParentNotice, reportToParent } from "./generations.ts";
 import {
 	fromRunText,
 	PARENT_MESSAGE_ADDRESS,
@@ -810,10 +810,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							details,
 							isError: true,
 						};
-					return {
-						content: [{ type: "text", text: fromRunText("Report", formatRunLabel(handle.record), report.text) }],
-						details,
-					};
+					const { parentText, truncated } = reportToParent(resolveAgentDir(), handle.record, report);
+					return { content: [{ type: "text", text: parentText }], details: { ...details, truncated } };
 				}
 
 				// A run delivers its own Reports, after each of its turns.
