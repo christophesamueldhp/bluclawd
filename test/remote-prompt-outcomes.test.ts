@@ -33,6 +33,8 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 	let token: string;
 	/** The registry's clock: moved on to reap a pane. */
 	let clock: number;
+	/** The panes tmux no longer has. */
+	const lost = new Set<string>();
 	const registrations: SelfRegistration[] = [];
 	const streams: AbortController[] = [];
 
@@ -59,7 +61,11 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		dir = await mkdtemp(join(tmpdir(), "bluclawd-outcomes-"));
 		vi.stubEnv("PI_SERVER_DIR", dir);
 		clock = Date.now();
-		supervisor = new ServerSupervisor({ now: () => clock, tmux: paneUp, dir });
+		supervisor = new ServerSupervisor({
+			now: () => clock,
+			tmux: { hasSession: (name) => !lost.has(name), end: () => {} },
+			dir,
+		});
 		server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
 		control = remoteControl();
 		setRemoteControl(control);
@@ -361,6 +367,12 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		await pane.report(true);
 		// No lifetime says which daemon accepted it, so a restart is not inferred.
 		expect(await ask("pane-unaged", [{ id: "p-unaged" }])).toEqual([]);
+	});
+
+	it("is refused once tmux no longer has its pane, as its pi died unseen", async () => {
+		await new OrchestratorClient().register({ id: "pane-dead", pane: "pane-dead", cwd: dir });
+		lost.add("pane-dead");
+		expect(await prompt("pane-dead", { text: "hi", id: "p-dead" })).toBe(409);
 	});
 
 	it("is lost when its pane unregisters with it still queued", async () => {

@@ -83,6 +83,30 @@ describe("send asks tmux whether its pane is still there", () => {
 		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "abort" }]);
 	});
 
+	it("queues for a pane tmux said was gone that beat while it answered, and leaves it live", async () => {
+		up.delete("pi-a");
+		const { sent } = await asking("pi-a");
+		await handleIpcRequest(supervisor, register("pi-a"));
+		held.answer();
+		expect(await sent).toEqual({ type: "ack", ok: true });
+		expect(await listed()).toEqual(["pi-a", "pi-b"]);
+	});
+
+	it("queues messages to one pane in the order sent, whichever of tmux's answers comes first", async () => {
+		const answers: (() => void)[] = [];
+		held.tmux.hasSessionAsync = () => new Promise((resolve) => answers.push(() => resolve(true)));
+		const prompt = (text: string) => ({ type: "prompt", text }) as const;
+		const sent = ["first", "second"].map((text) =>
+			handleIpcRequest(supervisor, { type: "send", instanceId: "pi-a", message: prompt(text) }),
+		);
+		await waitFor(() => expect(answers).toHaveLength(2));
+		answers[1]();
+		await new Promise((resolve) => setImmediate(resolve));
+		answers[0]();
+		await Promise.all(sent);
+		expect(supervisor.drainExternal("pi-a")).toEqual([prompt("first"), prompt("second")]);
+	});
+
 	it("wakes the pane's wait once it is queued", async () => {
 		const wait = handleIpcRequest(supervisor, { type: "wait", instanceId: "pi-a" });
 		const { sent } = await asking("pi-a");
