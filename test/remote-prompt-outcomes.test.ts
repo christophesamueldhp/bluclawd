@@ -50,7 +50,7 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 			startFailed: () => {},
 			delivery: supervisor.delivery,
 			// A terminal shows pi, so the phone may prompt.
-			tmux: { attached: () => true } as unknown as Tmux,
+			tmux: { attached: () => true, attachedAsync: async () => true } as unknown as Tmux,
 			webDir: dir,
 		});
 	}

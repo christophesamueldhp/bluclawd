@@ -29,8 +29,10 @@ const NOTIFY_INTERVAL_MS = 1000;
 const PUSH_SUBJECT = "https://github.com/christophesamueldhp/bluclawd";
 /** Each tmux command is a quick round-trip to the server: a hung one must not hold up the daemon. */
 export const TMUX_TIMEOUT_MS = 2000;
-/** How long whether a terminal shows pi is taken as known. */
-const TERMINAL_CHECK_MS = 1500;
+/** Whether a terminal shows pi, answered longer ago than this, is asked again in the background. */
+const TERMINAL_REFRESH_MS = 1500;
+/** An answer older than this, with none asked since, is too old to go by: it is asked as at first. */
+const TERMINAL_KEPT_MS = 5000;
 /** A list finding its probe landed longer ago than this asks tmux again; the phone's timers list every second. */
 const PROBE_REFRESH_MS = 1000;
 /** A probe landed longer ago than this, with none asked since, is too old to reap with: nothing listed
@@ -73,8 +75,9 @@ export class RemoteControl {
 	/** Panes started from the phone that have not registered yet, by tmux session name. */
 	private readonly starting = new Map<string, ReturnType<typeof setTimeout>>();
 	private server: RemoteServer | undefined;
-	/** Whether a terminal shows pi, as last asked of tmux: the phone's stream asks every second. */
-	private terminal: { open: boolean; at: number } | undefined;
+	/** Whether a terminal shows pi, as tmux last answered, and when. Kept only while the listener is on. */
+	private terminal: { open: boolean; landedAt: number } | undefined;
+	private askingTerminal = false;
 	/** The configured port the running server was started for. */
 	private serverPort: number | undefined;
 	private listenError: string | undefined;
@@ -127,12 +130,28 @@ export class RemoteControl {
 		}
 	}
 
+	/** From tmux's latest answer, kept fresh in the background as `list`'s probe is. */
 	private terminalOpen(): boolean {
-		const now = Date.now();
-		if (!this.terminal || now - this.terminal.at >= TERMINAL_CHECK_MS) {
-			this.terminal = { open: this.tmux.attached(), at: now };
-		}
+		const age = this.terminal ? Date.now() - this.terminal.landedAt : Number.POSITIVE_INFINITY;
+		// While one is out, the latest answer stands: a blocking ask would wait on the same tmux.
+		if (!this.terminal || (!this.askingTerminal && age > TERMINAL_KEPT_MS)) {
+			this.terminal = { open: this.tmux.attached(), landedAt: Date.now() };
+		} else if (this.server && !this.askingTerminal && age >= TERMINAL_REFRESH_MS) this.askTerminal();
 		return this.terminal.open;
+	}
+
+	private askTerminal(): void {
+		const server = this.server;
+		this.askingTerminal = true;
+		this.tmux
+			.attachedAsync()
+			.then((open) => {
+				// One asked before the listener went off or restarted is not kept.
+				if (this.server === server) this.terminal = { open, landedAt: Date.now() };
+			})
+			.finally(() => {
+				this.askingTerminal = false;
+			});
 	}
 
 	/** A pane registered: one the phone started is up. */
@@ -287,6 +306,7 @@ export class RemoteControl {
 		clearInterval(this.notifyTimer);
 		this.notifyTimer = undefined;
 		this.latest = undefined;
+		this.terminal = undefined;
 		this.notifier = undefined;
 		await server?.close();
 	}
