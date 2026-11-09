@@ -118,7 +118,7 @@ describe("A run's generations", () => {
 		expect(noticeDetails().map((details) => details.truncated)).toEqual([true, false]);
 	});
 
-	it("tells the orchestrator only the end of a Report over 50 KB", async () => {
+	it("tells the orchestrator only the end of a Report over 50 KB, and where its full text is", async () => {
 		const { launch, report, notices } = setup();
 		const backend = launch("backend", "Build the API.");
 		const lines = Array.from({ length: 100 }, (_, i) => `${i + 1} ${"x".repeat(1000)}`);

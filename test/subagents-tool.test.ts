@@ -188,7 +188,7 @@ describe("The subagent tool", () => {
 		await turn;
 
 		const scout = toolResultText(t.session, "call_scout");
-		const runId = scout.text.match(/sub_[0-9a-f-]{36}/)?.[0] ?? "";
+		const { runId } = scout.result?.details as { runId: string };
 		const reportFile = subagentReportPath(t.agentDir, t.session.sessionId, runId);
 		expect(scout.text).toMatch(/\n\nline 501\n/);
 		expect(scout.text).not.toMatch(/\nline 500\n/);
