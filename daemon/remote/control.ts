@@ -33,10 +33,9 @@ export const TMUX_TIMEOUT_MS = 2000;
 const TERMINAL_CHECK_MS = 1500;
 /** A list finding its probe landed longer ago than this asks tmux again; the phone's timers list every second. */
 const PROBE_REFRESH_MS = 1000;
-/** How long after it landed a probe is listed with, past which a list asks as an unprobed one does
- *  (the phone was away). While tmux does not answer, the next lands a refresh and TMUX_TIMEOUT_MS
- *  later, or later still while a blocking call holds the daemon: twice that leaves room. */
-const PROBE_KEPT_MS = (PROBE_REFRESH_MS + TMUX_TIMEOUT_MS) * 2;
+/** A probe landed longer ago than this, with none asked since, is too old to reap with: nothing listed
+ *  meanwhile (the phone was away), so a list asks as an unprobed one does. */
+const PROBE_KEPT_MS = 5000;
 
 export interface RemoteControlDeps {
 	/** Every row, with tmux's answers from `probe` where it has them. */
@@ -191,10 +190,10 @@ export class RemoteControl {
 	/** Every row, reaped with tmux's answers kept fresh in the background while the listener is on, so
 	 *  the phone's lists do not block the daemon on tmux. Rows themselves are never kept. */
 	private list(): InstanceSummary[] {
-		// Aged from when it landed, not when it was asked: a probe landing after a list that blocked
-		// on a hung tmux is the freshest there is, and must not send the next list blocking too.
+		// While the next probe is out, a blocking call would ask the same tmux it waits on: the latest
+		// is listed with, however long a blocking call held the daemon since it landed.
 		const age = this.latest ? Date.now() - this.latest.landedAt : Number.POSITIVE_INFINITY;
-		const kept = age <= PROBE_KEPT_MS ? this.latest?.probe : undefined;
+		const kept = this.probing || age <= PROBE_KEPT_MS ? this.latest?.probe : undefined;
 		if (this.server && !this.probing && age >= PROBE_REFRESH_MS) this.refreshProbe();
 		return this.deps.listInstances(kept);
 	}

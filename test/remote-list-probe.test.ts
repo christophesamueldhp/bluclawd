@@ -128,6 +128,22 @@ describe("remote control's list", () => {
 		expect(held.blocking).toEqual([]);
 	});
 
+	it("lists from its latest probe while the next is out, however long a blocking call held the daemon", async () => {
+		up.add("pi-a");
+		await handleIpcRequest(supervisor, register("pi-a"));
+		now += 16_000;
+		await sessions();
+		await land();
+		held.blocking.length = 0;
+		vi.setSystemTime(Date.now() + 1500);
+		await sessions();
+		expect(held.pending.size).toBe(1);
+		// A send blocked on a hung tmux, and the overdue list runs before the probe's answer does.
+		vi.setSystemTime(Date.now() + 10_000);
+		expect(await sessions()).toMatchObject([{ id: "pi-a", silent: true }]);
+		expect(held.blocking).toEqual([]);
+	});
+
 	it("lists from its probes again after a list that went without one blocked on a hung tmux", async () => {
 		for (const id of ["pi-a", "pi-b", "pi-c"]) {
 			up.add(id);
