@@ -1198,7 +1198,7 @@ describe("daemon: pane registrations", () => {
 		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("pi-a", "2026-01-01T00:00:00Z"), "idle", 1000);
 		supervisor.setInstanceMeta("pi-a", { pinned: true });
-		expect(supervisor.sendExternal("pi-a", { type: "abort" })).toBe(true);
+		expect(await supervisor.sendExternal("pi-a", { type: "abort" })).toBe(true);
 		supervisor.registerExternal(rec("pi-a", "2026-06-01T00:00:00Z"), "idle", 2000);
 		const [entry] = supervisor.listExternalInstances(2000);
 		expect(entry.record).toMatchObject({ createdAt: "2026-01-01T00:00:00Z", pinned: true, pane: "pi-a" });
@@ -1206,15 +1206,15 @@ describe("daemon: pane registrations", () => {
 		expect(supervisor.drainExternal("pi-a")).toEqual([]);
 		expect(await supervisor.deleteInstance("pi-a")).toBe(true);
 		expect(supervisor.listExternalInstances(2000)).toEqual([]);
-		expect(supervisor.sendExternal("pi-a", { type: "abort" })).toBe(false);
+		expect(await supervisor.sendExternal("pi-a", { type: "abort" })).toBe(false);
 	});
 
-	it("delivers everything queued, in order, in one drain", () => {
+	it("delivers everything queued, in order, in one drain", async () => {
 		const supervisor = testRegistry();
 		supervisor.registerExternal(rec("pi-a", "2026-01-01T00:00:00Z"), "idle");
-		supervisor.sendExternal("pi-a", { type: "rename", name: "x" });
-		supervisor.sendExternal("pi-a", { type: "prompt", text: "first" });
-		supervisor.sendExternal("pi-a", { type: "abort" });
+		await supervisor.sendExternal("pi-a", { type: "rename", name: "x" });
+		await supervisor.sendExternal("pi-a", { type: "prompt", text: "first" });
+		await supervisor.sendExternal("pi-a", { type: "abort" });
 		expect(supervisor.drainExternal("pi-a")).toEqual([
 			{ type: "rename", name: "x" },
 			{ type: "prompt", text: "first" },

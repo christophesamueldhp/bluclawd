@@ -69,7 +69,7 @@ describe("PWA icons", () => {
 					store: new RemoteStore(join(dir, "remote.json")),
 					webDir: WEB_DIR,
 					listInstances: () => [],
-					send: () => false,
+					send: async () => false,
 					launch: () => undefined,
 					startSession: () => "",
 					claimStart: () => ({ ok: false, refused: "running" }),

@@ -26,7 +26,7 @@ function remoteFor(dir: string, supervisor: ServerSupervisor, extra: Partial<Rem
 		delivery: supervisor.delivery,
 		listInstances: (probe) => listSummaries(supervisor, probe),
 		probeForList: () => supervisor.probeForList(),
-		send: () => true,
+		send: async () => true,
 		deleteInstance: (id) => supervisor.deleteInstance(id),
 		renameInstance: (id, name) => supervisor.renameInstance(id, name) !== undefined,
 		setPinned: (id, pinned) => supervisor.setInstanceMeta(id, { pinned }) !== undefined,

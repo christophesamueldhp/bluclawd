@@ -89,20 +89,20 @@ function fixture() {
 
 type Fixture = ReturnType<typeof fixture>;
 
-const states: Record<string, (f: Fixture) => void> = {
+const states: Record<string, (f: Fixture) => void | Promise<void>> = {
 	stored: () => {},
 	starting: (f) => {
 		f.supervisor.claimStart({ cwd: f.dir, sessionFile: f.file });
 	},
 	/** `p-given` taken by its pane's heartbeat, and `p-inbox` still in its inbox. */
-	live: (f) => {
+	live: async (f) => {
 		f.beat();
-		f.supervisor.sendExternal(ROW, { type: "prompt", text: "given", id: "p-given" });
+		await f.supervisor.sendExternal(ROW, { type: "prompt", text: "given", id: "p-given" });
 		f.supervisor.drainExternal("pi-a");
-		f.supervisor.sendExternal(ROW, { type: "prompt", text: "inbox", id: "p-inbox" });
+		await f.supervisor.sendExternal(ROW, { type: "prompt", text: "inbox", id: "p-inbox" });
 	},
-	silent: (f) => {
-		states.live(f);
+	silent: async (f) => {
+		await states.live(f);
 		f.lapse();
 	},
 };
@@ -161,34 +161,34 @@ describe("a row's state by event, as every reader lists it", () => {
 			[{ ...silent, pinned: true }],
 			held("sent", "lost"),
 		],
-	])("%s, then %s", (from, _, event, rows, outcomes = []) => {
+	])("%s, then %s", async (from, _, event, rows, outcomes = []) => {
 		const f = fixture();
-		states[from](f);
+		await states[from](f);
 		event(f);
 		expect(f.listed()).toEqual(rows);
 		expect(f.outcomes()).toEqual(outcomes);
 	});
 
-	it.each(["live", "silent"])("a %s row takes a message only while live", (from) => {
+	it.each(["live", "silent"])("a %s row takes a message only while live", async (from) => {
 		const f = fixture();
-		states[from](f);
-		expect(f.supervisor.sendExternal(ROW, { type: "abort" })).toBe(from === "live");
+		await states[from](f);
+		expect(await f.supervisor.sendExternal(ROW, { type: "abort" })).toBe(from === "live");
 	});
 
-	it("a live row whose pane died within its TTL does not take a message, and is stopped", () => {
+	it("a live row whose pane died within its TTL does not take a message, and is stopped", async () => {
 		const f = fixture();
-		states.live(f);
+		await states.live(f);
 		f.pass(0, "gone");
-		expect(f.supervisor.sendExternal(ROW, { type: "prompt", text: "new", id: "p-new" })).toBe(false);
+		expect(await f.supervisor.sendExternal(ROW, { type: "prompt", text: "new", id: "p-new" })).toBe(false);
 		expect(f.listed()).toEqual([stored]);
 		expect(f.outcomes()).toEqual(held("lost", "lost"));
 	});
 
-	it("a live row takes a message while tmux could not say whether its pane is up", () => {
+	it("a live row takes a message while tmux could not say whether its pane is up", async () => {
 		const f = fixture();
-		states.live(f);
+		await states.live(f);
 		f.pass(0, "unknown");
-		expect(f.supervisor.sendExternal(ROW, { type: "abort" })).toBe(true);
+		expect(await f.supervisor.sendExternal(ROW, { type: "abort" })).toBe(true);
 		expect(f.supervisor.drainExternal("pi-a")).toEqual([
 			{ type: "prompt", text: "inbox", id: "p-inbox" },
 			{ type: "abort" },
@@ -199,9 +199,9 @@ describe("a row's state by event, as every reader lists it", () => {
 		["starting", "starting"],
 		["live", "running"],
 		["silent", "running"],
-	])("a %s row refuses a start on its file", (from, refused) => {
+	])("a %s row refuses a start on its file", async (from, refused) => {
 		const f = fixture();
-		states[from](f);
+		await states[from](f);
 		expect(f.supervisor.claimStart({ cwd: f.dir, sessionFile: f.file })).toEqual({ ok: false, refused });
 	});
 
@@ -261,9 +261,9 @@ describe("a row's state by event, as every reader lists it", () => {
 		expect(rows().filter((r) => r.sessionFile === f.file)).toEqual([]);
 	});
 
-	it("a Silent pane another pane went on as its row is listed no more, and ends without stopping that row", () => {
+	it("a Silent pane another pane went on as its row is listed no more, and ends without stopping that row", async () => {
 		const f = fixture();
-		states.silent(f);
+		await states.silent(f);
 		f.supervisor.registerExternal(
 			{ id: "pi-b", status: "online", cwd: f.dir, createdAt, sessionFile: f.file, pane: "pi-b" },
 			"idle",
@@ -273,14 +273,14 @@ describe("a row's state by event, as every reader lists it", () => {
 		f.tmux.set("pi-a", "gone");
 		expect(f.listed()).toEqual([live]);
 		expect(f.outcomes()).toEqual(held("lost", "lost"));
-		expect(f.supervisor.sendExternal(ROW, { type: "abort" })).toBe(true);
+		expect(await f.supervisor.sendExternal(ROW, { type: "abort" })).toBe(true);
 		expect(f.supervisor.drainExternal("pi-b")).toEqual([{ type: "abort" }]);
 	});
 
-	it("a start claimed past a live pane's TTL, before any list, leaves that pane its row and its inbox", () => {
+	it("a start claimed past a live pane's TTL, before any list, leaves that pane its row and its inbox", async () => {
 		const f = fixture();
-		states.live(f);
-		f.supervisor.sendExternal(ROW, { type: "abort" });
+		await states.live(f);
+		await f.supervisor.sendExternal(ROW, { type: "abort" });
 		f.pass(20_000);
 		expect(f.supervisor.claimStart({ cwd: f.dir, sessionFile: f.file })).toMatchObject({ ok: true });
 		expect(f.supervisor.drainExternal("pi-a")).toEqual([
@@ -292,9 +292,9 @@ describe("a row's state by event, as every reader lists it", () => {
 		expect(f.outcomes()).toEqual(held("sent", "sent"));
 	});
 
-	it("a pane a start claimed the row for, past its live pane's TTL, takes that row's inbox", () => {
+	it("a pane a start claimed the row for, past its live pane's TTL, takes that row's inbox", async () => {
 		const f = fixture();
-		states.live(f);
+		await states.live(f);
 		f.pass(20_000);
 		f.supervisor.claimStart({ cwd: f.dir, sessionFile: f.file });
 		f.supervisor.registerExternal(
@@ -305,9 +305,9 @@ describe("a row's state by event, as every reader lists it", () => {
 		expect(f.outcomes()).toEqual(held("sent", "sent"));
 	});
 
-	it("a row deleted while silent stays deleted once its pane ends and its hand-off saves", () => {
+	it("a row deleted while silent stays deleted once its pane ends and its hand-off saves", async () => {
 		const f = fixture();
-		states.silent(f);
+		await states.silent(f);
 		f.supervisor.deleteInstance(ROW);
 		f.supervisor.unregisterExternal("pi-a", "quit");
 		f.tmux.set("pi-a", "gone");
@@ -317,9 +317,9 @@ describe("a row's state by event, as every reader lists it", () => {
 });
 
 describe("a deleted row does not come back by itself", () => {
-	it("a pane dropped while tmux could not answer, then deleted, is ended at its next heartbeat and not listed", () => {
+	it("a pane dropped while tmux could not answer, then deleted, is ended at its next heartbeat and not listed", async () => {
 		const f = fixture();
-		states.live(f);
+		await states.live(f);
 		f.lapse("unknown");
 		f.supervisor.deleteInstance(ROW);
 		f.beat();
@@ -332,9 +332,9 @@ describe("a deleted row does not come back by itself", () => {
 		expect(f.ended).toEqual(["pi-a", "pi-a"]);
 	});
 
-	it("a pane dropped while tmux could not answer, gone on to a new session, is not ended when its old row is deleted", () => {
+	it("a pane dropped while tmux could not answer, gone on to a new session, is not ended when its old row is deleted", async () => {
 		const f = fixture();
-		states.live(f);
+		await states.live(f);
 		f.lapse("unknown");
 		f.beat(f.other);
 		f.supervisor.deleteInstance(ROW);
@@ -343,9 +343,9 @@ describe("a deleted row does not come back by itself", () => {
 		expect(f.supervisor.listExternalInstances().map(({ record }) => record.sessionFile)).toEqual([f.other]);
 	});
 
-	it("a deleted pane gone on to a new session before it heard is ended, and its hand-off save lists nothing", () => {
+	it("a deleted pane gone on to a new session before it heard is ended, and its hand-off save lists nothing", async () => {
 		const f = fixture();
-		states.live(f);
+		await states.live(f);
 		f.supervisor.deleteInstance(ROW);
 		f.beat(f.other);
 		expect(f.ended).toEqual(["pi-a"]);
@@ -353,9 +353,9 @@ describe("a deleted row does not come back by itself", () => {
 		expect(listSummaries(f.supervisor)).toEqual([]);
 	});
 
-	it("a row deleted before its quit's hand-off saves stays deleted across a daemon restart", () => {
+	it("a row deleted before its quit's hand-off saves stays deleted across a daemon restart", async () => {
 		const f = fixture();
-		states.live(f);
+		await states.live(f);
 		f.supervisor.unregisterExternal("pi-a", "quit");
 		f.supervisor.deleteInstance(ROW);
 		f.restart();
@@ -378,9 +378,9 @@ describe("a deleted row does not come back by itself", () => {
 		expect(f.ended).toEqual([]);
 	});
 
-	it("a deleted pane beating after a daemon restart is still ended, not listed", () => {
+	it("a deleted pane beating after a daemon restart is still ended, not listed", async () => {
 		const f = fixture();
-		states.live(f);
+		await states.live(f);
 		f.supervisor.deleteInstance(ROW);
 		f.restart();
 		f.beat();
@@ -388,11 +388,11 @@ describe("a deleted row does not come back by itself", () => {
 		expect(f.ended).toEqual(["pi-a"]);
 	});
 
-	it("a deleted row is kept so while tmux may have its pane, then for a late hand-off save", () => {
+	it("a deleted row is kept so while tmux may have its pane, then for a late hand-off save", async () => {
 		/** Deleted, its pane then gone from tmux, `ms` later its hand-off saves. */
-		const saveAfter = (ms: number) => {
+		const saveAfter = async (ms: number) => {
 			const f = fixture();
-			states.live(f);
+			await states.live(f);
 			f.supervisor.deleteInstance(ROW);
 			f.lapse("unknown");
 			f.pass(3_600_000, "up");
@@ -403,9 +403,9 @@ describe("a deleted row does not come back by itself", () => {
 			listSummaries(f.supervisor);
 			return f.supervisor.saveInstance({ cwd: f.dir, sessionFile: f.file });
 		};
-		expect(saveAfter(START_MS - 25_000)).toBeUndefined();
+		expect(await saveAfter(START_MS - 25_000)).toBeUndefined();
 		// Its record has gone by then: a save so late is a new session's.
-		expect(saveAfter(START_MS + 1)).toMatchObject({ status: "stopped" });
+		expect(await saveAfter(START_MS + 1)).toMatchObject({ status: "stopped" });
 	});
 });
 
@@ -428,10 +428,10 @@ describe("listing in either order gives the same rows", () => {
 		["live", "TTL lapse, tmux could not answer", (f) => f.pass(20_000, "unknown")],
 		["silent", "tmux no longer has it", (f) => f.pass(0, "gone")],
 		["starting", "its start expired", (f) => f.pass(START_MS + 1)],
-	])("%s, then %s", (from, _, event) => {
+	])("%s, then %s", async (from, _, event) => {
 		const [storedFirst, panesFirst] = [fixture(), fixture()];
 		for (const f of [storedFirst, panesFirst]) {
-			states[from](f);
+			await states[from](f);
 			event(f);
 		}
 		expect(both(storedFirst, false)).toEqual(both(panesFirst, true));

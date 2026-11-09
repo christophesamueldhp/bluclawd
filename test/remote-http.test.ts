@@ -84,7 +84,7 @@ describe("remote HTTP API", () => {
 				store,
 				webDir: web,
 				listInstances: () => instances,
-				send: (id, message) => {
+				send: async (id, message) => {
 					sent.push({ id, message });
 					return true;
 				},

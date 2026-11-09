@@ -472,12 +472,16 @@ export class ServerSupervisor {
 
 	/** Queue a message for a self-registered session, by its pane's id or its row's; false when no
 	 *  live pane is registered as either, or tmux no longer has that pane, which then ends: its pi
-	 *  died unseen within its TTL, so nothing would take the message. */
-	sendExternal(id: string, message: PaneMessage): boolean {
+	 *  died unseen within its TTL, so nothing would take the message. tmux is asked without blocking. */
+	async sendExternal(id: string, message: PaneMessage): Promise<boolean> {
+		const asked = this.addressed(id);
+		if (!asked || !this.isLive(asked)) return false;
+		const { pane } = asked.pane.record;
+		const answer = pane && (await this.tmuxSaysAsync(pane));
+		// Its pane may have beaten, ended or been replaced meanwhile: only the same pi, still live, is meant.
 		const at = this.addressed(id);
-		if (!at || !this.isLive(at)) return false;
-		const { pane } = at.pane.record;
-		if (pane && this.tmuxSays(pane) === "gone") {
+		if (!at || !this.isLive(at) || at.pane.record.id !== asked.pane.record.id) return false;
+		if (answer === "gone") {
 			this.paneEnded(at);
 			return false;
 		}
@@ -619,18 +623,20 @@ export class ServerSupervisor {
 		for (const { parent } of loadInstances(this.deps.dir)) {
 			if (parent && !registered.has(parent)) names.add(parent);
 		}
-		const { tmux } = this.deps;
 		const answers = await Promise.all(
-			[...names].map(async (name): Promise<[string, TmuxAnswer]> => {
-				try {
-					const up = tmux.hasSessionAsync ? await tmux.hasSessionAsync(name) : tmux.hasSession(name);
-					return [name, up ? "up" : "gone"];
-				} catch {
-					return [name, "unknown"];
-				}
-			}),
+			[...names].map(async (name): Promise<[string, TmuxAnswer]> => [name, await this.tmuxSaysAsync(name)]),
 		);
 		return { now, said: new Map(answers) };
+	}
+
+	/** {@link tmuxSays}, asked without blocking. */
+	private async tmuxSaysAsync(pane: string): Promise<TmuxAnswer> {
+		const { tmux } = this.deps;
+		try {
+			return (tmux.hasSessionAsync ? await tmux.hasSessionAsync(pane) : tmux.hasSession(pane)) ? "up" : "gone";
+		} catch {
+			return "unknown";
+		}
 	}
 
 	/** Row `id`'s entry, a stored one if it had none. */

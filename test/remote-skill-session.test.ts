@@ -109,7 +109,7 @@ async function chat() {
 			],
 			report,
 			outcomes: () => report().outcomes,
-			send: (_id, message) => {
+			send: async (_id, message) => {
 				transported.push(message);
 				extension.events.emit("bluclawd:pane-message", message);
 				return true;

@@ -213,7 +213,7 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 					}
 					return undefined;
 				},
-				send: (sessionId, msg) => {
+				send: async (sessionId, msg) => {
 					if (msg.type === "stop_task") {
 						stopCalls.push({ sessionId, taskId: msg.id });
 						return true;
