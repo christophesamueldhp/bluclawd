@@ -31,11 +31,11 @@ const PUSH_SUBJECT = "https://github.com/christophesamueldhp/bluclawd";
 export const TMUX_TIMEOUT_MS = 2000;
 /** How long whether a terminal shows pi is taken as known. */
 const TERMINAL_CHECK_MS = 1500;
-/** A list finding its probe older than this asks tmux again; the phone's timers list every second. */
+/** A list finding its probe landed longer ago than this asks tmux again; the phone's timers list every second. */
 const PROBE_REFRESH_MS = 1000;
-/** How long a probe is listed with, past which a list asks as an unprobed one does. While tmux does
- *  not answer, a probe takes TMUX_TIMEOUT_MS and the next is asked up to a refresh after it lands, so
- *  one is listed with for up to twice both until the next lands. */
+/** How long after it landed a probe is listed with, past which a list asks as an unprobed one does
+ *  (the phone was away). While tmux does not answer, the next lands a refresh and TMUX_TIMEOUT_MS
+ *  later, or later still while a blocking call holds the daemon: twice that leaves room. */
 const PROBE_KEPT_MS = (PROBE_REFRESH_MS + TMUX_TIMEOUT_MS) * 2;
 
 export interface RemoteControlDeps {
@@ -82,8 +82,8 @@ export class RemoteControl {
 	/** Serialises apply and stop, so overlapping switches cannot start two servers. */
 	private queue: Promise<void> = Promise.resolve();
 	private notifyTimer: ReturnType<typeof setInterval> | undefined;
-	/** The latest list probe, and when it was asked: kept only while the listener is on. */
-	private latest: { askedAt: number; probe: ListProbe } | undefined;
+	/** The latest list probe, and when it landed: kept only while the listener is on. */
+	private latest: { landedAt: number; probe: ListProbe } | undefined;
 	private probing = false;
 	/** Only while some device is subscribed, so a change nobody was subscribed for is never sent late. */
 	private notifier: Notifier | undefined;
@@ -191,7 +191,9 @@ export class RemoteControl {
 	/** Every row, reaped with tmux's answers kept fresh in the background while the listener is on, so
 	 *  the phone's lists do not block the daemon on tmux. Rows themselves are never kept. */
 	private list(): InstanceSummary[] {
-		const age = this.latest ? Date.now() - this.latest.askedAt : Number.POSITIVE_INFINITY;
+		// Aged from when it landed, not when it was asked: a probe landing after a list that blocked
+		// on a hung tmux is the freshest there is, and must not send the next list blocking too.
+		const age = this.latest ? Date.now() - this.latest.landedAt : Number.POSITIVE_INFINITY;
 		const kept = age <= PROBE_KEPT_MS ? this.latest?.probe : undefined;
 		if (this.server && !this.probing && age >= PROBE_REFRESH_MS) this.refreshProbe();
 		return this.deps.listInstances(kept);
@@ -201,12 +203,11 @@ export class RemoteControl {
 		const { probeForList } = this.deps;
 		if (!probeForList) return;
 		const server = this.server;
-		const askedAt = Date.now();
 		this.probing = true;
 		probeForList()
 			.then((probe) => {
 				// One asked before the listener went off or restarted is not kept.
-				if (this.server === server) this.latest = { askedAt, probe };
+				if (this.server === server) this.latest = { landedAt: Date.now(), probe };
 			})
 			// Unhandled, it would shut the daemon down; the next list asks again.
 			.catch(() => undefined)

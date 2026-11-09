@@ -81,6 +81,12 @@ describe("remote control's list", () => {
 		rmSync(dir, { recursive: true, force: true });
 	});
 
+	/** tmux answers the probe out, and it lands. */
+	const land = async () => {
+		held.answer();
+		await new Promise((resolve) => setImmediate(resolve));
+	};
+
 	it("lists Silent panes from the kept probe: no blocking call, and no wait on a probe tmux holds", async () => {
 		up.add("pi-a");
 		await handleIpcRequest(supervisor, register("pi-a"));
@@ -88,8 +94,7 @@ describe("remote control's list", () => {
 		// The first list has no probe yet: it asks as an unprobed list does, and starts one.
 		await sessions();
 		await waitFor(() => expect([...held.pending.keys()]).toEqual(["pi-a"]));
-		held.answer();
-		await waitFor(() => expect(held.pending.size).toBe(0));
+		await land();
 
 		held.blocking.length = 0;
 		vi.setSystemTime(Date.now() + 1500);
@@ -106,8 +111,7 @@ describe("remote control's list", () => {
 		await handleIpcRequest(supervisor, register("pi-a"));
 		now += 16_000;
 		await sessions();
-		held.answer();
-		await waitFor(() => expect(held.pending.size).toBe(0));
+		await land();
 		held.blocking.length = 0;
 		// A list a second, as the phone's timers do; tmux answers each probe TMUX_TIMEOUT_MS after it
 		// was asked, just after that second's list.
@@ -117,10 +121,37 @@ describe("remote control's list", () => {
 			expect(await sessions()).toMatchObject([{ id: "pi-a", silent: true }]);
 			askedAt ??= held.pending.size ? Date.now() : undefined;
 			if (askedAt !== undefined && Date.now() - askedAt >= TMUX_TIMEOUT_MS) {
-				held.answer();
-				await waitFor(() => expect(held.pending.size).toBe(0));
+				await land();
 				askedAt = undefined;
 			}
+		}
+		expect(held.blocking).toEqual([]);
+	});
+
+	it("lists from its probes again after a list that went without one blocked on a hung tmux", async () => {
+		for (const id of ["pi-a", "pi-b", "pi-c"]) {
+			up.add(id);
+			await handleIpcRequest(supervisor, register(id));
+		}
+		now += 16_000;
+		await sessions();
+		await land();
+		// tmux hangs: each blocking call takes its whole timeout.
+		const { hasSession } = held.tmux;
+		held.tmux.hasSession = (name) => {
+			vi.setSystemTime(Date.now() + TMUX_TIMEOUT_MS);
+			return hasSession(name);
+		};
+		// The phone was away: its first list has no fresh probe, so it blocks, and asks for one.
+		vi.setSystemTime(Date.now() + 60_000);
+		await sessions();
+		await land();
+
+		held.blocking.length = 0;
+		for (let second = 0; second < 3; second++) {
+			vi.setSystemTime(Date.now() + 1000);
+			expect(await sessions()).toHaveLength(3);
+			await land();
 		}
 		expect(held.blocking).toEqual([]);
 	});
@@ -128,8 +159,7 @@ describe("remote control's list", () => {
 	/** A list that starts a probe, which tmux answers before the next list. */
 	const warm = async () => {
 		await sessions();
-		held.answer();
-		await waitFor(() => expect(held.pending.size).toBe(0));
+		await land();
 		await sessions();
 	};
 
@@ -161,8 +191,7 @@ describe("remote control's list", () => {
 		// The probe out asks about the Silent pane: tmux says gone, but the pane beats again first.
 		up.delete("pi-a");
 		await handleIpcRequest(supervisor, register("pi-a"));
-		held.answer();
-		await waitFor(() => expect(held.pending.size).toBe(0));
+		await land();
 
 		expect(await sessions()).toMatchObject([{ id: "pi-a", alive: true }]);
 		expect((await sessions())[0]).not.toHaveProperty("silent");
