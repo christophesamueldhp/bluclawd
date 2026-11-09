@@ -14,7 +14,7 @@ import type {
 	RemoteRequest,
 	RemoteResponse,
 } from "../ipc/protocol.ts";
-import { START_MS } from "../supervisor.ts";
+import { type ListProbe, START_MS } from "../supervisor.ts";
 import { Tmux } from "../tmux.ts";
 import type { PromptDelivery } from "./delivery.ts";
 import { type RemoteDeps, type RemoteServer, startRemoteServer } from "./http.ts";
@@ -31,9 +31,18 @@ const PUSH_SUBJECT = "https://github.com/christophesamueldhp/bluclawd";
 export const TMUX_TIMEOUT_MS = 2000;
 /** How long whether a terminal shows pi is taken as known. */
 const TERMINAL_CHECK_MS = 1500;
+/** A list probe older than this is asked again; the phone's timers list every second. */
+const PROBE_MS = 1000;
+/** How long a list probe is listed with, past which a list asks as an unprobed one does: long enough
+ *  for the next probe to wait out a tmux that does not answer, short enough that reaping as of its
+ *  `now` is barely late. */
+const PROBE_KEPT_MS = PROBE_MS * 2 + TMUX_TIMEOUT_MS;
 
 export interface RemoteControlDeps {
-	listInstances(): InstanceSummary[];
+	/** Every row, with tmux's answers from `probe` where it has them. */
+	listInstances(probe?: ListProbe): InstanceSummary[];
+	/** tmux's answers for a list, asked without blocking: remote control lists with the latest. */
+	probeForList?(): Promise<ListProbe>;
 	send(sessionId: string, message: PaneMessage): boolean;
 	deleteInstance(sessionId: string): boolean;
 	renameInstance: RemoteDeps["renameInstance"];
@@ -73,6 +82,9 @@ export class RemoteControl {
 	/** Serialises apply and stop, so overlapping switches cannot start two servers. */
 	private queue: Promise<void> = Promise.resolve();
 	private notifyTimer: ReturnType<typeof setInterval> | undefined;
+	/** The latest list probe, and when it was asked: kept only while the listener is on. */
+	private probe: { at: number; answers: ListProbe } | undefined;
+	private probing = false;
 	/** Only while some device is subscribed, so a change nobody was subscribed for is never sent late. */
 	private notifier: Notifier | undefined;
 	private readonly sendPush: (subscription: WebPushSubscription, payload: string) => Promise<PushResult>;
@@ -166,7 +178,7 @@ export class RemoteControl {
 		if (report.outcomes) this.delivery.reported(sessionId, report.outcomes);
 		// A pane that dies without unregistering is only reaped from the list; its first report may
 		// arrive before it is listed, so the sender's own is kept.
-		const live = new Set(this.deps.listInstances().flatMap((i) => (i.external ? [i.id] : [])));
+		const live = new Set(this.list().flatMap((i) => (i.external ? [i.id] : [])));
 		for (const id of this.reports.keys()) if (id !== sessionId && !live.has(id)) this.reports.delete(id);
 		this.reports.set(sessionId, report);
 		this.server?.status(sessionId);
@@ -174,6 +186,32 @@ export class RemoteControl {
 
 	hasReport(sessionId: string): boolean {
 		return this.reports.has(sessionId);
+	}
+
+	/** Every row, reaped with tmux's answers kept fresh in the background while the listener is on, so
+	 *  the phone's lists do not block the daemon on tmux. Rows themselves are never kept. */
+	private list(): InstanceSummary[] {
+		const age = this.probe ? Date.now() - this.probe.at : Number.POSITIVE_INFINITY;
+		const kept = age <= PROBE_KEPT_MS ? this.probe?.answers : undefined;
+		if (this.server && !this.probing && age >= PROBE_MS) this.refreshProbe();
+		return this.deps.listInstances(kept);
+	}
+
+	private refreshProbe(): void {
+		const { probeForList } = this.deps;
+		if (!probeForList) return;
+		const server = this.server;
+		const at = Date.now();
+		this.probing = true;
+		probeForList()
+			.then((answers) => {
+				// One asked before the listener went off or restarted is not kept.
+				if (this.server === server) this.probe = { at, answers };
+			})
+			.catch(() => undefined)
+			.finally(() => {
+				this.probing = false;
+			});
 	}
 
 	launch(): PaneLaunch | undefined {
@@ -203,7 +241,7 @@ export class RemoteControl {
 			this.server = await startRemoteServer(
 				{
 					store: this.store,
-					listInstances: this.deps.listInstances,
+					listInstances: () => this.list(),
 					send: this.deps.send,
 					launch: () => this.launch(),
 					startSession: (spec) => this.startSession(spec),
@@ -247,6 +285,7 @@ export class RemoteControl {
 		this.serverPort = undefined;
 		clearInterval(this.notifyTimer);
 		this.notifyTimer = undefined;
+		this.probe = undefined;
 		this.notifier = undefined;
 		await server?.close();
 	}
@@ -262,7 +301,7 @@ export class RemoteControl {
 				return;
 			}
 			this.notifier ??= new Notifier();
-			const notifications = this.notifier.observe(remoteSessions(this.deps.listInstances()));
+			const notifications = this.notifier.observe(remoteSessions(this.list()));
 			const present = notifications.length ? this.server?.present() : undefined;
 			for (const notification of notifications) {
 				const payload = JSON.stringify(notification);

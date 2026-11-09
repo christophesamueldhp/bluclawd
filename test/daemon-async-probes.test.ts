@@ -5,34 +5,10 @@ import { describe, expect, it } from "vitest";
 import { handleIpcRequest, listSummaries } from "../daemon/handler.ts";
 import type { ErrorResponse, InstanceSummary, ListResponse } from "../daemon/ipc/protocol.ts";
 import { loadDeleted, loadInstances, saveInstances } from "../daemon/storage.ts";
-import type { TmuxProbe } from "../daemon/supervisor.ts";
 import type { InstanceRecord } from "../daemon/types.ts";
+import { heldTmux } from "./helpers/held-tmux.ts";
 import { testRegistry } from "./helpers/registry.ts";
 import { waitFor } from "./helpers/wait-for.ts";
-
-/** A tmux whose has-session answers only when the test says, each pane as `up` has it. */
-function heldTmux(up: Set<string>) {
-	const pending = new Map<string, () => void>();
-	const asked: string[] = [];
-	const tmux: TmuxProbe = {
-		hasSession: (name) => {
-			asked.push(name);
-			return up.has(name);
-		},
-		hasSessionAsync: (name) => {
-			asked.push(name);
-			return new Promise((resolve) => pending.set(name, () => resolve(up.has(name))));
-		},
-		end: () => {},
-	};
-	const answer = () => {
-		for (const [name, resolve] of pending) {
-			pending.delete(name);
-			resolve();
-		}
-	};
-	return { tmux, pending, asked, answer };
-}
 
 /** A list reply's rows. */
 function instancesOf(reply: ListResponse | ErrorResponse): InstanceSummary[] {
