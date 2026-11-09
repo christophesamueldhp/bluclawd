@@ -353,9 +353,10 @@ export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefi
 	pi.on("turn_start", (event, ctx) => void tell(event, ctx));
 	pi.on("ui_prompt_start", (event, ctx) => void tell(event, ctx));
 	pi.on("ui_prompt_end", (event, ctx) => void tell(event, ctx));
-	pi.on("agent_settled", async (event, ctx) => {
-		// Idle before the Report, so the orchestrator it wakes no longer waits for this run.
-		await tell(event, ctx);
+	pi.on("agent_settled", (event, ctx) => {
+		// Idle before the Report, so the orchestrator it wakes no longer waits for this run: in the order sent, not
+		// awaited, as pi waits on this handler and an earlier Report may still be retrying.
+		void tell(event, ctx);
 		if (!pane) return;
 		const last = [...ctx.sessionManager.getBranch()]
 			.reverse()
