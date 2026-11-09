@@ -187,6 +187,26 @@ describe("Delivering a run's Reports", () => {
 		expect(next.notices()).toEqual([expect.stringMatching(/\n\nPagination added\.$/)]);
 	});
 
+	it("adopts an open foreground run into the orchestrator's session reopened after a crash: in the background, told the new pane, its stored Report a notice", async () => {
+		const first = setup();
+		const backend = first.launch("backend", "Build the API.", { deliveryMode: "foreground" });
+		const pane = await first.paneOf(backend);
+		// The orchestrator crashed while the run worked; the run stored its Report, which reached no one.
+		first.storeReport(backend, "API built.");
+
+		const next = setup(first);
+		const { parentSessionId } = next.scope.current()!;
+		next.admission.adopt(readPersistedRunRecord(first.agentDir, parentSessionId, backend.runId)!, next.session);
+		expect(next.generations.scheduler.getRun(backend.runId)?.deliveryMode).toBe("background");
+		expect(next.notices()).toEqual([expect.stringMatching(/\n\nAPI built\.$/)]);
+		await waitFor(() =>
+			expect(next.delivered).toContainEqual({
+				to: pane,
+				message: { type: "session_message", kind: "adopt", from: ORCHESTRATOR_PANE, sessionId: parentSessionId },
+			}),
+		);
+	});
+
 	it("tells the orchestrator's session, reopened, of the Report its closed run stored, once", async () => {
 		const first = setup();
 		const backend = first.launch("backend", "Build the API.");

@@ -194,9 +194,10 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		expect(reloadedCompleted?.status).toBe("completed");
 	});
 
-	it("reconciles a run in tmux its orchestrator never closed as closed, resumable from the session it kept", () => {
+	it("reconciles a run in tmux its orchestrator never closed as closed, resumable from the session it kept, and in the background", () => {
 		const agentDir = makeTempDir("reconcile-tmux");
-		const run = makeRecord({ runId: "sub_tmux_1", status: "running", pane: "pi-run" });
+		// No foreground call waits for it once its orchestrator crashed: a Report it stored comes as a notice.
+		const run = makeRecord({ runId: "sub_tmux_1", status: "running", pane: "pi-run", deliveryMode: "foreground" });
 		writePersistedRunRecord(agentDir, run);
 		const runDir = join(getSubagentsRootDir(agentDir), run.parentSessionId, run.runId);
 		writeFileSync(join(runDir, "a.jsonl"), "");
@@ -212,6 +213,7 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		expect(readPersistedRunRecord(agentDir, run.parentSessionId, run.runId)).toMatchObject({
 			status: "closed",
 			transcriptPath: join(runDir, "b.jsonl"),
+			deliveryMode: "background",
 		});
 	});
 

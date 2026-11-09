@@ -7,7 +7,7 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentActivity } from "../../daemon/activity.ts";
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
@@ -289,9 +289,9 @@ export async function executeTmuxRun(
 /**
  * Inside a run: its task is its first prompt, it tells its orchestrator whenever it starts working, falls
  * idle or waits on a prompt of its own, and each time it settles its last message goes to its orchestrator
- * as a Report.
+ * as a Report. Its orchestrator, `parent()`, is the pane of the session that adopted it last (ADR-0008).
  */
-export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefined): void {
+export function actAsRun(pi: ExtensionAPI, parent: () => string, pane: string | undefined): void {
 	const runDir = process.env[RUN_DIR_ENV];
 	/** Stores a Report before it is sent, numbered; none from a run started before Reports were stored. */
 	const store = (report: Parameters<typeof storeRunReport>[1]) => {
@@ -307,7 +307,11 @@ export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefi
 	let told: AgentActivity | undefined;
 	let sending = Promise.resolve();
 	const tell = (event: { type: string; kind?: string; title?: string }, ctx: ExtensionContext) => {
-		const now = activity.apply(event);
+		activity.apply(event);
+		return tellActivity(ctx);
+	};
+	const tellActivity = (ctx: ExtensionContext) => {
+		const now = activity.current;
 		if (!pane || now === told) return sending;
 		told = now;
 		const message: SessionMessage = {
@@ -316,7 +320,7 @@ export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefi
 			activity: now,
 			...(now === "awaiting_input" && activity.dialog?.title ? { dialog: activity.dialog.title } : {}),
 		};
-		sending = sending.then(() => send(parent, message, ctx));
+		sending = sending.then(() => send(parent(), message, ctx));
 		return sending;
 	};
 
@@ -324,7 +328,14 @@ export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefi
 	pi.events.on("bluclawd:session-message", (data) => {
 		const message = data as SessionMessage;
 		// Only its orchestrator stops its turn.
-		if (message.kind === "stop" && message.from === parent) current?.abort();
+		if (message.kind === "stop" && message.from === parent()) current?.abort();
+		// Its orchestrator's session, reopened in another pane: its run directory is kept under that session's.
+		if (message.kind === "adopt" && runDir && basename(dirname(runDir)) === message.sessionId) {
+			process.env[PARENT_ENV] = message.from;
+			// The adopting session lists the run as it was stored: it is told what the run does now.
+			told = undefined;
+			if (current) void tellActivity(current);
+		}
 	});
 	pi.on("session_start", (_event, ctx) => {
 		current = ctx;
@@ -369,7 +380,7 @@ export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefi
 		};
 		const report: SessionMessage = { ...fromRun(pi, pane), kind: "report", ...content, seq: store(content) };
 		// Not awaited, as pi waits on this handler: the orchestrator reads a Report its retries never got through.
-		sending = sending.then(() => send(parent, report, ctx, REPORT_RETRY_MS));
+		sending = sending.then(() => send(parent(), report, ctx, REPORT_RETRY_MS));
 	});
 }
 

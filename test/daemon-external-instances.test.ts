@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentActivity } from "../daemon/activity.ts";
 import { loadInstances, saveInstances } from "../daemon/storage.ts";
 import type { InstanceRecord } from "../daemon/types.ts";
 import { testRegistry } from "./helpers/registry.ts";
@@ -206,10 +207,10 @@ describe("a run whose orchestrator's pane is gone", () => {
 		const run = { ...rec("pi-r"), pane: "pi-r", parent: "pi-o" };
 		supervisor.registerExternal(orchestrator, "idle");
 		supervisor.registerExternal(run, "idle");
-		/** Time passes with the run beating and the orchestrator not, and a look at the list. */
-		const pass = (ms: number) => {
+		/** Time passes with the run beating as `activity` and the orchestrator not, and a look at the list. */
+		const pass = (ms: number, activity: AgentActivity = "idle") => {
 			now += ms;
-			supervisor.registerExternal(run, "idle");
+			supervisor.registerExternal(run, activity);
 			return supervisor.listExternalInstances().map(({ record, silent }) => ({ id: record.id, silent }));
 		};
 		return { up, ended, pass };
@@ -222,6 +223,24 @@ describe("a run whose orchestrator's pane is gone", () => {
 		// The orchestrator's pi crashed, and its pane went with it.
 		up.delete("pi-o");
 		pass(3000);
+		expect(ended).toEqual(["pi-r"]);
+	});
+
+	it("finishes the turn in flight: a working run is closed at its first heartbeat once it settles", () => {
+		const { up, ended, pass } = fixture();
+		pass(1000, "working");
+		up.delete("pi-o");
+		pass(3000, "working");
+		pass(3000, "working");
+		expect(ended).toEqual([]);
+		pass(3000, "idle");
+		expect(ended).toEqual(["pi-r"]);
+	});
+
+	it("is closed at once when it waits on a dialog: nobody is left to answer it", () => {
+		const { up, ended, pass } = fixture();
+		up.delete("pi-o");
+		pass(3000, "awaiting_input");
 		expect(ended).toEqual(["pi-r"]);
 	});
 

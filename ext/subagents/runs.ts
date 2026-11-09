@@ -358,7 +358,7 @@ export class SubagentRunScheduler<C = unknown> {
 
 	/**
 	 * Takes over an open run, its pi still running, that an earlier instance of the orchestrator's session started
-	 * (a reload), as it is stored.
+	 * (a reload, or a crash), as it is stored. No foreground call waits for it any more: its Reports come as notices.
 	 */
 	takeOver(stored: Readonly<SubagentRunRecord>, context: C): void {
 		if (this.runs.has(stored.runId)) return;
@@ -367,7 +367,7 @@ export class SubagentRunScheduler<C = unknown> {
 			resolveCompletion = res;
 		});
 		const managed: InternalManagedRun<C> = {
-			record: structuredClone(stored) as SubagentRunRecord,
+			record: { ...(structuredClone(stored) as SubagentRunRecord), deliveryMode: "background" },
 			abortController: new AbortController(),
 			resolveCompletion,
 			completionPromise,

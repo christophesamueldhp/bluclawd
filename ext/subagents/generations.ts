@@ -151,6 +151,17 @@ export function createGenerations(deps: GenerationDeps) {
 					});
 				},
 			});
+			// Taken over, perhaps from a pane that is gone: the run is told where to report from now on. Should it not
+			// hear, its Reports are read from disk once its pane ends.
+			if (execCtx.launch.pane) {
+				const adopt: SessionMessage = {
+					type: "session_message",
+					kind: "adopt",
+					from: parent,
+					sessionId: params.record.parentSessionId,
+				};
+				sendToRun(deps.send, execCtx.launch.pane, adopt).catch(() => {});
+			}
 			try {
 				return await executeTmuxRun(params, execCtx.launch, {
 					tmux: deps.tmux(),

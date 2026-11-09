@@ -67,6 +67,46 @@ async function reopenListsClosedRun(real: RealPi, sessionFile: string) {
 	await waitFor(() => expect(real.tmux.capture(run, 50).join("\n")).toContain("Looked."));
 }
 
+/**
+ * An orchestrator waiting in the foreground on "probe-run", whose answer takes `stallMs`: resolves once the run
+ * works on it, with both panes and the orchestrator's session file.
+ */
+async function orchestratorWaitingOnRun(real: RealPi, stallMs: number) {
+	real.script("main", [
+		{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around." } },
+		{ text: "read the report" },
+	]);
+	real.script("probe-run", [{ text: "Looked.", stallMs }]);
+	const orchestrator = real.start(["--", "delegate the look"]);
+	await real.waitForRequests("probe-run", 1);
+	const [run] = panes(real).filter((pane) => pane !== orchestrator);
+	expect(run).toBeDefined();
+	const sessionFile = await waitFor(async () => {
+		const file = (await real.rows()).find((row) => row.pane === orchestrator)?.sessionFile;
+		expect(file).toBeDefined();
+		return file ?? "";
+	});
+	return { orchestrator, run, sessionFile };
+}
+
+/** Kills the pi in `pane` as a crash does: it never ends its session, and its pane goes with it. */
+function crash(real: RealPi, pane: string): void {
+	const pid = Number(
+		spawnSync("tmux", ["-S", real.tmux.socket, "display-message", "-p", "-t", `=${pane}:`, "#{pane_pid}"], {
+			encoding: "utf8",
+		}).stdout.trim(),
+	);
+	// Never 0, which would kill this whole process group.
+	expect(pid).toBeGreaterThan(0);
+	process.kill(pid, "SIGKILL");
+}
+
+/** How many of the messages `request` sent hold `text`. */
+const holding = (request: Parameters<typeof conversation>[0], text: string) =>
+	conversation(request).filter((message) => message.text.includes(text)).length;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 describe.skipIf(!hasTmux)("a run's lifetime", () => {
 	let pi: RealPi | undefined;
 	let held: number | undefined;
@@ -124,6 +164,55 @@ describe.skipIf(!hasTmux)("a run's lifetime", () => {
 		real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
 		await waitFor(() => expect(screen()).toMatch(/Done \(1\)\n.*explorer: Look around\..*closed/));
 	});
+
+	it(
+		"finishes its turn after its orchestrator crashed, is then closed, and reopening tells the orchestrator its Report once, as a notice",
+		async () => {
+			const real = await startKept();
+			pi = real;
+			const { orchestrator, run, sessionFile } = await orchestratorWaitingOnRun(real, 8000);
+
+			crash(real, orchestrator);
+			await waitFor(() => expect(panes(real)).not.toContain(orchestrator));
+			// The run beats every 3 s, and each beat asks after its orchestrator's pane: working, it stays.
+			await sleep(4000);
+			expect(panes(real)).toContain(run);
+			await waitFor(() => expect(panes(real)).not.toContain(run));
+			expect(real.requests("probe-run")).toHaveLength(1);
+
+			real.start(["--session", sessionFile]);
+			const [, woken] = await real.waitForRequests("main", 2);
+			expect(holding(woken, "Looked.")).toBe(1);
+			await sleep(2000);
+			expect(real.requests("main")).toHaveLength(2);
+		},
+		3 * readinessMs,
+	);
+
+	it(
+		"is adopted by its orchestrator reopened after a crash while it still works: listed there, it reports there and stays open",
+		async () => {
+			const real = await startKept();
+			pi = real;
+			const { orchestrator, run, sessionFile } = await orchestratorWaitingOnRun(real, 15_000);
+
+			crash(real, orchestrator);
+			await waitFor(() => expect(panes(real)).not.toContain(orchestrator));
+			const reopened = real.start(["--session", sessionFile]);
+			await waitFor(() => expect(real.tmux.capture(reopened, 50).join("\n")).toContain("probe-run"));
+			await waitFor(async () =>
+				expect((await real.rows()).find((row) => row.pane === run)).toMatchObject({ parent: reopened }),
+			);
+
+			const [, woken] = await real.waitForRequests("main", 2);
+			expect(holding(woken, "Looked.")).toBe(1);
+			// Its heartbeats name the reopened orchestrator, whose pane is there: the daemon leaves it open.
+			await sleep(4000);
+			expect(panes(real)).toContain(run);
+			expect(real.requests("main")).toHaveLength(2);
+		},
+		3 * readinessMs,
+	);
 
 	it(
 		"stays open while its orchestrator's pane is Silent, is closed by the daemon once that pane is gone, and reopening lists it as resumable",

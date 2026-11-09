@@ -114,8 +114,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		// Runs are pi sessions of their own (ADR-0006): this pi may be one, and launches them from its pane.
 		const pane = Tmux.currentPane();
 		const runParent = process.env[PARENT_ENV];
-		if (runParent) actAsRun(pi, runParent, pane);
-		if (runParent && pane) messageAsRun(pi, runParent, pane);
+		// Read each time: an orchestrator reopened after a crash adopts the run from another pane (ADR-0008).
+		const currentParent = () => process.env[PARENT_ENV] || runParent || "";
+		if (runParent) actAsRun(pi, currentParent, pane);
+		if (runParent && pane) messageAsRun(pi, currentParent, pane);
 		const reports = new RunReports();
 		/** Aborted on a reload, which hands this instance's open runs to the next one. */
 		const handOff = new AbortController();
@@ -127,8 +129,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		pi.events.on("bluclawd:session-message", (data) => {
 			const message = data as SessionMessage;
 			if (message.kind === "report" || message.kind === "activity") reports.receive(message);
-			// A stop is for a run (actAsRun), never for its orchestrator.
-			else if (message.kind !== "stop") fromRun(message);
+			// A stop or an adopt is for a run (actAsRun), never for its orchestrator.
+			else if (message.kind === "message" || message.kind === "typed") fromRun(message);
 		});
 
 		let activeTurnIndex = 0;
@@ -395,8 +397,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 
 			const branchEntries = ctx.sessionManager.getBranch();
-			// A reload keeps the session, and so its open runs, whose pis still run: this instance takes them over.
-			if (event.reason === "reload" && pane) {
+			// Its open runs whose pis still run, after a reload or a crash of the instance that ran them: this instance
+			// takes them over (ADR-0008). Those this process runs already are left as they are.
+			if (pane) {
 				for (const runId of extractReferencedRunIdsFromBranch(branchEntries)) {
 					const run = readPersistedRunRecord(agentDir, sessionId, runId);
 					if (run?.pane && !isTerminalSubagentStatus(run.status) && paneUp(timedTmux(), run.pane))
@@ -407,7 +410,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			const liveIds = new Set(scheduler.listActiveRuns(sessionId).map((r) => r.runId));
 			for (const run of reconcileInterruptedRuns(agentDir, sessionId, branchEntries, liveIds)) {
 				if (run.status !== "closed" || !run.pane) continue;
-				// Left open by an orchestrator that is gone: the daemon closes it too, at its next heartbeat.
+				// Not taken over (its pi is gone, or this one has no pane to take it to): it is closed.
 				endPane(timedTmux(), run.pane);
 			}
 			// Reopening the session lists its closed runs, which can be resumed.
