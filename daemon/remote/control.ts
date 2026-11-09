@@ -9,7 +9,6 @@ import type {
 	InstanceSummary,
 	LiveSnapshot,
 	PaneLaunch,
-	PaneMessage,
 	PaneReport,
 	RemoteRequest,
 	RemoteResponse,
