@@ -161,6 +161,59 @@ export function newestRunSession(runDir: string): string | undefined {
 	}
 }
 
+/** A Report as its run stored it before sending it, numbered among the run's Reports. */
+export interface StoredRunReport {
+	seq: number;
+	text: string;
+	usage?: SessionUsage;
+	sessionId?: string;
+}
+
+/** The run's own: the orchestrator rewrites `record.json` and `report.md`, so a run's Reports go in files of their own. */
+const runReportsDir = (runDir: string) => join(runDir, "reports");
+
+/**
+ * Stores a run's Report before it is sent, as the next of its Reports, on from the earlier generations' in the same
+ * run directory. Returns its `seq`.
+ */
+export function storeRunReport(runDir: string, report: Omit<StoredRunReport, "seq">): number {
+	// By the files' names: a torn one keeps its number.
+	const seq = Math.max(0, ...storedSeqs(runDir)) + 1;
+	writeAtomicPrivateFile(join(runReportsDir(runDir), `${seq}.json`), JSON.stringify({ ...report, seq }));
+	return seq;
+}
+
+/** The numbers of the Reports a run stored, by their files' names. */
+function storedSeqs(runDir: string): number[] {
+	try {
+		return readdirSync(runReportsDir(runDir)).flatMap((file) => {
+			const at = /^(\d+)\.json$/.exec(file);
+			return at ? [Number(at[1])] : [];
+		});
+	} catch {
+		return [];
+	}
+}
+
+/** The Reports a run stored after `seq`, in order; a torn one is skipped. */
+export function readRunReports(runDir: string, seq: number): StoredRunReport[] {
+	return storedSeqs(runDir)
+		.filter((stored) => stored > seq)
+		.sort((a, b) => a - b)
+		.flatMap((stored) => {
+			try {
+				return [JSON.parse(readFileSync(join(runReportsDir(runDir), `${stored}.json`), "utf8")) as StoredRunReport];
+			} catch {
+				return [];
+			}
+		});
+}
+
+/** Where a run of the parent session keeps its session, task and Reports. */
+export function subagentRunDir(agentDir: string, parentSessionId: string, runId: string): string {
+	return join(getSubagentsRootDir(agentDir), parentSessionId, runId);
+}
+
 function sanitizeRecordForStorage(record: Readonly<SubagentRunRecord>): SubagentRunRecord {
 	const clone = structuredClone(record) as SubagentRunRecord;
 	if (clone.errorMessage) {

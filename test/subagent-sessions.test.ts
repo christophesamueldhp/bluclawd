@@ -1,3 +1,5 @@
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
 import type { JsonObject } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { remoteSessions } from "../daemon/remote/sessions.ts";
@@ -205,6 +207,33 @@ describe.skipIf(!hasTmux)("a background run, as a pi session of its own", () => 
 		real.tmux.sendKeys(orchestrator, ["hello", "Enter"]);
 		const fresh = (await real.waitForRequests("main", 3))[2];
 		expect(said(fresh)).toEqual(["hello"]);
+	});
+
+	it("brings the orchestrator a Report its run sent while the daemon was down, once the daemon is back, once", async () => {
+		const real = await startRealPi();
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around.", background: true } },
+			{ text: "waiting for probe-run" },
+			{ text: "read the report" },
+		]);
+		real.script("probe-run", [{ text: "Found it with the daemon down.", stallMs: 3000 }]);
+		real.start(["--", "delegate the look"]);
+		await real.waitForRequests("main", 2);
+		await real.waitForRequests("probe-run", 1);
+
+		await real.client.shutdownDaemon();
+		// The run settles meanwhile: its Report is stored, and its sends fail.
+		const subagents = join(real.agentDir, "bluclawd", "subagents");
+		await waitFor(() =>
+			expect(readdirSync(subagents, { recursive: true }).map(String)).toContainEqual(
+				expect.stringMatching(/reports\/1\.json$/),
+			),
+		);
+		await real.client.ensureDaemon();
+
+		const [, , woken] = await real.waitForRequests("main", 3);
+		expect(said(woken).filter((text) => text.includes("Found it with the daemon down."))).toHaveLength(1);
 	});
 });
 

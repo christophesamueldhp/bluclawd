@@ -9,16 +9,18 @@ import {
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
 	type SubagentMessageBus,
 } from "./messages.ts";
-import type { ParentScopeChecks, ScopedRun } from "./parent-scope.ts";
+import { inParentScope, type ParentScope, type ParentScopeChecks, type ScopedRun } from "./parent-scope.ts";
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
 import {
 	appendParentRunReference,
+	readRunReports,
 	recordRunSessionUsage,
+	subagentRunDir,
 	writeFullSubagentReport,
 	writePersistedRunRecord,
 } from "./storage.ts";
-import { executeTmuxRun, type RunReports, sendToRun, type TmuxRunDeps } from "./tmux-runs.ts";
+import { executeTmuxRun, type RunReports, sendToRun, storedReport, type TmuxRunDeps } from "./tmux-runs.ts";
 
 /** A Report no foreground launch took, as the orchestrator is told about it. */
 export interface ParentNotice {
@@ -45,6 +47,12 @@ export interface GenerationDeps {
 	/** Aborted when this orchestrator hands its open runs over to the next instance of its session (a reload). */
 	handOff: AbortSignal;
 }
+
+/** A run's Report as the orchestrator is told of it. */
+const noticeOf = (record: Readonly<SubagentRunRecord>, text: string): ParentNotice => ({
+	parentText: fromRunText("Report", formatRunLabel(record), text),
+	details: buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).details,
+});
 
 /** Persists each generation of a run and routes its messages; the scheduler it owns decides the transitions. */
 export function createGenerations(deps: GenerationDeps) {
@@ -125,10 +133,7 @@ export function createGenerations(deps: GenerationDeps) {
 					notify: (report) => {
 						const record = scheduler.getRun(runId);
 						if (!record) return;
-						deps.scope.notify(record, {
-							parentText: fromRunText("Report", formatRunLabel(record), report.text),
-							details: buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).details,
-						});
+						deps.scope.notify(record, noticeOf(record, report.text));
 					},
 					usage: (sessionId, totals) => recordRunSessionUsage(deps.agentDir(), params.record, sessionId, totals),
 					// Kept in the orchestrator's session for the user, who answers in the run's own: it starts no turn.
@@ -152,8 +157,34 @@ export function createGenerations(deps: GenerationDeps) {
 		},
 	});
 
+	/**
+	 * Tells the orchestrator of the Reports the scope's runs stored but could not send it, as after the daemon was down.
+	 * An open run's go through its own listener, which drops what it was told already.
+	 */
+	const pullReports = (scope: ParentScope) => {
+		const agentDir = deps.agentDir();
+		for (const run of scheduler.listRuns()) {
+			if (!inParentScope(run, scope)) continue;
+			const stored = readRunReports(
+				subagentRunDir(agentDir, run.parentSessionId, run.runId),
+				run.lastDeliveredSeq ?? 0,
+			);
+			if (stored.length === 0) continue;
+			if (!isTerminalSubagentStatus(run.status)) {
+				const { pane } = run;
+				if (pane) for (const report of stored) deps.reports.receive(storedReport(pane, report));
+				continue;
+			}
+			// Stored before the orchestrator is told: a crash between the two loses it rather than tell it twice.
+			const lastDeliveredSeq = stored[stored.length - 1].seq;
+			scheduler.markDelivered(run.runId, lastDeliveredSeq);
+			writePersistedRunRecord(agentDir, { ...run, lastDeliveredSeq });
+			for (const report of stored) deps.scope.notify(run, noticeOf(run, report.text));
+		}
+	};
+
 	const directory = createRunDirectory({ scheduler, agentDir: deps.agentDir });
 	const { messageFromParent } = createRunAddressing({ directory, bus: deps.bus });
 
-	return { scheduler, directory, messageFromParent };
+	return { scheduler, directory, messageFromParent, pullReports };
 }

@@ -448,6 +448,8 @@ const agentView: InlineExtension = {
 				pane,
 				(watched) => pi.events.emit("bluclawd:remote-watched", watched),
 				() => pi.events.emit("bluclawd:remote-want-report", true),
+				// Messages queued for it while the daemon was out of reach may be lost (ext/subagents).
+				() => pi.events.emit("bluclawd:daemon-reconnected", true),
 			);
 			registration.start();
 			offSubagents?.();

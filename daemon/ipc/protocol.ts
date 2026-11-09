@@ -118,6 +118,8 @@ export type SessionMessage = { type: "session_message"; from: string; name?: str
 			usage?: SessionUsage;
 			/** The session `usage` is of: a `/new` in the run starts another. */
 			sessionId?: string;
+			/** Its number among the run's Reports, stored before it was sent; absent from an older run. */
+			seq?: number;
 	  }
 	| { kind: "message" | "typed"; text: string }
 	| { kind: "activity"; activity: AgentActivity; dialog?: string }

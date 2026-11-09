@@ -22,6 +22,7 @@ import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { PANE_ENV, Tmux } from "../../daemon/tmux.ts";
 import { STATUS_KEYS } from "../../ext/_shared/status-keys.ts";
+import { storeRunReport } from "../../ext/subagents/storage.ts";
 import { createParentSessionWithSubagents } from "./subagent-session.ts";
 import { waitFor } from "./wait-for.ts";
 
@@ -319,6 +320,13 @@ export async function createSubagentTui(
 		switched,
 		/** The run reports `text` to its orchestrator, as its pi does when it settles. */
 		report: (name: string, text: string) => fromRun(name, { kind: "report", text }),
+		/** The run stores its Report `text`, as its pi does before sending it, and the send never gets through. */
+		storeReport: (name: string, text: string) => {
+			const { args } = runNamed(name);
+			storeRunReport(args[args.indexOf("--session-dir") + 1], { text });
+		},
+		/** The orchestrator's pane reaches the daemon again after a heartbeat that could not. */
+		reconnect: () => eventBus.emit("bluclawd:daemon-reconnected", true),
 		/** The run tells its orchestrator what it is doing now. */
 		activity: (name: string, activity: AgentActivity, dialog?: string) =>
 			fromRun(name, { kind: "activity", activity, ...(dialog ? { dialog } : {}) }),
