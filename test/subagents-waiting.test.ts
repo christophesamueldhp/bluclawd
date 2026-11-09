@@ -162,6 +162,24 @@ describe("The orchestrator's Waiting", () => {
 		expect(text.text).toMatch(/^\[2 subagent reports\]\n\n---\n\n\[Report from subagent "scout"/);
 	});
 
+	it("wakes the orchestrator with a Report its run stored but could not send, once it reaches the daemon again", async () => {
+		const t = await createSubagentTui();
+		tui = t;
+		t.script([launch(["scout"], { background: true }), () => fauxAssistantMessage("Waiting for scout.")]);
+		await prompt(t, "Scout the repo.");
+
+		t.storeReport("scout", "Scouted.");
+		t.reconnect();
+		t.reconnect();
+		await waitFor(() =>
+			expect(
+				t.session.messages.filter(
+					(message) => message.role === "custom" && JSON.stringify(message.content).includes("Scouted."),
+				),
+			).toHaveLength(1),
+		);
+	});
+
 	it("leaves a closed run out of the reminder", async () => {
 		const t = await createSubagentTui();
 		tui = t;

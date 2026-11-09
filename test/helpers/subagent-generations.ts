@@ -10,7 +10,7 @@ import { createGenerations, type ParentNotice } from "../../ext/subagents/genera
 import { SubagentMessageBus } from "../../ext/subagents/messages.ts";
 import { createParentScope, type ParentInboxItem } from "../../ext/subagents/parent-scope.ts";
 import type { AdmitSubagentRunRequest, AdmittedSubagentHandle } from "../../ext/subagents/runs.ts";
-import { ensureRunStorageDir, getSubagentsRootDir, storeRunReport } from "../../ext/subagents/storage.ts";
+import { ensureRunStorageDir, storeRunReport, subagentRunDir } from "../../ext/subagents/storage.ts";
 import { createAgentTaskSource } from "../../ext/subagents/task-source.ts";
 import { RunReports } from "../../ext/subagents/tmux-runs.ts";
 import { createParentScopeViews } from "../../ext/subagents/views.ts";
@@ -190,7 +190,7 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		reports.receive({ type: "session_message", kind: "report", from: await paneOf(handle), text, seq });
 	/** The run stores its Report `text`, as its pi does before sending it; returns its `seq`. */
 	const storeReport = (handle: AdmittedSubagentHandle, text: string) =>
-		storeRunReport(join(getSubagentsRootDir(agentDir), handle.record.parentSessionId, handle.runId), { text });
+		storeRunReport(subagentRunDir(agentDir, handle.record.parentSessionId, handle.runId), { text });
 	const admission = createRunAdmission({
 		scheduler: generations.scheduler,
 		directory,

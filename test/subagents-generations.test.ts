@@ -176,6 +176,28 @@ describe("Delivering a run's Reports", () => {
 		expect(readPersistedRunRecord(first.agentDir, scope.parentSessionId, backend.runId)?.lastDeliveredSeq).toBe(2);
 	});
 
+	it("reads the Reports that never came from disk, in order, before a later one that did", async () => {
+		const { launch, storeReport, sendReport, notices } = setup();
+		const backend = launch("backend", "Build the API.");
+		// Sent, then lost with the daemon's inbox, which no failed heartbeat told of.
+		storeReport(backend, "API built.");
+		storeReport(backend, "Pagination added.");
+		await sendReport(backend, 2, "Pagination added.");
+		expect(notices()).toEqual([
+			expect.stringMatching(/\n\nAPI built\.$/),
+			expect.stringMatching(/\n\nPagination added\.$/),
+		]);
+	});
+
+	it("numbers a run's Report after its last one, even one that cannot be read back", async () => {
+		const { launch, storeReport, agentDir } = setup();
+		const backend = launch("backend", "Build the API.");
+		expect(storeReport(backend, "API built.")).toBe(1);
+		const runDir = join(getSubagentsRootDir(agentDir), backend.record.parentSessionId, backend.runId);
+		writeFileSync(join(runDir, "reports", "1.json"), "{ torn");
+		expect(storeReport(backend, "Pagination added.")).toBe(2);
+	});
+
 	it("has a run send its Report again, whatever failed, until the daemon takes it or the tries run out", async () => {
 		let failures = 2;
 		const sends: string[] = [];

@@ -230,8 +230,6 @@ describe.skipIf(!hasTmux)("a background run, as a pi session of its own", () => 
 				expect.stringMatching(/reports\/1\.json$/),
 			),
 		);
-		// Past a heartbeat of the orchestrator's, which finds the daemon gone.
-		await new Promise((resolve) => setTimeout(resolve, 3500));
 		await real.client.ensureDaemon();
 
 		const [, , woken] = await real.waitForRequests("main", 3);

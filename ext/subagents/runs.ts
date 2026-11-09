@@ -463,7 +463,7 @@ export class SubagentRunScheduler<C = unknown> {
 			},
 			markDelivered: (seq: number) => {
 				if (inactive()) return;
-				managed.record.lastDeliveredSeq = seq;
+				this.markDelivered(managed.record.runId, seq);
 			},
 		};
 

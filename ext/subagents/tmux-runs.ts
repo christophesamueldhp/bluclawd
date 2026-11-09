@@ -19,7 +19,7 @@ import type { AgentDefinition } from "./definitions.ts";
 import { SUBAGENT_MESSAGE_CUSTOM_TYPE } from "./messages.ts";
 import { fromRun, runTaskText } from "./run-messages.ts";
 import type { SubagentRunExecuteParams, SubagentRunOutcome } from "./runs.ts";
-import { newestRunSession, readRunReports, storeRunReport } from "./storage.ts";
+import { newestRunSession, readRunReports, type StoredRunReport, storeRunReport } from "./storage.ts";
 import { sessionUsage } from "./usage.ts";
 
 /** What a run is started as: its role and choices, resolved. */
@@ -142,6 +142,14 @@ const REGISTER_WAIT_MS = 10_000;
 
 type RunReport = Extract<SessionMessage, { kind: "report" }>;
 
+/** A Report its run stored, as it would have come from its pane. */
+export const storedReport = (pane: string, stored: StoredRunReport): RunReport => ({
+	type: "session_message",
+	kind: "report",
+	from: pane,
+	...stored,
+});
+
 /** Where the Reports of the orchestrator's runs go: to the foreground launch waiting for one, else to the run. */
 export class RunReports {
 	/** Each open run's message handler, by its tmux session. */
@@ -215,13 +223,15 @@ export async function executeTmuxRun(
 	controller.markRunning();
 	let last = "";
 	let delivered = record.lastDeliveredSeq ?? 0;
-	const receive = (message: SessionMessage) => {
+	const receive = (message: SessionMessage, fromDisk = false) => {
 		if (message.kind === "activity") {
 			controller.updateActivity(message.activity);
 			if (message.activity === "awaiting_input") deps.needsInput(message.dialog);
 			return;
 		}
 		if (message.kind !== "report") return;
+		// Those before it that never came go first: the daemon may have lost them with no failed send to tell.
+		if (!fromDisk && message.seq !== undefined && message.seq > delivered + 1) pull();
 		// A Report sent again after a retry, or read from disk after it came, is told once.
 		if (message.seq !== undefined) {
 			if (message.seq <= delivered) return;
@@ -239,9 +249,7 @@ export async function executeTmuxRun(
 	const unlisten = deps.reports.listen(pane, receive);
 	/** The Reports the run stored that never came: its sends failed. */
 	const pull = () => {
-		for (const stored of readRunReports(launch.runDir, delivered)) {
-			receive({ type: "session_message", kind: "report", from: pane, ...stored });
-		}
+		for (const stored of readRunReports(launch.runDir, delivered)) receive(storedReport(pane, stored), true);
 	};
 	// Taken over after a reload, or resumed: what it stored while no instance listened.
 	pull();

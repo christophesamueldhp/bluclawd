@@ -177,30 +177,41 @@ const runReportsDir = (runDir: string) => join(runDir, "reports");
  * run directory. Returns its `seq`.
  */
 export function storeRunReport(runDir: string, report: Omit<StoredRunReport, "seq">): number {
-	const seq = (readRunReports(runDir, 0).at(-1)?.seq ?? 0) + 1;
+	// By the files' names: a torn one keeps its number.
+	const seq = Math.max(0, ...storedSeqs(runDir)) + 1;
 	writeAtomicPrivateFile(join(runReportsDir(runDir), `${seq}.json`), JSON.stringify({ ...report, seq }));
 	return seq;
 }
 
-/** The Reports a run stored after `seq`, in order. */
-export function readRunReports(runDir: string, seq: number): StoredRunReport[] {
-	let files: string[];
+/** The numbers of the Reports a run stored, by their files' names. */
+function storedSeqs(runDir: string): number[] {
 	try {
-		files = readdirSync(runReportsDir(runDir));
+		return readdirSync(runReportsDir(runDir)).flatMap((file) => {
+			const at = /^(\d+)\.json$/.exec(file);
+			return at ? [Number(at[1])] : [];
+		});
 	} catch {
 		return [];
 	}
-	return files
-		.flatMap((file) => {
-			const at = /^(\d+)\.json$/.exec(file);
-			if (!at || Number(at[1]) <= seq) return [];
+}
+
+/** The Reports a run stored after `seq`, in order; a torn one is skipped. */
+export function readRunReports(runDir: string, seq: number): StoredRunReport[] {
+	return storedSeqs(runDir)
+		.filter((stored) => stored > seq)
+		.sort((a, b) => a - b)
+		.flatMap((stored) => {
 			try {
-				return [JSON.parse(readFileSync(join(runReportsDir(runDir), file), "utf8")) as StoredRunReport];
+				return [JSON.parse(readFileSync(join(runReportsDir(runDir), `${stored}.json`), "utf8")) as StoredRunReport];
 			} catch {
 				return [];
 			}
-		})
-		.sort((a, b) => a.seq - b.seq);
+		});
+}
+
+/** Where a run of the parent session keeps its session, task and Reports. */
+export function subagentRunDir(agentDir: string, parentSessionId: string, runId: string): string {
+	return join(getSubagentsRootDir(agentDir), parentSessionId, runId);
 }
 
 function sanitizeRecordForStorage(record: Readonly<SubagentRunRecord>): SubagentRunRecord {

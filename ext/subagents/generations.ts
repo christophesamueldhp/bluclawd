@@ -1,4 +1,3 @@
-import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { createRunAddressing } from "./addressing.ts";
@@ -15,13 +14,13 @@ import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResu
 import { isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
 import {
 	appendParentRunReference,
-	getSubagentsRootDir,
 	readRunReports,
 	recordRunSessionUsage,
+	subagentRunDir,
 	writeFullSubagentReport,
 	writePersistedRunRecord,
 } from "./storage.ts";
-import { executeTmuxRun, type RunReports, sendToRun, type TmuxRunDeps } from "./tmux-runs.ts";
+import { executeTmuxRun, type RunReports, sendToRun, storedReport, type TmuxRunDeps } from "./tmux-runs.ts";
 
 /** A Report no foreground launch took, as the orchestrator is told about it. */
 export interface ParentNotice {
@@ -167,20 +166,20 @@ export function createGenerations(deps: GenerationDeps) {
 		for (const run of scheduler.listRuns()) {
 			if (!inParentScope(run, scope)) continue;
 			const stored = readRunReports(
-				join(getSubagentsRootDir(agentDir), run.parentSessionId, run.runId),
+				subagentRunDir(agentDir, run.parentSessionId, run.runId),
 				run.lastDeliveredSeq ?? 0,
 			);
 			if (stored.length === 0) continue;
 			if (!isTerminalSubagentStatus(run.status)) {
-				if (run.pane)
-					for (const report of stored)
-						deps.reports.receive({ type: "session_message", kind: "report", from: run.pane, ...report });
+				const { pane } = run;
+				if (pane) for (const report of stored) deps.reports.receive(storedReport(pane, report));
 				continue;
 			}
-			for (const report of stored) deps.scope.notify(run, noticeOf(run, report.text));
+			// Stored before the orchestrator is told: a crash between the two loses it rather than tell it twice.
 			const lastDeliveredSeq = stored[stored.length - 1].seq;
 			scheduler.markDelivered(run.runId, lastDeliveredSeq);
 			writePersistedRunRecord(agentDir, { ...run, lastDeliveredSeq });
+			for (const report of stored) deps.scope.notify(run, noticeOf(run, report.text));
 		}
 	};
 
