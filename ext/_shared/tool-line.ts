@@ -26,6 +26,8 @@ export interface CompactLook {
 	 * without one keeps pi's body (a diff, a file) under the call line, and pi's result.
 	 */
 	summary?(result: ToolResult, theme: Theme, args: Record<string, unknown>): string | string[];
+	/** What a look without a summary adds after the call line once the call succeeded, as ` (+2 -1)`. */
+	tally?(result: ToolResult, theme: Theme, args: Record<string, unknown>): string;
 }
 
 /** The `⎿` lines, each cut to the width rather than wrapped, so one long line cannot fill the screen. */
@@ -65,6 +67,8 @@ const isBlank = (line: string) => stripAnsi(line).trim() === "";
 /** pi's call component with its header line swapped for the `⏺ Name(arg)` line. */
 class WithPiBody implements Component {
 	readonly head = new Text("", 0, 0);
+	/** The look's tally, kept for the call line pi draws again before each result. */
+	tally = "";
 	piCall: Component | undefined;
 	/** The word pi's header starts with, as `edit` in `edit src/x.ts`. */
 	readonly piTitle: string;
@@ -92,6 +96,9 @@ class WithPiBody implements Component {
 		this.piCall?.invalidate();
 	}
 }
+
+/** Where a row's call line waits in pi's renderer state, which pi shares between the call and the result. */
+const CALL_LINE = Symbol("bluclawd call line");
 
 /** The components this file drew, so pi's renderers are never handed one as their `lastComponent`. */
 const drawnHere = new WeakSet<Component>();
@@ -127,7 +134,8 @@ export function compactTool(pi: PiRenderers, look: CompactLook): ToolRenderers {
 					() => new WithPiBody(last && !drawnHere.has(last) ? last : undefined, look.title.toLowerCase()),
 				);
 				call.piCall = pi.renderCall(args, theme, { ...context, lastComponent: call.piCall });
-				call.head.setText(line);
+				call.head.setText(line + call.tally);
+				context.state[CALL_LINE] = call;
 				return call;
 			}
 			// pi's call still runs, unseen, so the state it keeps (bash's start time) is right when the row expands.
@@ -143,6 +151,12 @@ export function compactTool(pi: PiRenderers, look: CompactLook): ToolRenderers {
 					...forPi(context),
 					expanded: true,
 				});
+			const call: WithPiBody | undefined = context.state[CALL_LINE];
+			// pi draws the call before the result, so the tally reaches a call line already drawn.
+			if (look.tally && call && !options.expanded && !context.isPartial) {
+				call.tally = look.tally(result, theme, argsOf(context));
+				call.head.setText(callLine(look, context.args, theme, context) + call.tally);
+			}
 			if (options.expanded || !look.summary) return pi.renderResult(result, options, theme, forPi(context));
 			// Likewise pi's result, which also stops what it started while expanded (bash's redraw every second).
 			pi.renderResult(result, options, theme, forPi(context));

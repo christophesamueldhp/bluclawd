@@ -180,19 +180,26 @@ const editDone = text("Successfully replaced 1 block(s) in src/x.ts.", {
 	firstChangedLine: 1,
 });
 
+// The test theme writes each colour as a tag, which counts toward the width: a coloured tally needs room on one line.
+const WIDE = 200;
+
 describe("collapsed edit and write", () => {
 	it("edit is the call line with pi's diff in full under it", () => {
-		const out = plain(draw(restyled("edit", piEdit), { args: editArgs, result: editDone, argsComplete: false }));
-		expect(out).toMatch(new RegExp(`^ ${DOT} Edit\\(src/x\\.ts\\)\n`));
+		const out = plain(
+			draw(restyled("edit", piEdit), { args: editArgs, result: editDone, argsComplete: false }, WIDE),
+		);
+		expect(out).toMatch(new RegExp(`^ ${DOT} Edit\\(src/x\\.ts\\) \\(\\+1 -1\\)\n`));
 		expect(out).toContain("-1 const a = 1;");
 		expect(out).toContain("+1 const a = 2;");
 		expect(out).not.toContain("edit src/x.ts");
 	});
 
 	it("edit's call line keeps the padding pi's own header had, as edit pads itself", () => {
-		const out = plain(draw(restyled("edit", piEdit), { args: editArgs, result: editDone, argsComplete: false }));
+		const out = plain(
+			draw(restyled("edit", piEdit), { args: editArgs, result: editDone, argsComplete: false }, WIDE),
+		);
 		const diffLine = out.split("\n").find((line) => line.includes("+1 const a = 2;")) ?? "";
-		expect(out.split("\n")[0]).toBe(` ${DOT} Edit(src/x.ts)`);
+		expect(out.split("\n")[0]).toBe(` ${DOT} Edit(src/x.ts) (+1 -1)`);
 		expect(diffLine.startsWith(" +1")).toBe(true);
 	});
 
@@ -215,7 +222,53 @@ describe("collapsed edit and write", () => {
 
 	it("write is the call line with pi's view of the file under it", () => {
 		const row: Row = { args: { path: "notes.md", content: "one\ntwo" }, result: text("Wrote notes.md") };
-		expect(plain(draw(restyled("write", piWrite), row))).toBe(`${DOT} Write(notes.md)\n\none\ntwo`);
+		expect(plain(draw(restyled("write", piWrite), row))).toBe(`${DOT} Write(notes.md) (+2)\n\none\ntwo`);
+	});
+
+	it("edit counts only changed lines, not context or pi's `...` gap", () => {
+		const diff = "  1 a\n- 2 b\n- 3 c\n+ 2 B\n  4 d\n    ...\n 40 x\n+41 y";
+		const out = plain(
+			draw(restyled("edit", piEdit), { args: editArgs, result: text("ok", { diff, patch: "" }) }, WIDE),
+		);
+		expect(out.split("\n")[0]).toBe(` ${DOT} Edit(src/x.ts) (+2 -2)`);
+	});
+
+	it("write does not count the file's trailing newline as a line", () => {
+		const row: Row = { args: { path: "notes.md", content: "one\ntwo\n" }, result: text("Wrote notes.md") };
+		expect(plain(draw(restyled("write", piWrite), row)).split("\n")[0]).toBe(`${DOT} Write(notes.md) (+2)`);
+	});
+
+	it("adds no count until the call succeeded", () => {
+		const writing = { path: "notes.md", content: "one" };
+		expect(plain(draw(restyled("write", piWrite), { args: writing })).split("\n")[0]).toBe(`${DOT} Write(notes.md)`);
+		const failed: Row = { args: editArgs, result: text("Could not find the text", editDone.details), isError: true };
+		expect(plain(draw(restyled("edit", piEdit), failed)).split("\n")[0]).toBe(` ${DOT} Edit(src/x.ts)`);
+	});
+
+	it("adds no count when the change is empty", () => {
+		const row: Row = { args: { path: "empty.md", content: "" }, result: text("Wrote empty.md") };
+		expect(plain(draw(restyled("write", piWrite), row)).split("\n")[0]).toBe(`${DOT} Write(empty.md)`);
+	});
+
+	it("keeps the count as pi draws the row again", () => {
+		const renderers = restyled("edit", piEdit);
+		const context = contextFor({ args: editArgs, argsComplete: false });
+		let call: any;
+		let result: any;
+		const pass = (expanded = false) => {
+			call = renderers.renderCall?.(editArgs, theme, { ...context, expanded, lastComponent: call });
+			result = renderers.renderResult?.(editDone as never, { expanded, isPartial: false }, theme, {
+				...context,
+				expanded,
+				lastComponent: result,
+			});
+			return plain(call.render(WIDE)[0]).trimEnd();
+		};
+		expect(pass()).toBe(` ${DOT} Edit(src/x.ts) (+1 -1)`);
+		expect(pass()).toBe(` ${DOT} Edit(src/x.ts) (+1 -1)`);
+		// Expanding hands the row back to pi; collapsing again builds a new call line.
+		pass(true);
+		expect(pass()).toBe(` ${DOT} Edit(src/x.ts) (+1 -1)`);
 	});
 
 	it("keeps pi's whole view when pi's first lines are not the header it expects", () => {

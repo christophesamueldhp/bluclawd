@@ -6,7 +6,13 @@
  */
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve } from "node:path";
-import type { BashToolDetails, ExtensionAPI, ReadToolDetails } from "@earendil-works/pi-coding-agent";
+import type {
+	BashToolDetails,
+	EditToolDetails,
+	ExtensionAPI,
+	ReadToolDetails,
+	Theme,
+} from "@earendil-works/pi-coding-agent";
 import {
 	type CompactLook,
 	compactTool,
@@ -111,8 +117,32 @@ const ls: CompactLook = {
 	summary: (result) => count(resultLines(result, "(empty directory)").length, "entry", "entries"),
 };
 
-const edit: CompactLook = { title: "Edit", arg: fileArg };
-const write: CompactLook = { title: "Write", arg: fileArg };
+/** Lines a change added and removed, as ` (+2 -1)`; ` (+2)` when what it replaced is unknown, nothing for no change. */
+function changed(theme: Theme, added: number, removed?: number): string {
+	if (added === 0 && !removed) return "";
+	const minus = removed === undefined ? "" : ` ${theme.fg("toolDiffRemoved", `-${removed}`)}`;
+	return ` (${theme.fg("toolDiffAdded", `+${added}`)}${minus})`;
+}
+
+/** pi's diff marks a changed line `+N text` or `-N text`, its number padded; context and its `...` gap start blank. */
+const changedLines = (diff: string, sign: "+" | "-") =>
+	diff.split("\n").filter((line) => line.startsWith(sign) && /^. *\d+ /.test(line)).length;
+
+const edit: CompactLook = {
+	title: "Edit",
+	arg: fileArg,
+	tally(result, theme) {
+		const diff = (result.details as EditToolDetails | undefined)?.diff ?? "";
+		return changed(theme, changedLines(diff, "+"), changedLines(diff, "-"));
+	},
+};
+
+// write does not know what the file held before, so it counts only what it wrote.
+const write: CompactLook = {
+	title: "Write",
+	arg: fileArg,
+	tally: (_result, theme, args) => changed(theme, lineCount(str(args.content).replace(/\n+$/, ""))),
+};
 
 const LOOKS: Record<string, CompactLook> = { read, bash, grep, find, ls, edit, write };
 
