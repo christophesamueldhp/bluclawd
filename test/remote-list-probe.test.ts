@@ -383,7 +383,7 @@ describe("whether a terminal shows pi", () => {
 
 		beforeEach(async () => {
 			dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-terminal-"));
-			vi.useFakeTimers({ toFake: ["Date"] });
+			vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
 			clients = true;
 			blocking = 0;
 			pending = [];
@@ -450,9 +450,24 @@ describe("whether a terminal shows pi", () => {
 			expect(await terminalOpen()).toBe(false);
 		});
 
-		it("asks tmux nothing until a phone asks", async () => {
-			vi.setSystemTime(Date.now() + 60_000);
+		it("does not keep an answer that landed while the listener was off", async () => {
+			await terminalOpen();
+			vi.setSystemTime(Date.now() + 1500);
+			await terminalOpen();
+			await control.handle({ type: "remote", action: "off" });
+			await answer(true);
+			({ terminalOpen } = await pairedPhone(control));
+			clients = false;
+			expect(await terminalOpen()).toBe(false);
+			expect(blocking).toBe(2);
+		});
+
+		it("asks tmux nothing until a phone asks, nor again until it asks again", async () => {
+			vi.advanceTimersByTime(60_000);
 			expect([blocking, pending.length]).toEqual([0, 0]);
+			await terminalOpen();
+			vi.advanceTimersByTime(60_000);
+			expect([blocking, pending.length]).toEqual([1, 0]);
 		});
 	});
 });
