@@ -31,12 +31,12 @@ const PUSH_SUBJECT = "https://github.com/christophesamueldhp/bluclawd";
 export const TMUX_TIMEOUT_MS = 2000;
 /** How long whether a terminal shows pi is taken as known. */
 const TERMINAL_CHECK_MS = 1500;
-/** A list probe older than this is asked again; the phone's timers list every second. */
-const PROBE_MS = 1000;
-/** How long a list probe is listed with, past which a list asks as an unprobed one does: long enough
- *  for the next probe to wait out a tmux that does not answer, short enough that reaping as of its
- *  `now` is barely late. */
-const PROBE_KEPT_MS = PROBE_MS * 2 + TMUX_TIMEOUT_MS;
+/** A list finding its probe older than this asks tmux again; the phone's timers list every second. */
+const PROBE_REFRESH_MS = 1000;
+/** How long a probe is listed with, past which a list asks as an unprobed one does. While tmux does
+ *  not answer, a probe takes TMUX_TIMEOUT_MS and the next is asked up to a refresh after it lands, so
+ *  one is listed with for up to twice both until the next lands. */
+const PROBE_KEPT_MS = (PROBE_REFRESH_MS + TMUX_TIMEOUT_MS) * 2;
 
 export interface RemoteControlDeps {
 	/** Every row, with tmux's answers from `probe` where it has them. */
@@ -83,7 +83,7 @@ export class RemoteControl {
 	private queue: Promise<void> = Promise.resolve();
 	private notifyTimer: ReturnType<typeof setInterval> | undefined;
 	/** The latest list probe, and when it was asked: kept only while the listener is on. */
-	private probe: { at: number; answers: ListProbe } | undefined;
+	private latest: { askedAt: number; probe: ListProbe } | undefined;
 	private probing = false;
 	/** Only while some device is subscribed, so a change nobody was subscribed for is never sent late. */
 	private notifier: Notifier | undefined;
@@ -191,9 +191,9 @@ export class RemoteControl {
 	/** Every row, reaped with tmux's answers kept fresh in the background while the listener is on, so
 	 *  the phone's lists do not block the daemon on tmux. Rows themselves are never kept. */
 	private list(): InstanceSummary[] {
-		const age = this.probe ? Date.now() - this.probe.at : Number.POSITIVE_INFINITY;
-		const kept = age <= PROBE_KEPT_MS ? this.probe?.answers : undefined;
-		if (this.server && !this.probing && age >= PROBE_MS) this.refreshProbe();
+		const age = this.latest ? Date.now() - this.latest.askedAt : Number.POSITIVE_INFINITY;
+		const kept = age <= PROBE_KEPT_MS ? this.latest?.probe : undefined;
+		if (this.server && !this.probing && age >= PROBE_REFRESH_MS) this.refreshProbe();
 		return this.deps.listInstances(kept);
 	}
 
@@ -201,13 +201,14 @@ export class RemoteControl {
 		const { probeForList } = this.deps;
 		if (!probeForList) return;
 		const server = this.server;
-		const at = Date.now();
+		const askedAt = Date.now();
 		this.probing = true;
 		probeForList()
-			.then((answers) => {
+			.then((probe) => {
 				// One asked before the listener went off or restarted is not kept.
-				if (this.server === server) this.probe = { at, answers };
+				if (this.server === server) this.latest = { askedAt, probe };
 			})
+			// Unhandled, it would shut the daemon down; the next list asks again.
 			.catch(() => undefined)
 			.finally(() => {
 				this.probing = false;
@@ -285,7 +286,7 @@ export class RemoteControl {
 		this.serverPort = undefined;
 		clearInterval(this.notifyTimer);
 		this.notifyTimer = undefined;
-		this.probe = undefined;
+		this.latest = undefined;
 		this.notifier = undefined;
 		await server?.close();
 	}

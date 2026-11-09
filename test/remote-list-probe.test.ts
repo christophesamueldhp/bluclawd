@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentActivity } from "../daemon/activity.ts";
 import { handleIpcRequest, listSummaries } from "../daemon/handler.ts";
-import { RemoteControl, type RemoteControlDeps } from "../daemon/remote/control.ts";
+import { RemoteControl, type RemoteControlDeps, TMUX_TIMEOUT_MS } from "../daemon/remote/control.ts";
 import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { RemoteSession } from "../daemon/remote/sessions.ts";
 import { loadInstances, saveInstances } from "../daemon/storage.ts";
@@ -18,13 +18,13 @@ function register(id: string, activity: AgentActivity = "idle") {
 	return { type: "register", instance: { id, pane: id, cwd: "/p", activity } } as const;
 }
 
-/** Remote control as the daemon wires it to `supervisor`, listing with a kept probe unless `probed` is false. */
-function remoteFor(dir: string, supervisor: ServerSupervisor, extra: Partial<RemoteControlDeps> = {}, probed = true) {
+/** Remote control as the daemon wires it to `supervisor`, listing with a kept probe. */
+function remoteFor(dir: string, supervisor: ServerSupervisor, extra: Partial<RemoteControlDeps> = {}) {
 	return new RemoteControl({
 		store: new RemoteStore(join(dir, "remote.json")),
 		delivery: supervisor.delivery,
 		listInstances: (probe) => listSummaries(supervisor, probe),
-		...(probed ? { probeForList: () => supervisor.probeForList() } : {}),
+		probeForList: () => supervisor.probeForList(),
 		send: () => true,
 		deleteInstance: (id) => supervisor.deleteInstance(id),
 		renameInstance: (id, name) => supervisor.renameInstance(id, name) !== undefined,
@@ -98,6 +98,30 @@ describe("remote control's list", () => {
 		expect([...held.pending.keys()]).toEqual(["pi-a"]);
 		expect(listed).toMatchObject([{ id: "pi-a", silent: true }]);
 		expect(await sessions()).toMatchObject([{ id: "pi-a", silent: true }]);
+		expect(held.blocking).toEqual([]);
+	});
+
+	it("lists from its probes, never blocking, while tmux takes its whole timeout over each", async () => {
+		up.add("pi-a");
+		await handleIpcRequest(supervisor, register("pi-a"));
+		now += 16_000;
+		await sessions();
+		held.answer();
+		await waitFor(() => expect(held.pending.size).toBe(0));
+		held.blocking.length = 0;
+		// A list a second, as the phone's timers do; tmux answers each probe TMUX_TIMEOUT_MS after it
+		// was asked, just after that second's list.
+		let askedAt: number | undefined;
+		for (let second = 0; second < 12; second++) {
+			vi.setSystemTime(Date.now() + 1000);
+			expect(await sessions()).toMatchObject([{ id: "pi-a", silent: true }]);
+			askedAt ??= held.pending.size ? Date.now() : undefined;
+			if (askedAt !== undefined && Date.now() - askedAt >= TMUX_TIMEOUT_MS) {
+				held.answer();
+				await waitFor(() => expect(held.pending.size).toBe(0));
+				askedAt = undefined;
+			}
+		}
 		expect(held.blocking).toEqual([]);
 	});
 
@@ -230,17 +254,13 @@ describe("remote control's list and pushes, kept probe or not", () => {
 		supervisor.paneStarting({ pane: "pi-start", cwd: "/p", label: "start" });
 		supervisor.paneStarting({ pane: "pi-fail", cwd: "/p", label: "fail" });
 		const pushes: string[] = [];
-		const control = remoteFor(
-			dir,
-			supervisor,
-			{
-				sendPush: async (_subscription, payload) => {
-					pushes.push(payload);
-					return "ok";
-				},
+		const control = remoteFor(dir, supervisor, {
+			sendPush: async (_subscription, payload) => {
+				pushes.push(payload);
+				return "ok";
 			},
-			probed,
-		);
+			...(probed ? {} : { probeForList: undefined }),
+		});
 		controls.push(control);
 		const phone = await pairedPhone(control);
 		control.store.setPush(phone.deviceId, {
