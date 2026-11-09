@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { EndReason, PaneDialog, PaneHeartbeat, PaneMessage } from "../../daemon/ipc/protocol.ts";
 import type { AgentActivity, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
+import { lastLine, textOf } from "../../daemon/session-state.ts";
 import { piCommand } from "../../daemon/tmux.ts";
 
-/** The subset of a session entry needed to derive a title — structural, so pi's SessionEntry fits. */
+/** The subset of a session entry a heartbeat reads — structural, so pi's SessionEntry fits. */
 interface EntryLike {
+	id?: string;
 	type: string;
 	timestamp?: string;
 	message?: { role?: string; content?: unknown };
@@ -43,6 +45,65 @@ export function deriveLabel(name: string | undefined, entries: EntryLike[]): str
  *  times it. A prompt pi takes from its queue mid-run is written then, and starts the time again. */
 export function turnStartedAt(entries: EntryLike[]): string | undefined {
 	return [...entries].reverse().find((e) => e.type === "message" && e.message?.role === "user")?.timestamp;
+}
+
+/** What a heartbeat reads off its session's entries. */
+export interface SessionReading {
+	name: string | undefined;
+	/** The first prompt's first line, as `deriveLabel` gives it. */
+	firstPrompt: string | undefined;
+	/** The last line of the last answer, on any branch. */
+	lastAnswer: string | undefined;
+	/** A message is in the session: something has been asked. */
+	asked: boolean;
+	/** An answer is in the session. */
+	answered: boolean;
+	lastEntry: { id: string | undefined; timestamp: string | undefined } | undefined;
+	turnStartedAt: string | undefined;
+}
+
+/** The part of pi's session manager a reading needs. */
+interface SessionSource {
+	getLeafId(): string | null;
+	getEntries(): EntryLike[];
+	getBranch(): EntryLike[];
+	getSessionName(): string | undefined;
+	/** pi's session manager has it, outside its read-only type; without it every read walks the entries. */
+	getEntryCount?(): number;
+}
+
+/**
+ * A session's reading, walked again only once the session has changed: its entries are only ever
+ * appended, so the same manager, leaf and entry count read the same.
+ */
+export class SessionDigest {
+	private last: { source: SessionSource; leafId: string | null; count: number; reading: SessionReading } | undefined;
+
+	read(source: SessionSource): SessionReading {
+		const count = source.getEntryCount?.();
+		const leafId = source.getLeafId();
+		const last = this.last;
+		if (last?.source === source && last.leafId === leafId && last.count === count) return last.reading;
+		const reading = readSession(source);
+		this.last = count === undefined ? undefined : { source, leafId, count, reading };
+		return reading;
+	}
+}
+
+function readSession(source: SessionSource): SessionReading {
+	const entries = source.getEntries();
+	const messages = entries.filter((e) => e.type === "message");
+	const lastAssistant = [...messages].reverse().find((e) => e.message?.role === "assistant");
+	const last = entries.at(-1);
+	return {
+		name: source.getSessionName(),
+		firstPrompt: deriveLabel(undefined, entries),
+		lastAnswer: lastAssistant ? lastLine(textOf(lastAssistant.message?.content)) : undefined,
+		asked: messages.length > 0,
+		answered: messages.some((e) => e.message?.role === "assistant"),
+		lastEntry: last && { id: last.id, timestamp: last.timestamp },
+		turnStartedAt: turnStartedAt(source.getBranch()),
+	};
 }
 
 /** Blocking prompt kinds: a `custom` overlay (agent view itself, /diff, …) is a view, not a

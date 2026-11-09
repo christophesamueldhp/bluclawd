@@ -20,24 +20,23 @@ import {
 import type { PaneHeartbeat, PaneMessage } from "../../daemon/ipc/protocol.ts";
 import { type InstanceSummary, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { labelFromTask, otherRows } from "../../daemon/rows.ts";
-import { lastLine, textOf, toolActivity } from "../../daemon/session-state.ts";
+import { toolActivity } from "../../daemon/session-state.ts";
 import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, PARENT_ENV, Tmux } from "../../daemon/tmux.ts";
 import { agentTasks, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
-import { timed } from "../_shared/timing.ts";
+import { timed, timedCall } from "../_shared/timing.ts";
 import { trustBadge } from "../_shared/trust-badge.ts";
 import { AgentView, EXIT_WORDS, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, handOffAfterExit } from "./hand-off.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
 import {
-	deriveLabel,
 	dialogDetail,
 	ForegroundActivity,
 	SelfRegistration,
-	turnStartedAt,
+	SessionDigest,
 	waitingDetail,
 } from "./self-registration.ts";
 
@@ -167,9 +166,10 @@ export function promptContent(message: { text: string; images?: Array<{ mimeType
  */
 export function isBlankPane(
 	pane: string | undefined,
-	sessions: Pick<ExtensionContext["sessionManager"], "getEntries" | "getHeader">,
+	header: { parentSession?: string } | null,
+	messaged: boolean,
 ): boolean {
-	return !!pane && !sessions.getHeader()?.parentSession && !sessions.getEntries().some((e) => e.type === "message");
+	return !!pane && !header?.parentSession && !messaged;
 }
 
 /**
@@ -240,7 +240,11 @@ const agentView: InlineExtension = {
 		// What the turn in progress is doing, for this session's row in other windows.
 		let liveDetail: string | undefined;
 
-		const blank = (ctx: ExtensionContext): boolean => isBlankPane(pane, ctx.sessionManager);
+		// A heartbeat every few seconds reads the session again only once it has changed.
+		const digest = new SessionDigest();
+
+		const blank = (ctx: ExtensionContext): boolean =>
+			isBlankPane(pane, ctx.sessionManager.getHeader(), digest.read(ctx.sessionManager).asked);
 		// A normal session, as bluclawd's: the pane `pi` started in this terminal, until ← opens
 		// agent view. Quitting ends it, and so does closing its terminal.
 		let normal = false;
@@ -274,17 +278,13 @@ const agentView: InlineExtension = {
 
 		/** This window's session's name, else the first words of its first prompt. */
 		const selfLabel = (ctx: ExtensionContext): string | undefined => {
-			const firstUser = deriveLabel(undefined, ctx.sessionManager.getEntries());
-			return ctx.sessionManager.getSessionName()?.trim() || (firstUser ? labelFromTask(firstUser) : undefined);
+			const { name, firstPrompt } = digest.read(ctx.sessionManager);
+			return name?.trim() || (firstPrompt ? labelFromTask(firstPrompt) : undefined);
 		};
 
 		/** What this window's session is, as its heartbeat says and its own row shows. */
 		const selfHeartbeat = (ctx: ExtensionContext): PaneHeartbeat => {
-			const entries = ctx.sessionManager.getEntries();
-			const messages = entries.filter((e) => e.type === "message") as Array<{
-				message: { role?: string; content?: unknown };
-			}>;
-			const lastAssistant = [...messages].reverse().find((e) => e.message.role === "assistant");
+			const session = digest.read(ctx.sessionManager);
 			const leafId = ctx.sessionManager.getLeafId() ?? undefined;
 			return {
 				cwd: ctx.sessionManager.getCwd(),
@@ -295,19 +295,15 @@ const agentView: InlineExtension = {
 				detail:
 					dialogDetail(activity) ??
 					waitingDetail(activity) ??
-					(activity.current === "working" && liveDetail
-						? liveDetail
-						: lastAssistant
-							? lastLine(textOf(lastAssistant.message.content))
-							: undefined),
-				turns: messages.some((e) => e.message.role === "assistant") ? 1 : 0,
+					(activity.current === "working" && liveDetail ? liveDetail : session.lastAnswer),
+				turns: session.answered ? 1 : 0,
 				createdAt: ctx.sessionManager.getHeader()?.timestamp,
 				// Its last entry's: once idle, when its last turn ended. Every heartbeat restates its lastSeenAt.
-				finishedAt: entries.at(-1)?.timestamp,
+				finishedAt: session.lastEntry?.timestamp,
 				// The active branch's, as a Chat times it: after a /tree, not a prompt on the branch left.
-				turnStartedAt: turnStartedAt(ctx.sessionManager.getBranch()),
+				turnStartedAt: session.turnStartedAt,
 				// Only once it differs: a heartbeat lags the file, whose last entry is otherwise the leaf.
-				leafId: leafId !== entries.at(-1)?.id ? leafId : undefined,
+				leafId: leafId !== session.lastEntry?.id ? leafId : undefined,
 				dialog: activity.current === "awaiting_input" ? activity.dialog : undefined,
 				...(ctx.ui.getEditorText().trim() !== "" ? { draft: true } : {}),
 				...(parent ? { parent } : {}),
@@ -444,7 +440,10 @@ const agentView: InlineExtension = {
 				new OrchestratorClient(),
 				// A blank session waits for its first prompt to be listed, unless it is a run (its orchestrator
 				// reaches it from its first turn on) or carries a row on (/new).
-				() => (blank(ctx) && !parent && event.reason !== "new" ? undefined : selfHeartbeat(ctx)),
+				() =>
+					timedCall("agent-view", "heartbeat", () =>
+						blank(ctx) && !parent && event.reason !== "new" ? undefined : selfHeartbeat(ctx),
+					),
 				(message) => onPaneMessage(ctx, message),
 				pane,
 				(watched) => pi.events.emit("bluclawd:remote-watched", watched),
