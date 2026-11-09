@@ -391,6 +391,15 @@ export class Tmux {
 		}
 	}
 
+	/** {@link attached} without blocking. */
+	async attachedAsync(): Promise<boolean> {
+		try {
+			return (await this.runAsync(["list-clients", "-F", "#{client_name}"])).trim() !== "";
+		} catch {
+			return false;
+		}
+	}
+
 	/** Leave tmux: the terminal returns to its shell, every pane keeps running. */
 	detach(): void {
 		this.run(["detach-client"]);

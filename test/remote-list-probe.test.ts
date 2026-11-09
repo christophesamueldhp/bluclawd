@@ -9,6 +9,7 @@ import { RemoteStore } from "../daemon/remote/pairing.ts";
 import type { RemoteSession } from "../daemon/remote/sessions.ts";
 import { loadInstances, saveInstances } from "../daemon/storage.ts";
 import type { ServerSupervisor } from "../daemon/supervisor.ts";
+import { Tmux } from "../daemon/tmux.ts";
 import { heldTmux } from "./helpers/held-tmux.ts";
 import { testRegistry } from "./helpers/registry.ts";
 import { waitFor } from "./helpers/wait-for.ts";
@@ -44,13 +45,15 @@ async function pairedPhone(control: RemoteControl) {
 	const { code } = control.store.createCode();
 	const claimed = control.store.claim(code, "iPhone");
 	if (!("token" in claimed)) throw new Error(claimed.error);
-	const sessions = async (): Promise<RemoteSession[]> => {
+	const list = async () => {
 		const res = await fetch(`http://127.0.0.1:${on.port}/api/sessions`, {
 			headers: { authorization: `Bearer ${claimed.token}` },
 		});
-		return ((await res.json()) as { sessions: RemoteSession[] }).sessions;
+		return (await res.json()) as { sessions: RemoteSession[]; terminalOpen: boolean };
 	};
-	return { sessions, deviceId: claimed.deviceId };
+	const sessions = async () => (await list()).sessions;
+	const terminalOpen = async () => (await list()).terminalOpen;
+	return { sessions, terminalOpen, deviceId: claimed.deviceId };
 }
 
 describe("remote control's list", () => {
@@ -344,5 +347,112 @@ describe("remote control's list and pushes, kept probe or not", () => {
 		expect(today.pushes.map((p) => JSON.parse(p).sessionId)).toEqual(["pi-live"]);
 		expect(kept.blocking).toEqual([]);
 		expect(today.blocking).not.toEqual([]);
+	});
+});
+
+describe("whether a terminal shows pi", () => {
+	it("is asked of tmux without blocking, with the blocking ask's answers", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "bluclawd-attached-"));
+		try {
+			const tmux = (out: string | Error) =>
+				new Tmux(dir, () => {
+					if (out instanceof Error) throw out;
+					return out;
+				});
+			expect(await tmux("/dev/ttys001\n").attachedAsync()).toBe(true);
+			expect(await tmux("").attachedAsync()).toBe(false);
+			expect(await tmux(new Error("no server running")).attachedAsync()).toBe(false);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	describe("to the phone", () => {
+		let dir: string;
+		let control: RemoteControl;
+		let terminalOpen: () => Promise<boolean>;
+		/** tmux's list-clients: the blocking ask answers `clients` at once; each one without blocking
+		 *  waits in `pending` until the test answers it. */
+		let clients: boolean;
+		let blocking: number;
+		let pending: ((open: boolean) => void)[];
+		const answer = async (open: boolean) => {
+			for (const resolve of pending.splice(0)) resolve(open);
+			await new Promise((resolve) => setImmediate(resolve));
+		};
+
+		beforeEach(async () => {
+			dir = mkdtempSync(join(tmpdir(), "bluclawd-remote-terminal-"));
+			vi.useFakeTimers({ toFake: ["Date"] });
+			clients = true;
+			blocking = 0;
+			pending = [];
+			const tmux = {
+				attached: () => {
+					blocking++;
+					return clients;
+				},
+				attachedAsync: () => new Promise<boolean>((resolve) => pending.push(resolve)),
+			} as unknown as Tmux;
+			control = remoteFor(dir, testRegistry(dir, () => Date.now(), heldTmux(new Set()).tmux), { tmux });
+			({ terminalOpen } = await pairedPhone(control));
+		});
+		afterEach(async () => {
+			await control.stop();
+			vi.useRealTimers();
+			rmSync(dir, { recursive: true, force: true });
+		});
+
+		it("answers from tmux's latest answer, never waiting on a list-clients tmux holds", async () => {
+			// None kept yet: asked as today, so the phone is not shown "Read only" meanwhile.
+			expect(await terminalOpen()).toBe(true);
+			expect(blocking).toBe(1);
+			expect(pending).toHaveLength(0);
+
+			vi.setSystemTime(Date.now() + 1500);
+			expect(await terminalOpen()).toBe(true);
+			expect(pending).toHaveLength(1);
+			clients = false;
+			for (let i = 0; i < 3; i++) expect(await terminalOpen()).toBe(true);
+			// tmux holds it however long: the latest answer stands, and no second one is asked.
+			vi.setSystemTime(Date.now() + 10_000);
+			expect(await terminalOpen()).toBe(true);
+			expect(pending).toHaveLength(1);
+			expect(blocking).toBe(1);
+
+			await answer(false);
+			expect(await terminalOpen()).toBe(false);
+			expect(blocking).toBe(1);
+		});
+		it("asks as at first once its answer is too old and none is out: the phone was away", async () => {
+			await terminalOpen();
+			vi.setSystemTime(Date.now() + 1500);
+			await terminalOpen();
+			await answer(true);
+			clients = false;
+			vi.setSystemTime(Date.now() + 60_000);
+			expect(await terminalOpen()).toBe(false);
+			expect(blocking).toBe(2);
+		});
+
+		it("does not keep an answer asked before the listener restarted", async () => {
+			await terminalOpen();
+			vi.setSystemTime(Date.now() + 1500);
+			await terminalOpen();
+			expect(pending).toHaveLength(1);
+			await control.handle({ type: "remote", action: "off" });
+			({ terminalOpen } = await pairedPhone(control));
+			clients = false;
+			expect(await terminalOpen()).toBe(false);
+			expect(blocking).toBe(2);
+			// The ask from before the restart lands with what tmux said then.
+			await answer(true);
+			expect(await terminalOpen()).toBe(false);
+		});
+
+		it("asks tmux nothing until a phone asks", async () => {
+			vi.setSystemTime(Date.now() + 60_000);
+			expect([blocking, pending.length]).toEqual([0, 0]);
+		});
 	});
 });
