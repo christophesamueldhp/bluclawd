@@ -7,6 +7,7 @@ import { join } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import permissions from "../ext/permissions/index.ts";
 import sandbox, { networkAsker } from "../ext/sandbox/index.ts";
 import {
 	forgetWrappedExec,
@@ -333,6 +334,30 @@ describe("the extension", () => {
 		expect(sandboxStatus()).toEqual({ kind: "off" });
 		expect(notes).toHaveLength(1);
 		expect(notes[0]).toContain("could not be read");
+	});
+
+	it("still warns when permissions read the same session_start's settings first", async () => {
+		const { handlers, ctx, notes } = load({});
+		const permissionHandlers: Record<string, (event: any, ctx: any) => Promise<any>> = {};
+		permissions({
+			on: (event: string, handler: any) => {
+				permissionHandlers[event] = handler;
+			},
+			registerShortcut: () => {},
+		} as any);
+		const permissionsCtx = {
+			...ctx,
+			ui: { ...ctx.ui, setStatus: () => {}, theme: { fg: (_c: string, t: string) => t } },
+		};
+		writeFileSync(join(getAgentDir(), "settings.json"), "{ not json");
+		const event = { type: "session_start", reason: "startup" };
+		await permissionHandlers.session_start(event, permissionsCtx);
+		await handlers.session_start(event, ctx);
+		const path = join(getAgentDir(), "settings.json");
+		expect(notes).toEqual([
+			`${path} could not be read: its deny rules are not in effect`,
+			`Sandbox is off: ${path} could not be read.`,
+		]);
 	});
 
 	it("warns once when the sandbox cannot run, or its settings are wrong", async () => {

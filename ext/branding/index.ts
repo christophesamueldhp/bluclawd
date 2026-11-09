@@ -15,6 +15,7 @@ import { SettingsManager, VERSION } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { mascotGlyphs } from "../_shared/mascot.ts";
 import { prefersReducedMotion } from "../_shared/settings.ts";
+import { startupSettings } from "../_shared/startup-settings.ts";
 import { timed } from "../_shared/timing.ts";
 import { AUTO_THEME, ThemePicker, themeOptions } from "./theme-picker.ts";
 import { MascotPlayer, pickEntrance, WelcomeHeader, type WelcomeHeaderInfo } from "./welcome-header.ts";
@@ -150,8 +151,7 @@ const branding: InlineExtension = {
 				const glyphs = mascotGlyphs();
 				let reducedMotion = false;
 				try {
-					const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
-					reducedMotion = prefersReducedMotion(settings);
+					reducedMotion = prefersReducedMotion(startupSettings(event, ctx).settings);
 				} catch {
 					// Unreadable settings: animate as by default.
 				}

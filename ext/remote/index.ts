@@ -20,7 +20,9 @@ import { currentDaemonBuildId, OrchestratorClient, type RemoteResult } from "../
 import { piCommand, Tmux } from "../../daemon/tmux.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
 import { remotePort } from "../_shared/settings.ts";
+import { startupSettings } from "../_shared/startup-settings.ts";
 import { timed } from "../_shared/timing.ts";
+import type { ProjectTrust } from "../_shared/trust-badge.ts";
 import { promptContent, promptOptions } from "../agent-view/index.ts";
 import { TRUST_CHANGED } from "../permissions/index.ts";
 import { remoteSkillPrompt } from "../skills/prompt.ts";
@@ -239,12 +241,12 @@ function factory(pi: ExtensionAPI): void {
 	/** Where pistatusline is, looked up once per session. */
 	let statusline: PaneReport["pistatusline"];
 	/** `notice`: what the pane could not do for the phone, which this report alone carries. */
-	const report = (ctx: ExtensionContext, notice?: string): void => {
+	const report = (ctx: ExtensionContext, notice?: string, trustOf?: () => ProjectTrust): void => {
 		// As agent view registers: a `pi -p` run inside the pane must not report as the pane.
 		if (!pane || ctx.mode !== "tui") return;
 		session = ctx;
 		const next = {
-			...buildReport(ctx, pi),
+			...buildReport(ctx, pi, trustOf),
 			...(statusline ? { pistatusline: statusline } : {}),
 			...(notice ? { notice: { text: notice, at: Date.now() } } : {}),
 			outcomes: outcomes.list(),
@@ -267,7 +269,7 @@ function factory(pi: ExtensionAPI): void {
 		if (watched) report(ctx);
 		else if (pane && ctx.mode === "tui") session = ctx;
 	};
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", (event, ctx) => {
 		if (pane && ctx.mode === "tui") {
 			tui = holdTui(ctx, "remote:tui");
 			statusline = pistatuslinePaths(pi);
@@ -278,7 +280,7 @@ function factory(pi: ExtensionAPI): void {
 				if (JSON.stringify(paneTasks(ctx.sessionManager.getSessionId())) !== reportedTasks) report(ctx);
 			});
 		}
-		report(ctx);
+		report(ctx, undefined, () => startupSettings(event, ctx).settings.getDefaultProjectTrust());
 	});
 	pi.on("model_select", (_event, ctx) => changed(ctx));
 	pi.on("thinking_level_select", (_event, ctx) => changed(ctx));

@@ -18,6 +18,7 @@ import type {
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 import * as forkSettings from "../_shared/settings.ts";
+import { type StartupSettings, startupSettings } from "../_shared/startup-settings.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { timed } from "../_shared/timing.ts";
 import { type ProjectTrust, trustBadge } from "../_shared/trust-badge.ts";
@@ -40,9 +41,9 @@ export function projectTrust(ctx: ExtensionContext): ProjectTrust {
 	return settings(ctx).getDefaultProjectTrust();
 }
 
-function refreshBadge(ctx: ExtensionContext): void {
+function refreshBadge(ctx: ExtensionContext, trust?: ProjectTrust): void {
 	try {
-		ctx.ui.setStatus(STATUS_KEYS.mode, trustStatusText(ctx, projectTrust(ctx)));
+		ctx.ui.setStatus(STATUS_KEYS.mode, trustStatusText(ctx, trust ?? projectTrust(ctx)));
 	} catch {
 		// Stale extension instance after a reload — nothing to draw on.
 	}
@@ -65,21 +66,21 @@ export async function setProjectTrust(
 function factory(pi: ExtensionAPI): void {
 	let deny: string[] = [];
 
-	function loadDeny(ctx: ExtensionContext): void {
-		const sm = settings(ctx);
+	function loadDeny(ctx: ExtensionContext, { settings: sm, errors }: StartupSettings): void {
 		deny = forkSettings.denyRules(sm);
 		for (const scope of forkSettings.invalidDenyScopes(sm)) {
 			ctx.ui.notify(`${scope} permissions.deny is not a list of rules: none of it is in effect`, "warning");
 		}
 		// pi reads an unparseable settings file as empty, which would drop its deny rules silently.
-		for (const { path, scope } of sm.drainErrors()) {
+		for (const { path, scope } of errors) {
 			ctx.ui.notify(`${path ?? `${scope} settings`} could not be read: its deny rules are not in effect`, "warning");
 		}
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
-		loadDeny(ctx);
-		refreshBadge(ctx);
+	pi.on("session_start", async (event, ctx) => {
+		const read = startupSettings(event, ctx);
+		loadDeny(ctx, read);
+		refreshBadge(ctx, read.settings.getDefaultProjectTrust());
 	});
 
 	pi.on("tool_call", async (event, ctx): Promise<ToolCallEventResult | undefined> => {
