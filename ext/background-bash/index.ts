@@ -18,7 +18,7 @@ import type {
 	ExtensionContext,
 	InlineExtension,
 } from "@earendil-works/pi-coding-agent";
-import { createLocalBashOperations, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import {
 	Box,
 	type Component,
@@ -34,6 +34,7 @@ import { stripAnsi } from "../../daemon/ansi.ts";
 import { agentTasks, isAgentTaskId, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { sharedRef } from "../_shared/global-state.ts";
+import { startupSettings } from "../_shared/startup-settings.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { subagentPanelHasRows } from "../_shared/subagent-panel.ts";
 import { timed } from "../_shared/timing.ts";
@@ -310,9 +311,7 @@ const backgroundBash: InlineExtension = {
 				appendEntry: (customType, data) => pi.appendEntry(customType, data),
 			});
 			try {
-				shellPath = SettingsManager.create(startCtx.cwd, undefined, {
-					projectTrusted: startCtx.isProjectTrusted(),
-				}).getShellPath();
+				shellPath = startupSettings(event, startCtx).settings.getShellPath();
 			} catch {
 				shellPath = undefined;
 			}

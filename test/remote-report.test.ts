@@ -281,6 +281,27 @@ describe("thinking level and trust mode from the phone", () => {
 		const { ctx, pi } = fakes({ cwd: home.dir() });
 		expect(buildReport(ctx as never, pi as never).trust).toBe("never");
 	});
+
+	it("reports the trust mode at session start, and the mode set after it from then on", async () => {
+		const sent = vi.spyOn(OrchestratorClient.prototype, "remoteReport").mockResolvedValue();
+		const handlers = new Map<string, (event: unknown, ctx?: unknown) => void>();
+		const on = (name: string, handler: (event: unknown, ctx?: unknown) => void) => handlers.set(name, handler);
+		process.env[PANE_ENV] = "pi-report";
+		try {
+			remoteFactory({ ...fakes().pi, on, events: { on }, registerCommand: () => {} } as never);
+		} finally {
+			delete process.env[PANE_ENV];
+		}
+		writeFileSync(home.settings(), JSON.stringify({ defaultProjectTrust: "always" }));
+		const { ctx } = fakes({ cwd: home.dir() });
+		handlers.get("session_start")?.({ type: "session_start", reason: "startup" }, { ...ctx, mode: "tui" });
+		handlers.get("bluclawd:remote-watched")?.(true);
+		writeFileSync(home.settings(), JSON.stringify({ defaultProjectTrust: "never" }));
+		handlers.get(TRUST_CHANGED)?.("never");
+		await waitFor(() => expect(sent).toHaveBeenCalledTimes(3));
+		expect(sent.mock.calls.map(([, report]) => report.trust)).toEqual(["always", "always", "never"]);
+		sent.mockRestore();
+	});
 });
 
 describe("slash commands from the phone", () => {
