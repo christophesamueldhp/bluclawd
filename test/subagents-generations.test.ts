@@ -102,6 +102,34 @@ describe("A run's generations", () => {
 		]);
 	});
 
+	it("tells the orchestrator only the end of a Report over 2000 lines, and where its full text is", async () => {
+		const { agentDir, scope, launch, report, notices, noticeDetails } = setup();
+		const backend = launch("backend", "Build the API.");
+		const lines = Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`);
+		await report(backend, lines.join("\n"));
+		await report(backend, "Pagination added.");
+
+		const reportFile = subagentReportPath(agentDir, scope.current()!.parentSessionId, backend.runId);
+		const [long, short] = notices();
+		expect(long).toMatch(/\n\nline 501\n/);
+		expect(long).not.toMatch(/\nline 500\n/);
+		expect(long.endsWith(`\nline 2500\n\n[Report truncated, full text: ${reportFile}]`)).toBe(true);
+		expect(short).toMatch(/\n\nPagination added\.$/);
+		expect(noticeDetails().map((details) => details.truncated)).toEqual([true, false]);
+	});
+
+	it("tells the orchestrator only the end of a Report over 50 KB", async () => {
+		const { launch, report, notices } = setup();
+		const backend = launch("backend", "Build the API.");
+		const lines = Array.from({ length: 100 }, (_, i) => `${i + 1} ${"x".repeat(1000)}`);
+		await report(backend, lines.join("\n"));
+
+		const [long] = notices();
+		expect(long).not.toContain("\n\n1 x");
+		expect(long).toMatch(/\n100 x+\n\n\[Report truncated, full text: .*report\.md\]$/);
+		expect(Buffer.byteLength(long)).toBeLessThan(52 * 1024);
+	});
+
 	it("keeps each session's usage the run reported, its latest on the run", async () => {
 		const { agentDir, scope, generations, launch, report } = setup();
 		const backend = launch("backend", "Build the API.");

@@ -31,6 +31,7 @@ import {
 import type { RunEntry } from "./directory.ts";
 import { createGenerations, type ParentNotice } from "./generations.ts";
 import {
+	capReport,
 	fromRunText,
 	PARENT_MESSAGE_ADDRESS,
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
@@ -49,6 +50,7 @@ import {
 	extractReferencedRunIdsFromBranch,
 	readPersistedRunRecord,
 	reconcileInterruptedRuns,
+	subagentReportPath,
 } from "./storage.ts";
 import { createAgentTaskSource } from "./task-source.ts";
 import { actAsRun, paneUp, RunReports, stopTurn } from "./tmux-runs.ts";
@@ -810,9 +812,13 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							details,
 							isError: true,
 						};
+					const capped = capReport(
+						report.text,
+						subagentReportPath(resolveAgentDir(), handle.record.parentSessionId, handle.runId),
+					);
 					return {
-						content: [{ type: "text", text: fromRunText("Report", formatRunLabel(handle.record), report.text) }],
-						details,
+						content: [{ type: "text", text: fromRunText("Report", formatRunLabel(handle.record), capped.text) }],
+						details: { ...details, truncated: capped.truncated },
 					};
 				}
 

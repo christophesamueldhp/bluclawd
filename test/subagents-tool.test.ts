@@ -21,9 +21,9 @@ import {
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PANE_ENV } from "../daemon/tmux.ts";
-import { readPersistedRunRecord } from "../ext/subagents/storage.ts";
+import { readPersistedRunRecord, subagentReportPath } from "../ext/subagents/storage.ts";
 import { createParentSessionWithSubagents } from "./helpers/subagent-session.ts";
-import { createSubagentTui, type SubagentTui } from "./helpers/subagent-tui.ts";
+import { createSubagentTui, launch, type SubagentTui } from "./helpers/subagent-tui.ts";
 
 const tempDirs: string[] = [];
 let tui: SubagentTui | undefined;
@@ -176,6 +176,29 @@ function toolResultText(session: { messages: readonly unknown[] }, id: string) {
 }
 
 describe("The subagent tool", () => {
+	it("gives a foreground call only the end of a Report over 2000 lines, and where its full text is", async () => {
+		const t = await createSubagentTui();
+		tui = t;
+		t.script([launch(["scout", "mapper"])]);
+		const turn = t.session.prompt("Scout and map.", { expandPromptTemplates: false });
+		await t.started("scout");
+		await t.started("mapper");
+		t.report("scout", Array.from({ length: 2500 }, (_, i) => `line ${i + 1}`).join("\n"));
+		t.report("mapper", "Mapped.");
+		await turn;
+
+		const scout = toolResultText(t.session, "call_scout");
+		const runId = scout.text.match(/sub_[0-9a-f-]{36}/)?.[0] ?? "";
+		const reportFile = subagentReportPath(t.agentDir, t.session.sessionId, runId);
+		expect(scout.text).toMatch(/\n\nline 501\n/);
+		expect(scout.text).not.toMatch(/\nline 500\n/);
+		expect(scout.text.endsWith(`\nline 2500\n\n[Report truncated, full text: ${reportFile}]`)).toBe(true);
+		expect(scout.result?.details).toMatchObject({ truncated: true });
+		const mapper = toolResultText(t.session, "call_mapper");
+		expect(mapper.text).toMatch(/\n\nMapped\.$/);
+		expect(mapper.result?.details).toMatchObject({ truncated: false });
+	});
+
 	it("refuses a launch outside tmux, where no run can be a pi session of its own", async () => {
 		vi.stubEnv(PANE_ENV, "");
 		const cwd = makeTempDir("no-tmux-cwd");

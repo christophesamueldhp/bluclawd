@@ -1,4 +1,5 @@
 import { Type } from "@earendil-works/pi-ai";
+import { truncateTail } from "@earendil-works/pi-coding-agent";
 import type { ParentScope } from "./parent-scope.ts";
 
 export const SUBAGENT_MESSAGE_TOOL = "subagent_message";
@@ -35,6 +36,13 @@ export interface SubagentMessageRecord extends SubagentMessageReceipt {
 	readonly fromName?: string;
 	readonly to: string;
 	readonly toName?: string;
+}
+
+/** A Report as the orchestrator is given it: its end, as pi caps a tool's output, and where its full text is if cut. */
+export function capReport(text: string, reportPath: string): { text: string; truncated: boolean } {
+	const tail = truncateTail(text);
+	if (!tail.truncated) return { text, truncated: false };
+	return { text: `${tail.content}\n\n[Report truncated, full text: ${reportPath}]`, truncated: true };
 }
 
 /**

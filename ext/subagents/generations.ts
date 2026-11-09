@@ -4,6 +4,7 @@ import { createRunAddressing } from "./addressing.ts";
 import { formatRunLabel, type RunExecutionContext } from "./admission.ts";
 import { createRunDirectory } from "./directory.ts";
 import {
+	capReport,
 	fromRunText,
 	PARENT_MESSAGE_ADDRESS,
 	SUBAGENT_MESSAGE_CUSTOM_TYPE,
@@ -16,6 +17,7 @@ import {
 	appendParentRunReference,
 	readRunReports,
 	recordRunSessionUsage,
+	subagentReportPath,
 	subagentRunDir,
 	writeFullSubagentReport,
 	writePersistedRunRecord,
@@ -49,10 +51,13 @@ export interface GenerationDeps {
 }
 
 /** A run's Report as the orchestrator is told of it. */
-const noticeOf = (record: Readonly<SubagentRunRecord>, text: string): ParentNotice => ({
-	parentText: fromRunText("Report", formatRunLabel(record), text),
-	details: buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).details,
-});
+const noticeOf = (agentDir: string, record: Readonly<SubagentRunRecord>, text: string): ParentNotice => {
+	const report = capReport(text, subagentReportPath(agentDir, record.parentSessionId, record.runId));
+	return {
+		parentText: fromRunText("Report", formatRunLabel(record), report.text),
+		details: { ...buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).details, truncated: report.truncated },
+	};
+};
 
 /** Persists each generation of a run and routes its messages; the scheduler it owns decides the transitions. */
 export function createGenerations(deps: GenerationDeps) {
@@ -133,7 +138,7 @@ export function createGenerations(deps: GenerationDeps) {
 					notify: (report) => {
 						const record = scheduler.getRun(runId);
 						if (!record) return;
-						deps.scope.notify(record, noticeOf(record, report.text));
+						deps.scope.notify(record, noticeOf(deps.agentDir(), record, report.text));
 					},
 					usage: (sessionId, totals) => recordRunSessionUsage(deps.agentDir(), params.record, sessionId, totals),
 					// Kept in the orchestrator's session for the user, who answers in the run's own: it starts no turn.
@@ -179,7 +184,7 @@ export function createGenerations(deps: GenerationDeps) {
 			const lastDeliveredSeq = stored[stored.length - 1].seq;
 			scheduler.markDelivered(run.runId, lastDeliveredSeq);
 			writePersistedRunRecord(agentDir, { ...run, lastDeliveredSeq });
-			for (const report of stored) deps.scope.notify(run, noticeOf(run, report.text));
+			for (const report of stored) deps.scope.notify(run, noticeOf(agentDir, run, report.text));
 		}
 	};
 
