@@ -86,7 +86,7 @@ let server: RemoteServer | undefined;
 let delivery = new PromptDelivery();
 delivery.changed = (id) => server?.status(id);
 /** Gamma's heartbeat takes the prompt a moment later, and its pi takes it or queues it. */
-function send(id: string, message: PaneMessage): boolean {
+async function send(id: string, message: PaneMessage): Promise<boolean> {
 	console.log("sent", id, JSON.stringify(message));
 	delivery.queue(id, message);
 	if (id === gamma.id && message.type === "prompt" && message.id) {

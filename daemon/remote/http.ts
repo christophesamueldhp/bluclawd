@@ -47,7 +47,7 @@ export interface RemoteDeps {
 	store: RemoteStore;
 	listInstances(): InstanceSummary[];
 	/** Queue a message for a pane's pi; false when no pane is registered as that id. */
-	send(sessionId: string, message: PaneMessage): boolean;
+	send(sessionId: string, message: PaneMessage): Promise<boolean>;
 	/** How to start a pane's pi; undefined until a pane has registered. */
 	launch(): PaneLaunch | undefined;
 	/** Start a pane; returns its tmux session name, the id its row registers as. */
@@ -562,7 +562,7 @@ async function handle(
 	const outcome = decide(session, route.action(body));
 	if ("error" in outcome) return json(res, PHONE_STATUS[outcome.error], { error: outcome.error });
 	if ("message" in outcome) {
-		if (!deps.send(session.id, outcome.message)) return json(res, 409, { error: "session_not_running" });
+		if (!(await deps.send(session.id, outcome.message))) return json(res, 409, { error: "session_not_running" });
 		const lifetime = deps.lifetime?.();
 		return json(res, 202, { ok: true, ...(lifetime ? { lifetime } : {}) });
 	}

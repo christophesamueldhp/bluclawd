@@ -54,7 +54,7 @@ describe("instant delivery to a pane", () => {
 		// Its wait reaches the daemon right after the first register.
 		await new Promise((resolve) => setTimeout(resolve, 50));
 		const sent = Date.now();
-		expect(supervisor.sendExternal("pane-wait-e2e", { type: "prompt", text: "hi" })).toBe(true);
+		expect(await supervisor.sendExternal("pane-wait-e2e", { type: "prompt", text: "hi" })).toBe(true);
 		await waitFor(() => expect(handled).toHaveLength(1));
 		expect(handled[0].message).toEqual({ type: "prompt", text: "hi" });
 		expect(handled[0].at - sent).toBeLessThan(500);
@@ -72,7 +72,7 @@ describe("instant delivery to a pane", () => {
 			// Three bytes a character: some fall across the socket's reads.
 			{ type: "prompt", text: "✻".repeat(200_000) },
 		];
-		for (const message of messages) supervisor.sendExternal("pane-images", message);
+		for (const message of messages) await supervisor.sendExternal("pane-images", message);
 		const { messages: delivered } = await client.register({ id: "pane-images", cwd: dir });
 		expect(delivered).toEqual(messages);
 		await client.unregister("pane-images");
@@ -81,7 +81,7 @@ describe("instant delivery to a pane", () => {
 	it("keeps the messages a register drains while the pane is busy for over a second", async () => {
 		const client = new OrchestratorClient();
 		await client.register({ id: "pane-busy", cwd: dir });
-		supervisor.sendExternal("pane-busy", { type: "prompt", text: "hi" });
+		await supervisor.sendExternal("pane-busy", { type: "prompt", text: "hi" });
 		const registering = client.register({ id: "pane-busy", cwd: dir });
 		const until = Date.now() + 1500;
 		while (Date.now() < until) {

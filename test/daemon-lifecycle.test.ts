@@ -291,7 +291,7 @@ describe("one row per session through quit and resume", () => {
 		supervisor.registerExternal(pane("pi-b"), "idle");
 
 		const waiting = supervisor.waitExternal("pi-b", 5_000);
-		expect(supervisor.sendExternal("pi-a", { type: "prompt", text: "hi" })).toBe(true);
+		expect(await supervisor.sendExternal("pi-a", { type: "prompt", text: "hi" })).toBe(true);
 		await expect(waiting).resolves.toBe("queued");
 		expect(supervisor.drainExternal("pi-b")).toEqual([{ type: "prompt", text: "hi" }]);
 		expect(supervisor.waitExternal("pi-a", 10)).toBeUndefined();
@@ -380,7 +380,7 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 		expect(listed[1].id).not.toBe("pi-a");
 	});
 
-	it("after /new, the old session's row id addresses that stopped row, not the pane's new session", () => {
+	it("after /new, the old session's row id addresses that stopped row, not the pane's new session", async () => {
 		const supervisor = testRegistry(dir);
 		supervisor.registerExternal(pane("pi-a", session("a", "a done"), "sa"), "idle");
 		supervisor.unregisterExternal("pi-a", "new");
@@ -388,13 +388,13 @@ describe("a session switch, fork or crash in a pane keeps the session it left as
 		const fresh = rows(supervisor)[1].id;
 
 		supervisor.setInstanceMeta("pi-a", { pinned: true });
-		expect(supervisor.sendExternal("pi-a", { type: "abort" })).toBe(false);
+		expect(await supervisor.sendExternal("pi-a", { type: "abort" })).toBe(false);
 		expect(rows(supervisor)).toEqual([stopped("pi-a", "sa", "a done", true), live(fresh, "sb", "pi-a")]);
 
 		expect(supervisor.deleteInstance("pi-a")).toBe(true);
 		expect(rows(supervisor)).toEqual([live(fresh, "sb", "pi-a")]);
 		// The pane's own id still reaches the pane once no row is listed as it.
-		expect(supervisor.sendExternal("pi-a", { type: "abort" })).toBe(true);
+		expect(await supervisor.sendExternal("pi-a", { type: "abort" })).toBe(true);
 		expect(supervisor.drainExternal("pi-a")).toEqual([{ type: "abort" }]);
 	});
 

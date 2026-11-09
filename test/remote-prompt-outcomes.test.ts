@@ -33,6 +33,8 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 	let token: string;
 	/** The registry's clock: moved on to reap a pane. */
 	let clock: number;
+	/** The panes tmux no longer has. */
+	const lost = new Set<string>();
 	const registrations: SelfRegistration[] = [];
 	const streams: AbortController[] = [];
 
@@ -59,7 +61,11 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		dir = await mkdtemp(join(tmpdir(), "bluclawd-outcomes-"));
 		vi.stubEnv("PI_SERVER_DIR", dir);
 		clock = Date.now();
-		supervisor = new ServerSupervisor({ now: () => clock, tmux: paneUp, dir });
+		supervisor = new ServerSupervisor({
+			now: () => clock,
+			tmux: { hasSession: (name) => !lost.has(name), end: () => {} },
+			dir,
+		});
 		server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
 		control = remoteControl();
 		setRemoteControl(control);
@@ -363,6 +369,12 @@ describe("a prompt's outcome, back to the phone by its id", () => {
 		expect(await ask("pane-unaged", [{ id: "p-unaged" }])).toEqual([]);
 	});
 
+	it("is refused once tmux no longer has its pane, as its pi died unseen", async () => {
+		await new OrchestratorClient().register({ id: "pane-dead", pane: "pane-dead", cwd: dir });
+		lost.add("pane-dead");
+		expect(await prompt("pane-dead", { text: "hi", id: "p-dead" })).toBe(409);
+	});
+
 	it("is lost when its pane unregisters with it still queued", async () => {
 		const pane = await stillPane("pane-quit");
 		const phone = await watch("pane-quit");
@@ -560,20 +572,20 @@ const inbox = (outcome: PromptOutcome["outcome"], reason?: string) =>
 
 describe("prompt delivery, fed by the row table", () => {
 	/** `p-given` taken by pane pi-a's heartbeat, and `p-inbox` still in its row's inbox. */
-	function delivering() {
+	async function delivering() {
 		const f = deliveryFixture();
 		f.beat();
-		f.send("p-given");
+		await f.send("p-given");
 		f.supervisor.drainExternal("pi-a");
-		f.send("p-inbox");
+		await f.send("p-inbox");
 		return f;
 	}
 
-	it("keeps a prompt in its row's inbox until its pane's heartbeat takes it, in the order sent", () => {
+	it("keeps a prompt in its row's inbox until its pane's heartbeat takes it, in the order sent", async () => {
 		const f = deliveryFixture();
 		f.beat();
-		expect(f.send("p-1")).toBe(true);
-		expect(f.supervisor.sendExternal(ROW, { type: "abort" })).toBe(true);
+		expect(await f.send("p-1")).toBe(true);
+		expect(await f.supervisor.sendExternal(ROW, { type: "abort" })).toBe(true);
 		expect(f.outcomes()).toEqual([{ id: "p-1", outcome: "sent" }]);
 		expect(f.supervisor.drainExternal("pi-a")).toEqual([
 			{ type: "prompt", text: "p-1", id: "p-1" },
@@ -583,14 +595,14 @@ describe("prompt delivery, fed by the row table", () => {
 		expect(f.outcomes()).toEqual([{ id: "p-1", outcome: "sent" }]);
 	});
 
-	it("tracks nothing for a row no live pane takes", () => {
+	it("tracks nothing for a row no live pane takes", async () => {
 		const f = deliveryFixture();
-		expect(f.send("p-1")).toBe(false);
+		expect(await f.send("p-1")).toBe(false);
 		expect(f.outcomes()).toEqual([]);
 	});
 
-	it("settles what its pane reports of the prompts its row was given, and nothing else", () => {
-		const f = delivering();
+	it("settles what its pane reports of the prompts its row was given, and nothing else", async () => {
+		const f = await delivering();
 		f.supervisor.delivery.reported(ROW, [
 			{ id: "p-given", outcome: "taken" },
 			{ id: "p-never-sent", outcome: "taken" },
@@ -599,7 +611,7 @@ describe("prompt delivery, fed by the row table", () => {
 		expect(f.outcomes()).toEqual([given("taken"), inbox("sent")]);
 	});
 
-	it.each<[string, (f: ReturnType<typeof delivering>) => void, PromptOutcome[]]>([
+	it.each<[string, (f: Awaited<ReturnType<typeof delivering>>) => void, PromptOutcome[]]>([
 		[
 			"it quits",
 			(f) => f.supervisor.unregisterExternal("pi-a", "quit"),
@@ -626,14 +638,14 @@ describe("prompt delivery, fed by the row table", () => {
 			(f) => f.supervisor.deleteInstance(ROW),
 			[given("lost", "pane_gone"), inbox("lost", "pane_gone")],
 		],
-	])("ends what its row's inbox and its pane hold when its pane ends: %s", (_, ends, outcomes) => {
-		const f = delivering();
+	])("ends what its row's inbox and its pane hold when its pane ends: %s", async (_, ends, outcomes) => {
+		const f = await delivering();
 		ends(f);
 		expect(f.outcomes()).toEqual(outcomes);
 	});
 
-	it("loses a Silent pane's inbox at once, while what it was given waits on its report", () => {
-		const f = delivering();
+	it("loses a Silent pane's inbox at once, while what it was given waits on its report", async () => {
+		const f = await delivering();
 		f.lapse();
 		expect(f.outcomes()).toEqual([given("sent"), inbox("lost", "pane_gone")]);
 		f.beat();
@@ -641,26 +653,26 @@ describe("prompt delivery, fed by the row table", () => {
 		expect(f.outcomes()).toEqual([given("taken"), inbox("lost", "pane_gone")]);
 	});
 
-	it("loses what a Silent pane was given once tmux no longer has it", () => {
-		const f = delivering();
+	it("loses what a Silent pane was given once tmux no longer has it", async () => {
+		const f = await delivering();
 		f.lapse();
 		f.tmux.set("pi-a", "gone");
 		f.supervisor.listExternalInstances();
 		expect(f.outcomes()).toEqual([given("lost", "pane_gone"), inbox("lost", "pane_gone")]);
 	});
 
-	it("refuses what a Silent pane was given once it comes back on another session", () => {
-		const f = delivering();
+	it("refuses what a Silent pane was given once it comes back on another session", async () => {
+		const f = await delivering();
 		f.lapse();
 		f.beat("pi-a", f.other);
 		expect(f.outcomes()).toEqual([given("refused", "session_changed"), inbox("lost", "pane_gone")]);
 	});
 
-	it("leaves the row's inbox to the pane that went on as its row when a Silent pane it held ends", () => {
-		const f = delivering();
+	it("leaves the row's inbox to the pane that went on as its row when a Silent pane it held ends", async () => {
+		const f = await delivering();
 		f.lapse();
 		f.beat("pi-b");
-		f.send("p-next");
+		await f.send("p-next");
 		f.tmux.set("pi-a", "gone");
 		f.supervisor.listExternalInstances();
 		expect(f.outcomes()).toEqual([
@@ -671,8 +683,8 @@ describe("prompt delivery, fed by the row table", () => {
 		expect(f.supervisor.drainExternal("pi-b")).toEqual([{ type: "prompt", text: "p-next", id: "p-next" }]);
 	});
 
-	it("tells its listener of each row whose pane ended or fell silent", () => {
-		const f = delivering();
+	it("tells its listener of each row whose pane ended or fell silent", async () => {
+		const f = await delivering();
 		const changed: string[] = [];
 		f.supervisor.delivery.changed = (row) => changed.push(row);
 		f.lapse();

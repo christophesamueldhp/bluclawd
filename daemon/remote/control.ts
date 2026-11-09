@@ -9,7 +9,6 @@ import type {
 	InstanceSummary,
 	LiveSnapshot,
 	PaneLaunch,
-	PaneMessage,
 	PaneReport,
 	RemoteRequest,
 	RemoteResponse,
@@ -44,7 +43,7 @@ export interface RemoteControlDeps {
 	listInstances(probe?: ListProbe): InstanceSummary[];
 	/** tmux's answers for a list, asked without blocking: remote control lists with the latest. */
 	probeForList?(): Promise<ListProbe>;
-	send(sessionId: string, message: PaneMessage): boolean;
+	send: RemoteDeps["send"];
 	deleteInstance(sessionId: string): boolean;
 	renameInstance: RemoteDeps["renameInstance"];
 	claimStart: RemoteDeps["claimStart"];

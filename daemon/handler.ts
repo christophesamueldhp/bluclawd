@@ -194,7 +194,7 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 		}
 
 		case "send": {
-			return supervisor.sendExternal(request.instanceId, request.message)
+			return (await supervisor.sendExternal(request.instanceId, request.message))
 				? { type: "ack", ok: true }
 				: unknownInstanceError(request.instanceId);
 		}

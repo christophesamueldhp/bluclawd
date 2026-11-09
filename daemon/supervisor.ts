@@ -136,6 +136,8 @@ export class ServerSupervisor {
 	private readonly rows = new Map<string, Row>();
 	/** Each pane's pending wait, by id; kept apart from its row, which every heartbeat replaces. */
 	private readonly waits = new Map<string, (outcome: WaitOutcome) => void>();
+	/** The latest send, settled once it is queued or refused. */
+	private sending: Promise<unknown> = Promise.resolve();
 	/** Each row's inbox and the phone's prompts in it, fed every pane's end and silence. */
 	readonly delivery: PromptDelivery;
 	/** By session file, the pane on it that reaping dropped, tmux unable to say whether it is up, and
@@ -472,12 +474,20 @@ export class ServerSupervisor {
 
 	/** Queue a message for a self-registered session, by its pane's id or its row's; false when no
 	 *  live pane is registered as either, or tmux no longer has that pane, which then ends: its pi
-	 *  died unseen within its TTL, so nothing would take the message. */
-	sendExternal(id: string, message: PaneMessage): boolean {
+	 *  died unseen within its TTL, so nothing would take the message. tmux is asked without blocking. */
+	async sendExternal(id: string, message: PaneMessage): Promise<boolean> {
+		const before = this.addressed(id);
+		if (!before || !this.isLive(before)) return false;
+		const { pane } = before.pane.record;
+		// Queued in the order sent, whichever of tmux's answers comes back first.
+		const turn = Promise.all([pane && this.tmuxSaysAsync(pane), this.sending]);
+		this.sending = turn;
+		const [answer] = await turn;
+		// Its pane may have beaten, ended or been replaced meanwhile: only the same pi, still live, is meant.
 		const at = this.addressed(id);
-		if (!at || !this.isLive(at)) return false;
-		const { pane } = at.pane.record;
-		if (pane && this.tmuxSays(pane) === "gone") {
+		if (!at || !this.isLive(at) || at.pane.record.id !== before.pane.record.id) return false;
+		// A beat since says its pi is up, whatever tmux answered before it.
+		if (answer === "gone" && at.pane === before.pane) {
 			this.paneEnded(at);
 			return false;
 		}
@@ -619,18 +629,20 @@ export class ServerSupervisor {
 		for (const { parent } of loadInstances(this.deps.dir)) {
 			if (parent && !registered.has(parent)) names.add(parent);
 		}
-		const { tmux } = this.deps;
 		const answers = await Promise.all(
-			[...names].map(async (name): Promise<[string, TmuxAnswer]> => {
-				try {
-					const up = tmux.hasSessionAsync ? await tmux.hasSessionAsync(name) : tmux.hasSession(name);
-					return [name, up ? "up" : "gone"];
-				} catch {
-					return [name, "unknown"];
-				}
-			}),
+			[...names].map(async (name): Promise<[string, TmuxAnswer]> => [name, await this.tmuxSaysAsync(name)]),
 		);
 		return { now, said: new Map(answers) };
+	}
+
+	/** Whether tmux has a pane's session, asked without blocking; "unknown" when it could not say. */
+	private async tmuxSaysAsync(pane: string): Promise<TmuxAnswer> {
+		const { tmux } = this.deps;
+		try {
+			return (tmux.hasSessionAsync ? await tmux.hasSessionAsync(pane) : tmux.hasSession(pane)) ? "up" : "gone";
+		} catch {
+			return "unknown";
+		}
 	}
 
 	/** Row `id`'s entry, a stored one if it had none. */
