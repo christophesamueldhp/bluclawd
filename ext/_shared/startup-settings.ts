@@ -6,8 +6,10 @@
  * `session_start` handler makes; a read later in the session (a command, a shortcut) still
  * opens the files itself, to see an edit made since.
  */
-import { type ExtensionContext, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { type ExtensionContext, type SessionStartEvent, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { sharedRef } from "./global-state.ts";
+
+type SettingsCtx = Pick<ExtensionContext, "cwd" | "isProjectTrusted">;
 
 export interface StartupSettings {
 	/** Shared by every handler: read it, never set it. */
@@ -16,20 +18,23 @@ export interface StartupSettings {
 	errors: ReturnType<SettingsManager["drainErrors"]>;
 }
 
-const reads = sharedRef("startupSettings", new WeakMap<object, Map<string, StartupSettings>>());
+const reads = sharedRef("startupSettings", new WeakMap<SessionStartEvent, Map<string, StartupSettings>>());
 
-export function startupSettings(
-	event: object,
-	ctx: Pick<ExtensionContext, "cwd" | "isProjectTrusted">,
-): StartupSettings {
-	const projectTrusted = ctx.isProjectTrusted();
-	const key = `${projectTrusted}:${ctx.cwd}`;
+/** The settings files as they are now, for one reader. */
+export function readSettings(ctx: SettingsCtx): StartupSettings {
+	const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted: ctx.isProjectTrusted() });
+	return { settings, errors: settings.drainErrors() };
+}
+
+export function startupSettings(event: SessionStartEvent, ctx: SettingsCtx): StartupSettings {
+	// Keyed by trust and cwd too: a read made before the project was trusted must not hand its
+	// project settings, or their absence, to a handler that sees it trusted.
+	const key = `${ctx.isProjectTrusted()}:${ctx.cwd}`;
 	const byKey = reads.get().get(event) ?? new Map<string, StartupSettings>();
 	reads.get().set(event, byKey);
 	let read = byKey.get(key);
 	if (!read) {
-		const settings = SettingsManager.create(ctx.cwd, undefined, { projectTrusted });
-		read = { settings, errors: settings.drainErrors() };
+		read = readSettings(ctx);
 		byKey.set(key, read);
 	}
 	return read;

@@ -43,14 +43,22 @@ describe("startupSettings", () => {
 		const copy = (await import(`${path}?copy=other`)) as typeof import("../ext/_shared/startup-settings.ts");
 		expect(copy.startupSettings).not.toBe(startupSettings);
 
-		const event = { type: "session_start", reason: "startup" };
+		const event = { type: "session_start", reason: "startup" } as const;
 		writeGlobal(JSON.stringify({ shellPath: "/bin/first" }));
 		expect(startupSettings(event, ctx()).settings.getShellPath()).toBe("/bin/first");
 		writeGlobal(JSON.stringify({ shellPath: "/bin/second" }));
 		expect(copy.startupSettings(event, ctx()).settings.getShellPath()).toBe("/bin/first");
 
 		// The next session_start (a /reload, /new, /resume) reads again.
-		const next = { type: "session_start", reason: "reload" };
+		const next = { type: "session_start", reason: "reload" } as const;
 		expect(startupSettings(next, ctx()).settings.getShellPath()).toBe("/bin/second");
+	});
+
+	it("never hands a read made before the project was trusted to a handler that sees it trusted", () => {
+		mkdirSync(join(dir, ".pi"));
+		writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ shellPath: "/bin/project" }));
+		const event = { type: "session_start", reason: "startup" } as const;
+		expect(startupSettings(event, ctx(false)).settings.getShellPath()).toBeUndefined();
+		expect(startupSettings(event, ctx(true)).settings.getShellPath()).toBe("/bin/project");
 	});
 });

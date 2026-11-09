@@ -13,11 +13,11 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	InlineExtension,
+	SessionStartEvent,
 	ToolCallEventResult,
 } from "@earendil-works/pi-coding-agent";
-import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { denyRules } from "../_shared/settings.ts";
-import { startupSettings } from "../_shared/startup-settings.ts";
+import { readSettings, startupSettings } from "../_shared/startup-settings.ts";
 import { timed } from "../_shared/timing.ts";
 import { runtimeConfig, sandboxSetting, saveSandboxEnabled } from "./config.ts";
 import { prepareReaper } from "./reaper.ts";
@@ -79,17 +79,14 @@ function factory(pi: ExtensionAPI): void {
 	let ctx: ExtensionContext | undefined;
 	const asker = networkAsker(() => ctx);
 
-	async function applySettings(startCtx: ExtensionContext, startEvent?: object): Promise<void> {
+	async function applySettings(startCtx: ExtensionContext, startEvent?: SessionStartEvent): Promise<void> {
 		ctx = startCtx;
 		asker.forget();
 		try {
 			// A session_start shares the read; /sandbox reads again, to see what it just saved.
-			const read = startEvent ? startupSettings(startEvent, startCtx) : undefined;
-			const sm =
-				read?.settings ??
-				SettingsManager.create(startCtx.cwd, undefined, { projectTrusted: startCtx.isProjectTrusted() });
+			const { settings: sm, errors } = startEvent ? startupSettings(startEvent, startCtx) : readSettings(startCtx);
 			// pi reads an unparseable settings file as empty, which reads as the sandbox being off.
-			for (const { path, scope } of read?.errors ?? sm.drainErrors()) {
+			for (const { path, scope } of errors) {
 				if (scope === "global")
 					startCtx.ui.notify(`Sandbox is off: ${path ?? "global settings"} could not be read.`, "warning");
 			}
