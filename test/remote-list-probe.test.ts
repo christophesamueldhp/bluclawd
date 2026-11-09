@@ -394,7 +394,11 @@ describe("whether a terminal shows pi", () => {
 				},
 				attachedAsync: () => new Promise<boolean>((resolve) => pending.push(resolve)),
 			} as unknown as Tmux;
-			control = remoteFor(dir, testRegistry(dir, () => Date.now(), heldTmux(new Set()).tmux), { tmux });
+			control = remoteFor(
+				dir,
+				testRegistry(dir, () => Date.now(), heldTmux(new Set()).tmux),
+				{ tmux },
+			);
 			({ terminalOpen } = await pairedPhone(control));
 		});
 		afterEach(async () => {
