@@ -29,7 +29,8 @@ export async function serve(): Promise<void> {
 	console.log(`server listening on ${socketPath}`);
 
 	const remote = new RemoteControl({
-		listInstances: () => listSummaries(supervisor),
+		listInstances: (probe) => listSummaries(supervisor, probe),
+		probeForList: () => supervisor.probeForList(),
 		send: (id, message) => supervisor.sendExternal(id, message),
 		deleteInstance: (id) => supervisor.deleteInstance(id),
 		renameInstance: (id, name) => supervisor.renameInstance(id, name) !== undefined,
