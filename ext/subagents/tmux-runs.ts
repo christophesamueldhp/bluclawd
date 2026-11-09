@@ -13,13 +13,13 @@ import type { AgentActivity } from "../../daemon/activity.ts";
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { textOf } from "../../daemon/session-state.ts";
-import { endPane, PARENT_ENV, RUN_TASK_ENV, type Tmux } from "../../daemon/tmux.ts";
+import { endPane, PARENT_ENV, RUN_DIR_ENV, RUN_TASK_ENV, type Tmux } from "../../daemon/tmux.ts";
 import { ForegroundActivity } from "../agent-view/self-registration.ts";
 import type { AgentDefinition } from "./definitions.ts";
 import { SUBAGENT_MESSAGE_CUSTOM_TYPE } from "./messages.ts";
 import { fromRun, runTaskText } from "./run-messages.ts";
 import type { SubagentRunExecuteParams, SubagentRunOutcome } from "./runs.ts";
-import { newestRunSession } from "./storage.ts";
+import { newestRunSession, readRunReports, storeRunReport } from "./storage.ts";
 import { sessionUsage } from "./usage.ts";
 
 /** What a run is started as: its role and choices, resolved. */
@@ -70,7 +70,11 @@ export function startRun(tmux: Pick<Tmux, "newSession">, run: RunLaunch): string
 	return tmux.newSession({
 		cwd: run.cwd,
 		args: runLaunchArgs(run, instructions),
-		env: { [PARENT_ENV]: run.parent, ...(run.task !== undefined ? { [RUN_TASK_ENV]: task } : {}) },
+		env: {
+			[PARENT_ENV]: run.parent,
+			[RUN_DIR_ENV]: run.runDir,
+			...(run.task !== undefined ? { [RUN_TASK_ENV]: task } : {}),
+		},
 	});
 }
 
@@ -210,13 +214,20 @@ export async function executeTmuxRun(
 	controller.recordPane(pane);
 	controller.markRunning();
 	let last = "";
-	const unlisten = deps.reports.listen(pane, (message) => {
+	let delivered = record.lastDeliveredSeq ?? 0;
+	const receive = (message: SessionMessage) => {
 		if (message.kind === "activity") {
 			controller.updateActivity(message.activity);
 			if (message.activity === "awaiting_input") deps.needsInput(message.dialog);
 			return;
 		}
 		if (message.kind !== "report") return;
+		// A Report sent again after a retry, or read from disk after it came, is told once.
+		if (message.seq !== undefined) {
+			if (message.seq <= delivered) return;
+			delivered = message.seq;
+			controller.markDelivered(delivered);
+		}
 		last = message.text;
 		if (message.usage) {
 			controller.updateUsage(message.usage);
@@ -224,7 +235,16 @@ export async function executeTmuxRun(
 		}
 		controller.updateProgress(message.text);
 		if (!deps.reports.take(record.runId, message)) deps.notify(message);
-	});
+	};
+	const unlisten = deps.reports.listen(pane, receive);
+	/** The Reports the run stored that never came: its sends failed. */
+	const pull = () => {
+		for (const stored of readRunReports(launch.runDir, delivered)) {
+			receive({ type: "session_message", kind: "report", from: pane, ...stored });
+		}
+	};
+	// Taken over after a reload, or resumed: what it stored while no instance listened.
+	pull();
 	// Closed by its orchestrator, or its own pi exited (quit, crash): its session is kept either way.
 	let watch: ReturnType<typeof setInterval> | undefined;
 	let handedOff = false;
@@ -239,7 +259,10 @@ export async function executeTmuxRun(
 			};
 			deps.handOff.addEventListener("abort", handOff, { once: true });
 			watch = setInterval(() => {
-				if (!paneUp(deps.tmux, pane)) resolve();
+				if (paneUp(deps.tmux, pane)) return;
+				// A foreground launch may still wait on a Report its run could not send.
+				pull();
+				resolve();
 			}, PANE_CHECK_MS);
 			watch.unref?.();
 		});
@@ -261,6 +284,16 @@ export async function executeTmuxRun(
  * as a Report.
  */
 export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefined): void {
+	const runDir = process.env[RUN_DIR_ENV];
+	/** Stores a Report before it is sent, numbered; none from a run started before Reports were stored. */
+	const store = (report: Parameters<typeof storeRunReport>[1]) => {
+		if (!runDir) return undefined;
+		try {
+			return storeRunReport(runDir, report);
+		} catch {
+			return undefined;
+		}
+	};
 	const activity = new ForegroundActivity();
 	/** What the orchestrator was last told. States and Reports go out one after another, in order. */
 	let told: AgentActivity | undefined;
@@ -320,21 +353,40 @@ export function actAsRun(pi: ExtensionAPI, parent: string, pane: string | undefi
 			.reverse()
 			.find((entry) => entry.type === "message" && entry.message.role === "assistant");
 		const text = last?.type === "message" && "content" in last.message ? textOf(last.message.content) : "";
-		const report: SessionMessage = {
-			...fromRun(pi, pane),
-			kind: "report",
+		const content = {
 			text,
 			usage: sessionUsage(ctx.sessionManager.getEntries()),
 			sessionId: ctx.sessionManager.getSessionId(),
 		};
-		sending = sending.then(() => send(parent, report, ctx));
-		await sending;
+		const report: SessionMessage = { ...fromRun(pi, pane), kind: "report", ...content, seq: store(content) };
+		// Not awaited, as pi waits on this handler: the orchestrator reads a Report its retries never got through.
+		sending = sending.then(() => send(parent, report, ctx, REPORT_RETRY_MS));
 	});
 }
 
-async function send(parent: string, message: SessionMessage, ctx: ExtensionContext): Promise<void> {
+/** How long a run waits before each next try of a Report the daemon did not take: some 30s in all. */
+const REPORT_RETRY_MS = [500, 1000, 2000, 4000, 8000, 15_000];
+
+/** Sends, and again after each of `delays` while it fails; throws the last failure once they run out. */
+export async function sendRetrying(send: () => Promise<void>, delays: readonly number[]): Promise<void> {
+	for (const delay of delays) {
+		try {
+			return await send();
+		} catch {
+			await new Promise((resolve) => setTimeout(resolve, delay));
+		}
+	}
+	return send();
+}
+
+async function send(
+	parent: string,
+	message: SessionMessage,
+	ctx: ExtensionContext,
+	retries: readonly number[] = [],
+): Promise<void> {
 	try {
-		await new OrchestratorClient().send(parent, message);
+		await sendRetrying(() => new OrchestratorClient().send(parent, message), retries);
 	} catch (error) {
 		// A replaced session's ctx throws, which must not break the chain of later sends.
 		try {

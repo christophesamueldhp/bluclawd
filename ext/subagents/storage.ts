@@ -161,6 +161,48 @@ export function newestRunSession(runDir: string): string | undefined {
 	}
 }
 
+/** A Report as its run stored it before sending it, numbered among the run's Reports. */
+export interface StoredRunReport {
+	seq: number;
+	text: string;
+	usage?: SessionUsage;
+	sessionId?: string;
+}
+
+/** The run's own: the orchestrator rewrites `record.json` and `report.md`, so a run's Reports go in files of their own. */
+const runReportsDir = (runDir: string) => join(runDir, "reports");
+
+/**
+ * Stores a run's Report before it is sent, as the next of its Reports, on from the earlier generations' in the same
+ * run directory. Returns its `seq`.
+ */
+export function storeRunReport(runDir: string, report: Omit<StoredRunReport, "seq">): number {
+	const seq = (readRunReports(runDir, 0).at(-1)?.seq ?? 0) + 1;
+	writeAtomicPrivateFile(join(runReportsDir(runDir), `${seq}.json`), JSON.stringify({ ...report, seq }));
+	return seq;
+}
+
+/** The Reports a run stored after `seq`, in order. */
+export function readRunReports(runDir: string, seq: number): StoredRunReport[] {
+	let files: string[];
+	try {
+		files = readdirSync(runReportsDir(runDir));
+	} catch {
+		return [];
+	}
+	return files
+		.flatMap((file) => {
+			const at = /^(\d+)\.json$/.exec(file);
+			if (!at || Number(at[1]) <= seq) return [];
+			try {
+				return [JSON.parse(readFileSync(join(runReportsDir(runDir), file), "utf8")) as StoredRunReport];
+			} catch {
+				return [];
+			}
+		})
+		.sort((a, b) => a.seq - b.seq);
+}
+
 function sanitizeRecordForStorage(record: Readonly<SubagentRunRecord>): SubagentRunRecord {
 	const clone = structuredClone(record) as SubagentRunRecord;
 	if (clone.errorMessage) {

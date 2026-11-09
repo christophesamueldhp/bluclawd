@@ -67,6 +67,8 @@ export interface SubagentRunRecord {
 	/** The usage of the run's session so far, as its latest Report gave it. */
 	usage: SessionUsage;
 	backgroundDeliveryAttempted: boolean;
+	/** The `seq` of the run's latest Report the orchestrator was told of; absent until one numbered was. */
+	lastDeliveredSeq?: number;
 	lastProgressText?: string;
 	summaryText?: string;
 }
@@ -80,6 +82,8 @@ export interface SubagentRunController {
 	/** The usage of the run's session so far. */
 	updateUsage(totals: SessionUsage): void;
 	updateProgress(text: string): void;
+	/** The orchestrator was told of the run's Report `seq`: stored with the run's next change. */
+	markDelivered(seq: number): void;
 }
 
 export interface SubagentRunExecuteParams {
@@ -399,6 +403,12 @@ export class SubagentRunScheduler<C = unknown> {
 		});
 	}
 
+	/** The orchestrator was told of the run's Report `seq`, of a final run too: stored with its next change. */
+	markDelivered(runId: string, seq: number): void {
+		const managed = this.runs.get(runId);
+		if (managed && seq > (managed.record.lastDeliveredSeq ?? 0)) managed.record.lastDeliveredSeq = seq;
+	}
+
 	cancelRun(runId: string, source: SubagentStopSource = "user", reason = "Subagent run cancelled"): boolean {
 		const managed = this.runs.get(runId);
 		if (!managed || isTerminalSubagentStatus(managed.record.status)) {
@@ -450,6 +460,10 @@ export class SubagentRunScheduler<C = unknown> {
 				if (inactive()) return;
 				managed.record.lastProgressText = text;
 				this.emitChange(managed);
+			},
+			markDelivered: (seq: number) => {
+				if (inactive()) return;
+				managed.record.lastDeliveredSeq = seq;
 			},
 		};
 

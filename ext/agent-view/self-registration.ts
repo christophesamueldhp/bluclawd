@@ -203,6 +203,9 @@ export class SelfRegistration {
 	private readonly onMessage: (message: PaneMessage) => void;
 	private readonly onWatched: (watched: boolean) => void;
 	private readonly onWantReport: () => void;
+	private readonly onReconnect: () => void;
+	/** The last register failed: the daemon was down, or did not answer. */
+	private unreached = false;
 	private activity: AgentActivity = "idle";
 	private timer: ReturnType<typeof setInterval> | undefined;
 	private readonly inflight = new Set<Promise<void>>();
@@ -219,7 +222,8 @@ export class SelfRegistration {
 	 *  `id`: a pane registers under its tmux session's name, so its row outlives a session switch.
 	 *  `getInfo` returns undefined while there is no session to list yet.
 	 *  `onWatched`: after each heartbeat, whether a phone has this session open.
-	 *  `onWantReport`: the daemon has no report from this pane, as after it restarted. */
+	 *  `onWantReport`: the daemon has no report from this pane, as after it restarted.
+	 *  `onReconnect`: a register went through after one that did not. */
 	constructor(
 		client: OrchestratorClient,
 		getInfo: () => PaneHeartbeat | undefined,
@@ -227,12 +231,14 @@ export class SelfRegistration {
 		id: string = randomUUID(),
 		onWatched: (watched: boolean) => void = () => {},
 		onWantReport: () => void = () => {},
+		onReconnect: () => void = () => {},
 	) {
 		this.client = client;
 		this.getInfo = getInfo;
 		this.onMessage = onMessage;
 		this.onWatched = onWatched;
 		this.onWantReport = onWantReport;
+		this.onReconnect = onReconnect;
 		this.id = id;
 	}
 
@@ -277,8 +283,11 @@ export class SelfRegistration {
 		const instance = { ...info, id: this.id, activity: this.activity, launch: { command: piCommand() } };
 		let watched = false;
 		let wantReport = false;
+		let reconnected = false;
 		try {
 			const res = await this.client.register(instance);
+			reconnected = this.unreached;
+			this.unreached = false;
 			watched = res?.watched === true;
 			wantReport = res?.wantReport === true;
 			const messages = res?.messages ?? [];
@@ -293,12 +302,14 @@ export class SelfRegistration {
 			}
 		} catch {
 			// daemon may be down; the next tick retries (register is an upsert).
+			this.unreached = true;
 		}
 		// Stopped meanwhile: pi may have invalidated the extension API the callback uses.
 		if (this.stopped) return;
 		try {
 			this.onWatched(watched);
 			if (wantReport) this.onWantReport();
+			if (reconnected) this.onReconnect();
 		} catch {
 			// a heartbeat must not reject: stop() awaits it and the timer fires it unawaited
 		}

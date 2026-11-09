@@ -239,6 +239,38 @@ describe("SelfRegistration report request", () => {
 	});
 });
 
+describe("SelfRegistration reconnect", () => {
+	it("says it reached the daemon again after a heartbeat that could not, and only then", async () => {
+		const replies: Array<Error | undefined> = [
+			undefined,
+			new Error("daemon down"),
+			new Error("daemon down"),
+			undefined,
+			undefined,
+		];
+		const client = {
+			register: async () => {
+				const reply = replies.shift();
+				if (reply) throw reply;
+				return { messages: [], watched: false };
+			},
+			unregister: async () => {},
+		} as unknown as OrchestratorClient;
+		let reconnected = 0;
+		const reg = new SelfRegistration(
+			client,
+			() => ({ cwd: "/p" }),
+			() => {},
+			"pi-1",
+			() => {},
+			() => {},
+			() => reconnected++,
+		);
+		for (let beat = 0; beat < 5; beat++) await reg.refresh();
+		expect(reconnected).toBe(1);
+	});
+});
+
 describe("SelfRegistration.stop", () => {
 	it("unregisters and resolves when pi's API is gone by the time an in-flight register lands", async () => {
 		let land: (reply: { watched: boolean; messages: [] }) => void = () => {};

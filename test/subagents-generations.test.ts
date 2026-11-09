@@ -11,6 +11,7 @@ import {
 	subagentReportPath,
 	writePersistedRunRecord,
 } from "../ext/subagents/storage.ts";
+import { sendRetrying } from "../ext/subagents/tmux-runs.ts";
 import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
 import {
 	fakeSessionContext,
@@ -109,6 +110,86 @@ describe("A run's generations", () => {
 
 		expect(readRunUsageLedger(agentDir, scope.current()!.parentSessionId).usage.totalTokens).toBe(130);
 		expect(generations.scheduler.getRun(backend.runId)?.usage.totalTokens).toBe(30);
+	});
+});
+
+describe("Delivering a run's Reports", () => {
+	it("tells the orchestrator of a Report once, however often it is sent", async () => {
+		const { launch, sendReport, notices } = setup();
+		const backend = launch("backend", "Build the API.");
+		await sendReport(backend, 1, "API built.");
+		// Sent again by a retry whose first try had reached the daemon.
+		await sendReport(backend, 1, "API built.");
+		await sendReport(backend, 2, "Pagination added.");
+		await sendReport(backend, 1, "API built.");
+		expect(notices()).toEqual([
+			expect.stringMatching(/\n\nAPI built\.$/),
+			expect.stringMatching(/\n\nPagination added\.$/),
+		]);
+	});
+
+	it("gives a foreground call the Report its run stored but could not send, once the run's pane is gone", async () => {
+		const { launch, paneOf, panes, storeReport, reports, notices } = setup();
+		const backend = launch("backend", "Build the API.");
+		await paneOf(backend);
+		const waiting = reports.next(backend.runId);
+		// Its send failed: the Report is only on disk.
+		storeReport(backend, "API built.");
+		panes[0].ended = true;
+
+		expect(await waiting).toMatchObject({ kind: "report", text: "API built.", seq: 1 });
+		expect(notices()).toEqual([]);
+	});
+
+	it("tells the orchestrator's session, reloaded, of the Report its open run stored meanwhile, and of no earlier one", async () => {
+		const first = setup();
+		const backend = first.launch("backend", "Build the API.");
+		first.storeReport(backend, "API built.");
+		await first.sendReport(backend, 1, "API built.");
+		// The orchestrator is reloading: the run's next Report is only on disk.
+		first.storeReport(backend, "Pagination added.");
+
+		const next = setup(first);
+		const { parentSessionId } = next.scope.current()!;
+		next.admission.adopt(readPersistedRunRecord(first.agentDir, parentSessionId, backend.runId)!, next.session);
+		expect(next.notices()).toEqual([expect.stringMatching(/\n\nPagination added\.$/)]);
+	});
+
+	it("tells the orchestrator's session, reopened, of the Report its closed run stored, once", async () => {
+		const first = setup();
+		const backend = first.launch("backend", "Build the API.");
+		first.storeReport(backend, "API built.");
+		await first.sendReport(backend, 1, "API built.");
+		first.storeReport(backend, "Pagination added.");
+		first.generations.scheduler.cancelRun(backend.runId, "model", "Done with it.");
+		await backend.completion;
+
+		const next = setup(first);
+		const scope = next.scope.current()!;
+		next.generations.scheduler.reopen(
+			readPersistedRunRecord(first.agentDir, scope.parentSessionId, backend.runId)!,
+			scope.sessionEpoch,
+		);
+		next.generations.pullReports(scope);
+		next.generations.pullReports(scope);
+		expect(next.notices()).toEqual([expect.stringMatching(/\n\nPagination added\.$/)]);
+		expect(readPersistedRunRecord(first.agentDir, scope.parentSessionId, backend.runId)?.lastDeliveredSeq).toBe(2);
+	});
+
+	it("has a run send its Report again, whatever failed, until the daemon takes it or the tries run out", async () => {
+		let failures = 2;
+		const sends: string[] = [];
+		const send = async () => {
+			sends.push("try");
+			if (failures-- > 0) throw new Error("connect ECONNREFUSED");
+		};
+		await sendRetrying(send, [0, 0, 0]);
+		expect(sends).toHaveLength(3);
+
+		failures = Number.POSITIVE_INFINITY;
+		sends.length = 0;
+		await expect(sendRetrying(send, [0, 0])).rejects.toThrow("ECONNREFUSED");
+		expect(sends).toHaveLength(3);
 	});
 });
 

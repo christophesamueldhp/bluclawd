@@ -119,6 +119,11 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		const reports = new RunReports();
 		/** Aborted on a reload, which hands this instance's open runs to the next one. */
 		const handOff = new AbortController();
+		// What the daemon held for this session meanwhile may be lost: its runs' Reports are read from disk.
+		pi.events.on("bluclawd:daemon-reconnected", () => {
+			const scope = parentScope.current();
+			if (scope) pullReports(scope);
+		});
 		pi.events.on("bluclawd:session-message", (data) => {
 			const message = data as SessionMessage;
 			if (message.kind === "report" || message.kind === "activity") reports.receive(message);
@@ -250,7 +255,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 		};
 
-		const { scheduler, directory, messageFromParent } = createGenerations({
+		const { scheduler, directory, messageFromParent, pullReports } = createGenerations({
 			agentDir: resolveAgentDir,
 			bus: messageBus,
 			scope: parentScope,
@@ -412,6 +417,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					const run = scheduler.getRun(runId) ?? readPersistedRunRecord(agentDir, sessionId, runId);
 					if (run?.status === "closed") scheduler.reopen(run, reopened.sessionEpoch);
 				}
+				// Reports its runs stored but could not send while it was gone.
+				pullReports(reopened);
 			}
 
 			unpublish?.();
