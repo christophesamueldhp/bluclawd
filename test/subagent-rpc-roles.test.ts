@@ -198,7 +198,7 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 		]);
 		real.tmux.sendKeys(pane, ["again", "Enter"]);
 		const main = await real.waitForRequests("main", 4);
-		expect(lastToolResult(main[3])?.text).toMatch(/read-only.*bash/s);
+		expect(lastToolResult(main[3])?.text).toMatch(/cannot have yet: bash/);
 		expect(real.requests("second")).toHaveLength(0);
 		expect(JSON.parse(readFileSync(snapshotFile, "utf8"))).toMatchObject(admitted);
 	});
@@ -229,7 +229,7 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 
 		expect(toolNames(real.requests("boss")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
 		expect(toolNames(real.requests("review")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
-		expect(lastToolResult(main[3])?.text).toMatch(/"tester" names tools a read-only run cannot have: bash/);
+		expect(lastToolResult(main[3])?.text).toMatch(/"tester" names tools a run on pi's RPC cannot have yet: bash/);
 		expect(real.requests("tests")).toHaveLength(0);
 		expect(toolNames(real.requests("compose")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
 	});
