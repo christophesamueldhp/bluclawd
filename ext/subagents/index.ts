@@ -407,9 +407,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						admission.adopt(run, ctx);
 				}
 			}
-			// Reconcile orphaned runs referenced on the active branch from prior crashes
+			// The session's runs an earlier instance left open and this one did not take over, on any branch.
 			const liveIds = new Set(scheduler.listActiveRuns(sessionId).map((r) => r.runId));
-			for (const run of reconcileInterruptedRuns(agentDir, sessionId, branchEntries, liveIds)) {
+			for (const run of reconcileInterruptedRuns(agentDir, sessionId, liveIds)) {
 				if (run.status !== "closed" || !run.pane) continue;
 				// Not taken over (its pi is gone, or this one has no pane to take it to): it is closed.
 				endPane(timedTmux(), run.pane);
@@ -579,7 +579,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				openWorldHint: false,
 			},
 			description:
-				"Send a message to a subagent by name or run ID (sub_…). A working child gets it at its next safe point; an idle one that is still open takes a turn on it. A completed or closed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
+				"Send a message to a subagent by name or run ID (sub_…). A working child gets it at its next safe point; an idle one that is still open takes a turn on it. A closed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
 			parameters: SUBAGENT_MESSAGE_PARAMETERS,
 			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
 				const ctx = toolCtx ?? parentScope.context();
@@ -841,7 +841,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						provider: handle.record.provider,
 						modelId: handle.record.modelId,
 						thinkingLevel: handle.record.thinkingLevel,
-						snapshotDrifted: false,
 						truncated: false,
 					} satisfies SubagentResultDetails,
 				};

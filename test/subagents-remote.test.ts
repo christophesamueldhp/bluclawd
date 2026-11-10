@@ -138,7 +138,6 @@ describe("Task 9 (M2) — Remote task parity, bounded output, cross-session deni
 			taskSummary: "Inspect HTTP",
 			startSnapshot: { headCommit: null, dirty: false, statusDigest: "" },
 			generation: 0,
-			snapshotDrifted: false,
 			admittedAt: 1000,
 			deliveryMode: "background" as const,
 			status: "running" as const,

@@ -45,7 +45,6 @@ const storedRun = (parentSessionId: string): SubagentRunRecord => ({
 	cwd: "/proj",
 	taskSummary: "Old task.",
 	startSnapshot: { headCommit: null, dirty: false, statusDigest: "" },
-	snapshotDrifted: false,
 	admittedAt: 1,
 	endedAt: 2,
 	deliveryMode: "background",
@@ -382,7 +381,7 @@ describe("Addressing a run", () => {
 			name: "checker-1",
 			agentName: "checker",
 			definitionSource: "inline",
-			status: "completed",
+			status: "closed",
 			transcriptPath: join(runDir, "old.jsonl"),
 		});
 
@@ -403,7 +402,7 @@ describe("Addressing a run", () => {
 		});
 
 		expect(await message("sub_old", "Go on.")).toBe(
-			'Message 0 unavailable: "old" (sub_old) is interrupted; only a completed or closed subagent can be resumed.',
+			'Message 0 unavailable: "old" (sub_old) is interrupted; only a closed subagent can be resumed.',
 		);
 	});
 

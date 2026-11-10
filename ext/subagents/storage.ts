@@ -297,14 +297,15 @@ export function listPersistedRunRecords(agentDir: string, parentSessionId: strin
 	return runIds.flatMap((runId) => readPersistedRunRecord(agentDir, parentSessionId, runId) ?? []);
 }
 
-/** Maps statuses and stop sources from before the queue and child quotas were removed. */
+/** Maps statuses and stop sources from before the queue and child quotas were removed, and before runs were pis. */
 function decodeLegacyStatus(record: SubagentRunRecord): void {
 	const legacy = record as { status: string; stopSource?: string };
 	if (legacy.status === "timed_out" || legacy.status === "budget_exceeded") {
 		record.stopReason ??=
 			legacy.status === "timed_out" ? "Stopped by a deadline (legacy)" : "Stopped by a budget (legacy)";
-		record.status = "cancelled";
 	}
+	// An in-process run that ended kept its session, as a closed run does: it can be resumed from it.
+	if (["completed", "cancelled", "timed_out", "budget_exceeded"].includes(legacy.status)) record.status = "closed";
 	// A queued run never started, so reconciliation interrupts it like any other orphan.
 	if (legacy.status === "queued") record.status = "starting";
 	// A run from before runs were pis of their own, whose last turn had ended: an orphan, if it was never final.
@@ -411,26 +412,22 @@ export function extractReferencedRunIdsFromBranch(branchEntries: readonly unknow
 }
 
 /**
- * Settles the runs on the active branch that an earlier instance left open: a run in tmux as closed, any other as
- * interrupted. Returns the records it changed.
+ * Settles the session's runs that an earlier instance left open: a run in tmux as closed, any other as interrupted.
+ * Those off the active branch too, as tree navigation would have closed them. Returns the records it changed.
  */
 export function reconcileInterruptedRuns(
 	agentDir: string,
 	parentSessionId: string,
-	activeBranchEntries: readonly unknown[],
 	liveRunIds: ReadonlySet<string> = new Set(),
 ): SubagentRunRecord[] {
-	const referencedIds = extractReferencedRunIdsFromBranch(activeBranchEntries);
 	const interrupted: SubagentRunRecord[] = [];
 
-	for (const runId of referencedIds) {
-		if (liveRunIds.has(runId)) continue;
-		const persisted = readPersistedRunRecord(agentDir, parentSessionId, runId);
-		if (!persisted) continue;
+	for (const persisted of listPersistedRunRecords(agentDir, parentSessionId)) {
+		if (liveRunIds.has(persisted.runId)) continue;
 		if (!isTerminalSubagentStatus(persisted.status)) {
 			// A run in tmux its orchestrator lost is closed, its session kept, so it can be resumed. No foreground call
 			// waits for it any more: a Report it stored comes as a notice (ADR-0008).
-			const runDir = join(getSubagentsRootDir(agentDir), parentSessionId, runId);
+			const runDir = join(getSubagentsRootDir(agentDir), parentSessionId, persisted.runId);
 			persisted.status = persisted.pane ? "closed" : "interrupted";
 			if (persisted.pane) {
 				persisted.transcriptPath ??= newestRunSession(runDir);

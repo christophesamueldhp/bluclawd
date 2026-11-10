@@ -24,18 +24,12 @@ function makeRecord(overrides: Partial<SubagentRunRecord> = {}): SubagentRunReco
 			dirty: false,
 			statusDigest: "",
 		},
-		endSnapshot: {
-			headCommit: "1111111",
-			dirty: false,
-			statusDigest: "",
-		},
-		snapshotDrifted: false,
 		admittedAt: 1000,
 		startedAt: 1010,
 		endedAt: 1500,
 		deliveryMode: "foreground",
-		status: "completed",
-		complete: true,
+		status: "closed",
+		complete: false,
 		usage: {
 			...createEmptySubagentUsage(),
 			input: 400,
@@ -84,22 +78,20 @@ describe("Task 5 (M1) — Subagent report envelope, truncation, and untrusted fr
 		].join("\n");
 
 		const record = makeRecord({
-			status: "cancelled",
-			complete: false,
+			status: "closed",
 			stopReason: "Turn limit (12) exceeded",
 			summaryText: spoofedWorkerText,
 		});
 
 		const envelope = buildSubagentResultEnvelope(record);
 		expect(envelope.parentText).toContain("Run: sub_test_1");
-		expect(envelope.parentText).toContain("Execution: cancelled");
+		expect(envelope.parentText).toContain("Execution: closed");
 		expect(envelope.parentText).toContain("Complete: false");
 		expect(envelope.parentText).toContain("Snapshot: HEAD 1111111 (clean)");
 		expect(envelope.parentText).toContain("Verification: not inferred by the runtime");
 		expect(envelope.parentText).not.toContain("Verification: npm test passed");
 		expect(envelope.parentText).not.toContain("bash 9");
 		expect(envelope.parentText).toContain("Turn limit (12) exceeded");
-		expect(envelope.isError).toBe(true);
 	});
 
 	it("preserves Snapshot, Scope, Evidence, Verification, and Blockers under structure-preserving 8 KiB UTF-8 truncation", () => {
@@ -142,20 +134,6 @@ describe("Task 5 (M1) — Subagent report envelope, truncation, and untrusted fr
 		expect(envelope.parentText).toContain(
 			"Full report: /tmp/pi-agent/bluclawd/subagents/sess_parent_1/sub_test_1/report.md",
 		);
-	});
-
-	it("surfaces workspace snapshot drift warnings when HEAD or working-tree status changes before child completion", () => {
-		const driftedRecord = makeRecord({
-			startSnapshot: { headCommit: "aaaa111", dirty: false, statusDigest: "" },
-			endSnapshot: { headCommit: "bbbb222", dirty: true, statusDigest: "9f8e7d6c5b4a3210" },
-			snapshotDrifted: true,
-		});
-
-		const envelope = buildSubagentResultEnvelope(driftedRecord);
-		expect(envelope.parentText).toContain("aaaa111");
-		expect(envelope.parentText).toContain("bbbb222");
-		expect(envelope.parentText).toMatch(/DRIFT WARNING/i);
-		expect(envelope.details.snapshotDrifted).toBe(true);
 	});
 
 	it("strips terminal control sequences and frames adversarial approval-spoofing and defect-suppression payloads as untrusted data", () => {

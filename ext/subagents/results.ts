@@ -1,10 +1,5 @@
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
-import {
-	isTerminalSubagentStatus,
-	type SubagentLifecycleStatus,
-	type SubagentRunRecord,
-	type WorkspaceSnapshot,
-} from "./runs.ts";
+import type { SubagentLifecycleStatus, SubagentRunRecord, WorkspaceSnapshot } from "./runs.ts";
 
 export const MAX_PARENT_REPORT_BYTES = 8 * 1024;
 export const UNTRUSTED_REPORT_HEADER =
@@ -19,7 +14,6 @@ export interface SubagentResultDetails {
 	provider: string;
 	modelId: string;
 	thinkingLevel: string;
-	snapshotDrifted: boolean;
 	reportPath?: string;
 	stopReason?: string;
 	errorMessage?: string;
@@ -30,7 +24,6 @@ export interface BuiltSubagentResultEnvelope {
 	parentText: string;
 	fullReportText: string;
 	truncated: boolean;
-	isError: boolean;
 	details: SubagentResultDetails;
 }
 
@@ -109,19 +102,9 @@ function parseWorkerSections(rawWorkerText: string): ParsedWorkerSections {
 	};
 }
 
-export function formatSnapshotSummary(
-	start: WorkspaceSnapshot,
-	end: WorkspaceSnapshot | undefined,
-	drifted: boolean,
-): string {
-	const startHead = start.headCommit ? `HEAD ${start.headCommit.slice(0, 12)}` : "non-git workspace";
-	const startState = start.dirty ? "dirty" : "clean";
-	if (!drifted || !end) {
-		return `${startHead} (${startState})`;
-	}
-	const endHead = end.headCommit ? `HEAD ${end.headCommit.slice(0, 12)}` : "non-git workspace";
-	const endState = end.dirty ? "dirty" : "clean";
-	return `${startHead} (${startState}) -> ${endHead} (${endState}) [DRIFT WARNING: repository state changed while subagent ran; re-verify cited paths before acting]`;
+/** The workspace as the run found it at launch. */
+export function formatSnapshotSummary(start: WorkspaceSnapshot): string {
+	return `${start.headCommit ? `HEAD ${start.headCommit.slice(0, 12)}` : "non-git workspace"} (${start.dirty ? "dirty" : "clean"})`;
 }
 
 function truncateUtf8Safe(text: string, maxBytes: number): { text: string; truncated: boolean } {
@@ -150,7 +133,7 @@ export function buildSubagentResultEnvelope(
 	maxParentBytes = MAX_PARENT_REPORT_BYTES,
 ): BuiltSubagentResultEnvelope {
 	const parsed = parseWorkerSections(record.summaryText ?? "");
-	const snapshotText = formatSnapshotSummary(record.startSnapshot, record.endSnapshot, record.snapshotDrifted);
+	const snapshotText = formatSnapshotSummary(record.startSnapshot);
 	const verificationText =
 		"not inferred by the runtime; any test or check results above are agent-reported (a zero shell exit is not test coverage)";
 
@@ -158,14 +141,11 @@ export function buildSubagentResultEnvelope(
 	if (parsed.blockers && parsed.blockers.toLowerCase() !== "none" && parsed.blockers !== "- none") {
 		runtimeBlockers.push(parsed.blockers);
 	}
-	if (record.stopReason && record.status !== "completed") {
+	if (record.stopReason) {
 		runtimeBlockers.push(`Runtime stop reason: ${sanitizeReportText(record.stopReason)}`);
 	}
 	if (record.errorMessage) {
 		runtimeBlockers.push(`Runtime error: ${sanitizeReportText(record.errorMessage)}`);
-	}
-	if (!record.complete && record.status === "completed") {
-		runtimeBlockers.push("Output was incomplete (stopped at token length limit).");
 	}
 	const blockersText = runtimeBlockers.length > 0 ? runtimeBlockers.join("\n") : "none";
 	const fullReportRef = record.reportPath ? record.reportPath : "(in-memory only — report file not persisted)";
@@ -209,8 +189,6 @@ export function buildSubagentResultEnvelope(
 		}
 	}
 
-	const isError = !isTerminalSubagentStatus(record.status) || record.status !== "completed" || !record.complete;
-
 	const details: SubagentResultDetails = {
 		runId: record.runId,
 		agentName: record.agentName,
@@ -220,7 +198,6 @@ export function buildSubagentResultEnvelope(
 		provider: record.provider,
 		modelId: record.modelId,
 		thinkingLevel: record.thinkingLevel,
-		snapshotDrifted: record.snapshotDrifted,
 		reportPath: record.reportPath,
 		stopReason: record.stopReason ? sanitizeReportText(record.stopReason) : undefined,
 		errorMessage: record.errorMessage ? sanitizeReportText(record.errorMessage) : undefined,
@@ -231,7 +208,6 @@ export function buildSubagentResultEnvelope(
 		parentText,
 		fullReportText,
 		truncated,
-		isError,
 		details,
 	};
 }

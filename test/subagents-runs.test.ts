@@ -65,9 +65,9 @@ describe("Ticket #8 — Every requested run starts immediately with no child quo
 			}
 		}
 
-		for (const gate of gates) gate.resolve({ status: "completed", complete: true, summaryText: "done" });
+		for (const gate of gates) gate.resolve({ status: "closed", summaryText: "done" });
 		const finished = await Promise.all(handles.map((h) => h.completion));
-		expect(finished.every((r) => r.status === "completed")).toBe(true);
+		expect(finished.every((r) => r.status === "closed")).toBe(true);
 	});
 
 	it("does not auto-stop a run past former turn, tool-call, token, repetition and time limits", async () => {
@@ -95,10 +95,10 @@ describe("Ticket #8 — Every requested run starts immediately with no child quo
 				expect(live.usage.totalTokens).toBe(100_001);
 			}
 
-			for (const gate of gates.values()) gate.resolve({ status: "completed", complete: true, summaryText: "done" });
+			for (const gate of gates.values()) gate.resolve({ status: "closed", summaryText: "done" });
 			for (const handle of handles) {
 				const done = await handle.completion;
-				expect(done.status).toBe("completed");
+				expect(done.status).toBe("closed");
 				expect(done.stopReason).toBeUndefined();
 			}
 		} finally {
@@ -114,7 +114,7 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 			vi.resetModules();
 			const { SubagentRunScheduler: ReloadedScheduler } = await import("../ext/subagents/runs.ts");
 			const scheduler = new ReloadedScheduler({
-				executeRun: async () => ({ status: "completed", complete: true, summaryText: "done" }),
+				executeRun: async () => ({ status: "closed", summaryText: "done" }),
 			});
 			const handle = admitted(scheduler.admit(makeRequest()));
 			await handle.completion;
@@ -125,7 +125,7 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 
 	it("numbers a launch as generation 0 and its resume as generation 1", async () => {
 		const scheduler = new SubagentRunScheduler({
-			executeRun: async () => ({ status: "completed", complete: true, summaryText: "done" }),
+			executeRun: async () => ({ status: "closed", summaryText: "done" }),
 		});
 		const launch = admitted(scheduler.admit(makeRequest()));
 		expect(launch.record.generation).toBe(0);
@@ -141,7 +141,7 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 				const gate = deferred<SubagentRunOutcome>();
 				params.signal.addEventListener(
 					"abort",
-					() => gate.resolve({ status: "cancelled", complete: false, summaryText: "Partial before abort" }),
+					() => gate.resolve({ status: "closed", summaryText: "Partial before abort" }),
 					{ once: true },
 				);
 				return gate.promise;
@@ -156,7 +156,7 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 		const stopped = admitted(scheduler.admit(makeRequest()));
 		expect(scheduler.cancelRun(stopped.runId, "remote")).toBe(true);
 		const stoppedResult = await stopped.completion;
-		expect(stoppedResult.status).toBe("cancelled");
+		expect(stoppedResult.status).toBe("closed");
 		expect(stoppedResult.stopSource).toBe("remote");
 		expect(stoppedResult.summaryText).toBe("Partial before abort");
 
@@ -164,19 +164,19 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 		const callerRun = admitted(scheduler.admit(makeRequest({ signal: caller.signal })));
 		caller.abort();
 		const callerResult = await callerRun.completion;
-		expect(callerResult.status).toBe("cancelled");
+		expect(callerResult.status).toBe("closed");
 		expect(callerResult.stopSource).toBe("caller");
 	});
 
 	it("ignores stop requests after a run has finished", async () => {
 		const scheduler = new SubagentRunScheduler({
-			executeRun: async () => ({ status: "completed", complete: true, summaryText: "ok" }),
+			executeRun: async () => ({ status: "closed", summaryText: "ok" }),
 		});
 		const handle = admitted(scheduler.admit(makeRequest()));
 		await handle.completion;
 
 		expect(scheduler.cancelRun(handle.runId, "user")).toBe(false);
-		expect(scheduler.getRun(handle.runId)?.status).toBe("completed");
+		expect(scheduler.getRun(handle.runId)?.status).toBe("closed");
 	});
 
 	it("keeps a stopping run active until a non-cooperating runner actually returns", async () => {
@@ -191,9 +191,9 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 		expect(scheduler.getRun(run.runId)?.status).toBe("stopping");
 		expect(scheduler.listActiveRuns().map((r) => r.runId)).toEqual([run.runId]);
 
-		stuckGate.resolve({ status: "completed", complete: true, summaryText: "late" });
+		stuckGate.resolve({ status: "closed", summaryText: "late" });
 		const done = await run.completion;
-		expect(done.status).toBe("cancelled");
+		expect(done.status).toBe("closed");
 		expect(scheduler.listActiveRuns()).toEqual([]);
 	});
 });
@@ -205,7 +205,7 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 		const finalizerGate = deferred();
 		let finalizerCalls = 0;
 		const scheduler = new SubagentRunScheduler({
-			executeRun: async () => ({ status: "completed", complete: true, summaryText: "done" }),
+			executeRun: async () => ({ status: "closed", summaryText: "done" }),
 			onFinalize: async (record) => {
 				finalizerCalls++;
 				await finalizerGate.promise;
@@ -227,7 +227,7 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 
 		finalizerGate.resolve();
 		const done = await handle.completion;
-		expect(done).toMatchObject({ status: "completed", reportPath: "/durable/report.md" });
+		expect(done).toMatchObject({ status: "closed", reportPath: "/durable/report.md" });
 		expect(finalizerCalls).toBe(1);
 		expect(scheduler.listActiveRuns()).toEqual([]);
 	});
@@ -236,10 +236,10 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 		const changes: string[] = [];
 		const finalized: string[] = [];
 		const scheduler = new SubagentRunScheduler({
-			executeRun: async () => ({ status: "completed", complete: true, summaryText: "done" }),
+			executeRun: async () => ({ status: "closed", summaryText: "done" }),
 			onFinalize: async (record) => {
 				finalized.push(record.status);
-				if (record.status === "completed") throw new Error("disk full");
+				if (record.status === "closed") throw new Error("disk full");
 				return record;
 			},
 			onStateChange: (record) => changes.push(record.status),
@@ -248,9 +248,9 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 		expect(done).toMatchObject({ status: "failed", complete: false });
 		expect(done.errorMessage).toMatch(/finaliz.*disk full/i);
 		expect(changes.at(-1)).toBe("failed");
-		expect(changes).not.toContain("completed");
+		expect(changes).not.toContain("closed");
 		// The failed outcome goes through the same durable path, replacing anything the first attempt stored
-		expect(finalized).toEqual(["completed", "failed"]);
+		expect(finalized).toEqual(["closed", "failed"]);
 	});
 
 	it("waits for runners and finalizers to settle and writes nothing afterwards", async () => {
@@ -275,12 +275,12 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 			settled = true;
 		});
 
-		runnerGate.resolve({ status: "completed", complete: true, summaryText: "late" });
+		runnerGate.resolve({ status: "closed", summaryText: "late" });
 		await tick();
 		expect(settled).toBe(false);
 		finalizerGate.resolve();
 		await drained;
-		expect((await handle.completion).status).toBe("cancelled");
+		expect((await handle.completion).status).toBe("closed");
 		await tick();
 		expect(changesAfterSettled).toBe(0);
 	});
@@ -309,7 +309,7 @@ describe("Issue #63 — A run's controller only affects its own generation", () 
 			},
 		});
 		const handle = admitted(scheduler.admit(makeRequest()));
-		gates[0].resolve({ status: "completed", complete: true, summaryText: "first" });
+		gates[0].resolve({ status: "closed", summaryText: "first" });
 		await handle.completion;
 
 		const resumed = admitted(scheduler.resume(handle.runId, undefined));
@@ -327,7 +327,7 @@ describe("Issue #63 — A run's controller only affects its own generation", () 
 			usage: { input: 15 },
 		});
 
-		gates[1].resolve({ status: "completed", complete: true, summaryText: "second" });
-		expect(await resumed.completion).toMatchObject({ status: "completed", usage: { input: 15 } });
+		gates[1].resolve({ status: "closed", summaryText: "second" });
+		expect(await resumed.completion).toMatchObject({ status: "closed", usage: { input: 15 } });
 	});
 });

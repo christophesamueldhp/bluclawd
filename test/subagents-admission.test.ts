@@ -86,15 +86,12 @@ async function setup(
 		executeRun: ({ record, signal }) =>
 			options.firstGenerationCompletes && !record.generation
 				? Promise.resolve({
-						status: "completed",
-						complete: true,
+						status: "closed",
 						summaryText: "v1 done.",
 						transcriptPath: join(agentDir, "transcript.jsonl"),
 					})
 				: new Promise((resolve) =>
-						signal.addEventListener("abort", () =>
-							resolve({ status: "cancelled", complete: false, summaryText: "" }),
-						),
+						signal.addEventListener("abort", () => resolve({ status: "closed", summaryText: "" })),
 					),
 	});
 	const scope = createParentScope({
@@ -387,7 +384,7 @@ describe("Run admission", () => {
 			name: "backend",
 		});
 		const completed = await handleOf(launched).completion;
-		expect(completed.status).toBe("completed");
+		expect(completed.status).toBe("closed");
 
 		const prompts: string[] = [];
 		const { result } = resume(completed, () => {
@@ -433,24 +430,16 @@ describe("Run admission", () => {
 			expect(resumed).toMatchObject({ ok: false, refusal: "unavailable" });
 			expect(errorOf(resumed)).toContain(`not supported in one-shot "${mode}" mode`);
 			expect(built).toBe(false);
-			expect(scheduler.getRun(completed.runId)?.status).toBe("completed");
+			expect(scheduler.getRun(completed.runId)?.status).toBe("closed");
 		}
 	});
 
-	it("refuses to resume a run that is running or stopped, or whose session was replaced", async () => {
+	it("refuses to resume a run that is running, or whose session was replaced", async () => {
 		const live = await setup();
 		const running = handleOf(await live.launch({ agent: "explorer", task: "x" })).record;
 		const notDone = await live.resume(running, () => "x").result;
 		expect(notDone).toMatchObject({ ok: false, refusal: "unavailable" });
-		expect(errorOf(notDone)).toMatch(/only a completed or closed subagent can be resumed/);
-
-		const stuck = handleOf(await live.launch({ agent: "explorer", name: "stuck", task: "Hold.", background: true }));
-		live.scheduler.cancelRun(stuck.runId, "model");
-		const stopped = await live.resume(await stuck.completion, () => "Go on.").result;
-		expect(stopped).toMatchObject({ ok: false, refusal: "unavailable" });
-		expect(errorOf(stopped)).toMatch(
-			/^"stuck" \(sub_[^)]+\) is cancelled; only a completed or closed subagent can be resumed/,
-		);
+		expect(errorOf(notDone)).toMatch(/only a closed subagent can be resumed/);
 
 		const { launch, resume, invalidateSession } = await setup({ firstGenerationCompletes: true });
 

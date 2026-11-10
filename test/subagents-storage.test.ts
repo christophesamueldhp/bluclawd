@@ -70,7 +70,6 @@ function makeRecord(overrides: Partial<SubagentRunRecord> = {}): SubagentRunReco
 		cwd: "/proj",
 		taskSummary: "Explore storage",
 		startSnapshot: { headCommit: "1234567", dirty: false, statusDigest: "" },
-		snapshotDrifted: false,
 		admittedAt: 1000,
 		startedAt: 1050,
 		deliveryMode: "foreground",
@@ -148,7 +147,7 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		expect(failedReport).not.toHaveProperty("reportPath");
 	});
 
-	it("records parent references via pi.appendEntry and reconciles orphaned nonterminal runs on restart as interrupted without replaying work", () => {
+	it("records parent references via pi.appendEntry and reconciles orphaned nonterminal runs on restart as interrupted without replaying work, on the active branch or not", () => {
 		const agentDir = makeTempDir("reconcile");
 		const appendedEntries: Array<{ type: string; customType: string; data: unknown }> = [];
 		const fakePi = {
@@ -158,12 +157,7 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		};
 
 		const runningRec = makeRecord({ runId: "sub_orphan_1", status: "running" });
-		const completedRec = makeRecord({
-			runId: "sub_done_2",
-			status: "completed",
-			complete: true,
-			endedAt: 2000,
-		});
+		const completedRec = makeRecord({ runId: "sub_done_2", status: "closed", endedAt: 2000 });
 		const abandonedBranchRec = makeRecord({ runId: "sub_abandoned_3", status: "running" });
 
 		writePersistedRunRecord(agentDir, runningRec);
@@ -175,23 +169,26 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		expect(appendedEntries).toHaveLength(2);
 		expect(appendedEntries[0].customType).toBe(SUBAGENT_RUN_CUSTOM_ENTRY);
 
-		// Reconcile only the active branch entries (runningRec and completedRec; abandonedBranchRec is not on branch)
+		// abandonedBranchRec is on no branch the session shows now: tree navigation closes such a run, and so does a restart.
 		const reconciled = reconcileInterruptedRuns(
 			agentDir,
 			runningRec.parentSessionId,
-			appendedEntries,
 			new Set(), // no live runs after restart
 		);
 
-		expect(reconciled.map((r) => r.runId)).toEqual(["sub_orphan_1"]);
-		expect(reconciled[0].status).toBe("interrupted");
-		expect(reconciled[0].complete).toBe(false);
+		expect(reconciled.map((r) => [r.runId, r.status]).sort()).toEqual([
+			["sub_abandoned_3", "interrupted"],
+			["sub_orphan_1", "interrupted"],
+		]);
+		expect(readPersistedRunRecord(agentDir, runningRec.parentSessionId, "sub_abandoned_3")?.status).toBe(
+			"interrupted",
+		);
 
 		const reloadedOrphan = readPersistedRunRecord(agentDir, runningRec.parentSessionId, "sub_orphan_1");
 		expect(reloadedOrphan?.status).toBe("interrupted");
 
 		const reloadedCompleted = readPersistedRunRecord(agentDir, completedRec.parentSessionId, "sub_done_2");
-		expect(reloadedCompleted?.status).toBe("completed");
+		expect(reloadedCompleted?.status).toBe("closed");
 	});
 
 	it("reconciles a run in tmux its orchestrator never closed as closed, resumable from the session it kept, and in the background", () => {
@@ -203,9 +200,8 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		writeFileSync(join(runDir, "a.jsonl"), "");
 		utimesSync(join(runDir, "a.jsonl"), 1, 1);
 		writeFileSync(join(runDir, "b.jsonl"), "");
-		const entries = [{ type: "custom", customType: SUBAGENT_RUN_CUSTOM_ENTRY, data: { runId: run.runId } }];
 
-		const reconciled = reconcileInterruptedRuns(agentDir, run.parentSessionId, entries, new Set());
+		const reconciled = reconcileInterruptedRuns(agentDir, run.parentSessionId, new Set());
 
 		expect(reconciled).toEqual([
 			expect.objectContaining({ runId: run.runId, status: "closed", transcriptPath: join(runDir, "b.jsonl") }),
@@ -217,7 +213,7 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		});
 	});
 
-	it("reads legacy quota stops as cancelled and reconciles a legacy queued run as interrupted without restarting it", () => {
+	it("reads legacy completed runs and stops as closed, resumable from their session, and reconciles a legacy queued run as interrupted without restarting it", () => {
 		const agentDir = makeTempDir("legacy");
 		const parentSessionId = "sess_legacy_1";
 		const writeLegacy = (runId: string, status: string, stopSource?: string, stopReason?: string) => {
@@ -233,27 +229,32 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 			const dir = join(getSubagentsRootDir(agentDir), parentSessionId, runId);
 			mkdirSync(dir, { recursive: true });
 			writeFileSync(join(dir, "record.json"), JSON.stringify(legacy));
-			return { type: "custom", customType: SUBAGENT_RUN_CUSTOM_ENTRY, data: { runId } };
 		};
-		const entries = [
-			writeLegacy("sub_legacy_queued", "queued"),
-			writeLegacy("sub_legacy_timeout", "timed_out", "deadline"),
-			writeLegacy("sub_legacy_budget", "budget_exceeded", "budget"),
-			writeLegacy("sub_legacy_aborted", "timed_out", "deadline", "aborted"),
-		];
+		writeLegacy("sub_legacy_queued", "queued");
+		writeLegacy("sub_legacy_timeout", "timed_out", "deadline");
+		writeLegacy("sub_legacy_budget", "budget_exceeded", "budget");
+		writeLegacy("sub_legacy_aborted", "timed_out", "deadline", "aborted");
+		writeLegacy("sub_legacy_completed", "completed");
+		writeLegacy("sub_legacy_cancelled", "cancelled", "user", "Subagent run cancelled");
 
-		const reconciled = reconcileInterruptedRuns(agentDir, parentSessionId, entries, new Set());
+		const reconciled = reconcileInterruptedRuns(agentDir, parentSessionId, new Set());
 
 		expect(reconciled.map((r) => [r.runId, r.status])).toEqual([["sub_legacy_queued", "interrupted"]]);
 		const timeout = readPersistedRunRecord(agentDir, parentSessionId, "sub_legacy_timeout");
-		expect(timeout).toMatchObject({ status: "cancelled", stopReason: "Stopped by a deadline (legacy)" });
+		expect(timeout).toMatchObject({ status: "closed", stopReason: "Stopped by a deadline (legacy)" });
 		expect(timeout?.stopSource).toBeUndefined();
 		const budget = readPersistedRunRecord(agentDir, parentSessionId, "sub_legacy_budget");
-		expect(budget).toMatchObject({ status: "cancelled", stopReason: "Stopped by a budget (legacy)" });
+		expect(budget).toMatchObject({ status: "closed", stopReason: "Stopped by a budget (legacy)" });
 		expect(budget?.stopSource).toBeUndefined();
 		expect(readPersistedRunRecord(agentDir, parentSessionId, "sub_legacy_aborted")).toMatchObject({
-			status: "cancelled",
+			status: "closed",
 			stopReason: "aborted",
+		});
+		expect(readPersistedRunRecord(agentDir, parentSessionId, "sub_legacy_completed")?.status).toBe("closed");
+		expect(readPersistedRunRecord(agentDir, parentSessionId, "sub_legacy_cancelled")).toMatchObject({
+			status: "closed",
+			stopSource: "user",
+			stopReason: "Subagent run cancelled",
 		});
 		const onDisk = join(getSubagentsRootDir(agentDir), parentSessionId, "sub_legacy_timeout", "record.json");
 		expect(JSON.parse(readFileSync(onDisk, "utf8"))).toMatchObject({ status: "timed_out", stopSource: "deadline" });

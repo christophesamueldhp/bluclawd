@@ -25,9 +25,7 @@ function setup() {
 			controllers.set(record.runId, controller);
 			return new Promise<SubagentRunOutcome>((resolve) => {
 				settle.set(record.runId, resolve);
-				signal.addEventListener("abort", () =>
-					resolve({ status: "cancelled", complete: false, summaryText: "stopped" }),
-				);
+				signal.addEventListener("abort", () => resolve({ status: "closed", summaryText: "stopped" }));
 			});
 		},
 	});
@@ -64,8 +62,8 @@ function setup() {
 		return admitted.handle;
 	};
 	/** Settles a Run with `status` at the clock's current time. */
-	const finish = async (runId: string, status: "completed" | "failed" = "completed") => {
-		settle.get(runId)?.({ status, complete: status === "completed", summaryText: status });
+	const finish = async (runId: string, status: "closed" | "failed" = "closed") => {
+		settle.get(runId)?.({ status, summaryText: status });
 		await scheduler.whenFinal(runId);
 	};
 	const views = createParentScopeViews({
