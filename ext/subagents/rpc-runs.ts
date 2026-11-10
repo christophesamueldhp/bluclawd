@@ -291,6 +291,7 @@ async function startInTurn(
 			if (signal.aborted) break;
 			// A daemon started anew takes the claim again, from the back of the queue.
 			if (++failures >= QUEUE_TRIES || !(await slots.ensure())) {
+				await slots.release(run).catch(() => {});
 				return { error: error instanceof Error ? error.message : String(error) };
 			}
 		}
@@ -351,7 +352,12 @@ export async function executeRpcRun(
 	if (!("hostPid" in turn)) {
 		const reason = "refused" in turn ? turn.refused : `the daemon could not start it (${turn.error})`;
 		if (record.deliveryMode === "background") deps.notStarted(reason);
-		return { status: "failed", summaryText: "", errorMessage: `It did not start: ${reason}` };
+		// A Resume that did not start leaves its session as it was, to be resumed again.
+		return {
+			status: launch.sessionFile ? "closed" : "failed",
+			summaryText: "",
+			errorMessage: `It did not start: ${reason}`,
+		};
 	}
 	const { hostPid } = turn;
 	controller.markRunning();

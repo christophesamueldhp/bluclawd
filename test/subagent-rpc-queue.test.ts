@@ -145,7 +145,7 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 		expect(readJson(join(runDir(real.agentDir, "kept"), "record.json")).generation).toBe(1);
 	});
 
-	it("starts a queued run as it was admitted, unless its delegation is denied by the time its turn comes", async () => {
+	it("starts a queued run as admitted but held to what its orchestrator denies by its turn, if it may start at all", async () => {
 		const real = await startOrchestrator();
 		pi = real;
 		addSettings(real, { subagents: { maxActive: 1 } });
@@ -164,8 +164,11 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 			);
 		mkdirSync(join(real.agentDir, "agents"));
 		auditor("You are AUDITOR-ONE.", "faux/faux-2", "high");
+		writeFileSync(join(real.cwd, "secret.txt"), "SECRET-S\n");
 		const gate = join(real.cwd, "hold.go");
+		const resume = join(real.cwd, "resume.go");
 		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "first", task: "Look first." } },
 			{
 				calls: [
 					launch("hold"),
@@ -173,36 +176,60 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 					launch("denied"),
 				],
 			},
+			{ tool: "subagent_resume", args: { agent: "first", task: "Look again." }, until: resume },
 			...Array(6).fill({ text: "waiting" }),
 		]);
+		real.script("first", [{ text: "Looked." }, { text: "Looked again." }]);
 		real.script("hold", [{ text: "Held.", until: gate }]);
-		real.script("later", [{ text: "Audited." }]);
+		real.script("later", [{ tool: "read", args: { path: "secret.txt" } }, { text: "Audited." }]);
 		real.script("denied", [{ text: "Ran." }]);
 		real.start(["--", "delegate"]);
-		await real.waitForRequests("main", 2);
 		await real.waitForRequests("hold", 1);
+		const first = runDir(real.agentDir, "first");
+		await waitFor(() => expect(readJson(join(first, "record.json"))).toMatchObject({ status: "closed" }));
+		writeFileSync(resume, "");
+		await real.waitForRequests("main", 4);
 
+		// Changed while they wait: the role's file, and what the orchestrator denies.
 		auditor("You are AUDITOR-TWO.", "faux/faux-3", "low");
-		addSettings(real, { permissions: { deny: ["Subagent(explorer)"] } });
+		addSettings(real, { permissions: { deny: ["Subagent(explorer)", "Read(secret.txt)"] } });
 		writeFileSync(gate, "");
-		const [asked] = await real.waitForRequests("later", 1);
-		expect(asked).toMatchObject({ model: "faux-2", reasoning: "high" });
-		expect(systemPrompt(asked)).toContain("AUDITOR-ONE");
-		expect(systemPrompt(asked)).not.toContain("AUDITOR-TWO");
+		const later = await real.waitForRequests("later", 2);
+		expect(later[0]).toMatchObject({ model: "faux-2", reasoning: "high" });
+		expect(systemPrompt(later[0])).toContain("AUDITOR-ONE");
+		expect(systemPrompt(later[0])).not.toContain("AUDITOR-TWO");
+		expect(
+			conversation(later[1])
+				.filter(({ role }) => role === "toolResult")
+				.at(-1)?.text,
+		).toMatch(/Blocked by permission rule/);
 
 		const denied = runDir(real.agentDir, "denied");
+		const notStarted = /^It did not start: .*Subagent\(explorer\)/;
 		await waitFor(() =>
 			expect(readJson(join(denied, "record.json"))).toMatchObject({
 				status: "failed",
-				errorMessage: expect.stringMatching(/^It did not start: .*Subagent\(explorer\)/),
+				errorMessage: expect.stringMatching(notStarted),
+			}),
+		);
+		// A Resume that did not start leaves its run as it was, to be resumed again.
+		await waitFor(() =>
+			expect(readJson(join(first, "record.json"))).toMatchObject({
+				status: "closed",
+				generation: 1,
+				errorMessage: expect.stringMatching(notStarted),
 			}),
 		);
 		await waitFor(() =>
 			expect(JSON.stringify(real.requests("main").map(conversation))).toMatch(
-				/Subagent \\"denied\\" \(sub_[^)]+\) did not start/,
+				/Subagent \\"first\\" \(sub_[^)]+\) did not start/,
 			),
 		);
+		expect(JSON.stringify(real.requests("main").map(conversation))).toMatch(
+			/Subagent \\"denied\\" \(sub_[^)]+\) did not start/,
+		);
 		expect(real.requests("denied")).toEqual([]);
+		expect(real.requests("first")).toHaveLength(1);
 		expect(existsSync(join(denied, "rpc-host.json"))).toBe(false);
 	});
 });
