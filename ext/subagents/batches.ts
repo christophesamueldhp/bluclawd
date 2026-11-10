@@ -29,6 +29,8 @@ import type { RunReports } from "./tmux-runs.ts";
 
 /** How much of the orchestrator's context a settled batch takes, whatever its size. */
 export const MAX_BATCH_AGGREGATE_BYTES = 16 * 1024;
+/** How much of a member's failure the aggregate lists: one line, the manifest keeping all of it. */
+const MAX_REASON_BYTES = 300;
 /** A member's Report gets at least this much of the aggregate, or is only pointed to. */
 const MIN_INLINE_REPORT_BYTES = 512;
 
@@ -56,9 +58,15 @@ export function memberOutcome({ record, report }: BatchMember): MemberOutcome {
 	return { status: "failed", why: outcome?.error ?? record.errorMessage ?? "no outcome was stored" };
 }
 
-const describe = (outcome: MemberOutcome) =>
-	outcome.status === "completed" ? "completed" : `${outcome.status}: ${sanitizeReportText(outcome.why)}`;
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
+const describe = (outcome: MemberOutcome, brief = false) => {
+	if (outcome.status === "completed") return "completed";
+	const why = sanitizeReportText(outcome.why);
+	if (!brief) return `${outcome.status}: ${why}`;
+	const line = why.split("\n")[0];
+	const cut = truncateUtf8Safe(line, MAX_REASON_BYTES).text;
+	return `${outcome.status}: ${cut}${cut === why ? "" : " […]"}`;
+};
 
 /** What a batch's tool result or notice carries besides its text. */
 export interface BatchResultDetails {
@@ -92,7 +100,7 @@ export function formatBatchAggregate(
 	let used = bytes(head);
 	let truncated = false;
 
-	const line = (i: number) => `- ${formatRunLabel(members[i].record)}: ${describe(outcomes[i])}`;
+	const line = (i: number) => `- ${formatRunLabel(members[i].record)}: ${describe(outcomes[i], true)}`;
 	const indexes = members.map((_, i) => i);
 	const allLines = indexes.map(line);
 	let listed = indexes;

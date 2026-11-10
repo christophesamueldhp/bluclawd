@@ -47,4 +47,16 @@ describe("a settled batch's aggregate", () => {
 		expect(text).toContain(`### "a" (sub_a): completed\na: ${"finding ".repeat(200).trim()}`);
 		expect(text).not.toContain("not inlined");
 	});
+	it("lists a long failure as one line, so it cannot crowd out the other statuses", () => {
+		const failed = member("f", "failed");
+		const error = `first line of the failure\n${"stderr noise ".repeat(2000)}`;
+		const members = [
+			{ ...failed, report: { ...failed.report!, outcome: { status: "failed" as const, error } } },
+			member("a", "completed"),
+		];
+		const { text } = formatBatchAggregate("batch_z", members, "/m.md", 16 * 1024);
+
+		expect(text).toContain('- "f" (sub_f): failed: first line of the failure […]\n- "a" (sub_a): completed');
+		expect(text).not.toContain("stderr noise");
+	});
 });

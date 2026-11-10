@@ -10,6 +10,7 @@ import {
 	hasTmux,
 	type RealPi,
 	startRealPi,
+	systemPrompt,
 } from "./helpers/real-pi.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -98,6 +99,11 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 							{ agent: "explorer", task: "Look.", name: "fine" },
 							{ agent: "nosuch", task: "Look.", name: "unknown" },
 							{ agent: "explorer", task: "  ", name: "blank" },
+							{
+								agent: { name: "writer", description: "Writes.", instructions: "Write.", tools: ["bash"] },
+								task: "Write.",
+								name: "writer",
+							},
 						],
 					}),
 					subagent({
@@ -108,23 +114,27 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 					}),
 					subagent({ tasks: [{ agent: "explorer", task: "Look.", name: "batch_mine" }] }),
 					subagent({}),
+					subagent({ tasks: [{ agent: "explorer" }] }),
 				],
 			},
 			{ text: "all refused" },
 		]);
 		real.start(["--", "delegate"]);
 		const [, answered] = await real.waitForRequests("main", 2);
-		const [both, model, empty, invalid, twins, reserved, none] = toolResults(answered);
+		const [both, model, empty, invalid, twins, reserved, none, taskless] = toolResults(answered);
 		expect(both).toMatch(/`tasks` and `agent`, `task` are alternative shapes/);
 		expect(model).toMatch(/`tasks` and `model` are alternative shapes/);
 		expect(empty).toMatch(/tasks: expected at least 1 items/);
 		expect(invalid).toMatch(/^No task of the batch was started:/);
 		expect(invalid).toMatch(/tasks\[1\] \("unknown"\): .*nosuch/);
 		expect(invalid).toMatch(/tasks\[2\] \("blank"\): Missing required parameter: task/);
+		// Writing members wait for the isolated writer path: a role that writes is refused as a single run is.
+		expect(invalid).toMatch(/tasks\[3\] \("writer"\): .*read-only run cannot have: bash/);
 		expect(invalid).not.toMatch(/tasks\[0\]/);
 		expect(twins).toMatch(/tasks\[1\] \("twin"\): .*also the name of tasks\[0\]/);
 		expect(reserved).toMatch(/tasks\[0\] \("batch_mine"\): Invalid subagent name/);
 		expect(none).toMatch(/Missing required parameter: agent/);
+		expect(taskless).toMatch(/tasks\.0\.task: missing/);
 		expect(records(real.agentDir)).toEqual([]);
 		expect(readdirSync(join(real.agentDir, "faux")).filter((file) => file.endsWith(".requests.jsonl"))).toEqual([
 			"main.requests.jsonl",
@@ -161,7 +171,11 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 							model: "faux/faux-3",
 							thinkingLevel: "low",
 						},
-						{ agent: "explorer", name: "tc", task: "Look, tc." },
+						{
+							agent: { name: "scout", description: "Scouts.", instructions: "You are SCOUT-ROLE." },
+							name: "tc",
+							task: "Look, tc.",
+						},
 					],
 				},
 			},
@@ -186,7 +200,8 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		expect(real.requests("tc")).toEqual([]);
 
 		writeFileSync(gate("ta"), "");
-		await real.waitForRequests("tc", 1);
+		const [tc] = await real.waitForRequests("tc", 1);
+		expect(systemPrompt(tc)).toContain("SCOUT-ROLE");
 		await waitFor(() => expect(recordOf(real, "tc").status).toBe("closed"));
 		// Proves only that the batch did not answer within this while, tb still working.
 		await new Promise((resolve) => setTimeout(resolve, 500));
