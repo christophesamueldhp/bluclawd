@@ -49,8 +49,12 @@ _Avoid_: idle, stopped, done (while runs are working)
 ### Tasks
 
 **Task**:
-An entry in `/tasks` and `task_stop`: a background shell, a monitor, or a run as seen from there.
+An entry in `/tasks` and `task_stop`: a background shell, a monitor, a wake-up, or a run as seen from there.
 _Avoid_: task for the run itself inside `subagents`
+
+**Wake-up**:
+A turn a session's agent schedules for itself: it starts once, at a set time or as soon after it as the session can take it, with a prompt the agent wrote. It outlives its pi crashing, and the session is opened again to take it; ending the session, a fork or a move in its tree, and deleting its row cancel it. An orchestrator schedules wake-ups, a run does not. A session may hold several at once.
+_Avoid_: timer, reminder, cron job, sleep, scheduled task
 
 ### Agent view
 
