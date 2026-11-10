@@ -1,0 +1,148 @@
+/**
+ * Wake-ups: turns an orchestrator's agent schedules for itself with `schedule_wakeup` (ADR-0009). Each pending
+ * one is a task in `/tasks` and `task_stop`; it fires once, as a notice that starts the session's next turn.
+ *
+ * For now a wake-up lives only as long as its pi: the registry is in memory, process-wide like the jobs
+ * (`/tasks` is read from other extensions' module graphs).
+ */
+
+import { notifyListeners, sharedRef } from "../_shared/global-state.ts";
+import { randomTaskId } from "./background-bash.ts";
+import { escapeXml, notificationContent, type OutgoingMessage, taskNotification } from "./monitor-events.ts";
+
+const MINUTE_MS = 60_000;
+const MAX_AHEAD_MS = 24 * 60 * MINUTE_MS;
+
+export type WakeupDue = { ok: true; dueAt: number } | { ok: false; error: string };
+
+/**
+ * When a wake-up asked for with exactly one of `delay` (seconds) or `at` (a local `HH:MM`, its next occurrence)
+ * falls due. Empty fields count as absent: models with strict tool schemas fill every field.
+ */
+export function wakeupDue(input: { delay?: number; at?: string }, now: number): WakeupDue {
+	const delay = typeof input.delay === "number" && input.delay !== 0 ? input.delay : undefined;
+	const at = typeof input.at === "string" && input.at.trim() ? input.at.trim() : undefined;
+	if ((delay === undefined) === (at === undefined)) {
+		return { ok: false, error: "Give schedule_wakeup exactly one of delay or at." };
+	}
+	let dueAt: number;
+	if (at !== undefined) {
+		const clock = /^(\d{1,2}):(\d{2})$/.exec(at);
+		const hours = Number(clock?.[1]);
+		const minutes = Number(clock?.[2]);
+		if (!clock || hours > 23 || minutes > 59) {
+			return { ok: false, error: `Not a clock time: "${at}" (use 24-hour HH:MM, e.g. 14:05)` };
+		}
+		const today = new Date(now);
+		const next = (days: number) =>
+			new Date(today.getFullYear(), today.getMonth(), today.getDate() + days, hours, minutes).getTime();
+		dueAt = next(0) > now ? next(0) : next(1);
+	} else dueAt = now + (delay ?? 0) * 1000;
+	// A clock time's next occurrence is never refused for being too far: on a DST fall-back day it is 25 hours.
+	if (dueAt - now < MINUTE_MS || (at === undefined && dueAt - now > MAX_AHEAD_MS)) {
+		return { ok: false, error: "A wake-up must be due between 1 minute and 24 hours from now." };
+	}
+	return { ok: true, dueAt };
+}
+
+export function isWakeupTaskId(id: string): boolean {
+	return /^w[0-9a-z]{8}$/.test(id);
+}
+
+export interface Wakeup {
+	id: string;
+	/** The session that scheduled it. */
+	owner: string | undefined;
+	prompt: string;
+	dueAt: number;
+	scheduledAt: number;
+}
+
+/** The pending wake-ups. One leaves the list when it is cancelled or fires. */
+export class WakeupRegistry {
+	private readonly pending = new Map<string, { wakeup: Wakeup; timer: ReturnType<typeof setTimeout> }>();
+	private readonly listeners = new Set<() => void>();
+
+	/** `onDue` is called when it falls due; the wake-up stays pending until it is taken. */
+	schedule(options: { owner: string | undefined; prompt: string; dueAt: number; onDue: (wakeup: Wakeup) => void }) {
+		let id = randomTaskId("w");
+		while (this.pending.has(id)) id = randomTaskId("w");
+		const wakeup: Wakeup = {
+			id,
+			owner: options.owner,
+			prompt: options.prompt,
+			dueAt: options.dueAt,
+			scheduledAt: Date.now(),
+		};
+		const timer = setTimeout(() => options.onDue(wakeup), Math.max(0, options.dueAt - Date.now()));
+		timer.unref();
+		this.pending.set(id, { wakeup, timer });
+		notifyListeners(this.listeners);
+		return wakeup;
+	}
+
+	/** The owner's pending wake-ups (everyone's without one), earliest first. */
+	list(owner?: string): Wakeup[] {
+		return [...this.pending.values()]
+			.map((entry) => entry.wakeup)
+			.filter((wakeup) => owner === undefined || wakeup.owner === owner)
+			.sort((a, b) => a.dueAt - b.dueAt);
+	}
+
+	/** Takes a pending wake-up off the list, as it is cancelled or fires; undefined if it is not the owner's or not pending. */
+	take(id: string, owner?: string): Wakeup | undefined {
+		const entry = this.pending.get(id);
+		if (!entry || (owner !== undefined && entry.wakeup.owner !== owner)) return undefined;
+		clearTimeout(entry.timer);
+		this.pending.delete(id);
+		notifyListeners(this.listeners);
+		return entry.wakeup;
+	}
+
+	subscribe(listener: () => void): () => void {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
+	}
+}
+
+export const wakeups = sharedRef("wakeups", new WakeupRegistry()).get();
+
+export const WAKEUP_MESSAGE_TYPE = "bluclawd:wakeup";
+
+export type WakeupMessageDetails = Pick<Wakeup, "id" | "prompt" | "dueAt">;
+
+const pad = (n: number) => String(n).padStart(2, "0");
+
+/** `13:40`, local time. */
+export function wakeupClock(at: number): string {
+	const date = new Date(at);
+	return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** `2026-11-10 13:40`, local time. */
+function wakeupDate(at: number): string {
+	const date = new Date(at);
+	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${wakeupClock(at)}`;
+}
+
+/** The notice that starts a wake-up's turn: the agent's own, with its due time and prompt. */
+export function wakeupMessage(wakeup: Wakeup): OutgoingMessage<WakeupMessageDetails> {
+	return {
+		customType: WAKEUP_MESSAGE_TYPE,
+		content: notificationContent(
+			taskNotification({
+				taskId: wakeup.id,
+				status: "due",
+				summary: `Your own wake-up, which you scheduled with schedule_wakeup, is due (due at ${wakeupDate(wakeup.dueAt)})`,
+				body: `\n<prompt>${escapeXml(wakeup.prompt)}</prompt>`,
+			}),
+		),
+		display: true,
+		details: { id: wakeup.id, prompt: wakeup.prompt, dueAt: wakeup.dueAt },
+	};
+}
+
+/** What schedule_wakeup answers: the task id, and when it falls due. */
+export function wakeupScheduledText(wakeup: Wakeup): string {
+	return `Wake-up ${wakeup.id} scheduled for ${wakeupDate(wakeup.dueAt)}. It starts a turn with its prompt then; cancel it with task_stop.`;
+}

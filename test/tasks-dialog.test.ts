@@ -4,6 +4,7 @@ import { type AgentTask, publishAgentTasks } from "../ext/_shared/agent-tasks.ts
 import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
 import { detachableExec, runningForegroundShells } from "../ext/background-bash/foreground-shells.ts";
 import { TasksDialog, visibleRows } from "../ext/background-bash/tasks-dialog.ts";
+import { wakeups } from "../ext/background-bash/wakeups.ts";
 
 const theme = { fg: (_c: string, t: string) => t, bg: (_c: string, t: string) => t, bold: (t: string) => t } as any;
 
@@ -35,6 +36,7 @@ function open(sessionOwner: string, rows?: number) {
 
 afterEach(() => {
 	for (const job of backgroundBashJobs.list()) backgroundBashJobs.kill(job.id);
+	for (const wakeup of wakeups.list()) wakeups.take(wakeup.id);
 });
 
 describe("/tasks dialog", () => {
@@ -123,6 +125,33 @@ describe("/tasks dialog", () => {
 		expect(out).toContain("  ↑/↓ to select · x to stop · Esc to close");
 		dialog.handleInput("\r");
 		expect(screen()).not.toContain("details");
+	});
+
+	it("lists the session's pending wake-ups, earliest first, and cancels one with x", () => {
+		const me = session();
+		const tomorrow = (hours: number, minutes: number) => {
+			const now = new Date();
+			return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, hours, minutes).getTime();
+		};
+		const onDue = () => {};
+		backgroundBashJobs.start({ command: "npm run dev", cwd: "/", owner: me, exec: forever });
+		wakeups.schedule({ owner: me, prompt: "Check the deploy", dueAt: tomorrow(14, 5), onDue });
+		wakeups.schedule({ owner: me, prompt: "Check CI\nthen merge", dueAt: tomorrow(9, 30), onDue });
+		wakeups.schedule({ owner: session(), prompt: "Not mine", dueAt: tomorrow(10, 0), onDue });
+		const { dialog, screen } = open(me);
+		const out = screen();
+		expect(out).toContain("\n\n    Wake-ups (2)\n");
+		expect(out).toMatch(
+			/Wake-ups \(2\)\n {4}. Check CI then merge +wakes 09:30\n {4}. Check the deploy +wakes 14:05\n/,
+		);
+		expect(out).not.toContain("Not mine");
+		dialog.handleInput("\x1b[B");
+		dialog.handleInput("\x1b[B");
+		expect(screen()).toContain("  ↑/↓ to select · x to cancel · Esc to close");
+		dialog.handleInput("\r");
+		expect(screen()).not.toContain("details");
+		dialog.handleInput("x");
+		expect(wakeups.list(me).map((w) => w.prompt)).toEqual(["Check CI\nthen merge"]);
 	});
 
 	it("stops the selected task as the user", async () => {

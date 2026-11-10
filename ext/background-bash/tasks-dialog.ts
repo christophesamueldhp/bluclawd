@@ -1,6 +1,6 @@
 /**
- * The interactive `/tasks` dialog: shells, monitors and subagent runs of this
- * session in sections, a detail view with the tail of the output file, and stop.
+ * The interactive `/tasks` dialog: shells, monitors, subagent runs and pending wake-ups
+ * of this session in sections, a detail view with the tail of the output file, and stop.
  * Rows are re-read on every render, so the dialog stays live while it is open.
  *
  * Laid out as bluclawd's Background dialog: a blank line, a rule in the
@@ -26,6 +26,7 @@ import { type AgentTask, agentTasks } from "../_shared/agent-tasks.ts";
 import { type BackgroundJobInfo, backgroundBashJobs, jobOutcome } from "./background-bash.ts";
 import { formatTaskDuration } from "./bash-limits.ts";
 import { FOREGROUND_TASK_AFTER_MS, type ForegroundShell, runningForegroundShells } from "./foreground-shells.ts";
+import { type Wakeup, wakeupClock, wakeups } from "./wakeups.ts";
 
 /** The detail view reads the file's last 8 KiB and shows its last 10 lines. */
 const DETAIL_TAIL_BYTES = 8192;
@@ -49,7 +50,7 @@ const POINTER = "❯";
 /** A running task's icon (`⏺` on macOS, `●` elsewhere). */
 const RUNNING_ICON = process.platform === "darwin" ? "⏺" : "●";
 
-type TaskKind = "shell" | "monitor" | "agent";
+type TaskKind = "shell" | "monitor" | "agent" | "wakeup";
 type TaskState = "running" | "completed" | "failed" | "killed";
 
 export interface TaskRow {
@@ -184,12 +185,13 @@ function outputTail(row: TaskRow): { lines: string[]; size: number; read: number
 	return { lines, size, read: Buffer.byteLength(text) };
 }
 
-/** What `x` does to a running task: a shell is stopped, a run is closed. */
-const stopVerb = (row: TaskRow) => (row.kind === "agent" ? "close" : "stop");
+/** What `x` does to a running task: a shell is stopped, a run is closed, a wake-up is cancelled. */
+const stopVerb = (row: TaskRow) => (row.kind === "agent" ? "close" : row.kind === "wakeup" ? "cancel" : "stop");
 
-/** Stops a shell, or closes a run, as the user; the model is told. */
+/** Stops a shell, closes a run, or cancels a wake-up, as the user; the model is told of a shell or a run. */
 export function stopTask(row: TaskRow, owner?: string, source: "user" | "remote" = "user"): void {
 	if (row.kind === "agent") agentTasks()?.close(row.id, { owner, source });
+	else if (row.kind === "wakeup") wakeups.take(row.id, owner);
 	else if (row.foreground) row.foreground.stop();
 	else backgroundBashJobs.kill(row.id, { byUser: true });
 }
@@ -209,27 +211,41 @@ function agentRow(task: AgentTask): TaskRow {
 	};
 }
 
+/** A pending wake-up, labelled with its prompt on one line. */
+function wakeupRow(wakeup: Wakeup): TaskRow {
+	return {
+		id: wakeup.id,
+		kind: "wakeup",
+		label: wakeup.prompt.replace(/\s+/g, " ").trim(),
+		state: "running",
+		statusText: `wakes ${wakeupClock(wakeup.dueAt)}`,
+		startedAt: wakeup.scheduledAt,
+	};
+}
+
 function agentRowById(id: string, owner: string | undefined): TaskRow | undefined {
 	const task = agentTasks()?.get(id, owner);
 	return task && agentRow(task);
 }
 
 /** Sections, in display order: a shell's section holds its command monitors too. */
-type Section = "shells" | "monitors" | "agents" | "done";
+type Section = "shells" | "monitors" | "agents" | "wakeups" | "done";
 const SECTIONS: [Section, string][] = [
 	["shells", "Shells"],
 	["monitors", "Monitors"],
 	["agents", "Local agents"],
+	["wakeups", "Wake-ups"],
 	["done", "Done"],
 ];
 
 function sectionOf(row: TaskRow): Section {
 	if (row.kind === "agent") return row.state === "running" ? "agents" : "done";
+	if (row.kind === "wakeup") return "wakeups";
 	return row.id.startsWith("s") ? "monitors" : "shells";
 }
 
-/** A WebSocket monitor has no detail view. */
-const hasDetail = (row: TaskRow) => sectionOf(row) !== "monitors";
+/** A WebSocket monitor and a wake-up have no detail view. */
+const hasDetail = (row: TaskRow) => sectionOf(row) !== "monitors" && sectionOf(row) !== "wakeups";
 
 /** A run opens to its own session, in place of the detail view, when the source can open one. */
 const opensRun = (row: TaskRow) => row.kind === "agent" && agentTasks()?.open !== undefined;
@@ -248,10 +264,13 @@ export function visibleRows(owner: string | undefined): TaskRow[] {
 	return SECTIONS.flatMap(([section]) => rows.filter((row) => sectionOf(row) === section));
 }
 
-/** What the dialog lists: the running tasks, then the finished runs, which the phone's list leaves out. */
+/**
+ * What the dialog lists: the running tasks, the pending wake-ups earliest first, then the finished runs. The
+ * phone's list leaves out the last two.
+ */
 function dialogRows(owner: string | undefined): TaskRow[] {
 	const done = (agentTasks()?.listDone?.(owner) ?? []).map(agentRow).sort((a, b) => b.startedAt - a.startedAt);
-	return [...visibleRows(owner), ...done];
+	return [...visibleRows(owner), ...wakeups.list(owner).map(wakeupRow), ...done];
 }
 
 /** A row's status beside its label. */
@@ -265,6 +284,7 @@ const META: Record<TaskState, string> = {
 /** A foreground command is told apart from the background ones it sits among. */
 const metaOf = (row: TaskRow) => {
 	if (row.foreground) return "foreground";
+	if (row.kind === "wakeup") return row.statusText ?? META[row.state];
 	if (row.kind !== "agent") return META[row.state];
 	return [row.model, row.statusText ?? META[row.state]].filter(Boolean).join(" · ");
 };
@@ -472,8 +492,8 @@ export class TasksDialog implements Component {
 			const items = rows.filter((r) => sectionOf(r) === section);
 			if (items.length === 0) continue;
 			if (lines.length > 0) lines.push({ kind: "gap" });
-			// The Shells header only when the list holds agents too.
-			if (section !== "shells" || agents + count("done") > 0) {
+			// The Shells header only when the list holds agents or wake-ups too.
+			if (section !== "shells" || agents + count("wakeups") + count("done") > 0) {
 				lines.push({ kind: "heading", text: `${t.bold(title)}${t.fg("dim", ` (${items.length})`)}` });
 			}
 			for (const row of items) lines.push({ kind: "row", row, index: index++ });

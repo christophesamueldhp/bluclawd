@@ -25,7 +25,7 @@ import {
 	runningForegroundShells,
 	subscribeForegroundShells,
 } from "../background-bash/foreground-shells.ts";
-import { stopTask, visibleRows } from "../background-bash/tasks-dialog.ts";
+import { stopTask, type TaskRow, visibleRows } from "../background-bash/tasks-dialog.ts";
 import { projectTrust, setProjectTrust, TRUST_CYCLE } from "../permissions/index.ts";
 import { skillId } from "../skills/prompt.ts";
 import { readRunUsageLedger } from "../subagents/storage.ts";
@@ -67,7 +67,9 @@ export function pistatuslinePaths(
 
 /** The session's running background tasks, as /tasks lists them. */
 export function paneTasks(owner: string | undefined): PaneTask[] {
+	// visibleRows holds no wake-ups: this only narrows the kind to the phone's.
 	return visibleRows(owner)
+		.filter((row): row is TaskRow & { kind: PaneTask["kind"] } => row.kind !== "wakeup")
 		.slice(0, TASKS_MAX)
 		.map((row) => {
 			const outputFile = row.job?.outputFile ?? row.outputFile;

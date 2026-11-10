@@ -88,8 +88,8 @@ function projectSegment(cwd: string): string {
 
 const TASK_ID_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
 
-/** A type letter and 8 random base36 characters (`b` shell, `s` WebSocket). */
-function randomTaskId(prefix: string): string {
+/** A type letter and 8 random base36 characters (`b` shell, `s` WebSocket, `w` wake-up). */
+export function randomTaskId(prefix: string): string {
 	const bytes = randomBytes(8);
 	let id = prefix;
 	for (const byte of bytes) id += TASK_ID_ALPHABET[byte % TASK_ID_ALPHABET.length];
