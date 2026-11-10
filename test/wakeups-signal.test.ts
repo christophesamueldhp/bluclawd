@@ -70,6 +70,8 @@ describe.skipIf(!hasTmux)("a pi that ends with a wake-up pending", () => {
 		process.kill(pid, "SIGTERM");
 		await stopped(real, sessionFile);
 		expect(wakeupEntries(sessionFile)).toEqual([WAKEUP_ENTRY]);
+		// It ended: the watch on the signal does not keep it running.
+		await waitFor(() => expect(() => process.kill(pid, 0)).toThrow());
 	});
 
 	it("cancels it when bluclawd ends its pi as a quit", async () => {
@@ -113,6 +115,45 @@ describe.skipIf(!hasTmux)("the daemon's hold on a session's wake-ups", () => {
 
 		await waitFor(async () => expect(await real.client.isRunning()).toBe(true));
 		await waitFor(() => expect(held()).toHaveLength(1));
+	});
+
+	/** A session whose pi a signal ended, with a wake-up ten minutes out that the daemon holds; its pane and file. */
+	async function crashed(real: RealPi) {
+		real.script("main", [
+			{ tool: "schedule_wakeup", args: { prompt: "Check CI.", delay: 600 } },
+			{ text: "scheduled" },
+			{ text: "CI is green" },
+		]);
+		const pane = real.start(["--", "watch CI"]);
+		await real.waitForRequests("main", 2);
+		await waitFor(() => expect(held()).toHaveLength(1));
+		const [{ sessionFile }] = held();
+		spawnSync("tmux", ["-S", real.tmux.socket, "kill-session", "-t", `=${pane}`]);
+		await waitFor(async () =>
+			expect((await real.rows()).find((row) => row.sessionFile === sessionFile)?.status).toBe("stopped"),
+		);
+		return { pane, sessionFile };
+	}
+
+	/** Ten minutes pass: in the session log, and in the daemon's copy on disk, the wake-up is overdue. */
+	function overdue(sessionFile: string) {
+		const at = Date.now() - 60_000;
+		writeFileSync(sessionFile, readFileSync(sessionFile, "utf8").replace(/"dueAt":\d+/, `"dueAt":${at}`));
+		const file = join(process.env.PI_SERVER_DIR ?? "", "wakeups.json");
+		writeFileSync(file, readFileSync(file, "utf8").replace(/"dueAt": \d+/, `"dueAt": ${at}`));
+		return at;
+	}
+
+	it("fires one that fell due while the daemon was down, once it is back", async () => {
+		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
+		pi = real;
+		const { sessionFile } = await crashed(real);
+		await real.client.shutdownDaemon();
+		overdue(sessionFile);
+
+		await real.client.ensureDaemon();
+		const requests = await real.waitForRequests("main", 3);
+		expect(conversation(requests[2]).at(-1)?.text).toContain("is late: it was due at");
 	});
 
 	it("reopens the session of a pi a signal ended once its wake-up falls due, and the turn starts there", async () => {

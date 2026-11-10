@@ -32,7 +32,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { stripAnsi } from "../../daemon/ansi.ts";
-import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
+import { currentDaemonBuildId, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { endedAsQuit, piCommand, runParent, Tmux } from "../../daemon/tmux.ts";
 import { type HeldWakeups, processStart } from "../../daemon/wakeups.ts";
 import { agentTasks, isAgentTaskId, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
@@ -167,9 +167,15 @@ function watchSignals(): void {
 	if (signals.watching) return;
 	signals.watching = true;
 	for (const signal of ["SIGHUP", "SIGTERM"] as const) {
-		process.on(signal, () => {
+		const listener = () => {
 			signals.received = true;
-		});
+			// Alone, it would keep the process from ending on the signal: it ends as it would have.
+			if (process.listenerCount(signal) === 1) {
+				process.off(signal, listener);
+				process.kill(process.pid, signal);
+			}
+		};
+		process.on(signal, listener);
 	}
 }
 
@@ -271,9 +277,12 @@ const backgroundBash: InlineExtension = {
 			handing = handing
 				.then(async () => {
 					const client = new OrchestratorClient();
-					// Scheduling one starts the daemon, as agent view does; one not running holds none to take back.
-					if (held.wakeups.length > 0) await client.ensureDaemon();
-					else if (!(await client.isRunning())) return;
+					// Scheduling one starts the daemon, as agent view does; one not running holds none to take back. One of an
+					// older build is replaced, as agent view replaces it: it would not know a hand-off.
+					const info = await client.getDaemonInfo();
+					if (!info.running && held.wakeups.length === 0) return;
+					if (info.running && info.buildId !== currentDaemonBuildId()) await client.restartDaemon();
+					else if (!info.running) await client.ensureDaemon();
 					await client.holdWakeups(held);
 				})
 				.catch(() => {});

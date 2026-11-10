@@ -71,10 +71,11 @@ export function processStart(pid: number): number | undefined {
 	try {
 		const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
 			encoding: "utf8",
-			env: { ...process.env, LC_ALL: "C" },
+			env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
 			timeout: 2000,
 		});
-		const at = Date.parse(out.trim());
+		// Printed in UTC, so the daemon and a pi with another TZ read the same time.
+		const at = Date.parse(`${out.trim()} UTC`);
 		return Number.isNaN(at) ? undefined : at;
 	} catch {
 		return undefined;
@@ -83,6 +84,12 @@ export function processStart(pid: number): number | undefined {
 
 /** Whether that process still runs. `ps` gives seconds, so a start within one of it is the same. */
 export function processAlive({ pid, startedAt }: ProcessId): boolean {
+	try {
+		process.kill(pid, 0);
+	} catch (error) {
+		// EPERM: there is one, of another user, which is never a pi of this one's.
+		if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+	}
 	const at = processStart(pid);
 	return at !== undefined && Math.abs(at - startedAt) < 1500;
 }
@@ -102,6 +109,8 @@ export interface HeldWakeups {
 const RECHECK_MS = 30_000;
 /** How long a reopened session has to take its pi, as a phone's start has (START_MS), before it is tried again. */
 const REOPEN_WAIT_MS = 90_000;
+/** How often a session is reopened for its wake-ups before the daemon gives up on it: its pi keeps failing to start. */
+const MAX_REOPENS = 3;
 
 export interface WakeupKeeperDeps {
 	/** Where wakeups.json lives. */
@@ -117,8 +126,8 @@ export interface WakeupKeeperDeps {
 /** The daemon's copy of every session's pending wake-ups, kept on disk across its restarts. */
 export class WakeupKeeper {
 	private readonly held: Map<string, HeldWakeups>;
-	/** When each session was last reopened for a wake-up. */
-	private readonly reopened = new Map<string, number>();
+	/** When each session was last reopened for a wake-up, and how often. */
+	private readonly reopened = new Map<string, { at: number; times: number }>();
 	private timer: ReturnType<typeof setTimeout> | undefined;
 	private readonly deps: WakeupKeeperDeps;
 
@@ -152,8 +161,8 @@ export class WakeupKeeper {
 		let changed = false;
 		for (const held of [...this.held.values()]) {
 			if (!held.wakeups.some((wakeup) => wakeup.dueAt <= now) || this.deps.alive(held.holder)) continue;
-			const since = this.reopened.get(held.sessionFile);
-			if (since !== undefined && now - since < REOPEN_WAIT_MS) continue;
+			const last = this.reopened.get(held.sessionFile);
+			if (last && (now - last.at < REOPEN_WAIT_MS || last.times >= MAX_REOPENS)) continue;
 			// The session log has the last word: a fire or a cancel whose hand-off never came.
 			const pending = this.deps.pending(held.sessionFile);
 			changed = true;
@@ -163,7 +172,7 @@ export class WakeupKeeper {
 			}
 			this.held.set(held.sessionFile, { ...held, wakeups: pending });
 			if (!pending.some((wakeup) => wakeup.dueAt <= now)) continue;
-			this.reopened.set(held.sessionFile, now);
+			this.reopened.set(held.sessionFile, { at: now, times: (last?.times ?? 0) + 1 });
 			// One that cannot be reopened now is tried again once REOPEN_WAIT_MS has passed.
 			try {
 				Promise.resolve(this.deps.reopen(held)).catch(() => {});
