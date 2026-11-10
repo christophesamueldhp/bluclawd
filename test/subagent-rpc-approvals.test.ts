@@ -94,9 +94,10 @@ describe.skipIf(!hasTmux)("an approval an RPC run needs", () => {
 		]);
 		real.script("first", [{ tool: "read", args: { path: "notes.gated" } }, { text: "Read it." }]);
 		writeFileSync(join(real.cwd, "other.gated"), "OSPREY\n");
+		const next = join(real.cwd, "next.go");
 		real.script("second", [
 			{ tool: "read", args: { path: "notes.gated" } },
-			{ tool: "read", args: { path: "other.gated" } },
+			{ tool: "read", args: { path: "other.gated" }, until: next },
 			{ text: "Read both." },
 		]);
 		const orchestrator = real.start(["--", "delegate"]);
@@ -122,6 +123,7 @@ describe.skipIf(!hasTmux)("an approval an RPC run needs", () => {
 		expect(screen()).not.toContain(squeezed('Subagent "second"'));
 
 		// Another file is another approval.
+		writeFileSync(next, "");
 		await waitFor(() => expect(screen()).toContain(squeezed(`read ${join(realpathSync(real.cwd), "other.gated")}`)));
 		expect(real.requests("second")).toHaveLength(2);
 		real.tmux.sendKeys(orchestrator, ["Enter"]);
