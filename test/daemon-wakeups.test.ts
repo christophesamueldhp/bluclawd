@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -150,6 +150,40 @@ describe("the daemon's copy of a session's wake-ups", () => {
 		expect(supervisor.deleteInstance("row-a")).toBe(true);
 		expect(supervisor.deleteInstance("pi-b")).toBe(true);
 		expect(f.keeper.list()).toEqual([]);
+	});
+
+	it("cancels them when agent view deletes its own row, which it unlists first", () => {
+		const f = fixture();
+		// Its row is kept on disk, as one whose session file exists is.
+		const file = join(f.dir, "a.jsonl");
+		writeFileSync(file, "");
+		const supervisor = new ServerSupervisor({
+			now: () => NOW,
+			tmux: { hasSession: () => true, end: () => {} },
+			dir: f.dir,
+			wakeups: f.keeper,
+		});
+		supervisor.registerExternal(
+			{
+				id: "pi-a",
+				pane: "pi-a",
+				cwd: "/work",
+				sessionFile: file,
+				status: "online",
+				createdAt: "2026-11-10T00:00:00Z",
+				lastSeenAt: new Date(NOW).toISOString(),
+			},
+			"idle",
+		);
+		const stale = hold(f, file, 41, [wakeup("w1", NOW + MINUTE)]);
+
+		supervisor.unregisterExternal("pi-a");
+		expect(supervisor.deleteInstance("pi-a")).toBe(true);
+		// Its pi is killed then: its last hand-off lands late, and its log never records the cancel.
+		f.keeper.hold(stale);
+		f.advance(MINUTE);
+		f.keeper.check();
+		expect(f.reopened).toEqual([]);
 	});
 
 	it("goes with the pi that took the session last: one back on it is left to fire its own", () => {
