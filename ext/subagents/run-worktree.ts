@@ -149,14 +149,26 @@ export function captureRunBaseline(
 			"-m",
 			message("working tree"),
 		]);
-		if (gitSync(source, ["cat-file", "-t", `${commit}:${rel}`]) !== "tree")
-			throw new Error(`${cwd} is not a directory in it`);
+		if (!holdsDirectory(source, commit, rel)) {
+			return {
+				ok: false,
+				error: `${cwd} is not a directory of the state recorded: it is ignored, or holds no file`,
+			};
+		}
 		const ref = `refs/bluclawd/runs/${runId}/baseline`;
 		gitSync(source, ["update-ref", ref, commit, ""]);
 		return { ok: true, baseline: { source, gitDir, head, index, tree, commit, ref }, cwd: rel };
 	} catch (error) {
 		const reason = error instanceof Error ? error.message : String(error);
 		return { ok: false, error: `Git could not record the state of ${source} (${reason})` };
+	}
+}
+
+function holdsDirectory(source: string, commit: string, rel: string): boolean {
+	try {
+		return gitSync(source, ["cat-file", "-t", `${commit}:${rel}`]) === "tree";
+	} catch {
+		return false;
 	}
 }
 

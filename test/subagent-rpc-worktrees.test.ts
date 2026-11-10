@@ -164,23 +164,32 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 		const repo = real.cwd;
 		const outside = join(repo, "..", "outside");
 		mkdirSync(outside);
-		write(repo, { "a.txt": "one\n", "pkg/secret.txt": "SECRET-S\n", "pkg/locked.txt": "locked\n" });
+		write(repo, {
+			"a.txt": "one\n",
+			"pkg/secret.txt": "token SECRET-S\n",
+			"pkg/ok.txt": "token FINE\n",
+			"pkg/locked.txt": "locked\n",
+		});
 		// Committed links: out of the repository, back into the checkout, and to nothing.
 		symlinkSync(outside, join(repo, "out"));
 		symlinkSync(join(repo, "a.txt"), join(repo, "alias.txt"));
 		symlinkSync(join(outside, "ghost.txt"), join(repo, "ghost.txt"));
+		symlinkSync(".git", join(repo, "g"));
 		git(repo, "init", "-q");
 		git(repo, "add", ".");
 		git(repo, "commit", "-q", "-m", "start");
 		// The orchestrator's rules name the checkout's files; its run's copies are held to them as well.
-		addSettings(real, { permissions: { deny: ["Read(pkg/secret.txt)", "Edit(pkg/locked.txt)"] } });
+		addSettings(real, {
+			defaultTools: ["+grep"],
+			permissions: { deny: ["Read(pkg/secret.txt)", "Edit(pkg/locked.txt)"] },
+		});
 		const before = checkoutState(repo);
 		real.script("main", [
 			// Pointed at the checkout itself, it still works in its worktree.
 			{
 				tool: "subagent",
 				args: {
-					agent: { ...writer, tools: [...writer.tools, "codemode"] },
+					agent: { ...writer, tools: [...writer.tools, "grep", "codemode"] },
 					name: "w",
 					cwd: join(repo, "pkg"),
 					task: "Escape.",
@@ -196,6 +205,7 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 			["write", { path: "../ghost.txt", content: "x" }],
 			["write", { path: "../.git", content: "gitdir: /tmp\n" }],
 			["write", { path: "../.GIT/config", content: "x" }],
+			["write", { path: "../g", content: "gitdir: /tmp\n" }],
 			["read", { path: "secret.txt" }],
 			["edit", { path: "locked.txt", oldText: "locked", newText: "x" }],
 		];
@@ -204,10 +214,12 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 			`for (const path of ${JSON.stringify([join(repo, "nested.txt"), "../out/nested.txt", "fine.txt"])}) {`,
 			'  try { await tools.write({ path, content: "x" }); out.push(path + ": ran"); } catch (error) { out.push(path + ": " + error.message); }',
 			"}",
+			'out.push(await tools.grep({ pattern: "token", path: "." }));',
 			'return out.join("\\n");',
 		].join("\n");
 		real.script("w", [
 			...attempts.map(([tool, args]) => ({ tool, args })),
+			{ tool: "grep", args: { pattern: "token", path: "." } },
 			{ tool: "codemode", args: { code } },
 			{ text: "Tried." },
 		]);
@@ -215,11 +227,14 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 		const main = await real.waitForRequests("main", 2);
 
 		const w = real.requests("w");
-		expect(w).toHaveLength(attempts.length + 2);
+		expect(w).toHaveLength(attempts.length + 3);
 		for (let step = 1; step <= attempts.length; step++) {
 			expect(lastToolResult(w[step])?.text).toMatch(/^(Refused|Blocked by permission rule)/);
 		}
-		const nested = lastToolResult(w[attempts.length + 1])?.text ?? "";
+		// A folder grep finds the files it may read, in the worktree.
+		expect(lastToolResult(w[attempts.length + 1])?.text).toContain("token FINE");
+		const nested = lastToolResult(w[attempts.length + 2])?.text ?? "";
+		expect(nested).toContain("token FINE");
 		expect(nested).toMatch(/nested\.txt: Refused/);
 		expect(nested).toMatch(/out\/nested\.txt: Refused/);
 		expect(nested).toContain("fine.txt: ran");
@@ -307,6 +322,7 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 		git(repo, "add", ".");
 		git(repo, "commit", "-q", "-m", "start");
 		const gate = join(real.cwd, "..", "go");
+		const edited = join(real.cwd, "..", "edited");
 		real.script("main", [
 			{ tool: "subagent", args: { agent: writer, name: "nogit", cwd: plain, task: "Edit." } },
 			{ tool: "subagent", args: { agent: writer, name: "unborn", cwd: empty, task: "Edit." } },
@@ -315,7 +331,11 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 				tool: "subagent",
 				args: { agent: "general-purpose", name: "gp", cwd: repo, background: true, task: "Edit." },
 			},
-			{ tool: "subagent", args: { agent: "explorer", name: "look-repo", cwd: repo, task: "Read a.txt." } },
+			{
+				tool: "subagent",
+				args: { agent: "explorer", name: "look-repo", cwd: repo, task: "Read a.txt." },
+				until: edited,
+			},
 			{ text: "done", until: gate },
 			{ text: "noted" },
 		]);
@@ -328,6 +348,7 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 		real.start(["--", "delegate"]);
 		// The reader in the repository starts once the writer has made its edit.
 		await waitFor(() => expect(real.requests("gp")).toHaveLength(2));
+		writeFileSync(edited, "");
 		const main = await real.waitForRequests("main", 6);
 		writeFileSync(gate, "");
 		await real.waitForRequests("main", 7);

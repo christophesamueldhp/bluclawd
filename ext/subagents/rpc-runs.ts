@@ -562,7 +562,7 @@ export async function executeRpcRun(
 		status: signal.aborted && outcome.status !== "completed" ? "cancelled" : "closed",
 		summaryText: report.text,
 		transcriptPath: state.sessionFile,
-		...(outcome.status === "completed" ? {} : { errorMessage: outcome.error }),
+		...(outcome.status === "completed" ? {} : { errorMessage: `${outcome.error}${workspaceNote}` }),
 	};
 }
 

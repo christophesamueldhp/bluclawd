@@ -103,17 +103,9 @@ function spellings(
 function unwritable(workspace: RunPolicy["workspace"], path: unknown, cwd: string): string | undefined {
 	if (!workspace) return "Refused: this run has no worktree of its own to change files in.";
 	if (typeof path !== "string" || !path) return "Refused: no path to change.";
-	const target = resolveToCwd(path, cwd);
 	const outside = `Refused: ${path} is outside this run's worktree, ${workspace.root}; it may change files only there.`;
-	if (!within(workspace.root, target)) return outside;
-	if (
-		relative(workspace.root, target)
-			.split(sep)
-			.some((segment) => segment.toLowerCase() === ".git")
-	) {
-		return `Refused: ${path} is Git's own state, which this run may not change.`;
-	}
 	// What exists of the path, links followed, is where the file lands: a link out of the worktree leads out of it.
+	const target = resolveToCwd(path, cwd);
 	let existing = target;
 	for (;;) {
 		try {
@@ -123,11 +115,19 @@ function unwritable(workspace: RunPolicy["workspace"], path: unknown, cwd: strin
 			existing = dirname(existing);
 		}
 	}
+	let landing: string;
 	try {
-		if (!within(workspace.root, realpathSync(existing))) return outside;
+		landing = join(realpathSync(existing), relative(existing, target));
 	} catch {
 		// A link to nothing: where a write through it lands cannot be checked.
 		return outside;
+	}
+	for (const spelled of [target, landing]) {
+		if (!within(workspace.root, spelled)) return outside;
+		const segments = relative(workspace.root, spelled).split(sep);
+		if (segments.some((segment) => segment.toLowerCase() === ".git")) {
+			return `Refused: ${path} is Git's own state, which this run may not change.`;
+		}
 	}
 	return undefined;
 }
