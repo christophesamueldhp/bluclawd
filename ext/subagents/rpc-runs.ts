@@ -21,6 +21,14 @@ import type { AgentDefinition } from "./definitions.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
 import { type RpcDenyRules, RUN_DEFINITION_FLAG } from "./rpc-child.ts";
 import { prepareRpcHost, processAlive, processGroupAlive, readRpcHostState, stopRpcHost } from "./rpc-host.ts";
+import {
+	answerRunApproval,
+	markRunApprovalSeen,
+	openRunApprovalRequests,
+	type RunApprovalAnswer,
+	type RunApprovalRequest,
+	runApprovalWithdrawn,
+} from "./run-approvals.ts";
 import { openRunInbox, type RunOutboxMessage, readRunOutbox, sealedRunInbox, sealRunInbox } from "./run-mailbox.ts";
 import { rpcRunMessageText, runTaskText } from "./run-messages.ts";
 import {
@@ -345,6 +353,8 @@ export interface RpcRunDeps {
 	handOff: AbortSignal;
 	/** A finding, question or blocker the run sent while it worked, for its orchestrator or a sibling. */
 	relay(message: RunOutboxMessage): void;
+	/** An approval the run asks for, answered by the user or blocked; `signal` aborts once it takes no answer. */
+	approve(request: RunApprovalRequest, signal: AbortSignal): Promise<RunApprovalAnswer>;
 }
 
 const untakenText = (count: number, runDir: string, generation: number) =>
@@ -437,13 +447,44 @@ export async function executeRpcRun(
 		return state?.hostPid === hostPid ? state : undefined;
 	};
 	const ended = () => ownState()?.exit !== undefined || !processAlive(hostPid);
+	/** The approvals asked for that this orchestrator saw and has not answered, each aborted once it takes no answer. */
+	const asked = new Map<string, AbortController>();
+	const approvals = () => {
+		for (const request of openRunApprovalRequests(launch.runDir, record.generation)) {
+			// Noted on every look, so the host can tell an orchestrator gone meanwhile from one still asking.
+			markRunApprovalSeen(launch.runDir, record.generation, request.id);
+			if (asked.has(request.id)) continue;
+			const pending = new AbortController();
+			asked.set(request.id, pending);
+			void deps
+				.approve(request, pending.signal)
+				.catch((): RunApprovalAnswer => "blocked")
+				.then((answer) => {
+					if (pending.signal.aborted) return;
+					asked.delete(request.id);
+					answerRunApproval(launch.runDir, record.generation, request.id, answer);
+				});
+		}
+		for (const [id, pending] of asked) {
+			if (!runApprovalWithdrawn(launch.runDir, record.generation, id)) continue;
+			asked.delete(id);
+			pending.abort();
+		}
+	};
 	await until(
 		() => {
 			relay();
+			approvals();
 			return ended();
 		},
 		AbortSignal.any([signal, deps.handOff]),
 	);
+	// No one here answers them any more. A stopped run's host withdraws them, and an answer would let its pi go on;
+	// a run handed off goes on, blocked on them.
+	for (const [id, pending] of asked) {
+		pending.abort();
+		if (!signal.aborted) answerRunApproval(launch.runDir, record.generation, id, "blocked");
+	}
 	// Handed off: the run goes on, its Report kept on disk, and this instance of the session stores nothing more.
 	if (!ended() && !signal.aborted) return new Promise<never>(() => {});
 	if (!ended()) stopRpcHost(hostPid);
