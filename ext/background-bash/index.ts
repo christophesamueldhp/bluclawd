@@ -17,6 +17,7 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 	InlineExtension,
+	SessionStartEvent,
 } from "@earendil-works/pi-coding-agent";
 import { createLocalBashOperations } from "@earendil-works/pi-coding-agent";
 import {
@@ -64,9 +65,15 @@ import { findOrphanShells, orphanShellMessage, SHELL_END_ENTRY, SHELL_START_ENTR
 import { type TaskRow, TasksDialog, taskRows } from "./tasks-dialog.ts";
 import {
 	isWakeupTaskId,
+	pendingWakeups,
+	WAKEUP_END_ENTRY,
+	WAKEUP_ENTRY,
 	WAKEUP_MESSAGE_TYPE,
 	type Wakeup,
+	type WakeupEnd,
+	type WakeupEndRecord,
 	type WakeupMessageDetails,
+	type WakeupRecord,
 	wakeupClock,
 	wakeupDue,
 	wakeupMessage,
@@ -203,21 +210,47 @@ const backgroundBash: InlineExtension = {
 			deliverOrHold(() => {
 				const due = dueWakeup();
 				if (!due || !ctx?.isIdle()) return;
-				wakeups.take(due.id);
-				pi.sendMessage(wakeupMessage(due), EVENT_DELIVERY);
+				wakeups.take(due.id, undefined, "fired");
+				pi.sendMessage(wakeupMessage(due, Date.now()), EVENT_DELIVERY);
 			});
 		};
 
-		/** A wake-up of a session that is no longer this pi's is dropped. */
-		const fireWakeup = (wakeup: Wakeup) => {
-			if (wakeup.owner === owner()) startDueWakeup();
-			else wakeups.take(wakeup.id);
+		const recordWakeupEnd = (wakeup: Pick<Wakeup, "id">, end: WakeupEnd) =>
+			pi.appendEntry<WakeupEndRecord>(WAKEUP_END_ENTRY, { id: wakeup.id, end });
+
+		/**
+		 * The session's pending wake-ups, rebuilt from its log; overdue ones fall due at once. A fork's new session gets
+		 * none: those it copied are recorded cancelled, so a later `/resume` of it revives none either.
+		 */
+		const restoreWakeups = (event: SessionStartEvent, startCtx: ExtensionContext) => {
+			const session = startCtx.sessionManager.getSessionId();
+			for (const record of pendingWakeups(startCtx.sessionManager.getEntries())) {
+				if (event.reason === "fork") recordWakeupEnd(record, "cancelled");
+				else {
+					wakeups.schedule({
+						owner: session,
+						prompt: record.prompt,
+						dueAt: record.dueAt,
+						restore: record,
+						onDue: startDueWakeup,
+						onEnd: recordWakeupEnd,
+					});
+				}
+			}
+		};
+
+		/** Ending the session cancels its wake-ups. */
+		const cancelWakeups = () => {
+			const session = owner();
+			if (session === undefined) return;
+			for (const wakeup of wakeups.list(session)) wakeups.take(wakeup.id, session);
 		};
 
 		// The orchestrator's only: a run does not schedule its own turns.
 		if (!runParent()) {
 			// The running turn has ended, and nothing else continues it.
 			pi.on("agent_settled", startDueWakeup);
+			pi.on("session_tree", cancelWakeups);
 			pi.registerTool({
 				name: "schedule_wakeup",
 				label: "ScheduleWakeup",
@@ -243,7 +276,14 @@ const backgroundBash: InlineExtension = {
 						owner: toolCtx?.sessionManager?.getSessionId(),
 						prompt,
 						dueAt: due.dueAt,
-						onDue: fireWakeup,
+						onDue: startDueWakeup,
+						onEnd: recordWakeupEnd,
+					});
+					pi.appendEntry<WakeupRecord>(WAKEUP_ENTRY, {
+						id: wakeup.id,
+						prompt,
+						dueAt: wakeup.dueAt,
+						scheduledAt: wakeup.scheduledAt,
 					});
 					return { content: [{ type: "text", text: wakeupScheduledText(wakeup) }], details: undefined };
 				},
@@ -407,6 +447,7 @@ const backgroundBash: InlineExtension = {
 			const previous = lastMainSession.get();
 			if (event.reason === "new" && previous && previous !== session) backgroundBashJobs.reown(previous, session);
 			lastMainSession.set(session);
+			if (!runParent()) restoreWakeups(event, startCtx);
 			if (event.reason === "startup" || event.reason === "resume") reportOrphanShells(startCtx);
 			pillSelected = false;
 			for (const off of cleanups.splice(0)) off();
@@ -483,7 +524,15 @@ const backgroundBash: InlineExtension = {
 			return { action: "continue" };
 		});
 
-		pi.on("session_shutdown", () => {
+		pi.on("session_shutdown", (event) => {
+			// A reload, or a `/resume` of the session itself, leaves its wake-ups pending for the next instance.
+			const session = owner();
+			const kept =
+				event.reason === "reload" ||
+				(event.reason === "resume" && event.targetSessionFile === ctx?.sessionManager.getSessionFile());
+			if (kept) {
+				if (session !== undefined) wakeups.release(session);
+			} else cancelWakeups();
 			clearMainSession();
 			for (const off of cleanups.splice(0)) off();
 			clearTimeout(hintTimer);

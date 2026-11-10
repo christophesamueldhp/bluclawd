@@ -9,9 +9,10 @@ import {
 	fauxToolCall,
 } from "@earendil-works/pi-ai";
 import {
-	type AgentSession,
-	createAgentSession,
-	DefaultResourceLoader,
+	type AgentSessionRuntime,
+	createAgentSessionFromServices,
+	createAgentSessionRuntime,
+	createAgentSessionServices,
 	ModelRuntime,
 	SessionManager,
 	SettingsManager,
@@ -28,11 +29,12 @@ const NOW = new Date(2026, 10, 10, 13, 30, 0).getTime();
 const MINUTE = 60_000;
 
 const tempDirs: string[] = [];
-const sessions: AgentSession[] = [];
+const runtimes: AgentSessionRuntime[] = [];
+let fauxProviders = 0;
 
 afterEach(() => {
-	for (const session of sessions.splice(0)) session.dispose();
-	for (const wakeup of wakeups.list()) wakeups.take(wakeup.id);
+	for (const runtime of runtimes.splice(0)) runtime.session.dispose();
+	wakeups.release();
 	vi.useRealTimers();
 	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -43,14 +45,18 @@ const textOf = (content: unknown) =>
 		: (content as Array<{ type: string; text?: string }>).map((part) => part.text ?? "").join("\n");
 
 /**
- * A pi session on a faux model with background-bash, its clock faked from 13:30 (and still moving, so pi's own
- * timers run). Each model call records the context it saw.
+ * A pi on a faux model with background-bash, its session persisted under `dir` (a new one, or `sessionFile` opened
+ * as pi started on it would). The clock is faked from 13:30 (and still moving, so pi's own timers run); a second
+ * start in the same test keeps it. Each model call records the context it saw.
  */
-async function startSession() {
-	vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], shouldAdvanceTime: true, now: NOW });
-	const dir = realpathSync(mkdtempSync(join(tmpdir(), "bluclawd-wakeups-")));
-	tempDirs.push(dir);
+async function startSession(options: { dir?: string; sessionFile?: string } = {}) {
+	if (!vi.isFakeTimers()) {
+		vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], shouldAdvanceTime: true, now: NOW });
+	}
+	const dir = options.dir ?? realpathSync(mkdtempSync(join(tmpdir(), "bluclawd-wakeups-")));
+	if (!options.dir) tempDirs.push(dir);
 	const agentDir = join(dir, "agent");
+	const sessionDir = join(dir, "sessions");
 	const modelRuntime = await ModelRuntime.create({
 		authPath: join(agentDir, "auth.json"),
 		modelsPath: join(agentDir, "models.json"),
@@ -58,36 +64,51 @@ async function startSession() {
 		allowModelNetwork: false,
 		refreshOnCreate: true,
 	});
-	const faux = fauxProvider({ provider: "faux-wakeups", models: [{ id: "faux-main" }] });
+	const faux = fauxProvider({ provider: `faux-wakeups-${++fauxProviders}`, models: [{ id: "faux-main" }] });
 	modelRuntime.registerNativeProvider(faux.provider);
 	await modelRuntime.refresh({ allowNetwork: false });
 	const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
-	const resourceLoader = new DefaultResourceLoader({
-		cwd: dir,
-		agentDir,
-		settingsManager,
-		extensionFactories: [backgroundBash],
-		noExtensions: true,
-		noSkills: true,
-		noPromptTemplates: true,
-		noThemes: true,
-		noContextFiles: true,
-		disabledBuiltinExtensions: ["mcp", "codemode", "tool_search"],
-	});
-	await resourceLoader.reload();
-	const { session } = await createAgentSession({
-		cwd: dir,
-		agentDir,
-		modelRuntime,
-		model: faux.getModel("faux-main"),
-		thinkingLevel: "low",
-		noTools: "builtin",
-		resourceLoader,
-		sessionManager: SessionManager.inMemory(dir),
-		settingsManager,
-	});
-	sessions.push(session);
-	await session.bindExtensions({ mode: "print" });
+	const runtime = await createAgentSessionRuntime(
+		async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
+			const services = await createAgentSessionServices({
+				cwd,
+				agentDir,
+				modelRuntime,
+				settingsManager,
+				resourceLoaderOptions: {
+					extensionFactories: [backgroundBash],
+					noExtensions: true,
+					noSkills: true,
+					noPromptTemplates: true,
+					noThemes: true,
+					noContextFiles: true,
+					disabledBuiltinExtensions: ["mcp", "codemode", "tool_search"],
+				},
+			});
+			const created = await createAgentSessionFromServices({
+				services,
+				sessionManager,
+				sessionStartEvent,
+				model: faux.getModel("faux-main"),
+				thinkingLevel: "low",
+				noTools: "builtin",
+			});
+			return { ...created, services, diagnostics: services.diagnostics };
+		},
+		{
+			cwd: dir,
+			agentDir,
+			sessionManager: options.sessionFile
+				? SessionManager.open(options.sessionFile, sessionDir)
+				: SessionManager.create(dir, sessionDir),
+		},
+	);
+	runtimes.push(runtime);
+	// As pi binds a session; without a binding a reload starts no new session.
+	const bind = (session: AgentSessionRuntime["session"]) =>
+		session.bindExtensions({ mode: "print", shutdownHandler: () => {} });
+	runtime.setRebindSession(bind);
+	await bind(runtime.session);
 	const seen: Context[] = [];
 	/** The model's replies, in order; each records the context it was called with. */
 	const replies = (steps: FauxResponseStep[]) =>
@@ -97,7 +118,7 @@ async function startSession() {
 				return typeof step === "function" ? step(context, options, state, model) : step;
 			}),
 		);
-	return { session, replies, seen };
+	return { runtime, session: runtime.session, replies, seen, dir };
 }
 
 /** The text of the last message the model saw in `context`. */
@@ -261,5 +282,129 @@ describe("schedule_wakeup", () => {
 		} finally {
 			vi.unstubAllEnvs();
 		}
+	});
+});
+
+/** The id of the wake-up a schedule_wakeup result names. */
+const wakeupId = (text: string) => /\bw[0-9a-z]{8}\b/.exec(text)?.[0];
+
+/** The pi is gone without ending its session, as in a crash: nothing of it is left in this process. */
+function crash(runtime: AgentSessionRuntime) {
+	wakeups.release();
+	runtime.session.dispose();
+}
+
+describe("a wake-up's lifetime", () => {
+	it("stays pending across a reload and fires on time", async () => {
+		const { session, replies, seen } = await startSession();
+		replies([
+			call("schedule_wakeup", { prompt: "Check the deploy.", delay: 600 }),
+			fauxAssistantMessage("Scheduled."),
+			fauxAssistantMessage("Deploy is fine."),
+		]);
+		await session.prompt("deploy", { expandPromptTemplates: false });
+		const id = wakeupId(lastText(seen[1]));
+		await session.reload();
+		expect(wakeups.list().map((w) => w.id)).toEqual([id]);
+
+		vi.advanceTimersByTime(10 * MINUTE);
+		await waitFor(() => seen.length === 3);
+		expect(lastText(seen[2])).toContain("Check the deploy.");
+		expect(wakeups.list()).toEqual([]);
+	});
+
+	it("fires each one that fell due while the session was closed once it is reopened: late, in due order, each in its own turn", async () => {
+		const first = await startSession();
+		first.replies([
+			call("schedule_wakeup", { prompt: "Second thing.", delay: 300 }),
+			call("schedule_wakeup", { prompt: "First thing.", delay: 120 }),
+			fauxAssistantMessage("Both scheduled."),
+		]);
+		await first.session.prompt("plan", { expandPromptTemplates: false });
+		const sessionFile = first.session.sessionFile;
+		crash(first.runtime);
+		vi.setSystemTime(NOW + 60 * MINUTE);
+
+		const reopened = await startSession({ dir: first.dir, sessionFile });
+		reopened.replies([fauxAssistantMessage("Did the first."), fauxAssistantMessage("Did the second.")]);
+		await waitFor(() => reopened.seen.length === 2);
+		const firstNotice = lastText(reopened.seen[0]);
+		expect(firstNotice).toContain("First thing.");
+		expect(firstNotice).toContain("it was due at 2026-11-10 13:32");
+		const second = reopened.seen[1].messages;
+		expect(textOf(second.at(-2)?.content)).toBe("Did the first.");
+		expect(textOf(second.at(-1)?.content)).toContain("Second thing.");
+		expect(textOf(second.at(-1)?.content)).toContain("it was due at 2026-11-10 13:35");
+		expect(wakeups.list()).toEqual([]);
+	});
+
+	/** Another stored session, to `/resume`. */
+	const otherSessionFile = (dir: string) => {
+		const other = SessionManager.create(dir, join(dir, "sessions"));
+		other.appendMessage({ role: "user", content: "other", timestamp: Date.now() });
+		other.appendMessage(fauxAssistantMessage("Other."));
+		return other.getSessionFile();
+	};
+
+	type Started = Awaited<ReturnType<typeof startSession>>;
+	const endings: [string, (started: Started) => Promise<unknown>][] = [
+		["a quit", ({ runtime }) => runtime.dispose()],
+		["/new", ({ runtime }) => runtime.newSession()],
+		["a /resume of another session", ({ runtime, dir }) => runtime.switchSession(otherSessionFile(dir) ?? "")],
+		["a fork", ({ runtime }) => runtime.fork(runtime.session.sessionManager.getLeafId() ?? "", { position: "at" })],
+		[
+			"tree navigation",
+			({ session }) =>
+				session.navigateTree(session.sessionManager.getEntries().find((e) => e.type === "message")?.id ?? ""),
+		],
+	];
+
+	it.each(endings)("is cancelled by %s, and a later /resume of the session revives none", async (_name, end) => {
+		const started = await startSession();
+		started.replies([call("schedule_wakeup", { prompt: "Never.", delay: 120 }), fauxAssistantMessage("Scheduled.")]);
+		await started.session.prompt("later", { expandPromptTemplates: false });
+		const sessionFile = started.session.sessionFile;
+		await end(started);
+		expect(wakeups.list()).toEqual([]);
+		// A fork's new session has none either, now or reopened.
+		const currentFile = started.runtime.session.sessionFile;
+		crash(started.runtime);
+		vi.setSystemTime(NOW + 60 * MINUTE);
+
+		for (const file of new Set([sessionFile, currentFile])) {
+			const reopened = await startSession({ dir: started.dir, sessionFile: file });
+			expect(wakeups.list()).toEqual([]);
+			// Proves nothing starts within it.
+			await new Promise((r) => setTimeout(r, 200));
+			expect(reopened.seen).toEqual([]);
+			crash(reopened.runtime);
+		}
+	});
+
+	it("never fires again once it has fired or been cancelled, after a reload or a reopen", async () => {
+		const started = await startSession();
+		started.replies([
+			call("schedule_wakeup", { prompt: "Fires.", delay: 60 }),
+			(context) =>
+				call("schedule_wakeup", { prompt: `Cancelled after ${wakeupId(lastText(context))}.`, delay: 600 }),
+			(context) => call("task_stop", { task_id: wakeupId(lastText(context)) ?? "" }),
+			fauxAssistantMessage("One left."),
+			fauxAssistantMessage("Fired."),
+		]);
+		await started.session.prompt("both", { expandPromptTemplates: false });
+		vi.advanceTimersByTime(MINUTE);
+		await waitFor(() => started.seen.length === 5);
+		expect(lastText(started.seen[4])).toContain("Fires.");
+		await started.session.reload();
+		expect(wakeups.list()).toEqual([]);
+		const sessionFile = started.session.sessionFile;
+		crash(started.runtime);
+		vi.setSystemTime(NOW + 60 * MINUTE);
+
+		const reopened = await startSession({ dir: started.dir, sessionFile });
+		expect(wakeups.list()).toEqual([]);
+		// Proves nothing starts within it.
+		await new Promise((r) => setTimeout(r, 200));
+		expect(reopened.seen).toEqual([]);
 	});
 });

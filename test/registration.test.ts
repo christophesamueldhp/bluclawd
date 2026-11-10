@@ -18,7 +18,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 		commands: ["tasks"],
 		tools: ["bash", "monitor", "schedule_wakeup", "task_stop"],
 		shortcuts: 0,
-		events: 4,
+		events: 5,
 	},
 	subagents: {
 		commands: [],
