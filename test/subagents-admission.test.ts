@@ -128,6 +128,7 @@ async function setup(
 		scope,
 		pane: () => (options.pane === null ? undefined : (options.pane ?? "pi-orchestrator")),
 		tools: () => [],
+		registeredTools: () => [],
 	};
 	const ctx: AdmissionContext = {
 		cwd,

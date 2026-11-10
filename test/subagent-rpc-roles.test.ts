@@ -203,7 +203,7 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 		expect(JSON.parse(readFileSync(snapshotFile, "utf8"))).toMatchObject(admitted);
 	});
 
-	it("gives a role only read tools, whatever its name or prompt claims, and refuses one naming more", async () => {
+	it("gives a role only read tools and codemode, whatever its name or prompt claims, and refuses one naming more", async () => {
 		const real = await startOrchestrator();
 		pi = real;
 		role(real.agentDir, "tester", "Run the tests.", "agents", ["tools: [read, bash]"]);
@@ -227,12 +227,11 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 		real.start(["--", "delegate"]);
 		const main = await real.waitForRequests("main", launches.length + 1);
 
-		expect(toolNames(real.requests("boss")[0])).toEqual(["read"]);
-		expect(toolNames(real.requests("review")[0])).toEqual(["read"]);
+		expect(toolNames(real.requests("boss")[0]).sort()).toEqual(["codemode", "read"]);
+		expect(toolNames(real.requests("review")[0]).sort()).toEqual(["codemode", "read"]);
 		expect(lastToolResult(main[3])?.text).toMatch(/"tester" names tools a read-only run cannot have: bash/);
-		expect(lastToolResult(main[4])?.text).toMatch(/"composer" names tools a read-only run cannot have: codemode/);
 		expect(real.requests("tests")).toHaveLength(0);
-		expect(real.requests("compose")).toHaveLength(0);
+		expect(toolNames(real.requests("compose")[0]).sort()).toEqual(["codemode", "read"]);
 	});
 
 	it("refuses an invalid or ambiguous role without falling back to another definition", async () => {

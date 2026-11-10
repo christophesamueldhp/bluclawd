@@ -202,6 +202,7 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		scope,
 		pane: () => ORCHESTRATOR_PANE,
 		tools: () => [],
+		registeredTools: () => [],
 	});
 	/** Gives the orchestrator's session the one model the test runs launch with. */
 	const loadModels = async () => {

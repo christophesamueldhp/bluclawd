@@ -287,6 +287,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			scope: parentScope,
 			pane: () => pane,
 			tools: () => (latestLoadout ? orchestratorTools(latestLoadout) : []),
+			registeredTools: () => latestLoadout?.registered.map((tool) => tool.name) ?? [],
 		});
 
 		const views = createParentScopeViews({

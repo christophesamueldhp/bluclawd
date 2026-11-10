@@ -23,7 +23,7 @@ import type { RunDirectory } from "./directory.ts";
 import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
 import { resolveChildModelAndRuntime } from "./models.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
-import { type RpcLaunch, rpcRunsEnabled, rpcRunTools } from "./rpc-runs.ts";
+import { type RpcLaunch, rpcGrantableTools, rpcRunsEnabled, rpcRunTools } from "./rpc-runs.ts";
 import { type RunWorkspace, resolveRunWorkspace } from "./run-workspace.ts";
 import {
 	type AdmittedSubagentHandle,
@@ -187,6 +187,8 @@ export interface RunAdmissionDeps {
 	pane: () => string | undefined;
 	/** The tools the orchestrator has, which a role may name. */
 	tools: () => readonly string[];
+	/** Every tool the orchestrator's pi registered, active or not. */
+	registeredTools: () => readonly string[];
 }
 
 export type AdmissionResult =
@@ -436,7 +438,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				return reject(resolvedDef.error);
 			}
 			const definition = resolvedDef.definition;
-			const available = deps.tools();
+			const available = rpc ? rpcGrantableTools(deps.tools(), deps.registeredTools()) : deps.tools();
 			const rpcTools = rpc ? rpcRunTools(definition, available) : undefined;
 			if (rpcTools && !rpcTools.ok) return reject(rpcTools.error);
 			const unknownTools = definition.tools?.filter((name) => !available.includes(name)) ?? [];
@@ -523,10 +525,27 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const childTrusted = workspace?.trusted(cwd) ?? projectTrusted;
 			if (rpcTools) {
 				// The role as admitted, with what it may do: what the run, and any later continuation of it, is held to.
+				// Besides its tools, the deny rules of its orchestrator and of its own workspace, each read where it was set.
+				const deny = [
+					{
+						cwd: ctx.cwd,
+						rules: forkSettings.denyRules(SettingsManager.create(ctx.cwd, agentDir, { projectTrusted })),
+					},
+					{
+						cwd,
+						rules: forkSettings.denyRules(
+							SettingsManager.create(cwd, agentDir, { projectTrusted: childTrusted }),
+						),
+					},
+				];
 				try {
 					writeAtomicPrivateFile(
 						join(storage.runDir, "definition.json"),
-						JSON.stringify({ ...definition, tools: rpcTools.tools, cwd, projectTrusted: childTrusted }, null, 2),
+						JSON.stringify(
+							{ ...definition, tools: rpcTools.tools, deny, cwd, projectTrusted: childTrusted },
+							null,
+							2,
+						),
 					);
 				} catch (error) {
 					return reject(

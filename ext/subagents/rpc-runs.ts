@@ -1,8 +1,8 @@
 /**
  * Runs on pi's RPC (ADR-0010), behind a switch until they replace runs in tmux: a run is a pi with no pane, held by
  * a host process of its own (rpc-host.ts), that takes its task in a fresh session, stores its Report once its work
- * settles, and exits. For now a run only reads: its tools are a plain allowlist of pi's read tools, and anything
- * else is refused at Admission.
+ * settles, and exits. For now a run only reads: its tools are a plain allowlist of pi's read tools and codemode,
+ * anything else is refused at Admission, and its pi checks every call again (rpc-child.ts).
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
@@ -12,6 +12,7 @@ import { parseSessionEntries, type SessionEntry } from "@earendil-works/pi-codin
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { piCommand } from "../../daemon/tmux.ts";
 import type { AgentDefinition } from "./definitions.ts";
+import { RUN_DEFINITION_FLAG } from "./rpc-child.ts";
 import { launchRpcHost, processAlive, readRpcHostState, stopRpcHost } from "./rpc-host.ts";
 import { runTaskText } from "./run-messages.ts";
 import type { RunRuntimeOutcome, SubagentRunExecuteParams, SubagentRunOutcome } from "./runs.ts";
@@ -30,8 +31,13 @@ const CHILD_EXTENSION = fileURLToPath(new URL("./rpc-child.ts", import.meta.url)
 
 export const rpcRunsEnabled = (): boolean => Boolean(process.env[RPC_RUNS_ENV]);
 
-/** pi's tools that only read: all an RPC run may have until its other capabilities are enforced. */
+/** pi's tools that only read. */
 const READ_TOOLS = ["read", "grep", "find", "ls"];
+/** All an RPC run may have until its other capabilities are enforced: the read tools, and codemode over them. */
+const RPC_TOOLS = [...READ_TOOLS, "codemode"];
+
+/** pi's names for MCP tools, which its `--tools` list does not filter. */
+const MCP_TOOLS = ["mcp__*", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"];
 
 /** What an RPC run is started as: its role and choices, resolved at Admission. */
 export interface RpcLaunch {
@@ -49,20 +55,28 @@ export interface RpcLaunch {
 }
 
 /**
- * The tools an RPC run gets: those its role names, or every read tool the orchestrator has when it names none.
- * Anything but a read tool is refused, the shell, edits, codemode, MCP and subagents among them; Admission checks
- * that the orchestrator has those named.
+ * The tools an orchestrator can give an RPC run: those it can call, and codemode when its pi has codemode at all,
+ * active or not. Codemode grants nothing of its own: a run's scripts reach only its other tools, and no model.
+ */
+export function rpcGrantableTools(callable: readonly string[], registered: readonly string[]): string[] {
+	return [...callable, ...(registered.includes("codemode") && !callable.includes("codemode") ? ["codemode"] : [])];
+}
+
+/**
+ * The tools an RPC run gets: those its role names, or every read tool and codemode the orchestrator can give it
+ * when it names none. Anything else is refused, the shell, edits, MCP and subagents among them; Admission checks
+ * that the orchestrator can give those named.
  */
 export function rpcRunTools(
 	definition: Pick<AgentDefinition, "name" | "tools">,
 	available: readonly string[],
 ): { ok: true; tools: string[] } | { ok: false; error: string } {
-	const named = definition.tools ?? READ_TOOLS.filter((tool) => available.includes(tool));
-	const refused = named.filter((tool) => !READ_TOOLS.includes(tool));
+	const named = definition.tools ?? RPC_TOOLS.filter((tool) => available.includes(tool));
+	const refused = named.filter((tool) => !RPC_TOOLS.includes(tool));
 	if (refused.length > 0) {
 		return {
 			ok: false,
-			error: `Subagent role "${definition.name}" names tools a read-only run cannot have: ${refused.join(", ")}. Runs on pi's RPC only read for now (${READ_TOOLS.join(", ")}): no shell, edits, codemode, MCP or subagents.`,
+			error: `Subagent role "${definition.name}" names tools a read-only run cannot have: ${refused.join(", ")}. Runs on pi's RPC only read for now (${RPC_TOOLS.join(", ")}): no shell, edits, MCP, tool search or subagents.`,
 		};
 	}
 	return { ok: true, tools: [...named] };
@@ -83,6 +97,9 @@ function rpcCommand(launch: RpcLaunch, instructionsFile: string): string[] {
 		launch.modelId,
 		...(launch.thinkingLevel ? ["--thinking", launch.thinkingLevel] : []),
 		...(launch.tools.length > 0 ? ["--tools", launch.tools.join(",")] : ["--no-tools"]),
+		// A plain list keeps every tool named as MCP's, whoever registers it.
+		"--exclude-tools",
+		MCP_TOOLS.join(","),
 		"--name",
 		launch.name,
 		"--append-system-prompt",
@@ -90,6 +107,8 @@ function rpcCommand(launch: RpcLaunch, instructionsFile: string): string[] {
 		"--session-dir",
 		launch.runDir,
 		launch.projectTrusted ? "--approve" : "--no-approve",
+		`--${RUN_DEFINITION_FLAG}`,
+		join(launch.runDir, "definition.json"),
 	];
 }
 
