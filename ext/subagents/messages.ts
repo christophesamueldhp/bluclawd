@@ -203,7 +203,7 @@ export class SubagentMessageBus {
 			return {
 				status: "unavailable",
 				seq,
-				reason: `"${to}" can no longer receive messages (${err instanceof Error ? err.message : String(err)}).`,
+				reason: `${label} can no longer receive messages (${err instanceof Error ? err.message : String(err)}).`,
 			};
 		}
 	}

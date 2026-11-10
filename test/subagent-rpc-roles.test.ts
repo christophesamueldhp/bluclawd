@@ -227,11 +227,11 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 		real.start(["--", "delegate"]);
 		const main = await real.waitForRequests("main", launches.length + 1);
 
-		expect(toolNames(real.requests("boss")[0]).sort()).toEqual(["codemode", "read"]);
-		expect(toolNames(real.requests("review")[0]).sort()).toEqual(["codemode", "read"]);
+		expect(toolNames(real.requests("boss")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
+		expect(toolNames(real.requests("review")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
 		expect(lastToolResult(main[3])?.text).toMatch(/"tester" names tools a read-only run cannot have: bash/);
 		expect(real.requests("tests")).toHaveLength(0);
-		expect(toolNames(real.requests("compose")[0]).sort()).toEqual(["codemode", "read"]);
+		expect(toolNames(real.requests("compose")[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
 	});
 
 	it("refuses an invalid or ambiguous role without falling back to another definition", async () => {

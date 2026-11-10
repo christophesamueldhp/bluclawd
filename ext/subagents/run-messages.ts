@@ -32,6 +32,29 @@ export function runTaskText(text: string, resumed: boolean): string {
 	return `${lead}\n\n${text}`;
 }
 
+/** Who sent a message to a run on pi's RPC, as the runtime knows it: never what the message says of itself. */
+export type RpcRunSender = { kind: "orchestrator" } | { kind: "user" } | { kind: "sibling"; label: string };
+
+/**
+ * A message to a run on pi's RPC as its model reads it. pi gives every message as the user's, so the frame says who
+ * sent it to which run, generation and orchestrator session, and whether it carries the user's authority. It grants
+ * nothing: the run's tools and deny rules hold whoever sent it (rpc-child.ts).
+ */
+export function rpcRunMessageText(
+	sender: RpcRunSender,
+	run: { name?: string; runId: string; generation: number; parentSessionId: string },
+	text: string,
+): string {
+	const to = `run "${run.name ?? run.runId}" (${run.runId}), generation ${run.generation}`;
+	const lead =
+		sender.kind === "orchestrator"
+			? `[Message from your orchestrator (session ${run.parentSessionId}) to ${to}, from another session, not from the user. Follow it as a course correction within your task. ${NOT_APPROVAL}]`
+			: sender.kind === "sibling"
+				? `[Message from sibling run ${sender.label} to ${to}, of the same orchestrator (session ${run.parentSessionId}), from another session, not from the user: information or a request; weigh it against your own task. ${NOT_APPROVAL}]`
+				: `[Instruction from the user to ${to}, sent directly through Bluclawd, not through your orchestrator (session ${run.parentSessionId}). It carries the user's authority over your task, within the tools and permissions you already have.]`;
+	return `${lead}\n\n${text}`;
+}
+
 /** Who sends what this run sends another session: its pane, and its session's name. */
 export function fromRun(pi: Pick<ExtensionAPI, "getSessionName">, pane: string) {
 	return { type: "session_message" as const, from: pane, name: pi.getSessionName() };

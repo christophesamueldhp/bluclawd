@@ -225,6 +225,8 @@ export type AdmissionResult =
 export interface ResumeChanges {
 	model?: string;
 	thinkingLevel?: string;
+	/** Set when the instruction is the user's own, given to the run directly, rather than its orchestrator's. */
+	from?: "user";
 }
 
 export interface RunAdmission {
@@ -494,6 +496,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					agentDir,
 					projectTrusted: definition.projectTrusted,
 					sessionFile,
+					...(changes.from ? { taskFrom: changes.from } : {}),
 					recheck: recheckRpc(current.runId, runDir, generation, { cwd: ctx.cwd, trusted: projectTrusted }),
 				},
 			},

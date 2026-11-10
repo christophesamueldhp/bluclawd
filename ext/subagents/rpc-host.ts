@@ -3,7 +3,8 @@
  * belongs to a detached host of its own, not to the orchestrator, whose pi may end first, nor to the daemon, which only
  * starts the host once the run's turn in its queue comes. The host starts the run's pi, gives it its task, stores its Report once its work settles with nothing pending, then closes its stdin and
  * records how it exited. Everything between the orchestrator and the host goes through the run's directory: the
- * launch spec in, the host's state and the run's Reports out; a SIGTERM to the host stops the run.
+ * launch spec and messages for the run in, the host's state, what the run sends out and its Reports out
+ * (run-mailbox.ts); a SIGTERM to the host stops the run.
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -12,6 +13,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { piPackageRoot } from "../../daemon/orchestrator-client.ts";
 import type { RunHostLaunch } from "../../daemon/run-queue.ts";
+import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
+import {
+	markGiven,
+	type RunInboxMessage,
+	type RunOutboxMessage,
+	readRunInbox,
+	sealRunInbox,
+	unsealRunInbox,
+	writeRunOutbox,
+} from "./run-mailbox.ts";
 import type { RunRuntimeOutcome } from "./runs.ts";
 import { storeRunReport, writeAtomicPrivateFile } from "./storage.ts";
 
@@ -50,6 +61,8 @@ const specPath = (runDir: string) => join(runDir, "rpc-spec.json");
 const statePath = (runDir: string) => join(runDir, "rpc-host.json");
 /** Child stderr: pi reports a failed start only there. */
 const stderrPath = (runDir: string) => join(runDir, "rpc-child.stderr");
+/** How often the host looks for messages posted to the run. */
+const INBOX_CHECK_MS = 50;
 const HOST_FILE = fileURLToPath(import.meta.url);
 const RESOLVE_HOOK = join(dirname(HOST_FILE), "../../daemon/pi-resolve-hook.mjs");
 
@@ -188,6 +201,11 @@ async function host(runDir: string): Promise<void> {
 
 	let last: { text: string; stopReason?: string; errorMessage?: string } = { text: "" };
 	let onSettled: ((aborted: boolean) => void) | undefined;
+	/** Messages from the inbox given to pi, by id, and those of them its conversation does not hold yet. */
+	const given = new Set<string>();
+	const taken = new Set<string>();
+	let waiting: RunInboxMessage[] = [];
+	let sent = 0;
 	const request = connect(child, (event) => {
 		if (event.type === "message_end") {
 			const message = event.message as {
@@ -203,9 +221,48 @@ async function host(runDir: string): Promise<void> {
 					errorMessage: message.errorMessage,
 				};
 			}
+			// pi queues a message in memory only: it is the run's once its conversation holds it.
+			const text = message.role === "user" ? textOf(message.content) : undefined;
+			const at = waiting.findIndex((given) => given.text === text);
+			if (at >= 0) {
+				taken.add(waiting[at].id);
+				waiting = waiting.filter((_, index) => index !== at);
+			}
+		}
+		// What the run sends out is read off its own tool's results, which its pi alone produces.
+		if (event.type === "tool_execution_end" && event.toolName === SUBAGENT_MESSAGE_TOOL && !event.isError) {
+			const details = (event.result as { details?: Omit<RunOutboxMessage, "seq"> } | undefined)?.details;
+			if (details) writeRunOutbox(runDir, spec.generation, { ...details, seq: ++sent });
 		}
 		if (event.type === "agent_settled") onSettled?.(event.aborted === true);
 	});
+	// One at a time, so the last look at the inbox and its seal cannot interleave with a message being given.
+	let turn = Promise.resolve();
+	const serial = <T>(task: () => Promise<T>): Promise<T> => {
+		const next = turn.then(task);
+		turn = next.then(
+			() => {},
+			() => {},
+		);
+		return next;
+	};
+	/**
+	 * Gives pi each message not given yet, as a prompt that steers it at its next safe point when it works and starts
+	 * it when it is idle: a bare steer would wait on an idle pi for a prompt that never comes.
+	 */
+	const give = async (messages: RunInboxMessage[]) => {
+		for (const message of messages) {
+			if (given.has(message.id)) continue;
+			given.add(message.id);
+			waiting.push(message);
+			const reply = await request({ type: "prompt", message: message.text, streamingBehavior: "steer" });
+			if (!reply.success) {
+				given.delete(message.id);
+				waiting = waiting.filter((held) => held !== message);
+			} else markGiven(runDir, spec.generation, message.id);
+		}
+	};
+	let watching: ReturnType<typeof setInterval> | undefined;
 	const settled = () =>
 		new Promise<boolean>((resolve) => {
 			onSettled = resolve;
@@ -251,16 +308,31 @@ async function host(runDir: string): Promise<void> {
 		let next = settled();
 		const prompted = await request({ type: "prompt", message: spec.prompt });
 		if (!prompted.success) return { status: "failed", error: String(prompted.error ?? "its task was refused") };
+		const inbox = () => readRunInbox(runDir, spec.generation);
+		watching = setInterval(() => void serial(() => give(inbox())).catch(() => {}), INBOX_CHECK_MS);
 		for (;;) {
 			const aborted = await next;
 			if (aborted || stopped) return { status: "stopped", error: "its work was stopped" };
 			next = settled();
-			// pi goes on by itself with what was queued meanwhile: the work is done once nothing is.
-			const now = (await request({ type: "get_state" })).data as {
-				isStreaming?: boolean;
-				pendingMessageCount?: number;
-			};
-			if (!now.isStreaming && !now.pendingMessageCount) break;
+			const done = await serial(async () => {
+				await give(inbox());
+				// pi goes on by itself with what was queued meanwhile: the work is done once nothing is.
+				const now = (await request({ type: "get_state" })).data as {
+					isStreaming?: boolean;
+					pendingMessageCount?: number;
+				};
+				if (now.isStreaming || now.pendingMessageCount || waiting.length > 0) return false;
+				// What landed before the seal is the run's to take: it goes on with it.
+				const late = sealRunInbox(runDir, spec.generation).filter(({ id }) => !given.has(id));
+				if (late.length === 0) return true;
+				unsealRunInbox(runDir, spec.generation);
+				await give(late);
+				// pi refused them all, so nothing settles again: they stay untaken, and the work is done.
+				if (waiting.length > 0) return false;
+				sealRunInbox(runDir, spec.generation);
+				return true;
+			});
+			if (done) break;
 		}
 		if (last.stopReason === "error") return { status: "failed", error: last.errorMessage ?? "its model failed" };
 		if (last.stopReason === "aborted") return { status: "stopped", error: "its work was stopped" };
@@ -284,6 +356,9 @@ async function host(runDir: string): Promise<void> {
 						},
 		),
 	]);
+	clearInterval(watching);
+	// Whatever it was sent and never took, stopped or failed first, stays in the sealed inbox, and the Report says so.
+	const untaken = sealRunInbox(runDir, spec.generation).filter(({ id }) => !taken.has(id)).length;
 	// Stored before its pi is let go: its work is on disk whatever happens next.
 	state.outcome = outcome;
 	state.reportSeq = storeRunReport(runDir, {
@@ -291,6 +366,7 @@ async function host(runDir: string): Promise<void> {
 		outcome,
 		sessionId: state.sessionId,
 		generation: spec.generation,
+		...(untaken ? { untaken } : {}),
 	});
 	save();
 	child.stdin?.end();

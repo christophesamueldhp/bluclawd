@@ -83,7 +83,7 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 			},
 		]);
 		expect(JSON.stringify(look)).not.toContain("SECRET-123");
-		expect(toolNames(look[0]).sort()).toEqual(["codemode", "read"]);
+		expect(toolNames(look[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
 		expect(lastToolResult(look[1])).toMatchObject({ toolName: "read", text: "the codeword is PELICAN\n" });
 
 		const dir = runDir(real.agentDir, "look");

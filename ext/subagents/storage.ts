@@ -172,6 +172,8 @@ export interface StoredRunReport {
 	sessionId?: string;
 	/** The run's generation that stored it; absent from a run in tmux. */
 	generation?: number;
+	/** How many messages posted to the run during its generation its pi never took: they stay in its sealed inbox. */
+	untaken?: number;
 }
 
 /** The run's own: the orchestrator rewrites `record.json` and `report.md`, so a run's Reports go in files of their own. */

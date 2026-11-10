@@ -18,9 +18,11 @@ import type { RunHostLaunch } from "../../daemon/run-queue.ts";
 import { piCommand } from "../../daemon/tmux.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import type { AgentDefinition } from "./definitions.ts";
+import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
 import { type RpcDenyRules, RUN_DEFINITION_FLAG } from "./rpc-child.ts";
 import { prepareRpcHost, processAlive, readRpcHostState, stopRpcHost } from "./rpc-host.ts";
-import { runTaskText } from "./run-messages.ts";
+import { openRunInbox, type RunOutboxMessage, readRunOutbox, sealedRunInbox, sealRunInbox } from "./run-mailbox.ts";
+import { rpcRunMessageText, runTaskText } from "./run-messages.ts";
 import type { RunRuntimeOutcome, SubagentRunExecuteParams, SubagentRunOutcome } from "./runs.ts";
 import { readRunReports, storedRunReportTextPath } from "./storage.ts";
 import type { RunReports } from "./tmux-runs.ts";
@@ -60,6 +62,8 @@ export interface RpcLaunch {
 	projectTrusted: boolean;
 	/** The saved session a Resume reopens; absent at the launch, which starts a fresh one. */
 	sessionFile?: string;
+	/** Set when a Resume's instruction is the user's own; otherwise the task is its orchestrator's. */
+	taskFrom?: "user";
 	/**
 	 * Why the run may no longer start, asked once its turn comes: it may have waited in the queue since Admission. It
 	 * narrows what the run is held to, never widens it.
@@ -209,7 +213,9 @@ function rpcCommand(launch: RpcLaunch, instructionsFile: string, definitionFile:
 		launch.modelId,
 		"--thinking",
 		launch.thinkingLevel,
-		...(launch.tools.length > 0 ? ["--tools", launch.tools.join(",")] : ["--no-tools"]),
+		// Its own message tool besides those it was given: the child extension grants it to every run.
+		"--tools",
+		[...launch.tools, SUBAGENT_MESSAGE_TOOL].join(","),
 		// A plain list keeps every tool named as MCP's, whoever registers it.
 		"--exclude-tools",
 		MCP_TOOLS.join(","),
@@ -313,7 +319,12 @@ export interface RpcRunDeps {
 	usage(sessionId: string, totals: SessionUsage): void;
 	/** Aborted when this orchestrator hands its open runs over to the next instance of its session (a reload). */
 	handOff: AbortSignal;
+	/** A finding, question or blocker the run sent while it worked, for its orchestrator or a sibling. */
+	relay(message: RunOutboxMessage): void;
 }
+
+const untakenText = (count: number, runDir: string, generation: number) =>
+	`Untaken: ${count} message${count === 1 ? "" : "s"} sent to it never reached its pi; kept in ${sealedRunInbox(runDir, generation)}.`;
 
 /**
  * A run's generation on pi's RPC, as the scheduler sees it: its host starts its pi, and the generation ends once
@@ -327,12 +338,31 @@ export async function executeRpcRun(
 ): Promise<SubagentRunOutcome> {
 	const instructions = join(launch.runDir, "instructions.md");
 	writeFileSync(instructions, launch.definition.instructions);
+	// Open before anything is awaited: the run takes messages from its Admission on, queued or working.
+	openRunInbox(launch.runDir, record.generation);
+	/** What the run's pi has sent out since it was last looked at: its progress is only noted, wakes nobody. */
+	let relayed = 0;
+	const relay = () => {
+		for (const message of readRunOutbox(launch.runDir, record.generation, relayed)) {
+			relayed = message.seq;
+			if (message.kind === "progress") controller.updateProgress(message.content);
+			else deps.relay(message);
+		}
+	};
+	/** Seals the inbox of a run that never started; says how many messages it holds. */
+	const untakenNote = () => {
+		const untaken = sealRunInbox(launch.runDir, record.generation).length;
+		return untaken ? ` ${untakenText(untaken, launch.runDir, record.generation)}` : "";
+	};
 	// Built before anything is awaited, so within its Admission: the run starts as admitted, however long it queues.
 	const host = prepareRpcHost(launch.runDir, {
 		command: rpcCommand(launch, instructions, runDefinitionPath(launch.runDir, record.generation)),
 		cwd: launch.cwd,
 		agentDir: launch.agentDir,
-		prompt: runTaskText(launch.task, launch.sessionFile !== undefined),
+		prompt:
+			launch.taskFrom === "user"
+				? rpcRunMessageText({ kind: "user" }, record, launch.task)
+				: runTaskText(launch.task, launch.sessionFile !== undefined),
 		model: { provider: launch.provider, id: launch.modelId, thinkingLevel: launch.thinkingLevel },
 		generation: record.generation,
 		...(launch.sessionFile ? { sessionFile: launch.sessionFile } : {}),
@@ -348,7 +378,7 @@ export async function executeRpcRun(
 	if (!turn) {
 		// Handed off before it started: the next instance of the session finds it never started.
 		if (!signal.aborted) return new Promise<never>(() => {});
-		return { status: "closed", summaryText: "", errorMessage: "It was stopped before it started." };
+		return { status: "closed", summaryText: "", errorMessage: `It was stopped before it started.${untakenNote()}` };
 	}
 	if (!("hostPid" in turn)) {
 		const reason = "refused" in turn ? turn.refused : `the daemon could not start it (${turn.error})`;
@@ -357,7 +387,7 @@ export async function executeRpcRun(
 		return {
 			status: launch.sessionFile ? "closed" : "failed",
 			summaryText: "",
-			errorMessage: `It did not start: ${reason}`,
+			errorMessage: `It did not start: ${reason}.${untakenNote()}`,
 		};
 	}
 	const { hostPid } = turn;
@@ -369,7 +399,13 @@ export async function executeRpcRun(
 		return state?.hostPid === hostPid ? state : undefined;
 	};
 	const ended = () => ownState()?.exit !== undefined || !processAlive(hostPid);
-	await until(ended, AbortSignal.any([signal, deps.handOff]));
+	await until(
+		() => {
+			relay();
+			return ended();
+		},
+		AbortSignal.any([signal, deps.handOff]),
+	);
 	// Handed off: the run goes on, its Report kept on disk, and this instance of the session stores nothing more.
 	if (!ended() && !signal.aborted) return new Promise<never>(() => {});
 	if (!ended()) {
@@ -378,11 +414,15 @@ export async function executeRpcRun(
 		if (!stopped) killHost(launch.runDir, hostPid);
 	}
 
+	// Whatever it sent before it ended reaches its recipients before its Report.
+	relay();
 	const state = ownState();
 	const report = readRunReports(launch.runDir, (state?.reportSeq ?? 0) - 1).find(
 		({ seq }) => seq === state?.reportSeq,
 	);
 	if (!state?.exit || !report) {
+		// Later messages are refused; those it was sent stay on disk, whether its pi took them or not.
+		sealRunInbox(launch.runDir, record.generation);
 		return {
 			status: "failed",
 			summaryText: report?.text ?? "",
@@ -405,6 +445,7 @@ export async function executeRpcRun(
 		`Process: exited with ${state.exit.signal ? `signal ${state.exit.signal}` : `code ${state.exit.code}`}, after its Report was stored.`,
 		`Transcript: ${state.sessionFile ?? "none"}`,
 		`Report: ${storedRunReportTextPath(launch.runDir, report.seq)}`,
+		...(report.untaken ? [untakenText(report.untaken, launch.runDir, record.generation)] : []),
 	].join("\n");
 	const message: Extract<SessionMessage, { kind: "report" }> = {
 		type: "session_message",

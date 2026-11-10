@@ -14,6 +14,8 @@ import {
 import { inParentScope, type ParentScope, type ParentScopeChecks, type ScopedRun } from "./parent-scope.ts";
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
 import { executeRpcRun, type RunSlots } from "./rpc-runs.ts";
+import { postToRun, whenGiven } from "./run-mailbox.ts";
+import { type RpcRunSender, rpcRunMessageText } from "./run-messages.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
 import {
 	appendParentRunReference,
@@ -26,6 +28,9 @@ import {
 	writePersistedRunRecord,
 } from "./storage.ts";
 import { executeTmuxRun, type RunReports, sendToRun, storedReport, type TmuxRunDeps } from "./tmux-runs.ts";
+
+/** How long a message's sender waits for the run's host to give it to its pi; a queued run's waits in its inbox. */
+const GIVE_WAIT_MS = 5000;
 
 /** A Report no foreground launch took, as the orchestrator is told about it. */
 export interface ParentNotice {
@@ -142,10 +147,23 @@ export function createGenerations(deps: GenerationDeps) {
 				recordRunSessionUsage(deps.agentDir(), params.record, sessionId, totals);
 			if ("rpc" in execCtx) {
 				if (!params.record.generation) recordLaunch(params.record);
+				const scope = { parentSessionId: params.record.parentSessionId, sessionEpoch: params.record.sessionEpoch };
+				// Posted to the run's inbox, which its host gives its pi at its next safe point, until the run settles.
 				deps.bus.register(runId, {
-					scope: { parentSessionId: params.record.parentSessionId, sessionEpoch: params.record.sessionEpoch },
-					deliver: async () => {
-						throw new Error("a run on pi's RPC takes no messages yet");
+					scope,
+					deliver: async (message) => {
+						const record = scheduler.getRun(runId) ?? params.record;
+						const sender: RpcRunSender =
+							message.from === PARENT_MESSAGE_ADDRESS
+								? { kind: "orchestrator" }
+								: { kind: "sibling", label: formatRunLabel({ name: message.fromName, runId: message.from }) };
+						const text = rpcRunMessageText(sender, record, message.content);
+						const posted = postToRun(execCtx.rpc.runDir, record.generation, text);
+						if (!posted.accepted) throw new Error("has finished");
+						// Accepted once posted; the sender goes on once its pi has it, or its host is slow to take it.
+						if (record.status === "running") {
+							await whenGiven(execCtx.rpc.runDir, record.generation, posted.id, GIVE_WAIT_MS);
+						}
 					},
 				});
 				try {
@@ -166,6 +184,16 @@ export function createGenerations(deps: GenerationDeps) {
 							});
 						},
 						usage,
+						// Sent as the run, in the scope it was admitted in: a stale one is refused, and kept on record.
+						relay: (message) => {
+							const generation = scheduler.getRun(runId)?.generation ?? params.record.generation;
+							const kind = message.kind[0].toUpperCase() + message.kind.slice(1);
+							void deps.bus.send(
+								{ address: runId, scope },
+								message.to,
+								`${kind} (generation ${generation}): ${message.content}`,
+							);
+						},
 					});
 				} finally {
 					deps.bus.unregister(runId, "has been closed");

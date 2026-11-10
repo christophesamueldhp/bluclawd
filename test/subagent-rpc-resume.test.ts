@@ -237,7 +237,7 @@ describe.skipIf(!hasTmux)("resuming an RPC run", () => {
 		expect(lastToolResult(audit[1])?.text).toBe("SECRET-S\n");
 		expect(systemPrompt(audit[2])).toContain("Audit v1.");
 		expect(systemPrompt(audit[2])).not.toContain("Audit v2.");
-		expect(toolNames(audit[2])).toEqual(["grep", "read"]);
+		expect(toolNames(audit[2])).toEqual(["grep", "read", "subagent_message"]);
 		expect(lastToolResult(audit[3])?.text).toMatch(/Blocked by permission rule/);
 		const dir = runDir(real.agentDir, "audit");
 		expect(readJson(join(dir, "definition.json"))).toMatchObject({

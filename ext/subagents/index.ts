@@ -1,5 +1,6 @@
 import {
 	type ExtensionAPI,
+	type ExtensionContext,
 	getAgentDir,
 	type InlineExtension,
 	SettingsManager,
@@ -12,6 +13,7 @@ import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { endPane, runParent, Tmux } from "../../daemon/tmux.ts";
 import { notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
+import { commandBlock } from "../_shared/command-block.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { pistatuslineDrawsFooter } from "../_shared/pistatusline.ts";
 import { maxActiveSubagents } from "../_shared/settings.ts";
@@ -45,8 +47,9 @@ import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET } from "./panel.ts
 import { createParentScope, inParentScope, type ParentInboxItem } from "./parent-scope.ts";
 import type { SubagentResultDetails } from "./results.ts";
 import { daemonRunSlots, rpcRunsEnabled } from "./rpc-runs.ts";
+import { createRunIntervention, RUN_CONVERSATION_ENTRY } from "./run-intervention.ts";
 import { messageAsRun } from "./run-messages.ts";
-import { isTerminalSubagentStatus } from "./runs.ts";
+import { isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
 import {
 	appendSubagentMessageRecord,
 	extractReferencedRunIdsFromBranch,
@@ -298,6 +301,22 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			ensureQueue: () => slots.ensure(),
 		});
 
+		/** The orchestrator is told, and goes on as it was: it still owns the work (ADR-0005). */
+		const noteToOrchestrator = (text: string) =>
+			pi.sendMessage(
+				{ customType: SUBAGENT_MESSAGE_CUSTOM_TYPE, content: [{ type: "text", text }], display: true },
+				{ deliverAs: "steer", triggerTurn: false },
+			);
+		const intervention = createRunIntervention({
+			scheduler,
+			admission,
+			agentDir: resolveAgentDir,
+			note: noteToOrchestrator,
+		});
+		pi.registerEntryRenderer<{ lines: string[] }>(RUN_CONVERSATION_ENTRY, (entry) =>
+			commandBlock(entry.data?.lines ?? []),
+		);
+
 		const views = createParentScopeViews({
 			scheduler,
 			directory,
@@ -348,6 +367,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				ctx.ui.notify("That run belongs to an earlier session and can no longer be opened.", "warning");
 				return undefined;
 			}
+			if (!run.pane && run.backend === "rpc") return openRpcRun(run, ctx);
 			if (!run.pane) {
 				ctx.ui.notify(`${run.name ?? runId} has no session of its own to open.`, "warning");
 				return undefined;
@@ -361,13 +381,35 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		};
 
 		/**
+		 * A run on pi's RPC has no pane: opening it shows the user its conversation here, and asks for an instruction,
+		 * which it takes at its next safe point, or resumes with once finished. Esc only looks.
+		 */
+		const openRpcRun = async (run: SubagentRunRecord, ctx: ExtensionContext): Promise<void> => {
+			pi.appendEntry(RUN_CONVERSATION_ENTRY, { lines: intervention.conversation(run) });
+			const text = (
+				await ctx.ui.input(`Instruct ${run.name ?? run.runId}`, "An instruction for it; Esc only looks")
+			)?.trim();
+			if (!text) return;
+			const result = await intervention.instruct(run, text, ctx);
+			if (result.ok) ctx.ui.notify(result.text, "info");
+			else ctx.ui.notify(result.error, "warning");
+		};
+
+		/**
 		 * Opening a closed run of this scope, from `/tasks`, resumes it with no message: its pi reopens on its session
 		 * for the user to type in. Undefined for any other run.
 		 */
 		const resumeClosed = (runId: string, owner?: string): Promise<void> | undefined => {
 			const run = scheduler.getRun(runId);
 			const ctx = parentScope.context();
-			if (!pane || !ctx || run?.status !== "closed" || (owner !== undefined && owner !== run.parentSessionId)) {
+			// A run on pi's RPC resumes only with an instruction: opening it asks for one.
+			if (
+				!pane ||
+				!ctx ||
+				run?.status !== "closed" ||
+				run.backend === "rpc" ||
+				(owner !== undefined && owner !== run.parentSessionId)
+			) {
 				return undefined;
 			}
 			return admission.resume(run, undefined, ctx).then((resumed) => {

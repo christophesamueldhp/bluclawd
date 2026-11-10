@@ -3,7 +3,8 @@
  * `subagent` or `schedule_wakeup` of its own. Its tools are fixed by a plain `--tools` list; every call, direct or
  * from a codemode script, is checked here as well against what the run was admitted with: one of its tools, and
  * none its orchestrator's or its workspace's deny rules refuse. This also closes the shell that pi's RPC `bash`
- * command runs outside the tool list.
+ * command runs outside the tool list. Every run also has its own `subagent_message`, which only returns what it
+ * would send: the run's host reads that off pi's events and passes it on, so the run reaches nothing itself.
  */
 import { readFileSync } from "node:fs";
 import {
@@ -12,8 +13,14 @@ import {
 	type ToolCallEventResult,
 	type ToolResultEventResult,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
 import { evaluateToolCallDeny, filterDeniedGrepToolResult } from "../permissions/policy.ts";
+import { PARENT_MESSAGE_ADDRESS, SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
+import { RUN_MESSAGE_KINDS, type RunOutboxMessage } from "./run-mailbox.ts";
+
+/** As large as a message from a run gets: anything longer belongs in its Report. */
+const MAX_MESSAGE_BYTES = 8192;
 
 /** The flag naming the run's admitted definition (definition.json): what it may do. */
 export const RUN_DEFINITION_FLAG = "bluclawd-run-definition";
@@ -69,6 +76,8 @@ export default function rpcChild(pi: ExtensionAPI): void {
 	pi.on("tool_call", (event, ctx): ToolCallEventResult | undefined => {
 		const admitted = currentPolicy();
 		if (!admitted) return { block: true, reason: "Refused: this run's admitted tools could not be read." };
+		// Every run's own, granted by no role: it reaches nothing but its host, and acts on nothing.
+		if (event.toolName === SUBAGENT_MESSAGE_TOOL) return undefined;
 		if (!admitted.tools.includes(event.toolName)) {
 			return { block: true, reason: `Refused: this run was not given ${event.toolName}.` };
 		}
@@ -105,6 +114,48 @@ export default function rpcChild(pi: ExtensionAPI): void {
 			}
 		}
 		return filtered;
+	});
+
+	pi.registerTool({
+		name: SUBAGENT_MESSAGE_TOOL,
+		label: "Message",
+		exposure: "model-only",
+		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+		description:
+			'Tell your orchestrator something while you work, without waiting for your report. Kind "question" or "blocker" when you need its decision, "finding" for a result it should know now: each wakes it. Kind "progress" only updates the status line it can look at, and wakes nobody. To tell a sibling run of the same orchestrator, give its name as `to`. Sending is not a reply: keep working, and do not acknowledge messages you receive.',
+		parameters: Type.Object(
+			{
+				kind: Type.Union(
+					RUN_MESSAGE_KINDS.map((kind) => Type.Literal(kind)),
+					{ description: "progress, finding, question or blocker." },
+				),
+				content: Type.String({ description: "The message, self-contained." }),
+				to: Type.Optional(
+					Type.String({
+						description: `A sibling run's name, or "${PARENT_MESSAGE_ADDRESS}" (the default) for your orchestrator.`,
+					}),
+				),
+			},
+			{ additionalProperties: false },
+		),
+		// Its host reads the result's details off pi's events and sends them on; nothing here reaches out.
+		execute: async (_toolCallId, params) => {
+			const to = params.to?.trim() || PARENT_MESSAGE_ADDRESS;
+			if (Buffer.byteLength(params.content) > MAX_MESSAGE_BYTES) {
+				throw new Error(`A message holds at most ${MAX_MESSAGE_BYTES} bytes; put the rest in your report.`);
+			}
+			const details: Omit<RunOutboxMessage, "seq"> = { to, kind: params.kind, content: params.content };
+			const recipient = to === PARENT_MESSAGE_ADDRESS ? "your orchestrator" : `"${to}"`;
+			return {
+				content: [
+					{
+						type: "text",
+						text: `Sent to ${recipient} as ${params.kind} (not yet handled). Keep working; do not wait for a reply.`,
+					},
+				],
+				details,
+			};
+		},
 	});
 
 	pi.on("user_bash", () => ({

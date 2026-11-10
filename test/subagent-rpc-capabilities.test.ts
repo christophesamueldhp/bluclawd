@@ -71,7 +71,7 @@ describe.skipIf(!hasTmux)("an RPC run's capabilities", () => {
 
 		const look = real.requests("look");
 		expect(look).toHaveLength(2);
-		expect(toolNames(look[0]).sort()).toEqual(["codemode", "read"]);
+		expect(toolNames(look[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
 		expect(lastToolResult(look[1])).toMatchObject({ toolName: "codemode" });
 		expect(lastToolResult(look[1])?.text).toContain("ALPHA|BETA|undefined");
 	});
@@ -107,7 +107,7 @@ describe.skipIf(!hasTmux)("an RPC run's capabilities", () => {
 
 		const look = real.requests("look");
 		expect(look).toHaveLength(6);
-		expect(toolNames(look[0]).sort()).toEqual(["codemode", "read"]);
+		expect(toolNames(look[0]).sort()).toEqual(["codemode", "read", "subagent_message"]);
 		const script = lastToolResult(look[1])?.text ?? "";
 		// Not even found: a tool named as MCP's is not one the run was given.
 		expect(JSON.parse(script.slice(script.indexOf("{")))).toMatchObject({ all: ["read"], found: [] });
@@ -167,7 +167,7 @@ describe.skipIf(!hasTmux)("an RPC run's capabilities", () => {
 
 		const look = real.requests("look");
 		expect(look).toHaveLength(reads.length + 3);
-		expect(toolNames(look[0]).sort()).toEqual(["codemode", "grep", "read"]);
+		expect(toolNames(look[0]).sort()).toEqual(["codemode", "grep", "read", "subagent_message"]);
 		expect(lastToolResult(look[1])?.text).toBe("token FINE\n");
 		for (const step of [2, 3, 4, 5]) expect(lastToolResult(look[step])?.text).toMatch(/Blocked by permission rule/);
 		expect(lastToolResult(look[6])?.text).toContain("FINE");
@@ -198,7 +198,7 @@ describe.skipIf(!hasTmux)("an RPC run's capabilities", () => {
 		real.start(["--", "delegate"]);
 		const main = await real.waitForRequests("main", 3);
 
-		expect(toolNames(real.requests("look")[0])).toEqual(["read"]);
+		expect(toolNames(real.requests("look")[0])).toEqual(["read", "subagent_message"]);
 		expect(lastToolResult(main[2])?.text).toMatch(/cannot give a child: codemode/);
 		expect(real.requests("scripted")).toHaveLength(0);
 	});
