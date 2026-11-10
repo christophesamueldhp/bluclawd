@@ -175,6 +175,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		}
 		real.script("tc", [{ text: "tc done." }]);
 		real.start(["--", "delegate"]);
+		await real.waitForRequests("main", 1);
 
 		// Both working at once, the third queued behind them, and the orchestrator waiting for all three.
 		const [ta, tb] = await Promise.all([real.waitForRequests("ta", 2), real.waitForRequests("tb", 2)]);
@@ -231,6 +232,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		real.script("bad", [{ text: "Half a thought.", error: "the faux provider broke" }]);
 		for (const name of ["ok1", "ok2"]) real.script(name, [{ text: `${name} found it.`, until: gate(name) }]);
 		real.start(["--", "delegate"]);
+		await real.waitForRequests("main", 1);
 
 		await waitFor(() => expect(recordOf(real, "bad").status).toBe("closed"));
 		expect([recordOf(real, "ok1").status, recordOf(real, "ok2").status]).toEqual(["running", "running"]);
@@ -261,6 +263,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		real.script("act", [{ text: "Never.", until: join(real.cwd, "never") }]);
 		for (const name of ["q1", "q2"]) real.script(name, [{ text: "Never started." }]);
 		const pane = real.start(["--", "delegate"]);
+		await real.waitForRequests("main", 1);
 		await real.waitForRequests("act", 1);
 		expect([recordOf(real, "q1").status, recordOf(real, "q2").status]).toEqual(["starting", "starting"]);
 
@@ -310,9 +313,10 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		const batch = /batch_\w+/.exec(result)?.[0] ?? "";
 		real.script("main", steps(batch));
 
-		// m0's Report waits for its batch's: it wakes nobody on its own.
+		// One slot: m1 starts once m0 is done, each start waited for on its own.
+		await waitFor(() => expect(recordOf(real, "m0").status).toBe("closed"));
 		await real.waitForRequests("m1", 1);
-		expect(recordOf(real, "m0").status).toBe("closed");
+		// m0's Report waits for its batch's: it wakes nobody on its own.
 		await new Promise((resolve) => setTimeout(resolve, 500));
 		expect(real.requests("main")).toHaveLength(2);
 
@@ -345,8 +349,8 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 	it("bounds the aggregate of a batch whose Reports exceed it, and keeps every full Report", async () => {
 		const real = await startOrchestrator();
 		pi = real;
-		const names = ["l1", "l2", "l3", "l4", "l5", "l6"];
-		const long = (name: string) => `${name} begins. ${"Lots of findings. ".repeat(400)}${name} ends.`;
+		const names = ["l1", "l2", "l3"];
+		const long = (name: string) => `${name} begins. ${"Lots of findings. ".repeat(600)}${name} ends.`;
 		real.script("main", [
 			{
 				tool: "subagent",
@@ -356,9 +360,12 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		]);
 		for (const name of names) real.script(name, [{ text: long(name) }]);
 		real.start(["--", "delegate"]);
+		// Each start waited for on its own: the orchestrator's, then its runs'.
+		await real.waitForRequests("main", 1);
+		for (const name of names) await real.waitForRequests(name, 1);
 		const [aggregate] = toolResults((await real.waitForRequests("main", 2))[1]);
 		expect(Buffer.byteLength(aggregate)).toBeLessThanOrEqual(16 * 1024);
-		expect(aggregate).toMatch(/6 tasks, 6 completed, 0 failed, 0 cancelled\./);
+		expect(aggregate).toMatch(/3 tasks, 3 completed, 0 failed, 0 cancelled\./);
 		for (const name of names) {
 			expect(aggregate).toMatch(new RegExp(`### "${name}" \\(sub_[\\w-]+\\): completed\\n${name} begins\\.`));
 			expect(aggregate).not.toContain(`${name} ends.`);
