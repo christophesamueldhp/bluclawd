@@ -1,26 +1,38 @@
 # bluclawd
 
-An extension pack for the pi coding agent: a sandboxed shell, background sessions, and an orchestrator that delegates work to subagents in the same live checkout.
+An extension pack for the pi coding agent: a sandboxed shell, background sessions, and an orchestrator that delegates work to subagents.
 
 ## Language
 
 ### Subagents
 
 **Run**:
-One delegated piece of work by a subagent: a pi session of its own that the orchestrator which launched it starts, messages, stops and closes, with its own identity, transcript and reports. A run lives through one or more generations. It is reached from its orchestrator: in agent view its row is folded under the orchestrator's, and goes when that row is deleted; the phone does not list it.
+One delegated piece of work owned by its launching orchestrator, with its own identity, session, context, transcript and reports. A run can span multiple generations; its saved context can outlive the process doing its work.
 _Avoid_: job, task (for a subagent's work), teammate
 
+**Run workspace**:
+The files and directories a run works with, which may be shared for reading or isolated for changes. An isolated run workspace has a defined starting state and does not automatically receive later edits from other runs or its orchestrator.
+_Avoid_: sandbox (for the workspace itself)
+
+**Integration**:
+Applying a run's isolated changes to the orchestrator's workspace, preserving intervening changes and verifying the combined result. It does not by itself include committing or publishing those changes.
+_Avoid_: automatic merge (when no Git merge is involved)
+
+**Cancellation**:
+Ending the selected work and its executing subprocesses, and cancelling pending steps when a batch or chain is cancelled, while retaining sessions and partial changes. User-cancelled work requires an explicit instruction to resume; a late message cannot restart it.
+_Avoid_: rollback, deletion, stopping the wait
+
 **Report**:
-A run's last message of a turn, given to its orchestrator each time the run falls idle. A run that stays open reports again after every later turn.
+A run's account of its work, given to its orchestrator when that work settles. Further work in the same run can produce another report, including after resume.
 _Avoid_: result (as if it came once), final answer
 
 **Stop**:
-Ending a run's turn in progress. Its pi stays open and still takes messages.
-_Avoid_: close, kill
+Requesting cancellation of a run's active work while retaining its session and partial changes. Stopping work is distinct from leaving it running in the background.
+_Avoid_: stopping the wait, cleanup
 
-**Close**:
-Ending a run's pi. Its session is kept and the run can be resumed. The orchestrator closes a run without asking it, and the end of the orchestrator's session closes all of its runs. So does the daemon once the orchestrator's pane is gone and the run is not working, though not while that pane is a Silent pane. The user can close a run from its row in agent view. A run the user is looking at when it is closed stays on screen, taking no more prompts, and its pi ends once the user leaves it.
-_Avoid_: stop, delete, shutdown request
+**Workspace cleanup**:
+Removing a run workspace without deleting its transcript or reports. A workspace containing changes requires an explicit user cleanup request; cleanup may make resume unavailable if the required workspace state cannot be restored.
+_Avoid_: stop, cancellation, deleting the session
 
 **Generation**:
 One launch or one resume of a run.
@@ -39,7 +51,7 @@ The orchestrator's session, and its session epoch, that a run or message belongs
 _Avoid_: generation, runtime generation
 
 **Resume**:
-Continuing a closed run with a new message from the orchestrator or the user, as its next generation, with its earlier context.
+Continuing a saved run with an explicit instruction from the orchestrator or the user, as its next generation, with its earlier context. Starting another run with the same role is not a resume.
 _Avoid_: restart, rerun
 
 **Waiting**:
