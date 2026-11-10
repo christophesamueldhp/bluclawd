@@ -287,6 +287,14 @@ export function delegationDenied(
 	return delegationDeny.blocked ? (delegationDeny.reason ?? "Blocked by permission rule") : undefined;
 }
 
+/** Why a run cannot be given `task`, a launch's or a Resume's instruction. */
+function invalidTaskText(task: string): string | undefined {
+	if (!task.trim()) return "Missing required parameter: task";
+	const bytes = Buffer.byteLength(task, "utf8");
+	if (bytes <= MAX_TASK_INPUT_BYTES) return undefined;
+	return `Delegated task exceeds the ${MAX_TASK_INPUT_BYTES}-byte limit (${bytes} bytes). Supply target file paths instead of pasting large file contents.`;
+}
+
 /** Why a call's model or thinking level cannot be what it names, before either is resolved. */
 function invalidModelChoice({ model, thinkingLevel }: ResumeChanges): string | undefined {
 	if (model !== undefined && !parseSubagentModelSpec(model)) {
@@ -394,7 +402,6 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		if (!buildPrompt) return cannot("a Resume needs an instruction for it.");
 		const invalid = invalidModelChoice(changes);
 		if (invalid) return refuse.unavailable(invalid);
-		if (deps.directory.list(scope).length >= MAX_OPEN_RUNS) return refuse.unavailable(TOO_MANY_OPEN);
 		const denied = deniedReason(current.agentName, ctx);
 		if (denied) return refuse.unavailable(denied);
 		const agentDir = deps.agentDir();
@@ -449,8 +456,12 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		if (!isResumableSubagentStatus(latest.status) || latest.generation !== current.generation) {
 			return cannot("another Resume of it started meanwhile.");
 		}
+		if (deps.directory.list(scope).length >= MAX_OPEN_RUNS) return refuse.unavailable(TOO_MANY_OPEN);
 		const holder = current.name ? deps.directory.nameHolder(scope, current.name)?.record : undefined;
 		if (holder) return refuse.unavailable(`${label} cannot resume: its name is now used by ${holder.runId}.`);
+		const task = buildPrompt();
+		const invalidTask = invalidTaskText(task);
+		if (invalidTask) return refuse.unavailable(invalidTask);
 		const model = { provider: childModel.model.provider, modelId: childModel.model.id, thinkingLevel };
 		const definition: RunDefinition = {
 			...admitted,
@@ -475,7 +486,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					definition,
 					...model,
 					tools: definition.tools,
-					task: buildPrompt(),
+					task,
 					cwd,
 					runDir,
 					agentDir,
@@ -555,13 +566,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const isBackground = params.background === true;
 
 			if (!agentName && !inlineRole) return reject("Missing required parameter: agent");
-			if (!taskText.trim()) return reject("Missing required parameter: task");
-			const taskBytes = Buffer.byteLength(taskText, "utf8");
-			if (taskBytes > MAX_TASK_INPUT_BYTES) {
-				return reject(
-					`Delegated task exceeds the ${MAX_TASK_INPUT_BYTES}-byte limit (${taskBytes} bytes). Supply target file paths instead of pasting large file contents.`,
-				);
-			}
+			const invalidTask = invalidTaskText(taskText);
+			if (invalidTask) return reject(invalidTask);
 
 			const denied = deniedReason(agentName, ctx);
 			if (denied) return reject(denied);

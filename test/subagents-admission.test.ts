@@ -604,6 +604,19 @@ describe("Run admission on pi's RPC", () => {
 		expect(await resume(completed, () => "Go on.").result).toMatchObject({ ok: false, refusal: "invalidated" });
 	});
 
+	it("refuses a Resume with an empty or oversized instruction before it claims the run's next generation", async () => {
+		const { agentDir, cwd, launch, resume, storageDir } = await rpcSetup({ firstGenerationCompletes: true });
+		const completed = await handleOf(await launch({ agent: "explorer", task: "x" })).completion;
+		saveConversation(agentDir, cwd);
+
+		expect(errorOf(await resume(completed, () => "  ").result)).toMatch(/Missing required parameter: task/);
+		expect(errorOf(await resume(completed, () => "x".repeat(MAX_TASK_INPUT_BYTES + 1)).result)).toMatch(
+			/exceeds the 32768-byte limit/,
+		);
+		expect(existsSync(join(storageDir, completed.runId, "generations"))).toBe(false);
+		expect(handleOf(await resume(completed, () => "Go on.").result).record.generation).toBe(1);
+	});
+
 	it("lets one of two instances of the orchestrator's session resume a run, never both", async () => {
 		const first = await rpcSetup({ firstGenerationCompletes: true });
 		const completed = await handleOf(await first.launch({ agent: "explorer", task: "x" })).completion;
