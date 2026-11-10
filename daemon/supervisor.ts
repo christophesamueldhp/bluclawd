@@ -220,7 +220,7 @@ export class ServerSupervisor {
 		// Until the new session has a file, the row stored for the old one must not show for it.
 		if (renewed && !(record.sessionFile && existsSync(record.sessionFile))) removeInstance(this.deps.dir, rowId);
 		this.persistRow(rowId, pane);
-		this.closeOrphanedRun(record);
+		this.closeOrphanedRun(record, activity);
 	}
 
 	/** A pane whose row was deleted is not listed again: its pi ends, as a quit does, and the save its
@@ -269,11 +269,13 @@ export class ServerSupervisor {
 	}
 
 	/**
-	 * A run lives as long as its orchestrator: once tmux no longer has the orchestrator's pane, its pi
-	 * is gone for good (a Silent pane's tmux still has it), and the run's next heartbeat closes it.
+	 * A run outlives its orchestrator's crash only to finish the turn in flight (ADR-0008): once tmux
+	 * no longer has the orchestrator's pane, its pi is gone for good (a Silent pane's tmux still has
+	 * it), and the run's first heartbeat that is not working closes it. A reopened orchestrator that
+	 * adopts the run first moves its heartbeat to its own pane.
 	 */
-	private closeOrphanedRun({ pane, parent }: InstanceRecord): void {
-		if (!pane || !parent || this.tmuxSays(parent) !== "gone") return;
+	private closeOrphanedRun({ pane, parent }: InstanceRecord, activity: AgentActivity): void {
+		if (!pane || !parent || activity === "working" || this.tmuxSays(parent) !== "gone") return;
 		// Should tmux not answer, the run's next heartbeat tries again.
 		endPane(this.deps.tmux, pane);
 	}

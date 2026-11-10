@@ -10,7 +10,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { type ExtensionAPI, parseSessionEntries, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
@@ -219,6 +219,11 @@ export function subagentRunDir(agentDir: string, parentSessionId: string, runId:
 	return join(getSubagentsRootDir(agentDir), parentSessionId, runId);
 }
 
+/** The parent session whose run `runDir` is: the one {@link subagentRunDir} kept it under. */
+export function runDirParentSessionId(runDir: string): string {
+	return basename(dirname(runDir));
+}
+
 function sanitizeRecordForStorage(record: Readonly<SubagentRunRecord>): SubagentRunRecord {
 	const clone = structuredClone(record) as SubagentRunRecord;
 	if (clone.errorMessage) {
@@ -423,10 +428,14 @@ export function reconcileInterruptedRuns(
 		const persisted = readPersistedRunRecord(agentDir, parentSessionId, runId);
 		if (!persisted) continue;
 		if (!isTerminalSubagentStatus(persisted.status)) {
-			// A run in tmux ends with its orchestrator, its pi closed and its session kept, so it can be resumed.
+			// A run in tmux its orchestrator lost is closed, its session kept, so it can be resumed. No foreground call
+			// waits for it any more: a Report it stored comes as a notice (ADR-0008).
 			const runDir = join(getSubagentsRootDir(agentDir), parentSessionId, runId);
 			persisted.status = persisted.pane ? "closed" : "interrupted";
-			if (persisted.pane) persisted.transcriptPath ??= newestRunSession(runDir);
+			if (persisted.pane) {
+				persisted.transcriptPath ??= newestRunSession(runDir);
+				persisted.deliveryMode = "background";
+			}
 			persisted.complete = false;
 			persisted.endedAt = Date.now();
 			persisted.stopReason = "orphaned_on_restart";

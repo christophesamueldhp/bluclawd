@@ -9,7 +9,7 @@ import {
 import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
-import { endPane, PARENT_ENV, Tmux } from "../../daemon/tmux.ts";
+import { endPane, runParent, Tmux } from "../../daemon/tmux.ts";
 import { notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { pistatuslineDrawsFooter } from "../_shared/pistatusline.ts";
@@ -113,9 +113,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		const resolveAgentDir = () => options.agentDir ?? getAgentDir();
 		// Runs are pi sessions of their own (ADR-0006): this pi may be one, and launches them from its pane.
 		const pane = Tmux.currentPane();
-		const runParent = process.env[PARENT_ENV];
-		if (runParent) actAsRun(pi, runParent, pane);
-		if (runParent && pane) messageAsRun(pi, runParent, pane);
+		const launchedBy = runParent();
+		if (launchedBy) {
+			const parent = () => runParent() ?? launchedBy;
+			actAsRun(pi, parent, pane);
+			if (pane) messageAsRun(pi, parent, pane);
+		}
 		const reports = new RunReports();
 		/** Aborted on a reload, which hands this instance's open runs to the next one. */
 		const handOff = new AbortController();
@@ -127,8 +130,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		pi.events.on("bluclawd:session-message", (data) => {
 			const message = data as SessionMessage;
 			if (message.kind === "report" || message.kind === "activity") reports.receive(message);
-			// A stop is for a run (actAsRun), never for its orchestrator.
-			else if (message.kind !== "stop") fromRun(message);
+			// A stop or an adopt is for a run (actAsRun), never for its orchestrator.
+			else if (message.kind === "message" || message.kind === "typed") fromRun(message);
 		});
 
 		let activeTurnIndex = 0;
@@ -395,8 +398,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 
 			const branchEntries = ctx.sessionManager.getBranch();
-			// A reload keeps the session, and so its open runs, whose pis still run: this instance takes them over.
-			if (event.reason === "reload" && pane) {
+			// Its open runs whose pis still run, after a reload or a crash of the instance that ran them: this instance
+			// takes them over (ADR-0008). Those this process runs already are left as they are.
+			if (pane) {
 				for (const runId of extractReferencedRunIdsFromBranch(branchEntries)) {
 					const run = readPersistedRunRecord(agentDir, sessionId, runId);
 					if (run?.pane && !isTerminalSubagentStatus(run.status) && paneUp(timedTmux(), run.pane))
@@ -407,7 +411,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			const liveIds = new Set(scheduler.listActiveRuns(sessionId).map((r) => r.runId));
 			for (const run of reconcileInterruptedRuns(agentDir, sessionId, branchEntries, liveIds)) {
 				if (run.status !== "closed" || !run.pane) continue;
-				// Left open by an orchestrator that is gone: the daemon closes it too, at its next heartbeat.
+				// Not taken over (its pi is gone, or this one has no pane to take it to): it is closed.
 				endPane(timedTmux(), run.pane);
 			}
 			// Reopening the session lists its closed runs, which can be resumed.
@@ -562,7 +566,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		// The orchestrator's only: a run messages through the daemon (messageAsRun), and manages no runs.
 		const registerOrchestratorTool: typeof pi.registerTool = (tool) => {
-			if (!runParent) pi.registerTool(tool);
+			if (!launchedBy) pi.registerTool(tool);
 		};
 		registerOrchestratorTool({
 			name: SUBAGENT_MESSAGE_TOOL,

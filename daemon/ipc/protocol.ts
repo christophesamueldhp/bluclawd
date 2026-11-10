@@ -109,7 +109,8 @@ export type PaneMessage =
  *  sends another with subagent_message. `typed`: what the user typed in a run, as a note for its
  *  orchestrator. `activity`: what a run is doing now, to its orchestrator, each time that changes;
  *  `dialog`: the title of the prompt it waits on. `stop`: the orchestrator ends its run's turn in
- *  progress, as Esc does. */
+ *  progress, as Esc does. `adopt`: the orchestrator's session `sessionId`, reopened in pane `from`,
+ *  takes its run over: the run reports there from now on (ADR-0008). */
 export type SessionMessage = { type: "session_message"; from: string; name?: string } & (
 	| {
 			kind: "report";
@@ -124,6 +125,7 @@ export type SessionMessage = { type: "session_message"; from: string; name?: str
 	| { kind: "message" | "typed"; text: string }
 	| { kind: "activity"; activity: AgentActivity; dialog?: string }
 	| { kind: "stop" }
+	| { kind: "adopt"; sessionId: string }
 );
 
 /** A session's tokens and cost. */

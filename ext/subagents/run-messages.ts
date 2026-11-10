@@ -83,7 +83,7 @@ export function messageTarget(
  * A run's side of messaging: its subagent_message and subagent_roster, what it receives, and the notes of what the
  * user types in it.
  */
-export function messageAsRun(pi: ExtensionAPI, parent: string, pane: string): void {
+export function messageAsRun(pi: ExtensionAPI, parent: () => string, pane: string): void {
 	pi.events.on("bluclawd:session-message", (data) => {
 		const message = data as SessionMessage;
 		if (message.kind !== "message") return;
@@ -91,7 +91,7 @@ export function messageAsRun(pi: ExtensionAPI, parent: string, pane: string): vo
 		pi.sendMessage(
 			{
 				customType: SUBAGENT_MESSAGE_CUSTOM_TYPE,
-				content: [{ type: "text", text: runMessageText(message, parent) }],
+				content: [{ type: "text", text: runMessageText(message, parent()) }],
 				display: true,
 				details: message,
 			},
@@ -107,7 +107,7 @@ export function messageAsRun(pi: ExtensionAPI, parent: string, pane: string): vo
 				text: event.text,
 			};
 			// The orchestrator only reads it; the run's answer reaches it as a Report.
-			void new OrchestratorClient().send(parent, note).catch(() => {});
+			void new OrchestratorClient().send(parent(), note).catch(() => {});
 		}
 		return { action: "continue" };
 	});
@@ -129,7 +129,11 @@ export function messageAsRun(pi: ExtensionAPI, parent: string, pane: string): vo
 		execute: async (_toolCallId, params) => {
 			const sender = fromRun(pi, pane);
 			const client = new OrchestratorClient();
-			const target = messageTarget(await client.list(), { pane, parent, name: sender.name }, params.to.trim());
+			const target = messageTarget(
+				await client.list(),
+				{ pane, parent: parent(), name: sender.name },
+				params.to.trim(),
+			);
 			if ("refused" in target) {
 				return {
 					content: [{ type: "text", text: `Message not sent: ${target.refused}` }],
@@ -158,7 +162,11 @@ export function messageAsRun(pi: ExtensionAPI, parent: string, pane: string): vo
 			'List who you can message with subagent_message: your orchestrator ("parent") and its other open runs, by name.',
 		parameters: Type.Object({}, { additionalProperties: false }),
 		execute: async () => {
-			const names = runRoster(await new OrchestratorClient().list(), { pane, parent, name: pi.getSessionName() });
+			const names = runRoster(await new OrchestratorClient().list(), {
+				pane,
+				parent: parent(),
+				name: pi.getSessionName(),
+			});
 			const text = names.map((name) => (name === PARENT_MESSAGE_ADDRESS ? `${name} (your orchestrator)` : name));
 			return { content: [{ type: "text", text: `You can message: ${text.join(", ")}.` }], details: undefined };
 		},
