@@ -186,6 +186,20 @@ describe("the run panel below the status line", () => {
 		await waitFor(() => tui!.panel().length === 0);
 	});
 
+	it("drops a failed run's row after 30 s under pi's own footer too", async () => {
+		tui = await createSubagentTui({ pistatusline: false });
+		vi.mocked(Tmux.prototype.newSession).mockImplementationOnce(() => {
+			throw new Error("tmux refused");
+		});
+		tui.script([launch(["scout"], { background: true })]);
+		await prompt(tui);
+		const below = () => tui!.widget("subagents:panel")?.lines ?? [];
+		await waitFor(() => below().some((line) => line.includes("failed")));
+
+		tui.advance(31_000);
+		await waitFor(() => below().length === 0);
+	});
+
 	it("dismisses a failed run's row with x", async () => {
 		tui = await createSubagentTui();
 		vi.mocked(Tmux.prototype.newSession).mockImplementationOnce(() => {
@@ -195,7 +209,9 @@ describe("the run panel below the status line", () => {
 		await prompt(tui);
 		await waitFor(() => row(tui!, "scout")?.includes("failed") ?? false);
 
-		tui.press("\x1b[B", "x");
+		tui.press("\x1b[B");
+		expect(tui.panel().at(-1)).toContain("x to dismiss");
+		tui.press("x");
 		await waitFor(() => tui!.panel().length === 0);
 		expect(agentTasks()?.listDone?.()).toEqual([]);
 	});

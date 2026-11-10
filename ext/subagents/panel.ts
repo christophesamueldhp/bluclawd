@@ -67,8 +67,9 @@ export function renderPanel(options: {
 		].join("  ");
 	});
 	const collapsed = idle > 0 ? [theme.fg("dim", `  ${idle} idle agent${idle === 1 ? "" : "s"}`)] : [];
+	const x = selected !== undefined && shown[selected - 1]?.state === "finished" ? "x to dismiss" : "x to close";
 	const hint =
-		selected === undefined ? [] : [theme.fg("dim", "  ↑/↓ to select · Enter to open · x to close · Esc to go back")];
+		selected === undefined ? [] : [theme.fg("dim", `  ↑/↓ to select · Enter to open · ${x} · Esc to go back`)];
 	return [main, ...rows, ...collapsed, ...hint].map((line) => truncateToWidth(line, width));
 }
 

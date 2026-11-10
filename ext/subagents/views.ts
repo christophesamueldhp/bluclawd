@@ -68,7 +68,7 @@ export function createParentScopeViews(deps: ParentScopeViewsDeps) {
 	};
 
 	return {
-		/** The Runs the panel shows too: only open ones. */
+		/** The Runs the panel shows, beside those that failed lately. */
 		open,
 		awaited,
 		done,

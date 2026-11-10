@@ -485,12 +485,18 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							},
 						});
 						panel = shown;
-						// Elapsed times move on between run changes, and a succeeded run leaves.
+						// Elapsed times move on between run changes, and a run that ended leaves the panel after a while.
+						let endedShown = false;
 						const ticker = setInterval(() => {
+							const ended = views.done().some(({ record }) => lately(record));
+							if (ended !== endedShown) {
+								// A failed run's row or the /tasks hint went: the tasks pill may take ↓ again.
+								endedShown = ended;
+								return runsChanged();
+							}
 							shown.sync();
 							refreshFooterStatus();
-							if (views.open().length > 0 || views.done().some(({ record }) => lately(record)))
-								tui.requestRender();
+							if (views.open().length > 0 || ended) tui.requestRender();
 						}, 1000);
 						ticker.unref?.();
 						return Object.assign(shown, {
@@ -517,7 +523,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			activeTurnIndex++;
 		});
 
-		// The panel's title says whether the orchestrator is Waiting, which turns on whether it is idle.
+		// The panel's main row says whether the orchestrator is Waiting, which turns on whether it is idle.
 		pi.on("agent_start", () => refreshFooterStatus());
 		pi.on("agent_settled", () => refreshFooterStatus());
 

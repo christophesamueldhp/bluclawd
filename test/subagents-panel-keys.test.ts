@@ -1,6 +1,7 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stripAnsi } from "../daemon/ansi.ts";
+import { Tmux } from "../daemon/tmux.ts";
 import { agentTasks } from "../ext/_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../ext/_shared/status-keys.ts";
 import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
@@ -149,6 +150,20 @@ describe("↓ with background shells running", () => {
 		t.press(DOWN, "x");
 		await waitFor(() => !row(t, "scout"));
 		expect(t.status(STATUS_KEYS.tasks)).toContain("↓ to manage");
+	});
+
+	it("has the pill offer ↓ again once a failed run's row leaves the panel", async () => {
+		const t = await withShell();
+		vi.mocked(Tmux.prototype.newSession).mockImplementationOnce(() => {
+			throw new Error("tmux refused");
+		});
+		t.script([launch(["scout"], { background: true })]);
+		await prompt(t);
+		await waitFor(() => row(t, "scout")?.includes("failed"));
+		expect(t.status(STATUS_KEYS.tasks)).toContain("/tasks to manage");
+
+		t.advance(31_000);
+		await waitFor(() => t.status(STATUS_KEYS.tasks)?.includes("↓ to manage"));
 	});
 
 	it("still selects the tasks pill while the panel is empty", async () => {
