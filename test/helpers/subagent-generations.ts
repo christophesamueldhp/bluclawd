@@ -97,6 +97,8 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 				for (const pane of panes) if (pane.name === name) pane.ended = true;
 			},
 			hasSession: (name) => panes.some((pane) => pane.name === name && !pane.ended),
+			shown: () => false,
+			moveClients: () => {},
 		}),
 		handOff: new AbortController().signal,
 		send: async (to, message) => {

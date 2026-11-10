@@ -237,6 +237,26 @@ describe("a run whose orchestrator's pane is gone", () => {
 		expect(ended).toEqual(["pi-r"]);
 	});
 
+	it("is only told it is closed while a terminal shows it, and ended once none does", () => {
+		const up = new Set(["pi-o", "pi-r"]);
+		const ended: string[] = [];
+		let shown = true;
+		const supervisor = testRegistry(undefined, undefined, {
+			hasSession: (name) => up.has(name),
+			end: (name) => ended.push(name),
+			shown: (name) => shown && name === "pi-r",
+		});
+		const run = { ...rec("pi-r"), pane: "pi-r", parent: "pi-o" };
+		supervisor.registerExternal({ ...rec("pi-o"), pane: "pi-o" }, "idle");
+		up.delete("pi-o");
+		supervisor.registerExternal(run, "idle");
+		expect(ended).toEqual([]);
+		expect(supervisor.drainExternal("pi-r")).toEqual([{ type: "session_message", kind: "close", from: "pi-o" }]);
+		shown = false;
+		supervisor.registerExternal(run, "idle");
+		expect(ended).toEqual(["pi-r"]);
+	});
+
 	it("is closed at once when it waits on a dialog: nobody is left to answer it", () => {
 		const { up, ended, pass } = fixture();
 		up.delete("pi-o");

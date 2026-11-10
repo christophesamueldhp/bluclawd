@@ -6,6 +6,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { remoteSessions } from "../daemon/remote/sessions.ts";
 import { collectRows } from "../daemon/rows.ts";
+import { HEARTBEAT_MS } from "../ext/agent-view/self-registration.ts";
 import { writePersistedRunRecord } from "../ext/subagents/storage.ts";
 import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
 import {
@@ -106,6 +107,106 @@ describe.skipIf(!hasTmux)("closing a run", () => {
 		real.tmux.sendKeys(orchestrator, ["x"]);
 		await waitFor(() => expect(panes(real)).toEqual([orchestrator]));
 		await waitFor(() => expect(screen()).not.toMatch(panelRow));
+	});
+
+	it("leaves a run the terminal shows open until the terminal leaves it", async () => {
+		const real = await startRealPi();
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around.", background: true } },
+			{ text: "waiting for probe-run" },
+			{ text: "read the report" },
+			{ tool: "subagent_close", args: { agent: "probe-run" } },
+			{ text: "closed" },
+		]);
+		real.script("probe-run", [{ text: "Looked." }]);
+		const orchestrator = real.start(["--", "delegate the look"]);
+		real.attach(orchestrator);
+		await real.waitForRequests("main", 3);
+		const run = (await real.rows()).find((row) => row.label === "probe-run")?.pane ?? "";
+		real.tmux.sendKeys(orchestrator, ["Down", "Enter"]);
+		await waitFor(() => expect(real.shown()).toBe(run));
+
+		real.tmux.sendKeys(orchestrator, ["close it", "Enter"]);
+		await real.waitForRequests("main", 5);
+		const screen = () => real.tmux.capture(run, 50).join("\n");
+		await waitFor(() => expect(screen()).toContain("Closed by its orchestrator"));
+		expect(real.shown()).toBe(run);
+		expect(panes(real)).toHaveLength(2);
+		// Closed, it takes no more prompts.
+		real.tmux.sendKeys(run, ["go on", "Enter"]);
+		await waitFor(() => expect(screen()).toContain("ask its orchestrator to resume it"));
+		expect(real.requests("probe-run")).toHaveLength(1);
+
+		real.tmux.sendKeys(run, ["C-u", "Left", "Left"]);
+		await waitFor(() => expect(real.shown()).toBe(orchestrator));
+		await waitFor(() => expect(panes(real)).toEqual([orchestrator]));
+	});
+
+	it("moves the terminal on to a closed run's next Generation when its orchestrator resumes it", async () => {
+		const real = await startRealPi();
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around.", background: true } },
+			{ text: "waiting for probe-run" },
+			{ text: "read the report" },
+			{ tool: "subagent_close", args: { agent: "probe-run" } },
+			{ text: "closed" },
+			{ tool: "subagent_message", args: { to: "probe-run", content: "Look again." } },
+			{ text: "resumed" },
+			{ text: "read the second report" },
+		]);
+		real.script("probe-run", [{ text: "Looked." }, { text: "Looked again." }]);
+		const orchestrator = real.start(["--", "delegate the look"]);
+		real.attach(orchestrator);
+		await real.waitForRequests("main", 3);
+		const first = (await real.rows()).find((row) => row.label === "probe-run")?.pane ?? "";
+		real.tmux.sendKeys(orchestrator, ["Down", "Enter"]);
+		await waitFor(() => expect(real.shown()).toBe(first));
+		real.tmux.sendKeys(orchestrator, ["close it", "Enter"]);
+		await real.waitForRequests("main", 5);
+		await waitFor(() => expect(real.tmux.capture(first, 50).join("\n")).toContain("Closed by its orchestrator"));
+
+		real.tmux.sendKeys(orchestrator, ["resume it", "Enter"]);
+		await real.waitForRequests("probe-run", 2);
+		await waitFor(() => expect(panes(real)).toHaveLength(2));
+		const next = panes(real).find((pane) => pane !== orchestrator) ?? "";
+		expect(next).not.toBe(first);
+		expect(real.shown()).toBe(next);
+		await real.waitForRequests("main", 8);
+		await waitFor(async () =>
+			expect((await real.rows()).filter((row) => row.label === "probe-run").map((row) => row.pane)).toEqual([next]),
+		);
+	});
+
+	it("leaves a run the terminal shows open when its orchestrator quits, and ← there opens agent view", async () => {
+		const real = await startRealPi();
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "probe-run", task: "Look around.", background: true } },
+			{ text: "waiting for probe-run" },
+			{ text: "read the report" },
+		]);
+		real.script("probe-run", [{ text: "Looked." }]);
+		const orchestrator = real.start(["--", "delegate the look"]);
+		real.attach(orchestrator);
+		await real.waitForRequests("main", 3);
+		const run = (await real.rows()).find((row) => row.label === "probe-run")?.pane ?? "";
+		real.tmux.sendKeys(orchestrator, ["Down", "Enter"]);
+		await waitFor(() => expect(real.shown()).toBe(run));
+
+		real.tmux.sendKeys(orchestrator, ["/quit", "Enter"]);
+		const screen = () => real.tmux.capture(run, 50).join("\n");
+		await waitFor(() => expect(screen()).toContain("Closed by its orchestrator"));
+		await waitFor(() => expect(panes(real)).toEqual([run]));
+		// Past the run's next heartbeats, at which the daemon ends a run whose orchestrator is gone.
+		await new Promise((resolve) => setTimeout(resolve, 2 * HEARTBEAT_MS));
+		expect(panes(real)).toEqual([run]);
+		expect(real.shown()).toBe(run);
+
+		real.tmux.sendKeys(run, ["Left", "Left"]);
+		await waitFor(() => expect(screen()).toContain("enter to open"));
+		expect(screen()).not.toContain("Could not go back");
 	});
 
 	it("is what ending the orchestrator's session does to its runs", async () => {

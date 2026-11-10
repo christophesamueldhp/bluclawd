@@ -105,6 +105,8 @@ export interface TmuxProbe {
 	hasSessionAsync?(name: string): Promise<boolean>;
 	/** Ends a pane's pi as quitting does: its session is kept. */
 	end(name: string): void;
+	/** Whether a terminal shows a pane; none does when absent. */
+	shown?(name: string): boolean;
 }
 
 /** Whether tmux has a pane's session; "unknown" when it could not say. */
@@ -220,7 +222,7 @@ export class ServerSupervisor {
 		// Until the new session has a file, the row stored for the old one must not show for it.
 		if (renewed && !(record.sessionFile && existsSync(record.sessionFile))) removeInstance(this.deps.dir, rowId);
 		this.persistRow(rowId, pane);
-		this.closeOrphanedRun(record, activity);
+		this.closeOrphanedRun(rowId, record, activity);
 	}
 
 	/** A pane whose row was deleted is not listed again: its pi ends, as a quit does, and the save its
@@ -274,10 +276,25 @@ export class ServerSupervisor {
 	 * it), and the run's first heartbeat that is not working closes it. A reopened orchestrator that
 	 * adopts the run first moves its heartbeat to its own pane.
 	 */
-	private closeOrphanedRun({ pane, parent }: InstanceRecord, activity: AgentActivity): void {
+	private closeOrphanedRun(rowId: string, { pane, parent }: InstanceRecord, activity: AgentActivity): void {
 		if (!pane || !parent || activity === "working" || this.tmuxSays(parent) !== "gone") return;
+		// One a terminal shows is only told, so the user is not thrown out of it: it ends once the terminal leaves.
+		if (this.shown(pane)) {
+			if (!this.delivery.pending(rowId))
+				this.delivery.queue(rowId, { type: "session_message", kind: "close", from: parent });
+			return;
+		}
 		// Should tmux not answer, the run's next heartbeat tries again.
 		endPane(this.deps.tmux, pane);
+	}
+
+	/** Whether a terminal shows a pane; taken to when tmux cannot say, as the run then ends itself once it hears. */
+	private shown(pane: string): boolean {
+		try {
+			return this.deps.tmux.shown?.(pane) ?? false;
+		} catch {
+			return true;
+		}
 	}
 
 	/** Store a pane's row as it shows without its pane, stopped, once its session has a file to resume
