@@ -50,6 +50,10 @@ _Avoid_: validation, preflight
 The orchestrator's session, and its session epoch, that a run or message belongs to. The session epoch changes whenever that session is switched, forked, replaced or shut down, which makes everything of the earlier epoch stale. A reload keeps the session, and its open runs; so does reopening it after a crash, which takes over its runs still open. A run whose originating entry is no longer on the active branch is out of scope too.
 _Avoid_: generation, runtime generation
 
+**Collaboration**:
+Independent orchestrator sessions the user linked, with `/collaborate` in one of them, for work the user named. Its members may send each other findings, questions and blockers; no one else is reached, and nothing a member sends adds a member, changes the work or starts a turn in another member. Changing the work makes what was sent under the earlier one stale. A session is in one at most. Switching to another session, forking or quitting leaves it, and with one member left it ends; a reload keeps it.
+_Avoid_: group chat, broadcast, peer discovery
+
 **Resume**:
 Continuing a saved run with an explicit instruction from the orchestrator or the user, as its next generation, with its earlier context. Starting another run with the same role is not a resume.
 _Avoid_: restart, rerun

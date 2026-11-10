@@ -4,7 +4,9 @@ import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { AgentActivity } from "./activity.ts";
+import type { Collaboration, CollaborationMember } from "./collaborations.ts";
 import type {
+	CollaborationRequest,
 	EndReason,
 	InstanceSummary,
 	LiveSnapshot,
@@ -54,7 +56,8 @@ type Request =
 	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null; entryId?: string }
 	| { type: "remote_report"; instanceId: string; report: PaneReport }
 	| WakeupsRequest
-	| RunQueueRequest;
+	| RunQueueRequest
+	| CollaborationRequest;
 
 interface AnyResponse {
 	type: string;
@@ -72,6 +75,9 @@ interface AnyResponse {
 	id?: string;
 	granted?: boolean;
 	hostPid?: number;
+	collaboration?: Collaboration;
+	to?: CollaborationMember;
+	current?: boolean;
 }
 
 /** Path to the daemon's CLI entry, for the ensureDaemon() auto-start. */
@@ -318,6 +324,15 @@ export class OrchestratorClient {
 	/** Gives up run `run`'s claim, or its slot before it launched. */
 	async releaseRun(run: string): Promise<void> {
 		await this.request({ type: "run_queue", action: "release", run });
+	}
+
+	/** A request about session `sessionId`'s collaboration (daemon/collaborations.ts); rejects with why it is refused. */
+	async collaboration(
+		request: CollaborationRequest extends infer R ? (R extends unknown ? Omit<R, "type"> : never) : never,
+	): Promise<{ collaboration?: Collaboration; to?: CollaborationMember; current?: boolean }> {
+		const res = await this.request({ type: "collaboration", ...request } as CollaborationRequest, 5000);
+		if (res.type !== "collaboration_result") throw new Error(OUT_OF_DATE);
+		return { collaboration: res.collaboration, to: res.to, current: res.current };
 	}
 
 	async unregister(instanceId: string, reason?: EndReason): Promise<void> {
