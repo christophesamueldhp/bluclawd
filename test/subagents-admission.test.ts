@@ -517,6 +517,18 @@ describe("Run admission on pi's RPC", () => {
 		expect(existsSync(storageDir)).toBe(false);
 	});
 
+	it("refuses a run whose orchestrator's or workspace's deny rules cannot be read, rather than holding it to none", async () => {
+		const { launch, cwd, agentDir, storageDir } = await rpcSetup({ settings: { permissions: { deny: 42 } } });
+		expect(errorOf(await launch({ agent: "explorer", task: "x" }))).toMatch(/deny rules.*cannot be read/);
+		writeFileSync(join(agentDir, "settings.json"), "{}");
+		const pkg = join(cwd, "pkg");
+		mkdirSync(join(pkg, ".pi"), { recursive: true });
+		writeFileSync(join(pkg, ".pi", "settings.json"), "{ not json");
+		new ProjectTrustStore(agentDir).set(realpathSync(pkg), true);
+		expect(errorOf(await launch({ agent: "explorer", cwd: "pkg", task: "x" }))).toMatch(/deny rules.*cannot be read/);
+		expect(existsSync(storageDir) ? readdirSync(storageDir) : []).toEqual([]);
+	});
+
 	it("gives a directory reached through a symlink no trust of the orchestrator's own", async () => {
 		const { launch, cwd } = await rpcSetup();
 		const other = makeTempDir("other");

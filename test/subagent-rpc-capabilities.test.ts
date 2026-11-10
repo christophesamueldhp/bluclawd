@@ -174,7 +174,7 @@ describe.skipIf(!hasTmux)("an RPC run's capabilities", () => {
 		const nested = lastToolResult(look[7])?.text ?? "";
 		expect(nested).toContain("ok.txt: token FINE");
 		expect(nested.match(/Blocked by permission rule/g)).toHaveLength(4);
-		// No denied content reached the run's model, by any route.
+		// None of the denied files' contents reached the run's model, read directly, nested or by grep.
 		expect(JSON.stringify(look)).not.toContain("SECRET-");
 	});
 

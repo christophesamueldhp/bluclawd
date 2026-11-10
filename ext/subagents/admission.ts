@@ -23,7 +23,8 @@ import type { RunDirectory } from "./directory.ts";
 import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
 import { resolveChildModelAndRuntime } from "./models.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
-import { type RpcLaunch, rpcGrantableTools, rpcRunsEnabled, rpcRunTools } from "./rpc-runs.ts";
+import type { RpcDenyRules } from "./rpc-child.ts";
+import { type RpcLaunch, rpcDenyRules, rpcGrantableTools, rpcRunsEnabled, rpcRunTools } from "./rpc-runs.ts";
 import { type RunWorkspace, resolveRunWorkspace } from "./run-workspace.ts";
 import {
 	type AdmittedSubagentHandle,
@@ -406,6 +407,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				return reject("A subagent's own cwd or agentScope needs runs on pi's RPC; omit them.");
 			}
 			let workspace: RunWorkspace | undefined;
+			let deny: RpcDenyRules[] = [];
 			if (rpc) {
 				const resolved = resolveRunWorkspace(params.cwd, {
 					cwd: ctx.cwd,
@@ -415,6 +417,12 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				});
 				if (!resolved.ok) return reject(resolved.error);
 				workspace = resolved.workspace;
+				const read = rpcDenyRules(agentDir, [
+					{ cwd: ctx.cwd, trusted: projectTrusted },
+					{ cwd: workspace.cwd, trusted: workspace.trusted(workspace.cwd) },
+				]);
+				if (!read.ok) return reject(read.error);
+				deny = read.deny;
 			}
 			const cwd = workspace?.cwd ?? ctx.cwd;
 
@@ -532,19 +540,6 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					modelId: childModel.model.id,
 					thinkingLevel: rpcThinkingLevel,
 				};
-				// Besides its tools, the deny rules of its orchestrator and of its own workspace, each read where it was set.
-				const deny = [
-					{
-						cwd: ctx.cwd,
-						rules: forkSettings.denyRules(SettingsManager.create(ctx.cwd, agentDir, { projectTrusted })),
-					},
-					{
-						cwd,
-						rules: forkSettings.denyRules(
-							SettingsManager.create(cwd, agentDir, { projectTrusted: childTrusted }),
-						),
-					},
-				];
 				try {
 					writeAtomicPrivateFile(
 						join(storage.runDir, "definition.json"),

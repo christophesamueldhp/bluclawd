@@ -18,10 +18,15 @@ import { evaluateToolCallDeny, filterDeniedGrepToolResult } from "../permissions
 /** The flag naming the run's admitted definition (definition.json): what it may do. */
 export const RUN_DEFINITION_FLAG = "bluclawd-run-definition";
 
+/** Deny rules, with the directory their relative paths are from. */
+export interface RpcDenyRules {
+	cwd: string;
+	rules: string[];
+}
+
 interface RunPolicy {
 	tools: string[];
-	/** Deny rules, each set with the directory its relative paths are from. */
-	deny: { cwd: string; rules: string[] }[];
+	deny: RpcDenyRules[];
 }
 
 function readPolicy(path: unknown): RunPolicy | undefined {

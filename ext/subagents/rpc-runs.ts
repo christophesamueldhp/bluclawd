@@ -8,11 +8,12 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseSessionEntries, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import { parseSessionEntries, type SessionEntry, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { piCommand } from "../../daemon/tmux.ts";
+import * as forkSettings from "../_shared/settings.ts";
 import type { AgentDefinition } from "./definitions.ts";
-import { RUN_DEFINITION_FLAG } from "./rpc-child.ts";
+import { type RpcDenyRules, RUN_DEFINITION_FLAG } from "./rpc-child.ts";
 import { launchRpcHost, processAlive, readRpcHostState, stopRpcHost } from "./rpc-host.ts";
 import { runTaskText } from "./run-messages.ts";
 import type { RunRuntimeOutcome, SubagentRunExecuteParams, SubagentRunOutcome } from "./runs.ts";
@@ -80,6 +81,32 @@ export function rpcRunTools(
 		};
 	}
 	return { ok: true, tools: [...named] };
+}
+
+/**
+ * The deny rules an RPC run is held to, read from the settings of each directory, as trusted: those of its
+ * orchestrator and of its own workspace. Rules that cannot be read refuse the run, rather than holding it to none.
+ */
+export function rpcDenyRules(
+	agentDir: string,
+	dirs: { cwd: string; trusted: boolean }[],
+): { ok: true; deny: RpcDenyRules[] } | { ok: false; error: string } {
+	const deny: RpcDenyRules[] = [];
+	for (const { cwd, trusted } of dirs) {
+		const settings = SettingsManager.create(cwd, agentDir, { projectTrusted: trusted });
+		const unread = [
+			...settings.drainErrors().map(({ path, scope }) => path ?? `${scope} settings`),
+			...forkSettings.invalidDenyScopes(settings).map((scope) => `${scope} permissions.deny`),
+		];
+		if (unread.length > 0) {
+			return {
+				ok: false,
+				error: `Cannot launch subagent: the deny rules it must be held to cannot be read (${unread.join(", ")}).`,
+			};
+		}
+		deny.push({ cwd, rules: forkSettings.denyRules(settings) });
+	}
+	return { ok: true, deny };
 }
 
 /** The run's pi with its flags: only bluclawd's child extension, its tools as an allowlist, its exact model and level. */
