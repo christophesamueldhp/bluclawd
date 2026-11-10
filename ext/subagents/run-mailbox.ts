@@ -96,7 +96,13 @@ const pause = new Int32Array(new SharedArrayBuffer(4));
 
 /** Waits until every post another live process had in flight landed or was refused. */
 function settlePosts(runDir: string): void {
-	for (const file of readdirSync(runDir)) {
+	let files: string[];
+	try {
+		files = readdirSync(runDir);
+	} catch {
+		return;
+	}
+	for (const file of files) {
 		const pid = Number(/^\.(\d+)-.*\.inbox$/.exec(file)?.[1]);
 		// This process posts synchronously, so none of its own is in flight; a dead poster's draft never lands.
 		if (!pid || pid === process.pid) continue;
