@@ -2,12 +2,15 @@
  * Wake-ups as the daemon keeps them (ADR-0009). Each session's pi hands over its pending wake-ups, and the daemon
  * reopens the session in agent view's tmux to take one that falls due once that pi is gone; the reopened pi fires
  * it from its session log, late. The log stays the wake-ups' source of truth: it is read again before a reopen, so
- * a hand-off lost on the way (a quit's cancel) never reopens a session for nothing.
+ * a hand-off lost on the way (a quit's cancel) never reopens a session for nothing. A Delete's cancel, which no pi is
+ * left to write there, is word left in the server dir instead.
  */
 
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { PaneLaunch } from "./ipc/protocol.ts";
+import { getServerDir } from "./paths.ts";
 import { loadWakeups, saveWakeups } from "./storage.ts";
 
 /** Session-log entries: a wake-up scheduled, and its end. */
@@ -58,6 +61,26 @@ export function readPendingWakeups(file: string): WakeupRecord[] {
 		}
 	});
 	return pendingWakeups(entries);
+}
+
+/** Where a Delete leaves word that it cancelled wake-up `id`: the session log cannot record it, its pi being gone. */
+const cancelMark = (dir: string, id: string) => join(dir, "wakeups-cancelled", id);
+
+/** Leaves word that a Delete cancelled wake-ups `ids`, so neither the daemon nor a later `/resume` takes them. */
+export function markCancelled(dir: string, ids: readonly string[]): void {
+	if (ids.length === 0) return;
+	mkdirSync(join(dir, "wakeups-cancelled"), { recursive: true });
+	for (const id of ids) writeFileSync(cancelMark(dir, id), "");
+}
+
+/** Whether a Delete cancelled wake-up `id`. */
+export function cancelledByDelete(id: string, dir: string = getServerDir()): boolean {
+	return existsSync(cancelMark(dir, id));
+}
+
+/** Forgets that word once the session log records the cancel. */
+export function forgetCancelled(id: string, dir: string = getServerDir()): void {
+	rmSync(cancelMark(dir, id), { force: true });
 }
 
 /** A process, told apart from a later one given its pid (after a restart of the Mac) by when it started. */
@@ -113,7 +136,7 @@ const REOPEN_WAIT_MS = 90_000;
 const MAX_REOPENS = 3;
 
 export interface WakeupKeeperDeps {
-	/** Where wakeups.json lives. */
+	/** Where wakeups.json lives, and a Delete's word of the wake-ups it cancelled. */
 	dir: string;
 	now: () => number;
 	alive: (holder: ProcessId) => boolean;
@@ -145,8 +168,16 @@ export class WakeupKeeper {
 		this.check();
 	}
 
-	/** Forgets a session's wake-ups: its row was deleted. */
+	/** Cancels a session's wake-ups, those its log has and those held: its row was deleted. */
 	drop(sessionFile: string): void {
+		const ids = [...this.deps.pending(sessionFile), ...(this.held.get(sessionFile)?.wakeups ?? [])].map(
+			({ id }) => id,
+		);
+		try {
+			markCancelled(this.deps.dir, ids);
+		} catch {
+			// Unmarked, they are only forgotten here: a later `/resume` revives them.
+		}
 		this.reopened.delete(sessionFile);
 		if (this.held.delete(sessionFile)) this.save();
 	}
@@ -171,7 +202,9 @@ export class WakeupKeeper {
 				continue;
 			}
 			// The session log has the last word: a fire or a cancel whose hand-off never came.
-			const pending = this.deps.pending(held.sessionFile);
+			const pending = this.deps
+				.pending(held.sessionFile)
+				.filter((wakeup) => !cancelledByDelete(wakeup.id, this.deps.dir));
 			changed = true;
 			if (pending.length === 0) {
 				this.held.delete(held.sessionFile);
