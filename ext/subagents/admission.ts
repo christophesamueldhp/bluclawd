@@ -403,7 +403,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			deps.scope.onBranch(current.originEntryId);
 		if (!scope || !inScope()) return refuse.invalidated;
 		if (!isResumableSubagentStatus(current.status)) {
-			return refuse.unavailable(`${label} is ${current.status}; only a closed subagent can be resumed.`);
+			return refuse.unavailable(
+				`${label} is ${current.status}; only a finished or stopped subagent can be resumed.`,
+			);
 		}
 		if (!buildPrompt) return cannot("a Resume needs an instruction for it.");
 		const invalid = invalidModelChoice(changes);
@@ -780,7 +782,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				taskSummary: summarizeTaskLabel(taskText),
 				startSnapshot,
 				deliveryMode: isBackground ? "background" : "foreground",
-				// Not linked to the call's signal: an aborted foreground call only stops waiting for the run's Report.
+				// Cancelling a foreground call on pi's RPC cancels its run's work; one in tmux only stops waiting for its
+				// Report. A run in the background goes on whatever becomes of the call.
+				...(rpcTools && !isBackground && signal ? { signal } : {}),
 				context: rpcTools
 					? {
 							rpc: {

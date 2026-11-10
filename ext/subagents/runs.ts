@@ -15,9 +15,11 @@ export type SubagentLifecycleStatus =
 	/** Left open by an orchestrator that is gone, with no pi of its own: it never started one, or predates them. */
 	| "interrupted"
 	/** Its pi was ended and its session kept: it can be resumed. */
-	| "closed";
+	| "closed"
+	/** Its work was stopped, and nothing of it runs any more; its session is kept, for an explicit Resume only. */
+	| "cancelled";
 
-export type SubagentTerminalStatus = "failed" | "interrupted" | "closed";
+export type SubagentTerminalStatus = "failed" | "interrupted" | "closed" | "cancelled";
 
 export type SubagentStopSource = "caller" | "user" | "model" | "remote" | "session_invalidated";
 
@@ -150,11 +152,11 @@ export function createRunId(): string {
 	return `${AGENT_TASK_ID_PREFIX}${randomUUID()}`;
 }
 
-const TERMINAL_STATES = new Set<SubagentLifecycleStatus>(["failed", "interrupted", "closed"]);
+const TERMINAL_STATES = new Set<SubagentLifecycleStatus>(["failed", "interrupted", "closed", "cancelled"]);
 
 /** Whether a final run can take a next generation. */
 export function isResumableSubagentStatus(status: SubagentLifecycleStatus): boolean {
-	return status === "closed";
+	return status === "closed" || status === "cancelled";
 }
 
 export function isTerminalSubagentStatus(status: SubagentLifecycleStatus): status is SubagentTerminalStatus {
@@ -318,7 +320,7 @@ export class SubagentRunScheduler<C = unknown> {
 		if (!isResumableSubagentStatus(managed.record.status)) {
 			return {
 				ok: false,
-				error: `Subagent run is ${managed.record.status}; only a closed run can be resumed.`,
+				error: `Subagent run is ${managed.record.status}; only a closed or cancelled run can be resumed.`,
 			};
 		}
 		let resolveCompletion!: (rec: Readonly<SubagentRunRecord>) => void;
@@ -518,7 +520,9 @@ export class SubagentRunScheduler<C = unknown> {
 		}
 		managed.finalizing = true;
 
-		const finalStatus: SubagentTerminalStatus = managed.pendingTerminalStatus ?? outcome.status;
+		// A stopped run is closed, unless its runner says how its stop ended: cancelled, or failed to be confirmed.
+		const finalStatus: SubagentTerminalStatus =
+			outcome.status === "closed" ? (managed.pendingTerminalStatus ?? "closed") : outcome.status;
 		managed.record.endedAt = this.now();
 		managed.record.summaryText = outcome.summaryText;
 		if (outcome.transcriptPath) managed.record.transcriptPath = outcome.transcriptPath;

@@ -140,25 +140,25 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 		expect(real.requests("broken")).toHaveLength(0);
 	});
 
-	it("stops when closed mid-work: its pi and host end, and its Report is kept without waking the orchestrator", async () => {
+	it("stops mid-work: its pi and host end, and its Report is kept without waking the orchestrator", async () => {
 		const real = await startOrchestrator();
 		pi = real;
 		real.script("main", [
 			{ tool: "subagent", args: { agent: "explorer", name: "slow", task: "Take your time.", background: true } },
 			{ text: "waiting for slow" },
-			{ tool: "subagent_close", args: { agent: "slow" } },
-			{ text: "closed it" },
+			{ tool: "subagent_stop", args: { agent: "slow" } },
+			{ text: "stopped it" },
 		]);
 		real.script("slow", [{ text: "Too late.", stallMs: 120_000 }]);
 		const pane = real.start(["--", "delegate in the background"]);
 		await real.waitForRequests("main", 2);
 		// The run's model is asked: its work is under way.
 		await real.waitForRequests("slow", 1);
-		real.tmux.sendKeys(pane, ["close slow", "Enter"]);
+		real.tmux.sendKeys(pane, ["stop slow", "Enter"]);
 		await real.waitForRequests("main", 4);
 
 		const dir = runDir(real.agentDir, "slow");
-		await waitFor(() => expect(JSON.parse(readFileSync(join(dir, "record.json"), "utf8")).status).toBe("closed"));
+		await waitFor(() => expect(JSON.parse(readFileSync(join(dir, "record.json"), "utf8")).status).toBe("cancelled"));
 		const host = JSON.parse(readFileSync(join(dir, "rpc-host.json"), "utf8"));
 		expect(host.outcome).toMatchObject({ status: "stopped" });
 		expect(JSON.parse(readFileSync(join(dir, "reports", "1.json"), "utf8")).outcome).toMatchObject({

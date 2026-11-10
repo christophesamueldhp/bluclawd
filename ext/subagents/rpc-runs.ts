@@ -20,7 +20,7 @@ import * as forkSettings from "../_shared/settings.ts";
 import type { AgentDefinition } from "./definitions.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
 import { type RpcDenyRules, RUN_DEFINITION_FLAG } from "./rpc-child.ts";
-import { prepareRpcHost, processAlive, readRpcHostState, stopRpcHost } from "./rpc-host.ts";
+import { prepareRpcHost, processAlive, processGroupAlive, readRpcHostState, stopRpcHost } from "./rpc-host.ts";
 import {
 	answerRunApproval,
 	markRunApprovalSeen,
@@ -241,8 +241,10 @@ function rpcCommand(launch: RpcLaunch, instructionsFile: string, definitionFile:
 
 /** How often the orchestrator looks at its run's host. */
 const HOST_CHECK_MS = 100;
-/** How long a stopped run's host may take to end before it and its pi are killed. */
+/** How long a run's host and its pi may take to end, once stopped or done, before what is left of them is killed. */
 const STOP_GRACE_MS = 10_000;
+/** How long what was killed of a run may take to be gone, before its end is reported as unconfirmed. */
+const KILL_WAIT_MS = 5000;
 
 /** The daemon's queue of runs (daemon/run-queue.ts), as an orchestrator takes its turns in it. */
 export interface RunSlots {
@@ -295,6 +297,8 @@ async function startInTurn(
 				failures = 0;
 				continue;
 			}
+			// Stopped as its turn came: it never starts.
+			if (signal.aborted) break;
 			const refused = recheck();
 			if (refused) {
 				await slots.release(run).catch(() => {});
@@ -388,7 +392,7 @@ export async function executeRpcRun(
 	if (!turn) {
 		// Handed off before it started: the next instance of the session finds it never started.
 		if (!signal.aborted) return new Promise<never>(() => {});
-		return { status: "closed", summaryText: "", errorMessage: `It was stopped before it started${untakenNote()}` };
+		return { status: "cancelled", summaryText: "", errorMessage: `It was stopped before it started${untakenNote()}` };
 	}
 	if (!("hostPid" in turn)) {
 		const reason = "refused" in turn ? turn.refused : `the daemon could not start it (${turn.error})`;
@@ -449,11 +453,9 @@ export async function executeRpcRun(
 	}
 	// Handed off: the run goes on, its Report kept on disk, and this instance of the session stores nothing more.
 	if (!ended() && !signal.aborted) return new Promise<never>(() => {});
-	if (!ended()) {
-		stopRpcHost(hostPid);
-		const stopped = await until(ended, AbortSignal.timeout(STOP_GRACE_MS));
-		if (!stopped) killHost(launch.runDir, hostPid);
-	}
+	if (!ended()) stopRpcHost(hostPid);
+	// The generation ends once nothing of it runs: its host, its pi, and whatever they started in the host's group.
+	const terminated = await endHostGroup(hostPid);
 
 	// Whatever it sent before it ended reaches its recipients before its Report.
 	relay();
@@ -461,9 +463,27 @@ export async function executeRpcRun(
 	const report = readRunReports(launch.runDir, (state?.reportSeq ?? 0) - 1).find(
 		({ seq }) => seq === state?.reportSeq,
 	);
+	if (!terminated) {
+		sealRunInbox(launch.runDir, record.generation);
+		return {
+			status: "failed",
+			summaryText: report?.text ?? "",
+			errorMessage: `Its processes did not all end, even killed: process group ${hostPid} still runs. Nothing confirms its work stopped.`,
+			transcriptPath: state?.sessionFile,
+		};
+	}
 	if (!state?.exit || !report) {
 		// Later messages are refused; those it was sent stay on disk, whether its pi took them or not.
 		sealRunInbox(launch.runDir, record.generation);
+		// Stopped, and nothing of it runs any more: cancelled, though its host ended before it stored a Report.
+		if (signal.aborted) {
+			return {
+				status: "cancelled",
+				summaryText: "",
+				errorMessage: "Its work was stopped, and nothing of it runs any more; no Report was stored.",
+				transcriptPath: state?.sessionFile,
+			};
+		}
 		return {
 			status: "failed",
 			summaryText: report?.text ?? "",
@@ -500,7 +520,8 @@ export async function executeRpcRun(
 	// A run stopped by its orchestrator or the user keeps its Report on disk, and wakes nobody with it.
 	if (!signal.aborted && !deps.reports.take(record.runId, message)) deps.notify(message);
 	return {
-		status: "closed",
+		// Stopped, and nothing of it runs any more; one that finished its work first was not cancelled.
+		status: signal.aborted && outcome.status !== "completed" ? "cancelled" : "closed",
 		summaryText: report.text,
 		transcriptPath: state.sessionFile,
 		...(outcome.status === "completed" ? {} : { errorMessage: outcome.error }),
@@ -525,16 +546,19 @@ function until(done: () => boolean, signal: AbortSignal): Promise<boolean> {
 	});
 }
 
-/** Ends a host that did not stop in time, and the run's pi with it. */
-function killHost(runDir: string, hostPid: number): void {
-	const childPid = readRpcHostState(runDir)?.childPid;
-	for (const pid of [hostPid, childPid]) {
-		try {
-			if (pid) process.kill(pid, "SIGKILL");
-		} catch {
-			// Gone already.
-		}
+/**
+ * Waits for the run's host's process group to empty: the host, its pi and whatever the pi started there. What is left
+ * after {@link STOP_GRACE_MS} is killed. True once none of it runs; false when it still does even then.
+ */
+async function endHostGroup(hostPid: number): Promise<boolean> {
+	const gone = () => !processGroupAlive(hostPid);
+	if (await until(gone, AbortSignal.timeout(STOP_GRACE_MS))) return true;
+	try {
+		process.kill(-hostPid, "SIGKILL");
+	} catch {
+		// Gone meanwhile.
 	}
+	return until(gone, AbortSignal.timeout(KILL_WAIT_MS));
 }
 
 /** The usage of the run's session, from its file: what pi counted, once per entry. */

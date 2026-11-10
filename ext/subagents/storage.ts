@@ -309,8 +309,10 @@ function decodeLegacyStatus(record: SubagentRunRecord): void {
 	const legacy = record as { status: string; stopSource?: string };
 	if (legacy.status === "timed_out") record.stopReason ??= "Stopped by a deadline (legacy)";
 	if (legacy.status === "budget_exceeded") record.stopReason ??= "Stopped by a budget (legacy)";
-	// An in-process run that ended kept its session, as a closed run does: it can be resumed from it.
-	if (["completed", "cancelled", "timed_out", "budget_exceeded"].includes(legacy.status)) record.status = "closed";
+	// An in-process run that ended kept its session, as a closed run does: it can be resumed from it. A run on pi's
+	// RPC was cancelled as runs are now.
+	const ended = ["completed", "timed_out", "budget_exceeded", ...(record.backend === "rpc" ? [] : ["cancelled"])];
+	if (ended.includes(legacy.status)) record.status = "closed";
 	// A queued run never started, so reconciliation interrupts it like any other orphan.
 	if (legacy.status === "queued") record.status = "starting";
 	// A run from before runs were pis of their own, whose last turn had ended: an orphan, if it was never final.

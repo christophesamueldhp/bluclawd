@@ -34,7 +34,7 @@ export function createRunDirectory(deps: RunDirectoryDeps) {
 	};
 	const entryOf = (record: Readonly<SubagentRunRecord>): RunEntry => {
 		const state = stateOf(record);
-		return { record, state, unreachable: UNREACHABLE[state] };
+		return { record, state, unreachable: record.status === "cancelled" ? "was stopped" : UNREACHABLE[state] };
 	};
 	const named = (target: string) => (record: Readonly<SubagentRunRecord>) =>
 		record.runId === target || record.name === target;

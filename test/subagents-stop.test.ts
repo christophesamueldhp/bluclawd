@@ -112,7 +112,8 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 			const res = await stopTool({ task_id: "sub_10_1" }, "sess_main");
 			const parsed = JSON.parse(res.content[0].text);
 			expect(parsed).toEqual({
-				message: "Successfully closed task: sub_10_1 (explorer: Inspect architecture); its session is kept",
+				message:
+					"Stop requested for task: sub_10_1 (explorer: Inspect architecture); it is stopping, not ended yet, and its session is kept",
 				task_id: "sub_10_1",
 				task_type: "local_agent",
 				command: "explorer: Inspect architecture",

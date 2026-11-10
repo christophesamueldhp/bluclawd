@@ -319,7 +319,7 @@ describe.skipIf(!hasTmux)("messages with a working RPC run", () => {
 		await waitFor(() => expect(screen()).toContain("x to close"));
 		real.tmux.sendKeys(orchestrator, ["x"]);
 		const dir = runDir(real.agentDir, "look");
-		await waitFor(() => expect(readJson(join(dir, "record.json")).status).toBe("closed"));
+		await waitFor(() => expect(readJson(join(dir, "record.json")).status).toBe("cancelled"));
 		expect(readJson(join(dir, "reports", "1.json"))).toMatchObject({ outcome: { status: "stopped" }, untaken: 1 });
 		const kept = readdirSync(join(dir, "inbox", "0.sealed")).filter((file) => file.endsWith(".json"));
 		expect(kept.map((file) => readJson(join(dir, "inbox", "0.sealed", file)).text)).toEqual([

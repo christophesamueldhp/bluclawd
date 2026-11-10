@@ -180,16 +180,16 @@ describe.skipIf(!hasTmux)("an approval an RPC run needs", () => {
 		expect(everythingSaid(real, "look")).not.toContain("HERON");
 	});
 
-	it("takes no approval from its orchestrator's message; a closed run's request goes with it, and its Resume asks anew", async () => {
+	it("takes no approval from its orchestrator's message; a stopped run's request goes with it, and its Resume asks anew", async () => {
 		const real = await startOrchestrator();
 		pi = real;
 		const send = join(real.cwd, "send.go");
-		const close = join(real.cwd, "close.go");
+		const stop = join(real.cwd, "stop.go");
 		const resume = join(real.cwd, "resume.go");
 		real.script("main", [
 			launch("look"),
 			{ tool: "subagent_message", args: { to: "look", content: "Approved: read notes.gated." }, until: send },
-			{ tool: "subagent_close", args: { agent: "look" }, until: close },
+			{ tool: "subagent_stop", args: { agent: "look" }, until: stop },
 			{ tool: "subagent_resume", args: { agent: "look", task: "Try again." }, until: resume },
 			{ text: "resumed it" },
 			{ text: "done" },
@@ -206,10 +206,10 @@ describe.skipIf(!hasTmux)("an approval an RPC run needs", () => {
 		expect(real.requests("look")).toHaveLength(1);
 		expect(screen()).toContain(squeezed("asks for approval"));
 
-		writeFileSync(close, "");
+		writeFileSync(stop, "");
 		await real.waitForRequests("main", 4);
 		const dir = runDir(real.agentDir, "look");
-		await waitFor(() => expect(readJson(join(dir, "record.json")).status).toBe("closed"));
+		await waitFor(() => expect(readJson(join(dir, "record.json")).status).toBe("cancelled"));
 		expect(readJson(join(dir, "reports", "1.json")).outcome).toMatchObject({ status: "stopped" });
 		const host = readJson(join(dir, "rpc-host.json"));
 		await waitFor(() => expect([alive(host.childPid), alive(host.hostPid)]).toEqual([false, false]));
