@@ -1,6 +1,6 @@
 /**
- * Background tasks: the model's `bash` (with `run_in_background`), `monitor` and
- * `task_stop`, and the user's side of them: `/tasks`, the footer's task count,
+ * Background tasks: the model's `bash` (with `run_in_background`), `monitor`,
+ * `schedule_wakeup` and `task_stop`, and the user's side of them: `/tasks`, the footer's task count,
  * Ctrl+B to move a running foreground bash into the background, and the
  * renderers for job events.
  *
@@ -31,6 +31,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { stripAnsi } from "../../daemon/ansi.ts";
+import { runParent } from "../../daemon/tmux.ts";
 import { agentTasks, isAgentTaskId, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { sharedRef } from "../_shared/global-state.ts";
@@ -60,6 +61,18 @@ import {
 } from "./notification-hold.ts";
 import { findOrphanShells, orphanShellMessage, SHELL_END_ENTRY, SHELL_START_ENTRY } from "./orphan-shells.ts";
 import { type TaskRow, TasksDialog, taskRows } from "./tasks-dialog.ts";
+import {
+	isWakeupTaskId,
+	WAKEUP_DELIVERY,
+	WAKEUP_MESSAGE_TYPE,
+	type Wakeup,
+	type WakeupMessageDetails,
+	wakeupClock,
+	wakeupDue,
+	wakeupMessage,
+	wakeupScheduledText,
+	wakeups,
+} from "./wakeups.ts";
 
 const MAX_COMMAND_CHARS = 80;
 
@@ -176,6 +189,50 @@ const backgroundBash: InlineExtension = {
 			}),
 		);
 
+		/**
+		 * A due wake-up goes to its own session only. It is checked when it is sent, not when it falls due: while
+		 * `/tasks` holds it, it can still be cancelled.
+		 */
+		const fireWakeup = (wakeup: Wakeup) =>
+			deliverOrHold(() => {
+				if (!wakeups.take(wakeup.id) || lastMainSession.get() !== wakeup.owner) return;
+				mainSession.sendMessage(wakeupMessage(wakeup), WAKEUP_DELIVERY);
+			});
+
+		// The orchestrator's only: a run does not schedule its own turns.
+		if (!runParent()) {
+			pi.registerTool({
+				name: "schedule_wakeup",
+				label: "ScheduleWakeup",
+				description: [
+					"- Schedules a turn of your own: once it is due, you get a notice with the prompt you give here and start a turn",
+					"- Give exactly one of delay (seconds from now) or at (a local 24-hour clock time, HH:MM; its next occurrence)",
+					"- It must fall due between 1 minute and 24 hours from now; one due while you are working waits for your next turn",
+					"- Returns the wake-up's task id; cancel it with task_stop",
+					"- One-shot: to check again later, schedule the next one when you wake",
+					"- Use it to come back to something you are waiting on: CI, a deploy, a monitor, a follow-up",
+				].join("\n"),
+				parameters: Type.Object({
+					prompt: Type.String({ description: "What to do when it is due, written for yourself" }),
+					delay: Type.Optional(Type.Number({ description: "Seconds from now, 60 to 86400" })),
+					at: Type.Optional(Type.String({ description: "A local 24-hour clock time, HH:MM, e.g. 14:05" })),
+				}),
+				execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
+					const prompt = params.prompt.trim();
+					if (!prompt) throw new Error("Missing required parameter: prompt");
+					const due = wakeupDue(params, Date.now());
+					if (!due.ok) throw new Error(due.error);
+					const wakeup = wakeups.schedule({
+						owner: toolCtx?.sessionManager?.getSessionId(),
+						prompt,
+						dueAt: due.dueAt,
+						onDue: fireWakeup,
+					});
+					return { content: [{ type: "text", text: wakeupScheduledText(wakeup) }], details: undefined };
+				},
+			});
+		}
+
 		pi.registerTool({
 			name: "task_stop",
 			label: "TaskStop",
@@ -206,6 +263,16 @@ const backgroundBash: InlineExtension = {
 						task_id: id,
 						task_type: "local_agent",
 						command: label,
+					});
+					return { content: [{ type: "text", text }], details: undefined };
+				}
+				if (isWakeupTaskId(id)) {
+					const wakeup = wakeups.take(id, callerOwner);
+					if (!wakeup) throw noTaskError(id);
+					const text = JSON.stringify({
+						message: `Successfully cancelled wake-up: ${id} (${wakeup.prompt})`,
+						task_id: id,
+						task_type: "wakeup",
 					});
 					return { content: [{ type: "text", text }], details: undefined };
 				}
@@ -284,6 +351,7 @@ const backgroundBash: InlineExtension = {
 				const timer = setInterval(() => dialogTui.requestRender(), 1000);
 				const offJobs = backgroundBashJobs.subscribe(() => dialogTui.requestRender());
 				const offAgents = subscribeAgentTasks(() => dialogTui.requestRender());
+				const offWakeups = wakeups.subscribe(() => dialogTui.requestRender());
 				const offHeld = subscribeNotificationHold(() => dialogTui.requestRender());
 				const offForeground = subscribeForegroundShells(() => dialogTui.requestRender());
 				return Object.assign(dialog as Component, {
@@ -291,6 +359,7 @@ const backgroundBash: InlineExtension = {
 						clearInterval(timer);
 						offJobs();
 						offAgents();
+						offWakeups();
 						offHeld();
 						offForeground();
 					},
@@ -423,6 +492,16 @@ const backgroundBash: InlineExtension = {
 			if (!d) return undefined;
 			const color = NOTIFICATION_DOT_COLOR[d.state ?? ""];
 			return commandBlock([`${color ? theme.fg(color, NOTIFICATION_DOT) : NOTIFICATION_DOT} ${clean(d.end)}`]);
+		});
+
+		pi.registerMessageRenderer<WakeupMessageDetails>(WAKEUP_MESSAGE_TYPE, (message, _options, theme) => {
+			const d = message.details;
+			if (!d) return undefined;
+			const prompt = d.prompt.split("\n").map((line) => `  ${theme.fg("dim", clean(line))}`);
+			return commandBlock([
+				`${theme.fg("accent", NOTIFICATION_DOT)} Wake-up due ${wakeupClock(d.dueAt)}`,
+				...prompt,
+			]);
 		});
 
 		pi.registerEntryRenderer<TasksData>("bluclawd:tasks", (entry, _options, theme) => {

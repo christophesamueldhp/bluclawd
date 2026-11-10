@@ -16,7 +16,7 @@ const EXPECTED: Record<string, { commands: string[]; tools: string[]; shortcuts:
 	checkpoints: { commands: ["rewind"], tools: [], shortcuts: 0, events: 6 },
 	"background-bash": {
 		commands: ["tasks"],
-		tools: ["bash", "monitor", "task_stop"],
+		tools: ["bash", "monitor", "schedule_wakeup", "task_stop"],
 		shortcuts: 0,
 		events: 3,
 	},

@@ -122,7 +122,7 @@ export function tailOutput(text: string, maxLines: number, maxBytes: number): st
 export const EVENT_DELIVERY: EventDelivery = { deliverAs: "steer", triggerTurn: true };
 
 export interface EventDelivery {
-	deliverAs: "steer";
+	deliverAs: "steer" | "followUp";
 	triggerTurn: boolean;
 }
 
