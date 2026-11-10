@@ -60,6 +60,8 @@ const SUBAGENT_REMINDER_CUSTOM_TYPE = "subagent-reminder";
 const BACKGROUND_BATCH_WINDOW_MS = 40;
 
 /** As remote and the daemon do, so a hung tmux server cannot hold up pi. */
+/** How long the panel keeps a run that failed, and its `/tasks` hint after a close. */
+const ENDED_SHOWN_MS = 30_000;
 const timedTmux = (): Tmux => new Tmux(undefined, undefined, { timeoutMs: 2000 });
 const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent that works in this same checkout";
 // Wording follows Codex's "After you delegate" block and Claude Code's harness text (docs/research/subagents-ux-and-waiting.md).
@@ -194,6 +196,11 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				{ deliverAs: "steer", triggerTurn: false },
 			);
 		};
+
+		/** Whether a final run ended within the last half minute: the panel still tells of it, as Claude Code's does. */
+		const lately = (record: { endedAt?: number }) => now() - (record.endedAt ?? 0) < ENDED_SHOWN_MS;
+		/** The runs that failed or were interrupted lately: their rows stay in the panel until then, or until dismissed. */
+		const endedLately = () => views.done().filter(({ record }) => record.status !== "closed" && lately(record));
 
 		const refreshFooterStatus = () => {
 			try {
@@ -433,7 +440,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 			unpublish?.();
 			// The panel first: publishing the tasks signals a change, and the tasks pill then reads the panel.
-			const unpublishPanel = publishSubagentPanel(() => panel !== undefined && views.open().length > 0);
+			const unpublishPanel = publishSubagentPanel(
+				() => panel !== undefined && (views.open().length > 0 || endedLately().length > 0),
+			);
 			const unpublishTasks = publishAgentTasks({
 				...taskSource,
 				open: (id, owner) => resumeClosed(id, owner) ?? openRun(id, owner),
@@ -457,6 +466,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 							tui,
 							theme,
 							runs: () => views.open(),
+							ended: endedLately,
+							closedLately: () =>
+								views.done().some(({ record }) => record.status === "closed" && lately(record)),
 							waitingFor: views.waitingFor,
 							now,
 							belowPrompt: !panelInStatus,
@@ -469,6 +481,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 								close: ({ record }) =>
 									taskSource.close(record.runId, { owner: record.parentSessionId, source: "user" }),
 								open: ({ record }) => void openRun(record.runId),
+								dismiss: ({ record }) => views.dismiss(record.runId, record.parentSessionId),
 							},
 						});
 						panel = shown;
@@ -476,7 +489,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						const ticker = setInterval(() => {
 							shown.sync();
 							refreshFooterStatus();
-							if (views.open().length > 0) tui.requestRender();
+							if (views.open().length > 0 || views.done().some(({ record }) => lately(record)))
+								tui.requestRender();
 						}, 1000);
 						ticker.unref?.();
 						return Object.assign(shown, {
