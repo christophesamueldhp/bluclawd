@@ -45,6 +45,7 @@ export interface FauxMessage {
 /** One request a session's model got. */
 export interface FauxRequest {
 	piVersion: string;
+	provider: string;
 	model: string;
 	reasoning?: string;
 	messages: FauxMessage[];

@@ -470,9 +470,10 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				params.thinkingLevel === "inherit"
 					? parentThinkingLevel
 					: (params.thinkingLevel ?? definition.thinkingLevel);
-			// A chosen model without a level gets the SDK's default for that model; an inherited one keeps the parent's.
-			const requestedThinkingLevel =
-				explicitThinkingLevel ?? (requestedModel === "inherit" ? parentThinkingLevel : undefined);
+			const rpcThinkingLevel = explicitThinkingLevel ?? parentThinkingLevel;
+			// On pi's RPC a level is resolved apart from the model, as the parent's when none is chosen. In tmux a chosen
+			// model without a level gets the SDK's default for that model; an inherited one keeps the parent's.
+			const requestedThinkingLevel = rpc || requestedModel === "inherit" ? rpcThinkingLevel : explicitThinkingLevel;
 			const childModel = await resolveChildModel(requestedModel, requestedThinkingLevel, ctx);
 			if (!childModel.ok) return reject(childModel.error);
 
@@ -524,7 +525,13 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			}
 			const childTrusted = workspace?.trusted(cwd) ?? projectTrusted;
 			if (rpcTools) {
-				// The role as admitted, with what it may do: what the run, and any later continuation of it, is held to.
+				// The role as admitted, with what it may do and the model and level it runs at: what the run, and any later
+				// continuation of it, is held to.
+				const admitted = {
+					provider: childModel.model.provider,
+					modelId: childModel.model.id,
+					thinkingLevel: rpcThinkingLevel,
+				};
 				// Besides its tools, the deny rules of its orchestrator and of its own workspace, each read where it was set.
 				const deny = [
 					{
@@ -542,7 +549,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					writeAtomicPrivateFile(
 						join(storage.runDir, "definition.json"),
 						JSON.stringify(
-							{ ...definition, tools: rpcTools.tools, deny, cwd, projectTrusted: childTrusted },
+							{ ...definition, tools: rpcTools.tools, deny, cwd, projectTrusted: childTrusted, admitted },
 							null,
 							2,
 						),
@@ -580,7 +587,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 								definition,
 								provider: childModel.model.provider,
 								modelId: childModel.model.id,
-								thinkingLevel: childModel.thinkingLevel,
+								thinkingLevel: rpcThinkingLevel,
 								tools: rpcTools.tools,
 								task: taskText,
 								cwd,
