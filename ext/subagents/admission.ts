@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { type ExtensionContext, SettingsManager, type ToolLoadout } from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import * as forkSettings from "../_shared/settings.ts";
@@ -23,6 +24,7 @@ import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
 import { resolveChildModelAndRuntime } from "./models.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
 import { type RpcLaunch, rpcRunsEnabled, rpcRunTools } from "./rpc-runs.ts";
+import { type RunWorkspace, resolveRunWorkspace } from "./run-workspace.ts";
 import {
 	type AdmittedSubagentHandle,
 	createRunId,
@@ -31,7 +33,7 @@ import {
 	type SubagentRunScheduler,
 	type WorkspaceSnapshot,
 } from "./runs.ts";
-import { ensureRunStorageDir, recordCountedSessionUsage } from "./storage.ts";
+import { ensureRunStorageDir, recordCountedSessionUsage, writeAtomicPrivateFile } from "./storage.ts";
 import type { RunLaunch } from "./tmux-runs.ts";
 
 export const MAX_TASK_INPUT_BYTES = 32 * 1024;
@@ -110,6 +112,24 @@ export const SUBAGENT_TOOL_PARAMETERS = Type.Object({
 	task: Type.String({
 		description: "Self-contained task instructions with explicit file paths, symbols, or diff context (max 32 KiB).",
 	}),
+	cwd: Type.Optional(
+		Type.String({
+			description:
+				"Directory the run works in: absolute, or relative to yours. Defaults to yours. Its project roles are found from there up to its repository root.",
+		}),
+	),
+	agentScope: Type.Optional(
+		Type.Union([Type.Literal("user"), Type.Literal("project"), Type.Literal("both")], {
+			description:
+				'Which saved roles `agent` may name: "user" (yours and the bundled ones), "project" (the project\'s), or "both" (the default). Project roles need the user\'s trust in their project either way.',
+		}),
+	),
+	confirmProjectAgents: Type.Optional(
+		Type.Boolean({
+			description:
+				"Accepted for compatibility, and ignored: whether a project's roles may run is the user's trust in that project, which no call can change.",
+		}),
+	),
 	model: Type.Optional(
 		Type.String({
 			description:
@@ -355,7 +375,6 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const parentSessionId = ctx.sessionManager.getSessionId();
 			const originEntryId = ctx.sessionManager.getLeafId() ?? undefined;
 			const agentDir = deps.agentDir();
-			const cwd = ctx.cwd;
 			const projectTrusted = ctx.isProjectTrusted();
 			const inlineRole = typeof params.agent === "string" ? undefined : params.agent;
 			const agentName = (typeof params.agent === "string" ? params.agent : params.agent.name).trim();
@@ -381,11 +400,36 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				);
 			}
 
-			// An inline role is validated; a saved one comes from the frozen catalog.
+			if (!rpc && (params.cwd !== undefined || params.agentScope !== undefined)) {
+				return reject("A subagent's own cwd or agentScope needs runs on pi's RPC; omit them.");
+			}
+			let workspace: RunWorkspace | undefined;
+			if (rpc) {
+				const resolved = resolveRunWorkspace(params.cwd, {
+					cwd: ctx.cwd,
+					projectTrusted,
+					agentDir,
+					denyRules: forkSettings.denyRules(SettingsManager.create(ctx.cwd, agentDir, { projectTrusted })),
+				});
+				if (!resolved.ok) return reject(resolved.error);
+				workspace = resolved.workspace;
+			}
+			const cwd = workspace?.cwd ?? ctx.cwd;
+
+			// An inline role is validated. A saved one is found from the run's own directory on pi's RPC, else in the
+			// catalog frozen at session start.
 			const resolvedDef = inlineRole
 				? createInlineAgentDefinition(inlineRole)
 				: resolveAgentDefinition(
-						deps.catalog() ?? discoverAgentDefinitions({ cwd, agentDir, projectTrusted }),
+						workspace
+							? discoverAgentDefinitions({
+									cwd,
+									root: workspace.root,
+									agentDir,
+									projectTrusted: workspace.trusted,
+									scope: params.agentScope,
+								})
+							: (deps.catalog() ?? discoverAgentDefinitions({ cwd, agentDir, projectTrusted })),
 						agentName,
 					);
 			if (!resolvedDef.ok) {
@@ -476,6 +520,20 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			if (!storage.ok) {
 				return reject(`Cannot launch subagent: storage is unavailable (${storage.error}).`);
 			}
+			const childTrusted = workspace?.trusted(cwd) ?? projectTrusted;
+			if (rpcTools) {
+				// The role as admitted, with what it may do: what the run, and any later continuation of it, is held to.
+				try {
+					writeAtomicPrivateFile(
+						join(storage.runDir, "definition.json"),
+						JSON.stringify({ ...definition, tools: rpcTools.tools, cwd, projectTrusted: childTrusted }, null, 2),
+					);
+				} catch (error) {
+					return reject(
+						`Cannot launch subagent: storage is unavailable (${error instanceof Error ? error.message : String(error)}).`,
+					);
+				}
+			}
 
 			const admitRes = deps.scheduler.admit({
 				runId,
@@ -509,7 +567,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 								cwd,
 								runDir: storage.runDir,
 								agentDir,
-								projectTrusted,
+								projectTrusted: childTrusted,
 							},
 						}
 					: {

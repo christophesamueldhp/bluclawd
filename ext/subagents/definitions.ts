@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getAgentDir, parseFrontmatter } from "@earendil-works/pi-coding-agent";
@@ -54,12 +54,21 @@ export interface AgentDefinitionCatalog {
 	readonly byName: ReadonlyMap<string, AgentDefinition>;
 	readonly invalidByName: ReadonlyMap<string, string>;
 	readonly diagnostics: readonly string[];
+	/** Why project roles were left out: their directories the user does not trust. */
+	readonly untrusted: readonly string[];
 }
+
+/** Which saved roles a launch may pick: the user's and bluclawd's own, the project's, or both. */
+export type AgentScope = "user" | "project" | "both";
 
 export interface DiscoverAgentDefinitionsOptions {
 	cwd: string;
 	agentDir?: string;
-	projectTrusted?: boolean;
+	/** Whether the project roles of a directory are trusted: one answer for every directory, or one per directory. */
+	projectTrusted?: boolean | ((dir: string) => boolean);
+	/** Project roles are looked for from cwd up to this directory; in cwd alone without one. */
+	root?: string;
+	scope?: AgentScope;
 }
 
 export type ResolveAgentDefinitionResult =
@@ -405,58 +414,61 @@ function loadScopeDirectory(dirPath: string, source: AgentDefinitionSource): Sco
 	return { valid, invalid, diagnostics };
 }
 
+/** cwd and its ancestors up to root, nearest first; cwd alone without a root above it. */
+function projectDirs(cwd: string, root: string | undefined): string[] {
+	const dirs = [cwd];
+	const rel = root === undefined ? ".." : relative(root, cwd);
+	if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return dirs;
+	for (let dir = cwd; dir !== root; ) {
+		dir = dirname(dir);
+		dirs.push(dir);
+	}
+	return dirs;
+}
+
 export function discoverAgentDefinitions(options: DiscoverAgentDefinitionsOptions): AgentDefinitionCatalog {
 	const agentDir = options.agentDir ?? getAgentDir();
-	const projectTrusted = options.projectTrusted ?? true;
+	const { projectTrusted = true, scope = "both" } = options;
+	const trusted = typeof projectTrusted === "function" ? projectTrusted : () => projectTrusted;
 	const diagnostics: string[] = [];
+	const untrusted: string[] = [];
 
-	const bundledScope = loadScopeDirectory(BUNDLED_AGENTS_DIR, "bundled");
-	diagnostics.push(...bundledScope.diagnostics);
-
-	const userAgentsDir = join(agentDir, "agents");
-	const projectAgentsDir = join(options.cwd, ".pi", "agents");
-
-	const userScope = loadScopeDirectory(userAgentsDir, "user");
-	let projectScope: ScopeLoadResult = {
-		valid: new Map(),
-		invalid: new Map(),
-		diagnostics: [],
-	};
-
-	if (projectTrusted) {
-		projectScope = loadScopeDirectory(projectAgentsDir, "project");
-	} else {
-		const untrustedFiles = listMarkdownFiles(projectAgentsDir);
-		if (untrustedFiles && untrustedFiles.files.length > 0) {
-			diagnostics.push(
-				`Ignored ${untrustedFiles.files.length} agent definition(s) in "${projectAgentsDir}" from untrusted project.`,
-			);
+	// Lowest precedence first: a later layer's definition of a name, valid or invalid, replaces an earlier one's.
+	const layers: ScopeLoadResult[] = [];
+	if (scope !== "project") {
+		layers.push(
+			loadScopeDirectory(BUNDLED_AGENTS_DIR, "bundled"),
+			loadScopeDirectory(join(agentDir, "agents"), "user"),
+		);
+	}
+	if (scope !== "user") {
+		for (const dir of projectDirs(options.cwd, options.root).reverse()) {
+			const projectAgentsDir = join(dir, ".pi", "agents");
+			if (trusted(dir)) {
+				layers.push(loadScopeDirectory(projectAgentsDir, "project"));
+				continue;
+			}
+			const untrustedFiles = listMarkdownFiles(projectAgentsDir);
+			if (untrustedFiles && untrustedFiles.files.length > 0) {
+				untrusted.push(
+					`Ignored ${untrustedFiles.files.length} agent definition(s) in "${projectAgentsDir}" from untrusted project.`,
+				);
+			}
 		}
 	}
 
-	diagnostics.push(...userScope.diagnostics, ...projectScope.diagnostics);
-
-	const effectiveValid = new Map<string, AgentDefinition>(bundledScope.valid);
-	const effectiveInvalid = new Map<string, string>(bundledScope.invalid);
-
-	// Apply user scope over bundled: invalid user definition blocks lower-precedence bundled fallback
-	for (const [name, err] of userScope.invalid) {
-		effectiveValid.delete(name);
-		effectiveInvalid.set(name, err);
-	}
-	for (const [name, def] of userScope.valid) {
-		effectiveInvalid.delete(name);
-		effectiveValid.set(name, def);
-	}
-
-	// Apply trusted project scope over user + bundled: invalid project definition blocks lower-precedence fallback
-	for (const [name, err] of projectScope.invalid) {
-		effectiveValid.delete(name);
-		effectiveInvalid.set(name, err);
-	}
-	for (const [name, def] of projectScope.valid) {
-		effectiveInvalid.delete(name);
-		effectiveValid.set(name, def);
+	const effectiveValid = new Map<string, AgentDefinition>();
+	const effectiveInvalid = new Map<string, string>();
+	for (const layer of layers) {
+		diagnostics.push(...layer.diagnostics);
+		for (const [name, err] of layer.invalid) {
+			effectiveValid.delete(name);
+			effectiveInvalid.set(name, err);
+		}
+		for (const [name, def] of layer.valid) {
+			effectiveInvalid.delete(name);
+			effectiveValid.set(name, def);
+		}
 	}
 
 	const sortedDefinitions = Array.from(effectiveValid.values()).sort((a, b) => a.name.localeCompare(b.name));
@@ -465,7 +477,8 @@ export function discoverAgentDefinitions(options: DiscoverAgentDefinitionsOption
 		definitions: Object.freeze(sortedDefinitions),
 		byName: new Map(effectiveValid),
 		invalidByName: new Map(effectiveInvalid),
-		diagnostics: Object.freeze(diagnostics),
+		diagnostics: Object.freeze([...untrusted, ...diagnostics]),
+		untrusted: Object.freeze(untrusted),
 	});
 }
 
@@ -498,7 +511,7 @@ export function resolveAgentDefinition(
 		const available = catalog.definitions.map((d) => d.name).join(", ") || "none";
 		return {
 			ok: false,
-			error: `Unknown subagent "${normalized}". Available subagents: ${available}`,
+			error: [`Unknown subagent "${normalized}". Available subagents: ${available}`, ...catalog.untrusted].join(" "),
 		};
 	}
 	return { ok: true, definition };

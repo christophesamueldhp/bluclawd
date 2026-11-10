@@ -368,3 +368,72 @@ describe("Task 1 (M1) — Agent definitions and bundled roles", () => {
 		}
 	});
 });
+
+describe("Project roles for a run's directory", () => {
+	const role = (dir: string, name: string, body: string, extra: string[] = []) => {
+		mkdirSync(join(dir, ".pi", "agents"), { recursive: true });
+		writeFileSync(
+			join(dir, ".pi", "agents", `${name}.md`),
+			["---", `name: ${name}`, `description: ${body}`, ...extra, "---", body].join("\n"),
+		);
+	};
+	const instructionsOf = (result: ReturnType<typeof resolveAgentDefinition>) =>
+		result.ok ? result.definition.instructions : result.error;
+
+	/** outer/.pi above the repository root, repo/.pi at it, repo/pkg/.pi nearer, and the run in repo/pkg/sub. */
+	function nested() {
+		const outer = makeTempDir("outer");
+		const agentDir = makeTempDir("nested-agent");
+		const repo = join(outer, "repo");
+		const cwd = join(repo, "pkg", "sub");
+		mkdirSync(cwd, { recursive: true });
+		role(outer, "outsider", "Above the root.");
+		role(outer, "explorer", "Outer explorer.");
+		role(repo, "explorer", "Root explorer.");
+		role(repo, "rooted", "Root only.");
+		role(join(repo, "pkg"), "explorer", "Package explorer.");
+		return { outer, agentDir, repo, cwd };
+	}
+
+	it("looks from the run's directory up to its root, the nearest definition of a name winning", () => {
+		const { agentDir, repo, cwd } = nested();
+		const catalog = discoverAgentDefinitions({ cwd, root: repo, agentDir, projectTrusted: () => true });
+		expect(instructionsOf(resolveAgentDefinition(catalog, "explorer"))).toBe("Package explorer.");
+		expect(instructionsOf(resolveAgentDefinition(catalog, "rooted"))).toBe("Root only.");
+		expect(resolveAgentDefinition(catalog, "outsider").ok).toBe(false);
+	});
+
+	it("does not fall back past an invalid nearer definition", () => {
+		const { agentDir, repo, cwd } = nested();
+		role(join(repo, "pkg"), "explorer", "Broken.", ["tools: 42"]);
+		const catalog = discoverAgentDefinitions({ cwd, root: repo, agentDir, projectTrusted: () => true });
+		expect(instructionsOf(resolveAgentDefinition(catalog, "explorer"))).toMatch(/invalid and cannot be launched/);
+	});
+
+	it("skips the roles of a directory the user does not trust, and says so", () => {
+		const { agentDir, repo, cwd } = nested();
+		const catalog = discoverAgentDefinitions({ cwd, root: repo, agentDir, projectTrusted: (dir) => dir === repo });
+		expect(instructionsOf(resolveAgentDefinition(catalog, "explorer"))).toBe("Root explorer.");
+		expect(catalog.diagnostics.join("\n")).toContain(join(repo, "pkg", ".pi", "agents"));
+	});
+
+	it("narrows the eligible sources by scope without trusting more", () => {
+		const { agentDir, repo, cwd } = nested();
+		mkdirSync(join(agentDir, "agents"));
+		writeFileSync(
+			join(agentDir, "agents", "explorer.md"),
+			"---\nname: explorer\ndescription: User explorer.\n---\nUser explorer.",
+		);
+		const discover = (scope: "user" | "project" | "both", trusted = true) =>
+			discoverAgentDefinitions({ cwd, root: repo, agentDir, projectTrusted: () => trusted, scope });
+		expect(instructionsOf(resolveAgentDefinition(discover("both"), "explorer"))).toBe("Package explorer.");
+		expect(instructionsOf(resolveAgentDefinition(discover("user"), "explorer"))).toBe("User explorer.");
+		expect(resolveAgentDefinition(discover("user"), "reviewer")).toMatchObject({
+			ok: true,
+			definition: { source: "bundled" },
+		});
+		expect(instructionsOf(resolveAgentDefinition(discover("project"), "explorer"))).toBe("Package explorer.");
+		expect(resolveAgentDefinition(discover("project"), "reviewer").ok).toBe(false);
+		expect(resolveAgentDefinition(discover("project", false), "explorer").ok).toBe(false);
+	});
+});

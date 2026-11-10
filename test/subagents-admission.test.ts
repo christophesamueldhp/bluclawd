@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxProvider } from "@earendil-works/pi-ai";
@@ -139,6 +148,7 @@ async function setup(
 	const storageDir = join(agentDir, "bluclawd", "subagents", sessionManager.getSessionId());
 	return {
 		agentDir,
+		cwd,
 		resume,
 		runtime,
 		faux,
@@ -474,5 +484,50 @@ describe("Run admission", () => {
 		scheduler.cancelRun(open.runId, "model");
 		await first.completion;
 		expect((await launch({ agent: "explorer", name: "run-9", task: "Look." })).ok).toBe(true);
+	});
+});
+
+describe("Run admission on pi's RPC", () => {
+	const rpcSetup = (options: Parameters<typeof setup>[0] = {}) => {
+		vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
+		return setup(options);
+	};
+
+	it("refuses a cwd it cannot use, or that the orchestrator's Read rules deny, before storage", async () => {
+		const secret = makeTempDir("secret");
+		const { launch, storageDir, cwd } = await rpcSetup({
+			settings: { permissions: { deny: [`Read(${secret}/**)`] } },
+		});
+		writeFileSync(join(cwd, "file.txt"), "");
+		expect(errorOf(await launch({ agent: "explorer", cwd: "missing", task: "x" }))).toMatch(
+			/cwd ".*missing" cannot be used/,
+		);
+		expect(errorOf(await launch({ agent: "explorer", cwd: "file.txt", task: "x" }))).toMatch(/is not a directory/);
+		expect(errorOf(await launch({ agent: "explorer", cwd: secret, task: "x" }))).toMatch(
+			/Blocked by permission rule/,
+		);
+		expect(existsSync(storageDir)).toBe(false);
+	});
+
+	it("gives a directory reached through a symlink no trust of the orchestrator's own", async () => {
+		const { launch, cwd } = await rpcSetup();
+		const other = makeTempDir("other");
+		mkdirSync(join(other, ".pi", "agents"), { recursive: true });
+		writeFileSync(join(other, ".pi", "agents", "sneaky.md"), "---\nname: sneaky\ndescription: Sneaky.\n---\nSneak.");
+		symlinkSync(other, join(cwd, "link"));
+		const trusted = { isProjectTrusted: () => true };
+		expect(errorOf(await launch({ agent: "sneaky", cwd: "link", task: "x" }, trusted))).toMatch(
+			/Unknown subagent "sneaky".*untrusted project/s,
+		);
+		const run = handleOf(await launch({ agent: "explorer", cwd: "link", task: "x" }, trusted)).record;
+		expect(run.cwd).toBe(realpathSync(other));
+	});
+
+	it("refuses a cwd or agentScope for a run in tmux rather than ignoring it", async () => {
+		const { launch, cwd } = await setup();
+		mkdirSync(join(cwd, "pkg"));
+		const refusal = /cwd or agentScope needs runs on pi's RPC/;
+		expect(errorOf(await launch({ agent: "explorer", cwd: "pkg", task: "x" }))).toMatch(refusal);
+		expect(errorOf(await launch({ agent: "explorer", agentScope: "user", task: "x" }))).toMatch(refusal);
 	});
 });
