@@ -146,6 +146,57 @@ describe.skipIf(!hasTmux)("the daemon's hold on a session's wake-ups", () => {
 		return at;
 	}
 
+	it("cancels a crashed session's wake-up when its row is deleted: the daemon reopens nothing, and a /resume revives none", async () => {
+		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
+		pi = real;
+		const { sessionFile } = await crashed(real);
+		overdue(sessionFile);
+		const [stale] = held();
+		const row = (await real.rows()).find((r) => r.sessionFile === sessionFile);
+		if (!row) throw new Error("The crashed session has no row.");
+
+		await real.client.delete(row.id);
+		// A hand-off that lands after the Delete, as one sent just before it does.
+		await real.client.holdWakeups(stale);
+		await new Promise((resolve) => setTimeout(resolve, 3000));
+		expect(real.requests("main")).toHaveLength(2);
+		expect(held()).toEqual([]);
+
+		real.start(["--session", sessionFile]);
+		await waitFor(() => expect(wakeupEntries(sessionFile)).toEqual([WAKEUP_ENTRY, WAKEUP_END_ENTRY]));
+		await new Promise((resolve) => setTimeout(resolve, 3000));
+		expect(real.requests("main")).toHaveLength(2);
+	});
+
+	it("cancels a live session's wake-up when its row is deleted, though its killed pi recorded nothing", async () => {
+		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
+		pi = real;
+		real.script("main", [
+			{ tool: "schedule_wakeup", args: { prompt: "Check CI.", delay: 600 } },
+			{ text: "scheduled" },
+			{ text: "CI is green" },
+		]);
+		const pane = real.start(["--", "watch CI"]);
+		await real.waitForRequests("main", 2);
+		await waitFor(() => expect(held()).toHaveLength(1));
+		const [{ sessionFile }] = held();
+		const row = (await real.rows()).find((r) => r.sessionFile === sessionFile);
+		if (!row) throw new Error("The session has no row.");
+
+		// As agent view deletes a live row: its pi is killed, then the row goes.
+		real.tmux.kill(pane);
+		await real.client.delete(row.id);
+		overdue(sessionFile);
+		await new Promise((resolve) => setTimeout(resolve, 3000));
+		expect(real.requests("main")).toHaveLength(2);
+		expect(held()).toEqual([]);
+
+		real.start(["--session", sessionFile]);
+		await waitFor(() => expect(wakeupEntries(sessionFile)).toEqual([WAKEUP_ENTRY, WAKEUP_END_ENTRY]));
+		await new Promise((resolve) => setTimeout(resolve, 3000));
+		expect(real.requests("main")).toHaveLength(2);
+	});
+
 	it("fires one that fell due while the daemon was down, once it is back", async () => {
 		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
 		pi = real;

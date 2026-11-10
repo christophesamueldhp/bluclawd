@@ -33,8 +33,9 @@ import {
 import { Type } from "typebox";
 import { stripAnsi } from "../../daemon/ansi.ts";
 import { currentDaemonBuildId, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
+import { getServerDir } from "../../daemon/paths.ts";
 import { endedAsQuit, piCommand, runParent, Tmux } from "../../daemon/tmux.ts";
-import { type HeldWakeups, processStart } from "../../daemon/wakeups.ts";
+import { cancelledByDelete, forgetCancelled, type HeldWakeups, processStart } from "../../daemon/wakeups.ts";
 import { agentTasks, isAgentTaskId, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { sharedRef } from "../_shared/global-state.ts";
@@ -295,13 +296,19 @@ const backgroundBash: InlineExtension = {
 
 		/**
 		 * The session's pending wake-ups, rebuilt from its log; overdue ones fall due at once. A fork's new session gets
-		 * none: those it copied are recorded cancelled, so a later `/resume` of it revives none either.
+		 * none: those it copied are recorded cancelled, so a later `/resume` of it revives none either. Nor do those a
+		 * Delete cancelled, which the log records now.
 		 */
 		const restoreWakeups = (event: SessionStartEvent, startCtx: ExtensionContext) => {
 			const session = startCtx.sessionManager.getSessionId();
+			const dir = getServerDir();
 			for (const record of pendingWakeups(startCtx.sessionManager.getEntries())) {
-				if (event.reason === "fork") recordWakeupEnd(record, "cancelled");
-				else {
+				const deleted = cancelledByDelete(dir, record.id);
+				if (event.reason === "fork" || deleted) {
+					recordWakeupEnd(record, "cancelled");
+					// A fork records it in its own log, not in the deleted session's.
+					if (deleted && event.reason !== "fork") forgetCancelled(dir, record.id);
+				} else {
 					wakeups.schedule({
 						owner: session,
 						prompt: record.prompt,

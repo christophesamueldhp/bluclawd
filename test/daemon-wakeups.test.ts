@@ -108,6 +108,19 @@ describe("the daemon's copy of a session's wake-ups", () => {
 		expect(f.reopened).toEqual([]);
 	});
 
+	it("never reopens a deleted session for the wake-ups it had, though a late hand-off brings them back", () => {
+		const f = fixture();
+		const stale = hold(f, "/s/a.jsonl", 41, [wakeup("w1", NOW + MINUTE), wakeup("w2", NOW + 2 * MINUTE)]);
+
+		f.keeper.drop("/s/a.jsonl");
+		// The deleted pi's last hand-off, sent before it was killed; its log never recorded the cancel.
+		f.keeper.hold(stale);
+		f.advance(2 * MINUTE);
+		f.keeper.check();
+		expect(f.reopened).toEqual([]);
+		expect(f.keeper.list()).toEqual([]);
+	});
+
 	it("forgets a session whose row is deleted, stored or live", () => {
 		const f = fixture();
 		const supervisor = new ServerSupervisor({
