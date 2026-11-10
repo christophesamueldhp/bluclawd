@@ -29,6 +29,7 @@ import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { setSharedTheme, theme } from "../_shared/theme.ts";
 import { timed, timedCall } from "../_shared/timing.ts";
 import { trustBadge } from "../_shared/trust-badge.ts";
+import { wakeups } from "../background-bash/wakeups.ts";
 import { AgentView, EXIT_WORDS, type PastSession } from "./agent-view.ts";
 import { type BackgroundableSession, handOffAfterExit } from "./hand-off.ts";
 import { loadViewMode, saveViewMode } from "./prefs.ts";
@@ -316,6 +317,7 @@ const agentView: InlineExtension = {
 				// Only once it differs: a heartbeat lags the file, whose last entry is otherwise the leaf.
 				leafId: leafId !== session.lastEntry?.id ? leafId : undefined,
 				dialog: activity.current === "awaiting_input" ? activity.dialog : undefined,
+				wakesAt: wakeups.list(ctx.sessionManager.getSessionId())[0]?.dueAt,
 				...(ctx.ui.getEditorText().trim() !== "" ? { draft: true } : {}),
 				...(parent() ? { parent: parent() } : {}),
 			};

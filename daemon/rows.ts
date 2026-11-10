@@ -40,6 +40,8 @@ export interface AgentRow {
 	starting?: true;
 	/** Its pane's pi stopped beating while tmux still has its pane: shown as it last beat. */
 	silent?: true;
+	/** Idle with a wake-up pending: when the earliest is due, which its line shows. */
+	wakesAt?: number;
 	/** This window's own pane, not registered with the daemon yet: no row there to delete, pin or order. */
 	unlisted?: true;
 }
@@ -123,6 +125,9 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 		...(inst.settled !== undefined ? { settled: inst.settled } : {}),
 		...(inst.status === "starting" ? { starting: true } : {}),
 		...(inst.silent ? { silent: true } : {}),
+		...(alive && state !== "working" && state !== "needs" && inst.wakesAt !== undefined
+			? { wakesAt: inst.wakesAt }
+			: {}),
 	};
 }
 

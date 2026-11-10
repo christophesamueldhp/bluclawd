@@ -510,6 +510,22 @@ describe("AgentView render", () => {
 		expect(text.at(-1)).not.toMatch(/space to reply|ctrl\+x|ctrl\+f/);
 	});
 
+	it("shows when an idle session next wakes, in place of its last answer; a working or ended one shows its own line", () => {
+		const wakesAt = new Date(2026, 10, 11, 14, 5).getTime();
+		const [, work, done, gone] = sessions;
+		const { text } = makeView({
+			instances: [
+				{ ...done, wakesAt },
+				{ ...work, wakesAt },
+				{ ...gone, wakesAt },
+			],
+		});
+		const body = text().join("\n");
+		expect(body).toMatch(/Idle\n.*title screen\s+wakes 14:05\s+6m/);
+		expect(body).toMatch(/collision detection\s+Adding swept-AABB checks/);
+		expect(body).toMatch(/sound effects\s+build broke/);
+	});
+
 	it("warns on each row when two panes run one session file", () => {
 		const twin = (id: string): InstanceSummary => ({
 			id,
