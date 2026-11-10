@@ -2,8 +2,9 @@
  * Wake-ups: turns an orchestrator's agent schedules for itself with `schedule_wakeup` (ADR-0009). Each pending
  * one is a task in `/tasks` and `task_stop`; it fires once, as a notice that starts the session's next turn.
  *
- * For now a wake-up lives only as long as its pi: the registry is in memory, process-wide like the jobs
- * (`/tasks` is read from other extensions' module graphs).
+ * The session log owns a wake-up: it records each one being scheduled and ending (fired or cancelled), and the
+ * pending ones are rebuilt from it when the session is opened. The registry holds the open session's, in memory
+ * and process-wide like the jobs (`/tasks` is read from other extensions' module graphs).
  */
 
 import { notifyListeners, sharedRef } from "../_shared/global-state.ts";
@@ -58,25 +59,68 @@ export interface Wakeup {
 	scheduledAt: number;
 }
 
+export type WakeupEnd = "fired" | "cancelled";
+
+/** Session-log entries: a wake-up scheduled, and its end. */
+export const WAKEUP_ENTRY = "bluclawd:wakeup-scheduled";
+export const WAKEUP_END_ENTRY = "bluclawd:wakeup-end";
+
+export type WakeupRecord = Omit<Wakeup, "owner">;
+
+export interface WakeupEndRecord {
+	id: string;
+	end: WakeupEnd;
+}
+
+type Entry = { type: string; customType?: string; data?: unknown };
+
+/** The wake-ups `entries` record scheduled and not ended, earliest first. Every branch counts: they are the session's. */
+export function pendingWakeups(entries: readonly Entry[]): WakeupRecord[] {
+	const ended = new Set<string>();
+	const scheduled: WakeupRecord[] = [];
+	for (const entry of entries) {
+		if (entry.type !== "custom") continue;
+		if (entry.customType === WAKEUP_END_ENTRY) ended.add((entry.data as WakeupEndRecord).id);
+		else if (entry.customType === WAKEUP_ENTRY) scheduled.push(entry.data as WakeupRecord);
+	}
+	return scheduled.filter((record) => !ended.has(record.id)).sort((a, b) => a.dueAt - b.dueAt);
+}
+
+interface Pending {
+	wakeup: Wakeup;
+	timer: ReturnType<typeof setTimeout>;
+	onEnd: (wakeup: Wakeup, end: WakeupEnd) => void;
+}
+
 /** The pending wake-ups. One leaves the list when it is cancelled or fires. */
 export class WakeupRegistry {
-	private readonly pending = new Map<string, { wakeup: Wakeup; timer: ReturnType<typeof setTimeout> }>();
+	private readonly pending = new Map<string, Pending>();
 	private readonly listeners = new Set<() => void>();
 
-	/** `onDue` is called when it falls due; the wake-up stays pending until it is taken. */
-	schedule(options: { owner: string | undefined; prompt: string; dueAt: number; onDue: (wakeup: Wakeup) => void }) {
-		let id = randomTaskId("w");
-		while (this.pending.has(id)) id = randomTaskId("w");
+	/**
+	 * `onDue` is called when it falls due; the wake-up stays pending until it is taken, and `onEnd` records how it
+	 * ended. A `restore`d one, rebuilt from the session log, keeps its id and scheduling time.
+	 */
+	schedule(options: {
+		owner: string | undefined;
+		prompt: string;
+		dueAt: number;
+		restore?: Pick<Wakeup, "id" | "scheduledAt">;
+		onDue: (wakeup: Wakeup) => void;
+		onEnd: (wakeup: Wakeup, end: WakeupEnd) => void;
+	}) {
+		let id = options.restore?.id ?? randomTaskId("w");
+		while (!options.restore && this.pending.has(id)) id = randomTaskId("w");
 		const wakeup: Wakeup = {
 			id,
 			owner: options.owner,
 			prompt: options.prompt,
 			dueAt: options.dueAt,
-			scheduledAt: Date.now(),
+			scheduledAt: options.restore?.scheduledAt ?? Date.now(),
 		};
 		const timer = setTimeout(() => options.onDue(wakeup), Math.max(0, options.dueAt - Date.now()));
 		timer.unref();
-		this.pending.set(id, { wakeup, timer });
+		this.pending.set(id, { wakeup, timer, onEnd: options.onEnd });
 		notifyListeners(this.listeners);
 		return wakeup;
 	}
@@ -89,14 +133,26 @@ export class WakeupRegistry {
 			.sort((a, b) => a.dueAt - b.dueAt);
 	}
 
-	/** Takes a pending wake-up off the list, as it is cancelled or fires; undefined if it is not the owner's or not pending. */
-	take(id: string, owner?: string): Wakeup | undefined {
+	/** Takes a pending wake-up off the list as it ends, cancelled unless it fires; undefined if it is not the owner's or not pending. */
+	take(id: string, owner?: string, end: WakeupEnd = "cancelled"): Wakeup | undefined {
 		const entry = this.pending.get(id);
 		if (!entry || (owner !== undefined && entry.wakeup.owner !== owner)) return undefined;
-		clearTimeout(entry.timer);
-		this.pending.delete(id);
-		notifyListeners(this.listeners);
+		this.remove(entry);
+		entry.onEnd(entry.wakeup, end);
 		return entry.wakeup;
+	}
+
+	/** Lets go of the owner's wake-ups (everyone's without one) without ending them: they stay pending in the session log. */
+	release(owner?: string): void {
+		for (const entry of [...this.pending.values()]) {
+			if (owner === undefined || entry.wakeup.owner === owner) this.remove(entry);
+		}
+	}
+
+	private remove(entry: Pending): void {
+		clearTimeout(entry.timer);
+		this.pending.delete(entry.wakeup.id);
+		notifyListeners(this.listeners);
 	}
 
 	subscribe(listener: () => void): () => void {
@@ -125,15 +181,20 @@ function wakeupDate(at: number): string {
 	return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${wakeupClock(at)}`;
 }
 
-/** The notice that starts a wake-up's turn: the agent's own, with its due time and prompt. */
-export function wakeupMessage(wakeup: Wakeup): OutgoingMessage<WakeupMessageDetails> {
+/** The notice that starts a wake-up's turn at `now`: the agent's own, with its due time and prompt. */
+export function wakeupMessage(wakeup: Wakeup, now: number): OutgoingMessage<WakeupMessageDetails> {
+	// One a minute or more past due is called late, whatever held it up: a closed session, or a long turn.
+	const when =
+		now - wakeup.dueAt < MINUTE_MS
+			? `is due (due at ${wakeupDate(wakeup.dueAt)})`
+			: `is late: it was due at ${wakeupDate(wakeup.dueAt)}, and it is now ${wakeupDate(now)}`;
 	return {
 		customType: WAKEUP_MESSAGE_TYPE,
 		content: notificationContent(
 			taskNotification({
 				taskId: wakeup.id,
 				status: "due",
-				summary: `Your own wake-up, which you scheduled with schedule_wakeup, is due (due at ${wakeupDate(wakeup.dueAt)})`,
+				summary: `Your own wake-up, which you scheduled with schedule_wakeup, ${when}`,
 				body: `\n<prompt>${escapeXml(wakeup.prompt)}</prompt>`,
 			}),
 		),

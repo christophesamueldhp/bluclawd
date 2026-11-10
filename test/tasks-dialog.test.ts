@@ -36,7 +36,7 @@ function open(sessionOwner: string, rows?: number) {
 
 afterEach(() => {
 	for (const job of backgroundBashJobs.list()) backgroundBashJobs.kill(job.id);
-	for (const wakeup of wakeups.list()) wakeups.take(wakeup.id);
+	wakeups.release();
 });
 
 describe("/tasks dialog", () => {
@@ -134,10 +134,11 @@ describe("/tasks dialog", () => {
 			return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, hours, minutes).getTime();
 		};
 		const onDue = () => {};
+		const onEnd = () => {};
 		backgroundBashJobs.start({ command: "npm run dev", cwd: "/", owner: me, exec: forever });
-		wakeups.schedule({ owner: me, prompt: "Check the deploy", dueAt: tomorrow(14, 5), onDue });
-		wakeups.schedule({ owner: me, prompt: "Check CI\nthen merge", dueAt: tomorrow(9, 30), onDue });
-		wakeups.schedule({ owner: session(), prompt: "Not mine", dueAt: tomorrow(10, 0), onDue });
+		wakeups.schedule({ owner: me, prompt: "Check the deploy", dueAt: tomorrow(14, 5), onDue, onEnd });
+		wakeups.schedule({ owner: me, prompt: "Check CI\nthen merge", dueAt: tomorrow(9, 30), onDue, onEnd });
+		wakeups.schedule({ owner: session(), prompt: "Not mine", dueAt: tomorrow(10, 0), onDue, onEnd });
 		const { dialog, screen } = open(me);
 		const out = screen();
 		expect(out).toContain("\n\n    Wake-ups (2)\n");
