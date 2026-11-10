@@ -3,12 +3,12 @@
  * with {@link askRunApproval} for a call its run may make only once the user allows it: never for one beyond the run's
  * grants or deny rules, which rpc-child.ts refuses before any other extension sees the call. The ask is one of pi's
  * dialogs, which pi's RPC hands the run's host; the host stores it in the run's directory, by generation and by pi's
- * id for the dialog, and gives pi the answer the orchestrator stores beside it. The orchestrator notes that it saw
- * the request: one nobody saw in time has no one to ask, and the host answers it as blocked. A request ends once
- * answered, or withdrawn by the host when its run stops, and nothing answers it after.
+ * id for the dialog, and gives pi the answer the orchestrator stores beside it. The orchestrator notes again and again
+ * that it still sees the request: one nobody saw for a while has no one to ask any more, and the host answers it as
+ * blocked. A request ends once answered, or withdrawn by the host, and nothing answers it after.
  */
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionUIContext, ToolCallEventResult } from "@earendil-works/pi-coding-agent";
 import { writeAtomicPrivateFile } from "./storage.ts";
@@ -98,12 +98,18 @@ export function openRunApprovalRequests(runDir: string, generation: number): Run
 	});
 }
 
-/** The orchestrator's: it saw request `id`, and will answer it. */
+/** The orchestrator's: it still sees request `id`, and will answer it. */
 export const markRunApprovalSeen = (runDir: string, generation: number, id: string) =>
 	writeAtomicPrivateFile(file(runDir, generation, id, "seen"), "");
 
-export const runApprovalSeen = (runDir: string, generation: number, id: string) =>
-	existsSync(file(runDir, generation, id, "seen"));
+/** When the orchestrator last noted it saw request `id`; 0 if it never did. */
+export function runApprovalSeenAt(runDir: string, generation: number, id: string): number {
+	try {
+		return statSync(file(runDir, generation, id, "seen")).mtimeMs;
+	} catch {
+		return 0;
+	}
+}
 
 /** The orchestrator's answer to request `id`. */
 export const answerRunApproval = (runDir: string, generation: number, id: string, answer: RunApprovalAnswer) =>

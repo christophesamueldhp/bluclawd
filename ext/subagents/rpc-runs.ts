@@ -413,10 +413,11 @@ export async function executeRpcRun(
 	const asked = new Map<string, AbortController>();
 	const approvals = () => {
 		for (const request of openRunApprovalRequests(launch.runDir, record.generation)) {
+			// Noted on every look, so the host can tell an orchestrator gone meanwhile from one still asking.
+			markRunApprovalSeen(launch.runDir, record.generation, request.id);
 			if (asked.has(request.id)) continue;
 			const pending = new AbortController();
 			asked.set(request.id, pending);
-			markRunApprovalSeen(launch.runDir, record.generation, request.id);
 			void deps
 				.approve(request, pending.signal)
 				.catch((): RunApprovalAnswer => "blocked")
@@ -440,10 +441,11 @@ export async function executeRpcRun(
 		},
 		AbortSignal.any([signal, deps.handOff]),
 	);
-	// No one here answers them any more, even should the run go on after a hand-off: they are blocked.
+	// No one here answers them any more. A stopped run's host withdraws them, and an answer would let its pi go on;
+	// a run handed off goes on, blocked on them.
 	for (const [id, pending] of asked) {
 		pending.abort();
-		answerRunApproval(launch.runDir, record.generation, id, "blocked");
+		if (!signal.aborted) answerRunApproval(launch.runDir, record.generation, id, "blocked");
 	}
 	// Handed off: the run goes on, its Report kept on disk, and this instance of the session stores nothing more.
 	if (!ended() && !signal.aborted) return new Promise<never>(() => {});

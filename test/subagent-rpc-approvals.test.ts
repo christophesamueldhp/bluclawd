@@ -82,7 +82,7 @@ describe.skipIf(!hasTmux)("an approval an RPC run needs", () => {
 		pi = undefined;
 	});
 
-	it("asks the user in its orchestrator, naming the run, action and target, before the action runs; the answer holds for the same action of another run", async () => {
+	it("asks the user in its orchestrator, naming the run, action and target, before the action runs; a yes holds for the same action of another run, not for another target", async () => {
 		const real = await startOrchestrator();
 		pi = real;
 		real.script("main", [
@@ -93,7 +93,12 @@ describe.skipIf(!hasTmux)("an approval an RPC run needs", () => {
 			{ text: "done" },
 		]);
 		real.script("first", [{ tool: "read", args: { path: "notes.gated" } }, { text: "Read it." }]);
-		real.script("second", [{ tool: "read", args: { path: "notes.gated" } }, { text: "Read it too." }]);
+		writeFileSync(join(real.cwd, "other.gated"), "OSPREY\n");
+		real.script("second", [
+			{ tool: "read", args: { path: "notes.gated" } },
+			{ tool: "read", args: { path: "other.gated" } },
+			{ text: "Read both." },
+		]);
 		const orchestrator = real.start(["--", "delegate"]);
 		const screen = () => unwrapped(real, orchestrator);
 
@@ -115,6 +120,13 @@ describe.skipIf(!hasTmux)("an approval an RPC run needs", () => {
 		const [, again] = await real.waitForRequests("second", 2);
 		expect(lastToolResult(again)).toContain("HERON");
 		expect(screen()).not.toContain(squeezed('Subagent "second"'));
+
+		// Another file is another approval.
+		await waitFor(() => expect(screen()).toContain(squeezed(`read ${join(realpathSync(real.cwd), "other.gated")}`)));
+		expect(real.requests("second")).toHaveLength(2);
+		real.tmux.sendKeys(orchestrator, ["Enter"]);
+		const [, , other] = await real.waitForRequests("second", 3);
+		expect(lastToolResult(other)).toContain("OSPREY");
 	});
 
 	it("refuses a call beyond its deny rules without asking, and one the user does not allow", async () => {
@@ -152,17 +164,12 @@ describe.skipIf(!hasTmux)("an approval an RPC run needs", () => {
 	it("is blocked, not allowed, once no orchestrator is there to ask the user", async () => {
 		const real = await startOrchestrator();
 		pi = real;
-		const gate = join(real.cwd, "read.go");
 		real.script("main", [launch("look"), { text: "waiting for look" }]);
-		real.script("look", [
-			{ tool: "read", args: { path: "notes.gated" }, until: gate },
-			{ text: "Blocked on notes.gated." },
-		]);
+		real.script("look", [{ tool: "read", args: { path: "notes.gated" } }, { text: "Blocked on notes.gated." }]);
 		const orchestrator = real.start(["--", "delegate"]);
-		await real.waitForRequests("look", 1);
-		// The run outlives its orchestrator's crash, and asks only then.
+		await waitFor(() => expect(unwrapped(real, orchestrator)).toContain(squeezed("asks for approval")));
+		// The run outlives its orchestrator's crash, which leaves its request seen and never answered.
 		crash(real, orchestrator);
-		writeFileSync(gate, "");
 
 		const [, blocked] = await real.waitForRequests("look", 2);
 		expect(lastToolResult(blocked)).toBe(

@@ -101,8 +101,8 @@ export function createGenerations(deps: GenerationDeps) {
 		appendParentRunReference(deps.pi, record);
 	};
 
-	/** The user's answers to what runs asked to do, by parent scope, action and target: each is asked once. */
-	const approvalAnswers = new Map<string, "allow" | "deny">();
+	/** What the user allowed runs to do, by parent scope, action and target: allowed once, never asked again. */
+	const allowed = new Set<string>();
 	// pi's dialog replaces an open one without settling it, so one opens only after the last settled.
 	let dialogs: Promise<unknown> = Promise.resolve();
 	/** Asks the user whether run `runId` may do what it asks, in this session's own dialog; blocked with no one to ask. */
@@ -111,26 +111,18 @@ export function createGenerations(deps: GenerationDeps) {
 			const record = scheduler.getRun(runId);
 			if (!record || signal.aborted || !deps.scope.inScope(record)) return "blocked";
 			const key = JSON.stringify([record.parentSessionId, record.sessionEpoch, request.action, request.target]);
-			const known = approvalAnswers.get(key);
-			if (known) return known;
+			if (allowed.has(key)) return "allow";
 			const ctx = deps.scope.context();
-			if (!ctx?.hasUI) {
-				const text = `Subagent ${formatRunLabel(record)} is blocked: it needs the user's approval to ${request.action} ${request.target}, and this session cannot ask the user. Its call was refused; ask the user how to go on.`;
-				deps.pi.sendMessage(
-					{ customType: SUBAGENT_MESSAGE_CUSTOM_TYPE, content: [{ type: "text", text }], display: true },
-					{ deliverAs: "steer", triggerTurn: true },
-				);
-				return "blocked";
-			}
-			const allowed = await ctx.ui.confirm(
+			if (!ctx?.hasUI) return "blocked";
+			const yes = await ctx.ui.confirm(
 				`Subagent ${formatRunLabel(record)}, generation ${record.generation}, asks for approval`,
-				`${request.action} ${request.target}\n\nYour answer holds for every run of this session that asks the same.`,
+				`${request.action} ${request.target}\n\nYes holds for every run of this session that asks the same.`,
 				{ signal },
 			);
 			if (signal.aborted) return "blocked";
-			approvalAnswers.set(key, allowed ? "allow" : "deny");
+			if (yes) allowed.add(key);
 			// Answered once the run had left this session's scope: it releases nothing there.
-			return deps.scope.inScope(record) ? (allowed ? "allow" : "deny") : "blocked";
+			return deps.scope.inScope(record) ? (yes ? "allow" : "deny") : "blocked";
 		});
 		dialogs = answer.catch(() => {});
 		return answer;

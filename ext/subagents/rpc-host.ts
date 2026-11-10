@@ -20,7 +20,7 @@ import {
 	type RunApprovalAnswer,
 	runApprovalAnswer,
 	runApprovalAsked,
-	runApprovalSeen,
+	runApprovalSeenAt,
 	storeRunApprovalRequest,
 	withdrawRunApproval,
 } from "./run-approvals.ts";
@@ -73,7 +73,7 @@ const statePath = (runDir: string) => join(runDir, "rpc-host.json");
 const stderrPath = (runDir: string) => join(runDir, "rpc-child.stderr");
 /** How often the host looks for messages posted to the run. */
 const INBOX_CHECK_MS = 50;
-/** How long the orchestrator has to see an approval the run asks for: past it, no one is there to ask. */
+/** How long the orchestrator may go without noting it sees an approval the run asks for: past it, no one is there. */
 const APPROVAL_SEEN_MS = 5000;
 /** pi's dialogs, each of which waits for an answer. */
 const DIALOGS = ["select", "confirm", "input", "editor"];
@@ -216,7 +216,7 @@ async function host(runDir: string): Promise<void> {
 		for (const [id, asked] of approvals) {
 			const answer = runApprovalAnswer(runDir, spec.generation, id);
 			if (answer) answerDialog(id, answer);
-			else if (!runApprovalSeen(runDir, spec.generation, id) && Date.now() - asked > APPROVAL_SEEN_MS) {
+			else if (Date.now() - Math.max(asked, runApprovalSeenAt(runDir, spec.generation, id)) > APPROVAL_SEEN_MS) {
 				withdrawRunApproval(runDir, spec.generation, id);
 				answerDialog(id, "blocked");
 			}
