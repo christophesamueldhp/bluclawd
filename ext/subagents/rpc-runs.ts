@@ -1,12 +1,14 @@
 /**
  * Runs on pi's RPC (ADR-0010), behind a switch until they replace runs in tmux: a run is a pi with no pane, held by
  * a host process of its own (rpc-host.ts), that takes its task in a fresh session, stores its Report once its work
- * settles, and exits. For now a run only reads: its tools are a plain allowlist of pi's read tools and codemode,
- * anything else is refused at Admission, and its pi checks every call again (rpc-child.ts).
+ * settles, and exits; a Resume starts another on its saved session, as its next generation. For now a run only
+ * reads: its tools are a plain allowlist of pi's read tools and codemode, anything else is refused at Admission, and
+ * its pi checks every call again (rpc-child.ts).
  */
 
-import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseSessionEntries, type SessionEntry, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
@@ -53,6 +55,64 @@ export interface RpcLaunch {
 	runDir: string;
 	agentDir: string;
 	projectTrusted: boolean;
+	/** The saved session a Resume reopens; absent at the launch, which starts a fresh one. */
+	sessionFile?: string;
+}
+
+/**
+ * What a run's generation is held to, as stored for it: at the launch, the role as admitted (definition.json),
+ * which no later generation exceeds; at each Resume, that narrowed to what the orchestrator can give now.
+ */
+export interface RunDefinition extends AgentDefinition {
+	tools: string[];
+	deny: RpcDenyRules[];
+	cwd: string;
+	projectTrusted: boolean;
+	admitted: { provider: string; modelId: string; thinkingLevel: string };
+}
+
+/** Where the definition of a run's generation is: the launch's in definition.json, each Resume's beside it. */
+export function runDefinitionPath(runDir: string, generation: number): string {
+	return generation ? join(runDir, "generations", `${generation}.json`) : join(runDir, "definition.json");
+}
+
+export function readRunDefinition(path: string): RunDefinition | undefined {
+	try {
+		const definition = JSON.parse(readFileSync(path, "utf8")) as RunDefinition;
+		const { tools, deny, cwd, admitted, instructions } = definition;
+		const valid =
+			Array.isArray(tools) &&
+			Array.isArray(deny) &&
+			typeof cwd === "string" &&
+			typeof instructions === "string" &&
+			typeof admitted?.provider === "string" &&
+			typeof admitted.modelId === "string" &&
+			typeof admitted.thinkingLevel === "string";
+		return valid ? definition : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Claims a run's generation `generation` for a Resume by storing its definition, only if no other Resume stored one
+ * first: pi does not lock a session, so this is what keeps it to one pi at a time, across orchestrator processes too.
+ */
+export function claimRunGeneration(runDir: string, generation: number, definition: RunDefinition): boolean {
+	const path = runDefinitionPath(runDir, generation);
+	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+	const draft = `${path}.${randomUUID()}.tmp`;
+	writeFileSync(draft, JSON.stringify(definition, null, 2), { mode: 0o600 });
+	try {
+		// A link fails where a file exists, and gives it whole: a reader never sees one half written.
+		linkSync(draft, path);
+		return true;
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+		throw error;
+	} finally {
+		rmSync(draft, { force: true });
+	}
 }
 
 /**
@@ -110,7 +170,7 @@ export function rpcDenyRules(
 }
 
 /** The run's pi with its flags: only bluclawd's child extension, its tools as an allowlist, its exact model and level. */
-function rpcCommand(launch: RpcLaunch, instructionsFile: string): string[] {
+function rpcCommand(launch: RpcLaunch, instructionsFile: string, definitionFile: string): string[] {
 	const providers = (process.env[RPC_PROVIDER_EXTENSIONS_ENV] ?? "").split(":").filter(Boolean);
 	return [
 		...piCommand(),
@@ -132,11 +192,11 @@ function rpcCommand(launch: RpcLaunch, instructionsFile: string): string[] {
 		launch.name,
 		"--append-system-prompt",
 		instructionsFile,
-		"--session-dir",
-		launch.runDir,
+		// By its absolute path: pi would ask on its stdout before opening a session by an id from another project.
+		...(launch.sessionFile ? ["--session", launch.sessionFile] : ["--session-dir", launch.runDir]),
 		launch.projectTrusted ? "--approve" : "--no-approve",
 		`--${RUN_DEFINITION_FLAG}`,
-		join(launch.runDir, "definition.json"),
+		definitionFile,
 	];
 }
 
@@ -168,15 +228,22 @@ export async function executeRpcRun(
 	const instructions = join(launch.runDir, "instructions.md");
 	writeFileSync(instructions, launch.definition.instructions);
 	const hostPid = launchRpcHost(launch.runDir, {
-		command: rpcCommand(launch, instructions),
+		command: rpcCommand(launch, instructions, runDefinitionPath(launch.runDir, record.generation)),
 		cwd: launch.cwd,
 		agentDir: launch.agentDir,
-		prompt: runTaskText(launch.task, false),
+		prompt: runTaskText(launch.task, launch.sessionFile !== undefined),
 		model: { provider: launch.provider, id: launch.modelId, thinkingLevel: launch.thinkingLevel },
+		generation: record.generation,
+		...(launch.sessionFile ? { sessionFile: launch.sessionFile } : {}),
 	});
 	controller.markRunning();
 
-	const ended = () => readRpcHostState(launch.runDir)?.exit !== undefined || !processAlive(hostPid);
+	// The run's directory keeps the state of its earlier generation's host until this one stores its own.
+	const ownState = () => {
+		const state = readRpcHostState(launch.runDir);
+		return state?.hostPid === hostPid ? state : undefined;
+	};
+	const ended = () => ownState()?.exit !== undefined || !processAlive(hostPid);
 	await until(ended, AbortSignal.any([signal, deps.handOff]));
 	// Handed off: the run goes on, its Report kept on disk, and this instance of the session stores nothing more.
 	if (!ended() && !signal.aborted) return new Promise<never>(() => {});
@@ -186,8 +253,10 @@ export async function executeRpcRun(
 		if (!stopped) killHost(launch.runDir, hostPid);
 	}
 
-	const state = readRpcHostState(launch.runDir);
-	const [report] = readRunReports(launch.runDir, record.lastDeliveredSeq ?? 0);
+	const state = ownState();
+	const report = readRunReports(launch.runDir, (state?.reportSeq ?? 0) - 1).find(
+		({ seq }) => seq === state?.reportSeq,
+	);
 	if (!state?.exit || !report) {
 		return {
 			status: "failed",

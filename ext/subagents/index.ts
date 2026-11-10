@@ -42,6 +42,7 @@ import { describeSubagentModels } from "./models.ts";
 import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET } from "./panel.ts";
 import { createParentScope, inParentScope, type ParentInboxItem } from "./parent-scope.ts";
 import type { SubagentResultDetails } from "./results.ts";
+import { rpcRunsEnabled } from "./rpc-runs.ts";
 import { messageAsRun } from "./run-messages.ts";
 import { isTerminalSubagentStatus } from "./runs.ts";
 import {
@@ -266,7 +267,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 		};
 
-		const { scheduler, directory, messageFromParent, pullReports } = createGenerations({
+		const { scheduler, directory, messageFromParent, resumeFromParent, pullReports } = createGenerations({
 			agentDir: resolveAgentDir,
 			bus: messageBus,
 			scope: parentScope,
@@ -621,6 +622,51 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				return messageFromParent(scope, params.to.trim(), params.content, admission, ctx);
 			},
 		});
+
+		// Only with runs on pi's RPC, whose finished runs a message does not continue.
+		if (rpcRunsEnabled()) {
+			registerOrchestratorTool({
+				name: "subagent_resume",
+				label: "Resume subagent",
+				exposure: "model-only",
+				annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+				description:
+					"Resume a finished subagent by name or run ID with your next instruction: it continues in the background in its own saved session, with its earlier context, the role and permissions it was launched with (never more than you have now) and its own workspace. It keeps its model and thinking level unless you set them. Its report is delivered when it finishes. A message does not resume a finished subagent; for fresh context, launch a new one.",
+				parameters: Type.Object(
+					{
+						agent: Type.String({ description: "The finished subagent's name or run ID (sub_…)." }),
+						task: Type.String({ description: "Its next instruction, self-contained." }),
+						model: Type.Optional(
+							Type.String({ description: '"provider/model" from subagent_models, or "inherit" for yours.' }),
+						),
+						thinkingLevel: Type.Optional(
+							Type.String({ description: 'A thinking level, or "inherit" for yours.' }),
+						),
+					},
+					{ additionalProperties: false },
+				),
+				execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
+					const ctx = toolCtx ?? parentScope.context();
+					const scope = parentScope.current();
+					if (!scope || !ctx) {
+						return {
+							content: [{ type: "text", text: "Subagent runtime is not initialized for this session." }],
+							details: undefined,
+							isError: true,
+						};
+					}
+					const { model, thinkingLevel } = params;
+					return resumeFromParent(
+						scope,
+						params.agent.trim(),
+						params.task,
+						{ model, thinkingLevel },
+						admission,
+						ctx,
+					);
+				},
+			});
+		}
 
 		const describeProgress = ({ record: run }: RunEntry, now: number) =>
 			[

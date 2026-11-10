@@ -242,7 +242,7 @@ export function createGenerations(deps: GenerationDeps) {
 	};
 
 	const directory = createRunDirectory({ scheduler, agentDir: deps.agentDir });
-	const { messageFromParent } = createRunAddressing({ directory, bus: deps.bus });
+	const { messageFromParent, resumeFromParent } = createRunAddressing({ directory, bus: deps.bus });
 
-	return { scheduler, directory, messageFromParent, pullReports };
+	return { scheduler, directory, messageFromParent, resumeFromParent, pullReports };
 }

@@ -1,8 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type ExtensionContext, SettingsManager, type ToolLoadout } from "@earendil-works/pi-coding-agent";
+import {
+	type ExtensionContext,
+	parseSessionEntries,
+	SettingsManager,
+	type ToolLoadout,
+} from "@earendil-works/pi-coding-agent";
 import { type Static, Type } from "typebox";
 import * as forkSettings from "../_shared/settings.ts";
 import { evaluateSubagentDelegationDeny } from "../permissions/policy.ts";
@@ -24,7 +29,18 @@ import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
 import { resolveChildModelAndRuntime } from "./models.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
 import type { RpcDenyRules } from "./rpc-child.ts";
-import { type RpcLaunch, rpcDenyRules, rpcGrantableTools, rpcRunsEnabled, rpcRunTools } from "./rpc-runs.ts";
+import { processAlive, readRpcHostState } from "./rpc-host.ts";
+import {
+	claimRunGeneration,
+	type RpcLaunch,
+	type RunDefinition,
+	readRunDefinition,
+	rpcDenyRules,
+	rpcGrantableTools,
+	rpcRunsEnabled,
+	rpcRunTools,
+	runDefinitionPath,
+} from "./rpc-runs.ts";
 import { type RunWorkspace, resolveRunWorkspace } from "./run-workspace.ts";
 import {
 	type AdmittedSubagentHandle,
@@ -201,6 +217,12 @@ export type AdmissionResult =
 			readonly refusal?: "invalidated" | "unavailable";
 	  };
 
+/** A model or thinking level a Resume asks for in place of those the run had; "inherit" for the orchestrator's. */
+export interface ResumeChanges {
+	model?: string;
+	thinkingLevel?: string;
+}
+
 export interface RunAdmission {
 	launch(request: LaunchRequest, ctx: AdmissionContext): Promise<AdmissionResult>;
 	/**
@@ -211,12 +233,22 @@ export interface RunAdmission {
 		run: Readonly<SubagentRunRecord>,
 		buildPrompt: (() => string) | undefined,
 		ctx: AdmissionContext,
+		changes?: ResumeChanges,
 	): Promise<AdmissionResult>;
 	/**
 	 * Takes over an open run this orchestrator's session started before a reload, its pi still running in its pane,
 	 * into the current scope.
 	 */
 	adopt(run: Readonly<SubagentRunRecord>, ctx: AdmissionContext): void;
+}
+
+/** Whether a saved session holds a conversation: pi would start a new one at a path without one, silently. */
+function holdsConversation(sessionFile: string): boolean {
+	try {
+		return parseSessionEntries(readFileSync(sessionFile, "utf8")).some((entry) => entry.type === "message");
+	} catch {
+		return false;
+	}
 }
 
 function summarizeTaskLabel(task: string): string {
@@ -253,6 +285,17 @@ export function delegationDenied(
 	const sm = SettingsManager.create(cwd, agentDir, { projectTrusted });
 	const delegationDeny = evaluateSubagentDelegationDeny(forkSettings.denyRules(sm), agentName, cwd);
 	return delegationDeny.blocked ? (delegationDeny.reason ?? "Blocked by permission rule") : undefined;
+}
+
+/** Why a call's model or thinking level cannot be what it names, before either is resolved. */
+function invalidModelChoice({ model, thinkingLevel }: ResumeChanges): string | undefined {
+	if (model !== undefined && !parseSubagentModelSpec(model)) {
+		return `Invalid subagent "model" value "${model}": must be "inherit" or explicit "provider/model".`;
+	}
+	if (thinkingLevel !== undefined && thinkingLevel !== "inherit" && !isSubagentThinkingLevel(thinkingLevel)) {
+		return `Invalid subagent "thinkingLevel" value "${thinkingLevel}": must be "inherit" or one of ${SUBAGENT_THINKING_LEVELS.join(", ")}.`;
+	}
+	return undefined;
 }
 
 export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
@@ -315,6 +358,133 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			current.runId,
 			{ launch: { ...launchOf(current, storage.runDir, parentPane, ctx), task: buildPrompt?.() } },
 			known ? undefined : { ...current, sessionEpoch: scope.sessionEpoch },
+		);
+		if (!resumed.ok) return refuse.unavailable(resumed.error);
+		return { ok: true, handle: resumed.handle };
+	};
+
+	/**
+	 * A closed run on pi's RPC reopens its saved session in a pi of its own, as its next generation, given an
+	 * instruction. It is held to the role it was admitted with (definition.json), never to the role's file as it is
+	 * now, and to no more than its orchestrator can give now: tools both allow, deny rules of either, trust both
+	 * grant. It keeps its model and level unless the call changes them, and its workspace, which must still be there.
+	 */
+	const resumeOnRpc = async (
+		run: Readonly<SubagentRunRecord>,
+		buildPrompt: (() => string) | undefined,
+		ctx: AdmissionContext,
+		changes: ResumeChanges,
+		refuse: { invalidated: AdmissionResult; unavailable: (error: string) => AdmissionResult },
+	): Promise<AdmissionResult> => {
+		const label = formatRunLabel(run);
+		const cannot = (why: string) => refuse.unavailable(`Cannot resume ${label}: ${why}`);
+		const scope = deps.scope.current();
+		const known = deps.scheduler.getRun(run.runId);
+		const current = known ?? run;
+		const inScope = () =>
+			scope !== undefined &&
+			deps.scope.inScope(scope) &&
+			current.parentSessionId === scope.parentSessionId &&
+			(!known || deps.scope.inScope(known)) &&
+			deps.scope.onBranch(current.originEntryId);
+		if (!scope || !inScope()) return refuse.invalidated;
+		if (!isResumableSubagentStatus(current.status)) {
+			return refuse.unavailable(`${label} is ${current.status}; only a closed subagent can be resumed.`);
+		}
+		if (!buildPrompt) return cannot("a Resume needs an instruction for it.");
+		const invalid = invalidModelChoice(changes);
+		if (invalid) return refuse.unavailable(invalid);
+		if (deps.directory.list(scope).length >= MAX_OPEN_RUNS) return refuse.unavailable(TOO_MANY_OPEN);
+		const denied = deniedReason(current.agentName, ctx);
+		if (denied) return refuse.unavailable(denied);
+		const agentDir = deps.agentDir();
+		const storage = ensureRunStorageDir(agentDir, current.parentSessionId, current.runId);
+		if (!storage.ok) return cannot(`storage is unavailable (${storage.error}).`);
+		const { runDir } = storage;
+		const admitted = readRunDefinition(runDefinitionPath(runDir, 0));
+		if (!admitted) return cannot("the role it was admitted with is not stored.");
+		const sessionFile = current.transcriptPath;
+		if (!sessionFile || !holdsConversation(sessionFile)) return cannot("it has no saved conversation to go on with.");
+		const host = readRpcHostState(runDir);
+		if (host && host.exit === undefined && processAlive(host.hostPid)) {
+			return cannot("its pi from before is still running.");
+		}
+
+		const projectTrusted = ctx.isProjectTrusted();
+		const workspace = resolveRunWorkspace(admitted.cwd, {
+			cwd: ctx.cwd,
+			projectTrusted,
+			agentDir,
+			denyRules: forkSettings.denyRules(SettingsManager.create(ctx.cwd, agentDir, { projectTrusted })),
+		});
+		if (!workspace.ok || workspace.workspace.cwd !== admitted.cwd) {
+			return cannot(
+				`its workspace ${admitted.cwd} is no longer available (${workspace.ok ? `it now leads to ${workspace.workspace.cwd}` : workspace.error}). It resumes only in its own workspace; spawn a new subagent and point it at ${current.reportPath ?? "its report"}.`,
+			);
+		}
+		const { cwd } = admitted;
+		const grantable = rpcGrantableTools(deps.tools(), deps.registeredTools());
+		const deny = rpcDenyRules(agentDir, [
+			{ cwd: ctx.cwd, trusted: projectTrusted },
+			{ cwd, trusted: workspace.workspace.trusted(cwd) },
+		]);
+		if (!deny.ok) return refuse.unavailable(deny.error);
+
+		// Model and level each as the call asks, else as the run's latest generation had them.
+		const prior = readRunDefinition(runDefinitionPath(runDir, current.generation))?.admitted ?? admitted.admitted;
+		const thinkingLevel =
+			changes.thinkingLevel === "inherit"
+				? deps.parentThinkingLevel()
+				: (changes.thinkingLevel ?? prior.thinkingLevel);
+		const requestedModel: SubagentModelSpec =
+			changes.model === undefined
+				? `${prior.provider}/${prior.modelId}`
+				: (parseSubagentModelSpec(changes.model) ?? "inherit");
+		const childModel = await resolveChildModel(requestedModel, thinkingLevel, ctx);
+		if (!childModel.ok) return refuse.unavailable(childModel.error);
+
+		// Everything from here to the resume runs without awaiting, so the session cannot change in between.
+		const latest = deps.scheduler.getRun(run.runId) ?? current;
+		if (deps.scope.current()?.sessionEpoch !== scope.sessionEpoch || !inScope()) return refuse.invalidated;
+		if (!isResumableSubagentStatus(latest.status) || latest.generation !== current.generation) {
+			return cannot("another Resume of it started meanwhile.");
+		}
+		const holder = current.name ? deps.directory.nameHolder(scope, current.name)?.record : undefined;
+		if (holder) return refuse.unavailable(`${label} cannot resume: its name is now used by ${holder.runId}.`);
+		const model = { provider: childModel.model.provider, modelId: childModel.model.id, thinkingLevel };
+		const definition: RunDefinition = {
+			...admitted,
+			tools: admitted.tools.filter((tool) => grantable.includes(tool)),
+			deny: [...admitted.deny, ...deny.deny],
+			projectTrusted: admitted.projectTrusted && workspace.workspace.trusted(cwd),
+			admitted: model,
+		};
+		const generation = current.generation + 1;
+		try {
+			if (!claimRunGeneration(runDir, generation, definition)) {
+				return cannot(`another Resume of it already started its generation ${generation}.`);
+			}
+		} catch (error) {
+			return cannot(`storage is unavailable (${error instanceof Error ? error.message : String(error)}).`);
+		}
+		const resumed = deps.scheduler.resume(
+			current.runId,
+			{
+				rpc: {
+					name: current.name ?? current.runId,
+					definition,
+					...model,
+					tools: definition.tools,
+					task: buildPrompt(),
+					cwd,
+					runDir,
+					agentDir,
+					projectTrusted: definition.projectTrusted,
+					sessionFile,
+				},
+			},
+			known ? undefined : { ...current, sessionEpoch: scope.sessionEpoch },
+			model,
 		);
 		if (!resumed.ok) return refuse.unavailable(resumed.error);
 		return { ok: true, handle: resumed.handle };
@@ -457,21 +627,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			}
 
 			// Spawn > role > parent for the model and thinking level, verified before admission.
+			const invalid = invalidModelChoice(params);
+			if (invalid) return reject(invalid);
 			const spawnModel = params.model === undefined ? undefined : parseSubagentModelSpec(params.model);
-			if (params.model !== undefined && !spawnModel) {
-				return reject(
-					`Invalid subagent "model" value "${params.model}": must be "inherit" or explicit "provider/model".`,
-				);
-			}
-			if (
-				params.thinkingLevel !== undefined &&
-				params.thinkingLevel !== "inherit" &&
-				!isSubagentThinkingLevel(params.thinkingLevel)
-			) {
-				return reject(
-					`Invalid subagent "thinkingLevel" value "${params.thinkingLevel}": must be "inherit" or one of ${SUBAGENT_THINKING_LEVELS.join(", ")}.`,
-				);
-			}
 			const parentThinkingLevel = deps.parentThinkingLevel();
 			const requestedModel = spawnModel ?? definition.model;
 			const explicitThinkingLevel =
@@ -621,7 +779,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			);
 		},
 
-		async resume(run, buildPrompt, ctx) {
+		async resume(run, buildPrompt, ctx, changes = {}) {
 			const label = formatRunLabel(run);
 			const invalidated: AdmissionResult = {
 				ok: false,
@@ -634,11 +792,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					`Resuming ${label} is not supported in one-shot "${ctx.mode}" mode because a resume runs in the background and the process exits before it completes.`,
 				);
 			}
-			// Its session has one owner at a time: none resumes it until a Resume on pi's RPC can guarantee that.
-			if (run.backend === "rpc") {
-				return unavailable(
-					`${label} ran on pi's RPC, and such a run cannot be resumed yet; spawn a new subagent and point it at ${run.reportPath ?? "its report"}.`,
-				);
+			if (run.backend === "rpc") return resumeOnRpc(run, buildPrompt, ctx, changes, { invalidated, unavailable });
+			if (changes.model !== undefined || changes.thinkingLevel !== undefined) {
+				return unavailable(`${label} runs in tmux, and resumes only with the model and level it had.`);
 			}
 			const parentPane = deps.pane();
 			if (parentPane === undefined) return unavailable(NEEDS_TMUX);

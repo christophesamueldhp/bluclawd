@@ -301,9 +301,15 @@ export class SubagentRunScheduler<C = unknown> {
 
 	/**
 	 * Runs a closed run again under the same identity, in the background. A run this scheduler does not
-	 * know is taken over from `stored`, its record as kept on disk.
+	 * know is taken over from `stored`, its record as kept on disk. `model` is the model and level the Resume
+	 * admitted, when they changed.
 	 */
-	resume(runId: string, context: C, stored?: Readonly<SubagentRunRecord>): AdmitSubagentRunResult {
+	resume(
+		runId: string,
+		context: C,
+		stored?: Readonly<SubagentRunRecord>,
+		model?: Pick<SubagentRunRecord, "provider" | "modelId" | "thinkingLevel">,
+	): AdmitSubagentRunResult {
 		if (!this.runs.has(runId) && stored?.runId === runId && isResumableSubagentStatus(stored.status)) {
 			this.adopt(stored);
 		}
@@ -322,6 +328,7 @@ export class SubagentRunScheduler<C = unknown> {
 		Object.assign(managed, {
 			record: {
 				...managed.record,
+				...model,
 				startedAt: undefined,
 				endedAt: undefined,
 				stopReason: undefined,

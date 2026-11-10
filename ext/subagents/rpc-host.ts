@@ -24,6 +24,10 @@ export interface RpcHostSpec {
 	prompt: string;
 	/** The model and thinking level the run's pi must have started with, as admitted. */
 	model: { provider: string; id: string; thinkingLevel: string };
+	/** The run's generation this host runs: 0 for the launch, then one more for each Resume. */
+	generation: number;
+	/** The saved session a Resume's pi must have opened, by its absolute path. */
+	sessionFile?: string;
 }
 
 /** The host as it last stored itself. */
@@ -213,6 +217,13 @@ async function host(runDir: string): Promise<void> {
 		state.sessionFile = data.sessionFile;
 		state.sessionId = data.sessionId;
 		save();
+		// pi starts a new session at a path that holds none, without a word.
+		if (spec.sessionFile && !sameFile(data.sessionFile, spec.sessionFile)) {
+			return {
+				status: "failed",
+				error: `its pi opened ${data.sessionFile ?? "no session"}, not the run's session ${spec.sessionFile}`,
+			};
+		}
 		// pi lowers a level its model lacks, and takes an id its provider lacks for a custom one, warning only.
 		const { provider, id } = data.model ?? {};
 		const admitted = spec.model;
@@ -270,11 +281,25 @@ async function host(runDir: string): Promise<void> {
 	]);
 	// Stored before its pi is let go: its work is on disk whatever happens next.
 	state.outcome = outcome;
-	state.reportSeq = storeRunReport(runDir, { text: last.text, outcome, sessionId: state.sessionId });
+	state.reportSeq = storeRunReport(runDir, {
+		text: last.text,
+		outcome,
+		sessionId: state.sessionId,
+		generation: spec.generation,
+	});
 	save();
 	child.stdin?.end();
 	state.exit = await exited;
 	save();
+}
+
+function sameFile(path: string | undefined, expected: string): boolean {
+	if (!path) return false;
+	try {
+		return realpathSync(path) === realpathSync(expected);
+	} catch {
+		return false;
+	}
 }
 
 function stderrTail(runDir: string): string {

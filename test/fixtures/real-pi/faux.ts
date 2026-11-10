@@ -18,9 +18,13 @@ import { type ExtensionAPI, getAgentDir, VERSION } from "@earendil-works/pi-codi
 
 /**
  * `stallMs`: the answer takes that long; `until`: it waits for that file to exist. Either ends once the request is
- * aborted (as Esc does).
+ * aborted (as Esc does). `calls`: several tool calls in one answer, which pi runs side by side.
  */
-export type FauxStep = ({ text: string; stallMs?: number } | { tool: string; args: JsonObject }) & { until?: string };
+export type FauxStep = (
+	| { text: string; stallMs?: number }
+	| { tool: string; args: JsonObject }
+	| { calls: { tool: string; args: JsonObject }[] }
+) & { until?: string };
 
 export const FAUX_MODELS = [
 	{ id: "faux-1", reasoning: false },
@@ -69,9 +73,11 @@ function fauxPi(pi: ExtensionAPI, models: typeof FAUX_MODELS): void {
 			const { signal } = options ?? {};
 			while (!existsSync(step.until) && !signal?.aborted) await new Promise((resolve) => setTimeout(resolve, 25));
 		}
+		if ("text" in step) return fauxAssistantMessage(fauxText(step.text));
+		const calls = "calls" in step ? step.calls : [step];
 		return fauxAssistantMessage(
-			"tool" in step ? fauxToolCall(step.tool, step.args) : fauxText(step.text),
-			"tool" in step ? { stopReason: "toolUse" } : undefined,
+			calls.map(({ tool, args }) => fauxToolCall(tool, args)),
+			{ stopReason: "toolUse" },
 		);
 	};
 	faux.setResponses([respond]);

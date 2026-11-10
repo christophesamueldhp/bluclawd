@@ -170,6 +170,8 @@ export interface StoredRunReport {
 	outcome?: RunRuntimeOutcome;
 	usage?: SessionUsage;
 	sessionId?: string;
+	/** The run's generation that stored it; absent from a run in tmux. */
+	generation?: number;
 }
 
 /** The run's own: the orchestrator rewrites `record.json` and `report.md`, so a run's Reports go in files of their own. */

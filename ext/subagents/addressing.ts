@@ -1,4 +1,4 @@
-import { type AdmissionContext, formatRunLabel, type RunAdmission } from "./admission.ts";
+import { type AdmissionContext, formatRunLabel, type ResumeChanges, type RunAdmission } from "./admission.ts";
 import type { RunDirectory } from "./directory.ts";
 import {
 	formatMessageReceipt,
@@ -65,7 +65,8 @@ export function createRunAddressing(deps: RunAddressingDeps) {
 		ctx: AdmissionContext | undefined,
 	) => {
 		const run = deps.directory.find(scope, to)?.record;
-		if (run && isTerminalSubagentStatus(run.status) && ctx) {
+		// A message to a run on pi's RPC is information only: the bus refuses a final one, which only a Resume continues.
+		if (run && isTerminalSubagentStatus(run.status) && run.backend !== "rpc" && ctx) {
 			const receipt = await resume(run, content, scope, admission, ctx);
 			if (receipt.status !== "accepted") return formatMessageReceipt(receipt);
 			return {
@@ -81,5 +82,41 @@ export function createRunAddressing(deps: RunAddressingDeps) {
 		return formatMessageReceipt(await bus.send({ address: PARENT_MESSAGE_ADDRESS, scope }, to, content));
 	};
 
-	return { messageFromParent };
+	/**
+	 * The orchestrator's explicit Resume of a final run, by name or run ID, with its next instruction and any change of
+	 * model or level; admission decides whether it may continue.
+	 */
+	const resumeFromParent = async (
+		scope: ParentScope,
+		to: string,
+		instruction: string,
+		changes: ResumeChanges,
+		admission: Pick<RunAdmission, "resume">,
+		ctx: AdmissionContext,
+	) => {
+		const run = deps.directory.find(scope, to)?.record;
+		const refused = (text: string) => ({
+			content: [{ type: "text" as const, text }],
+			details: undefined,
+			isError: true,
+		});
+		if (!run) return refused(`No subagent "${to}" of this session to resume.`);
+		if (!isTerminalSubagentStatus(run.status)) {
+			return refused(`${formatRunLabel(run)} is still ${run.status}: message it instead.`);
+		}
+		const resumed = await admission.resume(run, () => instruction, ctx, changes);
+		if (!resumed.ok) return refused(resumed.error);
+		const { record } = resumed.handle;
+		return {
+			content: [
+				{
+					type: "text" as const,
+					text: `Resuming ${formatRunLabel(run)} in the background with its earlier context, as its generation ${record.generation} on ${record.provider}/${record.modelId} at thinking ${record.thinkingLevel}. Its report will be delivered when it finishes.`,
+				},
+			],
+			details: undefined,
+		};
+	};
+
+	return { messageFromParent, resumeFromParent };
 }

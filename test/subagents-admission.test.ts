@@ -72,10 +72,12 @@ async function setup(
 		firstGenerationCompletes?: boolean;
 		// The orchestrator's tmux session, where runs start as pis of their own; null for a pi outside tmux.
 		pane?: string | null;
+		// Another orchestrator instance of the same session: its directories and session.
+		sameSession?: { cwd: string; agentDir: string; sessionManager: SessionManager };
 	} = {},
 ) {
-	const cwd = makeTempDir("cwd");
-	const agentDir = makeTempDir("agent");
+	const cwd = options.sameSession?.cwd ?? makeTempDir("cwd");
+	const agentDir = options.sameSession?.agentDir ?? makeTempDir("agent");
 	if (options.settings) writeFileSync(join(agentDir, "settings.json"), JSON.stringify(options.settings));
 	// The session a first generation that completes leaves, which a resume reopens.
 	if (options.firstGenerationCompletes) writeFileSync(join(agentDir, "transcript.jsonl"), "");
@@ -96,7 +98,7 @@ async function setup(
 	runtime.registerNativeProvider(faux.provider);
 	await runtime.refresh({ allowNetwork: false });
 	const registry = new ModelRegistry(runtime);
-	const sessionManager = SessionManager.inMemory(cwd);
+	const sessionManager = options.sameSession?.sessionManager ?? SessionManager.inMemory(cwd);
 	// Admitted runs stay live until stopped, so later launches see their names.
 	const scheduler = new SubagentRunScheduler<RunExecutionContext>({
 		executeRun: ({ record, signal }) =>
@@ -165,6 +167,7 @@ async function setup(
 		storageDir,
 		directory,
 		scope,
+		sessionManager,
 		invalidateSession: () => scope.invalidate("Parent session switching"),
 	};
 }
@@ -568,5 +571,52 @@ describe("Run admission on pi's RPC", () => {
 		const refusal = /cwd or agentScope needs runs on pi's RPC/;
 		expect(errorOf(await launch({ agent: "explorer", cwd: "pkg", task: "x" }))).toMatch(refusal);
 		expect(errorOf(await launch({ agent: "explorer", agentScope: "user", task: "x" }))).toMatch(refusal);
+	});
+
+	/** The saved session a completed first generation leaves: one message, which a Resume goes on from. */
+	const saveConversation = (agentDir: string, cwd: string) => {
+		const at = new Date().toISOString();
+		writeFileSync(
+			join(agentDir, "transcript.jsonl"),
+			[
+				{ type: "session", version: 3, id: "child", timestamp: at, cwd },
+				{ type: "message", id: "m1", parentId: null, timestamp: at, message: { role: "user", content: "x" } },
+			]
+				.map((entry) => JSON.stringify(entry))
+				.join("\n"),
+		);
+	};
+
+	it("refuses to resume a run whose originating entry left the branch, or whose session was replaced", async () => {
+		const { agentDir, cwd, launch, resume, sessionManager, invalidateSession } = await rpcSetup({
+			firstGenerationCompletes: true,
+		});
+		sessionManager.appendMessage({ role: "user", content: "delegate", timestamp: Date.now() });
+		const completed = await handleOf(await launch({ agent: "explorer", task: "x" })).completion;
+		saveConversation(agentDir, cwd);
+		expect(completed.originEntryId).toBeDefined();
+
+		sessionManager.resetLeaf();
+		const offBranch = await resume(completed, () => "Go on.").result;
+		expect(offBranch).toMatchObject({ ok: false, refusal: "invalidated" });
+		sessionManager.branch(completed.originEntryId!);
+		invalidateSession();
+		expect(await resume(completed, () => "Go on.").result).toMatchObject({ ok: false, refusal: "invalidated" });
+	});
+
+	it("lets one of two instances of the orchestrator's session resume a run, never both", async () => {
+		const first = await rpcSetup({ firstGenerationCompletes: true });
+		const completed = await handleOf(await first.launch({ agent: "explorer", task: "x" })).completion;
+		const second = await rpcSetup({ firstGenerationCompletes: true, sameSession: first });
+		saveConversation(first.agentDir, first.cwd);
+
+		const results = await Promise.all([
+			first.resume(completed, () => "Go on.").result,
+			second.resume(completed, () => "Go on too.").result,
+		]);
+		expect(results.filter((result) => result.ok)).toHaveLength(1);
+		expect(results.filter((result) => !result.ok).map(errorOf)).toEqual([
+			expect.stringMatching(/another Resume of it already started its generation 1/),
+		]);
 	});
 });
