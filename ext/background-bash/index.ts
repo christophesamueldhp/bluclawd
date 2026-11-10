@@ -32,7 +32,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { stripAnsi } from "../../daemon/ansi.ts";
-import { runParent } from "../../daemon/tmux.ts";
+import { endedAsQuit, runParent, Tmux } from "../../daemon/tmux.ts";
 import { agentTasks, isAgentTaskId, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { sharedRef } from "../_shared/global-state.ts";
@@ -151,6 +151,29 @@ const isEditor = (component: unknown) => typeof (component as { getText?: unknow
  * new instance of this extension per session, so it cannot live in the instance.
  */
 const lastMainSession = sharedRef<string | undefined>("backgroundBash.lastMainSession", undefined);
+
+/** Whether a SIGHUP or SIGTERM came: pi takes one for a quit, which ADR-0009 counts as a crash. One process-wide watch. */
+const signals = sharedRef("backgroundBash.signals", { watching: false, received: false }).get();
+function watchSignals(): void {
+	if (signals.watching) return;
+	signals.watching = true;
+	for (const signal of ["SIGHUP", "SIGTERM"] as const) {
+		process.on(signal, () => {
+			signals.received = true;
+		});
+	}
+}
+
+/**
+ * Whether this quit is a signal nobody asked for (a closed terminal, a kill, a logout), not the user's quit or one
+ * bluclawd sent (Tmux.end). Asked once every listener of the signal has run, whichever ran first.
+ */
+async function killedBySignal(): Promise<boolean> {
+	await new Promise((resolve) => setImmediate(resolve));
+	if (!signals.received) return false;
+	const pane = Tmux.currentPane();
+	return !(pane && endedAsQuit(pane));
+}
 
 const backgroundBash: InlineExtension = {
 	name: "background-bash",
@@ -448,6 +471,8 @@ const backgroundBash: InlineExtension = {
 			if (event.reason === "new" && previous && previous !== session) backgroundBashJobs.reown(previous, session);
 			lastMainSession.set(session);
 			if (!runParent()) restoreWakeups(event, startCtx);
+			// Only pi's own TUI ends on its signal handlers; a listener here would keep a print run from ending on one.
+			if (startCtx.mode === "tui") watchSignals();
 			if (event.reason === "startup" || event.reason === "resume") reportOrphanShells(startCtx);
 			pillSelected = false;
 			for (const off of cleanups.splice(0)) off();
@@ -524,12 +549,14 @@ const backgroundBash: InlineExtension = {
 			return { action: "continue" };
 		});
 
-		pi.on("session_shutdown", (event) => {
-			// A reload, or a `/resume` of the session itself, leaves its wake-ups pending for the next instance.
+		pi.on("session_shutdown", async (event) => {
+			// A reload, or a `/resume` of the session itself, leaves its wake-ups pending for the next instance, and so
+			// does a crash (ADR-0009).
 			const session = owner();
 			const kept =
 				event.reason === "reload" ||
-				(event.reason === "resume" && event.targetSessionFile === ctx?.sessionManager.getSessionFile());
+				(event.reason === "resume" && event.targetSessionFile === ctx?.sessionManager.getSessionFile()) ||
+				(event.reason === "quit" && (await killedBySignal()));
 			if (kept) {
 				if (session !== undefined) wakeups.release(session);
 			} else cancelWakeups();

@@ -16,3 +16,4 @@ Decided 2026-11-10; the spec is GitHub issue #268, settled by comparing bluclawd
 - A Delete cancels wake-ups the session log cannot record, so a later `/resume` of the session file must not revive them.
 - A session's pi that ran outside tmux comes back in agent view's tmux when the daemon reopens it.
 - No wake-up is dropped for being late; it fires once, saying when it was due.
+- A signal counts as a crash (decided 2026-11-10, in #280): pi takes a SIGHUP or SIGTERM for a quit, but a pi ended by one that bluclawd did not send (a closed terminal, a `kill`, a logout or restart) keeps its wake-ups. A pane bluclawd hangs up itself (a stop or a delete in agent view, a run closed) leaves word first, and ends as a quit.
