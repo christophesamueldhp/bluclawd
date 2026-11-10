@@ -39,7 +39,7 @@ export interface RpcLaunch {
 	definition: AgentDefinition;
 	provider: string;
 	modelId: string;
-	thinkingLevel?: string;
+	thinkingLevel: string;
 	tools: string[];
 	task: string;
 	cwd: string;
@@ -68,7 +68,7 @@ export function rpcRunTools(
 	return { ok: true, tools: [...named] };
 }
 
-/** The run's pi with its flags: only bluclawd's child extension, its tools as an allowlist, its exact model. */
+/** The run's pi with its flags: only bluclawd's child extension, its tools as an allowlist, its exact model and level. */
 function rpcCommand(launch: RpcLaunch, instructionsFile: string): string[] {
 	const providers = (process.env[RPC_PROVIDER_EXTENSIONS_ENV] ?? "").split(":").filter(Boolean);
 	return [
@@ -81,7 +81,8 @@ function rpcCommand(launch: RpcLaunch, instructionsFile: string): string[] {
 		launch.provider,
 		"--model",
 		launch.modelId,
-		...(launch.thinkingLevel ? ["--thinking", launch.thinkingLevel] : []),
+		"--thinking",
+		launch.thinkingLevel,
 		...(launch.tools.length > 0 ? ["--tools", launch.tools.join(",")] : ["--no-tools"]),
 		"--name",
 		launch.name,
@@ -125,7 +126,7 @@ export async function executeRpcRun(
 		cwd: launch.cwd,
 		agentDir: launch.agentDir,
 		prompt: runTaskText(launch.task, false),
-		model: { provider: launch.provider, id: launch.modelId },
+		model: { provider: launch.provider, id: launch.modelId, thinkingLevel: launch.thinkingLevel },
 	});
 	controller.markRunning();
 

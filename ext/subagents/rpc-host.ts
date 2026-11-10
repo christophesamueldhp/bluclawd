@@ -22,8 +22,8 @@ export interface RpcHostSpec {
 	/** The pi config directory the run's pi uses, with its auth and models: the orchestrator's. */
 	agentDir: string;
 	prompt: string;
-	/** The model the run's pi must have started with. */
-	model: { provider: string; id: string };
+	/** The model and thinking level the run's pi must have started with, as admitted. */
+	model: { provider: string; id: string; thinkingLevel: string };
 }
 
 /** The host as it last stored itself. */
@@ -206,17 +206,29 @@ async function host(runDir: string): Promise<void> {
 		const started = await request({ type: "get_state" });
 		const data = started.data as {
 			model?: { provider?: string; id?: string };
+			thinkingLevel?: string;
 			sessionFile?: string;
 			sessionId?: string;
 		};
 		state.sessionFile = data.sessionFile;
 		state.sessionId = data.sessionId;
 		save();
+		// pi lowers a level its model lacks, and takes an id its provider lacks for a custom one, warning only.
 		const { provider, id } = data.model ?? {};
-		if (provider !== spec.model.provider || id !== spec.model.id) {
+		const admitted = spec.model;
+		if (provider !== admitted.provider || id !== admitted.id || data.thinkingLevel !== admitted.thinkingLevel) {
 			return {
 				status: "failed",
-				error: `its pi started on ${provider ?? "no model"}/${id ?? ""}, not ${spec.model.provider}/${spec.model.id}`,
+				error: `its pi runs ${provider ?? "no model"}/${id ?? ""} at thinking ${data.thinkingLevel}, not ${admitted.provider}/${admitted.id} at thinking ${admitted.thinkingLevel}`,
+			};
+		}
+		const available = (await request({ type: "get_available_models" })).data as {
+			models?: { provider: string; id: string }[];
+		};
+		if (!available.models?.some((model) => model.provider === admitted.provider && model.id === admitted.id)) {
+			return {
+				status: "failed",
+				error: `its pi cannot use ${admitted.provider}/${admitted.id}: the model is unknown to it, or it has no authentication for it`,
 			};
 		}
 		// Subscribed before the prompt goes, so its settling cannot be missed.
