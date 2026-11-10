@@ -162,7 +162,14 @@ export class WakeupKeeper {
 		for (const held of [...this.held.values()]) {
 			if (!held.wakeups.some((wakeup) => wakeup.dueAt <= now) || this.deps.alive(held.holder)) continue;
 			const last = this.reopened.get(held.sessionFile);
-			if (last && (now - last.at < REOPEN_WAIT_MS || last.times >= MAX_REOPENS)) continue;
+			if (last && now - last.at < REOPEN_WAIT_MS) continue;
+			// Its pi keeps failing to start: the log still has the wake-up, which fires, late, when the session is next opened.
+			if (last && last.times >= MAX_REOPENS) {
+				this.held.delete(held.sessionFile);
+				this.reopened.delete(held.sessionFile);
+				changed = true;
+				continue;
+			}
 			// The session log has the last word: a fire or a cancel whose hand-off never came.
 			const pending = this.deps.pending(held.sessionFile);
 			changed = true;

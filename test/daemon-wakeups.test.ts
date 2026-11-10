@@ -150,7 +150,7 @@ describe("the daemon's copy of a session's wake-ups", () => {
 		expect(f.reopened).toEqual([]);
 	});
 
-	it("gives up on a session after three reopens that never took it", () => {
+	it("gives up on a session after three reopens that never took it, and stops looking at it", () => {
 		const f = fixture();
 		hold(f, "/s/a.jsonl", 41, [wakeup("w1", NOW + MINUTE)]);
 
@@ -159,6 +159,8 @@ describe("the daemon's copy of a session's wake-ups", () => {
 			f.keeper.check();
 		}
 		expect(f.reopened).toHaveLength(3);
+		// Left to the session log, which fires it when the session is next opened.
+		expect(f.keeper.list()).toEqual([]);
 	});
 
 	it("survives a restart of the daemon, and one due while it was down fires once, late", () => {

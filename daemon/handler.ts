@@ -228,8 +228,7 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 		}
 
 		case "wakeups": {
-			if (!wakeupKeeper) return { type: "error", ok: false, error: "This daemon keeps no wake-ups." };
-			wakeupKeeper.hold(request.held);
+			wakeupKeeper?.hold(request.held);
 			return { type: "ack", ok: true };
 		}
 

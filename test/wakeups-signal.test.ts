@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { HeldWakeups } from "../daemon/wakeups.ts";
 import { WAKEUP_END_ENTRY, WAKEUP_ENTRY } from "../ext/background-bash/wakeups.ts";
 import { conversation, DEFAULT_EXTENSIONS, hasTmux, type RealPi, startRealPi } from "./helpers/real-pi.ts";
 import { waitFor } from "./helpers/wait-for.ts";
@@ -17,6 +18,12 @@ function wakeupEntries(sessionFile: string): string[] {
 			entry.customType === WAKEUP_ENTRY || entry.customType === WAKEUP_END_ENTRY ? [entry.customType] : [],
 		);
 }
+
+/** Waits for the pane's pi to have saved its session as a stopped row: it has gone through its shutdown. */
+const stopped = (real: RealPi, sessionFile: string) =>
+	waitFor(async () =>
+		expect((await real.rows()).find((row) => row.sessionFile === sessionFile)?.status).toBe("stopped"),
+	);
 
 describe.skipIf(!hasTmux)("a pi that ends with a wake-up pending", () => {
 	let pi: RealPi | undefined;
@@ -43,12 +50,6 @@ describe.skipIf(!hasTmux)("a pi that ends with a wake-up pending", () => {
 		await waitFor(() => expect(wakeupEntries(sessionFile)).toEqual([WAKEUP_ENTRY]));
 		return { real, pane, sessionFile };
 	}
-
-	/** Waits for the pane's pi to have saved its session as a stopped row: it has gone through its shutdown. */
-	const stopped = (real: RealPi, sessionFile: string) =>
-		waitFor(async () =>
-			expect((await real.rows()).find((row) => row.sessionFile === sessionFile)?.status).toBe("stopped"),
-		);
 
 	it("keeps it pending when a signal ends its pi, as a crash does", async () => {
 		const { real, pane, sessionFile } = await scheduled();
@@ -96,11 +97,15 @@ describe.skipIf(!hasTmux)("the daemon's hold on a session's wake-ups", () => {
 		pi = undefined;
 	});
 
-	/** What the daemon holds, as it keeps it on disk. */
-	const held = () => {
-		const file = join(process.env.PI_SERVER_DIR ?? "", "wakeups.json");
-		return existsSync(file) ? (JSON.parse(readFileSync(file, "utf8")) as Array<{ sessionFile: string }>) : [];
+	/** Where the daemon keeps what it holds: the test's own server dir. */
+	const heldFile = () => {
+		const dir = process.env.PI_SERVER_DIR;
+		if (!dir) throw new Error("PI_SERVER_DIR is not set: startRealPi sets it.");
+		return join(dir, "wakeups.json");
 	};
+	/** What the daemon holds, as it keeps it on disk. */
+	const held = (): HeldWakeups[] =>
+		existsSync(heldFile()) ? (JSON.parse(readFileSync(heldFile(), "utf8")) as HeldWakeups[]) : [];
 
 	it("is handed a wake-up when it is scheduled, starting the daemon if it is not running", async () => {
 		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
@@ -129,9 +134,7 @@ describe.skipIf(!hasTmux)("the daemon's hold on a session's wake-ups", () => {
 		await waitFor(() => expect(held()).toHaveLength(1));
 		const [{ sessionFile }] = held();
 		spawnSync("tmux", ["-S", real.tmux.socket, "kill-session", "-t", `=${pane}`]);
-		await waitFor(async () =>
-			expect((await real.rows()).find((row) => row.sessionFile === sessionFile)?.status).toBe("stopped"),
-		);
+		await stopped(real, sessionFile);
 		return { pane, sessionFile };
 	}
 
@@ -139,8 +142,7 @@ describe.skipIf(!hasTmux)("the daemon's hold on a session's wake-ups", () => {
 	function overdue(sessionFile: string) {
 		const at = Date.now() - 60_000;
 		writeFileSync(sessionFile, readFileSync(sessionFile, "utf8").replace(/"dueAt":\d+/, `"dueAt":${at}`));
-		const file = join(process.env.PI_SERVER_DIR ?? "", "wakeups.json");
-		writeFileSync(file, readFileSync(file, "utf8").replace(/"dueAt": \d+/, `"dueAt": ${at}`));
+		writeFileSync(heldFile(), readFileSync(heldFile(), "utf8").replace(/"dueAt": \d+/, `"dueAt": ${at}`));
 		return at;
 	}
 
@@ -154,34 +156,24 @@ describe.skipIf(!hasTmux)("the daemon's hold on a session's wake-ups", () => {
 		await real.client.ensureDaemon();
 		const requests = await real.waitForRequests("main", 3);
 		expect(conversation(requests[2]).at(-1)?.text).toContain("is late: it was due at");
+		// Once: neither the daemon nor the reopened pi fires it again. A wait that proves nothing starts within it.
+		await new Promise((resolve) => setTimeout(resolve, 3000));
+		expect(real.requests("main")).toHaveLength(3);
 	});
 
 	it("reopens the session of a pi a signal ended once its wake-up falls due, and the turn starts there", async () => {
 		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
 		pi = real;
-		real.script("main", [
-			{ tool: "schedule_wakeup", args: { prompt: "Check CI.", delay: 600 } },
-			{ text: "scheduled" },
-			{ text: "CI is green" },
-		]);
-		const pane = real.start(["--", "watch CI"]);
-		await real.waitForRequests("main", 2);
-		await waitFor(() => expect(held()).toHaveLength(1));
-		const [{ sessionFile }] = held();
-		spawnSync("tmux", ["-S", real.tmux.socket, "kill-session", "-t", `=${pane}`]);
-		await waitFor(async () =>
-			expect((await real.rows()).find((row) => row.sessionFile === sessionFile)?.status).toBe("stopped"),
-		);
+		const { pane, sessionFile } = await crashed(real);
+		overdue(sessionFile);
 
-		// Ten minutes pass: in its log and in the daemon's copy, it is now overdue.
-		const overdue = Date.now() - 60_000;
-		const log = readFileSync(sessionFile, "utf8").replace(/"dueAt":\d+/, `"dueAt":${overdue}`);
-		writeFileSync(sessionFile, log);
-		const [copy] = JSON.parse(readFileSync(join(process.env.PI_SERVER_DIR ?? "", "wakeups.json"), "utf8"));
-		await real.client.holdWakeups({ ...copy, wakeups: [{ ...copy.wakeups[0], dueAt: overdue }] });
-
+		// The daemon is told of it as a hand-off: what it holds on disk is read only when it starts.
+		await real.client.holdWakeups(held()[0]);
 		const requests = await real.waitForRequests("main", 3);
 		expect(conversation(requests[2]).at(-1)?.text).toContain("is late: it was due at");
+		// Once: neither the daemon nor the reopened pi fires it again. A wait that proves nothing starts within it.
+		await new Promise((resolve) => setTimeout(resolve, 3000));
+		expect(real.requests("main")).toHaveLength(3);
 		const row = (await real.rows()).find((r) => r.sessionFile === sessionFile);
 		expect(row?.pane).toBeDefined();
 		expect(row?.pane).not.toBe(pane);

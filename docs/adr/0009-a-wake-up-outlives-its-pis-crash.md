@@ -12,7 +12,7 @@ Decided 2026-11-10; the spec is GitHub issue #268, settled by comparing bluclawd
 
 ## Consequences
 
-- A Silent pane is not reopened: its pi may only be held up, and it fires its own wake-ups when it beats again. A pi outside tmux that misses its heartbeat is given the same patience.
+- A Silent pane is not reopened: its pi may only be held up, and it fires its own wake-ups when it beats again. A pi outside tmux that is held up is not reopened either.
 - The daemon counts a session's pi as gone when its process no longer runs (decided in #280), not by its heartbeat: a pi outside tmux never registers one. The pi hands over its pid with its start time, which `ps` gives both sides, so a later process with the same pid (after a restart of the Mac) is not taken for it. A Silent pane's pi, or a held-up pi outside tmux, still runs, so the daemon leaves its wake-ups to it.
 - A Delete cancels wake-ups the session log cannot record, so a later `/resume` of the session file must not revive them.
 - A session's pi that ran outside tmux comes back in agent view's tmux when the daemon reopens it.
