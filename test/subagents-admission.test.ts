@@ -394,13 +394,15 @@ describe("Run admission", () => {
 		const resumed = await result;
 		expect(handleOf(resumed).record).toMatchObject({ name: "backend", modelId: "faux-alt", generation: 1 });
 		expect(prompts).toEqual(["built"]);
-		expect(scheduler.getContext(completed.runId)?.launch).toMatchObject({
-			name: "backend",
-			definition: { name: "explorer" },
-			model: "faux-adm/faux-alt",
-			task: "Now add tests.",
-			sessionFile: completed.transcriptPath,
-			parent: "pi-orchestrator",
+		expect(scheduler.getContext(completed.runId)).toMatchObject({
+			launch: {
+				name: "backend",
+				definition: { name: "explorer" },
+				model: "faux-adm/faux-alt",
+				task: "Now add tests.",
+				sessionFile: completed.transcriptPath,
+				parent: "pi-orchestrator",
+			},
 		});
 	});
 

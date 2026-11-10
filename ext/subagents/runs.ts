@@ -40,6 +40,8 @@ export interface SubagentRunRecord {
 	generation: number;
 	/** The tmux session of the run's pi (ADR-0006); absent on runs from before runs were pis of their own. */
 	pane?: string;
+	/** Set on a run whose pi runs on pi's RPC, with no pane (ADR-0010); absent on a run in tmux. */
+	backend?: "rpc";
 	/** What the run's pi is doing, as it last said; absent until it says. */
 	activity?: AgentActivity;
 	transcriptPath?: string;
@@ -82,6 +84,12 @@ export interface SubagentRunController {
 	markDelivered(seq: number): void;
 }
 
+/**
+ * How a run's work settled, as the runtime saw it, apart from what the run claims and from its process's exit:
+ * completed means its pi settled without an error, not that the task succeeded.
+ */
+export type RunRuntimeOutcome = { status: "completed" } | { status: "failed" | "stopped"; error: string };
+
 export interface SubagentRunExecuteParams {
 	readonly record: Readonly<SubagentRunRecord>;
 	readonly signal: AbortSignal;
@@ -106,6 +114,7 @@ export interface AdmitSubagentRunRequest<C = unknown> {
 	originToolCallId: string;
 	originEntryId?: string;
 	name?: string;
+	backend?: "rpc";
 	agentName: string;
 	definitionSource: AgentDefinitionSource;
 	provider: string;
@@ -231,6 +240,7 @@ export class SubagentRunScheduler<C = unknown> {
 			originToolCallId: request.originToolCallId,
 			originEntryId: request.originEntryId,
 			name: request.name,
+			...(request.backend ? { backend: request.backend } : {}),
 			generation: 0,
 			agentName: request.agentName,
 			definitionSource: request.definitionSource,

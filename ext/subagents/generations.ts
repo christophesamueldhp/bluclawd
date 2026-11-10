@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
+import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { createRunAddressing } from "./addressing.ts";
 import { formatRunLabel, type RunExecutionContext } from "./admission.ts";
 import { createRunDirectory } from "./directory.ts";
@@ -13,6 +13,7 @@ import {
 } from "./messages.ts";
 import { inParentScope, type ParentScope, type ParentScopeChecks, type ScopedRun } from "./parent-scope.ts";
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
+import { executeRpcRun } from "./rpc-runs.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
 import {
 	appendParentRunReference,
@@ -129,9 +130,35 @@ export function createGenerations(deps: GenerationDeps) {
 		executeRun: async (params) => {
 			const execCtx = params.context;
 			if (!execCtx) throw new Error("Subagent run has no execution context.");
+			const { runId } = params.record;
+			const notify = (report: { text: string; seq?: number }) => {
+				const record = scheduler.getRun(runId);
+				if (!record) return;
+				deps.scope.notify(record, noticeOf(deps.agentDir(), record, report));
+			};
+			const usage = (sessionId: string, totals: SessionUsage) =>
+				recordRunSessionUsage(deps.agentDir(), params.record, sessionId, totals);
+			if ("rpc" in execCtx) {
+				if (!params.record.generation) recordLaunch(params.record);
+				deps.bus.register(runId, {
+					scope: { parentSessionId: params.record.parentSessionId, sessionEpoch: params.record.sessionEpoch },
+					deliver: async () => {
+						throw new Error("a run on pi's RPC takes no messages yet");
+					},
+				});
+				try {
+					return await executeRpcRun(params, execCtx.rpc, {
+						reports: deps.reports,
+						handOff: deps.handOff,
+						notify,
+						usage,
+					});
+				} finally {
+					deps.bus.unregister(runId, "has been closed");
+				}
+			}
 			// A run taken over, after a reload or a crash, was recorded when it launched.
 			if (!params.record.generation && !execCtx.launch.pane) recordLaunch(params.record);
-			const { runId } = params.record;
 			const { parent } = execCtx.launch;
 			// The orchestrator's messages reach the run's pi through the daemon, as a message from another session.
 			deps.bus.register(runId, {
@@ -165,12 +192,8 @@ export function createGenerations(deps: GenerationDeps) {
 					tmux: deps.tmux(),
 					reports: deps.reports,
 					handOff: deps.handOff,
-					notify: (report) => {
-						const record = scheduler.getRun(runId);
-						if (!record) return;
-						deps.scope.notify(record, noticeOf(deps.agentDir(), record, report));
-					},
-					usage: (sessionId, totals) => recordRunSessionUsage(deps.agentDir(), params.record, sessionId, totals),
+					notify,
+					usage,
 					// Kept in the orchestrator's session for the user, who answers in the run's own: it starts no turn.
 					needsInput: (dialog) => {
 						const record = scheduler.getRun(runId);

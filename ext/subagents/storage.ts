@@ -15,7 +15,7 @@ import { type ExtensionAPI, parseSessionEntries, type SessionEntry } from "@eare
 import type { SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
 import { sanitizeReportText } from "./results.ts";
-import { isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
+import { isTerminalSubagentStatus, type RunRuntimeOutcome, type SubagentRunRecord } from "./runs.ts";
 import { addSubagentUsage, createEmptySubagentUsage, sessionUsage } from "./usage.ts";
 
 export const SUBAGENT_RUN_CUSTOM_ENTRY = "bluclawd.subagent-run";
@@ -81,7 +81,7 @@ function ensurePrivateDir(dirPath: string): void {
 	}
 }
 
-function writeAtomicPrivateFile(filePath: string, content: string): void {
+export function writeAtomicPrivateFile(filePath: string, content: string): void {
 	const parentDir = dirname(filePath);
 	ensurePrivateDir(parentDir);
 	const tmpPath = `${filePath}.tmp.${process.pid}.${atomicWriteSeq++}`;
@@ -164,7 +164,10 @@ export function newestRunSession(runDir: string): string | undefined {
 /** A Report as its run stored it before sending it, numbered among the run's Reports. */
 export interface StoredRunReport {
 	seq: number;
+	/** What the run says of its work: its own claim. */
 	text: string;
+	/** How its work settled, as the runtime saw it; absent from a run in tmux, which stores its own Reports. */
+	outcome?: RunRuntimeOutcome;
 	usage?: SessionUsage;
 	sessionId?: string;
 }

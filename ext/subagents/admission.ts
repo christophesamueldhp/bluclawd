@@ -22,6 +22,7 @@ import type { RunDirectory } from "./directory.ts";
 import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
 import { resolveChildModelAndRuntime } from "./models.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
+import { type RpcLaunch, rpcRunsEnabled, rpcRunTools } from "./rpc-runs.ts";
 import {
 	type AdmittedSubagentHandle,
 	createRunId,
@@ -51,10 +52,11 @@ export function orchestratorTools(loadout: ToolLoadout): string[] {
 	return [...loadout.callable.map((tool) => tool.name), ...BUILTIN_EXTENSIONS.filter((name) => declared.has(name))];
 }
 
-/** What a run needs from its admission to execute: it starts as a pi of its own in tmux (ADR-0006), its role as its launch flags. */
-export interface RunExecutionContext {
-	launch: RunLaunch;
-}
+/**
+ * What a run needs from its admission to execute: it starts as a pi of its own in tmux (ADR-0006), its role as its
+ * launch flags, or, behind a switch, as a pi on pi's RPC (ADR-0010).
+ */
+export type RunExecutionContext = { launch: RunLaunch } | { rpc: RpcLaunch };
 
 export function captureWorkspaceSnapshot(cwd: string): WorkspaceSnapshot {
 	try {
@@ -305,7 +307,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		const previous = deps.scheduler.getContext(run.runId);
 		return {
 			name: run.name ?? run.runId,
-			definition: previous ? previous.launch.definition : roleOf(run, ctx),
+			definition: previous && "launch" in previous ? previous.launch.definition : roleOf(run, ctx),
 			model: `${run.provider}/${run.modelId}`,
 			thinkingLevel: run.thinkingLevel === MODEL_DEFAULT_THINKING ? undefined : run.thinkingLevel,
 			cwd: run.cwd,
@@ -344,9 +346,10 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 
 	return {
 		async launch({ toolCallId, parentTurnId, params, signal }, ctx) {
-			// A run is a pi of its own in tmux (ADR-0006): there is no other way to run one.
+			// A run is a pi of its own in tmux (ADR-0006), unless runs on pi's RPC are switched on.
+			const rpc = rpcRunsEnabled();
 			const parentPane = deps.pane();
-			if (parentPane === undefined) return reject(NEEDS_TMUX);
+			if (parentPane === undefined && !rpc) return reject(NEEDS_TMUX);
 			const dispatched = deps.scope.current();
 			if (!dispatched) return reject("Subagent runtime is not initialized for this session.");
 			const parentSessionId = ctx.sessionManager.getSessionId();
@@ -390,6 +393,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			}
 			const definition = resolvedDef.definition;
 			const available = deps.tools();
+			const rpcTools = rpc ? rpcRunTools(definition, available) : undefined;
+			if (rpcTools && !rpcTools.ok) return reject(rpcTools.error);
 			const unknownTools = definition.tools?.filter((name) => !available.includes(name)) ?? [];
 			if (unknownTools.length > 0) {
 				return reject(
@@ -480,6 +485,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				originToolCallId: toolCallId,
 				originEntryId,
 				name: runName,
+				...(rpcTools ? { backend: "rpc" as const } : {}),
 				agentName: definition.name,
 				definitionSource: definition.source,
 				provider: childModel.model.provider,
@@ -490,19 +496,36 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				startSnapshot,
 				deliveryMode: isBackground ? "background" : "foreground",
 				// Not linked to the call's signal: an aborted foreground call only stops waiting for the run's Report.
-				context: {
-					launch: {
-						name: runName,
-						definition,
-						model: `${childModel.model.provider}/${childModel.model.id}`,
-						thinkingLevel: childModel.thinkingLevel,
-						task: taskText,
-						cwd,
-						runDir: storage.runDir,
-						parent: parentPane,
-						projectTrusted,
-					},
-				},
+				context: rpcTools
+					? {
+							rpc: {
+								name: runName,
+								definition,
+								provider: childModel.model.provider,
+								modelId: childModel.model.id,
+								thinkingLevel: childModel.thinkingLevel,
+								tools: rpcTools.tools,
+								task: taskText,
+								cwd,
+								runDir: storage.runDir,
+								agentDir,
+								projectTrusted,
+							},
+						}
+					: {
+							launch: {
+								name: runName,
+								definition,
+								model: `${childModel.model.provider}/${childModel.model.id}`,
+								thinkingLevel: childModel.thinkingLevel,
+								task: taskText,
+								cwd,
+								runDir: storage.runDir,
+								// Without a pane, a launch gets this far only with runs on pi's RPC switched on.
+								parent: parentPane!,
+								projectTrusted,
+							},
+						},
 			});
 			if (!admitRes.ok) return reject(admitRes.error);
 			return { ok: true, handle: admitRes.handle };
@@ -530,6 +553,12 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			if (ctx.mode === "print" || ctx.mode === "json") {
 				return unavailable(
 					`Resuming ${label} is not supported in one-shot "${ctx.mode}" mode because a resume runs in the background and the process exits before it completes.`,
+				);
+			}
+			// Its session has one owner at a time: none resumes it until a Resume on pi's RPC can guarantee that.
+			if (run.backend === "rpc") {
+				return unavailable(
+					`${label} ran on pi's RPC, and such a run cannot be resumed yet; spawn a new subagent and point it at ${run.reportPath ?? "its report"}.`,
 				);
 			}
 			const parentPane = deps.pane();
