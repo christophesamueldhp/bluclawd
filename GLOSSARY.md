@@ -51,7 +51,7 @@ The orchestrator's session, and its session epoch, that a run or message belongs
 _Avoid_: generation, runtime generation
 
 **Collaboration**:
-Independent orchestrator sessions the user linked, with `/collaborate` in one of them, for work the user named. Its members may send each other findings, questions and blockers; no one else is reached, and nothing a member sends adds a member, changes the work or starts a turn in another member. Changing the work makes what was sent under the earlier one stale. A session is in one at most, and only in its own session: a switch, fork or new session leaves it.
+Independent orchestrator sessions the user linked, with `/collaborate` in one of them, for work the user named. Its members may send each other findings, questions and blockers; no one else is reached, and nothing a member sends adds a member, changes the work or starts a turn in another member. Changing the work makes what was sent under the earlier one stale. A session is in one at most. Switching to another session, forking or quitting leaves it, and with one member left it ends; a reload keeps it.
 _Avoid_: group chat, broadcast, peer discovery
 
 **Resume**:

@@ -70,4 +70,23 @@ describe("the daemon's collaborations", () => {
 		expect(held.of("s-alpha")).toBeUndefined();
 		await expect(held.send("s-alpha", 1, "beta", "finding", "Hi.")).rejects.toThrow("is in no collaboration");
 	});
+
+	it("keeps the others linked when a member leaves, and ends with the last but one", async () => {
+		const { held, queued } = collaborations([pane("alpha"), pane("beta"), pane("gamma")]);
+		await held.open({ sessionId: "s-alpha", name: "alpha" }, ["beta", "gamma"], "Work");
+		await held.leave("s-gamma");
+		expect(held.of("s-gamma")).toBeUndefined();
+		expect(held.of("s-alpha")?.members.map((m) => m.name)).toEqual(["alpha", "beta"]);
+		await expect(held.send("s-alpha", 1, "gamma", "finding", "Hi.")).rejects.toThrow('no session "gamma"');
+
+		queued.length = 0;
+		await held.leave("s-beta");
+		expect(held.of("s-alpha")).toBeUndefined();
+		expect(queued).toEqual([
+			{
+				instanceId: "pane-alpha",
+				message: { type: "session_message", from: "beta", kind: "collaboration", to: "s-alpha" },
+			},
+		]);
+	});
 });

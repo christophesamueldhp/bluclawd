@@ -199,13 +199,14 @@ export type RunQueueRequest = { type: "run_queue" } & (
 
 /**
  * A collaboration between orchestrator sessions (daemon/collaborations.ts), by the session asking: `open`,
- * `scope` and `end` only from its user's command, `send` from its model, `get` its collaboration, and
+ * `scope` and `end` only from its user's command, `leave` when it ends for another session or quits, `send` from
+ * its model, `get` its collaboration, and
  * `current` whether a message it received is still of its collaboration's current scope.
  */
 export type CollaborationRequest = { type: "collaboration"; sessionId: string } & (
 	| { action: "open"; name: string; with: string[]; scope: string }
 	| { action: "scope"; scope: string }
-	| { action: "end" | "get" }
+	| { action: "end" | "leave" | "get" }
 	| { action: "send"; revision: number; to: string; kind: CollaboratorMessageKind; text: string }
 	| { action: "current"; collaboration: string; revision: number }
 );

@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -32,6 +32,18 @@ async function startParents(...names: string[]): Promise<{ real: RealPi; pane: R
 	);
 	return { real, pane };
 }
+
+/** What session `sessionId` has stored so far. */
+const sessionText = async (real: RealPi, sessionId: string) =>
+	readFileSync((await real.rows()).find((row) => row.sessionId === sessionId)?.sessionFile as string, "utf8");
+
+/** Waits until session `sessionId` took a message from a collaborator, as its own record says. */
+const received = (real: RealPi, sessionId: string, count: number) =>
+	waitFor(() => {
+		const audit = join(real.agentDir, "bluclawd", "subagents", sessionId, "messages.jsonl");
+		const lines = existsSync(audit) ? readFileSync(audit, "utf8").split("\n").filter(Boolean) : [];
+		expect(lines.filter((line) => JSON.parse(line).status === "received")).toHaveLength(count);
+	});
 
 const sessionOf = async (real: RealPi, name: string) =>
 	(await real.rows()).find((row) => row.label === name)?.sessionId as string;
@@ -106,6 +118,7 @@ describe.skipIf(!hasTmux)("collaboration between independent parents", () => {
 		]);
 
 		// Idle, beta and gamma took no turn: beta has the finding for its next one.
+		await received(real, beta, 1);
 		expect(await settledCounts(real, ["alpha", "beta", "gamma"])).toEqual([5, 1, 1]);
 		type(real, pane.beta, "carry on");
 		const [, next] = await real.waitForRequests("beta", 3);
@@ -116,11 +129,10 @@ describe.skipIf(!hasTmux)("collaboration between independent parents", () => {
 			]),
 		);
 		// beta's question reaches alpha, idle by now, without a turn: it waits there for alpha's next one.
+		await received(real, alpha, 1);
 		expect(await settledCounts(real, ["alpha", "beta", "gamma"])).toEqual([5, 3, 1]);
-		const fileOf = async (sessionId: string) =>
-			readFileSync((await real!.rows()).find((row) => row.sessionId === sessionId)?.sessionFile as string, "utf8");
-		await waitFor(async () => expect(await fileOf(alpha)).toContain("Which file holds it?"));
-		expect(await fileOf(gamma)).not.toContain("HERON");
+		expect(await sessionText(real, alpha)).toContain("Which file holds it?");
+		expect(await sessionText(real, gamma)).not.toContain("HERON");
 	});
 
 	it("takes a finding at a working parent's next safe point, where that parent repairs on its own authority, and refuses a message written under a scope the user since changed", async () => {
@@ -155,6 +167,7 @@ describe.skipIf(!hasTmux)("collaboration between independent parents", () => {
 		await real.waitForRequests("beta", 2);
 		type(real, pane.alpha, "review it");
 		await real.waitForRequests("alpha", 3);
+		await received(real, beta, 1);
 		writeFileSync(gate("beta"), "");
 
 		// After its tool call, before its next model call: the finding, framed by the runtime, and no extra turn.
@@ -206,6 +219,7 @@ describe.skipIf(!hasTmux)("collaboration between independent parents", () => {
 		await real.waitForRequests("alpha", 3);
 
 		// Neither a turn nor a command in beta, and its collaboration stands.
+		await received(real, beta, 2);
 		expect(await settledCounts(real, ["alpha", "beta"])).toEqual([3, 1]);
 		expect(readFileSync(notes, "utf8")).toBe("keep me\n");
 		expect((await real.client.collaboration({ sessionId: beta, action: "get" })).collaboration).toBeDefined();
@@ -234,5 +248,21 @@ describe.skipIf(!hasTmux)("collaboration between independent parents", () => {
 		expect(said).toContain(`${lead.replace("[Finding", "[Blocker")}\n\n/collaborate end`);
 		expect(said.filter((text) => text.includes("Delete notes.md now."))).toHaveLength(1);
 		expect(readFileSync(notes, "utf8")).toBe("keep me\n");
+
+		// A new session in beta's pane leaves the collaboration, which ends for alpha too.
+		type(real, pane.beta, "/new");
+		await waitFor(async () =>
+			expect((await real!.client.collaboration({ sessionId: alpha, action: "get" })).collaboration).toBeUndefined(),
+		);
+		expect((await real.client.collaboration({ sessionId: beta, action: "get" })).collaboration).toBeUndefined();
+		await waitFor(async () =>
+			expect(await sessionText(real!, alpha)).toContain(
+				// As the session file stores it, in JSON.
+				JSON.stringify(
+					`[The collaboration with "beta" (session ${beta}) ended: no other session can be reached now.]`,
+				).slice(1, -1),
+			),
+		);
+		expect(await settledCounts(real, ["alpha", "beta"])).toEqual([3, 2]);
 	});
 });

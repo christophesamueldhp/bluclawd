@@ -111,6 +111,18 @@ export class Collaborations {
 		return collaboration;
 	}
 
+	/** Session `sessionId` left its collaboration, for another session or by quitting; with one member left, it ends. */
+	async leave(sessionId: string): Promise<void> {
+		const collaboration = this.bySession.get(sessionId);
+		if (!collaboration) return;
+		this.bySession.delete(sessionId);
+		const left = collaboration.members;
+		collaboration.members = left.filter((m) => m.sessionId !== sessionId);
+		if (collaboration.members.length > 1) return this.tell(collaboration, sessionId, collaboration, left);
+		for (const member of collaboration.members) this.bySession.delete(member.sessionId);
+		await this.tell(collaboration, sessionId, undefined, left);
+	}
+
 	/**
 	 * Sends member `from`'s message to member `to` (a name or session id), as of revision `revision` of their
 	 * collaboration; throws why it cannot. The daemon, not the sender, says who sent it and for what.
@@ -163,13 +175,18 @@ export class Collaborations {
 	}
 
 	/** Tells every member but `actor` what the collaboration is now; `now` undefined once it ended. */
-	private async tell(collaboration: Collaboration, actor: string, now: Collaboration | undefined): Promise<void> {
-		const others = collaboration.members.filter((m) => m.sessionId !== actor);
+	private async tell(
+		collaboration: Collaboration,
+		actor: string,
+		now: Collaboration | undefined,
+		members = collaboration.members,
+	): Promise<void> {
+		const others = members.filter((m) => m.sessionId !== actor);
 		await Promise.all(
 			others.map((member) =>
 				this.deliverTo(member.sessionId, {
 					type: "session_message",
-					from: collaboration.members.find((m) => m.sessionId === actor)?.name ?? actor,
+					from: members.find((m) => m.sessionId === actor)?.name ?? actor,
 					kind: "collaboration",
 					to: member.sessionId,
 					...(now ? { collaboration: { ...now, members: now.members.map((m) => ({ ...m })) } } : {}),

@@ -121,6 +121,9 @@ async function handleCollaboration(request: CollaborationRequest): Promise<Colla
 				return result({ collaboration: await collaborations.rescope(sessionId, request.scope) });
 			case "end":
 				return result({ collaboration: await collaborations.end(sessionId) });
+			case "leave":
+				await collaborations.leave(sessionId);
+				return result({});
 			case "get":
 				return result({ collaboration: collaborations.of(sessionId) });
 			case "send":
