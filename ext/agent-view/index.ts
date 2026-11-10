@@ -21,7 +21,7 @@ import type { PaneHeartbeat, PaneMessage } from "../../daemon/ipc/protocol.ts";
 import { type InstanceSummary, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { labelFromTask, otherRows } from "../../daemon/rows.ts";
 import { toolActivity } from "../../daemon/session-state.ts";
-import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, PARENT_ENV, Tmux } from "../../daemon/tmux.ts";
+import { AGENT_VIEW_COMMAND, HIDE_ENV, NORMAL_ENV, OPEN_VIEW_ENV, runParent, Tmux } from "../../daemon/tmux.ts";
 import { agentTasks, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../_shared/builtin-commands.ts";
 import { holdTui } from "../_shared/hold-tui.ts";
@@ -227,9 +227,8 @@ const agentView: InlineExtension = {
 		// Pane mode: this pi runs in a tmux session of agent view's own (tmux.ts).
 		const pane = Tmux.currentPane();
 		const panes = new Tmux();
-		// A run's orchestrator (ADR-0006): ← goes back to it, or to agent view when the run was opened there. Read
-		// each time: an orchestrator reopened after a crash adopts the run from another pane (ADR-0008).
-		const parent = (): string | undefined => process.env[PARENT_ENV] || undefined;
+		// A run's orchestrator (ADR-0006): ← goes back to it, or to agent view when the run was opened there.
+		const parent = runParent;
 		const backToView = (): boolean => {
 			try {
 				return !!pane && panes.openedFromView(pane);

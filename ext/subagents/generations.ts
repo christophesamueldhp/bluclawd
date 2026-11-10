@@ -131,7 +131,7 @@ export function createGenerations(deps: GenerationDeps) {
 		executeRun: async (params) => {
 			const execCtx = params.context;
 			if (!execCtx) throw new Error("Subagent run has no execution context.");
-			// A run taken over after a reload was recorded when it launched.
+			// A run taken over, after a reload or a crash, was recorded when it launched.
 			if (!params.record.generation && !execCtx.launch.pane) recordLaunch(params.record);
 			const { runId } = params.record;
 			const { parent } = execCtx.launch;

@@ -10,7 +10,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { type ExtensionAPI, parseSessionEntries, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { sanitizeDiagnosticText } from "./diagnostics.ts";
@@ -217,6 +217,11 @@ export function readRunReports(runDir: string, seq: number): StoredRunReport[] {
 /** Where a run of the parent session keeps its session, task and Reports. */
 export function subagentRunDir(agentDir: string, parentSessionId: string, runId: string): string {
 	return join(getSubagentsRootDir(agentDir), parentSessionId, runId);
+}
+
+/** The parent session whose run `runDir` is: the one {@link subagentRunDir} kept it under. */
+export function runDirParentSessionId(runDir: string): string {
+	return basename(dirname(runDir));
 }
 
 function sanitizeRecordForStorage(record: Readonly<SubagentRunRecord>): SubagentRunRecord {

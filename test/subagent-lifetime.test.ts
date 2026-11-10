@@ -81,6 +81,10 @@ async function orchestratorWaitingOnRun(real: RealPi, stallMs: number) {
 	await real.waitForRequests("probe-run", 1);
 	const [run] = panes(real).filter((pane) => pane !== orchestrator);
 	expect(run).toBeDefined();
+	// The daemon has heard it working: its first heartbeat, sent idle before its turn, may land late.
+	await waitFor(async () =>
+		expect((await real.rows()).find((row) => row.pane === run)).toMatchObject({ activity: "working" }),
+	);
 	const sessionFile = await waitFor(async () => {
 		const file = (await real.rows()).find((row) => row.pane === orchestrator)?.sessionFile;
 		expect(file).toBeDefined();
@@ -102,7 +106,7 @@ function crash(real: RealPi, pane: string): void {
 }
 
 /** How many of the messages `request` sent hold `text`. */
-const holding = (request: Parameters<typeof conversation>[0], text: string) =>
+const countHolding = (request: Parameters<typeof conversation>[0], text: string) =>
 	conversation(request).filter((message) => message.text.includes(text)).length;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -170,48 +174,52 @@ describe.skipIf(!hasTmux)("a run's lifetime", () => {
 		async () => {
 			const real = await startKept();
 			pi = real;
-			const { orchestrator, run, sessionFile } = await orchestratorWaitingOnRun(real, 8000);
+			const { orchestrator, run, sessionFile } = await orchestratorWaitingOnRun(real, readinessMs);
 
 			crash(real, orchestrator);
 			await waitFor(() => expect(panes(real)).not.toContain(orchestrator));
 			// The run beats every 3 s, and each beat asks after its orchestrator's pane: working, it stays.
 			await sleep(4000);
 			expect(panes(real)).toContain(run);
+			// The rest of its turn ends inside this wait's bound, which started after it.
 			await waitFor(() => expect(panes(real)).not.toContain(run));
 			expect(real.requests("probe-run")).toHaveLength(1);
 
 			real.start(["--session", sessionFile]);
 			const [, woken] = await real.waitForRequests("main", 2);
-			expect(holding(woken, "Looked.")).toBe(1);
+			expect(countHolding(woken, "Looked.")).toBe(1);
 			await sleep(2000);
 			expect(real.requests("main")).toHaveLength(2);
 		},
-		3 * readinessMs,
+		4 * readinessMs,
 	);
 
 	it(
-		"is adopted by its orchestrator reopened after a crash while it still works: listed there, it reports there and stays open",
+		"is taken over by its orchestrator reopened after a crash while it still works: listed there, it reports there and stays open",
 		async () => {
 			const real = await startKept();
 			pi = real;
-			const { orchestrator, run, sessionFile } = await orchestratorWaitingOnRun(real, 15_000);
+			const { orchestrator, run, sessionFile } = await orchestratorWaitingOnRun(real, readinessMs);
 
 			crash(real, orchestrator);
 			await waitFor(() => expect(panes(real)).not.toContain(orchestrator));
 			const reopened = real.start(["--session", sessionFile]);
-			await waitFor(() => expect(real.tmux.capture(reopened, 50).join("\n")).toContain("probe-run"));
+			// Its row in the panel, not the launch in the transcript.
+			await waitFor(() =>
+				expect(real.tmux.capture(reopened, 50).join("\n")).toMatch(/probe-run {2}explorer {2}faux\/faux-1/),
+			);
 			await waitFor(async () =>
 				expect((await real.rows()).find((row) => row.pane === run)).toMatchObject({ parent: reopened }),
 			);
 
 			const [, woken] = await real.waitForRequests("main", 2);
-			expect(holding(woken, "Looked.")).toBe(1);
+			expect(countHolding(woken, "Looked.")).toBe(1);
 			// Its heartbeats name the reopened orchestrator, whose pane is there: the daemon leaves it open.
 			await sleep(4000);
 			expect(panes(real)).toContain(run);
 			expect(real.requests("main")).toHaveLength(2);
 		},
-		3 * readinessMs,
+		4 * readinessMs,
 	);
 
 	it(

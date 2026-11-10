@@ -7,7 +7,7 @@
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AgentActivity } from "../../daemon/activity.ts";
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
@@ -19,7 +19,13 @@ import type { AgentDefinition } from "./definitions.ts";
 import { SUBAGENT_MESSAGE_CUSTOM_TYPE } from "./messages.ts";
 import { fromRun, runTaskText } from "./run-messages.ts";
 import type { SubagentRunExecuteParams, SubagentRunOutcome } from "./runs.ts";
-import { newestRunSession, readRunReports, type StoredRunReport, storeRunReport } from "./storage.ts";
+import {
+	newestRunSession,
+	readRunReports,
+	runDirParentSessionId,
+	type StoredRunReport,
+	storeRunReport,
+} from "./storage.ts";
 import { sessionUsage } from "./usage.ts";
 
 /** What a run is started as: its role and choices, resolved. */
@@ -289,7 +295,7 @@ export async function executeTmuxRun(
 /**
  * Inside a run: its task is its first prompt, it tells its orchestrator whenever it starts working, falls
  * idle or waits on a prompt of its own, and each time it settles its last message goes to its orchestrator
- * as a Report. Its orchestrator, `parent()`, is the pane of the session that adopted it last (ADR-0008).
+ * as a Report. Its orchestrator, `parent()`, is the pane of the session that took it over last (ADR-0008).
  */
 export function actAsRun(pi: ExtensionAPI, parent: () => string, pane: string | undefined): void {
 	const runDir = process.env[RUN_DIR_ENV];
@@ -320,7 +326,7 @@ export function actAsRun(pi: ExtensionAPI, parent: () => string, pane: string | 
 			activity: now,
 			...(now === "awaiting_input" && activity.dialog?.title ? { dialog: activity.dialog.title } : {}),
 		};
-		sending = sending.then(() => send(parent(), message, ctx));
+		sending = sending.then(() => send(parent, message, ctx));
 		return sending;
 	};
 
@@ -330,7 +336,7 @@ export function actAsRun(pi: ExtensionAPI, parent: () => string, pane: string | 
 		// Only its orchestrator stops its turn.
 		if (message.kind === "stop" && message.from === parent()) current?.abort();
 		// Its orchestrator's session, reopened in another pane: its run directory is kept under that session's.
-		if (message.kind === "adopt" && runDir && basename(dirname(runDir)) === message.sessionId) {
+		if (message.kind === "adopt" && runDir && runDirParentSessionId(runDir) === message.sessionId) {
 			process.env[PARENT_ENV] = message.from;
 			// The adopting session lists the run as it was stored: it is told what the run does now.
 			told = undefined;
@@ -380,7 +386,8 @@ export function actAsRun(pi: ExtensionAPI, parent: () => string, pane: string | 
 		};
 		const report: SessionMessage = { ...fromRun(pi, pane), kind: "report", ...content, seq: store(content) };
 		// Not awaited, as pi waits on this handler: the orchestrator reads a Report its retries never got through.
-		sending = sending.then(() => send(parent(), report, ctx, REPORT_RETRY_MS));
+		// Each try goes to its orchestrator as of then: one that takes the run over meanwhile gets it.
+		sending = sending.then(() => send(parent, report, ctx, REPORT_RETRY_MS));
 	});
 }
 
@@ -400,13 +407,13 @@ export async function sendRetrying(send: () => Promise<void>, delays: readonly n
 }
 
 async function send(
-	parent: string,
+	parent: () => string,
 	message: SessionMessage,
 	ctx: ExtensionContext,
 	retries: readonly number[] = [],
 ): Promise<void> {
 	try {
-		await sendRetrying(() => new OrchestratorClient().send(parent, message), retries);
+		await sendRetrying(() => new OrchestratorClient().send(parent(), message), retries);
 	} catch (error) {
 		// A replaced session's ctx throws, which must not break the chain of later sends.
 		try {

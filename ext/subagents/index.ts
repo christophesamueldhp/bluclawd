@@ -9,7 +9,7 @@ import {
 import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
-import { endPane, PARENT_ENV, Tmux } from "../../daemon/tmux.ts";
+import { endPane, runParent, Tmux } from "../../daemon/tmux.ts";
 import { notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { pistatuslineDrawsFooter } from "../_shared/pistatusline.ts";
@@ -113,11 +113,12 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		const resolveAgentDir = () => options.agentDir ?? getAgentDir();
 		// Runs are pi sessions of their own (ADR-0006): this pi may be one, and launches them from its pane.
 		const pane = Tmux.currentPane();
-		const runParent = process.env[PARENT_ENV];
-		// Read each time: an orchestrator reopened after a crash adopts the run from another pane (ADR-0008).
-		const currentParent = () => process.env[PARENT_ENV] || runParent || "";
-		if (runParent) actAsRun(pi, currentParent, pane);
-		if (runParent && pane) messageAsRun(pi, currentParent, pane);
+		const launchedBy = runParent();
+		if (launchedBy) {
+			const parent = () => runParent() ?? launchedBy;
+			actAsRun(pi, parent, pane);
+			if (pane) messageAsRun(pi, parent, pane);
+		}
 		const reports = new RunReports();
 		/** Aborted on a reload, which hands this instance's open runs to the next one. */
 		const handOff = new AbortController();
@@ -565,7 +566,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		// The orchestrator's only: a run messages through the daemon (messageAsRun), and manages no runs.
 		const registerOrchestratorTool: typeof pi.registerTool = (tool) => {
-			if (!runParent) pi.registerTool(tool);
+			if (!launchedBy) pi.registerTool(tool);
 		};
 		registerOrchestratorTool({
 			name: SUBAGENT_MESSAGE_TOOL,

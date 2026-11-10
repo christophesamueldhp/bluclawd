@@ -22,8 +22,11 @@ export const NORMAL_ENV = "BLUCLAWD_NORMAL";
 export const OPEN_VIEW_ENV = "BLUCLAWD_OPEN_VIEW";
 /** Set with {@link OPEN_VIEW_ENV}: the row of the session being deleted, which that view leaves out. */
 export const HIDE_ENV = "BLUCLAWD_HIDE";
-/** Set on a run's pane: the tmux session of the orchestrator that launched it (ADR-0006). */
+/** Set on a run's pane: the tmux session of the orchestrator that launched it (ADR-0006), or that took it over
+ *  since (ADR-0008). */
 export const PARENT_ENV = "BLUCLAWD_PARENT";
+/** In a run, its orchestrator's tmux session as of now: one reopened after a crash takes it over from another pane. */
+export const runParent = (): string | undefined => process.env[PARENT_ENV] || undefined;
 /** Set with {@link PARENT_ENV} on a run's first start: the file holding its task, its first prompt. */
 export const RUN_TASK_ENV = "BLUCLAWD_RUN_TASK";
 /** Set with {@link PARENT_ENV}: the run's directory, where it stores each Report before sending it. */
