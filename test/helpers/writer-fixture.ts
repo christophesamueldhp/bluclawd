@@ -36,7 +36,7 @@ export async function createWriterFixture(): Promise<{
 					GIT_CONFIG_NOSYSTEM: "1",
 				},
 			});
-			return { stdout: result.stdout, stderr: result.stderr, code: 0, killed: false };
+			return { stdout: result.stdout, stderr: result.stderr, code: 0, killed: false, truncated: false };
 		} catch (error) {
 			const failure = error as Error & {
 				stdout?: string;
@@ -49,6 +49,7 @@ export async function createWriterFixture(): Promise<{
 				stderr: failure.stderr ?? failure.message,
 				code: typeof failure.code === "number" ? failure.code : 1,
 				killed: failure.killed ?? false,
+				truncated: false,
 			};
 		}
 	};

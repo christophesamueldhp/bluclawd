@@ -2,7 +2,6 @@
  * The pieces of pi this package copies or reaches into, checked against the pi installed here, so
  * a pi version bump that changes them fails here instead of drifting silently.
  */
-import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { stripAnsi } from "../daemon/ansi.ts";
@@ -48,13 +47,9 @@ describe("vendored from pi", () => {
 		for (const input of inputs) expect(stripAnsi(input), JSON.stringify(input)).toBe(pi.stripAnsi(input));
 	});
 
-	it("pi's own settings use none of the top-level keys bluclawd adds (ext/_shared/settings.ts)", () => {
-		const types = readFileSync(
-			new URL("core/settings-manager.d.ts", import.meta.resolve("@earendil-works/pi-coding-agent")),
-			"utf8",
-		);
-		const body = types.match(/export interface Settings \{([\s\S]*?)\n\}/)?.[1] ?? "";
-		const keys = [...body.matchAll(/^ {4}(\w+)\??:/gm)].map((match) => match[1]);
+	it("pi's own settings use none of the top-level keys bluclawd adds (ext/_shared/settings.ts)", async () => {
+		const { SettingsSchema } = await piModule("core/settings-schema.js");
+		const keys = Object.keys(SettingsSchema.properties);
 		expect(keys.length).toBeGreaterThan(10);
 		for (const key of ["permissions", "remote", "prefersReducedMotion"]) expect(keys).not.toContain(key);
 	});

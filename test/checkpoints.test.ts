@@ -49,7 +49,7 @@ function makeExec(extraEnv: Record<string, string> = {}): Exec {
 				(error, stdout, stderr) => {
 					const err = error as (Error & { code?: unknown; killed?: boolean }) | null;
 					const code = err ? (typeof err.code === "number" ? err.code : 1) : 0;
-					resolve({ stdout, stderr, code, killed: Boolean(err?.killed) });
+					resolve({ stdout, stderr, code, killed: Boolean(err?.killed), truncated: false });
 				},
 			);
 		});
@@ -61,7 +61,7 @@ function failOnce(exec: Exec, marker: string): Exec {
 	return async (command, args, options) => {
 		if (!fired && args.includes(marker)) {
 			fired = true;
-			return { stdout: "", stderr: "injected failure", code: 1, killed: false };
+			return { stdout: "", stderr: "injected failure", code: 1, killed: false, truncated: false };
 		}
 		return exec(command, args, options);
 	};

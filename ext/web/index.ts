@@ -2,8 +2,8 @@
  * Web access: `websearch` through Exa or OpenAI (the user's ChatGPT/Codex login), `webfetch`
  * through Exa, and `/web` to choose the search provider. See docs/adr/0004.
  */
-import { Type } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionCommandContext, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { EXA_PROVIDER, exaApiKey, exaContents } from "./exa.ts";
 import { defaultDeps, WebError } from "./http.ts";
 import { codexModels, defaultCodexModel } from "./openai.ts";

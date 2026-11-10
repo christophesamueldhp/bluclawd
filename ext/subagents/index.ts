@@ -1,4 +1,3 @@
-import { Type } from "@earendil-works/pi-ai";
 import {
 	type ExtensionAPI,
 	getAgentDir,
@@ -7,6 +6,7 @@ import {
 	type ToolLoadoutChanges,
 } from "@earendil-works/pi-coding-agent";
 import { isKeyRelease, matchesKey, type TUI } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 import type { SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { endPane, runParent, Tmux } from "../../daemon/tmux.ts";

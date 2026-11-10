@@ -5,8 +5,8 @@
  */
 
 import { basename, dirname, resolve } from "node:path";
-import { type Static, Type } from "@earendil-works/pi-ai";
 import { type ExtensionAPI, type ExtensionFactory, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { type Static, Type } from "typebox";
 import { timed } from "../_shared/timing.ts";
 import { loadMemoryEnabled, saveMemoryEnabled } from "./prefs.ts";
 import {

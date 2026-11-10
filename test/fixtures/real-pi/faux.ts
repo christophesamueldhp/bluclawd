@@ -2,7 +2,7 @@
  * A faux model for real pi processes (test/helpers/real-pi.ts). Each session follows its own script,
  * `<agent dir>/faux/<session name>.json` (`main` for a session without a name), read again on every
  * request, so a test can add steps while the session runs. Every request is logged as a line of
- * `<session name>.requests.jsonl` beside it: what that session's model was asked.
+ * `<session name>.requests.jsonl` beside it: what that session's model was asked, and by which pi version.
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,7 +14,7 @@ import {
 	fauxToolCall,
 	type JsonObject,
 } from "@earendil-works/pi-ai";
-import { type ExtensionAPI, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, getAgentDir, VERSION } from "@earendil-works/pi-coding-agent";
 
 /** `stallMs`: the answer takes that long, unless the request is aborted first (as Esc does). */
 export type FauxStep = { text: string; stallMs?: number } | { tool: string; args: JsonObject };
@@ -39,7 +39,7 @@ export default function fauxPi(pi: ExtensionAPI): void {
 		const asked = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).length : 0;
 		appendFileSync(
 			log,
-			`${JSON.stringify({ model: model.id, reasoning: options?.reasoning, messages: context.messages })}\n`,
+			`${JSON.stringify({ piVersion: VERSION, model: model.id, reasoning: options?.reasoning, messages: context.messages })}\n`,
 		);
 		const script = join(dir, `${key}.json`);
 		const step = (existsSync(script) ? (JSON.parse(readFileSync(script, "utf8")) as FauxStep[]) : [])[asked];

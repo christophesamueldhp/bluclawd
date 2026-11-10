@@ -6,7 +6,6 @@ import {
 	fauxAssistantMessage,
 	fauxProvider,
 	fauxToolCall,
-	Type,
 } from "@earendil-works/pi-ai";
 import {
 	type AgentSessionEvent,
@@ -19,6 +18,7 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 
 const tempDirs: string[] = [];
@@ -70,7 +70,7 @@ async function createRestrictedLoader(
 	return loader;
 }
 
-describe("Task 0 (M0) — Pi 1.0.4 public SDK compatibility and lifecycle proof", () => {
+describe("Task 0 (M0) — Pi 1.5.2 public SDK compatibility and lifecycle proof", () => {
 	it("binds extensions before prompting, streams events in order, and settles with agent_settled", async () => {
 		const cwd = makeTempDir("sdk-cwd");
 		const agentDir = makeTempDir("sdk-agent");

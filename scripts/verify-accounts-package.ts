@@ -10,10 +10,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { AccountsTerminal } from "../test/helpers/accounts-terminal.ts";
 import { readinessMs } from "../test/helpers/heartbeats.ts";
+import { piHost } from "../test/helpers/pi-host.ts";
 
 const hostArgument = process.argv[2];
 if (!hostArgument) throw new Error("Pass the package directory of an independently installed stock pi.");
 const host = resolve(hostArgument);
+// A mixed install is refused here: its result would not be evidence for any one pi version.
+const hostSet = piHost(host);
 const pi: typeof import("@earendil-works/pi-coding-agent") = await import(
 	pathToFileURL(join(host, "dist/index.js")).href
 );
@@ -230,7 +233,7 @@ try {
 	assert.deepEqual(scopeSnapshot(), scope);
 	assert.equal(await readFile(join(agentDir, "settings.json"), "utf8"), defaults);
 	console.log(
-		`PASS: stock pi ${pi.VERSION}; full package loaded, four Accounts routes, explicit model selection, native commands and Ctrl+L, unchanged scope/settings.`,
+		`PASS: stock pi ${pi.VERSION} (${Object.keys(hostSet.siblings).length} @earendil-works packages, all ${hostSet.version}); full package loaded, four Accounts routes, explicit model selection, native commands and Ctrl+L, unchanged scope/settings.`,
 	);
 } finally {
 	mode?.stop();
