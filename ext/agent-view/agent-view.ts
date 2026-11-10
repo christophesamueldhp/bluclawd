@@ -59,6 +59,7 @@ import { mascotGlyphs, REST, renderMascot } from "../_shared/mascot.ts";
 import { PasteTokens, shouldCollapse } from "../_shared/paste-tokens.ts";
 import { resolveToCwd } from "../_shared/path-resolve.ts";
 import { theme } from "../_shared/theme.ts";
+import { wakeupClock } from "../background-bash/wakeups.ts";
 import { type AgentClipboard, readAgentClipboard } from "./clipboard.ts";
 import { bandTargets, deletable, type OpenOutcome, type PaneOps, RowActions, stoppable } from "./row-actions.ts";
 
@@ -1883,7 +1884,7 @@ export class AgentView implements Component, Focusable {
 				this.justKilled === row.id ? "stopped · ctrl+x again to delete" : "ctrl+x again to delete",
 			);
 		}
-		const text = clean(row.detail);
+		const text = row.wakesAt !== undefined ? `wakes ${wakeupClock(row.wakesAt)}` : clean(row.detail);
 		const lead = [
 			this.viewMode === "directory" ? cc.fg(STATE_COLOR[row.state], STATE_WORDS[row.state]) : "",
 			row.livePanes ? cc.fg("warning", livePanesWarning(row.livePanes)) : "",

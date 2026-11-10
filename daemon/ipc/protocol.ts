@@ -36,6 +36,8 @@ export interface PaneHeartbeat {
 	dialog?: PaneDialog;
 	/** Its prompt holds unsent text. */
 	draft?: boolean;
+	/** When its earliest pending wake-up is due (ms since the epoch). */
+	wakesAt?: number;
 	/** A run's: the tmux session of the orchestrator that launched it. Agent view and the phone leave it out. */
 	parent?: string;
 }
@@ -55,6 +57,7 @@ const PANE_HEARTBEAT_KEYS = Object.keys({
 	leafId: true,
 	dialog: true,
 	draft: true,
+	wakesAt: true,
 	parent: true,
 } satisfies Record<keyof PaneHeartbeat, true>) as (keyof PaneHeartbeat)[];
 

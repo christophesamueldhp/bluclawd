@@ -189,6 +189,7 @@ describe("a pane's heartbeat, from its register request to agent view's row and 
 		leafId: "e7",
 		dialog: { kind: "confirm", title: "Allow bash?" },
 		draft: true,
+		wakesAt: Date.parse("2026-10-12T01:00:00.000Z"),
 	} satisfies Required<Omit<PaneHeartbeat, "parent">>;
 
 	it("carries every field to the listed summary, and each the row and the phone show", async () => {
