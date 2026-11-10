@@ -124,6 +124,8 @@ export interface RegistryDeps {
 	tmux: TmuxProbe;
 	/** Where instances.json lives. */
 	dir: string;
+	/** The wake-ups the daemon holds: a deleted row's session has none fired for it. */
+	wakeups?: { drop(sessionFile: string): void };
 }
 
 /**
@@ -822,11 +824,13 @@ export class ServerSupervisor {
 			if (getInstance(this.deps.dir, at.id)) removeInstance(this.deps.dir, at.id);
 			// Its pi may be quitting already: that quit's hand-off save does not bring it back.
 			this.recordDeleted(at.pane.record.id, at.pane.record.sessionFile);
+			if (at.pane.record.sessionFile) this.deps.wakeups?.drop(at.pane.record.sessionFile);
 			return true;
 		}
 		const stored = getInstance(this.deps.dir, instanceId);
 		if (!stored) return false;
 		this.recordDeleted(stored.sessionFile && this.droppedPaneOn.get(stored.sessionFile), stored.sessionFile);
+		if (stored.sessionFile) this.deps.wakeups?.drop(stored.sessionFile);
 		removeInstance(this.deps.dir, instanceId);
 		return true;
 	}

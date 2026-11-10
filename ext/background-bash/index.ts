@@ -32,7 +32,9 @@ import {
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { stripAnsi } from "../../daemon/ansi.ts";
-import { runParent } from "../../daemon/tmux.ts";
+import { currentDaemonBuildId, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
+import { endedAsQuit, piCommand, runParent, Tmux } from "../../daemon/tmux.ts";
+import { type HeldWakeups, processStart } from "../../daemon/wakeups.ts";
 import { agentTasks, isAgentTaskId, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { sharedRef } from "../_shared/global-state.ts";
@@ -152,6 +154,42 @@ const isEditor = (component: unknown) => typeof (component as { getText?: unknow
  */
 const lastMainSession = sharedRef<string | undefined>("backgroundBash.lastMainSession", undefined);
 
+/** When this process started, as the daemon tells it from a later one given its pid; asked of `ps` once. */
+let processStartedAt: number | undefined;
+function thisProcessStart(): number | undefined {
+	processStartedAt ??= processStart(process.pid);
+	return processStartedAt;
+}
+
+/** Whether a SIGHUP or SIGTERM came: pi takes one for a quit, which ADR-0009 counts as a crash. One process-wide watch. */
+const signals = sharedRef("backgroundBash.signals", { watching: false, received: false }).get();
+function watchSignals(): void {
+	if (signals.watching) return;
+	signals.watching = true;
+	for (const signal of ["SIGHUP", "SIGTERM"] as const) {
+		const listener = () => {
+			signals.received = true;
+			// Alone, it would keep the process from ending on the signal: it ends as it would have.
+			if (process.listenerCount(signal) === 1) {
+				process.off(signal, listener);
+				process.kill(process.pid, signal);
+			}
+		};
+		process.on(signal, listener);
+	}
+}
+
+/**
+ * Whether this quit is a signal nobody asked for (a closed terminal, a kill, a logout), not the user's quit or one
+ * bluclawd sent (Tmux.end). Asked once every listener of the signal has run, whichever ran first.
+ */
+async function killedBySignal(): Promise<boolean> {
+	await new Promise((resolve) => setImmediate(resolve));
+	if (!signals.received) return false;
+	const pane = Tmux.currentPane();
+	return !(pane && endedAsQuit(pane));
+}
+
 const backgroundBash: InlineExtension = {
 	name: "background-bash",
 	factory: (pi) => {
@@ -215,8 +253,45 @@ const backgroundBash: InlineExtension = {
 			});
 		};
 
-		const recordWakeupEnd = (wakeup: Pick<Wakeup, "id">, end: WakeupEnd) =>
+		let handing = Promise.resolve();
+		/**
+		 * Hands the daemon the session's pending wake-ups each time they change, so it can take one for the session once
+		 * this pi is gone (ADR-0009). Sent in order; one lost on the way is made up for by the session log, which the
+		 * daemon reads again before it acts.
+		 */
+		const handOff = () => {
+			const session = owner();
+			const sessionFile = ctx?.sessionManager.getSessionFile();
+			const startedAt = thisProcessStart();
+			if (ctx?.mode !== "tui" || session === undefined || !sessionFile || startedAt === undefined) return;
+			const held: HeldWakeups = {
+				sessionFile,
+				cwd: ctx.sessionManager.getCwd(),
+				label: ctx.sessionManager.getSessionName(),
+				holder: { pid: process.pid, startedAt },
+				launch: { command: piCommand() },
+				wakeups: wakeups
+					.list(session)
+					.map(({ id, prompt, dueAt, scheduledAt }) => ({ id, prompt, dueAt, scheduledAt })),
+			};
+			handing = handing
+				.then(async () => {
+					const client = new OrchestratorClient();
+					// Scheduling one starts the daemon, as agent view does; one not running holds none to take back. One of an
+					// older build is replaced, as agent view replaces it: it would not know a hand-off.
+					const info = await client.getDaemonInfo();
+					if (!info.running && held.wakeups.length === 0) return;
+					if (info.running && info.buildId !== currentDaemonBuildId()) await client.restartDaemon();
+					else if (!info.running) await client.ensureDaemon();
+					await client.holdWakeups(held);
+				})
+				.catch(() => {});
+		};
+
+		const recordWakeupEnd = (wakeup: Pick<Wakeup, "id">, end: WakeupEnd) => {
 			pi.appendEntry<WakeupEndRecord>(WAKEUP_END_ENTRY, { id: wakeup.id, end });
+			handOff();
+		};
 
 		/**
 		 * The session's pending wake-ups, rebuilt from its log; overdue ones fall due at once. A fork's new session gets
@@ -285,6 +360,7 @@ const backgroundBash: InlineExtension = {
 						dueAt: wakeup.dueAt,
 						scheduledAt: wakeup.scheduledAt,
 					});
+					handOff();
 					return { content: [{ type: "text", text: wakeupScheduledText(wakeup) }], details: undefined };
 				},
 			});
@@ -448,6 +524,10 @@ const backgroundBash: InlineExtension = {
 			if (event.reason === "new" && previous && previous !== session) backgroundBashJobs.reown(previous, session);
 			lastMainSession.set(session);
 			if (!runParent()) restoreWakeups(event, startCtx);
+			// This pi holds them now: the daemon leaves them to it while it runs.
+			if (wakeups.list(session).length > 0) handOff();
+			// Only pi's own TUI ends on its signal handlers; a listener here would keep a print run from ending on one.
+			if (startCtx.mode === "tui") watchSignals();
 			if (event.reason === "startup" || event.reason === "resume") reportOrphanShells(startCtx);
 			pillSelected = false;
 			for (const off of cleanups.splice(0)) off();
@@ -524,12 +604,14 @@ const backgroundBash: InlineExtension = {
 			return { action: "continue" };
 		});
 
-		pi.on("session_shutdown", (event) => {
-			// A reload, or a `/resume` of the session itself, leaves its wake-ups pending for the next instance.
+		pi.on("session_shutdown", async (event) => {
+			// A reload, or a `/resume` of the session itself, leaves its wake-ups pending for the next instance, and so
+			// does a crash (ADR-0009).
 			const session = owner();
 			const kept =
 				event.reason === "reload" ||
-				(event.reason === "resume" && event.targetSessionFile === ctx?.sessionManager.getSessionFile());
+				(event.reason === "resume" && event.targetSessionFile === ctx?.sessionManager.getSessionFile()) ||
+				(event.reason === "quit" && (await killedBySignal()));
 			if (kept) {
 				if (session !== undefined) wakeups.release(session);
 			} else cancelWakeups();

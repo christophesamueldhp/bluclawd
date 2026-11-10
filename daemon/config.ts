@@ -49,3 +49,7 @@ export function getInstancesPath(dir: string): string {
 export function getDeletedPath(dir: string): string {
 	return join(dir, "deleted.json");
 }
+
+export function getWakeupsPath(dir: string): string {
+	return join(dir, "wakeups.json");
+}

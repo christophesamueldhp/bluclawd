@@ -1,7 +1,8 @@
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { getDeletedPath, getInstancesPath } from "./config.ts";
+import { getDeletedPath, getInstancesPath, getWakeupsPath } from "./config.ts";
 import { ensureServerDir } from "./paths.ts";
 import type { InstanceRecord } from "./types.ts";
+import type { HeldWakeups } from "./wakeups.ts";
 
 /** A deleted row, kept so it does not come back by itself. `paneId`: the pane it was listed as (its
  *  registration id, its tmux session's name), ended should it beat again. `sessionFile`: a session of
@@ -54,6 +55,21 @@ export function loadDeleted(dir: string): DeletedRow[] {
 export function saveDeleted(dir: string, deleted: DeletedRow[]): void {
 	ensureServerDir(dir);
 	writeJson(getDeletedPath(dir), deleted);
+}
+
+/** Each session's pending wake-ups its pi handed over (daemon/wakeups.ts). */
+export function loadWakeups(dir: string): HeldWakeups[] {
+	try {
+		const parsed = JSON.parse(readFileSync(getWakeupsPath(dir), "utf-8")) as HeldWakeups[];
+		return Array.isArray(parsed) ? parsed : [];
+	} catch {
+		return [];
+	}
+}
+
+export function saveWakeups(dir: string, held: HeldWakeups[]): void {
+	ensureServerDir(dir);
+	writeJson(getWakeupsPath(dir), held);
 }
 
 export function getInstance(dir: string, instanceId: string): InstanceRecord | undefined {

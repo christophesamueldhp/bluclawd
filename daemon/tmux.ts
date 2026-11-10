@@ -9,7 +9,7 @@
 
 import { execFile, execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ensureServerDir, getServerDir } from "./paths.ts";
@@ -137,6 +137,19 @@ function parseShells(out: string): Omit<ShellInfo, "lastLine">[] {
 		});
 	}
 	return shells;
+}
+
+/** Where {@link Tmux.end} leaves word that it hung pane `name` up. */
+const endingMark = (dir: string, name: string) => join(dir, "ending", name);
+
+/** Whether {@link Tmux.end} hung pane `name` up, as a quit, rather than a signal from elsewhere; it answers once. */
+export function endedAsQuit(name: string, dir: string = getServerDir()): boolean {
+	try {
+		rmSync(endingMark(dir, name));
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 /** Ends session `name`, as a hang-up; one already gone, or that tmux cannot reach now, is left as it is. */
@@ -435,9 +448,24 @@ export class Tmux {
 		);
 	}
 
-	/** End a pane's pi as quitting does: tmux hangs it up, and it saves its session as a stopped row. */
+	/**
+	 * End a pane's pi as quitting does: tmux hangs it up, and it saves its session as a stopped row. It is left word
+	 * first, so it takes the hang-up for a quit, not for a crash (endedAsQuit).
+	 */
 	end(name: string): void {
-		this.run(["kill-session", "-t", `=${name}`]);
+		const mark = endingMark(this.dir, name);
+		try {
+			mkdirSync(join(this.dir, "ending"), { recursive: true });
+			writeFileSync(mark, "");
+		} catch {
+			// Unmarked, it keeps its wake-ups, as after a crash.
+		}
+		try {
+			this.run(["kill-session", "-t", `=${name}`]);
+		} catch (error) {
+			rmSync(mark, { force: true });
+			throw error;
+		}
 	}
 
 	/**

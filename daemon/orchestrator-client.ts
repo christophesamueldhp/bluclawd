@@ -16,8 +16,10 @@ import type {
 	StartFailedRequest,
 	StartRequest,
 	StartSpec,
+	WakeupsRequest,
 } from "./ipc/protocol.ts";
 import { daemonBuildId, getSocketPath } from "./paths.ts";
+import type { HeldWakeups } from "./wakeups.ts";
 
 export type { AgentActivity, EndReason };
 export type { InstanceSummary };
@@ -46,7 +48,8 @@ type Request =
 	| StartFailedRequest
 	| ({ type: "remote" } & RemoteAction)
 	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null; entryId?: string }
-	| { type: "remote_report"; instanceId: string; report: PaneReport };
+	| { type: "remote_report"; instanceId: string; report: PaneReport }
+	| WakeupsRequest;
 
 interface AnyResponse {
 	type: string;
@@ -281,6 +284,11 @@ export class OrchestratorClient {
 	/** This pane's model, context and usage, for the phone's status sheet. */
 	async remoteReport(instanceId: string, report: PaneReport): Promise<void> {
 		await this.request({ type: "remote_report", instanceId, report }, 1000);
+	}
+
+	/** Hands the daemon a session's pending wake-ups, replacing what it held for that session. */
+	async holdWakeups(held: HeldWakeups): Promise<void> {
+		await this.request({ type: "wakeups", held });
 	}
 
 	async unregister(instanceId: string, reason?: EndReason): Promise<void> {

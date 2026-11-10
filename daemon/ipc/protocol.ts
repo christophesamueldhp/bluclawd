@@ -1,5 +1,6 @@
 import type { AgentActivity } from "../activity.ts";
 import type { InstanceStatus } from "../types.ts";
+import type { HeldWakeups } from "../wakeups.ts";
 
 export interface ListRequest {
 	type: "list";
@@ -160,6 +161,12 @@ export type EndReason = "quit" | "reload" | "new" | "resume" | "fork";
  *  unregisters on that one only) or a fork. */
 export function endedForAnother(reason: EndReason | undefined): boolean {
 	return reason === "new" || reason === "resume" || reason === "fork";
+}
+
+/** A session's pending wake-ups, which its pi hands over each time they change (daemon/wakeups.ts). */
+export interface WakeupsRequest {
+	type: "wakeups";
+	held: HeldWakeups;
 }
 
 export interface UnregisterRequest {
@@ -393,6 +400,7 @@ interface RequestMap {
 	remote: RemoteRequest;
 	remote_live: RemoteLiveRequest;
 	remote_report: RemoteReportRequest;
+	wakeups: WakeupsRequest;
 }
 
 export type ServerRequest = RequestMap[keyof RequestMap];
@@ -527,6 +535,7 @@ interface ResponseMap {
 	remote: RemoteResponse;
 	remote_live: AckResponse;
 	remote_report: AckResponse;
+	wakeups: AckResponse;
 }
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;
