@@ -138,7 +138,6 @@ describe.skipIf(!hasTmux)("a run's usage, in its own session", () => {
 			endedAt: Date.now(),
 			deliveryMode: "background",
 			status: "closed",
-			complete: false,
 			usage: oldUsage,
 			backgroundDeliveryAttempted: true,
 		});

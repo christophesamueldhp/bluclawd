@@ -47,7 +47,6 @@ function persistedRecord(overrides: Partial<SubagentRunRecord>): SubagentRunReco
 		endedAt: 2000,
 		deliveryMode: "background",
 		status: "closed",
-		complete: false,
 		usage: createEmptySubagentUsage(),
 		backgroundDeliveryAttempted: true,
 		...overrides,

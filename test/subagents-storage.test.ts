@@ -74,7 +74,6 @@ function makeRecord(overrides: Partial<SubagentRunRecord> = {}): SubagentRunReco
 		startedAt: 1050,
 		deliveryMode: "foreground",
 		status: "running",
-		complete: false,
 		usage: {
 			...createEmptySubagentUsage(),
 			input: 200,
@@ -157,15 +156,15 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		};
 
 		const runningRec = makeRecord({ runId: "sub_orphan_1", status: "running" });
-		const completedRec = makeRecord({ runId: "sub_done_2", status: "closed", endedAt: 2000 });
+		const closedRec = makeRecord({ runId: "sub_done_2", status: "closed", endedAt: 2000 });
 		const abandonedBranchRec = makeRecord({ runId: "sub_abandoned_3", status: "running" });
 
 		writePersistedRunRecord(agentDir, runningRec);
-		writePersistedRunRecord(agentDir, completedRec);
+		writePersistedRunRecord(agentDir, closedRec);
 		writePersistedRunRecord(agentDir, abandonedBranchRec);
 
 		appendParentRunReference(fakePi, runningRec);
-		appendParentRunReference(fakePi, completedRec);
+		appendParentRunReference(fakePi, closedRec);
 		expect(appendedEntries).toHaveLength(2);
 		expect(appendedEntries[0].customType).toBe(SUBAGENT_RUN_CUSTOM_ENTRY);
 
@@ -187,8 +186,8 @@ describe("Task 5 (M1) — Subagent storage, atomic records, reconciliation, and 
 		const reloadedOrphan = readPersistedRunRecord(agentDir, runningRec.parentSessionId, "sub_orphan_1");
 		expect(reloadedOrphan?.status).toBe("interrupted");
 
-		const reloadedCompleted = readPersistedRunRecord(agentDir, completedRec.parentSessionId, "sub_done_2");
-		expect(reloadedCompleted?.status).toBe("closed");
+		const reloadedClosed = readPersistedRunRecord(agentDir, closedRec.parentSessionId, "sub_done_2");
+		expect(reloadedClosed?.status).toBe("closed");
 	});
 
 	it("reconciles a run in tmux its orchestrator never closed as closed, resumable from the session it kept, and in the background", () => {

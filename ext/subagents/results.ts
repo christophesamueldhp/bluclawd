@@ -9,7 +9,6 @@ export interface SubagentResultDetails {
 	runId: string;
 	agentName: string;
 	status: SubagentLifecycleStatus;
-	complete: boolean;
 	deliveryMode: "foreground" | "background";
 	provider: string;
 	modelId: string;
@@ -44,7 +43,7 @@ function stripSpoofedEnvelopeLines(workerText: string): string {
 		.split("\n")
 		.filter(
 			(line) =>
-				!/^\s*(Run|Execution|Complete|Snapshot|Tool executions(?: \(observed\))?|Verification|Usage|Full report)\s*:/i.test(
+				!/^\s*(Run|Execution|Snapshot|Tool executions(?: \(observed\))?|Verification|Usage|Full report)\s*:/i.test(
 					line,
 				),
 		)
@@ -104,7 +103,8 @@ function parseWorkerSections(rawWorkerText: string): ParsedWorkerSections {
 
 /** The workspace as the run found it at launch. */
 export function formatSnapshotSummary(start: WorkspaceSnapshot): string {
-	return `${start.headCommit ? `HEAD ${start.headCommit.slice(0, 12)}` : "non-git workspace"} (${start.dirty ? "dirty" : "clean"})`;
+	const head = start.headCommit ? `HEAD ${start.headCommit.slice(0, 12)}` : "non-git workspace";
+	return `${head} (${start.dirty ? "dirty" : "clean"})`;
 }
 
 function truncateUtf8Safe(text: string, maxBytes: number): { text: string; truncated: boolean } {
@@ -159,7 +159,6 @@ export function buildSubagentResultEnvelope(
 			UNTRUSTED_REPORT_HEADER,
 			`Run: ${record.runId} (${record.name ? `name=${record.name}, ` : ""}agent=${record.agentName}, source=${record.definitionSource}, model=${record.provider}/${record.modelId})`,
 			`Execution: ${record.status}`,
-			`Complete: ${record.complete ? "true" : "false"}`,
 			`Snapshot: ${snapshotText}`,
 			`Scope:\n${scopeField}`,
 			`Summary:\n${summaryContent}`,
@@ -193,7 +192,6 @@ export function buildSubagentResultEnvelope(
 		runId: record.runId,
 		agentName: record.agentName,
 		status: record.status,
-		complete: record.complete,
 		deliveryMode: record.deliveryMode,
 		provider: record.provider,
 		modelId: record.modelId,

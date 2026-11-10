@@ -60,7 +60,6 @@ export interface SubagentRunRecord {
 	stopReason?: string;
 	stopSource?: SubagentStopSource;
 	errorMessage?: string;
-	complete: boolean;
 	/** The usage of the run's session so far, as its latest Report gave it. */
 	usage: SessionUsage;
 	backgroundDeliveryAttempted: boolean;
@@ -248,7 +247,6 @@ export class SubagentRunScheduler<C = unknown> {
 			admittedAt,
 			deliveryMode: request.deliveryMode,
 			status: "starting",
-			complete: false,
 			usage: createEmptySubagentUsage(),
 			backgroundDeliveryAttempted: false,
 		};
@@ -324,7 +322,6 @@ export class SubagentRunScheduler<C = unknown> {
 				lastProgressText: undefined,
 				generation: managed.record.generation + 1,
 				status: "starting",
-				complete: false,
 				deliveryMode: "background",
 				activity: undefined,
 				backgroundDeliveryAttempted: false,
@@ -481,7 +478,7 @@ export class SubagentRunScheduler<C = unknown> {
 			return;
 		}
 		if (!managed.pendingTerminalStatus) {
-			// A run is never cancelled: stopping it closes its pi and keeps its session.
+			// Stopping a run closes its pi and keeps its session.
 			managed.pendingTerminalStatus = "closed";
 			managed.pendingStopSource = source;
 			managed.pendingStopReason = reason;
@@ -524,7 +521,6 @@ export class SubagentRunScheduler<C = unknown> {
 				finalized = {
 					...finalized,
 					status: "failed",
-					complete: false,
 					errorMessage: `Run finalization failed: ${err instanceof Error ? err.message : String(err)}`,
 				};
 				// Store the failure the same way so nothing durable still reads as a success.

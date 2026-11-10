@@ -49,7 +49,6 @@ const storedRun = (parentSessionId: string): SubagentRunRecord => ({
 	endedAt: 2,
 	deliveryMode: "background",
 	status: "interrupted",
-	complete: false,
 	usage: createEmptySubagentUsage(),
 	backgroundDeliveryAttempted: true,
 });

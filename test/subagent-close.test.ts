@@ -260,7 +260,6 @@ describe.skipIf(!hasTmux)("resuming a closed run", () => {
 			endedAt: Date.now(),
 			deliveryMode: "background",
 			status: "closed",
-			complete: false,
 			usage: createEmptySubagentUsage(),
 			backgroundDeliveryAttempted: true,
 		});

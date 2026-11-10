@@ -300,10 +300,8 @@ export function listPersistedRunRecords(agentDir: string, parentSessionId: strin
 /** Maps statuses and stop sources from before the queue and child quotas were removed, and before runs were pis. */
 function decodeLegacyStatus(record: SubagentRunRecord): void {
 	const legacy = record as { status: string; stopSource?: string };
-	if (legacy.status === "timed_out" || legacy.status === "budget_exceeded") {
-		record.stopReason ??=
-			legacy.status === "timed_out" ? "Stopped by a deadline (legacy)" : "Stopped by a budget (legacy)";
-	}
+	if (legacy.status === "timed_out") record.stopReason ??= "Stopped by a deadline (legacy)";
+	if (legacy.status === "budget_exceeded") record.stopReason ??= "Stopped by a budget (legacy)";
 	// An in-process run that ended kept its session, as a closed run does: it can be resumed from it.
 	if (["completed", "cancelled", "timed_out", "budget_exceeded"].includes(legacy.status)) record.status = "closed";
 	// A queued run never started, so reconciliation interrupts it like any other orphan.
@@ -433,7 +431,6 @@ export function reconcileInterruptedRuns(
 				persisted.transcriptPath ??= newestRunSession(runDir);
 				persisted.deliveryMode = "background";
 			}
-			persisted.complete = false;
 			persisted.endedAt = Date.now();
 			persisted.stopReason = "orphaned_on_restart";
 			writePersistedRunRecord(agentDir, persisted);

@@ -12,7 +12,7 @@ const fixture = (files: Record<string, string>) => {
 	return dir;
 };
 
-describe("live subagent evaluation guardrails", () => {
+describe("subagent evaluation guardrails", () => {
 	it("reserves the shared parent/child allowance before starting another request", () => {
 		const budget = new EvaluationBudget(1, 100, 1);
 		budget.reserve(10, 0.1);

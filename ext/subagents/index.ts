@@ -47,6 +47,7 @@ import { isTerminalSubagentStatus } from "./runs.ts";
 import {
 	appendSubagentMessageRecord,
 	extractReferencedRunIdsFromBranch,
+	listPersistedRunRecords,
 	readPersistedRunRecord,
 	reconcileInterruptedRuns,
 } from "./storage.ts";
@@ -399,11 +400,16 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 			const branchEntries = ctx.sessionManager.getBranch();
 			// Its open runs whose pis still run, after a reload or a crash of the instance that ran them: this instance
-			// takes them over (ADR-0008). Those this process runs already are left as they are.
+			// takes them over (ADR-0008). Those this process runs already are left as they are. A run is on the branch
+			// as tree navigation judges it, by the entry it was launched from.
 			if (pane) {
-				for (const runId of extractReferencedRunIdsFromBranch(branchEntries)) {
-					const run = readPersistedRunRecord(agentDir, sessionId, runId);
-					if (run?.pane && !isTerminalSubagentStatus(run.status) && paneUp(timedTmux(), run.pane))
+				for (const run of listPersistedRunRecords(agentDir, sessionId)) {
+					if (
+						run.pane &&
+						!isTerminalSubagentStatus(run.status) &&
+						parentScope.onBranch(run.originEntryId) &&
+						paneUp(timedTmux(), run.pane)
+					)
 						admission.adopt(run, ctx);
 				}
 			}
@@ -836,7 +842,6 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						runId: handle.runId,
 						agentName: handle.record.agentName,
 						status: handle.record.status,
-						complete: false,
 						deliveryMode: "background",
 						provider: handle.record.provider,
 						modelId: handle.record.modelId,

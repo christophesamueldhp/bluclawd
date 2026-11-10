@@ -7,7 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFil
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-/** The harness's own spend allowance for live trials; never a limit on production runs. */
+/** An evaluation's own spend allowance; never a limit on production runs. */
 export class EvaluationBudget {
 	private requests = 0;
 	private tokens = 0;

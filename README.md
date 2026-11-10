@@ -499,8 +499,6 @@ work around it.
 `scripts/eval-subagents.ts`: a run is graded by the fixture's own tests and the final tree, never by what
 the transcript claims, so a run with failing tests is incorrect however confident its report is, and a
 helper written twice is a duplicate even when the tests pass.
-There is no live evaluation: its `pi -p` runs went outside tmux, where subagents are refused, so it was
-removed. The last recorded live evidence (2026-10-28, issue #15) predates runs being pis of their own.
 
 ## Permissions
 

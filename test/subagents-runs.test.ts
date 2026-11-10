@@ -191,7 +191,7 @@ describe("Task 3 (M1) — Run state and cancellation", () => {
 		expect(scheduler.getRun(run.runId)?.status).toBe("stopping");
 		expect(scheduler.listActiveRuns().map((r) => r.runId)).toEqual([run.runId]);
 
-		stuckGate.resolve({ status: "closed", summaryText: "late" });
+		stuckGate.resolve({ status: "failed", summaryText: "late" });
 		const done = await run.completion;
 		expect(done.status).toBe("closed");
 		expect(scheduler.listActiveRuns()).toEqual([]);
@@ -245,7 +245,7 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 			onStateChange: (record) => changes.push(record.status),
 		});
 		const done = await admitted(scheduler.admit(makeRequest())).completion;
-		expect(done).toMatchObject({ status: "failed", complete: false });
+		expect(done).toMatchObject({ status: "failed" });
 		expect(done.errorMessage).toMatch(/finaliz.*disk full/i);
 		expect(changes.at(-1)).toBe("failed");
 		expect(changes).not.toContain("closed");
@@ -275,7 +275,7 @@ describe("Ticket #12 — Completion resolves only after durable finalization", (
 			settled = true;
 		});
 
-		runnerGate.resolve({ status: "closed", summaryText: "late" });
+		runnerGate.resolve({ status: "failed", summaryText: "late" });
 		await tick();
 		expect(settled).toBe(false);
 		finalizerGate.resolve();
