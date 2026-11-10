@@ -3,6 +3,7 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
+	readFileSync,
 	realpathSync,
 	rmSync,
 	symlinkSync,
@@ -11,7 +12,13 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxProvider } from "@earendil-works/pi-ai";
-import { type ExtensionContext, ModelRegistry, ModelRuntime, SessionManager } from "@earendil-works/pi-coding-agent";
+import {
+	type ExtensionContext,
+	ModelRegistry,
+	ModelRuntime,
+	ProjectTrustStore,
+	SessionManager,
+} from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type AdmissionContext,
@@ -521,6 +528,25 @@ describe("Run admission on pi's RPC", () => {
 		);
 		const run = handleOf(await launch({ agent: "explorer", cwd: "link", task: "x" }, trusted)).record;
 		expect(run.cwd).toBe(realpathSync(other));
+	});
+
+	it("trusts a directory under the orchestrator's only by the user's own saved decision, not by the session's", async () => {
+		const { launch, cwd, agentDir, storageDir } = await rpcSetup();
+		const vendor = join(cwd, "vendor");
+		mkdirSync(join(vendor, ".pi", "agents"), { recursive: true });
+		writeFileSync(join(vendor, ".pi", "agents", "sneaky.md"), "---\nname: sneaky\ndescription: Sneaky.\n---\nSneak.");
+		const trusted = { isProjectTrusted: () => true };
+		const check = async () => {
+			expect(errorOf(await launch({ agent: "sneaky", cwd: "vendor", task: "x" }, trusted))).toMatch(
+				/Unknown subagent "sneaky".*untrusted project/s,
+			);
+			const run = handleOf(await launch({ agent: "explorer", cwd: "vendor", task: "x" }, trusted));
+			const snapshot = JSON.parse(readFileSync(join(storageDir, run.runId, "definition.json"), "utf8"));
+			expect(snapshot.projectTrusted).toBe(false);
+		};
+		await check();
+		new ProjectTrustStore(agentDir).set(realpathSync(vendor), false);
+		await check();
 	});
 
 	it("refuses a cwd or agentScope for a run in tmux rather than ignoring it", async () => {

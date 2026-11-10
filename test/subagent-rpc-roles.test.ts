@@ -90,6 +90,8 @@ describe.skipIf(!hasTmux)("an RPC run's directory and role", () => {
 		role(real.cwd, "outsider", "Above the repository.");
 		role(repo, "explorer", "Repository explorer.");
 		role(pkg, "explorer", "Package explorer.");
+		// The user trusts the workspace, as /trust saves it: its directories inherit that decision.
+		new ProjectTrustStore(real.agentDir).set(realpathSync(real.cwd), true);
 		role(real.agentDir, "explorer", "User explorer.", "agents");
 		const inline = { name: "explorer", description: "Inline.", instructions: "Inline explorer." };
 		const launches: Array<JsonObject & { name: string }> = [

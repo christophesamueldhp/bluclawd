@@ -17,8 +17,9 @@ export interface RunWorkspace {
 	 */
 	root: string;
 	/**
-	 * Whether the user trusts the project resources of `dir`, real: in or under the orchestrator's directory, as its
-	 * session does; elsewhere only by a decision the user saved. A directory never gains trust by being chosen.
+	 * Whether the user trusts the project resources of `dir`, real: the orchestrator's own directory as its session
+	 * does; any other, under it or not, only by a decision the user saved, as pi decides per directory. A directory
+	 * never gains trust by being chosen.
 	 */
 	trusted(dir: string): boolean;
 }
@@ -59,7 +60,7 @@ export function resolveRunWorkspace(
 		workspace: {
 			cwd,
 			root: repositoryRoot(cwd) ?? (within(launchingCwd, cwd) ? launchingCwd : cwd),
-			trusted: (dir) => (within(launchingCwd, dir) ? launching.projectTrusted : store.get(dir) === true),
+			trusted: (dir) => (dir === launchingCwd ? launching.projectTrusted : store.get(dir) === true),
 		},
 	};
 }
