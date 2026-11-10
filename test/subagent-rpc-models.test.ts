@@ -73,13 +73,20 @@ describe.skipIf(!hasTmux)("an RPC run's model and thinking", () => {
 			// The orchestrator's level, which faux-1 cannot think at: refused, not lowered.
 			{ name: "refused", args: { agent: role("plain"), model: "faux/faux-1" } },
 		];
+		// In the background, so the runs start side by side; each Report then wakes the orchestrator.
 		real.script("main", [
-			...runs.map(({ name, args }) => ({ tool: "subagent", args: { ...args, name, task: "Answer." } })),
-			{ text: "done" },
+			...runs.map(({ name, args }) => ({
+				tool: "subagent",
+				args: { ...args, name, task: "Answer.", background: true },
+			})),
+			...runs.map(() => ({ text: "noted" })),
 		]);
 		for (const { name } of runs) real.script(name, [{ text: `${name} answered` }]);
 		real.start(["--model", "faux/faux-2", "--thinking", "medium", "--", "delegate"]);
-		const results = subagentResults(await real.waitForRequests("main", runs.length + 1));
+		// Reports may wake it more than once by now.
+		await waitFor(() => expect(real.requests("main").length).toBeGreaterThan(runs.length));
+		const results = subagentResults(real.requests("main").slice(0, runs.length + 1));
+		for (const { name } of runs.slice(0, -1)) await real.waitForRequests(name, 1);
 
 		expect(Object.fromEntries(runs.map(({ name }) => [name, asked(real.requests(name))]))).toEqual({
 			parents: ["faux/faux-2:medium"],
