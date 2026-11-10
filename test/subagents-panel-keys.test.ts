@@ -1,6 +1,7 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { stripAnsi } from "../daemon/ansi.ts";
+import { Tmux } from "../daemon/tmux.ts";
 import { agentTasks } from "../ext/_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../ext/_shared/status-keys.ts";
 import { type BackgroundExec, backgroundBashJobs } from "../ext/background-bash/background-bash.ts";
@@ -147,8 +148,22 @@ describe("↓ with background shells running", () => {
 		expect(t.status(STATUS_KEYS.tasks)).toContain("/tasks to manage");
 
 		t.press(DOWN, "x");
-		await waitFor(() => t.panel().length === 0);
+		await waitFor(() => !row(t, "scout"));
 		expect(t.status(STATUS_KEYS.tasks)).toContain("↓ to manage");
+	});
+
+	it("has the pill offer ↓ again once a failed run's row leaves the panel", async () => {
+		const t = await withShell();
+		vi.mocked(Tmux.prototype.newSession).mockImplementationOnce(() => {
+			throw new Error("tmux refused");
+		});
+		t.script([launch(["scout"], { background: true })]);
+		await prompt(t);
+		await waitFor(() => row(t, "scout")?.includes("failed"));
+		expect(t.status(STATUS_KEYS.tasks)).toContain("/tasks to manage");
+
+		t.advance(31_000);
+		await waitFor(() => t.status(STATUS_KEYS.tasks)?.includes("↓ to manage"));
 	});
 
 	it("still selects the tasks pill while the panel is empty", async () => {
@@ -161,7 +176,7 @@ describe("↓ with background shells running", () => {
 });
 
 describe("a focused panel", () => {
-	it("moves between rows with ↑/↓, staying within them", async () => {
+	it("moves between rows with ↑/↓, from main at the top to the last run, staying within them", async () => {
 		const t = await withOpenRuns(["scout", "mapper", "fixer"]);
 
 		// Sibling launches are admitted in no set order.
@@ -174,8 +189,22 @@ describe("a focused panel", () => {
 		expect(selected(t)).toMatch(new RegExp(`^❯ ${last} `));
 		t.press(DOWN);
 		expect(selected(t)).toMatch(new RegExp(`^❯ ${last} `));
-		t.press(UP, UP, UP);
+		t.press(UP, UP);
 		expect(selected(t)).toMatch(new RegExp(`^❯ ${first} `));
+		t.press(UP, UP);
+		expect(selected(t)).toMatch(/^❯ main\b/);
+	});
+
+	it("gives the keyboard back on Enter on main, and hands it an x typed there", async () => {
+		const t = await withOpenRuns(["scout"]);
+
+		t.press(DOWN, UP, "\r");
+		expect(t.editorFocused()).toBe(true);
+		expect(t.editorText()).toBe("");
+		t.press(DOWN, UP, "x");
+		expect(t.editorFocused()).toBe(true);
+		expect(t.editorText()).toBe("x");
+		expect(row(t, "scout")).toBeDefined();
 	});
 
 	/** Three open runs; names in panel order. */
@@ -211,7 +240,7 @@ describe("a focused panel", () => {
 		const t = await withOpenRuns(["scout"]);
 
 		t.press(DOWN);
-		expect(t.panel().at(-1)).toBe("  ↑/↓ to select · x to close · Esc to go back");
+		expect(t.panel().at(-1)).toBe("  ↑/↓ to select · Enter to open · x to close · Esc to go back");
 	});
 
 	it("gives the keyboard back to the prompt on Esc", async () => {
@@ -238,7 +267,7 @@ describe("a focused panel", () => {
 		expect(t.editorFocused()).toBe(false);
 		close(t, "scout");
 		await waitFor(() => t.editorFocused());
-		expect(t.panel()).toEqual([]);
+		expect(t.panel()).toEqual(["/tasks to see subagents"]);
 	});
 });
 
@@ -315,7 +344,7 @@ describe("x on a row", () => {
 		await waitFor(() => !row(t, closed));
 		expect(selected(t)).toMatch(new RegExp(`^❯ ${other} `));
 		t.press("x");
-		await waitFor(() => t.panel().length === 0);
+		await waitFor(() => !row(t, other));
 		expect(t.editorFocused()).toBe(true);
 	});
 });

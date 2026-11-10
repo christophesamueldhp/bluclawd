@@ -144,18 +144,30 @@ describe("the run panel below the status line", () => {
 		expect(status).toMatch(/scout \(explorer, sub_[0-9a-f-]+\): idle/);
 	});
 
-	it("shows at most five rows, then how many more /tasks has", async () => {
+	it("starts with a row for the orchestrator's own session, main", async () => {
 		tui = await createSubagentTui();
-		const names = ["one", "two", "three", "four", "five", "six", "seven"];
-		tui.script([launch(names, { background: true })]);
+		tui.script([launch(["scout"], { background: true })]);
 		await prompt(tui);
-		await waitFor(() => tui!.panel().some((line) => line.includes("more")));
+		await waitFor(() => row(tui!, "scout") ?? false);
 
-		expect(names.filter((name) => row(tui!, name))).toHaveLength(5);
-		expect(tui.panel().at(-1)?.trim()).toBe("+2 more · /tasks");
+		expect(tui.panel()[0]).toMatch(/^ {2}main\b/);
 	});
 
-	it("shows only open runs: one whose pi failed to start is not in it, and is Done in /tasks", async () => {
+	it("keeps three idle runs on rows of their own and counts the rest in one row, as Claude Code does", async () => {
+		tui = await createSubagentTui();
+		const names = ["one", "two", "three", "four", "five", "six"];
+		tui.script([launch(names, { background: true })]);
+		await prompt(tui);
+		await waitFor(() => names.every((name) => row(tui!, name)));
+
+		for (const name of names.slice(1)) tui.activity(name, "idle");
+		await waitFor(() => tui!.panel().at(-1)?.trim() === "2 idle agents");
+		// The working one keeps its row, whatever its place.
+		expect(row(tui, "one")).toBeDefined();
+		expect(names.filter((name) => row(tui!, name))).toHaveLength(4);
+	});
+
+	it("keeps a run whose pi failed to start for 30 s, marked failed, unless x dismisses it", async () => {
 		tui = await createSubagentTui();
 		vi.mocked(Tmux.prototype.newSession).mockImplementationOnce(() => {
 			throw new Error("tmux refused");
@@ -169,7 +181,39 @@ describe("the run panel below the status line", () => {
 					?.listDone?.()
 					.some((task) => task.state === "failed") ?? false,
 		);
-		expect(tui.panel()).toEqual([]);
+		await waitFor(() => row(tui!, "scout")?.includes("failed") ?? false);
+		tui.advance(31_000);
+		await waitFor(() => tui!.panel().length === 0);
+	});
+
+	it("drops a failed run's row after 30 s under pi's own footer too", async () => {
+		tui = await createSubagentTui({ pistatusline: false });
+		vi.mocked(Tmux.prototype.newSession).mockImplementationOnce(() => {
+			throw new Error("tmux refused");
+		});
+		tui.script([launch(["scout"], { background: true })]);
+		await prompt(tui);
+		const below = () => tui!.widget("subagents:panel")?.lines ?? [];
+		await waitFor(() => below().some((line) => line.includes("failed")));
+
+		tui.advance(31_000);
+		await waitFor(() => below().length === 0);
+	});
+
+	it("dismisses a failed run's row with x", async () => {
+		tui = await createSubagentTui();
+		vi.mocked(Tmux.prototype.newSession).mockImplementationOnce(() => {
+			throw new Error("tmux refused");
+		});
+		tui.script([launch(["scout"], { background: true })]);
+		await prompt(tui);
+		await waitFor(() => row(tui!, "scout")?.includes("failed") ?? false);
+
+		tui.press("\x1b[B");
+		expect(tui.panel().at(-1)).toContain("x to dismiss");
+		tui.press("x");
+		await waitFor(() => tui!.panel().length === 0);
+		expect(agentTasks()?.listDone?.()).toEqual([]);
 	});
 
 	it("drops a run as soon as it is closed", async () => {
@@ -180,9 +224,13 @@ describe("the run panel below the status line", () => {
 		]);
 		await prompt(tui);
 
-		await waitFor(() => tui!.panel().length === 0);
-		expect(tui.status(STATUS_KEYS.subagents)).toBeUndefined();
+		await waitFor(() => !row(tui!, "scout"));
+		expect(tui.status(STATUS_KEYS.subagents)).toContain("/tasks to see subagents");
 		expect(tui.runs[0]).toMatchObject({ name: "scout", ended: true });
+		// For 30 s, as Claude Code's footer does.
+		tui.advance(31_000);
+		await waitFor(() => tui!.status(STATUS_KEYS.subagents) === undefined);
+		expect(tui.panel()).toEqual([]);
 	});
 });
 

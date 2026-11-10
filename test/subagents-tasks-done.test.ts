@@ -58,7 +58,8 @@ async function closedRun(extensions?: ExtensionFactory[]) {
 describe("/tasks keeps the closed runs of this session", () => {
 	it("lists a closed run under Done with its model and status, but not on the phone", async () => {
 		({ t: tui } = await closedRun());
-		expect(tui.panel()).toEqual([]);
+		// Only the hint to /tasks is left in the panel.
+		expect(tui.panel()).toEqual(["/tasks to see subagents"]);
 
 		const out = tasks(tui).screen();
 		expect(out).toContain("    Done (1)\n");
