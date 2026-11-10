@@ -289,8 +289,9 @@ async function startInTurn(
 			return { hostPid: await slots.launch(run, host) };
 		} catch (error) {
 			if (signal.aborted) break;
-			// A daemon started anew takes the claim again, from the back of the queue.
-			if (++failures >= QUEUE_TRIES || !(await slots.ensure())) {
+			// A daemon started anew takes the claim again, from the back of the queue; a slow one may only seem down.
+			await slots.ensure();
+			if (++failures >= QUEUE_TRIES) {
 				await slots.release(run).catch(() => {});
 				return { error: error instanceof Error ? error.message : String(error) };
 			}

@@ -188,7 +188,13 @@ describe.skipIf(!hasTmux)("the daemon's queue of RPC runs", () => {
 		const first = runDir(real.agentDir, "first");
 		await waitFor(() => expect(readJson(join(first, "record.json"))).toMatchObject({ status: "closed" }));
 		writeFileSync(resume, "");
-		await real.waitForRequests("main", 4);
+		await waitFor(() =>
+			expect(JSON.stringify(real.requests("main").map(conversation))).toMatch(/Resuming \\"first\\" \(sub_/),
+		);
+		// Queued behind hold, as the Resume is.
+		for (const name of ["later", "denied"]) {
+			expect(readJson(join(runDir(real.agentDir, name), "record.json"))).toMatchObject({ status: "starting" });
+		}
 
 		// Changed while they wait: the role's file, and what the orchestrator denies.
 		auditor("You are AUDITOR-TWO.", "faux/faux-3", "low");
