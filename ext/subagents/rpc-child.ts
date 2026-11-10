@@ -2,11 +2,13 @@
  * The one bluclawd extension an RPC run's pi loads (`-ne -e`): none of the orchestrator's, so the run has no
  * `subagent` or `schedule_wakeup` of its own. Its tools are fixed by a plain `--tools` list; every call, direct or
  * from a codemode script, is checked here as well against what the run was admitted with: one of its tools, and
- * none its orchestrator's or its workspace's deny rules refuse. This also closes the shell that pi's RPC `bash`
+ * none its orchestrator's or its workspace's deny rules refuse. A run that edits changes files only in its own
+ * worktree, and is held there to the rules of the checkout it copies. This also closes the shell that pi's RPC `bash`
  * command runs outside the tool list. Every run also has its own `subagent_message`, which only returns what it
  * would send: the run's host reads that off pi's events and passes it on, so the run reaches nothing itself.
  */
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
 	createCodemodeExtension,
 	type ExtensionAPI,
@@ -34,32 +36,100 @@ export interface RpcDenyRules {
 interface RunPolicy {
 	tools: string[];
 	deny: RpcDenyRules[];
+	/** A run that edits: its worktree's root, and the root of the checkout it copies; both real. */
+	workspace?: { root: string; source: string };
 }
+
+/** pi's tools that change the file at their `path`. */
+const WRITE_TOOLS = ["edit", "write"];
 
 function readPolicy(path: unknown): RunPolicy | undefined {
 	try {
-		const { tools, deny } = JSON.parse(readFileSync(String(path), "utf8"));
+		const { tools, deny, workspace } = JSON.parse(readFileSync(String(path), "utf8"));
 		const strings = (list: unknown) => Array.isArray(list) && list.every((item) => typeof item === "string");
+		const root = workspace?.root;
+		const source = workspace?.baseline?.source;
 		const valid =
 			strings(tools) &&
 			Array.isArray(deny) &&
-			deny.every((set) => typeof set?.cwd === "string" && strings(set.rules));
-		return valid ? { tools, deny } : undefined;
+			deny.every((set) => typeof set?.cwd === "string" && strings(set.rules)) &&
+			(workspace === undefined || (typeof root === "string" && typeof source === "string"));
+		return valid ? { tools, deny, ...(workspace ? { workspace: { root, source } } : {}) } : undefined;
 	} catch {
 		return undefined;
 	}
 }
 
+function within(root: string, path: string): boolean {
+	const rel = relative(root, path);
+	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
 /**
  * A call's input as the run spelled it, from its own directory, and with its path made absolute, from the directory
- * a set of rules was set in: a rule refuses the call if it matches either.
+ * a set of rules was set in; in a worktree, also as the path of the same file in the checkout it copies. A rule
+ * refuses the call if it matches any.
  */
-function spellings(input: Record<string, unknown>, cwd: string, rulesCwd: string): [Record<string, unknown>, string][] {
-	const path = typeof input.path === "string" && input.path ? input.path : ".";
-	return [
+function spellings(
+	input: Record<string, unknown>,
+	cwd: string,
+	rulesCwd: string,
+	workspace: RunPolicy["workspace"],
+): [Record<string, unknown>, string][] {
+	const path = resolveToCwd(typeof input.path === "string" && input.path ? input.path : ".", cwd);
+	const found: [Record<string, unknown>, string][] = [
 		[input, cwd],
-		[{ ...input, path: resolveToCwd(path, cwd) }, rulesCwd],
+		[{ ...input, path }, rulesCwd],
 	];
+	if (!workspace) return found;
+	// As spelled, and as the file system names it: another case, or a link within the worktree, is the same file.
+	let real = path;
+	try {
+		real = realpathSync.native(path);
+	} catch {
+		// Not there yet: only its spelling names it.
+	}
+	for (const candidate of new Set([path, real])) {
+		if (!within(workspace.root, candidate)) continue;
+		found.push([{ ...input, path: join(workspace.source, relative(workspace.root, candidate)) }, rulesCwd]);
+	}
+	return found;
+}
+
+/**
+ * Why a run may not change the file at `path`: it has no worktree, or the file is not in it once every link on the way
+ * is followed, or it is in its `.git`, which leads to the Git state its checkout shares.
+ */
+function unwritable(workspace: RunPolicy["workspace"], path: unknown, cwd: string): string | undefined {
+	if (!workspace) return "Refused: this run has no worktree of its own to change files in.";
+	if (typeof path !== "string" || !path) return "Refused: no path to change.";
+	const target = resolveToCwd(path, cwd);
+	const outside = `Refused: ${path} is outside this run's worktree, ${workspace.root}; it may change files only there.`;
+	if (!within(workspace.root, target)) return outside;
+	if (
+		relative(workspace.root, target)
+			.split(sep)
+			.some((segment) => segment.toLowerCase() === ".git")
+	) {
+		return `Refused: ${path} is Git's own state, which this run may not change.`;
+	}
+	// What exists of the path, links followed, is where the file lands: a link out of the worktree leads out of it.
+	let existing = target;
+	for (;;) {
+		try {
+			lstatSync(existing);
+			break;
+		} catch {
+			existing = dirname(existing);
+		}
+	}
+	try {
+		if (!within(workspace.root, realpathSync(existing))) return outside;
+	} catch {
+		// A link to nothing: where a write through it lands cannot be checked.
+		return outside;
+	}
+	return undefined;
 }
 
 export default function rpcChild(pi: ExtensionAPI): void {
@@ -81,8 +151,17 @@ export default function rpcChild(pi: ExtensionAPI): void {
 		if (!admitted.tools.includes(event.toolName)) {
 			return { block: true, reason: `Refused: this run was not given ${event.toolName}.` };
 		}
+		if (WRITE_TOOLS.includes(event.toolName)) {
+			const refused = unwritable(admitted.workspace, (event.input as { path?: unknown }).path, ctx.cwd);
+			if (refused) return { block: true, reason: refused };
+		}
 		for (const { cwd, rules } of admitted.deny) {
-			for (const [input, at] of spellings(event.input as Record<string, unknown>, ctx.cwd, cwd)) {
+			for (const [input, at] of spellings(
+				event.input as Record<string, unknown>,
+				ctx.cwd,
+				cwd,
+				admitted.workspace,
+			)) {
 				const denied = evaluateToolCallDeny(rules, event.toolName, input, at);
 				if (denied) return denied;
 			}
@@ -94,8 +173,14 @@ export default function rpcChild(pi: ExtensionAPI): void {
 	pi.on("tool_result", (event, ctx): ToolResultEventResult | undefined => {
 		let content = event.content as Array<{ type: string; text?: string; [k: string]: unknown }>;
 		let filtered: ToolResultEventResult | undefined;
-		for (const { cwd, rules } of currentPolicy()?.deny ?? []) {
-			for (const [input, at] of spellings(event.input as Record<string, unknown>, ctx.cwd, cwd)) {
+		const admitted = currentPolicy();
+		for (const { cwd, rules } of admitted?.deny ?? []) {
+			for (const [input, at] of spellings(
+				event.input as Record<string, unknown>,
+				ctx.cwd,
+				cwd,
+				admitted?.workspace,
+			)) {
 				const result = filterDeniedGrepToolResult(
 					rules,
 					{

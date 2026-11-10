@@ -2,9 +2,9 @@
  * Runs on pi's RPC (ADR-0010), behind a switch until they replace runs in tmux: a run is a pi with no pane, held by
  * a host process of its own (rpc-host.ts), that takes its task in a fresh session, stores its Report once its work
  * settles, and exits; a Resume starts another on its saved session, as its next generation. Either waits its turn
- * in the daemon's queue (daemon/run-queue.ts), which starts the host once a slot is free. For now a run only
- * reads: its tools are a plain allowlist of pi's read tools and codemode, anything else is refused at Admission, and
- * its pi checks every call again (rpc-child.ts).
+ * in the daemon's queue (daemon/run-queue.ts), which starts the host once a slot is free. Its tools are a plain
+ * allowlist of pi's read tools, codemode and, for a run that edits, edit and write, confined to a worktree of its own
+ * (run-worktree.ts); anything else is refused at Admission, and its pi checks every call again (rpc-child.ts).
  */
 
 import { randomUUID } from "node:crypto";
@@ -23,6 +23,12 @@ import { type RpcDenyRules, RUN_DEFINITION_FLAG } from "./rpc-child.ts";
 import { prepareRpcHost, processAlive, processGroupAlive, readRpcHostState, stopRpcHost } from "./rpc-host.ts";
 import { openRunInbox, type RunOutboxMessage, readRunOutbox, sealedRunInbox, sealRunInbox } from "./run-mailbox.ts";
 import { rpcRunMessageText, runTaskText } from "./run-messages.ts";
+import {
+	describeWorkspace,
+	type IsolatedWorkspace,
+	materializeWorktree,
+	workspaceInstructions,
+} from "./run-worktree.ts";
 import type { RunRuntimeOutcome, SubagentRunExecuteParams, SubagentRunOutcome } from "./runs.ts";
 import { readRunReports, storedRunReportTextPath } from "./storage.ts";
 import type { RunReports } from "./tmux-runs.ts";
@@ -41,8 +47,14 @@ export const rpcRunsEnabled = (): boolean => Boolean(process.env[RPC_RUNS_ENV]);
 
 /** pi's tools that only read. */
 const READ_TOOLS = ["read", "grep", "find", "ls"];
-/** All an RPC run may have until its other capabilities are enforced: the read tools, and codemode over them. */
-const RPC_TOOLS = [...READ_TOOLS, "codemode"];
+/** pi's tools that change files: a run given either works in a worktree of its own, and changes nothing else. */
+export const WRITE_TOOLS = ["edit", "write"];
+/** All an RPC run may have until its shell is enforced: the read tools, codemode over them, and the edit tools. */
+const RPC_TOOLS = [...READ_TOOLS, "codemode", ...WRITE_TOOLS];
+/** What a run gets when its role names no tools: it reads. */
+const DEFAULT_RPC_TOOLS = [...READ_TOOLS, "codemode"];
+/** The bundled role made to implement changes, which names no tools so that it keeps every tool in tmux. */
+const BUNDLED_WRITER = "general-purpose";
 
 /** pi's names for MCP tools, which its `--tools` list does not filter. */
 const MCP_TOOLS = ["mcp__*", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"];
@@ -64,6 +76,8 @@ export interface RpcLaunch {
 	sessionFile?: string;
 	/** Set when a Resume's instruction is the user's own; otherwise the task is its orchestrator's. */
 	taskFrom?: "user";
+	/** The worktree of a run that edits, made at its launch; its `cwd` is in it. */
+	workspace?: IsolatedWorkspace;
 	/**
 	 * Why the run may no longer start, asked once its turn comes: it may have waited in the queue since Admission. It
 	 * narrows what the run is held to, never widens it.
@@ -81,6 +95,8 @@ export interface RunDefinition extends AgentDefinition {
 	cwd: string;
 	projectTrusted: boolean;
 	admitted: { provider: string; modelId: string; thinkingLevel: string };
+	/** A run that edits: the worktree it may change, and its baseline. */
+	workspace?: IsolatedWorkspace;
 }
 
 /** Where the definition of a run's generation is: the launch's in definition.json, each Resume's beside it. */
@@ -154,19 +170,23 @@ export function rpcGrantableTools(callable: readonly string[], registered: reado
 
 /**
  * The tools an RPC run gets: those its role names, or every read tool and codemode the orchestrator can give it
- * when it names none. Anything else is refused, the shell, edits, MCP and subagents among them; Admission checks
- * that the orchestrator can give those named.
+ * when it names none, and the edit tools besides for the bundled general-purpose role. Anything else is refused, the
+ * shell, MCP and subagents among them; Admission checks that the orchestrator can give those named.
  */
 export function rpcRunTools(
-	definition: Pick<AgentDefinition, "name" | "tools">,
+	definition: Pick<AgentDefinition, "name" | "tools" | "source">,
 	available: readonly string[],
 ): { ok: true; tools: string[] } | { ok: false; error: string } {
-	const named = definition.tools ?? RPC_TOOLS.filter((tool) => available.includes(tool));
+	const defaults =
+		definition.source === "bundled" && definition.name === BUNDLED_WRITER
+			? [...DEFAULT_RPC_TOOLS, ...WRITE_TOOLS]
+			: DEFAULT_RPC_TOOLS;
+	const named = definition.tools ?? defaults.filter((tool) => available.includes(tool));
 	const refused = named.filter((tool) => !RPC_TOOLS.includes(tool));
 	if (refused.length > 0) {
 		return {
 			ok: false,
-			error: `Subagent role "${definition.name}" names tools a read-only run cannot have: ${refused.join(", ")}. Runs on pi's RPC only read for now (${RPC_TOOLS.join(", ")}): no shell, edits, MCP, tool search or subagents.`,
+			error: `Subagent role "${definition.name}" names tools a run on pi's RPC cannot have yet: ${refused.join(", ")}. It may only read, script its reads with codemode, and edit files in a worktree of its own (${RPC_TOOLS.join(", ")}): no shell, MCP, tool search or subagents.`,
 		};
 	}
 	return { ok: true, tools: [...named] };
@@ -341,7 +361,11 @@ export async function executeRpcRun(
 	deps: RpcRunDeps,
 ): Promise<SubagentRunOutcome> {
 	const instructions = join(launch.runDir, "instructions.md");
-	writeFileSync(instructions, launch.definition.instructions);
+	const { workspace } = launch;
+	writeFileSync(
+		instructions,
+		launch.definition.instructions + (workspace ? `\n${workspaceInstructions(workspace)}` : ""),
+	);
 	// Open before anything is awaited: the run takes messages from its Admission on, queued or working.
 	openRunInbox(launch.runDir, record.generation);
 	/** What the run's pi has sent out since it was last looked at: its progress is only noted, wakes nobody. */
@@ -371,6 +395,16 @@ export async function executeRpcRun(
 		generation: record.generation,
 		...(launch.sessionFile ? { sessionFile: launch.sessionFile } : {}),
 	});
+	// A run that edits gets its worktree as its Admission recorded it, before it waits for its turn.
+	if (workspace && !launch.sessionFile) {
+		try {
+			await materializeWorktree(workspace);
+		} catch (error) {
+			const reason = `its worktree could not be made (${error instanceof Error ? error.message : String(error)})`;
+			if (record.deliveryMode === "background") deps.notStarted(reason);
+			return { status: "failed", summaryText: "", errorMessage: `It did not start: ${reason}${untakenNote()}` };
+		}
+	}
 	const turn = await startInTurn(
 		`${record.runId}/${record.generation}`,
 		record.parentSessionId,
@@ -415,6 +449,9 @@ export async function executeRpcRun(
 	if (!ended()) stopRpcHost(hostPid);
 	// The generation ends once nothing of it runs: its host, its pi, and whatever they started in the host's group.
 	const terminated = await endHostGroup(hostPid);
+	// Where it worked and what it changed there, as Git sees it rather than as the run says.
+	const workspaceLines = workspace ? await describeWorkspace(workspace) : [];
+	const workspaceNote = workspaceLines.length ? `\n${workspaceLines.join("\n")}` : "";
 
 	// Whatever it sent before it ended reaches its recipients before its Report.
 	relay();
@@ -427,7 +464,7 @@ export async function executeRpcRun(
 		return {
 			status: "failed",
 			summaryText: report?.text ?? "",
-			errorMessage: `Its processes did not all end, even killed: process group ${hostPid} still runs. Nothing confirms its work stopped.`,
+			errorMessage: `Its processes did not all end, even killed: process group ${hostPid} still runs. Nothing confirms its work stopped.${workspaceNote}`,
 			transcriptPath: state?.sessionFile,
 		};
 	}
@@ -439,14 +476,14 @@ export async function executeRpcRun(
 			return {
 				status: "cancelled",
 				summaryText: "",
-				errorMessage: "Its work was stopped, and nothing of it runs any more; no Report was stored.",
+				errorMessage: `Its work was stopped, and nothing of it runs any more; no Report was stored.${workspaceNote}`,
 				transcriptPath: state?.sessionFile,
 			};
 		}
 		return {
 			status: "failed",
 			summaryText: report?.text ?? "",
-			errorMessage: `The run's host ended before its pi did; see rpc-host.error and rpc-child.stderr in ${launch.runDir}.`,
+			errorMessage: `The run's host ended before its pi did; see rpc-host.error and rpc-child.stderr in ${launch.runDir}.${workspaceNote}`,
 			transcriptPath: state?.sessionFile,
 		};
 	}
@@ -463,6 +500,7 @@ export async function executeRpcRun(
 		"---",
 		`Outcome: ${outcome.status}${outcome.status === "completed" ? ": its pi settled its work without an error. What the run says above is its own claim; the runtime verified none of it." : `: ${outcome.error}.`}`,
 		`Process: exited with ${state.exit.signal ? `signal ${state.exit.signal}` : `code ${state.exit.code}`}, after its Report was stored.`,
+		...workspaceLines,
 		`Transcript: ${state.sessionFile ?? "none"}`,
 		`Report: ${storedRunReportTextPath(launch.runDir, report.seq)}`,
 		...(report.untaken ? [`Untaken: ${untakenText(report.untaken, launch.runDir, record.generation)}.`] : []),
