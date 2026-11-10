@@ -29,11 +29,13 @@ import type {
 	UnregisterResponse,
 	WaitRequest,
 	WaitResponse,
+	WakeupsRequest,
 } from "./ipc/protocol.ts";
 import { pickPaneHeartbeat } from "./ipc/protocol.ts";
 import type { RemoteControl } from "./remote/control.ts";
 import type { ListProbe, ServerSupervisor } from "./supervisor.ts";
 import type { InstanceRecord } from "./types.ts";
+import type { WakeupKeeper } from "./wakeups.ts";
 
 function toInstanceSummary(
 	instance: InstanceRecord,
@@ -72,6 +74,12 @@ let remoteControl: RemoteControl | undefined;
 
 export function setRemoteControl(control: RemoteControl | undefined): void {
 	remoteControl = control;
+}
+
+let wakeupKeeper: Pick<WakeupKeeper, "hold"> | undefined;
+
+export function setWakeupKeeper(keeper: Pick<WakeupKeeper, "hold"> | undefined): void {
+	wakeupKeeper = keeper;
 }
 
 /** Every row agent view lists: stored rows, then each pane's pi with its activity. With `probe`,
@@ -144,7 +152,8 @@ export async function handleIpcRequest(
 		| SendRequest
 		| StartFailedRequest
 		| RemoteLiveRequest
-		| RemoteReportRequest,
+		| RemoteReportRequest
+		| WakeupsRequest,
 ): Promise<AckResponse | ErrorResponse>;
 export async function handleIpcRequest(supervisor: ServerSupervisor, request: ServerRequest): Promise<ServerResponse>;
 export async function handleIpcRequest(supervisor: ServerSupervisor, request: ServerRequest): Promise<ServerResponse> {
@@ -216,6 +225,12 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 			remoteControl?.live(row, null);
 			remoteControl?.report(row, undefined);
 			return { type: "unregister_result", ok: true };
+		}
+
+		case "wakeups": {
+			if (!wakeupKeeper) return { type: "error", ok: false, error: "This daemon keeps no wake-ups." };
+			wakeupKeeper.hold(request.held);
+			return { type: "ack", ok: true };
 		}
 
 		case "delete": {

@@ -32,7 +32,9 @@ import {
 } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { stripAnsi } from "../../daemon/ansi.ts";
-import { endedAsQuit, runParent, Tmux } from "../../daemon/tmux.ts";
+import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
+import { endedAsQuit, piCommand, runParent, Tmux } from "../../daemon/tmux.ts";
+import { type HeldWakeups, processStart } from "../../daemon/wakeups.ts";
 import { agentTasks, isAgentTaskId, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { sharedRef } from "../_shared/global-state.ts";
@@ -152,6 +154,13 @@ const isEditor = (component: unknown) => typeof (component as { getText?: unknow
  */
 const lastMainSession = sharedRef<string | undefined>("backgroundBash.lastMainSession", undefined);
 
+/** When this process started, as the daemon tells it from a later one given its pid; asked of `ps` once. */
+let processStartedAt: number | undefined;
+function thisProcessStart(): number | undefined {
+	processStartedAt ??= processStart(process.pid);
+	return processStartedAt;
+}
+
 /** Whether a SIGHUP or SIGTERM came: pi takes one for a quit, which ADR-0009 counts as a crash. One process-wide watch. */
 const signals = sharedRef("backgroundBash.signals", { watching: false, received: false }).get();
 function watchSignals(): void {
@@ -238,8 +247,42 @@ const backgroundBash: InlineExtension = {
 			});
 		};
 
-		const recordWakeupEnd = (wakeup: Pick<Wakeup, "id">, end: WakeupEnd) =>
+		let handing = Promise.resolve();
+		/**
+		 * Hands the daemon the session's pending wake-ups each time they change, so it can take one for the session once
+		 * this pi is gone (ADR-0009). Sent in order; one lost on the way is made up for by the session log, which the
+		 * daemon reads again before it acts.
+		 */
+		const handOff = () => {
+			const session = owner();
+			const sessionFile = ctx?.sessionManager.getSessionFile();
+			const startedAt = thisProcessStart();
+			if (ctx?.mode !== "tui" || session === undefined || !sessionFile || startedAt === undefined) return;
+			const held: HeldWakeups = {
+				sessionFile,
+				cwd: ctx.sessionManager.getCwd(),
+				label: ctx.sessionManager.getSessionName(),
+				holder: { pid: process.pid, startedAt },
+				launch: { command: piCommand() },
+				wakeups: wakeups
+					.list(session)
+					.map(({ id, prompt, dueAt, scheduledAt }) => ({ id, prompt, dueAt, scheduledAt })),
+			};
+			handing = handing
+				.then(async () => {
+					const client = new OrchestratorClient();
+					// Scheduling one starts the daemon, as agent view does; one not running holds none to take back.
+					if (held.wakeups.length > 0) await client.ensureDaemon();
+					else if (!(await client.isRunning())) return;
+					await client.holdWakeups(held);
+				})
+				.catch(() => {});
+		};
+
+		const recordWakeupEnd = (wakeup: Pick<Wakeup, "id">, end: WakeupEnd) => {
 			pi.appendEntry<WakeupEndRecord>(WAKEUP_END_ENTRY, { id: wakeup.id, end });
+			handOff();
+		};
 
 		/**
 		 * The session's pending wake-ups, rebuilt from its log; overdue ones fall due at once. A fork's new session gets
@@ -308,6 +351,7 @@ const backgroundBash: InlineExtension = {
 						dueAt: wakeup.dueAt,
 						scheduledAt: wakeup.scheduledAt,
 					});
+					handOff();
 					return { content: [{ type: "text", text: wakeupScheduledText(wakeup) }], details: undefined };
 				},
 			});
@@ -471,6 +515,8 @@ const backgroundBash: InlineExtension = {
 			if (event.reason === "new" && previous && previous !== session) backgroundBashJobs.reown(previous, session);
 			lastMainSession.set(session);
 			if (!runParent()) restoreWakeups(event, startCtx);
+			// This pi holds them now: the daemon leaves them to it while it runs.
+			if (wakeups.list(session).length > 0) handOff();
 			// Only pi's own TUI ends on its signal handlers; a listener here would keep a print run from ending on one.
 			if (startCtx.mode === "tui") watchSignals();
 			if (event.reason === "startup" || event.reason === "resume") reportOrphanShells(startCtx);

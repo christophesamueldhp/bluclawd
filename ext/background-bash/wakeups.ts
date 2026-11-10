@@ -7,6 +7,7 @@
  * and process-wide like the jobs (`/tasks` is read from other extensions' module graphs).
  */
 
+import type { WakeupEnd } from "../../daemon/wakeups.ts";
 import { notifyListeners, sharedRef } from "../_shared/global-state.ts";
 import { randomTaskId } from "./background-bash.ts";
 import { escapeXml, notificationContent, type OutgoingMessage, taskNotification } from "./monitor-events.ts";
@@ -46,6 +47,15 @@ export function wakeupDue(input: { delay?: number; at?: string }, now: number): 
 	return { ok: true, dueAt };
 }
 
+export {
+	pendingWakeups,
+	WAKEUP_END_ENTRY,
+	WAKEUP_ENTRY,
+	type WakeupEnd,
+	type WakeupEndRecord,
+	type WakeupRecord,
+} from "../../daemon/wakeups.ts";
+
 export function isWakeupTaskId(id: string): boolean {
 	return /^w[0-9a-z]{8}$/.test(id);
 }
@@ -57,33 +67,6 @@ export interface Wakeup {
 	prompt: string;
 	dueAt: number;
 	scheduledAt: number;
-}
-
-export type WakeupEnd = "fired" | "cancelled";
-
-/** Session-log entries: a wake-up scheduled, and its end. */
-export const WAKEUP_ENTRY = "bluclawd:wakeup-scheduled";
-export const WAKEUP_END_ENTRY = "bluclawd:wakeup-end";
-
-export type WakeupRecord = Omit<Wakeup, "owner">;
-
-export interface WakeupEndRecord {
-	id: string;
-	end: WakeupEnd;
-}
-
-type Entry = { type: string; customType?: string; data?: unknown };
-
-/** The wake-ups `entries` record scheduled and not ended, earliest first. Every branch counts: they are the session's. */
-export function pendingWakeups(entries: readonly Entry[]): WakeupRecord[] {
-	const ended = new Set<string>();
-	const scheduled: WakeupRecord[] = [];
-	for (const entry of entries) {
-		if (entry.type !== "custom") continue;
-		if (entry.customType === WAKEUP_END_ENTRY) ended.add((entry.data as WakeupEndRecord).id);
-		else if (entry.customType === WAKEUP_ENTRY) scheduled.push(entry.data as WakeupRecord);
-	}
-	return scheduled.filter((record) => !ended.has(record.id)).sort((a, b) => a.dueAt - b.dueAt);
 }
 
 interface Pending {
