@@ -2,6 +2,7 @@ import {
 	type ExtensionAPI,
 	getAgentDir,
 	type InlineExtension,
+	SettingsManager,
 	type ToolLoadout,
 	type ToolLoadoutChanges,
 } from "@earendil-works/pi-coding-agent";
@@ -13,6 +14,7 @@ import { endPane, runParent, Tmux } from "../../daemon/tmux.ts";
 import { notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
 import { pistatuslineDrawsFooter } from "../_shared/pistatusline.ts";
+import { maxActiveSubagents } from "../_shared/settings.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { publishSubagentPanel } from "../_shared/subagent-panel.ts";
 import { timed } from "../_shared/timing.ts";
@@ -42,7 +44,7 @@ import { describeSubagentModels } from "./models.ts";
 import { createPanel, formatRunElapsed, SUBAGENT_PANEL_WIDGET } from "./panel.ts";
 import { createParentScope, inParentScope, type ParentInboxItem } from "./parent-scope.ts";
 import type { SubagentResultDetails } from "./results.ts";
-import { rpcRunsEnabled } from "./rpc-runs.ts";
+import { daemonRunSlots, rpcRunsEnabled } from "./rpc-runs.ts";
 import { messageAsRun } from "./run-messages.ts";
 import { isTerminalSubagentStatus } from "./runs.ts";
 import {
@@ -267,6 +269,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 		};
 
+		const slots = daemonRunSlots(() =>
+			maxActiveSubagents(SettingsManager.create(process.cwd(), resolveAgentDir(), { projectTrusted: false })),
+		);
 		const { scheduler, directory, messageFromParent, resumeFromParent, pullReports } = createGenerations({
 			agentDir: resolveAgentDir,
 			bus: messageBus,
@@ -277,6 +282,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			tmux: timedTmux,
 			send: (to, message) => new OrchestratorClient().send(to, message),
 			handOff: handOff.signal,
+			slots,
 		});
 
 		const admission = createRunAdmission({
@@ -289,6 +295,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			pane: () => pane,
 			tools: () => (latestLoadout ? orchestratorTools(latestLoadout) : []),
 			registeredTools: () => latestLoadout?.registered.map((tool) => tool.name) ?? [],
+			ensureQueue: () => slots.ensure(),
 		});
 
 		const views = createParentScopeViews({

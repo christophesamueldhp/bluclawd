@@ -1,7 +1,7 @@
 /**
  * The process that holds an RPC run's pi (ADR-0010). pi aborts its work once its stdin closes, so the pi's stdio
- * belongs to a detached host of its own, not to the orchestrator, whose pi may end first. The host starts the run's
- * pi, gives it its task, stores its Report once its work settles with nothing pending, then closes its stdin and
+ * belongs to a detached host of its own, not to the orchestrator, whose pi may end first, nor to the daemon, which only
+ * starts the host once the run's turn in its queue comes. The host starts the run's pi, gives it its task, stores its Report once its work settles with nothing pending, then closes its stdin and
  * records how it exited. Everything between the orchestrator and the host goes through the run's directory: the
  * launch spec in, the host's state and the run's Reports out; a SIGTERM to the host stops the run.
  */
@@ -11,6 +11,7 @@ import { appendFileSync, openSync, readFileSync, realpathSync, writeFileSync } f
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { piPackageRoot } from "../../daemon/orchestrator-client.ts";
+import type { RunHostLaunch } from "../../daemon/run-queue.ts";
 import type { RunRuntimeOutcome } from "./runs.ts";
 import { storeRunReport, writeAtomicPrivateFile } from "./storage.ts";
 
@@ -52,21 +53,25 @@ const stderrPath = (runDir: string) => join(runDir, "rpc-child.stderr");
 const HOST_FILE = fileURLToPath(import.meta.url);
 const RESOLVE_HOOK = join(dirname(HOST_FILE), "../../daemon/pi-resolve-hook.mjs");
 
-/** Starts a detached host for the run in `runDir`; it outlives the caller. Returns the host's pid. */
-export function launchRpcHost(runDir: string, spec: RpcHostSpec): number {
+/**
+ * Stores the run's spec in `runDir` and returns how to start its host, which the daemon does once the run's turn
+ * comes (daemon/run-queue.ts): detached, so it outlives whoever started it. Everything the host needs is in it, this
+ * pi's environment among it, since the daemon's is not this pi's; bluclawd's own variables are left out.
+ */
+export function prepareRpcHost(runDir: string, spec: RpcHostSpec): RunHostLaunch {
 	writeAtomicPrivateFile(specPath(runDir), JSON.stringify(spec));
 	// Started as pi starts the daemon: node strips the types, and the hook resolves pi's packages from its install.
 	const root = piPackageRoot();
-	const host = spawn(process.execPath, ["--import", RESOLVE_HOOK, HOST_FILE, runDir], {
-		detached: true,
-		stdio: "ignore",
-		env: { ...process.env, ...(root ? { PI_PACKAGE_ROOT: root } : {}) },
-	});
-	// A host that cannot be spawned leaves no pid, which fails the run; its error event must not end this pi.
-	host.on("error", () => {});
-	host.unref();
-	if (host.pid === undefined) throw new Error("the run's host did not start");
-	return host.pid;
+	const env = Object.fromEntries(
+		Object.entries(process.env).filter(
+			(entry): entry is [string, string] => entry[1] !== undefined && !entry[0].startsWith("BLUCLAWD_"),
+		),
+	);
+	return {
+		command: [process.execPath, "--import", RESOLVE_HOOK, HOST_FILE, runDir],
+		env: { ...env, ...(root ? { PI_PACKAGE_ROOT: root } : {}) },
+		cwd: runDir,
+	};
 }
 
 export function readRpcHostState(runDir: string): RpcHostState | undefined {

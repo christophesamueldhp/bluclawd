@@ -74,6 +74,8 @@ async function setup(
 		pane?: string | null;
 		// Another orchestrator instance of the same session: its directories and session.
 		sameSession?: { cwd: string; agentDir: string; sessionManager: SessionManager };
+		// The daemon that queues runs on pi's RPC cannot be started.
+		queueDown?: boolean;
 	} = {},
 ) {
 	const cwd = options.sameSession?.cwd ?? makeTempDir("cwd");
@@ -131,6 +133,7 @@ async function setup(
 		pane: () => (options.pane === null ? undefined : (options.pane ?? "pi-orchestrator")),
 		tools: () => [],
 		registeredTools: () => [],
+		ensureQueue: async () => !options.queueDown,
 	};
 	const ctx: AdmissionContext = {
 		cwd,
@@ -516,6 +519,14 @@ describe("Run admission on pi's RPC", () => {
 		expect(errorOf(await launch({ agent: "explorer", cwd: "file.txt", task: "x" }))).toMatch(/is not a directory/);
 		expect(errorOf(await launch({ agent: "explorer", cwd: secret, task: "x" }))).toMatch(
 			/Blocked by permission rule/,
+		);
+		expect(existsSync(storageDir)).toBe(false);
+	});
+
+	it("refuses a launch, before storing it, when the daemon that queues runs cannot be started", async () => {
+		const { launch, storageDir } = await rpcSetup({ queueDown: true });
+		expect(errorOf(await launch({ agent: "explorer", task: "x" }))).toBe(
+			"Cannot launch subagent: the daemon that queues runs is not running and could not be started.",
 		);
 		expect(existsSync(storageDir)).toBe(false);
 	});

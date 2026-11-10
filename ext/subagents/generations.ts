@@ -13,7 +13,7 @@ import {
 } from "./messages.ts";
 import { inParentScope, type ParentScope, type ParentScopeChecks, type ScopedRun } from "./parent-scope.ts";
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
-import { executeRpcRun } from "./rpc-runs.ts";
+import { executeRpcRun, type RunSlots } from "./rpc-runs.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
 import {
 	appendParentRunReference,
@@ -51,6 +51,8 @@ export interface GenerationDeps {
 	send: (pane: string, message: SessionMessage) => Promise<void>;
 	/** Aborted when this orchestrator hands its open runs over to the next instance of its session (a reload). */
 	handOff: AbortSignal;
+	/** The daemon's queue, where runs on pi's RPC take their turn. */
+	slots: RunSlots;
 }
 
 /** A run's Report as the orchestrator's model is given it, capped, as a tool result or a notice. */
@@ -150,7 +152,19 @@ export function createGenerations(deps: GenerationDeps) {
 					return await executeRpcRun(params, execCtx.rpc, {
 						reports: deps.reports,
 						handOff: deps.handOff,
+						slots: deps.slots,
 						notify,
+						notStarted: (reason) => {
+							const record = scheduler.getRun(runId);
+							if (!record) return;
+							deps.scope.notify(record, {
+								parentText: `Subagent ${formatRunLabel(record)} did not start: ${reason}`,
+								details: {
+									...buildSubagentResultEnvelope(record, MAX_PARENT_REPORT_BYTES).details,
+									truncated: false,
+								},
+							});
+						},
 						usage,
 					});
 				} finally {

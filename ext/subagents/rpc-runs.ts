@@ -1,7 +1,8 @@
 /**
  * Runs on pi's RPC (ADR-0010), behind a switch until they replace runs in tmux: a run is a pi with no pane, held by
  * a host process of its own (rpc-host.ts), that takes its task in a fresh session, stores its Report once its work
- * settles, and exits; a Resume starts another on its saved session, as its next generation. For now a run only
+ * settles, and exits; a Resume starts another on its saved session, as its next generation. Either waits its turn
+ * in the daemon's queue (daemon/run-queue.ts), which starts the host once a slot is free. For now a run only
  * reads: its tools are a plain allowlist of pi's read tools and codemode, anything else is refused at Admission, and
  * its pi checks every call again (rpc-child.ts).
  */
@@ -12,11 +13,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseSessionEntries, type SessionEntry, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
+import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
+import type { RunHostLaunch } from "../../daemon/run-queue.ts";
 import { piCommand } from "../../daemon/tmux.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import type { AgentDefinition } from "./definitions.ts";
 import { type RpcDenyRules, RUN_DEFINITION_FLAG } from "./rpc-child.ts";
-import { launchRpcHost, processAlive, readRpcHostState, stopRpcHost } from "./rpc-host.ts";
+import { prepareRpcHost, processAlive, readRpcHostState, stopRpcHost } from "./rpc-host.ts";
 import { runTaskText } from "./run-messages.ts";
 import type { RunRuntimeOutcome, SubagentRunExecuteParams, SubagentRunOutcome } from "./runs.ts";
 import { readRunReports, storedRunReportTextPath } from "./storage.ts";
@@ -57,6 +60,11 @@ export interface RpcLaunch {
 	projectTrusted: boolean;
 	/** The saved session a Resume reopens; absent at the launch, which starts a fresh one. */
 	sessionFile?: string;
+	/**
+	 * Why the run may no longer start, asked once its turn comes: it may have waited in the queue since Admission. It
+	 * narrows what the run is held to, never widens it.
+	 */
+	recheck(): string | undefined;
 }
 
 /**
@@ -92,6 +100,23 @@ export function readRunDefinition(path: string): RunDefinition | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * `definition` held as well to what the orchestrator can give now: only the tools it still can, and the deny rules it
+ * has now on top of those stored.
+ */
+export function narrowRunDefinition(
+	definition: RunDefinition,
+	grantable: readonly string[],
+	deny: readonly RpcDenyRules[],
+): RunDefinition {
+	const stored = new Set(definition.deny.map((rules) => JSON.stringify(rules)));
+	return {
+		...definition,
+		tools: definition.tools.filter((tool) => grantable.includes(tool)),
+		deny: [...definition.deny, ...deny.filter((rules) => !stored.has(JSON.stringify(rules)))],
+	};
 }
 
 /**
@@ -205,8 +230,81 @@ const HOST_CHECK_MS = 100;
 /** How long a stopped run's host may take to end before it and its pi are killed. */
 const STOP_GRACE_MS = 10_000;
 
+/** The daemon's queue of runs (daemon/run-queue.ts), as an orchestrator takes its turns in it. */
+export interface RunSlots {
+	/** Starts the daemon if none runs; false when it cannot. */
+	ensure(): Promise<boolean>;
+	/** True once run `run` of orchestrator `parent` is granted a slot; false when the daemon's wait passed first. */
+	claim(run: string, parent: string, signal: AbortSignal): Promise<boolean>;
+	/** Has the daemon start a granted run's host; returns its pid. */
+	launch(run: string, host: RunHostLaunch): Promise<number>;
+	/** Gives up a claim, or a slot not launched yet. */
+	release(run: string): Promise<void>;
+}
+
+/** The daemon's queue, with the bound on active runs `capacity` gives at each claim. */
+export function daemonRunSlots(capacity: () => number): RunSlots {
+	let ensuring: Promise<boolean> | undefined;
+	return {
+		ensure: () => {
+			// Shared: launches in one message would each start a daemon.
+			ensuring ??= new OrchestratorClient().ensureDaemon().finally(() => {
+				ensuring = undefined;
+			});
+			return ensuring;
+		},
+		claim: (run, parent, signal) => new OrchestratorClient().claimRun(run, parent, capacity(), signal),
+		launch: (run, host) => new OrchestratorClient().launchRun(run, host),
+		release: (run) => new OrchestratorClient().releaseRun(run),
+	};
+}
+
+/** How often in a row the daemon may fail a run's turn, each time started anew, before the run fails. */
+const QUEUE_TRIES = 3;
+
+/**
+ * Waits for run `run`'s turn in the queue, checks it may still start, and has the daemon start its host. Undefined
+ * once `signal` aborts first; its claim is given up then.
+ */
+async function startInTurn(
+	run: string,
+	parent: string,
+	host: RunHostLaunch,
+	recheck: () => string | undefined,
+	slots: RunSlots,
+	signal: AbortSignal,
+): Promise<{ hostPid: number } | { refused: string } | { error: string } | undefined> {
+	let failures = 0;
+	while (!signal.aborted) {
+		try {
+			if (!(await slots.claim(run, parent, signal))) {
+				failures = 0;
+				continue;
+			}
+			const refused = recheck();
+			if (refused) {
+				await slots.release(run).catch(() => {});
+				return { refused };
+			}
+			return { hostPid: await slots.launch(run, host) };
+		} catch (error) {
+			if (signal.aborted) break;
+			// A daemon started anew takes the claim again, from the back of the queue.
+			if (++failures >= QUEUE_TRIES || !(await slots.ensure())) {
+				return { error: error instanceof Error ? error.message : String(error) };
+			}
+		}
+	}
+	slots.release(run).catch(() => {});
+	return undefined;
+}
+
 export interface RpcRunDeps {
 	reports: RunReports;
+	/** The daemon's queue, which every launch and Resume takes its turn in. */
+	slots: RunSlots;
+	/** A background run did not start: the orchestrator is told why. */
+	notStarted(reason: string): void;
 	/** A Report no foreground launch took: it goes to the orchestrator. */
 	notify(report: Extract<SessionMessage, { kind: "report" }>): void;
 	/** The usage of the run's session `sessionId`. */
@@ -227,7 +325,8 @@ export async function executeRpcRun(
 ): Promise<SubagentRunOutcome> {
 	const instructions = join(launch.runDir, "instructions.md");
 	writeFileSync(instructions, launch.definition.instructions);
-	const hostPid = launchRpcHost(launch.runDir, {
+	// Built before anything is awaited, so within its Admission: the run starts as admitted, however long it queues.
+	const host = prepareRpcHost(launch.runDir, {
 		command: rpcCommand(launch, instructions, runDefinitionPath(launch.runDir, record.generation)),
 		cwd: launch.cwd,
 		agentDir: launch.agentDir,
@@ -236,6 +335,25 @@ export async function executeRpcRun(
 		generation: record.generation,
 		...(launch.sessionFile ? { sessionFile: launch.sessionFile } : {}),
 	});
+	const turn = await startInTurn(
+		`${record.runId}/${record.generation}`,
+		record.parentSessionId,
+		host,
+		launch.recheck,
+		deps.slots,
+		AbortSignal.any([signal, deps.handOff]),
+	);
+	if (!turn) {
+		// Handed off before it started: the next instance of the session finds it never started.
+		if (!signal.aborted) return new Promise<never>(() => {});
+		return { status: "closed", summaryText: "", errorMessage: "It was stopped before it started." };
+	}
+	if (!("hostPid" in turn)) {
+		const reason = "refused" in turn ? turn.refused : `the daemon could not start it (${turn.error})`;
+		if (record.deliveryMode === "background") deps.notStarted(reason);
+		return { status: "failed", summaryText: "", errorMessage: `It did not start: ${reason}` };
+	}
+	const { hostPid } = turn;
 	controller.markRunning();
 
 	// The run's directory keeps the state of its earlier generation's host until this one stores its own.

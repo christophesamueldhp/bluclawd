@@ -1,6 +1,14 @@
+import { spawn } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
 import { getServerDir, getSocketPath } from "./config.ts";
-import { handleIpcRequest, listSummaries, setRemoteControl, setShutdownHook, setWakeupKeeper } from "./handler.ts";
+import {
+	handleIpcRequest,
+	listSummaries,
+	setRemoteControl,
+	setRunQueue,
+	setShutdownHook,
+	setWakeupKeeper,
+} from "./handler.ts";
 import { startIpcServer } from "./ipc/server.ts";
 import { resumePane } from "./pane-start.ts";
 import { ensureServerDir } from "./paths.ts";
@@ -8,6 +16,7 @@ import { RemoteControl, TMUX_TIMEOUT_MS } from "./remote/control.ts";
 import { pistatusline } from "./remote/pistatusline.ts";
 import { launchUsable, startSession } from "./remote/spawn.ts";
 import { statusLine } from "./remote/statusline.ts";
+import { RunQueue } from "./run-queue.ts";
 import { ServerSupervisor } from "./supervisor.ts";
 import { Tmux } from "./tmux.ts";
 import { type HeldWakeups, processAlive, readPendingWakeups, WakeupKeeper } from "./wakeups.ts";
@@ -45,6 +54,27 @@ export async function serve(): Promise<void> {
 	});
 	const supervisor = new ServerSupervisor({ now: Date.now, tmux, dir: getServerDir(), wakeups });
 	setWakeupKeeper(wakeups);
+	setRunQueue(
+		new RunQueue({
+			now: Date.now,
+			// Detached, so a run's host leads a process group of its own and outlives the daemon.
+			spawn: ({ command, env, cwd }) => {
+				const host = spawn(command[0], command.slice(1), { cwd, env, detached: true, stdio: "ignore" });
+				host.on("error", () => {});
+				host.unref();
+				if (host.pid === undefined) throw new Error("the run's host did not start");
+				return host.pid;
+			},
+			running: (pid) => {
+				try {
+					process.kill(-pid, 0);
+					return true;
+				} catch (error) {
+					return (error as NodeJS.ErrnoException).code !== "ESRCH";
+				}
+			},
+		}),
+	);
 	const server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
 
 	try {

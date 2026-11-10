@@ -64,3 +64,16 @@ export function remotePort(sm: SettingsManager): number {
 	const port = (merged(sm).remote as { port?: unknown } | undefined)?.port;
 	return typeof port === "number" && Number.isInteger(port) && port > 0 && port < 65536 ? port : DEFAULT_PORT;
 }
+
+/** Runs a daemon keeps active at once unless the user sets another bound. */
+const DEFAULT_ACTIVE_SUBAGENTS = 4;
+
+/**
+ * `subagents.maxActive`: how many subagent runs on pi's RPC one daemon keeps active at once, across every
+ * orchestrator. Only the user's own settings set it: a project's could raise it for itself.
+ */
+export function maxActiveSubagents(sm: SettingsManager): number {
+	const max = ((sm.getGlobalSettings() as unknown as Mergeable).subagents as { maxActive?: unknown } | undefined)
+		?.maxActive;
+	return typeof max === "number" && Number.isInteger(max) && max > 0 ? max : DEFAULT_ACTIVE_SUBAGENTS;
+}

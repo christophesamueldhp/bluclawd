@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { denyRules, invalidDenyScopes } from "../ext/_shared/settings.ts";
+import { denyRules, invalidDenyScopes, maxActiveSubagents } from "../ext/_shared/settings.ts";
 import permissions, { TRUST_CHANGED, trustStatusText } from "../ext/permissions/index.ts";
 import { deniedBy } from "../ext/permissions/rules.ts";
 
@@ -43,6 +43,20 @@ describe("denyRules: global and project lists", () => {
 
 	it("reads nothing but deny", () => {
 		expect(denyRules(sm({ allow: ["Bash(**)"], ask: ["Bash(**)"] }, undefined))).toEqual([]);
+	});
+});
+
+describe("maxActiveSubagents: the user's bound on active subagents", () => {
+	const sm = (global: unknown, project: unknown) =>
+		({
+			getGlobalSettings: () => ({ subagents: global }),
+			getProjectSettings: () => ({ subagents: project }),
+		}) as unknown as SettingsManager;
+
+	it("is four unless the user's own settings give a positive whole number; a project's never count", () => {
+		expect(maxActiveSubagents(sm(undefined, { maxActive: 8 }))).toBe(4);
+		expect(maxActiveSubagents(sm({ maxActive: 2 }, { maxActive: 8 }))).toBe(2);
+		for (const maxActive of [0, -1, 2.5, "6"]) expect(maxActiveSubagents(sm({ maxActive }, undefined))).toBe(4);
 	});
 });
 

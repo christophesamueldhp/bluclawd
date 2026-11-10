@@ -13,13 +13,17 @@ import type {
 	PaneReport,
 	RegisterRequest,
 	RemoteResponse,
+	RunQueueRequest,
 	StartFailedRequest,
 	StartRequest,
 	StartSpec,
 	WakeupsRequest,
 } from "./ipc/protocol.ts";
 import { daemonBuildId, getSocketPath } from "./paths.ts";
+import type { RunHostLaunch } from "./run-queue.ts";
 import type { HeldWakeups } from "./wakeups.ts";
+
+const OUT_OF_DATE = "The agent daemon is out of date — restart pi to update it";
 
 export type { AgentActivity, EndReason };
 export type { InstanceSummary };
@@ -49,7 +53,8 @@ type Request =
 	| ({ type: "remote" } & RemoteAction)
 	| { type: "remote_live"; instanceId: string; live: LiveSnapshot | null; entryId?: string }
 	| { type: "remote_report"; instanceId: string; report: PaneReport }
-	| WakeupsRequest;
+	| WakeupsRequest
+	| RunQueueRequest;
 
 interface AnyResponse {
 	type: string;
@@ -65,6 +70,8 @@ interface AnyResponse {
 	queued?: boolean;
 	superseded?: boolean;
 	id?: string;
+	granted?: boolean;
+	hostPid?: number;
 }
 
 /** Path to the daemon's CLI entry, for the ensureDaemon() auto-start. */
@@ -289,6 +296,28 @@ export class OrchestratorClient {
 	/** Hands the daemon a session's pending wake-ups, replacing what it held for that session. */
 	async holdWakeups(held: HeldWakeups): Promise<void> {
 		await this.request({ type: "wakeups", held });
+	}
+
+	/**
+	 * Claims a slot in the daemon's queue for subagent run `run` of orchestrator `parent` (daemon/run-queue.ts):
+	 * true once granted, false when the daemon's wait passed first.
+	 */
+	async claimRun(run: string, parent: string, capacity: number, signal: AbortSignal): Promise<boolean> {
+		const res = await this.request({ type: "run_queue", action: "claim", run, parent, capacity }, 30_000, signal);
+		if (res.type !== "run_queue_result") throw new Error(OUT_OF_DATE);
+		return res.granted === true;
+	}
+
+	/** Has the daemon launch granted run `run`'s host; returns the host's pid. */
+	async launchRun(run: string, host: RunHostLaunch): Promise<number> {
+		const res = await this.request({ type: "run_queue", action: "launch", run, host });
+		if (res.type !== "run_queue_result" || res.hostPid === undefined) throw new Error(OUT_OF_DATE);
+		return res.hostPid;
+	}
+
+	/** Gives up run `run`'s claim, or its slot before it launched. */
+	async releaseRun(run: string): Promise<void> {
+		await this.request({ type: "run_queue", action: "release", run });
 	}
 
 	async unregister(instanceId: string, reason?: EndReason): Promise<void> {

@@ -101,6 +101,15 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 			moveClients: () => {},
 		}),
 		handOff: new AbortController().signal,
+		// Its runs are in tmux, which take no turn in the daemon's queue.
+		slots: {
+			ensure: async () => false,
+			claim: async () => false,
+			launch: async () => {
+				throw new Error("no queue");
+			},
+			release: async () => {},
+		},
 		send: async (to, message) => {
 			if (refusals > 0) {
 				refusals--;
@@ -203,6 +212,7 @@ export function createGenerationsFixture(earlier?: { cwd: string; agentDir: stri
 		pane: () => ORCHESTRATOR_PANE,
 		tools: () => [],
 		registeredTools: () => [],
+		ensureQueue: async () => false,
 	});
 	/** Gives the orchestrator's session the one model the test runs launch with. */
 	const loadModels = async () => {

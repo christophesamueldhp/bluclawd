@@ -14,6 +14,8 @@ import type {
 	RemoteRequest,
 	RemoteResponse,
 	RenameRequest,
+	RunQueueRequest,
+	RunQueueResponse,
 	SaveRequest,
 	SendRequest,
 	ServerRequest,
@@ -33,6 +35,7 @@ import type {
 } from "./ipc/protocol.ts";
 import { pickPaneHeartbeat } from "./ipc/protocol.ts";
 import type { RemoteControl } from "./remote/control.ts";
+import type { RunQueue } from "./run-queue.ts";
 import type { ListProbe, ServerSupervisor } from "./supervisor.ts";
 import type { InstanceRecord } from "./types.ts";
 import type { WakeupKeeper } from "./wakeups.ts";
@@ -80,6 +83,13 @@ let wakeupKeeper: Pick<WakeupKeeper, "hold"> | undefined;
 
 export function setWakeupKeeper(keeper: Pick<WakeupKeeper, "hold"> | undefined): void {
 	wakeupKeeper = keeper;
+}
+
+/** Installed by serve.ts: the queue of subagent runs. Unset outside `serve` (tests). */
+let runQueue: RunQueue | undefined;
+
+export function setRunQueue(queue: RunQueue | undefined): void {
+	runQueue = queue;
 }
 
 /** Every row agent view lists: stored rows, then each pane's pi with its activity. With `probe`,
@@ -142,6 +152,10 @@ export async function handleIpcRequest(
 	supervisor: ServerSupervisor,
 	request: StartRequest,
 ): Promise<StartResponse | ErrorResponse>;
+export async function handleIpcRequest(
+	supervisor: ServerSupervisor,
+	request: RunQueueRequest,
+): Promise<RunQueueResponse | ErrorResponse>;
 export async function handleIpcRequest(
 	supervisor: ServerSupervisor,
 	request:
@@ -230,6 +244,23 @@ export async function handleIpcRequest(supervisor: ServerSupervisor, request: Se
 		case "wakeups": {
 			wakeupKeeper?.hold(request.held);
 			return { type: "ack", ok: true };
+		}
+
+		case "run_queue": {
+			if (!runQueue) return { type: "error", ok: false, error: "runs are not queued in this process" };
+			if (request.action === "claim") {
+				const granted = await runQueue.claim(request.run, request.parent, request.capacity);
+				return { type: "run_queue_result", ok: true, granted };
+			}
+			if (request.action === "release") {
+				runQueue.release(request.run);
+				return { type: "run_queue_result", ok: true };
+			}
+			try {
+				return { type: "run_queue_result", ok: true, hostPid: runQueue.launch(request.run, request.host) };
+			} catch (error) {
+				return { type: "error", ok: false, error: error instanceof Error ? error.message : String(error) };
+			}
 		}
 
 		case "delete": {

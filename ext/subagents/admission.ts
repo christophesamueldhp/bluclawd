@@ -32,6 +32,7 @@ import type { RpcDenyRules } from "./rpc-child.ts";
 import { processAlive, readRpcHostState } from "./rpc-host.ts";
 import {
 	claimRunGeneration,
+	narrowRunDefinition,
 	type RpcLaunch,
 	type RunDefinition,
 	readRunDefinition,
@@ -58,6 +59,7 @@ export const MAX_TASK_INPUT_BYTES = 32 * 1024;
 const MODEL_DEFAULT_THINKING = "model default";
 /** How many runs an orchestrator holds open at once: each is a full pi. */
 export const MAX_OPEN_RUNS = 8;
+const QUEUE_DOWN = "the daemon that queues runs is not running and could not be started.";
 const TOO_MANY_OPEN = `An orchestrator holds at most ${MAX_OPEN_RUNS} open subagents. Close one whose work is done with subagent_close, then try again.`;
 /** Pi built-in extensions a run can be given like tools, when the orchestrator declares them. */
 const BUILTIN_EXTENSIONS = ["codemode", "tool_search"];
@@ -206,6 +208,8 @@ export interface RunAdmissionDeps {
 	tools: () => readonly string[];
 	/** Every tool the orchestrator's pi registered, active or not. */
 	registeredTools: () => readonly string[];
+	/** Starts the daemon whose queue runs on pi's RPC take their turn in; false when it cannot. */
+	ensureQueue: () => Promise<boolean>;
 }
 
 export type AdmissionResult =
@@ -449,6 +453,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				: (parseSubagentModelSpec(changes.model) ?? "inherit");
 		const childModel = await resolveChildModel(requestedModel, thinkingLevel, ctx);
 		if (!childModel.ok) return refuse.unavailable(childModel.error);
+		if (!(await deps.ensureQueue())) return cannot(QUEUE_DOWN);
 
 		// Everything from here to the resume runs without awaiting, so the session cannot change in between.
 		const latest = deps.scheduler.getRun(run.runId) ?? current;
@@ -456,7 +461,6 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		if (!isResumableSubagentStatus(latest.status) || latest.generation !== current.generation) {
 			return cannot("another Resume of it started meanwhile.");
 		}
-		if (deps.directory.list(scope).length >= MAX_OPEN_RUNS) return refuse.unavailable(TOO_MANY_OPEN);
 		const holder = current.name ? deps.directory.nameHolder(scope, current.name)?.record : undefined;
 		if (holder) return refuse.unavailable(`${label} cannot resume: its name is now used by ${holder.runId}.`);
 		const task = buildPrompt();
@@ -464,9 +468,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		if (invalidTask) return refuse.unavailable(invalidTask);
 		const model = { provider: childModel.model.provider, modelId: childModel.model.id, thinkingLevel };
 		const definition: RunDefinition = {
-			...admitted,
-			tools: admitted.tools.filter((tool) => grantable.includes(tool)),
-			deny: [...admitted.deny, ...deny.deny],
+			...narrowRunDefinition(admitted, grantable, deny.deny),
 			projectTrusted: admitted.projectTrusted && workspace.workspace.trusted(cwd),
 			admitted: model,
 		};
@@ -492,6 +494,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					agentDir,
 					projectTrusted: definition.projectTrusted,
 					sessionFile,
+					recheck: recheckRpc(current.runId, runDir, generation, { cwd: ctx.cwd, trusted: projectTrusted }),
 				},
 			},
 			known ? undefined : { ...current, sessionEpoch: scope.sessionEpoch },
@@ -500,6 +503,40 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		if (!resumed.ok) return refuse.unavailable(resumed.error);
 		return { ok: true, handle: resumed.handle };
 	};
+
+	/**
+	 * Why a run on pi's RPC, admitted with orchestrator `parent`'s directory and trust, may no longer start once its
+	 * turn in the queue comes: its scope or branch is gone, or its delegation is denied now. What its orchestrator
+	 * can no longer give, or now denies, is stored in the generation's definition, which its pi enforces.
+	 */
+	const recheckRpc =
+		(runId: string, runDir: string, generation: number, parent: { cwd: string; trusted: boolean }) =>
+		(): string | undefined => {
+			const run = deps.scheduler.getRun(runId);
+			if (!run || !deps.scope.inScope(run) || !deps.scope.onBranch(run.originEntryId)) {
+				return "its orchestrator's session or branch changed since it was admitted";
+			}
+			const agentDir = deps.agentDir();
+			const denied = delegationDenied(run.agentName, parent.cwd, agentDir, parent.trusted);
+			if (denied) return denied;
+			const path = runDefinitionPath(runDir, generation);
+			const definition = readRunDefinition(path);
+			if (!definition) return "the definition it was admitted with is not stored";
+			const deny = rpcDenyRules(agentDir, [parent, { cwd: definition.cwd, trusted: definition.projectTrusted }]);
+			if (!deny.ok) return deny.error;
+			const narrowed = narrowRunDefinition(
+				definition,
+				rpcGrantableTools(deps.tools(), deps.registeredTools()),
+				deny.deny,
+			);
+			if (JSON.stringify(narrowed) === JSON.stringify(definition)) return undefined;
+			try {
+				writeAtomicPrivateFile(path, JSON.stringify(narrowed, null, 2));
+			} catch (error) {
+				return `storage is unavailable (${error instanceof Error ? error.message : String(error)})`;
+			}
+			return undefined;
+		};
 
 	/** How the run is started again, as its record and its role say. */
 	const launchOf = (
@@ -648,6 +685,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const requestedThinkingLevel = rpc || requestedModel === "inherit" ? rpcThinkingLevel : explicitThinkingLevel;
 			const childModel = await resolveChildModel(requestedModel, requestedThinkingLevel, ctx);
 			if (!childModel.ok) return reject(childModel.error);
+			if (rpc && !(await deps.ensureQueue())) return reject(`Cannot launch subagent: ${QUEUE_DOWN}`);
 
 			// Everything from here to admit runs without awaiting, so the session cannot change in between.
 			if (
@@ -657,7 +695,8 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			) {
 				return reject("Parent session or branch changed before subagent admission; request cancelled.");
 			}
-			if (deps.directory.list(dispatched).length >= MAX_OPEN_RUNS) return reject(TOO_MANY_OPEN);
+			// Runs on pi's RPC have no such bound: those over the daemon's active ones wait in its queue.
+			if (!rpc && deps.directory.list(dispatched).length >= MAX_OPEN_RUNS) return reject(TOO_MANY_OPEN);
 			const startSnapshot = captureWorkspaceSnapshot(cwd);
 
 			const holderOf = (name: string) => deps.directory.nameHolder(dispatched, name)?.record;
@@ -753,6 +792,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 								runDir: storage.runDir,
 								agentDir,
 								projectTrusted: childTrusted,
+								recheck: recheckRpc(runId, storage.runDir, 0, { cwd: ctx.cwd, trusted: projectTrusted }),
 							},
 						}
 					: {

@@ -1,4 +1,5 @@
 import type { AgentActivity } from "../activity.ts";
+import type { RunHostLaunch } from "../run-queue.ts";
 import type { InstanceStatus } from "../types.ts";
 import type { HeldWakeups } from "../wakeups.ts";
 
@@ -171,6 +172,16 @@ export interface WakeupsRequest {
 	type: "wakeups";
 	held: HeldWakeups;
 }
+
+/**
+ * A subagent run's turn in the daemon's queue (daemon/run-queue.ts): a claim waits up to 25 s for a slot, a launch
+ * starts the granted run's host, a release gives up a claim or a slot not yet launched.
+ */
+export type RunQueueRequest = { type: "run_queue" } & (
+	| { action: "claim"; run: string; parent: string; capacity: number }
+	| { action: "launch"; run: string; host: RunHostLaunch }
+	| { action: "release"; run: string }
+);
 
 export interface UnregisterRequest {
 	type: "unregister";
@@ -404,6 +415,7 @@ interface RequestMap {
 	remote_live: RemoteLiveRequest;
 	remote_report: RemoteReportRequest;
 	wakeups: WakeupsRequest;
+	run_queue: RunQueueRequest;
 }
 
 export type ServerRequest = RequestMap[keyof RequestMap];
@@ -487,6 +499,14 @@ export interface ShutdownResponse extends ResponseBase {
 }
 
 /** Reply to send / delete / rename / meta / save / start_failed / remote_live / remote_report. */
+export interface RunQueueResponse extends ResponseBase {
+	type: "run_queue_result";
+	/** A claim's answer. */
+	granted?: boolean;
+	/** A launch's host. */
+	hostPid?: number;
+}
+
 export interface AckResponse extends ResponseBase {
 	type: "ack";
 	instance?: InstanceSummary;
@@ -539,6 +559,7 @@ interface ResponseMap {
 	remote_live: AckResponse;
 	remote_report: AckResponse;
 	wakeups: AckResponse;
+	run_queue: RunQueueResponse;
 }
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;
