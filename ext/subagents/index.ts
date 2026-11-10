@@ -27,6 +27,7 @@ import {
 	orchestratorTools,
 	SUBAGENT_TOOL_PARAMETERS,
 } from "./admission.ts";
+import { collaborateAsParent } from "./collaboration.ts";
 import {
 	type AgentDefinitionCatalog,
 	discoverAgentDefinitions,
@@ -671,6 +672,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				return messageFromParent(scope, params.to.trim(), params.content, admission, ctx);
 			},
 		});
+
+		// Collaboration between independent orchestrators: with runs on pi's RPC only, until they are the default.
+		if (!launchedBy && rpcRunsEnabled()) collaborateAsParent(pi, { agentDir: resolveAgentDir });
 
 		// Only with runs on pi's RPC, whose finished runs a message does not continue.
 		if (rpcRunsEnabled()) {

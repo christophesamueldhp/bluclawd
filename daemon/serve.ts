@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
+import { Collaborations } from "./collaborations.ts";
 import { getServerDir, getSocketPath } from "./config.ts";
 import {
 	handleIpcRequest,
 	listSummaries,
+	setCollaborations,
 	setRemoteControl,
 	setRunQueue,
 	setShutdownHook,
@@ -73,6 +75,20 @@ export async function serve(): Promise<void> {
 					return (error as NodeJS.ErrnoException).code !== "ESRCH";
 				}
 			},
+		}),
+	);
+	setCollaborations(
+		new Collaborations({
+			// Orchestrators' sessions in live panes: a run's row names its orchestrator's pane as its parent.
+			sessions: () =>
+				supervisor
+					.listExternalInstances()
+					.flatMap(({ record, silent }) =>
+						record.sessionId && !record.parent && !silent
+							? [{ instanceId: record.id, sessionId: record.sessionId, label: record.label, pane: record.pane }]
+							: [],
+					),
+			deliver: (instanceId, message) => supervisor.sendExternal(instanceId, message),
 		}),
 	);
 	const server = await startIpcServer((request) => handleIpcRequest(supervisor, request));
