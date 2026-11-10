@@ -153,7 +153,7 @@ export function collaborateAsParent(pi: ExtensionAPI, deps: { agentDir: () => st
 		sessionId = self;
 		known = undefined;
 		showTool(false);
-		// A reload or a reopening of a member keeps its membership; another session is no member.
+		// A reload, or reopening after a crash, keeps its membership; another session is no member.
 		void client()
 			.collaboration({ sessionId: self, action: "get" })
 			.then(({ collaboration }) => {
