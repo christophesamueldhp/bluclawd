@@ -1,4 +1,5 @@
 import type { AgentActivity } from "../activity.ts";
+import type { Collaboration, CollaborationMember, CollaboratorMessageKind } from "../collaborations.ts";
 import type { RunHostLaunch } from "../run-queue.ts";
 import type { InstanceStatus } from "../types.ts";
 import type { HeldWakeups } from "../wakeups.ts";
@@ -116,7 +117,9 @@ export type PaneMessage =
  *  `dialog`: the title of the prompt it waits on. `stop`: the orchestrator ends its run's turn in
  *  progress, as Esc does. `close`: the orchestrator closed its run while a terminal shows it: the run ends once
  *  the terminal leaves it. `adopt`: the orchestrator's session `sessionId`, reopened in pane `from`,
- *  takes its run over: the run reports there from now on (ADR-0008). */
+ *  takes its run over: the run reports there from now on (ADR-0008). `collaboration`: the collaboration the
+ *  user opened, changed (`collaboration` as it is now) or ended (none), for member session `to`.
+ *  `collaborator_message`: what a member sent member session `to` in it. Only the daemon sends these two. */
 export type SessionMessage = { type: "session_message"; from: string; name?: string } & (
 	| {
 			kind: "report";
@@ -132,6 +135,17 @@ export type SessionMessage = { type: "session_message"; from: string; name?: str
 	| { kind: "activity"; activity: AgentActivity; dialog?: string }
 	| { kind: "stop" | "close" }
 	| { kind: "adopt"; sessionId: string }
+	| { kind: "collaboration"; to: string; collaboration?: Collaboration }
+	| {
+			kind: "collaborator_message";
+			to: string;
+			collaboration: string;
+			revision: number;
+			scope: string;
+			fromSession: string;
+			message: CollaboratorMessageKind;
+			text: string;
+	  }
 );
 
 /** A session's tokens and cost. */
@@ -181,6 +195,20 @@ export type RunQueueRequest = { type: "run_queue" } & (
 	| { action: "claim"; run: string; parent: string; capacity: number }
 	| { action: "launch"; run: string; host: RunHostLaunch }
 	| { action: "release"; run: string }
+);
+
+/**
+ * A collaboration between orchestrator sessions (daemon/collaborations.ts), by the session asking: `open`,
+ * `scope` and `end` only from its user's command, `leave` when it ends for another session or quits, `send` from
+ * its model, `get` its collaboration, and
+ * `current` whether a message it received is still of its collaboration's current scope.
+ */
+export type CollaborationRequest = { type: "collaboration"; sessionId: string } & (
+	| { action: "open"; name: string; with: string[]; scope: string }
+	| { action: "scope"; scope: string }
+	| { action: "end" | "leave" | "get" }
+	| { action: "send"; revision: number; to: string; kind: CollaboratorMessageKind; text: string }
+	| { action: "current"; collaboration: string; revision: number }
 );
 
 export interface UnregisterRequest {
@@ -416,6 +444,7 @@ interface RequestMap {
 	remote_report: RemoteReportRequest;
 	wakeups: WakeupsRequest;
 	run_queue: RunQueueRequest;
+	collaboration: CollaborationRequest;
 }
 
 export type ServerRequest = RequestMap[keyof RequestMap];
@@ -507,6 +536,16 @@ export interface RunQueueResponse extends ResponseBase {
 	hostPid?: number;
 }
 
+export interface CollaborationResponse extends ResponseBase {
+	type: "collaboration_result";
+	/** The session's collaboration after the request; for `end`, the one that ended. */
+	collaboration?: Collaboration;
+	/** `send`'s recipient. */
+	to?: CollaborationMember;
+	/** `current`'s answer. */
+	current?: boolean;
+}
+
 export interface AckResponse extends ResponseBase {
 	type: "ack";
 	instance?: InstanceSummary;
@@ -560,6 +599,7 @@ interface ResponseMap {
 	remote_report: AckResponse;
 	wakeups: AckResponse;
 	run_queue: RunQueueResponse;
+	collaboration: CollaborationResponse;
 }
 
 export type ServerResponse = ResponseMap[keyof ResponseMap] | ErrorResponse;
