@@ -8,13 +8,7 @@
 
 import { notifyListeners, sharedRef } from "../_shared/global-state.ts";
 import { randomTaskId } from "./background-bash.ts";
-import {
-	type EventDelivery,
-	escapeXml,
-	notificationContent,
-	type OutgoingMessage,
-	taskNotification,
-} from "./monitor-events.ts";
+import { escapeXml, notificationContent, type OutgoingMessage, taskNotification } from "./monitor-events.ts";
 
 const MINUTE_MS = 60_000;
 const MAX_AHEAD_MS = 24 * 60 * MINUTE_MS;
@@ -44,7 +38,8 @@ export function wakeupDue(input: { delay?: number; at?: string }, now: number): 
 			new Date(today.getFullYear(), today.getMonth(), today.getDate() + days, hours, minutes).getTime();
 		dueAt = next(0) > now ? next(0) : next(1);
 	} else dueAt = now + (delay ?? 0) * 1000;
-	if (!(dueAt - now >= MINUTE_MS && dueAt - now <= MAX_AHEAD_MS)) {
+	// A clock time's next occurrence is never refused for being too far: on a DST fall-back day it is 25 hours.
+	if (dueAt - now < MINUTE_MS || (at === undefined && dueAt - now > MAX_AHEAD_MS)) {
 		return { ok: false, error: "A wake-up must be due between 1 minute and 24 hours from now." };
 	}
 	return { ok: true, dueAt };
@@ -80,7 +75,7 @@ export class WakeupRegistry {
 			scheduledAt: Date.now(),
 		};
 		const timer = setTimeout(() => options.onDue(wakeup), Math.max(0, options.dueAt - Date.now()));
-		timer.unref?.();
+		timer.unref();
 		this.pending.set(id, { wakeup, timer });
 		notifyListeners(this.listeners);
 		return wakeup;
@@ -112,16 +107,9 @@ export class WakeupRegistry {
 
 export const wakeups = sharedRef("wakeups", new WakeupRegistry()).get();
 
-/** A wake-up waits for the running turn to end, then starts the next one; it never steers the running one. */
-export const WAKEUP_DELIVERY: EventDelivery = { deliverAs: "followUp", triggerTurn: true };
-
 export const WAKEUP_MESSAGE_TYPE = "bluclawd:wakeup";
 
-export interface WakeupMessageDetails {
-	id: string;
-	prompt: string;
-	dueAt: number;
-}
+export type WakeupMessageDetails = Pick<Wakeup, "id" | "prompt" | "dueAt">;
 
 const pad = (n: number) => String(n).padStart(2, "0");
 

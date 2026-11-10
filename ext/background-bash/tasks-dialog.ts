@@ -492,7 +492,7 @@ export class TasksDialog implements Component {
 			const items = rows.filter((r) => sectionOf(r) === section);
 			if (items.length === 0) continue;
 			if (lines.length > 0) lines.push({ kind: "gap" });
-			// The Shells header only when the list holds agents too.
+			// The Shells header only when the list holds agents or wake-ups too.
 			if (section !== "shells" || agents + count("wakeups") + count("done") > 0) {
 				lines.push({ kind: "heading", text: `${t.bold(title)}${t.fg("dim", ` (${items.length})`)}` });
 			}

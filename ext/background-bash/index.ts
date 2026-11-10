@@ -46,6 +46,7 @@ import { createBackgroundBashTool } from "./bash-tool.ts";
 import { detachAll, runningForegroundShells, subscribeForegroundShells } from "./foreground-shells.ts";
 import { clearMainSession, mainSession, setMainSession } from "./main-session.ts";
 import {
+	EVENT_DELIVERY,
 	MONITOR_MESSAGE_TYPE,
 	type MonitorMessageDetails,
 	TASK_EXIT_MESSAGE_TYPE,
@@ -63,7 +64,6 @@ import { findOrphanShells, orphanShellMessage, SHELL_END_ENTRY, SHELL_START_ENTR
 import { type TaskRow, TasksDialog, taskRows } from "./tasks-dialog.ts";
 import {
 	isWakeupTaskId,
-	WAKEUP_DELIVERY,
 	WAKEUP_MESSAGE_TYPE,
 	type Wakeup,
 	type WakeupMessageDetails,
@@ -190,17 +190,30 @@ const backgroundBash: InlineExtension = {
 		);
 
 		/**
-		 * A due wake-up goes to its own session only. It is checked when it is sent, not when it falls due: while
-		 * `/tasks` holds it, it can still be cancelled.
+		 * Starts the turn of the session's earliest due wake-up once the session is idle. Until then it stays
+		 * pending, listed and cancellable, rather than in pi's queue, which Esc clears. A send held by `/tasks`
+		 * checks again when it goes out.
 		 */
-		const fireWakeup = (wakeup: Wakeup) =>
+		const startDueWakeup = () =>
 			deliverOrHold(() => {
-				if (!wakeups.take(wakeup.id) || lastMainSession.get() !== wakeup.owner) return;
-				mainSession.sendMessage(wakeupMessage(wakeup), WAKEUP_DELIVERY);
+				const session = owner();
+				if (session === undefined || !ctx?.isIdle()) return;
+				const due = wakeups.list(session).find((wakeup) => wakeup.dueAt <= Date.now());
+				if (!due) return;
+				wakeups.take(due.id);
+				pi.sendMessage(wakeupMessage(due), EVENT_DELIVERY);
 			});
+
+		/** A wake-up of a session that is no longer this pi's is dropped. */
+		const fireWakeup = (wakeup: Wakeup) => {
+			if (wakeup.owner === owner()) startDueWakeup();
+			else wakeups.take(wakeup.id);
+		};
 
 		// The orchestrator's only: a run does not schedule its own turns.
 		if (!runParent()) {
+			// The running turn has ended, and nothing else continues it.
+			pi.on("agent_settled", startDueWakeup);
 			pi.registerTool({
 				name: "schedule_wakeup",
 				label: "ScheduleWakeup",
@@ -241,6 +254,7 @@ const backgroundBash: InlineExtension = {
 				"- Takes a task_id parameter identifying the task to stop",
 				"- Returns a success or failure status",
 				"- Use this tool when you need to terminate a long-running task",
+				"- Also cancels a pending wake-up (schedule_wakeup) by its ID",
 			].join("\n"),
 			parameters: Type.Object({
 				task_id: Type.Optional(Type.String({ description: "The ID of the background task to stop" })),

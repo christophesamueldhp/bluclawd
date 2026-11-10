@@ -172,12 +172,14 @@ describe("schedule_wakeup", () => {
 		expect(wakeups.list()).toEqual([]);
 	});
 
-	it("waits for the running turn to end, then starts the next one", async () => {
+	it("waits for the running turn to end, then starts the next one, even if the queue is cleared meanwhile", async () => {
 		const { session, replies, seen } = await startSession();
 		replies([
 			call("schedule_wakeup", { prompt: "Recheck the deploy.", delay: 60 }),
 			() => {
 				vi.advanceTimersByTime(MINUTE);
+				// As Esc does: pi's queued messages go back to the editor.
+				session.clearQueue();
 				return call("schedule_wakeup", { prompt: "Later.", delay: 3600 });
 			},
 			fauxAssistantMessage("Both scheduled."),

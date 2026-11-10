@@ -67,7 +67,7 @@ export function pistatuslinePaths(
 
 /** The session's running background tasks, as /tasks lists them. */
 export function paneTasks(owner: string | undefined): PaneTask[] {
-	// The phone has no wake-ups (out of #268's scope); /tasks lists them apart from the running tasks.
+	// visibleRows holds no wake-ups: this only narrows the kind to the phone's.
 	return visibleRows(owner)
 		.filter((row): row is TaskRow & { kind: PaneTask["kind"] } => row.kind !== "wakeup")
 		.slice(0, TASKS_MAX)
