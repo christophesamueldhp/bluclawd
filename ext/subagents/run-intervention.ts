@@ -103,7 +103,8 @@ export function createRunIntervention(deps: RunInterventionDeps) {
 		): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
 			let current = deps.scheduler.getRun(run.runId) ?? run;
 			const name = current.name ?? current.runId;
-			if (!isTerminalSubagentStatus(current.status)) {
+			// A stopping run takes no more instructions: it resumes with this one once stopped.
+			if (!isTerminalSubagentStatus(current.status) && current.status !== "stopping") {
 				const runDir = runDirOf(current);
 				const framed = rpcRunMessageText({ kind: "user" }, current, text);
 				const posted = postToRun(runDir, current.generation, framed);
@@ -112,7 +113,9 @@ export function createRunIntervention(deps: RunInterventionDeps) {
 					if (current.status === "running") await whenGiven(runDir, current.generation, posted.id, GIVE_WAIT_MS);
 					return { ok: true, text: `${name} takes your instruction at its next safe point.` };
 				}
-				// It settled first: its pi is ending, and only a Resume continues its session.
+			}
+			// It settled first, or is stopping: its pi is ending, and only a Resume continues its session.
+			if (!isTerminalSubagentStatus(current.status)) {
 				current = (await deps.scheduler.whenFinal(current.runId)) ?? current;
 			}
 			const resumed = await deps.admission.resume(current, () => text, ctx, { from: "user" });

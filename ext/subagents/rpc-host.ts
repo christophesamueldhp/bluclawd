@@ -195,6 +195,9 @@ async function host(runDir: string): Promise<void> {
 	let stopped = false;
 	process.on("SIGTERM", () => {
 		stopped = true;
+		// A stopped run takes no more messages: those posted from now on are refused, not left untaken.
+		clearInterval(watching);
+		sealRunInbox(runDir, spec.generation);
 		// pi ends its work in order on a SIGTERM, its shell commands included.
 		child.kill("SIGTERM");
 	});
@@ -325,6 +328,7 @@ async function host(runDir: string): Promise<void> {
 				// What landed before the seal is the run's to take: it goes on with it.
 				const late = sealRunInbox(runDir, spec.generation).filter(({ id }) => !given.has(id));
 				if (late.length === 0) return true;
+				if (stopped) return false;
 				unsealRunInbox(runDir, spec.generation);
 				await give(late);
 				// pi refused them all, so nothing settles again: they stay untaken, and the work is done.

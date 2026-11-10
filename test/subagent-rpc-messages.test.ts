@@ -299,6 +299,35 @@ describe.skipIf(!hasTmux)("messages with a working RPC run", () => {
 		expect(readJson(join(dir, "record.json")).generation).toBe(0);
 	});
 
+	it("keeps a message it was given but never took when it is stopped, and says so in its Report", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const gate = join(real.cwd, "send.go");
+		real.script("main", [
+			launch("look"),
+			{ tool: "subagent_message", args: { to: "look", content: "Also look for HERON." }, until: gate },
+			...Array(3).fill({ text: "waiting" }),
+		]);
+		real.script("look", [{ text: "Never.", until: join(real.cwd, "never") }]);
+		const orchestrator = real.start(["--", "delegate"]);
+		await real.waitForRequests("look", 1);
+		writeFileSync(gate, "");
+		await real.waitForRequests("main", 3);
+
+		const screen = () => real.tmux.capture(orchestrator, 50).join("\n");
+		real.tmux.sendKeys(orchestrator, ["Down"]);
+		await waitFor(() => expect(screen()).toContain("x to close"));
+		real.tmux.sendKeys(orchestrator, ["x"]);
+		const dir = runDir(real.agentDir, "look");
+		await waitFor(() => expect(readJson(join(dir, "record.json")).status).toBe("closed"));
+		expect(readJson(join(dir, "reports", "1.json"))).toMatchObject({ outcome: { status: "stopped" }, untaken: 1 });
+		const kept = readdirSync(join(dir, "inbox", "0.sealed")).filter((file) => file.endsWith(".json"));
+		expect(kept.map((file) => readJson(join(dir, "inbox", "0.sealed", file)).text)).toEqual([
+			expect.stringMatching(/\n\nAlso look for HERON\.$/),
+		]);
+		expect(real.requests("look")).toHaveLength(1);
+	});
+
 	it("gains no capability from a peer's message that claims the user's authority", async () => {
 		const real = await startOrchestrator();
 		pi = real;

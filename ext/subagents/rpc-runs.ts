@@ -324,7 +324,7 @@ export interface RpcRunDeps {
 }
 
 const untakenText = (count: number, runDir: string, generation: number) =>
-	`Untaken: ${count} message${count === 1 ? "" : "s"} sent to it never reached its pi; kept in ${sealedRunInbox(runDir, generation)}.`;
+	`${count} message${count === 1 ? "" : "s"} sent to it never reached its pi, kept in ${sealedRunInbox(runDir, generation)}`;
 
 /**
  * A run's generation on pi's RPC, as the scheduler sees it: its host starts its pi, and the generation ends once
@@ -352,7 +352,7 @@ export async function executeRpcRun(
 	/** Seals the inbox of a run that never started; says how many messages it holds. */
 	const untakenNote = () => {
 		const untaken = sealRunInbox(launch.runDir, record.generation).length;
-		return untaken ? ` ${untakenText(untaken, launch.runDir, record.generation)}` : "";
+		return untaken ? `; ${untakenText(untaken, launch.runDir, record.generation)}.` : "";
 	};
 	// Built before anything is awaited, so within its Admission: the run starts as admitted, however long it queues.
 	const host = prepareRpcHost(launch.runDir, {
@@ -378,7 +378,7 @@ export async function executeRpcRun(
 	if (!turn) {
 		// Handed off before it started: the next instance of the session finds it never started.
 		if (!signal.aborted) return new Promise<never>(() => {});
-		return { status: "closed", summaryText: "", errorMessage: `It was stopped before it started.${untakenNote()}` };
+		return { status: "closed", summaryText: "", errorMessage: `It was stopped before it started${untakenNote()}` };
 	}
 	if (!("hostPid" in turn)) {
 		const reason = "refused" in turn ? turn.refused : `the daemon could not start it (${turn.error})`;
@@ -387,7 +387,7 @@ export async function executeRpcRun(
 		return {
 			status: launch.sessionFile ? "closed" : "failed",
 			summaryText: "",
-			errorMessage: `It did not start: ${reason}.${untakenNote()}`,
+			errorMessage: `It did not start: ${reason}${untakenNote()}`,
 		};
 	}
 	const { hostPid } = turn;
@@ -445,7 +445,7 @@ export async function executeRpcRun(
 		`Process: exited with ${state.exit.signal ? `signal ${state.exit.signal}` : `code ${state.exit.code}`}, after its Report was stored.`,
 		`Transcript: ${state.sessionFile ?? "none"}`,
 		`Report: ${storedRunReportTextPath(launch.runDir, report.seq)}`,
-		...(report.untaken ? [untakenText(report.untaken, launch.runDir, record.generation)] : []),
+		...(report.untaken ? [`Untaken: ${untakenText(report.untaken, launch.runDir, record.generation)}.`] : []),
 	].join("\n");
 	const message: Extract<SessionMessage, { kind: "report" }> = {
 		type: "session_message",
