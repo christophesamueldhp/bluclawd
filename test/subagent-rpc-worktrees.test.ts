@@ -265,7 +265,7 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 		const head = git(repo, "rev-parse", "HEAD");
 		// Outside the repository: a gate is not part of anyone's state.
 		const gate = join(repo, "..", "go");
-		const names = ["first", "second", "queued"];
+		const names = ["w1", "w2", "w3"];
 		real.script("main", [
 			{
 				calls: names.map((name) => ({
@@ -283,10 +283,10 @@ describe.skipIf(!hasTmux)("an RPC run that edits", () => {
 		}
 		real.start(["--", "delegate"]);
 		await real.waitForRequests("main", 2);
-		// Two edit side by side; the third waits for a slot, admitted already.
-		await waitFor(() => expect(real.requests("first")).toHaveLength(2));
-		await waitFor(() => expect(real.requests("second")).toHaveLength(2));
-		expect(real.requests("queued")).toHaveLength(0);
+		// Two edit side by side, whichever the queue took first; the third waits for a slot, admitted already.
+		const edited = () => names.filter((name) => real.requests(name).length === 2);
+		await waitFor(() => expect(edited()).toHaveLength(2));
+		expect(names.filter((name) => real.requests(name).length === 0)).toHaveLength(1);
 
 		// The orchestrator's checkout moves on meanwhile: a new edit, a new commit.
 		write(repo, { "a.txt": "one later\n", "later.txt": "later\n" });
