@@ -47,6 +47,7 @@ import { isTerminalSubagentStatus } from "./runs.ts";
 import {
 	appendSubagentMessageRecord,
 	extractReferencedRunIdsFromBranch,
+	listPersistedRunRecords,
 	readPersistedRunRecord,
 	reconcileInterruptedRuns,
 } from "./storage.ts";
@@ -399,17 +400,22 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 			const branchEntries = ctx.sessionManager.getBranch();
 			// Its open runs whose pis still run, after a reload or a crash of the instance that ran them: this instance
-			// takes them over (ADR-0008). Those this process runs already are left as they are.
+			// takes them over (ADR-0008). Those this process runs already are left as they are. A run is on the branch
+			// as tree navigation judges it, by the entry it was launched from.
 			if (pane) {
-				for (const runId of extractReferencedRunIdsFromBranch(branchEntries)) {
-					const run = readPersistedRunRecord(agentDir, sessionId, runId);
-					if (run?.pane && !isTerminalSubagentStatus(run.status) && paneUp(timedTmux(), run.pane))
+				for (const run of listPersistedRunRecords(agentDir, sessionId)) {
+					if (
+						run.pane &&
+						!isTerminalSubagentStatus(run.status) &&
+						parentScope.onBranch(run.originEntryId) &&
+						paneUp(timedTmux(), run.pane)
+					)
 						admission.adopt(run, ctx);
 				}
 			}
-			// Reconcile orphaned runs referenced on the active branch from prior crashes
+			// The session's runs an earlier instance left open and this one did not take over, on any branch.
 			const liveIds = new Set(scheduler.listActiveRuns(sessionId).map((r) => r.runId));
-			for (const run of reconcileInterruptedRuns(agentDir, sessionId, branchEntries, liveIds)) {
+			for (const run of reconcileInterruptedRuns(agentDir, sessionId, liveIds)) {
 				if (run.status !== "closed" || !run.pane) continue;
 				// Not taken over (its pi is gone, or this one has no pane to take it to): it is closed.
 				endPane(timedTmux(), run.pane);
@@ -579,7 +585,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 				openWorldHint: false,
 			},
 			description:
-				"Send a message to a subagent by name or run ID (sub_…). A working child gets it at its next safe point; an idle one that is still open takes a turn on it. A completed or closed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
+				"Send a message to a subagent by name or run ID (sub_…). A working child gets it at its next safe point; an idle one that is still open takes a turn on it. A closed child resumes in the background with its earlier context and the message as its next instruction. The receipt says accepted, unavailable, or invalidated, never handled.",
 			parameters: SUBAGENT_MESSAGE_PARAMETERS,
 			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
 				const ctx = toolCtx ?? parentScope.context();
@@ -836,12 +842,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						runId: handle.runId,
 						agentName: handle.record.agentName,
 						status: handle.record.status,
-						complete: false,
 						deliveryMode: "background",
 						provider: handle.record.provider,
 						modelId: handle.record.modelId,
 						thinkingLevel: handle.record.thinkingLevel,
-						snapshotDrifted: false,
 						truncated: false,
 					} satisfies SubagentResultDetails,
 				};

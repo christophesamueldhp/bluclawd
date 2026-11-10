@@ -256,12 +256,10 @@ describe.skipIf(!hasTmux)("resuming a closed run", () => {
 			cwd: real.cwd,
 			taskSummary: "Old task.",
 			startSnapshot: { headCommit: null, dirty: false, statusDigest: "" },
-			snapshotDrifted: false,
 			admittedAt: Date.now(),
 			endedAt: Date.now(),
 			deliveryMode: "background",
-			status: "completed",
-			complete: true,
+			status: "closed",
 			usage: createEmptySubagentUsage(),
 			backgroundDeliveryAttempted: true,
 		});

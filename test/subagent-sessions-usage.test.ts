@@ -134,12 +134,10 @@ describe.skipIf(!hasTmux)("a run's usage, in its own session", () => {
 			cwd: real.cwd,
 			taskSummary: "Old task.",
 			startSnapshot: { headCommit: null, dirty: false, statusDigest: "" },
-			snapshotDrifted: false,
 			admittedAt: Date.now(),
 			endedAt: Date.now(),
 			deliveryMode: "background",
-			status: "completed",
-			complete: true,
+			status: "closed",
 			usage: oldUsage,
 			backgroundDeliveryAttempted: true,
 		});

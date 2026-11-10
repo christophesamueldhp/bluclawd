@@ -42,13 +42,11 @@ function persistedRecord(overrides: Partial<SubagentRunRecord>): SubagentRunReco
 		cwd: "/proj",
 		taskSummary: "Inspect architecture",
 		startSnapshot: { headCommit: null, dirty: false, statusDigest: "" },
-		snapshotDrifted: false,
 		admittedAt: 1000,
 		startedAt: 1010,
 		endedAt: 2000,
 		deliveryMode: "background",
-		status: "completed",
-		complete: true,
+		status: "closed",
 		usage: createEmptySubagentUsage(),
 		backgroundDeliveryAttempted: true,
 		...overrides,
@@ -65,9 +63,7 @@ function setup(activeParentSessionId: string | undefined = "sess_main") {
 			controllers.set(record.runId, controller);
 			return new Promise<SubagentRunOutcome>((resolve) => {
 				settle.set(record.runId, resolve);
-				signal.addEventListener("abort", () =>
-					resolve({ status: "cancelled", complete: false, summaryText: "stopped" }),
-				);
+				signal.addEventListener("abort", () => resolve({ status: "closed", summaryText: "stopped" }));
 			});
 		},
 	});
@@ -136,10 +132,9 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 		const live = launch();
 		const foreign = launch("sess_other");
 		for (const [runId, status] of [
-			["sub_completed", "completed"],
+			["sub_closed", "closed"],
 			["sub_failed", "failed"],
 			["sub_interrupted", "interrupted"],
-			["sub_cancelled", "cancelled"],
 		] as const) {
 			writePersistedRunRecord(agentDir, persistedRecord({ runId, status }));
 		}
@@ -148,17 +143,16 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 		expect(source.get(foreign.runId)).toBeUndefined();
 		expect(source.get(foreign.runId, "sess_other")?.id).toBe(foreign.runId);
 		expect(
-			["sub_completed", "sub_failed", "sub_interrupted", "sub_cancelled"].map((id) => {
+			["sub_closed", "sub_failed", "sub_interrupted"].map((id) => {
 				const task = source.get(id);
 				return [task?.state, task?.status];
 			}),
 		).toEqual([
-			["completed", "completed"],
+			["completed", "closed"],
 			["failed", "failed"],
 			["failed", "interrupted"],
-			["stopped", "cancelled"],
 		]);
-		expect(source.get("sub_completed")).toMatchObject({ startedAt: 1010, endedAt: 2000 });
+		expect(source.get("sub_closed")).toMatchObject({ startedAt: 1010, endedAt: 2000 });
 		expect(source.get("sub_missing")).toBeUndefined();
 	});
 
@@ -168,7 +162,7 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 		scheduler.cancelRun(run.runId, "user");
 		expect(source.get(run.runId)).toMatchObject({ state: "running", status: "stopping" });
 		await run.completion;
-		expect(source.get(run.runId)).toMatchObject({ state: "stopped", status: "cancelled" });
+		expect(source.get(run.runId)).toMatchObject({ state: "completed", status: "closed" });
 	});
 
 	it("says why a stop failed: an unknown, foreign or orphaned id is not found, a finished run is not running", async () => {
@@ -178,10 +172,10 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 		const finished = launch();
 		const earlierEpoch = launch("sess_main", "Scan auth", 0);
 		for (const run of [finished, earlierEpoch]) {
-			settle.get(run.runId)?.({ status: "completed", complete: true, summaryText: "done" });
+			settle.get(run.runId)?.({ status: "closed", summaryText: "done" });
 			await run.completion;
 		}
-		writePersistedRunRecord(agentDir, persistedRecord({ runId: "sub_earlier", status: "completed" }));
+		writePersistedRunRecord(agentDir, persistedRecord({ runId: "sub_earlier", status: "closed" }));
 		writePersistedRunRecord(
 			agentDir,
 			persistedRecord({ runId: "sub_orphan", status: "running", endedAt: undefined }),
@@ -192,18 +186,18 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 		expect(source.close(finished.runId)).toMatchObject({
 			ok: false,
 			reason: "not_running",
-			task: { id: finished.runId, status: "completed" },
+			task: { id: finished.runId, status: "closed" },
 		});
 		// The same answer before a restart as after one, when the record is read from disk.
 		expect(source.close(earlierEpoch.runId)).toMatchObject({
 			ok: false,
 			reason: "not_running",
-			task: { id: earlierEpoch.runId, status: "completed" },
+			task: { id: earlierEpoch.runId, status: "closed" },
 		});
 		expect(source.close("sub_earlier")).toMatchObject({
 			ok: false,
 			reason: "not_running",
-			task: { status: "completed" },
+			task: { status: "closed" },
 		});
 
 		// A run a crashed process never ended has nothing to stop.
@@ -211,7 +205,7 @@ describe("Spec #52 — the run-to-task translation behind the agent-task seam", 
 
 		const stopped = source.close(running.runId, { source: "model" });
 		expect(stopped).toMatchObject({ ok: true, task: { id: running.runId } });
-		expect(await running.completion).toMatchObject({ status: "cancelled", stopSource: "model" });
+		expect(await running.completion).toMatchObject({ status: "closed", stopSource: "model" });
 	});
 
 	it("stops a run by its id only, not by its name", () => {

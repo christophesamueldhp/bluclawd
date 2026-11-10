@@ -46,12 +46,10 @@ function makeAgentRunRecord(overrides: Partial<SubagentRunRecord> = {}): Subagen
 		cwd: "/proj",
 		taskSummary: "Inspect architecture",
 		startSnapshot: { headCommit: "1234567", dirty: false, statusDigest: "" },
-		snapshotDrifted: false,
 		admittedAt: 1000,
 		startedAt: 1010,
 		deliveryMode: "background",
 		status: "running",
-		complete: false,
 		usage: createEmptySubagentUsage(),
 		backgroundDeliveryAttempted: false,
 		...overrides,
@@ -59,7 +57,7 @@ function makeAgentRunRecord(overrides: Partial<SubagentRunRecord> = {}): Subagen
 }
 
 function taskOf(r: SubagentRunRecord): AgentTask {
-	const finished = { completed: "completed", failed: "failed", interrupted: "failed", cancelled: "stopped" } as const;
+	const finished = { closed: "completed", failed: "failed", interrupted: "failed" } as const;
 	return {
 		id: r.runId,
 		owner: r.parentSessionId,
@@ -86,8 +84,7 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 				makeAgentRunRecord({
 					runId: "sub_10_3",
 					parentSessionId: "sess_main",
-					status: "completed",
-					complete: true,
+					status: "closed",
 				}),
 			],
 		]);
@@ -102,7 +99,7 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 			close: (id, opts) => {
 				const rec = records.get(id);
 				if (!rec || (opts?.owner && rec.parentSessionId !== opts.owner)) return { ok: false, reason: "not_found" };
-				if (rec.status === "completed") return { ok: false, reason: "not_running", task: taskOf(rec) };
+				if (rec.status === "closed") return { ok: false, reason: "not_running", task: taskOf(rec) };
 				observedStopSource = opts?.source;
 				rec.status = "stopping";
 				return { ok: true, task: taskOf(rec) };
@@ -128,9 +125,9 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 				"No task found with ID: sub_10_2",
 			);
 
-			// 3. Already completed subagent reports terminal status
+			// 3. Already closed subagent reports terminal status
 			await expect(stopTool({ task_id: "sub_10_3" }, "sess_main")).rejects.toThrow(
-				"Task sub_10_3 is not running (status: completed)",
+				"Task sub_10_3 is not running (status: closed)",
 			);
 		} finally {
 			unpublish();
@@ -162,7 +159,7 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 		const unpublish = publishAgentTasks({
 			list: (owner) =>
 				Array.from(runs.values())
-					.filter((r) => (!owner || r.parentSessionId === owner) && r.status !== "completed")
+					.filter((r) => (!owner || r.parentSessionId === owner) && r.status !== "closed")
 					.map((r) => ({
 						...taskOf(r),
 						output: () => "\x1b[31mScanning src/auth.ts:12\x1b[0m\nFound token check",
@@ -216,12 +213,12 @@ describe("Task 8 (M2) — Subagent task_stop routing and /tasks dialog integrati
 			expect(renderScreen()).toContain("Status:   stopping");
 
 			// Now simulate `sub_20_1` completing while detail view is still open -> stays open with final report until dismissed!
-			run1.status = "completed";
+			run1.status = "closed";
 			run1.endedAt = 4000;
-			const completedDetailOut = renderScreen();
-			expect(completedDetailOut).toContain("Agent details");
-			expect(completedDetailOut).toContain("Status:   completed");
-			expect(completedDetailOut).toContain("Final completed report for sub_20_1");
+			const closedDetailOut = renderScreen();
+			expect(closedDetailOut).toContain("Agent details");
+			expect(closedDetailOut).toContain("Status:   closed");
+			expect(closedDetailOut).toContain("Final completed report for sub_20_1");
 		} finally {
 			unpublish();
 		}

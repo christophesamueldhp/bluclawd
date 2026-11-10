@@ -179,7 +179,7 @@ export type AdmissionResult =
 export interface RunAdmission {
 	launch(request: LaunchRequest, ctx: AdmissionContext): Promise<AdmissionResult>;
 	/**
-	 * Admits a completed or closed run's next generation. `buildPrompt` is called only once every check has
+	 * Admits a closed run's next generation. `buildPrompt` is called only once every check has
 	 * passed, just before the run starts again. Without one, the run resumes for the user to type in.
 	 */
 	resume(
@@ -272,9 +272,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		if (known && !deps.scope.inScope(known)) return refuse.invalidated;
 		const current = known ?? run;
 		if (!isResumableSubagentStatus(current.status)) {
-			return refuse.unavailable(
-				`${label} is ${current.status}; only a completed or closed subagent can be resumed.`,
-			);
+			return refuse.unavailable(`${label} is ${current.status}; only a closed subagent can be resumed.`);
 		}
 		if (deps.directory.list(scope).length >= MAX_OPEN_RUNS) return refuse.unavailable(TOO_MANY_OPEN);
 		const sessionFile = current.transcriptPath;

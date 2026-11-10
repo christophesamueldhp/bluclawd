@@ -10,10 +10,8 @@ const TASK_STATES: Record<SubagentLifecycleStatus, AgentTaskState> = {
 	starting: "running",
 	running: "running",
 	stopping: "running",
-	completed: "completed",
 	failed: "failed",
 	interrupted: "failed",
-	cancelled: "stopped",
 	closed: "completed",
 };
 

@@ -174,7 +174,9 @@ The bundled catalog marks most current models `"multi_agent_version": "v2"`, for
 
 ## Implications for bluclawd
 
-What exists today, read from `ext/subagents/` (no code changed):
+> **Historical.** This section describes bluclawd as of 2026-11-04, when runs were in-process SDK sessions (`runner.ts`, `createAgentSession`). That runtime was removed: runs are now pi sessions of their own in tmux (ADR-0006) that outlive their orchestrator's crash (ADR-0008). The file references below no longer match the code.
+
+What existed then, read from `ext/subagents/` (no code changed):
 
 - **Launch.** The `subagent` tool admits a run (`ext/subagents/index.ts:464-474`). The child is an in-process pi session from `createAgentSession`, with a persisted session file (`SessionManager.create`, or `SessionManager.open` when resuming) (`ext/subagents/runner.ts:355-360`). Its tool calls are proxied through the parent's tools (`runner.ts:290-291`).
 - **Foreground by default.** A foreground run blocks the tool call until its report is back (`index.ts:511-518`), so the orchestrator's turn cannot end while one is active. `background: true` is opt-in. It returns at once with "The final report will be delivered to this session branch when complete" (`index.ts:477-509`; parameter `ext/subagents/admission.ts:97-102`) and is unavailable in print/json mode (`index.ts:58,446-449`).

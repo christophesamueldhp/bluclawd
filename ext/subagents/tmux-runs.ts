@@ -289,7 +289,7 @@ export async function executeTmuxRun(
 	// settles it, so it stores nothing more.
 	if (handedOff && !signal.aborted) return new Promise<never>(() => {});
 	endPane(deps.tmux, pane);
-	return { status: "closed", complete: false, summaryText: last, transcriptPath: runSessionFile(launch) };
+	return { status: "closed", summaryText: last, transcriptPath: runSessionFile(launch) };
 }
 
 /**

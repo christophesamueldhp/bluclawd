@@ -488,7 +488,7 @@ describe("Task 0 (M0) — Pi 1.0.4 public SDK compatibility and lifecycle proof"
 				}
 				return {
 					content: [{ type: "text", text: "Subagent run completed." }],
-					details: { runId: "sub_ok_1", status: "completed" },
+					details: { runId: "sub_ok_1", status: "closed" },
 					usage: syntheticChildUsage,
 				};
 			},
@@ -525,7 +525,7 @@ describe("Task 0 (M0) — Pi 1.0.4 public SDK compatibility and lifecycle proof"
 			expect(okResultMsg?.role).toBe("toolResult");
 			if (okResultMsg?.role === "toolResult") {
 				expect(okResultMsg.isError).toBe(false);
-				expect(okResultMsg.details).toEqual({ runId: "sub_ok_1", status: "completed" });
+				expect(okResultMsg.details).toEqual({ runId: "sub_ok_1", status: "closed" });
 				expect(okResultMsg.usage).toEqual(syntheticChildUsage);
 			}
 

@@ -16,7 +16,7 @@ export interface RunAddressingDeps {
 
 /**
  * Takes the orchestrator's message for a run, from lookup to outcome: a final run resumes with it, any other
- * gets it through the bus. A run that ended other than completed or closed is refused by admission.
+ * gets it through the bus. A run that ended other than closed is refused by admission.
  */
 export function createRunAddressing(deps: RunAddressingDeps) {
 	const { bus } = deps;

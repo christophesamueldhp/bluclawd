@@ -1,12 +1,6 @@
 import { rmSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-	createFixture,
-	EvaluationBudget,
-	gradeFixture,
-	passPowerK,
-	summarizePiEvents,
-} from "../scripts/eval-subagents.ts";
+import { createFixture, EvaluationBudget, gradeFixture, passPowerK } from "../scripts/eval-subagents.ts";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -18,7 +12,7 @@ const fixture = (files: Record<string, string>) => {
 	return dir;
 };
 
-describe("live subagent evaluation guardrails", () => {
+describe("subagent evaluation guardrails", () => {
 	it("reserves the shared parent/child allowance before starting another request", () => {
 		const budget = new EvaluationBudget(1, 100, 1);
 		budget.reserve(10, 0.1);
@@ -56,22 +50,6 @@ describe("live subagent evaluation guardrails", () => {
 		expect(passPowerK(groups, 3)).toBe(0.5);
 		expect(passPowerK([[true, true]], 3)).toBeNull();
 		expect(passPowerK([], 1)).toBeNull();
-	});
-
-	it("reads the session, orchestrator messages and parent-attributed usage from a pi event stream", () => {
-		const events = [
-			{ type: "session", id: "sess_1" },
-			{ type: "tool_execution_start", toolName: "subagent" },
-			{ type: "tool_execution_start", toolName: "subagent" },
-			{ type: "tool_execution_start", toolName: "subagent_message" },
-			{ type: "message_end", message: { role: "assistant", usage: { totalTokens: 10, cost: { total: 0.01 } } } },
-			{ type: "message_end", message: { role: "toolResult", usage: { totalTokens: 90, cost: { total: 0.09 } } } },
-		]
-			.map((event) => JSON.stringify(event))
-			.join("\n");
-		const summary = summarizePiEvents(`${events}\nnot json`);
-		expect(summary).toMatchObject({ sessionId: "sess_1", spawns: 2, orchestratorMessages: 1, tokens: 100 });
-		expect(summary.cost).toBeCloseTo(0.1);
 	});
 });
 

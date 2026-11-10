@@ -50,15 +50,18 @@ scripts/        probe-extensions.ts — headless report of what each extension r
 test/           vitest suites, self-contained — no monorepo, no fixture files
 ```
 
-16 extensions. Pi's own packages are peers; the vendored sandbox runtime is a production dependency.
+18 extensions. Pi's own packages are peers; the vendored sandbox runtime is a production dependency.
 
 | Extension | Registers |
 |---|---|
+| `tmux-launch` | outside tmux, `pi` starts its session as an agent-view pane and attaches to it |
 | `permissions` | deny-rule gate on every tool call; Alt+M |
+| `sandbox` | `/sandbox`; the model's `bash` and `monitor` run in the sandbox runtime when it is on |
 | `checkpoints` | `/rewind` |
 | `background-bash` | `/tasks`; the `bash`, `monitor` and `task_stop` tools |
 | `subagents` | model-only `subagent` tool (`general-purpose`, `explorer`, `reviewer`, plus trusted `.pi/agents/*.md` and `~/.pi/agent/agents/*.md`) |
 | `branding` | `/theme`; welcome header and mascot |
+| `transcript` | the transcript's tool look: a collapsed tool call is one `⏺ Name(arg)` line with a `⎿` summary |
 | `agent-view` | `/agent-view` (what `←` twice dispatches) |
 | `remote` | `/remote-control` |
 | `help` | `/help`, `/status`, `/context` |
@@ -66,6 +69,7 @@ test/           vitest suites, self-contained — no monorepo, no fixture files
 | `skills` | choose `/skill:name` from autocomplete anywhere in a terminal draft; selected markers show scope, package provenance, and instruction-file location, and delete as one unit. Typed or pasted references remain ordinary text, including at the beginning. |
 | `prompt-assist` | `/prompt-assist`; prompt suggestions and automatic session titles with a selectable Pi model; manual rename stays available |
 | `web` | `/web`; the `websearch` (Exa or OpenAI) and `webfetch` (Exa) tools |
+| `memory` | `/memory`; the model-only `memory` tool, which keeps Memories of the Project across sessions |
 | `accounts` | `/accounts`, `--models`, `--scoped`; named OAuth/API-key accounts and Active model selection in one chooser |
 | `paste` | bluclawd's paste in the prompt and agent view's composer: a paste over 800 characters or 2 lines shows as `[Pasted text #N +L lines]`, a ctrl+v image as `[Image #N]` (sent as an image), and pasting the same thing again right after shows the text or the image's file |
 
@@ -495,10 +499,6 @@ work around it.
 `scripts/eval-subagents.ts`: a run is graded by the fixture's own tests and the final tree, never by what
 the transcript claims, so a run with failing tests is incorrect however confident its report is, and a
 helper written twice is a duplicate even when the tests pass.
-`node --experimental-strip-types scripts/eval-subagents.ts` prints the opt-in live evaluation command
-without making model calls. Its `--live` mode runs `pi -p` outside tmux, where subagents are now refused,
-so it no longer measures orchestrated runs; the last recorded live evidence (2026-10-28, issue #15)
-predates runs being pis of their own.
 
 ## Permissions
 
