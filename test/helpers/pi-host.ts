@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs";
 import { findPackageJSON } from "node:module";
 import { dirname, join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export interface PiHost {
 	version: string;
@@ -16,6 +16,7 @@ export interface PiHost {
 interface Manifest {
 	version: string;
 	dependencies?: Record<string, string>;
+	devDependencies?: Record<string, string>;
 }
 
 const read = (path: string): Manifest => JSON.parse(readFileSync(path, "utf8")) as Manifest;
@@ -56,9 +57,20 @@ export function piHost(hostDir: string): PiHost {
 	return { version, siblings };
 }
 
-/** The host installed for this repository. */
-export function installedPiHost(): PiHost {
-	const manifest = findPackageJSON("@earendil-works/pi-coding-agent", import.meta.url);
-	if (!manifest) throw new Error("pi-coding-agent is not installed.");
-	return piHost(dirname(manifest));
+/** The host installed for the repository at `repo`, whose own pi packages must be that host's version too. */
+export function installedPiHost(repo = fileURLToPath(new URL("../..", import.meta.url))): PiHost {
+	const manifest = join(repo, "package.json");
+	const agent = resolveFrom("@earendil-works/pi-coding-agent", manifest);
+	if (!agent) throw new Error(`pi-coding-agent is not installed in ${repo}.`);
+	const host = piHost(dirname(agent));
+	const mixed: string[] = [];
+	for (const name of Object.keys(read(manifest).devDependencies ?? {})) {
+		if (!name.startsWith("@earendil-works/")) continue;
+		const found = resolveFrom(name, manifest);
+		const version = found ? read(found).version : "missing";
+		if (version !== host.version) mixed.push(`${name} ${version}`);
+	}
+	if (mixed.length > 0)
+		throw new Error(`${repo} uses other packages than its pi ${host.version}: ${mixed.join(", ")}`);
+	return host;
 }

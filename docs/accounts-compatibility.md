@@ -137,8 +137,9 @@ pi-coding-agent, pi-ai and pi-tui **1.5.2** (one copy of every `@earendil-works/
   packages, all 1.5.2): Git-package install, all 18 extensions loaded with no errors, four
   Accounts routes, explicit model selection, native commands and Ctrl+L, unchanged scope and
   settings. It refused a copy of that prefix with one package relabelled 1.5.0.
+- `npm ci` from the lockfile installs one copy of each package, all 1.5.2.
 - `npm run check` passed: lint (one pre-existing warning), dead code, typecheck, and
-  **2,357 tests in 157 files**, none skipped. The real-pi panes record the version of the
+  **2,358 tests in 157 files**, none skipped. The real-pi panes record the version of the
   pi that asked the faux model; `test/pi-host.test.ts` asserts it is 1.5.2.
 - Changes the bump needed: TypeBox's `Type`/`Static` now come from `typebox` (published
   pi-ai 1.5.2 no longer re-exports them); agent view's dimmed composer strips pi-tui 1.5.2's

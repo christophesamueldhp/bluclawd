@@ -72,6 +72,26 @@ describe("the pi host", () => {
 		expect(() => piHost(host)).toThrow(/@earendil-works\/pi-schema 1\.5\.0/);
 	});
 
+	it("is refused when the repository's own pi package is another version than the host's", () => {
+		const host = fakeHost({
+			"pi-coding-agent": AGENT,
+			"pi-ai": { version: "1.0.4" },
+			"pi-tui": { version: "1.5.2" },
+		});
+		const nested = join(host, "node_modules", "@earendil-works", "pi-ai");
+		mkdirSync(nested, { recursive: true });
+		writeFileSync(join(nested, "package.json"), JSON.stringify({ name: "@earendil-works/pi-ai", version: "1.5.2" }));
+		const repo = join(host, "..", "..", "..");
+		writeFileSync(
+			join(repo, "package.json"),
+			JSON.stringify({
+				devDependencies: { "@earendil-works/pi-ai": "1.0.4", "@earendil-works/pi-coding-agent": "1.5.2" },
+			}),
+		);
+		expect(piHost(host).version).toBe("1.5.2");
+		expect(() => installedPiHost(repo)).toThrow(/@earendil-works\/pi-ai 1\.0\.4/);
+	});
+
 	it("is refused when a sibling it depends on is missing", () => {
 		const host = fakeHost({ "pi-coding-agent": AGENT, "pi-tui": { version: "1.5.2" } });
 		expect(() => piHost(host)).toThrow(/@earendil-works\/pi-ai missing/);
