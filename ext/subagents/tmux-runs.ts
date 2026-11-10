@@ -13,7 +13,7 @@ import type { AgentActivity } from "../../daemon/activity.ts";
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import { textOf } from "../../daemon/session-state.ts";
-import { endPane, PARENT_ENV, RUN_DIR_ENV, RUN_TASK_ENV, type Tmux } from "../../daemon/tmux.ts";
+import { endPane, PARENT_ENV, RUN_DIR_ENV, RUN_TASK_ENV, Tmux } from "../../daemon/tmux.ts";
 import { ForegroundActivity } from "../agent-view/self-registration.ts";
 import type { AgentDefinition } from "./definitions.ts";
 import { SUBAGENT_MESSAGE_CUSTOM_TYPE } from "./messages.ts";
@@ -202,7 +202,7 @@ export class RunReports {
 }
 
 export interface TmuxRunDeps {
-	tmux: Pick<Tmux, "newSession" | "end" | "hasSession">;
+	tmux: Pick<Tmux, "newSession" | "end" | "hasSession" | "shown" | "moveClients">;
 	reports: RunReports;
 	/** A Report no foreground launch took: it goes to the orchestrator. */
 	notify(report: RunReport): void;
@@ -224,7 +224,17 @@ export async function executeTmuxRun(
 	launch: RunLaunch,
 	deps: TmuxRunDeps,
 ): Promise<SubagentRunOutcome> {
+	const previous = record.pane;
 	const pane = launch.pane ?? startRun(deps.tmux, launch);
+	// The pi of its last Generation, still open while a terminal shows it (closeRun): that terminal goes on in this one.
+	if (previous && previous !== pane && !launch.pane) {
+		try {
+			deps.tmux.moveClients(previous, pane);
+		} catch {
+			// Gone already.
+		}
+		endPane(deps.tmux, previous);
+	}
 	controller.recordPane(pane);
 	controller.markRunning();
 	let last = "";
@@ -288,16 +298,41 @@ export async function executeTmuxRun(
 	// The next instance of the orchestrator's session goes on with the run, from its stored record: this one never
 	// settles it, so it stores nothing more.
 	if (handedOff && !signal.aborted) return new Promise<never>(() => {});
-	endPane(deps.tmux, pane);
+	await closeRun(deps.tmux, pane, launch.parent);
 	return { status: "closed", summaryText: last, transcriptPath: runSessionFile(launch) };
 }
+
+/**
+ * Ends a closed run's pi. One a terminal shows is only told it is closed, so the user is not thrown out of it: it
+ * ends itself once the terminal leaves it (actAsRun). Should it not hear, it ends at once.
+ */
+async function closeRun(tmux: Pick<Tmux, "end" | "shown">, pane: string, from: string): Promise<void> {
+	let shown = false;
+	try {
+		shown = tmux.shown(pane);
+	} catch {
+		// Gone, or tmux did not answer: ended as before.
+	}
+	if (shown) {
+		try {
+			await new OrchestratorClient().send(pane, { type: "session_message", kind: "close", from });
+			return;
+		} catch {
+			// Not reached: ended at once.
+		}
+	}
+	endPane(tmux, pane);
+}
+
+/** How often a closed run checks whether a terminal still shows it. */
+const LEAVE_CHECK_MS = 500;
 
 /**
  * Inside a run: its task is its first prompt, it tells its orchestrator whenever it starts working, falls
  * idle or waits on a prompt of its own, and each time it settles its last message goes to its orchestrator
  * as a Report. Its orchestrator, `parent()`, is the pane of the session that took it over last (ADR-0008).
  */
-export function actAsRun(pi: ExtensionAPI, parent: () => string, pane: string | undefined): void {
+export function actAsRun(pi: ExtensionAPI, parent: () => string, pane: string | undefined): { closed: () => boolean } {
 	const runDir = process.env[RUN_DIR_ENV];
 	/** Stores a Report before it is sent, numbered; none from a run started before Reports were stored. */
 	const store = (report: Parameters<typeof storeRunReport>[1]) => {
@@ -318,7 +353,7 @@ export function actAsRun(pi: ExtensionAPI, parent: () => string, pane: string | 
 	};
 	const tellActivity = (ctx: ExtensionContext) => {
 		const now = activity.current;
-		if (!pane || now === told) return sending;
+		if (!pane || closed || now === told) return sending;
 		told = now;
 		const message: SessionMessage = {
 			...fromRun(pi, pane),
@@ -331,10 +366,37 @@ export function actAsRun(pi: ExtensionAPI, parent: () => string, pane: string | 
 	};
 
 	let current: ExtensionContext | undefined;
+	/** Closed by its orchestrator while a terminal showed it: it takes nothing more, and ends once the terminal leaves. */
+	let closed = false;
+	const close = () => {
+		if (closed) return;
+		closed = true;
+		current?.abort();
+		current?.ui.notify("Closed by its orchestrator. It ends once you leave it: ← goes back.", "info");
+		if (!pane) return;
+		const tmux = new Tmux(undefined, undefined, { timeoutMs: 2000 });
+		const watch = setInterval(() => {
+			try {
+				if (tmux.shown(pane)) return;
+			} catch {
+				// tmux did not answer: checked again next time.
+				return;
+			}
+			clearInterval(watch);
+			endPane(tmux, pane);
+		}, LEAVE_CHECK_MS);
+	};
+	pi.on("input", (event, ctx) => {
+		// Its own commands still run: /quit, agent view.
+		if (!closed || event.text.trimStart().startsWith("/")) return { action: "continue" };
+		ctx.ui.notify("This subagent is closed: ask its orchestrator to resume it.", "warning");
+		return { action: "handled" };
+	});
 	pi.events.on("bluclawd:session-message", (data) => {
 		const message = data as SessionMessage;
 		// Only its orchestrator stops its turn.
 		if (message.kind === "stop" && message.from === parent()) current?.abort();
+		if (message.kind === "close" && message.from === parent()) close();
 		// Its orchestrator's session, reopened in another pane: its run directory is kept under that session's.
 		if (message.kind === "adopt" && runDir && runDirParentSessionId(runDir) === message.sessionId) {
 			process.env[PARENT_ENV] = message.from;
@@ -366,7 +428,11 @@ export function actAsRun(pi: ExtensionAPI, parent: () => string, pane: string | 
 		// message that starts the turn goes without it. The frame still says it is not from the user.
 		pi.sendUserMessage(runTaskText(task, false));
 	});
-	pi.on("agent_start", (event, ctx) => void tell(event, ctx));
+	pi.on("agent_start", (event, ctx) => {
+		// Closed, it runs no turn, whatever starts one (a skill, a prompt template): nobody would hear its Report.
+		if (closed) return ctx.abort();
+		void tell(event, ctx);
+	});
 	pi.on("turn_start", (event, ctx) => void tell(event, ctx));
 	pi.on("ui_prompt_start", (event, ctx) => void tell(event, ctx));
 	pi.on("ui_prompt_end", (event, ctx) => void tell(event, ctx));
@@ -374,7 +440,7 @@ export function actAsRun(pi: ExtensionAPI, parent: () => string, pane: string | 
 		// Idle before the Report, so the orchestrator it wakes no longer waits for this run: in the order sent, not
 		// awaited, as pi waits on this handler and an earlier Report may still be retrying.
 		void tell(event, ctx);
-		if (!pane) return;
+		if (!pane || closed) return;
 		const last = [...ctx.sessionManager.getBranch()]
 			.reverse()
 			.find((entry) => entry.type === "message" && entry.message.role === "assistant");
@@ -389,6 +455,7 @@ export function actAsRun(pi: ExtensionAPI, parent: () => string, pane: string | 
 		// Each try goes to its orchestrator as of then: one that takes the run over meanwhile gets it.
 		sending = sending.then(() => send(parent, report, ctx, REPORT_RETRY_MS));
 	});
+	return { closed: () => closed };
 }
 
 /** How long a run waits before each next try of a Report the daemon did not take: some 30s in all. */

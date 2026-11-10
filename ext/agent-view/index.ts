@@ -236,6 +236,17 @@ const agentView: InlineExtension = {
 				return false;
 			}
 		};
+		/** Where ← goes back to from a run: its orchestrator's pane, unless the run was opened from agent view or that
+		 *  pane is gone (its orchestrator quit), when agent view opens instead. */
+		const backTo = (): string | undefined => {
+			const orchestrator = parent();
+			if (!orchestrator || backToView()) return undefined;
+			try {
+				return panes.hasSession(orchestrator) ? orchestrator : undefined;
+			} catch {
+				return orchestrator;
+			}
+		};
 		let launched = false;
 		// What the turn in progress is doing, for this session's row in other windows.
 		let liveDetail: string | undefined;
@@ -559,9 +570,8 @@ const agentView: InlineExtension = {
 				}
 				if (Date.now() - editedAt >= LEFT_EDIT_MS || (armedAt && Date.now() - armedAt < LEFT_ARM_MS)) {
 					disarm();
-					const orchestrator = parent();
-					if (!orchestrator || backToView())
-						pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
+					const orchestrator = backTo();
+					if (!orchestrator) pi.sendUserMessage(`/${AGENT_VIEW_COMMAND}`, { expandPromptTemplates: true });
 					else {
 						try {
 							panes.switchTo(orchestrator);
@@ -573,10 +583,7 @@ const agentView: InlineExtension = {
 				}
 				const at = Date.now();
 				armedAt = at;
-				leftHint = theme.fg(
-					"dim",
-					parent() && !backToView() ? "Press ← again to go back" : "Press ← again to open agents",
-				);
+				leftHint = theme.fg("dim", backTo() ? "Press ← again to go back" : "Press ← again to open agents");
 				paintPill?.();
 				setTimeout(() => {
 					if (armedAt === at) disarm();

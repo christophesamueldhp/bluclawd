@@ -405,6 +405,22 @@ export class Tmux {
 		}
 	}
 
+	/** Whether a terminal shows session `name`; throws when tmux could not say. */
+	shown(name: string): boolean {
+		return this.clientsOf(name).length > 0;
+	}
+
+	/** Show `to` in every terminal that shows `from`. */
+	moveClients(from: string, to: string): void {
+		for (const client of this.clientsOf(from)) this.run(["switch-client", "-c", client, "-t", `=${to}`]);
+	}
+
+	private clientsOf(name: string): string[] {
+		return this.run(["list-clients", "-t", `=${name}`, "-F", "#{client_name}"])
+			.split("\n")
+			.filter(Boolean);
+	}
+
 	/** Leave tmux: the terminal returns to its shell, every pane keeps running. */
 	detach(): void {
 		this.run(["detach-client"]);

@@ -117,8 +117,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		const launchedBy = runParent();
 		if (launchedBy) {
 			const parent = () => runParent() ?? launchedBy;
-			actAsRun(pi, parent, pane);
-			if (pane) messageAsRun(pi, parent, pane);
+			const run = actAsRun(pi, parent, pane);
+			if (pane) messageAsRun(pi, parent, pane, run.closed);
 		}
 		const reports = new RunReports();
 		/** Aborted on a reload, which hands this instance's open runs to the next one. */

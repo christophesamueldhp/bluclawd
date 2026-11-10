@@ -83,10 +83,11 @@ export function messageTarget(
  * A run's side of messaging: its subagent_message and subagent_roster, what it receives, and the notes of what the
  * user types in it.
  */
-export function messageAsRun(pi: ExtensionAPI, parent: () => string, pane: string): void {
+export function messageAsRun(pi: ExtensionAPI, parent: () => string, pane: string, closed: () => boolean): void {
 	pi.events.on("bluclawd:session-message", (data) => {
 		const message = data as SessionMessage;
-		if (message.kind !== "message") return;
+		// A closed run takes no more turns.
+		if (message.kind !== "message" || closed()) return;
 		// An idle run takes a turn on it; a busy one reads it at its next step.
 		pi.sendMessage(
 			{
