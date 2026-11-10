@@ -39,7 +39,7 @@ export default function fauxPi(pi: ExtensionAPI): void {
 		const asked = existsSync(log) ? readFileSync(log, "utf8").split("\n").filter(Boolean).length : 0;
 		appendFileSync(
 			log,
-			`${JSON.stringify({ host: VERSION, model: model.id, reasoning: options?.reasoning, messages: context.messages })}\n`,
+			`${JSON.stringify({ piVersion: VERSION, model: model.id, reasoning: options?.reasoning, messages: context.messages })}\n`,
 		);
 		const script = join(dir, `${key}.json`);
 		const step = (existsSync(script) ? (JSON.parse(readFileSync(script, "utf8")) as FauxStep[]) : [])[asked];

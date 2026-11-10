@@ -13,13 +13,14 @@ import { expect, vi } from "vitest";
 import { type InstanceSummary, OrchestratorClient, piPackageRoot } from "../../daemon/orchestrator-client.ts";
 import { Tmux } from "../../daemon/tmux.ts";
 import { type FauxStep, fauxDir } from "../fixtures/real-pi/faux.ts";
-// Refuses a host whose sibling packages mix versions before any pane starts.
-import "./pi-host.ts";
+import { installedPiHost } from "./pi-host.ts";
 import { waitFor } from "./wait-for.ts";
 
 export type { FauxStep };
 
 export const hasTmux = Tmux.available();
+// Refuses a host whose packages mix versions before any pane starts.
+installedPiHost();
 
 const root = fileURLToPath(new URL("../..", import.meta.url));
 export const PI_CLI = join(
@@ -43,8 +44,7 @@ export interface FauxMessage {
 
 /** One request a session's model got. */
 export interface FauxRequest {
-	/** The version of the pi that asked, as that pi reports it. */
-	host: string;
+	piVersion: string;
 	model: string;
 	reasoning?: string;
 	messages: FauxMessage[];

@@ -44,10 +44,11 @@ are masked, errors sanitized, and stored credentials remain owner-readable plain
 
 Checked on 2026-11-11 (#291), macOS, Node 26.8.1:
 
-- Stock published `@earendil-works/pi-coding-agent` **1.5.2** and the siblings it resolves,
-  `pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-mcp`, and `pi-tui`, all **1.5.2**. pi 1.5.2 pins
-  these exactly, so a plain `npm install` of it yields this set; `test/helpers/pi-host.ts`
-  refuses a tree that resolves any other version.
+- Stock published `@earendil-works/pi-coding-agent` **1.5.2** and every `@earendil-works/*` package
+  it resolves, directly or through another: `pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-mcp`,
+  `pi-schema`, `pi-telemetry` and `pi-tui`, all **1.5.2**. pi 1.5.2 pins these exactly, so a plain
+  `npm install` of it yields this set. `test/helpers/pi-host.ts` refuses a tree that resolves
+  any other version, in the tests and in the package probe.
 - A separate temporary npm installation, using published packages without source edits,
   a custom host build, private monkey-patches, or bluclawd development dependencies.
 - A normal `pi install git:https://fixture.invalid/bluclawd/package` against a temporary
@@ -132,11 +133,12 @@ SDK failure remains an installation limitation, not a passing compatibility resu
 Checked 2026-11-11 on macOS, Node 26.8.1, tmux 3.6b, with the development dependencies at
 pi-coding-agent, pi-ai and pi-tui **1.5.2** (one copy of every `@earendil-works/*` package, all 1.5.2):
 
-- The package probe above passed against a fresh stock 1.5.2 prefix: Git-package install,
-  all 18 extensions loaded with no errors, four Accounts routes, explicit model selection,
-  native commands and Ctrl+L, unchanged scope and settings.
+- The package probe above passed against a fresh stock 1.5.2 prefix (7 `@earendil-works`
+  packages, all 1.5.2): Git-package install, all 18 extensions loaded with no errors, four
+  Accounts routes, explicit model selection, native commands and Ctrl+L, unchanged scope and
+  settings. It refused a copy of that prefix with one package relabelled 1.5.0.
 - `npm run check` passed: lint (one pre-existing warning), dead code, typecheck, and
-  **2,356 tests in 157 files**, none skipped. The real-pi panes record the version of the
+  **2,357 tests in 157 files**, none skipped. The real-pi panes record the version of the
   pi that asked the faux model; `test/pi-host.test.ts` asserts it is 1.5.2.
 - Changes the bump needed: TypeBox's `Type`/`Static` now come from `typebox` (published
   pi-ai 1.5.2 no longer re-exports them); agent view's dimmed composer strips pi-tui 1.5.2's
