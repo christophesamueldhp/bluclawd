@@ -4,7 +4,8 @@
  * starts the host once the run's turn in its queue comes. The host starts the run's pi, gives it its task, stores its Report once its work settles with nothing pending, then closes its stdin and
  * records how it exited. Everything between the orchestrator and the host goes through the run's directory: the
  * launch spec and messages for the run in, the host's state, what the run sends out and its Reports out
- * (run-mailbox.ts); a SIGTERM to the host stops the run.
+ * (run-mailbox.ts), and approvals the run asks for out with their answers in (run-approvals.ts); a SIGTERM to the
+ * host stops the run.
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
@@ -14,6 +15,15 @@ import { fileURLToPath } from "node:url";
 import { piPackageRoot } from "../../daemon/orchestrator-client.ts";
 import type { RunHostLaunch } from "../../daemon/run-queue.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
+import {
+	dialogAnswer,
+	type RunApprovalAnswer,
+	runApprovalAnswer,
+	runApprovalAsked,
+	runApprovalSeen,
+	storeRunApprovalRequest,
+	withdrawRunApproval,
+} from "./run-approvals.ts";
 import {
 	markGiven,
 	type RunInboxMessage,
@@ -63,6 +73,10 @@ const statePath = (runDir: string) => join(runDir, "rpc-host.json");
 const stderrPath = (runDir: string) => join(runDir, "rpc-child.stderr");
 /** How often the host looks for messages posted to the run. */
 const INBOX_CHECK_MS = 50;
+/** How long the orchestrator has to see an approval the run asks for: past it, no one is there to ask. */
+const APPROVAL_SEEN_MS = 5000;
+/** pi's dialogs, each of which waits for an answer. */
+const DIALOGS = ["select", "confirm", "input", "editor"];
 const HOST_FILE = fileURLToPath(import.meta.url);
 const RESOLVE_HOOK = join(dirname(HOST_FILE), "../../daemon/pi-resolve-hook.mjs");
 
@@ -192,12 +206,38 @@ async function host(runDir: string): Promise<void> {
 	state.childPid = child.pid;
 	save();
 
+	/** Approvals the run's pi waits for, by pi's id for their dialog, with when each was asked. */
+	const approvals = new Map<string, number>();
+	const answerDialog = (id: string, answer: RunApprovalAnswer | undefined) => {
+		approvals.delete(id);
+		child.stdin?.write(`${JSON.stringify({ type: "extension_ui_response", id, ...dialogAnswer(answer) })}\n`);
+	};
+	const checkApprovals = () => {
+		for (const [id, asked] of approvals) {
+			const answer = runApprovalAnswer(runDir, spec.generation, id);
+			if (answer) answerDialog(id, answer);
+			else if (!runApprovalSeen(runDir, spec.generation, id) && Date.now() - asked > APPROVAL_SEEN_MS) {
+				withdrawRunApproval(runDir, spec.generation, id);
+				answerDialog(id, "blocked");
+			}
+		}
+	};
+	/**
+	 * A run that stops or ends takes no answer any more. Its pi is not answered either, which would let it go on to
+	 * its next step: ending, it drops the dialog itself.
+	 */
+	const withdrawApprovals = () => {
+		for (const id of approvals.keys()) withdrawRunApproval(runDir, spec.generation, id);
+		approvals.clear();
+	};
+
 	let stopped = false;
 	process.on("SIGTERM", () => {
 		stopped = true;
 		// A stopped run takes no more messages: those posted from now on are refused, not left untaken.
 		clearInterval(watching);
 		sealRunInbox(runDir, spec.generation);
+		withdrawApprovals();
 		// pi ends its work in order on a SIGTERM, its shell commands included.
 		child.kill("SIGTERM");
 	});
@@ -238,6 +278,18 @@ async function host(runDir: string): Promise<void> {
 			if (details) writeRunOutbox(runDir, spec.generation, { ...details, seq: ++sent });
 		}
 		if (event.type === "agent_settled") onSettled?.(event.aborted === true);
+		// A dialog waits for its answer: only an approval the run asks for goes to its orchestrator, and any other is
+		// dismissed at once, as if no one were there.
+		if (
+			event.type === "extension_ui_request" &&
+			typeof event.id === "string" &&
+			DIALOGS.includes(String(event.method))
+		) {
+			const ask = event.method === "select" && !stopped ? runApprovalAsked(event.title) : undefined;
+			if (ask && storeRunApprovalRequest(runDir, spec.generation, { id: event.id, ...ask })) {
+				approvals.set(event.id, Date.now());
+			} else answerDialog(event.id, undefined);
+		}
 	});
 	// One at a time, so the last look at the inbox and its seal cannot interleave with a message being given.
 	let turn = Promise.resolve();
@@ -312,7 +364,10 @@ async function host(runDir: string): Promise<void> {
 		const prompted = await request({ type: "prompt", message: spec.prompt });
 		if (!prompted.success) return { status: "failed", error: String(prompted.error ?? "its task was refused") };
 		const inbox = () => readRunInbox(runDir, spec.generation);
-		watching = setInterval(() => void serial(() => give(inbox())).catch(() => {}), INBOX_CHECK_MS);
+		watching = setInterval(() => {
+			checkApprovals();
+			void serial(() => give(inbox())).catch(() => {});
+		}, INBOX_CHECK_MS);
 		for (;;) {
 			const aborted = await next;
 			if (aborted || stopped) return { status: "stopped", error: "its work was stopped" };
@@ -361,6 +416,7 @@ async function host(runDir: string): Promise<void> {
 		),
 	]);
 	clearInterval(watching);
+	withdrawApprovals();
 	// Whatever it was sent and never took, stopped or failed first, stays in the sealed inbox, and the Report says so.
 	const untaken = sealRunInbox(runDir, spec.generation).filter(({ id }) => !taken.has(id)).length;
 	// Stored before its pi is let go: its work is on disk whatever happens next.

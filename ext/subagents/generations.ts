@@ -14,6 +14,7 @@ import {
 import { inParentScope, type ParentScope, type ParentScopeChecks, type ScopedRun } from "./parent-scope.ts";
 import { buildSubagentResultEnvelope, MAX_PARENT_REPORT_BYTES, type SubagentResultDetails } from "./results.ts";
 import { executeRpcRun, type RunSlots } from "./rpc-runs.ts";
+import type { RunApprovalAnswer, RunApprovalRequest } from "./run-approvals.ts";
 import { postToRun, whenGiven } from "./run-mailbox.ts";
 import { type RpcRunSender, rpcRunMessageText } from "./run-messages.ts";
 import { isTerminalSubagentStatus, type SubagentRunRecord, SubagentRunScheduler } from "./runs.ts";
@@ -98,6 +99,41 @@ export function createGenerations(deps: GenerationDeps) {
 			`Run: ${record.runId} (${record.agentName})\nStatus: ${record.status}\nTask: ${record.taskSummary}`,
 		);
 		appendParentRunReference(deps.pi, record);
+	};
+
+	/** The user's answers to what runs asked to do, by parent scope, action and target: each is asked once. */
+	const approvalAnswers = new Map<string, "allow" | "deny">();
+	// pi's dialog replaces an open one without settling it, so one opens only after the last settled.
+	let dialogs: Promise<unknown> = Promise.resolve();
+	/** Asks the user whether run `runId` may do what it asks, in this session's own dialog; blocked with no one to ask. */
+	const approve = (runId: string, request: RunApprovalRequest, signal: AbortSignal): Promise<RunApprovalAnswer> => {
+		const answer = dialogs.then(async (): Promise<RunApprovalAnswer> => {
+			const record = scheduler.getRun(runId);
+			if (!record || signal.aborted || !deps.scope.inScope(record)) return "blocked";
+			const key = JSON.stringify([record.parentSessionId, record.sessionEpoch, request.action, request.target]);
+			const known = approvalAnswers.get(key);
+			if (known) return known;
+			const ctx = deps.scope.context();
+			if (!ctx?.hasUI) {
+				const text = `Subagent ${formatRunLabel(record)} is blocked: it needs the user's approval to ${request.action} ${request.target}, and this session cannot ask the user. Its call was refused; ask the user how to go on.`;
+				deps.pi.sendMessage(
+					{ customType: SUBAGENT_MESSAGE_CUSTOM_TYPE, content: [{ type: "text", text }], display: true },
+					{ deliverAs: "steer", triggerTurn: true },
+				);
+				return "blocked";
+			}
+			const allowed = await ctx.ui.confirm(
+				`Subagent ${formatRunLabel(record)}, generation ${record.generation}, asks for approval`,
+				`${request.action} ${request.target}\n\nYour answer holds for every run of this session that asks the same.`,
+				{ signal },
+			);
+			if (signal.aborted) return "blocked";
+			approvalAnswers.set(key, allowed ? "allow" : "deny");
+			// Answered once the run had left this session's scope: it releases nothing there.
+			return deps.scope.inScope(record) ? (allowed ? "allow" : "deny") : "blocked";
+		});
+		dialogs = answer.catch(() => {});
+		return answer;
 	};
 
 	const scheduler = new SubagentRunScheduler<RunExecutionContext>({
@@ -194,6 +230,7 @@ export function createGenerations(deps: GenerationDeps) {
 								`${kind} (generation ${generation}): ${message.content}`,
 							);
 						},
+						approve: (request, signal) => approve(runId, request, signal),
 					});
 				} finally {
 					deps.bus.unregister(runId, "has been closed");
