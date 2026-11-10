@@ -49,7 +49,7 @@ import type { SubagentResultDetails } from "./results.ts";
 import { daemonRunSlots, rpcRunsEnabled } from "./rpc-runs.ts";
 import { createRunIntervention, RUN_CONVERSATION_ENTRY } from "./run-intervention.ts";
 import { messageAsRun } from "./run-messages.ts";
-import { isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
+import { isResumableSubagentStatus, isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
 import {
 	appendSubagentMessageRecord,
 	extractReferencedRunIdsFromBranch,
@@ -77,8 +77,10 @@ const AFTER_YOU_DELEGATE = [
 	"- Do not poll `subagent_status` by reflex; check it only when a run seems stuck.",
 	"- With no independent work left, end your turn and say you are waiting: the report will wake you.",
 	"- Never predict or invent a pending run's result; if the user asks, say it is still running.",
-	`- A run stays open after it reports, and nothing closes it for you: once its work is done, close it with \`subagent_close\`. At most ${MAX_OPEN_RUNS} runs stay open; \`subagent_message\` resumes a closed one.`,
 ];
+const CLOSE_RUNS = `- A run stays open after it reports, and nothing closes it for you: once its work is done, close it with \`subagent_close\`. At most ${MAX_OPEN_RUNS} runs stay open; \`subagent_message\` resumes a closed one.`;
+const RPC_RUNS_END =
+	"- A run's process ends by itself once it reports: there is nothing to close. `subagent_stop` cancels a run's work; only `subagent_resume` continues a finished or stopped run.";
 
 export interface SubagentExtensionOptions {
 	agentDir?: string;
@@ -110,6 +112,7 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 					"Run in the foreground (the default) when your next step needs the result. Set `background: true` only when you have independent work to do meanwhile.",
 					"",
 					...AFTER_YOU_DELEGATE,
+					rpcRunsEnabled() ? RPC_RUNS_END : CLOSE_RUNS,
 					"",
 				]),
 		"Available subagent roles:",
@@ -483,7 +486,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			if (reopened) {
 				for (const runId of extractReferencedRunIdsFromBranch(branchEntries)) {
 					const run = scheduler.getRun(runId) ?? readPersistedRunRecord(agentDir, sessionId, runId);
-					if (run?.status === "closed") scheduler.reopen(run, reopened.sessionEpoch);
+					if (run && isResumableSubagentStatus(run.status)) scheduler.reopen(run, reopened.sessionEpoch);
 				}
 				// Reports its runs stored but could not send while it was gone.
 				pullReports(reopened);
@@ -643,7 +646,8 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		// The orchestrator's only: a run messages through the daemon (messageAsRun), and manages no runs.
 		const registerOrchestratorTool: typeof pi.registerTool = (tool) => {
-			if (!launchedBy) pi.registerTool(tool);
+			// Runs on pi's RPC end their pis by themselves: the model has none to close, only work to stop.
+			if (!launchedBy && !(tool.name === "subagent_close" && rpcRunsEnabled())) pi.registerTool(tool);
 		};
 		registerOrchestratorTool({
 			name: SUBAGENT_MESSAGE_TOOL,
@@ -752,13 +756,49 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			},
 		});
 
+		/** Settles with the run's record once it is final; undefined once `signal` aborts first. */
+		const untilFinal = (runId: string, signal: AbortSignal | undefined) =>
+			new Promise<Readonly<SubagentRunRecord> | undefined>((resolve) => {
+				const final = scheduler.whenFinal(runId);
+				if (!final || signal?.aborted) return resolve(undefined);
+				signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+				void final.then(resolve);
+			});
+		/**
+		 * Cancels a run on pi's RPC, queued or working, and waits while the call does until nothing of it runs: a stop
+		 * asked for is not told as done.
+		 */
+		const stopRpcRun = async (run: Readonly<SubagentRunRecord>, signal: AbortSignal | undefined) => {
+			const label = formatRunLabel(run);
+			scheduler.cancelRun(run.runId, "model", "Stopped by its orchestrator");
+			const final = await untilFinal(run.runId, signal);
+			if (final?.status === "cancelled") {
+				return {
+					text: `Stopped ${label}: its work was cancelled, and none of its processes runs any more. Its session, Reports and files are kept; only subagent_resume continues it.`,
+					stopped: true,
+				};
+			}
+			if (final?.status === "closed") {
+				return {
+					text: `${label} finished its work before it could be stopped; its Report: ${final.reportPath ?? "kept with the run"}.`,
+					stopped: true,
+				};
+			}
+			return {
+				text: final
+					? `Could not confirm ${label} stopped: ${final.errorMessage ?? final.status}.`
+					: `Asked ${label} to stop; it is still stopping, and its processes may still run.`,
+				stopped: false,
+			};
+		};
 		registerOrchestratorTool({
 			name: "subagent_stop",
 			label: "Stop subagent",
 			exposure: "model-only",
 			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-			description:
-				'Stop the turn in progress of a subagent by name or run ID, or of every subagent with "all", as Esc does: the run stays open and takes messages. To end a run, use subagent_close.',
+			description: rpcRunsEnabled()
+				? 'Stop a subagent by name or run ID, or every one with "all": its work is cancelled, queued or under way, and the call returns once none of its processes runs. Its session, Reports and files are kept; only subagent_resume continues it.'
+				: 'Stop the turn in progress of a subagent by name or run ID, or of every subagent with "all", as Esc does: the run stays open and takes messages. To end a run, use subagent_close.',
 			parameters: Type.Object(
 				{ agent: Type.String({ description: 'A subagent name or run ID, or "all".' }) },
 				{ additionalProperties: false },
@@ -766,15 +806,25 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			execute: async (_toolCallId, params, signal) => {
 				const target = params.agent.trim();
 				if (target === "all") {
-					const asked = await Promise.all(
-						views.open().map(({ record }) => (record.pane && pane ? stopTurn(record.pane, pane, signal) : false)),
-					);
+					const open = views.open().map(({ record }) => record);
+					const rpc = open.filter((record) => record.backend === "rpc");
+					const [asked, cancelled] = await Promise.all([
+						Promise.all(
+							open.map((record) => (record.pane && pane ? stopTurn(record.pane, pane, signal) : false)),
+						),
+						Promise.all(rpc.map((record) => stopRpcRun(record, signal))),
+					]);
 					const stopped = asked.filter(Boolean).length;
+					const text = [
+						...(stopped > 0 || rpc.length === 0
+							? [`Stopped the turn of ${stopped} subagent${stopped === 1 ? "" : "s"}.`]
+							: []),
+						...cancelled.map((result) => result.text),
+					].join("\n");
 					return {
-						content: [
-							{ type: "text", text: `Stopped the turn of ${stopped} subagent${stopped === 1 ? "" : "s"}.` },
-						],
+						content: [{ type: "text", text }],
 						details: undefined,
+						isError: cancelled.some((result) => !result.stopped),
 					};
 				}
 				const run = views.findOpen(target)?.record;
@@ -784,6 +834,10 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						details: undefined,
 						isError: true,
 					};
+				}
+				if (run.backend === "rpc") {
+					const { text, stopped } = await stopRpcRun(run, signal);
+					return { content: [{ type: "text", text }], details: undefined, isError: !stopped };
 				}
 				const label = `${run.name ?? run.runId}'s turn (${run.runId})`;
 				const stopped = run.pane !== undefined && pane !== undefined && (await stopTurn(run.pane, pane, signal));
@@ -930,7 +984,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 									text:
 										run && isTerminalSubagentStatus(run.status)
 											? `${name} ended before it reported: ${run.errorMessage ?? run.stopReason ?? run.status}.`
-											: `Stopped waiting for ${name}'s report; it stays open in its own session.`,
+											: run?.backend === "rpc"
+												? `Cancelling ${name}: its work was asked to stop, and it is ${run.status}. Its session and Reports are kept; only subagent_resume continues it.`
+												: `Stopped waiting for ${name}'s report; it stays open in its own session.`,
 								},
 							],
 							details,

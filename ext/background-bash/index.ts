@@ -398,7 +398,11 @@ const backgroundBash: InlineExtension = {
 					if (!closed?.ok) throw noTaskError(id);
 					const label = `${closed.task.agent}: ${closed.task.summary}`;
 					const text = JSON.stringify({
-						message: `Successfully closed task: ${id} (${label}); its session is kept`,
+						// A stop only asked for is not told as done: the run ends once its processes have.
+						message:
+							closed.task.state === "running"
+								? `Stop requested for task: ${id} (${label}); it is ${closed.task.status}, not ended yet, and its session is kept`
+								: `Successfully closed task: ${id} (${label}); its session is kept`,
 						task_id: id,
 						task_type: "local_agent",
 						command: label,
