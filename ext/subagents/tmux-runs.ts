@@ -186,6 +186,11 @@ export class RunReports {
 		});
 	}
 
+	/** Whether a call waits for the run's next Report: it is told of the run's end as well. */
+	awaited(runId: string): boolean {
+		return this.waiting.has(runId);
+	}
+
 	/** Gives a run's Report to the launch waiting for it; false when none waits. */
 	take(runId: string, report: RunReport): boolean {
 		const waiter = this.waiting.get(runId);

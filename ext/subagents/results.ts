@@ -107,7 +107,7 @@ export function formatSnapshotSummary(start: WorkspaceSnapshot): string {
 	return `${head} (${start.dirty ? "dirty" : "clean"})`;
 }
 
-function truncateUtf8Safe(text: string, maxBytes: number): { text: string; truncated: boolean } {
+export function truncateUtf8Safe(text: string, maxBytes: number): { text: string; truncated: boolean } {
 	if (Buffer.byteLength(text, "utf8") <= maxBytes) {
 		return { text, truncated: false };
 	}

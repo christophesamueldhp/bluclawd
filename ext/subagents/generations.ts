@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { createRunAddressing } from "./addressing.ts";
 import { formatRunLabel, type RunExecutionContext } from "./admission.ts";
+import type { BatchResultDetails } from "./batches.ts";
 import { createRunDirectory } from "./directory.ts";
 import {
 	capReport,
@@ -35,7 +36,7 @@ const GIVE_WAIT_MS = 5000;
 /** A Report no foreground launch took, as the orchestrator is told about it. */
 export interface ParentNotice {
 	parentText: string;
-	details: SubagentResultDetails;
+	details: SubagentResultDetails | BatchResultDetails;
 }
 
 export interface GenerationDeps {

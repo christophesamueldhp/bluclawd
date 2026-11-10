@@ -105,7 +105,8 @@ export function captureWorkspaceSnapshot(cwd: string): WorkspaceSnapshot {
 	}
 }
 
-export const SUBAGENT_TOOL_PARAMETERS = Type.Object({
+/** One Run's parameters: those of a single assignment, which a `tasks` entry shares in part. */
+const RUN_PARAMETERS = Type.Object({
 	agent: Type.Union([
 		Type.String({
 			description: "Saved subagent role name (for example 'explorer' or 'reviewer').",
@@ -168,7 +169,66 @@ export const SUBAGENT_TOOL_PARAMETERS = Type.Object({
 	),
 });
 
-export type LaunchParams = Static<typeof SUBAGENT_TOOL_PARAMETERS>;
+/** What each entry of a `tasks` batch chooses for itself; the call's other parameters apply to every entry. */
+const TASK_ENTRY_KEYS = ["agent", "task", "name", "cwd", "model", "thinkingLevel"] as const;
+const run = RUN_PARAMETERS.properties;
+
+export const SUBAGENT_TOOL_PARAMETERS = Type.Object({
+	...run,
+	agent: Type.Optional(run.agent),
+	task: Type.Optional(run.task),
+	tasks: Type.Optional(
+		Type.Array(
+			Type.Object(
+				{
+					agent: run.agent,
+					task: run.task,
+					name: run.name,
+					cwd: run.cwd,
+					model: run.model,
+					thinkingLevel: run.thinkingLevel,
+				},
+				{ additionalProperties: false },
+			),
+			{
+				minItems: 1,
+				description:
+					"Independent assignments to run side by side, in place of agent and task: each entry is a subagent of its own, with its own role, task, name, cwd, model and thinking level. The call waits for every one (unless background) and returns one combined report.",
+			},
+		),
+	),
+});
+
+/** One Run's parameters: a single assignment's, or a `tasks` entry's with the call's own. */
+export type LaunchParams = Static<typeof RUN_PARAMETERS>;
+export type SubagentCallParams = Static<typeof SUBAGENT_TOOL_PARAMETERS>;
+
+/** Prefix of a batch's ID, which no run's name may take. */
+export const BATCH_ID_PREFIX = "batch_";
+
+/** What a subagent call asks for: one Run, or a batch of independent ones. Alternative shapes are never combined. */
+export type SubagentInvocation =
+	| { readonly ok: true; readonly run: LaunchParams }
+	| { readonly ok: true; readonly tasks: LaunchParams[] }
+	| { readonly ok: false; readonly error: string };
+
+export function subagentInvocation(params: SubagentCallParams): SubagentInvocation {
+	const { tasks, ...call } = params;
+	if (tasks === undefined) {
+		if (call.agent === undefined) return { ok: false, error: "Missing required parameter: agent" };
+		if (call.task === undefined) return { ok: false, error: "Missing required parameter: task" };
+		return { ok: true, run: { ...call, agent: call.agent, task: call.task } };
+	}
+	const conflicting = TASK_ENTRY_KEYS.filter((key) => call[key] !== undefined).map((key) => `\`${key}\``);
+	if (conflicting.length > 0) {
+		return {
+			ok: false,
+			error: `\`tasks\` and ${conflicting.join(", ")} are alternative shapes: set ${conflicting.join(", ")} in each entry of \`tasks\` instead, or leave \`tasks\` out.`,
+		};
+	}
+	const { agentScope, confirmProjectAgents, background } = call;
+	return { ok: true, tasks: tasks.map((entry) => ({ ...entry, agentScope, confirmProjectAgents, background })) };
+}
 
 /** How a run is named in replies: its quoted name and run ID, or its quoted run ID when unnamed. */
 export function formatRunLabel(run: Pick<SubagentRunRecord, "name" | "runId">): string {
@@ -180,6 +240,13 @@ export interface LaunchRequest {
 	parentTurnId: string;
 	params: LaunchParams;
 	signal?: AbortSignal;
+	/** The ID of the `tasks` batch the run is a member of. */
+	batch?: string;
+	/**
+	 * Awaited once the run passed every check, just before it is admitted: a batch's members are admitted together,
+	 * or none is. False when a sibling was refused, and this run is not admitted either.
+	 */
+	ready?: () => Promise<boolean>;
 }
 
 /** The parts of the calling tool's context admission reads. */
@@ -299,6 +366,19 @@ function invalidTaskText(task: string): string | undefined {
 	const bytes = Buffer.byteLength(task, "utf8");
 	if (bytes <= MAX_TASK_INPUT_BYTES) return undefined;
 	return `Delegated task exceeds the ${MAX_TASK_INPUT_BYTES}-byte limit (${bytes} bytes). Supply target file paths instead of pasting large file contents.`;
+}
+
+/** Why a run cannot be called `name`: it must not read as the orchestrator's address, a run ID or a batch ID. */
+function invalidRunName(name: string): string | undefined {
+	if (
+		AGENT_NAME_RE.test(name) &&
+		name !== PARENT_MESSAGE_ADDRESS &&
+		!name.startsWith("sub_") &&
+		!name.startsWith(BATCH_ID_PREFIX)
+	) {
+		return undefined;
+	}
+	return `Invalid subagent name "${name}": use lowercase letters, digits, "-" or "_", and not "${PARENT_MESSAGE_ADDRESS}" or a "sub_" or "${BATCH_ID_PREFIX}" prefix.`;
 }
 
 /** Why a call's model or thinking level cannot be what it names, before either is resolved. */
@@ -591,7 +671,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 	};
 
 	return {
-		async launch({ toolCallId, parentTurnId, params, signal }, ctx) {
+		async launch({ toolCallId, parentTurnId, params, signal, batch, ready }, ctx) {
 			// A run is a pi of its own in tmux (ADR-0006), unless runs on pi's RPC are switched on.
 			const rpc = rpcRunsEnabled();
 			const parentPane = deps.pane();
@@ -610,6 +690,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			if (!agentName && !inlineRole) return reject("Missing required parameter: agent");
 			const invalidTask = invalidTaskText(taskText);
 			if (invalidTask) return reject(invalidTask);
+			const requestedName = params.name?.trim();
+			const invalidName = requestedName === undefined ? undefined : invalidRunName(requestedName);
+			if (invalidName) return reject(invalidName);
 
 			const denied = deniedReason(agentName, ctx);
 			if (denied) return reject(denied);
@@ -691,6 +774,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const childModel = await resolveChildModel(requestedModel, requestedThinkingLevel, ctx);
 			if (!childModel.ok) return reject(childModel.error);
 			if (rpc && !(await deps.ensureQueue())) return reject(`Cannot launch subagent: ${QUEUE_DOWN}`);
+			if (ready && !(await ready())) return reject("Not admitted: another task of its batch was refused.");
 
 			// Everything from here to admit runs without awaiting, so the session cannot change in between.
 			if (
@@ -705,17 +789,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			const startSnapshot = captureWorkspaceSnapshot(cwd);
 
 			const holderOf = (name: string) => deps.directory.nameHolder(dispatched, name)?.record;
-			const requestedName = params.name?.trim();
 			if (requestedName !== undefined) {
-				if (
-					!AGENT_NAME_RE.test(requestedName) ||
-					requestedName === PARENT_MESSAGE_ADDRESS ||
-					requestedName.startsWith("sub_")
-				) {
-					return reject(
-						`Invalid subagent name "${requestedName}": use lowercase letters, digits, "-" or "_", and not "${PARENT_MESSAGE_ADDRESS}" or a "sub_" prefix.`,
-					);
-				}
 				const holder = holderOf(requestedName);
 				if (holder) {
 					return reject(
@@ -782,6 +856,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				taskSummary: summarizeTaskLabel(taskText),
 				startSnapshot,
 				deliveryMode: isBackground ? "background" : "foreground",
+				...(batch ? { batch } : {}),
 				// Cancelling a foreground call on pi's RPC cancels its run's work; one in tmux only stops waiting for its
 				// Report. A run in the background goes on whatever becomes of the call.
 				...(rpcTools && !isBackground && signal ? { signal } : {}),

@@ -26,7 +26,9 @@ import {
 	MAX_OPEN_RUNS,
 	orchestratorTools,
 	SUBAGENT_TOOL_PARAMETERS,
+	subagentInvocation,
 } from "./admission.ts";
+import { runTaskBatch } from "./batches.ts";
 import { collaborateAsParent } from "./collaboration.ts";
 import {
 	type AgentDefinitionCatalog,
@@ -100,7 +102,9 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 		"You own the split. Give each child a distinct task over separate files or areas: there are no locks, edits are live for you and every sibling, and the last write wins. Verify the combined result yourself.",
 		"",
 		"When to delegate:",
-		"- Independent pieces of work that can run in parallel: put their subagent calls together in one message, since calls in separate messages run one after another.",
+		rpcRunsEnabled()
+			? "- Independent pieces of work that can run in parallel: give them together as `tasks` in one call, which runs them side by side and returns one combined report once all have finished."
+			: "- Independent pieces of work that can run in parallel: put their subagent calls together in one message, since calls in separate messages run one after another.",
 		"- Exploration or review whose intermediate output does not belong in the main conversation.",
 		"",
 		"When NOT to delegate:",
@@ -772,9 +776,13 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 		 * Cancels a run on pi's RPC, queued or working, and waits while the call does until nothing of it runs: a stop
 		 * asked for is not told as done.
 		 */
-		const stopRpcRun = async (run: Readonly<SubagentRunRecord>, signal: AbortSignal | undefined) => {
+		const stopRpcRun = async (
+			run: Readonly<SubagentRunRecord>,
+			signal: AbortSignal | undefined,
+			reason = "Stopped by its orchestrator",
+		) => {
 			const label = formatRunLabel(run);
-			scheduler.cancelRun(run.runId, "model", "Stopped by its orchestrator");
+			scheduler.cancelRun(run.runId, "model", reason);
 			const final = await untilFinal(run.runId, signal);
 			if (final?.status === "cancelled") {
 				return {
@@ -801,7 +809,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			exposure: "model-only",
 			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
 			description: rpcRunsEnabled()
-				? 'Stop a subagent by name or run ID, or every one with "all": its work is cancelled, queued or under way, and the call returns once none of its processes runs. Its session, Reports and files are kept; only subagent_resume continues it.'
+				? 'Stop a subagent by name or run ID, every member of a batch by its ID (batch_…), or every one with "all": its work is cancelled, queued or under way, and the call returns once none of its processes runs. Its session, Reports and files are kept; only subagent_resume continues it.'
 				: 'Stop the turn in progress of a subagent by name or run ID, or of every subagent with "all", as Esc does: the run stays open and takes messages. To end a run, use subagent_close.',
 			parameters: Type.Object(
 				{ agent: Type.String({ description: 'A subagent name or run ID, or "all".' }) },
@@ -832,6 +840,17 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					};
 				}
 				const run = views.findOpen(target)?.record;
+				const members = run ? [] : views.open().filter(({ record }) => record.batch === target);
+				if (members.length > 0) {
+					const cancelled = await Promise.all(
+						members.map(({ record }) => stopRpcRun(record, signal, `Its batch ${target} was stopped`)),
+					);
+					return {
+						content: [{ type: "text", text: cancelled.map((result) => result.text).join("\n") }],
+						details: undefined,
+						isError: cancelled.some((result) => !result.stopped),
+					};
+				}
 				if (!run) {
 					return {
 						content: [{ type: "text", text: `No running subagent "${target}".` }],
@@ -955,10 +974,41 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						isError: true,
 					};
 				}
-				const admitRes = await admission.launch(
-					{ toolCallId, parentTurnId: `turn_${activeTurnIndex}`, params, signal },
-					ctx,
-				);
+				const invocation = subagentInvocation(params);
+				if (!invocation.ok) {
+					return { content: [{ type: "text", text: invocation.error }], details: undefined, isError: true };
+				}
+				const parentTurnId = `turn_${activeTurnIndex}`;
+				if ("tasks" in invocation) {
+					if (!rpcRunsEnabled()) {
+						return {
+							content: [
+								{
+									type: "text",
+									text: "A `tasks` batch needs runs on pi's RPC; give each subagent call one agent and task instead.",
+								},
+							],
+							details: undefined,
+							isError: true,
+						};
+					}
+					const scope = parentScope.current();
+					return runTaskBatch(
+						{
+							admission,
+							nameHolder: (name) => (scope ? directory.nameHolder(scope, name)?.record : undefined),
+							cancel: (runId) => scheduler.cancelRun(runId, "caller", "Its batch could not be admitted whole"),
+							agentDir: resolveAgentDir,
+							reports,
+							getRun: (runId) => scheduler.getRun(runId),
+							notify: (member, notice) => parentScope.notify(member, notice),
+						},
+						invocation.tasks,
+						{ toolCallId, parentTurnId, signal },
+						ctx,
+					);
+				}
+				const admitRes = await admission.launch({ toolCallId, parentTurnId, params: invocation.run, signal }, ctx);
 				if (!admitRes.ok) {
 					return {
 						content: [{ type: "text", text: admitRes.error }],

@@ -22,6 +22,10 @@ _Avoid_: automatic merge (when no Git merge is involved)
 Ending the selected work and its executing subprocesses, and cancelling pending steps when a batch or chain is cancelled, while retaining sessions and partial changes. User-cancelled work requires an explicit instruction to resume; a late message cannot restart it.
 _Avoid_: rollback, deletion, stopping the wait
 
+**Batch**:
+Independent runs launched together by one orchestrator call, admitted all together or not at all. One member's failure leaves the others working. The batch settles once every member has, with one bounded account of every member's outcome and a reference to each full report; cancelling it cancels every member, working or queued.
+_Avoid_: chain (for runs that depend on each other), group
+
 **Report**:
 A run's account of its work, given to its orchestrator when that work settles. Further work in the same run can produce another report, including after resume.
 _Avoid_: result (as if it came once), final answer

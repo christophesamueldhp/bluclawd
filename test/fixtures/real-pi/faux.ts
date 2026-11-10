@@ -18,10 +18,11 @@ import { type ExtensionAPI, getAgentDir, VERSION } from "@earendil-works/pi-codi
 
 /**
  * `stallMs`: the answer takes that long; `until`: it waits for that file to exist. Either ends once the request is
- * aborted (as Esc does). `calls`: several tool calls in one answer, which pi runs side by side.
+ * aborted (as Esc does). `calls`: several tool calls in one answer, which pi runs side by side. `error`: the answer
+ * fails with that message, as a provider error does.
  */
 export type FauxStep = (
-	| { text: string; stallMs?: number }
+	| { text: string; stallMs?: number; error?: string }
 	| { tool: string; args: JsonObject }
 	| { calls: { tool: string; args: JsonObject }[] }
 ) & { until?: string };
@@ -73,7 +74,10 @@ function fauxPi(pi: ExtensionAPI, models: typeof FAUX_MODELS): void {
 			const { signal } = options ?? {};
 			while (!existsSync(step.until) && !signal?.aborted) await new Promise((resolve) => setTimeout(resolve, 25));
 		}
-		if ("text" in step) return fauxAssistantMessage(fauxText(step.text));
+		if ("text" in step) {
+			const failed = step.error === undefined ? {} : { stopReason: "error" as const, errorMessage: step.error };
+			return fauxAssistantMessage(fauxText(step.text), failed);
+		}
 		const calls = "calls" in step ? step.calls : [step];
 		return fauxAssistantMessage(
 			calls.map(({ tool, args }) => fauxToolCall(tool, args)),
