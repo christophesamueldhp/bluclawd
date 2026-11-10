@@ -41,7 +41,8 @@ export function openRunInbox(runDir: string, generation: number): void {
 
 /**
  * Posts `text` to the run's generation `generation`: accepted once it landed in the open inbox, refused once the inbox
- * is sealed. A rename lands whole, and fails once the folder it goes to was renamed away by the seal.
+ * is sealed. A rename lands whole, and fails once the folder it goes to was renamed away by the seal. One that found
+ * the folder just before may still land in it just after, so the seal waits for every post whose draft is still there.
  */
 export function postToRun(
 	runDir: string,
@@ -50,7 +51,7 @@ export function postToRun(
 ): { accepted: true; id: string } | { accepted: false } {
 	// Named in the order posted: by time, then by this process's count within the same millisecond.
 	const id = `${String(Date.now()).padStart(15, "0")}-${String(++posted).padStart(9, "0")}-${randomUUID()}`;
-	const draft = join(runDir, `.${id}.inbox`);
+	const draft = join(runDir, `.${process.pid}-${id}.inbox`);
 	writeFileSync(draft, JSON.stringify({ id, text } satisfies RunInboxMessage), { mode: 0o600 });
 	try {
 		renameSync(draft, join(inboxPath(runDir, generation), `${id}.json`));
@@ -82,6 +83,33 @@ function readMessages(dir: string): RunInboxMessage[] {
 export const readRunInbox = (runDir: string, generation: number): RunInboxMessage[] =>
 	readMessages(inboxPath(runDir, generation));
 
+const alive = (pid: number) => {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+};
+
+const pause = new Int32Array(new SharedArrayBuffer(4));
+
+/** Waits until every post another live process had in flight landed or was refused. */
+function settlePosts(runDir: string): void {
+	let files: string[];
+	try {
+		files = readdirSync(runDir);
+	} catch {
+		return;
+	}
+	for (const file of files) {
+		const pid = Number(/^\.(\d+)-.*\.inbox$/.exec(file)?.[1]);
+		// This process posts synchronously, so none of its own is in flight; a dead poster's draft never lands.
+		if (!pid || pid === process.pid) continue;
+		while (existsSync(join(runDir, file)) && alive(pid)) Atomics.wait(pause, 0, 0, 1);
+	}
+}
+
 /** Seals the inbox, if still open, so nothing more lands in it; returns every message that did. */
 export function sealRunInbox(runDir: string, generation: number): RunInboxMessage[] {
 	try {
@@ -89,6 +117,8 @@ export function sealRunInbox(runDir: string, generation: number): RunInboxMessag
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 	}
+	// Listed only after the rename: a post that starts later finds no open inbox.
+	settlePosts(runDir);
 	return readMessages(sealedPath(runDir, generation));
 }
 

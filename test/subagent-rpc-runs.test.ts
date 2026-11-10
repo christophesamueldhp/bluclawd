@@ -187,7 +187,7 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 		real.start(["--", "delegate"]);
 		const main = await real.waitForRequests("main", 2);
 
-		expect(lastToolResult(main[1])?.text).toMatch(/read-only.*bash/s);
+		expect(lastToolResult(main[1])?.text).toMatch(/cannot have yet: bash/);
 		expect(real.requests("shelly")).toHaveLength(0);
 		expect(existsSync(join(real.agentDir, "bluclawd", "subagents"))).toBe(false);
 	});

@@ -41,8 +41,10 @@ import {
 	rpcRunsEnabled,
 	rpcRunTools,
 	runDefinitionPath,
+	WRITE_TOOLS,
 } from "./rpc-runs.ts";
 import { type RunWorkspace, resolveRunWorkspace } from "./run-workspace.ts";
+import { captureRunBaseline, dropRunBaseline, type IsolatedWorkspace, worktreePath } from "./run-worktree.ts";
 import {
 	type AdmittedSubagentHandle,
 	createRunId,
@@ -579,6 +581,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					projectTrusted: definition.projectTrusted,
 					sessionFile,
 					...(changes.from ? { taskFrom: changes.from } : {}),
+					...(definition.workspace ? { workspace: definition.workspace } : {}),
 					recheck: recheckRpc(current.runId, runDir, generation, { cwd: ctx.cwd, trusted: projectTrusted }),
 				},
 			},
@@ -814,6 +817,24 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				return reject(`Cannot launch subagent: storage is unavailable (${storage.error}).`);
 			}
 			const childTrusted = workspace?.trusted(cwd) ?? projectTrusted;
+			// A run that edits works in a worktree of its own, made from the checkout as it is now, and never in the
+			// checkout. It keeps the checkout's trust and deny rules: its files are the checkout's.
+			let isolated: IsolatedWorkspace | undefined;
+			let runCwd = cwd;
+			if (rpcTools?.tools.some((tool) => WRITE_TOOLS.includes(tool))) {
+				const captured = captureRunBaseline(cwd, runId);
+				if (!captured.ok) {
+					return reject(
+						`Subagent role "${definition.name}" may edit files, so it works in an isolated Git worktree, and none can be made: ${captured.error}. A run that edits never works in a shared checkout: give it a cwd in a Git repository with a commit, or a role that only reads.`,
+					);
+				}
+				isolated = { root: worktreePath(agentDir, runId), baseline: captured.baseline };
+				runCwd = join(isolated.root, captured.cwd);
+			}
+			const refuseIsolated = (error: string): AdmissionResult => {
+				if (isolated) dropRunBaseline(isolated.baseline);
+				return reject(error);
+			};
 			if (rpcTools) {
 				// The role as admitted, with what it may do and the model and level it runs at: what the run, and any later
 				// continuation of it, is held to.
@@ -826,13 +847,21 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					writeAtomicPrivateFile(
 						join(storage.runDir, "definition.json"),
 						JSON.stringify(
-							{ ...definition, tools: rpcTools.tools, deny, cwd, projectTrusted: childTrusted, admitted },
+							{
+								...definition,
+								tools: rpcTools.tools,
+								deny,
+								cwd: runCwd,
+								projectTrusted: childTrusted,
+								admitted,
+								...(isolated ? { workspace: isolated } : {}),
+							},
 							null,
 							2,
 						),
 					);
 				} catch (error) {
-					return reject(
+					return refuseIsolated(
 						`Cannot launch subagent: storage is unavailable (${error instanceof Error ? error.message : String(error)}).`,
 					);
 				}
@@ -852,7 +881,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				provider: childModel.model.provider,
 				modelId: childModel.model.id,
 				thinkingLevel: childModel.thinkingLevel ?? MODEL_DEFAULT_THINKING,
-				cwd,
+				cwd: runCwd,
 				taskSummary: summarizeTaskLabel(taskText),
 				startSnapshot,
 				deliveryMode: isBackground ? "background" : "foreground",
@@ -870,10 +899,11 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 								thinkingLevel: rpcThinkingLevel,
 								tools: rpcTools.tools,
 								task: taskText,
-								cwd,
+								cwd: runCwd,
 								runDir: storage.runDir,
 								agentDir,
 								projectTrusted: childTrusted,
+								...(isolated ? { workspace: isolated } : {}),
 								recheck: recheckRpc(runId, storage.runDir, 0, { cwd: ctx.cwd, trusted: projectTrusted }),
 							},
 						}
@@ -892,7 +922,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 							},
 						},
 			});
-			if (!admitRes.ok) return reject(admitRes.error);
+			if (!admitRes.ok) return refuseIsolated(admitRes.error);
 			return { ok: true, handle: admitRes.handle };
 		},
 
