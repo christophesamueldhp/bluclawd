@@ -1,6 +1,6 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { stripAnsi } from "../daemon/ansi.ts";
 import { Tmux } from "../daemon/tmux.ts";
 import { agentTasks } from "../ext/_shared/agent-tasks.ts";
 import { STATUS_KEYS } from "../ext/_shared/status-keys.ts";
@@ -280,7 +280,7 @@ describe("the prompt's editor wrappers with the panel present", () => {
 		);
 		await prompt(t);
 		await waitFor(() => row(t, "scout"));
-		const shown = () => stripAnsi(t.editor().render(100).join("\n"));
+		const shown = () => stripTerminalSequences(t.editor().render(100).join("\n"));
 		await waitFor(() => shown().includes("Check the report"));
 
 		t.press(DOWN, ESC);

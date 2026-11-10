@@ -81,4 +81,5 @@ export class AccountsTerminal implements Terminal {
 	}
 	setTitle(): void {}
 	setProgress(): void {}
+	setProgramStatus(): void {}
 }

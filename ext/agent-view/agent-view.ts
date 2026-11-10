@@ -23,6 +23,7 @@ import {
 	matchesKey,
 	parseColor,
 	SelectList,
+	stripTerminalSequences,
 	styleText,
 	styleTextWithAnsi,
 	type TUI,
@@ -30,7 +31,6 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { stripAnsi } from "../../daemon/ansi.ts";
 import {
 	currentDaemonBuildId,
 	type InstanceSummary,
@@ -2240,7 +2240,7 @@ export class AgentView implements Component, Focusable {
 		const current = promptLine(this.composer, width, "");
 		lines.push(lines.length ? current.replace(/^❯ /, "") : current);
 		if (this.pasting) lines.push(truncateToWidth(cc.fg("muted", "Reading clipboard…"), width));
-		return dim ? lines.map((line) => faint(stripAnsi(line))) : lines;
+		return dim ? lines.map((line) => faint(stripTerminalSequences(line))) : lines;
 	}
 
 	render(width: number): string[] {

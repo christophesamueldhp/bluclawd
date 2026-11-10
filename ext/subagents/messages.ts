@@ -1,5 +1,5 @@
-import { Type } from "@earendil-works/pi-ai";
 import { truncateTail } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import type { ParentScope } from "./parent-scope.ts";
 
 export const SUBAGENT_MESSAGE_TOOL = "subagent_message";

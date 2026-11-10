@@ -148,7 +148,7 @@ The built-in `/login`, `/model`, and `/scoped-models` commands and native model-
 remain host-owned and unchanged. The `/accounts` routes are bluclawd entry points, not overrides
 of those commands; this chooser does not edit scope or defaults.
 
-Scope display is verified on unmodified stock pi **1.0.4** using the public
+Scope display is verified on unmodified stock pi **1.5.2** using the public
 `ExtensionCommandContext.scopedModels` and `modelRegistry.getAll()` / `getAvailable()` contracts;
 explicit selection uses `ExtensionAPI.setModel()`. An empty host scope means unrestricted
 available models. A nonempty scope keeps its membership even when every member is unavailable:

@@ -42,22 +42,24 @@ are masked, errors sanitized, and stored credentials remain owner-readable plain
 
 ## Checked package set
 
-Checked on 2026-11-05, macOS, Node 26.8.1:
+Checked on 2026-11-11 (#291), macOS, Node 26.8.1:
 
-- Stock published `@earendil-works/pi-coding-agent` **1.0.4** and its matching
-  `chord`, `pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-mcp`, and `pi-tui` **1.0.4** packages.
+- Stock published `@earendil-works/pi-coding-agent` **1.5.2** and the siblings it resolves,
+  `pi-agent-core`, `pi-ai`, `pi-codemode`, `pi-mcp`, and `pi-tui`, all **1.5.2**. pi 1.5.2 pins
+  these exactly, so a plain `npm install` of it yields this set; `test/helpers/pi-host.ts`
+  refuses a tree that resolves any other version.
 - A separate temporary npm installation, using published packages without source edits,
   a custom host build, private monkey-patches, or bluclawd development dependencies.
 - A normal `pi install git:https://fixture.invalid/bluclawd/package` against a temporary
   Git snapshot of this checkout. A process-local Git URL rewrite supplies the local
   repository; pi itself performs the clone and production dependency installation.
   This verifies the installed layout and loader, not GitHub authentication or transport.
-- All 16 manifest extensions load through the stock bundled CLI and SDK resource loader.
+- All 18 manifest extensions load through the stock bundled CLI and SDK resource loader.
   The interactive Accounts smoke uses pi's supported package extension filter to select
   Accounts after loading the full manifest; agent view normally hands a real terminal
   to tmux and cannot own the injected terminal. No host or extension implementation is patched.
 
-**Observed upstream installation limit:** a fresh `npm install
+**Observed upstream installation limit (1.0.4 check, 2026-11-05):** a fresh `npm install
 @earendil-works/pi-coding-agent@1.0.4` on the check date resolved its caret-ranged
 sibling dependencies to **1.5.0**. Importing that mixed SDK failed before bluclawd
 loaded: `pi-codemode/declarations` did not export `MCP_TYPESCRIPT_PREAMBLE`.
@@ -75,10 +77,7 @@ Install the exact checked host into a disposable prefix (outside bluclawd):
 
 ```bash
 npm install --ignore-scripts --prefix /tmp/bluclawd-stock-pi \
-  @earendil-works/pi-coding-agent@1.0.4 @earendil-works/chord@1.0.4 \
-  @earendil-works/pi-agent-core@1.0.4 @earendil-works/pi-ai@1.0.4 \
-  @earendil-works/pi-codemode@1.0.4 @earendil-works/pi-mcp@1.0.4 \
-  @earendil-works/pi-tui@1.0.4
+  @earendil-works/pi-coding-agent@1.5.2
 node scripts/verify-accounts-package.ts \
   /tmp/bluclawd-stock-pi/node_modules/@earendil-works/pi-coding-agent
 ```
@@ -121,9 +120,29 @@ typechecking, all 71 focused Accounts tests, and **2,051 tests in 138 files** pa
 with no skipped tests. The normal Git-package/terminal probe also passed again.
 The different full-suite count reflects the intervening merged subagent changes.
 
-The package probe passed on the consistent published 1.0.4 set described above.
+The package probe passed on the consistent published 1.0.4 set checked on 2026-11-05.
 A separate real-PTY stock bundled-CLI smoke, loading only the Accounts extension with
 `-e` and temporary agent storage, opened `/accounts --models`, switched to Scoped with
 Ctrl+S, navigated to Accounts with Tab, closed with Esc, and exited with native `/quit`.
 It used no credentials and displayed the expected empty Models view. The mixed-version
 SDK failure remains an installation limitation, not a passing compatibility result.
+
+## Results for #291 (pi 1.5.2)
+
+Checked 2026-11-11 on macOS, Node 26.8.1, tmux 3.6b, with the development dependencies at
+pi-coding-agent, pi-ai and pi-tui **1.5.2** (one copy of every `@earendil-works/*` package, all 1.5.2):
+
+- The package probe above passed against a fresh stock 1.5.2 prefix: Git-package install,
+  all 18 extensions loaded with no errors, four Accounts routes, explicit model selection,
+  native commands and Ctrl+L, unchanged scope and settings.
+- `npm run check` passed: lint (one pre-existing warning), dead code, typecheck, and
+  **2,356 tests in 157 files**, none skipped. The real-pi panes record the version of the
+  pi that asked the faux model; `test/pi-host.test.ts` asserts it is 1.5.2.
+- Changes the bump needed: TypeBox's `Type`/`Static` now come from `typebox` (published
+  pi-ai 1.5.2 no longer re-exports them); agent view's dimmed composer strips pi-tui 1.5.2's
+  fake-cursor markers, which would otherwise draw a second cursor while renaming; test
+  doubles gained `Terminal.setProgramStatus` and `ExecResult.truncated`; the vendored
+  built-in command descriptions and the settings-key check follow 1.5.2.
+
+Earlier passes on 1.0.4 are not evidence for 1.5.2. Not covered: Linux, live OAuth and real
+provider networks.

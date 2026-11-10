@@ -28,7 +28,8 @@ import { withoutAgentViewCommand } from "../ext/agent-view/index.ts";
 import { focusedLine } from "./helpers/agent-view-focus.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
-const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+// Also drops the fake-cursor markers pi-tui's TUI turns into reverse video when it renders.
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m|\x1b_pi:\/?fc\x07/g, "");
 
 /** A theme whose styling is the identity, so assertions read plain text. */
 const plainTheme = {
@@ -889,6 +890,15 @@ describe("AgentView keys", () => {
 		view.handleInput(ENTER);
 		await flush();
 		expect(calls[0]).toEqual(["send", "ask", { type: "rename", name: "power-up design v2" }]);
+	});
+
+	it("while renaming, the dimmed composer shows no cursor of its own", () => {
+		const { view } = makeView();
+		for (const ch of "draft") view.handleInput(ch);
+		view.handleInput("\x12");
+		const composer = view.render(100).find((line) => stripAnsi(line).startsWith("❯ draft"));
+		expect(composer).toBeDefined();
+		expect(composer).not.toMatch(/\x1b_pi:fc\x07|\x1b\[7m/);
 	});
 
 	it("refuses a too-short task", () => {

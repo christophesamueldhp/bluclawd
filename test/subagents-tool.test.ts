@@ -16,9 +16,9 @@ import {
 	fauxToolCall,
 	getCurrentTools,
 	type TranscriptContext,
-	Type,
 } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PANE_ENV } from "../daemon/tmux.ts";
 import { readPersistedRunRecord } from "../ext/subagents/storage.ts";

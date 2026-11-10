@@ -4,8 +4,8 @@
  * the user types in the run goes to the orchestrator as a note (ADR-0005).
  */
 
-import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import type { InstanceSummary, SessionMessage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
 import {

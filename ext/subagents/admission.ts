@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { type Static, Type } from "@earendil-works/pi-ai";
 import { type ExtensionContext, SettingsManager, type ToolLoadout } from "@earendil-works/pi-coding-agent";
+import { type Static, Type } from "typebox";
 import * as forkSettings from "../_shared/settings.ts";
 import { evaluateSubagentDelegationDeny } from "../permissions/policy.ts";
 import {
