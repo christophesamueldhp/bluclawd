@@ -7,7 +7,7 @@
  */
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { openSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, openSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { piPackageRoot } from "../../daemon/orchestrator-client.ts";
@@ -159,11 +159,14 @@ async function host(runDir: string): Promise<void> {
 		env: childEnv(process.env, spec.agentDir),
 		stdio: ["pipe", "pipe", openSync(stderrPath(runDir), "a", 0o600)],
 	});
-	const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) =>
-		child.on("exit", (code, signal) => resolve({ code, signal })),
-	);
-	// A pi that never started leaves no pid; its exit says why.
-	child.on("error", () => {});
+	const exited = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
+		child.on("exit", (code, signal) => resolve({ code, signal }));
+		// A pi that could not be spawned never exits: why goes where its stderr would have.
+		child.on("error", (error) => {
+			appendFileSync(stderrPath(runDir), `${error.message}\n`);
+			resolve({ code: null, signal: null });
+		});
+	});
 	state.childPid = child.pid;
 	save();
 
@@ -270,7 +273,16 @@ function stderrTail(runDir: string): string {
 	}
 }
 
-if (process.argv[1] === HOST_FILE) {
+/** Whether this module runs as the host: node gives the entry by its real path, which an install may link to. */
+function isEntry(): boolean {
+	try {
+		return realpathSync(process.argv[1] ?? "") === realpathSync(HOST_FILE);
+	} catch {
+		return false;
+	}
+}
+
+if (isEntry()) {
 	const runDir = process.argv[2];
 	host(runDir).then(
 		() => process.exit(0),

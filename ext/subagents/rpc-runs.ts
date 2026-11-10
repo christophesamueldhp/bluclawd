@@ -174,7 +174,8 @@ export async function executeRpcRun(
 		...(usage ? { usage } : {}),
 		...(state.sessionId ? { sessionId: state.sessionId } : {}),
 	};
-	if (!deps.reports.take(record.runId, message)) deps.notify(message);
+	// A run stopped by its orchestrator or the user keeps its Report on disk, and wakes nobody with it.
+	if (!signal.aborted && !deps.reports.take(record.runId, message)) deps.notify(message);
 	return {
 		status: "closed",
 		summaryText: report.text,

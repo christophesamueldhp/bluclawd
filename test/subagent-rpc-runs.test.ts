@@ -8,6 +8,7 @@ import {
 	hasTmux,
 	type RealPi,
 	startRealPi,
+	systemPrompt,
 	toolNames,
 } from "./helpers/real-pi.ts";
 import { waitFor } from "./helpers/wait-for.ts";
@@ -73,6 +74,7 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 		const look = real.requests("look");
 		expect(look).toHaveLength(2);
 		expect(look[0]).toMatchObject({ piVersion: "1.5.2", model: "faux-1" });
+		expect(systemPrompt(look[0])).toContain("You are `explorer`, an exploration subagent");
 		// Its own conversation: the framed task and nothing of its orchestrator's.
 		expect(conversation(look[0])).toEqual([
 			{
@@ -96,7 +98,19 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 		// The Report and the session it came from stay on disk.
 		expect(readFileSync(join(dir, "reports", "1.md"), "utf8")).toContain("The codeword is PELICAN.");
 		expect(readFileSync(host.sessionFile, "utf8")).toContain("The codeword is PELICAN.");
-		await waitFor(() => expect(readFileSync(join(dir, "report.md"), "utf8")).toContain("The codeword is PELICAN."));
+		expect(JSON.parse(readFileSync(join(dir, "reports", "1.json"), "utf8"))).toMatchObject({
+			outcome: { status: "completed" },
+			sessionId: host.sessionId,
+		});
+		await waitFor(() =>
+			expect(JSON.parse(readFileSync(join(dir, "record.json"), "utf8"))).toMatchObject({
+				backend: "rpc",
+				generation: 0,
+				status: "closed",
+				transcriptPath: host.sessionFile,
+			}),
+		);
+		expect(readFileSync(join(dir, "report.md"), "utf8")).toContain("The codeword is PELICAN.");
 		// Its pi and the host that held it ended; no pane or row was ever needed.
 		await waitFor(() => expect([alive(host.childPid), alive(host.hostPid)]).toEqual([false, false]));
 		expect((await real.rows()).map((row) => row.label)).not.toContain("look");
@@ -124,6 +138,37 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 		expect(text).toContain("Process: exited with code 1");
 		expect(text).not.toContain("Outcome: completed");
 		expect(real.requests("broken")).toHaveLength(0);
+	});
+
+	it("stops when closed mid-work: its pi and host end, and its Report is kept without waking the orchestrator", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		real.script("main", [
+			{ tool: "subagent", args: { agent: "explorer", name: "slow", task: "Take your time.", background: true } },
+			{ text: "waiting for slow" },
+			{ tool: "subagent_close", args: { agent: "slow" } },
+			{ text: "closed it" },
+		]);
+		real.script("slow", [{ text: "Too late.", stallMs: 120_000 }]);
+		const pane = real.start(["--", "delegate in the background"]);
+		await real.waitForRequests("main", 2);
+		// The run's model is asked: its work is under way.
+		await real.waitForRequests("slow", 1);
+		real.tmux.sendKeys(pane, ["close slow", "Enter"]);
+		await real.waitForRequests("main", 4);
+
+		const dir = runDir(real.agentDir, "slow");
+		await waitFor(() => expect(JSON.parse(readFileSync(join(dir, "record.json"), "utf8")).status).toBe("closed"));
+		const host = JSON.parse(readFileSync(join(dir, "rpc-host.json"), "utf8"));
+		expect(host.outcome).toMatchObject({ status: "stopped" });
+		expect(JSON.parse(readFileSync(join(dir, "reports", "1.json"), "utf8")).outcome).toMatchObject({
+			status: "stopped",
+		});
+		await waitFor(() => expect([alive(host.childPid), alive(host.hostPid)]).toEqual([false, false]));
+		// Proves only that no Report woke it within this while.
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+		expect(real.requests("main")).toHaveLength(4);
+		expect(real.requests("slow")).toHaveLength(1);
 	});
 
 	it("refuses a role that names a shell before any child starts", async () => {
@@ -160,6 +205,8 @@ describe.skipIf(!hasTmux)("a read-only run on pi's RPC", () => {
 		real.start(["--", "delegate twice"]);
 		await real.waitForRequests("main", 3);
 
+		expect(real.requests("first")).toHaveLength(1);
+		expect(real.requests("second")).toHaveLength(1);
 		const [second] = real.requests("second");
 		expect(conversation(second)).toEqual([{ role: "user", text: expect.stringMatching(/Say two\.$/) }]);
 		const sessions = ["first", "second"].map(
