@@ -125,9 +125,7 @@ export function rowFromSummary(inst: InstanceSummary, selfId: string | undefined
 		...(inst.settled !== undefined ? { settled: inst.settled } : {}),
 		...(inst.status === "starting" ? { starting: true } : {}),
 		...(inst.silent ? { silent: true } : {}),
-		...(alive && state !== "working" && state !== "needs" && inst.wakesAt !== undefined
-			? { wakesAt: inst.wakesAt }
-			: {}),
+		...(alive && stateBandOf({ state }) === "idle" && inst.wakesAt !== undefined ? { wakesAt: inst.wakesAt } : {}),
 	};
 }
 
@@ -226,7 +224,7 @@ const STATE_BANDS = [
 	{ key: "idle", title: "Idle" },
 ] as const;
 
-export function stateBandOf(row: AgentRow): "needs" | "working" | "idle" {
+export function stateBandOf(row: Pick<AgentRow, "state">): "needs" | "working" | "idle" {
 	if (row.state === "needs") return "needs";
 	if (row.state === "working") return "working";
 	return "idle";
