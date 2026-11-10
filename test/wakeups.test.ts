@@ -19,7 +19,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PARENT_ENV } from "../daemon/tmux.ts";
 import backgroundBash from "../ext/background-bash/index.ts";
-import { holdNotifications } from "../ext/background-bash/notification-hold.ts";
+import { heldNotifications, holdNotifications } from "../ext/background-bash/notification-hold.ts";
 import { wakeupDue, wakeups } from "../ext/background-bash/wakeups.ts";
 import { waitFor } from "./helpers/wait-for.ts";
 
@@ -214,6 +214,18 @@ describe("schedule_wakeup", () => {
 		}
 		await waitFor(() => seen.length === 3);
 		expect(lastText(seen[2])).toContain("Look at the monitor.");
+	});
+
+	it("holds nothing for /tasks when a turn ends with no wake-up due", async () => {
+		const { session, replies } = await startSession();
+		replies([fauxAssistantMessage("Nothing to do.")]);
+		const release = holdNotifications();
+		try {
+			await session.prompt("hi", { expandPromptTemplates: false });
+			expect(heldNotifications()).toBe(0);
+		} finally {
+			release();
+		}
 	});
 
 	it("is cancelled by task_stop and never fires", async () => {

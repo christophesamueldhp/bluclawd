@@ -194,15 +194,19 @@ const backgroundBash: InlineExtension = {
 		 * pending, listed and cancellable, rather than in pi's queue, which Esc clears. A send held by `/tasks`
 		 * checks again when it goes out.
 		 */
-		const startDueWakeup = () =>
+		const dueWakeup = () => {
+			const session = owner();
+			return session === undefined ? undefined : wakeups.list(session).find((wakeup) => wakeup.dueAt <= Date.now());
+		};
+		const startDueWakeup = () => {
+			if (!dueWakeup()) return;
 			deliverOrHold(() => {
-				const session = owner();
-				if (session === undefined || !ctx?.isIdle()) return;
-				const due = wakeups.list(session).find((wakeup) => wakeup.dueAt <= Date.now());
-				if (!due) return;
+				const due = dueWakeup();
+				if (!due || !ctx?.isIdle()) return;
 				wakeups.take(due.id);
 				pi.sendMessage(wakeupMessage(due), EVENT_DELIVERY);
 			});
+		};
 
 		/** A wake-up of a session that is no longer this pi's is dropped. */
 		const fireWakeup = (wakeup: Wakeup) => {
