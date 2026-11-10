@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PaneLaunch } from "./ipc/protocol.ts";
+import { getServerDir } from "./paths.ts";
 import { loadWakeups, saveWakeups } from "./storage.ts";
 
 /** Session-log entries: a wake-up scheduled, and its end. */
@@ -73,12 +74,12 @@ export function markCancelled(dir: string, ids: readonly string[]): void {
 }
 
 /** Whether a Delete cancelled wake-up `id`. */
-export function cancelledByDelete(dir: string, id: string): boolean {
+export function cancelledByDelete(id: string, dir: string = getServerDir()): boolean {
 	return existsSync(cancelMark(dir, id));
 }
 
 /** Forgets that word once the session log records the cancel. */
-export function forgetCancelled(dir: string, id: string): void {
+export function forgetCancelled(id: string, dir: string = getServerDir()): void {
 	rmSync(cancelMark(dir, id), { force: true });
 }
 
@@ -135,7 +136,7 @@ const REOPEN_WAIT_MS = 90_000;
 const MAX_REOPENS = 3;
 
 export interface WakeupKeeperDeps {
-	/** Where wakeups.json lives. */
+	/** Where wakeups.json lives, and a Delete's word of the wake-ups it cancelled. */
 	dir: string;
 	now: () => number;
 	alive: (holder: ProcessId) => boolean;
@@ -169,7 +170,9 @@ export class WakeupKeeper {
 
 	/** Cancels a session's wake-ups, those its log has and those held: its row was deleted. */
 	drop(sessionFile: string): void {
-		const ids = [...this.deps.pending(sessionFile), ...(this.held.get(sessionFile)?.wakeups ?? [])].map((w) => w.id);
+		const ids = [...this.deps.pending(sessionFile), ...(this.held.get(sessionFile)?.wakeups ?? [])].map(
+			({ id }) => id,
+		);
 		try {
 			markCancelled(this.deps.dir, ids);
 		} catch {
@@ -201,7 +204,7 @@ export class WakeupKeeper {
 			// The session log has the last word: a fire or a cancel whose hand-off never came.
 			const pending = this.deps
 				.pending(held.sessionFile)
-				.filter((wakeup) => !cancelledByDelete(this.deps.dir, wakeup.id));
+				.filter((wakeup) => !cancelledByDelete(wakeup.id, this.deps.dir));
 			changed = true;
 			if (pending.length === 0) {
 				this.held.delete(held.sessionFile);

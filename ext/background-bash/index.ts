@@ -33,7 +33,6 @@ import {
 import { Type } from "typebox";
 import { stripAnsi } from "../../daemon/ansi.ts";
 import { currentDaemonBuildId, OrchestratorClient } from "../../daemon/orchestrator-client.ts";
-import { getServerDir } from "../../daemon/paths.ts";
 import { endedAsQuit, piCommand, runParent, Tmux } from "../../daemon/tmux.ts";
 import { cancelledByDelete, forgetCancelled, type HeldWakeups, processStart } from "../../daemon/wakeups.ts";
 import { agentTasks, isAgentTaskId, subscribeAgentTasks } from "../_shared/agent-tasks.ts";
@@ -301,13 +300,12 @@ const backgroundBash: InlineExtension = {
 		 */
 		const restoreWakeups = (event: SessionStartEvent, startCtx: ExtensionContext) => {
 			const session = startCtx.sessionManager.getSessionId();
-			const dir = getServerDir();
 			for (const record of pendingWakeups(startCtx.sessionManager.getEntries())) {
-				const deleted = cancelledByDelete(dir, record.id);
+				const deleted = cancelledByDelete(record.id);
 				if (event.reason === "fork" || deleted) {
 					recordWakeupEnd(record, "cancelled");
 					// A fork records it in its own log, not in the deleted session's.
-					if (deleted && event.reason !== "fork") forgetCancelled(dir, record.id);
+					if (deleted && event.reason !== "fork") forgetCancelled(record.id);
 				} else {
 					wakeups.schedule({
 						owner: session,
