@@ -16,38 +16,56 @@ describe("a run's inbox", () => {
 		runDir = undefined;
 	});
 
-	it("gives its seal every message another process posted before it, and refuses every one after", async () => {
+	it("gives its seal every message other processes posted before it, and refuses every one after", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "bc-inbox-"));
 		runDir = dir;
-		openRunInbox(dir, 0);
-		const poster = spawn(
-			process.execPath,
-			[
-				"--input-type=module",
-				"-e",
-				`import { postToRun } from ${JSON.stringify(MAILBOX)};
-				const ids = [];
-				for (let i = 0; i < 400; i++) {
-					const posted = postToRun(process.argv[1], 0, "m" + i);
-					ids.push(posted.accepted ? posted.id : null);
-				}
-				process.stdout.write(JSON.stringify(ids));`,
-				dir,
-			],
-			{ stdio: ["ignore", "pipe", "inherit"] },
-		);
-		let output = "";
-		poster.stdout.on("data", (chunk) => {
-			output += chunk;
+		// Several posters against many seals: a post in flight across a seal is rare, so one seal rarely meets one.
+		const generations = 100;
+		const posters = Array.from({ length: 4 }, () => {
+			const poster = spawn(
+				process.execPath,
+				[
+					"--input-type=module",
+					"-e",
+					`import { existsSync } from "node:fs";
+					import { join } from "node:path";
+					import { postToRun } from ${JSON.stringify(MAILBOX)};
+					const [dir, generations] = [process.argv[1], Number(process.argv[2])];
+					const posted = [];
+					for (let generation = 0; generation < generations; generation++) {
+						const inbox = join(dir, "inbox", String(generation));
+						while (!existsSync(inbox) && !existsSync(inbox + ".sealed")) {}
+						// Posts until refused: its last post is always one after the seal.
+						for (;;) {
+							const sent = postToRun(dir, generation, "m");
+							posted.push(sent.accepted ? sent.id : null);
+							if (!sent.accepted) break;
+						}
+					}
+					process.stdout.write(JSON.stringify(posted));`,
+					dir,
+					String(generations),
+				],
+				{ stdio: ["ignore", "pipe", "inherit"] },
+			);
+			let output = "";
+			poster.stdout.on("data", (chunk) => {
+				output += chunk;
+			});
+			return new Promise<(string | null)[]>((resolve) => poster.on("exit", () => resolve(JSON.parse(output))));
 		});
-		const exited = new Promise((resolve) => poster.on("exit", resolve));
-		await waitFor(() => expect(readdirSync(join(dir, "inbox", "0")).length).toBeGreaterThan(20));
 
-		const sealed = sealRunInbox(dir, 0);
-		await exited;
-		const ids: (string | null)[] = JSON.parse(output);
-		expect(ids.filter((id) => id === null).length).toBeGreaterThan(0);
-		expect(sealed.map(({ id }) => id).sort()).toEqual(ids.filter((id) => id !== null).sort());
+		const sealed: string[] = [];
+		for (let generation = 0; generation < generations; generation++) {
+			openRunInbox(dir, generation);
+			const inbox = join(dir, "inbox", String(generation));
+			if (generation === 0) await waitFor(() => expect(readdirSync(inbox).length).toBeGreaterThan(20));
+			else while (readdirSync(inbox).length < 4) {}
+			sealed.push(...sealRunInbox(dir, generation).map(({ id }) => id));
+		}
+		const ids = (await Promise.all(posters)).flat();
+		expect(ids.filter((id) => id === null).length).toBe(4 * generations);
+		expect(sealed.sort()).toEqual(ids.filter((id) => id !== null).sort());
 		// Nothing half posted is left behind by a refused message.
 		expect(readdirSync(dir).filter((file) => file.endsWith(".inbox"))).toEqual([]);
 	});
