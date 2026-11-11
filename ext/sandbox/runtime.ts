@@ -63,6 +63,24 @@ function serialized<T>(task: () => Promise<T>): Promise<T> {
 const LINUX_HINT =
 	"install bubblewrap, socat and ripgrep (apt install bubblewrap socat ripgrep); on Ubuntu 24.04+ also allow unprivileged user namespaces, see the README";
 
+/**
+ * The hosts the user let the model's commands reach this session, as `host:port`: a subagent run asking for one of
+ * them is not asked about again (ext/subagents/generations.ts).
+ */
+const allowedHosts = sharedRef<Set<string>>("sandbox-allowed-hosts", new Set());
+
+export function noteHostAllowed(target: string): void {
+	allowedHosts.get().add(target);
+}
+
+export function hostAllowed(target: string): boolean {
+	return allowedHosts.get().has(target);
+}
+
+export function forgetAllowedHosts(): void {
+	allowedHosts.get().clear();
+}
+
 export function sandboxStatus(): SandboxStatus {
 	return state.get().status;
 }

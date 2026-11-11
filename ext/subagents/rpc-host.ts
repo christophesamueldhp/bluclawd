@@ -140,12 +140,18 @@ export function stopRpcHost(hostPid: number): void {
 	}
 }
 
+/** What points at the daemon's socket and tmux's: a run reaches neither, so nothing it runs is told where they are. */
+const ENDPOINT_ENV = ["PI_SERVER_DIR", "TMUX", "TMUX_PANE"];
+
 /**
  * The run's pi inherits the orchestrator's environment but none of bluclawd's own variables, so nothing in it takes
- * itself for the orchestrator's pane or a run in tmux; its config directory is set explicitly.
+ * itself for the orchestrator's pane or a run in tmux, nor the daemon's or tmux's endpoints; its config directory is
+ * set explicitly.
  */
 function childEnv(env: NodeJS.ProcessEnv, agentDir: string): NodeJS.ProcessEnv {
-	const kept = Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith("BLUCLAWD_")));
+	const kept = Object.fromEntries(
+		Object.entries(env).filter(([key]) => !key.startsWith("BLUCLAWD_") && !ENDPOINT_ENV.includes(key)),
+	);
 	return { ...kept, PI_CODING_AGENT_DIR: agentDir };
 }
 

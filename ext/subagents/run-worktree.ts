@@ -450,7 +450,7 @@ export async function describeWorkspace(workspace: IsolatedWorkspace, runDir: st
 }
 
 /** What a run in a worktree is told of it, besides its role's instructions: one that only reads works in its chain's. */
-export function workspaceInstructions({ root, baseline }: IsolatedWorkspace, writes = true): string {
+export function workspaceInstructions({ root, baseline }: IsolatedWorkspace, writes = true, shell = false): string {
 	if (!writes) {
 		return [
 			"",
@@ -461,7 +461,10 @@ export function workspaceInstructions({ root, baseline }: IsolatedWorkspace, wri
 	return [
 		"",
 		"## Your workspace",
-		`You work in an isolated Git worktree, ${root}: a copy of your orchestrator's checkout ${baseline.source} as it was when you were admitted, its uncommitted changes included and its ignored files left out. You may change files only inside it, never its .git, and you have no shell. Your changes stay there for your orchestrator to review; later changes in its checkout do not reach you.`,
+		`You work in an isolated Git worktree, ${root}: a copy of your orchestrator's checkout ${baseline.source} as it was when you were admitted, its uncommitted changes included and its ignored files left out. You may change files only inside it, never its .git. Your changes stay there for your orchestrator to review; later changes in its checkout do not reach you.`,
+		shell
+			? "Your commands run in a sandbox of this run: they write only in the worktree and in $TMPDIR, cannot commit or change other Git state, reach a host only once the user allows it, and every process a command starts ends with it, so start nothing to outlive a command."
+			: "You have no shell.",
 	].join("\n");
 }
 

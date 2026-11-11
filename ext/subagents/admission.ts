@@ -11,6 +11,7 @@ import {
 import { type Static, Type } from "typebox";
 import * as forkSettings from "../_shared/settings.ts";
 import { evaluateSubagentDelegationDeny } from "../permissions/policy.ts";
+import { prepareRunContainment } from "../sandbox/run-containment.ts";
 import {
 	type AgentDefinition,
 	type AgentDefinitionCatalog,
@@ -38,10 +39,11 @@ import {
 	readRunDefinition,
 	rpcDenyRules,
 	rpcGrantableTools,
+	rpcRunMayShell,
 	rpcRunsEnabled,
 	rpcRunTools,
 	runDefinitionPath,
-	WRITE_TOOLS,
+	WORKTREE_TOOLS,
 } from "./rpc-runs.ts";
 import { type RunWorkspace, resolveRunWorkspace, within } from "./run-workspace.ts";
 import {
@@ -634,6 +636,10 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 		}
 		const { cwd } = admitted;
 		const grantable = rpcGrantableTools(deps.tools(), deps.registeredTools());
+		if (narrowRunDefinition(admitted, grantable, []).tools.includes("bash")) {
+			const shell = await prepareRunContainment();
+			if (!shell.ok) return cannot(`it runs commands, and a run gets no shell here: ${shell.reason}.`);
+		}
 		const deny = rpcDenyRules(agentDir, [
 			{ cwd: ctx.cwd, trusted: projectTrusted },
 			{ cwd, trusted: workspace.workspace.trusted(cwd) },
@@ -875,7 +881,9 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			}
 			const definition = resolvedDef.definition;
 			const available = rpc ? rpcGrantableTools(deps.tools(), deps.registeredTools()) : deps.tools();
-			const rpcTools = rpc ? rpcRunTools(definition, available) : undefined;
+			// Whether a run's commands can be contained here is known before it is given a shell.
+			const shell = rpc && rpcRunMayShell(definition) ? await prepareRunContainment() : undefined;
+			const rpcTools = rpc ? rpcRunTools(definition, available, shell) : undefined;
 			if (rpcTools && !rpcTools.ok) return reject(rpcTools.error);
 			const unknownTools = definition.tools?.filter((name) => !available.includes(name)) ?? [];
 			if (unknownTools.length > 0) {
@@ -883,10 +891,10 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 					`Subagent role "${definition.name}" names tools the orchestrator cannot give a child: ${unknownTools.join(", ")}. Available: ${available.join(", ") || "none"}.`,
 				);
 			}
-			const writes = rpcTools?.tools.some((tool) => WRITE_TOOLS.includes(tool)) === true;
+			const writes = rpcTools?.tools.some((tool) => WORKTREE_TOOLS.includes(tool)) === true;
 			const cannotIsolate = (why: string) =>
 				reject(
-					`Subagent role "${definition.name}" may edit files, so it works in an isolated Git worktree, and none can be made: ${why}. A run that edits never works in a shared checkout: give it a cwd in a Git repository with a commit, or a role that only reads.`,
+					`Subagent role "${definition.name}" may edit files or run commands, so it works in an isolated Git worktree, and none can be made: ${why}. Such a run never works in a shared checkout: give it a cwd in a Git repository with a commit, or a role that only reads.`,
 				);
 			// A step of a chain whose steps share a worktree works in it, whether it edits or not.
 			const shared = chain?.workspace;
@@ -1010,6 +1018,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 								projectTrusted: childTrusted,
 								admitted,
 								...(isolated ? { workspace: isolated } : {}),
+								...(rpcTools.tools.includes("bash") ? { shell: { runId, runDir: storage.runDir } } : {}),
 							},
 							null,
 							2,

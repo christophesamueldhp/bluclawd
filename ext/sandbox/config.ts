@@ -97,7 +97,7 @@ export function parseSandbox(value: unknown): SandboxSetting {
  * A rule or settings path as the sandbox takes it: absolute, since `srt` on Linux skips a
  * pattern whose first component is a wildcard. A relative path is under the working directory.
  */
-function sandboxPath(written: string, cwd: string, home: string): string {
+export function sandboxPath(written: string, cwd: string, home: string): string {
 	// `srt` refuses a deny glob ending in a separator, since as a pattern it can match no path.
 	const path = written.replace(/(.)\/+$/, "$1");
 	if (path.startsWith("//")) return path.slice(1);

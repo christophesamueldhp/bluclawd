@@ -149,8 +149,8 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		expect(invalid).toMatch(/^No task of the batch was started:/);
 		expect(invalid).toMatch(/tasks\[1\] \("unknown"\): .*nosuch/);
 		expect(invalid).toMatch(/tasks\[2\] \("blank"\): Missing required parameter: task/);
-		// A member is held to what a single run is: no shell, and edits only in a worktree of its own.
-		expect(invalid).toMatch(/tasks\[3\] \("writer"\): .*cannot have yet: bash/);
+		// A member is held to what a single run is: commands and edits only in a worktree of its own.
+		expect(invalid).toMatch(/tasks\[3\] \("writer"\): .*(none can be made|gets no shell here)/);
 		expect(invalid).toMatch(
 			/tasks\[4\] \("editor"\): .*isolated Git worktree, and none can be made: .* is not in a Git repository/,
 		);

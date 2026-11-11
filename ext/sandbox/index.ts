@@ -23,8 +23,10 @@ import { runtimeConfig, sandboxSetting, saveSandboxEnabled } from "./config.ts";
 import { prepareReaper } from "./reaper.ts";
 import {
 	type AskNetwork,
+	forgetAllowedHosts,
 	forgetWrappedExec,
 	markSandboxUnavailable,
+	noteHostAllowed,
 	type SandboxStatus,
 	sandboxStatus,
 	sandboxWraps,
@@ -47,10 +49,12 @@ export function networkAsker(context: () => ExtensionContext | undefined): { ask
 					try {
 						const ctx = context();
 						if (!ctx?.hasUI) return false;
-						return await ctx.ui.confirm(
+						const allowed = await ctx.ui.confirm(
 							"Network access",
 							`Allow the model's commands to reach ${target} for this session?`,
 						);
+						if (allowed) noteHostAllowed(target);
+						return allowed;
 					} catch {
 						return false;
 					}
@@ -60,7 +64,10 @@ export function networkAsker(context: () => ExtensionContext | undefined): { ask
 			}
 			return answer;
 		},
-		forget: () => answers.clear(),
+		forget: () => {
+			answers.clear();
+			forgetAllowedHosts();
+		},
 	};
 }
 

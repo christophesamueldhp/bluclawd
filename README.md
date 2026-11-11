@@ -612,6 +612,20 @@ it is read when a session starts, so `/reload` after editing:
   could change; and it is compiled when the sandbox starts, so without the Command Line Tools
   (`xcode-select --install`) commands run unreaped, and pi warns at session start. An escaped
   descendant keeps the sandbox's limits.
+- Subagent runs on pi's RPC (behind `BLUCLAWD_RPC_RUNS` for now): a run given `bash` (the bundled
+  `general-purpose`, or a role naming it) runs every command in a sandbox of its own, whether or not this one
+  is on. It writes only in its isolated worktree and a temp directory of its own, never the worktree's `.git`,
+  the Git directory it shares or the run's own state (approvals, inbox, definition); it reads nothing of
+  `~/.pi/agent` but its worktree, nor what a `Read` rule denies, in the checkout or its copy in the worktree;
+  it opens no Unix socket, so neither the daemon nor tmux; and a host no rule allows is asked about in the
+  orchestrator. The settings above narrow it further, but never widen what it writes. Each command's
+  processes are found by the run's own Seatbelt profile, which no process can leave, so detached,
+  double-forked, `setsid` and environment-scrubbed ones alike, then stopped and killed before its result
+  returns, and again before a stopped or ended run gives up its slot; a run whose processes cannot all be
+  confirmed ended is reported failed. This works on macOS only, needs the Command Line Tools, and relies on
+  private SPI (`sandbox_check`), so each pi first tests it on a sandboxed probe process. Elsewhere, or when
+  that test fails, runs get no shell and a role naming `bash` is refused. Not probed: a command handing work
+  to a system service that runs it outside the sandbox (`launchctl`, `at`, `crontab`).
 
 | Platform | Needs |
 |---|---|

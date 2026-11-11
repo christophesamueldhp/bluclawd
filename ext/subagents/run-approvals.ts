@@ -24,6 +24,9 @@ export interface RunApprovalRequest extends RunApprovalAsk {
 	id: string;
 }
 
+/** What a run asks for when one of its shell commands would reach a host no rule covers; its target is `host:port`. */
+export const NETWORK_ACCESS = "network access to";
+
 /** The user allowed or refused it; or no one could be asked. */
 export type RunApprovalAnswer = "allow" | "deny" | "blocked";
 
