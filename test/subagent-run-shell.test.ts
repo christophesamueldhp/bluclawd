@@ -129,7 +129,7 @@ describe.skipIf(!supported)("a run's shell, on the operating system", () => {
 		for (const server of sockets) server.close();
 		sockets = [];
 		await SandboxManager.reset();
-		rmSync(runShellTmp(scope.runId), { recursive: true, force: true });
+		rmSync(runShellTmp(agentDir, scope.runId), { recursive: true, force: true });
 		rmSync(root, { recursive: true, force: true });
 	});
 
@@ -137,7 +137,7 @@ describe.skipIf(!supported)("a run's shell, on the operating system", () => {
 		const result = await run('printf made > made.txt && printf temp > "$TMPDIR/t.txt" && cat a.txt');
 		expect(result).toMatchObject({ code: 0, output: "one\n" });
 		expect(readFileSync(join(worktree, "made.txt"), "utf8")).toBe("made");
-		expect(readFileSync(join(runShellTmp(scope.runId), "t.txt"), "utf8")).toBe("temp");
+		expect(readFileSync(join(runShellTmp(agentDir, scope.runId), "t.txt"), "utf8")).toBe("temp");
 	});
 
 	it("writes nothing outside its worktree: the checkout, a sibling, through a link, or a temp directory others share", async () => {

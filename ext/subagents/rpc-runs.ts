@@ -537,7 +537,7 @@ export async function executeRpcRun(
 	// The generation ends once nothing of it runs: its host, its pi, whatever they started in the host's group, and every
 	// process its commands started, wherever they went.
 	const terminated = await endHostGroup(hostPid, contained);
-	if (terminated && contained) rmSync(runShellTmp(record.runId), { recursive: true, force: true });
+	if (terminated && contained) rmSync(runShellTmp(launch.agentDir, record.runId), { recursive: true, force: true });
 	// Where it worked and what it changed there, as Git sees it rather than as the run says.
 	const workspaceLines = workspace ? await describeWorkspace(workspace) : [];
 	const workspaceNote = workspaceLines.length ? `\n${workspaceLines.join("\n")}` : "";

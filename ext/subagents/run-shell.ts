@@ -11,7 +11,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { mkdirSync, realpathSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { type BashOperations, createLocalBashOperations } from "@earendil-works/pi-coding-agent";
@@ -32,7 +32,8 @@ export interface RunShellScope {
 }
 
 /** A run's own temp directory: outside its worktree, so nothing there counts as its changes. */
-export const runShellTmp = (runId: string): string => join(realpathSync(tmpdir()), `bluclawd-run-${runId}`);
+export const runShellTmp = (agentDir: string, runId: string): string =>
+	join(realpathSync(agentDir), "bluclawd", "run-tmp", runId);
 
 /** Paths the sandbox runtime keeps writable for every sandbox, shared between them, so closed to a run's. */
 const SHARED_WRITABLE = ["/tmp/claude", "/private/tmp/claude", "~/.npm/_logs", "~/.claude/debug"];
@@ -90,8 +91,8 @@ export function runShellConfig(
 					...userPaths(on?.denyRead ?? []),
 					...userPaths(strings(written.credentials?.files?.map((file) => file.path))),
 				]),
-				allowRead: [workspace.root],
-				allowWrite: [workspace.root, runShellTmp(scope.runId)],
+				allowRead: [workspace.root, runShellTmp(agentDir, scope.runId)],
+				allowWrite: [workspace.root, runShellTmp(agentDir, scope.runId)],
 				denyWrite: unique([
 					join(workspace.root, ".git"),
 					workspace.gitDir,
@@ -131,9 +132,9 @@ export function createRunShell(
 		if (!SandboxManager.isSupportedPlatform()) return `the sandbox does not support ${process.platform}`;
 		const { errors } = SandboxManager.checkDependencies();
 		if (errors.length > 0) return `the sandbox cannot run: ${errors.join("; ")}`;
-		mkdirSync(runShellTmp(scope.runId), { recursive: true, mode: 0o700 });
+		mkdirSync(runShellTmp(options.agentDir, scope.runId), { recursive: true, mode: 0o700 });
 		// The runtime gives commands this as their TMPDIR, instead of a temp directory every sandbox shares.
-		process.env.CLAUDE_CODE_TMPDIR = runShellTmp(scope.runId);
+		process.env.CLAUDE_CODE_TMPDIR = runShellTmp(options.agentDir, scope.runId);
 		await SandboxManager.initialize(checked as SandboxRuntimeConfig, options.ask, false);
 		return { contained: { helper: containment.helper, marker: runMarker(scope.runId) }, hiddenEnv };
 	};
@@ -146,7 +147,10 @@ export function createRunShell(
 		const shell = await ready;
 		if (typeof shell === "string") throw new Error(`Refused: ${shell}.`);
 		const { SandboxManager } = await import("@anthropic-ai/sandbox-runtime");
-		const env: NodeJS.ProcessEnv = { ...(execOptions.env ?? process.env), TMPDIR: runShellTmp(scope.runId) };
+		const env: NodeJS.ProcessEnv = {
+			...(execOptions.env ?? process.env),
+			TMPDIR: runShellTmp(options.agentDir, scope.runId),
+		};
 		for (const name of shell.hiddenEnv) delete env[name];
 		const wrapped = await SandboxManager.wrapWithSandbox(command, "/bin/bash", undefined, execOptions.signal, {
 			commandId: randomUUID(),
