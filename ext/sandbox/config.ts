@@ -2,7 +2,7 @@
  * The `sandbox` settings, and the `srt` config they make together with the deny rules. Every
  * key besides `enabled` is `srt`'s own and is handed to it as written; bluclawd adds the deny
  * rules' paths, the project and temp to the four path and domain lists, and its server
- * directories to the credential files.
+ * directories to the credential files and the denied Unix-socket directories.
  *
  * Only global settings are read: a repository's files must not loosen or switch off the sandbox.
  */
@@ -94,7 +94,10 @@ export function parseSandbox(value: unknown): SandboxSetting {
 		denyRead: strings(filesystem.denyRead, "sandbox.filesystem.denyRead"),
 		denyWrite: strings(filesystem.denyWrite, "sandbox.filesystem.denyWrite"),
 	};
-	for (const list of Object.values(lists)) if (typeof list === "string") return { kind: "invalid", reason: list };
+	const denyUnixSockets = strings(network.denyUnixSockets, "sandbox.network.denyUnixSockets");
+	for (const list of [...Object.values(lists), denyUnixSockets]) {
+		if (typeof list === "string") return { kind: "invalid", reason: list };
+	}
 	const { enabled, ...written } = value;
 	return enabled === true
 		? { kind: "on", settings: { ...(lists as Omit<SandboxSettings, "written">), written } }
@@ -148,6 +151,7 @@ export function runtimeConfig(
 	const paths = (list: string[]) => [...new Set(list.map((path) => sandboxPath(path, cwd, home)))];
 	const { network, filesystem, credentials, ...rest } = settings.written;
 	const userCredentials = (credentials ?? {}) as { files?: unknown[] };
+	const userNetwork = (network ?? {}) as { denyUnixSockets?: string[] };
 	return {
 		...rest,
 		// A credential deny has nothing carved out of it, so no `allowRead` reopens a server directory.
@@ -155,7 +159,13 @@ export function runtimeConfig(
 			...userCredentials,
 			files: [...(userCredentials.files ?? []), ...serverDirs.map((path) => ({ path, mode: "deny" }))],
 		},
-		network: { deniedDomains: [], ...(network as object), allowedDomains: [...settings.allowedDomains] },
+		network: {
+			deniedDomains: [],
+			...userNetwork,
+			allowedDomains: [...settings.allowedDomains],
+			// After the user's own entries, so no setting drops it; srt denies these over every Unix-socket allow (macOS).
+			denyUnixSockets: [...new Set([...(userNetwork.denyUnixSockets ?? []), ...serverDirs])],
+		},
 		filesystem: {
 			...(filesystem as object),
 			denyRead: paths([...ruled(["Read"]), ...settings.denyRead]),

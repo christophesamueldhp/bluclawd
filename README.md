@@ -646,6 +646,12 @@ it is read when a session starts, so `/reload` after editing:
   `credentials` to hide environment variables or `network.deniedDomains`: see
   [docs/sandbox-settings.md](docs/sandbox-settings.md). A key the runtime does not know counts
   as a malformed setting.
+- bluclawd's own sockets, the daemon's and tmux's in `~/.pi/server` (or a private
+  `PI_SERVER_DIR`, and the default one too), are never a way out of the sandbox, whatever
+  `network.allowUnixSockets` or `network.allowAllUnixSockets` allows: on macOS a command cannot
+  connect to them, nor read their directory. On Linux one socket path cannot be denied, so
+  hiding the directory is the mechanism, not yet run there. See
+  [docs/sandbox-settings.md](docs/sandbox-settings.md#bluclawds-own-sockets).
 - When the sandbox cannot run, or its `sandbox` setting is malformed, the model's `bash` and
   `monitor` are refused and pi says why. There is no unsandboxed fallback. `bash` is also
   refused when bluclawd's background-bash extension is disabled, since pi's own `bash` does

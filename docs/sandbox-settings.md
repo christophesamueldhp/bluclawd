@@ -30,6 +30,8 @@ What bluclawd adds before it hands the config to `srt`:
 | `enabled` | bluclawd's own switch; not sent to `srt` |
 | `network.allowedDomains` | Sent as written |
 | `network.deniedDomains` | Empty when unset (`srt` requires the key) |
+| `network.denyUnixSockets` | Plus bluclawd's server directories ([below](#bluclawds-own-sockets)) |
+| `credentials.files` | Plus bluclawd's server directories, as `deny` |
 | `filesystem.denyRead` | Plus every `Read(<path>)` deny rule |
 | `filesystem.denyWrite` | Plus every `Edit(<path>)` and `Write(<path>)` deny rule |
 | `filesystem.allowWrite` | Plus the working directory and the temp directory |
@@ -85,10 +87,23 @@ port per session (no UI: refused).
 | `deniedResolvedAddresses` | `string[]` | IPs/CIDRs an allowed hostname must not resolve to, e.g. private ranges `["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]`. Loopback, link-local, cloud metadata and this machine's own addresses are refused already |
 | `allowLocalBinding` | boolean | macOS: commands may listen on and reach local ports directly (dev servers). Linux: ignored, the sandbox has its own loopback |
 | `allowUnixSockets` | `string[]` | macOS: Unix sockets allowed, e.g. `["/var/run/docker.sock"]`. Linux: ignored |
+| `denyUnixSockets` | `string[]` | macOS: directories whose Unix sockets stay refused over `allowUnixSockets` and `allowAllUnixSockets`. Linux: ignored. A key of bluclawd's private `srt` build |
 | `allowMachLookup` | `string[]` | macOS: extra XPC/Mach services, trailing `*` allowed, e.g. `["2BUA8C4S2C.com.1password.*"]` for the 1Password CLI |
 | `httpProxyPort`, `socksProxyPort` | number | Use your own proxy on this port instead of `srt`'s. That proxy does the filtering, so pi's dialog no longer applies |
 | `parentProxy` | `{ http?, https?, noProxy? }` | Send outbound traffic through a corporate proxy. Without it, `srt` uses its own `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` |
 | `mitmProxy` | `{ socketPath, domains }` | Route these domains through a proxy on that Unix socket; the allow/deny lists still apply |
+
+### bluclawd's own sockets
+
+bluclawd's own sockets are never a way out of the sandbox, whatever the Unix-socket keys allow.
+The daemon's `server.sock` and tmux's `tmux.sock` live in the server directory (`~/.pi/server`,
+or `$PI_SERVER_DIR`). bluclawd always adds that directory and the default one, by real path, to
+`denyUnixSockets` and to the denied `credentials.files`; no setting turns this off. On macOS a
+command cannot connect to either socket, even with `allowAllUnixSockets` or an `allowUnixSockets`
+entry above the directory (`~`, `~/.pi`), and cannot read the directory, whatever `allowRead`
+names. On Linux one socket path cannot be denied, so hiding the directory is the whole mechanism;
+it is read from `srt`'s code and not yet run there. Sockets bluclawd does not own (your tmux,
+Docker) follow these keys as written. Why: ADR-0012.
 
 ### TLS termination (experimental)
 
@@ -192,7 +207,7 @@ Each of these reopens something the sandbox otherwise closes. Turn one on only f
 | Key | What it gives up |
 |---|---|
 | `filesystem.disabled: true` | Every file rule, including the deny rules' paths, `credentials.files` and the always-protected names. `.env` becomes readable |
-| `network.allowAllUnixSockets: true` | All Unix sockets (a Docker socket gives full control of the machine). On Linux, VM sockets too |
+| `network.allowAllUnixSockets: true` | All Unix sockets (a Docker socket gives full control of the machine), except [bluclawd's own](#bluclawds-own-sockets). On Linux, VM sockets too |
 | `allowAppleEvents: true` | macOS: commands can launch other apps with `open` and script them; those apps run outside the sandbox |
 | `enableWeakerNetworkIsolation: true` | macOS: access to `com.apple.trustd.agent`, a possible way to send data out |
 | `enableWeakerNestedSandbox: true` | A weaker sandbox, for running inside Docker |

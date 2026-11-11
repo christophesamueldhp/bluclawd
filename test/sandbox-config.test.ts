@@ -126,7 +126,7 @@ describe("runtimeConfig", () => {
 		);
 		expect(config).toEqual({
 			credentials: { files: [] },
-			network: { allowedDomains: ["github.com"], deniedDomains: [] },
+			network: { allowedDomains: ["github.com"], deniedDomains: [], denyUnixSockets: [] },
 			filesystem: {
 				denyRead: ["/home/u/**/.env*"],
 				allowWrite: ["/proj", "/tmp/x", "/home/u/.npm"],
@@ -164,6 +164,25 @@ describe("bluclawd's server directories", () => {
 	it("are denied with no credentials setting at all", () => {
 		expect(runtimeConfig(none, [], "/proj", "/home/u", "/tmp/x", ["/home/u/.pi/server"]).credentials).toEqual({
 			files: [{ path: "/home/u/.pi/server", mode: "deny" }],
+		});
+	});
+
+	it("have their Unix sockets denied after the user's own denied directories, which no setting drops", async () => {
+		const dirs = ["/srv/private", "/home/u/.pi/server"];
+		for (const [written, denied] of [
+			[{}, dirs],
+			[{ denyUnixSockets: [] }, dirs],
+			[{ denyUnixSockets: ["/var/run/other", "/srv/private"] }, ["/var/run/other", ...dirs]],
+		] as const) {
+			const setting = parseSandbox({ enabled: true, network: { allowAllUnixSockets: true, ...written } });
+			if (setting.kind !== "on") throw new Error(setting.kind);
+			const config = runtimeConfig(setting.settings, [], "/proj", "/home/u", "/tmp/x", dirs);
+			expect(config.network).toMatchObject({ allowAllUnixSockets: true, denyUnixSockets: denied });
+			expect(typeof (await checkRuntimeConfig(config))).toBe("object");
+		}
+		expect(parseSandbox({ enabled: true, network: { denyUnixSockets: "/srv" } })).toEqual({
+			kind: "invalid",
+			reason: "sandbox.network.denyUnixSockets is not a list of strings",
 		});
 	});
 
@@ -229,7 +248,12 @@ describe("srt's own settings", () => {
 	it("reach the config as written, around bluclawd's own lists", () => {
 		expect(config).toEqual({
 			credentials: { envVars: [{ name: "API_TOKEN", mode: "deny" }], files: [] },
-			network: { allowedDomains: ["github.com"], deniedDomains: ["*:22"], strictAllowlist: true },
+			network: {
+				allowedDomains: ["github.com"],
+				deniedDomains: ["*:22"],
+				strictAllowlist: true,
+				denyUnixSockets: [],
+			},
 			filesystem: {
 				allowRead: ["~/.ssh/known_hosts"],
 				denyRead: ["/proj/**/.env*", "/home/u/.ssh"],
