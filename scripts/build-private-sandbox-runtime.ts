@@ -21,7 +21,7 @@ type BuildOptions = {
 
 const exec = promisify(execFile);
 const name = "@anthropic-ai/sandbox-runtime";
-const version = "0.0.81-bluclawd.3";
+const version = "0.0.81-bluclawd.4";
 const sourceCommit = "c40cf14a65d025e3cd27f071f13a73c12b3b1f92";
 const sourceTree = "8b0c1f68ab58235d56bdac8db5d70ad7db6fef6d";
 const officialSRI = "sha512-bjHDu87gjIR7+Oxy9jPiK3v8CvSELCzfpXa3fjqfSKdvlZET2iF51xcXILWPayTpowB3xtZeQVf2JR916nVW/w==";
@@ -33,8 +33,12 @@ const dependencies = {
 	"node-forge": "^1.4.0",
 	zod: "^3.25.0",
 };
-const stems = ["sandbox-manager", "sandbox-schemas"];
-const patches = { harness: "harness.patch", commandId: "command-id-ask.patch" };
+const stems = ["sandbox-manager", "sandbox-schemas", "sandbox-config", "macos-sandbox-utils"];
+const patches = {
+	harness: "harness.patch",
+	commandId: "command-id-ask.patch",
+	unixSocketDeny: "unix-socket-deny.patch",
+};
 const outputs = new Set(
 	stems.flatMap((stem) => [".js", ".js.map", ".d.ts", ".d.ts.map"].map((suffix) => `dist/sandbox/${stem}${suffix}`)),
 );
@@ -139,7 +143,7 @@ export function privateRuntimeMetadata(basePackage: PackageMetadata): PackageMet
 	Object.assign(result, {
 		version,
 		private: true,
-		description: `${result.description} (bluclawd private build: command id in network asks)`,
+		description: `${result.description} (bluclawd private build: command id in network asks, Unix-socket deny)`,
 		files: [
 			"dist",
 			"vendor/seccomp",
@@ -207,6 +211,7 @@ export async function buildPrivateSandboxRuntime(options: BuildOptions) {
 		"candidate-lint",
 		"candidate-format",
 		"command-id-green",
+		"unix-socket-deny-green",
 		"official-broad",
 		"patched-broad",
 	])
@@ -291,7 +296,7 @@ export async function buildPrivateSandboxRuntime(options: BuildOptions) {
 	await fs.writeFile(join(stage, "package.json"), `${JSON.stringify(metadata, null, 2)}\n`);
 	await fs.writeFile(
 		join(stage, "BLUCLAWD-NOTICE.txt"),
-		`bluclawd private sandbox runtime ${version}\nNot an Anthropic release or endorsement. Upstream copyright and Apache-2.0 license retained.\nUpstream: https://github.com/anthropics/sandbox-runtime at ${sourceCommit}\nModified source modules: ${stems.join(", ")}. Their JS/declarations/maps pass the requesting command's id to the network ask callback.\nPackage metadata removes development dependencies/build and lifecycle scripts; production ranges/public entries are unchanged.\nSee the accompanying provenance and source patch for reproducible maintenance.\n`,
+		`bluclawd private sandbox runtime ${version}\nNot an Anthropic release or endorsement. Upstream copyright and Apache-2.0 license retained.\nUpstream: https://github.com/anthropics/sandbox-runtime at ${sourceCommit}\nModified source modules: ${stems.join(", ")}. Their JS/declarations/maps pass the requesting command's id to the network ask callback, and add network.denyUnixSockets: on macOS, directories whose Unix sockets stay denied over the Unix-socket allows.\nPackage metadata removes development dependencies/build and lifecycle scripts; production ranges/public entries are unchanged.\nSee the accompanying provenance and source patch for reproducible maintenance.\n`,
 	);
 	for (const file of ["package.json", "BLUCLAWD-NOTICE.txt"]) await fs.chmod(join(stage, file), 0o644);
 	const home = join(outputDir, "npm-home");

@@ -111,13 +111,24 @@ describe("private sandbox runtime preparation", () => {
 		put(after, "dist/sandbox/socks-proxy.js", "new");
 		await expect(inspectRuntimeDelta(before, after)).rejects.toThrow(/unapproved/i);
 	});
-	it.each(["sandbox-config.js", "macos-sandbox-utils.js"])(
+	it.each(["linux-sandbox-utils.js", "sandbox-utils.js"])(
 		"rejects a change to %s, which no patch touches",
 		async (file) => {
 			const { before, after } = fixture();
 			put(before, `dist/sandbox/${file}`, "old");
 			put(after, `dist/sandbox/${file}`, "new");
 			await expect(inspectRuntimeDelta(before, after)).rejects.toThrow(/unapproved/i);
+		},
+	);
+	it.each(["sandbox-config.js", "macos-sandbox-utils.js"])(
+		"accepts a change to %s, which the Unix-socket deny patch touches",
+		async (file) => {
+			const { before, after } = fixture();
+			put(before, `dist/sandbox/${file}`, "old");
+			put(after, `dist/sandbox/${file}`, "new");
+			expect((await inspectRuntimeDelta(before, after)).map((change) => change.path)).toEqual([
+				`dist/sandbox/${file}`,
+			]);
 		},
 	);
 	it("rejects symlinked payload entries instead of following them", async () => {
@@ -159,7 +170,7 @@ describe("private sandbox runtime preparation", () => {
 		const result = privateRuntimeMetadata(basePackage);
 		expect(result).toMatchObject({
 			name: "@anthropic-ai/sandbox-runtime",
-			version: "0.0.81-bluclawd.3",
+			version: "0.0.81-bluclawd.4",
 			private: true,
 			author: "Anthropic PBC",
 			license: "Apache-2.0",
@@ -174,7 +185,9 @@ describe("private sandbox runtime preparation", () => {
 			"node-forge": "^1.4.0",
 			zod: "^3.25.0",
 		});
-		expect(result.description).toBe("Anthropic Sandbox Runtime (bluclawd private build: command id in network asks)");
+		expect(result.description).toBe(
+			"Anthropic Sandbox Runtime (bluclawd private build: command id in network asks, Unix-socket deny)",
+		);
 		expect(result.files).toContain("BLUCLAWD-NOTICE.txt");
 		expect(basePackage).toEqual(copy);
 	});
