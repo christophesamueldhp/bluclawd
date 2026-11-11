@@ -77,7 +77,7 @@ const ENDED_SHOWN_MS = 30_000;
 /** How many open runs `subagent_status` describes at once. */
 const MAX_STATUS_RUNS = 30;
 const timedTmux = (): Tmux => new Tmux(undefined, undefined, { timeoutMs: 2000 });
-const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent that works in this same checkout";
+const SUBAGENT_DESCRIPTION_LEAD = "Delegate a task to a child agent";
 // Wording follows Codex's "After you delegate" block and Claude Code's harness text (docs/research/subagents-ux-and-waiting.md).
 const AFTER_YOU_DELEGATE = [
 	"After you delegate:",
@@ -87,8 +87,39 @@ const AFTER_YOU_DELEGATE = [
 	"- Never predict or invent a pending run's result; if the user asks, say it is still running.",
 ];
 const CLOSE_RUNS = `- A run stays open after it reports, and nothing closes it for you: once its work is done, close it with \`subagent_close\`. At most ${MAX_OPEN_RUNS} runs stay open; \`subagent_message\` resumes a closed one.`;
-const RPC_RUNS_END =
-	"- A run's process ends by itself once it reports: there is nothing to close. `subagent_stop` cancels a run's work; only `subagent_resume` continues a finished or stopped run.";
+const RPC_RUNS_END = [
+	"- Progress from a run does not wake you; its findings, questions and blockers reach you as messages.",
+	"- A run's process ends by itself once it reports: there is nothing to close. `subagent_stop` cancels a run's work; only `subagent_resume` continues a finished or stopped run.",
+];
+const TMUX_DELEGATION = [
+	`${SUBAGENT_DESCRIPTION_LEAD} that works in this same checkout, with your tools and permission rules and a fresh context window. Children cannot delegate further.`,
+	"",
+	"You own the split. Give each child a distinct task over separate files or areas: there are no locks, edits are live for you and every sibling, and the last write wins. Verify the combined result yourself.",
+	"",
+	"When to delegate:",
+	"- Independent pieces of work that can run in parallel: put their subagent calls together in one message, since calls in separate messages run one after another.",
+	"- Exploration or review whose intermediate output does not belong in the main conversation.",
+	"",
+	"When NOT to delegate:",
+	"- Single-file lookups or edits you can do directly.",
+	"- Tightly coupled sequential steps where each step depends on the previous result.",
+];
+// Selective by design (spec #290 §13): no required role sequence, no quota, no full-history copying.
+const RPC_DELEGATION = [
+	`${SUBAGENT_DESCRIPTION_LEAD}: a pi of its own with a fresh context window and only the tools its role is granted. Children cannot delegate further.`,
+	"",
+	"Do small work yourself: a lookup, a one-file edit, or anything quicker to do than to describe. Delegate only when it helps:",
+	"- Independent pieces that can run side by side: give them together as `tasks` in one call, which returns one combined report once all have finished.",
+	"- Dependent steps, such as an edit, then an independent review, then a repair: give them as `chain` in one call, which runs them one after another in one worktree.",
+	"- A specialized investigation or review whose intermediate output does not belong in your context.",
+	"No sequence of roles is required and there is no quota: use as many runs as the work needs. Runs past the active limit wait in a queue; that limit is not a target, so there is no need to fill every slot.",
+	"",
+	"A run that only reads shares your checkout and needs no worktree. A run that edits works in a worktree of its own, made from your checkout as it was at the call: nothing reaches your checkout until you call `subagent_integrate` on it, or on a completed chain, with a `check` command that validates the combined result.",
+	"",
+	"Keep each task short and self-contained: the goal, the files or area, and what to report. Do not paste the conversation or large file contents; name paths instead.",
+	"",
+	"A Report ends with what the runtime saw: its Outcome, its Checks (the commands it ran and their exit codes, or that none ran) and its Changes. The rest is the run's own claim.",
+];
 
 export interface SubagentExtensionOptions {
 	agentDir?: string;
@@ -101,25 +132,9 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 	const rolesSection = catalog
 		? formatAgentRoutingDescriptions(catalog)
 		: "- `general-purpose`: Implementation work.\n- `explorer`: Codebase exploration.\n- `reviewer`: Code review.";
+	const rpc = rpcRunsEnabled();
 	return [
-		`${SUBAGENT_DESCRIPTION_LEAD}, with your tools and permission rules and a fresh context window. Children cannot delegate further.`,
-		"",
-		"You own the split. Give each child a distinct task over separate files or areas: there are no locks, edits are live for you and every sibling, and the last write wins. Verify the combined result yourself.",
-		"",
-		"When to delegate:",
-		rpcRunsEnabled()
-			? "- Independent pieces of work that can run in parallel: give them together as `tasks` in one call, which runs them side by side and returns one combined report once all have finished."
-			: "- Independent pieces of work that can run in parallel: put their subagent calls together in one message, since calls in separate messages run one after another.",
-		...(rpcRunsEnabled()
-			? [
-					"- Dependent steps, such as edit, then an independent review, then a repair: give them as `chain` in one call, which runs them one after another in one worktree and returns one combined report.",
-				]
-			: []),
-		"- Exploration or review whose intermediate output does not belong in the main conversation.",
-		"",
-		"When NOT to delegate:",
-		"- Single-file lookups or edits you can do directly.",
-		"- Tightly coupled sequential steps where each step depends on the previous result.",
+		...(rpc ? RPC_DELEGATION : TMUX_DELEGATION),
 		"",
 		...(oneShot
 			? ["Background runs are unavailable in this one-shot mode: omit `background`.", ""]
@@ -127,7 +142,7 @@ function buildBaseSubagentDescription(catalog?: AgentDefinitionCatalog, oneShot 
 					"Run in the foreground (the default) when your next step needs the result. Set `background: true` only when you have independent work to do meanwhile.",
 					"",
 					...AFTER_YOU_DELEGATE,
-					rpcRunsEnabled() ? RPC_RUNS_END : CLOSE_RUNS,
+					...(rpc ? RPC_RUNS_END : [CLOSE_RUNS]),
 					"",
 				]),
 		"Available subagent roles:",

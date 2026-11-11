@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, getCurrentTools, type TranscriptContext } from "@earendil-works/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createParentSessionWithSubagents } from "./helpers/subagent-session.ts";
 import { createSubagentTui, launch, type SubagentTui } from "./helpers/subagent-tui.ts";
 import { waitFor } from "./helpers/wait-for.ts";
@@ -57,6 +57,45 @@ describe("The orchestrator's Waiting", () => {
 			expect(description).toContain(
 				"A run stays open after it reports, and nothing closes it for you: once its work is done, close it with `subagent_close`. At most 8 runs stay open; `subagent_message` resumes a closed one.",
 			);
+		} finally {
+			session.dispose();
+		}
+	});
+
+	it("on pi's RPC, keeps delegation selective and points the model at batches, chains, Integration and Checks", async () => {
+		vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
+		const { session, faux } = await createParentSessionWithSubagents({
+			cwd: makeTempDir("selective-cwd"),
+			agentDir: makeTempDir("selective-agent"),
+		});
+		try {
+			await session.bindExtensions({ mode: "tui" });
+			let description = "";
+			faux.setResponses([
+				(context) => {
+					description = getCurrentTools(context.messages).find((t) => t.name === "subagent")?.description ?? "";
+					return fauxAssistantMessage("Done.");
+				},
+			]);
+			await session.prompt("Delegate something.", { expandPromptTemplates: false });
+
+			// Small work stays with the orchestrator; delegation is for useful independent or specialized work.
+			expect(description).toContain("Do small work yourself");
+			expect(description).toContain("give them together as `tasks`");
+			expect(description).toContain("give them as `chain`");
+			expect(description).toContain("No sequence of roles is required");
+			expect(description).toContain("no need to fill every slot");
+			// Read-only work needs no worktree; edits come back only through Integration, validated by a check.
+			expect(description).toContain("A run that only reads shares your checkout and needs no worktree");
+			expect(description).toContain("`subagent_integrate`");
+			expect(description).toContain("Checks");
+			expect(description).toContain("Do not paste the conversation or large file contents");
+			expect(description).toContain("Do not redo or touch delegated work");
+			expect(description).toContain("Progress from a run does not wake you");
+			// What holds only for tmux runs is not said of RPC runs.
+			expect(description).not.toContain("last write wins");
+			expect(description).not.toContain("Tightly coupled sequential steps");
+			expect(description).not.toContain("subagent_close");
 		} finally {
 			session.dispose();
 		}
