@@ -168,7 +168,7 @@ export const SCENARIOS: readonly Scenario[] = [
 			"test/bar.test.js": BAR_TEST,
 		},
 		prompt:
-			'Add src/percent.js exporting percent(part, total), a whole-number percentage clamped to 0..100, and src/bar.js exporting progressBar(ratio, width), "#" for the filled part and "-" for the rest, with ratio clamped to 0..1. Both must reuse clamp from src/util.js. Make `node --test test/` pass.',
+			'Have two subagents work side by side, one per file: one adds src/percent.js exporting percent(part, total), a whole-number percentage clamped to 0..100; the other adds src/bar.js exporting progressBar(ratio, width), "#" for the filled part and "-" for the rest, with ratio clamped to 0..1. Both must reuse clamp from src/util.js. Bring both changes into this checkout and make `node --test test/` pass.',
 		functions: ["clamp", "percent", "progressBar"],
 	},
 	{
@@ -182,7 +182,7 @@ export const SCENARIOS: readonly Scenario[] = [
 			),
 		},
 		prompt:
-			'Implement parseDuration in src/duration.js: "90s", "2m" and "1h" in seconds, and an unknown unit throws. Have the change reviewed independently, fix what the review finds, and make `node --test test/` pass.',
+			'Implement parseDuration in src/duration.js: "90s", "2m" and "1h" in seconds, and an unknown unit throws. Run it as a chain of subagents: one implements it, then a reviewer checks the change. Then have the subagent that implemented it fix what the review found, continuing its own session rather than starting a new subagent. Bring the result into this checkout and make `node --test test/` pass.',
 		functions: ["parseDuration"],
 	},
 	{
@@ -469,6 +469,7 @@ export async function runTrial(options: TrialOptions): Promise<TrialResult> {
 	const agentDir = options.agentDir ?? join(base, "agent");
 	const cwd = join(base, "work");
 	let removeRoles: (() => void) | undefined;
+	let linked = false;
 	try {
 		for (const dir of [agentDir, cwd, join(base, "s"), join(base, "home")]) mkdirSync(dir, { recursive: true });
 		createFixture(options.scenario.files, cwd);
@@ -476,13 +477,16 @@ export async function runTrial(options: TrialOptions): Promise<TrialResult> {
 			const scripted = live ? {} : { compaction: { enabled: false }, retry: { enabled: false } };
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ quietStartup: true, ...scripted }));
 		}
-		if (options.auth) symlinkSync(options.auth, join(agentDir, "auth.json"));
+		if (options.auth) {
+			symlinkSync(options.auth, join(agentDir, "auth.json"));
+			linked = true;
+		}
 		if (arm === "example") removeRoles = writeExampleRoles(agentDir);
 		return await trialIn(base, agentDir, cwd, options);
 	} finally {
 		removeRoles?.();
 		// Its trial's processes are gone by now, so nothing writes it any more.
-		if (options.auth) keepUnlessLinked(base, agentDir, options.auth);
+		if (options.auth && linked) keepUnlessLinked(base, agentDir, options.auth);
 		rmSync(base, { recursive: true, force: true, maxRetries: 10 });
 	}
 }
@@ -937,6 +941,7 @@ async function main(argv: string[]): Promise<void> {
 	try {
 		// A checkout the arm cannot load is said before any call is spent.
 		for (const arm of arms) armExtensions(arm, roots[arm]);
+		if (auth && !existsSync(auth)) throw new Error(`No auth.json at ${auth}`);
 		if (auth) {
 			for (const check of await checkCredentials({ auth: resolve(auth), models, thinking })) {
 				const saved = check.writtenThrough ? ", and pi saved auth.json through the link" : "";

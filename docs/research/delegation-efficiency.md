@@ -23,11 +23,12 @@ The same prompt is used for every arm. A fixture is a committed Git repository. 
 |---|---|---|
 | trivial | make `parseDuration` read minutes | the tests pass |
 | investigate | name the functions in `src/` that call `clamp`, changing nothing | the answer names `percent`, `progressBar`, `percent.js` and `bar.js`, and the tree is unchanged. A wrong extra name is not caught. |
-| parallel | add `percent` and `progressBar` in two new files, both reusing `clamp` | the tests pass, and `clamp`, `percent` and `progressBar` are each defined once |
-| review | implement `parseDuration` for s/m/h, have it reviewed independently, fix the findings | the tests pass, including the throw on an unknown unit |
+| parallel | have two subagents side by side each add one file, `percent` and `progressBar`, both reusing `clamp`, and bring both changes in | the tests pass, and `clamp`, `percent` and `progressBar` are each defined once |
+| review | implement `parseDuration` for s/m/h as a chain of subagents (one implements, a reviewer checks), then have the implementer fix the findings in its own session, and bring the result in | the tests pass, including the throw on an unknown unit |
 | watch | start `node server.js` in the background, be told when it prints `READY port=<port>` (about 2 s in), write the port to `port.txt`, stop the server | `port.txt` holds the port the server listened on, and the server was stopped |
 | slow | run `node build.js`, which takes about 2 s, limited to 10 s | the tests pass: the build wrote `dist/app.txt` |
 
+- **`parallel` and `review`** ask for subagents in so many words, so a model that follows them calls `subagent` with `tasks[]`, then `subagent_integrate` (`parallel`), or with `chain[]`, then `subagent_resume` (`review`). Their earlier prompts left delegating to the model, and in the first live record below it delegated nothing in `parallel`. That record used the earlier prompts. The `stock` arm has no subagents, so it can only do this work itself.
 - **`watch`**: the prompt states the need ("tell me when that line appears: do not poll for it") and names no tool. The server listens on a port the system picks and records it beside the fixture, outside the repository, where the check reads it.
   - **Left running**: a server nobody stops keeps the trial from settling. After 120 s it gives up, records that, and exits, so the trial ends incorrect rather than running to its time limit.
 - **`slow`**: the `bash` override takes `timeout` in milliseconds, with a 2-minute default. A model that sends `10` for "10 seconds" gets a 10 ms timeout. The command is still running then, so it moves to the background rather than being killed, and the result is not an error. The build may still finish and the trial pass, so this scenario's signal is the count of `bash` calls ended at their timeout, not its outcome. A scenario that relied on the default being too short would take minutes per trial.
@@ -48,7 +49,7 @@ These are per trial, and each is summarized as a median or maximum over the tria
 
 The next three are about the parent's tool calls only: the text that #337 trims first is the orchestrator's. Each is summed over the trials of a row.
 
-- **failed calls**: the parent's tool calls whose result was an error, of any kind.
+- **failed calls**: the parent's tool calls whose result was an error, of any kind. A `bash` command that exits non-zero, such as a test run that fails before a fix, counts too.
 - **bash timeouts**: the parent's `bash` calls that ended at their timeout. This is read from the result's shape, not its wording, which the two arms may word differently. A foreground call whose result names a background task is counted, since nobody presses Ctrl+B or sends a message during a trial. A call killed at its timeout (pi's `Command timed out after` error) is counted as well. A command that starts with `sleep` is killed rather than moved.
 - **tools**: the tools the parent called, by name. Per trial, the result also keeps how many times each was called. #337's coverage rule needs a tool to be called in both arms before its text counts as covered.
 
@@ -91,7 +92,7 @@ node scripts/eval-delegation.ts --live --models <provider/id>[,<provider/id>...]
   - When the budget cannot cover another trial, the run stops and reports what it has. Since a trial reserves a quarter, the run stops once less than a quarter of the budget is left, without ever passing it.
 - **Dialogs**: nobody answers them, so each one is cancelled, as with no user present. A Run's approval request therefore ends blocked.
 - **Failed launches**: if pi exits before it settles, as with an unknown model or a missing key, the trial records its stderr and the run stops.
-- **Not yet exercised**: none of the live path has run. That covers the `main` loop, the budget stop, the example arm end to end, and whether a provider key in the environment reaches the Runs' pis. Only the example extension's loading was checked, on faux: it registers its `subagent` tool under `-ne`. For `before` and `after`, two things were checked on faux and nothing else: each arm sends its own checkout's tool text (a marker put into one checkout's `monitor` description reached that arm's requests only), and the credentials check makes its call through a linked stand-in `auth.json`.
+- **Not yet exercised**: none of the live path has run. That covers the `main` loop, the budget stop, the example arm end to end, and whether a provider key in the environment reaches the Runs' pis. Only the example extension's loading was checked, on faux: it registers its `subagent` tool under `-ne`. For `before` and `after`, three things were checked on faux and nothing else. Each arm sends its own checkout's tool text: a marker put into one checkout's `monitor` description reached that arm's requests only. The scripted `parallel` and `review` trials pass in the `after` arm too, with all four extensions loaded; this was a one-off run, not a committed test. And the credentials check makes its call through a linked stand-in `auth.json`.
 
 ## Observed deterministic results
 
