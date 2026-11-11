@@ -237,7 +237,7 @@ Each ticket block of the implementation notes was checked item by item. An item 
 | R2 | **No live real-provider check.** No paid call was made. A run's pi on the user's real provider is unverified (auth and `models.json` reach it through the agent dir and env, by code reading only). The user can run the command under [Commands for the user](#commands-for-the-user). | #311, #310 |
 | R3 | **Provider-extensions stopgap**: a provider an extension registers is refused at Admission. `BLUCLAWD_RPC_PROVIDER_EXTENSIONS` loads extra `-e` extensions into each run, and 20 test files plus `test/helpers/fake-run-hosts.ts` depend on it for faux. It is not a supported configuration. | #292, ADR-0010 |
 | R4 | A key given only at runtime (`--api-key`) passes Admission, but the run's pi lacks it and fails late. Untested. Virtual routers are refused; there is no per-message model check. | #294 |
-| R5 | **ADR-0001 conflict (the user's decision)**: ADR-0001 says only a VM can contain process lifetime on macOS, and calls the reaper best-effort. #302 confirms termination of run shells with a sandbox-identity scan. Either ADR-0001 is revised to scope its claim to the orchestrator's own shell, or #302's confirmation is downgraded. | #302 |
+| R5 | **ADR-0001 conflict: resolved by ADR-0011.** ADR-0001 now scopes the VM-only claim to arbitrary commands; run shells confirm termination by sandbox identity (ADR-0011), and the orchestrator shell keeps the best-effort reaper. | #302 |
 | R6 | Known pre-existing flakes: F1–F6 below. | ledger |
 | R7 | No stable snapshot for a lone reader (story 48). | #301 |
 | R8 | **Recovery**: a kill between `claimRunGeneration` and the record write leaves a generation claimed forever, so the run cannot be resumed. A batch's aggregate and manifest are not rebuilt after takeover. A chain has no live manifest after takeover, and its handoff lacks an earlier step's workspace lines. A reload inside a step's Admission await could admit it twice. Two live pis on one session both deliver a Report. A run's message relayed again after a crash is taken once by the orchestrator and by a sibling's inbox, but a sibling resumed since gets it in its new generation, and the audit log (`messages.jsonl`) records each relay. A message still in the crashed orchestrator's memory when its run ended is not relayed again: only open runs are taken over. A parent that never returns leaves its record `running`, plus its worktree and `run-tmp`. A partly made worktree is not repaired. | #308 |
@@ -295,7 +295,6 @@ The parent contracts are **met on macOS with the faux provider, with exceptions*
 
 Release still depends on:
 
-- the user's ADR-0001 decision (R5);
 - a live real-provider run (R2);
 - accepting the macOS-only shell (R1) and the provider-extensions stopgap (R3).
 
