@@ -1,14 +1,16 @@
 /**
  * The `sandbox` settings, and the `srt` config they make together with the deny rules. Every
  * key besides `enabled` is `srt`'s own and is handed to it as written; bluclawd adds the deny
- * rules' paths, the project and temp to the four path and domain lists.
+ * rules' paths, the project and temp to the four path and domain lists, and its server
+ * directories to the credential files and the denied Unix-socket directories.
  *
  * Only global settings are read: a repository's files must not loosen or switch off the sandbox.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { getAgentDir, type SettingsManager } from "@earendil-works/pi-coding-agent";
+import { defaultServerDir, getServerDir } from "../../daemon/paths.ts";
 import { pathRule } from "../permissions/rules.ts";
 
 export interface SandboxSettings {
@@ -16,6 +18,9 @@ export interface SandboxSettings {
 	allowWrite: string[];
 	denyRead: string[];
 	denyWrite: string[];
+	denyUnixSockets: string[];
+	/** `credentials.files`, each entry left for `srt`'s schema to check. */
+	credentialFiles: unknown[];
 	/** The `sandbox` object as written, without `enabled`. */
 	written: Record<string, unknown>;
 }
@@ -78,18 +83,28 @@ export function parseSandbox(value: unknown): SandboxSetting {
 	}
 	const network = value.network ?? {};
 	const filesystem = value.filesystem ?? {};
+	const credentials = value.credentials ?? {};
 	if (!isPlainObject(network)) return { kind: "invalid", reason: "sandbox.network is not an object" };
 	if (!isPlainObject(filesystem)) return { kind: "invalid", reason: "sandbox.filesystem is not an object" };
+	if (!isPlainObject(credentials)) return { kind: "invalid", reason: "sandbox.credentials is not an object" };
+	const credentialFiles = credentials.files === undefined ? [] : credentials.files;
+	if (!Array.isArray(credentialFiles)) return { kind: "invalid", reason: "sandbox.credentials.files is not a list" };
 	const lists = {
 		allowedDomains: strings(network.allowedDomains, "sandbox.network.allowedDomains"),
 		allowWrite: strings(filesystem.allowWrite, "sandbox.filesystem.allowWrite"),
 		denyRead: strings(filesystem.denyRead, "sandbox.filesystem.denyRead"),
 		denyWrite: strings(filesystem.denyWrite, "sandbox.filesystem.denyWrite"),
+		denyUnixSockets: strings(network.denyUnixSockets, "sandbox.network.denyUnixSockets"),
 	};
-	for (const list of Object.values(lists)) if (typeof list === "string") return { kind: "invalid", reason: list };
+	for (const list of Object.values(lists)) {
+		if (typeof list === "string") return { kind: "invalid", reason: list };
+	}
 	const { enabled, ...written } = value;
 	return enabled === true
-		? { kind: "on", settings: { ...(lists as Omit<SandboxSettings, "written">), written } }
+		? {
+				kind: "on",
+				settings: { ...(lists as Omit<SandboxSettings, "credentialFiles" | "written">), credentialFiles, written },
+			}
 		: { kind: "off" };
 }
 
@@ -106,12 +121,31 @@ export function sandboxPath(written: string, cwd: string, home: string): string 
 	return isAbsolute(path) ? path : join(cwd, path);
 }
 
+/** `path` with its links resolved, as far as it exists: a server directory is often made after the sandbox starts. */
+function realPath(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		const parent = dirname(path);
+		return parent === path ? path : join(realPath(parent), basename(path));
+	}
+}
+
+/**
+ * bluclawd's server directories, where its daemon's and tmux's sockets live: the one this pi resolves and the
+ * default one, which a pi under a private `PI_SERVER_DIR` must not reach either (ADR-0012).
+ */
+export function serverDirs(): string[] {
+	return [...new Set([getServerDir(), defaultServerDir()].map((dir) => realPath(resolve(dir))))];
+}
+
 export function runtimeConfig(
 	settings: SandboxSettings,
 	denyRules: string[],
 	cwd: string,
 	home: string,
 	tmp: string,
+	ownServerDirs: string[],
 ): RuntimeConfig {
 	const ruled = (verbs: string[]) =>
 		denyRules.flatMap((rule) => {
@@ -119,10 +153,21 @@ export function runtimeConfig(
 			return parsed && verbs.includes(parsed.verb) ? [parsed.path] : [];
 		});
 	const paths = (list: string[]) => [...new Set(list.map((path) => sandboxPath(path, cwd, home)))];
-	const { network, filesystem, ...rest } = settings.written;
+	const { network, filesystem, credentials, ...rest } = settings.written;
 	return {
 		...rest,
-		network: { deniedDomains: [], ...(network as object), allowedDomains: [...settings.allowedDomains] },
+		// A credential deny has nothing carved out of it, so no `allowRead` reopens a server directory.
+		credentials: {
+			...(credentials as object),
+			files: [...settings.credentialFiles, ...ownServerDirs.map((path) => ({ path, mode: "deny" }))],
+		},
+		network: {
+			deniedDomains: [],
+			...(network as object),
+			allowedDomains: [...settings.allowedDomains],
+			// After the user's own entries, so no setting drops it; srt denies these over every Unix-socket allow (macOS).
+			denyUnixSockets: [...new Set([...settings.denyUnixSockets, ...ownServerDirs])],
+		},
 		filesystem: {
 			...(filesystem as object),
 			denyRead: paths([...ruled(["Read"]), ...settings.denyRead]),

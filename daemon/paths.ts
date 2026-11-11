@@ -21,14 +21,19 @@ export function daemonBuildId(dir: string, piRoot?: string): string {
 	return `${source}|${root}`;
 }
 
+/** The server directory of a pi with neither `PI_SERVER_DIR` nor `PI_CONFIG_DIR` set. */
+export function defaultServerDir(): string {
+	return join(homedir(), ".pi", "server");
+}
+
 export function getServerDir(): string {
 	const envDir = process.env.PI_SERVER_DIR;
 	if (envDir) {
 		return envDir;
 	}
 
-	const piDir = process.env.PI_CONFIG_DIR || join(homedir(), ".pi");
-	return join(piDir, "server");
+	const configDir = process.env.PI_CONFIG_DIR;
+	return configDir ? join(configDir, "server") : defaultServerDir();
 }
 
 /** The unauthenticated control sockets must stay behind an owner-only directory. */

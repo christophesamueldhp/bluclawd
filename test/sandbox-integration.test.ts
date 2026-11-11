@@ -57,12 +57,15 @@ describe.skipIf(!supported)(
 					allowWrite: [],
 					denyRead: [],
 					denyWrite: [],
+					denyUnixSockets: [],
+					credentialFiles: [],
 					written: { credentials: { envVars: [{ name: "BLUCLAWD_IT_TOKEN", mode: "deny" }] } },
 				},
 				["Read(**/.env*)"],
 				dir,
 				homedir(),
 				tmpdir(),
+				[],
 			);
 			const asker = networkAsker(() => ({ hasUI: true, ui: { confirm } }) as never);
 			expect(await startSandbox(config, asker.ask)).toEqual({ kind: "ready" });

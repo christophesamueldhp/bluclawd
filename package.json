@@ -59,6 +59,6 @@
     "check": "npm run lint && npm run deadcode && npm run typecheck && npm test"
   },
   "dependencies": {
-    "@anthropic-ai/sandbox-runtime": "file:vendor/sandbox-runtime/anthropic-ai-sandbox-runtime-0.0.81-bluclawd.3.tgz"
+    "@anthropic-ai/sandbox-runtime": "file:vendor/sandbox-runtime/anthropic-ai-sandbox-runtime-0.0.81-bluclawd.4.tgz"
   }
 }
