@@ -405,6 +405,26 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 		expect(existsSync(join(repo, "locked.txt"))).toBe(false);
 	});
 
+	it("runs no check for an orchestrator that may not run bash itself, and says why", async () => {
+		const real = await startOrchestrator();
+		pi = real;
+		const repo = real.cwd;
+		repository(repo, { "a.txt": SEVEN });
+		real.script("main", [
+			{ tool: "subagent", args: { agent: writer, name: "w", task: "Write." } },
+			{ tool: "subagent_integrate", args: { agent: "w", check: "touch checked" } },
+			{ text: "done" },
+		]);
+		real.script("w", [{ tool: "write", args: { path: "n.txt", content: "new\n" } }, { text: "Wrote." }]);
+		real.start(["--exclude-tools", "bash", "--", "delegate"]);
+
+		const main = await real.waitForRequests("main", 3);
+		const applied = toolResults(main[2])[1];
+		expect(applied).toMatch(/^Integration: applied A n\.txt to /m);
+		expect(applied).toMatch(/^Validation: `touch checked` did not run: your bash tool is not active/m);
+		expect(existsSync(join(repo, "checked"))).toBe(false);
+	});
+
 	it.skipIf(process.platform !== "darwin")(
 		"integrates a run whose shell is contained once none of its commands' processes runs",
 		async () => {

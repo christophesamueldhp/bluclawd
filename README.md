@@ -477,7 +477,8 @@ The orchestrator's tools:
   completed chain (`chain_…`), changed since its baseline to your checkout as it is now, keeping your
   edits there: all or nothing, through a three-way merge. A conflict applies nothing and lists the
   paths; `keep` leaves paths you resolved yourself, `preview` applies nothing, and `check` runs a
-  command in the checkout afterwards to validate the combined result. Nothing is staged or committed.
+  command in the checkout afterwards to validate the combined result, as your own bash would, and
+  only while your bash tool is active. Nothing is staged or committed.
 - `subagent_models`: the models a run can use, with auth status and supported thinking levels.
 
 Inside a run, its own `subagent_message` reaches `parent` (its orchestrator) or a sibling by name.

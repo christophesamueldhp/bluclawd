@@ -127,7 +127,7 @@ export function registerIntegration(pi: ExtensionAPI, deps: IntegrationDeps): vo
 		exposure: "model-only",
 		annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 		description:
-			"Integrate what a finished subagent that edits changed in its worktree, by name or run ID, or what a completed chain changed, by its ID (chain_…), into your checkout: only its own changes since its baseline are applied, onto your checkout as it is now, and every change made there meanwhile is kept. Nothing is staged, committed or pushed, and its worktree stays. Work that is still running, did not complete, or whose processes may still run is refused. On a conflict nothing is applied: resolve a routine one within what the user asked by editing your own file, then call again with that path in `keep`; a conflict whose resolution would change what the user or the run meant is for the user: ask them, and do not choose. `preview` shows its changes and what would conflict, applying nothing. `check` is a shell command run in the checkout once applied, to validate the combined result; its exit code and output are reported, and nothing is undone when it fails.",
+			"Integrate what a finished subagent that edits changed in its worktree, by name or run ID, or what a completed chain changed, by its ID (chain_…), into your checkout: only its own changes since its baseline are applied, onto your checkout as it is now, and every change made there meanwhile is kept. Nothing is staged, committed or pushed, and its worktree stays. Work that is still running, did not complete, or whose processes may still run is refused. On a conflict nothing is applied: resolve a routine one within what the user asked by editing your own file, then call again with that path in `keep`; a conflict whose resolution would change what the user or the run meant is for the user: ask them, and do not choose. `preview` shows its changes and what would conflict, applying nothing. `check` is a shell command run in the checkout once applied, as your own bash runs it and only while you have bash, to validate the combined result; its exit code and output are reported, and nothing is undone when it fails.",
 		parameters: Type.Object(
 			{
 				agent: Type.String({ description: "The finished subagent's name or run ID (sub_…), or a chain's ID." }),
@@ -152,7 +152,9 @@ export function registerIntegration(pi: ExtensionAPI, deps: IntegrationDeps): vo
 			const scope = deps.scope();
 			if (!scope || !ctx) return result("Subagent runtime is not initialized for this session.", true);
 			try {
-				return await integrate(deps, scope, ctx, { ...params, agent: params.agent.trim() }, signal);
+				// A check is one of the orchestrator's own commands: only one that may run bash may give one.
+				const mayShell = pi.getActiveTools().includes("bash");
+				return await integrate(deps, scope, ctx, { ...params, agent: params.agent.trim() }, mayShell, signal);
 			} catch (error) {
 				return result(
 					`Not integrated: ${error instanceof Error ? error.message : String(error)}. Nothing more was applied.`,
@@ -168,6 +170,7 @@ async function integrate(
 	scope: ParentScope,
 	ctx: IntegrationContext,
 	params: { agent: string; preview?: boolean; keep?: string[]; check?: string },
+	mayShell: boolean,
 	signal: AbortSignal | undefined,
 ): Promise<ToolResult> {
 	const target = resolveTarget(deps, scope, params.agent);
@@ -292,7 +295,7 @@ async function integrate(
 		writeAtomicPrivateFile(integrationPath(ownerDir), JSON.stringify({ tree: after, at: Date.now() }));
 		const kept = [...keep].filter((path) => paths.includes(path));
 		const validation = params.check
-			? await runCheck(params.check, source, deps.agentDir(), ctx, signal)
+			? await runCheck(params.check, source, deps.agentDir(), ctx, mayShell, signal)
 			: "Validation: none ran, so nothing validated the combined result. Run the project's checks, or call again with `check` next time.";
 		return result(
 			[
@@ -650,12 +653,16 @@ async function previewPatch(
 	].join("\n");
 }
 
-/** Runs the orchestrator's check in the checkout, as its own shell commands run: held to its deny rules and sandbox. */
+/**
+ * Runs the orchestrator's check in the checkout, as its own shell commands run: only while its bash tool is active,
+ * held to its deny rules and sandbox.
+ */
 async function runCheck(
 	command: string,
 	source: string,
 	agentDir: string,
 	ctx: IntegrationContext,
+	mayShell: boolean,
 	signal: AbortSignal | undefined,
 ): Promise<string> {
 	// Where the orchestrator's own commands run, when that is in the checkout; else the checkout's root.
@@ -667,6 +674,7 @@ async function runCheck(
 		: { reason: deny.error };
 	const notRun = (why: string) =>
 		`Validation: \`${command}\` did not run: ${why}. Nothing validated the combined result.`;
+	if (!mayShell) return notRun("your bash tool is not active, so you may not run commands");
 	if (blocked) return notRun(blocked.reason ?? "a deny rule forbids it");
 	const sandboxed = sandboxStatus().kind !== "off";
 	// Whether bluclawd's bash wraps commands is the sandbox's to know: only a wrapping that exists is reused.
