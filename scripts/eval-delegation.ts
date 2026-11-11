@@ -1,50 +1,70 @@
 /**
  * Comparative delegation evaluation: the same tasks, model and thinking level, done by stock pi with no extensions,
  * by pi with bluclawd's subagents (RPC runs), and, live only, by pi with pi's own example subagent extension (an
- * example it ships, not built-in behavior). Each trial is graded by the fixture's tests and final tree, never by the
- * transcript, and measured: usage of every session, wall time, run startup, parent wakeups, duplicated work,
- * Integration conflicts and peak processes.
+ * example it ships, not built-in behavior). Or done by two bluclawd checkouts, `before` and `after`, each loading the
+ * extensions that register tools, to compare two versions of their text. Each trial is graded by the fixture's tests
+ * or check and final tree, never by the transcript, and measured: usage of every session, wall time, run startup,
+ * parent wakeups, duplicated work, Integration conflicts, peak processes, and the parent's tool calls, failed calls
+ * and `bash` calls ended at their timeout.
  *
  * A live comparison spends real model calls; the budget is this experiment's control, never a production limit:
  *
- *   node scripts/eval-delegation.ts --live --model <provider/id> --thinking <level> --max-tokens <n> --max-dollars <n>
- *     [--trials 3] [--arms stock,bluclawd,example] [--scenarios trivial,investigate,parallel,review]
- *     [--agent-dir <dir>] [--out <results.json>]
+ *   node scripts/eval-delegation.ts --live --models <provider/id>[,...] --thinking <level> --max-tokens <n>
+ *     --max-dollars <n> [--trials 3] [--before <checkout> --after <checkout>] [--arms stock,bluclawd,example]
+ *     [--scenarios trivial,investigate,parallel,review,watch,slow] [--auth <auth.json> | --agent-dir <dir>]
+ *     [--out <results.json>]
  *
- * Credentials come from the environment (a provider's API key variable), or from `--agent-dir`, an agent dir used as
- * it is: give it a dedicated one, since every trial's sessions, Run records and worktrees are left there.
+ * Credentials come from the environment (a provider's API key variable); from `--auth`, the user's auth.json, linked
+ * into each trial's fresh agent dir once one call per provider showed pi writes through the link; or from
+ * `--agent-dir`, an agent dir used as it is: give it a dedicated one, since every trial's sessions, Run records and
+ * worktrees are left there.
  */
 import { type ChildProcess, execFileSync, spawn, spawnSync } from "node:child_process";
 import {
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	readlinkSync,
 	realpathSync,
 	rmSync,
+	statSync,
+	symlinkSync,
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { piPackageRoot } from "../daemon/orchestrator-client.ts";
 import { isTerminalSubagentStatus, type SubagentLifecycleStatus } from "../ext/subagents/runs.ts";
 import { createFixture, EvaluationBudget, type FixtureGrade, gradeFixture, passPowerK } from "./eval-subagents.ts";
+import { ORCHESTRATOR_EXTENSIONS } from "./prompt-footprint.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const PI_CODING_AGENT = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
 const PI_CLI = join(PI_CODING_AGENT, "bundle/cli.js");
 const EXAMPLE = join(PI_CODING_AGENT, "../examples/extensions/subagent");
 
-export type Arm = "stock" | "bluclawd" | "example";
+/** `before` and `after` load bluclawd's tool extensions from a checkout each: two versions of its text, compared. */
+export type Arm = "stock" | "bluclawd" | "example" | "before" | "after";
 export const ARMS: readonly Arm[] = ["stock", "bluclawd", "example"];
 
-const ARM_EXTENSIONS: Record<Arm, string[]> = {
-	stock: [],
-	bluclawd: [join(root, "ext/subagents/index.ts")],
-	example: [join(EXAMPLE, "index.ts")],
-};
+const loadsBluclawd = (arm: Arm) => arm === "bluclawd" || arm === "before" || arm === "after";
+
+/** The extensions an arm loads; `before` and `after` take theirs from `checkout`. */
+function armExtensions(arm: Arm, checkout: string | undefined): string[] {
+	if (arm === "stock") return [];
+	if (arm === "bluclawd") return [join(root, "ext/subagents/index.ts")];
+	if (arm === "example") return [join(EXAMPLE, "index.ts")];
+	if (!checkout) throw new Error(`The ${arm} arm needs the bluclawd checkout it loads`);
+	const paths = ORCHESTRATOR_EXTENSIONS.map((path) => join(checkout, path));
+	// A fresh worktree has no dependencies until they are installed: said here, rather than by pi failing to start.
+	const missing = [...paths, join(checkout, "node_modules")].filter((path) => !existsSync(path));
+	if (missing.length > 0) throw new Error(`The ${arm} arm's checkout lacks ${missing.join(", ")}`);
+	return paths;
+}
 
 export interface Scenario {
 	name: string;
@@ -55,6 +75,8 @@ export interface Scenario {
 	functions: string[];
 	/** For a question: what the final answer must say. The tree must then stay as it was. */
 	answer?: RegExp;
+	/** Grades the final tree in place of the fixture's tests: why the outcome is wrong, or nothing when it is right. */
+	check?: (cwd: string) => string | undefined;
 }
 
 const PACKAGE = JSON.stringify({ name: "fixture", private: true, type: "module" });
@@ -73,6 +95,36 @@ const BAR_TEST = testFile(
 	'import { progressBar } from "../src/bar.js";',
 	'test("bar", () => {\n\tassert.equal(progressBar(0.5, 4), "##--");\n\tassert.equal(progressBar(2, 2), "##");\n});',
 );
+
+/**
+ * A server on a port of the system's choosing, which it prints once ready. It records the port, and whether it gave
+ * up waiting to be stopped, beside the fixture, out of the repository: `watch` is graded on that record.
+ */
+const SERVER = `import { writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+
+const record = new URL("../server.json", import.meta.url);
+const server = createServer((_request, response) => response.end("ok"));
+server.listen(0, "127.0.0.1", () => {
+	const { port } = server.address();
+	writeFileSync(record, JSON.stringify({ port }));
+	setTimeout(() => console.log(\`READY port=\${port}\`), 2000);
+	setTimeout(() => {
+		writeFileSync(record, JSON.stringify({ port, expired: true }));
+		process.exit(1);
+	}, 120_000);
+});
+`;
+
+/** `watch`'s grade: the port the server printed is in port.txt, and the server was stopped before it gave up. */
+function checkWatch(cwd: string): string | undefined {
+	const record = join(cwd, "..", "server.json");
+	if (!existsSync(record)) return "the server never started";
+	const { port, expired } = JSON.parse(readFileSync(record, "utf8"));
+	if (expired) return "the server was left running until it gave up";
+	const written = existsSync(join(cwd, "port.txt")) ? readFileSync(join(cwd, "port.txt"), "utf8").trim() : undefined;
+	return written === String(port) ? undefined : `port.txt holds ${JSON.stringify(written)}, not ${port}`;
+}
 
 export const SCENARIOS: readonly Scenario[] = [
 	{
@@ -133,6 +185,31 @@ export const SCENARIOS: readonly Scenario[] = [
 			'Implement parseDuration in src/duration.js: "90s", "2m" and "1h" in seconds, and an unknown unit throws. Have the change reviewed independently, fix what the review finds, and make `node --test test/` pass.',
 		functions: ["parseDuration"],
 	},
+	{
+		name: "watch",
+		files: { "package.json": PACKAGE, "server.js": SERVER },
+		prompt:
+			"Start the server in server.js (`node server.js`) and keep it running in the background. Once it is up, which takes a few seconds, it prints a line with READY and its port. Tell me when that line appears: do not poll for it. Then write the port number alone to port.txt and stop the server.",
+		functions: [],
+		check: checkWatch,
+	},
+	{
+		// A limit sent as `10` is 10 ms: the build moves to the background at once and may still finish. The count of
+		// bash calls ended at their timeout is this scenario's signal, more than its outcome.
+		name: "slow",
+		files: {
+			"package.json": PACKAGE,
+			"build.js":
+				'import { mkdirSync, writeFileSync } from "node:fs";\n\nsetTimeout(() => {\n\tmkdirSync(new URL("./dist/", import.meta.url), { recursive: true });\n\twriteFileSync(new URL("./dist/app.txt", import.meta.url), "built\\n");\n\tconsole.log("Built dist/app.txt");\n}, 2000);\n',
+			"test/build.test.js": testFile(
+				'import { readFileSync } from "node:fs";',
+				'test("built", () => assert.equal(readFileSync(new URL("../dist/app.txt", import.meta.url), "utf8"), "built\\n"));',
+			),
+		},
+		prompt:
+			"Run the build, `node build.js`; it takes about 2 seconds. Limit it to 10 seconds. Then tell me what it printed.",
+		functions: [],
+	},
 ];
 
 export interface Usage {
@@ -147,9 +224,24 @@ export interface Usage {
 export interface TrialResult {
 	arm: Arm;
 	scenario: string;
-	/** The fixture's tests pass, each function is defined once, and a question's answer is right with nothing changed. */
+	model: string;
+	/**
+	 * The fixture's tests pass (or its scenario's check does), each function is defined once, and a question's answer
+	 * is right with nothing changed.
+	 */
 	correct: boolean;
 	grade: FixtureGrade;
+	/** Why the scenario's check found the outcome wrong. */
+	checkFailure?: string;
+	/** The parent's tool calls, by tool. */
+	toolCalls: Record<string, number>;
+	/** The parent's tool calls whose result was an error, of any kind. */
+	failedToolCalls: number;
+	/**
+	 * The parent's `bash` calls that ended at their timeout: moved to the background, which is not an error, or
+	 * killed. A timeout given in seconds where milliseconds are meant shows here, even when the trial passes.
+	 */
+	bashTimeouts: number;
 	answer: string;
 	/** A hash of every file of the final tree but `.git`, to compare arms. */
 	finalTree: string;
@@ -181,6 +273,8 @@ export interface TrialResult {
 
 export interface TrialOptions {
 	arm: Arm;
+	/** The bluclawd checkout a `before` or `after` arm loads its extensions from. */
+	root?: string;
 	scenario: Scenario;
 	model: string;
 	thinking: string;
@@ -190,6 +284,8 @@ export interface TrialOptions {
 	providerExtensions?: string[];
 	/** An existing agent dir to use as it is; a fresh one per trial when omitted. */
 	agentDir?: string;
+	/** The user's auth.json, linked into the trial's fresh agent dir, so a refreshed token is saved to it. */
+	auth?: string;
 	/** Called with the trial's directories before pi starts: a scripted model's steps go there. */
 	prepare?: (dirs: { agentDir: string; cwd: string }) => void;
 	/** Stops the trial once its sessions spent more than this many tokens or dollars. */
@@ -212,7 +308,44 @@ interface SessionLog {
 	name: string;
 	cwd: string;
 	start: number;
-	messages: { role: string; content?: unknown; usage?: Usage; details?: unknown; toolName?: string }[];
+	messages: {
+		role: string;
+		content?: unknown;
+		usage?: Usage;
+		details?: unknown;
+		toolName?: string;
+		toolCallId?: string;
+		isError?: boolean;
+	}[];
+}
+
+/** What the parent's tool calls came to: how many of each tool, how many failed, how many `bash` calls timed out. */
+function toolOutcomes(messages: SessionLog["messages"]) {
+	const toolCalls: Record<string, number> = {};
+	const backgrounded = new Set<string>();
+	for (const message of messages) {
+		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
+		for (const block of message.content) {
+			if (block.type !== "toolCall") continue;
+			toolCalls[block.name] = (toolCalls[block.name] ?? 0) + 1;
+			if (block.name === "bash" && block.arguments?.run_in_background === true) backgrounded.add(block.id);
+		}
+	}
+	let failedToolCalls = 0;
+	let bashTimeouts = 0;
+	for (const message of messages) {
+		if (message.role !== "toolResult") continue;
+		if (message.isError) failedToolCalls++;
+		if (message.toolName !== "bash" || backgrounded.has(message.toolCallId ?? "")) continue;
+		// Read from the result's shape, not its wording, which the arms may word differently. Nobody presses Ctrl+B or
+		// sends a message mid-trial, so a foreground command that went to the background went at its timeout.
+		const moved = Boolean((message.details as { backgroundTaskId?: string } | undefined)?.backgroundTaskId);
+		const text = Array.isArray(message.content) ? message.content.map((block: any) => block.text ?? "").join("") : "";
+		// pi's own message, for a command killed at its timeout instead.
+		const killed = message.isError === true && /^Command timed out after /m.test(text);
+		if (moved || killed) bashTimeouts++;
+	}
+	return { toolCalls, failedToolCalls, bashTimeouts };
 }
 
 function jsonl(path: string): any[] {
@@ -331,6 +464,7 @@ export async function runTrial(options: TrialOptions): Promise<TrialResult> {
 	if (!live && !options.model.startsWith("faux/")) throw new Error("Without `live`, the model must be a faux one");
 	if (!live && arm === "example")
 		throw new Error("The example's children have no session name, so a scripted model cannot tell them apart");
+	if (options.auth && options.agentDir) throw new Error("`auth` links into a fresh agent dir, not a given one");
 	const base = mkdtempSync(join(tmpdir(), "bc-eval-"));
 	const agentDir = options.agentDir ?? join(base, "agent");
 	const cwd = join(base, "work");
@@ -342,33 +476,125 @@ export async function runTrial(options: TrialOptions): Promise<TrialResult> {
 			const scripted = live ? {} : { compaction: { enabled: false }, retry: { enabled: false } };
 			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ quietStartup: true, ...scripted }));
 		}
+		if (options.auth) symlinkSync(options.auth, join(agentDir, "auth.json"));
 		if (arm === "example") removeRoles = writeExampleRoles(agentDir);
 		return await trialIn(base, agentDir, cwd, options);
 	} finally {
 		removeRoles?.();
+		// Its trial's processes are gone by now, so nothing writes it any more.
+		if (options.auth) keepUnlessLinked(base, agentDir, options.auth);
 		rmSync(base, { recursive: true, force: true, maxRetries: 10 });
 	}
 }
 
+/**
+ * Throws, leaving `base` in place, when the agent dir's auth.json is no longer the link to `auth`: whatever pi wrote
+ * there in its place may be the only copy of a refreshed credential.
+ */
+function keepUnlessLinked(base: string, agentDir: string, auth: string): void {
+	const path = join(agentDir, "auth.json");
+	if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink() && readlinkSync(path) === auth) return;
+	throw new Error(
+		`${path} is no longer a link to ${auth}: pi did not write through it. ${base} is kept. Stop, and ask before using any agent dir.`,
+	);
+}
+
+/** The environment of a pi of the evaluation, in `agentDir`. Offline and under `home` unless `live`. */
+function piEnv(dirs: { agentDir: string; serverDir: string; home: string }, live: boolean): NodeJS.ProcessEnv {
+	const env: NodeJS.ProcessEnv = Object.fromEntries(
+		// The user's bash timeouts would change the tools' text and `slow`'s default.
+		Object.entries(process.env).filter(
+			([key]) =>
+				!/^(BLUCLAWD_|TMUX|PI_SERVER_DIR$|PI_OFFLINE$|BASH_DEFAULT_TIMEOUT_MS$|BASH_MAX_TIMEOUT_MS$)/.test(key),
+		),
+	);
+	Object.assign(env, { PI_CODING_AGENT_DIR: dirs.agentDir, PI_SERVER_DIR: dirs.serverDir });
+	if (!live) Object.assign(env, { HOME: dirs.home, PI_OFFLINE: "1" });
+	const piRoot = piPackageRoot(PI_CLI);
+	if (piRoot) env.PI_PACKAGE_ROOT = piRoot;
+	return env;
+}
+
+export interface CredentialsCheck {
+	provider: string;
+	model: string;
+	/** pi saved the user's auth.json through the link during the call, as it does when it refreshes a token. */
+	writtenThrough: boolean;
+}
+
+/**
+ * Before a live comparison whose agent dirs link `auth` (the user's auth.json): one small call per provider of
+ * `models`, each through a fresh agent dir of that kind, to see that pi writes through the link rather than replacing
+ * it. Throws on a failed call or a replaced link, which leaves that agent dir in place.
+ */
+export async function checkCredentials(options: {
+	auth: string;
+	models: readonly string[];
+	thinking: string;
+	/** For a scripted model: offline, with the extension that registers it. */
+	providerExtensions?: string[];
+}): Promise<CredentialsCheck[]> {
+	const live = !options.providerExtensions;
+	const firstOfEach = new Map<string, string>();
+	for (const model of options.models) {
+		const provider = model.split("/")[0];
+		if (!firstOfEach.has(provider)) firstOfEach.set(provider, model);
+	}
+	const checked: CredentialsCheck[] = [];
+	for (const [provider, model] of firstOfEach) {
+		const base = mkdtempSync(join(tmpdir(), "bc-eval-auth-"));
+		const dirs = { agentDir: join(base, "agent"), serverDir: join(base, "s"), home: join(base, "home") };
+		for (const dir of Object.values(dirs)) mkdirSync(dir);
+		symlinkSync(options.auth, join(dirs.agentDir, "auth.json"));
+		// The file's time, not its contents: the credentials are never read here.
+		const before = statSync(options.auth).mtimeMs;
+		const extensions = (options.providerExtensions ?? []).flatMap((path) => ["-e", path]);
+		const args = [
+			PI_CLI,
+			"-p",
+			"--no-session",
+			"-ne",
+			...extensions,
+			"--model",
+			model,
+			"--thinking",
+			options.thinking,
+		];
+		const call = await new Promise<{ code: number | null; stderr: string }>((done) => {
+			const pi = spawn(process.execPath, [...args, "Reply with the single word ok."], {
+				cwd: base,
+				env: piEnv(dirs, live),
+				stdio: ["ignore", "ignore", "pipe"],
+			});
+			let stderr = "";
+			pi.stderr?.on("data", (data) => {
+				stderr = (stderr + data).slice(-2000);
+			});
+			const timer = setTimeout(() => pi.kill("SIGKILL"), 120_000);
+			pi.on("exit", (code) => {
+				clearTimeout(timer);
+				done({ code, stderr });
+			});
+		});
+		keepUnlessLinked(base, dirs.agentDir, options.auth);
+		rmSync(base, { recursive: true, force: true, maxRetries: 10 });
+		if (call.code !== 0) throw new Error(`The call to ${model} failed: ${call.stderr.trim()}`);
+		checked.push({ provider, model, writtenThrough: statSync(options.auth).mtimeMs !== before });
+	}
+	return checked;
+}
+
 async function trialIn(base: string, agentDir: string, cwd: string, options: TrialOptions): Promise<TrialResult> {
 	const { arm, scenario, live = false } = options;
-	const serverDir = join(base, "s");
-	const home = join(base, "home");
 	options.prepare?.({ agentDir, cwd });
 	// A given agent dir keeps earlier trials' sessions: only this one's count.
 	const earlier = new Set(sessionFiles(agentDir));
 	const ours = (dir: string) => sessionFiles(dir).filter((path) => !earlier.has(path));
 
-	const env: NodeJS.ProcessEnv = Object.fromEntries(
-		Object.entries(process.env).filter(([key]) => !/^(BLUCLAWD_|TMUX|PI_SERVER_DIR$|PI_OFFLINE$)/.test(key)),
-	);
-	Object.assign(env, { PI_CODING_AGENT_DIR: agentDir, PI_SERVER_DIR: serverDir });
-	if (!live) Object.assign(env, { HOME: home, PI_OFFLINE: "1" });
-	const piRoot = piPackageRoot(PI_CLI);
-	if (piRoot) env.PI_PACKAGE_ROOT = piRoot;
+	const env = piEnv({ agentDir, serverDir: join(base, "s"), home: join(base, "home") }, live);
 	const providers = options.providerExtensions ?? [];
-	if (arm === "bluclawd" && providers.length > 0) env.BLUCLAWD_RPC_PROVIDER_EXTENSIONS = providers.join(":");
-	const extensions = [...providers, ...ARM_EXTENSIONS[arm]].flatMap((path) => ["-e", path]);
+	if (loadsBluclawd(arm) && providers.length > 0) env.BLUCLAWD_RPC_PROVIDER_EXTENSIONS = providers.join(":");
+	const extensions = [...providers, ...armExtensions(arm, options.root)].flatMap((path) => ["-e", path]);
 	const args = [PI_CLI, "--mode", "rpc", "-ne", ...extensions, "--model", options.model];
 	args.push("--thinking", options.thinking);
 
@@ -479,7 +705,7 @@ async function trialIn(base: string, agentDir: string, cwd: string, options: Tri
 	}
 	let parentRequests = 0;
 	let answer = "";
-	let conflicts: number | null = arm === "bluclawd" ? 0 : null;
+	let conflicts: number | null = loadsBluclawd(arm) ? 0 : null;
 	for (const message of parent?.messages ?? []) {
 		if (message.role === "assistant") {
 			parentRequests++;
@@ -508,12 +734,17 @@ async function trialIn(base: string, agentDir: string, cwd: string, options: Tri
 	});
 
 	const grade = gradeFixture(cwd, scenario.functions);
+	const checkFailure = scenario.check?.(cwd);
+	const graded = scenario.check ? checkFailure === undefined : grade.correct;
 	const answered = scenario.answer ? scenario.answer.test(answer) && grade.changedFiles.length === 0 : true;
 	const result: TrialResult = {
 		arm,
 		scenario: scenario.name,
-		correct: grade.correct && answered && !cutShort,
+		model: options.model,
+		correct: graded && answered && !cutShort,
 		grade,
+		...(checkFailure ? { checkFailure } : {}),
+		...toolOutcomes(parent?.messages ?? []),
 		answer,
 		finalTree: treeHash(cwd),
 		wallMs,
@@ -571,6 +802,7 @@ async function stop(pi: ChildProcess, base: string, known: Set<number>): Promise
 }
 
 export interface Summary {
+	model: string;
 	scenario: string;
 	arm: Arm;
 	trials: number;
@@ -587,6 +819,10 @@ export interface Summary {
 	conflicts: number | null;
 	maxPeakProcesses: number;
 	maxLeftover: number;
+	/** Over every trial: the parent's failed tool calls and `bash` calls ended at their timeout, and the tools it called. */
+	failedToolCalls: number;
+	bashTimeouts: number;
+	tools: string[];
 }
 
 const median = (values: number[]) => {
@@ -595,14 +831,15 @@ const median = (values: number[]) => {
 };
 
 export function summarize(results: readonly TrialResult[]): Summary[] {
-	const keys = [...new Set(results.map((r) => `${r.scenario}\0${r.arm}`))];
+	const keys = [...new Set(results.map((r) => `${r.model}\0${r.scenario}\0${r.arm}`))];
 	return keys.map((key) => {
-		const [scenario, arm] = key.split("\0") as [string, Arm];
-		const trials = results.filter((r) => r.scenario === scenario && r.arm === arm);
+		const [model, scenario, arm] = key.split("\0") as [string, string, Arm];
+		const trials = results.filter((r) => r.model === model && r.scenario === scenario && r.arm === arm);
 		const outcomes = [trials.map((r) => r.correct)];
 		const startups = trials.flatMap((r) => r.startupMs);
 		const conflicts = trials.map((r) => r.conflicts);
 		return {
+			model,
 			scenario,
 			arm,
 			trials: trials.length,
@@ -618,6 +855,9 @@ export function summarize(results: readonly TrialResult[]): Summary[] {
 			conflicts: conflicts.includes(null) ? null : conflicts.reduce((sum: number, n) => sum + (n ?? 0), 0),
 			maxPeakProcesses: Math.max(...trials.map((r) => r.peakProcesses)),
 			maxLeftover: Math.max(...trials.map((r) => r.leftover)),
+			failedToolCalls: trials.reduce((sum, r) => sum + r.failedToolCalls, 0),
+			bashTimeouts: trials.reduce((sum, r) => sum + r.bashTimeouts, 0),
+			tools: [...new Set(trials.flatMap((r) => Object.keys(r.toolCalls)))].sort(),
 		};
 	});
 }
@@ -625,6 +865,7 @@ export function summarize(results: readonly TrialResult[]): Summary[] {
 /** The summary as a Markdown table. */
 export function formatSummary(rows: readonly Summary[]): string {
 	const columns: [string, (row: Summary) => unknown][] = [
+		["model", (r) => r.model],
 		["scenario", (r) => r.scenario],
 		["arm", (r) => r.arm],
 		["trials", (r) => r.trials],
@@ -640,6 +881,9 @@ export function formatSummary(rows: readonly Summary[]): string {
 		["conflicts", (r) => r.conflicts ?? "n/a"],
 		["peak procs", (r) => r.maxPeakProcesses],
 		["leftover", (r) => r.maxLeftover],
+		["failed calls", (r) => r.failedToolCalls],
+		["bash timeouts", (r) => r.bashTimeouts],
+		["tools", (r) => r.tools.join(", ")],
 	];
 	return [
 		`| ${columns.map(([name]) => name).join(" | ")} |`,
@@ -653,48 +897,80 @@ function flag(argv: string[], name: string): string | undefined {
 	return at >= 0 ? argv[at + 1] : undefined;
 }
 
+const USAGE = `Usage: node scripts/eval-delegation.ts --live --models <provider/id>[,<provider/id>...] --thinking <level>
+  --max-tokens <n> --max-dollars <n> [--trials 3] [--before <checkout> --after <checkout>]
+  [--arms stock,bluclawd,example|before,after] [--scenarios trivial,investigate,parallel,review,watch,slow]
+  [--auth <auth.json> | --agent-dir <dir>] [--out <results.json>]
+It spends real model calls, within the budget given, which covers every model.`;
+
 async function main(argv: string[]): Promise<void> {
-	const model = flag(argv, "model");
+	const models = (flag(argv, "models") ?? flag(argv, "model"))?.split(",");
 	const thinking = flag(argv, "thinking");
 	const maxTokens = Number(flag(argv, "max-tokens"));
 	const maxDollars = Number(flag(argv, "max-dollars"));
-	if (!argv.includes("--live") || !model || !thinking || !(maxTokens > 0) || !(maxDollars > 0)) {
-		console.error(
-			"Usage: node scripts/eval-delegation.ts --live --model <provider/id> --thinking <level> --max-tokens <n> --max-dollars <n> [--trials 3] [--arms stock,bluclawd,example] [--scenarios trivial,investigate,parallel,review] [--agent-dir <dir>] [--out <results.json>]\nIt spends real model calls, within the budget given.",
-		);
+	const roots: Partial<Record<Arm, string>> = {};
+	for (const arm of ["before", "after"] as const) {
+		const checkout = flag(argv, arm);
+		if (checkout) roots[arm] = resolve(checkout);
+	}
+	const auth = flag(argv, "auth");
+	const agentDir = flag(argv, "agent-dir");
+	if (
+		!argv.includes("--live") ||
+		!models ||
+		!thinking ||
+		!(maxTokens > 0) ||
+		!(maxDollars > 0) ||
+		(auth && agentDir)
+	) {
+		console.error(USAGE);
 		process.exitCode = 2;
 		return;
 	}
 	const trials = Number(flag(argv, "trials") ?? 3);
-	const arms = (flag(argv, "arms")?.split(",") ?? ARMS) as Arm[];
+	const arms = (flag(argv, "arms")?.split(",") ?? (roots.before || roots.after ? ["before", "after"] : ARMS)) as Arm[];
 	const names = flag(argv, "scenarios")?.split(",");
 	const scenarios = SCENARIOS.filter((s) => !names || names.includes(s.name));
-	const budget = new EvaluationBudget(trials * arms.length * scenarios.length, maxTokens, maxDollars);
+	const budget = new EvaluationBudget(models.length * trials * arms.length * scenarios.length, maxTokens, maxDollars);
 	const perTrial = { tokens: maxTokens / 4, dollars: maxDollars / 4 };
 	const results: TrialResult[] = [];
 	try {
-		for (let trial = 0; trial < trials; trial++) {
-			for (const scenario of scenarios) {
-				for (const arm of arms) {
-					// Each trial reserves a quarter of the budget and is stopped past it; what it leaves unspent returns.
-					const settle = budget.reserve(perTrial.tokens, perTrial.dollars);
-					const result = await runTrial({
-						arm,
-						scenario,
-						model,
-						thinking,
-						live: true,
-						agentDir: flag(argv, "agent-dir"),
-						limit: perTrial,
-					});
-					settle(
-						result.parentUsage.totalTokens + result.childUsage.totalTokens,
-						result.parentUsage.cost + result.childUsage.cost,
-					);
-					results.push(result);
-					console.error(`${scenario.name} ${arm} #${trial + 1}: ${result.correct ? "correct" : "incorrect"}`);
-					// Not a wrong answer: the setup is wrong, and every later trial would fail the same way.
-					if (result.failure) throw new Error(result.failure);
+		// A checkout the arm cannot load is said before any call is spent.
+		for (const arm of arms) armExtensions(arm, roots[arm]);
+		if (auth) {
+			for (const check of await checkCredentials({ auth: resolve(auth), models, thinking })) {
+				const saved = check.writtenThrough ? ", and pi saved auth.json through the link" : "";
+				console.error(`Credentials: ${check.provider} answered on ${check.model}${saved}.`);
+			}
+		}
+		for (const model of models) {
+			for (let trial = 0; trial < trials; trial++) {
+				for (const scenario of scenarios) {
+					for (const arm of arms) {
+						// Each trial reserves a quarter of the budget and is stopped past it; what it leaves unspent returns.
+						const settle = budget.reserve(perTrial.tokens, perTrial.dollars);
+						const result = await runTrial({
+							arm,
+							root: roots[arm],
+							scenario,
+							model,
+							thinking,
+							live: true,
+							agentDir,
+							auth: auth && resolve(auth),
+							limit: perTrial,
+						});
+						settle(
+							result.parentUsage.totalTokens + result.childUsage.totalTokens,
+							result.parentUsage.cost + result.childUsage.cost,
+						);
+						results.push(result);
+						console.error(
+							`${model} ${scenario.name} ${arm} #${trial + 1}: ${result.correct ? "correct" : "incorrect"}, ${result.failedToolCalls} failed calls, ${result.bashTimeouts} bash timeouts`,
+						);
+						// Not a wrong answer: the setup is wrong, and every later trial would fail the same way.
+						if (result.failure) throw new Error(result.failure);
+					}
 				}
 			}
 		}
@@ -702,7 +978,7 @@ async function main(argv: string[]): Promise<void> {
 		console.error(`Stopped: ${error instanceof Error ? error.message : String(error)}`);
 	}
 	const out = flag(argv, "out");
-	if (out) writeFileSync(out, JSON.stringify({ model, thinking, trials, results }, null, 2));
+	if (out) writeFileSync(out, JSON.stringify({ models, thinking, trials, roots, results }, null, 2));
 	console.log(formatSummary(summarize(results)));
 }
 
