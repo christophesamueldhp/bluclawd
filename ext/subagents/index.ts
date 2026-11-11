@@ -231,8 +231,9 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 
 		/** Whether a final run ended within the last half minute: the panel still tells of it, as Claude Code's does. */
 		const lately = (record: { endedAt?: number }) => now() - (record.endedAt ?? 0) < ENDED_SHOWN_MS;
-		/** A run that finished, or was stopped as asked, leaves the panel at once, as a closed run in tmux did. */
-		const leftAtOnce = (record: { status: string }) => record.status === "closed" || record.status === "cancelled";
+		/** A run that finished, or that the user or the model stopped, leaves the panel at once, as a closed run in tmux did. */
+		const leftAtOnce = ({ status, stopSource }: { status: string; stopSource?: string }) =>
+			status === "closed" || (status === "cancelled" && (stopSource === "user" || stopSource === "model"));
 		/** The runs that failed or were interrupted lately: their rows stay in the panel until then, or until dismissed. */
 		const endedLately = () => views.done().filter(({ record }) => !leftAtOnce(record) && lately(record));
 
@@ -510,8 +511,24 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 					);
 				}
 			}
+			// Outside tmux, this pi has no pane to take its runs in tmux over to: those still running are left so, never
+			// ended silently, until the session is opened in a pane again.
+			const leftRunning = pane
+				? []
+				: listPersistedRunRecords(agentDir, sessionId).filter(
+						(run) => run.pane && !isTerminalSubagentStatus(run.status) && paneUp(timedTmux(), run.pane),
+					);
+			if (leftRunning.length > 0 && ctx.hasUI) {
+				ctx.ui.notify(
+					`subagents: ${leftRunning.map(formatRunLabel).join(", ")} still run in tmux, from before runs ran on pi's RPC, and this pi has no pane to take them over: they are left running. Open this session in agent view to stop them.`,
+					"warning",
+				);
+			}
 			// The session's runs an earlier instance left open and this one did not take over, on any branch.
-			const liveIds = new Set(scheduler.listActiveRuns(sessionId).map((r) => r.runId));
+			const liveIds = new Set([
+				...scheduler.listActiveRuns(sessionId).map((r) => r.runId),
+				...leftRunning.map((run) => run.runId),
+			]);
 			for (const run of reconcileInterruptedRuns(agentDir, sessionId, liveIds)) {
 				if (run.status !== "closed" || !run.pane) continue;
 				// Not taken over (its pi is gone, or this one has no pane to take it to): it is closed.
@@ -858,7 +875,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			exposure: "model-only",
 			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
 			description:
-				'Stop a subagent by name or run ID, every member of a batch or chain by its ID (batch_… or chain_…), or every one with "all": its work is cancelled, queued or under way, and the call returns once none of its processes runs. Its session, Reports and files are kept; only subagent_resume continues it. A run in tmux, from before runs ran on pi\'s RPC, stays open after it reports: stop it once its work is done.',
+				'Stop a subagent by name or run ID, every member of a batch or chain by its ID (batch_… or chain_…), or every one with "all": its work is cancelled, queued or under way, and the call returns once none of its processes runs. Its session, Reports and files are kept; only subagent_resume continues it.',
 			parameters: Type.Object(
 				{ agent: Type.String({ description: 'A subagent name or run ID, a batch or chain ID, or "all".' }) },
 				{ additionalProperties: false },

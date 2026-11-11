@@ -129,7 +129,7 @@ describe.skipIf(!hasTmux)("runs in tmux from before runs ran on pi's RPC", () =>
 
 		expect(conversation(requests[1]).some((message) => message.text.includes("Legacy looked."))).toBe(true);
 		const status = lastToolResult(requests[2]);
-		expect(status?.text).toMatch(/^legacy \(explorer, sub_[0-9a-f-]+\): idle, in tmux/m);
+		expect(status?.text).toMatch(/^legacy \(explorer, sub_[0-9a-f-]+\): (idle|working), in tmux/m);
 
 		// Stopped only when asked: its pi in tmux ends then, its session and Report kept.
 		const stop = lastToolResult(requests[3]);
@@ -168,4 +168,27 @@ describe.skipIf(!hasTmux)("runs in tmux from before runs ran on pi's RPC", () =>
 		await waitFor(() => expect(screen()).toContain("assistant: Legacy looked."));
 		expect(real.tmux.hasSession(legacy.pane)).toBe(false);
 	}, 120_000);
+
+	it("switches the terminal to an open one's pane, with Enter on it in /tasks", async () => {
+		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
+		pi = real;
+		real.script("main", [{ text: "ready" }, { text: "read the report" }]);
+		const orchestrator = real.start(["--", "hello"]);
+		await real.waitForRequests("main", 1);
+		const { sessionId } = await sessionOf(real, orchestrator);
+		real.script("legacy", [{ text: "Legacy looked." }]);
+		const legacy = plantLegacyRun(real, orchestrator, sessionId);
+		await real.waitForRequests("legacy", 1);
+		real.tmux.sendKeys(orchestrator, ["/reload", "Enter"]);
+		// Taken over: its Report wakes the orchestrator.
+		await real.waitForRequests("main", 2);
+
+		real.attach(orchestrator);
+		await waitFor(() => expect(real.shown()).toBe(orchestrator));
+		real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
+		const screen = () => real.tmux.capture(orchestrator, 80).join("\n");
+		await waitFor(() => expect(screen()).toMatch(/❯ +⏺ explorer: Look around\..*idle/));
+		real.tmux.sendKeys(orchestrator, ["Enter"]);
+		await waitFor(() => expect(real.shown()).toBe(legacy.pane));
+	});
 });

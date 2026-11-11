@@ -7,6 +7,7 @@ import {
 	formatAgentRoutingDescriptions,
 	resolveAgentDefinition,
 } from "../ext/subagents/definitions.ts";
+import { rpcRunTools } from "../ext/subagents/rpc-runs.ts";
 
 const tempDirs: string[] = [];
 
@@ -439,5 +440,32 @@ describe("Project roles for a run's directory", () => {
 		expect(instructionsOf(resolveAgentDefinition(discover("project"), "explorer"))).toBe("Package explorer.");
 		expect(resolveAgentDefinition(discover("project"), "reviewer").ok).toBe(false);
 		expect(resolveAgentDefinition(discover("project", false), "explorer").ok).toBe(false);
+	});
+});
+
+describe("A run's tools where its commands cannot be contained, as on Linux and WSL", () => {
+	const noShell = { ok: false as const, reason: "only on macOS so far, not on linux" };
+	const orchestrators = ["read", "grep", "find", "ls", "edit", "write", "bash"];
+
+	it("gives the bundled general-purpose every tool but the shell, so it still edits", () => {
+		const catalog = discoverAgentDefinitions({
+			cwd: makeTempDir("cwd"),
+			agentDir: makeTempDir("agent"),
+			projectTrusted: true,
+		});
+		const generalPurpose = resolveAgentDefinition(catalog, "general-purpose");
+		if (!generalPurpose.ok) throw new Error(generalPurpose.error);
+		expect(rpcRunTools(generalPurpose.definition, orchestrators, noShell)).toEqual({
+			ok: true,
+			tools: ["read", "grep", "find", "ls", "edit", "write"],
+		});
+	});
+
+	it("refuses a role that names bash, with the reason", () => {
+		const tester = { name: "tester", tools: ["read", "bash"] };
+		expect(rpcRunTools(tester, orchestrators, noShell)).toEqual({
+			ok: false,
+			error: 'Subagent role "tester" names bash, and a run gets no shell here: only on macOS so far, not on linux. Give it a role that does not run commands.',
+		});
 	});
 });
