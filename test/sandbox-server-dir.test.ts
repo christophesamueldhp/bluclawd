@@ -3,7 +3,7 @@
  * and the default one, whatever the user's `allowRead` names (ADR-0012). macOS only: Linux hiding is untested here.
  */
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
@@ -23,7 +23,7 @@ describe.skipIf(!supported)("the orchestrator's shell and bluclawd's server dire
 	let root: string;
 	let project: string;
 	let home: string;
-	/** The private PI_SERVER_DIR as written: through tmpdir's link, and made only after the sandbox starts. */
+	/** The private PI_SERVER_DIR as written: through a link, and made only after the sandbox starts. */
 	let privateDir: string;
 	let defaultDir: string;
 	let dirs: string[];
@@ -75,13 +75,14 @@ describe.skipIf(!supported)("the orchestrator's shell and bluclawd's server dire
 	}
 
 	beforeAll(() => {
-		const spelled = mkdtempSync(join(tmpdir(), "bluclawd-server-dir-"));
-		root = realpathSync(spelled);
+		root = realpathSync(mkdtempSync(join(tmpdir(), "bluclawd-server-dir-")));
 		project = join(root, "project");
 		home = join(root, "home");
-		privateDir = join(spelled, "private", "server");
+		privateDir = join(root, "link", "server");
 		defaultDir = join(home, ".pi", "server");
 		mkdirSync(project);
+		mkdirSync(join(root, "private"));
+		symlinkSync(join(root, "private"), join(root, "link"));
 		mkdirSync(defaultDir, { recursive: true });
 		writeFileSync(join(defaultDir, "remote.json"), "SERVER-SECRET\n");
 		writeFileSync(join(root, "beside.txt"), "BESIDE\n");
@@ -105,10 +106,18 @@ describe.skipIf(!supported)("the orchestrator's shell and bluclawd's server dire
 		rmSync(root, { recursive: true, force: true });
 	});
 
-	it("cannot list or read either one, the private one made after the sandbox started", async () => {
+	it("cannot list or read either one, the private one made while a command runs", async () => {
 		await start({});
+		const go = join(root, "go");
+		// srt resolves its rules when it wraps a command, so this one's were set before the directory existed.
+		const running = run(
+			`for i in $(seq 100); do [ -e ${quote(go)} ] && break; sleep 0.1; done; ls ${quote(privateDir)}; cat ${quote(join(privateDir, "remote.json"))}`,
+		);
+		await new Promise((resolve) => setTimeout(resolve, 500));
 		mkdirSync(privateDir, { recursive: true });
 		writeFileSync(join(privateDir, "remote.json"), "SERVER-SECRET\n");
+		writeFileSync(go, "");
+		expect((await running).output).not.toMatch(/^remote\.json$|SERVER-SECRET/m);
 		await expectServerDirsHidden();
 	});
 
@@ -123,7 +132,7 @@ describe.skipIf(!supported)("the orchestrator's shell and bluclawd's server dire
 	it("cannot, with an allowRead naming a directory above them", async () => {
 		await start({
 			denyRead: [root],
-			written: { filesystem: { allowRead: [project, join(root, "beside.txt"), join(privateDir, ".."), home] } },
+			written: { filesystem: { allowRead: [project, join(root, "beside.txt"), join(root, "private"), home] } },
 		});
 		await expectServerDirsHidden();
 	});
