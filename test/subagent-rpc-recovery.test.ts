@@ -170,6 +170,9 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 			real.start(["--session", sessionFile]);
 			const requests = await real.waitForRequests("main", 3);
 			expect(countHolding(requests[2], "Which directory holds HERON?")).toBe(1);
+			// Its session holds it now, so the relay goes on past it: a later takeover relays it no more.
+			const relayed = join(runDir(real.agentDir, "look"), "outbox", "0.relayed");
+			await waitFor(() => expect(existsSync(relayed) && readFileSync(relayed, "utf8")).toBe("1"));
 			writeFileSync(gate, "");
 			const reported = await real.waitForRequests("main", 4);
 			expect(countHolding(reported[3], "Done without HERON.")).toBe(1);
