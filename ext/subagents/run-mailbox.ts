@@ -43,14 +43,29 @@ export function openRunInbox(runDir: string, generation: number): void {
  * Posts `text` to the run's generation `generation`: accepted once it landed in the open inbox, refused once the inbox
  * is sealed. A rename lands whole, and fails once the folder it goes to was renamed away by the seal. One that found
  * the folder just before may still land in it just after, so the seal waits for every post whose draft is still there.
+ * A post with a `key` the inbox holds already, as one relayed again after a crash, lands once.
  */
 export function postToRun(
 	runDir: string,
 	generation: number,
 	text: string,
+	key?: string,
 ): { accepted: true; id: string } | { accepted: false } {
+	const keyed = key && `-${key.replaceAll("/", ".")}`;
+	if (keyed) {
+		const landed = [inboxPath(runDir, generation), sealedPath(runDir, generation)]
+			.flatMap((dir) => {
+				try {
+					return readdirSync(dir);
+				} catch {
+					return [];
+				}
+			})
+			.find((file) => file.endsWith(`${keyed}.json`));
+		if (landed) return { accepted: true, id: landed.slice(0, -".json".length) };
+	}
 	// Named in the order posted: by time, then by this process's count within the same millisecond.
-	const id = `${String(Date.now()).padStart(15, "0")}-${String(++posted).padStart(9, "0")}-${randomUUID()}`;
+	const id = `${String(Date.now()).padStart(15, "0")}-${String(++posted).padStart(9, "0")}${keyed || `-${randomUUID()}`}`;
 	const draft = join(runDir, `.${process.pid}-${id}.inbox`);
 	writeFileSync(draft, JSON.stringify({ id, text } satisfies RunInboxMessage), { mode: 0o600 });
 	try {
@@ -186,7 +201,10 @@ export function readRunOutbox(runDir: string, generation: number, seq: number): 
 
 const relayedPath = (runDir: string, generation: number) => `${outboxPath(runDir, generation)}.relayed`;
 
-/** How far the orchestrator relayed what the run's generation sent: the `seq` of the last one, 0 for none. */
+/**
+ * How far what the run's generation sent is held for good by its recipients, as the orchestrator relayed it: the
+ * `seq` of the last one, 0 for none.
+ */
 export function relayedRunOutbox(runDir: string, generation: number): number {
 	try {
 		return Number(readFileSync(relayedPath(runDir, generation), "utf8")) || 0;
@@ -195,7 +213,10 @@ export function relayedRunOutbox(runDir: string, generation: number): number {
 	}
 }
 
-/** Stored before message `seq` is relayed: a crash between the two loses it rather than relay it twice. */
+/**
+ * Stored once message `seq`, and every one before it, is held for good: a crash before then has it relayed again, and
+ * its recipient takes it once.
+ */
 export function markRunOutboxRelayed(runDir: string, generation: number, seq: number): void {
 	writeAtomicPrivateFile(relayedPath(runDir, generation), String(seq));
 }

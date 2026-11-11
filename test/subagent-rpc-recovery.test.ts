@@ -142,6 +142,45 @@ describe.skipIf(!hasTmux)("recovering RPC runs", () => {
 	);
 
 	it(
+		"tells the reopened orchestrator once of a blocker its crashed instance held and never took",
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const gate = join(real.cwd, "look.go");
+			real.script("main", [
+				launch("look"),
+				// Its model never answers: the blocker waits in memory for the turn to end, which never comes.
+				{ text: "never answered", until: join(real.cwd, "never") },
+				{ text: "noted the blocker" },
+				{ text: "read the report" },
+			]);
+			real.script("look", [
+				{ tool: "subagent_message", args: { kind: "blocker", content: "Which directory holds HERON?" } },
+				{ text: "Done without HERON.", until: gate },
+			]);
+			const pane = real.start(["--", "delegate"]);
+			await real.waitForRequests("main", 2);
+			const sessionFile = await sessionFileOf(real, pane);
+			const { parentSessionId, runId } = recordOf(real, "look");
+			const audit = join(real.agentDir, "bluclawd", "subagents", parentSessionId, "messages.jsonl");
+			// Accepted for the orchestrator, which holds it to steer the turn under way.
+			await waitFor(() => expect(existsSync(audit) && readFileSync(audit, "utf8")).toContain(runId));
+
+			crash(real, pane);
+			real.start(["--session", sessionFile]);
+			const requests = await real.waitForRequests("main", 3);
+			expect(countHolding(requests[2], "Which directory holds HERON?")).toBe(1);
+			writeFileSync(gate, "");
+			const reported = await real.waitForRequests("main", 4);
+			expect(countHolding(reported[3], "Done without HERON.")).toBe(1);
+			expect(countHolding(reported[3], "Which directory holds HERON?")).toBe(1);
+			await sleep(2000);
+			expect(real.requests("main")).toHaveLength(4);
+		},
+		4 * readinessMs,
+	);
+
+	it(
 		"reports a run whose host died while its orchestrator was gone as uncertain, and never starts its work again",
 		async () => {
 			const real = await startOrchestrator();

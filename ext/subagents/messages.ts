@@ -14,6 +14,11 @@ export interface SubagentMessage {
 	readonly to: string;
 	readonly toName?: string;
 	readonly content: string;
+	/**
+	 * What a run sent, relayed from its outbox, by its run, generation and outbox number: relayed again after a crash,
+	 * its recipient takes it once.
+	 */
+	readonly id?: string;
 }
 
 export interface SubagentMessageReceipt {
@@ -127,6 +132,7 @@ export class SubagentMessageBus {
 		from: { readonly address: string; readonly scope: ParentScope },
 		to: string,
 		content: string,
+		id?: string,
 	): Promise<SubagentMessageReceipt> {
 		// The sequence number is taken before any await so concurrent senders share one ordering.
 		const seq = this.nextSeq++;
@@ -134,7 +140,10 @@ export class SubagentMessageBus {
 		const address = run?.record.runId ?? to;
 		const names = { fromName: this.recipients.find(from.scope, from.address)?.record.name, toName: run?.record.name };
 		const receipt = {
-			...(await this.route(seq, from.address, from.scope, address, run, content, names)),
+			...(await this.route(seq, from.address, from.scope, address, run, content, {
+				...names,
+				...(id ? { id } : {}),
+			})),
 			to: address,
 			toName: names.toName,
 		};
@@ -162,10 +171,10 @@ export class SubagentMessageBus {
 		to: string,
 		run: MessageRecipient | undefined,
 		content: string,
-		names: { fromName?: string; toName?: string },
+		about: { fromName?: string; toName?: string; id?: string },
 	): Promise<SubagentMessageReceipt> {
 		if (to === from) return { status: "unavailable", seq, reason: "An agent cannot message itself." };
-		const label = names.toName ? `"${names.toName}" (${to})` : `"${to}"`;
+		const label = about.toName ? `"${about.toName}" (${to})` : `"${to}"`;
 		const endpoint = this.endpoints.get(to);
 		if (endpoint && endpoint.scope.parentSessionId !== senderScope.parentSessionId) {
 			return { status: "unavailable", seq, reason: `"${to}" belongs to a different parent session.` };
@@ -185,7 +194,7 @@ export class SubagentMessageBus {
 			};
 		}
 		try {
-			await endpoint.deliver({ seq, from, to, content, ...names });
+			await endpoint.deliver({ seq, from, to, content, ...about });
 			return { status: "accepted", seq };
 		} catch (err) {
 			return {

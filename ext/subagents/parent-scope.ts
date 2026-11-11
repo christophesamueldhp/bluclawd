@@ -40,6 +40,15 @@ export interface ParentScopeDeps<N> {
 	batchWindowMs: number;
 }
 
+/** Whether a message the orchestrator was given, by its details, holds the run's message `id`, alone or batched. */
+function detailsHold(details: unknown, id: string): boolean {
+	const given = details as { id?: unknown; messages?: unknown } | undefined;
+	return (
+		given?.id === id ||
+		(Array.isArray(given?.messages) && given.messages.some((message) => (message as { id?: unknown })?.id === id))
+	);
+}
+
 /** Owns the parent scope and the batched inbox to the orchestrator. */
 export function createParentScope<N>(deps: ParentScopeDeps<N>) {
 	let ctx: ExtensionContext | undefined;
@@ -156,6 +165,21 @@ export function createParentScope<N>(deps: ParentScopeDeps<N>) {
 		/** Drops the context once the runs stopped by shutdown have settled. */
 		detach() {
 			ctx = undefined;
+		},
+		/**
+		 * Whether the orchestrator's session holds the message a run sent as `id`: until it does, the message may be
+		 * only in this pi's memory, which a crash loses.
+		 */
+		holds(id: string): boolean {
+			try {
+				return (
+					ctx?.sessionManager
+						.getEntries()
+						.some((entry) => entry.type === "custom_message" && detailsHold(entry.details, id)) ?? false
+				);
+			} catch {
+				return false;
+			}
 		},
 		/** Queues a finished run's notice for the orchestrator if the run is still in scope. */
 		notify(run: ScopedRun, notice: N) {

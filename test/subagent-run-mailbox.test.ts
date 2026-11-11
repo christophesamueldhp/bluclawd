@@ -90,4 +90,17 @@ describe("a run's inbox", () => {
 		expect(postToRun(dir, 1, "second").accepted).toBe(true);
 		expect(sealRunInbox(dir, 1).map(({ text }) => text)).toEqual(["first", "second"]);
 	});
+
+	it("takes a message relayed again, by its key, once, in the order it first landed", () => {
+		const dir = mkdtempSync(join(tmpdir(), "bc-inbox-"));
+		runDir = dir;
+		openRunInbox(dir, 1);
+		const first = postToRun(dir, 1, "Finding.", "sub_a/0/1");
+		postToRun(dir, 1, "From the user.");
+		expect(postToRun(dir, 1, "Finding.", "sub_a/0/1")).toEqual(first);
+		expect(sealRunInbox(dir, 1).map(({ text }) => text)).toEqual(["Finding.", "From the user."]);
+		// Sealed, it still holds what landed before.
+		expect(postToRun(dir, 1, "Finding.", "sub_a/0/1")).toEqual(first);
+		expect(postToRun(dir, 1, "Later.", "sub_a/0/2")).toEqual({ accepted: false });
+	});
 });

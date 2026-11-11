@@ -14,6 +14,7 @@ import { endPane, runParent, Tmux } from "../../daemon/tmux.ts";
 import { notifyAgentTasksChanged, publishAgentTasks } from "../_shared/agent-tasks.ts";
 import { commandBlock } from "../_shared/command-block.ts";
 import { focusedComponent, isPromptEditor } from "../_shared/focus.ts";
+import { sharedRef } from "../_shared/global-state.ts";
 import { pistatuslineDrawsFooter } from "../_shared/pistatusline.ts";
 import { STATUS_KEYS } from "../_shared/status-keys.ts";
 import { publishSubagentPanel } from "../_shared/subagent-panel.ts";
@@ -68,6 +69,8 @@ import { registerWorkspaceCleanup } from "./workspace-cleanup.ts";
 export const SUBAGENT_NOTIFICATION_CUSTOM_TYPE = "subagent-notification";
 const SUBAGENT_REMINDER_CUSTOM_TYPE = "subagent-reminder";
 const BACKGROUND_BATCH_WINDOW_MS = 40;
+/** The runs' messages this process gave its orchestrator's pi, by ID: the instance a reload starts gives none again. */
+const relaysGiven = sharedRef("subagentRelaysGiven", new Set<string>()).get();
 
 /** As remote and the daemon do, so a hung tmux server cannot hold up pi. */
 /** How long the panel keeps a run that failed, and its `/tasks` hint after a close. */
@@ -261,7 +264,14 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 			}
 		};
 
-		const sendToParent = (items: readonly ParentInboxItem<ParentNotice>[]) => {
+		const sendToParent = (sent: readonly ParentInboxItem<ParentNotice>[]) => {
+			// A run's message relayed again, after a crash or by the instance a reload started, is given to the model once.
+			const given = (item: ParentInboxItem<ParentNotice>) =>
+				item.kind === "message" &&
+				item.message.id !== undefined &&
+				(relaysGiven.has(item.message.id) || parentScope.holds(item.message.id));
+			const items = sent.filter((item) => !given(item));
+			if (items.length === 0) return;
 			const notices = items.flatMap((item) => (item.kind === "notice" ? [item.notice.details] : []));
 			const messages = items.flatMap((item) => (item.kind === "message" ? [item.message] : []));
 			const texts = items.map((item) =>
@@ -294,6 +304,7 @@ export function createSubagentsExtension(options: SubagentExtensionOptions = {})
 						triggerTurn: true,
 					},
 				);
+				for (const { id } of messages) if (id) relaysGiven.add(id);
 			} catch {
 				// The session was disposed during the batch window without a session_shutdown; nobody is left to tell.
 			}

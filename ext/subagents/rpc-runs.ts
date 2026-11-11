@@ -435,8 +435,11 @@ export interface RpcRunDeps {
 	usage(sessionId: string, totals: SessionUsage): void;
 	/** Aborted when this orchestrator hands its open runs over to the next instance of its session (a reload). */
 	handOff: AbortSignal;
-	/** A finding, question or blocker the run sent while it worked, for its orchestrator or a sibling. */
-	relay(message: RunOutboxMessage): void;
+	/**
+	 * A finding, question or blocker the run sent while it worked, for its orchestrator or a sibling; returns whether
+	 * its recipient holds it for good yet, or refused it for good.
+	 */
+	relay(message: RunOutboxMessage): () => boolean;
 	/** An approval the run asks for, answered by the user or blocked; `signal` aborts once it takes no answer. */
 	approve(request: RunApprovalRequest, signal: AbortSignal): Promise<RunApprovalAnswer>;
 }
@@ -474,17 +477,30 @@ export async function executeRpcRun(
 		openRunInbox(launch.runDir, record.generation);
 	}
 	/**
-	 * What the run's pi has sent out since it was last looked at: its progress is only noted, wakes nobody. How far
-	 * it was relayed is stored before each is relayed, so an instance that takes the run over goes on from there.
+	 * What the run's pi has sent out since it was last looked at: its progress is only noted, wakes nobody. This
+	 * instance relays each once, and stores how far their recipients hold them for good. An instance that takes the
+	 * run over relays again from there, and a recipient takes what it holds already only once: none is lost to a
+	 * crash in between.
 	 */
 	let relayed = relayedRunOutbox(launch.runDir, record.generation);
+	/** Whether the recipient of each message relayed here holds it for good, by its number. */
+	const handed = new Map<number, () => boolean>();
 	const relay = () => {
-		for (const message of readRunOutbox(launch.runDir, record.generation, relayed)) {
-			relayed = message.seq;
-			markRunOutboxRelayed(launch.runDir, record.generation, relayed);
+		const pending = readRunOutbox(launch.runDir, record.generation, relayed);
+		for (const message of pending) {
+			if (handed.has(message.seq)) continue;
 			if (message.kind === "progress") controller.updateProgress(message.content);
-			else deps.relay(message);
+			handed.set(message.seq, message.kind === "progress" ? () => true : deps.relay(message));
 		}
+		let held = relayed;
+		for (const { seq } of pending) {
+			if (!handed.get(seq)?.()) break;
+			handed.delete(seq);
+			held = seq;
+		}
+		if (held === relayed) return;
+		relayed = held;
+		markRunOutboxRelayed(launch.runDir, record.generation, relayed);
 	};
 	/**
 	 * Seals the inbox of a run that never started; says how many messages it holds. A launch that never started

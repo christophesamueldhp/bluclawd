@@ -48,6 +48,7 @@ export interface GenerationDeps {
 	scope: ParentScopeChecks & {
 		context(): ExtensionContext | undefined;
 		notify(run: ScopedRun, notice: ParentNotice): void;
+		holds(id: string): boolean;
 	};
 	pi: Pick<ExtensionAPI, "appendEntry" | "sendMessage">;
 	/** A run changed state. */
@@ -192,7 +193,7 @@ export function createGenerations(deps: GenerationDeps) {
 								? { kind: "orchestrator" }
 								: { kind: "sibling", label: formatRunLabel({ name: message.fromName, runId: message.from }) };
 						const text = rpcRunMessageText(sender, record, message.content);
-						const posted = postToRun(execCtx.rpc.runDir, record.generation, text);
+						const posted = postToRun(execCtx.rpc.runDir, record.generation, text, message.id);
 						if (!posted.accepted) throw new Error("has finished");
 						// Accepted once posted; the sender goes on once its pi has it, or its host is slow to take it.
 						if (record.status === "running") {
@@ -223,13 +224,23 @@ export function createGenerations(deps: GenerationDeps) {
 						usage,
 						// Sent as the run, in the scope it was admitted in: a stale one is refused, and kept on record.
 						relay: (message) => {
-							const generation = scheduler.getRun(runId)?.generation ?? params.record.generation;
+							const generation: number = scheduler.getRun(runId)?.generation ?? params.record.generation;
 							const kind = message.kind[0].toUpperCase() + message.kind.slice(1);
-							void deps.bus.send(
-								{ address: runId, scope },
-								message.to,
-								`${kind} (generation ${generation}): ${message.content}`,
-							);
+							const id: string = `${runId}/${generation}/${message.seq}`;
+							let sibling = false;
+							void deps.bus
+								.send(
+									{ address: runId, scope },
+									message.to,
+									`${kind} (generation ${generation}): ${message.content}`,
+									id,
+								)
+								.then((receipt) => {
+									// A sibling's inbox keeps what it accepted; what it refused stays refused.
+									sibling = receipt.to !== PARENT_MESSAGE_ADDRESS;
+								});
+							// The orchestrator holds it once its session does: before, it may be only in its pi's memory.
+							return (): boolean => sibling || deps.scope.holds(id);
 						},
 						approve: (request, signal) => approve(runId, request, signal),
 					});
