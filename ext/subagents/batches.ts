@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
 	type AdmissionContext,
@@ -106,7 +107,11 @@ export function formatBatchAggregate(
 
 	const line = (i: number) => {
 		const { record, workspace } = members[i];
-		const edits = workspace ? `; its edits are in its worktree ${workspace.root}, not in your checkout` : "";
+		// A worktree removed holds no edits: one left unchanged, or never started in.
+		const edits =
+			workspace && existsSync(workspace.root)
+				? `; its edits are in its worktree ${workspace.root}, not in your checkout`
+				: "";
 		return `- ${formatRunLabel(record)}: ${describe(outcomes[i], true)}${edits}`;
 	};
 	const indexes = members.map((_, i) => i);
@@ -300,7 +305,7 @@ export async function settleBatch(
 				.filter(({ generation }) => generation === record.generation)
 				.at(-1);
 			const isolated = readRunDefinition(runDefinitionPath(runDir, record.generation))?.workspace;
-			const workspace = isolated && { root: isolated.root, lines: await describeWorkspace(isolated) };
+			const workspace = isolated && { root: isolated.root, lines: await describeWorkspace(isolated, runDir) };
 			return { record, ...(report ? { report } : {}), ...(workspace ? { workspace } : {}) };
 		}),
 	);

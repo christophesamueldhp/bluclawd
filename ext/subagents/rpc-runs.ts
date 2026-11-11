@@ -33,8 +33,10 @@ import { openRunInbox, type RunOutboxMessage, readRunOutbox, sealedRunInbox, sea
 import { rpcRunMessageText, runTaskText } from "./run-messages.ts";
 import {
 	describeWorkspace,
+	discardWorktree,
 	type IsolatedWorkspace,
 	materializeWorktree,
+	releaseUnchangedWorktree,
 	workspaceInstructions,
 } from "./run-worktree.ts";
 import type { RunRuntimeOutcome, SubagentRunExecuteParams, SubagentRunOutcome } from "./runs.ts";
@@ -395,8 +397,14 @@ export async function executeRpcRun(
 			else deps.relay(message);
 		}
 	};
-	/** Seals the inbox of a run that never started; says how many messages it holds. */
+	/**
+	 * Seals the inbox of a run that never started; says how many messages it holds. A launch that never started
+	 * leaves no worktree or baseline behind either: there is nothing of it to resume.
+	 */
 	const untakenNote = () => {
+		if (workspace && !launch.sessionFile) {
+			discardWorktree(workspace, { agentDir: launch.agentDir, runId: record.runId, runDir: launch.runDir });
+		}
 		const untaken = sealRunInbox(launch.runDir, record.generation).length;
 		return untaken ? `; ${untakenText(untaken, launch.runDir, record.generation)}.` : "";
 	};
@@ -498,8 +506,16 @@ export async function executeRpcRun(
 	if (!ended()) stopRpcHost(hostPid);
 	// The generation ends once nothing of it runs: its host, its pi, and whatever they started in the host's group.
 	const terminated = await endHostGroup(hostPid);
+	// Once nothing of it runs, a worktree it left as it was made goes, a Resume making it again; any other stays.
+	if (workspace && terminated) {
+		await releaseUnchangedWorktree(workspace, {
+			agentDir: launch.agentDir,
+			runId: record.runId,
+			runDir: launch.runDir,
+		});
+	}
 	// Where it worked and what it changed there, as Git sees it rather than as the run says.
-	const workspaceLines = workspace ? await describeWorkspace(workspace) : [];
+	const workspaceLines = workspace ? await describeWorkspace(workspace, launch.runDir) : [];
 	const workspaceNote = workspaceLines.length ? `\n${workspaceLines.join("\n")}` : "";
 
 	// Whatever it sent before it ended reaches its recipients before its Report.
