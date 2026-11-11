@@ -363,6 +363,7 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 		real.script("main", [
 			{ tool: "subagent", args: { agent: writer, name: "w", task: "Write." } },
 			{ tool: "subagent_integrate", args: { agent: "w" }, until: gate },
+			{ tool: "subagent_integrate", args: { agent: "w", keep: ["locked.txt", "lib/x.txt"] } },
 			{ text: "done" },
 		]);
 		real.script("w", [
@@ -386,13 +387,40 @@ describe.skipIf(!hasTmux)("integrating an RPC run's changes", () => {
 		symlinkSync(outside, join(repo, "lib"));
 		writeFileSync(gate, "");
 
-		const main = await real.waitForRequests("main", 3);
-		const refused = toolResults(main[2])[1];
+		const main = await real.waitForRequests("main", 4);
+		const [, refused, applied] = toolResults(main[3]);
 		expect(refused).toMatch(/^Not integrated: nothing of .* was applied/);
 		expect(refused).toMatch(/^- locked\.txt: Blocked by permission rule \(deny\): Edit\(locked\.txt\)/m);
 		expect(refused).toMatch(/^- lib\/x\.txt: .*lib is a link in your checkout/m);
 		expect(readdirSync(outside)).toEqual([]);
 		expect(existsSync(join(repo, "locked.txt"))).toBe(false);
-		expect(existsSync(join(repo, "free.txt"))).toBe(false);
+		// Left as they are in the checkout, the rest goes in, still through no link.
+		expect(applied).toMatch(/^Integration: applied A free\.txt to /m);
+		expect(applied).toMatch(/^Kept as in your checkout: locked\.txt, lib\/x\.txt$/m);
+		expect(read(repo, "free.txt")).toBe("free\n");
+		expect(readdirSync(outside)).toEqual([]);
+		expect(existsSync(join(repo, "locked.txt"))).toBe(false);
 	});
+
+	it.skipIf(process.platform !== "darwin")(
+		"integrates a run whose shell is contained once none of its commands' processes runs",
+		async () => {
+			const real = await startOrchestrator();
+			pi = real;
+			const repo = real.cwd;
+			repository(repo, { "a.txt": SEVEN });
+			real.script("main", [
+				{ tool: "subagent", args: { agent: "general-purpose", name: "gp", task: "Make it." } },
+				{ tool: "subagent_integrate", args: { agent: "gp", check: "cat made.txt" } },
+				{ text: "done" },
+			]);
+			real.script("gp", [{ tool: "bash", args: { command: "printf made > made.txt" } }, { text: "Made it." }]);
+			real.start(["--", "delegate"]);
+			const main = await real.waitForRequests("main", 3);
+			const applied = toolResults(main[2])[1];
+			expect(applied).toMatch(/^Integration: applied A made\.txt to /m);
+			expect(applied).toMatch(/^Validation: `cat made\.txt` exited with code 0 .*\nIts output:\nmade$/m);
+			expect(read(repo, "made.txt")).toBe("made");
+		},
+	);
 });

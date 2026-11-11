@@ -27,7 +27,7 @@ import { createLocalBashOperations, type ExtensionAPI, SettingsManager } from "@
 import { Type } from "typebox";
 import { evaluateToolCallDeny } from "../permissions/policy.ts";
 import { prepareRunContainment, runMarker, runProcesses } from "../sandbox/run-containment.ts";
-import { wrapExec } from "../sandbox/runtime.ts";
+import { sandboxStatus, sandboxWraps, wrapExec } from "../sandbox/runtime.ts";
 import { CHAIN_ID_PREFIX, formatRunLabel } from "./admission.ts";
 import { type ChainResultDetails, chainResultPath } from "./chains.ts";
 import type { RunDirectory } from "./directory.ts";
@@ -50,11 +50,11 @@ import {
 import { isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
 import { readRunReports, subagentRunDir, writeAtomicPrivateFile } from "./storage.ts";
 
-/** How long a call waits for another Integration into the same repository before it gives up. */
-const LOCK_WAIT_MS = 120_000;
-/** How long a run's record may take to become final after its Report reached a foreground call. */
-const FINAL_WAIT_MS = 5_000;
+/** How long a call waits for another Integration into the same repository, its check included, before it gives up. */
 const CHECK_TIMEOUT_MS = 10 * 60_000;
+const LOCK_WAIT_MS = CHECK_TIMEOUT_MS + 2 * 60_000;
+/** How long a run's record may take to become final after its Report reached a foreground call. */
+const FINAL_WAIT_MS = 500;
 const MAX_CHECK_OUTPUT_BYTES = 2 * 1024;
 const MAX_PATCH_BYTES = 16 * 1024;
 const GITLINK = "160000";
@@ -210,11 +210,9 @@ async function integrate(
 			const problem = change.toMode === GITLINK ? "it is a nested repository" : pathProblem(source, change.path);
 			if (problem) blocked.set(change.path, problem);
 		}
-		const ours = await checkoutTree(
-			workspace,
-			base,
-			paths.filter((path) => !blocked.has(path)),
-		);
+		// Only paths it can reach without following a link: the same ones once more just before writing.
+		const hashed = paths.filter((path) => !blocked.has(path));
+		const ours = await checkoutTree(workspace, base, hashed);
 		const merge = await mergeTrees(source, baseline.gitDir, base, ours, after);
 		const theirsMeanwhile = (await treeChanges(source, baseline.gitDir, base, ours)).map((change) => change.path);
 		const writes = (await treeChanges(source, baseline.gitDir, ours, merge.tree)).filter(
@@ -272,7 +270,7 @@ async function integrate(
 		}
 
 		// Checked again just before writing: a change made to the checkout since must not be overwritten.
-		if (checkoutTreeSync(workspace, base, paths) !== ours) {
+		if (checkoutTreeSync(workspace, base, hashed) !== ours) {
 			return result(
 				`Not integrated: your checkout ${source} changed while ${label} was being integrated; nothing was applied. Call again.`,
 				true,
@@ -394,7 +392,9 @@ async function unsettled(
 	const left = processesLeft(runDir);
 	if (left) return left;
 	const definition = readRunDefinition(runDefinitionPath(runDir, run.generation));
-	if (definition?.shell) {
+	if (!definition)
+		return `nothing confirms what ${label} could run: the definition of its generation ${run.generation} cannot be read.`;
+	if (definition.shell) {
 		const ready = await prepareRunContainment();
 		const members = ready.ok
 			? await runProcesses({ helper: ready.helper, marker: runMarker(definition.shell.runId) }).catch(
@@ -657,24 +657,29 @@ async function runCheck(
 	ctx: IntegrationContext,
 	signal: AbortSignal | undefined,
 ): Promise<string> {
+	// Where the orchestrator's own commands run, when that is in the checkout; else the checkout's root.
+	const where = within(source, ctx.cwd) ? ctx.cwd : source;
 	const settings = SettingsManager.create(ctx.cwd, agentDir, { projectTrusted: ctx.isProjectTrusted() });
 	const deny = rpcDenyRules(agentDir, [{ cwd: ctx.cwd, trusted: ctx.isProjectTrusted() }]);
 	const blocked = deny.ok
-		? deny.deny.map(({ rules, cwd }) => evaluateToolCallDeny(rules, "bash", { command }, cwd)).find(Boolean)
+		? deny.deny.map(({ rules }) => evaluateToolCallDeny(rules, "bash", { command }, where)).find(Boolean)
 		: { reason: deny.error };
-	if (blocked)
-		return `Validation: \`${command}\` did not run: ${blocked.reason}. Nothing validated the combined result.`;
+	const notRun = (why: string) =>
+		`Validation: \`${command}\` did not run: ${why}. Nothing validated the combined result.`;
+	if (blocked) return notRun(blocked.reason ?? "a deny rule forbids it");
+	const sandboxed = sandboxStatus().kind !== "off";
+	// Whether bluclawd's bash wraps commands is the sandbox's to know: only a wrapping that exists is reused.
+	if (sandboxed && !sandboxWraps())
+		return notRun("the sandbox is on, but bluclawd's bash, which runs inside it, is not loaded");
 	const shellPath = settings.getShellPath();
-	const exec = wrapExec(
-		(cmd, cwd, options) => createLocalBashOperations({ shellPath }).exec(cmd, cwd, options),
-		() => shellPath,
-	);
+	const local = createLocalBashOperations({ shellPath }).exec;
+	const exec = sandboxed ? wrapExec(local, () => shellPath) : local;
 	const chunks: Buffer[] = [];
 	const started = Date.now();
 	const timeout = AbortSignal.timeout(CHECK_TIMEOUT_MS);
 	let exitCode: number | null;
 	try {
-		({ exitCode } = await exec(command, source, {
+		({ exitCode } = await exec(command, where, {
 			onData: (data) => chunks.push(data),
 			signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
 		}));
@@ -690,8 +695,14 @@ async function runCheck(
 		: signal?.aborted
 			? `was cancelled after ${seconds}s`
 			: `exited with code ${exitCode ?? "none"} after ${seconds}s`;
+	const verdict =
+		timeout.aborted || signal?.aborted
+			? ": it did not finish, so nothing validated the combined result. The applied changes stay"
+			: exitCode === 0
+				? ""
+				: ": the combined result fails it. The applied changes stay; nothing was undone";
 	return [
-		`Validation: \`${command}\` ${how} in ${source}${exitCode === 0 ? "" : ": the combined result fails it. The applied changes stay; nothing was undone"}.`,
+		`Validation: \`${command}\` ${how} in ${where}${verdict}.`,
 		tail ? `Its output${tail.startsWith("[…]") ? " ended" : ""}:\n${tail}` : "It printed nothing.",
 	].join("\n");
 }
