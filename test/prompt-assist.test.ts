@@ -90,7 +90,7 @@ function harness(
 	let factory: any = options.factory;
 	const response = deferred<any>();
 	const models = [
-		{ provider: "opencode-go", id: "mimo-v2.6-flash" },
+		{ provider: "opencode-go", id: "claude-haiku-5-5" },
 		{ provider: "custom", id: "vendor/fast-model" },
 	];
 	const stream = vi.fn((_model: unknown, _context: unknown, _options: unknown) => ({
@@ -563,7 +563,7 @@ describe("prompt assist enable/disable", () => {
 });
 
 describe("prompt assist model selection", () => {
-	it("selects any available Pi model, saves it, and uses it for naming without MiMo-specific parameters", async () => {
+	it("selects any available Pi model, saves it, and uses it for naming without default-model-specific parameters", async () => {
 		const h = harness();
 		await h.command("custom/vendor/fast-model");
 		expect(saveAssistModel).toHaveBeenCalledWith(expect.any(String), "custom/vendor/fast-model");
@@ -587,7 +587,7 @@ describe("prompt assist model selection", () => {
 		h.response.resolve(answer(" for login"));
 	});
 
-	it("restores the saved model on session start and can reset to MiMo", async () => {
+	it("restores the saved model on session start and can reset to Haiku 5.5", async () => {
 		vi.mocked(loadAssistModel).mockReturnValue("custom/vendor/fast-model");
 		const h = harness();
 		h.emit("before_agent_start");
@@ -693,10 +693,10 @@ describe("prompt assist model selection", () => {
 });
 
 describe("session assistance", () => {
-	it("names once in the background, uses MiMo with session affinity, and allows subsequent manual rename", async () => {
+	it("names once in the background, uses Haiku 5.5 with session affinity, and allows subsequent manual rename", async () => {
 		const h = harness();
 		expect(h.emit("before_agent_start")).toBeUndefined();
-		expect(h.ctx.modelRegistry.find).toHaveBeenCalledWith("opencode-go", "mimo-v2.6-flash");
+		expect(h.ctx.modelRegistry.find).toHaveBeenCalledWith("opencode-go", "claude-haiku-5-5");
 		expect(h.stream.mock.calls[0][2]).toMatchObject({
 			sessionId: "session-1",
 			maxTokens: 32,

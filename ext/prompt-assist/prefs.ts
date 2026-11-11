@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-export const DEFAULT_MODEL = "opencode-go/mimo-v2.6-flash";
+export const DEFAULT_MODEL = "opencode-go/claude-haiku-5-5";
 
 const prefsPath = (agentDir: string) => join(agentDir, "bluclawd", "prompt-assist.json");
 
