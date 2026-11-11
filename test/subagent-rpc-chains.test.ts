@@ -91,6 +91,13 @@ const writer = {
 	tools: ["read", "edit", "write"],
 };
 
+/**
+ * Waits until the model of `session` got more than `before` requests: a pi started for it. Each pi start gets a wait of
+ * its own.
+ */
+const started = (real: RealPi, session: string, before = 0) =>
+	waitFor(() => expect(real.requests(session).length).toBeGreaterThan(before));
+
 /** An orchestrator pane whose runs are RPC children, which load the faux provider as the pane does. */
 async function startOrchestrator(): Promise<RealPi> {
 	vi.stubEnv("BLUCLAWD_RPC_RUNS", "1");
@@ -140,12 +147,16 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		await real.waitForRequests("main", 1);
 
 		// The worker holds: nothing of the review exists yet, though the queue has room for it.
+		await started(real, "w");
 		await real.waitForRequests("w", 2);
 		await new Promise((resolve) => setTimeout(resolve, 500));
 		expect(recordOf(real, "rev")).toBeUndefined();
 		expect(real.requests("rev")).toEqual([]);
 		writeFileSync(gate, "");
 
+		// Each pi start waited for on its own.
+		await started(real, "rev");
+		await started(real, "w", 2);
 		const main = await real.waitForRequests("main", 2);
 		const w = real.requests("w");
 		const rev = real.requests("rev");
@@ -293,6 +304,8 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		real.script("w", [{ tool: "write", args: { path: "new.txt", content: "v1\n" } }, { text: "Wrote v1." }]);
 		real.script("rev", [{ text: "Half a review.", error: "the faux provider broke" }]);
 		real.start(["--", "delegate"]);
+		await started(real, "w");
+		await started(real, "rev");
 		const main = await real.waitForRequests("main", 2);
 		const [aggregate] = toolResults(main[1]);
 		expect(aggregate).toMatch(
@@ -380,6 +393,7 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		const chain = /chain_\w+/.exec(result)?.[0] ?? "";
 		real.script("main", steps(chain));
 
+		await started(real, "w");
 		await real.waitForRequests("rev", 1);
 		real.tmux.sendKeys(pane, ["try", "Enter"]);
 		const tried = await real.waitForRequests("main", 4);
