@@ -45,7 +45,10 @@ export function addSubagentUsage(target: SessionUsage, delta: Partial<SessionUsa
 	}
 }
 
-/** A session's usage so far, as pi's own totals count it: every entry of the session, not only its branch. */
+/**
+ * A session's usage so far, as pi's own totals count it: every entry of the session, not only its branch. Tokens that
+ * came with no price leave the cost unknown rather than $0: pi cannot tell a free model from one it has no price for.
+ */
 export function sessionUsage(entries: readonly SessionEntry[]): SessionUsage {
 	const totals = createEmptySubagentUsage();
 	for (const entry of entries) {
@@ -54,7 +57,9 @@ export function sessionUsage(entries: readonly SessionEntry[]): SessionUsage {
 		else if (entry.type === "message" && (entry.message.role === "assistant" || entry.message.role === "toolResult"))
 			counted = entry.message.usage;
 		else if (entry.type === "branch_summary" || entry.type === "compaction") counted = entry.usage;
-		if (counted) addSubagentUsage(totals, counted);
+		if (!counted) continue;
+		addSubagentUsage(totals, counted);
+		if (counted.totalTokens > 0 && !counted.cost?.total) totals.hasUnknownCost = true;
 	}
 	return totals;
 }

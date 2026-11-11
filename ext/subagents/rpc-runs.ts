@@ -19,6 +19,7 @@ import { piCommand } from "../../daemon/tmux.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import type { AgentDefinition } from "./definitions.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
+import { truncateUtf8Safe } from "./results.ts";
 import { type RpcDenyRules, RUN_DEFINITION_FLAG } from "./rpc-child.ts";
 import { prepareRpcHost, processAlive, processGroupAlive, readRpcHostState, stopRpcHost } from "./rpc-host.ts";
 import {
@@ -265,6 +266,17 @@ function rpcCommand(launch: RpcLaunch, instructionsFile: string, definitionFile:
 	];
 }
 
+/** How much of the orchestrator's context a run's Report takes: some 2,000 tokens at most, however long its text. */
+const MAX_RUN_REPORT_BYTES = 8 * 1024;
+/** What a run is told of its Report, which nothing summarizes for it: its orchestrator gets it as it is, bounded. */
+const REPORT_INSTRUCTIONS = [
+	"",
+	"",
+	"## Your Report",
+	"Your last message, once your work is done, is your Report to your orchestrator. Keep it concise, well under 2,000 tokens and shorter for simple work: what you found or changed, the checks you actually ran and how they ended, and what blocks you. Cite where the evidence is rather than pasting it; your transcript is kept. Never claim a check you did not run.",
+].join("\n");
+/** How much of why a run failed its Report gives; its stderr and transcript keep all of it. */
+const MAX_REASON_BYTES = 1024;
 /** How often the orchestrator looks at its run's host. */
 const HOST_CHECK_MS = 100;
 /** How long a run's host and its pi may take to end, once stopped or done, before what is left of them is killed. */
@@ -386,7 +398,8 @@ export async function executeRpcRun(
 						workspace,
 						launch.tools.some((tool) => WRITE_TOOLS.includes(tool)),
 					)}`
-				: ""),
+				: "") +
+			REPORT_INSTRUCTIONS,
 	);
 	// Open before anything is awaited: the run takes messages from its Admission on, queued or working.
 	openRunInbox(launch.runDir, record.generation);
@@ -523,6 +536,12 @@ export async function executeRpcRun(
 	// Whatever it sent before it ended reaches its recipients before its Report.
 	relay();
 	const state = ownState();
+	// Counted however the generation ended: what its session holds was spent, Report or not.
+	const usage = state?.sessionFile ? sessionFileUsage(state.sessionFile) : undefined;
+	if (usage) {
+		controller.updateUsage(usage);
+		deps.usage(state?.sessionId ?? record.runId, usage);
+	}
 	const report = readRunReports(launch.runDir, (state?.reportSeq ?? 0) - 1).find(
 		({ seq }) => seq === state?.reportSeq,
 	);
@@ -555,23 +574,21 @@ export async function executeRpcRun(
 		};
 	}
 	const outcome: RunRuntimeOutcome = report.outcome ?? { status: "failed", error: "no outcome was stored" };
-	const usage = state.sessionFile ? sessionFileUsage(state.sessionFile) : undefined;
-	if (usage) {
-		controller.updateUsage(usage);
-		deps.usage(state.sessionId ?? record.runId, usage);
-	}
 	controller.markDelivered(report.seq);
 	controller.updateProgress(report.text);
-	const text = [
-		report.text,
+	const fullReport = storedRunReportTextPath(launch.runDir, report.seq);
+	// What the runtime saw, never cut: the run's claim above it takes what room is left.
+	const runtime = [
 		"---",
-		`Outcome: ${outcome.status}${outcome.status === "completed" ? ": its pi settled its work without an error. What the run says above is its own claim; the runtime verified none of it." : `: ${outcome.error}.`}`,
+		`Outcome: ${outcome.status}${outcome.status === "completed" ? ": its pi settled its work without an error. What the run says above is its own claim; the runtime verified none of it." : `: ${cutReason(outcome.error)}.`}`,
 		`Process: exited with ${state.exit.signal ? `signal ${state.exit.signal}` : `code ${state.exit.code}`}, after its Report was stored.`,
-		...workspaceLines,
+		checksLine(launch.tools),
+		...(workspace ? workspaceLines : ["Changes: none: it had no tool that changes files."]),
 		`Transcript: ${state.sessionFile ?? "none"}`,
-		`Report: ${storedRunReportTextPath(launch.runDir, report.seq)}`,
+		`Report: ${fullReport}`,
 		...(report.untaken ? [`Untaken: ${untakenText(report.untaken, launch.runDir, record.generation)}.`] : []),
 	].join("\n");
+	const text = `${boundedClaim(report.text, MAX_RUN_REPORT_BYTES - bytes(runtime) - 1, fullReport)}\n${runtime}`;
 	const message: Extract<SessionMessage, { kind: "report" }> = {
 		type: "session_message",
 		kind: "report",
@@ -588,8 +605,30 @@ export async function executeRpcRun(
 		status: signal.aborted && outcome.status !== "completed" ? "cancelled" : "closed",
 		summaryText: report.text,
 		transcriptPath: state.sessionFile,
-		...(outcome.status === "completed" ? {} : { errorMessage: `${outcome.error}${workspaceNote}` }),
+		...(outcome.status === "completed" ? {} : { errorMessage: `${cutReason(outcome.error)}${workspaceNote}` }),
 	};
+}
+
+const bytes = (text: string) => Buffer.byteLength(text, "utf8");
+
+/** The run's own text, cut to `room` bytes from its end, saying where all of it is when cut. */
+function boundedClaim(text: string, room: number, fullReport: string): string {
+	if (bytes(text) <= room) return text;
+	const cut = `\n[Cut short; its full Report: ${fullReport}]`;
+	return `${truncateUtf8Safe(text, Math.max(0, room - bytes(cut))).text}${cut}`;
+}
+
+/** Why its work failed, as the runtime saw it: a pi's stderr can run long. */
+function cutReason(error: string): string {
+	const { text, truncated } = truncateUtf8Safe(error, MAX_REASON_BYTES);
+	return truncated ? `${text} […]` : text;
+}
+
+/** Which checks the run ran, as its tools allow: never what its text claims of them. */
+function checksLine(tools: readonly string[]): string {
+	return tools.includes("bash")
+		? "Checks: not tallied by the runtime: the commands it ran, and how each ended, are in its transcript. What its text says of them is its own claim."
+		: "Checks: none ran: it had no tool that runs commands. Any check its text claims is its own claim.";
 }
 
 /** Resolves true once `done` holds, checked every {@link HOST_CHECK_MS}; false once `signal` aborts first. */

@@ -247,7 +247,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		const listed = readFileSync(manifest, "utf8");
 		for (const [i, name] of ["ta", "tb", "tc"].entries()) {
 			expect(listed).toMatch(new RegExp(`- tasks\\[${i}\\] "${name}" \\(sub_[\\w-]+\\): completed`));
-			expect(listed).toContain(`Report: ${recordOf(real, name).reportPath}`);
+			expect(listed).toContain(`Report: ${join(runDir(real, name), "reports", "1.md")}`);
 		}
 		expect(recordOf(real, "ta")).toMatchObject({
 			cwd: realpathSync(join(real.cwd, "a")),
@@ -408,7 +408,7 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 		for (const name of names) {
 			expect(aggregate).toMatch(new RegExp(`### "${name}" \\(sub_[\\w-]+\\): completed\\n${name} begins\\.`));
 			expect(aggregate).not.toContain(`${name} ends.`);
-			const full = recordOf(real, name).reportPath ?? "";
+			const full = join(runDir(real, name), "reports", "1.md");
 			expect(aggregate).toContain(`[Cut short; its full Report: ${full}]`);
 			expect(readFileSync(full, "utf8")).toContain(`${name} ends.`);
 		}

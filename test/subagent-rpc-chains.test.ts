@@ -205,6 +205,9 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		expect(aggregate).toMatch(/- chain\[1\] "rev" \(sub_[\w-]+\): completed/);
 		expect(aggregate).toMatch(/- chain\[2\] "w" \(sub_[\w-]+\), resumed: completed/);
 		expect(aggregate).toMatch(/### chain\[2\] "w" \(sub_[\w-]+\), resumed: completed\nFixed: v2\./);
+		// Every step's Report, the review's findings among them, not only the last one's.
+		expect(aggregate).toMatch(/### chain\[0\] "w" \(sub_[\w-]+\): completed\nWrote v1\./);
+		expect(aggregate).toMatch(/### chain\[1\] "rev" \(sub_[\w-]+\): completed\nFINDING: new\.txt says v1/);
 		expect(aggregate).toMatch(/ready for you to review and integrate/);
 		const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(aggregate)?.[1] ?? "";
 		expect(aggregate).toMatch(/^Changes since its baseline: A pkg\/new\.txt$/m);
