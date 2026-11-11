@@ -337,7 +337,7 @@ const backgroundBash: InlineExtension = {
 				label: "ScheduleWakeup",
 				description: [
 					"- Schedules a turn of your own: once it is due, you get a notice with the prompt you give here and start a turn",
-					"- Give exactly one of delay (seconds from now) or at (a local 24-hour clock time, HH:MM; its next occurrence)",
+					"- Give exactly one of delay or at (its next occurrence)",
 					"- It must fall due between 1 minute and 24 hours from now; one due while you are working waits for your next turn",
 					"- Returns the wake-up's task id; cancel it with task_stop",
 					"- One-shot: to check again later, schedule the next one when you wake",
@@ -375,20 +375,15 @@ const backgroundBash: InlineExtension = {
 		pi.registerTool({
 			name: "task_stop",
 			label: "TaskStop",
-			description: [
-				"- Stops a running background task by its ID",
-				"- Takes a task_id parameter identifying the task to stop",
-				"- Returns a success or failure status",
-				"- Use this tool when you need to terminate a long-running task",
-				"- Also cancels a pending wake-up (schedule_wakeup) by its ID",
-			].join("\n"),
+			description: "Stops a running background task, or cancels a pending wake-up (schedule_wakeup), by its ID.",
 			parameters: Type.Object({
 				task_id: Type.Optional(Type.String({ description: "The ID of the background task to stop" })),
-				shell_id: Type.Optional(Type.String({ description: "Deprecated: use task_id instead" })),
 			}),
 			execute: async (_toolCallId, params, _signal, _onUpdate, toolCtx) => {
-				// A model fills an optional string with "": empty is absent.
-				const id = (params.task_id?.trim() || params.shell_id?.trim()) ?? "";
+				// A model fills an optional string with "": empty is absent. shell_id is no longer declared, and still
+				// accepted from calls made before.
+				const { shell_id } = params as { shell_id?: string };
+				const id = (params.task_id?.trim() || shell_id?.trim()) ?? "";
 				if (!id) throw new Error("Missing required parameter: task_id");
 				const callerOwner = toolCtx?.sessionManager?.getSessionId();
 				if (isAgentTaskId(id)) {

@@ -138,19 +138,19 @@ export function createBackgroundBashTool(options: BackgroundBashOptions): ToolDe
 		...(disabled
 			? {}
 			: {
-					run_in_background: Type.Optional(
-						Type.Boolean({ description: "Set to true to run this command in the background." }),
-					),
+					// Described once, in the guideline below.
+					run_in_background: Type.Optional(Type.Boolean()),
 				}),
 	});
 	type Params = Static<typeof parameters> & { run_in_background?: boolean };
 
 	return {
 		...base,
-		description: base.description.replace("timeout in seconds", "timeout in milliseconds"),
+		// The timeout's unit is said where the model fills it: pi's description names seconds.
+		description: base.description.replace(" Optionally provide a timeout in seconds.", ""),
 		promptGuidelines: [
 			...(base.promptGuidelines ?? []),
-			`\`timeout\` is in milliseconds: default ${defaultTimeoutMs()}, max ${maxTimeoutMs()}.`,
+			`\`timeout\` defaults to ${defaultTimeoutMs()}.`,
 			...(disabled
 				? []
 				: [

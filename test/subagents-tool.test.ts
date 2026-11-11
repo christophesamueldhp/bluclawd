@@ -21,6 +21,7 @@ import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Tmux } from "../daemon/tmux.ts";
+import { SUBAGENT_TOOL_PARAMETERS } from "../ext/subagents/admission.ts";
 import type { SubagentRunRecord } from "../ext/subagents/runs.ts";
 import { ensureRunStorageDir, readPersistedRunRecord, writePersistedRunRecord } from "../ext/subagents/storage.ts";
 import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
@@ -191,6 +192,34 @@ describe("The subagent tool", () => {
 		expect(text).toContain("Background subagent launched: scout");
 		const runId = text.match(/sub_[0-9a-f-]{36}/)?.[0] ?? "";
 		expect(readPersistedRunRecord(t.agentDir, t.session.sessionId, runId)).toMatchObject({ backend: "rpc" });
+	});
+
+	it("no longer declares confirmProjectAgents, and still launches a call that sends it", async () => {
+		const t = await createSubagentTui({ outsideTmux: true });
+		tui = t;
+		let declared: string[] = [];
+		t.script([
+			(context) => {
+				const tool = getCurrentTools(context.messages).find((candidate) => candidate.name === "subagent");
+				declared = Object.keys((tool?.parameters as { properties: object }).properties);
+				return fauxAssistantMessage(
+					fauxToolCall(
+						"subagent",
+						{ agent: "explorer", name: "scout", task: "Scout.", background: true, confirmProjectAgents: true },
+						{ id: "call_scout" },
+					),
+				);
+			},
+			() => fauxAssistantMessage("Waiting for scout."),
+		]);
+		await t.session.prompt("Scout.", { expandPromptTemplates: false });
+		await t.started("scout");
+
+		expect(declared).toContain("agentScope");
+		expect(declared).not.toContain("confirmProjectAgents");
+		const { result, text } = toolResultText(t.session, "call_scout");
+		expect(result?.isError).toBeFalsy();
+		expect(text).toContain("Background subagent launched: scout");
 	});
 
 	it("leaves a run in tmux from before running when it is reopened outside tmux, and says so", async () => {
@@ -450,5 +479,36 @@ describe("Live finding — background availability in the subagent description",
 		} finally {
 			session.dispose();
 		}
+	});
+});
+
+describe("The subagent tool's schema", () => {
+	/** A schema with its string descriptions left out: its names and types. */
+	const shape = (schema: unknown): unknown =>
+		JSON.parse(
+			JSON.stringify(schema, (key, value) =>
+				key === "description" && typeof value === "string" ? undefined : value,
+			),
+		);
+	const descriptions = (schema: unknown) => JSON.stringify(schema).match(/"description":"/g)?.length ?? 0;
+
+	it("describes each run property once, at the top level: tasks[] and chain[] entries carry its names and types", () => {
+		const { properties: top } = JSON.parse(JSON.stringify(SUBAGENT_TOOL_PARAMETERS));
+		const tasks = top.tasks.items;
+		const chain = top.chain.items;
+		for (const key of ["agent", "task", "name", "cwd", "model", "thinkingLevel"]) {
+			expect(descriptions(top[key])).toBeGreaterThan(0);
+			expect(tasks.properties[key]).toEqual(shape(top[key]));
+			expect(chain.properties[key]).toEqual(shape(top[key]));
+		}
+		expect(descriptions(tasks)).toBe(0);
+		// `resume` is a step's own, described nowhere else.
+		const { resume, ...steps } = chain.properties;
+		expect(descriptions(steps)).toBe(0);
+		expect(descriptions(resume)).toBe(1);
+		expect(tasks).toMatchObject({ required: ["agent", "task"], additionalProperties: false });
+		expect(chain).toMatchObject({ required: ["task"], additionalProperties: false });
+		expect(top.tasks.description).toContain("a single run's");
+		expect(top.chain.description).toContain("a single run's");
 	});
 });
