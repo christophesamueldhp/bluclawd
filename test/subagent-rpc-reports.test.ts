@@ -115,12 +115,16 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 			}
 			real.script("main", [
 				{ tool: "subagent", args: { agent: "general-purpose", name: "gp", task: "Check it." } },
+				{ tool: "subagent_resume", args: { agent: "gp", task: "Check once more." } },
+				{ text: "waiting for gp" },
 				{ text: "done" },
 			]);
 			real.script("gp", [
 				{ tool: "bash", args: { command: "grep -q one a.txt" } },
 				{ tool: "bash", args: { command: "test -f missing.txt" } },
 				{ text: "All tests pass." },
+				{ tool: "bash", args: { command: "grep -c one a.txt" } },
+				{ text: "Still passing." },
 			]);
 			real.start(["--", "delegate"]);
 			await real.waitForRequests("main", 1);
@@ -131,6 +135,14 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 			expect(report).toMatch(/^Checks: the commands its transcript shows it ran, 2:$/m);
 			expect(report).toMatch(/^- `grep -q one a\.txt`: exit 0$/m);
 			expect(report).toMatch(/^- `test -f missing\.txt`: exit 1$/m);
+
+			// Its next generation's Report lists only what that generation ran, though one session holds all three.
+			await started(real, "gp", 3);
+			const resumed = conversation((await real.waitForRequests("main", 4))[3]).at(-1)?.text ?? "";
+			expect(resumed).toContain("Still passing.");
+			expect(resumed).toMatch(/^Checks: the commands its transcript shows it ran, 1:$/m);
+			expect(resumed).toMatch(/^- `grep -c one a\.txt`: exit 0$/m);
+			expect(resumed).not.toContain("missing.txt");
 		},
 	);
 
@@ -178,7 +190,9 @@ describe.skipIf(!hasTmux)("an RPC run's Report", () => {
 		const [cancelled] = toolResults(main[1]);
 		expect(cancelled).toMatch(/^Cancelling batch batch_\w+: every member was asked to stop\./);
 		expect(cancelled).toContain(`Every member's status, full Report and transcript: ${manifest}`);
-		expect(cancelled).toMatch(/### "a" \(sub_[\w-]+\): completed\na found it\./);
+		expect(cancelled).toMatch(
+			/### "a" \(sub_[\w-]+\): completed\nChecks: none ran: it had no tool that runs commands\.\na found it\./,
+		);
 		expect(cancelled).toMatch(/- "b" \(sub_[\w-]+\): (not settled yet: stopping|cancelled)/);
 		expect(cancelled).toMatch(/- "c" \(sub_[\w-]+\): (not settled yet: (queued|stopping)|cancelled)/);
 		// Every member's final status, for the orchestrator to read.

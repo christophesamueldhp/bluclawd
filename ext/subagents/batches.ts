@@ -18,7 +18,8 @@ import {
 } from "./admission.ts";
 import { NOT_APPROVAL } from "./messages.ts";
 import { sanitizeReportText, truncateUtf8Safe } from "./results.ts";
-import { readRunDefinition, runDefinitionPath } from "./rpc-runs.ts";
+import { readRunDefinition, runDefinitionPath, sessionFileEntries } from "./rpc-runs.ts";
+import { checksSummary, commandsRun } from "./run-evidence.ts";
 import { describeWorkspace } from "./run-worktree.ts";
 import { type AdmittedSubagentHandle, isTerminalSubagentStatus, type SubagentRunRecord } from "./runs.ts";
 import {
@@ -62,6 +63,8 @@ export interface BatchMember {
 	reportFile?: string;
 	/** A member that edits: its worktree, and where it worked and what it changed there, as Git sees it. */
 	workspace?: { root: string; lines: string[] };
+	/** What its transcript shows of the checks it ran in its generation, in one line. */
+	checks?: string;
 }
 
 export function memberOutcome({ record, report }: BatchMember): MemberOutcome {
@@ -162,7 +165,7 @@ export function formatBatchAggregate(
 		reported.map((i) => {
 			const where = members[i].workspace?.lines.map((text) => `${text}\n`).join("") ?? "";
 			return {
-				heading: `### ${formatRunLabel(members[i].record)}: completed\n${where}`,
+				heading: `### ${formatRunLabel(members[i].record)}: completed\n${where}${members[i].checks ? `${members[i].checks}\n` : ""}`,
 				text: members[i].report?.text ?? "",
 				full: fullReportOf(members[i]),
 			};
@@ -256,6 +259,7 @@ function batchManifest(batch: string, members: readonly BatchMember[]): string {
 				`- tasks[${i}] ${formatRunLabel(record)}: ${describe(memberOutcome(member))}`,
 				`  Role ${record.agentName}, model ${record.provider}/${record.modelId} at thinking ${record.thinkingLevel}, cwd ${record.cwd}`,
 				...(member.workspace?.lines.map((text) => `  ${text}`) ?? []),
+				...(member.checks ? [`  ${member.checks}`] : []),
 				`  Report: ${(member.report && fullReportOf(member)) ?? "none stored"}`,
 				`  Transcript: ${record.transcriptPath ?? "none"}`,
 			];
@@ -378,12 +382,21 @@ export async function settleBatch(
 			const report = readRunReports(runDir, 0)
 				.filter(({ generation }) => generation === record.generation)
 				.at(-1);
-			const isolated = readRunDefinition(runDefinitionPath(runDir, record.generation))?.workspace;
+			const definition = readRunDefinition(runDefinitionPath(runDir, record.generation));
+			const isolated = definition?.workspace;
 			const workspace = isolated && { root: isolated.root, lines: await describeWorkspace(isolated, runDir) };
+			// What its transcript shows of this generation, which started when the scheduler started it.
+			const entries = report && record.transcriptPath ? sessionFileEntries(record.transcriptPath) : undefined;
+			const checks =
+				report &&
+				(entries
+					? checksSummary(definition?.tools ?? [], commandsRun(entries, record.startedAt ?? 0))
+					: "Checks: unknown: its transcript could not be read.");
 			const member: BatchMember = {
 				record,
 				...(report ? { report, reportFile: storedRunReportTextPath(runDir, report.seq) } : {}),
 				...(workspace ? { workspace } : {}),
+				...(checks ? { checks } : {}),
 			};
 			onSettled?.(i, member);
 			return member;

@@ -47,6 +47,16 @@ describe("a settled batch's aggregate", () => {
 		expect(text).toContain(`### "a" (sub_a): completed\na: ${"finding ".repeat(200).trim()}`);
 		expect(text).not.toContain("not inlined");
 	});
+
+	it("puts what a member's transcript shows of its checks above its own claim", () => {
+		const checked = member("a", "completed");
+		checked.checks = "Checks: its transcript shows 2 commands, 1 not ending with exit 0.";
+		const { text } = formatBatchAggregate("batch_c", [checked], "/m.md", 16 * 1024);
+
+		expect(text).toContain(
+			'### "a" (sub_a): completed\nChecks: its transcript shows 2 commands, 1 not ending with exit 0.\na: finding',
+		);
+	});
 	it("gives the room short Reports leave to longer ones, and points to each full Report as its run stored it", () => {
 		const short = ["a", "b", "c"].map((name) => member(name, "completed"));
 		for (const one of short) one.report = { ...one.report!, text: `${one.record.name}: brief.` };

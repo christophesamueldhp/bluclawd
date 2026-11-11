@@ -46,8 +46,17 @@ export function commandsRun(entries: readonly SessionEntry[], since: number): Ru
 		for (const call of nested) {
 			if (call.name !== "bash") continue;
 			const command = typeof call.arguments?.command === "string" ? call.arguments.command : "(not recorded)";
+			// bash fails its result on any exit but 0, so one that did not fail exited 0. pi keeps only the start of a
+			// failed one's text, which may have lost its exit code.
+			const code = call.status === "error" ? /Command exited with code (\d+)/.exec(call.error ?? "") : null;
 			const ended =
-				call.status === "ok" ? "exit 0" : call.status === "error" ? endedBy(call.error ?? "") : "unfinished";
+				call.status === "ok"
+					? "exit 0"
+					: call.status === "error"
+						? code
+							? `exit ${code[1]}`
+							: "failed, its exit not recorded"
+						: "unfinished";
 			commands.push({ command, ended: `${ended}, from codemode` });
 		}
 	}
@@ -61,6 +70,14 @@ function endedBy(text: string): string {
 	if (code) return `exit ${code[1]}`;
 	if (/^Command aborted$/.test(last)) return "aborted";
 	return `failed: ${line(last) || "no output"}`;
+}
+
+/** One line for a run among others, as a batch or chain lists it: how many commands it ran, how many did not exit 0. */
+export function checksSummary(tools: readonly string[], commands: readonly RunCommand[]): string {
+	if (!tools.includes("bash")) return "Checks: none ran: it had no tool that runs commands.";
+	if (commands.length === 0) return "Checks: its transcript shows it ran no commands.";
+	const failed = commands.filter(({ ended }) => !ended.startsWith("exit 0")).length;
+	return `Checks: its transcript shows ${commands.length} command${commands.length === 1 ? "" : "s"}, ${failed} not ending with exit 0.`;
 }
 
 const textOf = (content: unknown): string =>

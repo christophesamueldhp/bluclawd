@@ -464,7 +464,7 @@ function formatChainAggregate(
 	const notesReserve = 200;
 	const inlined = inlineReports(
 		reported.map(({ i, member }) => ({
-			heading: `### ${stepLabel(steps, results[i], i, label)}: completed\n`,
+			heading: `### ${stepLabel(steps, results[i], i, label)}: completed\n${member.checks ? `${member.checks}\n` : ""}`,
 			text: member.report?.text ?? "",
 			full: fullReportOf(member),
 		})),
@@ -502,6 +502,7 @@ function writeManifest(
 			return [
 				line,
 				`  Role ${record.agentName}, model ${record.provider}/${record.modelId} at thinking ${record.thinkingLevel}, cwd ${record.cwd}`,
+				...(result.member.checks ? [`  ${result.member.checks}`] : []),
 				`  Report: ${(result.member.report && fullReportOf(result.member)) ?? "none stored"}`,
 				`  Transcript: ${record.transcriptPath ?? "none"}`,
 			];

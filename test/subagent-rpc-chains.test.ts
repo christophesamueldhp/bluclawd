@@ -204,10 +204,12 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		expect(aggregate).toMatch(/- chain\[0\] "w" \(sub_[\w-]+\): completed/);
 		expect(aggregate).toMatch(/- chain\[1\] "rev" \(sub_[\w-]+\): completed/);
 		expect(aggregate).toMatch(/- chain\[2\] "w" \(sub_[\w-]+\), resumed: completed/);
-		expect(aggregate).toMatch(/### chain\[2\] "w" \(sub_[\w-]+\), resumed: completed\nFixed: v2\./);
+		expect(aggregate).toMatch(/### chain\[2\] "w" \(sub_[\w-]+\), resumed: completed\nChecks: [^\n]+\nFixed: v2\./);
 		// Every step's Report, the review's findings among them, not only the last one's.
-		expect(aggregate).toMatch(/### chain\[0\] "w" \(sub_[\w-]+\): completed\nWrote v1\./);
-		expect(aggregate).toMatch(/### chain\[1\] "rev" \(sub_[\w-]+\): completed\nFINDING: new\.txt says v1/);
+		expect(aggregate).toMatch(/### chain\[0\] "w" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nWrote v1\./);
+		expect(aggregate).toMatch(
+			/### chain\[1\] "rev" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nFINDING: new\.txt says v1/,
+		);
 		expect(aggregate).toMatch(/ready for you to review and integrate/);
 		const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(aggregate)?.[1] ?? "";
 		expect(aggregate).toMatch(/^Changes since its baseline: A pkg\/new\.txt$/m);
@@ -318,7 +320,7 @@ describe.skipIf(!hasTmux)("a chain of RPC runs", () => {
 		expect(aggregate).toMatch(/- chain\[1\] "rev" \(sub_[\w-]+\): failed: the faux provider broke/);
 		expect(aggregate).toMatch(/- chain\[2\] \("w"\): not run, since chain\[1\] \("rev"\) failed/);
 		expect(aggregate).toMatch(/keeps the partial work for you to inspect\. It is not ready to integrate/);
-		expect(aggregate).toMatch(/### chain\[0\] "w" \(sub_[\w-]+\): completed\nWrote v1\./);
+		expect(aggregate).toMatch(/### chain\[0\] "w" \(sub_[\w-]+\): completed\nChecks: [^\n]+\nWrote v1\./);
 		const workspace = /^Workspace: (.+?), an isolated Git worktree/m.exec(aggregate)?.[1] ?? "";
 		expect(readFileSync(join(workspace, "new.txt"), "utf8")).toBe("v1\n");
 		// The repair never ran: the worker's session holds its first generation only.

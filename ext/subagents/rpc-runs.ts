@@ -713,7 +713,7 @@ async function endHostGroup(hostPid: number, contained: RunContainment | undefin
 }
 
 /** The entries of the run's session, from its file; none before its pi wrote one. */
-function sessionFileEntries(sessionFile: string): SessionEntry[] | undefined {
+export function sessionFileEntries(sessionFile: string): SessionEntry[] | undefined {
 	try {
 		const entries = parseSessionEntries(readFileSync(sessionFile, "utf8"));
 		return entries.filter((entry): entry is SessionEntry => entry.type !== "session");
