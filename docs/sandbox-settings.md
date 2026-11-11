@@ -107,7 +107,8 @@ cannot be denied, and hiding the directory holds only for one that exists when a
 run on Linux, a command started before the daemon made its directory (it does on the first `←`)
 could list it, read it and connect to both sockets. So on Linux the sandbox does not start with
 `allowAllUnixSockets`, and its filter refuses every Unix socket. A command cannot list or read a
-directory that exists when it starts; one made while it runs stays readable to it.
+directory that exists when it starts; one made, or removed and made again, while it runs stays
+readable to it.
 
 One setting lifts the read deny: `filesystem.disabled: true` drops every file rule, the credential
 denies included, so a command can then read the server directory. The socket deny still holds on
