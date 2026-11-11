@@ -650,8 +650,8 @@ it is read when a session starts, so `/reload` after editing:
   `PI_SERVER_DIR`, and the default one too), are never a way out of the sandbox, whatever
   `network.allowUnixSockets` or `network.allowAllUnixSockets` allows: on macOS a command cannot
   connect to them, nor read their directory unless `filesystem.disabled` is on. On Linux one
-  socket path cannot be denied, so hiding the directory is the mechanism, not yet run there,
-  and `filesystem.disabled` turns it off. See
+  socket path cannot be denied, and hiding the directory misses one made after a command
+  started, so the sandbox does not start with `network.allowAllUnixSockets` there. See
   [docs/sandbox-settings.md](docs/sandbox-settings.md#bluclawds-own-sockets).
 - When the sandbox cannot run, or its `sandbox` setting is malformed, the model's `bash` and
   `monitor` are refused and pi says why. There is no unsandboxed fallback. `bash` is also
@@ -692,5 +692,5 @@ it is read when a session starts, so `/reload` after editing:
 | Platform | Needs |
 |---|---|
 | macOS | Nothing (Seatbelt); the Command Line Tools for the process reaper |
-| Linux, WSL2 | `bubblewrap`, `socat` and `ripgrep` (`apt install bubblewrap socat ripgrep`). On Ubuntu 24.04+, unprivileged user namespaces must be allowed by AppArmor: see [Anthropic's notes](https://code.claude.com/docs/en/sandboxing). The `apply-seccomp` binary bundled for x64 and arm64 blocks Unix sockets; without it the sandbox does not start unless the settings allow every Unix socket |
+| Linux, WSL2 | `bubblewrap`, `socat` and `ripgrep` (`apt install bubblewrap socat ripgrep`). On Ubuntu 24.04+, unprivileged user namespaces must be allowed by AppArmor: see [Anthropic's notes](https://code.claude.com/docs/en/sandboxing). The `apply-seccomp` binary bundled for x64 and arm64 blocks Unix sockets; without it, or with `network.allowAllUnixSockets`, the sandbox does not start |
 | Windows | Not supported; run pi in WSL2 |

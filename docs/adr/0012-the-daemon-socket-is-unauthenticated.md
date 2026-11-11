@@ -12,7 +12,7 @@ The only client this defends against is a sandboxed shell. With the sandbox off,
 ## Consequences
 
 - A process of the same user outside the sandbox can still start pi with a forged spec, or drive a pane through `send`. That is accepted, not a defect: `send` does not check that a command starts with `/`, and the cancel markers of `wakeups` take a client's id as a file name.
-- On Linux one socket path cannot be denied, so hiding the server directory from the shell is the whole mechanism there. When this was decided it had been read in srt's code, not run; if it does not hold, the sandbox refuses to start on Linux with `allowAllUnixSockets` on.
+- On Linux one socket path cannot be denied, so hiding the server directory from the shell was to be the whole mechanism there. Run on Linux (#327), it holds only for a directory that exists when a command starts: one made, or removed and made again, while the command runs is readable and its sockets connect. So the sandbox refuses to start on Linux with `allowAllUnixSockets` on, and with the seccomp filter on, a Linux shell reaches no Unix socket at all.
 - The promise is about Unix sockets. The remote app's HTTP listener on 127.0.0.1 keeps its own guard: a paired device's token, and a pairing secret the daemon gives only over its socket.
 - Adding authentication later would touch every client of the socket: each extension, the run host's launch, the remote app's reports.
 

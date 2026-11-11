@@ -70,8 +70,12 @@ const LINUX_HINT =
 
 const NO_UNIX_SOCKET_FILTER =
 	"Unix sockets cannot be blocked: the sandbox runtime's apply-seccomp binary was not found; " +
-	"reinstall bluclawd, set sandbox.seccomp.applyPath to a working apply-seccomp, " +
-	"or set sandbox.network.allowAllUnixSockets to true to let commands reach every Unix socket";
+	"reinstall bluclawd, or set sandbox.seccomp.applyPath to a working apply-seccomp";
+
+const ALL_UNIX_SOCKETS_OPEN_OWN =
+	"on Linux, sandbox.network.allowAllUnixSockets lets commands connect to bluclawd's own sockets: " +
+	"hiding the server directory keeps them out only when it exists before a command starts, " +
+	"and sandbox.filesystem.disabled drops that too; set allowAllUnixSockets to false";
 
 /**
  * The hosts the user let the model's commands reach this session, as `host:port`: a subagent run asking for one of
@@ -145,12 +149,13 @@ async function start(config: RuntimeConfig, ask: AskNetwork, platform: NodeJS.Pl
 	try {
 		const checked = await checkRuntimeConfig(config);
 		if (typeof checked === "string") return markSandboxUnavailable(checked);
+		// Before the running-sandbox path, so a settings change cannot add it to a sandbox already up (ADR-0012).
+		if (platform === "linux" && checked.network.allowAllUnixSockets === true) {
+			return markSandboxUnavailable(ALL_UNIX_SOCKETS_OPEN_OWN);
+		}
 		const sandbox = await engine();
-		// Checked on every start, since a settings change can drop `allowAllUnixSockets` from a running sandbox.
-		const unixSocketsOpen = async () =>
-			platform === "linux" &&
-			checked.network.allowAllUnixSockets !== true &&
-			!(await sandbox.canBlockUnixSockets(checked.seccomp));
+		// Checked on every start, since a settings change can drop the seccomp binary a running sandbox found.
+		const unixSocketsOpen = async () => platform === "linux" && !(await sandbox.canBlockUnixSockets(checked.seccomp));
 		if (state.get().initialized) {
 			if (await unixSocketsOpen()) return markSandboxUnavailable(NO_UNIX_SOCKET_FILTER);
 			sandbox.updateConfig(checked);
