@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import {
 	type ExtensionContext,
 	parseSessionEntries,
@@ -30,7 +30,7 @@ import { PARENT_MESSAGE_ADDRESS } from "./messages.ts";
 import { resolveChildModelAndRuntime } from "./models.ts";
 import type { ParentScopeChecks } from "./parent-scope.ts";
 import type { RpcDenyRules } from "./rpc-child.ts";
-import { processAlive, readRpcHostState } from "./rpc-host.ts";
+import { processAlive, readRpcHostSpec, readRpcHostState } from "./rpc-host.ts";
 import {
 	claimRunGeneration,
 	narrowRunDefinition,
@@ -352,6 +352,8 @@ export interface ChainPlacement {
 	workspace?: "record" | IsolatedWorkspace;
 	/** The entry the chain was launched from, which a later step is held to; the current leaf when absent. */
 	origin?: string;
+	/** The ID the step's run gets, which its chain stored before admitting it. */
+	runId?: string;
 }
 
 /** The parts of the calling tool's context admission reads. */
@@ -420,6 +422,11 @@ export interface RunAdmission {
 	 * into the current scope.
 	 */
 	adopt(run: Readonly<SubagentRunRecord>, ctx: AdmissionContext): void;
+	/**
+	 * Takes over an open run on pi's RPC that an earlier instance of this session admitted and left behind (a reload or
+	 * a crash), as its run directory stored it: false when that does not hold what it was launched with.
+	 */
+	recover(run: Readonly<SubagentRunRecord>, ctx: AdmissionContext): boolean;
 }
 
 /** Whether a saved session holds a conversation: pi would start a new one at a path without one, silently. */
@@ -969,7 +976,7 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 			}
 
 			// Prepared before admission, so a run that cannot store anything is never listed.
-			const runId = createRunId();
+			const runId = chain?.runId ?? createRunId();
 			const storage = ensureRunStorageDir(agentDir, parentSessionId, runId);
 			if (!storage.ok) {
 				return reject(`Cannot launch subagent: storage is unavailable (${storage.error}).`);
@@ -1102,6 +1109,50 @@ export function createRunAdmission(deps: RunAdmissionDeps): RunAdmission {
 				{ ...run, sessionEpoch: scope.sessionEpoch },
 				{ launch: { ...launchOf(run, storage.runDir, parentPane, ctx), pane: run.pane } },
 			);
+		},
+
+		recover(run, ctx) {
+			const scope = deps.scope.current();
+			const agentDir = deps.agentDir();
+			const storage = ensureRunStorageDir(agentDir, run.parentSessionId, run.runId);
+			if (!scope || !storage.ok) return false;
+			const { runDir } = storage;
+			// As admitted, frozen before it queued: its role, grants and model, and what its host starts.
+			const definition = readRunDefinition(runDefinitionPath(runDir, run.generation));
+			const spec = readRpcHostSpec(runDir);
+			if (!definition || spec?.generation !== run.generation) return false;
+			const { workspace } = definition;
+			deps.scheduler.takeOver(
+				{ ...run, sessionEpoch: scope.sessionEpoch },
+				{
+					rpc: {
+						name: run.name ?? run.runId,
+						definition,
+						provider: spec.model.provider,
+						modelId: spec.model.id,
+						thinkingLevel: spec.model.thinkingLevel,
+						tools: definition.tools,
+						task: "",
+						cwd: definition.cwd,
+						runDir,
+						agentDir,
+						projectTrusted: definition.projectTrusted,
+						...(spec.sessionFile ? { sessionFile: spec.sessionFile } : {}),
+						// A later step of a chain works in the worktree its first step made, named after that step's run.
+						...(workspace
+							? { workspace, ...(basename(workspace.root) !== run.runId ? { worktreeMade: true } : {}) }
+							: {}),
+						...(run.chain ? { keepWorktree: true } : {}),
+						recovered: spec,
+						// Not yet started, it starts only once the session that returned may still start it, as at any turn.
+						recheck: recheckRpc(run.runId, runDir, run.generation, {
+							cwd: ctx.cwd,
+							trusted: ctx.isProjectTrusted(),
+						}),
+					},
+				},
+			);
+			return true;
 		},
 
 		async resume(run, buildPrompt, ctx, changes = {}) {

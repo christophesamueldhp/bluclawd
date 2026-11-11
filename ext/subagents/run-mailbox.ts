@@ -183,3 +183,19 @@ export function readRunOutbox(runDir: string, generation: number, seq: number): 
 	}
 	return read;
 }
+
+const relayedPath = (runDir: string, generation: number) => `${outboxPath(runDir, generation)}.relayed`;
+
+/** How far the orchestrator relayed what the run's generation sent: the `seq` of the last one, 0 for none. */
+export function relayedRunOutbox(runDir: string, generation: number): number {
+	try {
+		return Number(readFileSync(relayedPath(runDir, generation), "utf8")) || 0;
+	} catch {
+		return 0;
+	}
+}
+
+/** Stored before message `seq` is relayed: a crash between the two loses it rather than relay it twice. */
+export function markRunOutboxRelayed(runDir: string, generation: number, seq: number): void {
+	writeAtomicPrivateFile(relayedPath(runDir, generation), String(seq));
+}
