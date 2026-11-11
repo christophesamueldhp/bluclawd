@@ -52,7 +52,7 @@ Script rules:
 - **Silence is not success.** The filter must match every terminal state, not just the happy path: \`grep -E --line-buffered "Traceback|Error|FAILED|Killed|OOM"\` beside the success marker, and a poll loop emits on \`succeeded|failed|cancelled|timeout\`. Before arming, ask: if this process crashed right now, would my filter emit anything? If unsure, widen it.
 - Stay selective all the same: every line is a conversation message. Never pipe raw logs. A monitor that produces too many events is stopped automatically; restart it with a tighter filter.
 
-Exit ends the watch and reports its exit code. Every monitor expires after \`timeout_ms\` (default ${minutes(DEFAULT_TIMEOUT_MS)}, at most ${minutes(CAP_TIMEOUT_MS)}): it is killed and you get one notice with the event count. Re-arm it if you still need the watch; for a long watch set \`timeout_ms\` to the maximum and re-arm on each expiry, and widen the filter if an expiry with no events was unexpected. Use task_stop to cancel early.`;
+The script runs in the same shell environment as bash. Exit ends the watch and reports its exit code. Every monitor expires after \`timeout_ms\` (default ${minutes(DEFAULT_TIMEOUT_MS)}, at most ${minutes(CAP_TIMEOUT_MS)}): it is killed and you get one notice with the event count. Re-arm it if you still need the watch; for a long watch set \`timeout_ms\` to the maximum and re-arm on each expiry, and widen the filter if an expiry with no events was unexpected. Use task_stop to cancel early.`;
 
 const monitorSchema = Type.Object({
 	command: Type.Optional(Type.String({ description: "Shell command or script." })),
