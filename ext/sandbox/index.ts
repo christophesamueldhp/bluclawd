@@ -19,7 +19,7 @@ import type {
 import { denyRules } from "../_shared/settings.ts";
 import { readSettings, startupSettings } from "../_shared/startup-settings.ts";
 import { timed } from "../_shared/timing.ts";
-import { runtimeConfig, sandboxSetting, saveSandboxEnabled } from "./config.ts";
+import { runtimeConfig, sandboxSetting, saveSandboxEnabled, serverDirs } from "./config.ts";
 import { prepareReaper } from "./reaper.ts";
 import {
 	type AskNetwork,
@@ -106,7 +106,7 @@ function factory(pi: ExtensionAPI): void {
 				setting.kind === "invalid"
 					? markSandboxUnavailable(setting.reason)
 					: await startSandbox(
-							runtimeConfig(setting.settings, denyRules(sm), startCtx.cwd, homedir(), tmpdir()),
+							runtimeConfig(setting.settings, denyRules(sm), startCtx.cwd, homedir(), tmpdir(), serverDirs()),
 							asker.ask,
 						);
 			notifyUnavailable(startCtx, status);
