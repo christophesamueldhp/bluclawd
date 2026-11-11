@@ -16,6 +16,7 @@ import {
 	writePersistedRunRecord,
 } from "../ext/subagents/storage.ts";
 import { createEmptySubagentUsage } from "../ext/subagents/usage.ts";
+import { readinessMs } from "./helpers/heartbeats.ts";
 import {
 	conversation,
 	DEFAULT_EXTENSIONS,
@@ -96,78 +97,82 @@ describe.skipIf(!hasTmux)("runs in tmux from before runs ran on pi's RPC", () =>
 		pi = undefined;
 	});
 
-	it("keeps an open one working until it is stopped, refuses to resume it, and starts its continuation on pi's RPC", async () => {
-		// No switch: every new run is on pi's RPC. Its pi loads the faux provider, which `-ne` leaves out.
-		vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", FAUX);
-		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
-		pi = real;
-		real.script("main", [{ text: "ready" }]);
-		const orchestrator = real.start(["--", "hello"]);
-		await real.waitForRequests("main", 1);
-		const { sessionId } = await sessionOf(real, orchestrator);
-		real.script("legacy", [{ text: "Legacy looked." }]);
-		const legacy = plantLegacyRun(real, orchestrator, sessionId);
-		await real.waitForRequests("legacy", 1);
+	it(
+		"keeps an open one working until it is stopped, refuses to resume it, and starts its continuation on pi's RPC",
+		async () => {
+			// No switch: every new run is on pi's RPC. Its pi loads the faux provider, which `-ne` leaves out.
+			vi.stubEnv("BLUCLAWD_RPC_PROVIDER_EXTENSIONS", FAUX);
+			const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
+			pi = real;
+			real.script("main", [{ text: "ready" }]);
+			const orchestrator = real.start(["--", "hello"]);
+			await real.waitForRequests("main", 1);
+			const { sessionId } = await sessionOf(real, orchestrator);
+			real.script("legacy", [{ text: "Legacy looked." }]);
+			const legacy = plantLegacyRun(real, orchestrator, sessionId);
+			await real.waitForRequests("legacy", 1);
 
-		real.script("main", [
-			{ text: "ready" },
-			// Woken by the old run's Report, once this orchestrator takes the run over.
-			{ tool: "subagent_status", args: {} },
-			{ tool: "subagent_stop", args: { agent: "legacy" } },
-			{ tool: "subagent_resume", args: { agent: "legacy", task: "Go on." } },
-			{ tool: "subagent_message", args: { to: "legacy", content: "Go on." } },
-			{
-				tool: "subagent",
-				args: { agent: "explorer", name: "fresh", task: `Continue the work of run ${legacy.runId}.` },
-			},
-			{ text: "done" },
-		]);
-		real.script("fresh", [{ text: "Continued." }]);
-		// The orchestrator takes the new runtime: the old run is taken over, never ended.
-		real.tmux.sendKeys(orchestrator, ["/reload", "Enter"]);
-		const requests = await real.waitForRequests("main", 7);
+			real.script("main", [
+				{ text: "ready" },
+				// Woken by the old run's Report, once this orchestrator takes the run over.
+				{ tool: "subagent_status", args: {} },
+				{ tool: "subagent_stop", args: { agent: "legacy" } },
+				{ tool: "subagent_resume", args: { agent: "legacy", task: "Go on." } },
+				{ tool: "subagent_message", args: { to: "legacy", content: "Go on." } },
+				{
+					tool: "subagent",
+					args: { agent: "explorer", name: "fresh", task: `Continue the work of run ${legacy.runId}.` },
+				},
+				{ text: "done" },
+			]);
+			real.script("fresh", [{ text: "Continued." }]);
+			// The orchestrator takes the new runtime: the old run is taken over, never ended.
+			real.tmux.sendKeys(orchestrator, ["/reload", "Enter"]);
+			const requests = await real.waitForRequests("main", 7);
 
-		expect(conversation(requests[1]).some((message) => message.text.includes("Legacy looked."))).toBe(true);
-		const status = lastToolResult(requests[2]);
-		expect(status?.text).toMatch(/^legacy \(explorer, sub_[0-9a-f-]+\): (idle|working), in tmux/m);
+			expect(conversation(requests[1]).some((message) => message.text.includes("Legacy looked."))).toBe(true);
+			const status = lastToolResult(requests[2]);
+			expect(status?.text).toMatch(/^legacy \(explorer, sub_[0-9a-f-]+\): (idle|working), in tmux/m);
 
-		// Stopped only when asked: its pi in tmux ends then, its session and Report kept.
-		const stop = lastToolResult(requests[3]);
-		expect(stop?.text).toMatch(/^Stopped "legacy" \(sub_[0-9a-f-]+\): its pi in tmux ended/);
-		expect(real.tmux.hasSession(legacy.pane)).toBe(false);
-		const stored = readPersistedRunRecord(real.agentDir, sessionId, legacy.runId);
-		expect(stored).toMatchObject({ status: "closed" });
-		expect(stored?.transcriptPath && existsSync(stored.transcriptPath)).toBe(true);
-		expect(stored?.reportPath && readFileSync(stored.reportPath, "utf8")).toContain("Legacy looked.");
+			// Stopped only when asked: its pi in tmux ends then, its session and Report kept.
+			const stop = lastToolResult(requests[3]);
+			expect(stop?.text).toMatch(/^Stopped "legacy" \(sub_[0-9a-f-]+\): its pi in tmux ended/);
+			expect(real.tmux.hasSession(legacy.pane)).toBe(false);
+			const stored = readPersistedRunRecord(real.agentDir, sessionId, legacy.runId);
+			expect(stored).toMatchObject({ status: "closed" });
+			expect(stored?.transcriptPath && existsSync(stored.transcriptPath)).toBe(true);
+			expect(stored?.reportPath && readFileSync(stored.reportPath, "utf8")).toContain("Legacy looked.");
 
-		// Neither a Resume nor a message continues it on pi's RPC: they point at its history instead.
-		for (const refused of [lastToolResult(requests[4]), lastToolResult(requests[5])]) {
-			expect(refused?.text).toContain("ran in tmux, before runs ran on pi's RPC, and is not resumed");
-			expect(refused?.text).toContain(stored?.reportPath ?? "no report");
-			expect(refused?.text).toContain(stored?.transcriptPath ?? "no transcript");
-		}
+			// Neither a Resume nor a message continues it on pi's RPC: they point at its history instead.
+			for (const refused of [lastToolResult(requests[4]), lastToolResult(requests[5])]) {
+				expect(refused?.text).toContain("ran in tmux, before runs ran on pi's RPC, and is not resumed");
+				expect(refused?.text).toContain(stored?.reportPath ?? "no report");
+				expect(refused?.text).toContain(stored?.transcriptPath ?? "no transcript");
+			}
 
-		// Its continuation is a new run, admitted afresh, on pi's RPC.
-		const [fresh] = await real.waitForRequests("fresh", 1);
-		expect(conversation(fresh).at(0)?.text).toContain(legacy.runId);
-		expect(lastToolResult(requests[6])?.text).toContain("Continued.");
-		const freshRecord = listPersistedRunRecords(real.agentDir, sessionId).find((run) => run.name === "fresh");
-		expect(freshRecord).toMatchObject({ backend: "rpc", status: "closed" });
-		expect(freshRecord?.pane).toBeUndefined();
-		expect(toolNames(requests[6])).not.toContain("subagent_close");
-		expect(toolNames(requests[6])).toEqual(expect.arrayContaining(["subagent_resume", "subagent_integrate"]));
+			// Its continuation is a new run, admitted afresh, on pi's RPC.
+			const [fresh] = await real.waitForRequests("fresh", 1);
+			expect(conversation(fresh).at(0)?.text).toContain(legacy.runId);
+			expect(lastToolResult(requests[6])?.text).toContain("Continued.");
+			const freshRecord = listPersistedRunRecords(real.agentDir, sessionId).find((run) => run.name === "fresh");
+			expect(freshRecord).toMatchObject({ backend: "rpc", status: "closed" });
+			expect(freshRecord?.pane).toBeUndefined();
+			expect(toolNames(requests[6])).not.toContain("subagent_close");
+			expect(toolNames(requests[6])).toEqual(expect.arrayContaining(["subagent_resume", "subagent_integrate"]));
 
-		// Its history stays readable: Enter on it in /tasks shows its conversation, and opens no pane.
-		real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
-		const screen = () => real.tmux.capture(orchestrator, 80).join("\n");
-		// Listed after its continuation, the latest first.
-		await waitFor(() => expect(screen()).toMatch(/explorer: Look around\..*closed/));
-		real.tmux.sendKeys(orchestrator, ["Down"]);
-		await waitFor(() => expect(screen()).toMatch(/❯ +explorer: Look around\./));
-		real.tmux.sendKeys(orchestrator, ["Enter"]);
-		await waitFor(() => expect(screen()).toContain("assistant: Legacy looked."));
-		expect(real.tmux.hasSession(legacy.pane)).toBe(false);
-	}, 120_000);
+			// Its history stays readable: Enter on it in /tasks shows its conversation, and opens no pane.
+			real.tmux.sendKeys(orchestrator, ["/tasks", "Enter"]);
+			const screen = () => real.tmux.capture(orchestrator, 80).join("\n");
+			// Listed after its continuation, the latest first.
+			await waitFor(() => expect(screen()).toMatch(/explorer: Look around\..*closed/));
+			real.tmux.sendKeys(orchestrator, ["Down"]);
+			await waitFor(() => expect(screen()).toMatch(/❯ +explorer: Look around\./));
+			real.tmux.sendKeys(orchestrator, ["Enter"]);
+			await waitFor(() => expect(screen()).toContain("assistant: Legacy looked."));
+			expect(real.tmux.hasSession(legacy.pane)).toBe(false);
+		},
+		4 * readinessMs,
+	);
 
 	it("switches the terminal to an open one's pane, with Enter on it in /tasks", async () => {
 		const real = await startRealPi({ extensions: [...DEFAULT_EXTENSIONS, "background-bash"] });
