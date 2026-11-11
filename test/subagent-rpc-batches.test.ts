@@ -210,28 +210,40 @@ describe.skipIf(!hasTmux)("a tasks batch of RPC runs", () => {
 				{ text: `${name} saw it.`, until: gate(name) },
 			]);
 		}
-		real.script("tc", [{ text: "tc done." }]);
+		real.script("tc", [{ text: "tc done.", until: gate("tc") }]);
 		real.start(["--", "delegate"]);
 		await real.waitForRequests("main", 1);
 
-		// Both working at once, the third queued behind them, and the orchestrator waiting for all three.
-		const [ta, tb] = await Promise.all([real.waitForRequests("ta", 2), real.waitForRequests("tb", 2)]);
+		// Two working at once, each at its last step, and the third queued behind them. Which two is the daemon's: the
+		// members claim their slots side by side, so their claims may reach it in any order.
+		const names = ["ta", "tb", "tc"];
+		const atGate = (name: string) => real.requests(name).length === (name === "tc" ? 1 : 2);
+		await waitFor(() => expect(names.filter(atGate)).toHaveLength(2));
+		const [first, second] = names.filter(atGate);
+		const [queued, ...more] = names.filter((name) => real.requests(name).length === 0);
+		expect(more).toEqual([]);
+		// Not merely slow to begin: its turn has not come.
+		expect(recordOf(real, queued).status).toBe("starting");
+
+		writeFileSync(gate(first), "");
+		await waitFor(() => expect(atGate(queued)).toBe(true));
+		writeFileSync(gate(second), "");
+		await waitFor(() =>
+			expect([first, second].map((name) => recordOf(real, name).status)).toEqual(["closed", "closed"]),
+		);
+		// Proves only that the batch did not answer within this while, the last still working.
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		expect(real.requests("main")).toHaveLength(1);
+
+		writeFileSync(gate(queued), "");
+		const main = await real.waitForRequests("main", 2);
+		// Each task as it chose.
+		const [ta, tb, [tc]] = names.map((name) => real.requests(name));
 		expect(ta[0]).toMatchObject({ model: "faux-2", reasoning: "high" });
 		expect(tb[0]).toMatchObject({ model: "faux-3", reasoning: "low" });
 		expect(toolResults(ta[1])).toEqual(["IN-A\n"]);
 		expect(toolResults(tb[1])).toEqual(["IN-B\n"]);
-		expect(real.requests("tc")).toEqual([]);
-
-		writeFileSync(gate("ta"), "");
-		const [tc] = await real.waitForRequests("tc", 1);
 		expect(systemPrompt(tc)).toContain("SCOUT-ROLE");
-		await waitFor(() => expect(recordOf(real, "tc").status).toBe("closed"));
-		// Proves only that the batch did not answer within this while, tb still working.
-		await new Promise((resolve) => setTimeout(resolve, 500));
-		expect(real.requests("main")).toHaveLength(1);
-
-		writeFileSync(gate("tb"), "");
-		const main = await real.waitForRequests("main", 2);
 		const results = toolResults(main[1]);
 		expect(results).toHaveLength(1);
 		const [aggregate] = results;

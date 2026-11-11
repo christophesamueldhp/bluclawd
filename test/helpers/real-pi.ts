@@ -159,6 +159,9 @@ export async function startRealPi(options: { extensions?: string[] } = {}): Prom
 			retry: { enabled: false },
 		}),
 	);
+	// A stored credential, as a real provider has: without one, pi 1.5.2 may resume a session before it has checked
+	// the faux provider's auth, and the session is left without a model (#318).
+	writeFileSync(join(agentDir, "auth.json"), JSON.stringify({ faux: { type: "api_key", key: "faux" } }));
 	const tmux = new Tmux(serverDir);
 	const terminal = join(base, "t.sock");
 	const client = new OrchestratorClient();

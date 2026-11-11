@@ -692,5 +692,5 @@ it is read when a session starts, so `/reload` after editing:
 | Platform | Needs |
 |---|---|
 | macOS | Nothing (Seatbelt); the Command Line Tools for the process reaper |
-| Linux, WSL2 | `bubblewrap`, `socat` and `ripgrep` (`apt install bubblewrap socat ripgrep`). On Ubuntu 24.04+, unprivileged user namespaces must be allowed by AppArmor: see [Anthropic's notes](https://code.claude.com/docs/en/sandboxing) |
+| Linux, WSL2 | `bubblewrap`, `socat` and `ripgrep` (`apt install bubblewrap socat ripgrep`). On Ubuntu 24.04+, unprivileged user namespaces must be allowed by AppArmor: see [Anthropic's notes](https://code.claude.com/docs/en/sandboxing). The `apply-seccomp` binary bundled for x64 and arm64 blocks Unix sockets; without it the sandbox does not start unless the settings allow every Unix socket |
 | Windows | Not supported; run pi in WSL2 |

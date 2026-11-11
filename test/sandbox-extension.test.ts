@@ -107,6 +107,7 @@ describe("the extension", () => {
 			resets: 0,
 			isSupportedPlatform: () => true,
 			checkDependencies: () => ({ errors: [], warnings: [] }),
+			canBlockUnixSockets: async () => true,
 			initialize: async (config) => {
 				configs.push(config);
 			},
