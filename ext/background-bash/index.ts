@@ -375,7 +375,13 @@ const backgroundBash: InlineExtension = {
 		pi.registerTool({
 			name: "task_stop",
 			label: "TaskStop",
-			description: "Stops a running background task, or cancels a pending wake-up (schedule_wakeup), by its ID.",
+			description: [
+				"- Stops a running background task by its ID",
+				"- Takes a task_id parameter identifying the task to stop",
+				"- Returns a success or failure status",
+				"- Use this tool when you need to terminate a long-running task",
+				"- Also cancels a pending wake-up (schedule_wakeup) by its ID",
+			].join("\n"),
 			parameters: Type.Object({
 				task_id: Type.Optional(Type.String({ description: "The ID of the background task to stop" })),
 			}),
