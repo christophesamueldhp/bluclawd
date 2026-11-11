@@ -11,11 +11,7 @@ afterEach(() => {
 	vi.useRealTimers();
 });
 
-const host = (run: string): RunHostLaunch => ({
-	command: ["node", "host.ts", `/runs/${run}`],
-	env: { PATH: "/bin", RUN: run },
-	cwd: `/runs/${run}`,
-});
+const host = (run: string): RunHostLaunch => ({ runDir: `/runs/${run}`, env: { PATH: "/bin", RUN: run } });
 
 /** A queue whose launched hosts run until `end(run)`; what it spawned is listed. */
 function fixture() {
@@ -96,6 +92,18 @@ describe("the daemon's queue of runs", () => {
 		expect(f.queue.launch("a1", host("a1"))).toBe(pid);
 		expect(f.spawned).toHaveLength(1);
 		expect(() => f.queue.launch("a2", host("a2"))).toThrow(/not granted/);
+	});
+
+	it("starts no host whose directory, environment or run is not one a run's host has", async () => {
+		const f = fixture();
+		f.claim("a1", "alpha");
+		await settle();
+		const launch = (sent: unknown) => () => f.queue.launch("a1", sent as RunHostLaunch);
+		expect(launch({ runDir: "runs/a1", env: {} })).toThrow(/not an absolute path/);
+		expect(launch({ runDir: "/runs/a1", env: { PATH: 1 } })).toThrow(/not a set of strings/);
+		// A run with a shell has its processes named by its run ID: a key that is not one names none.
+		expect(launch({ ...host("a1"), contained: true })).toThrow(/names its processes/);
+		expect(f.spawned).toEqual([]);
 	});
 
 	it("serves the orchestrator served least recently first, so a large batch does not hold another's runs back", async () => {

@@ -15,9 +15,10 @@ import { homedir } from "node:os";
 import { join, relative, sep } from "node:path";
 import type { SandboxRuntimeConfig } from "@anthropic-ai/sandbox-runtime";
 import { type BashOperations, createLocalBashOperations } from "@earendil-works/pi-coding-agent";
+import { runMarker } from "../../daemon/run-members.ts";
 import { pathRule } from "../permissions/rules.ts";
 import { checkRuntimeConfig, type RuntimeConfig, type SandboxSetting, sandboxPath } from "../sandbox/config.ts";
-import { endRunProcesses, prepareRunContainment, type RunContainment, runMarker } from "../sandbox/run-containment.ts";
+import { endRunProcesses, prepareRunContainment, type RunContainment } from "../sandbox/run-containment.ts";
 import type { AskNetwork } from "../sandbox/runtime.ts";
 import type { RpcDenyRules } from "./rpc-child.ts";
 

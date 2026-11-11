@@ -16,15 +16,14 @@ import { fileURLToPath } from "node:url";
 import { parseSessionEntries, type SessionEntry, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { SessionMessage, SessionUsage } from "../../daemon/ipc/protocol.ts";
 import { OrchestratorClient } from "../../daemon/orchestrator-client.ts";
+import { runMarker } from "../../daemon/run-members.ts";
 import type { RunHostLaunch } from "../../daemon/run-queue.ts";
-import { piCommand } from "../../daemon/tmux.ts";
 import * as forkSettings from "../_shared/settings.ts";
 import {
 	endRunProcesses,
 	prepareRunContainment,
 	type RunContainment,
 	type RunContainmentReady,
-	runMarker,
 } from "../sandbox/run-containment.ts";
 import type { AgentDefinition } from "./definitions.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
@@ -299,11 +298,10 @@ export function rpcDenyRules(
 	return { ok: true, deny };
 }
 
-/** The run's pi with its flags: only bluclawd's child extension, its tools as an allowlist, its exact model and level. */
-function rpcCommand(launch: RpcLaunch, instructionsFile: string, definitionFile: string): string[] {
+/** The run's pi's flags: only bluclawd's child extension, its tools as an allowlist, its exact model and level. */
+function rpcArgs(launch: RpcLaunch, instructionsFile: string, definitionFile: string): string[] {
 	const providers = (process.env[RPC_PROVIDER_EXTENSIONS_ENV] ?? "").split(":").filter(Boolean);
 	return [
-		...piCommand(),
 		"--mode",
 		"rpc",
 		"-ne",
@@ -505,7 +503,7 @@ export async function executeRpcRun(
 	const host = prepareRpcHost(
 		launch.runDir,
 		recovered ?? {
-			command: rpcCommand(launch, instructions, runDefinitionPath(launch.runDir, record.generation)),
+			args: rpcArgs(launch, instructions, runDefinitionPath(launch.runDir, record.generation)),
 			cwd: launch.cwd,
 			agentDir: launch.agentDir,
 			prompt:
@@ -557,7 +555,7 @@ export async function executeRpcRun(
 		: await startInTurn(
 				`${record.runId}/${record.generation}`,
 				record.parentSessionId,
-				contained ? { ...host, contained } : host,
+				contained ? { ...host, contained: true } : host,
 				launch.recheck,
 				deps.slots,
 				AbortSignal.any([signal, deps.handOff]),

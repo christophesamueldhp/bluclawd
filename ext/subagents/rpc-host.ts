@@ -38,8 +38,8 @@ import { storeRunReport, writeAtomicPrivateFile } from "./storage.ts";
 
 /** What the host starts: the run's pi and its first prompt. */
 export interface RpcHostSpec {
-	/** The run's pi with its flags, `--mode rpc` among them. */
-	command: string[];
+	/** The run's pi's flags, `--mode rpc` among them; the pi is the one the host's own install has. */
+	args: string[];
 	cwd: string;
 	/** The pi config directory the run's pi uses, with its auth and models: the orchestrator's. */
 	agentDir: string;
@@ -82,27 +82,55 @@ const APPROVAL_SEEN_MS = 5000;
 /** pi's dialogs, each of which waits for an answer. */
 const DIALOGS = ["select", "confirm", "input", "editor"];
 const HOST_FILE = fileURLToPath(import.meta.url);
-const RESOLVE_HOOK = join(dirname(HOST_FILE), "../../daemon/pi-resolve-hook.mjs");
 
 /**
- * Stores the run's spec in `runDir` and returns how to start its host, which the daemon does once the run's turn
- * comes (daemon/run-queue.ts): detached, so it outlives whoever started it. Everything the host needs is in it, this
- * pi's environment among it, since the daemon's is not this pi's; bluclawd's own variables are left out.
+ * Stores the run's spec in `runDir` and returns what the daemon starts its host with once the run's turn comes
+ * (daemon/run-queue.ts): detached, so it outlives whoever started it. The daemon's environment is not this pi's, so
+ * this pi's goes with it; bluclawd's own variables are left out.
  */
 export function prepareRpcHost(runDir: string, spec: RpcHostSpec): RunHostLaunch {
 	writeAtomicPrivateFile(specPath(runDir), JSON.stringify(spec));
-	// Started as pi starts the daemon: node strips the types, and the hook resolves pi's packages from its install.
-	const root = piPackageRoot();
 	const env = Object.fromEntries(
 		Object.entries(process.env).filter(
 			(entry): entry is [string, string] => entry[1] !== undefined && !entry[0].startsWith("BLUCLAWD_"),
 		),
 	);
-	return {
-		command: [process.execPath, "--import", RESOLVE_HOOK, HOST_FILE, runDir],
-		env: { ...env, ...(root ? { PI_PACKAGE_ROOT: root } : {}) },
-		cwd: runDir,
-	};
+	return { runDir, env };
+}
+
+/**
+ * Whether `value` is a spec a host runs: the daemon starts a host for any run directory a client names, so what the
+ * spec there holds is checked before anything of it starts.
+ */
+function isRpcHostSpec(value: unknown): value is RpcHostSpec {
+	const spec = value as Partial<RpcHostSpec> | null;
+	const text = (field: unknown) => typeof field === "string";
+	return (
+		typeof spec === "object" &&
+		spec !== null &&
+		Array.isArray(spec.args) &&
+		spec.args.every(text) &&
+		text(spec.cwd) &&
+		text(spec.agentDir) &&
+		text(spec.prompt) &&
+		text(spec.model?.provider) &&
+		text(spec.model?.id) &&
+		text(spec.model?.thinkingLevel) &&
+		Number.isInteger(spec.generation) &&
+		(spec.generation ?? -1) >= 0 &&
+		(spec.sessionFile === undefined || text(spec.sessionFile))
+	);
+}
+
+/** The pi of the install this host runs from, which a run's pi is: never one a spec names. */
+function piEntry(): string {
+	const root =
+		process.env.PI_PACKAGE_ROOT ??
+		piPackageRoot(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+	if (!root) throw new Error("pi's install was not found");
+	const { bin } = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { bin?: { pi?: unknown } };
+	if (typeof bin?.pi !== "string") throw new Error(`${root} names no pi to start`);
+	return join(root, bin.pi);
 }
 
 export function readRpcHostState(runDir: string): RpcHostState | undefined {
@@ -237,7 +265,8 @@ const textOf = (content: unknown): string =>
 			: "";
 
 async function host(runDir: string): Promise<void> {
-	const spec = JSON.parse(readFileSync(specPath(runDir), "utf8")) as RpcHostSpec;
+	const spec: unknown = JSON.parse(readFileSync(specPath(runDir), "utf8"));
+	if (!isRpcHostSpec(spec)) throw new Error(`${specPath(runDir)} is not a run's spec`);
 	// A generation runs once: a host launched for it again, after a lost reply or a recovery, leaves it to the first.
 	mkdirSync(dirname(hostClaimPath(runDir, spec.generation)), { recursive: true, mode: 0o700 });
 	try {
@@ -250,7 +279,7 @@ async function host(runDir: string): Promise<void> {
 	const save = () => writeAtomicPrivateFile(statePath(runDir), JSON.stringify(state));
 	save();
 
-	const child = spawn(spec.command[0], spec.command.slice(1), {
+	const child = spawn(process.execPath, [piEntry(), ...spec.args], {
 		cwd: spec.cwd,
 		env: childEnv(process.env, spec.agentDir),
 		stdio: ["pipe", "pipe", openSync(stderrPath(runDir), "a", 0o600)],

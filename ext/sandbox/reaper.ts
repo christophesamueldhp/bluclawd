@@ -6,13 +6,13 @@
  * and the sandbox says so.
  */
 import { execFile, spawn } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
-import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { existsSync, mkdirSync, renameSync } from "node:fs";
+import { dirname } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { type BashOperations, getAgentDir } from "@earendil-works/pi-coding-agent";
+import { nativeHelperPath } from "../../daemon/run-members.ts";
 
 type Exec = BashOperations["exec"];
 
@@ -33,10 +33,8 @@ export function nativeHelper(name: string): Promise<Helper> {
 
 async function build(name: string): Promise<Helper> {
 	try {
-		const source = fileURLToPath(new URL(`./native/${name}.c`, import.meta.url));
-		const hash = createHash("sha256").update(readFileSync(source)).digest("hex").slice(0, 16);
-		const dir = join(getAgentDir(), "bluclawd", "reaper");
-		const path = join(dir, `${name}-${hash}`);
+		const { source, path } = nativeHelperPath(name, getAgentDir());
+		const dir = dirname(path);
 		if (existsSync(path)) return { path };
 		// Fails where `cc` would offer to install the Command Line Tools instead.
 		const tools = await execFileAsync("/usr/bin/xcode-select", ["-p"], { timeout: 5000 }).then(

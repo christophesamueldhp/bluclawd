@@ -39,19 +39,19 @@ export function fakeRunHosts() {
 		vi.spyOn(OrchestratorClient.prototype, "claimRun").mockResolvedValue(true),
 		vi.spyOn(OrchestratorClient.prototype, "releaseRun").mockResolvedValue(undefined),
 		vi.spyOn(OrchestratorClient.prototype, "launchRun").mockImplementation(async (_run, host) => {
-			const spec = readRpcHostSpec(host.cwd);
-			if (!spec) throw new Error(`No host spec in ${host.cwd}`);
+			const spec = readRpcHostSpec(host.runDir);
+			if (!spec) throw new Error(`No host spec in ${host.runDir}`);
 			// Its run directory on its command line: a pid on disk counts as the run's host only then.
-			const waiter = spawn(process.execPath, ["-e", "setInterval(() => {}, 1 << 30)", host.cwd], {
+			const waiter = spawn(process.execPath, ["-e", "setInterval(() => {}, 1 << 30)", host.runDir], {
 				detached: true,
 				stdio: "ignore",
 			});
 			waiter.unref();
 			const hostPid = waiter.pid ?? 0;
 			const run: FakeRun = {
-				name: spec.command[spec.command.indexOf("--name") + 1],
-				runDir: host.cwd,
-				args: spec.command,
+				name: spec.args[spec.args.indexOf("--name") + 1],
+				runDir: host.runDir,
+				args: spec.args,
 				generation: spec.generation ?? 0,
 				hostPid,
 				ended: false,

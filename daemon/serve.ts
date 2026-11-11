@@ -1,5 +1,6 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { Collaborations } from "./collaborations.ts";
 import { getServerDir, getSocketPath } from "./config.ts";
 import {
@@ -13,16 +14,23 @@ import {
 } from "./handler.ts";
 import { startIpcServer } from "./ipc/server.ts";
 import { resumePane } from "./pane-start.ts";
-import { ensureServerDir } from "./paths.ts";
+import { daemonAgentDir, ensureServerDir } from "./paths.ts";
 import { RemoteControl, TMUX_TIMEOUT_MS } from "./remote/control.ts";
 import { pistatusline } from "./remote/pistatusline.ts";
 import { launchUsable, startSession } from "./remote/spawn.ts";
 import { statusLine } from "./remote/statusline.ts";
+import { nativeHelperPath } from "./run-members.ts";
 import { RunQueue } from "./run-queue.ts";
 import { loadActiveRuns, saveActiveRuns } from "./storage.ts";
 import { ServerSupervisor } from "./supervisor.ts";
 import { Tmux } from "./tmux.ts";
 import { type HeldWakeups, processAlive, readPendingWakeups, WakeupKeeper } from "./wakeups.ts";
+
+/** The host a run gets, from the daemon's own install: node strips its types, and the hook resolves pi's packages. */
+const RUN_HOST = fileURLToPath(new URL("../ext/subagents/rpc-host.ts", import.meta.url));
+const RESOLVE_HOOK = fileURLToPath(new URL("./pi-resolve-hook.mjs", import.meta.url));
+/** What would have node, or the loader, run code of a client's choosing in a run's host or its pi. */
+const LOADER_ENV = ["NODE_OPTIONS", "DYLD_INSERT_LIBRARIES", "LD_PRELOAD"];
 
 export async function serve(): Promise<void> {
 	const socketPath = getSocketPath();
@@ -64,14 +72,21 @@ export async function serve(): Promise<void> {
 			now: Date.now,
 			store: { load: () => loadActiveRuns(getServerDir()), save: (runs) => saveActiveRuns(getServerDir(), runs) },
 			// Detached, so a run's host leads a process group of its own and outlives the daemon.
-			spawn: ({ command, env, cwd }) => {
-				const host = spawn(command[0], command.slice(1), { cwd, env, detached: true, stdio: "ignore" });
+			spawn: ({ runDir, env }) => {
+				const root = process.env.PI_PACKAGE_ROOT;
+				const kept = Object.entries(env).filter(([key]) => !LOADER_ENV.includes(key) && key !== "PI_PACKAGE_ROOT");
+				const host = spawn(process.execPath, ["--import", RESOLVE_HOOK, RUN_HOST, runDir], {
+					cwd: runDir,
+					env: { ...Object.fromEntries(kept), ...(root ? { PI_PACKAGE_ROOT: root } : {}) },
+					detached: true,
+					stdio: "ignore",
+				});
 				host.on("error", () => {});
 				host.unref();
 				if (host.pid === undefined) throw new Error("the run's host did not start");
 				return host.pid;
 			},
-			running: (pid, contained) => {
+			running: (pid, marker) => {
 				try {
 					process.kill(-pid, 0);
 					return true;
@@ -79,7 +94,7 @@ export async function serve(): Promise<void> {
 					if ((error as NodeJS.ErrnoException).code !== "ESRCH") return true;
 				}
 				// Its host and pi are gone, maybe killed: whatever its commands left running is ended, and counted until it is.
-				if (!contained) return false;
+				if (!marker) return false;
 				const sweep = sweeps.get(pid);
 				if (sweep === "done") {
 					sweeps.delete(pid);
@@ -87,7 +102,8 @@ export async function serve(): Promise<void> {
 				}
 				if (!sweep) {
 					sweeps.set(pid, "running");
-					execFile(contained.helper, ["end", contained.marker], { timeout: 10_000 }, (error) => {
+					const helper = nativeHelperPath("run-members", daemonAgentDir()).path;
+					execFile(helper, ["end", marker], { timeout: 10_000 }, (error) => {
 						if (error) sweeps.delete(pid);
 						else sweeps.set(pid, "done");
 					});

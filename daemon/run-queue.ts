@@ -2,21 +2,27 @@
  * The daemon's queue of subagent runs on pi's RPC (ADR-0010): one bound on the runs active at once, shared by every
  * orchestrator of the daemon, and served fairly among them. An orchestrator claims a slot for its run and waits;
  * once granted, it checks that the run may still start and has the daemon launch the run's host, which the daemon
- * starts detached, as the orchestrator built it, and counts until every process of the host's group is gone. The
- * daemon never holds a run's stdio, and launches nothing its orchestrator does not claim: a queued run whose
- * orchestrator is gone waits, then is forgotten.
+ * starts detached and counts until every process of the host's group is gone. The daemon starts its own host only,
+ * from its own install: an orchestrator gives it the run's directory, whose spec the host reads and checks, and the
+ * environment the run's pi gets. The daemon never holds a run's stdio, and launches nothing its orchestrator does
+ * not claim: a queued run whose orchestrator is gone waits, then is forgotten.
  */
 
-/** How the daemon starts a run's host: everything it needs comes with it, the daemon's own environment unused. */
+import { isAbsolute } from "node:path";
+import { runMarker } from "./run-members.ts";
+
+/**
+ * What an orchestrator gives the daemon to start a run's host with. The environment is the orchestrator's, which the
+ * run's pi gets, and travels in memory only, never to disk.
+ */
 export interface RunHostLaunch {
-	command: string[];
+	runDir: string;
 	env: Record<string, string>;
-	cwd: string;
 	/**
-	 * For a run with a shell: the helper that finds and ends the processes its commands started, and the run's marker
-	 * (ext/sandbox/run-containment.ts). They may have left the host's group, and its slot is held until they end too.
+	 * For a run with a shell: the processes its commands started, which the daemon finds by the run's marker
+	 * (daemon/run-members.ts), may have left the host's group, and its slot is held until they end too.
 	 */
-	contained?: { helper: string; marker: string };
+	contained?: boolean;
 }
 
 /** How long a claim waits for a slot before it is answered without one; the orchestrator then claims again. */
@@ -34,10 +40,10 @@ export interface RunQueueDeps {
 	/** Starts a run's host detached, in a process group of its own; returns its pid, or throws. */
 	spawn: (launch: RunHostLaunch) => number;
 	/**
-	 * Whether any process of the group led by `pid` still runs, or, once none does, any process its commands started:
-	 * those are ended then, since nothing of the run is left to own them.
+	 * Whether any process of the group led by `pid` still runs, or, once none does, any process its commands started,
+	 * found by the run's `marker`: those are ended then, since nothing of the run is left to own them.
 	 */
-	running: (pid: number, contained: RunHostLaunch["contained"]) => boolean;
+	running: (pid: number, marker: string | undefined) => boolean;
 	/**
 	 * Where the launched runs are kept for the daemon started next: their hosts outlive this one, and hold their slots
 	 * until they end there too.
@@ -50,7 +56,7 @@ export interface ActiveRun {
 	run: string;
 	parent: string;
 	pid: number;
-	contained?: RunHostLaunch["contained"];
+	contained?: boolean;
 }
 
 interface Entry {
@@ -62,7 +68,28 @@ interface Entry {
 	claimedAt: number;
 	grantedAt?: number;
 	pid?: number;
-	contained?: RunHostLaunch["contained"];
+	contained?: boolean;
+}
+
+/** A run's key in the queue: its run ID and the generation launched. */
+const RUN_KEY = /^(sub_[\w-]+)\/\d+$/;
+
+/** The marker of run `run`'s processes, for a run with a shell. */
+const markerOf = (run: string, contained: boolean | undefined) => {
+	const runId = RUN_KEY.exec(run)?.[1];
+	return contained && runId ? runMarker(runId) : undefined;
+};
+
+/** Why a launch is not one the daemon starts: what it was sent is a client's, unchecked by its type. */
+function invalidLaunch(run: string, host: RunHostLaunch): string | undefined {
+	if (host?.contained && !RUN_KEY.test(run))
+		return "its key, which names its processes, is not a run's and a generation's";
+	if (typeof host?.runDir !== "string" || !isAbsolute(host.runDir)) return "its directory is not an absolute path";
+	const { env } = host;
+	if (typeof env !== "object" || env === null || Object.values(env).some((value) => typeof value !== "string")) {
+		return "its environment is not a set of strings";
+	}
+	return undefined;
 }
 
 export class RunQueue {
@@ -79,7 +106,7 @@ export class RunQueue {
 		this.deps = deps;
 		// Those still running when an earlier daemon ended hold their slots here, until their processes are gone.
 		for (const { run, parent, pid, contained } of deps.store?.load() ?? []) {
-			if (!deps.running(pid, contained)) continue;
+			if (!deps.running(pid, markerOf(run, contained))) continue;
 			this.entries.set(run, { parent, state: "active", claimedAt: deps.now(), pid, contained });
 		}
 		if (this.entries.size > 0) this.schedule();
@@ -131,6 +158,8 @@ export class RunQueue {
 		const entry = this.entries.get(run);
 		if (entry?.pid !== undefined) return entry.pid;
 		if (entry?.state !== "granted") throw new Error(`run ${run} was not granted a slot`);
+		const invalid = invalidLaunch(run, host);
+		if (invalid) throw new Error(`run ${run} was not launched: ${invalid}`);
 		try {
 			entry.pid = this.deps.spawn(host);
 		} catch (error) {
@@ -139,7 +168,7 @@ export class RunQueue {
 			throw error;
 		}
 		entry.state = "active";
-		entry.contained = host.contained;
+		entry.contained = host.contained === true;
 		this.save();
 		return entry.pid;
 	}
@@ -160,7 +189,7 @@ export class RunQueue {
 		for (const [run, entry] of this.entries) {
 			const ended =
 				entry.state === "active"
-					? entry.pid === undefined || !this.deps.running(entry.pid, entry.contained)
+					? entry.pid === undefined || !this.deps.running(entry.pid, markerOf(run, entry.contained))
 					: entry.state === "granted"
 						? now - (entry.grantedAt ?? now) > LAUNCH_LEASE_MS
 						: !entry.answer && now - entry.claimedAt > UNCLAIMED_MS;

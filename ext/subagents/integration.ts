@@ -25,8 +25,9 @@ import {
 import { dirname, join } from "node:path";
 import { createLocalBashOperations, type ExtensionAPI, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { runMarker } from "../../daemon/run-members.ts";
 import { evaluateToolCallDeny } from "../permissions/policy.ts";
-import { prepareRunContainment, runMarker, runProcesses } from "../sandbox/run-containment.ts";
+import { prepareRunContainment, runProcesses } from "../sandbox/run-containment.ts";
 import { sandboxStatus, sandboxWraps, wrapExec } from "../sandbox/runtime.ts";
 import { CHAIN_ID_PREFIX, formatRunLabel } from "./admission.ts";
 import { type ChainResultDetails, chainResultPath } from "./chains.ts";

@@ -68,3 +68,11 @@ export function newestMtimeMs(dir: string, depth = 0): number {
 	}
 	return newest;
 }
+
+/** The pi agent dir of the pi that started the daemon, as pi resolves it: the user's own settings and built helpers. */
+export function daemonAgentDir(): string {
+	const dir = process.env.PI_CODING_AGENT_DIR;
+	if (!dir) return join(homedir(), ".pi", "agent");
+	if (dir === "~") return homedir();
+	return dir.startsWith("~/") ? join(homedir(), dir.slice(2)) : dir;
+}

@@ -20,9 +20,6 @@ export interface RunContainment {
 
 export type RunContainmentReady = { ok: true; helper: string } | { ok: false; reason: string };
 
-/** The Mach name a run's profile allows; nothing registers it, so allowing it reaches nothing. */
-export const runMarker = (runId: string): string => `bluclawd.run.${runId}`;
-
 /** How long the self-test waits for its sandboxed process to be found: it starts slowly on a loaded machine. */
 const SELF_TEST_MS = 30_000;
 let tested: Promise<RunContainmentReady> | undefined;
