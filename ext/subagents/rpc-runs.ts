@@ -29,7 +29,7 @@ import {
 import type { AgentDefinition } from "./definitions.ts";
 import { SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
 import { truncateUtf8Safe } from "./results.ts";
-import { type RpcDenyRules, RUN_DEFINITION_FLAG } from "./rpc-child.ts";
+import { type RpcDenyRules, RUN_DEFINITION_FLAG, WRITE_TOOLS } from "./rpc-child.ts";
 import {
 	generationHost,
 	prepareRpcHost,
@@ -81,8 +81,6 @@ const CHILD_EXTENSION = fileURLToPath(new URL("./rpc-child.ts", import.meta.url)
 
 /** pi's tools that only read. */
 const READ_TOOLS = ["read", "grep", "find", "ls"];
-/** pi's tools that change files: a run given either works in a worktree of its own, and changes nothing else. */
-export const WRITE_TOOLS = ["edit", "write"];
 /** A run given any of these works in a worktree of its own: a command changes files as an edit does. */
 export const WORKTREE_TOOLS = [...WRITE_TOOLS, "bash"];
 /** All an RPC run may have: the read tools, codemode over them, the edit tools and the shell. */

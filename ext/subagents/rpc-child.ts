@@ -9,7 +9,7 @@
  * would send: the run's host reads that off pi's events and passes it on, so the run reaches nothing itself.
  */
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 import {
 	type BashOperations,
 	createBashToolDefinition,
@@ -30,6 +30,7 @@ import { PARENT_MESSAGE_ADDRESS, SUBAGENT_MESSAGE_TOOL } from "./messages.ts";
 import { askRunApproval, NETWORK_ACCESS } from "./run-approvals.ts";
 import { RUN_MESSAGE_KINDS, type RunOutboxMessage } from "./run-mailbox.ts";
 import { createRunShell } from "./run-shell.ts";
+import { within } from "./run-workspace.ts";
 
 /** As large as a message from a run gets: anything longer belongs in its Report. */
 const MAX_MESSAGE_BYTES = 8192;
@@ -55,8 +56,8 @@ interface RunPolicy {
 /** pi's tools that read or change files: none runs while a shell command of the run does. */
 const FILE_TOOLS = ["read", "grep", "find", "ls", "edit", "write"];
 
-/** pi's tools that change the file at their `path`. */
-const WRITE_TOOLS = ["edit", "write"];
+/** pi's tools that change the file at their `path`: a run given either works in a worktree of its own. */
+export const WRITE_TOOLS = ["edit", "write"];
 
 function readPolicy(path: unknown): RunPolicy | undefined {
 	try {
@@ -83,11 +84,6 @@ function readPolicy(path: unknown): RunPolicy | undefined {
 	} catch {
 		return undefined;
 	}
-}
-
-function within(root: string, path: string): boolean {
-	const rel = relative(root, path);
-	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 /**
